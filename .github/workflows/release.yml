@@ -42,6 +42,7 @@ jobs:
           RELEASE_PR_BODY_PATH: /tmp/release-pr-body.md
         run: bun scripts/guard-release-pr.ts "$RELEASE_PR_BODY_PATH"
       - run: bun install --frozen-lockfile
+      - run: bun run build
       - run: bun test
       - run: bun run check
       - run: bun run pack:check
@@ -57,6 +58,7 @@ jobs:
           fi
       - name: Create GitHub release
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
         run: |
           VERSION="$(node -p "require('./package.json').version")"
