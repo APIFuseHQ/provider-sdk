@@ -8,6 +8,7 @@ type MockImpitResponse = {
 	status: number;
 	body: string;
 	headers?: Record<string, string | string[]>;
+	arrayBufferBody?: Uint8Array;
 };
 
 type MockImpitCall = {
@@ -38,8 +39,17 @@ function toHeaders(headers: MockImpitResponse["headers"]): Headers {
 	return result;
 }
 
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+	return bytes.buffer.slice(
+		bytes.byteOffset,
+		bytes.byteOffset + bytes.byteLength,
+	) as ArrayBuffer;
+}
+
 function toImpitResponse(response: MockImpitResponse) {
 	const headers = toHeaders(response.headers);
+	const responseBytes =
+		response.arrayBufferBody ?? new TextEncoder().encode(response.body);
 	return {
 		status: response.status,
 		ok: response.status >= 200 && response.status < 300,
@@ -47,7 +57,7 @@ function toImpitResponse(response: MockImpitResponse) {
 		url: "https://example.com/final",
 		json: async () => JSON.parse(response.body),
 		text: async () => response.body,
-		arrayBuffer: async () => Buffer.from(response.body).buffer,
+		arrayBuffer: async () => toArrayBuffer(responseBytes),
 	};
 }
 
@@ -132,7 +142,9 @@ describe("createStealthClient", () => {
 				"set-cookie": "sid=xyz; Path=/",
 				"x-test": "1",
 			}),
-			text: async () => '{"error":true}',
+			text: async () => "text-first-corruption",
+			arrayBuffer: async () =>
+				toArrayBuffer(new TextEncoder().encode('{"error":true}')),
 		} as never)) as DeclarativeStealthResponse;
 
 		expect(response.ok).toBe(false);
@@ -159,7 +171,8 @@ describe("createStealthClient", () => {
 		const response = (await normalizeResponse({
 			status: 200,
 			headers,
-			text: async () => "ok",
+			text: async () => "text-first-corruption",
+			arrayBuffer: async () => toArrayBuffer(new TextEncoder().encode("ok")),
 		} as never)) as DeclarativeStealthResponse;
 
 		expect(response.cookies.getAll()).toEqual({ sid: "abc", csrf: "def" });

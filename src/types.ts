@@ -1015,6 +1015,8 @@ export interface DeclarativeStealthResponse {
 	tlsInfo?: { protocol?: string; cipher?: string; [key: string]: unknown };
 	cookies: CookieJar;
 	json<T>(): Promise<T>;
+	arrayBuffer(): Promise<ArrayBuffer>;
+	bytes(): Promise<Uint8Array>;
 }
 
 export type StealthResponse = DeclarativeStealthResponse;

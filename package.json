@@ -1,9 +1,9 @@
 {
 	"name": "@apifuse/provider-sdk",
-	"version": "2.1.0-beta.8",
+	"version": "2.1.0-beta.9",
 	"private": false,
 	"type": "module",
-	"description": "APIFuse Provider SDK \u2014 Build providers with zero architectural constraints",
+	"description": "APIFuse Provider SDK — Build providers with zero architectural constraints",
 	"license": "MIT",
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",

@@ -1,5 +1,10 @@
 # @apifuse/provider-sdk Changelog
 
+## 2.1.0-beta.9
+
+- Preserve raw stealth response bytes through the public SDK response wrapper.
+- Add `arrayBuffer()` and `bytes()` to `StealthResponse` so consumers can inspect binary-safe upstream bodies.
+
 ## 2.1.0-beta.8
 
 - Fix release automation for compiled `dist` package exports by building before package self-tests.
