@@ -36,6 +36,9 @@ const requiredPaths = [
 	"bin/apifuse-submit-check.ts",
 	"SUBMISSION.md",
 	"src/cli/create.ts",
+	"src/cli/templates/provider/.dockerignore.tpl",
+	"src/cli/templates/provider/.gitignore.tpl",
+	"src/cli/templates/provider/Dockerfile.tpl",
 	"src/cli/templates/provider/index.ts.tpl",
 	"src/cli/templates/provider/README.md.tpl",
 	"src/cli/templates/provider/meta.ts.tpl",
@@ -45,6 +48,18 @@ const requiredPaths = [
 	"src/cli/templates/provider/operations/ping.ts.tpl",
 	"src/cli/templates/provider/schemas/ping.ts.tpl",
 	"src/cli/templates/provider/upstream/README.md.tpl",
+	"dist/cli/templates/provider/.dockerignore.tpl",
+	"dist/cli/templates/provider/.gitignore.tpl",
+	"dist/cli/templates/provider/Dockerfile.tpl",
+	"dist/cli/templates/provider/index.ts.tpl",
+	"dist/cli/templates/provider/README.md.tpl",
+	"dist/cli/templates/provider/meta.ts.tpl",
+	"dist/cli/templates/provider/domain/README.md.tpl",
+	"dist/cli/templates/provider/mappers/README.md.tpl",
+	"dist/cli/templates/provider/operations/index.ts.tpl",
+	"dist/cli/templates/provider/operations/ping.ts.tpl",
+	"dist/cli/templates/provider/schemas/ping.ts.tpl",
+	"dist/cli/templates/provider/upstream/README.md.tpl",
 ];
 const forbiddenMatches = filePaths.filter(
 	(path) =>
