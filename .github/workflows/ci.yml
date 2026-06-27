@@ -24,6 +24,7 @@ jobs:
           cache: "npm"
           cache-dependency-path: bun.lock
       - run: bun install --frozen-lockfile
+      - run: bun run build
       - run: bun test
       - run: bun run check
       - run: bun run pack:check
