@@ -8,7 +8,12 @@ import {
 	TurnValidationError,
 	ValidationError,
 } from "../errors";
-import type { AuthFlowDefinition, AuthTurn, FlowContext } from "../types";
+import type {
+	AuthFlowDefinition,
+	AuthFlowInputHandler,
+	AuthTurn,
+	FlowContext,
+} from "../types";
 
 type TurnKind =
 	| "abort"
@@ -21,7 +26,7 @@ type TurnKind =
 	| "redirect"
 	| "retry";
 
-type CeremonyHandler = AuthFlowDefinition["start"];
+type CeremonyHandler = AuthFlowInputHandler;
 
 type JsonObject = Record<string, unknown>;
 

@@ -1,6 +1,6 @@
 {
   "name": "@apifuse/provider-sdk",
-  "version": "2.1.0-beta.5",
+  "version": "2.1.0-beta.6",
   "private": false,
   "type": "module",
   "description": "APIFuse Provider SDK \u2014 Build providers with zero architectural constraints",

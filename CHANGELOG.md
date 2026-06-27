@@ -1,5 +1,11 @@
 # @apifuse/provider-sdk Changelog
 
+## 2.1.0-beta.6
+
+- Public repository clean-import release for `APIFuseHQ/provider-sdk`.
+- Preserves the monorepo SDK exports required by ApiFuse provider registry cutover, including `./contract` and provider i18n helpers.
+
+
 ## 2.1.0-beta.5
 
 - Republish the bounty workspace DX hardening that accepts generated readonly metadata and factored `defineOperation()` maps during standalone TypeScript checks.

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
+import { defineOperation, defineProvider, z as providerZ } from "../provider";
 import type {
 	AuthMode,
 	BrowserEngine,
@@ -64,6 +65,42 @@ describe("ProviderDefinition types", () => {
 		] as const satisfies readonly AuthMode[];
 		expect(modes).toContain("none");
 		expect(modes).toContain("credentials");
+	});
+
+	it("rejects auth start handlers that declare input at runtime", () => {
+		const noop = defineOperation({
+			descriptionKey: "operations.noop.description",
+			input: providerZ.object({}),
+			output: providerZ.object({ ok: providerZ.boolean() }),
+			handler: async () => ({ ok: true }),
+		});
+
+		expect(() =>
+			defineProvider({
+				id: "bad-auth-start",
+				version: "1.0.0",
+				runtime: "standard",
+				meta: {
+					displayName: "Bad Auth Start",
+					descriptionKey: "providers.badAuthStart.description",
+					category: "test",
+				},
+				auth: {
+					mode: "credentials",
+					flow: {
+						start: (async (
+							_ctx: FlowContext,
+							_input?: Record<string, unknown>,
+						) => ({
+							kind: "form",
+							turnId: "start",
+						})) as never,
+						continue: async () => ({ kind: "complete", turnId: "complete" }),
+					},
+				},
+				operations: { noop },
+			}),
+		).toThrow(/auth\.flow\.start must not declare an input parameter/);
 	});
 
 	it("should type a complete provider definition", () => {

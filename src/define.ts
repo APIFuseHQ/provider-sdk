@@ -230,6 +230,18 @@ type WebSocketOperationConfig<
 		| Promise<Response | ReadableStream<Uint8Array>>;
 };
 
+type AuthStartNoInputGuard<TConfig> = TConfig extends {
+	auth?: { flow?: { start: infer TStart } };
+}
+	? TStart extends (...args: infer TArgs) => unknown
+		? TArgs extends [unknown]
+			? unknown
+			: {
+					"auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
+				}
+		: unknown
+	: unknown;
+
 export interface ProviderConfig<
 	TOperations extends Record<string, ProviderOperation>,
 > {
@@ -362,6 +374,23 @@ function validateProviderShape(config: unknown): void {
 			VALID_AUTH_MODES,
 			String(config.id),
 		);
+	if (
+		auth &&
+		typeof auth === "object" &&
+		"flow" in auth &&
+		auth.flow &&
+		typeof auth.flow === "object" &&
+		"start" in auth.flow &&
+		typeof auth.flow.start === "function" &&
+		auth.flow.start.length > 1
+	) {
+		throw new ProviderError(
+			`Provider "${String(config.id)}" auth.flow.start must not declare an input parameter`,
+			{
+				fix: "Return a form turn from start(ctx), then receive user input in continue(ctx, input).",
+			},
+		);
+	}
 	const access = config.access;
 	if (access !== undefined) {
 		if (!access || typeof access !== "object" || Array.isArray(access)) {
@@ -2203,8 +2232,9 @@ function validateOperationFixtures(
 
 export function defineProvider<
 	TOperations extends Record<string, ProviderOperation>,
+	TConfig extends ProviderConfig<TOperations>,
 >(
-	config: ProviderConfig<TOperations>,
+	config: TConfig & AuthStartNoInputGuard<TConfig>,
 ): ProviderDefinition & { operations: OperationMapConfig<TOperations> } {
 	validateProviderShape(config);
 	if (!CONNECTOR_ID_REGEX.test(config.id))

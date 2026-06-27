@@ -100,6 +100,40 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 		}
 	});
 
+	it("provider auth start flow type-check rejects input parameters", () => {
+		const fixture = join(
+			import.meta.dir,
+			"fixtures",
+			"auth-start-accepts-input.ts",
+		);
+		const result = spawnSync(
+			"bunx",
+			[
+				"tsgo",
+				"--noEmit",
+				"--strict",
+				"--moduleResolution",
+				"bundler",
+				"--module",
+				"ESNext",
+				"--target",
+				"ES2022",
+				"--skipLibCheck",
+				"--typeRoots",
+				join(REPO_ROOT, "node_modules", "@types"),
+				"--types",
+				"bun",
+				fixture,
+			],
+			{ cwd: REPO_ROOT, encoding: "utf8" },
+		);
+
+		expect(
+			result.status,
+			`auth start fixture unexpectedly type-checked\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+		).not.toBe(0);
+	});
+
 	it("provider-owned health journey files type-check against the provider authoring subpath", () => {
 		const journeyFiles = collectProviderHealthJourneyFiles(
 			join(REPO_ROOT, "providers"),
