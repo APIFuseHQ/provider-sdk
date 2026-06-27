@@ -1,0 +1,31 @@
+name: Release PR Guard
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  guard:
+    if: startsWith(github.head_ref, 'release/beta-') || startsWith(github.head_ref, 'release/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - name: Write release PR body
+        env:
+          RELEASE_PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$RELEASE_PR_BODY" > /tmp/release-pr-body.md
+      - name: Validate release evidence
+        env:
+          RELEASE_BRANCH: ${{ github.head_ref }}
+          RELEASE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          RELEASE_PR_BODY_PATH: /tmp/release-pr-body.md
+        run: bun scripts/guard-release-pr.ts "$RELEASE_PR_BODY_PATH"

@@ -1,0 +1,34 @@
+{
+	"compilerOptions": {
+		"target": "ES2022",
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
+		"moduleDetection": "force",
+		"strict": true,
+		"skipLibCheck": true,
+		"resolveJsonModule": true,
+		"allowImportingTsExtensions": true,
+		"noEmit": true,
+		"types": [
+			"bun"
+		],
+		"paths": {
+			"@/*": [
+				"./src/*"
+			],
+			"*": [
+				"./*"
+			]
+		}
+	},
+	"include": [
+		"src/**/*",
+		"bin/**/*"
+	],
+	"exclude": [
+		"node_modules",
+		"src/__tests__",
+		"**/*.test.ts",
+		"**/*.spec.ts"
+	]
+}

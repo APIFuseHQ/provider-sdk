@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: SDK CI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: "npm"
+          cache-dependency-path: bun.lock
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run check
+      - run: bun run pack:check
+      - run: bun run pack:smoke

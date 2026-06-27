@@ -1,0 +1,70 @@
+name: Release
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    if: >-
+      github.event.pull_request.merged == true &&
+      (startsWith(github.event.pull_request.head.ref, 'release/beta-') || startsWith(github.event.pull_request.head.ref, 'release/v'))
+    name: Publish package
+    runs-on: ubuntu-latest
+    environment: npm-publish
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: "npm"
+          cache-dependency-path: bun.lock
+      - name: Write release PR body
+        env:
+          RELEASE_PR_BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s' "$RELEASE_PR_BODY" > /tmp/release-pr-body.md
+      - name: Guard release evidence
+        env:
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
+          RELEASE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          RELEASE_PR_BODY_PATH: /tmp/release-pr-body.md
+        run: bun scripts/guard-release-pr.ts "$RELEASE_PR_BODY_PATH"
+      - run: bun install --frozen-lockfile
+      - run: bun test
+      - run: bun run check
+      - run: bun run pack:check
+      - run: bun run pack:smoke
+      - name: Publish to npm
+        env:
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          if [[ "$RELEASE_BRANCH" == release/beta-* ]]; then
+            npm publish --tag beta --provenance
+          else
+            npm publish --tag latest --provenance
+          fi
+      - name: Create GitHub release
+        env:
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v$VERSION"
+          git tag "$TAG" || true
+          git push origin "$TAG"
+          if [[ "$RELEASE_BRANCH" == release/beta-* ]]; then
+            gh release create "$TAG" --title "$TAG" --prerelease --generate-notes
+          else
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
