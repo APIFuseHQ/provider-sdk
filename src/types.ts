@@ -1428,17 +1428,19 @@ export interface AuthTurn {
 	};
 }
 
-export type AuthFlowHandler = (
+export type AuthFlowStartHandler = (ctx: FlowContext) => Promise<AuthTurn>;
+
+export type AuthFlowInputHandler = (
 	ctx: FlowContext,
 	input?: Record<string, unknown>,
 ) => Promise<AuthTurn>;
 
 export interface AuthFlowDefinition {
-	start: AuthFlowHandler;
-	continue: AuthFlowHandler;
-	poll?: AuthFlowHandler;
-	abort?: AuthFlowHandler;
-	refresh?: AuthFlowHandler;
+	start: AuthFlowStartHandler;
+	continue: AuthFlowInputHandler;
+	poll?: AuthFlowStartHandler;
+	abort?: AuthFlowStartHandler;
+	refresh?: AuthFlowInputHandler;
 }
 
 export type ProviderStateDurationString =
