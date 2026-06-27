@@ -1,5 +1,10 @@
 # @apifuse/provider-sdk Changelog
 
+## 2.1.0-beta.8
+
+- Fix release automation for compiled `dist` package exports by building before package self-tests.
+- Provide `GH_TOKEN` to the GitHub release creation step.
+
 ## 2.1.0-beta.7
 
 - Publish compiled `dist` exports for npm consumers so Next.js/Vercel builds do not parse TypeScript from `node_modules`.
