@@ -201,6 +201,8 @@ describe("ProviderDefinition types", () => {
 		} satisfies StealthFetchOptions;
 
 		const response: StealthResponse = {
+			arrayBuffer: async () => new TextEncoder().encode('{"ok":true}').buffer,
+			bytes: async () => new TextEncoder().encode('{"ok":true}'),
 			status: 200,
 			ok: true,
 			headers: { "content-type": "application/json" },

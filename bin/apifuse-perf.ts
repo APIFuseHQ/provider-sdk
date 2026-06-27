@@ -755,15 +755,24 @@ function createFixtureResponse(raw: unknown) {
 }
 
 function createFixtureStealthClient(rawText: string): StealthClient {
-	const createResponse = async (): Promise<StealthResponse> => ({
-		status: 200,
-		ok: true,
-		headers: { "content-type": "application/json" },
-		rawHeaders: [["content-type", "application/json"]],
-		body: rawText,
-		cookies: { get: () => undefined, getAll: () => ({}), toString: () => "" },
-		json: async <T>() => JSON.parse(rawText) as T,
-	});
+	const createResponse = async (): Promise<StealthResponse> => {
+		const bodyBytes = new TextEncoder().encode(rawText);
+		return {
+			status: 200,
+			ok: true,
+			headers: { "content-type": "application/json" },
+			rawHeaders: [["content-type", "application/json"]],
+			body: rawText,
+			cookies: { get: () => undefined, getAll: () => ({}), toString: () => "" },
+			json: async <T>() => JSON.parse(rawText) as T,
+			arrayBuffer: async () =>
+				bodyBytes.buffer.slice(
+					bodyBytes.byteOffset,
+					bodyBytes.byteOffset + bodyBytes.byteLength,
+				) as ArrayBuffer,
+			bytes: async () => new Uint8Array(bodyBytes),
+		};
+	};
 
 	return {
 		fetch: async () => createResponse(),

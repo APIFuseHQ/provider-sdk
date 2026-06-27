@@ -340,7 +340,8 @@ export async function normalizeResponse(
 	const cookies = new CookieJarImpl(
 		setCookieHeadersFromResponse(response.headers),
 	);
-	const body = await response.text();
+	const bodyBytes = await response.arrayBuffer();
+	const body = new TextDecoder().decode(bodyBytes);
 
 	return {
 		status: response.status,
@@ -351,6 +352,12 @@ export async function normalizeResponse(
 		cookies,
 		json<T>(): Promise<T> {
 			return Promise.resolve(JSON.parse(body));
+		},
+		arrayBuffer(): Promise<ArrayBuffer> {
+			return Promise.resolve(bodyBytes.slice(0));
+		},
+		bytes(): Promise<Uint8Array> {
+			return Promise.resolve(new Uint8Array(bodyBytes.slice(0)));
 		},
 	};
 }
