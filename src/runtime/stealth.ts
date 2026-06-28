@@ -18,6 +18,7 @@ import type {
 	HttpRetryOptions,
 	StealthClient,
 	StealthFetchOptions,
+	StealthRedirectHop,
 	StealthResponse,
 	StealthSession,
 } from "../types";
@@ -128,10 +129,16 @@ const FIREFOX_IMPIT_BY_MAJOR: Record<number, ImpitBrowser> = {
 
 type StealthTransportResponse = Pick<
 	ImpitResponse,
-	"arrayBuffer" | "headers" | "json" | "ok" | "status" | "text" | "url"
->;
+	"arrayBuffer" | "headers" | "json" | "ok" | "status" | "text"
+> & {
+	url?: string;
+	redirected?: boolean;
+};
 
 type StealthMethod = NonNullable<ImpitRequestInit["method"]>;
+type StealthRequestInit = ImpitRequestInit & {
+	redirect?: NonNullable<StealthFetchOptions["redirect"]>;
+};
 type NormalizedStealthRetryOptions = {
 	attempts: number;
 	methods: readonly string[];
@@ -177,10 +184,35 @@ class CookieJarImpl implements CookieJar {
 		return { ...this.cookies };
 	}
 
+	has(name: string): boolean {
+		return Object.hasOwn(this.cookies, name);
+	}
+
 	toString(): string {
 		return Object.entries(this.cookies)
 			.map(([name, value]) => `${name}=${value}`)
 			.join("; ");
+	}
+
+	toHeader(): string {
+		return this.toString();
+	}
+
+	snapshot(): Record<string, string> {
+		return this.getAll();
+	}
+
+	restore(cookies: Record<string, string>): void {
+		this.clear();
+		for (const [name, value] of Object.entries(cookies)) {
+			if (name) this.cookies[name] = value;
+		}
+	}
+
+	clear(): void {
+		for (const name of Object.keys(this.cookies)) {
+			delete this.cookies[name];
+		}
 	}
 
 	find(predicate: (cookie: string) => boolean): string | undefined {
@@ -335,6 +367,7 @@ function splitCombinedSetCookieHeader(headerValue: string): string[] {
 
 export async function normalizeResponse(
 	response: StealthTransportResponse,
+	requestUrl?: string,
 ): Promise<StealthResponse> {
 	const headers = Object.fromEntries(response.headers.entries());
 	const cookies = new CookieJarImpl(
@@ -346,6 +379,12 @@ export async function normalizeResponse(
 	return {
 		status: response.status,
 		ok: response.status >= 200 && response.status < 300,
+		...(response.url ? { url: response.url } : {}),
+		...(response.redirected !== undefined
+			? { redirected: response.redirected }
+			: requestUrl && response.url
+				? { redirected: response.url !== requestUrl }
+				: {}),
 		headers,
 		rawHeaders: headerEntriesFromHeaders(response.headers),
 		body,
@@ -743,6 +782,26 @@ function normalizeMethod(method: HttpMethod | string): StealthMethod {
 	}
 }
 
+function isRedirectStatus(status: number): boolean {
+	return [301, 302, 303, 307, 308].includes(status);
+}
+
+function nextRedirectMethod(
+	status: number,
+	method: StealthMethod,
+): StealthMethod {
+	if (status === 303 && method !== "HEAD") return "GET";
+	if ((status === 301 || status === 302) && method === "POST") return "GET";
+	return method;
+}
+
+function locationHeader(headers: Record<string, string>): string | undefined {
+	for (const [name, value] of Object.entries(headers)) {
+		if (name.toLowerCase() === "location") return value;
+	}
+	return undefined;
+}
+
 function createSessionFetcher(
 	baseUrl: string,
 	defaultProfile: string,
@@ -811,7 +870,7 @@ function createSessionFetcher(
 		};
 	}
 
-	return {
+	const session: StealthSession = {
 		async fetch(url, options: StealthFetchOptions = {}) {
 			const method = normalizeMethod(options.method ?? "GET");
 			const hasExplicitRetryPolicy = options.retry !== undefined;
@@ -896,9 +955,10 @@ function createSessionFetcher(
 							const cookieHeader = cookieJar.toString();
 							if (cookieHeader) headers.Cookie = cookieHeader;
 						}
-						const requestInit: ImpitRequestInit = {
+						const requestInit: StealthRequestInit = {
 							headers: normalizeHeaders(headers),
 							method,
+							...(options.redirect ? { redirect: options.redirect } : {}),
 							...(options.timeout ? { timeout: options.timeout } : {}),
 						};
 						if (options.body !== undefined) {
@@ -909,7 +969,7 @@ function createSessionFetcher(
 							proxy,
 							ignoreTlsErrors,
 						).fetch(requestUrl, requestInit);
-						const normalized = await normalizeResponse(response);
+						const normalized = await normalizeResponse(response, requestUrl);
 						cookieJar.setFromCookieStrings(
 							setCookieHeadersFromResponse(response.headers),
 						);
@@ -1052,11 +1112,128 @@ function createSessionFetcher(
 
 			throw normalizeStealthTransportError(lastError);
 		},
+		cookies: cookieJar,
+		redirects: {
+			async run(options) {
+				const maxHops =
+					options.maxHops === undefined || !Number.isFinite(options.maxHops)
+						? 10
+						: Math.max(0, Math.floor(options.maxHops));
+				const hops: StealthRedirectHop[] = [];
+				let currentUrl = resolveUrl(baseUrl, options.url);
+				let method = normalizeMethod(options.method ?? "GET");
+				let body = options.body;
+				let response: StealthResponse | undefined;
+				const visitedRequests = new Set<string>();
+
+				const {
+					url: _url,
+					maxHops: _maxHops,
+					stopWhen,
+					params,
+					...fetchOptions
+				} = options;
+
+				for (let hopIndex = 0; hopIndex <= maxHops; hopIndex += 1) {
+					visitedRequests.add(`${method} ${currentUrl}`);
+					response = await session.fetch(currentUrl, {
+						...fetchOptions,
+						body,
+						method,
+						...(hopIndex === 0 && params ? { params } : {}),
+						redirect: "manual",
+						throwOnHttpError: false,
+					});
+
+					if (!isRedirectStatus(response.status)) {
+						return {
+							final: response,
+							hops,
+							reason: "completed",
+							cookies: cookieJar.snapshot(),
+						};
+					}
+
+					const location = locationHeader(response.headers);
+					const nextUrl = location
+						? new URL(location, response.url ?? currentUrl).toString()
+						: undefined;
+					const hop: StealthRedirectHop = {
+						url: response.url ?? currentUrl,
+						status: response.status,
+						method,
+						...(location ? { location } : {}),
+						...(nextUrl ? { nextUrl } : {}),
+					};
+					hops.push(hop);
+
+					if (stopWhen && (await stopWhen(hop))) {
+						return {
+							final: response,
+							hops,
+							reason: "stopped",
+							cookies: cookieJar.snapshot(),
+						};
+					}
+
+					if (!nextUrl) {
+						return {
+							final: response,
+							hops,
+							reason: "missing_location",
+							cookies: cookieJar.snapshot(),
+						};
+					}
+
+					if (hops.length > maxHops) {
+						return {
+							final: response,
+							hops,
+							reason: "max_hops",
+							cookies: cookieJar.snapshot(),
+						};
+					}
+
+					const nextMethod = nextRedirectMethod(response.status, method);
+					if (nextMethod !== method) {
+						body = undefined;
+					}
+					if (visitedRequests.has(`${nextMethod} ${nextUrl}`)) {
+						return {
+							final: response,
+							hops,
+							reason: "loop",
+							cookies: cookieJar.snapshot(),
+						};
+					}
+					method = nextMethod;
+					currentUrl = nextUrl;
+				}
+
+				if (!response) {
+					response = await session.fetch(currentUrl, {
+						...fetchOptions,
+						body,
+						method,
+						...(params ? { params } : {}),
+						redirect: "manual",
+						throwOnHttpError: false,
+					});
+				}
+				return {
+					final: response,
+					hops,
+					reason: "max_hops",
+					cookies: cookieJar.snapshot(),
+				};
+			},
+		},
 		close() {
 			closed = true;
 			clients.clear();
 		},
 	};
+	return session;
 
 	async function classifyProxyAuthDiagnostic(
 		profileName: string,

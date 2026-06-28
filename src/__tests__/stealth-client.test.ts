@@ -9,6 +9,8 @@ type MockImpitResponse = {
 	body: string;
 	headers?: Record<string, string | string[]>;
 	arrayBufferBody?: Uint8Array;
+	url?: string;
+	redirected?: boolean;
 };
 
 type MockImpitCall = {
@@ -54,7 +56,8 @@ function toImpitResponse(response: MockImpitResponse) {
 		status: response.status,
 		ok: response.status >= 200 && response.status < 300,
 		headers,
-		url: "https://example.com/final",
+		url: response.url ?? "https://example.com/final",
+		redirected: response.redirected,
 		json: async () => JSON.parse(response.body),
 		text: async () => response.body,
 		arrayBuffer: async () => toArrayBuffer(responseBytes),
@@ -159,6 +162,23 @@ describe("createStealthClient", () => {
 		await expect(response.json<{ error: boolean }>()).resolves.toEqual({
 			error: true,
 		});
+	});
+
+	it("normalizes response url and redirected metadata when available", async () => {
+		const response = await normalizeResponse(
+			{
+				status: 200,
+				headers: toHeaders({ "content-type": "text/plain" }),
+				url: "https://example.com/final",
+				redirected: true,
+				text: async () => "text-first-corruption",
+				arrayBuffer: async () => toArrayBuffer(new TextEncoder().encode("ok")),
+			},
+			"https://example.com/start",
+		);
+
+		expect(response.url).toBe("https://example.com/final");
+		expect(response.redirected).toBe(true);
 	});
 
 	it("preserves multiple cookies when Headers.getSetCookie is unavailable", async () => {
@@ -471,6 +491,389 @@ describe("createStealthClient", () => {
 			method: "POST",
 			timeout: 12_000,
 		});
+	});
+
+	it("passes manual redirect mode through impit fetch", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: "/next", "set-cookie": "hop=one; Path=/" },
+			url: "https://example.com/start",
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const client = createStealthClient("https://example.com");
+
+		const response = await client.fetch("/start", {
+			redirect: "manual",
+			throwOnHttpError: false,
+		});
+
+		expect(mockStealthState.clients[0]?.calls[0]?.init).toMatchObject({
+			method: "GET",
+			redirect: "manual",
+		});
+		expect(response.headers.location).toBe("/next");
+		expect(response.cookies.get("hop")).toBe("one");
+	});
+
+	it("exposes session cookies accumulated across sequential requests", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 200,
+				body: "first",
+				headers: { "set-cookie": "sid=abc; Path=/" },
+			},
+			{
+				status: 200,
+				body: "second",
+				headers: { "set-cookie": "csrf=def; Path=/" },
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const session = createStealthClient("https://example.com").createSession();
+
+		await session.fetch("/first");
+		expect(session.cookies.has("sid")).toBe(true);
+		expect(session.cookies.toHeader()).toBe("sid=abc");
+
+		await session.fetch("/second");
+		expect(session.cookies.getAll()).toEqual({ sid: "abc", csrf: "def" });
+
+		const snapshot = session.cookies.snapshot();
+		session.cookies.clear();
+		expect(session.cookies.toString()).toBe("");
+		session.cookies.restore(snapshot);
+		expect(session.cookies.toString()).toBe("sid=abc; csrf=def");
+	});
+
+	it("redirects.run walks POST through 302 and 303 while accumulating cookies", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 302,
+				body: "",
+				headers: { location: "/step-two", "set-cookie": "a=1; Path=/" },
+				url: "https://example.com/login",
+			},
+			{
+				status: 303,
+				body: "",
+				headers: {
+					location: "https://example.com/final",
+					"set-cookie": "b=2; Path=/",
+				},
+				url: "https://example.com/step-two",
+			},
+			{
+				status: 200,
+				body: "done",
+				headers: { "set-cookie": "c=3; Path=/" },
+				url: "https://example.com/final",
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const session = createStealthClient("https://example.com").createSession();
+
+		const result = await session.redirects.run({
+			url: "/login",
+			method: "POST",
+			body: "payload",
+		});
+
+		expect(result.reason).toBe("completed");
+		expect(result.final.status).toBe(200);
+		expect(result.hops).toEqual([
+			{
+				url: "https://example.com/login",
+				status: 302,
+				method: "POST",
+				location: "/step-two",
+				nextUrl: "https://example.com/step-two",
+			},
+			{
+				url: "https://example.com/step-two",
+				status: 303,
+				method: "GET",
+				location: "https://example.com/final",
+				nextUrl: "https://example.com/final",
+			},
+		]);
+		expect(result.cookies).toEqual({ a: "1", b: "2", c: "3" });
+		expect(mockStealthState.clients[0]?.calls).toEqual([
+			expect.objectContaining({
+				url: "https://example.com/login",
+				init: expect.objectContaining({
+					body: "payload",
+					method: "POST",
+					redirect: "manual",
+				}),
+			}),
+			expect.objectContaining({
+				url: "https://example.com/step-two",
+				init: expect.objectContaining({
+					method: "GET",
+					redirect: "manual",
+				}),
+			}),
+			expect.objectContaining({
+				url: "https://example.com/final",
+				init: expect.objectContaining({
+					method: "GET",
+					redirect: "manual",
+				}),
+			}),
+		]);
+		expect(mockStealthState.clients[0]?.calls[1]?.init).not.toHaveProperty(
+			"body",
+		);
+	});
+
+	it("redirects.run preserves method and body for 307 redirects", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 307,
+				body: "",
+				headers: { location: "/retry" },
+				url: "https://example.com/submit",
+			},
+			{
+				status: 200,
+				body: "done",
+				headers: {},
+				url: "https://example.com/retry",
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const session = createStealthClient("https://example.com").createSession();
+
+		await session.redirects.run({
+			url: "/submit",
+			method: "POST",
+			body: "payload",
+		});
+
+		expect(mockStealthState.clients[0]?.calls[1]?.init).toMatchObject({
+			body: "payload",
+			method: "POST",
+			redirect: "manual",
+		});
+	});
+
+	it("redirects.run applies redirect method rewriting rules", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 301,
+				body: "",
+				headers: { location: "/moved" },
+				url: "https://example.com/post-start",
+			},
+			{
+				status: 200,
+				body: "done",
+				headers: {},
+				url: "https://example.com/moved",
+			},
+			{
+				status: 303,
+				body: "",
+				headers: { location: "/head-final" },
+				url: "https://example.com/head-start",
+			},
+			{
+				status: 200,
+				body: "",
+				headers: {},
+				url: "https://example.com/head-final",
+			},
+			{
+				status: 308,
+				body: "",
+				headers: { location: "/put-final" },
+				url: "https://example.com/put-start",
+			},
+			{
+				status: 200,
+				body: "done",
+				headers: {},
+				url: "https://example.com/put-final",
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const session = createStealthClient("https://example.com").createSession();
+
+		await session.redirects.run({
+			url: "/post-start",
+			method: "POST",
+			body: "payload",
+		});
+		await session.redirects.run({
+			url: "/head-start",
+			method: "HEAD",
+		});
+		await session.redirects.run({
+			url: "/put-start",
+			method: "PUT",
+			body: "payload",
+		});
+
+		const calls = mockStealthState.clients[0]?.calls ?? [];
+		expect(calls[1]?.init).toMatchObject({
+			method: "GET",
+			redirect: "manual",
+		});
+		expect(calls[1]?.init).not.toHaveProperty("body");
+		expect(calls[3]?.init).toMatchObject({
+			method: "HEAD",
+			redirect: "manual",
+		});
+		expect(calls[5]?.init).toMatchObject({
+			body: "payload",
+			method: "PUT",
+			redirect: "manual",
+		});
+	});
+
+	it("redirects.run stops on missing Location and maxHops", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: {},
+			url: "https://example.com/no-location",
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const session = createStealthClient("https://example.com").createSession();
+
+		const missingLocation = await session.redirects.run({
+			url: "/no-location",
+		});
+
+		expect(missingLocation.reason).toBe("missing_location");
+		expect(missingLocation.hops).toHaveLength(1);
+
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: "/loop" },
+			url: "https://example.com/loop",
+		});
+
+		const maxHops = await session.redirects.run({
+			url: "/loop",
+			maxHops: 0,
+		});
+
+		expect(maxHops.reason).toBe("max_hops");
+		expect(maxHops.hops).toHaveLength(1);
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(2);
+
+		mockStealthState.queuedResponses.push(
+			{
+				status: 302,
+				body: "",
+				headers: { location: "/second-limit" },
+				url: "https://example.com/first-limit",
+			},
+			{
+				status: 302,
+				body: "",
+				headers: { location: "/third-limit" },
+				url: "https://example.com/second-limit",
+			},
+		);
+
+		const oneFollow = await session.redirects.run({
+			url: "/first-limit",
+			maxHops: 1,
+		});
+
+		expect(oneFollow.reason).toBe("max_hops");
+		expect(oneFollow.hops).toHaveLength(2);
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(4);
+
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: "/self" },
+			url: "https://example.com/self",
+		});
+
+		const loop = await session.redirects.run({
+			url: "/self",
+		});
+
+		expect(loop.reason).toBe("loop");
+		expect(loop.hops).toHaveLength(1);
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(5);
+	});
+
+	it("redirects.run gives stopWhen the next URL before following", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: "/review" },
+			url: "https://example.com/start",
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const session = createStealthClient("https://example.com").createSession();
+		const seen: unknown[] = [];
+
+		const stopped = await session.redirects.run({
+			url: "/start",
+			stopWhen: (hop) => {
+				seen.push(hop);
+				return hop.nextUrl === "https://example.com/review";
+			},
+		});
+
+		expect(stopped.reason).toBe("stopped");
+		expect(seen).toEqual([
+			{
+				url: "https://example.com/start",
+				status: 302,
+				method: "GET",
+				location: "/review",
+				nextUrl: "https://example.com/review",
+			},
+		]);
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
+	});
+
+	it("redirects.run applies params only to the initial request", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 302,
+				body: "",
+				headers: { location: "/callback?code=123" },
+				url: "https://example.com/login?client_id=abc",
+			},
+			{
+				status: 200,
+				body: "done",
+				headers: {},
+				url: "https://example.com/callback?code=123",
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const session = createStealthClient("https://example.com").createSession();
+
+		await session.redirects.run({
+			url: "/login",
+			params: { client_id: "abc" },
+		});
+
+		expect(mockStealthState.clients[0]?.calls[0]?.url).toBe(
+			"https://example.com/login?client_id=abc",
+		);
+		expect(mockStealthState.clients[0]?.calls[1]?.url).toBe(
+			"https://example.com/callback?code=123",
+		);
 	});
 
 	it("wraps network failures in TransportError", async () => {

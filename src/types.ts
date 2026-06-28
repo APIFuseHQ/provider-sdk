@@ -979,6 +979,7 @@ export type HttpMethod =
 export interface StealthFetchOptions extends RequestOptions {
 	method?: HttpMethod;
 	body?: string | Buffer;
+	redirect?: "follow" | "manual" | "error";
 	/**
 	 * Offsets policy-managed proxy pool selection for caller-managed retries.
 	 * Use when a request receives an upstream challenge page rather than a
@@ -1005,9 +1006,20 @@ export interface CookieJar {
 	find?(predicate: (cookie: string) => boolean): string | undefined;
 }
 
+export interface StealthSessionCookies extends CookieJar {
+	has(name: string): boolean;
+	setFromCookieStrings(cookieStrings: readonly string[]): void;
+	toHeader(): string;
+	snapshot(): Record<string, string>;
+	restore(cookies: Record<string, string>): void;
+	clear(): void;
+}
+
 export interface DeclarativeStealthResponse {
 	status: number;
 	ok: boolean;
+	url?: string;
+	redirected?: boolean;
 	headers: Record<string, string>;
 	rawHeaders: [string, string][];
 	body: string;
@@ -1026,8 +1038,34 @@ export type RequestWithMethodOptions = RequestOptions & {
 	body?: unknown;
 };
 
+export interface StealthRedirectHop {
+	url: string;
+	status: number;
+	method: string;
+	location?: string;
+	nextUrl?: string;
+}
+
+export interface StealthRedirectRunOptions
+	extends Omit<StealthFetchOptions, "redirect"> {
+	url: string;
+	maxHops?: number;
+	stopWhen?: (hop: StealthRedirectHop) => boolean | Promise<boolean>;
+}
+
+export interface StealthRedirectRunResult {
+	final: StealthResponse;
+	hops: StealthRedirectHop[];
+	reason: "completed" | "stopped" | "max_hops" | "missing_location" | "loop";
+	cookies: Record<string, string>;
+}
+
 export interface StealthSession {
 	fetch(url: string, options?: StealthFetchOptions): Promise<StealthResponse>;
+	cookies: StealthSessionCookies;
+	redirects: {
+		run(options: StealthRedirectRunOptions): Promise<StealthRedirectRunResult>;
+	};
 	close(): void;
 }
 
