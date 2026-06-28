@@ -1,0 +1,55 @@
+name: Release PR Automation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "package.json"
+      - "bun.lock"
+      - "src/**"
+      - "bin/**"
+      - "scripts/**"
+      - "README.md"
+      - "AUTHORING.md"
+      - "CHANGELOG.md"
+      - "SUBMISSION.md"
+      - ".github/workflows/ci.yml"
+      - ".github/workflows/release-guard.yml"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/release-pr-automation.yml"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: provider-sdk-beta-release-pr
+  cancel-in-progress: false
+
+jobs:
+  prepare-beta-release-pr:
+    name: Prepare beta release PR
+    if: >-
+      github.repository == 'APIFuseHQ/provider-sdk' &&
+      !contains(github.event.head_commit.message, 'release/beta-') &&
+      !startsWith(github.event.head_commit.message, 'chore: release @apifuse/provider-sdk')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: "npm"
+          cache-dependency-path: bun.lock
+      - run: bun install --frozen-lockfile
+      - name: Create or update beta release PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_SHA: ${{ github.sha }}
+        run: bun scripts/prepare-beta-release-pr.ts
