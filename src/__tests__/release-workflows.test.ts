@@ -38,6 +38,7 @@ describe("release workflows", () => {
 		expect(RELEASE_AUTOMATION_WORKFLOW).toContain('- "src/**"');
 		expect(RELEASE_AUTOMATION_WORKFLOW).toContain("pull-requests: write");
 		expect(RELEASE_AUTOMATION_WORKFLOW).toContain("bun scripts/prepare-beta-release-pr.ts");
+		expect(RELEASE_GUARD_WORKFLOW).toContain("types: [opened, synchronize, reopened, edited]");
 
 		const body = buildReleasePrBody({
 			branch: "release/beta-2.1.0-beta.11",
