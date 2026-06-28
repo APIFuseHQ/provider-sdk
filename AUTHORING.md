@@ -264,6 +264,93 @@ deployment projection checks, and release workflows.
 - Credential-backed smoke requests pass local-only credential material in
   `connection.secrets`. Keep real values in shell env or `.env`, never in source
   or fixtures.
+- Credentials auth providers should use `defineCredentialsAuth()` instead of
+  hand-writing `auth.flow.start/continue`. The helper exposes one happy path:
+  declare form `fields`, declare `credentialKeys`, and put upstream login/session
+  creation in `login(ctx, input)`. It returns both `auth` and `credential` for
+  `defineProvider()` and builds the complete turn as `data.credential`, which is
+  the only value Gateway persists onto the connection.
+
+```ts
+import { defineCredentialsAuth, defineProvider } from "@apifuse/provider-sdk";
+
+const credentialsAuth = defineCredentialsAuth({
+  fields: {
+    email: { type: "email", labelKey: "auth.email.label" },
+    password: { type: "password", labelKey: "auth.password.label" },
+  },
+  credentialKeys: ["cookie"] as const,
+  storesReusableSecret: true,
+  justification: "Session cookie is required for authenticated operations.",
+  async login(ctx, input) {
+    const cookie = await loginAndBuildSessionCookie(ctx, input);
+    return { credential: { cookie } };
+  },
+});
+
+export default defineProvider({
+  id: "example-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  auth: credentialsAuth.auth,
+  credential: credentialsAuth.credential,
+  context: credentialsAuth.context,
+  // ...metadata and operations
+});
+```
+
+For OTP, MFA, CAPTCHA handoff, or user-approved login, return a challenge from
+`login()` instead of hand-writing `contextPatch`, `poll`, and final credential
+turns. SDK stores the pending challenge in auth-flow context, returns the next
+form/pending turn, and still persists only the final `data.credential`.
+
+```ts
+import {
+  credentialsAuthChallenge,
+  defineCredentialsAuth,
+} from "@apifuse/provider-sdk";
+
+const credentialsAuth = defineCredentialsAuth({
+  fields: {
+    email: { type: "email" },
+    password: { type: "password" },
+  },
+  credentialKeys: ["cookie"] as const,
+  async login(ctx, input) {
+    const result = await passwordLogin(ctx, input);
+    if (result.otpRequired) {
+      return credentialsAuthChallenge("otp", {
+        state: { transactionId: result.transactionId },
+        hintKey: "auth.otp.prompt",
+      });
+    }
+    if (result.manualApprovalRequired) {
+      return credentialsAuthChallenge("manualApproval", {
+        state: { transactionId: result.transactionId },
+        hintKey: "auth.manualApproval.openApp",
+        timing: { suggestedPollIntervalMs: 3000, maxWaitMs: 120000 },
+      });
+    }
+    return { credential: { cookie: result.cookie } };
+  },
+  challenges: {
+    otp: {
+      fields: { otp: { type: "otp", labelKey: "auth.otp.label" } },
+      async verify(ctx, input, state) {
+        const result = await verifyOtp(ctx, state.transactionId, input.otp);
+        return { credential: { cookie: result.cookie } };
+      },
+    },
+    manualApproval: {
+      async poll(ctx, state) {
+        const result = await checkApproval(ctx, state.transactionId);
+        if (!result.approved) return null;
+        return { credential: { cookie: result.cookie } };
+      },
+    },
+  },
+});
+```
 - Auth-flow debugging starts with `/auth/start`, continues with
   `/auth/continue`, and carries returned `contextPatch` values into the next
   request's `context`.

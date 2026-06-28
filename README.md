@@ -120,6 +120,14 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   `ctx.credential.get("key")` or `ctx.credential.getAccessToken()`.
 - **Provider env secrets**: declare `secrets[]`, set values in your shell or
   `.env`, and read only those names through `ctx.env.get("NAME")`.
+- **Credentials auth flows**: prefer `defineCredentialsAuth()` over hand-written
+  `auth.flow`. Declare the form fields and credential keys once, then put the
+  upstream login/session creation in `login(ctx, input)`. Return
+  `credentialsAuthChallenge("otp" | "manualApproval" | ...)` for MFA, CAPTCHA
+  handoff, or user-approved login branches. The helper returns
+  `{ auth, credential, context }` for `defineProvider()` and always completes
+  with `data.credential`, which is the value Gateway persists onto the
+  connection.
 - **Auth flows**: call `/auth/start`, then `/auth/continue` with the same
   `flowId`; preserve any returned `contextPatch` in the next local request's
   `context` object.

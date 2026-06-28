@@ -103,6 +103,37 @@ describe("ProviderDefinition types", () => {
 		).toThrow(/auth\.flow\.start must not declare an input parameter/);
 	});
 
+	it("rejects legacy auth exchange handlers at runtime", () => {
+		const noop = defineOperation({
+			descriptionKey: "operations.noop.description",
+			input: providerZ.object({}),
+			output: providerZ.object({ ok: providerZ.boolean() }),
+			handler: async () => ({ ok: true }),
+		});
+
+		expect(() =>
+			defineProvider({
+				id: "bad-auth-exchange",
+				version: "1.0.0",
+				runtime: "standard",
+				meta: {
+					displayName: "Bad Auth Exchange",
+					descriptionKey: "providers.badAuthExchange.description",
+					category: "test",
+				},
+				auth: {
+					mode: "credentials",
+					flow: {
+						start: async () => ({ kind: "form", turnId: "start" }),
+						continue: async () => ({ kind: "complete", turnId: "complete" }),
+					},
+					exchange: async () => ({ session: "cookie" }),
+				} as never,
+				operations: { noop },
+			}),
+		).toThrow(/auth\.exchange is not part of the Provider SDK auth contract/);
+	});
+
 	it("should type a complete provider definition", () => {
 		const definition = {
 			id: "korea-air-quality",

@@ -389,6 +389,98 @@ describe("lintProvider", () => {
 		);
 	});
 
+	it("rejects legacy auth.exchange so auth has one canonical interface", () => {
+		const diagnostics = lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			auth: {
+				mode: "credentials",
+				flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
+				exchange: async () => ({ session: "cookie" }),
+			} as never,
+			credential: {
+				keys: ["session"],
+				storesReusableSecret: true,
+				justification: "Session cookie is required for private operations.",
+			},
+		});
+
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({
+				rule: "auth-exchange-unsupported",
+				field: "auth.exchange",
+			}),
+		);
+	});
+
+	it("does not crash when malformed auth is primitive", () => {
+		expect(() =>
+			lintProvider({
+				id: "demo-provider",
+				allowedHosts: ["api.example.com"],
+				reviewed: "first-party",
+				auth: "credentials" as never,
+			}),
+		).not.toThrow();
+	});
+
+	it("rejects login-like operations on authenticated providers so auth flow remains canonical", () => {
+		const diagnostics = lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			auth: {
+				mode: "credentials",
+				flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
+			},
+			credential: {
+				keys: ["session"],
+				storesReusableSecret: true,
+				justification: "Session cookie is required for private operations.",
+			},
+			operations: {
+				"auth-login-with-password": {
+					descriptionKey: "operations.authLogin.description",
+					input: withDescriptionKey(
+						z.object({}),
+						"operations.authLogin.input.description",
+					),
+					output: withDescriptionKey(
+						z.object({ ok: withDescriptionKey(z.boolean(), "operations.authLogin.fields.ok.description") }),
+						"operations.authLogin.output.description",
+					),
+					fixtures: { request: {}, response: { ok: true } },
+				},
+				"login-with-password": {
+					descriptionKey: "operations.login.description",
+					input: withDescriptionKey(
+						z.object({}),
+						"operations.login.input.description",
+					),
+					output: withDescriptionKey(
+						z.object({ ok: withDescriptionKey(z.boolean(), "operations.login.fields.ok.description") }),
+						"operations.login.output.description",
+					),
+					fixtures: { request: {}, response: { ok: true } },
+				},
+			},
+		});
+
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({
+				rule: "auth-operation-unsupported",
+				field: "operations.auth-login-with-password",
+			}),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({
+				rule: "auth-operation-unsupported",
+				field: "operations.login-with-password",
+			}),
+		);
+	});
+
 	it("requires credential keys for credentials mode", () => {
 		const diagnostics = lintProvider({
 			id: "demo-provider",

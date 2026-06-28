@@ -1,3 +1,17 @@
+export { credentialsAuthChallenge, defineCredentialsAuth } from "./auth";
+export type {
+	CredentialsAuthChallengeDefinition,
+	CredentialsAuthChallengeRequest,
+	CredentialsAuthCompleteResult,
+	CredentialsAuthCredential,
+	CredentialsAuthField,
+	CredentialsAuthFields,
+	CredentialsAuthFieldType,
+	CredentialsAuthInput,
+	CredentialsAuthLoginResult,
+	DefineCredentialsAuthOptions,
+	DefinedCredentialsAuth,
+} from "./auth";
 export { createFormCeremony } from "./ceremonies";
 export {
 	assertFreshProviderChoiceIssuedAt,

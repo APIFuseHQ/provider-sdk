@@ -374,6 +374,14 @@ function validateProviderShape(config: unknown): void {
 			VALID_AUTH_MODES,
 			String(config.id),
 		);
+	if (auth && typeof auth === "object" && "exchange" in auth) {
+		throw new ProviderError(
+			`Provider "${String(config.id)}" auth.exchange is not part of the Provider SDK auth contract`,
+			{
+				fix: "Use the single canonical auth interface: auth.flow. Gateway calls auth.flow.start/continue/poll/abort/refresh only and persists complete turn data.credential as-is, so put login/token/session exchange inside auth.flow.continue.",
+			},
+		);
+	}
 	if (
 		auth &&
 		typeof auth === "object" &&
