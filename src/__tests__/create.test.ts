@@ -214,6 +214,19 @@ describe("provider create planning", () => {
 		expect(readme?.content).toContain("nodriver` is Python-runtime only");
 	});
 
+	it("renders credential auth start as an input-free form turn", async () => {
+		const cwd = makeTempDir("apifuse-create-credentials-");
+		const plan = await buildProviderCreatePlan(
+			createOptions({ authMode: "credentials", runtime: "browser" }),
+			cwd,
+		);
+		const index = findGeneratedFile(plan, "index.ts");
+
+		expect(index?.content).toContain("start: async (_ctx) =>");
+		expect(index?.content).toContain('kind: "form"');
+		expect(index?.content).not.toContain('kind: "input"');
+	});
+
 	it("keeps top-level CLI examples aligned with generated starter limits", () => {
 		expect(COMMAND_MANIFEST.record.examples.join("\n")).not.toContain(
 			"apifuse record . --operation ping",

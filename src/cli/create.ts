@@ -734,8 +734,8 @@ function renderAuthBlock(authMode: CreateAuthMode): string {
 			return `{
     mode: "credentials",
     flow: {
-      start: async () => ({
-        kind: "input",
+      start: async (_ctx) => ({
+        kind: "form",
         turnId: crypto.randomUUID(),
         expectedInput: {
           schema: {
@@ -778,7 +778,7 @@ function renderAuthBlock(authMode: CreateAuthMode): string {
 			return `{
     mode: "oauth2",
     flow: {
-      start: async () => ({
+      start: async (_ctx) => ({
         kind: "redirect",
         turnId: crypto.randomUUID(),
         data: {
