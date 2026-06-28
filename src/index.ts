@@ -1,5 +1,6 @@
 // @apifuse/provider-sdk
 
+export * from "./auth";
 export * from "./ceremonies";
 export * from "./choice-token";
 export type {

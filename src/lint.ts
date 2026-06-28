@@ -22,7 +22,11 @@ type ProviderAuthLike = {
 		abort?: unknown;
 		refresh?: unknown;
 	};
+	exchange?: unknown;
 };
+
+const AUTH_OPERATION_ID_PATTERN =
+	/^(?:auth[-_])?(?:login|exchange|continue|refresh|callback)(?:[-_]|$)/i;
 
 type ProviderContractMetaLike = {
 	publicSchemaFieldNames?: "normalized";
@@ -127,6 +131,10 @@ function lintReviewed(
 	];
 }
 
+function isProviderAuthLike(value: unknown): value is ProviderAuthLike {
+	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
 function hasReusableSecretKeys(keys: readonly string[] | undefined): boolean {
 	if (!keys) {
 		return false;
@@ -212,6 +220,15 @@ function lintAuthModel(provider: {
 			level: "error",
 			field: "auth.flow.continue",
 			message: `${providerLabel} must define auth.flow.continue for ${authMode} auth mode.`,
+		});
+	}
+
+	if (isProviderAuthLike(provider.auth) && "exchange" in provider.auth) {
+		diagnostics.push({
+			rule: "auth-exchange-unsupported",
+			level: "error",
+			field: "auth.exchange",
+			message: `${providerLabel} must not define auth.exchange. The Provider SDK has one auth interface: auth.flow. Gateway only calls auth.flow.start/continue/poll/abort/refresh and persists complete turn data.credential as-is; put login/token/session exchange inside auth.flow.continue.`,
 		});
 	}
 
@@ -1005,6 +1022,22 @@ export function lintProvider(
 		...lintPlaywrightDirectImports(provider),
 		...lintSelfHostedBrowserPatterns(provider, options),
 	];
+
+	if (provider.operations) {
+		const authMode = provider.auth?.mode;
+		if (authMode === "credentials" || authMode === "oauth2") {
+			for (const operationKey of Object.keys(provider.operations)) {
+				if (AUTH_OPERATION_ID_PATTERN.test(operationKey)) {
+					diagnostics.push({
+						rule: "auth-operation-unsupported",
+						level: "error",
+						field: `operations.${operationKey}`,
+						message: `Provider "${provider.id ?? "unknown"}" operation "${operationKey}" looks like a login/token/session exchange endpoint. Authenticated providers must expose login through the single auth.flow interface because Gateway persists only auth.flow complete turn data.credential as the connection credential. Move this logic into auth.flow.continue instead of a provider operation.`,
+					});
+				}
+			}
+		}
+	}
 
 	if (!provider.operations) {
 		return diagnostics;
