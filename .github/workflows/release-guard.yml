@@ -3,6 +3,7 @@ name: Release PR Guard
 on:
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, edited]
 
 permissions:
   contents: read
