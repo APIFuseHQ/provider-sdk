@@ -3,6 +3,7 @@ import { join } from "node:path";
 
 import { Hono } from "hono";
 import { z } from "zod";
+import { AuthAbortError, createAuthFlowHelpers } from "../auth";
 import {
 	AuthError,
 	ProviderError,
@@ -329,6 +330,7 @@ function createAuthFlowContext(
 	provider: ProviderDefinition,
 	request: AuthFlowRequest,
 	options: ProviderServerOptions = {},
+	signal?: AbortSignal,
 ): {
 	context: FlowContext;
 	getPatch: () => Record<string, unknown | null> | undefined;
@@ -383,6 +385,7 @@ function createAuthFlowContext(
 			credential,
 			context: flowContextStore.context,
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
+			auth: createAuthFlowHelpers({ signal }),
 		},
 		getPatch: flowContextStore.getPatch,
 	};
@@ -1291,6 +1294,7 @@ async function handleAuthFlow(
 	request: AuthFlowRequest,
 	route: AuthRoute,
 	options: ProviderServerOptions = {},
+	signal?: AbortSignal,
 ): Promise<Response | AuthFlowResponse> {
 	const flow = provider.auth?.flow;
 	if (!flow) {
@@ -1303,6 +1307,7 @@ async function handleAuthFlow(
 		provider,
 		request,
 		options,
+		signal,
 	);
 	try {
 		const result =
@@ -1336,6 +1341,11 @@ async function handleAuthFlow(
 				? materializeAuthFlowTurn(provider, request, result)
 				: result;
 		return toAuthFlowResponse(materializedResult, getPatch());
+	} catch (error) {
+		if (error instanceof AuthAbortError) {
+			return toAuthFlowResponse(error.turn, getPatch());
+		}
+		throw error;
 	} finally {
 		context.stealth.close?.();
 	}
@@ -1450,7 +1460,13 @@ export function createServerApp(
 				AuthFlowRequestSchema.parse(rawBody),
 				c.req.raw.headers,
 			);
-			const response = await handleAuthFlow(provider, body, "start", options);
+			const response = await handleAuthFlow(
+				provider,
+				body,
+				"start",
+				options,
+				c.req.raw.signal,
+			);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -1495,6 +1511,7 @@ export function createServerApp(
 				body,
 				"continue",
 				options,
+				c.req.raw.signal,
 			);
 			logProviderSuccess(
 				logger,
@@ -1535,7 +1552,13 @@ export function createServerApp(
 				AuthFlowRequestSchema.parse(rawBody),
 				c.req.raw.headers,
 			);
-			const response = await handleAuthFlow(provider, body, "poll", options);
+			const response = await handleAuthFlow(
+				provider,
+				body,
+				"poll",
+				options,
+				c.req.raw.signal,
+			);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -1575,7 +1598,13 @@ export function createServerApp(
 				AuthFlowRequestSchema.parse(rawBody),
 				c.req.raw.headers,
 			);
-			const response = await handleAuthFlow(provider, body, "refresh", options);
+			const response = await handleAuthFlow(
+				provider,
+				body,
+				"refresh",
+				options,
+				c.req.raw.signal,
+			);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -1615,7 +1644,13 @@ export function createServerApp(
 				AuthFlowRequestSchema.parse(rawBody),
 				c.req.raw.headers,
 			);
-			const response = await handleAuthFlow(provider, body, "abort", options);
+			const response = await handleAuthFlow(
+				provider,
+				body,
+				"abort",
+				options,
+				c.req.raw.signal,
+			);
 			logProviderSuccess(
 				logger,
 				provider,

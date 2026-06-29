@@ -1435,6 +1435,84 @@ export interface ContextScratchpad {
 
 export type FlowContextStore = ContextScratchpad;
 
+export type AuthSafeJson =
+	| string
+	| number
+	| boolean
+	| null
+	| readonly AuthSafeJson[]
+	| { readonly [key: string]: AuthSafeJson };
+
+export type AuthSafeData = { readonly [key: string]: AuthSafeJson };
+
+export type AuthAbortRetry = "never" | "retry" | "after_user_action";
+
+export type AuthAbortData = Record<string, unknown> & {
+	readonly code: string;
+	readonly message?: string;
+	readonly retry?: AuthAbortRetry;
+	readonly actionHint?: AuthSafeJson;
+	readonly fieldErrors?: { readonly [field: string]: string };
+	readonly details?: AuthSafeData;
+};
+
+export interface AuthFlowTerminalContext {
+	readonly signal?: AbortSignal;
+	readonly deadline?: string;
+	complete<TCredential extends Record<string, string>>(options: {
+		readonly credential: TCredential;
+		readonly metadata?: AuthSafeData;
+		readonly data?: AuthSafeData;
+		readonly turnId?: string;
+		readonly expiresAt?: string;
+	}): AuthTurn;
+	abort(options: {
+		readonly code: string;
+		readonly message?: string;
+		readonly retry?: AuthAbortRetry;
+		readonly actionHint?: AuthSafeJson;
+		readonly fieldErrors?: { readonly [field: string]: string };
+		readonly data?: AuthSafeData;
+		readonly turnId?: string;
+		readonly expiresAt?: string;
+	}): AuthTurn;
+	nextForm(
+		options: {
+			readonly hintKey?: ProviderLocaleKeyInput;
+			readonly data?: AuthSafeData;
+			readonly turnId?: string;
+			readonly expiresAt?: string;
+			readonly timing?: AuthTurn["timing"];
+		} & (
+			| {
+					readonly fields: Record<
+						string,
+						{
+							readonly type?: "string" | "email" | "password" | "otp";
+							readonly labelKey?: ProviderLocaleKeyInput;
+							readonly descriptionKey?: ProviderLocaleKeyInput;
+							readonly placeholderKey?: ProviderLocaleKeyInput;
+							readonly required?: boolean;
+							readonly sensitive?: boolean;
+						}
+					>;
+					readonly expectedInput?: never;
+			  }
+			| {
+					readonly expectedInput: Record<string, unknown>;
+					readonly fields?: never;
+			  }
+		),
+	): AuthTurn;
+	nextPoll(options?: {
+		readonly hintKey?: ProviderLocaleKeyInput;
+		readonly data?: AuthSafeData;
+		readonly turnId?: string;
+		readonly expiresAt?: string;
+		readonly timing?: AuthTurn["timing"];
+	}): AuthTurn;
+}
+
 export interface FlowContext {
 	connectionId?: string;
 	externalRef?: string;
@@ -1446,6 +1524,7 @@ export interface FlowContext {
 	credential?: CredentialContext;
 	context: ContextScratchpad;
 	stt: SttContext;
+	auth: AuthFlowTerminalContext;
 }
 
 export interface AuthTurn {

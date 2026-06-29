@@ -1,4 +1,9 @@
-export { credentialsAuthChallenge, defineCredentialsAuth } from "./auth";
+export {
+	AuthAbortError,
+	credentialsAuthChallenge,
+	createAuthFlowHelpers,
+	defineCredentialsAuth,
+} from "./auth";
 export type {
 	CredentialsAuthChallengeDefinition,
 	CredentialsAuthChallengeRequest,
@@ -64,7 +69,12 @@ export {
 	z,
 } from "./schema";
 export type {
+	AuthAbortData,
+	AuthAbortRetry,
+	AuthFlowTerminalContext,
 	AuthMode,
+	AuthSafeData,
+	AuthSafeJson,
 	FlowContext,
 	HealthCheckAssertionContext,
 	HealthCheckCase,

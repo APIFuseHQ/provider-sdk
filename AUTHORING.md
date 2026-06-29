@@ -264,6 +264,53 @@ deployment projection checks, and release workflows.
 - Credential-backed smoke requests pass local-only credential material in
   `connection.secrets`. Keep real values in shell env or `.env`, never in source
   or fixtures.
+- Hand-written auth flows should use `ctx.auth` helpers and return exactly one
+  terminal/next turn from each handler: `ctx.auth.nextForm(...)` or
+  `ctx.auth.nextPoll(...)` to ask Gateway for the next user/system step,
+  `ctx.auth.complete(...)` to finish with `data.credential`, or
+  `ctx.auth.abort(...)` to stop safely. Keep abort `data` and `actionHint`
+  JSON-safe and secret-free; never include raw cookies, credentials, headers,
+  HTML, or upstream `Error` objects.
+
+```ts
+export default defineProvider({
+  id: "example-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  auth: {
+    mode: "credentials",
+    flow: {
+      async start(ctx) {
+        return ctx.auth.nextForm({
+          fields: {
+            email: { type: "email", labelKey: "auth.email.label" },
+            password: { type: "password", labelKey: "auth.password.label" },
+          },
+          hintKey: "auth.signIn",
+        });
+      },
+      async continue(ctx, input) {
+        const result = await loginWithSubmittedFields(ctx, input);
+        if (result.blocked) {
+          return ctx.auth.abort({
+            code: "account_action_required",
+            retry: "after_user_action",
+            actionHint: { kind: "open_provider_app" },
+            message: "Approve the login in the provider app.",
+          });
+        }
+        return ctx.auth.complete({
+          credential: { cookie: result.cookie },
+          metadata: { accountId: result.accountId },
+        });
+      },
+    },
+  },
+  credential: { keys: ["cookie"] },
+  // ...metadata and operations
+});
+```
+
 - Credentials auth providers should use `defineCredentialsAuth()` instead of
   hand-writing `auth.flow.start/continue`. The helper exposes one happy path:
   declare form `fields`, declare `credentialKeys`, and put upstream login/session

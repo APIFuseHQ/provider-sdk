@@ -1,6 +1,10 @@
 import { AuthError, ProviderError } from "./errors";
 import type {
+	AuthAbortData,
 	AuthConfig,
+	AuthFlowTerminalContext,
+	AuthSafeData,
+	AuthSafeJson,
 	AuthTurn,
 	ContextDeclaration,
 	CredentialDeclaration,
@@ -9,6 +13,25 @@ import type {
 } from "./types";
 
 const CREDENTIALS_AUTH_CHALLENGE_CONTEXT_KEY = "__credentialsAuthChallenge";
+const DEFAULT_COMPLETE_TURN_ID = "auth.complete";
+const DEFAULT_ABORT_TURN_ID = "auth.abort";
+const DEFAULT_FORM_TURN_ID = "auth.form";
+const DEFAULT_POLL_TURN_ID = "auth.poll";
+const SENSITIVE_ABORT_DATA_KEY_PATTERN =
+	/(authorization|cookie|credential|header|html|password|secret|session|token|apikey)/i;
+
+function normalizedAuthDataKey(key: string): string {
+	return key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+}
+
+function isPlainAuthJsonObject(value: object): boolean {
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
+}
+
+function isSensitiveAuthDataKey(key: string): boolean {
+	return SENSITIVE_ABORT_DATA_KEY_PATTERN.test(normalizedAuthDataKey(key));
+}
 
 export type CredentialsAuthFieldType =
 	| "string"
@@ -35,6 +58,170 @@ export type CredentialsAuthInput<TFields extends CredentialsAuthFields> = {
 export type CredentialsAuthCredential<TCredentialKeys extends readonly string[]> = {
 	[K in TCredentialKeys[number]]: string;
 };
+
+function assertSafeAuthJson(value: AuthSafeJson, path: string): void {
+	if (value === null) return;
+	if (typeof value === "string" || typeof value === "boolean") return;
+	if (typeof value === "number") {
+		if (Number.isFinite(value)) return;
+		throw new AuthError(`Auth abort ${path} must be a finite number`, {
+			code: "auth_abort_unsafe_data",
+		});
+	}
+	if (Array.isArray(value)) {
+		for (const [index, item] of value.entries()) {
+			assertSafeAuthJson(item, `${path}[${index}]`);
+		}
+		return;
+	}
+	if (value instanceof Error) {
+		throw new AuthError(`Auth abort ${path} must not include Error objects`, {
+			code: "auth_abort_unsafe_data",
+		});
+	}
+	if (typeof value !== "object") {
+		throw new AuthError(`Auth abort ${path} must be JSON-safe`, {
+			code: "auth_abort_unsafe_data",
+		});
+	}
+	if (!isPlainAuthJsonObject(value)) {
+		throw new AuthError(`Auth abort ${path} must be a plain JSON object`, {
+			code: "auth_abort_unsafe_data",
+		});
+	}
+	for (const [key, item] of Object.entries(value)) {
+		if (isSensitiveAuthDataKey(key)) {
+			throw new AuthError(`Auth abort ${path}.${key} must not include secrets`, {
+				code: "auth_abort_unsafe_data",
+			});
+		}
+		assertSafeAuthJson(item, `${path}.${key}`);
+	}
+}
+
+function assertSafeAuthData(data: AuthSafeData, path: string): void {
+	assertSafeAuthJson(data, path);
+}
+
+function authTurnBase(options: {
+	turnId: string | undefined;
+	defaultTurnId: string;
+	expiresAt?: string;
+}): Pick<AuthTurn, "turnId" | "expiresAt"> {
+	return {
+		turnId: options.turnId ?? options.defaultTurnId,
+		...(options.expiresAt ? { expiresAt: options.expiresAt } : {}),
+	};
+}
+
+function abortData(options: {
+	code: string;
+	message?: string;
+	retry?: AuthAbortData["retry"];
+	actionHint?: AuthSafeJson;
+	fieldErrors?: { readonly [field: string]: string };
+	data?: AuthSafeData;
+}): AuthAbortData {
+	if (options.actionHint !== undefined) {
+		assertSafeAuthJson(options.actionHint, "actionHint");
+	}
+	if (options.data !== undefined) {
+		assertSafeAuthData(options.data, "data");
+	}
+	return {
+		code: options.code,
+		...(options.message ? { message: options.message } : {}),
+		...(options.retry ? { retry: options.retry } : {}),
+		...(options.actionHint !== undefined ? { actionHint: options.actionHint } : {}),
+		...(options.fieldErrors ? { fieldErrors: options.fieldErrors } : {}),
+		...(options.data ? { details: options.data } : {}),
+	};
+}
+
+export function createAuthFlowHelpers(options: {
+	readonly signal?: AbortSignal;
+	readonly deadline?: string;
+} = {}): AuthFlowTerminalContext {
+	return {
+		...(options.signal ? { signal: options.signal } : {}),
+		...(options.deadline ? { deadline: options.deadline } : {}),
+		complete({ credential, metadata, data, turnId, expiresAt }) {
+			return {
+				kind: "complete",
+				...authTurnBase({ turnId, defaultTurnId: DEFAULT_COMPLETE_TURN_ID, expiresAt }),
+				data: {
+					...(data ?? {}),
+					credential,
+					...(metadata ? { metadata } : {}),
+				},
+			};
+		},
+		abort({
+			code,
+			message,
+			retry,
+			actionHint,
+			fieldErrors,
+			data,
+			turnId,
+			expiresAt,
+		}) {
+			return {
+				kind: "abort",
+				...authTurnBase({ turnId, defaultTurnId: DEFAULT_ABORT_TURN_ID, expiresAt }),
+				data: abortData({
+					code,
+					message,
+					retry,
+					actionHint,
+					fieldErrors,
+					data,
+				}),
+			};
+		},
+		nextForm(options) {
+			return {
+				kind: "form",
+				...authTurnBase({
+					turnId: options.turnId,
+					defaultTurnId: DEFAULT_FORM_TURN_ID,
+					expiresAt: options.expiresAt,
+				}),
+				...(options.hintKey ? { hintKey: options.hintKey } : {}),
+				...(options.timing ? { timing: options.timing } : {}),
+				...(options.data ? { data: options.data } : {}),
+				expectedInput:
+					options.expectedInput ?? expectedInputFromFields(options.fields ?? {}),
+			};
+		},
+		nextPoll(options = {}) {
+			return {
+				kind: "poll",
+				...authTurnBase({
+					turnId: options.turnId,
+					defaultTurnId: DEFAULT_POLL_TURN_ID,
+					expiresAt: options.expiresAt,
+				}),
+				...(options.hintKey ? { hintKey: options.hintKey } : {}),
+				...(options.timing ? { timing: options.timing } : {}),
+				...(options.data ? { data: options.data } : {}),
+			};
+		},
+	};
+}
+
+export class AuthAbortError extends AuthError {
+	readonly turn: AuthTurn;
+
+	constructor(options: Parameters<AuthFlowTerminalContext["abort"]>[0]) {
+		super(options.message ?? options.code, {
+			code: options.code,
+			retryable: options.retry === "retry",
+		});
+		this.name = "AuthAbortError";
+		this.turn = createAuthFlowHelpers().abort(options);
+	}
+}
 
 export interface CredentialsAuthCompleteResult<
 	TCredentialKeys extends readonly string[],

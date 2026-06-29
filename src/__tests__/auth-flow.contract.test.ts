@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
+import { AuthAbortError, createAuthFlowHelpers } from "../auth";
 import { createServerApp } from "../server/serve";
 import type { AuthTurn, ProviderDefinition } from "../types";
 
@@ -223,6 +224,282 @@ function assertAuthTurnContract(turn: AuthTurn): void {
 }
 
 describe("auth-flow AuthTurn provider contract", () => {
+	it("exports auth terminal helpers from the provider authoring subpath", async () => {
+		const providerExports = await import("../provider");
+
+		expect(providerExports.AuthAbortError).toBe(AuthAbortError);
+		expect(providerExports.createAuthFlowHelpers).toBe(createAuthFlowHelpers);
+		expect(providerExports.createAuthFlowHelpers().abort({ code: "cancelled" })).toEqual({
+			kind: "abort",
+			turnId: "auth.abort",
+			data: { code: "cancelled" },
+		});
+	});
+
+	it("builds complete, form, and poll turns with helper defaults", () => {
+		const helpers = createAuthFlowHelpers();
+
+		expect(
+			helpers.complete({
+				credential: { access_token: "access-token" },
+				metadata: { accountId: "acct_1" },
+				data: { providerAccountLabel: "Demo" },
+			}),
+		).toEqual({
+			kind: "complete",
+			turnId: "auth.complete",
+			data: {
+				providerAccountLabel: "Demo",
+				credential: { access_token: "access-token" },
+				metadata: { accountId: "acct_1" },
+			},
+		});
+
+		expect(
+			helpers.nextForm({
+				fields: {
+					email: { type: "email", labelKey: "auth.email.label" },
+					otp: { type: "otp", required: false },
+				},
+				hintKey: "auth.signIn",
+				expiresAt,
+			}),
+		).toEqual({
+			kind: "form",
+			turnId: "auth.form",
+			expiresAt,
+			hintKey: "auth.signIn",
+			expectedInput: {
+				type: "object",
+				properties: {
+					email: {
+						type: "string",
+						format: "email",
+						nameKey: "auth.email.label",
+					},
+					otp: { type: "string", format: "otp", sensitive: true },
+				},
+				required: ["email"],
+			},
+		});
+
+		expect(
+			helpers.nextPoll({
+				hintKey: "auth.waitForApproval",
+				timing: { suggestedPollIntervalMs: 3000, maxWaitMs: 120000 },
+			}),
+		).toEqual({
+			kind: "poll",
+			turnId: "auth.poll",
+			hintKey: "auth.waitForApproval",
+			timing: { suggestedPollIntervalMs: 3000, maxWaitMs: 120000 },
+		});
+	});
+
+	it("builds safe typed abort data with retry and action hints", () => {
+		const turn = createAuthFlowHelpers().abort({
+			code: "mfa_required",
+			message: "Open the provider app and approve the login.",
+			retry: "after_user_action",
+			actionHint: {
+				kind: "open_provider_app",
+				steps: ["approve_login"],
+			},
+			fieldErrors: { otp: "Expired code" },
+			data: { transactionId: "txn_public_123" },
+		});
+
+		expect(turn).toEqual({
+			kind: "abort",
+			turnId: "auth.abort",
+			data: {
+				code: "mfa_required",
+				message: "Open the provider app and approve the login.",
+				retry: "after_user_action",
+				actionHint: {
+					kind: "open_provider_app",
+					steps: ["approve_login"],
+				},
+				fieldErrors: { otp: "Expired code" },
+				details: { transactionId: "txn_public_123" },
+			},
+		});
+	});
+
+	it("rejects unsafe abort helper data before it reaches auth route output", () => {
+		const helpers = createAuthFlowHelpers();
+
+		expect(() =>
+			helpers.abort({
+				code: "unsafe",
+				data: { headers: { "set-cookie": "secret-cookie" } },
+			}),
+		).toThrow("must not include secrets");
+		expect(() =>
+			helpers.abort({
+				code: "unsafe",
+				data: {
+					account: {
+						access_token: "secret-token",
+						refreshToken: "secret-refresh",
+						sessionCookie: "secret-session",
+					},
+				},
+			}),
+		).toThrow("must not include secrets");
+		expect(() =>
+			helpers.abort({
+				code: "unsafe",
+				actionHint: { retryWith: [{ api_key: "secret-key" }] },
+			}),
+		).toThrow("must not include secrets");
+		expect(() =>
+			helpers.abort({
+				code: "unsafe",
+				actionHint: { expiresAt: new Date("2027-01-01T00:00:00.000Z") },
+			}),
+		).toThrow("must be a plain JSON object");
+		expect(() =>
+			helpers.abort({
+				code: "unsafe",
+				actionHint: { values: new Map([["token", "secret-token"]]) },
+			}),
+		).toThrow("must be a plain JSON object");
+		class SecretBox {
+			toJSON() {
+				return { token: "secret-token" };
+			}
+		}
+		expect(() =>
+			helpers.abort({
+				code: "unsafe",
+				actionHint: { box: new SecretBox() } as never,
+			}),
+		).toThrow("must be a plain JSON object");
+		expect(() =>
+			Reflect.construct(AuthAbortError, [
+				{
+					code: "unsafe",
+					actionHint: { cause: new Error("raw upstream error") },
+				},
+			]),
+		).toThrow("must not include Error objects");
+	});
+
+	it("exposes helpers and request signal on auth flow context routes", async () => {
+		const app = createServerApp(
+			{
+				id: "auth-helper-provider",
+				version: "1.0.0",
+				runtime: "standard",
+				meta: { displayName: "Auth Helper Provider", category: "test" },
+				auth: {
+					mode: "credentials",
+					flow: {
+						start: async (ctx) =>
+							ctx.auth.nextForm({
+								fields: { email: { type: "email" } },
+								data: { hasSignal: ctx.auth.signal instanceof AbortSignal },
+							}),
+						continue: async (ctx) =>
+							ctx.auth.complete({
+								credential: { access_token: "access-token" },
+								data: { providerId: ctx.providerId },
+							}),
+					},
+				},
+				operations: {},
+			},
+			{ logger: () => {} },
+		);
+
+		const [startResponse, continueResponse] = await Promise.all([
+			app.request("/auth/start", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(authRequest()),
+			}),
+			app.request("/auth/continue", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(authRequest({ email: "demo@example.test" })),
+			}),
+		]);
+
+		expect(startResponse.status).toBe(200);
+		expect(await startResponse.json()).toEqual({
+			data: {
+				kind: "form",
+				turnId: "auth.form",
+				data: { hasSignal: true },
+				expectedInput: {
+					type: "object",
+					properties: { email: { type: "string", format: "email" } },
+					required: ["email"],
+				},
+			},
+		});
+		expect(continueResponse.status).toBe(200);
+		expect(await continueResponse.json()).toEqual({
+			data: {
+				kind: "complete",
+				turnId: "auth.complete",
+				data: {
+					providerId: "auth-contract-provider",
+					credential: { access_token: "access-token" },
+				},
+			},
+		});
+	});
+
+	it("normalizes thrown auth abort errors into safe abort turns", async () => {
+		const app = createServerApp(
+			{
+				id: "auth-abort-error-provider",
+				version: "1.0.0",
+				runtime: "standard",
+				meta: { displayName: "Auth Abort Error Provider", category: "test" },
+				auth: {
+					mode: "credentials",
+					flow: {
+						start: async () => {
+							throw new AuthAbortError({
+								code: "user_action_required",
+								message: "Approve login in the provider app.",
+								retry: "after_user_action",
+								actionHint: { kind: "open_provider_app" },
+							});
+						},
+						continue: async (ctx) =>
+							ctx.auth.complete({ credential: { access_token: "unused" } }),
+					},
+				},
+				operations: {},
+			},
+			{ logger: () => {} },
+		);
+
+		const response = await app.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(authRequest()),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			data: {
+				kind: "abort",
+				turnId: "auth.abort",
+				data: {
+					code: "user_action_required",
+					message: "Approve login in the provider app.",
+					retry: "after_user_action",
+					actionHint: { kind: "open_provider_app" },
+				},
+			},
+		});
+	});
+
 	it("wraps auth-flow turns under the provider server data envelope", async () => {
 		const app = createServerApp(createProvider(), { logger: () => {} });
 		const response = await app.request("/auth/start", {

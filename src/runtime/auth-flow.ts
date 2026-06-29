@@ -1,4 +1,5 @@
 import { ContextAccessError } from "../errors";
+import { createAuthFlowHelpers } from "../auth";
 import type {
 	ContextScratchpad,
 	EnvContext,
@@ -70,5 +71,6 @@ export function createFlowContext(options: {
 		env: options.env,
 		context: createScratchpad(options.allowedKeys, options.initialContext),
 		stt: options.stt ?? createUnsupportedSttClient(),
+		auth: createAuthFlowHelpers(),
 	};
 }
