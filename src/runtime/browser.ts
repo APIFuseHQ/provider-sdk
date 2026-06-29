@@ -69,6 +69,16 @@ type CdpFrameTreeNode = {
 	};
 };
 
+type CdpFetchFulfillParams = {
+	readonly requestId: string;
+	readonly responseCode: number;
+	readonly responseHeaders?: readonly {
+		readonly name: string;
+		readonly value: string;
+	}[];
+	readonly body?: string;
+};
+
 type BrowserPageContract = BrowserPage;
 
 function toResourceBody(
@@ -76,6 +86,10 @@ function toResourceBody(
 ): Buffer | string | undefined {
 	if (body === undefined || typeof body === "string" || Buffer.isBuffer(body)) {
 		return body;
+	}
+
+	if (body instanceof ArrayBuffer) {
+		return Buffer.from(new Uint8Array(body));
 	}
 
 	return Buffer.from(body);
@@ -101,6 +115,60 @@ async function toResourceRequest(
 	};
 }
 
+function toCdpResourceRequest(
+	params: unknown,
+): { requestId: string; request: BrowserResourceRequest } | null {
+	if (!isRecord(params)) {
+		return null;
+	}
+
+	const requestId = params.requestId;
+	const rawRequest = params.request;
+	if (typeof requestId !== "string" || !isRecord(rawRequest)) {
+		return null;
+	}
+
+	const url = rawRequest.url;
+	const method = String(rawRequest.method ?? "").toUpperCase();
+	if (typeof url !== "string" || !isResourceMethod(method)) {
+		return null;
+	}
+
+	return {
+		requestId,
+		request: {
+			headers: toCdpResourceHeaders(rawRequest.headers),
+			method,
+			resourceType:
+				typeof params.resourceType === "string" ? params.resourceType : undefined,
+			url,
+		},
+	};
+}
+
+function getCdpPausedRequestId(params: unknown): string | null {
+	if (!isRecord(params) || typeof params.requestId !== "string") {
+		return null;
+	}
+
+	return params.requestId;
+}
+
+function toCdpResourceHeaders(value: unknown): Record<string, string> {
+	if (!isRecord(value)) {
+		return {};
+	}
+
+	const headers: Record<string, string> = {};
+	for (const [name, headerValue] of Object.entries(value)) {
+		if (typeof headerValue === "string") {
+			headers[name] = headerValue;
+		}
+	}
+
+	return headers;
+}
+
 function matchesResourceRoute(
 	match: BrowserResourcePolicy["routes"][number]["match"],
 	request: BrowserResourceRequest,
@@ -113,6 +181,27 @@ function matchesResourceRoute(
 	}
 
 	return match(request);
+}
+
+function toCdpFulfillParams(
+	requestId: string,
+	decision: Extract<BrowserResourceDecision, { readonly action: "fulfill" }>,
+): CdpFetchFulfillParams {
+	const body = toResourceBody(decision.body);
+	return {
+		...(body === undefined
+			? {}
+			: { body: Buffer.from(body).toString("base64") }),
+		...(decision.headers === undefined
+			? {}
+			: {
+					responseHeaders: Object.entries(decision.headers).map(
+						([name, value]) => ({ name, value }),
+					),
+				}),
+		requestId,
+		responseCode: decision.status ?? 200,
+	};
 }
 
 async function fulfillResourceRoute(
@@ -1160,16 +1249,102 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 	}
 
 	async withResourcePolicy<T>(
-		_policy: BrowserResourcePolicy,
-		_run: () => Promise<T>,
+		policy: BrowserResourcePolicy,
+		run: () => Promise<T>,
 	): Promise<T> {
-		throw new ProviderError(
-			"Browser resource policies require a Playwright-backed browser page",
-			{
-				code: "BROWSER_RUNTIME_UNSUPPORTED",
-				fix: "Use the local Playwright browser runtime for BrowserPage.withResourcePolicy().",
-			},
+		const allowedMethods = new Set(
+			policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS,
 		);
+		const handlePausedRequest = (params: unknown): void => {
+			void this.handleResourcePolicyPausedRequest(
+				params,
+				policy,
+				allowedMethods,
+			);
+		};
+
+		const unsubscribe = this.pageClient.on(
+			"Fetch.requestPaused",
+			handlePausedRequest,
+		);
+
+		try {
+			await this.pageClient.send("Fetch.enable", {
+				patterns: [{ requestStage: "Request", urlPattern: "*" }],
+			});
+		} catch (error) {
+			unsubscribe();
+			throw new ProviderError(
+				"CDP browser target does not support BrowserPage.withResourcePolicy()",
+				{
+					cause: error instanceof Error ? error : undefined,
+					code: "BROWSER_RUNTIME_UNSUPPORTED",
+					fix: "Use a Chromium CDP target with the Fetch domain enabled, or use the local Playwright browser runtime.",
+				},
+			);
+		}
+
+		try {
+			return await run();
+		} finally {
+			unsubscribe();
+			await this.pageClient.send("Fetch.disable");
+		}
+	}
+
+	private async handleResourcePolicyPausedRequest(
+		params: unknown,
+		policy: BrowserResourcePolicy,
+		allowedMethods: ReadonlySet<BrowserResourceMethod>,
+	): Promise<void> {
+		const requestId = getCdpPausedRequestId(params);
+		if (requestId === null) {
+			return;
+		}
+
+		try {
+			const parsed = toCdpResourceRequest(params);
+			if (!parsed || !allowedMethods.has(parsed.request.method)) {
+				await this.failCdpResourceRequest(requestId);
+				return;
+			}
+
+			for (const resourceRoute of policy.routes) {
+				if (!matchesResourceRoute(resourceRoute.match, parsed.request)) {
+					continue;
+				}
+
+				const decision = await resourceRoute.handle(parsed.request);
+				switch (decision.action) {
+					case "fulfill":
+						await this.pageClient.send(
+							"Fetch.fulfillRequest",
+							toCdpFulfillParams(parsed.requestId, decision),
+						);
+						return;
+					case "block":
+						await this.failCdpResourceRequest(parsed.requestId);
+						return;
+				}
+			}
+
+			await this.failCdpResourceRequest(parsed.requestId);
+		} catch {
+			await this.failCdpResourceRequest(requestId);
+		}
+	}
+
+	private async failCdpResourceRequest(requestId: string): Promise<void> {
+		try {
+			await this.pageClient.send("Fetch.failRequest", {
+				errorReason: "BlockedByClient",
+				requestId,
+			});
+		} catch (error) {
+			if (error instanceof Error) {
+				return;
+			}
+		}
 	}
 
 	private async initialize(): Promise<void> {

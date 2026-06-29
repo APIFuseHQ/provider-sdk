@@ -36,6 +36,18 @@ type MockResourceRequest = {
 	url: () => string;
 };
 
+type MockCdpFetchFulfillRequest = {
+	body?: string;
+	requestId: string;
+	responseCode: number;
+	responseHeaders?: Array<{ name: string; value: string }>;
+};
+
+type MockCdpFetchFailure = {
+	errorReason: string;
+	requestId: string;
+};
+
 type MockRoute = {
 	abort: (errorCode?: string) => Promise<void>;
 	fulfill: (options: MockRouteFulfillOptions) => Promise<void>;
@@ -157,7 +169,13 @@ const cdpState = {
 	frameClicks: [] as string[],
 	frameContextIds: [] as number[],
 	failWebdriverPatch: false,
+	fetchDisabled: 0,
+	fetchEnabled: 0,
+	fetchEnableParams: [] as Array<Record<string, unknown>>,
+	fetchFailures: [] as MockCdpFetchFailure[],
+	fetchFulfillments: [] as MockCdpFetchFulfillRequest[],
 	navigateUrls: [] as string[],
+	pageSockets: [] as MockWebSocket[],
 	poolReleaseCalls: [] as string[],
 	poolReleaseRequests: [] as Array<Record<string, unknown>>,
 	runtimeEnabled: 0,
@@ -474,6 +492,22 @@ function parseSelector(expression: string): string | null {
 	return JSON.parse(match[1]) as string;
 }
 
+async function waitForCondition(
+	condition: () => boolean,
+	message: string,
+): Promise<void> {
+	const deadline = Date.now() + 500;
+	while (Date.now() < deadline) {
+		if (condition()) {
+			return;
+		}
+
+		await new Promise((resolve) => setTimeout(resolve, 0));
+	}
+
+	throw new Error(message);
+}
+
 class MockWebSocket {
 	static CONNECTING = 0;
 	static OPEN = 1;
@@ -487,6 +521,10 @@ class MockWebSocket {
 	>();
 
 	constructor(private readonly endpoint: string) {
+		if (endpoint.startsWith("ws://page.test/")) {
+			cdpState.pageSockets.push(this);
+		}
+
 		queueMicrotask(() => {
 			this.readyState = MockWebSocket.OPEN;
 			this.emit("open");
@@ -524,6 +562,21 @@ class MockWebSocket {
 		}
 
 		this.handlePageMessage(message);
+	}
+
+	dispatchFetchRequest(dispatch: MockResourceDispatch): string {
+		const requestId = `fetch-request-${cdpState.fetchFailures.length + cdpState.fetchFulfillments.length + 1}`;
+		this.emitPageEvent("Fetch.requestPaused", {
+			request: {
+				headers: dispatch.headers ?? {},
+				method: dispatch.method ?? "GET",
+				postData: dispatch.body,
+				url: dispatch.url,
+			},
+			requestId,
+			resourceType: dispatch.resourceType ?? "Document",
+		});
+		return requestId;
 	}
 
 	private emit(event: string, payload?: { data?: string }) {
@@ -713,6 +766,48 @@ class MockWebSocket {
 					data: Buffer.from("remote-shot").toString("base64"),
 				});
 				break;
+			case "Fetch.enable":
+				cdpState.fetchEnabled += 1;
+				cdpState.fetchEnableParams.push(message.params ?? {});
+				this.reply(message.id, {});
+				break;
+			case "Fetch.disable":
+				cdpState.fetchDisabled += 1;
+				this.reply(message.id, {});
+				break;
+			case "Fetch.fulfillRequest":
+				cdpState.fetchFulfillments.push({
+					...(typeof message.params?.body === "string"
+						? { body: message.params.body }
+						: {}),
+					requestId: String(message.params?.requestId ?? ""),
+					responseCode:
+						typeof message.params?.responseCode === "number"
+							? message.params.responseCode
+							: 0,
+					...(Array.isArray(message.params?.responseHeaders)
+						? {
+								responseHeaders: message.params.responseHeaders.filter(
+									(header): header is { name: string; value: string } =>
+										typeof header === "object" &&
+										header !== null &&
+										"name" in header &&
+										"value" in header &&
+										typeof header.name === "string" &&
+										typeof header.value === "string",
+								),
+							}
+						: {}),
+				});
+				this.reply(message.id, {});
+				break;
+			case "Fetch.failRequest":
+				cdpState.fetchFailures.push({
+					errorReason: String(message.params?.errorReason ?? ""),
+					requestId: String(message.params?.requestId ?? ""),
+				});
+				this.reply(message.id, {});
+				break;
 			default:
 				this.reply(message.id, {});
 		}
@@ -740,8 +835,14 @@ describe("createBrowserClient", () => {
 		cdpState.frameClicks.length = 0;
 		cdpState.frameContextIds.length = 0;
 		cdpState.failWebdriverPatch = false;
+		cdpState.fetchDisabled = 0;
+		cdpState.fetchEnabled = 0;
+		cdpState.fetchEnableParams.length = 0;
+		cdpState.fetchFailures.length = 0;
+		cdpState.fetchFulfillments.length = 0;
 		cdpState.insertedTexts.length = 0;
 		cdpState.navigateUrls.length = 0;
+		cdpState.pageSockets.length = 0;
 		cdpState.poolReleaseCalls.length = 0;
 		cdpState.poolReleaseRequests.length = 0;
 		cdpState.runtimeEnabled = 0;
@@ -1304,28 +1405,235 @@ describe("createBrowserClient", () => {
 		expect(cdpState.poolReleaseCalls).toEqual(["pool-page-1"]);
 	});
 
-	it("reports resource policies as unsupported on CDP pool pages", async () => {
+	it("enables and disables CDP Fetch around resource policy callbacks", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { ProviderError } = await import("../errors");
 		const { createBrowserClient } = await import("../runtime/browser");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 
-		const policyPromise = page.withResourcePolicy(
-			{ routes: [] },
-			async () => undefined,
-		);
-		await expect(policyPromise).rejects.toBeInstanceOf(ProviderError);
-		await expect(policyPromise).rejects.toMatchObject({
-			code: "BROWSER_RUNTIME_UNSUPPORTED",
-			message:
-				"Browser resource policies require a Playwright-backed browser page",
+		const result = await page.withResourcePolicy({ routes: [] }, async () => {
+			expect(cdpState.fetchEnabled).toBe(1);
+			expect(cdpState.fetchDisabled).toBe(0);
+			return "scoped";
 		});
 		await page.close();
 		await client.close();
 
+		expect(result).toBe("scoped");
+		expect(cdpState.fetchEnableParams).toEqual([
+			{ patterns: [{ requestStage: "Request", urlPattern: "*" }] },
+		]);
+		expect(cdpState.fetchDisabled).toBe(1);
 		expect(cdpState.poolReleaseCalls).toEqual(["pool-page-1"]);
+	});
+
+	it("fulfills a matching CDP Fetch request under a resource policy", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		await page.withResourcePolicy(
+			{
+				routes: [
+					{
+						match: "https://example.test/document",
+						handle: (request) => ({
+							action: "fulfill",
+							body: `<title>${request.resourceType}</title>`,
+							headers: { "content-type": "text/html" },
+							status: 202,
+						}),
+					},
+				],
+			},
+			async () => {
+				const socket = cdpState.pageSockets[0];
+				if (!socket) {
+					throw new Error("CDP page socket was not opened");
+				}
+
+				socket.dispatchFetchRequest({
+					headers: { accept: "text/html" },
+					method: "GET",
+					resourceType: "Document",
+					url: "https://example.test/document",
+				});
+				await waitForCondition(
+					() => cdpState.fetchFulfillments.length === 1,
+					"CDP Fetch request was not fulfilled",
+				);
+			},
+		);
+		await page.close();
+		await client.close();
+
+		expect(cdpState.fetchFailures).toEqual([]);
+		expect(cdpState.fetchFulfillments).toEqual([
+			{
+				body: Buffer.from("<title>Document</title>").toString("base64"),
+				requestId: "fetch-request-1",
+				responseCode: 202,
+				responseHeaders: [{ name: "content-type", value: "text/html" }],
+			},
+		]);
+	});
+
+	it("blocks unmatched CDP Fetch requests by default", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		await page.withResourcePolicy({ routes: [] }, async () => {
+			const socket = cdpState.pageSockets[0];
+			if (!socket) {
+				throw new Error("CDP page socket was not opened");
+			}
+
+			socket.dispatchFetchRequest({
+				method: "GET",
+				resourceType: "Script",
+				url: "https://example.test/app.js",
+			});
+			await waitForCondition(
+				() => cdpState.fetchFailures.length === 1,
+				"CDP Fetch request was not blocked",
+			);
+		});
+		await page.close();
+		await client.close();
+
+		expect(cdpState.fetchFulfillments).toEqual([]);
+		expect(cdpState.fetchFailures).toEqual([
+			{ errorReason: "BlockedByClient", requestId: "fetch-request-1" },
+		]);
+	});
+
+	it("blocks non-GET CDP Fetch requests before provider handlers run", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		let handlerCalls = 0;
+
+		await page.withResourcePolicy(
+			{
+				routes: [
+					{
+						match: () => true,
+						handle: () => {
+							handlerCalls += 1;
+							return { action: "fulfill", body: "unexpected" };
+						},
+					},
+				],
+			},
+			async () => {
+				const socket = cdpState.pageSockets[0];
+				if (!socket) {
+					throw new Error("CDP page socket was not opened");
+				}
+
+				socket.dispatchFetchRequest({
+					body: "secret=not-exposed",
+					headers: { "content-type": "application/x-www-form-urlencoded" },
+					method: "POST",
+					resourceType: "Fetch",
+					url: "https://example.test/post",
+				});
+				await waitForCondition(
+					() => cdpState.fetchFailures.length === 1,
+					"CDP POST request was not blocked",
+				);
+			},
+		);
+		await page.close();
+		await client.close();
+
+		expect(handlerCalls).toBe(0);
+		expect(cdpState.fetchFulfillments).toEqual([]);
+		expect(cdpState.fetchFailures).toEqual([
+			{ errorReason: "BlockedByClient", requestId: "fetch-request-1" },
+		]);
+	});
+
+	it("disables CDP Fetch when a resource policy callback throws", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		await expect(
+			page.withResourcePolicy({ routes: [] }, async () => {
+				throw new Error("resource policy callback failed");
+			}),
+		).rejects.toThrow("resource policy callback failed");
+		await page.close();
+		await client.close();
+
+		expect(cdpState.fetchEnabled).toBe(1);
+		expect(cdpState.fetchDisabled).toBe(1);
+	});
+
+	it("passes only safe CDP Fetch request metadata to provider handlers", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		let receivedKeys: string[] = [];
+		let postDataExposed = true;
+
+		await page.withResourcePolicy(
+			{
+				routes: [
+					{
+						match: () => true,
+						handle: (request) => {
+							receivedKeys = Object.keys(request).sort();
+							postDataExposed = "postData" in request || "body" in request;
+							return { action: "fulfill", body: "safe" };
+						},
+					},
+				],
+			},
+			async () => {
+				const socket = cdpState.pageSockets[0];
+				if (!socket) {
+					throw new Error("CDP page socket was not opened");
+				}
+
+				socket.dispatchFetchRequest({
+					body: "secret=not-exposed",
+					headers: { accept: "text/html" },
+					method: "GET",
+					resourceType: "Document",
+					url: "https://example.test/safe",
+				});
+				await waitForCondition(
+					() => cdpState.fetchFulfillments.length === 1,
+					"CDP Fetch request was not fulfilled",
+				);
+			},
+		);
+		await page.close();
+		await client.close();
+
+		expect(receivedKeys).toEqual(["headers", "method", "resourceType", "url"]);
+		expect(postDataExposed).toBeFalse();
+		expect(cdpState.fetchFulfillments).toEqual([
+			{
+				body: Buffer.from("safe").toString("base64"),
+				requestId: "fetch-request-1",
+				responseCode: 200,
+			},
+		]);
 	});
 
 	it("releases a pool lease exactly once when page.close() is repeated", async () => {
