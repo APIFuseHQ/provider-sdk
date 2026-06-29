@@ -7,18 +7,58 @@ type LaunchCall = {
 	proxy?: { server: string };
 };
 
+type MockRouteFulfillOptions = {
+	body?: Buffer | string;
+	headers?: Record<string, string>;
+	status?: number;
+};
+
+type MockResourceDispatch = {
+	body?: string;
+	headers?: Record<string, string>;
+	method?: string;
+	resourceType?: string;
+	url: string;
+};
+
+type MockRouteHandler = (route: MockRoute) => Promise<void>;
+
+type MockRouteRegistration = {
+	handler: MockRouteHandler;
+	pattern: string;
+};
+
+type MockResourceRequest = {
+	allHeaders: () => Promise<Record<string, string>>;
+	method: () => string;
+	postData: () => string | undefined;
+	resourceType: () => string;
+	url: () => string;
+};
+
+type MockRoute = {
+	abort: (errorCode?: string) => Promise<void>;
+	fulfill: (options: MockRouteFulfillOptions) => Promise<void>;
+	request: () => MockResourceRequest;
+};
+
 type MockPlaywrightPage = {
 	click: (selector: string) => Promise<void>;
 	close: () => Promise<void>;
 	content: () => Promise<string>;
+	dispatchResourceRequest: (
+		dispatch: MockResourceDispatch,
+	) => Promise<"handled" | "unhandled">;
 	evaluate: <T>(fn: string | (() => T)) => Promise<T>;
 	fill: (selector: string, text: string) => Promise<void>;
 	frames: () => MockPlaywrightFrame[];
 	goto: (url: string) => Promise<void>;
 	locator: (selector: string) => MockPlaywrightLocator;
+	route: (pattern: string, handler: MockRouteHandler) => Promise<void>;
 	screenshot: (options?: { fullPage?: boolean }) => Promise<Buffer>;
 	title: () => Promise<string>;
 	type: (selector: string, text: string) => Promise<void>;
+	unroute: (pattern: string, handler: MockRouteHandler) => Promise<void>;
 	url: () => string;
 	waitForSelector: (
 		selector: string,
@@ -30,6 +70,12 @@ type MockPlaywrightPage = {
 		content: string;
 		fills: Array<{ selector: string; text: string }>;
 		gotoUrls: string[];
+		resourceAborts: Array<{ errorCode?: string; url: string }>;
+		resourceFulfillments: Array<MockRouteFulfillOptions & { url: string }>;
+		resourceRequests: MockResourceDispatch[];
+		routes: MockRouteRegistration[];
+		unhandledResourceRequests: MockResourceDispatch[];
+		unrouteCalls: string[];
 		screenshots: Array<{ fullPage?: boolean }>;
 		types: Array<{ selector: string; text: string }>;
 		waits: Array<{ selector: string; timeout?: number }>;
@@ -166,6 +212,12 @@ function createMockPlaywrightPage(): MockPlaywrightPage {
 		content: "<html><body>local</body></html>",
 		fills: [] as Array<{ selector: string; text: string }>,
 		gotoUrls: [] as string[],
+		resourceAborts: [] as Array<{ errorCode?: string; url: string }>,
+		resourceFulfillments: [] as Array<MockRouteFulfillOptions & { url: string }>,
+		resourceRequests: [] as MockResourceDispatch[],
+		routes: [] as MockRouteRegistration[],
+		unhandledResourceRequests: [] as MockResourceDispatch[],
+		unrouteCalls: [] as string[],
 		screenshots: [] as Array<{ fullPage?: boolean }>,
 		types: [] as Array<{ selector: string; text: string }>,
 		waits: [] as Array<{ selector: string; timeout?: number }>,
@@ -181,6 +233,46 @@ function createMockPlaywrightPage(): MockPlaywrightPage {
 		},
 		async content() {
 			return state.content;
+		},
+		async dispatchResourceRequest(dispatch) {
+			state.resourceRequests.push(dispatch);
+			const registration = state.routes.at(-1);
+			if (!registration) {
+				state.unhandledResourceRequests.push(dispatch);
+				return "unhandled";
+			}
+
+			const request = {
+				async allHeaders() {
+					return dispatch.headers ?? {};
+				},
+				method() {
+					return dispatch.method ?? "GET";
+				},
+				postData() {
+					return dispatch.body;
+				},
+				resourceType() {
+					return dispatch.resourceType ?? "document";
+				},
+				url() {
+					return dispatch.url;
+				},
+			};
+			const route = {
+				async abort(errorCode?: string) {
+					state.resourceAborts.push({ errorCode, url: dispatch.url });
+				},
+				async fulfill(options: MockRouteFulfillOptions) {
+					state.resourceFulfillments.push({ ...options, url: dispatch.url });
+				},
+				request() {
+					return request;
+				},
+			};
+
+			await registration.handler(route);
+			return "handled";
 		},
 		async evaluate<T>(fn: string | (() => T)) {
 			if (typeof fn === "function") {
@@ -201,6 +293,11 @@ function createMockPlaywrightPage(): MockPlaywrightPage {
 		},
 		async goto(url) {
 			state.gotoUrls.push(url);
+			await this.dispatchResourceRequest({
+				method: "GET",
+				resourceType: "document",
+				url,
+			});
 		},
 		locator(selector) {
 			return {
@@ -218,6 +315,9 @@ function createMockPlaywrightPage(): MockPlaywrightPage {
 				},
 			};
 		},
+		async route(pattern, handler) {
+			state.routes.push({ handler, pattern });
+		},
 		async screenshot(options) {
 			state.screenshots.push(options ?? {});
 			return Buffer.from("local-shot");
@@ -227,6 +327,13 @@ function createMockPlaywrightPage(): MockPlaywrightPage {
 		},
 		async type(selector, text) {
 			state.types.push({ selector, text });
+		},
+		async unroute(pattern, handler) {
+			state.unrouteCalls.push(pattern);
+			state.routes = state.routes.filter(
+				(registration) =>
+					registration.pattern !== pattern || registration.handler !== handler,
+			);
 		},
 		url() {
 			return state.gotoUrls.at(-1) ?? "about:blank";
@@ -791,6 +898,208 @@ describe("createBrowserClient", () => {
 		expect(browserState.browsers[0]?.pages[0]?.state.closed).toBeTrue();
 	});
 
+	it("fulfills a document-like request under a scoped resource policy", async () => {
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		const result = await page.withResourcePolicy(
+			{
+				routes: [
+					{
+						match: "https://example.test/__sandbox",
+						handle: (request) => ({
+							action: "fulfill",
+							body: `<html><title>${request.resourceType}</title></html>`,
+							headers: { "content-type": "text/html" },
+							status: 200,
+						}),
+					},
+				],
+			},
+			async () => {
+				await page.goto("https://example.test/__sandbox");
+				return "loaded";
+			},
+		);
+
+		const rawPage = browserState.browsers[0]?.pages[0];
+		expect(result).toBe("loaded");
+		expect(rawPage?.state.resourceFulfillments).toEqual([
+			{
+				body: "<html><title>document</title></html>",
+				headers: { "content-type": "text/html" },
+				status: 200,
+				url: "https://example.test/__sandbox",
+			},
+		]);
+		expect(rawPage?.state.resourceAborts).toEqual([]);
+		expect(rawPage?.state.unrouteCalls).toEqual(["**/*"]);
+		expect(rawPage?.state.routes).toEqual([]);
+	});
+
+	it("blocks unhandled resource requests by default", async () => {
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		await page.withResourcePolicy({ routes: [] }, async () => {
+			await page.goto("https://example.test/unhandled");
+		});
+
+		const rawPage = browserState.browsers[0]?.pages[0];
+		expect(rawPage?.state.resourceFulfillments).toEqual([]);
+		expect(rawPage?.state.resourceAborts).toEqual([
+			{
+				errorCode: "blockedbyclient",
+				url: "https://example.test/unhandled",
+			},
+		]);
+		expect(rawPage?.state.routes).toEqual([]);
+	});
+
+	it("cleans up the resource policy after a successful callback", async () => {
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const rawPage = browserState.browsers[0]?.pages[0];
+
+		await page.withResourcePolicy(
+			{
+				routes: [
+					{
+						match: /\/inside$/,
+						handle: () => ({ action: "fulfill", body: "inside" }),
+					},
+				],
+			},
+			async () => {
+				await page.goto("https://example.test/inside");
+			},
+		);
+		await page.goto("https://example.test/outside");
+
+		expect(rawPage?.state.resourceFulfillments).toEqual([
+			{ body: "inside", status: 200, url: "https://example.test/inside" },
+		]);
+		expect(rawPage?.state.unhandledResourceRequests).toEqual([
+			{
+				method: "GET",
+				resourceType: "document",
+				url: "https://example.test/outside",
+			},
+		]);
+		expect(rawPage?.state.resourceAborts).toEqual([]);
+		expect(rawPage?.state.routes).toEqual([]);
+	});
+
+	it("cleans up the resource policy when the callback throws", async () => {
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const rawPage = browserState.browsers[0]?.pages[0];
+
+		await expect(
+			page.withResourcePolicy({ routes: [] }, async () => {
+				await page.goto("https://example.test/fail-closed");
+				throw new Error("resource evaluation failed");
+			}),
+		).rejects.toThrow("resource evaluation failed");
+		await page.goto("https://example.test/after-error");
+
+		expect(rawPage?.state.resourceAborts).toEqual([
+			{
+				errorCode: "blockedbyclient",
+				url: "https://example.test/fail-closed",
+			},
+		]);
+		expect(rawPage?.state.unhandledResourceRequests).toEqual([
+			{
+				method: "GET",
+				resourceType: "document",
+				url: "https://example.test/after-error",
+			},
+		]);
+		expect(rawPage?.state.unrouteCalls).toEqual(["**/*"]);
+		expect(rawPage?.state.routes).toEqual([]);
+	});
+
+	it("blocks non-GET and non-HEAD requests before provider handlers run", async () => {
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const rawPage = browserState.browsers[0]?.pages[0];
+		let handlerCalls = 0;
+
+		await page.withResourcePolicy(
+			{
+				routes: [
+					{
+						match: () => true,
+						handle: () => {
+							handlerCalls += 1;
+							return { action: "fulfill", body: "unexpected" };
+						},
+					},
+				],
+			},
+			async () => {
+				await rawPage?.dispatchResourceRequest({
+					body: "secret=not-exposed",
+					headers: { "content-type": "application/x-www-form-urlencoded" },
+					method: "POST",
+					resourceType: "fetch",
+					url: "https://example.test/post",
+				});
+			},
+		);
+
+		expect(handlerCalls).toBe(0);
+		expect(rawPage?.state.resourceFulfillments).toEqual([]);
+		expect(rawPage?.state.resourceAborts).toEqual([
+			{ errorCode: "blockedbyclient", url: "https://example.test/post" },
+		]);
+	});
+
+	it("passes only safe request metadata to provider handlers", async () => {
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const rawPage = browserState.browsers[0]?.pages[0];
+		let receivedKeys: string[] = [];
+		let postDataExposed = true;
+
+		await page.withResourcePolicy(
+			{
+				routes: [
+					{
+						match: () => true,
+						handle: (request) => {
+							receivedKeys = Object.keys(request).sort();
+							postDataExposed = "postData" in request || "body" in request;
+							return { action: "fulfill", body: "safe" };
+						},
+					},
+				],
+			},
+			async () => {
+				await rawPage?.dispatchResourceRequest({
+					body: "secret=not-exposed",
+					headers: { accept: "text/html" },
+					method: "GET",
+					resourceType: "document",
+					url: "https://example.test/safe",
+				});
+			},
+		);
+
+		expect(receivedKeys).toEqual(["headers", "method", "resourceType", "url"]);
+		expect(postDataExposed).toBeFalse();
+		expect(rawPage?.state.resourceFulfillments).toEqual([
+			{ body: "safe", status: 200, url: "https://example.test/safe" },
+		]);
+	});
+
 	it("requires the managed CDP pool when production mode is explicit", async () => {
 		const { ProviderError } = await import("../errors");
 		const { createBrowserClient } = await import("../runtime/browser");
@@ -992,6 +1301,30 @@ describe("createBrowserClient", () => {
 
 		expect(browserState.launchCalls).toHaveLength(0);
 		expect(cdpState.acquireCalls).toBe(1);
+		expect(cdpState.poolReleaseCalls).toEqual(["pool-page-1"]);
+	});
+
+	it("reports resource policies as unsupported on CDP pool pages", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { ProviderError } = await import("../errors");
+		const { createBrowserClient } = await import("../runtime/browser");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		const policyPromise = page.withResourcePolicy(
+			{ routes: [] },
+			async () => undefined,
+		);
+		await expect(policyPromise).rejects.toBeInstanceOf(ProviderError);
+		await expect(policyPromise).rejects.toMatchObject({
+			code: "BROWSER_RUNTIME_UNSUPPORTED",
+			message:
+				"Browser resource policies require a Playwright-backed browser page",
+		});
+		await page.close();
+		await client.close();
+
 		expect(cdpState.poolReleaseCalls).toEqual(["pool-page-1"]);
 	});
 

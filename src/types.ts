@@ -1244,6 +1244,45 @@ export interface BrowserFrame {
 	locator(selector: string): BrowserLocator;
 }
 
+export type BrowserResourceMethod = "GET" | "HEAD";
+
+export type BrowserResourceRequest = {
+	readonly url: string;
+	readonly method: BrowserResourceMethod;
+	readonly resourceType?: string;
+	readonly headers: Readonly<Record<string, string>>;
+};
+
+export type BrowserResourceBody = Buffer | Uint8Array | ArrayBuffer | string;
+
+export type BrowserResourceDecision =
+	| {
+			readonly action: "fulfill";
+			readonly status?: number;
+			readonly headers?: Readonly<Record<string, string>>;
+			readonly body?: BrowserResourceBody;
+	  }
+	| {
+			readonly action: "block";
+			readonly reason?: string;
+	  };
+
+export type BrowserResourceRoute = {
+	readonly match:
+		| string
+		| RegExp
+		| ((request: BrowserResourceRequest) => boolean);
+	readonly handle: (
+		request: BrowserResourceRequest,
+	) => Promise<BrowserResourceDecision> | BrowserResourceDecision;
+};
+
+export type BrowserResourcePolicy = {
+	readonly defaultAction?: "block";
+	readonly allowedMethods?: readonly BrowserResourceMethod[];
+	readonly routes: readonly BrowserResourceRoute[];
+};
+
 export interface BrowserPage extends BrowserFrame {
 	close(): Promise<void>;
 	fill(selector: string, text: string): Promise<void>;
@@ -1257,6 +1296,10 @@ export interface BrowserPage extends BrowserFrame {
 		options?: { timeout?: number },
 	): Promise<void>;
 	frames(): Promise<BrowserFrame[]>;
+	withResourcePolicy<T>(
+		policy: BrowserResourcePolicy,
+		run: () => Promise<T>,
+	): Promise<T>;
 }
 
 export type BrowserChallengeRequest = {

@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import type { Frame, LaunchOptions, Locator, Page } from "playwright";
+import type { Frame, LaunchOptions, Locator, Page, Request, Route } from "playwright";
 
 import { ProviderError } from "../errors";
 import type {
@@ -11,11 +11,18 @@ import type {
 	BrowserLocator,
 	BrowserOptions,
 	BrowserPage,
+	BrowserResourceBody,
+	BrowserResourceDecision,
+	BrowserResourceMethod,
+	BrowserResourcePolicy,
+	BrowserResourceRequest,
 } from "../types";
 
 const require = createRequire(import.meta.url);
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const SELECTOR_POLL_INTERVAL_MS = 100;
+const RESOURCE_POLICY_ROUTE_PATTERN = "**/*";
+const DEFAULT_RESOURCE_METHODS = ["GET", "HEAD"] as const;
 
 type PlaywrightModule = typeof import("playwright");
 type PlaywrightExtraModule = {
@@ -63,6 +70,62 @@ type CdpFrameTreeNode = {
 };
 
 type BrowserPageContract = BrowserPage;
+
+function toResourceBody(
+	body: BrowserResourceBody | undefined,
+): Buffer | string | undefined {
+	if (body === undefined || typeof body === "string" || Buffer.isBuffer(body)) {
+		return body;
+	}
+
+	return Buffer.from(body);
+}
+
+function isResourceMethod(method: string): method is BrowserResourceMethod {
+	return method === "GET" || method === "HEAD";
+}
+
+async function toResourceRequest(
+	request: Request,
+): Promise<BrowserResourceRequest | null> {
+	const method = request.method().toUpperCase();
+	if (!isResourceMethod(method)) {
+		return null;
+	}
+
+	return {
+		headers: await request.allHeaders(),
+		method,
+		resourceType: request.resourceType(),
+		url: request.url(),
+	};
+}
+
+function matchesResourceRoute(
+	match: BrowserResourcePolicy["routes"][number]["match"],
+	request: BrowserResourceRequest,
+): boolean {
+	if (typeof match === "string") {
+		return request.url === match;
+	}
+	if (match instanceof RegExp) {
+		return match.test(request.url);
+	}
+
+	return match(request);
+}
+
+async function fulfillResourceRoute(
+	route: Route,
+	decision: Extract<BrowserResourceDecision, { readonly action: "fulfill" }>,
+): Promise<void> {
+	const body = toResourceBody(decision.body);
+	await route.fulfill({
+		...(body === undefined ? {} : { body }),
+		...(decision.headers === undefined ? {} : { headers: decision.headers }),
+		status: decision.status ?? 200,
+	});
+}
 
 export type BrowserClientOptions = BrowserOptions & {
 	allowedHosts?: string[];
@@ -397,6 +460,47 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 
 	async close(): Promise<void> {
 		await this.page.close();
+	}
+
+	async withResourcePolicy<T>(
+		policy: BrowserResourcePolicy,
+		run: () => Promise<T>,
+	): Promise<T> {
+		const allowedMethods = new Set(
+			policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS,
+		);
+		const handler = async (route: Route): Promise<void> => {
+			const request = await toResourceRequest(route.request());
+			if (!request || !allowedMethods.has(request.method)) {
+				await route.abort("blockedbyclient");
+				return;
+			}
+
+			for (const resourceRoute of policy.routes) {
+				if (!matchesResourceRoute(resourceRoute.match, request)) {
+					continue;
+				}
+
+				const decision = await resourceRoute.handle(request);
+				switch (decision.action) {
+					case "fulfill":
+						await fulfillResourceRoute(route, decision);
+						return;
+					case "block":
+						await route.abort("blockedbyclient");
+						return;
+				}
+			}
+
+			await route.abort("blockedbyclient");
+		};
+
+		await this.page.route(RESOURCE_POLICY_ROUTE_PATTERN, handler);
+		try {
+			return await run();
+		} finally {
+			await this.page.unroute(RESOURCE_POLICY_ROUTE_PATTERN, handler);
+		}
 	}
 }
 
@@ -1053,6 +1157,19 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		} finally {
 			await this.pageClient.close();
 		}
+	}
+
+	async withResourcePolicy<T>(
+		_policy: BrowserResourcePolicy,
+		_run: () => Promise<T>,
+	): Promise<T> {
+		throw new ProviderError(
+			"Browser resource policies require a Playwright-backed browser page",
+			{
+				code: "BROWSER_RUNTIME_UNSUPPORTED",
+				fix: "Use the local Playwright browser runtime for BrowserPage.withResourcePolicy().",
+			},
+		);
 	}
 
 	private async initialize(): Promise<void> {
