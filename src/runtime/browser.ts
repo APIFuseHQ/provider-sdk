@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import type { Frame, LaunchOptions, Locator, Page } from "playwright";
+import type { Frame, LaunchOptions, Locator, Page, Request, Route } from "playwright";
 
 import { ProviderError } from "../errors";
 import type {
@@ -11,11 +11,18 @@ import type {
 	BrowserLocator,
 	BrowserOptions,
 	BrowserPage,
+	BrowserResourceBody,
+	BrowserResourceDecision,
+	BrowserResourceMethod,
+	BrowserResourcePolicy,
+	BrowserResourceRequest,
 } from "../types";
 
 const require = createRequire(import.meta.url);
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const SELECTOR_POLL_INTERVAL_MS = 100;
+const RESOURCE_POLICY_ROUTE_PATTERN = "**/*";
+const DEFAULT_RESOURCE_METHODS = ["GET", "HEAD"] as const;
 
 type PlaywrightModule = typeof import("playwright");
 type PlaywrightExtraModule = {
@@ -62,7 +69,152 @@ type CdpFrameTreeNode = {
 	};
 };
 
+type CdpFetchFulfillParams = {
+	readonly requestId: string;
+	readonly responseCode: number;
+	readonly responseHeaders?: readonly {
+		readonly name: string;
+		readonly value: string;
+	}[];
+	readonly body?: string;
+};
+
 type BrowserPageContract = BrowserPage;
+
+function toResourceBody(
+	body: BrowserResourceBody | undefined,
+): Buffer | string | undefined {
+	if (body === undefined || typeof body === "string" || Buffer.isBuffer(body)) {
+		return body;
+	}
+
+	if (body instanceof ArrayBuffer) {
+		return Buffer.from(new Uint8Array(body));
+	}
+
+	return Buffer.from(body);
+}
+
+function isResourceMethod(method: string): method is BrowserResourceMethod {
+	return method === "GET" || method === "HEAD";
+}
+
+async function toResourceRequest(
+	request: Request,
+): Promise<BrowserResourceRequest | null> {
+	const method = request.method().toUpperCase();
+	if (!isResourceMethod(method)) {
+		return null;
+	}
+
+	return {
+		headers: await request.allHeaders(),
+		method,
+		resourceType: request.resourceType(),
+		url: request.url(),
+	};
+}
+
+function toCdpResourceRequest(
+	params: unknown,
+): { requestId: string; request: BrowserResourceRequest } | null {
+	if (!isRecord(params)) {
+		return null;
+	}
+
+	const requestId = params.requestId;
+	const rawRequest = params.request;
+	if (typeof requestId !== "string" || !isRecord(rawRequest)) {
+		return null;
+	}
+
+	const url = rawRequest.url;
+	const method = String(rawRequest.method ?? "").toUpperCase();
+	if (typeof url !== "string" || !isResourceMethod(method)) {
+		return null;
+	}
+
+	return {
+		requestId,
+		request: {
+			headers: toCdpResourceHeaders(rawRequest.headers),
+			method,
+			resourceType:
+				typeof params.resourceType === "string" ? params.resourceType : undefined,
+			url,
+		},
+	};
+}
+
+function getCdpPausedRequestId(params: unknown): string | null {
+	if (!isRecord(params) || typeof params.requestId !== "string") {
+		return null;
+	}
+
+	return params.requestId;
+}
+
+function toCdpResourceHeaders(value: unknown): Record<string, string> {
+	if (!isRecord(value)) {
+		return {};
+	}
+
+	const headers: Record<string, string> = {};
+	for (const [name, headerValue] of Object.entries(value)) {
+		if (typeof headerValue === "string") {
+			headers[name] = headerValue;
+		}
+	}
+
+	return headers;
+}
+
+function matchesResourceRoute(
+	match: BrowserResourcePolicy["routes"][number]["match"],
+	request: BrowserResourceRequest,
+): boolean {
+	if (typeof match === "string") {
+		return request.url === match;
+	}
+	if (match instanceof RegExp) {
+		return match.test(request.url);
+	}
+
+	return match(request);
+}
+
+function toCdpFulfillParams(
+	requestId: string,
+	decision: Extract<BrowserResourceDecision, { readonly action: "fulfill" }>,
+): CdpFetchFulfillParams {
+	const body = toResourceBody(decision.body);
+	return {
+		...(body === undefined
+			? {}
+			: { body: Buffer.from(body).toString("base64") }),
+		...(decision.headers === undefined
+			? {}
+			: {
+					responseHeaders: Object.entries(decision.headers).map(
+						([name, value]) => ({ name, value }),
+					),
+				}),
+		requestId,
+		responseCode: decision.status ?? 200,
+	};
+}
+
+async function fulfillResourceRoute(
+	route: Route,
+	decision: Extract<BrowserResourceDecision, { readonly action: "fulfill" }>,
+): Promise<void> {
+	const body = toResourceBody(decision.body);
+	await route.fulfill({
+		...(body === undefined ? {} : { body }),
+		...(decision.headers === undefined ? {} : { headers: decision.headers }),
+		status: decision.status ?? 200,
+	});
+}
 
 export type BrowserClientOptions = BrowserOptions & {
 	allowedHosts?: string[];
@@ -397,6 +549,47 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 
 	async close(): Promise<void> {
 		await this.page.close();
+	}
+
+	async withResourcePolicy<T>(
+		policy: BrowserResourcePolicy,
+		run: () => Promise<T>,
+	): Promise<T> {
+		const allowedMethods = new Set(
+			policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS,
+		);
+		const handler = async (route: Route): Promise<void> => {
+			const request = await toResourceRequest(route.request());
+			if (!request || !allowedMethods.has(request.method)) {
+				await route.abort("blockedbyclient");
+				return;
+			}
+
+			for (const resourceRoute of policy.routes) {
+				if (!matchesResourceRoute(resourceRoute.match, request)) {
+					continue;
+				}
+
+				const decision = await resourceRoute.handle(request);
+				switch (decision.action) {
+					case "fulfill":
+						await fulfillResourceRoute(route, decision);
+						return;
+					case "block":
+						await route.abort("blockedbyclient");
+						return;
+				}
+			}
+
+			await route.abort("blockedbyclient");
+		};
+
+		await this.page.route(RESOURCE_POLICY_ROUTE_PATTERN, handler);
+		try {
+			return await run();
+		} finally {
+			await this.page.unroute(RESOURCE_POLICY_ROUTE_PATTERN, handler);
+		}
 	}
 }
 
@@ -1052,6 +1245,105 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 			});
 		} finally {
 			await this.pageClient.close();
+		}
+	}
+
+	async withResourcePolicy<T>(
+		policy: BrowserResourcePolicy,
+		run: () => Promise<T>,
+	): Promise<T> {
+		const allowedMethods = new Set(
+			policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS,
+		);
+		const handlePausedRequest = (params: unknown): void => {
+			void this.handleResourcePolicyPausedRequest(
+				params,
+				policy,
+				allowedMethods,
+			);
+		};
+
+		const unsubscribe = this.pageClient.on(
+			"Fetch.requestPaused",
+			handlePausedRequest,
+		);
+
+		try {
+			await this.pageClient.send("Fetch.enable", {
+				patterns: [{ requestStage: "Request", urlPattern: "*" }],
+			});
+		} catch (error) {
+			unsubscribe();
+			throw new ProviderError(
+				"CDP browser target does not support BrowserPage.withResourcePolicy()",
+				{
+					cause: error instanceof Error ? error : undefined,
+					code: "BROWSER_RUNTIME_UNSUPPORTED",
+					fix: "Use a Chromium CDP target with the Fetch domain enabled, or use the local Playwright browser runtime.",
+				},
+			);
+		}
+
+		try {
+			return await run();
+		} finally {
+			unsubscribe();
+			await this.pageClient.send("Fetch.disable");
+		}
+	}
+
+	private async handleResourcePolicyPausedRequest(
+		params: unknown,
+		policy: BrowserResourcePolicy,
+		allowedMethods: ReadonlySet<BrowserResourceMethod>,
+	): Promise<void> {
+		const requestId = getCdpPausedRequestId(params);
+		if (requestId === null) {
+			return;
+		}
+
+		try {
+			const parsed = toCdpResourceRequest(params);
+			if (!parsed || !allowedMethods.has(parsed.request.method)) {
+				await this.failCdpResourceRequest(requestId);
+				return;
+			}
+
+			for (const resourceRoute of policy.routes) {
+				if (!matchesResourceRoute(resourceRoute.match, parsed.request)) {
+					continue;
+				}
+
+				const decision = await resourceRoute.handle(parsed.request);
+				switch (decision.action) {
+					case "fulfill":
+						await this.pageClient.send(
+							"Fetch.fulfillRequest",
+							toCdpFulfillParams(parsed.requestId, decision),
+						);
+						return;
+					case "block":
+						await this.failCdpResourceRequest(parsed.requestId);
+						return;
+				}
+			}
+
+			await this.failCdpResourceRequest(parsed.requestId);
+		} catch {
+			await this.failCdpResourceRequest(requestId);
+		}
+	}
+
+	private async failCdpResourceRequest(requestId: string): Promise<void> {
+		try {
+			await this.pageClient.send("Fetch.failRequest", {
+				errorReason: "BlockedByClient",
+				requestId,
+			});
+		} catch (error) {
+			if (error instanceof Error) {
+				return;
+			}
 		}
 	}
 
