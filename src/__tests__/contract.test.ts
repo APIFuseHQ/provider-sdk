@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
 import {
+	centered,
 	defineHealthJourney,
 	defineProvider,
 	defineSmsOtpMatcher,
@@ -30,8 +31,8 @@ function buildProvider(
 		auth: {
 			mode: "oauth2",
 			flow: {
-				start: async () => ({ type: "form", fields: [] }),
-				continue: async () => ({ type: "complete" }),
+				start: async () => ({ kind: "form", turnId: "start" }),
+				continue: async () => ({ kind: "complete", turnId: "complete" }),
 			},
 		},
 		access: { visibility: "early_access" },
@@ -96,6 +97,7 @@ function buildProvider(
 					hints: { cache: "short" },
 					healthCheck: {
 						interval: "5m",
+						schedule: { randomize: centered("1m") },
 						timeoutMs: 2000,
 						degradedThresholdMs: 1000,
 						requiresConnection: true,
@@ -109,7 +111,8 @@ function buildProvider(
 								degradedThresholdMs: 700,
 								enabled: () => true,
 								assertions: ({ data }) => {
-									if (data.score < 1) {
+									const output = data as z.infer<typeof OutputSchema>;
+									if (output.score < 1) {
 										throw new Error("score below baseline");
 									}
 								},
@@ -236,6 +239,7 @@ describe("provider contract extraction", () => {
 		// Then: schedules, cases, and journey coverage remain as data metadata only.
 		expect(operation?.healthCheck).toEqual({
 			interval: "5m",
+			schedule: { randomize: { mode: "centered", maxOffset: "PT1M" } },
 			timeoutMs: 2000,
 			degradedThresholdMs: 1000,
 			requiresConnection: true,
