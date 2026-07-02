@@ -170,6 +170,7 @@ function extractHealthCheck(
 	if (!value) return undefined;
 	return compactObject({
 		interval: value.interval,
+		schedule: toJsonValue(value.schedule),
 		timeoutMs: value.timeoutMs,
 		degradedThresholdMs: value.degradedThresholdMs,
 		requiresConnection: value.requiresConnection,
