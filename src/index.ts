@@ -21,6 +21,8 @@ export {
 	type ProviderContractSnapshot,
 } from "./contract";
 export {
+	centered,
+	delayed,
 	defineHealthJourney,
 	defineOperation,
 	defineProvider,
@@ -152,6 +154,7 @@ export type {
 	HealthJourneyRunContext,
 	HealthJourneyRunResult,
 	HealthJourneySchedule,
+	HealthScheduleRandomization,
 	HealthJourneySmsContext,
 	HealthJourneyStep,
 	HttpClient,

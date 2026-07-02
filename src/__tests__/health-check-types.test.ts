@@ -1,9 +1,41 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { defineOperation, defineProvider } from "../define";
+import { centered, defineOperation, defineProvider } from "../define";
 import { ValidationError } from "../errors";
 import type { HealthCheckAssertionContext, HealthCheckCase } from "../types";
+
+function providerWithHealthCheckInterval(interval: string) {
+	return defineProvider({
+		id: "test-provider",
+		version: "1.0.0",
+		runtime: "standard",
+		meta: {
+			displayName: "T",
+			descriptionKey: "meta.description",
+			category: "demo",
+		},
+		operations: {
+			ping: {
+				input: z.object({}),
+				output: z.object({ ok: z.boolean() }),
+				async handler() {
+					return { ok: true };
+				},
+				healthCheck: {
+					interval: interval as never,
+					cases: [
+						{
+							name: "x",
+							input: {},
+							assertions: () => {},
+						},
+					],
+				},
+			},
+		},
+	});
+}
 
 describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("flows TOutput from operation.output schema into ctx.data", () => {
@@ -40,7 +72,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "T", category: "demo" },
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
 				operations: {
 					ping: {
 						input: z.object({}),
@@ -71,7 +107,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "T", category: "demo" },
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
 				operations: {
 					ping: {
 						input: z.object({}),
@@ -94,7 +134,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 			id: "test-provider",
 			version: "1.0.0",
 			runtime: "standard",
-			meta: { displayName: "T", category: "demo" },
+			meta: {
+				displayName: "T",
+				descriptionKey: "meta.description",
+				category: "demo",
+			},
 			operations: {
 				ping: {
 					input: z.object({}),
@@ -127,12 +171,203 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 		).toBe("8h");
 	});
 
+	it("characterizes positive ms-style healthCheck interval validation", () => {
+		const cases: Array<[string, boolean]> = [
+			["1", true],
+			[" 1 ", true],
+			["1ms", true],
+			["1 msec", true],
+			["1day", true],
+			["1 day", true],
+			["0.5h", true],
+			[".5h", true],
+			["+1h", true],
+			["1 hr", true],
+			["1hrs", true],
+			["1 secs", true],
+			["1y", true],
+			["1w", true],
+			["0", false],
+			["-1h", false],
+			["1 month", false],
+			["1mo", false],
+			["Infinity", false],
+			["1e3ms", false],
+			["1.2.3s", false],
+			["", false],
+			["   ", false],
+		];
+
+		for (const [interval, accepted] of cases) {
+			if (accepted) {
+				expect(
+					providerWithHealthCheckInterval(interval).operations.ping.healthCheck
+						?.interval,
+				).toBe(interval);
+			} else {
+				expect(() => providerWithHealthCheckInterval(interval)).toThrow(
+					/positive ms-style duration string/,
+				);
+			}
+		}
+	});
+
+	it("accepts operation healthCheck schedule randomization", () => {
+		const provider = defineProvider({
+			id: "test-provider",
+			version: "1.0.0",
+			runtime: "standard",
+			meta: {
+				displayName: "T",
+				descriptionKey: "meta.description",
+				category: "demo",
+			},
+			operations: {
+				ping: {
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					async handler() {
+						return { ok: true };
+					},
+					healthCheck: {
+						interval: "24h",
+						schedule: { randomize: centered("6h") },
+						cases: [
+							{
+								name: "x",
+								input: {},
+								assertions: () => {},
+							},
+						],
+					},
+				},
+			},
+		});
+
+		expect(provider.operations.ping.healthCheck?.schedule).toEqual({
+			randomize: { mode: "centered", maxOffset: "PT6H" },
+		});
+	});
+
+	it("uses characterized ms-style intervals when validating randomization bounds", () => {
+		const provider = defineProvider({
+			id: "test-provider",
+			version: "1.0.0",
+			runtime: "standard",
+			meta: {
+				displayName: "T",
+				descriptionKey: "meta.description",
+				category: "demo",
+			},
+			operations: {
+				ping: {
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					async handler() {
+						return { ok: true };
+					},
+					healthCheck: {
+						interval: "+12h",
+						schedule: { randomize: centered("6h") },
+						cases: [
+							{
+								name: "x",
+								input: {},
+								assertions: () => {},
+							},
+						],
+					},
+				},
+			},
+		});
+
+		expect(provider.operations.ping.healthCheck?.schedule).toEqual({
+			randomize: { mode: "centered", maxOffset: "PT6H" },
+		});
+	});
+
+	it("rejects operation healthCheck schedule jitter", () => {
+		expect(() =>
+			defineProvider({
+				id: "test-provider",
+				version: "1.0.0",
+				runtime: "standard",
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
+				operations: {
+					ping: {
+						input: z.object({}),
+						output: z.object({ ok: z.boolean() }),
+						async handler() {
+							return { ok: true };
+						},
+						healthCheck: {
+							interval: "24h",
+							schedule: { jitter: "PT20M" },
+							cases: [
+								{
+									name: "x",
+									input: {},
+									assertions: () => {},
+								},
+							],
+						} as never,
+					},
+				},
+			}),
+		).toThrow(
+			/schedule\.jitter is not supported.*Use schedule\.randomize instead/,
+		);
+	});
+
+	it("rejects operation healthCheck randomization duration as long as interval", () => {
+		expect(() =>
+			defineProvider({
+				id: "test-provider",
+				version: "1.0.0",
+				runtime: "standard",
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
+				operations: {
+					ping: {
+						input: z.object({}),
+						output: z.object({ ok: z.boolean() }),
+						async handler() {
+							return { ok: true };
+						},
+						healthCheck: {
+							interval: "6h",
+							schedule: { randomize: centered("6h") },
+							cases: [
+								{
+									name: "x",
+									input: {},
+									assertions: () => {},
+								},
+							],
+						},
+					},
+				},
+			}),
+		).toThrow(/duration must be shorter than schedule interval/);
+	});
+
 	it("accepts provider, suite, case, and runtime override policy fields", () => {
 		const provider = defineProvider({
 			id: "test-provider",
 			version: "1.0.0",
 			runtime: "standard",
-			meta: { displayName: "T", category: "demo" },
+			meta: {
+				displayName: "T",
+				descriptionKey: "meta.description",
+				category: "demo",
+			},
 			operations: {
 				ping: {
 					input: z.object({}),
@@ -185,7 +420,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "T", category: "demo" },
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
 				operations: {
 					ping: {
 						input: z.object({}),
@@ -216,7 +455,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "T", category: "demo" },
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
 				operations: {
 					ping: {
 						input: z.object({}),
@@ -247,7 +490,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "T", category: "demo" },
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
 				operations: {
 					ping: {
 						input: z.object({}),
@@ -277,7 +524,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "T", category: "demo" },
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
 				operations: {
 					ping: {
 						input: z.object({}),
@@ -308,7 +559,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "T", category: "demo" },
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
 				operations: {
 					ping: {
 						input: z.object({}),
@@ -328,7 +583,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 			id: "test-provider",
 			version: "1.0.0",
 			runtime: "standard",
-			meta: { displayName: "T", category: "demo" },
+			meta: {
+				displayName: "T",
+				descriptionKey: "meta.description",
+				category: "demo",
+			},
 			operations: {
 				"wipe-all": {
 					input: z.object({}),
@@ -353,7 +612,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 			id: "test-provider",
 			version: "1.0.0",
 			runtime: "standard",
-			meta: { displayName: "T", category: "demo" },
+			meta: {
+				displayName: "T",
+				descriptionKey: "meta.description",
+				category: "demo",
+			},
 			operations: {
 				ping: {
 					input: z.object({}),
@@ -387,7 +650,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "T", category: "demo" },
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
 				operations: {
 					ping: {
 						input: z.object({}),
@@ -409,7 +676,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "T", category: "demo" },
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
 				operations: {
 					ping: {
 						input: z.object({}),
@@ -435,7 +706,11 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				id: "test-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "T", category: "demo" },
+				meta: {
+					displayName: "T",
+					descriptionKey: "meta.description",
+					category: "demo",
+				},
 				operations: {
 					ping: {
 						input: z.object({}),

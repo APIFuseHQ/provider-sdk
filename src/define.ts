@@ -1,3 +1,5 @@
+import ms from "ms";
+
 import { ProviderError, ValidationError } from "./errors";
 import { safeParseSchemaSync } from "./schema";
 import type {
@@ -10,6 +12,7 @@ import type {
 	HealthCheckUnsupported,
 	HealthJourneyDefinition,
 	HealthJourneySchedule,
+	HealthScheduleRandomization,
 	InferSchemaOutput,
 	OperationDefinition,
 	OperationHandlerResult,
@@ -118,49 +121,25 @@ const VALID_OPERATION_TRANSPORT_KINDS = [
 const SSE_EVENT_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const WEBSOCKET_SUBPROTOCOL_REGEX = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
-const MS_DURATION_UNITS = new Set([
-	"years",
-	"year",
-	"yrs",
-	"yr",
-	"y",
-	"weeks",
-	"week",
-	"w",
-	"days",
-	"day",
-	"d",
-	"hours",
-	"hour",
-	"hrs",
-	"hr",
-	"h",
-	"minutes",
-	"minute",
-	"mins",
-	"min",
-	"m",
-	"seconds",
-	"second",
-	"secs",
-	"sec",
-	"s",
-	"milliseconds",
-	"millisecond",
-	"msecs",
-	"msec",
-	"ms",
-]);
 const MS_DURATION_PATTERN = /^([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*([a-zA-Z]+)?$/;
 
 function isPositiveMsDurationString(value: unknown): value is string {
 	if (typeof value !== "string") return false;
-	const match = value.trim().match(MS_DURATION_PATTERN);
-	if (!match) return false;
-	const amount = Number(match[1]);
-	if (!Number.isFinite(amount) || amount <= 0) return false;
-	const unit = match[2]?.toLowerCase();
-	return unit === undefined || MS_DURATION_UNITS.has(unit);
+	return parsePositiveMsDuration(value) !== undefined;
+}
+
+function msDurationMs(value: string): number {
+	return parsePositiveMsDuration(value) ?? 0;
+}
+
+function parsePositiveMsDuration(value: string): number | undefined {
+	const trimmed = value.trim();
+	if (!MS_DURATION_PATTERN.test(trimmed)) return undefined;
+	const parsed = ms(
+		(trimmed.startsWith("+") ? trimmed.slice(1) : trimmed) as ms.StringValue,
+	);
+	if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
+	return parsed;
 }
 
 type ProviderOperation = OperationDefinition<SchemaLike, SchemaLike>;
@@ -1124,6 +1103,7 @@ function validateOperationTransports(
 
 const HEALTH_CHECK_SUITE_FIELDS = new Set([
 	"interval",
+	"schedule",
 	"timeoutMs",
 	"degradedThresholdMs",
 	"cases",
@@ -1471,6 +1451,35 @@ function validateHealthCheckSuite(
 				fix: `Set ${fieldPath}.interval to a positive ms-style duration string.`,
 			},
 		);
+	if (s.schedule !== undefined) {
+		if (
+			!s.schedule ||
+			typeof s.schedule !== "object" ||
+			Array.isArray(s.schedule)
+		) {
+			throw new ValidationError(
+				`Provider "${providerId}" ${fieldPath}.schedule must be an object.`,
+			);
+		}
+		if (Reflect.get(s.schedule, "jitter") !== undefined) {
+			throw new ValidationError(
+				`Provider "${providerId}" ${fieldPath}.schedule.jitter is not supported for operation healthCheck schedules. Use schedule.randomize instead.`,
+			);
+		}
+		rejectUnknownFields(
+			s.schedule,
+			new Set(["randomize"]),
+			`${fieldPath}.schedule`,
+		);
+		const randomize = Reflect.get(s.schedule, "randomize");
+		if (randomize !== undefined) {
+			validateScheduleRandomization(
+				randomize,
+				`Provider "${providerId}" ${fieldPath}.schedule.randomize`,
+				msDurationMs(s.interval),
+			);
+		}
+	}
 	if (s.timeoutMs !== undefined) {
 		assertBoundedIntegerMs(
 			s.timeoutMs,
@@ -1569,7 +1578,12 @@ const HEALTH_JOURNEY_FIELDS = new Set([
 	"steps",
 	"run",
 ]);
-const HEALTH_JOURNEY_SCHEDULE_FIELDS = new Set(["kind", "interval", "jitter"]);
+const HEALTH_JOURNEY_SCHEDULE_FIELDS = new Set([
+	"kind",
+	"interval",
+	"jitter",
+	"randomize",
+]);
 const HEALTH_JOURNEY_STEP_FIELDS = new Set([
 	"id",
 	"description",
@@ -1742,6 +1756,54 @@ function isoDurationMs(value: string): number {
 	);
 }
 
+function scheduleRandomizationMs(
+	randomize: unknown,
+	fieldPath: string,
+): number {
+	const mode = Reflect.get(randomize as object, "mode");
+	switch (mode) {
+		case "centered": {
+			const maxOffset = Reflect.get(randomize as object, "maxOffset");
+			assertIsoDuration(maxOffset, `${fieldPath}.maxOffset`);
+			return isoDurationMs(maxOffset);
+		}
+		case "delayed": {
+			const maxDelay = Reflect.get(randomize as object, "maxDelay");
+			assertIsoDuration(maxDelay, `${fieldPath}.maxDelay`);
+			return isoDurationMs(maxDelay);
+		}
+		default:
+			throw new ValidationError(
+				`${fieldPath}.mode must be "centered" or "delayed".`,
+			);
+	}
+}
+
+function validateScheduleRandomization(
+	randomize: unknown,
+	fieldPath: string,
+	intervalMs: number,
+): void {
+	if (!randomize || typeof randomize !== "object" || Array.isArray(randomize)) {
+		throw new ValidationError(`${fieldPath} must be an object.`);
+	}
+	const mode = Reflect.get(randomize, "mode");
+	const allowedFields =
+		mode === "centered"
+			? new Set(["mode", "maxOffset"])
+			: new Set(["mode", "maxDelay"]);
+	rejectUnknownFields(randomize, allowedFields, fieldPath);
+	const offsetMs = scheduleRandomizationMs(randomize, fieldPath);
+	if (offsetMs <= 0) {
+		throw new ValidationError(`${fieldPath} duration must be positive.`);
+	}
+	if (offsetMs >= intervalMs) {
+		throw new ValidationError(
+			`${fieldPath} duration must be shorter than schedule interval.`,
+		);
+	}
+}
+
 function assertIsoCountry(
 	value: unknown,
 	fieldPath: string,
@@ -1757,13 +1819,21 @@ function normalizeIntervalDuration(input: string): string {
 	const trimmed = input.trim();
 	const shorthand = /^(\d+)(s|m|h|d)$/i.exec(trimmed);
 	if (shorthand) {
-		const amount = Number(shorthand[1]);
+		const durationMs = msDurationMs(trimmed);
+		const unit = shorthand[2]?.toLowerCase();
+		const amount =
+			unit === "s"
+				? durationMs / 1_000
+				: unit === "m"
+					? durationMs / 60_000
+					: unit === "h"
+						? durationMs / 3_600_000
+						: durationMs / 86_400_000;
 		if (!Number.isInteger(amount) || amount <= 0) {
 			throw new ValidationError(
 				`Journey schedule interval must be a positive duration.`,
 			);
 		}
-		const unit = shorthand[2]?.toLowerCase();
 		if (unit === "s") return `PT${amount}S`;
 		if (unit === "m") return `PT${amount}M`;
 		if (unit === "h") return `PT${amount}H`;
@@ -1775,16 +1845,32 @@ function normalizeIntervalDuration(input: string): string {
 
 export function every(
 	interval: string,
-	options: { jitter?: string } = {},
+	options: { jitter?: string; randomize?: HealthScheduleRandomization } = {},
 ): HealthJourneySchedule {
+	if (options.jitter !== undefined && options.randomize !== undefined) {
+		throw new ValidationError(
+			`Schedule cannot define both jitter and randomize. Use randomize instead.`,
+		);
+	}
 	const schedule: HealthJourneySchedule = {
 		kind: "interval",
 		interval: normalizeIntervalDuration(interval),
 	};
+	if (options.randomize !== undefined) {
+		schedule.randomize = options.randomize;
+	}
 	if (options.jitter !== undefined) {
 		schedule.jitter = normalizeIntervalDuration(options.jitter);
 	}
 	return schedule;
+}
+
+export function centered(maxOffset: string): HealthScheduleRandomization {
+	return { mode: "centered", maxOffset: normalizeIntervalDuration(maxOffset) };
+}
+
+export function delayed(maxDelay: string): HealthScheduleRandomization {
+	return { mode: "delayed", maxDelay: normalizeIntervalDuration(maxDelay) };
 }
 
 function countCapturingGroups(pattern: RegExp): number {
@@ -2001,15 +2087,29 @@ function validateHealthJourneySchedule(
 		throw new ValidationError(
 			`Provider "${providerId}" ${fieldPath}.kind must be "interval".`,
 		);
-	assertIsoDuration(
-		Reflect.get(schedule, "interval"),
-		`Provider "${providerId}" ${fieldPath}.interval`,
-	);
+	const interval = Reflect.get(schedule, "interval");
+	assertIsoDuration(interval, `Provider "${providerId}" ${fieldPath}.interval`);
+	const randomize = Reflect.get(schedule, "randomize");
+	if (
+		Reflect.get(schedule, "jitter") !== undefined &&
+		randomize !== undefined
+	) {
+		throw new ValidationError(
+			`Provider "${providerId}" ${fieldPath} cannot define both jitter and randomize.`,
+		);
+	}
 	if (Reflect.get(schedule, "jitter") !== undefined)
 		assertIsoDuration(
 			Reflect.get(schedule, "jitter"),
 			`Provider "${providerId}" ${fieldPath}.jitter`,
 		);
+	if (randomize !== undefined) {
+		validateScheduleRandomization(
+			randomize,
+			`Provider "${providerId}" ${fieldPath}.randomize`,
+			isoDurationMs(interval),
+		);
+	}
 }
 
 function validateHealthJourneys(
@@ -2252,7 +2352,9 @@ export function defineProvider<
 	if (Object.keys(config.operations).length === 0)
 		throw new ProviderError(
 			`Provider "${config.id}" must define at least one operation`,
-			{ fix: "Add at least one operation to the operations object" },
+			{
+				fix: "Add at least one operation to the operations object",
+			},
 		);
 	validateOperationIds(config.id, config.operations);
 	validateOperationAnnotations(config.id, config.operations);
