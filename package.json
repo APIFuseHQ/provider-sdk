@@ -1,5 +1,5 @@
 {
-	"version": "2.1.0-beta.13",
+	"version": "2.1.0-beta.14",
 	"name": "@apifuse/provider-sdk",
 	"private": false,
 	"type": "module",
