@@ -27,6 +27,8 @@ export {
 	parseProviderChoiceToken,
 } from "./choice-token";
 export {
+	centered,
+	delayed,
 	defineHealthJourney,
 	defineOperation,
 	defineProvider,
@@ -85,6 +87,7 @@ export type {
 	HealthJourneyManualTriggerPolicy,
 	HealthJourneyRunContext,
 	HealthJourneyRunResult,
+	HealthScheduleRandomization,
 	HttpRetryOptions,
 	HttpRetrySummary,
 	InferSchemaOutput,

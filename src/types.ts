@@ -331,8 +331,19 @@ export interface HealthJourneySchedule {
 	kind: "interval";
 	/** ISO 8601 duration, for example PT8H. */
 	interval: Iso8601Duration;
+	randomize?: HealthScheduleRandomization;
 	jitter?: Iso8601Duration;
 }
+
+export type HealthScheduleRandomization =
+	| {
+			mode: "centered";
+			maxOffset: Iso8601Duration;
+	  }
+	| {
+			mode: "delayed";
+			maxDelay: Iso8601Duration;
+	  };
 
 export interface HealthJourneyStep {
 	id: string;
@@ -612,6 +623,9 @@ export interface HealthCheckCase<TInput = unknown, TOutput = unknown> {
 export interface HealthCheckSuite<TInput = unknown, TOutput = unknown> {
 	/** Polling interval for the suite. All cases share this cadence. */
 	interval: ProbeInterval;
+	schedule?: {
+		randomize?: HealthScheduleRandomization;
+	};
 	/** Per-case timeout in milliseconds. Default: 30000. */
 	timeoutMs?: number;
 	/** Default degradation threshold for cases in this suite. Default: runtime threshold. */

@@ -1,9 +1,11 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import {
+	centered,
 	defineHealthJourney,
 	defineProvider,
 	defineSmsOtpMatcher,
+	delayed,
 	every,
 } from "./define";
 
@@ -25,6 +27,117 @@ describe("health journey authoring", () => {
 			interval: "PT8H",
 			jitter: "PT20M",
 		});
+	});
+
+	it("serializes centered schedule randomization with normalized duration", () => {
+		expect(every("24h", { randomize: centered("6h") })).toEqual({
+			kind: "interval",
+			interval: "PT24H",
+			randomize: { mode: "centered", maxOffset: "PT6H" },
+		});
+	});
+
+	it("serializes delayed schedule randomization with normalized duration", () => {
+		expect(delayed("45m")).toEqual({
+			mode: "delayed",
+			maxDelay: "PT45M",
+		});
+	});
+
+	it("rejects schedules that define both jitter and randomize", () => {
+		expect(() =>
+			every("24h", { jitter: "PT20M", randomize: centered("6h") }),
+		).toThrow(/Schedule cannot define both jitter and randomize/);
+	});
+
+	it("rejects malformed health journey randomization objects", () => {
+		const baseProvider = {
+			id: "bad-randomize-provider",
+			version: "1.0.0",
+			runtime: "shared" as const,
+			meta: {
+				displayName: "Bad Randomize",
+				descriptionKey: "meta.description",
+				category: "test",
+			},
+			operations: {
+				ping: dummyOperation(),
+			},
+		};
+
+		expect(() =>
+			defineProvider({
+				...baseProvider,
+				healthJourneys: [
+					defineHealthJourney({
+						id: "bad-extra",
+						schedule: {
+							...every("24h", { randomize: centered("6h") }),
+							randomize: {
+								mode: "centered",
+								maxOffset: "PT6H",
+								extra: true,
+							},
+						} as never,
+						coversOperations: ["ping"],
+						steps: [{ id: "ping", operationId: "ping", kind: "operation" }],
+					}),
+				],
+			}),
+		).toThrow(/Unknown field "extra"/);
+
+		expect(() =>
+			defineProvider({
+				...baseProvider,
+				healthJourneys: [
+					defineHealthJourney({
+						id: "bad-mode",
+						schedule: {
+							...every("24h"),
+							randomize: { mode: "spread", maxDelay: "PT6H" },
+						} as never,
+						coversOperations: ["ping"],
+						steps: [{ id: "ping", operationId: "ping", kind: "operation" }],
+					}),
+				],
+			}),
+		).toThrow(/mode must be "centered" or "delayed"/);
+
+		expect(() =>
+			defineProvider({
+				...baseProvider,
+				healthJourneys: [
+					defineHealthJourney({
+						id: "bad-duration",
+						schedule: {
+							...every("24h"),
+							randomize: { mode: "delayed", maxDelay: "PT0S" },
+						} as never,
+						coversOperations: ["ping"],
+						steps: [{ id: "ping", operationId: "ping", kind: "operation" }],
+					}),
+				],
+			}),
+		).toThrow(/duration must be positive/);
+
+		expect(() =>
+			defineProvider({
+				...baseProvider,
+				healthJourneys: [
+					defineHealthJourney({
+						id: "bad-conflict",
+						schedule: {
+							kind: "interval",
+							interval: "PT24H",
+							jitter: "PT20M",
+							randomize: { mode: "centered", maxOffset: "PT6H" },
+						},
+						coversOperations: ["ping"],
+						steps: [{ id: "ping", operationId: "ping", kind: "operation" }],
+					}),
+				],
+			}),
+		).toThrow(/cannot define both jitter and randomize/);
 	});
 
 	it("extracts Yogiyo OTP samples with national service code origins", () => {
