@@ -102,6 +102,7 @@ describe("provider create planning", () => {
 			),
 		).toBeTrue();
 		expect(packageJson?.content).not.toContain("record:sample");
+		expect(packageJson?.content).not.toContain(["perf", "sample"].join(":"));
 		expect(packageJson?.content).toContain('"typescript": "');
 		expect(packageJson?.content).toContain('"@types/bun": "');
 		expect(plan.validationCommands).toContain("bun run submit-check");
@@ -229,7 +230,7 @@ describe("provider create planning", () => {
 
 	it("keeps top-level CLI examples aligned with generated starter limits", () => {
 		expect(COMMAND_MANIFEST.record.examples.join("\n")).not.toContain(
-			"apifuse record . --operation ping",
+			["apifuse record . --operation", "ping"].join(" "),
 		);
 		expect(COMMAND_MANIFEST.perf.usage).toContain("--params");
 	});
