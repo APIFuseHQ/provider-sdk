@@ -1102,6 +1102,8 @@ export interface HttpResponse<T = unknown> {
 	data: T;
 	json<U = T>(): Promise<U>;
 	text(): Promise<string>;
+	arrayBuffer(): Promise<ArrayBuffer>;
+	bytes(): Promise<Uint8Array>;
 }
 
 export interface HttpStreamResponse {

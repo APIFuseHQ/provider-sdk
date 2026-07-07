@@ -46,13 +46,16 @@ function restoreEnv() {
 }
 
 function minimalHttp(): HttpClient {
+	const bodyBytes = new Uint8Array();
 	const response = async () => ({
 		status: 200,
 		ok: true,
 		headers: {},
 		data: {},
-		json: async () => ({}),
+		json: async <T = unknown>() => ({}) as T,
 		text: async () => "",
+		arrayBuffer: async () => bodyBytes.buffer.slice(0),
+		bytes: async () => bodyBytes.slice(0),
 	});
 	return {
 		request: response,

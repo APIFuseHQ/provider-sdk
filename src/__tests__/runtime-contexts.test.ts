@@ -61,47 +61,23 @@ describe("runtime contexts", () => {
 	});
 
 	it("createFlowContext wires runtime dependencies and scratchpad", () => {
+		const bodyBytes = new Uint8Array();
+		const response = async () => ({
+			status: 200,
+			ok: true,
+			headers: {},
+			data: {},
+			json: async <T = unknown>() => ({}) as T,
+			text: async () => "",
+			arrayBuffer: async () => bodyBytes.buffer.slice(0),
+			bytes: async () => bodyBytes.slice(0),
+		});
 		const http = {
-			request: async () => ({
-				status: 200,
-				ok: true,
-				headers: {},
-				data: {},
-				json: async () => ({}),
-				text: async () => "",
-			}),
-			get: async () => ({
-				status: 200,
-				ok: true,
-				headers: {},
-				data: {},
-				json: async () => ({}),
-				text: async () => "",
-			}),
-			post: async () => ({
-				status: 200,
-				ok: true,
-				headers: {},
-				data: {},
-				json: async () => ({}),
-				text: async () => "",
-			}),
-			put: async () => ({
-				status: 200,
-				ok: true,
-				headers: {},
-				data: {},
-				json: async () => ({}),
-				text: async () => "",
-			}),
-			delete: async () => ({
-				status: 200,
-				ok: true,
-				headers: {},
-				data: {},
-				json: async () => ({}),
-				text: async () => "",
-			}),
+			request: response,
+			get: response,
+			post: response,
+			put: response,
+			delete: response,
 			stream: async () => {
 				throw new Error("stream unsupported in runtime context test client");
 			},
