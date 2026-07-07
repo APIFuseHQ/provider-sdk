@@ -582,7 +582,8 @@ function toHttpTransportError(error: unknown): TransportError {
 
 async function toNativeHttpResponse(response: Response): Promise<HttpResponse> {
 	const headers = Object.fromEntries(response.headers.entries());
-	const rawText = await response.text();
+	const bodyBytes = new Uint8Array(await response.arrayBuffer());
+	const rawText = new TextDecoder().decode(bodyBytes);
 	const data = parseHttpData(rawText, headers);
 
 	return {
@@ -602,6 +603,12 @@ async function toNativeHttpResponse(response: Response): Promise<HttpResponse> {
 		ok: response.status >= 200 && response.status < 300,
 		status: response.status,
 		text: async () => rawText,
+		arrayBuffer: async () =>
+			bodyBytes.buffer.slice(
+				bodyBytes.byteOffset,
+				bodyBytes.byteOffset + bodyBytes.byteLength,
+			),
+		bytes: async () => bodyBytes.slice(0),
 	};
 }
 

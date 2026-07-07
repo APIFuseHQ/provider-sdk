@@ -10,7 +10,7 @@ import {
 
 type MockImpitResponse = {
 	status: number;
-	body: string;
+	body: string | Uint8Array;
 	headers?: Record<string, string | string[]>;
 };
 
@@ -41,7 +41,11 @@ describe("createHttpClient", () => {
 				if (error) throw error;
 				const response = mockNativeFetchState.queuedResponses.shift();
 				if (!response) throw new Error("No queued native response");
-				const nativeResponse = new Response(response.body, {
+				const body =
+					typeof response.body === "string"
+						? response.body
+						: new Uint8Array(response.body).slice(0).buffer;
+				const nativeResponse = new Response(body, {
 					headers: response.headers as HeadersInit,
 					status: response.status,
 				});
@@ -79,6 +83,86 @@ describe("createHttpClient", () => {
 			args: { q: "1" },
 		});
 		expect(await result.text()).toBe(JSON.stringify({ args: { q: "1" } }));
+		expect(Array.from(await result.bytes())).toEqual(
+			Array.from(new TextEncoder().encode(JSON.stringify({ args: { q: "1" } }))),
+		);
+		expect(Array.from(new Uint8Array(await result.arrayBuffer()))).toEqual(
+			Array.from(new TextEncoder().encode(JSON.stringify({ args: { q: "1" } }))),
+		);
+	});
+
+	it("preserves raw non-UTF-8 bytes while keeping lossy text compatibility", async () => {
+		const originalBytes = new Uint8Array([0x52, 0x49, 0xff, 0x00, 0x80, 0x45]);
+		const expectedText = new TextDecoder().decode(originalBytes);
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: originalBytes,
+			headers: { "content-type": "text/plain" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient();
+		const result = await http.get("https://example.com/binary");
+
+		expect(Array.from(await result.bytes())).toEqual(Array.from(originalBytes));
+		expect(Array.from(new Uint8Array(await result.arrayBuffer()))).toEqual(
+			Array.from(originalBytes),
+		);
+		expect(await result.text()).toBe(expectedText);
+		expect(result.data).toBe(expectedText);
+	});
+
+	it("lets callers decode EUC-KR bodies from preserved response bytes", async () => {
+		const originalBytes = new Uint8Array([0xbe, 0xc8, 0xb3, 0xe7]);
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: originalBytes,
+			headers: { "content-type": "text/html" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient();
+		const result = await http.get("https://example.com/euc-kr");
+
+		expect(new TextDecoder("euc-kr").decode(await result.bytes())).toBe("안녕");
+	});
+
+	it("returns defensive copies from byte-native response methods", async () => {
+		const originalBytes = new Uint8Array([0x52, 0x49, 0xff, 0x00, 0x80, 0x45]);
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: originalBytes,
+			headers: { "content-type": "application/octet-stream" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient();
+		const result = await http.get("https://example.com/defensive-copy");
+
+		const bytes = await result.bytes();
+		bytes[0] = 0x00;
+		const arrayBufferBytes = new Uint8Array(await result.arrayBuffer());
+		arrayBufferBytes[1] = 0x00;
+
+		expect(Array.from(await result.bytes())).toEqual(Array.from(originalBytes));
+		expect(Array.from(new Uint8Array(await result.arrayBuffer()))).toEqual(
+			Array.from(originalBytes),
+		);
+	});
+
+	it("keeps empty JSON response compatibility", async () => {
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: "",
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient();
+		const result = await http.get("https://example.com/empty-json");
+
+		expect(result.data).toBeNull();
+		expect(await result.json()).toBeNull();
 	});
 
 	it("normalizes rich params and preserves existing query strings", async () => {

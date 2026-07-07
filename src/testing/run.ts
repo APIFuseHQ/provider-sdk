@@ -128,13 +128,21 @@ function inferFixtureDir(providerId: string): string {
 }
 
 function jsonResponse(data: unknown): HttpResponse {
+	const body = JSON.stringify(data);
+	const bodyBytes = new TextEncoder().encode(body);
 	return {
 		status: 200,
 		ok: true,
 		headers: {},
 		data,
 		json: async <_T = unknown>() => JSON.parse(JSON.stringify(data)),
-		text: async () => JSON.stringify(data),
+		text: async () => body,
+		arrayBuffer: async () =>
+			bodyBytes.buffer.slice(
+				bodyBytes.byteOffset,
+				bodyBytes.byteOffset + bodyBytes.byteLength,
+			),
+		bytes: async () => bodyBytes.slice(0),
 	};
 }
 

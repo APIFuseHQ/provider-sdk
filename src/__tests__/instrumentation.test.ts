@@ -13,6 +13,27 @@ import type {
 	StealthClient,
 } from "../types";
 
+function createMockHttpResponse(requestId: string, duration: number) {
+	const data = { ok: true };
+	const body = JSON.stringify(data);
+	const bodyBytes = new TextEncoder().encode(body);
+	return {
+		status: 200,
+		ok: true,
+		headers: { "content-type": "application/json" },
+		data,
+		meta: { requestId, duration },
+		json: async <T>() => data as T,
+		text: async () => body,
+		arrayBuffer: async () =>
+			bodyBytes.buffer.slice(
+				bodyBytes.byteOffset,
+				bodyBytes.byteOffset + bodyBytes.byteLength,
+			),
+		bytes: async () => bodyBytes.slice(0),
+	};
+}
+
 function createMockContext(): ProviderContext {
 	const mockPage = {
 		pageId: "page-1",
@@ -55,55 +76,15 @@ function createMockContext(): ProviderContext {
 		})),
 	};
 
-	return {
-		env: createEnvContext(),
-		credential: createCredentialContext(),
-		http: {
-			request: mock(async () => ({
-				status: 200,
-				ok: true,
-				headers: { "content-type": "application/json" },
-				data: { ok: true },
-				meta: { requestId: "req-0", duration: 10 },
-				json: async <T>() => ({ ok: true }) as T,
-				text: async () => JSON.stringify({ ok: true }),
-			})),
-			get: mock(async () => ({
-				status: 200,
-				ok: true,
-				headers: { "content-type": "application/json" },
-				data: { ok: true },
-				meta: { requestId: "req-1", duration: 15 },
-				json: async <T>() => ({ ok: true }) as T,
-				text: async () => JSON.stringify({ ok: true }),
-			})),
-			post: mock(async () => ({
-				status: 200,
-				ok: true,
-				headers: { "content-type": "application/json" },
-				data: { ok: true },
-				meta: { requestId: "req-2", duration: 20 },
-				json: async <T>() => ({ ok: true }) as T,
-				text: async () => JSON.stringify({ ok: true }),
-			})),
-			put: mock(async () => ({
-				status: 200,
-				ok: true,
-				headers: { "content-type": "application/json" },
-				data: { ok: true },
-				meta: { requestId: "req-3", duration: 25 },
-				json: async <T>() => ({ ok: true }) as T,
-				text: async () => JSON.stringify({ ok: true }),
-			})),
-			delete: mock(async () => ({
-				status: 200,
-				ok: true,
-				headers: { "content-type": "application/json" },
-				data: { ok: true },
-				meta: { requestId: "req-4", duration: 30 },
-				json: async <T>() => ({ ok: true }) as T,
-				text: async () => JSON.stringify({ ok: true }),
-			})),
+		return {
+			env: createEnvContext(),
+			credential: createCredentialContext(),
+			http: {
+				request: mock(async () => createMockHttpResponse("req-0", 10)),
+				get: mock(async () => createMockHttpResponse("req-1", 15)),
+				post: mock(async () => createMockHttpResponse("req-2", 20)),
+				put: mock(async () => createMockHttpResponse("req-3", 25)),
+				delete: mock(async () => createMockHttpResponse("req-4", 30)),
 			stream: mock(async () => {
 				throw new Error("stream unsupported in instrumentation test client");
 			}),

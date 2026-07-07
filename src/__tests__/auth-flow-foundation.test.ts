@@ -19,13 +19,21 @@ import type { HttpClient, HttpResponse } from "../types";
 type RouteHandler = (body?: unknown) => Promise<unknown> | unknown;
 
 function createHttpResponse(data: unknown): HttpResponse<unknown> {
+	const body = JSON.stringify(data);
+	const bodyBytes = new TextEncoder().encode(body);
 	return {
 		status: 200,
 		ok: true,
 		headers: {},
 		data,
 		json: async <U = unknown>() => data as U,
-		text: async () => JSON.stringify(data),
+		text: async () => body,
+		arrayBuffer: async () =>
+			bodyBytes.buffer.slice(
+				bodyBytes.byteOffset,
+				bodyBytes.byteOffset + bodyBytes.byteLength,
+			),
+		bytes: async () => bodyBytes.slice(0),
 	};
 }
 

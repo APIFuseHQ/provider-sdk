@@ -1,5 +1,9 @@
 # @apifuse/provider-sdk Changelog
 
+## Unreleased
+
+- Add `arrayBuffer()` and `bytes()` to `HttpResponse` so `ctx.http` consumers can read binary-safe upstream bodies; internal response handling is now byte-first.
+
 ## 2.1.0-beta.15
 
 - Release candidate for main commit 4f51232d87828082f117dcc9f0c257a46f37c040.
