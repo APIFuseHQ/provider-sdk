@@ -2,12 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import {
 	centered,
+	delayed,
 	defineHealthJourney,
 	defineProvider,
 	defineSmsOtpMatcher,
-	delayed,
 	every,
-} from "./define";
+} from "./index";
 
 const noopHandler = async () => ({});
 
@@ -26,6 +26,19 @@ describe("health journey authoring", () => {
 			kind: "interval",
 			interval: "PT8H",
 			jitter: "PT20M",
+		});
+	});
+
+	it("exports centered and delayed schedule randomization helpers", () => {
+		expect(every("24h", { randomize: centered("6h") })).toEqual({
+			kind: "interval",
+			interval: "PT24H",
+			randomize: { mode: "centered", maxOffset: "PT6H" },
+		});
+		expect(every("2h", { randomize: delayed("15m") })).toEqual({
+			kind: "interval",
+			interval: "PT2H",
+			randomize: { mode: "delayed", maxDelay: "PT15M" },
 		});
 	});
 
