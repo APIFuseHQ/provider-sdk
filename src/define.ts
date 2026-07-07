@@ -14,6 +14,7 @@ import type {
 	HealthJourneySchedule,
 	HealthScheduleRandomization,
 	InferSchemaOutput,
+	NativeTcpEgressRule,
 	OperationDefinition,
 	OperationHandlerResult,
 	OperationHttpStreamTransport,
@@ -80,6 +81,7 @@ const VALID_AUTH_MODES = [
 	"credentials",
 	"oauth2",
 ] as const;
+const VALID_NATIVE_TCP_TLS_MODES = ["required", "allowed", "disabled"] as const;
 const VALID_PROVIDER_ACCESS_VISIBILITIES = ["public", "early_access"] as const;
 const VALID_PROVIDER_PROXY_MODES = [
 	"disabled",
@@ -213,7 +215,7 @@ type AuthStartNoInputGuard<TConfig> = TConfig extends {
 	auth?: { flow?: { start: infer TStart } };
 }
 	? TStart extends (...args: infer TArgs) => unknown
-		? TArgs extends [unknown]
+		? TArgs extends [] | [unknown]
 			? unknown
 			: {
 					"auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
@@ -228,6 +230,11 @@ export interface ProviderConfig<
 	version: string;
 	runtime: "standard" | "shared" | "browser";
 	allowedHosts?: string[];
+	native?: {
+		network?: {
+			tcp?: readonly NativeTcpEgressRule[];
+		};
+	};
 	stealth?: {
 		profile: string;
 		platform: StealthPlatform;
@@ -413,6 +420,64 @@ function validateProviderShape(config: unknown): void {
 				"access.visibility",
 				VALID_PROVIDER_ACCESS_VISIBILITIES,
 				String(config.id),
+			);
+		}
+	}
+}
+
+function validateNativeTcpEgressRules(config: {
+	id: string;
+	native?: {
+		network?: {
+			tcp?: readonly NativeTcpEgressRule[];
+		};
+	};
+}): void {
+	const rules = config.native?.network?.tcp;
+	if (rules === undefined) return;
+	if (!Array.isArray(rules)) {
+		throw new ValidationError(
+			`Provider "${config.id}" native.network.tcp must be an array.`,
+			{
+				fix: "Declare native.network.tcp as an array of { host, ports, tls } rules.",
+			},
+		);
+	}
+	for (const [index, rule] of rules.entries()) {
+		const path = `native.network.tcp[${index}]`;
+		if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path} must be an object.`,
+			);
+		}
+		if (typeof rule.host !== "string" || rule.host.trim().length === 0) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path}.host must be a non-empty host.`,
+			);
+		}
+		if (rule.host.includes("*")) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path}.host must not contain wildcards.`,
+			);
+		}
+		if (!Array.isArray(rule.ports) || rule.ports.length === 0) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path}.ports must be a non-empty array.`,
+			);
+		}
+		for (const port of rule.ports) {
+			if (!Number.isInteger(port) || port < 1 || port > 65535) {
+				throw new ValidationError(
+					`Provider "${config.id}" ${path}.ports contains invalid port "${String(port)}".`,
+				);
+			}
+		}
+		if (
+			typeof rule.tls !== "string" ||
+			!VALID_NATIVE_TCP_TLS_MODES.some((mode) => mode === rule.tls)
+		) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path}.tls must be "required", "allowed", or "disabled".`,
 			);
 		}
 	}
@@ -2376,6 +2441,7 @@ export function defineProvider<
 	validateOperationFixtures(config.id, config.operations);
 	validateProviderProxy(config);
 	validateProviderStt(config);
+	validateNativeTcpEgressRules(config);
 	if (config.runtime === "browser" && !config.browser)
 		throw new ProviderError(
 			`Provider "${config.id}" must define browser.engine when runtime is "browser"`,
@@ -2393,6 +2459,7 @@ export function defineProvider<
 		version: config.version,
 		runtime: config.runtime,
 		allowedHosts: config.allowedHosts,
+		native: config.native,
 		stealth: config.stealth,
 		proxy: config.proxy,
 		stt: config.stt,

@@ -1,10 +1,21 @@
+import net from "node:net";
 import { describe, expect, it } from "bun:test";
 
 import { ContextAccessError, CredentialModeError } from "../errors";
 import { createFlowContext, createScratchpad } from "../runtime/auth-flow";
 import { createCredentialContext } from "../runtime/credential";
 import { createEnvContext } from "../runtime/env";
-import type { HttpClient } from "../types";
+import { createNativeNetworkClient } from "../runtime/native-network";
+import type { HttpClient, NativeContext, StealthClient } from "../types";
+
+const stealthStub: StealthClient = {
+	fetch: async () => {
+		throw new Error("stealth unsupported in runtime context test client");
+	},
+	createSession: () => {
+		throw new Error("stealth session unsupported in runtime context test client");
+	},
+};
 
 describe("runtime contexts", () => {
 	it("createEnvContext respects the allowlist", () => {
@@ -60,7 +71,7 @@ describe("runtime contexts", () => {
 		expect(() => scratchpad.set("missing", true)).toThrow(ContextAccessError);
 	});
 
-	it("createFlowContext wires runtime dependencies and scratchpad", () => {
+	it("createFlowContext wires runtime dependencies and scratchpad", async () => {
 		const bodyBytes = new Uint8Array();
 		const response = async () => ({
 			status: 200,
@@ -88,6 +99,7 @@ describe("runtime contexts", () => {
 
 		const context = createFlowContext({
 			http,
+			stealth: stealthStub,
 			env: createEnvContext(),
 			tenantId: "tenant-1",
 			providerId: "demo-provider",
@@ -98,8 +110,114 @@ describe("runtime contexts", () => {
 		});
 
 		expect(context.http).toBe(http);
+		await expect(
+			context.native.network.connectTcp({
+				host: "127.0.0.1",
+				port: 1,
+			}),
+		).rejects.toThrow("Native network runtime is not available");
 		expect(context.tenantId).toBe("tenant-1");
 		expect(context.providerId).toBe("demo-provider");
 		expect(context.context.get("state")).toBe("draft");
+	});
+
+	it("createFlowContext accepts an injected native network client", () => {
+		const native: NativeContext = {
+			network: createNativeNetworkClient([
+				{ host: "127.0.0.1", ports: [65535], tls: "disabled" },
+			]),
+		};
+		const http = {
+			request: async () => {
+				throw new Error("unused");
+			},
+			get: async () => {
+				throw new Error("unused");
+			},
+			post: async () => {
+				throw new Error("unused");
+			},
+			put: async () => {
+				throw new Error("unused");
+			},
+			delete: async () => {
+				throw new Error("unused");
+			},
+			stream: async () => {
+				throw new Error("unused");
+			},
+			sse: async () => {
+				throw new Error("unused");
+			},
+		} as HttpClient;
+
+		const context = createFlowContext({
+			http,
+			native,
+			stealth: stealthStub,
+			env: createEnvContext(),
+			tenantId: "tenant-1",
+			providerId: "demo-provider",
+			allowedKeys: [],
+		});
+
+		expect(context.native).toBe(native);
+	});
+
+	it("native network denies undeclared TCP egress before opening a socket", async () => {
+		const server = net.createServer((socket) => {
+			socket.destroy(new Error("should not be reached"));
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string") {
+				throw new Error("TCP server did not expose an address");
+			}
+			const client = createNativeNetworkClient();
+
+			await expect(
+				client.connectTcp({
+					host: "127.0.0.1",
+					port: address.port,
+					timeoutMs: 100,
+				}),
+			).rejects.toThrow("not declared");
+		} finally {
+			await new Promise<void>((resolve, reject) =>
+				server.close((error) => (error ? reject(error) : resolve())),
+			);
+		}
+	});
+
+	it("native network connects to declared TCP loopback and reads echoed bytes", async () => {
+		const server = net.createServer((socket) => {
+			socket.on("data", (chunk) => socket.write(chunk));
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string") {
+				throw new Error("TCP server did not expose an address");
+			}
+			const client = createNativeNetworkClient([
+				{ host: "127.0.0.1", ports: [address.port], tls: "disabled" },
+			]);
+			const connection = await client.connectTcp({
+				host: "127.0.0.1",
+				port: address.port,
+				timeoutMs: 500,
+			});
+
+			await connection.write("ping");
+			const chunk = await connection.read();
+			await connection.close();
+
+			expect(new TextDecoder().decode(chunk ?? new Uint8Array())).toBe("ping");
+		} finally {
+			await new Promise<void>((resolve, reject) =>
+				server.close((error) => (error ? reject(error) : resolve())),
+			);
+		}
 	});
 });

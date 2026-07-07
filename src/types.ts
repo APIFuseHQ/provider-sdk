@@ -1161,6 +1161,44 @@ export interface HttpClient {
 	): Promise<AsyncIterable<SseMessage>>;
 }
 
+export type NativeTcpTlsMode = "required" | "allowed" | "disabled";
+
+export interface NativeTcpEgressRule {
+	host: string;
+	ports: readonly number[];
+	tls: NativeTcpTlsMode;
+}
+
+export interface NativeNetworkConnectOptions {
+	host: string;
+	port: number;
+	timeoutMs?: number;
+	signal?: AbortSignal;
+}
+
+export interface NativeTlsConnectOptions extends NativeNetworkConnectOptions {
+	serverName?: string;
+	rejectUnauthorized?: boolean;
+}
+
+export interface NativeNetworkConnection extends AsyncIterable<Uint8Array> {
+	write(data: Uint8Array | string): Promise<void>;
+	read(): Promise<Uint8Array | null>;
+	chunks(): AsyncIterable<Uint8Array>;
+	close(): Promise<void>;
+}
+
+export interface NativeNetworkClient {
+	connectTcp(
+		options: NativeNetworkConnectOptions,
+	): Promise<NativeNetworkConnection>;
+	connectTls(options: NativeTlsConnectOptions): Promise<NativeNetworkConnection>;
+}
+
+export interface NativeContext {
+	network: NativeNetworkClient;
+}
+
 export interface ProviderCacheKeyOptions {
 	/**
 	 * Additional field names to omit from stable key material. The SDK always
@@ -1578,6 +1616,7 @@ export interface FlowContext {
 	tenantId: string;
 	providerId: string;
 	http: HttpClient;
+	native: NativeContext;
 	stealth: StealthClient;
 	env: EnvContext;
 	credential?: CredentialContext;
@@ -1697,6 +1736,7 @@ export interface ProviderContext {
 	credential: CredentialContext;
 	request?: ProviderRequestContext;
 	http: HttpClient;
+	native: NativeContext;
 	cache: ProviderCache;
 	state: ProviderRuntimeState;
 	stealth: StealthClient;
@@ -1794,6 +1834,11 @@ export interface ProviderDefinition {
 	version: string;
 	runtime: "standard" | "shared" | "browser";
 	allowedHosts?: string[];
+	native?: {
+		network?: {
+			tcp?: readonly NativeTcpEgressRule[];
+		};
+	};
 	stealth?: {
 		profile: string;
 		platform: StealthPlatform;

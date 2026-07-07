@@ -4,6 +4,9 @@ import { createTestProviderChoiceContext } from "../runtime/choice";
 import { createCredentialContext } from "../runtime/credential";
 import { createEnvContext } from "../runtime/env";
 import { wrapWithInstrumentation } from "../runtime/instrumentation";
+import { createUnsupportedNativeNetworkClient } from "../runtime/native-network";
+import { createUnsupportedProviderRuntimeState } from "../runtime/state";
+import { createUnsupportedSttClient } from "../runtime/stt";
 import { createTraceContext } from "../runtime/trace";
 import type {
 	AuthContext,
@@ -92,7 +95,11 @@ function createMockContext(): ProviderContext {
 				throw new Error("sse unsupported in instrumentation test client");
 			}),
 		} as HttpClient,
+		native: {
+			network: createUnsupportedNativeNetworkClient(),
+		},
 		cache: createProviderCache({ providerId: "instrumented-provider" }),
+		state: createUnsupportedProviderRuntimeState(),
 		stealth,
 		browser: {
 			engine: "playwright-stealth",
@@ -101,6 +108,7 @@ function createMockContext(): ProviderContext {
 		} as unknown as BrowserClient,
 		trace: createTraceContext(),
 		auth: {} as AuthContext,
+		stt: createUnsupportedSttClient(),
 		choice: createTestProviderChoiceContext({
 			providerId: "instrumented-provider",
 		}),

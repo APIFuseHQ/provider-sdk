@@ -85,6 +85,49 @@ describe("defineProvider", () => {
 		expect(provider.operations.prices.transport).toBeUndefined();
 	});
 
+	it("accepts native TCP egress metadata", () => {
+		const provider = defineProvider({
+			...validConfig,
+			native: {
+				network: {
+					tcp: [
+						{ host: "talk.kakao.com", ports: [5228, 5229], tls: "required" },
+					],
+				},
+			},
+		});
+
+		expect(provider.native?.network?.tcp?.[0]).toEqual({
+			host: "talk.kakao.com",
+			ports: [5228, 5229],
+			tls: "required",
+		});
+	});
+
+	it("rejects malformed native TCP egress metadata", () => {
+		const cases = [
+			{ host: "", ports: [5228], tls: "required" },
+			{ host: "*.example.com", ports: [5228], tls: "required" },
+			{ host: "example.com", ports: [], tls: "required" },
+			{ host: "example.com", ports: [0], tls: "required" },
+			{ host: "example.com", ports: [65536], tls: "required" },
+			{ host: "example.com", ports: [5228], tls: "maybe" },
+		];
+
+		for (const rule of cases) {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					native: {
+						network: {
+							tcp: [rule],
+						},
+					},
+				} as never),
+			).toThrow(ValidationError);
+		}
+	});
+
 	it("rejects invalid operation transport metadata", () => {
 		expect(() =>
 			defineProvider({

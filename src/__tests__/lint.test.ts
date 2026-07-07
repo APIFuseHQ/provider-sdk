@@ -363,6 +363,32 @@ describe("lintProvider", () => {
 		);
 	});
 
+	it("rejects malformed native TCP egress declarations", () => {
+		const diagnostics = lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			native: {
+				network: {
+					tcp: [
+						{ host: "*.example.com", ports: [5228], tls: "required" },
+						{ host: "tcp.example.com", ports: [], tls: "maybe" },
+					],
+				},
+			},
+		});
+
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-tcp-egress-no-wildcards" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-tcp-egress-ports" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-tcp-egress-tls" }),
+		);
+	});
+
 	it("flags removed api-key auth mode", () => {
 		const diagnostics = lintProvider({
 			id: "demo-provider",

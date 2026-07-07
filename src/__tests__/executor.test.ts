@@ -6,7 +6,9 @@ import { SessionExpiredError, TransportError } from "../errors";
 import { createProviderCache } from "../runtime/cache";
 import { createTestProviderChoiceContext } from "../runtime/choice";
 import { executeOperation } from "../runtime/executor";
+import { createUnsupportedNativeNetworkClient } from "../runtime/native-network";
 import { createUnsupportedProviderRuntimeState } from "../runtime/state";
+import { createUnsupportedSttClient } from "../runtime/stt";
 import type { ProviderContext, ProviderDefinition } from "../types";
 
 function createMockCtx(fetchResponse: unknown, status = 200): ProviderContext {
@@ -53,6 +55,9 @@ function createMockCtx(fetchResponse: unknown, status = 200): ProviderContext {
 			})),
 		},
 		http: {} as ProviderContext["http"],
+		native: {
+			network: createUnsupportedNativeNetworkClient(),
+		},
 		cache: createProviderCache({ providerId: "test-provider" }),
 		state: createUnsupportedProviderRuntimeState(),
 		browser: {} as ProviderContext["browser"],
@@ -62,6 +67,7 @@ function createMockCtx(fetchResponse: unknown, status = 200): ProviderContext {
 		auth: {
 			requestField: mock(async () => ""),
 		},
+		stt: createUnsupportedSttClient(),
 		choice: createTestProviderChoiceContext({ providerId: "test-provider" }),
 	};
 }

@@ -112,6 +112,98 @@ function lintAllowedHosts(
 	return [];
 }
 
+function lintNativeTcpEgress(
+	providerId: string | undefined,
+	native:
+		| {
+				network?: {
+					tcp?: readonly unknown[];
+				};
+		  }
+		| undefined,
+): LintDiagnostic[] {
+	const rules = native?.network?.tcp;
+	if (rules === undefined) return [];
+	const prefix = providerId ? `Provider "${providerId}"` : "Provider";
+	if (!Array.isArray(rules)) {
+		return [
+			{
+				rule: "native-tcp-egress-array",
+				level: "error",
+				field: "native.network.tcp",
+				message: `${prefix} native.network.tcp must be an array.`,
+			},
+		];
+	}
+
+	const diagnostics: LintDiagnostic[] = [];
+	for (const [index, rule] of rules.entries()) {
+		const field = `native.network.tcp[${index}]`;
+		if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+			diagnostics.push({
+				rule: "native-tcp-egress-object",
+				level: "error",
+				field,
+				message: `${prefix} ${field} must be an object.`,
+			});
+			continue;
+		}
+		const record = rule as Record<string, unknown>;
+		const host = record.host;
+		if (typeof host !== "string" || host.trim().length === 0) {
+			diagnostics.push({
+				rule: "native-tcp-egress-host",
+				level: "error",
+				field: `${field}.host`,
+				message: `${prefix} ${field}.host must be a non-empty host.`,
+			});
+		} else if (host.includes("*")) {
+			diagnostics.push({
+				rule: "native-tcp-egress-no-wildcards",
+				level: "error",
+				field: `${field}.host`,
+				message: `${prefix} ${field}.host must not contain wildcards.`,
+			});
+		}
+
+		const ports = record.ports;
+		if (!Array.isArray(ports) || ports.length === 0) {
+			diagnostics.push({
+				rule: "native-tcp-egress-ports",
+				level: "error",
+				field: `${field}.ports`,
+				message: `${prefix} ${field}.ports must be a non-empty array.`,
+			});
+		} else {
+			for (const port of ports) {
+				if (!Number.isInteger(port) || port < 1 || port > 65535) {
+					diagnostics.push({
+						rule: "native-tcp-egress-port",
+						level: "error",
+						field: `${field}.ports`,
+						message: `${prefix} ${field}.ports contains invalid port "${String(port)}".`,
+					});
+					break;
+				}
+			}
+		}
+
+		if (
+			record.tls !== "required" &&
+			record.tls !== "allowed" &&
+			record.tls !== "disabled"
+		) {
+			diagnostics.push({
+				rule: "native-tcp-egress-tls",
+				level: "error",
+				field: `${field}.tls`,
+				message: `${prefix} ${field}.tls must be "required", "allowed", or "disabled".`,
+			});
+		}
+	}
+	return diagnostics;
+}
+
 function lintReviewed(
 	providerId: string | undefined,
 	reviewed: string | undefined,
@@ -976,6 +1068,11 @@ export function lintProvider(
 	provider: {
 		id?: string;
 		allowedHosts?: readonly string[];
+		native?: {
+			network?: {
+				tcp?: readonly unknown[];
+			};
+		};
 		stealth?: unknown;
 		auth?: ProviderAuthLike;
 		credential?: {
@@ -1015,6 +1112,7 @@ export function lintProvider(
 ): LintDiagnostic[] {
 	const diagnostics: LintDiagnostic[] = [
 		...lintAllowedHosts(provider.id, provider.allowedHosts),
+		...lintNativeTcpEgress(provider.id, provider.native),
 		...lintReviewed(provider.id, provider.reviewed),
 		...lintAuthModel(provider),
 		...lintStealthTransportUsage(provider),
