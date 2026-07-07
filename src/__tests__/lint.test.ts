@@ -389,6 +389,42 @@ describe("lintProvider", () => {
 		);
 	});
 
+	it("rejects malformed native dynamic TCP egress declarations", () => {
+		const diagnostics = lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			native: {
+				network: {
+					dynamicTcp: [
+						{
+							sourceHost: "*.ticket.example.com",
+							sourcePorts: [],
+							targetHostSuffixes: ["*.example.com"],
+							tls: "maybe",
+						},
+					],
+				},
+			},
+		});
+
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-dynamic-tcp-egress-source-host" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-dynamic-tcp-egress-source-ports" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-dynamic-tcp-egress-target-suffixes" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-dynamic-tcp-egress-target-ports" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-dynamic-tcp-egress-tls" }),
+		);
+	});
+
 	it("flags removed api-key auth mode", () => {
 		const diagnostics = lintProvider({
 			id: "demo-provider",

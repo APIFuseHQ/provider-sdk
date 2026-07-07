@@ -220,4 +220,56 @@ describe("runtime contexts", () => {
 			);
 		}
 	});
+
+	it("native network allows a bounded dynamic TCP grant then supports revocation", async () => {
+		const server = net.createServer((socket) => {
+			socket.on("data", (chunk) => socket.write(chunk));
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string") {
+				throw new Error("TCP server did not expose an address");
+			}
+			const client = createNativeNetworkClient(
+				[{ host: "source.example.com", ports: [995], tls: "disabled" }],
+				[
+					{
+						sourceHost: "source.example.com",
+						sourcePorts: [995],
+						targetHostSuffixes: ["127.0.0.1"],
+						targetPorts: [address.port],
+						tls: "disabled",
+						ttlMs: 5_000,
+					},
+				],
+			);
+
+			await expect(
+				client.connectTcp({ host: "127.0.0.1", port: address.port, timeoutMs: 100 }),
+			).rejects.toThrow("not declared");
+
+			const grant = client.grantTcpEgress({
+				sourceHost: "source.example.com",
+				sourcePort: 995,
+				host: "127.0.0.1",
+				port: address.port,
+				tls: "disabled",
+			});
+			const connection = await client.connectTcp({ host: "127.0.0.1", port: address.port, timeoutMs: 500 });
+			await connection.write("pong");
+			const chunk = await connection.read();
+			await connection.close();
+			expect(new TextDecoder().decode(chunk ?? new Uint8Array())).toBe("pong");
+
+			grant.revoke();
+			await expect(
+				client.connectTcp({ host: "127.0.0.1", port: address.port, timeoutMs: 100 }),
+			).rejects.toThrow("not declared");
+		} finally {
+			await new Promise<void>((resolve, reject) =>
+				server.close((error) => (error ? reject(error) : resolve())),
+			);
+		}
+	});
 });

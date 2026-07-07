@@ -255,7 +255,10 @@ function createProviderContext(
 			},
 		}),
 		native: {
-			network: createNativeNetworkClient(provider.native?.network?.tcp ?? []),
+			network: createNativeNetworkClient(
+				provider.native?.network?.tcp ?? [],
+				provider.native?.network?.dynamicTcp ?? [],
+			),
 		},
 		cache: createProviderCache({ providerId: provider.id }),
 		state,
@@ -377,7 +380,10 @@ function createAuthFlowContext(
 			providerId: request.providerId ?? provider.id,
 			http: createHttpClient(baseUrl, proxyClientOptions),
 			native: {
-				network: createNativeNetworkClient(provider.native?.network?.tcp ?? []),
+				network: createNativeNetworkClient(
+				provider.native?.network?.tcp ?? [],
+				provider.native?.network?.dynamicTcp ?? [],
+			),
 			},
 			stealth: stealthBaseUrl
 				? stealthProfile

@@ -1163,10 +1163,41 @@ export interface HttpClient {
 
 export type NativeTcpTlsMode = "required" | "allowed" | "disabled";
 
+export interface NativeTcpPortRange {
+	start: number;
+	end: number;
+}
+
 export interface NativeTcpEgressRule {
 	host: string;
 	ports: readonly number[];
 	tls: NativeTcpTlsMode;
+}
+
+export interface NativeTcpDynamicEgressRule {
+	/** Declared upstream that authorizes the dynamic endpoint, e.g. Kakao CHECKIN. */
+	sourceHost: string;
+	sourcePorts: readonly number[];
+	/** Target host suffixes allowed for granted egress. Use exact suffixes, no wildcards. */
+	targetHostSuffixes: readonly string[];
+	targetPorts?: readonly number[];
+	targetPortRanges?: readonly NativeTcpPortRange[];
+	tls: NativeTcpTlsMode;
+	ttlMs?: number;
+	maxGrants?: number;
+}
+
+export interface NativeNetworkDynamicGrantOptions {
+	sourceHost: string;
+	sourcePort: number;
+	host: string;
+	port: number;
+	tls: NativeTcpTlsMode;
+	ttlMs?: number;
+}
+
+export interface NativeNetworkEgressGrant {
+	revoke(): void;
 }
 
 export interface NativeNetworkConnectOptions {
@@ -1193,6 +1224,7 @@ export interface NativeNetworkClient {
 		options: NativeNetworkConnectOptions,
 	): Promise<NativeNetworkConnection>;
 	connectTls(options: NativeTlsConnectOptions): Promise<NativeNetworkConnection>;
+	grantTcpEgress(options: NativeNetworkDynamicGrantOptions): NativeNetworkEgressGrant;
 }
 
 export interface NativeContext {
@@ -1837,6 +1869,7 @@ export interface ProviderDefinition {
 	native?: {
 		network?: {
 			tcp?: readonly NativeTcpEgressRule[];
+			dynamicTcp?: readonly NativeTcpDynamicEgressRule[];
 		};
 	};
 	stealth?: {

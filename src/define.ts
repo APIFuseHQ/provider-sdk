@@ -14,6 +14,7 @@ import type {
 	HealthJourneySchedule,
 	HealthScheduleRandomization,
 	InferSchemaOutput,
+	NativeTcpDynamicEgressRule,
 	NativeTcpEgressRule,
 	OperationDefinition,
 	OperationHandlerResult,
@@ -233,6 +234,7 @@ export interface ProviderConfig<
 	native?: {
 		network?: {
 			tcp?: readonly NativeTcpEgressRule[];
+			dynamicTcp?: readonly NativeTcpDynamicEgressRule[];
 		};
 	};
 	stealth?: {
@@ -430,6 +432,7 @@ function validateNativeTcpEgressRules(config: {
 	native?: {
 		network?: {
 			tcp?: readonly NativeTcpEgressRule[];
+			dynamicTcp?: readonly NativeTcpDynamicEgressRule[];
 		};
 	};
 }): void {
@@ -478,6 +481,108 @@ function validateNativeTcpEgressRules(config: {
 		) {
 			throw new ValidationError(
 				`Provider "${config.id}" ${path}.tls must be "required", "allowed", or "disabled".`,
+			);
+		}
+	}
+}
+
+function validateNativeTcpDynamicEgressRules(config: {
+	id: string;
+	native?: {
+		network?: {
+			dynamicTcp?: readonly NativeTcpDynamicEgressRule[];
+		};
+	};
+}): void {
+	const rules = config.native?.network?.dynamicTcp;
+	if (rules === undefined) return;
+	if (!Array.isArray(rules)) {
+		throw new ValidationError(
+			`Provider "${config.id}" native.network.dynamicTcp must be an array.`,
+		);
+	}
+	for (const [index, rule] of rules.entries()) {
+		const path = `native.network.dynamicTcp[${index}]`;
+		if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path} must be an object.`,
+			);
+		}
+		if (typeof rule.sourceHost !== "string" || rule.sourceHost.trim().length === 0 || rule.sourceHost.includes("*")) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path}.sourceHost must be a non-empty exact host without wildcards.`,
+			);
+		}
+		if (!Array.isArray(rule.sourcePorts) || rule.sourcePorts.length === 0) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path}.sourcePorts must be a non-empty array.`,
+			);
+		}
+		for (const port of rule.sourcePorts) {
+			if (!Number.isInteger(port) || port < 1 || port > 65535) {
+				throw new ValidationError(
+					`Provider "${config.id}" ${path}.sourcePorts contains invalid port "${String(port)}".`,
+				);
+			}
+		}
+		if (!Array.isArray(rule.targetHostSuffixes) || rule.targetHostSuffixes.length === 0) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path}.targetHostSuffixes must be a non-empty array.`,
+			);
+		}
+		for (const suffix of rule.targetHostSuffixes) {
+			if (typeof suffix !== "string" || suffix.trim().length === 0 || suffix.includes("*")) {
+				throw new ValidationError(
+					`Provider "${config.id}" ${path}.targetHostSuffixes must contain exact suffixes without wildcards.`,
+				);
+			}
+		}
+		const hasPorts = Array.isArray(rule.targetPorts) && rule.targetPorts.length > 0;
+		const hasRanges = Array.isArray(rule.targetPortRanges) && rule.targetPortRanges.length > 0;
+		if (!hasPorts && !hasRanges) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path} must declare targetPorts or targetPortRanges.`,
+			);
+		}
+		for (const port of rule.targetPorts ?? []) {
+			if (!Number.isInteger(port) || port < 1 || port > 65535) {
+				throw new ValidationError(
+					`Provider "${config.id}" ${path}.targetPorts contains invalid port "${String(port)}".`,
+				);
+			}
+		}
+		for (const range of rule.targetPortRanges ?? []) {
+			if (
+				!range ||
+				typeof range !== "object" ||
+				Array.isArray(range) ||
+				!Number.isInteger(range.start) ||
+				!Number.isInteger(range.end) ||
+				range.start < 1 ||
+				range.end > 65535 ||
+				range.start > range.end
+			) {
+				throw new ValidationError(
+					`Provider "${config.id}" ${path}.targetPortRanges contains an invalid port range.`,
+				);
+			}
+		}
+		if (
+			typeof rule.tls !== "string" ||
+			!VALID_NATIVE_TCP_TLS_MODES.some((mode) => mode === rule.tls)
+		) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path}.tls must be "required", "allowed", or "disabled".`,
+			);
+		}
+		if (rule.ttlMs !== undefined && (!Number.isInteger(rule.ttlMs) || rule.ttlMs < 1)) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path}.ttlMs must be a positive integer.`,
+			);
+		}
+		if (rule.maxGrants !== undefined && (!Number.isInteger(rule.maxGrants) || rule.maxGrants < 1)) {
+			throw new ValidationError(
+				`Provider "${config.id}" ${path}.maxGrants must be a positive integer.`,
 			);
 		}
 	}
@@ -2442,6 +2547,7 @@ export function defineProvider<
 	validateProviderProxy(config);
 	validateProviderStt(config);
 	validateNativeTcpEgressRules(config);
+	validateNativeTcpDynamicEgressRules(config);
 	if (config.runtime === "browser" && !config.browser)
 		throw new ProviderError(
 			`Provider "${config.id}" must define browser.engine when runtime is "browser"`,

@@ -6,26 +6,55 @@ import type {
 	NativeNetworkClient,
 	NativeNetworkConnectOptions,
 	NativeNetworkConnection,
+	NativeNetworkDynamicGrantOptions,
+	NativeTcpDynamicEgressRule,
 	NativeTcpEgressRule,
+	NativeTcpTlsMode,
 	NativeTlsConnectOptions,
 } from "../types";
 
 type SocketLike = net.Socket | tls.TLSSocket;
 type ConnectKind = "tcp" | "tls";
 
+type NativeTcpEffectiveRule = NativeTcpEgressRule & {
+	expiresAt?: number;
+	revoke?: () => void;
+};
+
+const DEFAULT_DYNAMIC_GRANT_TTL_MS = 60_000;
+const DEFAULT_DYNAMIC_GRANT_MAX_GRANTS = 16;
+
 function normalizeHost(host: string): string {
 	return host.trim().toLowerCase();
 }
 
+function hostMatchesSuffix(host: string, suffix: string): boolean {
+	const normalizedHost = normalizeHost(host);
+	const normalizedSuffix = normalizeHost(suffix).replace(/^\.+/, "");
+	return normalizedHost === normalizedSuffix || normalizedHost.endsWith(`.${normalizedSuffix}`);
+}
+
+function portInRange(port: number, range: { start: number; end: number }): boolean {
+	return port >= range.start && port <= range.end;
+}
+
+function tlsModeAllows(ruleMode: NativeTcpTlsMode, requestedMode: NativeTcpTlsMode): boolean {
+	return ruleMode === requestedMode || ruleMode === "allowed";
+}
+
 function assertDeclaredEgress(
-	rules: readonly NativeTcpEgressRule[],
+	rules: readonly NativeTcpEffectiveRule[],
 	kind: ConnectKind,
 	host: string,
 	port: number,
 ): void {
+	const now = Date.now();
 	const normalizedHost = normalizeHost(host);
 	const matchingRule = rules.find(
-		(rule) => normalizeHost(rule.host) === normalizedHost && rule.ports.includes(port),
+		(rule) =>
+			(rule.expiresAt === undefined || rule.expiresAt > now) &&
+			normalizeHost(rule.host) === normalizedHost &&
+			rule.ports.includes(port),
 	);
 
 	if (!matchingRule) {
@@ -45,6 +74,21 @@ function assertDeclaredEgress(
 			{ code: "native_network_tls_disabled" },
 		);
 	}
+}
+
+function findDynamicGrantRule(
+	rules: readonly NativeTcpDynamicEgressRule[],
+	grant: NativeNetworkDynamicGrantOptions,
+): NativeTcpDynamicEgressRule | undefined {
+	return rules.find(
+		(rule) =>
+			normalizeHost(rule.sourceHost) === normalizeHost(grant.sourceHost) &&
+			rule.sourcePorts.includes(grant.sourcePort) &&
+			rule.targetHostSuffixes.some((suffix) => hostMatchesSuffix(grant.host, suffix)) &&
+			(rule.targetPorts?.includes(grant.port) === true ||
+				rule.targetPortRanges?.some((range) => portInRange(grant.port, range)) === true) &&
+			tlsModeAllows(rule.tls, grant.tls),
+	);
 }
 
 function toNativeNetworkError(error: unknown, timeout = false): TransportError {
@@ -212,15 +256,63 @@ async function connectSocket(
 
 export function createNativeNetworkClient(
 	rules: readonly NativeTcpEgressRule[] = [],
+	dynamicRules: readonly NativeTcpDynamicEgressRule[] = [],
 ): NativeNetworkClient {
+	const staticRules = [...rules];
+	const dynamicGrants: NativeTcpEffectiveRule[] = [];
+	const pruneExpired = () => {
+		const now = Date.now();
+		for (let index = dynamicGrants.length - 1; index >= 0; index -= 1) {
+			const grant = dynamicGrants[index];
+			if (grant?.expiresAt !== undefined && grant.expiresAt <= now) {
+				dynamicGrants.splice(index, 1);
+			}
+		}
+	};
+	const effectiveRules = () => {
+		pruneExpired();
+		return [...staticRules, ...dynamicGrants];
+	};
+
 	return {
 		async connectTcp(options: NativeNetworkConnectOptions) {
-			assertDeclaredEgress(rules, "tcp", options.host, options.port);
+			assertDeclaredEgress(effectiveRules(), "tcp", options.host, options.port);
 			return createConnection(await connectSocket("tcp", options));
 		},
 		async connectTls(options: NativeTlsConnectOptions) {
-			assertDeclaredEgress(rules, "tls", options.host, options.port);
+			assertDeclaredEgress(effectiveRules(), "tls", options.host, options.port);
 			return createConnection(await connectSocket("tls", options));
+		},
+		grantTcpEgress(options: NativeNetworkDynamicGrantOptions) {
+			const rule = findDynamicGrantRule(dynamicRules, options);
+			if (!rule) {
+				throw new TransportError(
+					`Native dynamic TCP egress grant to ${options.host}:${options.port} is not declared by provider.native.network.dynamicTcp.`,
+					{ code: "native_network_dynamic_egress_denied" },
+				);
+			}
+
+			pruneExpired();
+			const maxGrants = rule.maxGrants ?? DEFAULT_DYNAMIC_GRANT_MAX_GRANTS;
+			if (dynamicGrants.length >= maxGrants) {
+				throw new TransportError("Native dynamic TCP egress grant limit exceeded.", {
+					code: "native_network_dynamic_egress_limit_exceeded",
+				});
+			}
+
+			const ttlMs = options.ttlMs ?? rule.ttlMs ?? DEFAULT_DYNAMIC_GRANT_TTL_MS;
+			const grant: NativeTcpEffectiveRule = {
+				host: options.host,
+				ports: [options.port],
+				tls: options.tls,
+				expiresAt: Date.now() + ttlMs,
+			};
+			grant.revoke = () => {
+				const index = dynamicGrants.indexOf(grant);
+				if (index >= 0) dynamicGrants.splice(index, 1);
+			};
+			dynamicGrants.push(grant);
+			return { revoke: grant.revoke };
 		},
 	};
 }
@@ -236,5 +328,10 @@ export function createUnsupportedNativeNetworkClient(
 	return {
 		connectTcp: unsupported,
 		connectTls: unsupported,
+		grantTcpEgress() {
+			throw new TransportError(message, {
+				code: "native_network_unsupported",
+			});
+		},
 	};
 }

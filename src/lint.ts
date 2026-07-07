@@ -204,6 +204,95 @@ function lintNativeTcpEgress(
 	return diagnostics;
 }
 
+function lintNativeTcpDynamicEgress(
+	providerId: string | undefined,
+	native:
+		| {
+				network?: {
+					dynamicTcp?: readonly unknown[];
+				};
+		  }
+		| undefined,
+): LintDiagnostic[] {
+	const rules = native?.network?.dynamicTcp;
+	if (rules === undefined) return [];
+	const prefix = providerId ? `Provider "${providerId}"` : "Provider";
+	if (!Array.isArray(rules)) {
+		return [
+			{
+				rule: "native-dynamic-tcp-egress-array",
+				level: "error",
+				field: "native.network.dynamicTcp",
+				message: `${prefix} native.network.dynamicTcp must be an array.`,
+			},
+		];
+	}
+
+	const diagnostics: LintDiagnostic[] = [];
+	for (const [index, rule] of rules.entries()) {
+		const field = `native.network.dynamicTcp[${index}]`;
+		if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-object",
+				level: "error",
+				field,
+				message: `${prefix} ${field} must be an object.`,
+			});
+			continue;
+		}
+		const record = rule as Record<string, unknown>;
+		const sourceHost = record.sourceHost;
+		if (typeof sourceHost !== "string" || sourceHost.trim().length === 0 || sourceHost.includes("*")) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-source-host",
+				level: "error",
+				field: `${field}.sourceHost`,
+				message: `${prefix} ${field}.sourceHost must be a non-empty exact host without wildcards.`,
+			});
+		}
+		const sourcePorts = record.sourcePorts;
+		if (!Array.isArray(sourcePorts) || sourcePorts.length === 0) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-source-ports",
+				level: "error",
+				field: `${field}.sourcePorts`,
+				message: `${prefix} ${field}.sourcePorts must be a non-empty array.`,
+			});
+		}
+		const suffixes = record.targetHostSuffixes;
+		if (!Array.isArray(suffixes) || suffixes.length === 0 || suffixes.some((suffix) => typeof suffix !== "string" || suffix.trim().length === 0 || suffix.includes("*"))) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-target-suffixes",
+				level: "error",
+				field: `${field}.targetHostSuffixes`,
+				message: `${prefix} ${field}.targetHostSuffixes must contain exact suffixes without wildcards.`,
+			});
+		}
+		const targetPorts = record.targetPorts;
+		const targetPortRanges = record.targetPortRanges;
+		if (
+			(!Array.isArray(targetPorts) || targetPorts.length === 0) &&
+			(!Array.isArray(targetPortRanges) || targetPortRanges.length === 0)
+		) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-target-ports",
+				level: "error",
+				field,
+				message: `${prefix} ${field} must declare targetPorts or targetPortRanges.`,
+			});
+		}
+		if (record.tls !== "required" && record.tls !== "allowed" && record.tls !== "disabled") {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-tls",
+				level: "error",
+				field: `${field}.tls`,
+				message: `${prefix} ${field}.tls must be "required", "allowed", or "disabled".`,
+			});
+		}
+	}
+	return diagnostics;
+}
+
 function lintReviewed(
 	providerId: string | undefined,
 	reviewed: string | undefined,
@@ -1071,6 +1160,7 @@ export function lintProvider(
 		native?: {
 			network?: {
 				tcp?: readonly unknown[];
+				dynamicTcp?: readonly unknown[];
 			};
 		};
 		stealth?: unknown;
@@ -1113,6 +1203,7 @@ export function lintProvider(
 	const diagnostics: LintDiagnostic[] = [
 		...lintAllowedHosts(provider.id, provider.allowedHosts),
 		...lintNativeTcpEgress(provider.id, provider.native),
+		...lintNativeTcpDynamicEgress(provider.id, provider.native),
 		...lintReviewed(provider.id, provider.reviewed),
 		...lintAuthModel(provider),
 		...lintStealthTransportUsage(provider),
