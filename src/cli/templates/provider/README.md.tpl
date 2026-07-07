@@ -9,6 +9,7 @@ bun run dev
 bun run check
 bun run test
 bun run submit-check
+bunx apifuse perf . --operation <operation-id> --runs 3
 ```
 
 

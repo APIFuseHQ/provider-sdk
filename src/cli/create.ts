@@ -629,7 +629,6 @@ function renderPackageJson(input: {
 					"apifuse submit-check . --markdown submission-report.md",
 				test: "apifuse test .",
 				record: "apifuse record .",
-				"perf:sample": "apifuse perf . --operation ping --runs 3",
 				start: "bun start.ts",
 			},
 			dependencies: {
