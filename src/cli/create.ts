@@ -4,15 +4,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-	cancel,
-	intro,
-	isCancel,
-	note,
-	outro,
-	select,
-	text,
-} from "@clack/prompts";
+import { cancel, intro, isCancel, note, outro, select, text } from "@clack/prompts";
 import { z } from "zod";
 
 import packageJson from "../../package.json";
@@ -28,12 +20,7 @@ export const CATEGORY_OPTIONS = [
 	"communication",
 	"other",
 ] as const;
-export const AUTH_MODE_OPTIONS = [
-	"none",
-	"platform-managed",
-	"credentials",
-	"oauth2",
-] as const;
+export const AUTH_MODE_OPTIONS = ["none", "platform-managed", "credentials", "oauth2"] as const;
 export const RUNTIME_OPTIONS = ["standard", "browser"] as const;
 export const PRESET_OPTIONS = ["standalone", "monorepo"] as const;
 
@@ -95,9 +82,7 @@ export type ProviderCreatePlan = {
 	workspaceRoot?: string;
 };
 
-const TEMPLATE_DIR = fileURLToPath(
-	new URL("./templates/provider/", import.meta.url),
-);
+const TEMPLATE_DIR = fileURLToPath(new URL("./templates/provider/", import.meta.url));
 const HELP_TEXT = `Usage: apifuse create <provider-name> [options]
 Examples:
   apifuse create my-provider
@@ -126,9 +111,7 @@ export async function main() {
 	}
 
 	const parsed = parseArgs(normalizedArgs);
-	const config = parsed.configPath
-		? await loadConfig(parsed.configPath)
-		: undefined;
+	const config = parsed.configPath ? await loadConfig(parsed.configPath) : undefined;
 	const resolved = await resolveCreateOptions(parsed, config, process.cwd());
 	const plan = await buildProviderCreatePlan(resolved, process.cwd());
 
@@ -195,18 +178,10 @@ function parseArgs(argv: string[]): ParsedArgs {
 				parsed.displayName = ensureValue(flag, consumeValue());
 				break;
 			case "--category":
-				parsed.category = parseEnum(
-					"category",
-					consumeValue(),
-					CATEGORY_OPTIONS,
-				);
+				parsed.category = parseEnum("category", consumeValue(), CATEGORY_OPTIONS);
 				break;
 			case "--auth-mode":
-				parsed.authMode = parseEnum(
-					"auth mode",
-					consumeValue(),
-					AUTH_MODE_OPTIONS,
-				);
+				parsed.authMode = parseEnum("auth mode", consumeValue(), AUTH_MODE_OPTIONS);
 				break;
 			case "--runtime":
 				parsed.runtime = parseEnum("runtime", consumeValue(), RUNTIME_OPTIONS);
@@ -253,9 +228,7 @@ function parseEnum<T extends readonly string[]>(
 	const resolvedValue = ensureValue(`--${label}`, value);
 	const matchedValue = options.find((option) => option === resolvedValue);
 	if (!matchedValue) {
-		throw new Error(
-			`Invalid ${label}: ${resolvedValue}. Expected one of: ${options.join(", ")}`,
-		);
+		throw new Error(`Invalid ${label}: ${resolvedValue}. Expected one of: ${options.join(", ")}`);
 	}
 	return matchedValue;
 }
@@ -282,9 +255,7 @@ async function resolveCreateOptions(
 		authMode: parsed.authMode ?? config?.authMode,
 		runtime: parsed.runtime ?? config?.runtime,
 		sdkSpecifier:
-			parsed.sdkSpecifier ??
-			config?.sdkSpecifier ??
-			process.env.APIFUSE__SDK__SPECIFIER,
+			parsed.sdkSpecifier ?? config?.sdkSpecifier ?? process.env.APIFUSE__SDK__SPECIFIER,
 		dryRun: parsed.dryRun,
 		json: parsed.json,
 		yes: parsed.yes,
@@ -298,9 +269,7 @@ async function resolveCreateOptions(
 
 	if (partial.yes) {
 		if (!partial.name) {
-			throw new Error(
-				"--yes requires a provider name (positional or via config).",
-			);
+			throw new Error("--yes requires a provider name (positional or via config).");
 		}
 
 		return {
@@ -410,9 +379,7 @@ export async function buildProviderCreatePlan(
 	cwd: string,
 ): Promise<ProviderCreatePlan> {
 	const resolvedWorkspaceRoot =
-		options.preset === "monorepo"
-			? findApifuseInternalWorkspaceRoot(cwd)
-			: undefined;
+		options.preset === "monorepo" ? findApifuseInternalWorkspaceRoot(cwd) : undefined;
 	if (options.preset === "monorepo" && !resolvedWorkspaceRoot) {
 		throw new Error(
 			"Monorepo preset is internal to the APIFuse repository. External bounty workspaces are one-provider repositories; use the standalone default create flow.",
@@ -424,9 +391,7 @@ export async function buildProviderCreatePlan(
 	if (options.outputDir) {
 		providerRoot = resolve(cwd, options.outputDir);
 		installCwd =
-			options.preset === "monorepo" && resolvedWorkspaceRoot
-				? resolvedWorkspaceRoot
-				: providerRoot;
+			options.preset === "monorepo" && resolvedWorkspaceRoot ? resolvedWorkspaceRoot : providerRoot;
 	} else if (options.preset === "monorepo" && resolvedWorkspaceRoot) {
 		providerRoot = resolve(resolvedWorkspaceRoot, "providers", options.name);
 		installCwd = resolvedWorkspaceRoot;
@@ -439,10 +404,7 @@ export async function buildProviderCreatePlan(
 		throw new Error(`Target directory already exists: ${providerRoot}`);
 	}
 
-	if (
-		options.sdkSpecifier?.startsWith("workspace:") &&
-		!resolvedWorkspaceRoot
-	) {
+	if (options.sdkSpecifier?.startsWith("workspace:") && !resolvedWorkspaceRoot) {
 		throw new Error(
 			"workspace:* is only valid inside the APIFuse monorepo because public Provider SDK scaffolds must install from npm or an explicit tarball/file specifier.",
 		);
@@ -592,17 +554,14 @@ export async function buildProviderCreatePlan(
 		validationCommands: [
 			"bun run check",
 			"bun run type-check",
-			"bun run submit-check",
+			"bun run submit-check -- --smoke",
 			"bun run test",
 		],
 		workspaceRoot: resolvedWorkspaceRoot,
 	};
 }
 
-async function renderTemplate(
-	fileName: string,
-	values: Record<string, string>,
-): Promise<string> {
+async function renderTemplate(fileName: string, values: Record<string, string>): Promise<string> {
 	const templatePath = resolve(TEMPLATE_DIR, fileName);
 	const template = await readFile(templatePath, "utf8");
 	return template.replace(/\{\{([A-Z_]+)\}\}/g, (_match, key: string) => {
@@ -610,10 +569,7 @@ async function renderTemplate(
 	});
 }
 
-function renderPackageJson(input: {
-	packageName: string;
-	sdkSpecifier: string;
-}): string {
+function renderPackageJson(input: { packageName: string; sdkSpecifier: string }): string {
 	return `${JSON.stringify(
 		{
 			name: input.packageName,
@@ -625,8 +581,7 @@ function renderPackageJson(input: {
 				dev: "apifuse dev .",
 				check: "apifuse check . && bun run type-check",
 				"type-check": "tsc --noEmit",
-				"submit-check":
-					"apifuse submit-check . --markdown submission-report.md",
+				"submit-check": "apifuse submit-check . --markdown submission-report.md",
 				test: "apifuse test .",
 				record: "apifuse record .",
 				start: "bun start.ts",
@@ -665,10 +620,7 @@ function renderTsconfig(): string {
 	)}\n`;
 }
 
-function renderStarterLocaleCatalog(
-	displayName: string,
-	locale: "en" | "ko",
-): string {
+function renderStarterLocaleCatalog(displayName: string, locale: "en" | "ko"): string {
 	const catalog = {
 		meta: {
 			displayName,
@@ -870,9 +822,7 @@ function isApifuseInternalWorkspaceRoot(workspaceRoot: string): boolean {
 		return false;
 	}
 	try {
-		const packageJson = JSON.parse(
-			readFileSync(providerSdkPackageJsonPath, "utf8"),
-		);
+		const packageJson = JSON.parse(readFileSync(providerSdkPackageJsonPath, "utf8"));
 		return (
 			typeof packageJson === "object" &&
 			packageJson !== null &&
@@ -891,27 +841,17 @@ async function writePlan(plan: ProviderCreatePlan): Promise<void> {
 	}
 }
 
-async function installDependencies(
-	plan: ProviderCreatePlan,
-	jsonMode: boolean,
-): Promise<void> {
+async function installDependencies(plan: ProviderCreatePlan, jsonMode: boolean): Promise<void> {
 	await runCommand(plan.installCommand, plan.installCwd, jsonMode);
 }
 
-async function runBaselineValidation(
-	plan: ProviderCreatePlan,
-	jsonMode: boolean,
-): Promise<void> {
+async function runBaselineValidation(plan: ProviderCreatePlan, jsonMode: boolean): Promise<void> {
 	for (const command of plan.validationCommands) {
 		await runCommand(command, plan.providerRoot, jsonMode);
 	}
 }
 
-async function runCommand(
-	command: string,
-	cwd: string,
-	jsonMode: boolean,
-): Promise<void> {
+async function runCommand(command: string, cwd: string, jsonMode: boolean): Promise<void> {
 	const [binary, ...args] = command.split(" ");
 	if (!binary) {
 		throw new Error(`Cannot run empty command in ${cwd}`);
@@ -943,9 +883,7 @@ async function runCommand(
 			rejectPromise(
 				new Error(
 					`Command failed (${command}) in ${cwd}${
-						stdout || stderr
-							? `\n${[stdout, stderr].filter(Boolean).join("\n")}`
-							: ""
+						stdout || stderr ? `\n${[stdout, stderr].filter(Boolean).join("\n")}` : ""
 					}`,
 				),
 			);
@@ -953,11 +891,7 @@ async function runCommand(
 	});
 }
 
-function printResult(
-	plan: ProviderCreatePlan,
-	jsonMode: boolean,
-	dryRun: boolean,
-) {
+function printResult(plan: ProviderCreatePlan, jsonMode: boolean, dryRun: boolean) {
 	const payload = {
 		success: true,
 		dryRun,
@@ -974,9 +908,7 @@ function printResult(
 		},
 		validationCommands: plan.validationCommands,
 		nextDevCommand: plan.nextDevCommand,
-		files: plan.files.map(
-			(file) => relative(plan.providerRoot, file.path) || file.path,
-		),
+		files: plan.files.map((file) => relative(plan.providerRoot, file.path) || file.path),
 	};
 
 	if (jsonMode) {
@@ -992,7 +924,7 @@ function printResult(
 	}
 	console.log(`Next local dev: ${plan.nextDevCommand}`);
 	console.log(
-		"Submission evidence: run `bun run submit-check`, save the generated report, and note `/health` plus `POST /v1/{operation}` smoke results.",
+		"Submission evidence: run `bun run submit-check -- --smoke` to archive measured `/health` and `POST /v1/{operation}` results.",
 	);
 	if (plan.files.some((file) => file.content.includes('runtime: "browser"'))) {
 		console.log(

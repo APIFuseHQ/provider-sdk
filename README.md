@@ -56,7 +56,7 @@ Removed legacy runtime paths are not supported:
 cd my-provider
 bun run check
 bun run test
-bun run submit-check
+bun run submit-check -- --smoke
 bun run dev
 ```
 
@@ -245,10 +245,10 @@ be replaced before recording fixtures.
 Standalone providers include a pre-submission script:
 
 ```bash
-bun run submit-check
+bun run submit-check -- --smoke
 ```
 
-This runs the public review-readiness evaluator and writes `submission-report.md`. The report contains provider metadata, a 100-point readiness score, hard blockers, warnings, checklist evidence, and remediation. Blockers override the score; fix them before posting bounty evidence. The command is offline-safe by default and does not execute arbitrary upstream calls. Add local smoke notes to your assigned workspace PR after testing `/health` and `POST /v1/{operation}`. See [`SUBMISSION.md`](./SUBMISSION.md) for the full public-only bounty submission checklist shipped in the npm package.
+This runs the public review-readiness evaluator and writes `submission-report.md`. The report contains provider metadata, a 100-point readiness score, hard blockers, warnings, checklist evidence, measured smoke details, and remediation. Blockers override the score; fix them before posting bounty evidence. `--smoke` boots the local dev server, checks `/health`, and POSTs every operation fixture. Set `APIFUSE__PROVIDER__*` env vars when live upstream credentials are available; without them, structured provider errors can still earn runtime-path smoke credit. See [`SUBMISSION.md`](./SUBMISSION.md) for the full public-only bounty submission checklist shipped in the npm package.
 
 ## Scope boundary
 

@@ -8,7 +8,7 @@ Generated with `apifuse create`.
 bun run dev
 bun run check
 bun run test
-bun run submit-check
+bun run submit-check -- --smoke
 bunx apifuse perf . --operation <operation-id> --runs 3
 ```
 
@@ -35,15 +35,17 @@ review when `index.ts` remains a short composition root.
 Before posting bounty evidence, run:
 
 ```bash
-bun run submit-check
+bun run submit-check -- --smoke
 ```
 
 This writes `submission-report.md` with a review-readiness score, blockers,
 warnings, health coverage notes, fixture/schema evidence, and remediation. A
 score is not a payout guarantee; blockers must be fixed before maintainer
 review. The generated `ping` starter intentionally warns until you replace it
-with real upstream-backed Operations. The full public-only checklist is shipped
-in `node_modules/@apifuse/provider-sdk/SUBMISSION.md`.
+with real upstream-backed Operations. `APIFUSE__PROVIDER__*` env vars enable
+live upstream calls; without them, structured provider errors can still verify
+runtime routing. The full public-only checklist is shipped in
+`node_modules/@apifuse/provider-sdk/SUBMISSION.md`.
 
 
 ## Operation guide

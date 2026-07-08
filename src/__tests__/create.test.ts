@@ -105,7 +105,7 @@ describe("provider create planning", () => {
 		expect(packageJson?.content).not.toContain(["perf", "sample"].join(":"));
 		expect(packageJson?.content).toContain('"typescript": "');
 		expect(packageJson?.content).toContain('"@types/bun": "');
-		expect(plan.validationCommands).toContain("bun run submit-check");
+		expect(plan.validationCommands).toContain("bun run submit-check -- --smoke");
 		expect(plan.validationCommands).toContain("bun run type-check");
 		expect(plan.nextDevCommand).toContain("bun run dev");
 	});
