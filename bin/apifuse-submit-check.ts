@@ -2133,6 +2133,24 @@ function isVacuousAssertionFunction(assertions: unknown): boolean {
 	if (bound.size === 0) {
 		return true;
 	}
+	// A parameter reference anywhere in the (reachable) body is treated as
+	// inspecting the response. This is deliberately syntactic, not a dataflow
+	// analysis.
+	//
+	// KNOWN LIMITATION (accepted): a body that reads the parameter but never
+	// turns that read into an outcome — no throw, no returned verdict — still
+	// passes, e.g. `({ status }) => { console.info(status); }`. Precisely
+	// rejecting it would require tracking whether the read flows to a throw
+	// argument or return value through arbitrary local bindings and invoked
+	// helpers (`const ok = ctx.output.ok; return ok ? ...` / a called helper that
+	// throws). That is transitive use-def dataflow, and an imprecise version
+	// FALSE-BLOCKS real assertions of exactly those shapes — verified
+	// empirically. Under the fail-open contract (rejecting a real contributor is
+	// strictly worse than missing a no-op) we accept the miss here. This gate
+	// stops accidental/lazy no-ops (empty bodies, `void 0`, `Promise.resolve()`,
+	// throws in uninvoked closures); a determined bypass via a decorative ctx
+	// read is no easier than writing the real one-line `throw`, and the actual
+	// defense against a runtime-empty assertion is the live `--smoke` probe.
 	return !referencesBoundNames(fn, bound);
 }
 
