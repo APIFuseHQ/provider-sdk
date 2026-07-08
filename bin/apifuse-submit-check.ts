@@ -2096,31 +2096,118 @@ function isVacuousAssertionFunction(assertions: unknown): boolean {
 		return false;
 	}
 
+	const parsed = parseAssertionSource(source);
+	if (!parsed) {
+		return false;
+	}
+
+	// Fast-path: enumerated literal no-op bodies (empty, return void 0, {},
+	// Promise.resolve() with a vacuous argument, etc.). Kept as a precise,
+	// zero-false-positive first check.
+	const literalVacuous = parsed.concise
+		? isVacuousConciseAssertionBody(parsed.body)
+		: isVacuousBlockAssertionBody(parsed.body);
+	if (literalVacuous) {
+		return true;
+	}
+
+	// Principled backstop: a real health assertion MUST inspect the probe
+	// response, which is delivered exclusively through the assertion's
+	// parameter (ctx or a destructured shape), or it must throw. A body that
+	// references neither any parameter nor `throw` cannot be doing real work,
+	// regardless of how the no-op is spelled (await Promise.resolve(),
+	// Promise.resolve().then(), new Promise(r => r()), etc.). This closes the
+	// whole equivalent-no-op class without enumerating every form.
+	return isInversionVacuous(parsed.params, parsed.body);
+}
+
+const ASSERTION_BODY_KEYWORDS = new Set([
+	"async",
+	"await",
+	"return",
+	"void",
+	"undefined",
+	"null",
+	"true",
+	"false",
+	"Promise",
+	"resolve",
+	"reject",
+	"then",
+	"catch",
+	"finally",
+	"all",
+	"allSettled",
+	"race",
+	"new",
+	"function",
+	"typeof",
+	"if",
+	"else",
+	"throw",
+]);
+
+interface ParsedAssertion {
+	params: string;
+	body: string;
+	concise: boolean;
+}
+
+function parseAssertionSource(rawSource: string): ParsedAssertion | undefined {
+	const source = stripComments(rawSource);
 	const arrowIndex = source.indexOf("=>");
 	if (arrowIndex >= 0) {
+		const head = source.slice(0, arrowIndex);
+		const openParen = head.indexOf("(");
+		const params =
+			openParen >= 0
+				? head.slice(openParen + 1, head.lastIndexOf(")"))
+				: head.replace(/\basync\b/g, "").trim();
 		const arrowBody = source.slice(arrowIndex + 2).trim();
 		if (!arrowBody.startsWith("{")) {
-			return isVacuousConciseAssertionBody(arrowBody);
+			return { params, body: arrowBody, concise: true };
 		}
 		// Block-body arrow: parse the arrow body itself, NOT source.indexOf("{"),
 		// which would grab a destructured-parameter brace (e.g. ({ data }) => {}).
 		const arrowBodyEnd = arrowBody.lastIndexOf("}");
 		if (arrowBodyEnd <= 0) {
-			return false;
+			return undefined;
 		}
-		return isVacuousBlockAssertionBody(arrowBody.slice(1, arrowBodyEnd));
+		return { params, body: arrowBody.slice(1, arrowBodyEnd), concise: false };
 	}
 
 	// Non-arrow function: skip the parameter list so a destructured parameter
 	// brace (function ({ data }) {}) is not mistaken for the function body.
-	const parenEnd = source.indexOf(")");
-	const bodyStart = source.indexOf("{", parenEnd >= 0 ? parenEnd : 0);
+	const openParen = source.indexOf("(");
+	const closeParen = openParen >= 0 ? source.indexOf(")", openParen) : -1;
+	const params = openParen >= 0 && closeParen > openParen ? source.slice(openParen + 1, closeParen) : "";
+	const bodyStart = source.indexOf("{", closeParen >= 0 ? closeParen : 0);
 	const bodyEnd = source.lastIndexOf("}");
 	if (bodyStart < 0 || bodyEnd <= bodyStart) {
+		return undefined;
+	}
+	return { params, body: source.slice(bodyStart + 1, bodyEnd), concise: false };
+}
+
+function isInversionVacuous(params: string, body: string): boolean {
+	// A body that throws is doing real work (asserting a failure path).
+	if (/\bthrow\b/.test(body)) {
 		return false;
 	}
-
-	return isVacuousBlockAssertionBody(source.slice(bodyStart + 1, bodyEnd));
+	const paramIds = (params.match(/[A-Za-z_$][\w$]*/g) ?? []).filter(
+		(id) => !ASSERTION_BODY_KEYWORDS.has(id),
+	);
+	// No parameters at all → the assertion cannot inspect the response; unless
+	// it throws (handled above) it is vacuous.
+	if (paramIds.length === 0) {
+		return true;
+	}
+	// If the body references any bound parameter, assume it inspects the
+	// response and treat it as a real assertion (fail-open on uncertainty).
+	const referencesParam = paramIds.some((id) =>
+		new RegExp(`\\b${id.replace(/[$]/g, "\\$")}\\b`).test(body),
+	);
+	return !referencesParam;
 }
 
 function isVacuousBlockAssertionBody(body: string): boolean {

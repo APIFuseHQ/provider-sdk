@@ -231,7 +231,7 @@ export default defineProvider({
 				extraOperationFields ??
 				`healthCheck: {
         interval: "1m",
-        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: () => ({ status: "pass" }) }],
+        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: ({ status, data }) => { if (status !== 200) { return { status: "degraded", label: "lookup changed" }; } if (!data) { throw new Error("empty lookup response"); } } }],
       },`
 			}
     },
@@ -936,6 +936,12 @@ ${assertionLines(21)}
 		["block return Promise.resolve()", "() => { return Promise.resolve(); }"],
 		["async empty block", "async () => {}"],
 		["async return Promise.resolve()", "async () => { return Promise.resolve(); }"],
+		["async awaited Promise.resolve()", "async () => await Promise.resolve()"],
+		["async awaited block", "async () => { await Promise.resolve(); }"],
+		["async awaited undefined", "async () => { await undefined; }"],
+		["Promise.resolve().then no-op", "() => Promise.resolve().then(() => {})"],
+		["new Promise resolve no-op", "() => new Promise((resolve) => resolve())"],
+		["side-effect only, no param ref", "() => { globalThis.__x = 1; }"],
 	] as const) {
 		it(`blocks vacuous health assertions with ${label}`, async () => {
 			const dir = makeProviderDir(
@@ -1753,7 +1759,7 @@ export default defineProvider({
       fixtures: { request: { q: "btc" }, response: { ok: true } },
       healthCheck: {
         interval: "1m",
-        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: () => ({ status: "pass" }) }],
+        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: ({ status, data }) => { if (status !== 200) { return { status: "degraded", label: "lookup changed" }; } if (!data) { throw new Error("empty lookup response"); } } }],
       },
     },
   },
