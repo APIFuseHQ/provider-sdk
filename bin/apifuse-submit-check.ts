@@ -2631,6 +2631,8 @@ function shouldConsiderEntropyValue(value: string): boolean {
 	}
 	if (/^sha(?:256|512)-/i.test(value)) return false;
 	if (/\s/.test(value)) return false;
+	if (value.includes("${")) return false;
+	if (value.includes("/")) return false;
 	if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
 	if (/^(?:\.{0,2}\/|~\/|[A-Za-z]:\\)/.test(value)) return false;
 	if (value.includes(".") && /^[A-Za-z0-9_.-]+$/.test(value)) return false;

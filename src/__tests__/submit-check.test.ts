@@ -1122,6 +1122,39 @@ const integrity = "sha512-qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5
 		expect(check?.status).toBe("pass");
 	});
 
+	it("ignores template-literal URL path composition", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-template-path-",
+			`${validProviderSource()}
+	const PHARMACY_API_BASE = "https://example.com";
+	const BASE = PHARMACY_API_BASE;
+	export const LIST_URL = \`\${PHARMACY_API_BASE}/getParmacyListInfoInqire\`;
+	export const DETAIL_URL = \`\${BASE}/getSomethingLongerCamelCase\`;
+	`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("ignores MIME and form-encoding strings with path separators", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-mime-path-",
+			`${validProviderSource()}
+	const FORM_CONTENT_TYPE = "application/x-www-form-urlencoded; charset=UTF-8";
+	const COMPACT_FORM_CONTENT_TYPE = "application/x-www-form-urlencoded;charset=UTF-8";
+	const UPLOAD_CONTENT_TYPE = "multipart/form-data; boundary=APIFuseProviderBoundary";
+	`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+	});
+
 	it("warns on high-entropy source blobs without secret-like context", async () => {
 		const blob = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
 		const dir = makeProviderDir(
