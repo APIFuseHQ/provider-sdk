@@ -931,6 +931,11 @@ ${assertionLines(21)}
 		["block return parenthesized object", "() => { return ({}); }"],
 		["concise void 0", "() => void 0"],
 		["concise parenthesized object", "() => ({})"],
+		["concise Promise.resolve()", "() => Promise.resolve()"],
+		["concise Promise.resolve({})", "() => Promise.resolve({})"],
+		["block return Promise.resolve()", "() => { return Promise.resolve(); }"],
+		["async empty block", "async () => {}"],
+		["async return Promise.resolve()", "async () => { return Promise.resolve(); }"],
 	] as const) {
 		it(`blocks vacuous health assertions with ${label}`, async () => {
 			const dir = makeProviderDir(
@@ -993,6 +998,29 @@ ${assertionLines(21)}
               throw new Error("items must be an array");
             }
           },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real async / Promise-returning health assertion bodies", async () => {
+		const dir = makeProviderDir(
+			"submit-real-async-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (ctx) =>
+            Promise.resolve(
+              ctx.output.ok ? undefined : { status: "degraded", label: "lookup down" },
+            ),
         }],
       },`),
 		);

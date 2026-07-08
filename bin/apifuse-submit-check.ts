@@ -2127,13 +2127,20 @@ function isVacuousBlockAssertionBody(body: string): boolean {
 	const normalized = stripComments(body).replace(/\s+/g, "");
 	return (
 		normalized === "" ||
-		/^return(?:;|undefined;?|void0;?|\(void0\);?|\{\};?|\(\{\}\);?)$/.test(normalized)
+		/^return(?:;|undefined;?|void0;?|\(void0\);?|\{\};?|\(\{\}\);?|Promise\.resolve\((?:|undefined|void0|\(void0\)|\{\}|\(\{\}\))\);?)$/.test(
+			normalized,
+		)
 	);
 }
 
 function isVacuousConciseAssertionBody(body: string): boolean {
 	const normalized = stripComments(body).replace(/\s+/g, "");
-	return normalized === "" || /^(?:undefined|void0|\(void0\)|\{\}|\(\{\}\))$/.test(normalized);
+	return (
+		normalized === "" ||
+		/^(?:undefined|void0|\(void0\)|\{\}|\(\{\}\)|Promise\.resolve\((?:|undefined|void0|\(void0\)|\{\}|\(\{\}\))\))$/.test(
+			normalized,
+		)
+	);
 }
 
 function stripComments(source: string): string {
