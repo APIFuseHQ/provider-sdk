@@ -926,6 +926,11 @@ ${assertionLines(21)}
 		["destructured params empty block", "({ data, status }) => {}"],
 		["destructured params comment-only", "({ data }) => { /* TODO */ }"],
 		["non-arrow function empty block", "function ({ data }) {}"],
+		["block return empty object", "() => { return {}; }"],
+		["block return void 0", "() => { return void 0; }"],
+		["block return parenthesized object", "() => { return ({}); }"],
+		["concise void 0", "() => void 0"],
+		["concise parenthesized object", "() => ({})"],
 	] as const) {
 		it(`blocks vacuous health assertions with ${label}`, async () => {
 			const dir = makeProviderDir(
