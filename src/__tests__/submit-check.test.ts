@@ -944,6 +944,8 @@ ${assertionLines(21)}
 		["side-effect only, no param ref", "() => { globalThis.__x = 1; }"],
 		["throw only inside a string literal", '() => { console.info("throw later"); }'],
 		["bound param referenced only in string", '({ data }) => { console.info("data missing"); }'],
+		["statement-position regex after if()", "(ctx) => { if (true) /ctx/.test('x'); }"],
+		["statement-position regex after while()", "(ctx) => { while (false) /ctx/.test('x'); }"],
 	] as const) {
 		it(`blocks vacuous health assertions with ${label}`, async () => {
 			const dir = makeProviderDir(

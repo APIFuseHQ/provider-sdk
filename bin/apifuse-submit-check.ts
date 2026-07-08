@@ -2311,11 +2311,21 @@ function maskToCodeView(source: string): string {
 		"await",
 		"new",
 	]);
+	// After a control-statement header `if (...) / while (...) / for (...)` etc.,
+	// the parenthesis closes but a following `/` is still in statement/expression
+	// position, so it starts a regex — unlike a value-grouping `(expr)` whose `)`
+	// ends a value and is followed by division. Track, per `(`, whether it opened
+	// a control header so the matching `)` sets the right token class.
+	const CONTROL_KEYWORDS = new Set(["if", "while", "for", "switch", "catch", "with"]);
 	// "value" = previous token ends an expression (identifier, number, string,
 	// `)`, `]`, regex, template, value keyword) → a following `/` is division.
 	// "op" = previous token is an operator/opener/expression-keyword → a
 	// following `/` starts a regex.
 	let prevTok: "value" | "op" | "" = "";
+	// Most recent identifier/keyword word, used to classify the next `(`.
+	let lastWord = "";
+	// For each open `(`, whether it began a control-statement header.
+	const parenCtrl: boolean[] = [];
 	const tmplStack: number[] = [];
 	let depth = 0;
 	let i = 0;
@@ -2362,11 +2372,13 @@ function maskToCodeView(source: string): string {
 					while (j < n && /[a-z]/i.test(source[j])) j++;
 					blank(i, j);
 					prevTok = "value";
+					lastWord = "";
 					i = j;
 					continue;
 				}
 			}
 			prevTok = "op";
+			lastWord = "";
 			i++;
 			continue;
 		}
@@ -2379,6 +2391,7 @@ function maskToCodeView(source: string): string {
 			j = Math.min(j + 1, n);
 			blank(i, j);
 			prevTok = "value";
+			lastWord = "";
 			i = j;
 			continue;
 		}
@@ -2393,11 +2406,30 @@ function maskToCodeView(source: string): string {
 			} else {
 				prevTok = "value";
 			}
+			lastWord = "";
+			continue;
+		}
+		if (c === "(") {
+			parenCtrl.push(CONTROL_KEYWORDS.has(lastWord));
+			prevTok = "op";
+			lastWord = "";
+			i++;
+			continue;
+		}
+		if (c === ")") {
+			// A control-header `)` (if/while/for/…) leaves us in statement
+			// position → a following `/` is a regex; a value-grouping `)` ends a
+			// value → division.
+			const wasControlHeader = parenCtrl.pop() ?? false;
+			prevTok = wasControlHeader ? "op" : "value";
+			lastWord = "";
+			i++;
 			continue;
 		}
 		if (c === "{") {
 			depth++;
 			prevTok = "op";
+			lastWord = "";
 			i++;
 			continue;
 		}
@@ -2417,10 +2449,12 @@ function maskToCodeView(source: string): string {
 				} else {
 					prevTok = "value";
 				}
+				lastWord = "";
 				continue;
 			}
 			depth--;
 			prevTok = "value";
+			lastWord = "";
 			i++;
 			continue;
 		}
@@ -2430,6 +2464,7 @@ function maskToCodeView(source: string): string {
 			while (j < n && /[\w$]/.test(source[j])) j++;
 			const word = source.slice(i, j);
 			prevTok = EXPR_KEYWORDS.has(word) ? "op" : "value";
+			lastWord = word;
 			i = j;
 			continue;
 		}
@@ -2438,11 +2473,13 @@ function maskToCodeView(source: string): string {
 			let j = i + 1;
 			while (j < n && /[\w.]/.test(source[j])) j++;
 			prevTok = "value";
+			lastWord = "";
 			i = j;
 			continue;
 		}
 		if (!/\s/.test(c)) {
-			prevTok = c === ")" || c === "]" ? "value" : "op";
+			prevTok = c === "]" ? "value" : "op";
+			lastWord = "";
 		}
 		i++;
 	}
