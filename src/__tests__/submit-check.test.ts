@@ -19,7 +19,8 @@ import {
 } from "../../bin/apifuse-submit-check";
 
 const tempDirs: string[] = [];
-const submitCheckCliPath = join(import.meta.dir, "..", "..", "bin", "apifuse-submit-check.ts");
+const repoRoot = dirname(dirname(import.meta.dir));
+const submitCheckCliPath = join(repoRoot, "bin", "apifuse-submit-check.ts");
 const tempRoot = join(process.cwd(), ".tmp-provider-sdk-submit-check-tests");
 
 setDefaultTimeout(60_000);
@@ -66,7 +67,7 @@ function linkLocalSdkDependency(providerDir: string): void {
 	mkdirSync(scopeDir, { recursive: true });
 	const target = join(scopeDir, "provider-sdk");
 	if (!existsSync(target)) {
-		symlinkSync(dirname(dirname(import.meta.dir)), target, "dir");
+		symlinkSync(repoRoot, target, "dir");
 	}
 	const binDir = join(providerDir, "node_modules", ".bin");
 	mkdirSync(binDir, { recursive: true });
@@ -899,6 +900,106 @@ ${assertionLines(21)}
 		expect(report.summary.blockers).toBeGreaterThan(0);
 	});
 
+	it("blocks no-op health assertion bodies", async () => {
+		const dir = makeProviderDir(
+			"submit-vacuous-health-empty-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: () => {} }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.points).toBe(0);
+		expect(check?.remediation).toContain("healthCheck.assertions for lookup is empty");
+		expect(report.score.verdict).toBe("blocked");
+		expect(report.score.total).toBeLessThan(90);
+	});
+
+	for (const [label, assertionsSource] of [
+		["undefined concise return", "() => undefined"],
+		["comment-only block", "(ctx) => { /* TODO */ }"],
+	] as const) {
+		it(`blocks vacuous health assertions with ${label}`, async () => {
+			const dir = makeProviderDir(
+				"submit-vacuous-health-",
+				validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: ${assertionsSource} }],
+      },`),
+			);
+			writeValidLocaleCatalogs(dir);
+			const report = await buildSubmitCheckReport(dir);
+			const check = report.checks.find((item) => item.id === "health-coverage");
+
+			expect(check?.level).toBe("blocker");
+			expect(check?.status).toBe("fail");
+			expect(check?.evidence?.join("\n")).toContain("lookup: empty healthCheck.assertions");
+		});
+	}
+
+	it("passes real health assertion bodies", async () => {
+		const dir = makeProviderDir(
+			"submit-real-health-assertions-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (ctx) => {
+            if (!ctx.output.ok) {
+              throw new Error("lookup must return ok");
+            }
+            if (ctx.durationMs > 1_000) {
+              return { status: "degraded", label: "slow lookup" };
+            }
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("blocks only operations whose health cases are all vacuous", async () => {
+		const source = validProviderSource().replace(
+			"    },\n  },\n});",
+			`    },
+    empty: {
+      descriptionKey: "operations.lookup.description",
+      input,
+      output,
+      annotations: { readOnly: true, idempotent: true, openWorld: true },
+      handler: async () => ({ ok: true }),
+      fixtures: { request: { q: "eth" }, response: { ok: true } },
+      healthCheck: {
+        interval: "1m",
+        cases: [{ name: "empty ok", input: { q: "eth" }, assertions: () => {} }],
+      },
+    },
+  },
+});`,
+		);
+		const dir = makeProviderDir("submit-mixed-vacuous-health-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence).toEqual(["empty: empty healthCheck.assertions"]);
+		expect(check?.remediation).toContain("healthCheck.assertions for empty is empty");
+		expect(check?.remediation).not.toContain("lookup is empty");
+	});
+
 	it("warns but does not block generated OAuth providers without credential keys", async () => {
 		const oauthSource = validProviderSource().replace(
 			'auth: { mode: "none" },',
@@ -987,6 +1088,21 @@ ${assertionLines(21)}
 				id: check.id,
 				remediation: expect.stringMatching(/\S/),
 			})),
+		);
+
+		const vacuousHealthDir = makeProviderDir(
+			"submit-remediation-vacuous-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: () => {} }],
+      },`),
+		);
+		writeValidLocaleCatalogs(vacuousHealthDir);
+		const vacuousHealthReport = await buildSubmitCheckReport(vacuousHealthDir);
+		expect(
+			vacuousHealthReport.checks.find((check) => check.id === "health-coverage")?.remediation,
+		).toContain(
+			"healthCheck.assertions for lookup is empty",
 		);
 	});
 

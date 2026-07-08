@@ -1972,6 +1972,7 @@ function scoreFixtureCoverage(provider: ProviderDefinition): SubmitCheck {
 function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 	const operations = Object.entries(provider.operations);
 	const missing: string[] = [];
+	const vacuous: string[] = [];
 	const placeholder: string[] = [];
 	const unsupported: string[] = [];
 	const generatedStarter: string[] = [];
@@ -1982,6 +1983,9 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 		if (!hasCheck && !hasUnsupported) {
 			missing.push(operationId);
 			continue;
+		}
+		if (hasCheck && !hasUnsupported && hasOnlyVacuousHealthCases(operation.healthCheck)) {
+			vacuous.push(operationId);
 		}
 		if (hasUnsupported) {
 			const reason = operation.healthCheckUnsupported?.reason ?? "";
@@ -2005,6 +2009,17 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 			`For ${missing.join(", ")}, add \`healthCheck: { interval, cases }\` for safe read-only upstream probes, or add \`healthCheckUnsupported: { reason: "<specific reason>" }\`.`,
 			CATEGORY_MAX_POINTS.health,
 			missing,
+		);
+	}
+
+	if (vacuous.length > 0) {
+		return blocker(
+			"health-coverage",
+			"health",
+			"One or more operations have healthCheck cases with empty assertions.",
+			`healthCheck.assertions for ${vacuous.join(", ")} is empty — assert on status and response shape (e.g. throw or return {status:'degraded'} when the upstream contract breaks), or declare healthCheckUnsupported with a specific reason if the operation genuinely cannot be probed.`,
+			CATEGORY_MAX_POINTS.health,
+			vacuous.map((operationId) => `${operationId}: empty healthCheck.assertions`),
 		);
 	}
 
@@ -2057,6 +2072,59 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 		"All operations declare real health checks.",
 		CATEGORY_MAX_POINTS.health,
 	);
+}
+
+function hasOnlyVacuousHealthCases(
+	healthCheck: ProviderDefinition["operations"][string]["healthCheck"],
+): boolean {
+	const cases = healthCheck?.cases;
+	if (!Array.isArray(cases) || cases.length === 0) {
+		return true;
+	}
+	return cases.every((healthCase) => isVacuousAssertionFunction(healthCase?.assertions));
+}
+
+function isVacuousAssertionFunction(assertions: unknown): boolean {
+	if (typeof assertions !== "function") {
+		return true;
+	}
+
+	let source: string;
+	try {
+		source = Function.prototype.toString.call(assertions);
+	} catch {
+		return false;
+	}
+
+	const arrowIndex = source.indexOf("=>");
+	if (arrowIndex >= 0) {
+		const arrowBody = source.slice(arrowIndex + 2).trim();
+		if (!arrowBody.startsWith("{")) {
+			return isVacuousConciseAssertionBody(arrowBody);
+		}
+	}
+
+	const bodyStart = source.indexOf("{");
+	const bodyEnd = source.lastIndexOf("}");
+	if (bodyStart < 0 || bodyEnd <= bodyStart) {
+		return false;
+	}
+
+	return isVacuousBlockAssertionBody(source.slice(bodyStart + 1, bodyEnd));
+}
+
+function isVacuousBlockAssertionBody(body: string): boolean {
+	const normalized = stripComments(body).replace(/\s+/g, "");
+	return normalized === "" || /^return(?:;|undefined;?|\{\};?)$/.test(normalized);
+}
+
+function isVacuousConciseAssertionBody(body: string): boolean {
+	const normalized = stripComments(body).replace(/\s+/g, "");
+	return normalized === "" || /^(?:undefined|void0|\{\}|\(\{\}\))$/.test(normalized);
+}
+
+function stripComments(source: string): string {
+	return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
 }
 
 function scoreSmoke(
