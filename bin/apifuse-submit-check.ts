@@ -2096,6 +2096,13 @@ function isVacuousAssertionFunction(assertions: unknown): boolean {
 		return false;
 	}
 
+	// Native / bound functions stringify to `function () { [native code] }` with
+	// no inspectable body or params. The underlying implementation may inspect
+	// ctx, so fail open (do not flag) rather than mistake it for an empty body.
+	if (/\[native code\]/.test(source)) {
+		return false;
+	}
+
 	const parsed = parseAssertionSource(source);
 	if (!parsed) {
 		return false;
@@ -2117,8 +2124,12 @@ function isVacuousAssertionFunction(assertions: unknown): boolean {
 	// references neither any parameter nor `throw` cannot be doing real work,
 	// regardless of how the no-op is spelled (await Promise.resolve(),
 	// Promise.resolve().then(), new Promise(r => r()), etc.). This closes the
-	// whole equivalent-no-op class without enumerating every form.
-	return isInversionVacuous(parsed.params, parsed.body);
+	// whole equivalent-no-op class without enumerating every form. The check
+	// runs against `rawBody` (block comments removed but line comments and
+	// regex literals preserved) so a `//` inside a regex such as
+	// /^https?:\/\// is not mistaken for a comment and does not erase a real
+	// parameter reference.
+	return isInversionVacuous(parsed.params, parsed.rawBody);
 }
 
 const ASSERTION_BODY_KEYWORDS = new Set([
@@ -2150,11 +2161,22 @@ const ASSERTION_BODY_KEYWORDS = new Set([
 interface ParsedAssertion {
 	params: string;
 	body: string;
+	rawBody: string;
 	concise: boolean;
 }
 
 function parseAssertionSource(rawSource: string): ParsedAssertion | undefined {
+	// `body` has ALL comments stripped (used by the literal fast-path, which
+	// normalizes whitespace and matches exact no-op spellings). `rawBody` has
+	// only block comments removed, preserving line comments and — critically —
+	// regex literals like /^https?:\/\// whose `//` a naive line-comment strip
+	// would corrupt. The inversion param/throw check uses `rawBody`.
 	const source = stripComments(rawSource);
+	const rawSourceNoBlock = stripBlockComments(rawSource);
+	const rawArrowIndex = rawSourceNoBlock.indexOf("=>");
+	const rawBodyFull =
+		rawArrowIndex >= 0 ? rawSourceNoBlock.slice(rawArrowIndex + 2).trim() : rawSourceNoBlock;
+
 	const arrowIndex = source.indexOf("=>");
 	if (arrowIndex >= 0) {
 		const head = source.slice(0, arrowIndex);
@@ -2165,7 +2187,7 @@ function parseAssertionSource(rawSource: string): ParsedAssertion | undefined {
 				: head.replace(/\basync\b/g, "").trim();
 		const arrowBody = source.slice(arrowIndex + 2).trim();
 		if (!arrowBody.startsWith("{")) {
-			return { params, body: arrowBody, concise: true };
+			return { params, body: arrowBody, rawBody: rawBodyFull, concise: true };
 		}
 		// Block-body arrow: parse the arrow body itself, NOT source.indexOf("{"),
 		// which would grab a destructured-parameter brace (e.g. ({ data }) => {}).
@@ -2173,7 +2195,10 @@ function parseAssertionSource(rawSource: string): ParsedAssertion | undefined {
 		if (arrowBodyEnd <= 0) {
 			return undefined;
 		}
-		return { params, body: arrowBody.slice(1, arrowBodyEnd), concise: false };
+		const rawBlockBody = rawBodyFull.startsWith("{")
+			? rawBodyFull.slice(1, rawBodyFull.lastIndexOf("}"))
+			: rawBodyFull;
+		return { params, body: arrowBody.slice(1, arrowBodyEnd), rawBody: rawBlockBody, concise: false };
 	}
 
 	// Non-arrow function: skip the parameter list so a destructured parameter
@@ -2186,7 +2211,11 @@ function parseAssertionSource(rawSource: string): ParsedAssertion | undefined {
 	if (bodyStart < 0 || bodyEnd <= bodyStart) {
 		return undefined;
 	}
-	return { params, body: source.slice(bodyStart + 1, bodyEnd), concise: false };
+	const rawOpen = rawSourceNoBlock.indexOf("{", rawSourceNoBlock.indexOf(")"));
+	const rawClose = rawSourceNoBlock.lastIndexOf("}");
+	const rawBlockBody =
+		rawOpen >= 0 && rawClose > rawOpen ? rawSourceNoBlock.slice(rawOpen + 1, rawClose) : rawBodyFull;
+	return { params, body: source.slice(bodyStart + 1, bodyEnd), rawBody: rawBlockBody, concise: false };
 }
 
 function isInversionVacuous(params: string, body: string): boolean {
@@ -2232,6 +2261,10 @@ function isVacuousConciseAssertionBody(body: string): boolean {
 
 function stripComments(source: string): string {
 	return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
+}
+
+function stripBlockComments(source: string): string {
+	return source.replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
 function scoreSmoke(

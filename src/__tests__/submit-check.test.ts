@@ -1038,6 +1038,57 @@ ${assertionLines(21)}
 		expect(check?.points).toBe(15);
 	});
 
+	it("passes assertions that inspect a URL-shaped field via a regex literal", async () => {
+		// Regression: the `//` inside /^https?:\/\// must not be treated as a
+		// line comment and erase the data.url parameter reference.
+		const dir = makeProviderDir(
+			"submit-regex-url-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: ({ data }) => {
+            const ok = /^https?:\\/\\//.test(data.url);
+            return ok ? undefined : { status: "degraded", label: "bad url" };
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("fails open for native / bound assertion functions", async () => {
+		// Regression: fn.bind(...) stringifies to `function () { [native code] }`
+		// with no inspectable params; must not be flagged as an empty assertion.
+		const dir = makeProviderDir(
+			"submit-bound-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (function checkHealth({ status }) {
+            if (status !== 200) {
+              throw new Error("lookup failed");
+            }
+          }).bind(undefined),
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
 	it("blocks only operations whose health cases are all vacuous", async () => {
 		const source = validProviderSource().replace(
 			"    },\n  },\n});",
