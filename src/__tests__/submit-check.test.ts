@@ -946,6 +946,8 @@ ${assertionLines(21)}
 		["bound param referenced only in string", '({ data }) => { console.info("data missing"); }'],
 		["statement-position regex after if()", "(ctx) => { if (true) /ctx/.test('x'); }"],
 		["statement-position regex after while()", "(ctx) => { while (false) /ctx/.test('x'); }"],
+		["throw only as an object property key", "() => ({ throw: undefined })"],
+		["throw property key among others", "() => ({ throw: 1, status: 2 })"],
 	] as const) {
 		it(`blocks vacuous health assertions with ${label}`, async () => {
 			const dir = makeProviderDir(

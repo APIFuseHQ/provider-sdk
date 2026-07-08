@@ -2216,9 +2216,13 @@ function parseAssertionSource(rawSource: string): ParsedAssertion | undefined {
 }
 
 function isInversionVacuous(params: string, body: string): boolean {
-	// `body` is already the code view, so a `throw` here is a real throw
-	// statement, not text inside a comment or string literal.
-	if (/\bthrow\b/.test(body)) {
+	// `body` is already the code view, so a `throw` here is real code, not text
+	// inside a comment or string. But `throw` is only a statement keyword: it is
+	// NOT a throw when used as a property key (`{ throw: x }`), a member
+	// (`obj.throw`), or part of a longer identifier. Require a `throw` token that
+	// is not preceded by `.`/an identifier char and not immediately followed by
+	// `:` (which would make it a property name).
+	if (hasRealThrowStatement(body)) {
 		return false;
 	}
 	const paramIds = (params.match(/[A-Za-z_$][\w$]*/g) ?? []).filter(
@@ -2238,6 +2242,26 @@ function isInversionVacuous(params: string, body: string): boolean {
 		return new RegExp(`(?<![$\\w])${escaped}(?![$\\w])`).test(body);
 	});
 	return !referencesParam;
+}
+
+/**
+ * True if the code-view `body` contains a real `throw` STATEMENT. `throw` is a
+ * statement keyword, so a `throw` token that is used as a property key
+ * (`{ throw: x }`), a member/identifier (`obj.throw`, `throwCount`), etc. does
+ * not throw. Require a `throw` word token not preceded by `.`/identifier chars
+ * and not immediately followed by `:` (which would make it a property name).
+ */
+function hasRealThrowStatement(body: string): boolean {
+	const re = /(?<![.\w$])throw(?![\w$])/g;
+	let match: RegExpExecArray | null = re.exec(body);
+	while (match !== null) {
+		const after = body.slice(match.index + "throw".length).replace(/^\s+/, "");
+		if (!after.startsWith(":")) {
+			return true;
+		}
+		match = re.exec(body);
+	}
+	return false;
 }
 
 /**
