@@ -923,6 +923,9 @@ ${assertionLines(21)}
 	for (const [label, assertionsSource] of [
 		["undefined concise return", "() => undefined"],
 		["comment-only block", "(ctx) => { /* TODO */ }"],
+		["destructured params empty block", "({ data, status }) => {}"],
+		["destructured params comment-only", "({ data }) => { /* TODO */ }"],
+		["non-arrow function empty block", "function ({ data }) {}"],
 	] as const) {
 		it(`blocks vacuous health assertions with ${label}`, async () => {
 			const dir = makeProviderDir(
@@ -956,6 +959,33 @@ ${assertionLines(21)}
             }
             if (ctx.durationMs > 1_000) {
               return { status: "degraded", label: "slow lookup" };
+            }
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real destructured-parameter health assertion bodies", async () => {
+		const dir = makeProviderDir(
+			"submit-real-destructured-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: ({ status, data }) => {
+            if (status !== 200) {
+              return { status: "degraded", label: "lookup changed" };
+            }
+            if (!Array.isArray(data.items)) {
+              throw new Error("items must be an array");
             }
           },
         }],

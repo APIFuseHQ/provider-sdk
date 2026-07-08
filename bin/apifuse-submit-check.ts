@@ -2102,9 +2102,19 @@ function isVacuousAssertionFunction(assertions: unknown): boolean {
 		if (!arrowBody.startsWith("{")) {
 			return isVacuousConciseAssertionBody(arrowBody);
 		}
+		// Block-body arrow: parse the arrow body itself, NOT source.indexOf("{"),
+		// which would grab a destructured-parameter brace (e.g. ({ data }) => {}).
+		const arrowBodyEnd = arrowBody.lastIndexOf("}");
+		if (arrowBodyEnd <= 0) {
+			return false;
+		}
+		return isVacuousBlockAssertionBody(arrowBody.slice(1, arrowBodyEnd));
 	}
 
-	const bodyStart = source.indexOf("{");
+	// Non-arrow function: skip the parameter list so a destructured parameter
+	// brace (function ({ data }) {}) is not mistaken for the function body.
+	const parenEnd = source.indexOf(")");
+	const bodyStart = source.indexOf("{", parenEnd >= 0 ? parenEnd : 0);
 	const bodyEnd = source.lastIndexOf("}");
 	if (bodyStart < 0 || bodyEnd <= bodyStart) {
 		return false;
