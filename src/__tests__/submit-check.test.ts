@@ -990,6 +990,50 @@ ${assertionLines(21)}
 		);
 	});
 
+	it("includes actionable remediation on every failing or warning submit check", async () => {
+		const brokenSource = validProviderSource(
+			'healthCheckUnsupported: { reason: "TODO later after real API access" },',
+		)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				`handler: async () => {
+        await fetch("https://api.example.com/raw");
+        return { ok: true };
+      },`,
+			)
+			.replace(
+				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				"fixtures: { request: { q: 123 }, response: { ok: true } },",
+			)
+			.replace(
+				"annotations: { readOnly: true, idempotent: true, openWorld: true },",
+				"",
+			);
+		const dir = makeProviderDir(
+			"submit-remediation-coverage-",
+			brokenSource,
+			"missing submission guidance",
+			false,
+		);
+		const report = await buildSubmitCheckReport(dir);
+		const actionable = report.checks.filter(
+			(check) => check.status === "fail" || check.status === "warn",
+		);
+
+		expect(actionable.length).toBeGreaterThan(0);
+		expect(
+			actionable.map((check) => ({
+				id: check.id,
+				remediation: check.remediation?.trim(),
+			})),
+		).toEqual(
+			actionable.map((check) => ({
+				id: check.id,
+				remediation: expect.stringMatching(/\S/),
+			})),
+		);
+	});
+
 	it("warns on placeholder unsupported health rationale without blocking", async () => {
 		const dir = makeProviderDir(
 			"submit-placeholder-health-",
