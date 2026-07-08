@@ -2564,14 +2564,29 @@ function isEntropySecretExcludedPath(relativePath: string): boolean {
 	);
 }
 
-function extractStringLiteralCandidates(line: string): string[] {
+export function extractStringLiteralCandidates(line: string): string[] {
 	const candidates: string[] = [];
-	const pattern = /(["'`])((?:\\.|(?!\1)[^\\\r\n]){20,})\1/g;
-	let match = pattern.exec(line);
-	while (match !== null) {
-		const value = match[2];
-		if (value) candidates.push(value);
-		match = pattern.exec(line);
+	for (let index = 0; index < line.length; index += 1) {
+		const quote = line[index];
+		if (quote !== '"' && quote !== "'" && quote !== "`") continue;
+
+		const contentStart = index + 1;
+		let cursor = contentStart;
+		while (cursor < line.length) {
+			const char = line[cursor];
+			if (char === "\\") {
+				cursor += 2;
+				continue;
+			}
+			if (char === quote) {
+				if (cursor - contentStart >= 20) {
+					candidates.push(line.slice(contentStart, cursor));
+				}
+				index = cursor;
+				break;
+			}
+			cursor += 1;
+		}
 	}
 	return candidates;
 }

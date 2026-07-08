@@ -12,6 +12,7 @@ import { dirname, join } from "node:path";
 
 import {
 	buildSubmitCheckReport,
+	extractStringLiteralCandidates,
 	isAutoPromotionEligible,
 	renderMarkdown,
 	type SubmitCheckReport,
@@ -1051,6 +1052,43 @@ ${assertionLines(21)}
 		expect(check?.evidence?.join("\n")).toContain("index.ts:");
 		expect(check?.evidence?.join("\n")).toContain("qJ8n...[REDACTED length=58]");
 		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
+	it("scans short string literals in linear time", () => {
+		const shortLiteralLine = '\t\t\tcloses_at: "21:00",';
+		const lines = Array.from({ length: 500 }, () => shortLiteralLine);
+		const startedAt = Date.now();
+
+		const candidates = lines.flatMap((line) => extractStringLiteralCandidates(line));
+
+		expect(candidates).toHaveLength(0);
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+	});
+
+	it("extracts long string literal candidates without dropping supported quote forms", () => {
+		const highEntropy =
+			"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+		const escaped = String.raw`abc\"defghiJKLMNOP1234567890`;
+		const backtick = "mP4sT7yB3cD6fG1hL5zX0aS";
+		const first = "A1b2C3d4E5f6G7h8I9j0K";
+		const second = "z9Y8x7W6v5U4t3S2r1Q0p";
+
+		expect(highEntropy.length).toBe(64);
+		expect(extractStringLiteralCandidates(`const key = "${highEntropy}";`)).toEqual([
+			highEntropy,
+		]);
+		expect(extractStringLiteralCandidates(`const escaped = "${escaped}";`)).toEqual([
+			escaped,
+		]);
+		expect(
+			extractStringLiteralCandidates(`const template = \`${backtick}\`;`),
+		).toEqual([backtick]);
+		expect(
+			extractStringLiteralCandidates(`const pair = '${first}' + "${second}";`),
+		).toEqual([first, second]);
+		expect(extractStringLiteralCandidates('const short = "1234567890123456789";')).toEqual(
+			[],
+		);
 	});
 
 	it("ignores high-entropy strings in fixtures", async () => {
