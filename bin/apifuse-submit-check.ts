@@ -2282,9 +2282,23 @@ function scopeReferences(root: acorn.AnyNode, names: Set<string>): boolean {
  * Walk `node`, invoking `onReference` when an Identifier in value position
  * matches a name in `names`. Skips property keys and non-computed member
  * properties. On entering a nested function, removes any parameter names it
- * rebinds (shadowing) from the active set for that subtree.
+ * rebinds (shadowing) from the active set for that subtree, and does NOT descend
+ * into a DEFERRED function body — one bound to a name (a variable/assignment
+ * initializer, a function declaration, an object/class member) rather than
+ * immediately executed. A parameter read inside an uninvoked closure (e.g.
+ * `(ctx) => { const later = () => ctx.status; }`) never runs when the assertion
+ * runs, so it must not count as inspecting the response — mirroring how
+ * `functionThrows` ignores throws inside nested functions. Immediately-invoked
+ * callbacks (`ctx.items.every((i) => ...)`, IIFEs) are NOT deferred, so their
+ * bodies are still searched and real assertions keep passing.
  */
-function walkAstValues(node: acorn.AnyNode, names: Set<string>, onReference: () => void): void {
+function walkAstValues(
+	node: acorn.AnyNode,
+	names: Set<string>,
+	onReference: () => void,
+	parent: acorn.AnyNode | null = null,
+	parentKey: string | null = null,
+): void {
 	if (names.size === 0) {
 		return;
 	}
@@ -2295,7 +2309,7 @@ function walkAstValues(node: acorn.AnyNode, names: Set<string>, onReference: () 
 		return;
 	}
 	// Nested function: subtract its own parameter bindings (shadowing) before
-	// descending into its body.
+	// descending into its body — and skip it entirely when it is deferred.
 	if (isFunctionNode(node)) {
 		const shadowed = new Set<string>();
 		for (const param of node.params) {
@@ -2307,10 +2321,14 @@ function walkAstValues(node: acorn.AnyNode, names: Set<string>, onReference: () 
 				visible.add(name);
 			}
 		}
-		if (visible.size > 0) {
-			for (const child of childNodes(node.body)) {
-				walkAstValues(child, visible, onReference);
+		if (visible.size === 0 || isDeferredFunction(node, parent, parentKey)) {
+			return;
+		}
+		for (const [key, child] of childEntries(node)) {
+			if (key === "params") {
+				continue;
 			}
+			walkAstValues(child, visible, onReference, node, key);
 		}
 		return;
 	}
@@ -2323,8 +2341,45 @@ function walkAstValues(node: acorn.AnyNode, names: Set<string>, onReference: () 
 		if (key === "property" && node.type === "MemberExpression" && !node.computed) {
 			continue;
 		}
-		walkAstValues(child, names, onReference);
+		walkAstValues(child, names, onReference, node, key);
 	}
+}
+
+/**
+ * A function node is "deferred" when its parent binds it to a name instead of
+ * executing it, so its body does not run as part of evaluating the assertion:
+ * `const f = () => ...` / `f = () => ...` / `function f() {}` / `{ f: () => ...
+ * }` / a class method. Functions in any other position (a call argument like
+ * `.every(cb)`, a callee `(() => ...)()`, a return/conditional expression) may
+ * execute when the assertion runs, so they are not deferred.
+ */
+function isDeferredFunction(
+	fn: AssertionFunctionNode,
+	parent: acorn.AnyNode | null,
+	parentKey: string | null,
+): boolean {
+	if (fn.type === "FunctionDeclaration") {
+		return true;
+	}
+	if (!parent) {
+		return false;
+	}
+	if (parent.type === "VariableDeclarator" && parentKey === "init") {
+		return true;
+	}
+	if (parent.type === "AssignmentExpression" && parentKey === "right") {
+		return true;
+	}
+	if (parent.type === "Property" && parentKey === "value" && !parent.computed) {
+		return true;
+	}
+	if (
+		(parent.type === "MethodDefinition" || parent.type === "PropertyDefinition") &&
+		parentKey === "value"
+	) {
+		return true;
+	}
+	return false;
 }
 
 /** Generic pre-order AST walk; `visit` returns false to stop descending. */
