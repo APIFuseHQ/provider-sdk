@@ -470,6 +470,111 @@ describe("createHttpClient", () => {
 		expect(mockNativeFetchState.calls).toHaveLength(1);
 	});
 
+	it("defaults proxy-routed GET requests to transient transport retry", async () => {
+		const originalRandom = Math.random;
+		Math.random = () => 0;
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
+		let response: Awaited<ReturnType<typeof http.get>> | undefined;
+		try {
+			response = await http.get("https://example.com");
+		} finally {
+			Math.random = originalRandom;
+		}
+
+		expect(response?.ok).toBeTrue();
+		expect(response?.data).toEqual({ ok: true });
+		expect(mockNativeFetchState.calls).toHaveLength(2);
+		for (const call of mockNativeFetchState.calls) {
+			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(
+				"http://proxy.test",
+			);
+		}
+	});
+
+	it("defaults provider-policy proxy GET requests to transient transport retry", async () => {
+		const originalRandom = Math.random;
+		Math.random = () => 0;
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, {
+			upstream: {
+				proxy: {
+					mode: "optional",
+					provider: "custom",
+					geo: { country: "KR" },
+				},
+			},
+			apifuseConfig: { proxy: { url: "http://proxy.test" } },
+		});
+		let response: Awaited<ReturnType<typeof http.get>> | undefined;
+		try {
+			response = await http.get("https://example.com");
+		} finally {
+			Math.random = originalRandom;
+		}
+
+		expect(response?.ok).toBeTrue();
+		expect(response?.data).toEqual({ ok: true });
+		expect(mockNativeFetchState.calls).toHaveLength(2);
+		for (const call of mockNativeFetchState.calls) {
+			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(
+				"http://proxy.test",
+			);
+		}
+	});
+
+	it("does not default-retry proxy-routed GET requests when retry is false", async () => {
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: "{}",
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
+
+		await expect(
+			http.get("https://example.com", { retry: false }),
+		).rejects.toMatchObject({
+			code: "transport_network_error",
+		});
+		expect(mockNativeFetchState.calls).toHaveLength(1);
+	});
+
+	it("does not default-retry proxy-routed POST requests", async () => {
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: "{}",
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
+
+		await expect(
+			http.post("https://example.com", { ok: true }),
+		).rejects.toMatchObject({
+			code: "transport_network_error",
+		});
+		expect(mockNativeFetchState.calls).toHaveLength(1);
+	});
+
 	it("SafeRead retries configured HTTP statuses and preserves terminal HTTP error shape", async () => {
 		mockNativeFetchState.queuedResponses.push(
 			{

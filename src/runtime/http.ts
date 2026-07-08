@@ -252,6 +252,40 @@ function normalizeRetryOptions(
 	return normalized;
 }
 
+function isProxyRoutedOrRequested(
+	options: RequestOptions,
+	clientOptions: HttpClientOptions,
+): boolean {
+	if (options.proxy !== undefined || clientOptions.proxy !== undefined) {
+		return true;
+	}
+
+	const upstreamProxy = clientOptions.upstream?.proxy;
+	if (upstreamProxy === true) {
+		return true;
+	}
+	if (upstreamProxy && upstreamProxy.mode !== "disabled") {
+		return true;
+	}
+
+	return Boolean(
+		clientOptions.proxyPolicy && clientOptions.proxyPolicy.mode !== "disabled",
+	);
+}
+
+function selectRetryInput(
+	options: RequestOptions,
+	clientOptions: HttpClientOptions,
+): RequestOptions["retry"] {
+	if (options.retry !== undefined) {
+		return options.retry;
+	}
+	if (isProxyRoutedOrRequested(options, clientOptions)) {
+		return HttpRetryPreset.TransportTransient;
+	}
+	return undefined;
+}
+
 function validateRetryOptionsShape(retry: HttpRetryOptions): void {
 	if (
 		retry.preset !== undefined &&
@@ -874,7 +908,9 @@ export function createHttpClient(
 			options.body,
 		);
 		const methodName = normalizeHttpMethod(method);
-		const retryOptions = normalizeRetryOptions(headersOptions.retry);
+		const retryOptions = normalizeRetryOptions(
+			selectRetryInput(headersOptions, clientOptions),
+		);
 		if (retryOptions) validateUnsafeRetryMethods(retryOptions);
 		const retryEnabled = Boolean(
 			retryOptions &&
