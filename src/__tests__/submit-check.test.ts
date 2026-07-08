@@ -51,6 +51,7 @@ function makeProviderDir(
 	);
 	if (includeRepositoryDx) {
 		writeFileSync(join(dir, ".gitignore"), "node_modules/\n.env\n");
+		writeFileSync(join(dir, "AGENTS.md"), "# Agent Guide\n");
 	}
 	writeFileSync(join(dir, "Dockerfile"), "FROM oven/bun:1.2-alpine\n");
 	writeFileSync(join(dir, "README.md"), readme);
@@ -295,6 +296,7 @@ describe("apifuse submit-check", () => {
 		expect(report.score.verdict).toBe("reviewable_with_warnings");
 		expect(dxCheck?.status).toBe("warn");
 		expect(dxCheck?.message).toContain(".gitignore");
+		expect(dxCheck?.message).toContain("AGENTS.md");
 		expect(dxCheck?.message).toContain("type-check");
 		expect(dxCheck?.remediation).toContain("apifuse create");
 	});
