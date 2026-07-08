@@ -12,6 +12,7 @@ import {
 	createProviderChoiceContext,
 	createStealthClient,
 	createSttClientFromEnv,
+	createUnsupportedNativeNetworkClient,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
 	ProviderError,
 } from "../src";
@@ -96,6 +97,9 @@ export function createProviderContext(provider: ProviderDefinition): {
 					})
 				: createUnsupportedBrowserStub(),
 		http: createHttpClient(),
+		native: {
+			network: createUnsupportedNativeNetworkClient(),
+		},
 		cache: createProviderCache({ providerId: provider.id }),
 		state,
 		trace: createTraceContext(),

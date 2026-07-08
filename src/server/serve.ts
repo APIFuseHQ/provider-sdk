@@ -34,6 +34,7 @@ import { createEnvContext } from "../runtime/env";
 import { executeOperation } from "../runtime/executor";
 import { createHttpClient } from "../runtime/http";
 import { wrapWithInstrumentation } from "../runtime/instrumentation";
+import { createNativeNetworkClient } from "../runtime/native-network";
 import { getProviderBaseUrl } from "../runtime/provider";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
@@ -253,6 +254,12 @@ function createProviderContext(
 				retryResponseMeta.set(wrappedContext, summary);
 			},
 		}),
+		native: {
+			network: createNativeNetworkClient(
+				provider.native?.network?.tcp ?? [],
+				provider.native?.network?.dynamicTcp ?? [],
+			),
+		},
 		cache: createProviderCache({ providerId: provider.id }),
 		state,
 		stealth: stealthBaseUrl
@@ -372,6 +379,12 @@ function createAuthFlowContext(
 			tenantId: request.tenantId ?? "",
 			providerId: request.providerId ?? provider.id,
 			http: createHttpClient(baseUrl, proxyClientOptions),
+			native: {
+				network: createNativeNetworkClient(
+				provider.native?.network?.tcp ?? [],
+				provider.native?.network?.dynamicTcp ?? [],
+			),
+			},
 			stealth: stealthBaseUrl
 				? stealthProfile
 					? createStealthClient(

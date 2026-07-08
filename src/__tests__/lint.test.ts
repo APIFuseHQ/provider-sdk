@@ -3,10 +3,7 @@ import { z } from "zod";
 import { lintOperation, lintProvider } from "../lint";
 import { describeKey, fields } from "../schema";
 
-function withDescriptionKey<TSchema extends z.ZodType>(
-	schema: TSchema,
-	key: string,
-): TSchema {
+function withDescriptionKey<TSchema extends z.ZodType>(schema: TSchema, key: string): TSchema {
 	return describeKey(schema, key);
 }
 
@@ -19,25 +16,13 @@ describe("lintOperation", () => {
 			}),
 			output: z.object({ result: z.string() }),
 			fixtures: { request: { filters: { ids: ["btc"] } } },
-			inputExamples: [
-				{ scenario: "one", input: { filters: { ids: ["btc"] } } },
-			],
+			inputExamples: [{ scenario: "one", input: { filters: { ids: ["btc"] } } }],
 		});
 
-		expect(
-			diagnostics.some((item) => item.rule === "description-min-length"),
-		).toBe(true);
-		expect(
-			diagnostics.some(
-				(item) => item.rule === "schema-description-key-required",
-			),
-		).toBe(true);
-		expect(
-			diagnostics.some((item) => item.rule === "fixtures-both-directions"),
-		).toBe(true);
-		expect(
-			diagnostics.some((item) => item.rule === "complex-input-has-examples"),
-		).toBe(true);
+		expect(diagnostics.some((item) => item.rule === "description-min-length")).toBe(true);
+		expect(diagnostics.some((item) => item.rule === "schema-description-key-required")).toBe(true);
+		expect(diagnostics.some((item) => item.rule === "fixtures-both-directions")).toBe(true);
+		expect(diagnostics.some((item) => item.rule === "complex-input-has-examples")).toBe(true);
 	});
 
 	it("accepts key-only operation descriptions", () => {
@@ -45,19 +30,13 @@ describe("lintOperation", () => {
 			descriptionKey: "operations.search.description",
 			input: withDescriptionKey(
 				z.object({
-					query: withDescriptionKey(
-						z.string(),
-						"operations.search.fields.query.description",
-					),
+					query: withDescriptionKey(z.string(), "operations.search.fields.query.description"),
 				}),
 				"operations.search.input.description",
 			),
 			output: withDescriptionKey(
 				z.object({
-					result: withDescriptionKey(
-						z.string(),
-						"operations.search.fields.result.description",
-					),
+					result: withDescriptionKey(z.string(), "operations.search.fields.result.description"),
 				}),
 				"operations.search.output.description",
 			),
@@ -67,12 +46,8 @@ describe("lintOperation", () => {
 			},
 		});
 
-		expect(
-			diagnostics.some((item) => item.rule === "description-min-length"),
-		).toBe(false);
-		expect(
-			diagnostics.some((item) => item.rule === "description-has-when-clause"),
-		).toBe(false);
+		expect(diagnostics.some((item) => item.rule === "description-min-length")).toBe(false);
+		expect(diagnostics.some((item) => item.rule === "description-has-when-clause")).toBe(false);
 		expect(
 			diagnostics.some(
 				(item) =>
@@ -87,19 +62,13 @@ describe("lintOperation", () => {
 			descriptionKey: "operations.price.description",
 			input: withDescriptionKey(
 				z.object({
-					symbol: withDescriptionKey(
-						z.string(),
-						"operations.price.fields.symbol.description",
-					),
+					symbol: withDescriptionKey(z.string(), "operations.price.fields.symbol.description"),
 				}),
 				"operations.price.input.description",
 			),
 			output: withDescriptionKey(
 				z.object({
-					price: withDescriptionKey(
-						z.number(),
-						"operations.price.fields.price.description",
-					),
+					price: withDescriptionKey(z.number(), "operations.price.fields.price.description"),
 				}),
 				"operations.price.output.description",
 			),
@@ -116,15 +85,10 @@ describe("lintOperation", () => {
 		const diagnostics = lintOperation({
 			description:
 				"Use this operation when callers need raw prose rejected and when static operation metadata must be keyed.",
-			input: z
-				.object({ query: z.string().describe("Search keyword") })
-				.describe("Search input"),
+			input: z.object({ query: z.string().describe("Search keyword") }).describe("Search input"),
 			output: withDescriptionKey(
 				z.object({
-					ok: withDescriptionKey(
-						z.boolean(),
-						"operations.search.fields.ok.description",
-					),
+					ok: withDescriptionKey(z.boolean(), "operations.search.fields.ok.description"),
 				}),
 				"operations.search.output.description",
 			),
@@ -145,10 +109,7 @@ describe("lintOperation", () => {
 				"Use this operation when a caller needs described optional, defaulted, array, and record fields and when wrapper internals should inherit the public field description instead of producing duplicate diagnostics.",
 			input: z
 				.object({
-					keyword: z
-						.string()
-						.default("")
-						.describe("Keyword filter supplied by the caller"),
+					keyword: z.string().default("").describe("Keyword filter supplied by the caller"),
 					page: z.number().int().optional().describe("Optional page number"),
 				})
 				.describe("Wrapped input schema"),
@@ -158,9 +119,7 @@ describe("lintOperation", () => {
 						.array(
 							z.object({
 								id: z.string().describe("Stable item id"),
-								metadata: z
-									.record(z.string(), z.string())
-									.describe("Open-world metadata map"),
+								metadata: z.record(z.string(), z.string()).describe("Open-world metadata map"),
 							}),
 						)
 						.describe("Returned item rows"),
@@ -176,16 +135,13 @@ describe("lintOperation", () => {
 			],
 		});
 
-		expect(
-			diagnostics.filter((item) => item.rule === "all-fields-described"),
-		).toEqual([]);
+		expect(diagnostics.filter((item) => item.rule === "all-fields-described")).toEqual([]);
 	});
 
 	it("does not require duplicate descriptions on pipe input and output internals", () => {
 		const normalizedCode = z
 			.preprocess(
-				(value) =>
-					typeof value === "string" ? value.trim().toUpperCase() : value,
+				(value) => (typeof value === "string" ? value.trim().toUpperCase() : value),
 				z.enum(["A", "B"]).describe("Normalized finite code"),
 			)
 			.describe("Normalized finite code");
@@ -209,9 +165,7 @@ describe("lintOperation", () => {
 			},
 		});
 
-		expect(
-			diagnostics.filter((item) => item.rule === "all-fields-described"),
-		).toEqual([]);
+		expect(diagnostics.filter((item) => item.rule === "all-fields-described")).toEqual([]);
 	});
 
 	it("still requires descriptions for indexed union branches", () => {
@@ -288,9 +242,7 @@ describe("lintOperation", () => {
 				.describe("Login input"),
 			output: z
 				.object({
-					accessToken: fields
-						.token()
-						.describe("Access token returned upstream"),
+					accessToken: fields.token().describe("Access token returned upstream"),
 				})
 				.describe("Login output"),
 			fixtures: {
@@ -307,9 +259,7 @@ describe("lintOperation", () => {
 		);
 		expect(
 			diagnostics.find(
-				(item) =>
-					item.field === "output.accessToken" &&
-					item.rule === "sensitive-field-unmarked",
+				(item) => item.field === "output.accessToken" && item.rule === "sensitive-field-unmarked",
 			),
 		).toBeUndefined();
 	});
@@ -360,6 +310,66 @@ describe("lintProvider", () => {
 				rule: "allowed-hosts-no-wildcards",
 				level: "error",
 			}),
+		);
+	});
+
+	it("rejects malformed native TCP egress declarations", () => {
+		const diagnostics = lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			native: {
+				network: {
+					tcp: [
+						{ host: "*.example.com", ports: [5228], tls: "required" },
+						{ host: "tcp.example.com", ports: [], tls: "maybe" },
+					],
+				},
+			},
+		});
+
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-tcp-egress-no-wildcards" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-tcp-egress-ports" }),
+		);
+		expect(diagnostics).toContainEqual(expect.objectContaining({ rule: "native-tcp-egress-tls" }));
+	});
+
+	it("rejects malformed native dynamic TCP egress declarations", () => {
+		const diagnostics = lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			native: {
+				network: {
+					dynamicTcp: [
+						{
+							sourceHost: "*.ticket.example.com",
+							sourcePorts: [],
+							targetHostSuffixes: ["*.example.com"],
+							tls: "maybe",
+						},
+					],
+				},
+			},
+		});
+
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-dynamic-tcp-egress-source-host" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-dynamic-tcp-egress-source-ports" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-dynamic-tcp-egress-target-suffixes" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-dynamic-tcp-egress-target-ports" }),
+		);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({ rule: "native-dynamic-tcp-egress-tls" }),
 		);
 	});
 
@@ -442,24 +452,22 @@ describe("lintProvider", () => {
 			operations: {
 				"auth-login-with-password": {
 					descriptionKey: "operations.authLogin.description",
-					input: withDescriptionKey(
-						z.object({}),
-						"operations.authLogin.input.description",
-					),
+					input: withDescriptionKey(z.object({}), "operations.authLogin.input.description"),
 					output: withDescriptionKey(
-						z.object({ ok: withDescriptionKey(z.boolean(), "operations.authLogin.fields.ok.description") }),
+						z.object({
+							ok: withDescriptionKey(z.boolean(), "operations.authLogin.fields.ok.description"),
+						}),
 						"operations.authLogin.output.description",
 					),
 					fixtures: { request: {}, response: { ok: true } },
 				},
 				"login-with-password": {
 					descriptionKey: "operations.login.description",
-					input: withDescriptionKey(
-						z.object({}),
-						"operations.login.input.description",
-					),
+					input: withDescriptionKey(z.object({}), "operations.login.input.description"),
 					output: withDescriptionKey(
-						z.object({ ok: withDescriptionKey(z.boolean(), "operations.login.fields.ok.description") }),
+						z.object({
+							ok: withDescriptionKey(z.boolean(), "operations.login.fields.ok.description"),
+						}),
 						"operations.login.output.description",
 					),
 					fixtures: { request: {}, response: { ok: true } },
@@ -588,8 +596,7 @@ describe("lintProvider", () => {
 				mode: "oauth2",
 				flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
 			},
-			authFlowSource:
-				"async function start(ctx) { return ctx.context.get('state'); }",
+			authFlowSource: "async function start(ctx) { return ctx.context.get('state'); }",
 		});
 
 		expect(diagnostics).toContainEqual(
@@ -612,8 +619,7 @@ describe("lintProvider", () => {
 					input: z.object({ query: z.string().describe("Search query") }),
 					output: z.object({ ok: z.boolean().describe("Success flag") }),
 					fixtures: { request: { query: "desk" }, response: { ok: true } },
-					source:
-						"async function handler(ctx) { return ctx.stealth.fetch('/search'); }",
+					source: "async function handler(ctx) { return ctx.stealth.fetch('/search'); }",
 				},
 			},
 		});
@@ -641,17 +647,14 @@ describe("lintProvider", () => {
 					input: z.object({ query: z.string().describe("Search query") }),
 					output: z.object({ ok: z.boolean().describe("Success flag") }),
 					fixtures: { request: { query: "desk" }, response: { ok: true } },
-					source:
-						"async function handler(ctx) { return ctx.stealth.fetch('/search'); }",
+					source: "async function handler(ctx) { return ctx.stealth.fetch('/search'); }",
 				},
 			},
 		});
 
-		expect(
-			diagnostics.some(
-				(diagnostic) => diagnostic.rule === "stealth-config-required",
-			),
-		).toBe(false);
+		expect(diagnostics.some((diagnostic) => diagnostic.rule === "stealth-config-required")).toBe(
+			false,
+		);
 	});
 
 	it("warns when provider source imports playwright directly", () => {
@@ -687,8 +690,7 @@ describe("lintProvider", () => {
 			allowedHosts: ["api.example.com"],
 			reviewed: "first-party",
 			providerSourceFiles: {
-				"index.ts":
-					'import { chromium } from "playwright-core"; export default provider;',
+				"index.ts": 'import { chromium } from "playwright-core"; export default provider;',
 			},
 			operations: {
 				search: {
@@ -813,9 +815,7 @@ await fetch(endpoint + "/json/version");
 			},
 		});
 
-		expect(
-			diagnostics.some((diagnostic) => diagnostic.rule.startsWith("browser-")),
-		).toBe(false);
+		expect(diagnostics.some((diagnostic) => diagnostic.rule.startsWith("browser-"))).toBe(false);
 	});
 
 	it("rejects credential keys for platform-managed auth mode", () => {
@@ -850,8 +850,7 @@ await fetch(endpoint + "/json/version");
 				justification: "Tokens must be reused across requests.",
 			},
 			context: { keys: ["state"] },
-			authFlowSource:
-				"async function start(ctx) { return ctx.context.get('state'); }",
+			authFlowSource: "async function start(ctx) { return ctx.context.get('state'); }",
 		});
 
 		expect(

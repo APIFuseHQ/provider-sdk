@@ -28,6 +28,11 @@ function buildProvider(
 		version: "1.2.3",
 		runtime: "shared",
 		allowedHosts: ["api.example.com", "assets.example.com"],
+		native: {
+			network: {
+				tcp: [{ host: "loco.kakao.com", ports: [5228], tls: "required" }],
+			},
+		},
 		auth: {
 			mode: "oauth2",
 			flow: {
@@ -269,6 +274,18 @@ describe("provider contract extraction", () => {
 				],
 			},
 		]);
+	});
+
+	it("preserves native network egress metadata", () => {
+		const provider = buildProvider(["zeta-search", "alpha-search"]);
+
+		const snapshot = extractProviderContract(provider);
+
+		expect(snapshot.native).toEqual({
+			network: {
+				tcp: [{ host: "loco.kakao.com", ports: [5228], tls: "required" }],
+			},
+		});
 	});
 
 	it("serializes health journey SMS matcher regex source and flags", () => {

@@ -35,6 +35,7 @@ export function extractProviderContract(
 	provider: ProviderDefinition,
 ): ProviderContractSnapshot {
 	const auth = extractAuth(provider.auth);
+	const native = toJsonValue(provider.native);
 	const stealth = toJsonValue(provider.stealth);
 	const proxy = toJsonValue(provider.proxy);
 	const stt = toJsonValue(provider.stt);
@@ -63,6 +64,7 @@ export function extractProviderContract(
 		...(provider.allowedHosts
 			? { allowedHosts: [...provider.allowedHosts].sort() }
 			: {}),
+		...(native === undefined ? {} : { native }),
 		...(stealth === undefined ? {} : { stealth }),
 		...(proxy === undefined ? {} : { proxy }),
 		...(stt === undefined ? {} : { stt }),

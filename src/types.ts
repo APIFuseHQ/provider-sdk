@@ -9,9 +9,7 @@ export interface StandardSchemaV1<Input = unknown, Output = Input> {
 		readonly vendor: string;
 		readonly validate: (
 			value: unknown,
-		) =>
-			| StandardSchemaV1.Result<Output>
-			| Promise<StandardSchemaV1.Result<Output>>;
+		) => StandardSchemaV1.Result<Output> | Promise<StandardSchemaV1.Result<Output>>;
 		readonly types?: { readonly input: Input; readonly output: Output };
 	};
 }
@@ -34,12 +32,11 @@ export namespace StandardSchemaV1 {
 /** Schema formats supported by provider operations. */
 export type SchemaLike = ZodType | StandardSchemaV1;
 /** Infer the validated output type produced by a Zod or Standard Schema. */
-export type InferSchemaOutput<TSchema extends SchemaLike> =
-	TSchema extends ZodType
-		? ZodInfer<TSchema>
-		: TSchema extends StandardSchemaV1<unknown, infer Output>
-			? Output
-			: unknown;
+export type InferSchemaOutput<TSchema extends SchemaLike> = TSchema extends ZodType
+	? ZodInfer<TSchema>
+	: TSchema extends StandardSchemaV1<unknown, infer Output>
+		? Output
+		: unknown;
 
 export interface OperationInputExample {
 	scenario: string;
@@ -47,11 +44,7 @@ export interface OperationInputExample {
 	rationale?: string;
 }
 
-export type OperationRiskClass =
-	| "read"
-	| "write"
-	| "destructive"
-	| "external-send";
+export type OperationRiskClass = "read" | "write" | "destructive" | "external-send";
 
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
 
@@ -136,11 +129,7 @@ export const STREAM_MAX_DURATION_MS_MAX = 1_800_000;
 export const STREAM_CHUNK_BYTES_MIN = 1;
 export const STREAM_CHUNK_BYTES_MAX = 1_048_576;
 
-export type OperationTransportKind =
-	| "json"
-	| "sse"
-	| "http-stream"
-	| "websocket";
+export type OperationTransportKind = "json" | "sse" | "http-stream" | "websocket";
 
 export interface OperationJsonTransport {
 	kind: "json";
@@ -301,10 +290,7 @@ export interface SttTranscript {
 	verificationCode?: VerificationCodeExtractionResult;
 }
 
-export type VerificationCodeCandidateSource =
-	| "digits"
-	| "spoken_words"
-	| "mixed";
+export type VerificationCodeCandidateSource = "digits" | "spoken_words" | "mixed";
 
 export interface VerificationCodeCandidate {
 	code: string;
@@ -363,10 +349,7 @@ export interface HealthJourneyGatewayContext {
 		input?: Record<string, unknown>;
 		metadata?: Record<string, unknown>;
 	}): Promise<{ connectionId: string; rowVersion: number }>;
-	disconnect?(connection: {
-		connectionId: string;
-		rowVersion: number;
-	}): Promise<void>;
+	disconnect?(connection: { connectionId: string; rowVersion: number }): Promise<void>;
 	execute(
 		providerId: string,
 		operationId: string,
@@ -478,9 +461,7 @@ export interface HealthJourneyDefinition {
 	requiredSecrets?: readonly string[];
 	manualTrigger?: HealthJourneyManualTriggerPolicy;
 	steps: readonly [HealthJourneyStep, ...HealthJourneyStep[]];
-	run?: (
-		ctx: HealthJourneyRunContext,
-	) => Promise<HealthJourneyRunResult | undefined>;
+	run?: (ctx: HealthJourneyRunContext) => Promise<HealthJourneyRunResult | undefined>;
 }
 
 /**
@@ -586,9 +567,7 @@ export interface HealthCheckCase<TInput = unknown, TOutput = unknown> {
 	 * the durable probe input must be derived from a live read-only operation
 	 * immediately before the checked operation executes.
 	 */
-	prepareInput?: (
-		ctx: HealthCheckInputPreparationContext<TInput>,
-	) => TInput | Promise<TInput>;
+	prepareInput?: (ctx: HealthCheckInputPreparationContext<TInput>) => TInput | Promise<TInput>;
 	/**
 	 * Assertion executed against the operation's response and timing.
 	 *
@@ -601,11 +580,7 @@ export interface HealthCheckCase<TInput = unknown, TOutput = unknown> {
 	 */
 	assertions: (
 		ctx: HealthCheckAssertionContext<TOutput>,
-	) =>
-		| void
-		| Promise<void>
-		| HealthCheckCaseResult
-		| Promise<HealthCheckCaseResult>;
+	) => void | Promise<void> | HealthCheckCaseResult | Promise<HealthCheckCaseResult>;
 	/** Override per-case degradation threshold (ms); falls back to the suite default. */
 	degradedThresholdMs?: number;
 	/** Override per-case timeout in milliseconds; falls back to the suite/provider/runtime default. */
@@ -631,10 +606,7 @@ export interface HealthCheckSuite<TInput = unknown, TOutput = unknown> {
 	/** Default degradation threshold for cases in this suite. Default: runtime threshold. */
 	degradedThresholdMs?: number;
 	/** Non-empty list of cases. Empty arrays are rejected at definition time. */
-	cases: [
-		HealthCheckCase<TInput, TOutput>,
-		...HealthCheckCase<TInput, TOutput>[],
-	];
+	cases: [HealthCheckCase<TInput, TOutput>, ...HealthCheckCase<TInput, TOutput>[]];
 	/**
 	 * If true, the runtime SHALL invoke `connect()` before `execute()` and
 	 * `disconnect()` after, using the service-account token. The provider
@@ -763,11 +735,7 @@ export type ProviderProxyMode = "disabled" | "optional" | "required";
 
 export type ProviderProxyProvider = "smartproxy" | "decodo" | "custom";
 
-export type ProviderProxySessionAffinity =
-	| "request"
-	| "operation"
-	| "auth-flow"
-	| "connection";
+export type ProviderProxySessionAffinity = "request" | "operation" | "auth-flow" | "connection";
 
 export interface ProviderProxyPolicy {
 	/**
@@ -882,15 +850,8 @@ export interface ProviderMeta {
 	};
 }
 
-export type RequestParamPrimitive =
-	| string
-	| number
-	| boolean
-	| null
-	| undefined;
-export type RequestParamValue =
-	| RequestParamPrimitive
-	| readonly RequestParamPrimitive[];
+export type RequestParamPrimitive = string | number | boolean | null | undefined;
+export type RequestParamValue = RequestParamPrimitive | readonly RequestParamPrimitive[];
 export type RequestParams = Record<string, RequestParamValue>;
 
 export const HttpRetryPreset = {
@@ -900,16 +861,14 @@ export const HttpRetryPreset = {
 	AggressiveRead: "aggressive_read",
 	RateLimitAware: "rate_limit_aware",
 } as const;
-export type HttpRetryPreset =
-	(typeof HttpRetryPreset)[keyof typeof HttpRetryPreset];
+export type HttpRetryPreset = (typeof HttpRetryPreset)[keyof typeof HttpRetryPreset];
 
 export const HttpRetryJitter = {
 	None: "none",
 	Full: "full",
 	Equal: "equal",
 } as const;
-export type HttpRetryJitter =
-	(typeof HttpRetryJitter)[keyof typeof HttpRetryJitter];
+export type HttpRetryJitter = (typeof HttpRetryJitter)[keyof typeof HttpRetryJitter];
 
 export const HttpRetryDelayStrategy = {
 	Fixed: "fixed",
@@ -925,8 +884,7 @@ export const HttpRetryAfterPolicy = {
 	/** Honor Retry-After but also cap it to the SDK-computed backoff delay. */
 	Cap: "cap",
 } as const;
-export type HttpRetryAfterPolicy =
-	(typeof HttpRetryAfterPolicy)[keyof typeof HttpRetryAfterPolicy];
+export type HttpRetryAfterPolicy = (typeof HttpRetryAfterPolicy)[keyof typeof HttpRetryAfterPolicy];
 
 export const HttpRetryUnsafeMethodPolicy = {
 	Reject: "reject",
@@ -1060,8 +1018,7 @@ export interface StealthRedirectHop {
 	nextUrl?: string;
 }
 
-export interface StealthRedirectRunOptions
-	extends Omit<StealthFetchOptions, "redirect"> {
+export interface StealthRedirectRunOptions extends Omit<StealthFetchOptions, "redirect"> {
 	url: string;
 	maxHops?: number;
 	stopWhen?: (hop: StealthRedirectHop) => boolean | Promise<boolean>;
@@ -1140,25 +1097,81 @@ export type OperationHandlerResult<TOutput> =
 export interface HttpClient {
 	request(url: string, opts?: RequestWithMethodOptions): Promise<HttpResponse>;
 	get(url: string, options?: RequestOptions): Promise<HttpResponse>;
-	post(
-		url: string,
-		body: unknown,
-		options?: RequestOptions,
-	): Promise<HttpResponse>;
-	put(
-		url: string,
-		body: unknown,
-		options?: RequestOptions,
-	): Promise<HttpResponse>;
+	post(url: string, body: unknown, options?: RequestOptions): Promise<HttpResponse>;
+	put(url: string, body: unknown, options?: RequestOptions): Promise<HttpResponse>;
 	delete(url: string, options?: RequestOptions): Promise<HttpResponse>;
-	stream(
-		url: string,
-		options?: RequestWithMethodOptions,
-	): Promise<HttpStreamResponse>;
-	sse(
-		url: string,
-		options?: RequestWithMethodOptions,
-	): Promise<AsyncIterable<SseMessage>>;
+	stream(url: string, options?: RequestWithMethodOptions): Promise<HttpStreamResponse>;
+	sse(url: string, options?: RequestWithMethodOptions): Promise<AsyncIterable<SseMessage>>;
+}
+
+export type NativeTcpTlsMode = "required" | "allowed" | "disabled";
+
+export interface NativeTcpPortRange {
+	start: number;
+	end: number;
+}
+
+export interface NativeTcpEgressRule {
+	host: string;
+	ports: readonly number[];
+	tls: NativeTcpTlsMode;
+}
+
+export interface NativeTcpDynamicEgressRule {
+	/** Declared upstream that authorizes the dynamic endpoint, e.g. Kakao CHECKIN. */
+	sourceHost?: string;
+	sourceHostSuffixes?: readonly string[];
+	sourcePorts?: readonly number[];
+	sourcePortRanges?: readonly NativeTcpPortRange[];
+	/** Target host suffixes allowed for granted egress. Use exact suffixes, no wildcards. */
+	targetHostSuffixes: readonly string[];
+	targetPorts?: readonly number[];
+	targetPortRanges?: readonly NativeTcpPortRange[];
+	tls: NativeTcpTlsMode;
+	ttlMs?: number;
+	maxGrants?: number;
+}
+
+export interface NativeNetworkDynamicGrantOptions {
+	sourceHost: string;
+	sourcePort: number;
+	host: string;
+	port: number;
+	tls: NativeTcpTlsMode;
+	ttlMs?: number;
+}
+
+export interface NativeNetworkEgressGrant {
+	revoke(): void;
+}
+
+export interface NativeNetworkConnectOptions {
+	host: string;
+	port: number;
+	timeoutMs?: number;
+	signal?: AbortSignal;
+}
+
+export interface NativeTlsConnectOptions extends NativeNetworkConnectOptions {
+	serverName?: string;
+	rejectUnauthorized?: boolean;
+}
+
+export interface NativeNetworkConnection extends AsyncIterable<Uint8Array> {
+	write(data: Uint8Array | string): Promise<void>;
+	read(): Promise<Uint8Array | null>;
+	chunks(): AsyncIterable<Uint8Array>;
+	close(): Promise<void>;
+}
+
+export interface NativeNetworkClient {
+	connectTcp(options: NativeNetworkConnectOptions): Promise<NativeNetworkConnection>;
+	connectTls(options: NativeTlsConnectOptions): Promise<NativeNetworkConnection>;
+	grantTcpEgress(options: NativeNetworkDynamicGrantOptions): NativeNetworkEgressGrant;
+}
+
+export interface NativeContext {
+	network: NativeNetworkClient;
 }
 
 export interface ProviderCacheKeyOptions {
@@ -1203,17 +1216,9 @@ export interface ProviderCacheResponseMeta {
 }
 
 export interface ProviderCache {
-	key(
-		namespace: string,
-		parts: unknown,
-		options?: ProviderCacheKeyOptions,
-	): string;
+	key(namespace: string, parts: unknown, options?: ProviderCacheKeyOptions): string;
 	get<T = unknown>(key: string): Promise<ProviderCacheResult<T> | null>;
-	set<T = unknown>(
-		key: string,
-		value: T,
-		options: ProviderCacheGetOrSetOptions,
-	): Promise<void>;
+	set<T = unknown>(key: string, value: T, options: ProviderCacheGetOrSetOptions): Promise<void>;
 	delete(key: string): Promise<void>;
 	getOrSet<T = unknown>(
 		key: string,
@@ -1234,12 +1239,8 @@ export interface BrowserClient {
 	close?(): Promise<void>;
 	newPage(): Promise<BrowserPage>;
 	rawPage(): Promise<BrowserPage>;
-	withIsolatedContext<T>(
-		handler: (page: BrowserPage) => Promise<T>,
-	): Promise<T>;
-	solveChallenge(
-		request: BrowserChallengeRequest,
-	): Promise<BrowserChallengeResult>;
+	withIsolatedContext<T>(handler: (page: BrowserPage) => Promise<T>): Promise<T>;
+	solveChallenge(request: BrowserChallengeRequest): Promise<BrowserChallengeResult>;
 }
 
 export interface BrowserLocator {
@@ -1284,10 +1285,7 @@ export type BrowserResourceDecision =
 	  };
 
 export type BrowserResourceRoute = {
-	readonly match:
-		| string
-		| RegExp
-		| ((request: BrowserResourceRequest) => boolean);
+	readonly match: string | RegExp | ((request: BrowserResourceRequest) => boolean);
 	readonly handle: (
 		request: BrowserResourceRequest,
 	) => Promise<BrowserResourceDecision> | BrowserResourceDecision;
@@ -1307,15 +1305,9 @@ export interface BrowserPage extends BrowserFrame {
 	screenshot(options?: { fullPage?: boolean }): Promise<Buffer>;
 	click(selector: string): Promise<void>;
 	type(selector: string, text: string): Promise<void>;
-	waitForSelector(
-		selector: string,
-		options?: { timeout?: number },
-	): Promise<void>;
+	waitForSelector(selector: string, options?: { timeout?: number }): Promise<void>;
 	frames(): Promise<BrowserFrame[]>;
-	withResourcePolicy<T>(
-		policy: BrowserResourcePolicy,
-		run: () => Promise<T>,
-	): Promise<T>;
+	withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T>;
 }
 
 export type BrowserChallengeRequest = {
@@ -1362,10 +1354,7 @@ export interface TraceContext {
 }
 
 export interface AuthContext {
-	requestField(
-		name: string,
-		options?: { type?: "otp" | "text" },
-	): Promise<string>;
+	requestField(name: string, options?: { type?: "otp" | "text" }): Promise<string>;
 }
 
 export interface EnvContext {
@@ -1414,9 +1403,7 @@ export type ProviderChoiceStorageOptions =
 			readonly unavailable?: "reject";
 	  };
 
-export interface ProviderChoiceIssueOptions<
-	TPayload extends Record<string, unknown>,
-> {
+export interface ProviderChoiceIssueOptions<TPayload extends Record<string, unknown>> {
 	prefix: string;
 	purpose: string;
 	payload: TPayload;
@@ -1445,18 +1432,12 @@ export interface ProviderChoiceContext {
 	): string;
 	issue<TPayload extends Record<string, unknown>>(
 		options: ProviderChoiceIssueOptions<TPayload> & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "server" }
-			>;
+			readonly storage: Extract<ProviderChoiceStorageOptions, { readonly mode: "server" }>;
 		},
 	): Promise<string>;
 	issue<TPayload extends Record<string, unknown>>(
 		options: ProviderChoiceIssueOptions<TPayload> & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "auto" }
-			>;
+			readonly storage: Extract<ProviderChoiceStorageOptions, { readonly mode: "auto" }>;
 		},
 	): string | Promise<string>;
 	issue<TPayload extends Record<string, unknown>>(
@@ -1469,18 +1450,12 @@ export interface ProviderChoiceContext {
 	): Record<string, unknown>;
 	parse(
 		options: ProviderChoiceParseOptions & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "server" }
-			>;
+			readonly storage: Extract<ProviderChoiceStorageOptions, { readonly mode: "server" }>;
 		},
 	): Promise<Record<string, unknown>>;
 	parse(
 		options: ProviderChoiceParseOptions & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "auto" }
-			>;
+			readonly storage: Extract<ProviderChoiceStorageOptions, { readonly mode: "auto" }>;
 		},
 	): Record<string, unknown> | Promise<Record<string, unknown>>;
 	parse(options: ProviderChoiceParseOptions): Record<string, unknown>;
@@ -1578,6 +1553,7 @@ export interface FlowContext {
 	tenantId: string;
 	providerId: string;
 	http: HttpClient;
+	native: NativeContext;
 	stealth: StealthClient;
 	env: EnvContext;
 	credential?: CredentialContext;
@@ -1660,11 +1636,7 @@ export interface ProviderStateNamespace {
 		prefix?: string;
 	}): Promise<StateValue<T>[]>;
 	get<T = unknown>(key: string): Promise<StateValue<T> | null>;
-	set<T = unknown>(
-		key: string,
-		value: T,
-		options?: StateWriteOptions,
-	): Promise<StateValue<T>>;
+	set<T = unknown>(key: string, value: T, options?: StateWriteOptions): Promise<StateValue<T>>;
 	patch<T extends Record<string, unknown>>(
 		key: string,
 		partial: Partial<T>,
@@ -1686,10 +1658,7 @@ export interface ProviderStateNamespace {
 }
 
 export interface ProviderRuntimeState {
-	namespace(
-		name: string,
-		options: StateNamespaceOptions,
-	): ProviderStateNamespace;
+	namespace(name: string, options: StateNamespaceOptions): ProviderStateNamespace;
 }
 
 export interface ProviderContext {
@@ -1697,6 +1666,7 @@ export interface ProviderContext {
 	credential: CredentialContext;
 	request?: ProviderRequestContext;
 	http: HttpClient;
+	native: NativeContext;
 	cache: ProviderCache;
 	state: ProviderRuntimeState;
 	stealth: StealthClient;
@@ -1782,10 +1752,7 @@ export interface OperationDefinition<
 		proxy?: boolean | ProviderProxyPolicy;
 	};
 	hints?: Record<string, string>;
-	healthCheck?: HealthCheckSuite<
-		InferSchemaOutput<TInput>,
-		InferSchemaOutput<TOutput>
-	>;
+	healthCheck?: HealthCheckSuite<InferSchemaOutput<TInput>, InferSchemaOutput<TOutput>>;
 	healthCheckUnsupported?: HealthCheckUnsupported;
 }
 
@@ -1794,6 +1761,12 @@ export interface ProviderDefinition {
 	version: string;
 	runtime: "standard" | "shared" | "browser";
 	allowedHosts?: string[];
+	native?: {
+		network?: {
+			tcp?: readonly NativeTcpEgressRule[];
+			dynamicTcp?: readonly NativeTcpDynamicEgressRule[];
+		};
+	};
 	stealth?: {
 		profile: string;
 		platform: StealthPlatform;

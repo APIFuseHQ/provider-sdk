@@ -1,17 +1,9 @@
 import type { ZodType } from "zod";
 
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint";
-import {
-	APIFUSE_DESCRIPTION_KEY_META_KEY,
-	APIFUSE_SENSITIVE_META_KEY,
-} from "./schema";
+import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema";
 
-type AuthModeLike =
-	| "none"
-	| "platform-managed"
-	| "credentials"
-	| "oauth2"
-	| "api-key";
+type AuthModeLike = "none" | "platform-managed" | "credentials" | "oauth2" | "api-key";
 
 type ProviderAuthLike = {
 	mode?: AuthModeLike;
@@ -112,6 +104,220 @@ function lintAllowedHosts(
 	return [];
 }
 
+function lintNativeTcpEgress(
+	providerId: string | undefined,
+	native:
+		| {
+				network?: {
+					tcp?: readonly unknown[];
+				};
+		  }
+		| undefined,
+): LintDiagnostic[] {
+	const rules = native?.network?.tcp;
+	if (rules === undefined) return [];
+	const prefix = providerId ? `Provider "${providerId}"` : "Provider";
+	if (!Array.isArray(rules)) {
+		return [
+			{
+				rule: "native-tcp-egress-array",
+				level: "error",
+				field: "native.network.tcp",
+				message: `${prefix} native.network.tcp must be an array.`,
+			},
+		];
+	}
+
+	const diagnostics: LintDiagnostic[] = [];
+	for (const [index, rule] of rules.entries()) {
+		const field = `native.network.tcp[${index}]`;
+		if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+			diagnostics.push({
+				rule: "native-tcp-egress-object",
+				level: "error",
+				field,
+				message: `${prefix} ${field} must be an object.`,
+			});
+			continue;
+		}
+		const record = rule as Record<string, unknown>;
+		const host = record.host;
+		if (typeof host !== "string" || host.trim().length === 0) {
+			diagnostics.push({
+				rule: "native-tcp-egress-host",
+				level: "error",
+				field: `${field}.host`,
+				message: `${prefix} ${field}.host must be a non-empty host.`,
+			});
+		} else if (host.includes("*")) {
+			diagnostics.push({
+				rule: "native-tcp-egress-no-wildcards",
+				level: "error",
+				field: `${field}.host`,
+				message: `${prefix} ${field}.host must not contain wildcards.`,
+			});
+		}
+
+		const ports = record.ports;
+		if (!Array.isArray(ports) || ports.length === 0) {
+			diagnostics.push({
+				rule: "native-tcp-egress-ports",
+				level: "error",
+				field: `${field}.ports`,
+				message: `${prefix} ${field}.ports must be a non-empty array.`,
+			});
+		} else {
+			for (const port of ports) {
+				if (!Number.isInteger(port) || port < 1 || port > 65535) {
+					diagnostics.push({
+						rule: "native-tcp-egress-port",
+						level: "error",
+						field: `${field}.ports`,
+						message: `${prefix} ${field}.ports contains invalid port "${String(port)}".`,
+					});
+					break;
+				}
+			}
+		}
+
+		if (record.tls !== "required" && record.tls !== "allowed" && record.tls !== "disabled") {
+			diagnostics.push({
+				rule: "native-tcp-egress-tls",
+				level: "error",
+				field: `${field}.tls`,
+				message: `${prefix} ${field}.tls must be "required", "allowed", or "disabled".`,
+			});
+		}
+	}
+	return diagnostics;
+}
+
+function lintNativeTcpDynamicEgress(
+	providerId: string | undefined,
+	native:
+		| {
+				network?: {
+					dynamicTcp?: readonly unknown[];
+				};
+		  }
+		| undefined,
+): LintDiagnostic[] {
+	const rules = native?.network?.dynamicTcp;
+	if (rules === undefined) return [];
+	const prefix = providerId ? `Provider "${providerId}"` : "Provider";
+	if (!Array.isArray(rules)) {
+		return [
+			{
+				rule: "native-dynamic-tcp-egress-array",
+				level: "error",
+				field: "native.network.dynamicTcp",
+				message: `${prefix} native.network.dynamicTcp must be an array.`,
+			},
+		];
+	}
+
+	const diagnostics: LintDiagnostic[] = [];
+	for (const [index, rule] of rules.entries()) {
+		const field = `native.network.dynamicTcp[${index}]`;
+		if (!rule || typeof rule !== "object" || Array.isArray(rule)) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-object",
+				level: "error",
+				field,
+				message: `${prefix} ${field} must be an object.`,
+			});
+			continue;
+		}
+		const record = rule as Record<string, unknown>;
+		const sourceHost = record.sourceHost;
+		const sourceHostSuffixes = record.sourceHostSuffixes;
+		const hasSourceHost = typeof sourceHost === "string" && sourceHost.trim().length > 0;
+		const hasSourceHostSuffixes =
+			Array.isArray(sourceHostSuffixes) && sourceHostSuffixes.length > 0;
+		if (hasSourceHost === hasSourceHostSuffixes) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-source-host",
+				level: "error",
+				field,
+				message: `${prefix} ${field} must declare exactly one of sourceHost or sourceHostSuffixes.`,
+			});
+		}
+		if (hasSourceHost && sourceHost.includes("*")) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-source-host",
+				level: "error",
+				field: `${field}.sourceHost`,
+				message: `${prefix} ${field}.sourceHost must be an exact host without wildcards.`,
+			});
+		}
+		if (
+			hasSourceHostSuffixes &&
+			sourceHostSuffixes.some(
+				(suffix) =>
+					typeof suffix !== "string" || suffix.trim().length === 0 || suffix.includes("*"),
+			)
+		) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-source-host",
+				level: "error",
+				field: `${field}.sourceHostSuffixes`,
+				message: `${prefix} ${field}.sourceHostSuffixes must contain exact suffixes without wildcards.`,
+			});
+		}
+		const sourcePorts = record.sourcePorts;
+		const sourcePortRanges = record.sourcePortRanges;
+		if (
+			(!Array.isArray(sourcePorts) || sourcePorts.length === 0) &&
+			(!Array.isArray(sourcePortRanges) || sourcePortRanges.length === 0)
+		) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-source-ports",
+				level: "error",
+				field,
+				message: `${prefix} ${field} must declare sourcePorts or sourcePortRanges.`,
+			});
+		}
+		const suffixes = record.targetHostSuffixes;
+		if (
+			!Array.isArray(suffixes) ||
+			suffixes.length === 0 ||
+			suffixes.some(
+				(suffix) =>
+					typeof suffix !== "string" || suffix.trim().length === 0 || suffix.includes("*"),
+			)
+		) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-target-suffixes",
+				level: "error",
+				field: `${field}.targetHostSuffixes`,
+				message: `${prefix} ${field}.targetHostSuffixes must contain exact suffixes without wildcards.`,
+			});
+		}
+		const targetPorts = record.targetPorts;
+		const targetPortRanges = record.targetPortRanges;
+		if (
+			(!Array.isArray(targetPorts) || targetPorts.length === 0) &&
+			(!Array.isArray(targetPortRanges) || targetPortRanges.length === 0)
+		) {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-target-ports",
+				level: "error",
+				field,
+				message: `${prefix} ${field} must declare targetPorts or targetPortRanges.`,
+			});
+		}
+		if (record.tls !== "required" && record.tls !== "allowed" && record.tls !== "disabled") {
+			diagnostics.push({
+				rule: "native-dynamic-tcp-egress-tls",
+				level: "error",
+				field: `${field}.tls`,
+				message: `${prefix} ${field}.tls must be "required", "allowed", or "disabled".`,
+			});
+		}
+	}
+	return diagnostics;
+}
+
 function lintReviewed(
 	providerId: string | undefined,
 	reviewed: string | undefined,
@@ -141,28 +347,19 @@ function hasReusableSecretKeys(keys: readonly string[] | undefined): boolean {
 	}
 
 	return keys.some((key) =>
-		/(access_token|refresh_token|password|secret|cookie|session|token|api[_-]?key)/i.test(
-			key,
-		),
+		/(access_token|refresh_token|password|secret|cookie|session|token|api[_-]?key)/i.test(key),
 	);
 }
 
-function hasReusableReloginSecretKeys(
-	keys: readonly string[] | undefined,
-): boolean {
+function hasReusableReloginSecretKeys(keys: readonly string[] | undefined): boolean {
 	if (!keys) {
 		return false;
 	}
 
-	return keys.some((key) =>
-		/(password|passcode|secret|cookie|session)/i.test(key),
-	);
+	return keys.some((key) => /(password|passcode|secret|cookie|session)/i.test(key));
 }
 
-function getAuthFlowSource(provider: {
-	auth?: ProviderAuthLike;
-	authFlowSource?: string;
-}): string {
+function getAuthFlowSource(provider: { auth?: ProviderAuthLike; authFlowSource?: string }): string {
 	if (provider.authFlowSource) {
 		return provider.authFlowSource;
 	}
@@ -176,10 +373,7 @@ function getAuthFlowSource(provider: {
 	];
 
 	return parts
-		.filter(
-			(part): part is (...args: unknown[]) => unknown =>
-				typeof part === "function",
-		)
+		.filter((part): part is (...args: unknown[]) => unknown => typeof part === "function")
 		.map((part) => part.toString())
 		.join("\n");
 }
@@ -243,8 +437,7 @@ function lintAuthModel(provider: {
 
 	if (
 		hasReusableSecretKeys(credentialKeys) &&
-		(!provider.credential?.storesReusableSecret ||
-			!provider.credential.justification)
+		(!provider.credential?.storesReusableSecret || !provider.credential.justification)
 	) {
 		diagnostics.push({
 			rule: "credential-reusable-secret",
@@ -257,8 +450,7 @@ function lintAuthModel(provider: {
 	if (
 		typeof provider.auth?.flow?.refresh === "function" &&
 		hasReusableReloginSecretKeys(credentialKeys) &&
-		(!provider.credential?.storesReusableSecret ||
-			!provider.credential.justification)
+		(!provider.credential?.storesReusableSecret || !provider.credential.justification)
 	) {
 		diagnostics.push({
 			rule: "auth-refresh-reusable-secret",
@@ -278,10 +470,7 @@ function lintAuthModel(provider: {
 	}
 
 	const authFlowSource = getAuthFlowSource(provider);
-	if (
-		authFlowSource.includes("ctx.context") &&
-		(provider.context?.keys?.length ?? 0) === 0
-	) {
+	if (authFlowSource.includes("ctx.context") && (provider.context?.keys?.length ?? 0) === 0) {
 		diagnostics.push({
 			rule: "context-keys-required",
 			level: "warn",
@@ -323,8 +512,7 @@ function isSchemaRecord(value: unknown): value is Record<string, SchemaLike> {
 }
 
 function getObjectShape(schema: SchemaLike): Record<string, SchemaLike> {
-	const rawShape =
-		typeof schema.shape === "function" ? schema.shape() : schema.shape;
+	const rawShape = typeof schema.shape === "function" ? schema.shape() : schema.shape;
 	if (isSchemaRecord(rawShape)) {
 		return rawShape;
 	}
@@ -344,9 +532,7 @@ function getObjectShape(schema: SchemaLike): Record<string, SchemaLike> {
 	return {};
 }
 
-function getChildSchemas(
-	schema: SchemaLike,
-): Array<{ key: string; schema: SchemaLike }> {
+function getChildSchemas(schema: SchemaLike): Array<{ key: string; schema: SchemaLike }> {
 	const seen = new Map<string, SchemaLike>();
 	const def = getSchemaDef(schema);
 
@@ -450,10 +636,7 @@ function getSchemaMetadata(schema: SchemaLike): Record<string, unknown> {
 }
 
 function getSchemaDescriptionKey(schema: SchemaLike): string | undefined {
-	const value = Reflect.get(
-		getSchemaMetadata(schema),
-		APIFUSE_DESCRIPTION_KEY_META_KEY,
-	);
+	const value = Reflect.get(getSchemaMetadata(schema), APIFUSE_DESCRIPTION_KEY_META_KEY);
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
@@ -597,22 +780,14 @@ function collectSchemaDescriptionKeyDiagnostics(
 						? `${currentPath}[]`
 						: `${currentPath}.${child.key}`;
 		diagnostics.push(
-			...collectSchemaDescriptionKeyDiagnostics(
-				child.schema,
-				childPath,
-				seen,
-				!isStructuralNode,
-			),
+			...collectSchemaDescriptionKeyDiagnostics(child.schema, childPath, seen, !isStructuralNode),
 		);
 	}
 
 	return diagnostics;
 }
 
-function isComplexSchema(
-	schema: unknown,
-	seen = new Set<SchemaLike>(),
-): boolean {
+function isComplexSchema(schema: unknown, seen = new Set<SchemaLike>()): boolean {
 	if (!isSchema(schema) || seen.has(schema)) {
 		return false;
 	}
@@ -624,10 +799,7 @@ function isComplexSchema(
 		return childChildren.length > 0;
 	});
 
-	return (
-		hasNestedComposite ||
-		children.some(({ schema: child }) => isComplexSchema(child, seen))
-	);
+	return hasNestedComposite || children.some(({ schema: child }) => isComplexSchema(child, seen));
 }
 
 function hasBidirectionalFixtures(fixtures: unknown): boolean {
@@ -638,16 +810,11 @@ function hasBidirectionalFixtures(fixtures: unknown): boolean {
 	return "request" in fixtures && "response" in fixtures;
 }
 
-function getOperationSource(operation: {
-	handler?: unknown;
-	source?: string;
-}): string {
+function getOperationSource(operation: { handler?: unknown; source?: string }): string {
 	if (operation.source) {
 		return operation.source;
 	}
-	return typeof operation.handler === "function"
-		? operation.handler.toString()
-		: "";
+	return typeof operation.handler === "function" ? operation.handler.toString() : "";
 }
 
 function lintStealthTransportUsage(provider: {
@@ -660,22 +827,20 @@ function lintStealthTransportUsage(provider: {
 	}
 
 	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
-	return Object.entries(provider.operations).flatMap(
-		([operationKey, operation]) => {
-			const source = getOperationSource(operation);
-			if (!/\bctx\.stealth\b/.test(source)) {
-				return [];
-			}
-			return [
-				{
-					rule: "stealth-config-required",
-					level: "error" as const,
-					field: `operations.${operationKey}`,
-					message: `${providerLabel} operation "${operationKey}" uses ctx.stealth but provider.stealth is not declared.`,
-				},
-			];
-		},
-	);
+	return Object.entries(provider.operations).flatMap(([operationKey, operation]) => {
+		const source = getOperationSource(operation);
+		if (!/\bctx\.stealth\b/.test(source)) {
+			return [];
+		}
+		return [
+			{
+				rule: "stealth-config-required",
+				level: "error" as const,
+				field: `operations.${operationKey}`,
+				message: `${providerLabel} operation "${operationKey}" uses ctx.stealth but provider.stealth is not declared.`,
+			},
+		];
+	});
 }
 
 function lintCredentialWriteUsage(provider: {
@@ -685,24 +850,22 @@ function lintCredentialWriteUsage(provider: {
 		return [];
 	}
 
-	return Object.entries(provider.operations).flatMap(
-		([operationKey, operation]) => {
-			const source = getOperationSource(operation);
-			if (!/\bctx\.credential\.(?:set|setMany)\s*\(/.test(source)) {
-				return [];
-			}
+	return Object.entries(provider.operations).flatMap(([operationKey, operation]) => {
+		const source = getOperationSource(operation);
+		if (!/\bctx\.credential\.(?:set|setMany)\s*\(/.test(source)) {
+			return [];
+		}
 
-			return [
-				{
-					rule: "ctx-credential-write-forbidden-in-handler",
-					level: "error" as const,
-					field: `operations.${operationKey}.handler`,
-					message:
-						"Operation handlers must not mutate credentials; return refreshed credentials from auth.flow.refresh instead.",
-				},
-			];
-		},
-	);
+		return [
+			{
+				rule: "ctx-credential-write-forbidden-in-handler",
+				level: "error" as const,
+				field: `operations.${operationKey}.handler`,
+				message:
+					"Operation handlers must not mutate credentials; return refreshed credentials from auth.flow.refresh instead.",
+			},
+		];
+	});
 }
 
 function lintPlaywrightDirectImports(provider: {
@@ -724,9 +887,7 @@ function lintPlaywrightDirectImports(provider: {
 		});
 	}
 
-	for (const [filePath, source] of Object.entries(
-		provider.providerSourceFiles ?? {},
-	)) {
+	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
 		if (!importPattern.test(source)) {
 			continue;
 		}
@@ -814,15 +975,11 @@ function lintSelfHostedBrowserPatterns(
 		sources.push({ field: "auth.flow", source: provider.authFlowSource });
 	}
 
-	for (const [filePath, source] of Object.entries(
-		provider.providerSourceFiles ?? {},
-	)) {
+	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
 		sources.push({ field: `sourceFiles.${filePath}`, source });
 	}
 
-	for (const [operationKey, operation] of Object.entries(
-		provider.operations ?? {},
-	)) {
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
 		const source = getOperationSource(operation);
 		if (source) {
 			sources.push({
@@ -865,16 +1022,14 @@ export function lintOperation(op: {
 }): LintDiagnostic[] {
 	const diagnostics: LintDiagnostic[] = [];
 	const description = op.description ?? "";
-	const hasDescriptionKey =
-		typeof op.descriptionKey === "string" && op.descriptionKey.length > 0;
+	const hasDescriptionKey = typeof op.descriptionKey === "string" && op.descriptionKey.length > 0;
 
 	if (description.trim().length > 0 && !hasDescriptionKey) {
 		diagnostics.push({
 			rule: "operation-description-raw-prose",
 			level: "error",
 			field: "description",
-			message:
-				"Operation description must use descriptionKey instead of raw static prose.",
+			message: "Operation description must use descriptionKey instead of raw static prose.",
 		});
 	}
 
@@ -892,21 +1047,16 @@ export function lintOperation(op: {
 			rule: "operation-when-to-use-raw-prose",
 			level: "error",
 			field: "whenToUse",
-			message:
-				"Operation whenToUse must use whenToUseKeys instead of raw static prose.",
+			message: "Operation whenToUse must use whenToUseKeys instead of raw static prose.",
 		});
 	}
 
-	if (
-		(op.whenNotToUse?.length ?? 0) > 0 &&
-		!(op.whenNotToUseKeys?.length ?? 0)
-	) {
+	if ((op.whenNotToUse?.length ?? 0) > 0 && !(op.whenNotToUseKeys?.length ?? 0)) {
 		diagnostics.push({
 			rule: "operation-when-not-to-use-raw-prose",
 			level: "error",
 			field: "whenNotToUse",
-			message:
-				"Operation whenNotToUse must use whenNotToUseKeys instead of raw static prose.",
+			message: "Operation whenNotToUse must use whenNotToUseKeys instead of raw static prose.",
 		});
 	}
 
@@ -942,14 +1092,11 @@ export function lintOperation(op: {
 			rule: "complex-input-has-examples",
 			level: "warn",
 			field: "inputExamples",
-			message:
-				"Complex input schemas should provide at least 2 input examples.",
+			message: "Complex input schemas should provide at least 2 input examples.",
 		});
 	}
 
-	for (const field of uniqueFields(
-		collectUnmarkedSensitiveFields(op.input, "input"),
-	)) {
+	for (const field of uniqueFields(collectUnmarkedSensitiveFields(op.input, "input"))) {
 		diagnostics.push({
 			rule: "sensitive-field-unmarked",
 			level: "warn",
@@ -958,9 +1105,7 @@ export function lintOperation(op: {
 		});
 	}
 
-	for (const field of uniqueFields(
-		collectUnmarkedSensitiveFields(op.output, "output"),
-	)) {
+	for (const field of uniqueFields(collectUnmarkedSensitiveFields(op.output, "output"))) {
 		diagnostics.push({
 			rule: "sensitive-field-unmarked",
 			level: "warn",
@@ -976,6 +1121,12 @@ export function lintProvider(
 	provider: {
 		id?: string;
 		allowedHosts?: readonly string[];
+		native?: {
+			network?: {
+				tcp?: readonly unknown[];
+				dynamicTcp?: readonly unknown[];
+			};
+		};
 		stealth?: unknown;
 		auth?: ProviderAuthLike;
 		credential?: {
@@ -1015,6 +1166,8 @@ export function lintProvider(
 ): LintDiagnostic[] {
 	const diagnostics: LintDiagnostic[] = [
 		...lintAllowedHosts(provider.id, provider.allowedHosts),
+		...lintNativeTcpEgress(provider.id, provider.native),
+		...lintNativeTcpDynamicEgress(provider.id, provider.native),
 		...lintReviewed(provider.id, provider.reviewed),
 		...lintAuthModel(provider),
 		...lintStealthTransportUsage(provider),
@@ -1044,36 +1197,35 @@ export function lintProvider(
 	}
 
 	diagnostics.push(
-		...Object.entries(provider.operations).flatMap(
-			([operationKey, operation]) =>
-				[
-					...lintOperation({
-						description: operation.description ?? "",
-						descriptionKey: operation.descriptionKey,
-						whenToUse: operation.whenToUse,
-						whenToUseKeys: operation.whenToUseKeys,
-						whenNotToUse: operation.whenNotToUse,
-						whenNotToUseKeys: operation.whenNotToUseKeys,
-						input: operation.input,
-						output: operation.output,
-						fixtures: operation.fixtures,
-						inputExamples: operation.inputExamples,
-						derivations: operation.derivations,
-					}),
-					...lintPublicSchemaFieldNames(
-						provider.id,
-						operationKey,
-						operation.input,
-						operation.output,
-						provider.meta?.contract?.publicSchemaFieldNames === "normalized",
-					),
-				].map((diagnostic) => ({
-					...diagnostic,
-					field: diagnostic.field
-						? `operations.${operationKey}.${diagnostic.field}`
-						: `operations.${operationKey}`,
-					message: `[${operationKey}] ${diagnostic.message}`,
-				})),
+		...Object.entries(provider.operations).flatMap(([operationKey, operation]) =>
+			[
+				...lintOperation({
+					description: operation.description ?? "",
+					descriptionKey: operation.descriptionKey,
+					whenToUse: operation.whenToUse,
+					whenToUseKeys: operation.whenToUseKeys,
+					whenNotToUse: operation.whenNotToUse,
+					whenNotToUseKeys: operation.whenNotToUseKeys,
+					input: operation.input,
+					output: operation.output,
+					fixtures: operation.fixtures,
+					inputExamples: operation.inputExamples,
+					derivations: operation.derivations,
+				}),
+				...lintPublicSchemaFieldNames(
+					provider.id,
+					operationKey,
+					operation.input,
+					operation.output,
+					provider.meta?.contract?.publicSchemaFieldNames === "normalized",
+				),
+			].map((diagnostic) => ({
+				...diagnostic,
+				field: diagnostic.field
+					? `operations.${operationKey}.${diagnostic.field}`
+					: `operations.${operationKey}`,
+				message: `[${operationKey}] ${diagnostic.message}`,
+			})),
 		),
 	);
 

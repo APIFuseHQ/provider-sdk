@@ -11,6 +11,7 @@ export interface ProviderContractSnapshot {
 		readonly runtime: ProviderDefinition["runtime"];
 	};
 	readonly allowedHosts?: readonly string[];
+	readonly native?: JsonValue;
 	readonly stealth?: JsonValue;
 	readonly proxy?: JsonValue;
 	readonly stt?: JsonValue;

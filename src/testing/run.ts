@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 
 import { createProviderCache } from "../runtime/cache";
 import { createTestProviderChoiceContext } from "../runtime/choice";
+import { createUnsupportedNativeNetworkClient } from "../runtime/native-network";
 import { createMemoryProviderRuntimeState } from "../runtime/state";
 import { createUnsupportedSttClient } from "../runtime/stt";
 import { safeParseSchemaSync } from "../schema";
@@ -173,6 +174,11 @@ function createSnapshotContext(rawFixture: unknown): ProviderContext {
 			delete: async () => jsonResponse(rawFixture),
 			stream: async () => unsupported("ctx.http.stream"),
 			sse: async () => unsupported("ctx.http.sse"),
+		},
+		native: {
+			network: createUnsupportedNativeNetworkClient(
+				"Standard test snapshot context does not support ctx.native.network",
+			),
 		},
 		cache: createProviderCache({ providerId: "standard-test" }),
 		state,

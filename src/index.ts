@@ -64,6 +64,10 @@ export {
 export { createEnvContext } from "./runtime/env";
 export { executeOperation } from "./runtime/executor";
 export { createHttpClient } from "./runtime/http";
+export {
+	createNativeNetworkClient,
+	createUnsupportedNativeNetworkClient,
+} from "./runtime/native-network";
 export type { Insight, InsightSeverity } from "./runtime/insights";
 export { generateInsights } from "./runtime/insights";
 export {
@@ -168,6 +172,17 @@ export type {
 	Iso3166Alpha2CountryCode,
 	Iso4217CurrencyCode,
 	Iso8601Duration,
+	NativeContext,
+	NativeNetworkClient,
+	NativeNetworkConnectOptions,
+	NativeNetworkConnection,
+	NativeNetworkDynamicGrantOptions,
+	NativeNetworkEgressGrant,
+	NativeTcpDynamicEgressRule,
+	NativeTcpEgressRule,
+	NativeTcpPortRange,
+	NativeTcpTlsMode,
+	NativeTlsConnectOptions,
 	OperationAnnotations,
 	OperationApprovalPolicy,
 	OperationContractMetadata,

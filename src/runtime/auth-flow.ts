@@ -5,9 +5,11 @@ import type {
 	EnvContext,
 	FlowContext,
 	HttpClient,
+	NativeContext,
 	StealthClient,
 	SttContext,
 } from "../types";
+import { createUnsupportedNativeNetworkClient } from "./native-network";
 import { createUnsupportedSttClient } from "./stt";
 
 function normalizeAllowedKeys(allowedKeys: string[]): Set<string> {
@@ -59,6 +61,7 @@ export function createFlowContext(options: {
 	externalRef?: string;
 	allowedKeys: string[];
 	initialContext?: Record<string, unknown>;
+	native?: NativeContext;
 	stt?: SttContext;
 }): FlowContext {
 	return {
@@ -67,6 +70,9 @@ export function createFlowContext(options: {
 		tenantId: options.tenantId,
 		providerId: options.providerId,
 		http: options.http,
+		native: options.native ?? {
+			network: createUnsupportedNativeNetworkClient(),
+		},
 		stealth: options.stealth,
 		env: options.env,
 		context: createScratchpad(options.allowedKeys, options.initialContext),

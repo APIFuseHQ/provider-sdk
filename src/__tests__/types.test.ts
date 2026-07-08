@@ -6,6 +6,7 @@ import type {
 	BrowserEngine,
 	CookieJar,
 	FlowContext,
+	NativeTcpEgressRule,
 	ProviderContext,
 	ProviderDefinition,
 	ProviderMeta,
@@ -144,6 +145,17 @@ describe("ProviderDefinition types", () => {
 				platform: "macos" as StealthPlatform,
 			},
 			proxy: true,
+			native: {
+				network: {
+					tcp: [
+						{
+							host: "loco.kakao.com",
+							ports: [5228],
+							tls: "required",
+						} satisfies NativeTcpEgressRule,
+					],
+				},
+			},
 			browser: {
 				engine: "nodriver" as BrowserEngine,
 			},
@@ -181,6 +193,8 @@ describe("ProviderDefinition types", () => {
 					output: z.object({ results: z.array(z.string()) }),
 					handler: async (_ctx: ProviderContext, input) => {
 						const parsed = z.object({ query: z.string() }).parse(input);
+						const connectTcp = _ctx.native.network.connectTcp;
+						expect(typeof connectTcp).toBe("function");
 
 						return {
 							results: [parsed.query],
