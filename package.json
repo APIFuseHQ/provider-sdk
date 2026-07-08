@@ -88,6 +88,7 @@
 	"dependencies": {
 		"@clack/prompts": "^1.5.1",
 		"@types/ms": "^2.1.0",
+		"acorn": "^8.17.0",
 		"ajv": "^8.17",
 		"hono": "^4.12.25",
 		"impit": "0.14.1",

@@ -948,6 +948,10 @@ ${assertionLines(21)}
 		["statement-position regex after while()", "(ctx) => { while (false) /ctx/.test('x'); }"],
 		["throw only as an object property key", "() => ({ throw: undefined })"],
 		["throw property key among others", "() => ({ throw: 1, status: 2 })"],
+		["throw only inside an uninvoked nested function", "() => { const later = () => { throw new Error('x'); }; }"],
+		["destructured alias whose binding is unused", "({ status: ignored }) => { const status = 200; }"],
+		["destructured alias, body refs the property key", "({ status: ignored }) => { return status; }"],
+		["nested arrow references only its own param", "function (ctx) { [1].forEach((x) => x + 1); }"],
 	] as const) {
 		it(`blocks vacuous health assertions with ${label}`, async () => {
 			const dir = makeProviderDir(
@@ -1057,6 +1061,59 @@ ${assertionLines(21)}
           assertions: ({ data }) => {
             const ok = /^https?:\\/\\//.test(data.url);
             return ok ? undefined : { status: "degraded", label: "bad url" };
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real assertions that use a nested arrow callback", async () => {
+		// Regression: a nested arrow (item => item.ok) must not be mistaken for
+		// the assertion's own signature. The outer function still inspects its
+		// own `ctx` parameter, so this is a real assertion.
+		const dir = makeProviderDir(
+			"submit-nested-arrow-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (ctx) => {
+            const allOk = ctx.output.items.every((item) => item.ok);
+            return allOk ? undefined : { status: "degraded", label: "bad item" };
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real assertions that alias a destructured parameter", async () => {
+		// Regression: destructuring binds the local alias (`renamed`), not the
+		// source property key (`status`). Referencing the alias is a real
+		// response inspection.
+		const dir = makeProviderDir(
+			"submit-alias-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: ({ status: renamed }) => {
+            if (renamed !== 200) {
+              throw new Error("lookup failed");
+            }
           },
         }],
       },`),

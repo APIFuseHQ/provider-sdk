@@ -7,6 +7,7 @@ import { createServer } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import * as acorn from "acorn";
 import { z } from "zod";
 
 import packageJson from "../package.json";
@@ -2103,430 +2104,268 @@ function isVacuousAssertionFunction(assertions: unknown): boolean {
 		return false;
 	}
 
-	const parsed = parseAssertionSource(source);
-	if (!parsed) {
+	const fn = parseAssertionFunction(source);
+	if (!fn) {
+		// Unparseable source → fail open (treat as a real assertion). A false
+		// negative here only misses a no-op; a false positive would wrongly
+		// reject a valid contributor.
 		return false;
 	}
 
-	// Fast-path: enumerated literal no-op bodies (empty, return void 0, {},
-	// Promise.resolve() with a vacuous argument, etc.). Precise and
-	// zero-false-positive; operates on the code view so comments/strings can't
-	// disguise a real body as a literal no-op.
-	const literalVacuous = parsed.concise
-		? isVacuousConciseAssertionBody(parsed.body)
-		: isVacuousBlockAssertionBody(parsed.body);
-	if (literalVacuous) {
+	// A real health assertion MUST either throw when the upstream contract
+	// breaks, or inspect the probe response, which is delivered exclusively
+	// through the assertion's own parameter(s). Working on the parsed AST (not
+	// text) makes this precise at the syntactic layer: a `throw` only counts
+	// when it is a real ThrowStatement in THIS function's body (not inside a
+	// nested, uninvoked function), and a parameter reference is checked against
+	// the actual bound names (destructuring binds the local alias, not the
+	// property key). This closes the whole equivalent-no-op class — empty
+	// bodies, `void 0`, `({})`, `Promise.resolve()`, `await Promise.resolve()`,
+	// `.then()`, `new Promise(r => r())`, side-effect-only bodies, throws hidden
+	// in uninvoked closures — without enumerating spellings.
+	if (functionThrows(fn)) {
+		return false;
+	}
+	const bound = new Set<string>();
+	for (const param of fn.params) {
+		collectBoundNames(param, bound);
+	}
+	if (bound.size === 0) {
 		return true;
 	}
-
-	// Principled backstop: a real health assertion MUST inspect the probe
-	// response, which is delivered exclusively through the assertion's
-	// parameter (ctx or a destructured shape), or it must throw. A body that
-	// references neither any bound parameter nor `throw` cannot be doing real
-	// work, regardless of how the no-op is spelled (await Promise.resolve(),
-	// Promise.resolve().then(), new Promise(r => r()), etc.). This closes the
-	// whole equivalent-no-op class without enumerating every form.
-	return isInversionVacuous(parsed.params, parsed.body);
+	return !referencesBoundNames(fn, bound);
 }
 
-const ASSERTION_BODY_KEYWORDS = new Set([
-	"async",
-	"await",
-	"return",
-	"void",
-	"undefined",
-	"null",
-	"true",
-	"false",
-	"Promise",
-	"resolve",
-	"reject",
-	"then",
-	"catch",
-	"finally",
-	"all",
-	"allSettled",
-	"race",
-	"new",
-	"function",
-	"typeof",
-	"if",
-	"else",
-	"throw",
-	"for",
-	"while",
-	"switch",
-	"case",
-	"do",
-	"const",
-	"let",
-	"var",
-]);
+type AssertionFunctionNode =
+	| acorn.ArrowFunctionExpression
+	| acorn.FunctionExpression
+	| acorn.FunctionDeclaration;
 
-interface ParsedAssertion {
-	/** Parameter list, from the code view (comments/strings already blanked). */
-	params: string;
-	/**
-	 * Function body, taken from the code view: every non-code region (line and
-	 * block comments, string and template-literal text, regex literals) is
-	 * replaced with equal-length whitespace, while real code — including
-	 * `${...}` template EXPRESSIONS — is preserved at its original offset. All
-	 * downstream structure/identifier/keyword checks run on this so no lexical
-	 * form (regex `//`, a `throw` inside a string, a param named `$ctx`, a
-	 * param referenced only in a `${...}`) can fool them.
-	 */
-	body: string;
-	concise: boolean;
-}
-
-function parseAssertionSource(rawSource: string): ParsedAssertion | undefined {
-	const view = maskToCodeView(rawSource);
-	const arrowIndex = view.indexOf("=>");
-	if (arrowIndex >= 0) {
-		const head = view.slice(0, arrowIndex);
-		const openParen = head.indexOf("(");
-		const params =
-			openParen >= 0
-				? head.slice(openParen + 1, head.lastIndexOf(")"))
-				: head.replace(/\basync\b/g, "").trim();
-		const arrowBody = view.slice(arrowIndex + 2).trim();
-		if (!arrowBody.startsWith("{")) {
-			return { params, body: arrowBody, concise: true };
-		}
-		// Block-body arrow: parse the arrow body itself, NOT view.indexOf("{"),
-		// which would grab a destructured-parameter brace (e.g. ({ data }) => {}).
-		const arrowBodyEnd = arrowBody.lastIndexOf("}");
-		if (arrowBodyEnd <= 0) {
-			return undefined;
-		}
-		return { params, body: arrowBody.slice(1, arrowBodyEnd), concise: false };
-	}
-
-	// Non-arrow function: skip the parameter list so a destructured parameter
-	// brace (function ({ data }) {}) is not mistaken for the function body.
-	const openParen = view.indexOf("(");
-	const closeParen = openParen >= 0 ? view.indexOf(")", openParen) : -1;
-	const params = openParen >= 0 && closeParen > openParen ? view.slice(openParen + 1, closeParen) : "";
-	const bodyStart = view.indexOf("{", closeParen >= 0 ? closeParen : 0);
-	const bodyEnd = view.lastIndexOf("}");
-	if (bodyStart < 0 || bodyEnd <= bodyStart) {
-		return undefined;
-	}
-	return { params, body: view.slice(bodyStart + 1, bodyEnd), concise: false };
-}
-
-function isInversionVacuous(params: string, body: string): boolean {
-	// `body` is already the code view, so a `throw` here is real code, not text
-	// inside a comment or string. But `throw` is only a statement keyword: it is
-	// NOT a throw when used as a property key (`{ throw: x }`), a member
-	// (`obj.throw`), or part of a longer identifier. Require a `throw` token that
-	// is not preceded by `.`/an identifier char and not immediately followed by
-	// `:` (which would make it a property name).
-	if (hasRealThrowStatement(body)) {
-		return false;
-	}
-	const paramIds = (params.match(/[A-Za-z_$][\w$]*/g) ?? []).filter(
-		(id) => !ASSERTION_BODY_KEYWORDS.has(id),
+function isFunctionNode(node: acorn.AnyNode): node is AssertionFunctionNode {
+	return (
+		node.type === "ArrowFunctionExpression" ||
+		node.type === "FunctionExpression" ||
+		node.type === "FunctionDeclaration"
 	);
-	// No parameters at all → the assertion cannot inspect the response; unless
-	// it throws (handled above) it is vacuous.
-	if (paramIds.length === 0) {
-		return true;
+}
+
+/**
+ * Parse the `Function.prototype.toString()` output of an assertion into its AST
+ * function node. The stringified form can be an arrow (`(a) => {}`), a function
+ * expression (`function (a) {}`), or a bare method (`foo() {}`), so try a few
+ * wrappers until one parses. Returns undefined on any parse failure so callers
+ * fail open.
+ */
+function parseAssertionFunction(source: string): AssertionFunctionNode | undefined {
+	const candidates = [source, `(${source})`, `({${source}})`];
+	for (const candidate of candidates) {
+		let program: acorn.Program;
+		try {
+			program = acorn.parse(candidate, { ecmaVersion: "latest" });
+		} catch {
+			continue;
+		}
+		const fn = findFirstFunction(program);
+		if (fn) {
+			return fn;
+		}
 	}
-	// If the body references any bound parameter, assume it inspects the
-	// response and treat it as a real assertion (fail-open on uncertainty).
-	// `$` and `_` are valid identifier characters, so `\b` boundaries are
-	// unreliable (e.g. `$ctx`); guard with explicit non-identifier lookarounds.
-	const referencesParam = paramIds.some((id) => {
-		const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		return new RegExp(`(?<![$\\w])${escaped}(?![$\\w])`).test(body);
+	return undefined;
+}
+
+/** Depth-first search for the first function node in a parsed program. */
+function findFirstFunction(root: acorn.AnyNode): AssertionFunctionNode | undefined {
+	let found: AssertionFunctionNode | undefined;
+	walkAst(root, (node) => {
+		if (found) {
+			return false;
+		}
+		if (isFunctionNode(node)) {
+			found = node;
+			return false;
+		}
+		return true;
 	});
-	return !referencesParam;
+	return found;
 }
 
 /**
- * True if the code-view `body` contains a real `throw` STATEMENT. `throw` is a
- * statement keyword, so a `throw` token that is used as a property key
- * (`{ throw: x }`), a member/identifier (`obj.throw`, `throwCount`), etc. does
- * not throw. Require a `throw` word token not preceded by `.`/identifier chars
- * and not immediately followed by `:` (which would make it a property name).
+ * Collect the identifier names actually BOUND by a parameter pattern. For
+ * destructuring, the binding is the local target (`value`), not the source
+ * property key — so `({ status: ignored })` binds `ignored`, and a body that
+ * merely mentions `status` is not referencing a parameter.
  */
-function hasRealThrowStatement(body: string): boolean {
-	const re = /(?<![.\w$])throw(?![\w$])/g;
-	let match: RegExpExecArray | null = re.exec(body);
-	while (match !== null) {
-		const after = body.slice(match.index + "throw".length).replace(/^\s+/, "");
-		if (!after.startsWith(":")) {
-			return true;
-		}
-		match = re.exec(body);
+function collectBoundNames(pattern: acorn.Pattern | null, out: Set<string>): void {
+	if (!pattern) {
+		return;
 	}
-	return false;
-}
-
-/**
- * Return a same-length copy of `source` in which every character that is NOT
- * executable code is replaced by whitespace (newlines preserved), so index
- * positions are stable. Blanked regions: `//` line comments, `/* *\/` block
- * comments, `'...'` / `"..."` strings, `` `...` `` template TEXT, and `/.../ `
- * regex literals. Template `${ ... }` EXPRESSIONS are kept as code, since a
- * real assertion may reference its parameter only inside an interpolation.
- *
- * This single-pass lexer replaces the earlier ad-hoc comment/string strippers:
- * running every structural, keyword, and identifier check on the code view
- * closes the whole class of "lexical form fools the matcher" bugs (regex `//`,
- * `throw` in a string, `$ctx` params, params used only in `${...}`).
- */
-function maskToCodeView(source: string): string {
-	const out = source.split("");
-	const n = source.length;
-	const blank = (from: number, to: number) => {
-		for (let k = from; k < to && k < n; k++) {
-			out[k] = source[k] === "\n" ? "\n" : " ";
-		}
-	};
-	// Blank template-literal TEXT starting at index `from` (already past the
-	// opening backtick or a `}`). Stops after the closing backtick (returns
-	// {next, opened:false}) or at a `${` (returns {next, opened:true}) so the
-	// caller can treat the following interpolation as code.
-	const maskTemplateText = (from: number): { next: number; opened: boolean } => {
-		let k = from;
-		while (k < n) {
-			if (source[k] === "\\") {
-				out[k] = " ";
-				if (k + 1 < n) out[k + 1] = " ";
-				k += 2;
-				continue;
+	switch (pattern.type) {
+		case "Identifier":
+			out.add(pattern.name);
+			break;
+		case "AssignmentPattern":
+			collectBoundNames(pattern.left, out);
+			break;
+		case "RestElement":
+			collectBoundNames(pattern.argument, out);
+			break;
+		case "ArrayPattern":
+			for (const element of pattern.elements) {
+				collectBoundNames(element, out);
 			}
-			if (source[k] === "`") {
-				out[k] = " ";
-				return { next: k + 1, opened: false };
-			}
-			if (source[k] === "$" && source[k + 1] === "{") {
-				out[k] = " ";
-				out[k + 1] = " ";
-				return { next: k + 2, opened: true };
-			}
-			out[k] = source[k] === "\n" ? "\n" : " ";
-			k++;
-		}
-		return { next: k, opened: false };
-	};
-	// A `/` begins a regex literal (not division) only in expression/prefix
-	// position — i.e. when the PREVIOUS token does not end a value. Tracking the
-	// previous token (not just the previous char) is required because keywords
-	// like `return`/`typeof`/`void` end in a letter yet are followed by a regex,
-	// while identifiers/`)`/`]`/numbers/strings end a value and are followed by
-	// division. Transpilers (e.g. bun inlining `const ok = /re/; return ok`)
-	// routinely produce `return /re/.test(...)`, so this distinction is load-
-	// bearing, not theoretical.
-	const EXPR_KEYWORDS = new Set([
-		"return",
-		"typeof",
-		"instanceof",
-		"in",
-		"of",
-		"case",
-		"delete",
-		"void",
-		"do",
-		"else",
-		"yield",
-		"await",
-		"new",
-	]);
-	// After a control-statement header `if (...) / while (...) / for (...)` etc.,
-	// the parenthesis closes but a following `/` is still in statement/expression
-	// position, so it starts a regex — unlike a value-grouping `(expr)` whose `)`
-	// ends a value and is followed by division. Track, per `(`, whether it opened
-	// a control header so the matching `)` sets the right token class.
-	const CONTROL_KEYWORDS = new Set(["if", "while", "for", "switch", "catch", "with"]);
-	// "value" = previous token ends an expression (identifier, number, string,
-	// `)`, `]`, regex, template, value keyword) → a following `/` is division.
-	// "op" = previous token is an operator/opener/expression-keyword → a
-	// following `/` starts a regex.
-	let prevTok: "value" | "op" | "" = "";
-	// Most recent identifier/keyword word, used to classify the next `(`.
-	let lastWord = "";
-	// For each open `(`, whether it began a control-statement header.
-	const parenCtrl: boolean[] = [];
-	const tmplStack: number[] = [];
-	let depth = 0;
-	let i = 0;
-	while (i < n) {
-		const c = source[i];
-		const c2 = source[i + 1];
-		if (c === "/" && c2 === "/") {
-			let j = i;
-			while (j < n && source[j] !== "\n") j++;
-			blank(i, j);
-			i = j;
-			continue;
-		}
-		if (c === "/" && c2 === "*") {
-			let j = i + 2;
-			while (j < n && !(source[j] === "*" && source[j + 1] === "/")) j++;
-			j = Math.min(j + 2, n);
-			blank(i, j);
-			i = j;
-			continue;
-		}
-		if (c === "/") {
-			if (prevTok !== "value") {
-				let j = i + 1;
-				let inClass = false;
-				let ok = false;
-				while (j < n) {
-					const rc = source[j];
-					if (rc === "\\") {
-						j += 2;
-						continue;
-					}
-					if (rc === "\n") break;
-					if (rc === "[") inClass = true;
-					else if (rc === "]") inClass = false;
-					else if (rc === "/" && !inClass) {
-						j++;
-						ok = true;
-						break;
-					}
-					j++;
-				}
-				if (ok) {
-					while (j < n && /[a-z]/i.test(source[j])) j++;
-					blank(i, j);
-					prevTok = "value";
-					lastWord = "";
-					i = j;
-					continue;
-				}
-			}
-			prevTok = "op";
-			lastWord = "";
-			i++;
-			continue;
-		}
-		if (c === "'" || c === '"') {
-			let j = i + 1;
-			while (j < n && source[j] !== c) {
-				if (source[j] === "\\") j += 2;
-				else j++;
-			}
-			j = Math.min(j + 1, n);
-			blank(i, j);
-			prevTok = "value";
-			lastWord = "";
-			i = j;
-			continue;
-		}
-		if (c === "`") {
-			out[i] = " ";
-			const { next, opened } = maskTemplateText(i + 1);
-			i = next;
-			if (opened) {
-				tmplStack.push(depth);
-				depth++;
-				prevTok = "op";
-			} else {
-				prevTok = "value";
-			}
-			lastWord = "";
-			continue;
-		}
-		if (c === "(") {
-			parenCtrl.push(CONTROL_KEYWORDS.has(lastWord));
-			prevTok = "op";
-			lastWord = "";
-			i++;
-			continue;
-		}
-		if (c === ")") {
-			// A control-header `)` (if/while/for/…) leaves us in statement
-			// position → a following `/` is a regex; a value-grouping `)` ends a
-			// value → division.
-			const wasControlHeader = parenCtrl.pop() ?? false;
-			prevTok = wasControlHeader ? "op" : "value";
-			lastWord = "";
-			i++;
-			continue;
-		}
-		if (c === "{") {
-			depth++;
-			prevTok = "op";
-			lastWord = "";
-			i++;
-			continue;
-		}
-		if (c === "}") {
-			if (tmplStack.length > 0 && depth - 1 === tmplStack[tmplStack.length - 1]) {
-				// Closes a `${...}` interpolation → blank it and resume the
-				// enclosing template text.
-				tmplStack.pop();
-				depth--;
-				out[i] = " ";
-				const { next, opened } = maskTemplateText(i + 1);
-				i = next;
-				if (opened) {
-					tmplStack.push(depth);
-					depth++;
-					prevTok = "op";
+			break;
+		case "ObjectPattern":
+			for (const property of pattern.properties) {
+				if (property.type === "RestElement") {
+					collectBoundNames(property.argument, out);
 				} else {
-					prevTok = "value";
+					// `.value` is the local binding target, `.key` is the source
+					// property name — bind only the former.
+					collectBoundNames(property.value, out);
 				}
-				lastWord = "";
-				continue;
 			}
-			depth--;
-			prevTok = "value";
-			lastWord = "";
-			i++;
-			continue;
-		}
-		// Identifier or keyword.
-		if (/[A-Za-z_$]/.test(c)) {
-			let j = i + 1;
-			while (j < n && /[\w$]/.test(source[j])) j++;
-			const word = source.slice(i, j);
-			prevTok = EXPR_KEYWORDS.has(word) ? "op" : "value";
-			lastWord = word;
-			i = j;
-			continue;
-		}
-		// Numeric literal.
-		if (/[0-9]/.test(c)) {
-			let j = i + 1;
-			while (j < n && /[\w.]/.test(source[j])) j++;
-			prevTok = "value";
-			lastWord = "";
-			i = j;
-			continue;
-		}
-		if (!/\s/.test(c)) {
-			prevTok = c === "]" ? "value" : "op";
-			lastWord = "";
-		}
-		i++;
+			break;
 	}
-	return out.join("");
 }
 
-function isVacuousBlockAssertionBody(body: string): boolean {
-	const normalized = body.replace(/\s+/g, "");
-	return (
-		normalized === "" ||
-		/^return(?:;|undefined;?|void0;?|\(void0\);?|\{\};?|\(\{\}\);?|Promise\.resolve\((?:|undefined|void0|\(void0\)|\{\}|\(\{\}\))\);?)$/.test(
-			normalized,
-		)
-	);
+/**
+ * True if the function contains a real `throw` statement in ITS OWN body —
+ * descending through control flow but NOT into nested functions, whose throws
+ * do not execute unless that nested function is invoked.
+ */
+function functionThrows(fn: AssertionFunctionNode): boolean {
+	if (fn.body.type !== "BlockStatement") {
+		// Concise arrow returning an expression cannot contain a throw statement.
+		return false;
+	}
+	let throws = false;
+	walkAst(fn.body, (node) => {
+		if (throws) {
+			return false;
+		}
+		if (node.type === "ThrowStatement") {
+			throws = true;
+			return false;
+		}
+		// Do not descend into nested function bodies.
+		if (isFunctionNode(node)) {
+			return false;
+		}
+		return true;
+	});
+	return throws;
 }
 
-function isVacuousConciseAssertionBody(body: string): boolean {
-	const normalized = body.replace(/\s+/g, "");
+/**
+ * True if the function's body references any of the given bound parameter names
+ * as an actual value. Property KEYS (`{ status: ... }`, `obj.status`) are not
+ * references; computed members (`obj[status]`) are. Nested functions that
+ * re-bind the same name shadow it, so their bodies are searched with the
+ * shadowed name removed from the target set.
+ */
+function referencesBoundNames(fn: AssertionFunctionNode, bound: Set<string>): boolean {
+	if (bound.size === 0) {
+		return false;
+	}
+	return scopeReferences(fn.body, bound);
+}
+
+function scopeReferences(root: acorn.AnyNode, names: Set<string>): boolean {
+	let referenced = false;
+	walkAstValues(root, names, () => {
+		referenced = true;
+	});
+	return referenced;
+}
+
+/**
+ * Walk `node`, invoking `onReference` when an Identifier in value position
+ * matches a name in `names`. Skips property keys and non-computed member
+ * properties. On entering a nested function, removes any parameter names it
+ * rebinds (shadowing) from the active set for that subtree.
+ */
+function walkAstValues(node: acorn.AnyNode, names: Set<string>, onReference: () => void): void {
+	if (names.size === 0) {
+		return;
+	}
+	if (node.type === "Identifier") {
+		if (names.has(node.name)) {
+			onReference();
+		}
+		return;
+	}
+	// Nested function: subtract its own parameter bindings (shadowing) before
+	// descending into its body.
+	if (isFunctionNode(node)) {
+		const shadowed = new Set<string>();
+		for (const param of node.params) {
+			collectBoundNames(param, shadowed);
+		}
+		const visible = new Set<string>();
+		for (const name of names) {
+			if (!shadowed.has(name)) {
+				visible.add(name);
+			}
+		}
+		if (visible.size > 0) {
+			for (const child of childNodes(node.body)) {
+				walkAstValues(child, visible, onReference);
+			}
+		}
+		return;
+	}
+	for (const [key, child] of childEntries(node)) {
+		// Skip non-computed property keys (`{ status: x }`) and member
+		// properties (`obj.status`) — these are names, not references.
+		if (key === "key" && node.type === "Property" && !node.computed) {
+			continue;
+		}
+		if (key === "property" && node.type === "MemberExpression" && !node.computed) {
+			continue;
+		}
+		walkAstValues(child, names, onReference);
+	}
+}
+
+/** Generic pre-order AST walk; `visit` returns false to stop descending. */
+function walkAst(node: acorn.AnyNode, visit: (node: acorn.AnyNode) => boolean): void {
+	if (!visit(node)) {
+		return;
+	}
+	for (const child of childNodes(node)) {
+		walkAst(child, visit);
+	}
+}
+
+function* childNodes(node: acorn.AnyNode): Generator<acorn.AnyNode> {
+	for (const [, child] of childEntries(node)) {
+		yield child;
+	}
+}
+
+function* childEntries(node: acorn.AnyNode): Generator<[string, acorn.AnyNode]> {
+	for (const key of Object.keys(node)) {
+		if (key === "type" || key === "start" || key === "end" || key === "loc" || key === "range") {
+			continue;
+		}
+		const value = (node as unknown as Record<string, unknown>)[key];
+		if (Array.isArray(value)) {
+			for (const item of value) {
+				if (isAstNode(item)) {
+					yield [key, item];
+				}
+			}
+		} else if (isAstNode(value)) {
+			yield [key, value];
+		}
+	}
+}
+
+function isAstNode(value: unknown): value is acorn.AnyNode {
 	return (
-		normalized === "" ||
-		/^(?:undefined|void0|\(void0\)|\{\}|\(\{\}\)|Promise\.resolve\((?:|undefined|void0|\(void0\)|\{\}|\(\{\}\))\))$/.test(
-			normalized,
-		)
+		typeof value === "object" &&
+		value !== null &&
+		typeof (value as { type?: unknown }).type === "string"
 	);
 }
 
