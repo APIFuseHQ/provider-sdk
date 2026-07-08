@@ -2219,8 +2219,13 @@ function parseAssertionSource(rawSource: string): ParsedAssertion | undefined {
 }
 
 function isInversionVacuous(params: string, body: string): boolean {
+	// Ignore string/template literals so text inside them (e.g. a log message
+	// containing the word "throw", or a param name mentioned only in a string)
+	// cannot masquerade as real assertion logic. Block comments are already
+	// stripped by the caller; regex literals are preserved.
+	const code = stripStringLiterals(body);
 	// A body that throws is doing real work (asserting a failure path).
-	if (/\bthrow\b/.test(body)) {
+	if (/\bthrow\b/.test(code)) {
 		return false;
 	}
 	const paramIds = (params.match(/[A-Za-z_$][\w$]*/g) ?? []).filter(
@@ -2233,10 +2238,24 @@ function isInversionVacuous(params: string, body: string): boolean {
 	}
 	// If the body references any bound parameter, assume it inspects the
 	// response and treat it as a real assertion (fail-open on uncertainty).
-	const referencesParam = paramIds.some((id) =>
-		new RegExp(`\\b${id.replace(/[$]/g, "\\$")}\\b`).test(body),
-	);
+	// `$` and `_` are valid identifier characters, so `\b` boundaries are
+	// unreliable (e.g. `$ctx`); guard with explicit non-identifier lookarounds.
+	const referencesParam = paramIds.some((id) => {
+		const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+		return new RegExp(`(?<![$\\w])${escaped}(?![$\\w])`).test(code);
+	});
 	return !referencesParam;
+}
+
+function stripStringLiterals(source: string): string {
+	// Remove '...' , "..." and `...` literal contents (handling escapes) so their
+	// text is not scanned as code. Kept intentionally simple: replaces each
+	// literal with an empty pair, which is sufficient for keyword/identifier
+	// presence checks.
+	return source
+		.replace(/'(?:\\.|[^'\\])*'/g, "''")
+		.replace(/"(?:\\.|[^"\\])*"/g, '""')
+		.replace(/`(?:\\.|[^`\\])*`/g, "``");
 }
 
 function isVacuousBlockAssertionBody(body: string): boolean {

@@ -942,6 +942,8 @@ ${assertionLines(21)}
 		["Promise.resolve().then no-op", "() => Promise.resolve().then(() => {})"],
 		["new Promise resolve no-op", "() => new Promise((resolve) => resolve())"],
 		["side-effect only, no param ref", "() => { globalThis.__x = 1; }"],
+		["throw only inside a string literal", '() => { console.info("throw later"); }'],
+		["bound param referenced only in string", '({ data }) => { console.info("data missing"); }'],
 	] as const) {
 		it(`blocks vacuous health assertions with ${label}`, async () => {
 			const dir = makeProviderDir(
@@ -1078,6 +1080,30 @@ ${assertionLines(21)}
               throw new Error("lookup failed");
             }
           }).bind(undefined),
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes assertions whose parameter name contains $", async () => {
+		// Regression: `\b` word boundaries fail for `$ctx` because `$` is not a
+		// word char, so the param-reference check must use identifier-aware
+		// lookarounds.
+		const dir = makeProviderDir(
+			"submit-dollar-param-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: ($ctx) =>
+            $ctx.status === 200 ? undefined : { status: "degraded", label: "lookup down" },
         }],
       },`),
 		);
