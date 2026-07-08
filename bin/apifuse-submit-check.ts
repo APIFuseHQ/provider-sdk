@@ -435,13 +435,14 @@ function scoreDescribeKey(providerRoot: string): SubmitCheck {
 function scoreNoRawFetch(providerRoot: string): SubmitCheck {
 	const findings = findSourceLineMatches(providerRoot, /(?<![.\w])fetch\s*\(/);
 	if (findings.length > 0) {
+		const evidence = formatSourceFindings(findings);
 		return blocker(
 			"no-raw-fetch",
 			SDK_NATIVE_CATEGORY,
 			"Provider source calls raw fetch().",
-			"Replace raw fetch() with ctx.stealth.fetch() (cloud-IP-blocked otherwise) or ctx.http for non-stealth calls.",
+			`Replace raw fetch() in ${evidence.join(", ")} with ctx.stealth.fetch() for stealth/cloud-IP-sensitive calls or ctx.http.get/post/request for ordinary HTTP calls.`,
 			0,
-			formatSourceFindings(findings),
+			evidence,
 		);
 	}
 
@@ -1790,6 +1791,10 @@ function scoreManagedBrowserRuntime(providerRoot: string): SubmitCheck {
 function scoreBaseChecks(results: CheckResult[]): SubmitCheck[] {
 	const failed = results.filter((result) => !result.passed);
 	if (failed.length > 0) {
+		const remediation = [
+			"Run `bunx apifuse check .` from the provider root.",
+			...Array.from(new Set(failed.map(baseCheckRemediation))),
+		].join(" ");
 		return [
 			{
 				id: "base-checks",
@@ -1799,8 +1804,7 @@ function scoreBaseChecks(results: CheckResult[]): SubmitCheck[] {
 				points: 0,
 				maxPoints: CATEGORY_MAX_POINTS.definition,
 				message: "Base provider checks failed.",
-				remediation:
-					"Run `bun run check` and fix every failing item before bounty submission.",
+				remediation,
 				evidence: failed.map((result) =>
 					redact(`${result.message}: ${(result.details ?? []).join("; ")}`),
 				),
@@ -1820,6 +1824,31 @@ function scoreBaseChecks(results: CheckResult[]): SubmitCheck[] {
 			evidence: results.map((result) => result.message),
 		},
 	];
+}
+
+function baseCheckRemediation(result: CheckResult): string {
+	switch (result.message) {
+		case "index.ts exists and exports default defineProvider":
+			return "Fix `index.ts` so it default-exports `defineProvider({...})`.";
+		case "All operations have handler, input, output":
+			return "For each operation named in evidence, add `handler`, `input`, and `output` fields to `defineProvider({ operations })`.";
+		case "All operations have fixtures":
+			return "For each operation named in evidence, add `fixtures.request` and `fixtures.response` values that exercise the operation schemas.";
+		case "Zod schemas parse fixtures without error":
+			return "Update the failing fixture values or their zod schemas until `fixtures.request` and `fixtures.response` parse cleanly.";
+		case "Provider authoring lint has no error-level diagnostics":
+			return "Fix each lint diagnostic shown in evidence, then rerun `bunx apifuse check .`.";
+		case "Provider metadata is declared in defineProvider":
+			return "Fill the missing `defineProvider` metadata fields: `id`, `meta.displayName`, `meta.category`, `runtime`, and `auth.mode`.";
+		case "Dockerfile exists":
+			return "Add a provider-root `Dockerfile` based on the current `apifuse create` template.";
+		case "package.json exists with @apifuse/provider-sdk dependency":
+			return "Add `@apifuse/provider-sdk` to `package.json` dependencies.";
+		case "Base provider checks can run":
+			return "Fix the import/runtime error shown in evidence so `apifuse check` can load the provider.";
+		default:
+			return `Fix the failing base check "${result.message}" shown in evidence.`;
+	}
 }
 
 function scoreLocaleCatalog(
@@ -2001,7 +2030,7 @@ function scoreOperationMetadata(provider: ProviderDefinition): SubmitCheck {
 			maxPoints: CATEGORY_MAX_POINTS.operations,
 			message: "One or more operations have weak descriptions.",
 			remediation:
-				"Add 150+ character English descriptions explaining when to use, when not to use, outputs, and caveats.",
+				`For ${weakDescriptions.join(", ")}, add an operation \`descriptionKey\` backed by \`locales/en.json\` and \`locales/ko.json\`, or add a 150+ character \`description\` explaining when to use it, when not to use it, outputs, and caveats.`,
 			evidence: weakDescriptions,
 		};
 	}
@@ -2021,7 +2050,7 @@ function scoreOperationMetadata(provider: ProviderDefinition): SubmitCheck {
 				: "Operation descriptions and metadata are review-ready.",
 		remediation:
 			missingAnnotations.length > 0
-				? "Add annotations such as readOnly, destructive, idempotent, openWorld, rateLimit, or timeoutMs where applicable."
+				? `For ${missingAnnotations.join(", ")}, add \`annotations\` with the applicable safety fields, such as \`readOnly\`, \`destructive\`, \`idempotent\`, \`openWorld\`, \`rateLimit\`, or \`timeoutMs\`.`
 				: undefined,
 		evidence:
 			missingAnnotations.length > 0
@@ -2044,7 +2073,7 @@ function scoreFixtureCoverage(provider: ProviderDefinition): SubmitCheck {
 			"fixtures",
 			"fixtures",
 			"One or more operations are missing bidirectional fixtures.",
-			"Add fixtures.request and fixtures.response that parse against operation schemas.",
+			`For ${missing.join(", ")}, add \`fixtures.request\` and \`fixtures.response\` values that parse against the operation input and output schemas.`,
 			CATEGORY_MAX_POINTS.fixtures,
 			missing,
 		);
@@ -2092,7 +2121,7 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 			"health-coverage",
 			"health",
 			"One or more operations lack healthCheck or healthCheckUnsupported.",
-			"Declare a safe healthCheck for read-only upstream probes or a specific healthCheckUnsupported.reason.",
+			`For ${missing.join(", ")}, add \`healthCheck: { interval, cases }\` for safe read-only upstream probes, or add \`healthCheckUnsupported: { reason: "<specific reason>" }\`.`,
 			CATEGORY_MAX_POINTS.health,
 			missing,
 		);
@@ -2108,7 +2137,7 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 			maxPoints: CATEGORY_MAX_POINTS.health,
 			message: "Some healthCheckUnsupported reasons look placeholder-like.",
 			remediation:
-				"Replace placeholder rationale with a specific reason such as destructive mutation, paid call, credential sensitivity, or upstream flakiness.",
+				`For ${placeholder.join(", ")}, replace the placeholder \`healthCheckUnsupported.reason\` with a specific reason such as destructive mutation, paid call, credential sensitivity, or upstream flakiness.`,
 			evidence: placeholder,
 		};
 	}
@@ -2124,7 +2153,7 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 			message:
 				"Generated starter operation health rationale is present; replace starter logic before bounty submission.",
 			remediation:
-				"Replace `ping` with real upstream-backed operations and prefer real healthCheck for safe read-only probes.",
+				`Replace generated starter operation(s) ${generatedStarter.join(", ")} with real upstream-backed operations and add \`healthCheck\` for safe read-only probes.`,
 			evidence: generatedStarter,
 		};
 	}
@@ -2140,7 +2169,7 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 			message:
 				"Health coverage is declared, with one or more unsupported probes.",
 			remediation:
-				"Reviewers prefer real healthCheck for safe read-only upstream operations.",
+				`For ${unsupported.join(", ")}, replace \`healthCheckUnsupported\` with \`healthCheck: { interval, cases }\` when the upstream operation is safe and read-only; keep unsupported only for destructive, paid, credential-sensitive, or flaky probes with a specific reason.`,
 			evidence: unsupported.map(
 				(operationId) => `${operationId}: healthCheckUnsupported`,
 			),
@@ -2205,7 +2234,7 @@ function scoreAuthSafety(provider: ProviderDefinition): SubmitCheck {
 			maxPoints: CATEGORY_MAX_POINTS.auth,
 			message: "OAuth auth mode does not declare persisted credential.keys.",
 			remediation:
-				"Generated OAuth starters may begin without keys, but bounty-ready OAuth providers should declare persisted token keys once the real token exchange is implemented.",
+				"Add `credential: { keys: [...] }` to `defineProvider` with the persisted OAuth token fields returned by the real token exchange.",
 		};
 	}
 
@@ -2224,7 +2253,7 @@ function scoreAuthSafety(provider: ProviderDefinition): SubmitCheck {
 				message:
 					"Provider is no-auth but at least one operation is not marked openWorld.",
 				remediation:
-					"Confirm auth.mode and operation annotations match the actual upstream auth model.",
+					`Either set \`auth.mode\` to the upstream auth model, or mark these public no-auth operations with \`annotations.openWorld: true\`: ${securedOperations.map(([operationId]) => operationId).join(", ")}.`,
 				evidence: securedOperations.map(([operationId]) => operationId),
 			};
 		}
@@ -2285,7 +2314,7 @@ function scoreProviderDocs(providerRoot: string): SubmitCheck[] {
 					: "Provider README includes expected submission guidance.",
 			remediation:
 				missing.length > 0 || !mentionsSubmitCheck
-					? "Include Parameters, Response, Example, and submit-check evidence guidance."
+					? "Update `README.md` to include `Parameters`, `Response`, `Example`, and submit-check evidence guidance sections."
 					: undefined,
 			evidence: [
 				...missing.map(([, label]) => `missing ${label}`),
