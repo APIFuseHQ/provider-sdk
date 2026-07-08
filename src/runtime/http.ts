@@ -58,7 +58,12 @@ type HttpStatusOutcome = {
 	status: number;
 	headers: Record<string, string>;
 	retryable: boolean;
+	proxyUsed: boolean;
 };
+
+type NativeHttpAttemptOutcome = HttpResponse | HttpStatusOutcome;
+
+type NativeHttpAttemptError = TransportError & { proxyUsed?: boolean };
 
 function isHttpStatusOutcome(
 	outcome: HttpResponse | HttpStatusOutcome,
@@ -250,40 +255,6 @@ function normalizeRetryOptions(
 	};
 
 	return normalized;
-}
-
-function isProxyRoutedOrRequested(
-	options: RequestOptions,
-	clientOptions: HttpClientOptions,
-): boolean {
-	if (options.proxy !== undefined || clientOptions.proxy !== undefined) {
-		return true;
-	}
-
-	const upstreamProxy = clientOptions.upstream?.proxy;
-	if (upstreamProxy === true) {
-		return true;
-	}
-	if (upstreamProxy && upstreamProxy.mode !== "disabled") {
-		return true;
-	}
-
-	return Boolean(
-		clientOptions.proxyPolicy && clientOptions.proxyPolicy.mode !== "disabled",
-	);
-}
-
-function selectRetryInput(
-	options: RequestOptions,
-	clientOptions: HttpClientOptions,
-): RequestOptions["retry"] {
-	if (options.retry !== undefined) {
-		return options.retry;
-	}
-	if (isProxyRoutedOrRequested(options, clientOptions)) {
-		return HttpRetryPreset.TransportTransient;
-	}
-	return undefined;
 }
 
 function validateRetryOptionsShape(retry: HttpRetryOptions): void {
@@ -719,12 +690,20 @@ async function resolveNativeProxy(
 	options: RequestOptions,
 	clientOptions: HttpClientOptions,
 	warn: (message: string) => void,
+	proxyAttemptOffset = 0,
 ): Promise<string | undefined> {
+	const baseProxyAttempt =
+		clientOptions.proxyAttempt === undefined ||
+		!Number.isFinite(clientOptions.proxyAttempt)
+			? 0
+			: Math.max(0, Math.floor(clientOptions.proxyAttempt));
 	const resolvedProxy = await resolveProxyConfigAsync({
 		proxy: options.proxy ?? clientOptions.proxy,
 		upstream: clientOptions.upstream,
 		apifuseConfig: clientOptions.apifuseConfig,
+		proxyPolicy: clientOptions.proxyPolicy,
 		affinityKey: clientOptions.affinityKey,
+		proxyAttempt: baseProxyAttempt + proxyAttemptOffset,
 		telemetry: clientOptions.telemetry,
 	});
 	if (resolvedProxy.shouldWarn) {
@@ -764,7 +743,8 @@ async function fetchNativeHttp(
 	clientOptions: HttpClientOptions,
 	warn: (message: string) => void,
 	statusRetryCodes?: readonly number[],
-): Promise<HttpResponse | HttpStatusOutcome> {
+	proxyAttemptOffset = 0,
+): Promise<NativeHttpAttemptOutcome> {
 	const requestUrl = appendQueryParams(
 		resolveHttpUrl(baseUrl, url),
 		options.params,
@@ -774,8 +754,14 @@ async function fetchNativeHttp(
 		? setTimeout(() => controller?.abort(), options.timeout)
 		: undefined;
 
+	let proxy: string | undefined;
 	try {
-		const proxy = await resolveNativeProxy(options, clientOptions, warn);
+		proxy = await resolveNativeProxy(
+			options,
+			clientOptions,
+			warn,
+			proxyAttemptOffset,
+		);
 		const requestInit: NativeFetchInit = {
 			headers: options.headers,
 			method,
@@ -797,6 +783,7 @@ async function fetchNativeHttp(
 				status: response.status,
 				headers,
 				retryable: statusRetryCodes.includes(response.status),
+				proxyUsed: Boolean(proxy),
 			};
 		}
 
@@ -816,7 +803,9 @@ async function fetchNativeHttp(
 		if (error instanceof SyntaxError) {
 			throw error;
 		}
-		throw toHttpTransportError(error);
+		const transportError = toHttpTransportError(error) as NativeHttpAttemptError;
+		transportError.proxyUsed = Boolean(proxy);
+		throw transportError;
 	} finally {
 		if (timeoutHandle) clearTimeout(timeoutHandle);
 	}
@@ -908,9 +897,12 @@ export function createHttpClient(
 			options.body,
 		);
 		const methodName = normalizeHttpMethod(method);
-		const retryOptions = normalizeRetryOptions(
-			selectRetryInput(headersOptions, clientOptions),
-		);
+		const explicitRetry = headersOptions.retry !== undefined;
+		const retryOptions =
+			normalizeRetryOptions(headersOptions.retry) ??
+			(explicitRetry
+				? undefined
+				: createRetryOptions(HttpRetryPreset.TransportTransient));
 		if (retryOptions) validateUnsafeRetryMethods(retryOptions);
 		const retryEnabled = Boolean(
 			retryOptions &&
@@ -919,6 +911,7 @@ export function createHttpClient(
 		);
 		const statusRetryEnabled = Boolean(
 			retryEnabled &&
+				explicitRetry &&
 				retryOptions &&
 				retryOptions.statusCodes.length > 0 &&
 				headersOptions.throwOnHttpError !== false,
@@ -928,7 +921,9 @@ export function createHttpClient(
 				? { ...headersOptions, throwOnHttpError: false }
 				: headersOptions;
 
-		const executeOnce = (): Promise<HttpResponse | HttpStatusOutcome> =>
+		const executeOnce = (
+			proxyAttemptOffset = 0,
+		): Promise<NativeHttpAttemptOutcome> =>
 			fetchNativeHttp(
 				baseUrl,
 				url,
@@ -937,6 +932,7 @@ export function createHttpClient(
 				clientOptions,
 				warnOnce,
 				statusRetryEnabled ? retryOptions?.statusCodes : undefined,
+				proxyAttemptOffset,
 			);
 
 		if (!retryEnabled || !retryOptions) {
@@ -951,7 +947,7 @@ export function createHttpClient(
 		let lastStatus: number | undefined;
 		for (let attempt = 1; attempt <= retryOptions.attempts; attempt += 1) {
 			try {
-				const outcome = await executeOnce();
+				const outcome = await executeOnce(attempt - 1);
 				if (isHttpStatusOutcome(outcome)) {
 					lastStatus = outcome.status;
 					if (outcome.retryable && attempt < retryOptions.attempts) {
@@ -986,8 +982,10 @@ export function createHttpClient(
 			} catch (error) {
 				lastErrorCode = retryErrorCode(error);
 				lastStatus = retryErrorStatus(error);
+				const proxyUsed = Boolean((error as NativeHttpAttemptError).proxyUsed);
 				if (
 					attempt < retryOptions.attempts &&
+					(explicitRetry || proxyUsed) &&
 					shouldRetryTransportError(error, retryOptions)
 				) {
 					await sleep(computeRetryDelayMs(retryOptions, attempt));
