@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setDefaultTimeout } from "bun:test";
 import {
 	existsSync,
 	mkdirSync,
@@ -12,20 +12,17 @@ import { dirname, join } from "node:path";
 
 import {
 	buildSubmitCheckReport,
+	extractStringLiteralCandidates,
 	isAutoPromotionEligible,
 	renderMarkdown,
 	type SubmitCheckReport,
 } from "../../bin/apifuse-submit-check";
 
 const tempDirs: string[] = [];
-const submitCheckCliPath = join(
-	import.meta.dir,
-	"..",
-	"..",
-	"bin",
-	"apifuse-submit-check.ts",
-);
+const submitCheckCliPath = join(import.meta.dir, "..", "..", "bin", "apifuse-submit-check.ts");
 const tempRoot = join(process.cwd(), ".tmp-provider-sdk-submit-check-tests");
+
+setDefaultTimeout(60_000);
 
 function makeProviderDir(
 	prefix: string,
@@ -44,6 +41,7 @@ function makeProviderDir(
 			...(includeRepositoryDx
 				? {
 						scripts: {
+							dev: "apifuse dev .",
 							check: checkScript,
 							"type-check": "tsc --noEmit",
 						},
@@ -70,6 +68,12 @@ function linkLocalSdkDependency(providerDir: string): void {
 	if (!existsSync(target)) {
 		symlinkSync(dirname(dirname(import.meta.dir)), target, "dir");
 	}
+	const binDir = join(providerDir, "node_modules", ".bin");
+	mkdirSync(binDir, { recursive: true });
+	const binTarget = join(binDir, "apifuse");
+	if (!existsSync(binTarget)) {
+		symlinkSync(join(target, "bin", "apifuse.ts"), binTarget);
+	}
 }
 
 function writeValidLocaleCatalogs(dir: string): void {
@@ -89,8 +93,7 @@ function makeValidLocaleCatalogs(): {
 				description:
 					"Good Provider exposes a deterministic submit-check fixture with provider-owned catalog copy.",
 				docTitle: "Good Provider API",
-				docDescription:
-					"Reference documentation for the Good Provider submit-check fixture.",
+				docDescription: "Reference documentation for the Good Provider submit-check fixture.",
 				docSummary: "Deterministic provider used by submit-check tests.",
 				docMarkdown:
 					"Use Good Provider to validate provider-level and operation-level localized copy.",
@@ -123,13 +126,11 @@ function makeValidLocaleCatalogs(): {
 	const ko = {
 		provider: {
 			meta: {
-				description:
-					"Good Provider는 제공자 소유 카탈로그 문구를 포함한 제출 검사 픽스처입니다.",
+				description: "Good Provider는 제공자 소유 카탈로그 문구를 포함한 제출 검사 픽스처입니다.",
 				docTitle: "Good Provider API",
 				docDescription: "Good Provider 제출 검사 픽스처 참조 문서입니다.",
 				docSummary: "제출 검사 테스트에 사용하는 결정적 제공자입니다.",
-				docMarkdown:
-					"Good Provider를 사용해 제공자 및 작업 수준 현지화 문구를 검증합니다.",
+				docMarkdown: "Good Provider를 사용해 제공자 및 작업 수준 현지화 문구를 검증합니다.",
 				publicProfile: {
 					displayName: "Good Provider",
 					shortDescription: "현지화된 결정적 제공자 픽스처입니다.",
@@ -173,9 +174,7 @@ function defaultReadme(): string {
 	].join("\n");
 }
 
-function validProviderSource(
-	extraOperationFields: string | undefined = undefined,
-): string {
+function validProviderSource(extraOperationFields: string | undefined = undefined): string {
 	return `
 import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";
 
@@ -241,10 +240,7 @@ export default defineProvider({
 }
 
 function sourceWithHandler(handlerSource: string): string {
-	return validProviderSource().replace(
-		"handler: async () => ({ ok: true }),",
-		handlerSource,
-	);
+	return validProviderSource().replace("handler: async () => ({ ok: true }),", handlerSource);
 }
 
 function sourceWithAuth(authSource: string): string {
@@ -272,15 +268,14 @@ describe("apifuse submit-check", () => {
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir, {
 			tier: "bronze",
+			smoke: true,
 			smokeNote: "GET /health and POST /v1/lookup passed locally.",
 		});
 
 		expect(report.score.verdict).toBe("ready");
 		expect(report.summary.blockers).toBe(0);
 		expect(report.score.total).toBeGreaterThanOrEqual(90);
-		expect(renderMarkdown(report)).toContain(
-			"APIFuse Provider Submission Report",
-		);
+		expect(renderMarkdown(report)).toContain("APIFuse Provider Submission Report");
 	});
 
 	it("warns when generated repository DX files or scripts are missing", async () => {
@@ -339,10 +334,7 @@ describe("apifuse submit-check", () => {
 	it("blocks when provider id keeps the apifuse-provider prefix", async () => {
 		const dir = makeProviderDir(
 			"submit-id-slug-fail-",
-			validProviderSource().replace(
-				'id: "good-provider"',
-				'id: "apifuse-provider-good-provider"',
-			),
+			validProviderSource().replace('id: "good-provider"', 'id: "apifuse-provider-good-provider"'),
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
@@ -368,18 +360,13 @@ describe("apifuse submit-check", () => {
 
 		expect(check?.level).toBe("blocker");
 		expect(check?.status).toBe("fail");
-		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(
-			true,
-		);
+		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
 		expect(report.score.verdict).toBe("blocked");
 		expect(report.summary.blockers).toBeGreaterThanOrEqual(1);
 	});
 
 	it("passes when provider root has no vendor SDK shim directory", async () => {
-		const dir = makeProviderDir(
-			"submit-no-vendor-shim-pass-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-no-vendor-shim-pass-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "no-vendor-shim");
@@ -391,10 +378,7 @@ describe("apifuse submit-check", () => {
 	});
 
 	it("blocks when provider root contains a vendor SDK shim directory", async () => {
-		const dir = makeProviderDir(
-			"submit-no-vendor-shim-fail-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-no-vendor-shim-fail-", validProviderSource());
 		mkdirSync(join(dir, "vendor"), { recursive: true });
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
@@ -408,10 +392,7 @@ describe("apifuse submit-check", () => {
 	});
 
 	it("passes when source files import directly from the SDK", async () => {
-		const dir = makeProviderDir(
-			"submit-no-vendor-import-pass-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-no-vendor-import-pass-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "no-vendor-import");
@@ -423,10 +404,7 @@ describe("apifuse submit-check", () => {
 	});
 
 	it("blocks when source files import from vendor shim paths", async () => {
-		const dir = makeProviderDir(
-			"submit-no-vendor-import-fail-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-no-vendor-import-fail-", validProviderSource());
 		writeFileSync(
 			join(dir, "helper.ts"),
 			'import { defineProvider } from "../vendor/provider-sdk";\n',
@@ -448,10 +426,7 @@ describe("apifuse submit-check", () => {
 	});
 
 	it("passes when schema descriptions use describeKey", async () => {
-		const dir = makeProviderDir(
-			"submit-describe-key-pass-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-describe-key-pass-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "describe-key");
@@ -463,10 +438,7 @@ describe("apifuse submit-check", () => {
 	});
 
 	it("blocks when source schemas use raw describe prose", async () => {
-		const dir = makeProviderDir(
-			"submit-describe-key-fail-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-describe-key-fail-", validProviderSource());
 		writeFileSync(
 			join(dir, "schema.ts"),
 			'import { z } from "@apifuse/provider-sdk";\nexport const schema = z.string().describe("Raw prose");\n',
@@ -520,9 +492,7 @@ void useStealth;
 
 		expect(check?.level).toBe("blocker");
 		expect(check?.status).toBe("fail");
-		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(
-			true,
-		);
+		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
 		expect(report.score.verdict).toBe("blocked");
 	});
 
@@ -565,9 +535,7 @@ export async function openLocalBrowser() {
 		const report = await buildSubmitCheckReport(dir, {
 			smokeNote: "GET /health and POST /v1/lookup passed locally.",
 		});
-		const check = report.checks.find(
-			(item) => item.id === "managed-browser-runtime",
-		);
+		const check = report.checks.find((item) => item.id === "managed-browser-runtime");
 
 		expect(check?.level).toBe("warn");
 		expect(check?.status).toBe("warn");
@@ -575,9 +543,7 @@ export async function openLocalBrowser() {
 		expect(check?.message).toContain("self-hosted browser/CDP");
 		expect(check?.remediation).toContain("ctx.browser");
 		expect(check?.remediation).toContain("managed CDP Pool");
-		expect(check?.evidence?.join("\n")).toContain(
-			"browser-provider-local-cdp-env",
-		);
+		expect(check?.evidence?.join("\n")).toContain("browser-provider-local-cdp-env");
 		expect(check?.evidence?.join("\n")).toContain("browser-self-hosted-launch");
 		expect(check?.evidence?.join("\n")).toContain("entrypoint.sh");
 		expect(check?.evidence?.join("\n")).toContain("Dockerfile");
@@ -631,14 +597,12 @@ ${assertionLines(5)}
 		const report = await buildSubmitCheckReport(dir, {
 			smokeNote: "GET /health and POST /v1/lookup passed locally.",
 		});
-		const check = report.checks.find(
-			(item) => item.id === "as-assertion-count",
-		);
+		const check = report.checks.find((item) => item.id === "as-assertion-count");
 
 		expect(check?.status).toBe("pass");
 		expect(check?.maxPoints).toBe(0);
 		expect(check?.points).toBe(0);
-		expect(report.score.verdict).toBe("ready");
+		expect(report.score.verdict).toBe("reviewable_with_warnings");
 	});
 
 	it("warns for moderate type assertion counts without changing score", async () => {
@@ -653,9 +617,7 @@ ${assertionLines(6)}
 		const report = await buildSubmitCheckReport(dir, {
 			smokeNote: "GET /health and POST /v1/lookup passed locally.",
 		});
-		const check = report.checks.find(
-			(item) => item.id === "as-assertion-count",
-		);
+		const check = report.checks.find((item) => item.id === "as-assertion-count");
 
 		expect(check?.level).toBe("warn");
 		expect(check?.status).toBe("warn");
@@ -676,9 +638,7 @@ ${assertionLines(21)}
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "as-assertion-count",
-		);
+		const check = report.checks.find((item) => item.id === "as-assertion-count");
 
 		expect(check?.level).toBe("blocker");
 		expect(check?.status).toBe("fail");
@@ -717,10 +677,7 @@ ${assertionLines(21)}
 	});
 
 	it("passes credential usage for no-auth providers", async () => {
-		const dir = makeProviderDir(
-			"submit-credential-usage-no-auth-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-credential-usage-no-auth-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "credential-usage");
@@ -753,36 +710,27 @@ ${assertionLines(21)}
 		const check = report.checks.find((item) => item.id === "credential-usage");
 
 		expect(check?.status).toBe("pass");
-		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(
-			true,
-		);
+		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
 	});
 
 	it("blocks key-only providers when the English locale catalog is missing", async () => {
-		const dir = makeProviderDir(
-			"submit-missing-locale-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-missing-locale-", validProviderSource());
 		const report = await buildSubmitCheckReport(dir, {
 			smokeNote: "GET /health and POST /v1/lookup passed locally.",
 		});
 
 		expect(report.score.verdict).toBe("blocked");
 		expect(report.summary.blockers).toBeGreaterThan(0);
-		expect(
-			report.checks.find((check) => check.id === "locale-catalog")?.evidence,
-		).toContain("en:*: Missing provider locale catalog for en");
+		expect(report.checks.find((check) => check.id === "locale-catalog")?.evidence).toContain(
+			"en:*: Missing provider locale catalog for en",
+		);
 	});
 
 	it("blocks key-only providers when the English locale catalog is missing a required key", async () => {
-		const dir = makeProviderDir(
-			"submit-missing-en-key-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-missing-en-key-", validProviderSource());
 		const { en, ko } = makeValidLocaleCatalogs();
 		mkdirSync(join(dir, "locales"), { recursive: true });
-		delete (en.operations as { lookup: { description?: string } }).lookup
-			.description;
+		delete (en.operations as { lookup: { description?: string } }).lookup.description;
 		writeFileSync(join(dir, "locales", "en.json"), JSON.stringify(en));
 		writeFileSync(join(dir, "locales", "ko.json"), JSON.stringify(ko));
 
@@ -791,18 +739,13 @@ ${assertionLines(21)}
 		});
 
 		expect(report.score.verdict).toBe("blocked");
-		expect(
-			report.checks.find((check) => check.id === "locale-catalog")?.evidence,
-		).toContain(
+		expect(report.checks.find((check) => check.id === "locale-catalog")?.evidence).toContain(
 			"en:operations.lookup.description: Missing provider locale key operations.lookup.description in en",
 		);
 	});
 
 	it("blocks key-only providers when the English locale catalog is missing a provider meta key", async () => {
-		const dir = makeProviderDir(
-			"submit-missing-en-provider-meta-key-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-missing-en-provider-meta-key-", validProviderSource());
 		const { en, ko } = makeValidLocaleCatalogs();
 		mkdirSync(join(dir, "locales"), { recursive: true });
 		delete (en.provider as { meta: { description?: string } }).meta.description;
@@ -814,18 +757,13 @@ ${assertionLines(21)}
 		});
 
 		expect(report.score.verdict).toBe("blocked");
-		expect(
-			report.checks.find((check) => check.id === "locale-catalog")?.evidence,
-		).toContain(
+		expect(report.checks.find((check) => check.id === "locale-catalog")?.evidence).toContain(
 			"en:provider.meta.description: Missing provider locale key provider.meta.description in en",
 		);
 	});
 
 	it("blocks key-only providers when the Korean locale catalog is missing", async () => {
-		const dir = makeProviderDir(
-			"submit-missing-ko-locale-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-missing-ko-locale-", validProviderSource());
 		const { en } = makeValidLocaleCatalogs();
 		mkdirSync(join(dir, "locales"), { recursive: true });
 		writeFileSync(join(dir, "locales", "en.json"), JSON.stringify(en));
@@ -835,20 +773,16 @@ ${assertionLines(21)}
 		});
 
 		expect(report.score.verdict).toBe("blocked");
-		expect(
-			report.checks.find((check) => check.id === "locale-catalog")?.evidence,
-		).toContain("ko:*: Missing provider locale catalog for ko");
+		expect(report.checks.find((check) => check.id === "locale-catalog")?.evidence).toContain(
+			"ko:*: Missing provider locale catalog for ko",
+		);
 	});
 
 	it("blocks key-only providers when the Korean locale catalog is missing a required key", async () => {
-		const dir = makeProviderDir(
-			"submit-missing-ko-key-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-missing-ko-key-", validProviderSource());
 		const { en, ko } = makeValidLocaleCatalogs();
 		mkdirSync(join(dir, "locales"), { recursive: true });
-		delete (ko.operations as { lookup: { description?: string } }).lookup
-			.description;
+		delete (ko.operations as { lookup: { description?: string } }).lookup.description;
 		writeFileSync(join(dir, "locales", "en.json"), JSON.stringify(en));
 		writeFileSync(join(dir, "locales", "ko.json"), JSON.stringify(ko));
 
@@ -857,18 +791,13 @@ ${assertionLines(21)}
 		});
 
 		expect(report.score.verdict).toBe("blocked");
-		expect(
-			report.checks.find((check) => check.id === "locale-catalog")?.evidence,
-		).toContain(
+		expect(report.checks.find((check) => check.id === "locale-catalog")?.evidence).toContain(
 			"ko:operations.lookup.description: Missing provider locale key operations.lookup.description in ko",
 		);
 	});
 
 	it("blocks key-only providers when the Korean locale catalog is missing a public profile key", async () => {
-		const dir = makeProviderDir(
-			"submit-missing-ko-public-profile-key-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-missing-ko-public-profile-key-", validProviderSource());
 		const { en, ko } = makeValidLocaleCatalogs();
 		mkdirSync(join(dir, "locales"), { recursive: true });
 		delete (
@@ -884,9 +813,7 @@ ${assertionLines(21)}
 		});
 
 		expect(report.score.verdict).toBe("blocked");
-		expect(
-			report.checks.find((check) => check.id === "locale-catalog")?.evidence,
-		).toContain(
+		expect(report.checks.find((check) => check.id === "locale-catalog")?.evidence).toContain(
 			"ko:provider.meta.publicProfile.shortDescription: Missing provider locale key provider.meta.publicProfile.shortDescription in ko",
 		);
 	});
@@ -904,8 +831,7 @@ ${assertionLines(21)}
 				"--json",
 				"--markdown",
 				markdownPath,
-				"--smoke-note",
-				"GET /health and POST /v1/lookup passed locally.",
+				"--smoke",
 			],
 			{ stdout: "pipe", stderr: "pipe" },
 		);
@@ -917,16 +843,55 @@ ${assertionLines(21)}
 		expect(exitCode).toBe(0);
 		expect(JSON.parse(stdout).score.verdict).toBe("ready");
 		expect(existsSync(markdownPath)).toBeTrue();
-		expect(readFileSync(markdownPath, "utf8")).toContain(
-			"APIFuse Provider Submission Report",
+		expect(readFileSync(markdownPath, "utf8")).toContain("APIFuse Provider Submission Report");
+	}, 60_000);
+
+	it("warns with zero smoke points when measured smoke is not run", async () => {
+		const dir = makeProviderDir("submit-no-smoke-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir, {
+			smokeNote: "GET /health and POST /v1/lookup passed locally.",
+		});
+		const check = report.checks.find((item) => item.id === "local-smoke");
+
+		expect(check?.status).toBe("warn");
+		expect(check?.points).toBe(0);
+		expect(check?.remediation).toContain("--smoke");
+		expect(check?.evidence).toContain(
+			"Deprecated --smoke-note was provided and ignored for scoring.",
 		);
 	});
 
-	it("blocks when health coverage is missing", async () => {
+	it("passes measured smoke for an offline scaffold-like provider", async () => {
+		const dir = makeProviderDir("submit-smoke-pass-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir, { smoke: true });
+		const check = report.checks.find((item) => item.id === "local-smoke");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(10);
+		expect(check?.evidence?.join("\n")).toContain("lookup: success HTTP 200");
+	});
+
+	it("blocks measured smoke when a handler throws an unstructured error", async () => {
 		const dir = makeProviderDir(
-			"submit-missing-health-",
-			validProviderSource(""),
+			"submit-smoke-fail-",
+			sourceWithHandler(`handler: async () => {
+        throw new Error("boom");
+      },`),
 		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir, { smoke: true });
+		const check = report.checks.find((item) => item.id === "local-smoke");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.points).toBe(0);
+		expect(check?.evidence?.join("\n")).toContain("lookup: incoherent HTTP 500");
+	});
+
+	it("blocks when health coverage is missing", async () => {
+		const dir = makeProviderDir("submit-missing-health-", validProviderSource(""));
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 
@@ -959,9 +924,7 @@ ${assertionLines(21)}
 
 		expect(report.summary.blockers).toBe(0);
 		expect(report.score.verdict).toBe("reviewable_with_warnings");
-		expect(
-			report.checks.find((check) => check.id === "auth-safety")?.status,
-		).toBe("warn");
+		expect(report.checks.find((check) => check.id === "auth-safety")?.status).toBe("warn");
 	});
 
 	it("surfaces reusable-secret gate failures for auth refresh", async () => {
@@ -980,14 +943,10 @@ ${assertionLines(21)}
 		const dir = makeProviderDir("submit-refresh-secret-gate-", refreshSource);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const baseChecks = report.checks.find(
-			(check) => check.id === "base-checks",
-		);
+		const baseChecks = report.checks.find((check) => check.id === "base-checks");
 
 		expect(report.score.verdict).toBe("blocked");
-		expect(baseChecks?.evidence?.join("\\n")).toContain(
-			"auth-refresh-reusable-secret",
-		);
+		expect(baseChecks?.evidence?.join("\\n")).toContain("auth-refresh-reusable-secret");
 	});
 
 	it("includes actionable remediation on every failing or warning submit check", async () => {
@@ -1002,13 +961,10 @@ ${assertionLines(21)}
       },`,
 			)
 			.replace(
-				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
 				"fixtures: { request: { q: 123 }, response: { ok: true } },",
 			)
-			.replace(
-				"annotations: { readOnly: true, idempotent: true, openWorld: true },",
-				"",
-			);
+			.replace("annotations: { readOnly: true, idempotent: true, openWorld: true },", "");
 		const dir = makeProviderDir(
 			"submit-remediation-coverage-",
 			brokenSource,
@@ -1046,18 +1002,13 @@ ${assertionLines(21)}
 
 		expect(report.score.verdict).toBe("reviewable_with_warnings");
 		expect(report.summary.blockers).toBe(0);
-		expect(
-			report.checks.find((check) => check.id === "health-coverage")?.status,
-		).toBe("warn");
+		expect(report.checks.find((check) => check.id === "health-coverage")?.status).toBe("warn");
 	});
 
 	it("redacts repeated secret-like values from submitted evidence", async () => {
 		const firstToken = "Bearer abcdefghijklmnopqrstuvwxyz1234567890TOKENA";
 		const secondToken = "Bearer abcdefghijklmnopqrstuvwxyz1234567890TOKENB";
-		const dir = makeProviderDir(
-			"submit-repeated-secret-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-repeated-secret-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir, {
 			smokeNote: `${firstToken} then ${secondToken}`,
@@ -1066,7 +1017,7 @@ ${assertionLines(21)}
 
 		expect(markdown).not.toContain(firstToken);
 		expect(markdown).not.toContain(secondToken);
-		expect(markdown.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(2);
+		expect(markdown).toContain("Deprecated --smoke-note was provided and ignored for scoring.");
 	});
 
 	it("blocks and redacts high-confidence secret evidence", async () => {
@@ -1081,6 +1032,145 @@ ${assertionLines(21)}
 		expect(report.score.verdict).toBe("blocked");
 		expect(report.summary.blockers).toBeGreaterThan(0);
 		expect(markdown).not.toContain("ghp_abcdefghijklmnopqrstuvwxyzABCDE12345");
+	});
+
+	it("blocks high-entropy strings assigned to secret-like identifiers", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+		const dir = makeProviderDir(
+			"submit-entropy-secret-",
+			`${validProviderSource()}\nconst FALLBACK_SERVICE_KEY = "${key}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.points).toBe(0);
+		expect(check?.remediation).toContain("ctx.env.get");
+		expect(check?.remediation).toContain("rotate");
+		expect(check?.evidence?.join("\n")).toContain("index.ts:");
+		expect(check?.evidence?.join("\n")).toContain("qJ8n...[REDACTED length=58]");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
+	it("scans short string literals in linear time", () => {
+		const shortLiteralLine = '\t\t\tcloses_at: "21:00",';
+		const lines = Array.from({ length: 500 }, () => shortLiteralLine);
+		const startedAt = Date.now();
+
+		const candidates = lines.flatMap((line) => extractStringLiteralCandidates(line));
+
+		expect(candidates).toHaveLength(0);
+		expect(Date.now() - startedAt).toBeLessThan(1_000);
+	});
+
+	it("extracts long string literal candidates without dropping supported quote forms", () => {
+		const highEntropy =
+			"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+		const escaped = String.raw`abc\"defghiJKLMNOP1234567890`;
+		const backtick = "mP4sT7yB3cD6fG1hL5zX0aS";
+		const first = "A1b2C3d4E5f6G7h8I9j0K";
+		const second = "z9Y8x7W6v5U4t3S2r1Q0p";
+
+		expect(highEntropy.length).toBe(64);
+		expect(extractStringLiteralCandidates(`const key = "${highEntropy}";`)).toEqual([
+			highEntropy,
+		]);
+		expect(extractStringLiteralCandidates(`const escaped = "${escaped}";`)).toEqual([
+			escaped,
+		]);
+		expect(
+			extractStringLiteralCandidates(`const template = \`${backtick}\`;`),
+		).toEqual([backtick]);
+		expect(
+			extractStringLiteralCandidates(`const pair = '${first}' + "${second}";`),
+		).toEqual([first, second]);
+		expect(extractStringLiteralCandidates('const short = "1234567890123456789";')).toEqual(
+			[],
+		);
+	});
+
+	it("ignores high-entropy strings in fixtures", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+		const dir = makeProviderDir("submit-entropy-fixture-", validProviderSource());
+		mkdirSync(join(dir, "__fixtures__"), { recursive: true });
+		writeFileSync(
+			join(dir, "__fixtures__", "fixture.ts"),
+			`export const SERVICE_KEY = "${key}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("ignores English text, URLs, and package integrity hashes", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-ignored-",
+			`${validProviderSource()}
+const sentence = "this is a long english sentence with normal words";
+const docsUrl = "https://example.com/really/long/path/that/is/not/a/secret";
+const integrity = "sha512-qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("ignores template-literal URL path composition", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-template-path-",
+			`${validProviderSource()}
+	const PHARMACY_API_BASE = "https://example.com";
+	const BASE = PHARMACY_API_BASE;
+	export const LIST_URL = \`\${PHARMACY_API_BASE}/getParmacyListInfoInqire\`;
+	export const DETAIL_URL = \`\${BASE}/getSomethingLongerCamelCase\`;
+	`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("ignores MIME and form-encoding strings with path separators", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-mime-path-",
+			`${validProviderSource()}
+	const FORM_CONTENT_TYPE = "application/x-www-form-urlencoded; charset=UTF-8";
+	const COMPACT_FORM_CONTENT_TYPE = "application/x-www-form-urlencoded;charset=UTF-8";
+	const UPLOAD_CONTENT_TYPE = "multipart/form-data; boundary=APIFuseProviderBoundary";
+	`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("warns on high-entropy source blobs without secret-like context", async () => {
+		const blob = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+		const dir = makeProviderDir(
+			"submit-entropy-warn-",
+			`${validProviderSource()}\nconst fixtureBlob = "${blob}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(check?.points).toBeGreaterThan(0);
+		expect(check?.message).toContain("false positives");
+		expect(check?.evidence?.join("\n")).toContain("may be a false positive");
+		expect(check?.evidence?.join("\n")).not.toContain(blob);
 	});
 
 	it("checks auto-promotion eligibility boundaries", () => {
@@ -1099,10 +1189,7 @@ ${assertionLines(21)}
 	});
 
 	it("passes structural rules for a clean provider", async () => {
-		const dir = makeProviderDir(
-			"submit-structural-pass-",
-			validProviderSource(),
-		);
+		const dir = makeProviderDir("submit-structural-pass-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		for (const id of [
@@ -1126,9 +1213,7 @@ ${assertionLines(21)}
 		const dir = makeProviderDir("submit-input-passthrough-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1145,9 +1230,7 @@ ${assertionLines(21)}
 		const dir = makeProviderDir("submit-input-passthrough-allow-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		// The acknowledged @apifuse-allow downgrades this rule from blocker to a
 		// counted warning: status is warn and the rule contributes no blocker.
@@ -1163,9 +1246,7 @@ ${assertionLines(21)}
 		const dir = makeProviderDir("submit-loose-schema-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unjustified-loose-schema",
-		);
+		const check = report.checks.find((item) => item.id === "unjustified-loose-schema");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1180,9 +1261,7 @@ ${assertionLines(21)}
 		const dir = makeProviderDir("submit-loose-schema-justified-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unjustified-loose-schema",
-		);
+		const check = report.checks.find((item) => item.id === "unjustified-loose-schema");
 
 		expect(check?.status).toBe("pass");
 	});
@@ -1202,9 +1281,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-factory-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1214,9 +1291,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-static-ops-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("pass");
 	});
@@ -1231,9 +1306,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-input-aliased-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1247,9 +1320,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-input-inline-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1264,9 +1335,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-inline-factory-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1280,9 +1349,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-input-multiline-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1298,9 +1365,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-aliased-factory-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1320,9 +1385,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1333,10 +1396,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		// using a locally-built schema, another module has an unrelated
 		// passthrough const of the same name. With no import binding the two,
 		// the strict input must NOT be flagged (binding-aware resolution).
-		const source = validProviderSource().replace(
-			"input,\n",
-			"input: requestSchema,\n",
-		);
+		const source = validProviderSource().replace("input,\n", "input: requestSchema,\n");
 		const dir = makeProviderDir("submit-input-name-collision-", source);
 		// index.ts declares its own strict requestSchema (no passthrough); a
 		// sibling module has an unrelated passthrough const of the same name.
@@ -1351,9 +1411,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		writeFileSync(join(dir, "index.ts"), withLocal);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		expect(check?.status).toBe("pass");
 	});
@@ -1376,9 +1434,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1394,9 +1450,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-decoy-operations-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1416,9 +1470,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1434,9 +1486,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-input-field-in-schema-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		expect(check?.status).toBe("pass");
 	});
@@ -1449,16 +1499,11 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 				"const output = describeKey(",
 				"const upstreamRaw = z.object({ input: z.object({ q: z.string() }).passthrough() });\nconst output = describeKey(",
 			)
-			.replace(
-				"input,\n",
-				"input: z.object({ q: z.string() }).passthrough(),\n",
-			);
+			.replace("input,\n", "input: z.object({ q: z.string() }).passthrough(),\n");
 		const dir = makeProviderDir("submit-input-mixed-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1476,9 +1521,7 @@ export default defineProvider({ id: "real", version: "1.0.0", runtime: "standard
 		const dir = makeProviderDir("submit-default-export-real-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1540,9 +1583,7 @@ export default defineProvider({
 		const dir = makeProviderDir("submit-default-export-static-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("pass");
 	});
@@ -1557,9 +1598,7 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-unresolved-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1579,9 +1618,7 @@ export default provider;
 		const dir = makeProviderDir("submit-named-default-factory-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1596,9 +1633,7 @@ export default defineProvider({ id: "spread", version: "1.0.0", runtime: "standa
 		const dir = makeProviderDir("submit-factory-spread-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1615,9 +1650,7 @@ export default defineProvider ({ id: "ws", version: "1.0.0", runtime: "standard"
 		const dir = makeProviderDir("submit-ws-defineprovider-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1642,9 +1675,7 @@ export default defineProvider({ id: "decoy", version: "1.0.0", runtime: "standar
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1659,9 +1690,7 @@ export default defineProvider({ id: "paren", version: "1.0.0", runtime: "standar
 		const dir = makeProviderDir("submit-paren-factory-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1675,9 +1704,7 @@ export default defineProvider({ id: "paren", version: "1.0.0", runtime: "standar
 		const dir = makeProviderDir("submit-spaced-passthrough-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "unsafe-input-passthrough",
-		);
+		const check = report.checks.find((item) => item.id === "unsafe-input-passthrough");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1694,9 +1721,7 @@ export default defineProvider({ id: "allow", version: "1.0.0", runtime: "standar
 		const dir = makeProviderDir("submit-flat-op-allow-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("warn");
 		expect(check?.level).toBe("warn");
@@ -1715,9 +1740,7 @@ export default defineProvider({ id: "typed-factory", version: "1.0.0", runtime: 
 		const dir = makeProviderDir("submit-typed-factory-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1745,9 +1768,7 @@ export default defineProvider({ id: "reshape", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-transparent-reshape-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("pass");
 	});
@@ -1765,9 +1786,7 @@ export default defineProvider({ id: "opaque-entries", version: "1.0.0", runtime:
 		const dir = makeProviderDir("submit-opaque-fromentries-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1789,9 +1808,7 @@ export default defineProvider({ id: "opaque-pred", version: "1.0.0", runtime: "s
 		const dir = makeProviderDir("submit-opaque-predicate-entries-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1810,9 +1827,7 @@ export default defineProvider({ id: "launder", version: "1.0.0", runtime: "stand
 		const dir = makeProviderDir("submit-laundered-spread-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
@@ -1830,9 +1845,7 @@ export default defineProvider({ id: "static-spread", version: "1.0.0", runtime: 
 		const dir = makeProviderDir("submit-static-var-spread-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
-		const check = report.checks.find(
-			(item) => item.id === "flat-operation-composition",
-		);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
 
 		expect(check?.status).toBe("pass");
 	});

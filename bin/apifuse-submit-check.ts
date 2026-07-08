@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 
+import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -15,6 +17,7 @@ import {
 	validateProviderLocaleCatalogs,
 } from "../src/i18n";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY } from "../src/schema";
+import { safeParseSchemaSync } from "../src/schema";
 import { type CheckResult, runChecks } from "./apifuse-check";
 
 const TIERS = ["bronze", "silver", "gold", "diamond"] as const;
@@ -35,6 +38,7 @@ export type SubmitCheck = {
 	message: string;
 	remediation?: string;
 	evidence?: string[];
+	details?: unknown;
 };
 
 export type SubmitCheckReport = {
@@ -69,6 +73,7 @@ type CliArgs = {
 	isJson: boolean;
 	markdownPath?: string;
 	providerPath?: string;
+	smoke: boolean;
 	smokeNote?: string;
 	tier?: BountyTier;
 };
@@ -76,6 +81,24 @@ type CliArgs = {
 type SecretFinding = {
 	label: string;
 	file: string;
+	line?: number;
+	level?: CheckLevel;
+	remediation?: string;
+	evidence?: string;
+};
+
+export type SmokeOperationOutcome = {
+	operationId: string;
+	status: "success" | "structured_error" | "incoherent";
+	httpStatus?: number;
+	message: string;
+};
+
+export type SmokeResult = {
+	measured: true;
+	healthOk: boolean;
+	bootError?: string;
+	operations: SmokeOperationOutcome[];
 };
 
 type SourceFinding = {
@@ -98,14 +121,13 @@ const CATEGORY_MAX_POINTS = {
 	docs: 10,
 } as const;
 
-const REQUIRED_PUBLIC_PROVIDER_LOCALES = [
-	"en",
-	"ko",
-] as const satisfies readonly ProviderLocale[];
+const REQUIRED_PUBLIC_PROVIDER_LOCALES = ["en", "ko"] as const satisfies readonly ProviderLocale[];
 
-const HELP_TEXT = `Usage: apifuse submit-check [path] [--tier bronze|silver|gold|diamond] [--json] [--markdown <path>] [--smoke-note <text>]
+const HELP_TEXT = `Usage: apifuse submit-check [path] [--tier bronze|silver|gold|diamond] [--json] [--markdown <path>] [--smoke]
 Alias: apifuse bounty-check [path]
-Default: apifuse submit-check .`;
+Default: apifuse submit-check .
+
+Smoke: --smoke boots the provider dev server, checks /health, and POSTs every operation fixture. APIFUSE__PROVIDER__* env vars enable live upstream calls; without them, structured provider errors can still verify runtime routing. --smoke-note is deprecated and ignored for scoring.`;
 
 export async function main() {
 	try {
@@ -120,10 +142,7 @@ export async function main() {
 		const report = await buildSubmitCheckReport(providerRoot, args);
 
 		if (args.markdownPath) {
-			await writeFile(
-				resolve(process.cwd(), args.markdownPath),
-				renderMarkdown(report),
-			);
+			await writeFile(resolve(process.cwd(), args.markdownPath), renderMarkdown(report));
 		}
 
 		if (args.isJson) {
@@ -150,7 +169,7 @@ function normalizeArgs(argv: string[]): string[] {
 }
 
 function parseArgs(argv: string[]): CliArgs {
-	const args: CliArgs = { isJson: false };
+	const args: CliArgs = { isJson: false, smoke: false };
 
 	for (let index = 0; index < argv.length; index += 1) {
 		const arg = argv[index];
@@ -174,6 +193,11 @@ function parseArgs(argv: string[]): CliArgs {
 
 		if (arg.startsWith("--markdown=")) {
 			args.markdownPath = arg.slice("--markdown=".length);
+			continue;
+		}
+
+		if (arg === "--smoke") {
+			args.smoke = true;
 			continue;
 		}
 
@@ -226,9 +250,7 @@ function parseTier(value: string): BountyTier {
 	if (isBountyTier(value)) {
 		return value;
 	}
-	throw new Error(
-		`Invalid --tier "${value}". Expected one of: ${TIERS.join(", ")}`,
-	);
+	throw new Error(`Invalid --tier "${value}". Expected one of: ${TIERS.join(", ")}`);
 }
 
 function isBountyTier(value: string): value is BountyTier {
@@ -237,7 +259,7 @@ function isBountyTier(value: string): value is BountyTier {
 
 export async function buildSubmitCheckReport(
 	providerRoot: string,
-	args: { smokeNote?: string; tier?: BountyTier } = {},
+	args: { smoke?: boolean; smokeNote?: string; tier?: BountyTier } = {},
 ): Promise<SubmitCheckReport> {
 	const checks: SubmitCheck[] = [];
 	const baseChecks = await safeRunChecks(providerRoot);
@@ -257,16 +279,17 @@ export async function buildSubmitCheckReport(
 	checks.push(scoreFlatOperationComposition(providerRoot));
 
 	if (provider) {
+		const smokeResult = args.smoke ? await runSubmitCheckSmoke(providerRoot, provider) : undefined;
 		checks.push(scoreCredentialUsage(providerRoot, provider));
 		checks.push(scoreLocaleCatalog(providerRoot, provider));
 		checks.push(scoreOperationMetadata(provider));
 		checks.push(scoreFixtureCoverage(provider));
 		checks.push(scoreHealthCoverage(provider));
 		checks.push(scoreAuthSafety(provider));
-		checks.push(scoreSmokeEvidence(args.smokeNote));
+		checks.push(scoreSmoke(smokeResult, args.smokeNote));
 		checks.push(...scoreProviderDocs(providerRoot));
 		checks.push(scoreRepositoryDx(providerRoot));
-		checks.push(scoreSecrets(providerRoot));
+		checks.push(scoreSecrets(providerRoot, provider));
 	} else {
 		checks.push(
 			blocker(
@@ -279,22 +302,14 @@ export async function buildSubmitCheckReport(
 		);
 	}
 
-	const total = clamp(
-		Math.round(checks.reduce((sum, check) => sum + check.points, 0)),
-		0,
-		100,
-	);
+	const total = clamp(Math.round(checks.reduce((sum, check) => sum + check.points, 0)), 0, 100);
 	const blockers = checks.filter(
 		(check) => check.level === "blocker" && check.status === "fail",
 	).length;
 	const warnings = checks.filter((check) => check.status === "warn").length;
 	const passed = checks.filter((check) => check.status === "pass").length;
 	const verdict: Verdict =
-		blockers > 0
-			? "blocked"
-			: total >= 90 && warnings === 0
-				? "ready"
-				: "reviewable_with_warnings";
+		blockers > 0 ? "blocked" : total >= 90 && warnings === 0 ? "ready" : "reviewable_with_warnings";
 
 	return {
 		schemaVersion: 1,
@@ -335,18 +350,10 @@ function scoreProviderIdSlug(
 			);
 		}
 
-		return pass(
-			"id-slug",
-			SDK_NATIVE_CATEGORY,
-			"Provider id uses the short slug.",
-			0,
-		);
+		return pass("id-slug", SDK_NATIVE_CATEGORY, "Provider id uses the short slug.", 0);
 	}
 
-	const findings = findSourceLineMatches(
-		providerRoot,
-		/["'`]apifuse-provider-[a-z0-9-]/i,
-	);
+	const findings = findSourceLineMatches(providerRoot, /["'`]apifuse-provider-[a-z0-9-]/i);
 	if (findings.length > 0) {
 		return blocker(
 			"id-slug",
@@ -358,12 +365,7 @@ function scoreProviderIdSlug(
 		);
 	}
 
-	return pass(
-		"id-slug",
-		SDK_NATIVE_CATEGORY,
-		"Provider id uses the short slug.",
-		0,
-	);
+	return pass("id-slug", SDK_NATIVE_CATEGORY, "Provider id uses the short slug.", 0);
 }
 
 function scoreNoVendorShim(providerRoot: string): SubmitCheck {
@@ -388,10 +390,7 @@ function scoreNoVendorShim(providerRoot: string): SubmitCheck {
 }
 
 function scoreNoVendorImport(providerRoot: string): SubmitCheck {
-	const findings = findSourceLineMatches(
-		providerRoot,
-		/from\s+["'][^"']*vendor\//,
-	);
+	const findings = findSourceLineMatches(providerRoot, /from\s+["'][^"']*vendor\//);
 	if (findings.length > 0) {
 		return blocker(
 			"no-vendor-import",
@@ -424,12 +423,7 @@ function scoreDescribeKey(providerRoot: string): SubmitCheck {
 		);
 	}
 
-	return pass(
-		"describe-key",
-		SDK_NATIVE_CATEGORY,
-		"Schema descriptions use describeKey.",
-		0,
-	);
+	return pass("describe-key", SDK_NATIVE_CATEGORY, "Schema descriptions use describeKey.", 0);
 }
 
 function scoreNoRawFetch(providerRoot: string): SubmitCheck {
@@ -446,12 +440,7 @@ function scoreNoRawFetch(providerRoot: string): SubmitCheck {
 		);
 	}
 
-	return pass(
-		"no-raw-fetch",
-		SDK_NATIVE_CATEGORY,
-		"Provider source avoids raw fetch().",
-		0,
-	);
+	return pass("no-raw-fetch", SDK_NATIVE_CATEGORY, "Provider source avoids raw fetch().", 0);
 }
 
 const REDUNDANT_RUNTIME_GUARD_PATTERNS: readonly RegExp[] = [
@@ -461,10 +450,7 @@ const REDUNDANT_RUNTIME_GUARD_PATTERNS: readonly RegExp[] = [
 const SDK_CONTEXT_METHOD_ALIAS_PATTERN =
 	/\bconst\s+(\w+)\s*=\s*ctx\.(?:stealth|http|cache|state|browser|trace|auth|stt|choice)\.(?:\w+)/;
 
-function hasRedundantRuntimeGuard(
-	line: string,
-	remainingLines: readonly string[],
-): boolean {
+function hasRedundantRuntimeGuard(line: string, remainingLines: readonly string[]): boolean {
 	if (REDUNDANT_RUNTIME_GUARD_PATTERNS.some((pattern) => pattern.test(line))) {
 		return true;
 	}
@@ -475,12 +461,8 @@ function hasRedundantRuntimeGuard(
 		return false;
 	}
 
-	const guardPattern = new RegExp(
-		`(?:typeof\\s+${alias}\\s*!==\\s*["']function["']|!${alias}\\b)`,
-	);
-	return remainingLines
-		.slice(0, 8)
-		.some((candidate) => guardPattern.test(candidate));
+	const guardPattern = new RegExp(`(?:typeof\\s+${alias}\\s*!==\\s*["']function["']|!${alias}\\b)`);
+	return remainingLines.slice(0, 8).some((candidate) => guardPattern.test(candidate));
 }
 
 function scoreNoRedundantRuntimeGuards(providerRoot: string): SubmitCheck {
@@ -581,11 +563,7 @@ function scoreAsAssertionCount(providerRoot: string): SubmitCheck {
 
 // Returns true when `findingLine` (1-based) or the line directly above it
 // carries an `// @apifuse-allow <ruleId>:` acknowledgement comment.
-function hasAllowOverride(
-	lines: readonly string[],
-	findingLine: number,
-	ruleId: string,
-): boolean {
+function hasAllowOverride(lines: readonly string[], findingLine: number, ruleId: string): boolean {
 	const pattern = new RegExp(`@apifuse-allow\\s+${ruleId}\\b`);
 	const current = lines[findingLine - 1];
 	const previous = lines[findingLine - 2];
@@ -636,11 +614,7 @@ function escapeHatchResult(
 		return pass(ruleId, SDK_NATIVE_CATEGORY, copy.passMessage, 0);
 	}
 
-	const { violations, overridden } = partitionAllowOverrides(
-		providerRoot,
-		findings,
-		ruleId,
-	);
+	const { violations, overridden } = partitionAllowOverrides(providerRoot, findings, ruleId);
 
 	if (violations.length > 0) {
 		return blocker(
@@ -953,9 +927,7 @@ function inputKeyIsSchemaField(source: string, propIndex: number): boolean {
 // across unrelated modules from producing false positives).
 function fileImportsBinding(source: string, name: string): boolean {
 	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-	return new RegExp(`\\bimport\\b[^;]*\\b${escaped}\\b[^;]*\\bfrom\\b`).test(
-		source,
-	);
+	return new RegExp(`\\bimport\\b[^;]*\\b${escaped}\\b[^;]*\\bfrom\\b`).test(source);
 }
 
 // Resolves the ORIGINAL exported name for a local binding `localName`. When the
@@ -999,11 +971,7 @@ function scoreUnsafeInputPassthrough(providerRoot: string): SubmitCheck {
 		passthroughByFile.set(filePath, localMap);
 		const constDecl =
 			/(?:^|\n)[ \t]*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?\s*=/g;
-		for (
-			let match = constDecl.exec(source);
-			match !== null;
-			match = constDecl.exec(source)
-		) {
+		for (let match = constDecl.exec(source); match !== null; match = constDecl.exec(source)) {
 			const name = match[1];
 			if (name === undefined) {
 				continue;
@@ -1042,11 +1010,7 @@ function scoreUnsafeInputPassthrough(providerRoot: string): SubmitCheck {
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
 
 		const inputProp = /\binput\s*:\s*/g;
-		for (
-			let match = inputProp.exec(source);
-			match !== null;
-			match = inputProp.exec(source)
-		) {
+		for (let match = inputProp.exec(source); match !== null; match = inputProp.exec(source)) {
 			// Skip `input` keys that are fields inside a zod schema body (e.g. an
 			// upstream payload modelled as `z.object({ input: ... })`). Only an
 			// operation's public `input:` property is in scope for this rule.
@@ -1074,9 +1038,7 @@ function scoreUnsafeInputPassthrough(providerRoot: string): SubmitCheck {
 					// Imported binding: map a possible `orig as refName` alias
 					// back to the exported name the provider-wide map is keyed by.
 					const originalName = importedOriginalName(source, refName);
-					const site =
-						passthroughConsts.get(refName) ??
-						passthroughConsts.get(originalName);
+					const site = passthroughConsts.get(refName) ?? passthroughConsts.get(originalName);
 					if (site) {
 						push(site);
 					}
@@ -1122,8 +1084,7 @@ function scoreUnjustifiedLooseSchema(providerRoot: string): SubmitCheck {
 			// A `//` justification comment on the same line or the line above
 			// (including the `@apifuse-allow loose-schema:` form) acknowledges it.
 			const previous = lines[index - 1];
-			const justified =
-				line.includes("//") || previous?.trim().startsWith("//") === true;
+			const justified = line.includes("//") || previous?.trim().startsWith("//") === true;
 			if (!justified) {
 				findings.push({
 					file: toRelativeProviderPath(providerRoot, filePath),
@@ -1134,8 +1095,7 @@ function scoreUnjustifiedLooseSchema(providerRoot: string): SubmitCheck {
 	}
 
 	return escapeHatchResult(providerRoot, "unjustified-loose-schema", findings, {
-		blockerMessage:
-			"Loose schema (z.record/z.unknown/z.any) used without justification.",
+		blockerMessage: "Loose schema (z.record/z.unknown/z.any) used without justification.",
 		remediation:
 			"Model the real shape with a typed zod schema. If the upstream payload is genuinely arbitrary, add a `// <reason>` comment or `// @apifuse-allow loose-schema: <reason>` on the line above.",
 		passMessage: "Loose schemas are justified or absent.",
@@ -1164,24 +1124,18 @@ function spreadIdentifierResolvesToFactory(
 	let sawDeclaration = false;
 	for (const filePath of [
 		indexPath,
-		...listNonTestTypeScriptFiles(providerRoot).filter(
-			(p) => resolve(p) !== resolve(indexPath),
-		),
+		...listNonTestTypeScriptFiles(providerRoot).filter((p) => resolve(p) !== resolve(indexPath)),
 	]) {
 		if (!existsSync(filePath)) {
 			continue;
 		}
-		const fileSource =
-			filePath === indexPath ? indexSource : readFileSync(filePath, "utf8");
+		const fileSource = filePath === indexPath ? indexSource : readFileSync(filePath, "utf8");
 		const re = new RegExp(declRe.source, "g");
 		for (let m = re.exec(fileSource); m !== null; m = re.exec(fileSource)) {
 			sawDeclaration = true;
-			const expr = unwrapParens(
-				balancedValueExpression(fileSource, m.index + m[0].length).trim(),
-			);
+			const expr = unwrapParens(balancedValueExpression(fileSource, m.index + m[0].length).trim());
 			const isFactory =
-				(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr) ||
-					hasTopLevelFactorySpread(expr)) &&
+				(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr) || hasTopLevelFactorySpread(expr)) &&
 				!isTransparentObjectReshape(expr);
 			if (isFactory) {
 				return true;
@@ -1233,9 +1187,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	if (inlineDefault) {
 		defineParenIndex = inlineDefault.index + inlineDefault[0].length - 1; // points at `(`
 	} else {
-		const namedDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/.exec(
-			source,
-		);
+		const namedDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/.exec(source);
 		const exportedName = namedDefault?.[1];
 		if (exportedName !== undefined) {
 			const namedDecl = new RegExp(
@@ -1309,9 +1261,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		// Search index.ts first (its line attribution wins), then siblings.
 		const searchOrder = [
 			indexPath,
-			...listNonTestTypeScriptFiles(providerRoot).filter(
-				(p) => resolve(p) !== resolve(indexPath),
-			),
+			...listNonTestTypeScriptFiles(providerRoot).filter((p) => resolve(p) !== resolve(indexPath)),
 		];
 
 		// Collect EVERY same-named declaration across the submission and classify
@@ -1331,23 +1281,15 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			if (!existsSync(filePath)) {
 				continue;
 			}
-			const fileSource =
-				filePath === indexPath ? source : readFileSync(filePath, "utf8");
+			const fileSource = filePath === indexPath ? source : readFileSync(filePath, "utf8");
 			const relPath = toRelativeProviderPath(providerRoot, filePath);
 
 			const declRe = new RegExp(aliasDecl.source, "g");
-			for (
-				let m = declRe.exec(fileSource);
-				m !== null;
-				m = declRe.exec(fileSource)
-			) {
+			for (let m = declRe.exec(fileSource); m !== null; m = declRe.exec(fileSource)) {
 				const valueStart = m.index + m[0].length;
-				const expr = unwrapParens(
-					balancedValueExpression(fileSource, valueStart).trim(),
-				);
+				const expr = unwrapParens(balancedValueExpression(fileSource, valueStart).trim());
 				const isFactory =
-					(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr) ||
-						hasTopLevelFactorySpread(expr)) &&
+					(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr) || hasTopLevelFactorySpread(expr)) &&
 					!isTransparentObjectReshape(expr);
 				candidates.push({
 					expr,
@@ -1357,11 +1299,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 				});
 			}
 			const destructRe = new RegExp(destructured.source, "g");
-			for (
-				let m = destructRe.exec(fileSource);
-				m !== null;
-				m = destructRe.exec(fileSource)
-			) {
+			for (let m = destructRe.exec(fileSource); m !== null; m = destructRe.exec(fileSource)) {
 				candidates.push({
 					expr: `${m[1]}(`,
 					line: offsetToLine(fileSource, m.index),
@@ -1389,9 +1327,9 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		// the unresolved import as a factory-composed (non-static) shape rather
 		// than silently passing.
 		if (!resolved) {
-			const importMatch = new RegExp(
-				`\\bimport\\b[^;]*\\b${aliasName}\\b[^;]*\\bfrom\\b`,
-			).exec(source);
+			const importMatch = new RegExp(`\\bimport\\b[^;]*\\b${aliasName}\\b[^;]*\\bfrom\\b`).exec(
+				source,
+			);
 			if (importMatch) {
 				effective = `${aliasName}(`;
 				effectiveLine = offsetToLine(source, importMatch.index);
@@ -1406,8 +1344,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	// inspect depth-1 entries so that ordinary spreads deep inside operation
 	// handler bodies (e.g. `{ ...headers }`, `...arr.map(...)`) are NOT mistaken
 	// for a top-level factory composition of the operations map itself.
-	const hasFactorySpread =
-		effective !== undefined && hasTopLevelFactorySpread(effective);
+	const hasFactorySpread = effective !== undefined && hasTopLevelFactorySpread(effective);
 	// A spread of a bare identifier (`{ ...hidden }`) is static ONLY when that
 	// identifier resolves to a non-factory declaration. Resolve each top-level
 	// spread identifier so an opaque factory map laundered through a variable
@@ -1418,18 +1355,14 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			spreadIdentifierResolvesToFactory(providerRoot, indexPath, source, name),
 		);
 	const isStaticLiteral =
-		effective?.startsWith("{") === true &&
-		!hasFactorySpread &&
-		!hasFactorySpreadIdentifier;
+		effective?.startsWith("{") === true && !hasFactorySpread && !hasFactorySpreadIdentifier;
 	// A call expression `ident(...)` (factory) or a factory-spread literal is
 	// the rejected, non-static shape — UNLESS it is the stdlib
 	// `Object.fromEntries(Object.entries(<source-visible obj>)...)` reshape,
 	// whose op set is still enumerable from source (verified golden pattern).
 	const isFactoryCall =
 		effective !== undefined &&
-		(/^[A-Za-z_$][\w$.]*\s*\(/.test(effective) ||
-			hasFactorySpread ||
-			hasFactorySpreadIdentifier) &&
+		(/^[A-Za-z_$][\w$.]*\s*\(/.test(effective) || hasFactorySpread || hasFactorySpreadIdentifier) &&
 		!isTransparentObjectReshape(effective);
 
 	if (isFactoryCall && !isStaticLiteral) {
@@ -1437,19 +1370,13 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		// `// @apifuse-allow flat-operation-composition: <reason>` comment on
 		// the reported line (or the line above) downgrades this blocker to a
 		// counted warning, consistent with the other structural rules.
-		return escapeHatchResult(
-			providerRoot,
-			ruleId,
-			[{ file: effectiveFile, line: effectiveLine }],
-			{
-				blockerMessage:
-					"defineProvider operations are composed by a factory call instead of a static object literal.",
-				remediation:
-					"Declare operations as a static literal: defineProvider({ operations: { 'op-id': defineOperation({...}) } }). The provider-registry AST gate requires static runtime/operations; factory composition fails the registry build. If composition is unavoidable, add `// @apifuse-allow flat-operation-composition: <reason>`.",
-				passMessage:
-					"defineProvider declares operations as a static object literal.",
-			},
-		);
+		return escapeHatchResult(providerRoot, ruleId, [{ file: effectiveFile, line: effectiveLine }], {
+			blockerMessage:
+				"defineProvider operations are composed by a factory call instead of a static object literal.",
+			remediation:
+				"Declare operations as a static literal: defineProvider({ operations: { 'op-id': defineOperation({...}) } }). The provider-registry AST gate requires static runtime/operations; factory composition fails the registry build. If composition is unavoidable, add `// @apifuse-allow flat-operation-composition: <reason>`.",
+			passMessage: "defineProvider declares operations as a static object literal.",
+		});
 	}
 
 	return pass(
@@ -1460,18 +1387,11 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	);
 }
 
-function scoreCredentialUsage(
-	providerRoot: string,
-	provider: ProviderDefinition,
-): SubmitCheck {
-	const credentialReferences = findSourceLineMatches(
-		providerRoot,
-		/ctx\.credential/,
-	);
+function scoreCredentialUsage(providerRoot: string, provider: ProviderDefinition): SubmitCheck {
+	const credentialReferences = findSourceLineMatches(providerRoot, /ctx\.credential/);
 	const authMode = provider.auth?.mode ?? "none";
 	const credentialKeys = provider.credential?.keys ?? [];
-	const storesProviderCredential =
-		authMode !== "none" || credentialKeys.length > 0;
+	const storesProviderCredential = authMode !== "none" || credentialKeys.length > 0;
 
 	if (storesProviderCredential && credentialReferences.length === 0) {
 		return {
@@ -1481,8 +1401,7 @@ function scoreCredentialUsage(
 			status: "warn",
 			points: 0,
 			maxPoints: 0,
-			message:
-				"Credential-backed provider does not reference credential persistence in source.",
+			message: "Credential-backed provider does not reference credential persistence in source.",
 			remediation:
 				"Persist provider session state through the SDK credential context instead of process-local state. See providers/catchtable for the reference pattern.",
 		};
@@ -1495,9 +1414,7 @@ function scoreCredentialUsage(
 			? "Provider does not declare reusable credentials."
 			: "Credential-backed provider references ctx.credential.",
 		0,
-		credentialReferences.length > 0
-			? formatSourceFindings(credentialReferences)
-			: undefined,
+		credentialReferences.length > 0 ? formatSourceFindings(credentialReferences) : undefined,
 	);
 }
 
@@ -1505,9 +1422,7 @@ function findSourceLineMatches(
 	providerRoot: string,
 	pattern: RegExp | ((line: string) => boolean),
 ): SourceFinding[] {
-	return findSourceFindings(providerRoot, (line) =>
-		matchesLinePattern(line, pattern),
-	);
+	return findSourceFindings(providerRoot, (line) => matchesLinePattern(line, pattern));
 }
 
 function findSourceFindings(
@@ -1534,10 +1449,7 @@ function findSourceFindings(
 	return findings;
 }
 
-function matchesLinePattern(
-	line: string,
-	pattern: RegExp | ((line: string) => boolean),
-): boolean {
+function matchesLinePattern(line: string, pattern: RegExp | ((line: string) => boolean)): boolean {
 	return typeof pattern === "function" ? pattern(line) : pattern.test(line);
 }
 
@@ -1591,11 +1503,7 @@ function collectNonTestTypeScriptFiles(
 			}
 			continue;
 		}
-		if (
-			entry.isFile() &&
-			relativePath.endsWith(".ts") &&
-			!isExcludedTestSource(relativePath)
-		) {
+		if (entry.isFile() && relativePath.endsWith(".ts") && !isExcludedTestSource(relativePath)) {
 			files.push(entryPath);
 		}
 	}
@@ -1610,9 +1518,7 @@ function isScannableProviderSourceFile(relativePath: string): boolean {
 }
 
 function shouldScanSourceDirectory(relativePath: string): boolean {
-	return ![".git", "node_modules", "dist", "build", "coverage"].includes(
-		relativePath,
-	);
+	return ![".git", "node_modules", "dist", "build", "coverage"].includes(relativePath);
 }
 
 function isExcludedTestSource(relativePath: string): boolean {
@@ -1625,10 +1531,7 @@ function isExcludedTestSource(relativePath: string): boolean {
 	);
 }
 
-function toRelativeProviderPath(
-	providerRoot: string,
-	filePath: string,
-): string {
+function toRelativeProviderPath(providerRoot: string, filePath: string): string {
 	return relative(providerRoot, filePath).replaceAll("\\", "/");
 }
 
@@ -1674,9 +1577,7 @@ function scoreRepositoryDx(providerRoot: string): SubmitCheck {
 	};
 }
 
-function readPackageScripts(
-	packageJsonPath: string,
-): Record<string, unknown> | undefined {
+function readPackageScripts(packageJsonPath: string): Record<string, unknown> | undefined {
 	if (!existsSync(packageJsonPath)) {
 		return undefined;
 	}
@@ -1851,10 +1752,7 @@ function baseCheckRemediation(result: CheckResult): string {
 	}
 }
 
-function scoreLocaleCatalog(
-	providerRoot: string,
-	provider: ProviderDefinition,
-): SubmitCheck {
+function scoreLocaleCatalog(providerRoot: string, provider: ProviderDefinition): SubmitCheck {
 	const requiredKeys = collectProviderRequiredLocaleKeys(provider);
 	if (requiredKeys.length === 0) {
 		return pass(
@@ -1885,9 +1783,7 @@ function scoreLocaleCatalog(
 				"Provider locale catalog is missing required public-provider copy.",
 				"Add provider-local locales/en.json and locales/ko.json values for every provider metadata key, operation descriptionKey, and .describeKey() or describeKey() schema field.",
 				0,
-				validation.issues.map(
-					(issue) => `${issue.locale}:${issue.key}: ${issue.message}`,
-				),
+				validation.issues.map((issue) => `${issue.locale}:${issue.key}: ${issue.message}`),
 			);
 		}
 	} catch (error) {
@@ -1910,9 +1806,7 @@ function scoreLocaleCatalog(
 	);
 }
 
-function collectProviderRequiredLocaleKeys(
-	provider: ProviderDefinition,
-): string[] {
+function collectProviderRequiredLocaleKeys(provider: ProviderDefinition): string[] {
 	const keys = new Set<string>();
 
 	addLocaleKeys(keys, [
@@ -1975,10 +1869,7 @@ function collectSchemaDescriptionKeys(schema: unknown): string[] {
 	return keys;
 }
 
-function collectJsonSchemaDescriptionKeys(
-	schema: Record<string, unknown>,
-	keys: string[],
-): void {
+function collectJsonSchemaDescriptionKeys(schema: Record<string, unknown>, keys: string[]): void {
 	const descriptionKey = schema[APIFUSE_DESCRIPTION_KEY_META_KEY];
 	if (typeof descriptionKey === "string" && descriptionKey.length > 0) {
 		keys.push(descriptionKey);
@@ -2010,8 +1901,7 @@ function scoreOperationMetadata(provider: ProviderDefinition): SubmitCheck {
 			// is enforced at registry catalog-build time, matching how lintOperation
 			// skips the raw-description min-length rule when a descriptionKey is set.
 			const hasDescriptionKey =
-				typeof operation.descriptionKey === "string" &&
-				operation.descriptionKey.length > 0;
+				typeof operation.descriptionKey === "string" && operation.descriptionKey.length > 0;
 			if (hasDescriptionKey) return false;
 			return true;
 		})
@@ -2029,14 +1919,12 @@ function scoreOperationMetadata(provider: ProviderDefinition): SubmitCheck {
 			points: 0,
 			maxPoints: CATEGORY_MAX_POINTS.operations,
 			message: "One or more operations have weak descriptions.",
-			remediation:
-				`For ${weakDescriptions.join(", ")}, add an operation \`descriptionKey\` backed by \`locales/en.json\` and \`locales/ko.json\`, or add a 150+ character \`description\` explaining when to use it, when not to use it, outputs, and caveats.`,
+			remediation: `For ${weakDescriptions.join(", ")}, add an operation \`descriptionKey\` backed by \`locales/en.json\` and \`locales/ko.json\`, or add a 150+ character \`description\` explaining when to use it, when not to use it, outputs, and caveats.`,
 			evidence: weakDescriptions,
 		};
 	}
 
-	const points =
-		missingAnnotations.length > 0 ? 11 : CATEGORY_MAX_POINTS.operations;
+	const points = missingAnnotations.length > 0 ? 11 : CATEGORY_MAX_POINTS.operations;
 	return {
 		id: "operation-metadata",
 		category: "operations",
@@ -2054,19 +1942,14 @@ function scoreOperationMetadata(provider: ProviderDefinition): SubmitCheck {
 				: undefined,
 		evidence:
 			missingAnnotations.length > 0
-				? missingAnnotations.map(
-						(operationId) => `${operationId}: missing annotations`,
-					)
+				? missingAnnotations.map((operationId) => `${operationId}: missing annotations`)
 				: operations.map(([operationId]) => operationId),
 	};
 }
 
 function scoreFixtureCoverage(provider: ProviderDefinition): SubmitCheck {
 	const missing = Object.entries(provider.operations)
-		.filter(
-			([, operation]) =>
-				!operation.fixtures?.request || !operation.fixtures?.response,
-		)
+		.filter(([, operation]) => !operation.fixtures?.request || !operation.fixtures?.response)
 		.map(([operationId]) => operationId);
 	if (missing.length > 0) {
 		return blocker(
@@ -2107,9 +1990,7 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 				generatedStarter.push(operationId);
 			}
 			if (
-				/(todo|later|tbd|test fixture|unit test|placeholder|not sure|skip for test)/i.test(
-					reason,
-				)
+				/(todo|later|tbd|test fixture|unit test|placeholder|not sure|skip for test)/i.test(reason)
 			) {
 				placeholder.push(operationId);
 			}
@@ -2136,8 +2017,7 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 			points: 8,
 			maxPoints: CATEGORY_MAX_POINTS.health,
 			message: "Some healthCheckUnsupported reasons look placeholder-like.",
-			remediation:
-				`For ${placeholder.join(", ")}, replace the placeholder \`healthCheckUnsupported.reason\` with a specific reason such as destructive mutation, paid call, credential sensitivity, or upstream flakiness.`,
+			remediation: `For ${placeholder.join(", ")}, replace the placeholder \`healthCheckUnsupported.reason\` with a specific reason such as destructive mutation, paid call, credential sensitivity, or upstream flakiness.`,
 			evidence: placeholder,
 		};
 	}
@@ -2152,8 +2032,7 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 			maxPoints: CATEGORY_MAX_POINTS.health,
 			message:
 				"Generated starter operation health rationale is present; replace starter logic before bounty submission.",
-			remediation:
-				`Replace generated starter operation(s) ${generatedStarter.join(", ")} with real upstream-backed operations and add \`healthCheck\` for safe read-only probes.`,
+			remediation: `Replace generated starter operation(s) ${generatedStarter.join(", ")} with real upstream-backed operations and add \`healthCheck\` for safe read-only probes.`,
 			evidence: generatedStarter,
 		};
 	}
@@ -2166,13 +2045,9 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 			status: "warn",
 			points: 12,
 			maxPoints: CATEGORY_MAX_POINTS.health,
-			message:
-				"Health coverage is declared, with one or more unsupported probes.",
-			remediation:
-				`For ${unsupported.join(", ")}, replace \`healthCheckUnsupported\` with \`healthCheck: { interval, cases }\` when the upstream operation is safe and read-only; keep unsupported only for destructive, paid, credential-sensitive, or flaky probes with a specific reason.`,
-			evidence: unsupported.map(
-				(operationId) => `${operationId}: healthCheckUnsupported`,
-			),
+			message: "Health coverage is declared, with one or more unsupported probes.",
+			remediation: `For ${unsupported.join(", ")}, replace \`healthCheckUnsupported\` with \`healthCheck: { interval, cases }\` when the upstream operation is safe and read-only; keep unsupported only for destructive, paid, credential-sensitive, or flaky probes with a specific reason.`,
+			evidence: unsupported.map((operationId) => `${operationId}: healthCheckUnsupported`),
 		};
 	}
 
@@ -2184,8 +2059,55 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 	);
 }
 
-function scoreSmokeEvidence(smokeNote: string | undefined): SubmitCheck {
-	if (smokeNote?.trim()) {
+function scoreSmoke(
+	smokeResult: SmokeResult | undefined,
+	smokeNote: string | undefined,
+): SubmitCheck {
+	const deprecatedEvidence = smokeNote?.trim()
+		? ["Deprecated --smoke-note was provided and ignored for scoring."]
+		: [];
+	if (!smokeResult) {
+		return {
+			id: "local-smoke",
+			category: "smoke",
+			level: "warn",
+			status: "warn",
+			points: 0,
+			maxPoints: CATEGORY_MAX_POINTS.smoke,
+			message: "Measured local smoke was not run.",
+			remediation:
+				"Rerun submit-check with `--smoke` so it boots the provider, verifies `/health`, and POSTs every operation fixture. Set APIFUSE__PROVIDER__* env vars when live upstream credentials are available.",
+			evidence: deprecatedEvidence,
+		};
+	}
+
+	const evidence = [
+		`/health: ${smokeResult.healthOk ? "ok" : "failed"}`,
+		...smokeResult.operations.map(
+			(outcome) =>
+				`${outcome.operationId}: ${outcome.status}${outcome.httpStatus ? ` HTTP ${outcome.httpStatus}` : ""} - ${outcome.message}`,
+		),
+		...deprecatedEvidence,
+	];
+	const incoherent = smokeResult.operations.filter((outcome) => outcome.status === "incoherent");
+	if (!smokeResult.healthOk || smokeResult.bootError || incoherent.length > 0) {
+		return {
+			id: "local-smoke",
+			category: "smoke",
+			level: "blocker",
+			status: "fail",
+			points: 0,
+			maxPoints: CATEGORY_MAX_POINTS.smoke,
+			message: "Measured smoke failed to verify a coherent provider runtime.",
+			remediation:
+				"Fix the dev server boot, `/health`, or incoherent operation responses, then rerun `bun run submit-check -- --smoke`.",
+			evidence: smokeResult.bootError ? [`boot: ${smokeResult.bootError}`, ...evidence] : evidence,
+			details: smokeResult,
+		};
+	}
+
+	const successes = smokeResult.operations.filter((outcome) => outcome.status === "success");
+	if (successes.length > 0) {
 		return {
 			id: "local-smoke",
 			category: "smoke",
@@ -2193,8 +2115,9 @@ function scoreSmokeEvidence(smokeNote: string | undefined): SubmitCheck {
 			status: "pass",
 			points: CATEGORY_MAX_POINTS.smoke,
 			maxPoints: CATEGORY_MAX_POINTS.smoke,
-			message: "Local smoke evidence was provided.",
-			evidence: [redact(smokeNote.trim())],
+			message: "Measured smoke passed with at least one schema-valid operation success.",
+			evidence,
+			details: smokeResult,
 		};
 	}
 
@@ -2203,12 +2126,224 @@ function scoreSmokeEvidence(smokeNote: string | undefined): SubmitCheck {
 		category: "smoke",
 		level: "warn",
 		status: "warn",
-		points: 5,
+		points: 7,
 		maxPoints: CATEGORY_MAX_POINTS.smoke,
-		message: "No local smoke evidence was provided.",
+		message: "Runtime path was verified, but no live upstream schema-valid success was observed.",
 		remediation:
-			"Start `bun run dev`, call `/health` and at least one `POST /v1/{operation}`, then rerun with `--smoke-note` or paste notes in the assigned workspace PR.",
+			"Provide APIFUSE__PROVIDER__* env vars or fixture-safe upstream access, then rerun `bun run submit-check -- --smoke` to capture at least one schema-valid success.",
+		evidence,
+		details: smokeResult,
 	};
+}
+
+export async function runSubmitCheckSmoke(
+	providerRoot: string,
+	provider?: ProviderDefinition,
+): Promise<SmokeResult> {
+	const loadedProvider = provider ?? (await loadProvider(providerRoot));
+	if (!loadedProvider) {
+		return {
+			measured: true,
+			healthOk: false,
+			bootError: "Provider could not be loaded.",
+			operations: [],
+		};
+	}
+
+	const port = await getAvailablePort();
+	const server = spawn("bun", ["run", "dev"], {
+		cwd: providerRoot,
+		env: { ...process.env, APIFUSE__RUNTIME__PORT: String(port) },
+		detached: process.platform !== "win32",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let output = "";
+	server.stdout?.on("data", (chunk) => {
+		output += chunk.toString();
+	});
+	server.stderr?.on("data", (chunk) => {
+		output += chunk.toString();
+	});
+
+	try {
+		const baseUrl = `http://127.0.0.1:${port}`;
+		const health = await waitForSmokeHealth(`${baseUrl}/health`, server, () => output);
+		if (!health.ok) {
+			return {
+				measured: true,
+				healthOk: false,
+				bootError: health.error,
+				operations: [],
+			};
+		}
+		const operations: SmokeOperationOutcome[] = [];
+		for (const [operationId, operation] of Object.entries(loadedProvider.operations)) {
+			operations.push(
+				await smokeOperation(baseUrl, operationId, operation.output, {
+					requestId: `req_submit_check_smoke_${operationId}`,
+					input: operation.fixtures?.request ?? {},
+					headers: {},
+				}),
+			);
+		}
+		return { measured: true, healthOk: true, operations };
+	} finally {
+		await stopSmokeServer(server);
+	}
+}
+
+async function smokeOperation(
+	baseUrl: string,
+	operationId: string,
+	outputSchema: ProviderDefinition["operations"][string]["output"],
+	body: unknown,
+): Promise<SmokeOperationOutcome> {
+	try {
+		const response = await fetch(`${baseUrl}/v1/${operationId}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+			signal: AbortSignal.timeout(20_000),
+		});
+		const payload = await response.json().catch(() => undefined);
+		if (response.ok && isRecord(payload) && "data" in payload) {
+			const parsed = safeParseSchemaSync(
+				outputSchema,
+				payload.data,
+				`operations.${operationId}.output`,
+			);
+			if (parsed.success) {
+				return {
+					operationId,
+					status: "success",
+					httpStatus: response.status,
+					message: "schema-valid success",
+				};
+			}
+			return {
+				operationId,
+				status: "incoherent",
+				httpStatus: response.status,
+				message: "success payload failed output schema validation",
+			};
+		}
+		if (isStructuredProviderError(payload) && response.status < 500) {
+			return {
+				operationId,
+				status: "structured_error",
+				httpStatus: response.status,
+				message: `${payload.error.code}: ${payload.error.message}`,
+			};
+		}
+		return {
+			operationId,
+			status: "incoherent",
+			httpStatus: response.status,
+			message: isStructuredProviderError(payload)
+				? `${payload.error.code}: ${payload.error.message}`
+				: "response was not a schema-valid success or structured provider error",
+		};
+	} catch (error) {
+		return {
+			operationId,
+			status: "incoherent",
+			message: error instanceof Error ? error.message : String(error),
+		};
+	}
+}
+
+function isStructuredProviderError(
+	value: unknown,
+): value is { error: { code: string; message: string } } {
+	return (
+		isRecord(value) &&
+		isRecord(value.error) &&
+		typeof value.error.code === "string" &&
+		typeof value.error.message === "string"
+	);
+}
+
+async function getAvailablePort(): Promise<number> {
+	return await new Promise((resolvePromise, rejectPromise) => {
+		const server = createServer();
+		server.once("error", rejectPromise);
+		server.listen(0, "127.0.0.1", () => {
+			const address = server.address();
+			server.close((error) => {
+				if (error) {
+					rejectPromise(error);
+					return;
+				}
+				if (!address || typeof address === "string") {
+					rejectPromise(new Error("Could not allocate a local TCP port."));
+					return;
+				}
+				resolvePromise(address.port);
+			});
+		});
+	});
+}
+
+async function waitForSmokeHealth(
+	url: string,
+	server: ChildProcess,
+	getOutput: () => string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
+	const deadline = Date.now() + 20_000;
+	let lastError: unknown;
+
+	while (Date.now() < deadline) {
+		if (server.exitCode !== null) {
+			return {
+				ok: false,
+				error: `Dev server exited early with code ${server.exitCode}. ${getOutput()}`,
+			};
+		}
+
+		try {
+			const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
+			if (response.ok) return { ok: true };
+			lastError = new Error(`${url} returned ${response.status}`);
+		} catch (error) {
+			lastError = error;
+		}
+		await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+	}
+
+	return {
+		ok: false,
+		error: `Timed out waiting for ${url}: ${lastError instanceof Error ? lastError.message : String(lastError)}. ${getOutput()}`,
+	};
+}
+
+async function stopSmokeServer(server: ChildProcess): Promise<void> {
+	if (server.exitCode !== null) return;
+	killSmokeProcessTree(server, "SIGTERM");
+	await new Promise<void>((resolvePromise) => {
+		const timeout = setTimeout(() => {
+			if (server.exitCode === null) {
+				killSmokeProcessTree(server, "SIGKILL");
+			}
+			resolvePromise();
+		}, 2_000);
+		server.once("exit", () => {
+			clearTimeout(timeout);
+			resolvePromise();
+		});
+	});
+}
+
+function killSmokeProcessTree(server: ChildProcess, signal: NodeJS.Signals): void {
+	if (server.pid === undefined) return;
+	try {
+		if (process.platform === "win32") {
+			server.kill(signal);
+			return;
+		}
+		process.kill(-server.pid, signal);
+	} catch {
+		server.kill(signal);
+	}
 }
 
 function scoreAuthSafety(provider: ProviderDefinition): SubmitCheck {
@@ -2250,10 +2385,8 @@ function scoreAuthSafety(provider: ProviderDefinition): SubmitCheck {
 				status: "warn",
 				points: 7,
 				maxPoints: CATEGORY_MAX_POINTS.auth,
-				message:
-					"Provider is no-auth but at least one operation is not marked openWorld.",
-				remediation:
-					`Either set \`auth.mode\` to the upstream auth model, or mark these public no-auth operations with \`annotations.openWorld: true\`: ${securedOperations.map(([operationId]) => operationId).join(", ")}.`,
+				message: "Provider is no-auth but at least one operation is not marked openWorld.",
+				remediation: `Either set \`auth.mode\` to the upstream auth model, or mark these public no-auth operations with \`annotations.openWorld: true\`: ${securedOperations.map(([operationId]) => operationId).join(", ")}.`,
 				evidence: securedOperations.map(([operationId]) => operationId),
 			};
 		}
@@ -2295,9 +2428,7 @@ function scoreProviderDocs(providerRoot: string): SubmitCheck[] {
 
 	const points = Math.max(
 		0,
-		CATEGORY_MAX_POINTS.docs -
-			missing.length * 2 -
-			(mentionsSubmitCheck ? 0 : 1),
+		CATEGORY_MAX_POINTS.docs - missing.length * 2 - (mentionsSubmitCheck ? 0 : 1),
 	);
 
 	return [
@@ -2324,9 +2455,10 @@ function scoreProviderDocs(providerRoot: string): SubmitCheck[] {
 	];
 }
 
-function scoreSecrets(providerRoot: string): SubmitCheck {
-	const findings = findSecretFindings(providerRoot);
-	if (findings.length > 0) {
+function scoreSecrets(providerRoot: string, provider?: ProviderDefinition): SubmitCheck {
+	const findings = findSecretFindings(providerRoot, provider?.id);
+	const blockerFindings = findings.filter((finding) => finding.level !== "warn");
+	if (blockerFindings.length > 0) {
 		return {
 			id: "secret-scan",
 			category: "security",
@@ -2334,11 +2466,34 @@ function scoreSecrets(providerRoot: string): SubmitCheck {
 			status: "fail",
 			points: 0,
 			maxPoints: CATEGORY_MAX_POINTS.security,
-			message:
-				"Potential real credential material was found in shareable files.",
+			message: "Potential real credential material was found in shareable files.",
 			remediation:
-				"Remove real secrets from source, README, and fixtures. Use environment variables and local-only connection.secrets instead.",
-			evidence: findings.map((finding) => `${finding.file}: ${finding.label}`),
+				blockerFindings[0]?.remediation ??
+				'Move hardcoded credentials to env vars read via `ctx.env.get("APIFUSE__PROVIDER__<ID>__<NAME>")` and rotate the leaked credential.',
+			evidence: blockerFindings.map(
+				(finding) =>
+					finding.evidence ??
+					`${finding.file}${finding.line ? `:${finding.line}` : ""}: ${finding.label}`,
+			),
+		};
+	}
+	if (findings.length > 0) {
+		return {
+			id: "secret-scan",
+			category: "security",
+			level: "warn",
+			status: "warn",
+			points: 8,
+			maxPoints: CATEGORY_MAX_POINTS.security,
+			message:
+				"High-entropy source strings were found without secret-like identifier context; they may be false positives.",
+			remediation:
+				'Review the listed strings. If any are credentials, move them to env vars read via `ctx.env.get("APIFUSE__PROVIDER__<ID>__<NAME>")` and rotate the leaked credential; otherwise keep generated blobs in fixtures/tests or document why they are public.',
+			evidence: findings.map(
+				(finding) =>
+					finding.evidence ??
+					`${finding.file}${finding.line ? `:${finding.line}` : ""}: ${finding.label}`,
+			),
 		};
 	}
 
@@ -2350,7 +2505,7 @@ function scoreSecrets(providerRoot: string): SubmitCheck {
 	);
 }
 
-function findSecretFindings(providerRoot: string): SecretFinding[] {
+function findSecretFindings(providerRoot: string, providerId = "<ID>"): SecretFinding[] {
 	const candidateFiles = [
 		"README.md",
 		"index.ts",
@@ -2371,14 +2526,155 @@ function findSecretFindings(providerRoot: string): SecretFinding[] {
 		}
 	}
 
+	findings.push(...findEntropySecretFindings(providerRoot, providerId));
 	return findings;
 }
 
+function findEntropySecretFindings(providerRoot: string, providerId: string): SecretFinding[] {
+	const findings: SecretFinding[] = [];
+	for (const filePath of listNonTestProviderSourceFiles(providerRoot)) {
+		const relativePath = toRelativeProviderPath(providerRoot, filePath);
+		if (isEntropySecretExcludedPath(relativePath)) continue;
+		const content = readFileSync(filePath, "utf8");
+		const lines = content.split(/\r?\n/);
+		for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+			const line = lines[lineIndex] ?? "";
+			for (const candidate of extractStringLiteralCandidates(line)) {
+				const finding = classifyEntropyCandidate({
+					value: candidate,
+					line,
+					file: relativePath,
+					lineNumber: lineIndex + 1,
+					providerId,
+				});
+				if (finding) findings.push(finding);
+			}
+		}
+	}
+	return findings;
+}
+
+function isEntropySecretExcludedPath(relativePath: string): boolean {
+	return (
+		relativePath.endsWith(".test.ts") ||
+		relativePath.startsWith("__tests__/") ||
+		relativePath.includes("/__tests__/") ||
+		relativePath.startsWith("__fixtures__/") ||
+		relativePath.includes("/__fixtures__/")
+	);
+}
+
+export function extractStringLiteralCandidates(line: string): string[] {
+	const candidates: string[] = [];
+	for (let index = 0; index < line.length; index += 1) {
+		const quote = line[index];
+		if (quote !== '"' && quote !== "'" && quote !== "`") continue;
+
+		const contentStart = index + 1;
+		let cursor = contentStart;
+		while (cursor < line.length) {
+			const char = line[cursor];
+			if (char === "\\") {
+				cursor += 2;
+				continue;
+			}
+			if (char === quote) {
+				if (cursor - contentStart >= 20) {
+					candidates.push(line.slice(contentStart, cursor));
+				}
+				index = cursor;
+				break;
+			}
+			cursor += 1;
+		}
+	}
+	return candidates;
+}
+
+function classifyEntropyCandidate(input: {
+	value: string;
+	line: string;
+	file: string;
+	lineNumber: number;
+	providerId: string;
+}): SecretFinding | undefined {
+	const value = input.value;
+	if (!shouldConsiderEntropyValue(value)) return undefined;
+	const charset = classifyEntropyCharset(value);
+	if (!charset) return undefined;
+	const entropy = shannonEntropy(value);
+	const secretishContext = SECRETISH_IDENTIFIER_PATTERN.test(input.line);
+	const threshold = charset === "hex" ? 3.0 : secretishContext ? 4.0 : 4.5;
+	if (entropy < threshold) return undefined;
+
+	const preview = `${value.slice(0, 4)}...[REDACTED length=${value.length}]`;
+	const envName = `APIFUSE__PROVIDER__${input.providerId.toUpperCase().replace(/[^A-Z0-9]+/g, "_")}__${guessSecretName(input.line)}`;
+	const location = `${input.file}:${input.lineNumber}`;
+	const label =
+		charset === "hex"
+			? `high-entropy hex string (${entropy.toFixed(2)} bits/char)`
+			: `high-entropy base64-like string (${entropy.toFixed(2)} bits/char)`;
+	return {
+		label,
+		file: input.file,
+		line: input.lineNumber,
+		level: secretishContext ? "blocker" : "warn",
+		remediation: `Move ${location} to an env var read via \`ctx.env.get("${envName}")\` and rotate the leaked credential.`,
+		evidence: `${location}: ${label}; preview ${preview}${secretishContext ? "" : "; may be a false positive"}`,
+	};
+}
+
+function shouldConsiderEntropyValue(value: string): boolean {
+	const lower = value.toLowerCase();
+	if (/^(?:dev-only|local|example|sample|your-|replace|<)/i.test(value)) {
+		return false;
+	}
+	if (/^sha(?:256|512)-/i.test(value)) return false;
+	if (/\s/.test(value)) return false;
+	if (value.includes("${")) return false;
+	if (value.includes("/")) return false;
+	if (/^[a-z][a-z0-9+.-]*:\/\//i.test(value)) return false;
+	if (/^(?:\.{0,2}\/|~\/|[A-Za-z]:\\)/.test(value)) return false;
+	if (value.includes(".") && /^[A-Za-z0-9_.-]+$/.test(value)) return false;
+	if (lower.includes("/") && /\.[a-z0-9]{1,8}(?:$|[/?#])/i.test(value)) {
+		return false;
+	}
+	return value.length >= 20;
+}
+
+function classifyEntropyCharset(value: string): "base64" | "hex" | undefined {
+	if (/^[a-f0-9]+$/i.test(value) && value.length >= 32) return "hex";
+	const base64ishChars = value.match(/[A-Za-z0-9+/=_-]/g)?.length ?? 0;
+	if (base64ishChars / value.length >= 0.9) return "base64";
+	return undefined;
+}
+
+function shannonEntropy(value: string): number {
+	const counts = new Map<string, number>();
+	for (const char of value) counts.set(char, (counts.get(char) ?? 0) + 1);
+	let entropy = 0;
+	for (const count of counts.values()) {
+		const probability = count / value.length;
+		entropy -= probability * Math.log2(probability);
+	}
+	return entropy;
+}
+
+function guessSecretName(line: string): string {
+	const match =
+		/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(line) ??
+		/["']?([A-Za-z_$][\w$-]*)["']?\s*:/.exec(line);
+	const raw = match?.[1] ?? "SECRET";
+	return raw
+		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
+		.toUpperCase()
+		.replace(/[^A-Z0-9]+/g, "_");
+}
+
+const SECRETISH_IDENTIFIER_PATTERN = /key|token|secret|password|credential|auth/i;
+
 const SECRET_PATTERNS: Array<[string, RegExp]> = [
-	[
-		"JWT-like token",
-		/eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/,
-	],
+	["JWT-like token", /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/],
 	["GitHub token", /gh[pousr]_[A-Za-z0-9_]{30,}/],
 	["Stripe live key", /(?:sk|rk)_live_[A-Za-z0-9]{20,}/],
 	["Bearer token", /Bearer\s+[A-Za-z0-9._~+/=-]{32,}/i],
@@ -2388,9 +2684,7 @@ const SECRET_PATTERNS: Array<[string, RegExp]> = [
 	],
 ];
 
-async function safeLoadProvider(
-	providerRoot: string,
-): Promise<ProviderDefinition | undefined> {
+async function safeLoadProvider(providerRoot: string): Promise<ProviderDefinition | undefined> {
 	try {
 		return await loadProvider(providerRoot);
 	} catch {
@@ -2398,9 +2692,7 @@ async function safeLoadProvider(
 	}
 }
 
-async function loadProvider(
-	providerRoot: string,
-): Promise<ProviderDefinition | undefined> {
+async function loadProvider(providerRoot: string): Promise<ProviderDefinition | undefined> {
 	const entryPath = resolve(providerRoot, "index.ts");
 	if (!existsSync(entryPath)) {
 		return undefined;
@@ -2480,8 +2772,7 @@ export function renderText(report: SubmitCheckReport): string {
 	];
 
 	for (const check of report.checks) {
-		const marker =
-			check.status === "pass" ? "✓" : check.status === "warn" ? "⚠" : "✗";
+		const marker = check.status === "pass" ? "✓" : check.status === "warn" ? "⚠" : "✗";
 		lines.push(
 			`${marker} [${check.category}] ${check.message} (${check.points}/${check.maxPoints})`,
 		);
@@ -2503,9 +2794,7 @@ export function renderMarkdown(report: SubmitCheckReport): string {
 		`- **Provider**: ${report.provider.id}@${report.provider.version}`,
 		`- **SDK**: ${report.provider.sdkVersion}`,
 		`- **Runtime/Auth**: ${report.provider.runtime} / ${report.provider.authMode}`,
-		...(report.provider.tier
-			? [`- **Bounty tier**: ${report.provider.tier}`]
-			: []),
+		...(report.provider.tier ? [`- **Bounty tier**: ${report.provider.tier}`] : []),
 		`- **Score**: ${report.score.total}/${report.score.max}`,
 		`- **Verdict**: ${report.score.verdict}`,
 		`- **Blockers**: ${report.summary.blockers}`,
@@ -2518,12 +2807,7 @@ export function renderMarkdown(report: SubmitCheckReport): string {
 	];
 
 	for (const check of report.checks) {
-		const status =
-			check.status === "pass"
-				? "PASS"
-				: check.status === "warn"
-					? "WARN"
-					: "FAIL";
+		const status = check.status === "pass" ? "PASS" : check.status === "warn" ? "WARN" : "FAIL";
 		lines.push(
 			`| ${status} | ${escapeMarkdown(check.category)} | ${escapeMarkdown(check.message)} | ${check.points}/${check.maxPoints} | ${escapeMarkdown(check.remediation ?? "")} |`,
 		);
@@ -2553,9 +2837,7 @@ function redact(value: string): string {
 }
 
 function toGlobalRegex(pattern: RegExp): RegExp {
-	return pattern.global
-		? pattern
-		: new RegExp(pattern.source, `${pattern.flags}g`);
+	return pattern.global ? pattern : new RegExp(pattern.source, `${pattern.flags}g`);
 }
 
 function clamp(value: number, min: number, max: number): number {

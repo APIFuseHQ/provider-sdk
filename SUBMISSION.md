@@ -9,11 +9,11 @@ bunx @apifuse/provider-sdk@beta create my-provider --yes
 cd my-provider
 bun run check
 bun run test
-bun run submit-check
+bun run submit-check -- --smoke
 bun run dev
 ```
 
-`bun run submit-check` runs `apifuse submit-check . --markdown submission-report.md` in generated Providers.
+`bun run submit-check -- --smoke` runs the generated `apifuse submit-check . --markdown submission-report.md` script with measured smoke enabled.
 
 ## What submit-check scores
 
@@ -52,20 +52,19 @@ Fix all blockers before submitting:
 
 Warnings do not fail the command, but they should be addressed when practical. For example, the generated starter `ping` operation warns because it is not a real upstream-backed bounty Operation. SDK-native warnings also flag moderate `as Type` assertion counts and credentialed Providers that never reference `ctx.credential`.
 
-## Safe local smoke evidence
+## Measured local smoke
 
-`submit-check` does not call arbitrary live upstream APIs by default. After replacing starter logic, run the Provider locally and record a short evidence note:
+`submit-check` does not call live upstream APIs by default. For smoke scoring,
+run measured smoke so the CLI boots the Provider, checks `/health`, and POSTs
+each operation fixture:
 
 ```bash
-bun run dev
-curl -s http://localhost:3900/health
-curl -s -X POST http://localhost:3900/v1/<operation> \
-  -H 'Content-Type: application/json' \
-  -d '{"requestId":"req_local_smoke","input":{...},"headers":{}}'
-
-bun run submit-check -- --smoke-note "GET /health and POST /v1/<operation> passed locally with redacted input."
+bun run submit-check -- --smoke
 ```
 
+`APIFUSE__PROVIDER__*` env vars enable live upstream calls. Their absence can
+still produce 7/10 smoke credit when every operation routes and returns a
+structured provider error envelope, but zero schema-valid successes are observed.
 Never paste real credentials, personal data, account numbers, access tokens, cookies, or unredacted upstream responses into workspace PR comments, chat, or reports.
 
 ## Submission evidence checklist
