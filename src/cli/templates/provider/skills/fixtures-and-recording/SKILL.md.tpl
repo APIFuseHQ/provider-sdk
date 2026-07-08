@@ -28,17 +28,21 @@ provider ran against the real upstream.
   broken (see pagination skill), not your fixture.
 
 ## Fixture shape
-Each operation entry carries the full triple:
-```json
-{ "<operation>": { "request": {...}, "upstream": {...}, "normalized": {...} } }
-```
-- `upstream` is the verbatim upstream body (secrets stripped).
-- `normalized` must be byte-reproducible by running your mapper over
-  `upstream` — and your tests must assert exactly that.
+`apifuse record` (`bun run record`) writes the captured RAW UPSTREAM payload
+to `__fixtures__/raw.json` (secrets sanitized). With `--append` it
+accumulates an array of raw payloads. The recorder does NOT write your
+normalized output — raw.json is upstream evidence only.
+
+Derive normalized expectations in TESTS, not in the fixture file: load the
+recorded raw payload, run your mapper over it, and assert the exact expected
+normalized rows inline in the test. If you keep expected-output snapshots,
+generate them from the mapper and review them row by row — never hand-author
+values that the upstream did not return.
 
 ## Tests to derive from fixtures
-- Mapper: `map(upstreamRow)` equals the normalized fixture row (toEqual, not
-  toMatchObject, for full rows — partial matching hides dropped fields).
+- Mapper: `map(recordedUpstreamRow)` equals the expected normalized row
+  (toEqual, not toMatchObject, for full rows — partial matching hides
+  dropped fields).
 - Edge rows: single-item object vs array (`items.item` unwrapping), missing
   optional fields, unpadded/numeric time values, vendor error headers.
 - Error paths: upstream error `resultCode`, HTTP failure, missing secret,
@@ -49,5 +53,6 @@ Each operation entry carries the full triple:
 ## Checklist
 - [ ] Every fixture recorded live; no placeholder-looking values
 - [ ] No empty-result fixture for a query that must have data
-- [ ] normalized == mapper(upstream) asserted in tests
+- [ ] normalized expectations derived from mapper(recorded raw), not
+      hand-authored
 - [ ] Error and edge-shape rows covered, not just the happy row

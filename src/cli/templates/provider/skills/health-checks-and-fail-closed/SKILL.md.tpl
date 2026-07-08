@@ -6,15 +6,20 @@ description: Writing health checks that can actually fail, and fail-closed guard
 # Health checks and fail-closed guards
 
 ## Health checks that can actually fail
-`Array.isArray(data.items)` passes forever, including when the provider is
-completely broken (wrong param name → empty array on every call). Every list
-operation's health check must be able to detect the zero-rows regression:
+`Array.isArray(data.items)` alone can never fail. Every list operation's
+health check must be able to detect the zero-rows regression.
+
+Assertion contract (per SDK `HealthCheckCase`): THROW to fail the case
+(recorded as `down`); return `{ status: "degraded", label }` to flag without
+failing; return nothing for `ok`. There is no `"down"` return value.
 
 ```ts
 assertions: ({ status, data }) => {
-  if (status !== 200) return { status: "down", label: "<op> request failed" };
+  if (status !== 200) {
+    throw new Error(`<op> request failed with status ${status}`);
+  }
   if (!Array.isArray(data.items)) {
-    return { status: "down", label: "<op> missing items array" };
+    throw new Error("<op> missing items array");
   }
   // Dense query MUST return rows; zero rows = upstream contract drift
   if (data.items.length === 0) {
