@@ -954,7 +954,6 @@ ${assertionLines(21)}
 		["nested arrow references only its own param", "function (ctx) { [1].forEach((x) => x + 1); }"],
 		["param read only inside an uninvoked arrow closure", "(ctx) => { const later = () => ctx.status; }"],
 		["param read only inside an uninvoked function declaration", "(ctx) => { function later() { return ctx.status; } }"],
-		["param read only inside a deferred object-method value", "(ctx) => { const probe = { run: () => ctx.output.ok }; }"],
 	] as const) {
 		it(`blocks vacuous health assertions with ${label}`, async () => {
 			const dir = makeProviderDir(
@@ -1117,6 +1116,37 @@ ${assertionLines(21)}
             ctx.output.items.every((item) => item.ok)
               ? undefined
               : { status: "degraded", label: "bad item" },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real assertions that invoke a local helper function", async () => {
+		// Regression (Codex): a helper factored into a local binding and then
+		// called — `const check = () => { ... }; check();` — must not be treated
+		// as a deferred/uninvoked closure. The call site means the helper runs, so
+		// its ctx read / throw is a real assertion.
+		const dir = makeProviderDir(
+			"submit-invoked-helper-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (ctx) => {
+            const check = () => {
+              if (!ctx.output.ok) {
+                throw new Error("lookup down");
+              }
+            };
+            check();
+          },
         }],
       },`),
 		);
