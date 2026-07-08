@@ -82,12 +82,21 @@ function findDynamicGrantRule(
 ): NativeTcpDynamicEgressRule | undefined {
 	return rules.find(
 		(rule) =>
-			normalizeHost(rule.sourceHost) === normalizeHost(grant.sourceHost) &&
-			rule.sourcePorts.includes(grant.sourcePort) &&
+			sourceHostMatches(rule, grant.sourceHost) &&
+			(rule.sourcePorts?.includes(grant.sourcePort) === true ||
+				rule.sourcePortRanges?.some((range) => portInRange(grant.sourcePort, range)) === true) &&
 			rule.targetHostSuffixes.some((suffix) => hostMatchesSuffix(grant.host, suffix)) &&
 			(rule.targetPorts?.includes(grant.port) === true ||
 				rule.targetPortRanges?.some((range) => portInRange(grant.port, range)) === true) &&
 			tlsModeAllows(rule.tls, grant.tls),
+	);
+}
+
+function sourceHostMatches(rule: NativeTcpDynamicEgressRule, sourceHost: string): boolean {
+	return (
+		(rule.sourceHost !== undefined &&
+			normalizeHost(rule.sourceHost) === normalizeHost(sourceHost)) ||
+		rule.sourceHostSuffixes?.some((suffix) => hostMatchesSuffix(sourceHost, suffix)) === true
 	);
 }
 

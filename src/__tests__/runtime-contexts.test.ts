@@ -123,9 +123,7 @@ describe("runtime contexts", () => {
 
 	it("createFlowContext accepts an injected native network client", () => {
 		const native: NativeContext = {
-			network: createNativeNetworkClient([
-				{ host: "127.0.0.1", ports: [65535], tls: "disabled" },
-			]),
+			network: createNativeNetworkClient([{ host: "127.0.0.1", ports: [65535], tls: "disabled" }]),
 		};
 		const http = {
 			request: async () => {
@@ -256,7 +254,11 @@ describe("runtime contexts", () => {
 				port: address.port,
 				tls: "disabled",
 			});
-			const connection = await client.connectTcp({ host: "127.0.0.1", port: address.port, timeoutMs: 500 });
+			const connection = await client.connectTcp({
+				host: "127.0.0.1",
+				port: address.port,
+				timeoutMs: 500,
+			});
 			await connection.write("pong");
 			const chunk = await connection.read();
 			await connection.close();
@@ -266,6 +268,54 @@ describe("runtime contexts", () => {
 			await expect(
 				client.connectTcp({ host: "127.0.0.1", port: address.port, timeoutMs: 100 }),
 			).rejects.toThrow("not declared");
+		} finally {
+			await new Promise<void>((resolve, reject) =>
+				server.close((error) => (error ? reject(error) : resolve())),
+			);
+		}
+	});
+
+	it("native network allows dynamic grants from source host suffixes", async () => {
+		const server = net.createServer((socket) => {
+			socket.on("data", (chunk) => socket.write(chunk));
+		});
+		await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string") {
+				throw new Error("TCP server did not expose an address");
+			}
+			const client = createNativeNetworkClient(
+				[],
+				[
+					{
+						sourceHostSuffixes: ["kakao.com"],
+						sourcePortRanges: [{ start: 10_000, end: 20_000 }],
+						targetHostSuffixes: ["127.0.0.1"],
+						targetPorts: [address.port],
+						tls: "disabled",
+					},
+				],
+			);
+
+			const grant = client.grantTcpEgress({
+				sourceHost: "edge-loco.kakao.com",
+				sourcePort: 10001,
+				host: "127.0.0.1",
+				port: address.port,
+				tls: "disabled",
+			});
+			const connection = await client.connectTcp({
+				host: "127.0.0.1",
+				port: address.port,
+				timeoutMs: 500,
+			});
+			await connection.write("suffix");
+			const chunk = await connection.read();
+			await connection.close();
+			grant.revoke();
+
+			expect(new TextDecoder().decode(chunk ?? new Uint8Array())).toBe("suffix");
 		} finally {
 			await new Promise<void>((resolve, reject) =>
 				server.close((error) => (error ? reject(error) : resolve())),
