@@ -470,6 +470,263 @@ describe("createHttpClient", () => {
 		expect(mockNativeFetchState.calls).toHaveLength(1);
 	});
 
+	it("defaults proxy-routed GET requests to transient transport retry", async () => {
+		const originalRandom = Math.random;
+		Math.random = () => 0;
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
+		let response: Awaited<ReturnType<typeof http.get>> | undefined;
+		try {
+			response = await http.get("https://example.com");
+		} finally {
+			Math.random = originalRandom;
+		}
+
+		expect(response?.ok).toBeTrue();
+		expect(response?.data).toEqual({ ok: true });
+		expect(mockNativeFetchState.calls).toHaveLength(2);
+		for (const call of mockNativeFetchState.calls) {
+			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(
+				"http://proxy.test",
+			);
+		}
+	});
+
+	it("defaults provider-policy proxy GET requests to transient transport retry", async () => {
+		const originalRandom = Math.random;
+		Math.random = () => 0;
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, {
+			upstream: {
+				proxy: {
+					mode: "optional",
+					provider: "custom",
+					geo: { country: "KR" },
+				},
+			},
+			apifuseConfig: { proxy: { url: "http://proxy.test" } },
+		});
+		let response: Awaited<ReturnType<typeof http.get>> | undefined;
+		try {
+			response = await http.get("https://example.com");
+		} finally {
+			Math.random = originalRandom;
+		}
+
+		expect(response?.ok).toBeTrue();
+		expect(response?.data).toEqual({ ok: true });
+		expect(mockNativeFetchState.calls).toHaveLength(2);
+		for (const call of mockNativeFetchState.calls) {
+			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(
+				"http://proxy.test",
+			);
+		}
+	});
+
+	it("does not default-retry optional proxy policies that resolve without a proxy URL", async () => {
+		const originalSmartproxyKey =
+			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, {
+			upstream: {
+				proxy: {
+					mode: "optional",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+				},
+			},
+			warn: () => undefined,
+		});
+
+		try {
+			await expect(http.get("https://example.com")).rejects.toMatchObject({
+				code: "transport_network_error",
+			});
+			expect(mockNativeFetchState.calls).toHaveLength(1);
+			expect(
+				(mockNativeFetchState.calls[0]?.init as RequestInit & { proxy?: string })
+					?.proxy,
+			).toBeUndefined();
+		} finally {
+			if (originalSmartproxyKey === undefined) {
+				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+			} else {
+				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY =
+					originalSmartproxyKey;
+			}
+		}
+	});
+
+	it("honors explicit retry when optional proxy policies resolve without a proxy URL", async () => {
+		const originalSmartproxyKey =
+			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, {
+			upstream: {
+				proxy: {
+					mode: "optional",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+				},
+			},
+			warn: () => undefined,
+		});
+
+		try {
+			const response = await http.get("https://example.com", {
+				retry: { preset: HttpRetryPreset.TransportTransient, baseDelayMs: 0 },
+			});
+
+			expect(response.data).toEqual({ ok: true });
+			expect(mockNativeFetchState.calls).toHaveLength(2);
+			for (const call of mockNativeFetchState.calls) {
+				expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(
+					undefined,
+				);
+			}
+		} finally {
+			if (originalSmartproxyKey === undefined) {
+				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+			} else {
+				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY =
+					originalSmartproxyKey;
+			}
+		}
+	});
+
+	it("rotates provider-policy proxy attempts across default HTTP retries", async () => {
+		const originalSmartproxyKey =
+			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const originalFetch = globalThis.fetch;
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const upstreamCalls: MockNativeFetchCall[] = [];
+		globalThis.fetch = mock(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("smartproxy.org/web_v1/ip/get-ip-v3")) {
+					return new Response(
+						["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"),
+						{ status: 200 },
+					);
+				}
+				upstreamCalls.push({ url, init });
+				if (upstreamCalls.length === 1) {
+					throw new Error("Network error");
+				}
+				return new Response(JSON.stringify({ ok: true }), {
+					headers: { "content-type": "application/json" },
+					status: 200,
+				});
+			},
+		) as typeof fetch;
+
+		const { clearProxyResolutionCache } = await import("../config/loader");
+		clearProxyResolutionCache();
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, {
+			affinityKey: "http_retry_rotation",
+			upstream: {
+				proxy: {
+					mode: "required",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 2 },
+				},
+			},
+			warn: () => undefined,
+		});
+
+		try {
+			const response = await http.get("https://example.com");
+
+			expect(response.data).toEqual({ ok: true });
+			expect(upstreamCalls).toHaveLength(2);
+			expect(
+				(upstreamCalls[0]?.init as RequestInit & { proxy?: string })?.proxy,
+			).toBe("http://5.78.24.25:31001");
+			expect(
+				(upstreamCalls[1]?.init as RequestInit & { proxy?: string })?.proxy,
+			).toBe("http://5.78.24.26:31002");
+		} finally {
+			clearProxyResolutionCache();
+			globalThis.fetch = originalFetch;
+			if (originalSmartproxyKey === undefined) {
+				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+			} else {
+				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY =
+					originalSmartproxyKey;
+			}
+		}
+	});
+
+	it("does not default-retry proxy-routed GET requests when retry is false", async () => {
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: "{}",
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
+
+		await expect(
+			http.get("https://example.com", { retry: false }),
+		).rejects.toMatchObject({
+			code: "transport_network_error",
+		});
+		expect(mockNativeFetchState.calls).toHaveLength(1);
+	});
+
+	it("does not default-retry proxy-routed POST requests", async () => {
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: "{}",
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
+
+		await expect(
+			http.post("https://example.com", { ok: true }),
+		).rejects.toMatchObject({
+			code: "transport_network_error",
+		});
+		expect(mockNativeFetchState.calls).toHaveLength(1);
+	});
+
 	it("SafeRead retries configured HTTP statuses and preserves terminal HTTP error shape", async () => {
 		mockNativeFetchState.queuedResponses.push(
 			{
