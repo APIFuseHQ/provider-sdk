@@ -2109,8 +2109,9 @@ function isVacuousAssertionFunction(assertions: unknown): boolean {
 	}
 
 	// Fast-path: enumerated literal no-op bodies (empty, return void 0, {},
-	// Promise.resolve() with a vacuous argument, etc.). Kept as a precise,
-	// zero-false-positive first check.
+	// Promise.resolve() with a vacuous argument, etc.). Precise and
+	// zero-false-positive; operates on the code view so comments/strings can't
+	// disguise a real body as a literal no-op.
 	const literalVacuous = parsed.concise
 		? isVacuousConciseAssertionBody(parsed.body)
 		: isVacuousBlockAssertionBody(parsed.body);
@@ -2121,15 +2122,11 @@ function isVacuousAssertionFunction(assertions: unknown): boolean {
 	// Principled backstop: a real health assertion MUST inspect the probe
 	// response, which is delivered exclusively through the assertion's
 	// parameter (ctx or a destructured shape), or it must throw. A body that
-	// references neither any parameter nor `throw` cannot be doing real work,
-	// regardless of how the no-op is spelled (await Promise.resolve(),
+	// references neither any bound parameter nor `throw` cannot be doing real
+	// work, regardless of how the no-op is spelled (await Promise.resolve(),
 	// Promise.resolve().then(), new Promise(r => r()), etc.). This closes the
-	// whole equivalent-no-op class without enumerating every form. The check
-	// runs against `rawBody` (block comments removed but line comments and
-	// regex literals preserved) so a `//` inside a regex such as
-	// /^https?:\/\// is not mistaken for a comment and does not erase a real
-	// parameter reference.
-	return isInversionVacuous(parsed.params, parsed.rawBody);
+	// whole equivalent-no-op class without enumerating every form.
+	return isInversionVacuous(parsed.params, parsed.body);
 }
 
 const ASSERTION_BODY_KEYWORDS = new Set([
@@ -2156,76 +2153,72 @@ const ASSERTION_BODY_KEYWORDS = new Set([
 	"if",
 	"else",
 	"throw",
+	"for",
+	"while",
+	"switch",
+	"case",
+	"do",
+	"const",
+	"let",
+	"var",
 ]);
 
 interface ParsedAssertion {
+	/** Parameter list, from the code view (comments/strings already blanked). */
 	params: string;
+	/**
+	 * Function body, taken from the code view: every non-code region (line and
+	 * block comments, string and template-literal text, regex literals) is
+	 * replaced with equal-length whitespace, while real code — including
+	 * `${...}` template EXPRESSIONS — is preserved at its original offset. All
+	 * downstream structure/identifier/keyword checks run on this so no lexical
+	 * form (regex `//`, a `throw` inside a string, a param named `$ctx`, a
+	 * param referenced only in a `${...}`) can fool them.
+	 */
 	body: string;
-	rawBody: string;
 	concise: boolean;
 }
 
 function parseAssertionSource(rawSource: string): ParsedAssertion | undefined {
-	// `body` has ALL comments stripped (used by the literal fast-path, which
-	// normalizes whitespace and matches exact no-op spellings). `rawBody` has
-	// only block comments removed, preserving line comments and — critically —
-	// regex literals like /^https?:\/\// whose `//` a naive line-comment strip
-	// would corrupt. The inversion param/throw check uses `rawBody`.
-	const source = stripComments(rawSource);
-	const rawSourceNoBlock = stripBlockComments(rawSource);
-	const rawArrowIndex = rawSourceNoBlock.indexOf("=>");
-	const rawBodyFull =
-		rawArrowIndex >= 0 ? rawSourceNoBlock.slice(rawArrowIndex + 2).trim() : rawSourceNoBlock;
-
-	const arrowIndex = source.indexOf("=>");
+	const view = maskToCodeView(rawSource);
+	const arrowIndex = view.indexOf("=>");
 	if (arrowIndex >= 0) {
-		const head = source.slice(0, arrowIndex);
+		const head = view.slice(0, arrowIndex);
 		const openParen = head.indexOf("(");
 		const params =
 			openParen >= 0
 				? head.slice(openParen + 1, head.lastIndexOf(")"))
 				: head.replace(/\basync\b/g, "").trim();
-		const arrowBody = source.slice(arrowIndex + 2).trim();
+		const arrowBody = view.slice(arrowIndex + 2).trim();
 		if (!arrowBody.startsWith("{")) {
-			return { params, body: arrowBody, rawBody: rawBodyFull, concise: true };
+			return { params, body: arrowBody, concise: true };
 		}
-		// Block-body arrow: parse the arrow body itself, NOT source.indexOf("{"),
+		// Block-body arrow: parse the arrow body itself, NOT view.indexOf("{"),
 		// which would grab a destructured-parameter brace (e.g. ({ data }) => {}).
 		const arrowBodyEnd = arrowBody.lastIndexOf("}");
 		if (arrowBodyEnd <= 0) {
 			return undefined;
 		}
-		const rawBlockBody = rawBodyFull.startsWith("{")
-			? rawBodyFull.slice(1, rawBodyFull.lastIndexOf("}"))
-			: rawBodyFull;
-		return { params, body: arrowBody.slice(1, arrowBodyEnd), rawBody: rawBlockBody, concise: false };
+		return { params, body: arrowBody.slice(1, arrowBodyEnd), concise: false };
 	}
 
 	// Non-arrow function: skip the parameter list so a destructured parameter
 	// brace (function ({ data }) {}) is not mistaken for the function body.
-	const openParen = source.indexOf("(");
-	const closeParen = openParen >= 0 ? source.indexOf(")", openParen) : -1;
-	const params = openParen >= 0 && closeParen > openParen ? source.slice(openParen + 1, closeParen) : "";
-	const bodyStart = source.indexOf("{", closeParen >= 0 ? closeParen : 0);
-	const bodyEnd = source.lastIndexOf("}");
+	const openParen = view.indexOf("(");
+	const closeParen = openParen >= 0 ? view.indexOf(")", openParen) : -1;
+	const params = openParen >= 0 && closeParen > openParen ? view.slice(openParen + 1, closeParen) : "";
+	const bodyStart = view.indexOf("{", closeParen >= 0 ? closeParen : 0);
+	const bodyEnd = view.lastIndexOf("}");
 	if (bodyStart < 0 || bodyEnd <= bodyStart) {
 		return undefined;
 	}
-	const rawOpen = rawSourceNoBlock.indexOf("{", rawSourceNoBlock.indexOf(")"));
-	const rawClose = rawSourceNoBlock.lastIndexOf("}");
-	const rawBlockBody =
-		rawOpen >= 0 && rawClose > rawOpen ? rawSourceNoBlock.slice(rawOpen + 1, rawClose) : rawBodyFull;
-	return { params, body: source.slice(bodyStart + 1, bodyEnd), rawBody: rawBlockBody, concise: false };
+	return { params, body: view.slice(bodyStart + 1, bodyEnd), concise: false };
 }
 
 function isInversionVacuous(params: string, body: string): boolean {
-	// Ignore string/template literals so text inside them (e.g. a log message
-	// containing the word "throw", or a param name mentioned only in a string)
-	// cannot masquerade as real assertion logic. Block comments are already
-	// stripped by the caller; regex literals are preserved.
-	const code = stripStringLiterals(body);
-	// A body that throws is doing real work (asserting a failure path).
-	if (/\bthrow\b/.test(code)) {
+	// `body` is already the code view, so a `throw` here is a real throw
+	// statement, not text inside a comment or string literal.
+	if (/\bthrow\b/.test(body)) {
 		return false;
 	}
 	const paramIds = (params.match(/[A-Za-z_$][\w$]*/g) ?? []).filter(
@@ -2242,24 +2235,222 @@ function isInversionVacuous(params: string, body: string): boolean {
 	// unreliable (e.g. `$ctx`); guard with explicit non-identifier lookarounds.
 	const referencesParam = paramIds.some((id) => {
 		const escaped = id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-		return new RegExp(`(?<![$\\w])${escaped}(?![$\\w])`).test(code);
+		return new RegExp(`(?<![$\\w])${escaped}(?![$\\w])`).test(body);
 	});
 	return !referencesParam;
 }
 
-function stripStringLiterals(source: string): string {
-	// Remove '...' , "..." and `...` literal contents (handling escapes) so their
-	// text is not scanned as code. Kept intentionally simple: replaces each
-	// literal with an empty pair, which is sufficient for keyword/identifier
-	// presence checks.
-	return source
-		.replace(/'(?:\\.|[^'\\])*'/g, "''")
-		.replace(/"(?:\\.|[^"\\])*"/g, '""')
-		.replace(/`(?:\\.|[^`\\])*`/g, "``");
+/**
+ * Return a same-length copy of `source` in which every character that is NOT
+ * executable code is replaced by whitespace (newlines preserved), so index
+ * positions are stable. Blanked regions: `//` line comments, `/* *\/` block
+ * comments, `'...'` / `"..."` strings, `` `...` `` template TEXT, and `/.../ `
+ * regex literals. Template `${ ... }` EXPRESSIONS are kept as code, since a
+ * real assertion may reference its parameter only inside an interpolation.
+ *
+ * This single-pass lexer replaces the earlier ad-hoc comment/string strippers:
+ * running every structural, keyword, and identifier check on the code view
+ * closes the whole class of "lexical form fools the matcher" bugs (regex `//`,
+ * `throw` in a string, `$ctx` params, params used only in `${...}`).
+ */
+function maskToCodeView(source: string): string {
+	const out = source.split("");
+	const n = source.length;
+	const blank = (from: number, to: number) => {
+		for (let k = from; k < to && k < n; k++) {
+			out[k] = source[k] === "\n" ? "\n" : " ";
+		}
+	};
+	// Blank template-literal TEXT starting at index `from` (already past the
+	// opening backtick or a `}`). Stops after the closing backtick (returns
+	// {next, opened:false}) or at a `${` (returns {next, opened:true}) so the
+	// caller can treat the following interpolation as code.
+	const maskTemplateText = (from: number): { next: number; opened: boolean } => {
+		let k = from;
+		while (k < n) {
+			if (source[k] === "\\") {
+				out[k] = " ";
+				if (k + 1 < n) out[k + 1] = " ";
+				k += 2;
+				continue;
+			}
+			if (source[k] === "`") {
+				out[k] = " ";
+				return { next: k + 1, opened: false };
+			}
+			if (source[k] === "$" && source[k + 1] === "{") {
+				out[k] = " ";
+				out[k + 1] = " ";
+				return { next: k + 2, opened: true };
+			}
+			out[k] = source[k] === "\n" ? "\n" : " ";
+			k++;
+		}
+		return { next: k, opened: false };
+	};
+	// A `/` begins a regex literal (not division) only in expression/prefix
+	// position — i.e. when the PREVIOUS token does not end a value. Tracking the
+	// previous token (not just the previous char) is required because keywords
+	// like `return`/`typeof`/`void` end in a letter yet are followed by a regex,
+	// while identifiers/`)`/`]`/numbers/strings end a value and are followed by
+	// division. Transpilers (e.g. bun inlining `const ok = /re/; return ok`)
+	// routinely produce `return /re/.test(...)`, so this distinction is load-
+	// bearing, not theoretical.
+	const EXPR_KEYWORDS = new Set([
+		"return",
+		"typeof",
+		"instanceof",
+		"in",
+		"of",
+		"case",
+		"delete",
+		"void",
+		"do",
+		"else",
+		"yield",
+		"await",
+		"new",
+	]);
+	// "value" = previous token ends an expression (identifier, number, string,
+	// `)`, `]`, regex, template, value keyword) → a following `/` is division.
+	// "op" = previous token is an operator/opener/expression-keyword → a
+	// following `/` starts a regex.
+	let prevTok: "value" | "op" | "" = "";
+	const tmplStack: number[] = [];
+	let depth = 0;
+	let i = 0;
+	while (i < n) {
+		const c = source[i];
+		const c2 = source[i + 1];
+		if (c === "/" && c2 === "/") {
+			let j = i;
+			while (j < n && source[j] !== "\n") j++;
+			blank(i, j);
+			i = j;
+			continue;
+		}
+		if (c === "/" && c2 === "*") {
+			let j = i + 2;
+			while (j < n && !(source[j] === "*" && source[j + 1] === "/")) j++;
+			j = Math.min(j + 2, n);
+			blank(i, j);
+			i = j;
+			continue;
+		}
+		if (c === "/") {
+			if (prevTok !== "value") {
+				let j = i + 1;
+				let inClass = false;
+				let ok = false;
+				while (j < n) {
+					const rc = source[j];
+					if (rc === "\\") {
+						j += 2;
+						continue;
+					}
+					if (rc === "\n") break;
+					if (rc === "[") inClass = true;
+					else if (rc === "]") inClass = false;
+					else if (rc === "/" && !inClass) {
+						j++;
+						ok = true;
+						break;
+					}
+					j++;
+				}
+				if (ok) {
+					while (j < n && /[a-z]/i.test(source[j])) j++;
+					blank(i, j);
+					prevTok = "value";
+					i = j;
+					continue;
+				}
+			}
+			prevTok = "op";
+			i++;
+			continue;
+		}
+		if (c === "'" || c === '"') {
+			let j = i + 1;
+			while (j < n && source[j] !== c) {
+				if (source[j] === "\\") j += 2;
+				else j++;
+			}
+			j = Math.min(j + 1, n);
+			blank(i, j);
+			prevTok = "value";
+			i = j;
+			continue;
+		}
+		if (c === "`") {
+			out[i] = " ";
+			const { next, opened } = maskTemplateText(i + 1);
+			i = next;
+			if (opened) {
+				tmplStack.push(depth);
+				depth++;
+				prevTok = "op";
+			} else {
+				prevTok = "value";
+			}
+			continue;
+		}
+		if (c === "{") {
+			depth++;
+			prevTok = "op";
+			i++;
+			continue;
+		}
+		if (c === "}") {
+			if (tmplStack.length > 0 && depth - 1 === tmplStack[tmplStack.length - 1]) {
+				// Closes a `${...}` interpolation → blank it and resume the
+				// enclosing template text.
+				tmplStack.pop();
+				depth--;
+				out[i] = " ";
+				const { next, opened } = maskTemplateText(i + 1);
+				i = next;
+				if (opened) {
+					tmplStack.push(depth);
+					depth++;
+					prevTok = "op";
+				} else {
+					prevTok = "value";
+				}
+				continue;
+			}
+			depth--;
+			prevTok = "value";
+			i++;
+			continue;
+		}
+		// Identifier or keyword.
+		if (/[A-Za-z_$]/.test(c)) {
+			let j = i + 1;
+			while (j < n && /[\w$]/.test(source[j])) j++;
+			const word = source.slice(i, j);
+			prevTok = EXPR_KEYWORDS.has(word) ? "op" : "value";
+			i = j;
+			continue;
+		}
+		// Numeric literal.
+		if (/[0-9]/.test(c)) {
+			let j = i + 1;
+			while (j < n && /[\w.]/.test(source[j])) j++;
+			prevTok = "value";
+			i = j;
+			continue;
+		}
+		if (!/\s/.test(c)) {
+			prevTok = c === ")" || c === "]" ? "value" : "op";
+		}
+		i++;
+	}
+	return out.join("");
 }
 
 function isVacuousBlockAssertionBody(body: string): boolean {
-	const normalized = stripComments(body).replace(/\s+/g, "");
+	const normalized = body.replace(/\s+/g, "");
 	return (
 		normalized === "" ||
 		/^return(?:;|undefined;?|void0;?|\(void0\);?|\{\};?|\(\{\}\);?|Promise\.resolve\((?:|undefined|void0|\(void0\)|\{\}|\(\{\}\))\);?)$/.test(
@@ -2269,21 +2460,13 @@ function isVacuousBlockAssertionBody(body: string): boolean {
 }
 
 function isVacuousConciseAssertionBody(body: string): boolean {
-	const normalized = stripComments(body).replace(/\s+/g, "");
+	const normalized = body.replace(/\s+/g, "");
 	return (
 		normalized === "" ||
 		/^(?:undefined|void0|\(void0\)|\{\}|\(\{\}\)|Promise\.resolve\((?:|undefined|void0|\(void0\)|\{\}|\(\{\}\))\))$/.test(
 			normalized,
 		)
 	);
-}
-
-function stripComments(source: string): string {
-	return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/.*$/gm, "");
-}
-
-function stripBlockComments(source: string): string {
-	return source.replace(/\/\*[\s\S]*?\*\//g, "");
 }
 
 function scoreSmoke(

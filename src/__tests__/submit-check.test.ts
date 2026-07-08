@@ -1115,6 +1115,47 @@ ${assertionLines(21)}
 		expect(check?.points).toBe(15);
 	});
 
+	it("passes assertions that reference the param only inside a regex or template expression", async () => {
+		// Regression (token-aware lexer): a `return /re/.test(param)` (the shape a
+		// transpiler may inline) and a `${param}` interpolation must both count as
+		// real parameter references. A `param.a / param.b` division must not be
+		// mistaken for a regex literal that swallows the reference.
+		const dir = makeProviderDir(
+			"submit-lexer-edge-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [
+          {
+            name: "url shape",
+            input: { q: "btc" },
+            assertions: ({ data }) => {
+              return /^https?:\\/\\//.test(data.url) ? undefined : { status: "degraded" };
+            },
+          },
+          {
+            name: "ratio",
+            input: { q: "eth" },
+            assertions: ({ data }) => {
+              return data.a / data.b > 1 ? undefined : { status: "degraded" };
+            },
+          },
+          {
+            name: "template",
+            input: { q: "sol" },
+            assertions: (ctx) =>
+              \`\${ctx.status}\` === "200" ? undefined : { status: "degraded" },
+          },
+        ],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
 	it("blocks only operations whose health cases are all vacuous", async () => {
 		const source = validProviderSource().replace(
 			"    },\n  },\n});",
