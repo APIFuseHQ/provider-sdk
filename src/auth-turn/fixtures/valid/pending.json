@@ -1,0 +1,5 @@
+{
+	"kind": "pending",
+	"turnId": "credentials.noPendingChallenge",
+	"hintKey": "auth.challenge.pending"
+}

@@ -1,0 +1,14 @@
+{
+	"kind": "form",
+	"turnId": "fixture.form",
+	"hint": "Provide the required input to continue.",
+	"data": {},
+	"expectedInput": {
+		"type": "object",
+		"required": ["apiKey"],
+		"properties": {
+			"apiKey": { "type": "string" }
+		},
+		"x-apifuse-field-order": ["apiKey"]
+	}
+}

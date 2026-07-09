@@ -1,0 +1,8 @@
+{
+	"kind": "abort",
+	"turnId": "fixture.abort",
+	"hint": "OAuth flow aborted.",
+	"data": {
+		"code": "flow_expired"
+	}
+}

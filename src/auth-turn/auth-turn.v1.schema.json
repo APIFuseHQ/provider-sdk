@@ -1,0 +1,89 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://apifuse.com/contracts/auth-turn/v1",
+	"title": "APIFuse AuthTurn envelope v1",
+	"description": "Protocol message exchanged during auth.flow ceremonies. kind is an open string; known kinds are tooling metadata, not a wire constraint.",
+	"type": "object",
+	"additionalProperties": false,
+	"required": ["kind", "turnId"],
+	"properties": {
+		"kind": {
+			"type": "string",
+			"minLength": 1,
+			"description": "Open turn kind. Known kinds are listed in the TURN_KINDS registry; unknown kinds remain valid on the wire."
+		},
+		"turnId": {
+			"type": "string",
+			"minLength": 1,
+			"description": "Provider-scoped identifier of this turn."
+		},
+		"expiresAt": {
+			"type": "string",
+			"minLength": 1,
+			"description": "Turn expiry timestamp as an ISO 8601 / RFC 3339 string."
+		},
+		"data": {
+			"type": "object",
+			"additionalProperties": true,
+			"description": "Kind-specific payload. Terminal kinds carry the payloads described in $defs."
+		},
+		"expectedInput": {
+			"type": "object",
+			"additionalProperties": true,
+			"description": "JSON Schema describing the input expected next."
+		},
+		"hint": {
+			"type": "string",
+			"description": "Deprecated but load-bearing human-readable hint materialized from provider locale catalogs."
+		},
+		"hintKey": {
+			"type": "string",
+			"description": "Provider locale catalog key for the turn hint."
+		},
+		"timing": {
+			"type": "object",
+			"additionalProperties": false,
+			"description": "Client pacing guidance for poll-style turns.",
+			"properties": {
+				"suggestedPollIntervalMs": {
+					"type": "number",
+					"minimum": 1
+				},
+				"maxWaitMs": {
+					"type": "number",
+					"minimum": 1
+				}
+			}
+		}
+	},
+	"$defs": {
+		"completeTurnData": {
+			"title": "Terminal payload for kind \"complete\"",
+			"description": "data payload of a complete turn. The gateway extracts data.credential for persistence; complete turns are never echoed to browsers.",
+			"type": "object",
+			"additionalProperties": true,
+			"required": ["credential"],
+			"properties": {
+				"credential": {
+					"type": "object",
+					"additionalProperties": true
+				},
+				"metadata": {
+					"type": "object",
+					"additionalProperties": true
+				}
+			}
+		},
+		"abortTurnData": {
+			"title": "Terminal payload for kind \"abort\"",
+			"description": "data payload of an abort turn. code, when present, is the machine-readable abort reason.",
+			"type": "object",
+			"additionalProperties": true,
+			"properties": {
+				"code": {
+					"type": "string"
+				}
+			}
+		}
+	}
+}

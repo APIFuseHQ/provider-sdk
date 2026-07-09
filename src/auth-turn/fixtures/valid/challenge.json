@@ -1,0 +1,17 @@
+{
+	"kind": "challenge",
+	"turnId": "fixture.challenge",
+	"hint": "Complete the WebAuthn prompt in your browser.",
+	"expiresAt": "2026-01-01T00:00:00.000Z",
+	"data": {
+		"challenge": "fixture-challenge-not-real",
+		"rpId": "example.com"
+	},
+	"expectedInput": {
+		"type": "object",
+		"required": ["attestation"],
+		"properties": {
+			"attestation": { "type": "object" }
+		}
+	}
+}

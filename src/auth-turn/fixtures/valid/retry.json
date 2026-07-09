@@ -1,0 +1,8 @@
+{
+	"kind": "retry",
+	"turnId": "fixture.retry",
+	"hint": "OAuth token exchange failed: OAuth callback payload is invalid.",
+	"data": {
+		"error": "OAuth callback payload is invalid."
+	}
+}

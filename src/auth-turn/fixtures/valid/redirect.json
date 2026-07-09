@@ -1,0 +1,16 @@
+{
+	"kind": "redirect",
+	"turnId": "fixture.redirect",
+	"hint": "Open the provider authorization page to continue.",
+	"data": {
+		"url": "https://auth.example.com/authorize?state=fixture-state"
+	},
+	"expectedInput": {
+		"type": "object",
+		"required": ["code", "state"],
+		"properties": {
+			"code": { "type": "string" },
+			"state": { "type": "string" }
+		}
+	}
+}

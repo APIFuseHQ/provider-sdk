@@ -701,6 +701,14 @@ export interface ProviderHealthMonitorConfig {
 	serviceAccount?: string;
 }
 
+/**
+ * New name for `ProviderHealthMonitorConfig` as part of the health dependency
+ * inversion (`healthMonitor` → `healthProbe`). Both provider-level fields are
+ * accepted transitionally with identical validation; declaring both is a
+ * `ValidationError`.
+ */
+export type ProviderHealthProbeConfig = ProviderHealthMonitorConfig;
+
 export interface HealthMonitorProbeOverride {
 	/** Optional runtime interval override as a positive `ms`-style duration string. */
 	interval?: ProbeInterval;
@@ -1812,5 +1820,7 @@ export interface ProviderDefinition {
 	meta: ProviderMeta;
 	operations: Record<string, OperationDefinition<SchemaLike, SchemaLike>>;
 	healthMonitor?: ProviderHealthMonitorConfig;
+	/** Transitional alias for `healthMonitor`; `defineProvider` mirrors both. */
+	healthProbe?: ProviderHealthProbeConfig;
 	healthJourneys?: readonly HealthJourneyDefinition[];
 }

@@ -1,0 +1,13 @@
+{
+	"kind": "complete",
+	"turnId": "fixture.complete",
+	"hint": "OAuth flow completed.",
+	"data": {
+		"credential": {
+			"accessToken": "fixture-fake-access-token-not-a-secret"
+		},
+		"metadata": {
+			"scope": "read"
+		}
+	}
+}

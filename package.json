@@ -1,5 +1,5 @@
 {
-	"version": "2.1.0-beta.22",
+	"version": "2.2.0-beta.0",
 	"name": "@apifuse/provider-sdk",
 	"private": false,
 	"type": "module",
@@ -50,6 +50,12 @@
 			"import": "./dist/contract.js",
 			"default": "./dist/contract.js"
 		},
+		"./auth-turn": {
+			"types": "./dist/auth-turn/index.d.ts",
+			"import": "./dist/auth-turn/index.js",
+			"default": "./dist/auth-turn/index.js"
+		},
+		"./auth-turn/auth-turn.v1.schema.json": "./dist/auth-turn/auth-turn.v1.schema.json",
 		"./server": {
 			"types": "./dist/server/index.d.ts",
 			"import": "./dist/server/index.js",
@@ -77,7 +83,7 @@
 		"pack:smoke": "bun run build && bun bin/apifuse-pack-smoke.ts",
 		"release:guard": "bun scripts/guard-release-pr.ts",
 		"format:check": "biome format .",
-		"build": "tsgo -p tsconfig.build.json && rm -rf dist/cli/templates && cp -R src/cli/templates dist/cli/templates"
+		"build": "tsgo -p tsconfig.build.json && rm -rf dist/cli/templates && cp -R src/cli/templates dist/cli/templates && rm -rf dist/auth-turn/fixtures && cp -R src/auth-turn/fixtures dist/auth-turn/fixtures && cp src/auth-turn/auth-turn.v1.schema.json dist/auth-turn/auth-turn.v1.schema.json"
 	},
 	"devDependencies": {
 		"@biomejs/biome": "^2.5.0",
