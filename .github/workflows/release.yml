@@ -70,3 +70,60 @@ jobs:
           else
             gh release create "$TAG" --title "$TAG" --generate-notes
           fi
+      - name: Notify monorepo (provider_sdk_released dispatch)
+        # Publish already happened: a dispatch failure must not fail the
+        # release. The monorepo falls back to a manual bump PR in that case.
+        continue-on-error: true
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOPPLER_TOKEN}" ]; then
+            echo "::warning::DOPPLER_TOKEN secret missing; skipping provider_sdk_released dispatch to the monorepo. Open the bump PR manually."
+            exit 1
+          fi
+          VERSION="$(node -p "require('./package.json').version")"
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::warning::package.json version is not exact semver ($VERSION); skipping dispatch."
+            exit 1
+          fi
+          if [[ "$RELEASE_BRANCH" == release/beta-* ]]; then
+            DIST_TAG="beta"
+          else
+            DIST_TAG="latest"
+          fi
+          payload=$(curl -fsS \
+            -H "Authorization: Bearer ${DOPPLER_TOKEN}" \
+            -H "Accept: application/json" \
+            "https://api.doppler.com/v3/configs/config/secrets/download?project=apifuse&config=prd&format=json&include_dynamic_secrets=false")
+          app_id=$(jq -er '.APIFUSE__BOUNTY__GITHUB_APP_ID // empty' <<<"${payload}")
+          private_key=$(jq -er '.APIFUSE__BOUNTY__GITHUB_APP_PRIVATE_KEY // empty' <<<"${payload}")
+          if [ -z "${app_id}" ] || [ -z "${private_key}" ]; then
+            echo "::warning::GitHub App credentials missing in Doppler; skipping dispatch."
+            exit 1
+          fi
+          echo "::add-mask::${private_key}"
+          now=$(date +%s)
+          header=$(printf '{"alg":"RS256","typ":"JWT"}' | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+          claims=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now - 60))" "$((now + 540))" "${app_id}" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+          key_file=$(mktemp)
+          printf '%s' "${private_key}" > "${key_file}"
+          signature=$(printf '%s.%s' "${header}" "${claims}" | openssl dgst -sha256 -sign "${key_file}" -binary | openssl base64 -A | tr '+/' '-_' | tr -d '=')
+          rm -f "${key_file}"
+          jwt="${header}.${claims}.${signature}"
+          installation_id=$(curl -fsS -H "Authorization: Bearer ${jwt}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/APIFuseHQ/apifuse/installation" | jq -er '.id')
+          app_token=$(curl -fsS -X POST -H "Authorization: Bearer ${jwt}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/app/installations/${installation_id}/access_tokens" | jq -er '.token')
+          echo "::add-mask::${app_token}"
+          jq -n --arg version "$VERSION" --arg tag "v$VERSION" --arg dist_tag "$DIST_TAG" \
+            '{event_type: "provider_sdk_released", client_payload: {version: $version, tag: $tag, dist_tag: $dist_tag}}' |
+          curl -fsS -X POST \
+            -H "Authorization: Bearer ${app_token}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/APIFuseHQ/apifuse/dispatches" \
+            -d @-
+          echo "Dispatched provider_sdk_released version=$VERSION dist_tag=$DIST_TAG to APIFuseHQ/apifuse"
