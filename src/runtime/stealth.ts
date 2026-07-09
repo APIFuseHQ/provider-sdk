@@ -10,19 +10,17 @@ import {
 	resolveProxyConfigAsync,
 	SMARTPROXY_MAX_POOL_SIZE,
 } from "../config/loader";
-import { ProviderError, SDKError, TransportError } from "../errors";
+import { SDKError, TransportError } from "../errors";
 import { getStealthProfile } from "../stealth/profiles";
 import type {
 	CookieJar,
 	HttpMethod,
-	HttpRetryOptions,
 	StealthClient,
 	StealthFetchOptions,
 	StealthRedirectHop,
 	StealthResponse,
 	StealthSession,
 } from "../types";
-import { HttpRetryPreset, HttpRetryUnsafeMethodPolicy } from "../types";
 import {
 	createProxyAuthIpDeniedError,
 	createProxyEdgeAuthRejectedError,
@@ -35,10 +33,17 @@ import {
 	isProxyPoolRefreshableError,
 	isProxyPoolStaleMessage,
 	isProxyPoolStaleStatus,
-	PROXY_AUTH_IP_DENIED_CODE,
 	PROXY_EDGE_AUTH_REJECTED_CODE,
 	PROXY_POOL_STALE_CODE,
 } from "./proxy-errors";
+import {
+	computeProxyAttemptIndex,
+	computeProxyTransportRetryDelayMs,
+	createDefaultProxyTransportRetryOptions,
+	normalizeProxyTransportRetryOptions,
+	shouldRetryProxyTransportAttempt,
+	validateUnsafeProxyTransportRetryMethods,
+} from "./proxy-retry-policy";
 import { appendQueryParams } from "./request-options";
 
 const DEFAULT_PROFILE = "chrome-146";
@@ -53,31 +58,7 @@ const PROXY_CONNECT_FAILURE_BODY_PATTERN =
 	/\bproxy\b.*\b(non[\s-]?200|connect|tunnel)|\bconnect\b.*\bproxy\b|\btunnel\b/i;
 const PROXY_AUTH_DIAGNOSTIC_URL = "http://example.com/";
 const PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS = 5_000;
-const DEFAULT_STEALTH_RETRY_METHODS = ["GET", "HEAD", "OPTIONS"] as const;
-const DEFAULT_STEALTH_RETRY_ERROR_CODES = [
-	PROXY_CONNECT_FAILURE_CODE,
-	"transport_network_error",
-	"transport_timeout",
-] as const;
-const RATE_LIMIT_STEALTH_RETRY_ERROR_CODES = ["transport_timeout"] as const;
-const KNOWN_STEALTH_RETRY_METHODS = new Set([
-	"GET",
-	"HEAD",
-	"POST",
-	"PUT",
-	"DELETE",
-	"OPTIONS",
-	"TRACE",
-	"PATCH",
-]);
-const UNSAFE_STEALTH_RETRY_METHODS = new Set([
-	"POST",
-	"PUT",
-	"PATCH",
-	"DELETE",
-	"TRACE",
-]);
-const MAX_STEALTH_RETRY_ATTEMPTS = 8;
+const STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES = [PROXY_CONNECT_FAILURE_CODE] as const;
 
 export type StealthClientOptions = ProxyResolutionOptions & {
 	warn?: (message: string) => void;
@@ -138,12 +119,6 @@ type StealthTransportResponse = Pick<
 type StealthMethod = NonNullable<ImpitRequestInit["method"]>;
 type StealthRequestInit = ImpitRequestInit & {
 	redirect?: NonNullable<StealthFetchOptions["redirect"]>;
-};
-type NormalizedStealthRetryOptions = {
-	attempts: number;
-	methods: readonly string[];
-	errorCodes: readonly string[];
-	unsafeMethodPolicy: HttpRetryOptions["unsafeMethodPolicy"];
 };
 
 function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
@@ -303,9 +278,7 @@ function normalizeHeaders(
 function hasOwn(object: object, key: string): boolean {
 	return Object.hasOwn(object, key);
 }
-function toImpitCookieJar(
-	cookieJar: CookieJarImpl,
-): NonNullable<ImpitOptions["cookieJar"]> {
+function toImpitCookieJar(cookieJar: CookieJarImpl): NonNullable<ImpitOptions["cookieJar"]> {
 	return {
 		setCookie(cookie: string, _url: string, cb?: (error?: unknown) => void) {
 			cookieJar.setFromCookieStrings([cookie]);
@@ -322,10 +295,8 @@ function assertNoUnsupportedFingerprintOverrides(options: unknown): void {
 	const unsupported: string[] = [];
 	if (hasOwn(options, "headerOrder")) unsupported.push("headerOrder");
 	const stealth = options.stealth;
-	if (isRecord(stealth) && hasOwn(stealth, "ja3"))
-		unsupported.push("stealth.ja3");
-	if (isRecord(stealth) && hasOwn(stealth, "h2"))
-		unsupported.push("stealth.h2");
+	if (isRecord(stealth) && hasOwn(stealth, "ja3")) unsupported.push("stealth.ja3");
+	if (isRecord(stealth) && hasOwn(stealth, "h2")) unsupported.push("stealth.h2");
 	if (unsupported.length === 0) return;
 
 	throw new SDKError(
@@ -333,9 +304,7 @@ function assertNoUnsupportedFingerprintOverrides(options: unknown): void {
 	);
 }
 
-function responseHeadersToRecord(
-	headers: Headers,
-): Record<string, string | string[] | undefined> {
+function responseHeadersToRecord(headers: Headers): Record<string, string | string[] | undefined> {
 	const record: Record<string, string> = {};
 	for (const [name, value] of headers.entries()) record[name] = value;
 	return record;
@@ -370,9 +339,7 @@ export async function normalizeResponse(
 	requestUrl?: string,
 ): Promise<StealthResponse> {
 	const headers = Object.fromEntries(response.headers.entries());
-	const cookies = new CookieJarImpl(
-		setCookieHeadersFromResponse(response.headers),
-	);
+	const cookies = new CookieJarImpl(setCookieHeadersFromResponse(response.headers));
 	const bodyBytes = await response.arrayBuffer();
 	const body = new TextDecoder().decode(bodyBytes);
 
@@ -422,189 +389,11 @@ function isPolicyManagedProxy(options: StealthClientOptions): boolean {
 	return Boolean(policy && typeof policy === "object");
 }
 
-function isRetrySafeStealthMethod(method: StealthMethod): boolean {
-	return method === "GET" || method === "HEAD" || method === "OPTIONS";
+function isProxyConnectFailureResponse(response: StealthTransportResponse, body: string): boolean {
+	return response.status === 0 && PROXY_CONNECT_FAILURE_BODY_PATTERN.test(body ?? "");
 }
 
-function createStealthRetryOptions(
-	preset: HttpRetryPreset,
-): NormalizedStealthRetryOptions {
-	switch (preset) {
-		case HttpRetryPreset.Off:
-			return {
-				attempts: 1,
-				methods: DEFAULT_STEALTH_RETRY_METHODS,
-				errorCodes: DEFAULT_STEALTH_RETRY_ERROR_CODES,
-				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.Reject,
-			};
-		case HttpRetryPreset.AggressiveRead:
-			return {
-				attempts: 4,
-				methods: DEFAULT_STEALTH_RETRY_METHODS,
-				errorCodes: DEFAULT_STEALTH_RETRY_ERROR_CODES,
-				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.Reject,
-			};
-		case HttpRetryPreset.RateLimitAware:
-			return {
-				attempts: 3,
-				methods: DEFAULT_STEALTH_RETRY_METHODS,
-				errorCodes: RATE_LIMIT_STEALTH_RETRY_ERROR_CODES,
-				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.Reject,
-			};
-		case HttpRetryPreset.SafeRead:
-		case HttpRetryPreset.TransportTransient:
-			return {
-				attempts: 3,
-				methods: DEFAULT_STEALTH_RETRY_METHODS,
-				errorCodes: DEFAULT_STEALTH_RETRY_ERROR_CODES,
-				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.Reject,
-			};
-	}
-	throw new ProviderError(`Unknown stealth retry preset: ${preset}`, {
-		code: "retry_invalid_policy",
-	});
-}
-
-function normalizeStealthRetryOptions(
-	retry: StealthFetchOptions["retry"],
-): NormalizedStealthRetryOptions | undefined {
-	if (retry === undefined) return undefined;
-	if (retry === false) return createStealthRetryOptions(HttpRetryPreset.Off);
-	if (retry === true)
-		return createStealthRetryOptions(HttpRetryPreset.TransportTransient);
-	if (typeof retry === "string") {
-		if (!Object.values(HttpRetryPreset).includes(retry)) {
-			throw new ProviderError(`Unknown stealth retry preset: ${retry}`, {
-				code: "retry_invalid_policy",
-			});
-		}
-		return createStealthRetryOptions(retry);
-	}
-	if (typeof retry !== "object" || retry === null || Array.isArray(retry)) {
-		throw new ProviderError("Stealth retry policy must be a plain object", {
-			code: "retry_invalid_policy",
-		});
-	}
-	if (
-		retry.unsafeMethodPolicy !== undefined &&
-		!Object.values(HttpRetryUnsafeMethodPolicy).includes(
-			retry.unsafeMethodPolicy,
-		)
-	) {
-		throw new ProviderError(
-			`Unknown stealth retry unsafe method policy: ${String(retry.unsafeMethodPolicy)}`,
-			{ code: "retry_invalid_policy" },
-		);
-	}
-	if (retry.methods !== undefined) {
-		if (!Array.isArray(retry.methods)) {
-			throw new ProviderError("Stealth retry methods must be an array", {
-				code: "retry_invalid_policy",
-			});
-		}
-		const unknownMethods = retry.methods
-			.map((method) => (typeof method === "string" ? method.toUpperCase() : ""))
-			.filter((method) => !KNOWN_STEALTH_RETRY_METHODS.has(method));
-		if (unknownMethods.length > 0) {
-			throw new ProviderError(
-				`Unknown stealth retry method(s): ${unknownMethods.join(", ")}`,
-				{ code: "retry_invalid_policy" },
-			);
-		}
-	}
-	if (retry.errorCodes !== undefined) {
-		if (
-			!Array.isArray(retry.errorCodes) ||
-			retry.errorCodes.some((errorCode) => typeof errorCode !== "string")
-		) {
-			throw new ProviderError(
-				"Stealth retry errorCodes must contain only strings",
-				{ code: "retry_invalid_policy" },
-			);
-		}
-	}
-
-	const base = createStealthRetryOptions(
-		retry.preset ?? HttpRetryPreset.TransportTransient,
-	);
-	const attempts =
-		retry.attempts === undefined || !Number.isFinite(retry.attempts)
-			? base.attempts
-			: Math.max(
-					1,
-					Math.min(MAX_STEALTH_RETRY_ATTEMPTS, Math.floor(retry.attempts)),
-				);
-	const normalized: NormalizedStealthRetryOptions = {
-		attempts,
-		methods:
-			retry.methods?.map((method) => method.toUpperCase()) ?? base.methods,
-		errorCodes: retry.errorCodes ?? base.errorCodes,
-		unsafeMethodPolicy: retry.unsafeMethodPolicy ?? base.unsafeMethodPolicy,
-	};
-
-	if (
-		normalized.unsafeMethodPolicy !==
-		HttpRetryUnsafeMethodPolicy.AllowExplicitUnsafe
-	) {
-		const unsafeMethods = normalized.methods.filter((method) =>
-			UNSAFE_STEALTH_RETRY_METHODS.has(method.toUpperCase()),
-		);
-		if (unsafeMethods.length > 0) {
-			throw new ProviderError(
-				`Stealth retry methods include unsafe method(s): ${unsafeMethods.join(", ")}`,
-				{ code: "retry_unsafe_method" },
-			);
-		}
-	}
-
-	return normalized;
-}
-
-function isExplicitStealthRetryAllowed(
-	method: StealthMethod,
-	error: TransportError,
-	retryOptions: NormalizedStealthRetryOptions | undefined,
-): boolean {
-	if (!retryOptions || retryOptions.attempts <= 1) return false;
-	return (
-		retryOptions.methods.includes(method.toUpperCase()) &&
-		retryOptions.errorCodes.includes(proxyAttemptErrorCode(error))
-	);
-}
-
-function isRetryableProxyTransportError(error: unknown): boolean {
-	if (error instanceof TransportError) {
-		if (error.code === PROXY_AUTH_IP_DENIED_CODE) {
-			return false;
-		}
-		return (
-			error.code === PROXY_CONNECT_FAILURE_CODE ||
-			error.code === "transport_network_error" ||
-			error.code === "transport_timeout"
-		);
-	}
-
-	if (error instanceof SDKError) {
-		return false;
-	}
-
-	const message = error instanceof Error ? error.message : String(error);
-	return /\bproxy\b|\bnon[\s-]?200\b|\bconnect\b|\btunnel\b/i.test(message);
-}
-
-function isProxyConnectFailureResponse(
-	response: StealthTransportResponse,
-	body: string,
-): boolean {
-	return (
-		response.status === 0 && PROXY_CONNECT_FAILURE_BODY_PATTERN.test(body ?? "")
-	);
-}
-
-function createProxyConnectFailureError(
-	body: string,
-	cause?: Error,
-): TransportError {
+function createProxyConnectFailureError(body: string, cause?: Error): TransportError {
 	const bodyExcerpt = (body ?? "").trim().slice(0, 1_000);
 	if (isProxyAuthIpDeniedMessage(bodyExcerpt)) {
 		return createProxyAuthIpDeniedError(cause);
@@ -613,10 +402,7 @@ function createProxyConnectFailureError(
 		return createProxyEdgeAuthRejectedError(cause);
 	}
 	if (isProxyPoolStaleMessage(bodyExcerpt)) {
-		return createProxyPoolStaleError(
-			bodyExcerpt.includes("512") ? 512 : 509,
-			cause,
-		);
+		return createProxyPoolStaleError(bodyExcerpt.includes("512") ? 512 : 509, cause);
 	}
 	return new TransportError(bodyExcerpt || "Proxy CONNECT failed", {
 		code: PROXY_CONNECT_FAILURE_CODE,
@@ -723,33 +509,20 @@ function normalizeStealthTransportError(error: unknown): TransportError {
 	}
 
 	if (isProxyAuthIpDeniedMessage(message)) {
-		return createProxyAuthIpDeniedError(
-			error instanceof Error ? error : undefined,
-		);
+		return createProxyAuthIpDeniedError(error instanceof Error ? error : undefined);
 	}
 
 	if (isProxyEdgeAuthRejectedMessage(message)) {
-		return createProxyEdgeAuthRejectedError(
-			error instanceof Error ? error : undefined,
-		);
+		return createProxyEdgeAuthRejectedError(error instanceof Error ? error : undefined);
 	}
 
 	const proxyTunnelStatus = getProxyTunnelStatus(error);
-	if (
-		proxyTunnelStatus !== undefined &&
-		isProxyPoolStaleStatus(proxyTunnelStatus)
-	) {
-		return createProxyPoolStaleError(
-			proxyTunnelStatus,
-			error instanceof Error ? error : undefined,
-		);
+	if (proxyTunnelStatus !== undefined && isProxyPoolStaleStatus(proxyTunnelStatus)) {
+		return createProxyPoolStaleError(proxyTunnelStatus, error instanceof Error ? error : undefined);
 	}
 
 	if (PROXY_CONNECT_FAILURE_BODY_PATTERN.test(message)) {
-		return createProxyConnectFailureError(
-			message,
-			error instanceof Error ? error : undefined,
-		);
+		return createProxyConnectFailureError(message, error instanceof Error ? error : undefined);
 	}
 
 	return new TransportError("Network error", {
@@ -757,6 +530,10 @@ function normalizeStealthTransportError(error: unknown): TransportError {
 		status: 0,
 		cause: error instanceof Error ? error : undefined,
 	});
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function normalizeMethod(method: HttpMethod | string): StealthMethod {
@@ -786,10 +563,7 @@ function isRedirectStatus(status: number): boolean {
 	return [301, 302, 303, 307, 308].includes(status);
 }
 
-function nextRedirectMethod(
-	status: number,
-	method: StealthMethod,
-): StealthMethod {
+function nextRedirectMethod(status: number, method: StealthMethod): StealthMethod {
 	if (status === 303 && method !== "HEAD") return "GET";
 	if ((status === 301 || status === 302) && method === "POST") return "GET";
 	return method;
@@ -842,19 +616,16 @@ function createSessionFetcher(
 		options?: StealthFetchOptions,
 		proxyAttempt?: number,
 	): Promise<ResolvedAttemptProxy> {
-		const rawProxyAttemptOffset = options?.proxyAttemptOffset ?? 0;
-		const proxyAttemptOffset = Number.isFinite(rawProxyAttemptOffset)
-			? Math.max(0, Math.floor(rawProxyAttemptOffset))
-			: 0;
 		const resolvedProxy = await resolveProxyConfigAsync({
 			proxy: options?.proxy ?? clientOptions.proxy,
 			upstream: clientOptions.upstream,
 			apifuseConfig: clientOptions.apifuseConfig,
 			affinityKey: clientOptions.affinityKey,
-			proxyAttempt:
-				proxyAttempt === undefined
-					? proxyAttemptOffset
-					: proxyAttemptOffset + proxyAttempt,
+			proxyAttempt: computeProxyAttemptIndex({
+				baseProxyAttempt: clientOptions.proxyAttempt,
+				proxyAttemptOffset: options?.proxyAttemptOffset,
+				retryAttemptOffset: proxyAttempt,
+			}),
 			telemetry: clientOptions.telemetry,
 		});
 
@@ -874,23 +645,35 @@ function createSessionFetcher(
 		async fetch(url, options: StealthFetchOptions = {}) {
 			const method = normalizeMethod(options.method ?? "GET");
 			const hasExplicitRetryPolicy = options.retry !== undefined;
-			const stealthRetryOptions = normalizeStealthRetryOptions(options.retry);
+			const stealthRetryOptions =
+				normalizeProxyTransportRetryOptions(options.retry, {
+					extraErrorCodes: STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES,
+					label: "Stealth",
+				}) ??
+				(hasExplicitRetryPolicy
+					? undefined
+					: createDefaultProxyTransportRetryOptions({
+							extraErrorCodes: STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES,
+							label: "Stealth",
+						}));
+			if (stealthRetryOptions) {
+				validateUnsafeProxyTransportRetryMethods(stealthRetryOptions, "Stealth");
+			}
 			const hasPolicyProxy = isPolicyManagedProxy(clientOptions);
-			const usesPolicyAllocator =
-				hasPolicyProxy && !options.proxy && !clientOptions.proxy;
-			const maxAttempts = usesPolicyAllocator
-				? Math.max(
-						1,
-						Math.min(
-							MAX_POLICY_PROXY_RETRY_ATTEMPTS,
-							clientOptions.proxyPolicy?.session?.poolSize ??
-								(typeof clientOptions.upstream?.proxy === "object"
-									? clientOptions.upstream.proxy.session?.poolSize
-									: undefined) ??
-								DEFAULT_SMARTPROXY_POOL_SIZE,
-						),
-					)
-				: 1;
+			const usesPolicyAllocator = hasPolicyProxy && !options.proxy && !clientOptions.proxy;
+			const retryAttemptCap = Math.max(1, stealthRetryOptions?.attempts ?? 1);
+			const policyProxyAttemptCap = Math.max(
+				1,
+				Math.min(
+					MAX_POLICY_PROXY_RETRY_ATTEMPTS,
+					clientOptions.proxyPolicy?.session?.poolSize ??
+						(typeof clientOptions.upstream?.proxy === "object"
+							? clientOptions.upstream.proxy.session?.poolSize
+							: undefined) ??
+						DEFAULT_SMARTPROXY_POOL_SIZE,
+				),
+			);
+			const maxAttempts = usesPolicyAllocator ? policyProxyAttemptCap : retryAttemptCap;
 			let lastError: unknown;
 
 			for (
@@ -920,9 +703,7 @@ function createSessionFetcher(
 							...(attemptProxy?.poolIndex === undefined
 								? {}
 								: { poolIndex: attemptProxy.poolIndex }),
-							...(attemptProxy?.proxyHash
-								? { proxyHash: attemptProxy.proxyHash }
-								: {}),
+							...(attemptProxy?.proxyHash ? { proxyHash: attemptProxy.proxyHash } : {}),
 							outcome,
 							...(errorCode ? { errorCode } : {}),
 							...(status === undefined ? {} : { status }),
@@ -933,7 +714,7 @@ function createSessionFetcher(
 						assertNoUnsupportedFingerprintOverrides(options);
 						attemptProxy = await resolveRequestProxy(options, attempt);
 						proxy = attemptProxy.url;
-						if (proxy) {
+						if (proxy && usesPolicyAllocator) {
 							if (attemptedProxies.has(proxy)) {
 								break;
 							}
@@ -941,15 +722,10 @@ function createSessionFetcher(
 						}
 						const ignoreTlsErrors = Boolean(
 							options.stealth?.insecureSkipVerify ??
-								(!hasPolicyProxy &&
-									proxy &&
-									clientOptions.proxyStealth?.insecureSkipVerify),
+								(!hasPolicyProxy && proxy && clientOptions.proxyStealth?.insecureSkipVerify),
 						);
 						const profileName = options.profile ?? defaultProfile;
-						const requestUrl = appendQueryParams(
-							resolveUrl(baseUrl, url),
-							options.params,
-						);
+						const requestUrl = appendQueryParams(resolveUrl(baseUrl, url), options.params);
 						const headers = { ...(options.headers ?? {}) };
 						if (!hasHeader(headers, "Cookie")) {
 							const cookieHeader = cookieJar.toString();
@@ -964,20 +740,14 @@ function createSessionFetcher(
 						if (options.body !== undefined) {
 							requestInit.body = normalizeBody(options.body);
 						}
-						const response = await getClient(
-							profileName,
-							proxy,
-							ignoreTlsErrors,
-						).fetch(requestUrl, requestInit);
-						const normalized = await normalizeResponse(response, requestUrl);
-						cookieJar.setFromCookieStrings(
-							setCookieHeadersFromResponse(response.headers),
+						const response = await getClient(profileName, proxy, ignoreTlsErrors).fetch(
+							requestUrl,
+							requestInit,
 						);
+						const normalized = await normalizeResponse(response, requestUrl);
+						cookieJar.setFromCookieStrings(setCookieHeadersFromResponse(response.headers));
 
-						if (
-							proxy &&
-							isProxyConnectFailureResponse(response, normalized.body)
-						) {
+						if (proxy && isProxyConnectFailureResponse(response, normalized.body)) {
 							throw createProxyConnectFailureError(normalized.body);
 						}
 
@@ -987,10 +757,9 @@ function createSessionFetcher(
 								usesPolicyAllocator &&
 								isProxyEdgeTlsRejectedResponse(
 									response.status,
-									[
-										JSON.stringify(responseHeadersToRecord(response.headers)),
-										normalized.body,
-									].join("\n"),
+									[JSON.stringify(responseHeadersToRecord(response.headers)), normalized.body].join(
+										"\n",
+									),
 								)
 							) {
 								throw createProxyEdgeTlsRejectedError(response.status);
@@ -1011,13 +780,10 @@ function createSessionFetcher(
 						}
 
 						if (response.status >= 400 && options.throwOnHttpError !== false) {
-							throw new TransportError(
-								`Upstream request failed with status ${response.status}`,
-								{
-									code: "upstream_http_error",
-									status: response.status,
-								},
-							);
+							throw new TransportError(`Upstream request failed with status ${response.status}`, {
+								code: "upstream_http_error",
+								status: response.status,
+							});
 						}
 
 						recordProxyAttempt("ok", undefined, response.status);
@@ -1030,11 +796,7 @@ function createSessionFetcher(
 							proxyAttemptStatus(normalizedError),
 						);
 						lastError = normalizedError;
-						if (
-							proxy &&
-							usesPolicyAllocator &&
-							isProxyPoolRefreshableError(normalizedError)
-						) {
+						if (proxy && usesPolicyAllocator && isProxyPoolRefreshableError(normalizedError)) {
 							stalePoolError = normalizedError;
 							if (shouldRunProxyAuthDiagnostic(normalizedError)) {
 								stalePoolDiagnosticProxy = proxy;
@@ -1045,20 +807,21 @@ function createSessionFetcher(
 							break;
 						}
 						if (
-							proxy &&
 							attempt + 1 <
 								(stealthRetryOptions
 									? Math.min(maxAttempts, stealthRetryOptions.attempts)
 									: maxAttempts) &&
-							(!hasExplicitRetryPolicy
-								? isRetrySafeStealthMethod(method)
-								: isExplicitStealthRetryAllowed(
-										method,
-										normalizedError,
-										stealthRetryOptions,
-									)) &&
-							isRetryableProxyTransportError(normalizedError)
+							shouldRetryProxyTransportAttempt({
+								error: normalizedError,
+								explicitRetry: hasExplicitRetryPolicy,
+								method,
+								options: stealthRetryOptions,
+								proxyUsed: Boolean(proxy),
+							})
 						) {
+							if (stealthRetryOptions) {
+								await sleep(computeProxyTransportRetryDelayMs(stealthRetryOptions!, attempt + 1));
+							}
 							continue;
 						}
 						throw normalizedError;
@@ -1126,13 +889,7 @@ function createSessionFetcher(
 				let response: StealthResponse | undefined;
 				const visitedRequests = new Set<string>();
 
-				const {
-					url: _url,
-					maxHops: _maxHops,
-					stopWhen,
-					params,
-					...fetchOptions
-				} = options;
+				const { url: _url, maxHops: _maxHops, stopWhen, params, ...fetchOptions } = options;
 
 				for (let hopIndex = 0; hopIndex <= maxHops; hopIndex += 1) {
 					visitedRequests.add(`${method} ${currentUrl}`);
@@ -1240,22 +997,16 @@ function createSessionFetcher(
 		proxy: string,
 	): Promise<"source_ip_denied" | "edge_auth_rejected" | undefined> {
 		try {
-			const response = await getClient(profileName, proxy, false).fetch(
-				PROXY_AUTH_DIAGNOSTIC_URL,
-				{
-					method: "GET",
-					timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
-				},
-			);
+			const response = await getClient(profileName, proxy, false).fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
+				method: "GET",
+				timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
+			});
 			const normalized = await normalizeResponse(response);
 			return classifyProxyAuthDiagnosticMessage(normalized.body);
 		} catch (error) {
 			const message =
 				error instanceof Error
-					? [
-							error.message,
-							error.cause instanceof Error ? error.cause.message : "",
-						]
+					? [error.message, error.cause instanceof Error ? error.cause.message : ""]
 							.filter(Boolean)
 							.join(" ")
 					: String(error);
@@ -1295,22 +1046,14 @@ export function createStealthClient(
 	clientOptions: StealthClientOptions = {},
 ): StealthClient {
 	const defaultProfile =
-		typeof defaultProfileOrOptions === "string"
-			? defaultProfileOrOptions
-			: DEFAULT_PROFILE;
+		typeof defaultProfileOrOptions === "string" ? defaultProfileOrOptions : DEFAULT_PROFILE;
 	const resolvedClientOptions =
-		typeof defaultProfileOrOptions === "string"
-			? clientOptions
-			: defaultProfileOrOptions;
+		typeof defaultProfileOrOptions === "string" ? clientOptions : defaultProfileOrOptions;
 	let sharedSession: StealthSession | null = null;
 
 	function getSharedSession(): StealthSession {
 		if (!sharedSession) {
-			sharedSession = createSessionFetcher(
-				baseUrl,
-				defaultProfile,
-				resolvedClientOptions,
-			);
+			sharedSession = createSessionFetcher(baseUrl, defaultProfile, resolvedClientOptions);
 		}
 
 		return sharedSession;
@@ -1322,11 +1065,7 @@ export function createStealthClient(
 		},
 		createSession(opts?: { profile?: string }) {
 			const sessionProfile = opts?.profile ?? defaultProfile;
-			return createSessionFetcher(
-				baseUrl,
-				sessionProfile,
-				resolvedClientOptions,
-			);
+			return createSessionFetcher(baseUrl, sessionProfile, resolvedClientOptions);
 		},
 		close() {
 			sharedSession?.close();
