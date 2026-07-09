@@ -96,12 +96,7 @@ class FakeRedis {
 		return Math.max(0, expiresAt - Date.now());
 	}
 
-	async eval(
-		_script: string,
-		_keyCount: number,
-		key: string,
-		token: string,
-	): Promise<number> {
+	async eval(_script: string, _keyCount: number, key: string, token: string): Promise<number> {
 		if ((await this.get(key)) !== token) return 0;
 		return this.del(key);
 	}
@@ -116,9 +111,7 @@ class FakeRedis {
 }
 
 function stealthProxyCalls(): unknown[] {
-	return stealthState.clients.flatMap((client) =>
-		client.calls.map((call) => call.options.proxy),
-	);
+	return stealthState.clients.flatMap((client) => client.calls.map((call) => call.options.proxy));
 }
 
 const nativeFetchCalls: Array<{
@@ -132,20 +125,18 @@ function nativeProxyCalls(): Array<string | undefined> {
 
 function queueNativeFetchResponses(...responses: MockImpitResponse[]): void {
 	const queue = [...responses];
-	global.fetch = mock(
-		async (input: string | URL | Request, init?: RequestInit) => {
-			nativeFetchCalls.push({
-				url: String(input),
-				init: init as RequestInit & { proxy?: string },
-			});
-			const response = queue.shift();
-			if (!response) throw new Error("No queued native response");
-			return new Response(response.body, {
-				headers: response.headers as HeadersInit,
-				status: response.status,
-			});
-		},
-	) as unknown as typeof fetch;
+	global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		nativeFetchCalls.push({
+			url: String(input),
+			init: init as RequestInit & { proxy?: string },
+		});
+		const response = queue.shift();
+		if (!response) throw new Error("No queued native response");
+		return new Response(response.body, {
+			headers: response.headers as HeadersInit,
+			status: response.status,
+		});
+	}) as unknown as typeof fetch;
 }
 
 function queueAllocatorAndNativeResponses(
@@ -153,24 +144,22 @@ function queueAllocatorAndNativeResponses(
 	...responses: MockImpitResponse[]
 ): void {
 	const queue = [...responses];
-	global.fetch = mock(
-		async (input: string | URL | Request, init?: RequestInit) => {
-			const url = String(input);
-			if (url.includes("get-ip-v3")) {
-				return new Response(allocatorBody, { status: 200 });
-			}
-			nativeFetchCalls.push({
-				url,
-				init: init as RequestInit & { proxy?: string },
-			});
-			const response = queue.shift();
-			if (!response) throw new Error("No queued native response");
-			return new Response(response.body, {
-				headers: response.headers as HeadersInit,
-				status: response.status,
-			});
-		},
-	) as unknown as typeof fetch;
+	global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		const url = String(input);
+		if (url.includes("get-ip-v3")) {
+			return new Response(allocatorBody, { status: 200 });
+		}
+		nativeFetchCalls.push({
+			url,
+			init: init as RequestInit & { proxy?: string },
+		});
+		const response = queue.shift();
+		if (!response) throw new Error("No queued native response");
+		return new Response(response.body, {
+			headers: response.headers as HeadersInit,
+			status: response.status,
+		});
+	}) as unknown as typeof fetch;
 }
 
 function toHeaders(headers: MockImpitResponse["headers"]): Headers {
@@ -240,8 +229,7 @@ describe("proxy integration", () => {
 		originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		originalProxySessionId = process.env.APIFUSE__PROXY__SESSION_ID;
 		originalProxySessionDuration = process.env.APIFUSE__PROXY__SESSION_DURATION;
-		originalProxyDefaultLifetime =
-			process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
+		originalProxyDefaultLifetime = process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
 		delete process.env.APIFUSE__PROXY__URL;
 		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		delete process.env.APIFUSE__PROXY__SESSION_ID;
@@ -273,14 +261,12 @@ describe("proxy integration", () => {
 			delete process.env.APIFUSE__PROXY__SESSION_ID;
 		}
 		if (originalProxySessionDuration) {
-			process.env.APIFUSE__PROXY__SESSION_DURATION =
-				originalProxySessionDuration;
+			process.env.APIFUSE__PROXY__SESSION_DURATION = originalProxySessionDuration;
 		} else {
 			delete process.env.APIFUSE__PROXY__SESSION_DURATION;
 		}
 		if (originalProxyDefaultLifetime) {
-			process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES =
-				originalProxyDefaultLifetime;
+			process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES = originalProxyDefaultLifetime;
 		} else {
 			delete process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
 		}
@@ -323,9 +309,7 @@ describe("proxy integration", () => {
 
 		const header = telemetry.toHeaderValue();
 		expect(header).toBeTruthy();
-		const decoded = JSON.parse(
-			Buffer.from(header ?? "", "base64url").toString("utf8"),
-		);
+		const decoded = JSON.parse(Buffer.from(header ?? "", "base64url").toString("utf8"));
 
 		expect(decoded.proxy).toMatchObject({
 			allocatorStatus: 500,
@@ -512,8 +496,7 @@ describe("proxy integration", () => {
 	});
 
 	it("adds sticky sessions to Smartproxy-compatible proxy URLs", () => {
-		process.env.APIFUSE__PROXY__URL =
-			"http://smart-user_area-KR:secret@proxy.smartproxy.net:3120";
+		process.env.APIFUSE__PROXY__URL = "http://smart-user_area-KR:secret@proxy.smartproxy.net:3120";
 		process.env.APIFUSE__PROXY__SESSION_ID = "fixed-session";
 		process.env.APIFUSE__PROXY__SESSION_DURATION = "90";
 
@@ -560,8 +543,7 @@ describe("proxy integration", () => {
 	});
 
 	it("rejects malformed sticky session duration instead of embedding it in the proxy username", () => {
-		process.env.APIFUSE__PROXY__URL =
-			"http://smart-user_area-KR:secret@proxy.smartproxy.net:3120";
+		process.env.APIFUSE__PROXY__URL = "http://smart-user_area-KR:secret@proxy.smartproxy.net:3120";
 		process.env.APIFUSE__PROXY__SESSION_DURATION = "abc";
 
 		expect(() => resolveProxyConfig({ upstream: { proxy: true } })).toThrow(
@@ -570,8 +552,7 @@ describe("proxy integration", () => {
 	});
 
 	it("adds sticky sessions to Decodo proxy URLs", () => {
-		process.env.APIFUSE__PROXY__URL =
-			"http://smart-user_area-KR:secret@gate.decodo.com:7000";
+		process.env.APIFUSE__PROXY__URL = "http://smart-user_area-KR:secret@gate.decodo.com:7000";
 		process.env.APIFUSE__PROXY__SESSION_ID = "fixed-session";
 		process.env.APIFUSE__PROXY__SESSION_DURATION = "90";
 
@@ -625,9 +606,7 @@ describe("proxy integration", () => {
 		expect(allocatorUrl.searchParams.get("app_key")).toBe("redacted-test-key");
 		expect(allocatorUrl.searchParams.get("cc")).toBe("KR");
 		expect(allocatorUrl.searchParams.get("num")).toBe("20");
-		expect(allocatorUrl.searchParams.get("life")).toBe(
-			String(SMARTPROXY_MAX_LIFETIME_MINUTES),
-		);
+		expect(allocatorUrl.searchParams.get("life")).toBe(String(SMARTPROXY_MAX_LIFETIME_MINUTES));
 	});
 
 	it("shares Smartproxy allocator results through Redis across SDK cache resets", async () => {
@@ -810,9 +789,7 @@ describe("proxy integration", () => {
 		expect(first.url).toBe("http://5.78.24.25:31001");
 		expect(second.url).toBe("http://5.78.24.25:31001");
 		expect(allocatorCalls).toBe(1);
-		expect(events).toContainEqual(
-			expect.objectContaining({ cacheStatus: "allocator" }),
-		);
+		expect(events).toContainEqual(expect.objectContaining({ cacheStatus: "allocator" }));
 		expect(events).toContainEqual(
 			expect.objectContaining({ cacheStatus: "lock_wait", cacheHit: true }),
 		);
@@ -824,19 +801,15 @@ describe("proxy integration", () => {
 		const events: unknown[] = [];
 		let allocatorCalls = 0;
 		let allocatorSignal: AbortSignal | undefined;
-		global.fetch = mock(
-			async (_input: string | URL | Request, init?: RequestInit) => {
-				allocatorCalls += 1;
-				allocatorSignal = init?.signal ?? undefined;
-				return await new Promise<Response>((_resolve, reject) => {
-					allocatorSignal?.addEventListener(
-						"abort",
-						() => reject(new Error("allocator aborted")),
-						{ once: true },
-					);
+		global.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+			allocatorCalls += 1;
+			allocatorSignal = init?.signal ?? undefined;
+			return await new Promise<Response>((_resolve, reject) => {
+				allocatorSignal?.addEventListener("abort", () => reject(new Error("allocator aborted")), {
+					once: true,
 				});
-			},
-		) as unknown as typeof fetch;
+			});
+		}) as unknown as typeof fetch;
 
 		const startedAt = Date.now();
 		await expect(
@@ -878,20 +851,18 @@ describe("proxy integration", () => {
 		let allocatorCalls = 0;
 		let allocatorSignal: AbortSignal | undefined;
 		let bodyReadStarted = false;
-		global.fetch = mock(
-			async (_input: string | URL | Request, init?: RequestInit) => {
-				allocatorCalls += 1;
-				allocatorSignal = init?.signal ?? undefined;
-				return {
-					ok: true,
-					status: 200,
-					text: () => {
-						bodyReadStarted = true;
-						return new Promise<string>(() => undefined);
-					},
-				} as Response;
-			},
-		) as unknown as typeof fetch;
+		global.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+			allocatorCalls += 1;
+			allocatorSignal = init?.signal ?? undefined;
+			return {
+				ok: true,
+				status: 200,
+				text: () => {
+					bodyReadStarted = true;
+					return new Promise<string>(() => undefined);
+				},
+			} as Response;
+		}) as unknown as typeof fetch;
 
 		const startedAt = Date.now();
 		await expect(
@@ -942,18 +913,14 @@ describe("proxy integration", () => {
 		const redis = new FakeRedis();
 		__setProxyRedisForTests(redis);
 		let allocatorSignal: AbortSignal | undefined;
-		global.fetch = mock(
-			async (_input: string | URL | Request, init?: RequestInit) => {
-				allocatorSignal = init?.signal ?? undefined;
-				return await new Promise<Response>((_resolve, reject) => {
-					allocatorSignal?.addEventListener(
-						"abort",
-						() => reject(new Error("allocator aborted")),
-						{ once: true },
-					);
+		global.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+			allocatorSignal = init?.signal ?? undefined;
+			return await new Promise<Response>((_resolve, reject) => {
+				allocatorSignal?.addEventListener("abort", () => reject(new Error("allocator aborted")), {
+					once: true,
 				});
-			},
-		) as unknown as typeof fetch;
+			});
+		}) as unknown as typeof fetch;
 
 		const startedAt = Date.now();
 		await expect(
@@ -982,8 +949,7 @@ describe("proxy integration", () => {
 	it("reports redacted Smartproxy allocator failure telemetry before throwing", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const events: unknown[] = [];
-		global.fetch = (async () =>
-			new Response("allocator denied", { status: 503 })) as typeof fetch;
+		global.fetch = (async () => new Response("allocator denied", { status: 503 })) as typeof fetch;
 
 		await expect(
 			resolveProxyConfigAsync({
@@ -1141,10 +1107,10 @@ describe("proxy integration", () => {
 		let allocatorCalls = 0;
 		global.fetch = (async () => {
 			allocatorCalls += 1;
-			return new Response(
-				JSON.stringify({ code: 0, data: { list: [{ ip: "", port: "" }] } }),
-				{ status: 200, headers: { "Content-Type": "application/json" } },
-			);
+			return new Response(JSON.stringify({ code: 0, data: { list: [{ ip: "", port: "" }] } }), {
+				status: 200,
+				headers: { "Content-Type": "application/json" },
+			});
 		}) as typeof fetch;
 
 		await expect(
@@ -1194,9 +1160,7 @@ describe("proxy integration", () => {
 
 		const header = telemetry.toHeaderValue();
 		expect(header).toBeTruthy();
-		const decoded = JSON.parse(
-			Buffer.from(header ?? "", "base64url").toString("utf8"),
-		);
+		const decoded = JSON.parse(Buffer.from(header ?? "", "base64url").toString("utf8"));
 
 		expect(decoded.proxy).toMatchObject({
 			allocatorStatus: 500,
@@ -1265,9 +1229,7 @@ describe("proxy integration", () => {
 					},
 				},
 			}),
-		).rejects.toThrow(
-			"APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES must be a positive number",
-		);
+		).rejects.toThrow("APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES must be a positive number");
 		expect(global.fetch).not.toHaveBeenCalled();
 	});
 
@@ -1280,14 +1242,11 @@ describe("proxy integration", () => {
 				status: 200,
 			});
 		}) as typeof fetch;
-		stealthState.queuedResponses.push(
-			new Error("Proxy responded with non 200 code: 512 OK"),
-			{
-				status: 200,
-				body: JSON.stringify({ ok: true }),
-				headers: { "Content-Type": "application/json" },
-			},
-		);
+		stealthState.queuedResponses.push(new Error("Proxy responded with non 200 code: 512 OK"), {
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
 
 		const { createStealthClient } = await import("../runtime/stealth");
 		const client = createStealthClient("https://example.com", {
@@ -1306,9 +1265,60 @@ describe("proxy integration", () => {
 
 		expect(response.status).toBe(200);
 		expect(allocatorCalls).toBe(1);
+		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
+	});
+
+	it("retry false preserves Smartproxy stale-pool candidate rotation before refresh", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const pools = [
+			["5.78.24.25:31001", "5.78.24.26:31002"],
+			["5.78.24.27:31003", "5.78.24.28:31004"],
+		];
+		let allocatorCalls = 0;
+		global.fetch = (async () => {
+			const pool = pools[allocatorCalls] ?? pools[pools.length - 1];
+			allocatorCalls += 1;
+			return new Response(pool.join("\n"), { status: 200 });
+		}) as typeof fetch;
+		stealthState.queuedResponses.push(
+			{
+				status: 512,
+				body: "proxy pool unavailable",
+				headers: { "content-type": "text/plain" },
+			},
+			{
+				status: 512,
+				body: "proxy pool unavailable",
+				headers: { "content-type": "text/plain" },
+			},
+			{
+				status: 200,
+				body: JSON.stringify({ ok: true }),
+				headers: { "Content-Type": "application/json" },
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 2 },
+				},
+			},
+			affinityKey: "af_con_retry_false_stale_pool",
+		});
+
+		const response = await client.fetch("/health", { retry: false });
+
+		expect(response.status).toBe(200);
+		expect(allocatorCalls).toBe(2);
 		expect(stealthProxyCalls()).toEqual([
 			"http://5.78.24.25:31001",
 			"http://5.78.24.26:31002",
+			"http://5.78.24.27:31003",
 		]);
 	});
 
@@ -1404,9 +1414,9 @@ describe("proxy integration", () => {
 		expect(error).toBeInstanceOf(TransportError);
 		expect((error as TransportError).status).toBe(509);
 		expect(allocatorCalls).toBe(1);
-		expect(
-			stealthState.clients[0]?.calls.map((call) => call.options.proxy),
-		).toEqual(["http://5.78.24.25:31001"]);
+		expect(stealthState.clients[0]?.calls.map((call) => call.options.proxy)).toEqual([
+			"http://5.78.24.25:31001",
+		]);
 	});
 
 	it("refreshes Smartproxy stealth pools after all endpoints return edge certificate 495", async () => {
@@ -1501,9 +1511,9 @@ describe("proxy integration", () => {
 		expect(error).toBeInstanceOf(TransportError);
 		expect((error as TransportError).status).toBe(495);
 		expect(allocatorCalls).toBe(1);
-		expect(
-			stealthState.clients[0]?.calls.map((call) => call.options.proxy),
-		).toEqual(["http://5.78.24.25:31001"]);
+		expect(stealthState.clients[0]?.calls.map((call) => call.options.proxy)).toEqual([
+			"http://5.78.24.25:31001",
+		]);
 	});
 
 	it("does not retry origin certificate 495 responses without policy-managed proxy", async () => {
@@ -1590,10 +1600,7 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-		]);
+		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
 	});
 
 	it("retries Smartproxy stealth requests when impit throws a proxy CONNECT error", async () => {
@@ -1603,9 +1610,7 @@ describe("proxy integration", () => {
 				status: 200,
 			})) as typeof fetch;
 		stealthState.queuedResponses.push(
-			new Error(
-				"failed to do request: proxy CONNECT tunnel failed with non 200 code: 509 OK",
-			),
+			new Error("failed to do request: proxy CONNECT tunnel failed with non 200 code: 509 OK"),
 			{
 				status: 200,
 				body: JSON.stringify({ ok: true }),
@@ -1629,10 +1634,7 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-		]);
+		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
 	});
 
 	it("retries safe Smartproxy stealth reads when impit throws a generic network error", async () => {
@@ -1663,10 +1665,7 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-		]);
+		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
 	});
 
 	it("retries safe Smartproxy stealth reads when impit throws a timeout error", async () => {
@@ -1699,10 +1698,7 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health", { timeout: 10 });
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-		]);
+		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
 	});
 
 	it("does not retry generic Smartproxy stealth network errors for unsafe methods", async () => {
@@ -1806,10 +1802,7 @@ describe("proxy integration", () => {
 		});
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-		]);
+		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
 	});
 
 	it("retries Smartproxy stealth requests when impit exposes structured proxy tunnel status", async () => {
@@ -1843,10 +1836,7 @@ describe("proxy integration", () => {
 		const response = await client.fetch("/health");
 
 		expect(response.status).toBe(200);
-		expect(stealthProxyCalls()).toEqual([
-			"http://5.78.24.25:31001",
-			"http://5.78.24.26:31002",
-		]);
+		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001", "http://5.78.24.26:31002"]);
 	});
 
 	it("classifies Smartproxy stealth auth-ip edge rejection without source-IP allowlist messaging", async () => {
@@ -1968,11 +1958,7 @@ describe("proxy integration", () => {
 			"http://5.78.24.27:31003",
 			"http://5.78.24.28:31004",
 		]);
-		expect(
-			stealthState.clients.flatMap((client) =>
-				client.calls.map((call) => call.url),
-			),
-		).toEqual([
+		expect(stealthState.clients.flatMap((client) => client.calls.map((call) => call.url))).toEqual([
 			"https://example.com/health",
 			"https://example.com/health",
 			"https://example.com/health",
@@ -2020,8 +2006,7 @@ describe("proxy integration", () => {
 
 	it("keeps Smartproxy policy stealth clients on origin certificate verification", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
-			new Response("5.78.24.25:31001", { status: 200 })) as typeof fetch;
+		global.fetch = (async () => new Response("5.78.24.25:31001", { status: 200 })) as typeof fetch;
 		stealthState.queuedResponses.push({
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -2041,12 +2026,8 @@ describe("proxy integration", () => {
 
 		await client.fetch("/health");
 
-		expect(stealthState.clients[0]?.calls[0]?.options.proxy).toBe(
-			"http://5.78.24.25:31001",
-		);
-		expect(
-			stealthState.clients[0]?.calls[0]?.options.insecureSkipVerify,
-		).toBeUndefined();
+		expect(stealthState.clients[0]?.calls[0]?.options.proxy).toBe("http://5.78.24.25:31001");
+		expect(stealthState.clients[0]?.calls[0]?.options.insecureSkipVerify).toBeUndefined();
 	});
 
 	it("hydrates APIFUSE__PROXY__URL from apifuse.config.ts when env is unset", async () => {
@@ -2054,18 +2035,12 @@ describe("proxy integration", () => {
 
 		await Bun.write(
 			`${directory}/apifuse.config.ts`,
-			[
-				"export default {",
-				"  proxy: { url: 'https://file-proxy.example:8443' },",
-				"};",
-			].join("\n"),
+			["export default {", "  proxy: { url: 'https://file-proxy.example:8443' },", "};"].join("\n"),
 		);
 
 		const config = await loadApiFuseConfig(directory);
 
 		expect(config.proxy?.url).toBe("https://file-proxy.example:8443");
-		expect(process.env.APIFUSE__PROXY__URL).toBe(
-			"https://file-proxy.example:8443",
-		);
+		expect(process.env.APIFUSE__PROXY__URL).toBe("https://file-proxy.example:8443");
 	});
 });

@@ -34,25 +34,23 @@ describe("createHttpClient", () => {
 		mockNativeFetchState.lastResponse = undefined;
 		mockNativeFetchState.queuedResponses.length = 0;
 		mockNativeFetchState.queuedErrors.length = 0;
-		globalThis.fetch = mock(
-			async (input: string | URL | Request, init?: RequestInit) => {
-				mockNativeFetchState.calls.push({ url: String(input), init });
-				const error = mockNativeFetchState.queuedErrors.shift();
-				if (error) throw error;
-				const response = mockNativeFetchState.queuedResponses.shift();
-				if (!response) throw new Error("No queued native response");
-				const body =
-					typeof response.body === "string"
-						? response.body
-						: new Uint8Array(response.body).slice(0).buffer;
-				const nativeResponse = new Response(body, {
-					headers: response.headers as HeadersInit,
-					status: response.status,
-				});
-				mockNativeFetchState.lastResponse = nativeResponse;
-				return nativeResponse;
-			},
-		) as typeof fetch;
+		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+			mockNativeFetchState.calls.push({ url: String(input), init });
+			const error = mockNativeFetchState.queuedErrors.shift();
+			if (error) throw error;
+			const response = mockNativeFetchState.queuedResponses.shift();
+			if (!response) throw new Error("No queued native response");
+			const body =
+				typeof response.body === "string"
+					? response.body
+					: new Uint8Array(response.body).slice(0).buffer;
+			const nativeResponse = new Response(body, {
+				headers: response.headers as HeadersInit,
+				status: response.status,
+			});
+			mockNativeFetchState.lastResponse = nativeResponse;
+			return nativeResponse;
+		}) as typeof fetch;
 	});
 
 	afterAll(() => {
@@ -72,9 +70,7 @@ describe("createHttpClient", () => {
 			params: { q: "1" },
 		});
 
-		expect(mockNativeFetchState.calls[0]?.url).toBe(
-			"https://httpbin.org/get?q=1",
-		);
+		expect(mockNativeFetchState.calls[0]?.url).toBe("https://httpbin.org/get?q=1");
 		expect(result.status).toBe(200);
 		expect(result.ok).toBeTrue();
 		expect(result.headers["content-type"]).toBe("application/json");
@@ -204,13 +200,9 @@ describe("createHttpClient", () => {
 			key: "value",
 		});
 
-		expect(mockNativeFetchState.calls[0]?.init?.body).toBe(
-			JSON.stringify({ key: "value" }),
-		);
+		expect(mockNativeFetchState.calls[0]?.init?.body).toBe(JSON.stringify({ key: "value" }));
 		expect(result.data).toEqual({ json: { key: "value" } });
-		expect(await result.text()).toBe(
-			JSON.stringify({ json: { key: "value" } }),
-		);
+		expect(await result.text()).toBe(JSON.stringify({ json: { key: "value" } }));
 	});
 
 	it("stream() exposes native response body without eager text buffering", async () => {
@@ -266,10 +258,9 @@ describe("createHttpClient", () => {
 		const response = await http.stream("https://example.com/events");
 
 		expect(response.status).toBe(200);
-		expect(
-			(mockNativeFetchState.calls[0]?.init as RequestInit & { proxy?: string })
-				?.proxy,
-		).toBe("http://proxy.test");
+		expect((mockNativeFetchState.calls[0]?.init as RequestInit & { proxy?: string })?.proxy).toBe(
+			"http://proxy.test",
+		);
 	});
 
 	it("post() preserves caller-encoded string bodies", async () => {
@@ -318,9 +309,7 @@ describe("createHttpClient", () => {
 		await http.get("https://second.example/resource");
 
 		expect(mockNativeFetchState.calls).toHaveLength(2);
-		expect(mockNativeFetchState.calls[1]?.init?.headers).not.toHaveProperty(
-			"Cookie",
-		);
+		expect(mockNativeFetchState.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
 	});
 
 	it("throws TransportError on 4xx by default", async () => {
@@ -333,9 +322,7 @@ describe("createHttpClient", () => {
 		const { createHttpClient } = await import("../runtime/http");
 		const http = createHttpClient();
 
-		await expect(http.get("https://example.com/not-found")).rejects.toThrow(
-			TransportError,
-		);
+		await expect(http.get("https://example.com/not-found")).rejects.toThrow(TransportError);
 		expect(mockNativeFetchState.lastResponse?.bodyUsed).toBe(true);
 	});
 
@@ -493,9 +480,7 @@ describe("createHttpClient", () => {
 		expect(response?.data).toEqual({ ok: true });
 		expect(mockNativeFetchState.calls).toHaveLength(2);
 		for (const call of mockNativeFetchState.calls) {
-			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(
-				"http://proxy.test",
-			);
+			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe("http://proxy.test");
 		}
 	});
 
@@ -531,15 +516,12 @@ describe("createHttpClient", () => {
 		expect(response?.data).toEqual({ ok: true });
 		expect(mockNativeFetchState.calls).toHaveLength(2);
 		for (const call of mockNativeFetchState.calls) {
-			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(
-				"http://proxy.test",
-			);
+			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe("http://proxy.test");
 		}
 	});
 
 	it("does not default-retry optional proxy policies that resolve without a proxy URL", async () => {
-		const originalSmartproxyKey =
-			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
 		mockNativeFetchState.queuedResponses.push({
@@ -566,22 +548,19 @@ describe("createHttpClient", () => {
 			});
 			expect(mockNativeFetchState.calls).toHaveLength(1);
 			expect(
-				(mockNativeFetchState.calls[0]?.init as RequestInit & { proxy?: string })
-					?.proxy,
+				(mockNativeFetchState.calls[0]?.init as RequestInit & { proxy?: string })?.proxy,
 			).toBeUndefined();
 		} finally {
 			if (originalSmartproxyKey === undefined) {
 				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 			} else {
-				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY =
-					originalSmartproxyKey;
+				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
 			}
 		}
 	});
 
 	it("honors explicit retry when optional proxy policies resolve without a proxy URL", async () => {
-		const originalSmartproxyKey =
-			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
 		mockNativeFetchState.queuedResponses.push({
@@ -610,45 +589,36 @@ describe("createHttpClient", () => {
 			expect(response.data).toEqual({ ok: true });
 			expect(mockNativeFetchState.calls).toHaveLength(2);
 			for (const call of mockNativeFetchState.calls) {
-				expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(
-					undefined,
-				);
+				expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(undefined);
 			}
 		} finally {
 			if (originalSmartproxyKey === undefined) {
 				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 			} else {
-				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY =
-					originalSmartproxyKey;
+				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
 			}
 		}
 	});
 
 	it("rotates provider-policy proxy attempts across default HTTP retries", async () => {
-		const originalSmartproxyKey =
-			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		const originalFetch = globalThis.fetch;
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const upstreamCalls: MockNativeFetchCall[] = [];
-		globalThis.fetch = mock(
-			async (input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				if (url.includes("smartproxy.org/web_v1/ip/get-ip-v3")) {
-					return new Response(
-						["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"),
-						{ status: 200 },
-					);
-				}
-				upstreamCalls.push({ url, init });
-				if (upstreamCalls.length === 1) {
-					throw new Error("Network error");
-				}
-				return new Response(JSON.stringify({ ok: true }), {
-					headers: { "content-type": "application/json" },
-					status: 200,
-				});
-			},
-		) as typeof fetch;
+		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("smartproxy.org/web_v1/ip/get-ip-v3")) {
+				return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
+			}
+			upstreamCalls.push({ url, init });
+			if (upstreamCalls.length === 1) {
+				throw new Error("Network error");
+			}
+			return new Response(JSON.stringify({ ok: true }), {
+				headers: { "content-type": "application/json" },
+				status: 200,
+			});
+		}) as typeof fetch;
 
 		const { clearProxyResolutionCache } = await import("../config/loader");
 		clearProxyResolutionCache();
@@ -671,20 +641,19 @@ describe("createHttpClient", () => {
 
 			expect(response.data).toEqual({ ok: true });
 			expect(upstreamCalls).toHaveLength(2);
-			expect(
-				(upstreamCalls[0]?.init as RequestInit & { proxy?: string })?.proxy,
-			).toBe("http://5.78.24.25:31001");
-			expect(
-				(upstreamCalls[1]?.init as RequestInit & { proxy?: string })?.proxy,
-			).toBe("http://5.78.24.26:31002");
+			expect((upstreamCalls[0]?.init as RequestInit & { proxy?: string })?.proxy).toBe(
+				"http://5.78.24.25:31001",
+			);
+			expect((upstreamCalls[1]?.init as RequestInit & { proxy?: string })?.proxy).toBe(
+				"http://5.78.24.26:31002",
+			);
 		} finally {
 			clearProxyResolutionCache();
 			globalThis.fetch = originalFetch;
 			if (originalSmartproxyKey === undefined) {
 				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 			} else {
-				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY =
-					originalSmartproxyKey;
+				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
 			}
 		}
 	});
@@ -700,9 +669,7 @@ describe("createHttpClient", () => {
 		const { createHttpClient } = await import("../runtime/http");
 		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
 
-		await expect(
-			http.get("https://example.com", { retry: false }),
-		).rejects.toMatchObject({
+		await expect(http.get("https://example.com", { retry: false })).rejects.toMatchObject({
 			code: "transport_network_error",
 		});
 		expect(mockNativeFetchState.calls).toHaveLength(1);
@@ -719,9 +686,7 @@ describe("createHttpClient", () => {
 		const { createHttpClient } = await import("../runtime/http");
 		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
 
-		await expect(
-			http.post("https://example.com", { ok: true }),
-		).rejects.toMatchObject({
+		await expect(http.post("https://example.com", { ok: true })).rejects.toMatchObject({
 			code: "transport_network_error",
 		});
 		expect(mockNativeFetchState.calls).toHaveLength(1);
@@ -950,10 +915,7 @@ describe("createHttpClient", () => {
 	it("caps Retry-After delays by maxDelayMs", async () => {
 		const originalSetTimeout = globalThis.setTimeout;
 		const delays: number[] = [];
-		globalThis.setTimeout = ((
-			handler: Parameters<typeof setTimeout>[0],
-			timeout?: number,
-		) => {
+		globalThis.setTimeout = ((handler: Parameters<typeof setTimeout>[0], timeout?: number) => {
 			delays.push(Number(timeout ?? 0));
 			if (typeof handler === "function") {
 				queueMicrotask(handler as () => void);
@@ -998,10 +960,7 @@ describe("createHttpClient", () => {
 	it("distinguishes bounded Retry-After respect from cap-to-backoff behavior", async () => {
 		const originalSetTimeout = globalThis.setTimeout;
 		const delays: number[] = [];
-		globalThis.setTimeout = ((
-			handler: Parameters<typeof setTimeout>[0],
-			timeout?: number,
-		) => {
+		globalThis.setTimeout = ((handler: Parameters<typeof setTimeout>[0], timeout?: number) => {
 			delays.push(Number(timeout ?? 0));
 			if (typeof handler === "function") {
 				queueMicrotask(handler as () => void);
@@ -1068,10 +1027,7 @@ describe("createHttpClient", () => {
 	});
 
 	it("retries native HTTP through the configured proxy without switching transports", async () => {
-		mockNativeFetchState.queuedErrors.push(
-			new Error("Network error"),
-			new Error("Network error"),
-		);
+		mockNativeFetchState.queuedErrors.push(new Error("Network error"), new Error("Network error"));
 		mockNativeFetchState.queuedResponses.push({
 			status: 200,
 			body: "{}",
@@ -1093,9 +1049,7 @@ describe("createHttpClient", () => {
 
 		expect(mockNativeFetchState.calls).toHaveLength(3);
 		for (const call of mockNativeFetchState.calls) {
-			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe(
-				"http://proxy.test",
-			);
+			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe("http://proxy.test");
 		}
 	});
 
@@ -1107,12 +1061,39 @@ describe("createHttpClient", () => {
 		const { createHttpClient } = await import("../runtime/http");
 		const http = createHttpClient();
 
-		await expect(
-			http.get("https://example.com/slow", { timeout: 100 }),
-		).rejects.toMatchObject({
+		await expect(http.get("https://example.com/slow", { timeout: 100 })).rejects.toMatchObject({
 			code: "transport_timeout",
 			status: 0,
 		});
+	});
+
+	it("defaults proxy-routed GET timeout failures to transient transport retry", async () => {
+		const originalRandom = Math.random;
+		Math.random = () => 0;
+		const timeoutError = new Error("operation timed out after 100ms");
+		timeoutError.name = "TimeoutError";
+		mockNativeFetchState.queuedErrors.push(timeoutError);
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http");
+		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
+		try {
+			const response = await http.get("https://example.com/slow", {
+				timeout: 100,
+			});
+
+			expect(response.data).toEqual({ ok: true });
+			expect(mockNativeFetchState.calls).toHaveLength(2);
+			for (const call of mockNativeFetchState.calls) {
+				expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe("http://proxy.test");
+			}
+		} finally {
+			Math.random = originalRandom;
+		}
 	});
 
 	it("fails clearly for relative URLs without an upstream base URL", async () => {
@@ -1121,8 +1102,7 @@ describe("createHttpClient", () => {
 
 		await expect(http.get("/relative")).rejects.toMatchObject({
 			code: "transport_invalid_url",
-			message:
-				"ctx.http requires an absolute URL when provider.upstream.baseUrl is not declared",
+			message: "ctx.http requires an absolute URL when provider.upstream.baseUrl is not declared",
 		});
 		expect(mockNativeFetchState.calls).toHaveLength(0);
 	});
@@ -1178,9 +1158,7 @@ describe("createHttpClient", () => {
 			method: "PATCH",
 		});
 
-		expect(mockNativeFetchState.calls[0]?.init).toEqual(
-			expect.objectContaining({ method: "GET" }),
-		);
+		expect(mockNativeFetchState.calls[0]?.init).toEqual(expect.objectContaining({ method: "GET" }));
 		expect(mockNativeFetchState.calls[1]?.init).toEqual(
 			expect.objectContaining({
 				body: JSON.stringify({ patched: true }),
@@ -1193,9 +1171,9 @@ describe("createHttpClient", () => {
 		const { createHttpClient } = await import("../runtime/http");
 		const http = createHttpClient("https://example.com");
 
-		await expect(
-			http.get("/profiled", { profile: "chrome-146" } as never),
-		).rejects.toMatchObject({ code: "http_transport_override_unsupported" });
+		await expect(http.get("/profiled", { profile: "chrome-146" } as never)).rejects.toMatchObject({
+			code: "http_transport_override_unsupported",
+		});
 		await expect(
 			http.get("/profiled", { stealth: { profile: "chrome-146" } } as never),
 		).rejects.toMatchObject({ code: "http_transport_override_unsupported" });
@@ -1215,9 +1193,7 @@ describe("createHttpClient", () => {
 		await http.request("/trace", { method: "TRACE" });
 
 		expect(mockNativeFetchState.calls).toHaveLength(1);
-		expect(mockNativeFetchState.calls[0]?.url).toBe(
-			"https://example.com/trace",
-		);
+		expect(mockNativeFetchState.calls[0]?.url).toBe("https://example.com/trace");
 		expect(mockNativeFetchState.calls[0]?.init).toMatchObject({
 			method: "TRACE",
 		});

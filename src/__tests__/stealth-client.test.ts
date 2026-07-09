@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, mock } from "bun:test";
 
 import { SDKError, TransportError } from "../errors";
 import { normalizeResponse } from "../runtime/stealth";
-import type { DeclarativeStealthResponse } from "../types";
+import { type DeclarativeStealthResponse, HttpRetryUnsafeMethodPolicy } from "../types";
 
 type MockImpitResponse = {
 	status: number;
@@ -42,16 +42,12 @@ function toHeaders(headers: MockImpitResponse["headers"]): Headers {
 }
 
 function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-	return bytes.buffer.slice(
-		bytes.byteOffset,
-		bytes.byteOffset + bytes.byteLength,
-	) as ArrayBuffer;
+	return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
 function toImpitResponse(response: MockImpitResponse) {
 	const headers = toHeaders(response.headers);
-	const responseBytes =
-		response.arrayBufferBody ?? new TextEncoder().encode(response.body);
+	const responseBytes = response.arrayBufferBody ?? new TextEncoder().encode(response.body);
 	return {
 		status: response.status,
 		ok: response.status >= 200 && response.status < 300,
@@ -146,8 +142,7 @@ describe("createStealthClient", () => {
 				"x-test": "1",
 			}),
 			text: async () => "text-first-corruption",
-			arrayBuffer: async () =>
-				toArrayBuffer(new TextEncoder().encode('{"error":true}')),
+			arrayBuffer: async () => toArrayBuffer(new TextEncoder().encode('{"error":true}')),
 		} as never)) as DeclarativeStealthResponse;
 
 		expect(response.ok).toBe(false);
@@ -183,8 +178,7 @@ describe("createStealthClient", () => {
 
 	it("preserves multiple cookies when Headers.getSetCookie is unavailable", async () => {
 		const headers = toHeaders({
-			"set-cookie":
-				"sid=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/, csrf=def; Path=/",
+			"set-cookie": "sid=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/, csrf=def; Path=/",
 		});
 		Object.defineProperty(headers, "getSetCookie", { value: undefined });
 
@@ -197,10 +191,7 @@ describe("createStealthClient", () => {
 
 		expect(response.cookies.getAll()).toEqual({ sid: "abc", csrf: "def" });
 		expect(response.rawHeaders).toEqual([
-			[
-				"set-cookie",
-				"sid=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/, csrf=def; Path=/",
-			],
+			["set-cookie", "sid=abc; Expires=Wed, 21 Oct 2026 07:28:00 GMT; Path=/, csrf=def; Path=/"],
 		]);
 	});
 
@@ -320,13 +311,8 @@ describe("createStealthClient", () => {
 		};
 
 		expect(impitCookieJar).toBeDefined();
-		expect(
-			await impitCookieJar.getCookieString("https://example.com/next"),
-		).toBe("sid=abc");
-		await impitCookieJar.setCookie(
-			"redirect_sid=xyz; Path=/",
-			"https://example.com/redirect",
-		);
+		expect(await impitCookieJar.getCookieString("https://example.com/next")).toBe("sid=abc");
+		await impitCookieJar.setCookie("redirect_sid=xyz; Path=/", "https://example.com/redirect");
 
 		await session.fetch("/second");
 
@@ -427,9 +413,7 @@ describe("createStealthClient", () => {
 		const { createStealthClient } = await import("../runtime/stealth");
 		const client = createStealthClient("https://example.com", "ios-safari-26");
 
-		await expect(client.fetch("/profile")).rejects.toThrow(
-			/Safari stealth fingerprint/,
-		);
+		await expect(client.fetch("/profile")).rejects.toThrow(/Safari stealth fingerprint/);
 		expect(mockStealthState.clients).toHaveLength(0);
 	});
 
@@ -462,9 +446,9 @@ describe("createStealthClient", () => {
 		await client.fetch("/trace", { method: "TRACE" });
 		expect(mockStealthState.clients[0]?.calls[0]?.init.method).toBe("TRACE");
 
-		await expect(
-			client.fetch("/tunnel", { method: "CONNECT" as never }),
-		).rejects.toThrow(/Unsupported stealth method: CONNECT/);
+		await expect(client.fetch("/tunnel", { method: "CONNECT" as never })).rejects.toThrow(
+			/Unsupported stealth method: CONNECT/,
+		);
 		expect(mockStealthState.clients).toHaveLength(1);
 	});
 
@@ -625,9 +609,7 @@ describe("createStealthClient", () => {
 				}),
 			}),
 		]);
-		expect(mockStealthState.clients[0]?.calls[1]?.init).not.toHaveProperty(
-			"body",
-		);
+		expect(mockStealthState.clients[0]?.calls[1]?.init).not.toHaveProperty("body");
 	});
 
 	it("redirects.run preserves method and body for 307 redirects", async () => {
@@ -882,9 +864,7 @@ describe("createStealthClient", () => {
 		const { createStealthClient } = await import("../runtime/stealth");
 		const client = createStealthClient("https://example.com");
 
-		await expect(client.fetch("/network")).rejects.toBeInstanceOf(
-			TransportError,
-		);
+		await expect(client.fetch("/network")).rejects.toBeInstanceOf(TransportError);
 		mockStealthState.queuedErrors.push(new Error("socket hang up"));
 		await expect(client.fetch("/network")).rejects.toMatchObject({
 			code: "transport_network_error",
@@ -906,5 +886,114 @@ describe("createStealthClient", () => {
 			status: 0,
 			message: "Request timed out",
 		});
+	});
+
+	it("defaults proxy-routed GET network failures to transient transport retry", async () => {
+		mockStealthState.queuedErrors.push(new Error("socket hang up"));
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const client = createStealthClient("https://example.com");
+
+		const response = await client.fetch("/health", {
+			proxy: "http://proxy.test",
+		});
+
+		expect(response.status).toBe(200);
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(2);
+		expect(mockStealthState.clients[0]?.options?.proxyUrl).toBe("http://proxy.test");
+	});
+
+	it("defaults proxy-routed GET timeout failures to transient transport retry", async () => {
+		const timeoutError = new Error("request timeout after 10ms");
+		timeoutError.name = "TimeoutError";
+		mockStealthState.queuedErrors.push(timeoutError);
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const client = createStealthClient("https://example.com");
+
+		const response = await client.fetch("/slow", {
+			proxy: "http://proxy.test",
+			timeout: 10,
+		});
+
+		expect(response.status).toBe(200);
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(2);
+		expect(mockStealthState.clients[0]?.options?.proxyUrl).toBe("http://proxy.test");
+	});
+
+	it("does not default-retry when no stealth proxy was resolved", async () => {
+		mockStealthState.queuedErrors.push(new Error("socket hang up"));
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const client = createStealthClient("https://example.com");
+
+		await expect(client.fetch("/health")).rejects.toMatchObject({
+			code: "transport_network_error",
+		});
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
+		expect(mockStealthState.clients[0]?.options?.proxyUrl).toBeUndefined();
+	});
+
+	it("does not default-retry proxy-routed GET when retry is false", async () => {
+		mockStealthState.queuedErrors.push(new Error("socket hang up"));
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const client = createStealthClient("https://example.com");
+
+		await expect(
+			client.fetch("/health", { proxy: "http://proxy.test", retry: false }),
+		).rejects.toMatchObject({
+			code: "transport_network_error",
+		});
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
+	});
+
+	it("honors explicit unsafe POST retry when acknowledged", async () => {
+		mockStealthState.queuedErrors.push(new Error("socket hang up"));
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth");
+		const client = createStealthClient("https://example.com");
+
+		const response = await client.fetch("/health", {
+			method: "POST",
+			body: "{}",
+			proxy: "http://proxy.test",
+			retry: {
+				methods: ["POST"],
+				attempts: 2,
+				errorCodes: ["transport_network_error"],
+				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.AllowExplicitUnsafe,
+			},
+		});
+
+		expect(response.status).toBe(200);
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(2);
+		expect(mockStealthState.clients[0]?.calls[0]?.init?.method).toBe("POST");
+		expect(mockStealthState.clients[0]?.calls[1]?.init?.method).toBe("POST");
 	});
 });

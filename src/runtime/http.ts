@@ -1,17 +1,11 @@
 import type { ProxyResolutionOptions } from "../config/loader";
 import { resolveProxyConfigAsync } from "../config/loader";
 import { ProviderError, TransportError } from "../errors";
-import {
-	parseSseStream,
-	readableBytes,
-	readableLines,
-	readableTextChunks,
-} from "../stream";
+import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream";
 import type {
 	HttpClient,
 	HttpMethod,
 	HttpResponse,
-	HttpRetryOptions,
 	HttpRetrySummary,
 	HttpStreamResponse,
 	RequestOptions,
@@ -19,12 +13,16 @@ import type {
 	SseMessage,
 } from "../types";
 import {
-	HttpRetryAfterPolicy,
-	HttpRetryDelayStrategy,
-	HttpRetryJitter,
-	HttpRetryPreset,
-	HttpRetryUnsafeMethodPolicy,
-} from "../types";
+	computeProxyAttemptIndex,
+	computeProxyTransportRetryDelayMs,
+	createDefaultProxyTransportRetryOptions,
+	isProxyTransportRetryMethod,
+	normalizeProxyTransportRetryOptions,
+	proxyTransportRetryErrorCode,
+	proxyTransportRetryErrorStatus,
+	shouldRetryProxyTransportAttempt,
+	validateUnsafeProxyTransportRetryMethods,
+} from "./proxy-retry-policy";
 import { appendQueryParams, normalizeHttpRequestBody } from "./request-options";
 
 const DEFAULT_HTTP_BASE_URL = "http://localhost";
@@ -33,24 +31,6 @@ export type HttpClientOptions = ProxyResolutionOptions & {
 	warn?: (message: string) => void;
 	userAgent?: string;
 	onRetrySummary?: (summary: HttpRetrySummary) => void;
-};
-
-type NormalizedRetryOptions = Required<
-	Pick<
-		HttpRetryOptions,
-		| "attempts"
-		| "delayStrategy"
-		| "baseDelayMs"
-		| "maxDelayMs"
-		| "jitter"
-		| "retryAfter"
-		| "unsafeMethodPolicy"
-	>
-> & {
-	preset?: HttpRetryPreset;
-	methods: readonly string[];
-	statusCodes: readonly number[];
-	errorCodes: readonly string[];
 };
 
 type HttpStatusOutcome = {
@@ -69,416 +49,6 @@ function isHttpStatusOutcome(
 	outcome: HttpResponse | HttpStatusOutcome,
 ): outcome is HttpStatusOutcome {
 	return "kind" in outcome && outcome.kind === "http-status";
-}
-
-const DEFAULT_RETRY_METHODS = ["GET", "HEAD", "OPTIONS"] as const;
-const DEFAULT_RETRY_ERROR_CODES = [
-	"transport_network_error",
-	"transport_timeout",
-] as const;
-const SAFE_RETRY_STATUS_CODES = [408, 429, 500, 502, 503, 504] as const;
-const RATE_LIMIT_RETRY_STATUS_CODES = [429, 503] as const;
-const KNOWN_RETRY_METHODS = new Set([
-	"GET",
-	"HEAD",
-	"POST",
-	"PUT",
-	"DELETE",
-	"OPTIONS",
-	"TRACE",
-	"PATCH",
-]);
-const UNSAFE_RETRY_METHODS = new Set([
-	"POST",
-	"PUT",
-	"PATCH",
-	"DELETE",
-	"TRACE",
-]);
-const MAX_RETRY_ATTEMPTS = 8;
-const MAX_RETRY_DELAY_MS = 30_000;
-
-function hasOwnValue<T extends string>(
-	values: Record<string, T>,
-	value: unknown,
-): value is T {
-	if (typeof value !== "string") return false;
-	return Object.values(values).some((candidate) => candidate === value);
-}
-
-function createInvalidRetryPolicyError(message: string): ProviderError {
-	return new ProviderError(message, { code: "retry_invalid_policy" });
-}
-
-function createRetryOptions(preset: HttpRetryPreset): NormalizedRetryOptions {
-	switch (preset) {
-		case HttpRetryPreset.Off:
-			return {
-				preset,
-				attempts: 1,
-				methods: DEFAULT_RETRY_METHODS,
-				statusCodes: [],
-				errorCodes: DEFAULT_RETRY_ERROR_CODES,
-				delayStrategy: HttpRetryDelayStrategy.Exponential,
-				baseDelayMs: 100,
-				maxDelayMs: 1_000,
-				jitter: HttpRetryJitter.Full,
-				retryAfter: HttpRetryAfterPolicy.Ignore,
-				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.Reject,
-			};
-		case HttpRetryPreset.SafeRead:
-			return {
-				preset,
-				attempts: 3,
-				methods: DEFAULT_RETRY_METHODS,
-				statusCodes: SAFE_RETRY_STATUS_CODES,
-				errorCodes: DEFAULT_RETRY_ERROR_CODES,
-				delayStrategy: HttpRetryDelayStrategy.Exponential,
-				baseDelayMs: 100,
-				maxDelayMs: 2_000,
-				jitter: HttpRetryJitter.Full,
-				retryAfter: HttpRetryAfterPolicy.Cap,
-				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.Reject,
-			};
-		case HttpRetryPreset.AggressiveRead:
-			return {
-				preset,
-				attempts: 4,
-				methods: DEFAULT_RETRY_METHODS,
-				statusCodes: SAFE_RETRY_STATUS_CODES,
-				errorCodes: DEFAULT_RETRY_ERROR_CODES,
-				delayStrategy: HttpRetryDelayStrategy.Exponential,
-				baseDelayMs: 150,
-				maxDelayMs: 5_000,
-				jitter: HttpRetryJitter.Full,
-				retryAfter: HttpRetryAfterPolicy.Cap,
-				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.Reject,
-			};
-		case HttpRetryPreset.RateLimitAware:
-			return {
-				preset,
-				attempts: 3,
-				methods: DEFAULT_RETRY_METHODS,
-				statusCodes: RATE_LIMIT_RETRY_STATUS_CODES,
-				errorCodes: ["transport_timeout"],
-				delayStrategy: HttpRetryDelayStrategy.Exponential,
-				baseDelayMs: 250,
-				maxDelayMs: 5_000,
-				jitter: HttpRetryJitter.Equal,
-				retryAfter: HttpRetryAfterPolicy.Respect,
-				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.Reject,
-			};
-		case HttpRetryPreset.TransportTransient:
-			return {
-				preset,
-				attempts: 3,
-				methods: DEFAULT_RETRY_METHODS,
-				statusCodes: [],
-				errorCodes: DEFAULT_RETRY_ERROR_CODES,
-				delayStrategy: HttpRetryDelayStrategy.Exponential,
-				baseDelayMs: 100,
-				maxDelayMs: 1_000,
-				jitter: HttpRetryJitter.Full,
-				retryAfter: HttpRetryAfterPolicy.Ignore,
-				unsafeMethodPolicy: HttpRetryUnsafeMethodPolicy.Reject,
-			};
-	}
-	throw createInvalidRetryPolicyError(`Unknown HTTP retry preset: ${preset}`);
-}
-
-function clampPositiveInteger(
-	value: number | undefined,
-	fallback: number,
-	max: number,
-): number {
-	if (value === undefined) return fallback;
-	if (!Number.isFinite(value) || value < 1) return fallback;
-	return Math.min(Math.floor(value), max);
-}
-
-function clampDelay(value: number | undefined, fallback: number): number {
-	if (value === undefined) return fallback;
-	if (!Number.isFinite(value) || value < 0) return fallback;
-	return Math.min(Math.floor(value), MAX_RETRY_DELAY_MS);
-}
-
-function normalizeRetryOptions(
-	retry: RequestOptions["retry"],
-): NormalizedRetryOptions | undefined {
-	if (retry === undefined || retry === false) {
-		return undefined;
-	}
-	if (retry === true) {
-		return createRetryOptions(HttpRetryPreset.TransportTransient);
-	}
-	if (typeof retry === "string") {
-		if (!hasOwnValue(HttpRetryPreset, retry)) {
-			throw createInvalidRetryPolicyError(
-				`Unknown HTTP retry preset: ${retry}`,
-			);
-		}
-		return createRetryOptions(retry);
-	}
-	if (typeof retry !== "object" || retry === null) {
-		throw createInvalidRetryPolicyError("HTTP retry policy must be an object");
-	}
-	if (Array.isArray(retry)) {
-		throw createInvalidRetryPolicyError(
-			"HTTP retry policy must be a plain object",
-		);
-	}
-
-	validateRetryOptionsShape(retry);
-	const base = createRetryOptions(
-		retry.preset ?? HttpRetryPreset.TransportTransient,
-	);
-	const maxDelayMs = clampDelay(retry.maxDelayMs, base.maxDelayMs);
-	const normalized: NormalizedRetryOptions = {
-		preset: retry.preset ?? base.preset,
-		attempts: clampPositiveInteger(
-			retry.attempts,
-			base.attempts,
-			MAX_RETRY_ATTEMPTS,
-		),
-		methods:
-			retry.methods?.map((method) => method.toUpperCase()) ?? base.methods,
-		statusCodes:
-			retry.statusCodes?.filter((status) => Number.isInteger(status)) ??
-			base.statusCodes,
-		errorCodes: retry.errorCodes ?? base.errorCodes,
-		delayStrategy: retry.delayStrategy ?? base.delayStrategy,
-		baseDelayMs: clampDelay(retry.baseDelayMs, base.baseDelayMs),
-		maxDelayMs,
-		jitter: retry.jitter ?? base.jitter,
-		retryAfter: retry.retryAfter ?? base.retryAfter,
-		unsafeMethodPolicy: retry.unsafeMethodPolicy ?? base.unsafeMethodPolicy,
-	};
-
-	return normalized;
-}
-
-function validateRetryOptionsShape(retry: HttpRetryOptions): void {
-	if (
-		retry.preset !== undefined &&
-		!hasOwnValue(HttpRetryPreset, retry.preset)
-	) {
-		throw createInvalidRetryPolicyError(
-			`Unknown HTTP retry preset: ${String(retry.preset)}`,
-		);
-	}
-	if (
-		retry.delayStrategy !== undefined &&
-		!hasOwnValue(HttpRetryDelayStrategy, retry.delayStrategy)
-	) {
-		throw createInvalidRetryPolicyError(
-			`Unknown HTTP retry delay strategy: ${String(retry.delayStrategy)}`,
-		);
-	}
-	if (
-		retry.jitter !== undefined &&
-		!hasOwnValue(HttpRetryJitter, retry.jitter)
-	) {
-		throw createInvalidRetryPolicyError(
-			`Unknown HTTP retry jitter policy: ${String(retry.jitter)}`,
-		);
-	}
-	if (
-		retry.retryAfter !== undefined &&
-		!hasOwnValue(HttpRetryAfterPolicy, retry.retryAfter)
-	) {
-		throw createInvalidRetryPolicyError(
-			`Unknown HTTP retry-after policy: ${String(retry.retryAfter)}`,
-		);
-	}
-	if (
-		retry.unsafeMethodPolicy !== undefined &&
-		!hasOwnValue(HttpRetryUnsafeMethodPolicy, retry.unsafeMethodPolicy)
-	) {
-		throw createInvalidRetryPolicyError(
-			`Unknown HTTP retry unsafe method policy: ${String(retry.unsafeMethodPolicy)}`,
-		);
-	}
-	if (retry.methods !== undefined) {
-		if (!Array.isArray(retry.methods)) {
-			throw createInvalidRetryPolicyError(
-				"HTTP retry methods must be an array",
-			);
-		}
-		const nonStringMethods = retry.methods.filter(
-			(method) => typeof method !== "string",
-		);
-		if (nonStringMethods.length > 0) {
-			throw createInvalidRetryPolicyError(
-				"HTTP retry methods must contain only strings",
-			);
-		}
-		const unknownMethods = retry.methods
-			.map((method) => method.toUpperCase())
-			.filter((method) => !KNOWN_RETRY_METHODS.has(method));
-		if (unknownMethods.length > 0) {
-			throw createInvalidRetryPolicyError(
-				`Unknown HTTP retry method(s): ${unknownMethods.join(", ")}`,
-			);
-		}
-	}
-	if (retry.statusCodes !== undefined) {
-		if (!Array.isArray(retry.statusCodes)) {
-			throw createInvalidRetryPolicyError(
-				"HTTP retry statusCodes must be an array",
-			);
-		}
-		const invalidStatusCodes = retry.statusCodes.filter(
-			(status) =>
-				!Number.isInteger(status) ||
-				Number(status) < 100 ||
-				Number(status) > 599,
-		);
-		if (invalidStatusCodes.length > 0) {
-			throw createInvalidRetryPolicyError(
-				"HTTP retry statusCodes must contain HTTP status integers in [100, 599]",
-			);
-		}
-	}
-	if (retry.errorCodes !== undefined) {
-		if (!Array.isArray(retry.errorCodes)) {
-			throw createInvalidRetryPolicyError(
-				"HTTP retry errorCodes must be an array",
-			);
-		}
-		const nonStringErrorCodes = retry.errorCodes.filter(
-			(errorCode) => typeof errorCode !== "string",
-		);
-		if (nonStringErrorCodes.length > 0) {
-			throw createInvalidRetryPolicyError(
-				"HTTP retry errorCodes must contain only strings",
-			);
-		}
-	}
-	if (
-		retry.preset === HttpRetryPreset.Off &&
-		((retry.attempts !== undefined && retry.attempts > 1) ||
-			(retry.statusCodes !== undefined && retry.statusCodes.length > 0))
-	) {
-		throw createInvalidRetryPolicyError(
-			"HTTP retry preset off cannot be combined with retry-enabling overrides",
-		);
-	}
-}
-
-function validateUnsafeRetryMethods(options: NormalizedRetryOptions): void {
-	if (
-		options.unsafeMethodPolicy ===
-		HttpRetryUnsafeMethodPolicy.AllowExplicitUnsafe
-	) {
-		return;
-	}
-	const unsafeMethods = options.methods.filter((method) =>
-		UNSAFE_RETRY_METHODS.has(method.toUpperCase()),
-	);
-	if (unsafeMethods.length === 0) return;
-
-	throw new ProviderError(
-		`HTTP retry methods include unsafe method(s): ${unsafeMethods.join(", ")}`,
-		{ code: "retry_unsafe_method" },
-	);
-}
-
-function isMethodRetryable(
-	method: HttpMethod,
-	options: NormalizedRetryOptions,
-): boolean {
-	return options.methods
-		.map((allowedMethod) => allowedMethod.toUpperCase())
-		.includes(method.toUpperCase());
-}
-
-function retryErrorCode(error: unknown): string | undefined {
-	if (error instanceof TransportError) {
-		return error.code;
-	}
-	if (error && typeof error === "object" && "code" in error) {
-		const code = Reflect.get(error, "code");
-		return typeof code === "string" ? code : undefined;
-	}
-	return undefined;
-}
-
-function retryErrorStatus(error: unknown): number | undefined {
-	if (error instanceof TransportError) {
-		return error.status ?? error.upstreamStatus;
-	}
-	return undefined;
-}
-
-function shouldRetryTransportError(
-	error: unknown,
-	options: NormalizedRetryOptions,
-): boolean {
-	const code = retryErrorCode(error);
-	return Boolean(code && options.errorCodes.includes(code));
-}
-
-function retryAfterHeader(headers: Record<string, string>): string | undefined {
-	for (const [name, value] of Object.entries(headers)) {
-		if (name.toLowerCase() === "retry-after") return value;
-	}
-	return undefined;
-}
-
-function parseRetryAfterMs(
-	headers: Record<string, string>,
-	now: number = Date.now(),
-): number | undefined {
-	const value = retryAfterHeader(headers);
-	if (!value) return undefined;
-	const seconds = Number(value);
-	if (Number.isFinite(seconds)) {
-		return Math.max(0, Math.floor(seconds * 1_000));
-	}
-	const dateMs = Date.parse(value);
-	if (!Number.isNaN(dateMs)) {
-		return Math.max(0, dateMs - now);
-	}
-	return undefined;
-}
-
-function computeRetryDelayMs(
-	options: NormalizedRetryOptions,
-	attemptIndex: number,
-	headers?: Record<string, string>,
-): number {
-	const multiplier =
-		options.delayStrategy === HttpRetryDelayStrategy.Exponential
-			? 2 ** Math.max(0, attemptIndex - 1)
-			: 1;
-	const configuredDelay = Math.min(
-		options.baseDelayMs * multiplier,
-		options.maxDelayMs,
-	);
-	const retryAfterMs =
-		options.retryAfter === HttpRetryAfterPolicy.Ignore
-			? undefined
-			: headers
-				? parseRetryAfterMs(headers)
-				: undefined;
-	if (retryAfterMs !== undefined) {
-		const boundedRetryAfterMs = Math.min(retryAfterMs, options.maxDelayMs);
-		if (options.retryAfter === HttpRetryAfterPolicy.Cap) {
-			return Math.min(boundedRetryAfterMs, configuredDelay);
-		}
-		return boundedRetryAfterMs;
-	}
-
-	switch (options.jitter) {
-		case HttpRetryJitter.None:
-			return configuredDelay;
-		case HttpRetryJitter.Equal:
-			return Math.floor(
-				configuredDelay / 2 + Math.random() * (configuredDelay / 2),
-			);
-		case HttpRetryJitter.Full:
-			return Math.floor(Math.random() * configuredDelay);
-	}
 }
 
 async function sleep(ms: number): Promise<void> {
@@ -505,9 +75,7 @@ function withClientHeaders(
 	body: unknown,
 ): RequestOptions {
 	const headers: Record<string, string> = {
-		...(clientOptions.userAgent
-			? { "User-Agent": clientOptions.userAgent }
-			: {}),
+		...(clientOptions.userAgent ? { "User-Agent": clientOptions.userAgent } : {}),
 		...options?.headers,
 	};
 
@@ -522,10 +90,7 @@ function withClientHeaders(
 }
 
 function parseHttpData(body: string, headers: Record<string, string>): unknown {
-	const contentType =
-		headers["content-type"] ??
-		headers["Content-Type"] ??
-		headers["CONTENT-TYPE"];
+	const contentType = headers["content-type"] ?? headers["Content-Type"] ?? headers["CONTENT-TYPE"];
 
 	if (contentType?.includes("application/json")) {
 		return body ? JSON.parse(body) : null;
@@ -596,23 +161,14 @@ async function toNativeHttpResponse(response: Response): Promise<HttpResponse> {
 		headers,
 		json: async <T = unknown>() => {
 			const contentType =
-				headers["content-type"] ??
-				headers["Content-Type"] ??
-				headers["CONTENT-TYPE"];
-			return parseJson<T>(
-				contentType?.includes("application/json") && !rawText
-					? "null"
-					: rawText,
-			);
+				headers["content-type"] ?? headers["Content-Type"] ?? headers["CONTENT-TYPE"];
+			return parseJson<T>(contentType?.includes("application/json") && !rawText ? "null" : rawText);
 		},
 		ok: response.status >= 200 && response.status < 300,
 		status: response.status,
 		text: async () => rawText,
 		arrayBuffer: async () =>
-			bodyBytes.buffer.slice(
-				bodyBytes.byteOffset,
-				bodyBytes.byteOffset + bodyBytes.byteLength,
-			),
+			bodyBytes.buffer.slice(bodyBytes.byteOffset, bodyBytes.byteOffset + bodyBytes.byteLength),
 		bytes: async () => bodyBytes.slice(0),
 	};
 }
@@ -625,9 +181,7 @@ async function drainNativeResponseBody(response: Response): Promise<void> {
 	}
 }
 
-function requireNativeResponseBody(
-	response: Response,
-): ReadableStream<Uint8Array> {
+function requireNativeResponseBody(response: Response): ReadableStream<Uint8Array> {
 	if (!response.body) {
 		throw new TransportError("Response body stream is unavailable", {
 			code: "transport_stream_unavailable",
@@ -692,18 +246,16 @@ async function resolveNativeProxy(
 	warn: (message: string) => void,
 	proxyAttemptOffset = 0,
 ): Promise<string | undefined> {
-	const baseProxyAttempt =
-		clientOptions.proxyAttempt === undefined ||
-		!Number.isFinite(clientOptions.proxyAttempt)
-			? 0
-			: Math.max(0, Math.floor(clientOptions.proxyAttempt));
 	const resolvedProxy = await resolveProxyConfigAsync({
 		proxy: options.proxy ?? clientOptions.proxy,
 		upstream: clientOptions.upstream,
 		apifuseConfig: clientOptions.apifuseConfig,
 		proxyPolicy: clientOptions.proxyPolicy,
 		affinityKey: clientOptions.affinityKey,
-		proxyAttempt: baseProxyAttempt + proxyAttemptOffset,
+		proxyAttempt: computeProxyAttemptIndex({
+			baseProxyAttempt: clientOptions.proxyAttempt,
+			retryAttemptOffset: proxyAttemptOffset,
+		}),
 		telemetry: clientOptions.telemetry,
 	});
 	if (resolvedProxy.shouldWarn) {
@@ -723,9 +275,7 @@ function assertNoHttpTransportOverrides(options: RequestOptions): void {
 	}
 }
 
-function normalizeNativeFetchBody(
-	body: unknown,
-): string | ArrayBuffer | undefined {
+function normalizeNativeFetchBody(body: unknown): string | ArrayBuffer | undefined {
 	const normalized = normalizeHttpRequestBody(body);
 	if (!Buffer.isBuffer(normalized)) {
 		return normalized;
@@ -745,10 +295,7 @@ async function fetchNativeHttp(
 	statusRetryCodes?: readonly number[],
 	proxyAttemptOffset = 0,
 ): Promise<NativeHttpAttemptOutcome> {
-	const requestUrl = appendQueryParams(
-		resolveHttpUrl(baseUrl, url),
-		options.params,
-	);
+	const requestUrl = appendQueryParams(resolveHttpUrl(baseUrl, url), options.params);
 	const controller = options.timeout ? new AbortController() : undefined;
 	const timeoutHandle = options.timeout
 		? setTimeout(() => controller?.abort(), options.timeout)
@@ -756,12 +303,7 @@ async function fetchNativeHttp(
 
 	let proxy: string | undefined;
 	try {
-		proxy = await resolveNativeProxy(
-			options,
-			clientOptions,
-			warn,
-			proxyAttemptOffset,
-		);
+		proxy = await resolveNativeProxy(options, clientOptions, warn, proxyAttemptOffset);
 		const requestInit: NativeFetchInit = {
 			headers: options.headers,
 			method,
@@ -789,13 +331,10 @@ async function fetchNativeHttp(
 
 		if (response.status >= 400 && options.throwOnHttpError !== false) {
 			await drainNativeResponseBody(response);
-			throw new TransportError(
-				`Upstream request failed with status ${response.status}`,
-				{
-					code: "upstream_http_error",
-					status: response.status,
-				},
-			);
+			throw new TransportError(`Upstream request failed with status ${response.status}`, {
+				code: "upstream_http_error",
+				status: response.status,
+			});
 		}
 
 		return toNativeHttpResponse(response);
@@ -819,10 +358,7 @@ async function fetchNativeHttpStream(
 	clientOptions: HttpClientOptions,
 	warn: (message: string) => void,
 ): Promise<HttpStreamResponse> {
-	const requestUrl = appendQueryParams(
-		resolveHttpUrl(baseUrl, url),
-		options.params,
-	);
+	const requestUrl = appendQueryParams(resolveHttpUrl(baseUrl, url), options.params);
 	const controller = options.timeout ? new AbortController() : undefined;
 	const timeoutHandle = options.timeout
 		? setTimeout(() => controller?.abort(), options.timeout)
@@ -845,13 +381,10 @@ async function fetchNativeHttpStream(
 
 		if (response.status >= 400 && options.throwOnHttpError !== false) {
 			await drainNativeResponseBody(response);
-			throw new TransportError(
-				`Upstream request failed with status ${response.status}`,
-				{
-					code: "upstream_http_error",
-					status: response.status,
-				},
-			);
+			throw new TransportError(`Upstream request failed with status ${response.status}`, {
+				code: "upstream_http_error",
+				status: response.status,
+			});
 		}
 
 		return toNativeHttpStreamResponse(response);
@@ -891,23 +424,19 @@ export function createHttpClient(
 			);
 		}
 		assertNoHttpTransportOverrides(options);
-		const headersOptions = withClientHeaders(
-			options,
-			clientOptions,
-			options.body,
-		);
+		const headersOptions = withClientHeaders(options, clientOptions, options.body);
 		const methodName = normalizeHttpMethod(method);
 		const explicitRetry = headersOptions.retry !== undefined;
 		const retryOptions =
-			normalizeRetryOptions(headersOptions.retry) ??
-			(explicitRetry
-				? undefined
-				: createRetryOptions(HttpRetryPreset.TransportTransient));
-		if (retryOptions) validateUnsafeRetryMethods(retryOptions);
+			normalizeProxyTransportRetryOptions(headersOptions.retry, {
+				label: "HTTP",
+			}) ??
+			(explicitRetry ? undefined : createDefaultProxyTransportRetryOptions({ label: "HTTP" }));
+		if (retryOptions) validateUnsafeProxyTransportRetryMethods(retryOptions, "HTTP");
 		const retryEnabled = Boolean(
 			retryOptions &&
 				retryOptions.attempts > 1 &&
-				isMethodRetryable(methodName, retryOptions),
+				isProxyTransportRetryMethod(methodName, retryOptions),
 		);
 		const statusRetryEnabled = Boolean(
 			retryEnabled &&
@@ -916,14 +445,11 @@ export function createHttpClient(
 				retryOptions.statusCodes.length > 0 &&
 				headersOptions.throwOnHttpError !== false,
 		);
-		const attemptOptions: RequestOptions & { body?: unknown } =
-			statusRetryEnabled
-				? { ...headersOptions, throwOnHttpError: false }
-				: headersOptions;
+		const attemptOptions: RequestOptions & { body?: unknown } = statusRetryEnabled
+			? { ...headersOptions, throwOnHttpError: false }
+			: headersOptions;
 
-		const executeOnce = (
-			proxyAttemptOffset = 0,
-		): Promise<NativeHttpAttemptOutcome> =>
+		const executeOnce = (proxyAttemptOffset = 0): Promise<NativeHttpAttemptOutcome> =>
 			fetchNativeHttp(
 				baseUrl,
 				url,
@@ -951,19 +477,14 @@ export function createHttpClient(
 				if (isHttpStatusOutcome(outcome)) {
 					lastStatus = outcome.status;
 					if (outcome.retryable && attempt < retryOptions.attempts) {
-						await sleep(
-							computeRetryDelayMs(retryOptions, attempt, outcome.headers),
-						);
+						await sleep(computeProxyTransportRetryDelayMs(retryOptions, attempt, outcome.headers));
 						continue;
 					}
 					throw toUpstreamHttpError(outcome.status);
 				}
 
 				const response = outcome;
-				if (
-					response.status >= 400 &&
-					headersOptions.throwOnHttpError !== false
-				) {
+				if (response.status >= 400 && headersOptions.throwOnHttpError !== false) {
 					throw toUpstreamHttpError(response.status);
 				}
 
@@ -980,15 +501,20 @@ export function createHttpClient(
 				}
 				return response;
 			} catch (error) {
-				lastErrorCode = retryErrorCode(error);
-				lastStatus = retryErrorStatus(error);
+				lastErrorCode = proxyTransportRetryErrorCode(error);
+				lastStatus = proxyTransportRetryErrorStatus(error);
 				const proxyUsed = Boolean((error as NativeHttpAttemptError).proxyUsed);
 				if (
 					attempt < retryOptions.attempts &&
-					(explicitRetry || proxyUsed) &&
-					shouldRetryTransportError(error, retryOptions)
+					shouldRetryProxyTransportAttempt({
+						error,
+						explicitRetry,
+						method: methodName,
+						options: retryOptions,
+						proxyUsed,
+					})
 				) {
-					await sleep(computeRetryDelayMs(retryOptions, attempt));
+					await sleep(computeProxyTransportRetryDelayMs(retryOptions, attempt));
 					continue;
 				}
 				throw error;
@@ -1012,30 +538,17 @@ export function createHttpClient(
 			);
 		}
 		assertNoHttpTransportOverrides(options);
-		const headersOptions = withClientHeaders(
-			options,
-			clientOptions,
-			options.body,
-		);
+		const headersOptions = withClientHeaders(options, clientOptions, options.body);
 		const methodName = normalizeHttpMethod(method);
-		return fetchNativeHttpStream(
-			baseUrl,
-			url,
-			methodName,
-			headersOptions,
-			clientOptions,
-			warnOnce,
-		);
+		return fetchNativeHttpStream(baseUrl, url, methodName, headersOptions, clientOptions, warnOnce);
 	}
 
 	return {
 		request: async (url, options: RequestWithMethodOptions = {}) =>
 			request(url, options.method ?? "GET", options),
 		get: async (url, options) => request(url, "GET", options),
-		post: async (url, body, options) =>
-			request(url, "POST", { ...options, body }),
-		put: async (url, body, options) =>
-			request(url, "PUT", { ...options, body }),
+		post: async (url, body, options) => request(url, "POST", { ...options, body }),
+		put: async (url, body, options) => request(url, "PUT", { ...options, body }),
 		delete: async (url, options) => request(url, "DELETE", options),
 		stream: async (url, options: RequestWithMethodOptions = {}) =>
 			streamRequest(url, options.method ?? "GET", options),
