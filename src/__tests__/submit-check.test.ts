@@ -56,8 +56,8 @@ function makeProviderDir(
 	}
 	writeFileSync(join(dir, "Dockerfile"), "FROM oven/bun:1.2-alpine\n");
 	writeFileSync(join(dir, "README.md"), readme);
-	mkdirSync(join(dir, "__fixtures"), { recursive: true });
-	writeFileSync(join(dir, "__fixtures", "raw.json"), "{}\n");
+	mkdirSync(join(dir, "__fixtures__"), { recursive: true });
+	writeFileSync(join(dir, "__fixtures__", "raw.json"), '{"lookup":{"q":"btc","ok":true}}\n');
 	writeFileSync(join(dir, "index.ts"), indexSource);
 	linkLocalSdkDependency(dir);
 	return dir;
@@ -900,6 +900,411 @@ ${assertionLines(21)}
 
 		expect(report.score.verdict).toBe("blocked");
 		expect(report.summary.blockers).toBeGreaterThan(0);
+	});
+
+	it("blocks empty recorded fixture provenance for real operations", async () => {
+		const dir = makeProviderDir("submit-empty-raw-real-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "__fixtures__", "raw.json"), "{}\n");
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "fixture-provenance");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.message).toContain("__fixtures__/raw.json is empty or missing");
+		expect(report.score.verdict).toBe("blocked");
+	});
+
+	it("warns on empty recorded fixture provenance for generated local-only scaffolds", async () => {
+		const dir = makeProviderDir(
+			"submit-empty-raw-scaffold-",
+			validProviderSource(
+				'healthCheckUnsupported: { reason: "generated local-only scaffold until real upstream access exists" },',
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "__fixtures__", "raw.json"), "{}\n");
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "fixture-provenance");
+
+		expect(check?.status).toBe("warn");
+		expect(check?.level).toBe("warn");
+		expect(check?.message).toContain("bun run record");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("blocks missing recorded fixture provenance", async () => {
+		const dir = makeProviderDir("submit-missing-raw-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		rmSync(join(dir, "__fixtures__", "raw.json"), { force: true });
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "fixture-provenance");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(report.score.verdict).toBe("blocked");
+	});
+
+	it("passes non-empty recorded fixture provenance", async () => {
+		const dir = makeProviderDir("submit-non-empty-raw-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "fixture-provenance");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks flat primitive raw fixture provenance", async () => {
+		const dir = makeProviderDir("submit-flat-raw-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "__fixtures__", "raw.json"), '{"a":1}\n');
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "fixture-provenance");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks vendor keys leaked from public output schemas with source evidence", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`MKioskTy: z.string(),
+    duty_name: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K", duty_name: "open" }),',
+			)
+			.replace(
+				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K", duty_name: "open" } },',
+			);
+		const dir = makeProviderDir("submit-vendor-key-leak-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.evidence?.[0]).toMatch(/index\.ts:\d+/);
+	});
+
+	it("warns when vendor key leaks are allow-listed", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`// @apifuse-allow vendor-key-leak: canonical public agency code.
+    MKioskTy: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
+			)
+			.replace(
+				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-vendor-key-allow-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("warn");
+		expect(check?.level).toBe("warn");
+	});
+
+	it("does not flag vendor keys in upstream parsing schemas", async () => {
+		const source = `${validProviderSource()}
+const upstreamRow = z.object({ MKioskTy: z.string() });
+`;
+		const dir = makeProviderDir("submit-upstream-key-pass-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("does not flag two-member digit suffix families in public output schemas", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`addressLine1: z.string(),
+    addressLine2: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, addressLine1: "a", addressLine2: "b" }),',
+			)
+			.replace(
+				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true, addressLine1: "a", addressLine2: "b" } },',
+			);
+		const dir = makeProviderDir("submit-two-digit-key-family-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks digit-suffixed vendor key families in public output schemas", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`hvec1: z.string(),
+    hvec2: z.string(),
+    hvec3: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, hvec1: "a", hvec2: "b", hvec3: "c" }),',
+			)
+			.replace(
+				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true, hvec1: "a", hvec2: "b", hvec3: "c" } },',
+			);
+		const dir = makeProviderDir("submit-digit-key-family-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.[0]).toMatch(/index\.ts:\d+/);
+	});
+
+	it("blocks computed string vendor keys in public output schemas", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`["duty_name"]: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, duty_name: "open" }),',
+			)
+			.replace(
+				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true, duty_name: "open" } },',
+			);
+		const dir = makeProviderDir("submit-computed-vendor-key-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("does not let unrelated upstream-named consts exempt public schemas", async () => {
+		const source = validProviderSource()
+			.replace(
+				'import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";',
+				`import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";
+
+const upstreamNote = true;`,
+			)
+			.replace("output,", "output: z.object({ duty_name: z.string() }),")
+			.replace("handler: async () => ({ ok: true }),", 'handler: async () => ({ duty_name: "open" }),')
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { duty_name: "open" } },',
+			);
+		const dir = makeProviderDir("submit-upstream-note-bypass-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("still exempts upstream-marked z.object value ranges", async () => {
+		const source = `${validProviderSource()}
+const upstreamOutput = z.object({ duty_name: z.string() });
+`;
+		const dir = makeProviderDir("submit-upstream-range-pass-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("does not confuse braces in comments with object structure", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`// } comment with brace
+    good: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, good: "yes" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, good: "yes" } },',
+			);
+		const dir = makeProviderDir("submit-comment-brace-schema-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks compact vendor timestamps in normalized response fixtures", async () => {
+		const source = validProviderSource().replace(
+			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+			`fixtures: {
+        request: { q: "btc" },
+        response: { ok: true, startTime: "1030", date: "20260709" },
+      },`,
+		);
+		const dir = makeProviderDir("submit-vendor-timestamp-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.evidence?.[0]).toMatch(/index\.ts:\d+/);
+	});
+
+	it("does not flag HHmm-like status values in normalized response fixtures", async () => {
+		const source = validProviderSource().replace(
+			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+			'fixtures: { request: { q: "btc" }, response: { ok: true, status: "1030" } },',
+		);
+		const dir = makeProviderDir("submit-status-hhmm-pass-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks HHmm strings on timestamp-like fixture keys", async () => {
+		const source = validProviderSource().replace(
+			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+			'fixtures: { request: { q: "btc" }, response: { ok: true, openTime: "1030" } },',
+		);
+		const dir = makeProviderDir("submit-open-time-hhmm-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("blocks non-interpolated template timestamp fixtures", async () => {
+		const source = validProviderSource().replace(
+			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+			"fixtures: { request: { q: \"btc\" }, response: { ok: true, openTime: `1030` } },",
+		);
+		const dir = makeProviderDir("submit-template-time-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("detects timestamps under JSON-style quoted fixture keys", async () => {
+		const source = validProviderSource().replace(
+			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+			'fixtures: { "request": { "q": "btc" }, "response": { "ok": true, "updated_at": "20260707222855" } },',
+		);
+		const dir = makeProviderDir("submit-quoted-key-fixtures-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("only checks compact timestamps inside fixtures objects", async () => {
+		const source = `${validProviderSource()}
+const response = { updatedAt: "20260707222855" };
+`;
+		const dir = makeProviderDir("submit-response-outside-fixtures-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("checks compact timestamps in response objects inside fixtures", async () => {
+		const source = validProviderSource().replace(
+			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+			`fixtures: {
+        request: { q: "btc", extra: "${"x".repeat(2200)}" },
+        response: { ok: true, updatedAt: "20260707222855" },
+      },`,
+		);
+		const dir = makeProviderDir("submit-response-inside-fixtures-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("passes ISO timestamps in normalized response fixtures", async () => {
+		const source = validProviderSource().replace(
+			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+			`fixtures: {
+        request: { q: "btc" },
+        response: { ok: true, startTime: "2026-07-09T10:30:00+09:00" },
+      },`,
+		);
+		const dir = makeProviderDir("submit-iso-timestamp-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("warns when compact vendor timestamps are allow-listed", async () => {
+		const source = validProviderSource().replace(
+			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+			`fixtures: {
+        request: { q: "btc" },
+        // @apifuse-allow vendor-timestamp-leak: source value is a route code.
+        response: { ok: true, startTime: "1030" },
+      },`,
+		);
+		const dir = makeProviderDir("submit-timestamp-allow-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("warn");
+		expect(check?.level).toBe("warn");
+	});
+
+	it("does not add new blockers for the fresh local-only scaffold shape", async () => {
+		const dir = makeProviderDir(
+			"submit-fresh-scaffold-",
+			validProviderSource(
+				'healthCheckUnsupported: { reason: "generated local-only scaffold until real operations exist" },',
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "__fixtures__", "raw.json"), "{}\n");
+		const report = await buildSubmitCheckReport(dir);
+
+		expect(report.checks.find((item) => item.id === "fixture-provenance")?.status).toBe("warn");
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe("pass");
+		expect(report.checks.find((item) => item.id === "vendor-timestamp-leak")?.status).toBe("pass");
 	});
 
 	it("blocks no-op health assertion bodies", async () => {
