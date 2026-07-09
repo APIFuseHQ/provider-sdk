@@ -110,6 +110,41 @@ describe("provider create planning", () => {
 		expect(plan.nextDevCommand).toContain("bun run dev");
 	});
 
+	it("renders the agent guide and skills library", async () => {
+		const cwd = makeTempDir("apifuse-create-agent-guide-");
+		const plan = await buildProviderCreatePlan(createOptions(), cwd);
+
+		const agentsGuide = findGeneratedFile(plan, "AGENTS.md");
+		expect(agentsGuide?.content).toContain("APIFuse Provider Workspace — Agent Guide");
+		expect(agentsGuide?.content).toContain("Normalize, don't proxy");
+		expect(agentsGuide?.content).toContain("Fail closed, never fabricate");
+		expect(agentsGuide?.content).toContain("skills/upstream-notes/");
+
+		const claudeGuide = findGeneratedFile(plan, "CLAUDE.md");
+		expect(claudeGuide?.content).toContain("@AGENTS.md");
+
+		const skillPaths = [
+			join("skills", "normalization-standards", "SKILL.md"),
+			join("skills", "upstream-contract-verification", "SKILL.md"),
+			join("skills", "fixtures-and-recording", "SKILL.md"),
+			join("skills", "pagination-and-counts", "SKILL.md"),
+			join("skills", "health-checks-and-fail-closed", "SKILL.md"),
+			join("skills", "upstream-notes", "README.md"),
+		];
+		for (const skillPath of skillPaths) {
+			const file = findGeneratedFile(plan, skillPath);
+			expect(file?.content?.length ?? 0).toBeGreaterThan(200);
+		}
+
+		// Every skill referenced from the AGENTS.md index must be generated.
+		const referenced = agentsGuide?.content.match(/skills\/[a-z-]+\/SKILL\.md/g) ?? [];
+		expect(referenced.length).toBeGreaterThan(0);
+		for (const ref of new Set(referenced)) {
+			const file = findGeneratedFile(plan, join(...ref.split("/")));
+			expect(file, `missing generated file for ${ref}`).toBeDefined();
+		}
+	});
+
 	it("renders standalone ignore files for local-only artifacts", async () => {
 		const cwd = makeTempDir("apifuse-create-ignore-files-");
 		const plan = await buildProviderCreatePlan(createOptions(), cwd);

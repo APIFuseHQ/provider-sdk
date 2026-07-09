@@ -1544,6 +1544,9 @@ function scoreRepositoryDx(providerRoot: string): SubmitCheck {
 	if (!existsSync(resolve(providerRoot, ".gitignore"))) {
 		missing.push(".gitignore");
 	}
+	if (!existsSync(resolve(providerRoot, "AGENTS.md"))) {
+		missing.push("AGENTS.md");
+	}
 
 	const packageJsonPath = resolve(providerRoot, "package.json");
 	const packageScripts = readPackageScripts(packageJsonPath);
@@ -1572,7 +1575,7 @@ function scoreRepositoryDx(providerRoot: string): SubmitCheck {
 		maxPoints: 0,
 		message: `Generated repository DX guardrails are missing: ${missing.join(", ")}.`,
 		remediation:
-			"Regenerate with the current `apifuse create` template or add .gitignore plus `type-check: tsc --noEmit` and include it from `check`.",
+			"Regenerate with the current `apifuse create` template or restore the missing files: .gitignore, AGENTS.md (agent contribution guide), plus `type-check: tsc --noEmit` included from `check`.",
 		evidence: missing,
 	};
 }

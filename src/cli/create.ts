@@ -538,6 +538,38 @@ export async function buildProviderCreatePlan(
 				PROVIDER_ID: options.name,
 			}),
 		},
+		{
+			path: resolve(providerRoot, "AGENTS.md"),
+			content: await renderTemplate("AGENTS.md.tpl", {}),
+		},
+		{
+			path: resolve(providerRoot, "CLAUDE.md"),
+			content: await renderTemplate("CLAUDE.md.tpl", {}),
+		},
+		{
+			path: resolve(providerRoot, "skills", "normalization-standards", "SKILL.md"),
+			content: await renderTemplate("skills/normalization-standards/SKILL.md.tpl", {}),
+		},
+		{
+			path: resolve(providerRoot, "skills", "upstream-contract-verification", "SKILL.md"),
+			content: await renderTemplate("skills/upstream-contract-verification/SKILL.md.tpl", {}),
+		},
+		{
+			path: resolve(providerRoot, "skills", "fixtures-and-recording", "SKILL.md"),
+			content: await renderTemplate("skills/fixtures-and-recording/SKILL.md.tpl", {}),
+		},
+		{
+			path: resolve(providerRoot, "skills", "pagination-and-counts", "SKILL.md"),
+			content: await renderTemplate("skills/pagination-and-counts/SKILL.md.tpl", {}),
+		},
+		{
+			path: resolve(providerRoot, "skills", "health-checks-and-fail-closed", "SKILL.md"),
+			content: await renderTemplate("skills/health-checks-and-fail-closed/SKILL.md.tpl", {}),
+		},
+		{
+			path: resolve(providerRoot, "skills", "upstream-notes", "README.md"),
+			content: await renderTemplate("skills/upstream-notes/README.md.tpl", {}),
+		},
 	];
 
 	return {
