@@ -285,6 +285,9 @@ export async function buildSubmitCheckReport(
 		checks.push(scoreLocaleCatalog(providerRoot, provider));
 		checks.push(scoreOperationMetadata(provider));
 		checks.push(scoreFixtureCoverage(provider));
+		checks.push(scoreFixtureProvenance(providerRoot, provider));
+		checks.push(scoreVendorKeyLeak(providerRoot));
+		checks.push(scoreVendorTimestampLeak(providerRoot));
 		checks.push(scoreHealthCoverage(provider));
 		checks.push(scoreAuthSafety(provider));
 		checks.push(scoreSmoke(smokeResult, args.smokeNote));
@@ -1971,6 +1974,513 @@ function scoreFixtureCoverage(provider: ProviderDefinition): SubmitCheck {
 		"All operations include bidirectional fixtures.",
 		CATEGORY_MAX_POINTS.fixtures,
 	);
+}
+
+const GENERATED_LOCAL_ONLY_SCAFFOLD_REASON = /generated local-only scaffold/i;
+
+function scoreFixtureProvenance(
+	providerRoot: string,
+	provider: ProviderDefinition,
+): SubmitCheck {
+	const rawPath = resolve(providerRoot, "__fixtures__", "raw.json");
+	let hasRecordedEvidence = false;
+	if (existsSync(rawPath)) {
+		try {
+			hasRecordedEvidence = hasNonEmptyRecordedFixture(JSON.parse(readFileSync(rawPath, "utf8")));
+		} catch {
+			hasRecordedEvidence = false;
+		}
+	}
+
+	if (hasRecordedEvidence) {
+		return pass(
+			"fixture-provenance",
+			"fixtures",
+			"Recorded upstream fixture evidence is present.",
+			0,
+		);
+	}
+
+	if (allOperationsAreGeneratedLocalScaffold(provider)) {
+		return {
+			id: "fixture-provenance",
+			category: "fixtures",
+			level: "warn",
+			status: "warn",
+			points: 0,
+			maxPoints: 0,
+			message:
+				"Generated local-only scaffold has no recorded upstream fixture evidence yet; run `bun run record` once real operations exist.",
+			remediation:
+				"Run `bun run record` (apifuse record) against the real upstream to capture raw payloads once real operations exist.",
+			evidence: ["__fixtures__/raw.json"],
+		};
+	}
+
+	return blocker(
+		"fixture-provenance",
+		"fixtures",
+		"No recorded upstream fixture evidence (__fixtures__/raw.json is empty or missing).",
+		"Run `bun run record` (apifuse record) against the real upstream to capture raw payloads; derive normalized expectations in tests from mapper(recorded raw). Hand-authored fixtures without recorded provenance are not reviewable.",
+		0,
+		["__fixtures__/raw.json"],
+	);
+}
+
+function hasNonEmptyRecordedFixture(value: unknown): boolean {
+	if (value === null || value === undefined) {
+		return false;
+	}
+	if (Array.isArray(value)) {
+		return value.some(hasNonEmptyRecordedFixture);
+	}
+	if (typeof value === "object") {
+		return Object.values(value).some(hasNonEmptyRecordedFixture);
+	}
+	if (typeof value === "string") {
+		return value.length > 0;
+	}
+	return true;
+}
+
+function allOperationsAreGeneratedLocalScaffold(provider: ProviderDefinition): boolean {
+	const operations = Object.values(provider.operations);
+	return (
+		operations.length > 0 &&
+		operations.every((operation) =>
+			GENERATED_LOCAL_ONLY_SCAFFOLD_REASON.test(operation.healthCheckUnsupported?.reason ?? ""),
+		)
+	);
+}
+
+function scoreVendorKeyLeak(providerRoot: string): SubmitCheck {
+	return escapeHatchResult(providerRoot, "vendor-key-leak", findVendorKeyLeakFindings(providerRoot), {
+		blockerMessage: "Public schema keys leak raw vendor field names.",
+		remediation:
+			"Normalize public request/response fields to APIFuse-standard lowerCamelCase names (e.g. isOpen24h, latitude); keep raw vendor keys only in upstream-parsing schemas (const upstream... = z.object(...)). Add `// @apifuse-allow vendor-key-leak` only with a comment explaining why the vendor name is genuinely canonical.",
+		passMessage: "No vendor field-name leaks detected in public schemas.",
+	});
+}
+
+function scoreVendorTimestampLeak(providerRoot: string): SubmitCheck {
+	return escapeHatchResult(
+		providerRoot,
+		"vendor-timestamp-leak",
+		findVendorTimestampLeakFindings(providerRoot),
+		{
+			blockerMessage: "Normalized fixtures carry raw vendor timestamp formats.",
+			remediation:
+				"Convert vendor compact timestamps (yyyymmdd, HHmm, yyyymmddHHmmss) to ISO 8601 (date, time with timezone) at the mapper boundary; fixtures.response must show the normalized form. Add `// @apifuse-allow vendor-timestamp-leak` only when the value is genuinely not a timestamp.",
+			passMessage: "No vendor timestamp formats detected in normalized fixtures.",
+		},
+	);
+}
+
+type ObjectRange = {
+	start: number;
+	end: number;
+};
+
+type ZObjectLiteral = {
+	objectStart: number;
+	objectEnd: number;
+	callStart: number;
+	enclosingConst?: string;
+};
+
+function findVendorKeyLeakFindings(providerRoot: string): SourceFinding[] {
+	const findings: SourceFinding[] = [];
+	const seen = new Set<string>();
+
+	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
+		const source = readFileSync(filePath, "utf8");
+		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		for (const zObject of findZObjectLiterals(source)) {
+			if (zObject.enclosingConst && /upstream|raw|vendor/i.test(zObject.enclosingConst)) {
+				continue;
+			}
+			if (!zObjectAppearsPublicOutput(source, zObject)) {
+				continue;
+			}
+			for (const keyFinding of vendorKeyFindingsForObject(source, zObject)) {
+				const key = `${relPath}:${keyFinding.line}:${keyFinding.key}`;
+				if (!seen.has(key)) {
+					seen.add(key);
+					findings.push({ file: relPath, line: keyFinding.line });
+					if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
+						return findings;
+					}
+				}
+			}
+		}
+	}
+
+	return findings;
+}
+
+function findZObjectLiterals(source: string): ZObjectLiteral[] {
+	const literals: ZObjectLiteral[] = [];
+	const callPattern = /\bz\s*\.\s*object\s*\(/g;
+	for (let match = callPattern.exec(source); match !== null; match = callPattern.exec(source)) {
+		const parenIndex = source.indexOf("(", match.index);
+		const objectStart = findNextNonWhitespace(source, parenIndex + 1);
+		if (objectStart === -1 || source[objectStart] !== "{") {
+			continue;
+		}
+		const objectEnd = findMatchingBracket(source, objectStart);
+		if (objectEnd === -1) {
+			continue;
+		}
+		literals.push({
+			objectStart,
+			objectEnd,
+			callStart: match.index,
+			enclosingConst: nearestPrecedingConstName(source, match.index),
+		});
+		callPattern.lastIndex = objectEnd;
+	}
+	return literals;
+}
+
+function zObjectAppearsPublicOutput(source: string, zObject: ZObjectLiteral): boolean {
+	if (zObject.enclosingConst && /output|response|result/i.test(zObject.enclosingConst)) {
+		return true;
+	}
+	const before = source.slice(Math.max(0, zObject.callStart - 160), zObject.callStart);
+	return /(?:^|[\s,{])(?:output|response)\s*:\s*$/.test(before);
+}
+
+function vendorKeyFindingsForObject(
+	source: string,
+	zObject: ZObjectLiteral,
+): Array<{ key: string; line: number }> {
+	const keys = collectTopLevelObjectKeys(source, zObject.objectStart, zObject.objectEnd);
+	const digitFamilies = new Map<string, Set<string>>();
+	for (const key of keys) {
+		const digitMatch = /^([a-z][a-zA-Z]*)(\d+)[a-z]*$/i.exec(key.name);
+		if (!digitMatch?.[1] || !digitMatch[2]) {
+			continue;
+		}
+		const digits = digitFamilies.get(digitMatch[1]) ?? new Set<string>();
+		digits.add(digitMatch[2]);
+		digitFamilies.set(digitMatch[1], digits);
+	}
+
+	return keys
+		.filter((key) => {
+			if (!/^[a-z][a-zA-Z0-9]*$/.test(key.name)) {
+				return true;
+			}
+			const digitMatch = /^([a-z][a-zA-Z]*)(\d+)[a-z]*$/i.exec(key.name);
+			return digitMatch?.[1] !== undefined && (digitFamilies.get(digitMatch[1])?.size ?? 0) >= 2;
+		})
+		.map((key) => ({ key: key.name, line: offsetToLine(source, key.offset) }));
+}
+
+function collectTopLevelObjectKeys(
+	source: string,
+	objectStart: number,
+	objectEnd: number,
+): Array<{ name: string; offset: number }> {
+	const keys: Array<{ name: string; offset: number }> = [];
+	let index = objectStart + 1;
+	while (index < objectEnd) {
+		index = skipWhitespaceAndComments(source, index, objectEnd);
+		if (index >= objectEnd || source[index] === "}") {
+			break;
+		}
+		const keyStart = index;
+		let key: string | undefined;
+		const quote = source[index];
+		if (quote === '"' || quote === "'") {
+			const endQuote = findStringEnd(source, index);
+			if (endQuote === -1) {
+				break;
+			}
+			key = source.slice(index + 1, endQuote);
+			index = endQuote + 1;
+		} else {
+			const idMatch = /^[A-Za-z_$][\w$]*/.exec(source.slice(index));
+			if (idMatch?.[0]) {
+				key = idMatch[0];
+				index += idMatch[0].length;
+			}
+		}
+		index = skipWhitespaceAndComments(source, index, objectEnd);
+		if (key && source[index] === ":") {
+			keys.push({ name: key, offset: keyStart });
+			index = skipObjectValue(source, index + 1, objectEnd);
+		} else {
+			index = skipObjectValue(source, index, objectEnd);
+		}
+		if (source[index] === ",") {
+			index += 1;
+		}
+	}
+	return keys;
+}
+
+function findVendorTimestampLeakFindings(providerRoot: string): SourceFinding[] {
+	const findings: SourceFinding[] = [];
+	const seen = new Set<string>();
+
+	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
+		const source = readFileSync(filePath, "utf8");
+		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		const zObjectRanges = findZObjectLiterals(source).map((zObject) => ({
+			start: zObject.callStart,
+			end: zObject.objectEnd,
+		}));
+		const upstreamRanges = findUpstreamMarkedConstRanges(source);
+		const fixtureResponseRanges = [
+			...findPropertyObjectRanges(source, "response"),
+			...findPropertyObjectRanges(source, "output"),
+		].filter((range) => rangeHasPrecedingFixtureMarker(source, range.start));
+
+		for (const range of fixtureResponseRanges) {
+			for (const literal of findStringLiteralsInRange(source, range)) {
+				if (
+					rangeContainsOffset(zObjectRanges, literal.offset) ||
+					rangeContainsOffset(upstreamRanges, literal.offset) ||
+					!isVendorTimestampCandidate(literal.value, lineAtOffset(source, literal.offset))
+				) {
+					continue;
+				}
+				const line = offsetToLine(source, literal.offset);
+				const key = `${relPath}:${line}:${literal.value}`;
+				if (!seen.has(key)) {
+					seen.add(key);
+					findings.push({ file: relPath, line });
+					if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
+						return findings;
+					}
+				}
+			}
+		}
+	}
+
+	return findings;
+}
+
+function findPropertyObjectRanges(source: string, propertyName: string): ObjectRange[] {
+	const ranges: ObjectRange[] = [];
+	const escaped = propertyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	const pattern = new RegExp(`(?:^|[^\\w$])["']?${escaped}["']?\\s*:`, "g");
+	for (let match = pattern.exec(source); match !== null; match = pattern.exec(source)) {
+		const objectStart = findNextNonWhitespace(source, match.index + match[0].length);
+		if (objectStart === -1 || source[objectStart] !== "{") {
+			continue;
+		}
+		const objectEnd = findMatchingBracket(source, objectStart);
+		if (objectEnd === -1) {
+			continue;
+		}
+		ranges.push({ start: objectStart, end: objectEnd });
+		pattern.lastIndex = objectEnd;
+	}
+	return ranges;
+}
+
+function rangeHasPrecedingFixtureMarker(source: string, offset: number): boolean {
+	const before = source.slice(Math.max(0, offset - 2000), offset);
+	return /\bfixtures\s*:/.test(before);
+}
+
+function findUpstreamMarkedConstRanges(source: string): ObjectRange[] {
+	const ranges: ObjectRange[] = [];
+	const pattern =
+		/(?:^|\n)[ \t]*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?\s*=/g;
+	for (let match = pattern.exec(source); match !== null; match = pattern.exec(source)) {
+		const name = match[1];
+		if (!name || !/upstream|raw|vendor/i.test(name)) {
+			continue;
+		}
+		const start = match.index + match[0].length;
+		const expression = balancedValueExpression(source, start);
+		ranges.push({ start, end: start + expression.length });
+	}
+	return ranges;
+}
+
+function findStringLiteralsInRange(
+	source: string,
+	range: ObjectRange,
+): Array<{ value: string; offset: number }> {
+	const literals: Array<{ value: string; offset: number }> = [];
+	let index = range.start;
+	while (index <= range.end) {
+		const quote = source[index];
+		if (quote !== '"' && quote !== "'") {
+			index += 1;
+			continue;
+		}
+		const end = findStringEnd(source, index);
+		if (end === -1) {
+			break;
+		}
+		literals.push({ value: source.slice(index + 1, end), offset: index });
+		index = end + 1;
+	}
+	return literals;
+}
+
+function isVendorTimestampCandidate(value: string, line: string): boolean {
+	if (/^\d{8}$/.test(value)) {
+		return isPlausibleCompactDate(value);
+	}
+	if (/^\d{12}$/.test(value)) {
+		return isPlausibleCompactDate(value.slice(0, 8)) && isPlausibleHourMinute(value.slice(8, 12));
+	}
+	if (/^\d{14}$/.test(value)) {
+		const seconds = Number(value.slice(12, 14));
+		return (
+			isPlausibleCompactDate(value.slice(0, 8)) &&
+			isPlausibleHourMinute(value.slice(8, 12)) &&
+			seconds >= 0 &&
+			seconds <= 59
+		);
+	}
+	if (/^\d{4}$/.test(value) && /(time|date|at|open|close|updated|created)/i.test(line)) {
+		return isPlausibleHourMinute(value);
+	}
+	return false;
+}
+
+function isPlausibleCompactDate(value: string): boolean {
+	const year = Number(value.slice(0, 4));
+	const month = Number(value.slice(4, 6));
+	const day = Number(value.slice(6, 8));
+	return year >= 1900 && year <= 2099 && month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
+
+function isPlausibleHourMinute(value: string): boolean {
+	const hour = Number(value.slice(0, 2));
+	const minute = Number(value.slice(2, 4));
+	return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
+}
+
+function nearestPrecedingConstName(source: string, offset: number): string | undefined {
+	const prefix = source.slice(0, offset);
+	const matches = prefix.matchAll(
+		/(?:^|\n)[ \t]*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?\s*=/g,
+	);
+	let name: string | undefined;
+	for (const match of matches) {
+		name = match[1];
+	}
+	return name;
+}
+
+function findNextNonWhitespace(source: string, start: number): number {
+	for (let index = start; index < source.length; index += 1) {
+		if (!/\s/.test(source[index] ?? "")) {
+			return index;
+		}
+	}
+	return -1;
+}
+
+function findMatchingBracket(source: string, openIndex: number): number {
+	const open = source[openIndex];
+	const close = open === "{" ? "}" : open === "(" ? ")" : open === "[" ? "]" : undefined;
+	if (!close) {
+		return -1;
+	}
+	let depth = 0;
+	for (let index = openIndex; index < source.length; index += 1) {
+		const char = source[index];
+		if (char === '"' || char === "'" || char === "`") {
+			const stringEnd = findStringEnd(source, index);
+			if (stringEnd === -1) {
+				return -1;
+			}
+			index = stringEnd;
+			continue;
+		}
+		if (char === open) {
+			depth += 1;
+		} else if (char === close) {
+			depth -= 1;
+			if (depth === 0) {
+				return index;
+			}
+		}
+	}
+	return -1;
+}
+
+function findStringEnd(source: string, start: number): number {
+	const quote = source[start];
+	for (let index = start + 1; index < source.length; index += 1) {
+		if (source[index] === "\\") {
+			index += 1;
+			continue;
+		}
+		if (source[index] === quote) {
+			return index;
+		}
+	}
+	return -1;
+}
+
+function skipWhitespaceAndComments(source: string, start: number, end: number): number {
+	let index = start;
+	while (index < end) {
+		if (/\s/.test(source[index] ?? "")) {
+			index += 1;
+			continue;
+		}
+		if (source.startsWith("//", index)) {
+			const newline = source.indexOf("\n", index + 2);
+			index = newline === -1 ? end : newline + 1;
+			continue;
+		}
+		if (source.startsWith("/*", index)) {
+			const close = source.indexOf("*/", index + 2);
+			index = close === -1 ? end : close + 2;
+			continue;
+		}
+		break;
+	}
+	return index;
+}
+
+function skipObjectValue(source: string, start: number, end: number): number {
+	let index = start;
+	while (index < end) {
+		const char = source[index];
+		if (char === '"' || char === "'" || char === "`") {
+			const stringEnd = findStringEnd(source, index);
+			if (stringEnd === -1) {
+				return end;
+			}
+			index = stringEnd + 1;
+			continue;
+		}
+		if (char === "{" || char === "(" || char === "[") {
+			const close = findMatchingBracket(source, index);
+			if (close === -1) {
+				return end;
+			}
+			index = close + 1;
+			continue;
+		}
+		if (char === "," || char === "}") {
+			return index;
+		}
+		index += 1;
+	}
+	return index;
+}
+
+function rangeContainsOffset(ranges: readonly ObjectRange[], offset: number): boolean {
+	return ranges.some((range) => offset >= range.start && offset <= range.end);
+}
+
+function lineAtOffset(source: string, offset: number): string {
+	const start = source.lastIndexOf("\n", offset) + 1;
+	const end = source.indexOf("\n", offset);
+	return source.slice(start, end === -1 ? source.length : end);
 }
 
 function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
