@@ -1,0 +1,7 @@
+{
+	"kind": "poll",
+	"turnId": "fixture.invalid.timing-unknown-field",
+	"timing": {
+		"recommendedIntervalMs": 5000
+	}
+}

@@ -264,6 +264,8 @@ export interface ProviderConfig<
 	};
 	operations: OperationMapConfig<TOperations>;
 	healthMonitor?: ProviderHealthMonitorConfig;
+	/** New name for `healthMonitor` (transitional alias); declaring both is a ValidationError. */
+	healthProbe?: ProviderHealthMonitorConfig;
 	healthJourneys?: readonly HealthJourneyDefinition[];
 }
 
@@ -1213,6 +1215,7 @@ function assertBoundedIntegerMs(
 function validateProviderHealthMonitor(
 	providerId: string,
 	healthMonitor: unknown,
+	field: "healthMonitor" | "healthProbe" = "healthMonitor",
 ): void {
 	if (healthMonitor === undefined) return;
 	if (
@@ -1221,21 +1224,21 @@ function validateProviderHealthMonitor(
 		Array.isArray(healthMonitor)
 	)
 		throw new ValidationError(
-			`Provider "${providerId}" has invalid healthMonitor: must be an object.`,
+			`Provider "${providerId}" has invalid ${field}: must be an object.`,
 			{
-				fix: `Set healthMonitor to { requiredSecrets?: string[]; serviceAccount?: string }`,
+				fix: `Set ${field} to { requiredSecrets?: string[]; serviceAccount?: string }`,
 			},
 		);
 	const healthMonitorRecord = Object.fromEntries(Object.entries(healthMonitor));
 	rejectUnknownFields(
 		healthMonitorRecord,
 		PROVIDER_HEALTH_MONITOR_FIELDS,
-		"healthMonitor",
+		field,
 	);
 	if (healthMonitorRecord.defaultProbeTimeoutMs !== undefined) {
 		assertBoundedIntegerMs(
 			healthMonitorRecord.defaultProbeTimeoutMs,
-			`Provider "${providerId}" healthMonitor.defaultProbeTimeoutMs`,
+			`Provider "${providerId}" ${field}.defaultProbeTimeoutMs`,
 			{
 				min: HEALTH_CHECK_TIMEOUT_MS_MIN,
 				max: HEALTH_CHECK_TIMEOUT_MS_MAX,
@@ -1246,7 +1249,7 @@ function validateProviderHealthMonitor(
 	if (healthMonitorRecord.defaultDegradedThresholdMs !== undefined) {
 		assertBoundedIntegerMs(
 			healthMonitorRecord.defaultDegradedThresholdMs,
-			`Provider "${providerId}" healthMonitor.defaultDegradedThresholdMs`,
+			`Provider "${providerId}" ${field}.defaultDegradedThresholdMs`,
 			{
 				min: HEALTH_CHECK_DEGRADED_THRESHOLD_MS_MIN,
 				max: HEALTH_CHECK_DEGRADED_THRESHOLD_MS_MAX,
@@ -1258,12 +1261,12 @@ function validateProviderHealthMonitor(
 	if (requiredSecrets !== undefined) {
 		if (!Array.isArray(requiredSecrets))
 			throw new ValidationError(
-				`Provider "${providerId}" has invalid healthMonitor.requiredSecrets: must be string[].`,
+				`Provider "${providerId}" has invalid ${field}.requiredSecrets: must be string[].`,
 			);
 		for (const [index, secret] of requiredSecrets.entries()) {
 			if (typeof secret !== "string" || secret.length === 0)
 				throw new ValidationError(
-					`Provider "${providerId}" has invalid healthMonitor.requiredSecrets[${index}]: must be a non-empty string.`,
+					`Provider "${providerId}" has invalid ${field}.requiredSecrets[${index}]: must be a non-empty string.`,
 				);
 		}
 	}
@@ -1275,23 +1278,23 @@ function validateProviderHealthMonitor(
 			Array.isArray(credentialInputs)
 		) {
 			throw new ValidationError(
-				`Provider "${providerId}" has invalid healthMonitor.credentialInputs: must be an object mapping auth input fields to env var names.`,
+				`Provider "${providerId}" has invalid ${field}.credentialInputs: must be an object mapping auth input fields to env var names.`,
 			);
 		}
-		for (const [field, envVar] of Object.entries(credentialInputs)) {
-			if (field.trim().length === 0) {
+		for (const [inputField, envVar] of Object.entries(credentialInputs)) {
+			if (inputField.trim().length === 0) {
 				throw new ValidationError(
-					`Provider "${providerId}" has invalid healthMonitor.credentialInputs key: must be a non-empty auth input field.`,
+					`Provider "${providerId}" has invalid ${field}.credentialInputs key: must be a non-empty auth input field.`,
 				);
 			}
 			if (typeof envVar !== "string" || envVar.trim().length === 0) {
 				throw new ValidationError(
-					`Provider "${providerId}" has invalid healthMonitor.credentialInputs.${field}: must be a non-empty env var name.`,
+					`Provider "${providerId}" has invalid ${field}.credentialInputs.${inputField}: must be a non-empty env var name.`,
 				);
 			}
 			if (Array.isArray(requiredSecrets) && !requiredSecrets.includes(envVar)) {
 				throw new ValidationError(
-					`Provider "${providerId}" healthMonitor.credentialInputs.${field} references ${envVar}, which must also be listed in healthMonitor.requiredSecrets.`,
+					`Provider "${providerId}" ${field}.credentialInputs.${inputField} references ${envVar}, which must also be listed in ${field}.requiredSecrets.`,
 				);
 			}
 		}
@@ -1305,32 +1308,32 @@ function validateProviderHealthMonitor(
 			Array.isArray(probeOverrides)
 		)
 			throw new ValidationError(
-				`Provider "${providerId}" has invalid healthMonitor.probeOverrides: must be an object keyed by probe id.`,
+				`Provider "${providerId}" has invalid ${field}.probeOverrides: must be an object keyed by probe id.`,
 			);
 		for (const [probeId, override] of Object.entries(probeOverrides)) {
 			if (probeId.length === 0)
 				throw new ValidationError(
-					`Provider "${providerId}" has invalid healthMonitor.probeOverrides key: must be a non-empty probe id.`,
+					`Provider "${providerId}" has invalid ${field}.probeOverrides key: must be a non-empty probe id.`,
 				);
 			if (!override || typeof override !== "object" || Array.isArray(override))
 				throw new ValidationError(
-					`Provider "${providerId}" has invalid healthMonitor.probeOverrides["${probeId}"]: must be an object.`,
+					`Provider "${providerId}" has invalid ${field}.probeOverrides["${probeId}"]: must be an object.`,
 				);
 			const overrideRecord = Object.fromEntries(Object.entries(override));
 			rejectUnknownFields(
 				overrideRecord,
 				PROVIDER_HEALTH_MONITOR_PROBE_OVERRIDE_FIELDS,
-				`healthMonitor.probeOverrides["${probeId}"]`,
+				`${field}.probeOverrides["${probeId}"]`,
 			);
 			const interval = overrideRecord.interval;
 			if (interval !== undefined && !isPositiveMsDurationString(interval))
 				throw new ValidationError(
-					`Provider "${providerId}" has invalid healthMonitor.probeOverrides["${probeId}"].interval: must be a positive ms-style duration string such as 30s, 5m, 8h, or 1 day.`,
+					`Provider "${providerId}" has invalid ${field}.probeOverrides["${probeId}"].interval: must be a positive ms-style duration string such as 30s, 5m, 8h, or 1 day.`,
 				);
 			if (overrideRecord.timeoutMs !== undefined) {
 				assertBoundedIntegerMs(
 					overrideRecord.timeoutMs,
-					`Provider "${providerId}" healthMonitor.probeOverrides["${probeId}"].timeoutMs`,
+					`Provider "${providerId}" ${field}.probeOverrides["${probeId}"].timeoutMs`,
 					{
 						min: HEALTH_CHECK_TIMEOUT_MS_MIN,
 						max: HEALTH_CHECK_TIMEOUT_MS_MAX,
@@ -1341,7 +1344,7 @@ function validateProviderHealthMonitor(
 			if (overrideRecord.degradedThresholdMs !== undefined) {
 				assertBoundedIntegerMs(
 					overrideRecord.degradedThresholdMs,
-					`Provider "${providerId}" healthMonitor.probeOverrides["${probeId}"].degradedThresholdMs`,
+					`Provider "${providerId}" ${field}.probeOverrides["${probeId}"].degradedThresholdMs`,
 					{
 						min: HEALTH_CHECK_DEGRADED_THRESHOLD_MS_MIN,
 						max: HEALTH_CHECK_DEGRADED_THRESHOLD_MS_MAX,
@@ -1357,7 +1360,7 @@ function validateProviderHealthMonitor(
 		(typeof serviceAccount !== "string" || serviceAccount.length === 0)
 	)
 		throw new ValidationError(
-			`Provider "${providerId}" has invalid healthMonitor.serviceAccount: must be a non-empty string.`,
+			`Provider "${providerId}" has invalid ${field}.serviceAccount: must be a non-empty string.`,
 		);
 }
 
@@ -2372,7 +2375,18 @@ export function defineProvider<
 		config.operations,
 		journeyCoveredOperations,
 	);
-	validateProviderHealthMonitor(config.id, config.healthMonitor);
+	if (config.healthMonitor !== undefined && config.healthProbe !== undefined)
+		throw new ValidationError(
+			`Provider "${config.id}" declares both healthMonitor and healthProbe. They are aliases; declare exactly one.`,
+			{
+				fix: "Keep healthProbe (the new name) and delete the healthMonitor block.",
+			},
+		);
+	validateProviderHealthMonitor(
+		config.id,
+		config.healthProbe ?? config.healthMonitor,
+		config.healthProbe !== undefined ? "healthProbe" : "healthMonitor",
+	);
 	validateOperationFixtures(config.id, config.operations);
 	validateProviderProxy(config);
 	validateProviderStt(config);
@@ -2405,7 +2419,10 @@ export function defineProvider<
 		context: config.context,
 		meta: config.meta,
 		operations: config.operations,
-		healthMonitor: config.healthMonitor,
+		// Transitional healthMonitor → healthProbe alias: mirror whichever field
+		// was declared onto both so old and new consumers keep working.
+		healthMonitor: config.healthMonitor ?? config.healthProbe,
+		healthProbe: config.healthProbe ?? config.healthMonitor,
 		healthJourneys: config.healthJourneys,
 	};
 }

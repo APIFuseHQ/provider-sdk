@@ -202,6 +202,7 @@ export type {
 	ProviderContext,
 	ProviderDefinition,
 	ProviderHealthMonitorConfig,
+	ProviderHealthProbeConfig,
 	ProviderLocale,
 	ProviderLocaleKey,
 	ProviderLocaleKeyInput,

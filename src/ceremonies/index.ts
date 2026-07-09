@@ -1,7 +1,8 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
-import Ajv from "ajv";
+import Ajv2020 from "ajv/dist/2020.js";
 
+import { AUTH_TURN_SCHEMA, type KnownAuthTurnKind } from "../auth-turn";
 import {
 	FlowExpiredError,
 	ProviderSecretError,
@@ -15,53 +16,18 @@ import type {
 	FlowContext,
 } from "../types";
 
-type TurnKind =
-	| "abort"
-	| "challenge"
-	| "complete"
-	| "form"
-	| "message"
-	| "multi_choice"
-	| "poll"
-	| "redirect"
-	| "retry";
+type TurnKind = KnownAuthTurnKind;
 
 type CeremonyHandler = AuthFlowInputHandler;
 
 type JsonObject = Record<string, unknown>;
 
-const ajv = new Ajv({ allErrors: true, strict: true, strictSchema: true });
+const ajv = new Ajv2020({ allErrors: true, strict: true, strictSchema: true });
 
-const authTurnSchema = {
-	type: "object",
-	additionalProperties: false,
-	required: ["kind", "turnId"],
-	properties: {
-		kind: { type: "string", minLength: 1 },
-		turnId: { type: "string", minLength: 1 },
-		expiresAt: { type: "string", minLength: 1 },
-		data: {
-			type: "object",
-			additionalProperties: true,
-		},
-		expectedInput: {
-			type: "object",
-			additionalProperties: true,
-		},
-		hint: { type: "string" },
-		hintKey: { type: "string" },
-		timing: {
-			type: "object",
-			additionalProperties: false,
-			properties: {
-				suggestedPollIntervalMs: { type: "number", minimum: 1 },
-				maxWaitMs: { type: "number", minimum: 1 },
-			},
-		},
-	},
-} as const;
-
-const validateAuthTurn = ajv.compile(authTurnSchema);
+// Runtime ceremony-output validation derives from the exported versioned
+// contract: it compiles the exact AUTH_TURN_SCHEMA document shipped at
+// dist/auth-turn/auth-turn.v1.schema.json, so the two cannot drift.
+const validateAuthTurn = ajv.compile(AUTH_TURN_SCHEMA);
 
 const OAUTH2_STATE_KEY = "__oauth2_state";
 const OAUTH2_PKCE_VERIFIER_KEY = "__oauth2_pkce_verifier";

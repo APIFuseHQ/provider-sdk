@@ -1,0 +1,9 @@
+{
+	"kind": "poll",
+	"turnId": "fixture.poll",
+	"hint": "Continue polling until the device flow completes.",
+	"timing": {
+		"suggestedPollIntervalMs": 5000,
+		"maxWaitMs": 120000
+	}
+}

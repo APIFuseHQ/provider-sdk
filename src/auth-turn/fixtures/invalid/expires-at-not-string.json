@@ -1,0 +1,5 @@
+{
+	"kind": "challenge",
+	"turnId": "fixture.invalid.expires-at-not-string",
+	"expiresAt": 1767225600000
+}

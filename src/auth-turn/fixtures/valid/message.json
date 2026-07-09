@@ -1,0 +1,13 @@
+{
+	"kind": "message",
+	"turnId": "fixture.message",
+	"hint": "Enter the code on the verification page, then poll for completion.",
+	"data": {
+		"user_code": "FIXT-CODE",
+		"verification_uri": "https://example.com/device"
+	},
+	"timing": {
+		"suggestedPollIntervalMs": 5000,
+		"maxWaitMs": 120000
+	}
+}

@@ -77,6 +77,12 @@ import type {
 	SttContext,
 } from "../types";
 import {
+	createSelfTestApp,
+	createSelfTestInvoke,
+	resolveSelfTestPort,
+} from "./self-test";
+import { resolveSelfTestMasterSecrets } from "./self-test-token";
+import {
 	type AuthFlowRequest,
 	AuthFlowRequestSchema,
 	type AuthFlowResponse,
@@ -1710,6 +1716,12 @@ function getBunServeRuntime(): BunServeRuntime | undefined {
 export interface ServeOptions extends ProviderServerOptions {
 	host?: string;
 	port?: number;
+	/**
+	 * Port for the internal self-test listener (default 3001 or
+	 * APIFUSE__PROVIDER_RUNTIME__SELF_TEST_PORT). The listener only starts
+	 * when APIFUSE__PROVIDER_RUNTIME__SELF_TEST_MASTER_SECRET is present.
+	 */
+	selfTestPort?: number;
 }
 
 export async function serve(
@@ -1737,5 +1749,21 @@ export async function serve(
 		hostname: options.host ?? DEFAULT_HOST,
 		fetch: app.fetch,
 	});
+
+	// Internal self-test listener (health dependency inversion): a SEPARATE
+	// socket the tenant-facing gateway never dials. Off by default — it only
+	// starts when the shared self-test master secret env is present.
+	const selfTestSecrets = resolveSelfTestMasterSecrets();
+	if (selfTestSecrets) {
+		const selfTestApp = createSelfTestApp(provider, {
+			secrets: selfTestSecrets,
+			invoke: createSelfTestInvoke(app),
+		});
+		bunRuntime.serve({
+			port: options.selfTestPort ?? resolveSelfTestPort(),
+			hostname: options.host ?? DEFAULT_HOST,
+			fetch: selfTestApp.fetch,
+		});
+	}
 	await Promise.resolve();
 }

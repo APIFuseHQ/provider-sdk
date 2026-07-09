@@ -1,0 +1,15 @@
+{
+	"kind": "multi_choice",
+	"turnId": "fixture.multi_choice",
+	"hint": "Choose an authentication method.",
+	"data": {
+		"choices": ["oauth", "form"]
+	},
+	"expectedInput": {
+		"type": "object",
+		"required": ["choice"],
+		"properties": {
+			"choice": { "type": "string", "enum": ["oauth", "form"] }
+		}
+	}
+}

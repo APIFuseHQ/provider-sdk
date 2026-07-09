@@ -60,6 +60,13 @@ const requiredPaths = [
 	"dist/cli/templates/provider/operations/ping.ts.tpl",
 	"dist/cli/templates/provider/schemas/ping.ts.tpl",
 	"dist/cli/templates/provider/upstream/README.md.tpl",
+	"dist/auth-turn/index.js",
+	"dist/auth-turn/index.d.ts",
+	"dist/auth-turn/auth-turn.v1.schema.json",
+	"dist/auth-turn/fixtures/valid/abort.json",
+	"dist/auth-turn/fixtures/valid/complete.json",
+	"dist/auth-turn/fixtures/invalid/unknown-top-level-field.json",
+	"src/auth-turn/auth-turn.v1.schema.json",
 ];
 const forbiddenMatches = filePaths.filter(
 	(path) =>
