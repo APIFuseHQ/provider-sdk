@@ -7,6 +7,7 @@ import { createServer } from "node:net";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
+import * as acorn from "acorn";
 import { z } from "zod";
 
 import packageJson from "../package.json";
@@ -1975,6 +1976,7 @@ function scoreFixtureCoverage(provider: ProviderDefinition): SubmitCheck {
 function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 	const operations = Object.entries(provider.operations);
 	const missing: string[] = [];
+	const vacuous: string[] = [];
 	const placeholder: string[] = [];
 	const unsupported: string[] = [];
 	const generatedStarter: string[] = [];
@@ -1985,6 +1987,9 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 		if (!hasCheck && !hasUnsupported) {
 			missing.push(operationId);
 			continue;
+		}
+		if (hasCheck && !hasUnsupported && hasOnlyVacuousHealthCases(operation.healthCheck)) {
+			vacuous.push(operationId);
 		}
 		if (hasUnsupported) {
 			const reason = operation.healthCheckUnsupported?.reason ?? "";
@@ -2008,6 +2013,17 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 			`For ${missing.join(", ")}, add \`healthCheck: { interval, cases }\` for safe read-only upstream probes, or add \`healthCheckUnsupported: { reason: "<specific reason>" }\`.`,
 			CATEGORY_MAX_POINTS.health,
 			missing,
+		);
+	}
+
+	if (vacuous.length > 0) {
+		return blocker(
+			"health-coverage",
+			"health",
+			"One or more operations have healthCheck cases with empty assertions.",
+			`healthCheck.assertions for ${vacuous.join(", ")} is empty — assert on status and response shape (e.g. throw or return {status:'degraded'} when the upstream contract breaks), or declare healthCheckUnsupported with a specific reason if the operation genuinely cannot be probed.`,
+			CATEGORY_MAX_POINTS.health,
+			vacuous.map((operationId) => `${operationId}: empty healthCheck.assertions`),
 		);
 	}
 
@@ -2059,6 +2075,381 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 		"health",
 		"All operations declare real health checks.",
 		CATEGORY_MAX_POINTS.health,
+	);
+}
+
+function hasOnlyVacuousHealthCases(
+	healthCheck: ProviderDefinition["operations"][string]["healthCheck"],
+): boolean {
+	const cases = healthCheck?.cases;
+	if (!Array.isArray(cases) || cases.length === 0) {
+		return true;
+	}
+	return cases.every((healthCase) => isVacuousAssertionFunction(healthCase?.assertions));
+}
+
+function isVacuousAssertionFunction(assertions: unknown): boolean {
+	if (typeof assertions !== "function") {
+		return true;
+	}
+
+	let source: string;
+	try {
+		source = Function.prototype.toString.call(assertions);
+	} catch {
+		return false;
+	}
+
+	// Native / bound functions stringify to `function () { [native code] }` with
+	// no inspectable body or params. The underlying implementation may inspect
+	// ctx, so fail open (do not flag) rather than mistake it for an empty body.
+	if (/\[native code\]/.test(source)) {
+		return false;
+	}
+
+	const fn = parseAssertionFunction(source);
+	if (!fn) {
+		// Unparseable source → fail open (treat as a real assertion). A false
+		// negative here only misses a no-op; a false positive would wrongly
+		// reject a valid contributor.
+		return false;
+	}
+
+	// A real health assertion MUST either throw when the upstream contract
+	// breaks, or inspect the probe response, which is delivered exclusively
+	// through the assertion's own parameter(s). Working on the parsed AST (not
+	// text) makes this precise at the syntactic layer: a `throw` only counts
+	// when it is a real ThrowStatement in THIS function's body (not inside a
+	// nested, uninvoked function), and a parameter reference is checked against
+	// the actual bound names (destructuring binds the local alias, not the
+	// property key). This closes the whole equivalent-no-op class — empty
+	// bodies, `void 0`, `({})`, `Promise.resolve()`, `await Promise.resolve()`,
+	// `.then()`, `new Promise(r => r())`, side-effect-only bodies, throws hidden
+	// in uninvoked closures — without enumerating spellings.
+	if (functionThrows(fn)) {
+		return false;
+	}
+	const bound = new Set<string>();
+	for (const param of fn.params) {
+		collectBoundNames(param, bound);
+	}
+	if (bound.size === 0) {
+		return true;
+	}
+	// A parameter reference anywhere in the (reachable) body is treated as
+	// inspecting the response. This is deliberately syntactic, not a dataflow
+	// analysis.
+	//
+	// KNOWN LIMITATION (accepted): a body that reads the parameter but never
+	// turns that read into an outcome — no throw, no returned verdict — still
+	// passes, e.g. `({ status }) => { console.info(status); }`. Precisely
+	// rejecting it would require tracking whether the read flows to a throw
+	// argument or return value through arbitrary local bindings and invoked
+	// helpers (`const ok = ctx.output.ok; return ok ? ...` / a called helper that
+	// throws). That is transitive use-def dataflow, and an imprecise version
+	// FALSE-BLOCKS real assertions of exactly those shapes — verified
+	// empirically. Under the fail-open contract (rejecting a real contributor is
+	// strictly worse than missing a no-op) we accept the miss here. This gate
+	// stops accidental/lazy no-ops (empty bodies, `void 0`, `Promise.resolve()`,
+	// throws in uninvoked closures); a determined bypass via a decorative ctx
+	// read is no easier than writing the real one-line `throw`, and the actual
+	// defense against a runtime-empty assertion is the live `--smoke` probe.
+	return !referencesBoundNames(fn, bound);
+}
+
+type AssertionFunctionNode =
+	| acorn.ArrowFunctionExpression
+	| acorn.FunctionExpression
+	| acorn.FunctionDeclaration;
+
+function isFunctionNode(node: acorn.AnyNode): node is AssertionFunctionNode {
+	return (
+		node.type === "ArrowFunctionExpression" ||
+		node.type === "FunctionExpression" ||
+		node.type === "FunctionDeclaration"
+	);
+}
+
+/**
+ * Parse the `Function.prototype.toString()` output of an assertion into its AST
+ * function node. The stringified form can be an arrow (`(a) => {}`), a function
+ * expression (`function (a) {}`), or a bare method (`foo() {}`), so try a few
+ * wrappers until one parses. Returns undefined on any parse failure so callers
+ * fail open.
+ */
+function parseAssertionFunction(source: string): AssertionFunctionNode | undefined {
+	const candidates = [source, `(${source})`, `({${source}})`];
+	for (const candidate of candidates) {
+		let program: acorn.Program;
+		try {
+			program = acorn.parse(candidate, { ecmaVersion: "latest" });
+		} catch {
+			continue;
+		}
+		const fn = findFirstFunction(program);
+		if (fn) {
+			return fn;
+		}
+	}
+	return undefined;
+}
+
+/** Depth-first search for the first function node in a parsed program. */
+function findFirstFunction(root: acorn.AnyNode): AssertionFunctionNode | undefined {
+	let found: AssertionFunctionNode | undefined;
+	walkAst(root, (node) => {
+		if (found) {
+			return false;
+		}
+		if (isFunctionNode(node)) {
+			found = node;
+			return false;
+		}
+		return true;
+	});
+	return found;
+}
+
+/**
+ * Collect the identifier names actually BOUND by a parameter pattern. For
+ * destructuring, the binding is the local target (`value`), not the source
+ * property key — so `({ status: ignored })` binds `ignored`, and a body that
+ * merely mentions `status` is not referencing a parameter.
+ */
+function collectBoundNames(pattern: acorn.Pattern | null, out: Set<string>): void {
+	if (!pattern) {
+		return;
+	}
+	switch (pattern.type) {
+		case "Identifier":
+			out.add(pattern.name);
+			break;
+		case "AssignmentPattern":
+			collectBoundNames(pattern.left, out);
+			break;
+		case "RestElement":
+			collectBoundNames(pattern.argument, out);
+			break;
+		case "ArrayPattern":
+			for (const element of pattern.elements) {
+				collectBoundNames(element, out);
+			}
+			break;
+		case "ObjectPattern":
+			for (const property of pattern.properties) {
+				if (property.type === "RestElement") {
+					collectBoundNames(property.argument, out);
+				} else {
+					// `.value` is the local binding target, `.key` is the source
+					// property name — bind only the former.
+					collectBoundNames(property.value, out);
+				}
+			}
+			break;
+	}
+}
+
+/**
+ * True if the function contains a real `throw` statement in ITS OWN body —
+ * descending through control flow but NOT into nested functions, whose throws
+ * do not execute unless that nested function is invoked.
+ */
+function functionThrows(fn: AssertionFunctionNode): boolean {
+	if (fn.body.type !== "BlockStatement") {
+		// Concise arrow returning an expression cannot contain a throw statement.
+		return false;
+	}
+	let throws = false;
+	walkAst(fn.body, (node) => {
+		if (throws) {
+			return false;
+		}
+		if (node.type === "ThrowStatement") {
+			throws = true;
+			return false;
+		}
+		// Do not descend into nested function bodies.
+		if (isFunctionNode(node)) {
+			return false;
+		}
+		return true;
+	});
+	return throws;
+}
+
+/**
+ * True if the function's body references any of the given bound parameter names
+ * as an actual value. Property KEYS (`{ status: ... }`, `obj.status`) are not
+ * references; computed members (`obj[status]`) are. Nested functions that
+ * re-bind the same name shadow it, so their bodies are searched with the
+ * shadowed name removed from the target set.
+ */
+function referencesBoundNames(fn: AssertionFunctionNode, bound: Set<string>): boolean {
+	if (bound.size === 0) {
+		return false;
+	}
+	let referenced = false;
+	walkAstValues(fn.body, bound, fn.body, null, null, () => {
+		referenced = true;
+	});
+	return referenced;
+}
+
+/**
+ * Walk `node`, invoking `onReference` when an Identifier in value position
+ * matches a name in `names`. Skips property keys and non-computed member
+ * properties. On entering a nested function, removes any parameter names it
+ * rebinds (shadowing) from the active set for that subtree, and does NOT descend
+ * into a PROVABLY-UNINVOKED helper — a function bound to a local name that is
+ * never referenced again anywhere in the assertion body, so it cannot run when
+ * the assertion runs (e.g. `(ctx) => { const later = () => ctx.status; }`). Its
+ * parameter reads therefore must not count as inspecting the response, mirroring
+ * how `functionThrows` ignores throws inside nested functions.
+ *
+ * Crucially, a helper that IS referenced again (a call site like `check()`) is
+ * NOT skipped — its body is searched — so real assertions that factor the check
+ * into a local helper still pass. Immediately-invoked callbacks (`.every(cb)`,
+ * IIFEs, callees) are likewise searched. When in doubt we descend (fail open):
+ * the only skip is a helper we can prove is never invoked.
+ */
+function walkAstValues(
+	node: acorn.AnyNode,
+	names: Set<string>,
+	outerBody: acorn.AnyNode,
+	parent: acorn.AnyNode | null,
+	parentKey: string | null,
+	onReference: () => void,
+): void {
+	if (names.size === 0) {
+		return;
+	}
+	if (node.type === "Identifier") {
+		if (names.has(node.name)) {
+			onReference();
+		}
+		return;
+	}
+	// Nested function: subtract its own parameter bindings (shadowing) before
+	// descending into its body — and skip it only when it is a provably
+	// uninvoked helper.
+	if (isFunctionNode(node)) {
+		const shadowed = new Set<string>();
+		for (const param of node.params) {
+			collectBoundNames(param, shadowed);
+		}
+		const visible = new Set<string>();
+		for (const name of names) {
+			if (!shadowed.has(name)) {
+				visible.add(name);
+			}
+		}
+		if (visible.size === 0 || isProvablyUninvokedHelper(node, parent, parentKey, outerBody)) {
+			return;
+		}
+		for (const [key, child] of childEntries(node)) {
+			if (key === "params") {
+				continue;
+			}
+			walkAstValues(child, visible, outerBody, node, key, onReference);
+		}
+		return;
+	}
+	for (const [key, child] of childEntries(node)) {
+		// Skip non-computed property keys (`{ status: x }`) and member
+		// properties (`obj.status`) — these are names, not references.
+		if (key === "key" && node.type === "Property" && !node.computed) {
+			continue;
+		}
+		if (key === "property" && node.type === "MemberExpression" && !node.computed) {
+			continue;
+		}
+		walkAstValues(child, names, outerBody, node, key, onReference);
+	}
+}
+
+/**
+ * True if `fn` is a local helper bound to a name that is NEVER referenced again
+ * anywhere in `outerBody` — meaning it is never invoked, so its body does not run
+ * as part of evaluating the assertion. Only these provably-dead helpers are
+ * skipped; a helper with any call site (its name appearing more than once, i.e.
+ * beyond its own declaration) is treated as potentially executed and searched.
+ * Anonymous functions in expression position (call args, callees, returns) are
+ * never "uninvoked helpers" — they may run — so they are not skipped here.
+ */
+function isProvablyUninvokedHelper(
+	fn: AssertionFunctionNode,
+	parent: acorn.AnyNode | null,
+	parentKey: string | null,
+	outerBody: acorn.AnyNode,
+): boolean {
+	let helperName: string | undefined;
+	if (fn.type === "FunctionDeclaration" && fn.id) {
+		helperName = fn.id.name;
+	} else if (
+		parent &&
+		parent.type === "VariableDeclarator" &&
+		parentKey === "init" &&
+		parent.id.type === "Identifier"
+	) {
+		helperName = parent.id.name;
+	}
+	if (helperName === undefined) {
+		// Not a name-bound helper (anonymous callback / expression). It may run,
+		// so do not skip it.
+		return false;
+	}
+	// Count every occurrence of the helper name in the assertion body. Exactly
+	// one occurrence is its own binding declaration; more than one means there is
+	// at least one reference (call site), so the helper can run.
+	let occurrences = 0;
+	walkAst(outerBody, (node) => {
+		if (node.type === "Identifier" && node.name === helperName) {
+			occurrences += 1;
+		}
+		return true;
+	});
+	return occurrences <= 1;
+}
+
+/** Generic pre-order AST walk; `visit` returns false to stop descending. */
+function walkAst(node: acorn.AnyNode, visit: (node: acorn.AnyNode) => boolean): void {
+	if (!visit(node)) {
+		return;
+	}
+	for (const child of childNodes(node)) {
+		walkAst(child, visit);
+	}
+}
+
+function* childNodes(node: acorn.AnyNode): Generator<acorn.AnyNode> {
+	for (const [, child] of childEntries(node)) {
+		yield child;
+	}
+}
+
+function* childEntries(node: acorn.AnyNode): Generator<[string, acorn.AnyNode]> {
+	for (const key of Object.keys(node)) {
+		if (key === "type" || key === "start" || key === "end" || key === "loc" || key === "range") {
+			continue;
+		}
+		const value = (node as unknown as Record<string, unknown>)[key];
+		if (Array.isArray(value)) {
+			for (const item of value) {
+				if (isAstNode(item)) {
+					yield [key, item];
+				}
+			}
+		} else if (isAstNode(value)) {
+			yield [key, value];
+		}
+	}
+}
+
+function isAstNode(value: unknown): value is acorn.AnyNode {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		typeof (value as { type?: unknown }).type === "string"
 	);
 }
 

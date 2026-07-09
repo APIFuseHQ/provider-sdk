@@ -19,7 +19,8 @@ import {
 } from "../../bin/apifuse-submit-check";
 
 const tempDirs: string[] = [];
-const submitCheckCliPath = join(import.meta.dir, "..", "..", "bin", "apifuse-submit-check.ts");
+const repoRoot = dirname(dirname(import.meta.dir));
+const submitCheckCliPath = join(repoRoot, "bin", "apifuse-submit-check.ts");
 const tempRoot = join(process.cwd(), ".tmp-provider-sdk-submit-check-tests");
 
 setDefaultTimeout(60_000);
@@ -67,7 +68,7 @@ function linkLocalSdkDependency(providerDir: string): void {
 	mkdirSync(scopeDir, { recursive: true });
 	const target = join(scopeDir, "provider-sdk");
 	if (!existsSync(target)) {
-		symlinkSync(dirname(dirname(import.meta.dir)), target, "dir");
+		symlinkSync(repoRoot, target, "dir");
 	}
 	const binDir = join(providerDir, "node_modules", ".bin");
 	mkdirSync(binDir, { recursive: true });
@@ -231,7 +232,7 @@ export default defineProvider({
 				extraOperationFields ??
 				`healthCheck: {
         interval: "1m",
-        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: () => ({ status: "pass" }) }],
+        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: ({ status, data }) => { if (status !== 200) { return { status: "degraded", label: "lookup changed" }; } if (!data) { throw new Error("empty lookup response"); } } }],
       },`
 			}
     },
@@ -901,6 +902,413 @@ ${assertionLines(21)}
 		expect(report.summary.blockers).toBeGreaterThan(0);
 	});
 
+	it("blocks no-op health assertion bodies", async () => {
+		const dir = makeProviderDir(
+			"submit-vacuous-health-empty-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: () => {} }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.points).toBe(0);
+		expect(check?.remediation).toContain("healthCheck.assertions for lookup is empty");
+		expect(report.score.verdict).toBe("blocked");
+		expect(report.score.total).toBeLessThan(90);
+	});
+
+	for (const [label, assertionsSource] of [
+		["undefined concise return", "() => undefined"],
+		["comment-only block", "(ctx) => { /* TODO */ }"],
+		["destructured params empty block", "({ data, status }) => {}"],
+		["destructured params comment-only", "({ data }) => { /* TODO */ }"],
+		["non-arrow function empty block", "function ({ data }) {}"],
+		["block return empty object", "() => { return {}; }"],
+		["block return void 0", "() => { return void 0; }"],
+		["block return parenthesized object", "() => { return ({}); }"],
+		["concise void 0", "() => void 0"],
+		["concise parenthesized object", "() => ({})"],
+		["concise Promise.resolve()", "() => Promise.resolve()"],
+		["concise Promise.resolve({})", "() => Promise.resolve({})"],
+		["block return Promise.resolve()", "() => { return Promise.resolve(); }"],
+		["async empty block", "async () => {}"],
+		["async return Promise.resolve()", "async () => { return Promise.resolve(); }"],
+		["async awaited Promise.resolve()", "async () => await Promise.resolve()"],
+		["async awaited block", "async () => { await Promise.resolve(); }"],
+		["async awaited undefined", "async () => { await undefined; }"],
+		["Promise.resolve().then no-op", "() => Promise.resolve().then(() => {})"],
+		["new Promise resolve no-op", "() => new Promise((resolve) => resolve())"],
+		["side-effect only, no param ref", "() => { globalThis.__x = 1; }"],
+		["throw only inside a string literal", '() => { console.info("throw later"); }'],
+		["bound param referenced only in string", '({ data }) => { console.info("data missing"); }'],
+		["statement-position regex after if()", "(ctx) => { if (true) /ctx/.test('x'); }"],
+		["statement-position regex after while()", "(ctx) => { while (false) /ctx/.test('x'); }"],
+		["throw only as an object property key", "() => ({ throw: undefined })"],
+		["throw property key among others", "() => ({ throw: 1, status: 2 })"],
+		["throw only inside an uninvoked nested function", "() => { const later = () => { throw new Error('x'); }; }"],
+		["destructured alias whose binding is unused", "({ status: ignored }) => { const status = 200; }"],
+		["destructured alias, body refs the property key", "({ status: ignored }) => { return status; }"],
+		["nested arrow references only its own param", "function (ctx) { [1].forEach((x) => x + 1); }"],
+		["param read only inside an uninvoked arrow closure", "(ctx) => { const later = () => ctx.status; }"],
+		["param read only inside an uninvoked function declaration", "(ctx) => { function later() { return ctx.status; } }"],
+	] as const) {
+		it(`blocks vacuous health assertions with ${label}`, async () => {
+			const dir = makeProviderDir(
+				"submit-vacuous-health-",
+				validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: ${assertionsSource} }],
+      },`),
+			);
+			writeValidLocaleCatalogs(dir);
+			const report = await buildSubmitCheckReport(dir);
+			const check = report.checks.find((item) => item.id === "health-coverage");
+
+			expect(check?.level).toBe("blocker");
+			expect(check?.status).toBe("fail");
+			expect(check?.evidence?.join("\n")).toContain("lookup: empty healthCheck.assertions");
+		});
+	}
+
+	it("passes real health assertion bodies", async () => {
+		const dir = makeProviderDir(
+			"submit-real-health-assertions-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (ctx) => {
+            if (!ctx.output.ok) {
+              throw new Error("lookup must return ok");
+            }
+            if (ctx.durationMs > 1_000) {
+              return { status: "degraded", label: "slow lookup" };
+            }
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real destructured-parameter health assertion bodies", async () => {
+		const dir = makeProviderDir(
+			"submit-real-destructured-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: ({ status, data }) => {
+            if (status !== 200) {
+              return { status: "degraded", label: "lookup changed" };
+            }
+            if (!Array.isArray(data.items)) {
+              throw new Error("items must be an array");
+            }
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real async / Promise-returning health assertion bodies", async () => {
+		const dir = makeProviderDir(
+			"submit-real-async-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (ctx) =>
+            Promise.resolve(
+              ctx.output.ok ? undefined : { status: "degraded", label: "lookup down" },
+            ),
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes assertions that inspect a URL-shaped field via a regex literal", async () => {
+		// Regression: the `//` inside /^https?:\/\// must not be treated as a
+		// line comment and erase the data.url parameter reference.
+		const dir = makeProviderDir(
+			"submit-regex-url-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: ({ data }) => {
+            const ok = /^https?:\\/\\//.test(data.url);
+            return ok ? undefined : { status: "degraded", label: "bad url" };
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real assertions that use a nested arrow callback", async () => {
+		// Regression: a nested arrow (item => item.ok) must not be mistaken for
+		// the assertion's own signature. The outer function still inspects its
+		// own `ctx` parameter, so this is a real assertion.
+		const dir = makeProviderDir(
+			"submit-nested-arrow-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (ctx) => {
+            const allOk = ctx.output.items.every((item) => item.ok);
+            return allOk ? undefined : { status: "degraded", label: "bad item" };
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real assertions that use an immediately-invoked callback", async () => {
+		// Regression: a callback invoked immediately (Array#every) executes when
+		// the assertion runs, so a param read inside it is a real response
+		// inspection — unlike a deferred/uninvoked closure.
+		const dir = makeProviderDir(
+			"submit-immediate-callback-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (ctx) =>
+            ctx.output.items.every((item) => item.ok)
+              ? undefined
+              : { status: "degraded", label: "bad item" },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real assertions that invoke a local helper function", async () => {
+		// Regression (Codex): a helper factored into a local binding and then
+		// called — `const check = () => { ... }; check();` — must not be treated
+		// as a deferred/uninvoked closure. The call site means the helper runs, so
+		// its ctx read / throw is a real assertion.
+		const dir = makeProviderDir(
+			"submit-invoked-helper-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (ctx) => {
+            const check = () => {
+              if (!ctx.output.ok) {
+                throw new Error("lookup down");
+              }
+            };
+            check();
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes real assertions that alias a destructured parameter", async () => {
+		// Regression: destructuring binds the local alias (`renamed`), not the
+		// source property key (`status`). Referencing the alias is a real
+		// response inspection.
+		const dir = makeProviderDir(
+			"submit-alias-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: ({ status: renamed }) => {
+            if (renamed !== 200) {
+              throw new Error("lookup failed");
+            }
+          },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("fails open for native / bound assertion functions", async () => {
+		// Regression: fn.bind(...) stringifies to `function () { [native code] }`
+		// with no inspectable params; must not be flagged as an empty assertion.
+		const dir = makeProviderDir(
+			"submit-bound-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: (function checkHealth({ status }) {
+            if (status !== 200) {
+              throw new Error("lookup failed");
+            }
+          }).bind(undefined),
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes assertions whose parameter name contains $", async () => {
+		// Regression: `\b` word boundaries fail for `$ctx` because `$` is not a
+		// word char, so the param-reference check must use identifier-aware
+		// lookarounds.
+		const dir = makeProviderDir(
+			"submit-dollar-param-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{
+          name: "lookup ok",
+          input: { q: "btc" },
+          assertions: ($ctx) =>
+            $ctx.status === 200 ? undefined : { status: "degraded", label: "lookup down" },
+        }],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("passes assertions that reference the param only inside a regex or template expression", async () => {
+		// Regression (token-aware lexer): a `return /re/.test(param)` (the shape a
+		// transpiler may inline) and a `${param}` interpolation must both count as
+		// real parameter references. A `param.a / param.b` division must not be
+		// mistaken for a regex literal that swallows the reference.
+		const dir = makeProviderDir(
+			"submit-lexer-edge-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [
+          {
+            name: "url shape",
+            input: { q: "btc" },
+            assertions: ({ data }) => {
+              return /^https?:\\/\\//.test(data.url) ? undefined : { status: "degraded" };
+            },
+          },
+          {
+            name: "ratio",
+            input: { q: "eth" },
+            assertions: ({ data }) => {
+              return data.a / data.b > 1 ? undefined : { status: "degraded" };
+            },
+          },
+          {
+            name: "template",
+            input: { q: "sol" },
+            assertions: (ctx) =>
+              \`\${ctx.status}\` === "200" ? undefined : { status: "degraded" },
+          },
+        ],
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("blocks only operations whose health cases are all vacuous", async () => {
+		const source = validProviderSource().replace(
+			"    },\n  },\n});",
+			`    },
+    empty: {
+      descriptionKey: "operations.lookup.description",
+      input,
+      output,
+      annotations: { readOnly: true, idempotent: true, openWorld: true },
+      handler: async () => ({ ok: true }),
+      fixtures: { request: { q: "eth" }, response: { ok: true } },
+      healthCheck: {
+        interval: "1m",
+        cases: [{ name: "empty ok", input: { q: "eth" }, assertions: () => {} }],
+      },
+    },
+  },
+});`,
+		);
+		const dir = makeProviderDir("submit-mixed-vacuous-health-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence).toEqual(["empty: empty healthCheck.assertions"]);
+		expect(check?.remediation).toContain("healthCheck.assertions for empty is empty");
+		expect(check?.remediation).not.toContain("lookup is empty");
+	});
+
 	it("warns but does not block generated OAuth providers without credential keys", async () => {
 		const oauthSource = validProviderSource().replace(
 			'auth: { mode: "none" },',
@@ -989,6 +1397,21 @@ ${assertionLines(21)}
 				id: check.id,
 				remediation: expect.stringMatching(/\S/),
 			})),
+		);
+
+		const vacuousHealthDir = makeProviderDir(
+			"submit-remediation-vacuous-health-",
+			validProviderSource(`healthCheck: {
+        interval: "1m",
+        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: () => {} }],
+      },`),
+		);
+		writeValidLocaleCatalogs(vacuousHealthDir);
+		const vacuousHealthReport = await buildSubmitCheckReport(vacuousHealthDir);
+		expect(
+			vacuousHealthReport.checks.find((check) => check.id === "health-coverage")?.remediation,
+		).toContain(
+			"healthCheck.assertions for lookup is empty",
 		);
 	});
 
@@ -1576,7 +1999,7 @@ export default defineProvider({
       fixtures: { request: { q: "btc" }, response: { ok: true } },
       healthCheck: {
         interval: "1m",
-        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: () => ({ status: "pass" }) }],
+        cases: [{ name: "lookup ok", input: { q: "btc" }, assertions: ({ status, data }) => { if (status !== 200) { return { status: "degraded", label: "lookup changed" }; } if (!data) { throw new Error("empty lookup response"); } } }],
       },
     },
   },
