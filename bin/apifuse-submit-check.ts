@@ -731,10 +731,11 @@ function unwrapParens(expr: string): string {
 // closing bracket. This lets a property value be read across newlines, so a
 // multi-line `input: z.object({...})\n.passthrough()` is captured whole.
 function balancedValueExpression(source: string, valueStart: number): string {
+	const masked = maskCommentsAndStrings(source);
 	let depth = 0;
 	let index = valueStart;
 	for (; index < source.length; index += 1) {
-		const ch = source[index];
+		const ch = masked[index];
 		if (ch === "(" || ch === "{" || ch === "[") {
 			depth += 1;
 		} else if (ch === ")" || ch === "}" || ch === "]") {
@@ -2021,26 +2022,54 @@ function scoreFixtureProvenance(
 		"fixture-provenance",
 		"fixtures",
 		"No recorded upstream fixture evidence (__fixtures__/raw.json is empty or missing).",
-		"Run `bun run record` (apifuse record) against the real upstream to capture raw payloads; derive normalized expectations in tests from mapper(recorded raw). Hand-authored fixtures without recorded provenance are not reviewable.",
+		"Run `bun run record` (apifuse record) against the real upstream to capture actual recorded upstream payloads per operation in __fixtures__/raw.json; derive normalized expectations in tests from mapper(recorded raw). Hand-authored fixtures without recorded provenance are not reviewable.",
 		0,
 		["__fixtures__/raw.json"],
 	);
 }
 
 function hasNonEmptyRecordedFixture(value: unknown): boolean {
+	return recordedFixtureStats(value, 0).hasNestedSubstance;
+}
+
+function recordedFixtureStats(
+	value: unknown,
+	depth: number,
+): { hasNestedSubstance: boolean; leafValues: number } {
 	if (value === null || value === undefined) {
-		return false;
+		return { hasNestedSubstance: false, leafValues: 0 };
 	}
 	if (Array.isArray(value)) {
-		return value.some(hasNonEmptyRecordedFixture);
+		let leafValues = 0;
+		let hasNestedSubstance = false;
+		for (const item of value) {
+			const child = recordedFixtureStats(item, depth + 1);
+			leafValues += child.leafValues;
+			hasNestedSubstance ||= child.hasNestedSubstance;
+		}
+		return {
+			hasNestedSubstance: hasNestedSubstance || (depth >= 1 && value.length > 0 && leafValues >= 2),
+			leafValues,
+		};
 	}
 	if (typeof value === "object") {
-		return Object.values(value).some(hasNonEmptyRecordedFixture);
+		let leafValues = 0;
+		let hasNestedSubstance = false;
+		for (const item of Object.values(value)) {
+			const child = recordedFixtureStats(item, depth + 1);
+			leafValues += child.leafValues;
+			hasNestedSubstance ||= child.hasNestedSubstance;
+		}
+		return {
+			hasNestedSubstance:
+				hasNestedSubstance || (depth >= 1 && Object.keys(value).length > 0 && leafValues >= 2),
+			leafValues,
+		};
 	}
-	if (typeof value === "string") {
-		return value.length > 0;
+	if (typeof value === "string" && value.length === 0) {
+		return { hasNestedSubstance: false, leafValues: 0 };
 	}
-	return true;
+	return { hasNestedSubstance: false, leafValues: 1 };
 }
 
 function allOperationsAreGeneratedLocalScaffold(provider: ProviderDefinition): boolean {
@@ -2085,7 +2114,10 @@ type ZObjectLiteral = {
 	objectStart: number;
 	objectEnd: number;
 	callStart: number;
-	enclosingConst?: string;
+};
+
+type NamedObjectRange = ObjectRange & {
+	name: string;
 };
 
 function findVendorKeyLeakFindings(providerRoot: string): SourceFinding[] {
@@ -2095,8 +2127,9 @@ function findVendorKeyLeakFindings(providerRoot: string): SourceFinding[] {
 	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
 		const source = readFileSync(filePath, "utf8");
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		const upstreamRanges = findUpstreamMarkedConstRanges(source);
 		for (const zObject of findZObjectLiterals(source)) {
-			if (zObject.enclosingConst && /upstream|raw|vendor/i.test(zObject.enclosingConst)) {
+			if (rangeContainsOffset(upstreamRanges, zObject.callStart)) {
 				continue;
 			}
 			if (!zObjectAppearsPublicOutput(source, zObject)) {
@@ -2120,14 +2153,15 @@ function findVendorKeyLeakFindings(providerRoot: string): SourceFinding[] {
 
 function findZObjectLiterals(source: string): ZObjectLiteral[] {
 	const literals: ZObjectLiteral[] = [];
+	const masked = maskCommentsAndStrings(source);
 	const callPattern = /\bz\s*\.\s*object\s*\(/g;
-	for (let match = callPattern.exec(source); match !== null; match = callPattern.exec(source)) {
-		const parenIndex = source.indexOf("(", match.index);
-		const objectStart = findNextNonWhitespace(source, parenIndex + 1);
-		if (objectStart === -1 || source[objectStart] !== "{") {
+	for (let match = callPattern.exec(masked); match !== null; match = callPattern.exec(masked)) {
+		const parenIndex = masked.indexOf("(", match.index);
+		const objectStart = findNextNonWhitespace(masked, parenIndex + 1);
+		if (objectStart === -1 || masked[objectStart] !== "{") {
 			continue;
 		}
-		const objectEnd = findMatchingBracket(source, objectStart);
+		const objectEnd = findMatchingBracket(masked, objectStart);
 		if (objectEnd === -1) {
 			continue;
 		}
@@ -2135,7 +2169,6 @@ function findZObjectLiterals(source: string): ZObjectLiteral[] {
 			objectStart,
 			objectEnd,
 			callStart: match.index,
-			enclosingConst: nearestPrecedingConstName(source, match.index),
 		});
 		callPattern.lastIndex = objectEnd;
 	}
@@ -2143,7 +2176,8 @@ function findZObjectLiterals(source: string): ZObjectLiteral[] {
 }
 
 function zObjectAppearsPublicOutput(source: string, zObject: ZObjectLiteral): boolean {
-	if (zObject.enclosingConst && /output|response|result/i.test(zObject.enclosingConst)) {
+	const enclosingConst = findConstValueRangeContaining(source, zObject.callStart);
+	if (enclosingConst && /output|response|result/i.test(enclosingConst.name)) {
 		return true;
 	}
 	const before = source.slice(Math.max(0, zObject.callStart - 160), zObject.callStart);
@@ -2172,7 +2206,7 @@ function vendorKeyFindingsForObject(
 				return true;
 			}
 			const digitMatch = /^([a-z][a-zA-Z]*)(\d+)[a-z]*$/i.exec(key.name);
-			return digitMatch?.[1] !== undefined && (digitFamilies.get(digitMatch[1])?.size ?? 0) >= 2;
+			return digitMatch?.[1] !== undefined && (digitFamilies.get(digitMatch[1])?.size ?? 0) >= 3;
 		})
 		.map((key) => ({ key: key.name, line: offsetToLine(source, key.offset) }));
 }
@@ -2183,10 +2217,11 @@ function collectTopLevelObjectKeys(
 	objectEnd: number,
 ): Array<{ name: string; offset: number }> {
 	const keys: Array<{ name: string; offset: number }> = [];
+	const masked = maskCommentsAndStrings(source);
 	let index = objectStart + 1;
 	while (index < objectEnd) {
-		index = skipWhitespaceAndComments(source, index, objectEnd);
-		if (index >= objectEnd || source[index] === "}") {
+		index = skipWhitespaceAndComments(masked, index, objectEnd);
+		if (index >= objectEnd || masked[index] === "}") {
 			break;
 		}
 		const keyStart = index;
@@ -2199,21 +2234,41 @@ function collectTopLevelObjectKeys(
 			}
 			key = source.slice(index + 1, endQuote);
 			index = endQuote + 1;
+		} else if (masked[index] === "[") {
+			const computedEnd = findMatchingBracket(masked, index);
+			const literalStart = findNextNonWhitespace(masked, index + 1);
+			if (computedEnd === -1 || literalStart === -1) {
+				break;
+			}
+			const computedQuote = source[literalStart];
+			if (computedQuote === '"' || computedQuote === "'") {
+				const literalEnd = findStringEnd(source, literalStart);
+				const afterLiteral =
+					literalEnd === -1
+						? -1
+						: skipWhitespaceAndComments(masked, literalEnd + 1, computedEnd);
+				if (literalEnd !== -1 && afterLiteral === computedEnd) {
+					key = source.slice(literalStart + 1, literalEnd);
+				}
+			}
+			index = computedEnd + 1;
 		} else {
-			const idMatch = /^[A-Za-z_$][\w$]*/.exec(source.slice(index));
+			const idMatch = /^[A-Za-z_$][\w$]*/.exec(masked.slice(index));
 			if (idMatch?.[0]) {
 				key = idMatch[0];
 				index += idMatch[0].length;
 			}
 		}
-		index = skipWhitespaceAndComments(source, index, objectEnd);
-		if (key && source[index] === ":") {
+		index = skipWhitespaceAndComments(masked, index, objectEnd);
+		if (key && masked[index] === ":") {
 			keys.push({ name: key, offset: keyStart });
-			index = skipObjectValue(source, index + 1, objectEnd);
+			index = skipObjectValue(masked, index + 1, objectEnd);
 		} else {
-			index = skipObjectValue(source, index, objectEnd);
+			// Spread-based composition is intentionally not expanded here; this gate
+			// only evaluates keys visible in the object literal.
+			index = skipObjectValue(masked, index, objectEnd);
 		}
-		if (source[index] === ",") {
+		if (masked[index] === ",") {
 			index += 1;
 		}
 	}
@@ -2232,17 +2287,21 @@ function findVendorTimestampLeakFindings(providerRoot: string): SourceFinding[] 
 			end: zObject.objectEnd,
 		}));
 		const upstreamRanges = findUpstreamMarkedConstRanges(source);
+		const fixtureRanges = findPropertyObjectRanges(source, "fixtures");
 		const fixtureResponseRanges = [
 			...findPropertyObjectRanges(source, "response"),
 			...findPropertyObjectRanges(source, "output"),
-		].filter((range) => rangeHasPrecedingFixtureMarker(source, range.start));
+		].filter((range) => rangeContainedInRanges(fixtureRanges, range));
 
 		for (const range of fixtureResponseRanges) {
 			for (const literal of findStringLiteralsInRange(source, range)) {
 				if (
 					rangeContainsOffset(zObjectRanges, literal.offset) ||
 					rangeContainsOffset(upstreamRanges, literal.offset) ||
-					!isVendorTimestampCandidate(literal.value, lineAtOffset(source, literal.offset))
+					!isVendorTimestampCandidate(
+						literal.value,
+						propertyKeyForStringLiteral(source, literal.offset),
+					)
 				) {
 					continue;
 				}
@@ -2264,14 +2323,15 @@ function findVendorTimestampLeakFindings(providerRoot: string): SourceFinding[] 
 
 function findPropertyObjectRanges(source: string, propertyName: string): ObjectRange[] {
 	const ranges: ObjectRange[] = [];
+	const masked = maskCommentsAndStrings(source);
 	const escaped = propertyName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	const pattern = new RegExp(`(?:^|[^\\w$])["']?${escaped}["']?\\s*:`, "g");
-	for (let match = pattern.exec(source); match !== null; match = pattern.exec(source)) {
-		const objectStart = findNextNonWhitespace(source, match.index + match[0].length);
-		if (objectStart === -1 || source[objectStart] !== "{") {
+	for (let match = pattern.exec(masked); match !== null; match = pattern.exec(masked)) {
+		const objectStart = findNextNonWhitespace(masked, match.index + match[0].length);
+		if (objectStart === -1 || masked[objectStart] !== "{") {
 			continue;
 		}
-		const objectEnd = findMatchingBracket(source, objectStart);
+		const objectEnd = findMatchingBracket(masked, objectStart);
 		if (objectEnd === -1) {
 			continue;
 		}
@@ -2281,25 +2341,31 @@ function findPropertyObjectRanges(source: string, propertyName: string): ObjectR
 	return ranges;
 }
 
-function rangeHasPrecedingFixtureMarker(source: string, offset: number): boolean {
-	const before = source.slice(Math.max(0, offset - 2000), offset);
-	return /\bfixtures\s*:/.test(before);
+function findUpstreamMarkedConstRanges(source: string): ObjectRange[] {
+	return findNamedConstValueRanges(source)
+		.filter((range) => /upstream|raw|vendor/i.test(range.name))
+		.map(({ start, end }) => ({ start, end }));
 }
 
-function findUpstreamMarkedConstRanges(source: string): ObjectRange[] {
-	const ranges: ObjectRange[] = [];
+function findNamedConstValueRanges(source: string): NamedObjectRange[] {
+	const ranges: NamedObjectRange[] = [];
+	const masked = maskCommentsAndStrings(source);
 	const pattern =
 		/(?:^|\n)[ \t]*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?\s*=/g;
-	for (let match = pattern.exec(source); match !== null; match = pattern.exec(source)) {
+	for (let match = pattern.exec(masked); match !== null; match = pattern.exec(masked)) {
 		const name = match[1];
-		if (!name || !/upstream|raw|vendor/i.test(name)) {
+		if (!name) {
 			continue;
 		}
 		const start = match.index + match[0].length;
-		const expression = balancedValueExpression(source, start);
-		ranges.push({ start, end: start + expression.length });
+		const expression = balancedValueExpression(masked, start);
+		ranges.push({ name, start, end: start + expression.length });
 	}
 	return ranges;
+}
+
+function findConstValueRangeContaining(source: string, offset: number): NamedObjectRange | undefined {
+	return findNamedConstValueRanges(source).find((range) => offset >= range.start && offset <= range.end);
 }
 
 function findStringLiteralsInRange(
@@ -2310,7 +2376,7 @@ function findStringLiteralsInRange(
 	let index = range.start;
 	while (index <= range.end) {
 		const quote = source[index];
-		if (quote !== '"' && quote !== "'") {
+		if (quote !== '"' && quote !== "'" && quote !== "`") {
 			index += 1;
 			continue;
 		}
@@ -2318,13 +2384,17 @@ function findStringLiteralsInRange(
 		if (end === -1) {
 			break;
 		}
+		if (quote === "`" && source.slice(index + 1, end).includes("${")) {
+			index = end + 1;
+			continue;
+		}
 		literals.push({ value: source.slice(index + 1, end), offset: index });
 		index = end + 1;
 	}
 	return literals;
 }
 
-function isVendorTimestampCandidate(value: string, line: string): boolean {
+function isVendorTimestampCandidate(value: string, key: string | undefined): boolean {
 	if (/^\d{8}$/.test(value)) {
 		return isPlausibleCompactDate(value);
 	}
@@ -2340,7 +2410,11 @@ function isVendorTimestampCandidate(value: string, line: string): boolean {
 			seconds <= 59
 		);
 	}
-	if (/^\d{4}$/.test(value) && /(time|date|at|open|close|updated|created)/i.test(line)) {
+	if (
+		/^\d{4}$/.test(value) &&
+		key !== undefined &&
+		/(?:^|_)at$|At$|time|date|open|close|updated|created/i.test(key)
+	) {
 		return isPlausibleHourMinute(value);
 	}
 	return false;
@@ -2357,18 +2431,6 @@ function isPlausibleHourMinute(value: string): boolean {
 	const hour = Number(value.slice(0, 2));
 	const minute = Number(value.slice(2, 4));
 	return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
-}
-
-function nearestPrecedingConstName(source: string, offset: number): string | undefined {
-	const prefix = source.slice(0, offset);
-	const matches = prefix.matchAll(
-		/(?:^|\n)[ \t]*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*(?::[^=\n]+)?\s*=/g,
-	);
-	let name: string | undefined;
-	for (const match of matches) {
-		name = match[1];
-	}
-	return name;
 }
 
 function findNextNonWhitespace(source: string, start: number): number {
@@ -2421,6 +2483,57 @@ function findStringEnd(source: string, start: number): number {
 		}
 	}
 	return -1;
+}
+
+function maskCommentsAndStrings(source: string): string {
+	const chars = source.split("");
+	for (let index = 0; index < source.length; index += 1) {
+		if (source.startsWith("//", index)) {
+			const bodyStart = index + 2;
+			const newline = source.indexOf("\n", bodyStart);
+			const end = newline === -1 ? source.length : newline;
+			for (let bodyIndex = bodyStart; bodyIndex < end; bodyIndex += 1) {
+				chars[bodyIndex] = " ";
+			}
+			index = end;
+			continue;
+		}
+		if (source.startsWith("/*", index)) {
+			const bodyStart = index + 2;
+			const close = source.indexOf("*/", bodyStart);
+			const end = close === -1 ? source.length : close;
+			for (let bodyIndex = bodyStart; bodyIndex < end; bodyIndex += 1) {
+				if (chars[bodyIndex] !== "\n") {
+					chars[bodyIndex] = " ";
+				}
+			}
+			index = close === -1 ? source.length : close + 1;
+			continue;
+		}
+		const quote = source[index];
+		if (quote !== '"' && quote !== "'" && quote !== "`") {
+			continue;
+		}
+		const end = findStringEnd(source, index);
+		if (end === -1) {
+			break;
+		}
+		// Preserve quoted property keys ("response": ...) so range/key scanners
+		// can still match them; only string VALUES are blanked.
+		let probe = end + 1;
+		while (probe < source.length && /\s/.test(source[probe] ?? "")) {
+			probe += 1;
+		}
+		if (source[probe] !== ":") {
+			for (let bodyIndex = index + 1; bodyIndex < end; bodyIndex += 1) {
+				if (chars[bodyIndex] !== "\n") {
+					chars[bodyIndex] = " ";
+				}
+			}
+		}
+		index = end;
+	}
+	return chars.join("");
 }
 
 function skipWhitespaceAndComments(source: string, start: number, end: number): number {
@@ -2477,10 +2590,41 @@ function rangeContainsOffset(ranges: readonly ObjectRange[], offset: number): bo
 	return ranges.some((range) => offset >= range.start && offset <= range.end);
 }
 
-function lineAtOffset(source: string, offset: number): string {
-	const start = source.lastIndexOf("\n", offset) + 1;
-	const end = source.indexOf("\n", offset);
-	return source.slice(start, end === -1 ? source.length : end);
+function rangeContainedInRanges(ranges: readonly ObjectRange[], candidate: ObjectRange): boolean {
+	return ranges.some((range) => candidate.start >= range.start && candidate.end <= range.end);
+}
+
+function propertyKeyForStringLiteral(source: string, literalOffset: number): string | undefined {
+	const masked = maskCommentsAndStrings(source);
+	let index = skipWhitespaceBackward(masked, literalOffset - 1);
+	if (masked[index] !== ":") {
+		return undefined;
+	}
+	index = skipWhitespaceBackward(masked, index - 1);
+	if (index < 0) {
+		return undefined;
+	}
+	if (source[index] === '"' || source[index] === "'") {
+		const quote = source[index];
+		let start = index - 1;
+		while (start >= 0) {
+			if (source[start] === quote && source[start - 1] !== "\\") {
+				return source.slice(start + 1, index);
+			}
+			start -= 1;
+		}
+		return undefined;
+	}
+	const keyMatch = /[A-Za-z_$][\w$]*$/.exec(masked.slice(0, index + 1));
+	return keyMatch?.[0];
+}
+
+function skipWhitespaceBackward(source: string, start: number): number {
+	let index = start;
+	while (index >= 0 && /\s/.test(source[index] ?? "")) {
+		index -= 1;
+	}
+	return index;
 }
 
 function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
