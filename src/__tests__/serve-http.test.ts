@@ -470,6 +470,26 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 }
 
 describe("provider proxy affinity", () => {
+	it("uses identity-only connection IDs for connection affinity", () => {
+		const provider = {
+			...createTestProvider(),
+			proxy: {
+				mode: "required",
+				provider: "smartproxy",
+				geo: { country: "KR" },
+				session: { affinity: "connection" },
+			},
+		} satisfies ProviderDefinition;
+		const request = {
+			input: {},
+			connectionId: "af_con_0123456789ABCDEFGHJKMN",
+		} as Parameters<typeof resolveProviderProxyAffinityKey>[1];
+
+		expect(resolveProviderProxyAffinityKey(provider, request, "search")).toBe(
+			"af_con_0123456789ABCDEFGHJKMN",
+		);
+	});
+
 	it("scopes operation affinity by provider and operation instead of provider-wide fallback", () => {
 		const provider = {
 			...createTestProvider(),
