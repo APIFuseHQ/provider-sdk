@@ -92,6 +92,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 				input: z.object({ value: z.string() }),
 				output: z.object({
 					echoed: z.string(),
+					connectionId: z.string().optional(),
 					secret: z.string().optional(),
 				}),
 				handler: async (ctx, input) => {
@@ -99,6 +100,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 
 					return {
 						echoed: parsed.value,
+						connectionId: ctx.request?.connectionId,
 						secret: ctx.credential.get("token"),
 					};
 				},
@@ -530,6 +532,7 @@ describe("provider HTTP server", () => {
 		expect(await response.json()).toEqual({
 			data: {
 				echoed: "hello",
+				connectionId: "af_con_1",
 				secret: "secret-token",
 			},
 		});
@@ -548,6 +551,26 @@ describe("provider HTTP server", () => {
 				cpuTotalMicros: expect.any(Number),
 			}),
 		]);
+	});
+
+	it("preserves optional connection identity without credential material", async () => {
+		const response = await app.request("/v1/echo", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_optional_connection",
+				input: { value: "hello" },
+				connectionId: "af_con_0123456789ABCDEFGHJKMN",
+			}),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			data: {
+				echoed: "hello",
+				connectionId: "af_con_0123456789ABCDEFGHJKMN",
+			},
+		});
 	});
 
 	it("fails closed for deployed browser providers when the CDP pool URL is missing", async () => {

@@ -21,6 +21,7 @@ export const OperationConnectionSchema = z.object({
 export const OperationRequestSchema = z.object({
 	requestId: z.string(),
 	input: z.record(z.string(), z.unknown()),
+	connectionId: z.string().optional(),
 	connection: OperationConnectionSchema.optional(),
 	headers: z.record(z.string(), z.string()).optional(),
 	trace: z.record(z.string(), z.string()).optional(),

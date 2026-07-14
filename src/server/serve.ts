@@ -245,7 +245,7 @@ function createProviderContext(
 		values: request.connection?.secrets,
 	});
 	const requestContext = {
-		connectionId: request.connection?.id,
+		connectionId: request.connectionId ?? request.connection?.id,
 		headers: request.headers ?? {},
 	};
 	const context = wrapWithInstrumentation({
