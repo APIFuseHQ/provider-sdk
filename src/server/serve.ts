@@ -196,7 +196,7 @@ export function resolveProviderProxyAffinityKey(
 	operationId: string,
 ): string {
 	const connectionKey =
-		request.connection?.id ?? request.connection?.externalRef;
+		resolveOperationConnectionId(request) ?? request.connection?.externalRef;
 	const affinity =
 		typeof provider.proxy === "object"
 			? provider.proxy.session?.affinity
@@ -205,6 +205,12 @@ export function resolveProviderProxyAffinityKey(
 		return `${provider.id}/${operationId}`;
 	}
 	return connectionKey ?? provider.id;
+}
+
+function resolveOperationConnectionId(
+	request: OperationRequest,
+): string | undefined {
+	return request.connection?.id ?? request.connectionId;
 }
 
 function createProviderContext(
@@ -245,7 +251,7 @@ function createProviderContext(
 		values: request.connection?.secrets,
 	});
 	const requestContext = {
-		connectionId: request.connection?.id,
+		connectionId: resolveOperationConnectionId(request),
 		headers: request.headers ?? {},
 	};
 	const context = wrapWithInstrumentation({

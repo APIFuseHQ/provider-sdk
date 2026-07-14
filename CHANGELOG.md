@@ -35,6 +35,7 @@
 ## Unreleased
 
 - Add `arrayBuffer()` and `bytes()` to `HttpResponse` so `ctx.http` consumers can read binary-safe upstream bodies; internal response handling is now byte-first.
+- Preserve identity-only operation `connectionId` values in `ProviderContext` without requiring credential material.
 
 ## 2.1.0-beta.15
 

@@ -92,6 +92,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 				input: z.object({ value: z.string() }),
 				output: z.object({
 					echoed: z.string(),
+					connectionId: z.string().optional(),
 					secret: z.string().optional(),
 				}),
 				handler: async (ctx, input) => {
@@ -99,6 +100,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 
 					return {
 						echoed: parsed.value,
+						connectionId: ctx.request?.connectionId,
 						secret: ctx.credential.get("token"),
 					};
 				},
@@ -468,6 +470,42 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 }
 
 describe("provider proxy affinity", () => {
+	it("prefers credential connection IDs and falls back to identity-only IDs", () => {
+		const provider = {
+			...createTestProvider(),
+			proxy: {
+				mode: "required",
+				provider: "smartproxy",
+				geo: { country: "KR" },
+				session: { affinity: "connection" },
+			},
+		} satisfies ProviderDefinition;
+		const identityOnlyRequest = {
+			requestId: "req_identity_only",
+			input: {},
+			connectionId: "af_con_0123456789ABCDEFGHJKMN",
+		} satisfies Parameters<typeof resolveProviderProxyAffinityKey>[1];
+		const credentialRequest = {
+			requestId: "req_credential",
+			input: {},
+			connectionId: "af_con_conflicting_top_level",
+			connection: {
+				id: "af_con_credential",
+				mode: "credentials",
+				secrets: { token: "secret-token" },
+				metadata: {},
+				externalRef: "ext_credential",
+			},
+		} satisfies Parameters<typeof resolveProviderProxyAffinityKey>[1];
+
+		expect(
+			resolveProviderProxyAffinityKey(provider, identityOnlyRequest, "search"),
+		).toBe("af_con_0123456789ABCDEFGHJKMN");
+		expect(
+			resolveProviderProxyAffinityKey(provider, credentialRequest, "search"),
+		).toBe("af_con_credential");
+	});
+
 	it("scopes operation affinity by provider and operation instead of provider-wide fallback", () => {
 		const provider = {
 			...createTestProvider(),
@@ -530,6 +568,7 @@ describe("provider HTTP server", () => {
 		expect(await response.json()).toEqual({
 			data: {
 				echoed: "hello",
+				connectionId: "af_con_1",
 				secret: "secret-token",
 			},
 		});
@@ -548,6 +587,26 @@ describe("provider HTTP server", () => {
 				cpuTotalMicros: expect.any(Number),
 			}),
 		]);
+	});
+
+	it("preserves optional connection identity without credential material", async () => {
+		const response = await app.request("/v1/echo", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_optional_connection",
+				input: { value: "hello" },
+				connectionId: "af_con_0123456789ABCDEFGHJKMN",
+			}),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			data: {
+				echoed: "hello",
+				connectionId: "af_con_0123456789ABCDEFGHJKMN",
+			},
+		});
 	});
 
 	it("fails closed for deployed browser providers when the CDP pool URL is missing", async () => {
