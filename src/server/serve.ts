@@ -210,7 +210,7 @@ export function resolveProviderProxyAffinityKey(
 function resolveOperationConnectionId(
 	request: OperationRequest,
 ): string | undefined {
-	return request.connectionId ?? request.connection?.id;
+	return request.connection?.id ?? request.connectionId;
 }
 
 function createProviderContext(

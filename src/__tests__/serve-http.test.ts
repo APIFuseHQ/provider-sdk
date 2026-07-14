@@ -470,7 +470,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 }
 
 describe("provider proxy affinity", () => {
-	it("uses identity-only connection IDs for connection affinity", () => {
+	it("prefers credential connection IDs and falls back to identity-only IDs", () => {
 		const provider = {
 			...createTestProvider(),
 			proxy: {
@@ -480,14 +480,30 @@ describe("provider proxy affinity", () => {
 				session: { affinity: "connection" },
 			},
 		} satisfies ProviderDefinition;
-		const request = {
+		const identityOnlyRequest = {
+			requestId: "req_identity_only",
 			input: {},
 			connectionId: "af_con_0123456789ABCDEFGHJKMN",
-		} as Parameters<typeof resolveProviderProxyAffinityKey>[1];
+		} satisfies Parameters<typeof resolveProviderProxyAffinityKey>[1];
+		const credentialRequest = {
+			requestId: "req_credential",
+			input: {},
+			connectionId: "af_con_conflicting_top_level",
+			connection: {
+				id: "af_con_credential",
+				mode: "credentials",
+				secrets: { token: "secret-token" },
+				metadata: {},
+				externalRef: "ext_credential",
+			},
+		} satisfies Parameters<typeof resolveProviderProxyAffinityKey>[1];
 
-		expect(resolveProviderProxyAffinityKey(provider, request, "search")).toBe(
-			"af_con_0123456789ABCDEFGHJKMN",
-		);
+		expect(
+			resolveProviderProxyAffinityKey(provider, identityOnlyRequest, "search"),
+		).toBe("af_con_0123456789ABCDEFGHJKMN");
+		expect(
+			resolveProviderProxyAffinityKey(provider, credentialRequest, "search"),
+		).toBe("af_con_credential");
 	});
 
 	it("scopes operation affinity by provider and operation instead of provider-wide fallback", () => {
