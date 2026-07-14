@@ -609,6 +609,34 @@ describe("provider HTTP server", () => {
 		});
 	});
 
+	it("keeps request identity aligned with nested credentials", async () => {
+		const response = await app.request("/v1/echo", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_conflicting_connection",
+				input: { value: "hello" },
+				connectionId: "af_con_top_level",
+				connection: {
+					id: "af_con_nested",
+					mode: "credentials",
+					secrets: { token: "nested-secret-token" },
+					metadata: {},
+					externalRef: "ext_nested",
+				},
+			}),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			data: {
+				echoed: "hello",
+				connectionId: "af_con_nested",
+				secret: "nested-secret-token",
+			},
+		});
+	});
+
 	it("fails closed for deployed browser providers when the CDP pool URL is missing", async () => {
 		const previousRuntime = process.env.APIFUSE__PROVIDER__RUNTIME;
 		const previousPoolUrl = process.env.APIFUSE__CDP_POOL__URL;
