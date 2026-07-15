@@ -93,6 +93,7 @@
 	},
 	"dependencies": {
 		"@clack/prompts": "^1.5.1",
+		"@rgrove/parse-xml": "4.2.2",
 		"@types/ms": "^2.1.0",
 		"acorn": "^8.17.0",
 		"ajv": "^8.17",

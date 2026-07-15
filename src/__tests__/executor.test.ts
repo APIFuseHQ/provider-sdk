@@ -2,7 +2,19 @@ import { describe, expect, it, mock } from "bun:test";
 
 import { z } from "zod";
 
-import { SessionExpiredError, TransportError } from "../errors";
+import {
+	isSessionExpiredError,
+	SessionExpiredError,
+	TransportError,
+} from "../errors";
+
+// A query-qualified specifier forces Bun to evaluate errors.ts a second time,
+// producing a genuinely separate module identity (distinct constructors) that
+// models the packaged src/* vs a provider's dist/* SDK entrypoint split. Mirrors
+// the pattern proven in error-identity.test.ts.
+const duplicateSdk = import("../errors.ts?duplicate-sdk-instance") as Promise<
+	typeof import("../errors")
+>;
 import { createProviderCache } from "../runtime/cache";
 import { createTestProviderChoiceContext } from "../runtime/choice";
 import { executeOperation } from "../runtime/executor";
@@ -242,6 +254,38 @@ describe("executeOperation", () => {
 			name: "SessionExpiredError",
 			options: { retryable: true },
 		});
+		expect(calls).toBe(1);
+	});
+
+	it("upgrades a duplicate-module SessionExpiredError to retryable for opt-in operations", async () => {
+		const Dup = await duplicateSdk;
+		expect(Dup.SessionExpiredError).not.toBe(SessionExpiredError);
+
+		const ctx = createMockCtx({});
+		let calls = 0;
+		const provider = createMockProvider({
+			retryOnAuthRefresh: true,
+			handler: async () => {
+				calls++;
+				// A correctly branded SessionExpiredError thrown from a handler
+				// loaded through a duplicate/published SDK module: its constructor
+				// identity differs from the source executor's, so `instanceof`
+				// misses it and the retryable upgrade is silently skipped.
+				throw new Dup.SessionExpiredError();
+			},
+		});
+
+		let caught: unknown;
+		try {
+			await executeOperation(provider, "search", ctx, { query: "test" });
+		} catch (error) {
+			caught = error;
+		}
+
+		// The executor must recognize the cross-module error via the branded guard
+		// and upgrade it to retryable so Credential Service re-drives the operation.
+		expect(isSessionExpiredError(caught)).toBe(true);
+		expect((caught as SessionExpiredError).options?.retryable).toBe(true);
 		expect(calls).toBe(1);
 	});
 

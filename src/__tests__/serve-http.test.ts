@@ -1672,3 +1672,116 @@ describe("provider HTTP server", () => {
 		});
 	});
 });
+
+describe("provider HTTP server cross-module error identity", () => {
+	async function createDuplicateInstanceApp() {
+		// Genuine second module identity for the SDK errors, modelling the packaged
+		// src/* server importing errors whose provider throws dist/* errors.
+		const Dup = (await import("../errors.ts?duplicate-sdk-instance")) as typeof import(
+			"../errors"
+		);
+		const base = createTestProvider() as ProviderDefinition;
+		const provider = {
+			...base,
+			operations: {
+				...base.operations,
+				dupProviderError: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					handler: async () => {
+						throw new Dup.ProviderError("Missing provider service key", {
+							code: "CONFIGURATION_ERROR",
+							fix: "Set the provider service key.",
+						});
+					},
+				},
+				dupSessionExpired: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					handler: async () => {
+						throw new Dup.SessionExpiredError();
+					},
+				},
+				dupTransport: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					handler: async () => {
+						throw new Dup.TransportError("Request timed out", {
+							code: "transport_timeout",
+						});
+					},
+				},
+				unbrandedLookalike: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					handler: async () => {
+						const err = new Error("Missing provider service key") as Error & {
+							code?: string;
+							options?: unknown;
+						};
+						err.name = "ProviderError";
+						err.code = "CONFIGURATION_ERROR";
+						err.options = { code: "CONFIGURATION_ERROR" };
+						throw err;
+					},
+				},
+			},
+		} as ProviderDefinition;
+		return createServerApp(provider);
+	}
+
+	async function requestOperation(app: ReturnType<typeof createServerApp>, operation: string) {
+		return app.request(`/v1/${operation}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: `req_${operation}`, input: { value: "hello" } }),
+		});
+	}
+
+	it("classifies a duplicate-instance ProviderError instead of 500 internal_error", async () => {
+		const app = await createDuplicateInstanceApp();
+		const response = await requestOperation(app, "dupProviderError");
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({
+			error: {
+				code: "CONFIGURATION_ERROR",
+				message: "Missing provider service key",
+				requestId: "req_dupProviderError",
+				fix: "Set the provider service key.",
+			},
+		});
+	});
+
+	it("classifies a duplicate-instance SessionExpiredError as reauth_required", async () => {
+		const app = await createDuplicateInstanceApp();
+		const response = await requestOperation(app, "dupSessionExpired");
+
+		expect(response.status).toBe(401);
+		const body = await response.json();
+		expect(body.error.code).toBe("reauth_required");
+		expect(body.error.details.category).toBe("credential_expired");
+	});
+
+	it("classifies a duplicate-instance TransportError as a 504 upstream failure", async () => {
+		const app = await createDuplicateInstanceApp();
+		const response = await requestOperation(app, "dupTransport");
+
+		expect(response.status).toBe(504);
+		expect((await response.json()).error.code).toBe("transport_timeout");
+	});
+
+	it("keeps an unbranded lookalike as 500 internal_error", async () => {
+		const app = await createDuplicateInstanceApp();
+		const response = await requestOperation(app, "unbrandedLookalike");
+
+		expect(response.status).toBe(500);
+		expect(await response.json()).toEqual({
+			error: {
+				code: "internal_error",
+				message: "Internal error",
+				requestId: "req_unbrandedLookalike",
+			},
+		});
+	});
+});
