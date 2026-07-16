@@ -4,6 +4,7 @@ import path from "node:path";
 
 import Redis from "ioredis";
 
+import { BoundedExpiringMap } from "../runtime/bounded-expiring-map";
 import type { ProviderProxyPolicy, TraceConfig } from "../types";
 
 export const SMARTPROXY_APP_KEY_ENV = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
@@ -151,9 +152,7 @@ type ProxyRedisClient = Pick<
 	"connect" | "del" | "eval" | "get" | "on" | "pttl" | "set" | "status"
 >;
 
-const proxyCache = new Map<string, CachedProxyPool>();
 const proxyInflight = new Map<string, Promise<SmartproxyAllocationResult>>();
-const invalidatedProxyKeys = new Map<string, number>();
 const redisClients = new Map<string, ProxyRedisClient>();
 let proxyRedisForTests: ProxyRedisClient | undefined;
 let smartproxyAllocatorDeadlineMsForTests: number | undefined;
@@ -174,6 +173,16 @@ const SMARTPROXY_ALLOCATOR_RETRY_BASE_MS = 25;
 // reusing stale raw CONNECT endpoints as if they were valid for `life` minutes.
 const SMARTPROXY_EXTRACTION_CACHE_TTL_MS = 15_000;
 const SMARTPROXY_EXTRACTION_SOFT_REFRESH_MS = 10_000;
+const SMARTPROXY_POOL_CACHE_MAX_ENTRIES = 1_000;
+const SMARTPROXY_INVALIDATION_CACHE_MAX_ENTRIES = 1_000;
+const proxyCache = new BoundedExpiringMap<string, CachedProxyPool>({
+	maxEntries: SMARTPROXY_POOL_CACHE_MAX_ENTRIES,
+	expiresAt: (pool) => pool.expiresAt,
+});
+const invalidatedProxyKeys = new BoundedExpiringMap<string, number>({
+	maxEntries: SMARTPROXY_INVALIDATION_CACHE_MAX_ENTRIES,
+	expiresAt: (invalidatedUntil) => invalidatedUntil,
+});
 
 function redisUrlFromEnv(): string | undefined {
 	return (
@@ -207,6 +216,19 @@ export function __setSmartproxyAllocatorDeadlineMsForTests(
 	deadlineMs: number | undefined,
 ): void {
 	smartproxyAllocatorDeadlineMsForTests = deadlineMs;
+}
+
+/** @internal Test-only hook for verifying proxy-cache lifecycle invariants. */
+export function __getProxyResolutionCacheStatsForTests(): {
+	proxyCacheEntries: number;
+	proxyInflightEntries: number;
+	invalidatedProxyKeyEntries: number;
+} {
+	return {
+		proxyCacheEntries: proxyCache.size,
+		proxyInflightEntries: proxyInflight.size,
+		invalidatedProxyKeyEntries: invalidatedProxyKeys.size,
+	};
 }
 
 function getProxyRedis(): ProxyRedisClient | undefined {
@@ -673,10 +695,10 @@ async function allocateSmartproxy(
 	);
 	const startedAt = Date.now();
 	const now = startedAt;
-	const invalidatedUntil = invalidatedProxyKeys.get(cacheKey) ?? 0;
+	const invalidatedUntil = invalidatedProxyKeys.get(cacheKey, now) ?? 0;
 	const skipCached = invalidatedUntil > now;
-	const cached = proxyCache.get(cacheKey);
-	if (!skipCached && cached && isFresh(cached, now)) {
+	const cached = skipCached ? undefined : proxyCache.get(cacheKey, now);
+	if (cached) {
 		if (shouldSoftRefresh(cached, now)) {
 			void refreshSmartproxyPool(cacheKey, policy, appKey, lifetimeMinutes);
 			return {
@@ -742,7 +764,7 @@ async function readSmartproxyRedisPool(
 	}
 	const now = Date.now();
 	if (!isFresh(pool, now)) return null;
-	proxyCache.set(cacheKey, pool);
+	proxyCache.set(cacheKey, pool, now);
 	return {
 		pool,
 		telemetry: telemetryForPool(pool, "redis_hit", startedAt, { redisReadMs }),
@@ -1069,7 +1091,7 @@ async function allocateAndStoreSmartproxyPool(
 			rawConnect: true,
 		},
 	};
-	proxyCache.set(cacheKey, result);
+	proxyCache.set(cacheKey, result, allocatedAt);
 	if (options.redis && options.poolKey) {
 		const redis = options.redis;
 		const poolKey = options.poolKey;
@@ -1324,9 +1346,11 @@ function markSmartproxyCacheInvalidated(
 		options.affinityKey,
 		lifetimeMinutes,
 	);
+	const now = Date.now();
 	invalidatedProxyKeys.set(
 		cacheKey,
-		Date.now() + SMARTPROXY_INVALIDATION_SKIP_REDIS_MS,
+		now + SMARTPROXY_INVALIDATION_SKIP_REDIS_MS,
+		now,
 	);
 	proxyCache.delete(cacheKey);
 	proxyInflight.delete(cacheKey);

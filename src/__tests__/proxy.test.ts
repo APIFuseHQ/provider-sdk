@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import {
+	__getProxyResolutionCacheStatsForTests,
 	__setProxyRedisForTests,
 	__setSmartproxyAllocatorDeadlineMsForTests,
 	clearProxyResolutionCache,
@@ -683,6 +684,46 @@ describe("proxy integration", () => {
 			expect(cached.url).toBe("http://5.78.24.21:31001");
 			expect(fresh.url).toBe("http://5.78.24.22:31001");
 			expect(allocatorCalls).toBe(2);
+		} finally {
+			Date.now = originalNow;
+		}
+	});
+
+	it("reclaims expired Smartproxy pools when another affinity is allocated", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		let now = 1_700_000_000_000;
+		Date.now = () => now;
+		let allocatorCalls = 0;
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			return new Response(`5.78.24.${40 + allocatorCalls}:31001`, {
+				status: 200,
+			});
+		}) as typeof fetch;
+
+		const policy = {
+			mode: "required" as const,
+			provider: "smartproxy" as const,
+			geo: { country: "KR" },
+			session: { affinity: "connection" as const, poolSize: 1 },
+		};
+
+		try {
+			await resolveProxyConfigAsync({
+				affinityKey: "af_con_reclaim_a",
+				upstream: { proxy: policy },
+			});
+			expect(__getProxyResolutionCacheStatsForTests().proxyCacheEntries).toBe(1);
+
+			now += 16_000;
+			await resolveProxyConfigAsync({
+				affinityKey: "af_con_reclaim_b",
+				upstream: { proxy: policy },
+			});
+
+			expect(allocatorCalls).toBe(2);
+			expect(__getProxyResolutionCacheStatsForTests().proxyCacheEntries).toBe(1);
 		} finally {
 			Date.now = originalNow;
 		}
