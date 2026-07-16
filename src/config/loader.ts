@@ -158,6 +158,7 @@ type ProxyRedisClient = Pick<
 >;
 
 const proxyInflight = new Map<string, Promise<SmartproxyAllocationResult>>();
+const proxyAllocationPublicationTokens = new Map<string, symbol>();
 const redisClients = new Map<string, ProxyRedisClient>();
 let proxyRedisForTests: ProxyRedisClient | undefined;
 let smartproxyAllocatorDeadlineMsForTests: number | undefined;
@@ -272,11 +273,13 @@ export function __getProxyResolutionCacheStatsForTests(): {
 	proxyCacheEntries: number;
 	proxyInflightEntries: number;
 	invalidatedProxyKeyEntries: number;
+	proxyPublicationTokenEntries: number;
 } {
 	return {
 		proxyCacheEntries: proxyCache.size,
 		proxyInflightEntries: proxyInflight.size,
 		invalidatedProxyKeyEntries: invalidatedProxyKeys.size,
+		proxyPublicationTokenEntries: proxyAllocationPublicationTokens.size,
 	};
 }
 
@@ -778,14 +781,17 @@ async function allocateSmartproxy(
 		};
 	}
 
-	const promise = allocateSmartproxyShared(
+	let promise: Promise<SmartproxyAllocationResult>;
+	promise = allocateSmartproxyShared(
 		cacheKey,
 		policy,
 		appKey,
 		lifetimeMinutes,
 		startedAt,
 	).finally(() => {
-		proxyInflight.delete(cacheKey);
+		if (proxyInflight.get(cacheKey) === promise) {
+			proxyInflight.delete(cacheKey);
+		}
 	});
 	proxyInflight.set(cacheKey, promise);
 	const result = await promise;
@@ -1039,17 +1045,47 @@ async function readSmartproxyAllocatorBodyWithDeadline(
 	});
 }
 
+type SmartproxyPoolStoreOptions = {
+	cacheStatus: ProxyCacheStatus;
+	redis?: ProxyRedisClient;
+	poolKey?: string;
+};
+
 async function allocateAndStoreSmartproxyPool(
 	cacheKey: string,
 	policy: ProviderProxyPolicy,
 	appKey: string,
 	lifetimeMinutes: number,
 	startedAt: number,
-	options: {
-		cacheStatus: ProxyCacheStatus;
-		redis?: ProxyRedisClient;
-		poolKey?: string;
-	},
+	options: SmartproxyPoolStoreOptions,
+): Promise<SmartproxyAllocationResult> {
+	const publicationToken = Symbol("smartproxy-allocation-publication");
+	proxyAllocationPublicationTokens.set(cacheKey, publicationToken);
+	try {
+		return await allocateAndStoreSmartproxyPoolWithPublicationToken(
+			cacheKey,
+			policy,
+			appKey,
+			lifetimeMinutes,
+			startedAt,
+			publicationToken,
+			options,
+		);
+	} finally {
+		if (proxyAllocationPublicationTokens.get(cacheKey) === publicationToken) {
+			proxyAllocationPublicationTokens.delete(cacheKey);
+		}
+	}
+}
+
+async function allocateAndStoreSmartproxyPoolWithPublicationToken(
+	cacheKey: string,
+	policy: ProviderProxyPolicy,
+	appKey: string,
+	lifetimeMinutes: number,
+	startedAt: number,
+	publicationToken: symbol,
+	options: SmartproxyPoolStoreOptions,
 ): Promise<SmartproxyAllocationResult> {
 	const invalidationGuardAtStart = invalidatedProxyKeys.get(
 		cacheKey,
@@ -1144,6 +1180,18 @@ async function allocateAndStoreSmartproxyPool(
 			rawConnect: true,
 		},
 	};
+	if (proxyAllocationPublicationTokens.get(cacheKey) !== publicationToken) {
+		return {
+			pool: result,
+			telemetry: telemetryForPool(result, options.cacheStatus, startedAt, {
+				allocatorMs,
+				allocatorAttempts,
+				allocatorBodyClass,
+				...(allocatorStatus === undefined ? {} : { allocatorStatus }),
+				attempts: allocatorAttempts,
+			}),
+		};
+	}
 	proxyCache.set(cacheKey, result, allocatedAt);
 	if (options.redis && options.poolKey) {
 		const redis = options.redis;
@@ -1391,6 +1439,7 @@ function classifySmartproxyAllocatorBody(
 export function clearProxyResolutionCache(): void {
 	proxyCache.clear();
 	proxyInflight.clear();
+	proxyAllocationPublicationTokens.clear();
 	invalidatedProxyKeys.clear();
 	smartproxyInvalidationOverflowUntil = 0;
 }
@@ -1423,6 +1472,7 @@ function markSmartproxyCacheInvalidated(
 	);
 	proxyCache.delete(cacheKey);
 	proxyInflight.delete(cacheKey);
+	proxyAllocationPublicationTokens.delete(cacheKey);
 	return cacheKey;
 }
 

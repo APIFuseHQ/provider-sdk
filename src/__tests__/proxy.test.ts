@@ -943,6 +943,213 @@ describe("proxy integration", () => {
 		}
 	});
 
+	it("prevents an older allocation from publishing over a newer local replacement", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		const now = 1_700_000_000_000;
+		Date.now = () => now;
+		__setProxyRedisForTests(undefined);
+		let allocatorCalls = 0;
+		let markOlderStarted!: () => void;
+		let releaseOlder!: () => void;
+		const olderStarted = new Promise<void>((resolve) => {
+			markOlderStarted = resolve;
+		});
+		const olderRelease = new Promise<void>((resolve) => {
+			releaseOlder = resolve;
+		});
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			const allocatorCall = allocatorCalls;
+			if (allocatorCall === 2) {
+				markOlderStarted();
+				await olderRelease;
+			}
+			return new Response(`10.4.0.${allocatorCall}:31001`, { status: 200 });
+		}) as typeof fetch;
+
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+		const options = {
+			affinityKey: "af_con_allocation_publication",
+			upstream: { proxy: policy },
+		};
+
+		try {
+			const first = await resolveProxyConfigAsync(options);
+			expect(invalidateProxyResolutionCache(options)).toBe(true);
+			const olderPromise = resolveProxyConfigAsync(options);
+			await olderStarted;
+			expect(invalidateProxyResolutionCache(options)).toBe(true);
+			const newer = await resolveProxyConfigAsync(options);
+			releaseOlder();
+			const older = await olderPromise;
+			const localAfterOlder = await resolveProxyConfigAsync(options);
+
+			expect(first.url).toBe("http://10.4.0.1:31001");
+			expect(older.url).toBe("http://10.4.0.2:31001");
+			expect(newer.url).toBe("http://10.4.0.3:31001");
+			expect(localAfterOlder.url).toBe("http://10.4.0.3:31001");
+			expect(allocatorCalls).toBe(3);
+		} finally {
+			Date.now = originalNow;
+		}
+	});
+
+	it("prevents an invalidated in-flight allocation from publishing after guard overflow", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		const now = 1_700_000_000_000;
+		Date.now = () => now;
+		const redis = new FakeRedis();
+		__setProxyRedisForTests(redis);
+		let allocatorCalls = 0;
+		let markOlderStarted!: () => void;
+		let releaseOlder!: () => void;
+		const olderStarted = new Promise<void>((resolve) => {
+			markOlderStarted = resolve;
+		});
+		const olderRelease = new Promise<void>((resolve) => {
+			releaseOlder = resolve;
+		});
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			const allocatorCall = allocatorCalls;
+			if (allocatorCall === 2) {
+				markOlderStarted();
+				await olderRelease;
+			}
+			return new Response(`10.6.0.${allocatorCall}:31001`, { status: 200 });
+		}) as typeof fetch;
+
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+		const options = {
+			affinityKey: "af_con_overflow_publication",
+			upstream: { proxy: policy },
+		};
+
+		try {
+			const first = await resolveProxyConfigAsync(options);
+			const poolKey = redis.setCalls.find(
+				(call) => call.mode === "PX" && call.condition === undefined,
+			)?.key;
+			if (!poolKey) throw new Error("Expected initial Smartproxy pool key");
+			expect(invalidateProxyResolutionCache(options)).toBe(true);
+			const olderPromise = resolveProxyConfigAsync(options);
+			await olderStarted;
+			expect(invalidateProxyResolutionCache(options)).toBe(true);
+			for (let index = 0; index < 1_000; index += 1) {
+				expect(
+					invalidateProxyResolutionCache({
+						affinityKey: `af_con_overflow_publication_filler_${index}`,
+						upstream: { proxy: policy },
+					}),
+				).toBe(true);
+			}
+			expect(
+				__getProxyResolutionCacheStatsForTests().invalidatedProxyKeyEntries,
+			).toBe(1_000);
+
+			releaseOlder();
+			const older = await olderPromise;
+			const rawRedisPool = await redis.get(poolKey);
+			if (!rawRedisPool) throw new Error("Expected shared Smartproxy pool");
+			const redisPool = JSON.parse(rawRedisPool) as { urls?: string[] };
+			const afterOlder = await resolveProxyConfigAsync(options);
+
+			expect(first.url).toBe("http://10.6.0.1:31001");
+			expect(older.url).toBe("http://10.6.0.2:31001");
+			expect(redisPool.urls?.[0]).toBe("http://10.6.0.1:31001");
+			expect(afterOlder.url).toBe("http://10.6.0.3:31001");
+			expect(allocatorCalls).toBe(3);
+		} finally {
+			Date.now = originalNow;
+		}
+	});
+
+	it("keeps a newer singleflight registered when an invalidated allocation finishes", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		const now = 1_700_000_000_000;
+		Date.now = () => now;
+		__setProxyRedisForTests(undefined);
+		let allocatorCalls = 0;
+		let markOlderStarted!: () => void;
+		let releaseOlder!: () => void;
+		let markNewerStarted!: () => void;
+		let releaseNewer!: () => void;
+		const olderStarted = new Promise<void>((resolve) => {
+			markOlderStarted = resolve;
+		});
+		const olderRelease = new Promise<void>((resolve) => {
+			releaseOlder = resolve;
+		});
+		const newerStarted = new Promise<void>((resolve) => {
+			markNewerStarted = resolve;
+		});
+		const newerRelease = new Promise<void>((resolve) => {
+			releaseNewer = resolve;
+		});
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			const allocatorCall = allocatorCalls;
+			if (allocatorCall === 1) {
+				markOlderStarted();
+				await olderRelease;
+			} else if (allocatorCall === 2) {
+				markNewerStarted();
+				await newerRelease;
+			}
+			return new Response(`10.5.0.${allocatorCall}:31001`, { status: 200 });
+		}) as typeof fetch;
+
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+		const options = {
+			affinityKey: "af_con_inflight_generation",
+			upstream: { proxy: policy },
+		};
+
+		try {
+			const olderPromise = resolveProxyConfigAsync(options);
+			await olderStarted;
+			expect(invalidateProxyResolutionCache(options)).toBe(true);
+			const newerPromise = resolveProxyConfigAsync(options);
+			await newerStarted;
+			releaseOlder();
+			const older = await olderPromise;
+			const activeStats = __getProxyResolutionCacheStatsForTests();
+			expect(activeStats.proxyInflightEntries).toBe(1);
+			expect(activeStats.proxyPublicationTokenEntries).toBe(1);
+
+			releaseNewer();
+			const newer = await newerPromise;
+			const settledStats = __getProxyResolutionCacheStatsForTests();
+			expect(older.url).toBe("http://10.5.0.1:31001");
+			expect(newer.url).toBe("http://10.5.0.2:31001");
+			expect(allocatorCalls).toBe(2);
+			expect(settledStats.proxyInflightEntries).toBe(0);
+			expect(settledStats.proxyPublicationTokenEntries).toBe(0);
+		} finally {
+			releaseOlder();
+			releaseNewer();
+			Date.now = originalNow;
+		}
+	});
+
 	it("purges shared Smartproxy Redis pools when a stale pool is invalidated", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		__setProxyRedisForTests(new FakeRedis());
