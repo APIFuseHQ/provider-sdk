@@ -755,10 +755,15 @@ describe("proxy integration", () => {
 			affinityKey: "af_con_overflow_0",
 			upstream: { proxy: policy },
 		};
+		const unrelatedOptions = {
+			affinityKey: "af_con_overflow_unrelated",
+			upstream: { proxy: policy },
+		};
 
 		try {
 			const first = await resolveProxyConfigAsync(firstOptions);
 			clearProxyResolutionCache();
+			const unrelated = await resolveProxyConfigAsync(unrelatedOptions);
 			expect(invalidateProxyResolutionCache(firstOptions)).toBe(true);
 			for (let index = 1; index <= 1_000; index += 1) {
 				invalidateProxyResolutionCache({
@@ -770,11 +775,14 @@ describe("proxy integration", () => {
 				__getProxyResolutionCacheStatsForTests().invalidatedProxyKeyEntries,
 			).toBe(1_000);
 
+			const unrelatedCached = await resolveProxyConfigAsync(unrelatedOptions);
 			const second = await resolveProxyConfigAsync(firstOptions);
 
 			expect(first.url).toBe("http://5.78.24.51:31001");
-			expect(second.url).toBe("http://5.78.24.52:31001");
-			expect(allocatorCalls).toBe(2);
+			expect(unrelated.url).toBe("http://5.78.24.52:31001");
+			expect(unrelatedCached.url).toBe("http://5.78.24.52:31001");
+			expect(second.url).toBe("http://5.78.24.53:31001");
+			expect(allocatorCalls).toBe(3);
 		} finally {
 			Date.now = originalNow;
 		}

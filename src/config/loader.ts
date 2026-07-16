@@ -708,12 +708,11 @@ async function allocateSmartproxy(
 	if (smartproxyInvalidationOverflowUntil <= now) {
 		smartproxyInvalidationOverflowUntil = 0;
 	}
-	const invalidatedUntil = Math.max(
-		invalidatedProxyKeys.get(cacheKey, now) ?? 0,
-		smartproxyInvalidationOverflowUntil,
-	);
-	const skipCached = invalidatedUntil > now;
-	const cached = skipCached ? undefined : proxyCache.get(cacheKey, now);
+	const invalidatedUntil = invalidatedProxyKeys.get(cacheKey, now) ?? 0;
+	const skipMemoryCache = invalidatedUntil > now;
+	const skipRedisCache =
+		skipMemoryCache || smartproxyInvalidationOverflowUntil > now;
+	const cached = skipMemoryCache ? undefined : proxyCache.get(cacheKey, now);
 	if (cached) {
 		if (shouldSoftRefresh(cached, now)) {
 			void refreshSmartproxyPool(cacheKey, policy, appKey, lifetimeMinutes);
@@ -730,7 +729,7 @@ async function allocateSmartproxy(
 		};
 	}
 
-	if (!skipCached) {
+	if (!skipRedisCache) {
 		const redisResult = await readSmartproxyRedisPool(cacheKey, startedAt);
 		if (redisResult) return redisResult;
 	}
