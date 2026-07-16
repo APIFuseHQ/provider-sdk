@@ -882,6 +882,67 @@ describe("proxy integration", () => {
 		}
 	});
 
+	it("does not clear a newer invalidation that arrives during allocation", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		const now = 1_700_000_000_000;
+		Date.now = () => now;
+		__setProxyRedisForTests(new FakeRedis());
+		let allocatorCalls = 0;
+		let markReplacementStarted!: () => void;
+		let releaseReplacement!: () => void;
+		const replacementStarted = new Promise<void>((resolve) => {
+			markReplacementStarted = resolve;
+		});
+		const replacementRelease = new Promise<void>((resolve) => {
+			releaseReplacement = resolve;
+		});
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			if (allocatorCalls === 2) {
+				markReplacementStarted();
+				await replacementRelease;
+			}
+			return new Response(`10.3.0.${allocatorCalls}:31001`, { status: 200 });
+		}) as typeof fetch;
+
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+		const options = {
+			affinityKey: "af_con_invalidation_generation",
+			upstream: { proxy: policy },
+		};
+
+		try {
+			const first = await resolveProxyConfigAsync(options);
+			expect(invalidateProxyResolutionCache(options)).toBe(true);
+			const replacementPromise = resolveProxyConfigAsync(options);
+			await replacementStarted;
+			expect(invalidateProxyResolutionCache(options)).toBe(true);
+			releaseReplacement();
+			const replacement = await replacementPromise;
+			expect(
+				__getProxyResolutionCacheStatsForTests().invalidatedProxyKeyEntries,
+			).toBe(1);
+
+			const afterNewerInvalidation = await resolveProxyConfigAsync(options);
+
+			expect(first.url).toBe("http://10.3.0.1:31001");
+			expect(replacement.url).toBe("http://10.3.0.2:31001");
+			expect(afterNewerInvalidation.url).toBe("http://10.3.0.3:31001");
+			expect(allocatorCalls).toBe(3);
+			expect(
+				__getProxyResolutionCacheStatsForTests().invalidatedProxyKeyEntries,
+			).toBe(0);
+		} finally {
+			Date.now = originalNow;
+		}
+	});
+
 	it("purges shared Smartproxy Redis pools when a stale pool is invalidated", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		__setProxyRedisForTests(new FakeRedis());

@@ -219,11 +219,13 @@ function resolveSmartproxyCacheBypass(
 
 function settleSmartproxyInvalidationAfterAllocation(
 	cacheKey: string,
+	expectedGuard: SmartproxyInvalidationGuard | undefined,
 	now: number,
 	redisWriteSucceeded: boolean,
 ): void {
+	if (!expectedGuard) return;
 	const guard = invalidatedProxyKeys.get(cacheKey, now);
-	if (!guard) return;
+	if (guard !== expectedGuard) return;
 	if (redisWriteSucceeded) {
 		invalidatedProxyKeys.delete(cacheKey);
 		return;
@@ -1049,6 +1051,10 @@ async function allocateAndStoreSmartproxyPool(
 		poolKey?: string;
 	},
 ): Promise<SmartproxyAllocationResult> {
+	const invalidationGuardAtStart = invalidatedProxyKeys.get(
+		cacheKey,
+		Date.now(),
+	);
 	const poolSize = resolveSmartproxyPoolSize(policy);
 	const allocatorUrl = buildSmartproxyAllocatorUrl(
 		policy,
@@ -1153,6 +1159,7 @@ async function allocateAndStoreSmartproxyPool(
 		);
 		settleSmartproxyInvalidationAfterAllocation(
 			cacheKey,
+			invalidationGuardAtStart,
 			Date.now(),
 			redisWriteResult === "OK",
 		);
@@ -1168,7 +1175,12 @@ async function allocateAndStoreSmartproxyPool(
 			}),
 		};
 	}
-	settleSmartproxyInvalidationAfterAllocation(cacheKey, Date.now(), false);
+	settleSmartproxyInvalidationAfterAllocation(
+		cacheKey,
+		invalidationGuardAtStart,
+		Date.now(),
+		false,
+	);
 	return {
 		pool: result,
 		telemetry: telemetryForPool(result, options.cacheStatus, startedAt, {
