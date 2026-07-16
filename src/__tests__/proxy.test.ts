@@ -57,6 +57,10 @@ class FakeRedis {
 	private readonly failNextNxKeys = new Set<string>();
 	private readonly failNextSetKeys = new Set<string>();
 	private readonly failNextDelKeys = new Set<string>();
+	private readonly publicationDeferrals = new Map<
+		string,
+		{ markStarted: () => void; release: Promise<void> }
+	>();
 
 	failNextNxSet(key: string): void {
 		this.failNextNxKeys.add(key);
@@ -68,6 +72,25 @@ class FakeRedis {
 
 	failNextDel(key: string): void {
 		this.failNextDelKeys.add(key);
+	}
+
+	deferNextPublication(key: string): {
+		started: Promise<void>;
+		release: () => void;
+	} {
+		let markStarted!: () => void;
+		let release!: () => void;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		const releasePromise = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		this.publicationDeferrals.set(key, {
+			markStarted,
+			release: releasePromise,
+		});
+		return { started, release };
 	}
 
 	async connect(): Promise<void> {
@@ -95,6 +118,7 @@ class FakeRedis {
 		if (this.failNextSetKeys.delete(key)) throw new Error("Injected Redis set failure");
 		if (condition === "NX" && this.failNextNxKeys.delete(key)) return null;
 		if (condition === "NX" && this.values.has(key)) return null;
+		await this.waitForPublicationDeferral(key);
 		this.values.set(key, value);
 		if (mode === "PX" && typeof ttlMs === "number") {
 			this.expiresAt.set(key, Date.now() + ttlMs);
@@ -117,9 +141,37 @@ class FakeRedis {
 		return Math.max(0, expiresAt - Date.now());
 	}
 
-	async eval(_script: string, _keyCount: number, key: string, token: string): Promise<number> {
-		if ((await this.get(key)) !== token) return 0;
-		return this.del(key);
+	async eval(
+		_script: string,
+		keyCount: number,
+		...args: Array<string | number>
+	): Promise<number> {
+		const keys = args.slice(0, keyCount).map(String);
+		const values = args.slice(keyCount).map(String);
+		if (keyCount === 1 && keys[0] && values.length === 1) {
+			if ((await this.get(keys[0])) !== values[0]) return 0;
+			return this.del(keys[0]);
+		}
+		if (keyCount === 2 && keys[0] && keys[1] && values.length === 0) {
+			const lockDeleted = await this.del(keys[0]);
+			const poolDeleted = await this.del(keys[1]);
+			return lockDeleted + poolDeleted;
+		}
+		if (keyCount === 2 && keys[0] && keys[1] && values.length === 3) {
+			await this.waitForPublicationDeferral(keys[1]);
+			if ((await this.get(keys[0])) !== values[0]) return 0;
+			await this.set(keys[1], values[1], "PX", Number(values[2]));
+			return 1;
+		}
+		throw new Error("Unsupported FakeRedis eval shape");
+	}
+
+	private async waitForPublicationDeferral(key: string): Promise<void> {
+		const deferral = this.publicationDeferrals.get(key);
+		if (!deferral) return;
+		this.publicationDeferrals.delete(key);
+		deferral.markStarted();
+		await deferral.release;
 	}
 
 	private deleteIfExpired(key: string): void {
@@ -1162,6 +1214,120 @@ describe("proxy integration", () => {
 			expect(afterOlder.url).toBe("http://10.6.0.3:31001");
 			expect(allocatorCalls).toBe(3);
 		} finally {
+			Date.now = originalNow;
+		}
+	});
+
+	it("prevents an invalidated Redis write from publishing after pool deletion", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		const now = 1_700_000_000_000;
+		Date.now = () => now;
+		const redis = new FakeRedis();
+		__setProxyRedisForTests(redis);
+		let allocatorCalls = 0;
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			return new Response(`10.8.0.${allocatorCalls}:31001`, { status: 200 });
+		}) as typeof fetch;
+
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+		const options = {
+			affinityKey: "af_con_redis_write_invalidation",
+			upstream: { proxy: policy },
+		};
+		let releasePublication: (() => void) | undefined;
+
+		try {
+			const first = await resolveProxyConfigAsync(options);
+			const poolKey = redis.setCalls.find(
+				(call) => call.mode === "PX" && call.condition === undefined,
+			)?.key;
+			if (!poolKey) throw new Error("Expected initial Smartproxy pool key");
+			const deferredPublication = redis.deferNextPublication(poolKey);
+			releasePublication = deferredPublication.release;
+
+			expect(invalidateProxyResolutionCache(options)).toBe(true);
+			const olderPromise = resolveProxyConfigAsync(options);
+			await deferredPublication.started;
+			expect(await invalidateProxyResolutionCacheAsync(options)).toBe(true);
+			expect(await redis.get(poolKey)).toBeNull();
+			deferredPublication.release();
+			const older = await olderPromise;
+			const redisAfterOlder = await redis.get(poolKey);
+			const afterInvalidation = await resolveProxyConfigAsync(options);
+
+			expect(first.url).toBe("http://10.8.0.1:31001");
+			expect(older.url).toBe("http://10.8.0.2:31001");
+			expect(redisAfterOlder).toBeNull();
+			expect(afterInvalidation.url).toBe("http://10.8.0.3:31001");
+			expect(allocatorCalls).toBe(3);
+		} finally {
+			releasePublication?.();
+			Date.now = originalNow;
+		}
+	});
+
+	it("drops a local pool when a remote invalidation revokes its Redis lock", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		const now = 1_700_000_000_000;
+		Date.now = () => now;
+		const redis = new FakeRedis();
+		__setProxyRedisForTests(redis);
+		let allocatorCalls = 0;
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			return new Response(`10.9.0.${allocatorCalls}:31001`, { status: 200 });
+		}) as typeof fetch;
+
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+		const options = {
+			affinityKey: "af_con_remote_invalidation",
+			upstream: { proxy: policy },
+		};
+		let releasePublication: (() => void) | undefined;
+
+		try {
+			const first = await resolveProxyConfigAsync(options);
+			const poolKey = redis.setCalls.find(
+				(call) => call.mode === "PX" && call.condition === undefined,
+			)?.key;
+			const lockKey = redis.setCalls.find(
+				(call) => call.mode === "PX" && call.condition === "NX",
+			)?.key;
+			if (!poolKey || !lockKey) {
+				throw new Error("Expected initial Smartproxy pool and lock keys");
+			}
+			const deferredPublication = redis.deferNextPublication(poolKey);
+			releasePublication = deferredPublication.release;
+
+			expect(invalidateProxyResolutionCache(options)).toBe(true);
+			const olderPromise = resolveProxyConfigAsync(options);
+			await deferredPublication.started;
+			await redis.eval("remote-invalidation", 2, lockKey, poolKey);
+			deferredPublication.release();
+			const older = await olderPromise;
+			const redisAfterOlder = await redis.get(poolKey);
+			const afterRemoteInvalidation = await resolveProxyConfigAsync(options);
+
+			expect(first.url).toBe("http://10.9.0.1:31001");
+			expect(older.url).toBe("http://10.9.0.2:31001");
+			expect(redisAfterOlder).toBeNull();
+			expect(afterRemoteInvalidation.url).toBe("http://10.9.0.3:31001");
+			expect(allocatorCalls).toBe(3);
+		} finally {
+			releasePublication?.();
 			Date.now = originalNow;
 		}
 	});

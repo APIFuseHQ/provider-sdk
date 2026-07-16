@@ -175,6 +175,10 @@ const PROXY_CACHE_PREFIX = "apifuse:proxy:smartproxy:v1";
 const REDIS_TIMEOUT_MS = 150;
 const SMARTPROXY_LOCK_TTL_MS = 10_000;
 const SMARTPROXY_LOCK_POLL_MAX_MS = 9_000;
+const SMARTPROXY_REDIS_PUBLISH_IF_LOCK_OWNER_SCRIPT =
+	'if redis.call("get", KEYS[1]) == ARGV[1] then redis.call("set", KEYS[2], ARGV[2], "PX", ARGV[3]); return 1 else return 0 end';
+const SMARTPROXY_REDIS_INVALIDATE_SCRIPT =
+	'redis.call("del", KEYS[1]); return redis.call("del", KEYS[2])';
 const SMARTPROXY_DEADLINE_MARGIN_MS = 1_000;
 const SMARTPROXY_INVALIDATION_SKIP_REDIS_MS = 30_000;
 const SMARTPROXY_ALLOCATOR_MAX_ATTEMPTS = 3;
@@ -898,6 +902,8 @@ async function allocateSmartproxyShared(
 							: "allocator",
 						redis,
 						poolKey,
+						lockKey,
+						lockToken: token,
 					},
 				);
 			} finally {
@@ -1056,6 +1062,8 @@ type SmartproxyPoolStoreOptions = {
 	cacheStatus: ProxyCacheStatus;
 	redis?: ProxyRedisClient;
 	poolKey?: string;
+	lockKey?: string;
+	lockToken?: string;
 };
 
 async function allocateAndStoreSmartproxyPool(
@@ -1216,23 +1224,41 @@ async function allocateAndStoreSmartproxyPoolWithPublicationGeneration(
 		};
 	}
 	proxyCache.set(cacheKey, result, allocatedAt);
-	if (options.redis && options.poolKey) {
+	if (
+		options.redis &&
+		options.poolKey &&
+		options.lockKey &&
+		options.lockToken
+	) {
 		const redis = options.redis;
 		const poolKey = options.poolKey;
+		const lockKey = options.lockKey;
+		const lockToken = options.lockToken;
+		const serializedPool = serializeSmartproxyPool(result);
+		const redisTtlMs = Math.max(1_000, result.expiresAt - Date.now());
 		const redisWriteStartedAt = Date.now();
 		const redisWriteResult = await withRedisTimeout(() =>
-			redis.set(
+			redis.eval(
+				SMARTPROXY_REDIS_PUBLISH_IF_LOCK_OWNER_SCRIPT,
+				2,
+				lockKey,
 				poolKey,
-				serializeSmartproxyPool(result),
-				"PX",
-				Math.max(1_000, result.expiresAt - Date.now()),
+				lockToken,
+				serializedPool,
+				String(redisTtlMs),
 			),
 		);
+		if (
+			redisWriteResult === 0 &&
+			proxyCache.get(cacheKey, Date.now()) === result
+		) {
+			proxyCache.delete(cacheKey);
+		}
 		settleSmartproxyInvalidationAfterAllocation(
 			cacheKey,
 			invalidationGuardAtStart,
 			Date.now(),
-			redisWriteResult === "OK",
+			redisWriteResult === 1,
 		);
 		return {
 			pool: result,
@@ -1513,7 +1539,14 @@ export async function invalidateProxyResolutionCacheAsync(
 	const redis = getProxyRedis();
 	try {
 		if (redis && (await ensureRedisReady(redis))) {
-			await withRedisTimeout(() => redis.del(smartproxyRedisPoolKey(cacheKey)));
+			await withRedisTimeout(() =>
+				redis.eval(
+					SMARTPROXY_REDIS_INVALIDATE_SCRIPT,
+					2,
+					smartproxyRedisLockKey(cacheKey),
+					smartproxyRedisPoolKey(cacheKey),
+				),
+			);
 		}
 	} catch {
 		// Cache invalidation must not turn a stale proxy retry into a Redis outage.
