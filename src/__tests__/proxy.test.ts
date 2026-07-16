@@ -54,6 +54,11 @@ class FakeRedis {
 	}> = [];
 	private readonly values = new Map<string, string>();
 	private readonly expiresAt = new Map<string, number>();
+	private readonly failNextNxKeys = new Set<string>();
+
+	failNextNxSet(key: string): void {
+		this.failNextNxKeys.add(key);
+	}
 
 	async connect(): Promise<void> {
 		this.status = "ready";
@@ -77,6 +82,7 @@ class FakeRedis {
 	): Promise<"OK" | null> {
 		this.deleteIfExpired(key);
 		this.setCalls.push({ key, mode, ttlMs, condition });
+		if (condition === "NX" && this.failNextNxKeys.delete(key)) return null;
 		if (condition === "NX" && this.values.has(key)) return null;
 		this.values.set(key, value);
 		if (mode === "PX" && typeof ttlMs === "number") {
@@ -731,12 +737,13 @@ describe("proxy integration", () => {
 		}
 	});
 
-	it("keeps Redis fail-closed when invalidation tombstones exceed the local cap", async () => {
+	it("keeps Redis fail-closed through lock contention when invalidation tombstones exceed the local cap", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const originalNow = Date.now;
 		const now = 1_700_000_000_000;
 		Date.now = () => now;
-		__setProxyRedisForTests(new FakeRedis());
+		const redis = new FakeRedis();
+		__setProxyRedisForTests(redis);
 		let allocatorCalls = 0;
 		global.fetch = (async () => {
 			allocatorCalls += 1;
@@ -762,6 +769,10 @@ describe("proxy integration", () => {
 
 		try {
 			const first = await resolveProxyConfigAsync(firstOptions);
+			const firstLockKey = redis.setCalls.find(
+				(call) => call.condition === "NX",
+			)?.key;
+			if (!firstLockKey) throw new Error("Expected initial Smartproxy lock key");
 			clearProxyResolutionCache();
 			const unrelated = await resolveProxyConfigAsync(unrelatedOptions);
 			expect(invalidateProxyResolutionCache(firstOptions)).toBe(true);
@@ -776,6 +787,7 @@ describe("proxy integration", () => {
 			).toBe(1_000);
 
 			const unrelatedCached = await resolveProxyConfigAsync(unrelatedOptions);
+			redis.failNextNxSet(firstLockKey);
 			const second = await resolveProxyConfigAsync(firstOptions);
 
 			expect(first.url).toBe("http://5.78.24.51:31001");

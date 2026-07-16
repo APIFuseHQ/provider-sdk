@@ -194,6 +194,20 @@ const invalidatedProxyKeys = new BoundedExpiringMap<string, number>({
 	},
 });
 
+function resolveSmartproxyCacheBypass(
+	cacheKey: string,
+	now: number,
+): { memory: boolean; redis: boolean } {
+	if (smartproxyInvalidationOverflowUntil <= now) {
+		smartproxyInvalidationOverflowUntil = 0;
+	}
+	const memory = (invalidatedProxyKeys.get(cacheKey, now) ?? 0) > now;
+	return {
+		memory,
+		redis: memory || smartproxyInvalidationOverflowUntil > now,
+	};
+}
+
 function redisUrlFromEnv(): string | undefined {
 	return (
 		process.env.APIFUSE__PROVIDER__CACHE_REDIS_URL?.trim() ||
@@ -705,14 +719,8 @@ async function allocateSmartproxy(
 	);
 	const startedAt = Date.now();
 	const now = startedAt;
-	if (smartproxyInvalidationOverflowUntil <= now) {
-		smartproxyInvalidationOverflowUntil = 0;
-	}
-	const invalidatedUntil = invalidatedProxyKeys.get(cacheKey, now) ?? 0;
-	const skipMemoryCache = invalidatedUntil > now;
-	const skipRedisCache =
-		skipMemoryCache || smartproxyInvalidationOverflowUntil > now;
-	const cached = skipMemoryCache ? undefined : proxyCache.get(cacheKey, now);
+	const cacheBypass = resolveSmartproxyCacheBypass(cacheKey, now);
+	const cached = cacheBypass.memory ? undefined : proxyCache.get(cacheKey, now);
 	if (cached) {
 		if (shouldSoftRefresh(cached, now)) {
 			void refreshSmartproxyPool(cacheKey, policy, appKey, lifetimeMinutes);
@@ -729,7 +737,7 @@ async function allocateSmartproxy(
 		};
 	}
 
-	if (!skipRedisCache) {
+	if (!cacheBypass.redis) {
 		const redisResult = await readSmartproxyRedisPool(cacheKey, startedAt);
 		if (redisResult) return redisResult;
 	}
@@ -764,6 +772,7 @@ async function readSmartproxyRedisPool(
 	cacheKey: string,
 	startedAt: number,
 ): Promise<SmartproxyAllocationResult | null> {
+	if (resolveSmartproxyCacheBypass(cacheKey, Date.now()).redis) return null;
 	const redis = getProxyRedis();
 	if (!redis || !(await ensureRedisReady(redis))) return null;
 	const redisStartedAt = Date.now();
@@ -772,6 +781,7 @@ async function readSmartproxyRedisPool(
 	);
 	const redisReadMs = Math.max(0, Date.now() - redisStartedAt);
 	if (typeof raw !== "string") return null;
+	if (resolveSmartproxyCacheBypass(cacheKey, Date.now()).redis) return null;
 	const pool = safeParseSmartproxyPool(raw);
 	if (!pool) {
 		await withRedisTimeout(() => redis.del(smartproxyRedisPoolKey(cacheKey)));
