@@ -709,6 +709,96 @@ describe("proxy integration", () => {
 		}
 	});
 
+	it("lets concurrent same-generation soft refreshes publish successful results", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		let now = 1_700_000_000_000;
+		Date.now = () => now;
+		__setProxyRedisForTests(undefined);
+		let allocatorCalls = 0;
+		let markFirstRefreshStarted!: () => void;
+		let releaseFirstRefresh!: () => void;
+		let markSecondRefreshStarted!: () => void;
+		let releaseSecondRefresh!: () => void;
+		const firstRefreshStarted = new Promise<void>((resolve) => {
+			markFirstRefreshStarted = resolve;
+		});
+		const firstRefreshRelease = new Promise<void>((resolve) => {
+			releaseFirstRefresh = resolve;
+		});
+		const secondRefreshStarted = new Promise<void>((resolve) => {
+			markSecondRefreshStarted = resolve;
+		});
+		const secondRefreshRelease = new Promise<void>((resolve) => {
+			releaseSecondRefresh = resolve;
+		});
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			const allocatorCall = allocatorCalls;
+			if (allocatorCall === 2) {
+				markFirstRefreshStarted();
+				await firstRefreshRelease;
+			} else if (allocatorCall === 3) {
+				markSecondRefreshStarted();
+				await secondRefreshRelease;
+			}
+			return new Response(`10.7.0.${allocatorCall}:31001`, { status: 200 });
+		}) as typeof fetch;
+
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+		const options = {
+			affinityKey: "af_con_concurrent_soft_refresh",
+			upstream: { proxy: policy },
+		};
+		const nextTurn = () =>
+			new Promise<void>((resolve) => {
+				setTimeout(resolve, 0);
+			});
+
+		try {
+			const first = await resolveProxyConfigAsync(options);
+			now += 11_000;
+			const firstSoftHit = await resolveProxyConfigAsync(options);
+			await firstRefreshStarted;
+			const secondSoftHit = await resolveProxyConfigAsync(options);
+			await secondRefreshStarted;
+			releaseFirstRefresh();
+			await nextTurn();
+			await nextTurn();
+			const whileSecondRefreshRuns = await resolveProxyConfigAsync(options);
+			releaseSecondRefresh();
+			for (let attempt = 0; attempt < 20; attempt += 1) {
+				if (
+					__getProxyResolutionCacheStatsForTests()
+						.proxyPublicationGenerationEntries === 0
+				) {
+					break;
+				}
+				await nextTurn();
+			}
+			const afterBothRefreshes = await resolveProxyConfigAsync(options);
+
+			expect(first.url).toBe("http://10.7.0.1:31001");
+			expect(firstSoftHit.url).toBe("http://10.7.0.1:31001");
+			expect(secondSoftHit.url).toBe("http://10.7.0.1:31001");
+			expect(whileSecondRefreshRuns.url).toBe("http://10.7.0.2:31001");
+			expect(afterBothRefreshes.url).toBe("http://10.7.0.3:31001");
+			expect(allocatorCalls).toBe(3);
+			expect(
+				__getProxyResolutionCacheStatsForTests().proxyPublicationGenerationEntries,
+			).toBe(0);
+		} finally {
+			releaseFirstRefresh();
+			releaseSecondRefresh();
+			Date.now = originalNow;
+		}
+	});
+
 	it("reclaims expired Smartproxy pools when another affinity is allocated", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const originalNow = Date.now;
@@ -1133,7 +1223,7 @@ describe("proxy integration", () => {
 			const older = await olderPromise;
 			const activeStats = __getProxyResolutionCacheStatsForTests();
 			expect(activeStats.proxyInflightEntries).toBe(1);
-			expect(activeStats.proxyPublicationTokenEntries).toBe(1);
+			expect(activeStats.proxyPublicationGenerationEntries).toBe(1);
 
 			releaseNewer();
 			const newer = await newerPromise;
@@ -1142,7 +1232,7 @@ describe("proxy integration", () => {
 			expect(newer.url).toBe("http://10.5.0.2:31001");
 			expect(allocatorCalls).toBe(2);
 			expect(settledStats.proxyInflightEntries).toBe(0);
-			expect(settledStats.proxyPublicationTokenEntries).toBe(0);
+			expect(settledStats.proxyPublicationGenerationEntries).toBe(0);
 		} finally {
 			releaseOlder();
 			releaseNewer();

@@ -157,8 +157,15 @@ type ProxyRedisClient = Pick<
 	"connect" | "del" | "eval" | "get" | "on" | "pttl" | "set" | "status"
 >;
 
+type SmartproxyAllocationPublicationGeneration = {
+	activeAllocations: number;
+};
+
 const proxyInflight = new Map<string, Promise<SmartproxyAllocationResult>>();
-const proxyAllocationPublicationTokens = new Map<string, symbol>();
+const proxyAllocationPublicationGenerations = new Map<
+	string,
+	SmartproxyAllocationPublicationGeneration
+>();
 const redisClients = new Map<string, ProxyRedisClient>();
 let proxyRedisForTests: ProxyRedisClient | undefined;
 let smartproxyAllocatorDeadlineMsForTests: number | undefined;
@@ -273,13 +280,13 @@ export function __getProxyResolutionCacheStatsForTests(): {
 	proxyCacheEntries: number;
 	proxyInflightEntries: number;
 	invalidatedProxyKeyEntries: number;
-	proxyPublicationTokenEntries: number;
+	proxyPublicationGenerationEntries: number;
 } {
 	return {
 		proxyCacheEntries: proxyCache.size,
 		proxyInflightEntries: proxyInflight.size,
 		invalidatedProxyKeyEntries: invalidatedProxyKeys.size,
-		proxyPublicationTokenEntries: proxyAllocationPublicationTokens.size,
+		proxyPublicationGenerationEntries: proxyAllocationPublicationGenerations.size,
 	};
 }
 
@@ -1059,32 +1066,45 @@ async function allocateAndStoreSmartproxyPool(
 	startedAt: number,
 	options: SmartproxyPoolStoreOptions,
 ): Promise<SmartproxyAllocationResult> {
-	const publicationToken = Symbol("smartproxy-allocation-publication");
-	proxyAllocationPublicationTokens.set(cacheKey, publicationToken);
+	let publicationGeneration =
+		proxyAllocationPublicationGenerations.get(cacheKey);
+	if (!publicationGeneration) {
+		publicationGeneration = { activeAllocations: 0 };
+		proxyAllocationPublicationGenerations.set(
+			cacheKey,
+			publicationGeneration,
+		);
+	}
+	publicationGeneration.activeAllocations += 1;
 	try {
-		return await allocateAndStoreSmartproxyPoolWithPublicationToken(
+		return await allocateAndStoreSmartproxyPoolWithPublicationGeneration(
 			cacheKey,
 			policy,
 			appKey,
 			lifetimeMinutes,
 			startedAt,
-			publicationToken,
+			publicationGeneration,
 			options,
 		);
 	} finally {
-		if (proxyAllocationPublicationTokens.get(cacheKey) === publicationToken) {
-			proxyAllocationPublicationTokens.delete(cacheKey);
+		publicationGeneration.activeAllocations -= 1;
+		if (
+			publicationGeneration.activeAllocations === 0 &&
+			proxyAllocationPublicationGenerations.get(cacheKey) ===
+				publicationGeneration
+		) {
+			proxyAllocationPublicationGenerations.delete(cacheKey);
 		}
 	}
 }
 
-async function allocateAndStoreSmartproxyPoolWithPublicationToken(
+async function allocateAndStoreSmartproxyPoolWithPublicationGeneration(
 	cacheKey: string,
 	policy: ProviderProxyPolicy,
 	appKey: string,
 	lifetimeMinutes: number,
 	startedAt: number,
-	publicationToken: symbol,
+	publicationGeneration: SmartproxyAllocationPublicationGeneration,
 	options: SmartproxyPoolStoreOptions,
 ): Promise<SmartproxyAllocationResult> {
 	const invalidationGuardAtStart = invalidatedProxyKeys.get(
@@ -1180,7 +1200,10 @@ async function allocateAndStoreSmartproxyPoolWithPublicationToken(
 			rawConnect: true,
 		},
 	};
-	if (proxyAllocationPublicationTokens.get(cacheKey) !== publicationToken) {
+	if (
+		proxyAllocationPublicationGenerations.get(cacheKey) !==
+		publicationGeneration
+	) {
 		return {
 			pool: result,
 			telemetry: telemetryForPool(result, options.cacheStatus, startedAt, {
@@ -1439,7 +1462,7 @@ function classifySmartproxyAllocatorBody(
 export function clearProxyResolutionCache(): void {
 	proxyCache.clear();
 	proxyInflight.clear();
-	proxyAllocationPublicationTokens.clear();
+	proxyAllocationPublicationGenerations.clear();
 	invalidatedProxyKeys.clear();
 	smartproxyInvalidationOverflowUntil = 0;
 }
@@ -1472,7 +1495,7 @@ function markSmartproxyCacheInvalidated(
 	);
 	proxyCache.delete(cacheKey);
 	proxyInflight.delete(cacheKey);
-	proxyAllocationPublicationTokens.delete(cacheKey);
+	proxyAllocationPublicationGenerations.delete(cacheKey);
 	return cacheKey;
 }
 
