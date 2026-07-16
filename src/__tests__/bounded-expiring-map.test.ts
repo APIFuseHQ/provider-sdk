@@ -78,4 +78,18 @@ describe("BoundedExpiringMap", () => {
 		expect(cache.get("b", 1)?.value).toBe("second");
 		expect(cache.size).toBe(1);
 	});
+
+	it("reports capacity eviction without treating expiry cleanup as overflow", () => {
+		const evicted: Entry[] = [];
+		const cache = new BoundedExpiringMap<string, Entry>({
+			maxEntries: 1,
+			expiresAt: (entry) => entry.expiresAt,
+			onCapacityEviction: (entry) => evicted.push(entry),
+		});
+		cache.set("expired", { value: "old", expiresAt: 1 }, 0);
+		cache.set("fresh", { value: "first", expiresAt: 100 }, 1);
+		cache.set("new", { value: "second", expiresAt: 100 }, 2);
+
+		expect(evicted).toEqual([{ value: "first", expiresAt: 100 }]);
+	});
 });

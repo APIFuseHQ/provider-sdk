@@ -156,6 +156,7 @@ const proxyInflight = new Map<string, Promise<SmartproxyAllocationResult>>();
 const redisClients = new Map<string, ProxyRedisClient>();
 let proxyRedisForTests: ProxyRedisClient | undefined;
 let smartproxyAllocatorDeadlineMsForTests: number | undefined;
+let smartproxyInvalidationOverflowUntil = 0;
 
 const PROXY_CACHE_PREFIX = "apifuse:proxy:smartproxy:v1";
 const REDIS_TIMEOUT_MS = 150;
@@ -182,6 +183,15 @@ const proxyCache = new BoundedExpiringMap<string, CachedProxyPool>({
 const invalidatedProxyKeys = new BoundedExpiringMap<string, number>({
 	maxEntries: SMARTPROXY_INVALIDATION_CACHE_MAX_ENTRIES,
 	expiresAt: (invalidatedUntil) => invalidatedUntil,
+	// A live tombstone protects correctness when Redis deletion is delayed or
+	// fails. If the local bound evicts one, bypass all Redis pool reads until
+	// that tombstone would have expired rather than reviving a stale pool.
+	onCapacityEviction: (invalidatedUntil) => {
+		smartproxyInvalidationOverflowUntil = Math.max(
+			smartproxyInvalidationOverflowUntil,
+			invalidatedUntil,
+		);
+	},
 });
 
 function redisUrlFromEnv(): string | undefined {
@@ -695,7 +705,13 @@ async function allocateSmartproxy(
 	);
 	const startedAt = Date.now();
 	const now = startedAt;
-	const invalidatedUntil = invalidatedProxyKeys.get(cacheKey, now) ?? 0;
+	if (smartproxyInvalidationOverflowUntil <= now) {
+		smartproxyInvalidationOverflowUntil = 0;
+	}
+	const invalidatedUntil = Math.max(
+		invalidatedProxyKeys.get(cacheKey, now) ?? 0,
+		smartproxyInvalidationOverflowUntil,
+	);
 	const skipCached = invalidatedUntil > now;
 	const cached = skipCached ? undefined : proxyCache.get(cacheKey, now);
 	if (cached) {
@@ -1327,6 +1343,7 @@ export function clearProxyResolutionCache(): void {
 	proxyCache.clear();
 	proxyInflight.clear();
 	invalidatedProxyKeys.clear();
+	smartproxyInvalidationOverflowUntil = 0;
 }
 
 function markSmartproxyCacheInvalidated(

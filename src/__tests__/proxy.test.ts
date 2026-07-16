@@ -8,6 +8,7 @@ import {
 	__setProxyRedisForTests,
 	__setSmartproxyAllocatorDeadlineMsForTests,
 	clearProxyResolutionCache,
+	invalidateProxyResolutionCache,
 	invalidateProxyResolutionCacheAsync,
 	loadApiFuseConfig,
 	resolveProxyConfig,
@@ -16,6 +17,7 @@ import {
 } from "../config/loader";
 import { TransportError } from "../errors";
 import { ProxyTelemetryCollector } from "../runtime/proxy-telemetry";
+import type { ProviderProxyPolicy } from "../types";
 import { HttpRetryUnsafeMethodPolicy } from "../types";
 
 type MockImpitResponse = {
@@ -43,7 +45,7 @@ const stealthState = {
 };
 
 class FakeRedis {
-	status = "ready";
+	status: "ready" = "ready";
 	readonly setCalls: Array<{
 		key: string;
 		mode?: string;
@@ -724,6 +726,55 @@ describe("proxy integration", () => {
 
 			expect(allocatorCalls).toBe(2);
 			expect(__getProxyResolutionCacheStatsForTests().proxyCacheEntries).toBe(1);
+		} finally {
+			Date.now = originalNow;
+		}
+	});
+
+	it("keeps Redis fail-closed when invalidation tombstones exceed the local cap", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		const now = 1_700_000_000_000;
+		Date.now = () => now;
+		__setProxyRedisForTests(new FakeRedis());
+		let allocatorCalls = 0;
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			return new Response(`5.78.24.${50 + allocatorCalls}:31001`, {
+				status: 200,
+			});
+		}) as typeof fetch;
+
+		const policy: ProviderProxyPolicy = {
+			mode: "required" as const,
+			provider: "smartproxy" as const,
+			geo: { country: "KR" },
+			session: { affinity: "connection" as const, poolSize: 1 },
+		};
+		const firstOptions = {
+			affinityKey: "af_con_overflow_0",
+			upstream: { proxy: policy },
+		};
+
+		try {
+			const first = await resolveProxyConfigAsync(firstOptions);
+			clearProxyResolutionCache();
+			expect(invalidateProxyResolutionCache(firstOptions)).toBe(true);
+			for (let index = 1; index <= 1_000; index += 1) {
+				invalidateProxyResolutionCache({
+					affinityKey: `af_con_overflow_${index}`,
+					upstream: { proxy: policy },
+				});
+			}
+			expect(
+				__getProxyResolutionCacheStatsForTests().invalidatedProxyKeyEntries,
+			).toBe(1_000);
+
+			const second = await resolveProxyConfigAsync(firstOptions);
+
+			expect(first.url).toBe("http://5.78.24.51:31001");
+			expect(second.url).toBe("http://5.78.24.52:31001");
+			expect(allocatorCalls).toBe(2);
 		} finally {
 			Date.now = originalNow;
 		}

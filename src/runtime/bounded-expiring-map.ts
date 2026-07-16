@@ -1,12 +1,14 @@
 export type BoundedExpiringMapOptions<V> = {
 	maxEntries: number;
 	expiresAt: (value: V) => number;
+	onCapacityEviction?: (value: V) => void;
 };
 
 export class BoundedExpiringMap<K, V> {
 	private readonly entries = new Map<K, V>();
 	private readonly maxEntries: number;
 	private readonly expiresAt: (value: V) => number;
+	private readonly onCapacityEviction: ((value: V) => void) | undefined;
 
 	constructor(options: BoundedExpiringMapOptions<V>) {
 		if (!Number.isInteger(options.maxEntries) || options.maxEntries <= 0) {
@@ -14,6 +16,7 @@ export class BoundedExpiringMap<K, V> {
 		}
 		this.maxEntries = options.maxEntries;
 		this.expiresAt = options.expiresAt;
+		this.onCapacityEviction = options.onCapacityEviction;
 	}
 
 	get(key: K, now = Date.now()): V | undefined {
@@ -38,7 +41,9 @@ export class BoundedExpiringMap<K, V> {
 		while (this.entries.size > this.maxEntries) {
 			const oldest = this.entries.keys().next();
 			if (oldest.done) break;
+			const evicted = this.entries.get(oldest.value) as V;
 			this.entries.delete(oldest.value);
+			this.onCapacityEviction?.(evicted);
 		}
 	}
 
