@@ -142,6 +142,11 @@ type CachedProxyPool = {
 	diagnostics?: Record<string, string | number | boolean>;
 };
 
+type SmartproxyInvalidationGuard = {
+	expiresAt: number;
+	blockMemory: boolean;
+};
+
 type SmartproxyAllocationResult = {
 	pool: CachedProxyPool;
 	telemetry: ProxyResolutionTelemetryEvent;
@@ -180,16 +185,19 @@ const proxyCache = new BoundedExpiringMap<string, CachedProxyPool>({
 	maxEntries: SMARTPROXY_POOL_CACHE_MAX_ENTRIES,
 	expiresAt: (pool) => pool.expiresAt,
 });
-const invalidatedProxyKeys = new BoundedExpiringMap<string, number>({
+const invalidatedProxyKeys = new BoundedExpiringMap<
+	string,
+	SmartproxyInvalidationGuard
+>({
 	maxEntries: SMARTPROXY_INVALIDATION_CACHE_MAX_ENTRIES,
-	expiresAt: (invalidatedUntil) => invalidatedUntil,
+	expiresAt: (guard) => guard.expiresAt,
 	// A live tombstone protects correctness when Redis deletion is delayed or
 	// fails. If the local bound evicts one, bypass all Redis pool reads until
 	// that tombstone would have expired rather than reviving a stale pool.
-	onCapacityEviction: (invalidatedUntil) => {
+	onCapacityEviction: (guard) => {
 		smartproxyInvalidationOverflowUntil = Math.max(
 			smartproxyInvalidationOverflowUntil,
-			invalidatedUntil,
+			guard.expiresAt,
 		);
 	},
 });
@@ -201,11 +209,26 @@ function resolveSmartproxyCacheBypass(
 	if (smartproxyInvalidationOverflowUntil <= now) {
 		smartproxyInvalidationOverflowUntil = 0;
 	}
-	const memory = (invalidatedProxyKeys.get(cacheKey, now) ?? 0) > now;
+	const guard = invalidatedProxyKeys.get(cacheKey, now);
+	const memory = guard?.blockMemory === true;
 	return {
 		memory,
-		redis: memory || smartproxyInvalidationOverflowUntil > now,
+		redis: guard !== undefined || smartproxyInvalidationOverflowUntil > now,
 	};
+}
+
+function settleSmartproxyInvalidationAfterAllocation(
+	cacheKey: string,
+	now: number,
+	redisWriteSucceeded: boolean,
+): void {
+	const guard = invalidatedProxyKeys.get(cacheKey, now);
+	if (!guard) return;
+	if (redisWriteSucceeded) {
+		invalidatedProxyKeys.delete(cacheKey);
+		return;
+	}
+	invalidatedProxyKeys.set(cacheKey, { ...guard, blockMemory: false }, now);
 }
 
 function redisUrlFromEnv(): string | undefined {
@@ -764,7 +787,6 @@ async function allocateSmartproxy(
 	});
 	proxyInflight.set(cacheKey, promise);
 	const result = await promise;
-	invalidatedProxyKeys.delete(cacheKey);
 	return result;
 }
 
@@ -1121,13 +1143,18 @@ async function allocateAndStoreSmartproxyPool(
 		const redis = options.redis;
 		const poolKey = options.poolKey;
 		const redisWriteStartedAt = Date.now();
-		await withRedisTimeout(() =>
+		const redisWriteResult = await withRedisTimeout(() =>
 			redis.set(
 				poolKey,
 				serializeSmartproxyPool(result),
 				"PX",
 				Math.max(1_000, result.expiresAt - Date.now()),
 			),
+		);
+		settleSmartproxyInvalidationAfterAllocation(
+			cacheKey,
+			Date.now(),
+			redisWriteResult === "OK",
 		);
 		return {
 			pool: result,
@@ -1141,6 +1168,7 @@ async function allocateAndStoreSmartproxyPool(
 			}),
 		};
 	}
+	settleSmartproxyInvalidationAfterAllocation(cacheKey, Date.now(), false);
 	return {
 		pool: result,
 		telemetry: telemetryForPool(result, options.cacheStatus, startedAt, {
@@ -1375,7 +1403,10 @@ function markSmartproxyCacheInvalidated(
 	const now = Date.now();
 	invalidatedProxyKeys.set(
 		cacheKey,
-		now + SMARTPROXY_INVALIDATION_SKIP_REDIS_MS,
+		{
+			expiresAt: now + SMARTPROXY_INVALIDATION_SKIP_REDIS_MS,
+			blockMemory: true,
+		},
 		now,
 	);
 	proxyCache.delete(cacheKey);

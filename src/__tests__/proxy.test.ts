@@ -55,9 +55,19 @@ class FakeRedis {
 	private readonly values = new Map<string, string>();
 	private readonly expiresAt = new Map<string, number>();
 	private readonly failNextNxKeys = new Set<string>();
+	private readonly failNextSetKeys = new Set<string>();
+	private readonly failNextDelKeys = new Set<string>();
 
 	failNextNxSet(key: string): void {
 		this.failNextNxKeys.add(key);
+	}
+
+	failNextSet(key: string): void {
+		this.failNextSetKeys.add(key);
+	}
+
+	failNextDel(key: string): void {
+		this.failNextDelKeys.add(key);
 	}
 
 	async connect(): Promise<void> {
@@ -82,6 +92,7 @@ class FakeRedis {
 	): Promise<"OK" | null> {
 		this.deleteIfExpired(key);
 		this.setCalls.push({ key, mode, ttlMs, condition });
+		if (this.failNextSetKeys.delete(key)) throw new Error("Injected Redis set failure");
 		if (condition === "NX" && this.failNextNxKeys.delete(key)) return null;
 		if (condition === "NX" && this.values.has(key)) return null;
 		this.values.set(key, value);
@@ -92,6 +103,7 @@ class FakeRedis {
 	}
 
 	async del(key: string): Promise<number> {
+		if (this.failNextDelKeys.delete(key)) throw new Error("Injected Redis del failure");
 		const existed = this.values.delete(key);
 		this.expiresAt.delete(key);
 		return existed ? 1 : 0;
@@ -795,6 +807,76 @@ describe("proxy integration", () => {
 			expect(unrelatedCached.url).toBe("http://5.78.24.52:31001");
 			expect(second.url).toBe("http://5.78.24.53:31001");
 			expect(allocatorCalls).toBe(3);
+		} finally {
+			Date.now = originalNow;
+		}
+	});
+
+	it("keeps stale Redis blocked when a replacement write fails and its local pool is evicted", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		const now = 1_700_000_000_000;
+		Date.now = () => now;
+		const redis = new FakeRedis();
+		__setProxyRedisForTests(redis);
+		let allocatorCalls = 0;
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			const zeroBased = allocatorCalls - 1;
+			const thirdOctet = Math.floor(zeroBased / 250);
+			const fourthOctet = (zeroBased % 250) + 1;
+			return new Response(`10.2.${thirdOctet}.${fourthOctet}:31001`, {
+				status: 200,
+			});
+		}) as typeof fetch;
+
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+		const options = {
+			affinityKey: "af_con_failed_replacement",
+			upstream: { proxy: policy },
+		};
+
+		try {
+			const first = await resolveProxyConfigAsync(options);
+			const poolKey = redis.setCalls.find(
+				(call) => call.mode === "PX" && call.condition === undefined,
+			)?.key;
+			if (!poolKey) throw new Error("Expected initial Smartproxy pool key");
+
+			redis.failNextDel(poolKey);
+			await invalidateProxyResolutionCacheAsync(options);
+			redis.failNextSet(poolKey);
+			const replacement = await resolveProxyConfigAsync(options);
+			const cachedReplacement = await resolveProxyConfigAsync(options);
+			expect(
+				__getProxyResolutionCacheStatsForTests().invalidatedProxyKeyEntries,
+			).toBe(1);
+
+			for (let index = 0; index < 1_000; index += 1) {
+				await resolveProxyConfigAsync({
+					affinityKey: `af_con_failed_replacement_filler_${index}`,
+					upstream: { proxy: policy },
+				});
+			}
+			expect(__getProxyResolutionCacheStatsForTests().proxyCacheEntries).toBe(
+				1_000,
+			);
+
+			const afterLocalEviction = await resolveProxyConfigAsync(options);
+
+			expect(first.url).toBe("http://10.2.0.1:31001");
+			expect(replacement.url).toBe("http://10.2.0.2:31001");
+			expect(cachedReplacement.url).toBe("http://10.2.0.2:31001");
+			expect(afterLocalEviction.url).toBe("http://10.2.4.3:31001");
+			expect(allocatorCalls).toBe(1_003);
+			expect(
+				__getProxyResolutionCacheStatsForTests().invalidatedProxyKeyEntries,
+			).toBe(0);
 		} finally {
 			Date.now = originalNow;
 		}
