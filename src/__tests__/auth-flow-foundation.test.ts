@@ -132,6 +132,33 @@ describe("prevalidate", () => {
 			{ path: "$", message: "Prevalidation timed out after -1ms" },
 		]);
 	});
+
+	it("re-checks the deadline after the lazy re2-wasm load on pattern nodes", () => {
+		// Deadline reads for a root string pattern schema happen in order:
+		// (1) guard start, (2) prevalidate entry guard, (3) collectPatternErrors
+		// entry guard, (4) the recheck after loadRe2WasmModule(). Freeze time
+		// through (3) and jump past the deadline afterwards so only the
+		// post-load recheck can observe the overrun — without it the call
+		// would return { valid: true } after its deadline.
+		const realNow = Date.now;
+		let calls = 0;
+		Date.now = () => (++calls <= 3 ? 0 : 10_000);
+
+		try {
+			const result = prevalidate({ type: "string", pattern: "^a+$" }, "aaa", {
+				timeoutMs: 500,
+			});
+
+			expect(result).toEqual({
+				valid: false,
+				errors: [
+					{ path: "$", message: "Prevalidation timed out after 500ms" },
+				],
+			});
+		} finally {
+			Date.now = realNow;
+		}
+	});
 });
 
 describe("validateCeremonyOutput", () => {

@@ -95,8 +95,12 @@ function collectPatternErrors(
 	}
 
 	if (typeof schema.pattern === "string" && typeof data === "string") {
+		const { RE2 } = loadRe2WasmModule();
+		// The first use pays the synchronous re2-wasm instantiation above, and
+		// on a root string schema no later guard() runs. Recheck the deadline
+		// so a cold module load cannot let the node finish past its timeout.
+		guard();
 		try {
-			const { RE2 } = loadRe2WasmModule();
 			const regex = new RE2(schema.pattern, "u");
 			if (!regex.test(data)) {
 				errors.push({
@@ -184,6 +188,9 @@ function collectPatternErrors(
 			schema.patternProperties,
 		)) {
 			const { RE2 } = loadRe2WasmModule();
+			// Same cold-load recheck as the `pattern` branch above: the loop
+			// below may be empty, leaving no later guard() on this node.
+			guard();
 			const keyPattern = new RE2(pattern, "u");
 			for (const [key, value] of Object.entries(data)) {
 				guard();
