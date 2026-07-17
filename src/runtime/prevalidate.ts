@@ -1,5 +1,23 @@
+import { createRequire } from "node:module";
 import Ajv from "ajv";
-import { RE2 } from "re2-wasm";
+
+const require = createRequire(import.meta.url);
+
+type Re2WasmModule = typeof import("re2-wasm");
+
+let re2WasmModule: Re2WasmModule | undefined;
+
+/**
+ * re2-wasm instantiates its WASM binary at load time (~27 MiB of resident
+ * memory) and this module is exported from the SDK index every provider pod
+ * boots with. Pattern prevalidation is only exercised by ceremony input
+ * schemas that declare `pattern`, so the module load is deferred to first use
+ * and memoized. A synchronous require keeps prevalidate() synchronous.
+ */
+function loadRe2WasmModule(): Re2WasmModule {
+	re2WasmModule ??= require("re2-wasm") as Re2WasmModule;
+	return re2WasmModule;
+}
 
 export interface PrevalidateResult {
 	valid: boolean;
@@ -77,6 +95,11 @@ function collectPatternErrors(
 	}
 
 	if (typeof schema.pattern === "string" && typeof data === "string") {
+		const { RE2 } = loadRe2WasmModule();
+		// The first use pays the synchronous re2-wasm instantiation above, and
+		// on a root string schema no later guard() runs. Recheck the deadline
+		// so a cold module load cannot let the node finish past its timeout.
+		guard();
 		try {
 			const regex = new RE2(schema.pattern, "u");
 			if (!regex.test(data)) {
@@ -164,6 +187,10 @@ function collectPatternErrors(
 		for (const [pattern, childSchema] of Object.entries(
 			schema.patternProperties,
 		)) {
+			const { RE2 } = loadRe2WasmModule();
+			// Same cold-load recheck as the `pattern` branch above: the loop
+			// below may be empty, leaving no later guard() on this node.
+			guard();
 			const keyPattern = new RE2(pattern, "u");
 			for (const [key, value] of Object.entries(data)) {
 				guard();

@@ -2,8 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import Redis from "ioredis";
+import type Redis from "ioredis";
 
+import { loadIoredisModule } from "../runtime/redis";
 import type { ProviderProxyPolicy, TraceConfig } from "../types";
 
 export const SMARTPROXY_APP_KEY_ENV = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
@@ -216,7 +217,10 @@ function getProxyRedis(): ProxyRedisClient | undefined {
 	const existing = redisClients.get(redisUrl);
 	if (existing) return existing;
 
-	const redis = new Redis(redisUrl, {
+	// ioredis is lazy-loaded (see runtime/redis.ts): the proxy-pool allocator
+	// only needs it once a policy-managed proxy is actually resolved.
+	const { default: RedisClient } = loadIoredisModule();
+	const redis = new RedisClient(redisUrl, {
 		connectTimeout: REDIS_TIMEOUT_MS,
 		enableOfflineQueue: false,
 		lazyConnect: true,

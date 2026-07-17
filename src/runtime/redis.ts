@@ -1,4 +1,25 @@
-import Redis from "ioredis";
+import { createRequire } from "node:module";
+import type Redis from "ioredis";
+
+const require = createRequire(import.meta.url);
+
+type IoredisModule = typeof import("ioredis");
+
+let ioredisModule: IoredisModule | undefined;
+
+/**
+ * ioredis costs ~19 MiB of resident memory the moment it is loaded, and this
+ * file (plus the proxy-pool allocator in config/loader.ts) sits on every
+ * provider pod's serve() import chain. Providers that never touch cache,
+ * runtime state, or proxy-pool Redis should not pay that at boot, so the
+ * module load is deferred to first client creation and memoized. A
+ * synchronous require keeps the existing sync client-creation call sites
+ * unchanged.
+ */
+export function loadIoredisModule(): IoredisModule {
+	ioredisModule ??= require("ioredis") as IoredisModule;
+	return ioredisModule;
+}
 
 export type ProviderRedisClient = Redis;
 
@@ -17,6 +38,7 @@ type RedisTimeoutOptions<T> = {
 export function createProviderRedisClient(
 	options: ProviderRedisClientOptions,
 ): ProviderRedisClient {
+	const { default: Redis } = loadIoredisModule();
 	const redis = new Redis(options.redisUrl, {
 		connectTimeout: options.timeoutMs,
 		enableOfflineQueue: false,

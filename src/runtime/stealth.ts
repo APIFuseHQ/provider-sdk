@@ -1,6 +1,11 @@
 import { createHash } from "node:crypto";
-import type { Browser, ImpitOptions, ImpitResponse, RequestInit } from "impit";
-import { Impit } from "impit";
+import type {
+	Browser,
+	Impit,
+	ImpitOptions,
+	ImpitResponse,
+	RequestInit,
+} from "impit";
 
 import type { ProxyResolutionOptions } from "../config/loader";
 import {
@@ -47,6 +52,23 @@ import {
 import { appendQueryParams } from "./request-options";
 
 const DEFAULT_PROFILE = "chrome-146";
+
+type ImpitModule = typeof import("impit");
+
+let impitModulePromise: Promise<ImpitModule> | undefined;
+
+/**
+ * impit is a native (napi) module that costs ~12 MiB of resident memory the
+ * moment it is loaded. Every provider pod pulls this file through the serve()
+ * import chain, but only providers that actually issue a stealth request need
+ * the transport — so the module load is deferred to first client creation and
+ * memoized. Proxy/stealth configuration parsing stays eager: only the native
+ * module itself is lazy.
+ */
+function loadImpitModule(): Promise<ImpitModule> {
+	impitModulePromise ??= import("impit");
+	return impitModulePromise;
+}
 
 const MISSING_PROXY_WARNING =
 	"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.";
@@ -588,15 +610,19 @@ function createSessionFetcher(
 	const cookieJar = new CookieJarImpl([]);
 	const impitCookieJar = toImpitCookieJar(cookieJar);
 
-	function getClient(
+	async function getClient(
 		profileName: string,
 		proxyUrl: string | undefined,
 		ignoreTlsErrors: boolean,
-	): Impit {
+	): Promise<Impit> {
 		if (closed) {
 			throw new TransportError("Stealth session is closed", { status: 0 });
 		}
 		const browser = resolveImpitBrowser(profileName);
+		const { Impit } = await loadImpitModule();
+		if (closed) {
+			throw new TransportError("Stealth session is closed", { status: 0 });
+		}
 		const cacheKey = JSON.stringify({ browser, proxyUrl, ignoreTlsErrors });
 		let client = clients.get(cacheKey);
 		if (!client) {
@@ -740,10 +766,8 @@ function createSessionFetcher(
 						if (options.body !== undefined) {
 							requestInit.body = normalizeBody(options.body);
 						}
-						const response = await getClient(profileName, proxy, ignoreTlsErrors).fetch(
-							requestUrl,
-							requestInit,
-						);
+						const client = await getClient(profileName, proxy, ignoreTlsErrors);
+						const response = await client.fetch(requestUrl, requestInit);
 						const normalized = await normalizeResponse(response, requestUrl);
 						cookieJar.setFromCookieStrings(setCookieHeadersFromResponse(response.headers));
 
@@ -997,7 +1021,8 @@ function createSessionFetcher(
 		proxy: string,
 	): Promise<"source_ip_denied" | "edge_auth_rejected" | undefined> {
 		try {
-			const response = await getClient(profileName, proxy, false).fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
+			const client = await getClient(profileName, proxy, false);
+			const response = await client.fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
 				method: "GET",
 				timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
 			});
