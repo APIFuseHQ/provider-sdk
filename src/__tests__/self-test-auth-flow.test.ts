@@ -651,6 +651,17 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(state.continueCount).toBe(1);
 	});
 
+	it("does not memoize a generic 400-mapped provider failure from continue", async () => {
+		const state = createFlowProviderState();
+		state.flowError = true; // generic throw -> non-auth status, never cached
+		const { selfTestApp } = createApps(createFlowProvider(state));
+		await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		// Both cycles re-drove the flow: transient provider failures must not
+		// freeze the signal behind the rejection cache.
+		expect(state.continueCount).toBe(2);
+	});
+
 	it("never posts credentials into a non-input start turn (redirect/poll/challenge)", async () => {
 		const state = createFlowProviderState();
 		state.nonInputTurnAtStart = "redirect";

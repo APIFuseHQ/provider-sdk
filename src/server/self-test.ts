@@ -134,10 +134,12 @@ export const SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON = "auth_flow_rejected";
  */
 /**
  * Post-submission /auth/continue statuses that mean the flow REJECTED the
- * credentials (thrown AuthError -> 401, schema-invalid inputs -> 400, 403):
- * memoized as `auth_flow_rejected`. 408/429/5xx stay uncached transients.
+ * credentials (thrown AuthError -> 401, forbidden -> 403): memoized as
+ * `auth_flow_rejected`. Deliberately NOT 400 — the auth route maps generic
+ * ProviderErrors and Zod request errors there, which are often transient or
+ * fixable and must stay uncached retries (like 408/429/5xx).
  */
-const AUTH_REJECTION_HTTP_STATUSES: ReadonlySet<number> = new Set([400, 401, 403]);
+const AUTH_REJECTION_HTTP_STATUSES: ReadonlySet<number> = new Set([401, 403]);
 
 const INTERACTIVE_TURN_KIND_SET: ReadonlySet<string> = new Set(
 	TURN_KINDS.filter(
@@ -622,9 +624,9 @@ async function materializeFlowCredential(
 		if (!continued.ok) {
 			// Providers built with defineCredentialsAuth cannot return a retry
 			// turn — a rejected password THROWS and /auth/continue answers with
-			// an auth-shaped 4xx. That is a credential REJECTION (memoized, so
-			// the probe never hammers a locked-out login), not a transient
-			// failure: only 408/429/5xx-class errors stay uncached retries.
+			// an auth-shaped 401/403. That is a credential REJECTION (memoized,
+			// so the probe never hammers a locked-out login); every other
+			// status stays an uncached transient retry.
 			if (AUTH_REJECTION_HTTP_STATUSES.has(continued.httpStatus)) {
 				return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON };
 			}
