@@ -3730,23 +3730,24 @@ function classifyEntropyCandidate(input: {
 }): SecretFinding | undefined {
 	const value = input.value;
 	if (!shouldConsiderEntropyValue(value)) return undefined;
-	// Word-like SCREAMING_SNAKE values (e.g. error-code constants such as
-	// "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED") are identifiers, not credential
-	// material, but they may contain secret-ish words (AUTH/PASSWORD/...) in
-	// their own text and would otherwise be permanently blocker-flagged. The
-	// exemption only applies when the surrounding code — the line minus the
-	// literal itself — carries no secret-ish identifier, so a value assigned
-	// to `apiKey`/`token`/`secret`-style names stays fully scanned.
-	if (
-		isScreamingSnakeConstantValue(value) &&
-		!SECRETISH_IDENTIFIER_PATTERN.test(stripCandidateFromLine(input.line, value))
-	) {
-		return undefined;
-	}
 	const charset = classifyEntropyCharset(value);
 	if (!charset) return undefined;
 	const entropy = shannonEntropy(value);
 	const secretishContext = SECRETISH_IDENTIFIER_PATTERN.test(input.line);
+	// Word-like SCREAMING_SNAKE values (e.g. error-code constants such as
+	// "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED") may contain secret-ish words
+	// (AUTH/PASSWORD/...) in their own text and would otherwise be permanently
+	// blocker-flagged. They are never skipped — entropy classification always
+	// runs — but when the secret-ish context comes solely from the literal's
+	// own content (the line minus the literal carries no secret-ish
+	// identifier), the finding is capped at a non-blocking warning instead of
+	// a blocker. Assignments to `apiKey`/`token`/`secret`-style names still
+	// escalate to blockers, and `// @apifuse-allow secret-scan` remains the
+	// reviewed way to silence the warning.
+	const selfContextOnlyConstant =
+		secretishContext &&
+		isScreamingSnakeConstantValue(value) &&
+		!SECRETISH_IDENTIFIER_PATTERN.test(stripCandidateFromLine(input.line, value));
 	const threshold = charset === "hex" ? 3.0 : secretishContext ? 4.0 : 4.5;
 	if (entropy < threshold) return undefined;
 
@@ -3757,13 +3758,18 @@ function classifyEntropyCandidate(input: {
 		charset === "hex"
 			? `high-entropy hex string (${entropy.toFixed(2)} bits/char)`
 			: `high-entropy base64-like string (${entropy.toFixed(2)} bits/char)`;
+	const contextNote = selfContextOnlyConstant
+		? "; identifier-like constant (downgraded to warning)"
+		: secretishContext
+			? ""
+			: "; may be a false positive";
 	return {
 		label,
 		file: input.file,
 		line: input.lineNumber,
-		level: secretishContext ? "blocker" : "warn",
+		level: secretishContext && !selfContextOnlyConstant ? "blocker" : "warn",
 		remediation: `Move ${location} to an env var read via \`ctx.env.get("${envName}")\` and rotate the leaked credential.`,
-		evidence: `${location}: ${label}; preview ${preview}${secretishContext ? "" : "; may be a false positive"}`,
+		evidence: `${location}: ${label}; preview ${preview}${contextNote}`,
 	};
 }
 
@@ -3775,9 +3781,11 @@ function classifyEntropyCandidate(input: {
 // "PROVIDER_CONTRACT_V2_REQUIRED" match; digit-heavy segmented material
 // (e.g. license/credential shapes like "ABCD1234_EFGH5678_IJKL9012"),
 // uppercase blobs ("XK9J_Q2ZP_M7VN"), and underscore-free hex-like values
-// ("A1B2C3D4...") all fall through to entropy classification. Genuinely
-// digit-heavy error codes are rare; providers can acknowledge those with
-// `// @apifuse-allow secret-scan: <reason>` instead.
+// ("A1B2C3D4...") do not. This shape gate never skips entropy classification;
+// it only decides whether a finding whose secret-ish context comes solely
+// from the literal's own text is downgraded from blocker to warning, so it
+// deliberately stays strict: values that merely contain a secret-ish word but
+// are not word-like constants keep full blocker severity.
 function isScreamingSnakeConstantValue(value: string): boolean {
 	if (!/^[A-Z][A-Z0-9_]*$/.test(value) || !value.includes("_")) return false;
 	const segments = value.split("_");

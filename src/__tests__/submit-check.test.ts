@@ -2223,13 +2223,14 @@ const integrity = "sha512-qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5
 		expect(check?.evidence?.join("\n")).not.toContain(blob);
 	});
 
-	it("does not flag SCREAMING_SNAKE error-code constants containing secret-ish words", async () => {
+	it("downgrades SCREAMING_SNAKE error-code constants to a non-blocking warning", async () => {
 		// Entropy 4.04 bits/char, 36 chars, 100% base64-ish charset, and the
-		// value itself contains AUTH/PASSWORD — before the identifier exemption
-		// this was permanently blocker-flagged (no suppression path existed).
-		// The exemption requires the surrounding code (line minus the literal)
-		// to be free of secret-ish identifiers, so both a throw site and a
-		// neutrally-named constant qualify.
+		// value itself contains AUTH/PASSWORD — before the downgrade this was
+		// permanently blocker-flagged (verdict BLOCKED, no suppression path).
+		// Entropy classification still runs, but because the secret-ish
+		// context comes solely from the literal's own text (throw sites and
+		// neutrally-named constants), the finding is capped at a warning and
+		// the verdict is never BLOCKED.
 		const dir = makeProviderDir(
 			"submit-entropy-error-code-",
 			`${validProviderSource()}
@@ -2245,7 +2246,46 @@ export function raiseCaptchaGate(): never {
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "secret-scan");
 
-		expect(check?.status).toBe("pass");
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(check?.evidence?.join("\n")).toContain(
+			"identifier-like constant (downgraded to warning)",
+		);
+		expect(report.summary.blockers).toBe(0);
+		expect(report.score.verdict).not.toBe("blocked");
+	});
+
+	it("still warns on pure-alphabetic keyboard-mash uppercase values", async () => {
+		// Codex round-3 counterexample: all-alphabetic segments pass the
+		// word-like shape test, but entropy classification is never skipped —
+		// 4.66 bits/char in a neutral context still surfaces as a warning.
+		const mash = "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD";
+		const dir = makeProviderDir(
+			"submit-entropy-keyboard-mash-",
+			`${validProviderSource()}\nconst license = "${mash}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("warn");
+		expect(check?.evidence?.join("\n")).not.toContain(mash);
+	});
+
+	it("suppresses downgraded error-code warnings via @apifuse-allow secret-scan", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-error-code-allow-",
+			`${validProviderSource()}
+// @apifuse-allow secret-scan: upstream auth error code, not a credential
+const CAPTCHA_REQUIRED_CODE = "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.message).toContain("1 acknowledged @apifuse-allow override(s)");
 		expect(report.summary.blockers).toBe(0);
 	});
 
