@@ -310,12 +310,37 @@ function upstreamErrorMessage(body: unknown): string | undefined {
 }
 
 /**
- * In-process cache of flow-materialized credentials keyed by
- * (providerId + stable hash of credentialInputs), so consecutive probe cycles
- * reuse the session instead of logging in every cycle (upstream account
- * safety). Entries are invalidated on a probe auth failure, at most once.
+ * How long a memoized multi-turn flow outcome suppresses re-driving the auth
+ * flow. Generous on purpose: a multi-turn ceremony (OTP, device approval) is a
+ * provider property that changes on the timescale of releases, not probe
+ * cycles, and every re-drive is a REAL upstream login submission. The cache is
+ * in-process, so a pod restart also clears the entry.
  */
-export type SelfTestCredentialSessionCache = Map<string, Record<string, string>>;
+export const SELF_TEST_MULTI_TURN_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+
+export type SelfTestCredentialSessionEntry =
+	/** Flow-materialized credential reused across probe cycles. */
+	| { kind: "credential"; credential: Record<string, string> }
+	/**
+	 * Negative entry: the flow did not complete in a single continue turn
+	 * (`auth_flow_multi_turn`). Memoized so subsequent cycles report the skip
+	 * WITHOUT contacting the upstream again — the first attempt already
+	 * submitted real credentials (and may have triggered an OTP send).
+	 */
+	| { kind: "multi_turn"; cachedAtMs: number };
+
+/**
+ * In-process cache of per-(providerId + stable hash of credentialInputs) auth
+ * flow outcomes, so consecutive probe cycles reuse the session — or the
+ * memoized multi-turn skip — instead of logging in every cycle (upstream
+ * account safety, DR-7). Credential entries are invalidated on a probe auth
+ * failure, at most once; multi-turn entries expire after
+ * `SELF_TEST_MULTI_TURN_RETRY_AFTER_MS` or on process restart. Flow ERRORS
+ * (transport/protocol failures, thrown start/continue) are deliberately NEVER
+ * cached: they are typically transient, and retrying a failed request next
+ * cycle is not a repeated login submission.
+ */
+export type SelfTestCredentialSessionCache = Map<string, SelfTestCredentialSessionEntry>;
 
 interface SelfTestExecutionContext {
 	provider: ProviderDefinition;
@@ -561,21 +586,51 @@ async function resolveSelfTestConnection(
 	}
 
 	const cacheKey = credentialSessionCacheKey(execution.provider.id, inputs);
-	if (options.forceLogin !== true) {
-		const cached = execution.sessionCache.get(cacheKey);
-		if (cached) {
-			registerSensitiveValues(execution, Object.values(cached));
-			return {
-				kind: "connection",
-				connection: buildConnection(cached),
-				credentialSource: "cache",
-				cacheKey,
-			};
+	const cached = execution.sessionCache.get(cacheKey);
+	// DR-7 upstream-account safety: a memoized multi-turn outcome
+	// short-circuits to the auth_flow_multi_turn skip WITHOUT re-driving
+	// flow.start()/flow.continue() — every re-drive is a real upstream login
+	// submission (OTP sends, lockout risk), and the probe scheduler would
+	// otherwise repeat it every cycle forever. Changed credentialInputs hash
+	// to a different key and re-attempt immediately; otherwise the entry
+	// expires after a generous TTL (or process restart) so a provider whose
+	// flow becomes single-turn again is eventually re-probed.
+	if (cached?.kind === "multi_turn") {
+		if (Date.now() - cached.cachedAtMs < SELF_TEST_MULTI_TURN_RETRY_AFTER_MS) {
+			return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
 		}
+		execution.sessionCache.delete(cacheKey);
+	}
+	if (options.forceLogin !== true && cached?.kind === "credential") {
+		registerSensitiveValues(execution, Object.values(cached.credential));
+		return {
+			kind: "connection",
+			connection: buildConnection(cached.credential),
+			credentialSource: "cache",
+			cacheKey,
+		};
 	}
 	const materialized = await materializeFlowCredential(execution, inputs);
-	if (!("credential" in materialized)) return materialized;
-	execution.sessionCache.set(cacheKey, materialized.credential);
+	if (!("credential" in materialized)) {
+		// Only the multi-turn SKIP is negative-cached. Flow ERRORS
+		// (auth_flow_unavailable / auth_flow_failed / invalid credential
+		// payloads, or a thrown start/continue) are never memoized: they are
+		// typically transient upstream or host failures, so each cycle may
+		// retry — permanently caching an error would silently freeze the
+		// signal on a blip, while retrying a FAILED request is not a repeated
+		// successful login submission.
+		if (
+			materialized.kind === "skip" &&
+			materialized.skipReason === SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON
+		) {
+			execution.sessionCache.set(cacheKey, { kind: "multi_turn", cachedAtMs: Date.now() });
+		}
+		return materialized;
+	}
+	execution.sessionCache.set(cacheKey, {
+		kind: "credential",
+		credential: materialized.credential,
+	});
 	return {
 		kind: "connection",
 		connection: buildConnection(materialized.credential),

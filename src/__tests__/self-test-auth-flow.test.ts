@@ -21,21 +21,30 @@ const CREDENTIAL_INPUTS = { phone: "010-1234-5678", password: "pw-secret-1234" }
 
 interface FlowProviderState {
 	loginCount: number;
+	/** Every `flow.start()` invocation, regardless of outcome. */
+	startCount: number;
+	/** Every `flow.continue()` invocation, regardless of outcome. */
+	continueCount: number;
 	/** Cookie the upstream currently accepts; probes with any other value 401. */
 	validCookie: string;
 	/** Cookie the next successful login will issue. */
 	nextCookie: () => string;
 	/** When true, `continue` never completes (OTP-style second turn). */
 	multiTurn: boolean;
+	/** When true, `continue` throws (transient upstream/transport failure). */
+	flowError: boolean;
 }
 
 function createFlowProviderState(): FlowProviderState {
 	let issued = 0;
 	return {
 		loginCount: 0,
+		startCount: 0,
+		continueCount: 0,
 		validCookie: "flow-session-secret-v1",
 		nextCookie: () => `flow-session-secret-v${++issued}`,
 		multiTurn: false,
+		flowError: false,
 	};
 }
 
@@ -68,8 +77,15 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 		auth: {
 			mode: "credentials",
 			flow: {
-				start: async () => formTurn("turn-start"),
+				start: async () => {
+					state.startCount += 1;
+					return formTurn("turn-start");
+				},
 				continue: async (_ctx, input = {}) => {
+					state.continueCount += 1;
+					if (state.flowError) {
+						throw new Error("upstream login endpoint temporarily unreachable");
+					}
 					if (state.multiTurn) {
 						return formTurn("turn-otp");
 					}
@@ -216,6 +232,7 @@ async function runCase(
 	operationId: string,
 	caseName: string,
 	requestId = "req-flow-test",
+	inputs: Record<string, string> = CREDENTIAL_INPUTS,
 ): Promise<SelfTestResponse> {
 	const response = await selfTestApp.request(SELF_TEST_PATH, {
 		method: "POST",
@@ -228,7 +245,7 @@ async function runCase(
 			requestId,
 			operationId,
 			caseName,
-			credentials: { inputs: CREDENTIAL_INPUTS },
+			credentials: { inputs },
 		}),
 	});
 	expect(response.status).toBe(200);
@@ -258,6 +275,71 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(body.result?.skipReason).toBe("auth_flow_multi_turn");
 		expect(body.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON);
 		expect(state.loginCount).toBe(0);
+	});
+
+	it("memoizes the multi-turn outcome: later cycles skip WITHOUT contacting the upstream flow", async () => {
+		const state = createFlowProviderState();
+		state.multiTurn = true;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(first.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON);
+		expect(state.startCount).toBe(1);
+		expect(state.continueCount).toBe(1);
+
+		// Second probe cycle: same skip, ZERO additional flow traffic — the
+		// first continue already submitted real credentials upstream (OTP
+		// send / lockout risk), so the outcome must be served from the
+		// session cache (DR-7: probes must not log in every cycle).
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		expect(second.result?.status).toBe("skipped");
+		expect(second.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON);
+		expect(state.startCount).toBe(1);
+		expect(state.continueCount).toBe(1);
+	});
+
+	it("re-attempts the flow when credentialInputs change (different cache key)", async () => {
+		const state = createFlowProviderState();
+		state.multiTurn = true;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(state.continueCount).toBe(1);
+
+		// Rotated credentials hash to a different cache key: the memoized
+		// multi-turn entry for the old inputs must not suppress a genuine
+		// re-attempt with the new ones.
+		const rotated = await runCase(selfTestApp, "session", "session case", "req-cycle-2", {
+			phone: CREDENTIAL_INPUTS.phone,
+			password: "rotated-password-5678",
+		});
+		expect(rotated.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON);
+		expect(state.startCount).toBe(2);
+		expect(state.continueCount).toBe(2);
+	});
+
+	it("never memoizes flow ERRORS: each cycle may retry a transient failure", async () => {
+		const state = createFlowProviderState();
+		state.flowError = true;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(first.result?.status).toBe("error");
+		expect(first.result?.error?.code).toBe("auth_flow_failed");
+		expect(state.continueCount).toBe(1);
+
+		// A thrown/errored flow is transient by policy — the next cycle
+		// retries instead of being frozen by a negative cache entry…
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		expect(second.result?.status).toBe("error");
+		expect(state.continueCount).toBe(2);
+
+		// …so recovery is observed as soon as the upstream comes back.
+		state.flowError = false;
+		const third = await runCase(selfTestApp, "session", "session case", "req-cycle-3");
+		expect(third.result?.status).toBe("ok");
+		expect(state.loginCount).toBe(1);
+		expect(state.continueCount).toBe(3);
 	});
 
 	it("reuses the cached session across probe cycles instead of logging in every cycle", async () => {
