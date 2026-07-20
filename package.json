@@ -76,7 +76,7 @@
 		"lint": "biome lint .",
 		"lint:fix": "biome lint --write",
 		"format": "biome format --write",
-		"type-check": "tsgo --noEmit",
+		"type-check": "tsc --noEmit",
 		"test": "bun test",
 		"check": "bun run lint && bun run type-check && bun run build",
 		"pack:check": "bun run build && bun bin/apifuse-pack-check.ts",
@@ -84,14 +84,14 @@
 		"pack:types": "bun run build && bun bin/apifuse-pack-types.ts",
 		"release:guard": "bun scripts/guard-release-pr.ts",
 		"format:check": "biome format .",
-		"build": "tsgo -p tsconfig.build.json && rm -rf dist/cli/templates && cp -R src/cli/templates dist/cli/templates && rm -rf dist/auth-turn/fixtures && cp -R src/auth-turn/fixtures dist/auth-turn/fixtures && cp src/auth-turn/auth-turn.v1.schema.json dist/auth-turn/auth-turn.v1.schema.json"
+		"build": "tsc -p tsconfig.build.json && rm -rf dist/cli/templates && cp -R src/cli/templates dist/cli/templates && rm -rf dist/auth-turn/fixtures && cp -R src/auth-turn/fixtures dist/auth-turn/fixtures && cp src/auth-turn/auth-turn.v1.schema.json dist/auth-turn/auth-turn.v1.schema.json"
 	},
 	"devDependencies": {
 		"@arethetypeswrong/cli": "^0.18.5",
 		"@biomejs/biome": "^2.5.0",
 		"@types/bun": "latest",
 		"@types/node": "^25.9.3",
-		"@typescript/native-preview": "7.0.0-dev.20260419.1"
+		"typescript": "7.0.2"
 	},
 	"dependencies": {
 		"@clack/prompts": "^1.5.1",

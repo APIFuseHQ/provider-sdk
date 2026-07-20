@@ -84,8 +84,9 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 					"@apifuse/provider-sdk": `file:${tarballPath}`,
 				},
 				devDependencies: {
-					// Real tsc, not tsgo: this must reflect what external provider
-					// polyrepos (e.g. apifuse-provider-tabelog) run in their CI.
+					// Pinned to TS 5.x independently of the repo's own TypeScript 7
+					// toolchain: this must reflect what external provider polyrepos
+					// (e.g. apifuse-provider-tabelog) run in their CI.
 					typescript: "^5.9.3",
 					// skipLibCheck:false type-checks transitive deps too (ioredis
 					// references Buffer), so the fixture needs node types like any
