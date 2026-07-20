@@ -40,6 +40,8 @@ interface FlowProviderState {
 	abortAtStart: boolean;
 	/** When true, `start` returns a turn kind unknown to TURN_KINDS. */
 	unknownTurnAtStart: boolean;
+	/** When set, `start` returns this known NON-input turn kind (e.g. redirect). */
+	nonInputTurnAtStart?: string;
 	/** When true, `continue` returns a terminal abort turn. */
 	abortAtContinue: boolean;
 	/** When true, `continue` returns a turn kind unknown to TURN_KINDS. */
@@ -117,6 +119,12 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 					}
 					if (state.unknownTurnAtStart) {
 						return { kind: "mystery_kind", turnId: "turn-mystery-start" } as unknown as AuthTurn;
+					}
+					if (state.nonInputTurnAtStart !== undefined) {
+						return {
+							kind: state.nonInputTurnAtStart,
+							turnId: "turn-noninput-start",
+						} as unknown as AuthTurn;
 					}
 					return formTurn("turn-start");
 				},
@@ -641,6 +649,23 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
 		expect(second.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON);
 		expect(state.continueCount).toBe(1);
+	});
+
+	it("never posts credentials into a non-input start turn (redirect/poll/challenge)", async () => {
+		const state = createFlowProviderState();
+		state.nonInputTurnAtStart = "redirect";
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(first.result?.status).toBe("skipped");
+		expect(first.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON);
+		expect(state.continueCount).toBe(0);
+
+		// A genuine headless gap: memoized like any multi-turn flow.
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		expect(second.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON);
+		expect(state.startCount).toBe(1);
+		expect(state.continueCount).toBe(0);
 	});
 
 	it("rejects an unknown start turn BEFORE submitting credentials", async () => {

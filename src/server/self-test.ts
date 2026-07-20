@@ -590,6 +590,14 @@ async function materializeFlowCredential(
 				message: `Auth flow start returned an unrecognized turn kind "${turn.kind}".`,
 			};
 		}
+		// Auto-continue ONLY into input prompts (form/retry). Other known
+		// interactive stages (redirect, poll, pending, challenge, message,
+		// multi_choice) are valid flows that are NOT asking for the credential
+		// inputs — posting the password there submits it to the wrong stage.
+		// They are a genuine headless gap: the memoized multi-turn skip.
+		if (turn.kind !== "form" && turn.kind !== "retry") {
+			return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
+		}
 		// The case deadline may have fired while start() was still running.
 		// Never submit real credentials into a flow whose case already
 		// reported self_test_timeout — a late continue is a real upstream
