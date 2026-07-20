@@ -478,6 +478,32 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(body.result?.error?.code).toBe("self_test_timeout");
 	});
 
+	it("discards a credential from a flow that completed after the case deadline", async () => {
+		const state = createFlowProviderState();
+		// The flow outlives the 150ms case budget but eventually completes.
+		state.startDelayMs = 300;
+		state.caseTimeoutMs = 150;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(first.result?.status).toBe("error");
+		expect(first.result?.error?.code).toBe("self_test_timeout");
+
+		// Let the abandoned flow finish its late login attempt…
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		const loginsAfterLateCompletion = state.loginCount;
+
+		// …then a healthy cycle must materialize a FRESH credential: nothing
+		// from the timed-out login may have been cached. The upstream accepts
+		// only the next-issued session, so reusing the abandoned v1 cookie
+		// would fail the probe.
+		state.startDelayMs = 0;
+		state.validCookie = "flow-session-secret-v2";
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		expect(second.result?.status).toBe("ok");
+		expect(state.loginCount).toBe(loginsAfterLateCompletion + 1);
+	});
+
 	it("redacts flow-materialized secrets from every probe output", async () => {
 		const state = createFlowProviderState();
 		const { selfTestApp } = createApps(createFlowProvider(state));

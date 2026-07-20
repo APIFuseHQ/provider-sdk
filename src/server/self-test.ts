@@ -596,7 +596,7 @@ async function resolveSelfTestConnection(
 	execution: SelfTestExecutionContext,
 	operationId: string,
 	suite: AnyHealthCheckSuite,
-	options: { forceLogin?: boolean } = {},
+	options: { forceLogin?: boolean; isAbandoned?: () => boolean } = {},
 ): Promise<SelfTestConnectionResolution> {
 	if (!suite.requiresConnection) return { kind: "connection" };
 	const inputs = execution.credentials ?? {};
@@ -662,11 +662,23 @@ async function resolveSelfTestConnection(
 		// successful login submission.
 		if (
 			materialized.kind === "skip" &&
-			materialized.skipReason === SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON
+			materialized.skipReason === SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON &&
+			options.isAbandoned?.() !== true
 		) {
 			execution.sessionCache.set(cacheKey, { kind: "multi_turn", cachedAtMs: Date.now() });
 		}
 		return materialized;
+	}
+	// A flow that outlived the case deadline still completes here (the timeout
+	// only races the promise, it cannot cancel it). The case already reported
+	// self_test_timeout — caching this credential would let the next probe
+	// reuse a login whose latency just failed the case, hiding the failure.
+	if (options.isAbandoned?.() === true) {
+		return {
+			kind: "flow_error",
+			code: "self_test_timeout",
+			message: "Auth flow completed after the case deadline; credential discarded.",
+		};
 	}
 	execution.sessionCache.set(cacheKey, {
 		kind: "credential",
@@ -736,12 +748,21 @@ async function executeSelfTestCase(
 	}
 
 	const resolveConnection = async (forceLogin: boolean): Promise<SelfTestConnectionResolution> => {
+		// The timeout only races the flow promise — it cannot cancel it. Once
+		// the deadline fires, the still-running resolution is marked abandoned
+		// so its late completion cannot write the session cache.
+		let abandoned = false;
 		try {
 			return await withCaseTimeout(
-				() => resolveSelfTestConnection(execution, operationId, suite, { forceLogin }),
+				() =>
+					resolveSelfTestConnection(execution, operationId, suite, {
+						forceLogin,
+						isAbandoned: () => abandoned,
+					}),
 				remainingCaseTimeoutMs(),
 			);
 		} catch (error) {
+			abandoned = true;
 			return {
 				kind: "flow_error",
 				code: error instanceof SelfTestCaseTimeoutError ? "self_test_timeout" : "auth_flow_failed",
