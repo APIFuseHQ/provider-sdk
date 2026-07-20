@@ -3544,8 +3544,9 @@ function scoreProviderDocs(providerRoot: string): SubmitCheck[] {
 // Splits secret findings into still-active findings and acknowledged
 // `// @apifuse-allow secret-scan` overrides, mirroring partitionAllowOverrides
 // (same pragma placement: the finding line or the line directly above it).
-// Findings without a line number (file-level pattern hits on high-confidence
-// credential shapes) cannot be acknowledged and always stay active.
+// Every finding source carries a line number (entropy candidates and located
+// SECRET_PATTERNS matches); a finding that somehow lacks one stays active
+// defensively.
 function partitionSecretScanAllowOverrides(
 	providerRoot: string,
 	findings: readonly SecretFinding[],
@@ -3650,8 +3651,19 @@ function findSecretFindings(providerRoot: string, providerId = "<ID>"): SecretFi
 		if (!existsSync(filePath)) continue;
 		const content = readFileSync(filePath, "utf8");
 		for (const [label, pattern] of SECRET_PATTERNS) {
-			if (pattern.test(content)) {
-				findings.push({ label, file: relativePath });
+			// Locate every match to its line so pattern findings carry the line
+			// information hasAllowOverride needs: `// @apifuse-allow secret-scan`
+			// must behave uniformly across entropy findings and pattern findings.
+			const globalPattern = new RegExp(
+				pattern.source,
+				pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`,
+			);
+			const seenLines = new Set<number>();
+			for (const match of content.matchAll(globalPattern)) {
+				const line = offsetToLine(content, match.index);
+				if (seenLines.has(line)) continue;
+				seenLines.add(line);
+				findings.push({ label, file: relativePath, line });
 			}
 		}
 	}

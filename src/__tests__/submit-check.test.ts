@@ -2427,6 +2427,48 @@ const apiKey = "${key}";
 		expect(report.summary.blockers).toBe(0);
 	});
 
+	it("suppresses acknowledged SECRET_PATTERNS hits in README via @apifuse-allow secret-scan", async () => {
+		// Pattern findings (demo Bearer tokens, JWTs, quoted credential
+		// fields) must honor the pragma uniformly with entropy findings: the
+		// match is located to its line so hasAllowOverride can see the
+		// adjacent acknowledgement.
+		const demoToken = "Bearer abcdefghijklmnopqrstuvwxyz1234567890TOKENA";
+		const dir = makeProviderDir(
+			"submit-pattern-allow-readme-",
+			validProviderSource(),
+			`${defaultReadme()}
+<!-- @apifuse-allow secret-scan: public documentation example, not a live credential -->
+Authorization: ${demoToken}
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(check?.message).toContain("1 acknowledged @apifuse-allow override(s)");
+		expect(check?.evidence?.join("\n")).toContain("README.md:");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("still blocks unacknowledged SECRET_PATTERNS hits in README", async () => {
+		const demoToken = "Bearer abcdefghijklmnopqrstuvwxyz1234567890TOKENA";
+		const dir = makeProviderDir(
+			"submit-pattern-readme-",
+			validProviderSource(),
+			`${defaultReadme()}\nAuthorization: ${demoToken}\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).toContain("README.md:");
+		expect(report.score.verdict).toBe("blocked");
+	});
+
 	it("does not let an @apifuse-allow pragma suppress findings on other lines", async () => {
 		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
 		const dir = makeProviderDir(
