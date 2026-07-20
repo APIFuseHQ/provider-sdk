@@ -592,6 +592,25 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		);
 	});
 
+	it("evicts a fresh credential the probe rejected — next cycle logs in anew, no stale replay", async () => {
+		const state = createFlowProviderState();
+		// Upstream rejects every session, including fresh ones.
+		state.validCookie = "never-issued";
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(first.result?.status).toBe("failed");
+		expect(state.loginCount).toBe(1);
+
+		// The rejected fresh session must NOT be replayed: cycle 2 performs
+		// exactly one probe attempt with a brand-new login (a surviving cache
+		// entry would add a guaranteed-stale attempt before the retry).
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		expect(second.result?.status).toBe("failed");
+		expect(state.loginCount).toBe(2);
+		expect(state.seenConnectionIds).toHaveLength(2);
+	});
+
 	it("redacts flow-materialized secrets from every probe output", async () => {
 		const state = createFlowProviderState();
 		const { selfTestApp } = createApps(createFlowProvider(state));

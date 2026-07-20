@@ -985,6 +985,23 @@ async function executeSelfTestCase(
 			return nonConnectionResult(retryResolution);
 		}
 		result = await runProbeAttempt(retryResolution.connection);
+		// The retry's fresh credential is subject to the same eviction rule
+		// as a first-attempt fresh credential (below).
+		if (retryResolution.cacheKey !== undefined && isAuthFailureCaseResult(result)) {
+			execution.sessionCache.delete(retryResolution.cacheKey);
+		}
+		return result;
+	}
+
+	// A FRESH credential the probe just rejected is known-bad: evict it so the
+	// next cycle logs in anew instead of replaying a guaranteed-stale session
+	// once before recovering. (No retry here — fresh credentials never retry.)
+	if (
+		resolution.credentialSource === "flow" &&
+		resolution.cacheKey !== undefined &&
+		isAuthFailureCaseResult(result)
+	) {
+		execution.sessionCache.delete(resolution.cacheKey);
 	}
 
 	return result;
