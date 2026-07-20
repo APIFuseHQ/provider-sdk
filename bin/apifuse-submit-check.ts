@@ -3541,9 +3541,46 @@ function scoreProviderDocs(providerRoot: string): SubmitCheck[] {
 	];
 }
 
+// Splits secret findings into still-active findings and acknowledged
+// `// @apifuse-allow secret-scan` overrides, mirroring partitionAllowOverrides
+// (same pragma placement: the finding line or the line directly above it).
+// Findings without a line number (file-level pattern hits on high-confidence
+// credential shapes) cannot be acknowledged and always stay active.
+function partitionSecretScanAllowOverrides(
+	providerRoot: string,
+	findings: readonly SecretFinding[],
+): { active: SecretFinding[]; overridden: SecretFinding[] } {
+	const fileLineCache = new Map<string, string[]>();
+	const active: SecretFinding[] = [];
+	const overridden: SecretFinding[] = [];
+
+	for (const finding of findings) {
+		if (finding.line === undefined) {
+			active.push(finding);
+			continue;
+		}
+		const absolute = resolve(providerRoot, finding.file);
+		let lines = fileLineCache.get(absolute);
+		if (lines === undefined) {
+			lines = existsSync(absolute) ? readFileSync(absolute, "utf8").split(/\r?\n/) : [];
+			fileLineCache.set(absolute, lines);
+		}
+		if (hasAllowOverride(lines, finding.line, "secret-scan")) {
+			overridden.push(finding);
+		} else {
+			active.push(finding);
+		}
+	}
+
+	return { active, overridden };
+}
+
 function scoreSecrets(providerRoot: string, provider?: ProviderDefinition): SubmitCheck {
-	const findings = findSecretFindings(providerRoot, provider?.id);
-	const blockerFindings = findings.filter((finding) => finding.level !== "warn");
+	const { active, overridden } = partitionSecretScanAllowOverrides(
+		providerRoot,
+		findSecretFindings(providerRoot, provider?.id),
+	);
+	const blockerFindings = active.filter((finding) => finding.level !== "warn");
 	if (blockerFindings.length > 0) {
 		return {
 			id: "secret-scan",
@@ -3563,7 +3600,15 @@ function scoreSecrets(providerRoot: string, provider?: ProviderDefinition): Subm
 			),
 		};
 	}
-	if (findings.length > 0) {
+	if (active.length > 0 || overridden.length > 0) {
+		const messageBase =
+			active.length > 0
+				? "High-entropy source strings were found without secret-like identifier context; they may be false positives."
+				: "Potential credential-like strings were found in shareable files.";
+		const message =
+			overridden.length > 0
+				? `${messageBase} ${overridden.length} acknowledged @apifuse-allow override(s).`
+				: messageBase;
 		return {
 			id: "secret-scan",
 			category: "security",
@@ -3571,11 +3616,10 @@ function scoreSecrets(providerRoot: string, provider?: ProviderDefinition): Subm
 			status: "warn",
 			points: 8,
 			maxPoints: CATEGORY_MAX_POINTS.security,
-			message:
-				"High-entropy source strings were found without secret-like identifier context; they may be false positives.",
+			message,
 			remediation:
-				'Review the listed strings. If any are credentials, move them to env vars read via `ctx.env.get("APIFUSE__PROVIDER__<ID>__<NAME>")` and rotate the leaked credential; otherwise keep generated blobs in fixtures/tests or document why they are public.',
-			evidence: findings.map(
+				'Review the listed strings. If any are credentials, move them to env vars read via `ctx.env.get("APIFUSE__PROVIDER__<ID>__<NAME>")` and rotate the leaked credential; otherwise keep generated blobs in fixtures/tests or document why they are public with `// @apifuse-allow secret-scan: <reason>`.',
+			evidence: [...active, ...overridden].map(
 				(finding) =>
 					finding.evidence ??
 					`${finding.file}${finding.line ? `:${finding.line}` : ""}: ${finding.label}`,
@@ -3725,6 +3769,13 @@ function shouldConsiderEntropyValue(value: string): boolean {
 	if (lower.includes("/") && /\.[a-z0-9]{1,8}(?:$|[/?#])/i.test(value)) {
 		return false;
 	}
+	// Anchored SCREAMING_SNAKE identifiers (e.g. error-code constants like
+	// "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED") are identifiers, not credential
+	// material: real base64/hex secrets virtually never consist solely of
+	// uppercase letters, digits, and underscores. The exemption deliberately
+	// requires at least one underscore, so uppercase hex-like values (e.g.
+	// "A1B2C3D4...") and mixed-case/+/= material stay fully scanned.
+	if (value.includes("_") && /^[A-Z][A-Z0-9_]*$/.test(value)) return false;
 	return value.length >= 20;
 }
 

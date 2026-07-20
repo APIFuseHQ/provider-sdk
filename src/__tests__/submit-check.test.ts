@@ -2223,6 +2223,94 @@ const integrity = "sha512-qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5
 		expect(check?.evidence?.join("\n")).not.toContain(blob);
 	});
 
+	it("does not flag SCREAMING_SNAKE error-code constants containing secret-ish words", async () => {
+		// Entropy 4.04 bits/char, 36 chars, 100% base64-ish charset, and the
+		// value itself contains AUTH/PASSWORD — before the identifier exemption
+		// this was permanently blocker-flagged (no suppression path existed).
+		const dir = makeProviderDir(
+			"submit-entropy-error-code-",
+			`${validProviderSource()}\nconst AUTH_ERROR_CODE = "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("still blocks mixed-case base64-like values assigned to key-like identifiers", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-entropy-mixed-case-key-",
+			`${validProviderSource()}\nconst apiKey = "${key}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
+	it("still blocks uppercase hex-like values without the identifier underscore shape", async () => {
+		// Deliberate exemption boundary: uppercase-only is not enough — the
+		// SCREAMING_SNAKE exemption also requires at least one underscore, so
+		// hex-like uppercase material stays fully scanned.
+		const hex = "A1B2C3D4E5F60718293A4B5C6D7E8F90";
+		const dir = makeProviderDir(
+			"submit-entropy-upper-hex-",
+			`${validProviderSource()}\nconst signingKey = "${hex}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).not.toContain(hex);
+	});
+
+	it("downgrades acknowledged @apifuse-allow secret-scan findings to a warn", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-entropy-allow-override-",
+			`${validProviderSource()}
+// @apifuse-allow secret-scan: public demo blob documented in README
+const apiKey = "${key}";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(check?.message).toContain("1 acknowledged @apifuse-allow override(s)");
+		expect(check?.evidence?.join("\n")).toContain("index.ts:");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("does not let an @apifuse-allow pragma suppress findings on other lines", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-entropy-allow-wrong-line-",
+			`${validProviderSource()}
+// @apifuse-allow secret-scan: acknowledged blob
+const acknowledged = "${key}";
+const apiKey = "${key}";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
 	it("checks auto-promotion eligibility boundaries", () => {
 		const report = {
 			score: { total: 94, max: 100, verdict: "ready" },
