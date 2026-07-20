@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
+import { TURN_KINDS } from "../auth-turn";
+
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import type {
@@ -111,6 +113,17 @@ export type SelfTestAuthFlowInvoke = (args: {
  * this exact string to `self_test_incapable`; never vary it.
  */
 export const SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON = "auth_flow_multi_turn";
+
+/**
+ * Known interactive turn kinds (everything in TURN_KINDS that is not
+ * terminal). Only these justify the memoized multi-turn skip — they mean a
+ * human must participate. Kinds outside this set are treated as flow errors.
+ */
+const INTERACTIVE_TURN_KIND_SET: ReadonlySet<string> = new Set(
+	TURN_KINDS.filter((descriptor) => descriptor.rendering !== "terminal").map(
+		(descriptor) => descriptor.kind,
+	),
+);
 
 export interface SelfTestAppOptions {
 	/** Derived-token verification secrets; without them every self-test route 404s. */
@@ -552,6 +565,17 @@ async function materializeFlowCredential(
 		};
 	}
 	if (turn.kind !== "complete") {
+		// Only KNOWN interactive kinds are a genuine "cannot complete headless"
+		// multi-turn gap (memoized by the caller). An unknown kind is ambiguous
+		// — it may encode a transient provider failure — so it reports as a
+		// flow error, which is never memoized, instead of freezing the signal.
+		if (!INTERACTIVE_TURN_KIND_SET.has(turn.kind)) {
+			return {
+				kind: "flow_error",
+				code: "auth_flow_unexpected_turn",
+				message: `Auth flow returned an unrecognized turn kind "${turn.kind}".`,
+			};
+		}
 		return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
 	}
 	const credential = completedCredentialFromTurn(turn.data);

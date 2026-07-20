@@ -37,6 +37,8 @@ interface FlowProviderState {
 	abortAtStart: boolean;
 	/** When true, `continue` returns a terminal abort turn. */
 	abortAtContinue: boolean;
+	/** When true, `continue` returns a turn kind unknown to TURN_KINDS. */
+	unknownTurnAtContinue: boolean;
 	/** Artificial latency inside `flow.start()` (deadline tests). */
 	startDelayMs: number;
 	/** Artificial latency inside the probe handler (deadline tests). */
@@ -57,6 +59,7 @@ function createFlowProviderState(): FlowProviderState {
 		flowError: false,
 		abortAtStart: false,
 		abortAtContinue: false,
+		unknownTurnAtContinue: false,
 		startDelayMs: 0,
 		probeDelayMs: 0,
 	};
@@ -108,6 +111,9 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 					}
 					if (state.abortAtContinue) {
 						return { kind: "abort", turnId: "turn-abort-continue" } as AuthTurn;
+					}
+					if (state.unknownTurnAtContinue) {
+						return { kind: "mystery_kind", turnId: "turn-mystery" } as unknown as AuthTurn;
 					}
 					if (state.multiTurn) {
 						return formTurn("turn-otp");
@@ -435,6 +441,24 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		// NOT negative-cached as multi_turn: the next cycle re-drives the flow.
 		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
 		expect(second.result?.error?.code).toBe("auth_flow_aborted");
+		expect(state.startCount).toBe(2);
+		expect(state.continueCount).toBe(2);
+	});
+
+	it("treats an unknown turn kind as a flow error, never a memoized multi-turn skip", async () => {
+		const state = createFlowProviderState();
+		state.unknownTurnAtContinue = true;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(first.result?.status).toBe("error");
+		expect(first.result?.error?.code).toBe("auth_flow_unexpected_turn");
+		expect(first.result?.skipReason).toBeUndefined();
+
+		// Ambiguous turns may encode a transient provider failure — the next
+		// cycle re-drives the flow instead of being frozen by a negative entry.
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		expect(second.result?.error?.code).toBe("auth_flow_unexpected_turn");
 		expect(state.startCount).toBe(2);
 		expect(state.continueCount).toBe(2);
 	});
