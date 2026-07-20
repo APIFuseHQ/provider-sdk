@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { ProviderError } from "../errors";
+import { AuthError, ProviderError } from "../errors";
 import { createMemoryProviderRuntimeState } from "../runtime/state";
 import {
 	createSelfTestApp,
@@ -34,6 +34,8 @@ interface FlowProviderState {
 	multiTurn: boolean;
 	/** When true, `continue` throws (transient upstream/transport failure). */
 	flowError: boolean;
+	/** When true, `continue` throws an AuthError (defineCredentialsAuth-style rejection). */
+	authErrorAtContinue: boolean;
 	/** When true, `start` returns a terminal abort turn. */
 	abortAtStart: boolean;
 	/** When true, `start` returns a turn kind unknown to TURN_KINDS. */
@@ -64,6 +66,7 @@ function createFlowProviderState(): FlowProviderState {
 		nextCookie: () => `flow-session-secret-v${++issued}`,
 		multiTurn: false,
 		flowError: false,
+		authErrorAtContinue: false,
 		abortAtStart: false,
 		unknownTurnAtStart: false,
 		abortAtContinue: false,
@@ -124,6 +127,13 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 					}
 					if (state.flowError) {
 						throw new Error("upstream login endpoint temporarily unreachable");
+					}
+					if (state.authErrorAtContinue) {
+						// defineCredentialsAuth-style rejection: login throws, the
+						// /auth route answers 401 — no retry turn is ever produced.
+						throw new AuthError("upstream rejected the password", {
+							code: "AUTH_REQUIRED",
+						});
 					}
 					if (state.abortAtContinue) {
 						return { kind: "abort", turnId: "turn-abort-continue" } as AuthTurn;
@@ -615,6 +625,22 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(second.result?.status).toBe("failed");
 		expect(state.loginCount).toBe(2);
 		expect(state.seenConnectionIds).toHaveLength(2);
+	});
+
+	it("memoizes a thrown auth rejection (defineCredentialsAuth-style 401) like a retry turn", async () => {
+		const state = createFlowProviderState();
+		state.authErrorAtContinue = true;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(first.result?.status).toBe("skipped");
+		expect(first.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON);
+		expect(state.continueCount).toBe(1);
+
+		// Same bad password must not be re-submitted next cycle (lockout safety).
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		expect(second.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON);
+		expect(state.continueCount).toBe(1);
 	});
 
 	it("rejects an unknown start turn BEFORE submitting credentials", async () => {
