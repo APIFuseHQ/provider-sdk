@@ -3730,6 +3730,19 @@ function classifyEntropyCandidate(input: {
 }): SecretFinding | undefined {
 	const value = input.value;
 	if (!shouldConsiderEntropyValue(value)) return undefined;
+	// Word-like SCREAMING_SNAKE values (e.g. error-code constants such as
+	// "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED") are identifiers, not credential
+	// material, but they may contain secret-ish words (AUTH/PASSWORD/...) in
+	// their own text and would otherwise be permanently blocker-flagged. The
+	// exemption only applies when the surrounding code — the line minus the
+	// literal itself — carries no secret-ish identifier, so a value assigned
+	// to `apiKey`/`token`/`secret`-style names stays fully scanned.
+	if (
+		isScreamingSnakeConstantValue(value) &&
+		!SECRETISH_IDENTIFIER_PATTERN.test(stripCandidateFromLine(input.line, value))
+	) {
+		return undefined;
+	}
 	const charset = classifyEntropyCharset(value);
 	if (!charset) return undefined;
 	const entropy = shannonEntropy(value);
@@ -3754,6 +3767,24 @@ function classifyEntropyCandidate(input: {
 	};
 }
 
+// Word-like SCREAMING_SNAKE identifier shape: at least two underscore-
+// separated segments, each an alphabetic-dominant word ([A-Z]{2,} optionally
+// followed by digits). Dictionary-style constants like
+// "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED" match; high-entropy uppercase blobs
+// (e.g. "ABCD_EFGH_..._3456", "XK9J_Q2ZP_M7VN") and underscore-free hex-like
+// values (e.g. "A1B2C3D4...") do not.
+function isScreamingSnakeConstantValue(value: string): boolean {
+	if (!/^[A-Z][A-Z0-9_]*$/.test(value) || !value.includes("_")) return false;
+	const segments = value.split("_");
+	return segments.length >= 2 && segments.every((segment) => /^[A-Z]{2,}[0-9]*$/.test(segment));
+}
+
+// Removes every occurrence of the candidate literal from its line so context
+// checks only see the surrounding code, not the literal's own text.
+function stripCandidateFromLine(line: string, value: string): string {
+	return line.split(value).join("");
+}
+
 function shouldConsiderEntropyValue(value: string): boolean {
 	const lower = value.toLowerCase();
 	if (/^(?:dev-only|local|example|sample|your-|replace|<)/i.test(value)) {
@@ -3769,13 +3800,6 @@ function shouldConsiderEntropyValue(value: string): boolean {
 	if (lower.includes("/") && /\.[a-z0-9]{1,8}(?:$|[/?#])/i.test(value)) {
 		return false;
 	}
-	// Anchored SCREAMING_SNAKE identifiers (e.g. error-code constants like
-	// "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED") are identifiers, not credential
-	// material: real base64/hex secrets virtually never consist solely of
-	// uppercase letters, digits, and underscores. The exemption deliberately
-	// requires at least one underscore, so uppercase hex-like values (e.g.
-	// "A1B2C3D4...") and mixed-case/+/= material stay fully scanned.
-	if (value.includes("_") && /^[A-Z][A-Z0-9_]*$/.test(value)) return false;
 	return value.length >= 20;
 }
 

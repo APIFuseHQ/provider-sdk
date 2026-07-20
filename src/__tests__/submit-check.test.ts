@@ -2227,9 +2227,17 @@ const integrity = "sha512-qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5
 		// Entropy 4.04 bits/char, 36 chars, 100% base64-ish charset, and the
 		// value itself contains AUTH/PASSWORD — before the identifier exemption
 		// this was permanently blocker-flagged (no suppression path existed).
+		// The exemption requires the surrounding code (line minus the literal)
+		// to be free of secret-ish identifiers, so both a throw site and a
+		// neutrally-named constant qualify.
 		const dir = makeProviderDir(
 			"submit-entropy-error-code-",
-			`${validProviderSource()}\nconst AUTH_ERROR_CODE = "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED";\n`,
+			`${validProviderSource()}
+const CAPTCHA_REQUIRED_CODE = "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED";
+export function raiseCaptchaGate(): never {
+	throw new Error("AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED");
+}
+`,
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
@@ -2237,6 +2245,56 @@ const integrity = "sha512-qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5
 
 		expect(check?.status).toBe("pass");
 		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("still blocks SCREAMING_SNAKE-shaped values assigned to secret-like identifiers", async () => {
+		// Codex review counterexample: the exemption must not fire when the
+		// secret-ish context comes from code outside the literal itself.
+		const dir = makeProviderDir(
+			"submit-entropy-upper-secret-ident-",
+			`${validProviderSource()}\nconst apiKey = "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("still blocks uppercase underscore credentials assigned to key-like identifiers", async () => {
+		// Codex review's verbatim example: base64-like alphabet, entropy 4.78,
+		// on an `apiKey` line — must remain a blocker.
+		const key = "ABCD_EFGH_IJKL_MNOP_QRST_UVWX_YZ12_3456";
+		const dir = makeProviderDir(
+			"submit-entropy-upper-key-",
+			`${validProviderSource()}\nconst apiKey = "${key}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
+	it("still flags uppercase high-entropy blobs that are not word-like constants", async () => {
+		// Shape boundary: every underscore-separated segment must be an
+		// alphabetic-dominant word ([A-Z]{2,} then optional digits). Codex's
+		// uppercase-credential alphabet example fails that (segment "3456"),
+		// so it stays scanned even in a non-secretish context.
+		const blob = "ABCD_EFGH_IJKL_MNOP_QRST_UVWX_YZ12_3456";
+		const dir = makeProviderDir(
+			"submit-entropy-upper-blob-",
+			`${validProviderSource()}\nconst REQUEST_SIGNING_SEED = "${blob}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("warn");
+		expect(check?.evidence?.join("\n")).not.toContain(blob);
 	});
 
 	it("still blocks mixed-case base64-like values assigned to key-like identifiers", async () => {
