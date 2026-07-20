@@ -54,6 +54,8 @@ interface FlowProviderState {
 	probeDelayMs: number;
 	/** Connection ids observed by the session case's prepareInput, per run. */
 	seenConnectionIds: string[];
+	/** When true, the provider declares proxy.session.affinity = "operation". */
+	operationAffinity: boolean;
 	/** Optional per-case timeout override applied to the session case. */
 	caseTimeoutMs?: number;
 }
@@ -77,6 +79,7 @@ function createFlowProviderState(): FlowProviderState {
 		continueDelayMs: 0,
 		probeDelayMs: 0,
 		seenConnectionIds: [],
+		operationAffinity: false,
 	};
 }
 
@@ -98,6 +101,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 		version: "1.0.0",
 		runtime: "standard",
 		meta: { displayName: "Flow Provider", category: "test" },
+		...(state.operationAffinity ? { proxy: { session: { affinity: "operation" } } } : {}),
 		credential: { keys: ["sessionCookie", "userId"] },
 		healthProbe: {
 			credentialInputs: {
@@ -700,6 +704,28 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(body.result?.status).toBe("ok");
 		// A slow login must not read as a fast healthy case.
 		expect(body.result?.responseTimeMs).toBeGreaterThanOrEqual(200);
+	});
+
+	it("splits the session cache per operation for operation-affinity proxies", async () => {
+		const state = createFlowProviderState();
+		state.operationAffinity = true;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		await runCase(selfTestApp, "leaky", "leaky case", "req-cycle-2");
+		// Each operation pins its own proxy (providerId/operationId): one shared
+		// cookie would hop between per-operation proxies, so each operation
+		// materializes its own session.
+		expect(state.loginCount).toBe(2);
+	});
+
+	it("shares one login across operations for connection-scoped affinity", async () => {
+		const state = createFlowProviderState();
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		await runCase(selfTestApp, "leaky", "leaky case", "req-cycle-2");
+		expect(state.loginCount).toBe(1);
 	});
 
 	it("redacts flow-materialized secrets from every probe output", async () => {

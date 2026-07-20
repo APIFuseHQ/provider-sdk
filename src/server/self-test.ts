@@ -700,8 +700,21 @@ async function resolveSelfTestConnection(
 	// session replayed under a per-request id would ride a different proxy/IP
 	// each cycle and upstreams would treat the cookie as stale or suspicious.
 	// The id carries only a hash of the inputs, never the inputs themselves.
-	const affinityKey = credentialSessionCacheKey(execution.provider.id, inputs);
+	//
+	// Providers declaring `proxy.session.affinity: "operation"` pin the PROBE's
+	// proxy to `${providerId}/${operationId}` regardless of connection id — so
+	// the login must ride that exact key, and the session cache splits per
+	// operation (one shared cookie would otherwise hop between per-operation
+	// proxies).
+	const operationAffinity =
+		typeof execution.provider.proxy === "object" &&
+		execution.provider.proxy?.session?.affinity === "operation";
+	const credentialKey = credentialSessionCacheKey(execution.provider.id, inputs);
+	const affinityKey = operationAffinity ? `${credentialKey}:${operationId}` : credentialKey;
 	const connectionId = `self-test-${createHash("sha256").update(affinityKey).digest("hex").slice(0, 22)}`;
+	const flowAffinityId = operationAffinity
+		? `${execution.provider.id}/${operationId}`
+		: connectionId;
 	const buildConnection = (secrets: Readonly<Record<string, string>>): OperationConnection => ({
 		id: connectionId,
 		mode: "credentials",
@@ -749,7 +762,7 @@ async function resolveSelfTestConnection(
 	}
 	const materialized = await materializeFlowCredential(execution, inputs, {
 		...(options.isAbandoned !== undefined ? { isAbandoned: options.isAbandoned } : {}),
-		connectionId,
+		connectionId: flowAffinityId,
 	});
 	if (!("credential" in materialized)) {
 		// Only the multi-turn SKIP is negative-cached. Flow ERRORS
