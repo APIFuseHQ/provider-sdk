@@ -649,8 +649,15 @@ async function resolveSelfTestConnection(
 		return { kind: "skip", skipReason: "credential_missing:credentials" };
 	}
 
+	// The connection id seeds proxy/connection affinity in the provider
+	// context, so it must be STABLE per (provider, credentialInputs): a cached
+	// session replayed under a per-request id would ride a different proxy/IP
+	// each cycle and upstreams would treat the cookie as stale or suspicious.
+	// The id carries only a hash of the inputs, never the inputs themselves.
+	const affinityKey = credentialSessionCacheKey(execution.provider.id, inputs);
+	const connectionId = `self-test-${createHash("sha256").update(affinityKey).digest("hex").slice(0, 22)}`;
 	const buildConnection = (secrets: Readonly<Record<string, string>>): OperationConnection => ({
-		id: `self-test-${execution.requestId}`,
+		id: connectionId,
 		mode: "credentials",
 		secrets: { ...secrets },
 		metadata: { purpose: "provider-self-test", operationId },
@@ -663,7 +670,7 @@ async function resolveSelfTestConnection(
 		return { kind: "connection", connection: buildConnection(inputs), credentialSource: "inputs" };
 	}
 
-	const cacheKey = credentialSessionCacheKey(execution.provider.id, inputs);
+	const cacheKey = affinityKey;
 	const cached = execution.sessionCache.get(cacheKey);
 	// DR-7 upstream-account safety: a memoized multi-turn outcome
 	// short-circuits to the auth_flow_multi_turn skip WITHOUT re-driving

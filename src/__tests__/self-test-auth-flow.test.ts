@@ -46,6 +46,8 @@ interface FlowProviderState {
 	continueDelayMs: number;
 	/** Artificial latency inside the probe handler (deadline tests). */
 	probeDelayMs: number;
+	/** Connection ids observed by the session case's prepareInput, per run. */
+	seenConnectionIds: string[];
 	/** Optional per-case timeout override applied to the session case. */
 	caseTimeoutMs?: number;
 }
@@ -66,6 +68,7 @@ function createFlowProviderState(): FlowProviderState {
 		startDelayMs: 0,
 		continueDelayMs: 0,
 		probeDelayMs: 0,
+		seenConnectionIds: [],
 	};
 }
 
@@ -179,6 +182,16 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 							name: "session case",
 							input: {},
 							...(state.caseTimeoutMs !== undefined ? { timeoutMs: state.caseTimeoutMs } : {}),
+							prepareInput: async ({
+								input,
+								connectionId,
+							}: {
+								input: unknown;
+								connectionId?: string;
+							}) => {
+								state.seenConnectionIds.push(connectionId ?? "none");
+								return input;
+							},
 							assertions: ({ data }: { data: unknown }) => {
 								if (!(data as { ok: boolean }).ok) {
 									throw new Error("flow credential did not reach handler");
@@ -550,6 +563,33 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
 		expect(second.result?.status).toBe("ok");
 		expect(state.loginCount).toBe(loginsAfterLateCompletion + 1);
+	});
+
+	it("keeps the connection id stable across cycles so cached sessions ride one affinity", async () => {
+		const state = createFlowProviderState();
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		expect(first.result?.status).toBe("ok");
+		expect(second.result?.status).toBe("ok");
+		expect(state.loginCount).toBe(1);
+		// The connection id seeds proxy/connection affinity: the cached cookie
+		// must be replayed under the SAME id, never a per-request one.
+		expect(state.seenConnectionIds).toHaveLength(2);
+		expect(state.seenConnectionIds[0]).toBe(state.seenConnectionIds[1] as string);
+		expect(state.seenConnectionIds[0]).toStartWith("self-test-");
+
+		// Rotated inputs are a different credential identity — different
+		// affinity, and no raw input material in the id itself.
+		state.multiTurn = true;
+		await runCase(selfTestApp, "session", "session case", "req-cycle-3", {
+			phone: CREDENTIAL_INPUTS.phone,
+			password: "rotated-password-5678",
+		});
+		expect(state.seenConnectionIds.every((id) => !id.includes("rotated-password-5678"))).toBe(
+			true,
+		);
 	});
 
 	it("redacts flow-materialized secrets from every probe output", async () => {
