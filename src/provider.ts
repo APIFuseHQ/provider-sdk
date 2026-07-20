@@ -115,6 +115,7 @@ export type {
 	ProviderChoiceParseOptions,
 	ProviderContext,
 	ProviderDefinition,
+	ProviderDeploymentOverrides,
 	ProviderLocale,
 	ProviderLocaleKey,
 	ProviderLocaleKeyInput,

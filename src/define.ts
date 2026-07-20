@@ -22,6 +22,7 @@ import type {
 	OperationWebSocketTransport,
 	ProviderAccessConfig,
 	ProviderDefinition,
+	ProviderDeploymentOverrides,
 	ProviderHealthMonitorConfig,
 	ProviderProxyConfig,
 	ProviderPublicProfile,
@@ -227,6 +228,13 @@ export interface ProviderConfig<
 	id: string;
 	version: string;
 	runtime: "standard" | "shared" | "browser";
+	/**
+	 * Optional deployment overrides, passed through verbatim onto the returned
+	 * provider definition. The SDK types this field but does not deep-validate
+	 * it — the APIFuse registry builder owns deployment validation and
+	 * resolves omitted fields against the runtime deployment profiles.
+	 */
+	deployment?: ProviderDeploymentOverrides;
 	allowedHosts?: string[];
 	stealth?: {
 		profile: string;
@@ -2341,6 +2349,25 @@ function validateOperationFixtures(
 	}
 }
 
+/**
+ * Shallow shape guard only: the `deployment` object is passed through
+ * verbatim and deliberately not deep-validated by the SDK — the APIFuse
+ * registry builder owns deployment validation and profile resolution.
+ */
+function validateProviderDeployment(
+	providerId: string,
+	deployment: unknown,
+): void {
+	if (deployment === undefined) return;
+	if (!deployment || typeof deployment !== "object" || Array.isArray(deployment))
+		throw new ProviderError(
+			`Provider "${providerId}" deployment must be an object when present`,
+			{
+				fix: 'Pass deployment: { runtime: "shared" | "dedicated" | "browser", ... } or remove the field',
+			},
+		);
+}
+
 export function defineProvider<
 	TOperations extends Record<string, ProviderOperation>,
 	TConfig extends ProviderConfig<TOperations>,
@@ -2388,6 +2415,7 @@ export function defineProvider<
 		config.healthProbe !== undefined ? "healthProbe" : "healthMonitor",
 	);
 	validateOperationFixtures(config.id, config.operations);
+	validateProviderDeployment(config.id, config.deployment);
 	validateProviderProxy(config);
 	validateProviderStt(config);
 	if (config.runtime === "browser" && !config.browser)
@@ -2406,6 +2434,9 @@ export function defineProvider<
 		id: config.id,
 		version: config.version,
 		runtime: config.runtime,
+		// Verbatim passthrough: deployment validation and profile resolution
+		// are owned by the APIFuse registry builder, not the SDK.
+		deployment: config.deployment,
 		allowedHosts: config.allowedHosts,
 		stealth: config.stealth,
 		proxy: config.proxy,
