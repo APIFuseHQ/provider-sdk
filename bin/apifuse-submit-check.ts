@@ -3768,15 +3768,23 @@ function classifyEntropyCandidate(input: {
 }
 
 // Word-like SCREAMING_SNAKE identifier shape: at least two underscore-
-// separated segments, each an alphabetic-dominant word ([A-Z]{2,} optionally
-// followed by digits). Dictionary-style constants like
-// "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED" match; high-entropy uppercase blobs
-// (e.g. "ABCD_EFGH_..._3456", "XK9J_Q2ZP_M7VN") and underscore-free hex-like
-// values (e.g. "A1B2C3D4...") do not.
+// separated segments, each essentially pure alphabetic — letters optionally
+// followed by a SHORT digit suffix (at most 2, e.g. version markers like
+// "V2") — and at most 15% digits across the whole value. Dictionary-style
+// constants like "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED" or
+// "PROVIDER_CONTRACT_V2_REQUIRED" match; digit-heavy segmented material
+// (e.g. license/credential shapes like "ABCD1234_EFGH5678_IJKL9012"),
+// uppercase blobs ("XK9J_Q2ZP_M7VN"), and underscore-free hex-like values
+// ("A1B2C3D4...") all fall through to entropy classification. Genuinely
+// digit-heavy error codes are rare; providers can acknowledge those with
+// `// @apifuse-allow secret-scan: <reason>` instead.
 function isScreamingSnakeConstantValue(value: string): boolean {
 	if (!/^[A-Z][A-Z0-9_]*$/.test(value) || !value.includes("_")) return false;
 	const segments = value.split("_");
-	return segments.length >= 2 && segments.every((segment) => /^[A-Z]{2,}[0-9]*$/.test(segment));
+	if (segments.length < 2) return false;
+	if (!segments.every((segment) => /^[A-Z]+[0-9]{0,2}$/.test(segment))) return false;
+	const digitCount = value.match(/[0-9]/g)?.length ?? 0;
+	return digitCount / value.length <= 0.15;
 }
 
 // Removes every occurrence of the candidate literal from its line so context

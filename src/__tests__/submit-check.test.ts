@@ -2234,6 +2234,8 @@ const integrity = "sha512-qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5
 			"submit-entropy-error-code-",
 			`${validProviderSource()}
 const CAPTCHA_REQUIRED_CODE = "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED";
+const SUBMIT_FAILED_CODE = "AUTH_PASSWORD_LOGIN_SUBMIT_FAILED";
+const CONTRACT_GATE_CODE = "PROVIDER_CONTRACT_V2_REQUIRED";
 export function raiseCaptchaGate(): never {
 	throw new Error("AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED");
 }
@@ -2280,10 +2282,11 @@ export function raiseCaptchaGate(): never {
 	});
 
 	it("still flags uppercase high-entropy blobs that are not word-like constants", async () => {
-		// Shape boundary: every underscore-separated segment must be an
-		// alphabetic-dominant word ([A-Z]{2,} then optional digits). Codex's
-		// uppercase-credential alphabet example fails that (segment "3456"),
-		// so it stays scanned even in a non-secretish context.
+		// Shape boundary: every underscore-separated segment must be letters
+		// with at most a 2-digit suffix, and digits must be <= 15% of the
+		// value. Codex's uppercase-credential alphabet example fails both
+		// (segment "3456"), so it stays scanned even in a non-secretish
+		// context.
 		const blob = "ABCD_EFGH_IJKL_MNOP_QRST_UVWX_YZ12_3456";
 		const dir = makeProviderDir(
 			"submit-entropy-upper-blob-",
@@ -2295,6 +2298,39 @@ export function raiseCaptchaGate(): never {
 
 		expect(check?.status).toBe("warn");
 		expect(check?.evidence?.join("\n")).not.toContain(blob);
+	});
+
+	it("still warns on digit-heavy segmented uppercase values in neutral context", async () => {
+		// Codex round-2 counterexample: license/credential-shaped material with
+		// digit-heavy segments must fall through to entropy classification.
+		// Each segment carries a 4-digit suffix (> 2) and digits are 46% of the
+		// value (> 15%), so the word-like predicate rejects it; entropy 4.65
+		// exceeds the no-context threshold (4.5) and surfaces as a warn.
+		const license = "ABCD1234_EFGH5678_IJKL9012_MNOP3456";
+		const dir = makeProviderDir(
+			"submit-entropy-license-neutral-",
+			`${validProviderSource()}\nconst license = "${license}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("warn");
+		expect(check?.evidence?.join("\n")).not.toContain(license);
+	});
+
+	it("still blocks digit-heavy segmented uppercase values in secret context", async () => {
+		const license = "ABCD1234_EFGH5678_IJKL9012_MNOP3456";
+		const dir = makeProviderDir(
+			"submit-entropy-license-secret-",
+			`${validProviderSource()}\nconst licenseKey = "${license}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
 	});
 
 	it("still blocks mixed-case base64-like values assigned to key-like identifiers", async () => {
