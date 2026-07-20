@@ -1,5 +1,5 @@
-import { providerStateRedisUrlFromEnv } from "../config/loader";
-import { ProviderError } from "../errors";
+import { providerStateRedisUrlFromEnv } from "../config/loader.js";
+import { ProviderError } from "../errors.js";
 import type {
 	ProviderRuntimeState,
 	ProviderStateNamespace,
@@ -7,13 +7,13 @@ import type {
 	StateNamespaceOptions,
 	StateValue,
 	StateWriteOptions,
-} from "../types";
+} from "../types.js";
 import {
 	createProviderRedisClient,
 	ensureRedisReady,
 	type ProviderRedisClient,
 	withRedisTimeout,
-} from "./redis";
+} from "./redis.js";
 
 const DEFAULT_REDIS_TIMEOUT_MS = 250;
 const REDIS_STATE_PREFIX = "apifuse:provider-state:v1";
@@ -57,37 +57,24 @@ async function withRequiredRedis<T>(operation: () => Promise<T>): Promise<T> {
 	return await withRedisTimeout(operation, {
 		timeoutMs: DEFAULT_REDIS_TIMEOUT_MS,
 		onTimeout: () => {
-			throw new UnsupportedProviderStateError(
-				"Provider runtime state Redis timed out",
-			);
+			throw new UnsupportedProviderStateError("Provider runtime state Redis timed out");
 		},
 		onError: () => {
-			throw new UnsupportedProviderStateError(
-				"Provider runtime state Redis is unavailable",
-			);
+			throw new UnsupportedProviderStateError("Provider runtime state Redis is unavailable");
 		},
 	});
 }
 
 async function requireRedisReady(redis: ProviderRedisClient): Promise<void> {
 	if (await ensureRedisReady(redis, DEFAULT_REDIS_TIMEOUT_MS)) return;
-	throw new UnsupportedProviderStateError(
-		"Provider runtime state Redis is unavailable",
-	);
+	throw new UnsupportedProviderStateError("Provider runtime state Redis is unavailable");
 }
 
-function providerStatePrefix(
-	providerId: string | undefined,
-	namespace: string,
-): string {
+function providerStatePrefix(providerId: string | undefined, namespace: string): string {
 	return `${REDIS_STATE_PREFIX}:${providerId ?? "default"}:${namespace}`;
 }
 
-function providerStateKey(
-	providerId: string | undefined,
-	namespace: string,
-	key: string,
-): string {
+function providerStateKey(providerId: string | undefined, namespace: string, key: string): string {
 	return `${providerStatePrefix(providerId, namespace)}:${key}`;
 }
 
@@ -132,9 +119,7 @@ function envelopeFromJson(
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
 		return null;
 	}
-	const record: Record<string, unknown> = Object.fromEntries(
-		Object.entries(parsed),
-	);
+	const record: Record<string, unknown> = Object.fromEntries(Object.entries(parsed));
 	if (
 		typeof record.version !== "number" ||
 		typeof record.expiresAt !== "string" ||
@@ -182,9 +167,7 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 
 	private async activeKeys(): Promise<string[]> {
 		await requireRedisReady(this.backend.redis);
-		return await withRequiredRedis(() =>
-			this.backend.redis.keys(`${this.prefix()}*`),
-		);
+		return await withRequiredRedis(() => this.backend.redis.keys(`${this.prefix()}*`));
 	}
 
 	private enforceValueSize(value: unknown): void {
@@ -207,47 +190,29 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		}
 	}
 
-	async list<T>(options?: {
-		limit?: number;
-		prefix?: string;
-	}): Promise<StateValue<T>[]> {
+	async list<T>(options?: { limit?: number; prefix?: string }): Promise<StateValue<T>[]> {
 		const keys = (await this.activeKeys()).filter((key) => {
-			const publicKey = publicStateKey(
-				this.providerId,
-				this.namespaceName,
-				key,
-			);
+			const publicKey = publicStateKey(this.providerId, this.namespaceName, key);
 			return options?.prefix ? publicKey.startsWith(options.prefix) : true;
 		});
 		const limited = keys.slice(0, Math.max(0, options?.limit ?? keys.length));
 		if (limited.length === 0) return [];
-		const values = await withRequiredRedis(() =>
-			this.backend.redis.mget(limited),
-		);
+		const values = await withRequiredRedis(() => this.backend.redis.mget(limited));
 		return values.flatMap((raw, index) => {
 			const key = limited[index];
 			if (!key) return [];
-			const value = envelopeFromJson(
-				publicStateKey(this.providerId, this.namespaceName, key),
-				raw,
-			);
+			const value = envelopeFromJson(publicStateKey(this.providerId, this.namespaceName, key), raw);
 			return value ? [value] : [];
 		});
 	}
 
 	async get<T>(key: string): Promise<StateValue<T> | null> {
 		await requireRedisReady(this.backend.redis);
-		const raw = await withRequiredRedis(() =>
-			this.backend.redis.get(this.redisKey(key)),
-		);
+		const raw = await withRequiredRedis(() => this.backend.redis.get(this.redisKey(key)));
 		return envelopeFromJson(key, raw);
 	}
 
-	async set<T>(
-		key: string,
-		value: T,
-		options?: StateWriteOptions,
-	): Promise<StateValue<T>> {
+	async set<T>(key: string, value: T, options?: StateWriteOptions): Promise<StateValue<T>> {
 		this.enforceValueSize(value);
 		await this.enforceMaxEntries(key);
 		const current = await this.get<T>(key);
@@ -258,12 +223,7 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		const expiresAt = resolveExpiresAt(ttl);
 		const envelope = redisEnvelope(value, version, createdAt, expiresAt);
 		await withRequiredRedis(() =>
-			this.backend.redis.set(
-				this.redisKey(key),
-				JSON.stringify(envelope),
-				"PX",
-				ttlMs,
-			),
+			this.backend.redis.set(this.redisKey(key), JSON.stringify(envelope), "PX", ttlMs),
 		);
 		return {
 			key,
@@ -313,11 +273,7 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 	): Promise<StateValue<Record<string, unknown>>> {
 		const current = (await this.get<Record<string, unknown>>(key))?.value ?? {};
 		const previous = typeof current[field] === "number" ? current[field] : 0;
-		return await this.set(
-			key,
-			{ ...current, [field]: previous + delta },
-			options,
-		);
+		return await this.set(key, { ...current, [field]: previous + delta }, options);
 	}
 }
 
@@ -330,43 +286,26 @@ class RedisProviderRuntimeState implements ProviderRuntimeState {
 		this.providerId = options.providerId;
 	}
 
-	namespace(
-		name: string,
-		options: StateNamespaceOptions,
-	): ProviderStateNamespace {
-		return new RedisProviderStateNamespace(
-			this.backend,
-			this.providerId,
-			name,
-			options,
-		);
+	namespace(name: string, options: StateNamespaceOptions): ProviderStateNamespace {
+		return new RedisProviderStateNamespace(this.backend, this.providerId, name, options);
 	}
 }
 
 export class UnsupportedProviderStateError extends ProviderError {
-	constructor(
-		message = "Provider runtime state is not available in this runtime",
-	) {
+	constructor(message = "Provider runtime state is not available in this runtime") {
 		super(message, { code: "PROVIDER_STATE_UNSUPPORTED" });
 		this.name = "UnsupportedProviderStateError";
 	}
 }
 
 class UnsupportedProviderStateNamespace implements ProviderStateNamespace {
-	async list<T>(_options?: {
-		limit?: number;
-		prefix?: string;
-	}): Promise<StateValue<T>[]> {
+	async list<T>(_options?: { limit?: number; prefix?: string }): Promise<StateValue<T>[]> {
 		throw new UnsupportedProviderStateError();
 	}
 	async get<T>(_key: string): Promise<StateValue<T> | null> {
 		throw new UnsupportedProviderStateError();
 	}
-	async set<T>(
-		_key: string,
-		_value: T,
-		_options?: StateWriteOptions,
-	): Promise<StateValue<T>> {
+	async set<T>(_key: string, _value: T, _options?: StateWriteOptions): Promise<StateValue<T>> {
 		throw new UnsupportedProviderStateError();
 	}
 	async patch<T extends Record<string, unknown>>(
@@ -398,10 +337,7 @@ class UnsupportedProviderStateNamespace implements ProviderStateNamespace {
 }
 
 class UnsupportedProviderRuntimeState implements ProviderRuntimeState {
-	namespace(
-		_name: string,
-		_options: StateNamespaceOptions,
-	): ProviderStateNamespace {
+	namespace(_name: string, _options: StateNamespaceOptions): ProviderStateNamespace {
 		return new UnsupportedProviderStateNamespace();
 	}
 }
@@ -420,10 +356,7 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 		}
 	}
 
-	async list<T>(_options?: {
-		limit?: number;
-		prefix?: string;
-	}): Promise<StateValue<T>[]> {
+	async list<T>(_options?: { limit?: number; prefix?: string }): Promise<StateValue<T>[]> {
 		this.pruneExpired();
 		const rows = Array.from(this.values.values()).filter((value) =>
 			_options?.prefix ? value.key.startsWith(_options.prefix) : true,
@@ -436,17 +369,11 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 		return this.values.get(key) ?? null;
 	}
 
-	async set<T>(
-		key: string,
-		value: T,
-		options?: StateWriteOptions,
-	): Promise<StateValue<T>> {
+	async set<T>(key: string, value: T, options?: StateWriteOptions): Promise<StateValue<T>> {
 		this.pruneExpired();
 		const now = new Date().toISOString();
 		const current = this.values.get(key);
-		const expiresAt = resolveMemoryStateExpiresAt(
-			options?.ttl ?? this.options.defaultTtl,
-		);
+		const expiresAt = resolveMemoryStateExpiresAt(options?.ttl ?? this.options.defaultTtl);
 		const row = {
 			key,
 			value,
@@ -499,10 +426,7 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 class MemoryProviderRuntimeState implements ProviderRuntimeState {
 	readonly namespaces = new Map<string, MemoryProviderStateNamespace>();
 
-	namespace(
-		name: string,
-		_options: StateNamespaceOptions,
-	): ProviderStateNamespace {
+	namespace(name: string, _options: StateNamespaceOptions): ProviderStateNamespace {
 		const existing = this.namespaces.get(name);
 		if (existing) return existing;
 		const created = new MemoryProviderStateNamespace(_options);
@@ -536,10 +460,7 @@ export function createRedisProviderRuntimeState(
 }
 
 export function createProviderRuntimeStateFromEnv(
-	options: {
-		readonly providerId?: string;
-		readonly allowMemoryFallback?: boolean;
-	} = {},
+	options: { readonly providerId?: string; readonly allowMemoryFallback?: boolean } = {},
 ): ProviderRuntimeState {
 	const redisUrl = providerStateRedisUrlFromEnv();
 	if (redisUrl) {

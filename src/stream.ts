@@ -1,4 +1,4 @@
-import type { SseMessage } from "./types";
+import type { SseMessage } from "./types.js";
 
 export interface SseEvent<TData = unknown> {
 	event: string;
@@ -61,8 +61,7 @@ export function done<TData>(
 
 export function encodeSseEvent(input: SseEvent): string {
 	const lines: string[] = [];
-	if (input.id !== undefined)
-		lines.push(`id: ${sseFieldValue(input.id, "id")}`);
+	if (input.id !== undefined) lines.push(`id: ${sseFieldValue(input.id, "id")}`);
 	if (input.event) lines.push(`event: ${sseFieldValue(input.event, "event")}`);
 	if (input.retry !== undefined) {
 		if (!Number.isInteger(input.retry) || input.retry < 0) {
@@ -70,8 +69,7 @@ export function encodeSseEvent(input: SseEvent): string {
 		}
 		lines.push(`retry: ${input.retry}`);
 	}
-	const data =
-		typeof input.data === "string" ? input.data : JSON.stringify(input.data);
+	const data = typeof input.data === "string" ? input.data : JSON.stringify(input.data);
 	for (const line of data.split(/\r?\n/)) {
 		lines.push(`data: ${line}`);
 	}
@@ -85,9 +83,7 @@ function sseFieldValue(value: string, field: "event" | "id"): string {
 	return value;
 }
 
-export async function* readableBytes(
-	body: ReadableStream<Uint8Array>,
-): AsyncIterable<Uint8Array> {
+export async function* readableBytes(body: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
 	const reader = body.getReader();
 	try {
 		for (;;) {
@@ -100,9 +96,7 @@ export async function* readableBytes(
 	}
 }
 
-export async function* readableTextChunks(
-	body: ReadableStream<Uint8Array>,
-): AsyncIterable<string> {
+export async function* readableTextChunks(body: ReadableStream<Uint8Array>): AsyncIterable<string> {
 	const decoder = new TextDecoder();
 	for await (const chunk of readableBytes(body)) {
 		yield decoder.decode(chunk, { stream: true });
@@ -111,9 +105,7 @@ export async function* readableTextChunks(
 	if (tail) yield tail;
 }
 
-export async function* readableLines(
-	body: ReadableStream<Uint8Array>,
-): AsyncIterable<string> {
+export async function* readableLines(body: ReadableStream<Uint8Array>): AsyncIterable<string> {
 	let buffer = "";
 	for await (const chunk of readableTextChunks(body)) {
 		buffer += chunk;
@@ -121,8 +113,7 @@ export async function* readableLines(
 			const index = buffer.search(/\r?\n/);
 			if (index < 0) break;
 			const line = buffer.slice(0, index);
-			const newlineLength =
-				buffer[index] === "\r" && buffer[index + 1] === "\n" ? 2 : 1;
+			const newlineLength = buffer[index] === "\r" && buffer[index + 1] === "\n" ? 2 : 1;
 			buffer = buffer.slice(index + newlineLength);
 			yield line;
 		}
@@ -150,9 +141,7 @@ function parseJson<T>(data: string): T {
 	return JSON.parse(data);
 }
 
-export async function* parseSseStream(
-	body: ReadableStream<Uint8Array>,
-): AsyncIterable<SseMessage> {
+export async function* parseSseStream(body: ReadableStream<Uint8Array>): AsyncIterable<SseMessage> {
 	let eventName = "message";
 	let dataLines: string[] = [];
 	let id: string | undefined;

@@ -1,7 +1,7 @@
-import type { ProxyResolutionOptions } from "../config/loader";
-import { resolveProxyConfigAsync } from "../config/loader";
-import { ProviderError, TransportError } from "../errors";
-import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream";
+import type { ProxyResolutionOptions } from "../config/loader.js";
+import { resolveProxyConfigAsync } from "../config/loader.js";
+import { ProviderError, TransportError } from "../errors.js";
+import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
 	HttpClient,
 	HttpMethod,
@@ -11,7 +11,7 @@ import type {
 	RequestOptions,
 	RequestWithMethodOptions,
 	SseMessage,
-} from "../types";
+} from "../types.js";
 import {
 	computeProxyAttemptIndex,
 	computeProxyTransportRetryDelayMs,
@@ -22,8 +22,8 @@ import {
 	proxyTransportRetryErrorStatus,
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
-} from "./proxy-retry-policy";
-import { appendQueryParams, normalizeHttpRequestBody } from "./request-options";
+} from "./proxy-retry-policy.js";
+import { appendQueryParams, normalizeHttpRequestBody } from "./request-options.js";
 
 const DEFAULT_HTTP_BASE_URL = "http://localhost";
 

@@ -1,4 +1,4 @@
-import { ConfigurationError, decodeMasterKey } from "./key-derivation";
+import { ConfigurationError, decodeMasterKey } from "./key-derivation.js";
 
 export interface KeyRingOptions {
 	env: NodeJS.ProcessEnv;
@@ -16,16 +16,12 @@ export interface KeyRing {
 	accept(version: number): KeyRingEntry;
 	activeWriter(): KeyRingEntry;
 	versions(): number[];
-	purgeVersion(
-		version: number,
-		isActiveInStore: (v: number) => Promise<boolean>,
-	): Promise<void>;
+	purgeVersion(version: number, isActiveInStore: (v: number) => Promise<boolean>): Promise<void>;
 }
 
 const DEFAULT_KEY_PREFIX = "APIFUSE__KEYRING__MASTER_KEY_V";
 const DEFAULT_ACCEPT_LIST_VAR = "APIFUSE__KEYRING__MASTER_KEY_ACCEPT_LIST";
-const DEFAULT_WRITER_VERSION_VAR =
-	"APIFUSE__KEYRING__MASTER_KEY_WRITER_VERSION";
+const DEFAULT_WRITER_VERSION_VAR = "APIFUSE__KEYRING__MASTER_KEY_WRITER_VERSION";
 
 function parseAcceptList(raw: string | undefined): number[] {
 	if (!raw || raw.trim().length === 0) {
@@ -56,19 +52,14 @@ function parseAcceptList(raw: string | undefined): number[] {
 	return versions;
 }
 
-function parseWriterVersion(
-	raw: string | undefined,
-	acceptList: number[],
-): number {
+function parseWriterVersion(raw: string | undefined, acceptList: number[]): number {
 	if (!raw || raw.trim().length === 0) {
 		throw new ConfigurationError("writer-version env var is empty");
 	}
 	const trimmed = raw.trim();
 	const v = Number.parseInt(trimmed, 10);
 	if (!Number.isInteger(v) || v <= 0 || String(v) !== trimmed) {
-		throw new ConfigurationError(
-			`writer-version "${trimmed}" is not a positive integer`,
-		);
+		throw new ConfigurationError(`writer-version "${trimmed}" is not a positive integer`);
 	}
 	if (!acceptList.includes(v)) {
 		throw new ConfigurationError(
@@ -90,8 +81,7 @@ export function loadKeyRing(options: KeyRingOptions): KeyRing {
 	const env = options.env;
 	const prefix = options.envPrefix ?? DEFAULT_KEY_PREFIX;
 	const acceptListVar = options.acceptListVar ?? DEFAULT_ACCEPT_LIST_VAR;
-	const writerVersionVar =
-		options.writerVersionVar ?? DEFAULT_WRITER_VERSION_VAR;
+	const writerVersionVar = options.writerVersionVar ?? DEFAULT_WRITER_VERSION_VAR;
 
 	const acceptList = parseAcceptList(env[acceptListVar]);
 	const writerVersion = parseWriterVersion(env[writerVersionVar], acceptList);
@@ -100,9 +90,7 @@ export function loadKeyRing(options: KeyRingOptions): KeyRing {
 	for (const version of acceptList) {
 		const raw = env[`${prefix}${version}`];
 		if (raw === undefined) {
-			throw new ConfigurationError(
-				`${prefix}${version} is missing (listed in accept-list)`,
-			);
+			throw new ConfigurationError(`${prefix}${version} is missing (listed in accept-list)`);
 		}
 		const key = decodeMasterKey(raw);
 		entries.set(version, { version, key });

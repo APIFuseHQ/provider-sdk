@@ -1,13 +1,13 @@
 import { type ZodString, type ZodType, z } from "zod";
 
-import { ValidationError } from "./errors";
-import { providerLocaleKey } from "./i18n/keys";
+import { ValidationError } from "./errors.js";
+import { providerLocaleKey } from "./i18n/keys.js";
 import type {
 	InferSchemaOutput,
 	ProviderLocaleKey,
 	SchemaLike,
 	StandardSchemaV1,
-} from "./types";
+} from "./types.js";
 
 export { z };
 
@@ -25,15 +25,11 @@ function isFailureResult<Output>(
 	return "issues" in result;
 }
 function isPromiseResult<Output>(
-	result:
-		| StandardSchemaV1.Result<Output>
-		| Promise<StandardSchemaV1.Result<Output>>,
+	result: StandardSchemaV1.Result<Output> | Promise<StandardSchemaV1.Result<Output>>,
 ): result is Promise<StandardSchemaV1.Result<Output>> {
 	return result instanceof Promise;
 }
-function formatStandardSchemaIssues(
-	issues: readonly StandardSchemaV1.Issue[],
-): string {
+function formatStandardSchemaIssues(issues: readonly StandardSchemaV1.Issue[]): string {
 	return issues.map((issue) => issue.message).join("; ");
 }
 export function parseSchema<TSchema extends SchemaLike>(
@@ -46,8 +42,7 @@ export async function parseSchema(
 	value: unknown,
 	fieldPath: string,
 ): Promise<unknown> {
-	if ("parse" in schema && typeof schema.parse === "function")
-		return schema.parse(value);
+	if ("parse" in schema && typeof schema.parse === "function") return schema.parse(value);
 	const result = schema["~standard"].validate(value);
 	const resolved = isPromiseResult(result) ? await result : result;
 	if (isFailureResult(resolved))
@@ -78,8 +73,7 @@ export function safeParseSchemaSync(
 					`Schema validation for ${fieldPath} returned a Promise. defineProvider fixture validation requires synchronous Standard Schema validation.`,
 				),
 			};
-		if (isFailureResult(result))
-			return { success: false, error: result.issues };
+		if (isFailureResult(result)) return { success: false, error: result.issues };
 		return { success: true, data: result.value };
 	} catch (error) {
 		return { success: false, error };
@@ -147,9 +141,7 @@ const describeKeyMethod = function <TSchema extends ZodType>(
 };
 
 function installDescribeKeyOnPrototype(prototype: unknown): void {
-	const target = prototype as
-		| (Record<string, unknown> & { describeKey?: unknown })
-		| null;
+	const target = prototype as (Record<string, unknown> & { describeKey?: unknown }) | null;
 	if (!target || typeof target.describeKey === "function") {
 		return;
 	}
@@ -201,12 +193,8 @@ export function field<TSchema extends ZodType>(
 	const metadata = described.meta() ?? {};
 	return described.meta({
 		...metadata,
-		...((options.sensitive ?? true)
-			? { [APIFUSE_SENSITIVE_META_KEY]: true }
-			: {}),
-		...(options.kind
-			? { [APIFUSE_SENSITIVE_KIND_META_KEY]: options.kind }
-			: {}),
+		...((options.sensitive ?? true) ? { [APIFUSE_SENSITIVE_META_KEY]: true } : {}),
+		...(options.kind ? { [APIFUSE_SENSITIVE_KIND_META_KEY]: options.kind } : {}),
 	});
 }
 
@@ -222,10 +210,7 @@ function sensitiveString(
 	description: string,
 	options: { description?: string; minLength?: number } = {},
 ): ZodString {
-	const schema =
-		options.minLength === undefined
-			? z.string()
-			: z.string().min(options.minLength);
+	const schema = options.minLength === undefined ? z.string() : z.string().min(options.minLength);
 	return field(schema, {
 		kind,
 		description: options.description ?? description,
@@ -234,33 +219,17 @@ function sensitiveString(
 
 export const fields = {
 	apiKey: (options?: { description?: string }) =>
-		sensitiveString(
-			"api_key",
-			"Provider API key or credential secret.",
-			options,
-		),
+		sensitiveString("api_key", "Provider API key or credential secret.", options),
 	authorization: (options?: { description?: string }) =>
-		sensitiveString(
-			"authorization",
-			"Authorization header value or bearer credential.",
-			options,
-		),
+		sensitiveString("authorization", "Authorization header value or bearer credential.", options),
 	cookie: (options?: { description?: string }) =>
-		sensitiveString(
-			"cookie",
-			"Cookie header or browser session secret.",
-			options,
-		),
+		sensitiveString("cookie", "Cookie header or browser session secret.", options),
 	otp: (options?: { description?: string }) =>
 		sensitiveString("otp", "One-time verification code.", options),
 	password: (options?: { description?: string; minLength?: number }) =>
 		sensitiveString("password", "Password credential.", options),
 	paymentUrl: (options?: { description?: string }) =>
-		sensitiveString(
-			"payment_url",
-			"Sensitive payment or checkout URL.",
-			options,
-		),
+		sensitiveString("payment_url", "Sensitive payment or checkout URL.", options),
 	phone: (options?: { description?: string }) =>
 		sensitiveString("phone", "Phone number or phone-based identity.", options),
 	secret: (options?: { description?: string }) =>
@@ -271,10 +240,7 @@ export const fields = {
 
 export function isSensitiveSchema(schema: unknown): boolean {
 	const metadata = readZodMetadata(schema);
-	return (
-		metadata !== undefined &&
-		Reflect.get(metadata, APIFUSE_SENSITIVE_META_KEY) === true
-	);
+	return metadata !== undefined && Reflect.get(metadata, APIFUSE_SENSITIVE_META_KEY) === true;
 }
 
 export function collectSensitivePaths(schema: unknown): SensitivePath[] {
@@ -283,10 +249,7 @@ export function collectSensitivePaths(schema: unknown): SensitivePath[] {
 	return out;
 }
 
-export function redactPayload(
-	value: unknown,
-	paths: readonly SensitivePath[] = [],
-): unknown {
+export function redactPayload(value: unknown, paths: readonly SensitivePath[] = []): unknown {
 	return redactValue(value, [], paths);
 }
 
@@ -297,8 +260,7 @@ function collectSensitivePathsInto(
 	activeSchemas: Set<unknown>,
 	emittedPaths: Set<string>,
 ): void {
-	if (!schema || typeof schema !== "object" || activeSchemas.has(schema))
-		return;
+	if (!schema || typeof schema !== "object" || activeSchemas.has(schema)) return;
 	activeSchemas.add(schema);
 	try {
 		if (isSensitiveSchema(schema)) pushSensitivePath(out, emittedPaths, path);
@@ -308,13 +270,7 @@ function collectSensitivePathsInto(
 			case "object": {
 				const shape = readObjectShape(def);
 				for (const [key, child] of Object.entries(shape)) {
-					collectSensitivePathsInto(
-						child,
-						[...path, key],
-						out,
-						activeSchemas,
-						emittedPaths,
-					);
+					collectSensitivePathsInto(child, [...path, key], out, activeSchemas, emittedPaths);
 				}
 				break;
 			}
@@ -341,20 +297,8 @@ function collectSensitivePathsInto(
 				);
 				break;
 			case "pipe":
-				collectSensitivePathsInto(
-					Reflect.get(def, "in"),
-					path,
-					out,
-					activeSchemas,
-					emittedPaths,
-				);
-				collectSensitivePathsInto(
-					Reflect.get(def, "out"),
-					path,
-					out,
-					activeSchemas,
-					emittedPaths,
-				);
+				collectSensitivePathsInto(Reflect.get(def, "in"), path, out, activeSchemas, emittedPaths);
+				collectSensitivePathsInto(Reflect.get(def, "out"), path, out, activeSchemas, emittedPaths);
 				break;
 		}
 	} finally {
@@ -402,18 +346,13 @@ function pathMatches(
 ): boolean {
 	return patterns.some((pattern) => {
 		if (pattern.length !== path.length) return false;
-		return pattern.every(
-			(segment, index) => segment === "*" || segment === path[index],
-		);
+		return pattern.every((segment, index) => segment === "*" || segment === path[index]);
 	});
 }
 
 function isReservedSensitiveKey(key: string): boolean {
 	const normalized = key.toLowerCase().replace(/[-_\s]/g, "");
-	return (
-		RESERVED_SENSITIVE_KEYS.has(normalized) ||
-		RESERVED_SENSITIVE_KEYS.has(key.toLowerCase())
-	);
+	return RESERVED_SENSITIVE_KEYS.has(normalized) || RESERVED_SENSITIVE_KEYS.has(key.toLowerCase());
 }
 
 function readZodMetadata(schema: unknown): object | undefined {

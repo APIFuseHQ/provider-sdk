@@ -8,7 +8,7 @@ import {
 	fields,
 	redactPayload,
 	sensitive,
-} from "../schema";
+} from "../schema.js";
 
 describe("schema sensitivity metadata", () => {
 	it("marks fields without changing validation", () => {
@@ -17,9 +17,7 @@ describe("schema sensitivity metadata", () => {
 			password: sensitive(z.string().min(8)),
 		});
 
-		expect(
-			schema.parse({ username: "neo", password: "correct horse" }),
-		).toEqual({
+		expect(schema.parse({ username: "neo", password: "correct horse" })).toEqual({
 			username: "neo",
 			password: "correct horse",
 		});
@@ -62,19 +60,13 @@ describe("schema sensitivity metadata", () => {
 			}),
 		});
 
-		expect(collectSensitivePaths(schema)).toEqual([
-			["password"],
-			["phoneNumber"],
-			["checkoutUrl"],
-		]);
+		expect(collectSensitivePaths(schema)).toEqual([["password"], ["phoneNumber"], ["checkoutUrl"]]);
 
 		const jsonSchema = z.toJSONSchema(schema) as {
 			properties?: Record<string, Record<string, unknown>>;
 		};
 		expect(jsonSchema.properties?.password?.["x-apifuse-sensitive"]).toBe(true);
-		expect(jsonSchema.properties?.password?.["x-apifuse-sensitive-kind"]).toBe(
-			"password",
-		);
+		expect(jsonSchema.properties?.password?.["x-apifuse-sensitive-kind"]).toBe("password");
 		expect(jsonSchema.properties?.checkoutUrl?.description).toBe(
 			"Payment URL returned by the upstream provider.",
 		);

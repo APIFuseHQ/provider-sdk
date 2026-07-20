@@ -1,5 +1,5 @@
-import { serve } from "./server/serve";
-import type { ProviderDefinition } from "./types";
+import { serve } from "./server/serve.js";
+import type { ProviderDefinition } from "./types.js";
 
 export interface DevServerOptions {
 	port?: number;
@@ -18,17 +18,12 @@ export function createDevServer(
 			console.log(
 				`[apifuse dev] ${provider.id}@${provider.version} running at http://localhost:${port}`,
 			);
-			console.log(
-				`[apifuse dev] Operations: ${Object.keys(provider.operations).join(", ")}`,
-			);
+			console.log(`[apifuse dev] Operations: ${Object.keys(provider.operations).join(", ")}`);
 			console.log(`[apifuse dev] Health: http://localhost:${port}/health`);
 		},
 	};
 }
 
-export function startDevServer(
-	provider: ProviderDefinition,
-	options?: DevServerOptions,
-): void {
+export function startDevServer(provider: ProviderDefinition, options?: DevServerOptions): void {
 	createDevServer(provider, options).start();
 }

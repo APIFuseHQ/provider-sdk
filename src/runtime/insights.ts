@@ -1,5 +1,5 @@
-import { computePercentile } from "./perf";
-import type { Span, SpanAttributeValue } from "./trace";
+import { computePercentile } from "./perf.js";
+import type { Span, SpanAttributeValue } from "./trace.js";
 
 export type InsightSeverity = "info" | "warning" | "error";
 
@@ -115,11 +115,7 @@ function parseHostname(url: string | undefined): string | undefined {
 	}
 }
 
-function makeInsight(
-	id: string,
-	severity: InsightSeverity,
-	result: InsightResult,
-): Insight {
+function makeInsight(id: string, severity: InsightSeverity, result: InsightResult): Insight {
 	return {
 		id,
 		severity,
@@ -266,8 +262,7 @@ function getDnsRepeatedCandidate(spans: Span[]): DnsHostInsight | null {
 		}
 
 		const avgDnsMs =
-			entry.dnsDurations.reduce((sum, value) => sum + value, 0) /
-			entry.dnsDurations.length;
+			entry.dnsDurations.reduce((sum, value) => sum + value, 0) / entry.dnsDurations.length;
 		const reuseRate = entry.reuseCount / entry.totalCount;
 
 		if (avgDnsMs > DNS_WARN_MS && reuseRate < 0.2) {
@@ -301,9 +296,7 @@ function getDnsRepeatedInsight(spans: Span[]): InsightResult {
 
 function getProxyOverheadInsight(spans: Span[]): InsightResult {
 	const requestSpans = spans.filter(isRequestSpan);
-	const proxiedDurations = requestSpans
-		.filter(hasProxy)
-		.map((span) => span.duration_ms);
+	const proxiedDurations = requestSpans.filter(hasProxy).map((span) => span.duration_ms);
 	const directDurations = requestSpans
 		.filter((span) => !hasProxy(span))
 		.map((span) => span.duration_ms);
@@ -316,11 +309,8 @@ function getProxyOverheadInsight(spans: Span[]): InsightResult {
 	}
 
 	const proxyAvg =
-		proxiedDurations.reduce((sum, value) => sum + value, 0) /
-		proxiedDurations.length;
-	const directAvg =
-		directDurations.reduce((sum, value) => sum + value, 0) /
-		directDurations.length;
+		proxiedDurations.reduce((sum, value) => sum + value, 0) / proxiedDurations.length;
+	const directAvg = directDurations.reduce((sum, value) => sum + value, 0) / directDurations.length;
 
 	if (directAvg > 0 && proxyAvg >= directAvg * 2) {
 		return {
@@ -345,9 +335,7 @@ function getBrowserIdleInsight(spans: Span[]): InsightResult {
 				return waitMs;
 			}
 
-			return span.name.toLowerCase().includes("wait")
-				? span.duration_ms
-				: undefined;
+			return span.name.toLowerCase().includes("wait") ? span.duration_ms : undefined;
 		})
 		.filter((value): value is number => value !== undefined);
 
@@ -374,9 +362,7 @@ function getBrowserIdleInsight(spans: Span[]): InsightResult {
 }
 
 function getSessionExpiryInsight(spans: Span[]): InsightResult {
-	const refreshCount = spans.filter(
-		(span) => span.name === "credential.refresh",
-	).length;
+	const refreshCount = spans.filter((span) => span.name === "credential.refresh").length;
 	const requestCount = spans.filter(isRequestSpan).length;
 
 	if (requestCount === 0) {
@@ -415,36 +401,12 @@ export function generateInsights(spans: Span[]): Insight[] {
 	const sessionExpiry = getSessionExpiryInsight(spans);
 
 	const rules = [
-		makeInsight(
-			"tls_reuse_failure",
-			tlsReuse.triggered ? "warning" : "info",
-			tlsReuse,
-		),
-		makeInsight(
-			"slow_transform",
-			slowTransform.triggered ? "warning" : "info",
-			slowTransform,
-		),
-		makeInsight(
-			"large_response",
-			largeResponse.triggered ? "warning" : "info",
-			largeResponse,
-		),
-		makeInsight(
-			"dns_repeated",
-			dnsRepeated.triggered ? "warning" : "info",
-			dnsRepeated,
-		),
-		makeInsight(
-			"proxy_overhead",
-			proxyOverhead.triggered ? "warning" : "info",
-			proxyOverhead,
-		),
-		makeInsight(
-			"browser_idle",
-			browserIdle.triggered ? "warning" : "info",
-			browserIdle,
-		),
+		makeInsight("tls_reuse_failure", tlsReuse.triggered ? "warning" : "info", tlsReuse),
+		makeInsight("slow_transform", slowTransform.triggered ? "warning" : "info", slowTransform),
+		makeInsight("large_response", largeResponse.triggered ? "warning" : "info", largeResponse),
+		makeInsight("dns_repeated", dnsRepeated.triggered ? "warning" : "info", dnsRepeated),
+		makeInsight("proxy_overhead", proxyOverhead.triggered ? "warning" : "info", proxyOverhead),
+		makeInsight("browser_idle", browserIdle.triggered ? "warning" : "info", browserIdle),
 		makeInsight(
 			"session_expiry_frequent",
 			sessionExpiry.triggered ? "warning" : "info",

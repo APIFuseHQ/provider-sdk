@@ -1,4 +1,4 @@
-import type { Span } from "./trace";
+import type { Span } from "./trace.js";
 
 export type WaterfallRequest = {
 	method: string;
@@ -52,11 +52,7 @@ export function renderWaterfall(
 
 	for (const node of tree) {
 		const operationDuration = formatDuration(node.span.duration_ms);
-		const operationBar = renderBar(
-			node.span.duration_ms,
-			totalDuration,
-			maxBarWidth,
-		);
+		const operationBar = renderBar(node.span.duration_ms, totalDuration, maxBarWidth);
 		const operationColor = spanColor(node.span, slowThresholdMs);
 
 		lines.push(
@@ -104,14 +100,9 @@ function renderChildren(
 		const provider = isLast ? "└─" : "├─";
 
 		const duration = formatDuration(node.span.duration_ms);
-		const bar = renderBar(
-			node.span.duration_ms,
-			ctx.totalDuration,
-			ctx.maxBarWidth,
-		);
+		const bar = renderBar(node.span.duration_ms, ctx.totalDuration, ctx.maxBarWidth);
 		const color = spanColor(node.span, ctx.slowThresholdMs);
-		const star =
-			node.span.id === ctx.bottleneckId ? `  ${ANSI.yellow}★${ANSI.reset}` : "";
+		const star = node.span.id === ctx.bottleneckId ? `  ${ANSI.yellow}★${ANSI.reset}` : "";
 		const barSuffix = bar ? ` ${bar}` : "";
 
 		const nameWidth = 20;
@@ -190,11 +181,7 @@ function findBottleneck(roots: SpanNode[]): string | null {
 	return longest.id;
 }
 
-function renderBar(
-	durationMs: number,
-	totalMs: number,
-	maxWidth: number,
-): string {
+function renderBar(durationMs: number, totalMs: number, maxWidth: number): string {
 	if (totalMs <= 0 || durationMs <= 0) {
 		return "";
 	}

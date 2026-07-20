@@ -1,12 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { z as plainZ } from "zod";
 
-import { z } from "../provider";
-import { APIFUSE_DESCRIPTION_KEY_META_KEY, describeKey } from "../schema";
+import { z } from "../provider.js";
+import { APIFUSE_DESCRIPTION_KEY_META_KEY, describeKey } from "../schema.js";
 
-function descriptionKey(schema: {
-	meta(): Record<string, unknown> | undefined;
-}) {
+function descriptionKey(schema: { meta(): Record<string, unknown> | undefined }) {
 	return schema.meta()?.[APIFUSE_DESCRIPTION_KEY_META_KEY];
 }
 
@@ -18,22 +16,14 @@ describe("schema description keys", () => {
 	});
 
 	it("preserves chaining after Zod refinements", () => {
-		const schema = z
-			.number()
-			.min(0)
-			.describeKey("schemaDescriptions.index.d0002");
+		const schema = z.number().min(0).describeKey("schemaDescriptions.index.d0002");
 
 		expect(descriptionKey(schema)).toBe("schemaDescriptions.index.d0002");
 	});
 
 	it("matches describeKey(schema, key) compatibility metadata", () => {
-		const methodSchema = z
-			.string()
-			.describeKey("schemaDescriptions.index.d0003");
-		const functionSchema = describeKey(
-			z.string(),
-			"schemaDescriptions.index.d0003",
-		);
+		const methodSchema = z.string().describeKey("schemaDescriptions.index.d0003");
+		const functionSchema = describeKey(z.string(), "schemaDescriptions.index.d0003");
 
 		expect(descriptionKey(methodSchema)).toBe(descriptionKey(functionSchema));
 	});
@@ -43,9 +33,9 @@ describe("schema description keys", () => {
 
 		for (const schema of schemas) {
 			expect(typeof schema.describeKey).toBe("function");
-			expect(
-				descriptionKey(schema.describeKey("schemaDescriptions.index.d0004")),
-			).toBe("schemaDescriptions.index.d0004");
+			expect(descriptionKey(schema.describeKey("schemaDescriptions.index.d0004"))).toBe(
+				"schemaDescriptions.index.d0004",
+			);
 		}
 	});
 

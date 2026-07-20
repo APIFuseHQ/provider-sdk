@@ -9,8 +9,8 @@ import {
 	digestProviderContract,
 	every,
 	extractProviderContract,
-} from "../index";
-import type { ProviderContext, ProviderDefinition } from "../types";
+} from "../index.js";
+import type { ProviderContext, ProviderDefinition } from "../types.js";
 
 const InputSchema = z.object({ query: z.string() });
 const OutputSchema = z.object({ name: z.string(), score: z.number() });
@@ -20,9 +20,7 @@ const handler = async (_ctx: ProviderContext, input: { query: string }) => ({
 	score: 1,
 });
 
-function buildProvider(
-	operationIds: readonly [string, string],
-): ProviderDefinition {
+function buildProvider(operationIds: readonly [string, string]): ProviderDefinition {
 	return defineProvider({
 		id: "contract-provider",
 		version: "1.2.3",
@@ -138,9 +136,7 @@ function buildProvider(
 				timeout: "PT1M",
 				cooldown: "PT10M",
 				requiredSecrets: ["EXAMPLE_API_KEY"],
-				steps: [
-					{ id: "search", operationId: "zeta-search", kind: "operation" },
-				],
+				steps: [{ id: "search", operationId: "zeta-search", kind: "operation" }],
 				run: async () => ({ status: "ok" }),
 			}),
 		],
@@ -181,12 +177,8 @@ describe("provider contract extraction", () => {
 
 	it("produces a stable digest for semantically identical provider definitions", () => {
 		// Given: equivalent providers with opposite operation insertion order.
-		const first = extractProviderContract(
-			buildProvider(["zeta-search", "alpha-search"]),
-		);
-		const second = extractProviderContract(
-			buildProvider(["alpha-search", "zeta-search"]),
-		);
+		const first = extractProviderContract(buildProvider(["zeta-search", "alpha-search"]));
+		const second = extractProviderContract(buildProvider(["alpha-search", "zeta-search"]));
 
 		// When: digesting both canonical snapshots.
 		const firstDigest = digestProviderContract(first);
@@ -232,9 +224,7 @@ describe("provider contract extraction", () => {
 
 		// When: extracting the provider contract.
 		const snapshot = extractProviderContract(provider);
-		const operation = snapshot.operations.find(
-			(candidate) => candidate.id === "alpha-search",
-		);
+		const operation = snapshot.operations.find((candidate) => candidate.id === "alpha-search");
 
 		// Then: schedules, cases, and journey coverage remain as data metadata only.
 		expect(operation?.healthCheck).toEqual({
@@ -264,9 +254,7 @@ describe("provider contract extraction", () => {
 				timeout: "PT1M",
 				cooldown: "PT10M",
 				requiredSecrets: ["EXAMPLE_API_KEY"],
-				steps: [
-					{ id: "search", operationId: "zeta-search", kind: "operation" },
-				],
+				steps: [{ id: "search", operationId: "zeta-search", kind: "operation" }],
 			},
 		]);
 	});
@@ -295,9 +283,7 @@ describe("provider contract extraction", () => {
 						waitTimeout: "PT2M30S",
 					}),
 				],
-				steps: [
-					{ id: "search", operationId: "alpha-search", kind: "operation" },
-				],
+				steps: [{ id: "search", operationId: "alpha-search", kind: "operation" }],
 			}),
 		];
 

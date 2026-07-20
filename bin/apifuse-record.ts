@@ -20,8 +20,8 @@ import {
 	type StealthClient,
 	TransportError,
 	ValidationError,
-} from "../src";
-import { createMemoryProviderRuntimeState } from "../src/runtime/state";
+} from "../src/index.js";
+import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 
 type CliArgs = {
 	append: boolean;
@@ -64,31 +64,18 @@ export async function main() {
 			resolveOperationBaseUrl(provider, operationName),
 		);
 
-		console.log(
-			`[apifuse record] Calling ${operationName} on ${provider.id}...`,
-		);
+		console.log(`[apifuse record] Calling ${operationName} on ${provider.id}...`);
 
-		const result = await executeOperation(
-			provider,
-			operationName,
-			capture.ctx,
-			parsedParams,
-		);
+		const result = await executeOperation(provider, operationName, capture.ctx, parsedParams);
 		const captured = capture.getCapturedRaw();
 
 		if (captured === undefined) {
-			throw new Error(
-				`No upstream response was captured for ${provider.id}.${operationName}.`,
-			);
+			throw new Error(`No upstream response was captured for ${provider.id}.${operationName}.`);
 		}
 
 		const rawPayload = args.sanitize ? sanitizeFixture(captured) : captured;
 		const fixturePath = resolve(location.rootDir, "__fixtures__", "raw.json");
-		const nextPayload = await prepareFixturePayload(
-			fixturePath,
-			rawPayload,
-			args.append,
-		);
+		const nextPayload = await prepareFixturePayload(fixturePath, rawPayload, args.append);
 
 		await mkdir(dirname(fixturePath), { recursive: true });
 		await writeFile(fixturePath, `${JSON.stringify(nextPayload, null, 2)}\n`);
@@ -98,9 +85,7 @@ export async function main() {
 				Buffer.byteLength(JSON.stringify(rawPayload)),
 			)})`,
 		);
-		console.log(
-			`[apifuse record] Saved to ${relative(process.cwd(), fixturePath)}`,
-		);
+		console.log(`[apifuse record] Saved to ${relative(process.cwd(), fixturePath)}`);
 
 		void result;
 	} catch (error) {
@@ -210,11 +195,7 @@ function formatCliError(error: unknown): string {
 	}
 
 	if (error instanceof ProviderError || error instanceof ValidationError) {
-		return [
-			error.message,
-			error.code ? `code=${error.code}` : undefined,
-			error.fix,
-		]
+		return [error.message, error.code ? `code=${error.code}` : undefined, error.fix]
 			.filter(Boolean)
 			.join(" ");
 	}
@@ -269,8 +250,7 @@ function findProviderRoot(startDirectory: string): string | undefined {
 
 function looksLikeProviderRoot(directory: string): boolean {
 	return (
-		existsSync(resolve(directory, "index.ts")) &&
-		existsSync(resolve(directory, "package.json"))
+		existsSync(resolve(directory, "index.ts")) && existsSync(resolve(directory, "package.json"))
 	);
 }
 
@@ -287,15 +267,10 @@ async function loadProvider(rootDir: string): Promise<ProviderRuntime> {
 	return module.default;
 }
 
-function resolveOperationName(
-	provider: ProviderRuntime,
-	operationName?: string,
-): string {
+function resolveOperationName(provider: ProviderRuntime, operationName?: string): string {
 	if (operationName) {
 		if (!(operationName in provider.operations)) {
-			throw new Error(
-				`Unknown operation "${operationName}" for provider "${provider.id}".`,
-			);
+			throw new Error(`Unknown operation "${operationName}" for provider "${provider.id}".`);
 		}
 
 		return operationName;
@@ -309,10 +284,7 @@ function resolveOperationName(
 	return firstOperation;
 }
 
-function parseParams(
-	operation: ProviderRuntime["operations"][string],
-	value: string,
-): unknown {
+function parseParams(operation: ProviderRuntime["operations"][string], value: string): unknown {
 	let parsed: unknown;
 
 	try {
@@ -326,10 +298,7 @@ function parseParams(
 	return operation.input ? operation.input.parse(parsed) : parsed;
 }
 
-function resolveOperationBaseUrl(
-	provider: ProviderRuntime,
-	operationName: string,
-): string {
+function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: string): string {
 	const baseUrl = provider.operations[operationName]?.upstream?.baseUrl;
 	if (!baseUrl) {
 		throw new Error(
@@ -346,12 +315,9 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string) {
 	const http = proxyHttpClient(createHttpClient(baseUrl), (response) => {
 		capturedRaw = response.data;
 	});
-	const stealth = proxyStealthClient(
-		createStealthClient(baseUrl),
-		(response) => {
-			capturedRaw = normalizeCapturedStealthResponse(response);
-		},
-	);
+	const stealth = proxyStealthClient(createStealthClient(baseUrl), (response) => {
+		capturedRaw = normalizeCapturedStealthResponse(response);
+	});
 
 	const env = {
 		get: (key: string) => process.env[key],
@@ -464,9 +430,7 @@ function proxyStealthSession(
 	};
 }
 
-function normalizeCapturedStealthResponse(
-	response: Awaited<ReturnType<StealthClient["fetch"]>>,
-) {
+function normalizeCapturedStealthResponse(response: Awaited<ReturnType<StealthClient["fetch"]>>) {
 	try {
 		return JSON.parse(response.body);
 	} catch {
@@ -483,15 +447,13 @@ function sanitizeFixture(value: unknown): unknown {
 		return value;
 	}
 
-	const entries = Object.entries(value as MutableRecord).map(
-		([key, entryValue]) => {
-			if (isSensitiveKey(key)) {
-				return [key, "[REDACTED]"] as const;
-			}
+	const entries = Object.entries(value as MutableRecord).map(([key, entryValue]) => {
+		if (isSensitiveKey(key)) {
+			return [key, "[REDACTED]"] as const;
+		}
 
-			return [key, sanitizeFixture(entryValue)] as const;
-		},
-	);
+		return [key, sanitizeFixture(entryValue)] as const;
+	});
 
 	return Object.fromEntries(entries);
 }

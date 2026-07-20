@@ -4,7 +4,7 @@ import {
 	createBypassProviderCache,
 	createProviderCache,
 	resetProviderCacheForTests,
-} from "../runtime/cache";
+} from "../runtime/cache.js";
 
 describe("provider cache", () => {
 	afterEach(() => {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { TransportError } from "../errors";
+import { TransportError } from "../errors.js";
 import {
 	computeProxyAttemptIndex,
 	createDefaultProxyTransportRetryOptions,
@@ -10,8 +10,8 @@ import {
 	normalizeProxyTransportRetryOptions,
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
-} from "../runtime/proxy-retry-policy";
-import { HttpRetryUnsafeMethodPolicy } from "../types";
+} from "../runtime/proxy-retry-policy.js";
+import { HttpRetryUnsafeMethodPolicy } from "../types.js";
 
 describe("proxy transport retry policy", () => {
 	it("keeps HTTP and stealth on the same default safe transport policy", () => {

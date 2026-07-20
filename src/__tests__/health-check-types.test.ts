@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { centered, defineOperation, defineProvider } from "../define";
-import { ValidationError } from "../errors";
-import type { HealthCheckAssertionContext, HealthCheckCase } from "../types";
+import { centered, defineOperation, defineProvider } from "../define.js";
+import { ValidationError } from "../errors.js";
+import type { HealthCheckAssertionContext, HealthCheckCase } from "../types.js";
 
 function providerWithHealthCheckInterval(interval: string) {
 	return defineProvider({
@@ -166,9 +166,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 		});
 
 		expect(provider.operations.ping.healthCheck?.interval).toBe("2m");
-		expect(
-			provider.healthMonitor?.probeOverrides?.["test-provider/ping"]?.interval,
-		).toBe("8h");
+		expect(provider.healthMonitor?.probeOverrides?.["test-provider/ping"]?.interval).toBe("8h");
 	});
 
 	it("characterizes positive ms-style healthCheck interval validation", () => {
@@ -201,8 +199,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 		for (const [interval, accepted] of cases) {
 			if (accepted) {
 				expect(
-					providerWithHealthCheckInterval(interval).operations.ping.healthCheck
-						?.interval,
+					providerWithHealthCheckInterval(interval).operations.ping.healthCheck?.interval,
 				).toBe(interval);
 			} else {
 				expect(() => providerWithHealthCheckInterval(interval)).toThrow(
@@ -318,9 +315,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					},
 				},
 			}),
-		).toThrow(
-			/schedule\.jitter is not supported.*Use schedule\.randomize instead/,
-		);
+		).toThrow(/schedule\.jitter is not supported.*Use schedule\.randomize instead/);
 	});
 
 	it("rejects operation healthCheck randomization duration as long as interval", () => {
@@ -405,13 +400,10 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 
 		expect(provider.healthMonitor?.defaultProbeTimeoutMs).toBe(45_000);
 		expect(provider.operations.ping.healthCheck?.timeoutMs).toBe(30_000);
-		expect(provider.operations.ping.healthCheck?.cases[0]?.timeoutMs).toBe(
-			10_000,
+		expect(provider.operations.ping.healthCheck?.cases[0]?.timeoutMs).toBe(10_000);
+		expect(provider.healthMonitor?.probeOverrides?.["test-provider/write-canary"]?.timeoutMs).toBe(
+			60_000,
 		);
-		expect(
-			provider.healthMonitor?.probeOverrides?.["test-provider/write-canary"]
-				?.timeoutMs,
-		).toBe(60_000);
 	});
 
 	it("rejects invalid provider and case timeout policy fields", () => {
@@ -602,9 +594,9 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			},
 		});
-		expect(
-			provider.operations["wipe-all"]?.healthCheckUnsupported?.reason,
-		).toContain("Destructive");
+		expect(provider.operations["wipe-all"]?.healthCheckUnsupported?.reason).toContain(
+			"Destructive",
+		);
 	});
 
 	it("accepts provider-level healthMonitor with requiredSecrets", () => {
@@ -638,10 +630,9 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 		expect(provider.healthMonitor?.requiredSecrets).toEqual([
 			"APIFUSE__HEALTH_MONITOR__TEST_TOKEN",
 		]);
-		expect(
-			provider.healthMonitor?.probeOverrides?.["test-provider/auth-flow"]
-				?.interval,
-		).toBe("1h");
+		expect(provider.healthMonitor?.probeOverrides?.["test-provider/auth-flow"]?.interval).toBe(
+			"1h",
+		);
 	});
 
 	it("rejects unknown field on provider healthMonitor", () => {

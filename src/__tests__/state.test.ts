@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createUnsupportedProviderRuntimeState } from "../runtime/state";
+import { createUnsupportedProviderRuntimeState } from "../runtime/state.js";
 
 describe("provider runtime state SDK surface", () => {
 	test("unsupported runtime fails loudly", async () => {
@@ -10,8 +10,6 @@ describe("provider runtime state SDK surface", () => {
 			maxEntries: 10,
 			maxValueBytes: 1024,
 		});
-		await expect(namespace.get("key")).rejects.toThrow(
-			"Provider runtime state is not available",
-		);
+		await expect(namespace.get("key")).rejects.toThrow("Provider runtime state is not available");
 	});
 });

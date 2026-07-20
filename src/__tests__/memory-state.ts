@@ -5,15 +5,12 @@ import type {
 	StateNamespaceOptions,
 	StateValue,
 	StateWriteOptions,
-} from "../types";
+} from "../types.js";
 
 export class MemoryProviderRuntimeState implements ProviderRuntimeState {
 	readonly namespaces = new Map<string, MemoryProviderStateNamespace>();
 
-	namespace(
-		name: string,
-		_options: StateNamespaceOptions,
-	): ProviderStateNamespace {
+	namespace(name: string, _options: StateNamespaceOptions): ProviderStateNamespace {
 		const existing = this.namespaces.get(name);
 		if (existing) return existing;
 		const created = new MemoryProviderStateNamespace();
@@ -31,10 +28,7 @@ export class MemoryProviderRuntimeState implements ProviderRuntimeState {
 class MemoryProviderStateNamespace implements ProviderStateNamespace {
 	readonly values = new Map<string, StateValue>();
 
-	async list<T = unknown>(options?: {
-		limit?: number;
-		prefix?: string;
-	}): Promise<StateValue<T>[]> {
+	async list<T = unknown>(options?: { limit?: number; prefix?: string }): Promise<StateValue<T>[]> {
 		const rows = Array.from(this.values.values()).filter((value) =>
 			options?.prefix ? value.key.startsWith(options.prefix) : true,
 		);
@@ -75,9 +69,7 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 		_value: T,
 		_options?: StateWriteOptions,
 	): Promise<StateCasResult<T>> {
-		throw new Error(
-			"MemoryProviderStateNamespace.compareAndSet is not implemented.",
-		);
+		throw new Error("MemoryProviderStateNamespace.compareAndSet is not implemented.");
 	}
 
 	async delete(key: string): Promise<void> {
@@ -90,8 +82,6 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 		_delta = 1,
 		_options?: StateWriteOptions,
 	): Promise<StateValue<Record<string, unknown>>> {
-		throw new Error(
-			"MemoryProviderStateNamespace.increment is not implemented.",
-		);
+		throw new Error("MemoryProviderStateNamespace.increment is not implemented.");
 	}
 }

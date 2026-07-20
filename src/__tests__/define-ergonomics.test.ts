@@ -1,14 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import {
-	defineOperation,
-	defineProvider,
-	defineStreamOperation,
-} from "../define";
-import { ProviderError } from "../errors";
-import { event } from "../stream";
-import type { StandardSchemaV1 } from "../types";
+import { defineOperation, defineProvider, defineStreamOperation } from "../define.js";
+import { ProviderError } from "../errors.js";
+import { event } from "../stream.js";
+import type { StandardSchemaV1 } from "../types.js";
 
 const callDefineProvider = (config: unknown): unknown =>
 	Reflect.apply(defineProvider, undefined, [config]);
@@ -40,10 +36,7 @@ describe("defineProvider ergonomics", () => {
 		const provider = defineProvider(makeProviderConfig());
 
 		await expect(
-			Reflect.apply(provider.operations.lookup.handler, undefined, [
-				undefined,
-				{ id: "coin" },
-			]),
+			Reflect.apply(provider.operations.lookup.handler, undefined, [undefined, { id: "coin" }]),
 		).resolves.toEqual({ result: "COIN" });
 	});
 
@@ -68,10 +61,7 @@ describe("defineProvider ergonomics", () => {
 		});
 
 		await expect(
-			Reflect.apply(provider.operations.search.handler, undefined, [
-				undefined,
-				{ q: "abc" },
-			]),
+			Reflect.apply(provider.operations.search.handler, undefined, [undefined, { q: "abc" }]),
 		).resolves.toEqual({ count: 3 });
 	});
 
@@ -100,14 +90,9 @@ describe("defineProvider ergonomics", () => {
 		});
 
 		await expect(
-			Reflect.apply(provider.operations.search.handler, undefined, [
-				undefined,
-				{ q: "abcd" },
-			]),
+			Reflect.apply(provider.operations.search.handler, undefined, [undefined, { q: "abcd" }]),
 		).resolves.toEqual({ count: 4 });
-		expect(provider.operations.search.upstream?.baseUrl).toBe(
-			"https://example.com",
-		);
+		expect(provider.operations.search.upstream?.baseUrl).toBe("https://example.com");
 	});
 
 	it("defineStreamOperation composes operations with explicit non-JSON transport", () => {
@@ -198,9 +183,9 @@ describe("defineProvider ergonomics", () => {
 	});
 
 	it("names missing required fields in defineProvider errors", () => {
-		expect(() =>
-			callDefineProvider({ ...makeProviderConfig(), version: undefined }),
-		).toThrow(/missing required field "version"/);
+		expect(() => callDefineProvider({ ...makeProviderConfig(), version: undefined })).toThrow(
+			/missing required field "version"/,
+		);
 	});
 
 	it("names invalid auth.mode in defineProvider errors", () => {

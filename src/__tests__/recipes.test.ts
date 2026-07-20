@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { extractPagination, normalizeErrorResponse } from "../recipes/rest-api";
+import { extractPagination, normalizeErrorResponse } from "../recipes/rest-api.js";
 
 describe("rest-api recipe", () => {
 	it("extracts pagination from standard shape", () => {

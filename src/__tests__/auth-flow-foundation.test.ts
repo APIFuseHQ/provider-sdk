@@ -9,12 +9,12 @@ import {
 	createSwitchCeremony,
 	createWebAuthnCeremony,
 	validateCeremonyOutput,
-} from "../ceremonies";
-import { TurnValidationError } from "../errors";
-import { createFlowContext } from "../runtime/auth-flow";
-import { createEnvContext } from "../runtime/env";
-import { prevalidate } from "../runtime/prevalidate";
-import type { HttpClient, HttpResponse } from "../types";
+} from "../ceremonies/index.js";
+import { TurnValidationError } from "../errors.js";
+import { createFlowContext } from "../runtime/auth-flow.js";
+import { createEnvContext } from "../runtime/env.js";
+import { prevalidate } from "../runtime/prevalidate.js";
+import type { HttpClient, HttpResponse } from "../types.js";
 
 type RouteHandler = (body?: unknown) => Promise<unknown> | unknown;
 
@@ -29,17 +29,12 @@ function createHttpResponse(data: unknown): HttpResponse<unknown> {
 		json: async <U = unknown>() => data as U,
 		text: async () => body,
 		arrayBuffer: async () =>
-			bodyBytes.buffer.slice(
-				bodyBytes.byteOffset,
-				bodyBytes.byteOffset + bodyBytes.byteLength,
-			),
+			bodyBytes.buffer.slice(bodyBytes.byteOffset, bodyBytes.byteOffset + bodyBytes.byteLength),
 		bytes: async () => bodyBytes.slice(0),
 	};
 }
 
-function createMockHttpClient(
-	routes: Record<string, RouteHandler>,
-): HttpClient {
+function createMockHttpClient(routes: Record<string, RouteHandler>): HttpClient {
 	const invoke = async (method: string, url: string, body?: unknown) => {
 		const route = routes[`${method} ${url}`];
 		if (!route) {
@@ -64,10 +59,7 @@ function createMockHttpClient(
 	};
 }
 
-function createTestContext(
-	routes: Record<string, RouteHandler> = {},
-	allowedKeys: string[] = [],
-) {
+function createTestContext(routes: Record<string, RouteHandler> = {}, allowedKeys: string[] = []) {
 	process.env.TEST_OAUTH_CLIENT_ID = "client-id";
 	process.env.TEST_OAUTH_CLIENT_SECRET = "client-secret";
 
@@ -109,16 +101,11 @@ describe("prevalidate", () => {
 		);
 
 		expect(result.valid).toBe(false);
-		expect(result.errors).toContainEqual(
-			expect.objectContaining({ path: "$.email" }),
-		);
+		expect(result.errors).toContainEqual(expect.objectContaining({ path: "$.email" }));
 	});
 
 	it("rejects unsupported RE2 patterns", () => {
-		const result = prevalidate(
-			{ type: "string", pattern: "(cat|dog)\\1" },
-			"catcat",
-		);
+		const result = prevalidate({ type: "string", pattern: "(cat|dog)\\1" }, "catcat");
 
 		expect(result.valid).toBe(false);
 		expect(result.errors?.[0]?.message).toContain("invalid escape sequence");
@@ -128,17 +115,13 @@ describe("prevalidate", () => {
 		const result = prevalidate({ type: "string" }, "ok", { timeoutMs: -1 });
 
 		expect(result.valid).toBe(false);
-		expect(result.errors).toEqual([
-			{ path: "$", message: "Prevalidation timed out after -1ms" },
-		]);
+		expect(result.errors).toEqual([{ path: "$", message: "Prevalidation timed out after -1ms" }]);
 	});
 });
 
 describe("validateCeremonyOutput", () => {
 	it("rejects malformed turns", () => {
-		expect(() => validateCeremonyOutput({ kind: "form" })).toThrow(
-			TurnValidationError,
-		);
+		expect(() => validateCeremonyOutput({ kind: "form" })).toThrow(TurnValidationError);
 	});
 });
 
@@ -260,10 +243,9 @@ describe("createDeviceFlowCeremony", () => {
 
 describe("createWebAuthnCeremony", () => {
 	it("handles happy path", async () => {
-		const ctx = createTestContext(
-			{ "POST https://verify.example.com": () => ({ ok: true }) },
-			["__webauthn_challenge"],
-		);
+		const ctx = createTestContext({ "POST https://verify.example.com": () => ({ ok: true }) }, [
+			"__webauthn_challenge",
+		]);
 		const ceremony = createWebAuthnCeremony({
 			rpId: "example.com",
 			verifyUrl: "https://verify.example.com",
@@ -312,9 +294,7 @@ describe("createMagicLinkCeremony", () => {
 			verifyUrl: "https://magic.example.com/verify",
 		});
 
-		expect(
-			(await ceremony.start(ctx, { email: "demo@example.com" })).kind,
-		).toBe("message");
+		expect((await ceremony.start(ctx, { email: "demo@example.com" })).kind).toBe("message");
 		expect((await ceremony.poll?.(ctx))?.kind).toBe("complete");
 	});
 
@@ -354,9 +334,9 @@ describe("createFormCeremony", () => {
 		});
 
 		expect((await ceremony.start(createTestContext())).kind).toBe("form");
-		expect(
-			(await ceremony.continue(createTestContext(), { username: "demo" })).kind,
-		).toBe("complete");
+		expect((await ceremony.continue(createTestContext(), { username: "demo" })).kind).toBe(
+			"complete",
+		);
 	});
 
 	it("preserves provider-declared form field order in expected input metadata", async () => {
@@ -373,10 +353,7 @@ describe("createFormCeremony", () => {
 
 		const turn = await ceremony.start(createTestContext());
 
-		expect(turn.expectedInput?.["x-apifuse-field-order"]).toEqual([
-			"phone",
-			"password",
-		]);
+		expect(turn.expectedInput?.["x-apifuse-field-order"]).toEqual(["phone", "password"]);
 	});
 
 	it("returns retry turn on validation failure", async () => {
@@ -388,9 +365,7 @@ describe("createFormCeremony", () => {
 			},
 		});
 
-		expect((await ceremony.continue(createTestContext(), {})).kind).toBe(
-			"retry",
-		);
+		expect((await ceremony.continue(createTestContext(), {})).kind).toBe("retry");
 	});
 
 	it("aborts", async () => {
@@ -422,31 +397,21 @@ describe("combineCeremonies", () => {
 		);
 
 		expect((await ceremony.start(ctx)).kind).toBe("form");
-		expect((await ceremony.continue(ctx, { username: "demo" })).kind).toBe(
-			"form",
-		);
-		expect((await ceremony.continue(ctx, { otp: "123456" })).kind).toBe(
-			"complete",
-		);
+		expect((await ceremony.continue(ctx, { username: "demo" })).kind).toBe("form");
+		expect((await ceremony.continue(ctx, { otp: "123456" })).kind).toBe("complete");
 	});
 
 	it("returns retry when current stage cannot poll", async () => {
 		const ctx = createTestContext({}, ["__combined_stage"]);
-		const ceremony = combineCeremonies(
-			createFormCeremony({ schema: { type: "object" } }),
-		);
+		const ceremony = combineCeremonies(createFormCeremony({ schema: { type: "object" } }));
 
 		await ceremony.start(ctx);
 		expect((await ceremony.poll?.(ctx))?.kind).toBe("retry");
 	});
 
 	it("aborts", async () => {
-		const ceremony = combineCeremonies(
-			createFormCeremony({ schema: { type: "object" } }),
-		);
-		const abortResult = await ceremony.abort?.(
-			createTestContext({}, ["__combined_stage"]),
-		);
+		const ceremony = combineCeremonies(createFormCeremony({ schema: { type: "object" } }));
+		const abortResult = await ceremony.abort?.(createTestContext({}, ["__combined_stage"]));
 		expect(abortResult).toBeDefined();
 		expect(abortResult?.kind).toBe("abort");
 	});
@@ -463,9 +428,7 @@ describe("createSwitchCeremony", () => {
 		});
 
 		expect((await ceremony.start(ctx)).kind).toBe("multi_choice");
-		expect((await ceremony.continue(ctx, { choice: "email" })).kind).toBe(
-			"form",
-		);
+		expect((await ceremony.continue(ctx, { choice: "email" })).kind).toBe("form");
 	});
 
 	it("returns retry turn for invalid choice", async () => {
@@ -474,18 +437,14 @@ describe("createSwitchCeremony", () => {
 			choices: { email: createFormCeremony({ schema: { type: "object" } }) },
 		});
 
-		expect((await ceremony.continue(ctx, { choice: "sms" })).kind).toBe(
-			"retry",
-		);
+		expect((await ceremony.continue(ctx, { choice: "sms" })).kind).toBe("retry");
 	});
 
 	it("aborts", async () => {
 		const ceremony = createSwitchCeremony({
 			choices: { email: createFormCeremony({ schema: { type: "object" } }) },
 		});
-		const abortResult = await ceremony.abort?.(
-			createTestContext({}, ["__switch_selection"]),
-		);
+		const abortResult = await ceremony.abort?.(createTestContext({}, ["__switch_selection"]));
 		expect(abortResult).toBeDefined();
 		expect(abortResult?.kind).toBe("abort");
 	});

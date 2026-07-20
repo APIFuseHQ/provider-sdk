@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 
-import { main as runMain } from "../src/cli/create";
+import { main as runMain } from "../src/cli/create.js";
 
 export { runMain as main };
 

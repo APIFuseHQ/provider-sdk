@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { defineProvider } from "../define";
-import { ProviderError, ValidationError } from "../errors";
-import { createFlowContext } from "../runtime/auth-flow";
+import { defineProvider } from "../define.js";
+import { ProviderError, ValidationError } from "../errors.js";
+import { createFlowContext } from "../runtime/auth-flow.js";
 import {
 	APIFUSE__STT__BACKEND_ENV,
 	APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV,
@@ -15,9 +15,9 @@ import {
 	createUnsupportedSttClient,
 	extractVerificationCode,
 	resolveSttPrompt,
-} from "../runtime/stt";
-import { createServerApp } from "../server/serve";
-import type { HttpClient, StealthClient, SttContext } from "../types";
+} from "../runtime/stt.js";
+import { createServerApp } from "../server/serve.js";
+import type { HttpClient, StealthClient, SttContext } from "../types.js";
 
 const previousEnv = {
 	backend: process.env[APIFUSE__STT__BACKEND_ENV],
@@ -93,15 +93,9 @@ describe("STT verification code extraction", () => {
 	});
 
 	it("parses English and Korean spoken digit words", () => {
-		expect(
-			extractVerificationCode("zero one two three", { codeLengths: [4] }).code,
-		).toBe("0123");
-		expect(
-			extractVerificationCode("공 일 이 삼", { codeLengths: [4] }).code,
-		).toBe("0123");
-		expect(extractVerificationCode("영일이삼", { codeLengths: [4] }).code).toBe(
-			"0123",
-		);
+		expect(extractVerificationCode("zero one two three", { codeLengths: [4] }).code).toBe("0123");
+		expect(extractVerificationCode("공 일 이 삼", { codeLengths: [4] }).code).toBe("0123");
+		expect(extractVerificationCode("영일이삼", { codeLengths: [4] }).code).toBe("0123");
 	});
 
 	it("parses mixed digit and word sequences", () => {
@@ -114,18 +108,16 @@ describe("STT verification code extraction", () => {
 	});
 
 	it("filters by allowed code length", () => {
-		expect(() =>
-			extractVerificationCode("code 1234", { codeLengths: [6] }),
-		).toThrow(ProviderError);
+		expect(() => extractVerificationCode("code 1234", { codeLengths: [6] })).toThrow(ProviderError);
 	});
 
 	it("fails closed for ambiguous or missing candidates", () => {
-		expect(() =>
-			extractVerificationCode("codes 1234 and 5678", { codeLengths: [4] }),
-		).toThrow(/Multiple verification code candidates/);
-		expect(() =>
-			extractVerificationCode("no code here", { codeLengths: [4] }),
-		).toThrow(/No verification code candidate/);
+		expect(() => extractVerificationCode("codes 1234 and 5678", { codeLengths: [4] })).toThrow(
+			/Multiple verification code candidates/,
+		);
+		expect(() => extractVerificationCode("no code here", { codeLengths: [4] })).toThrow(
+			/No verification code candidate/,
+		);
 	});
 
 	it("rejects unsafe verification-code length options before allocating ranges", () => {
@@ -134,12 +126,12 @@ describe("STT verification code extraction", () => {
 				codeLengths: { min: 1, max: 99 },
 			}),
 		).toThrow(ValidationError);
-		expect(() =>
-			extractVerificationCode("code 1234", { codeLengths: { min: 6, max: 4 } }),
-		).toThrow(ValidationError);
-		expect(() =>
-			extractVerificationCode("code 1234", { codeLengths: [4, 0] }),
-		).toThrow(ValidationError);
+		expect(() => extractVerificationCode("code 1234", { codeLengths: { min: 6, max: 4 } })).toThrow(
+			ValidationError,
+		);
+		expect(() => extractVerificationCode("code 1234", { codeLengths: [4, 0] })).toThrow(
+			ValidationError,
+		);
 	});
 });
 
@@ -241,9 +233,7 @@ describe("STT prompt and runtime clients", () => {
 				language: "ko",
 				task: "transcribe",
 			});
-			expect(String(calls[0]?.body.initial_prompt)).toContain(
-				"Arabic numerals",
-			);
+			expect(String(calls[0]?.body.initial_prompt)).toContain("Arabic numerals");
 		} finally {
 			global.fetch = originalFetch;
 		}

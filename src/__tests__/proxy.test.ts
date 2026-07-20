@@ -12,10 +12,10 @@ import {
 	resolveProxyConfig,
 	resolveProxyConfigAsync,
 	SMARTPROXY_MAX_LIFETIME_MINUTES,
-} from "../config/loader";
-import { TransportError } from "../errors";
-import { ProxyTelemetryCollector } from "../runtime/proxy-telemetry";
-import { HttpRetryUnsafeMethodPolicy } from "../types";
+} from "../config/loader.js";
+import { TransportError } from "../errors.js";
+import { ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
+import { HttpRetryUnsafeMethodPolicy } from "../types.js";
 
 type MockImpitResponse = {
 	status: number;
@@ -339,7 +339,7 @@ describe("proxy integration", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
 			apifuseConfig: { proxy: { url: "https://config-proxy.example:8443" } },
 			upstream: { proxy: true },
@@ -358,7 +358,7 @@ describe("proxy integration", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
 			upstream: { proxy: true },
 		});
@@ -375,7 +375,7 @@ describe("proxy integration", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com");
 
 		await http.get("/health", { proxy: "https://request-proxy.example:8443" });
@@ -398,7 +398,7 @@ describe("proxy integration", () => {
 			},
 		);
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
 			upstream: { proxy: true },
 			warn: (message) => {
@@ -421,7 +421,7 @@ describe("proxy integration", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			apifuseConfig: { proxy: { url: "https://stealth-proxy.example:8443" } },
 			upstream: { proxy: true },
@@ -444,7 +444,7 @@ describe("proxy integration", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			apifuseConfig: { proxy: { url: "https://stealth-proxy.example:8443" } },
 			proxyStealth: { insecureSkipVerify: true },
@@ -466,7 +466,7 @@ describe("proxy integration", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await client.fetch("/health", {
@@ -1182,7 +1182,7 @@ describe("proxy integration", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
 			affinityKey: "af_con_http",
 			upstream: {
@@ -1248,7 +1248,7 @@ describe("proxy integration", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1298,7 +1298,7 @@ describe("proxy integration", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1352,7 +1352,7 @@ describe("proxy integration", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1391,7 +1391,7 @@ describe("proxy integration", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1449,7 +1449,7 @@ describe("proxy integration", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1488,7 +1488,7 @@ describe("proxy integration", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1523,7 +1523,7 @@ describe("proxy integration", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		let error: unknown;
@@ -1546,7 +1546,7 @@ describe("proxy integration", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await client.fetch("/health");
@@ -1584,7 +1584,7 @@ describe("proxy integration", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1618,7 +1618,7 @@ describe("proxy integration", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1649,7 +1649,7 @@ describe("proxy integration", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1682,7 +1682,7 @@ describe("proxy integration", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1709,7 +1709,7 @@ describe("proxy integration", () => {
 			})) as typeof fetch;
 		stealthState.queuedResponses.push(new Error("socket hang up"));
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1742,7 +1742,7 @@ describe("proxy integration", () => {
 				status: 200,
 			})) as typeof fetch;
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1777,7 +1777,7 @@ describe("proxy integration", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1820,7 +1820,7 @@ describe("proxy integration", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1868,7 +1868,7 @@ describe("proxy integration", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1927,7 +1927,7 @@ describe("proxy integration", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -1969,7 +1969,7 @@ describe("proxy integration", () => {
 	it("does not retry stealth proxy failover when optional policy resolves unproxied", async () => {
 		stealthState.queuedResponses.push(new Error("connect failed"));
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {
@@ -2012,7 +2012,7 @@ describe("proxy integration", () => {
 			body: JSON.stringify({ ok: true }),
 			headers: { "Content-Type": "application/json" },
 		});
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
 			upstream: {
 				proxy: {

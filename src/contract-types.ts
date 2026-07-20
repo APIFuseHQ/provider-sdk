@@ -1,5 +1,5 @@
-import type { JsonValue } from "./contract-json";
-import type { ProviderDefinition } from "./types";
+import type { JsonValue } from "./contract-json.js";
+import type { ProviderDefinition } from "./types.js";
 
 export const PROVIDER_CONTRACT_SCHEMA_VERSION = "2026-06-23";
 

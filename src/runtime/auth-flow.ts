@@ -1,5 +1,5 @@
-import { ContextAccessError } from "../errors";
-import { createAuthFlowHelpers } from "../auth";
+import { ContextAccessError } from "../errors.js";
+import { createAuthFlowHelpers } from "../auth.js";
 import type {
 	ContextScratchpad,
 	EnvContext,
@@ -7,8 +7,8 @@ import type {
 	HttpClient,
 	StealthClient,
 	SttContext,
-} from "../types";
-import { createUnsupportedSttClient } from "./stt";
+} from "../types.js";
+import { createUnsupportedSttClient } from "./stt.js";
 
 function normalizeAllowedKeys(allowedKeys: string[]): Set<string> {
 	return new Set(allowedKeys.filter((key) => key.trim().length > 0));
@@ -16,9 +16,7 @@ function normalizeAllowedKeys(allowedKeys: string[]): Set<string> {
 
 function assertAllowedKey(allowedKeys: Set<string>, key: string): void {
 	if (!allowedKeys.has(key)) {
-		throw new ContextAccessError(
-			`Context key "${key}" is not declared in context.keys.`,
-		);
+		throw new ContextAccessError(`Context key "${key}" is not declared in context.keys.`);
 	}
 }
 

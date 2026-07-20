@@ -1,6 +1,6 @@
 import type { ZodType } from "zod";
 
-import type { LintDiagnostic } from "./lint";
+import type { LintDiagnostic } from "./lint.js";
 
 type SchemaLike = ZodType & {
 	def?: Record<string, unknown>;
@@ -55,8 +55,7 @@ function isSchemaRecord(value: unknown): value is Record<string, SchemaLike> {
 }
 
 function getObjectShape(schema: SchemaLike): Record<string, SchemaLike> {
-	const rawShape =
-		typeof schema.shape === "function" ? schema.shape() : schema.shape;
+	const rawShape = typeof schema.shape === "function" ? schema.shape() : schema.shape;
 	if (isSchemaRecord(rawShape)) {
 		return rawShape;
 	}
@@ -69,10 +68,7 @@ function getObjectShape(schema: SchemaLike): Record<string, SchemaLike> {
 	return isSchemaRecord(defShape) ? defShape : {};
 }
 
-function appendSchemaChildren(
-	children: SchemaLike[],
-	value: unknown,
-): SchemaLike[] {
+function appendSchemaChildren(children: SchemaLike[], value: unknown): SchemaLike[] {
 	if (isSchema(value)) {
 		children.push(value);
 		return children;
@@ -183,26 +179,14 @@ function collectPublicSchemaFieldDiagnostics(
 			});
 		}
 		diagnostics.push(
-			...collectPublicSchemaFieldDiagnostics(
-				providerId,
-				operationId,
-				child,
-				fieldPath,
-				seen,
-			),
+			...collectPublicSchemaFieldDiagnostics(providerId, operationId, child, fieldPath, seen),
 		);
 	}
 
 	for (const child of getTransparentChildSchemas(schema)) {
 		const childPath = schema.element === child ? `${basePath}[]` : basePath;
 		diagnostics.push(
-			...collectPublicSchemaFieldDiagnostics(
-				providerId,
-				operationId,
-				child,
-				childPath,
-				seen,
-			),
+			...collectPublicSchemaFieldDiagnostics(providerId, operationId, child, childPath, seen),
 		);
 	}
 
@@ -221,17 +205,7 @@ export function lintPublicSchemaFieldNames(
 	}
 
 	return [
-		...collectPublicSchemaFieldDiagnostics(
-			providerId,
-			operationId,
-			input,
-			"input",
-		),
-		...collectPublicSchemaFieldDiagnostics(
-			providerId,
-			operationId,
-			output,
-			"output",
-		),
+		...collectPublicSchemaFieldDiagnostics(providerId, operationId, input, "input"),
+		...collectPublicSchemaFieldDiagnostics(providerId, operationId, output, "output"),
 	];
 }

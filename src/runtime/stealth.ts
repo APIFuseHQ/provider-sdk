@@ -2,16 +2,16 @@ import { createHash } from "node:crypto";
 import type { Browser, ImpitOptions, ImpitResponse, RequestInit } from "impit";
 import { Impit } from "impit";
 
-import type { ProxyResolutionOptions } from "../config/loader";
+import type { ProxyResolutionOptions } from "../config/loader.js";
 import {
 	DEFAULT_SMARTPROXY_POOL_SIZE,
 	invalidateProxyResolutionCacheAsync,
 	ProxyResolutionError,
 	resolveProxyConfigAsync,
 	SMARTPROXY_MAX_POOL_SIZE,
-} from "../config/loader";
-import { SDKError, TransportError } from "../errors";
-import { getStealthProfile } from "../stealth/profiles";
+} from "../config/loader.js";
+import { SDKError, TransportError } from "../errors.js";
+import { getStealthProfile } from "../stealth/profiles.js";
 import type {
 	CookieJar,
 	HttpMethod,
@@ -20,7 +20,7 @@ import type {
 	StealthRedirectHop,
 	StealthResponse,
 	StealthSession,
-} from "../types";
+} from "../types.js";
 import {
 	createProxyAuthIpDeniedError,
 	createProxyEdgeAuthRejectedError,
@@ -35,7 +35,7 @@ import {
 	isProxyPoolStaleStatus,
 	PROXY_EDGE_AUTH_REJECTED_CODE,
 	PROXY_POOL_STALE_CODE,
-} from "./proxy-errors";
+} from "./proxy-errors.js";
 import {
 	computeProxyAttemptIndex,
 	computeProxyTransportRetryDelayMs,
@@ -43,8 +43,8 @@ import {
 	normalizeProxyTransportRetryOptions,
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
-} from "./proxy-retry-policy";
-import { appendQueryParams } from "./request-options";
+} from "./proxy-retry-policy.js";
+import { appendQueryParams } from "./request-options.js";
 
 const DEFAULT_PROFILE = "chrome-146";
 

@@ -14,7 +14,7 @@ import {
 	normalizedXmlName,
 	rootXmlContext,
 	type XmlSemanticBranch,
-} from "./submit-check-xml-semantics";
+} from "./submit-check-xml-semantics.js";
 
 const MIN_RECORDED_XML_LENGTH = 128;
 // Recorded fixtures must remain reviewable; this pre-allocation cap also bounds the parser tree.

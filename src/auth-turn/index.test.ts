@@ -10,7 +10,7 @@ import {
 	AUTH_TURN_SCHEMA_ARTIFACT_PATH,
 	type KnownAuthTurnKind,
 	TURN_KINDS,
-} from "./index";
+} from "./index.js";
 
 interface NamedFixture {
 	name: string;

@@ -2,7 +2,7 @@
 
 import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
-import type { ProviderDefinition } from "../src";
+import type { ProviderDefinition } from "../src/index.js";
 import {
 	createBrowserClient,
 	createCredentialContext,
@@ -14,10 +14,10 @@ import {
 	createSttClientFromEnv,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
 	ProviderError,
-} from "../src";
-import { createMemoryProviderRuntimeState } from "../src/runtime/state";
-import { createTraceContext } from "../src/runtime/trace";
-import type { BrowserClient, ProviderContext } from "../src/types";
+} from "../src/index.js";
+import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { createTraceContext } from "../src/runtime/trace.js";
+import type { BrowserClient, ProviderContext } from "../src/types.js";
 
 const HELP_TEXT = `Usage: apifuse dev [path]
 Example: apifuse dev providers/korea-air-quality
@@ -33,12 +33,9 @@ export async function main() {
 
 	const providerPath = resolveProviderPath(args[0] ?? ".");
 	const providerModule = await import(resolve(providerPath, "index.ts"));
-	const provider = assertProviderDefinition(
-		providerModule.default,
-		providerPath,
-	);
+	const provider = assertProviderDefinition(providerModule.default, providerPath);
 
-	const { startDevServer } = await import("../src/dev");
+	const { startDevServer } = await import("../src/dev.js");
 	const port = Number(process.env.APIFUSE__RUNTIME__PORT) || 3900;
 
 	startDevServer(provider, { port });
@@ -57,8 +54,7 @@ export async function main() {
 
 	const firstOperation = Object.keys(provider.operations)[0];
 	if (firstOperation) {
-		const sampleInput =
-			provider.operations[firstOperation]?.fixtures?.request ?? {};
+		const sampleInput = provider.operations[firstOperation]?.fixtures?.request ?? {};
 		const sampleBody = JSON.stringify({
 			requestId: `req_local_${firstOperation}`,
 			input: sampleInput,
@@ -149,9 +145,7 @@ function renderHotReloadCommand(providerPath: string, port: number): string {
 	const devEntry = resolve(providerPath, "dev.ts");
 	if (existsSync(devEntry)) {
 		const relativeDevEntry = relative(process.cwd(), devEntry) || "dev.ts";
-		const portPrefix = process.env.APIFUSE__RUNTIME__PORT
-			? `APIFUSE__RUNTIME__PORT=${port} `
-			: "";
+		const portPrefix = process.env.APIFUSE__RUNTIME__PORT ? `APIFUSE__RUNTIME__PORT=${port} ` : "";
 		return `${portPrefix}bun --hot ${relativeDevEntry}`;
 	}
 	return "rerun `apifuse dev` after edits (no dev.ts entrypoint found)";
@@ -166,40 +160,28 @@ function createUnsupportedBrowserStub(): BrowserClient {
 		engine: "playwright-stealth",
 		async close() {},
 		async newPage() {
-			throw new ProviderError(
-				"Browser runtime is not enabled for this provider",
-				{
-					code: "BROWSER_RUNTIME_UNSUPPORTED",
-					fix: 'Set provider runtime to "browser" to use ctx.browser',
-				},
-			);
+			throw new ProviderError("Browser runtime is not enabled for this provider", {
+				code: "BROWSER_RUNTIME_UNSUPPORTED",
+				fix: 'Set provider runtime to "browser" to use ctx.browser',
+			});
 		},
 		async rawPage() {
-			throw new ProviderError(
-				"Browser runtime is not enabled for this provider",
-				{
-					code: "BROWSER_RUNTIME_UNSUPPORTED",
-					fix: 'Set provider runtime to "browser" and APIFUSE__CDP_POOL__URL to use ctx.browser.rawPage',
-				},
-			);
+			throw new ProviderError("Browser runtime is not enabled for this provider", {
+				code: "BROWSER_RUNTIME_UNSUPPORTED",
+				fix: 'Set provider runtime to "browser" and APIFUSE__CDP_POOL__URL to use ctx.browser.rawPage',
+			});
 		},
 		async withIsolatedContext() {
-			throw new ProviderError(
-				"Browser runtime is not enabled for this provider",
-				{
-					code: "BROWSER_RUNTIME_UNSUPPORTED",
-					fix: 'Set provider runtime to "browser" to use ctx.browser.withIsolatedContext',
-				},
-			);
+			throw new ProviderError("Browser runtime is not enabled for this provider", {
+				code: "BROWSER_RUNTIME_UNSUPPORTED",
+				fix: 'Set provider runtime to "browser" to use ctx.browser.withIsolatedContext',
+			});
 		},
 		async solveChallenge() {
-			throw new ProviderError(
-				"Browser runtime is not enabled for this provider",
-				{
-					code: "BROWSER_RUNTIME_UNSUPPORTED",
-					fix: 'Set provider runtime to "browser" to use ctx.browser.solveChallenge',
-				},
-			);
+			throw new ProviderError("Browser runtime is not enabled for this provider", {
+				code: "BROWSER_RUNTIME_UNSUPPORTED",
+				fix: 'Set provider runtime to "browser" to use ctx.browser.solveChallenge',
+			});
 		},
 	};
 }
@@ -216,10 +198,7 @@ function createUnsupportedAuthStub() {
 	};
 }
 
-function assertProviderDefinition(
-	value: unknown,
-	providerPath: string,
-): ProviderDefinition {
+function assertProviderDefinition(value: unknown, providerPath: string): ProviderDefinition {
 	if (!isProviderDefinition(value)) {
 		throw new Error(
 			`Expected ${resolve(providerPath, "index.ts")} to export default defineProvider(...)`,
@@ -230,11 +209,7 @@ function assertProviderDefinition(
 }
 
 function isProviderDefinition(value: unknown): value is ProviderDefinition {
-	if (
-		!isRecord(value) ||
-		!isRecord(value.meta) ||
-		!isRecord(value.operations)
-	) {
+	if (!isRecord(value) || !isRecord(value.meta) || !isRecord(value.operations)) {
 		return false;
 	}
 

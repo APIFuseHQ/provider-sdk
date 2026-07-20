@@ -2,9 +2,9 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 
-import type { ProviderProxyPolicy, TraceConfig } from "../types";
+import type { ProviderProxyPolicy, TraceConfig } from "../types.js";
 
 export const SMARTPROXY_APP_KEY_ENV = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 export const SMARTPROXY_MAX_LIFETIME_MINUTES = 2000;
@@ -12,12 +12,9 @@ export const DEFAULT_SMARTPROXY_POOL_SIZE = 20;
 export const SMARTPROXY_MAX_POOL_SIZE = 20;
 export const DEFAULT_PROXY_PROVIDER_ENV = "APIFUSE__PROXY__PROVIDER";
 export const DEFAULT_PROXY_COUNTRY_ENV = "APIFUSE__PROXY__DEFAULT_COUNTRY";
-export const DEFAULT_PROXY_LIFETIME_ENV =
-	"APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES";
-export const PROVIDER_CACHE_REDIS_URL_ENV =
-	"APIFUSE__PROVIDER__CACHE_REDIS_URL";
-export const PROVIDER_STATE_REDIS_URL_ENV =
-	"APIFUSE__PROVIDER__STATE_REDIS_URL";
+export const DEFAULT_PROXY_LIFETIME_ENV = "APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES";
+export const PROVIDER_CACHE_REDIS_URL_ENV = "APIFUSE__PROVIDER__CACHE_REDIS_URL";
+export const PROVIDER_STATE_REDIS_URL_ENV = "APIFUSE__PROVIDER__STATE_REDIS_URL";
 export const REDIS_URL_ENV = "APIFUSE__REDIS__URL";
 
 export type ProxyOptions = {
@@ -165,8 +162,7 @@ const SMARTPROXY_LOCK_POLL_MAX_MS = 9_000;
 const SMARTPROXY_DEADLINE_MARGIN_MS = 1_000;
 const SMARTPROXY_INVALIDATION_SKIP_REDIS_MS = 30_000;
 const SMARTPROXY_ALLOCATOR_MAX_ATTEMPTS = 3;
-const SMARTPROXY_ALLOCATOR_DEADLINE_MS =
-	SMARTPROXY_LOCK_TTL_MS - SMARTPROXY_DEADLINE_MARGIN_MS;
+const SMARTPROXY_ALLOCATOR_DEADLINE_MS = SMARTPROXY_LOCK_TTL_MS - SMARTPROXY_DEADLINE_MARGIN_MS;
 const SMARTPROXY_ALLOCATOR_RETRY_BASE_MS = 25;
 // Smartproxy API extraction returns fresh IP:port candidates; the `life`
 // parameter controls session duration intent, not a hard endpoint lease. Keep
@@ -197,15 +193,11 @@ export function providerStateRedisUrlFromEnv(): string | undefined {
 }
 
 /** @internal Test-only hook for exercising shared proxy-cache behavior. */
-export function __setProxyRedisForTests(
-	redis: ProxyRedisClient | undefined,
-): void {
+export function __setProxyRedisForTests(redis: ProxyRedisClient | undefined): void {
 	proxyRedisForTests = redis;
 }
 
-export function __setSmartproxyAllocatorDeadlineMsForTests(
-	deadlineMs: number | undefined,
-): void {
+export function __setSmartproxyAllocatorDeadlineMsForTests(deadlineMs: number | undefined): void {
 	smartproxyAllocatorDeadlineMsForTests = deadlineMs;
 }
 
@@ -230,9 +222,7 @@ function getProxyRedis(): ProxyRedisClient | undefined {
 	return redis;
 }
 
-async function withRedisTimeout<T>(
-	operation: () => Promise<T>,
-): Promise<T | undefined> {
+async function withRedisTimeout<T>(operation: () => Promise<T>): Promise<T | undefined> {
 	let timeoutId: ReturnType<typeof setTimeout> | undefined;
 	try {
 		const timeout = new Promise<undefined>((resolve) => {
@@ -318,17 +308,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 	return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function toProxyDiagnostics(
-	value: unknown,
-): Record<string, string | number | boolean> | undefined {
+function toProxyDiagnostics(value: unknown): Record<string, string | number | boolean> | undefined {
 	if (!isRecord(value)) return undefined;
 	const diagnostics: Record<string, string | number | boolean> = {};
 	for (const [key, item] of Object.entries(value)) {
-		if (
-			typeof item === "string" ||
-			typeof item === "number" ||
-			typeof item === "boolean"
-		) {
+		if (typeof item === "string" || typeof item === "number" || typeof item === "boolean") {
 			diagnostics[key] = item;
 		}
 	}
@@ -411,11 +395,8 @@ function applyStickyProxySession(proxyUrl: string): string {
 	}
 
 	const username = decodeURIComponent(parsed.username);
-	const sessionId =
-		process.env.APIFUSE__PROXY__SESSION_ID?.trim() || "apifuse-shared";
-	const sessionDuration = readPositiveIntegerEnv(
-		"APIFUSE__PROXY__SESSION_DURATION",
-	);
+	const sessionId = process.env.APIFUSE__PROXY__SESSION_ID?.trim() || "apifuse-shared";
+	const sessionDuration = readPositiveIntegerEnv("APIFUSE__PROXY__SESSION_DURATION");
 	const stickyUsername = host.includes("smartproxy")
 		? buildSmartproxyUsername(username, sessionId, sessionDuration)
 		: buildDecodoUsername(username, sessionId, sessionDuration ?? "60");
@@ -430,27 +411,16 @@ function buildSmartproxyUsername(
 	sessionDuration?: string,
 ): string {
 	const parts = username.split("_");
-	const configuredLife = parts
-		.find((part) => part.startsWith("life-"))
-		?.slice("life-".length);
+	const configuredLife = parts.find((part) => part.startsWith("life-"))?.slice("life-".length);
 	const baseUsername = parts
 		.filter((part) => !part.startsWith("session-") && !part.startsWith("life-"))
 		.join("_");
 	return `${baseUsername}_session-${sessionId}_life-${sessionDuration ?? configuredLife ?? "60"}`;
 }
 
-function buildDecodoUsername(
-	username: string,
-	sessionId: string,
-	sessionDuration: string,
-): string {
-	const withoutSticky = username.replace(
-		/-session-.+-sessionduration-\d+$/,
-		"",
-	);
-	const baseUsername = withoutSticky.startsWith("user-")
-		? withoutSticky
-		: `user-${withoutSticky}`;
+function buildDecodoUsername(username: string, sessionId: string, sessionDuration: string): string {
+	const withoutSticky = username.replace(/-session-.+-sessionduration-\d+$/, "");
+	const baseUsername = withoutSticky.startsWith("user-") ? withoutSticky : `user-${withoutSticky}`;
 	return `${baseUsername}-session-${sessionId}-sessionduration-${sessionDuration}`;
 }
 
@@ -461,9 +431,7 @@ function syncProxyEnv(config: ApiFuseConfig): void {
 	}
 }
 
-export function resolveProxyConfig(
-	options: ProxyResolutionOptions = {},
-): ResolvedProxyConfig {
+export function resolveProxyConfig(options: ProxyResolutionOptions = {}): ResolvedProxyConfig {
 	const explicitProxyUrl = normalizeProxyUrl(options.proxy);
 	if (explicitProxyUrl) {
 		return { shouldWarn: false, url: explicitProxyUrl };
@@ -485,9 +453,7 @@ export function resolveProxyConfig(
 		return { shouldWarn: false, url: envProxyUrl };
 	}
 
-	const configuredProxyUrl = normalizeProxyUrl(
-		options.apifuseConfig?.proxy?.url,
-	);
+	const configuredProxyUrl = normalizeProxyUrl(options.apifuseConfig?.proxy?.url);
 	if (configuredProxyUrl) {
 		return { shouldWarn: false, url: configuredProxyUrl };
 	}
@@ -539,10 +505,7 @@ export async function resolveProxyConfigAsync(
 			options.affinityKey,
 		);
 		options.telemetry?.recordProxyResolution(allocated.telemetry);
-		const poolIndex = selectProxyPoolIndex(
-			allocated.pool.urls.length,
-			options.proxyAttempt,
-		);
+		const poolIndex = selectProxyPoolIndex(allocated.pool.urls.length, options.proxyAttempt);
 		return {
 			shouldWarn: false,
 			url: allocated.pool.urls[poolIndex],
@@ -570,9 +533,7 @@ export async function resolveProxyConfigAsync(
 	}
 }
 
-function resolvePolicy(
-	options: ProxyResolutionOptions,
-): ProviderProxyPolicy | undefined {
+function resolvePolicy(options: ProxyResolutionOptions): ProviderProxyPolicy | undefined {
 	if (options.proxyPolicy) {
 		return options.proxyPolicy;
 	}
@@ -585,30 +546,20 @@ function resolvePolicy(
 
 function resolveProxyProvider(policy: ProviderProxyPolicy): string {
 	return (
-		policy.provider ??
-		process.env[DEFAULT_PROXY_PROVIDER_ENV]?.trim().toLowerCase() ??
-		"custom"
+		policy.provider ?? process.env[DEFAULT_PROXY_PROVIDER_ENV]?.trim().toLowerCase() ?? "custom"
 	);
 }
 
-function resolveSmartproxyCountry(
-	policy: ProviderProxyPolicy,
-): string | undefined {
+function resolveSmartproxyCountry(policy: ProviderProxyPolicy): string | undefined {
 	return (
-		policy.geo?.country ??
-		process.env[DEFAULT_PROXY_COUNTRY_ENV]?.trim().toUpperCase() ??
-		undefined
+		policy.geo?.country ?? process.env[DEFAULT_PROXY_COUNTRY_ENV]?.trim().toUpperCase() ?? undefined
 	);
 }
 
 function resolveSmartproxyLifetime(policy: ProviderProxyPolicy): number {
 	const configuredLifetime =
-		policy.session?.lifetimeMinutes ??
-		readPositiveNumberEnv(DEFAULT_PROXY_LIFETIME_ENV, 30);
-	return Math.min(
-		SMARTPROXY_MAX_LIFETIME_MINUTES,
-		Math.max(1, Math.floor(configuredLifetime)),
-	);
+		policy.session?.lifetimeMinutes ?? readPositiveNumberEnv(DEFAULT_PROXY_LIFETIME_ENV, 30);
+	return Math.min(SMARTPROXY_MAX_LIFETIME_MINUTES, Math.max(1, Math.floor(configuredLifetime)));
 }
 
 function readPositiveNumberEnv(name: string, fallback: number): number {
@@ -624,10 +575,7 @@ function readPositiveNumberEnv(name: string, fallback: number): number {
 function resolveSmartproxyPoolSize(policy: ProviderProxyPolicy): number {
 	return Math.min(
 		SMARTPROXY_MAX_POOL_SIZE,
-		Math.max(
-			1,
-			Math.floor(policy.session?.poolSize ?? DEFAULT_SMARTPROXY_POOL_SIZE),
-		),
+		Math.max(1, Math.floor(policy.session?.poolSize ?? DEFAULT_SMARTPROXY_POOL_SIZE)),
 	);
 }
 
@@ -635,9 +583,7 @@ function selectProxyPoolIndex(poolSize: number, attempt = 0): number {
 	if (poolSize <= 1) {
 		return 0;
 	}
-	const normalizedAttempt = Number.isFinite(attempt)
-		? Math.max(0, Math.floor(attempt))
-		: 0;
+	const normalizedAttempt = Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt)) : 0;
 	return normalizedAttempt % poolSize;
 }
 
@@ -651,10 +597,7 @@ function buildSmartproxyCacheKey(
 		provider: "smartproxy",
 		country: resolveSmartproxyCountry(policy),
 		affinity: policy.session?.affinity ?? "request",
-		affinityKey:
-			(policy.session?.affinity ?? "request") === "request"
-				? undefined
-				: affinityKey,
+		affinityKey: (policy.session?.affinity ?? "request") === "request" ? undefined : affinityKey,
 		lifetimeMinutes,
 		poolSize,
 	});
@@ -666,11 +609,7 @@ async function allocateSmartproxy(
 	lifetimeMinutes: number,
 	affinityKey: string | undefined,
 ): Promise<SmartproxyAllocationResult> {
-	const cacheKey = buildSmartproxyCacheKey(
-		policy,
-		affinityKey,
-		lifetimeMinutes,
-	);
+	const cacheKey = buildSmartproxyCacheKey(policy, affinityKey, lifetimeMinutes);
 	const startedAt = Date.now();
 	const now = startedAt;
 	const invalidatedUntil = invalidatedProxyKeys.get(cacheKey) ?? 0;
@@ -730,9 +669,7 @@ async function readSmartproxyRedisPool(
 	const redis = getProxyRedis();
 	if (!redis || !(await ensureRedisReady(redis))) return null;
 	const redisStartedAt = Date.now();
-	const raw = await withRedisTimeout(() =>
-		redis.get(smartproxyRedisPoolKey(cacheKey)),
-	);
+	const raw = await withRedisTimeout(() => redis.get(smartproxyRedisPoolKey(cacheKey)));
 	const redisReadMs = Math.max(0, Date.now() - redisStartedAt);
 	if (typeof raw !== "string") return null;
 	const pool = safeParseSmartproxyPool(raw);
@@ -756,16 +693,9 @@ async function refreshSmartproxyPool(
 	lifetimeMinutes: number,
 ): Promise<void> {
 	try {
-		await allocateSmartproxyShared(
-			cacheKey,
-			policy,
-			appKey,
-			lifetimeMinutes,
-			Date.now(),
-			{
-				background: true,
-			},
-		);
+		await allocateSmartproxyShared(cacheKey, policy, appKey, lifetimeMinutes, Date.now(), {
+			background: true,
+		});
 	} catch {
 		// Soft refresh is opportunistic; current fresh pool remains usable.
 	}
@@ -809,9 +739,7 @@ async function allocateSmartproxyShared(
 					lifetimeMinutes,
 					startedAt,
 					{
-						cacheStatus: options.background
-							? "soft_stale_refresh"
-							: "allocator",
+						cacheStatus: options.background ? "soft_stale_refresh" : "allocator",
 						redis,
 						poolKey,
 					},
@@ -838,15 +766,10 @@ async function allocateSmartproxyShared(
 		if (typeof pttl === "number" && pttl <= 0) {
 			continue;
 		}
-		if (
-			Date.now() - startedAt >
-			SMARTPROXY_LOCK_POLL_MAX_MS - SMARTPROXY_DEADLINE_MARGIN_MS
-		) {
+		if (Date.now() - startedAt > SMARTPROXY_LOCK_POLL_MAX_MS - SMARTPROXY_DEADLINE_MARGIN_MS) {
 			break;
 		}
-		await sleep(
-			Math.min(500, Math.max(50, typeof pttl === "number" ? pttl : 100)),
-		);
+		await sleep(Math.min(500, Math.max(50, typeof pttl === "number" ? pttl : 100)));
 	}
 
 	throw new ProxyResolutionError(
@@ -893,9 +816,7 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 function smartproxyAllocatorDeadlineMs(): number {
-	return (
-		smartproxyAllocatorDeadlineMsForTests ?? SMARTPROXY_ALLOCATOR_DEADLINE_MS
-	);
+	return smartproxyAllocatorDeadlineMsForTests ?? SMARTPROXY_ALLOCATOR_DEADLINE_MS;
 }
 
 function createDeadlineAbortController(deadlineAt: number): {
@@ -917,9 +838,7 @@ function createDeadlineAbortController(deadlineAt: number): {
 	};
 }
 
-function smartproxyAllocatorDeadlineFailure(
-	attempt: number,
-): SmartproxyAllocatorFailure {
+function smartproxyAllocatorDeadlineFailure(attempt: number): SmartproxyAllocatorFailure {
 	return {
 		ok: false,
 		attempt,
@@ -981,22 +900,12 @@ async function allocateAndStoreSmartproxyPool(
 	},
 ): Promise<SmartproxyAllocationResult> {
 	const poolSize = resolveSmartproxyPoolSize(policy);
-	const allocatorUrl = buildSmartproxyAllocatorUrl(
-		policy,
-		appKey,
-		lifetimeMinutes,
-		poolSize,
-	);
+	const allocatorUrl = buildSmartproxyAllocatorUrl(policy, appKey, lifetimeMinutes, poolSize);
 	const allocatorStartedAt = Date.now();
-	const allocatorDeadlineAt =
-		allocatorStartedAt + smartproxyAllocatorDeadlineMs();
+	const allocatorDeadlineAt = allocatorStartedAt + smartproxyAllocatorDeadlineMs();
 	let allocation: SmartproxyAllocatorSuccess | undefined;
 	let lastFailure: SmartproxyAllocatorFailure | undefined;
-	for (
-		let attempt = 1;
-		attempt <= SMARTPROXY_ALLOCATOR_MAX_ATTEMPTS;
-		attempt += 1
-	) {
+	for (let attempt = 1; attempt <= SMARTPROXY_ALLOCATOR_MAX_ATTEMPTS; attempt += 1) {
 		if (Date.now() >= allocatorDeadlineAt) {
 			lastFailure = smartproxyAllocatorDeadlineFailure(attempt);
 			break;
@@ -1013,8 +922,7 @@ async function allocateAndStoreSmartproxyPool(
 		lastFailure = attemptResult;
 		if (attempt < SMARTPROXY_ALLOCATOR_MAX_ATTEMPTS) {
 			if (Date.now() >= allocatorDeadlineAt) break;
-			const { controller, dispose } =
-				createDeadlineAbortController(allocatorDeadlineAt);
+			const { controller, dispose } = createDeadlineAbortController(allocatorDeadlineAt);
 			try {
 				await sleep(smartproxyAllocatorBackoffMs(attempt), controller.signal);
 			} catch {
@@ -1027,9 +935,7 @@ async function allocateAndStoreSmartproxyPool(
 
 	const allocatorMs = Math.max(0, Date.now() - allocatorStartedAt);
 	const allocatorAttempts =
-		allocation?.attempt ??
-		lastFailure?.attempt ??
-		SMARTPROXY_ALLOCATOR_MAX_ATTEMPTS;
+		allocation?.attempt ?? lastFailure?.attempt ?? SMARTPROXY_ALLOCATOR_MAX_ATTEMPTS;
 	const allocatorBodyClass =
 		lastFailure?.bodyClass ?? allocation?.bodyClass ?? "usable_proxy_endpoints";
 	const allocatorStatus = lastFailure ? lastFailure.status : allocation?.status;
@@ -1106,9 +1012,7 @@ async function allocateAndStoreSmartproxyPool(
 	};
 }
 
-type SmartproxyAllocatorAttemptResult =
-	| SmartproxyAllocatorSuccess
-	| SmartproxyAllocatorFailure;
+type SmartproxyAllocatorAttemptResult = SmartproxyAllocatorSuccess | SmartproxyAllocatorFailure;
 
 type SmartproxyAllocatorSuccess = {
 	ok: true;
@@ -1150,10 +1054,7 @@ async function fetchSmartproxyAllocatorAttempt(
 
 	let body: string;
 	try {
-		body = await readSmartproxyAllocatorBodyWithDeadline(
-			response,
-			controller.signal,
-		);
+		body = await readSmartproxyAllocatorBodyWithDeadline(response, controller.signal);
 	} catch (error) {
 		dispose();
 		return {
@@ -1196,8 +1097,7 @@ async function fetchSmartproxyAllocatorAttempt(
 }
 
 function smartproxyAllocatorBackoffMs(attempt: number): number {
-	const base =
-		SMARTPROXY_ALLOCATOR_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1);
+	const base = SMARTPROXY_ALLOCATOR_RETRY_BASE_MS * 2 ** Math.max(0, attempt - 1);
 	const jitter = Math.floor(Math.random() * SMARTPROXY_ALLOCATOR_RETRY_BASE_MS);
 	return base + jitter;
 }
@@ -1247,14 +1147,8 @@ function parseSmartproxyAllocatorProxies(body: string): string[] {
 
 	try {
 		const parsed: unknown = JSON.parse(trimmed);
-		const data =
-			parsed && typeof parsed === "object" && "data" in parsed
-				? parsed.data
-				: undefined;
-		const list =
-			data && typeof data === "object" && "list" in data
-				? data.list
-				: undefined;
+		const data = parsed && typeof parsed === "object" && "data" in parsed ? parsed.data : undefined;
+		const list = data && typeof data === "object" && "list" in data ? data.list : undefined;
 		if (Array.isArray(list)) {
 			return list
 				.map((item) => {
@@ -1263,8 +1157,7 @@ function parseSmartproxyAllocatorProxies(body: string): string[] {
 					}
 					const ip = "ip" in item && typeof item.ip === "string" ? item.ip : "";
 					const port =
-						"port" in item &&
-						(typeof item.port === "string" || typeof item.port === "number")
+						"port" in item && (typeof item.port === "string" || typeof item.port === "number")
 							? item.port
 							: "";
 					return ip && port ? `http://${ip}:${port}` : null;
@@ -1307,9 +1200,7 @@ export function clearProxyResolutionCache(): void {
 	invalidatedProxyKeys.clear();
 }
 
-function markSmartproxyCacheInvalidated(
-	options: ProxyResolutionOptions = {},
-): string | undefined {
+function markSmartproxyCacheInvalidated(options: ProxyResolutionOptions = {}): string | undefined {
 	const policy = resolvePolicy(options);
 	if (!policy || policy.mode === "disabled") {
 		return undefined;
@@ -1319,23 +1210,14 @@ function markSmartproxyCacheInvalidated(
 	}
 
 	const lifetimeMinutes = resolveSmartproxyLifetime(policy);
-	const cacheKey = buildSmartproxyCacheKey(
-		policy,
-		options.affinityKey,
-		lifetimeMinutes,
-	);
-	invalidatedProxyKeys.set(
-		cacheKey,
-		Date.now() + SMARTPROXY_INVALIDATION_SKIP_REDIS_MS,
-	);
+	const cacheKey = buildSmartproxyCacheKey(policy, options.affinityKey, lifetimeMinutes);
+	invalidatedProxyKeys.set(cacheKey, Date.now() + SMARTPROXY_INVALIDATION_SKIP_REDIS_MS);
 	proxyCache.delete(cacheKey);
 	proxyInflight.delete(cacheKey);
 	return cacheKey;
 }
 
-export function invalidateProxyResolutionCache(
-	options: ProxyResolutionOptions = {},
-): boolean {
+export function invalidateProxyResolutionCache(options: ProxyResolutionOptions = {}): boolean {
 	return markSmartproxyCacheInvalidated(options) !== undefined;
 }
 
@@ -1374,9 +1256,7 @@ async function importConfig(filePath: string): Promise<ApiFuseConfig | null> {
 	}
 }
 
-export async function loadApiFuseConfig(
-	dir: string = process.cwd(),
-): Promise<ApiFuseConfig> {
+export async function loadApiFuseConfig(dir: string = process.cwd()): Promise<ApiFuseConfig> {
 	const tsPath = path.resolve(dir, "apifuse.config.ts");
 	if (existsSync(tsPath)) {
 		const config = await importConfig(tsPath);

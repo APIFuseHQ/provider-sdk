@@ -5,7 +5,7 @@ import {
 	buildReleasePrBody,
 	nextBetaVersion,
 	releaseBranchForVersion,
-} from "../../scripts/prepare-beta-release-pr";
+} from "../../scripts/prepare-beta-release-pr.js";
 
 const WORKFLOW_DIR = ".github/workflows";
 const RELEASE_WORKFLOW = workflow("release.yml");

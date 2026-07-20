@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 
-import { deriveSubkey } from "./key-derivation";
+import { deriveSubkey } from "./key-derivation.js";
 
 const HMAC_HEX_LENGTH = 16;
 
@@ -22,12 +22,7 @@ export function deriveContextNamespace(
 		throw new Error("sessionId is empty");
 	}
 
-	const subkey = deriveSubkey(
-		masterSecret,
-		providerId,
-		"context-namespace",
-		keyVersion,
-	);
+	const subkey = deriveSubkey(masterSecret, providerId, "context-namespace", keyVersion);
 	const hmac = createHmac("sha256", subkey).update(providerId).digest("hex");
 	return `provider:${hmac.slice(0, HMAC_HEX_LENGTH)}:${sessionId}`;
 }

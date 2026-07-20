@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 
-import { ProviderError } from "../errors";
-import { credentialsAuthChallenge, defineCredentialsAuth } from "../provider";
-import { createScratchpad } from "../runtime/auth-flow";
-import type { FlowContext } from "../types";
+import { ProviderError } from "../errors.js";
+import { credentialsAuthChallenge, defineCredentialsAuth } from "../provider.js";
+import { createScratchpad } from "../runtime/auth-flow.js";
+import type { FlowContext } from "../types.js";
 
 function createFlowContext(initialContext: Record<string, unknown> = {}): FlowContext {
 	return {
@@ -117,7 +117,7 @@ describe("defineCredentialsAuth", () => {
 		const credentialsAuth = defineCredentialsAuth({
 			fields: { email: { type: "email" } },
 			credentialKeys: ["cookie"] as const,
-			login: async () => ({ } as never),
+			login: async () => ({}) as never,
 		});
 
 		await expect(

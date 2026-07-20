@@ -1,4 +1,4 @@
-import { TransportError } from "../errors";
+import { TransportError } from "../errors.js";
 
 export const PROXY_AUTH_IP_DENIED_CODE = "PROXY_AUTH_IP_DENIED";
 export const PROXY_AUTH_IP_DENIED_MESSAGE =
@@ -39,9 +39,7 @@ export function isProxyEdgeAuthRejectedMessage(message: string): boolean {
 	return PROXY_EDGE_AUTH_REJECTED_PATTERN.test(message);
 }
 
-export function createProxyEdgeAuthRejectedError(
-	cause?: Error,
-): TransportError {
+export function createProxyEdgeAuthRejectedError(cause?: Error): TransportError {
 	return new TransportError(PROXY_EDGE_AUTH_REJECTED_MESSAGE, {
 		code: PROXY_EDGE_AUTH_REJECTED_CODE,
 		cause,
@@ -52,10 +50,7 @@ export function isProxyPoolStaleStatus(status: number): boolean {
 	return PROXY_POOL_STALE_STATUS_CODES.has(status);
 }
 
-export function isProxyEdgeTlsRejectedResponse(
-	status: number,
-	evidence: string,
-): boolean {
+export function isProxyEdgeTlsRejectedResponse(status: number, evidence: string): boolean {
 	return (
 		PROXY_EDGE_TLS_REJECTED_STATUS_CODES.has(status) &&
 		PROXY_EDGE_TLS_REJECTED_MESSAGE_PATTERN.test(evidence)
@@ -67,10 +62,7 @@ export function isProxyPoolStaleMessage(message: string): boolean {
 }
 
 export function isProxyPoolRefreshableError(error: unknown): boolean {
-	if (
-		error instanceof TransportError &&
-		error.code === PROXY_AUTH_IP_DENIED_CODE
-	) {
+	if (error instanceof TransportError && error.code === PROXY_AUTH_IP_DENIED_CODE) {
 		return false;
 	}
 
@@ -89,39 +81,26 @@ export function isProxyPoolRefreshableError(error: unknown): boolean {
 		cause instanceof Error ? cause.message : "",
 	].join(" ");
 	return (
-		PROXY_POOL_STALE_MESSAGE_PATTERN.test(message) ||
-		PROXY_EDGE_AUTH_REJECTED_PATTERN.test(message)
+		PROXY_POOL_STALE_MESSAGE_PATTERN.test(message) || PROXY_EDGE_AUTH_REJECTED_PATTERN.test(message)
 	);
 }
 
 export const isProxyPoolStaleError = isProxyPoolRefreshableError;
 
-export function createProxyPoolStaleError(
-	status: number,
-	cause?: Error,
-): TransportError {
-	return new TransportError(
-		`Proxy provider pool failed with status ${status}`,
-		{
-			code: PROXY_POOL_STALE_CODE,
-			status,
-			cause,
-		},
-	);
+export function createProxyPoolStaleError(status: number, cause?: Error): TransportError {
+	return new TransportError(`Proxy provider pool failed with status ${status}`, {
+		code: PROXY_POOL_STALE_CODE,
+		status,
+		cause,
+	});
 }
 
-export function createProxyEdgeTlsRejectedError(
-	status: number,
-	cause?: Error,
-): TransportError {
-	return new TransportError(
-		`Proxy edge TLS request was rejected with status ${status}`,
-		{
-			code: PROXY_EDGE_TLS_REJECTED_CODE,
-			status,
-			cause,
-		},
-	);
+export function createProxyEdgeTlsRejectedError(status: number, cause?: Error): TransportError {
+	return new TransportError(`Proxy edge TLS request was rejected with status ${status}`, {
+		code: PROXY_EDGE_TLS_REJECTED_CODE,
+		status,
+		cause,
+	});
 }
 
 export function createProxyPoolExhaustedError(cause?: Error): TransportError {

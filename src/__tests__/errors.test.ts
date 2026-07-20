@@ -12,7 +12,7 @@ import {
 	TransportError,
 	TurnValidationError,
 	ValidationError,
-} from "../errors";
+} from "../errors.js";
 
 describe("ProviderError", () => {
 	it("should include fix hint", () => {
@@ -90,20 +90,12 @@ describe("SDKError", () => {
 
 describe("new provider-sdk foundation errors", () => {
 	it("assigns stable error codes", () => {
-		expect(new ProviderSecretError("missing secret").code).toBe(
-			"provider_secret_error",
-		);
+		expect(new ProviderSecretError("missing secret").code).toBe("provider_secret_error");
 		expect(new CredentialKeyError("bad key").code).toBe("credential_key_error");
-		expect(new CredentialModeError("bad mode").code).toBe(
-			"credential_mode_error",
-		);
+		expect(new CredentialModeError("bad mode").code).toBe("credential_mode_error");
 		expect(new FlowExpiredError("expired").code).toBe("flow_expired");
-		expect(new TurnValidationError("invalid turn").code).toBe(
-			"turn_validation_error",
-		);
-		expect(new ContextAccessError("bad context").code).toBe(
-			"context_access_error",
-		);
+		expect(new TurnValidationError("invalid turn").code).toBe("turn_validation_error");
+		expect(new ContextAccessError("bad context").code).toBe("context_access_error");
 	});
 
 	it("inherits from ProviderError", () => {

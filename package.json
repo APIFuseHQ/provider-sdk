@@ -81,11 +81,13 @@
 		"check": "bun run lint && bun run type-check && bun run build",
 		"pack:check": "bun run build && bun bin/apifuse-pack-check.ts",
 		"pack:smoke": "bun run build && bun bin/apifuse-pack-smoke.ts",
+		"pack:types": "bun run build && bun bin/apifuse-pack-types.ts",
 		"release:guard": "bun scripts/guard-release-pr.ts",
 		"format:check": "biome format .",
 		"build": "tsgo -p tsconfig.build.json && rm -rf dist/cli/templates && cp -R src/cli/templates dist/cli/templates && rm -rf dist/auth-turn/fixtures && cp -R src/auth-turn/fixtures dist/auth-turn/fixtures && cp src/auth-turn/auth-turn.v1.schema.json dist/auth-turn/auth-turn.v1.schema.json"
 	},
 	"devDependencies": {
+		"@arethetypeswrong/cli": "^0.18.5",
 		"@biomejs/biome": "^2.5.0",
 		"@types/bun": "latest",
 		"@types/node": "^25.9.3",

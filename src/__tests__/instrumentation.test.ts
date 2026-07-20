@@ -1,17 +1,17 @@
 import { describe, expect, it, mock } from "bun:test";
-import { createProviderCache } from "../runtime/cache";
-import { createTestProviderChoiceContext } from "../runtime/choice";
-import { createCredentialContext } from "../runtime/credential";
-import { createEnvContext } from "../runtime/env";
-import { wrapWithInstrumentation } from "../runtime/instrumentation";
-import { createTraceContext } from "../runtime/trace";
+import { createProviderCache } from "../runtime/cache.js";
+import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import { createCredentialContext } from "../runtime/credential.js";
+import { createEnvContext } from "../runtime/env.js";
+import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
+import { createTraceContext } from "../runtime/trace.js";
 import type {
 	AuthContext,
 	BrowserClient,
 	HttpClient,
 	ProviderContext,
 	StealthClient,
-} from "../types";
+} from "../types.js";
 
 function createMockHttpResponse(requestId: string, duration: number) {
 	const data = { ok: true };
@@ -26,10 +26,7 @@ function createMockHttpResponse(requestId: string, duration: number) {
 		json: async <T>() => data as T,
 		text: async () => body,
 		arrayBuffer: async () =>
-			bodyBytes.buffer.slice(
-				bodyBytes.byteOffset,
-				bodyBytes.byteOffset + bodyBytes.byteLength,
-			),
+			bodyBytes.buffer.slice(bodyBytes.byteOffset, bodyBytes.byteOffset + bodyBytes.byteLength),
 		bytes: async () => bodyBytes.slice(0),
 	};
 }
@@ -76,15 +73,15 @@ function createMockContext(): ProviderContext {
 		})),
 	};
 
-		return {
-			env: createEnvContext(),
-			credential: createCredentialContext(),
-			http: {
-				request: mock(async () => createMockHttpResponse("req-0", 10)),
-				get: mock(async () => createMockHttpResponse("req-1", 15)),
-				post: mock(async () => createMockHttpResponse("req-2", 20)),
-				put: mock(async () => createMockHttpResponse("req-3", 25)),
-				delete: mock(async () => createMockHttpResponse("req-4", 30)),
+	return {
+		env: createEnvContext(),
+		credential: createCredentialContext(),
+		http: {
+			request: mock(async () => createMockHttpResponse("req-0", 10)),
+			get: mock(async () => createMockHttpResponse("req-1", 15)),
+			post: mock(async () => createMockHttpResponse("req-2", 20)),
+			put: mock(async () => createMockHttpResponse("req-3", 25)),
+			delete: mock(async () => createMockHttpResponse("req-4", 30)),
 			stream: mock(async () => {
 				throw new Error("stream unsupported in instrumentation test client");
 			}),
@@ -133,10 +130,7 @@ describe("createTraceContext", () => {
 		await trace.span("second", async () => undefined);
 		await trace.span("third", async () => undefined);
 
-		expect(trace.getSpans().map((span) => span.name)).toEqual([
-			"second",
-			"third",
-		]);
+		expect(trace.getSpans().map((span) => span.name)).toEqual(["second", "third"]);
 	});
 });
 
@@ -266,9 +260,9 @@ describe("wrapWithInstrumentation", () => {
 
 		const instrumented = wrapWithInstrumentation(ctx);
 
-		await expect(
-			instrumented.stealth.fetch("https://secure.example.com/fail"),
-		).rejects.toThrow("boom");
+		await expect(instrumented.stealth.fetch("https://secure.example.com/fail")).rejects.toThrow(
+			"boom",
+		);
 
 		expect(instrumented.trace.getSpans()[0]).toMatchObject({
 			name: "stealth.fetch",

@@ -7,7 +7,7 @@ import {
 	defineProvider,
 	defineSmsOtpMatcher,
 	every,
-} from "./index";
+} from "./index.js";
 
 const noopHandler = async () => ({});
 
@@ -88,9 +88,9 @@ describe("health journey authoring", () => {
 	});
 
 	it("rejects schedules that define both jitter and randomize", () => {
-		expect(() =>
-			every("24h", { jitter: "PT20M", randomize: centered("6h") }),
-		).toThrow(/Schedule cannot define both jitter and randomize/);
+		expect(() => every("24h", { jitter: "PT20M", randomize: centered("6h") })).toThrow(
+			/Schedule cannot define both jitter and randomize/,
+		);
 	});
 
 	it("rejects malformed health journey randomization objects", () => {
@@ -227,20 +227,16 @@ describe("health journey authoring", () => {
 			waitTimeout: "PT2M30S",
 		});
 
-		expect(
-			matcher.extractOtp(
-				"[모두의주차장]인증번호는 0919 입니다. 정확히 입력해주세요.",
-			),
-		).toBe("0919");
+		expect(matcher.extractOtp("[모두의주차장]인증번호는 0919 입니다. 정확히 입력해주세요.")).toBe(
+			"0919",
+		);
 	});
 
 	it("extracts OTPs repeatably when authors pass a stateful regex", () => {
 		const matcher = defineSmsOtpMatcher({
 			id: "global-regex-otp",
 			country: "KR",
-			origins: [
-				{ kind: "nationalServiceCode", country: "KR", value: "16615270" },
-			],
+			origins: [{ kind: "nationalServiceCode", country: "KR", value: "16615270" }],
 			code: { pattern: /인증번호는\s*\[([0-9]{4})\]/g },
 			maxAge: "PT5M",
 			waitTimeout: "PT2M30S",
@@ -256,9 +252,7 @@ describe("health journey authoring", () => {
 		const matcher = defineSmsOtpMatcher({
 			id: "global-regex-otp",
 			country: "KR",
-			origins: [
-				{ kind: "nationalServiceCode", country: "KR", value: "16615270" },
-			],
+			origins: [{ kind: "nationalServiceCode", country: "KR", value: "16615270" }],
 			code: { pattern },
 			maxAge: "PT5M",
 			waitTimeout: "PT2M30S",
@@ -277,9 +271,7 @@ describe("health journey authoring", () => {
 		const matcher = defineSmsOtpMatcher({
 			id: "character-class-otp",
 			country: "KR",
-			origins: [
-				{ kind: "nationalServiceCode", country: "KR", value: "16615270" },
-			],
+			origins: [{ kind: "nationalServiceCode", country: "KR", value: "16615270" }],
 			code: { pattern: /인증번호[()]\s*([0-9]{4})/ },
 			maxAge: "PT5M",
 			waitTimeout: "PT2M30S",
@@ -293,9 +285,7 @@ describe("health journey authoring", () => {
 			defineSmsOtpMatcher({
 				id: "bad",
 				country: "KR",
-				origins: [
-					{ kind: "nationalServiceCode", country: "KR", value: "16615270" },
-				],
+				origins: [{ kind: "nationalServiceCode", country: "KR", value: "16615270" }],
 				code: { pattern: /([0-9]{4})/ },
 				maxAge: "PT5M",
 				waitTimeout: "PT2M30S",
@@ -361,9 +351,7 @@ describe("health journey authoring", () => {
 						publicRationale:
 							"Replays a bounded SMS/payment URL health journey only after operator acknowledgement.",
 					},
-					steps: [
-						{ id: "start", operationId: "start-payment", kind: "operation" },
-					],
+					steps: [{ id: "start", operationId: "start-payment", kind: "operation" }],
 				}),
 			],
 		});
@@ -405,9 +393,7 @@ describe("health journey authoring", () => {
 							minManualInterval: "PT8H",
 							publicRationale: "manual run",
 						},
-						steps: [
-							{ id: "start", operationId: "start-payment", kind: "operation" },
-						],
+						steps: [{ id: "start", operationId: "start-payment", kind: "operation" }],
 					}),
 				],
 			}),
@@ -439,9 +425,7 @@ describe("health journey authoring", () => {
 							// @ts-expect-error runtime validation covers JS provider declarations.
 							requiresAcknowledgement: true,
 						},
-						steps: [
-							{ id: "start", operationId: "start-payment", kind: "operation" },
-						],
+						steps: [{ id: "start", operationId: "start-payment", kind: "operation" }],
 					}),
 				],
 			}),
@@ -476,9 +460,7 @@ describe("health journey authoring", () => {
 							// @ts-expect-error runtime validation covers JS provider declarations.
 							reason: "disabled-only field",
 						},
-						steps: [
-							{ id: "start", operationId: "start-payment", kind: "operation" },
-						],
+						steps: [{ id: "start", operationId: "start-payment", kind: "operation" }],
 					}),
 				],
 			}),
@@ -511,9 +493,7 @@ describe("health journey authoring", () => {
 							minManualInterval: "PT0S",
 							publicRationale: "operator-acknowledged payment journey",
 						},
-						steps: [
-							{ id: "start", operationId: "start-payment", kind: "operation" },
-						],
+						steps: [{ id: "start", operationId: "start-payment", kind: "operation" }],
 					}),
 				],
 			}),
@@ -546,9 +526,7 @@ describe("health journey authoring", () => {
 							minManualInterval: "PT8H",
 							publicRationale: "payment journey",
 						},
-						steps: [
-							{ id: "start", operationId: "start-payment", kind: "operation" },
-						],
+						steps: [{ id: "start", operationId: "start-payment", kind: "operation" }],
 					}),
 				],
 			}),
@@ -607,9 +585,7 @@ describe("health journey authoring", () => {
 		const matcher = defineSmsOtpMatcher({
 			id: "phone-otp",
 			country: "KR",
-			origins: [
-				{ kind: "nationalServiceCode", country: "KR", value: "16615270" },
-			],
+			origins: [{ kind: "nationalServiceCode", country: "KR", value: "16615270" }],
 			code: { pattern: /([0-9]{4})/ },
 			maxAge: "PT5M",
 			waitTimeout: "PT2M30S",

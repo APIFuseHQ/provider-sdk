@@ -1,4 +1,4 @@
-import type { Span } from "./trace";
+import type { Span } from "./trace.js";
 
 export type PerfStats = {
 	p50: number;

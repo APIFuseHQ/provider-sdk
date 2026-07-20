@@ -1,5 +1,5 @@
-import { SDKError } from "../errors";
-import type { StealthPlatform, StealthProfile } from "../types";
+import { SDKError } from "../errors.js";
+import type { StealthPlatform, StealthProfile } from "../types.js";
 
 type StealthProfileDefinition = Omit<StealthProfile, "name" | "platform"> & {
 	platform: StealthPlatform;
@@ -81,10 +81,7 @@ const FIREFOX_JA3 =
 const SAFARI_JA3 =
 	"771,4865-4866-4867-49196-49195-52393-49200-49199-49188-49192-159-158-107-103-57-51-157-156-61-60-53-47-255,0-23-65281-10-11-16-5-13-18-51-45-43-27,29-23-24-25,0";
 
-function createProfile(
-	name: string,
-	definition: StealthProfileDefinition,
-): StealthProfile {
+function createProfile(name: string, definition: StealthProfileDefinition): StealthProfile {
 	return {
 		name,
 		platform: definition.platform,
@@ -93,12 +90,8 @@ function createProfile(
 		tlsClientIdentifier: definition.tlsClientIdentifier,
 		ja3: definition.ja3,
 		ja4: definition.ja4,
-		h2Settings: definition.h2Settings
-			? { ...definition.h2Settings }
-			: undefined,
-		headerOrder: definition.headerOrder
-			? [...definition.headerOrder]
-			: undefined,
+		h2Settings: definition.h2Settings ? { ...definition.h2Settings } : undefined,
+		headerOrder: definition.headerOrder ? [...definition.headerOrder] : undefined,
 	};
 }
 
@@ -108,8 +101,7 @@ function extractBrowserMajorVersion(profile: StealthProfile): string {
 		return chromeVersion;
 	}
 
-	const identifierVersion =
-		profile.tlsClientIdentifier?.match(/(\d+)(?!.*\d)/)?.[1];
+	const identifierVersion = profile.tlsClientIdentifier?.match(/(\d+)(?!.*\d)/)?.[1];
 	if (identifierVersion) {
 		return identifierVersion;
 	}
@@ -132,9 +124,7 @@ function toPlatformHeaderValue(platform: StealthPlatform): string {
 	}
 }
 
-export function generateLayer2Headers(
-	profile: StealthProfile,
-): Record<string, string> {
+export function generateLayer2Headers(profile: StealthProfile): Record<string, string> {
 	const headers: Record<string, string> = {
 		"Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
 	};
@@ -143,16 +133,13 @@ export function generateLayer2Headers(
 	const majorVersion = extractBrowserMajorVersion(profile);
 
 	if (identifier.startsWith("chrome_") || identifier.startsWith("edge_")) {
-		const isEdge =
-			identifier.startsWith("edge_") || /\bEdg\//.test(profile.userAgent);
+		const isEdge = identifier.startsWith("edge_") || /\bEdg\//.test(profile.userAgent);
 		headers["Sec-Ch-Ua"] = isEdge
 			? `"Chromium";v="${majorVersion}", "Microsoft Edge";v="${majorVersion}", "Not)A;Brand";v="99"`
 			: `"Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}", "Not)A;Brand";v="99"`;
 		headers["Sec-Ch-Ua-Platform"] = toPlatformHeaderValue(profile.platform);
 		headers["Sec-Ch-Ua-Mobile"] =
-			profile.platform === "android" || profile.platform === "ios"
-				? "?1"
-				: "?0";
+			profile.platform === "android" || profile.platform === "ios" ? "?1" : "?0";
 	}
 
 	return headers;
@@ -301,8 +288,5 @@ export function getStealthProfile(name: string): StealthProfile {
 }
 
 export function listStealthProfiles(): string[] {
-	return [
-		...Object.keys(STEALTH_PROFILES),
-		...Object.keys(STEALTH_PROFILE_ALIASES),
-	];
+	return [...Object.keys(STEALTH_PROFILES), ...Object.keys(STEALTH_PROFILE_ALIASES)];
 }
