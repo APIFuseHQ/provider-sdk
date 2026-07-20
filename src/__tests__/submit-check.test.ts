@@ -2255,6 +2255,41 @@ export function raiseCaptchaGate(): never {
 		expect(report.score.verdict).not.toBe("blocked");
 	});
 
+	it("downgrades multiple error-code constants sharing one line to a warning", async () => {
+		// Codex round-5 counterexample: with several SCREAMING_SNAKE literals
+		// on one line, a sibling literal must not leak AUTH/PASSWORD into this
+		// candidate's context — all literal contents are stripped before the
+		// secret-context check, so the array line stays non-blocking.
+		const dir = makeProviderDir(
+			"submit-entropy-error-code-array-",
+			`${validProviderSource()}
+const ERROR_CODES = ["AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED", "AUTH_PASSWORD_LOGIN_SUBMIT_FAILED"];
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("still blocks error-code-shaped arrays assigned to secret-like identifiers", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-error-code-array-key-",
+			`${validProviderSource()}
+const apiKeys = ["AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED", "AUTH_PASSWORD_LOGIN_SUBMIT_FAILED"];
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
 	it("still warns on pure-alphabetic keyboard-mash uppercase values", async () => {
 		// Codex round-3 counterexample: all-alphabetic segments pass the
 		// word-like shape test, but entropy classification is never skipped —

@@ -3750,16 +3750,20 @@ function classifyEntropyCandidate(input: {
 	// "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED") may contain secret-ish words
 	// (AUTH/PASSWORD/...) in their own text and would otherwise be permanently
 	// blocker-flagged. They are never skipped — entropy classification always
-	// runs — but when the secret-ish context comes solely from the literal's
-	// own content (the line minus the literal carries no secret-ish
+	// runs — but when the secret-ish context comes solely from string-literal
+	// text (the line with ALL literal contents stripped carries no secret-ish
 	// identifier), the finding is capped at a non-blocking warning instead of
-	// a blocker. Assignments to `apiKey`/`token`/`secret`-style names still
-	// escalate to blockers, and `// @apifuse-allow secret-scan` remains the
-	// reviewed way to silence the warning.
+	// a blocker. Stripping every literal — not just the candidate — matters
+	// for lines holding several constants (e.g. an ERROR_CODES array), where
+	// a sibling literal would otherwise leak AUTH/PASSWORD into this
+	// candidate's context. Assignments to `apiKey`/`token`/`secret`-style
+	// names still escalate to blockers via the identifier side, and
+	// `// @apifuse-allow secret-scan` remains the reviewed way to silence the
+	// warning.
 	const selfContextOnlyConstant =
 		secretishContext &&
 		isScreamingSnakeConstantValue(value) &&
-		!SECRETISH_IDENTIFIER_PATTERN.test(stripCandidateFromLine(input.line, value));
+		!SECRETISH_IDENTIFIER_PATTERN.test(stripStringLiteralContents(input.line));
 	const threshold = charset === "hex" ? 3.0 : secretishContext ? 4.0 : 4.5;
 	if (entropy < threshold) return undefined;
 
@@ -3807,10 +3811,39 @@ function isScreamingSnakeConstantValue(value: string): boolean {
 	return digitCount / value.length <= 0.15;
 }
 
-// Removes every occurrence of the candidate literal from its line so context
-// checks only see the surrounding code, not the literal's own text.
-function stripCandidateFromLine(line: string, value: string): string {
-	return line.split(value).join("");
+// Removes the contents of every string literal on the line (keeping the
+// quotes, same quote/escape walking as extractStringLiteralCandidates) so
+// context checks only see actual code — identifiers, property names,
+// keywords. Sibling literals on the same line (e.g. an array of error-code
+// constants) must not leak secret-ish words into another candidate's context.
+function stripStringLiteralContents(line: string): string {
+	let result = "";
+	let index = 0;
+	while (index < line.length) {
+		const char = line[index];
+		if (char !== '"' && char !== "'" && char !== "`") {
+			result += char;
+			index += 1;
+			continue;
+		}
+		const quote = char;
+		result += quote;
+		index += 1;
+		while (index < line.length) {
+			const inner = line[index];
+			if (inner === "\\") {
+				index += 2;
+				continue;
+			}
+			if (inner === quote) {
+				result += quote;
+				index += 1;
+				break;
+			}
+			index += 1;
+		}
+	}
+	return result;
 }
 
 function shouldConsiderEntropyValue(value: string): boolean {
