@@ -38,9 +38,8 @@ describe("user-input contract", () => {
 		expect(isProviderNeedsInputPayload({ status: "ok" })).toBe(false);
 		expect(
 			isProviderNeedsInputPayload({
-				status: NEEDS_INPUT_STATUS,
+				...payload,
 				required_selections: "not-a-list",
-				action_hint: "x",
 			}),
 		).toBe(false);
 		expect(
@@ -51,5 +50,33 @@ describe("user-input contract", () => {
 		).toBe(false);
 		expect(isProviderNeedsInputPayload(null)).toBe(false);
 		expect(isProviderNeedsInputPayload([payload])).toBe(false);
+	});
+
+	it("rejects malformed selections and a missing retry template", () => {
+		expect(
+			isProviderNeedsInputPayload({
+				...payload,
+				required_selections: [{ selection_key: 1 }],
+			}),
+		).toBe(false);
+		expect(
+			isProviderNeedsInputPayload({
+				...payload,
+				required_selections: [
+					{
+						...payload.required_selections[0],
+						valid_options: [{ selection_value: "21" }],
+					},
+				],
+			}),
+		).toBe(false);
+		const { continue_with: _omitted, ...withoutContinueWith } = payload;
+		expect(isProviderNeedsInputPayload(withoutContinueWith)).toBe(false);
+		expect(
+			isProviderNeedsInputPayload({
+				...payload,
+				continue_with: { operation: "reserve" },
+			}),
+		).toBe(false);
 	});
 });

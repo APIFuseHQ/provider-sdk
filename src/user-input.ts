@@ -55,22 +55,59 @@ export interface ProviderNeedsInputPayload {
 	readonly status: typeof NEEDS_INPUT_STATUS;
 	readonly required_selections: readonly ProviderRequiredSelection[];
 	readonly selected_options?: readonly ProviderSelectedOption[];
-	readonly continue_with?: ProviderContinueWith;
+	// Required: the contract depends on a ready-to-send retry template — an
+	// agent that can relay options but has no canonical way to retry is back
+	// to guessing call shapes.
+	readonly continue_with: ProviderContinueWith;
 	readonly action_hint: string;
 	/** Provider-specific fresh state token(s), e.g. `reservation_state`. */
 	readonly [extra: string]: unknown;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isSelectionOption(value: unknown): value is ProviderSelectionOption {
+	return (
+		isRecord(value) &&
+		typeof value.selection_value === "string" &&
+		typeof value.label === "string"
+	);
+}
+
+function isRequiredSelection(
+	value: unknown,
+): value is ProviderRequiredSelection {
+	return (
+		isRecord(value) &&
+		typeof value.selection_key === "string" &&
+		typeof value.label === "string" &&
+		typeof value.required === "boolean" &&
+		Array.isArray(value.valid_options) &&
+		value.valid_options.every(isSelectionOption)
+	);
+}
+
+function isContinueWith(value: unknown): value is ProviderContinueWith {
+	return (
+		isRecord(value) &&
+		typeof value.operation === "string" &&
+		isRecord(value.args)
+	);
+}
+
 export function isProviderNeedsInputPayload(
 	value: unknown,
 ): value is ProviderNeedsInputPayload {
-	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+	if (!isRecord(value)) {
 		return false;
 	}
-	const record = value as Record<string, unknown>;
 	return (
-		record.status === NEEDS_INPUT_STATUS &&
-		Array.isArray(record.required_selections) &&
-		typeof record.action_hint === "string"
+		value.status === NEEDS_INPUT_STATUS &&
+		Array.isArray(value.required_selections) &&
+		value.required_selections.every(isRequiredSelection) &&
+		isContinueWith(value.continue_with) &&
+		typeof value.action_hint === "string"
 	);
 }
