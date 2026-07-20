@@ -20,6 +20,7 @@ import {
 import { APIFUSE_DESCRIPTION_KEY_META_KEY } from "../src/schema";
 import { safeParseSchemaSync } from "../src/schema";
 import { type CheckResult, runChecks } from "./apifuse-check";
+import { hasSubstantiveXmlStructure } from "./submit-check-xml";
 
 const TIERS = ["bronze", "silver", "gold", "diamond"] as const;
 const TIER_VALUES: ReadonlySet<string> = new Set(TIERS);
@@ -2066,8 +2067,14 @@ function recordedFixtureStats(
 			leafValues,
 		};
 	}
-	if (typeof value === "string" && value.length === 0) {
-		return { hasNestedSubstance: false, leafValues: 0 };
+	if (typeof value === "string") {
+		if (value.length === 0) {
+			return { hasNestedSubstance: false, leafValues: 0 };
+		}
+		// A recorded operation value may be a raw XML success payload; treat a
+		// substantive, well-formed one as nested evidence while still counting the
+		// string as a leaf so existing JSON provenance heuristics are unchanged.
+		return { hasNestedSubstance: hasSubstantiveXmlStructure(value), leafValues: 1 };
 	}
 	return { hasNestedSubstance: false, leafValues: 1 };
 }
@@ -2191,24 +2198,55 @@ function vendorKeyFindingsForObject(
 	const keys = collectTopLevelObjectKeys(source, zObject.objectStart, zObject.objectEnd);
 	const digitFamilies = new Map<string, Set<string>>();
 	for (const key of keys) {
-		const digitMatch = /^([a-z][a-zA-Z]*)(\d+)[a-z]*$/i.exec(key.name);
-		if (!digitMatch?.[1] || !digitMatch[2]) {
+		const member = numberedFamilyMember(key.name);
+		if (!member) {
 			continue;
 		}
-		const digits = digitFamilies.get(digitMatch[1]) ?? new Set<string>();
-		digits.add(digitMatch[2]);
-		digitFamilies.set(digitMatch[1], digits);
+		const positions = digitFamilies.get(member.base) ?? new Set<string>();
+		positions.add(member.position);
+		digitFamilies.set(member.base, positions);
 	}
 
 	return keys
 		.filter((key) => {
-			if (!/^[a-z][a-zA-Z0-9]*$/.test(key.name)) {
+			if (!isAllowedPublicOutputKeyName(key.name)) {
 				return true;
 			}
-			const digitMatch = /^([a-z][a-zA-Z]*)(\d+)[a-z]*$/i.exec(key.name);
-			return digitMatch?.[1] !== undefined && (digitFamilies.get(digitMatch[1])?.size ?? 0) >= 3;
+			const member = numberedFamilyMember(key.name);
+			return member !== null && (digitFamilies.get(member.base)?.size ?? 0) >= 3;
 		})
 		.map((key) => ({ key: key.name, line: offsetToLine(source, key.offset) }));
+}
+
+// A numbered vendor family is a base name plus a numeric position and an
+// optional trailing letter suffix, in either compact/camel form (sensor1,
+// duty1s) or semantic snake_case form (sensor_1, duty_time_1s). Both styles
+// normalize to the same { base, position } so a family of >=3 distinct
+// positions is caught regardless of which naming style the vendor leaked
+// through. Returns null for names that carry no numeric position.
+function numberedFamilyMember(name: string): { base: string; position: string } | null {
+	const camelMatch = /^([a-z][a-zA-Z]*)(\d+)[a-z]*$/i.exec(name);
+	if (camelMatch?.[1] && camelMatch[2]) {
+		return { base: camelMatch[1], position: camelMatch[2] };
+	}
+	const snakeMatch = /^([a-z][a-z0-9]*(?:_[a-z0-9]+)*?)_(\d+)[a-z]*$/.exec(name);
+	if (snakeMatch?.[1] && snakeMatch[2]) {
+		return { base: snakeMatch[1], position: snakeMatch[2] };
+	}
+	return null;
+}
+
+// Public output keys may use APIFuse lowerCamelCase (isOpen24h, latitude) or
+// semantic snake_case (pharmacy_id, weekly_hours, total_count, scan_exhausted).
+// Both are normalized, human-authored names. Raw vendor keys leak through mixed
+// case or uppercase acronyms (MKioskTy) and match neither, so they stay flagged.
+// Numbered vendor families still pass this name gate in either style
+// (sensor1/2/3 or sensor_1/sensor_2/sensor_3), so they are caught separately by
+// the >=3-member numberedFamilyMember check in vendorKeyFindingsForObject.
+function isAllowedPublicOutputKeyName(name: string): boolean {
+	const isLowerCamelCase = /^[a-z][a-zA-Z0-9]*$/.test(name);
+	const isSemanticSnakeCase = /^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$/.test(name);
+	return isLowerCamelCase || isSemanticSnakeCase;
 }
 
 function collectTopLevelObjectKeys(

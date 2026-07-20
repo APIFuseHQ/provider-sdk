@@ -954,6 +954,147 @@ ${assertionLines(21)}
 		expect(check?.status).toBe("pass");
 	});
 
+	it("passes the real EV root-operation raw XML fixture shape", async () => {
+		const dir = makeProviderDir("submit-ev-xml-raw-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const rawXml = [
+			'<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
+			"<response><header><resultCode>00</resultCode><resultMsg>NORMAL SERVICE.</resultMsg>",
+			"<totalCount>75374</totalCount><pageNo>1</pageNo><numOfRows>10</numOfRows></header>",
+			"<body><items><item><statNm>낙성대동주민센터</statNm><statId>ME174013</statId>",
+			"<chgerId>01</chgerId><chgerType>06</chgerType><addr>서울특별시 관악구 낙성대로4가길 5</addr>",
+			"<lat>37.476296</lat><lng>126.9583876</lng><stat>2</stat></item></items></body></response>",
+		].join("");
+		writeFileSync(
+			join(dir, "__fixtures__", "raw.json"),
+			JSON.stringify({ "search-chargers": rawXml }),
+		);
+
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "fixture-provenance");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("accepts domain faultCode fields inside recorded XML items", async () => {
+		const dir = makeProviderDir("submit-domain-fault-code-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const rawXml = [
+			"<response><header><resultCode>00</resultCode><resultMsg>NORMAL SERVICE.</resultMsg></header>",
+			"<body><items><item><recordId>EV-FAULT-001</recordId><faultCode>connector_overheat</faultCode>",
+			"<faultMessage>Connector temperature sensor reading for this charger</faultMessage>",
+			"<observedAt>2026-07-15T00:00:00Z</observedAt></item></items></body></response>",
+		].join("");
+		writeFileSync(
+			join(dir, "__fixtures__", "raw.json"),
+			JSON.stringify({ "charger-diagnostics": rawXml }),
+		);
+
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "fixture-provenance");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	for (const [caseName, rawXml] of [
+		[
+			"malformed XML",
+			"<response><header><resultCode>00</resultCode></header><body><items><item><id>EV-1</id><status>available</status></items></body></response>",
+		],
+		[
+			"HTML",
+			`<html><head><title>Service unavailable</title></head><body><h1>Upstream error</h1><p>${"Please retry later. ".repeat(8)}</p></body></html>`,
+		],
+		[
+			"DOCTYPE",
+			'<!DOCTYPE response [<!ENTITY station SYSTEM "file:///etc/hostname">]><response><header><resultCode>00</resultCode></header><body><items><item><id>&station;</id><status>available for charging</status></item></items></body></response>',
+		],
+		[
+			"processing instruction",
+			'<?recording source="upstream"?><response><header><resultCode>00</resultCode></header><body><items><item><id>EV-1</id><status>available for charging</status></item></items></body></response>',
+		],
+		[
+			"error root",
+			`<Error><Code>ServiceUnavailable</Code><Message>${"The upstream request could not be completed. ".repeat(4)}</Message></Error>`,
+		],
+		[
+			"failure control envelope",
+			`<response><header><resultCode>30</resultCode><resultMsg>${"SERVICE KEY IS NOT REGISTERED ".repeat(4)}</resultMsg></header><body><items><item><id>EV-1</id><status>available</status></item></items></body></response>`,
+		],
+		[
+			"control-only success envelope",
+			`<response><header><resultCode>00</resultCode><resultMsg>NORMAL SERVICE.</resultMsg><totalCount>75374</totalCount><pageNo>1</pageNo><numOfRows>10</numOfRows></header>${" ".repeat(64)}</response>`,
+		],
+	] as const) {
+		it(`blocks ${caseName} as recorded XML evidence`, async () => {
+			const dir = makeProviderDir("submit-invalid-xml-raw-", validProviderSource());
+			writeValidLocaleCatalogs(dir);
+			writeFileSync(
+				join(dir, "__fixtures__", "raw.json"),
+				JSON.stringify({ lookup: rawXml }),
+			);
+
+			const report = await buildSubmitCheckReport(dir);
+			const check = report.checks.find((item) => item.id === "fixture-provenance");
+
+			expect(check?.status).toBe("fail");
+			expect(check?.level).toBe("blocker");
+		});
+	}
+
+	it("blocks recorded XML above the size limit", async () => {
+		const dir = makeProviderDir("submit-oversized-xml-raw-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const rawXml = `<response><body><items><item><recordId>EV-1</recordId><description>${"x".repeat(
+			4 * 1024 * 1024,
+		)}</description></item></items></body></response>`;
+		writeFileSync(
+			join(dir, "__fixtures__", "raw.json"),
+			JSON.stringify({ lookup: rawXml }),
+		);
+
+		const report = await buildSubmitCheckReport(dir);
+		expect(report.checks.find((item) => item.id === "fixture-provenance")?.status).toBe(
+			"fail",
+		);
+	});
+
+	it("blocks recorded XML above the depth limit", async () => {
+		const dir = makeProviderDir("submit-deep-xml-raw-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const rawXml = `<response><body>${"<layer>".repeat(
+			65,
+		)}<item><recordId>EV-1</recordId><description>available for charging today</description></item>${"</layer>".repeat(
+			65,
+		)}</body></response>`;
+		writeFileSync(
+			join(dir, "__fixtures__", "raw.json"),
+			JSON.stringify({ lookup: rawXml }),
+		);
+
+		const report = await buildSubmitCheckReport(dir);
+		expect(report.checks.find((item) => item.id === "fixture-provenance")?.status).toBe(
+			"fail",
+		);
+	});
+
+	it("blocks recorded XML above the element-width limit", async () => {
+		const dir = makeProviderDir("submit-wide-xml-raw-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const rawXml = `<response><body><items>${"<marker/>".repeat(
+			50_001,
+		)}<item><recordId>EV-1</recordId><description>available for charging today</description></item></items></body></response>`;
+		writeFileSync(
+			join(dir, "__fixtures__", "raw.json"),
+			JSON.stringify({ lookup: rawXml }),
+		);
+
+		const report = await buildSubmitCheckReport(dir);
+		expect(report.checks.find((item) => item.id === "fixture-provenance")?.status).toBe(
+			"fail",
+		);
+	});
+
 	it("blocks flat primitive raw fixture provenance", async () => {
 		const dir = makeProviderDir("submit-flat-raw-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
@@ -1028,6 +1169,35 @@ const upstreamRow = z.object({ MKioskTy: z.string() });
 		expect(check?.status).toBe("pass");
 	});
 
+	it("allows semantic snake_case keys in public output schemas", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`pharmacy_id: z.string(),
+    weekly_hours: z.array(z.string()),
+    trauma_centers: z.array(z.string()),
+    total_count: z.number(),
+    filtered_count: z.number(),
+    scan_count: z.number(),
+    scan_exhausted: z.boolean(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, pharmacy_id: "P-1", weekly_hours: ["24h"], trauma_centers: ["regional"], total_count: 1, filtered_count: 1, scan_count: 1, scan_exhausted: false }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, pharmacy_id: "P-1", weekly_hours: ["24h"], trauma_centers: ["regional"], total_count: 1, filtered_count: 1, scan_count: 1, scan_exhausted: false } },',
+			);
+		const dir = makeProviderDir("submit-semantic-snake-case-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("pass");
+	});
+
 	it("does not flag two-member digit suffix families in public output schemas", async () => {
 		const source = validProviderSource()
 			.replace(
@@ -1078,20 +1248,70 @@ const upstreamRow = z.object({ MKioskTy: z.string() });
 		expect(check?.evidence?.[0]).toMatch(/index\.ts:\d+/);
 	});
 
-	it("blocks computed string vendor keys in public output schemas", async () => {
+	it("blocks snake_case-suffixed vendor key families in public output schemas", async () => {
 		const source = validProviderSource()
 			.replace(
 				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
-				`["duty_name"]: z.string(),
+				`sensor_1: z.string(),
+    sensor_2: z.string(),
+    sensor_3: z.string(),
     ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
 			)
 			.replace(
 				"handler: async () => ({ ok: true }),",
-				'handler: async () => ({ ok: true, duty_name: "open" }),',
+				'handler: async () => ({ ok: true, sensor_1: "a", sensor_2: "b", sensor_3: "c" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, sensor_1: "a", sensor_2: "b", sensor_3: "c" } },',
+			);
+		const dir = makeProviderDir("submit-snake-digit-key-family-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.[0]).toMatch(/index\.ts:\d+/);
+	});
+
+	it("does not flag two-member snake_case digit families in public output schemas", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`address_line_1: z.string(),
+    address_line_2: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, address_line_1: "a", address_line_2: "b" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, address_line_1: "a", address_line_2: "b" } },',
+			);
+		const dir = makeProviderDir("submit-two-snake-digit-key-family-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks computed string vendor keys in public output schemas", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`["MKioskTy"]: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
 			)
 			.replace(
 				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
-				'fixtures: { request: { q: "btc" }, response: { ok: true, duty_name: "open" } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
 			);
 		const dir = makeProviderDir("submit-computed-vendor-key-", source);
 		writeValidLocaleCatalogs(dir);
@@ -1109,11 +1329,11 @@ const upstreamRow = z.object({ MKioskTy: z.string() });
 
 const upstreamNote = true;`,
 			)
-			.replace("output,", "output: z.object({ duty_name: z.string() }),")
-			.replace("handler: async () => ({ ok: true }),", 'handler: async () => ({ duty_name: "open" }),')
+			.replace("output,", "output: z.object({ MKioskTy: z.string() }),")
+			.replace("handler: async () => ({ ok: true }),", 'handler: async () => ({ MKioskTy: "K" }),')
 			.replace(
 				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
-				'fixtures: { request: { q: "btc" }, response: { duty_name: "open" } },',
+				'fixtures: { request: { q: "btc" }, response: { MKioskTy: "K" } },',
 			);
 		const dir = makeProviderDir("submit-upstream-note-bypass-", source);
 		writeValidLocaleCatalogs(dir);
@@ -1125,7 +1345,7 @@ const upstreamNote = true;`,
 
 	it("still exempts upstream-marked z.object value ranges", async () => {
 		const source = `${validProviderSource()}
-const upstreamOutput = z.object({ duty_name: z.string() });
+const upstreamOutput = z.object({ MKioskTy: z.string() });
 `;
 		const dir = makeProviderDir("submit-upstream-range-pass-", source);
 		writeValidLocaleCatalogs(dir);

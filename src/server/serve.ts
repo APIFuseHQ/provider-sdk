@@ -6,9 +6,10 @@ import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth";
 import {
 	AuthError,
+	isProviderError,
+	isSessionExpiredError,
+	isTransportError,
 	ProviderError,
-	SessionExpiredError,
-	TransportError,
 } from "../errors";
 import {
 	loadProviderLocaleCatalogs,
@@ -507,7 +508,7 @@ function toErrorResponse(
 	error: unknown,
 	requestId?: string,
 ): OperationErrorResponse {
-	if (error instanceof ProviderError) {
+	if (isProviderError(error)) {
 		const details = publicProviderErrorDetails(error);
 		return {
 			error: {
@@ -563,7 +564,12 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function providerObservabilityDetails(error: ProviderError):
+// Accepts `unknown` so the branded guards narrow cleanly from the top: the
+// subtype error classes are structurally compatible with ProviderError, so
+// narrowing from a ProviderError-typed value would collapse the negative branch
+// to `never`. Narrowing from unknown avoids that while still recognizing errors
+// from a duplicate SDK module instance.
+function providerObservabilityDetails(error: unknown):
 	| {
 			category: ProviderErrorCategory;
 			taxonomyVersion: string;
@@ -576,14 +582,14 @@ function providerObservabilityDetails(error: ProviderError):
 	// operation (see design.md §4.3 D3). Without this branch the auth error would
 	// serialize as a bare 401 with no retryable/category, losing the refresh
 	// signal for exactly the retryOnAuthRefresh operations it is meant to enable.
-	if (error instanceof SessionExpiredError) {
+	if (isSessionExpiredError(error)) {
 		return {
 			category: error.options?.category ?? "credential_expired",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: error.options?.retryable ?? false,
 		};
 	}
-	if (!(error instanceof TransportError)) {
+	if (!isTransportError(error)) {
 		return undefined;
 	}
 	const isProxyPoolCode =
@@ -616,7 +622,7 @@ function providerObservabilityDetails(error: ProviderError):
 }
 
 function publicProviderErrorMessage(error: ProviderError): string {
-	if (error instanceof TransportError) {
+	if (isTransportError(error)) {
 		if (error.code === PROXY_AUTH_IP_DENIED_CODE) {
 			return error.message;
 		}
@@ -646,11 +652,11 @@ function toStatusCode(
 		return 400;
 	}
 
-	if (error instanceof TransportError) {
+	if (isTransportError(error)) {
 		return error.code === "transport_timeout" ? 504 : 502;
 	}
 
-	if (error instanceof ProviderError) {
+	if (isProviderError(error)) {
 		switch (error.code) {
 			case "AUTH_REQUIRED":
 			case "reauth_required":
@@ -697,7 +703,7 @@ function logProviderError(
 	cost: ProviderRequestCost,
 ): void {
 	const code =
-		error instanceof ProviderError
+		isProviderError(error)
 			? (error.code ?? "provider_error")
 			: error instanceof z.ZodError
 				? "invalid_request"
@@ -705,7 +711,7 @@ function logProviderError(
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
 	const details =
-		error instanceof ProviderError
+		isProviderError(error)
 			? providerObservabilityDetails(error)
 			: undefined;
 	const emit =
@@ -722,7 +728,7 @@ function logProviderError(
 		code,
 		errorClass,
 		message,
-		...(error instanceof TransportError && error.upstreamStatus
+		...(isTransportError(error) && error.upstreamStatus
 			? { upstreamStatus: error.upstreamStatus }
 			: {}),
 		...(details

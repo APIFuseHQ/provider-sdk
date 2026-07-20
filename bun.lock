@@ -6,6 +6,7 @@
       "name": "@apifuse/provider-sdk",
       "dependencies": {
         "@clack/prompts": "^1.5.1",
+        "@rgrove/parse-xml": "4.2.2",
         "@types/ms": "^2.1.0",
         "acorn": "^8.17.0",
         "ajv": "^8.17",
@@ -52,6 +53,8 @@
     "@clack/prompts": ["@clack/prompts@1.6.0", "", { "dependencies": { "@clack/core": "1.4.2", "fast-string-width": "^3.0.2", "fast-wrap-ansi": "^0.2.0", "sisteransi": "^1.0.5" } }, "sha512-EYlRokl8szrP9Z25qT5aepMdBjzBvHF9ZEhzIiUBc9guz/T31EqRgvD0QSgZcpE93xiwrr+OkB4nz0BZyF6fSA=="],
 
     "@ioredis/commands": ["@ioredis/commands@1.10.0", "", {}, "sha512-UmeW7z4LfctwoQ5wkhVzgq8tXkreED2xZGpX+Bg+zA+WJFZCT6c062AfCK/Dfk81xZnnwdhJCUMkitihRaoC2Q=="],
+
+    "@rgrove/parse-xml": ["@rgrove/parse-xml@4.2.2", "", {}, "sha512-KJpwSfVwrZ1Ab9KU4oRwG0VefGpveSt/w/j1m6YkJkB5KhdDbN/7BS0ojcLCzrG3/YGFhtfFHKVBkrms6w8Org=="],
 
     "@types/bun": ["@types/bun@1.3.14", "", { "dependencies": { "bun-types": "1.3.14" } }, "sha512-h1hFqFVcvAvD9j9K7ZW7vd82aSA+rTdznZa+5bwvCwqSB1jmmfLcbIWhOLx1/+boy/xmjgCs/OMUL8hRJSmnPw=="],
 

@@ -37,6 +37,9 @@ export {
 } from "./define";
 export {
 	AuthError,
+	isProviderError,
+	isSessionExpiredError,
+	isTransportError,
 	ProviderError,
 	SessionExpiredError,
 	TransportError,

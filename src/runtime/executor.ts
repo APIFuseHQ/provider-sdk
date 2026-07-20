@@ -1,4 +1,4 @@
-import { ProviderError, SessionExpiredError } from "../errors";
+import { isSessionExpiredError, ProviderError, SessionExpiredError } from "../errors";
 import { parseSchema } from "../schema";
 import type { ProviderContext, ProviderDefinition } from "../types";
 
@@ -64,7 +64,12 @@ export async function executeOperation(
 		// operation is safe to re-drive after refresh, which we signal by marking
 		// the surfaced error retryable; non-idempotent operations (the default)
 		// stay non-retryable so they are not auto-re-driven. See design.md §4.3 D3.
-		if (error instanceof SessionExpiredError && operation.retryOnAuthRefresh) {
+		// Use the branded guard, not `instanceof`: a handler loaded through a
+		// duplicate/published SDK module can throw a correctly branded
+		// SessionExpiredError whose constructor identity differs from this
+		// executor's, which `instanceof` would miss — dropping the retryable
+		// upgrade and stranding an operation that opted into auth refresh.
+		if (isSessionExpiredError(error) && operation.retryOnAuthRefresh) {
 			throw new SessionExpiredError(error.message, { retryable: true });
 		}
 		throw error;
