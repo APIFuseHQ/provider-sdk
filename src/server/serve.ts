@@ -79,6 +79,7 @@ import type {
 } from "../types";
 import {
 	createSelfTestApp,
+	createSelfTestAuthFlowInvoke,
 	createSelfTestInvoke,
 	resolveSelfTestPort,
 } from "./self-test";
@@ -1770,6 +1771,7 @@ export async function serve(
 		const selfTestApp = createSelfTestApp(provider, {
 			secrets: selfTestSecrets,
 			invoke: createSelfTestInvoke(app),
+			authFlow: createSelfTestAuthFlowInvoke(app),
 		});
 		bunRuntime.serve({
 			port: options.selfTestPort ?? resolveSelfTestPort(),
