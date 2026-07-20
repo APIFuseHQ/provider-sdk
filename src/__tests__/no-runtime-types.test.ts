@@ -95,7 +95,7 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 		const result = spawnSync(
 			"bunx",
 			[
-				"tsgo",
+				"tsc",
 				"--noEmit",
 				"--strict",
 				"--moduleResolution",
@@ -129,7 +129,7 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 		const result = spawnSync(
 			"bunx",
 			[
-				"tsgo",
+				"tsc",
 				"--noEmit",
 				"--strict",
 				"--moduleResolution",
