@@ -571,6 +571,16 @@ async function materializeFlowCredential(
 		};
 	}
 	if (turn.kind !== "complete") {
+		// Validate the start turn BEFORE submitting credentials: an unknown
+		// kind may be a provider typo or a stage that must not receive the
+		// probe inputs. `retry` counts as an input prompt at this stage.
+		if (turn.kind !== "retry" && !INTERACTIVE_TURN_KIND_SET.has(turn.kind)) {
+			return {
+				kind: "flow_error",
+				code: "auth_flow_unexpected_turn",
+				message: `Auth flow start returned an unrecognized turn kind "${turn.kind}".`,
+			};
+		}
 		// The case deadline may have fired while start() was still running.
 		// Never submit real credentials into a flow whose case already
 		// reported self_test_timeout — a late continue is a real upstream
@@ -853,7 +863,10 @@ async function executeSelfTestCase(
 	const runProbeAttempt = async (
 		connection: OperationConnection | undefined,
 	): Promise<SelfTestCaseResult> => {
-		const { startedAtMs, finish } = beginCase();
+		// Share the OUTER case scope: startedAt/responseTimeMs must cover the
+		// WHOLE case — auth-flow materialization included — not just the final
+		// operation attempt, or a slow login reads as a fast healthy case.
+		const { startedAtMs, finish } = caseScope;
 		try {
 			return await withCaseTimeout(async () => {
 				const resolvedInput = resolveHealthCheckInputDateTokens(healthCase.input);

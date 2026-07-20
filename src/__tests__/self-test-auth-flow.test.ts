@@ -36,6 +36,8 @@ interface FlowProviderState {
 	flowError: boolean;
 	/** When true, `start` returns a terminal abort turn. */
 	abortAtStart: boolean;
+	/** When true, `start` returns a turn kind unknown to TURN_KINDS. */
+	unknownTurnAtStart: boolean;
 	/** When true, `continue` returns a terminal abort turn. */
 	abortAtContinue: boolean;
 	/** When true, `continue` returns a turn kind unknown to TURN_KINDS. */
@@ -63,6 +65,7 @@ function createFlowProviderState(): FlowProviderState {
 		multiTurn: false,
 		flowError: false,
 		abortAtStart: false,
+		unknownTurnAtStart: false,
 		abortAtContinue: false,
 		unknownTurnAtContinue: false,
 		startDelayMs: 0,
@@ -108,6 +111,9 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 					}
 					if (state.abortAtStart) {
 						return { kind: "abort", turnId: "turn-abort-start" } as AuthTurn;
+					}
+					if (state.unknownTurnAtStart) {
+						return { kind: "mystery_kind", turnId: "turn-mystery-start" } as unknown as AuthTurn;
 					}
 					return formTurn("turn-start");
 				},
@@ -609,6 +615,29 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(second.result?.status).toBe("failed");
 		expect(state.loginCount).toBe(2);
 		expect(state.seenConnectionIds).toHaveLength(2);
+	});
+
+	it("rejects an unknown start turn BEFORE submitting credentials", async () => {
+		const state = createFlowProviderState();
+		state.unknownTurnAtStart = true;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const body = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(body.result?.status).toBe("error");
+		expect(body.result?.error?.code).toBe("auth_flow_unexpected_turn");
+		// Credentials must never reach continue through an unrecognized stage.
+		expect(state.continueCount).toBe(0);
+	});
+
+	it("case timing covers auth-flow materialization, not just the final probe attempt", async () => {
+		const state = createFlowProviderState();
+		state.startDelayMs = 200;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const body = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(body.result?.status).toBe("ok");
+		// A slow login must not read as a fast healthy case.
+		expect(body.result?.responseTimeMs).toBeGreaterThanOrEqual(200);
 	});
 
 	it("redacts flow-materialized secrets from every probe output", async () => {
