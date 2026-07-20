@@ -58,9 +58,7 @@ type MockPlaywrightPage = {
 	click: (selector: string) => Promise<void>;
 	close: () => Promise<void>;
 	content: () => Promise<string>;
-	dispatchResourceRequest: (
-		dispatch: MockResourceDispatch,
-	) => Promise<"handled" | "unhandled">;
+	dispatchResourceRequest: (dispatch: MockResourceDispatch) => Promise<"handled" | "unhandled">;
 	evaluate: <T>(fn: string | (() => T)) => Promise<T>;
 	fill: (selector: string, text: string) => Promise<void>;
 	frames: () => MockPlaywrightFrame[];
@@ -72,10 +70,7 @@ type MockPlaywrightPage = {
 	type: (selector: string, text: string) => Promise<void>;
 	unroute: (pattern: string, handler: MockRouteHandler) => Promise<void>;
 	url: () => string;
-	waitForSelector: (
-		selector: string,
-		options?: { timeout?: number },
-	) => Promise<void>;
+	waitForSelector: (selector: string, options?: { timeout?: number }) => Promise<void>;
 	state: {
 		clicks: string[];
 		closed: boolean;
@@ -349,8 +344,7 @@ function createMockPlaywrightPage(): MockPlaywrightPage {
 		async unroute(pattern, handler) {
 			state.unrouteCalls.push(pattern);
 			state.routes = state.routes.filter(
-				(registration) =>
-					registration.pattern !== pattern || registration.handler !== handler,
+				(registration) => registration.pattern !== pattern || registration.handler !== handler,
 			);
 		},
 		url() {
@@ -362,9 +356,7 @@ function createMockPlaywrightPage(): MockPlaywrightPage {
 	};
 }
 
-function createMockBrowserLauncher(
-	options: { applyStealthOnPage?: () => boolean } = {},
-) {
+function createMockBrowserLauncher(options: { applyStealthOnPage?: () => boolean } = {}) {
 	return {
 		launch: async (launchOptions: LaunchCall = {}) => {
 			browserState.launchCalls.push(launchOptions);
@@ -492,10 +484,7 @@ function parseSelector(expression: string): string | null {
 	return JSON.parse(match[1]) as string;
 }
 
-async function waitForCondition(
-	condition: () => boolean,
-	message: string,
-): Promise<void> {
+async function waitForCondition(condition: () => boolean, message: string): Promise<void> {
 	const deadline = Date.now() + 500;
 	while (Date.now() < deadline) {
 		if (condition()) {
@@ -515,10 +504,7 @@ class MockWebSocket {
 	static CLOSED = 3;
 
 	readyState = MockWebSocket.CONNECTING;
-	private listeners = new Map<
-		string,
-		Set<(event?: { data?: string }) => void>
-	>();
+	private listeners = new Map<string, Set<(event?: { data?: string }) => void>>();
 
 	constructor(private readonly endpoint: string) {
 		if (endpoint.startsWith("ws://page.test/")) {
@@ -531,10 +517,7 @@ class MockWebSocket {
 		});
 	}
 
-	addEventListener(
-		event: string,
-		listener: (event?: { data?: string }) => void,
-	) {
+	addEventListener(event: string, listener: (event?: { data?: string }) => void) {
 		const listeners = this.listeners.get(event) ?? new Set();
 		listeners.add(listener);
 		this.listeners.set(event, listeners);
@@ -553,10 +536,7 @@ class MockWebSocket {
 			params?: Record<string, unknown>;
 		};
 
-		if (
-			this.endpoint === "ws://pool.test" ||
-			this.endpoint === "ws://pool.test/"
-		) {
+		if (this.endpoint === "ws://pool.test" || this.endpoint === "ws://pool.test/") {
 			this.handlePoolMessage(message);
 			return;
 		}
@@ -662,8 +642,7 @@ class MockWebSocket {
 				break;
 			case "Page.createIsolatedWorld":
 				this.reply(message.id, {
-					executionContextId:
-						message.params?.frameId === "recaptcha-frame" ? 42 : 7,
+					executionContextId: message.params?.frameId === "recaptcha-frame" ? 42 : 7,
 				});
 				break;
 			case "Page.navigate":
@@ -674,9 +653,7 @@ class MockWebSocket {
 			case "Runtime.evaluate": {
 				const expression = String(message.params?.expression ?? "");
 				const contextId =
-					typeof message.params?.contextId === "number"
-						? message.params.contextId
-						: undefined;
+					typeof message.params?.contextId === "number" ? message.params.contextId : undefined;
 				const selector = parseSelector(expression);
 				if (contextId !== undefined) {
 					cdpState.frameContextIds.push(contextId);
@@ -759,9 +736,7 @@ class MockWebSocket {
 				this.reply(message.id, {});
 				break;
 			case "Page.captureScreenshot":
-				cdpState.screenshotCalls.push(
-					Boolean(message.params?.captureBeyondViewport),
-				);
+				cdpState.screenshotCalls.push(Boolean(message.params?.captureBeyondViewport));
 				this.reply(message.id, {
 					data: Buffer.from("remote-shot").toString("base64"),
 				});
@@ -777,14 +752,10 @@ class MockWebSocket {
 				break;
 			case "Fetch.fulfillRequest":
 				cdpState.fetchFulfillments.push({
-					...(typeof message.params?.body === "string"
-						? { body: message.params.body }
-						: {}),
+					...(typeof message.params?.body === "string" ? { body: message.params.body } : {}),
 					requestId: String(message.params?.requestId ?? ""),
 					responseCode:
-						typeof message.params?.responseCode === "number"
-							? message.params.responseCode
-							: 0,
+						typeof message.params?.responseCode === "number" ? message.params.responseCode : 0,
 					...(Array.isArray(message.params?.responseHeaders)
 						? {
 								responseHeaders: message.params.responseHeaders.filter(
@@ -865,16 +836,13 @@ describe("createBrowserClient", () => {
 	});
 
 	it("throws ProviderError with install hint when the stealth browser launcher is unavailable", async () => {
-		browserState.requireError = Object.assign(
-			new Error("Cannot find module 'playwright'"),
-			{
-				code: "MODULE_NOT_FOUND",
-			},
-		);
+		browserState.requireError = Object.assign(new Error("Cannot find module 'playwright'"), {
+			code: "MODULE_NOT_FOUND",
+		});
 		registerBrowserMocks();
 
-		const { ProviderError } = await import("../errors");
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { ProviderError } = await import("../errors.js");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const pagePromise = client.newPage();
 
@@ -887,17 +855,15 @@ describe("createBrowserClient", () => {
 
 	it("throws ProviderError with install hint for ESM missing Playwright when stealth is disabled", async () => {
 		browserState.requireError = Object.assign(
-			new Error(
-				"Cannot find package 'playwright' imported from runtime/browser",
-			),
+			new Error("Cannot find package 'playwright' imported from runtime/browser"),
 			{
 				code: "ERR_MODULE_NOT_FOUND",
 			},
 		);
 		registerBrowserMocks();
 
-		const { ProviderError } = await import("../errors");
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { ProviderError } = await import("../errors.js");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient({ stealth: false });
 		const pagePromise = client.newPage();
 
@@ -909,7 +875,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("falls back to local Playwright and implements browser page methods", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 
 		const page = (await client.newPage()) as {
@@ -927,10 +893,7 @@ describe("createBrowserClient", () => {
 			title(): Promise<string>;
 			type(selector: string, text: string): Promise<void>;
 			url(): Promise<string>;
-			waitForSelector(
-				selector: string,
-				options?: { timeout?: number },
-			): Promise<void>;
+			waitForSelector(selector: string, options?: { timeout?: number }): Promise<void>;
 			close(): Promise<void>;
 		};
 
@@ -972,9 +935,7 @@ describe("createBrowserClient", () => {
 			{ selector: "#email", timeout: 1234 },
 			{ selector: "#status", timeout: 99 },
 		]);
-		expect(browserState.browsers[0]?.pages[0]?.state.clicks).toEqual([
-			"button[type=submit]",
-		]);
+		expect(browserState.browsers[0]?.pages[0]?.state.clicks).toEqual(["button[type=submit]"]);
 		expect(browserState.browsers[0]?.pages[0]?.state.types).toEqual([
 			{ selector: "#email", text: "demo@example.com" },
 		]);
@@ -986,9 +947,7 @@ describe("createBrowserClient", () => {
 		expect(title).toBe("local-title");
 		expect(pageTitle).toBe("local-title");
 		expect(currentUrl).toBe("https://example.com/login");
-		expect(frameUrl).toBe(
-			"https://www.google.com/recaptcha/api2/anchor?k=site-key",
-		);
+		expect(frameUrl).toBe("https://www.google.com/recaptcha/api2/anchor?k=site-key");
 		expect(locatorText).toBe("local text");
 		expect(challenge).toEqual({
 			type: "recaptcha",
@@ -1000,7 +959,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("fulfills a document-like request under a scoped resource policy", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 
@@ -1040,7 +999,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("blocks unhandled resource requests by default", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 
@@ -1060,7 +1019,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("cleans up the resource policy after a successful callback", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 		const rawPage = browserState.browsers[0]?.pages[0];
@@ -1095,7 +1054,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("cleans up the resource policy when the callback throws", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 		const rawPage = browserState.browsers[0]?.pages[0];
@@ -1126,7 +1085,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("blocks non-GET and non-HEAD requests before provider handlers run", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 		const rawPage = browserState.browsers[0]?.pages[0];
@@ -1163,7 +1122,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("passes only safe request metadata to provider handlers", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 		const rawPage = browserState.browsers[0]?.pages[0];
@@ -1202,12 +1161,10 @@ describe("createBrowserClient", () => {
 	});
 
 	it("requires the managed CDP pool when production mode is explicit", async () => {
-		const { ProviderError } = await import("../errors");
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { ProviderError } = await import("../errors.js");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 
-		expect(() => createBrowserClient({ requireCdpPool: true })).toThrow(
-			ProviderError,
-		);
+		expect(() => createBrowserClient({ requireCdpPool: true })).toThrow(ProviderError);
 		expect(() => createBrowserClient({ requireCdpPool: true })).toThrow(
 			"Managed CDP Pool is required for browser providers in production",
 		);
@@ -1215,7 +1172,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("uses local Playwright for isolated contexts outside production pool mode", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 
 		const title = await client.withIsolatedContext(async (page) => {
@@ -1227,14 +1184,12 @@ describe("createBrowserClient", () => {
 		expect(browserState.launchCalls).toHaveLength(1);
 		expect(browserState.browsers[0]?.contexts).toHaveLength(1);
 		expect(browserState.browsers[0]?.contexts[0]?.state.newPageCalls).toBe(1);
-		expect(
-			browserState.browsers[0]?.contexts[0]?.state.pages[0]?.state.closed,
-		).toBeTrue();
+		expect(browserState.browsers[0]?.contexts[0]?.state.pages[0]?.state.closed).toBeTrue();
 		expect(browserState.browsers[0]?.contexts[0]?.state.closeCalls).toBe(1);
 	});
 
 	it("closes the page it creates for standalone challenge solving", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 
 		const challenge = await client.solveChallenge({
@@ -1252,7 +1207,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("does not reuse a closed active page for later challenge solving", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 
@@ -1273,11 +1228,10 @@ describe("createBrowserClient", () => {
 	});
 
 	it("passes launch options through and can disable stealth", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient({
 			extraArgs: ["--disable-dev-shm-usage"],
-			executablePath:
-				"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 			headless: false,
 			proxy: "http://127.0.0.1:8080",
 			stealth: false,
@@ -1288,8 +1242,7 @@ describe("createBrowserClient", () => {
 		expect(browserState.launchCalls).toEqual([
 			{
 				args: ["--disable-dev-shm-usage"],
-				executablePath:
-					"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+				executablePath: "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
 				headless: false,
 				proxy: { server: "http://127.0.0.1:8080" },
 			},
@@ -1301,7 +1254,7 @@ describe("createBrowserClient", () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "http://pool.test";
 
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient({
 			allowedHosts: ["bank.example.com", "www.google.com"],
 		});
@@ -1310,9 +1263,7 @@ describe("createBrowserClient", () => {
 			click(selector: string): Promise<void>;
 			content(): Promise<string>;
 			evaluate<T>(fn: string | (() => T)): Promise<T>;
-			frames(): Promise<
-				Array<{ url(): Promise<string>; title(): Promise<string> }>
-			>;
+			frames(): Promise<Array<{ url(): Promise<string>; title(): Promise<string> }>>;
 			goto(url: string): Promise<void>;
 			locator(selector: string): { textContent(): Promise<string | null> };
 			screenshot(options?: { fullPage?: boolean }): Promise<Buffer>;
@@ -1363,9 +1314,7 @@ describe("createBrowserClient", () => {
 		expect(title).toBe("remote-title");
 		expect(pageTitle).toBe("remote-title");
 		expect(currentUrl).toBe("https://bank.example.com/login");
-		expect(frameUrl).toBe(
-			"https://www.google.com/recaptcha/api2/anchor?k=site-key",
-		);
+		expect(frameUrl).toBe("https://www.google.com/recaptcha/api2/anchor?k=site-key");
 		expect(locatorText).toBeNull();
 		expect(challenge).toEqual({
 			type: "recaptcha",
@@ -1376,15 +1325,13 @@ describe("createBrowserClient", () => {
 		expect(cdpState.frameContextIds).toContain(42);
 		expect(html).toContain('<input id="name" />');
 		expect(screenshot.toString()).toBe("remote-shot");
-		expect(cdpState.closedEndpoints).toContain(
-			"ws://page.test/devtools/page/pool-page-1",
-		);
+		expect(cdpState.closedEndpoints).toContain("ws://page.test/devtools/page/pool-page-1");
 		expect(cdpState.closedEndpoints).toContain("ws://pool.test/");
 	});
 
 	it("enforces the CDP pool for rawPage and never launches local Chromium", async () => {
-		const { ProviderError } = await import("../errors");
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { ProviderError } = await import("../errors.js");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const localClient = createBrowserClient();
 
 		await expect(localClient.rawPage()).rejects.toBeInstanceOf(ProviderError);
@@ -1408,7 +1355,7 @@ describe("createBrowserClient", () => {
 	it("enables and disables CDP Fetch around resource policy callbacks", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 
@@ -1431,7 +1378,7 @@ describe("createBrowserClient", () => {
 	it("fulfills a matching CDP Fetch request under a resource policy", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 
@@ -1484,7 +1431,7 @@ describe("createBrowserClient", () => {
 	it("blocks unmatched CDP Fetch requests by default", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 
@@ -1516,7 +1463,7 @@ describe("createBrowserClient", () => {
 	it("blocks non-GET CDP Fetch requests before provider handlers run", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 		let handlerCalls = 0;
@@ -1565,7 +1512,7 @@ describe("createBrowserClient", () => {
 	it("disables CDP Fetch when a resource policy callback throws", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 
@@ -1584,7 +1531,7 @@ describe("createBrowserClient", () => {
 	it("passes only safe CDP Fetch request metadata to provider handlers", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 		let receivedKeys: string[] = [];
@@ -1639,7 +1586,7 @@ describe("createBrowserClient", () => {
 	it("releases a pool lease exactly once when page.close() is repeated", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 		const page = await client.newPage();
 
@@ -1654,7 +1601,7 @@ describe("createBrowserClient", () => {
 	it("releases a pool lease exactly once when browser.close() owns the active page", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 
 		await client.newPage();
@@ -1668,7 +1615,7 @@ describe("createBrowserClient", () => {
 	it("releases every tracked pool lease when browser.close() owns multiple pages", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 
 		await client.newPage();
@@ -1678,18 +1625,14 @@ describe("createBrowserClient", () => {
 
 		expect(cdpState.acquireCalls).toBe(2);
 		expect(cdpState.poolReleaseCalls).toEqual(["pool-page-1", "pool-page-2"]);
-		expect(cdpState.closedEndpoints).toContain(
-			"ws://page.test/devtools/page/pool-page-1",
-		);
-		expect(cdpState.closedEndpoints).toContain(
-			"ws://page.test/devtools/page/pool-page-2",
-		);
+		expect(cdpState.closedEndpoints).toContain("ws://page.test/devtools/page/pool-page-1");
+		expect(cdpState.closedEndpoints).toContain("ws://page.test/devtools/page/pool-page-2");
 	});
 
 	it("uses isolated browser context pool acquire and disposes it after success", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 
 		const title = await client.withIsolatedContext(async (page) => {
@@ -1699,9 +1642,7 @@ describe("createBrowserClient", () => {
 		await client.close();
 
 		expect(title).toBe("remote-title");
-		expect(cdpState.acquireParams).toEqual([
-			{ isolationMode: "browserContext" },
-		]);
+		expect(cdpState.acquireParams).toEqual([{ isolationMode: "browserContext" }]);
 		expect(cdpState.poolReleaseCalls).toEqual(["pool-page-1"]);
 		expect(cdpState.poolReleaseRequests).toEqual([
 			{ browserContextId: "pool-context-1", pageId: "pool-page-1" },
@@ -1711,7 +1652,7 @@ describe("createBrowserClient", () => {
 	it("cleans up isolated browser context pool leases when the handler fails", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 
 		await expect(
@@ -1722,9 +1663,7 @@ describe("createBrowserClient", () => {
 		).rejects.toThrow("parse failed");
 		await client.close();
 
-		expect(cdpState.acquireParams).toEqual([
-			{ isolationMode: "browserContext" },
-		]);
+		expect(cdpState.acquireParams).toEqual([{ isolationMode: "browserContext" }]);
 		expect(cdpState.poolReleaseCalls).toEqual(["pool-page-1"]);
 		expect(cdpState.poolReleaseRequests).toEqual([
 			{ browserContextId: "pool-context-1", pageId: "pool-page-1" },
@@ -1735,28 +1674,24 @@ describe("createBrowserClient", () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		cdpState.failWebdriverPatch = true;
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 
-		await expect(
-			client.withIsolatedContext(async () => undefined),
-		).rejects.toThrow("Runtime init failed");
+		await expect(client.withIsolatedContext(async () => undefined)).rejects.toThrow(
+			"Runtime init failed",
+		);
 		await client.close();
 
-		expect(cdpState.acquireParams).toEqual([
-			{ isolationMode: "browserContext" },
-		]);
+		expect(cdpState.acquireParams).toEqual([{ isolationMode: "browserContext" }]);
 		expect(cdpState.poolReleaseCalls).toEqual(["pool-page-1"]);
 		expect(cdpState.poolReleaseRequests).toEqual([
 			{ browserContextId: "pool-context-1", pageId: "pool-page-1" },
 		]);
-		expect(cdpState.closedEndpoints).toContain(
-			"ws://page.test/devtools/page/pool-page-1",
-		);
+		expect(cdpState.closedEndpoints).toContain("ws://page.test/devtools/page/pool-page-1");
 	});
 
 	it("exposes the resolved engine on the browser client", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const defaultClient = createBrowserClient();
 		const nodriverClient = createBrowserClient({ engine: "nodriver" });
 
@@ -1765,8 +1700,8 @@ describe("createBrowserClient", () => {
 	});
 
 	it("throws a Python runtime error for the nodriver engine", async () => {
-		const { ProviderError } = await import("../errors");
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { ProviderError } = await import("../errors.js");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient({ engine: "nodriver" });
 		const pagePromise = client.newPage();
 
@@ -1779,8 +1714,8 @@ describe("createBrowserClient", () => {
 	});
 
 	it("throws a Python runtime error for the selenium-uc engine", async () => {
-		const { ProviderError } = await import("../errors");
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { ProviderError } = await import("../errors.js");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient({ engine: "selenium-uc" });
 		const pagePromise = client.newPage();
 
@@ -1793,7 +1728,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("closes the underlying local browser instance", async () => {
-		const { createBrowserClient } = await import("../runtime/browser");
+		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
 
 		await client.newPage();

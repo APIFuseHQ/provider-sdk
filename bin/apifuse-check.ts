@@ -6,9 +6,9 @@ import { pathToFileURL } from "node:url";
 
 import { z } from "zod";
 
-import type { ProviderDefinition } from "../src";
-import { lintProvider, type ProviderLintMode } from "../src/lint";
-import { safeParseSchemaSync } from "../src/schema";
+import type { ProviderDefinition } from "../src/index.js";
+import { lintProvider, type ProviderLintMode } from "../src/lint.js";
+import { safeParseSchemaSync } from "../src/schema.js";
 
 const HELP_TEXT = `Usage: apifuse check [path]
 Example: apifuse check providers/korea-air-quality
@@ -24,9 +24,7 @@ export type RunChecksOptions = {
 	lintMode?: ProviderLintMode;
 };
 
-type SafeParseResult =
-	| { success: true; data: unknown }
-	| { success: false; error: unknown };
+type SafeParseResult = { success: true; data: unknown } | { success: false; error: unknown };
 
 export async function main() {
 	const args = normalizeArgs(process.argv.slice(2));
@@ -142,17 +140,9 @@ function isScannableProviderSourceFile(relativePath: string): boolean {
 	);
 }
 
-function collectProviderSourceFiles(
-	providerRoot: string,
-): Record<string, string> {
+function collectProviderSourceFiles(providerRoot: string): Record<string, string> {
 	const sources: Record<string, string> = {};
-	const skipDirectories = new Set([
-		".git",
-		"node_modules",
-		"dist",
-		"build",
-		".next",
-	]);
+	const skipDirectories = new Set([".git", "node_modules", "dist", "build", ".next"]);
 	const visit = (directory: string) => {
 		for (const entry of readdirSync(directory, { withFileTypes: true })) {
 			const path = resolve(directory, entry.name);
@@ -162,10 +152,7 @@ function collectProviderSourceFiles(
 				}
 				continue;
 			}
-			if (
-				!entry.isFile() ||
-				!isScannableProviderSourceFile(path.slice(providerRoot.length + 1))
-			) {
+			if (!entry.isFile() || !isScannableProviderSourceFile(path.slice(providerRoot.length + 1))) {
 				continue;
 			}
 			sources[path.slice(providerRoot.length + 1)] = readFileSync(path, "utf8");
@@ -175,10 +162,7 @@ function collectProviderSourceFiles(
 	return sources;
 }
 
-function checkIndex(
-	indexPath: string,
-	provider: ProviderDefinition | undefined,
-): CheckResult {
+function checkIndex(indexPath: string, provider: ProviderDefinition | undefined): CheckResult {
 	if (!existsSync(indexPath)) {
 		return {
 			message: "index.ts exists and exports default defineProvider",
@@ -200,9 +184,7 @@ function checkIndex(
 	};
 }
 
-function checkOperations(
-	provider: ProviderDefinition | undefined,
-): CheckResult {
+function checkOperations(provider: ProviderDefinition | undefined): CheckResult {
 	if (!provider) {
 		return {
 			message: "All operations have handler, input, output",
@@ -277,20 +259,14 @@ function checkSchemas(provider: ProviderDefinition | undefined): CheckResult {
 			continue;
 		}
 
-		const requestResult = parseFixture(
-			operation.input,
-			operation.fixtures.request,
-		);
+		const requestResult = parseFixture(operation.input, operation.fixtures.request);
 		if (!requestResult.success) {
 			failures.push(
 				`${operationId}: request fixture invalid (${formatSchemaError(requestResult.error)})`,
 			);
 		}
 
-		const responseResult = parseFixture(
-			operation.output,
-			operation.fixtures.response,
-		);
+		const responseResult = parseFixture(operation.output, operation.fixtures.response);
 		if (!responseResult.success) {
 			failures.push(
 				`${operationId}: response fixture invalid (${formatSchemaError(responseResult.error)})`,
@@ -317,13 +293,8 @@ function checkAuthoringLint(
 		};
 	}
 
-	const diagnostics = lintProvider(
-		{ ...provider, providerSourceFiles },
-		{ mode: lintMode },
-	);
-	const errors = diagnostics.filter(
-		(diagnostic) => diagnostic.level === "error",
-	);
+	const diagnostics = lintProvider({ ...provider, providerSourceFiles }, { mode: lintMode });
+	const errors = diagnostics.filter((diagnostic) => diagnostic.level === "error");
 	const details = diagnostics.map((diagnostic) => {
 		const field = diagnostic.field ? `${diagnostic.field}: ` : "";
 		return `${diagnostic.level.toUpperCase()} ${diagnostic.rule} ${field}${diagnostic.message}`;
@@ -336,9 +307,7 @@ function checkAuthoringLint(
 	};
 }
 
-function checkProviderMetadata(
-	provider: ProviderDefinition | undefined,
-): CheckResult {
+function checkProviderMetadata(provider: ProviderDefinition | undefined): CheckResult {
 	if (!provider) {
 		return {
 			message: "Provider metadata is declared in defineProvider",
@@ -425,18 +394,12 @@ function checkPackageJson(packageJsonPath: string): CheckResult {
 	}
 }
 
-function assertProviderDefinition(
-	value: unknown,
-): ProviderDefinition | undefined {
+function assertProviderDefinition(value: unknown): ProviderDefinition | undefined {
 	return isProviderDefinition(value) ? value : undefined;
 }
 
 function isProviderDefinition(value: unknown): value is ProviderDefinition {
-	if (
-		!isRecord(value) ||
-		!isRecord(value.meta) ||
-		!isRecord(value.operations)
-	) {
+	if (!isRecord(value) || !isRecord(value.meta) || !isRecord(value.operations)) {
 		return false;
 	}
 
@@ -457,8 +420,7 @@ function hasSchemaParser(value: unknown): boolean {
 	return (
 		isRecord(value) &&
 		(typeof value.safeParse === "function" ||
-			(isRecord(value["~standard"]) &&
-				typeof value["~standard"].validate === "function"))
+			(isRecord(value["~standard"]) && typeof value["~standard"].validate === "function"))
 	);
 }
 
@@ -470,9 +432,7 @@ function formatSchemaError(error: unknown): string {
 	if (Array.isArray(error)) {
 		return error
 			.map((issue) =>
-				isRecord(issue) && typeof issue.message === "string"
-					? issue.message
-					: String(issue),
+				isRecord(issue) && typeof issue.message === "string" ? issue.message : String(issue),
 			)
 			.join(", ");
 	}

@@ -1,4 +1,4 @@
-import type { TraceSpan } from "../types";
+import type { TraceSpan } from "../types.js";
 
 export interface OTLPExportOptions {
 	endpoint: string;
@@ -32,10 +32,7 @@ function createTraceId(signature: string): string {
 	return traceId;
 }
 
-function normalizeHexId(
-	value: string | undefined,
-	length: number,
-): string | undefined {
+function normalizeHexId(value: string | undefined, length: number): string | undefined {
 	if (!value) {
 		return undefined;
 	}
@@ -44,9 +41,7 @@ function normalizeHexId(
 	return normalized.padStart(length, "0").slice(-length);
 }
 
-function toAttributeValue(
-	value: unknown,
-): Record<string, string | number | boolean> {
+function toAttributeValue(value: unknown): Record<string, string | number | boolean> {
 	if (typeof value === "string") {
 		return { stringValue: value };
 	}
@@ -92,20 +87,16 @@ export function spansToOTLP(
 		}>;
 	}>;
 } {
-	const traceId = createTraceId(
-		createBatchSignature(spans, resourceAttributes),
-	);
+	const traceId = createTraceId(createBatchSignature(spans, resourceAttributes));
 
 	return {
 		resourceSpans: [
 			{
 				resource: {
-					attributes: Object.entries(resourceAttributes ?? {}).map(
-						([key, value]) => ({
-							key,
-							value: { stringValue: value },
-						}),
-					),
+					attributes: Object.entries(resourceAttributes ?? {}).map(([key, value]) => ({
+						key,
+						value: { stringValue: value },
+					})),
 				},
 				scopeSpans: [
 					{
@@ -122,12 +113,10 @@ export function spansToOTLP(
 							startTimeUnixNano: String(span.startedAt * 1_000_000),
 							endTimeUnixNano: String(span.endedAt * 1_000_000),
 							status: { code: span.status === "ok" ? 1 : 2 },
-							attributes: Object.entries(span.attributes ?? {}).map(
-								([key, value]) => ({
-									key,
-									value: toAttributeValue(value),
-								}),
-							),
+							attributes: Object.entries(span.attributes ?? {}).map(([key, value]) => ({
+								key,
+								value: toAttributeValue(value),
+							})),
 						})),
 					},
 				],

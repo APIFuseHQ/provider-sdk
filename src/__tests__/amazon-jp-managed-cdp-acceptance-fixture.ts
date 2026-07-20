@@ -1,16 +1,11 @@
-import { ProviderError } from "../errors";
-import type { BrowserPage } from "../types";
+import { ProviderError } from "../errors.js";
+import type { BrowserPage } from "../types.js";
 
-type AcceptancePage = Pick<
-	BrowserPage,
-	"close" | "content" | "goto" | "title" | "url"
->;
+type AcceptancePage = Pick<BrowserPage, "close" | "content" | "goto" | "title" | "url">;
 
 type AcceptanceBrowser = {
 	readonly newPage: () => Promise<AcceptancePage>;
-	readonly withIsolatedContext: <T>(
-		handler: (page: AcceptancePage) => Promise<T>,
-	) => Promise<T>;
+	readonly withIsolatedContext: <T>(handler: (page: AcceptancePage) => Promise<T>) => Promise<T>;
 };
 
 export type AcceptanceContext = {
@@ -57,9 +52,8 @@ export async function amazonJpOrders(ctx, url) {
 function containsAkamaiInterstitial(snapshot: AmazonPageSnapshot): boolean {
 	const haystack = `${snapshot.title}\n${snapshot.html}`;
 	return (
-		/AkamaiGHost|Reference #|api-services-support@amazon|Robot Check/i.test(
-			haystack,
-		) || snapshot.url.includes("/errors/validateCaptcha")
+		/AkamaiGHost|Reference #|api-services-support@amazon|Robot Check/i.test(haystack) ||
+		snapshot.url.includes("/errors/validateCaptcha")
 	);
 }
 
@@ -88,38 +82,29 @@ function assertPublicAmazonPage(snapshot: AmazonPageSnapshot): void {
 	}
 
 	if (snapshot.resultCount === 0) {
-		throw new ProviderError(
-			"Amazon JP public smoke returned no result markers",
-			{
-				code: "AMAZON_JP_EMPTY_PUBLIC_RESULTS",
-				details: { title: snapshot.title, url: snapshot.url },
-				fix: "Treat empty browser pages as runtime failures until expected Amazon JP result markers are present.",
-			},
-		);
+		throw new ProviderError("Amazon JP public smoke returned no result markers", {
+			code: "AMAZON_JP_EMPTY_PUBLIC_RESULTS",
+			details: { title: snapshot.title, url: snapshot.url },
+			fix: "Treat empty browser pages as runtime failures until expected Amazon JP result markers are present.",
+		});
 	}
 }
 
 function assertAuthenticatedAmazonPage(snapshot: AmazonPageSnapshot): void {
 	if (isSignInRedirect(snapshot)) {
-		throw new ProviderError(
-			"Amazon JP authenticated smoke redirected to sign-in",
-			{
-				code: "AMAZON_JP_AUTH_SIGN_IN_REDIRECT",
-				details: { title: snapshot.title, url: snapshot.url },
-				fix: "Use ctx.browser.withIsolatedContext for authenticated cookies and fail closed when the session is rejected.",
-			},
-		);
+		throw new ProviderError("Amazon JP authenticated smoke redirected to sign-in", {
+			code: "AMAZON_JP_AUTH_SIGN_IN_REDIRECT",
+			details: { title: snapshot.title, url: snapshot.url },
+			fix: "Use ctx.browser.withIsolatedContext for authenticated cookies and fail closed when the session is rejected.",
+		});
 	}
 
 	if (snapshot.resultCount === 0) {
-		throw new ProviderError(
-			"Amazon JP authenticated smoke returned no account markers",
-			{
-				code: "AMAZON_JP_EMPTY_AUTHENTICATED_RESULTS",
-				details: { title: snapshot.title, url: snapshot.url },
-				fix: "Do not convert an empty authenticated browser page into a successful empty result.",
-			},
-		);
+		throw new ProviderError("Amazon JP authenticated smoke returned no account markers", {
+			code: "AMAZON_JP_EMPTY_AUTHENTICATED_RESULTS",
+			details: { title: snapshot.title, url: snapshot.url },
+			fix: "Do not convert an empty authenticated browser page into a successful empty result.",
+		});
 	}
 }
 
@@ -127,8 +112,7 @@ async function snapshotPage(page: AcceptancePage): Promise<AmazonPageSnapshot> {
 	const html = await page.content();
 	return {
 		html,
-		resultCount: (html.match(/data-asin=|js-order-card|order-card/g) ?? [])
-			.length,
+		resultCount: (html.match(/data-asin=|js-order-card|order-card/g) ?? []).length,
 		title: await page.title(),
 		url: await page.url(),
 	};
@@ -140,9 +124,7 @@ export async function runAmazonJpPublicSmoke(
 ): Promise<AmazonAcceptanceResult> {
 	const page = await ctx.browser.newPage();
 	try {
-		await page.goto(
-			`https://www.amazon.co.jp/s?k=${encodeURIComponent(query)}`,
-		);
+		await page.goto(`https://www.amazon.co.jp/s?k=${encodeURIComponent(query)}`);
 		const snapshot = await snapshotPage(page);
 		assertPublicAmazonPage(snapshot);
 		return { title: snapshot.title, url: snapshot.url };
@@ -199,9 +181,7 @@ export class FixtureBrowser implements AcceptanceBrowser {
 		return this.createPage();
 	}
 
-	async withIsolatedContext<T>(
-		handler: (page: AcceptancePage) => Promise<T>,
-	): Promise<T> {
+	async withIsolatedContext<T>(handler: (page: AcceptancePage) => Promise<T>): Promise<T> {
 		this.isolatedContextCalls += 1;
 		const page = this.createPage();
 		try {

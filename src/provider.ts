@@ -3,7 +3,7 @@ export {
 	credentialsAuthChallenge,
 	createAuthFlowHelpers,
 	defineCredentialsAuth,
-} from "./auth";
+} from "./auth.js";
 export type {
 	CredentialsAuthChallengeDefinition,
 	CredentialsAuthChallengeRequest,
@@ -16,8 +16,8 @@ export type {
 	CredentialsAuthLoginResult,
 	DefineCredentialsAuthOptions,
 	DefinedCredentialsAuth,
-} from "./auth";
-export { createFormCeremony } from "./ceremonies";
+} from "./auth.js";
+export { createFormCeremony } from "./ceremonies/index.js";
 export {
 	assertFreshProviderChoiceIssuedAt,
 	createProviderChoiceToken,
@@ -25,7 +25,7 @@ export {
 	type ProviderChoiceTokenErrorReason,
 	type ProviderChoiceTokenPayload,
 	parseProviderChoiceToken,
-} from "./choice-token";
+} from "./choice-token.js";
 export {
 	centered,
 	delayed,
@@ -34,7 +34,7 @@ export {
 	defineProvider,
 	defineSmsOtpMatcher,
 	every,
-} from "./define";
+} from "./define.js";
 export {
 	AuthError,
 	isProviderError,
@@ -44,18 +44,18 @@ export {
 	SessionExpiredError,
 	TransportError,
 	ValidationError,
-} from "./errors";
+} from "./errors.js";
 export {
 	getProviderLocalePath,
 	providerLocaleKey,
 	qualifyProviderLocaleKey,
-} from "./i18n";
+} from "./i18n/index.js";
 export {
 	type CreateProviderChoiceContextOptions,
 	createProviderChoiceContext,
 	createTestProviderChoiceContext,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-} from "./runtime/choice";
+} from "./runtime/choice.js";
 export {
 	APIFUSE_DESCRIPTION_KEY_META_KEY,
 	APIFUSE_REDACTION_MARKER,
@@ -72,7 +72,7 @@ export {
 	type SensitivePath,
 	sensitive,
 	z,
-} from "./schema";
+} from "./schema.js";
 export type {
 	AuthAbortData,
 	AuthAbortRetry,
@@ -134,11 +134,11 @@ export type {
 	StateNamespaceOptions,
 	StateValue,
 	StateWriteOptions,
-} from "./types";
+} from "./types.js";
 export {
 	HttpRetryAfterPolicy,
 	HttpRetryDelayStrategy,
 	HttpRetryJitter,
 	HttpRetryPreset,
 	HttpRetryUnsafeMethodPolicy,
-} from "./types";
+} from "./types.js";

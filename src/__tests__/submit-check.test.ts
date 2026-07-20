@@ -16,7 +16,7 @@ import {
 	isAutoPromotionEligible,
 	renderMarkdown,
 	type SubmitCheckReport,
-} from "../../bin/apifuse-submit-check";
+} from "../../bin/apifuse-submit-check.js";
 
 const tempDirs: string[] = [];
 const repoRoot = dirname(dirname(import.meta.dir));
@@ -1029,10 +1029,7 @@ ${assertionLines(21)}
 		it(`blocks ${caseName} as recorded XML evidence`, async () => {
 			const dir = makeProviderDir("submit-invalid-xml-raw-", validProviderSource());
 			writeValidLocaleCatalogs(dir);
-			writeFileSync(
-				join(dir, "__fixtures__", "raw.json"),
-				JSON.stringify({ lookup: rawXml }),
-			);
+			writeFileSync(join(dir, "__fixtures__", "raw.json"), JSON.stringify({ lookup: rawXml }));
 
 			const report = await buildSubmitCheckReport(dir);
 			const check = report.checks.find((item) => item.id === "fixture-provenance");
@@ -1048,15 +1045,10 @@ ${assertionLines(21)}
 		const rawXml = `<response><body><items><item><recordId>EV-1</recordId><description>${"x".repeat(
 			4 * 1024 * 1024,
 		)}</description></item></items></body></response>`;
-		writeFileSync(
-			join(dir, "__fixtures__", "raw.json"),
-			JSON.stringify({ lookup: rawXml }),
-		);
+		writeFileSync(join(dir, "__fixtures__", "raw.json"), JSON.stringify({ lookup: rawXml }));
 
 		const report = await buildSubmitCheckReport(dir);
-		expect(report.checks.find((item) => item.id === "fixture-provenance")?.status).toBe(
-			"fail",
-		);
+		expect(report.checks.find((item) => item.id === "fixture-provenance")?.status).toBe("fail");
 	});
 
 	it("blocks recorded XML above the depth limit", async () => {
@@ -1067,15 +1059,10 @@ ${assertionLines(21)}
 		)}<item><recordId>EV-1</recordId><description>available for charging today</description></item>${"</layer>".repeat(
 			65,
 		)}</body></response>`;
-		writeFileSync(
-			join(dir, "__fixtures__", "raw.json"),
-			JSON.stringify({ lookup: rawXml }),
-		);
+		writeFileSync(join(dir, "__fixtures__", "raw.json"), JSON.stringify({ lookup: rawXml }));
 
 		const report = await buildSubmitCheckReport(dir);
-		expect(report.checks.find((item) => item.id === "fixture-provenance")?.status).toBe(
-			"fail",
-		);
+		expect(report.checks.find((item) => item.id === "fixture-provenance")?.status).toBe("fail");
 	});
 
 	it("blocks recorded XML above the element-width limit", async () => {
@@ -1084,15 +1071,10 @@ ${assertionLines(21)}
 		const rawXml = `<response><body><items>${"<marker/>".repeat(
 			50_001,
 		)}<item><recordId>EV-1</recordId><description>available for charging today</description></item></items></body></response>`;
-		writeFileSync(
-			join(dir, "__fixtures__", "raw.json"),
-			JSON.stringify({ lookup: rawXml }),
-		);
+		writeFileSync(join(dir, "__fixtures__", "raw.json"), JSON.stringify({ lookup: rawXml }));
 
 		const report = await buildSubmitCheckReport(dir);
-		expect(report.checks.find((item) => item.id === "fixture-provenance")?.status).toBe(
-			"fail",
-		);
+		expect(report.checks.find((item) => item.id === "fixture-provenance")?.status).toBe("fail");
 	});
 
 	it("blocks flat primitive raw fixture provenance", async () => {
@@ -1119,7 +1101,7 @@ ${assertionLines(21)}
 				'handler: async () => ({ ok: true, MKioskTy: "K", duty_name: "open" }),',
 			)
 			.replace(
-				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
 				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K", duty_name: "open" } },',
 			);
 		const dir = makeProviderDir("submit-vendor-key-leak-", source);
@@ -1145,7 +1127,7 @@ ${assertionLines(21)}
 				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
 			)
 			.replace(
-				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
 				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
 			);
 		const dir = makeProviderDir("submit-vendor-key-allow-", source);
@@ -1211,7 +1193,7 @@ const upstreamRow = z.object({ MKioskTy: z.string() });
 				'handler: async () => ({ ok: true, addressLine1: "a", addressLine2: "b" }),',
 			)
 			.replace(
-				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
 				'fixtures: { request: { q: "btc" }, response: { ok: true, addressLine1: "a", addressLine2: "b" } },',
 			);
 		const dir = makeProviderDir("submit-two-digit-key-family-", source);
@@ -1236,7 +1218,7 @@ const upstreamRow = z.object({ MKioskTy: z.string() });
 				'handler: async () => ({ ok: true, hvec1: "a", hvec2: "b", hvec3: "c" }),',
 			)
 			.replace(
-				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
 				'fixtures: { request: { q: "btc" }, response: { ok: true, hvec1: "a", hvec2: "b", hvec3: "c" } },',
 			);
 		const dir = makeProviderDir("submit-digit-key-family-", source);
@@ -1310,7 +1292,7 @@ const upstreamRow = z.object({ MKioskTy: z.string() });
 				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
 			)
 			.replace(
-				"fixtures: { request: { q: \"btc\" }, response: { ok: true } },",
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
 				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
 			);
 		const dir = makeProviderDir("submit-computed-vendor-key-", source);
@@ -1426,7 +1408,7 @@ const upstreamOutput = z.object({ MKioskTy: z.string() });
 	it("blocks non-interpolated template timestamp fixtures", async () => {
 		const source = validProviderSource().replace(
 			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
-			"fixtures: { request: { q: \"btc\" }, response: { ok: true, openTime: `1030` } },",
+			'fixtures: { request: { q: "btc" }, response: { ok: true, openTime: `1030` } },',
 		);
 		const dir = makeProviderDir("submit-template-time-", source);
 		writeValidLocaleCatalogs(dir);
@@ -1575,12 +1557,27 @@ const response = { updatedAt: "20260707222855" };
 		["statement-position regex after while()", "(ctx) => { while (false) /ctx/.test('x'); }"],
 		["throw only as an object property key", "() => ({ throw: undefined })"],
 		["throw property key among others", "() => ({ throw: 1, status: 2 })"],
-		["throw only inside an uninvoked nested function", "() => { const later = () => { throw new Error('x'); }; }"],
-		["destructured alias whose binding is unused", "({ status: ignored }) => { const status = 200; }"],
-		["destructured alias, body refs the property key", "({ status: ignored }) => { return status; }"],
+		[
+			"throw only inside an uninvoked nested function",
+			"() => { const later = () => { throw new Error('x'); }; }",
+		],
+		[
+			"destructured alias whose binding is unused",
+			"({ status: ignored }) => { const status = 200; }",
+		],
+		[
+			"destructured alias, body refs the property key",
+			"({ status: ignored }) => { return status; }",
+		],
 		["nested arrow references only its own param", "function (ctx) { [1].forEach((x) => x + 1); }"],
-		["param read only inside an uninvoked arrow closure", "(ctx) => { const later = () => ctx.status; }"],
-		["param read only inside an uninvoked function declaration", "(ctx) => { function later() { return ctx.status; } }"],
+		[
+			"param read only inside an uninvoked arrow closure",
+			"(ctx) => { const later = () => ctx.status; }",
+		],
+		[
+			"param read only inside an uninvoked function declaration",
+			"(ctx) => { function later() { return ctx.status; } }",
+		],
 	] as const) {
 		it(`blocks vacuous health assertions with ${label}`, async () => {
 			const dir = makeProviderDir(
@@ -2035,9 +2032,7 @@ const response = { updatedAt: "20260707222855" };
 		const vacuousHealthReport = await buildSubmitCheckReport(vacuousHealthDir);
 		expect(
 			vacuousHealthReport.checks.find((check) => check.id === "health-coverage")?.remediation,
-		).toContain(
-			"healthCheck.assertions for lookup is empty",
-		);
+		).toContain("healthCheck.assertions for lookup is empty");
 	});
 
 	it("warns on placeholder unsupported health rationale without blocking", async () => {
@@ -2116,29 +2111,21 @@ const response = { updatedAt: "20260707222855" };
 	});
 
 	it("extracts long string literal candidates without dropping supported quote forms", () => {
-		const highEntropy =
-			"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+		const highEntropy = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 		const escaped = String.raw`abc\"defghiJKLMNOP1234567890`;
 		const backtick = "mP4sT7yB3cD6fG1hL5zX0aS";
 		const first = "A1b2C3d4E5f6G7h8I9j0K";
 		const second = "z9Y8x7W6v5U4t3S2r1Q0p";
 
 		expect(highEntropy.length).toBe(64);
-		expect(extractStringLiteralCandidates(`const key = "${highEntropy}";`)).toEqual([
-			highEntropy,
+		expect(extractStringLiteralCandidates(`const key = "${highEntropy}";`)).toEqual([highEntropy]);
+		expect(extractStringLiteralCandidates(`const escaped = "${escaped}";`)).toEqual([escaped]);
+		expect(extractStringLiteralCandidates(`const template = \`${backtick}\`;`)).toEqual([backtick]);
+		expect(extractStringLiteralCandidates(`const pair = '${first}' + "${second}";`)).toEqual([
+			first,
+			second,
 		]);
-		expect(extractStringLiteralCandidates(`const escaped = "${escaped}";`)).toEqual([
-			escaped,
-		]);
-		expect(
-			extractStringLiteralCandidates(`const template = \`${backtick}\`;`),
-		).toEqual([backtick]);
-		expect(
-			extractStringLiteralCandidates(`const pair = '${first}' + "${second}";`),
-		).toEqual([first, second]);
-		expect(extractStringLiteralCandidates('const short = "1234567890123456789";')).toEqual(
-			[],
-		);
+		expect(extractStringLiteralCandidates('const short = "1234567890123456789";')).toEqual([]);
 	});
 
 	it("ignores high-entropy strings in fixtures", async () => {

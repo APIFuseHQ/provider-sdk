@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { lintProvider } from "../lint";
+import { lintProvider } from "../lint.js";
 
 const OPERATION_DESCRIPTION =
 	"Use this operation when callers need normalized commerce search results and when the provider must keep upstream parameter and response names behind the APIFuse mapping boundary.";
@@ -50,9 +50,7 @@ describe("public provider schema field lint", () => {
 				rule: "public-schema-upstream-field",
 				level: "error",
 				field: "operations.search.input.display",
-				message: expect.stringContaining(
-					'Provider "example-commerce" operation "search"',
-				),
+				message: expect.stringContaining('Provider "example-commerce" operation "search"'),
 			}),
 		);
 		expect(diagnostics).toContainEqual(
@@ -87,9 +85,7 @@ describe("public provider schema field lint", () => {
 			operations: {
 				search: {
 					description: OPERATION_DESCRIPTION,
-					input: z
-						.object({ query: z.string().describe("Search query") })
-						.describe("Search input"),
+					input: z.object({ query: z.string().describe("Search query") }).describe("Search input"),
 					output: z
 						.object({
 							item: z
@@ -147,26 +143,12 @@ describe("public provider schema field lint", () => {
 										title: z.string().describe("Product title"),
 										url: z.string().describe("Product URL"),
 										image_url: z.string().nullable().describe("Image URL"),
-										lowest_price: z
-											.number()
-											.nullable()
-											.describe("Lowest price"),
-										highest_price: z
-											.number()
-											.nullable()
-											.describe("Highest price"),
+										lowest_price: z.number().nullable().describe("Lowest price"),
+										highest_price: z.number().nullable().describe("Highest price"),
 										mall_name: z.string().nullable().describe("Mall name"),
-										product_id: z
-											.string()
-											.nullable()
-											.describe("Naver product ID"),
-										product_type_code: z
-											.string()
-											.nullable()
-											.describe("Naver product type code"),
-										category_path: z
-											.array(z.string())
-											.describe("Category path"),
+										product_id: z.string().nullable().describe("Naver product ID"),
+										product_type_code: z.string().nullable().describe("Naver product type code"),
+										category_path: z.array(z.string()).describe("Category path"),
 									}),
 								)
 								.describe("Normalized item rows"),
@@ -213,9 +195,7 @@ describe("public provider schema field lint", () => {
 		});
 
 		expect(
-			diagnostics.filter(
-				(diagnostic) => diagnostic.rule === "public-schema-upstream-field",
-			),
+			diagnostics.filter((diagnostic) => diagnostic.rule === "public-schema-upstream-field"),
 		).toEqual([]);
 	});
 });

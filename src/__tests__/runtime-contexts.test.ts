@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
 
-import { ContextAccessError, CredentialModeError } from "../errors";
-import { createFlowContext, createScratchpad } from "../runtime/auth-flow";
-import { createCredentialContext } from "../runtime/credential";
-import { createEnvContext } from "../runtime/env";
-import type { HttpClient } from "../types";
+import { ContextAccessError, CredentialModeError } from "../errors.js";
+import { createFlowContext, createScratchpad } from "../runtime/auth-flow.js";
+import { createCredentialContext } from "../runtime/credential.js";
+import { createEnvContext } from "../runtime/env.js";
+import type { HttpClient } from "../types.js";
 
 describe("runtime contexts", () => {
 	it("createEnvContext respects the allowlist", () => {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import packageJson from "../package.json";
-import { COMMAND_MANIFEST, COMMAND_ORDER } from "../src/cli/commands";
+import { COMMAND_MANIFEST, COMMAND_ORDER } from "../src/cli/commands.js";
 
 const command = process.argv[2];
 

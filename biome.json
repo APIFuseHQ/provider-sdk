@@ -26,6 +26,16 @@
 			},
 			"suspicious": {
 				"noExplicitAny": "off"
+			},
+			"correctness": {
+				"useImportExtensions": {
+					"level": "error",
+					"options": {
+						"extensionMappings": {
+							"ts": "js"
+						}
+					}
+				}
 			}
 		}
 	},

@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 
-import { invalidateSubkeyCache } from "../runtime/key-derivation";
-import { deriveContextNamespace } from "../runtime/namespace";
+import { invalidateSubkeyCache } from "../runtime/key-derivation.js";
+import { deriveContextNamespace } from "../runtime/namespace.js";
 
 const MASTER = Buffer.alloc(32, 7);
 

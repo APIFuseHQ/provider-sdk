@@ -1,11 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
-import {
-	generateInsights,
-	type Insight,
-	type InsightSeverity,
-} from "../runtime/insights";
-import type { Span } from "../runtime/trace";
+import { generateInsights, type Insight, type InsightSeverity } from "../runtime/insights.js";
+import type { Span } from "../runtime/trace.js";
 
 function makeSpan(
 	name: string,
@@ -35,11 +31,7 @@ function findInsight(insights: Insight[], id: string): Insight {
 	return insight;
 }
 
-function expectSeverity(
-	insights: Insight[],
-	id: string,
-	severity: InsightSeverity,
-): Insight {
+function expectSeverity(insights: Insight[], id: string, severity: InsightSeverity): Insight {
 	const insight = findInsight(insights, id);
 	expect(insight.severity).toBe(severity);
 	return insight;
@@ -59,11 +51,7 @@ describe("generateInsights", () => {
 			makeSpan("stealth.fetch", {}, { connection_reused: true }),
 		];
 
-		const insight = expectSeverity(
-			generateInsights(spans),
-			"tls_reuse_failure",
-			"warning",
-		);
+		const insight = expectSeverity(generateInsights(spans), "tls_reuse_failure", "warning");
 
 		expect(insight.message).toContain("Stealth connection reuse");
 		expect(insight.fix).toContain("ctx.stealth.createSession");
@@ -78,11 +66,7 @@ describe("generateInsights", () => {
 			makeSpan("stealth.fetch", {}, { connection_reused: false }),
 		];
 
-		const insight = expectSeverity(
-			generateInsights(spans),
-			"tls_reuse_failure",
-			"info",
-		);
+		const insight = expectSeverity(generateInsights(spans), "tls_reuse_failure", "info");
 
 		expect(insight.message.startsWith("✓")).toBe(true);
 		expect(insight.message).toContain("80%");
@@ -96,11 +80,7 @@ describe("generateInsights", () => {
 			makeSpan("transformResponse", { duration_ms: 25 }),
 		];
 
-		const insight = expectSeverity(
-			generateInsights(spans),
-			"slow_transform",
-			"warning",
-		);
+		const insight = expectSeverity(generateInsights(spans), "slow_transform", "warning");
 
 		expect(insight.message).toContain("p95");
 		expect(insight.fix).toContain("transformResponse");
@@ -112,11 +92,7 @@ describe("generateInsights", () => {
 			makeSpan("http.get", {}, { response_size: 5_000 }),
 		];
 
-		const insight = expectSeverity(
-			generateInsights(spans),
-			"large_response",
-			"warning",
-		);
+		const insight = expectSeverity(generateInsights(spans), "large_response", "warning");
 
 		expect(insight.message).toContain("Response size");
 		expect(insight.fix).toContain("limit");
@@ -144,11 +120,7 @@ describe("generateInsights", () => {
 			),
 		];
 
-		const insight = expectSeverity(
-			generateInsights(spans),
-			"dns_repeated",
-			"warning",
-		);
+		const insight = expectSeverity(generateInsights(spans), "dns_repeated", "warning");
 
 		expect(insight.message).toContain("api.example.com");
 		expect(insight.fix).toContain("DNS");
@@ -162,11 +134,7 @@ describe("generateInsights", () => {
 			makeSpan("stealth.fetch", { duration_ms: 260 }, { proxy: true }),
 		];
 
-		const insight = expectSeverity(
-			generateInsights(spans),
-			"proxy_overhead",
-			"warning",
-		);
+		const insight = expectSeverity(generateInsights(spans), "proxy_overhead", "warning");
 
 		expect(insight.message).toContain("with proxy");
 		expect(insight.fix).toContain("proxy");
@@ -178,11 +146,7 @@ describe("generateInsights", () => {
 			makeSpan("page.click", { duration_ms: 20 }),
 		];
 
-		const insight = expectSeverity(
-			generateInsights(spans),
-			"browser_idle",
-			"warning",
-		);
+		const insight = expectSeverity(generateInsights(spans), "browser_idle", "warning");
 
 		expect(insight.message).toContain("6200ms");
 		expect(insight.fix).toContain("waitForSelector");
@@ -198,11 +162,7 @@ describe("generateInsights", () => {
 			makeSpan("credential.refresh"),
 		];
 
-		const insight = expectSeverity(
-			generateInsights(spans),
-			"session_expiry_frequent",
-			"warning",
-		);
+		const insight = expectSeverity(generateInsights(spans), "session_expiry_frequent", "warning");
 
 		expect(insight.message).toContain("20%");
 		expect(insight.fix).toContain("ttl");

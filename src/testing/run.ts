@@ -1,28 +1,23 @@
 import { describe, expect, it } from "bun:test";
 
-import { createProviderCache } from "../runtime/cache";
-import { createTestProviderChoiceContext } from "../runtime/choice";
-import { createMemoryProviderRuntimeState } from "../runtime/state";
-import { createUnsupportedSttClient } from "../runtime/stt";
-import { safeParseSchemaSync } from "../schema";
+import { createProviderCache } from "../runtime/cache.js";
+import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import { createMemoryProviderRuntimeState } from "../runtime/state.js";
+import { createUnsupportedSttClient } from "../runtime/stt.js";
+import { safeParseSchemaSync } from "../schema.js";
 import type {
 	AuthMode,
 	CredentialContext,
 	HttpResponse,
 	ProviderContext,
 	ProviderDefinition,
-} from "../types";
+} from "../types.js";
 
 // Mirrors CONNECTOR_ID_REGEX in ../define.ts, which defineProvider() enforces.
 // A single lowercase segment (no hyphen) is a valid id, so the trailing group
 // is optional (`*`), matching providers like `kakaomap`, `kstartup`, `triple`.
 const CONNECTOR_ID_REGEX = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/;
-const VALID_AUTH_MODES = [
-	"none",
-	"platform-managed",
-	"credentials",
-	"oauth2",
-] as const;
+const VALID_AUTH_MODES = ["none", "platform-managed", "credentials", "oauth2"] as const;
 const UPDATE_SNAPSHOT_ARGS = new Set(["-u", "--update-snapshots"]);
 
 export interface StandardTestsManifest {
@@ -118,9 +113,7 @@ function inferFixtureDir(providerId: string): string {
 		.find((file) => file !== undefined);
 
 	if (testFile) {
-		const pathname = testFile.startsWith("file://")
-			? new URL(testFile).pathname
-			: testFile;
+		const pathname = testFile.startsWith("file://") ? new URL(testFile).pathname : testFile;
 		return `${pathname.replace(/\/[^/]+$/, "")}/../__fixtures__`;
 	}
 
@@ -138,10 +131,7 @@ function jsonResponse(data: unknown): HttpResponse {
 		json: async <_T = unknown>() => JSON.parse(JSON.stringify(data)),
 		text: async () => body,
 		arrayBuffer: async () =>
-			bodyBytes.buffer.slice(
-				bodyBytes.byteOffset,
-				bodyBytes.byteOffset + bodyBytes.byteLength,
-			),
+			bodyBytes.buffer.slice(bodyBytes.byteOffset, bodyBytes.byteOffset + bodyBytes.byteLength),
 		bytes: async () => bodyBytes.slice(0),
 	};
 }
@@ -184,16 +174,14 @@ function createSnapshotContext(rawFixture: unknown): ProviderContext {
 			engine: "playwright-stealth",
 			newPage: async () => unsupported("ctx.browser.newPage"),
 			rawPage: async () => unsupported("ctx.browser.rawPage"),
-			withIsolatedContext: async () =>
-				unsupported("ctx.browser.withIsolatedContext"),
+			withIsolatedContext: async () => unsupported("ctx.browser.withIsolatedContext"),
 			solveChallenge: async () => unsupported("ctx.browser.solveChallenge"),
 		},
 		trace: {
 			span: async (_name, fn) => fn(),
 		},
 		auth: {
-			requestField: async (name) =>
-				unsupported(`ctx.auth.requestField(${name})`),
+			requestField: async (name) => unsupported(`ctx.auth.requestField(${name})`),
 		},
 		stt: createUnsupportedSttClient(
 			"Standard test snapshot context does not support ctx.stt.transcribe",
@@ -292,11 +280,7 @@ function parseSchemaFixture(
 		operationName,
 		fieldName,
 		fixture,
-		safeParseSchemaSync(
-			schema,
-			fixture,
-			`operations.${operationName}.fixtures.${fieldName}`,
-		),
+		safeParseSchemaSync(schema, fixture, `operations.${operationName}.fixtures.${fieldName}`),
 	);
 }
 
@@ -322,40 +306,20 @@ export function runStandardTests(
 
 		for (const [operationName, op] of operations) {
 			if (op.fixtures?.request !== undefined) {
-				parseSchemaFixture(
-					operationName,
-					"request",
-					op.input,
-					op.fixtures.request,
-				);
+				parseSchemaFixture(operationName, "request", op.input, op.fixtures.request);
 			}
 
 			if (op.fixtures?.response !== undefined) {
-				parseSchemaFixture(
-					operationName,
-					"response",
-					op.output,
-					op.fixtures.response,
-				);
+				parseSchemaFixture(operationName, "response", op.output, op.fixtures.response);
 			}
 
 			if (isFixtureEnvelope(rawFixture)) {
 				if (rawFixture.request !== undefined) {
-					parseSchemaFixture(
-						operationName,
-						"request",
-						op.input,
-						rawFixture.request,
-					);
+					parseSchemaFixture(operationName, "request", op.input, rawFixture.request);
 				}
 
 				if (rawFixture.response !== undefined) {
-					parseSchemaFixture(
-						operationName,
-						"response",
-						op.output,
-						rawFixture.response,
-					);
+					parseSchemaFixture(operationName, "response", op.output, rawFixture.response);
 				}
 			}
 		}
@@ -411,21 +375,11 @@ export function runStandardTests(
 		it("operation schemas can parse fixture data", () => {
 			for (const [operationName, op] of operations) {
 				if (op.fixtures?.request !== undefined && op.input) {
-					parseSchemaFixture(
-						operationName,
-						"request",
-						op.input,
-						op.fixtures.request,
-					);
+					parseSchemaFixture(operationName, "request", op.input, op.fixtures.request);
 				}
 
 				if (op.fixtures?.response !== undefined && op.output) {
-					parseSchemaFixture(
-						operationName,
-						"response",
-						op.output,
-						op.fixtures.response,
-					);
+					parseSchemaFixture(operationName, "response", op.output, op.fixtures.response);
 				}
 
 				expect(operationName).toBeTruthy();
@@ -471,9 +425,7 @@ export function runStandardTests(
 					await Bun.write(snapshotPath, serialized);
 				}
 
-				const expected: unknown = JSON.parse(
-					await Bun.file(snapshotPath).text(),
-				);
+				const expected: unknown = JSON.parse(await Bun.file(snapshotPath).text());
 				expect(actual).toEqual(expected);
 			});
 		}

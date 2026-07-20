@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { loadKeyRing } from "../runtime/keyring";
+import { loadKeyRing } from "../runtime/keyring.js";
 
 const KEY_V1 = Buffer.alloc(32, 1).toString("base64");
 const KEY_V2 = Buffer.alloc(32, 2).toString("base64");
@@ -108,9 +108,7 @@ describe("loadKeyRing", () => {
 				APIFUSE__KEYRING__MASTER_KEY_WRITER_VERSION: "2",
 			}),
 		});
-		await expect(ring.purgeVersion(1, async () => true)).rejects.toThrow(
-			/cannot purge/,
-		);
+		await expect(ring.purgeVersion(1, async () => true)).rejects.toThrow(/cannot purge/);
 		expect(() => ring.accept(1)).not.toThrow();
 	});
 

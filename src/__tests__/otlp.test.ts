@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { exportSpansOTLP, spansToOTLP } from "../runtime/otlp";
-import type { TraceSpan } from "../types";
+import { exportSpansOTLP, spansToOTLP } from "../runtime/otlp.js";
+import type { TraceSpan } from "../types.js";
 
 function makeSpan(overrides: Partial<TraceSpan> = {}): TraceSpan {
 	return {
@@ -95,13 +95,11 @@ describe("otlp export", () => {
 		let requestUrl: string | undefined;
 		let requestInit: RequestInit | undefined;
 
-		global.fetch = mock(
-			async (url: string | URL | Request, init?: RequestInit) => {
-				requestUrl = typeof url === "string" ? url : url.toString();
-				requestInit = init;
-				return new Response(null, { status: 200 });
-			},
-		) as unknown as typeof fetch;
+		global.fetch = mock(async (url: string | URL | Request, init?: RequestInit) => {
+			requestUrl = typeof url === "string" ? url : url.toString();
+			requestInit = init;
+			return new Response(null, { status: 200 });
+		}) as unknown as typeof fetch;
 
 		await exportSpansOTLP([makeSpan()], {
 			endpoint: "http://localhost:4318/v1/traces",
@@ -115,9 +113,7 @@ describe("otlp export", () => {
 			"Content-Type": "application/json",
 			Authorization: "Bearer test",
 		});
-		expect(JSON.parse(String(requestInit?.body))).toEqual(
-			spansToOTLP([makeSpan()]),
-		);
+		expect(JSON.parse(String(requestInit?.body))).toEqual(spansToOTLP([makeSpan()]));
 	});
 
 	it("exportSpansOTLP() swallows fetch errors and warns", async () => {
@@ -133,9 +129,6 @@ describe("otlp export", () => {
 			}),
 		).resolves.toBeUndefined();
 
-		expect(warn).toHaveBeenCalledWith(
-			"[apifuse] OTLP export failed:",
-			"network down",
-		);
+		expect(warn).toHaveBeenCalledWith("[apifuse] OTLP export failed:", "network down");
 	});
 });

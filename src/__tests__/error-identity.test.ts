@@ -2,12 +2,13 @@ import { describe, expect, it } from "bun:test";
 
 // Namespace import so a missing guard surfaces as a focused per-test failure
 // rather than aborting the whole module during the RED phase.
-import * as SDK from "../errors";
+import * as SDK from "../errors.js";
 
 // A query-qualified specifier forces Bun to evaluate errors.ts a second time,
 // producing a genuinely separate module identity (distinct constructors) that
 // models the packaged src/* vs dist/* entrypoint split proven in
 // /tmp/provider-sdk-surgical-error-identity-research.md.
+// biome-ignore lint/correctness/useImportExtensions: specifier already carries .ts; the ?query (invisible to the rule) mints a second module identity under bun test
 const duplicateSdk = import("../errors.ts?duplicate-sdk-instance") as Promise<
 	typeof import("../errors")
 >;

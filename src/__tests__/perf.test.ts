@@ -1,12 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { join } from "node:path";
 
-import {
-	computePercentile,
-	computeStats,
-	groupSpansByName,
-} from "../runtime/perf";
-import type { Span } from "../runtime/trace";
+import { computePercentile, computeStats, groupSpansByName } from "../runtime/perf.js";
+import type { Span } from "../runtime/trace.js";
 
 function makeSpan(name: string, duration_ms: number): Span {
 	return {
@@ -63,11 +59,7 @@ describe("groupSpansByName", () => {
 describe("CLI help", () => {
 	it("prints record subcommand help without a stack trace", async () => {
 		const proc = Bun.spawn({
-			cmd: [
-				"bun",
-				join(import.meta.dir, "../../bin/apifuse-record.ts"),
-				"--help",
-			],
+			cmd: ["bun", join(import.meta.dir, "../../bin/apifuse-record.ts"), "--help"],
 			stdout: "pipe",
 			stderr: "pipe",
 		});
@@ -84,11 +76,7 @@ describe("CLI help", () => {
 
 	it("prints perf subcommand help without a stack trace", async () => {
 		const proc = Bun.spawn({
-			cmd: [
-				"bun",
-				join(import.meta.dir, "../../bin/apifuse-perf.ts"),
-				"--help",
-			],
+			cmd: ["bun", join(import.meta.dir, "../../bin/apifuse-perf.ts"), "--help"],
 			stdout: "pipe",
 			stderr: "pipe",
 		});

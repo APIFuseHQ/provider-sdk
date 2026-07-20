@@ -1,5 +1,5 @@
-import { CredentialModeError } from "../errors";
-import type { AuthMode, CredentialContext } from "../types";
+import { CredentialModeError } from "../errors.js";
+import type { AuthMode, CredentialContext } from "../types.js";
 
 export interface CreateCredentialContextOptions {
 	allowedKeys?: string[];

@@ -1,4 +1,4 @@
-import Redis from "ioredis";
+import { Redis } from "ioredis";
 
 export type ProviderRedisClient = Redis;
 
@@ -43,9 +43,7 @@ export async function withRedisTimeout<T>(
 				}
 			}, options.timeoutMs);
 		});
-		const operationResult = options.onError
-			? operation().catch(options.onError)
-			: operation();
+		const operationResult = options.onError ? operation().catch(options.onError) : operation();
 		return await Promise.race([operationResult, timeout]);
 	} finally {
 		if (timeoutId) clearTimeout(timeoutId);
@@ -56,10 +54,7 @@ export function redisStatus(redis: ProviderRedisClient): string {
 	return redis.status;
 }
 
-async function waitForRedisReady(
-	redis: ProviderRedisClient,
-	timeoutMs: number,
-): Promise<boolean> {
+async function waitForRedisReady(redis: ProviderRedisClient, timeoutMs: number): Promise<boolean> {
 	let timeoutId: ReturnType<typeof setTimeout> | undefined;
 	let settled = false;
 
@@ -80,10 +75,7 @@ async function waitForRedisReady(
 		const onReady = () => finish(true);
 		const onUnavailable = () => finish(false);
 
-		timeoutId = setTimeout(
-			() => finish(redisStatus(redis) === "ready"),
-			timeoutMs,
-		);
+		timeoutId = setTimeout(() => finish(redisStatus(redis) === "ready"), timeoutMs);
 		redis.once("ready", onReady);
 		redis.once("close", onUnavailable);
 		redis.once("end", onUnavailable);

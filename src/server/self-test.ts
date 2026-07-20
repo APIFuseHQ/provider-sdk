@@ -9,16 +9,16 @@ import type {
 	HealthCheckSuite,
 	OperationDefinition,
 	ProviderDefinition,
-} from "../types";
-import { resolveHealthCheckInputDateTokens } from "./self-test-input-tokens";
-import { collectSelfTestSensitiveValues, redactSelfTestText } from "./self-test-redaction";
+} from "../types.js";
+import { resolveHealthCheckInputDateTokens } from "./self-test-input-tokens.js";
+import { collectSelfTestSensitiveValues, redactSelfTestText } from "./self-test-redaction.js";
 import {
 	DEFAULT_SELF_TEST_PORT,
 	PROVIDER_RUNTIME_SELF_TEST_PORT_ENV,
 	type SelfTestMasterSecrets,
 	verifySelfTestAuthorization,
-} from "./self-test-token";
-import type { OperationConnection } from "./types";
+} from "./self-test-token.js";
+import type { OperationConnection } from "./types.js";
 
 export const SELF_TEST_SCHEMA_VERSION = 1 as const;
 export const SELF_TEST_PATH = "/internal/health/self-test";

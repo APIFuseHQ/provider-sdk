@@ -1,7 +1,7 @@
 import { createRequire } from "node:module";
 import type { Frame, LaunchOptions, Locator, Page, Request, Route } from "playwright";
 
-import { ProviderError } from "../errors";
+import { ProviderError } from "../errors.js";
 import type {
 	BrowserChallengeRequest,
 	BrowserChallengeResult,
@@ -16,7 +16,7 @@ import type {
 	BrowserResourceMethod,
 	BrowserResourcePolicy,
 	BrowserResourceRequest,
-} from "../types";
+} from "../types.js";
 
 const require = createRequire(import.meta.url);
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
@@ -29,9 +29,7 @@ type PlaywrightExtraModule = {
 	chromium: PlaywrightModule["chromium"] & { use(plugin: unknown): unknown };
 };
 
-type StealthPluginFactory = (options?: {
-	enabledEvasions?: Set<string>;
-}) => unknown;
+type StealthPluginFactory = (options?: { enabledEvasions?: Set<string> }) => unknown;
 
 type PoolAcquireResponse = {
 	browserContextId?: string;
@@ -81,9 +79,7 @@ type CdpFetchFulfillParams = {
 
 type BrowserPageContract = BrowserPage;
 
-function toResourceBody(
-	body: BrowserResourceBody | undefined,
-): Buffer | string | undefined {
+function toResourceBody(body: BrowserResourceBody | undefined): Buffer | string | undefined {
 	if (body === undefined || typeof body === "string" || Buffer.isBuffer(body)) {
 		return body;
 	}
@@ -99,9 +95,7 @@ function isResourceMethod(method: string): method is BrowserResourceMethod {
 	return method === "GET" || method === "HEAD";
 }
 
-async function toResourceRequest(
-	request: Request,
-): Promise<BrowserResourceRequest | null> {
+async function toResourceRequest(request: Request): Promise<BrowserResourceRequest | null> {
 	const method = request.method().toUpperCase();
 	if (!isResourceMethod(method)) {
 		return null;
@@ -139,8 +133,7 @@ function toCdpResourceRequest(
 		request: {
 			headers: toCdpResourceHeaders(rawRequest.headers),
 			method,
-			resourceType:
-				typeof params.resourceType === "string" ? params.resourceType : undefined,
+			resourceType: typeof params.resourceType === "string" ? params.resourceType : undefined,
 			url,
 		},
 	};
@@ -189,15 +182,14 @@ function toCdpFulfillParams(
 ): CdpFetchFulfillParams {
 	const body = toResourceBody(decision.body);
 	return {
-		...(body === undefined
-			? {}
-			: { body: Buffer.from(body).toString("base64") }),
+		...(body === undefined ? {} : { body: Buffer.from(body).toString("base64") }),
 		...(decision.headers === undefined
 			? {}
 			: {
-					responseHeaders: Object.entries(decision.headers).map(
-						([name, value]) => ({ name, value }),
-					),
+					responseHeaders: Object.entries(decision.headers).map(([name, value]) => ({
+						name,
+						value,
+					})),
 				}),
 		requestId,
 		responseCode: decision.status ?? 200,
@@ -228,18 +220,14 @@ type SupportedBrowserClient = {
 	close(): Promise<void>;
 	newPage(): Promise<BrowserPageContract>;
 	rawPage(): Promise<BrowserPageContract>;
-	withIsolatedContext<T>(
-		handler: (page: BrowserPageContract) => Promise<T>,
-	): Promise<T>;
+	withIsolatedContext<T>(handler: (page: BrowserPageContract) => Promise<T>): Promise<T>;
 };
 
 function getDefaultCdpPoolUrl(env = process.env): string | undefined {
 	return env.APIFUSE__CDP_POOL__URL;
 }
 
-async function importOptionalModule<T extends object>(
-	moduleName: string,
-): Promise<T> {
+async function importOptionalModule<T extends object>(moduleName: string): Promise<T> {
 	return (await import(moduleName)) as T;
 }
 
@@ -369,9 +357,7 @@ async function loadPlaywright(): Promise<PlaywrightModule> {
 	}
 
 	try {
-		return unwrapModuleDefault(
-			await importOptionalModule<PlaywrightModule>("playwright"),
-		);
+		return unwrapModuleDefault(await importOptionalModule<PlaywrightModule>("playwright"));
 	} catch (error) {
 		if (isModuleNotFoundError(error)) {
 			throw new ProviderError("Playwright is not installed", {
@@ -419,19 +405,14 @@ async function loadPlaywrightExtra(): Promise<PlaywrightExtraModule> {
 async function loadStealthPluginFactory(): Promise<StealthPluginFactory> {
 	try {
 		return unwrapModuleDefault(
-			await importOptionalModule<StealthPluginFactory>(
-				"puppeteer-extra-plugin-stealth",
-			),
+			await importOptionalModule<StealthPluginFactory>("puppeteer-extra-plugin-stealth"),
 		);
 	} catch (error) {
 		if (isModuleNotFoundError(error)) {
-			throw new ProviderError(
-				"puppeteer-extra-plugin-stealth is not installed",
-				{
-					cause: error instanceof Error ? error : undefined,
-					fix: "Run: bun add playwright-extra puppeteer-extra-plugin-stealth",
-				},
-			);
+			throw new ProviderError("puppeteer-extra-plugin-stealth is not installed", {
+				cause: error instanceof Error ? error : undefined,
+				fix: "Run: bun add playwright-extra puppeteer-extra-plugin-stealth",
+			});
 		}
 
 		throw error;
@@ -503,10 +484,7 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 		return await this.page.evaluate(fn);
 	}
 
-	async waitForSelector(
-		selector: string,
-		options?: { timeout?: number },
-	): Promise<void> {
+	async waitForSelector(selector: string, options?: { timeout?: number }): Promise<void> {
 		await this.page.waitForSelector(selector, options);
 	}
 
@@ -551,13 +529,8 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 		await this.page.close();
 	}
 
-	async withResourcePolicy<T>(
-		policy: BrowserResourcePolicy,
-		run: () => Promise<T>,
-	): Promise<T> {
-		const allowedMethods = new Set(
-			policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS,
-		);
+	async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
+		const allowedMethods = new Set(policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS);
 		const handler = async (route: Route): Promise<void> => {
 			const request = await toResourceRequest(route.request());
 			if (!request || !allowedMethods.has(request.method)) {
@@ -623,9 +596,7 @@ class PlaywrightBrowserClient implements SupportedBrowserClient {
 		});
 	}
 
-	async withIsolatedContext<T>(
-		handler: (page: BrowserPageContract) => Promise<T>,
-	): Promise<T> {
+	async withIsolatedContext<T>(handler: (page: BrowserPageContract) => Promise<T>): Promise<T> {
 		const browser = await this.ensureBrowser();
 		const context = await browser.newContext();
 		const page = await context.newPage();
@@ -673,10 +644,7 @@ function normalizeWebSocketEndpoint(endpoint: string): string {
 class JsonRpcWebSocketClient {
 	private nextId = 1;
 	private readonly endpoint: string;
-	private readonly listeners = new Map<
-		string,
-		Set<(params: unknown) => void>
-	>();
+	private readonly listeners = new Map<string, Set<(params: unknown) => void>>();
 	private readonly pending = new Map<
 		JsonRpcId,
 		{
@@ -770,9 +738,7 @@ class JsonRpcWebSocketClient {
 					this.pending.delete(payload.id);
 
 					if (payload.error) {
-						pending.reject(
-							new Error(payload.error.message ?? "JSON-RPC command failed"),
-						);
+						pending.reject(new Error(payload.error.message ?? "JSON-RPC command failed"));
 						return;
 					}
 
@@ -800,11 +766,7 @@ class JsonRpcWebSocketClient {
 			});
 
 			socket.addEventListener("error", () => {
-				reject(
-					new Error(
-						`Unable to connect to WebSocket endpoint: ${this.endpoint}`,
-					),
-				);
+				reject(new Error(`Unable to connect to WebSocket endpoint: ${this.endpoint}`));
 			});
 		});
 
@@ -843,19 +805,14 @@ function parsePoolAcquireResponse(value: unknown): PoolAcquireResponse {
 		});
 	}
 
-	if (
-		value.browserContextId !== undefined &&
-		typeof value.browserContextId !== "string"
-	) {
+	if (value.browserContextId !== undefined && typeof value.browserContextId !== "string") {
 		throw new ProviderError("CDP Pool returned an invalid acquire response", {
 			code: "BROWSER_RUNTIME_UNSUPPORTED",
 		});
 	}
 
 	return {
-		...(value.browserContextId
-			? { browserContextId: value.browserContextId }
-			: {}),
+		...(value.browserContextId ? { browserContextId: value.browserContextId } : {}),
 		pageId: value.pageId,
 		wsEndpoint: value.wsEndpoint,
 	};
@@ -881,10 +838,7 @@ function parseCdpFrameTreeNode(value: unknown): CdpFrameTreeNode | undefined {
 		frame: {
 			id: frameId,
 			name: typeof value.frame.name === "string" ? value.frame.name : undefined,
-			parentId:
-				typeof value.frame.parentId === "string"
-					? value.frame.parentId
-					: undefined,
+			parentId: typeof value.frame.parentId === "string" ? value.frame.parentId : undefined,
 			url: typeof value.frame.url === "string" ? value.frame.url : undefined,
 		},
 		...(childFrames ? { childFrames } : {}),
@@ -902,10 +856,7 @@ function getCdpExecutionContext(params: unknown): {
 	const contextId = params.context.id;
 	const auxData = params.context.auxData;
 	return {
-		frameId:
-			isRecord(auxData) && typeof auxData.frameId === "string"
-				? auxData.frameId
-				: undefined,
+		frameId: isRecord(auxData) && typeof auxData.frameId === "string" ? auxData.frameId : undefined,
 		id: typeof contextId === "number" ? contextId : undefined,
 	};
 }
@@ -914,10 +865,7 @@ class CdpBrowserLocator implements BrowserLocator {
 	constructor(
 		private readonly frame: {
 			evaluate<T>(fn: string | (() => T)): Promise<T>;
-			waitForSelector?(
-				selector: string,
-				options?: { timeout?: number },
-			): Promise<void>;
+			waitForSelector?(selector: string, options?: { timeout?: number }): Promise<void>;
 		},
 		private readonly selector: string,
 	) {}
@@ -989,9 +937,7 @@ class CdpBrowserFrame implements BrowserFrame {
 	) {}
 
 	async url(): Promise<string> {
-		const evaluatedUrl = await this.evaluate<string | undefined>(
-			"window.location.href",
-		);
+		const evaluatedUrl = await this.evaluate<string | undefined>("window.location.href");
 		return evaluatedUrl || this.initialUrl;
 	}
 
@@ -1011,10 +957,7 @@ class CdpBrowserFrame implements BrowserFrame {
 		return new CdpBrowserLocator(this, selector);
 	}
 
-	async waitForSelector(
-		selector: string,
-		options?: { timeout?: number },
-	): Promise<void> {
+	async waitForSelector(selector: string, options?: { timeout?: number }): Promise<void> {
 		await this.page.waitForSelectorInFrame(this.id, selector, options);
 	}
 
@@ -1049,10 +992,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 
 		try {
 			await this.pageClient.send("Page.navigate", { url });
-			await this.waitForDocumentReady(
-				startedAt + DEFAULT_WAIT_TIMEOUT_MS,
-				() => loadEventSeen,
-			);
+			await this.waitForDocumentReady(startedAt + DEFAULT_WAIT_TIMEOUT_MS, () => loadEventSeen);
 		} finally {
 			unsubscribe();
 		}
@@ -1063,10 +1003,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		return await this.evaluateWithContext<T>(fn);
 	}
 
-	async evaluateInFrame<T>(
-		frameId: string,
-		fn: string | (() => T),
-	): Promise<T> {
+	async evaluateInFrame<T>(frameId: string, fn: string | (() => T)): Promise<T> {
 		await this.initialize();
 		const contextId = await this.getFrameExecutionContextId(frameId);
 		return await this.evaluateWithContext<T>(fn, contextId);
@@ -1096,10 +1033,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		throw new Error(`Timed out waiting for selector: ${selector}`);
 	}
 
-	private async evaluateWithContext<T>(
-		fn: string | (() => T),
-		contextId?: number,
-	): Promise<T> {
+	private async evaluateWithContext<T>(fn: string | (() => T), contextId?: number): Promise<T> {
 		const result = await this.pageClient.send("Runtime.evaluate", {
 			awaitPromise: true,
 			...(contextId === undefined ? {} : { contextId }),
@@ -1109,20 +1043,14 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 
 		if (result.exceptionDetails) {
 			throw new Error(
-				String(
-					(result.exceptionDetails as { text?: string }).text ??
-						"Browser evaluation failed",
-				),
+				String((result.exceptionDetails as { text?: string }).text ?? "Browser evaluation failed"),
 			);
 		}
 
 		return (result.result as { value?: T } | undefined)?.value as T;
 	}
 
-	async waitForSelector(
-		selector: string,
-		options?: { timeout?: number },
-	): Promise<void> {
+	async waitForSelector(selector: string, options?: { timeout?: number }): Promise<void> {
 		const timeout = options?.timeout ?? DEFAULT_WAIT_TIMEOUT_MS;
 		const deadline = Date.now() + timeout;
 
@@ -1188,14 +1116,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		const result = await this.pageClient.send("Page.getFrameTree");
 		const frames = flattenCdpFrameTree(parseCdpFrameTreeNode(result.frameTree));
 		return frames.map(
-			(frame) =>
-				new CdpBrowserFrame(
-					frame.id,
-					this,
-					frame.url ?? "",
-					frame.name,
-					frame.parentId,
-				),
+			(frame) => new CdpBrowserFrame(frame.id, this, frame.url ?? "", frame.name, frame.parentId),
 		);
 	}
 
@@ -1209,8 +1130,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 
 	async url(): Promise<string> {
 		const [mainFrame] = await this.frames();
-		const frameUrl =
-			mainFrame instanceof CdpBrowserFrame ? mainFrame.fallbackUrl() : "";
+		const frameUrl = mainFrame instanceof CdpBrowserFrame ? mainFrame.fallbackUrl() : "";
 		return frameUrl || (await this.evaluate<string>("window.location.href"));
 	}
 
@@ -1238,9 +1158,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 
 		try {
 			await this.release({
-				...(this.browserContextId
-					? { browserContextId: this.browserContextId }
-					: {}),
+				...(this.browserContextId ? { browserContextId: this.browserContextId } : {}),
 				pageId: this.pageId,
 			});
 		} finally {
@@ -1248,25 +1166,13 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		}
 	}
 
-	async withResourcePolicy<T>(
-		policy: BrowserResourcePolicy,
-		run: () => Promise<T>,
-	): Promise<T> {
-		const allowedMethods = new Set(
-			policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS,
-		);
+	async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
+		const allowedMethods = new Set(policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS);
 		const handlePausedRequest = (params: unknown): void => {
-			void this.handleResourcePolicyPausedRequest(
-				params,
-				policy,
-				allowedMethods,
-			);
+			void this.handleResourcePolicyPausedRequest(params, policy, allowedMethods);
 		};
 
-		const unsubscribe = this.pageClient.on(
-			"Fetch.requestPaused",
-			handlePausedRequest,
-		);
+		const unsubscribe = this.pageClient.on("Fetch.requestPaused", handlePausedRequest);
 
 		try {
 			await this.pageClient.send("Fetch.enable", {
@@ -1376,9 +1282,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		});
 		const contextId = result.executionContextId;
 		if (typeof contextId !== "number") {
-			throw new Error(
-				`Unable to resolve execution context for frame: ${frameId}`,
-			);
+			throw new Error(`Unable to resolve execution context for frame: ${frameId}`);
 		}
 
 		this.frameExecutionContexts.set(frameId, contextId);
@@ -1424,17 +1328,11 @@ class CdpPoolBrowserClient implements SupportedBrowserClient {
 		return await this.acquirePage({ isolatedContext: true });
 	}
 
-	private async acquirePage(options?: {
-		isolatedContext?: boolean;
-	}): Promise<BrowserPageContract> {
+	private async acquirePage(options?: { isolatedContext?: boolean }): Promise<BrowserPageContract> {
 		const acquireResult = parsePoolAcquireResponse(
 			await this.poolClient.send("acquire", {
-				...(this.allowedHosts.length > 0
-					? { allowedHosts: this.allowedHosts }
-					: {}),
-				...(options?.isolatedContext
-					? { isolationMode: "browserContext" }
-					: {}),
+				...(this.allowedHosts.length > 0 ? { allowedHosts: this.allowedHosts } : {}),
+				...(options?.isolatedContext ? { isolationMode: "browserContext" } : {}),
 			}),
 		);
 		const pageClient = new JsonRpcWebSocketClient(acquireResult.wsEndpoint);
@@ -1463,9 +1361,7 @@ class CdpPoolBrowserClient implements SupportedBrowserClient {
 		return await this.newPage();
 	}
 
-	async withIsolatedContext<T>(
-		handler: (page: BrowserPageContract) => Promise<T>,
-	): Promise<T> {
+	async withIsolatedContext<T>(handler: (page: BrowserPageContract) => Promise<T>): Promise<T> {
 		const page = await this.acquirePage({ isolatedContext: true });
 
 		try {
@@ -1481,9 +1377,7 @@ class CdpPoolBrowserClient implements SupportedBrowserClient {
 }
 
 class UnsupportedBrowserEngineClient implements SupportedBrowserClient {
-	constructor(
-		readonly engine: Extract<BrowserEngine, "nodriver" | "selenium-uc">,
-	) {}
+	constructor(readonly engine: Extract<BrowserEngine, "nodriver" | "selenium-uc">) {}
 
 	async newPage(): Promise<never> {
 		if (this.engine === "nodriver") {
@@ -1510,15 +1404,11 @@ class UnsupportedBrowserEngineClient implements SupportedBrowserClient {
 	async close(): Promise<void> {}
 }
 
-function createPlaywrightStealthClient(
-	options: BrowserClientOptions = {},
-): SupportedBrowserClient {
+function createPlaywrightStealthClient(options: BrowserClientOptions = {}): SupportedBrowserClient {
 	return new PlaywrightBrowserClient(options);
 }
 
-function createCdpPoolBrowserClient(
-	options: BrowserClientOptions,
-): SupportedBrowserClient {
+function createCdpPoolBrowserClient(options: BrowserClientOptions): SupportedBrowserClient {
 	return new CdpPoolBrowserClient(options);
 }
 
@@ -1547,13 +1437,10 @@ export class BrowserClient implements BrowserClientContract {
 		this.cdpUrl = resolvedOptions.cdpUrl;
 
 		if (resolvedOptions.requireCdpPool && !resolvedOptions.cdpUrl) {
-			throw new ProviderError(
-				"Managed CDP Pool is required for browser providers in production",
-				{
-					code: "BROWSER_CDP_POOL_REQUIRED",
-					fix: "Set APIFUSE__CDP_POOL__URL for deployed browser providers. Local standalone development may omit it.",
-				},
-			);
+			throw new ProviderError("Managed CDP Pool is required for browser providers in production", {
+				code: "BROWSER_CDP_POOL_REQUIRED",
+				fix: "Set APIFUSE__CDP_POOL__URL for deployed browser providers. Local standalone development may omit it.",
+			});
 		}
 
 		switch (engine) {
@@ -1591,9 +1478,7 @@ export class BrowserClient implements BrowserClientContract {
 		return this.activatePage(page);
 	}
 
-	async withIsolatedContext<T>(
-		handler: (page: BrowserPageContract) => Promise<T>,
-	): Promise<T> {
+	async withIsolatedContext<T>(handler: (page: BrowserPageContract) => Promise<T>): Promise<T> {
 		const previousActivePage = this.activePage;
 		let trackedPage: BrowserPageContract | undefined;
 
@@ -1638,16 +1523,11 @@ export class BrowserClient implements BrowserClientContract {
 		return trackedPage;
 	}
 
-	async solveChallenge(
-		request: BrowserChallengeRequest,
-	): Promise<BrowserChallengeResult> {
+	async solveChallenge(request: BrowserChallengeRequest): Promise<BrowserChallengeResult> {
 		if (request.type !== "recaptcha") {
-			throw new ProviderError(
-				`Unsupported browser challenge: ${request.type}`,
-				{
-					code: "BROWSER_RUNTIME_UNSUPPORTED",
-				},
-			);
+			throw new ProviderError(`Unsupported browser challenge: ${request.type}`, {
+				code: "BROWSER_RUNTIME_UNSUPPORTED",
+			});
 		}
 
 		if (this.activePage) {
@@ -1709,8 +1589,7 @@ async function findRecaptchaFrame(
 	for (const frame of frames) {
 		const url = await frame.url();
 		const matchesRecaptcha =
-			url.includes("google.com/recaptcha") ||
-			url.includes("recaptcha.net/recaptcha");
+			url.includes("google.com/recaptcha") || url.includes("recaptcha.net/recaptcha");
 		const matchesSiteKey = !siteKey || url.includes(siteKey);
 		if (matchesRecaptcha && matchesSiteKey) {
 			return frame;
@@ -1720,8 +1599,6 @@ async function findRecaptchaFrame(
 	return undefined;
 }
 
-export function createBrowserClient(
-	options: BrowserClientOptions = {},
-): BrowserClient {
+export function createBrowserClient(options: BrowserClientOptions = {}): BrowserClient {
 	return new BrowserClient(options);
 }

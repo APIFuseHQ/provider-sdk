@@ -1,8 +1,8 @@
-import type { ProviderDefinition } from "../types";
+import type { ProviderDefinition } from "../types.js";
 import {
 	PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_ENV,
 	PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_PREVIOUS_ENV,
-} from "./self-test-token";
+} from "./self-test-token.js";
 
 export const SELF_TEST_REDACTED_PLACEHOLDER = "[REDACTED]";
 

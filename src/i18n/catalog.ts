@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import type { AuthTurn } from "../types";
+import type { AuthTurn } from "../types.js";
 import {
 	getProviderLocalePath,
 	isProviderLocaleValue,
@@ -10,12 +10,9 @@ import {
 	type ProviderLocaleKey,
 	type ProviderLocaleValue,
 	providerLocaleKey,
-} from "./keys";
+} from "./keys.js";
 
-export type ProviderLocaleCatalogMap = Record<
-	ProviderLocale,
-	ProviderLocaleCatalog
->;
+export type ProviderLocaleCatalogMap = Record<ProviderLocale, ProviderLocaleCatalog>;
 
 export interface LoadProviderLocaleCatalogsOptions {
 	providerDir: string;
@@ -58,9 +55,7 @@ export function resolveProviderLocaleValue(
 	);
 }
 
-function asStringValue(
-	value: ProviderLocaleValue | undefined,
-): string | undefined {
+function asStringValue(value: ProviderLocaleValue | undefined): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
@@ -82,9 +77,7 @@ function localizeAuthInputSchema(
 	},
 ): Record<string, unknown> | undefined {
 	if (!expectedInput) return undefined;
-	const schema = isRecord(expectedInput.schema)
-		? expectedInput.schema
-		: expectedInput;
+	const schema = isRecord(expectedInput.schema) ? expectedInput.schema : expectedInput;
 	const localizedSchema = localizeAuthSchemaObject(schema, options);
 	if (localizedSchema === schema) return undefined;
 	return isRecord(expectedInput.schema)
@@ -104,21 +97,16 @@ function localizeAuthSchemaObject(
 		fallbackLocale: ProviderLocale;
 	},
 ): Record<string, unknown> {
-	const properties = isRecord(schema.properties)
-		? schema.properties
-		: undefined;
+	const properties = isRecord(schema.properties) ? schema.properties : undefined;
 	if (!properties) return schema;
 
 	let changed = false;
 	const localizedProperties = Object.fromEntries(
 		Object.entries(properties).map(([fieldName, property]) => {
 			if (!isRecord(property)) return [fieldName, property];
-			const nameKey =
-				typeof property.nameKey === "string" ? property.nameKey : undefined;
+			const nameKey = typeof property.nameKey === "string" ? property.nameKey : undefined;
 			const descriptionKey =
-				typeof property.descriptionKey === "string"
-					? property.descriptionKey
-					: undefined;
+				typeof property.descriptionKey === "string" ? property.descriptionKey : undefined;
 			const title = nameKey
 				? asStringValue(
 						resolveProviderLocaleValue(
@@ -166,12 +154,7 @@ export function localizeAuthTurn(
 	const fallbackLocale = options.fallbackLocale ?? "en";
 	const hint = turn.hintKey
 		? asStringValue(
-				resolveProviderLocaleValue(
-					options.catalogs,
-					turn.hintKey,
-					options.locale,
-					fallbackLocale,
-				),
+				resolveProviderLocaleValue(options.catalogs, turn.hintKey, options.locale, fallbackLocale),
 			)
 		: undefined;
 	const expectedInput = localizeAuthInputSchema(turn.expectedInput, {
@@ -184,12 +167,7 @@ export function localizeAuthTurn(
 		? Object.fromEntries(
 				Object.entries(fieldErrorKeys).flatMap(([fieldName, key]) => {
 					const message = asStringValue(
-						resolveProviderLocaleValue(
-							options.catalogs,
-							key,
-							options.locale,
-							fallbackLocale,
-						),
+						resolveProviderLocaleValue(options.catalogs, key, options.locale, fallbackLocale),
 					);
 					return message ? [[fieldName, message]] : [];
 				}),

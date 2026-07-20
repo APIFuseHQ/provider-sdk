@@ -1,11 +1,8 @@
-import { isSessionExpiredError, ProviderError, SessionExpiredError } from "../errors";
-import { parseSchema } from "../schema";
-import type { ProviderContext, ProviderDefinition } from "../types";
+import { isSessionExpiredError, ProviderError, SessionExpiredError } from "../errors.js";
+import { parseSchema } from "../schema.js";
+import type { ProviderContext, ProviderDefinition } from "../types.js";
 
-export function isStreamingOperation(
-	provider: ProviderDefinition,
-	operationId: string,
-): boolean {
+export function isStreamingOperation(provider: ProviderDefinition, operationId: string): boolean {
 	const kind = provider.operations[operationId]?.transport?.kind ?? "json";
 	return kind !== "json";
 }
@@ -31,13 +28,10 @@ export async function executeOperation(
 	const operation = provider.operations[operationId];
 
 	if (!operation) {
-		throw new ProviderError(
-			`Unknown operation: ${provider.id}/${operationId}`,
-			{
-				code: "NOT_FOUND",
-				fix: `Valid operations: ${Object.keys(provider.operations).join(", ")}`,
-			},
-		);
+		throw new ProviderError(`Unknown operation: ${provider.id}/${operationId}`, {
+			code: "NOT_FOUND",
+			fix: `Valid operations: ${Object.keys(provider.operations).join(", ")}`,
+		});
 	}
 
 	const validatedInput = await parseSchema(
@@ -79,9 +73,5 @@ export async function executeOperation(
 		return result;
 	}
 
-	return parseSchema(
-		operation.output,
-		result,
-		`operations.${operationId}.output`,
-	);
+	return parseSchema(operation.output, result, `operations.${operationId}.output`);
 }

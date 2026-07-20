@@ -1,4 +1,4 @@
-import { ProviderError, TransportError, ValidationError } from "../errors";
+import { ProviderError, TransportError, ValidationError } from "../errors.js";
 import type {
 	Bcp47Locale,
 	ProviderSttConfig,
@@ -13,16 +13,14 @@ import type {
 	VerificationCodeCandidate,
 	VerificationCodeCandidateSource,
 	VerificationCodeExtractionResult,
-} from "../types";
+} from "../types.js";
 
 export const APIFUSE__STT__BACKEND_ENV = "APIFUSE__STT__BACKEND";
 export const APIFUSE__STT__MODEL_ENV = "APIFUSE__STT__MODEL";
 export const CLOUDFLARE_ACCOUNT_ID_ENV = "APIFUSE__CLOUDFLARE__ACCOUNT_ID";
-export const APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV =
-	"APIFUSE__STT__CLOUDFLARE_API_TOKEN";
+export const APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV = "APIFUSE__STT__CLOUDFLARE_API_TOKEN";
 export const CLOUDFLARE_WORKERS_AI_STT_BACKEND = "cloudflare-workers-ai";
-export const DEFAULT_CLOUDFLARE_WORKERS_AI_STT_MODEL =
-	"@cf/openai/whisper-large-v3-turbo";
+export const DEFAULT_CLOUDFLARE_WORKERS_AI_STT_MODEL = "@cf/openai/whisper-large-v3-turbo";
 export const DEFAULT_STT_MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 export const DEFAULT_STT_TIMEOUT_MS = 30_000;
 
@@ -45,10 +43,7 @@ type ErrorSttClientOptions = {
 	fix?: string;
 };
 
-function providerError(
-	message: string,
-	options: { code: string; fix?: string },
-): ProviderError {
+function providerError(message: string, options: { code: string; fix?: string }): ProviderError {
 	return new ProviderError(message, options);
 }
 
@@ -82,9 +77,7 @@ export function createSttClientFromEnv(
 	env: EnvLike = process.env,
 ): SttContext {
 	if (!config) {
-		return createUnsupportedSttClient(
-			"Provider does not declare STT capability",
-		);
+		return createUnsupportedSttClient("Provider does not declare STT capability");
 	}
 
 	const backend = normalizedEnvValue(env, APIFUSE__STT__BACKEND_ENV);
@@ -116,25 +109,17 @@ export function createSttClientFromEnv(
 		accountId,
 		apiToken,
 		model:
-			normalizedEnvValue(env, APIFUSE__STT__MODEL_ENV) ??
-			DEFAULT_CLOUDFLARE_WORKERS_AI_STT_MODEL,
+			normalizedEnvValue(env, APIFUSE__STT__MODEL_ENV) ?? DEFAULT_CLOUDFLARE_WORKERS_AI_STT_MODEL,
 	});
 }
 
 function base64ByteLength(data: string): number {
 	const normalized = data.trim();
-	const padding = normalized.endsWith("==")
-		? 2
-		: normalized.endsWith("=")
-			? 1
-			: 0;
+	const padding = normalized.endsWith("==") ? 2 : normalized.endsWith("=") ? 1 : 0;
 	return Math.floor((normalized.length * 3) / 4) - padding;
 }
 
-function assertBase64Audio(
-	audio: SttAudioInput,
-	maxAudioBytes: number | undefined,
-): number {
+function assertBase64Audio(audio: SttAudioInput, maxAudioBytes: number | undefined): number {
 	if (audio.kind !== "base64") {
 		throw new ValidationError("Unsupported STT audio input kind", {
 			code: "UNSUPPORTED_STT_OPTION",
@@ -142,32 +127,22 @@ function assertBase64Audio(
 		});
 	}
 	const data = audio.data.trim();
-	if (
-		data.length === 0 ||
-		data.length % 4 !== 0 ||
-		!BASE64_AUDIO_PATTERN.test(data)
-	) {
-		throw new ValidationError(
-			"STT audio.data must be a base64-encoded string",
-			{
-				code: "INVALID_STT_AUDIO",
-			},
-		);
+	if (data.length === 0 || data.length % 4 !== 0 || !BASE64_AUDIO_PATTERN.test(data)) {
+		throw new ValidationError("STT audio.data must be a base64-encoded string", {
+			code: "INVALID_STT_AUDIO",
+		});
 	}
 	const bytes = base64ByteLength(data);
 	const maxBytes = maxAudioBytes ?? DEFAULT_STT_MAX_AUDIO_BYTES;
 	if (bytes > maxBytes) {
-		throw new ValidationError(
-			`STT audio exceeds maxAudioBytes (${bytes} > ${maxBytes})`,
-			{ code: "STT_AUDIO_TOO_LARGE" },
-		);
+		throw new ValidationError(`STT audio exceeds maxAudioBytes (${bytes} > ${maxBytes})`, {
+			code: "STT_AUDIO_TOO_LARGE",
+		});
 	}
 	return bytes;
 }
 
-export function resolveSttPrompt(
-	request: SttTranscribeRequest,
-): string | undefined {
+export function resolveSttPrompt(request: SttTranscribeRequest): string | undefined {
 	const policy = effectivePromptPolicy(request);
 	if (policy === "none") return undefined;
 	if (policy === "default-hint") return DEFAULT_OTP_HINT;
@@ -183,17 +158,14 @@ function warnOrThrowUnsupportedOption(
 	request: SttTranscribeRequest,
 	message: string,
 ): { code: "UNSUPPORTED_STT_OPTION"; message: string } | undefined {
-	const policy: SttUnsupportedOptionPolicy =
-		request.unsupportedOptionPolicy ?? "warn";
+	const policy: SttUnsupportedOptionPolicy = request.unsupportedOptionPolicy ?? "warn";
 	if (policy === "error") {
 		throw new ProviderError(message, { code: "UNSUPPORTED_STT_OPTION" });
 	}
 	return { code: "UNSUPPORTED_STT_OPTION", message };
 }
 
-function normalizeCloudflareLanguage(
-	language: Bcp47Locale | undefined,
-): string | undefined {
+function normalizeCloudflareLanguage(language: Bcp47Locale | undefined): string | undefined {
 	return language?.split("-")[0]?.toLowerCase();
 }
 
@@ -232,9 +204,7 @@ function createTimeoutController(signalTimeoutMs: number): {
 	return { controller, clear: () => clearTimeout(timeout) };
 }
 
-function toCloudflareInput(
-	request: SttTranscribeRequest,
-): Record<string, unknown> {
+function toCloudflareInput(request: SttTranscribeRequest): Record<string, unknown> {
 	const prompt = resolveSttPrompt(request);
 	const input: Record<string, unknown> = {
 		audio: request.audio.data.trim(),
@@ -273,8 +243,7 @@ function parseSegments(value: unknown): SttSegment[] | undefined {
 					: typeof segment.endMs === "number"
 						? segment.endMs
 						: undefined,
-			confidence:
-				typeof segment.confidence === "number" ? segment.confidence : undefined,
+			confidence: typeof segment.confidence === "number" ? segment.confidence : undefined,
 		});
 	}
 	return segments.length > 0 ? segments : undefined;
@@ -288,13 +257,10 @@ function toSttTranscript(payload: unknown, audioBytes: number): SttTranscript {
 		(typeof result?.text === "string" ? result.text : undefined) ??
 		(typeof info?.text === "string" ? info.text : undefined);
 	if (!text) {
-		throw new TransportError(
-			"STT upstream response did not include transcript text",
-			{
-				code: "STT_UPSTREAM_FAILED",
-				status: 502,
-			},
-		);
+		throw new TransportError("STT upstream response did not include transcript text", {
+			code: "STT_UPSTREAM_FAILED",
+			status: 502,
+		});
 	}
 	const durationMs =
 		typeof result?.durationMs === "number"
@@ -327,23 +293,15 @@ export function createCloudflareWorkersAiSttClient(
 	return {
 		async transcribe(request) {
 			const warnings = [];
-			if (
-				request.initialPrompt &&
-				effectivePromptPolicy(request) !== "custom-hint"
-			) {
+			if (request.initialPrompt && effectivePromptPolicy(request) !== "custom-hint") {
 				const warning = warnOrThrowUnsupportedOption(
 					request,
 					"initialPrompt is honored only when promptPolicy is custom-hint",
 				);
 				if (warning) warnings.push(warning);
 			}
-			const audioBytes = assertBase64Audio(
-				request.audio,
-				request.maxAudioBytes,
-			);
-			const timeout = createTimeoutController(
-				request.timeoutMs ?? DEFAULT_STT_TIMEOUT_MS,
-			);
+			const audioBytes = assertBase64Audio(request.audio, request.maxAudioBytes);
+			const timeout = createTimeoutController(request.timeoutMs ?? DEFAULT_STT_TIMEOUT_MS);
 			try {
 				let response: Response;
 				try {
@@ -388,10 +346,7 @@ export function createCloudflareWorkersAiSttClient(
 				if (request.mode === "otp" || request.verificationCode) {
 					return {
 						...withWarnings,
-						verificationCode: extractVerificationCode(
-							withWarnings.text,
-							request.verificationCode,
-						),
+						verificationCode: extractVerificationCode(withWarnings.text, request.verificationCode),
 					};
 				}
 				return withWarnings;
@@ -433,12 +388,9 @@ const KO_DIGITS: Record<string, string> = {
 	구: "9",
 };
 
-function lengthSet(
-	codeLengths: SttVerificationCodeOptions["codeLengths"],
-): Set<number> {
+function lengthSet(codeLengths: SttVerificationCodeOptions["codeLengths"]): Set<number> {
 	if (codeLengths === undefined) return new Set([4, 5, 6, 7, 8]);
-	if (typeof codeLengths === "number")
-		return new Set([validCodeLength(codeLengths)]);
+	if (typeof codeLengths === "number") return new Set([validCodeLength(codeLengths)]);
 	if (Array.isArray(codeLengths)) {
 		const values = codeLengths.map((length) => validCodeLength(length));
 		return new Set(values);
@@ -469,10 +421,9 @@ function lengthSet(
 
 function validCodeLength(value: number): number {
 	if (!Number.isInteger(value) || value < 1 || value > 32) {
-		throw new ValidationError(
-			"STT verification code length must be an integer between 1 and 32",
-			{ code: "INVALID_STT_VERIFICATION_CODE_OPTIONS" },
-		);
+		throw new ValidationError("STT verification code length must be an integer between 1 and 32", {
+			code: "INVALID_STT_VERIFICATION_CODE_OPTIONS",
+		});
 	}
 	return value;
 }
@@ -554,11 +505,7 @@ function tokenizeDigits(text: string): DigitToken[] {
 	return tokens.sort((a, b) => a.startIndex - b.startIndex);
 }
 
-function isAdjacent(
-	left: DigitToken,
-	right: DigitToken,
-	text: string,
-): boolean {
+function isAdjacent(left: DigitToken, right: DigitToken, text: string): boolean {
 	const between = text.slice(left.endIndex, right.startIndex);
 	return /^[\s,.:;\-_/]*$/u.test(between);
 }
@@ -608,12 +555,9 @@ export function extractVerificationCode(
 	}
 	const candidates = [...candidatesByCode.values()];
 	if (candidates.length === 0) {
-		throw new ProviderError(
-			"No verification code candidate found in transcript",
-			{
-				code: "NO_CODE_FOUND",
-			},
-		);
+		throw new ProviderError("No verification code candidate found in transcript", {
+			code: "NO_CODE_FOUND",
+		});
 	}
 	if (candidates.length > 1) {
 		throw new ProviderError("Multiple verification code candidates found", {

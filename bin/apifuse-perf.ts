@@ -24,19 +24,12 @@ import {
 	type StealthClient,
 	type StealthResponse,
 	wrapWithInstrumentation,
-} from "../src";
-import {
-	computeStats,
-	groupSpansByName,
-	type PerfStats,
-} from "../src/runtime/perf";
-import { createMemoryProviderRuntimeState } from "../src/runtime/state";
-import {
-	createTraceContext,
-	resolveTraceContextOptions,
-} from "../src/runtime/trace";
-import { renderWaterfall } from "../src/runtime/waterfall";
-import type { BrowserClient } from "../src/types";
+} from "../src/index.js";
+import { computeStats, groupSpansByName, type PerfStats } from "../src/runtime/perf.js";
+import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { createTraceContext, resolveTraceContextOptions } from "../src/runtime/trace.js";
+import { renderWaterfall } from "../src/runtime/waterfall.js";
+import type { BrowserClient } from "../src/types.js";
 
 type CliArgs = {
 	compareProxy: boolean;
@@ -112,11 +105,7 @@ export async function main() {
 		const inputSchema = getOperationSchema(provider, operation, "input");
 		const outputSchema = getOperationSchema(provider, operation, "output");
 		const fixtureReplay = await loadFixtureReplay(providerDirectory);
-		const inputTemplate = resolveInputTemplate(
-			provider,
-			inputSchema,
-			args.params,
-		);
+		const inputTemplate = resolveInputTemplate(provider, inputSchema, args.params);
 
 		const directSuite = await runProfileSuite({
 			args,
@@ -168,9 +157,7 @@ export async function main() {
 				label: `${providerId}/${args.operation}`,
 				proxyEnabled: false,
 				stats: directSuite.stats,
-				mode: directSuite.runs.some((run) => run.mode === "fixture")
-					? "fixture"
-					: "live",
+				mode: directSuite.runs.some((run) => run.mode === "fixture") ? "fixture" : "live",
 			});
 			console.log(`Flamegraph: ${flamePath}`);
 		}
@@ -294,27 +281,18 @@ function parseArgs(argv: string[]): CliArgs {
 		}
 
 		if (arg.startsWith("--warmup=")) {
-			warmup = parseNonNegativeInteger(
-				arg.slice("--warmup=".length),
-				"--warmup",
-			);
+			warmup = parseNonNegativeInteger(arg.slice("--warmup=".length), "--warmup");
 			continue;
 		}
 
 		if (arg === "--concurrency" || arg === "-c") {
-			concurrency = parsePositiveInteger(
-				requireArgValue(argv, index, arg),
-				arg,
-			);
+			concurrency = parsePositiveInteger(requireArgValue(argv, index, arg), arg);
 			index += 1;
 			continue;
 		}
 
 		if (arg.startsWith("--concurrency=")) {
-			concurrency = parsePositiveInteger(
-				arg.slice("--concurrency=".length),
-				"--concurrency",
-			);
+			concurrency = parsePositiveInteger(arg.slice("--concurrency=".length), "--concurrency");
 			continue;
 		}
 
@@ -354,11 +332,7 @@ function parseArgs(argv: string[]): CliArgs {
 	};
 }
 
-function requireArgValue(
-	argv: string[],
-	index: number,
-	option: string,
-): string {
+function requireArgValue(argv: string[], index: number, option: string): string {
 	const value = argv[index + 1];
 	if (!value) {
 		throw new Error(`Missing value for ${option}`);
@@ -396,9 +370,7 @@ function resolveProviderEntry(providerDirectory: string): string {
 	throw new Error(`Provider entry not found in ${providerDirectory}`);
 }
 
-async function loadProvider(
-	providerEntry: string,
-): Promise<ProviderDefinition> {
+async function loadProvider(providerEntry: string): Promise<ProviderDefinition> {
 	const mod = (await import(pathToFileURL(providerEntry).href)) as {
 		default?: ProviderDefinition;
 	};
@@ -469,9 +441,7 @@ function resolveInputTemplate(
 	}
 }
 
-async function loadFixtureReplay(
-	providerDirectory: string,
-): Promise<FixtureReplay | null> {
+async function loadFixtureReplay(providerDirectory: string): Promise<FixtureReplay | null> {
 	const fixturePath = resolve(providerDirectory, "__fixtures__", "raw.json");
 	if (!existsSync(fixturePath)) {
 		return null;
@@ -521,15 +491,8 @@ async function runProfileSuite(options: {
 	}
 
 	const runs: RunResult[] = [];
-	for (
-		let index = 0;
-		index < options.args.runs;
-		index += options.args.concurrency
-	) {
-		const batchSize = Math.min(
-			options.args.concurrency,
-			options.args.runs - index,
-		);
+	for (let index = 0; index < options.args.runs; index += options.args.concurrency) {
+		const batchSize = Math.min(options.args.concurrency, options.args.runs - index);
 		const batch = Array.from({ length: batchSize }, () =>
 			profileRun({
 				config: options.config,
@@ -552,8 +515,7 @@ async function runProfileSuite(options: {
 	const breakdown = [...groupedSpans.entries()]
 		.filter(([name]) => name !== rootSpanName)
 		.map(([name, durations]) => {
-			const avgMs =
-				durations.reduce((sum, value) => sum + value, 0) / durations.length;
+			const avgMs = durations.reduce((sum, value) => sum + value, 0) / durations.length;
 			const percent = stats.avg > 0 ? (avgMs / stats.avg) * 100 : 0;
 			return { avgMs, name, percent };
 		})
@@ -611,9 +573,7 @@ async function executeProfileRun(options: {
 	proxyEnabled: boolean;
 }): Promise<RunResult> {
 	const _operation = getOperation(options.provider, options.operationName);
-	const traceContext = createTraceContext(
-		resolveTraceContextOptions(options.config.trace),
-	);
+	const traceContext = createTraceContext(resolveTraceContextOptions(options.config.trace));
 	const baseContext = createBaseContext({
 		config: options.config,
 		provider: options.provider,
@@ -638,9 +598,7 @@ async function executeProfileRun(options: {
 			normalizedInput,
 		);
 
-		return ctx.trace.span("transformResponse", async () =>
-			options.outputSchema.parse(result),
-		);
+		return ctx.trace.span("transformResponse", async () => options.outputSchema.parse(result));
 	});
 	const durationMs = performance.now() - startedAt;
 	const spans = ctx.trace.getSpans();
@@ -790,36 +748,24 @@ function createBrowserStub(): BrowserClient {
 		engine: "playwright-stealth",
 		async close() {},
 		async newPage() {
-			throw new ProviderError(
-				"Browser runtime is not supported by apifuse perf yet.",
-				{
-					code: "BROWSER_RUNTIME_UNSUPPORTED",
-				},
-			);
+			throw new ProviderError("Browser runtime is not supported by apifuse perf yet.", {
+				code: "BROWSER_RUNTIME_UNSUPPORTED",
+			});
 		},
 		async rawPage() {
-			throw new ProviderError(
-				"Browser runtime is not supported by apifuse perf yet.",
-				{
-					code: "BROWSER_RUNTIME_UNSUPPORTED",
-				},
-			);
+			throw new ProviderError("Browser runtime is not supported by apifuse perf yet.", {
+				code: "BROWSER_RUNTIME_UNSUPPORTED",
+			});
 		},
 		async withIsolatedContext() {
-			throw new ProviderError(
-				"Browser runtime is not supported by apifuse perf yet.",
-				{
-					code: "BROWSER_RUNTIME_UNSUPPORTED",
-				},
-			);
+			throw new ProviderError("Browser runtime is not supported by apifuse perf yet.", {
+				code: "BROWSER_RUNTIME_UNSUPPORTED",
+			});
 		},
 		async solveChallenge() {
-			throw new ProviderError(
-				"Browser runtime is not supported by apifuse perf yet.",
-				{
-					code: "BROWSER_RUNTIME_UNSUPPORTED",
-				},
-			);
+			throw new ProviderError("Browser runtime is not supported by apifuse perf yet.", {
+				code: "BROWSER_RUNTIME_UNSUPPORTED",
+			});
 		},
 	};
 }
@@ -833,9 +779,7 @@ function buildInsights(
 	const allSpans = runs.flatMap((run) => run.spans);
 	const stealthSpans = allSpans.filter((span) => span.name === "stealth.fetch");
 	const dnsSpans = allSpans.filter((span) => span.name === "dns");
-	const transform = breakdown.find(
-		(entry) => entry.name === "transformResponse",
-	);
+	const transform = breakdown.find((entry) => entry.name === "transformResponse");
 	const responseSizes = allSpans
 		.map((span) => span.attributes.response_size)
 		.filter((value): value is number => typeof value === "number");
@@ -844,9 +788,7 @@ function buildInsights(
 		.filter((value): value is boolean => typeof value === "boolean");
 
 	if (reuseFlags.length > 0) {
-		const reusePercent = Math.round(
-			(reuseFlags.filter(Boolean).length / reuseFlags.length) * 100,
-		);
+		const reusePercent = Math.round((reuseFlags.filter(Boolean).length / reuseFlags.length) * 100);
 		insights.push(
 			reusePercent >= 80
 				? `✓ Stealth connection reuse: ${reusePercent}% (good)`
@@ -863,24 +805,16 @@ function buildInsights(
 	}
 
 	if (dnsSpans.length > 0) {
-		const dnsAvg =
-			dnsSpans.reduce((sum, span) => sum + span.duration_ms, 0) /
-			dnsSpans.length;
+		const dnsAvg = dnsSpans.reduce((sum, span) => sum + span.duration_ms, 0) / dnsSpans.length;
 		if (dnsAvg >= 5) {
-			insights.push(
-				`⚠ DNS resolution: ${formatDuration(dnsAvg)} avg — consider DNS caching`,
-			);
+			insights.push(`⚠ DNS resolution: ${formatDuration(dnsAvg)} avg — consider DNS caching`);
 		}
 	}
 
 	if (responseSizes.length > 0) {
-		const avgSize =
-			responseSizes.reduce((sum, value) => sum + value, 0) /
-			responseSizes.length;
+		const avgSize = responseSizes.reduce((sum, value) => sum + value, 0) / responseSizes.length;
 		if (avgSize >= 4096) {
-			insights.push(
-				`⚠ Response size: ${formatBytes(avgSize)} avg — check gzip (Accept-Encoding)`,
-			);
+			insights.push(`⚠ Response size: ${formatBytes(avgSize)} avg — check gzip (Accept-Encoding)`);
 		}
 	}
 
@@ -925,13 +859,10 @@ function renderReport(options: {
 
 	if (options.proxySuite) {
 		const delta = options.proxySuite.stats.p50 - options.suite.stats.p50;
-		const deltaPercent =
-			options.suite.stats.p50 > 0 ? (delta / options.suite.stats.p50) * 100 : 0;
+		const deltaPercent = options.suite.stats.p50 > 0 ? (delta / options.suite.stats.p50) * 100 : 0;
 		lines.push("│");
 		lines.push("│ Proxy Comparison (--compare-proxy):");
-		lines.push(
-			`│   proxy: off  → p50: ${formatDuration(options.suite.stats.p50)}`,
-		);
+		lines.push(`│   proxy: off  → p50: ${formatDuration(options.suite.stats.p50)}`);
 		lines.push(
 			`│   proxy: on   → p50: ${formatDuration(options.proxySuite.stats.p50)} (${delta >= 0 ? "+" : ""}${Math.round(deltaPercent)}%)`,
 		);
@@ -979,9 +910,7 @@ function formatBytes(value: number): string {
 }
 
 function selectRepresentativeRun(runs: RunResult[]): RunResult {
-	const sorted = [...runs].sort(
-		(left, right) => left.durationMs - right.durationMs,
-	);
+	const sorted = [...runs].sort((left, right) => left.durationMs - right.durationMs);
 	const middle = sorted[Math.floor(sorted.length / 2)];
 	if (middle) {
 		return middle;
@@ -1065,17 +994,10 @@ function buildFlamegraphSvg(
 
 	const rects = flattened
 		.map((node) => {
-			const x =
-				12 +
-				((node.span.startedAt - root.startedAt) / totalDuration) * (width - 24);
-			const rectWidth = Math.max(
-				1,
-				(node.span.duration_ms / totalDuration) * (width - 24),
-			);
+			const x = 12 + ((node.span.startedAt - root.startedAt) / totalDuration) * (width - 24);
+			const rectWidth = Math.max(1, (node.span.duration_ms / totalDuration) * (width - 24));
 			const y = chartTop + node.depth * rowHeight;
-			const label = escapeXml(
-				`${node.span.name} (${formatDuration(node.span.duration_ms)})`,
-			);
+			const label = escapeXml(`${node.span.name} (${formatDuration(node.span.duration_ms)})`);
 			const title = escapeXml(
 				`${node.span.name}\n${formatDuration(node.span.duration_ms)}\nstatus: ${node.span.status}`,
 			);
@@ -1094,9 +1016,7 @@ function buildFlamegraphSvg(
 }
 
 function buildFlameTree(spans: Span[]): FlameNode[] {
-	const sorted = [...spans].sort(
-		(left, right) => left.startedAt - right.startedAt,
-	);
+	const sorted = [...spans].sort((left, right) => left.startedAt - right.startedAt);
 	const nodeMap = new Map<string, FlameNode>();
 
 	for (const span of sorted) {
@@ -1139,9 +1059,7 @@ function findRootSpan(spans: Span[]): Span {
 		return root;
 	}
 
-	const sorted = [...spans].sort(
-		(left, right) => left.startedAt - right.startedAt,
-	);
+	const sorted = [...spans].sort((left, right) => left.startedAt - right.startedAt);
 	const first = sorted[0];
 	if (!first) {
 		throw new Error("Expected at least one span");

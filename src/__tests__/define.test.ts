@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { defineProvider } from "../define";
-import { ProviderError, ValidationError } from "../errors";
-import type { ProviderContext, ProviderDeploymentOverrides } from "../types";
+import { defineProvider } from "../define.js";
+import { ProviderError, ValidationError } from "../errors.js";
+import type { ProviderContext, ProviderDeploymentOverrides } from "../types.js";
 
 const InputSchema = z.object({ id: z.string() });
 const OutputSchema = z.object({ name: z.string(), price: z.number() });
@@ -226,9 +226,7 @@ describe("defineProvider", () => {
 	});
 
 	it("throws ProviderError for invalid id format - single word", () => {
-		expect(() =>
-			defineProvider({ ...validConfig, id: "weather" }),
-		).not.toThrow();
+		expect(() => defineProvider({ ...validConfig, id: "weather" })).not.toThrow();
 	});
 
 	it("throws ProviderError for invalid id format - spaces", () => {
@@ -257,9 +255,7 @@ describe("defineProvider", () => {
 				prices: {
 					...validConfig.operations.prices,
 					fixtures: {
-						request: { wrong_field: "x" } as unknown as z.infer<
-							typeof InputSchema
-						>,
+						request: { wrong_field: "x" } as unknown as z.infer<typeof InputSchema>,
 						response: validConfig.operations.prices.fixtures.response,
 					},
 				},
@@ -278,9 +274,7 @@ describe("defineProvider", () => {
 					...validConfig.operations.prices,
 					fixtures: {
 						request: validConfig.operations.prices.fixtures.request,
-						response: { wrong: true } as unknown as z.infer<
-							typeof OutputSchema
-						>,
+						response: { wrong: true } as unknown as z.infer<typeof OutputSchema>,
 					},
 				},
 			},
@@ -297,9 +291,7 @@ describe("defineProvider", () => {
 				prices: {
 					...validConfig.operations.prices,
 					fixtures: {
-						request: { wrong_field: "x" } as unknown as z.infer<
-							typeof InputSchema
-						>,
+						request: { wrong_field: "x" } as unknown as z.infer<typeof InputSchema>,
 						response: validConfig.operations.prices.fixtures.response,
 					},
 				},
@@ -324,9 +316,7 @@ describe("defineProvider", () => {
 	});
 
 	it("throws ProviderError when no operations defined", () => {
-		expect(() => defineProvider({ ...validConfig, operations: {} })).toThrow(
-			ProviderError,
-		);
+		expect(() => defineProvider({ ...validConfig, operations: {} })).toThrow(ProviderError);
 	});
 
 	it("works without operation fixtures", () => {
@@ -396,16 +386,12 @@ describe("defineProvider", () => {
 		});
 
 		it("accepts a valid integer in [1, 60000] ms", () => {
-			const provider = defineProvider(
-				withAnnotations({ readOnly: true, timeoutMs: 30_000 }),
-			);
+			const provider = defineProvider(withAnnotations({ readOnly: true, timeoutMs: 30_000 }));
 			expect(provider.operations.prices.annotations?.timeoutMs).toBe(30_000);
 		});
 
 		it("accepts annotations without timeoutMs", () => {
-			expect(() =>
-				defineProvider(withAnnotations({ readOnly: true })),
-			).not.toThrow();
+			expect(() => defineProvider(withAnnotations({ readOnly: true }))).not.toThrow();
 		});
 
 		it("accepts a provider with no annotations block", () => {
@@ -413,27 +399,19 @@ describe("defineProvider", () => {
 		});
 
 		it("rejects timeoutMs of 0 (lower bound exclusive)", () => {
-			expect(() => defineProvider(withAnnotations({ timeoutMs: 0 }))).toThrow(
-				ValidationError,
-			);
+			expect(() => defineProvider(withAnnotations({ timeoutMs: 0 }))).toThrow(ValidationError);
 		});
 
 		it("rejects negative timeoutMs", () => {
-			expect(() =>
-				defineProvider(withAnnotations({ timeoutMs: -100 })),
-			).toThrow(ValidationError);
+			expect(() => defineProvider(withAnnotations({ timeoutMs: -100 }))).toThrow(ValidationError);
 		});
 
 		it("rejects timeoutMs above 60000 ms (upper bound)", () => {
-			expect(() =>
-				defineProvider(withAnnotations({ timeoutMs: 60_001 })),
-			).toThrow(ValidationError);
+			expect(() => defineProvider(withAnnotations({ timeoutMs: 60_001 }))).toThrow(ValidationError);
 		});
 
 		it("rejects non-integer timeoutMs", () => {
-			expect(() =>
-				defineProvider(withAnnotations({ timeoutMs: 1500.5 })),
-			).toThrow(ValidationError);
+			expect(() => defineProvider(withAnnotations({ timeoutMs: 1500.5 }))).toThrow(ValidationError);
 		});
 
 		it("rejects non-number timeoutMs", () => {
@@ -509,10 +487,7 @@ describe("defineProvider", () => {
 			expect(() =>
 				defineProvider({
 					...validConfig,
-					deployment: [{ runtime: "shared" }] as unknown as Record<
-						string,
-						never
-					>,
+					deployment: [{ runtime: "shared" }] as unknown as Record<string, never>,
 				}),
 			).toThrow(ProviderError);
 		});

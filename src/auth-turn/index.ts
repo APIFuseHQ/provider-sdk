@@ -1,4 +1,4 @@
-import type { AuthTurn } from "../types";
+import type { AuthTurn } from "../types.js";
 
 export type { AuthTurn };
 

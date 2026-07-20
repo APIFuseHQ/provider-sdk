@@ -1,7 +1,7 @@
 import ms from "ms";
 
-import { ProviderError, ValidationError } from "./errors";
-import { safeParseSchemaSync } from "./schema";
+import { ProviderError, ValidationError } from "./errors.js";
+import { safeParseSchemaSync } from "./schema.js";
 import type {
 	AuthConfig,
 	BrowserEngine,
@@ -33,7 +33,7 @@ import type {
 	SchemaLike,
 	SmsOtpMatcherDefinition,
 	StealthPlatform,
-} from "./types";
+} from "./types.js";
 import {
 	HEALTH_CHECK_DEGRADED_THRESHOLD_MS_MAX,
 	HEALTH_CHECK_DEGRADED_THRESHOLD_MS_MIN,
@@ -49,7 +49,7 @@ import {
 	STREAM_IDLE_TIMEOUT_MS_MIN,
 	STREAM_MAX_DURATION_MS_MAX,
 	STREAM_MAX_DURATION_MS_MIN,
-} from "./types";
+} from "./types.js";
 
 type ProviderImplementationSourceAccess =
 	| "official_api"
@@ -75,23 +75,10 @@ interface ProviderImplementationProfile {
 const CONNECTOR_ID_REGEX = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/;
 const OPERATION_ID_REGEX = /^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/;
 const VALID_RUNTIMES = ["standard", "shared", "browser"] as const;
-const VALID_AUTH_MODES = [
-	"none",
-	"platform-managed",
-	"credentials",
-	"oauth2",
-] as const;
+const VALID_AUTH_MODES = ["none", "platform-managed", "credentials", "oauth2"] as const;
 const VALID_PROVIDER_ACCESS_VISIBILITIES = ["public", "early_access"] as const;
-const VALID_PROVIDER_PROXY_MODES = [
-	"disabled",
-	"optional",
-	"required",
-] as const;
-const VALID_PROVIDER_PROXY_PROVIDERS = [
-	"smartproxy",
-	"decodo",
-	"custom",
-] as const;
+const VALID_PROVIDER_PROXY_MODES = ["disabled", "optional", "required"] as const;
+const VALID_PROVIDER_PROXY_PROVIDERS = ["smartproxy", "decodo", "custom"] as const;
 const VALID_PROVIDER_PROXY_AFFINITIES = [
 	"request",
 	"operation",
@@ -102,23 +89,9 @@ const VALID_PROVIDER_STT_MODES = ["optional", "required"] as const;
 const SMARTPROXY_APP_KEY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 const RESERVED_OPERATION_IDS = new Set(["auth", "health"]);
 const MCP_TOOL_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
-const VALID_OPERATION_RISK_CLASSES = [
-	"read",
-	"write",
-	"destructive",
-	"external-send",
-] as const;
-const VALID_OPERATION_APPROVAL_POLICIES = [
-	"never",
-	"risk-based",
-	"always",
-] as const;
-const VALID_OPERATION_TRANSPORT_KINDS = [
-	"json",
-	"sse",
-	"http-stream",
-	"websocket",
-] as const;
+const VALID_OPERATION_RISK_CLASSES = ["read", "write", "destructive", "external-send"] as const;
+const VALID_OPERATION_APPROVAL_POLICIES = ["never", "risk-based", "always"] as const;
+const VALID_OPERATION_TRANSPORT_KINDS = ["json", "sse", "http-stream", "websocket"] as const;
 const SSE_EVENT_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const WEBSOCKET_SUBPROTOCOL_REGEX = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
@@ -136,18 +109,16 @@ function msDurationMs(value: string): number {
 function parsePositiveMsDuration(value: string): number | undefined {
 	const trimmed = value.trim();
 	if (!MS_DURATION_PATTERN.test(trimmed)) return undefined;
-	const parsed = ms(
-		(trimmed.startsWith("+") ? trimmed.slice(1) : trimmed) as ms.StringValue,
-	);
+	const parsed = ms((trimmed.startsWith("+") ? trimmed.slice(1) : trimmed) as ms.StringValue);
 	if (!Number.isFinite(parsed) || parsed <= 0) return undefined;
 	return parsed;
 }
 
 type ProviderOperation = OperationDefinition<SchemaLike, SchemaLike>;
-type OperationConfig<
-	TInput extends SchemaLike,
-	TOutput extends SchemaLike,
-> = Omit<OperationDefinition<TInput, TOutput>, "handler"> & {
+type OperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<
+	OperationDefinition<TInput, TOutput>,
+	"handler"
+> & {
 	handler(
 		ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0],
 		input: InferSchemaOutput<TInput>,
@@ -155,59 +126,44 @@ type OperationConfig<
 		| OperationHandlerResult<InferSchemaOutput<TOutput>>
 		| Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
 };
-type OperationMapConfig<TOperations extends Record<string, ProviderOperation>> =
-	{
-		[K in keyof TOperations]: TOperations[K] extends OperationDefinition<
-			infer TInput,
-			infer TOutput
-		>
-			? OperationConfig<TInput, TOutput> | OperationDefinition<TInput, TOutput>
-			: never;
-	};
-type StreamOperationConfig<
-	TInput extends SchemaLike,
-	TOutput extends SchemaLike,
-> =
+type OperationMapConfig<TOperations extends Record<string, ProviderOperation>> = {
+	[K in keyof TOperations]: TOperations[K] extends OperationDefinition<infer TInput, infer TOutput>
+		? OperationConfig<TInput, TOutput> | OperationDefinition<TInput, TOutput>
+		: never;
+};
+type StreamOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> =
 	| SseOperationConfig<TInput, TOutput>
 	| HttpStreamOperationConfig<TInput, TOutput>
 	| WebSocketOperationConfig<TInput, TOutput>;
-type SseOperationConfig<
-	TInput extends SchemaLike,
-	TOutput extends SchemaLike,
-> = Omit<OperationConfig<TInput, TOutput>, "handler" | "transport"> & {
+type SseOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<
+	OperationConfig<TInput, TOutput>,
+	"handler" | "transport"
+> & {
 	transport: OperationSseTransport;
 	handler(
 		ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0],
 		input: InferSchemaOutput<TInput>,
-	):
-		| AsyncIterable<ProviderStreamEvent>
-		| Promise<AsyncIterable<ProviderStreamEvent>>;
+	): AsyncIterable<ProviderStreamEvent> | Promise<AsyncIterable<ProviderStreamEvent>>;
 };
-type HttpStreamOperationConfig<
-	TInput extends SchemaLike,
-	TOutput extends SchemaLike,
-> = Omit<OperationConfig<TInput, TOutput>, "handler" | "transport"> & {
+type HttpStreamOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<
+	OperationConfig<TInput, TOutput>,
+	"handler" | "transport"
+> & {
 	transport: OperationHttpStreamTransport;
 	handler(
 		ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0],
 		input: InferSchemaOutput<TInput>,
-	):
-		| Response
-		| ReadableStream<Uint8Array>
-		| Promise<Response | ReadableStream<Uint8Array>>;
+	): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
 };
-type WebSocketOperationConfig<
-	TInput extends SchemaLike,
-	TOutput extends SchemaLike,
-> = Omit<OperationConfig<TInput, TOutput>, "handler" | "transport"> & {
+type WebSocketOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<
+	OperationConfig<TInput, TOutput>,
+	"handler" | "transport"
+> & {
 	transport: OperationWebSocketTransport;
 	handler(
 		ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0],
 		input: InferSchemaOutput<TInput>,
-	):
-		| Response
-		| ReadableStream<Uint8Array>
-		| Promise<Response | ReadableStream<Uint8Array>>;
+	): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
 };
 
 type AuthStartNoInputGuard<TConfig> = TConfig extends {
@@ -222,9 +178,7 @@ type AuthStartNoInputGuard<TConfig> = TConfig extends {
 		: unknown
 	: unknown;
 
-export interface ProviderConfig<
-	TOperations extends Record<string, ProviderOperation>,
-> {
+export interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> {
 	id: string;
 	version: string;
 	runtime: "standard" | "shared" | "browser";
@@ -278,35 +232,24 @@ export interface ProviderConfig<
 }
 
 /** Define one provider operation with schema-driven handler inference. */
-export function defineOperation<
-	TInput extends SchemaLike,
-	TOutput extends SchemaLike,
->(
+export function defineOperation<TInput extends SchemaLike, TOutput extends SchemaLike>(
 	operation: OperationConfig<TInput, TOutput>,
 ): OperationDefinition<TInput, TOutput> {
 	return operation;
 }
 
 /** Define a non-JSON provider operation with explicit transport metadata. */
-export function defineStreamOperation<
-	TInput extends SchemaLike,
-	TOutput extends SchemaLike,
->(
+export function defineStreamOperation<TInput extends SchemaLike, TOutput extends SchemaLike>(
 	operation: StreamOperationConfig<TInput, TOutput>,
 ): OperationDefinition<TInput, TOutput> {
 	return operation;
 }
 
-function assertObjectConfig(
-	value: unknown,
-): asserts value is Record<string, unknown> {
+function assertObjectConfig(value: unknown): asserts value is Record<string, unknown> {
 	if (!value || typeof value !== "object") {
-		throw new ProviderError(
-			"defineProvider config must be an object. Offending field: config",
-			{
-				fix: "Pass defineProvider({ id, version, runtime, meta, operations })",
-			},
-		);
+		throw new ProviderError("defineProvider config must be an object. Offending field: config", {
+			fix: "Pass defineProvider({ id, version, runtime, meta, operations })",
+		});
 	}
 }
 function assertRequiredField(
@@ -344,25 +287,10 @@ function validateProviderShape(config: unknown): void {
 	assertRequiredField(config, "meta", String(config.id));
 	assertRequiredField(config, "operations", String(config.id));
 	if (typeof config.runtime === "string")
-		assertLiteralField(
-			config.runtime,
-			"runtime",
-			VALID_RUNTIMES,
-			String(config.id),
-		);
+		assertLiteralField(config.runtime, "runtime", VALID_RUNTIMES, String(config.id));
 	const auth = config.auth;
-	if (
-		auth &&
-		typeof auth === "object" &&
-		"mode" in auth &&
-		typeof auth.mode === "string"
-	)
-		assertLiteralField(
-			auth.mode,
-			"auth.mode",
-			VALID_AUTH_MODES,
-			String(config.id),
-		);
+	if (auth && typeof auth === "object" && "mode" in auth && typeof auth.mode === "string")
+		assertLiteralField(auth.mode, "auth.mode", VALID_AUTH_MODES, String(config.id));
 	if (auth && typeof auth === "object" && "exchange" in auth) {
 		throw new ProviderError(
 			`Provider "${String(config.id)}" auth.exchange is not part of the Provider SDK auth contract`,
@@ -398,9 +326,7 @@ function validateProviderShape(config: unknown): void {
 				},
 			);
 		}
-		const accessRecord: Record<string, unknown> = Object.fromEntries(
-			Object.entries(access),
-		);
+		const accessRecord: Record<string, unknown> = Object.fromEntries(Object.entries(access));
 		for (const key of Object.keys(accessRecord)) {
 			if (key !== "visibility") {
 				throw new ValidationError(`Unknown field "${key}" on access.`, {
@@ -445,31 +371,13 @@ function validateProviderProxy(config: {
 			},
 		);
 	}
-	rejectUnknownFields(
-		proxy,
-		new Set(["mode", "provider", "geo", "session"]),
-		"proxy",
-	);
-	assertLiteralField(
-		proxy.mode,
-		"proxy.mode",
-		VALID_PROVIDER_PROXY_MODES,
-		config.id,
-	);
+	rejectUnknownFields(proxy, new Set(["mode", "provider", "geo", "session"]), "proxy");
+	assertLiteralField(proxy.mode, "proxy.mode", VALID_PROVIDER_PROXY_MODES, config.id);
 	if (proxy.provider !== undefined) {
-		assertLiteralField(
-			proxy.provider,
-			"proxy.provider",
-			VALID_PROVIDER_PROXY_PROVIDERS,
-			config.id,
-		);
+		assertLiteralField(proxy.provider, "proxy.provider", VALID_PROVIDER_PROXY_PROVIDERS, config.id);
 	}
 	if (proxy.geo !== undefined) {
-		if (
-			!proxy.geo ||
-			typeof proxy.geo !== "object" ||
-			Array.isArray(proxy.geo)
-		) {
+		if (!proxy.geo || typeof proxy.geo !== "object" || Array.isArray(proxy.geo)) {
 			throw new ValidationError(
 				`Provider "${config.id}" has invalid proxy.geo: must be an object.`,
 				{
@@ -477,11 +385,7 @@ function validateProviderProxy(config: {
 				},
 			);
 		}
-		rejectUnknownFields(
-			proxy.geo,
-			new Set(["country", "subdivision", "city"]),
-			"proxy.geo",
-		);
+		rejectUnknownFields(proxy.geo, new Set(["country", "subdivision", "city"]), "proxy.geo");
 		if (proxy.geo.country !== undefined) {
 			assertIsoCountry(proxy.geo.country, "proxy.geo.country");
 		}
@@ -495,11 +399,7 @@ function validateProviderProxy(config: {
 		}
 	}
 	if (proxy.session !== undefined) {
-		if (
-			!proxy.session ||
-			typeof proxy.session !== "object" ||
-			Array.isArray(proxy.session)
-		) {
+		if (!proxy.session || typeof proxy.session !== "object" || Array.isArray(proxy.session)) {
 			throw new ValidationError(
 				`Provider "${config.id}" has invalid proxy.session: must be an object.`,
 				{
@@ -521,19 +421,13 @@ function validateProviderProxy(config: {
 			);
 		}
 		const lifetime = proxy.session.lifetimeMinutes;
-		if (
-			lifetime !== undefined &&
-			(!Number.isFinite(lifetime) || lifetime <= 0)
-		) {
+		if (lifetime !== undefined && (!Number.isFinite(lifetime) || lifetime <= 0)) {
 			throw new ValidationError(
 				`Provider "${config.id}" has invalid proxy.session.lifetimeMinutes: must be a positive number of minutes.`,
 			);
 		}
 		const poolSize = proxy.session.poolSize;
-		if (
-			poolSize !== undefined &&
-			(!Number.isInteger(poolSize) || poolSize <= 0)
-		) {
+		if (poolSize !== undefined && (!Number.isInteger(poolSize) || poolSize <= 0)) {
 			throw new ValidationError(
 				`Provider "${config.id}" has invalid proxy.session.poolSize: must be a positive integer.`,
 			);
@@ -541,8 +435,7 @@ function validateProviderProxy(config: {
 	}
 	if (proxy.mode === "required" && proxy.provider === "smartproxy") {
 		const hasSmartproxySecret = config.secrets?.some(
-			(secret) =>
-				secret.name === SMARTPROXY_APP_KEY_SECRET && secret.required !== false,
+			(secret) => secret.name === SMARTPROXY_APP_KEY_SECRET && secret.required !== false,
 		);
 		if (!hasSmartproxySecret) {
 			throw new ValidationError(
@@ -555,17 +448,13 @@ function validateProviderProxy(config: {
 	}
 }
 
-function validateProviderStt(config: {
-	id: string;
-	stt?: ProviderSttConfig;
-}): void {
+function validateProviderStt(config: { id: string; stt?: ProviderSttConfig }): void {
 	const stt = config.stt;
 	if (stt === undefined) return;
 	if (!stt || typeof stt !== "object" || Array.isArray(stt)) {
-		throw new ValidationError(
-			`Provider "${config.id}" has invalid stt: must be an object.`,
-			{ fix: `Use stt: { mode: "required" } or stt: { mode: "optional" }.` },
-		);
+		throw new ValidationError(`Provider "${config.id}" has invalid stt: must be an object.`, {
+			fix: `Use stt: { mode: "required" } or stt: { mode: "optional" }.`,
+		});
 	}
 	rejectUnknownFields(stt, new Set(["mode"]), "stt");
 	assertLiteralField(stt.mode, "stt.mode", VALID_PROVIDER_STT_MODES, config.id);
@@ -592,16 +481,9 @@ function validateOperationIds(
 			);
 	}
 }
-const OPERATION_CONTRACT_VERSION_REGEX =
-	/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
-const OPERATION_SENSITIVE_PATH_REGEX =
-	/^(?:[A-Za-z0-9_$-]+|\*)(?:\.(?:[A-Za-z0-9_$-]+|\*))*$/;
-const VALID_OPERATION_LIFECYCLES = [
-	"stable",
-	"beta",
-	"deprecated",
-	"removed",
-] as const;
+const OPERATION_CONTRACT_VERSION_REGEX = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/;
+const OPERATION_SENSITIVE_PATH_REGEX = /^(?:[A-Za-z0-9_$-]+|\*)(?:\.(?:[A-Za-z0-9_$-]+|\*))*$/;
+const VALID_OPERATION_LIFECYCLES = ["stable", "beta", "deprecated", "removed"] as const;
 
 function assertNonEmptyString(
 	value: unknown,
@@ -632,10 +514,7 @@ function validateToolRouterMetadata(
 				},
 			);
 		}
-		if (
-			toolRouter.name !== undefined &&
-			!MCP_TOOL_NAME_REGEX.test(toolRouter.name)
-		) {
+		if (toolRouter.name !== undefined && !MCP_TOOL_NAME_REGEX.test(toolRouter.name)) {
 			throw new ValidationError(
 				`Provider "${providerId}" operation "${operationName}" has invalid operations.${operationName}.toolRouter.name: expected an MCP-safe name.`,
 				{
@@ -707,10 +586,7 @@ function validateOperationContracts(
 				providerId,
 			);
 		}
-		if (
-			contract.lifecycle === "deprecated" ||
-			contract.lifecycle === "removed"
-		) {
+		if (contract.lifecycle === "deprecated" || contract.lifecycle === "removed") {
 			if (!contract.deprecation || typeof contract.deprecation !== "object") {
 				throw new ValidationError(
 					`Provider "${providerId}" operation "${operationName}" is ${contract.lifecycle} but lacks operations.${operationName}.contract.deprecation metadata.`,
@@ -758,10 +634,7 @@ function validateOperationAnnotations(
 					fix: `Set ${field} to an integer in [${OPERATION_TIMEOUT_MS_MIN}, ${OPERATION_TIMEOUT_MS_MAX}] (milliseconds).`,
 				},
 			);
-		if (
-			timeoutMs < OPERATION_TIMEOUT_MS_MIN ||
-			timeoutMs > OPERATION_TIMEOUT_MS_MAX
-		)
+		if (timeoutMs < OPERATION_TIMEOUT_MS_MIN || timeoutMs > OPERATION_TIMEOUT_MS_MAX)
 			throw new ValidationError(
 				`Provider "${providerId}" has invalid ${field}: ${timeoutMs} is outside [${OPERATION_TIMEOUT_MS_MIN}, ${OPERATION_TIMEOUT_MS_MAX}] ms.`,
 				{
@@ -959,12 +832,7 @@ function validateOperationTransports(
 				},
 			);
 		}
-		assertLiteralField(
-			kind,
-			`${fieldPath}.kind`,
-			VALID_OPERATION_TRANSPORT_KINDS,
-			providerId,
-		);
+		assertLiteralField(kind, `${fieldPath}.kind`, VALID_OPERATION_TRANSPORT_KINDS, providerId);
 
 		switch (kind) {
 			case "json":
@@ -996,16 +864,9 @@ function validateOperationTransports(
 					STREAM_MAX_DURATION_MS_MAX,
 					"max duration",
 				);
-				assertPositiveBytes(
-					Reflect.get(transport, "maxEventBytes"),
-					`${fieldPath}.maxEventBytes`,
-				);
+				assertPositiveBytes(Reflect.get(transport, "maxEventBytes"), `${fieldPath}.maxEventBytes`);
 				const resumable = Reflect.get(transport, "resumable");
-				if (
-					resumable !== undefined &&
-					resumable !== false &&
-					resumable !== "last-event-id"
-				) {
+				if (resumable !== undefined && resumable !== false && resumable !== "last-event-id") {
 					throw new ValidationError(
 						`Provider "${providerId}" operation "${operationName}" has invalid ${fieldPath}.resumable: expected false or "last-event-id".`,
 						{
@@ -1025,12 +886,7 @@ function validateOperationTransports(
 				rejectUnknownFields(transport, HTTP_STREAM_TRANSPORT_FIELDS, fieldPath);
 				const contentType = Reflect.get(transport, "contentType");
 				if (contentType !== undefined) {
-					assertNonEmptyString(
-						contentType,
-						`${fieldPath}.contentType`,
-						providerId,
-						operationName,
-					);
+					assertNonEmptyString(contentType, `${fieldPath}.contentType`, providerId, operationName);
 				}
 				assertStreamMs(
 					Reflect.get(transport, "idleTimeoutMs"),
@@ -1046,10 +902,7 @@ function validateOperationTransports(
 					STREAM_MAX_DURATION_MS_MAX,
 					"max duration",
 				);
-				assertPositiveBytes(
-					Reflect.get(transport, "maxChunkBytes"),
-					`${fieldPath}.maxChunkBytes`,
-				);
+				assertPositiveBytes(Reflect.get(transport, "maxChunkBytes"), `${fieldPath}.maxChunkBytes`);
 				break;
 			}
 			case "websocket": {
@@ -1074,10 +927,7 @@ function validateOperationTransports(
 						);
 					}
 					for (const subprotocol of subprotocols) {
-						if (
-							typeof subprotocol !== "string" ||
-							!WEBSOCKET_SUBPROTOCOL_REGEX.test(subprotocol)
-						) {
+						if (typeof subprotocol !== "string" || !WEBSOCKET_SUBPROTOCOL_REGEX.test(subprotocol)) {
 							throw new ValidationError(
 								`Provider "${providerId}" operation "${operationName}" has invalid ${fieldPath}.subprotocols: each subprotocol must be an RFC token string.`,
 								{
@@ -1101,10 +951,7 @@ function validateOperationTransports(
 					STREAM_MAX_DURATION_MS_MAX,
 					"max duration",
 				);
-				assertPositiveBytes(
-					Reflect.get(transport, "maxFrameBytes"),
-					`${fieldPath}.maxFrameBytes`,
-				);
+				assertPositiveBytes(Reflect.get(transport, "maxFrameBytes"), `${fieldPath}.maxFrameBytes`);
 				break;
 			}
 		}
@@ -1167,10 +1014,7 @@ function levenshtein(a: string, b: string): number {
 	return prev[n] ?? 0;
 }
 
-function suggestField(
-	unknown: string,
-	candidates: ReadonlySet<string>,
-): string | undefined {
+function suggestField(unknown: string, candidates: ReadonlySet<string>): string | undefined {
 	let best: string | undefined;
 	let bestDist = 3;
 	for (const candidate of candidates) {
@@ -1183,11 +1027,7 @@ function suggestField(
 	return best;
 }
 
-function rejectUnknownFields(
-	value: object,
-	allowed: ReadonlySet<string>,
-	fieldPath: string,
-): void {
+function rejectUnknownFields(value: object, allowed: ReadonlySet<string>, fieldPath: string): void {
 	for (const key of Object.keys(value)) {
 		if (allowed.has(key)) continue;
 		const hint = suggestField(key, allowed);
@@ -1226,23 +1066,12 @@ function validateProviderHealthMonitor(
 	field: "healthMonitor" | "healthProbe" = "healthMonitor",
 ): void {
 	if (healthMonitor === undefined) return;
-	if (
-		!healthMonitor ||
-		typeof healthMonitor !== "object" ||
-		Array.isArray(healthMonitor)
-	)
-		throw new ValidationError(
-			`Provider "${providerId}" has invalid ${field}: must be an object.`,
-			{
-				fix: `Set ${field} to { requiredSecrets?: string[]; serviceAccount?: string }`,
-			},
-		);
+	if (!healthMonitor || typeof healthMonitor !== "object" || Array.isArray(healthMonitor))
+		throw new ValidationError(`Provider "${providerId}" has invalid ${field}: must be an object.`, {
+			fix: `Set ${field} to { requiredSecrets?: string[]; serviceAccount?: string }`,
+		});
 	const healthMonitorRecord = Object.fromEntries(Object.entries(healthMonitor));
-	rejectUnknownFields(
-		healthMonitorRecord,
-		PROVIDER_HEALTH_MONITOR_FIELDS,
-		field,
-	);
+	rejectUnknownFields(healthMonitorRecord, PROVIDER_HEALTH_MONITOR_FIELDS, field);
 	if (healthMonitorRecord.defaultProbeTimeoutMs !== undefined) {
 		assertBoundedIntegerMs(
 			healthMonitorRecord.defaultProbeTimeoutMs,
@@ -1310,11 +1139,7 @@ function validateProviderHealthMonitor(
 
 	const probeOverrides = healthMonitorRecord.probeOverrides;
 	if (probeOverrides !== undefined) {
-		if (
-			!probeOverrides ||
-			typeof probeOverrides !== "object" ||
-			Array.isArray(probeOverrides)
-		)
+		if (!probeOverrides || typeof probeOverrides !== "object" || Array.isArray(probeOverrides))
 			throw new ValidationError(
 				`Provider "${providerId}" has invalid ${field}.probeOverrides: must be an object keyed by probe id.`,
 			);
@@ -1380,14 +1205,8 @@ function validateHealthCheckCase(
 ): void {
 	const fieldPath = `operations.${operationName}.healthCheck.cases[${caseIndex}]`;
 	if (!caseValue || typeof caseValue !== "object" || Array.isArray(caseValue))
-		throw new ValidationError(
-			`Provider "${providerId}" ${fieldPath} must be an object.`,
-		);
-	rejectUnknownFields(
-		caseValue as Record<string, unknown>,
-		HEALTH_CHECK_CASE_FIELDS,
-		fieldPath,
-	);
+		throw new ValidationError(`Provider "${providerId}" ${fieldPath} must be an object.`);
+	rejectUnknownFields(caseValue as Record<string, unknown>, HEALTH_CHECK_CASE_FIELDS, fieldPath);
 	const c = caseValue as HealthCheckCase;
 	if (typeof c.name !== "string" || c.name.length === 0)
 		throw new ValidationError(
@@ -1415,15 +1234,11 @@ function validateHealthCheckCase(
 			`Provider "${providerId}" ${fieldPath}.degradedThresholdMs must be an integer degraded threshold in [${HEALTH_CHECK_DEGRADED_THRESHOLD_MS_MIN}, ${HEALTH_CHECK_DEGRADED_THRESHOLD_MS_MAX}] ms.`,
 		);
 	if (c.timeoutMs !== undefined) {
-		assertBoundedIntegerMs(
-			c.timeoutMs,
-			`Provider "${providerId}" ${fieldPath}.timeoutMs`,
-			{
-				min: HEALTH_CHECK_TIMEOUT_MS_MIN,
-				max: HEALTH_CHECK_TIMEOUT_MS_MAX,
-				label: "timeout",
-			},
-		);
+		assertBoundedIntegerMs(c.timeoutMs, `Provider "${providerId}" ${fieldPath}.timeoutMs`, {
+			min: HEALTH_CHECK_TIMEOUT_MS_MIN,
+			max: HEALTH_CHECK_TIMEOUT_MS_MAX,
+			label: "timeout",
+		});
 	}
 	if (
 		c.expectedStatus !== undefined &&
@@ -1439,21 +1254,11 @@ function validateHealthCheckCase(
 		);
 }
 
-function validateHealthCheckSuite(
-	providerId: string,
-	operationName: string,
-	suite: unknown,
-): void {
+function validateHealthCheckSuite(providerId: string, operationName: string, suite: unknown): void {
 	const fieldPath = `operations.${operationName}.healthCheck`;
 	if (!suite || typeof suite !== "object" || Array.isArray(suite))
-		throw new ValidationError(
-			`Provider "${providerId}" ${fieldPath} must be an object.`,
-		);
-	rejectUnknownFields(
-		suite as Record<string, unknown>,
-		HEALTH_CHECK_SUITE_FIELDS,
-		fieldPath,
-	);
+		throw new ValidationError(`Provider "${providerId}" ${fieldPath} must be an object.`);
+	rejectUnknownFields(suite as Record<string, unknown>, HEALTH_CHECK_SUITE_FIELDS, fieldPath);
 	const s = suite as HealthCheckSuite;
 	if (!isPositiveMsDurationString(s.interval))
 		throw new ValidationError(
@@ -1463,11 +1268,7 @@ function validateHealthCheckSuite(
 			},
 		);
 	if (s.schedule !== undefined) {
-		if (
-			!s.schedule ||
-			typeof s.schedule !== "object" ||
-			Array.isArray(s.schedule)
-		) {
+		if (!s.schedule || typeof s.schedule !== "object" || Array.isArray(s.schedule)) {
 			throw new ValidationError(
 				`Provider "${providerId}" ${fieldPath}.schedule must be an object.`,
 			);
@@ -1477,11 +1278,7 @@ function validateHealthCheckSuite(
 				`Provider "${providerId}" ${fieldPath}.schedule.jitter is not supported for operation healthCheck schedules. Use schedule.randomize instead.`,
 			);
 		}
-		rejectUnknownFields(
-			s.schedule,
-			new Set(["randomize"]),
-			`${fieldPath}.schedule`,
-		);
+		rejectUnknownFields(s.schedule, new Set(["randomize"]), `${fieldPath}.schedule`);
 		const randomize = Reflect.get(s.schedule, "randomize");
 		if (randomize !== undefined) {
 			validateScheduleRandomization(
@@ -1492,15 +1289,11 @@ function validateHealthCheckSuite(
 		}
 	}
 	if (s.timeoutMs !== undefined) {
-		assertBoundedIntegerMs(
-			s.timeoutMs,
-			`Provider "${providerId}" ${fieldPath}.timeoutMs`,
-			{
-				min: HEALTH_CHECK_TIMEOUT_MS_MIN,
-				max: HEALTH_CHECK_TIMEOUT_MS_MAX,
-				label: "timeout",
-			},
-		);
+		assertBoundedIntegerMs(s.timeoutMs, `Provider "${providerId}" ${fieldPath}.timeoutMs`, {
+			min: HEALTH_CHECK_TIMEOUT_MS_MIN,
+			max: HEALTH_CHECK_TIMEOUT_MS_MAX,
+			label: "timeout",
+		});
 	}
 	if (s.degradedThresholdMs !== undefined) {
 		assertBoundedIntegerMs(
@@ -1513,10 +1306,7 @@ function validateHealthCheckSuite(
 			},
 		);
 	}
-	if (
-		s.requiresConnection !== undefined &&
-		typeof s.requiresConnection !== "boolean"
-	)
+	if (s.requiresConnection !== undefined && typeof s.requiresConnection !== "boolean")
 		throw new ValidationError(
 			`Provider "${providerId}" ${fieldPath}.requiresConnection must be a boolean.`,
 		);
@@ -1548,14 +1338,8 @@ function validateHealthCheckUnsupported(
 	unsupported: unknown,
 ): void {
 	const fieldPath = `operations.${operationName}.healthCheckUnsupported`;
-	if (
-		!unsupported ||
-		typeof unsupported !== "object" ||
-		Array.isArray(unsupported)
-	)
-		throw new ValidationError(
-			`Provider "${providerId}" ${fieldPath} must be an object.`,
-		);
+	if (!unsupported || typeof unsupported !== "object" || Array.isArray(unsupported))
+		throw new ValidationError(`Provider "${providerId}" ${fieldPath} must be an object.`);
 	rejectUnknownFields(
 		unsupported as Record<string, unknown>,
 		HEALTH_CHECK_UNSUPPORTED_FIELDS,
@@ -1589,12 +1373,7 @@ const HEALTH_JOURNEY_FIELDS = new Set([
 	"steps",
 	"run",
 ]);
-const HEALTH_JOURNEY_SCHEDULE_FIELDS = new Set([
-	"kind",
-	"interval",
-	"jitter",
-	"randomize",
-]);
+const HEALTH_JOURNEY_SCHEDULE_FIELDS = new Set(["kind", "interval", "jitter", "randomize"]);
 const HEALTH_JOURNEY_STEP_FIELDS = new Set([
 	"id",
 	"description",
@@ -1613,10 +1392,7 @@ const HEALTH_JOURNEY_MANUAL_TRIGGER_FIELDS = new Set([
 	"minManualInterval",
 	"publicRationale",
 ]);
-const HEALTH_JOURNEY_MANUAL_TRIGGER_DISABLED_FIELDS = new Set([
-	"enabled",
-	"reason",
-]);
+const HEALTH_JOURNEY_MANUAL_TRIGGER_DISABLED_FIELDS = new Set(["enabled", "reason"]);
 const HEALTH_JOURNEY_MANUAL_TRIGGER_ENABLED_FIELDS = new Set([
 	"enabled",
 	"requiresAcknowledgement",
@@ -1636,32 +1412,18 @@ function validateHealthJourneyManualTrigger(
 	manualTrigger: unknown,
 ): void {
 	const fieldPath = `healthJourneys.${journeyId}.manualTrigger`;
-	if (
-		!manualTrigger ||
-		typeof manualTrigger !== "object" ||
-		Array.isArray(manualTrigger)
-	) {
+	if (!manualTrigger || typeof manualTrigger !== "object" || Array.isArray(manualTrigger)) {
 		throw new ValidationError(
 			`Provider "${providerId}" ${fieldPath} must be an object when present.`,
 		);
 	}
-	rejectUnknownFields(
-		manualTrigger,
-		HEALTH_JOURNEY_MANUAL_TRIGGER_FIELDS,
-		fieldPath,
-	);
+	rejectUnknownFields(manualTrigger, HEALTH_JOURNEY_MANUAL_TRIGGER_FIELDS, fieldPath);
 	const enabled = Reflect.get(manualTrigger, "enabled");
 	if (typeof enabled !== "boolean") {
-		throw new ValidationError(
-			`Provider "${providerId}" ${fieldPath}.enabled must be a boolean.`,
-		);
+		throw new ValidationError(`Provider "${providerId}" ${fieldPath}.enabled must be a boolean.`);
 	}
 	if (enabled === false) {
-		rejectUnknownFields(
-			manualTrigger,
-			HEALTH_JOURNEY_MANUAL_TRIGGER_DISABLED_FIELDS,
-			fieldPath,
-		);
+		rejectUnknownFields(manualTrigger, HEALTH_JOURNEY_MANUAL_TRIGGER_DISABLED_FIELDS, fieldPath);
 		if (
 			Reflect.get(manualTrigger, "reason") !== undefined &&
 			(typeof Reflect.get(manualTrigger, "reason") !== "string" ||
@@ -1673,25 +1435,15 @@ function validateHealthJourneyManualTrigger(
 		}
 		return;
 	}
-	rejectUnknownFields(
-		manualTrigger,
-		HEALTH_JOURNEY_MANUAL_TRIGGER_ENABLED_FIELDS,
-		fieldPath,
-	);
-	const requiresAcknowledgement = Reflect.get(
-		manualTrigger,
-		"requiresAcknowledgement",
-	);
+	rejectUnknownFields(manualTrigger, HEALTH_JOURNEY_MANUAL_TRIGGER_ENABLED_FIELDS, fieldPath);
+	const requiresAcknowledgement = Reflect.get(manualTrigger, "requiresAcknowledgement");
 	if (typeof requiresAcknowledgement !== "boolean") {
 		throw new ValidationError(
 			`Provider "${providerId}" ${fieldPath}.requiresAcknowledgement must be a boolean.`,
 		);
 	}
 	const risk = Reflect.get(manualTrigger, "risk");
-	if (
-		typeof risk !== "string" ||
-		!HEALTH_JOURNEY_MANUAL_TRIGGER_RISKS.has(risk)
-	) {
+	if (typeof risk !== "string" || !HEALTH_JOURNEY_MANUAL_TRIGGER_RISKS.has(risk)) {
 		throw new ValidationError(
 			`Provider "${providerId}" ${fieldPath}.risk must be one of read_only, writes_external_state, or sms_or_payment.`,
 		);
@@ -1702,10 +1454,7 @@ function validateHealthJourneyManualTrigger(
 		);
 	}
 	const minManualInterval = Reflect.get(manualTrigger, "minManualInterval");
-	assertIsoDuration(
-		minManualInterval,
-		`Provider "${providerId}" ${fieldPath}.minManualInterval`,
-	);
+	assertIsoDuration(minManualInterval, `Provider "${providerId}" ${fieldPath}.minManualInterval`);
 	if (isoDurationMs(minManualInterval) <= 0) {
 		throw new ValidationError(
 			`Provider "${providerId}" ${fieldPath}.minManualInterval must be a positive duration.`,
@@ -1736,18 +1485,14 @@ const SMS_ORIGIN_FIELDS_BY_KIND: Record<string, ReadonlySet<string>> = {
 	e164: new Set(["kind", "value", "display"]),
 	nationalServiceCode: new Set(["kind", "country", "value", "display"]),
 };
-const DURATION_RE =
-	/^P(?=\d|T\d)(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$/;
+const DURATION_RE = /^P(?=\d|T\d)(?:\d+D)?(?:T(?:\d+H)?(?:\d+M)?(?:\d+(?:\.\d+)?S)?)?$/;
 const E164_RE = /^\+[1-9]\d{1,14}$/;
 const ISO_COUNTRY_RE = /^[A-Z]{2}$/;
 const NATIONAL_SERVICE_CODE_RE = /^[0-9]{2,15}$/;
 const BCP47_RE = /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/;
 const JOURNEY_ID_RE = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 
-function assertIsoDuration(
-	value: unknown,
-	fieldPath: string,
-): asserts value is string {
+function assertIsoDuration(value: unknown, fieldPath: string): asserts value is string {
 	if (typeof value !== "string" || !DURATION_RE.test(value)) {
 		throw new ValidationError(
 			`${fieldPath} must be an ISO 8601 duration for example PT8H or PT2M30S.`,
@@ -1762,15 +1507,10 @@ function isoDurationMs(value: string): number {
 	const hours = Number(/(\d+)H/.exec(value)?.[1] ?? 0);
 	const minutes = Number(/(\d+)M/.exec(value)?.[1] ?? 0);
 	const seconds = Number(/(\d+(?:\.\d+)?)S/.exec(value)?.[1] ?? 0);
-	return (
-		days * 86_400_000 + hours * 3_600_000 + minutes * 60_000 + seconds * 1_000
-	);
+	return days * 86_400_000 + hours * 3_600_000 + minutes * 60_000 + seconds * 1_000;
 }
 
-function scheduleRandomizationMs(
-	randomize: unknown,
-	fieldPath: string,
-): number {
+function scheduleRandomizationMs(randomize: unknown, fieldPath: string): number {
 	const mode = Reflect.get(randomize as object, "mode");
 	switch (mode) {
 		case "centered": {
@@ -1784,9 +1524,7 @@ function scheduleRandomizationMs(
 			return isoDurationMs(maxDelay);
 		}
 		default:
-			throw new ValidationError(
-				`${fieldPath}.mode must be "centered" or "delayed".`,
-			);
+			throw new ValidationError(`${fieldPath}.mode must be "centered" or "delayed".`);
 	}
 }
 
@@ -1800,25 +1538,18 @@ function validateScheduleRandomization(
 	}
 	const mode = Reflect.get(randomize, "mode");
 	const allowedFields =
-		mode === "centered"
-			? new Set(["mode", "maxOffset"])
-			: new Set(["mode", "maxDelay"]);
+		mode === "centered" ? new Set(["mode", "maxOffset"]) : new Set(["mode", "maxDelay"]);
 	rejectUnknownFields(randomize, allowedFields, fieldPath);
 	const offsetMs = scheduleRandomizationMs(randomize, fieldPath);
 	if (offsetMs <= 0) {
 		throw new ValidationError(`${fieldPath} duration must be positive.`);
 	}
 	if (offsetMs >= intervalMs) {
-		throw new ValidationError(
-			`${fieldPath} duration must be shorter than schedule interval.`,
-		);
+		throw new ValidationError(`${fieldPath} duration must be shorter than schedule interval.`);
 	}
 }
 
-function assertIsoCountry(
-	value: unknown,
-	fieldPath: string,
-): asserts value is string {
+function assertIsoCountry(value: unknown, fieldPath: string): asserts value is string {
 	if (typeof value !== "string" || !ISO_COUNTRY_RE.test(value)) {
 		throw new ValidationError(
 			`${fieldPath} must be an ISO 3166-1 alpha-2 country code for example KR.`,
@@ -1841,9 +1572,7 @@ function normalizeIntervalDuration(input: string): string {
 						? durationMs / 3_600_000
 						: durationMs / 86_400_000;
 		if (!Number.isInteger(amount) || amount <= 0) {
-			throw new ValidationError(
-				`Journey schedule interval must be a positive duration.`,
-			);
+			throw new ValidationError(`Journey schedule interval must be a positive duration.`);
 		}
 		if (unit === "s") return `PT${amount}S`;
 		if (unit === "m") return `PT${amount}M`;
@@ -1902,11 +1631,7 @@ function countCapturingGroups(pattern: RegExp): number {
 		if (inCharacterClass || char !== "(") continue;
 		const next = source[i + 1];
 		if (next === "?" && source[i + 2] !== "<") continue;
-		if (
-			next === "?" &&
-			source[i + 2] === "<" &&
-			(source[i + 3] === "=" || source[i + 3] === "!")
-		)
+		if (next === "?" && source[i + 2] === "<" && (source[i + 3] === "=" || source[i + 3] === "!"))
 			continue;
 		count += 1;
 	}
@@ -1925,9 +1650,7 @@ function validateSmsOrigin(origin: unknown, fieldPath: string): void {
 	}
 	const kind = Reflect.get(origin, "kind");
 	if (kind !== "e164" && kind !== "nationalServiceCode") {
-		throw new ValidationError(
-			`${fieldPath}.kind must be "e164" or "nationalServiceCode".`,
-		);
+		throw new ValidationError(`${fieldPath}.kind must be "e164" or "nationalServiceCode".`);
 	}
 	rejectUnknownFields(origin, SMS_ORIGIN_FIELDS_BY_KIND[kind], fieldPath);
 	if (kind === "e164") {
@@ -1954,9 +1677,7 @@ function validateSmsOrigin(origin: unknown, fieldPath: string): void {
 		Reflect.get(origin, "display") !== undefined &&
 		typeof Reflect.get(origin, "display") !== "string"
 	) {
-		throw new ValidationError(
-			`${fieldPath}.display must be a string when present.`,
-		);
+		throw new ValidationError(`${fieldPath}.display must be a string when present.`);
 	}
 }
 
@@ -1970,9 +1691,7 @@ function validateSmsOtpMatcher(
 	rejectUnknownFields(matcher, SMS_OTP_MATCHER_FIELDS, fieldPath);
 	const matcherId = Reflect.get(matcher, "id");
 	if (typeof matcherId !== "string" || !JOURNEY_ID_RE.test(matcherId)) {
-		throw new ValidationError(
-			`${fieldPath}.id must be a kebab-case identifier.`,
-		);
+		throw new ValidationError(`${fieldPath}.id must be a kebab-case identifier.`);
 	}
 	assertIsoCountry(Reflect.get(matcher, "country"), `${fieldPath}.country`);
 	if (
@@ -1980,24 +1699,18 @@ function validateSmsOtpMatcher(
 		(typeof Reflect.get(matcher, "locale") !== "string" ||
 			!BCP47_RE.test(Reflect.get(matcher, "locale")))
 	) {
-		throw new ValidationError(
-			`${fieldPath}.locale must be a BCP 47 locale for example ko-KR.`,
-		);
+		throw new ValidationError(`${fieldPath}.locale must be a BCP 47 locale for example ko-KR.`);
 	}
 	if (
 		Reflect.get(matcher, "phoneNumber") !== undefined &&
 		(typeof Reflect.get(matcher, "phoneNumber") !== "string" ||
 			!E164_RE.test(Reflect.get(matcher, "phoneNumber")))
 	) {
-		throw new ValidationError(
-			`${fieldPath}.phoneNumber must be an ITU-T E.164 number.`,
-		);
+		throw new ValidationError(`${fieldPath}.phoneNumber must be an ITU-T E.164 number.`);
 	}
 	const origins = Reflect.get(matcher, "origins");
 	if (!Array.isArray(origins) || origins.length === 0) {
-		throw new ValidationError(
-			`${fieldPath}.origins must be a non-empty array.`,
-		);
+		throw new ValidationError(`${fieldPath}.origins must be a non-empty array.`);
 	}
 	for (const [index, origin] of origins.entries()) {
 		validateSmsOrigin(origin, `${fieldPath}.origins[${index}]`);
@@ -2018,10 +1731,7 @@ function validateSmsOtpMatcher(
 		);
 	}
 	const regex = pattern instanceof RegExp ? pattern : new RegExp(pattern);
-	if (
-		countCapturingGroups(regex) !== 1 &&
-		Reflect.get(code, "capture") === undefined
-	) {
+	if (countCapturingGroups(regex) !== 1 && Reflect.get(code, "capture") === undefined) {
 		throw new ValidationError(
 			`${fieldPath}.code.pattern must contain exactly one OTP capture or declare code.capture.`,
 		);
@@ -2031,20 +1741,12 @@ function validateSmsOtpMatcher(
 		typeof Reflect.get(code, "capture") !== "string" &&
 		typeof Reflect.get(code, "capture") !== "number"
 	) {
-		throw new ValidationError(
-			`${fieldPath}.code.capture must be a string or number when present.`,
-		);
+		throw new ValidationError(`${fieldPath}.code.capture must be a string or number when present.`);
 	}
 	assertIsoDuration(Reflect.get(matcher, "maxAge"), `${fieldPath}.maxAge`);
-	assertIsoDuration(
-		Reflect.get(matcher, "waitTimeout"),
-		`${fieldPath}.waitTimeout`,
-	);
+	assertIsoDuration(Reflect.get(matcher, "waitTimeout"), `${fieldPath}.waitTimeout`);
 	if (Reflect.get(matcher, "clockSkew") !== undefined)
-		assertIsoDuration(
-			Reflect.get(matcher, "clockSkew"),
-			`${fieldPath}.clockSkew`,
-		);
+		assertIsoDuration(Reflect.get(matcher, "clockSkew"), `${fieldPath}.clockSkew`);
 }
 
 export function defineSmsOtpMatcher(
@@ -2076,9 +1778,7 @@ export function defineSmsOtpMatcher(
 	return matcher;
 }
 
-export function defineHealthJourney(
-	config: HealthJourneyDefinition,
-): HealthJourneyDefinition {
+export function defineHealthJourney(config: HealthJourneyDefinition): HealthJourneyDefinition {
 	return config;
 }
 
@@ -2089,22 +1789,15 @@ function validateHealthJourneySchedule(
 ): void {
 	const fieldPath = `healthJourneys.${journeyId}.schedule`;
 	if (!schedule || typeof schedule !== "object" || Array.isArray(schedule)) {
-		throw new ValidationError(
-			`Provider "${providerId}" ${fieldPath} must be an object.`,
-		);
+		throw new ValidationError(`Provider "${providerId}" ${fieldPath} must be an object.`);
 	}
 	rejectUnknownFields(schedule, HEALTH_JOURNEY_SCHEDULE_FIELDS, fieldPath);
 	if (Reflect.get(schedule, "kind") !== "interval")
-		throw new ValidationError(
-			`Provider "${providerId}" ${fieldPath}.kind must be "interval".`,
-		);
+		throw new ValidationError(`Provider "${providerId}" ${fieldPath}.kind must be "interval".`);
 	const interval = Reflect.get(schedule, "interval");
 	assertIsoDuration(interval, `Provider "${providerId}" ${fieldPath}.interval`);
 	const randomize = Reflect.get(schedule, "randomize");
-	if (
-		Reflect.get(schedule, "jitter") !== undefined &&
-		randomize !== undefined
-	) {
+	if (Reflect.get(schedule, "jitter") !== undefined && randomize !== undefined) {
 		throw new ValidationError(
 			`Provider "${providerId}" ${fieldPath} cannot define both jitter and randomize.`,
 		);
@@ -2131,17 +1824,13 @@ function validateHealthJourneys(
 	const covered = new Set<string>();
 	if (healthJourneys === undefined) return covered;
 	if (!Array.isArray(healthJourneys)) {
-		throw new ValidationError(
-			`Provider "${providerId}" healthJourneys must be an array.`,
-		);
+		throw new ValidationError(`Provider "${providerId}" healthJourneys must be an array.`);
 	}
 	const journeyIds = new Set<string>();
 	for (const [index, journey] of healthJourneys.entries()) {
 		const prefix = `healthJourneys[${index}]`;
 		if (!journey || typeof journey !== "object" || Array.isArray(journey)) {
-			throw new ValidationError(
-				`Provider "${providerId}" ${prefix} must be an object.`,
-			);
+			throw new ValidationError(`Provider "${providerId}" ${prefix} must be an object.`);
 		}
 		rejectUnknownFields(journey, HEALTH_JOURNEY_FIELDS, prefix);
 		if (typeof journey.id !== "string" || !JOURNEY_ID_RE.test(journey.id)) {
@@ -2155,10 +1844,7 @@ function validateHealthJourneys(
 			);
 		journeyIds.add(journey.id);
 		validateHealthJourneySchedule(providerId, journey.id, journey.schedule);
-		if (
-			!Array.isArray(journey.coversOperations) ||
-			journey.coversOperations.length === 0
-		) {
+		if (!Array.isArray(journey.coversOperations) || journey.coversOperations.length === 0) {
 			throw new ValidationError(
 				`Provider "${providerId}" healthJourneys.${journey.id}.coversOperations must be a non-empty array.`,
 			);
@@ -2193,10 +1879,7 @@ function validateHealthJourneys(
 					`Provider "${providerId}" healthJourneys.${journey.id}.smsMatchers must be an array.`,
 				);
 			for (const [matcherIndex, matcher] of journey.smsMatchers.entries()) {
-				validateSmsOtpMatcher(
-					matcher,
-					`healthJourneys.${journey.id}.smsMatchers[${matcherIndex}]`,
-				);
+				validateSmsOtpMatcher(matcher, `healthJourneys.${journey.id}.smsMatchers[${matcherIndex}]`);
 				if (matcherIds.has(matcher.id))
 					throw new ValidationError(
 						`Provider "${providerId}" healthJourneys.${journey.id}.smsMatchers has duplicate matcher id "${matcher.id}".`,
@@ -2207,9 +1890,7 @@ function validateHealthJourneys(
 		for (const [stepIndex, step] of journey.steps.entries()) {
 			const stepPath = `healthJourneys.${journey.id}.steps[${stepIndex}]`;
 			if (!step || typeof step !== "object" || Array.isArray(step))
-				throw new ValidationError(
-					`Provider "${providerId}" ${stepPath} must be an object.`,
-				);
+				throw new ValidationError(`Provider "${providerId}" ${stepPath} must be an object.`);
 			rejectUnknownFields(step, HEALTH_JOURNEY_STEP_FIELDS, stepPath);
 			if (typeof step.id !== "string" || !JOURNEY_ID_RE.test(step.id))
 				throw new ValidationError(
@@ -2219,20 +1900,13 @@ function validateHealthJourneys(
 				throw new ValidationError(
 					`Provider "${providerId}" ${stepPath}.operationId references unknown operation "${step.operationId}".`,
 				);
-			if (
-				step.usesSmsMatcher !== undefined &&
-				!matcherIds.has(step.usesSmsMatcher)
-			)
+			if (step.usesSmsMatcher !== undefined && !matcherIds.has(step.usesSmsMatcher))
 				throw new ValidationError(
 					`Provider "${providerId}" ${stepPath}.usesSmsMatcher references unknown matcher "${step.usesSmsMatcher}".`,
 				);
 		}
 		if (journey.manualTrigger !== undefined)
-			validateHealthJourneyManualTrigger(
-				providerId,
-				journey.id,
-				journey.manualTrigger,
-			);
+			validateHealthJourneyManualTrigger(providerId, journey.id, journey.manualTrigger);
 		if (journey.timeout !== undefined)
 			assertIsoDuration(
 				journey.timeout,
@@ -2278,23 +1952,10 @@ function validateOperationHealthChecks(
 					fix: `Remove either operations.${operationName}.healthCheck or operations.${operationName}.healthCheckUnsupported.`,
 				},
 			);
-		if (hasCheck)
-			validateHealthCheckSuite(
-				providerId,
-				operationName,
-				operation.healthCheck,
-			);
+		if (hasCheck) validateHealthCheckSuite(providerId, operationName, operation.healthCheck);
 		if (hasUnsupported)
-			validateHealthCheckUnsupported(
-				providerId,
-				operationName,
-				operation.healthCheckUnsupported,
-			);
-		if (
-			!hasCheck &&
-			!hasUnsupported &&
-			!journeyCoveredOperations.has(operationName)
-		)
+			validateHealthCheckUnsupported(providerId, operationName, operation.healthCheckUnsupported);
+		if (!hasCheck && !hasUnsupported && !journeyCoveredOperations.has(operationName))
 			throw new ValidationError(
 				`Provider "${providerId}" operation "${operationName}" declares neither healthCheck nor healthCheckUnsupported.`,
 				{
@@ -2354,18 +2015,12 @@ function validateOperationFixtures(
  * verbatim and deliberately not deep-validated by the SDK — the APIFuse
  * registry builder owns deployment validation and profile resolution.
  */
-function validateProviderDeployment(
-	providerId: string,
-	deployment: unknown,
-): void {
+function validateProviderDeployment(providerId: string, deployment: unknown): void {
 	if (deployment === undefined) return;
 	if (!deployment || typeof deployment !== "object" || Array.isArray(deployment))
-		throw new ProviderError(
-			`Provider "${providerId}" deployment must be an object when present`,
-			{
-				fix: 'Pass deployment: { runtime: "shared" | "dedicated" | "browser", ... } or remove the field',
-			},
-		);
+		throw new ProviderError(`Provider "${providerId}" deployment must be an object when present`, {
+			fix: 'Pass deployment: { runtime: "shared" | "dedicated" | "browser", ... } or remove the field',
+		});
 }
 
 export function defineProvider<
@@ -2380,12 +2035,9 @@ export function defineProvider<
 			fix: 'Use lowercase alphanumeric with dashes, e.g., "korea-air-quality"',
 		});
 	if (Object.keys(config.operations).length === 0)
-		throw new ProviderError(
-			`Provider "${config.id}" must define at least one operation`,
-			{
-				fix: "Add at least one operation to the operations object",
-			},
-		);
+		throw new ProviderError(`Provider "${config.id}" must define at least one operation`, {
+			fix: "Add at least one operation to the operations object",
+		});
 	validateOperationIds(config.id, config.operations);
 	validateOperationAnnotations(config.id, config.operations);
 	validateOperationObservability(config.id, config.operations);
@@ -2397,11 +2049,7 @@ export function defineProvider<
 		config.operations,
 		config.healthJourneys,
 	);
-	validateOperationHealthChecks(
-		config.id,
-		config.operations,
-		journeyCoveredOperations,
-	);
+	validateOperationHealthChecks(config.id, config.operations, journeyCoveredOperations);
 	if (config.healthMonitor !== undefined && config.healthProbe !== undefined)
 		throw new ValidationError(
 			`Provider "${config.id}" declares both healthMonitor and healthProbe. They are aliases; declare exactly one.`,
