@@ -1759,6 +1759,19 @@ export interface OperationDefinition<
 	TInput extends SchemaLike = SchemaLike,
 	TOutput extends SchemaLike = SchemaLike,
 > {
+	/**
+	 * Short English display title for the operation. The SDK passes it through
+	 * verbatim; the APIFuse registry derives the operation's en locale title
+	 * baseline from it (`docs.titleKey` remains available as an explicit key
+	 * override).
+	 */
+	title?: string;
+	/**
+	 * Raw English operation description. The SDK passes it through verbatim;
+	 * keyed descriptions via `descriptionKey` remain the primary flow, and
+	 * provider lint rules for raw prose descriptions still apply.
+	 */
+	description?: string;
 	descriptionKey?: ProviderLocaleKeyInput;
 	docs?: OperationDocMeta;
 	whenToUseKeys?: readonly ProviderLocaleKeyInput[];
@@ -1797,10 +1810,55 @@ export interface OperationDefinition<
 	healthCheckUnsupported?: HealthCheckUnsupported;
 }
 
+/**
+ * Author-declared deployment overrides accepted as the optional top-level
+ * `deployment` key on `defineProvider()`.
+ *
+ * The SDK passes this object through VERBATIM onto the returned provider
+ * definition — it is typed here but deliberately not deep-validated: the
+ * APIFuse registry builder owns deployment validation and resolves omitted
+ * fields against the runtime deployment profiles. The shape mirrors the
+ * registry's `ProviderDeploymentOverrides` contract; every field is
+ * optional. Note that the deployment `runtime` axis
+ * (`shared`/`dedicated`/`browser`) is distinct from the provider execution
+ * `runtime` (`standard`/`shared`/`browser`).
+ */
+export interface ProviderDeploymentOverrides {
+	runtime?: "shared" | "dedicated" | "browser";
+	language?: "typescript" | "python";
+	replicas?: number;
+	hpa?: {
+		enabled: boolean;
+		minReplicas?: number;
+		maxReplicas?: number;
+		targetCPUUtilizationPercentage?: number;
+	};
+	resources?: {
+		cpu: string;
+		memory: string;
+	};
+	cache?: {
+		redis?: {
+			enabled: boolean;
+			url?: string;
+		};
+	};
+	network?: {
+		additionalTcpPorts?: number[];
+	};
+	buildContext?: string;
+}
+
 export interface ProviderDefinition {
 	id: string;
 	version: string;
 	runtime: "standard" | "shared" | "browser";
+	/**
+	 * Optional deployment overrides, passed through verbatim from
+	 * `defineProvider({ deployment })`. Validation and profile resolution are
+	 * owned by the APIFuse registry builder, not the SDK.
+	 */
+	deployment?: ProviderDeploymentOverrides;
 	allowedHosts?: string[];
 	stealth?: {
 		profile: string;

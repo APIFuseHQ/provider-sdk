@@ -201,6 +201,7 @@ export type {
 	ProviderChoiceParseOptions,
 	ProviderContext,
 	ProviderDefinition,
+	ProviderDeploymentOverrides,
 	ProviderHealthMonitorConfig,
 	ProviderHealthProbeConfig,
 	ProviderLocale,

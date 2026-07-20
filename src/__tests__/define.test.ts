@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { defineProvider } from "../define";
 import { ProviderError, ValidationError } from "../errors";
-import type { ProviderContext } from "../types";
+import type { ProviderContext, ProviderDeploymentOverrides } from "../types";
 
 const InputSchema = z.object({ id: z.string() });
 const OutputSchema = z.object({ name: z.string(), price: z.number() });
@@ -444,6 +444,114 @@ describe("defineProvider", () => {
 					}),
 				),
 			).toThrow(ValidationError);
+		});
+	});
+
+	describe("deployment passthrough", () => {
+		it("passes a full deployment object through verbatim", () => {
+			const deployment = {
+				runtime: "dedicated" as const,
+				language: "typescript" as const,
+				replicas: 2,
+				hpa: {
+					enabled: true,
+					minReplicas: 1,
+					maxReplicas: 4,
+					targetCPUUtilizationPercentage: 70,
+				},
+				resources: { cpu: "200m", memory: "256Mi" },
+				cache: { redis: { enabled: true, url: "redis://cache:6379" } },
+				network: { additionalTcpPorts: [8443] },
+				buildContext: ".",
+			};
+			const provider = defineProvider({ ...validConfig, deployment });
+
+			expect(provider.deployment).toBe(deployment);
+			expect(provider.deployment).toEqual(deployment);
+		});
+
+		it("accepts a partial deployment object without filling defaults", () => {
+			const provider = defineProvider({
+				...validConfig,
+				deployment: { runtime: "browser" as const },
+			});
+
+			expect(provider.deployment).toEqual({ runtime: "browser" });
+			expect(provider.deployment?.replicas).toBeUndefined();
+			expect(provider.deployment?.hpa).toBeUndefined();
+			expect(provider.deployment?.resources).toBeUndefined();
+		});
+
+		it("does not deep-validate deployment fields (registry builder owns validation)", () => {
+			const deployment = {
+				runtime: "not-a-runtime",
+				replicas: -3,
+				surprise: { nested: true },
+			} as unknown as ProviderDeploymentOverrides;
+			const provider = defineProvider({ ...validConfig, deployment });
+
+			expect(provider.deployment).toBe(deployment);
+		});
+
+		it("leaves deployment undefined when not declared", () => {
+			const provider = defineProvider(validConfig);
+
+			expect(provider.deployment).toBeUndefined();
+		});
+
+		it("rejects a non-object deployment value", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					deployment: "shared" as unknown as Record<string, never>,
+				}),
+			).toThrow(ProviderError);
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					deployment: [{ runtime: "shared" }] as unknown as Record<
+						string,
+						never
+					>,
+				}),
+			).toThrow(ProviderError);
+		});
+
+		it("keeps stripping unknown top-level keys other than deployment", () => {
+			const provider = defineProvider({
+				...validConfig,
+				...({ deploy: { runtime: "shared" } } as Record<string, unknown>),
+			} as typeof validConfig);
+
+			expect("deploy" in provider).toBe(false);
+		});
+	});
+
+	describe("operation title and description passthrough", () => {
+		it("preserves code-authored title and description on the built operation", () => {
+			const provider = defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						title: "Get Prices",
+						description:
+							"Use this operation when you need the latest quoted price for an asset id; returns the display name and price in KRW.",
+					},
+				},
+			});
+
+			expect(provider.operations.prices.title).toBe("Get Prices");
+			expect(provider.operations.prices.description).toBe(
+				"Use this operation when you need the latest quoted price for an asset id; returns the display name and price in KRW.",
+			);
+		});
+
+		it("keeps title and description undefined when not declared", () => {
+			const provider = defineProvider(validConfig);
+
+			expect(provider.operations.prices.title).toBeUndefined();
+			expect(provider.operations.prices.description).toBeUndefined();
 		});
 	});
 });
