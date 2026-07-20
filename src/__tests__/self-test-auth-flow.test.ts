@@ -8,6 +8,7 @@ import {
 	createSelfTestAuthFlowInvoke,
 	createSelfTestInvoke,
 	SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON,
+	SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON,
 	SELF_TEST_PATH,
 	type SelfTestResponse,
 } from "../server/self-test";
@@ -41,6 +42,8 @@ interface FlowProviderState {
 	unknownTurnAtContinue: boolean;
 	/** Artificial latency inside `flow.start()` (deadline tests). */
 	startDelayMs: number;
+	/** Artificial latency inside `flow.continue()` (deadline tests). */
+	continueDelayMs: number;
 	/** Artificial latency inside the probe handler (deadline tests). */
 	probeDelayMs: number;
 	/** Optional per-case timeout override applied to the session case. */
@@ -61,6 +64,7 @@ function createFlowProviderState(): FlowProviderState {
 		abortAtContinue: false,
 		unknownTurnAtContinue: false,
 		startDelayMs: 0,
+		continueDelayMs: 0,
 		probeDelayMs: 0,
 	};
 }
@@ -106,6 +110,9 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 				},
 				continue: async (_ctx, input = {}) => {
 					state.continueCount += 1;
+					if (state.continueDelayMs > 0) {
+						await new Promise((resolve) => setTimeout(resolve, state.continueDelayMs));
+					}
 					if (state.flowError) {
 						throw new Error("upstream login endpoint temporarily unreachable");
 					}
@@ -122,7 +129,9 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 						input.phone !== CREDENTIAL_INPUTS.phone ||
 						input.password !== CREDENTIAL_INPUTS.password
 					) {
-						return formTurn("turn-retry");
+						// Mirrors real providers (e.g. catchtable): invalid credentials
+						// come back as a retry-kind turn, not a fresh form.
+						return { kind: "retry", turnId: "turn-retry" } as unknown as AuthTurn;
 					}
 					state.loginCount += 1;
 					return {
@@ -478,10 +487,49 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(body.result?.error?.code).toBe("self_test_timeout");
 	});
 
+	it("reports a post-submission retry turn as auth_flow_rejected and memoizes it", async () => {
+		const state = createFlowProviderState();
+		const { selfTestApp } = createApps(createFlowProvider(state));
+		const wrongInputs = { phone: CREDENTIAL_INPUTS.phone, password: "wrong-password" };
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1", wrongInputs);
+		expect(first.result?.status).toBe("skipped");
+		expect(first.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON);
+		expect(state.continueCount).toBe(1);
+
+		// Rejected credentials are memoized: the next cycle must not re-submit
+		// them upstream (lockout safety) — same distinct skip, zero contact.
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2", wrongInputs);
+		expect(second.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON);
+		expect(state.startCount).toBe(1);
+		expect(state.continueCount).toBe(1);
+	});
+
+	it("never submits credentials after the case deadline fired mid-start", async () => {
+		const state = createFlowProviderState();
+		state.startDelayMs = 300;
+		state.caseTimeoutMs = 150;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const body = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(body.result?.status).toBe("error");
+		expect(body.result?.error?.code).toBe("self_test_timeout");
+
+		// Let the abandoned background flow run to completion: it must bail
+		// BEFORE continue — a late credential submission is a real upstream
+		// login/OTP attempt nobody is waiting for.
+		await new Promise((resolve) => setTimeout(resolve, 400));
+		expect(state.startCount).toBe(1);
+		expect(state.continueCount).toBe(0);
+		expect(state.loginCount).toBe(0);
+	});
+
 	it("discards a credential from a flow that completed after the case deadline", async () => {
 		const state = createFlowProviderState();
-		// The flow outlives the 150ms case budget but eventually completes.
-		state.startDelayMs = 300;
+		// The flow outlives the 150ms case budget but eventually completes:
+		// start returns fast (so credentials are legitimately submitted before
+		// the deadline), then continue is slow and finishes after it.
+		state.continueDelayMs = 300;
 		state.caseTimeoutMs = 150;
 		const { selfTestApp } = createApps(createFlowProvider(state));
 
@@ -497,7 +545,7 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		// from the timed-out login may have been cached. The upstream accepts
 		// only the next-issued session, so reusing the abandoned v1 cookie
 		// would fail the probe.
-		state.startDelayMs = 0;
+		state.continueDelayMs = 0;
 		state.validCookie = "flow-session-secret-v2";
 		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
 		expect(second.result?.status).toBe("ok");

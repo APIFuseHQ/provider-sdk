@@ -115,14 +115,25 @@ export type SelfTestAuthFlowInvoke = (args: {
 export const SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON = "auth_flow_multi_turn";
 
 /**
- * Known interactive turn kinds (everything in TURN_KINDS that is not
- * terminal). Only these justify the memoized multi-turn skip — they mean a
- * human must participate. Kinds outside this set are treated as flow errors.
+ * A `retry` turn after credential submission: the flow REJECTED the
+ * configured inputs (bad password, exchange failure). Distinct from the
+ * multi-turn gap so monitoring surfaces it as a real credential outage, and
+ * memoized like multi-turn so the probe does not re-submit rejected
+ * credentials every cycle (lockout safety).
+ */
+export const SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON = "auth_flow_rejected";
+
+/**
+ * Known interactive turn kinds that justify the memoized multi-turn skip —
+ * they mean a human must participate (OTP, challenge, redirect, …).
+ * `retry` is deliberately excluded: after a credential submission it means
+ * rejection, not interaction (see SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON).
+ * Kinds outside TURN_KINDS entirely are treated as flow errors.
  */
 const INTERACTIVE_TURN_KIND_SET: ReadonlySet<string> = new Set(
-	TURN_KINDS.filter((descriptor) => descriptor.rendering !== "terminal").map(
-		(descriptor) => descriptor.kind,
-	),
+	TURN_KINDS.filter(
+		(descriptor) => descriptor.rendering !== "terminal" && descriptor.kind !== "retry",
+	).map((descriptor) => descriptor.kind),
 );
 
 export interface SelfTestAppOptions {
@@ -340,7 +351,15 @@ export type SelfTestCredentialSessionEntry =
 	 * WITHOUT contacting the upstream again — the first attempt already
 	 * submitted real credentials (and may have triggered an OTP send).
 	 */
-	| { kind: "multi_turn"; cachedAtMs: number };
+	| { kind: "multi_turn"; cachedAtMs: number }
+	/**
+	 * Negative entry: the flow REJECTED the submitted credential inputs
+	 * (`retry` turn after continue — bad password, exchange failure).
+	 * Memoized so the probe does not re-submit rejected credentials every
+	 * cycle; a new entry is attempted when the inputs rotate (new hash),
+	 * the TTL lapses, or the process restarts.
+	 */
+	| { kind: "rejected"; cachedAtMs: number };
 
 /**
  * In-process cache of per-(providerId + stable hash of credentialInputs) auth
@@ -506,6 +525,7 @@ function completedCredentialFromTurn(turnData: unknown): Record<string, string> 
 async function materializeFlowCredential(
 	execution: SelfTestExecutionContext,
 	inputs: Readonly<Record<string, string>>,
+	options: { isAbandoned?: () => boolean } = {},
 ): Promise<
 	| { credential: Record<string, string> }
 	| Exclude<SelfTestConnectionResolution, { kind: "connection" }>
@@ -543,6 +563,17 @@ async function materializeFlowCredential(
 		};
 	}
 	if (turn.kind !== "complete") {
+		// The case deadline may have fired while start() was still running.
+		// Never submit real credentials into a flow whose case already
+		// reported self_test_timeout — a late continue is a real upstream
+		// login/OTP attempt nobody is waiting for.
+		if (options.isAbandoned?.() === true) {
+			return {
+				kind: "flow_error",
+				code: "self_test_timeout",
+				message: "Case deadline passed before credential submission; flow abandoned.",
+			};
+		}
 		const continued = parseAuthFlowResponse(
 			await authFlow({
 				route: "continue",
@@ -563,6 +594,12 @@ async function materializeFlowCredential(
 			code: "auth_flow_aborted",
 			message: "Auth flow aborted after credential submission.",
 		};
+	}
+	if (turn.kind === "retry") {
+		// A retry turn AFTER submission is a credential rejection, not an
+		// interactive gap — surfaced distinctly so monitoring can treat it as
+		// a real outage, and memoized by the caller (lockout safety).
+		return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON };
 	}
 	if (turn.kind !== "complete") {
 		// Only KNOWN interactive kinds are a genuine "cannot complete headless"
@@ -636,9 +673,15 @@ async function resolveSelfTestConnection(
 	// to a different key and re-attempt immediately; otherwise the entry
 	// expires after a generous TTL (or process restart) so a provider whose
 	// flow becomes single-turn again is eventually re-probed.
-	if (cached?.kind === "multi_turn") {
+	if (cached?.kind === "multi_turn" || cached?.kind === "rejected") {
 		if (Date.now() - cached.cachedAtMs < SELF_TEST_MULTI_TURN_RETRY_AFTER_MS) {
-			return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
+			return {
+				kind: "skip",
+				skipReason:
+					cached.kind === "rejected"
+						? SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON
+						: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON,
+			};
 		}
 		execution.sessionCache.delete(cacheKey);
 	}
@@ -651,7 +694,9 @@ async function resolveSelfTestConnection(
 			cacheKey,
 		};
 	}
-	const materialized = await materializeFlowCredential(execution, inputs);
+	const materialized = await materializeFlowCredential(execution, inputs, {
+		...(options.isAbandoned !== undefined ? { isAbandoned: options.isAbandoned } : {}),
+	});
 	if (!("credential" in materialized)) {
 		// Only the multi-turn SKIP is negative-cached. Flow ERRORS
 		// (auth_flow_unavailable / auth_flow_failed / invalid credential
@@ -660,12 +705,12 @@ async function resolveSelfTestConnection(
 		// retry — permanently caching an error would silently freeze the
 		// signal on a blip, while retrying a FAILED request is not a repeated
 		// successful login submission.
-		if (
-			materialized.kind === "skip" &&
-			materialized.skipReason === SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON &&
-			options.isAbandoned?.() !== true
-		) {
-			execution.sessionCache.set(cacheKey, { kind: "multi_turn", cachedAtMs: Date.now() });
+		if (materialized.kind === "skip" && options.isAbandoned?.() !== true) {
+			if (materialized.skipReason === SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON) {
+				execution.sessionCache.set(cacheKey, { kind: "multi_turn", cachedAtMs: Date.now() });
+			} else if (materialized.skipReason === SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON) {
+				execution.sessionCache.set(cacheKey, { kind: "rejected", cachedAtMs: Date.now() });
+			}
 		}
 		return materialized;
 	}
