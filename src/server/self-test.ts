@@ -519,6 +519,16 @@ async function materializeFlowCredential(
 	}
 	let turn = started.turn;
 	const flowContext = applyAuthFlowContextPatch({}, started.contextPatch);
+	if (turn.kind === "abort") {
+		// Terminal turn: continuing after an abort would replay credentials into
+		// a flow that already refused to proceed. Not memoized (flow errors are
+		// never cached) — an abort can be transient upstream maintenance.
+		return {
+			kind: "flow_error",
+			code: "auth_flow_aborted",
+			message: "Auth flow aborted before requesting input.",
+		};
+	}
 	if (turn.kind !== "complete") {
 		const continued = parseAuthFlowResponse(
 			await authFlow({
@@ -533,6 +543,13 @@ async function materializeFlowCredential(
 			return { kind: "flow_error", code: continued.code, message: continued.message };
 		}
 		turn = continued.turn;
+	}
+	if (turn.kind === "abort") {
+		return {
+			kind: "flow_error",
+			code: "auth_flow_aborted",
+			message: "Auth flow aborted after credential submission.",
+		};
 	}
 	if (turn.kind !== "complete") {
 		return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
@@ -656,6 +673,12 @@ async function executeSelfTestCase(
 	const redact = (text: string) => redactSelfTestText(text, execution.sensitiveValues);
 	const defaultLabel = redact(healthCase.description ?? healthCase.name);
 	const timeoutMs = resolveCaseTimeoutMs(execution, suite, healthCase);
+	// One deadline for the WHOLE case: connection materialization (auth flow),
+	// the probe, and the one-shot auth retry all draw from the same budget —
+	// a 30s case must never take ~4×30s across its stages.
+	const caseDeadlineAtMs = performance.now() + timeoutMs;
+	const remainingCaseTimeoutMs = () =>
+		Math.max(1, Math.ceil(caseDeadlineAtMs - performance.now()));
 
 	const beginCase = () => {
 		const startedAt = new Date().toISOString();
@@ -692,7 +715,7 @@ async function executeSelfTestCase(
 		try {
 			return await withCaseTimeout(
 				() => resolveSelfTestConnection(execution, operationId, suite, { forceLogin }),
-				timeoutMs,
+				remainingCaseTimeoutMs(),
 			);
 		} catch (error) {
 			return {
@@ -814,7 +837,7 @@ async function executeSelfTestCase(
 					httpStatus: executed.status,
 					assertion: { passed: true },
 				});
-			}, timeoutMs);
+			}, remainingCaseTimeoutMs());
 		} catch (error) {
 			if (error instanceof SelfTestCaseTimeoutError) {
 				return finish({

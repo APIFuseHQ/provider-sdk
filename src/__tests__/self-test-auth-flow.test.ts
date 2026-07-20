@@ -33,6 +33,16 @@ interface FlowProviderState {
 	multiTurn: boolean;
 	/** When true, `continue` throws (transient upstream/transport failure). */
 	flowError: boolean;
+	/** When true, `start` returns a terminal abort turn. */
+	abortAtStart: boolean;
+	/** When true, `continue` returns a terminal abort turn. */
+	abortAtContinue: boolean;
+	/** Artificial latency inside `flow.start()` (deadline tests). */
+	startDelayMs: number;
+	/** Artificial latency inside the probe handler (deadline tests). */
+	probeDelayMs: number;
+	/** Optional per-case timeout override applied to the session case. */
+	caseTimeoutMs?: number;
 }
 
 function createFlowProviderState(): FlowProviderState {
@@ -45,6 +55,10 @@ function createFlowProviderState(): FlowProviderState {
 		nextCookie: () => `flow-session-secret-v${++issued}`,
 		multiTurn: false,
 		flowError: false,
+		abortAtStart: false,
+		abortAtContinue: false,
+		startDelayMs: 0,
+		probeDelayMs: 0,
 	};
 }
 
@@ -79,12 +93,21 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 			flow: {
 				start: async () => {
 					state.startCount += 1;
+					if (state.startDelayMs > 0) {
+						await new Promise((resolve) => setTimeout(resolve, state.startDelayMs));
+					}
+					if (state.abortAtStart) {
+						return { kind: "abort", turnId: "turn-abort-start" } as AuthTurn;
+					}
 					return formTurn("turn-start");
 				},
 				continue: async (_ctx, input = {}) => {
 					state.continueCount += 1;
 					if (state.flowError) {
 						throw new Error("upstream login endpoint temporarily unreachable");
+					}
+					if (state.abortAtContinue) {
+						return { kind: "abort", turnId: "turn-abort-continue" } as AuthTurn;
 					}
 					if (state.multiTurn) {
 						return formTurn("turn-otp");
@@ -117,6 +140,9 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 				handler: async (ctx: {
 					credential: { get(key: string): string | undefined; getAll(): Record<string, string> };
 				}) => {
+					if (state.probeDelayMs > 0) {
+						await new Promise((resolve) => setTimeout(resolve, state.probeDelayMs));
+					}
 					const cookie = ctx.credential.get("sessionCookie");
 					if (cookie !== state.validCookie) {
 						throw new ProviderError("upstream rejected stale session", {
@@ -137,6 +163,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 						{
 							name: "session case",
 							input: {},
+							...(state.caseTimeoutMs !== undefined ? { timeoutMs: state.caseTimeoutMs } : {}),
 							assertions: ({ data }: { data: unknown }) => {
 								if (!(data as { ok: boolean }).ok) {
 									throw new Error("flow credential did not reach handler");
@@ -375,6 +402,56 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(third.result?.status).toBe("failed");
 		expect(third.result?.httpStatus).toBe(401);
 		expect(state.loginCount).toBe(3);
+	});
+
+	it("stops after a terminal abort turn from start — credentials are never submitted", async () => {
+		const state = createFlowProviderState();
+		state.abortAtStart = true;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(first.result?.status).toBe("error");
+		expect(first.result?.error?.code).toBe("auth_flow_aborted");
+		expect(state.continueCount).toBe(0);
+
+		// Aborts are transient by policy (e.g. upstream maintenance) — never
+		// memoized, so the next cycle re-attempts the flow.
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		expect(second.result?.error?.code).toBe("auth_flow_aborted");
+		expect(state.startCount).toBe(2);
+		expect(state.continueCount).toBe(0);
+	});
+
+	it("treats an abort after credential submission as a flow error, not a multi-turn skip", async () => {
+		const state = createFlowProviderState();
+		state.abortAtContinue = true;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(first.result?.status).toBe("error");
+		expect(first.result?.error?.code).toBe("auth_flow_aborted");
+		expect(first.result?.skipReason).toBeUndefined();
+
+		// NOT negative-cached as multi_turn: the next cycle re-drives the flow.
+		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
+		expect(second.result?.error?.code).toBe("auth_flow_aborted");
+		expect(state.startCount).toBe(2);
+		expect(state.continueCount).toBe(2);
+	});
+
+	it("enforces ONE deadline across flow materialization and the probe", async () => {
+		const state = createFlowProviderState();
+		// Each stage alone fits the 450ms budget; together they cannot. The old
+		// per-stage timers would pass this case in ~600ms — the shared deadline
+		// must fail it with a timeout.
+		state.startDelayMs = 300;
+		state.probeDelayMs = 300;
+		state.caseTimeoutMs = 450;
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const body = await runCase(selfTestApp, "session", "session case");
+		expect(body.result?.status).toBe("error");
+		expect(body.result?.error?.code).toBe("self_test_timeout");
 	});
 
 	it("redacts flow-materialized secrets from every probe output", async () => {
