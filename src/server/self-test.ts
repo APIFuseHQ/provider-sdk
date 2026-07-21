@@ -729,8 +729,18 @@ async function resolveSelfTestConnection(
 
 	const auth = execution.provider.auth;
 	if (auth?.mode !== "credentials" || !auth.flow) {
-		// Providers without a declared credentials flow keep raw-input semantics.
-		return { kind: "connection", connection: buildConnection(inputs), credentialSource: "inputs" };
+		// Providers without a declared credentials flow keep raw-input semantics
+		// — and the pre-existing per-request connection id: there is no session
+		// to keep on one affinity, and a stable id would silently pin every
+		// cycle of a connection-affinity proxy to the same upstream session.
+		return {
+			kind: "connection",
+			connection: {
+				...buildConnection(inputs),
+				id: `self-test-${execution.requestId}`,
+			},
+			credentialSource: "inputs",
+		};
 	}
 
 	const cacheKey = affinityKey;

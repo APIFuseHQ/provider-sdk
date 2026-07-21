@@ -293,7 +293,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 	} as unknown as ProviderDefinition;
 }
 
-function createFlowlessProvider(): ProviderDefinition {
+function createFlowlessProvider(seenIds: string[] = []): ProviderDefinition {
 	return {
 		id: PROVIDER_ID,
 		version: "1.0.0",
@@ -324,6 +324,16 @@ function createFlowlessProvider(): ProviderDefinition {
 						{
 							name: "raw case",
 							input: {},
+							prepareInput: async ({
+								input,
+								connectionId,
+							}: {
+								input: unknown;
+								connectionId?: string;
+							}) => {
+								seenIds.push(connectionId ?? "none");
+								return input;
+							},
 							assertions: ({ data }: { data: unknown }) => {
 								if (!(data as { ok: boolean }).ok) {
 									throw new Error("raw credential inputs did not reach handler");
@@ -827,9 +837,16 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 	});
 
 	it("keeps raw-input semantics for credentials providers without a declared flow", async () => {
-		const { selfTestApp } = createApps(createFlowlessProvider());
-		const body = await runCase(selfTestApp, "raw", "raw case");
+		const seenIds: string[] = [];
+		const { selfTestApp } = createApps(createFlowlessProvider(seenIds));
+		const body = await runCase(selfTestApp, "raw", "raw case", "req-cycle-1");
 		expect(body.result?.status).toBe("ok");
+
+		// No session to keep on one affinity: flowless probes keep the
+		// pre-existing per-request connection id (proxy isolation per cycle).
+		await runCase(selfTestApp, "raw", "raw case", "req-cycle-2");
+		expect(seenIds).toHaveLength(2);
+		expect(seenIds[0]).not.toBe(seenIds[1] as string);
 	});
 
 	it("reports a visible auth_flow_unavailable error when the host has no auth-flow driver", async () => {
