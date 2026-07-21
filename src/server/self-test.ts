@@ -550,24 +550,31 @@ function completedCredentialFromTurn(turnData: unknown): Record<string, string> 
  */
 
 /**
- * Fields an input-prompt turn actually requests, from its JSON-schema
- * `expectedInput.schema.properties`. `null` when the turn declares no
- * schema (legacy/loose flows keep full-input semantics).
+ * Fields an input-prompt turn actually requests. The canonical auth-turn
+ * shape carries the JSON schema DIRECTLY on `expectedInput` (`ctx.auth
+ * .nextForm`/`defineCredentialsAuth`, the committed fixtures); some providers
+ * nest it as `expectedInput.schema`. Both are honored. `null` when the turn
+ * declares no schema (legacy/loose flows keep full-input semantics).
  */
 function turnRequestedFields(turn: { expectedInput?: unknown }): string[] | null {
 	const expectedInput = turn.expectedInput;
-	const schema =
-		expectedInput && typeof expectedInput === "object"
-			? (expectedInput as { schema?: unknown }).schema
-			: undefined;
-	const properties =
-		schema && typeof schema === "object"
-			? (schema as { properties?: unknown }).properties
-			: undefined;
-	if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+	if (!expectedInput || typeof expectedInput !== "object" || Array.isArray(expectedInput)) {
 		return null;
 	}
-	return Object.keys(properties);
+	const propertiesOf = (candidate: unknown): string[] | null => {
+		const properties =
+			candidate && typeof candidate === "object"
+				? (candidate as { properties?: unknown }).properties
+				: undefined;
+		if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+			return null;
+		}
+		return Object.keys(properties);
+	};
+	return (
+		propertiesOf(expectedInput) ??
+		propertiesOf((expectedInput as { schema?: unknown }).schema)
+	);
 }
 
 async function materializeFlowCredential(

@@ -44,6 +44,8 @@ interface FlowProviderState {
 	nonInputTurnAtStart?: string;
 	/** When set, `start`'s form turn requests ONLY these schema fields. */
 	startFormFields?: string[];
+	/** When true, form turns use the canonical DIRECT expectedInput schema shape. */
+	directExpectedInputShape?: boolean;
 	/** Input keys `continue` observed on its last invocation. */
 	lastContinueInputKeys?: string[];
 	/** When true, `continue` returns a terminal abort turn. */
@@ -91,17 +93,20 @@ function createFlowProviderState(): FlowProviderState {
 }
 
 function createFlowProvider(state: FlowProviderState): ProviderDefinition {
-	const formTurn = (turnId: string, fields: string[] = ["phone", "password"]): AuthTurn => ({
-		kind: "form",
-		turnId,
-		expectedInput: {
-			schema: {
-				type: "object",
-				required: fields,
-				properties: Object.fromEntries(fields.map((field) => [field, { type: "string" }])),
-			},
-		},
-	});
+	const formTurn = (turnId: string, fields: string[] = ["phone", "password"]): AuthTurn => {
+		const schema = {
+			type: "object",
+			required: fields,
+			properties: Object.fromEntries(fields.map((field) => [field, { type: "string" }])),
+		};
+		return {
+			kind: "form",
+			turnId,
+			// Canonical shape carries the schema DIRECTLY on expectedInput; the
+			// nested { schema } variant is provider-authored (e.g. catchtable).
+			expectedInput: state.directExpectedInputShape ? schema : { schema },
+		} as AuthTurn;
+	};
 
 	return {
 		id: PROVIDER_ID,
@@ -821,6 +826,17 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(body.result?.status).toBe("skipped");
 		expect(body.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON);
 		// The password must never be posted into a stage that did not ask for it.
+		expect(state.continueCount).toBe(0);
+	});
+
+	it("reads requested fields from the canonical DIRECT expectedInput shape", async () => {
+		const state = createFlowProviderState();
+		state.directExpectedInputShape = true;
+		state.startFormFields = ["otp"];
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const body = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(body.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON);
 		expect(state.continueCount).toBe(0);
 	});
 
