@@ -42,6 +42,10 @@ interface FlowProviderState {
 	unknownTurnAtStart: boolean;
 	/** When set, `start` returns this known NON-input turn kind (e.g. redirect). */
 	nonInputTurnAtStart?: string;
+	/** When set, `start`'s form turn requests ONLY these schema fields. */
+	startFormFields?: string[];
+	/** Input keys `continue` observed on its last invocation. */
+	lastContinueInputKeys?: string[];
 	/** When true, `continue` returns a terminal abort turn. */
 	abortAtContinue: boolean;
 	/** When true, `continue` returns a turn kind unknown to TURN_KINDS. */
@@ -87,14 +91,14 @@ function createFlowProviderState(): FlowProviderState {
 }
 
 function createFlowProvider(state: FlowProviderState): ProviderDefinition {
-	const formTurn = (turnId: string): AuthTurn => ({
+	const formTurn = (turnId: string, fields: string[] = ["phone", "password"]): AuthTurn => ({
 		kind: "form",
 		turnId,
 		expectedInput: {
 			schema: {
 				type: "object",
-				required: ["phone", "password"],
-				properties: { phone: { type: "string" }, password: { type: "string" } },
+				required: fields,
+				properties: Object.fromEntries(fields.map((field) => [field, { type: "string" }])),
 			},
 		},
 	});
@@ -133,10 +137,11 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 							turnId: "turn-noninput-start",
 						} as unknown as AuthTurn;
 					}
-					return formTurn("turn-start");
+					return formTurn("turn-start", state.startFormFields ?? ["phone", "password"]);
 				},
 				continue: async (_ctx, input = {}) => {
 					state.continueCount += 1;
+					state.lastContinueInputKeys = Object.keys(input).sort();
 					if (state.continueDelayMs > 0) {
 						await new Promise((resolve) => setTimeout(resolve, state.continueDelayMs));
 					}
@@ -805,6 +810,30 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(second.result?.status).toBe("ok");
 		expect(state.loginCount).toBe(2);
 		expect(state.prepStatuses).toContain(401);
+	});
+
+	it("skips (multi-turn) when the start turn requests fields the probe does not hold", async () => {
+		const state = createFlowProviderState();
+		state.startFormFields = ["otp"];
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const body = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(body.result?.status).toBe("skipped");
+		expect(body.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON);
+		// The password must never be posted into a stage that did not ask for it.
+		expect(state.continueCount).toBe(0);
+	});
+
+	it("submits ONLY the fields the turn requests", async () => {
+		const state = createFlowProviderState();
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const body = await runCase(selfTestApp, "session", "session case", "req-cycle-1", {
+			...CREDENTIAL_INPUTS,
+			extraneous: "never-send-me",
+		});
+		expect(body.result?.status).toBe("ok");
+		expect(state.lastContinueInputKeys).toEqual(["password", "phone"]);
 	});
 
 	it("redacts flow-materialized secrets from every probe output", async () => {

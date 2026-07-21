@@ -354,9 +354,17 @@ function upstreamErrorMessage(body: unknown): string | undefined {
  */
 export const SELF_TEST_MULTI_TURN_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
 
+/**
+ * Age bound for POSITIVE cached credentials. Expiry modes that never produce
+ * a 401/403 (a 200 login page, an assertion failure) would otherwise replay
+ * the same stale session until pod restart — one re-login per day is the
+ * upstream-safe recovery for them.
+ */
+export const SELF_TEST_CREDENTIAL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
 export type SelfTestCredentialSessionEntry =
 	/** Flow-materialized credential reused across probe cycles. */
-	| { kind: "credential"; credential: Record<string, string> }
+	| { kind: "credential"; credential: Record<string, string>; cachedAtMs: number }
 	/**
 	 * Negative entry: the flow did not complete in a single continue turn
 	 * (`auth_flow_multi_turn`). Memoized so subsequent cycles report the skip
@@ -458,7 +466,7 @@ type SelfTestConnectionResolution =
 type ParsedAuthFlowTurn =
 	| {
 			ok: true;
-			turn: { kind: string; data?: unknown };
+			turn: { kind: string; data?: unknown; expectedInput?: unknown };
 			contextPatch?: Record<string, unknown>;
 	  }
 	| { ok: false; code: string; message: string; httpStatus: number };
@@ -490,7 +498,11 @@ function parseAuthFlowResponse(result: { status: number; body: unknown }): Parse
 	const contextPatch = objectProperty(result.body, "contextPatch");
 	return {
 		ok: true,
-		turn: { kind: turnKind, data: objectProperty(turnValue, "data") },
+		turn: {
+			kind: turnKind,
+			data: objectProperty(turnValue, "data"),
+			expectedInput: objectProperty(turnValue, "expectedInput"),
+		},
 		...(contextPatch && typeof contextPatch === "object" && !Array.isArray(contextPatch)
 			? { contextPatch: contextPatch as Record<string, unknown> }
 			: {}),
@@ -536,6 +548,28 @@ function completedCredentialFromTurn(turnData: unknown): Record<string, string> 
  * other than a complete turn is a visible multi-turn gap, never a fabricated
  * probe failure.
  */
+
+/**
+ * Fields an input-prompt turn actually requests, from its JSON-schema
+ * `expectedInput.schema.properties`. `null` when the turn declares no
+ * schema (legacy/loose flows keep full-input semantics).
+ */
+function turnRequestedFields(turn: { expectedInput?: unknown }): string[] | null {
+	const expectedInput = turn.expectedInput;
+	const schema =
+		expectedInput && typeof expectedInput === "object"
+			? (expectedInput as { schema?: unknown }).schema
+			: undefined;
+	const properties =
+		schema && typeof schema === "object"
+			? (schema as { properties?: unknown }).properties
+			: undefined;
+	if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+		return null;
+	}
+	return Object.keys(properties);
+}
+
 async function materializeFlowCredential(
 	execution: SelfTestExecutionContext,
 	inputs: Readonly<Record<string, string>>,
@@ -600,6 +634,21 @@ async function materializeFlowCredential(
 		if (turn.kind !== "form" && turn.kind !== "retry") {
 			return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
 		}
+		// Submit ONLY what the turn asks for: a first stage of a multi-step
+		// login may request a subset (or different fields entirely) — posting
+		// the full inputs would send secrets to the wrong stage. A turn
+		// requesting any field we do not hold is a headless gap (multi-turn);
+		// a turn with no declared schema keeps full-input semantics.
+		const requestedFields = turnRequestedFields(turn);
+		let submitInputs: Record<string, string> = { ...inputs };
+		if (requestedFields !== null) {
+			if (requestedFields.some((field) => inputs[field] === undefined)) {
+				return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
+			}
+			submitInputs = Object.fromEntries(
+				requestedFields.map((field) => [field, inputs[field] as string]),
+			);
+		}
 		// The case deadline may have fired while start() was still running.
 		// Never submit real credentials into a flow whose case already
 		// reported self_test_timeout — a late continue is a real upstream
@@ -617,7 +666,7 @@ async function materializeFlowCredential(
 				requestId: `${execution.requestId}-auth-continue-${randomUUID()}`,
 				flowId,
 				...(options.connectionId ? { connectionId: options.connectionId } : {}),
-				input: { ...inputs },
+				input: submitInputs,
 				...(Object.keys(flowContext).length > 0 ? { context: flowContext } : {}),
 			}),
 		);
@@ -766,13 +815,19 @@ async function resolveSelfTestConnection(
 		execution.sessionCache.delete(cacheKey);
 	}
 	if (options.forceLogin !== true && cached?.kind === "credential") {
-		registerSensitiveValues(execution, Object.values(cached.credential));
-		return {
-			kind: "connection",
-			connection: buildConnection(cached.credential),
-			credentialSource: "cache",
-			cacheKey,
-		};
+		if (Date.now() - cached.cachedAtMs >= SELF_TEST_CREDENTIAL_MAX_AGE_MS) {
+			// Age-bounded: expiry modes that never 401 (login-page 200s,
+			// assertion failures) must not replay one stale session forever.
+			execution.sessionCache.delete(cacheKey);
+		} else {
+			registerSensitiveValues(execution, Object.values(cached.credential));
+			return {
+				kind: "connection",
+				connection: buildConnection(cached.credential),
+				credentialSource: "cache",
+				cacheKey,
+			};
+		}
 	}
 	const materialized = await materializeFlowCredential(execution, inputs, {
 		...(options.isAbandoned !== undefined ? { isAbandoned: options.isAbandoned } : {}),
@@ -809,6 +864,7 @@ async function resolveSelfTestConnection(
 	execution.sessionCache.set(cacheKey, {
 		kind: "credential",
 		credential: materialized.credential,
+		cachedAtMs: Date.now(),
 	});
 	return {
 		kind: "connection",
