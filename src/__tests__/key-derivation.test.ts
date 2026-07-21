@@ -6,7 +6,7 @@ import {
 	deriveSubkey,
 	invalidateSubkeyCache,
 	type KeyPurpose,
-} from "../runtime/key-derivation";
+} from "../runtime/key-derivation.js";
 
 const TEST_KEY = Buffer.alloc(32, 7);
 const OTHER_KEY = Buffer.alloc(32, 11);
@@ -86,15 +86,15 @@ describe("deriveSubkey", () => {
 
 	it("rejects short master keys", () => {
 		const short = Buffer.alloc(16, 7);
-		expect(() =>
-			deriveSubkey(short, "provider-x", "credential-encryption", 1),
-		).toThrow(ConfigurationError);
+		expect(() => deriveSubkey(short, "provider-x", "credential-encryption", 1)).toThrow(
+			ConfigurationError,
+		);
 	});
 
 	it("rejects empty providerId", () => {
-		expect(() =>
-			deriveSubkey(TEST_KEY, "", "credential-encryption", 1),
-		).toThrow(ConfigurationError);
+		expect(() => deriveSubkey(TEST_KEY, "", "credential-encryption", 1)).toThrow(
+			ConfigurationError,
+		);
 	});
 
 	it("matches the cross-language HKDF reference test vector", () => {
@@ -104,12 +104,7 @@ describe("deriveSubkey", () => {
 		//   info    = "provider=korea-weather"
 		//   output  = HKDF-SHA256(master, salt, info, 32)
 		// Go (crypto/hkdf) and Node (node:crypto.hkdfSync) must both return this hex.
-		const subkey = deriveSubkey(
-			TEST_KEY,
-			"korea-weather",
-			"credential-encryption",
-			1,
-		);
+		const subkey = deriveSubkey(TEST_KEY, "korea-weather", "credential-encryption", 1);
 		expect(subkey.toString("hex")).toBe(
 			"8dccd08c8a601613cdec1d005d36207e2670ae4bddb70500865316faa2491f4b",
 		);
@@ -118,11 +113,7 @@ describe("deriveSubkey", () => {
 
 describe("KeyPurpose enum coverage", () => {
 	it("covers exactly the three purposes defined in the spec", () => {
-		const purposes: KeyPurpose[] = [
-			"credential-encryption",
-			"context-namespace",
-			"token-signing",
-		];
+		const purposes: KeyPurpose[] = ["credential-encryption", "context-namespace", "token-signing"];
 		for (const p of purposes) {
 			const k = deriveSubkey(TEST_KEY, "p", p, 1);
 			expect(k.length).toBe(32);

@@ -1,4 +1,4 @@
-import type { ProviderErrorCategory } from "./observability";
+import type { ProviderErrorCategory } from "./observability.js";
 
 // Versioned, cross-realm brands. `Symbol.for` resolves to the same symbol in
 // any copy/entrypoint of this SDK major version, so an error created by a
@@ -8,9 +8,7 @@ import type { ProviderErrorCategory } from "./observability";
 // future breaking change to this contract mint a distinct key.
 const PROVIDER_ERROR_BRAND = Symbol.for("@apifuse/provider-sdk/error-brand@1");
 const PROVIDER_ERROR_BRAND_VALUE = 1;
-const SESSION_EXPIRED_BRAND = Symbol.for(
-	"@apifuse/provider-sdk/error-kind/session-expired@1",
-);
+const SESSION_EXPIRED_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/session-expired@1");
 const TRANSPORT_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/transport@1");
 
 // Defines a non-enumerable, non-writable, non-configurable own data property.
@@ -35,9 +33,7 @@ function hasOwnBrand(value: unknown, brand: symbol, expected: number | true): bo
 	}
 	const descriptor = Object.getOwnPropertyDescriptor(value, brand);
 	return (
-		descriptor !== undefined &&
-		Object.hasOwn(descriptor, "value") &&
-		descriptor.value === expected
+		descriptor !== undefined && Object.hasOwn(descriptor, "value") && descriptor.value === expected
 	);
 }
 
@@ -91,10 +87,7 @@ export class AuthError extends ProviderError {
 }
 
 export class SessionExpiredError extends AuthError {
-	constructor(
-		message = "Provider session expired",
-		options?: ProviderErrorOptions,
-	) {
+	constructor(message = "Provider session expired", options?: ProviderErrorOptions) {
 		super(message, {
 			code: "reauth_required",
 			category: "credential_expired",

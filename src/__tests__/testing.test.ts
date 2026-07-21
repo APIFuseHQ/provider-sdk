@@ -2,14 +2,14 @@ import { describe, expect, it } from "bun:test";
 import { mkdirSync } from "node:fs";
 import { z } from "zod";
 
-import { defineProvider } from "../define";
-import * as sdk from "../index";
+import { defineProvider } from "../define.js";
+import * as sdk from "../index.js";
 import {
 	describeTransform,
 	runStandardTests,
 	snapshotTransform,
 	toMatchShape,
-} from "../testing";
+} from "../testing/index.js";
 
 const testProvider = defineProvider({
 	id: "test-provider",
@@ -135,10 +135,7 @@ describeTransform("double-value", { value: 2 }, { doubled: 4 }, (raw) => ({
 describe("toMatchShape", () => {
 	it("passes when all shape keys match", () => {
 		expect(() => {
-			toMatchShape(
-				{ name: "Alice", age: 30, extra: "ignored" },
-				{ name: "Alice", age: 30 },
-			);
+			toMatchShape({ name: "Alice", age: 30, extra: "ignored" }, { name: "Alice", age: 30 });
 		}).not.toThrow();
 	});
 

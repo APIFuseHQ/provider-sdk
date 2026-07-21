@@ -4,20 +4,20 @@ import {
 	createProviderChoiceToken,
 	ProviderChoiceTokenError,
 	parseProviderChoiceToken,
-} from "../choice-token";
-import { ProviderError } from "../errors";
+} from "../choice-token.js";
+import { ProviderError } from "../errors.js";
 import {
 	checkResultCode,
 	isEmptyResult,
 	nullIfPlaceholder,
 	unwrapGovEnvelope,
-} from "../recipes/gov-api";
-import { createTestProviderChoiceContext } from "../runtime/choice";
-import type { CredentialContext } from "../types";
-import { toISODate } from "../utils/date";
-import { pivotByField, unwrapEnvelope } from "../utils/parse";
-import { stripHtml, truncate } from "../utils/text";
-import { toBoolean, toFloat, toInt, toNumber } from "../utils/transform";
+} from "../recipes/gov-api.js";
+import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import type { CredentialContext } from "../types.js";
+import { toISODate } from "../utils/date.js";
+import { pivotByField, unwrapEnvelope } from "../utils/parse.js";
+import { stripHtml, truncate } from "../utils/text.js";
+import { toBoolean, toFloat, toInt, toNumber } from "../utils/transform.js";
 
 describe("transform utils", () => {
 	it("parses numbers and booleans", () => {
@@ -31,9 +31,7 @@ describe("transform utils", () => {
 
 describe("date utils", () => {
 	it("formats dates with timezone", () => {
-		expect(toISODate("20230101", "Asia/Seoul")).toBe(
-			"2023-01-01T00:00:00+09:00",
-		);
+		expect(toISODate("20230101", "Asia/Seoul")).toBe("2023-01-01T00:00:00+09:00");
 	});
 });
 
@@ -84,12 +82,12 @@ describe("choice token utils", () => {
 				secret: "test-secret",
 			}),
 		).toThrow(ProviderChoiceTokenError);
-		expect(() =>
-			assertFreshProviderChoiceIssuedAt(1000, { ttlMs: 10, nowMs: 2000 }),
-		).toThrow(ProviderChoiceTokenError);
-		expect(() =>
-			assertFreshProviderChoiceIssuedAt(40_000, { ttlMs: 10, nowMs: 1_000 }),
-		).toThrow(ProviderChoiceTokenError);
+		expect(() => assertFreshProviderChoiceIssuedAt(1000, { ttlMs: 10, nowMs: 2000 })).toThrow(
+			ProviderChoiceTokenError,
+		);
+		expect(() => assertFreshProviderChoiceIssuedAt(40_000, { ttlMs: 10, nowMs: 1_000 })).toThrow(
+			ProviderChoiceTokenError,
+		);
 	});
 
 	it("keeps provider-specific choice namespaces isolated for future facades", () => {
@@ -375,8 +373,6 @@ describe("gov-api recipe", () => {
 				response: { body: { items: { item: [{ id: 1 }] } } },
 			}),
 		).toEqual([{ id: 1 }]);
-		expect(isEmptyResult({ response: { header: { resultCode: "03" } } })).toBe(
-			true,
-		);
+		expect(isEmptyResult({ response: { header: { resultCode: "03" } } })).toBe(true);
 	});
 });

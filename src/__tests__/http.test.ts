@@ -1,12 +1,12 @@
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { TransportError } from "../errors";
+import { TransportError } from "../errors.js";
 import {
 	HttpRetryAfterPolicy,
 	HttpRetryJitter,
 	HttpRetryPreset,
 	HttpRetryUnsafeMethodPolicy,
-} from "../types";
+} from "../types.js";
 
 type MockImpitResponse = {
 	status: number;
@@ -64,7 +64,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const result = await http.get("https://httpbin.org/get", {
 			params: { q: "1" },
@@ -96,7 +96,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const result = await http.get("https://example.com/binary");
 
@@ -116,7 +116,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "text/html" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const result = await http.get("https://example.com/euc-kr");
 
@@ -131,7 +131,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/octet-stream" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const result = await http.get("https://example.com/defensive-copy");
 
@@ -153,7 +153,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const result = await http.get("https://example.com/empty-json");
 
@@ -168,7 +168,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com");
 
 		await http.get("/items?existing=1", {
@@ -194,7 +194,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const result = await http.post("https://httpbin.org/post", {
 			key: "value",
@@ -212,7 +212,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const response = await http.stream("https://example.com/logs");
 
@@ -231,7 +231,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "text/event-stream" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const events = await http.sse("https://example.com/events");
 		const first = await events[Symbol.asyncIterator]().next();
@@ -252,7 +252,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
 
 		const response = await http.stream("https://example.com/events");
@@ -270,7 +270,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const result = await http.post("https://example.com/form", "a=1&b=2", {
 			headers: {
@@ -302,7 +302,7 @@ describe("createHttpClient", () => {
 			},
 		);
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await http.get("https://first.example/session");
@@ -319,7 +319,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(http.get("https://example.com/not-found")).rejects.toThrow(TransportError);
@@ -333,7 +333,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const response = await http.get("https://example.com/invalid", {
 			throwOnHttpError: false,
@@ -352,7 +352,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		try {
@@ -367,7 +367,7 @@ describe("createHttpClient", () => {
 	it("throws TransportError on network error", async () => {
 		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(http.get("https://example.com")).rejects.toMatchObject({
@@ -385,7 +385,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(http.get("https://example.com")).rejects.toMatchObject({
@@ -405,7 +405,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, {
 			onRetrySummary: (summary) => summaries.push(summary),
 		});
@@ -443,7 +443,7 @@ describe("createHttpClient", () => {
 			},
 		);
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(
@@ -467,7 +467,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
 		let response: Awaited<ReturnType<typeof http.get>> | undefined;
 		try {
@@ -494,7 +494,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, {
 			upstream: {
 				proxy: {
@@ -530,7 +530,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, {
 			upstream: {
 				proxy: {
@@ -569,7 +569,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, {
 			upstream: {
 				proxy: {
@@ -620,9 +620,9 @@ describe("createHttpClient", () => {
 			});
 		}) as typeof fetch;
 
-		const { clearProxyResolutionCache } = await import("../config/loader");
+		const { clearProxyResolutionCache } = await import("../config/loader.js");
 		clearProxyResolutionCache();
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, {
 			affinityKey: "http_retry_rotation",
 			upstream: {
@@ -666,7 +666,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
 
 		await expect(http.get("https://example.com", { retry: false })).rejects.toMatchObject({
@@ -683,7 +683,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
 
 		await expect(http.post("https://example.com", { ok: true })).rejects.toMatchObject({
@@ -706,7 +706,7 @@ describe("createHttpClient", () => {
 			},
 		);
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(
@@ -739,7 +739,7 @@ describe("createHttpClient", () => {
 			},
 		);
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const response = await http.get("https://example.com", {
 			retry: {
@@ -766,7 +766,7 @@ describe("createHttpClient", () => {
 			},
 		);
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 		const response = await http.get("https://example.com", {
 			retry: { preset: HttpRetryPreset.SafeRead, baseDelayMs: 0 },
@@ -785,7 +785,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(
@@ -795,7 +795,7 @@ describe("createHttpClient", () => {
 	});
 
 	it("rejects custom unsafe retry methods unless explicitly allowed", async () => {
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(
@@ -811,7 +811,7 @@ describe("createHttpClient", () => {
 	});
 
 	it("rejects invalid retry presets with a stable provider-facing error", async () => {
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(
@@ -830,7 +830,7 @@ describe("createHttpClient", () => {
 	});
 
 	it("rejects malformed retry option values before issuing a request", async () => {
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(
@@ -863,7 +863,7 @@ describe("createHttpClient", () => {
 	});
 
 	it("rejects retry-enabling overrides when preset is Off", async () => {
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(
@@ -894,7 +894,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await http.post(
@@ -939,7 +939,7 @@ describe("createHttpClient", () => {
 				},
 			);
 
-			const { createHttpClient } = await import("../runtime/http");
+			const { createHttpClient } = await import("../runtime/http.js");
 			const http = createHttpClient();
 			await http.get("https://example.com", {
 				retry: {
@@ -997,7 +997,7 @@ describe("createHttpClient", () => {
 				},
 			);
 
-			const { createHttpClient } = await import("../runtime/http");
+			const { createHttpClient } = await import("../runtime/http.js");
 			const http = createHttpClient();
 			await http.get("https://example.com/respect", {
 				retry: {
@@ -1034,7 +1034,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
 			proxy: "http://proxy.test",
 		});
@@ -1058,7 +1058,7 @@ describe("createHttpClient", () => {
 		timeoutError.name = "TimeoutError";
 		mockNativeFetchState.queuedErrors.push(timeoutError);
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(http.get("https://example.com/slow", { timeout: 100 })).rejects.toMatchObject({
@@ -1079,7 +1079,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient(undefined, { proxy: "http://proxy.test" });
 		try {
 			const response = await http.get("https://example.com/slow", {
@@ -1097,7 +1097,7 @@ describe("createHttpClient", () => {
 	});
 
 	it("fails clearly for relative URLs without an upstream base URL", async () => {
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await expect(http.get("/relative")).rejects.toMatchObject({
@@ -1114,7 +1114,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await http.put("https://example.com/resource", { data: "updated" });
@@ -1128,7 +1128,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await http.delete("https://example.com/resource");
@@ -1149,7 +1149,7 @@ describe("createHttpClient", () => {
 			},
 		);
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
 
 		await http.request("https://example.com/default");
@@ -1168,7 +1168,7 @@ describe("createHttpClient", () => {
 	});
 
 	it("rejects stealth transport overrides on ctx.http", async () => {
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com");
 
 		await expect(http.get("/profiled", { profile: "chrome-146" } as never)).rejects.toMatchObject({
@@ -1187,7 +1187,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com");
 
 		await http.request("/trace", { method: "TRACE" });
@@ -1206,7 +1206,7 @@ describe("createHttpClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createHttpClient } = await import("../runtime/http");
+		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
 			userAgent: "native-agent",
 		});

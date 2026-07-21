@@ -1,4 +1,4 @@
-import type { EnvContext } from "../types";
+import type { EnvContext } from "../types.js";
 
 export function createEnvContext(allowedKeys?: string[]): EnvContext {
 	return {

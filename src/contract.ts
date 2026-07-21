@@ -6,13 +6,13 @@ import {
 	type JsonPrimitive,
 	type JsonValue,
 	toJsonValue,
-} from "./contract-json";
-import { describeSchema, serializeSmsMatcher } from "./contract-serialization";
+} from "./contract-json.js";
+import { describeSchema, serializeSmsMatcher } from "./contract-serialization.js";
 import {
 	PROVIDER_CONTRACT_SCHEMA_VERSION,
 	type ProviderContractOperation,
 	type ProviderContractSnapshot,
-} from "./contract-types";
+} from "./contract-types.js";
 import type {
 	HealthCheckSuite,
 	HealthCheckUnsupported,
@@ -20,7 +20,7 @@ import type {
 	OperationDefinition,
 	OperationTransport,
 	ProviderDefinition,
-} from "./types";
+} from "./types.js";
 
 export {
 	canonicalJson,
@@ -31,9 +31,7 @@ export {
 	type ProviderContractSnapshot,
 };
 
-export function extractProviderContract(
-	provider: ProviderDefinition,
-): ProviderContractSnapshot {
+export function extractProviderContract(provider: ProviderDefinition): ProviderContractSnapshot {
 	const auth = extractAuth(provider.auth);
 	const stealth = toJsonValue(provider.stealth);
 	const proxy = toJsonValue(provider.proxy);
@@ -57,12 +55,8 @@ export function extractProviderContract(
 		meta: toJsonValue(provider.meta) ?? null,
 		operations: Object.entries(provider.operations)
 			.sort(([leftId], [rightId]) => leftId.localeCompare(rightId))
-			.map(([operationId, operation]) =>
-				extractOperation(operationId, operation),
-			),
-		...(provider.allowedHosts
-			? { allowedHosts: [...provider.allowedHosts].sort() }
-			: {}),
+			.map(([operationId, operation]) => extractOperation(operationId, operation)),
+		...(provider.allowedHosts ? { allowedHosts: [...provider.allowedHosts].sort() } : {}),
 		...(stealth === undefined ? {} : { stealth }),
 		...(proxy === undefined ? {} : { proxy }),
 		...(stt === undefined ? {} : { stt }),
@@ -78,9 +72,7 @@ export function extractProviderContract(
 	};
 }
 
-export function digestProviderContract(
-	snapshot: ProviderContractSnapshot,
-): string {
+export function digestProviderContract(snapshot: ProviderContractSnapshot): string {
 	return createHash("sha256").update(canonicalJson(snapshot)).digest("hex");
 }
 
@@ -105,9 +97,7 @@ function extractOperation(
 	const upstream = toJsonValue(operation.upstream);
 	const hints = toJsonValue(operation.hints);
 	const healthCheck = extractHealthCheck(operation.healthCheck);
-	const healthCheckUnsupported = extractHealthCheckUnsupported(
-		operation.healthCheckUnsupported,
-	);
+	const healthCheckUnsupported = extractHealthCheckUnsupported(operation.healthCheckUnsupported);
 
 	return {
 		id: operationId,
@@ -149,9 +139,7 @@ function extractAuth(value: ProviderDefinition["auth"]): JsonValue | undefined {
 	});
 }
 
-function extractTransport(
-	value: OperationTransport | undefined,
-): JsonValue | undefined {
+function extractTransport(value: OperationTransport | undefined): JsonValue | undefined {
 	if (!value) return undefined;
 	if (value.kind !== "sse") return toJsonValue(value);
 	return compactObject({
@@ -164,9 +152,7 @@ function extractTransport(
 	});
 }
 
-function extractHealthCheck(
-	value: HealthCheckSuite | undefined,
-): JsonValue | undefined {
+function extractHealthCheck(value: HealthCheckSuite | undefined): JsonValue | undefined {
 	if (!value) return undefined;
 	return compactObject({
 		interval: value.interval,
@@ -204,9 +190,7 @@ function extractHealthJourney(value: HealthJourneyDefinition): JsonValue {
 		cooldown: value.cooldown,
 		smsMatchers: toJsonValue(
 			value.smsMatchers?.map((matcher) =>
-				serializeSmsMatcher(
-					copyRecordWithout(matcher, new Set(["extractOtp"])),
-				),
+				serializeSmsMatcher(copyRecordWithout(matcher, new Set(["extractOtp"]))),
 			),
 		),
 		requiredSecrets: toJsonValue(value.requiredSecrets),

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { AuthAbortError, createAuthFlowHelpers } from "../auth";
-import { createServerApp } from "../server/serve";
-import type { AuthTurn, ProviderDefinition } from "../types";
+import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
+import { createServerApp } from "../server/serve.js";
+import type { AuthTurn, ProviderDefinition } from "../types.js";
 
 const JsonRecordSchema = z.record(z.string(), z.unknown());
 const IsoDateTimeSchema = z.iso.datetime();
@@ -178,9 +178,7 @@ function createProvider(): ProviderDefinition {
 				start: async () => turns.webauthn,
 				continue: async (_ctx, input) => {
 					const kind = input?.kind;
-					return typeof kind === "string" && kind in turns
-						? turns[kind as TurnKind]
-						: turns.error;
+					return typeof kind === "string" && kind in turns ? turns[kind as TurnKind] : turns.error;
 				},
 				poll: async () => turns.retry,
 				abort: async () => turns.abort,
@@ -225,7 +223,7 @@ function assertAuthTurnContract(turn: AuthTurn): void {
 
 describe("auth-flow AuthTurn provider contract", () => {
 	it("exports auth terminal helpers from the provider authoring subpath", async () => {
-		const providerExports = await import("../provider");
+		const providerExports = await import("../provider.js");
 
 		expect(providerExports.AuthAbortError).toBe(AuthAbortError);
 		expect(providerExports.createAuthFlowHelpers).toBe(createAuthFlowHelpers);
@@ -470,8 +468,7 @@ describe("auth-flow AuthTurn provider contract", () => {
 								actionHint: { kind: "open_provider_app" },
 							});
 						},
-						continue: async (ctx) =>
-							ctx.auth.complete({ credential: { access_token: "unused" } }),
+						continue: async (ctx) => ctx.auth.complete({ credential: { access_token: "unused" } }),
 					},
 				},
 				operations: {},
@@ -560,12 +557,8 @@ describe("auth-flow AuthTurn provider contract", () => {
 	});
 
 	it("rejects AuthTurn values missing required fields", () => {
-		expect(() => AuthTurnShapeSchema.parse({ kind: "form" })).toThrow(
-			z.ZodError,
-		);
-		expect(() =>
-			AuthTurnShapeSchema.parse({ turnId: "turn_missing_kind" }),
-		).toThrow(z.ZodError);
+		expect(() => AuthTurnShapeSchema.parse({ kind: "form" })).toThrow(z.ZodError);
+		expect(() => AuthTurnShapeSchema.parse({ turnId: "turn_missing_kind" })).toThrow(z.ZodError);
 	});
 
 	it("rejects malformed documented expectedInput schema", () => {
@@ -591,9 +584,7 @@ describe("auth-flow AuthTurn provider contract", () => {
 			error: expect.objectContaining({
 				code: "invalid_request",
 				message: "Invalid request body",
-				details: expect.arrayContaining([
-					expect.objectContaining({ path: "requestId" }),
-				]),
+				details: expect.arrayContaining([expect.objectContaining({ path: "requestId" })]),
 			}),
 		});
 	});

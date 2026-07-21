@@ -4,7 +4,7 @@ import type {
 	ProxyResolutionTelemetryEvent,
 	ProxyTelemetrySink,
 	SmartproxyAllocatorBodyClass,
-} from "../config/loader";
+} from "../config/loader.js";
 
 export const PROVIDER_TELEMETRY_HEADER = "X-ApiFuse-Provider-Telemetry";
 
@@ -55,31 +55,18 @@ const CACHE_STATUS_SEVERITY: Record<ProxyCacheStatus, number> = {
 	allocator: 7,
 };
 
-function sumOptional(
-	left: number | undefined,
-	right: number | undefined,
-): number | undefined {
+function sumOptional(left: number | undefined, right: number | undefined): number | undefined {
 	const total = (left ?? 0) + (right ?? 0);
 	return total > 0 ? total : undefined;
 }
 
-function maxOptional(
-	left: number | undefined,
-	right: number | undefined,
-): number | undefined {
-	const values = [left, right].filter(
-		(value): value is number => typeof value === "number",
-	);
+function maxOptional(left: number | undefined, right: number | undefined): number | undefined {
+	const values = [left, right].filter((value): value is number => typeof value === "number");
 	return values.length > 0 ? Math.max(...values) : undefined;
 }
 
-function worseStatus(
-	left: ProxyCacheStatus,
-	right: ProxyCacheStatus,
-): ProxyCacheStatus {
-	return CACHE_STATUS_SEVERITY[right] > CACHE_STATUS_SEVERITY[left]
-		? right
-		: left;
+function worseStatus(left: ProxyCacheStatus, right: ProxyCacheStatus): ProxyCacheStatus {
+	return CACHE_STATUS_SEVERITY[right] > CACHE_STATUS_SEVERITY[left] ? right : left;
 }
 
 function encodeBase64Url(value: string): string {
@@ -97,9 +84,7 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 			cacheHit: event.cacheHit,
 			resolutionMs: Math.max(0, Math.floor(event.resolutionMs)),
 			allocatorMs:
-				event.allocatorMs === undefined
-					? undefined
-					: Math.max(0, Math.floor(event.allocatorMs)),
+				event.allocatorMs === undefined ? undefined : Math.max(0, Math.floor(event.allocatorMs)),
 			allocatorStatus:
 				event.allocatorStatus === undefined
 					? undefined
@@ -110,30 +95,20 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 					? undefined
 					: Math.max(1, Math.floor(event.allocatorAttempts)),
 			lockWaitMs:
-				event.lockWaitMs === undefined
-					? undefined
-					: Math.max(0, Math.floor(event.lockWaitMs)),
+				event.lockWaitMs === undefined ? undefined : Math.max(0, Math.floor(event.lockWaitMs)),
 			redisReadMs:
-				event.redisReadMs === undefined
-					? undefined
-					: Math.max(0, Math.floor(event.redisReadMs)),
+				event.redisReadMs === undefined ? undefined : Math.max(0, Math.floor(event.redisReadMs)),
 			redisWriteMs:
-				event.redisWriteMs === undefined
-					? undefined
-					: Math.max(0, Math.floor(event.redisWriteMs)),
+				event.redisWriteMs === undefined ? undefined : Math.max(0, Math.floor(event.redisWriteMs)),
 			poolAgeMs:
-				event.poolAgeMs === undefined
-					? undefined
-					: Math.max(0, Math.floor(event.poolAgeMs)),
+				event.poolAgeMs === undefined ? undefined : Math.max(0, Math.floor(event.poolAgeMs)),
 			poolExpiresInMs:
 				event.poolExpiresInMs === undefined
 					? undefined
 					: Math.max(0, Math.floor(event.poolExpiresInMs)),
 			attempts: Math.max(1, Math.floor(event.attempts || 1)),
 			refreshes:
-				event.refreshes === undefined
-					? undefined
-					: Math.max(0, Math.floor(event.refreshes)),
+				event.refreshes === undefined ? undefined : Math.max(0, Math.floor(event.refreshes)),
 		});
 	}
 
@@ -148,9 +123,7 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 			...(event.proxyHash ? { proxyHash: event.proxyHash.slice(0, 16) } : {}),
 			outcome: event.outcome === "ok" ? "ok" : "error",
 			...(event.errorCode ? { errorCode: event.errorCode.slice(0, 80) } : {}),
-			...(event.status === undefined
-				? {}
-				: { status: Math.max(0, Math.floor(event.status)) }),
+			...(event.status === undefined ? {} : { status: Math.max(0, Math.floor(event.status)) }),
 			...(event.durationMs === undefined
 				? {}
 				: { durationMs: Math.max(0, Math.floor(event.durationMs)) }),
@@ -170,18 +143,12 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 				allocatorMs: sumOptional(acc.allocatorMs, event.allocatorMs),
 				allocatorStatus: event.allocatorStatus ?? acc.allocatorStatus,
 				allocatorBodyClass: event.allocatorBodyClass ?? acc.allocatorBodyClass,
-				allocatorAttempts: sumOptional(
-					acc.allocatorAttempts,
-					event.allocatorAttempts,
-				),
+				allocatorAttempts: sumOptional(acc.allocatorAttempts, event.allocatorAttempts),
 				lockWaitMs: sumOptional(acc.lockWaitMs, event.lockWaitMs),
 				redisReadMs: sumOptional(acc.redisReadMs, event.redisReadMs),
 				redisWriteMs: sumOptional(acc.redisWriteMs, event.redisWriteMs),
 				poolAgeMs: maxOptional(acc.poolAgeMs, event.poolAgeMs),
-				poolExpiresInMs: maxOptional(
-					acc.poolExpiresInMs,
-					event.poolExpiresInMs,
-				),
+				poolExpiresInMs: maxOptional(acc.poolExpiresInMs, event.poolExpiresInMs),
 				attempts: acc.attempts + event.attempts,
 				refreshes: sumOptional(acc.refreshes, event.refreshes),
 			}),
@@ -194,9 +161,7 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 				cacheStatus: aggregate.cacheStatus,
 				cacheHit: aggregate.cacheHit,
 				resolutionMs: aggregate.resolutionMs,
-				...(aggregate.allocatorMs !== undefined
-					? { allocatorMs: aggregate.allocatorMs }
-					: {}),
+				...(aggregate.allocatorMs !== undefined ? { allocatorMs: aggregate.allocatorMs } : {}),
 				...(aggregate.allocatorStatus !== undefined
 					? { allocatorStatus: aggregate.allocatorStatus }
 					: {}),
@@ -206,40 +171,26 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 				...(aggregate.allocatorAttempts !== undefined
 					? { allocatorAttempts: aggregate.allocatorAttempts }
 					: {}),
-				...(aggregate.lockWaitMs !== undefined
-					? { lockWaitMs: aggregate.lockWaitMs }
-					: {}),
-				...(aggregate.redisReadMs !== undefined
-					? { redisReadMs: aggregate.redisReadMs }
-					: {}),
-				...(aggregate.redisWriteMs !== undefined
-					? { redisWriteMs: aggregate.redisWriteMs }
-					: {}),
-				...(aggregate.poolAgeMs !== undefined
-					? { poolAgeMs: aggregate.poolAgeMs }
-					: {}),
+				...(aggregate.lockWaitMs !== undefined ? { lockWaitMs: aggregate.lockWaitMs } : {}),
+				...(aggregate.redisReadMs !== undefined ? { redisReadMs: aggregate.redisReadMs } : {}),
+				...(aggregate.redisWriteMs !== undefined ? { redisWriteMs: aggregate.redisWriteMs } : {}),
+				...(aggregate.poolAgeMs !== undefined ? { poolAgeMs: aggregate.poolAgeMs } : {}),
 				...(aggregate.poolExpiresInMs !== undefined
 					? { poolExpiresInMs: aggregate.poolExpiresInMs }
 					: {}),
 				attempts: aggregate.attempts,
-				...(aggregate.refreshes !== undefined
-					? { refreshes: aggregate.refreshes }
-					: {}),
+				...(aggregate.refreshes !== undefined ? { refreshes: aggregate.refreshes } : {}),
 				...(this.#attempts.length > 0
 					? {
 							attemptSamples: this.#attempts.map((attempt, index) => ({
 								n: index + 1,
 								a: attempt.attempt,
-								...(attempt.poolIndex === undefined
-									? {}
-									: { i: attempt.poolIndex }),
+								...(attempt.poolIndex === undefined ? {} : { i: attempt.poolIndex }),
 								...(attempt.proxyHash ? { h: attempt.proxyHash } : {}),
 								o: attempt.outcome,
 								...(attempt.errorCode ? { c: attempt.errorCode } : {}),
 								...(attempt.status === undefined ? {} : { s: attempt.status }),
-								...(attempt.durationMs === undefined
-									? {}
-									: { d: attempt.durationMs }),
+								...(attempt.durationMs === undefined ? {} : { d: attempt.durationMs }),
 							})),
 						}
 					: {}),

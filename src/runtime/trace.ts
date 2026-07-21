@@ -5,8 +5,8 @@ import type {
 	TraceAttributeValue,
 	TraceConfig,
 	TraceSpan,
-} from "../types";
-import { exportSpansOTLP, type OTLPExportOptions } from "./otlp";
+} from "../types.js";
+import { exportSpansOTLP, type OTLPExportOptions } from "./otlp.js";
 
 export type SpanAttributeValue = TraceAttributeValue;
 
@@ -44,16 +44,10 @@ type CompletedSpanEntry = {
 };
 
 export interface TraceRecorder {
-	runSpan<T>(
-		name: string,
-		fn: () => Promise<T> | T,
-		options?: SpanHookOptions<T>,
-	): Promise<T>;
+	runSpan<T>(name: string, fn: () => Promise<T> | T, options?: SpanHookOptions<T>): Promise<T>;
 }
 
-export const TRACE_RECORDER = Symbol.for(
-	"@apifuse/provider-sdk/runtime/trace-recorder",
-);
+export const TRACE_RECORDER = Symbol.for("@apifuse/provider-sdk/runtime/trace-recorder");
 
 type InternalTraceContext = TraceContext & {
 	[TRACE_RECORDER]: TraceRecorder;
@@ -61,9 +55,7 @@ type InternalTraceContext = TraceContext & {
 	_resourceAttributes?: Record<string, string>;
 };
 
-function buildOTLPExportOptions(
-	config?: TraceConfig,
-): OTLPExportOptions | undefined {
+function buildOTLPExportOptions(config?: TraceConfig): OTLPExportOptions | undefined {
 	if (config?.exporter !== "otlp") {
 		return undefined;
 	}
@@ -80,9 +72,7 @@ function buildOTLPExportOptions(
 	};
 }
 
-export function resolveTraceContextOptions(
-	config?: TraceConfig,
-): CreateTraceContextOptions {
+export function resolveTraceContextOptions(config?: TraceConfig): CreateTraceContextOptions {
 	return {
 		maxSpans: config?.maxSpans,
 		onSpan: config?.onSpan,
@@ -90,14 +80,8 @@ export function resolveTraceContextOptions(
 	};
 }
 
-function normalizeAttributeValue(
-	value: unknown,
-): SpanAttributeValue | undefined {
-	if (
-		typeof value === "string" ||
-		typeof value === "number" ||
-		typeof value === "boolean"
-	) {
+function normalizeAttributeValue(value: unknown): SpanAttributeValue | undefined {
+	if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
 		return value;
 	}
 
@@ -117,10 +101,7 @@ function normalizeAttributes(
 
 	const normalizedEntries = Object.entries(attributes)
 		.map(([key, value]) => [key, normalizeAttributeValue(value)] as const)
-		.filter(
-			(entry): entry is readonly [string, SpanAttributeValue] =>
-				entry[1] !== undefined,
-		);
+		.filter((entry): entry is readonly [string, SpanAttributeValue] => entry[1] !== undefined);
 
 	return Object.fromEntries(normalizedEntries);
 }
@@ -130,9 +111,7 @@ function insertCompletedSpan(
 	entry: CompletedSpanEntry,
 	maxSpans: number,
 ): void {
-	const insertAt = completed.findIndex(
-		(existingEntry) => existingEntry.sequence > entry.sequence,
-	);
+	const insertAt = completed.findIndex((existingEntry) => existingEntry.sequence > entry.sequence);
 
 	if (insertAt === -1) {
 		completed.push(entry);
@@ -145,15 +124,11 @@ function insertCompletedSpan(
 	}
 }
 
-export function getTraceRecorder(
-	trace: BaseTraceContext,
-): TraceRecorder | null {
+export function getTraceRecorder(trace: BaseTraceContext): TraceRecorder | null {
 	return (trace as Partial<InternalTraceContext>)[TRACE_RECORDER] ?? null;
 }
 
-export function createTraceContext(
-	options: CreateTraceContextOptions = {},
-): TraceContext {
+export function createTraceContext(options: CreateTraceContextOptions = {}): TraceContext {
 	const maxSpans = options.maxSpans ?? 1000;
 	const completed: CompletedSpanEntry[] = [];
 	const activeSpanStorage = new AsyncLocalStorage<PendingSpan | undefined>();
@@ -214,11 +189,7 @@ export function createTraceContext(
 					...(pendingSpan.parentId ? { parentId: pendingSpan.parentId } : {}),
 				};
 
-				insertCompletedSpan(
-					completed,
-					{ sequence: pendingSpan.sequence, span },
-					maxSpans,
-				);
+				insertCompletedSpan(completed, { sequence: pendingSpan.sequence, span }, maxSpans);
 				options.onSpan?.(span);
 
 				if (!pendingSpan.parentId) {
@@ -233,8 +204,7 @@ export function createTraceContext(
 					finalize("ok", successAttributes ?? undefined);
 					return value;
 				} catch (error) {
-					const errorMessage =
-						error instanceof Error ? error.message : String(error);
+					const errorMessage = error instanceof Error ? error.message : String(error);
 					const errorAttributes = spanOptions.onError?.(error);
 					finalize("error", errorAttributes ?? undefined, errorMessage);
 					throw error;

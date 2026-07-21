@@ -1,23 +1,18 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { clearProxyResolutionCache } from "../config/loader";
-import {
-	AuthError,
-	ProviderError,
-	SessionExpiredError,
-	TransportError,
-} from "../errors";
-import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry";
-import { createMemoryProviderRuntimeState } from "../runtime/state";
+import { clearProxyResolutionCache } from "../config/loader.js";
+import { AuthError, ProviderError, SessionExpiredError, TransportError } from "../errors.js";
+import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
+import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import {
 	createServerApp,
 	type ProviderServerLogEvent,
 	resolveProviderProxyAffinityKey,
-} from "../server/serve";
-import { event } from "../stream";
-import type { ProviderDefinition } from "../types";
-import { HttpRetryPreset } from "../types";
+} from "../server/serve.js";
+import { event } from "../stream.js";
+import type { ProviderDefinition } from "../types.js";
+import { HttpRetryPreset } from "../types.js";
 
 function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 	return {
@@ -342,8 +337,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 						code: "TABLE_SELECTION_REQUIRED",
 						fix: "Call availability and pass one reservation_choices[].reservation_choice.",
 						details: {
-							next_action:
-								"ask_user_to_pick_table_then_call_reserve_with_reservation_choice",
+							next_action: "ask_user_to_pick_table_then_call_reserve_with_reservation_choice",
 							required_input: "reservation_choice",
 						},
 					});
@@ -498,12 +492,12 @@ describe("provider proxy affinity", () => {
 			},
 		} satisfies Parameters<typeof resolveProviderProxyAffinityKey>[1];
 
-		expect(
-			resolveProviderProxyAffinityKey(provider, identityOnlyRequest, "search"),
-		).toBe("af_con_0123456789ABCDEFGHJKMN");
-		expect(
-			resolveProviderProxyAffinityKey(provider, credentialRequest, "search"),
-		).toBe("af_con_credential");
+		expect(resolveProviderProxyAffinityKey(provider, identityOnlyRequest, "search")).toBe(
+			"af_con_0123456789ABCDEFGHJKMN",
+		);
+		expect(resolveProviderProxyAffinityKey(provider, credentialRequest, "search")).toBe(
+			"af_con_credential",
+		);
 	});
 
 	it("scopes operation affinity by provider and operation instead of provider-wide fallback", () => {
@@ -645,8 +639,7 @@ describe("provider HTTP server", () => {
 			expect(await response.json()).toEqual({
 				error: {
 					code: "BROWSER_CDP_POOL_REQUIRED",
-					message:
-						"Managed CDP Pool is required for browser providers in production",
+					message: "Managed CDP Pool is required for browser providers in production",
 					requestId: "req_browser_no_pool",
 					fix: "Set APIFUSE__CDP_POOL__URL for deployed browser providers. Local standalone development may omit it.",
 				},
@@ -666,10 +659,10 @@ describe("provider HTTP server", () => {
 	});
 
 	it("rejects server-backed choice state without a durable runtime state backend", async () => {
-		const previousMasterSecret =
-			process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
-		process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET =
-			Buffer.from("x".repeat(32)).toString("base64");
+		const previousMasterSecret = process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
+		process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET = Buffer.from(
+			"x".repeat(32),
+		).toString("base64");
 		try {
 			const serverChoiceApp = createServerApp(createTestProvider());
 			const response = await serverChoiceApp.request("/v1/issueServerChoice", {
@@ -694,20 +687,18 @@ describe("provider HTTP server", () => {
 			});
 		} finally {
 			if (previousMasterSecret === undefined) {
-				delete process.env
-					.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
+				delete process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
 			} else {
-				process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET =
-					previousMasterSecret;
+				process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET = previousMasterSecret;
 			}
 		}
 	});
 
 	it("keeps injected server-backed choice state across operation HTTP requests", async () => {
-		const previousMasterSecret =
-			process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
-		process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET =
-			Buffer.from("x".repeat(32)).toString("base64");
+		const previousMasterSecret = process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
+		process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET = Buffer.from(
+			"x".repeat(32),
+		).toString("base64");
 		try {
 			const serverChoiceApp = createServerApp(createTestProvider(), {
 				state: createMemoryProviderRuntimeState(),
@@ -719,36 +710,28 @@ describe("provider HTTP server", () => {
 				metadata: {},
 				externalRef: "ext_choice_http",
 			};
-			const issueResponse = await serverChoiceApp.request(
-				"/v1/issueServerChoice",
-				{
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify({
-						requestId: "req_issue_choice",
-						input: { value: "persisted" },
-						connection,
-					}),
-				},
-			);
+			const issueResponse = await serverChoiceApp.request("/v1/issueServerChoice", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req_issue_choice",
+					input: { value: "persisted" },
+					connection,
+				}),
+			});
 			expect(issueResponse.status).toBe(200);
 			const issueBody = await issueResponse.json();
-			const token = z
-				.object({ data: z.object({ token: z.string() }) })
-				.parse(issueBody).data.token;
+			const token = z.object({ data: z.object({ token: z.string() }) }).parse(issueBody).data.token;
 
-			const parseResponse = await serverChoiceApp.request(
-				"/v1/parseServerChoice",
-				{
-					method: "POST",
-					headers: { "content-type": "application/json" },
-					body: JSON.stringify({
-						requestId: "req_parse_choice",
-						input: { token },
-						connection,
-					}),
-				},
-			);
+			const parseResponse = await serverChoiceApp.request("/v1/parseServerChoice", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req_parse_choice",
+					input: { token },
+					connection,
+				}),
+			});
 
 			expect(parseResponse.status).toBe(200);
 			expect(await parseResponse.json()).toEqual({
@@ -756,11 +739,9 @@ describe("provider HTTP server", () => {
 			});
 		} finally {
 			if (previousMasterSecret === undefined) {
-				delete process.env
-					.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
+				delete process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
 			} else {
-				process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET =
-					previousMasterSecret;
+				process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET = previousMasterSecret;
 			}
 		}
 	});
@@ -900,9 +881,7 @@ describe("provider HTTP server", () => {
 
 		expect(response.status).toBe(200);
 		expect(response.headers.get("content-type")).toContain("text/event-stream");
-		expect(await response.text()).toBe(
-			'id: evt_1\nevent: delta\ndata: {"value":"hello"}\n\n',
-		);
+		expect(await response.text()).toBe('id: evt_1\nevent: delta\ndata: {"value":"hello"}\n\n');
 	});
 
 	it("emits terminal SSE error events for invalid stream payloads", async () => {
@@ -1015,25 +994,20 @@ describe("provider HTTP server", () => {
 		});
 
 		expect(response.status).toBe(200);
-		await expect(response.text()).rejects.toThrow(
-			"Stream chunk exceeded declared byte limit",
-		);
+		await expect(response.text()).rejects.toThrow("Stream chunk exceeded declared byte limit");
 	});
 
 	it("propagates stream cancellation to returned ReadableStream sources", async () => {
 		const state: { streamCancelled?: boolean } = {};
 		const appWithAbortableStream = createServerApp(createTestProvider(state));
-		const response = await appWithAbortableStream.request(
-			"/v1/abortableDownload",
-			{
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					requestId: "req_abort_stream",
-					input: { value: "unused" },
-				}),
-			},
-		);
+		const response = await appWithAbortableStream.request("/v1/abortableDownload", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_abort_stream",
+				input: { value: "unused" },
+			}),
+		});
 
 		await response.body?.cancel("test abort");
 
@@ -1043,17 +1017,14 @@ describe("provider HTTP server", () => {
 	it("propagates SSE stream cancellation to async iterators", async () => {
 		const state: { streamCancelled?: boolean } = {};
 		const appWithAbortableStream = createServerApp(createTestProvider(state));
-		const response = await appWithAbortableStream.request(
-			"/v1/abortableEvents",
-			{
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({
-					requestId: "req_abort_sse",
-					input: { value: "first" },
-				}),
-			},
-		);
+		const response = await appWithAbortableStream.request("/v1/abortableEvents", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_abort_sse",
+				input: { value: "first" },
+			}),
+		});
 
 		const reader = response.body?.getReader();
 		await reader?.read();
@@ -1285,8 +1256,7 @@ describe("provider HTTP server", () => {
 				requestId: "req_action_required",
 				fix: "Call availability and pass one reservation_choices[].reservation_choice.",
 				details: {
-					next_action:
-						"ask_user_to_pick_table_then_call_reserve_with_reservation_choice",
+					next_action: "ask_user_to_pick_table_then_call_reserve_with_reservation_choice",
 					required_input: "reservation_choice",
 				},
 			},
@@ -1522,12 +1492,10 @@ describe("provider HTTP server", () => {
 
 	it("returns Smartproxy allocator failures with private telemetry and proxy-pool classification", async () => {
 		const originalFetch = global.fetch;
-		const originalSmartproxyKey =
-			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		clearProxyResolutionCache();
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
-			new Response("allocator denied", { status: 503 })) as typeof fetch;
+		global.fetch = (async () => new Response("allocator denied", { status: 503 })) as typeof fetch;
 		const baseProvider = createTestProvider();
 		const provider = {
 			...baseProvider,
@@ -1572,9 +1540,7 @@ describe("provider HTTP server", () => {
 			expect(response.status).toBe(502);
 			const telemetryHeader = response.headers.get(PROVIDER_TELEMETRY_HEADER);
 			expect(telemetryHeader).toBeTruthy();
-			const decoded = JSON.parse(
-				Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8"),
-			);
+			const decoded = JSON.parse(Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8"));
 			expect(decoded).toMatchObject({
 				v: 1,
 				proxy: {
@@ -1677,9 +1643,8 @@ describe("provider HTTP server cross-module error identity", () => {
 	async function createDuplicateInstanceApp() {
 		// Genuine second module identity for the SDK errors, modelling the packaged
 		// src/* server importing errors whose provider throws dist/* errors.
-		const Dup = (await import("../errors.ts?duplicate-sdk-instance")) as typeof import(
-			"../errors"
-		);
+		// biome-ignore lint/correctness/useImportExtensions: specifier already carries .ts; the ?query (invisible to the rule) mints a second module identity under bun test
+		const Dup = (await import("../errors.ts?duplicate-sdk-instance")) as typeof import("../errors");
 		const base = createTestProvider() as ProviderDefinition;
 		const provider = {
 			...base,

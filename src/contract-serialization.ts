@@ -6,8 +6,8 @@ import {
 	isRecord,
 	type JsonValue,
 	toJsonValue,
-} from "./contract-json";
-import type { SchemaLike } from "./types";
+} from "./contract-json.js";
+import type { SchemaLike } from "./types.js";
 
 export function describeSchema(schema: SchemaLike): JsonValue {
 	if (isZodSchema(schema)) {
@@ -17,10 +17,7 @@ export function describeSchema(schema: SchemaLike): JsonValue {
 			vendor: "zod",
 			typeName: getSchemaTypeName(schema),
 			jsonSchema,
-			jsonSchemaHash:
-				jsonSchema === undefined
-					? undefined
-					: digest(canonicalJson(jsonSchema)),
+			jsonSchemaHash: jsonSchema === undefined ? undefined : digest(canonicalJson(jsonSchema)),
 		});
 	}
 	const standard = isRecord(schema) ? schema["~standard"] : undefined;
@@ -30,8 +27,7 @@ export function describeSchema(schema: SchemaLike): JsonValue {
 			standard: "standard-schema-v1",
 			vendor: typeof standard.vendor === "string" ? standard.vendor : "unknown",
 			version:
-				typeof standard.version === "number" ||
-				typeof standard.version === "string"
+				typeof standard.version === "number" || typeof standard.version === "string"
 					? standard.version
 					: undefined,
 		});
@@ -43,9 +39,7 @@ export function describeSchema(schema: SchemaLike): JsonValue {
 	});
 }
 
-export function serializeSmsMatcher(
-	value: Record<string, unknown>,
-): Record<string, unknown> {
+export function serializeSmsMatcher(value: Record<string, unknown>): Record<string, unknown> {
 	const code = value.code;
 	if (!isRecord(code)) return value;
 	const pattern = code.pattern;

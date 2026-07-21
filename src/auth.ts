@@ -1,4 +1,4 @@
-import { AuthError, ProviderError } from "./errors";
+import { AuthError, ProviderError } from "./errors.js";
 import type {
 	AuthAbortData,
 	AuthConfig,
@@ -10,7 +10,7 @@ import type {
 	CredentialDeclaration,
 	FlowContext,
 	ProviderLocaleKeyInput,
-} from "./types";
+} from "./types.js";
 
 const CREDENTIALS_AUTH_CHALLENGE_CONTEXT_KEY = "__credentialsAuthChallenge";
 const DEFAULT_COMPLETE_TURN_ID = "auth.complete";
@@ -33,11 +33,7 @@ function isSensitiveAuthDataKey(key: string): boolean {
 	return SENSITIVE_ABORT_DATA_KEY_PATTERN.test(normalizedAuthDataKey(key));
 }
 
-export type CredentialsAuthFieldType =
-	| "string"
-	| "email"
-	| "password"
-	| "otp";
+export type CredentialsAuthFieldType = "string" | "email" | "password" | "otp";
 
 export interface CredentialsAuthField {
 	type?: CredentialsAuthFieldType;
@@ -138,10 +134,9 @@ function abortData(options: {
 	};
 }
 
-export function createAuthFlowHelpers(options: {
-	readonly signal?: AbortSignal;
-	readonly deadline?: string;
-} = {}): AuthFlowTerminalContext {
+export function createAuthFlowHelpers(
+	options: { readonly signal?: AbortSignal; readonly deadline?: string } = {},
+): AuthFlowTerminalContext {
 	return {
 		...(options.signal ? { signal: options.signal } : {}),
 		...(options.deadline ? { deadline: options.deadline } : {}),
@@ -156,16 +151,7 @@ export function createAuthFlowHelpers(options: {
 				},
 			};
 		},
-		abort({
-			code,
-			message,
-			retry,
-			actionHint,
-			fieldErrors,
-			data,
-			turnId,
-			expiresAt,
-		}) {
+		abort({ code, message, retry, actionHint, fieldErrors, data, turnId, expiresAt }) {
 			return {
 				kind: "abort",
 				...authTurnBase({ turnId, defaultTurnId: DEFAULT_ABORT_TURN_ID, expiresAt }),
@@ -190,8 +176,7 @@ export function createAuthFlowHelpers(options: {
 				...(options.hintKey ? { hintKey: options.hintKey } : {}),
 				...(options.timing ? { timing: options.timing } : {}),
 				...(options.data ? { data: options.data } : {}),
-				expectedInput:
-					options.expectedInput ?? expectedInputFromFields(options.fields ?? {}),
+				expectedInput: options.expectedInput ?? expectedInputFromFields(options.fields ?? {}),
 			};
 		},
 		nextPoll(options = {}) {
@@ -223,9 +208,7 @@ export class AuthAbortError extends AuthError {
 	}
 }
 
-export interface CredentialsAuthCompleteResult<
-	TCredentialKeys extends readonly string[],
-> {
+export interface CredentialsAuthCompleteResult<TCredentialKeys extends readonly string[]> {
 	credential: CredentialsAuthCredential<TCredentialKeys>;
 	/** Additional non-credential auth-flow data to return alongside credential. */
 	data?: Record<string, unknown>;
@@ -247,9 +230,7 @@ export interface CredentialsAuthChallengeRequest<TChallengeId extends string = s
 export type CredentialsAuthLoginResult<
 	TCredentialKeys extends readonly string[],
 	TChallengeId extends string = string,
-> =
-	| CredentialsAuthCompleteResult<TCredentialKeys>
-	| CredentialsAuthChallengeRequest<TChallengeId>;
+> = CredentialsAuthCompleteResult<TCredentialKeys> | CredentialsAuthChallengeRequest<TChallengeId>;
 
 export interface CredentialsAuthChallengeDefinition<
 	TFields extends CredentialsAuthFields,
@@ -351,12 +332,8 @@ function expectedInputFromFields(fields: CredentialsAuthFields): Record<string, 
 					...(field.type === "password" ? { format: "password" } : {}),
 					...(field.type === "otp" ? { format: "otp" } : {}),
 					...(field.labelKey ? { nameKey: field.labelKey } : {}),
-					...(field.descriptionKey
-						? { descriptionKey: field.descriptionKey }
-						: {}),
-					...(field.placeholderKey
-						? { placeholderKey: field.placeholderKey }
-						: {}),
+					...(field.descriptionKey ? { descriptionKey: field.descriptionKey } : {}),
+					...(field.placeholderKey ? { placeholderKey: field.placeholderKey } : {}),
 					...(field.sensitive || field.type === "password" || field.type === "otp"
 						? { sensitive: true }
 						: {}),
@@ -437,10 +414,7 @@ function getPendingChallenge(ctx: FlowContext): PendingCredentialsAuthChallenge 
 	};
 }
 
-function setPendingChallenge(
-	ctx: FlowContext,
-	challenge: PendingCredentialsAuthChallenge,
-): void {
+function setPendingChallenge(ctx: FlowContext, challenge: PendingCredentialsAuthChallenge): void {
 	ctx.context.set(CREDENTIALS_AUTH_CHALLENGE_CONTEXT_KEY, challenge);
 }
 
@@ -473,9 +447,7 @@ function retryTurn(
 		turnId: retryTurnId,
 		expectedInput,
 		data: {
-			fieldErrors: Object.fromEntries(
-				missing.map((name) => [name, "Required"]),
-			),
+			fieldErrors: Object.fromEntries(missing.map((name) => [name, "Required"])),
 			fieldErrorKeys: Object.fromEntries(
 				missing.map((name) => [name, "auth.credentials.fieldRequired"]),
 			),
@@ -499,18 +471,12 @@ function completeTurn<TCredentialKeys extends readonly string[]>(
 		typeof result.credential !== "object" ||
 		Array.isArray(result.credential)
 	) {
-		throw new ProviderError(
-			"Credentials auth login completed without a credential object",
-			{
-				code: "credentials_auth_missing_credential",
-				fix: "Return { credential: { ... } } from defineCredentialsAuth handlers. Gateway persists only auth.flow complete data.credential into the connection.",
-			},
-		);
+		throw new ProviderError("Credentials auth login completed without a credential object", {
+			code: "credentials_auth_missing_credential",
+			fix: "Return { credential: { ... } } from defineCredentialsAuth handlers. Gateway persists only auth.flow complete data.credential into the connection.",
+		});
 	}
-	assertCredentialKeys(
-		credentialKeys,
-		result.credential as Record<string, unknown>,
-	);
+	assertCredentialKeys(credentialKeys, result.credential as Record<string, unknown>);
 	return {
 		kind: "complete",
 		turnId: result.turnId ?? defaultTurnId,
@@ -523,24 +489,18 @@ function completeTurn<TCredentialKeys extends readonly string[]>(
 }
 
 function challengeTurn(
-	definition: CredentialsAuthChallengeDefinition<
-		CredentialsAuthFields,
-		readonly string[],
-		string
-	>,
+	definition: CredentialsAuthChallengeDefinition<CredentialsAuthFields, readonly string[], string>,
 	request: CredentialsAuthChallengeRequest<string>,
 ): AuthTurn {
-	const expectedInput = definition.fields
-		? expectedInputFromFields(definition.fields)
-		: undefined;
+	const expectedInput = definition.fields ? expectedInputFromFields(definition.fields) : undefined;
 	return {
 		kind: expectedInput ? "form" : "pending",
 		turnId: request.turnId ?? definition.turnId ?? `credentials.${request.challengeId}`,
 		...(request.expiresAt ? { expiresAt: request.expiresAt } : {}),
-		...(request.hintKey ?? definition.hintKey
+		...((request.hintKey ?? definition.hintKey)
 			? { hintKey: request.hintKey ?? definition.hintKey }
 			: {}),
-		...(request.timing ?? definition.timing
+		...((request.timing ?? definition.timing)
 			? { timing: request.timing ?? definition.timing }
 			: {}),
 		...(expectedInput ? { expectedInput } : {}),
@@ -630,13 +590,7 @@ async function continuePendingChallenge<TCredentialKeys extends readonly string[
 		normalizeInput(definition.fields, rawInput),
 		pending.state,
 	);
-	return await resolveAuthResult(
-		ctx,
-		credentialKeys,
-		challenges,
-		result,
-		completeTurnId,
-	);
+	return await resolveAuthResult(ctx, credentialKeys, challenges, result, completeTurnId);
 }
 
 async function pollPendingChallenge<TCredentialKeys extends readonly string[]>(
@@ -669,13 +623,7 @@ async function pollPendingChallenge<TCredentialKeys extends readonly string[]>(
 				`credentials.${pending.challengeId}.pending`,
 		};
 	}
-	return await resolveAuthResult(
-		ctx,
-		credentialKeys,
-		challenges,
-		result,
-		completeTurnId,
-	);
+	return await resolveAuthResult(ctx, credentialKeys, challenges, result, completeTurnId);
 }
 
 export function defineCredentialsAuth<
@@ -697,7 +645,7 @@ export function defineCredentialsAuth<
 ): DefinedCredentialsAuth {
 	if (Object.keys(options.fields).length === 0) {
 		throw new ProviderError("defineCredentialsAuth requires at least one field", {
-			fix: "Pass fields such as { email: { type: \"email\" }, password: { type: \"password\" } }.",
+			fix: 'Pass fields such as { email: { type: "email" }, password: { type: "password" } }.',
 		});
 	}
 
@@ -737,10 +685,7 @@ export function defineCredentialsAuth<
 						return retryTurn(expectedInput, missing, retryTurnId);
 					}
 
-					const result = await options.login(
-						ctx,
-						normalizeInput(options.fields, rawInput),
-					);
+					const result = await options.login(ctx, normalizeInput(options.fields, rawInput));
 					return await resolveAuthResult(
 						ctx,
 						options.credentialKeys,
@@ -776,10 +721,7 @@ export function defineCredentialsAuth<
 		},
 		context: {
 			keys: Array.from(
-				new Set([
-					CREDENTIALS_AUTH_CHALLENGE_CONTEXT_KEY,
-					...(options.contextKeys ?? []),
-				]),
+				new Set([CREDENTIALS_AUTH_CHALLENGE_CONTEXT_KEY, ...(options.contextKeys ?? [])]),
 			),
 		},
 	};

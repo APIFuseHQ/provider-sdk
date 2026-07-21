@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import * as sdkPublicSurface from "../index";
+import * as sdkPublicSurface from "../index.js";
 
 const PUBLIC_INDEX_PATH = join(import.meta.dir, "..", "index.ts");
 const PACKAGE_ROOT = dirname(dirname(import.meta.dir));
@@ -37,12 +37,8 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 	});
 
 	it("exports canonical STT env constants", () => {
-		expect(sdkPublicSurface.APIFUSE__STT__BACKEND_ENV).toBe(
-			"APIFUSE__STT__BACKEND",
-		);
-		expect(sdkPublicSurface.APIFUSE__STT__MODEL_ENV).toBe(
-			"APIFUSE__STT__MODEL",
-		);
+		expect(sdkPublicSurface.APIFUSE__STT__BACKEND_ENV).toBe("APIFUSE__STT__BACKEND");
+		expect(sdkPublicSurface.APIFUSE__STT__MODEL_ENV).toBe("APIFUSE__STT__MODEL");
 		expect(sdkPublicSurface.APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV).toBe(
 			"APIFUSE__STT__CLOUDFLARE_API_TOKEN",
 		);
@@ -61,12 +57,8 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 	it("does not import any apps/health-monitor or __generated__ source", () => {
 		const indexSource = readFileSync(PUBLIC_INDEX_PATH, "utf8");
 		expect(indexSource.match(/from\s+["']apps\/health-monitor/)).toBeNull();
-		expect(
-			indexSource.match(/from\s+["']\.\.\/\.\.\/\.\.\/__generated__/),
-		).toBeNull();
-		expect(
-			indexSource.match(/from\s+["'].*provider-registry\/generated/),
-		).toBeNull();
+		expect(indexSource.match(/from\s+["']\.\.\/\.\.\/\.\.\/__generated__/)).toBeNull();
+		expect(indexSource.match(/from\s+["'].*provider-registry\/generated/)).toBeNull();
 		expect(indexSource.match(/from\s+["']apps\/status/)).toBeNull();
 		expect(indexSource.match(/from\s+["']apps\/gateway/)).toBeNull();
 	});
@@ -81,9 +73,7 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 	});
 
 	it("provider-owned health journeys do not import runtime-only modules", () => {
-		const journeyFiles = collectProviderHealthJourneyFiles(
-			join(REPO_ROOT, "providers"),
-		);
+		const journeyFiles = collectProviderHealthJourneyFiles(join(REPO_ROOT, "providers"));
 		if (journeyFiles.length === 0) {
 			return;
 		}
@@ -101,15 +91,11 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 	});
 
 	it("provider auth start flow type-check rejects input parameters", () => {
-		const fixture = join(
-			import.meta.dir,
-			"fixtures",
-			"auth-start-accepts-input.ts",
-		);
+		const fixture = join(import.meta.dir, "fixtures", "auth-start-accepts-input.ts");
 		const result = spawnSync(
 			"bunx",
 			[
-				"tsgo",
+				"tsc",
 				"--noEmit",
 				"--strict",
 				"--moduleResolution",
@@ -135,9 +121,7 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 	});
 
 	it("provider-owned health journey files type-check against the provider authoring subpath", () => {
-		const journeyFiles = collectProviderHealthJourneyFiles(
-			join(REPO_ROOT, "providers"),
-		);
+		const journeyFiles = collectProviderHealthJourneyFiles(join(REPO_ROOT, "providers"));
 		if (journeyFiles.length === 0) {
 			return;
 		}
@@ -145,7 +129,7 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 		const result = spawnSync(
 			"bunx",
 			[
-				"tsgo",
+				"tsc",
 				"--noEmit",
 				"--strict",
 				"--moduleResolution",
@@ -187,8 +171,7 @@ function collectProviderHealthJourneyFiles(root: string): string[] {
 		if (
 			stat.isFile() &&
 			path.endsWith(".ts") &&
-			(path.endsWith("health-journeys.ts") ||
-				path.includes("/health-journeys/"))
+			(path.endsWith("health-journeys.ts") || path.includes("/health-journeys/"))
 		) {
 			files.push(path);
 		}

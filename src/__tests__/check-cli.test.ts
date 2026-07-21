@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { runChecks } from "../../bin/apifuse-check";
+import { runChecks } from "../../bin/apifuse-check.js";
 
 const tempDirs: string[] = [];
 const tempRoot = join(process.cwd(), ".tmp-provider-sdk-tests");
@@ -102,15 +102,11 @@ export default {
 		);
 
 		const results = await runChecks(providerDir);
-		const authoring = results.find((result) =>
-			result.message.includes("Provider authoring lint"),
-		);
+		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
 
 		expect(authoring?.passed).toBe(false);
 		expect(authoring?.details?.join("\n")).toContain("description-min-length");
-		expect(authoring?.details?.join("\n")).toContain(
-			"schema-description-key-required",
-		);
+		expect(authoring?.details?.join("\n")).toContain("schema-description-key-required");
 	});
 
 	it("passes public authoring lint for a review-ready provider", async () => {
@@ -158,9 +154,7 @@ export default {
 		);
 
 		const results = await runChecks(providerDir);
-		const authoring = results.find((result) =>
-			result.message.includes("Provider authoring lint"),
-		);
+		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
 
 		expect(authoring?.passed).toBe(true);
 	});
@@ -228,9 +222,7 @@ export default {
 		);
 
 		const results = await runChecks(providerDir);
-		const authoring = results.find((result) =>
-			result.message.includes("Provider authoring lint"),
-		);
+		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
 		const details = authoring?.details?.join("\n") ?? "";
 
 		expect(authoring?.passed).toBe(false);
@@ -292,13 +284,9 @@ export default defineProvider({
 		);
 
 		const results = await runChecks(providerDir);
-		const authoring = results.find((result) =>
-			result.message.includes("Provider authoring lint"),
-		);
+		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
 
 		expect(authoring?.passed).toBe(false);
-		expect(authoring?.details?.join("\n")).toContain(
-			"ctx-credential-write-forbidden-in-handler",
-		);
+		expect(authoring?.details?.join("\n")).toContain("ctx-credential-write-forbidden-in-handler");
 	});
 });

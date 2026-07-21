@@ -1,17 +1,9 @@
 import type { ZodType } from "zod";
 
-import { lintPublicSchemaFieldNames } from "./public-schema-field-lint";
-import {
-	APIFUSE_DESCRIPTION_KEY_META_KEY,
-	APIFUSE_SENSITIVE_META_KEY,
-} from "./schema";
+import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
+import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 
-type AuthModeLike =
-	| "none"
-	| "platform-managed"
-	| "credentials"
-	| "oauth2"
-	| "api-key";
+type AuthModeLike = "none" | "platform-managed" | "credentials" | "oauth2" | "api-key";
 
 type ProviderAuthLike = {
 	mode?: AuthModeLike;
@@ -141,28 +133,19 @@ function hasReusableSecretKeys(keys: readonly string[] | undefined): boolean {
 	}
 
 	return keys.some((key) =>
-		/(access_token|refresh_token|password|secret|cookie|session|token|api[_-]?key)/i.test(
-			key,
-		),
+		/(access_token|refresh_token|password|secret|cookie|session|token|api[_-]?key)/i.test(key),
 	);
 }
 
-function hasReusableReloginSecretKeys(
-	keys: readonly string[] | undefined,
-): boolean {
+function hasReusableReloginSecretKeys(keys: readonly string[] | undefined): boolean {
 	if (!keys) {
 		return false;
 	}
 
-	return keys.some((key) =>
-		/(password|passcode|secret|cookie|session)/i.test(key),
-	);
+	return keys.some((key) => /(password|passcode|secret|cookie|session)/i.test(key));
 }
 
-function getAuthFlowSource(provider: {
-	auth?: ProviderAuthLike;
-	authFlowSource?: string;
-}): string {
+function getAuthFlowSource(provider: { auth?: ProviderAuthLike; authFlowSource?: string }): string {
 	if (provider.authFlowSource) {
 		return provider.authFlowSource;
 	}
@@ -176,10 +159,7 @@ function getAuthFlowSource(provider: {
 	];
 
 	return parts
-		.filter(
-			(part): part is (...args: unknown[]) => unknown =>
-				typeof part === "function",
-		)
+		.filter((part): part is (...args: unknown[]) => unknown => typeof part === "function")
 		.map((part) => part.toString())
 		.join("\n");
 }
@@ -243,8 +223,7 @@ function lintAuthModel(provider: {
 
 	if (
 		hasReusableSecretKeys(credentialKeys) &&
-		(!provider.credential?.storesReusableSecret ||
-			!provider.credential.justification)
+		(!provider.credential?.storesReusableSecret || !provider.credential.justification)
 	) {
 		diagnostics.push({
 			rule: "credential-reusable-secret",
@@ -257,8 +236,7 @@ function lintAuthModel(provider: {
 	if (
 		typeof provider.auth?.flow?.refresh === "function" &&
 		hasReusableReloginSecretKeys(credentialKeys) &&
-		(!provider.credential?.storesReusableSecret ||
-			!provider.credential.justification)
+		(!provider.credential?.storesReusableSecret || !provider.credential.justification)
 	) {
 		diagnostics.push({
 			rule: "auth-refresh-reusable-secret",
@@ -278,10 +256,7 @@ function lintAuthModel(provider: {
 	}
 
 	const authFlowSource = getAuthFlowSource(provider);
-	if (
-		authFlowSource.includes("ctx.context") &&
-		(provider.context?.keys?.length ?? 0) === 0
-	) {
+	if (authFlowSource.includes("ctx.context") && (provider.context?.keys?.length ?? 0) === 0) {
 		diagnostics.push({
 			rule: "context-keys-required",
 			level: "warn",
@@ -323,8 +298,7 @@ function isSchemaRecord(value: unknown): value is Record<string, SchemaLike> {
 }
 
 function getObjectShape(schema: SchemaLike): Record<string, SchemaLike> {
-	const rawShape =
-		typeof schema.shape === "function" ? schema.shape() : schema.shape;
+	const rawShape = typeof schema.shape === "function" ? schema.shape() : schema.shape;
 	if (isSchemaRecord(rawShape)) {
 		return rawShape;
 	}
@@ -344,9 +318,7 @@ function getObjectShape(schema: SchemaLike): Record<string, SchemaLike> {
 	return {};
 }
 
-function getChildSchemas(
-	schema: SchemaLike,
-): Array<{ key: string; schema: SchemaLike }> {
+function getChildSchemas(schema: SchemaLike): Array<{ key: string; schema: SchemaLike }> {
 	const seen = new Map<string, SchemaLike>();
 	const def = getSchemaDef(schema);
 
@@ -450,10 +422,7 @@ function getSchemaMetadata(schema: SchemaLike): Record<string, unknown> {
 }
 
 function getSchemaDescriptionKey(schema: SchemaLike): string | undefined {
-	const value = Reflect.get(
-		getSchemaMetadata(schema),
-		APIFUSE_DESCRIPTION_KEY_META_KEY,
-	);
+	const value = Reflect.get(getSchemaMetadata(schema), APIFUSE_DESCRIPTION_KEY_META_KEY);
 	return typeof value === "string" && value.length > 0 ? value : undefined;
 }
 
@@ -597,22 +566,14 @@ function collectSchemaDescriptionKeyDiagnostics(
 						? `${currentPath}[]`
 						: `${currentPath}.${child.key}`;
 		diagnostics.push(
-			...collectSchemaDescriptionKeyDiagnostics(
-				child.schema,
-				childPath,
-				seen,
-				!isStructuralNode,
-			),
+			...collectSchemaDescriptionKeyDiagnostics(child.schema, childPath, seen, !isStructuralNode),
 		);
 	}
 
 	return diagnostics;
 }
 
-function isComplexSchema(
-	schema: unknown,
-	seen = new Set<SchemaLike>(),
-): boolean {
+function isComplexSchema(schema: unknown, seen = new Set<SchemaLike>()): boolean {
 	if (!isSchema(schema) || seen.has(schema)) {
 		return false;
 	}
@@ -624,10 +585,7 @@ function isComplexSchema(
 		return childChildren.length > 0;
 	});
 
-	return (
-		hasNestedComposite ||
-		children.some(({ schema: child }) => isComplexSchema(child, seen))
-	);
+	return hasNestedComposite || children.some(({ schema: child }) => isComplexSchema(child, seen));
 }
 
 function hasBidirectionalFixtures(fixtures: unknown): boolean {
@@ -638,16 +596,11 @@ function hasBidirectionalFixtures(fixtures: unknown): boolean {
 	return "request" in fixtures && "response" in fixtures;
 }
 
-function getOperationSource(operation: {
-	handler?: unknown;
-	source?: string;
-}): string {
+function getOperationSource(operation: { handler?: unknown; source?: string }): string {
 	if (operation.source) {
 		return operation.source;
 	}
-	return typeof operation.handler === "function"
-		? operation.handler.toString()
-		: "";
+	return typeof operation.handler === "function" ? operation.handler.toString() : "";
 }
 
 function lintStealthTransportUsage(provider: {
@@ -660,22 +613,20 @@ function lintStealthTransportUsage(provider: {
 	}
 
 	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
-	return Object.entries(provider.operations).flatMap(
-		([operationKey, operation]) => {
-			const source = getOperationSource(operation);
-			if (!/\bctx\.stealth\b/.test(source)) {
-				return [];
-			}
-			return [
-				{
-					rule: "stealth-config-required",
-					level: "error" as const,
-					field: `operations.${operationKey}`,
-					message: `${providerLabel} operation "${operationKey}" uses ctx.stealth but provider.stealth is not declared.`,
-				},
-			];
-		},
-	);
+	return Object.entries(provider.operations).flatMap(([operationKey, operation]) => {
+		const source = getOperationSource(operation);
+		if (!/\bctx\.stealth\b/.test(source)) {
+			return [];
+		}
+		return [
+			{
+				rule: "stealth-config-required",
+				level: "error" as const,
+				field: `operations.${operationKey}`,
+				message: `${providerLabel} operation "${operationKey}" uses ctx.stealth but provider.stealth is not declared.`,
+			},
+		];
+	});
 }
 
 function lintCredentialWriteUsage(provider: {
@@ -685,24 +636,22 @@ function lintCredentialWriteUsage(provider: {
 		return [];
 	}
 
-	return Object.entries(provider.operations).flatMap(
-		([operationKey, operation]) => {
-			const source = getOperationSource(operation);
-			if (!/\bctx\.credential\.(?:set|setMany)\s*\(/.test(source)) {
-				return [];
-			}
+	return Object.entries(provider.operations).flatMap(([operationKey, operation]) => {
+		const source = getOperationSource(operation);
+		if (!/\bctx\.credential\.(?:set|setMany)\s*\(/.test(source)) {
+			return [];
+		}
 
-			return [
-				{
-					rule: "ctx-credential-write-forbidden-in-handler",
-					level: "error" as const,
-					field: `operations.${operationKey}.handler`,
-					message:
-						"Operation handlers must not mutate credentials; return refreshed credentials from auth.flow.refresh instead.",
-				},
-			];
-		},
-	);
+		return [
+			{
+				rule: "ctx-credential-write-forbidden-in-handler",
+				level: "error" as const,
+				field: `operations.${operationKey}.handler`,
+				message:
+					"Operation handlers must not mutate credentials; return refreshed credentials from auth.flow.refresh instead.",
+			},
+		];
+	});
 }
 
 function lintPlaywrightDirectImports(provider: {
@@ -724,9 +673,7 @@ function lintPlaywrightDirectImports(provider: {
 		});
 	}
 
-	for (const [filePath, source] of Object.entries(
-		provider.providerSourceFiles ?? {},
-	)) {
+	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
 		if (!importPattern.test(source)) {
 			continue;
 		}
@@ -814,15 +761,11 @@ function lintSelfHostedBrowserPatterns(
 		sources.push({ field: "auth.flow", source: provider.authFlowSource });
 	}
 
-	for (const [filePath, source] of Object.entries(
-		provider.providerSourceFiles ?? {},
-	)) {
+	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
 		sources.push({ field: `sourceFiles.${filePath}`, source });
 	}
 
-	for (const [operationKey, operation] of Object.entries(
-		provider.operations ?? {},
-	)) {
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
 		const source = getOperationSource(operation);
 		if (source) {
 			sources.push({
@@ -865,16 +808,14 @@ export function lintOperation(op: {
 }): LintDiagnostic[] {
 	const diagnostics: LintDiagnostic[] = [];
 	const description = op.description ?? "";
-	const hasDescriptionKey =
-		typeof op.descriptionKey === "string" && op.descriptionKey.length > 0;
+	const hasDescriptionKey = typeof op.descriptionKey === "string" && op.descriptionKey.length > 0;
 
 	if (description.trim().length > 0 && !hasDescriptionKey) {
 		diagnostics.push({
 			rule: "operation-description-raw-prose",
 			level: "error",
 			field: "description",
-			message:
-				"Operation description must use descriptionKey instead of raw static prose.",
+			message: "Operation description must use descriptionKey instead of raw static prose.",
 		});
 	}
 
@@ -892,21 +833,16 @@ export function lintOperation(op: {
 			rule: "operation-when-to-use-raw-prose",
 			level: "error",
 			field: "whenToUse",
-			message:
-				"Operation whenToUse must use whenToUseKeys instead of raw static prose.",
+			message: "Operation whenToUse must use whenToUseKeys instead of raw static prose.",
 		});
 	}
 
-	if (
-		(op.whenNotToUse?.length ?? 0) > 0 &&
-		!(op.whenNotToUseKeys?.length ?? 0)
-	) {
+	if ((op.whenNotToUse?.length ?? 0) > 0 && !(op.whenNotToUseKeys?.length ?? 0)) {
 		diagnostics.push({
 			rule: "operation-when-not-to-use-raw-prose",
 			level: "error",
 			field: "whenNotToUse",
-			message:
-				"Operation whenNotToUse must use whenNotToUseKeys instead of raw static prose.",
+			message: "Operation whenNotToUse must use whenNotToUseKeys instead of raw static prose.",
 		});
 	}
 
@@ -942,14 +878,11 @@ export function lintOperation(op: {
 			rule: "complex-input-has-examples",
 			level: "warn",
 			field: "inputExamples",
-			message:
-				"Complex input schemas should provide at least 2 input examples.",
+			message: "Complex input schemas should provide at least 2 input examples.",
 		});
 	}
 
-	for (const field of uniqueFields(
-		collectUnmarkedSensitiveFields(op.input, "input"),
-	)) {
+	for (const field of uniqueFields(collectUnmarkedSensitiveFields(op.input, "input"))) {
 		diagnostics.push({
 			rule: "sensitive-field-unmarked",
 			level: "warn",
@@ -958,9 +891,7 @@ export function lintOperation(op: {
 		});
 	}
 
-	for (const field of uniqueFields(
-		collectUnmarkedSensitiveFields(op.output, "output"),
-	)) {
+	for (const field of uniqueFields(collectUnmarkedSensitiveFields(op.output, "output"))) {
 		diagnostics.push({
 			rule: "sensitive-field-unmarked",
 			level: "warn",
@@ -1044,36 +975,35 @@ export function lintProvider(
 	}
 
 	diagnostics.push(
-		...Object.entries(provider.operations).flatMap(
-			([operationKey, operation]) =>
-				[
-					...lintOperation({
-						description: operation.description ?? "",
-						descriptionKey: operation.descriptionKey,
-						whenToUse: operation.whenToUse,
-						whenToUseKeys: operation.whenToUseKeys,
-						whenNotToUse: operation.whenNotToUse,
-						whenNotToUseKeys: operation.whenNotToUseKeys,
-						input: operation.input,
-						output: operation.output,
-						fixtures: operation.fixtures,
-						inputExamples: operation.inputExamples,
-						derivations: operation.derivations,
-					}),
-					...lintPublicSchemaFieldNames(
-						provider.id,
-						operationKey,
-						operation.input,
-						operation.output,
-						provider.meta?.contract?.publicSchemaFieldNames === "normalized",
-					),
-				].map((diagnostic) => ({
-					...diagnostic,
-					field: diagnostic.field
-						? `operations.${operationKey}.${diagnostic.field}`
-						: `operations.${operationKey}`,
-					message: `[${operationKey}] ${diagnostic.message}`,
-				})),
+		...Object.entries(provider.operations).flatMap(([operationKey, operation]) =>
+			[
+				...lintOperation({
+					description: operation.description ?? "",
+					descriptionKey: operation.descriptionKey,
+					whenToUse: operation.whenToUse,
+					whenToUseKeys: operation.whenToUseKeys,
+					whenNotToUse: operation.whenNotToUse,
+					whenNotToUseKeys: operation.whenNotToUseKeys,
+					input: operation.input,
+					output: operation.output,
+					fixtures: operation.fixtures,
+					inputExamples: operation.inputExamples,
+					derivations: operation.derivations,
+				}),
+				...lintPublicSchemaFieldNames(
+					provider.id,
+					operationKey,
+					operation.input,
+					operation.output,
+					provider.meta?.contract?.publicSchemaFieldNames === "normalized",
+				),
+			].map((diagnostic) => ({
+				...diagnostic,
+				field: diagnostic.field
+					? `operations.${operationKey}.${diagnostic.field}`
+					: `operations.${operationKey}`,
+				message: `[${operationKey}] ${diagnostic.message}`,
+			})),
 		),
 	);
 

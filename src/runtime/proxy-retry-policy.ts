@@ -1,12 +1,12 @@
-import { ProviderError, TransportError } from "../errors";
-import type { HttpMethod, HttpRetryOptions, RequestOptions } from "../types";
+import { ProviderError, TransportError } from "../errors.js";
+import type { HttpMethod, HttpRetryOptions, RequestOptions } from "../types.js";
 import {
 	HttpRetryAfterPolicy,
 	HttpRetryDelayStrategy,
 	HttpRetryJitter,
 	HttpRetryPreset,
 	HttpRetryUnsafeMethodPolicy,
-} from "../types";
+} from "../types.js";
 
 export type NormalizedProxyTransportRetryOptions = Required<
 	Pick<

@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { ProviderChoiceTokenError } from "../choice-token";
-import { ProviderError } from "../errors";
-import { createTestProviderChoiceContext } from "../runtime/choice";
-import { createUnsupportedProviderRuntimeState } from "../runtime/state";
-import type { CredentialContext, ProviderRuntimeState } from "../types";
-import { MemoryProviderRuntimeState } from "./memory-state";
+import { ProviderChoiceTokenError } from "../choice-token.js";
+import { ProviderError } from "../errors.js";
+import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import { createUnsupportedProviderRuntimeState } from "../runtime/state.js";
+import type { CredentialContext, ProviderRuntimeState } from "../types.js";
+import { MemoryProviderRuntimeState } from "./memory-state.js";
 
 const STORAGE_OPTIONS = {
 	mode: "server",

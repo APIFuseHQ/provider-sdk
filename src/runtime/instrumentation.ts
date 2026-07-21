@@ -1,34 +1,20 @@
-import type { ProviderContext } from "../types";
+import type { ProviderContext } from "../types.js";
 import {
 	type CreateTraceContextOptions,
 	createTraceContext,
 	getTraceRecorder,
 	type TraceContext,
-} from "./trace";
+} from "./trace.js";
 
 export interface InstrumentationOptions extends CreateTraceContextOptions {}
 
-export type InstrumentedProviderContext<T extends ProviderContext> = Omit<
-	T,
-	"trace"
-> & {
+export type InstrumentedProviderContext<T extends ProviderContext> = Omit<T, "trace"> & {
 	trace: TraceContext;
 };
 
-type InstrumentedNamespace =
-	| "http"
-	| "stealth"
-	| "browser"
-	| "session"
-	| "state";
+type InstrumentedNamespace = "http" | "stealth" | "browser" | "session" | "state";
 
-const BROWSER_PAGE_METHODS = new Set([
-	"goto",
-	"fill",
-	"click",
-	"type",
-	"waitForSelector",
-]);
+const BROWSER_PAGE_METHODS = new Set(["goto", "fill", "click", "type", "waitForSelector"]);
 
 function getErrorStatus(error: unknown): number | undefined {
 	if (
@@ -59,10 +45,7 @@ function getResponseDuration(result: unknown): number | undefined {
 	return undefined;
 }
 
-function getResponseStatus(
-	namespace: InstrumentedNamespace,
-	result: unknown,
-): number | undefined {
+function getResponseStatus(namespace: InstrumentedNamespace, result: unknown): number | undefined {
 	if (
 		typeof result === "object" &&
 		result !== null &&
@@ -111,8 +94,7 @@ function getMethod(
 	}
 
 	if (namespace === "stealth") {
-		const options =
-			typeof args[1] === "object" && args[1] !== null ? args[1] : undefined;
+		const options = typeof args[1] === "object" && args[1] !== null ? args[1] : undefined;
 		if (options && "method" in options && typeof options.method === "string") {
 			return options.method.toUpperCase();
 		}
@@ -133,9 +115,7 @@ function buildSpanAttributes(
 	const attributes: Record<string, string | number | boolean> = {};
 	const url = getUrl(namespace, args, result);
 	const method = getMethod(namespace, methodName, args);
-	const status = error
-		? getErrorStatus(error)
-		: getResponseStatus(namespace, result);
+	const status = error ? getErrorStatus(error) : getResponseStatus(namespace, result);
 	const duration = error ? undefined : getResponseDuration(result);
 
 	if (url) {
@@ -146,10 +126,7 @@ function buildSpanAttributes(
 		attributes.method = method;
 	}
 
-	if (
-		status !== undefined &&
-		(namespace === "http" || namespace === "stealth")
-	) {
+	if (status !== undefined && (namespace === "http" || namespace === "stealth")) {
 		attributes.status = status;
 	}
 
@@ -241,10 +218,8 @@ function wrapPage<T extends object>(page: T, trace: TraceContext): T {
 						return result;
 					},
 					{
-						onSuccess: () =>
-							getBrowserPageAttributes(methodName, args, elapsedMs),
-						onError: (error) =>
-							getBrowserPageAttributes(methodName, args, undefined, error),
+						onSuccess: () => getBrowserPageAttributes(methodName, args, elapsedMs),
+						onError: (error) => getBrowserPageAttributes(methodName, args, undefined, error),
 					},
 				);
 			};
@@ -310,18 +285,14 @@ function wrapNamespace<T extends object>(
 									namespaceTarget &&
 									typeof namespaceTarget === "object" &&
 									"engine" in namespaceTarget &&
-									typeof (namespaceTarget as { engine?: unknown }).engine ===
-										"string"
+									typeof (namespaceTarget as { engine?: unknown }).engine === "string"
 								) {
-									attributes.engine = (
-										namespaceTarget as { engine: string }
-									).engine;
+									attributes.engine = (namespaceTarget as { engine: string }).engine;
 								}
 
 								return attributes;
 							},
-							onError: (error) =>
-								getBrowserPageAttributes("newPage", args, undefined, error),
+							onError: (error) => getBrowserPageAttributes("newPage", args, undefined, error),
 						},
 					);
 				};
@@ -348,10 +319,8 @@ function wrapNamespace<T extends object>(
 							return result;
 						},
 						{
-							onSuccess: () =>
-								getBrowserPageAttributes(methodName, args, elapsedMs),
-							onError: (error) =>
-								getBrowserPageAttributes(methodName, args, undefined, error),
+							onSuccess: () => getBrowserPageAttributes(methodName, args, elapsedMs),
+							onError: (error) => getBrowserPageAttributes(methodName, args, undefined, error),
 						},
 					);
 				};
@@ -365,16 +334,8 @@ function wrapNamespace<T extends object>(
 					`${namespace}.${methodName}`,
 					() => Reflect.apply(value, namespaceTarget, args),
 					{
-						onSuccess: (result) =>
-							buildSpanAttributes(namespace, methodName, args, result),
-						onError: (error) =>
-							buildSpanAttributes(
-								namespace,
-								methodName,
-								args,
-								undefined,
-								error,
-							),
+						onSuccess: (result) => buildSpanAttributes(namespace, methodName, args, result),
+						onError: (error) => buildSpanAttributes(namespace, methodName, args, undefined, error),
 					},
 				);
 

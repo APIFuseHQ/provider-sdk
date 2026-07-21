@@ -5,8 +5,8 @@ import {
 	type ProviderLocaleCatalogMap,
 	resolveProviderLocaleValue,
 	validateProviderLocaleCatalogs,
-} from "./catalog";
-import { providerLocaleKey } from "./keys";
+} from "./catalog.js";
+import { providerLocaleKey } from "./keys.js";
 
 describe("provider locale catalogs", () => {
 	const catalogs: ProviderLocaleCatalogMap = {
@@ -35,20 +35,12 @@ describe("provider locale catalogs", () => {
 	};
 
 	it("resolves requested locale with English fallback", () => {
-		expect(
-			resolveProviderLocaleValue(
-				catalogs,
-				providerLocaleKey("meta.description"),
-				"ko",
-			),
-		).toBe("식당 예약");
-		expect(
-			resolveProviderLocaleValue(
-				catalogs,
-				providerLocaleKey("meta.description"),
-				"ja",
-			),
-		).toBe("Restaurant reservations");
+		expect(resolveProviderLocaleValue(catalogs, providerLocaleKey("meta.description"), "ko")).toBe(
+			"식당 예약",
+		);
+		expect(resolveProviderLocaleValue(catalogs, providerLocaleKey("meta.description"), "ja")).toBe(
+			"Restaurant reservations",
+		);
 	});
 
 	it("validates required key parity", () => {

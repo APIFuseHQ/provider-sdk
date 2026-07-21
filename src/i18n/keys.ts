@@ -1,6 +1,6 @@
-import type { ProviderLocaleKey } from "../types";
+import type { ProviderLocaleKey } from "../types.js";
 
-export type { ProviderLocale, ProviderLocaleKey } from "../types";
+export type { ProviderLocale, ProviderLocaleKey } from "../types.js";
 
 const PROVIDER_LOCALE_KEY_RE =
 	/^[a-z][a-z0-9]*(?:[A-Z][a-z0-9]+)*(?:\.[a-z][a-z0-9]*(?:[A-Z][a-z0-9]+)*|\.[0-9]+)*$/;
@@ -10,15 +10,11 @@ export function providerLocaleKey(key: string): ProviderLocaleKey {
 	return key;
 }
 
-export function isProviderLocaleKey(
-	value: unknown,
-): value is ProviderLocaleKey {
+export function isProviderLocaleKey(value: unknown): value is ProviderLocaleKey {
 	return typeof value === "string" && PROVIDER_LOCALE_KEY_RE.test(value);
 }
 
-export function assertProviderLocaleKey(
-	value: unknown,
-): asserts value is ProviderLocaleKey {
+export function assertProviderLocaleKey(value: unknown): asserts value is ProviderLocaleKey {
 	if (!isProviderLocaleKey(value)) {
 		throw new Error(
 			`Provider locale key must be a dot path such as "meta.description" or "operations.search.description"; received ${JSON.stringify(value)}`,
@@ -50,9 +46,7 @@ export function getProviderLocalePath(
 export type ProviderLocaleValue = string | readonly string[];
 export type ProviderLocaleCatalog = Record<string, unknown>;
 
-export function isProviderLocaleValue(
-	value: unknown,
-): value is ProviderLocaleValue {
+export function isProviderLocaleValue(value: unknown): value is ProviderLocaleValue {
 	return (
 		typeof value === "string" ||
 		(Array.isArray(value) && value.every((entry) => typeof entry === "string"))

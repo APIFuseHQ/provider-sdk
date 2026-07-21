@@ -11,16 +11,16 @@ import * as acorn from "acorn";
 import { z } from "zod";
 
 import packageJson from "../package.json";
-import type { ProviderDefinition } from "../src";
+import type { ProviderDefinition } from "../src/index.js";
 import {
 	loadProviderLocaleCatalogs,
 	type ProviderLocale,
 	validateProviderLocaleCatalogs,
-} from "../src/i18n";
-import { APIFUSE_DESCRIPTION_KEY_META_KEY } from "../src/schema";
-import { safeParseSchemaSync } from "../src/schema";
-import { type CheckResult, runChecks } from "./apifuse-check";
-import { hasSubstantiveXmlStructure } from "./submit-check-xml";
+} from "../src/i18n/index.js";
+import { APIFUSE_DESCRIPTION_KEY_META_KEY } from "../src/schema.js";
+import { safeParseSchemaSync } from "../src/schema.js";
+import { type CheckResult, runChecks } from "./apifuse-check.js";
+import { hasSubstantiveXmlStructure } from "./submit-check-xml.js";
 
 const TIERS = ["bronze", "silver", "gold", "diamond"] as const;
 const TIER_VALUES: ReadonlySet<string> = new Set(TIERS);
@@ -1980,10 +1980,7 @@ function scoreFixtureCoverage(provider: ProviderDefinition): SubmitCheck {
 
 const GENERATED_LOCAL_ONLY_SCAFFOLD_REASON = /generated local-only scaffold/i;
 
-function scoreFixtureProvenance(
-	providerRoot: string,
-	provider: ProviderDefinition,
-): SubmitCheck {
+function scoreFixtureProvenance(providerRoot: string, provider: ProviderDefinition): SubmitCheck {
 	const rawPath = resolve(providerRoot, "__fixtures__", "raw.json");
 	let hasRecordedEvidence = false;
 	if (existsSync(rawPath)) {
@@ -2090,12 +2087,17 @@ function allOperationsAreGeneratedLocalScaffold(provider: ProviderDefinition): b
 }
 
 function scoreVendorKeyLeak(providerRoot: string): SubmitCheck {
-	return escapeHatchResult(providerRoot, "vendor-key-leak", findVendorKeyLeakFindings(providerRoot), {
-		blockerMessage: "Public schema keys leak raw vendor field names.",
-		remediation:
-			"Normalize public request/response fields to APIFuse-standard lowerCamelCase names (e.g. isOpen24h, latitude); keep raw vendor keys only in upstream-parsing schemas (const upstream... = z.object(...)). Add `// @apifuse-allow vendor-key-leak` only with a comment explaining why the vendor name is genuinely canonical.",
-		passMessage: "No vendor field-name leaks detected in public schemas.",
-	});
+	return escapeHatchResult(
+		providerRoot,
+		"vendor-key-leak",
+		findVendorKeyLeakFindings(providerRoot),
+		{
+			blockerMessage: "Public schema keys leak raw vendor field names.",
+			remediation:
+				"Normalize public request/response fields to APIFuse-standard lowerCamelCase names (e.g. isOpen24h, latitude); keep raw vendor keys only in upstream-parsing schemas (const upstream... = z.object(...)). Add `// @apifuse-allow vendor-key-leak` only with a comment explaining why the vendor name is genuinely canonical.",
+			passMessage: "No vendor field-name leaks detected in public schemas.",
+		},
+	);
 }
 
 function scoreVendorTimestampLeak(providerRoot: string): SubmitCheck {
@@ -2282,9 +2284,7 @@ function collectTopLevelObjectKeys(
 			if (computedQuote === '"' || computedQuote === "'") {
 				const literalEnd = findStringEnd(source, literalStart);
 				const afterLiteral =
-					literalEnd === -1
-						? -1
-						: skipWhitespaceAndComments(masked, literalEnd + 1, computedEnd);
+					literalEnd === -1 ? -1 : skipWhitespaceAndComments(masked, literalEnd + 1, computedEnd);
 				if (literalEnd !== -1 && afterLiteral === computedEnd) {
 					key = source.slice(literalStart + 1, literalEnd);
 				}
@@ -2402,8 +2402,13 @@ function findNamedConstValueRanges(source: string): NamedObjectRange[] {
 	return ranges;
 }
 
-function findConstValueRangeContaining(source: string, offset: number): NamedObjectRange | undefined {
-	return findNamedConstValueRanges(source).find((range) => offset >= range.start && offset <= range.end);
+function findConstValueRangeContaining(
+	source: string,
+	offset: number,
+): NamedObjectRange | undefined {
+	return findNamedConstValueRanges(source).find(
+		(range) => offset >= range.start && offset <= range.end,
+	);
 }
 
 function findStringLiteralsInRange(

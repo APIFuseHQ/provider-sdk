@@ -2,19 +2,14 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import Ajv2020 from "ajv/dist/2020.js";
 
-import { AUTH_TURN_SCHEMA, type KnownAuthTurnKind } from "../auth-turn";
+import { AUTH_TURN_SCHEMA, type KnownAuthTurnKind } from "../auth-turn/index.js";
 import {
 	FlowExpiredError,
 	ProviderSecretError,
 	TurnValidationError,
 	ValidationError,
-} from "../errors";
-import type {
-	AuthFlowDefinition,
-	AuthFlowInputHandler,
-	AuthTurn,
-	FlowContext,
-} from "../types";
+} from "../errors.js";
+import type { AuthFlowDefinition, AuthFlowInputHandler, AuthTurn, FlowContext } from "../types.js";
 
 type TurnKind = KnownAuthTurnKind;
 
@@ -45,10 +40,7 @@ function ensureRecord(value: unknown): JsonObject {
 	return isRecord(value) ? value : {};
 }
 
-function createTurn(
-	kind: TurnKind,
-	options: Omit<AuthTurn, "kind" | "turnId"> = {},
-): AuthTurn {
+function createTurn(kind: TurnKind, options: Omit<AuthTurn, "kind" | "turnId"> = {}): AuthTurn {
 	return {
 		kind,
 		turnId: randomUUID(),
@@ -69,11 +61,7 @@ function getRequiredEnv(ctx: FlowContext, key: string): string {
 }
 
 function toBase64Url(input: Buffer): string {
-	return input
-		.toString("base64")
-		.replace(/\+/g, "-")
-		.replace(/\//g, "_")
-		.replace(/=+$/g, "");
+	return input.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
 }
 
 function createCodeVerifier(): string {
@@ -130,10 +118,7 @@ async function runCeremonyHandler(
 	}
 }
 
-function getString(
-	input: Record<string, unknown>,
-	key: string,
-): string | undefined {
+function getString(input: Record<string, unknown>, key: string): string | undefined {
 	const value = input[key];
 	return typeof value === "string" ? value : undefined;
 }
@@ -142,10 +127,7 @@ function getNestedRecord(ctx: FlowContext, key: string): JsonObject {
 	return ensureRecord(ctx.context.get(key));
 }
 
-function buildJsonSchemaForm(
-	expectedInput: JsonObject,
-	hint: string,
-): AuthTurn {
+function buildJsonSchemaForm(expectedInput: JsonObject, hint: string): AuthTurn {
 	return createTurn("form", {
 		hint,
 		expectedInput: withDeclaredFormFieldOrder(expectedInput),
@@ -160,10 +142,7 @@ function withDeclaredFormFieldOrder(expectedInput: JsonObject): JsonObject {
 	}
 
 	const existingOrder = expectedInput[FORM_FIELD_ORDER_EXTENSION];
-	if (
-		Array.isArray(existingOrder) &&
-		existingOrder.every((value) => typeof value === "string")
-	) {
+	if (Array.isArray(existingOrder) && existingOrder.every((value) => typeof value === "string")) {
 		return expectedInput;
 	}
 
@@ -176,9 +155,7 @@ function withDeclaredFormFieldOrder(expectedInput: JsonObject): JsonObject {
 export function validateCeremonyOutput(turn: unknown): AuthTurn {
 	if (!validateAuthTurn(turn)) {
 		const detail = validateAuthTurn.errors
-			?.map(
-				(error) => `${error.instancePath || "$"} ${error.message ?? "invalid"}`,
-			)
+			?.map((error) => `${error.instancePath || "$"} ${error.message ?? "invalid"}`)
 			.join("; ");
 		throw new TurnValidationError(detail || "Invalid AuthTurn output");
 	}
@@ -214,10 +191,7 @@ export function createOAuth2Ceremony(options: {
 					if (options.usePKCE) {
 						const verifier = createCodeVerifier();
 						ctx.context.set(OAUTH2_PKCE_VERIFIER_KEY, verifier);
-						authorizeUrl.searchParams.set(
-							"code_challenge",
-							createCodeChallenge(verifier),
-						);
+						authorizeUrl.searchParams.set("code_challenge", createCodeChallenge(verifier));
 						authorizeUrl.searchParams.set("code_challenge_method", "S256");
 					}
 
@@ -270,10 +244,7 @@ export function createOAuth2Ceremony(options: {
 				ctx,
 				input,
 			),
-		abort: async () =>
-			validateCeremonyOutput(
-				createTurn("abort", { hint: "OAuth flow aborted." }),
-			),
+		abort: async () => validateCeremonyOutput(createTurn("abort", { hint: "OAuth flow aborted." })),
 	};
 }
 
@@ -329,26 +300,19 @@ export function createDeviceFlowCeremony(options: {
 						client_id: getRequiredEnv(ctx, options.clientIdEnvKey),
 						...(options.clientSecretEnvKey
 							? {
-									client_secret: getRequiredEnv(
-										ctx,
-										options.clientSecretEnvKey,
-									),
+									client_secret: getRequiredEnv(ctx, options.clientSecretEnvKey),
 								}
 							: {}),
 					});
 					const data = ensureRecord(response.data);
 					const errorCode = getString(data, "error");
 
-					if (
-						errorCode === "authorization_pending" ||
-						errorCode === "slow_down"
-					) {
+					if (errorCode === "authorization_pending" || errorCode === "slow_down") {
 						return createTurn("poll", {
 							data,
 							hint: "Authorization pending.",
 							timing: {
-								suggestedPollIntervalMs:
-									errorCode === "slow_down" ? 10_000 : 5_000,
+								suggestedPollIntervalMs: errorCode === "slow_down" ? 10_000 : 5_000,
 								maxWaitMs: 120_000,
 							},
 						});
@@ -367,9 +331,7 @@ export function createDeviceFlowCeremony(options: {
 				ctx,
 			),
 		abort: async () =>
-			validateCeremonyOutput(
-				createTurn("abort", { hint: "Device flow aborted." }),
-			),
+			validateCeremonyOutput(createTurn("abort", { hint: "Device flow aborted." })),
 	};
 }
 
@@ -437,9 +399,7 @@ export function createWebAuthnCeremony(options: {
 				input,
 			),
 		abort: async () =>
-			validateCeremonyOutput(
-				createTurn("abort", { hint: "WebAuthn ceremony aborted." }),
-			),
+			validateCeremonyOutput(createTurn("abort", { hint: "WebAuthn ceremony aborted." })),
 	};
 }
 
@@ -526,9 +486,7 @@ export function createMagicLinkCeremony(options: {
 				ctx,
 			),
 		abort: async () =>
-			validateCeremonyOutput(
-				createTurn("abort", { hint: "Magic link flow aborted." }),
-			),
+			validateCeremonyOutput(createTurn("abort", { hint: "Magic link flow aborted." })),
 	};
 }
 
@@ -548,7 +506,7 @@ export function createFormCeremony(options: {
 		continue: (ctx, input = {}) =>
 			runCeremonyHandler(
 				async () => {
-					const { prevalidate } = await import("../runtime/prevalidate");
+					const { prevalidate } = await import("../runtime/prevalidate.js");
 					const result = prevalidate(options.schema, input);
 					if (!result.valid) {
 						throw new ValidationError("Form input failed validation.", {
@@ -558,9 +516,7 @@ export function createFormCeremony(options: {
 
 					return createTurn("complete", {
 						data: {
-							credential: options.mapCredential
-								? options.mapCredential(input)
-								: input,
+							credential: options.mapCredential ? options.mapCredential(input) : input,
 						},
 						hint: "Form completed.",
 					});
@@ -570,15 +526,11 @@ export function createFormCeremony(options: {
 				input,
 			),
 		abort: async () =>
-			validateCeremonyOutput(
-				createTurn("abort", { hint: "Form ceremony aborted." }),
-			),
+			validateCeremonyOutput(createTurn("abort", { hint: "Form ceremony aborted." })),
 	};
 }
 
-export function combineCeremonies(
-	...ceremonies: AuthFlowDefinition[]
-): AuthFlowDefinition {
+export function combineCeremonies(...ceremonies: AuthFlowDefinition[]): AuthFlowDefinition {
 	function getStage(ctx: FlowContext): number {
 		const rawStage = ctx.context.get(COMBINED_STAGE_KEY);
 		return typeof rawStage === "number" ? rawStage : 0;
@@ -630,9 +582,7 @@ export function combineCeremonies(
 				async () => {
 					const current = ceremonies[getStage(ctx)];
 					if (!current?.poll) {
-						throw new ValidationError(
-							"Current ceremony does not support polling.",
-						);
+						throw new ValidationError("Current ceremony does not support polling.");
 					}
 					return await current.poll(ctx);
 				},
@@ -680,9 +630,7 @@ export function createSwitchCeremony(options: {
 				async () => {
 					const storedChoice = ctx.context.get(SWITCH_SELECTION_KEY);
 					const choice =
-						typeof storedChoice === "string"
-							? storedChoice
-							: getString(input, "choice");
+						typeof storedChoice === "string" ? storedChoice : getString(input, "choice");
 
 					if (!choice || !options.choices[choice]) {
 						throw new ValidationError("A valid choice is required.");
@@ -710,9 +658,7 @@ export function createSwitchCeremony(options: {
 
 					const ceremony = options.choices[choice];
 					if (!ceremony?.poll) {
-						throw new ValidationError(
-							"Selected ceremony does not support polling.",
-						);
+						throw new ValidationError("Selected ceremony does not support polling.");
 					}
 
 					return await ceremony.poll(ctx);

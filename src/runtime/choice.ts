@@ -10,8 +10,8 @@ import {
 	assertFreshProviderChoiceIssuedAt,
 	ProviderChoiceTokenError,
 	type ProviderChoiceTokenPayload,
-} from "../choice-token";
-import { ProviderError } from "../errors";
+} from "../choice-token.js";
+import { ProviderError } from "../errors.js";
 import type {
 	CredentialContext,
 	EnvContext,
@@ -23,7 +23,7 @@ import type {
 	ProviderRequestContext,
 	ProviderRuntimeState,
 	ProviderStateDurationString,
-} from "../types";
+} from "../types.js";
 
 export const PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV =
 	"APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET";
@@ -74,18 +74,12 @@ export function createProviderChoiceContext(
 	): string;
 	function issue<TPayload extends ProviderChoiceTokenPayload>(
 		issueOptions: ProviderChoiceIssueOptions<TPayload> & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "server" }
-			>;
+			readonly storage: Extract<ProviderChoiceStorageOptions, { readonly mode: "server" }>;
 		},
 	): Promise<string>;
 	function issue<TPayload extends ProviderChoiceTokenPayload>(
 		issueOptions: ProviderChoiceIssueOptions<TPayload> & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "auto" }
-			>;
+			readonly storage: Extract<ProviderChoiceStorageOptions, { readonly mode: "auto" }>;
 		},
 	): string | Promise<string>;
 	function issue<TPayload extends ProviderChoiceTokenPayload>(
@@ -112,10 +106,7 @@ export function createProviderChoiceContext(
 				required: true,
 			}),
 		};
-		const resolvedStorage = resolveIssueStorage(
-			issueOptions.storage,
-			issueOptions.payload,
-		);
+		const resolvedStorage = resolveIssueStorage(issueOptions.storage, issueOptions.payload);
 		if (resolvedStorage.mode === "server") {
 			return issueServerStoredChoice({
 				baseEnvelope,
@@ -146,31 +137,19 @@ export function createProviderChoiceContext(
 	): ProviderChoiceTokenPayload;
 	function parse(
 		parseOptions: ProviderChoiceParseOptions & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "server" }
-			>;
+			readonly storage: Extract<ProviderChoiceStorageOptions, { readonly mode: "server" }>;
 		},
 	): Promise<ProviderChoiceTokenPayload>;
 	function parse(
 		parseOptions: ProviderChoiceParseOptions & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "auto" }
-			>;
+			readonly storage: Extract<ProviderChoiceStorageOptions, { readonly mode: "auto" }>;
 		},
 	): ProviderChoiceTokenPayload | Promise<ProviderChoiceTokenPayload>;
 	function parse(
 		parseOptions: ProviderChoiceParseOptions,
 	): ProviderChoiceTokenPayload | Promise<ProviderChoiceTokenPayload> {
-		const [
-			actualPrefix,
-			tokenKid,
-			encodedIv,
-			encryptedPayload,
-			authTag,
-			signature,
-		] = parseManagedChoiceTokenParts(parseOptions.token);
+		const [actualPrefix, tokenKid, encodedIv, encryptedPayload, authTag, signature] =
+			parseManagedChoiceTokenParts(parseOptions.token);
 		if (
 			actualPrefix !== parseOptions.prefix ||
 			tokenKid !== kid ||
@@ -191,13 +170,9 @@ export function createProviderChoiceContext(
 			purpose: parseOptions.purpose,
 			kid: tokenKid,
 		});
-		const signedBody = [
-			parseOptions.prefix,
-			tokenKid,
-			encodedIv,
-			encryptedPayload,
-			authTag,
-		].join(".");
+		const signedBody = [parseOptions.prefix, tokenKid, encodedIv, encryptedPayload, authTag].join(
+			".",
+		);
 		assertManagedChoiceSignature({
 			signedBody,
 			signature,
@@ -247,30 +222,23 @@ export function createTestProviderChoiceContext(
 	return createProviderChoiceContext({
 		...options,
 		masterSecret:
-			options.masterSecret ??
-			"apifuse-test-provider-runtime-choice-token-master-secret",
+			options.masterSecret ?? "apifuse-test-provider-runtime-choice-token-master-secret",
 	});
 }
 
-function resolveChoiceMasterSecret(
-	options: CreateProviderChoiceContextOptions,
-): string {
+function resolveChoiceMasterSecret(options: CreateProviderChoiceContextOptions): string {
 	const configured =
-		options.masterSecret ??
-		options.env?.get(PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV);
+		options.masterSecret ?? options.env?.get(PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV);
 	const trimmed = configured?.trim();
 	if (trimmed) return trimmed;
-	throw new ProviderError(
-		"Provider runtime choice-token master secret is not configured.",
-		{
-			code: "CHOICE_TOKEN_MASTER_SECRET_NOT_CONFIGURED",
-			category: "internal_error",
-			retryable: false,
-			details: {
-				secret: PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-			},
+	throw new ProviderError("Provider runtime choice-token master secret is not configured.", {
+		code: "CHOICE_TOKEN_MASTER_SECRET_NOT_CONFIGURED",
+		category: "internal_error",
+		retryable: false,
+		details: {
+			secret: PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
 		},
-	);
+	});
 }
 
 type ManagedChoiceKeyInput = {
@@ -286,9 +254,7 @@ type ManagedChoiceKeys = {
 	readonly binding: Buffer;
 };
 
-function deriveManagedChoiceKeys(
-	input: ManagedChoiceKeyInput,
-): ManagedChoiceKeys {
+function deriveManagedChoiceKeys(input: ManagedChoiceKeyInput): ManagedChoiceKeys {
 	return {
 		encryption: deriveManagedChoiceKey(input, "encryption"),
 		signing: deriveManagedChoiceKey(input, "signing"),
@@ -327,22 +293,14 @@ function encryptManagedChoiceToken(options: {
 	]).toString("base64url");
 	const authTag = cipher.getAuthTag().toString("base64url");
 	const encodedIv = iv.toString("base64url");
-	const signedBody = [
-		options.prefix,
-		options.kid,
-		encodedIv,
-		encryptedPayload,
-		authTag,
-	].join(".");
+	const signedBody = [options.prefix, options.kid, encodedIv, encryptedPayload, authTag].join(".");
 	const signature = createHmac("sha256", options.keys.signing)
 		.update(signedBody)
 		.digest("base64url");
 	return `${signedBody}.${signature}`;
 }
 
-async function issueServerStoredChoice<
-	TPayload extends ProviderChoiceTokenPayload,
->(options: {
+async function issueServerStoredChoice<TPayload extends ProviderChoiceTokenPayload>(options: {
 	readonly baseEnvelope: Omit<ManagedChoiceEnvelope, "payload">;
 	readonly issueOptions: ProviderChoiceIssueOptions<TPayload>;
 	readonly storage: ServerProviderChoiceStorageOptions;
@@ -351,23 +309,18 @@ async function issueServerStoredChoice<
 	readonly keys: ManagedChoiceKeys;
 	readonly issuedAtMs: number;
 }): Promise<string> {
-	const serializedPayload = serializeChoicePayload(
-		options.issueOptions.payload,
-	);
+	const serializedPayload = serializeChoicePayload(options.issueOptions.payload);
 	const payloadBytes = Buffer.byteLength(serializedPayload, "utf8");
 	if (payloadBytes > options.storage.maxValueBytes) {
-		throw new ProviderError(
-			"Provider choice payload exceeds state storage policy.",
-			{
-				code: "CHOICE_STATE_PAYLOAD_TOO_LARGE",
-				category: "input_validation",
-				retryable: false,
-				details: {
-					maxValueBytes: options.storage.maxValueBytes,
-					payloadBytes,
-				},
+		throw new ProviderError("Provider choice payload exceeds state storage policy.", {
+			code: "CHOICE_STATE_PAYLOAD_TOO_LARGE",
+			category: "input_validation",
+			retryable: false,
+			details: {
+				maxValueBytes: options.storage.maxValueBytes,
+				payloadBytes,
 			},
-		);
+		});
 	}
 	const stateId = `choice_${randomBytes(16).toString("base64url")}`;
 	const digest = digestChoicePayload(serializedPayload);
@@ -439,10 +392,7 @@ function resolveIssueStorage<TPayload extends ProviderChoiceTokenPayload>(
 	  } {
 	if (!storage || storage.mode === "inline") return { mode: "inline" };
 	if (storage.mode === "server") return { mode: "server", storage };
-	const payloadBytes = Buffer.byteLength(
-		serializeChoicePayload(payload),
-		"utf8",
-	);
+	const payloadBytes = Buffer.byteLength(serializeChoicePayload(payload), "utf8");
 	if (payloadBytes <= storage.maxInlineBytes) return { mode: "inline" };
 	return { mode: "server", storage };
 }
@@ -536,10 +486,7 @@ function parseManagedChoiceTokenParts(
 ] {
 	const parts = token.split(".");
 	if (parts.length !== 6) {
-		throw new ProviderChoiceTokenError(
-			"invalid_shape",
-			"Provider choice token shape is invalid.",
-		);
+		throw new ProviderChoiceTokenError("invalid_shape", "Provider choice token shape is invalid.");
 	}
 	return [parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]];
 }
@@ -601,9 +548,7 @@ function decryptManagedChoiceToken(options: {
 	}
 }
 
-function isManagedChoiceEnvelope(
-	value: unknown,
-): value is ManagedChoiceEnvelope {
+function isManagedChoiceEnvelope(value: unknown): value is ManagedChoiceEnvelope {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	if (!("payload" in value) || !isChoicePayload(value.payload)) return false;
 	return (
@@ -617,9 +562,7 @@ function isManagedChoiceEnvelope(
 		typeof value.issued_at_ms === "number" &&
 		"ttl_ms" in value &&
 		typeof value.ttl_ms === "number" &&
-		(!("binding" in value) ||
-			value.binding === undefined ||
-			isChoiceBinding(value.binding))
+		(!("binding" in value) || value.binding === undefined || isChoiceBinding(value.binding))
 	);
 }
 
@@ -627,13 +570,10 @@ function isChoicePayload(value: unknown): value is ProviderChoiceTokenPayload {
 	return Boolean(value && typeof value === "object" && !Array.isArray(value));
 }
 
-function isChoiceBinding(
-	value: unknown,
-): value is ManagedChoiceEnvelope["binding"] {
+function isChoiceBinding(value: unknown): value is ManagedChoiceEnvelope["binding"] {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	return (
-		(!("connection_hash" in value) ||
-			typeof value.connection_hash === "string") &&
+		(!("connection_hash" in value) || typeof value.connection_hash === "string") &&
 		(!("credential_hash" in value) || typeof value.credential_hash === "string")
 	);
 }
@@ -648,10 +588,7 @@ function assertManagedChoiceEnvelope(
 		readonly futureToleranceMs?: number;
 	},
 ): void {
-	if (
-		envelope.provider_id !== options.providerId ||
-		envelope.purpose !== options.purpose
-	) {
+	if (envelope.provider_id !== options.providerId || envelope.purpose !== options.purpose) {
 		throw new ProviderChoiceTokenError(
 			"invalid_payload",
 			"Provider choice token payload is invalid.",
@@ -660,10 +597,7 @@ function assertManagedChoiceEnvelope(
 	assertFreshProviderChoiceIssuedAt(envelope.issued_at_ms, {
 		// Clamp to the issuer's embedded TTL so a caller-supplied value cannot
 		// silently extend token validity past the deadline the issuer intended.
-		ttlMs:
-			options.ttlMs != null
-				? Math.min(options.ttlMs, envelope.ttl_ms)
-				: envelope.ttl_ms,
+		ttlMs: options.ttlMs != null ? Math.min(options.ttlMs, envelope.ttl_ms) : envelope.ttl_ms,
 		nowMs: options.nowMs,
 		futureToleranceMs: options.futureToleranceMs,
 	});
@@ -676,9 +610,7 @@ function createChoiceBinding(options: {
 	readonly credential?: CredentialContext;
 	readonly required: boolean;
 }): ManagedChoiceEnvelope["binding"] {
-	const connectionHash = options.options?.connection
-		? hashRequiredConnection(options)
-		: undefined;
+	const connectionHash = options.options?.connection ? hashRequiredConnection(options) : undefined;
 	const credentialHash = options.options?.credentialKeys?.length
 		? hashCredentialKeys(options)
 		: undefined;
@@ -697,14 +629,11 @@ function hashRequiredConnection(options: {
 	const connectionId = options.request?.connectionId;
 	if (!connectionId) {
 		if (!options.required) return undefined;
-		throw new ProviderError(
-			"Provider choice tokens require connection context.",
-			{
-				code: "CHOICE_CONTEXT_REQUIRED",
-				category: "input_validation",
-				retryable: false,
-			},
-		);
+		throw new ProviderError("Provider choice tokens require connection context.", {
+			code: "CHOICE_CONTEXT_REQUIRED",
+			category: "input_validation",
+			retryable: false,
+		});
 	}
 	return createHmac("sha256", options.keys.binding)
 		.update("connection")
@@ -722,15 +651,12 @@ function hashCredentialKeys(options: {
 	const material = credentialKeys.map((key) => {
 		const value = options.credential?.get(key);
 		if (typeof value !== "string" || value.length === 0) {
-			throw new ProviderError(
-				"Provider choice tokens require configured credential binding.",
-				{
-					code: "CHOICE_CONTEXT_REQUIRED",
-					category: "input_validation",
-					retryable: false,
-					details: { credentialKey: key },
-				},
-			);
+			throw new ProviderError("Provider choice tokens require configured credential binding.", {
+				code: "CHOICE_CONTEXT_REQUIRED",
+				category: "input_validation",
+				retryable: false,
+				details: { credentialKey: key },
+			});
 		}
 		return [key, value];
 	});

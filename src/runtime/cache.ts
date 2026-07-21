@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { providerCacheRedisUrlFromEnv } from "../config/loader";
+import { providerCacheRedisUrlFromEnv } from "../config/loader.js";
 import type {
 	ProviderCache,
 	ProviderCacheGetOrSetOptions,
@@ -8,13 +8,13 @@ import type {
 	ProviderCacheLookupMeta,
 	ProviderCacheResponseMeta,
 	ProviderCacheResult,
-} from "../types";
+} from "../types.js";
 import {
 	createProviderRedisClient,
 	ensureRedisReady,
 	type ProviderRedisClient,
 	withRedisTimeout,
-} from "./redis";
+} from "./redis.js";
 
 type CacheSource = ProviderCacheLookupMeta["source"];
 
@@ -123,10 +123,7 @@ function normalizeKeyPart(value: unknown, extra: Set<string>): unknown {
 }
 
 function stableHash(value: unknown): string {
-	return createHash("sha256")
-		.update(JSON.stringify(value))
-		.digest("hex")
-		.slice(0, 32);
+	return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 32);
 }
 
 function jitteredTtlMs(ttlMs: number, jitterPct: number | undefined): number {
@@ -161,10 +158,7 @@ function safeParseEnvelope(raw: string | null): CacheEnvelope | null {
 	}
 }
 
-function resultWithValue<T>(
-	value: unknown,
-	meta: ProviderCacheLookupMeta,
-): ProviderCacheResult<T> {
+function resultWithValue<T>(value: unknown, meta: ProviderCacheLookupMeta): ProviderCacheResult<T> {
 	return {
 		value: <T>value,
 		meta,
@@ -187,18 +181,14 @@ function resultFromEnvelope<T>(
 	});
 }
 
-function sourceSummary(
-	events: ProviderCacheLookupMeta[],
-): ProviderCacheResponseMeta["source"] {
+function sourceSummary(events: ProviderCacheLookupMeta[]): ProviderCacheResponseMeta["source"] {
 	const sources = new Set(events.map((event) => event.source));
 	if (sources.size === 0) return undefined;
 	if (sources.size === 1) return events[0]?.source;
 	return "mixed";
 }
 
-async function withRedisFallback<T>(
-	operation: () => Promise<T>,
-): Promise<T | undefined> {
+async function withRedisFallback<T>(operation: () => Promise<T>): Promise<T | undefined> {
 	return await withRedisTimeout(operation, {
 		timeoutMs: DEFAULT_REDIS_TIMEOUT_MS,
 		onTimeout: () => undefined,
@@ -206,15 +196,10 @@ async function withRedisFallback<T>(
 	});
 }
 
-export function createProviderCache(
-	options: ProviderCacheOptions,
-): ProviderCache {
+export function createProviderCache(options: ProviderCacheOptions): ProviderCache {
 	const redisUrl = options.redisUrl ?? providerCacheRedisUrlFromEnv();
 	const backend = getSharedBackend(redisUrl);
-	const memoryMaxEntries = Math.max(
-		1,
-		options.memoryMaxEntries ?? DEFAULT_MEMORY_MAX_ENTRIES,
-	);
+	const memoryMaxEntries = Math.max(1, options.memoryMaxEntries ?? DEFAULT_MEMORY_MAX_ENTRIES);
 	const now = options.now ?? Date.now;
 	const events: ProviderCacheLookupMeta[] = [];
 
@@ -238,11 +223,7 @@ export function createProviderCache(
 		}
 	}
 
-	function rememberEnvelope(
-		key: string,
-		envelope: CacheEnvelope,
-		currentTime: number,
-	): void {
+	function rememberEnvelope(key: string, envelope: CacheEnvelope, currentTime: number): void {
 		sweepMemory(currentTime);
 		backend.memory.delete(key);
 		backend.memory.set(key, {
@@ -253,11 +234,7 @@ export function createProviderCache(
 		enforceMemoryLimit();
 	}
 
-	function touchMemory(
-		key: string,
-		entry: MemoryEntry,
-		currentTime: number,
-	): void {
+	function touchMemory(key: string, entry: MemoryEntry, currentTime: number): void {
 		backend.memory.delete(key);
 		backend.memory.set(key, { ...entry, lastAccessedAt: currentTime });
 	}
@@ -298,12 +275,7 @@ export function createProviderCache(
 			if (memoryEntry.expiresAt <= currentTime) {
 				backend.memory.delete(key);
 			} else {
-				const memoryResult = resultFromEnvelope<T>(
-					key,
-					memoryEntry,
-					currentTime,
-					"memory",
-				);
+				const memoryResult = resultFromEnvelope<T>(key, memoryEntry, currentTime, "memory");
 				if (memoryResult && !memoryResult.meta.stale) {
 					touchMemory(key, memoryEntry, currentTime);
 					return memoryResult;
@@ -334,10 +306,7 @@ export function createProviderCache(
 		cacheOptions: ProviderCacheGetOrSetOptions,
 	): Promise<void> {
 		const currentTime = now();
-		const freshTtlMs = jitteredTtlMs(
-			cacheOptions.ttlMs,
-			cacheOptions.jitterPct,
-		);
+		const freshTtlMs = jitteredTtlMs(cacheOptions.ttlMs, cacheOptions.jitterPct);
 		const staleIfErrorMs = cacheOptions.staleIfErrorMs ?? 0;
 		const staleTtlMs = freshTtlMs + staleIfErrorMs;
 		const envelope: CacheEnvelope = {
@@ -352,9 +321,7 @@ export function createProviderCache(
 		if (!redis || !(await ensureRedisReady(redis, DEFAULT_REDIS_TIMEOUT_MS))) {
 			return;
 		}
-		await withRedisFallback(() =>
-			redis.set(key, JSON.stringify(envelope), "PX", staleTtlMs),
-		);
+		await withRedisFallback(() => redis.set(key, JSON.stringify(envelope), "PX", staleTtlMs));
 	}
 
 	async function loadAndStore<T>(
@@ -385,16 +352,12 @@ export function createProviderCache(
 
 	return {
 		key(namespace, parts, keyOptions?: ProviderCacheKeyOptions) {
-			const extra = new Set(
-				(keyOptions?.redactFields ?? []).map((field) => field.toLowerCase()),
-			);
+			const extra = new Set((keyOptions?.redactFields ?? []).map((field) => field.toLowerCase()));
 			const normalized = normalizeKeyPart(parts, extra);
 			return `${DEFAULT_PREFIX}:${options.providerId}:${namespace}:${stableHash(normalized)}`;
 		},
 
-		async get<T = unknown>(
-			key: string,
-		): Promise<ProviderCacheResult<T> | null> {
+		async get<T = unknown>(key: string): Promise<ProviderCacheResult<T> | null> {
 			const result = await read<T>(key);
 			if (result) record(result.meta);
 			return result;
@@ -405,10 +368,7 @@ export function createProviderCache(
 		async delete(key: string): Promise<void> {
 			backend.memory.delete(key);
 			const redis = backend.redis;
-			if (
-				!redis ||
-				!(await ensureRedisReady(redis, DEFAULT_REDIS_TIMEOUT_MS))
-			) {
+			if (!redis || !(await ensureRedisReady(redis, DEFAULT_REDIS_TIMEOUT_MS))) {
 				return;
 			}
 			await withRedisFallback(() => redis.del(key));
@@ -428,10 +388,7 @@ export function createProviderCache(
 			const existingInflight = backend.inflight.get(key);
 			if (existingInflight) {
 				const inflightResult = await existingInflight;
-				const result = resultWithValue<T>(
-					inflightResult.value,
-					inflightResult.meta,
-				);
+				const result = resultWithValue<T>(inflightResult.value, inflightResult.meta);
 				record(result.meta);
 				return result;
 			}
@@ -470,16 +427,12 @@ export function createBypassProviderCache(
 
 	return {
 		key(namespace, parts, keyOptions?: ProviderCacheKeyOptions) {
-			const extra = new Set(
-				(keyOptions?.redactFields ?? []).map((field) => field.toLowerCase()),
-			);
+			const extra = new Set((keyOptions?.redactFields ?? []).map((field) => field.toLowerCase()));
 			const normalized = normalizeKeyPart(parts, extra);
 			return `${DEFAULT_PREFIX}:${options.providerId}:${namespace}:${stableHash(normalized)}`;
 		},
 
-		async get<T = unknown>(
-			_key: string,
-		): Promise<ProviderCacheResult<T> | null> {
+		async get<T = unknown>(_key: string): Promise<ProviderCacheResult<T> | null> {
 			return null;
 		},
 

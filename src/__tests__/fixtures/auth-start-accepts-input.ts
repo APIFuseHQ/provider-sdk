@@ -1,4 +1,4 @@
-import { defineOperation, defineProvider, z } from "../../provider";
+import { defineOperation, defineProvider, z } from "../../provider.js";
 
 const noop = defineOperation({
 	descriptionKey: "operations.noop.description",

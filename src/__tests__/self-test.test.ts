@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { ProviderError } from "../errors";
-import { createMemoryProviderRuntimeState } from "../runtime/state";
+import { ProviderError } from "../errors.js";
+import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import {
 	computeSelfTestPlanDigest,
 	createSelfTestApp,
@@ -10,14 +10,14 @@ import {
 	SELF_TEST_HEALTHZ_PATH,
 	SELF_TEST_PATH,
 	type SelfTestResponse,
-} from "../server/self-test";
+} from "../server/self-test.js";
 import {
 	deriveSelfTestToken,
 	PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_ENV,
 	resolveSelfTestMasterSecrets,
-} from "../server/self-test-token";
-import { createServerApp } from "../server/serve";
-import type { ProviderDefinition } from "../types";
+} from "../server/self-test-token.js";
+import { createServerApp } from "../server/serve.js";
+import type { ProviderDefinition } from "../types.js";
 
 const MASTER_SECRET = "self-test-master-secret";
 const PREVIOUS_MASTER_SECRET = "self-test-previous-master-secret";

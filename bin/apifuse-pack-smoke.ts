@@ -1,19 +1,7 @@
 #!/usr/bin/env bun
 
-import {
-	type ChildProcess,
-	execFileSync,
-	spawn,
-	spawnSync,
-} from "node:child_process";
-import {
-	existsSync,
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { type ChildProcess, execFileSync, spawn, spawnSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -41,9 +29,7 @@ const PING_RESPONSE_SCHEMA = z.object({
 
 const KEEP_TEMP = process.env.APIFUSE__PACK_SMOKE__KEEP_TEMP === "1";
 
-const tempRoot = mkdtempSync(
-	join(tmpdir(), "apifuse-provider-sdk-pack-smoke-"),
-);
+const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-smoke-"));
 const packDir = join(tempRoot, "pack");
 const consumerDir = join(tempRoot, "consumer");
 const externalWorkspaceDir = join(tempRoot, "external-workspace");
@@ -81,15 +67,7 @@ try {
 
 	run(
 		"bun",
-		[
-			cliBin,
-			"create",
-			"dx-smoke",
-			"--yes",
-			"--json",
-			"--sdk-specifier",
-			tarballSpecifier,
-		],
+		[cliBin, "create", "dx-smoke", "--yes", "--json", "--sdk-specifier", tarballSpecifier],
 		consumerDir,
 	);
 
@@ -99,11 +77,7 @@ try {
 	run("bun", ["run", "test"], generatedProviderDir);
 	assertGeneratedReadme(generatedProviderDir);
 	await smokeGeneratedDevServer(generatedProviderDir);
-	assertExternalWorkspaceTopology(
-		cliBin,
-		externalWorkspaceDir,
-		tarballSpecifier,
-	);
+	assertExternalWorkspaceTopology(cliBin, externalWorkspaceDir, tarballSpecifier);
 
 	console.log(
 		`Provider SDK packed-artifact smoke passed: ${tarballPath} -> ${generatedProviderDir}`,
@@ -148,15 +122,8 @@ function assertExternalWorkspaceTopology(
 		externalWorkspaceDir,
 	);
 
-	const generatedProviderDir = join(
-		externalWorkspaceDir,
-		"external-workspace-smoke",
-	);
-	const forbiddenProviderDir = join(
-		externalWorkspaceDir,
-		"providers",
-		"external-workspace-smoke",
-	);
+	const generatedProviderDir = join(externalWorkspaceDir, "external-workspace-smoke");
+	const forbiddenProviderDir = join(externalWorkspaceDir, "providers", "external-workspace-smoke");
 	if (!existsSync(generatedProviderDir)) {
 		throw new Error(
 			"Public create must generate a one-provider repository at <name>/ even when providers/ exists.",
@@ -168,9 +135,7 @@ function assertExternalWorkspaceTopology(
 		);
 	}
 
-	const packageJson = JSON.parse(
-		readFileSync(join(generatedProviderDir, "package.json"), "utf8"),
-	);
+	const packageJson = JSON.parse(readFileSync(join(generatedProviderDir, "package.json"), "utf8"));
 	const sdkDependency = packageJson?.dependencies?.["@apifuse/provider-sdk"];
 	if (sdkDependency !== tarballSpecifier) {
 		throw new Error(
@@ -178,9 +143,7 @@ function assertExternalWorkspaceTopology(
 		);
 	}
 	if (JSON.stringify(packageJson).includes("workspace:")) {
-		throw new Error(
-			"External bounty workspace scaffold must not contain workspace: dependencies.",
-		);
+		throw new Error("External bounty workspace scaffold must not contain workspace: dependencies.");
 	}
 
 	run("bun", ["install"], generatedProviderDir);
@@ -199,30 +162,20 @@ function assertExternalWorkspaceTopology(
 		},
 	);
 	if (monorepoAttempt.status === 0) {
-		throw new Error(
-			"--preset monorepo must reject outside the private APIFuse monorepo.",
-		);
+		throw new Error("--preset monorepo must reject outside the private APIFuse monorepo.");
 	}
 	const rejectionOutput = `${monorepoAttempt.stdout}\n${monorepoAttempt.stderr}`;
-	if (
-		!rejectionOutput.includes(
-			"Monorepo preset is internal to the APIFuse repository",
-		)
-	) {
+	if (!rejectionOutput.includes("Monorepo preset is internal to the APIFuse repository")) {
 		throw new Error(`Unexpected monorepo rejection output: ${rejectionOutput}`);
 	}
 }
 
 function packSdk(destination: string): { filename: string } {
-	const raw = execFileSync(
-		"npm",
-		["pack", "--json", "--pack-destination", destination],
-		{
-			cwd: process.cwd(),
-			encoding: "utf8",
-			stdio: ["ignore", "pipe", "inherit"],
-		},
-	);
+	const raw = execFileSync("npm", ["pack", "--json", "--pack-destination", destination], {
+		cwd: process.cwd(),
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "inherit"],
+	});
 	const parsed = PACK_RESULT_SCHEMA.parse(JSON.parse(raw));
 	const first = parsed[0];
 	if (!first) {
@@ -252,29 +205,19 @@ function run(command: string, args: string[], cwd: string): void {
 function assertGeneratedReadme(providerDir: string): void {
 	const readme = readFileSync(join(providerDir, "README.md"), "utf8");
 	if (!readme.includes('"requestId":"req_local_ping"')) {
-		throw new Error(
-			"Generated README is missing requestId in local smoke docs.",
-		);
+		throw new Error("Generated README is missing requestId in local smoke docs.");
 	}
 	if (readme.includes('"connection":null')) {
-		throw new Error(
-			"Generated README must not document connection:null for no-auth local smoke.",
-		);
+		throw new Error("Generated README must not document connection:null for no-auth local smoke.");
 	}
 	if (!readme.includes("bunx playwright install chromium")) {
-		throw new Error(
-			"Generated README is missing browser runtime troubleshooting guidance.",
-		);
+		throw new Error("Generated README is missing browser runtime troubleshooting guidance.");
 	}
 	if (!readme.includes("impit")) {
-		throw new Error(
-			"Generated README is missing impit stealth runtime guidance.",
-		);
+		throw new Error("Generated README is missing impit stealth runtime guidance.");
 	}
 	if (!readme.includes("bun run submit-check")) {
-		throw new Error(
-			"Generated README must document the submit-check pre-submission workflow.",
-		);
+		throw new Error("Generated README must document the submit-check pre-submission workflow.");
 	}
 	if (!readme.includes("bun run record -- --operation <operation>")) {
 		throw new Error(
@@ -368,9 +311,7 @@ async function waitForHttp(
 
 	while (Date.now() < deadline) {
 		if (server.exitCode !== null) {
-			throw new Error(
-				`Dev server exited early with code ${server.exitCode}\n${getOutput()}`,
-			);
+			throw new Error(`Dev server exited early with code ${server.exitCode}\n${getOutput()}`);
 		}
 
 		try {

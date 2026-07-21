@@ -1,13 +1,8 @@
 import { z } from "zod";
 
-import { HttpRetryPreset } from "../types";
+import { HttpRetryPreset } from "../types.js";
 
-export const ConnectionModeSchema = z.enum([
-	"oauth2",
-	"credentials",
-	"platform-managed",
-	"none",
-]);
+export const ConnectionModeSchema = z.enum(["oauth2", "credentials", "platform-managed", "none"]);
 
 export const OperationConnectionSchema = z.object({
 	id: z.string(),
@@ -99,18 +94,10 @@ export const AuthFlowErrorResponseSchema = OperationErrorResponseSchema;
 export type ConnectionMode = z.infer<typeof ConnectionModeSchema>;
 export type OperationConnection = z.infer<typeof OperationConnectionSchema>;
 export type OperationRequest = z.infer<typeof OperationRequestSchema>;
-export type OperationSuccessResponse = z.infer<
-	typeof OperationSuccessResponseSchema
->;
-export type OperationErrorResponse = z.infer<
-	typeof OperationErrorResponseSchema
->;
-export type OperationResponse =
-	| OperationSuccessResponse
-	| OperationErrorResponse;
+export type OperationSuccessResponse = z.infer<typeof OperationSuccessResponseSchema>;
+export type OperationErrorResponse = z.infer<typeof OperationErrorResponseSchema>;
+export type OperationResponse = OperationSuccessResponse | OperationErrorResponse;
 export type AuthFlowRequest = z.infer<typeof AuthFlowRequestSchema>;
-export type AuthFlowSuccessResponse = z.infer<
-	typeof AuthFlowSuccessResponseSchema
->;
+export type AuthFlowSuccessResponse = z.infer<typeof AuthFlowSuccessResponseSchema>;
 export type AuthFlowErrorResponse = z.infer<typeof AuthFlowErrorResponseSchema>;
 export type AuthFlowResponse = AuthFlowSuccessResponse | AuthFlowErrorResponse;

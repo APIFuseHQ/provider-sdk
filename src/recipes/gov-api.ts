@@ -1,4 +1,4 @@
-import { unwrapEnvelope } from "../utils/parse";
+import { unwrapEnvelope } from "../utils/parse.js";
 
 function getResultCode(raw: unknown): string | undefined {
 	if (!raw || typeof raw !== "object") {
@@ -33,10 +33,7 @@ export function checkResultCode(
  * Replace placeholder values with null
  * e.g., nullIfPlaceholder('해당없음', ['해당없음', '-', '']) → null
  */
-export function nullIfPlaceholder(
-	v: unknown,
-	patterns: string[],
-): unknown | null {
+export function nullIfPlaceholder(v: unknown, patterns: string[]): unknown | null {
 	if (v === null || v === undefined) {
 		return null;
 	}

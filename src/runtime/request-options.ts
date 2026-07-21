@@ -1,12 +1,6 @@
-import type {
-	RequestParamPrimitive,
-	RequestParams,
-	RequestParamValue,
-} from "../types";
+import type { RequestParamPrimitive, RequestParams, RequestParamValue } from "../types.js";
 
-function isParamArray(
-	value: RequestParamValue,
-): value is readonly RequestParamPrimitive[] {
+function isParamArray(value: RequestParamValue): value is readonly RequestParamPrimitive[] {
 	return Array.isArray(value);
 }
 
@@ -29,8 +23,7 @@ export function appendQueryParams(url: string, params?: RequestParams): string {
 	const parsed = new URL(url);
 	for (const [key, value] of Object.entries(params)) {
 		if (isParamArray(value)) {
-			for (const item of value)
-				appendQueryValue(parsed.searchParams, key, item);
+			for (const item of value) appendQueryValue(parsed.searchParams, key, item);
 			continue;
 		}
 		appendQueryValue(parsed.searchParams, key, value);
@@ -39,9 +32,7 @@ export function appendQueryParams(url: string, params?: RequestParams): string {
 	return parsed.toString();
 }
 
-export function normalizeHttpRequestBody(
-	body: unknown,
-): string | Buffer | undefined {
+export function normalizeHttpRequestBody(body: unknown): string | Buffer | undefined {
 	if (body === undefined) {
 		return undefined;
 	}

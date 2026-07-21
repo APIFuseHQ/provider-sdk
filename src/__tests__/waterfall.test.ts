@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
-import type { Span } from "../runtime/trace";
-import { renderWaterfall, type WaterfallRequest } from "../runtime/waterfall";
+import type { Span } from "../runtime/trace.js";
+import { renderWaterfall, type WaterfallRequest } from "../runtime/waterfall.js";
 
 function assertDefined<T>(value: T | null | undefined, message?: string): T {
 	if (value === null || value === undefined) {
@@ -95,11 +95,8 @@ describe("renderWaterfall", () => {
 		expect(stealthFetchLine).toBeDefined();
 		expect(dnsLine).toBeDefined();
 
-		const stripAnsi = (s: string) =>
-			s.replace(new RegExp("\\u001b\\[[0-9;]*m", "g"), "");
-		const stealthFetchPos = stripAnsi(assertDefined(stealthFetchLine)).indexOf(
-			"├─",
-		);
+		const stripAnsi = (s: string) => s.replace(new RegExp("\\u001b\\[[0-9;]*m", "g"), "");
+		const stealthFetchPos = stripAnsi(assertDefined(stealthFetchLine)).indexOf("├─");
 		const dnsPos = stripAnsi(assertDefined(dnsLine)).indexOf("└─");
 
 		expect(dnsPos).toBeGreaterThan(stealthFetchPos);
@@ -187,10 +184,7 @@ describe("renderWaterfall", () => {
 			duration_ms: 3.2,
 		});
 
-		const output = renderWaterfall(
-			[root, fast, slow, transform],
-			defaultRequest,
-		);
+		const output = renderWaterfall([root, fast, slow, transform], defaultRequest);
 
 		const lines = output.split("\n");
 		const stealthFetchLine = lines.find((l) => l.includes("stealth.fetch"));
@@ -254,13 +248,10 @@ describe("renderWaterfall", () => {
 			{ maxBarWidth: 20 },
 		);
 
-		const stripAnsi = (s: string) =>
-			s.replace(new RegExp("\\u001b\\[[0-9;]*m", "g"), "");
+		const stripAnsi = (s: string) => s.replace(new RegExp("\\u001b\\[[0-9;]*m", "g"), "");
 		const lines = output.split("\n").map(stripAnsi);
 
-		const halfLine = lines.find(
-			(l) => l.includes("half") && !l.includes("full"),
-		);
+		const halfLine = lines.find((l) => l.includes("half") && !l.includes("full"));
 		const fullLine = lines.find((l) => l.includes("full"));
 
 		const countBars = (s: string) => (s.match(/━/g) ?? []).length;

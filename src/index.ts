@@ -1,15 +1,15 @@
 // @apifuse/provider-sdk
 
-export * from "./auth";
-export * from "./ceremonies";
-export * from "./choice-token";
+export * from "./auth.js";
+export * from "./ceremonies/index.js";
+export * from "./choice-token.js";
 export type {
 	ApiFuseConfig,
 	BrowserConfig,
 	ProxyConfig,
 	SessionConfig,
-} from "./config/loader";
-export { defineConfig, loadApiFuseConfig } from "./config/loader";
+} from "./config/loader.js";
+export { defineConfig, loadApiFuseConfig } from "./config/loader.js";
 export {
 	canonicalJson,
 	digestProviderContract,
@@ -19,7 +19,7 @@ export {
 	PROVIDER_CONTRACT_SCHEMA_VERSION,
 	type ProviderContractOperation,
 	type ProviderContractSnapshot,
-} from "./contract";
+} from "./contract.js";
 export {
 	centered,
 	delayed,
@@ -30,54 +30,55 @@ export {
 	defineStreamOperation,
 	every,
 	type ProviderConfig,
-} from "./define";
-export type { DevServerOptions } from "./dev";
-export { createDevServer, startDevServer } from "./dev";
-export * from "./errors";
-export * from "./i18n";
+} from "./define.js";
+export type { DevServerOptions } from "./dev.js";
+export { createDevServer, startDevServer } from "./dev.js";
+export * from "./errors.js";
+export * from "./user-input.js";
+export * from "./i18n/index.js";
 export {
 	type LintDiagnostic,
 	lintOperation,
 	lintProvider,
-} from "./lint";
-export * from "./recipes/gov-api";
-export * from "./recipes/rest-api";
-export { createFlowContext, createScratchpad } from "./runtime/auth-flow";
-export type { BrowserClientOptions } from "./runtime/browser";
-export { BrowserClient, createBrowserClient } from "./runtime/browser";
+} from "./lint.js";
+export * from "./recipes/gov-api.js";
+export * from "./recipes/rest-api.js";
+export { createFlowContext, createScratchpad } from "./runtime/auth-flow.js";
+export type { BrowserClientOptions } from "./runtime/browser.js";
+export { BrowserClient, createBrowserClient } from "./runtime/browser.js";
 export {
 	createBypassProviderCache,
 	createProviderCache,
 	type ProviderCacheOptions,
 	resetProviderCacheForTests,
-} from "./runtime/cache";
+} from "./runtime/cache.js";
 export {
 	type CreateProviderChoiceContextOptions,
 	createProviderChoiceContext,
 	createTestProviderChoiceContext,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-} from "./runtime/choice";
+} from "./runtime/choice.js";
 export {
 	type CreateCredentialContextOptions,
 	createCredentialContext,
-} from "./runtime/credential";
-export { createEnvContext } from "./runtime/env";
-export { executeOperation } from "./runtime/executor";
-export { createHttpClient } from "./runtime/http";
-export type { Insight, InsightSeverity } from "./runtime/insights";
-export { generateInsights } from "./runtime/insights";
+} from "./runtime/credential.js";
+export { createEnvContext } from "./runtime/env.js";
+export { executeOperation } from "./runtime/executor.js";
+export { createHttpClient } from "./runtime/http.js";
+export type { Insight, InsightSeverity } from "./runtime/insights.js";
+export { generateInsights } from "./runtime/insights.js";
 export {
 	type InstrumentationOptions,
 	type InstrumentedProviderContext,
 	wrapWithInstrumentation,
-} from "./runtime/instrumentation";
-export { type PrevalidateResult, prevalidate } from "./runtime/prevalidate";
-export { getProviderBaseUrl } from "./runtime/provider";
+} from "./runtime/instrumentation.js";
+export { type PrevalidateResult, prevalidate } from "./runtime/prevalidate.js";
+export { getProviderBaseUrl } from "./runtime/provider.js";
 export {
 	createUnsupportedProviderRuntimeState,
 	UnsupportedProviderStateError,
-} from "./runtime/state";
-export { createStealthClient } from "./runtime/stealth";
+} from "./runtime/state.js";
+export { createStealthClient } from "./runtime/stealth.js";
 export {
 	APIFUSE__STT__BACKEND_ENV,
 	APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV,
@@ -86,13 +87,13 @@ export {
 	createUnsupportedSttClient,
 	extractVerificationCode,
 	resolveSttPrompt,
-} from "./runtime/stt";
+} from "./runtime/stt.js";
 export {
 	type CreateTraceContextOptions,
 	createTraceContext,
 	type Span,
 	type TraceContext,
-} from "./runtime/trace";
+} from "./runtime/trace.js";
 export {
 	APIFUSE_DESCRIPTION_KEY_META_KEY,
 	APIFUSE_REDACTION_MARKER,
@@ -109,10 +110,10 @@ export {
 	type SensitivePath,
 	sensitive,
 	z,
-} from "./schema";
-export { createServerApp, type ServeOptions, serve } from "./server";
-export { getStealthProfile, listStealthProfiles } from "./stealth/profiles";
-export * from "./stream";
+} from "./schema.js";
+export { createServerApp, type ServeOptions, serve } from "./server/index.js";
+export { getStealthProfile, listStealthProfiles } from "./stealth/profiles.js";
+export * from "./stream.js";
 export type {
 	ApiFuseResponse,
 	AuthConfig,
@@ -264,7 +265,7 @@ export type {
 	VerificationCodeCandidate,
 	VerificationCodeCandidateSource,
 	VerificationCodeExtractionResult,
-} from "./types";
+} from "./types.js";
 export {
 	DEFAULT_OPERATION_TRANSPORT,
 	HttpRetryAfterPolicy,
@@ -281,8 +282,8 @@ export {
 	STREAM_IDLE_TIMEOUT_MS_MIN,
 	STREAM_MAX_DURATION_MS_MAX,
 	STREAM_MAX_DURATION_MS_MIN,
-} from "./types";
-export * from "./utils/date";
-export * from "./utils/parse";
-export * from "./utils/text";
-export * from "./utils/transform";
+} from "./types.js";
+export * from "./utils/date.js";
+export * from "./utils/parse.js";
+export * from "./utils/text.js";
+export * from "./utils/transform.js";

@@ -1,27 +1,19 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import {
-	mkdirSync,
-	mkdtempSync,
-	readFileSync,
-	rmSync,
-	writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
-import { buildSubmitCheckReport } from "../../bin/apifuse-submit-check";
-import { COMMAND_MANIFEST } from "../cli/commands";
+import { buildSubmitCheckReport } from "../../bin/apifuse-submit-check.js";
+import { COMMAND_MANIFEST } from "../cli/commands.js";
 import {
 	buildProviderCreatePlan,
 	type CreateResolvedOptions,
 	toDisplayName,
-} from "../cli/create";
+} from "../cli/create.js";
 
 const SDK_NATIVE_CATEGORY = "sdk-native";
 
-function materializePlan(
-	plan: Awaited<ReturnType<typeof buildProviderCreatePlan>>,
-): string {
+function materializePlan(plan: Awaited<ReturnType<typeof buildProviderCreatePlan>>): string {
 	for (const file of plan.files) {
 		mkdirSync(dirname(file.path), { recursive: true });
 		writeFileSync(file.path, file.content);
@@ -46,9 +38,7 @@ afterEach(() => {
 	}
 });
 
-function createOptions(
-	overrides: Partial<CreateResolvedOptions> = {},
-): CreateResolvedOptions {
+function createOptions(overrides: Partial<CreateResolvedOptions> = {}): CreateResolvedOptions {
 	return {
 		name: "weather-provider",
 		displayName: "Weather Provider",
@@ -67,35 +57,23 @@ function findGeneratedFile(
 	plan: Awaited<ReturnType<typeof buildProviderCreatePlan>>,
 	relativePath: string,
 ) {
-	return plan.files.find(
-		(file) => file.path === join(plan.providerRoot, relativePath),
-	);
+	return plan.files.find((file) => file.path === join(plan.providerRoot, relativePath));
 }
 
 describe("provider create planning", () => {
 	it("renders standalone providers without workspace dependencies", async () => {
 		const cwd = makeTempDir("apifuse-create-standalone-");
 		const plan = await buildProviderCreatePlan(createOptions(), cwd);
-		const packageJson = plan.files.find((file) =>
-			file.path.endsWith("package.json"),
-		);
+		const packageJson = plan.files.find((file) => file.path.endsWith("package.json"));
 
 		expect(plan.preset).toBe("standalone");
 		expect(plan.providerRoot).toBe(join(cwd, "weather-provider"));
+		expect(packageJson?.content.includes('"@apifuse/provider-sdk": "workspace:*"')).toBeFalse();
 		expect(
-			packageJson?.content.includes('"@apifuse/provider-sdk": "workspace:*"'),
-		).toBeFalse();
-		expect(
-			packageJson?.content.includes(
-				'"check": "apifuse check . && bun run type-check"',
-			),
+			packageJson?.content.includes('"check": "apifuse check . && bun run type-check"'),
 		).toBeTrue();
-		expect(
-			packageJson?.content.includes('"type-check": "tsc --noEmit"'),
-		).toBeTrue();
-		expect(
-			packageJson?.content.includes('"record": "apifuse record ."'),
-		).toBeTrue();
+		expect(packageJson?.content.includes('"type-check": "tsc --noEmit"')).toBeTrue();
+		expect(packageJson?.content.includes('"record": "apifuse record ."')).toBeTrue();
 		expect(
 			packageJson?.content.includes(
 				'"submit-check": "apifuse submit-check . --markdown submission-report.md"',
@@ -180,18 +158,11 @@ describe("provider create planning", () => {
 			JSON.stringify({ name: "@apifuse/provider-sdk" }),
 		);
 
-		const plan = await buildProviderCreatePlan(
-			createOptions({ preset: "monorepo" }),
-			cwd,
-		);
-		const packageJson = plan.files.find((file) =>
-			file.path.endsWith("package.json"),
-		);
+		const plan = await buildProviderCreatePlan(createOptions({ preset: "monorepo" }), cwd);
+		const packageJson = plan.files.find((file) => file.path.endsWith("package.json"));
 
 		expect(plan.providerRoot).toBe(join(cwd, "providers", "weather-provider"));
-		expect(
-			packageJson?.content.includes('"@apifuse/provider-sdk": "workspace:*"'),
-		).toBeTrue();
+		expect(packageJson?.content.includes('"@apifuse/provider-sdk": "workspace:*"')).toBeTrue();
 		expect(plan.installCwd).toBe(cwd);
 	});
 
@@ -207,9 +178,7 @@ describe("provider create planning", () => {
 		);
 
 		const plan = await buildProviderCreatePlan(createOptions(), cwd);
-		const packageJson = plan.files.find((file) =>
-			file.path.endsWith("package.json"),
-		);
+		const packageJson = plan.files.find((file) => file.path.endsWith("package.json"));
 
 		expect(plan.preset).toBe("standalone");
 		expect(plan.providerRoot).toBe(join(cwd, "weather-provider"));
@@ -229,17 +198,14 @@ describe("provider create planning", () => {
 			}),
 		);
 
-		expect(
-			buildProviderCreatePlan(createOptions({ preset: "monorepo" }), cwd),
-		).rejects.toThrow("Monorepo preset is internal to the APIFuse repository");
+		expect(buildProviderCreatePlan(createOptions({ preset: "monorepo" }), cwd)).rejects.toThrow(
+			"Monorepo preset is internal to the APIFuse repository",
+		);
 	});
 
 	it("renders browser providers with the supported TypeScript browser engine", async () => {
 		const cwd = makeTempDir("apifuse-create-browser-");
-		const plan = await buildProviderCreatePlan(
-			createOptions({ runtime: "browser" }),
-			cwd,
-		);
+		const plan = await buildProviderCreatePlan(createOptions({ runtime: "browser" }), cwd);
 		const index = findGeneratedFile(plan, "index.ts");
 		const readme = findGeneratedFile(plan, "README.md");
 
@@ -275,9 +241,7 @@ describe("provider create planning", () => {
 		const plan = await buildProviderCreatePlan(createOptions(), cwd);
 		const readme = findGeneratedFile(plan, "README.md");
 		const devFile = plan.files.find((file) => file.path.endsWith("dev.ts"));
-		const dockerfile = plan.files.find((file) =>
-			file.path.endsWith("Dockerfile"),
-		);
+		const dockerfile = plan.files.find((file) => file.path.endsWith("Dockerfile"));
 
 		expect(readme?.content).toContain("POST /auth/disconnect");
 		expect(readme?.content).toContain('"requestId":"req_local_ping"');
@@ -286,12 +250,8 @@ describe("provider create planning", () => {
 		expect(readme?.content).toContain("3000");
 		expect(devFile?.content).toContain("3900");
 		expect(dockerfile?.content).toContain("EXPOSE 3000");
-		expect(findGeneratedFile(plan, "tsconfig.json")?.content).toContain(
-			'"types": [',
-		);
-		expect(findGeneratedFile(plan, "tsconfig.json")?.content).toContain(
-			'"bun"',
-		);
+		expect(findGeneratedFile(plan, "tsconfig.json")?.content).toContain('"types": [');
+		expect(findGeneratedFile(plan, "tsconfig.json")?.content).toContain('"bun"');
 	});
 
 	it("renders starter health-check guidance that passes current provider validation contract", async () => {
@@ -301,22 +261,14 @@ describe("provider create planning", () => {
 		const readme = findGeneratedFile(plan, "README.md");
 
 		expect(operation?.content).toContain("healthCheckUnsupported");
-		expect(operation?.content).toContain(
-			"Generated local-only scaffold operation",
-		);
+		expect(operation?.content).toContain("Generated local-only scaffold operation");
 		expect(operation?.content).not.toContain("healthCheck: {");
-		expect(readme?.content).toContain(
-			"Every operation must declare exactly one",
-		);
-		expect(readme?.content).toContain(
-			"preferred for safe read-only upstream probes",
-		);
+		expect(readme?.content).toContain("Every operation must declare exactly one");
+		expect(readme?.content).toContain("preferred for safe read-only upstream probes");
 		expect(readme?.content).toContain(
 			"apifuse record` is not expected to work with the generated local-only `ping`",
 		);
-		expect(readme?.content).toContain(
-			"bun run record -- --operation <operation>",
-		);
+		expect(readme?.content).toContain("bun run record -- --operation <operation>");
 		expect(readme?.content).toContain("impit");
 		expect(readme?.content).toContain("bunx playwright install chromium");
 		expect(readme?.content).toContain("bun run submit-check");
@@ -347,9 +299,7 @@ describe("provider create planning", () => {
 		expect(index?.content).toContain(
 			'import { defineProvider } from "@apifuse/provider-sdk/provider";',
 		);
-		expect(index?.content).toContain(
-			'import { operations } from "./operations";',
-		);
+		expect(index?.content).toContain('import { operations } from "./operations";');
 		expect(index?.content).toContain("defineProvider({");
 		expect(index?.content).toContain("meta: providerMeta");
 		expect(index?.content).toContain("operations: operations");
@@ -367,12 +317,8 @@ describe("provider create planning", () => {
 		);
 		expect(schema?.content).toContain("export const pingInputSchema");
 		expect(schema?.content).not.toContain(".describeKey(");
-		expect(schema?.content).toContain(
-			'describeKey(z.string(), "schemaDescriptions.input.value")',
-		);
-		expect(readme?.content).toContain(
-			"index.ts              # composition root",
-		);
+		expect(schema?.content).toContain('describeKey(z.string(), "schemaDescriptions.input.value")');
+		expect(readme?.content).toContain("index.ts              # composition root");
 	});
 
 	it("publishes CLI runtime prompt dependency as a production dependency", () => {
@@ -400,9 +346,7 @@ describe("provider create planning", () => {
 		const providerRoot = materializePlan(plan);
 
 		const report = await buildSubmitCheckReport(providerRoot);
-		const sdkNativeChecks = report.checks.filter(
-			(check) => check.category === SDK_NATIVE_CATEGORY,
-		);
+		const sdkNativeChecks = report.checks.filter((check) => check.category === SDK_NATIVE_CATEGORY);
 
 		// The scaffold must ship the four sdk-native rules and pass all of them:
 		// id-slug, no-vendor-shim, no-vendor-import, describe-key.
@@ -411,15 +355,9 @@ describe("provider create planning", () => {
 			expect(check.status).toBe("pass");
 		}
 		expect(sdkNativeChecks.some((check) => check.id === "id-slug")).toBeTrue();
-		expect(
-			sdkNativeChecks.some((check) => check.id === "no-vendor-shim"),
-		).toBeTrue();
-		expect(
-			sdkNativeChecks.some((check) => check.id === "no-vendor-import"),
-		).toBeTrue();
-		expect(
-			sdkNativeChecks.some((check) => check.id === "describe-key"),
-		).toBeTrue();
+		expect(sdkNativeChecks.some((check) => check.id === "no-vendor-shim")).toBeTrue();
+		expect(sdkNativeChecks.some((check) => check.id === "no-vendor-import")).toBeTrue();
+		expect(sdkNativeChecks.some((check) => check.id === "describe-key")).toBeTrue();
 	});
 
 	it("generates a browser-runtime scaffold that passes every sdk-native rule", async () => {
@@ -435,9 +373,7 @@ describe("provider create planning", () => {
 		const providerRoot = materializePlan(plan);
 
 		const report = await buildSubmitCheckReport(providerRoot);
-		const sdkNativeChecks = report.checks.filter(
-			(check) => check.category === SDK_NATIVE_CATEGORY,
-		);
+		const sdkNativeChecks = report.checks.filter((check) => check.category === SDK_NATIVE_CATEGORY);
 
 		expect(sdkNativeChecks.length).toBeGreaterThanOrEqual(4);
 		for (const check of sdkNativeChecks) {
@@ -458,10 +394,7 @@ describe("provider create planning", () => {
 
 		// 1) vendor/ shim directory + vendor import
 		mkdirSync(join(providerRoot, "vendor"), { recursive: true });
-		writeFileSync(
-			join(providerRoot, "vendor", "provider-sdk.ts"),
-			"export const shim = 1;\n",
-		);
+		writeFileSync(join(providerRoot, "vendor", "provider-sdk.ts"), "export const shim = 1;\n");
 		writeFileSync(
 			join(providerRoot, "tampered.ts"),
 			'import { shim } from "./vendor/provider-sdk";\nexport const apifuseProviderId = "apifuse-provider-test-scaffold";\nexport const used = shim;\n',
@@ -469,8 +402,7 @@ describe("provider create planning", () => {
 
 		const report = await buildSubmitCheckReport(providerRoot);
 		const failedSdkNative = report.checks.filter(
-			(check) =>
-				check.category === SDK_NATIVE_CATEGORY && check.status === "fail",
+			(check) => check.category === SDK_NATIVE_CATEGORY && check.status === "fail",
 		);
 		const failedIds = new Set(failedSdkNative.map((check) => check.id));
 

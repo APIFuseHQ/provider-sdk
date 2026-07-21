@@ -3,63 +3,60 @@ import { join } from "node:path";
 
 import { Hono } from "hono";
 import { z } from "zod";
-import { AuthAbortError, createAuthFlowHelpers } from "../auth";
+import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import {
 	AuthError,
 	isProviderError,
 	isSessionExpiredError,
 	isTransportError,
 	ProviderError,
-} from "../errors";
+} from "../errors.js";
 import {
 	loadProviderLocaleCatalogs,
 	localizeAuthTurn,
 	type ProviderLocaleCatalogMap,
-} from "../i18n/catalog";
-import type { ProviderLocale } from "../i18n/keys";
+} from "../i18n/catalog.js";
+import type { ProviderLocale } from "../i18n/keys.js";
 import {
 	categoryForStatus,
 	isRetryableCategory,
 	PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	type ProviderErrorCategory,
-} from "../observability";
-import { createScratchpad } from "../runtime/auth-flow";
-import { createBrowserClient } from "../runtime/browser";
-import { createProviderCache } from "../runtime/cache";
+} from "../observability.js";
+import { createScratchpad } from "../runtime/auth-flow.js";
+import { createBrowserClient } from "../runtime/browser.js";
+import { createProviderCache } from "../runtime/cache.js";
 import {
 	createProviderChoiceContext,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-} from "../runtime/choice";
-import { createCredentialContext } from "../runtime/credential";
-import { createEnvContext } from "../runtime/env";
-import { executeOperation } from "../runtime/executor";
-import { createHttpClient } from "../runtime/http";
-import { wrapWithInstrumentation } from "../runtime/instrumentation";
-import { getProviderBaseUrl } from "../runtime/provider";
+} from "../runtime/choice.js";
+import { createCredentialContext } from "../runtime/credential.js";
+import { createEnvContext } from "../runtime/env.js";
+import { executeOperation } from "../runtime/executor.js";
+import { createHttpClient } from "../runtime/http.js";
+import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
+import { getProviderBaseUrl } from "../runtime/provider.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
 	PROXY_EDGE_AUTH_REJECTED_CODE,
 	PROXY_POOL_EXHAUSTED_CODE,
-} from "../runtime/proxy-errors";
-import {
-	PROVIDER_TELEMETRY_HEADER,
-	ProxyTelemetryCollector,
-} from "../runtime/proxy-telemetry";
+} from "../runtime/proxy-errors.js";
+import { PROVIDER_TELEMETRY_HEADER, ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
 import {
 	createProviderRuntimeStateFromEnv,
 	createUnsupportedProviderRuntimeState,
-} from "../runtime/state";
-import { createStealthClient } from "../runtime/stealth";
-import { createSttClientFromEnv } from "../runtime/stt";
-import { createTraceContext } from "../runtime/trace";
-import { parseSchema } from "../schema";
-import { getStealthProfile } from "../stealth/profiles";
+} from "../runtime/state.js";
+import { createStealthClient } from "../runtime/stealth.js";
+import { createSttClientFromEnv } from "../runtime/stt.js";
+import { createTraceContext } from "../runtime/trace.js";
+import { parseSchema } from "../schema.js";
+import { getStealthProfile } from "../stealth/profiles.js";
 import {
 	APIFUSE_STREAM_DONE_EVENT,
 	APIFUSE_STREAM_ERROR_EVENT,
 	encodeSseEvent,
 	error as streamError,
-} from "../stream";
+} from "../stream.js";
 import type {
 	AuthContext,
 	AuthTurn,
@@ -76,14 +73,14 @@ import type {
 	ProviderStreamEvent,
 	StealthClient,
 	SttContext,
-} from "../types";
+} from "../types.js";
 import {
 	createSelfTestApp,
 	createSelfTestAuthFlowInvoke,
 	createSelfTestInvoke,
 	resolveSelfTestPort,
-} from "./self-test";
-import { resolveSelfTestMasterSecrets } from "./self-test-token";
+} from "./self-test.js";
+import { resolveSelfTestMasterSecrets } from "./self-test-token.js";
 import {
 	type AuthFlowRequest,
 	AuthFlowRequestSchema,
@@ -94,7 +91,7 @@ import {
 	OperationRequestSchema,
 	type OperationResponse,
 	type OperationSuccessResponse,
-} from "./types";
+} from "./types.js";
 
 const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_PORT = 3000;
@@ -158,9 +155,7 @@ function createStealthStub(): StealthClient {
 	};
 }
 
-function getProviderStealthBaseUrl(
-	provider: ProviderDefinition,
-): string | undefined {
+function getProviderStealthBaseUrl(provider: ProviderDefinition): string | undefined {
 	const baseUrl = getProviderBaseUrl(provider);
 	if (baseUrl) {
 		return baseUrl;
@@ -170,15 +165,10 @@ function getProviderStealthBaseUrl(
 }
 
 function getProviderStealthProfile(provider: ProviderDefinition) {
-	return provider.stealth?.profile
-		? getStealthProfile(provider.stealth.profile)
-		: undefined;
+	return provider.stealth?.profile ? getStealthProfile(provider.stealth.profile) : undefined;
 }
 
-function isProductionProviderBrowserMode(
-	provider: ProviderDefinition,
-	env = process.env,
-): boolean {
+function isProductionProviderBrowserMode(provider: ProviderDefinition, env = process.env): boolean {
 	if (provider.runtime !== "browser") {
 		return false;
 	}
@@ -187,9 +177,7 @@ function isProductionProviderBrowserMode(
 		return true;
 	}
 
-	return (
-		env.NODE_ENV === "production" && env.APIFUSE__PROVIDER__ID === provider.id
-	);
+	return env.NODE_ENV === "production" && env.APIFUSE__PROVIDER__ID === provider.id;
 }
 
 export function resolveProviderProxyAffinityKey(
@@ -197,21 +185,16 @@ export function resolveProviderProxyAffinityKey(
 	request: OperationRequest,
 	operationId: string,
 ): string {
-	const connectionKey =
-		resolveOperationConnectionId(request) ?? request.connection?.externalRef;
+	const connectionKey = resolveOperationConnectionId(request) ?? request.connection?.externalRef;
 	const affinity =
-		typeof provider.proxy === "object"
-			? provider.proxy.session?.affinity
-			: undefined;
+		typeof provider.proxy === "object" ? provider.proxy.session?.affinity : undefined;
 	if (affinity === "operation") {
 		return `${provider.id}/${operationId}`;
 	}
 	return connectionKey ?? provider.id;
 }
 
-function resolveOperationConnectionId(
-	request: OperationRequest,
-): string | undefined {
+function resolveOperationConnectionId(request: OperationRequest): string | undefined {
 	return request.connection?.id ?? request.connectionId;
 }
 
@@ -228,11 +211,7 @@ function createProviderContext(
 	const stealthProfile = getProviderStealthProfile(provider);
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
-		affinityKey: resolveProviderProxyAffinityKey(
-			provider,
-			request,
-			operationId,
-		),
+		affinityKey: resolveProviderProxyAffinityKey(provider, request, operationId),
 		telemetry: proxyTelemetry,
 	};
 	let wrappedContext: ProviderContext | undefined;
@@ -271,11 +250,7 @@ function createProviderContext(
 		state,
 		stealth: stealthBaseUrl
 			? stealthProfile
-				? createStealthClient(
-						stealthBaseUrl,
-						stealthProfile.name,
-						stealthClientOptions,
-					)
+				? createStealthClient(stealthBaseUrl, stealthProfile.name, stealthClientOptions)
 				: createStealthClient(stealthBaseUrl, stealthClientOptions)
 			: createStealthStub(),
 		browser:
@@ -388,11 +363,7 @@ function createAuthFlowContext(
 			http: createHttpClient(baseUrl, proxyClientOptions),
 			stealth: stealthBaseUrl
 				? stealthProfile
-					? createStealthClient(
-							stealthBaseUrl,
-							stealthProfile.name,
-							stealthClientOptions,
-						)
+					? createStealthClient(stealthBaseUrl, stealthProfile.name, stealthClientOptions)
 					: createStealthClient(stealthBaseUrl, stealthClientOptions)
 				: createStealthStub(),
 			env: createEnvContext(provider.secrets?.map((secret) => secret.name)),
@@ -505,10 +476,7 @@ function zodDetails(error: z.ZodError): Array<{
 	}));
 }
 
-function toErrorResponse(
-	error: unknown,
-	requestId?: string,
-): OperationErrorResponse {
+function toErrorResponse(error: unknown, requestId?: string): OperationErrorResponse {
 	if (isProviderError(error)) {
 		const details = publicProviderErrorDetails(error);
 		return {
@@ -646,9 +614,7 @@ function publicProviderErrorMessage(error: ProviderError): string {
 	return error.message;
 }
 
-function toStatusCode(
-	error: unknown,
-): 400 | 401 | 404 | 429 | 500 | 502 | 503 | 504 {
+function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 | 504 {
 	if (error instanceof z.ZodError) {
 		return 400;
 	}
@@ -703,20 +669,15 @@ function logProviderError(
 	status: number,
 	cost: ProviderRequestCost,
 ): void {
-	const code =
-		isProviderError(error)
-			? (error.code ?? "provider_error")
-			: error instanceof z.ZodError
-				? "invalid_request"
-				: "internal_error";
+	const code = isProviderError(error)
+		? (error.code ?? "provider_error")
+		: error instanceof z.ZodError
+			? "invalid_request"
+			: "internal_error";
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
-	const details =
-		isProviderError(error)
-			? providerObservabilityDetails(error)
-			: undefined;
-	const emit =
-		typeof logger === "function" ? logger : defaultProviderServerLogger;
+	const details = isProviderError(error) ? providerObservabilityDetails(error) : undefined;
+	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	emit({
 		level: status >= 500 ? "error" : "warn",
 		event: "provider_request_failed",
@@ -751,8 +712,7 @@ function logProviderCleanupError(
 	resource: "browser" | "stealth",
 	error: unknown,
 ): void {
-	const emit =
-		typeof logger === "function" ? logger : defaultProviderServerLogger;
+	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
 	emit({
@@ -777,8 +737,7 @@ function logProviderSuccess(
 	status: number,
 	cost: ProviderRequestCost,
 ): void {
-	const emit =
-		typeof logger === "function" ? logger : defaultProviderServerLogger;
+	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	emit({
 		level: "info",
 		event: "provider_request_completed",
@@ -824,18 +783,13 @@ function toJsonSuccessResponse(
 	};
 }
 
-function isAsyncIterable<T = unknown>(
-	value: unknown,
-): value is AsyncIterable<T> {
+function isAsyncIterable<T = unknown>(value: unknown): value is AsyncIterable<T> {
 	if (!value || typeof value !== "object") return false;
 	const iterator = Reflect.get(value, Symbol.asyncIterator);
 	return typeof iterator === "function";
 }
 
-function responseWithCleanup(
-	response: Response,
-	cleanup: RequestCleanup,
-): Response {
+function responseWithCleanup(response: Response, cleanup: RequestCleanup): Response {
 	if (!response.body) {
 		void cleanup();
 		return response;
@@ -884,10 +838,7 @@ async function validateSseEvent(
 	const transport = getSseTransport(operation);
 	const schema = transport?.events?.[event.event];
 	if (!schema) {
-		if (
-			event.event === APIFUSE_STREAM_ERROR_EVENT ||
-			event.event === APIFUSE_STREAM_DONE_EVENT
-		) {
+		if (event.event === APIFUSE_STREAM_ERROR_EVENT || event.event === APIFUSE_STREAM_DONE_EVENT) {
 			return event;
 		}
 		throw new ProviderError(
@@ -900,11 +851,7 @@ async function validateSseEvent(
 			},
 		);
 	}
-	const data = await parseSchema(
-		schema,
-		event.data,
-		`transport.events.${event.event}`,
-	);
+	const data = await parseSchema(schema, event.data, `transport.events.${event.event}`);
 	return { ...event, data };
 }
 
@@ -924,8 +871,7 @@ function assertStreamPayloadWithinLimit(
 	throw new ProviderError(
 		`Stream ${kind} exceeded declared byte limit (${actualBytes} > ${maxBytes}).`,
 		{
-			code:
-				kind === "event" ? "STREAM_EVENT_TOO_LARGE" : "STREAM_CHUNK_TOO_LARGE",
+			code: kind === "event" ? "STREAM_EVENT_TOO_LARGE" : "STREAM_CHUNK_TOO_LARGE",
 			retryable: false,
 			category: "input_validation",
 			fix:
@@ -970,15 +916,10 @@ function toSseResponse(
 				const validated = await validateSseEvent(operation, next.value);
 				const encodedEvent = encodeSseEvent(validated);
 				const encodedBytes = encoder.encode(encodedEvent);
-				assertStreamPayloadWithinLimit(
-					encodedBytes.byteLength,
-					transport?.maxEventBytes,
-					"event",
-				);
+				assertStreamPayloadWithinLimit(encodedBytes.byteLength, transport?.maxEventBytes, "event");
 				controller.enqueue(encodedBytes);
 			} catch (error) {
-				const message =
-					error instanceof Error ? error.message : "Stream failed";
+				const message = error instanceof Error ? error.message : "Stream failed";
 				controller.enqueue(
 					encoder.encode(
 						encodeSseEvent(
@@ -1025,11 +966,7 @@ function enforceStreamChunkLimit(
 					return;
 				}
 				if (value) {
-					assertStreamPayloadWithinLimit(
-						byteLength(value),
-						maxChunkBytes,
-						"chunk",
-					);
+					assertStreamPayloadWithinLimit(byteLength(value), maxChunkBytes, "chunk");
 					controller.enqueue(value);
 				}
 			} catch (error) {
@@ -1049,10 +986,7 @@ function toStreamingResponse(
 	requestId?: string,
 ): Response {
 	const transport = operation.transport?.kind ?? "json";
-	if (
-		transport === "sse" &&
-		(result instanceof Response || result instanceof ReadableStream)
-	) {
+	if (transport === "sse" && (result instanceof Response || result instanceof ReadableStream)) {
 		void cleanup();
 		throw new ProviderError(
 			"SSE operations must return an AsyncIterable of typed stream.event(...) values.",
@@ -1066,20 +1000,13 @@ function toStreamingResponse(
 	}
 	if (result instanceof Response) {
 		const httpTransport = getHttpStreamTransport(operation);
-		if (
-			httpTransport &&
-			result.body &&
-			httpTransport?.maxChunkBytes !== undefined
-		) {
+		if (httpTransport && result.body && httpTransport?.maxChunkBytes !== undefined) {
 			return responseWithCleanup(
-				new Response(
-					enforceStreamChunkLimit(result.body, httpTransport.maxChunkBytes),
-					{
-						headers: result.headers,
-						status: result.status,
-						statusText: result.statusText,
-					},
-				),
+				new Response(enforceStreamChunkLimit(result.body, httpTransport.maxChunkBytes), {
+					headers: result.headers,
+					status: result.status,
+					statusText: result.statusText,
+				}),
 				cleanup,
 			);
 		}
@@ -1099,8 +1026,7 @@ function toStreamingResponse(
 						: {
 								"Content-Type":
 									operation.transport?.kind === "http-stream"
-										? (operation.transport.contentType ??
-											"application/octet-stream")
+										? (operation.transport.contentType ?? "application/octet-stream")
 										: "application/octet-stream",
 							},
 			}),
@@ -1120,18 +1046,14 @@ function toStreamingResponse(
 	);
 }
 
-function getSseTransport(
-	operation: OperationDefinition,
-): OperationSseTransport | undefined {
+function getSseTransport(operation: OperationDefinition): OperationSseTransport | undefined {
 	return operation.transport?.kind === "sse" ? operation.transport : undefined;
 }
 
 function getHttpStreamTransport(
 	operation: OperationDefinition,
 ): OperationHttpStreamTransport | undefined {
-	return operation.transport?.kind === "http-stream"
-		? operation.transport
-		: undefined;
+	return operation.transport?.kind === "http-stream" ? operation.transport : undefined;
 }
 
 function toAuthFlowResponse(
@@ -1152,9 +1074,7 @@ function toAuthFlowResponse(
 	};
 }
 
-function authFlowLocaleFromHeaders(
-	headers?: Record<string, string>,
-): ProviderLocale {
+function authFlowLocaleFromHeaders(headers?: Record<string, string>): ProviderLocale {
 	const header = Object.entries(headers ?? {}).find(
 		([key]) => key.toLowerCase() === "accept-language",
 	)?.[1];
@@ -1172,9 +1092,7 @@ function isAuthFlowLocale(value: string | undefined): value is ProviderLocale {
 }
 
 function isAuthTurn(value: unknown): value is AuthTurn {
-	return (
-		!!value && typeof value === "object" && "kind" in value && "turnId" in value
-	);
+	return !!value && typeof value === "object" && "kind" in value && "turnId" in value;
 }
 
 function loadAuthFlowLocaleCatalogs(
@@ -1211,10 +1129,7 @@ function materializeAuthFlowTurn(
 	});
 }
 
-function withAuthRequestHeaders(
-	request: AuthFlowRequest,
-	headers: Headers,
-): AuthFlowRequest {
+function withAuthRequestHeaders(request: AuthFlowRequest, headers: Headers): AuthFlowRequest {
 	return {
 		...request,
 		headers: {
@@ -1232,17 +1147,9 @@ async function handleOperation(
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
 	proxyTelemetry?: ProxyTelemetryCollector,
 ): Promise<Response | OperationResponse> {
-	const ctx = createProviderContext(
-		provider,
-		request,
-		operationId,
-		options,
-		state,
-		proxyTelemetry,
-	);
+	const ctx = createProviderContext(provider, request, operationId, options, state, proxyTelemetry);
 	const operation = provider.operations[operationId];
-	const streaming =
-		operation?.transport?.kind && operation.transport.kind !== "json";
+	const streaming = operation?.transport?.kind && operation.transport.kind !== "json";
 	let cleanupCalled = false;
 	const cleanup = async () => {
 		if (cleanupCalled) return;
@@ -1273,12 +1180,7 @@ async function handleOperation(
 		}
 	};
 	try {
-		const result = await executeOperation(
-			provider,
-			operationId,
-			ctx,
-			request.input,
-		);
+		const result = await executeOperation(provider, operationId, ctx, request.input);
 		if (streaming && operation) {
 			return toStreamingResponse(operation, result, cleanup, request.requestId);
 		}
@@ -1322,12 +1224,7 @@ async function handleAuthFlow(
 		});
 	}
 
-	const { context, getPatch } = createAuthFlowContext(
-		provider,
-		request,
-		options,
-		signal,
-	);
+	const { context, getPatch } = createAuthFlowContext(provider, request, options, signal);
 	try {
 		const result =
 			route === "start"
@@ -1475,17 +1372,8 @@ export function createServerApp(
 				.clone()
 				.json()
 				.catch(() => undefined);
-			const body = withAuthRequestHeaders(
-				AuthFlowRequestSchema.parse(rawBody),
-				c.req.raw.headers,
-			);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"start",
-				options,
-				c.req.raw.signal,
-			);
+			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
+			const response = await handleAuthFlow(provider, body, "start", options, c.req.raw.signal);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -1521,17 +1409,8 @@ export function createServerApp(
 				.clone()
 				.json()
 				.catch(() => undefined);
-			const body = withAuthRequestHeaders(
-				AuthFlowRequestSchema.parse(rawBody),
-				c.req.raw.headers,
-			);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"continue",
-				options,
-				c.req.raw.signal,
-			);
+			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
+			const response = await handleAuthFlow(provider, body, "continue", options, c.req.raw.signal);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -1567,17 +1446,8 @@ export function createServerApp(
 				.clone()
 				.json()
 				.catch(() => undefined);
-			const body = withAuthRequestHeaders(
-				AuthFlowRequestSchema.parse(rawBody),
-				c.req.raw.headers,
-			);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"poll",
-				options,
-				c.req.raw.signal,
-			);
+			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
+			const response = await handleAuthFlow(provider, body, "poll", options, c.req.raw.signal);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -1613,17 +1483,8 @@ export function createServerApp(
 				.clone()
 				.json()
 				.catch(() => undefined);
-			const body = withAuthRequestHeaders(
-				AuthFlowRequestSchema.parse(rawBody),
-				c.req.raw.headers,
-			);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"refresh",
-				options,
-				c.req.raw.signal,
-			);
+			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
+			const response = await handleAuthFlow(provider, body, "refresh", options, c.req.raw.signal);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -1659,17 +1520,8 @@ export function createServerApp(
 				.clone()
 				.json()
 				.catch(() => undefined);
-			const body = withAuthRequestHeaders(
-				AuthFlowRequestSchema.parse(rawBody),
-				c.req.raw.headers,
-			);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"abort",
-				options,
-				c.req.raw.signal,
-			);
+			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
+			const response = await handleAuthFlow(provider, body, "abort", options, c.req.raw.signal);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -1744,12 +1596,9 @@ export async function serve(
 	const bunRuntime = getBunServeRuntime();
 
 	if (bunRuntime === undefined) {
-		throw new ProviderError(
-			"Bun runtime is required to start the provider server",
-			{
-				code: "RUNTIME_UNSUPPORTED",
-			},
-		);
+		throw new ProviderError("Bun runtime is required to start the provider server", {
+			code: "RUNTIME_UNSUPPORTED",
+		});
 	}
 
 	const app = createServerApp(provider, {

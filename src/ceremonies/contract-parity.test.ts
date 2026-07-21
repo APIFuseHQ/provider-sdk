@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "bun:test";
 import Ajv2020 from "ajv/dist/2020.js";
 
-import { AUTH_TURN_SCHEMA } from "../auth-turn";
-import { TurnValidationError } from "../errors";
-import { validateCeremonyOutput } from "./index";
+import { AUTH_TURN_SCHEMA } from "../auth-turn/index.js";
+import { TurnValidationError } from "../errors.js";
+import { validateCeremonyOutput } from "./index.js";
 
 interface NamedFixture {
 	name: string;

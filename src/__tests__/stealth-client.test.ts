@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { SDKError, TransportError } from "../errors";
-import { normalizeResponse } from "../runtime/stealth";
-import { type DeclarativeStealthResponse, HttpRetryUnsafeMethodPolicy } from "../types";
+import { SDKError, TransportError } from "../errors.js";
+import { normalizeResponse } from "../runtime/stealth.js";
+import { type DeclarativeStealthResponse, HttpRetryUnsafeMethodPolicy } from "../types.js";
 
 type MockImpitResponse = {
 	status: number;
@@ -90,7 +90,7 @@ describe("createStealthClient", () => {
 	});
 
 	it("returns fetch and createSession functions", async () => {
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 
 		const client = createStealthClient("https://example.com");
 
@@ -108,7 +108,7 @@ describe("createStealthClient", () => {
 			},
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		const response = (await client.fetch("/health", {
@@ -202,7 +202,7 @@ describe("createStealthClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await expect(client.fetch("/fail")).rejects.toMatchObject({
@@ -219,7 +219,7 @@ describe("createStealthClient", () => {
 			headers: { "content-type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		const response = await client.fetch("/fail", {
@@ -242,7 +242,7 @@ describe("createStealthClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await client.fetch("/items?existing=1", {
@@ -265,7 +265,7 @@ describe("createStealthClient", () => {
 			{ status: 200, body: "second", headers: { a: "2" } },
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 		const session = client.createSession();
 
@@ -300,7 +300,7 @@ describe("createStealthClient", () => {
 			{ status: 200, body: "second", headers: {} },
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 		const session = client.createSession();
 
@@ -322,7 +322,7 @@ describe("createStealthClient", () => {
 	});
 
 	it("rejects removed Chrome profile names before starting impit", async () => {
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 
 		for (const profile of ["chrome-129", "chrome-130", "chrome-131"]) {
 			const client = createStealthClient("https://example.com", profile);
@@ -340,7 +340,7 @@ describe("createStealthClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", "chrome-146");
 		const session = client.createSession();
 
@@ -364,7 +364,7 @@ describe("createStealthClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", "firefox-147");
 		const session = client.createSession({ profile: "chrome-146" });
 
@@ -382,7 +382,7 @@ describe("createStealthClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", "firefox-132");
 
 		await client.fetch("/profile");
@@ -399,7 +399,7 @@ describe("createStealthClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", "custom-profile");
 
 		await client.fetch("/profile");
@@ -410,7 +410,7 @@ describe("createStealthClient", () => {
 	});
 
 	it("rejects Safari-only stealth profiles instead of silently impersonating Chrome", async () => {
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", "ios-safari-26");
 
 		await expect(client.fetch("/profile")).rejects.toThrow(/Safari stealth fingerprint/);
@@ -418,7 +418,7 @@ describe("createStealthClient", () => {
 	});
 
 	it("rejects low-level stealth fingerprint overrides that impit owns internally", async () => {
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await expect(
@@ -440,7 +440,7 @@ describe("createStealthClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await client.fetch("/trace", { method: "TRACE" });
@@ -459,7 +459,7 @@ describe("createStealthClient", () => {
 			headers: { "content-type": "text/plain" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await client.fetch("/post", {
@@ -485,7 +485,7 @@ describe("createStealthClient", () => {
 			url: "https://example.com/start",
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		const response = await client.fetch("/start", {
@@ -515,7 +515,7 @@ describe("createStealthClient", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient("https://example.com").createSession();
 
 		await session.fetch("/first");
@@ -557,7 +557,7 @@ describe("createStealthClient", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient("https://example.com").createSession();
 
 		const result = await session.redirects.run({
@@ -628,7 +628,7 @@ describe("createStealthClient", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient("https://example.com").createSession();
 
 		await session.redirects.run({
@@ -684,7 +684,7 @@ describe("createStealthClient", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient("https://example.com").createSession();
 
 		await session.redirects.run({
@@ -727,7 +727,7 @@ describe("createStealthClient", () => {
 			url: "https://example.com/no-location",
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient("https://example.com").createSession();
 
 		const missingLocation = await session.redirects.run({
@@ -801,7 +801,7 @@ describe("createStealthClient", () => {
 			url: "https://example.com/start",
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient("https://example.com").createSession();
 		const seen: unknown[] = [];
 
@@ -842,7 +842,7 @@ describe("createStealthClient", () => {
 			},
 		);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient("https://example.com").createSession();
 
 		await session.redirects.run({
@@ -861,7 +861,7 @@ describe("createStealthClient", () => {
 	it("wraps network failures in TransportError", async () => {
 		mockStealthState.queuedErrors.push(new Error("socket hang up"));
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await expect(client.fetch("/network")).rejects.toBeInstanceOf(TransportError);
@@ -878,7 +878,7 @@ describe("createStealthClient", () => {
 		timeoutError.name = "TimeoutError";
 		mockStealthState.queuedErrors.push(timeoutError);
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await expect(client.fetch("/slow", { timeout: 10 })).rejects.toMatchObject({
@@ -896,7 +896,7 @@ describe("createStealthClient", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		const response = await client.fetch("/health", {
@@ -918,7 +918,7 @@ describe("createStealthClient", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		const response = await client.fetch("/slow", {
@@ -939,7 +939,7 @@ describe("createStealthClient", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await expect(client.fetch("/health")).rejects.toMatchObject({
@@ -957,7 +957,7 @@ describe("createStealthClient", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		await expect(
@@ -976,7 +976,7 @@ describe("createStealthClient", () => {
 			headers: { "Content-Type": "application/json" },
 		});
 
-		const { createStealthClient } = await import("../runtime/stealth");
+		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
 		const response = await client.fetch("/health", {

@@ -1,4 +1,4 @@
-export { createServerApp, type ServeOptions, serve } from "./serve";
+export { createServerApp, type ServeOptions, serve } from "./serve.js";
 export {
 	computeSelfTestPlanDigest,
 	createSelfTestApp,
@@ -22,14 +22,14 @@ export {
 	type SelfTestRequest,
 	SelfTestRequestSchema,
 	type SelfTestResponse,
-} from "./self-test";
-export { resolveHealthCheckInputDateTokens } from "./self-test-input-tokens";
+} from "./self-test.js";
+export { resolveHealthCheckInputDateTokens } from "./self-test-input-tokens.js";
 export {
 	collectSelfTestSensitiveValues,
 	redactSelfTestText,
 	SELF_TEST_MAX_TEXT_LENGTH,
 	SELF_TEST_REDACTED_PLACEHOLDER,
-} from "./self-test-redaction";
+} from "./self-test-redaction.js";
 export {
 	DEFAULT_SELF_TEST_PORT,
 	deriveSelfTestToken,
@@ -39,7 +39,7 @@ export {
 	resolveSelfTestMasterSecrets,
 	type SelfTestMasterSecrets,
 	verifySelfTestAuthorization,
-} from "./self-test-token";
+} from "./self-test-token.js";
 export type {
 	AuthFlowRequest,
 	AuthFlowResponse,
@@ -50,7 +50,7 @@ export type {
 	OperationRequest,
 	OperationResponse,
 	OperationSuccessResponse,
-} from "./types";
+} from "./types.js";
 export {
 	AuthFlowRequestSchema,
 	AuthFlowSuccessResponseSchema,
@@ -60,4 +60,4 @@ export {
 	OperationErrorResponseSchema,
 	OperationRequestSchema,
 	OperationSuccessResponseSchema,
-} from "./types";
+} from "./types.js";

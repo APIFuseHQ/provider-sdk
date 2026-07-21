@@ -2,24 +2,21 @@ import { describe, expect, it, mock } from "bun:test";
 
 import { z } from "zod";
 
-import {
-	isSessionExpiredError,
-	SessionExpiredError,
-	TransportError,
-} from "../errors";
+import { isSessionExpiredError, SessionExpiredError, TransportError } from "../errors.js";
 
 // A query-qualified specifier forces Bun to evaluate errors.ts a second time,
 // producing a genuinely separate module identity (distinct constructors) that
 // models the packaged src/* vs a provider's dist/* SDK entrypoint split. Mirrors
 // the pattern proven in error-identity.test.ts.
+// biome-ignore lint/correctness/useImportExtensions: specifier already carries .ts; the ?query (invisible to the rule) mints a second module identity under bun test
 const duplicateSdk = import("../errors.ts?duplicate-sdk-instance") as Promise<
 	typeof import("../errors")
 >;
-import { createProviderCache } from "../runtime/cache";
-import { createTestProviderChoiceContext } from "../runtime/choice";
-import { executeOperation } from "../runtime/executor";
-import { createUnsupportedProviderRuntimeState } from "../runtime/state";
-import type { ProviderContext, ProviderDefinition } from "../types";
+import { createProviderCache } from "../runtime/cache.js";
+import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import { executeOperation } from "../runtime/executor.js";
+import { createUnsupportedProviderRuntimeState } from "../runtime/state.js";
+import type { ProviderContext, ProviderDefinition } from "../types.js";
 
 function createMockCtx(fetchResponse: unknown, status = 200): ProviderContext {
 	return {
@@ -143,9 +140,7 @@ describe("executeOperation", () => {
 		const ctx = createMockCtx({});
 		const provider = createMockProvider();
 
-		await expect(
-			executeOperation(provider, "nonexistent", ctx, {}),
-		).rejects.toThrow("nonexistent");
+		await expect(executeOperation(provider, "nonexistent", ctx, {})).rejects.toThrow("nonexistent");
 	});
 
 	it("throws ProviderError when operation has no handler", async () => {
@@ -162,9 +157,9 @@ describe("executeOperation", () => {
 			},
 		};
 
-		await expect(
-			executeOperation(provider, "search", ctx, { query: "test" }),
-		).rejects.toThrow(TypeError);
+		await expect(executeOperation(provider, "search", ctx, { query: "test" })).rejects.toThrow(
+			TypeError,
+		);
 	});
 
 	it("propagates 401 errors without legacy auto-refresh", async () => {
@@ -319,9 +314,9 @@ describe("executeOperation", () => {
 			},
 		});
 
-		await expect(
-			executeOperation(provider, "search", ctx, { query: "test" }),
-		).rejects.toThrow(SessionExpiredError);
+		await expect(executeOperation(provider, "search", ctx, { query: "test" })).rejects.toThrow(
+			SessionExpiredError,
+		);
 		expect(calls).toBe(1);
 	});
 });

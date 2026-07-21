@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
-import { SDKError } from "../errors";
-import { getStealthProfile, listStealthProfiles } from "../stealth/profiles";
+import { SDKError } from "../errors.js";
+import { getStealthProfile, listStealthProfiles } from "../stealth/profiles.js";
 
 describe("stealth profiles", () => {
 	it("returns the chrome-146 profile without unverified ja4", () => {
@@ -41,29 +41,17 @@ describe("stealth profiles", () => {
 	});
 
 	it("throws SDKError for removed Chrome and Edge profiles", () => {
-		for (const profile of [
-			"chrome-129",
-			"chrome-130",
-			"chrome-131",
-			"edge-131",
-		]) {
+		for (const profile of ["chrome-129", "chrome-130", "chrome-131", "edge-131"]) {
 			expect(() => getStealthProfile(profile)).toThrow(SDKError);
 		}
-		expect(() => getStealthProfile("chrome-131")).toThrow(
-			"Unknown stealth profile: chrome-131",
-		);
+		expect(() => getStealthProfile("chrome-131")).toThrow("Unknown stealth profile: chrome-131");
 	});
 
 	it("lists the canonical Chrome profile, alias, and non-Chrome profiles", () => {
 		const profiles = listStealthProfiles();
 
 		expect(profiles).toEqual(
-			expect.arrayContaining([
-				"chrome-146",
-				"chrome-desktop",
-				"firefox-147",
-				"ios-safari-26",
-			]),
+			expect.arrayContaining(["chrome-146", "chrome-desktop", "firefox-147", "ios-safari-26"]),
 		);
 		expect(profiles).not.toContain("chrome-129");
 		expect(profiles).not.toContain("chrome-130");

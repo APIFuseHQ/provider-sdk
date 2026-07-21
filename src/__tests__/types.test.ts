@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
-import { defineOperation, defineProvider, z as providerZ } from "../provider";
+import { defineOperation, defineProvider, z as providerZ } from "../provider.js";
 import type {
 	AuthMode,
 	BrowserEngine,
@@ -13,7 +13,7 @@ import type {
 	StealthPlatform,
 	StealthProfile,
 	StealthResponse,
-} from "../types";
+} from "../types.js";
 
 describe("ProviderDefinition types", () => {
 	it("should allow valid provider meta", () => {
@@ -45,14 +45,10 @@ describe("ProviderDefinition types", () => {
 	});
 
 	it("should enforce id format via pattern test", () => {
-		const validId = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)+$/.test(
-			"korea-air-quality",
-		);
+		const validId = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)+$/.test("korea-air-quality");
 		expect(validId).toBe(true);
 
-		const invalidId = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)+$/.test(
-			"AirKoreaRealtime",
-		);
+		const invalidId = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)+$/.test("AirKoreaRealtime");
 		expect(invalidId).toBe(false);
 	});
 
@@ -88,10 +84,7 @@ describe("ProviderDefinition types", () => {
 				auth: {
 					mode: "credentials",
 					flow: {
-						start: (async (
-							_ctx: FlowContext,
-							_input?: Record<string, unknown>,
-						) => ({
+						start: (async (_ctx: FlowContext, _input?: Record<string, unknown>) => ({
 							kind: "form",
 							turnId: "start",
 						})) as never,
@@ -198,9 +191,7 @@ describe("ProviderDefinition types", () => {
 		} satisfies ProviderDefinition;
 
 		expect(definition.id).toBe("korea-air-quality");
-		expect(definition.operations.search.descriptionKey).toBe(
-			"operations.search.description",
-		);
+		expect(definition.operations.search.descriptionKey).toBe("operations.search.description");
 		expect(definition.auth?.mode).toBe("oauth2");
 	});
 
