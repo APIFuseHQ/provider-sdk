@@ -32,6 +32,45 @@ No retry templates, next-action routing, or other agent choreography: provider p
 
 Declare the union in the operation `output` schema (`z.union([CreatedSchema, NeedsInputSchema])`). Reserve hard errors for genuinely unrecoverable flows (payment-gated, unsupported input kinds) and state the concrete reason in the error `message` itself, not only in `details`. Reference implementation: `providers/catchtable` `reserve` in the platform monorepo.
 
+### Attempt tokens: the server carries the decisions
+
+When a mutation needs more than one user decision (or one decision plus a
+final go/no-go), do not make the agent re-send accumulated state across
+rounds — weak models drop or corrupt it. Split the operation into a
+**prepare/confirm pair** driven by a server-held attempt record:
+
+- The prepare operation is non-destructive. A start call takes only the
+  scalar intent fields; every response returns a fresh `attempt_token`
+  referencing a server-side record (`ctx.choice.issue` with
+  `storage.mode: "server"`) that stores every settled decision. Continue
+  calls take `attempt_token` plus only the NEW answers.
+- `needs_input` rounds list only the still-pending selections; settled
+  decisions may ride along in a display-only field but are never re-sent.
+- When nothing is pending, the prepare operation returns `status: "ready"`
+  with a human-readable summary — the consumer's user-facing confirmation.
+- The confirm operation is the only mutation and takes exactly
+  `{attempt_token}`. It re-validates everything live before executing and
+  returns `needs_input` (fresh token) instead of proceeding when upstream
+  drift invalidates a stored decision — never substitute a different option
+  for what the user picked.
+- Expired or foreign tokens fail factually (nothing happened; start a new
+  attempt with the scalar fields) — no answer salvage from a dead token.
+- **The provider must enforce consumption itself.** `ctx.choice` server
+  storage keeps tokens parseable until TTL — `parse` does not invalidate
+  them, so a confirm handler that only parses can be replayed into a second
+  booking or payment. After a successful execution, record the result under
+  the token's digest in `ctx.state` and make replays idempotent: a repeated
+  confirm returns the original created payload without touching upstream,
+  and later prepare rounds on the consumed token fail factually with the
+  existing reference. Record the result only after upstream success, so an
+  interrupted confirm stays retryable.
+
+The invariant behind all of it: complex flow state is the system's job, not
+the model's. The model carries exactly one opaque key between calls.
+Reference implementations: `providers/catchtable` `reserve`/`reserve-confirm`
+(including the consume-on-success guard) and `providers/modu-parking`
+payment state tokens in the platform monorepo.
+
 ### Description template
 
 Every operation `description` MUST be at least 150 characters and follow this structure:
