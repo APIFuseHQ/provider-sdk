@@ -84,15 +84,35 @@ function isRequiredSelection(
 	);
 }
 
+function isSelectedOption(value: unknown): value is ProviderSelectedOption {
+	return (
+		isRecord(value) &&
+		typeof value.selection_key === "string" &&
+		typeof value.selection_value === "string"
+	);
+}
+
 export function isProviderNeedsInputPayload(
 	value: unknown,
 ): value is ProviderNeedsInputPayload {
 	if (!isRecord(value)) {
 		return false;
 	}
+	if (
+		value.status !== NEEDS_INPUT_STATUS ||
+		!Array.isArray(value.required_selections) ||
+		!value.required_selections.every(isRequiredSelection)
+	) {
+		return false;
+	}
+	// A needs_input with nothing to ask AND nothing settled to echo is a
+	// no-op dead end — reject it so providers cannot ship it accidentally.
+	if (value.required_selections.length > 0) {
+		return true;
+	}
 	return (
-		value.status === NEEDS_INPUT_STATUS &&
-		Array.isArray(value.required_selections) &&
-		value.required_selections.every(isRequiredSelection)
+		Array.isArray(value.selected_options) &&
+		value.selected_options.length > 0 &&
+		value.selected_options.every(isSelectedOption)
 	);
 }

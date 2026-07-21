@@ -37,10 +37,22 @@ describe("user-input contract", () => {
 				required_selections: "not-a-list",
 			}),
 		).toBe(false);
+		// Nothing to ask AND nothing settled to echo = no-op dead end.
 		expect(
 			isProviderNeedsInputPayload({
 				status: NEEDS_INPUT_STATUS,
 				required_selections: [],
+			}),
+		).toBe(false);
+		// Sole-choice auto-accept: empty questions but a settled echo is valid.
+		expect(
+			isProviderNeedsInputPayload({
+				status: NEEDS_INPUT_STATUS,
+				required_selections: [],
+				selected_options: [
+					{ selection_key: "reservation_option", selection_value: "H:1:2" },
+				],
+				reservation_state: "fresh",
 			}),
 		).toBe(true);
 		expect(isProviderNeedsInputPayload(null)).toBe(false);
