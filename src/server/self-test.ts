@@ -556,12 +556,14 @@ function completedCredentialFromTurn(turnData: unknown): Record<string, string> 
  * nest it as `expectedInput.schema`. Both are honored. `null` when the turn
  * declares no schema (legacy/loose flows keep full-input semantics).
  */
-function turnRequestedFields(turn: { expectedInput?: unknown }): string[] | null {
+function turnRequestedFields(
+	turn: { expectedInput?: unknown },
+): { properties: string[]; required: string[] } | null {
 	const expectedInput = turn.expectedInput;
 	if (!expectedInput || typeof expectedInput !== "object" || Array.isArray(expectedInput)) {
 		return null;
 	}
-	const propertiesOf = (candidate: unknown): string[] | null => {
+	const schemaOf = (candidate: unknown): { properties: string[]; required: string[] } | null => {
 		const properties =
 			candidate && typeof candidate === "object"
 				? (candidate as { properties?: unknown }).properties
@@ -569,11 +571,17 @@ function turnRequestedFields(turn: { expectedInput?: unknown }): string[] | null
 		if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
 			return null;
 		}
-		return Object.keys(properties);
+		const requiredRaw =
+			candidate && typeof candidate === "object"
+				? (candidate as { required?: unknown }).required
+				: undefined;
+		const required = Array.isArray(requiredRaw)
+			? requiredRaw.filter((field): field is string => typeof field === "string")
+			: [];
+		return { properties: Object.keys(properties), required };
 	};
 	return (
-		propertiesOf(expectedInput) ??
-		propertiesOf((expectedInput as { schema?: unknown }).schema)
+		schemaOf(expectedInput) ?? schemaOf((expectedInput as { schema?: unknown }).schema)
 	);
 }
 
@@ -643,17 +651,21 @@ async function materializeFlowCredential(
 		}
 		// Submit ONLY what the turn asks for: a first stage of a multi-step
 		// login may request a subset (or different fields entirely) — posting
-		// the full inputs would send secrets to the wrong stage. A turn
-		// requesting any field we do not hold is a headless gap (multi-turn);
-		// a turn with no declared schema keeps full-input semantics.
+		// the full inputs would send secrets to the wrong stage. Only the
+		// schema's REQUIRED fields are mandatory (defineCredentialsAuth
+		// encodes optional fields by omitting them from `required`); a turn
+		// whose required fields we do not hold is a headless gap (multi-turn).
+		// A turn with no declared schema keeps full-input semantics.
 		const requestedFields = turnRequestedFields(turn);
 		let submitInputs: Record<string, string> = { ...inputs };
 		if (requestedFields !== null) {
-			if (requestedFields.some((field) => inputs[field] === undefined)) {
+			if (requestedFields.required.some((field) => inputs[field] === undefined)) {
 				return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
 			}
 			submitInputs = Object.fromEntries(
-				requestedFields.map((field) => [field, inputs[field] as string]),
+				requestedFields.properties
+					.filter((field) => inputs[field] !== undefined)
+					.map((field) => [field, inputs[field] as string]),
 			);
 		}
 		// The case deadline may have fired while start() was still running.

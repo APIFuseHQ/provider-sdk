@@ -44,6 +44,8 @@ interface FlowProviderState {
 	nonInputTurnAtStart?: string;
 	/** When set, `start`'s form turn requests ONLY these schema fields. */
 	startFormFields?: string[];
+	/** When set, only these of startFormFields are marked required. */
+	startFormRequired?: string[];
 	/** When true, form turns use the canonical DIRECT expectedInput schema shape. */
 	directExpectedInputShape?: boolean;
 	/** Input keys `continue` observed on its last invocation. */
@@ -96,7 +98,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 	const formTurn = (turnId: string, fields: string[] = ["phone", "password"]): AuthTurn => {
 		const schema = {
 			type: "object",
-			required: fields,
+			required: state.startFormRequired ?? fields,
 			properties: Object.fromEntries(fields.map((field) => [field, { type: "string" }])),
 		};
 		return {
@@ -838,6 +840,20 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		const body = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
 		expect(body.result?.skipReason).toBe(SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON);
 		expect(state.continueCount).toBe(0);
+	});
+
+	it("proceeds when only OPTIONAL schema fields are absent from the inputs", async () => {
+		const state = createFlowProviderState();
+		// The form also advertises an optional captcha field the probe does not
+		// hold — required stays phone+password, so login must proceed.
+		state.startFormFields = ["phone", "password", "captcha_token"];
+		state.startFormRequired = ["phone", "password"];
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const body = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(body.result?.status).toBe("ok");
+		expect(state.loginCount).toBe(1);
+		expect(state.lastContinueInputKeys).toEqual(["password", "phone"]);
 	});
 
 	it("submits ONLY the fields the turn requests", async () => {
