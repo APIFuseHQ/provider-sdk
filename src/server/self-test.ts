@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
-import { TURN_KINDS } from "../auth-turn";
+import { TURN_KINDS } from "../auth-turn/index.js";
 
 import { type Context, Hono } from "hono";
 import { z } from "zod";
