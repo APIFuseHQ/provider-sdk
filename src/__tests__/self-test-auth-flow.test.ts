@@ -50,6 +50,8 @@ interface FlowProviderState {
 	directExpectedInputShape?: boolean;
 	/** Input keys `continue` observed on its last invocation. */
 	lastContinueInputKeys?: string[];
+	/** externalRef `continue`'s FlowContext carried on its last invocation. */
+	lastFlowExternalRef?: string;
 	/** When true, `continue` returns a terminal abort turn. */
 	abortAtContinue: boolean;
 	/** When true, `continue` returns a turn kind unknown to TURN_KINDS. */
@@ -149,6 +151,9 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 				continue: async (_ctx, input = {}) => {
 					state.continueCount += 1;
 					state.lastContinueInputKeys = Object.keys(input).sort();
+					state.lastFlowExternalRef = (
+						_ctx as { externalRef?: string } | undefined
+					)?.externalRef;
 					if (state.continueDelayMs > 0) {
 						await new Promise((resolve) => setTimeout(resolve, state.continueDelayMs));
 					}
@@ -657,6 +662,17 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		const second = await runCase(selfTestApp, "session", "session case", "req-cycle-2");
 		expect(second.result?.status).toBe("ok");
 		expect(state.loginCount).toBe(loginsAfterLateCompletion + 1);
+	});
+
+	it("forwards the probe connection's externalRef into the auth flow", async () => {
+		const state = createFlowProviderState();
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		const body = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(body.result?.status).toBe("ok");
+		// Flows reading ctx.externalRef must see the SAME identity the probe
+		// connection carries — production-equivalent login.
+		expect(state.lastFlowExternalRef).toBe(`${PROVIDER_ID}-session-self-test`);
 	});
 
 	it("keeps the connection id stable across cycles so cached sessions ride one affinity", async () => {

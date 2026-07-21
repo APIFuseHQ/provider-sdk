@@ -102,6 +102,8 @@ export type SelfTestAuthFlowInvoke = (args: {
 	flowId: string;
 	/** Stable per-credential connection id — keeps login on the probe's affinity. */
 	connectionId?: string;
+	/** The probe connection's externalRef — flows reading ctx.externalRef see the same identity. */
+	externalRef?: string;
 	input?: Record<string, unknown>;
 	context?: Record<string, unknown>;
 }) => Promise<{
@@ -279,7 +281,7 @@ export function createSelfTestInvoke(app: {
 export function createSelfTestAuthFlowInvoke(app: {
 	request: (input: string, requestInit?: RequestInit) => Response | Promise<Response>;
 }): SelfTestAuthFlowInvoke {
-	return async ({ route, requestId, flowId, connectionId, input, context }) => {
+	return async ({ route, requestId, flowId, connectionId, externalRef, input, context }) => {
 		const response = await app.request(`/auth/${route}`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -287,6 +289,7 @@ export function createSelfTestAuthFlowInvoke(app: {
 				requestId,
 				flowId,
 				...(connectionId ? { connectionId } : {}),
+				...(externalRef ? { externalRef } : {}),
 				...(input ? { input } : {}),
 				...(context ? { context } : {}),
 			}),
@@ -588,7 +591,11 @@ function turnRequestedFields(
 async function materializeFlowCredential(
 	execution: SelfTestExecutionContext,
 	inputs: Readonly<Record<string, string>>,
-	options: { isAbandoned?: () => boolean; connectionId?: string } = {},
+	options: {
+		isAbandoned?: () => boolean;
+		connectionId?: string;
+		externalRef?: string;
+	} = {},
 ): Promise<
 	| { credential: Record<string, string> }
 	| Exclude<SelfTestConnectionResolution, { kind: "connection" }>
@@ -613,6 +620,7 @@ async function materializeFlowCredential(
 			requestId: `${execution.requestId}-auth-start-${randomUUID()}`,
 			flowId,
 			...(options.connectionId ? { connectionId: options.connectionId } : {}),
+			...(options.externalRef ? { externalRef: options.externalRef } : {}),
 		}),
 	);
 	if (!started.ok) {
@@ -685,6 +693,7 @@ async function materializeFlowCredential(
 				requestId: `${execution.requestId}-auth-continue-${randomUUID()}`,
 				flowId,
 				...(options.connectionId ? { connectionId: options.connectionId } : {}),
+				...(options.externalRef ? { externalRef: options.externalRef } : {}),
 				input: submitInputs,
 				...(Object.keys(flowContext).length > 0 ? { context: flowContext } : {}),
 			}),
@@ -851,6 +860,7 @@ async function resolveSelfTestConnection(
 	const materialized = await materializeFlowCredential(execution, inputs, {
 		...(options.isAbandoned !== undefined ? { isAbandoned: options.isAbandoned } : {}),
 		connectionId,
+		externalRef: `${execution.provider.id}-${operationId}-self-test`,
 	});
 	if (!("credential" in materialized)) {
 		// Only the multi-turn SKIP is negative-cached. Flow ERRORS
