@@ -2210,6 +2210,437 @@ const integrity = "sha512-qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5
 		expect(check?.evidence?.join("\n")).not.toContain(blob);
 	});
 
+	it("downgrades SCREAMING_SNAKE error-code constants to a non-blocking warning", async () => {
+		// Entropy 4.04 bits/char, 36 chars, 100% base64-ish charset, and the
+		// value itself contains AUTH/PASSWORD — before the downgrade this was
+		// permanently blocker-flagged (verdict BLOCKED, no suppression path).
+		// Entropy classification still runs, but because the secret-ish
+		// context comes solely from the literal's own text (throw sites and
+		// neutrally-named constants), the finding is capped at a warning and
+		// the verdict is never BLOCKED.
+		const dir = makeProviderDir(
+			"submit-entropy-error-code-",
+			`${validProviderSource()}
+const CAPTCHA_REQUIRED_CODE = "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED";
+const SUBMIT_FAILED_CODE = "AUTH_PASSWORD_LOGIN_SUBMIT_FAILED";
+const CONTRACT_GATE_CODE = "PROVIDER_CONTRACT_V2_REQUIRED";
+export function raiseCaptchaGate(): never {
+	throw new Error("AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED");
+}
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(check?.evidence?.join("\n")).toContain(
+			"identifier-like constant (downgraded to warning)",
+		);
+		expect(report.summary.blockers).toBe(0);
+		expect(report.score.verdict).not.toBe("blocked");
+	});
+
+	it("downgrades multiple error-code constants sharing one line to a warning", async () => {
+		// Codex round-5 counterexample: with several SCREAMING_SNAKE literals
+		// on one line, a sibling literal must not leak AUTH/PASSWORD into this
+		// candidate's context — all literal contents are stripped before the
+		// secret-context check, so the array line stays non-blocking.
+		const dir = makeProviderDir(
+			"submit-entropy-error-code-array-",
+			`${validProviderSource()}
+const ERROR_CODES = ["AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED", "AUTH_PASSWORD_LOGIN_SUBMIT_FAILED"];
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("still blocks error-code-shaped arrays assigned to secret-like identifiers", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-error-code-array-key-",
+			`${validProviderSource()}
+const apiKeys = ["AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED", "AUTH_PASSWORD_LOGIN_SUBMIT_FAILED"];
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("downgrades error-code constants in ternary arms to a warning", async () => {
+		// Codex round-8 counterexample: a ternary arm is followed by ":" but is
+		// not an object key. The role classifier marks it VALUE (preceded by
+		// "?"), so it is stripped from context and the line stays non-blocking.
+		const dir = makeProviderDir(
+			"submit-entropy-ternary-arm-",
+			`${validProviderSource()}
+const ok = Date.now() > 0;
+const code = ok ? "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED" : "AUTH_PASSWORD_LOGIN_SUBMIT_FAILED";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("still blocks ternary error-code constants assigned to secret-like identifiers", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-ternary-secret-ident-",
+			`${validProviderSource()}
+const ok = Date.now() > 0;
+const password = ok ? "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED" : "AUTH_PASSWORD_LOGIN_SUBMIT_FAILED";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("keeps constant-shaped call-argument siblings as blocking secret context", async () => {
+		// Codex round-9 counterexample: in a call, the first argument (a
+		// 20+-char SCREAMING_SNAKE header NAME) genuinely describes the second
+		// argument. Sibling stripping is scoped to non-call containers, so
+		// call-argument siblings keep their context and the high-entropy value
+		// stays a blocker.
+		const dir = makeProviderDir(
+			"submit-entropy-call-arg-sibling-",
+			`${validProviderSource()}
+const headers = new Headers();
+headers.set("X_CUSTOM_LONG_AUTH_TOKEN_HEADER", "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD");
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("downgrades single error-code constants at call-site throw positions", async () => {
+		// The self-context rule is container-independent: a lone constant
+		// inside a call's parentheses is still stripped as self, so throw
+		// sites stay non-blocking.
+		const dir = makeProviderDir(
+			"submit-entropy-throw-call-",
+			`${validProviderSource()}
+export function raiseSubmitGate(): never {
+	throw new Error("AUTH_PASSWORD_LOGIN_SUBMIT_FAILED");
+}
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("keeps quoted property names as blocking secret context", async () => {
+		// Codex round-6 counterexample: only identifier-constant-shaped
+		// literals are stripped from the context check; quoted property keys
+		// and header names like "Authorization" are genuine external context,
+		// so a high-entropy value behind them must stay a blocker.
+		const dir = makeProviderDir(
+			"submit-entropy-quoted-header-",
+			`${validProviderSource()}
+const headers = { "Authorization": "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD" };
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("keeps SCREAMING_SNAKE quoted keys as blocking secret context", async () => {
+		// Codex round-7 counterexample: short constant-shaped keys like
+		// "API_KEY" are below the entropy-candidate minimum length and survive
+		// the strip, so they stay genuine external context.
+		const dir = makeProviderDir(
+			"submit-entropy-snake-key-",
+			`${validProviderSource()}
+const headers = { "API_KEY": "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD" };
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("keeps long SCREAMING_SNAKE quoted keys in key position as blocking secret context", async () => {
+		// Even a pathological 20+-char constant-shaped key is never stripped
+		// when it sits in key position (immediately followed by ":").
+		const dir = makeProviderDir(
+			"submit-entropy-snake-long-key-",
+			`${validProviderSource()}
+const headers = { "X_CUSTOM_LONG_AUTH_TOKEN_HEADER": "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD" };
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("still warns on pure-alphabetic keyboard-mash uppercase values", async () => {
+		// Codex round-3 counterexample: all-alphabetic segments pass the
+		// word-like shape test, but entropy classification is never skipped —
+		// 4.66 bits/char in a neutral context still surfaces as a warning.
+		const mash = "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD";
+		const dir = makeProviderDir(
+			"submit-entropy-keyboard-mash-",
+			`${validProviderSource()}\nconst license = "${mash}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("warn");
+		expect(check?.evidence?.join("\n")).not.toContain(mash);
+	});
+
+	it("suppresses downgraded error-code warnings via @apifuse-allow secret-scan", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-error-code-allow-",
+			`${validProviderSource()}
+// @apifuse-allow secret-scan: upstream auth error code, not a credential
+const CAPTCHA_REQUIRED_CODE = "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.message).toContain("1 acknowledged @apifuse-allow override(s)");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("still blocks SCREAMING_SNAKE-shaped values assigned to secret-like identifiers", async () => {
+		// Codex review counterexample: the exemption must not fire when the
+		// secret-ish context comes from code outside the literal itself.
+		const dir = makeProviderDir(
+			"submit-entropy-upper-secret-ident-",
+			`${validProviderSource()}\nconst apiKey = "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("still blocks uppercase underscore credentials assigned to key-like identifiers", async () => {
+		// Codex review's verbatim example: base64-like alphabet, entropy 4.78,
+		// on an `apiKey` line — must remain a blocker.
+		const key = "ABCD_EFGH_IJKL_MNOP_QRST_UVWX_YZ12_3456";
+		const dir = makeProviderDir(
+			"submit-entropy-upper-key-",
+			`${validProviderSource()}\nconst apiKey = "${key}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
+	it("still flags uppercase high-entropy blobs that are not word-like constants", async () => {
+		// Shape boundary: every underscore-separated segment must be letters
+		// with at most a 2-digit suffix, and digits must be <= 15% of the
+		// value. Codex's uppercase-credential alphabet example fails both
+		// (segment "3456"), so it stays scanned even in a non-secretish
+		// context.
+		const blob = "ABCD_EFGH_IJKL_MNOP_QRST_UVWX_YZ12_3456";
+		const dir = makeProviderDir(
+			"submit-entropy-upper-blob-",
+			`${validProviderSource()}\nconst REQUEST_SIGNING_SEED = "${blob}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("warn");
+		expect(check?.evidence?.join("\n")).not.toContain(blob);
+	});
+
+	it("still warns on digit-heavy segmented uppercase values in neutral context", async () => {
+		// Codex round-2 counterexample: license/credential-shaped material with
+		// digit-heavy segments must fall through to entropy classification.
+		// Each segment carries a 4-digit suffix (> 2) and digits are 46% of the
+		// value (> 15%), so the word-like predicate rejects it; entropy 4.65
+		// exceeds the no-context threshold (4.5) and surfaces as a warn.
+		const license = "ABCD1234_EFGH5678_IJKL9012_MNOP3456";
+		const dir = makeProviderDir(
+			"submit-entropy-license-neutral-",
+			`${validProviderSource()}\nconst license = "${license}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("warn");
+		expect(check?.evidence?.join("\n")).not.toContain(license);
+	});
+
+	it("still blocks digit-heavy segmented uppercase values in secret context", async () => {
+		const license = "ABCD1234_EFGH5678_IJKL9012_MNOP3456";
+		const dir = makeProviderDir(
+			"submit-entropy-license-secret-",
+			`${validProviderSource()}\nconst licenseKey = "${license}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("still blocks mixed-case base64-like values assigned to key-like identifiers", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-entropy-mixed-case-key-",
+			`${validProviderSource()}\nconst apiKey = "${key}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
+	it("still blocks uppercase hex-like values without the identifier underscore shape", async () => {
+		// Deliberate exemption boundary: uppercase-only is not enough — the
+		// SCREAMING_SNAKE exemption also requires at least one underscore, so
+		// hex-like uppercase material stays fully scanned.
+		const hex = "A1B2C3D4E5F60718293A4B5C6D7E8F90";
+		const dir = makeProviderDir(
+			"submit-entropy-upper-hex-",
+			`${validProviderSource()}\nconst signingKey = "${hex}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).not.toContain(hex);
+	});
+
+	it("downgrades acknowledged @apifuse-allow secret-scan findings to a warn", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-entropy-allow-override-",
+			`${validProviderSource()}
+// @apifuse-allow secret-scan: public demo blob documented in README
+const apiKey = "${key}";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(check?.message).toContain("1 acknowledged @apifuse-allow override(s)");
+		expect(check?.evidence?.join("\n")).toContain("index.ts:");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("suppresses acknowledged SECRET_PATTERNS hits in README via @apifuse-allow secret-scan", async () => {
+		// Pattern findings (demo Bearer tokens, JWTs, quoted credential
+		// fields) must honor the pragma uniformly with entropy findings: the
+		// match is located to its line so hasAllowOverride can see the
+		// adjacent acknowledgement.
+		const demoToken = "Bearer abcdefghijklmnopqrstuvwxyz1234567890TOKENA";
+		const dir = makeProviderDir(
+			"submit-pattern-allow-readme-",
+			validProviderSource(),
+			`${defaultReadme()}
+<!-- @apifuse-allow secret-scan: public documentation example, not a live credential -->
+Authorization: ${demoToken}
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(check?.message).toContain("1 acknowledged @apifuse-allow override(s)");
+		expect(check?.evidence?.join("\n")).toContain("README.md:");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("still blocks unacknowledged SECRET_PATTERNS hits in README", async () => {
+		const demoToken = "Bearer abcdefghijklmnopqrstuvwxyz1234567890TOKENA";
+		const dir = makeProviderDir(
+			"submit-pattern-readme-",
+			validProviderSource(),
+			`${defaultReadme()}\nAuthorization: ${demoToken}\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).toContain("README.md:");
+		expect(report.score.verdict).toBe("blocked");
+	});
+
+	it("does not let an @apifuse-allow pragma suppress findings on other lines", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-entropy-allow-wrong-line-",
+			`${validProviderSource()}
+// @apifuse-allow secret-scan: acknowledged blob
+const acknowledged = "${key}";
+const apiKey = "${key}";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
 	it("checks auto-promotion eligibility boundaries", () => {
 		const report = {
 			score: { total: 94, max: 100, verdict: "ready" },

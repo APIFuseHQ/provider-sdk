@@ -3546,9 +3546,47 @@ function scoreProviderDocs(providerRoot: string): SubmitCheck[] {
 	];
 }
 
+// Splits secret findings into still-active findings and acknowledged
+// `// @apifuse-allow secret-scan` overrides, mirroring partitionAllowOverrides
+// (same pragma placement: the finding line or the line directly above it).
+// Every finding source carries a line number (entropy candidates and located
+// SECRET_PATTERNS matches); a finding that somehow lacks one stays active
+// defensively.
+function partitionSecretScanAllowOverrides(
+	providerRoot: string,
+	findings: readonly SecretFinding[],
+): { active: SecretFinding[]; overridden: SecretFinding[] } {
+	const fileLineCache = new Map<string, string[]>();
+	const active: SecretFinding[] = [];
+	const overridden: SecretFinding[] = [];
+
+	for (const finding of findings) {
+		if (finding.line === undefined) {
+			active.push(finding);
+			continue;
+		}
+		const absolute = resolve(providerRoot, finding.file);
+		let lines = fileLineCache.get(absolute);
+		if (lines === undefined) {
+			lines = existsSync(absolute) ? readFileSync(absolute, "utf8").split(/\r?\n/) : [];
+			fileLineCache.set(absolute, lines);
+		}
+		if (hasAllowOverride(lines, finding.line, "secret-scan")) {
+			overridden.push(finding);
+		} else {
+			active.push(finding);
+		}
+	}
+
+	return { active, overridden };
+}
+
 function scoreSecrets(providerRoot: string, provider?: ProviderDefinition): SubmitCheck {
-	const findings = findSecretFindings(providerRoot, provider?.id);
-	const blockerFindings = findings.filter((finding) => finding.level !== "warn");
+	const { active, overridden } = partitionSecretScanAllowOverrides(
+		providerRoot,
+		findSecretFindings(providerRoot, provider?.id),
+	);
+	const blockerFindings = active.filter((finding) => finding.level !== "warn");
 	if (blockerFindings.length > 0) {
 		return {
 			id: "secret-scan",
@@ -3568,7 +3606,15 @@ function scoreSecrets(providerRoot: string, provider?: ProviderDefinition): Subm
 			),
 		};
 	}
-	if (findings.length > 0) {
+	if (active.length > 0 || overridden.length > 0) {
+		const messageBase =
+			active.length > 0
+				? "High-entropy source strings were found without secret-like identifier context; they may be false positives."
+				: "Potential credential-like strings were found in shareable files.";
+		const message =
+			overridden.length > 0
+				? `${messageBase} ${overridden.length} acknowledged @apifuse-allow override(s).`
+				: messageBase;
 		return {
 			id: "secret-scan",
 			category: "security",
@@ -3576,11 +3622,10 @@ function scoreSecrets(providerRoot: string, provider?: ProviderDefinition): Subm
 			status: "warn",
 			points: 8,
 			maxPoints: CATEGORY_MAX_POINTS.security,
-			message:
-				"High-entropy source strings were found without secret-like identifier context; they may be false positives.",
+			message,
 			remediation:
-				'Review the listed strings. If any are credentials, move them to env vars read via `ctx.env.get("APIFUSE__PROVIDER__<ID>__<NAME>")` and rotate the leaked credential; otherwise keep generated blobs in fixtures/tests or document why they are public.',
-			evidence: findings.map(
+				'Review the listed strings. If any are credentials, move them to env vars read via `ctx.env.get("APIFUSE__PROVIDER__<ID>__<NAME>")` and rotate the leaked credential; otherwise keep generated blobs in fixtures/tests or document why they are public with `// @apifuse-allow secret-scan: <reason>`.',
+			evidence: [...active, ...overridden].map(
 				(finding) =>
 					finding.evidence ??
 					`${finding.file}${finding.line ? `:${finding.line}` : ""}: ${finding.label}`,
@@ -3611,8 +3656,19 @@ function findSecretFindings(providerRoot: string, providerId = "<ID>"): SecretFi
 		if (!existsSync(filePath)) continue;
 		const content = readFileSync(filePath, "utf8");
 		for (const [label, pattern] of SECRET_PATTERNS) {
-			if (pattern.test(content)) {
-				findings.push({ label, file: relativePath });
+			// Locate every match to its line so pattern findings carry the line
+			// information hasAllowOverride needs: `// @apifuse-allow secret-scan`
+			// must behave uniformly across entropy findings and pattern findings.
+			const globalPattern = new RegExp(
+				pattern.source,
+				pattern.flags.includes("g") ? pattern.flags : `${pattern.flags}g`,
+			);
+			const seenLines = new Set<number>();
+			for (const match of content.matchAll(globalPattern)) {
+				const line = offsetToLine(content, match.index);
+				if (seenLines.has(line)) continue;
+				seenLines.add(line);
+				findings.push({ label, file: relativePath, line });
 			}
 		}
 	}
@@ -3670,7 +3726,7 @@ export function extractStringLiteralCandidates(line: string): string[] {
 				continue;
 			}
 			if (char === quote) {
-				if (cursor - contentStart >= 20) {
+				if (cursor - contentStart >= ENTROPY_CANDIDATE_MIN_LENGTH) {
 					candidates.push(line.slice(contentStart, cursor));
 				}
 				index = cursor;
@@ -3695,6 +3751,25 @@ function classifyEntropyCandidate(input: {
 	if (!charset) return undefined;
 	const entropy = shannonEntropy(value);
 	const secretishContext = SECRETISH_IDENTIFIER_PATTERN.test(input.line);
+	// Word-like SCREAMING_SNAKE values (e.g. error-code constants such as
+	// "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED") may contain secret-ish words
+	// (AUTH/PASSWORD/...) in their own text and would otherwise be permanently
+	// blocker-flagged. They are never skipped — entropy classification always
+	// runs — but when the secret-ish context comes solely from identifier-
+	// constant-shaped literal text (the line with those literals stripped
+	// carries no secret-ish identifier), the finding is capped at a
+	// non-blocking warning instead of a blocker. Stripping constant-shaped
+	// siblings — not just the candidate — matters for lines holding several
+	// constants (e.g. an ERROR_CODES array), while quoted property keys and
+	// header names ("Authorization", "apiKey") stay visible as genuine
+	// external context. Assignments to `apiKey`/`token`/`secret`-style names
+	// still escalate to blockers via the identifier side, and
+	// `// @apifuse-allow secret-scan` remains the reviewed way to silence the
+	// warning.
+	const selfContextOnlyConstant =
+		secretishContext &&
+		isScreamingSnakeConstantValue(value) &&
+		!SECRETISH_IDENTIFIER_PATTERN.test(stripIdentifierConstantLiterals(input.line, value));
 	const threshold = charset === "hex" ? 3.0 : secretishContext ? 4.0 : 4.5;
 	if (entropy < threshold) return undefined;
 
@@ -3705,14 +3780,161 @@ function classifyEntropyCandidate(input: {
 		charset === "hex"
 			? `high-entropy hex string (${entropy.toFixed(2)} bits/char)`
 			: `high-entropy base64-like string (${entropy.toFixed(2)} bits/char)`;
+	const contextNote = selfContextOnlyConstant
+		? "; identifier-like constant (downgraded to warning)"
+		: secretishContext
+			? ""
+			: "; may be a false positive";
 	return {
 		label,
 		file: input.file,
 		line: input.lineNumber,
-		level: secretishContext ? "blocker" : "warn",
+		level: secretishContext && !selfContextOnlyConstant ? "blocker" : "warn",
 		remediation: `Move ${location} to an env var read via \`ctx.env.get("${envName}")\` and rotate the leaked credential.`,
-		evidence: `${location}: ${label}; preview ${preview}${secretishContext ? "" : "; may be a false positive"}`,
+		evidence: `${location}: ${label}; preview ${preview}${contextNote}`,
 	};
+}
+
+// Word-like SCREAMING_SNAKE identifier shape: at least two underscore-
+// separated segments, each essentially pure alphabetic — letters optionally
+// followed by a SHORT digit suffix (at most 2, e.g. version markers like
+// "V2") — and at most 15% digits across the whole value. Dictionary-style
+// constants like "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED" or
+// "PROVIDER_CONTRACT_V2_REQUIRED" match; digit-heavy segmented material
+// (e.g. license/credential shapes like "ABCD1234_EFGH5678_IJKL9012"),
+// uppercase blobs ("XK9J_Q2ZP_M7VN"), and underscore-free hex-like values
+// ("A1B2C3D4...") do not. This shape gate never skips entropy classification;
+// it only decides whether a finding whose secret-ish context comes solely
+// from the literal's own text is downgraded from blocker to warning, so it
+// deliberately stays strict: values that merely contain a secret-ish word but
+// are not word-like constants keep full blocker severity.
+function isScreamingSnakeConstantValue(value: string): boolean {
+	if (!/^[A-Z][A-Z0-9_]*$/.test(value) || !value.includes("_")) return false;
+	const segments = value.split("_");
+	if (segments.length < 2) return false;
+	if (!segments.every((segment) => /^[A-Z]+[0-9]{0,2}$/.test(segment))) return false;
+	const digitCount = value.match(/[0-9]/g)?.length ?? 0;
+	return digitCount / value.length <= 0.15;
+}
+
+type LineStringLiteral = {
+	// Index of the opening quote.
+	start: number;
+	// Index just past the closing quote (line end when unterminated).
+	end: number;
+	content: string;
+	closed: boolean;
+	role: "key" | "value";
+	// Nearest unclosed bracket enclosing the literal's start, if any.
+	container?: { bracket: "[" | "(" | "{"; index: number };
+};
+
+// Stable identity for the container a literal sits in ("top" when the
+// literal is not inside any bracket on the line).
+function literalContainerKey(literal: LineStringLiteral): string {
+	return literal.container
+		? `${literal.container.bracket}${literal.container.index}`
+		: "top";
+}
+
+// Single-pass line tokenizer: extracts every string literal with its span and
+// classifies its syntactic role once. A literal is a KEY when it is preceded
+// (ignoring whitespace) by "{", ",", "(", or the line start AND followed
+// (ignoring whitespace) by ":" — i.e. it names the value next to it. Every
+// other literal is a VALUE: ternary arms (preceded by "?" or ":"), array
+// elements, call arguments, and assignment right-hand sides, even when a
+// ternary's ":" happens to follow them. Uses the same quote/escape walking as
+// extractStringLiteralCandidates.
+function tokenizeLineStringLiterals(line: string): LineStringLiteral[] {
+	const literals: LineStringLiteral[] = [];
+	const bracketStack: Array<{ bracket: "[" | "(" | "{"; index: number }> = [];
+	let index = 0;
+	while (index < line.length) {
+		const char = line[index];
+		if (char !== '"' && char !== "'" && char !== "`") {
+			if (char === "[" || char === "(" || char === "{") {
+				bracketStack.push({ bracket: char, index });
+			} else if (char === "]" || char === ")" || char === "}") {
+				bracketStack.pop();
+			}
+			index += 1;
+			continue;
+		}
+		const quote = char;
+		const start = index;
+		const contentStart = index + 1;
+		let cursor = contentStart;
+		let closed = false;
+		while (cursor < line.length) {
+			const inner = line[cursor];
+			if (inner === "\\") {
+				cursor += 2;
+				continue;
+			}
+			if (inner === quote) {
+				closed = true;
+				break;
+			}
+			cursor += 1;
+		}
+		const contentEnd = Math.min(cursor, line.length);
+		const end = closed ? cursor + 1 : line.length;
+		const before = line.slice(0, start).trimEnd();
+		const keyPreceded = before === "" || /[{,(]$/.test(before);
+		const keyFollowed = closed && /^\s*:/.test(line.slice(end));
+		literals.push({
+			start,
+			end,
+			content: line.slice(contentStart, contentEnd),
+			closed,
+			role: keyPreceded && keyFollowed ? "key" : "value",
+			container: bracketStack[bracketStack.length - 1],
+		});
+		index = end;
+	}
+	return literals;
+}
+
+// Builds the context text used to decide whether a candidate's secret-ish
+// context is genuine. The candidate's own literal is ALWAYS stripped
+// (self-context rule). SIBLING identifier-constant-shaped candidate literals
+// (VALUE role, SCREAMING_SNAKE shape, >= ENTROPY_CANDIDATE_MIN_LENGTH) are
+// stripped only when they share the candidate's non-call container — the same
+// `[...]` array, the same `{...}` object value list, or the bracket-free top
+// level (ternary arms) — so a value list of error codes cannot poison its own
+// members' context. Call-argument siblings (inside `(...)`) always keep their
+// context: in `headers.set("X_LONG_AUTH_TOKEN_NAME", "QWERTY_...")` the first
+// argument genuinely describes the second, so stripping it would erase real
+// auth/token context. KEY-role literals are never stripped.
+function stripIdentifierConstantLiterals(line: string, candidate: string): string {
+	const literals = tokenizeLineStringLiterals(line);
+	const candidateContainers = new Set<string>();
+	for (const literal of literals) {
+		if (literal.content === candidate) {
+			candidateContainers.add(literalContainerKey(literal));
+		}
+	}
+	let result = "";
+	let previousEnd = 0;
+	for (const literal of literals) {
+		result += line.slice(previousEnd, literal.start);
+		const isSelf = literal.content === candidate;
+		const isSameNonCallContainerSibling =
+			literal.role === "value" &&
+			literal.content.length >= ENTROPY_CANDIDATE_MIN_LENGTH &&
+			isScreamingSnakeConstantValue(literal.content) &&
+			literal.container?.bracket !== "(" &&
+			candidateContainers.has(literalContainerKey(literal));
+		if (isSelf || isSameNonCallContainerSibling) {
+			const quote = line[literal.start] ?? "";
+			result += quote + (literal.closed ? quote : "");
+		} else {
+			result += line.slice(literal.start, literal.end);
+		}
+		previousEnd = literal.end;
+	}
+	result += line.slice(previousEnd);
+	return result;
 }
 
 function shouldConsiderEntropyValue(value: string): boolean {
@@ -3730,7 +3952,7 @@ function shouldConsiderEntropyValue(value: string): boolean {
 	if (lower.includes("/") && /\.[a-z0-9]{1,8}(?:$|[/?#])/i.test(value)) {
 		return false;
 	}
-	return value.length >= 20;
+	return value.length >= ENTROPY_CANDIDATE_MIN_LENGTH;
 }
 
 function classifyEntropyCharset(value: string): "base64" | "hex" | undefined {
@@ -3763,6 +3985,11 @@ function guessSecretName(line: string): string {
 }
 
 const SECRETISH_IDENTIFIER_PATTERN = /key|token|secret|password|credential|auth/i;
+
+// Minimum length for a string literal to be considered an entropy candidate.
+// Shared by candidate extraction, entropy screening, and the context strip so
+// the three stay coherent.
+const ENTROPY_CANDIDATE_MIN_LENGTH = 20;
 
 const SECRET_PATTERNS: Array<[string, RegExp]> = [
 	["JWT-like token", /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/],
