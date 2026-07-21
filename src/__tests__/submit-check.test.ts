@@ -2326,6 +2326,48 @@ const password = ok ? "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED" : "AUTH_PASSWORD_LO
 		expect(check?.status).toBe("fail");
 	});
 
+	it("keeps constant-shaped call-argument siblings as blocking secret context", async () => {
+		// Codex round-9 counterexample: in a call, the first argument (a
+		// 20+-char SCREAMING_SNAKE header NAME) genuinely describes the second
+		// argument. Sibling stripping is scoped to non-call containers, so
+		// call-argument siblings keep their context and the high-entropy value
+		// stays a blocker.
+		const dir = makeProviderDir(
+			"submit-entropy-call-arg-sibling-",
+			`${validProviderSource()}
+const headers = new Headers();
+headers.set("X_CUSTOM_LONG_AUTH_TOKEN_HEADER", "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD");
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("downgrades single error-code constants at call-site throw positions", async () => {
+		// The self-context rule is container-independent: a lone constant
+		// inside a call's parentheses is still stripped as self, so throw
+		// sites stay non-blocking.
+		const dir = makeProviderDir(
+			"submit-entropy-throw-call-",
+			`${validProviderSource()}
+export function raiseSubmitGate(): never {
+	throw new Error("AUTH_PASSWORD_LOGIN_SUBMIT_FAILED");
+}
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(report.summary.blockers).toBe(0);
+	});
+
 	it("keeps quoted property names as blocking secret context", async () => {
 		// Codex round-6 counterexample: only identifier-constant-shaped
 		// literals are stripped from the context check; quoted property keys

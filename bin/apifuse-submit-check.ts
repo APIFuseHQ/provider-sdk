@@ -3764,7 +3764,7 @@ function classifyEntropyCandidate(input: {
 	const selfContextOnlyConstant =
 		secretishContext &&
 		isScreamingSnakeConstantValue(value) &&
-		!SECRETISH_IDENTIFIER_PATTERN.test(stripIdentifierConstantLiterals(input.line));
+		!SECRETISH_IDENTIFIER_PATTERN.test(stripIdentifierConstantLiterals(input.line, value));
 	const threshold = charset === "hex" ? 3.0 : secretishContext ? 4.0 : 4.5;
 	if (entropy < threshold) return undefined;
 
@@ -3820,7 +3820,17 @@ type LineStringLiteral = {
 	content: string;
 	closed: boolean;
 	role: "key" | "value";
+	// Nearest unclosed bracket enclosing the literal's start, if any.
+	container?: { bracket: "[" | "(" | "{"; index: number };
 };
+
+// Stable identity for the container a literal sits in ("top" when the
+// literal is not inside any bracket on the line).
+function literalContainerKey(literal: LineStringLiteral): string {
+	return literal.container
+		? `${literal.container.bracket}${literal.container.index}`
+		: "top";
+}
 
 // Single-pass line tokenizer: extracts every string literal with its span and
 // classifies its syntactic role once. A literal is a KEY when it is preceded
@@ -3832,10 +3842,16 @@ type LineStringLiteral = {
 // extractStringLiteralCandidates.
 function tokenizeLineStringLiterals(line: string): LineStringLiteral[] {
 	const literals: LineStringLiteral[] = [];
+	const bracketStack: Array<{ bracket: "[" | "(" | "{"; index: number }> = [];
 	let index = 0;
 	while (index < line.length) {
 		const char = line[index];
 		if (char !== '"' && char !== "'" && char !== "`") {
+			if (char === "[" || char === "(" || char === "{") {
+				bracketStack.push({ bracket: char, index });
+			} else if (char === "]" || char === ")" || char === "}") {
+				bracketStack.pop();
+			}
 			index += 1;
 			continue;
 		}
@@ -3867,31 +3883,44 @@ function tokenizeLineStringLiterals(line: string): LineStringLiteral[] {
 			content: line.slice(contentStart, contentEnd),
 			closed,
 			role: keyPreceded && keyFollowed ? "key" : "value",
+			container: bracketStack[bracketStack.length - 1],
 		});
 		index = end;
 	}
 	return literals;
 }
 
-// Removes the contents of VALUE-role string literals that could themselves be
-// entropy candidates of the downgraded kind: identifier-constant-shaped
-// (SCREAMING_SNAKE) AND at least the scanner's minimum candidate length.
-// Sibling constants on the same line (an ERROR_CODES array, ternary arms)
-// must not leak secret-ish words into another candidate's context, while
-// KEY-role literals — quoted property keys and header names like
-// "Authorization", "API_KEY", or a pathological 20+-char SCREAMING_SNAKE
-// header key — always stay visible to the secret-context check as genuine
-// external context.
-function stripIdentifierConstantLiterals(line: string): string {
+// Builds the context text used to decide whether a candidate's secret-ish
+// context is genuine. The candidate's own literal is ALWAYS stripped
+// (self-context rule). SIBLING identifier-constant-shaped candidate literals
+// (VALUE role, SCREAMING_SNAKE shape, >= ENTROPY_CANDIDATE_MIN_LENGTH) are
+// stripped only when they share the candidate's non-call container — the same
+// `[...]` array, the same `{...}` object value list, or the bracket-free top
+// level (ternary arms) — so a value list of error codes cannot poison its own
+// members' context. Call-argument siblings (inside `(...)`) always keep their
+// context: in `headers.set("X_LONG_AUTH_TOKEN_NAME", "QWERTY_...")` the first
+// argument genuinely describes the second, so stripping it would erase real
+// auth/token context. KEY-role literals are never stripped.
+function stripIdentifierConstantLiterals(line: string, candidate: string): string {
+	const literals = tokenizeLineStringLiterals(line);
+	const candidateContainers = new Set<string>();
+	for (const literal of literals) {
+		if (literal.content === candidate) {
+			candidateContainers.add(literalContainerKey(literal));
+		}
+	}
 	let result = "";
 	let previousEnd = 0;
-	for (const literal of tokenizeLineStringLiterals(line)) {
+	for (const literal of literals) {
 		result += line.slice(previousEnd, literal.start);
-		const strip =
+		const isSelf = literal.content === candidate;
+		const isSameNonCallContainerSibling =
 			literal.role === "value" &&
 			literal.content.length >= ENTROPY_CANDIDATE_MIN_LENGTH &&
-			isScreamingSnakeConstantValue(literal.content);
-		if (strip) {
+			isScreamingSnakeConstantValue(literal.content) &&
+			literal.container?.bracket !== "(" &&
+			candidateContainers.has(literalContainerKey(literal));
+		if (isSelf || isSameNonCallContainerSibling) {
 			const quote = line[literal.start] ?? "";
 			result += quote + (literal.closed ? quote : "");
 		} else {
