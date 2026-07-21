@@ -18,6 +18,20 @@
 
 Provider code is the declaration input to the internal platform registry. The public SDK owns provider authoring/runtime ergonomics; internal docs, deploy, and discovery projections are built downstream from those declarations. `bun run lint:providers` enforces provider authoring standards.
 
+### User-input round-trips: never dead-end (`needs_input`)
+
+A mutation MUST NOT fail for a problem the end user can resolve by choosing among live options (a required menu/course selection, a form question, a stale-but-recoverable state token). Throwing an error there strands the consuming agent: consumer error-shaping layers routinely strip error metadata, and a model that only sees "error" narrates failure to the user instead of relaying the choice.
+
+Return the official success-shaped contract from `src/user-input.ts` instead (`ProviderNeedsInputPayload`, guard `isProviderNeedsInputPayload`):
+
+- `status: "needs_input"` plus `required_selections` — only the still-pending questions, with human-readable `label`s and `valid_options` the agent relays verbatim. The agent never chooses for the user; anything with no real choice (agreement checkboxes, single-option required groups) is the provider's job to auto-answer.
+- `selected_options` — selections already settled, echoed so the retry keeps them.
+- `continue_with` — a ready-to-send `{operation, args}` retry template.
+- a freshly minted provider state token in the same response, so the retry never races an expired token.
+- `action_hint` — one sentence telling the agent to relay options and retry.
+
+Declare the union in the operation `output` schema (`z.union([CreatedSchema, NeedsInputSchema])`). Reserve hard errors for genuinely unrecoverable flows (payment-gated, unsupported input kinds) and state the concrete reason in the error `message` itself, not only in `details`. Reference implementation: `providers/catchtable` `reserve` in the platform monorepo.
+
 ### Description template
 
 Every operation `description` MUST be at least 150 characters and follow this structure:

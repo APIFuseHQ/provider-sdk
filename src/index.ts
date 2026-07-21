@@ -34,6 +34,7 @@ export {
 export type { DevServerOptions } from "./dev.js";
 export { createDevServer, startDevServer } from "./dev.js";
 export * from "./errors.js";
+export * from "./user-input.js";
 export * from "./i18n/index.js";
 export {
 	type LintDiagnostic,
