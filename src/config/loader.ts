@@ -1136,7 +1136,9 @@ function buildSmartproxyAllocatorUrl(
 	if (country) {
 		params.set("cc", country);
 	}
-	return `https://www.smartproxy.org/web_v1/ip/get-ip-v3?${params.toString()}`;
+	// www.smartproxy.org stopped serving the extraction API on 2026-07-21 (the
+	// old path 404s into the marketing site); the API lives on the api host.
+	return `https://api.smartproxy.org/web_v1/ip/get-ip-v3?${params.toString()}`;
 }
 
 function parseSmartproxyAllocatorProxies(body: string): string[] {
