@@ -302,6 +302,24 @@ export function createSelfTestAuthFlowInvoke(app: {
 	};
 }
 
+/**
+ * An auth-shaped (401/403) response from the prepareInput gateway helper:
+ * surfaced as a `failed` case with its httpStatus so the one-shot cached
+ * session recovery (and fresh-credential eviction) can trigger — a generic
+ * self_test_execution_error would hide the stale session forever.
+ */
+class SelfTestPrepareAuthError extends Error {
+	constructor(
+		readonly httpStatus: number,
+		gatewayOperationId: string,
+	) {
+		super(
+			`prepareInput helper operation "${gatewayOperationId}" failed with auth status ${httpStatus}`,
+		);
+		this.name = "SelfTestPrepareAuthError";
+	}
+}
+
 class SelfTestCaseTimeoutError extends Error {
 	constructor(timeoutMs: number) {
 		super(`Self-test case timed out after ${timeoutMs}ms`);
@@ -711,10 +729,14 @@ async function resolveSelfTestConnection(
 		execution.provider.proxy?.session?.affinity === "operation";
 	const credentialKey = credentialSessionCacheKey(execution.provider.id, inputs);
 	const affinityKey = operationAffinity ? `${credentialKey}:${operationId}` : credentialKey;
-	const connectionId = `self-test-${createHash("sha256").update(affinityKey).digest("hex").slice(0, 22)}`;
-	const flowAffinityId = operationAffinity
+	// ONE id for the auth flow AND the probe connection: providers may bind
+	// the issued credential to FlowContext.connectionId and later compare it
+	// against ctx.request.connectionId. Operation-affinity providers use the
+	// probe's exact proxy key (providerId/operationId); everyone else uses the
+	// stable per-credential hash.
+	const connectionId = operationAffinity
 		? `${execution.provider.id}/${operationId}`
-		: connectionId;
+		: `self-test-${createHash("sha256").update(affinityKey).digest("hex").slice(0, 22)}`;
 	const buildConnection = (secrets: Readonly<Record<string, string>>): OperationConnection => ({
 		id: connectionId,
 		mode: "credentials",
@@ -762,7 +784,7 @@ async function resolveSelfTestConnection(
 	}
 	const materialized = await materializeFlowCredential(execution, inputs, {
 		...(options.isAbandoned !== undefined ? { isAbandoned: options.isAbandoned } : {}),
-		connectionId: flowAffinityId,
+		connectionId,
 	});
 	if (!("credential" in materialized)) {
 		// Only the multi-turn SKIP is negative-cached. Flow ERRORS
@@ -930,6 +952,9 @@ async function executeSelfTestCase(
 										connection,
 										requestId: `${execution.requestId}-prepare-${randomUUID()}`,
 									});
+									if (executed.status === 401 || executed.status === 403) {
+										throw new SelfTestPrepareAuthError(executed.status, gatewayOperationId);
+									}
 									return {
 										status: executed.status,
 										duration: performance.now() - startedGatewayMs,
@@ -1004,6 +1029,14 @@ async function executeSelfTestCase(
 					status: "error",
 					label: defaultLabel,
 					error: { code: "self_test_timeout", message: redact(error.message) },
+				});
+			}
+			if (error instanceof SelfTestPrepareAuthError) {
+				return finish({
+					status: "failed",
+					label: defaultLabel,
+					httpStatus: error.httpStatus,
+					assertion: { passed: false, message: redact(error.message) },
 				});
 			}
 			return finish({

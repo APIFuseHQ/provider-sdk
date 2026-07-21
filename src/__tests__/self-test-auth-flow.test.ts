@@ -229,6 +229,41 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 					],
 				},
 			},
+			prep: {
+				annotations: { readOnly: true },
+				input: z.object({}),
+				output: z.object({ ok: z.boolean() }),
+				handler: async (ctx: {
+					credential: { get(key: string): string | undefined };
+				}) => ({ ok: ctx.credential.get("sessionCookie") === state.validCookie }),
+				healthCheck: {
+					interval: "5m",
+					requiresConnection: true,
+					cases: [
+						{
+							name: "prep case",
+							input: {},
+							prepareInput: async ({
+								input,
+								gateway,
+							}: {
+								input: unknown;
+								gateway: {
+									execute: (
+										providerId: string,
+										operationId: string,
+										operationInput: unknown,
+									) => Promise<{ status: number }>;
+								};
+							}) => {
+								await gateway.execute(PROVIDER_ID, "session", {});
+								return input;
+							},
+							assertions: () => {},
+						},
+					],
+				},
+			},
 			leaky: {
 				annotations: { readOnly: true },
 				input: z.object({}),
@@ -717,6 +752,9 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		// cookie would hop between per-operation proxies, so each operation
 		// materializes its own session.
 		expect(state.loginCount).toBe(2);
+		// The probe connection carries the SAME id the auth flow used — the
+		// probe's exact proxy key.
+		expect(state.seenConnectionIds[0]).toBe(`${PROVIDER_ID}/session`);
 	});
 
 	it("shares one login across operations for connection-scoped affinity", async () => {
@@ -726,6 +764,25 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		await runCase(selfTestApp, "session", "session case", "req-cycle-1");
 		await runCase(selfTestApp, "leaky", "leaky case", "req-cycle-2");
 		expect(state.loginCount).toBe(1);
+	});
+
+	it("recovers a stale cached session when prepareInput's gateway helper hits 401", async () => {
+		const state = createFlowProviderState();
+		const { selfTestApp } = createApps(createFlowProvider(state));
+
+		// Cycle 1 materializes and caches v1.
+		const first = await runCase(selfTestApp, "session", "session case", "req-cycle-1");
+		expect(first.result?.status).toBe("ok");
+		expect(state.loginCount).toBe(1);
+
+		// The upstream rotates: cached v1 is now stale, next login issues v2.
+		state.validCookie = "flow-session-secret-v2";
+
+		// prepareInput's gateway.execute hits 401 with the cached session —
+		// that must trigger the same one-shot recovery as a probe-level 401.
+		const second = await runCase(selfTestApp, "prep", "prep case", "req-cycle-2");
+		expect(second.result?.status).toBe("ok");
+		expect(state.loginCount).toBe(2);
 	});
 
 	it("redacts flow-materialized secrets from every probe output", async () => {
