@@ -2290,6 +2290,25 @@ const apiKeys = ["AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED", "AUTH_PASSWORD_LOGIN_SU
 		expect(check?.status).toBe("fail");
 	});
 
+	it("keeps quoted property names as blocking secret context", async () => {
+		// Codex round-6 counterexample: only identifier-constant-shaped
+		// literals are stripped from the context check; quoted property keys
+		// and header names like "Authorization" are genuine external context,
+		// so a high-entropy value behind them must stay a blocker.
+		const dir = makeProviderDir(
+			"submit-entropy-quoted-header-",
+			`${validProviderSource()}
+const headers = { "Authorization": "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD" };
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
 	it("still warns on pure-alphabetic keyboard-mash uppercase values", async () => {
 		// Codex round-3 counterexample: all-alphabetic segments pass the
 		// word-like shape test, but entropy classification is never skipped —
