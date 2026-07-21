@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { AuthError, ProviderError } from "../errors";
-import { createMemoryProviderRuntimeState } from "../runtime/state";
+import { AuthError, ProviderError } from "../errors.js";
+import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import {
 	createSelfTestApp,
 	createSelfTestAuthFlowInvoke,
@@ -11,10 +11,10 @@ import {
 	SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON,
 	SELF_TEST_PATH,
 	type SelfTestResponse,
-} from "../server/self-test";
-import { deriveSelfTestToken } from "../server/self-test-token";
-import { createServerApp } from "../server/serve";
-import type { AuthTurn, ProviderDefinition } from "../types";
+} from "../server/self-test.js";
+import { deriveSelfTestToken } from "../server/self-test-token.js";
+import { createServerApp } from "../server/serve.js";
+import type { AuthTurn, ProviderDefinition } from "../types.js";
 
 const MASTER_SECRET = "self-test-master-secret";
 const PROVIDER_ID = "flow-provider";
