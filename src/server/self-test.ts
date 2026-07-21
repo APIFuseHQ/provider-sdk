@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 
+import { TURN_KINDS } from "../auth-turn/index.js";
+
 import { type Context, Hono } from "hono";
 import { z } from "zod";
 import type {
@@ -86,11 +88,79 @@ export type SelfTestOperationInvoke = (args: {
 	meta?: Record<string, unknown>;
 }>;
 
+export type SelfTestAuthFlowRoute = "start" | "continue";
+
+/**
+ * In-process driver for the tenant app's /auth pipeline. Self-test uses it to
+ * materialize `requiresConnection` credentials through the provider's declared
+ * auth flow — the exact path production connections take — instead of
+ * injecting raw credential inputs as connection secrets.
+ */
+export type SelfTestAuthFlowInvoke = (args: {
+	route: SelfTestAuthFlowRoute;
+	requestId: string;
+	flowId: string;
+	/** Stable per-credential connection id — keeps login on the probe's affinity. */
+	connectionId?: string;
+	/** The probe connection's externalRef — flows reading ctx.externalRef see the same identity. */
+	externalRef?: string;
+	input?: Record<string, unknown>;
+	context?: Record<string, unknown>;
+}) => Promise<{
+	status: number;
+	body: unknown;
+}>;
+
+/**
+ * Skip reason reported when a declared auth flow does not complete in a single
+ * continue (OTP, retry loop). Cross-repo contract: the health-monitor maps
+ * this exact string to `self_test_incapable`; never vary it.
+ */
+export const SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON = "auth_flow_multi_turn";
+
+/**
+ * A `retry` turn after credential submission: the flow REJECTED the
+ * configured inputs (bad password, exchange failure). Distinct from the
+ * multi-turn gap so monitoring surfaces it as a real credential outage, and
+ * memoized like multi-turn so the probe does not re-submit rejected
+ * credentials every cycle (lockout safety).
+ */
+export const SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON = "auth_flow_rejected";
+
+/**
+ * Known interactive turn kinds that justify the memoized multi-turn skip —
+ * they mean a human must participate (OTP, challenge, redirect, …).
+ * `retry` is deliberately excluded: after a credential submission it means
+ * rejection, not interaction (see SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON).
+ * Kinds outside TURN_KINDS entirely are treated as flow errors.
+ */
+/**
+ * Post-submission /auth/continue statuses that mean the flow REJECTED the
+ * credentials (thrown AuthError -> 401, forbidden -> 403): memoized as
+ * `auth_flow_rejected`. Deliberately NOT 400 — the auth route maps generic
+ * ProviderErrors and Zod request errors there, which are often transient or
+ * fixable and must stay uncached retries (like 408/429/5xx).
+ */
+const AUTH_REJECTION_HTTP_STATUSES: ReadonlySet<number> = new Set([401, 403]);
+
+const INTERACTIVE_TURN_KIND_SET: ReadonlySet<string> = new Set(
+	TURN_KINDS.filter(
+		(descriptor) => descriptor.rendering !== "terminal" && descriptor.kind !== "retry",
+	).map((descriptor) => descriptor.kind),
+);
+
 export interface SelfTestAppOptions {
 	/** Derived-token verification secrets; without them every self-test route 404s. */
 	secrets?: SelfTestMasterSecrets;
 	/** In-process invoke bound to the tenant-facing app's /v1 pipeline. */
 	invoke: SelfTestOperationInvoke;
+	/**
+	 * In-process auth-flow driver bound to the tenant-facing app's /auth
+	 * pipeline. Required for providers that declare `auth.mode: "credentials"`
+	 * with a flow; without it their requiresConnection cases report a visible
+	 * auth_flow_unavailable error instead of probing with raw inputs.
+	 */
+	authFlow?: SelfTestAuthFlowInvoke;
 	/** Overall request budget; defaults to env / 120s. */
 	requestBudgetMs?: number;
 	/** Env override for secret collection + budget resolution (tests). */
@@ -207,6 +277,34 @@ export function createSelfTestInvoke(app: {
 	};
 }
 
+/** Binds the self-test auth-flow driver to a tenant app's /auth pipeline in-process. */
+export function createSelfTestAuthFlowInvoke(app: {
+	request: (input: string, requestInit?: RequestInit) => Response | Promise<Response>;
+}): SelfTestAuthFlowInvoke {
+	return async ({ route, requestId, flowId, connectionId, externalRef, input, context }) => {
+		const response = await app.request(`/auth/${route}`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId,
+				flowId,
+				...(connectionId ? { connectionId } : {}),
+				...(externalRef ? { externalRef } : {}),
+				...(input ? { input } : {}),
+				...(context ? { context } : {}),
+			}),
+		});
+		const text = await response.text();
+		let body: unknown = text;
+		try {
+			body = text.length > 0 ? JSON.parse(text) : undefined;
+		} catch {
+			// non-JSON transports keep the raw text as body
+		}
+		return { status: response.status, body };
+	};
+}
+
 class SelfTestCaseTimeoutError extends Error {
 	constructor(timeoutMs: number) {
 		super(`Self-test case timed out after ${timeoutMs}ms`);
@@ -250,13 +348,69 @@ function upstreamErrorMessage(body: unknown): string | undefined {
 	return typeof message === "string" ? message : undefined;
 }
 
+/**
+ * How long a memoized multi-turn flow outcome suppresses re-driving the auth
+ * flow. Generous on purpose: a multi-turn ceremony (OTP, device approval) is a
+ * provider property that changes on the timescale of releases, not probe
+ * cycles, and every re-drive is a REAL upstream login submission. The cache is
+ * in-process, so a pod restart also clears the entry.
+ */
+export const SELF_TEST_MULTI_TURN_RETRY_AFTER_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Age bound for POSITIVE cached credentials. Expiry modes that never produce
+ * a 401/403 (a 200 login page, an assertion failure) would otherwise replay
+ * the same stale session until pod restart — one re-login per day is the
+ * upstream-safe recovery for them.
+ */
+export const SELF_TEST_CREDENTIAL_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+export type SelfTestCredentialSessionEntry =
+	/** Flow-materialized credential reused across probe cycles. */
+	| { kind: "credential"; credential: Record<string, string>; cachedAtMs: number }
+	/**
+	 * Negative entry: the flow did not complete in a single continue turn
+	 * (`auth_flow_multi_turn`). Memoized so subsequent cycles report the skip
+	 * WITHOUT contacting the upstream again — the first attempt already
+	 * submitted real credentials (and may have triggered an OTP send).
+	 */
+	| { kind: "multi_turn"; cachedAtMs: number }
+	/**
+	 * Negative entry: the flow REJECTED the submitted credential inputs
+	 * (`retry` turn after continue — bad password, exchange failure).
+	 * Memoized so the probe does not re-submit rejected credentials every
+	 * cycle; a new entry is attempted when the inputs rotate (new hash),
+	 * the TTL lapses, or the process restarts.
+	 */
+	| { kind: "rejected"; cachedAtMs: number };
+
+/**
+ * In-process cache of per-(providerId + stable hash of credentialInputs) auth
+ * flow outcomes, so consecutive probe cycles reuse the session — or the
+ * memoized multi-turn skip — instead of logging in every cycle (upstream
+ * account safety, DR-7). Credential entries are invalidated on a probe auth
+ * failure, at most once; multi-turn entries expire after
+ * `SELF_TEST_MULTI_TURN_RETRY_AFTER_MS` or on process restart. Flow ERRORS
+ * (transport/protocol failures, thrown start/continue) are deliberately NEVER
+ * cached: they are typically transient, and retrying a failed request next
+ * cycle is not a repeated login submission.
+ */
+export type SelfTestCredentialSessionCache = Map<string, SelfTestCredentialSessionEntry>;
+
 interface SelfTestExecutionContext {
 	provider: ProviderDefinition;
 	invoke: SelfTestOperationInvoke;
+	authFlow?: SelfTestAuthFlowInvoke;
 	requestId: string;
 	credentials?: Readonly<Record<string, string>>;
 	requestTimeoutMs?: number;
-	sensitiveValues: readonly string[];
+	/**
+	 * Mutable on purpose: every secret value materialized by an auth flow is
+	 * appended here BEFORE any probe output is built, so redactSelfTestText
+	 * scrubs flow-issued cookies/tokens exactly like request-supplied inputs.
+	 */
+	sensitiveValues: string[];
+	sessionCache: SelfTestCredentialSessionCache;
 }
 
 function resolveCaseTimeoutMs(
@@ -275,33 +429,483 @@ function resolveCaseTimeoutMs(
 	);
 }
 
-function buildSelfTestConnection(
+function credentialSessionCacheKey(
+	providerId: string,
+	inputs: Readonly<Record<string, string>>,
+): string {
+	const canonical = JSON.stringify(
+		Object.keys(inputs)
+			.sort()
+			.map((key) => [key, inputs[key]]),
+	);
+	return `${providerId}:${createHash("sha256").update(canonical).digest("hex")}`;
+}
+
+function registerSensitiveValues(
+	execution: SelfTestExecutionContext,
+	values: Iterable<string>,
+): void {
+	for (const value of values) {
+		if (
+			typeof value === "string" &&
+			value.length > 0 &&
+			!execution.sensitiveValues.includes(value)
+		) {
+			execution.sensitiveValues.push(value);
+		}
+	}
+}
+
+type SelfTestConnectionResolution =
+	| {
+			kind: "connection";
+			connection?: OperationConnection;
+			credentialSource?: "inputs" | "flow" | "cache";
+			cacheKey?: string;
+	  }
+	| { kind: "skip"; skipReason: string }
+	| { kind: "flow_error"; code: string; message: string };
+
+type ParsedAuthFlowTurn =
+	| {
+			ok: true;
+			turn: { kind: string; data?: unknown; expectedInput?: unknown };
+			contextPatch?: Record<string, unknown>;
+	  }
+	| { ok: false; code: string; message: string; httpStatus: number };
+
+function parseAuthFlowResponse(result: { status: number; body: unknown }): ParsedAuthFlowTurn {
+	const errorEnvelope = objectProperty(result.body, "error");
+	if (result.status < 200 || result.status >= 300 || errorEnvelope !== undefined) {
+		const message = objectProperty(errorEnvelope, "message");
+		return {
+			ok: false,
+			code: "auth_flow_failed",
+			message:
+				typeof message === "string"
+					? message
+					: `Auth flow request failed with status ${result.status}`,
+			httpStatus: result.status,
+		};
+	}
+	const turnValue = objectProperty(result.body, "data");
+	const turnKind = objectProperty(turnValue, "kind");
+	if (typeof turnKind !== "string") {
+		return {
+			ok: false,
+			code: "auth_flow_failed",
+			message: "Auth flow returned an unrecognized turn.",
+			httpStatus: result.status,
+		};
+	}
+	const contextPatch = objectProperty(result.body, "contextPatch");
+	return {
+		ok: true,
+		turn: {
+			kind: turnKind,
+			data: objectProperty(turnValue, "data"),
+			expectedInput: objectProperty(turnValue, "expectedInput"),
+		},
+		...(contextPatch && typeof contextPatch === "object" && !Array.isArray(contextPatch)
+			? { contextPatch: contextPatch as Record<string, unknown> }
+			: {}),
+	};
+}
+
+function applyAuthFlowContextPatch(
+	base: Record<string, unknown>,
+	patch: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+	if (!patch) return base;
+	const next = { ...base };
+	for (const [key, value] of Object.entries(patch)) {
+		if (value === null) {
+			delete next[key];
+		} else {
+			next[key] = value;
+		}
+	}
+	return next;
+}
+
+/**
+ * Extracts the completed credential from a complete turn's data payload — the
+ * same `data.credential` record the gateway persists as connection secrets in
+ * production (`persistCredential` → credential-service `UpdateCredential`).
+ */
+function completedCredentialFromTurn(turnData: unknown): Record<string, string> | undefined {
+	const credential = objectProperty(turnData, "credential");
+	if (!credential || typeof credential !== "object" || Array.isArray(credential)) {
+		return undefined;
+	}
+	const secrets: Record<string, string> = {};
+	for (const [key, value] of Object.entries(credential)) {
+		if (typeof value === "string") secrets[key] = value;
+	}
+	return Object.keys(secrets).length > 0 ? secrets : undefined;
+}
+
+/**
+ * Drives the provider's declared auth flow exactly like production does:
+ * `flow.start()` then a single `flow.continue(credentialInputs)`. Anything
+ * other than a complete turn is a visible multi-turn gap, never a fabricated
+ * probe failure.
+ */
+
+/**
+ * Fields an input-prompt turn actually requests. The canonical auth-turn
+ * shape carries the JSON schema DIRECTLY on `expectedInput` (`ctx.auth
+ * .nextForm`/`defineCredentialsAuth`, the committed fixtures); some providers
+ * nest it as `expectedInput.schema`. Both are honored. `null` when the turn
+ * declares no schema (legacy/loose flows keep full-input semantics).
+ */
+function turnRequestedFields(
+	turn: { expectedInput?: unknown },
+): { properties: string[]; required: string[] } | null {
+	const expectedInput = turn.expectedInput;
+	if (!expectedInput || typeof expectedInput !== "object" || Array.isArray(expectedInput)) {
+		return null;
+	}
+	const schemaOf = (candidate: unknown): { properties: string[]; required: string[] } | null => {
+		const properties =
+			candidate && typeof candidate === "object"
+				? (candidate as { properties?: unknown }).properties
+				: undefined;
+		if (!properties || typeof properties !== "object" || Array.isArray(properties)) {
+			return null;
+		}
+		const requiredRaw =
+			candidate && typeof candidate === "object"
+				? (candidate as { required?: unknown }).required
+				: undefined;
+		const required = Array.isArray(requiredRaw)
+			? requiredRaw.filter((field): field is string => typeof field === "string")
+			: [];
+		return { properties: Object.keys(properties), required };
+	};
+	return (
+		schemaOf(expectedInput) ?? schemaOf((expectedInput as { schema?: unknown }).schema)
+	);
+}
+
+async function materializeFlowCredential(
+	execution: SelfTestExecutionContext,
+	inputs: Readonly<Record<string, string>>,
+	options: {
+		isAbandoned?: () => boolean;
+		connectionId?: string;
+		externalRef?: string;
+	} = {},
+): Promise<
+	| { credential: Record<string, string> }
+	| Exclude<SelfTestConnectionResolution, { kind: "connection" }>
+> {
+	const authFlow = execution.authFlow;
+	if (!authFlow) {
+		return {
+			kind: "flow_error",
+			code: "auth_flow_unavailable",
+			message:
+				"Provider declares a credentials auth flow but the self-test host has no auth-flow driver.",
+		};
+	}
+	const flowId = `self-test-${randomUUID()}`;
+	// The login must ride the SAME proxy/connection affinity the probe will
+	// use (createAuthFlowContext keys affinity on connectionId) — otherwise
+	// IP/session-bound upstreams see the cookie arrive from a different
+	// session and reject it.
+	const started = parseAuthFlowResponse(
+		await authFlow({
+			route: "start",
+			requestId: `${execution.requestId}-auth-start-${randomUUID()}`,
+			flowId,
+			...(options.connectionId ? { connectionId: options.connectionId } : {}),
+			...(options.externalRef ? { externalRef: options.externalRef } : {}),
+		}),
+	);
+	if (!started.ok) {
+		return { kind: "flow_error", code: started.code, message: started.message };
+	}
+	let turn = started.turn;
+	const flowContext = applyAuthFlowContextPatch({}, started.contextPatch);
+	if (turn.kind === "abort") {
+		// Terminal turn: continuing after an abort would replay credentials into
+		// a flow that already refused to proceed. Not memoized (flow errors are
+		// never cached) — an abort can be transient upstream maintenance.
+		return {
+			kind: "flow_error",
+			code: "auth_flow_aborted",
+			message: "Auth flow aborted before requesting input.",
+		};
+	}
+	if (turn.kind !== "complete") {
+		// Validate the start turn BEFORE submitting credentials: an unknown
+		// kind may be a provider typo or a stage that must not receive the
+		// probe inputs. `retry` counts as an input prompt at this stage.
+		if (turn.kind !== "retry" && !INTERACTIVE_TURN_KIND_SET.has(turn.kind)) {
+			return {
+				kind: "flow_error",
+				code: "auth_flow_unexpected_turn",
+				message: `Auth flow start returned an unrecognized turn kind "${turn.kind}".`,
+			};
+		}
+		// Auto-continue ONLY into input prompts (form/retry). Other known
+		// interactive stages (redirect, poll, pending, challenge, message,
+		// multi_choice) are valid flows that are NOT asking for the credential
+		// inputs — posting the password there submits it to the wrong stage.
+		// They are a genuine headless gap: the memoized multi-turn skip.
+		if (turn.kind !== "form" && turn.kind !== "retry") {
+			return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
+		}
+		// Submit ONLY what the turn asks for: a first stage of a multi-step
+		// login may request a subset (or different fields entirely) — posting
+		// the full inputs would send secrets to the wrong stage. Only the
+		// schema's REQUIRED fields are mandatory (defineCredentialsAuth
+		// encodes optional fields by omitting them from `required`); a turn
+		// whose required fields we do not hold is a headless gap (multi-turn).
+		// A turn with no declared schema keeps full-input semantics.
+		const requestedFields = turnRequestedFields(turn);
+		let submitInputs: Record<string, string> = { ...inputs };
+		if (requestedFields !== null) {
+			if (requestedFields.required.some((field) => inputs[field] === undefined)) {
+				return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
+			}
+			submitInputs = Object.fromEntries(
+				requestedFields.properties
+					.filter((field) => inputs[field] !== undefined)
+					.map((field) => [field, inputs[field] as string]),
+			);
+		}
+		// The case deadline may have fired while start() was still running.
+		// Never submit real credentials into a flow whose case already
+		// reported self_test_timeout — a late continue is a real upstream
+		// login/OTP attempt nobody is waiting for.
+		if (options.isAbandoned?.() === true) {
+			return {
+				kind: "flow_error",
+				code: "self_test_timeout",
+				message: "Case deadline passed before credential submission; flow abandoned.",
+			};
+		}
+		const continued = parseAuthFlowResponse(
+			await authFlow({
+				route: "continue",
+				requestId: `${execution.requestId}-auth-continue-${randomUUID()}`,
+				flowId,
+				...(options.connectionId ? { connectionId: options.connectionId } : {}),
+				...(options.externalRef ? { externalRef: options.externalRef } : {}),
+				input: submitInputs,
+				...(Object.keys(flowContext).length > 0 ? { context: flowContext } : {}),
+			}),
+		);
+		if (!continued.ok) {
+			// Providers built with defineCredentialsAuth cannot return a retry
+			// turn — a rejected password THROWS and /auth/continue answers with
+			// an auth-shaped 401/403. That is a credential REJECTION (memoized,
+			// so the probe never hammers a locked-out login); every other
+			// status stays an uncached transient retry.
+			if (AUTH_REJECTION_HTTP_STATUSES.has(continued.httpStatus)) {
+				return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON };
+			}
+			return { kind: "flow_error", code: continued.code, message: continued.message };
+		}
+		turn = continued.turn;
+	}
+	if (turn.kind === "abort") {
+		return {
+			kind: "flow_error",
+			code: "auth_flow_aborted",
+			message: "Auth flow aborted after credential submission.",
+		};
+	}
+	if (turn.kind === "retry") {
+		// A retry turn AFTER submission is a credential rejection, not an
+		// interactive gap — surfaced distinctly so monitoring can treat it as
+		// a real outage, and memoized by the caller (lockout safety).
+		return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON };
+	}
+	if (turn.kind !== "complete") {
+		// Only KNOWN interactive kinds are a genuine "cannot complete headless"
+		// multi-turn gap (memoized by the caller). An unknown kind is ambiguous
+		// — it may encode a transient provider failure — so it reports as a
+		// flow error, which is never memoized, instead of freezing the signal.
+		if (!INTERACTIVE_TURN_KIND_SET.has(turn.kind)) {
+			return {
+				kind: "flow_error",
+				code: "auth_flow_unexpected_turn",
+				message: `Auth flow returned an unrecognized turn kind "${turn.kind}".`,
+			};
+		}
+		return { kind: "skip", skipReason: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON };
+	}
+	const credential = completedCredentialFromTurn(turn.data);
+	if (!credential) {
+		return {
+			kind: "flow_error",
+			code: "auth_flow_invalid_credential",
+			message: "Auth flow completed without a string-valued credential payload.",
+		};
+	}
+	// Redaction contract: flow-issued secrets are registered BEFORE any probe
+	// output can be built from them.
+	registerSensitiveValues(execution, Object.values(credential));
+	return { credential };
+}
+
+async function resolveSelfTestConnection(
 	execution: SelfTestExecutionContext,
 	operationId: string,
 	suite: AnyHealthCheckSuite,
-): { connection?: OperationConnection } | { skipReason: string } {
-	if (!suite.requiresConnection) return {};
+	options: { forceLogin?: boolean; isAbandoned?: () => boolean } = {},
+): Promise<SelfTestConnectionResolution> {
+	if (!suite.requiresConnection) return { kind: "connection" };
 	const inputs = execution.credentials ?? {};
 	const declaredFields = Object.keys(
 		(execution.provider.healthProbe ?? execution.provider.healthMonitor)?.credentialInputs ?? {},
 	);
 	for (const field of declaredFields) {
 		if (!inputs[field]) {
-			return { skipReason: `credential_missing:${field}` };
+			return { kind: "skip", skipReason: `credential_missing:${field}` };
 		}
 	}
 	if (declaredFields.length === 0 && Object.keys(inputs).length === 0) {
-		return { skipReason: "credential_missing:credentials" };
+		return { kind: "skip", skipReason: "credential_missing:credentials" };
 	}
+
+	// The connection id seeds proxy/connection affinity in the provider
+	// context, so it must be STABLE per (provider, credentialInputs): a cached
+	// session replayed under a per-request id would ride a different proxy/IP
+	// each cycle and upstreams would treat the cookie as stale or suspicious.
+	// The id carries only a hash of the inputs, never the inputs themselves.
+	//
+	// Providers declaring `proxy.session.affinity: "operation"` pin the PROBE's
+	// proxy to `${providerId}/${operationId}` regardless of connection id — so
+	// the login must ride that exact key, and the session cache splits per
+	// operation (one shared cookie would otherwise hop between per-operation
+	// proxies).
+	const operationAffinity =
+		typeof execution.provider.proxy === "object" &&
+		execution.provider.proxy?.session?.affinity === "operation";
+	const credentialKey = credentialSessionCacheKey(execution.provider.id, inputs);
+	const affinityKey = operationAffinity ? `${credentialKey}:${operationId}` : credentialKey;
+	// ONE id for the auth flow AND the probe connection: providers may bind
+	// the issued credential to FlowContext.connectionId and later compare it
+	// against ctx.request.connectionId. Operation-affinity providers use the
+	// probe's exact proxy key (providerId/operationId); everyone else uses the
+	// stable per-credential hash.
+	const connectionId = operationAffinity
+		? `${execution.provider.id}/${operationId}`
+		: `self-test-${createHash("sha256").update(affinityKey).digest("hex").slice(0, 22)}`;
+	const buildConnection = (secrets: Readonly<Record<string, string>>): OperationConnection => ({
+		id: connectionId,
+		mode: "credentials",
+		secrets: { ...secrets },
+		metadata: { purpose: "provider-self-test", operationId },
+		externalRef: `${execution.provider.id}-${operationId}-self-test`,
+	});
+
+	const auth = execution.provider.auth;
+	if (auth?.mode !== "credentials" || !auth.flow) {
+		// Providers without a declared credentials flow keep raw-input semantics
+		// — and the pre-existing per-request connection id: there is no session
+		// to keep on one affinity, and a stable id would silently pin every
+		// cycle of a connection-affinity proxy to the same upstream session.
+		return {
+			kind: "connection",
+			connection: {
+				...buildConnection(inputs),
+				id: `self-test-${execution.requestId}`,
+			},
+			credentialSource: "inputs",
+		};
+	}
+
+	const cacheKey = affinityKey;
+	const cached = execution.sessionCache.get(cacheKey);
+	// DR-7 upstream-account safety: a memoized multi-turn outcome
+	// short-circuits to the auth_flow_multi_turn skip WITHOUT re-driving
+	// flow.start()/flow.continue() — every re-drive is a real upstream login
+	// submission (OTP sends, lockout risk), and the probe scheduler would
+	// otherwise repeat it every cycle forever. Changed credentialInputs hash
+	// to a different key and re-attempt immediately; otherwise the entry
+	// expires after a generous TTL (or process restart) so a provider whose
+	// flow becomes single-turn again is eventually re-probed.
+	if (cached?.kind === "multi_turn" || cached?.kind === "rejected") {
+		if (Date.now() - cached.cachedAtMs < SELF_TEST_MULTI_TURN_RETRY_AFTER_MS) {
+			return {
+				kind: "skip",
+				skipReason:
+					cached.kind === "rejected"
+						? SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON
+						: SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON,
+			};
+		}
+		execution.sessionCache.delete(cacheKey);
+	}
+	if (options.forceLogin !== true && cached?.kind === "credential") {
+		if (Date.now() - cached.cachedAtMs >= SELF_TEST_CREDENTIAL_MAX_AGE_MS) {
+			// Age-bounded: expiry modes that never 401 (login-page 200s,
+			// assertion failures) must not replay one stale session forever.
+			execution.sessionCache.delete(cacheKey);
+		} else {
+			registerSensitiveValues(execution, Object.values(cached.credential));
+			return {
+				kind: "connection",
+				connection: buildConnection(cached.credential),
+				credentialSource: "cache",
+				cacheKey,
+			};
+		}
+	}
+	const materialized = await materializeFlowCredential(execution, inputs, {
+		...(options.isAbandoned !== undefined ? { isAbandoned: options.isAbandoned } : {}),
+		connectionId,
+		externalRef: `${execution.provider.id}-${operationId}-self-test`,
+	});
+	if (!("credential" in materialized)) {
+		// Only the multi-turn SKIP is negative-cached. Flow ERRORS
+		// (auth_flow_unavailable / auth_flow_failed / invalid credential
+		// payloads, or a thrown start/continue) are never memoized: they are
+		// typically transient upstream or host failures, so each cycle may
+		// retry — permanently caching an error would silently freeze the
+		// signal on a blip, while retrying a FAILED request is not a repeated
+		// successful login submission.
+		if (materialized.kind === "skip" && options.isAbandoned?.() !== true) {
+			if (materialized.skipReason === SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON) {
+				execution.sessionCache.set(cacheKey, { kind: "multi_turn", cachedAtMs: Date.now() });
+			} else if (materialized.skipReason === SELF_TEST_AUTH_FLOW_REJECTED_SKIP_REASON) {
+				execution.sessionCache.set(cacheKey, { kind: "rejected", cachedAtMs: Date.now() });
+			}
+		}
+		return materialized;
+	}
+	// A flow that outlived the case deadline still completes here (the timeout
+	// only races the promise, it cannot cancel it). The case already reported
+	// self_test_timeout — caching this credential would let the next probe
+	// reuse a login whose latency just failed the case, hiding the failure.
+	if (options.isAbandoned?.() === true) {
+		return {
+			kind: "flow_error",
+			code: "self_test_timeout",
+			message: "Auth flow completed after the case deadline; credential discarded.",
+		};
+	}
+	execution.sessionCache.set(cacheKey, {
+		kind: "credential",
+		credential: materialized.credential,
+		cachedAtMs: Date.now(),
+	});
 	return {
-		connection: {
-			id: `self-test-${execution.requestId}`,
-			mode: "credentials",
-			secrets: { ...inputs },
-			metadata: { purpose: "provider-self-test", operationId },
-			externalRef: `${execution.provider.id}-${operationId}-self-test`,
-		},
+		kind: "connection",
+		connection: buildConnection(materialized.credential),
+		credentialSource: "flow",
+		cacheKey,
 	};
+}
+
+/** A failed probe whose HTTP status is auth-shaped invalidates a cached session once. */
+function isAuthFailureCaseResult(result: SelfTestCaseResult): boolean {
+	return result.status === "failed" && (result.httpStatus === 401 || result.httpStatus === 403);
 }
 
 async function executeSelfTestCase(
@@ -310,153 +914,268 @@ async function executeSelfTestCase(
 	suite: AnyHealthCheckSuite,
 	healthCase: AnyHealthCheckCase,
 ): Promise<SelfTestCaseResult> {
-	const { provider, invoke, sensitiveValues } = execution;
-	const redact = (text: string) => redactSelfTestText(text, sensitiveValues);
-	const startedAt = new Date().toISOString();
-	const startedAtMs = performance.now();
-	const finish = (
-		partial: Omit<
-			SelfTestCaseResult,
-			"operationId" | "caseName" | "startedAt" | "finishedAt" | "responseTimeMs"
-		> & { responseTimeMs?: number },
-	): SelfTestCaseResult => ({
-		operationId,
-		caseName: healthCase.name,
-		startedAt,
-		finishedAt: new Date().toISOString(),
-		responseTimeMs:
-			partial.responseTimeMs ?? Math.max(0, Math.round(performance.now() - startedAtMs)),
-		...partial,
-	});
+	const { provider, invoke } = execution;
+	// execution.sensitiveValues may grow while the case runs (flow-issued
+	// secrets); redact always reads the live array.
+	const redact = (text: string) => redactSelfTestText(text, execution.sensitiveValues);
 	const defaultLabel = redact(healthCase.description ?? healthCase.name);
+	const timeoutMs = resolveCaseTimeoutMs(execution, suite, healthCase);
+	// One deadline for the WHOLE case: connection materialization (auth flow),
+	// the probe, and the one-shot auth retry all draw from the same budget —
+	// a 30s case must never take ~4×30s across its stages.
+	const caseDeadlineAtMs = performance.now() + timeoutMs;
+	const remainingCaseTimeoutMs = () =>
+		Math.max(1, Math.ceil(caseDeadlineAtMs - performance.now()));
+
+	const beginCase = () => {
+		const startedAt = new Date().toISOString();
+		const startedAtMs = performance.now();
+		return {
+			startedAtMs,
+			finish: (
+				partial: Omit<
+					SelfTestCaseResult,
+					"operationId" | "caseName" | "startedAt" | "finishedAt" | "responseTimeMs"
+				> & { responseTimeMs?: number },
+			): SelfTestCaseResult => ({
+				operationId,
+				caseName: healthCase.name,
+				startedAt,
+				finishedAt: new Date().toISOString(),
+				responseTimeMs:
+					partial.responseTimeMs ?? Math.max(0, Math.round(performance.now() - startedAtMs)),
+				...partial,
+			}),
+		};
+	};
+	const caseScope = beginCase();
 
 	if (healthCase.enabled && healthCase.enabled() === false) {
-		return finish({
+		return caseScope.finish({
 			status: "skipped",
 			label: defaultLabel,
 			skipReason: "disabled",
 		});
 	}
 
-	const connectionResolution = buildSelfTestConnection(execution, operationId, suite);
-	if ("skipReason" in connectionResolution) {
-		return finish({
-			status: "skipped",
-			label: defaultLabel,
-			skipReason: connectionResolution.skipReason,
-		});
-	}
-	const connection = connectionResolution.connection;
+	const resolveConnection = async (forceLogin: boolean): Promise<SelfTestConnectionResolution> => {
+		// The timeout only races the flow promise — it cannot cancel it. Once
+		// the deadline fires, the still-running resolution is marked abandoned
+		// so its late completion cannot write the session cache.
+		let abandoned = false;
+		try {
+			return await withCaseTimeout(
+				() =>
+					resolveSelfTestConnection(execution, operationId, suite, {
+						forceLogin,
+						isAbandoned: () => abandoned,
+					}),
+				remainingCaseTimeoutMs(),
+			);
+		} catch (error) {
+			abandoned = true;
+			return {
+				kind: "flow_error",
+				code: error instanceof SelfTestCaseTimeoutError ? "self_test_timeout" : "auth_flow_failed",
+				message: error instanceof Error ? error.message : String(error),
+			};
+		}
+	};
 
-	const timeoutMs = resolveCaseTimeoutMs(execution, suite, healthCase);
-	try {
-		return await withCaseTimeout(async () => {
-			const resolvedInput = resolveHealthCheckInputDateTokens(healthCase.input);
-			const preparedInput = healthCase.prepareInput
-				? await healthCase.prepareInput({
-						providerId: provider.id,
-						operationId,
-						input: resolvedInput,
-						...(connection ? { connectionId: connection.id } : {}),
-						gateway: {
-							execute: async (foreignProviderId, gatewayOperationId, gatewayInput) => {
-								if (foreignProviderId !== provider.id) {
-									throw new Error(
-										`Self-test prepareInput may only invoke provider "${provider.id}" operations (requested "${foreignProviderId}").`,
-									);
-								}
-								const startedGatewayMs = performance.now();
-								const executed = await invoke({
-									operationId: gatewayOperationId,
-									input: gatewayInput,
-									connection,
-									requestId: `${execution.requestId}-prepare-${randomUUID()}`,
-								});
-								return {
-									status: executed.status,
-									duration: performance.now() - startedGatewayMs,
-									data: executed.data,
-									meta: executed.meta,
-								};
-							},
-						},
-					})
-				: resolvedInput;
-
-			const executed = await invoke({
-				operationId,
-				input: preparedInput,
-				connection,
-				requestId: `${execution.requestId}-${randomUUID()}`,
+	const nonConnectionResult = (
+		resolution: Exclude<SelfTestConnectionResolution, { kind: "connection" }>,
+	): SelfTestCaseResult => {
+		if (resolution.kind === "skip") {
+			return caseScope.finish({
+				status: "skipped",
+				label: defaultLabel,
+				skipReason: resolution.skipReason,
 			});
-			const durationMs = performance.now() - startedAtMs;
+		}
+		return caseScope.finish({
+			status: "error",
+			label: defaultLabel,
+			error: { code: resolution.code, message: redact(resolution.message) },
+		});
+	};
 
-			if (executed.status < 200 || executed.status >= 300) {
+	const runProbeAttempt = async (
+		connection: OperationConnection | undefined,
+	): Promise<SelfTestCaseResult> => {
+		// gateway.execute keeps its contract — EVERY helper status is returned
+		// to the prepareInput hook (it may branch on 401 itself). The last
+		// auth-shaped helper status is only RECORDED: if the hook then throws,
+		// the case fails WITH that status so stale-session recovery triggers.
+		let prepareAuthStatus: number | null = null;
+		// Share the OUTER case scope: startedAt/responseTimeMs must cover the
+		// WHOLE case — auth-flow materialization included — not just the final
+		// operation attempt, or a slow login reads as a fast healthy case.
+		const { startedAtMs, finish } = caseScope;
+		try {
+			return await withCaseTimeout(async () => {
+				const resolvedInput = resolveHealthCheckInputDateTokens(healthCase.input);
+				const preparedInput = healthCase.prepareInput
+					? await healthCase.prepareInput({
+							providerId: provider.id,
+							operationId,
+							input: resolvedInput,
+							...(connection ? { connectionId: connection.id } : {}),
+							gateway: {
+								execute: async (foreignProviderId, gatewayOperationId, gatewayInput) => {
+									if (foreignProviderId !== provider.id) {
+										throw new Error(
+											`Self-test prepareInput may only invoke provider "${provider.id}" operations (requested "${foreignProviderId}").`,
+										);
+									}
+									const startedGatewayMs = performance.now();
+									const executed = await invoke({
+										operationId: gatewayOperationId,
+										input: gatewayInput,
+										connection,
+										requestId: `${execution.requestId}-prepare-${randomUUID()}`,
+									});
+									if (executed.status === 401 || executed.status === 403) {
+										prepareAuthStatus = executed.status;
+									}
+									return {
+										status: executed.status,
+										duration: performance.now() - startedGatewayMs,
+										data: executed.data,
+										meta: executed.meta,
+									};
+								},
+							},
+						})
+					: resolvedInput;
+
+				const executed = await invoke({
+					operationId,
+					input: preparedInput,
+					connection,
+					requestId: `${execution.requestId}-${randomUUID()}`,
+				});
+				const durationMs = performance.now() - startedAtMs;
+
+				if (executed.status < 200 || executed.status >= 300) {
+					return finish({
+						status: "failed",
+						label: defaultLabel,
+						httpStatus: executed.status,
+						error: {
+							code: upstreamErrorCode(executed.data) ?? "operation_failed",
+							message: redact(
+								upstreamErrorMessage(executed.data) ??
+									`Operation invocation failed with status ${executed.status}`,
+							),
+						},
+					});
+				}
+
+				const assertionContext: HealthCheckAssertionContext = {
+					status: executed.status,
+					data: executed.data,
+					durationMs,
+					...(executed.meta ? { meta: executed.meta } : {}),
+				};
+				let assertionResult: unknown;
+				try {
+					assertionResult = await healthCase.assertions(assertionContext);
+				} catch (assertionError) {
+					return finish({
+						status: "failed",
+						label: defaultLabel,
+						httpStatus: executed.status,
+						assertion: {
+							passed: false,
+							message: redact(
+								assertionError instanceof Error ? assertionError.message : String(assertionError),
+							),
+						},
+					});
+				}
+				const statusValue = objectProperty(assertionResult, "status");
+				const overrideStatus =
+					statusValue === "ok" || statusValue === "degraded" ? statusValue : undefined;
+				const labelValue = objectProperty(assertionResult, "label");
+				const overrideLabel = typeof labelValue === "string" ? redact(labelValue) : undefined;
 				return finish({
-					status: "failed",
-					label: defaultLabel,
+					status: overrideStatus ?? "ok",
+					label: overrideLabel ?? defaultLabel,
 					httpStatus: executed.status,
-					error: {
-						code: upstreamErrorCode(executed.data) ?? "operation_failed",
-						message: redact(
-							upstreamErrorMessage(executed.data) ??
-								`Operation invocation failed with status ${executed.status}`,
-						),
-					},
+					assertion: { passed: true },
+				});
+			}, remainingCaseTimeoutMs());
+		} catch (error) {
+			if (error instanceof SelfTestCaseTimeoutError) {
+				return finish({
+					status: "error",
+					label: defaultLabel,
+					error: { code: "self_test_timeout", message: redact(error.message) },
 				});
 			}
-
-			const assertionContext: HealthCheckAssertionContext = {
-				status: executed.status,
-				data: executed.data,
-				durationMs,
-				...(executed.meta ? { meta: executed.meta } : {}),
-			};
-			let assertionResult: unknown;
-			try {
-				assertionResult = await healthCase.assertions(assertionContext);
-			} catch (assertionError) {
+			if (prepareAuthStatus !== null) {
 				return finish({
 					status: "failed",
 					label: defaultLabel,
-					httpStatus: executed.status,
+					httpStatus: prepareAuthStatus,
 					assertion: {
 						passed: false,
-						message: redact(
-							assertionError instanceof Error ? assertionError.message : String(assertionError),
-						),
+						message: redact(error instanceof Error ? error.message : String(error)),
 					},
 				});
 			}
-			const statusValue = objectProperty(assertionResult, "status");
-			const overrideStatus =
-				statusValue === "ok" || statusValue === "degraded" ? statusValue : undefined;
-			const labelValue = objectProperty(assertionResult, "label");
-			const overrideLabel = typeof labelValue === "string" ? redact(labelValue) : undefined;
-			return finish({
-				status: overrideStatus ?? "ok",
-				label: overrideLabel ?? defaultLabel,
-				httpStatus: executed.status,
-				assertion: { passed: true },
-			});
-		}, timeoutMs);
-	} catch (error) {
-		if (error instanceof SelfTestCaseTimeoutError) {
 			return finish({
 				status: "error",
 				label: defaultLabel,
-				error: { code: "self_test_timeout", message: redact(error.message) },
+				error: {
+					code: "self_test_execution_error",
+					message: redact(error instanceof Error ? error.message : String(error)),
+				},
 			});
 		}
-		return finish({
-			status: "error",
-			label: defaultLabel,
-			error: {
-				code: "self_test_execution_error",
-				message: redact(error instanceof Error ? error.message : String(error)),
-			},
-		});
+	};
+
+	const resolution = await resolveConnection(false);
+	if (resolution.kind !== "connection") {
+		return nonConnectionResult(resolution);
 	}
+
+	let result = await runProbeAttempt(resolution.connection);
+
+	// One-shot session recovery: a cached credential that fails the probe with
+	// an auth-shaped status is invalidated, the flow re-runs ONCE, and the
+	// probe retries once. Fresh (just-materialized) credentials never retry.
+	if (
+		resolution.credentialSource === "cache" &&
+		resolution.cacheKey !== undefined &&
+		isAuthFailureCaseResult(result)
+	) {
+		execution.sessionCache.delete(resolution.cacheKey);
+		const retryResolution = await resolveConnection(true);
+		if (retryResolution.kind !== "connection") {
+			return nonConnectionResult(retryResolution);
+		}
+		result = await runProbeAttempt(retryResolution.connection);
+		// The retry's fresh credential is subject to the same eviction rule
+		// as a first-attempt fresh credential (below).
+		if (retryResolution.cacheKey !== undefined && isAuthFailureCaseResult(result)) {
+			execution.sessionCache.delete(retryResolution.cacheKey);
+		}
+		return result;
+	}
+
+	// A FRESH credential the probe just rejected is known-bad: evict it so the
+	// next cycle logs in anew instead of replaying a guaranteed-stale session
+	// once before recovering. (No retry here — fresh credentials never retry.)
+	if (
+		resolution.credentialSource === "flow" &&
+		resolution.cacheKey !== undefined &&
+		isAuthFailureCaseResult(result)
+	) {
+		execution.sessionCache.delete(resolution.cacheKey);
+	}
+
+	return result;
 }
 
 interface SelectedCase {
@@ -557,6 +1276,10 @@ export function createSelfTestApp(provider: ProviderDefinition, options: SelfTes
 	const app = new Hono();
 	const planDigest = computeSelfTestPlanDigest(provider);
 	const requestBudgetMs = resolveRequestBudgetMs(options);
+	// In-process flow-credential session cache (providerId + credentialInputs
+	// hash → materialized credential). Lives as long as the app so consecutive
+	// probe cycles never log in to the upstream more than once per session.
+	const sessionCache: SelfTestCredentialSessionCache = new Map();
 	let busy = false;
 
 	app.notFound((c) => c.json({ error: { code: "not_found", message: "Not found" } }, 404));
@@ -648,6 +1371,7 @@ export function createSelfTestApp(provider: ProviderDefinition, options: SelfTes
 			const execution: SelfTestExecutionContext = {
 				provider,
 				invoke: options.invoke,
+				...(options.authFlow ? { authFlow: options.authFlow } : {}),
 				requestId: request.requestId,
 				credentials: request.credentials?.inputs,
 				requestTimeoutMs: request.timeoutMs,
@@ -655,6 +1379,7 @@ export function createSelfTestApp(provider: ProviderDefinition, options: SelfTes
 					env: options.env,
 					credentialInputs: request.credentials?.inputs,
 				}),
+				sessionCache,
 			};
 			const deadline = performance.now() + requestBudgetMs;
 			const results: SelfTestCaseResult[] = [];

@@ -74,7 +74,12 @@ import type {
 	StealthClient,
 	SttContext,
 } from "../types.js";
-import { createSelfTestApp, createSelfTestInvoke, resolveSelfTestPort } from "./self-test.js";
+import {
+	createSelfTestApp,
+	createSelfTestAuthFlowInvoke,
+	createSelfTestInvoke,
+	resolveSelfTestPort,
+} from "./self-test.js";
 import { resolveSelfTestMasterSecrets } from "./self-test-token.js";
 import {
 	type AuthFlowRequest,
@@ -1615,6 +1620,7 @@ export async function serve(
 		const selfTestApp = createSelfTestApp(provider, {
 			secrets: selfTestSecrets,
 			invoke: createSelfTestInvoke(app),
+			authFlow: createSelfTestAuthFlowInvoke(app),
 		});
 		bunRuntime.serve({
 			port: options.selfTestPort ?? resolveSelfTestPort(),
