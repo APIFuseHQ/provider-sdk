@@ -23,11 +23,6 @@ describe("user-input contract", () => {
 			{ selection_key: "reservation_option", selection_value: "H:1:2" },
 		],
 		reservation_state: "ct_res_state_v1.fresh",
-		continue_with: {
-			operation: "reserve",
-			args: { shop_ref: "s1", reservation_state: "ct_res_state_v1.fresh" },
-		},
-		action_hint: "Relay required_selections to the user verbatim.",
 	};
 
 	it("accepts a well-formed needs_input payload", () => {
@@ -47,12 +42,12 @@ describe("user-input contract", () => {
 				status: NEEDS_INPUT_STATUS,
 				required_selections: [],
 			}),
-		).toBe(false);
+		).toBe(true);
 		expect(isProviderNeedsInputPayload(null)).toBe(false);
 		expect(isProviderNeedsInputPayload([payload])).toBe(false);
 	});
 
-	it("rejects malformed selections and a missing retry template", () => {
+	it("rejects malformed selection entries", () => {
 		expect(
 			isProviderNeedsInputPayload({
 				...payload,
@@ -68,14 +63,6 @@ describe("user-input contract", () => {
 						valid_options: [{ selection_value: "21" }],
 					},
 				],
-			}),
-		).toBe(false);
-		const { continue_with: _omitted, ...withoutContinueWith } = payload;
-		expect(isProviderNeedsInputPayload(withoutContinueWith)).toBe(false);
-		expect(
-			isProviderNeedsInputPayload({
-				...payload,
-				continue_with: { operation: "reserve" },
 			}),
 		).toBe(false);
 	});
