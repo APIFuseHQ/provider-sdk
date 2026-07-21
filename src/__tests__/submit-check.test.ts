@@ -2290,6 +2290,42 @@ const apiKeys = ["AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED", "AUTH_PASSWORD_LOGIN_SU
 		expect(check?.status).toBe("fail");
 	});
 
+	it("downgrades error-code constants in ternary arms to a warning", async () => {
+		// Codex round-8 counterexample: a ternary arm is followed by ":" but is
+		// not an object key. The role classifier marks it VALUE (preceded by
+		// "?"), so it is stripped from context and the line stays non-blocking.
+		const dir = makeProviderDir(
+			"submit-entropy-ternary-arm-",
+			`${validProviderSource()}
+const ok = Date.now() > 0;
+const code = ok ? "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED" : "AUTH_PASSWORD_LOGIN_SUBMIT_FAILED";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+		expect(report.summary.blockers).toBe(0);
+	});
+
+	it("still blocks ternary error-code constants assigned to secret-like identifiers", async () => {
+		const dir = makeProviderDir(
+			"submit-entropy-ternary-secret-ident-",
+			`${validProviderSource()}
+const ok = Date.now() > 0;
+const password = ok ? "AUTH_PASSWORD_LOGIN_CAPTCHA_REQUIRED" : "AUTH_PASSWORD_LOGIN_SUBMIT_FAILED";
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
 	it("keeps quoted property names as blocking secret context", async () => {
 		// Codex round-6 counterexample: only identifier-constant-shaped
 		// literals are stripped from the context check; quoted property keys

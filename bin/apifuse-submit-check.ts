@@ -3812,28 +3812,35 @@ function isScreamingSnakeConstantValue(value: string): boolean {
 	return digitCount / value.length <= 0.15;
 }
 
-// Removes the contents of every string literal on the line that could itself
-// be an entropy candidate of the downgraded kind: identifier-constant-shaped
-// (SCREAMING_SNAKE) AND at least the scanner's minimum candidate length —
-// and never a literal in key position (immediately followed by ":"), since
-// quoted object keys describe the value next to them. Sibling constants on
-// the same line (e.g. an ERROR_CODES array) must not leak secret-ish words
-// into another candidate's context, but every other literal — quoted
-// property keys and header names like "Authorization", "API_KEY", or even a
-// pathological 20+-char SCREAMING_SNAKE header key — is genuine external
-// context and stays visible to the secret-context check. Uses the same
-// quote/escape walking as extractStringLiteralCandidates.
-function stripIdentifierConstantLiterals(line: string): string {
-	let result = "";
+type LineStringLiteral = {
+	// Index of the opening quote.
+	start: number;
+	// Index just past the closing quote (line end when unterminated).
+	end: number;
+	content: string;
+	closed: boolean;
+	role: "key" | "value";
+};
+
+// Single-pass line tokenizer: extracts every string literal with its span and
+// classifies its syntactic role once. A literal is a KEY when it is preceded
+// (ignoring whitespace) by "{", ",", "(", or the line start AND followed
+// (ignoring whitespace) by ":" — i.e. it names the value next to it. Every
+// other literal is a VALUE: ternary arms (preceded by "?" or ":"), array
+// elements, call arguments, and assignment right-hand sides, even when a
+// ternary's ":" happens to follow them. Uses the same quote/escape walking as
+// extractStringLiteralCandidates.
+function tokenizeLineStringLiterals(line: string): LineStringLiteral[] {
+	const literals: LineStringLiteral[] = [];
 	let index = 0;
 	while (index < line.length) {
 		const char = line[index];
 		if (char !== '"' && char !== "'" && char !== "`") {
-			result += char;
 			index += 1;
 			continue;
 		}
 		const quote = char;
+		const start = index;
 		const contentStart = index + 1;
 		let cursor = contentStart;
 		let closed = false;
@@ -3849,14 +3856,50 @@ function stripIdentifierConstantLiterals(line: string): string {
 			}
 			cursor += 1;
 		}
-		const content = line.slice(contentStart, Math.min(cursor, line.length));
-		const inKeyPosition = closed && /^\s*:/.test(line.slice(cursor + 1));
-		const isConstantCandidate =
-			content.length >= ENTROPY_CANDIDATE_MIN_LENGTH && isScreamingSnakeConstantValue(content);
-		const keptContent = isConstantCandidate && !inKeyPosition ? "" : content;
-		result += quote + keptContent + (closed ? quote : "");
-		index = closed ? cursor + 1 : line.length;
+		const contentEnd = Math.min(cursor, line.length);
+		const end = closed ? cursor + 1 : line.length;
+		const before = line.slice(0, start).trimEnd();
+		const keyPreceded = before === "" || /[{,(]$/.test(before);
+		const keyFollowed = closed && /^\s*:/.test(line.slice(end));
+		literals.push({
+			start,
+			end,
+			content: line.slice(contentStart, contentEnd),
+			closed,
+			role: keyPreceded && keyFollowed ? "key" : "value",
+		});
+		index = end;
 	}
+	return literals;
+}
+
+// Removes the contents of VALUE-role string literals that could themselves be
+// entropy candidates of the downgraded kind: identifier-constant-shaped
+// (SCREAMING_SNAKE) AND at least the scanner's minimum candidate length.
+// Sibling constants on the same line (an ERROR_CODES array, ternary arms)
+// must not leak secret-ish words into another candidate's context, while
+// KEY-role literals — quoted property keys and header names like
+// "Authorization", "API_KEY", or a pathological 20+-char SCREAMING_SNAKE
+// header key — always stay visible to the secret-context check as genuine
+// external context.
+function stripIdentifierConstantLiterals(line: string): string {
+	let result = "";
+	let previousEnd = 0;
+	for (const literal of tokenizeLineStringLiterals(line)) {
+		result += line.slice(previousEnd, literal.start);
+		const strip =
+			literal.role === "value" &&
+			literal.content.length >= ENTROPY_CANDIDATE_MIN_LENGTH &&
+			isScreamingSnakeConstantValue(literal.content);
+		if (strip) {
+			const quote = line[literal.start] ?? "";
+			result += quote + (literal.closed ? quote : "");
+		} else {
+			result += line.slice(literal.start, literal.end);
+		}
+		previousEnd = literal.end;
+	}
+	result += line.slice(previousEnd);
 	return result;
 }
 
