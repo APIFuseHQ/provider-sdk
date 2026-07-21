@@ -2309,6 +2309,41 @@ const headers = { "Authorization": "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD" 
 		expect(check?.status).toBe("fail");
 	});
 
+	it("keeps SCREAMING_SNAKE quoted keys as blocking secret context", async () => {
+		// Codex round-7 counterexample: short constant-shaped keys like
+		// "API_KEY" are below the entropy-candidate minimum length and survive
+		// the strip, so they stay genuine external context.
+		const dir = makeProviderDir(
+			"submit-entropy-snake-key-",
+			`${validProviderSource()}
+const headers = { "API_KEY": "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD" };
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
+	it("keeps long SCREAMING_SNAKE quoted keys in key position as blocking secret context", async () => {
+		// Even a pathological 20+-char constant-shaped key is never stripped
+		// when it sits in key position (immediately followed by ":").
+		const dir = makeProviderDir(
+			"submit-entropy-snake-long-key-",
+			`${validProviderSource()}
+const headers = { "X_CUSTOM_LONG_AUTH_TOKEN_HEADER": "QWERTYUIOP_ASDFGHJKL_ZXCVBNMQWE_RTYUIOPASD" };
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+	});
+
 	it("still warns on pure-alphabetic keyboard-mash uppercase values", async () => {
 		// Codex round-3 counterexample: all-alphabetic segments pass the
 		// word-like shape test, but entropy classification is never skipped —

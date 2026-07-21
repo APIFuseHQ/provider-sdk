@@ -3721,7 +3721,7 @@ export function extractStringLiteralCandidates(line: string): string[] {
 				continue;
 			}
 			if (char === quote) {
-				if (cursor - contentStart >= 20) {
+				if (cursor - contentStart >= ENTROPY_CANDIDATE_MIN_LENGTH) {
 					candidates.push(line.slice(contentStart, cursor));
 				}
 				index = cursor;
@@ -3812,14 +3812,17 @@ function isScreamingSnakeConstantValue(value: string): boolean {
 	return digitCount / value.length <= 0.15;
 }
 
-// Removes the contents of every string literal on the line that is itself
-// identifier-constant-shaped (the same SCREAMING_SNAKE shape the downgrade
-// covers), keeping the quotes and using the same quote/escape walking as
-// extractStringLiteralCandidates. Sibling constants on the same line (e.g.
-// an ERROR_CODES array) must not leak secret-ish words into another
-// candidate's context, but every other literal — quoted property keys and
-// header names like "Authorization" or "apiKey" — is genuine external
-// context and stays visible to the secret-context check.
+// Removes the contents of every string literal on the line that could itself
+// be an entropy candidate of the downgraded kind: identifier-constant-shaped
+// (SCREAMING_SNAKE) AND at least the scanner's minimum candidate length —
+// and never a literal in key position (immediately followed by ":"), since
+// quoted object keys describe the value next to them. Sibling constants on
+// the same line (e.g. an ERROR_CODES array) must not leak secret-ish words
+// into another candidate's context, but every other literal — quoted
+// property keys and header names like "Authorization", "API_KEY", or even a
+// pathological 20+-char SCREAMING_SNAKE header key — is genuine external
+// context and stays visible to the secret-context check. Uses the same
+// quote/escape walking as extractStringLiteralCandidates.
 function stripIdentifierConstantLiterals(line: string): string {
 	let result = "";
 	let index = 0;
@@ -3847,7 +3850,10 @@ function stripIdentifierConstantLiterals(line: string): string {
 			cursor += 1;
 		}
 		const content = line.slice(contentStart, Math.min(cursor, line.length));
-		const keptContent = isScreamingSnakeConstantValue(content) ? "" : content;
+		const inKeyPosition = closed && /^\s*:/.test(line.slice(cursor + 1));
+		const isConstantCandidate =
+			content.length >= ENTROPY_CANDIDATE_MIN_LENGTH && isScreamingSnakeConstantValue(content);
+		const keptContent = isConstantCandidate && !inKeyPosition ? "" : content;
 		result += quote + keptContent + (closed ? quote : "");
 		index = closed ? cursor + 1 : line.length;
 	}
@@ -3869,7 +3875,7 @@ function shouldConsiderEntropyValue(value: string): boolean {
 	if (lower.includes("/") && /\.[a-z0-9]{1,8}(?:$|[/?#])/i.test(value)) {
 		return false;
 	}
-	return value.length >= 20;
+	return value.length >= ENTROPY_CANDIDATE_MIN_LENGTH;
 }
 
 function classifyEntropyCharset(value: string): "base64" | "hex" | undefined {
@@ -3902,6 +3908,11 @@ function guessSecretName(line: string): string {
 }
 
 const SECRETISH_IDENTIFIER_PATTERN = /key|token|secret|password|credential|auth/i;
+
+// Minimum length for a string literal to be considered an entropy candidate.
+// Shared by candidate extraction, entropy screening, and the context strip so
+// the three stay coherent.
+const ENTROPY_CANDIDATE_MIN_LENGTH = 20;
 
 const SECRET_PATTERNS: Array<[string, RegExp]> = [
 	["JWT-like token", /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/],
