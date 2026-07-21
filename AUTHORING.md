@@ -40,8 +40,8 @@ rounds — weak models drop or corrupt it. Split the operation into a
 **prepare/confirm pair** driven by a server-held attempt record:
 
 - The prepare operation is non-destructive. A start call takes only the
-  scalar intent fields; every response returns a fresh single-use
-  `attempt_token` referencing a server-side record (`ctx.choice.issue` with
+  scalar intent fields; every response returns a fresh `attempt_token`
+  referencing a server-side record (`ctx.choice.issue` with
   `storage.mode: "server"`) that stores every settled decision. Continue
   calls take `attempt_token` plus only the NEW answers.
 - `needs_input` rounds list only the still-pending selections; settled
@@ -55,11 +55,21 @@ rounds — weak models drop or corrupt it. Split the operation into a
   for what the user picked.
 - Expired or foreign tokens fail factually (nothing happened; start a new
   attempt with the scalar fields) — no answer salvage from a dead token.
+- **The provider must enforce consumption itself.** `ctx.choice` server
+  storage keeps tokens parseable until TTL — `parse` does not invalidate
+  them, so a confirm handler that only parses can be replayed into a second
+  booking or payment. After a successful execution, record the result under
+  the token's digest in `ctx.state` and make replays idempotent: a repeated
+  confirm returns the original created payload without touching upstream,
+  and later prepare rounds on the consumed token fail factually with the
+  existing reference. Record the result only after upstream success, so an
+  interrupted confirm stays retryable.
 
 The invariant behind all of it: complex flow state is the system's job, not
 the model's. The model carries exactly one opaque key between calls.
 Reference implementations: `providers/catchtable` `reserve`/`reserve-confirm`
-and `providers/modu-parking` payment state tokens in the platform monorepo.
+(including the consume-on-success guard) and `providers/modu-parking`
+payment state tokens in the platform monorepo.
 
 ### Description template
 
