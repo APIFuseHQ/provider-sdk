@@ -54,6 +54,8 @@ interface FlowProviderState {
 	probeDelayMs: number;
 	/** Connection ids observed by the session case's prepareInput, per run. */
 	seenConnectionIds: string[];
+	/** Helper statuses the prep case's prepareInput hook observed. */
+	prepStatuses: number[];
 	/** When true, the provider declares proxy.session.affinity = "operation". */
 	operationAffinity: boolean;
 	/** Optional per-case timeout override applied to the session case. */
@@ -79,6 +81,7 @@ function createFlowProviderState(): FlowProviderState {
 		continueDelayMs: 0,
 		probeDelayMs: 0,
 		seenConnectionIds: [],
+		prepStatuses: [],
 		operationAffinity: false,
 	};
 }
@@ -256,7 +259,13 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 									) => Promise<{ status: number }>;
 								};
 							}) => {
-								await gateway.execute(PROVIDER_ID, "session", {});
+								// Contract: the hook SEES every helper status (may branch on
+								// it) — the typical pattern throws on non-2xx.
+								const executed = await gateway.execute(PROVIDER_ID, "session", {});
+								state.prepStatuses.push(executed.status);
+								if (executed.status !== 200) {
+									throw new Error(`helper status ${executed.status}`);
+								}
 								return input;
 							},
 							assertions: () => {},
@@ -778,11 +787,14 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		// The upstream rotates: cached v1 is now stale, next login issues v2.
 		state.validCookie = "flow-session-secret-v2";
 
-		// prepareInput's gateway.execute hits 401 with the cached session —
-		// that must trigger the same one-shot recovery as a probe-level 401.
+		// prepareInput's gateway.execute hits 401 with the cached session; the
+		// hook SEES the status (contract preserved), throws, and that failure
+		// carries the auth status — triggering the same one-shot recovery as a
+		// probe-level 401.
 		const second = await runCase(selfTestApp, "prep", "prep case", "req-cycle-2");
 		expect(second.result?.status).toBe("ok");
 		expect(state.loginCount).toBe(2);
+		expect(state.prepStatuses).toContain(401);
 	});
 
 	it("redacts flow-materialized secrets from every probe output", async () => {

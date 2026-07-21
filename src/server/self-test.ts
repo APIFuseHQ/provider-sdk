@@ -302,24 +302,6 @@ export function createSelfTestAuthFlowInvoke(app: {
 	};
 }
 
-/**
- * An auth-shaped (401/403) response from the prepareInput gateway helper:
- * surfaced as a `failed` case with its httpStatus so the one-shot cached
- * session recovery (and fresh-credential eviction) can trigger — a generic
- * self_test_execution_error would hide the stale session forever.
- */
-class SelfTestPrepareAuthError extends Error {
-	constructor(
-		readonly httpStatus: number,
-		gatewayOperationId: string,
-	) {
-		super(
-			`prepareInput helper operation "${gatewayOperationId}" failed with auth status ${httpStatus}`,
-		);
-		this.name = "SelfTestPrepareAuthError";
-	}
-}
-
 class SelfTestCaseTimeoutError extends Error {
 	constructor(timeoutMs: number) {
 		super(`Self-test case timed out after ${timeoutMs}ms`);
@@ -925,6 +907,11 @@ async function executeSelfTestCase(
 	const runProbeAttempt = async (
 		connection: OperationConnection | undefined,
 	): Promise<SelfTestCaseResult> => {
+		// gateway.execute keeps its contract — EVERY helper status is returned
+		// to the prepareInput hook (it may branch on 401 itself). The last
+		// auth-shaped helper status is only RECORDED: if the hook then throws,
+		// the case fails WITH that status so stale-session recovery triggers.
+		let prepareAuthStatus: number | null = null;
 		// Share the OUTER case scope: startedAt/responseTimeMs must cover the
 		// WHOLE case — auth-flow materialization included — not just the final
 		// operation attempt, or a slow login reads as a fast healthy case.
@@ -953,7 +940,7 @@ async function executeSelfTestCase(
 										requestId: `${execution.requestId}-prepare-${randomUUID()}`,
 									});
 									if (executed.status === 401 || executed.status === 403) {
-										throw new SelfTestPrepareAuthError(executed.status, gatewayOperationId);
+										prepareAuthStatus = executed.status;
 									}
 									return {
 										status: executed.status,
@@ -1031,12 +1018,15 @@ async function executeSelfTestCase(
 					error: { code: "self_test_timeout", message: redact(error.message) },
 				});
 			}
-			if (error instanceof SelfTestPrepareAuthError) {
+			if (prepareAuthStatus !== null) {
 				return finish({
 					status: "failed",
 					label: defaultLabel,
-					httpStatus: error.httpStatus,
-					assertion: { passed: false, message: redact(error.message) },
+					httpStatus: prepareAuthStatus,
+					assertion: {
+						passed: false,
+						message: redact(error instanceof Error ? error.message : String(error)),
+					},
 				});
 			}
 			return finish({
