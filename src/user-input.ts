@@ -11,7 +11,6 @@
 //   as-is. The agent never chooses on the user's behalf.
 // - `selected_options`: selections already settled, echoed so the follow-up
 //   call keeps them without the agent reconstructing anything.
-// - `continue_with`: a ready-to-send operation + args template for the retry.
 // - a fresh provider-specific state token (e.g. `reservation_state`) minted
 //   at response time, so the retry never races an expired token.
 //
@@ -19,6 +18,12 @@
 // consumer error-shaping layers routinely strip error metadata, and a model
 // that only sees "error" narrates failure to the user. Complex recovery
 // logic belongs to the system, not the model.
+//
+// Deliberately ABSENT: retry templates, next-action routing, or any other
+// agent choreography. Provider payloads carry upstream-backed data only; how
+// to phrase the ask and shape the retry call is the consumer's contract
+// (apifuse#1030). The retry is fully determined by data: copy the echoed
+// selected_options, add the user's new answers, resend with the fresh state.
 
 export const NEEDS_INPUT_STATUS = "needs_input" as const;
 
@@ -46,20 +51,10 @@ export interface ProviderSelectedOption {
 	readonly quantity?: number;
 }
 
-export interface ProviderContinueWith {
-	readonly operation: string;
-	readonly args: Readonly<Record<string, unknown>>;
-}
-
 export interface ProviderNeedsInputPayload {
 	readonly status: typeof NEEDS_INPUT_STATUS;
 	readonly required_selections: readonly ProviderRequiredSelection[];
 	readonly selected_options?: readonly ProviderSelectedOption[];
-	// Required: the contract depends on a ready-to-send retry template — an
-	// agent that can relay options but has no canonical way to retry is back
-	// to guessing call shapes.
-	readonly continue_with: ProviderContinueWith;
-	readonly action_hint: string;
 	/** Provider-specific fresh state token(s), e.g. `reservation_state`. */
 	readonly [extra: string]: unknown;
 }
@@ -89,11 +84,11 @@ function isRequiredSelection(
 	);
 }
 
-function isContinueWith(value: unknown): value is ProviderContinueWith {
+function isSelectedOption(value: unknown): value is ProviderSelectedOption {
 	return (
 		isRecord(value) &&
-		typeof value.operation === "string" &&
-		isRecord(value.args)
+		typeof value.selection_key === "string" &&
+		typeof value.selection_value === "string"
 	);
 }
 
@@ -103,11 +98,21 @@ export function isProviderNeedsInputPayload(
 	if (!isRecord(value)) {
 		return false;
 	}
+	if (
+		value.status !== NEEDS_INPUT_STATUS ||
+		!Array.isArray(value.required_selections) ||
+		!value.required_selections.every(isRequiredSelection)
+	) {
+		return false;
+	}
+	// A needs_input with nothing to ask AND nothing settled to echo is a
+	// no-op dead end — reject it so providers cannot ship it accidentally.
+	if (value.required_selections.length > 0) {
+		return true;
+	}
 	return (
-		value.status === NEEDS_INPUT_STATUS &&
-		Array.isArray(value.required_selections) &&
-		value.required_selections.every(isRequiredSelection) &&
-		isContinueWith(value.continue_with) &&
-		typeof value.action_hint === "string"
+		Array.isArray(value.selected_options) &&
+		value.selected_options.length > 0 &&
+		value.selected_options.every(isSelectedOption)
 	);
 }

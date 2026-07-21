@@ -25,10 +25,10 @@ A mutation MUST NOT fail for a problem the end user can resolve by choosing amon
 Return the official success-shaped contract from `src/user-input.ts` instead (`ProviderNeedsInputPayload`, guard `isProviderNeedsInputPayload`):
 
 - `status: "needs_input"` plus `required_selections` — only the still-pending questions, with human-readable `label`s and `valid_options` the agent relays verbatim. The agent never chooses for the user; anything with no real choice (agreement checkboxes, single-option required groups) is the provider's job to auto-answer.
-- `selected_options` — selections already settled, echoed so the retry keeps them.
-- `continue_with` — a ready-to-send `{operation, args}` retry template.
+- `selected_options` — selections already settled, echoed so the retry keeps them (copy them back and add the user's new answers).
 - a freshly minted provider state token in the same response, so the retry never races an expired token.
-- `action_hint` — one sentence telling the agent to relay options and retry.
+
+No retry templates, next-action routing, or other agent choreography: provider payloads carry upstream-backed data only, and the consumer owns how the ask is phrased and how the retry call is shaped.
 
 Declare the union in the operation `output` schema (`z.union([CreatedSchema, NeedsInputSchema])`). Reserve hard errors for genuinely unrecoverable flows (payment-gated, unsupported input kinds) and state the concrete reason in the error `message` itself, not only in `details`. Reference implementation: `providers/catchtable` `reserve` in the platform monorepo.
 
