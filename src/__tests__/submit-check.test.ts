@@ -17,6 +17,7 @@ import {
 	renderMarkdown,
 	type SubmitCheckReport,
 } from "../../bin/apifuse-submit-check.js";
+import { syncPromptAssets } from "../cli/prompt-assets.js";
 
 const tempDirs: string[] = [];
 const repoRoot = dirname(dirname(import.meta.dir));
@@ -52,7 +53,9 @@ function makeProviderDir(
 	);
 	if (includeRepositoryDx) {
 		writeFileSync(join(dir, ".gitignore"), "node_modules/\n.env\n");
-		writeFileSync(join(dir, "AGENTS.md"), "# Agent Guide\n");
+		// Generated-scaffold prompt assets (AGENTS.md, .agents/skills, symlinks,
+		// manifest) so the freshness blocker stays green for fixture providers.
+		syncPromptAssets(dir);
 	}
 	writeFileSync(join(dir, "Dockerfile"), "FROM oven/bun:1.2-alpine\n");
 	writeFileSync(join(dir, "README.md"), readme);
@@ -294,7 +297,10 @@ describe("apifuse submit-check", () => {
 		});
 		const dxCheck = report.checks.find((check) => check.id === "repository-dx");
 
-		expect(report.score.verdict).toBe("reviewable_with_warnings");
+		// Missing prompt assets are additionally a zero-point freshness blocker,
+		// so a provider without the generated DX files is now blocked outright.
+		expect(report.score.verdict).toBe("blocked");
+		expect(report.checks.find((check) => check.id === "prompt-assets-fresh")?.status).toBe("fail");
 		expect(dxCheck?.status).toBe("warn");
 		expect(dxCheck?.message).toContain(".gitignore");
 		expect(dxCheck?.message).toContain("AGENTS.md");
@@ -2096,6 +2102,25 @@ const response = { updatedAt: "20260707222855" };
 		expect(check?.remediation).toContain("rotate");
 		expect(check?.evidence?.join("\n")).toContain("index.ts:");
 		expect(check?.evidence?.join("\n")).toContain("qJ8n...[REDACTED length=58]");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
+	it("keeps secret-scan coverage for source files planted under .agents/", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+		const dir = makeProviderDir("submit-agents-hidden-secret-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		// .agents must not be a scan-exempt sanctuary: a planted .ts there is
+		// runtime-reachable via a plain relative import from index.ts.
+		writeFileSync(
+			join(dir, ".agents", "net.ts"),
+			`export const FALLBACK_SERVICE_KEY = "${key}";\n`,
+		);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).toContain(".agents/net.ts:");
 		expect(check?.evidence?.join("\n")).not.toContain(key);
 	});
 

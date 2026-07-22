@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
@@ -16,6 +16,11 @@ const SDK_NATIVE_CATEGORY = "sdk-native";
 function materializePlan(plan: Awaited<ReturnType<typeof buildProviderCreatePlan>>): string {
 	for (const file of plan.files) {
 		mkdirSync(dirname(file.path), { recursive: true });
+		if (file.kind === "symlink") {
+			rmSync(file.path, { recursive: true, force: true });
+			symlinkSync(file.content, file.path);
+			continue;
+		}
 		writeFileSync(file.path, file.content);
 	}
 	return plan.providerRoot;
@@ -93,21 +98,20 @@ describe("provider create planning", () => {
 		const plan = await buildProviderCreatePlan(createOptions(), cwd);
 
 		const agentsGuide = findGeneratedFile(plan, "AGENTS.md");
+		expect(agentsGuide?.kind).toBeUndefined();
 		expect(agentsGuide?.content).toContain("APIFuse Provider Workspace — Agent Guide");
 		expect(agentsGuide?.content).toContain("Normalize, don't proxy");
 		expect(agentsGuide?.content).toContain("Fail closed, never fabricate");
-		expect(agentsGuide?.content).toContain("skills/upstream-notes/");
-
-		const claudeGuide = findGeneratedFile(plan, "CLAUDE.md");
-		expect(claudeGuide?.content).toContain("@AGENTS.md");
+		expect(agentsGuide?.content).toContain(".agents/skills/upstream-notes/");
+		expect(agentsGuide?.content).toContain("sync-assets");
 
 		const skillPaths = [
-			join("skills", "normalization-standards", "SKILL.md"),
-			join("skills", "upstream-contract-verification", "SKILL.md"),
-			join("skills", "fixtures-and-recording", "SKILL.md"),
-			join("skills", "pagination-and-counts", "SKILL.md"),
-			join("skills", "health-checks-and-fail-closed", "SKILL.md"),
-			join("skills", "upstream-notes", "README.md"),
+			join(".agents", "skills", "normalization-standards", "SKILL.md"),
+			join(".agents", "skills", "upstream-contract-verification", "SKILL.md"),
+			join(".agents", "skills", "fixtures-and-recording", "SKILL.md"),
+			join(".agents", "skills", "pagination-and-counts", "SKILL.md"),
+			join(".agents", "skills", "health-checks-and-fail-closed", "SKILL.md"),
+			join(".agents", "skills", "upstream-notes", "README.md"),
 		];
 		for (const skillPath of skillPaths) {
 			const file = findGeneratedFile(plan, skillPath);
@@ -115,12 +119,79 @@ describe("provider create planning", () => {
 		}
 
 		// Every skill referenced from the AGENTS.md index must be generated.
-		const referenced = agentsGuide?.content.match(/skills\/[a-z-]+\/SKILL\.md/g) ?? [];
+		const referenced = agentsGuide?.content.match(/\.agents\/skills\/[a-z-]+\/SKILL\.md/g) ?? [];
 		expect(referenced.length).toBeGreaterThan(0);
 		for (const ref of new Set(referenced)) {
 			const file = findGeneratedFile(plan, join(...ref.split("/")));
 			expect(file, `missing generated file for ${ref}`).toBeDefined();
 		}
+	});
+
+	it("plans CLAUDE.md/.claude/.codex as symlinks with a schema-v2 manifest", async () => {
+		const cwd = makeTempDir("apifuse-create-symlinks-");
+		const plan = await buildProviderCreatePlan(createOptions(), cwd);
+
+		const claudeGuide = findGeneratedFile(plan, "CLAUDE.md");
+		expect(claudeGuide?.kind).toBe("symlink");
+		expect(claudeGuide?.content).toBe("AGENTS.md");
+
+		const claudeDir = findGeneratedFile(plan, ".claude");
+		expect(claudeDir?.kind).toBe("symlink");
+		expect(claudeDir?.content).toBe(".agents");
+
+		const codexDir = findGeneratedFile(plan, ".codex");
+		expect(codexDir?.kind).toBe("symlink");
+		expect(codexDir?.content).toBe(".agents");
+
+		// No stray CLAUDE.md file plan entry and no legacy top-level skills/.
+		const relativePaths = plan.files.map((file) => file.path.slice(plan.providerRoot.length + 1));
+		expect(relativePaths.filter((path) => path === "CLAUDE.md")).toHaveLength(1);
+		expect(relativePaths.some((path) => path === "skills" || path.startsWith("skills/"))).toBeFalse();
+
+		const sdkVersion = (
+			JSON.parse(readFileSync(resolve(import.meta.dir, "../../package.json"), "utf8")) as {
+				version: string;
+			}
+		).version;
+
+		const manifest = findGeneratedFile(plan, join(".apifuse", "prompt-assets.json"));
+		expect(manifest?.kind).toBeUndefined();
+		expect(manifest?.content.endsWith("\n")).toBeTrue();
+		const parsed = JSON.parse(manifest?.content ?? "{}") as {
+			schemaVersion: number;
+			sdkVersion: string;
+			paths: string[];
+			symlinks: Record<string, string>;
+		};
+		expect(parsed.schemaVersion).toBe(2);
+		expect(parsed.sdkVersion).toBe(sdkVersion);
+		expect(parsed.symlinks).toEqual({
+			"CLAUDE.md": "AGENTS.md",
+			".claude": ".agents",
+			".codex": ".agents",
+		});
+		expect(parsed.paths).toEqual([...parsed.paths].sort());
+		expect(parsed.paths).toContain("AGENTS.md");
+		expect(parsed.paths).toContain("CLAUDE.md");
+		expect(parsed.paths).toContain(".claude");
+		expect(parsed.paths).toContain(".codex");
+		expect(parsed.paths).toContain(".agents/skills/normalization-standards/SKILL.md");
+		expect(parsed.paths).not.toContain(".apifuse/prompt-assets.json");
+
+		// Manifest must be planned after every asset it records.
+		const manifestIndex = plan.files.findIndex((file) =>
+			file.path.endsWith(join(".apifuse", "prompt-assets.json")),
+		);
+		for (const assetPath of parsed.paths) {
+			const assetIndex = plan.files.findIndex(
+				(file) => file.path === join(plan.providerRoot, assetPath),
+			);
+			expect(assetIndex).toBeGreaterThanOrEqual(0);
+			expect(assetIndex).toBeLessThan(manifestIndex);
+		}
+
+		const packageJson = findGeneratedFile(plan, "package.json");
+		expect(packageJson?.content).toContain('"sync-assets": "apifuse sync-assets ."');
 	});
 
 	it("renders standalone ignore files for local-only artifacts", async () => {
@@ -183,7 +254,15 @@ describe("provider create planning", () => {
 		expect(plan.preset).toBe("standalone");
 		expect(plan.providerRoot).toBe(join(cwd, "weather-provider"));
 		expect(packageJson?.content).not.toContain('"workspace:*"');
-		expect(packageJson?.content).toContain('"@apifuse/provider-sdk": "^');
+		// Exact pin (no caret): the freshness gate requires the installed SDK to
+		// equal the manifest's sdkVersion, which records the create CLI version.
+		const sdkVersionExact = (
+			JSON.parse(readFileSync(resolve(import.meta.dir, "../../package.json"), "utf8")) as {
+				version: string;
+			}
+		).version;
+		expect(packageJson?.content).toContain(`"@apifuse/provider-sdk": "${sdkVersionExact}"`);
+		expect(packageJson?.content).not.toContain('"@apifuse/provider-sdk": "^');
 		expect(plan.installCwd).toBe(join(cwd, "weather-provider"));
 	});
 
