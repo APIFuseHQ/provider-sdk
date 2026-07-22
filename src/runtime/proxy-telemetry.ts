@@ -1,8 +1,11 @@
 import type {
 	ProxyAttemptTelemetryEvent,
 	ProxyCacheStatus,
+	ProxyProtocol,
 	ProxyResolutionTelemetryEvent,
 	ProxyTelemetrySink,
+	ProxyVendorFailoverTelemetryEvent,
+	ProxyVendorName,
 	SmartproxyAllocatorBodyClass,
 } from "../config/loader.js";
 
@@ -11,7 +14,8 @@ export const PROVIDER_TELEMETRY_HEADER = "X-ApiFuse-Provider-Telemetry";
 type ProviderTelemetryHeader = {
 	v: 1;
 	proxy?: {
-		provider: "smartproxy";
+		provider: ProxyVendorName;
+		protocol?: ProxyProtocol;
 		cacheStatus: ProxyCacheStatus;
 		cacheHit: boolean;
 		resolutionMs: number;
@@ -27,6 +31,10 @@ type ProviderTelemetryHeader = {
 		attempts: number;
 		refreshes?: number;
 		attemptSamples?: CompactProxyAttemptSample[];
+		/** Distinct vendors attempted across the resolution chain, in order seen. */
+		vendors?: ProxyVendorName[];
+		/** Cross-vendor failover events (bounded). */
+		failovers?: CompactVendorFailoverSample[];
 	};
 };
 
@@ -41,8 +49,17 @@ type CompactProxyAttemptSample = {
 	d?: number;
 };
 
+type CompactVendorFailoverSample = {
+	v: ProxyVendorName;
+	nx?: ProxyVendorName;
+	p: "resolution" | "transport";
+	r: ProxyVendorFailoverTelemetryEvent["reason"];
+	a?: number;
+};
+
 const MAX_HEADER_BYTES = 4_096;
 const MAX_PROXY_ATTEMPT_SAMPLES = 24;
+const MAX_PROXY_FAILOVER_SAMPLES = 12;
 
 const CACHE_STATUS_SEVERITY: Record<ProxyCacheStatus, number> = {
 	disabled: 0,
@@ -76,10 +93,12 @@ function encodeBase64Url(value: string): string {
 export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 	#events: ProxyResolutionTelemetryEvent[] = [];
 	#attempts: ProxyAttemptTelemetryEvent[] = [];
+	#failovers: ProxyVendorFailoverTelemetryEvent[] = [];
 
 	recordProxyResolution(event: ProxyResolutionTelemetryEvent): void {
 		this.#events.push({
-			provider: "smartproxy",
+			provider: event.provider,
+			...(event.protocol ? { protocol: event.protocol } : {}),
 			cacheStatus: event.cacheStatus,
 			cacheHit: event.cacheHit,
 			resolutionMs: Math.max(0, Math.floor(event.resolutionMs)),
@@ -112,10 +131,21 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 		});
 	}
 
+	recordProxyVendorFailover(event: ProxyVendorFailoverTelemetryEvent): void {
+		if (this.#failovers.length >= MAX_PROXY_FAILOVER_SAMPLES) return;
+		this.#failovers.push({
+			vendor: event.vendor,
+			...(event.nextVendor ? { nextVendor: event.nextVendor } : {}),
+			phase: event.phase,
+			reason: event.reason,
+			...(event.attempt === undefined ? {} : { attempt: Math.max(0, Math.floor(event.attempt)) }),
+		});
+	}
+
 	recordProxyAttempt(event: ProxyAttemptTelemetryEvent): void {
 		if (this.#attempts.length >= MAX_PROXY_ATTEMPT_SAMPLES) return;
 		this.#attempts.push({
-			provider: "smartproxy",
+			provider: event.provider,
 			attempt: Math.max(1, Math.floor(event.attempt || 1)),
 			...(event.poolIndex === undefined
 				? {}
@@ -134,9 +164,17 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 		const [first, ...rest] = this.#events;
 		if (!first) return undefined;
 
+		// The serving vendor/protocol is the last recorded resolution (a failed
+		// vendor records first, the vendor that served records last).
+		const serving = this.#events[this.#events.length - 1] ?? first;
+		const vendors: ProxyVendorName[] = [];
+		for (const event of this.#events) {
+			if (!vendors.includes(event.provider)) vendors.push(event.provider);
+		}
+
 		const aggregate = rest.reduce<ProxyResolutionTelemetryEvent>(
 			(acc, event) => ({
-				provider: "smartproxy",
+				provider: event.provider,
 				cacheStatus: worseStatus(acc.cacheStatus, event.cacheStatus),
 				cacheHit: acc.cacheHit && event.cacheHit,
 				resolutionMs: acc.resolutionMs + event.resolutionMs,
@@ -157,7 +195,8 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 		const payload: ProviderTelemetryHeader = {
 			v: 1,
 			proxy: {
-				provider: "smartproxy",
+				provider: serving.provider,
+				...(serving.protocol ? { protocol: serving.protocol } : {}),
 				cacheStatus: aggregate.cacheStatus,
 				cacheHit: aggregate.cacheHit,
 				resolutionMs: aggregate.resolutionMs,
@@ -191,6 +230,18 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 								...(attempt.errorCode ? { c: attempt.errorCode } : {}),
 								...(attempt.status === undefined ? {} : { s: attempt.status }),
 								...(attempt.durationMs === undefined ? {} : { d: attempt.durationMs }),
+							})),
+						}
+					: {}),
+				...(vendors.length > 1 ? { vendors } : {}),
+				...(this.#failovers.length > 0
+					? {
+							failovers: this.#failovers.map((failover) => ({
+								v: failover.vendor,
+								...(failover.nextVendor ? { nx: failover.nextVendor } : {}),
+								p: failover.phase,
+								r: failover.reason,
+								...(failover.attempt === undefined ? {} : { a: failover.attempt }),
 							})),
 						}
 					: {}),

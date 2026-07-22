@@ -769,7 +769,25 @@ export type ProviderAccessVisibility = "public" | "early_access";
 
 export type ProviderProxyMode = "disabled" | "optional" | "required";
 
-export type ProviderProxyProvider = "smartproxy" | "decodo" | "custom";
+/**
+ * Proxy egress vendors. These are FOUR DISTINCT services — do not conflate them
+ * (a common mistake because the names collide with a well-known rebrand):
+ *
+ * - `smartproxy` — **api.smartproxy.org**, a residential proxy with an IP
+ *   *extraction/allocation* API (app_key → a pool of raw `ip:port` CONNECT
+ *   endpoints). This is our own vendor. It is NOT the company formerly named
+ *   "Smartproxy". Credentials: `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ * - `nodemaven` — **gate.nodemaven.com**, a *gateway* proxy with static
+ *   credentials; geo/session encoded in the username, no allocation API.
+ * - `decodo` — **decodo.com**, the *gateway* proxy that was named "Smartproxy"
+ *   (smartproxy.com) before its 2025 rebrand to Decodo. Sticky sessions via
+ *   username params. A different company from `smartproxy` above.
+ *   **@deprecated** — unused; no managed adapter. Use `smartproxy`/`nodemaven`,
+ *   or the `APIFUSE__PROXY__URL` bring-your-own escape hatch.
+ * - `custom` — **@deprecated** bring-your-own static proxy URL marker. The
+ *   `APIFUSE__PROXY__URL` env still works without declaring this value.
+ */
+export type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 
 export type ProviderProxySessionAffinity =
 	| "request"
@@ -783,7 +801,18 @@ export interface ProviderProxyPolicy {
 	 * certificate verification, and vendor allocator endpoints are SDK-owned.
 	 */
 	mode: ProviderProxyMode;
+	/**
+	 * @deprecated Use `providers: [...]` to declare an ordered vendor fallback
+	 * chain. A single-element `providers` list is equivalent to this field.
+	 */
 	provider?: ProviderProxyProvider;
+	/**
+	 * Ordered proxy-vendor fallback chain. The SDK tries each vendor in order and
+	 * fails over to the next when a vendor lacks credentials or its allocation /
+	 * transport is exhausted. When omitted, `provider` (or the platform default)
+	 * is used as a single-vendor chain.
+	 */
+	providers?: ProviderProxyProvider[];
 	geo?: {
 		/** ISO 3166-1 alpha-2 country code, for example KR or US. */
 		country?: Iso3166Alpha2CountryCode;

@@ -4,8 +4,24 @@ import path from "node:path";
 
 import { Redis } from "ioredis";
 
-import type { ProviderProxyPolicy, TraceConfig } from "../types.js";
+import type { ProviderProxyPolicy, ProviderProxyProvider, TraceConfig } from "../types.js";
+import {
+	NODEMAVEN_DEFAULT_PROTOCOL,
+	type ProxyProtocol,
+	hasNodemavenCredentials,
+	nodemavenPoolSize,
+	synthesizeNodemavenProxy,
+} from "../runtime/proxy-nodemaven.js";
 
+export type { ProxyProtocol } from "../runtime/proxy-nodemaven.js";
+
+/** Proxy vendors the SDK resolves natively (as opposed to the static env path). */
+export type ProxyVendorName = "smartproxy" | "nodemaven";
+
+// "smartproxy" here is api.smartproxy.org — a residential proxy with an IP
+// extraction API (app_key → raw ip:port pool). It is NOT the company formerly
+// named Smartproxy (smartproxy.com), which rebranded to Decodo in 2025 and is
+// modelled separately as the `decodo` gateway vendor. Do not conflate them.
 export const SMARTPROXY_APP_KEY_ENV = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 export const SMARTPROXY_MAX_LIFETIME_MINUTES = 2000;
 export const DEFAULT_SMARTPROXY_POOL_SIZE = 20;
@@ -52,6 +68,26 @@ export type ProxyResolutionOptions = {
 	affinityKey?: string;
 	/** Zero-based proxy-pool attempt index used by SDK transports for failover. */
 	proxyAttempt?: number;
+	/**
+	 * Tunnelling protocols the calling transport can use. When a resolved
+	 * protocol is not in this set the resolver fails with
+	 * `PROXY_PROTOCOL_UNSUPPORTED` instead of silently downgrading. Unset means
+	 * permissive (both protocols allowed).
+	 */
+	transportProtocols?: readonly ProxyProtocol[];
+	/**
+	 * Explicit protocol override. Internal — for the verification harness and
+	 * tests, or an advanced caller. Normal callers omit it and each vendor uses
+	 * its own benchmarked default protocol (see VENDOR_DEFAULT_PROTOCOL). Not an
+	 * env var and not a provider-policy field.
+	 */
+	protocol?: ProxyProtocol;
+	/**
+	 * Gateway pool "refresh" generation. Bumped by transports on pool refresh to
+	 * derive a fresh gateway session set (ignored by allocation-style vendors,
+	 * whose refresh is driven by cache invalidation).
+	 */
+	proxyRefreshEpoch?: number;
 	telemetry?: ProxyTelemetrySink;
 };
 
@@ -74,7 +110,8 @@ export type SmartproxyAllocatorBodyClass =
 	| "usable_proxy_endpoints";
 
 export type ProxyResolutionTelemetryEvent = {
-	provider: "smartproxy";
+	provider: ProxyVendorName;
+	protocol?: ProxyProtocol;
 	cacheStatus: ProxyCacheStatus;
 	cacheHit: boolean;
 	resolutionMs: number;
@@ -92,7 +129,7 @@ export type ProxyResolutionTelemetryEvent = {
 };
 
 export type ProxyAttemptTelemetryEvent = {
-	provider: "smartproxy";
+	provider: ProxyVendorName;
 	attempt: number;
 	poolIndex?: number;
 	proxyHash?: string;
@@ -102,31 +139,60 @@ export type ProxyAttemptTelemetryEvent = {
 	durationMs?: number;
 };
 
+export type ProxyVendorFailoverTelemetryEvent = {
+	/** Vendor that failed or was skipped. */
+	vendor: ProxyVendorName;
+	/** Vendor tried next, or undefined when the chain is exhausted. */
+	nextVendor?: ProxyVendorName;
+	phase: "resolution" | "transport";
+	reason: "no_credentials" | "allocation_failed" | "pool_exhausted" | "protocol_unsupported";
+	attempt?: number;
+};
+
 export type ProxyTelemetrySink = {
 	recordProxyResolution(event: ProxyResolutionTelemetryEvent): void;
 	recordProxyAttempt?(event: ProxyAttemptTelemetryEvent): void;
+	recordProxyVendorFailover?(event: ProxyVendorFailoverTelemetryEvent): void;
 };
 
 export type ResolvedProxyConfig = {
 	shouldWarn: boolean;
 	url?: string;
-	source?: "explicit" | "env" | "config" | "smartproxy-allocator";
+	source?: "explicit" | "env" | "config" | "smartproxy-allocator" | "nodemaven-gateway";
+	protocol?: ProxyProtocol;
 	diagnostics?: Record<string, string | number | boolean>;
 };
 
+export type ProxyResolutionErrorCode =
+	| "PROXY_REQUIRED"
+	| "PROXY_ALLOCATION_FAILED"
+	| "PROXY_PROTOCOL_UNSUPPORTED";
+
 export class ProxyResolutionError extends Error {
-	readonly code: "PROXY_REQUIRED" | "PROXY_ALLOCATION_FAILED";
+	readonly code: ProxyResolutionErrorCode;
 	readonly telemetry?: ProxyResolutionTelemetryEvent;
+	readonly vendor?: ProxyVendorName;
+	readonly vendorChain?: ProxyVendorName[];
+	readonly protocol?: ProxyProtocol;
 
 	constructor(
-		code: "PROXY_REQUIRED" | "PROXY_ALLOCATION_FAILED",
+		code: ProxyResolutionErrorCode,
 		message: string,
-		options?: { cause?: unknown; telemetry?: ProxyResolutionTelemetryEvent },
+		options?: {
+			cause?: unknown;
+			telemetry?: ProxyResolutionTelemetryEvent;
+			vendor?: ProxyVendorName;
+			vendorChain?: ProxyVendorName[];
+			protocol?: ProxyProtocol;
+		},
 	) {
 		super(message, options);
 		this.name = "ProxyResolutionError";
 		this.code = code;
 		this.telemetry = options?.telemetry;
+		this.vendor = options?.vendor;
+		this.vendorChain = options?.vendorChain;
+		this.protocol = options?.protocol;
 	}
 }
 
@@ -389,6 +455,11 @@ function applyStickyProxySession(proxyUrl: string): string {
 		return proxyUrl;
 	}
 
+	// This rewrites sticky-session usernames for a bring-your-own *gateway* URL
+	// (APIFUSE__PROXY__URL). The `smartproxy` host here means a smartproxy.com /
+	// Decodo-family gateway that authenticates by username — NOT the
+	// api.smartproxy.org allocation vendor, whose endpoints are raw ip:port with
+	// no credentials and therefore return early above.
 	const host = parsed.hostname.toLowerCase();
 	if (!host.includes("smartproxy") && !host.includes("decodo")) {
 		return proxyUrl;
@@ -477,60 +548,214 @@ export async function resolveProxyConfigAsync(
 		return { shouldWarn: false };
 	}
 
-	const provider = resolveProxyProvider(policy);
-	if (provider !== "smartproxy") {
+	const chain = resolveVendorChain(policy);
+	if (chain.length === 0) {
+		// decodo/custom/env-static providers keep the legacy static-URL path.
 		return resolveProxyConfig({
 			...options,
 			upstream: { proxy: true },
 		});
 	}
 
-	const appKey = process.env[SMARTPROXY_APP_KEY_ENV]?.trim();
-	if (!appKey) {
-		if (policy.mode === "required") {
-			throw new ProxyResolutionError(
-				"PROXY_REQUIRED",
-				`Smartproxy egress is required but ${SMARTPROXY_APP_KEY_ENV} is not configured.`,
-			);
-		}
-		return { shouldWarn: true };
-	}
-	const lifetimeMinutes = resolveSmartproxyLifetime(policy);
+	// Protocol is chosen per vendor (each vendor's benchmarked-best), with an
+	// optional explicit override for the harness/tests. Both are tunnelling
+	// schemes. transportProtocols is what the calling transport can actually use.
+	const transportProtocols = options.transportProtocols ?? (["http", "socks5"] as const);
 
-	try {
-		const allocated = await allocateSmartproxy(
-			policy,
-			appKey,
-			lifetimeMinutes,
-			options.affinityKey,
-		);
-		options.telemetry?.recordProxyResolution(allocated.telemetry);
-		const poolIndex = selectProxyPoolIndex(allocated.pool.urls.length, options.proxyAttempt);
-		return {
-			shouldWarn: false,
-			url: allocated.pool.urls[poolIndex],
-			source: "smartproxy-allocator",
-			diagnostics: {
-				...allocated.pool.diagnostics,
-				poolSize: allocated.pool.urls.length,
-				poolIndex,
-			},
-		};
-	} catch (error) {
-		if (error instanceof ProxyResolutionError && error.telemetry) {
-			options.telemetry?.recordProxyResolution(error.telemetry);
+	const sizes = chain.map((vendor) => vendorPoolSize(vendor, policy));
+	const total = sizes.reduce((sum, size) => sum + size, 0);
+	const normalizedAttempt = normalizeAttemptIndex(options.proxyAttempt);
+	const { vendorIndex: startVendorIndex, poolIndex: startPoolIndex } = mapFlatAttempt(
+		total > 0 ? normalizedAttempt % total : 0,
+		sizes,
+	);
+	const refreshEpoch = normalizeAttemptIndex(options.proxyRefreshEpoch);
+
+	let lastError: unknown;
+	let blockedProtocol: ProxyProtocol | undefined;
+	for (let vendorIndex = startVendorIndex; vendorIndex < chain.length; vendorIndex++) {
+		const vendor = chain[vendorIndex] as ProxyVendorName;
+		const nextVendor = chain[vendorIndex + 1];
+		const poolIndex = vendorIndex === startVendorIndex ? startPoolIndex : 0;
+		const protocol = options.protocol ?? VENDOR_DEFAULT_PROTOCOL[vendor];
+
+		if (!vendorHasCredentials(vendor)) {
+			options.telemetry?.recordProxyVendorFailover?.({
+				vendor,
+				nextVendor,
+				phase: "resolution",
+				reason: "no_credentials",
+			});
+			continue;
 		}
-		if (policy.mode === "required") {
-			throw error instanceof ProxyResolutionError
-				? error
+
+		// The calling transport must be able to use this vendor's protocol; if not,
+		// fail over to the next vendor rather than silently downgrading.
+		if (!transportProtocols.includes(protocol)) {
+			blockedProtocol = protocol;
+			options.telemetry?.recordProxyVendorFailover?.({
+				vendor,
+				nextVendor,
+				phase: "resolution",
+				reason: "protocol_unsupported",
+			});
+			continue;
+		}
+
+		try {
+			return await resolveWithVendor(vendor, policy, options, {
+				protocol,
+				poolIndex,
+				refreshEpoch,
+			});
+		} catch (error) {
+			// Config/programming errors (invalid filter, etc.) are not vendor
+			// outages — propagate them rather than failing over.
+			if (!(error instanceof ProxyResolutionError)) {
+				throw error;
+			}
+			if (error.telemetry) {
+				options.telemetry?.recordProxyResolution(error.telemetry);
+			}
+			lastError = error;
+			options.telemetry?.recordProxyVendorFailover?.({
+				vendor,
+				nextVendor,
+				phase: "resolution",
+				reason: "allocation_failed",
+			});
+		}
+	}
+
+	if (policy.mode === "required") {
+		if (lastError) {
+			throw lastError instanceof ProxyResolutionError
+				? lastError
 				: new ProxyResolutionError(
 						"PROXY_ALLOCATION_FAILED",
-						"Smartproxy allocator failed for required proxy egress.",
-						{ cause: error },
+						`All proxy vendors [${chain.join(", ")}] failed for required proxy egress.`,
+						{ cause: lastError, vendorChain: chain },
 					);
 		}
-		return { shouldWarn: true };
+		if (blockedProtocol) {
+			throw new ProxyResolutionError(
+				"PROXY_PROTOCOL_UNSUPPORTED",
+				`No proxy vendor in [${chain.join(", ")}] could serve a protocol supported by this transport (supports: ${transportProtocols.join(", ")}; vendor wanted "${blockedProtocol}"). Route this provider through the stealth transport.`,
+				{ protocol: blockedProtocol, vendorChain: chain },
+			);
+		}
+		throw new ProxyResolutionError(
+			"PROXY_REQUIRED",
+			`Proxy egress is required but no vendor credentials are configured. Missing: ${chain
+				.map((vendor) => `${missingCredentialEnv(vendor)} (${vendor})`)
+				.join(", ")}.`,
+			{ vendorChain: chain },
+		);
 	}
+	return { shouldWarn: true };
+}
+
+/**
+ * Each vendor's default egress protocol, chosen from live KR benchmarks. HTTP
+ * CONNECT wins for nodemaven (socks5 adds ~500ms through the gateway) and ties
+ * for smartproxy, and is the only protocol ctx.http (Bun native fetch) supports.
+ * Override per call via ProxyResolutionOptions.protocol (harness/tests).
+ */
+const VENDOR_DEFAULT_PROTOCOL: Record<ProxyVendorName, ProxyProtocol> = {
+	smartproxy: "http",
+	nodemaven: NODEMAVEN_DEFAULT_PROTOCOL,
+};
+
+/**
+ * Guard the No-MITM invariant: a resolved proxy URL must use a tunnelling scheme
+ * (http CONNECT or socks5) so the client TLS handshake reaches the origin
+ * end-to-end. Anything else would intercept TLS and break fingerprinting.
+ */
+export function assertTunnelingScheme(url: string): void {
+	let scheme: string;
+	try {
+		scheme = new URL(url).protocol.replace(/:$/, "").toLowerCase();
+	} catch {
+		throw new ProxyResolutionError("PROXY_ALLOCATION_FAILED", `Malformed proxy URL: ${url}`);
+	}
+	if (scheme !== "http" && scheme !== "socks5") {
+		throw new ProxyResolutionError(
+			"PROXY_ALLOCATION_FAILED",
+			`Resolved proxy scheme "${scheme}" is not a tunnelling scheme (expected http or socks5). Refusing to route TLS through a non-tunnelling proxy.`,
+		);
+	}
+}
+
+async function resolveWithVendor(
+	vendor: ProxyVendorName,
+	policy: ProviderProxyPolicy,
+	options: ProxyResolutionOptions,
+	context: { protocol: ProxyProtocol; poolIndex: number; refreshEpoch: number },
+): Promise<ResolvedProxyConfig> {
+	if (vendor === "nodemaven") {
+		const startedAt = Date.now();
+		const synthesized = synthesizeNodemavenProxy({
+			policy,
+			affinityKey: options.affinityKey,
+			protocol: context.protocol,
+			poolIndex: context.poolIndex,
+			refreshEpoch: context.refreshEpoch,
+			country: resolveSmartproxyCountry(policy),
+		});
+		options.telemetry?.recordProxyResolution({
+			provider: "nodemaven",
+			protocol: synthesized.protocol,
+			cacheStatus: "disabled",
+			cacheHit: false,
+			resolutionMs: Math.max(0, Date.now() - startedAt),
+			attempts: 1,
+		});
+		assertTunnelingScheme(synthesized.url);
+		return {
+			shouldWarn: false,
+			url: synthesized.url,
+			source: "nodemaven-gateway",
+			protocol: synthesized.protocol,
+			diagnostics: {
+				...synthesized.diagnostics,
+				poolIndex: context.poolIndex,
+			},
+		};
+	}
+
+	// smartproxy allocation-style vendor.
+	const appKey = process.env[SMARTPROXY_APP_KEY_ENV]?.trim();
+	if (!appKey) {
+		// Guarded by vendorHasCredentials; treated as a vendor-internal failure.
+		throw new ProxyResolutionError(
+			"PROXY_ALLOCATION_FAILED",
+			`${SMARTPROXY_APP_KEY_ENV} is not configured.`,
+			{ vendor: "smartproxy" },
+		);
+	}
+	const lifetimeMinutes = resolveSmartproxyLifetime(policy);
+	const allocated = await allocateSmartproxy(
+		policy,
+		appKey,
+		lifetimeMinutes,
+		options.affinityKey,
+		context.protocol,
+	);
+	options.telemetry?.recordProxyResolution({ ...allocated.telemetry, protocol: context.protocol });
+	const poolIndex = selectProxyPoolIndex(allocated.pool.urls.length, context.poolIndex);
+	const url = allocated.pool.urls[poolIndex];
+	if (url) assertTunnelingScheme(url);
+	return {
+		shouldWarn: false,
+		url,
+		source: "smartproxy-allocator",
+		protocol: context.protocol,
+		diagnostics: {
+			...allocated.pool.diagnostics,
+			poolSize: allocated.pool.urls.length,
+			poolIndex,
+		},
+	};
 }
 
 function resolvePolicy(options: ProxyResolutionOptions): ProviderProxyPolicy | undefined {
@@ -544,10 +769,90 @@ function resolvePolicy(options: ProxyResolutionOptions): ProviderProxyPolicy | u
 	return undefined;
 }
 
-function resolveProxyProvider(policy: ProviderProxyPolicy): string {
-	return (
-		policy.provider ?? process.env[DEFAULT_PROXY_PROVIDER_ENV]?.trim().toLowerCase() ?? "custom"
-	);
+function isRegistryVendor(name: string | undefined): name is ProxyVendorName {
+	return name === "smartproxy" || name === "nodemaven";
+}
+
+/**
+ * Ordered list of SDK-native proxy vendors declared by the policy. `providers`
+ * takes precedence over the legacy singular `provider`; the platform default
+ * env is the final fallback. Non-registry names (decodo/custom) are dropped so
+ * an all-static chain falls through to the legacy env-URL path unchanged.
+ */
+export function resolveVendorChain(policy: ProviderProxyPolicy): ProxyVendorName[] {
+	const declared: (ProviderProxyProvider | undefined)[] = policy.providers?.length
+		? policy.providers
+		: [policy.provider ?? envDefaultProvider()];
+	const chain: ProxyVendorName[] = [];
+	for (const name of declared) {
+		if (isRegistryVendor(name) && !chain.includes(name)) {
+			chain.push(name);
+		}
+	}
+	return chain;
+}
+
+function envDefaultProvider(): ProviderProxyProvider | undefined {
+	const raw = process.env[DEFAULT_PROXY_PROVIDER_ENV]?.trim().toLowerCase();
+	return (raw as ProviderProxyProvider | undefined) ?? undefined;
+}
+
+function vendorHasCredentials(vendor: ProxyVendorName): boolean {
+	if (vendor === "nodemaven") return hasNodemavenCredentials();
+	return Boolean(process.env[SMARTPROXY_APP_KEY_ENV]?.trim());
+}
+
+function missingCredentialEnv(vendor: ProxyVendorName): string {
+	return vendor === "nodemaven" ? "APIFUSE__PROXY__NODEMAVEN_USERNAME" : SMARTPROXY_APP_KEY_ENV;
+}
+
+function vendorPoolSize(vendor: ProxyVendorName, policy: ProviderProxyPolicy): number {
+	return vendor === "nodemaven" ? nodemavenPoolSize(policy) : resolveSmartproxyPoolSize(policy);
+}
+
+/**
+ * Total attempt span across a policy's vendor chain — the sum of each vendor's
+ * pool size. Transports use this so successive attempts rotate a vendor's pool
+ * and then fail over to the next vendor via the flat attempt index. With one
+ * vendor this equals that vendor's pool size (today's behaviour).
+ */
+export function resolvePolicyProxyPoolSpan(policy: ProviderProxyPolicy): number {
+	const chain = resolveVendorChain(policy);
+	if (chain.length === 0) return resolveSmartproxyPoolSize(policy);
+	return chain.reduce((sum, vendor) => sum + vendorPoolSize(vendor, policy), 0);
+}
+
+/** Map a resolved proxy source label to the vendor that served it. */
+export function vendorFromResolvedSource(
+	source: ResolvedProxyConfig["source"],
+): ProxyVendorName | undefined {
+	if (source === "nodemaven-gateway") return "nodemaven";
+	if (source === "smartproxy-allocator") return "smartproxy";
+	return undefined;
+}
+
+function normalizeAttemptIndex(attempt: number | undefined): number {
+	return Number.isFinite(attempt) ? Math.max(0, Math.floor(attempt as number)) : 0;
+}
+
+/**
+ * Map a flat attempt index into (vendorIndex, poolIndex) by concatenating each
+ * vendor's pool space in chain order. With a single vendor this reduces to
+ * `attempt % poolSize`, preserving today's behaviour exactly.
+ */
+export function mapFlatAttempt(
+	flat: number,
+	sizes: readonly number[],
+): { vendorIndex: number; poolIndex: number } {
+	let cursor = flat;
+	for (let vendorIndex = 0; vendorIndex < sizes.length; vendorIndex++) {
+		const size = Math.max(1, sizes[vendorIndex] ?? 1);
+		if (cursor < size) {
+			return { vendorIndex, poolIndex: cursor };
+		}
+		cursor -= size;
+	}
+	return { vendorIndex: 0, poolIndex: 0 };
 }
 
 function resolveSmartproxyCountry(policy: ProviderProxyPolicy): string | undefined {
@@ -591,10 +896,12 @@ function buildSmartproxyCacheKey(
 	policy: ProviderProxyPolicy,
 	affinityKey: string | undefined,
 	lifetimeMinutes: number,
+	protocol: ProxyProtocol,
 ): string {
 	const poolSize = resolveSmartproxyPoolSize(policy);
 	return JSON.stringify({
 		provider: "smartproxy",
+		protocol,
 		country: resolveSmartproxyCountry(policy),
 		affinity: policy.session?.affinity ?? "request",
 		affinityKey: (policy.session?.affinity ?? "request") === "request" ? undefined : affinityKey,
@@ -608,8 +915,9 @@ async function allocateSmartproxy(
 	appKey: string,
 	lifetimeMinutes: number,
 	affinityKey: string | undefined,
+	protocol: ProxyProtocol,
 ): Promise<SmartproxyAllocationResult> {
-	const cacheKey = buildSmartproxyCacheKey(policy, affinityKey, lifetimeMinutes);
+	const cacheKey = buildSmartproxyCacheKey(policy, affinityKey, lifetimeMinutes, protocol);
 	const startedAt = Date.now();
 	const now = startedAt;
 	const invalidatedUntil = invalidatedProxyKeys.get(cacheKey) ?? 0;
@@ -617,7 +925,7 @@ async function allocateSmartproxy(
 	const cached = proxyCache.get(cacheKey);
 	if (!skipCached && cached && isFresh(cached, now)) {
 		if (shouldSoftRefresh(cached, now)) {
-			void refreshSmartproxyPool(cacheKey, policy, appKey, lifetimeMinutes);
+			void refreshSmartproxyPool(cacheKey, policy, appKey, lifetimeMinutes, protocol);
 			return {
 				pool: cached,
 				telemetry: telemetryForPool(cached, "soft_stale_refresh", startedAt, {
@@ -653,6 +961,7 @@ async function allocateSmartproxy(
 		appKey,
 		lifetimeMinutes,
 		startedAt,
+		protocol,
 	).finally(() => {
 		proxyInflight.delete(cacheKey);
 	});
@@ -691,11 +1000,20 @@ async function refreshSmartproxyPool(
 	policy: ProviderProxyPolicy,
 	appKey: string,
 	lifetimeMinutes: number,
+	protocol: ProxyProtocol,
 ): Promise<void> {
 	try {
-		await allocateSmartproxyShared(cacheKey, policy, appKey, lifetimeMinutes, Date.now(), {
-			background: true,
-		});
+		await allocateSmartproxyShared(
+			cacheKey,
+			policy,
+			appKey,
+			lifetimeMinutes,
+			Date.now(),
+			protocol,
+			{
+				background: true,
+			},
+		);
 	} catch {
 		// Soft refresh is opportunistic; current fresh pool remains usable.
 	}
@@ -707,6 +1025,7 @@ async function allocateSmartproxyShared(
 	appKey: string,
 	lifetimeMinutes: number,
 	startedAt: number,
+	protocol: ProxyProtocol,
 	options: { background?: boolean } = {},
 ): Promise<SmartproxyAllocationResult> {
 	const redis = getProxyRedis();
@@ -717,7 +1036,7 @@ async function allocateSmartproxyShared(
 			appKey,
 			lifetimeMinutes,
 			startedAt,
-			{ cacheStatus: "allocator" },
+			{ cacheStatus: "allocator", protocol },
 		);
 	}
 
@@ -742,6 +1061,7 @@ async function allocateSmartproxyShared(
 						cacheStatus: options.background ? "soft_stale_refresh" : "allocator",
 						redis,
 						poolKey,
+						protocol,
 					},
 				);
 			} finally {
@@ -897,10 +1217,17 @@ async function allocateAndStoreSmartproxyPool(
 		cacheStatus: ProxyCacheStatus;
 		redis?: ProxyRedisClient;
 		poolKey?: string;
+		protocol: ProxyProtocol;
 	},
 ): Promise<SmartproxyAllocationResult> {
 	const poolSize = resolveSmartproxyPoolSize(policy);
-	const allocatorUrl = buildSmartproxyAllocatorUrl(policy, appKey, lifetimeMinutes, poolSize);
+	const allocatorUrl = buildSmartproxyAllocatorUrl(
+		policy,
+		appKey,
+		lifetimeMinutes,
+		poolSize,
+		options.protocol,
+	);
 	const allocatorStartedAt = Date.now();
 	const allocatorDeadlineAt = allocatorStartedAt + smartproxyAllocatorDeadlineMs();
 	let allocation: SmartproxyAllocatorSuccess | undefined;
@@ -914,6 +1241,7 @@ async function allocateAndStoreSmartproxyPool(
 			allocatorUrl,
 			attempt,
 			allocatorDeadlineAt,
+			options.protocol,
 		);
 		if (attemptResult.ok) {
 			allocation = attemptResult;
@@ -1034,6 +1362,7 @@ async function fetchSmartproxyAllocatorAttempt(
 	allocatorUrl: string,
 	attempt: number,
 	deadlineAt: number,
+	protocol: ProxyProtocol,
 ): Promise<SmartproxyAllocatorAttemptResult> {
 	const { controller, dispose } = createDeadlineAbortController(deadlineAt);
 	let response: Response;
@@ -1077,7 +1406,7 @@ async function fetchSmartproxyAllocatorAttempt(
 		};
 	}
 
-	const urls = parseSmartproxyAllocatorProxies(body);
+	const urls = parseSmartproxyAllocatorProxies(body, protocol);
 	const bodyClass = classifySmartproxyAllocatorBody(body, urls);
 	if (urls.length === 0) {
 		return {
@@ -1117,18 +1446,27 @@ function smartproxyAllocatorFailureMessage(
 	return "Smartproxy allocator response did not contain a usable proxy endpoint.";
 }
 
+// Smartproxy get-ip-v3 `protocol` param: 1 = HTTP. The SOCKS5 value ("2") is a
+// best-effort mapping pending live vendor confirmation; http is the default and
+// the only value exercised in production today.
+const SMARTPROXY_PROTOCOL_PARAM: Record<ProxyProtocol, string> = {
+	http: "1",
+	socks5: "2",
+};
+
 function buildSmartproxyAllocatorUrl(
 	policy: ProviderProxyPolicy,
 	appKey: string,
 	lifetimeMinutes: number,
 	poolSize: number,
+	protocol: ProxyProtocol,
 ): string {
 	const params = new URLSearchParams({
 		app_key: appKey,
 		pt: "9",
 		num: String(poolSize),
 		life: String(lifetimeMinutes),
-		protocol: "1",
+		protocol: SMARTPROXY_PROTOCOL_PARAM[protocol],
 		format: "txt",
 		lb: "\\n",
 	});
@@ -1141,7 +1479,8 @@ function buildSmartproxyAllocatorUrl(
 	return `https://api.smartproxy.org/web_v1/ip/get-ip-v3?${params.toString()}`;
 }
 
-function parseSmartproxyAllocatorProxies(body: string): string[] {
+function parseSmartproxyAllocatorProxies(body: string, protocol: ProxyProtocol): string[] {
+	const scheme = protocol === "socks5" ? "socks5" : "http";
 	const trimmed = body.trim();
 	if (!trimmed) {
 		return [];
@@ -1162,7 +1501,7 @@ function parseSmartproxyAllocatorProxies(body: string): string[] {
 						"port" in item && (typeof item.port === "string" || typeof item.port === "number")
 							? item.port
 							: "";
-					return ip && port ? `http://${ip}:${port}` : null;
+					return ip && port ? `${scheme}://${ip}:${port}` : null;
 				})
 				.filter((url): url is string => url !== null);
 		}
@@ -1174,7 +1513,7 @@ function parseSmartproxyAllocatorProxies(body: string): string[] {
 		.split(/\r?\n/)
 		.map((item) => item.trim())
 		.filter((item) => /^\d{1,3}(?:\.\d{1,3}){3}:\d{2,5}$/.test(item))
-		.map((line) => `http://${line}`);
+		.map((line) => `${scheme}://${line}`);
 }
 
 function classifySmartproxyAllocatorBody(
@@ -1207,12 +1546,17 @@ function markSmartproxyCacheInvalidated(options: ProxyResolutionOptions = {}): s
 	if (!policy || policy.mode === "disabled") {
 		return undefined;
 	}
-	if (resolveProxyProvider(policy) !== "smartproxy") {
+	if (!resolveVendorChain(policy).includes("smartproxy")) {
 		return undefined;
 	}
 
 	const lifetimeMinutes = resolveSmartproxyLifetime(policy);
-	const cacheKey = buildSmartproxyCacheKey(policy, options.affinityKey, lifetimeMinutes);
+	const cacheKey = buildSmartproxyCacheKey(
+		policy,
+		options.affinityKey,
+		lifetimeMinutes,
+		options.protocol ?? VENDOR_DEFAULT_PROTOCOL.smartproxy,
+	);
 	invalidatedProxyKeys.set(cacheKey, Date.now() + SMARTPROXY_INVALIDATION_SKIP_REDIS_MS);
 	proxyCache.delete(cacheKey);
 	proxyInflight.delete(cacheKey);

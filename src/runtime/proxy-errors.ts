@@ -19,10 +19,18 @@ const PROXY_AUTH_IP_DENIED_PATTERN =
 	/\b(?:source|egress|client)\s+ip\b.{0,120}\b(?:deny|denied|unauthori[sz]ed|not\s+authori[sz]ed|white\s*list|allow\s*list)\b|\b(?:white\s*list|allow\s*list)\b.{0,120}\b(?:source|egress|client)\s+ip\b/i;
 const PROXY_EDGE_AUTH_REJECTED_PATTERN =
 	/\bauth\s+ip\s+err\b|\bproxy\b.{0,120}\bauth(?:entication)?\b.{0,120}\b(?:reject(?:ed)?|fail(?:ed)?|invalid|den(?:y|ied)|unauthori[sz]ed)\b|\bauth(?:entication)?\b.{0,120}\b(?:reject(?:ed)?|fail(?:ed)?|invalid|den(?:y|ied)|unauthori[sz]ed)\b.{0,120}\bproxy\b/i;
-const PROXY_POOL_STALE_MESSAGE_PATTERN =
-	/\bproxy\b.{0,120}\b(?:pool|lease|expired|unavailable|exhausted|non[\s-]?200\s+code:\s*(?:509|512))\b|\bnon[\s-]?200\s+code:\s*(?:509|512)\b.{0,120}\bproxy\b|\bsmartproxy\b.{0,120}\b(?:509|512)\b/i;
-const PROXY_EDGE_TLS_REJECTED_MESSAGE_PATTERN =
-	/\b(?:smartproxy|proxy)\b.{0,160}\b(?:495|ssl|tls|cert(?:ificate)?|handshake|edge|connect|non[\s-]?200)\b|\b(?:495|ssl|tls|cert(?:ificate)?|handshake|edge|connect|non[\s-]?200)\b.{0,160}\b(?:smartproxy|proxy)\b/i;
+// Vendor host tokens that can appear in upstream error strings. Adding a proxy
+// vendor updates every classifier below in one place. `proxy` is the generic
+// fallback so vendor-agnostic messages still classify.
+const PROXY_VENDOR_ALTERNATION = "smartproxy|nodemaven|proxy";
+const PROXY_POOL_STALE_MESSAGE_PATTERN = new RegExp(
+	`\\bproxy\\b.{0,120}\\b(?:pool|lease|expired|unavailable|exhausted|non[\\s-]?200\\s+code:\\s*(?:509|512))\\b|\\bnon[\\s-]?200\\s+code:\\s*(?:509|512)\\b.{0,120}\\bproxy\\b|\\b(?:${PROXY_VENDOR_ALTERNATION})\\b.{0,120}\\b(?:509|512)\\b`,
+	"i",
+);
+const PROXY_EDGE_TLS_REJECTED_MESSAGE_PATTERN = new RegExp(
+	`\\b(?:${PROXY_VENDOR_ALTERNATION})\\b.{0,160}\\b(?:495|ssl|tls|cert(?:ificate)?|handshake|edge|connect|non[\\s-]?200)\\b|\\b(?:495|ssl|tls|cert(?:ificate)?|handshake|edge|connect|non[\\s-]?200)\\b.{0,160}\\b(?:${PROXY_VENDOR_ALTERNATION})\\b`,
+	"i",
+);
 
 export function isProxyAuthIpDeniedMessage(message: string): boolean {
 	return PROXY_AUTH_IP_DENIED_PATTERN.test(message);

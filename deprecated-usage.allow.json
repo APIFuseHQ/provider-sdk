@@ -1,0 +1,14 @@
+{
+  "allow": [
+    {
+      "file": "src/config/loader.ts",
+      "symbol": "provider",
+      "reason": "resolveVendorChain reads the deprecated singular proxy.provider field to build a single-vendor chain for backwards compatibility."
+    },
+    {
+      "file": "src/define.ts",
+      "symbol": "provider",
+      "reason": "validateProviderProxy accepts the deprecated singular proxy.provider field and validates it for backwards compatibility."
+    }
+  ]
+}
