@@ -64,22 +64,44 @@ export async function main() {
 	}
 
 	const result = syncPromptAssets(providerRoot);
+
+	// Honesty gate: writes alone never imply success. sync-assets intentionally
+	// PRESERVES (does not delete) unauthorized skills and symlinks under
+	// .agents/skills, so it can return changed:false while verify still fails.
+	// Re-verify AFTER writing and let the true post-sync state drive the exit
+	// code — never claim success while the freshness gate would reject the tree.
+	const verification = verifyPromptAssets(providerRoot);
+
+	if (result.changed) {
+		for (const removed of result.removed) {
+			console.log(`removed  ${removed}`);
+		}
+		for (const wrote of result.wroteFiles) {
+			console.log(`wrote    ${wrote}`);
+		}
+		for (const link of result.createdSymlinks) {
+			console.log(`symlink  ${link}`);
+		}
+		console.log(`manifest ${result.manifestPath} (sdkVersion ${installedSdkVersion()})`);
+	}
+
+	if (!verification.ok) {
+		console.error(`\nPrompt assets are still out of sync in ${providerRoot}:`);
+		for (const issue of formatPromptAssetIssues(verification)) {
+			console.error(`  - ${issue}`);
+		}
+		console.error(
+			"\nsync-assets never deletes unrecognized content: resolve these by hand — remove any unauthorized skill directory or symlink under .agents/skills/, migrate a real .claude/.codex directory into .agents/ — then re-run `apifuse sync-assets .`.",
+		);
+		process.exit(1);
+	}
+
 	if (!result.changed) {
 		console.log(
 			`Prompt assets already in sync with the installed SDK (${installedSdkVersion()}): ${providerRoot}`,
 		);
 		return;
 	}
-	for (const removed of result.removed) {
-		console.log(`removed  ${removed}`);
-	}
-	for (const wrote of result.wroteFiles) {
-		console.log(`wrote    ${wrote}`);
-	}
-	for (const link of result.createdSymlinks) {
-		console.log(`symlink  ${link}`);
-	}
-	console.log(`manifest ${result.manifestPath} (sdkVersion ${installedSdkVersion()})`);
 	console.log(`\nPrompt assets synced: ${providerRoot}`);
 }
 

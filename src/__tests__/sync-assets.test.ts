@@ -757,6 +757,83 @@ describe("apifuse sync-assets", () => {
 		expect(readFileSync(join(providerRoot, ".codex", "config.toml"), "utf8")).toBe('model = "x"\n');
 	});
 
+	it("sync-assets (default mode) exits non-zero on an injected skill, never deletes it, converges after removal", async () => {
+		const cwd = makeTempDir("sync-assets-cli-injected-skill-");
+		const providerRoot = await materializeScaffold(cwd);
+		mkdirSync(join(providerRoot, ".agents", "skills", "pwn"), { recursive: true });
+		writeFileSync(join(providerRoot, ".agents", "skills", "pwn", "SKILL.md"), "# pwn\n");
+
+		const run = runSyncAssetsCli(providerRoot);
+		expect(run.status).toBe(1);
+		const out = `${run.stdout}\n${run.stderr}`;
+		expect(out).toContain(".agents/skills/pwn/");
+		expect(out).not.toContain("already in sync");
+		// The injected skill is preserved (a human must remove it), never deleted.
+		expect(existsSync(join(providerRoot, ".agents", "skills", "pwn", "SKILL.md"))).toBeTrue();
+
+		// After the user removes it by hand, sync-assets converges and exits 0.
+		rmSync(join(providerRoot, ".agents", "skills", "pwn"), { recursive: true, force: true });
+		const ok = runSyncAssetsCli(providerRoot);
+		expect(ok.status).toBe(0);
+	});
+
+	it("sync-assets (default mode) reports 'already in sync' and exits 0 on a clean provider", async () => {
+		const cwd = makeTempDir("sync-assets-cli-clean-");
+		const providerRoot = await materializeScaffold(cwd);
+		const run = runSyncAssetsCli(providerRoot);
+		expect(run.status).toBe(0);
+		expect(run.stdout).toContain("already in sync");
+	});
+
+	it("sync-assets (default mode) converges to exit 0 when only managed writes are needed", async () => {
+		const cwd = makeTempDir("sync-assets-cli-managed-writes-");
+		const providerRoot = await materializeScaffold(cwd);
+		const skillPath = join(providerRoot, ".agents", "skills", "pagination-and-counts", "SKILL.md");
+		writeFileSync(skillPath, "tampered\n");
+
+		const run = runSyncAssetsCli(providerRoot);
+		expect(run.status).toBe(0);
+		expect(run.stdout).toContain("Prompt assets synced");
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+	});
+
+	it("preserves a legacy upstream-note when .agents is a symlink to an outside dir with identical bytes", async () => {
+		const cwd = makeTempDir("sync-assets-agents-symlink-legacy-note-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		const noteBytes = "# vendor foo\nhard-won quirk\n";
+
+		// Move the real .agents outside and symlink .agents at it; the outside
+		// tree already holds an identical-bytes upstream note.
+		const outsideAgents = join(cwd, "outside-agents");
+		renameSync(join(providerRoot, ".agents"), outsideAgents);
+		mkdirSync(join(outsideAgents, "skills", "upstream-notes"), { recursive: true });
+		writeFileSync(join(outsideAgents, "skills", "upstream-notes", "foo.md"), noteBytes);
+		symlinkSync(outsideAgents, join(providerRoot, ".agents"));
+
+		// Legacy top-level skills/ carries the SAME note (identical bytes) — the
+		// through-symlink duplicate check would otherwise drop it as redundant.
+		mkdirSync(join(providerRoot, "skills", "upstream-notes"), { recursive: true });
+		writeFileSync(join(providerRoot, "skills", "upstream-notes", "foo.md"), noteBytes);
+
+		const result = syncPromptAssets(providerRoot);
+		expect(result.changed).toBeTrue();
+
+		// .agents is now a REAL directory (the symlink was normalized away first).
+		expect(lstatSync(join(providerRoot, ".agents")).isDirectory()).toBeTrue();
+		expect(lstatSync(join(providerRoot, ".agents")).isSymbolicLink()).toBeFalse();
+		// The contributor note survives in the real tree — not dropped as redundant.
+		const notePath = join(providerRoot, ".agents", "skills", "upstream-notes", "foo.md");
+		expect(existsSync(notePath)).toBeTrue();
+		expect(readFileSync(notePath, "utf8")).toBe(noteBytes);
+		// Legacy skills/ is gone, verify is green, and the outside tree is untouched.
+		expect(existsSync(join(providerRoot, "skills"))).toBeFalse();
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+		expect(readFileSync(join(outsideAgents, "skills", "upstream-notes", "foo.md"), "utf8")).toBe(
+			noteBytes,
+		);
+	});
+
 	it("flags a symlink directly under .agents/skills/ but ignores a symlink at the .agents/ root", async () => {
 		const cwd = makeTempDir("sync-assets-injected-symlink-");
 		const providerRoot = await materializeScaffold(cwd);

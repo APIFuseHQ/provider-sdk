@@ -672,6 +672,20 @@ export function syncPromptAssets(providerRoot: string): PromptAssetSyncResult {
 	const wroteFiles: string[] = [];
 	const createdSymlinks: string[] = [];
 
+	// 0. Normalize `.agents` into a REAL directory BEFORE anything is written
+	// into or compared against it. A symlinked (or regular-file) `.agents` would
+	// otherwise let step 1's upstream-notes duplicate check read the destination
+	// THROUGH the link (an outside file); a byte match would skip the legacy note
+	// as "redundant", then the link is replaced with a real dir and legacy
+	// skills/ is removed — silently dropping the contributor note. lstat only;
+	// the symlink is unlinked, never followed (its outside target is untouched).
+	const agentsAbsPath = join(providerRoot, ".agents");
+	const agentsStat = lstatSafe(agentsAbsPath);
+	if (agentsStat && !agentsStat.isDirectory()) {
+		rmSync(agentsAbsPath, { recursive: true, force: true });
+	}
+	mkdirSync(agentsAbsPath, { recursive: true });
+
 	// 1. Legacy top-level skills/ from the pre-.agents layout. Contributor-
 	// authored upstream-notes files are relocated into the managed
 	// .agents/skills/upstream-notes/ zone FIRST (never destroyed); only then is
