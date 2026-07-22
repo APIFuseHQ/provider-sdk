@@ -75,6 +75,11 @@ export {
 export { type PrevalidateResult, prevalidate } from "./runtime/prevalidate.js";
 export { getProviderBaseUrl } from "./runtime/provider.js";
 export {
+	assertRequiredSecretsPresent,
+	listMissingRequiredSecrets,
+	MISSING_SECRET_CODE,
+} from "./runtime/secrets.js";
+export {
 	createUnsupportedProviderRuntimeState,
 	UnsupportedProviderStateError,
 } from "./runtime/state.js";

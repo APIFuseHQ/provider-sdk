@@ -43,6 +43,11 @@ import {
 } from "../runtime/proxy-errors.js";
 import { PROVIDER_TELEMETRY_HEADER, ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
 import {
+	assertRequiredSecretsPresent,
+	listMissingRequiredSecrets,
+	MISSING_SECRET_CODE,
+} from "../runtime/secrets.js";
+import {
 	createProviderRuntimeStateFromEnv,
 	createUnsupportedProviderRuntimeState,
 } from "../runtime/state.js";
@@ -410,6 +415,12 @@ export type ProviderServerLogEvent =
 	  })
 	| {
 			level: "warn";
+			event: "provider_secrets_missing";
+			providerId: string;
+			missingSecrets: string[];
+	  }
+	| {
+			level: "warn";
 			event: "provider_cleanup_failed";
 			providerId: string;
 			kind: "operation";
@@ -558,6 +569,18 @@ function providerObservabilityDetails(error: unknown):
 			retryable: error.options?.retryable ?? false,
 		};
 	}
+	// Missing-secret errors carry the canonical credential_unavailable category
+	// so Gateway/observability can attribute the failure to provisioning, not
+	// the upstream. Matched by code (not constructor) so both the SDK-owned
+	// runtime gate and any not-yet-migrated provider-thrown MISSING_SECRET
+	// serialize identically, including across duplicate SDK module instances.
+	if (isProviderError(error) && error.code === MISSING_SECRET_CODE) {
+		return {
+			category: error.options?.category ?? "credential_unavailable",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: error.options?.retryable ?? false,
+		};
+	}
 	if (!isTransportError(error)) {
 		return undefined;
 	}
@@ -628,6 +651,10 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 			case "AUTH_REQUIRED":
 			case "reauth_required":
 				return 401;
+			// Unprovisioned declared secret: a deployment/config defect, never an
+			// upstream failure — explicit 400 (was only reached via fallthrough).
+			case MISSING_SECRET_CODE:
+				return 400;
 			case "NOT_FOUND":
 			case "not_found":
 			case "NO_DATA":
@@ -1224,8 +1251,16 @@ async function handleAuthFlow(
 		});
 	}
 
+	// Same SDK-owned gate as executeOperation: OAuth/credentials ceremonies
+	// depend on declared secrets (client ids/secrets), so fail structured before
+	// any flow code runs instead of at whatever point the ceremony first reads
+	// the env. `abort` stays exempt: a user must always be able to cancel a
+	// stranded flow even when provisioning is broken.
 	const { context, getPatch } = createAuthFlowContext(provider, request, options, signal);
 	try {
+		if (route !== "abort") {
+			assertRequiredSecretsPresent(provider, context.env);
+		}
 		const result =
 			route === "start"
 				? await flow.start(context)
@@ -1279,6 +1314,24 @@ export function createServerApp(
 			providerId: provider.id,
 			allowMemoryFallback: options.allowMemoryStateFallback === true,
 		});
+
+	// Boot-time visibility for unprovisioned declared secrets: emit a structured
+	// warn so deploy tooling/alerting sees the gap the moment the pod boots,
+	// instead of discovering it request-by-request. Deliberately log-only — a
+	// boot crash would trade a structured MISSING_SECRET signal for
+	// CrashLoopBackOff. Requests still fail closed via the executeOperation gate.
+	const missingSecretsAtBoot = listMissingRequiredSecrets(
+		provider,
+		createEnvContext(provider.secrets?.map((secret) => secret.name)),
+	);
+	if (missingSecretsAtBoot.length > 0) {
+		logger({
+			level: "warn",
+			event: "provider_secrets_missing",
+			providerId: provider.id,
+			missingSecrets: missingSecretsAtBoot,
+		});
+	}
 
 	app.notFound((c) =>
 		c.json(

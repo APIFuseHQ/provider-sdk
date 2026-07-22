@@ -2,7 +2,12 @@ import { describe, expect, it, mock } from "bun:test";
 
 import { z } from "zod";
 
-import { isSessionExpiredError, SessionExpiredError, TransportError } from "../errors.js";
+import {
+	isSessionExpiredError,
+	type ProviderError,
+	SessionExpiredError,
+	TransportError,
+} from "../errors.js";
 
 // A query-qualified specifier forces Bun to evaluate errors.ts a second time,
 // producing a genuinely separate module identity (distinct constructors) that
@@ -318,5 +323,135 @@ describe("executeOperation", () => {
 			SessionExpiredError,
 		);
 		expect(calls).toBe(1);
+	});
+});
+
+describe("executeOperation SDK-owned secret enforcement", () => {
+	const API_KEY = "APIFUSE__PROVIDER__TEST_PROVIDER__API_KEY";
+	const SECOND_KEY = "APIFUSE__PROVIDER__TEST_PROVIDER__SECOND_KEY";
+
+	function ctxWithEnv(values: Record<string, string | undefined>): ProviderContext {
+		return {
+			...createMockCtx({}),
+			env: { get: (key: string) => values[key] },
+		};
+	}
+
+	function providerWithSecrets(
+		secrets: ProviderDefinition["secrets"],
+		handler: () => Promise<{ results: string[] }>,
+	): ProviderDefinition {
+		return { ...createMockProvider({ handler }), secrets };
+	}
+
+	it("throws structured MISSING_SECRET before the handler when a required secret is unset", async () => {
+		let calls = 0;
+		const provider = providerWithSecrets([{ name: API_KEY, required: true }], async () => {
+			calls++;
+			return { results: [] };
+		});
+
+		await expect(
+			executeOperation(provider, "search", ctxWithEnv({}), { query: "test" }),
+		).rejects.toMatchObject({
+			name: "ProviderSecretError",
+			message: `Missing required provider secret: ${API_KEY}`,
+			options: {
+				code: "MISSING_SECRET",
+				category: "credential_unavailable",
+				retryable: false,
+			},
+		});
+		expect(calls).toBe(0);
+	});
+
+	it("names the missing secret in the fix so operators know what to provision", async () => {
+		const provider = providerWithSecrets([{ name: API_KEY, required: true }], async () => ({
+			results: [],
+		}));
+
+		let caught: unknown;
+		try {
+			await executeOperation(provider, "search", ctxWithEnv({}), { query: "test" });
+		} catch (error) {
+			caught = error;
+		}
+
+		expect((caught as ProviderError).fix).toContain(API_KEY);
+	});
+
+	it("gates before input validation so probes fail with MISSING_SECRET, not invalid input", async () => {
+		const provider = providerWithSecrets([{ name: API_KEY, required: true }], async () => ({
+			results: [],
+		}));
+
+		// Input violates the schema; the secret gate must still win.
+		await expect(
+			executeOperation(provider, "search", ctxWithEnv({}), { query: 42 }),
+		).rejects.toMatchObject({ options: { code: "MISSING_SECRET" } });
+	});
+
+	it("treats whitespace-only values as missing", async () => {
+		let calls = 0;
+		const provider = providerWithSecrets([{ name: API_KEY, required: true }], async () => {
+			calls++;
+			return { results: [] };
+		});
+
+		await expect(
+			executeOperation(provider, "search", ctxWithEnv({ [API_KEY]: "   " }), { query: "test" }),
+		).rejects.toMatchObject({ options: { code: "MISSING_SECRET" } });
+		expect(calls).toBe(0);
+	});
+
+	it("lists every missing required secret in a single error", async () => {
+		const provider = providerWithSecrets(
+			[
+				{ name: API_KEY, required: true },
+				{ name: SECOND_KEY, required: true },
+			],
+			async () => ({ results: [] }),
+		);
+
+		await expect(
+			executeOperation(provider, "search", ctxWithEnv({}), { query: "test" }),
+		).rejects.toMatchObject({
+			message: `Missing required provider secrets: ${API_KEY}, ${SECOND_KEY}`,
+		});
+	});
+
+	it("runs the handler when the required secret is present", async () => {
+		const provider = providerWithSecrets([{ name: API_KEY, required: true }], async () => ({
+			results: ["ok"],
+		}));
+
+		const result = await executeOperation(provider, "search", ctxWithEnv({ [API_KEY]: "value" }), {
+			query: "test",
+		});
+
+		expect(result).toEqual({ results: ["ok"] });
+	});
+
+	it("does not enforce optional or default-flag declarations", async () => {
+		const provider = providerWithSecrets(
+			[{ name: API_KEY, required: false }, { name: SECOND_KEY }],
+			async () => ({ results: ["ok"] }),
+		);
+
+		const result = await executeOperation(provider, "search", ctxWithEnv({}), { query: "test" });
+
+		expect(result).toEqual({ results: ["ok"] });
+	});
+
+	it("leaves undeclared env reads untouched", async () => {
+		// No secrets declared: handlers may still read ctx.env freely and the
+		// gate never fires.
+		const provider = createMockProvider({
+			handler: async () => ({ results: ["no-secrets"] }),
+		});
+
+		const result = await executeOperation(provider, "search", ctxWithEnv({}), { query: "test" });
+
+		expect(result).toEqual({ results: ["no-secrets"] });
 	});
 });
