@@ -11,7 +11,7 @@ import {
 	ProviderChoiceTokenError,
 	type ProviderChoiceTokenPayload,
 } from "../choice-token.js";
-import { ProviderError } from "../errors.js";
+import { isProviderError, ProviderError } from "../errors.js";
 import type {
 	CredentialContext,
 	EnvContext,
@@ -23,6 +23,7 @@ import type {
 	ProviderRequestContext,
 	ProviderRuntimeState,
 	ProviderStateDurationString,
+	StateValue,
 } from "../types.js";
 
 export const PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV =
@@ -359,9 +360,29 @@ async function parseServerStoredChoice(options: {
 		storage,
 		contextState: options.contextState,
 	});
-	const record = await namespace.get<ProviderChoiceTokenPayload>(
-		optionsStateKey(options.handle.state_id),
-	);
+	// Reading a server-stored choice back deserializes a persisted value. A
+	// corrupt/undecodable value would otherwise surface as a raw JSON.parse
+	// SyntaxError (or another unexpected throwable) that escapes the choice error
+	// taxonomy, gets masked as internal_error 500, and is treated as retryable by
+	// the hub -> reservation restart loop (2026-07-22 catchtable RCA, candidate A).
+	// Convert any non-branded throwable into a branded invalid_payload so it maps
+	// to a clean, non-retryable 400. Branded ProviderChoiceTokenError and genuine
+	// ProviderError (e.g. Redis-unavailable / state-unavailable) pass through so
+	// their category/retryable semantics are preserved.
+	let record: StateValue<ProviderChoiceTokenPayload> | null;
+	try {
+		record = await namespace.get<ProviderChoiceTokenPayload>(
+			optionsStateKey(options.handle.state_id),
+		);
+	} catch (error) {
+		if (error instanceof ProviderChoiceTokenError || isProviderError(error)) {
+			throw error;
+		}
+		throw new ProviderChoiceTokenError(
+			"invalid_payload",
+			"Provider choice token state payload could not be decoded.",
+		);
+	}
 	if (!record) {
 		throw new ProviderChoiceTokenError(
 			"invalid_payload",

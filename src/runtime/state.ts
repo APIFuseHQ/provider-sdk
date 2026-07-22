@@ -115,7 +115,17 @@ function envelopeFromJson(
 	// biome-ignore lint/suspicious/noExplicitAny: state envelopes deserialize caller-owned generic values.
 ): StateValue<any> | null {
 	if (!raw) return null;
-	const parsed: unknown = JSON.parse(raw);
+	// A corrupt/undecodable persisted envelope must be treated as absent rather
+	// than throwing a raw JSON.parse SyntaxError: an uncaught SyntaxError escapes
+	// the provider error taxonomy, is masked as internal_error 500, and is then
+	// retried by the hub (2026-07-22 catchtable reserve RCA, candidate A). Returning
+	// null also keeps list() from aborting the whole scan on a single bad entry.
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return null;
+	}
 	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
 		return null;
 	}

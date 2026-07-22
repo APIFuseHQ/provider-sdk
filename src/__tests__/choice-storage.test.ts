@@ -127,6 +127,46 @@ describe("managed choice storage", () => {
 		).rejects.toThrow(ProviderChoiceTokenError);
 	});
 
+	it("rejects a corrupt/undecodable server choice as a branded token error, not a raw SyntaxError", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({ state });
+		const token = await choice.issue({
+			prefix: "provider_choice_v2",
+			purpose: "reservation",
+			payload: { choice_id: "A", details: "x".repeat(2_000) },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+		// Simulate the Redis-backed decode failure: the stored envelope bytes are
+		// corrupt, so the state read throws a raw JSON.parse SyntaxError. Before the
+		// hotfix this escaped the choice error taxonomy and was masked as a retryable
+		// internal_error 500 (2026-07-22 catchtable reserve loop, candidate A).
+		const namespace = state.firstNamespace();
+		namespace.get = async () => {
+			throw new SyntaxError("Unexpected token < in JSON at position 0");
+		};
+
+		const parsePromise = choice.parse({
+			token,
+			prefix: "provider_choice_v2",
+			purpose: "reservation",
+			ttlMs: 60_000,
+			nowMs: 2_000,
+			storage: STORAGE_OPTIONS,
+		});
+
+		await expect(parsePromise).rejects.toThrow(ProviderChoiceTokenError);
+		await expect(parsePromise).rejects.not.toBeInstanceOf(SyntaxError);
+		try {
+			await parsePromise;
+			throw new Error("Expected parse to reject.");
+		} catch (error) {
+			expect(error).toBeInstanceOf(ProviderChoiceTokenError);
+			expect((error as ProviderChoiceTokenError).reason).toBe("invalid_payload");
+		}
+	});
+
 	it("rejects managed server choices when stored state digest changes", async () => {
 		const state = new MemoryProviderRuntimeState();
 		const choice = createManagedChoiceFixture({ state });
