@@ -568,6 +568,66 @@ describe("apifuse sync-assets", () => {
 		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
 	});
 
+	it("never overwrites a newer .agents upstream-note when migrating a conflicting legacy copy", async () => {
+		const cwd = makeTempDir("sync-assets-upstream-notes-conflict-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		// Manually-migrated (newer) note already lives under .agents.
+		const destPath = join(providerRoot, ".agents", "skills", "upstream-notes", "foo.md");
+		writeFileSync(destPath, "# vendor foo (NEWER, hand-authored)\n");
+
+		// A stale legacy copy with DIFFERENT content still sits under skills/.
+		mkdirSync(join(providerRoot, "skills", "upstream-notes"), { recursive: true });
+		writeFileSync(
+			join(providerRoot, "skills", "upstream-notes", "foo.md"),
+			"# vendor foo (older legacy copy)\n",
+		);
+
+		const result = syncPromptAssets(providerRoot);
+		expect(result.removed).toContain("skills/");
+
+		// The newer .agents note is byte-unchanged.
+		expect(readFileSync(destPath, "utf8")).toBe("# vendor foo (NEWER, hand-authored)\n");
+		// The legacy content is preserved at a non-colliding conflict path.
+		const conflictPath = join(
+			providerRoot,
+			".agents",
+			"skills",
+			"upstream-notes",
+			"foo.legacy.md",
+		);
+		expect(existsSync(conflictPath)).toBeTrue();
+		expect(readFileSync(conflictPath, "utf8")).toBe("# vendor foo (older legacy copy)\n");
+		expect(result.wroteFiles).toContain(".agents/skills/upstream-notes/foo.legacy.md");
+		expect(existsSync(join(providerRoot, "skills"))).toBeFalse();
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+	});
+
+	it("drops a byte-identical legacy upstream-note without creating a conflict file", async () => {
+		const cwd = makeTempDir("sync-assets-upstream-notes-identical-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		const destPath = join(providerRoot, ".agents", "skills", "upstream-notes", "foo.md");
+		writeFileSync(destPath, "# vendor foo (identical bytes)\n");
+		mkdirSync(join(providerRoot, "skills", "upstream-notes"), { recursive: true });
+		writeFileSync(
+			join(providerRoot, "skills", "upstream-notes", "foo.md"),
+			"# vendor foo (identical bytes)\n",
+		);
+
+		const result = syncPromptAssets(providerRoot);
+		expect(result.removed).toContain("skills/");
+
+		// Destination unchanged, legacy dropped, no conflict file created.
+		expect(readFileSync(destPath, "utf8")).toBe("# vendor foo (identical bytes)\n");
+		expect(
+			existsSync(join(providerRoot, ".agents", "skills", "upstream-notes", "foo.legacy.md")),
+		).toBeFalse();
+		expect(result.wroteFiles).not.toContain(".agents/skills/upstream-notes/foo.legacy.md");
+		expect(existsSync(join(providerRoot, "skills"))).toBeFalse();
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+	});
+
 	it("fails the freshness gate on a symlink planted inside .agents/", async () => {
 		const cwd = makeTempDir("sync-assets-injected-symlink-");
 		const providerRoot = await materializeScaffold(cwd);

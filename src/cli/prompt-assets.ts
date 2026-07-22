@@ -526,10 +526,38 @@ function ensureParentDirectory(providerRoot: string, relativeFilePath: string): 
  * skipped (regenerated from the template). Only real files reached through real
  * directories are moved — symlinks are never relocated or followed, so a
  * hostile `skills/upstream-notes/link -> /outside` can never copy content into
- * or out of the provider root. Returns the relocated destination paths.
+ * or out of the provider root.
+ *
+ * A newer `.agents` note is never overwritten. When the destination already
+ * exists: identical bytes mean the legacy copy is redundant (dropped, no
+ * write); differing bytes (or a non-regular-file destination) mean the legacy
+ * content is written to the first free `<name>.legacy[.N]<ext>` path alongside
+ * it so both versions are retained. Returns the paths actually written.
  *
  * Called only when the legacy `skills/` entry is itself a real directory.
  */
+/**
+ * First non-colliding conflict path alongside `destRelativePath`, inserting a
+ * `.legacy` marker before the extension: `foo.md` -> `foo.legacy.md`, then
+ * `foo.legacy.1.md`, `foo.legacy.2.md`, … Uses lstat (never follows) so an
+ * existing symlink at a candidate name still counts as taken.
+ */
+function firstFreeConflictPath(providerRoot: string, destRelativePath: string): string {
+	const slash = destRelativePath.lastIndexOf("/");
+	const dir = destRelativePath.slice(0, slash);
+	const filename = destRelativePath.slice(slash + 1);
+	const dot = filename.lastIndexOf(".");
+	const stem = dot > 0 ? filename.slice(0, dot) : filename;
+	const ext = dot > 0 ? filename.slice(dot) : "";
+	for (let index = 0; ; index += 1) {
+		const candidateName = index === 0 ? `${stem}.legacy${ext}` : `${stem}.legacy.${index}${ext}`;
+		const candidateRelative = `${dir}/${candidateName}`;
+		if (!lstatSafe(join(providerRoot, candidateRelative))) {
+			return candidateRelative;
+		}
+	}
+}
+
 function relocateLegacyUpstreamNotes(providerRoot: string): string[] {
 	const legacyNotesDir = `${LEGACY_TOP_LEVEL_SKILLS_DIR}/upstream-notes`;
 	const legacyNotesStat = lstatSafe(join(providerRoot, legacyNotesDir));
@@ -563,9 +591,28 @@ function relocateLegacyUpstreamNotes(providerRoot: string): string[] {
 			}
 			const destRelativePath = `${UPSTREAM_NOTES_DIR}/${subPath}`;
 			const contents = readFileSync(join(providerRoot, relativePath));
-			ensureParentDirectory(providerRoot, destRelativePath);
-			writeFileSync(join(providerRoot, destRelativePath), contents);
-			relocated.push(destRelativePath);
+			const destAbsPath = join(providerRoot, destRelativePath);
+			const destStat = lstatSafe(destAbsPath);
+			if (!destStat) {
+				// No collision — relocate the legacy note as-is.
+				ensureParentDirectory(providerRoot, destRelativePath);
+				writeFileSync(destAbsPath, contents);
+				relocated.push(destRelativePath);
+				continue;
+			}
+			if (destStat.isFile() && readFileSync(destAbsPath).equals(contents)) {
+				// A byte-identical note already lives at the destination; the legacy
+				// copy is redundant. Write nothing — the caller removes the legacy
+				// tree, dropping the duplicate without touching the newer file.
+				continue;
+			}
+			// Destination exists with different bytes (or is not a plain file):
+			// never overwrite it. Retain both by writing the legacy content to the
+			// first free `<name>.legacy[.N]<ext>` path beside it.
+			const conflictRelativePath = firstFreeConflictPath(providerRoot, destRelativePath);
+			ensureParentDirectory(providerRoot, conflictRelativePath);
+			writeFileSync(join(providerRoot, conflictRelativePath), contents);
+			relocated.push(conflictRelativePath);
 		}
 	};
 	walk(legacyNotesDir);
