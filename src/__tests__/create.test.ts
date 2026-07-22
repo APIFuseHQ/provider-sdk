@@ -254,7 +254,15 @@ describe("provider create planning", () => {
 		expect(plan.preset).toBe("standalone");
 		expect(plan.providerRoot).toBe(join(cwd, "weather-provider"));
 		expect(packageJson?.content).not.toContain('"workspace:*"');
-		expect(packageJson?.content).toContain('"@apifuse/provider-sdk": "^');
+		// Exact pin (no caret): the freshness gate requires the installed SDK to
+		// equal the manifest's sdkVersion, which records the create CLI version.
+		const sdkVersionExact = (
+			JSON.parse(readFileSync(resolve(import.meta.dir, "../../package.json"), "utf8")) as {
+				version: string;
+			}
+		).version;
+		expect(packageJson?.content).toContain(`"@apifuse/provider-sdk": "${sdkVersionExact}"`);
+		expect(packageJson?.content).not.toContain('"@apifuse/provider-sdk": "^');
 		expect(plan.installCwd).toBe(join(cwd, "weather-provider"));
 	});
 

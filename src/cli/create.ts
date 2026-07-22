@@ -418,11 +418,16 @@ export async function buildProviderCreatePlan(
 		);
 	}
 
+	// Exact pin, not a caret range: the prompt-asset freshness gate requires
+	// manifest.sdkVersion === installed SDK version, and the manifest records
+	// this CLI's own version. A caret range would let `bun install` resolve a
+	// newer SDK than the create binary, making a fresh scaffold fail its own
+	// gate. `sync-assets` after an explicit SDK upgrade re-records the version.
 	const sdkSpecifier =
 		options.sdkSpecifier ??
 		(options.preset === "monorepo" && resolvedWorkspaceRoot
 			? "workspace:*"
-			: `^${packageJson.version}`);
+			: packageJson.version);
 	const relativeProviderRoot = relative(cwd, providerRoot) || options.name;
 	const nextDevCommand = `cd ${relativeProviderRoot} && bun run dev`;
 	const packageName =
