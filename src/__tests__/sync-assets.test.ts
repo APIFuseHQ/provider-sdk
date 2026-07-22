@@ -628,8 +628,8 @@ describe("apifuse sync-assets", () => {
 		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
 	});
 
-	it("losslessly merges a real .claude directory into .agents on migration", async () => {
-		const cwd = makeTempDir("sync-assets-claude-dir-merge-");
+	it("fails loudly and non-destructively when .claude is a real directory", async () => {
+		const cwd = makeTempDir("sync-assets-claude-real-dir-");
 		const providerRoot = await materializeScaffold(cwd);
 
 		// Replace the managed .claude symlink with a real user-authored config dir.
@@ -638,56 +638,39 @@ describe("apifuse sync-assets", () => {
 		writeFileSync(join(providerRoot, ".claude", "commands", "foo.md"), "# my command\n");
 		writeFileSync(join(providerRoot, ".claude", "settings.json"), '{"hooks":true}\n');
 
-		const result = syncPromptAssets(providerRoot);
-		expect(result.changed).toBeTrue();
-
-		// .claude is now the managed symlink; user content survives under .agents.
-		expect(lstatSync(join(providerRoot, ".claude")).isSymbolicLink()).toBeTrue();
-		expect(readlinkSync(join(providerRoot, ".claude"))).toBe(".agents");
-		expect(readFileSync(join(providerRoot, ".agents", "commands", "foo.md"), "utf8")).toBe(
-			"# my command\n",
-		);
-		expect(readFileSync(join(providerRoot, ".agents", "settings.json"), "utf8")).toBe(
-			'{"hooks":true}\n',
-		);
-		// Reachable through the new symlink — nothing was lost.
+		// sync-assets throws, names the path, and touches nothing.
+		expect(() => syncPromptAssets(providerRoot)).toThrow(".claude");
+		expect(lstatSync(join(providerRoot, ".claude")).isDirectory()).toBeTrue();
 		expect(readFileSync(join(providerRoot, ".claude", "commands", "foo.md"), "utf8")).toBe(
 			"# my command\n",
 		);
-		expect(result.wroteFiles).toContain(".agents/commands/foo.md");
-		expect(result.wroteFiles).toContain(".agents/settings.json");
-		expect(result.removed).not.toContain(".agents/settings.json");
-		expect(result.removed).not.toContain(".agents/commands/");
+		expect(readFileSync(join(providerRoot, ".claude", "settings.json"), "utf8")).toBe(
+			'{"hooks":true}\n',
+		);
+
+		// verify reports the distinct migration-required reason, never `unexpected`.
+		const verification = verifyPromptAssets(providerRoot);
+		expect(verification.ok).toBeFalse();
+		expect(verification.modified.join("\n")).toContain(
+			".claude (must be a symlink to .agents; migrate its contents first)",
+		);
+		expect(verification.unexpected).not.toContain(".claude");
+		expect(verification.unexpected).not.toContain(".claude/");
+
+		// The CLI --check surfaces the same failure and exits 1.
+		const check = runSyncAssetsCli(providerRoot, ["--check"]);
+		expect(check.status).toBe(1);
+		expect(check.stderr).toContain("must be a symlink to .agents");
+
+		// A plain sync-assets run also exits non-zero with a message naming .claude,
+		// and still destroys nothing.
+		const run = runSyncAssetsCli(providerRoot);
+		expect(run.status).toBe(1);
+		expect(run.stderr).toContain(".claude");
+		expect(existsSync(join(providerRoot, ".claude", "commands", "foo.md"))).toBeTrue();
 	});
 
-	it("never overwrites an existing .agents file when merging a conflicting real .codex directory", async () => {
-		const cwd = makeTempDir("sync-assets-codex-dir-conflict-");
-		const providerRoot = await materializeScaffold(cwd);
-
-		// A pre-existing (user) settings file already lives under .agents.
-		writeFileSync(join(providerRoot, ".agents", "settings.json"), '{"from":"agents"}\n');
-
-		// A real .codex dir carries a DIFFERENT settings.json.
-		rmSync(join(providerRoot, ".codex"), { force: true });
-		mkdirSync(join(providerRoot, ".codex"), { recursive: true });
-		writeFileSync(join(providerRoot, ".codex", "settings.json"), '{"from":"codex"}\n');
-
-		const result = syncPromptAssets(providerRoot);
-
-		expect(lstatSync(join(providerRoot, ".codex")).isSymbolicLink()).toBeTrue();
-		expect(readlinkSync(join(providerRoot, ".codex"))).toBe(".agents");
-		// The existing .agents copy is byte-unchanged.
-		expect(readFileSync(join(providerRoot, ".agents", "settings.json"), "utf8")).toBe(
-			'{"from":"agents"}\n',
-		);
-		// The .codex version is retained at a non-colliding conflict path.
-		expect(readFileSync(join(providerRoot, ".agents", "settings.legacy.json"), "utf8")).toBe(
-			'{"from":"codex"}\n',
-		);
-		expect(result.wroteFiles).toContain(".agents/settings.legacy.json");
-	});
-
-	it("leaves already-correct .claude/.codex symlinks untouched (no-op, no merge)", async () => {
+	it("leaves already-correct .claude/.codex symlinks untouched (no-op)", async () => {
 		const cwd = makeTempDir("sync-assets-symlink-noop-");
 		const providerRoot = await materializeScaffold(cwd);
 
@@ -699,6 +682,31 @@ describe("apifuse sync-assets", () => {
 		expect(readlinkSync(join(providerRoot, ".claude"))).toBe(".agents");
 		expect(lstatSync(join(providerRoot, ".codex")).isSymbolicLink()).toBeTrue();
 		expect(readlinkSync(join(providerRoot, ".codex"))).toBe(".agents");
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+	});
+
+	it("converges and stays green after the user removes a previously-real .claude directory", async () => {
+		const cwd = makeTempDir("sync-assets-claude-converge-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		// Provider is in the failing state: .claude is a real directory.
+		rmSync(join(providerRoot, ".claude"), { force: true });
+		mkdirSync(join(providerRoot, ".claude"), { recursive: true });
+		writeFileSync(join(providerRoot, ".claude", "settings.json"), "{}\n");
+		expect(() => syncPromptAssets(providerRoot)).toThrow(".claude");
+
+		// User reconciles by hand: relocates content and removes the directory.
+		rmSync(join(providerRoot, ".claude"), { recursive: true, force: true });
+
+		// Sync now converges (creates the symlink); a second run is an idempotent no-op.
+		const first = syncPromptAssets(providerRoot);
+		expect(first.changed).toBeTrue();
+		expect(lstatSync(join(providerRoot, ".claude")).isSymbolicLink()).toBeTrue();
+		expect(readlinkSync(join(providerRoot, ".claude"))).toBe(".agents");
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+
+		const second = syncPromptAssets(providerRoot);
+		expect(second.changed).toBeFalse();
 		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
 	});
 

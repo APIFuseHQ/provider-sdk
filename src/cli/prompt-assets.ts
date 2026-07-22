@@ -444,7 +444,15 @@ export function verifyPromptAssets(providerRoot: string): PromptAssetVerificatio
 		}
 		if (entry.kind === "symlink") {
 			if (!stat.isSymbolicLink()) {
-				modified.push(`${entry.path} (expected symlink -> ${entry.content})`);
+				// A real directory here is user agent config, not a stale asset:
+				// report a distinct, actionable reason (never a generic `unexpected`,
+				// and it is never swept — findUnexpectedAgentEntries only walks
+				// `.agents/`). sync-assets throws on it rather than migrating.
+				modified.push(
+					stat.isDirectory()
+						? `${entry.path} (must be a symlink to ${entry.content}; migrate its contents first)`
+						: `${entry.path} (expected symlink -> ${entry.content})`,
+				);
 				continue;
 			}
 			const target = readlinkSync(absPath);
@@ -619,128 +627,35 @@ function relocateLegacyUpstreamNotes(providerRoot: string): string[] {
 	return relocated;
 }
 
+/** Sorted immediate child names of a directory (empty on any read error). */
+function readTopLevelEntryNames(absDir: string): string[] {
+	try {
+		return readdirSync(absDir).sort();
+	} catch {
+		return [];
+	}
+}
+
 /**
- * Losslessly migrate a pre-existing REAL directory sitting where a managed
- * symlink belongs (a user's real `.claude/` or `.codex/` holding project agent
- * config — commands/, settings.json, hooks, …) into the symlink's target tree
- * (`.agents/`), so the content stays reachable through the new link instead of
- * being deleted. Returns the destination paths written (clean, no trailing
- * slash) so the caller can shield them from the governance sweep in this run.
- *
- * Merge rules mirror the upstream-notes conflict handling: destination absent
- * -> move; byte-identical -> drop the duplicate; differing bytes (or occupied
- * by a non-matching kind) -> never overwrite, write to the first free
- * `<name>.legacy[.N]<ext>` path. Nested symlinks are recreated verbatim and
- * never followed (no traversal into their target), so nothing can escape the
- * provider root. The source is removed only after it is verifiably emptied; any
- * unmergeable leftover throws rather than being deleted.
- *
- * Fails loudly if the symlink target is not a real directory (never merges
- * through a symlinked/absent `.agents`).
+ * Actionable error for a pre-existing REAL directory occupying a managed
+ * symlink path (`.claude`/`.codex`). The agent-asset layout requires a symlink
+ * to `.agents`; sync-assets never merges or deletes such a directory (either
+ * would risk destroying user agent config), so it fails loudly and tells the
+ * user to reconcile it by hand. Deterministic and idempotent: once the user
+ * moves/removes the contents, the next run creates the symlink and stays green.
  */
-function mergeRealDirectoryIntoSymlinkTarget(
+function realDirectorySymlinkConflictMessage(
 	providerRoot: string,
-	sourceRelDir: string,
-	targetRelDir: string,
-	wroteFiles: string[],
-): string[] {
-	const targetStat = lstatSafe(join(providerRoot, targetRelDir));
-	if (!targetStat?.isDirectory()) {
-		throw new Error(
-			`sync-assets: refusing to migrate ${sourceRelDir}/ — its symlink target ${targetRelDir} is not a real directory. Resolve manually to avoid data loss.`,
-		);
-	}
-	const migrated: string[] = [];
-	const readDirentsSafe = (absDir: string) => {
-		try {
-			return readdirSync(absDir, { withFileTypes: true });
-		} catch {
-			return [];
-		}
-	};
-	const mergeDir = (relSourceDir: string, relTargetDir: string): void => {
-		for (const dirent of readDirentsSafe(join(providerRoot, relSourceDir))) {
-			const srcRel = `${relSourceDir}/${dirent.name}`;
-			const srcAbs = join(providerRoot, srcRel);
-			const destRel = `${relTargetDir}/${dirent.name}`;
-			const destAbs = join(providerRoot, destRel);
-			const destStat = lstatSafe(destAbs);
-
-			if (dirent.isSymbolicLink()) {
-				// Preserve the user's symlink verbatim (never followed).
-				const linkTarget = readlinkSync(srcAbs);
-				const placeRel = destStat ? firstFreeConflictPath(providerRoot, destRel) : destRel;
-				ensureParentDirectory(providerRoot, placeRel);
-				symlinkSync(linkTarget, join(providerRoot, placeRel));
-				rmSync(srcAbs, { force: true }); // unlink the source link, never following it
-				if (destStat) {
-					migrated.push(destRel);
-				}
-				migrated.push(placeRel);
-				wroteFiles.push(placeRel);
-				continue;
-			}
-
-			if (dirent.isDirectory()) {
-				if (!destStat) {
-					mkdirSync(destAbs, { recursive: true });
-					mergeDir(srcRel, destRel);
-					rmdirSync(srcAbs);
-				} else if (destStat.isDirectory()) {
-					mergeDir(srcRel, destRel);
-					rmdirSync(srcAbs);
-				} else {
-					// Target occupied by a non-directory: relocate the whole subtree
-					// to a conflict path rather than overwrite either side.
-					const placeRel = firstFreeConflictPath(providerRoot, destRel);
-					mkdirSync(join(providerRoot, placeRel), { recursive: true });
-					mergeDir(srcRel, placeRel);
-					rmdirSync(srcAbs);
-				}
-				continue;
-			}
-
-			if (!dirent.isFile()) {
-				// Sockets/fifos/devices — never guess; fail loudly rather than delete.
-				throw new Error(
-					`sync-assets: cannot migrate ${srcRel} (not a regular file, directory, or symlink). Resolve manually.`,
-				);
-			}
-
-			const contents = readFileSync(srcAbs);
-			if (!destStat) {
-				ensureParentDirectory(providerRoot, destRel);
-				writeFileSync(destAbs, contents);
-				rmSync(srcAbs, { force: true });
-				migrated.push(destRel);
-				wroteFiles.push(destRel);
-			} else if (destStat.isFile() && readFileSync(destAbs).equals(contents)) {
-				// Byte-identical — drop the redundant copy without touching the dest,
-				// but shield the recognized destination from this run's sweep.
-				rmSync(srcAbs, { force: true });
-				migrated.push(destRel);
-			} else {
-				// Differing bytes (or dest occupied by another kind): never overwrite.
-				// Keep the existing destination AND the migrated copy at a free path.
-				const placeRel = firstFreeConflictPath(providerRoot, destRel);
-				ensureParentDirectory(providerRoot, placeRel);
-				writeFileSync(join(providerRoot, placeRel), contents);
-				rmSync(srcAbs, { force: true });
-				migrated.push(destRel);
-				migrated.push(placeRel);
-				wroteFiles.push(placeRel);
-			}
-		}
-	};
-	mergeDir(sourceRelDir, targetRelDir);
-	// Source must now be empty; refuse to delete it if anything is left behind.
-	if (readDirentsSafe(join(providerRoot, sourceRelDir)).length > 0) {
-		throw new Error(
-			`sync-assets: ${sourceRelDir}/ still has unmerged entries after migration; refusing to delete. Resolve manually.`,
-		);
-	}
-	rmdirSync(join(providerRoot, sourceRelDir));
-	return migrated;
+	entryPath: string,
+	target: string,
+): string {
+	const names = readTopLevelEntryNames(join(providerRoot, entryPath));
+	const contents = names.length > 0 ? names.join(", ") : "(empty)";
+	return (
+		`${entryPath}/ is a real directory containing [${contents}]. ` +
+		`The APIFuse agent-asset layout requires ${entryPath} to be a symlink to ${target}. ` +
+		`Move or remove its contents (e.g. into ${target}/) and re-run \`apifuse sync-assets .\`.`
+	);
 }
 
 /**
@@ -849,12 +764,12 @@ export function syncPromptAssets(providerRoot: string): PromptAssetSyncResult {
 		wroteFiles.push(entry.path);
 	}
 
-	// 4. Symlinks — replace whatever occupies the path. Wrong-target links and
-	// regular files carry no user tree and are simply removed, but a REAL
+	// 4. Symlinks — replace whatever occupies the path. A wrong-target symlink
+	// or a regular file carries no user tree and is replaced. But a REAL
 	// DIRECTORY here is pre-existing user agent config (a hand-managed
-	// `.claude/` or `.codex/`): it is migrated losslessly into the symlink
-	// target (`.agents/`) rather than deleted. Correct links are left untouched.
-	const migratedIntoAgents = new Set<string>();
+	// `.claude/` or `.codex/` with commands/, settings.json, hooks): never
+	// merge or delete it. Fail loudly and idempotently so the user reconciles
+	// it by hand — no data is touched. Correct links are left untouched.
 	for (const entry of entries) {
 		if (entry.kind !== "symlink") {
 			continue;
@@ -866,16 +781,11 @@ export function syncPromptAssets(providerRoot: string): PromptAssetSyncResult {
 			continue;
 		}
 		if (stat?.isDirectory()) {
-			const merged = mergeRealDirectoryIntoSymlinkTarget(
-				providerRoot,
-				entry.path,
-				entry.content,
-				wroteFiles,
+			throw new Error(
+				realDirectorySymlinkConflictMessage(providerRoot, entry.path, entry.content),
 			);
-			for (const migratedPath of merged) {
-				migratedIntoAgents.add(migratedPath);
-			}
-		} else if (stat) {
+		}
+		if (stat) {
 			rmSync(absPath, { recursive: true, force: true });
 		}
 		ensureParentDirectory(providerRoot, entry.path);
@@ -892,17 +802,6 @@ export function syncPromptAssets(providerRoot: string): PromptAssetSyncResult {
 		const cleanRelativePath = relativePath.endsWith("/")
 			? relativePath.slice(0, -1)
 			: relativePath;
-		// Never sweep away user content just migrated in from a real
-		// .claude/.codex directory in this same run (the file itself, or a
-		// stray directory that now holds migrated files).
-		if (
-			migratedIntoAgents.has(cleanRelativePath) ||
-			[...migratedIntoAgents].some((migratedPath) =>
-				migratedPath.startsWith(`${cleanRelativePath}/`),
-			)
-		) {
-			continue;
-		}
 		const absPath = join(providerRoot, cleanRelativePath);
 		if (!lstatSafe(absPath)) {
 			continue;
