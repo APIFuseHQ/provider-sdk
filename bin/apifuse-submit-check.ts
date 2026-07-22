@@ -1438,11 +1438,13 @@ function scoreCredentialUsage(providerRoot: string, provider: ProviderDefinition
 // with/without category), which broke uniform incident attribution when nine
 // providers shipped with unprovisioned secrets (2026-07-22).
 //
-// Heuristic, warn-only: a line reading a DECLARED secret via `.env.get(...)`
-// (string literal or a const alias of a declared name) followed within a small
-// window by a falsy presence check plus a `throw`. Guards over env names that
-// are NOT declared in defineProvider secrets[] are out of scope — the rule
-// flags duplication of the SDK check only. Escape hatch:
+// Heuristic, warn-only: a line reading a declared `required: true` secret via
+// `.env.get(...)` (string literal or a const alias of a declared name)
+// followed within a small window by a falsy presence check plus a `throw`.
+// The rule flags duplication of the SDK gate ONLY: env names that are not
+// declared in defineProvider secrets[], and optional declarations
+// (`required: false`/omitted) that the runtime deliberately does not enforce,
+// are out of scope. Escape hatch:
 // `// @apifuse-allow sdk-owned-secret-presence: <reason>`.
 // ---------------------------------------------------------------------------
 
@@ -1526,8 +1528,13 @@ function scoreSdkOwnedSecretPresence(
 	provider: ProviderDefinition,
 ): SubmitCheck {
 	const passMessage = "Provider relies on SDK-owned secret presence validation.";
+	// Only `required: true` declarations: those are exactly what the runtime
+	// gate enforces. A presence guard over an optional secret is conditional
+	// business logic the SDK will not replace, not double validation.
 	const declaredNames: ReadonlySet<string> = new Set(
-		(provider.secrets ?? []).map((secret) => secret.name),
+		(provider.secrets ?? [])
+			.filter((secret) => secret.required === true)
+			.map((secret) => secret.name),
 	);
 	if (declaredNames.size === 0) {
 		return pass(SDK_OWNED_SECRET_PRESENCE_RULE_ID, SDK_NATIVE_CATEGORY, passMessage, 0);

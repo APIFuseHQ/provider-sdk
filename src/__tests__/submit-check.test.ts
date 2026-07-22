@@ -3419,6 +3419,22 @@ export function requireServiceKey(ctx: { env: { get(key: string): string | undef
 		expect(check?.status).toBe("pass");
 	});
 
+	it("ignores guards over optional declared secrets the runtime does not enforce", async () => {
+		const dir = makeProviderDir(
+			"submit-secret-presence-optional-",
+			validProviderSource()
+				.replace(
+					'auth: { mode: "none" },',
+					`auth: { mode: "none" },\n  secrets: [{ name: "${SECRET_NAME}", required: false }],`,
+				)
+				.replace("handler: async () => ({ ok: true }),", literalGuardHandler()),
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const check = await findCheck(dir);
+		expect(check?.status).toBe("pass");
+	});
+
 	it("ignores guards over env names not declared in secrets[]", async () => {
 		const dir = makeProviderDir(
 			"submit-secret-presence-undeclared-",
