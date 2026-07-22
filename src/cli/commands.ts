@@ -2,6 +2,7 @@ export type ApifuseCommandName =
 	| "create"
 	| "dev"
 	| "check"
+	| "sync-assets"
 	| "submit-check"
 	| "bounty-check"
 	| "record"
@@ -45,6 +46,14 @@ export const COMMAND_MANIFEST: Record<
 		usage: "apifuse check [path]",
 		examples: ["apifuse check .", "apifuse check providers/korea-air-quality"],
 		modulePath: "./apifuse-check",
+	},
+	"sync-assets": {
+		name: "sync-assets",
+		summary:
+			"Regenerate SDK-managed agent prompt assets (AGENTS.md, .agents/skills, symlinks, manifest) for the installed SDK version.",
+		usage: "apifuse sync-assets [path] [--check]",
+		examples: ["apifuse sync-assets .", "apifuse sync-assets . --check"],
+		modulePath: "./apifuse-sync-assets",
 	},
 	"submit-check": {
 		name: "submit-check",
@@ -103,6 +112,7 @@ export const COMMAND_ORDER: ApifuseCommandName[] = [
 	"create",
 	"dev",
 	"check",
+	"sync-assets",
 	"submit-check",
 	"record",
 	"test",

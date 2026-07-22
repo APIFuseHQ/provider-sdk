@@ -61,7 +61,7 @@ function normalizeArgs(argv: string[]): string[] {
 	return argv[0] === "check" ? argv.slice(1) : argv;
 }
 
-function resolveProviderRoot(inputPath: string): string {
+export function resolveProviderRoot(inputPath: string): string {
 	const resolvedInput = resolveFromParents(inputPath);
 
 	if (!existsSync(resolvedInput)) {
