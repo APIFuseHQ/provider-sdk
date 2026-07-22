@@ -386,6 +386,128 @@ describe("apifuse sync-assets", () => {
 		expect(syncPromptAssets(providerRoot).changed).toBeFalse();
 	});
 
+	it("preserves a contributor-authored upstream-notes file: check passes and sync is a no-op", async () => {
+		const cwd = makeTempDir("sync-assets-upstream-notes-authored-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		// The upstream-notes README template instructs contributors to ADD
+		// sibling note files; they are contributor-owned, never flagged.
+		const notePath = join(providerRoot, ".agents", "skills", "upstream-notes", "foo.md");
+		writeFileSync(notePath, "# vendor foo\nSymptom -> Cause -> Rule -> Evidence\n");
+
+		const verification = verifyPromptAssets(providerRoot);
+		expect(verification.ok).toBeTrue();
+		expect(verification.unexpected).toEqual([]);
+
+		const cli = runSyncAssetsCli(providerRoot, ["--check"]);
+		expect(cli.status).toBe(0);
+		expect(cli.stdout).toContain("in sync");
+
+		const result = syncPromptAssets(providerRoot);
+		expect(result.changed).toBeFalse();
+		expect(result.removed).toEqual([]);
+		expect(existsSync(notePath)).toBeTrue();
+		expect(readFileSync(notePath, "utf8")).toContain("# vendor foo");
+	});
+
+	it("keeps the upstream-notes README.md managed: tampering fails the gate and sync restores it", async () => {
+		const cwd = makeTempDir("sync-assets-upstream-notes-readme-");
+		const providerRoot = await materializeScaffold(cwd);
+		const readmePath = join(providerRoot, ".agents", "skills", "upstream-notes", "README.md");
+		const original = readFileSync(readmePath, "utf8");
+		writeFileSync(readmePath, `${original}\nsmuggled guidance\n`);
+
+		const verification = verifyPromptAssets(providerRoot);
+		expect(verification.ok).toBeFalse();
+		expect(verification.modified.join("\n")).toContain(
+			".agents/skills/upstream-notes/README.md",
+		);
+
+		const result = syncPromptAssets(providerRoot);
+		expect(result.wroteFiles).toContain(".agents/skills/upstream-notes/README.md");
+		expect(readFileSync(readmePath, "utf8")).toBe(original);
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+	});
+
+	it("relocates legacy skills/upstream-notes authored notes instead of destroying them", async () => {
+		const cwd = makeTempDir("sync-assets-upstream-notes-legacy-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		// Rewind to a legacy layout carrying an authored upstream note.
+		rmSync(join(providerRoot, ".agents"), { recursive: true, force: true });
+		rmSync(join(providerRoot, ".claude"), { force: true });
+		rmSync(join(providerRoot, ".codex"), { force: true });
+		rmSync(join(providerRoot, ".apifuse"), { recursive: true, force: true });
+		rmSync(join(providerRoot, "CLAUDE.md"), { force: true });
+		writeFileSync(join(providerRoot, "CLAUDE.md"), "@AGENTS.md\n");
+		mkdirSync(join(providerRoot, "skills", "upstream-notes"), { recursive: true });
+		writeFileSync(
+			join(providerRoot, "skills", "upstream-notes", "README.md"),
+			"legacy readme that must be regenerated\n",
+		);
+		writeFileSync(
+			join(providerRoot, "skills", "upstream-notes", "bar.md"),
+			"# vendor bar\nhard-won upstream quirk\n",
+		);
+
+		const result = syncPromptAssets(providerRoot);
+		expect(result.changed).toBeTrue();
+		expect(result.removed).toContain("skills/");
+		expect(result.wroteFiles).toContain(".agents/skills/upstream-notes/bar.md");
+
+		// Legacy tree is gone; the authored note survives at the managed path.
+		expect(existsSync(join(providerRoot, "skills"))).toBeFalse();
+		const relocated = join(providerRoot, ".agents", "skills", "upstream-notes", "bar.md");
+		expect(existsSync(relocated)).toBeTrue();
+		expect(readFileSync(relocated, "utf8")).toContain("hard-won upstream quirk");
+		// README.md is regenerated from the template, not the stale legacy copy.
+		expect(
+			readFileSync(
+				join(providerRoot, ".agents", "skills", "upstream-notes", "README.md"),
+				"utf8",
+			),
+		).not.toContain("legacy readme that must be regenerated");
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+	});
+
+	it("never follows a hostile symlink named under upstream-notes", async () => {
+		const cwd = makeTempDir("sync-assets-upstream-notes-symlink-escape-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		// Victim outside the provider root, reachable through a symlink planted
+		// inside the contributor-owned zone — the exemption must not let it
+		// escape.
+		const outsideDir = join(cwd, "outside-victim");
+		mkdirSync(outsideDir, { recursive: true });
+		writeFileSync(join(outsideDir, "important.txt"), "do not delete\n");
+		symlinkSync(outsideDir, join(providerRoot, ".agents", "skills", "upstream-notes", "linkdir"));
+
+		const manifestPath = join(providerRoot, PROMPT_ASSET_MANIFEST_PATH);
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { paths: string[] };
+		manifest.paths = [
+			...manifest.paths,
+			".agents/skills/upstream-notes/linkdir/important.txt",
+		].sort();
+		writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+		// A symlink is never contributor-owned: the gate flags it even under
+		// upstream-notes.
+		const verification = verifyPromptAssets(providerRoot);
+		expect(verification.ok).toBeFalse();
+		expect(verification.unexpected).toContain(".agents/skills/upstream-notes/linkdir");
+
+		const result = syncPromptAssets(providerRoot);
+		// Orphan cleanup never deletes through the link; the governance sweep
+		// unlinks the symlink itself without recursing into the outside target.
+		expect(result.removed).not.toContain(".agents/skills/upstream-notes/linkdir/important.txt");
+		expect(
+			existsSync(join(providerRoot, ".agents", "skills", "upstream-notes", "linkdir")),
+		).toBeFalse();
+		expect(readFileSync(join(outsideDir, "important.txt"), "utf8")).toBe("do not delete\n");
+		expect(existsSync(join(outsideDir, "important.txt"))).toBeTrue();
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+	});
+
 	it("fails the freshness gate on a symlink planted inside .agents/", async () => {
 		const cwd = makeTempDir("sync-assets-injected-symlink-");
 		const providerRoot = await materializeScaffold(cwd);

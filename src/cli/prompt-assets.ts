@@ -44,6 +44,31 @@ export const PROMPT_ASSET_SYMLINKS: Readonly<Record<string, string>> = {
 /** Legacy layout remnants that must not survive a sync (pre-.agents layout). */
 const LEGACY_TOP_LEVEL_SKILLS_DIR = "skills";
 
+/**
+ * Contributor-owned zone. `.agents/skills/upstream-notes/README.md` is
+ * SDK-managed (pristine-verified), but the README template explicitly
+ * instructs contributors to ADD per-vendor note files as sibling entries, and
+ * reviewers treat them as submission quality. Any file under this directory
+ * OTHER than README.md is therefore contributor-owned: the freshness gate must
+ * never flag it `unexpected`, and sync-assets (including its legacy cleanup)
+ * must never delete it — legacy authored notes are relocated here, not dropped.
+ */
+const UPSTREAM_NOTES_DIR = ".agents/skills/upstream-notes";
+const UPSTREAM_NOTES_README = `${UPSTREAM_NOTES_DIR}/README.md`;
+
+/**
+ * True for real, contributor-authored entries inside the upstream-notes zone
+ * (everything under it except the managed README.md). Symlinks are never
+ * treated as contributor-owned — callers must gate this behind an lstat that
+ * excludes symlinks so the exemption can never smuggle a path that escapes the
+ * provider root by naming it under upstream-notes.
+ */
+function isContributorOwnedUpstreamNotesPath(relativePath: string): boolean {
+	return (
+		relativePath.startsWith(`${UPSTREAM_NOTES_DIR}/`) && relativePath !== UPSTREAM_NOTES_README
+	);
+}
+
 /** Relative asset paths whose content is rendered from `<path>.tpl`. */
 export const PROMPT_ASSET_FILE_PATHS: readonly string[] = [
 	"AGENTS.md",
@@ -260,6 +285,14 @@ const AGENTS_EXPECTED_DIRS: ReadonlySet<string> = (() => {
  * unlisted `.agents/**` file is loaded as agent guidance by every agent CLI.
  * Returns sorted provider-root-relative paths (directories get a trailing `/`).
  *
+ * The `.agents/skills/upstream-notes/` subtree is a contributor-owned zone: the
+ * README template instructs contributors to ADD per-vendor note files there and
+ * reviewers grade them, so real authored files and subdirectories under it are
+ * NOT flagged. The exemption is scoped tightly — README.md is still required and
+ * pristine (checked via the managed entry set), and any SYMLINK under the zone
+ * is still flagged (the walk never follows it), so no path can escape the
+ * provider root by being named under upstream-notes.
+ *
  * Never enumerates when `.agents` is missing or a symlink — those cases are
  * reported separately (missing entries / "found a symlink"); walking would
  * either no-op or follow the link out of the provider root.
@@ -280,15 +313,23 @@ function findUnexpectedAgentEntries(providerRoot: string): string[] {
 	const walk = (relativeDir: string): void => {
 		for (const dirent of readDirentsSafe(join(providerRoot, relativeDir))) {
 			const relativePath = `${relativeDir}/${dirent.name}`;
+			// Symlinks are never contributor-owned, even under upstream-notes:
+			// flag them so the governance sweep unlinks them (never following the
+			// link) and no escape path can be smuggled into the exempt zone.
 			if (dirent.isSymbolicLink()) {
 				unexpected.push(relativePath);
 			} else if (dirent.isDirectory()) {
 				if (AGENTS_EXPECTED_DIRS.has(relativePath)) {
 					walk(relativePath);
+				} else if (isContributorOwnedUpstreamNotesPath(relativePath)) {
+					// Real contributor-authored subdirectory of upstream-notes.
 				} else {
 					unexpected.push(`${relativePath}/`);
 				}
-			} else if (!AGENTS_EXPECTED_FILES.has(relativePath)) {
+			} else if (
+				!AGENTS_EXPECTED_FILES.has(relativePath) &&
+				!isContributorOwnedUpstreamNotesPath(relativePath)
+			) {
 				unexpected.push(relativePath);
 			}
 		}
@@ -472,6 +513,59 @@ function ensureParentDirectory(providerRoot: string, relativeFilePath: string): 
 }
 
 /**
+ * Relocate contributor-authored files from the legacy top-level
+ * `skills/upstream-notes/` into the managed `.agents/skills/upstream-notes/`
+ * zone before the legacy `skills/` tree is deleted. The legacy README.md is
+ * skipped (regenerated from the template). Only real files reached through real
+ * directories are moved — symlinks are never relocated or followed, so a
+ * hostile `skills/upstream-notes/link -> /outside` can never copy content into
+ * or out of the provider root. Returns the relocated destination paths.
+ *
+ * Called only when the legacy `skills/` entry is itself a real directory.
+ */
+function relocateLegacyUpstreamNotes(providerRoot: string): string[] {
+	const legacyNotesDir = `${LEGACY_TOP_LEVEL_SKILLS_DIR}/upstream-notes`;
+	const legacyNotesStat = lstatSafe(join(providerRoot, legacyNotesDir));
+	if (!legacyNotesStat?.isDirectory()) {
+		return [];
+	}
+	const relocated: string[] = [];
+	const readDirentsSafe = (absDir: string) => {
+		try {
+			return readdirSync(absDir, { withFileTypes: true });
+		} catch {
+			return [];
+		}
+	};
+	const walk = (relativeDir: string): void => {
+		for (const dirent of readDirentsSafe(join(providerRoot, relativeDir))) {
+			const relativePath = `${relativeDir}/${dirent.name}`;
+			if (dirent.isSymbolicLink()) {
+				continue; // never relocate a symlink or recurse through it
+			}
+			if (dirent.isDirectory()) {
+				walk(relativePath);
+				continue;
+			}
+			if (!dirent.isFile()) {
+				continue;
+			}
+			const subPath = relativePath.slice(`${legacyNotesDir}/`.length);
+			if (subPath === "README.md") {
+				continue; // managed asset, regenerated from the template
+			}
+			const destRelativePath = `${UPSTREAM_NOTES_DIR}/${subPath}`;
+			const contents = readFileSync(join(providerRoot, relativePath));
+			ensureParentDirectory(providerRoot, destRelativePath);
+			writeFileSync(join(providerRoot, destRelativePath), contents);
+			relocated.push(destRelativePath);
+		}
+	};
+	walk(legacyNotesDir);
+	return relocated;
+}
+
+/**
  * Regenerate the full managed asset set for the installed SDK version in an
  * existing provider root. Deletes legacy managed paths first (top-level
  * skills/**, plus manifest-listed paths that left the set — restricted to
@@ -491,9 +585,17 @@ export function syncPromptAssets(providerRoot: string): PromptAssetSyncResult {
 	const wroteFiles: string[] = [];
 	const createdSymlinks: string[] = [];
 
-	// 1. Legacy top-level skills/ from the pre-.agents layout.
+	// 1. Legacy top-level skills/ from the pre-.agents layout. Contributor-
+	// authored upstream-notes files are relocated into the managed
+	// .agents/skills/upstream-notes/ zone FIRST (never destroyed); only then is
+	// the legacy tree removed. Relocation runs only when `skills` is a real
+	// directory — a `skills` symlink is unlinked without following it.
 	const legacySkillsAbsPath = join(providerRoot, LEGACY_TOP_LEVEL_SKILLS_DIR);
-	if (lstatSafe(legacySkillsAbsPath)) {
+	const legacySkillsStat = lstatSafe(legacySkillsAbsPath);
+	if (legacySkillsStat) {
+		if (legacySkillsStat.isDirectory()) {
+			wroteFiles.push(...relocateLegacyUpstreamNotes(providerRoot));
+		}
 		rmSync(legacySkillsAbsPath, { recursive: true, force: true });
 		removed.push(`${LEGACY_TOP_LEVEL_SKILLS_DIR}/`);
 	}
@@ -513,6 +615,7 @@ export function syncPromptAssets(providerRoot: string): PromptAssetSyncResult {
 				expectedPaths.has(previousPath) ||
 				!isSafeRelativeAssetPath(previousPath) ||
 				!isManagedNamespacePath(previousPath) ||
+				isContributorOwnedUpstreamNotesPath(previousPath) ||
 				findSymlinkAncestor(providerRoot, previousPath) !== undefined
 			) {
 				continue;

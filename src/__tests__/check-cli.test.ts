@@ -333,6 +333,24 @@ export default defineProvider({
 		expect(promptAssets?.passed).toBe(true);
 	});
 
+	it("passes the prompt-assets check with a contributor-authored upstream-notes file", async () => {
+		const providerDir = makeProviderDir("apifuse-check-prompt-assets-upstream-notes-");
+		writeMinimalProviderIndex(providerDir);
+		syncPromptAssets(providerDir);
+		// The documented workflow: contributors ADD per-vendor note files under
+		// upstream-notes. These must not trip the freshness gate.
+		mkdirSync(join(providerDir, ".agents", "skills", "upstream-notes"), { recursive: true });
+		writeFileSync(
+			join(providerDir, ".agents", "skills", "upstream-notes", "rate-limits.md"),
+			"# vendor rate limits\nSymptom -> Cause -> Rule -> Evidence\n",
+		);
+
+		const results = await runChecks(providerDir);
+		const promptAssets = results.find((result) => result.message === PROMPT_ASSETS_CHECK_MESSAGE);
+
+		expect(promptAssets?.passed).toBe(true);
+	});
+
 	it("fails the prompt-assets check when a managed symlink is tampered", async () => {
 		const providerDir = makeProviderDir("apifuse-check-prompt-assets-symlink-");
 		writeMinimalProviderIndex(providerDir);
