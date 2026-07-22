@@ -260,47 +260,45 @@ function isManagedNamespacePath(relativePath: string): boolean {
 	);
 }
 
-/** The real-file asset paths that live under the `.agents/` tree. */
-const AGENTS_EXPECTED_FILES: ReadonlySet<string> = new Set(
-	PROMPT_ASSET_FILE_PATHS.filter((assetPath) => assetPath.startsWith(".agents/")),
-);
-
-/** Every ancestor directory implied by AGENTS_EXPECTED_FILES (incl. `.agents`). */
-const AGENTS_EXPECTED_DIRS: ReadonlySet<string> = (() => {
-	const dirs = new Set<string>();
-	for (const assetPath of AGENTS_EXPECTED_FILES) {
-		const segments = assetPath.split("/");
-		for (let end = 1; end < segments.length; end += 1) {
-			dirs.add(segments.slice(0, end).join("/"));
-		}
-	}
-	return dirs;
-})();
+/**
+ * Root of the auto-loaded skill tree. `.claude`/`.codex` symlink onto `.agents`,
+ * so every agent CLI loads `.agents/skills/<name>/` as guidance — this subtree,
+ * and only this subtree, is the guidance-injection vector the freshness gate
+ * polices for unauthorized content.
+ */
+const AGENTS_SKILLS_DIR = ".agents/skills";
 
 /**
- * Enumerate entries inside the real `.agents/` tree that are NOT part of the
- * managed set — injected files, stray directories, or any symlink (the layout
- * contract permits symlinks only at CLAUDE.md/.claude/.codex). This is the
- * governance backstop: `.claude`/`.codex` symlink onto `.agents`, so an
- * unlisted `.agents/**` file is loaded as agent guidance by every agent CLI.
- * Returns sorted provider-root-relative paths (directories get a trailing `/`).
+ * Skill directory names the SDK authorizes: the managed skills plus the
+ * contributor-owned `upstream-notes` zone. Derived from PROMPT_ASSET_FILE_PATHS
+ * (`.agents/skills/<name>/...`), so upstream-notes is included via its managed
+ * README. Any OTHER directory directly under `.agents/skills/` is an injected
+ * skill.
+ */
+const AUTHORIZED_SKILL_DIR_NAMES: ReadonlySet<string> = new Set(
+	PROMPT_ASSET_FILE_PATHS.filter((assetPath) => assetPath.startsWith(`${AGENTS_SKILLS_DIR}/`)).map(
+		(assetPath) => assetPath.split("/")[2],
+	),
+);
+
+/**
+ * Enumerate the guidance-injection risks under `.agents/skills/` — and ONLY
+ * those. Two things are flagged (never followed, never deleted by sync):
+ *   1. an unauthorized skill directory `.agents/skills/<name>/` whose <name> is
+ *      neither a managed skill nor `upstream-notes` (an injected skill), and
+ *   2. any SYMLINK anywhere under `.agents/skills/` (at any depth).
  *
- * The `.agents/skills/upstream-notes/` subtree is a contributor-owned zone: the
- * README template instructs contributors to ADD per-vendor note files there and
- * reviewers grade them, so real authored regular files under it are NOT flagged.
- * The exemption is scoped tightly and covers files only, never the walk itself:
- * README.md is still required and pristine (checked via the managed entry set),
- * real subdirectories are still descended into, and any SYMLINK anywhere under
- * the zone (at any depth) is still flagged (never followed), so no path can
- * escape the provider root by being named — or nested — under upstream-notes.
- *
- * Never enumerates when `.agents` is missing or a symlink — those cases are
- * reported separately (missing entries / "found a symlink"); walking would
- * either no-op or follow the link out of the provider root.
+ * Everything else under `.agents/` is tool/user content that legitimately lands
+ * there through the `.claude`/`.codex` symlinks — `settings.json`,
+ * `config.toml`, `commands/`, `hooks/`, `references/`, authored files inside
+ * `.agents/skills/upstream-notes/`, etc. — and is NEVER flagged or swept. Real
+ * subdirectories inside authorized skills are still walked so nested symlinks
+ * stay visible. Returns sorted provider-root-relative paths (dirs get a
+ * trailing `/`). No-op when `.agents/skills` is missing or a symlink.
  */
 function findUnexpectedAgentEntries(providerRoot: string): string[] {
-	const agentsStat = lstatSafe(join(providerRoot, ".agents"));
-	if (!agentsStat?.isDirectory()) {
+	const skillsStat = lstatSafe(join(providerRoot, AGENTS_SKILLS_DIR));
+	if (!skillsStat?.isDirectory()) {
 		return [];
 	}
 	const unexpected: string[] = [];
@@ -311,37 +309,33 @@ function findUnexpectedAgentEntries(providerRoot: string): string[] {
 			return [];
 		}
 	};
-	const walk = (relativeDir: string): void => {
+	// Recurse through an authorized skill directory, flagging only symlinks
+	// (never following them); real files/dirs inside are the skill's content.
+	const flagNestedSymlinks = (relativeDir: string): void => {
 		for (const dirent of readDirentsSafe(join(providerRoot, relativeDir))) {
 			const relativePath = `${relativeDir}/${dirent.name}`;
-			// Symlinks are never contributor-owned, even under upstream-notes,
-			// at any depth: flag them so the governance sweep unlinks them (never
-			// following the link) and no escape path can be smuggled into the
-			// exempt zone by nesting it below an authored directory.
 			if (dirent.isSymbolicLink()) {
 				unexpected.push(relativePath);
 			} else if (dirent.isDirectory()) {
-				// Always descend into real directories in the managed namespace,
-				// including contributor-authored subdirectories of upstream-notes:
-				// the exemption covers authored regular files, never the act of
-				// walking, so nested content (especially symlinks) stays visible.
-				if (
-					AGENTS_EXPECTED_DIRS.has(relativePath) ||
-					isContributorOwnedUpstreamNotesPath(relativePath)
-				) {
-					walk(relativePath);
-				} else {
-					unexpected.push(`${relativePath}/`);
-				}
-			} else if (
-				!AGENTS_EXPECTED_FILES.has(relativePath) &&
-				!isContributorOwnedUpstreamNotesPath(relativePath)
-			) {
-				unexpected.push(relativePath);
+				flagNestedSymlinks(relativePath);
 			}
 		}
 	};
-	walk(".agents");
+	for (const dirent of readDirentsSafe(join(providerRoot, AGENTS_SKILLS_DIR))) {
+		const relativePath = `${AGENTS_SKILLS_DIR}/${dirent.name}`;
+		if (dirent.isSymbolicLink()) {
+			// A symlink directly under the skills tree — the injection vector.
+			unexpected.push(relativePath);
+		} else if (dirent.isDirectory()) {
+			if (AUTHORIZED_SKILL_DIR_NAMES.has(dirent.name)) {
+				flagNestedSymlinks(relativePath);
+			} else {
+				// An unauthorized skill directory — flagged, never deleted.
+				unexpected.push(`${relativePath}/`);
+			}
+		}
+		// Non-skill regular files directly under `.agents/skills/` are ignored.
+	}
 	return unexpected.sort();
 }
 
@@ -793,23 +787,15 @@ export function syncPromptAssets(providerRoot: string): PromptAssetSyncResult {
 		createdSymlinks.push(`${entry.path} -> ${entry.content}`);
 	}
 
-	// 4b. Remove unlisted entries from the `.agents/` tree so a regenerated
-	// tree contains only the managed set (injected guidance, stray dirs, and
-	// symlinks). After steps 3-4 `.agents` is guaranteed a real directory, so
-	// this never resolves through a symlinked ancestor. Keeps the invariant
-	// that a completed sync leaves verifyPromptAssets green.
-	for (const relativePath of findUnexpectedAgentEntries(providerRoot)) {
-		const cleanRelativePath = relativePath.endsWith("/")
-			? relativePath.slice(0, -1)
-			: relativePath;
-		const absPath = join(providerRoot, cleanRelativePath);
-		if (!lstatSafe(absPath)) {
-			continue;
-		}
-		rmSync(absPath, { recursive: true, force: true });
-		removed.push(relativePath);
-		removeEmptyParentDirectories(providerRoot, dirname(absPath));
-	}
+	// INVARIANT: sync-assets only writes/repairs the managed asset set + the
+	// managed symlinks and migrates known legacy paths (top-level skills/** with
+	// upstream-notes relocation). It NEVER deletes unrecognized user/tool
+	// content. In particular there is deliberately no sweep of `.agents/`: the
+	// `.claude`/`.codex` symlinks point at `.agents`, so agent CLIs write live
+	// project config there (settings.json, config.toml, commands/, hooks/, …).
+	// Unauthorized injected skills and symlinks under `.agents/skills/` are
+	// surfaced by verifyPromptAssets (the freshness gate) for a human to remove
+	// — they are flagged, never deleted here.
 
 	// 5. Manifest last so a crash mid-sync never records a fresh manifest.
 	let manifestChanged = false;

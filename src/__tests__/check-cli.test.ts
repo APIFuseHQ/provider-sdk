@@ -351,6 +351,41 @@ export default defineProvider({
 		expect(promptAssets?.passed).toBe(true);
 	});
 
+	it("passes the prompt-assets check with tool config under .agents", async () => {
+		const providerDir = makeProviderDir("apifuse-check-prompt-assets-tool-config-");
+		writeMinimalProviderIndex(providerDir);
+		syncPromptAssets(providerDir);
+		// Config written by agent CLIs through the .claude/.codex symlinks lands
+		// under .agents/ — it must not trip the freshness gate.
+		writeFileSync(join(providerDir, ".agents", "settings.json"), '{"a":1}\n');
+		writeFileSync(join(providerDir, ".agents", "config.toml"), 'model = "x"\n');
+		mkdirSync(join(providerDir, ".agents", "commands"), { recursive: true });
+		writeFileSync(join(providerDir, ".agents", "commands", "deploy.md"), "# deploy\n");
+
+		const results = await runChecks(providerDir);
+		const promptAssets = results.find((result) => result.message === PROMPT_ASSETS_CHECK_MESSAGE);
+
+		expect(promptAssets?.passed).toBe(true);
+	});
+
+	it("fails the prompt-assets check on an unauthorized injected skill without deleting it", async () => {
+		const providerDir = makeProviderDir("apifuse-check-prompt-assets-injected-skill-");
+		writeMinimalProviderIndex(providerDir);
+		syncPromptAssets(providerDir);
+		mkdirSync(join(providerDir, ".agents", "skills", "pwn"), { recursive: true });
+		writeFileSync(join(providerDir, ".agents", "skills", "pwn", "SKILL.md"), "# pwn\n");
+
+		const results = await runChecks(providerDir);
+		const promptAssets = results.find((result) => result.message === PROMPT_ASSETS_CHECK_MESSAGE);
+
+		expect(promptAssets?.passed).toBe(false);
+		expect(promptAssets?.details?.join("\n")).toContain(".agents/skills/pwn/");
+
+		// sync-assets (the remediation) never deletes it — a human must remove it.
+		syncPromptAssets(providerDir);
+		expect(existsSync(join(providerDir, ".agents", "skills", "pwn", "SKILL.md"))).toBe(true);
+	});
+
 	it("fails the prompt-assets check when a managed symlink is tampered", async () => {
 		const providerDir = makeProviderDir("apifuse-check-prompt-assets-symlink-");
 		writeMinimalProviderIndex(providerDir);
