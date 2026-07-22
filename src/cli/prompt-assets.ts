@@ -282,6 +282,25 @@ const AUTHORIZED_SKILL_DIR_NAMES: ReadonlySet<string> = new Set(
 );
 
 /**
+ * Every managed directory ancestor implied by the real-file asset paths, sorted
+ * parent-before-child (fewest path segments first): `.agents`, `.agents/skills`,
+ * `.agents/skills/<each managed skill>`, `.agents/skills/upstream-notes`, … .
+ * Derived generically from PROMPT_ASSET_FILE_PATHS so no level is ever missed;
+ * sync normalizes each into a REAL directory before any relocation/comparison/
+ * write so nothing resolves through a symlink to an outside location.
+ */
+const MANAGED_DIRECTORY_ANCESTORS: readonly string[] = (() => {
+	const dirs = new Set<string>();
+	for (const assetPath of PROMPT_ASSET_FILE_PATHS) {
+		const segments = assetPath.split("/");
+		for (let end = 1; end < segments.length; end += 1) {
+			dirs.add(segments.slice(0, end).join("/"));
+		}
+	}
+	return [...dirs].sort((a, b) => a.split("/").length - b.split("/").length);
+})();
+
+/**
  * Enumerate the guidance-injection risks under `.agents/skills/` — and ONLY
  * those. Two things are flagged (never followed, never deleted by sync):
  *   1. an unauthorized skill directory `.agents/skills/<name>/` whose <name> is
@@ -672,19 +691,25 @@ export function syncPromptAssets(providerRoot: string): PromptAssetSyncResult {
 	const wroteFiles: string[] = [];
 	const createdSymlinks: string[] = [];
 
-	// 0. Normalize `.agents` into a REAL directory BEFORE anything is written
-	// into or compared against it. A symlinked (or regular-file) `.agents` would
-	// otherwise let step 1's upstream-notes duplicate check read the destination
-	// THROUGH the link (an outside file); a byte match would skip the legacy note
-	// as "redundant", then the link is replaced with a real dir and legacy
-	// skills/ is removed — silently dropping the contributor note. lstat only;
-	// the symlink is unlinked, never followed (its outside target is untouched).
-	const agentsAbsPath = join(providerRoot, ".agents");
-	const agentsStat = lstatSafe(agentsAbsPath);
-	if (agentsStat && !agentsStat.isDirectory()) {
-		rmSync(agentsAbsPath, { recursive: true, force: true });
+	// 0. Normalize the ENTIRE managed directory ancestor chain into REAL
+	// directories BEFORE any relocation, comparison, or managed-file write. If
+	// ANY level (`.agents`, `.agents/skills`, `.agents/skills/upstream-notes`, a
+	// managed skill dir) is a symlink or regular file, a later identity/collision
+	// check or write would resolve THROUGH it to an outside location — e.g. the
+	// legacy upstream-note duplicate check could read an outside file, match
+	// bytes, and drop the note as "redundant"; the link is then replaced with a
+	// real dir and legacy skills/ is removed → silent data loss. Iterating
+	// parent-before-child replaces a symlinked parent before its children are
+	// created. lstat only: a symlink/file is unlinked, never followed, so the
+	// outside target and everything outside the provider root are untouched.
+	for (const managedDir of MANAGED_DIRECTORY_ANCESTORS) {
+		const absDir = join(providerRoot, managedDir);
+		const stat = lstatSafe(absDir);
+		if (stat && !stat.isDirectory()) {
+			rmSync(absDir, { recursive: true, force: true });
+		}
+		mkdirSync(absDir, { recursive: true });
 	}
-	mkdirSync(agentsAbsPath, { recursive: true });
 
 	// 1. Legacy top-level skills/ from the pre-.agents layout. Contributor-
 	// authored upstream-notes files are relocated into the managed

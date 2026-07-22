@@ -834,6 +834,50 @@ describe("apifuse sync-assets", () => {
 		);
 	});
 
+	// Same hazard at every nested level of the managed ancestor chain: step 0
+	// normalizes the WHOLE chain, so a symlink at any depth cannot make the
+	// duplicate check read an outside file and drop the note.
+	for (const symlinkRel of [".agents/skills", ".agents/skills/upstream-notes"]) {
+		it(`preserves a legacy upstream-note when ${symlinkRel} is a symlink to an outside dir with identical bytes`, async () => {
+			const cwd = makeTempDir("sync-assets-nested-symlink-note-");
+			const providerRoot = await materializeScaffold(cwd);
+			const noteBytes = "# vendor foo\nhard-won quirk\n";
+
+			// Move the chosen managed subtree outside and symlink it back; seed the
+			// outside target with an identical-bytes note at the upstream-notes path.
+			const outsideDir = join(cwd, `outside-${symlinkRel.replace(/[/.]/g, "_")}`);
+			renameSync(join(providerRoot, symlinkRel), outsideDir);
+			const innerNoteRel = ".agents/skills/upstream-notes/foo.md".slice(symlinkRel.length + 1);
+			const outsideNotePath = join(outsideDir, innerNoteRel);
+			mkdirSync(dirname(outsideNotePath), { recursive: true });
+			writeFileSync(outsideNotePath, noteBytes);
+			symlinkSync(outsideDir, join(providerRoot, symlinkRel));
+
+			// Legacy top-level skills/ carries the same note (identical bytes).
+			mkdirSync(join(providerRoot, "skills", "upstream-notes"), { recursive: true });
+			writeFileSync(join(providerRoot, "skills", "upstream-notes", "foo.md"), noteBytes);
+
+			const result = syncPromptAssets(providerRoot);
+			expect(result.changed).toBeTrue();
+
+			// The whole managed ancestor chain is real again (no level is a symlink).
+			expect(lstatSync(join(providerRoot, ".agents")).isSymbolicLink()).toBeFalse();
+			expect(lstatSync(join(providerRoot, ".agents", "skills")).isSymbolicLink()).toBeFalse();
+			expect(
+				lstatSync(join(providerRoot, ".agents", "skills", "upstream-notes")).isSymbolicLink(),
+			).toBeFalse();
+
+			// The contributor note survives in the REAL tree — not dropped as redundant.
+			const notePath = join(providerRoot, ".agents", "skills", "upstream-notes", "foo.md");
+			expect(existsSync(notePath)).toBeTrue();
+			expect(readFileSync(notePath, "utf8")).toBe(noteBytes);
+			// Legacy skills/ gone, verify green, outside target untouched.
+			expect(existsSync(join(providerRoot, "skills"))).toBeFalse();
+			expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+			expect(readFileSync(outsideNotePath, "utf8")).toBe(noteBytes);
+		});
+	}
+
 	it("flags a symlink directly under .agents/skills/ but ignores a symlink at the .agents/ root", async () => {
 		const cwd = makeTempDir("sync-assets-injected-symlink-");
 		const providerRoot = await materializeScaffold(cwd);
