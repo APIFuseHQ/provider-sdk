@@ -1,5 +1,9 @@
 # @apifuse/provider-sdk Changelog
 
+## 2.2.0-beta.7
+
+- Release candidate for main commit 2ce4ea4bd36ce333eba8b3b474bf6e82b5e9216c.
+
 ## 2.2.0-beta.6
 
 - Release candidate for main commit 17f4e41d44efe7c148ef875b950be4f2c7df1294.
