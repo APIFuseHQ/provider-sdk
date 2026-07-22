@@ -145,28 +145,48 @@ async function runCell(
 		const fingerprint = ja3FromEcho(tlsRes.body);
 		const directFp = await directFingerprint(transport);
 
-		const cfRes = await get(proxyUrl, CF_ORIGIN);
-		const cfChallenged = looksLikeChallenge(cfRes.status, cfRes.headers, cfRes.body);
+		let cfStatus: number | undefined;
+		let cfChallenged = false;
+		try {
+			const cfRes = await get(proxyUrl, CF_ORIGIN);
+			cfStatus = cfRes.status;
+			cfChallenged = looksLikeChallenge(cfRes.status, cfRes.headers, cfRes.body);
+		} catch (error) {
+			cfChallenged = true;
+			cfStatus = undefined;
+			void error;
+		}
 
 		const fpPreserved = transport === "native-fetch" || (!!fingerprint && fingerprint === directFp);
+		// A browser-gated origin (Cloudflare) is only a pass/fail signal for the
+		// stealth transport. ctx.http (native fetch) has no browser impersonation,
+		// so it is expected to be challenged there — reported as INFO, not FAIL.
+		const cfGates = transport === "stealth";
 		const pass =
-			ipRes.status < 300 && !!egressIp && fpPreserved && cfRes.status === 200 && !cfChallenged;
+			ipRes.status < 300 &&
+			!!egressIp &&
+			fpPreserved &&
+			(!cfGates || (cfStatus === 200 && !cfChallenged));
 
 		return {
 			...base,
 			status: pass ? "PASS" : "FAIL",
 			egressIp,
 			fingerprint,
-			cfStatus: cfRes.status,
-			note: pass
-				? undefined
-				: [
-						!egressIp ? "no egress ip" : "",
-						!fpPreserved ? `fingerprint drift (${fingerprint} vs ${directFp})` : "",
-						cfChallenged ? "cloudflare challenge" : "",
-					]
-						.filter(Boolean)
-						.join("; "),
+			cfStatus,
+			note:
+				(pass
+					? cfGates
+						? undefined
+						: `cf=${cfChallenged ? "challenged (expected for native fetch)" : cfStatus}`
+					: [
+							ipRes.status >= 300 ? `egress status ${ipRes.status}` : "",
+							!egressIp ? "no egress ip" : "",
+							!fpPreserved ? `fingerprint drift (${fingerprint} vs ${directFp})` : "",
+							cfGates && cfChallenged ? "cloudflare challenge" : "",
+						]
+							.filter(Boolean)
+							.join("; ")) || undefined,
 		};
 	} catch (error) {
 		return {
