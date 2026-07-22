@@ -5,12 +5,18 @@ import type { ProviderProxyPolicy } from "../types.js";
 export const NODEMAVEN_USERNAME_ENV = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
 export const NODEMAVEN_PASSWORD_ENV = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
 export const NODEMAVEN_FILTER_ENV = "APIFUSE__PROXY__NODEMAVEN_FILTER";
-export const PROXY_PROTOCOL_ENV = "APIFUSE__PROXY__PROTOCOL";
 
 export const NODEMAVEN_GATEWAY_HOST = "gate.nodemaven.com";
 
 /** Both schemes tunnel bytes end-to-end, preserving the client TLS handshake. */
 export type ProxyProtocol = "http" | "socks5";
+
+/**
+ * NodeMaven's fastest protocol: HTTP CONNECT. Benchmarks (KR, cold + warm)
+ * showed socks5 through the gateway adds ~500ms per request over http, so
+ * NodeMaven never defaults to socks5.
+ */
+export const NODEMAVEN_DEFAULT_PROTOCOL: ProxyProtocol = "http";
 
 /** NodeMaven gateway port ranges per protocol (docs: HTTP 8080-9080, SOCKS5 1080-2080). */
 const NODEMAVEN_PORTS: Record<ProxyProtocol, { min: number; max: number }> = {
@@ -36,18 +42,6 @@ function readNodemavenUsername(): string | undefined {
 
 function readNodemavenPassword(): string | undefined {
 	return process.env[NODEMAVEN_PASSWORD_ENV]?.trim() || undefined;
-}
-
-/**
- * Resolve the requested tunnelling protocol from the operator env. Both values
- * yield a tunnelling scheme (`http://` CONNECT or `socks5://`), never a MITM
- * proxy. Throws on an unrecognised value rather than silently defaulting.
- */
-export function resolveProxyProtocol(): ProxyProtocol {
-	const raw = process.env[PROXY_PROTOCOL_ENV]?.trim().toLowerCase();
-	if (!raw) return "http";
-	if (raw === "http" || raw === "socks5") return raw;
-	throw new Error(`${PROXY_PROTOCOL_ENV} must be "http" or "socks5"`);
 }
 
 function resolveNodemavenFilter(): string {

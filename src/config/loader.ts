@@ -6,11 +6,10 @@ import { Redis } from "ioredis";
 
 import type { ProviderProxyPolicy, ProviderProxyProvider, TraceConfig } from "../types.js";
 import {
-	PROXY_PROTOCOL_ENV,
+	NODEMAVEN_DEFAULT_PROTOCOL,
 	type ProxyProtocol,
 	hasNodemavenCredentials,
 	nodemavenPoolSize,
-	resolveProxyProtocol,
 	synthesizeNodemavenProxy,
 } from "../runtime/proxy-nodemaven.js";
 
@@ -76,6 +75,13 @@ export type ProxyResolutionOptions = {
 	 * permissive (both protocols allowed).
 	 */
 	transportProtocols?: readonly ProxyProtocol[];
+	/**
+	 * Explicit protocol override. Internal — for the verification harness and
+	 * tests, or an advanced caller. Normal callers omit it and each vendor uses
+	 * its own benchmarked default protocol (see VENDOR_DEFAULT_PROTOCOL). Not an
+	 * env var and not a provider-policy field.
+	 */
+	protocol?: ProxyProtocol;
 	/**
 	 * Gateway pool "refresh" generation. Bumped by transports on pool refresh to
 	 * derive a fresh gateway session set (ignored by allocation-style vendors,
@@ -551,17 +557,10 @@ export async function resolveProxyConfigAsync(
 		});
 	}
 
-	// Protocol is an operator/deployment concern (account capability + transport
-	// support), resolved from env. Both values are tunnelling schemes.
-	const protocol = resolveProxyProtocol();
+	// Protocol is chosen per vendor (each vendor's benchmarked-best), with an
+	// optional explicit override for the harness/tests. Both are tunnelling
+	// schemes. transportProtocols is what the calling transport can actually use.
 	const transportProtocols = options.transportProtocols ?? (["http", "socks5"] as const);
-	if (!transportProtocols.includes(protocol)) {
-		throw new ProxyResolutionError(
-			"PROXY_PROTOCOL_UNSUPPORTED",
-			`Proxy protocol "${protocol}" is not supported by this transport (supports: ${transportProtocols.join(", ")}). Set ${PROXY_PROTOCOL_ENV} to a supported value or route this provider through the stealth transport.`,
-			{ protocol },
-		);
-	}
 
 	const sizes = chain.map((vendor) => vendorPoolSize(vendor, policy));
 	const total = sizes.reduce((sum, size) => sum + size, 0);
@@ -573,11 +572,12 @@ export async function resolveProxyConfigAsync(
 	const refreshEpoch = normalizeAttemptIndex(options.proxyRefreshEpoch);
 
 	let lastError: unknown;
-	let anyCredentials = false;
+	let blockedProtocol: ProxyProtocol | undefined;
 	for (let vendorIndex = startVendorIndex; vendorIndex < chain.length; vendorIndex++) {
 		const vendor = chain[vendorIndex] as ProxyVendorName;
 		const nextVendor = chain[vendorIndex + 1];
 		const poolIndex = vendorIndex === startVendorIndex ? startPoolIndex : 0;
+		const protocol = options.protocol ?? VENDOR_DEFAULT_PROTOCOL[vendor];
 
 		if (!vendorHasCredentials(vendor)) {
 			options.telemetry?.recordProxyVendorFailover?.({
@@ -588,7 +588,19 @@ export async function resolveProxyConfigAsync(
 			});
 			continue;
 		}
-		anyCredentials = true;
+
+		// The calling transport must be able to use this vendor's protocol; if not,
+		// fail over to the next vendor rather than silently downgrading.
+		if (!transportProtocols.includes(protocol)) {
+			blockedProtocol = protocol;
+			options.telemetry?.recordProxyVendorFailover?.({
+				vendor,
+				nextVendor,
+				phase: "resolution",
+				reason: "protocol_unsupported",
+			});
+			continue;
+		}
 
 		try {
 			return await resolveWithVendor(vendor, policy, options, {
@@ -597,8 +609,8 @@ export async function resolveProxyConfigAsync(
 				refreshEpoch,
 			});
 		} catch (error) {
-			// Config/programming errors (malformed env, invalid filter) are not
-			// vendor outages — propagate them rather than failing over.
+			// Config/programming errors (invalid filter, etc.) are not vendor
+			// outages — propagate them rather than failing over.
 			if (!(error instanceof ProxyResolutionError)) {
 				throw error;
 			}
@@ -616,25 +628,43 @@ export async function resolveProxyConfigAsync(
 	}
 
 	if (policy.mode === "required") {
-		if (!anyCredentials) {
+		if (lastError) {
+			throw lastError instanceof ProxyResolutionError
+				? lastError
+				: new ProxyResolutionError(
+						"PROXY_ALLOCATION_FAILED",
+						`All proxy vendors [${chain.join(", ")}] failed for required proxy egress.`,
+						{ cause: lastError, vendorChain: chain },
+					);
+		}
+		if (blockedProtocol) {
 			throw new ProxyResolutionError(
-				"PROXY_REQUIRED",
-				`Proxy egress is required but no vendor credentials are configured. Missing: ${chain
-					.map((vendor) => `${missingCredentialEnv(vendor)} (${vendor})`)
-					.join(", ")}.`,
-				{ vendorChain: chain },
+				"PROXY_PROTOCOL_UNSUPPORTED",
+				`No proxy vendor in [${chain.join(", ")}] could serve a protocol supported by this transport (supports: ${transportProtocols.join(", ")}; vendor wanted "${blockedProtocol}"). Route this provider through the stealth transport.`,
+				{ protocol: blockedProtocol, vendorChain: chain },
 			);
 		}
-		throw lastError instanceof ProxyResolutionError
-			? lastError
-			: new ProxyResolutionError(
-					"PROXY_ALLOCATION_FAILED",
-					`All proxy vendors [${chain.join(", ")}] failed for required proxy egress.`,
-					{ cause: lastError, vendorChain: chain },
-				);
+		throw new ProxyResolutionError(
+			"PROXY_REQUIRED",
+			`Proxy egress is required but no vendor credentials are configured. Missing: ${chain
+				.map((vendor) => `${missingCredentialEnv(vendor)} (${vendor})`)
+				.join(", ")}.`,
+			{ vendorChain: chain },
+		);
 	}
 	return { shouldWarn: true };
 }
+
+/**
+ * Each vendor's default egress protocol, chosen from live KR benchmarks. HTTP
+ * CONNECT wins for nodemaven (socks5 adds ~500ms through the gateway) and ties
+ * for smartproxy, and is the only protocol ctx.http (Bun native fetch) supports.
+ * Override per call via ProxyResolutionOptions.protocol (harness/tests).
+ */
+const VENDOR_DEFAULT_PROTOCOL: Record<ProxyVendorName, ProxyProtocol> = {
+	smartproxy: "http",
+	nodemaven: NODEMAVEN_DEFAULT_PROTOCOL,
+};
 
 /**
  * Guard the No-MITM invariant: a resolved proxy URL must use a tunnelling scheme
@@ -1525,7 +1555,7 @@ function markSmartproxyCacheInvalidated(options: ProxyResolutionOptions = {}): s
 		policy,
 		options.affinityKey,
 		lifetimeMinutes,
-		resolveProxyProtocol(),
+		options.protocol ?? VENDOR_DEFAULT_PROTOCOL.smartproxy,
 	);
 	invalidatedProxyKeys.set(cacheKey, Date.now() + SMARTPROXY_INVALIDATION_SKIP_REDIS_MS);
 	proxyCache.delete(cacheKey);

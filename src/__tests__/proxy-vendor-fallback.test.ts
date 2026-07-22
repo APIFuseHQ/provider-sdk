@@ -15,7 +15,6 @@ const PROXY_ENV_KEYS = [
 	"APIFUSE__PROXY__NODEMAVEN_USERNAME",
 	"APIFUSE__PROXY__NODEMAVEN_PASSWORD",
 	"APIFUSE__PROXY__NODEMAVEN_FILTER",
-	"APIFUSE__PROXY__PROTOCOL",
 	"APIFUSE__PROXY__PROVIDER",
 	"APIFUSE__PROXY__DEFAULT_COUNTRY",
 	"APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES",
@@ -163,10 +162,18 @@ describe("proxy vendor fallback", () => {
 			expect(resolved.url).toContain("-filter-high-");
 		});
 
-		it("uses the SOCKS5 scheme and port range when the protocol env requests it", async () => {
-			process.env.APIFUSE__PROXY__PROTOCOL = "socks5";
+		it("defaults nodemaven to the http protocol", async () => {
 			const resolved = await resolveProxyConfigAsync({
 				proxyPolicy: { mode: "required", provider: "nodemaven", geo: { country: "US" } },
+			});
+			expect(resolved.protocol).toBe("http");
+			expect(resolved.url).toMatch(/^http:\/\//);
+		});
+
+		it("uses the SOCKS5 scheme and port range when the protocol override requests it", async () => {
+			const resolved = await resolveProxyConfigAsync({
+				proxyPolicy: { mode: "required", provider: "nodemaven", geo: { country: "US" } },
+				protocol: "socks5",
 			});
 			expect(resolved.protocol).toBe("socks5");
 			expect(resolved.url).toMatch(/^socks5:\/\/acct123-.*@gate\.nodemaven\.com:\d{4}$/);
@@ -231,26 +238,28 @@ describe("proxy vendor fallback", () => {
 	});
 
 	describe("protocol capability guard", () => {
-		it("fails loudly when a socks5 policy meets an http-only transport", async () => {
+		it("fails loudly when a socks5 protocol meets an http-only transport", async () => {
 			process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 			process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-			process.env.APIFUSE__PROXY__PROTOCOL = "socks5";
 
 			const rejection = resolveProxyConfigAsync({
 				proxyPolicy: { mode: "required", provider: "nodemaven" },
+				protocol: "socks5",
 				transportProtocols: ["http"],
 			});
 			await expect(rejection).rejects.toMatchObject({ code: "PROXY_PROTOCOL_UNSUPPORTED" });
 			await expect(rejection).rejects.toBeInstanceOf(ProxyResolutionError);
 		});
 
-		it("rejects an unrecognized protocol env value", async () => {
+		it("allows the http default on an http-only transport", async () => {
 			process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 			process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-			process.env.APIFUSE__PROXY__PROTOCOL = "quic";
-			await expect(
-				resolveProxyConfigAsync({ proxyPolicy: { mode: "required", provider: "nodemaven" } }),
-			).rejects.toThrow('APIFUSE__PROXY__PROTOCOL must be "http" or "socks5"');
+			const resolved = await resolveProxyConfigAsync({
+				proxyPolicy: { mode: "required", provider: "nodemaven" },
+				transportProtocols: ["http"],
+			});
+			expect(resolved.protocol).toBe("http");
+			expect(resolved.source).toBe("nodemaven-gateway");
 		});
 	});
 

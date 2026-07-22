@@ -61,14 +61,15 @@ function vendorHasCreds(vendor: Vendor): boolean {
 }
 
 async function resolveProxy(vendor: Vendor, protocol: ProxyProtocol): Promise<string> {
-	process.env.APIFUSE__PROXY__PROTOCOL = protocol;
 	const resolved = await resolveProxyConfigAsync({
 		proxyPolicy: {
 			mode: "required",
 			provider: vendor,
 			geo: { country: COUNTRY as Uppercase<string> },
 		},
-		// The harness itself is protocol-permissive; the transport enforces support.
+		// Explicit protocol override so the matrix can exercise both schemes; the
+		// harness is protocol-permissive and the transport enforces support.
+		protocol,
 		transportProtocols: ["http", "socks5"],
 	});
 	if (!resolved.url) throw new Error("resolver returned no proxy URL");
