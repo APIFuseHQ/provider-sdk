@@ -17,6 +17,7 @@ import {
 	renderMarkdown,
 	type SubmitCheckReport,
 } from "../../bin/apifuse-submit-check.js";
+import { syncPromptAssets } from "../cli/prompt-assets.js";
 
 const tempDirs: string[] = [];
 const repoRoot = dirname(dirname(import.meta.dir));
@@ -52,7 +53,9 @@ function makeProviderDir(
 	);
 	if (includeRepositoryDx) {
 		writeFileSync(join(dir, ".gitignore"), "node_modules/\n.env\n");
-		writeFileSync(join(dir, "AGENTS.md"), "# Agent Guide\n");
+		// Generated-scaffold prompt assets (AGENTS.md, .agents/skills, symlinks,
+		// manifest) so the freshness blocker stays green for fixture providers.
+		syncPromptAssets(dir);
 	}
 	writeFileSync(join(dir, "Dockerfile"), "FROM oven/bun:1.2-alpine\n");
 	writeFileSync(join(dir, "README.md"), readme);
@@ -294,7 +297,10 @@ describe("apifuse submit-check", () => {
 		});
 		const dxCheck = report.checks.find((check) => check.id === "repository-dx");
 
-		expect(report.score.verdict).toBe("reviewable_with_warnings");
+		// Missing prompt assets are additionally a zero-point freshness blocker,
+		// so a provider without the generated DX files is now blocked outright.
+		expect(report.score.verdict).toBe("blocked");
+		expect(report.checks.find((check) => check.id === "prompt-assets-fresh")?.status).toBe("fail");
 		expect(dxCheck?.status).toBe("warn");
 		expect(dxCheck?.message).toContain(".gitignore");
 		expect(dxCheck?.message).toContain("AGENTS.md");

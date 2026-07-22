@@ -6,6 +6,11 @@ import { pathToFileURL } from "node:url";
 
 import { z } from "zod";
 
+import {
+	formatPromptAssetIssues,
+	PROMPT_ASSET_SYNC_REMEDIATION,
+	verifyPromptAssets,
+} from "../src/cli/prompt-assets.js";
 import type { ProviderDefinition } from "../src/index.js";
 import { lintProvider, type ProviderLintMode } from "../src/lint.js";
 import { safeParseSchemaSync } from "../src/schema.js";
@@ -129,7 +134,24 @@ export async function runChecks(
 		checkProviderMetadata(provider),
 		checkDockerfile(dockerfilePath),
 		checkPackageJson(packageJsonPath),
+		checkPromptAssets(providerRoot),
 	];
+}
+
+export const PROMPT_ASSETS_CHECK_MESSAGE =
+	"Agent prompt assets match the installed SDK version";
+
+function checkPromptAssets(providerRoot: string): CheckResult {
+	const verification = verifyPromptAssets(providerRoot);
+	if (verification.ok) {
+		return { message: PROMPT_ASSETS_CHECK_MESSAGE, passed: true };
+	}
+
+	return {
+		message: PROMPT_ASSETS_CHECK_MESSAGE,
+		passed: false,
+		details: [...formatPromptAssetIssues(verification), PROMPT_ASSET_SYNC_REMEDIATION],
+	};
 }
 
 function isScannableProviderSourceFile(relativePath: string): boolean {
@@ -142,7 +164,15 @@ function isScannableProviderSourceFile(relativePath: string): boolean {
 
 function collectProviderSourceFiles(providerRoot: string): Record<string, string> {
 	const sources: Record<string, string> = {};
-	const skipDirectories = new Set([".git", "node_modules", "dist", "build", ".next"]);
+	const skipDirectories = new Set([
+		".git",
+		"node_modules",
+		"dist",
+		"build",
+		".next",
+		".agents",
+		".apifuse",
+	]);
 	const visit = (directory: string) => {
 		for (const entry of readdirSync(directory, { withFileTypes: true })) {
 			const path = resolve(directory, entry.name);

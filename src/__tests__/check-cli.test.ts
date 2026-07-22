@@ -2,7 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { runChecks } from "../../bin/apifuse-check.js";
+import { PROMPT_ASSETS_CHECK_MESSAGE, runChecks } from "../../bin/apifuse-check.js";
+import { PROMPT_ASSET_MANIFEST_PATH, syncPromptAssets } from "../cli/prompt-assets.js";
 
 const tempDirs: string[] = [];
 const tempRoot = join(process.cwd(), ".tmp-provider-sdk-tests");
@@ -289,4 +290,70 @@ export default defineProvider({
 		expect(authoring?.passed).toBe(false);
 		expect(authoring?.details?.join("\n")).toContain("ctx-credential-write-forbidden-in-handler");
 	});
+
+	it("fails the prompt-assets check when the manifest is missing", async () => {
+		const providerDir = makeProviderDir("apifuse-check-prompt-assets-missing-");
+		writeMinimalProviderIndex(providerDir);
+
+		const results = await runChecks(providerDir);
+		const promptAssets = results.find((result) => result.message === PROMPT_ASSETS_CHECK_MESSAGE);
+
+		expect(promptAssets?.passed).toBe(false);
+		expect(promptAssets?.details?.join("\n")).toContain(PROMPT_ASSET_MANIFEST_PATH);
+		expect(promptAssets?.details?.join("\n")).toContain("sync-assets");
+	});
+
+	it("passes the prompt-assets check for a freshly synced provider", async () => {
+		const providerDir = makeProviderDir("apifuse-check-prompt-assets-fresh-");
+		writeMinimalProviderIndex(providerDir);
+		syncPromptAssets(providerDir);
+
+		const results = await runChecks(providerDir);
+		const promptAssets = results.find((result) => result.message === PROMPT_ASSETS_CHECK_MESSAGE);
+
+		expect(promptAssets?.passed).toBe(true);
+	});
+
+	it("fails the prompt-assets check when a managed symlink is tampered", async () => {
+		const providerDir = makeProviderDir("apifuse-check-prompt-assets-symlink-");
+		writeMinimalProviderIndex(providerDir);
+		syncPromptAssets(providerDir);
+		rmSync(join(providerDir, "CLAUDE.md"), { force: true });
+		writeFileSync(join(providerDir, "CLAUDE.md"), "@AGENTS.md\n");
+
+		const results = await runChecks(providerDir);
+		const promptAssets = results.find((result) => result.message === PROMPT_ASSETS_CHECK_MESSAGE);
+
+		expect(promptAssets?.passed).toBe(false);
+		expect(promptAssets?.details?.join("\n")).toContain("CLAUDE.md (expected symlink -> AGENTS.md)");
+	});
 });
+
+function writeMinimalProviderIndex(providerDir: string): void {
+	writeFileSync(
+		join(providerDir, "index.ts"),
+		`
+import { z } from "zod";
+
+export default {
+  id: "prompt-assets-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  allowedHosts: ["api.example.com"],
+  reviewed: "community",
+  auth: { mode: "none" },
+  meta: { displayName: "Prompt Assets Provider", category: "other" },
+  operations: {
+    lookup: {
+      description: "Deterministic prompt-assets fixture lookup operation for check tests.",
+      input: z.object({ q: z.string() }),
+      output: z.object({ ok: z.boolean() }),
+      handler: async () => ({ ok: true }),
+      fixtures: { request: { q: "btc" }, response: { ok: true } },
+      healthCheckUnsupported: { reason: "Unit test operation." },
+    },
+  },
+};
+`,
+	);
+}

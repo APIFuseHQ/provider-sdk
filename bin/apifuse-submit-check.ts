@@ -11,6 +11,10 @@ import * as acorn from "acorn";
 import { z } from "zod";
 
 import packageJson from "../package.json";
+import {
+	formatPromptAssetIssues,
+	verifyPromptAssets,
+} from "../src/cli/prompt-assets.js";
 import type { ProviderDefinition } from "../src/index.js";
 import {
 	loadProviderLocaleCatalogs,
@@ -19,7 +23,7 @@ import {
 } from "../src/i18n/index.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY } from "../src/schema.js";
 import { safeParseSchemaSync } from "../src/schema.js";
-import { type CheckResult, runChecks } from "./apifuse-check.js";
+import { type CheckResult, PROMPT_ASSETS_CHECK_MESSAGE, runChecks } from "./apifuse-check.js";
 import { hasSubstantiveXmlStructure } from "./submit-check-xml.js";
 
 const TIERS = ["bronze", "silver", "gold", "diamond"] as const;
@@ -267,7 +271,15 @@ export async function buildSubmitCheckReport(
 	const baseChecks = await safeRunChecks(providerRoot);
 	const provider = await safeLoadProvider(providerRoot);
 
-	checks.push(...scoreBaseChecks(baseChecks));
+	// Prompt-asset freshness is reported by its own dedicated zero-point
+	// blocker below; filter the base-check duplicate so it is not double
+	// penalized under the definition category.
+	checks.push(
+		...scoreBaseChecks(
+			baseChecks.filter((result) => result.message !== PROMPT_ASSETS_CHECK_MESSAGE),
+		),
+	);
+	checks.push(scorePromptAssetFreshness(providerRoot));
 	checks.push(scoreProviderIdSlug(providerRoot, provider));
 	checks.push(scoreNoVendorShim(providerRoot));
 	checks.push(scoreNoVendorImport(providerRoot));
@@ -1524,7 +1536,9 @@ function isScannableProviderSourceFile(relativePath: string): boolean {
 }
 
 function shouldScanSourceDirectory(relativePath: string): boolean {
-	return ![".git", "node_modules", "dist", "build", "coverage"].includes(relativePath);
+	return ![".git", "node_modules", "dist", "build", "coverage", ".agents", ".apifuse"].includes(
+		relativePath,
+	);
 }
 
 function isExcludedTestSource(relativePath: string): boolean {
@@ -1543,6 +1557,27 @@ function toRelativeProviderPath(providerRoot: string, filePath: string): string 
 
 function formatSourceFindings(findings: readonly SourceFinding[]): string[] {
 	return findings.map((finding) => `${finding.file}:${finding.line}`);
+}
+
+function scorePromptAssetFreshness(providerRoot: string): SubmitCheck {
+	const verification = verifyPromptAssets(providerRoot);
+	if (verification.ok) {
+		return pass(
+			"prompt-assets-fresh",
+			"docs",
+			"SDK-managed agent prompt assets match the installed SDK version.",
+			0,
+		);
+	}
+
+	return blocker(
+		"prompt-assets-fresh",
+		"docs",
+		"SDK-managed agent prompt assets are missing, stale, or modified.",
+		"Run `bun run sync-assets` (or `bunx apifuse sync-assets .`) to regenerate AGENTS.md, .agents/skills/**, the CLAUDE.md/.claude/.codex symlinks, and .apifuse/prompt-assets.json for the installed SDK version.",
+		0,
+		formatPromptAssetIssues(verification),
+	);
 }
 
 function scoreRepositoryDx(providerRoot: string): SubmitCheck {
