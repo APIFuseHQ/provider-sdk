@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,6 +8,11 @@ import { cancel, intro, isCancel, note, outro, select, text } from "@clack/promp
 import { z } from "zod";
 
 import packageJson from "../../package.json";
+import {
+	buildPromptAssetManifest,
+	buildPromptAssetPlanEntries,
+	PROMPT_ASSET_MANIFEST_PATH,
+} from "./prompt-assets.js";
 
 export const PROVIDER_NAME_REGEX = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
 export const CATEGORY_OPTIONS = [
@@ -64,7 +69,10 @@ export type CreateResolvedOptions = {
 
 export type ProviderPlanFile = {
 	path: string;
+	/** File content, or the symlink target (relative path) for kind "symlink". */
 	content: string;
+	/** Absent kind means "file" (backward compatible with older consumers). */
+	kind?: "file" | "symlink";
 };
 
 export type ProviderCreatePlan = {
@@ -538,39 +546,22 @@ export async function buildProviderCreatePlan(
 				PROVIDER_ID: options.name,
 			}),
 		},
-		{
-			path: resolve(providerRoot, "AGENTS.md"),
-			content: await renderTemplate("AGENTS.md.tpl", {}),
-		},
-		{
-			path: resolve(providerRoot, "CLAUDE.md"),
-			content: await renderTemplate("CLAUDE.md.tpl", {}),
-		},
-		{
-			path: resolve(providerRoot, "skills", "normalization-standards", "SKILL.md"),
-			content: await renderTemplate("skills/normalization-standards/SKILL.md.tpl", {}),
-		},
-		{
-			path: resolve(providerRoot, "skills", "upstream-contract-verification", "SKILL.md"),
-			content: await renderTemplate("skills/upstream-contract-verification/SKILL.md.tpl", {}),
-		},
-		{
-			path: resolve(providerRoot, "skills", "fixtures-and-recording", "SKILL.md"),
-			content: await renderTemplate("skills/fixtures-and-recording/SKILL.md.tpl", {}),
-		},
-		{
-			path: resolve(providerRoot, "skills", "pagination-and-counts", "SKILL.md"),
-			content: await renderTemplate("skills/pagination-and-counts/SKILL.md.tpl", {}),
-		},
-		{
-			path: resolve(providerRoot, "skills", "health-checks-and-fail-closed", "SKILL.md"),
-			content: await renderTemplate("skills/health-checks-and-fail-closed/SKILL.md.tpl", {}),
-		},
-		{
-			path: resolve(providerRoot, "skills", "upstream-notes", "README.md"),
-			content: await renderTemplate("skills/upstream-notes/README.md.tpl", {}),
-		},
 	];
+
+	const promptAssetEntries = await buildPromptAssetPlanEntries(renderTemplate);
+	for (const entry of promptAssetEntries) {
+		files.push({
+			path: resolve(providerRoot, entry.path),
+			content: entry.content,
+			...(entry.kind === "symlink" ? { kind: "symlink" as const } : {}),
+		});
+	}
+	// Manifest last: writePlan writes in order, so a crash mid-scaffold never
+	// leaves a manifest that claims assets which were not written.
+	files.push({
+		path: resolve(providerRoot, PROMPT_ASSET_MANIFEST_PATH),
+		content: buildPromptAssetManifest(promptAssetEntries, packageJson.version),
+	});
 
 	return {
 		displayName: options.displayName,
@@ -614,6 +605,7 @@ function renderPackageJson(input: { packageName: string; sdkSpecifier: string })
 				check: "apifuse check . && bun run type-check",
 				"type-check": "tsc --noEmit",
 				"submit-check": "apifuse submit-check . --markdown submission-report.md",
+				"sync-assets": "apifuse sync-assets .",
 				test: "apifuse test .",
 				record: "apifuse record .",
 				start: "bun start.ts",
@@ -869,6 +861,13 @@ function isApifuseInternalWorkspaceRoot(workspaceRoot: string): boolean {
 async function writePlan(plan: ProviderCreatePlan): Promise<void> {
 	for (const file of plan.files) {
 		await mkdir(dirname(file.path), { recursive: true });
+		if (file.kind === "symlink") {
+			// rm operates on the link itself (lstat semantics) and tolerates
+			// directories, so whatever occupies the path is replaced by the link.
+			await rm(file.path, { recursive: true, force: true });
+			await symlink(file.content, file.path);
+			continue;
+		}
 		await writeFile(file.path, file.content);
 	}
 }
@@ -940,7 +939,10 @@ function printResult(plan: ProviderCreatePlan, jsonMode: boolean, dryRun: boolea
 		},
 		validationCommands: plan.validationCommands,
 		nextDevCommand: plan.nextDevCommand,
-		files: plan.files.map((file) => relative(plan.providerRoot, file.path) || file.path),
+		files: plan.files.map((file) => {
+			const relativePath = relative(plan.providerRoot, file.path) || file.path;
+			return file.kind === "symlink" ? `${relativePath} -> ${file.content} (symlink)` : relativePath;
+		}),
 	};
 
 	if (jsonMode) {
