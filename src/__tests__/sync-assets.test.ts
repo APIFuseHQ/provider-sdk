@@ -628,6 +628,80 @@ describe("apifuse sync-assets", () => {
 		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
 	});
 
+	it("losslessly merges a real .claude directory into .agents on migration", async () => {
+		const cwd = makeTempDir("sync-assets-claude-dir-merge-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		// Replace the managed .claude symlink with a real user-authored config dir.
+		rmSync(join(providerRoot, ".claude"), { force: true });
+		mkdirSync(join(providerRoot, ".claude", "commands"), { recursive: true });
+		writeFileSync(join(providerRoot, ".claude", "commands", "foo.md"), "# my command\n");
+		writeFileSync(join(providerRoot, ".claude", "settings.json"), '{"hooks":true}\n');
+
+		const result = syncPromptAssets(providerRoot);
+		expect(result.changed).toBeTrue();
+
+		// .claude is now the managed symlink; user content survives under .agents.
+		expect(lstatSync(join(providerRoot, ".claude")).isSymbolicLink()).toBeTrue();
+		expect(readlinkSync(join(providerRoot, ".claude"))).toBe(".agents");
+		expect(readFileSync(join(providerRoot, ".agents", "commands", "foo.md"), "utf8")).toBe(
+			"# my command\n",
+		);
+		expect(readFileSync(join(providerRoot, ".agents", "settings.json"), "utf8")).toBe(
+			'{"hooks":true}\n',
+		);
+		// Reachable through the new symlink — nothing was lost.
+		expect(readFileSync(join(providerRoot, ".claude", "commands", "foo.md"), "utf8")).toBe(
+			"# my command\n",
+		);
+		expect(result.wroteFiles).toContain(".agents/commands/foo.md");
+		expect(result.wroteFiles).toContain(".agents/settings.json");
+		expect(result.removed).not.toContain(".agents/settings.json");
+		expect(result.removed).not.toContain(".agents/commands/");
+	});
+
+	it("never overwrites an existing .agents file when merging a conflicting real .codex directory", async () => {
+		const cwd = makeTempDir("sync-assets-codex-dir-conflict-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		// A pre-existing (user) settings file already lives under .agents.
+		writeFileSync(join(providerRoot, ".agents", "settings.json"), '{"from":"agents"}\n');
+
+		// A real .codex dir carries a DIFFERENT settings.json.
+		rmSync(join(providerRoot, ".codex"), { force: true });
+		mkdirSync(join(providerRoot, ".codex"), { recursive: true });
+		writeFileSync(join(providerRoot, ".codex", "settings.json"), '{"from":"codex"}\n');
+
+		const result = syncPromptAssets(providerRoot);
+
+		expect(lstatSync(join(providerRoot, ".codex")).isSymbolicLink()).toBeTrue();
+		expect(readlinkSync(join(providerRoot, ".codex"))).toBe(".agents");
+		// The existing .agents copy is byte-unchanged.
+		expect(readFileSync(join(providerRoot, ".agents", "settings.json"), "utf8")).toBe(
+			'{"from":"agents"}\n',
+		);
+		// The .codex version is retained at a non-colliding conflict path.
+		expect(readFileSync(join(providerRoot, ".agents", "settings.legacy.json"), "utf8")).toBe(
+			'{"from":"codex"}\n',
+		);
+		expect(result.wroteFiles).toContain(".agents/settings.legacy.json");
+	});
+
+	it("leaves already-correct .claude/.codex symlinks untouched (no-op, no merge)", async () => {
+		const cwd = makeTempDir("sync-assets-symlink-noop-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		const result = syncPromptAssets(providerRoot);
+		expect(result.changed).toBeFalse();
+		expect(result.wroteFiles).toEqual([]);
+		expect(result.removed).toEqual([]);
+		expect(lstatSync(join(providerRoot, ".claude")).isSymbolicLink()).toBeTrue();
+		expect(readlinkSync(join(providerRoot, ".claude"))).toBe(".agents");
+		expect(lstatSync(join(providerRoot, ".codex")).isSymbolicLink()).toBeTrue();
+		expect(readlinkSync(join(providerRoot, ".codex"))).toBe(".agents");
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+	});
+
 	it("fails the freshness gate on a symlink planted inside .agents/", async () => {
 		const cwd = makeTempDir("sync-assets-injected-symlink-");
 		const providerRoot = await materializeScaffold(cwd);
