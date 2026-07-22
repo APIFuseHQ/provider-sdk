@@ -3318,3 +3318,124 @@ export default defineProvider({ id: "static-spread", version: "1.0.0", runtime: 
 		expect(check?.status).toBe("pass");
 	});
 });
+
+describe("sdk-owned-secret-presence rule", () => {
+	const SECRET_NAME = "APIFUSE__PROVIDER__GOOD_PROVIDER__SERVICE_KEY";
+
+	function sourceWithDeclaredSecret(): string {
+		return validProviderSource().replace(
+			'auth: { mode: "none" },',
+			`auth: { mode: "none" },\n  secrets: [{ name: "${SECRET_NAME}", required: true }],`,
+		);
+	}
+
+	function literalGuardHandler(allowComment = ""): string {
+		return `handler: async (ctx) => {
+        ${allowComment}const key = ctx.env.get("${SECRET_NAME}");
+        if (!key?.trim()) {
+          throw new Error("missing key");
+        }
+        return { ok: true };
+      },`;
+	}
+
+	async function findCheck(dir: string) {
+		const report = await buildSubmitCheckReport(dir);
+		return report.checks.find((item) => item.id === "sdk-owned-secret-presence");
+	}
+
+	it("warns on a direct-literal local presence guard", async () => {
+		const dir = makeProviderDir(
+			"submit-secret-presence-literal-",
+			sourceWithDeclaredSecret().replace(
+				"handler: async () => ({ ok: true }),",
+				literalGuardHandler(),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const check = await findCheck(dir);
+		expect(check?.status).toBe("warn");
+		expect(check?.level).toBe("warn");
+		expect(check?.points).toBe(0);
+		expect(check?.maxPoints).toBe(0);
+		expect(check?.remediation).toContain("MISSING_SECRET");
+		expect(check?.evidence?.some((line) => line.startsWith("index.ts:"))).toBe(true);
+	});
+
+	it("detects the aliased requireServiceKey pattern in a sibling module", async () => {
+		const dir = makeProviderDir("submit-secret-presence-alias-", sourceWithDeclaredSecret());
+		writeFileSync(
+			join(dir, "upstream.ts"),
+			`export const SERVICE_KEY_ENV = "${SECRET_NAME}";
+
+export function requireServiceKey(ctx: { env: { get(key: string): string | undefined } }): string {
+  const value = ctx.env.get(SERVICE_KEY_ENV);
+  if (!value?.trim()) {
+    throw new Error("Missing required provider secret: " + SERVICE_KEY_ENV);
+  }
+  return value;
+}
+`,
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const check = await findCheck(dir);
+		expect(check?.status).toBe("warn");
+		expect(check?.evidence?.some((line) => line.startsWith("upstream.ts:"))).toBe(true);
+	});
+
+	it("passes with an acknowledged @apifuse-allow override", async () => {
+		const dir = makeProviderDir(
+			"submit-secret-presence-allow-",
+			sourceWithDeclaredSecret().replace(
+				"handler: async () => ({ ok: true }),",
+				literalGuardHandler(
+					"// @apifuse-allow sdk-owned-secret-presence: legacy guard pending removal\n        ",
+				),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const check = await findCheck(dir);
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toContain("acknowledged @apifuse-allow override");
+	});
+
+	it("passes a guard-free provider that reads the secret directly", async () => {
+		const dir = makeProviderDir(
+			"submit-secret-presence-clean-",
+			sourceWithDeclaredSecret().replace(
+				"handler: async () => ({ ok: true }),",
+				`handler: async (ctx) => {
+        const key = ctx.env.get("${SECRET_NAME}");
+        return { ok: key !== undefined };
+      },`,
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const check = await findCheck(dir);
+		expect(check?.status).toBe("pass");
+	});
+
+	it("ignores guards over env names not declared in secrets[]", async () => {
+		const dir = makeProviderDir(
+			"submit-secret-presence-undeclared-",
+			sourceWithDeclaredSecret().replace(
+				"handler: async () => ({ ok: true }),",
+				`handler: async (ctx) => {
+        const flag = ctx.env.get("SOME_UNDECLARED_TOGGLE");
+        if (!flag) {
+          throw new Error("toggle disabled");
+        }
+        return { ok: true };
+      },`,
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const check = await findCheck(dir);
+		expect(check?.status).toBe("pass");
+	});
+});
