@@ -75,10 +75,11 @@
 	"scripts": {
 		"lint": "biome lint .",
 		"lint:fix": "biome lint --write",
+		"lint:deprecated": "bun run scripts/lint-deprecated-usage.ts",
 		"format": "biome format --write",
 		"type-check": "tsc --noEmit",
 		"test": "bun test",
-		"check": "bun run lint && bun run type-check && bun run build",
+		"check": "bun run lint && bun run type-check && bun run lint:deprecated && bun run build",
 		"pack:check": "bun run build && bun bin/apifuse-pack-check.ts",
 		"pack:smoke": "bun run build && bun bin/apifuse-pack-smoke.ts",
 		"pack:types": "bun run build && bun bin/apifuse-pack-types.ts",
@@ -91,7 +92,7 @@
 		"@biomejs/biome": "^2.5.0",
 		"@types/bun": "latest",
 		"@types/node": "^25.9.3",
-		"typescript": "7.0.2"
+		"typescript": "6.0.3"
 	},
 	"dependencies": {
 		"@clack/prompts": "^1.5.1",

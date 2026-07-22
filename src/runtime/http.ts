@@ -256,6 +256,9 @@ async function resolveNativeProxy(
 			baseProxyAttempt: clientOptions.proxyAttempt,
 			retryAttemptOffset: proxyAttemptOffset,
 		}),
+		// Bun's native fetch proxy option tunnels HTTP CONNECT only; SOCKS5 is not
+		// supported here, so a socks5 policy fails loudly rather than downgrading.
+		transportProtocols: ["http"],
 		telemetry: clientOptions.telemetry,
 	});
 	if (resolvedProxy.shouldWarn) {

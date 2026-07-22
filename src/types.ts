@@ -769,7 +769,7 @@ export type ProviderAccessVisibility = "public" | "early_access";
 
 export type ProviderProxyMode = "disabled" | "optional" | "required";
 
-export type ProviderProxyProvider = "smartproxy" | "decodo" | "custom";
+export type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 
 export type ProviderProxySessionAffinity =
 	| "request"
@@ -783,7 +783,18 @@ export interface ProviderProxyPolicy {
 	 * certificate verification, and vendor allocator endpoints are SDK-owned.
 	 */
 	mode: ProviderProxyMode;
+	/**
+	 * @deprecated Use `providers: [...]` to declare an ordered vendor fallback
+	 * chain. A single-element `providers` list is equivalent to this field.
+	 */
 	provider?: ProviderProxyProvider;
+	/**
+	 * Ordered proxy-vendor fallback chain. The SDK tries each vendor in order and
+	 * fails over to the next when a vendor lacks credentials or its allocation /
+	 * transport is exhausted. When omitted, `provider` (or the platform default)
+	 * is used as a single-vendor chain.
+	 */
+	providers?: ProviderProxyProvider[];
 	geo?: {
 		/** ISO 3166-1 alpha-2 country code, for example KR or US. */
 		country?: Iso3166Alpha2CountryCode;

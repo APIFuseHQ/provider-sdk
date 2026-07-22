@@ -78,7 +78,7 @@ const VALID_RUNTIMES = ["standard", "shared", "browser"] as const;
 const VALID_AUTH_MODES = ["none", "platform-managed", "credentials", "oauth2"] as const;
 const VALID_PROVIDER_ACCESS_VISIBILITIES = ["public", "early_access"] as const;
 const VALID_PROVIDER_PROXY_MODES = ["disabled", "optional", "required"] as const;
-const VALID_PROVIDER_PROXY_PROVIDERS = ["smartproxy", "decodo", "custom"] as const;
+const VALID_PROVIDER_PROXY_PROVIDERS = ["smartproxy", "nodemaven", "decodo", "custom"] as const;
 const VALID_PROVIDER_PROXY_AFFINITIES = [
 	"request",
 	"operation",
@@ -371,10 +371,23 @@ function validateProviderProxy(config: {
 			},
 		);
 	}
-	rejectUnknownFields(proxy, new Set(["mode", "provider", "geo", "session"]), "proxy");
+	rejectUnknownFields(proxy, new Set(["mode", "provider", "providers", "geo", "session"]), "proxy");
 	assertLiteralField(proxy.mode, "proxy.mode", VALID_PROVIDER_PROXY_MODES, config.id);
 	if (proxy.provider !== undefined) {
 		assertLiteralField(proxy.provider, "proxy.provider", VALID_PROVIDER_PROXY_PROVIDERS, config.id);
+	}
+	if (proxy.providers !== undefined) {
+		if (!Array.isArray(proxy.providers) || proxy.providers.length === 0) {
+			throw new ValidationError(
+				`Provider "${config.id}" has invalid proxy.providers: must be a non-empty array of proxy vendors.`,
+				{
+					fix: `Use proxy.providers: ["smartproxy", "nodemaven"] to declare an ordered fallback chain.`,
+				},
+			);
+		}
+		for (const vendor of proxy.providers) {
+			assertLiteralField(vendor, "proxy.providers[]", VALID_PROVIDER_PROXY_PROVIDERS, config.id);
+		}
 	}
 	if (proxy.geo !== undefined) {
 		if (!proxy.geo || typeof proxy.geo !== "object" || Array.isArray(proxy.geo)) {
@@ -433,7 +446,16 @@ function validateProviderProxy(config: {
 			);
 		}
 	}
-	if (proxy.mode === "required" && proxy.provider === "smartproxy") {
+	// Smartproxy uses a provider-declared secret; when it is a required-mode
+	// vendor (singular or in the chain) the app key must be declared so a missing
+	// credential fails at build/validation time, not during a live outage.
+	const vendorChain =
+		proxy.providers && proxy.providers.length > 0
+			? proxy.providers
+			: proxy.provider
+				? [proxy.provider]
+				: [];
+	if (proxy.mode === "required" && vendorChain.includes("smartproxy")) {
 		const hasSmartproxySecret = config.secrets?.some(
 			(secret) => secret.name === SMARTPROXY_APP_KEY_SECRET && secret.required !== false,
 		);

@@ -2,13 +2,15 @@ import { createHash } from "node:crypto";
 import type { Browser, ImpitOptions, ImpitResponse, RequestInit } from "impit";
 import { Impit } from "impit";
 
-import type { ProxyResolutionOptions } from "../config/loader.js";
+import type { ProxyResolutionOptions, ProxyVendorName } from "../config/loader.js";
 import {
 	DEFAULT_SMARTPROXY_POOL_SIZE,
 	invalidateProxyResolutionCacheAsync,
 	ProxyResolutionError,
+	resolvePolicyProxyPoolSpan,
 	resolveProxyConfigAsync,
 	SMARTPROXY_MAX_POOL_SIZE,
+	vendorFromResolvedSource,
 } from "../config/loader.js";
 import { SDKError, TransportError } from "../errors.js";
 import { getStealthProfile } from "../stealth/profiles.js";
@@ -51,7 +53,11 @@ const DEFAULT_PROFILE = "chrome-146";
 const MISSING_PROXY_WARNING =
 	"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.";
 
-const MAX_POLICY_PROXY_RETRY_ATTEMPTS = SMARTPROXY_MAX_POOL_SIZE;
+/**
+ * Upper bound on attempts across a multi-vendor chain, so a two-vendor chain can
+ * exhaust each vendor's pool before failing over and finally throwing.
+ */
+const MAX_POLICY_PROXY_TOTAL_ATTEMPTS = SMARTPROXY_MAX_POOL_SIZE * 2;
 const MAX_POLICY_PROXY_POOL_REFRESHES = 1;
 const PROXY_CONNECT_FAILURE_CODE = "proxy_connect_failed";
 const PROXY_CONNECT_FAILURE_BODY_PATTERN =
@@ -426,6 +432,7 @@ type ResolvedAttemptProxy = {
 	url?: string;
 	poolIndex?: number;
 	proxyHash?: string;
+	vendor?: ProxyVendorName;
 };
 
 function proxyPoolIndexFromDiagnostics(
@@ -615,6 +622,7 @@ function createSessionFetcher(
 	async function resolveRequestProxy(
 		options?: StealthFetchOptions,
 		proxyAttempt?: number,
+		refreshEpoch?: number,
 	): Promise<ResolvedAttemptProxy> {
 		const resolvedProxy = await resolveProxyConfigAsync({
 			proxy: options?.proxy ?? clientOptions.proxy,
@@ -626,6 +634,10 @@ function createSessionFetcher(
 				proxyAttemptOffset: options?.proxyAttemptOffset,
 				retryAttemptOffset: proxyAttempt,
 			}),
+			// The impit stealth transport tunnels both HTTP CONNECT and SOCKS5,
+			// preserving the client TLS fingerprint end-to-end.
+			transportProtocols: ["http", "socks5"],
+			...(refreshEpoch === undefined ? {} : { proxyRefreshEpoch: refreshEpoch }),
 			telemetry: clientOptions.telemetry,
 		});
 
@@ -638,6 +650,7 @@ function createSessionFetcher(
 			url: resolvedProxy.url,
 			poolIndex: proxyPoolIndexFromDiagnostics(resolvedProxy.diagnostics),
 			proxyHash: proxyEndpointHash(resolvedProxy.url),
+			vendor: vendorFromResolvedSource(resolvedProxy.source),
 		};
 	}
 
@@ -662,15 +675,18 @@ function createSessionFetcher(
 			const hasPolicyProxy = isPolicyManagedProxy(clientOptions);
 			const usesPolicyAllocator = hasPolicyProxy && !options.proxy && !clientOptions.proxy;
 			const retryAttemptCap = Math.max(1, stealthRetryOptions?.attempts ?? 1);
+			// Span the whole vendor chain: successive attempts rotate one vendor's
+			// pool, then fail over to the next vendor via the flat attempt index.
+			const policyProxy =
+				clientOptions.proxyPolicy ??
+				(typeof clientOptions.upstream?.proxy === "object"
+					? clientOptions.upstream.proxy
+					: undefined);
 			const policyProxyAttemptCap = Math.max(
 				1,
 				Math.min(
-					MAX_POLICY_PROXY_RETRY_ATTEMPTS,
-					clientOptions.proxyPolicy?.session?.poolSize ??
-						(typeof clientOptions.upstream?.proxy === "object"
-							? clientOptions.upstream.proxy.session?.poolSize
-							: undefined) ??
-						DEFAULT_SMARTPROXY_POOL_SIZE,
+					MAX_POLICY_PROXY_TOTAL_ATTEMPTS,
+					policyProxy ? resolvePolicyProxyPoolSpan(policyProxy) : DEFAULT_SMARTPROXY_POOL_SIZE,
 				),
 			);
 			const maxAttempts = usesPolicyAllocator ? policyProxyAttemptCap : retryAttemptCap;
@@ -698,7 +714,7 @@ function createSessionFetcher(
 						if (attemptRecorded || !proxy) return;
 						attemptRecorded = true;
 						clientOptions.telemetry?.recordProxyAttempt?.({
-							provider: "smartproxy",
+							provider: attemptProxy?.vendor ?? "smartproxy",
 							attempt: attempt + 1,
 							...(attemptProxy?.poolIndex === undefined
 								? {}
@@ -712,7 +728,7 @@ function createSessionFetcher(
 					};
 					try {
 						assertNoUnsupportedFingerprintOverrides(options);
-						attemptProxy = await resolveRequestProxy(options, attempt);
+						attemptProxy = await resolveRequestProxy(options, attempt, refreshAttempt);
 						proxy = attemptProxy.url;
 						if (proxy && usesPolicyAllocator) {
 							if (attemptedProxies.has(proxy)) {
