@@ -1535,10 +1535,12 @@ function isScannableProviderSourceFile(relativePath: string): boolean {
 	);
 }
 
+// `.agents`/`.apifuse` stay IN scope on purpose: managed content there is
+// markdown/JSON (never scannable), while a planted `.ts`/`.sh` under those
+// directories must not become a scan-exempt hiding place for secrets, raw
+// fetch, or vendor imports.
 function shouldScanSourceDirectory(relativePath: string): boolean {
-	return ![".git", "node_modules", "dist", "build", "coverage", ".agents", ".apifuse"].includes(
-		relativePath,
-	);
+	return ![".git", "node_modules", "dist", "build", "coverage"].includes(relativePath);
 }
 
 function isExcludedTestSource(relativePath: string): boolean {

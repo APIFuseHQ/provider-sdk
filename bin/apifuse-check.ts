@@ -164,15 +164,10 @@ function isScannableProviderSourceFile(relativePath: string): boolean {
 
 function collectProviderSourceFiles(providerRoot: string): Record<string, string> {
 	const sources: Record<string, string> = {};
-	const skipDirectories = new Set([
-		".git",
-		"node_modules",
-		"dist",
-		"build",
-		".next",
-		".agents",
-		".apifuse",
-	]);
+	// `.agents`/`.apifuse` are deliberately not skipped: managed content there
+	// is markdown/JSON (never matched by isScannableProviderSourceFile), and a
+	// planted `.ts`/`.sh` under those directories must stay in scanner scope.
+	const skipDirectories = new Set([".git", "node_modules", "dist", "build", ".next"]);
 	const visit = (directory: string) => {
 		for (const entry of readdirSync(directory, { withFileTypes: true })) {
 			const path = resolve(directory, entry.name);

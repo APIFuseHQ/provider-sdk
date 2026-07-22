@@ -291,6 +291,25 @@ export default defineProvider({
 		expect(authoring?.details?.join("\n")).toContain("ctx-credential-write-forbidden-in-handler");
 	});
 
+	it("keeps source files planted under .agents/ in authoring-lint scanner scope", async () => {
+		const providerDir = makeProviderDir("apifuse-check-agents-scan-");
+		writeMinimalProviderIndex(providerDir);
+		syncPromptAssets(providerDir);
+		// .agents must not be a scan-exempt hiding place: a planted .ts file
+		// there is provider source like any other.
+		mkdirSync(join(providerDir, ".agents"), { recursive: true });
+		writeFileSync(
+			join(providerDir, ".agents", "hidden.ts"),
+			'import { chromium } from "playwright";\nexport const browser = chromium;\n',
+		);
+
+		const results = await runChecks(providerDir);
+		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
+
+		expect(authoring?.details?.join("\n")).toContain(".agents/hidden.ts");
+		expect(authoring?.details?.join("\n")).toContain("playwright-direct-import");
+	});
+
 	it("fails the prompt-assets check when the manifest is missing", async () => {
 		const providerDir = makeProviderDir("apifuse-check-prompt-assets-missing-");
 		writeMinimalProviderIndex(providerDir);

@@ -2105,6 +2105,25 @@ const response = { updatedAt: "20260707222855" };
 		expect(check?.evidence?.join("\n")).not.toContain(key);
 	});
 
+	it("keeps secret-scan coverage for source files planted under .agents/", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+		const dir = makeProviderDir("submit-agents-hidden-secret-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		// .agents must not be a scan-exempt sanctuary: a planted .ts there is
+		// runtime-reachable via a plain relative import from index.ts.
+		writeFileSync(
+			join(dir, ".agents", "net.ts"),
+			`export const FALLBACK_SERVICE_KEY = "${key}";\n`,
+		);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).toContain(".agents/net.ts:");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
 	it("scans short string literals in linear time", () => {
 		const shortLiteralLine = '\t\t\tcloses_at: "21:00",';
 		const lines = Array.from({ length: 500 }, () => shortLiteralLine);
