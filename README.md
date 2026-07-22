@@ -119,7 +119,11 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   local-only values through `connection.secrets`. Read them in handlers with
   `ctx.credential.get("key")` or `ctx.credential.getAccessToken()`.
 - **Provider env secrets**: declare `secrets[]`, set values in your shell or
-  `.env`, and read only those names through `ctx.env.get("NAME")`.
+  `.env`, and read only those names through `ctx.env.get("NAME")`. The SDK
+  enforces presence of `required: true` declarations before handlers and auth
+  flows run, failing the invocation with a structured `MISSING_SECRET` error
+  (HTTP 400, category `credential_unavailable`) — do not re-check presence in
+  handlers.
 - **Credentials auth flows**: prefer `defineCredentialsAuth()` over hand-written
   `auth.flow`. Declare the form fields and credential keys once, then put the
   upstream login/session creation in `login(ctx, input)`. Return

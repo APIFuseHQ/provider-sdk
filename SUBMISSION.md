@@ -50,7 +50,7 @@ Fix all blockers before submitting:
 - High-confidence secret or token material in source, README, package metadata, or fixtures.
 - SDK-native source blockers: prefixed Provider ids, `vendor/` SDK shims or imports, raw `.describe()` prose instead of `describeKey`, raw global `fetch()` calls, and excessive `as Type` assertions.
 
-Warnings do not fail the command, but they should be addressed when practical. For example, the generated starter `ping` operation warns because it is not a real upstream-backed bounty Operation. SDK-native warnings also flag moderate `as Type` assertion counts and credentialed Providers that never reference `ctx.credential`.
+Warnings do not fail the command, but they should be addressed when practical. For example, the generated starter `ping` operation warns because it is not a real upstream-backed bounty Operation. SDK-native warnings also flag moderate `as Type` assertion counts, credentialed Providers that never reference `ctx.credential`, and provider-local re-validation of declared env secrets (`sdk-owned-secret-presence`, 0 points): the SDK already rejects invocations with a structured `MISSING_SECRET` error when a declared `required: true` secret is unset, so `requireServiceKey`-style presence guards are deprecated dead weight — delete the guard and read the value directly with `ctx.env.get()`, or acknowledge a deliberate exception with `// @apifuse-allow sdk-owned-secret-presence: <reason>`.
 
 ## Measured local smoke
 

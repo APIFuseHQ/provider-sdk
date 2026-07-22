@@ -283,6 +283,7 @@ export async function buildSubmitCheckReport(
 	if (provider) {
 		const smokeResult = args.smoke ? await runSubmitCheckSmoke(providerRoot, provider) : undefined;
 		checks.push(scoreCredentialUsage(providerRoot, provider));
+		checks.push(scoreSdkOwnedSecretPresence(providerRoot, provider));
 		checks.push(scoreLocaleCatalog(providerRoot, provider));
 		checks.push(scoreOperationMetadata(provider));
 		checks.push(scoreFixtureCoverage(provider));
@@ -1422,6 +1423,159 @@ function scoreCredentialUsage(providerRoot: string, provider: ProviderDefinition
 		0,
 		credentialReferences.length > 0 ? formatSourceFindings(credentialReferences) : undefined,
 	);
+}
+
+// ---------------------------------------------------------------------------
+// sdk-owned-secret-presence (warn): provider-local double validation of
+// declared env secrets.
+//
+// The SDK runtime is the single source of truth for secret presence: declared
+// `required: true` secrets are validated before every handler/auth-flow
+// invocation and fail with the canonical structured MISSING_SECRET error
+// (HTTP 400, category credential_unavailable). Provider-local presence guards
+// (requireServiceKey/requireApiKey style) are dead weight that historically
+// diverged into inconsistent shapes (CONFIGURATION_ERROR vs MISSING_SECRET,
+// with/without category), which broke uniform incident attribution when nine
+// providers shipped with unprovisioned secrets (2026-07-22).
+//
+// Heuristic, warn-only: a line reading a declared `required: true` secret via
+// `.env.get(...)` (string literal or a const alias of a declared name)
+// followed within a small window by a falsy presence check plus a `throw`.
+// The rule flags duplication of the SDK gate ONLY: env names that are not
+// declared in defineProvider secrets[], and optional declarations
+// (`required: false`/omitted) that the runtime deliberately does not enforce,
+// are out of scope. Escape hatch:
+// `// @apifuse-allow sdk-owned-secret-presence: <reason>`.
+// ---------------------------------------------------------------------------
+
+const SDK_OWNED_SECRET_PRESENCE_RULE_ID = "sdk-owned-secret-presence";
+const SECRET_PRESENCE_GUARD_LOOKAHEAD_LINES = 10;
+
+const ENV_GET_CALL_PATTERN =
+	/\.env\.get\(\s*(?:"([^"]+)"|'([^']+)'|`([^`$]+)`|([A-Za-z_$][\w$]*))\s*\)/;
+
+const SECRET_ALIAS_CONST_PATTERN =
+	/\bconst\s+([A-Za-z_$][\w$]*)\s*=\s*(?:"([^"]+)"|'([^']+)'|`([^`$]+)`)/g;
+
+const ENV_GET_ASSIGNMENT_PATTERN = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=[^;]*\.env\.get\(/;
+
+// Const aliases of declared secret names (e.g. `const SERVICE_KEY_ENV =
+// "APIFUSE__PROVIDER__X__SERVICE_KEY"`) so aliased `.env.get(SERVICE_KEY_ENV)`
+// guards are detected, not just direct string literals.
+function buildDeclaredSecretAliasMap(
+	providerRoot: string,
+	declaredNames: ReadonlySet<string>,
+): Map<string, string> {
+	const aliases = new Map<string, string>();
+	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
+		const content = readFileSync(filePath, "utf8");
+		for (const match of content.matchAll(SECRET_ALIAS_CONST_PATTERN)) {
+			const alias = match[1];
+			const name = match[2] ?? match[3] ?? match[4];
+			if (alias && name && declaredNames.has(name)) {
+				aliases.set(alias, name);
+			}
+		}
+	}
+	return aliases;
+}
+
+function hasLocalSecretPresenceGuard(
+	line: string,
+	remainingLines: readonly string[],
+	declaredNames: ReadonlySet<string>,
+	aliases: ReadonlyMap<string, string>,
+): boolean {
+	const match = ENV_GET_CALL_PATTERN.exec(line);
+	if (!match) {
+		return false;
+	}
+	const literal = match[1] ?? match[2] ?? match[3];
+	const identifier = match[4];
+	const readsDeclaredSecret =
+		literal !== undefined
+			? declaredNames.has(literal)
+			: identifier !== undefined && aliases.has(identifier);
+	if (!readsDeclaredSecret) {
+		return false;
+	}
+
+	const window = [line, ...remainingLines.slice(0, SECRET_PRESENCE_GUARD_LOOKAHEAD_LINES)];
+	if (!window.some((candidate) => /\bthrow\b/.test(candidate))) {
+		return false;
+	}
+
+	// Assigned read (`const key = ctx.env.get(...)`): only a falsy/undefined
+	// check on THAT variable counts as a presence guard. Anchoring on the
+	// assigned identifier avoids false positives from unrelated guards/throws
+	// that merely sit near the env read (mirrors the aliased runtime-guard rule).
+	const assigned = ENV_GET_ASSIGNMENT_PATTERN.exec(line)?.[1];
+	if (assigned) {
+		const escaped = assigned.replace(/\$/g, "\\$");
+		const guardPattern = new RegExp(
+			`(?:!\\s*${escaped}\\b|\\b${escaped}\\s*===?\\s*(?:undefined|null)\\b|\\b${escaped}\\s*==\\s*null\\b|\\b${escaped}(?:\\?\\.|\\.)length\\s*===?\\s*0\\b)`,
+		);
+		return window.some((candidate) => guardPattern.test(candidate));
+	}
+
+	// Un-assigned read: only an inline presence check on the same line counts,
+	// e.g. `if (!ctx.env.get(KEY)) throw ...`.
+	return /(?:if\s*\(\s*!|===?\s*undefined\b|==\s*null\b)/.test(line);
+}
+
+function scoreSdkOwnedSecretPresence(
+	providerRoot: string,
+	provider: ProviderDefinition,
+): SubmitCheck {
+	const passMessage = "Provider relies on SDK-owned secret presence validation.";
+	// Only `required: true` declarations: those are exactly what the runtime
+	// gate enforces. A presence guard over an optional secret is conditional
+	// business logic the SDK will not replace, not double validation.
+	const declaredNames: ReadonlySet<string> = new Set(
+		(provider.secrets ?? [])
+			.filter((secret) => secret.required === true)
+			.map((secret) => secret.name),
+	);
+	if (declaredNames.size === 0) {
+		return pass(SDK_OWNED_SECRET_PRESENCE_RULE_ID, SDK_NATIVE_CATEGORY, passMessage, 0);
+	}
+
+	const aliases = buildDeclaredSecretAliasMap(providerRoot, declaredNames);
+	const findings = findSourceFindings(providerRoot, (line, remainingLines) =>
+		hasLocalSecretPresenceGuard(line, remainingLines, declaredNames, aliases),
+	);
+	if (findings.length === 0) {
+		return pass(SDK_OWNED_SECRET_PRESENCE_RULE_ID, SDK_NATIVE_CATEGORY, passMessage, 0);
+	}
+
+	const { violations, overridden } = partitionAllowOverrides(
+		providerRoot,
+		findings,
+		SDK_OWNED_SECRET_PRESENCE_RULE_ID,
+	);
+	if (violations.length === 0) {
+		return pass(
+			SDK_OWNED_SECRET_PRESENCE_RULE_ID,
+			SDK_NATIVE_CATEGORY,
+			`${passMessage} ${overridden.length} acknowledged @apifuse-allow override(s).`,
+			0,
+			formatSourceFindings(overridden),
+		);
+	}
+
+	return {
+		id: SDK_OWNED_SECRET_PRESENCE_RULE_ID,
+		category: SDK_NATIVE_CATEGORY,
+		level: "warn",
+		status: "warn",
+		points: 0,
+		maxPoints: 0,
+		message:
+			"Provider source re-validates declared env secret presence locally; the SDK owns this check.",
+		remediation:
+			"The provider SDK validates declared required secrets before handlers and auth flows run and returns the canonical MISSING_SECRET error (HTTP 400, category credential_unavailable). Declare the secret with required: true in defineProvider({ secrets: [...] }), delete the provider-local presence guard (requireServiceKey/requireApiKey style), and read the value directly with ctx.env.get(); the guard is dead weight and its divergent CONFIGURATION_ERROR-style shape is deprecated. Acknowledge intentional exceptions with `// @apifuse-allow sdk-owned-secret-presence: <reason>`.",
+		evidence: formatSourceFindings(violations),
+	};
 }
 
 function findSourceLineMatches(

@@ -1,6 +1,7 @@
 import { isSessionExpiredError, ProviderError, SessionExpiredError } from "../errors.js";
 import { parseSchema } from "../schema.js";
 import type { ProviderContext, ProviderDefinition } from "../types.js";
+import { assertRequiredSecretsPresent } from "./secrets.js";
 
 export function isStreamingOperation(provider: ProviderDefinition, operationId: string): boolean {
 	const kind = provider.operations[operationId]?.transport?.kind ?? "json";
@@ -33,6 +34,13 @@ export async function executeOperation(
 			fix: `Valid operations: ${Object.keys(provider.operations).join(", ")}`,
 		});
 	}
+
+	// SDK-owned secret presence gate (single source of truth): declared
+	// `required: true` secrets are validated here, before input parsing and the
+	// handler, so every invocation path (serve /v1, self-test probes, perf,
+	// record) fails with the same structured MISSING_SECRET error instead of a
+	// handler-specific crash. Providers must not re-check presence locally.
+	assertRequiredSecretsPresent(provider, ctx.env);
 
 	const validatedInput = await parseSchema(
 		operation.input,

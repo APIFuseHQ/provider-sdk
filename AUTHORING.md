@@ -309,6 +309,59 @@ External contributors are expected to submit standalone Provider source plus:
 Maintainers own monorepo import under `providers/<id>/`, registry generation,
 deployment projection checks, and release workflows.
 
+### Declared secrets are SDK-enforced
+
+Environment/secret presence validation is single-sourced in the SDK. Declare
+every env secret the provider needs in `defineProvider`:
+
+```ts
+secrets: [
+  {
+    name: "APIFUSE__PROVIDER__MY_PROVIDER__API_KEY",
+    required: true,
+    description: "Upstream API key from the vendor portal",
+  },
+],
+```
+
+The runtime validates every `required: true` declaration before any operation
+handler or auth-flow handler (except `abort`) runs. When a required secret is
+unset or whitespace-only, the invocation fails with the canonical structured
+error — code `MISSING_SECRET`, HTTP 400, `details.category:
+"credential_unavailable"`, `retryable: false`, and a `fix` naming every missing
+secret — across `/v1/{operation}`, self-test probes, `apifuse perf`, and
+`apifuse record`. The server also emits a `provider_secrets_missing` warn log
+at boot so unprovisioned deployments are visible immediately without crashing
+the pod.
+
+Provider-local presence re-validation is **deprecated**: do not write
+`requireServiceKey`/`requireApiKey`-style guards that re-check `ctx.env.get()`
+and throw a hand-rolled `CONFIGURATION_ERROR`/`MISSING_SECRET`. Those guards
+are dead weight (the SDK gate runs first) and historically diverged into
+inconsistent error shapes. The `sdk-owned-secret-presence` submit-check rule
+flags them at warn level; acknowledge a deliberate exception with
+`// @apifuse-allow sdk-owned-secret-presence: <reason>`.
+
+```ts
+// Before (deprecated): provider-local double validation
+function requireServiceKey(ctx: ProviderContext): string {
+  const value = ctx.env.get(SERVICE_KEY_ENV);
+  if (!value?.trim()) {
+    throw new ProviderError(`Missing required provider secret: ${SERVICE_KEY_ENV}`, {
+      code: "CONFIGURATION_ERROR",
+    });
+  }
+  return value;
+}
+
+// After: declare { name: SERVICE_KEY_ENV, required: true } and read directly.
+const serviceKey = ctx.env.get(SERVICE_KEY_ENV);
+```
+
+Note the asymmetry: the gate treats whitespace-only values as missing, but
+`ctx.env.get()` still returns the raw value to handlers — trim at the point of
+use if the upstream is whitespace-sensitive.
+
 ### Public local debugging checklist
 
 - Operation smoke requests use the provider server envelope:

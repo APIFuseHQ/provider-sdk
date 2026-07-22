@@ -1750,3 +1750,160 @@ describe("provider HTTP server cross-module error identity", () => {
 		});
 	});
 });
+
+describe("SDK-owned secret enforcement over HTTP", () => {
+	const API_KEY_ENV = "APIFUSE__PROVIDER__TEST_PROVIDER__HTTP_TEST_API_KEY";
+
+	function createSecretProvider(): ProviderDefinition {
+		const base = createTestProvider() as ProviderDefinition;
+		return {
+			...base,
+			secrets: [{ name: API_KEY_ENV, required: true, description: "Test upstream key" }],
+		};
+	}
+
+	function withUnsetSecret<T>(run: () => Promise<T>): Promise<T> {
+		const previous = process.env[API_KEY_ENV];
+		delete process.env[API_KEY_ENV];
+		return run().finally(() => {
+			if (previous === undefined) {
+				delete process.env[API_KEY_ENV];
+			} else {
+				process.env[API_KEY_ENV] = previous;
+			}
+		});
+	}
+
+	it("rejects operations with the canonical structured MISSING_SECRET envelope", async () => {
+		await withUnsetSecret(async () => {
+			const events: ProviderServerLogEvent[] = [];
+			const app = createServerApp(createSecretProvider(), {
+				logger: (event) => events.push(event),
+			});
+
+			const response = await app.request("/v1/echo", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_missing_secret", input: { value: "hello" } }),
+			});
+
+			expect(response.status).toBe(400);
+			const body = await response.json();
+			expect(body.error.code).toBe("MISSING_SECRET");
+			expect(body.error.message).toBe(`Missing required provider secret: ${API_KEY_ENV}`);
+			expect(body.error.fix).toContain(API_KEY_ENV);
+			expect(body.error.details).toEqual({
+				category: "credential_unavailable",
+				taxonomyVersion: expect.any(String),
+				retryable: false,
+			});
+
+			// Structured failure log carries the canonical category for
+			// observability/alerting (the incident-visibility fix).
+			expect(events).toContainEqual(
+				expect.objectContaining({
+					level: "warn",
+					event: "provider_request_failed",
+					code: "MISSING_SECRET",
+					errorCategory: "credential_unavailable",
+					retryable: false,
+					status: 400,
+				}),
+			);
+		});
+	});
+
+	it("runs the handler once the declared secret is provisioned", async () => {
+		const previous = process.env[API_KEY_ENV];
+		process.env[API_KEY_ENV] = "provisioned-value";
+		try {
+			const app = createServerApp(createSecretProvider());
+			const response = await app.request("/v1/echo", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_present_secret", input: { value: "hello" } }),
+			});
+
+			expect(response.status).toBe(200);
+			expect((await response.json()).data.echoed).toBe("hello");
+		} finally {
+			if (previous === undefined) {
+				delete process.env[API_KEY_ENV];
+			} else {
+				process.env[API_KEY_ENV] = previous;
+			}
+		}
+	});
+
+	it("rejects auth flow start with the same MISSING_SECRET envelope", async () => {
+		await withUnsetSecret(async () => {
+			const app = createServerApp(createSecretProvider());
+			const response = await app.request("/auth/start", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req_auth_missing_secret",
+					flowId: "flow_missing_secret",
+					providerId: "test-provider",
+					context: {},
+				}),
+			});
+
+			expect(response.status).toBe(400);
+			const body = await response.json();
+			expect(body.error.code).toBe("MISSING_SECRET");
+			expect(body.error.details.category).toBe("credential_unavailable");
+		});
+	});
+
+	it("still allows aborting a flow while secrets are unprovisioned", async () => {
+		await withUnsetSecret(async () => {
+			const app = createServerApp(createSecretProvider());
+			const response = await app.request("/auth/disconnect", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req_abort_missing_secret",
+					flowId: "flow_abort_missing_secret",
+					providerId: "test-provider",
+					context: { step: "started" },
+				}),
+			});
+
+			expect(response.status).toBe(200);
+		});
+	});
+
+	it("emits a provider_secrets_missing warn at boot instead of crashing", async () => {
+		await withUnsetSecret(async () => {
+			const events: ProviderServerLogEvent[] = [];
+			createServerApp(createSecretProvider(), { logger: (event) => events.push(event) });
+
+			expect(events).toEqual([
+				{
+					level: "warn",
+					event: "provider_secrets_missing",
+					providerId: "test-provider",
+					missingSecrets: [API_KEY_ENV],
+				},
+			]);
+		});
+	});
+
+	it("does not emit the boot warning when the secret is provisioned", async () => {
+		const previous = process.env[API_KEY_ENV];
+		process.env[API_KEY_ENV] = "provisioned-value";
+		try {
+			const events: ProviderServerLogEvent[] = [];
+			createServerApp(createSecretProvider(), { logger: (event) => events.push(event) });
+
+			expect(events).toEqual([]);
+		} finally {
+			if (previous === undefined) {
+				delete process.env[API_KEY_ENV];
+			} else {
+				process.env[API_KEY_ENV] = previous;
+			}
+		}
+	});
+});
