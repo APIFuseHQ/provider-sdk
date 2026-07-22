@@ -777,12 +777,15 @@ export type ProviderProxyMode = "disabled" | "optional" | "required";
  *   *extraction/allocation* API (app_key → a pool of raw `ip:port` CONNECT
  *   endpoints). This is our own vendor. It is NOT the company formerly named
  *   "Smartproxy". Credentials: `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ * - `nodemaven` — **gate.nodemaven.com**, a *gateway* proxy with static
+ *   credentials; geo/session encoded in the username, no allocation API.
  * - `decodo` — **decodo.com**, the *gateway* proxy that was named "Smartproxy"
  *   (smartproxy.com) before its 2025 rebrand to Decodo. Sticky sessions via
  *   username params. A different company from `smartproxy` above.
- * - `nodemaven` — **gate.nodemaven.com**, a *gateway* proxy with static
- *   credentials; geo/session encoded in the username, no allocation API.
- * - `custom` — a bring-your-own static proxy URL (`APIFUSE__PROXY__URL`).
+ *   **@deprecated** — unused; no managed adapter. Use `smartproxy`/`nodemaven`,
+ *   or the `APIFUSE__PROXY__URL` bring-your-own escape hatch.
+ * - `custom` — **@deprecated** bring-your-own static proxy URL marker. The
+ *   `APIFUSE__PROXY__URL` env still works without declaring this value.
  */
 export type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 

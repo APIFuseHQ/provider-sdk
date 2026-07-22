@@ -468,6 +468,16 @@ function validateProviderProxy(config: {
 			);
 		}
 	}
+	// `decodo`/`custom` are deprecated vendor values (string-union members, so the
+	// @deprecated symbol gate can't catch them — warn at validation time instead).
+	const deprecatedVendors = vendorChain.filter(
+		(vendor) => vendor === "decodo" || vendor === "custom",
+	);
+	if (deprecatedVendors.length > 0) {
+		console.warn(
+			`[provider-sdk] Provider "${config.id}" uses deprecated proxy vendor(s): ${deprecatedVendors.join(", ")}. Use "smartproxy"/"nodemaven", or the APIFUSE__PROXY__URL bring-your-own escape hatch.`,
+		);
+	}
 }
 
 function validateProviderStt(config: { id: string; stt?: ProviderSttConfig }): void {
