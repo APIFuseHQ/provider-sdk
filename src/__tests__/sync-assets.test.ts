@@ -508,6 +508,66 @@ describe("apifuse sync-assets", () => {
 		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
 	});
 
+	it("never recursively deletes a managed directory named by a manifest entry (protects authored notes)", async () => {
+		const cwd = makeTempDir("sync-assets-dir-orphan-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		const notePath = join(providerRoot, ".agents", "skills", "upstream-notes", "foo.md");
+		writeFileSync(notePath, "# vendor foo\nhard-won quirk\n");
+
+		const manifestPath = join(providerRoot, PROMPT_ASSET_MANIFEST_PATH);
+		const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as { paths: string[] };
+		// A hostile/stale manifest lists DIRECTORIES inside the managed namespace;
+		// a recursive delete of these would destroy contributor-authored notes.
+		manifest.paths = [...manifest.paths, ".agents/skills", ".agents/skills/upstream-notes"].sort();
+		writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+		const result = syncPromptAssets(providerRoot);
+		expect(result.removed).not.toContain(".agents/skills");
+		expect(result.removed).not.toContain(".agents/skills/upstream-notes");
+		expect(existsSync(notePath)).toBeTrue();
+		expect(readFileSync(notePath, "utf8")).toContain("hard-won quirk");
+		expect(
+			existsSync(join(providerRoot, ".agents", "skills", "normalization-standards", "SKILL.md")),
+		).toBeTrue();
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+	});
+
+	it("flags a nested symlink under upstream-notes via sync-assets --check and never follows it", async () => {
+		const cwd = makeTempDir("sync-assets-nested-upstream-symlink-");
+		const providerRoot = await materializeScaffold(cwd);
+
+		const outsideDir = join(cwd, "outside-victim");
+		mkdirSync(outsideDir, { recursive: true });
+		writeFileSync(join(outsideDir, "important.txt"), "do not delete\n");
+
+		// Authored (contributor-owned) subdirectory hiding a nested escape symlink.
+		const vendorDir = join(providerRoot, ".agents", "skills", "upstream-notes", "vendor");
+		mkdirSync(vendorDir, { recursive: true });
+		writeFileSync(join(vendorDir, "notes.md"), "# vendor notes\n");
+		symlinkSync(outsideDir, join(vendorDir, "evil"));
+
+		// The nested symlink must be visible to verification even though it lives
+		// below an authored (exempt) directory; the authored file stays exempt.
+		const verification = verifyPromptAssets(providerRoot);
+		expect(verification.ok).toBeFalse();
+		expect(verification.unexpected).toContain(".agents/skills/upstream-notes/vendor/evil");
+		expect(verification.unexpected).not.toContain(
+			".agents/skills/upstream-notes/vendor/notes.md",
+		);
+
+		const cli = runSyncAssetsCli(providerRoot, ["--check"]);
+		expect(cli.status).toBe(1);
+		expect(cli.stderr).toContain(".agents/skills/upstream-notes/vendor/evil");
+
+		const result = syncPromptAssets(providerRoot);
+		expect(result.removed).toContain(".agents/skills/upstream-notes/vendor/evil");
+		expect(existsSync(join(vendorDir, "evil"))).toBeFalse();
+		expect(readFileSync(join(outsideDir, "important.txt"), "utf8")).toBe("do not delete\n");
+		expect(existsSync(join(vendorDir, "notes.md"))).toBeTrue();
+		expect(verifyPromptAssets(providerRoot).ok).toBeTrue();
+	});
+
 	it("fails the freshness gate on a symlink planted inside .agents/", async () => {
 		const cwd = makeTempDir("sync-assets-injected-symlink-");
 		const providerRoot = await materializeScaffold(cwd);

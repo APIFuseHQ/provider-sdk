@@ -287,11 +287,12 @@ const AGENTS_EXPECTED_DIRS: ReadonlySet<string> = (() => {
  *
  * The `.agents/skills/upstream-notes/` subtree is a contributor-owned zone: the
  * README template instructs contributors to ADD per-vendor note files there and
- * reviewers grade them, so real authored files and subdirectories under it are
- * NOT flagged. The exemption is scoped tightly — README.md is still required and
- * pristine (checked via the managed entry set), and any SYMLINK under the zone
- * is still flagged (the walk never follows it), so no path can escape the
- * provider root by being named under upstream-notes.
+ * reviewers grade them, so real authored regular files under it are NOT flagged.
+ * The exemption is scoped tightly and covers files only, never the walk itself:
+ * README.md is still required and pristine (checked via the managed entry set),
+ * real subdirectories are still descended into, and any SYMLINK anywhere under
+ * the zone (at any depth) is still flagged (never followed), so no path can
+ * escape the provider root by being named — or nested — under upstream-notes.
  *
  * Never enumerates when `.agents` is missing or a symlink — those cases are
  * reported separately (missing entries / "found a symlink"); walking would
@@ -313,16 +314,22 @@ function findUnexpectedAgentEntries(providerRoot: string): string[] {
 	const walk = (relativeDir: string): void => {
 		for (const dirent of readDirentsSafe(join(providerRoot, relativeDir))) {
 			const relativePath = `${relativeDir}/${dirent.name}`;
-			// Symlinks are never contributor-owned, even under upstream-notes:
-			// flag them so the governance sweep unlinks them (never following the
-			// link) and no escape path can be smuggled into the exempt zone.
+			// Symlinks are never contributor-owned, even under upstream-notes,
+			// at any depth: flag them so the governance sweep unlinks them (never
+			// following the link) and no escape path can be smuggled into the
+			// exempt zone by nesting it below an authored directory.
 			if (dirent.isSymbolicLink()) {
 				unexpected.push(relativePath);
 			} else if (dirent.isDirectory()) {
-				if (AGENTS_EXPECTED_DIRS.has(relativePath)) {
+				// Always descend into real directories in the managed namespace,
+				// including contributor-authored subdirectories of upstream-notes:
+				// the exemption covers authored regular files, never the act of
+				// walking, so nested content (especially symlinks) stays visible.
+				if (
+					AGENTS_EXPECTED_DIRS.has(relativePath) ||
+					isContributorOwnedUpstreamNotesPath(relativePath)
+				) {
 					walk(relativePath);
-				} else if (isContributorOwnedUpstreamNotesPath(relativePath)) {
-					// Real contributor-authored subdirectory of upstream-notes.
 				} else {
 					unexpected.push(`${relativePath}/`);
 				}
@@ -621,7 +628,25 @@ export function syncPromptAssets(providerRoot: string): PromptAssetSyncResult {
 				continue;
 			}
 			const absPath = join(providerRoot, previousPath);
-			if (!lstatSafe(absPath)) {
+			const orphanStat = lstatSafe(absPath);
+			if (!orphanStat) {
+				continue;
+			}
+			// Never recursively delete a managed-namespace DIRECTORY named by the
+			// (untrusted) manifest: a hostile or stale entry like `.agents/skills`
+			// would otherwise sweep away contributor-authored upstream-notes files
+			// nested inside it. Directories are removed only when already empty;
+			// recursive removal is limited to regular files (and a symlink AT the
+			// path, which rmSync unlinks without following). Individual authored
+			// notes are additionally guarded by isContributorOwnedUpstreamNotesPath.
+			if (orphanStat.isDirectory()) {
+				try {
+					rmdirSync(absPath); // succeeds only when the directory is empty
+				} catch {
+					continue;
+				}
+				removed.push(previousPath);
+				removeEmptyParentDirectories(providerRoot, dirname(absPath));
 				continue;
 			}
 			rmSync(absPath, { recursive: true, force: true });
