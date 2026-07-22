@@ -19,6 +19,10 @@ export type { ProxyProtocol } from "../runtime/proxy-nodemaven.js";
 /** Proxy vendors the SDK resolves natively (as opposed to the static env path). */
 export type ProxyVendorName = "smartproxy" | "nodemaven";
 
+// "smartproxy" here is api.smartproxy.org — a residential proxy with an IP
+// extraction API (app_key → raw ip:port pool). It is NOT the company formerly
+// named Smartproxy (smartproxy.com), which rebranded to Decodo in 2025 and is
+// modelled separately as the `decodo` gateway vendor. Do not conflate them.
 export const SMARTPROXY_APP_KEY_ENV = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 export const SMARTPROXY_MAX_LIFETIME_MINUTES = 2000;
 export const DEFAULT_SMARTPROXY_POOL_SIZE = 20;
@@ -445,6 +449,11 @@ function applyStickyProxySession(proxyUrl: string): string {
 		return proxyUrl;
 	}
 
+	// This rewrites sticky-session usernames for a bring-your-own *gateway* URL
+	// (APIFUSE__PROXY__URL). The `smartproxy` host here means a smartproxy.com /
+	// Decodo-family gateway that authenticates by username — NOT the
+	// api.smartproxy.org allocation vendor, whose endpoints are raw ip:port with
+	// no credentials and therefore return early above.
 	const host = parsed.hostname.toLowerCase();
 	if (!host.includes("smartproxy") && !host.includes("decodo")) {
 		return proxyUrl;

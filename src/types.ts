@@ -769,6 +769,21 @@ export type ProviderAccessVisibility = "public" | "early_access";
 
 export type ProviderProxyMode = "disabled" | "optional" | "required";
 
+/**
+ * Proxy egress vendors. These are FOUR DISTINCT services — do not conflate them
+ * (a common mistake because the names collide with a well-known rebrand):
+ *
+ * - `smartproxy` — **api.smartproxy.org**, a residential proxy with an IP
+ *   *extraction/allocation* API (app_key → a pool of raw `ip:port` CONNECT
+ *   endpoints). This is our own vendor. It is NOT the company formerly named
+ *   "Smartproxy". Credentials: `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ * - `decodo` — **decodo.com**, the *gateway* proxy that was named "Smartproxy"
+ *   (smartproxy.com) before its 2025 rebrand to Decodo. Sticky sessions via
+ *   username params. A different company from `smartproxy` above.
+ * - `nodemaven` — **gate.nodemaven.com**, a *gateway* proxy with static
+ *   credentials; geo/session encoded in the username, no allocation API.
+ * - `custom` — a bring-your-own static proxy URL (`APIFUSE__PROXY__URL`).
+ */
 export type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 
 export type ProviderProxySessionAffinity =
