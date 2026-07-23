@@ -884,6 +884,20 @@ export function resolvePolicyTransportAttemptCap(input: {
 	return Math.max(budget, span);
 }
 
+/**
+ * A registry vendor chain (smartproxy/nodemaven) resolves a potentially
+ * *different* endpoint per flat attempt index, so a transport retry should
+ * advance across endpoints and de-duplicate once the chain stops yielding new
+ * ones. Static/custom/decodo policies (empty registry chain) resolve the *same*
+ * URL every attempt by design — retrying that same endpoint is intended, so the
+ * transport loop must not de-duplicate them.
+ */
+export function policyResolvesRegistryVendorChain(
+	policy: ProviderProxyPolicy | undefined,
+): boolean {
+	return Boolean(policy) && resolveVendorChain(policy as ProviderProxyPolicy).length > 0;
+}
+
 /** Map a resolved proxy source label to the vendor that served it. */
 export function vendorFromResolvedSource(
 	source: ResolvedProxyConfig["source"],

@@ -224,6 +224,8 @@ describe("proxy integration", () => {
 	let originalProxySessionId: string | undefined;
 	let originalProxySessionDuration: string | undefined;
 	let originalProxyDefaultLifetime: string | undefined;
+	let originalNodemavenUsername: string | undefined;
+	let originalNodemavenPassword: string | undefined;
 
 	beforeEach(() => {
 		originalFetch = global.fetch;
@@ -232,11 +234,15 @@ describe("proxy integration", () => {
 		originalProxySessionId = process.env.APIFUSE__PROXY__SESSION_ID;
 		originalProxySessionDuration = process.env.APIFUSE__PROXY__SESSION_DURATION;
 		originalProxyDefaultLifetime = process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
+		originalNodemavenUsername = process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
+		originalNodemavenPassword = process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
 		delete process.env.APIFUSE__PROXY__URL;
 		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		delete process.env.APIFUSE__PROXY__SESSION_ID;
 		delete process.env.APIFUSE__PROXY__SESSION_DURATION;
 		delete process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
+		delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
+		delete process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
 		clearProxyResolutionCache();
 		stealthState.clients.length = 0;
 		stealthState.queuedResponses.length = 0;
@@ -271,6 +277,16 @@ describe("proxy integration", () => {
 			process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES = originalProxyDefaultLifetime;
 		} else {
 			delete process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
+		}
+		if (originalNodemavenUsername) {
+			process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = originalNodemavenUsername;
+		} else {
+			delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
+		}
+		if (originalNodemavenPassword) {
+			process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = originalNodemavenPassword;
+		} else {
+			delete process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
 		}
 		clearProxyResolutionCache();
 		__setProxyRedisForTests(undefined);
@@ -1219,59 +1235,93 @@ describe("proxy integration", () => {
 		// retry loop must rotate past the primary vendor's whole pool span on
 		// transport failure and reach the NodeMaven leg, not stop at the retry
 		// budget (TransportTransient = 4) and strand the request on Smartproxy.
+		// NodeMaven credentials are restored by the suite afterEach.
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		try {
-			global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
-				const url = String(input);
-				if (url.includes("get-ip-v3")) {
-					return new Response(
-						["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join(
-							"\n",
-						),
-						{ status: 200 },
-					);
-				}
-				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
-				const proxy = (init as { proxy?: string } | undefined)?.proxy;
-				// The NodeMaven leg answers; every Smartproxy endpoint fails transport.
-				if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
-					return new Response(JSON.stringify({ ok: true }), {
-						status: 200,
-						headers: { "Content-Type": "application/json" },
-					});
-				}
-				throw new Error("socket hang up");
-			}) as unknown as typeof fetch;
-
-			const { createHttpClient } = await import("../runtime/http.js");
-			const http = createHttpClient("https://example.com", {
-				affinityKey: "af_con_http_vendor_advance",
-				upstream: {
-					proxy: {
-						mode: "required",
-						providers: ["smartproxy", "nodemaven"],
-						geo: { country: "KR" },
-						session: { affinity: "connection", poolSize: 4 },
-					},
-				},
-			});
-
-			const response = await http.get("/health");
-
-			expect(response.status).toBe(200);
-			const proxies = nativeProxyCalls();
-			// Four Smartproxy endpoints exhausted, then the NodeMaven crossover.
-			expect(proxies.length).toBeGreaterThanOrEqual(5);
-			for (const proxy of proxies.slice(0, 4)) {
-				expect(proxy).toMatch(/^http:\/\/5\.78\.24\.\d+:\d+$/);
+		global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("get-ip-v3")) {
+				return new Response(
+					["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join(
+						"\n",
+					),
+					{ status: 200 },
+				);
 			}
-			expect(proxies.some((proxy) => proxy?.includes("gate.nodemaven.com"))).toBe(true);
-		} finally {
-			delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
-			delete process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
+			nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+			const proxy = (init as { proxy?: string } | undefined)?.proxy;
+			// The NodeMaven leg answers; every Smartproxy endpoint fails transport.
+			if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error("socket hang up");
+		}) as unknown as typeof fetch;
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com", {
+			affinityKey: "af_con_http_vendor_advance",
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 4 },
+				},
+			},
+		});
+
+		const response = await http.get("/health");
+
+		expect(response.status).toBe(200);
+		const proxies = nativeProxyCalls();
+		// Four Smartproxy endpoints exhausted, then the NodeMaven crossover.
+		expect(proxies.length).toBeGreaterThanOrEqual(5);
+		for (const proxy of proxies.slice(0, 4)) {
+			expect(proxy).toMatch(/^http:\/\/5\.78\.24\.\d+:\d+$/);
 		}
+		expect(proxies.some((proxy) => proxy?.includes("gate.nodemaven.com"))).toBe(true);
+	});
+
+	it("stops re-hammering a partial ctx.http allocation instead of retrying duplicate endpoints", async () => {
+		// A Smartproxy allocation succeeds but returns fewer live endpoints (2)
+		// than the configured pool size (4), and every endpoint fails transport.
+		// The flat offset would otherwise map indices 2/3 back onto endpoints 0/1
+		// (modulo), so without de-duplication the loop would resend the same GET up
+		// to the whole widened span. The loop must break once the chain stops
+		// yielding a new endpoint — exactly two distinct attempts, not four.
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("get-ip-v3")) {
+				return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
+			}
+			nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+			throw new Error("socket hang up");
+		}) as unknown as typeof fetch;
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com", {
+			affinityKey: "af_con_http_partial_alloc",
+			upstream: {
+				proxy: {
+					mode: "required",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 4 },
+				},
+			},
+		});
+
+		await expect(http.get("/health")).rejects.toThrow();
+		const proxies = nativeProxyCalls();
+		// Exactly the two distinct allocated endpoints, then a dedup break — no
+		// re-hammering of an already-attempted endpoint.
+		expect(proxies).toHaveLength(2);
+		expect(new Set(proxies).size).toBe(2);
 	});
 
 	it("rejects malformed default Smartproxy lifetime before optional allocator fallback", async () => {
@@ -1338,111 +1388,104 @@ describe("proxy integration", () => {
 		// (3) and strand the request on Smartproxy. Pool span 4 puts the NodeMaven
 		// crossover at flat attempt index 4, beyond the old min(span, attempts=3)
 		// cap, so this asserts the corrected full-span rotation.
+		// NodeMaven credentials are restored by the suite afterEach, matching the
+		// Smartproxy app-key handling above — no per-test teardown needed.
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		try {
-			let allocatorCalls = 0;
-			global.fetch = (async () => {
-				allocatorCalls += 1;
-				return new Response(
-					["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join(
-						"\n",
-					),
-					{ status: 200 },
-				);
-			}) as typeof fetch;
-			// Four Smartproxy endpoints fail with a plain network error
-			// (transport_network_error — retryable, not pool-refreshable), then the
-			// NodeMaven leg answers 200.
-			stealthState.queuedResponses.push(
-				new Error("socket hang up"),
-				new Error("socket hang up"),
-				new Error("socket hang up"),
-				new Error("socket hang up"),
-				{
-					status: 200,
-					body: JSON.stringify({ ok: true }),
-					headers: { "Content-Type": "application/json" },
-				},
+		let allocatorCalls = 0;
+		global.fetch = (async () => {
+			allocatorCalls += 1;
+			return new Response(
+				["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join(
+					"\n",
+				),
+				{ status: 200 },
 			);
+		}) as typeof fetch;
+		// Four Smartproxy endpoints fail with a plain network error
+		// (transport_network_error — retryable, not pool-refreshable), then the
+		// NodeMaven leg answers 200.
+		stealthState.queuedResponses.push(
+			new Error("socket hang up"),
+			new Error("socket hang up"),
+			new Error("socket hang up"),
+			new Error("socket hang up"),
+			{
+				status: 200,
+				body: JSON.stringify({ ok: true }),
+				headers: { "Content-Type": "application/json" },
+			},
+		);
 
-			const { createStealthClient } = await import("../runtime/stealth.js");
-			const client = createStealthClient("https://example.com", {
-				upstream: {
-					proxy: {
-						mode: "required",
-						providers: ["smartproxy", "nodemaven"],
-						geo: { country: "KR" },
-						session: { affinity: "connection", poolSize: 4 },
-					},
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 4 },
 				},
-				affinityKey: "af_con_vendor_advance",
-			});
+			},
+			affinityKey: "af_con_vendor_advance",
+		});
 
-			const response = await client.fetch("/health");
+		const response = await client.fetch("/health");
 
-			expect(response.status).toBe(200);
-			expect(allocatorCalls).toBe(1);
-			const proxies = stealthProxyCalls() as string[];
-			expect(proxies).toHaveLength(5);
-			// The first four attempts exhaust the Smartproxy pool...
-			for (const proxy of proxies.slice(0, 4)) {
-				expect(proxy).toMatch(/^http:\/\/5\.78\.24\.\d+:\d+$/);
-			}
-			// ...and the fifth crosses over into the NodeMaven gateway leg.
-			expect(proxies[4]).toMatch(/@gate\.nodemaven\.com:\d+$/);
-		} finally {
-			delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
-			delete process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
+		expect(response.status).toBe(200);
+		expect(allocatorCalls).toBe(1);
+		const proxies = stealthProxyCalls() as string[];
+		expect(proxies).toHaveLength(5);
+		// The first four attempts exhaust the Smartproxy pool...
+		for (const proxy of proxies.slice(0, 4)) {
+			expect(proxy).toMatch(/^http:\/\/5\.78\.24\.\d+:\d+$/);
 		}
+		// ...and the fifth crosses over into the NodeMaven gateway leg.
+		expect(proxies[4]).toMatch(/@gate\.nodemaven\.com:\d+$/);
 	});
 
 	it("throws only after attempting every vendor in the chain on persistent transport failure", async () => {
+		// NodeMaven credentials are restored by the suite afterEach.
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		try {
-			global.fetch = (async () =>
-				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-					status: 200,
-				})) as typeof fetch;
-			// Pool span 2 (Smartproxy) + 2 (NodeMaven) = 4 attempts, all failing.
-			stealthState.queuedResponses.push(
-				new Error("socket hang up"),
-				new Error("socket hang up"),
-				new Error("socket hang up"),
-				new Error("socket hang up"),
-			);
+		global.fetch = (async () =>
+			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+				status: 200,
+			})) as typeof fetch;
+		// Pool span 2 (Smartproxy) + 2 (NodeMaven) = 4 attempts, all failing.
+		stealthState.queuedResponses.push(
+			new Error("socket hang up"),
+			new Error("socket hang up"),
+			new Error("socket hang up"),
+			new Error("socket hang up"),
+		);
 
-			const { createStealthClient } = await import("../runtime/stealth.js");
-			const client = createStealthClient("https://example.com", {
-				upstream: {
-					proxy: {
-						mode: "required",
-						providers: ["smartproxy", "nodemaven"],
-						geo: { country: "KR" },
-						session: { affinity: "connection", poolSize: 2 },
-					},
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 2 },
 				},
-				affinityKey: "af_con_vendor_exhaust",
-			});
+			},
+			affinityKey: "af_con_vendor_exhaust",
+		});
 
-			let error: unknown;
-			try {
-				await client.fetch("/health");
-			} catch (caught) {
-				error = caught;
-			}
-
-			expect(error).toBeInstanceOf(TransportError);
-			const proxies = stealthProxyCalls() as string[];
-			// The NodeMaven leg is exercised before the chain gives up.
-			expect(proxies.some((proxy) => /@gate\.nodemaven\.com:\d+$/.test(proxy))).toBe(true);
-		} finally {
-			delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
-			delete process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
+		let error: unknown;
+		try {
+			await client.fetch("/health");
+		} catch (caught) {
+			error = caught;
 		}
+
+		expect(error).toBeInstanceOf(TransportError);
+		const proxies = stealthProxyCalls() as string[];
+		// The NodeMaven leg is exercised before the chain gives up.
+		expect(proxies.some((proxy) => /@gate\.nodemaven\.com:\d+$/.test(proxy))).toBe(true);
 	});
 
 	it("retry false preserves Smartproxy stale-pool candidate rotation before refresh", async () => {

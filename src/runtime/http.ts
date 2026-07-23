@@ -1,5 +1,9 @@
 import type { ProxyResolutionOptions } from "../config/loader.js";
-import { resolvePolicyTransportAttemptCap, resolveProxyConfigAsync } from "../config/loader.js";
+import {
+	policyResolvesRegistryVendorChain,
+	resolvePolicyTransportAttemptCap,
+	resolveProxyConfigAsync,
+} from "../config/loader.js";
 import { ProviderError, TransportError } from "../errors.js";
 import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
@@ -298,6 +302,7 @@ async function fetchNativeHttp(
 	warn: (message: string) => void,
 	statusRetryCodes?: readonly number[],
 	proxyAttemptOffset = 0,
+	preResolvedProxy?: { url: string | undefined },
 ): Promise<NativeHttpAttemptOutcome> {
 	const requestUrl = appendQueryParams(resolveHttpUrl(baseUrl, url), options.params);
 	const controller = options.timeout ? new AbortController() : undefined;
@@ -307,7 +312,11 @@ async function fetchNativeHttp(
 
 	let proxy: string | undefined;
 	try {
-		proxy = await resolveNativeProxy(options, clientOptions, warn, proxyAttemptOffset);
+		// The retry loop pre-resolves (and de-duplicates) the proxy for allocator
+		// chains; reuse that result rather than resolving the same offset twice.
+		proxy = preResolvedProxy
+			? preResolvedProxy.url
+			: await resolveNativeProxy(options, clientOptions, warn, proxyAttemptOffset);
 		const requestInit: NativeFetchInit = {
 			headers: options.headers,
 			method,
@@ -480,7 +489,10 @@ export function createHttpClient(
 				})
 			: 1;
 
-		const executeOnce = (proxyAttemptOffset = 0): Promise<NativeHttpAttemptOutcome> =>
+		const executeOnce = (
+			proxyAttemptOffset = 0,
+			preResolvedProxy?: { url: string | undefined },
+		): Promise<NativeHttpAttemptOutcome> =>
 			fetchNativeHttp(
 				baseUrl,
 				url,
@@ -490,6 +502,7 @@ export function createHttpClient(
 				warnOnce,
 				statusRetryEnabled ? retryOptions?.statusCodes : undefined,
 				proxyAttemptOffset,
+				preResolvedProxy,
 			);
 
 		if (!retryEnabled || !retryOptions) {
@@ -500,11 +513,41 @@ export function createHttpClient(
 			return outcome;
 		}
 
+		// Track resolved endpoints across a policy-allocator chain. Successive
+		// attempts rotate the flat offset across the concatenated vendor pool
+		// spans, but an under-filled allocation (fewer live endpoints than the
+		// configured pool size) makes the modulo mapping repeat endpoints before
+		// the offset reaches the next vendor. Stop once the chain stops yielding a
+		// new endpoint rather than re-hammering the same one under backoff — this
+		// mirrors ctx.stealth's de-duplication.
+		// Only registry vendor chains (smartproxy/nodemaven) rotate endpoints per
+		// attempt; static/custom/decodo policies resolve the same URL every time
+		// and must keep retrying it, so restrict de-duplication to registry chains.
+		const dedupeAllocatorEndpoints =
+			usesPolicyAllocator && policyResolvesRegistryVendorChain(policyProxy);
+		const attemptedProxies = new Set<string>();
+		let lastError: unknown;
 		let lastErrorCode: string | undefined;
 		let lastStatus: number | undefined;
 		for (let attempt = 1; attempt <= transportAttemptCap; attempt += 1) {
+			let preResolvedProxy: { url: string | undefined } | undefined;
+			if (dedupeAllocatorEndpoints) {
+				const resolvedUrl = await resolveNativeProxy(
+					attemptOptions,
+					clientOptions,
+					warnOnce,
+					attempt - 1,
+				);
+				if (resolvedUrl) {
+					if (attemptedProxies.has(resolvedUrl)) {
+						break;
+					}
+					attemptedProxies.add(resolvedUrl);
+				}
+				preResolvedProxy = { url: resolvedUrl };
+			}
 			try {
-				const outcome = await executeOnce(attempt - 1);
+				const outcome = await executeOnce(attempt - 1, preResolvedProxy);
 				if (isHttpStatusOutcome(outcome)) {
 					lastStatus = outcome.status;
 					if (outcome.retryable && attempt < retryOptions.attempts) {
@@ -532,6 +575,7 @@ export function createHttpClient(
 				}
 				return response;
 			} catch (error) {
+				lastError = error;
 				lastErrorCode = proxyTransportRetryErrorCode(error);
 				lastStatus = proxyTransportRetryErrorStatus(error);
 				const proxyUsed = Boolean((error as NativeHttpAttemptError).proxyUsed);
@@ -552,6 +596,12 @@ export function createHttpClient(
 			}
 		}
 
+		// Reached only by the dedup break above: the allocator chain stopped
+		// yielding new endpoints before a terminal outcome. Surface the last real
+		// transport failure rather than a synthetic exhaustion error.
+		if (lastError !== undefined) {
+			throw lastError;
+		}
 		throw new TransportError("HTTP retry exhausted without a terminal result", {
 			code: "retry_exhausted",
 		});
