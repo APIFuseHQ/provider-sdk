@@ -1,5 +1,9 @@
 import type { ProxyResolutionOptions } from "../config/loader.js";
-import { resolveProxyConfigAsync } from "../config/loader.js";
+import {
+	resolvePolicyProxyPoolSpan,
+	resolveProxyConfigAsync,
+	SMARTPROXY_MAX_POOL_SIZE,
+} from "../config/loader.js";
 import { ProviderError, TransportError } from "../errors.js";
 import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
@@ -8,6 +12,7 @@ import type {
 	HttpResponse,
 	HttpRetrySummary,
 	HttpStreamResponse,
+	ProviderProxyPolicy,
 	RequestOptions,
 	RequestWithMethodOptions,
 	SseMessage,
@@ -26,6 +31,10 @@ import {
 import { appendQueryParams, normalizeHttpRequestBody } from "./request-options.js";
 
 const DEFAULT_HTTP_BASE_URL = "http://localhost";
+
+// Upper bound on total policy-allocator transport attempts, mirroring ctx.stealth:
+// even a long vendor chain cannot spin more than this many endpoints on failure.
+const MAX_POLICY_PROXY_TOTAL_ATTEMPTS = SMARTPROXY_MAX_POOL_SIZE * 2;
 
 export type HttpClientOptions = ProxyResolutionOptions & {
 	warn?: (message: string) => void;
@@ -452,6 +461,32 @@ export function createHttpClient(
 			? { ...headersOptions, throwOnHttpError: false }
 			: headersOptions;
 
+		// Span the whole vendor chain on transport failures. Like ctx.stealth, a
+		// policy-managed proxy resolves a *different* endpoint/vendor per attempt
+		// (the flat proxyAttemptOffset rotates across the concatenated vendor pool
+		// spans), so a transport failure should advance to the next endpoint —
+		// potentially crossing into the fallback vendor — rather than stopping at
+		// the per-endpoint retry budget (retryOptions.attempts, default 3) and
+		// stranding the request on the primary vendor. The crossover only happens
+		// once the flat index exceeds the primary vendor's pool size (~10-20), so a
+		// budget of 3 would never reach the fallback. Status-code retries stay
+		// bounded by the retry budget; only transport rotation gets the full span.
+		const policyProxy: ProviderProxyPolicy | undefined = (() => {
+			const policy = clientOptions.proxyPolicy ?? clientOptions.upstream?.proxy;
+			return policy && typeof policy === "object" ? policy : undefined;
+		})();
+		const usesPolicyAllocator = Boolean(policyProxy) && !options.proxy && !clientOptions.proxy;
+		const transportAttemptCap =
+			usesPolicyAllocator && retryOptions && policyProxy
+				? Math.max(
+						retryOptions.attempts,
+						Math.max(
+							1,
+							Math.min(MAX_POLICY_PROXY_TOTAL_ATTEMPTS, resolvePolicyProxyPoolSpan(policyProxy)),
+						),
+					)
+				: (retryOptions?.attempts ?? 1);
+
 		const executeOnce = (proxyAttemptOffset = 0): Promise<NativeHttpAttemptOutcome> =>
 			fetchNativeHttp(
 				baseUrl,
@@ -474,7 +509,7 @@ export function createHttpClient(
 
 		let lastErrorCode: string | undefined;
 		let lastStatus: number | undefined;
-		for (let attempt = 1; attempt <= retryOptions.attempts; attempt += 1) {
+		for (let attempt = 1; attempt <= transportAttemptCap; attempt += 1) {
 			try {
 				const outcome = await executeOnce(attempt - 1);
 				if (isHttpStatusOutcome(outcome)) {
@@ -508,7 +543,7 @@ export function createHttpClient(
 				lastStatus = proxyTransportRetryErrorStatus(error);
 				const proxyUsed = Boolean((error as NativeHttpAttemptError).proxyUsed);
 				if (
-					attempt < retryOptions.attempts &&
+					attempt < transportAttemptCap &&
 					shouldRetryProxyTransportAttempt({
 						error,
 						explicitRetry,

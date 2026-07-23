@@ -822,11 +822,26 @@ function createSessionFetcher(
 							}
 							break;
 						}
+						// Cap the number of transport retries. For a policy-allocator chain,
+						// every attempt resolves a *different* endpoint/vendor (poolIndex
+						// rotates across the concatenated vendor pool spans), so a transport
+						// failure is a signal to advance to the next endpoint — potentially
+						// crossing into the fallback vendor — not to retry the same endpoint.
+						// Truncating that rotation at the per-endpoint retry budget
+						// (stealthRetryOptions.attempts, default 3) would strand the request
+						// on the primary vendor and never reach the fallback, since the
+						// crossover only happens once the flat attempt index exceeds the
+						// primary vendor's pool size (~10-20). So for allocator chains we
+						// rotate across the full span (maxAttempts, == policyProxyAttemptCap),
+						// matching the refreshable-error branch above. Fixed single proxies
+						// (non-allocator) keep the per-endpoint retry budget.
+						const transportRetryCap = usesPolicyAllocator
+							? maxAttempts
+							: stealthRetryOptions
+								? Math.min(maxAttempts, stealthRetryOptions.attempts)
+								: maxAttempts;
 						if (
-							attempt + 1 <
-								(stealthRetryOptions
-									? Math.min(maxAttempts, stealthRetryOptions.attempts)
-									: maxAttempts) &&
+							attempt + 1 < transportRetryCap &&
 							shouldRetryProxyTransportAttempt({
 								error: normalizedError,
 								explicitRetry: hasExplicitRetryPolicy,
