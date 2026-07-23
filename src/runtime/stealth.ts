@@ -8,8 +8,8 @@ import {
 	invalidateProxyResolutionCacheAsync,
 	ProxyResolutionError,
 	resolvePolicyProxyPoolSpan,
+	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
-	SMARTPROXY_MAX_POOL_SIZE,
 	vendorFromResolvedSource,
 } from "../config/loader.js";
 import { SDKError, TransportError } from "../errors.js";
@@ -53,11 +53,6 @@ const DEFAULT_PROFILE = "chrome-146";
 const MISSING_PROXY_WARNING =
 	"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.";
 
-/**
- * Upper bound on attempts across a multi-vendor chain, so a two-vendor chain can
- * exhaust each vendor's pool before failing over and finally throwing.
- */
-const MAX_POLICY_PROXY_TOTAL_ATTEMPTS = SMARTPROXY_MAX_POOL_SIZE * 2;
 const MAX_POLICY_PROXY_POOL_REFRESHES = 1;
 const PROXY_CONNECT_FAILURE_CODE = "proxy_connect_failed";
 const PROXY_CONNECT_FAILURE_BODY_PATTERN =
@@ -682,12 +677,13 @@ function createSessionFetcher(
 				(typeof clientOptions.upstream?.proxy === "object"
 					? clientOptions.upstream.proxy
 					: undefined);
+			// The pool span is already bounded by each vendor's max pool size
+			// (smartproxy ≤20, nodemaven ≤50), so the configured span never exceeds
+			// the chain's true maximum — a large NodeMaven pool stays fully
+			// reachable rather than being truncated at an arbitrary ceiling.
 			const policyProxyAttemptCap = Math.max(
 				1,
-				Math.min(
-					MAX_POLICY_PROXY_TOTAL_ATTEMPTS,
-					policyProxy ? resolvePolicyProxyPoolSpan(policyProxy) : DEFAULT_SMARTPROXY_POOL_SIZE,
-				),
+				policyProxy ? resolvePolicyProxyPoolSpan(policyProxy) : DEFAULT_SMARTPROXY_POOL_SIZE,
 			);
 			const maxAttempts = usesPolicyAllocator ? policyProxyAttemptCap : retryAttemptCap;
 			let lastError: unknown;
@@ -827,19 +823,21 @@ function createSessionFetcher(
 						// rotates across the concatenated vendor pool spans), so a transport
 						// failure is a signal to advance to the next endpoint — potentially
 						// crossing into the fallback vendor — not to retry the same endpoint.
-						// Truncating that rotation at the per-endpoint retry budget
-						// (stealthRetryOptions.attempts, default 3) would strand the request
-						// on the primary vendor and never reach the fallback, since the
-						// crossover only happens once the flat attempt index exceeds the
-						// primary vendor's pool size (~10-20). So for allocator chains we
-						// rotate across the full span (maxAttempts, == policyProxyAttemptCap),
-						// matching the refreshable-error branch above. Fixed single proxies
-						// (non-allocator) keep the per-endpoint retry budget.
-						const transportRetryCap = usesPolicyAllocator
-							? maxAttempts
-							: stealthRetryOptions
-								? Math.min(maxAttempts, stealthRetryOptions.attempts)
-								: maxAttempts;
+						// Truncating that rotation at the per-endpoint retry budget would
+						// strand the request on the primary vendor and never reach the
+						// fallback, since the crossover only happens once the flat attempt
+						// index exceeds the primary vendor's pool size (~10-20).
+						// resolvePolicyTransportAttemptCap widens to the full chain span only
+						// for implicit, safe-method allocator requests; explicit retry
+						// policies (their documented `attempts` ceiling), unsafe methods, and
+						// static/non-registry vendors keep the per-endpoint retry budget.
+						const transportRetryCap = resolvePolicyTransportAttemptCap({
+							policy: policyProxy,
+							usesPolicyAllocator,
+							retryAttempts: stealthRetryOptions?.attempts ?? 1,
+							explicitRetry: hasExplicitRetryPolicy,
+							method,
+						});
 						if (
 							attempt + 1 < transportRetryCap &&
 							shouldRetryProxyTransportAttempt({

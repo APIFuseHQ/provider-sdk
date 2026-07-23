@@ -9,10 +9,12 @@ import {
 	clearProxyResolutionCache,
 	invalidateProxyResolutionCacheAsync,
 	loadApiFuseConfig,
+	resolvePolicyTransportAttemptCap,
 	resolveProxyConfig,
 	resolveProxyConfigAsync,
 	SMARTPROXY_MAX_LIFETIME_MINUTES,
 } from "../config/loader.js";
+import type { ProviderProxyPolicy } from "../types.js";
 import { TransportError } from "../errors.js";
 import { ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
 import { HttpRetryUnsafeMethodPolicy } from "../types.js";
@@ -2217,5 +2219,109 @@ describe("proxy integration", () => {
 
 		expect(config.proxy?.url).toBe("https://file-proxy.example:8443");
 		expect(process.env.APIFUSE__PROXY__URL).toBe("https://file-proxy.example:8443");
+	});
+});
+
+describe("resolvePolicyTransportAttemptCap", () => {
+	const chainPolicy: ProviderProxyPolicy = {
+		mode: "required",
+		providers: ["smartproxy", "nodemaven"],
+		geo: { country: "KR" },
+		session: { affinity: "connection", poolSize: 4 },
+	};
+
+	it("widens an implicit, safe-method allocator request to the full chain span", () => {
+		// Smartproxy(4) + NodeMaven(4) = span 8, so the flat index reaches the
+		// NodeMaven leg at attempt 4 — well past the default per-endpoint budget.
+		expect(
+			resolvePolicyTransportAttemptCap({
+				policy: chainPolicy,
+				usesPolicyAllocator: true,
+				retryAttempts: 3,
+				explicitRetry: false,
+				method: "GET",
+			}),
+		).toBe(8);
+	});
+
+	it("honours an explicit retry policy's attempt ceiling instead of widening", () => {
+		// A caller that pinned attempts:2 must not have the request duplicated
+		// across the whole pool — `attempts` is the documented total ceiling.
+		expect(
+			resolvePolicyTransportAttemptCap({
+				policy: chainPolicy,
+				usesPolicyAllocator: true,
+				retryAttempts: 2,
+				explicitRetry: true,
+				method: "GET",
+			}),
+		).toBe(2);
+	});
+
+	it("never widens an unsafe method across the pool", () => {
+		expect(
+			resolvePolicyTransportAttemptCap({
+				policy: chainPolicy,
+				usesPolicyAllocator: true,
+				retryAttempts: 2,
+				explicitRetry: false,
+				method: "POST",
+			}),
+		).toBe(2);
+	});
+
+	it("keeps the retry budget for non-registry (static) vendor policies", () => {
+		// `custom`/`decodo` resolve the legacy static proxy URL, not an allocator
+		// pool — every attempt hits the same endpoint, so widening would only
+		// hammer a dead endpoint with no possible crossover.
+		const staticPolicy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "custom",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 4 },
+		};
+		expect(
+			resolvePolicyTransportAttemptCap({
+				policy: staticPolicy,
+				usesPolicyAllocator: true,
+				retryAttempts: 3,
+				explicitRetry: false,
+				method: "GET",
+			}),
+		).toBe(3);
+	});
+
+	it("keeps the retry budget when the request is not allocator-managed", () => {
+		expect(
+			resolvePolicyTransportAttemptCap({
+				policy: chainPolicy,
+				usesPolicyAllocator: false,
+				retryAttempts: 3,
+				explicitRetry: false,
+				method: "GET",
+			}),
+		).toBe(3);
+	});
+
+	it("reaches the fallback vendor behind a large NodeMaven-first pool", () => {
+		// Regression for the 40-attempt ceiling bug: NodeMaven allows a 50-slot
+		// pool, so a NodeMaven-first chain with poolSize 50 spans 50 + 20 = 70.
+		// A hard cap of 40 would strand the request inside the NodeMaven pool and
+		// never cross into the Smartproxy fallback.
+		const nodemavenFirst: ProviderProxyPolicy = {
+			mode: "required",
+			providers: ["nodemaven", "smartproxy"],
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 50 },
+		};
+		expect(
+			resolvePolicyTransportAttemptCap({
+				policy: nodemavenFirst,
+				usesPolicyAllocator: true,
+				retryAttempts: 3,
+				explicitRetry: false,
+				method: "GET",
+			}),
+		).toBe(70);
 	});
 });

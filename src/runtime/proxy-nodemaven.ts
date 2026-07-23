@@ -27,7 +27,7 @@ const NODEMAVEN_PORTS: Record<ProxyProtocol, { min: number; max: number }> = {
 const NODEMAVEN_FILTERS = new Set(["medium", "high"]);
 const DEFAULT_NODEMAVEN_FILTER = "medium";
 const DEFAULT_NODEMAVEN_POOL_SIZE = 20;
-const NODEMAVEN_MAX_POOL_SIZE = 50;
+export const NODEMAVEN_MAX_POOL_SIZE = 50;
 /** NodeMaven sticky sessions persist up to 24h server-side, keyed by the sid. */
 const NODEMAVEN_MAX_LIFETIME_MINUTES = 1440;
 const SID_LENGTH = 10;

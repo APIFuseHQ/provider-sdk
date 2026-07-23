@@ -1,9 +1,5 @@
 import type { ProxyResolutionOptions } from "../config/loader.js";
-import {
-	resolvePolicyProxyPoolSpan,
-	resolveProxyConfigAsync,
-	SMARTPROXY_MAX_POOL_SIZE,
-} from "../config/loader.js";
+import { resolvePolicyTransportAttemptCap, resolveProxyConfigAsync } from "../config/loader.js";
 import { ProviderError, TransportError } from "../errors.js";
 import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
@@ -31,10 +27,6 @@ import {
 import { appendQueryParams, normalizeHttpRequestBody } from "./request-options.js";
 
 const DEFAULT_HTTP_BASE_URL = "http://localhost";
-
-// Upper bound on total policy-allocator transport attempts, mirroring ctx.stealth:
-// even a long vendor chain cannot spin more than this many endpoints on failure.
-const MAX_POLICY_PROXY_TOTAL_ATTEMPTS = SMARTPROXY_MAX_POOL_SIZE * 2;
 
 export type HttpClientOptions = ProxyResolutionOptions & {
 	warn?: (message: string) => void;
@@ -466,26 +458,27 @@ export function createHttpClient(
 		// (the flat proxyAttemptOffset rotates across the concatenated vendor pool
 		// spans), so a transport failure should advance to the next endpoint —
 		// potentially crossing into the fallback vendor — rather than stopping at
-		// the per-endpoint retry budget (retryOptions.attempts, default 3) and
-		// stranding the request on the primary vendor. The crossover only happens
-		// once the flat index exceeds the primary vendor's pool size (~10-20), so a
-		// budget of 3 would never reach the fallback. Status-code retries stay
-		// bounded by the retry budget; only transport rotation gets the full span.
+		// the per-endpoint retry budget and stranding the request on the primary
+		// vendor. resolvePolicyTransportAttemptCap widens the cap to the chain span
+		// only for implicit, safe-method allocator requests; explicit retry
+		// policies (their documented `attempts` ceiling), unsafe methods, and
+		// static/non-registry vendors keep the retry budget. Status-code retries
+		// stay bounded by the retry budget regardless; only transport rotation gets
+		// the full span.
 		const policyProxy: ProviderProxyPolicy | undefined = (() => {
 			const policy = clientOptions.proxyPolicy ?? clientOptions.upstream?.proxy;
 			return policy && typeof policy === "object" ? policy : undefined;
 		})();
 		const usesPolicyAllocator = Boolean(policyProxy) && !options.proxy && !clientOptions.proxy;
-		const transportAttemptCap =
-			usesPolicyAllocator && retryOptions && policyProxy
-				? Math.max(
-						retryOptions.attempts,
-						Math.max(
-							1,
-							Math.min(MAX_POLICY_PROXY_TOTAL_ATTEMPTS, resolvePolicyProxyPoolSpan(policyProxy)),
-						),
-					)
-				: (retryOptions?.attempts ?? 1);
+		const transportAttemptCap = retryOptions
+			? resolvePolicyTransportAttemptCap({
+					policy: policyProxy,
+					usesPolicyAllocator,
+					retryAttempts: retryOptions.attempts,
+					explicitRetry,
+					method: methodName,
+				})
+			: 1;
 
 		const executeOnce = (proxyAttemptOffset = 0): Promise<NativeHttpAttemptOutcome> =>
 			fetchNativeHttp(
