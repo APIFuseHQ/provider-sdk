@@ -478,8 +478,15 @@ function validateProviderProxy(config: {
 			const requiredSecrets = VENDOR_REQUIRED_SECRETS[vendor];
 			if (!requiredSecrets) continue;
 			for (const secretName of requiredSecrets) {
+				// Match the canonical runtime gate (assertRequiredSecretsPresent /
+				// listMissingRequiredSecrets), which enforces only `required === true`
+				// declarations. A declaration that omits `required` (defaulting to
+				// optional) is skipped at runtime, so accepting it here would pass
+				// validation while leaving the credential unenforced until proxy
+				// resolution during a live request — the fail-open gap this check exists
+				// to close.
 				const declared = config.secrets?.some(
-					(secret) => secret.name === secretName && secret.required !== false,
+					(secret) => secret.name === secretName && secret.required === true,
 				);
 				if (!declared) {
 					throw new ValidationError(

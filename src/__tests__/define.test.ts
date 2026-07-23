@@ -607,13 +607,31 @@ describe("defineProvider", () => {
 			).not.toThrow();
 		});
 
-		it("treats a declared-but-optional vendor secret as missing", () => {
+		it("treats a declared-but-optional (required: false) vendor secret as missing", () => {
 			expect(() =>
 				defineProvider({
 					...validConfig,
 					proxy: { mode: "required", providers: ["nodemaven"] },
 					secrets: [
 						{ name: NODEMAVEN_USERNAME_SECRET, required: false },
+						{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
+					],
+				}),
+			).toThrow(
+				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
+			);
+		});
+
+		it("treats a vendor secret that omits `required` as missing (matches the runtime gate)", () => {
+			// listMissingRequiredSecrets enforces only `required === true`, so a
+			// default-flag declaration is skipped at runtime; define-time validation
+			// must reject it too rather than pass a config the runtime won't enforce.
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: { mode: "required", providers: ["nodemaven"] },
+					secrets: [
+						{ name: NODEMAVEN_USERNAME_SECRET },
 						{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
 					],
 				}),
