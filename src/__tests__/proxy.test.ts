@@ -1291,8 +1291,8 @@ describe("proxy integration", () => {
 		// than the configured pool size (4), and every endpoint fails transport.
 		// The flat offset would otherwise map indices 2/3 back onto endpoints 0/1
 		// (modulo), so without de-duplication the loop would resend the same GET up
-		// to the whole widened span. The loop must break once the chain stops
-		// yielding a new endpoint — exactly two distinct attempts, not four.
+		// to the whole widened span. Duplicate offsets are skipped, so only the two
+		// distinct allocated endpoints are ever issued a request.
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
@@ -1318,10 +1318,62 @@ describe("proxy integration", () => {
 
 		await expect(http.get("/health")).rejects.toThrow();
 		const proxies = nativeProxyCalls();
-		// Exactly the two distinct allocated endpoints, then a dedup break — no
-		// re-hammering of an already-attempted endpoint.
+		// Exactly the two distinct allocated endpoints — duplicate offsets skipped,
+		// no re-hammering of an already-attempted endpoint.
 		expect(proxies).toHaveLength(2);
 		expect(new Set(proxies).size).toBe(2);
+	});
+
+	it("reaches the nodemaven leg past duplicate ctx.http offsets from a partial allocation", async () => {
+		// The critical crossover case: Smartproxy pool configured to 4 but the
+		// allocator returns only 2 live URLs. Flat offsets 2/3 map back onto the two
+		// Smartproxy endpoints (modulo), while NodeMaven begins at offset 4 (the
+		// configured pool-size boundary). Skipping — not breaking on — the duplicate
+		// offsets is what lets the loop walk into the NodeMaven leg; a break would
+		// strand the request on Smartproxy exactly like the original SPOF bug.
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
+		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
+		global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("get-ip-v3")) {
+				return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
+			}
+			nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+			const proxy = (init as { proxy?: string } | undefined)?.proxy;
+			if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			throw new Error("socket hang up");
+		}) as unknown as typeof fetch;
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com", {
+			affinityKey: "af_con_http_partial_crossover",
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 4 },
+				},
+			},
+		});
+
+		const response = await http.get("/health");
+
+		expect(response.status).toBe(200);
+		const proxies = nativeProxyCalls();
+		const smartproxyCalls = proxies.filter((proxy) => /^http:\/\/5\.78\.24\./.test(proxy ?? ""));
+		// Each of the two live Smartproxy endpoints is issued exactly once (duplicate
+		// offsets skipped, not re-hammered)...
+		expect(smartproxyCalls).toHaveLength(2);
+		expect(new Set(smartproxyCalls).size).toBe(2);
+		// ...and the NodeMaven leg is still reached despite the duplicate offsets.
+		expect(proxies.some((proxy) => proxy?.includes("gate.nodemaven.com"))).toBe(true);
 	});
 
 	it("rejects malformed default Smartproxy lifetime before optional allocator fallback", async () => {
@@ -1485,6 +1537,60 @@ describe("proxy integration", () => {
 		expect(error).toBeInstanceOf(TransportError);
 		const proxies = stealthProxyCalls() as string[];
 		// The NodeMaven leg is exercised before the chain gives up.
+		expect(proxies.some((proxy) => /@gate\.nodemaven\.com:\d+$/.test(proxy))).toBe(true);
+	});
+
+	it("reaches the nodemaven leg past duplicate stealth offsets from a partial allocation", async () => {
+		// Stealth twin of the ctx.http partial-allocation crossover: Smartproxy pool
+		// configured to 4 but the allocator returns only 2 live URLs. Flat offsets
+		// 2/3 fold back onto the two endpoints (modulo), and NodeMaven begins at the
+		// configured boundary offset 4. The widened stealth cap only helps if those
+		// duplicate offsets are *skipped* rather than treated as chain exhaustion —
+		// a break on the first repeat would strand the request on Smartproxy exactly
+		// like the SPOF this change targets.
+		// NodeMaven credentials are restored by the suite afterEach.
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
+		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
+		global.fetch = (async () =>
+			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+				status: 200,
+			})) as typeof fetch;
+		// Only the two distinct Smartproxy endpoints issue a request (offsets 0/1);
+		// the duplicate offsets 2/3 are skipped without consuming a response, then
+		// the NodeMaven leg answers 200.
+		stealthState.queuedResponses.push(
+			new Error("socket hang up"),
+			new Error("socket hang up"),
+			{
+				status: 200,
+				body: JSON.stringify({ ok: true }),
+				headers: { "Content-Type": "application/json" },
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 4 },
+				},
+			},
+			affinityKey: "af_con_stealth_partial_crossover",
+		});
+
+		const response = await client.fetch("/health");
+
+		expect(response.status).toBe(200);
+		const proxies = stealthProxyCalls() as string[];
+		const smartproxyCalls = proxies.filter((proxy) => /^http:\/\/5\.78\.24\./.test(proxy));
+		// Each live Smartproxy endpoint is attempted exactly once (duplicates skipped)...
+		expect(smartproxyCalls).toHaveLength(2);
+		expect(new Set(smartproxyCalls).size).toBe(2);
+		// ...and the NodeMaven leg is still reached despite the duplicate offsets.
 		expect(proxies.some((proxy) => /@gate\.nodemaven\.com:\d+$/.test(proxy))).toBe(true);
 	});
 

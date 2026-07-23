@@ -6,6 +6,7 @@ import type { ProxyResolutionOptions, ProxyVendorName } from "../config/loader.j
 import {
 	DEFAULT_SMARTPROXY_POOL_SIZE,
 	invalidateProxyResolutionCacheAsync,
+	policyResolvesRegistryVendorChain,
 	ProxyResolutionError,
 	resolvePolicyProxyPoolSpan,
 	resolvePolicyTransportAttemptCap,
@@ -686,6 +687,11 @@ function createSessionFetcher(
 				policyProxy ? resolvePolicyProxyPoolSpan(policyProxy) : DEFAULT_SMARTPROXY_POOL_SIZE,
 			);
 			const maxAttempts = usesPolicyAllocator ? policyProxyAttemptCap : retryAttemptCap;
+			// Only registry vendor chains (smartproxy/nodemaven) rotate endpoints per
+			// attempt; static/custom/decodo policies resolve the same URL every time
+			// and must keep retrying it, so restrict de-duplication to registry chains.
+			const dedupeAllocatorEndpoints =
+				usesPolicyAllocator && policyResolvesRegistryVendorChain(policyProxy);
 			let lastError: unknown;
 
 			for (
@@ -726,9 +732,14 @@ function createSessionFetcher(
 						assertNoUnsupportedFingerprintOverrides(options);
 						attemptProxy = await resolveRequestProxy(options, attempt, refreshAttempt);
 						proxy = attemptProxy.url;
-						if (proxy && usesPolicyAllocator) {
+						if (proxy && dedupeAllocatorEndpoints) {
+							// An under-filled allocation repeats endpoints (via the modulo
+							// pool mapping) before the flat offset crosses into the next
+							// vendor. Skip an already-tried endpoint and advance the offset
+							// rather than breaking — breaking here would strand the request on
+							// the primary vendor and never reach the fallback leg.
 							if (attemptedProxies.has(proxy)) {
-								break;
+								continue;
 							}
 							attemptedProxies.add(proxy);
 						}
