@@ -1,6 +1,6 @@
 import type { ProxyResolutionOptions } from "../config/loader.js";
 import {
-	policyResolvesRegistryVendorChain,
+	policyRotatesTransportVendorChain,
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
 } from "../config/loader.js";
@@ -519,11 +519,18 @@ export function createHttpClient(
 		// sentinel for a duplicate; the loop then advances the flat offset without
 		// issuing the request, so it keeps walking toward — and into — the fallback
 		// vendor's pool span instead of stalling on the primary vendor.
-		// Only registry vendor chains (smartproxy/nodemaven) rotate endpoints per
-		// attempt; static/custom/decodo policies resolve the same URL every time
-		// and must keep retrying it, so restrict de-duplication to registry chains.
-		const dedupeAllocatorEndpoints =
-			usesPolicyAllocator && policyResolvesRegistryVendorChain(policyProxy);
+		// De-duplication is gated on the SAME predicate that widens the attempt cap
+		// (implicit, safe-method, registry-chain rotation). It must NOT engage for
+		// an explicit retry policy: there the caller's `attempts` count is the
+		// contract and each attempt must issue against whatever endpoint it resolves
+		// — even a repeat — instead of being silently skipped (which would collapse
+		// a `poolSize: 1` + `attempts: 3` request to a single fetch).
+		const dedupeAllocatorEndpoints = policyRotatesTransportVendorChain({
+			policy: policyProxy,
+			usesPolicyAllocator,
+			explicitRetry,
+			method: methodName,
+		});
 		const dedupeContext = dedupeAllocatorEndpoints
 			? { attempted: new Set<string>() }
 			: undefined;
@@ -559,7 +566,18 @@ export function createHttpClient(
 		let lastError: unknown;
 		let lastErrorCode: string | undefined;
 		let lastStatus: number | undefined;
+		// `attempt` walks the flat proxy offset across the full chain span; `issued`
+		// counts requests that were actually sent (skipped duplicate offsets do not
+		// increment it). Retry summaries and the status-retry budget must reflect
+		// issued requests, not the raw offset, so they stay accurate when partial
+		// allocations skip offsets.
+		let issued = 0;
 		for (let attempt = 1; attempt <= transportAttemptCap; attempt += 1) {
+			// Whether this offset actually issued a request (vs. a skipped duplicate),
+			// so the catch counts a thrown *transport* failure once without
+			// double-counting a status outcome that already incremented before it
+			// re-threw as an upstream HTTP error.
+			let issuedThisAttempt = false;
 			try {
 				const outcome = await executeOnce(attempt - 1);
 				if (isDedupeSkipOutcome(outcome)) {
@@ -568,9 +586,11 @@ export function createHttpClient(
 					// the loop keeps rotating toward the fallback vendor.
 					continue;
 				}
+				issued += 1;
+				issuedThisAttempt = true;
 				if (isHttpStatusOutcome(outcome)) {
 					lastStatus = outcome.status;
-					if (outcome.retryable && attempt < retryOptions.attempts) {
+					if (outcome.retryable && issued < retryOptions.attempts) {
 						await sleep(computeProxyTransportRetryDelayMs(retryOptions, attempt, outcome.headers));
 						continue;
 					}
@@ -582,10 +602,10 @@ export function createHttpClient(
 					throw toUpstreamHttpError(response.status);
 				}
 
-				if (attempt > 1) {
+				if (issued > 1) {
 					const summary: HttpRetrySummary = {
-						attempts: attempt,
-						retries: attempt - 1,
+						attempts: issued,
+						retries: issued - 1,
 						...(retryOptions.preset ? { preset: retryOptions.preset } : {}),
 						transport: "native",
 						...(lastErrorCode ? { lastErrorCode } : {}),
@@ -595,6 +615,7 @@ export function createHttpClient(
 				}
 				return response;
 			} catch (error) {
+				if (!issuedThisAttempt) issued += 1;
 				lastError = error;
 				lastErrorCode = proxyTransportRetryErrorCode(error);
 				lastStatus = proxyTransportRetryErrorStatus(error);

@@ -864,6 +864,37 @@ const UNSAFE_TRANSPORT_RETRY_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"
  * vendor's max pool size), so a large NodeMaven pool (≤50) stays reachable and
  * a pathological chain can never spin unbounded.
  */
+/**
+ * True when a policy request is in *implicit chain-rotation* mode: successive
+ * transport attempts rotate the flat index across the concatenated vendor pool
+ * spans (and, past the primary vendor's span, into the fallback vendor). This is
+ * the ONLY mode in which the transport loop widens its attempt cap AND
+ * de-duplicates repeated endpoints — the two behaviours must share one predicate
+ * so they never diverge. It holds when ALL of the widening conditions hold:
+ *  - the request is policy-allocator managed (not a caller-supplied proxy URL);
+ *  - the caller did NOT pin an explicit retry policy — its `attempts` ceiling is
+ *    the documented contract and must be honoured verbatim against whatever
+ *    endpoint each attempt resolves (even a repeated one), so no de-duplication;
+ *  - the method is safe/idempotent — an unsafe request is never duplicated;
+ *  - the policy resolves a non-empty registry vendor chain (smartproxy /
+ *    nodemaven). Static vendors (custom / decodo) resolve the same URL every
+ *    attempt, so there is nothing to rotate or de-duplicate.
+ */
+export function policyRotatesTransportVendorChain(input: {
+	policy: ProviderProxyPolicy | undefined;
+	usesPolicyAllocator: boolean;
+	explicitRetry: boolean;
+	method: string;
+}): boolean {
+	if (!input.usesPolicyAllocator || !input.policy || input.explicitRetry) {
+		return false;
+	}
+	if (UNSAFE_TRANSPORT_RETRY_METHODS.has(input.method.toUpperCase())) {
+		return false;
+	}
+	return resolveVendorChain(input.policy).length > 0;
+}
+
 export function resolvePolicyTransportAttemptCap(input: {
 	policy: ProviderProxyPolicy | undefined;
 	usesPolicyAllocator: boolean;
@@ -872,15 +903,17 @@ export function resolvePolicyTransportAttemptCap(input: {
 	method: string;
 }): number {
 	const budget = Math.max(1, Math.floor(input.retryAttempts));
-	if (!input.usesPolicyAllocator || !input.policy || input.explicitRetry) {
+	if (
+		!policyRotatesTransportVendorChain({
+			policy: input.policy,
+			usesPolicyAllocator: input.usesPolicyAllocator,
+			explicitRetry: input.explicitRetry,
+			method: input.method,
+		})
+	) {
 		return budget;
 	}
-	if (UNSAFE_TRANSPORT_RETRY_METHODS.has(input.method.toUpperCase())) {
-		return budget;
-	}
-	const chain = resolveVendorChain(input.policy);
-	if (chain.length === 0) return budget;
-	const span = Math.min(maxPolicyProxyPoolSpan(input.policy), resolvePolicyProxyPoolSpan(input.policy));
+	const span = Math.min(maxPolicyProxyPoolSpan(input.policy as ProviderProxyPolicy), resolvePolicyProxyPoolSpan(input.policy as ProviderProxyPolicy));
 	return Math.max(budget, span);
 }
 

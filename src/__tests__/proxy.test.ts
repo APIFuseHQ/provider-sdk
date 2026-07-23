@@ -14,7 +14,7 @@ import {
 	resolveProxyConfigAsync,
 	SMARTPROXY_MAX_LIFETIME_MINUTES,
 } from "../config/loader.js";
-import type { ProviderProxyPolicy } from "../types.js";
+import type { HttpRetrySummary, ProviderProxyPolicy } from "../types.js";
 import { TransportError } from "../errors.js";
 import { ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
 import { HttpRetryUnsafeMethodPolicy } from "../types.js";
@@ -1350,9 +1350,13 @@ describe("proxy integration", () => {
 			throw new Error("socket hang up");
 		}) as unknown as typeof fetch;
 
+		let retrySummary: HttpRetrySummary | undefined;
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
 			affinityKey: "af_con_http_partial_crossover",
+			onRetrySummary: (summary) => {
+				retrySummary = summary;
+			},
 			upstream: {
 				proxy: {
 					mode: "required",
@@ -1374,6 +1378,68 @@ describe("proxy integration", () => {
 		expect(new Set(smartproxyCalls).size).toBe(2);
 		// ...and the NodeMaven leg is still reached despite the duplicate offsets.
 		expect(proxies.some((proxy) => proxy?.includes("gate.nodemaven.com"))).toBe(true);
+		// The retry summary counts only issued requests (2 Smartproxy + 1 NodeMaven),
+		// not the two skipped duplicate offsets — 3 attempts / 2 retries, not 5 / 4.
+		expect(retrySummary).toEqual({
+			attempts: 3,
+			retries: 2,
+			preset: "transport_transient",
+			transport: "native",
+			lastErrorCode: "transport_network_error",
+		});
+	});
+
+	it("honors an explicit ctx.http retry count against a single-endpoint allocation", async () => {
+		// Regression: de-duplication must not engage for an explicit retry policy. A
+		// Smartproxy pool of 1 resolves the same endpoint every attempt, but a caller
+		// that pinned `retry: { attempts: 3, statusCodes: [503] }` documented three
+		// attempts — skipping the "duplicates" would collapse it to a single fetch
+		// and mask the 503 behind a synthetic retry_exhausted error.
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		let targetCalls = 0;
+		global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("get-ip-v3")) {
+				return new Response("5.78.24.25:31001", { status: 200 });
+			}
+			targetCalls += 1;
+			nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+			return new Response("upstream busy", { status: 503 });
+		}) as unknown as typeof fetch;
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com", {
+			affinityKey: "af_con_http_explicit_retry",
+			upstream: {
+				proxy: {
+					mode: "required",
+					provider: "smartproxy",
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 1 },
+				},
+			},
+		});
+
+		let error: unknown;
+		try {
+			await http.get("/health", {
+				retry: {
+					attempts: 3,
+					statusCodes: [503],
+					baseDelayMs: 0,
+					maxDelayMs: 0,
+					jitter: "none",
+				},
+			});
+		} catch (caught) {
+			error = caught;
+		}
+
+		// All three explicit attempts are issued against the single endpoint...
+		expect(targetCalls).toBe(3);
+		// ...and the terminal error surfaces the real 503, not a synthetic exhaustion.
+		expect((error as { status?: number }).status).toBe(503);
+		expect((error as { code?: string }).code).toBe("upstream_http_error");
 	});
 
 	it("rejects malformed default Smartproxy lifetime before optional allocator fallback", async () => {
