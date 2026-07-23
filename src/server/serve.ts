@@ -512,11 +512,22 @@ function toErrorResponse(error: unknown, requestId?: string): OperationErrorResp
 		};
 	}
 
+	// A masked internal error MUST NOT be advertised as retryable: without an
+	// explicit retryable:false the hub (bori provider-backed engine) defaults 5xx
+	// to retryable:true, which turns a deterministic pre-upstream crash into an
+	// infinite START->CONTINUE->restart loop (2026-07-22 catchtable reserve RCA).
+	// We still refuse to leak message/stack — only the error class name (or the
+	// primitive type for non-Error throwables) is surfaced for ops triage.
 	return {
 		error: {
 			code: "internal_error",
 			message: "Internal error",
 			...(requestId ? { requestId } : {}),
+			details: {
+				retryable: false,
+				category: "internal_error",
+				errorClass: error instanceof Error ? error.name : typeof error,
+			},
 		},
 	};
 }

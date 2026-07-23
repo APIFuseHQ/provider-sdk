@@ -1587,8 +1587,35 @@ describe("provider HTTP server", () => {
 				code: "internal_error",
 				message: "Internal error",
 				requestId: "req_5",
+				details: {
+					retryable: false,
+					category: "internal_error",
+					errorClass: "Error",
+				},
 			},
 		});
+	});
+
+	it("marks masked internal errors as non-retryable with the real error class", async () => {
+		const response = await app.request("/v1/unexpectedError", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_masked", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(500);
+		const body = (await response.json()) as {
+			error: { code: string; message: string; details?: Record<string, unknown> };
+		};
+		expect(body.error.code).toBe("internal_error");
+		// Must never leak the raw message/stack beyond the generic string.
+		expect(body.error.message).toBe("Internal error");
+		expect(JSON.stringify(body)).not.toContain("boom");
+		// The hub honors details.retryable; a masked crash must be non-retryable so
+		// it cannot drive the START->CONTINUE->restart loop.
+		expect(body.error.details?.retryable).toBe(false);
+		expect(body.error.details?.category).toBe("internal_error");
+		expect(body.error.details?.errorClass).toBe("Error");
 	});
 
 	it("emits provider failure events through the injected logger", async () => {
@@ -1746,6 +1773,11 @@ describe("provider HTTP server cross-module error identity", () => {
 				code: "internal_error",
 				message: "Internal error",
 				requestId: "req_unbrandedLookalike",
+				details: {
+					retryable: false,
+					category: "internal_error",
+					errorClass: "ProviderError",
+				},
 			},
 		});
 	});
