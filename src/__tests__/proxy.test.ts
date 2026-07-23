@@ -1714,6 +1714,60 @@ describe("proxy integration", () => {
 		]);
 	});
 
+	it("does not run allocator pool-refresh retries for a static (custom) proxy policy", async () => {
+		// Regression: allocator stale-pool handling (endpoint rotation + cache
+		// refresh) is a smartproxy/nodemaven concept. A static custom/decodo policy
+		// resolves ONE URL that cannot be "refreshed", so a refreshable 512 must fall
+		// through to the ordinary transport-retry path and honour `retry: false` —
+		// not be resent maxAttempts × refreshes times (up to ~40) against the same
+		// dead endpoint. This is the failure mode gating the refresh machinery on the
+		// crude `usesPolicyAllocator` (true for static policies) would reintroduce.
+		process.env.APIFUSE__PROXY__URL = "http://static-user:secret@proxy.static.example:7000";
+		stealthState.queuedResponses.push(
+			{
+				status: 512,
+				body: "proxy pool unavailable",
+				headers: { "content-type": "text/plain" },
+			},
+			// Extra responses that must never be consumed if retry:false is honoured.
+			{
+				status: 512,
+				body: "proxy pool unavailable",
+				headers: { "content-type": "text/plain" },
+			},
+			{
+				status: 200,
+				body: JSON.stringify({ ok: true }),
+				headers: { "Content-Type": "application/json" },
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					provider: "custom",
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 4 },
+				},
+			},
+			affinityKey: "af_con_static_no_refresh",
+		});
+
+		let error: unknown;
+		try {
+			await client.fetch("/health", { retry: false });
+		} catch (caught) {
+			error = caught;
+		}
+
+		// Exactly one request is issued against the single static endpoint — the two
+		// unused queued responses prove no allocator rotation/refresh occurred.
+		expect(error).toBeInstanceOf(TransportError);
+		expect(stealthProxyCalls()).toEqual(["http://static-user:secret@proxy.static.example:7000"]);
+	});
+
 	it("refreshes stale Smartproxy stealth pools after all endpoints return 509 or 512", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const pools = [

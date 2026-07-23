@@ -686,12 +686,18 @@ function createSessionFetcher(
 				1,
 				policyProxy ? resolvePolicyProxyPoolSpan(policyProxy) : DEFAULT_SMARTPROXY_POOL_SIZE,
 			);
-			const maxAttempts = usesPolicyAllocator ? policyProxyAttemptCap : retryAttemptCap;
-			// Only registry vendor chains (smartproxy/nodemaven) rotate endpoints per
-			// attempt; static/custom/decodo policies resolve the same URL every time
-			// and must keep retrying it, so restrict de-duplication to registry chains.
-			const dedupeAllocatorEndpoints =
+			// A registry vendor chain (smartproxy/nodemaven) is the only policy whose
+			// successive attempts resolve a *different* endpoint, so it is the only one
+			// that may widen the attempt cap to the pool span, de-duplicate endpoints,
+			// and drive allocator stale-pool refresh. A static custom/decodo policy
+			// resolves the same URL every attempt: widening/refreshing it would resend
+			// the request dozens of times (up to maxAttempts × refreshes) and bypass
+			// retry:false and unsafe-method controls. Static policies therefore follow
+			// the ordinary transport-retry budget instead.
+			const rotatesRegistryChain =
 				usesPolicyAllocator && policyResolvesRegistryVendorChain(policyProxy);
+			const maxAttempts = rotatesRegistryChain ? policyProxyAttemptCap : retryAttemptCap;
+			const dedupeAllocatorEndpoints = rotatesRegistryChain;
 			let lastError: unknown;
 
 			for (
@@ -819,7 +825,7 @@ function createSessionFetcher(
 							proxyAttemptStatus(normalizedError),
 						);
 						lastError = normalizedError;
-						if (proxy && usesPolicyAllocator && isProxyPoolRefreshableError(normalizedError)) {
+						if (proxy && rotatesRegistryChain && isProxyPoolRefreshableError(normalizedError)) {
 							stalePoolError = normalizedError;
 							if (shouldRunProxyAuthDiagnostic(normalizedError)) {
 								stalePoolDiagnosticProxy = proxy;
@@ -869,7 +875,7 @@ function createSessionFetcher(
 				}
 
 				if (
-					usesPolicyAllocator &&
+					rotatesRegistryChain &&
 					stalePoolError &&
 					refreshAttempt < MAX_POLICY_PROXY_POOL_REFRESHES
 				) {
