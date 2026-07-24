@@ -7,6 +7,7 @@ import { Redis } from "ioredis";
 import type { ProviderProxyPolicy, ProviderProxyProvider, TraceConfig } from "../types.js";
 import {
 	NODEMAVEN_DEFAULT_PROTOCOL,
+	NODEMAVEN_MAX_POOL_SIZE,
 	type ProxyProtocol,
 	hasNodemavenCredentials,
 	nodemavenPoolSize,
@@ -820,6 +821,114 @@ export function resolvePolicyProxyPoolSpan(policy: ProviderProxyPolicy): number 
 	const chain = resolveVendorChain(policy);
 	if (chain.length === 0) return resolveSmartproxyPoolSize(policy);
 	return chain.reduce((sum, vendor) => sum + vendorPoolSize(vendor, policy), 0);
+}
+
+function vendorMaxPoolSize(vendor: ProxyVendorName): number {
+	return vendor === "nodemaven" ? NODEMAVEN_MAX_POOL_SIZE : SMARTPROXY_MAX_POOL_SIZE;
+}
+
+/**
+ * Absolute upper bound on a chain's attempt span — the sum of each vendor's
+ * *maximum* pool size. Unlike `resolvePolicyProxyPoolSpan` (the configured
+ * span), this backstop is independent of `session.poolSize`, so it never
+ * truncates a legitimately large pool below the point where the flat attempt
+ * index would cross into the next vendor (e.g. a 50-slot NodeMaven pool).
+ */
+export function maxPolicyProxyPoolSpan(policy: ProviderProxyPolicy): number {
+	const chain = resolveVendorChain(policy);
+	if (chain.length === 0) return SMARTPROXY_MAX_POOL_SIZE;
+	return chain.reduce((sum, vendor) => sum + vendorMaxPoolSize(vendor), 0);
+}
+
+const UNSAFE_TRANSPORT_RETRY_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE", "TRACE"]);
+
+/**
+ * Transport-retry attempt cap for a policy-managed request. A transport failure
+ * rotates the flat attempt index onto the *next* endpoint (and, once the index
+ * passes the primary vendor's pool span, the *next vendor*), so the cap must be
+ * the chain's full pool span for failover to reach the fallback vendor — the
+ * per-endpoint retry budget (default 3) never gets there.
+ *
+ * The span only widens beyond the caller's retry budget when ALL hold:
+ *  - the request is policy-allocator managed (not a caller-supplied proxy URL);
+ *  - the caller did NOT pin an explicit retry policy — `HttpRetryOptions.attempts`
+ *    is the documented total-attempt ceiling and must be honoured verbatim;
+ *  - the method is safe/idempotent — an unsafe request must never be duplicated
+ *    across the pool even if some framework default would allow it;
+ *  - the policy resolves a non-empty *registry* vendor chain (smartproxy /
+ *    nodemaven). Static vendors (custom / decodo) and credential-less policies
+ *    resolve no allocator pool, so every attempt would hit the same endpoint
+ *    with no possible crossover — they keep the retry budget.
+ *
+ * The widened cap is bounded by the chain's true maximum span (sum of each
+ * vendor's max pool size), so a large NodeMaven pool (≤50) stays reachable and
+ * a pathological chain can never spin unbounded.
+ */
+/**
+ * True when a policy request is in *implicit chain-rotation* mode: successive
+ * transport attempts rotate the flat index across the concatenated vendor pool
+ * spans (and, past the primary vendor's span, into the fallback vendor). This is
+ * the ONLY mode in which the transport loop widens its attempt cap AND
+ * de-duplicates repeated endpoints — the two behaviours must share one predicate
+ * so they never diverge. It holds when ALL of the widening conditions hold:
+ *  - the request is policy-allocator managed (not a caller-supplied proxy URL);
+ *  - the caller did NOT pin an explicit retry policy — its `attempts` ceiling is
+ *    the documented contract and must be honoured verbatim against whatever
+ *    endpoint each attempt resolves (even a repeated one), so no de-duplication;
+ *  - the method is safe/idempotent — an unsafe request is never duplicated;
+ *  - the policy resolves a non-empty registry vendor chain (smartproxy /
+ *    nodemaven). Static vendors (custom / decodo) resolve the same URL every
+ *    attempt, so there is nothing to rotate or de-duplicate.
+ */
+export function policyRotatesTransportVendorChain(input: {
+	policy: ProviderProxyPolicy | undefined;
+	usesPolicyAllocator: boolean;
+	explicitRetry: boolean;
+	method: string;
+}): boolean {
+	if (!input.usesPolicyAllocator || !input.policy || input.explicitRetry) {
+		return false;
+	}
+	if (UNSAFE_TRANSPORT_RETRY_METHODS.has(input.method.toUpperCase())) {
+		return false;
+	}
+	return resolveVendorChain(input.policy).length > 0;
+}
+
+export function resolvePolicyTransportAttemptCap(input: {
+	policy: ProviderProxyPolicy | undefined;
+	usesPolicyAllocator: boolean;
+	retryAttempts: number;
+	explicitRetry: boolean;
+	method: string;
+}): number {
+	const budget = Math.max(1, Math.floor(input.retryAttempts));
+	if (
+		!policyRotatesTransportVendorChain({
+			policy: input.policy,
+			usesPolicyAllocator: input.usesPolicyAllocator,
+			explicitRetry: input.explicitRetry,
+			method: input.method,
+		})
+	) {
+		return budget;
+	}
+	const span = Math.min(maxPolicyProxyPoolSpan(input.policy as ProviderProxyPolicy), resolvePolicyProxyPoolSpan(input.policy as ProviderProxyPolicy));
+	return Math.max(budget, span);
+}
+
+/**
+ * A registry vendor chain (smartproxy/nodemaven) resolves a potentially
+ * *different* endpoint per flat attempt index, so a transport retry should
+ * advance across endpoints and de-duplicate once the chain stops yielding new
+ * ones. Static/custom/decodo policies (empty registry chain) resolve the *same*
+ * URL every attempt by design — retrying that same endpoint is intended, so the
+ * transport loop must not de-duplicate them.
+ */
+export function policyResolvesRegistryVendorChain(
+	policy: ProviderProxyPolicy | undefined,
+): boolean {
+	return Boolean(policy) && resolveVendorChain(policy as ProviderProxyPolicy).length > 0;
 }
 
 /** Map a resolved proxy source label to the vendor that served it. */

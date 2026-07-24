@@ -6,10 +6,11 @@ import type { ProxyResolutionOptions, ProxyVendorName } from "../config/loader.j
 import {
 	DEFAULT_SMARTPROXY_POOL_SIZE,
 	invalidateProxyResolutionCacheAsync,
+	policyResolvesRegistryVendorChain,
 	ProxyResolutionError,
 	resolvePolicyProxyPoolSpan,
+	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
-	SMARTPROXY_MAX_POOL_SIZE,
 	vendorFromResolvedSource,
 } from "../config/loader.js";
 import { SDKError, TransportError } from "../errors.js";
@@ -53,11 +54,6 @@ const DEFAULT_PROFILE = "chrome-146";
 const MISSING_PROXY_WARNING =
 	"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.";
 
-/**
- * Upper bound on attempts across a multi-vendor chain, so a two-vendor chain can
- * exhaust each vendor's pool before failing over and finally throwing.
- */
-const MAX_POLICY_PROXY_TOTAL_ATTEMPTS = SMARTPROXY_MAX_POOL_SIZE * 2;
 const MAX_POLICY_PROXY_POOL_REFRESHES = 1;
 const PROXY_CONNECT_FAILURE_CODE = "proxy_connect_failed";
 const PROXY_CONNECT_FAILURE_BODY_PATTERN =
@@ -682,14 +678,26 @@ function createSessionFetcher(
 				(typeof clientOptions.upstream?.proxy === "object"
 					? clientOptions.upstream.proxy
 					: undefined);
+			// The pool span is already bounded by each vendor's max pool size
+			// (smartproxy ≤20, nodemaven ≤50), so the configured span never exceeds
+			// the chain's true maximum — a large NodeMaven pool stays fully
+			// reachable rather than being truncated at an arbitrary ceiling.
 			const policyProxyAttemptCap = Math.max(
 				1,
-				Math.min(
-					MAX_POLICY_PROXY_TOTAL_ATTEMPTS,
-					policyProxy ? resolvePolicyProxyPoolSpan(policyProxy) : DEFAULT_SMARTPROXY_POOL_SIZE,
-				),
+				policyProxy ? resolvePolicyProxyPoolSpan(policyProxy) : DEFAULT_SMARTPROXY_POOL_SIZE,
 			);
-			const maxAttempts = usesPolicyAllocator ? policyProxyAttemptCap : retryAttemptCap;
+			// A registry vendor chain (smartproxy/nodemaven) is the only policy whose
+			// successive attempts resolve a *different* endpoint, so it is the only one
+			// that may widen the attempt cap to the pool span, de-duplicate endpoints,
+			// and drive allocator stale-pool refresh. A static custom/decodo policy
+			// resolves the same URL every attempt: widening/refreshing it would resend
+			// the request dozens of times (up to maxAttempts × refreshes) and bypass
+			// retry:false and unsafe-method controls. Static policies therefore follow
+			// the ordinary transport-retry budget instead.
+			const rotatesRegistryChain =
+				usesPolicyAllocator && policyResolvesRegistryVendorChain(policyProxy);
+			const maxAttempts = rotatesRegistryChain ? policyProxyAttemptCap : retryAttemptCap;
+			const dedupeAllocatorEndpoints = rotatesRegistryChain;
 			let lastError: unknown;
 
 			for (
@@ -730,9 +738,14 @@ function createSessionFetcher(
 						assertNoUnsupportedFingerprintOverrides(options);
 						attemptProxy = await resolveRequestProxy(options, attempt, refreshAttempt);
 						proxy = attemptProxy.url;
-						if (proxy && usesPolicyAllocator) {
+						if (proxy && dedupeAllocatorEndpoints) {
+							// An under-filled allocation repeats endpoints (via the modulo
+							// pool mapping) before the flat offset crosses into the next
+							// vendor. Skip an already-tried endpoint and advance the offset
+							// rather than breaking — breaking here would strand the request on
+							// the primary vendor and never reach the fallback leg.
 							if (attemptedProxies.has(proxy)) {
-								break;
+								continue;
 							}
 							attemptedProxies.add(proxy);
 						}
@@ -812,7 +825,7 @@ function createSessionFetcher(
 							proxyAttemptStatus(normalizedError),
 						);
 						lastError = normalizedError;
-						if (proxy && usesPolicyAllocator && isProxyPoolRefreshableError(normalizedError)) {
+						if (proxy && rotatesRegistryChain && isProxyPoolRefreshableError(normalizedError)) {
 							stalePoolError = normalizedError;
 							if (shouldRunProxyAuthDiagnostic(normalizedError)) {
 								stalePoolDiagnosticProxy = proxy;
@@ -822,11 +835,28 @@ function createSessionFetcher(
 							}
 							break;
 						}
+						// Cap the number of transport retries. For a policy-allocator chain,
+						// every attempt resolves a *different* endpoint/vendor (poolIndex
+						// rotates across the concatenated vendor pool spans), so a transport
+						// failure is a signal to advance to the next endpoint — potentially
+						// crossing into the fallback vendor — not to retry the same endpoint.
+						// Truncating that rotation at the per-endpoint retry budget would
+						// strand the request on the primary vendor and never reach the
+						// fallback, since the crossover only happens once the flat attempt
+						// index exceeds the primary vendor's pool size (~10-20).
+						// resolvePolicyTransportAttemptCap widens to the full chain span only
+						// for implicit, safe-method allocator requests; explicit retry
+						// policies (their documented `attempts` ceiling), unsafe methods, and
+						// static/non-registry vendors keep the per-endpoint retry budget.
+						const transportRetryCap = resolvePolicyTransportAttemptCap({
+							policy: policyProxy,
+							usesPolicyAllocator,
+							retryAttempts: stealthRetryOptions?.attempts ?? 1,
+							explicitRetry: hasExplicitRetryPolicy,
+							method,
+						});
 						if (
-							attempt + 1 <
-								(stealthRetryOptions
-									? Math.min(maxAttempts, stealthRetryOptions.attempts)
-									: maxAttempts) &&
+							attempt + 1 < transportRetryCap &&
 							shouldRetryProxyTransportAttempt({
 								error: normalizedError,
 								explicitRetry: hasExplicitRetryPolicy,
@@ -845,7 +875,7 @@ function createSessionFetcher(
 				}
 
 				if (
-					usesPolicyAllocator &&
+					rotatesRegistryChain &&
 					stalePoolError &&
 					refreshAttempt < MAX_POLICY_PROXY_POOL_REFRESHES
 				) {
