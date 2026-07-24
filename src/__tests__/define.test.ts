@@ -529,4 +529,115 @@ describe("defineProvider", () => {
 			expect(provider.operations.prices.description).toBeUndefined();
 		});
 	});
+
+	describe("required proxy vendor credentials", () => {
+		const SMARTPROXY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
+		const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
+		const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
+
+		it("requires the smartproxy app key for a required smartproxy chain", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: { mode: "required", provider: "smartproxy" },
+				}),
+			).toThrow(
+				/requires smartproxy egress but does not declare APIFUSE__PROXY__SMARTPROXY_APP_KEY/,
+			);
+		});
+
+		it("requires both nodemaven credentials for a required nodemaven-only chain", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: { mode: "required", providers: ["nodemaven"] },
+				}),
+			).toThrow(
+				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
+			);
+		});
+
+		it("rejects a required smartproxy→nodemaven chain that only declares the smartproxy secret (silently dead fallback)", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
+					secrets: [{ name: SMARTPROXY_SECRET, required: true }],
+				}),
+			).toThrow(
+				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
+			);
+		});
+
+		it("rejects a required nodemaven chain that declares username but omits the password", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: { mode: "required", providers: ["nodemaven"] },
+					secrets: [{ name: NODEMAVEN_USERNAME_SECRET, required: true }],
+				}),
+			).toThrow(
+				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_PASSWORD/,
+			);
+		});
+
+		it("accepts a required smartproxy→nodemaven chain that declares every vendor's secrets", () => {
+			const provider = defineProvider({
+				...validConfig,
+				proxy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
+				secrets: [
+					{ name: SMARTPROXY_SECRET, required: true },
+					{ name: NODEMAVEN_USERNAME_SECRET, required: true },
+					{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
+				],
+			});
+
+			expect(provider.proxy).toEqual({
+				mode: "required",
+				providers: ["smartproxy", "nodemaven"],
+			});
+		});
+
+		it("does not require nodemaven credentials when the chain is optional", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: { mode: "optional", providers: ["smartproxy", "nodemaven"] },
+				}),
+			).not.toThrow();
+		});
+
+		it("treats a declared-but-optional (required: false) vendor secret as missing", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: { mode: "required", providers: ["nodemaven"] },
+					secrets: [
+						{ name: NODEMAVEN_USERNAME_SECRET, required: false },
+						{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
+					],
+				}),
+			).toThrow(
+				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
+			);
+		});
+
+		it("treats a vendor secret that omits `required` as missing (matches the runtime gate)", () => {
+			// listMissingRequiredSecrets enforces only `required === true`, so a
+			// default-flag declaration is skipped at runtime; define-time validation
+			// must reject it too rather than pass a config the runtime won't enforce.
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: { mode: "required", providers: ["nodemaven"] },
+					secrets: [
+						{ name: NODEMAVEN_USERNAME_SECRET },
+						{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
+					],
+				}),
+			).toThrow(
+				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
+			);
+		});
+	});
 });

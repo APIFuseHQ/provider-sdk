@@ -25,6 +25,7 @@ import type {
 	ProviderDeploymentOverrides,
 	ProviderHealthMonitorConfig,
 	ProviderProxyConfig,
+	ProviderProxyProvider,
 	ProviderPublicProfile,
 	ProviderReviewed,
 	ProviderSecretDeclaration,
@@ -87,6 +88,20 @@ const VALID_PROVIDER_PROXY_AFFINITIES = [
 ] as const;
 const VALID_PROVIDER_STT_MODES = ["optional", "required"] as const;
 const SMARTPROXY_APP_KEY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
+const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
+const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
+// Per-vendor provider-declared credential secrets. A required-mode chain must
+// declare every secret of every credentialed vendor it names, so a missing
+// credential fails at build/validation time rather than during a live outage: a
+// declared-but-uncredentialed fallback leg is a silently dead SPOF, which is
+// exactly the failure class the multi-vendor chain exists to remove. Vendors
+// absent from this map (e.g. `custom`/`decodo`, whose credentials come from the
+// `APIFUSE__PROXY__URL` bring-your-own escape hatch, not provider secrets) impose
+// no declaration requirement.
+const VENDOR_REQUIRED_SECRETS: Partial<Record<ProviderProxyProvider, readonly string[]>> = {
+	smartproxy: [SMARTPROXY_APP_KEY_SECRET],
+	nodemaven: [NODEMAVEN_USERNAME_SECRET, NODEMAVEN_PASSWORD_SECRET],
+};
 const RESERVED_OPERATION_IDS = new Set(["auth", "health"]);
 const MCP_TOOL_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
 const VALID_OPERATION_RISK_CLASSES = ["read", "write", "destructive", "external-send"] as const;
@@ -446,26 +461,42 @@ function validateProviderProxy(config: {
 			);
 		}
 	}
-	// Smartproxy uses a provider-declared secret; when it is a required-mode
-	// vendor (singular or in the chain) the app key must be declared so a missing
-	// credential fails at build/validation time, not during a live outage.
+	// Every credentialed vendor in a required-mode chain must declare its
+	// provider secret(s) so a missing credential fails at build/validation time,
+	// not during a live outage. This covers the fallback legs too (not just the
+	// first vendor): a declared-but-uncredentialed nodemaven fallback would leave
+	// the chain silently down to a single vendor, reintroducing the SPOF the chain
+	// removes.
 	const vendorChain =
 		proxy.providers && proxy.providers.length > 0
 			? proxy.providers
 			: proxy.provider
 				? [proxy.provider]
 				: [];
-	if (proxy.mode === "required" && vendorChain.includes("smartproxy")) {
-		const hasSmartproxySecret = config.secrets?.some(
-			(secret) => secret.name === SMARTPROXY_APP_KEY_SECRET && secret.required !== false,
-		);
-		if (!hasSmartproxySecret) {
-			throw new ValidationError(
-				`Provider "${config.id}" requires Smartproxy egress but does not declare ${SMARTPROXY_APP_KEY_SECRET}.`,
-				{
-					fix: `Add secrets: [{ name: "${SMARTPROXY_APP_KEY_SECRET}", required: true }] to the provider.`,
-				},
-			);
+	if (proxy.mode === "required") {
+		for (const vendor of vendorChain) {
+			const requiredSecrets = VENDOR_REQUIRED_SECRETS[vendor];
+			if (!requiredSecrets) continue;
+			for (const secretName of requiredSecrets) {
+				// Match the canonical runtime gate (assertRequiredSecretsPresent /
+				// listMissingRequiredSecrets), which enforces only `required === true`
+				// declarations. A declaration that omits `required` (defaulting to
+				// optional) is skipped at runtime, so accepting it here would pass
+				// validation while leaving the credential unenforced until proxy
+				// resolution during a live request — the fail-open gap this check exists
+				// to close.
+				const declared = config.secrets?.some(
+					(secret) => secret.name === secretName && secret.required === true,
+				);
+				if (!declared) {
+					throw new ValidationError(
+						`Provider "${config.id}" requires ${vendor} egress but does not declare ${secretName}.`,
+						{
+							fix: `Add secrets: [{ name: "${secretName}", required: true }] to the provider (every vendor in a required proxy chain must declare its credential secrets).`,
+						},
+					);
+				}
+			}
 		}
 	}
 	// `decodo`/`custom` are deprecated vendor values (string-union members, so the
