@@ -338,6 +338,27 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 		expect((thrown as { code?: string }).code).toBe("PROVIDER_STATE_UNSUPPORTED");
 	});
 
+	it("records an error span when an instrumented method throws synchronously", async () => {
+		const ctx = createMockContext();
+		ctx.state = createMemoryProviderRuntimeState();
+		// A promise-returning implementation that fails its pre-flight
+		// validation SYNCHRONOUSLY: the throw must stay synchronous for the
+		// caller, and the failure must still be recorded as an error span.
+		(ctx.http as { get: unknown }).get = () => {
+			throw new Error("sync pre-flight validation failed");
+		};
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		expect(() => instrumented.http.get("https://api.example.com/items")).toThrow(
+			"sync pre-flight validation failed",
+		);
+
+		const spans = instrumented.trace.getSpans();
+		const errorSpan = spans.find((span) => span.name === "http.get");
+		expect(errorSpan).toBeDefined();
+		expect(errorSpan?.status).toBe("error");
+	});
+
 	it("keeps stealth.createSession() synchronous with a working session client", async () => {
 		const ctx = createMockContext();
 		const instrumented = wrapWithInstrumentation(ctx);

@@ -347,7 +347,28 @@ function wrapNamespace<T extends object>(
 				// 2026-07-22 reserve internal_error loop before it). Sync members
 				// keep their sync contract; only genuinely async operations are
 				// recorded as spans.
-				const result = Reflect.apply(value, namespaceTarget, args);
+				let result: unknown;
+				try {
+					result = Reflect.apply(value, namespaceTarget, args);
+				} catch (error) {
+					// A promise-returning implementation may still throw
+					// SYNCHRONOUSLY during pre-flight validation. Preserve the
+					// synchronous throw contract, but keep recording the failure
+					// span (the pre-fidelity wrapper captured these).
+					recorder
+						.runSpan(
+							`${namespace}.${methodName}`,
+							() => {
+								throw error;
+							},
+							{
+								onError: (spanError) =>
+									buildSpanAttributes(namespace, methodName, args, undefined, spanError),
+							},
+						)
+						.catch(() => undefined);
+					throw error;
+				}
 				if (!isThenable(result)) {
 					// The state namespace factory returns the object whose METHODS
 					// are the operations worth tracing — instrument that object so
