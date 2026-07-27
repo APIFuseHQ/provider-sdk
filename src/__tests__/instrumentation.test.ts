@@ -3,7 +3,9 @@ import { createProviderCache } from "../runtime/cache.js";
 import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { createCredentialContext } from "../runtime/credential.js";
 import { createEnvContext } from "../runtime/env.js";
+import { isProviderError } from "../errors.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
+import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import { createTraceContext } from "../runtime/trace.js";
 import type {
 	AuthContext,
@@ -276,3 +278,104 @@ describe("wrapWithInstrumentation", () => {
 		});
 	});
 });
+
+describe("synchronous return fidelity (state + stealth factories)", () => {
+	// Regression for the 2026-07-27 catchtable CONFIRM_STATE_UNAVAILABLE outage
+	// (and the 2026-07-22 reserve internal_error loop): the generic method
+	// wrapper span-wrapped EVERY function property, and runSpan always returns
+	// a Promise — so the synchronous factory `ctx.state.namespace()` came back
+	// as a Promise and every downstream method call threw a raw
+	// `TypeError: ns.compareAndSet is not a function`.
+	it("keeps ctx.state.namespace() synchronous and instruments the returned namespace's operations", async () => {
+		const ctx = createMockContext();
+		ctx.state = createMemoryProviderRuntimeState();
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		const ns = instrumented.state.namespace("attempt_results", {
+			defaultTtl: "1h",
+			maxTtl: "1h",
+			maxEntries: 5,
+			maxValueBytes: 1024,
+		});
+
+		expect(isThenableForTest(ns)).toBe(false);
+		expect(typeof ns.get).toBe("function");
+		expect(typeof ns.compareAndSet).toBe("function");
+
+		await ns.set("k", { v: 1 });
+		const stored = await ns.get<{ v: number }>("k");
+		expect(stored?.value).toEqual({ v: 1 });
+
+		// The factory itself is not a span; the OPERATIONS are.
+		const spanNames = instrumented.trace.getSpans().map((span) => span.name);
+		expect(spanNames).toContain("state.set");
+		expect(spanNames).toContain("state.get");
+		expect(spanNames).not.toContain("state.namespace");
+	});
+
+	it("passes branded provider errors from state operations through unchanged (never a raw TypeError)", async () => {
+		const ctx = createMockContext();
+		ctx.state = createMemoryProviderRuntimeState();
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		const ns = instrumented.state.namespace("attempt_results", {
+			defaultTtl: "1h",
+			maxTtl: "1h",
+			maxEntries: 5,
+			maxValueBytes: 1024,
+		});
+
+		let thrown: unknown;
+		try {
+			// The in-memory backend deliberately rejects CAS with a BRANDED error;
+			// the instrumented path must surface exactly that, not a TypeError.
+			await ns.compareAndSet("k", 0, { status: "confirming" }, { ttl: "3m" });
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).not.toBeInstanceOf(TypeError);
+		expect(isProviderError(thrown)).toBe(true);
+		expect((thrown as { code?: string }).code).toBe("PROVIDER_STATE_UNSUPPORTED");
+	});
+
+	it("records an error span when an instrumented method throws synchronously", async () => {
+		const ctx = createMockContext();
+		ctx.state = createMemoryProviderRuntimeState();
+		// A promise-returning implementation that fails its pre-flight
+		// validation SYNCHRONOUSLY: the throw must stay synchronous for the
+		// caller, and the failure must still be recorded as an error span.
+		(ctx.http as { get: unknown }).get = () => {
+			throw new Error("sync pre-flight validation failed");
+		};
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		expect(() => instrumented.http.get("https://api.example.com/items")).toThrow(
+			"sync pre-flight validation failed",
+		);
+
+		const spans = instrumented.trace.getSpans();
+		const errorSpan = spans.find((span) => span.name === "http.get");
+		expect(errorSpan).toBeDefined();
+		expect(errorSpan?.status).toBe("error");
+	});
+
+	it("keeps stealth.createSession() synchronous with a working session client", async () => {
+		const ctx = createMockContext();
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		// Same fidelity class: createSession is a sync factory on an
+		// instrumented namespace and must not come back as a Promise.
+		const session = instrumented.stealth.createSession();
+		expect(isThenableForTest(session)).toBe(false);
+		const response = await session.fetch("https://secure.example.com/home");
+		expect(response.ok).toBe(true);
+	});
+});
+
+function isThenableForTest(value: unknown): boolean {
+	return (
+		(typeof value === "object" || typeof value === "function") &&
+		value !== null &&
+		typeof (value as { then?: unknown }).then === "function"
+	);
+}
