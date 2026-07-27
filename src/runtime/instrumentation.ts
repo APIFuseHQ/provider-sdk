@@ -16,6 +16,14 @@ type InstrumentedNamespace = "http" | "stealth" | "browser" | "session" | "state
 
 const BROWSER_PAGE_METHODS = new Set(["goto", "fill", "click", "type", "waitForSelector"]);
 
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+	return (
+		(typeof value === "object" || typeof value === "function") &&
+		value !== null &&
+		typeof (value as { then?: unknown }).then === "function"
+	);
+}
+
 function getErrorStatus(error: unknown): number | undefined {
 	if (
 		typeof error === "object" &&
@@ -329,15 +337,38 @@ function wrapNamespace<T extends object>(
 				return wrapped;
 			}
 
-			const wrapped = (...args: unknown[]) =>
-				recorder.runSpan(
-					`${namespace}.${methodName}`,
-					() => Reflect.apply(value, namespaceTarget, args),
-					{
-						onSuccess: (result) => buildSpanAttributes(namespace, methodName, args, result),
-						onError: (error) => buildSpanAttributes(namespace, methodName, args, undefined, error),
-					},
-				);
+			const wrapped = (...args: unknown[]) => {
+				// Invoke first and decide by the RETURN VALUE. `runSpan` always
+				// returns a Promise, so unconditionally span-wrapping every member
+				// silently rewrote synchronous contracts: `ctx.state.namespace()`
+				// (a sync factory) came back as a Promise, and every method call on
+				// it threw a raw TypeError — surfaced in production as catchtable's
+				// deterministic CONFIRM_STATE_UNAVAILABLE on 2026-07-27 (and the
+				// 2026-07-22 reserve internal_error loop before it). Sync members
+				// keep their sync contract; only genuinely async operations are
+				// recorded as spans.
+				const result = Reflect.apply(value, namespaceTarget, args);
+				if (!isThenable(result)) {
+					// The state namespace factory returns the object whose METHODS
+					// are the operations worth tracing — instrument that object so
+					// `state.get`/`state.compareAndSet`/… spans exist (they never
+					// could before: the factory's return value was destroyed).
+					if (
+						namespace === "state" &&
+						methodName === "namespace" &&
+						typeof result === "object" &&
+						result !== null
+					) {
+						return wrapNamespace(namespace, result, trace);
+					}
+					return result;
+				}
+				return recorder.runSpan(`${namespace}.${methodName}`, () => result, {
+					onSuccess: (spanResult) =>
+						buildSpanAttributes(namespace, methodName, args, spanResult),
+					onError: (error) => buildSpanAttributes(namespace, methodName, args, undefined, error),
+				});
+			};
 
 			wrappedMethods.set(property, wrapped);
 			return wrapped;
