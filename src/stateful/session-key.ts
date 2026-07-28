@@ -7,7 +7,8 @@ export interface SessionKeyParts {
 	readonly providerId: string;
 	readonly serviceAccountId: string;
 	readonly connectionId: string;
-	readonly dimensions: Readonly<Record<string, string>>;
+	/** Optional extra session axes (e.g. device, mailbox, persona). Defaults to none. */
+	readonly dimensions?: Readonly<Record<string, string>>;
 }
 
 const PREFIX = "stateful:v1";
@@ -19,7 +20,7 @@ export function buildSessionKey(parts: SessionKeyParts): SessionKey {
 	validateRequiredPart(parts.serviceAccountId, "serviceAccountId");
 	validateRequiredPart(parts.connectionId, "connectionId");
 
-	const dimensions = Object.entries(parts.dimensions).sort(([left], [right]) =>
+	const dimensions = Object.entries(parts.dimensions ?? {}).sort(([left], [right]) =>
 		left < right ? -1 : left > right ? 1 : 0,
 	);
 	for (const [name, value] of dimensions) {

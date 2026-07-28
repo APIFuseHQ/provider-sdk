@@ -1,3 +1,8 @@
+import type {
+	ProviderEventOwnerFence,
+	ProviderEventPublishOptions,
+} from "./provider-event-pipeline.js";
+import type { SessionKey } from "./session-key.js";
 import {
 	makeStatefulProviderCloseContext,
 	makeStatefulProviderSessionContext,
@@ -77,6 +82,10 @@ export type StatefulProviderEventPublish<TEvent = unknown> = (
 ) => void | Promise<void>;
 export type StatefulProviderEventDisposer = () => void | Promise<void>;
 
+export interface StatefulProviderEventPublisher<TEvent = unknown> {
+	publish(event: TEvent, options: ProviderEventPublishOptions): unknown;
+}
+
 export type StatefulWriteReconciliationResult<TSharedState = unknown> = {
 	readonly result: StatefulOperationResult;
 	readonly sharedState?: TSharedState;
@@ -125,7 +134,7 @@ export type StatefulProviderSessionManagerOptions<TSession, TSharedState, TEvent
 		ctx: StatefulProviderSessionContext,
 		state: TSharedState,
 	) => Promise<void>;
-	readonly eventPublisher?: StatefulProviderEventPublish<TEvent>;
+	readonly eventPublisher?: StatefulProviderEventPublisher<TEvent>;
 	readonly clock?: () => Date;
 	readonly metricEmitter?: StatefulProviderMetricEmitter;
 };
@@ -134,6 +143,25 @@ type ParallelLimiter = {
 	active: number;
 	readonly waiting: Array<() => void>;
 };
+
+const STATEFUL_SESSION_ESTABLISHMENT_FAILURE = Symbol.for(
+	"@apifuse/provider-sdk/stateful/session-establishment-failure@1",
+);
+
+function markStatefulSessionEstablishmentFailure(error: unknown): unknown {
+	if ((typeof error === "object" && error !== null) || typeof error === "function") {
+		try {
+			Object.defineProperty(error, STATEFUL_SESSION_ESTABLISHMENT_FAILURE, {
+				value: true,
+				enumerable: false,
+			});
+			return error;
+		} catch {}
+	}
+	const wrapped = new Error("Stateful session establishment failed.", { cause: error });
+	Object.defineProperty(wrapped, STATEFUL_SESSION_ESTABLISHMENT_FAILURE, { value: true });
+	return wrapped;
+}
 
 export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TEvent = unknown>
 	implements StatefulOperationExecutor<TSession>
@@ -145,10 +173,11 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 		TSharedState,
 		TEvent
 	>["checkpointStore"];
-	readonly #eventPublisher?: StatefulProviderEventPublish<TEvent>;
+	readonly #eventPublisher?: StatefulProviderEventPublisher<TEvent>;
 	readonly #clock: () => Date;
 	readonly #metricEmitter: StatefulProviderMetricEmitter;
 	readonly #eventDisposers = new Map<string, StatefulProviderEventDisposer>();
+	readonly #eventOwnerFences = new Map<string, ProviderEventOwnerFence>();
 	readonly #parallelLimiters = new Map<string, ParallelLimiter>();
 
 	constructor(options: StatefulProviderSessionManagerOptions<TSession, TSharedState, TEvent>) {
@@ -171,8 +200,13 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 	): Promise<StatefulOperationResult> {
 		const startedAt = this.#clock().getTime();
 		const run = async () => {
-			const managedSession = await this.getOrCreate(owner, request, signal);
-			const validatedOwner = validateOwnership ? await validateOwnership(owner, signal) : owner;
+			const managedSession = await this.getOrCreate(owner, request, signal, validateOwnership);
+			const validatedOwner = await this.validatePooledOwnership(
+				owner,
+				request.sessionKey,
+				signal,
+				validateOwnership,
+			);
 			const ctx = makeStatefulProviderSessionContext(
 				this.#adapter.providerId,
 				validatedOwner,
@@ -193,8 +227,13 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 				});
 				await this.#pool.invalidate(owner.sessionKey, error.reason);
 				if (!error.retryable || this.#adapter.policy.reconnect === "unsupported") throw error;
-				const reconnected = await this.getOrCreate(owner, request, signal);
-				const revalidatedOwner = validateOwnership ? await validateOwnership(owner, signal) : owner;
+				const reconnected = await this.getOrCreate(owner, request, signal, validateOwnership);
+				const revalidatedOwner = await this.validatePooledOwnership(
+					owner,
+					request.sessionKey,
+					signal,
+					validateOwnership,
+				);
 				const reconnectedCtx = makeStatefulProviderSessionContext(
 					this.#adapter.providerId,
 					revalidatedOwner,
@@ -207,10 +246,7 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 			}
 		};
 
-		const concurrency = this.#adapter.policy.concurrency;
-		if (concurrency.mode === "serialize") return this.#pool.runExclusive(owner.sessionKey, run);
-		if (concurrency.maxInFlight === undefined) return run();
-		return this.runLimited(owner.sessionKey, concurrency.maxInFlight, run);
+		return this.schedule(owner.sessionKey, run);
 	}
 
 	executeLocal(
@@ -226,17 +262,31 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 		owner: SessionOwnerRecord,
 		request: StatefulOperationRequest,
 		signal: AbortSignal,
+		validateOwnership?: StatefulOwnershipValidator,
 	): Promise<StatefulSessionHealth> {
 		if (!this.#adapter.health) {
 			throw new Error(
 				`Stateful provider adapter "${this.#adapter.providerId}" has no health hook.`,
 			);
 		}
-		const session = await this.getOrCreate(owner, request, signal);
-		return this.#adapter.health(
-			makeStatefulProviderSessionContext(this.#adapter.providerId, owner, request, signal),
-			session.value,
-		);
+		return this.schedule(owner.sessionKey, async () => {
+			const session = await this.getOrCreate(owner, request, signal, validateOwnership);
+			const validatedOwner = await this.validatePooledOwnership(
+				owner,
+				request.sessionKey,
+				signal,
+				validateOwnership,
+			);
+			return this.#adapter.health?.(
+				makeStatefulProviderSessionContext(
+					this.#adapter.providerId,
+					validatedOwner,
+					request,
+					signal,
+				),
+				session.value,
+			) as Promise<StatefulSessionHealth>;
+		});
 	}
 
 	async reconcileWrite(
@@ -244,20 +294,34 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 		request: StatefulOperationRequest,
 		ledgerEntry: unknown,
 		signal: AbortSignal,
+		validateOwnership?: StatefulOwnershipValidator,
 	): Promise<StatefulWriteReconciliationResult<TSharedState>> {
 		if (!this.#adapter.reconcileWrite) {
 			throw new Error(
 				`Stateful provider adapter "${this.#adapter.providerId}" does not support write reconciliation.`,
 			);
 		}
-		const ctx = makeStatefulProviderSessionContext(
-			this.#adapter.providerId,
-			owner,
-			request,
-			signal,
-		);
-		const sharedState = this.#adapter.restore ? await this.#adapter.restore(ctx) : undefined;
-		return this.#adapter.reconcileWrite(ctx, ledgerEntry, sharedState);
+		return this.schedule(owner.sessionKey, async () => {
+			const restoreCtx = makeStatefulProviderSessionContext(
+				this.#adapter.providerId,
+				owner,
+				request,
+				signal,
+			);
+			const sharedState = this.#adapter.restore
+				? await this.#adapter.restore(restoreCtx)
+				: undefined;
+			const validatedOwner = validateOwnership ? await validateOwnership(owner, signal) : owner;
+			const ctx = makeStatefulProviderSessionContext(
+				this.#adapter.providerId,
+				validatedOwner,
+				request,
+				signal,
+			);
+			return this.#adapter.reconcileWrite?.(ctx, ledgerEntry, sharedState) as Promise<
+				StatefulWriteReconciliationResult<TSharedState>
+			>;
+		});
 	}
 
 	closeAll(reason: string): Promise<void> {
@@ -268,11 +332,12 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 		owner: SessionOwnerRecord,
 		request: StatefulOperationRequest,
 		signal: AbortSignal,
+		validateOwnership?: StatefulOwnershipValidator,
 	): Promise<ManagedSession<TSession>> {
 		return this.#pool.getOrCreate(
 			owner.sessionKey,
 			owner.generation,
-			() => this.connect(owner, request, signal),
+			() => this.connect(owner, request, signal, validateOwnership),
 			this.#clock(),
 			managedSessionIdentity(owner, request),
 		);
@@ -282,6 +347,7 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 		owner: SessionOwnerRecord,
 		request: StatefulOperationRequest,
 		signal: AbortSignal,
+		validateOwnership?: StatefulOwnershipValidator,
 	): Promise<TSession> {
 		const ctx = makeStatefulProviderSessionContext(
 			this.#adapter.providerId,
@@ -289,29 +355,76 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 			request,
 			signal,
 		);
-		const sharedState = this.#adapter.restore ? await this.#adapter.restore(ctx) : undefined;
-		const session = await this.#adapter.connect(ctx, sharedState);
-		if (!this.#adapter.subscribe || !this.#eventPublisher) return session;
+		let session: TSession | undefined;
+		let connected = false;
 		try {
-			const disposer = await this.#adapter.subscribe(ctx, session, this.#eventPublisher);
+			const sharedState = this.#adapter.restore ? await this.#adapter.restore(ctx) : undefined;
+			session = await this.#adapter.connect(ctx, sharedState);
+			connected = true;
+			const validatedOwner = validateOwnership ? await validateOwnership(owner, signal) : owner;
+			const validatedCtx = makeStatefulProviderSessionContext(
+				this.#adapter.providerId,
+				validatedOwner,
+				request,
+				signal,
+			);
+			this.refreshEventOwnerFence(validatedOwner, request.sessionKey);
+			if (!this.#adapter.subscribe || !this.#eventPublisher) return session;
+			const identityKey = sessionIdentityKey(owner.sessionKey, owner.generation);
+			const disposer = await this.#adapter.subscribe(validatedCtx, session, (event) => {
+				const ownerFence = this.#eventOwnerFences.get(identityKey);
+				if (!ownerFence) return;
+				this.#eventPublisher?.publish(event, { ownerFence });
+			});
 			if (typeof disposer !== "function") {
 				throw new Error(
 					`Stateful provider adapter "${this.#adapter.providerId}" subscribe hook must return a disposer.`,
 				);
 			}
-			this.#eventDisposers.set(sessionIdentityKey(owner.sessionKey, owner.generation), disposer);
+			this.#eventDisposers.set(identityKey, disposer);
 			return session;
 		} catch (error) {
-			try {
-				await this.#adapter.close(ctx, session, "event-subscription-failed");
-			} catch (closeError) {
-				throw new AggregateError(
-					[error, closeError],
-					"Stateful event subscription and session cleanup both failed.",
-				);
+			this.#eventOwnerFences.delete(sessionIdentityKey(owner.sessionKey, owner.generation));
+			let establishmentError = error;
+			if (connected) {
+				try {
+					await this.#adapter.close(ctx, session as TSession, "session-establishment-failed");
+				} catch (closeError) {
+					establishmentError = new AggregateError(
+						[error, closeError],
+						"Stateful session establishment and cleanup both failed.",
+					);
+				}
 			}
-			throw error;
+			throw markStatefulSessionEstablishmentFailure(establishmentError);
 		}
+	}
+
+	private async validatePooledOwnership(
+		owner: SessionOwnerRecord,
+		sessionKey: SessionKey,
+		signal: AbortSignal,
+		validateOwnership?: StatefulOwnershipValidator,
+	): Promise<SessionOwnerRecord> {
+		try {
+			const validatedOwner = validateOwnership ? await validateOwnership(owner, signal) : owner;
+			this.refreshEventOwnerFence(validatedOwner, sessionKey);
+			return validatedOwner;
+		} catch (error) {
+			await this.#pool
+				.invalidate(owner.sessionKey, "ownership-validation-failed")
+				.catch(() => undefined);
+			throw markStatefulSessionEstablishmentFailure(error);
+		}
+	}
+
+	private refreshEventOwnerFence(owner: SessionOwnerRecord, sessionKey: SessionKey): void {
+		this.#eventOwnerFences.set(sessionIdentityKey(owner.sessionKey, owner.generation), {
+			sessionKey,
+			generation: owner.generation,
+			ownerPodId: owner.ownerPodId,
+			ownerEndpoint: owner.ownerEndpoint,
+		});
 	}
 
 	private async closeManagedSession(
@@ -323,6 +436,7 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 		const disposerKey = sessionIdentityKey(session.sessionKey, session.generation);
 		const disposer = this.#eventDisposers.get(disposerKey);
 		this.#eventDisposers.delete(disposerKey);
+		this.#eventOwnerFences.delete(disposerKey);
 		if (disposer) {
 			try {
 				await disposer();
@@ -382,6 +496,13 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown, TE
 				this.#parallelLimiters.delete(sessionKey);
 			}
 		}
+	}
+
+	private schedule<R>(sessionKey: string, run: () => Promise<R>): Promise<R> {
+		const concurrency = this.#adapter.policy.concurrency;
+		if (concurrency.mode === "serialize") return this.#pool.runExclusive(sessionKey, run);
+		if (concurrency.maxInFlight === undefined) return run();
+		return this.runLimited(sessionKey, concurrency.maxInFlight, run);
 	}
 }
 

@@ -55,13 +55,13 @@ import { createStealthClient } from "../runtime/stealth.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import { createTraceContext } from "../runtime/trace.js";
 import { parseSchema } from "../schema.js";
-import { getStealthProfile } from "../stealth/profiles.js";
 import {
 	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
 	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
 	STATEFUL_TIMESTAMP_HEADER as STATEFUL_FORWARDING_TIMESTAMP_HEADER,
 	verifyStatefulRequestSignature,
 } from "../stateful-signing.js";
+import { getStealthProfile } from "../stealth/profiles.js";
 import {
 	APIFUSE_STREAM_DONE_EVENT,
 	APIFUSE_STREAM_ERROR_EVENT,
@@ -97,8 +97,8 @@ import {
 	AuthFlowRequestSchema,
 	type AuthFlowResponse,
 	type AuthFlowSuccessResponse,
-	type OperationErrorResponse,
 	OperationConnectionSchema,
+	type OperationErrorResponse,
 	type OperationRequest,
 	OperationRequestSchema,
 	type OperationResponse,
@@ -113,6 +113,10 @@ const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
 const STATEFUL_FORWARDING_SOURCE_POD_HEADER = "x-apifuse-stateful-source-pod";
 const DEFAULT_STATEFUL_FORWARDING_MAX_SKEW_MS = 5 * 60_000;
 const DEFAULT_STATEFUL_FORWARDING_REPLAY_CACHE_MAX_ENTRIES = 10_000;
+const STATEFUL_FORWARDING_REPLAY_BUCKET_MS = 10_000;
+const STATEFUL_FORWARDING_REPLAY_RETRY_AFTER_SECONDS = Math.ceil(
+	STATEFUL_FORWARDING_REPLAY_BUCKET_MS / 1_000,
+);
 
 export const ProviderServerStatefulForwardEnvelopeSchema = z
 	.object({
@@ -126,6 +130,10 @@ export const ProviderServerStatefulForwardEnvelopeSchema = z
 		generation: z.number().int().positive(),
 		sourcePodId: z.string().min(1),
 		forwardedAt: z.string().refine((value) => Number.isFinite(Date.parse(value))),
+		deadlineAt: z
+			.string()
+			.refine((value) => Number.isFinite(Date.parse(value)))
+			.optional(),
 		idempotencyKey: z.string().min(1).optional(),
 		operationRequest: OperationRequestSchema.extend({
 			connection: OperationConnectionSchema.strict().optional(),
@@ -160,7 +168,7 @@ export type ProviderServerOperationExecutorInput = {
 	readonly provider: ProviderDefinition;
 	readonly operationId: string;
 	readonly ctx: ProviderContext;
-	readonly request: OperationRequest;
+	readonly request: OperationRequest & { readonly deadlineAt?: string };
 	readonly signal?: AbortSignal;
 	readonly internalStatefulForward?: ProviderServerStatefulForwardEnvelope;
 };
@@ -786,6 +794,7 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 				return 502;
 			case "STT_UNAVAILABLE":
 			case "UNSUPPORTED_STT_BACKEND":
+			case "STATEFUL_FORWARDING_REPLAY_CACHE_FULL":
 				return 503;
 		}
 
@@ -1429,17 +1438,45 @@ async function handleAuthFlow(
 
 class StatefulForwardingReplayCache {
 	readonly #nonces = new Map<string, number>();
+	readonly #expiryBuckets = new Map<number, Set<string>>();
+	#nextExpiryBucket?: number;
+	#latestExpiryBucket?: number;
 
 	constructor(private readonly maxEntries: number) {}
 
 	claim(nonce: string, expiresAtMs: number, nowMs: number): "accepted" | "replayed" | "full" {
-		for (const [cachedNonce, expiry] of this.#nonces) {
-			if (expiry < nowMs) this.#nonces.delete(cachedNonce);
-		}
+		this.dropExpiredBuckets(nowMs);
 		if (this.#nonces.has(nonce)) return "replayed";
 		if (this.#nonces.size >= this.maxEntries) return "full";
-		this.#nonces.set(nonce, expiresAtMs);
+		const expiryBucket =
+			Math.ceil(expiresAtMs / STATEFUL_FORWARDING_REPLAY_BUCKET_MS) *
+			STATEFUL_FORWARDING_REPLAY_BUCKET_MS;
+		this.#nonces.set(nonce, expiryBucket);
+		const bucket = this.#expiryBuckets.get(expiryBucket) ?? new Set<string>();
+		bucket.add(nonce);
+		this.#expiryBuckets.set(expiryBucket, bucket);
+		this.#nextExpiryBucket = Math.min(this.#nextExpiryBucket ?? expiryBucket, expiryBucket);
+		this.#latestExpiryBucket = Math.max(this.#latestExpiryBucket ?? expiryBucket, expiryBucket);
 		return "accepted";
+	}
+
+	private dropExpiredBuckets(nowMs: number): void {
+		if (this.#nextExpiryBucket === undefined || this.#latestExpiryBucket === undefined) return;
+		if (nowMs >= this.#latestExpiryBucket) {
+			this.#nonces.clear();
+			this.#expiryBuckets.clear();
+			this.#nextExpiryBucket = undefined;
+			this.#latestExpiryBucket = undefined;
+			return;
+		}
+		while (this.#nextExpiryBucket <= nowMs) {
+			const bucket = this.#expiryBuckets.get(this.#nextExpiryBucket);
+			if (bucket) {
+				for (const cachedNonce of bucket) this.#nonces.delete(cachedNonce);
+				this.#expiryBuckets.delete(this.#nextExpiryBucket);
+			}
+			this.#nextExpiryBucket += STATEFUL_FORWARDING_REPLAY_BUCKET_MS;
+		}
 	}
 }
 
@@ -1508,8 +1545,11 @@ function verifyStatefulForwardingRequest(input: {
 
 function operationRequestFromForwardingEnvelope(
 	envelope: ProviderServerStatefulForwardEnvelope,
-): OperationRequest {
-	return envelope.operationRequest;
+): OperationRequest & { readonly deadlineAt?: string } {
+	return {
+		...envelope.operationRequest,
+		...(envelope.deadlineAt !== undefined ? { deadlineAt: envelope.deadlineAt } : {}),
+	};
 }
 
 function parseStatefulForwardingEnvelope(rawBody: unknown): ProviderServerStatefulForwardEnvelope {
@@ -1673,6 +1713,9 @@ export function createServerApp(
 			return c.json({ data: output });
 		} catch (error) {
 			const status = toStatusCode(error);
+			if (isProviderError(error) && error.code === "STATEFUL_FORWARDING_REPLAY_CACHE_FULL") {
+				c.header("Retry-After", String(STATEFUL_FORWARDING_REPLAY_RETRY_AFTER_SECONDS));
+			}
 			const requestId = extractRequestId(rawBody);
 			logProviderError(
 				logger,
@@ -2031,6 +2074,19 @@ export interface ServeOptions extends ProviderServerOptions {
 const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
 const DEFAULT_SHUTDOWN_SIGNALS: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
 
+type SignalServerRegistration = {
+	readonly signals: ReadonlySet<NodeJS.Signals>;
+	readonly close: () => Promise<void>;
+};
+
+type ProcessSignalCoordinator = {
+	readonly registrations: Set<SignalServerRegistration>;
+	readonly listener: () => void;
+	handling: boolean;
+};
+
+const processSignalCoordinators = new Map<NodeJS.Signals, ProcessSignalCoordinator>();
+
 export async function serve(
 	provider: ProviderDefinition,
 	options: ServeOptions = {},
@@ -2058,41 +2114,43 @@ export async function serve(
 		statefulForwarding: options.statefulForwarding,
 	});
 
-	const server = bunRuntime.serve({
-		port: options.port ?? DEFAULT_PORT,
-		hostname: options.host ?? DEFAULT_HOST,
-		fetch: app.fetch,
-	});
-
-	// Internal self-test listener (health dependency inversion): a SEPARATE
-	// socket the tenant-facing gateway never dials. Off by default — it only
-	// starts when the shared self-test master secret env is present.
-	const servers = [server];
-	const selfTestSecrets = resolveSelfTestMasterSecrets();
-	if (selfTestSecrets) {
-		const selfTestApp = createSelfTestApp(provider, {
-			secrets: selfTestSecrets,
-			invoke: createSelfTestInvoke(app),
-			authFlow: createSelfTestAuthFlowInvoke(app),
-		});
+	const servers: BunServerHandle[] = [];
+	try {
 		servers.push(
 			bunRuntime.serve({
-				port: options.selfTestPort ?? resolveSelfTestPort(),
+				port: options.port ?? DEFAULT_PORT,
 				hostname: options.host ?? DEFAULT_HOST,
-				fetch: selfTestApp.fetch,
+				fetch: app.fetch,
 			}),
 		);
+
+		// Internal self-test listener (health dependency inversion): a SEPARATE
+		// socket the tenant-facing gateway never dials. Off by default — it only
+		// starts when the shared self-test master secret env is present.
+		const selfTestSecrets = resolveSelfTestMasterSecrets();
+		if (selfTestSecrets) {
+			const selfTestApp = createSelfTestApp(provider, {
+				secrets: selfTestSecrets,
+				invoke: createSelfTestInvoke(app),
+				authFlow: createSelfTestAuthFlowInvoke(app),
+			});
+			servers.push(
+				bunRuntime.serve({
+					port: options.selfTestPort ?? resolveSelfTestPort(),
+					hostname: options.host ?? DEFAULT_HOST,
+					fetch: selfTestApp.fetch,
+				}),
+			);
+		}
+	} catch (error) {
+		await Promise.allSettled(servers.map((startedServer) => startedServer.stop(true)));
+		throw error;
 	}
 
-	const signalListeners = new Map<NodeJS.Signals, () => void>();
+	const server = servers[0];
+	if (!server) throw new Error("Provider server failed to create its primary listener.");
 	let closePromise: Promise<void> | undefined;
-
-	const removeSignalListeners = () => {
-		for (const [signal, listener] of signalListeners) {
-			process.removeListener(signal, listener);
-		}
-		signalListeners.clear();
-	};
+	let unregisterSignals = () => {};
 
 	const close = (closeOptions: ProviderServerCloseOptions = {}): Promise<void> => {
 		if (closePromise) return closePromise;
@@ -2103,26 +2161,86 @@ export async function serve(
 			timeoutMs,
 			logger,
 			providerId: provider.id,
-		}).finally(removeSignalListeners);
+		}).finally(() => unregisterSignals());
 		return closePromise;
 	};
 
-	for (const signal of configuredSignals) {
-		const listener = () => {
-			removeSignalListeners();
-			void close({ timeoutMs: configuredTimeoutMs }).finally(() => {
-				try {
-					process.kill(process.pid, signal);
-				} catch {
-					process.exitCode = 1;
-				}
-			});
-		};
-		signalListeners.set(signal, listener);
-		process.once(signal, listener);
+	try {
+		unregisterSignals = registerForProcessSignals(configuredSignals, () =>
+			close({ timeoutMs: configuredTimeoutMs }),
+		);
+	} catch (error) {
+		unregisterSignals();
+		await Promise.allSettled(servers.map((startedServer) => startedServer.stop(true)));
+		throw error;
 	}
 
 	return { port: server.port, close };
+}
+
+function registerForProcessSignals(
+	signals: NodeJS.Signals[],
+	close: () => Promise<void>,
+): () => void {
+	if (signals.length === 0) return () => {};
+	const registration: SignalServerRegistration = {
+		signals: new Set(signals),
+		close,
+	};
+	let registered = true;
+	const unregister = () => {
+		if (!registered) return;
+		registered = false;
+		for (const signal of registration.signals) {
+			const coordinator = processSignalCoordinators.get(signal);
+			if (!coordinator) continue;
+			coordinator.registrations.delete(registration);
+			if (coordinator.registrations.size === 0 && !coordinator.handling) {
+				process.removeListener(signal, coordinator.listener);
+				processSignalCoordinators.delete(signal);
+			}
+		}
+	};
+	try {
+		for (const signal of signals) {
+			let coordinator = processSignalCoordinators.get(signal);
+			if (!coordinator) {
+				const created: ProcessSignalCoordinator = {
+					registrations: new Set(),
+					handling: false,
+					listener: () => handleCoordinatedSignal(signal, created),
+				};
+				coordinator = created;
+				processSignalCoordinators.set(signal, coordinator);
+				process.on(signal, coordinator.listener);
+			}
+			coordinator.registrations.add(registration);
+		}
+	} catch (error) {
+		unregister();
+		throw error;
+	}
+	return unregister;
+}
+
+function handleCoordinatedSignal(
+	signal: NodeJS.Signals,
+	coordinator: ProcessSignalCoordinator,
+): void {
+	if (coordinator.handling) return;
+	coordinator.handling = true;
+	const registrations = [...coordinator.registrations];
+	void Promise.allSettled(registrations.map((registration) => registration.close())).finally(() => {
+		if (processSignalCoordinators.get(signal) === coordinator) {
+			process.removeListener(signal, coordinator.listener);
+			processSignalCoordinators.delete(signal);
+		}
+		try {
+			process.kill(process.pid, signal);
+		} catch {
+			process.exitCode = 1;
+		}
+	});
 }
 
 async function closeProviderServers(input: {

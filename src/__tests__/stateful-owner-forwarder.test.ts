@@ -79,4 +79,24 @@ describe("HttpStatefulOwnerForwarder transport failures", () => {
 		expect(error.code).toBe("STATEFUL_FORWARDING_REQUEST_FAILED");
 		expect(error.cause).toBeInstanceOf(TypeError);
 	});
+
+	it("propagates the operation deadline into the signed forwarding envelope", async () => {
+		let envelope: Record<string, unknown> | undefined;
+		const deadlineAt = "2026-08-01T00:00:15.000Z";
+		const forwarder = new HttpStatefulOwnerForwarder({
+			currentPodId: "pod-source",
+			secret: "secret",
+			fetch: async (_url, init) => {
+				envelope = JSON.parse(String(init?.body));
+				return Response.json({ data: { forwarded: true } });
+			},
+		});
+
+		await forwarder.forward(
+			owner("http://pod-owner"),
+			{ ...request, deadlineAt },
+			new AbortController().signal,
+		);
+		expect(envelope?.deadlineAt).toBe(deadlineAt);
+	});
 });

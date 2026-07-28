@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
 import { statefulSignedHeaders } from "../../dist/stateful/index.js";
@@ -166,7 +166,8 @@ describe("signed stateful operation forwarding", () => {
 			},
 		});
 		const timestamp = new Date().toISOString();
-		const body = forwardingBody({ forwardedAt: timestamp });
+		const deadlineAt = new Date(Date.now() + 30_000).toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp, deadlineAt });
 
 		const response = await app.request(STATEFUL_ROUTE, {
 			method: "POST",
@@ -183,6 +184,7 @@ describe("signed stateful operation forwarding", () => {
 			requestId: "req-stateful-forward",
 			input: { value: "forwarded" },
 			headers: { "x-request-source": "forwarder" },
+			deadlineAt,
 		});
 		expect(received?.internalStatefulForward).toEqual(JSON.parse(body));
 		expect(received?.signal).toBeInstanceOf(AbortSignal);
@@ -338,6 +340,69 @@ describe("signed stateful operation forwarding", () => {
 		expect(executions).toBe(1);
 	});
 
+	it("returns 503 with Retry-After when the replay cache is full", async () => {
+		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+			logger: () => {},
+			statefulForwarding: forwardingConfig({ replayCacheMaxEntries: 1 }),
+			internalOperationExecutor: async () => ({ accepted: true }),
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp });
+		const first = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body, { nonce: "capacity-one" }),
+			body,
+		});
+		expect(first.status).toBe(200);
+		const full = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body, { nonce: "capacity-two" }),
+			body,
+		});
+		expect(full.status).toBe(503);
+		expect(full.headers.get("retry-after")).toBe("10");
+		expect((await full.json()).error.code).toBe("STATEFUL_FORWARDING_REPLAY_CACHE_FULL");
+	});
+
+	it("drops expired replay buckets and recovers capacity", async () => {
+		let nowMs = 1_800_000_000_000;
+		const dateNow = spyOn(Date, "now").mockImplementation(() => nowMs);
+		try {
+			const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+				logger: () => {},
+				statefulForwarding: forwardingConfig({ replayCacheMaxEntries: 1, maxSkewMs: 1_000 }),
+				internalOperationExecutor: async () => ({ accepted: true }),
+			});
+			const firstTimestamp = new Date(nowMs).toISOString();
+			const firstBody = forwardingBody({ forwardedAt: firstTimestamp });
+			expect(
+				(
+					await app.request(STATEFUL_ROUTE, {
+						method: "POST",
+						headers: signedHeaders(FORWARDING_SECRET, firstTimestamp, firstBody, {
+							nonce: "expiring-one",
+						}),
+						body: firstBody,
+					})
+				).status,
+			).toBe(200);
+
+			nowMs += 20_000;
+			const secondTimestamp = new Date(nowMs).toISOString();
+			const secondBody = forwardingBody({ forwardedAt: secondTimestamp });
+			const recovered = await app.request(STATEFUL_ROUTE, {
+				method: "POST",
+				headers: signedHeaders(FORWARDING_SECRET, secondTimestamp, secondBody, {
+					nonce: "expiring-two",
+				}),
+				body: secondBody,
+			});
+			expect(recovered.status).toBe(200);
+		} finally {
+			dateNow.mockRestore();
+		}
+	});
+
 	it("binds signatures to the HTTP method and route", async () => {
 		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
 			logger: () => {},
@@ -409,6 +474,23 @@ describe("signed stateful operation forwarding", () => {
 		expect(unknownField.status).toBe(400);
 		expect((await unknownField.json()).error.code).toBe("STATEFUL_FORWARDING_ENVELOPE_INVALID");
 		expect(executions).toBe(0);
+	});
+
+	it("rejects a malformed forwarded deadline", async () => {
+		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+			logger: () => {},
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async () => ({ accepted: true }),
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp, deadlineAt: "not-an-iso-date" });
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+		expect(response.status).toBe(400);
+		expect((await response.json()).error.code).toBe("STATEFUL_FORWARDING_ENVELOPE_INVALID");
 	});
 
 	it("rejects a stale owner fence through the SDK-owned validation boundary", async () => {

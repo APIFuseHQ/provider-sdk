@@ -208,6 +208,7 @@ export class HttpSessionOwnerRegistry implements SessionOwnerRegistry {
 		body: unknown,
 		callerSignal?: AbortSignal,
 	): Promise<Response> {
+		callerSignal?.throwIfAborted();
 		const rawBody = JSON.stringify(body);
 		const timestamp = this.#clock().toISOString();
 		const path = `/v1/stateful/sessions/owners/${operation}`;

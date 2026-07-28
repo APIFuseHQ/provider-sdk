@@ -1,20 +1,18 @@
+import { z } from "zod";
 import {
 	type OperationConnection,
 	OperationErrorResponseSchema,
 	OperationSuccessResponseSchema,
 } from "../server/index.js";
-import { z } from "zod";
-
-import { signStatefulRequestBody, statefulSignedHeaders } from "../stateful-signing.js";
 import type { ProviderServerStatefulForwardEnvelope } from "../server/serve.js";
-
+import { signStatefulRequestBody, statefulSignedHeaders } from "../stateful-signing.js";
+import type { SessionKey } from "./session-key.js";
 import type {
 	StatefulOperationRequest,
 	StatefulOperationResult,
 	StatefulOwnerForwarder,
 } from "./stateful-provider-session-routing.js";
 import { forwardingContextFromStatefulRuntimeContext } from "./stateful-provider-session-routing.js";
-import type { SessionKey } from "./session-key.js";
 import type {
 	SessionOwnerRecord,
 	SessionOwnerRegistry,
@@ -190,6 +188,7 @@ function buildForwardingEnvelope(input: {
 		connectionId: input.request.connectionId,
 		serviceAccountId: input.request.serviceAccountId,
 		...(input.request.idempotencyKey ? { idempotencyKey: input.request.idempotencyKey } : {}),
+		...(input.request.deadlineAt !== undefined ? { deadlineAt: input.request.deadlineAt } : {}),
 		sourcePodId: input.sourcePodId,
 		forwardedAt: input.forwardedAt,
 		ownerPodId: input.owner.ownerPodId,

@@ -1,6 +1,5 @@
-import { createHmac } from "node:crypto";
-
 import { describe, expect, it } from "bun:test";
+import { createHmac } from "node:crypto";
 
 import {
 	AmbiguousRegistryOperationError,
@@ -205,6 +204,41 @@ describe("HttpSessionOwnerRegistry", () => {
 			expect(error.ambiguous).toBe(true);
 			expect(error.message).toContain("resolve the session owner and reconcile");
 		}
+	});
+
+	it("keeps pre-dispatch caller aborts unambiguous but marks post-dispatch aborts ambiguous", async () => {
+		let fetchCalls = 0;
+		const registry = new HttpSessionOwnerRegistry({
+			baseUrl: "http://control-plane.invalid",
+			secret: SECRET,
+			fetch: async (_url, init) => {
+				fetchCalls += 1;
+				return await rejectWhenAborted(init?.signal ?? undefined);
+			},
+		});
+		const acquireInput = {
+			sessionKey: SESSION_KEY,
+			ownerPodId: "pod-a",
+			ownerEndpoint: "http://pod-a",
+			leaseDurationMs: 60_000,
+		};
+
+		const preDispatch = new AbortController();
+		const preDispatchReason = new Error("cancelled before dispatch");
+		preDispatch.abort(preDispatchReason);
+		const preDispatchError = await registry
+			.acquire(acquireInput, preDispatch.signal)
+			.catch((caught) => caught);
+		expect(preDispatchError).toBe(preDispatchReason);
+		expect(preDispatchError).not.toBeInstanceOf(AmbiguousRegistryOperationError);
+		expect(fetchCalls).toBe(0);
+
+		const postDispatch = new AbortController();
+		const acquiring = registry.acquire(acquireInput, postDispatch.signal);
+		await Promise.resolve();
+		expect(fetchCalls).toBe(1);
+		postDispatch.abort(new Error("cancelled after dispatch"));
+		await expect(acquiring).rejects.toBeInstanceOf(AmbiguousRegistryOperationError);
 	});
 });
 

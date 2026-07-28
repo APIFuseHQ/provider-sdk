@@ -112,6 +112,17 @@ type ManagedLease = {
 	timer?: ReturnType<typeof setTimeout>;
 };
 
+const STATEFUL_SESSION_ESTABLISHMENT_FAILURE = Symbol.for(
+	"@apifuse/provider-sdk/stateful/session-establishment-failure@1",
+);
+
+function isStatefulSessionEstablishmentFailure(error: unknown): boolean {
+	if ((typeof error !== "object" || error === null) && typeof error !== "function") return false;
+	return (
+		Object.getOwnPropertyDescriptor(error, STATEFUL_SESSION_ESTABLISHMENT_FAILURE)?.value === true
+	);
+}
+
 export class StatefulSessionRouter {
 	readonly #currentPod: StatefulOwnerPod;
 	readonly #registry: SessionOwnerRegistry;
@@ -224,12 +235,19 @@ export class StatefulSessionRouter {
 				"apifuse_stateful_provider_routing_local_total",
 				metricLabels(request, validatedOwner),
 			);
-			return this.#executor.executeLocal(
-				request,
-				validatedOwner,
-				deadlineSignal.signal,
-				(expected, signal) => this.validateLocalOwnership(request, expected, signal, true),
-			);
+			try {
+				return await this.#executor.executeLocal(
+					request,
+					validatedOwner,
+					deadlineSignal.signal,
+					(expected, signal) => this.validateLocalOwnership(request, expected, signal, true),
+				);
+			} catch (error) {
+				if (isStatefulSessionEstablishmentFailure(error)) {
+					await this.releaseFailedEstablishment(request.sessionKey, validatedOwner);
+				}
+				throw error;
+			}
 		}
 		this.forgetManagedLease(request.sessionKey);
 		this.#metricEmitter.increment(
@@ -325,6 +343,40 @@ export class StatefulSessionRouter {
 		if (!managed) return;
 		this.stopManagedLease(managed);
 		this.#managedLeases.delete(sessionKey);
+	}
+
+	private async releaseFailedEstablishment(
+		sessionKey: SessionKey,
+		owner: SessionOwnerRecord,
+	): Promise<void> {
+		const managed = this.#managedLeases.get(sessionKey);
+		if (
+			managed &&
+			managed.record.ownerPodId === owner.ownerPodId &&
+			managed.record.generation === owner.generation
+		) {
+			this.stopManagedLease(managed);
+			this.#managedLeases.delete(sessionKey);
+		}
+		try {
+			await this.#registry.release({
+				sessionKey,
+				ownerPodId: owner.ownerPodId,
+				generation: owner.generation,
+			});
+		} catch (error) {
+			try {
+				console.error(
+					JSON.stringify({
+						event: "stateful_session_establishment_lease_release_failed",
+						sessionKey: owner.sessionKey,
+						ownerPodId: owner.ownerPodId,
+						generation: owner.generation,
+						errorClass: error instanceof Error ? error.name : "UnknownError",
+					}),
+				);
+			} catch {}
+		}
 	}
 
 	private stopManagedLease(managed: ManagedLease): void {

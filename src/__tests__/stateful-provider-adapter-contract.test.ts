@@ -106,7 +106,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 				subscribe: async (ctx) => () => disposed.push(ctx.sessionKey),
 			}),
 			poolPolicy: { ...poolPolicy, maxSessions: 1 },
-			eventPublisher: async () => {},
+			eventPublisher: { publish: () => {} },
 		});
 		await manager.invoke(owner("session-a"), request("session-a"), new AbortController().signal);
 		await manager.invoke(owner("session-b"), request("session-b"), new AbortController().signal);
@@ -246,5 +246,86 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 
 		await expect(manager.closeAll("test")).rejects.toBeInstanceOf(AggregateError);
 		expect(closed).toEqual(["session-a", "session-b"]);
+	});
+
+	it("binds the authoritative owner fence to adapter events for each generation", async () => {
+		const fences = [];
+		const manager = new StatefulProviderSessionManager({
+			adapter: adapter({
+				subscribe: async (ctx, _session, publish) => {
+					await publish({ eventId: `event-${ctx.generation}` });
+					return () => {};
+				},
+			}),
+			poolPolicy,
+			eventPublisher: {
+				publish: (_event, options) => fences.push(options.ownerFence),
+			},
+		});
+
+		await manager.invoke(owner("session-a", 1), request(), new AbortController().signal);
+		await manager.invoke(owner("session-a", 2), request(), new AbortController().signal);
+
+		expect(fences).toEqual([
+			{
+				sessionKey: "session-a",
+				generation: 1,
+				ownerPodId: "pod-a",
+				ownerEndpoint: "http://pod-a",
+			},
+			{
+				sessionKey: "session-a",
+				generation: 2,
+				ownerPodId: "pod-a",
+				ownerEndpoint: "http://pod-a",
+			},
+		]);
+		await manager.closeAll("test");
+	});
+
+	it("serializes health checks behind invokes and applies ownership validation", async () => {
+		let releaseInvoke: (() => void) | undefined;
+		let markInvokeStarted: (() => void) | undefined;
+		const invokeStarted = new Promise<void>((resolve) => {
+			markInvokeStarted = resolve;
+		});
+		const invokeGate = new Promise<void>((resolve) => {
+			releaseInvoke = resolve;
+		});
+		let healthCalls = 0;
+		let validations = 0;
+		const manager = new StatefulProviderSessionManager({
+			adapter: adapter({
+				invoke: async () => {
+					markInvokeStarted?.();
+					await invokeGate;
+					return { output: "ok" };
+				},
+				health: async () => {
+					healthCalls += 1;
+					return { status: "ready" };
+				},
+			}),
+			poolPolicy,
+		});
+		const invoking = manager.invoke(owner(), request(), new AbortController().signal);
+		await invokeStarted;
+		const checking = manager.health(
+			owner(),
+			request(),
+			new AbortController().signal,
+			async (expected) => {
+				validations += 1;
+				return expected;
+			},
+		);
+		await Bun.sleep(5);
+		expect(healthCalls).toBe(0);
+		releaseInvoke?.();
+		await invoking;
+		expect(await checking).toEqual({ status: "ready" });
+		expect(healthCalls).toBe(1);
+		expect(validations).toBe(1);
+		await manager.closeAll("test");
 	});
 });

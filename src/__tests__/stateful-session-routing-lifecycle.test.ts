@@ -100,6 +100,64 @@ describe("StatefulSessionRouter deadlines", () => {
 });
 
 describe("StatefulSessionRouter lease lifecycle", () => {
+	it("releases a failed establishment lease, stops renewal, and permits generation+1 takeover", async () => {
+		const backing = new InMemorySessionOwnerRegistry();
+		let renewCalls = 0;
+		let releaseCalls = 0;
+		const registry = {
+			resolve: (...args) => backing.resolve(...args),
+			acquire: (...args) => backing.acquire(...args),
+			renew: (...args) => {
+				renewCalls += 1;
+				return backing.renew(...args);
+			},
+			release: (...args) => {
+				releaseCalls += 1;
+				return backing.release(...args);
+			},
+		};
+		const failedManager = new StatefulProviderSessionManager({
+			adapter: makeAdapter({
+				connect: async () => {
+					throw new Error("connect failed");
+				},
+			}),
+			poolPolicy: { maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
+		});
+		const failedRouter = new StatefulSessionRouter({
+			currentPod,
+			registry,
+			forwarder: unusedForwarder,
+			executor: failedManager,
+			leaseDurationMs: 60,
+			leaseRenewalFraction: 0.25,
+		});
+
+		await expect(failedRouter.route(request())).rejects.toThrow("connect failed");
+		expect(releaseCalls).toBe(1);
+		expect(await backing.resolve(sessionKey)).toBeNull();
+		const renewsAfterFailure = renewCalls;
+		await Bun.sleep(40);
+		expect(renewCalls).toBe(renewsAfterFailure);
+
+		let acquiredGeneration = 0;
+		const nextRouter = new StatefulSessionRouter({
+			currentPod: { podId: "pod-b", endpoint: "http://pod-b" },
+			registry,
+			forwarder: unusedForwarder,
+			executor: {
+				executeLocal: async (_request, owner) => {
+					acquiredGeneration = owner.generation;
+					return { output: "ok" };
+				},
+			},
+			leaseDurationMs: 1_000,
+		});
+		await nextRouter.route(request());
+		expect(acquiredGeneration).toBe(2);
+		await nextRouter.release();
+	});
+
 	it("renews held sessions, connects before marking connected, and stops on release", async () => {
 		const backing = new InMemorySessionOwnerRegistry();
 		let renewCalls = 0;
@@ -150,6 +208,9 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 	it("rejects ownership loss after connect without invoking the adapter", async () => {
 		const registry = new InMemorySessionOwnerRegistry();
 		let invokeCalls = 0;
+		let closeCalls = 0;
+		let subscribeCalls = 0;
+		let published = 0;
 		const adapter = makeAdapter({
 			connect: async () => {
 				await replaceOwner(registry, 1);
@@ -159,10 +220,23 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 				invokeCalls += 1;
 				return { output: "unexpected" };
 			},
+			subscribe: async (_ctx, _session, publish) => {
+				subscribeCalls += 1;
+				await publish({ eventId: "event-stale" });
+				return () => {};
+			},
+			close: async () => {
+				closeCalls += 1;
+			},
 		});
 		const manager = new StatefulProviderSessionManager({
 			adapter,
 			poolPolicy: { maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
+			eventPublisher: {
+				publish: () => {
+					published += 1;
+				},
+			},
 		});
 		const router = new StatefulSessionRouter({
 			currentPod,
@@ -174,7 +248,11 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 
 		await expect(router.route(request())).rejects.toBeInstanceOf(StatefulRoutingOwnershipError);
 		expect(invokeCalls).toBe(0);
+		expect(subscribeCalls).toBe(0);
+		expect(published).toBe(0);
+		expect(closeCalls).toBe(1);
 		await manager.closeAll("test-complete");
+		expect(closeCalls).toBe(1);
 	});
 
 	it("revalidates after reconnect and does not double-execute after ownership loss", async () => {
