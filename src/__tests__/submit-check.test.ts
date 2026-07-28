@@ -13,10 +13,12 @@ import { dirname, join } from "node:path";
 import {
 	buildSubmitCheckReport,
 	extractStringLiteralCandidates,
+	hasNonEmptyRecordedFixture,
 	isAutoPromotionEligible,
 	renderMarkdown,
 	type SubmitCheckReport,
 } from "../../bin/apifuse-submit-check.js";
+import { hasSubstantiveDelimitedTextStructure } from "../../bin/submit-check-delimited-text.js";
 import { syncPromptAssets } from "../cli/prompt-assets.js";
 
 const tempDirs: string[] = [];
@@ -959,6 +961,60 @@ ${assertionLines(21)}
 
 		expect(check?.status).toBe("pass");
 	});
+
+	it("accepts a top-level recorded Cabinet Office-shaped Japanese CSV payload", async () => {
+		const rawCsv = [
+			"国民の祝日・休日月日,国民の祝日・休日名称",
+			"2026/1/1,元日",
+			"2026/1/12,成人の日",
+			"2026/2/11,建国記念の日",
+			"2026/2/23,天皇誕生日",
+			"2026/3/20,春分の日",
+			"2026/4/29,昭和の日",
+			"2026/5/3,憲法記念日",
+			"2026/5/4,みどりの日",
+			"2026/5/5,こどもの日",
+			"2026/5/6,振替休日",
+			"2026/7/20,海の日",
+			"2026/8/11,山の日",
+			"2026/9/21,敬老の日",
+			"2026/9/22,国民の休日",
+			"2026/9/23,秋分の日",
+			"2026/10/12,スポーツの日",
+			"2026/11/3,文化の日",
+			"2026/11/23,勤労感謝の日",
+		].join("\r\n");
+
+		expect(hasSubstantiveDelimitedTextStructure(rawCsv)).toBeTrue();
+		expect(hasNonEmptyRecordedFixture(rawCsv)).toBeTrue();
+
+		const dir = makeProviderDir("submit-japanese-csv-raw-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "__fixtures__", "raw.json"), JSON.stringify(rawCsv));
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "fixture-provenance");
+
+		expect(check?.status).toBe("pass");
+		expect(report.score.verdict).not.toBe("blocked");
+	});
+
+	for (const [caseName, rawText] of [
+		["short delimited text", "date,name\n2026/1/1,元日\n2026/1/12,成人の日"],
+		[
+			"multi-line prose",
+			[
+				"This is a long prose paragraph describing an upstream service without tabular fields.",
+				"It continues on another line and intentionally contains enough detail to cross the length floor.",
+				"A final sentence confirms that ordinary explanatory text is not recorded delimited evidence.",
+			].join("\n"),
+		],
+		["single-line delimited text", "date,name,".repeat(30)],
+	] as const) {
+		it(`blocks ${caseName} as recorded fixture provenance`, () => {
+			expect(hasSubstantiveDelimitedTextStructure(rawText)).toBeFalse();
+			expect(hasNonEmptyRecordedFixture(rawText)).toBeFalse();
+		});
+	}
 
 	it("passes the real EV root-operation raw XML fixture shape", async () => {
 		const dir = makeProviderDir("submit-ev-xml-raw-", validProviderSource());

@@ -42,7 +42,7 @@ Calls a real upstream-backed operation through ctx.http or ctx.stealth and write
 Options:
   --operation, -o <name>   operation to call
   --params, -p <json>      JSON input passed to the operation (default: {})
-  --append                 append to an existing array fixture
+  --append                 preserve the existing fixture and append this capture
   --sanitize               redact common token/header fields (default)
   --no-sanitize            write the captured upstream payload as-is
   --help, -h               show this help
@@ -462,7 +462,7 @@ function isSensitiveKey(key: string): boolean {
 	return /authorization|token|api[-_]?key/i.test(key);
 }
 
-async function prepareFixturePayload(
+export async function prepareFixturePayload(
 	fixturePath: string,
 	payload: unknown,
 	append: boolean,
@@ -471,15 +471,34 @@ async function prepareFixturePayload(
 		return payload;
 	}
 
+	let fixtureSource: string;
 	try {
-		const existing = JSON.parse(readFileSync(fixturePath, "utf8")) as unknown;
-		if (Array.isArray(existing)) {
-			return [...existing, payload];
-		}
-	} catch {
-		// Fall through to overwrite with the new payload.
+		fixtureSource = readFileSync(fixturePath, "utf8");
+	} catch (error) {
+		throw new Error(
+			`Cannot append to existing fixture "${fixturePath}" because it could not be read: ${
+				error instanceof Error ? error.message : String(error)
+			}. Fix its permissions or delete it, then run apifuse record --append again.`,
+		);
 	}
 
+	let existing: unknown;
+	try {
+		existing = JSON.parse(fixtureSource) as unknown;
+	} catch (error) {
+		throw new Error(
+			`Cannot append to corrupt fixture "${fixturePath}" because it is not valid JSON: ${
+				error instanceof Error ? error.message : String(error)
+			}. Fix or delete the fixture, then run apifuse record --append again.`,
+		);
+	}
+
+	if (Array.isArray(existing)) {
+		return [...existing, payload];
+	}
+	if (existing !== null) {
+		return [existing, payload];
+	}
 	return payload;
 }
 
@@ -491,4 +510,6 @@ function formatBytes(bytes: number): string {
 	return `${(bytes / 1024).toFixed(1)} KB`;
 }
 
-await main();
+if (import.meta.main) {
+	await main();
+}
