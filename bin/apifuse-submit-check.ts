@@ -15,15 +15,15 @@ import {
 	formatPromptAssetIssues,
 	verifyPromptAssets,
 } from "../src/cli/prompt-assets.js";
-import type { ProviderDefinition } from "../src/index.js";
 import {
 	loadProviderLocaleCatalogs,
 	type ProviderLocale,
 	validateProviderLocaleCatalogs,
 } from "../src/i18n/index.js";
-import { APIFUSE_DESCRIPTION_KEY_META_KEY } from "../src/schema.js";
-import { safeParseSchemaSync } from "../src/schema.js";
+import type { ProviderDefinition } from "../src/index.js";
+import { APIFUSE_DESCRIPTION_KEY_META_KEY, safeParseSchemaSync } from "../src/schema.js";
 import { type CheckResult, PROMPT_ASSETS_CHECK_MESSAGE, runChecks } from "./apifuse-check.js";
+import { hasSubstantiveDelimitedTextStructure } from "./submit-check-delimited-text.js";
 import { hasSubstantiveXmlStructure } from "./submit-check-xml.js";
 
 const TIERS = ["bronze", "silver", "gold", "diamond"] as const;
@@ -2217,7 +2217,7 @@ function scoreFixtureProvenance(providerRoot: string, provider: ProviderDefiniti
 	);
 }
 
-function hasNonEmptyRecordedFixture(value: unknown): boolean {
+export function hasNonEmptyRecordedFixture(value: unknown): boolean {
 	return recordedFixtureStats(value, 0).hasNestedSubstance;
 }
 
@@ -2259,10 +2259,14 @@ function recordedFixtureStats(
 		if (value.length === 0) {
 			return { hasNestedSubstance: false, leafValues: 0 };
 		}
-		// A recorded operation value may be a raw XML success payload; treat a
-		// substantive, well-formed one as nested evidence while still counting the
-		// string as a leaf so existing JSON provenance heuristics are unchanged.
-		return { hasNestedSubstance: hasSubstantiveXmlStructure(value), leafValues: 1 };
+		// A recorded operation value may be a raw XML or delimited-text success
+		// payload. Treat a substantive one as nested evidence while still counting
+		// the string as a leaf so existing JSON provenance heuristics are unchanged.
+		return {
+			hasNestedSubstance:
+				hasSubstantiveXmlStructure(value) || hasSubstantiveDelimitedTextStructure(value),
+			leafValues: 1,
+		};
 	}
 	return { hasNestedSubstance: false, leafValues: 1 };
 }
