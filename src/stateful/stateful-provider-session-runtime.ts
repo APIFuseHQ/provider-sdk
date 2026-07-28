@@ -92,8 +92,8 @@ export interface ManagedSession<T> {
 type SessionFactory<T> = () => T | Promise<T>;
 type SessionCloseHook<T> = (session: ManagedSession<T>, reason: string) => void | Promise<void>;
 export class InMemorySessionOwnerRegistry implements SessionOwnerRegistry {
-	readonly #owners = new Map<StatefulProviderSessionKey, SessionOwnerRecord>();
-	readonly #generationHighWater = new Map<StatefulProviderSessionKey, number>();
+	readonly #owners = new Map<SessionKey, SessionOwnerRecord>();
+	readonly #generationHighWater = new Map<SessionKey, number>();
 
 	async resolve(
 		sessionKey: SessionKey,

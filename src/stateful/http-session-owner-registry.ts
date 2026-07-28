@@ -10,7 +10,6 @@ import type {
 	RenewSessionOwnerInput,
 	SessionOwnerRecord,
 	SessionOwnerRegistry,
-	StatefulProviderSessionKey,
 } from "./stateful-provider-session-runtime.js";
 
 type FetchTransport = (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
@@ -143,7 +142,7 @@ export class HttpSessionOwnerRegistry implements SessionOwnerRegistry {
 	}
 
 	async resolve(
-		sessionKey: StatefulProviderSessionKey,
+		sessionKey: SessionKey,
 		now?: Date,
 		signal?: AbortSignal,
 	): Promise<HttpSessionOwnerRecord | null> {
