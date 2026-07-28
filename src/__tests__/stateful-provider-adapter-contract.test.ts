@@ -248,6 +248,68 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 		expect(closed).toEqual(["session-a", "session-b"]);
 	});
 
+	it("waits for a slow subscription, disposes it, and suppresses events after closeAll", async () => {
+		let releaseSubscribe: (() => void) | undefined;
+		let markSubscribeStarted: (() => void) | undefined;
+		const subscribeStarted = new Promise<void>((resolve) => {
+			markSubscribeStarted = resolve;
+		});
+		const subscribeGate = new Promise<void>((resolve) => {
+			releaseSubscribe = resolve;
+		});
+		let publishFromSubscription: ((event: unknown) => void | Promise<void>) | undefined;
+		let publishes = 0;
+		let publishesAfterClose = 0;
+		let closeResolved = false;
+		let disposers = 0;
+		let closes = 0;
+		const manager = new StatefulProviderSessionManager({
+			adapter: adapter({
+				subscribe: async (_ctx, _session, publish) => {
+					publishFromSubscription = publish;
+					markSubscribeStarted?.();
+					await subscribeGate;
+					await publish({ eventId: "during-shutdown" });
+					return () => {
+						disposers += 1;
+					};
+				},
+				close: async () => {
+					closes += 1;
+				},
+			}),
+			poolPolicy,
+			eventPublisher: {
+				publish: () => {
+					publishes += 1;
+					if (closeResolved) publishesAfterClose += 1;
+				},
+			},
+		});
+		const invoking = manager.invoke(owner(), request(), new AbortController().signal);
+		await subscribeStarted;
+		const closing = manager.closeAll("shutdown").then(() => {
+			closeResolved = true;
+		});
+
+		await Bun.sleep(5);
+		expect(closeResolved).toBe(false);
+		releaseSubscribe?.();
+		await expect(invoking).rejects.toThrow("pool is closed; cannot get or create session");
+		await closing;
+		await publishFromSubscription?.({ eventId: "after-shutdown" });
+
+		expect({ closes, disposers, publishes, publishesAfterClose }).toEqual({
+			closes: 1,
+			disposers: 1,
+			publishes: 1,
+			publishesAfterClose: 0,
+		});
+		await expect(
+			manager.invoke(owner(), request(), new AbortController().signal),
+		).rejects.toThrow("pool is closed; cannot get or create session");
+	});
+
 	it("binds the authoritative owner fence to adapter events for each generation", async () => {
 		const fences = [];
 		const manager = new StatefulProviderSessionManager({

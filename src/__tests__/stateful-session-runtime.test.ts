@@ -166,6 +166,45 @@ describe("InMemorySessionOwnerRegistry", () => {
 });
 
 describe("PodLocalSessionPool", () => {
+	it("drains an in-flight creation and rejects creation after closeAll starts", async () => {
+		const closed: Array<{ key: string; reason: string }> = [];
+		let releaseFactory: ((value: string) => void) | undefined;
+		let markFactoryStarted: (() => void) | undefined;
+		const factoryStarted = new Promise<void>((resolve) => {
+			markFactoryStarted = resolve;
+		});
+		const factoryGate = new Promise<string>((resolve) => {
+			releaseFactory = resolve;
+		});
+		const pool = new PodLocalSessionPool<string>(
+			{ maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
+			(session, reason) => closed.push({ key: session.sessionKey, reason }),
+		);
+		const creating = pool.getOrCreate("slow", 1, async () => {
+			markFactoryStarted?.();
+			return factoryGate;
+		});
+		await factoryStarted;
+		let closeResolved = false;
+		const closing = pool.closeAll("shutdown").then(() => {
+			closeResolved = true;
+		});
+
+		await Bun.sleep(5);
+		expect(closeResolved).toBe(false);
+		await expect(pool.getOrCreate("new", 1, () => "new")).rejects.toThrow(
+			'pool is closed; cannot get or create session "new"',
+		);
+		releaseFactory?.("created");
+		await expect(creating).rejects.toThrow(
+			'pool is closed; cannot get or create session "slow"',
+		);
+		await closing;
+		expect(closed).toEqual([{ key: "slow", reason: "shutdown" }]);
+		await pool.invalidate("slow", "should-be-empty");
+		expect(closed).toHaveLength(1);
+	});
+
 	it("evicts the least recently used session at capacity", async () => {
 		const closed: Array<{ key: string; reason: string }> = [];
 		const pool = new PodLocalSessionPool<string>(

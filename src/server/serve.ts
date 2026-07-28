@@ -61,6 +61,7 @@ import {
 	STATEFUL_TIMESTAMP_HEADER as STATEFUL_FORWARDING_TIMESTAMP_HEADER,
 	verifyStatefulRequestSignature,
 } from "../stateful-signing.js";
+import { StatefulRoutingDeadlineError } from "../stateful/stateful-provider-session-routing.js";
 import { getStealthProfile } from "../stealth/profiles.js";
 import {
 	APIFUSE_STREAM_DONE_EVENT,
@@ -1672,6 +1673,10 @@ export function createServerApp(
 					{ code: "STATEFUL_FORWARDING_ENVELOPE_INVALID" },
 				);
 			}
+			const deadlineAtMs = envelope.deadlineAt ? Date.parse(envelope.deadlineAt) : undefined;
+			if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
+				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+			}
 			const ownerFenceValid = await options.statefulForwarding?.validateOwnerFence(
 				{
 					providerId: envelope.providerId,
@@ -1693,13 +1698,23 @@ export function createServerApp(
 			const request = operationRequestFromForwardingEnvelope(envelope);
 			const operationId = envelope.operationId;
 			const ctx = createProviderContext(provider, request, operationId, options, state);
+			const remainingDeadlineMs = deadlineAtMs === undefined ? undefined : deadlineAtMs - Date.now();
+			if (remainingDeadlineMs !== undefined && remainingDeadlineMs <= 0) {
+				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+			}
+			const signal = remainingDeadlineMs !== undefined
+				? AbortSignal.any([
+						c.req.raw.signal,
+						AbortSignal.timeout(remainingDeadlineMs),
+					])
+				: c.req.raw.signal;
 			const output = await options.internalOperationExecutor({
 				provider,
 				operationId,
 				ctx,
 				request,
 				internalStatefulForward: envelope,
-				signal: c.req.raw.signal,
+				signal,
 			});
 			logProviderSuccess(
 				logger,

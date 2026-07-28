@@ -100,6 +100,56 @@ describe("StatefulSessionRouter deadlines", () => {
 });
 
 describe("StatefulSessionRouter lease lifecycle", () => {
+	it("does not release a lease established by a newer local attempt", async () => {
+		const registry = new InMemorySessionOwnerRegistry();
+		let releaseFirstAttempt: (() => void) | undefined;
+		let markFirstAttemptStarted: (() => void) | undefined;
+		const firstAttemptStarted = new Promise<void>((resolve) => {
+			markFirstAttemptStarted = resolve;
+		});
+		const firstAttemptGate = new Promise<void>((resolve) => {
+			releaseFirstAttempt = resolve;
+		});
+		const establishmentFailure = new Error("first establishment failed");
+		Object.defineProperty(
+			establishmentFailure,
+			Symbol.for("@apifuse/provider-sdk/stateful/session-establishment-failure@1"),
+			{ value: true },
+		);
+		const router = new StatefulSessionRouter({
+			currentPod,
+			registry,
+			forwarder: unusedForwarder,
+			executor: {
+				executeLocal: async (operationRequest, owner, signal, validateOwnership) => {
+					if (operationRequest.requestId === "request-a") {
+						markFirstAttemptStarted?.();
+						await firstAttemptGate;
+						throw establishmentFailure;
+					}
+					await validateOwnership?.(owner, signal);
+					return { output: "connected" };
+				},
+			},
+			leaseDurationMs: 1_000,
+		});
+
+		const firstRoute = router.route(request({ requestId: "request-a" })).catch((error) => error);
+		await firstAttemptStarted;
+		await expect(router.route(request({ requestId: "request-b" }))).resolves.toEqual({
+			output: "connected",
+		});
+		releaseFirstAttempt?.();
+		expect(await firstRoute).toBe(establishmentFailure);
+		expect(await registry.resolve(sessionKey)).toMatchObject({
+			ownerPodId: currentPod.podId,
+			generation: 1,
+			status: "connected",
+		});
+
+		await router.release();
+	});
+
 	it("releases a failed establishment lease, stops renewal, and permits generation+1 takeover", async () => {
 		const backing = new InMemorySessionOwnerRegistry();
 		let renewCalls = 0;

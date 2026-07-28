@@ -133,6 +133,8 @@ export class StatefulSessionRouter {
 	readonly #clock: () => Date;
 	readonly #metricEmitter: StatefulProviderMetricEmitter;
 	readonly #managedLeases = new Map<SessionKey, ManagedLease>();
+	readonly #latestLocalAttempts = new Map<SessionKey, number>();
+	#nextLocalAttempt = 0;
 
 	constructor(options: StatefulSessionRouterOptions) {
 		validateRouterLeaseDuration(options.leaseDurationMs);
@@ -224,6 +226,8 @@ export class StatefulSessionRouter {
 			);
 		}
 		if (owner.ownerPodId === this.#currentPod.podId) {
+			const localAttempt = ++this.#nextLocalAttempt;
+			this.#latestLocalAttempts.set(request.sessionKey, localAttempt);
 			const validatedOwner = await this.validateLocalOwnership(
 				request,
 				owner,
@@ -244,7 +248,11 @@ export class StatefulSessionRouter {
 				);
 			} catch (error) {
 				if (isStatefulSessionEstablishmentFailure(error)) {
-					await this.releaseFailedEstablishment(request.sessionKey, validatedOwner);
+					await this.releaseFailedEstablishment(
+						request.sessionKey,
+						validatedOwner,
+						localAttempt,
+					);
 				}
 				throw error;
 			}
@@ -348,7 +356,9 @@ export class StatefulSessionRouter {
 	private async releaseFailedEstablishment(
 		sessionKey: SessionKey,
 		owner: SessionOwnerRecord,
+		localAttempt: number,
 	): Promise<void> {
+		if (this.#latestLocalAttempts.get(sessionKey) !== localAttempt) return;
 		const managed = this.#managedLeases.get(sessionKey);
 		if (
 			managed &&

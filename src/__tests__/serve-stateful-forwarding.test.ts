@@ -190,6 +190,68 @@ describe("signed stateful operation forwarding", () => {
 		expect(received?.signal).toBeInstanceOf(AbortSignal);
 	});
 
+	it("rejects an expired forwarded deadline without invoking the executor", async () => {
+		let executions = 0;
+		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+			logger: () => {},
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async () => {
+				executions += 1;
+				return { accepted: true };
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const deadlineAt = new Date(Date.now() - 1).toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp, deadlineAt });
+
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+
+		expect(response.status).toBe(500);
+		expect(await response.json()).toEqual({
+			error: {
+				code: "internal_error",
+				message: "Internal error",
+				requestId: "req-stateful-forward",
+				details: {
+					retryable: false,
+					category: "internal_error",
+					errorClass: "StatefulRoutingDeadlineError",
+				},
+			},
+		});
+		expect(executions).toBe(0);
+	});
+
+	it("passes a combined signal that aborts at the forwarded deadline", async () => {
+		let signalAbortedAfterDeadline = false;
+		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+			logger: () => {},
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async ({ signal }) => {
+				await Bun.sleep(45);
+				signalAbortedAfterDeadline = signal?.aborted === true;
+				return { accepted: true };
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const deadlineAt = new Date(Date.now() + 15).toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp, deadlineAt });
+
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ data: { accepted: true } });
+		expect(signalAbortedAfterDeadline).toBe(true);
+	});
+
 	it("rejects missing signature headers with a structured provider error", async () => {
 		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
 			logger: () => {},

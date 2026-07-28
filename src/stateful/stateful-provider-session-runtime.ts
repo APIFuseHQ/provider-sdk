@@ -185,6 +185,7 @@ export class PodLocalSessionPool<T> {
 	readonly #sessions = new Map<string, ManagedSession<T>>();
 	readonly #queues = new Map<string, Promise<void>>();
 	readonly #creates = new Map<string, Promise<ManagedSession<T>>>();
+	#closed = false;
 
 	constructor(
 		private readonly policy: SessionPoolPolicy,
@@ -201,16 +202,20 @@ export class PodLocalSessionPool<T> {
 		identity?: ManagedSessionIdentity,
 	): Promise<ManagedSession<T>> {
 		validateGeneration(generation);
+		this.assertOpen(sessionKey);
 		const existingCreate = this.#creates.get(sessionKey);
 		if (existingCreate) {
 			try {
 				await existingCreate;
 			} catch {}
+			this.assertOpen(sessionKey);
 		}
 		const create = this.getOrCreateUnlocked(sessionKey, generation, factory, now, identity);
 		this.#creates.set(sessionKey, create);
 		try {
-			return await create;
+			const session = await create;
+			this.assertOpen(sessionKey);
+			return session;
 		} finally {
 			if (this.#creates.get(sessionKey) === create) this.#creates.delete(sessionKey);
 		}
@@ -248,7 +253,23 @@ export class PodLocalSessionPool<T> {
 	}
 
 	async closeAll(reason: string): Promise<void> {
+		this.#closed = true;
 		const errors: unknown[] = [];
+		await Promise.all(
+			[...this.#creates.values()].map(async (create) => {
+				let session: ManagedSession<T>;
+				try {
+					session = await create;
+				} catch {
+					return;
+				}
+				try {
+					await this.closeOne(session.sessionKey, reason);
+				} catch (error) {
+					errors.push(error);
+				}
+			}),
+		);
 		for (const sessionKey of [...this.#sessions.keys()]) {
 			try {
 				await this.closeOne(sessionKey, reason);
@@ -302,6 +323,13 @@ export class PodLocalSessionPool<T> {
 		if (!session) return;
 		this.#sessions.delete(sessionKey);
 		await this.closeSession(session, reason);
+	}
+
+	private assertOpen(sessionKey: string): void {
+		if (!this.#closed) return;
+		throw new Error(
+			`Pod-local session pool is closed; cannot get or create session "${sessionKey}".`,
+		);
 	}
 }
 
