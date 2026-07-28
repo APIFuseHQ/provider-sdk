@@ -1,4 +1,3 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -56,6 +55,13 @@ import { createStealthClient } from "../runtime/stealth.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import { createTraceContext } from "../runtime/trace.js";
 import { parseSchema } from "../schema.js";
+import {
+	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
+	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
+	STATEFUL_TIMESTAMP_HEADER as STATEFUL_FORWARDING_TIMESTAMP_HEADER,
+	verifyStatefulRequestSignature,
+} from "../stateful-signing.js";
+import { StatefulRoutingDeadlineError } from "../stateful/stateful-provider-session-routing.js";
 import { getStealthProfile } from "../stealth/profiles.js";
 import {
 	APIFUSE_STREAM_DONE_EVENT,
@@ -92,6 +98,7 @@ import {
 	AuthFlowRequestSchema,
 	type AuthFlowResponse,
 	type AuthFlowSuccessResponse,
+	OperationConnectionSchema,
 	type OperationErrorResponse,
 	type OperationRequest,
 	OperationRequestSchema,
@@ -104,17 +111,65 @@ const DEFAULT_PORT = 3000;
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
-const STATEFUL_FORWARDING_SIGNATURE_HEADER = "x-apifuse-stateful-signature";
-const STATEFUL_FORWARDING_TIMESTAMP_HEADER = "x-apifuse-stateful-timestamp";
+const STATEFUL_FORWARDING_SOURCE_POD_HEADER = "x-apifuse-stateful-source-pod";
 const DEFAULT_STATEFUL_FORWARDING_MAX_SKEW_MS = 5 * 60_000;
+const DEFAULT_STATEFUL_FORWARDING_REPLAY_CACHE_MAX_ENTRIES = 10_000;
+const STATEFUL_FORWARDING_REPLAY_BUCKET_MS = 10_000;
+const STATEFUL_FORWARDING_REPLAY_RETRY_AFTER_SECONDS = Math.ceil(
+	STATEFUL_FORWARDING_REPLAY_BUCKET_MS / 1_000,
+);
 
-export type ProviderServerStatefulForwardEnvelope = Readonly<Record<string, unknown>>;
+export const ProviderServerStatefulForwardEnvelopeSchema = z
+	.object({
+		requestId: z.string().min(1),
+		providerId: z.string().min(1),
+		operationId: z.string().min(1),
+		sessionKey: z.string().min(1),
+		connectionId: z.string().min(1),
+		serviceAccountId: z.string().min(1),
+		ownerPodId: z.string().min(1),
+		generation: z.number().int().positive(),
+		sourcePodId: z.string().min(1),
+		forwardedAt: z.string().refine((value) => Number.isFinite(Date.parse(value))),
+		deadlineAt: z
+			.string()
+			.refine((value) => Number.isFinite(Date.parse(value)))
+			.optional(),
+		idempotencyKey: z.string().min(1).optional(),
+		operationRequest: OperationRequestSchema.extend({
+			connection: OperationConnectionSchema.strict().optional(),
+		}).strict(),
+	})
+	.strict();
+
+export type ProviderServerStatefulForwardEnvelope = Readonly<
+	z.infer<typeof ProviderServerStatefulForwardEnvelopeSchema>
+>;
+
+export type ProviderServerStatefulOwnerFence = Readonly<
+	Pick<
+		ProviderServerStatefulForwardEnvelope,
+		| "providerId"
+		| "sessionKey"
+		| "ownerPodId"
+		| "generation"
+		| "sourcePodId"
+		| "forwardedAt"
+		| "requestId"
+		| "idempotencyKey"
+	>
+>;
+
+export type ProviderServerStatefulOwnerFenceValidator = (
+	fence: ProviderServerStatefulOwnerFence,
+	signal: AbortSignal,
+) => boolean | Promise<boolean>;
 
 export type ProviderServerOperationExecutorInput = {
 	readonly provider: ProviderDefinition;
 	readonly operationId: string;
 	readonly ctx: ProviderContext;
-	readonly request: OperationRequest;
+	readonly request: OperationRequest & { readonly deadlineAt?: string };
 	readonly signal?: AbortSignal;
 	readonly internalStatefulForward?: ProviderServerStatefulForwardEnvelope;
 };
@@ -449,6 +504,14 @@ export type ProviderServerLogEvent =
 			resource: "browser" | "stealth";
 			errorClass: string;
 			message: string;
+	  }
+	| {
+			level: "error";
+			event: "provider_shutdown_hook_failed";
+			providerId: string;
+			hookIndex: number;
+			errorClass: string;
+			message: string;
 	  };
 
 export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
@@ -462,6 +525,9 @@ export type ProviderServerOptions = {
 	statefulForwarding?: {
 		readonly secret: string;
 		readonly maxSkewMs?: number;
+		readonly replayCacheMaxEntries?: number;
+		/** Required fail-closed check against the SDK/runtime owner registry. */
+		readonly validateOwnerFence: ProviderServerStatefulOwnerFenceValidator;
 	};
 	/** Optional STT override for tests or custom hosts; local/prod normally resolves from env. */
 	stt?: SttContext;
@@ -469,6 +535,28 @@ export type ProviderServerOptions = {
 	state?: ProviderRuntimeState;
 	/** Allow process-local runtime state only for local development and tests. */
 	allowMemoryStateFallback?: boolean;
+	/**
+	 * Graceful process shutdown. Hooks run in declaration order after listeners stop accepting work.
+	 *
+	 * @example
+	 * ```ts
+	 * await serve(provider, {
+	 *   shutdown: {
+	 *     hooks: [
+	 *       async () => { await emitter.flush(); },
+	 *       async () => { await sessionManager.closeAll("server-shutdown"); },
+	 *       async () => { await lease.release(); },
+	 *       async () => { await router.close(); },
+	 *     ],
+	 *   },
+	 * });
+	 * ```
+	 */
+	shutdown?: {
+		readonly hooks?: Array<() => Promise<void>>;
+		readonly signals?: boolean | NodeJS.Signals[];
+		readonly timeoutMs?: number;
+	};
 };
 
 const defaultProviderServerLogger: ProviderServerLogger = (event) => {
@@ -516,6 +604,17 @@ function zodDetails(error: z.ZodError): Array<{
 }
 
 function toErrorResponse(error: unknown, requestId?: string): OperationErrorResponse {
+	if (error instanceof StatefulRoutingDeadlineError) {
+		return {
+			error: {
+				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
+				message: "Stateful forwarding deadline expired.",
+				...(requestId ? { requestId } : {}),
+				details: { retryable: false },
+			},
+		};
+	}
+
 	if (isProviderError(error)) {
 		const details = publicProviderErrorDetails(error);
 		return {
@@ -680,6 +779,9 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 	if (error instanceof z.ZodError) {
 		return 400;
 	}
+	if (error instanceof StatefulRoutingDeadlineError) {
+		return 504;
+	}
 
 	if (isTransportError(error)) {
 		return error.code === "transport_timeout" ? 504 : 502;
@@ -707,6 +809,7 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 				return 502;
 			case "STT_UNAVAILABLE":
 			case "UNSUPPORTED_STT_BACKEND":
+			case "STATEFUL_FORWARDING_REPLAY_CACHE_FULL":
 				return 503;
 		}
 
@@ -739,7 +842,9 @@ function logProviderError(
 		? (error.code ?? "provider_error")
 		: error instanceof z.ZodError
 			? "invalid_request"
-			: "internal_error";
+			: error instanceof StatefulRoutingDeadlineError
+				? "STATEFUL_FORWARDING_DEADLINE_EXPIRED"
+				: "internal_error";
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
 	const details = isProviderError(error) ? providerObservabilityDetails(error) : undefined;
@@ -1348,10 +1453,57 @@ async function handleAuthFlow(
 	}
 }
 
+class StatefulForwardingReplayCache {
+	readonly #nonces = new Map<string, number>();
+	readonly #expiryBuckets = new Map<number, Set<string>>();
+	#nextExpiryBucket?: number;
+	#latestExpiryBucket?: number;
+
+	constructor(private readonly maxEntries: number) {}
+
+	claim(nonce: string, expiresAtMs: number, nowMs: number): "accepted" | "replayed" | "full" {
+		this.dropExpiredBuckets(nowMs);
+		if (this.#nonces.has(nonce)) return "replayed";
+		if (this.#nonces.size >= this.maxEntries) return "full";
+		const expiryBucket =
+			Math.ceil(expiresAtMs / STATEFUL_FORWARDING_REPLAY_BUCKET_MS) *
+			STATEFUL_FORWARDING_REPLAY_BUCKET_MS;
+		this.#nonces.set(nonce, expiryBucket);
+		const bucket = this.#expiryBuckets.get(expiryBucket) ?? new Set<string>();
+		bucket.add(nonce);
+		this.#expiryBuckets.set(expiryBucket, bucket);
+		this.#nextExpiryBucket = Math.min(this.#nextExpiryBucket ?? expiryBucket, expiryBucket);
+		this.#latestExpiryBucket = Math.max(this.#latestExpiryBucket ?? expiryBucket, expiryBucket);
+		return "accepted";
+	}
+
+	private dropExpiredBuckets(nowMs: number): void {
+		if (this.#nextExpiryBucket === undefined || this.#latestExpiryBucket === undefined) return;
+		if (nowMs >= this.#latestExpiryBucket) {
+			this.#nonces.clear();
+			this.#expiryBuckets.clear();
+			this.#nextExpiryBucket = undefined;
+			this.#latestExpiryBucket = undefined;
+			return;
+		}
+		while (this.#nextExpiryBucket <= nowMs) {
+			const bucket = this.#expiryBuckets.get(this.#nextExpiryBucket);
+			if (bucket) {
+				for (const cachedNonce of bucket) this.#nonces.delete(cachedNonce);
+				this.#expiryBuckets.delete(this.#nextExpiryBucket);
+			}
+			this.#nextExpiryBucket += STATEFUL_FORWARDING_REPLAY_BUCKET_MS;
+		}
+	}
+}
+
 function verifyStatefulForwardingRequest(input: {
 	readonly options: ProviderServerOptions;
 	readonly rawBody: string;
 	readonly headers: Headers;
+	readonly method: string;
+	readonly path: string;
+	readonly replayCache: StatefulForwardingReplayCache;
 }): void {
 	const config = input.options.statefulForwarding;
 	if (!config?.secret) {
@@ -1361,9 +1513,15 @@ function verifyStatefulForwardingRequest(input: {
 	}
 	const timestamp = input.headers.get(STATEFUL_FORWARDING_TIMESTAMP_HEADER) ?? "";
 	const signature = input.headers.get(STATEFUL_FORWARDING_SIGNATURE_HEADER) ?? "";
-	if (!timestamp || !signature) {
+	const nonce = input.headers.get(STATEFUL_FORWARDING_NONCE_HEADER) ?? "";
+	if (!timestamp || !signature || !nonce) {
 		throw new ProviderError("Stateful forwarding signature headers are missing.", {
 			code: "STATEFUL_FORWARDING_SIGNATURE_MISSING",
+		});
+	}
+	if (nonce.length > 256) {
+		throw new ProviderError("Stateful forwarding nonce is invalid.", {
+			code: "STATEFUL_FORWARDING_NONCE_INVALID",
 		});
 	}
 	const timestampMs = Date.parse(timestamp);
@@ -1374,32 +1532,49 @@ function verifyStatefulForwardingRequest(input: {
 			{ code: "STATEFUL_FORWARDING_TIMESTAMP_INVALID" },
 		);
 	}
-	const expected = `v1=${createHmac("sha256", config.secret)
-		.update(`${timestamp}.${input.rawBody}`)
-		.digest("hex")}`;
-	if (!safeEqualAscii(signature, expected)) {
+	if (
+		!verifyStatefulRequestSignature({
+			secret: config.secret,
+			timestamp,
+			rawBody: input.rawBody,
+			method: input.method,
+			path: input.path,
+			nonce,
+			signature,
+		})
+	) {
 		throw new ProviderError("Stateful forwarding signature is invalid.", {
 			code: "STATEFUL_FORWARDING_SIGNATURE_INVALID",
 		});
 	}
-}
-
-function safeEqualAscii(actual: string, expected: string): boolean {
-	const actualBytes = Buffer.from(actual);
-	const expectedBytes = Buffer.from(expected);
-	if (actualBytes.byteLength !== expectedBytes.byteLength) return false;
-	return timingSafeEqual(actualBytes, expectedBytes);
+	const replayResult = input.replayCache.claim(nonce, timestampMs + maxSkewMs, Date.now());
+	if (replayResult === "replayed") {
+		throw new ProviderError("Stateful forwarding nonce has already been used.", {
+			code: "STATEFUL_FORWARDING_REPLAY_DETECTED",
+		});
+	}
+	if (replayResult === "full") {
+		throw new ProviderError("Stateful forwarding replay cache is at capacity.", {
+			code: "STATEFUL_FORWARDING_REPLAY_CACHE_FULL",
+		});
+	}
 }
 
 function operationRequestFromForwardingEnvelope(
 	envelope: ProviderServerStatefulForwardEnvelope,
-): OperationRequest {
-	return OperationRequestSchema.parse({
-		requestId: envelope.requestId,
-		input: envelope.input,
-		connection: envelope.connection,
-		headers: envelope.headers,
-		trace: envelope.trace,
+): OperationRequest & { readonly deadlineAt?: string } {
+	return {
+		...envelope.operationRequest,
+		...(envelope.deadlineAt !== undefined ? { deadlineAt: envelope.deadlineAt } : {}),
+	};
+}
+
+function parseStatefulForwardingEnvelope(rawBody: unknown): ProviderServerStatefulForwardEnvelope {
+	const parsed = ProviderServerStatefulForwardEnvelopeSchema.safeParse(rawBody);
+	if (parsed.success) return parsed.data;
+	throw new ProviderError("Stateful forwarding envelope is invalid.", {
+		code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
+		details: zodDetails(parsed.error),
 	});
 }
 
@@ -1407,8 +1582,13 @@ export function createServerApp(
 	provider: ProviderDefinition,
 	options: ProviderServerOptions = {},
 ): Hono {
+	validateStatefulServerConfig(options);
 	const app = new Hono();
 	const logger = options.logger ?? defaultProviderServerLogger;
+	const statefulForwardingReplayCache = new StatefulForwardingReplayCache(
+		options.statefulForwarding?.replayCacheMaxEntries ??
+			DEFAULT_STATEFUL_FORWARDING_REPLAY_CACHE_MAX_ENTRIES,
+	);
 	const state =
 		options.state ??
 		createProviderRuntimeStateFromEnv({
@@ -1470,24 +1650,115 @@ export function createServerApp(
 				options,
 				rawBody: rawBodyText,
 				headers: c.req.raw.headers,
+				method: c.req.raw.method,
+				path: STATEFUL_INTERNAL_OPERATIONS_ROUTE,
+				replayCache: statefulForwardingReplayCache,
 			});
-			rawBody = JSON.parse(rawBodyText);
-			if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
-				throw new ProviderError("Stateful forwarding envelope must be an object.", {
+			try {
+				rawBody = JSON.parse(rawBodyText);
+			} catch {
+				throw new ProviderError("Stateful forwarding envelope is not valid JSON.", {
 					code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
 				});
 			}
-			const envelope = rawBody as ProviderServerStatefulForwardEnvelope;
+			const envelope = parseStatefulForwardingEnvelope(rawBody);
+			if (envelope.providerId !== provider.id) {
+				throw new ProviderError(
+					"Stateful forwarding envelope providerId does not match the served provider.",
+					{ code: "STATEFUL_FORWARDING_PROVIDER_MISMATCH" },
+				);
+			}
+			if (envelope.requestId !== envelope.operationRequest.requestId) {
+				throw new ProviderError("Stateful forwarding requestId values do not match.", {
+					code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
+				});
+			}
+			if (
+				envelope.sourcePodId !==
+				(c.req.raw.headers.get(STATEFUL_FORWARDING_SOURCE_POD_HEADER) ?? "")
+			) {
+				throw new ProviderError("Stateful forwarding source pod does not match its header.", {
+					code: "STATEFUL_FORWARDING_SOURCE_POD_MISMATCH",
+				});
+			}
+			if (
+				envelope.forwardedAt !== (c.req.raw.headers.get(STATEFUL_FORWARDING_TIMESTAMP_HEADER) ?? "")
+			) {
+				throw new ProviderError(
+					"Stateful forwarding forwardedAt does not match its signature timestamp.",
+					{ code: "STATEFUL_FORWARDING_ENVELOPE_INVALID" },
+				);
+			}
+			const deadlineAtMs = envelope.deadlineAt ? Date.parse(envelope.deadlineAt) : undefined;
+			if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
+				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+			}
+			const remainingDeadlineMs =
+				deadlineAtMs === undefined ? undefined : deadlineAtMs - Date.now();
+			const deadlineSignal =
+				remainingDeadlineMs === undefined ? undefined : AbortSignal.timeout(remainingDeadlineMs);
+			const signal = deadlineSignal
+				? AbortSignal.any([c.req.raw.signal, deadlineSignal])
+				: c.req.raw.signal;
+			const ownerFenceValidation = Promise.resolve(
+				options.statefulForwarding?.validateOwnerFence(
+					{
+						providerId: envelope.providerId,
+						sessionKey: envelope.sessionKey,
+						ownerPodId: envelope.ownerPodId,
+						generation: envelope.generation,
+						sourcePodId: envelope.sourcePodId,
+						forwardedAt: envelope.forwardedAt,
+						requestId: envelope.requestId,
+						...(envelope.idempotencyKey ? { idempotencyKey: envelope.idempotencyKey } : {}),
+					},
+					signal,
+				),
+			);
+			let ownerFenceValid: boolean | undefined;
+			try {
+				ownerFenceValid = deadlineSignal
+					? await Promise.race([
+							ownerFenceValidation,
+							new Promise<never>((_resolve, reject) => {
+								deadlineSignal.addEventListener(
+									"abort",
+									() =>
+										reject(
+											new StatefulRoutingDeadlineError(
+												envelope.requestId,
+												envelope.deadlineAt as string,
+											),
+										),
+									{ once: true },
+								);
+							}),
+						])
+					: await ownerFenceValidation;
+			} catch (error) {
+				if (deadlineSignal?.aborted) {
+					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+				}
+				throw error;
+			}
+			if (ownerFenceValid !== true) {
+				throw new ProviderError("Stateful forwarding owner fence is no longer current.", {
+					code: "STATEFUL_FORWARDING_OWNER_FENCE_INVALID",
+				});
+			}
 			const request = operationRequestFromForwardingEnvelope(envelope);
-			const operationId = typeof envelope.operationId === "string" ? envelope.operationId : "";
+			const operationId = envelope.operationId;
 			const ctx = createProviderContext(provider, request, operationId, options, state);
+			if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
+				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+			}
 			const output = await options.internalOperationExecutor({
 				provider,
 				operationId,
 				ctx,
 				request,
 				internalStatefulForward: envelope,
-				signal: c.req.raw.signal,
+				signal,
 			});
 			logProviderSuccess(
 				logger,
@@ -1501,6 +1772,9 @@ export function createServerApp(
 			return c.json({ data: output });
 		} catch (error) {
 			const status = toStatusCode(error);
+			if (isProviderError(error) && error.code === "STATEFUL_FORWARDING_REPLAY_CACHE_FULL") {
+				c.header("Retry-After", String(STATEFUL_FORWARDING_REPLAY_RETRY_AFTER_SECONDS));
+			}
 			const requestId = extractRequestId(rawBody);
 			logProviderError(
 				logger,
@@ -1768,12 +2042,54 @@ export function createServerApp(
 	return app;
 }
 
+function validateStatefulServerConfig(options: ProviderServerOptions): void {
+	if (options.statefulForwarding && !options.internalOperationExecutor) {
+		throw new Error(
+			"Invalid provider server configuration: statefulForwarding requires internalOperationExecutor; missing option internalOperationExecutor.",
+		);
+	}
+	if (options.internalOperationExecutor && !options.statefulForwarding?.secret) {
+		throw new Error(
+			"Invalid provider server configuration: internalOperationExecutor requires statefulForwarding.secret; missing option statefulForwarding.secret.",
+		);
+	}
+	if (
+		options.statefulForwarding &&
+		typeof options.statefulForwarding.validateOwnerFence !== "function"
+	) {
+		throw new Error(
+			"Invalid provider server configuration: statefulForwarding requires validateOwnerFence.",
+		);
+	}
+	if (
+		options.statefulForwarding?.maxSkewMs !== undefined &&
+		(!Number.isFinite(options.statefulForwarding.maxSkewMs) ||
+			options.statefulForwarding.maxSkewMs <= 0)
+	) {
+		throw new Error("Invalid provider server configuration: maxSkewMs must be positive.");
+	}
+	if (
+		options.statefulForwarding?.replayCacheMaxEntries !== undefined &&
+		(!Number.isInteger(options.statefulForwarding.replayCacheMaxEntries) ||
+			options.statefulForwarding.replayCacheMaxEntries <= 0)
+	) {
+		throw new Error(
+			"Invalid provider server configuration: replayCacheMaxEntries must be a positive integer.",
+		);
+	}
+}
+
 type BunServeRuntime = {
 	serve: (options: {
 		port: number;
 		hostname: string;
 		fetch: (request: Request) => Response | Promise<Response>;
-	}) => unknown;
+	}) => BunServerHandle;
+};
+
+type BunServerHandle = {
+	readonly port: number;
+	stop(closeActiveConnections?: boolean): Promise<void>;
 };
 
 function getBunServeRuntime(): BunServeRuntime | undefined {
@@ -1789,10 +2105,19 @@ function getBunServeRuntime(): BunServeRuntime | undefined {
 
 	return {
 		serve(options) {
-			return serve(options);
+			return serve(options) as BunServerHandle;
 		},
 	};
 }
+
+export type ProviderServerCloseOptions = {
+	readonly timeoutMs?: number;
+};
+
+export type ProviderServerHandle = {
+	readonly port: number;
+	close(options?: ProviderServerCloseOptions): Promise<void>;
+};
 
 export interface ServeOptions extends ProviderServerOptions {
 	host?: string;
@@ -1805,10 +2130,26 @@ export interface ServeOptions extends ProviderServerOptions {
 	selfTestPort?: number;
 }
 
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+const DEFAULT_SHUTDOWN_SIGNALS: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
+
+type SignalServerRegistration = {
+	readonly signals: ReadonlySet<NodeJS.Signals>;
+	readonly close: () => Promise<void>;
+};
+
+type ProcessSignalCoordinator = {
+	readonly registrations: Set<SignalServerRegistration>;
+	readonly listener: () => void;
+	handling: boolean;
+};
+
+const processSignalCoordinators = new Map<NodeJS.Signals, ProcessSignalCoordinator>();
+
 export async function serve(
 	provider: ProviderDefinition,
 	options: ServeOptions = {},
-): Promise<void> {
+): Promise<ProviderServerHandle> {
 	const bunRuntime = getBunServeRuntime();
 
 	if (bunRuntime === undefined) {
@@ -1816,6 +2157,11 @@ export async function serve(
 			code: "RUNTIME_UNSUPPORTED",
 		});
 	}
+	const logger = options.logger ?? defaultProviderServerLogger;
+	const configuredTimeoutMs = shutdownTimeout(
+		options.shutdown?.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS,
+	);
+	const configuredSignals = resolveShutdownSignals(options.shutdown?.signals ?? true);
 
 	const app = createServerApp(provider, {
 		logger: options.logger,
@@ -1827,27 +2173,190 @@ export async function serve(
 		statefulForwarding: options.statefulForwarding,
 	});
 
-	bunRuntime.serve({
-		port: options.port ?? DEFAULT_PORT,
-		hostname: options.host ?? DEFAULT_HOST,
-		fetch: app.fetch,
-	});
+	const servers: BunServerHandle[] = [];
+	try {
+		servers.push(
+			bunRuntime.serve({
+				port: options.port ?? DEFAULT_PORT,
+				hostname: options.host ?? DEFAULT_HOST,
+				fetch: app.fetch,
+			}),
+		);
 
-	// Internal self-test listener (health dependency inversion): a SEPARATE
-	// socket the tenant-facing gateway never dials. Off by default — it only
-	// starts when the shared self-test master secret env is present.
-	const selfTestSecrets = resolveSelfTestMasterSecrets();
-	if (selfTestSecrets) {
-		const selfTestApp = createSelfTestApp(provider, {
-			secrets: selfTestSecrets,
-			invoke: createSelfTestInvoke(app),
-			authFlow: createSelfTestAuthFlowInvoke(app),
-		});
-		bunRuntime.serve({
-			port: options.selfTestPort ?? resolveSelfTestPort(),
-			hostname: options.host ?? DEFAULT_HOST,
-			fetch: selfTestApp.fetch,
-		});
+		// Internal self-test listener (health dependency inversion): a SEPARATE
+		// socket the tenant-facing gateway never dials. Off by default — it only
+		// starts when the shared self-test master secret env is present.
+		const selfTestSecrets = resolveSelfTestMasterSecrets();
+		if (selfTestSecrets) {
+			const selfTestApp = createSelfTestApp(provider, {
+				secrets: selfTestSecrets,
+				invoke: createSelfTestInvoke(app),
+				authFlow: createSelfTestAuthFlowInvoke(app),
+			});
+			servers.push(
+				bunRuntime.serve({
+					port: options.selfTestPort ?? resolveSelfTestPort(),
+					hostname: options.host ?? DEFAULT_HOST,
+					fetch: selfTestApp.fetch,
+				}),
+			);
+		}
+	} catch (error) {
+		await Promise.allSettled(servers.map((startedServer) => startedServer.stop(true)));
+		throw error;
 	}
-	await Promise.resolve();
+
+	const server = servers[0];
+	if (!server) throw new Error("Provider server failed to create its primary listener.");
+	let closePromise: Promise<void> | undefined;
+	let unregisterSignals = () => {};
+
+	const close = (closeOptions: ProviderServerCloseOptions = {}): Promise<void> => {
+		if (closePromise) return closePromise;
+		const timeoutMs = shutdownTimeout(closeOptions.timeoutMs ?? configuredTimeoutMs);
+		closePromise = closeProviderServers({
+			servers,
+			hooks: options.shutdown?.hooks ?? [],
+			timeoutMs,
+			logger,
+			providerId: provider.id,
+		}).finally(() => unregisterSignals());
+		return closePromise;
+	};
+
+	try {
+		unregisterSignals = registerForProcessSignals(configuredSignals, () =>
+			close({ timeoutMs: configuredTimeoutMs }),
+		);
+	} catch (error) {
+		unregisterSignals();
+		await Promise.allSettled(servers.map((startedServer) => startedServer.stop(true)));
+		throw error;
+	}
+
+	return { port: server.port, close };
+}
+
+function registerForProcessSignals(
+	signals: NodeJS.Signals[],
+	close: () => Promise<void>,
+): () => void {
+	if (signals.length === 0) return () => {};
+	const registration: SignalServerRegistration = {
+		signals: new Set(signals),
+		close,
+	};
+	let registered = true;
+	const unregister = () => {
+		if (!registered) return;
+		registered = false;
+		for (const signal of registration.signals) {
+			const coordinator = processSignalCoordinators.get(signal);
+			if (!coordinator) continue;
+			coordinator.registrations.delete(registration);
+			if (coordinator.registrations.size === 0 && !coordinator.handling) {
+				process.removeListener(signal, coordinator.listener);
+				processSignalCoordinators.delete(signal);
+			}
+		}
+	};
+	try {
+		for (const signal of signals) {
+			let coordinator = processSignalCoordinators.get(signal);
+			if (!coordinator) {
+				const created: ProcessSignalCoordinator = {
+					registrations: new Set(),
+					handling: false,
+					listener: () => handleCoordinatedSignal(signal, created),
+				};
+				coordinator = created;
+				processSignalCoordinators.set(signal, coordinator);
+				process.on(signal, coordinator.listener);
+			}
+			coordinator.registrations.add(registration);
+		}
+	} catch (error) {
+		unregister();
+		throw error;
+	}
+	return unregister;
+}
+
+function handleCoordinatedSignal(
+	signal: NodeJS.Signals,
+	coordinator: ProcessSignalCoordinator,
+): void {
+	if (coordinator.handling) return;
+	coordinator.handling = true;
+	const registrations = [...coordinator.registrations];
+	void Promise.allSettled(registrations.map((registration) => registration.close())).finally(() => {
+		if (processSignalCoordinators.get(signal) === coordinator) {
+			process.removeListener(signal, coordinator.listener);
+			processSignalCoordinators.delete(signal);
+		}
+		try {
+			process.kill(process.pid, signal);
+		} catch {
+			process.exitCode = 1;
+		}
+	});
+}
+
+async function closeProviderServers(input: {
+	readonly servers: BunServerHandle[];
+	readonly hooks: Array<() => Promise<void>>;
+	readonly timeoutMs: number;
+	readonly logger: ProviderServerLogger;
+	readonly providerId: string;
+}): Promise<void> {
+	const deadline = Date.now() + input.timeoutMs;
+	const gracefulStops = input.servers.map((server) => server.stop(false));
+	for (const gracefulStop of gracefulStops) gracefulStop.catch(() => undefined);
+	for (const [hookIndex, hook] of input.hooks.entries()) {
+		try {
+			await withinShutdownBudget(Promise.resolve().then(hook), deadline);
+		} catch (error) {
+			try {
+				input.logger({
+					level: "error",
+					event: "provider_shutdown_hook_failed",
+					providerId: input.providerId,
+					hookIndex,
+					errorClass: error instanceof Error ? error.name : "UnknownError",
+					message: error instanceof Error ? error.message : "Shutdown hook failed.",
+				});
+			} catch {}
+		}
+	}
+	const forcedStops = input.servers.map((server) => server.stop(true));
+	await withinShutdownBudget(
+		Promise.allSettled([...gracefulStops, ...forcedStops]).then(() => undefined),
+		deadline,
+	).catch(() => undefined);
+}
+
+async function withinShutdownBudget<T>(promise: Promise<T>, deadline: number): Promise<T> {
+	promise.catch(() => undefined);
+	const remainingMs = Math.max(0, deadline - Date.now());
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(() => reject(new Error("Provider server shutdown timed out.")), remainingMs);
+	});
+	try {
+		return await Promise.race([promise, timeout]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+function resolveShutdownSignals(signals: boolean | NodeJS.Signals[]): NodeJS.Signals[] {
+	if (signals === false) return [];
+	return [...new Set(signals === true ? DEFAULT_SHUTDOWN_SIGNALS : signals)];
+}
+
+function shutdownTimeout(value: number): number {
+	if (!Number.isFinite(value) || value < 0) {
+		throw new Error("Provider server shutdown timeoutMs must be a non-negative finite number.");
+	}
+	return value;
 }

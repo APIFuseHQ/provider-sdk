@@ -61,6 +61,11 @@
 			"import": "./dist/server/index.js",
 			"default": "./dist/server/index.js"
 		},
+		"./stateful": {
+			"types": "./dist/stateful/index.d.ts",
+			"import": "./dist/stateful/index.js",
+			"default": "./dist/stateful/index.js"
+		},
 		"./testing": {
 			"types": "./dist/testing/index.d.ts",
 			"import": "./dist/testing/index.js",

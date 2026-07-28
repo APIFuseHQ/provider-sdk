@@ -1,7 +1,12 @@
 export {
 	createServerApp,
+	type ProviderServerCloseOptions,
+	type ProviderServerHandle,
+	type ProviderServerLogEvent,
+	type ProviderServerLogger,
 	type ProviderServerOperationExecutor,
 	type ProviderServerOperationExecutorInput,
+	type ProviderServerOptions,
 	type ProviderServerStatefulForwardEnvelope,
 	type ServeOptions,
 	serve,
