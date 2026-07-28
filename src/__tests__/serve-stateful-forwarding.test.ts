@@ -210,19 +210,55 @@ describe("signed stateful operation forwarding", () => {
 			body,
 		});
 
-		expect(response.status).toBe(500);
+		expect(response.status).toBe(504);
 		expect(await response.json()).toEqual({
 			error: {
-				code: "internal_error",
-				message: "Internal error",
+				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
+				message: "Stateful forwarding deadline expired.",
 				requestId: "req-stateful-forward",
-				details: {
-					retryable: false,
-					category: "internal_error",
-					errorClass: "StatefulRoutingDeadlineError",
-				},
+				details: { retryable: false },
 			},
 		});
+		expect(executions).toBe(0);
+	});
+
+	it("bounds owner-fence validation by the forwarded deadline", async () => {
+		let executions = 0;
+		let validationSignal: AbortSignal | undefined;
+		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+			logger: () => {},
+			statefulForwarding: forwardingConfig({
+				validateOwnerFence: async (_fence, signal) => {
+					validationSignal = signal;
+					await Bun.sleep(100);
+					return true;
+				},
+			}),
+			internalOperationExecutor: async () => {
+				executions += 1;
+				return { accepted: true };
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const deadlineAt = new Date(Date.now() + 20).toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp, deadlineAt });
+
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+
+		expect(response.status).toBe(504);
+		expect(await response.json()).toEqual({
+			error: {
+				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
+				message: "Stateful forwarding deadline expired.",
+				requestId: "req-stateful-forward",
+				details: { retryable: false },
+			},
+		});
+		expect(validationSignal?.aborted).toBe(true);
 		expect(executions).toBe(0);
 	});
 

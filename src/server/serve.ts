@@ -604,6 +604,17 @@ function zodDetails(error: z.ZodError): Array<{
 }
 
 function toErrorResponse(error: unknown, requestId?: string): OperationErrorResponse {
+	if (error instanceof StatefulRoutingDeadlineError) {
+		return {
+			error: {
+				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
+				message: "Stateful forwarding deadline expired.",
+				...(requestId ? { requestId } : {}),
+				details: { retryable: false },
+			},
+		};
+	}
+
 	if (isProviderError(error)) {
 		const details = publicProviderErrorDetails(error);
 		return {
@@ -768,6 +779,9 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 	if (error instanceof z.ZodError) {
 		return 400;
 	}
+	if (error instanceof StatefulRoutingDeadlineError) {
+		return 504;
+	}
 
 	if (isTransportError(error)) {
 		return error.code === "transport_timeout" ? 504 : 502;
@@ -828,7 +842,9 @@ function logProviderError(
 		? (error.code ?? "provider_error")
 		: error instanceof z.ZodError
 			? "invalid_request"
-			: "internal_error";
+			: error instanceof StatefulRoutingDeadlineError
+				? "STATEFUL_FORWARDING_DEADLINE_EXPIRED"
+				: "internal_error";
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
 	const details = isProviderError(error) ? providerObservabilityDetails(error) : undefined;
@@ -1677,19 +1693,54 @@ export function createServerApp(
 			if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
 				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
 			}
-			const ownerFenceValid = await options.statefulForwarding?.validateOwnerFence(
-				{
-					providerId: envelope.providerId,
-					sessionKey: envelope.sessionKey,
-					ownerPodId: envelope.ownerPodId,
-					generation: envelope.generation,
-					sourcePodId: envelope.sourcePodId,
-					forwardedAt: envelope.forwardedAt,
-					requestId: envelope.requestId,
-					...(envelope.idempotencyKey ? { idempotencyKey: envelope.idempotencyKey } : {}),
-				},
-				c.req.raw.signal,
+			const remainingDeadlineMs =
+				deadlineAtMs === undefined ? undefined : deadlineAtMs - Date.now();
+			const deadlineSignal =
+				remainingDeadlineMs === undefined ? undefined : AbortSignal.timeout(remainingDeadlineMs);
+			const signal = deadlineSignal
+				? AbortSignal.any([c.req.raw.signal, deadlineSignal])
+				: c.req.raw.signal;
+			const ownerFenceValidation = Promise.resolve(
+				options.statefulForwarding?.validateOwnerFence(
+					{
+						providerId: envelope.providerId,
+						sessionKey: envelope.sessionKey,
+						ownerPodId: envelope.ownerPodId,
+						generation: envelope.generation,
+						sourcePodId: envelope.sourcePodId,
+						forwardedAt: envelope.forwardedAt,
+						requestId: envelope.requestId,
+						...(envelope.idempotencyKey ? { idempotencyKey: envelope.idempotencyKey } : {}),
+					},
+					signal,
+				),
 			);
+			let ownerFenceValid: boolean | undefined;
+			try {
+				ownerFenceValid = deadlineSignal
+					? await Promise.race([
+							ownerFenceValidation,
+							new Promise<never>((_resolve, reject) => {
+								deadlineSignal.addEventListener(
+									"abort",
+									() =>
+										reject(
+											new StatefulRoutingDeadlineError(
+												envelope.requestId,
+												envelope.deadlineAt as string,
+											),
+										),
+									{ once: true },
+								);
+							}),
+						])
+					: await ownerFenceValidation;
+			} catch (error) {
+				if (deadlineSignal?.aborted) {
+					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+				}
+				throw error;
+			}
 			if (ownerFenceValid !== true) {
 				throw new ProviderError("Stateful forwarding owner fence is no longer current.", {
 					code: "STATEFUL_FORWARDING_OWNER_FENCE_INVALID",
@@ -1698,16 +1749,9 @@ export function createServerApp(
 			const request = operationRequestFromForwardingEnvelope(envelope);
 			const operationId = envelope.operationId;
 			const ctx = createProviderContext(provider, request, operationId, options, state);
-			const remainingDeadlineMs = deadlineAtMs === undefined ? undefined : deadlineAtMs - Date.now();
-			if (remainingDeadlineMs !== undefined && remainingDeadlineMs <= 0) {
+			if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
 				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
 			}
-			const signal = remainingDeadlineMs !== undefined
-				? AbortSignal.any([
-						c.req.raw.signal,
-						AbortSignal.timeout(remainingDeadlineMs),
-					])
-				: c.req.raw.signal;
 			const output = await options.internalOperationExecutor({
 				provider,
 				operationId,

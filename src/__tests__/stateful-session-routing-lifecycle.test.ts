@@ -100,8 +100,18 @@ describe("StatefulSessionRouter deadlines", () => {
 });
 
 describe("StatefulSessionRouter lease lifecycle", () => {
-	it("does not release a lease established by a newer local attempt", async () => {
-		const registry = new InMemorySessionOwnerRegistry();
+	it("skips a failed-establishment release after a newer local attempt succeeds", async () => {
+		const backing = new InMemorySessionOwnerRegistry();
+		let releaseCalls = 0;
+		const registry = {
+			resolve: (...args) => backing.resolve(...args),
+			acquire: (...args) => backing.acquire(...args),
+			renew: (...args) => backing.renew(...args),
+			release: (...args) => {
+				releaseCalls += 1;
+				return backing.release(...args);
+			},
+		};
 		let releaseFirstAttempt: (() => void) | undefined;
 		let markFirstAttemptStarted: (() => void) | undefined;
 		const firstAttemptStarted = new Promise<void>((resolve) => {
@@ -141,9 +151,88 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 		});
 		releaseFirstAttempt?.();
 		expect(await firstRoute).toBe(establishmentFailure);
-		expect(await registry.resolve(sessionKey)).toMatchObject({
+		expect(releaseCalls).toBe(0);
+		expect(await backing.resolve(sessionKey)).toMatchObject({
 			ownerPodId: currentPod.podId,
 			generation: 1,
+			status: "connected",
+		});
+
+		await router.release();
+	});
+
+	it("serializes a suspended failed-establishment release before a newer local attempt", async () => {
+		const backing = new InMemorySessionOwnerRegistry();
+		let resolveCalls = 0;
+		let markReleaseStarted: (() => void) | undefined;
+		let resumeRelease: (() => void) | undefined;
+		const releaseStarted = new Promise<void>((resolve) => {
+			markReleaseStarted = resolve;
+		});
+		const releaseGate = new Promise<void>((resolve) => {
+			resumeRelease = resolve;
+		});
+		const registry = {
+			resolve: (...args) => {
+				resolveCalls += 1;
+				return backing.resolve(...args);
+			},
+			acquire: (...args) => backing.acquire(...args),
+			renew: (...args) => backing.renew(...args),
+			release: async (...args) => {
+				markReleaseStarted?.();
+				await releaseGate;
+				return backing.release(...args);
+			},
+		};
+		let releaseFirstAttempt: (() => void) | undefined;
+		let markFirstAttemptStarted: (() => void) | undefined;
+		const firstAttemptStarted = new Promise<void>((resolve) => {
+			markFirstAttemptStarted = resolve;
+		});
+		const firstAttemptGate = new Promise<void>((resolve) => {
+			releaseFirstAttempt = resolve;
+		});
+		const establishmentFailure = new Error("first establishment failed");
+		Object.defineProperty(
+			establishmentFailure,
+			Symbol.for("@apifuse/provider-sdk/stateful/session-establishment-failure@1"),
+			{ value: true },
+		);
+		const router = new StatefulSessionRouter({
+			currentPod,
+			registry,
+			forwarder: unusedForwarder,
+			executor: {
+				executeLocal: async (operationRequest, owner, signal, validateOwnership) => {
+					if (operationRequest.requestId === "request-a") {
+						markFirstAttemptStarted?.();
+						await firstAttemptGate;
+						throw establishmentFailure;
+					}
+					await validateOwnership?.(owner, signal);
+					return { output: "connected" };
+				},
+			},
+			leaseDurationMs: 1_000,
+		});
+
+		const firstRoute = router.route(request({ requestId: "request-a" })).catch((error) => error);
+		await firstAttemptStarted;
+		releaseFirstAttempt?.();
+		await releaseStarted;
+		const resolvesBeforeNewAttempt = resolveCalls;
+		const secondRoute = router.route(request({ requestId: "request-b" }));
+		await Bun.sleep(0);
+		expect(resolveCalls).toBe(resolvesBeforeNewAttempt);
+		resumeRelease?.();
+		expect(await firstRoute).toBe(establishmentFailure);
+		await expect(secondRoute).resolves.toEqual({
+			output: "connected",
+		});
+		expect(await backing.resolve(sessionKey)).toMatchObject({
+			ownerPodId: currentPod.podId,
+			generation: 2,
 			status: "connected",
 		});
 
@@ -185,6 +274,7 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 
 		await expect(failedRouter.route(request())).rejects.toThrow("connect failed");
 		expect(releaseCalls).toBe(1);
+		expect(failedRouter.latestLocalAttemptCountForTesting).toBe(0);
 		expect(await backing.resolve(sessionKey)).toBeNull();
 		const renewsAfterFailure = renewCalls;
 		await Bun.sleep(40);
@@ -206,6 +296,24 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 		await nextRouter.route(request());
 		expect(acquiredGeneration).toBe(2);
 		await nextRouter.release();
+	});
+
+	it("cleans the latest local attempt after releaseSession completes", async () => {
+		const registry = new InMemorySessionOwnerRegistry();
+		const router = new StatefulSessionRouter({
+			currentPod,
+			registry,
+			forwarder: unusedForwarder,
+			executor: {
+				executeLocal: async () => ({ output: "ok" }),
+			},
+			leaseDurationMs: 1_000,
+		});
+
+		await router.route(request());
+		expect(router.latestLocalAttemptCountForTesting).toBe(1);
+		await expect(router.releaseSession(sessionKey)).resolves.toBe(true);
+		expect(router.latestLocalAttemptCountForTesting).toBe(0);
 	});
 
 	it("renews held sessions, connects before marking connected, and stops on release", async () => {

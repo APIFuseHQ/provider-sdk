@@ -134,6 +134,7 @@ export class StatefulSessionRouter {
 	readonly #metricEmitter: StatefulProviderMetricEmitter;
 	readonly #managedLeases = new Map<SessionKey, ManagedLease>();
 	readonly #latestLocalAttempts = new Map<SessionKey, number>();
+	readonly #establishmentQueues = new Map<SessionKey, Promise<void>>();
 	#nextLocalAttempt = 0;
 
 	constructor(options: StatefulSessionRouterOptions) {
@@ -169,55 +170,77 @@ export class StatefulSessionRouter {
 		const deadlineSignal = makeDeadlineSignal(request, now);
 
 		try {
-			const resolved = await this.#registry.resolve(request.sessionKey, now, deadlineSignal.signal);
-			if (resolved) {
-				validateOwnerGeneration(resolved);
-				return await this.routeToOwner(request, resolved, deadlineSignal);
-			}
-
-			const acquired = await this.#registry.acquire(
-				{
-					sessionKey: request.sessionKey,
-					ownerPodId: this.#currentPod.podId,
-					ownerEndpoint: this.#currentPod.endpoint,
-					leaseDurationMs: this.#leaseDurationMs,
-					status: "acquiring",
+			const route = await this.runEstablishmentTask(request.sessionKey, async () => {
+				const resolved = await this.#registry.resolve(
+					request.sessionKey,
 					now,
-				},
-				deadlineSignal.signal,
-			);
-			validateOwnerGeneration(acquired.record);
-			this.#metricEmitter.increment(
-				"apifuse_stateful_provider_routing_reacquire_total",
-				metricLabels(request, acquired.record),
-			);
-			return await this.routeToOwner(request, acquired.record, deadlineSignal);
+					deadlineSignal.signal,
+				);
+				if (resolved) {
+					validateOwnerGeneration(resolved);
+					return this.prepareRouteToOwner(request, resolved, deadlineSignal.signal);
+				}
+
+				const acquired = await this.#registry.acquire(
+					{
+						sessionKey: request.sessionKey,
+						ownerPodId: this.#currentPod.podId,
+						ownerEndpoint: this.#currentPod.endpoint,
+						leaseDurationMs: this.#leaseDurationMs,
+						status: "acquiring",
+						now,
+					},
+					deadlineSignal.signal,
+				);
+				validateOwnerGeneration(acquired.record);
+				this.#metricEmitter.increment(
+					"apifuse_stateful_provider_routing_reacquire_total",
+					metricLabels(request, acquired.record),
+				);
+				return this.prepareRouteToOwner(request, acquired.record, deadlineSignal.signal);
+			});
+			return await this.routeToOwner(request, route, deadlineSignal);
 		} finally {
 			deadlineSignal.cleanup();
 		}
 	}
 
 	async release(): Promise<void> {
-		await Promise.all([...this.#managedLeases.keys()].map((key) => this.releaseSession(key)));
+		const sessionKeys = new Set([
+			...this.#managedLeases.keys(),
+			...this.#latestLocalAttempts.keys(),
+		]);
+		await Promise.all([...sessionKeys].map((key) => this.releaseSession(key)));
 	}
 
 	async releaseSession(sessionKey: SessionKey): Promise<boolean> {
-		const managed = this.#managedLeases.get(sessionKey);
-		if (!managed) return false;
-		this.stopManagedLease(managed);
-		this.#managedLeases.delete(sessionKey);
-		return this.#registry.release({
-			sessionKey,
-			ownerPodId: managed.record.ownerPodId,
-			generation: managed.record.generation,
+		return this.runEstablishmentTask(sessionKey, async () => {
+			try {
+				const managed = this.#managedLeases.get(sessionKey);
+				if (!managed) return false;
+				this.stopManagedLease(managed);
+				this.#managedLeases.delete(sessionKey);
+				return await this.#registry.release({
+					sessionKey,
+					ownerPodId: managed.record.ownerPodId,
+					generation: managed.record.generation,
+				});
+			} finally {
+				this.#latestLocalAttempts.delete(sessionKey);
+			}
 		});
 	}
 
-	private async routeToOwner<TInput = unknown>(
+	/** @internal Test-only visibility into local-attempt lifecycle cleanup. */
+	get latestLocalAttemptCountForTesting(): number {
+		return this.#latestLocalAttempts.size;
+	}
+
+	private async prepareRouteToOwner<TInput = unknown>(
 		request: StatefulOperationRequest<TInput>,
 		owner: SessionOwnerRecord,
-		deadlineSignal: DeadlineSignal,
-	): Promise<StatefulOperationResult> {
+		signal: AbortSignal,
+	): Promise<{ readonly owner: SessionOwnerRecord; readonly localAttempt?: number }> {
 		if (owner.sessionKey !== request.sessionKey) {
 			throw new StatefulRoutingOwnershipError(
 				request.requestId,
@@ -225,43 +248,57 @@ export class StatefulSessionRouter {
 				"Resolved stateful session owner does not match request session key.",
 			);
 		}
-		if (owner.ownerPodId === this.#currentPod.podId) {
-			const localAttempt = ++this.#nextLocalAttempt;
-			this.#latestLocalAttempts.set(request.sessionKey, localAttempt);
-			const validatedOwner = await this.validateLocalOwnership(
-				request,
-				owner,
-				deadlineSignal.signal,
-				false,
+		if (owner.ownerPodId !== this.#currentPod.podId) {
+			this.forgetManagedLease(request.sessionKey);
+			this.#metricEmitter.increment(
+				"apifuse_stateful_provider_routing_forward_total",
+				metricLabels(request, owner),
 			);
+			return { owner };
+		}
+
+		const localAttempt = ++this.#nextLocalAttempt;
+		this.#latestLocalAttempts.set(request.sessionKey, localAttempt);
+		try {
+			const validatedOwner = await this.validateLocalOwnership(request, owner, signal, false);
 			this.ensureManagedLease(request.sessionKey, validatedOwner);
 			this.#metricEmitter.increment(
 				"apifuse_stateful_provider_routing_local_total",
 				metricLabels(request, validatedOwner),
 			);
+			return { owner: validatedOwner, localAttempt };
+		} catch (error) {
+			if (this.#latestLocalAttempts.get(request.sessionKey) === localAttempt) {
+				this.#latestLocalAttempts.delete(request.sessionKey);
+			}
+			throw error;
+		}
+	}
+
+	private async routeToOwner<TInput = unknown>(
+		request: StatefulOperationRequest<TInput>,
+		route: { readonly owner: SessionOwnerRecord; readonly localAttempt?: number },
+		deadlineSignal: DeadlineSignal,
+	): Promise<StatefulOperationResult> {
+		const { owner, localAttempt } = route;
+		if (localAttempt !== undefined) {
 			try {
 				return await this.#executor.executeLocal(
 					request,
-					validatedOwner,
+					owner,
 					deadlineSignal.signal,
-					(expected, signal) => this.validateLocalOwnership(request, expected, signal, true),
+					(expected, signal) =>
+						this.runEstablishmentTask(request.sessionKey, () =>
+							this.validateLocalOwnership(request, expected, signal, true),
+						),
 				);
 			} catch (error) {
 				if (isStatefulSessionEstablishmentFailure(error)) {
-					await this.releaseFailedEstablishment(
-						request.sessionKey,
-						validatedOwner,
-						localAttempt,
-					);
+					await this.releaseFailedEstablishment(request.sessionKey, owner, localAttempt);
 				}
 				throw error;
 			}
 		}
-		this.forgetManagedLease(request.sessionKey);
-		this.#metricEmitter.increment(
-			"apifuse_stateful_provider_routing_forward_total",
-			metricLabels(request, owner),
-		);
 		return this.#forwarder.forward(owner, request, deadlineSignal.signal);
 	}
 
@@ -347,6 +384,7 @@ export class StatefulSessionRouter {
 	}
 
 	private forgetManagedLease(sessionKey: SessionKey): void {
+		this.#latestLocalAttempts.delete(sessionKey);
 		const managed = this.#managedLeases.get(sessionKey);
 		if (!managed) return;
 		this.stopManagedLease(managed);
@@ -358,34 +396,62 @@ export class StatefulSessionRouter {
 		owner: SessionOwnerRecord,
 		localAttempt: number,
 	): Promise<void> {
-		if (this.#latestLocalAttempts.get(sessionKey) !== localAttempt) return;
-		const managed = this.#managedLeases.get(sessionKey);
-		if (
-			managed &&
-			managed.record.ownerPodId === owner.ownerPodId &&
-			managed.record.generation === owner.generation
-		) {
-			this.stopManagedLease(managed);
-			this.#managedLeases.delete(sessionKey);
-		}
-		try {
-			await this.#registry.release({
-				sessionKey,
-				ownerPodId: owner.ownerPodId,
-				generation: owner.generation,
-			});
-		} catch (error) {
+		await this.runEstablishmentTask(sessionKey, async () => {
+			if (this.#latestLocalAttempts.get(sessionKey) !== localAttempt) return;
 			try {
-				console.error(
-					JSON.stringify({
-						event: "stateful_session_establishment_lease_release_failed",
-						sessionKey: owner.sessionKey,
+				const managed = this.#managedLeases.get(sessionKey);
+				if (
+					managed &&
+					managed.record.ownerPodId === owner.ownerPodId &&
+					managed.record.generation === owner.generation
+				) {
+					this.stopManagedLease(managed);
+					this.#managedLeases.delete(sessionKey);
+				}
+				try {
+					await this.#registry.release({
+						sessionKey,
 						ownerPodId: owner.ownerPodId,
 						generation: owner.generation,
-						errorClass: error instanceof Error ? error.name : "UnknownError",
-					}),
-				);
-			} catch {}
+					});
+				} catch (error) {
+					try {
+						console.error(
+							JSON.stringify({
+								event: "stateful_session_establishment_lease_release_failed",
+								sessionKey: owner.sessionKey,
+								ownerPodId: owner.ownerPodId,
+								generation: owner.generation,
+								errorClass: error instanceof Error ? error.name : "UnknownError",
+							}),
+						);
+					} catch {}
+				}
+			} finally {
+				if (this.#latestLocalAttempts.get(sessionKey) === localAttempt) {
+					this.#latestLocalAttempts.delete(sessionKey);
+				}
+			}
+		});
+	}
+
+	private async runEstablishmentTask<T>(
+		sessionKey: SessionKey,
+		task: () => T | Promise<T>,
+	): Promise<T> {
+		const previous = this.#establishmentQueues.get(sessionKey) ?? Promise.resolve();
+		const next = previous.then(task, task);
+		const settled = next.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.#establishmentQueues.set(sessionKey, settled);
+		try {
+			return await next;
+		} finally {
+			if (this.#establishmentQueues.get(sessionKey) === settled) {
+				this.#establishmentQueues.delete(sessionKey);
+			}
 		}
 	}
 
