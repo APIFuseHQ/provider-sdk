@@ -1,5 +1,9 @@
 # @apifuse/provider-sdk Changelog
 
+## 2.2.0-beta.10
+
+- Release candidate for main commit c41bd919739e0293ae8fa4d72a8a32f034cef4b8.
+
 ## 2.2.0-beta.9
 
 - Release candidate for main commit 5c78c8b (bundles #67 nodemaven required-secret + #68 transport vendor-advance).
