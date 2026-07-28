@@ -233,29 +233,22 @@ describe("signed stateful operation forwarding", () => {
 		expect(responseText).not.toContain("sensitive-envelope-material");
 	});
 
-	it("fails closed when stateful forwarding is not configured", async () => {
-		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
-			logger: () => {},
-			internalOperationExecutor: async () => ({ accepted: true }),
-		});
-		const body = forwardingBody();
-		const timestamp = new Date().toISOString();
+	it("fails fast when the internal executor has no forwarding secret", () => {
+		expect(() =>
+			createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+				logger: () => {},
+				internalOperationExecutor: async () => ({ accepted: true }),
+			}),
+		).toThrow("missing option statefulForwarding.secret");
+	});
 
-		const response = await app.request(STATEFUL_ROUTE, {
-			method: "POST",
-			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
-			body,
-		});
-		const responseText = await response.text();
-
-		expect(response.status).toBe(400);
-		expectStructuredError(
-			JSON.parse(responseText),
-			"STATEFUL_FORWARDING_NOT_CONFIGURED",
-			"Stateful forwarding is not configured.",
-		);
-		expect(responseText).not.toContain(FORWARDING_SECRET);
-		expect(responseText).not.toContain("sensitive-envelope-material");
+	it("fails fast when forwarding has no internal executor", () => {
+		expect(() =>
+			createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+				logger: () => {},
+				statefulForwarding: { secret: FORWARDING_SECRET },
+			}),
+		).toThrow("missing option internalOperationExecutor");
 	});
 
 	it("rejects a signed forwarding envelope that is not an object", async () => {

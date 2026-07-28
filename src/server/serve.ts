@@ -451,6 +451,14 @@ export type ProviderServerLogEvent =
 			resource: "browser" | "stealth";
 			errorClass: string;
 			message: string;
+	  }
+	| {
+			level: "error";
+			event: "provider_shutdown_hook_failed";
+			providerId: string;
+			hookIndex: number;
+			errorClass: string;
+			message: string;
 	  };
 
 export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
@@ -471,6 +479,28 @@ export type ProviderServerOptions = {
 	state?: ProviderRuntimeState;
 	/** Allow process-local runtime state only for local development and tests. */
 	allowMemoryStateFallback?: boolean;
+	/**
+	 * Graceful process shutdown. Hooks run in declaration order after listeners stop accepting work.
+	 *
+	 * @example
+	 * ```ts
+	 * await serve(provider, {
+	 *   shutdown: {
+	 *     hooks: [
+	 *       async () => { await emitter.flush(); },
+	 *       async () => { await sessionManager.closeAll("server-shutdown"); },
+	 *       async () => { await lease.release(); },
+	 *       async () => { await router.close(); },
+	 *     ],
+	 *   },
+	 * });
+	 * ```
+	 */
+	shutdown?: {
+		readonly hooks?: Array<() => Promise<void>>;
+		readonly signals?: boolean | NodeJS.Signals[];
+		readonly timeoutMs?: number;
+	};
 };
 
 const defaultProviderServerLogger: ProviderServerLogger = (event) => {
@@ -1406,6 +1436,7 @@ export function createServerApp(
 	provider: ProviderDefinition,
 	options: ProviderServerOptions = {},
 ): Hono {
+	validateStatefulServerConfig(options);
 	const app = new Hono();
 	const logger = options.logger ?? defaultProviderServerLogger;
 	const state =
@@ -1767,12 +1798,30 @@ export function createServerApp(
 	return app;
 }
 
+function validateStatefulServerConfig(options: ProviderServerOptions): void {
+	if (options.statefulForwarding && !options.internalOperationExecutor) {
+		throw new Error(
+			"Invalid provider server configuration: statefulForwarding requires internalOperationExecutor; missing option internalOperationExecutor.",
+		);
+	}
+	if (options.internalOperationExecutor && !options.statefulForwarding?.secret) {
+		throw new Error(
+			"Invalid provider server configuration: internalOperationExecutor requires statefulForwarding.secret; missing option statefulForwarding.secret.",
+		);
+	}
+}
+
 type BunServeRuntime = {
 	serve: (options: {
 		port: number;
 		hostname: string;
 		fetch: (request: Request) => Response | Promise<Response>;
-	}) => unknown;
+	}) => BunServerHandle;
+};
+
+type BunServerHandle = {
+	readonly port: number;
+	stop(closeActiveConnections?: boolean): Promise<void>;
 };
 
 function getBunServeRuntime(): BunServeRuntime | undefined {
@@ -1788,10 +1837,19 @@ function getBunServeRuntime(): BunServeRuntime | undefined {
 
 	return {
 		serve(options) {
-			return serve(options);
+			return serve(options) as BunServerHandle;
 		},
 	};
 }
+
+export type ProviderServerCloseOptions = {
+	readonly timeoutMs?: number;
+};
+
+export type ProviderServerHandle = {
+	readonly port: number;
+	close(options?: ProviderServerCloseOptions): Promise<void>;
+};
 
 export interface ServeOptions extends ProviderServerOptions {
 	host?: string;
@@ -1804,10 +1862,13 @@ export interface ServeOptions extends ProviderServerOptions {
 	selfTestPort?: number;
 }
 
+const DEFAULT_SHUTDOWN_TIMEOUT_MS = 30_000;
+const DEFAULT_SHUTDOWN_SIGNALS: NodeJS.Signals[] = ["SIGTERM", "SIGINT"];
+
 export async function serve(
 	provider: ProviderDefinition,
 	options: ServeOptions = {},
-): Promise<void> {
+): Promise<ProviderServerHandle> {
 	const bunRuntime = getBunServeRuntime();
 
 	if (bunRuntime === undefined) {
@@ -1815,6 +1876,11 @@ export async function serve(
 			code: "RUNTIME_UNSUPPORTED",
 		});
 	}
+	const logger = options.logger ?? defaultProviderServerLogger;
+	const configuredTimeoutMs = shutdownTimeout(
+		options.shutdown?.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS,
+	);
+	const configuredSignals = resolveShutdownSignals(options.shutdown?.signals ?? true);
 
 	const app = createServerApp(provider, {
 		logger: options.logger,
@@ -1826,7 +1892,7 @@ export async function serve(
 		statefulForwarding: options.statefulForwarding,
 	});
 
-	bunRuntime.serve({
+	const server = bunRuntime.serve({
 		port: options.port ?? DEFAULT_PORT,
 		hostname: options.host ?? DEFAULT_HOST,
 		fetch: app.fetch,
@@ -1835,6 +1901,7 @@ export async function serve(
 	// Internal self-test listener (health dependency inversion): a SEPARATE
 	// socket the tenant-facing gateway never dials. Off by default — it only
 	// starts when the shared self-test master secret env is present.
+	const servers = [server];
 	const selfTestSecrets = resolveSelfTestMasterSecrets();
 	if (selfTestSecrets) {
 		const selfTestApp = createSelfTestApp(provider, {
@@ -1842,11 +1909,111 @@ export async function serve(
 			invoke: createSelfTestInvoke(app),
 			authFlow: createSelfTestAuthFlowInvoke(app),
 		});
-		bunRuntime.serve({
-			port: options.selfTestPort ?? resolveSelfTestPort(),
-			hostname: options.host ?? DEFAULT_HOST,
-			fetch: selfTestApp.fetch,
-		});
+		servers.push(
+			bunRuntime.serve({
+				port: options.selfTestPort ?? resolveSelfTestPort(),
+				hostname: options.host ?? DEFAULT_HOST,
+				fetch: selfTestApp.fetch,
+			}),
+		);
 	}
-	await Promise.resolve();
+
+	const signalListeners = new Map<NodeJS.Signals, () => void>();
+	let closePromise: Promise<void> | undefined;
+
+	const removeSignalListeners = () => {
+		for (const [signal, listener] of signalListeners) {
+			process.removeListener(signal, listener);
+		}
+		signalListeners.clear();
+	};
+
+	const close = (closeOptions: ProviderServerCloseOptions = {}): Promise<void> => {
+		if (closePromise) return closePromise;
+		const timeoutMs = shutdownTimeout(closeOptions.timeoutMs ?? configuredTimeoutMs);
+		closePromise = closeProviderServers({
+			servers,
+			hooks: options.shutdown?.hooks ?? [],
+			timeoutMs,
+			logger,
+			providerId: provider.id,
+		}).finally(removeSignalListeners);
+		return closePromise;
+	};
+
+	for (const signal of configuredSignals) {
+		const listener = () => {
+			removeSignalListeners();
+			void close({ timeoutMs: configuredTimeoutMs }).finally(() => {
+				try {
+					process.kill(process.pid, signal);
+				} catch {
+					process.exitCode = 1;
+				}
+			});
+		};
+		signalListeners.set(signal, listener);
+		process.once(signal, listener);
+	}
+
+	return { port: server.port, close };
+}
+
+async function closeProviderServers(input: {
+	readonly servers: BunServerHandle[];
+	readonly hooks: Array<() => Promise<void>>;
+	readonly timeoutMs: number;
+	readonly logger: ProviderServerLogger;
+	readonly providerId: string;
+}): Promise<void> {
+	const deadline = Date.now() + input.timeoutMs;
+	const gracefulStops = input.servers.map((server) => server.stop(false));
+	for (const gracefulStop of gracefulStops) gracefulStop.catch(() => undefined);
+	for (const [hookIndex, hook] of input.hooks.entries()) {
+		try {
+			await withinShutdownBudget(Promise.resolve().then(hook), deadline);
+		} catch (error) {
+			try {
+				input.logger({
+					level: "error",
+					event: "provider_shutdown_hook_failed",
+					providerId: input.providerId,
+					hookIndex,
+					errorClass: error instanceof Error ? error.name : "UnknownError",
+					message: error instanceof Error ? error.message : "Shutdown hook failed.",
+				});
+			} catch {}
+		}
+	}
+	const forcedStops = input.servers.map((server) => server.stop(true));
+	await withinShutdownBudget(
+		Promise.allSettled([...gracefulStops, ...forcedStops]).then(() => undefined),
+		deadline,
+	).catch(() => undefined);
+}
+
+async function withinShutdownBudget<T>(promise: Promise<T>, deadline: number): Promise<T> {
+	promise.catch(() => undefined);
+	const remainingMs = Math.max(0, deadline - Date.now());
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_resolve, reject) => {
+		timer = setTimeout(() => reject(new Error("Provider server shutdown timed out.")), remainingMs);
+	});
+	try {
+		return await Promise.race([promise, timeout]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
+function resolveShutdownSignals(signals: boolean | NodeJS.Signals[]): NodeJS.Signals[] {
+	if (signals === false) return [];
+	return [...new Set(signals === true ? DEFAULT_SHUTDOWN_SIGNALS : signals)];
+}
+
+function shutdownTimeout(value: number): number {
+	if (!Number.isFinite(value) || value < 0) {
+		throw new Error("Provider server shutdown timeoutMs must be a non-negative finite number.");
+	}
+	return value;
 }

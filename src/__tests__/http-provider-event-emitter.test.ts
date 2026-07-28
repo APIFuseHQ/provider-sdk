@@ -1,6 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 
 import {
+	buildSessionKey,
 	HttpProviderEventEmitter,
 	RecordingProviderEventDeliveryFailureRecorder,
 	type ProviderEvent,
@@ -8,6 +9,17 @@ import {
 } from "../../dist/stateful/index.js";
 
 const SECRET = "event-emitter-test-secret";
+const OWNER_FENCE = {
+	sessionKey: buildSessionKey({
+		providerId: "provider-1",
+		serviceAccountId: "sa-1",
+		connectionId: "connection-1",
+		dimensions: {},
+	}),
+	generation: 9,
+	ownerPodId: "pod-a",
+	ownerEndpoint: "http://pod-a.internal",
+};
 
 function event(eventId: string): ProviderEvent {
 	return {
@@ -45,16 +57,21 @@ describe("HttpProviderEventEmitter", () => {
 				retryMaxMs: 1,
 				jitterRatio: 0,
 			});
-			emitter.publish(event("event-1"));
+			const ack = emitter.publish(event("event-1"), {
+				ownerFence: OWNER_FENCE,
+				idempotencyKey: "custom-idempotency-key",
+			});
 
-			expect(await emitter.flush(1_000)).toBe(true);
+			expect(ack).toEqual({ accepted: true, queued: 1 });
+			expect(await emitter.flush(1_000)).toEqual({ delivered: 1, failed: 0, pending: 0 });
 			expect(requests).toHaveLength(2);
-			expect(requests[0]?.eventId).toBe("event-1");
-			expect(requests[1]?.eventId).toBe("event-1");
+			expect(requests[0]?.eventId).toBe("custom-idempotency-key");
+			expect(requests[1]?.eventId).toBe("custom-idempotency-key");
 			expect(requests[1]?.body).toBe(requests[0]?.body);
 			expect(JSON.parse(requests[0]?.body ?? "{}")).toMatchObject({
 				eventId: "event-1",
 				session: { generation: 9 },
+				ownerFence: OWNER_FENCE,
 			});
 			expect(emitter.pendingCount()).toBe(0);
 		} finally {
@@ -87,15 +104,15 @@ describe("HttpProviderEventEmitter", () => {
 				failureRecorder: failures,
 				metricEmitter: metrics,
 			});
-			emitter.publish(event("oldest"));
-			emitter.publish(event("second"));
-			emitter.publish(event("third"));
+			emitter.publish(event("oldest"), { ownerFence: OWNER_FENCE });
+			emitter.publish(event("second"), { ownerFence: OWNER_FENCE });
+			emitter.publish(event("third"), { ownerFence: OWNER_FENCE });
 
 			expect(failures.failures).toEqual([
 				expect.objectContaining({ eventId: "oldest", reason: "buffer_overflow" }),
 			]);
 			expect(metricNames).toContain("apifuse_stateful_provider_event_drop_total");
-			expect(await emitter.flush(1_000)).toBe(true);
+			expect(await emitter.flush(1_000)).toEqual({ delivered: 2, failed: 1, pending: 0 });
 			expect(delivered).toEqual(["second", "third"]);
 		} finally {
 			server.stop(true);
@@ -117,8 +134,8 @@ describe("HttpProviderEventEmitter", () => {
 			failureRecorder: failures,
 		});
 
-		expect(() => emitter.publish(event("event-down"))).not.toThrow();
-		expect(await emitter.flush(1_000)).toBe(true);
+		expect(() => emitter.publish(event("event-down"), { ownerFence: OWNER_FENCE })).not.toThrow();
+		expect(await emitter.flush(1_000)).toEqual({ delivered: 0, failed: 1, pending: 0 });
 		expect(emitter.pendingCount()).toBe(0);
 		expect(failures.failures).toEqual([
 			expect.objectContaining({
@@ -127,5 +144,53 @@ describe("HttpProviderEventEmitter", () => {
 				attempts: 2,
 			}),
 		]);
+	});
+
+	it("reports events still pending when the flush budget expires", async () => {
+		let finishRequest: (() => void) | undefined;
+		const emitter = new HttpProviderEventEmitter({
+			baseUrl: "http://platform.invalid",
+			secret: SECRET,
+			fetch: async () => {
+				await new Promise<void>((resolve) => {
+					finishRequest = resolve;
+				});
+				return new Response(null, { status: 204 });
+			},
+		});
+
+		emitter.publish(event("pending"), { ownerFence: OWNER_FENCE });
+		expect(await emitter.flush(1)).toEqual({ delivered: 0, failed: 0, pending: 1 });
+		finishRequest?.();
+		expect(await emitter.flush(1_000)).toEqual({ delivered: 1, failed: 0, pending: 0 });
+	});
+
+	it("logs structured loss details by default when publication is rejected", () => {
+		const error = spyOn(console, "error").mockImplementation(() => {});
+		try {
+			const emitter = new HttpProviderEventEmitter({
+				baseUrl: "http://platform.invalid",
+				secret: SECRET,
+			});
+			const cyclic: Record<string, unknown> = {};
+			cyclic.self = cyclic;
+			const rejected = emitter.publish(
+				{ ...event("cyclic"), payload: cyclic },
+				{
+					ownerFence: OWNER_FENCE,
+				},
+			);
+
+			expect(rejected).toEqual({ accepted: false, queued: 0 });
+			expect(error).toHaveBeenCalledTimes(1);
+			expect(JSON.parse(String(error.mock.calls[0]?.[0]))).toEqual({
+				event: "provider_event_delivery_failed",
+				eventId: "cyclic",
+				reason: "attempts_exhausted",
+				attempts: 0,
+			});
+		} finally {
+			error.mockRestore();
+		}
 	});
 });

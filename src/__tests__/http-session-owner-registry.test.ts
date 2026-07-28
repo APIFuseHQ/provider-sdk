@@ -2,12 +2,23 @@ import { createHmac } from "node:crypto";
 
 import { describe, expect, it } from "bun:test";
 
-import { HttpSessionOwnerRegistry, StatefulControlPlaneError } from "../../dist/stateful/index.js";
+import {
+	AmbiguousRegistryOperationError,
+	buildSessionKey,
+	HttpSessionOwnerRegistry,
+	StatefulControlPlaneError,
+} from "../../dist/stateful/index.js";
 
 const SECRET = "control-plane-test-secret";
 const NOW = new Date("2026-01-01T00:00:00.000Z");
+const SESSION_KEY = buildSessionKey({
+	providerId: "provider-1",
+	serviceAccountId: "sa-1",
+	connectionId: "connection-1",
+	dimensions: {},
+});
 const OWNER = {
-	sessionKey: "session-1",
+	sessionKey: SESSION_KEY,
 	ownerPodId: "pod-a",
 	ownerEndpoint: "http://pod-a",
 	generation: 7,
@@ -47,10 +58,10 @@ describe("HttpSessionOwnerRegistry", () => {
 				clock: () => NOW,
 			});
 
-			expect(await registry.resolve("session-1", NOW)).toEqual(OWNER);
+			expect(await registry.resolve(SESSION_KEY, NOW)).toEqual(OWNER);
 			expect(
 				await registry.acquire({
-					sessionKey: "session-1",
+					sessionKey: SESSION_KEY,
 					ownerPodId: "pod-a",
 					ownerEndpoint: "http://pod-a",
 					leaseDurationMs: 60_000,
@@ -59,7 +70,7 @@ describe("HttpSessionOwnerRegistry", () => {
 			).toEqual({ record: OWNER, acquired: true });
 			expect(
 				await registry.renew({
-					sessionKey: "session-1",
+					sessionKey: SESSION_KEY,
 					ownerPodId: "pod-a",
 					generation: 7,
 					leaseDurationMs: 60_000,
@@ -68,7 +79,7 @@ describe("HttpSessionOwnerRegistry", () => {
 			).toEqual(OWNER);
 			expect(
 				await registry.release({
-					sessionKey: "session-1",
+					sessionKey: SESSION_KEY,
 					ownerPodId: "pod-a",
 					generation: 7,
 				}),
@@ -86,7 +97,7 @@ describe("HttpSessionOwnerRegistry", () => {
 				baseUrl: server.url.origin,
 				secret: SECRET,
 			});
-			expect(await registry.resolve("missing")).toBeNull();
+			expect(await registry.resolve(SESSION_KEY)).toBeNull();
 		} finally {
 			server.stop(true);
 		}
@@ -103,7 +114,7 @@ describe("HttpSessionOwnerRegistry", () => {
 					baseUrl: server.url.origin,
 					secret: SECRET,
 				});
-				const error = await registry.resolve("session-1").catch((caught) => caught);
+				const error = await registry.resolve(SESSION_KEY).catch((caught) => caught);
 				expect(error).toBeInstanceOf(StatefulControlPlaneError);
 				expect(error.code).toMatch(/STATEFUL_CONTROL_PLANE_(?:HTTP_ERROR|INVALID_RESPONSE)/);
 			} finally {
@@ -111,4 +122,97 @@ describe("HttpSessionOwnerRegistry", () => {
 			}
 		}
 	});
+
+	it("rejects generation zero and invalid owner-record session keys", async () => {
+		for (const record of [
+			{ ...OWNER, generation: 0 },
+			{ ...OWNER, sessionKey: "not-a-canonical-session-key" },
+		]) {
+			const registry = new HttpSessionOwnerRegistry({
+				baseUrl: "http://control-plane.invalid",
+				secret: SECRET,
+				fetch: async () => Response.json(record),
+			});
+			const error = await registry.resolve(SESSION_KEY).catch((caught) => caught);
+			expect(error).toBeInstanceOf(StatefulControlPlaneError);
+			expect(error.code).toBe("STATEFUL_CONTROL_PLANE_INVALID_RESPONSE");
+		}
+	});
+
+	it("combines and forwards the caller abort signal", async () => {
+		let fetchSignal: AbortSignal | undefined;
+		const registry = new HttpSessionOwnerRegistry({
+			baseUrl: "http://control-plane.invalid",
+			secret: SECRET,
+			fetch: async (_url, init) => {
+				fetchSignal = init?.signal ?? undefined;
+				return await rejectWhenAborted(fetchSignal);
+			},
+		});
+		const controller = new AbortController();
+		const resolving = registry.resolve(SESSION_KEY, undefined, controller.signal);
+		controller.abort(new Error("caller cancelled"));
+
+		const error = await resolving.catch((caught) => caught);
+		expect(fetchSignal?.aborted).toBe(true);
+		expect(error).toBeInstanceOf(StatefulControlPlaneError);
+		expect(error.message).toContain("resolve request failed");
+	});
+
+	it("times out hung requests with an actionable structured error", async () => {
+		const registry = new HttpSessionOwnerRegistry({
+			baseUrl: "http://control-plane.invalid",
+			secret: SECRET,
+			requestTimeoutMs: 5,
+			fetch: async (_url, init) => await rejectWhenAborted(init?.signal ?? undefined),
+		});
+
+		const error = await registry.resolve(SESSION_KEY).catch((caught) => caught);
+		expect(error).toBeInstanceOf(StatefulControlPlaneError);
+		expect(error.code).toBe("STATEFUL_CONTROL_PLANE_REQUEST_FAILED");
+		expect(error.message).toContain("timed out after 5ms");
+		expect(error.message).toContain("retry resolve");
+	});
+
+	it("marks mutation network failures and timeouts as ambiguous", async () => {
+		for (const registry of [
+			new HttpSessionOwnerRegistry({
+				baseUrl: "http://control-plane.invalid",
+				secret: SECRET,
+				fetch: async () => {
+					throw new Error("connection reset");
+				},
+			}),
+			new HttpSessionOwnerRegistry({
+				baseUrl: "http://control-plane.invalid",
+				secret: SECRET,
+				requestTimeoutMs: 5,
+				fetch: async (_url, init) => await rejectWhenAborted(init?.signal ?? undefined),
+			}),
+		]) {
+			const error = await registry
+				.acquire({
+					sessionKey: SESSION_KEY,
+					ownerPodId: "pod-a",
+					ownerEndpoint: "http://pod-a",
+					leaseDurationMs: 60_000,
+				})
+				.catch((caught) => caught);
+			expect(error).toBeInstanceOf(AmbiguousRegistryOperationError);
+			expect(error.code).toBe("STATEFUL_CONTROL_PLANE_OPERATION_AMBIGUOUS");
+			expect(error.ambiguous).toBe(true);
+			expect(error.message).toContain("resolve the session owner and reconcile");
+		}
+	});
 });
+
+function rejectWhenAborted(signal?: AbortSignal): Promise<Response> {
+	return new Promise((_resolve, reject) => {
+		if (!signal) return;
+		if (signal.aborted) {
+			reject(signal.reason);
+			return;
+		}
+		signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+	});
+}

@@ -1,13 +1,12 @@
 import { statefulSignedHeaders } from "../stateful-signing.js";
-import {
-	NOOP_PROVIDER_EVENT_DELIVERY_FAILURE_RECORDER,
-	type ProviderEventDeliveryFailureReason,
-	type ProviderEventDeliveryFailureRecorder,
+import type {
+	ProviderEventDeliveryFailureReason,
+	ProviderEventDeliveryFailureRecorder,
 } from "./provider-event-delivery-failures.js";
 import type {
-	AppendProviderEventAndEnqueueWebhooksResult,
-	ProviderEventPipeline,
-	ProviderEventPipelineAppendOptions,
+	ProviderEventPublisher,
+	ProviderEventPublishOptions,
+	PublishAck,
 } from "./provider-event-pipeline.js";
 import {
 	NOOP_PROVIDER_EVENT_METRIC_EMITTER,
@@ -36,6 +35,7 @@ export type HttpProviderEventEmitterOptions = {
 type BufferedEvent = {
 	readonly event: ProviderEvent;
 	readonly rawBody: string;
+	readonly idempotencyKey: string;
 	attempts: number;
 	dropped: boolean;
 	abortController?: AbortController;
@@ -47,7 +47,34 @@ const DEFAULT_RETRY_MAX_MS = 30_000;
 const DEFAULT_MAX_ATTEMPTS = 10;
 const DEFAULT_JITTER_RATIO = 0.2;
 
-export class HttpProviderEventEmitter implements ProviderEventPipeline {
+export type ProviderEventFlushReport = {
+	/** Events delivered during this emitter's lifetime. */
+	readonly delivered: number;
+	/** Events permanently dropped during this emitter's lifetime. */
+	readonly failed: number;
+	/** Events still buffered when flush returned. */
+	readonly pending: number;
+};
+
+const CONSOLE_PROVIDER_EVENT_DELIVERY_FAILURE_RECORDER = {
+	record(failure) {
+		console.error(
+			JSON.stringify({
+				event: "provider_event_delivery_failed",
+				eventId: failure.eventId,
+				reason: failure.reason,
+				attempts: failure.attempts,
+			}),
+		);
+	},
+} satisfies ProviderEventDeliveryFailureRecorder;
+
+/**
+ * Provider-pod HTTP publication with a bounded best-effort delivery guarantee and at-least-once
+ * transport retries. This is not durable at-least-once delivery: buffered events can be lost if
+ * the process is killed. Graceful shutdown should drain the in-memory buffer with flush().
+ */
+export class HttpProviderEventEmitter implements ProviderEventPublisher {
 	readonly #baseUrl: string;
 	readonly #secret: string;
 	readonly #fetch: FetchTransport;
@@ -62,6 +89,8 @@ export class HttpProviderEventEmitter implements ProviderEventPipeline {
 	readonly #jitterRatio: number;
 	readonly #queue: BufferedEvent[] = [];
 	#drainPromise?: Promise<void>;
+	#deliveredCount = 0;
+	#failedCount = 0;
 
 	constructor(options: HttpProviderEventEmitterOptions) {
 		if (options.baseUrl.trim().length === 0) {
@@ -77,7 +106,7 @@ export class HttpProviderEventEmitter implements ProviderEventPipeline {
 		this.#random = options.random ?? Math.random;
 		this.#metricEmitter = options.metricEmitter ?? NOOP_PROVIDER_EVENT_METRIC_EMITTER;
 		this.#failureRecorder =
-			options.failureRecorder ?? NOOP_PROVIDER_EVENT_DELIVERY_FAILURE_RECORDER;
+			options.failureRecorder ?? CONSOLE_PROVIDER_EVENT_DELIVERY_FAILURE_RECORDER;
 		this.#maxBufferedEvents = positiveInteger(
 			options.maxBufferedEvents ?? DEFAULT_MAX_BUFFERED_EVENTS,
 			"maxBufferedEvents",
@@ -94,56 +123,43 @@ export class HttpProviderEventEmitter implements ProviderEventPipeline {
 		}
 	}
 
-	publish(event: ProviderEvent): void {
-		this.#enqueue(event);
-	}
-
-	async appendAndFanout(
-		event: ProviderEvent,
-		options: ProviderEventPipelineAppendOptions = {},
-	): Promise<AppendProviderEventAndEnqueueWebhooksResult> {
-		if (options.beforeAppend && !(await options.beforeAppend())) {
-			this.#incrementDropMetric(event, options.metricEmitter);
-			return {
-				appended: false,
-				appendedCount: 0,
-				matchedSubscriptionCount: 0,
-				enqueuedCount: 0,
-				fenced: true,
-			};
-		}
-		const accepted = this.#enqueue(event);
-		return {
-			appended: accepted,
-			appendedCount: accepted ? 1 : 0,
-			matchedSubscriptionCount: 0,
-			enqueuedCount: 0,
-		};
+	publish(event: ProviderEvent, options: ProviderEventPublishOptions): PublishAck {
+		const accepted = this.#enqueue(event, options);
+		return { accepted, queued: this.#queue.length };
 	}
 
 	pendingCount(): number {
 		return this.#queue.length;
 	}
 
-	async flush(timeoutMs = 30_000): Promise<boolean> {
+	async flush(timeoutMs = 30_000): Promise<ProviderEventFlushReport> {
 		nonnegativeFinite(timeoutMs, "flush timeout");
 		this.#ensureDrain();
-		if (this.#queue.length === 0) return true;
-		if (timeoutMs === 0) return false;
+		if (this.#queue.length === 0 || timeoutMs === 0) return this.#flushReport();
 		let timeout: ReturnType<typeof setTimeout> | undefined;
-		const timedOut = new Promise<false>((resolve) => {
-			timeout = setTimeout(() => resolve(false), timeoutMs);
+		const timedOut = new Promise<void>((resolve) => {
+			timeout = setTimeout(resolve, timeoutMs);
 		});
-		const drained = (this.#drainPromise ?? Promise.resolve()).then(() => true as const);
-		const result = await Promise.race([drained, timedOut]);
+		await Promise.race([this.#drainPromise ?? Promise.resolve(), timedOut]);
 		if (timeout) clearTimeout(timeout);
-		return result && this.#queue.length === 0;
+		return this.#flushReport();
 	}
 
-	#enqueue(event: ProviderEvent): boolean {
+	#flushReport(): ProviderEventFlushReport {
+		return {
+			delivered: this.#deliveredCount,
+			failed: this.#failedCount,
+			pending: this.#queue.length,
+		};
+	}
+
+	#enqueue(event: ProviderEvent, options: ProviderEventPublishOptions): boolean {
 		let rawBody: string;
 		try {
-			rawBody = JSON.stringify(event);
+			rawBody = JSON.stringify({
+				...event,
+				ownerFence: options.ownerFence,
+			});
 		} catch (error) {
 			this.#recordFailure(event, "attempts_exhausted", 0, error);
 			return false;
@@ -156,7 +172,13 @@ export class HttpProviderEventEmitter implements ProviderEventPipeline {
 				this.#recordFailure(oldest.event, "buffer_overflow", oldest.attempts);
 			}
 		}
-		this.#queue.push({ event, rawBody, attempts: 0, dropped: false });
+		this.#queue.push({
+			event,
+			rawBody,
+			idempotencyKey: options.idempotencyKey ?? event.eventId,
+			attempts: 0,
+			dropped: false,
+		});
 		this.#ensureDrain();
 		return true;
 	}
@@ -180,6 +202,7 @@ export class HttpProviderEventEmitter implements ProviderEventPipeline {
 			if (current.dropped) continue;
 			if (delivered) {
 				if (this.#queue[0] === current) this.#queue.shift();
+				this.#deliveredCount += 1;
 				continue;
 			}
 			if (current.attempts >= this.#maxAttempts) {
@@ -200,7 +223,7 @@ export class HttpProviderEventEmitter implements ProviderEventPipeline {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
-					"x-apifuse-event-id": buffered.event.eventId,
+					"x-apifuse-event-id": buffered.idempotencyKey,
 					...statefulSignedHeaders({
 						secret: this.#secret,
 						timestamp,
@@ -235,6 +258,7 @@ export class HttpProviderEventEmitter implements ProviderEventPipeline {
 		attempts: number,
 		error?: unknown,
 	): void {
+		this.#failedCount += 1;
 		this.#incrementDropMetric(event);
 		try {
 			const recorded = this.#failureRecorder.record({
