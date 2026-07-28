@@ -59,6 +59,20 @@ try {
 	);
 
 	run("bun", ["install"], consumerDir);
+	run(
+		"bun",
+		[
+			"--eval",
+			[
+				'import { resolveProxy } from "@apifuse/provider-sdk";',
+				'if (typeof resolveProxy !== "function") throw new Error("resolveProxy is not exported");',
+				'const resolved = await resolveProxy({ proxy: "http://127.0.0.1:8080" });',
+				'if (resolved.url !== "http://127.0.0.1:8080") throw new Error("resolveProxy returned the wrong URL");',
+				'console.log("packed root resolveProxy export OK");',
+			].join("\n"),
+		],
+		consumerDir,
+	);
 
 	const cliBin = join(consumerDir, "node_modules", ".bin", "apifuse");
 	if (!existsSync(cliBin)) {
