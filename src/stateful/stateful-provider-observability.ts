@@ -8,6 +8,7 @@ export const STATEFUL_PROVIDER_METRIC_NAMES = [
 	"apifuse_stateful_provider_session_owner_fencing_stale_total",
 	"apifuse_stateful_provider_active_sessions",
 	"apifuse_stateful_provider_lru_evictions_total",
+	"apifuse_stateful_provider_session_invalidations_total",
 	"apifuse_stateful_provider_session_operation_queue_depth",
 	"apifuse_stateful_provider_session_operation_queue_wait_ms",
 	"apifuse_stateful_provider_session_operation_duration_ms",

@@ -40,21 +40,56 @@ function operationBody(): string {
 	});
 }
 
-function forwardingBody(): string {
-	return JSON.stringify({
+function forwardingEnvelope(overrides: Record<string, unknown> = {}) {
+	return {
 		requestId: "req-stateful-forward",
 		providerId: "stateful-test-provider",
 		operationId: "echo",
-		input: { value: "forwarded" },
-		headers: { "x-request-source": "forwarder" },
-		statefulToken: "sensitive-envelope-material",
-	});
+		sessionKey: "stateful-test-provider:account:connection",
+		connectionId: "connection-1",
+		serviceAccountId: "account-1",
+		ownerPodId: "pod-owner",
+		generation: 7,
+		sourcePodId: "pod-source",
+		forwardedAt: new Date().toISOString(),
+		operationRequest: {
+			requestId: "req-stateful-forward",
+			input: { value: "forwarded" },
+			headers: { "x-request-source": "forwarder" },
+		},
+		...overrides,
+	};
 }
 
-function signedHeaders(secret: string, timestamp: string, body: string): Record<string, string> {
+function forwardingBody(overrides: Record<string, unknown> = {}): string {
+	return JSON.stringify(forwardingEnvelope(overrides));
+}
+
+function forwardingConfig(overrides: Record<string, unknown> = {}) {
+	return {
+		secret: FORWARDING_SECRET,
+		validateOwnerFence: async () => true,
+		...overrides,
+	};
+}
+
+function signedHeaders(
+	secret: string,
+	timestamp: string,
+	body: string,
+	input: { path?: string; nonce?: string } = {},
+): Record<string, string> {
 	return {
 		"content-type": "application/json",
-		...statefulSignedHeaders({ secret, timestamp, rawBody: body }),
+		"x-apifuse-stateful-source-pod": "pod-source",
+		...statefulSignedHeaders({
+			secret,
+			timestamp,
+			rawBody: body,
+			method: "POST",
+			path: input.path ?? STATEFUL_ROUTE,
+			...(input.nonce ? { nonce: input.nonce } : {}),
+		}),
 	};
 }
 
@@ -124,14 +159,14 @@ describe("signed stateful operation forwarding", () => {
 		let received: ProviderServerOperationExecutorInput | undefined;
 		const app = createServerApp(provider, {
 			logger: () => {},
-			statefulForwarding: { secret: FORWARDING_SECRET },
+			statefulForwarding: forwardingConfig(),
 			internalOperationExecutor: async (input) => {
 				received = input;
 				return { accepted: true };
 			},
 		});
-		const body = forwardingBody();
 		const timestamp = new Date().toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp });
 
 		const response = await app.request(STATEFUL_ROUTE, {
 			method: "POST",
@@ -156,7 +191,7 @@ describe("signed stateful operation forwarding", () => {
 	it("rejects missing signature headers with a structured provider error", async () => {
 		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
 			logger: () => {},
-			statefulForwarding: { secret: FORWARDING_SECRET },
+			statefulForwarding: forwardingConfig(),
 			internalOperationExecutor: async () => ({ accepted: true }),
 		});
 
@@ -180,16 +215,18 @@ describe("signed stateful operation forwarding", () => {
 	it("rejects an invalid signature without echoing secret material", async () => {
 		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
 			logger: () => {},
-			statefulForwarding: { secret: FORWARDING_SECRET },
+			statefulForwarding: forwardingConfig(),
 			internalOperationExecutor: async () => ({ accepted: true }),
 		});
-		const body = forwardingBody();
 		const timestamp = new Date().toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp });
 
 		const response = await app.request(STATEFUL_ROUTE, {
 			method: "POST",
 			headers: {
 				"content-type": "application/json",
+				"x-apifuse-stateful-nonce": "invalid-signature-nonce",
+				"x-apifuse-stateful-source-pod": "pod-source",
 				[SIGNATURE_HEADER]: "v1=invalid",
 				[TIMESTAMP_HEADER]: timestamp,
 			},
@@ -210,11 +247,11 @@ describe("signed stateful operation forwarding", () => {
 	it("rejects a signed timestamp outside the configured skew", async () => {
 		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
 			logger: () => {},
-			statefulForwarding: { secret: FORWARDING_SECRET, maxSkewMs: 1_000 },
+			statefulForwarding: forwardingConfig({ maxSkewMs: 1_000 }),
 			internalOperationExecutor: async () => ({ accepted: true }),
 		});
-		const body = forwardingBody();
 		const timestamp = new Date(Date.now() - 60_000).toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp });
 
 		const response = await app.request(STATEFUL_ROUTE, {
 			method: "POST",
@@ -246,7 +283,7 @@ describe("signed stateful operation forwarding", () => {
 		expect(() =>
 			createServerApp(createTestProvider({ defaultExecutions: 0 }), {
 				logger: () => {},
-				statefulForwarding: { secret: FORWARDING_SECRET },
+				statefulForwarding: forwardingConfig(),
 			}),
 		).toThrow("missing option internalOperationExecutor");
 	});
@@ -254,11 +291,11 @@ describe("signed stateful operation forwarding", () => {
 	it("rejects a signed forwarding envelope that is not an object", async () => {
 		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
 			logger: () => {},
-			statefulForwarding: { secret: FORWARDING_SECRET },
+			statefulForwarding: forwardingConfig(),
 			internalOperationExecutor: async () => ({ accepted: true }),
 		});
-		const body = JSON.stringify(["not-an-object"]);
 		const timestamp = new Date().toISOString();
+		const body = JSON.stringify(["not-an-object"]);
 
 		const response = await app.request(STATEFUL_ROUTE, {
 			method: "POST",
@@ -267,10 +304,132 @@ describe("signed stateful operation forwarding", () => {
 		});
 
 		expect(response.status).toBe(400);
+		const error = await response.json();
+		expect(error.error).toMatchObject({
+			code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
+			message: "Stateful forwarding envelope is invalid.",
+		});
+	});
+
+	it("rejects nonce replay inside the signature skew window", async () => {
+		let executions = 0;
+		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+			logger: () => {},
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async () => {
+				executions += 1;
+				return { accepted: true };
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp });
+		const headers = signedHeaders(FORWARDING_SECRET, timestamp, body, {
+			nonce: "one-use-nonce",
+		});
+
+		expect((await app.request(STATEFUL_ROUTE, { method: "POST", headers, body })).status).toBe(200);
+		const replay = await app.request(STATEFUL_ROUTE, { method: "POST", headers, body });
+		expect(replay.status).toBe(400);
+		expectStructuredError(
+			await replay.json(),
+			"STATEFUL_FORWARDING_REPLAY_DETECTED",
+			"Stateful forwarding nonce has already been used.",
+		);
+		expect(executions).toBe(1);
+	});
+
+	it("binds signatures to the HTTP method and route", async () => {
+		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+			logger: () => {},
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async () => ({ accepted: true }),
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp });
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body, {
+				path: "/v1/stateful/events",
+			}),
+			body,
+		});
+		expect(response.status).toBe(400);
 		expectStructuredError(
 			await response.json(),
-			"STATEFUL_FORWARDING_ENVELOPE_INVALID",
-			"Stateful forwarding envelope must be an object.",
+			"STATEFUL_FORWARDING_SIGNATURE_INVALID",
+			"Stateful forwarding signature is invalid.",
 		);
+	});
+
+	it("rejects missing owner fences and provider mismatches before execution", async () => {
+		let executions = 0;
+		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+			logger: () => {},
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async () => {
+				executions += 1;
+				return { accepted: true };
+			},
+		});
+		const missingFenceTimestamp = new Date().toISOString();
+		const missingFenceEnvelope = forwardingEnvelope({ forwardedAt: missingFenceTimestamp });
+		delete (missingFenceEnvelope as { generation?: number }).generation;
+		const missingFenceBody = JSON.stringify(missingFenceEnvelope);
+		const missingFence = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, missingFenceTimestamp, missingFenceBody),
+			body: missingFenceBody,
+		});
+		expect(missingFence.status).toBe(400);
+		expect((await missingFence.json()).error.code).toBe("STATEFUL_FORWARDING_ENVELOPE_INVALID");
+
+		const mismatchTimestamp = new Date().toISOString();
+		const mismatchBody = forwardingBody({
+			providerId: "different-provider",
+			forwardedAt: mismatchTimestamp,
+		});
+		const mismatch = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, mismatchTimestamp, mismatchBody),
+			body: mismatchBody,
+		});
+		expect(mismatch.status).toBe(400);
+		expect((await mismatch.json()).error.code).toBe("STATEFUL_FORWARDING_PROVIDER_MISMATCH");
+
+		const unknownFieldTimestamp = new Date().toISOString();
+		const unknownFieldBody = forwardingBody({
+			forwardedAt: unknownFieldTimestamp,
+			unexpected: true,
+		});
+		const unknownField = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, unknownFieldTimestamp, unknownFieldBody),
+			body: unknownFieldBody,
+		});
+		expect(unknownField.status).toBe(400);
+		expect((await unknownField.json()).error.code).toBe("STATEFUL_FORWARDING_ENVELOPE_INVALID");
+		expect(executions).toBe(0);
+	});
+
+	it("rejects a stale owner fence through the SDK-owned validation boundary", async () => {
+		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+			logger: () => {},
+			statefulForwarding: forwardingConfig({ validateOwnerFence: async () => false }),
+			internalOperationExecutor: async () => ({ accepted: true }),
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp });
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+
+		expect(response.status).toBe(400);
+		expect((await response.json()).error).toMatchObject({
+			code: "STATEFUL_FORWARDING_OWNER_FENCE_INVALID",
+			message: "Stateful forwarding owner fence is no longer current.",
+			requestId: "req-stateful-forward",
+		});
 	});
 });

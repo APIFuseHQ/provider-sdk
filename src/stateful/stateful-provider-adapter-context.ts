@@ -29,11 +29,19 @@ export function makeStatefulProviderCloseContext<TSession>(
 	providerId: string,
 	session: ManagedSession<TSession>,
 ): StatefulProviderSessionContext {
+	const identity = session.identity;
 	return {
 		sessionKey: session.sessionKey,
 		providerId,
-		connectionId: "",
-		serviceAccountId: "",
+		...(identity
+			? {
+					connectionId: identity.connectionId,
+					serviceAccountId: identity.serviceAccountId,
+					ownerPodId: identity.ownerPodId,
+					ownerEndpoint: identity.ownerEndpoint,
+					ownerStatus: identity.ownerStatus,
+				}
+			: {}),
 		generation: session.generation,
 		signal: new AbortController().signal,
 	};

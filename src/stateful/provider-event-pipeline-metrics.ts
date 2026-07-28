@@ -53,8 +53,8 @@ export function providerEventMetricLabels(event: ProviderEvent) {
 		connectionId: event.connectionId,
 		serviceAccountId: event.serviceAccountId,
 		eventType: event.eventType,
-		subjectKind: event.subject.kind,
-		subjectId: event.subject.id,
+		subjectKind: event.subject?.kind,
+		subjectId: event.subject?.id,
 		sessionKey: event.session.sessionKey,
 		generation: event.session.generation,
 	};

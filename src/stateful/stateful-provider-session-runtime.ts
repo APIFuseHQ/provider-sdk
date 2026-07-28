@@ -66,8 +66,18 @@ export interface SessionOwnerRegistry {
 
 export interface SessionPoolPolicy {
 	readonly maxSessions: number;
-	readonly idleTimeoutMs: number;
-	readonly absoluteMaxLifetimeMs: number;
+	/** Disable idle eviction for connection-owned listeners with `"unlimited"`. */
+	readonly idleTimeoutMs: number | "unlimited";
+	/** Disable age-based recycling for expensive healthy sessions with `"unlimited"`. */
+	readonly maxLifetimeMs: number | "unlimited";
+}
+
+export interface ManagedSessionIdentity {
+	readonly connectionId: string;
+	readonly serviceAccountId: string;
+	readonly ownerPodId: string;
+	readonly ownerEndpoint: string;
+	readonly ownerStatus: SessionOwnerStatus;
 }
 
 export interface ManagedSession<T> {
@@ -76,6 +86,7 @@ export interface ManagedSession<T> {
 	readonly value: T;
 	readonly createdAt: string;
 	readonly lastUsedAt: string;
+	readonly identity?: ManagedSessionIdentity;
 }
 
 type SessionFactory<T> = () => T | Promise<T>;
@@ -187,6 +198,7 @@ export class PodLocalSessionPool<T> {
 		generation: number,
 		factory: SessionFactory<T>,
 		now: Date = new Date(),
+		identity?: ManagedSessionIdentity,
 	): Promise<ManagedSession<T>> {
 		validateGeneration(generation);
 		const existingCreate = this.#creates.get(sessionKey);
@@ -195,7 +207,7 @@ export class PodLocalSessionPool<T> {
 				await existingCreate;
 			} catch {}
 		}
-		const create = this.getOrCreateUnlocked(sessionKey, generation, factory, now);
+		const create = this.getOrCreateUnlocked(sessionKey, generation, factory, now, identity);
 		this.#creates.set(sessionKey, create);
 		try {
 			return await create;
@@ -209,6 +221,7 @@ export class PodLocalSessionPool<T> {
 		generation: number,
 		factory: SessionFactory<T>,
 		now: Date,
+		identity?: ManagedSessionIdentity,
 	): Promise<ManagedSession<T>> {
 		await this.evictExpired(now);
 
@@ -227,6 +240,7 @@ export class PodLocalSessionPool<T> {
 			value: await factory(),
 			createdAt: now.toISOString(),
 			lastUsedAt: now.toISOString(),
+			...(identity ? { identity } : {}),
 		};
 		this.#sessions.set(sessionKey, session);
 		await this.evictOverCapacity();
@@ -234,8 +248,16 @@ export class PodLocalSessionPool<T> {
 	}
 
 	async closeAll(reason: string): Promise<void> {
+		const errors: unknown[] = [];
 		for (const sessionKey of [...this.#sessions.keys()]) {
-			await this.closeOne(sessionKey, reason);
+			try {
+				await this.closeOne(sessionKey, reason);
+			} catch (error) {
+				errors.push(error);
+			}
+		}
+		if (errors.length > 0) {
+			throw new AggregateError(errors, `Failed to close ${errors.length} stateful session(s).`);
 		}
 	}
 
@@ -311,8 +333,10 @@ function isSessionExpired<T>(
 ): boolean {
 	const nowMs = now.getTime();
 	return (
-		nowMs - Date.parse(session.lastUsedAt) >= policy.idleTimeoutMs ||
-		nowMs - Date.parse(session.createdAt) >= policy.absoluteMaxLifetimeMs
+		(policy.idleTimeoutMs !== "unlimited" &&
+			nowMs - Date.parse(session.lastUsedAt) >= policy.idleTimeoutMs) ||
+		(policy.maxLifetimeMs !== "unlimited" &&
+			nowMs - Date.parse(session.createdAt) >= policy.maxLifetimeMs)
 	);
 }
 
@@ -332,11 +356,17 @@ function validatePoolPolicy(policy: SessionPoolPolicy): void {
 	if (!Number.isInteger(policy.maxSessions) || policy.maxSessions <= 0) {
 		throw new Error("Session pool maxSessions must be a positive integer.");
 	}
-	if (!Number.isFinite(policy.idleTimeoutMs) || policy.idleTimeoutMs <= 0) {
-		throw new Error("Session pool idleTimeoutMs must be a positive finite number.");
+	if (
+		policy.idleTimeoutMs !== "unlimited" &&
+		(!Number.isFinite(policy.idleTimeoutMs) || policy.idleTimeoutMs <= 0)
+	) {
+		throw new Error('Session pool idleTimeoutMs must be a positive finite number or "unlimited".');
 	}
-	if (!Number.isFinite(policy.absoluteMaxLifetimeMs) || policy.absoluteMaxLifetimeMs <= 0) {
-		throw new Error("Session pool absoluteMaxLifetimeMs must be a positive finite number.");
+	if (
+		policy.maxLifetimeMs !== "unlimited" &&
+		(!Number.isFinite(policy.maxLifetimeMs) || policy.maxLifetimeMs <= 0)
+	) {
+		throw new Error('Session pool maxLifetimeMs must be a positive finite number or "unlimited".');
 	}
 }
 

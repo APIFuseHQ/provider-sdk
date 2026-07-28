@@ -5,7 +5,8 @@ import {
 } from "../server/index.js";
 import { z } from "zod";
 
-import { signStatefulRequestBody } from "../stateful-signing.js";
+import { signStatefulRequestBody, statefulSignedHeaders } from "../stateful-signing.js";
+import type { ProviderServerStatefulForwardEnvelope } from "../server/serve.js";
 
 import type {
 	StatefulOperationRequest,
@@ -13,11 +14,16 @@ import type {
 	StatefulOwnerForwarder,
 } from "./stateful-provider-session-routing.js";
 import { forwardingContextFromStatefulRuntimeContext } from "./stateful-provider-session-routing.js";
-import type { SessionOwnerRecord } from "./stateful-provider-session-runtime.js";
+import type { SessionKey } from "./session-key.js";
+import type {
+	SessionOwnerRecord,
+	SessionOwnerRegistry,
+} from "./stateful-provider-session-runtime.js";
 
 export const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
 export const STATEFUL_FORWARDING_SIGNATURE_HEADER = "x-apifuse-stateful-signature";
 export const STATEFUL_FORWARDING_TIMESTAMP_HEADER = "x-apifuse-stateful-timestamp";
+export const STATEFUL_FORWARDING_NONCE_HEADER = "x-apifuse-stateful-nonce";
 export const STATEFUL_FORWARDING_SOURCE_POD_HEADER = "x-apifuse-stateful-source-pod";
 
 export interface StatefulOwnerForwarderOptions {
@@ -37,7 +43,25 @@ const SENSITIVE_HEADER_NAMES = new Set([
 	"set-cookie",
 	STATEFUL_FORWARDING_SIGNATURE_HEADER,
 	STATEFUL_FORWARDING_TIMESTAMP_HEADER,
+	STATEFUL_FORWARDING_NONCE_HEADER,
+	STATEFUL_FORWARDING_SOURCE_POD_HEADER,
 ]);
+
+/** Builds the standard fail-closed owner-currentness check for serve(). */
+export function createStatefulOwnerFenceValidator(registry: SessionOwnerRegistry) {
+	return async (
+		fence: Pick<ProviderServerStatefulForwardEnvelope, "sessionKey" | "ownerPodId" | "generation">,
+		signal: AbortSignal,
+	): Promise<boolean> => {
+		const current = await registry.resolve(fence.sessionKey as SessionKey, undefined, signal);
+		return (
+			current !== null &&
+			current.sessionKey === fence.sessionKey &&
+			current.ownerPodId === fence.ownerPodId &&
+			current.generation === fence.generation
+		);
+	};
+}
 
 export class StatefulOwnerForwardingError extends Error {
 	readonly code: string;
@@ -47,8 +71,9 @@ export class StatefulOwnerForwardingError extends Error {
 		readonly code: string;
 		readonly message: string;
 		readonly status?: number;
+		readonly cause?: unknown;
 	}) {
-		super(input.message);
+		super(input.message, input.cause === undefined ? undefined : { cause: input.cause });
 		this.name = "StatefulOwnerForwardingError";
 		this.code = input.code;
 		this.status = input.status;
@@ -85,25 +110,34 @@ export class HttpStatefulOwnerForwarder implements StatefulOwnerForwarder {
 			forwardedAt,
 		});
 		const rawBody = JSON.stringify(envelope);
-		const signature = signStatefulForwardingBody({
-			secret: this.#secret,
-			timestamp: forwardedAt,
-			rawBody,
-		});
-		const response = await this.#fetch(
-			`${owner.ownerEndpoint.replace(/\/+$/, "")}${STATEFUL_INTERNAL_OPERATIONS_ROUTE}`,
-			{
+		let response: Response;
+		try {
+			const target = new URL(
+				`${owner.ownerEndpoint.replace(/\/+$/, "")}${STATEFUL_INTERNAL_OPERATIONS_ROUTE}`,
+			);
+			response = await this.#fetch(target, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
-					[STATEFUL_FORWARDING_TIMESTAMP_HEADER]: forwardedAt,
-					[STATEFUL_FORWARDING_SIGNATURE_HEADER]: signature,
+					...statefulSignedHeaders({
+						secret: this.#secret,
+						timestamp: forwardedAt,
+						rawBody,
+						method: "POST",
+						path: STATEFUL_INTERNAL_OPERATIONS_ROUTE,
+					}),
 					[STATEFUL_FORWARDING_SOURCE_POD_HEADER]: this.#currentPodId,
 				},
 				body: rawBody,
 				signal,
-			},
-		);
+			});
+		} catch (cause) {
+			throw new StatefulOwnerForwardingError({
+				code: "STATEFUL_FORWARDING_REQUEST_FAILED",
+				message: "Stateful owner forwarding request failed before a response was received.",
+				cause,
+			});
+		}
 		return parseForwardedResponse(response);
 	}
 }
@@ -112,6 +146,9 @@ export function signStatefulForwardingBody(input: {
 	readonly secret: string;
 	readonly timestamp: string;
 	readonly rawBody: string;
+	readonly method: string;
+	readonly path: string;
+	readonly nonce: string;
 }): string {
 	return signStatefulRequestBody(input);
 }
@@ -143,7 +180,7 @@ function buildForwardingEnvelope(input: {
 	readonly request: StatefulOperationRequest;
 	readonly sourcePodId: string;
 	readonly forwardedAt: string;
-}): Record<string, unknown> {
+}): ProviderServerStatefulForwardEnvelope {
 	const metadata = forwardedMetadata(input.request);
 	return {
 		requestId: input.request.requestId,
@@ -152,15 +189,18 @@ function buildForwardingEnvelope(input: {
 		sessionKey: input.request.sessionKey,
 		connectionId: input.request.connectionId,
 		serviceAccountId: input.request.serviceAccountId,
-		input: input.request.input,
-		connection: metadata.connection,
-		headers: sanitizeForwardedHeaders(metadata.headers),
-		...(metadata.trace ? { trace: metadata.trace } : {}),
-		...(input.request.deadlineAt ? { deadlineAt: input.request.deadlineAt } : {}),
 		...(input.request.idempotencyKey ? { idempotencyKey: input.request.idempotencyKey } : {}),
 		sourcePodId: input.sourcePodId,
 		forwardedAt: input.forwardedAt,
-		owner: input.owner,
+		ownerPodId: input.owner.ownerPodId,
+		generation: input.owner.generation,
+		operationRequest: {
+			requestId: input.request.requestId,
+			input: input.request.input as Record<string, unknown>,
+			connection: metadata.connection,
+			headers: sanitizeForwardedHeaders(metadata.headers),
+			...(metadata.trace ? { trace: metadata.trace } : {}),
+		},
 	};
 }
 

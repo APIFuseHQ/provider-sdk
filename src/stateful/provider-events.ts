@@ -2,31 +2,44 @@ import { createHash, randomUUID } from "node:crypto";
 
 const DEFAULT_MAX_PAYLOAD_BYTES = 256 * 1024;
 const REDACTED_VALUE = "[REDACTED]";
-const SECRET_KEY_PATTERN = /(?:token|password|secret|credential|cookie|authorization|device|uuid)/i;
+const CREDENTIAL_KEY_PATTERN = /(?:token|password|secret|credential|cookie|authorization)/i;
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
 export type ProviderEventSubject = {
-	kind: "message" | "chat" | "member" | "session" | "auth" | "provider" | string;
+	/** Provider-defined resource category, for example `message`, `mailbox`, or `browser-context`. */
+	kind: string;
 	id: string;
 };
 
 export type ProviderEventSession = {
+	/** Canonical logical session identity shared by every stateful provider. */
 	sessionKey: string;
+	/** Ownership generation shared by every stateful provider for stale-event fencing. */
 	generation: number;
 };
 
 export interface ProviderEvent<TPayload = Record<string, unknown>> {
+	/** Universal stable identity used for transport retries and deduplication. */
 	eventId: string;
+	/** Universal provider namespace needed to route and interpret the event. */
 	providerId: string;
-	connectionId: string;
-	serviceAccountId: string;
+	/** Optional because mailbox/browser protocols may not expose an API connection identity. */
+	connectionId?: string;
+	/** Optional because not every provider session maps to a platform service account. */
+	serviceAccountId?: string;
+	/** Universal provider-defined event classification. */
 	eventType: string;
-	subject: ProviderEventSubject;
-	occurredAt: string;
+	/** Optional for protocol-level events without a single resource subject. */
+	subject?: ProviderEventSubject;
+	/** Optional when the upstream protocol does not provide an occurrence timestamp. */
+	occurredAt?: string;
+	/** Universal SDK observation time used for ordering and lag measurement. */
 	observedAt: string;
+	/** Universal JSON data envelope; protocols without data use an empty object. */
 	payload: TPayload;
+	/** Universal stateful ownership fence for rejecting events from stale sessions. */
 	session: ProviderEventSession;
 	providerCursor?: string;
 	dedupeKey?: string;
@@ -45,6 +58,8 @@ export type BuildProviderEventInput<
 	idFactory?: ProviderEventIdFactory;
 	maxPayloadBytes?: number;
 	shouldRedactPayload?: boolean;
+	/** Provider-specific credential key patterns added to the conservative SDK defaults. */
+	redactionPatterns?: readonly RegExp[];
 };
 
 export type ProviderEventListOptions = {
@@ -70,13 +85,14 @@ export interface ProviderEventLog {
 
 export type ProviderEventEmitterDefaults = {
 	providerId: string;
-	connectionId: string;
-	serviceAccountId: string;
+	connectionId?: string;
+	serviceAccountId?: string;
 	session: ProviderEventSession;
 	clock?: ProviderEventClock;
 	idFactory?: ProviderEventIdFactory;
 	maxPayloadBytes?: number;
 	shouldRedactPayload?: boolean;
+	redactionPatterns?: readonly RegExp[];
 };
 
 export type ProviderEventEmitterInput<
@@ -104,19 +120,21 @@ export function buildProviderEvent<
 	validatePayload(input.payload, input.maxPayloadBytes ?? DEFAULT_MAX_PAYLOAD_BYTES);
 	const observedAt = input.observedAt ?? input.clock?.().toISOString() ?? new Date().toISOString();
 	const payload =
-		input.shouldRedactPayload === false ? input.payload : redactProviderEventPayload(input.payload);
+		input.shouldRedactPayload === false
+			? input.payload
+			: redactProviderEventPayload(input.payload, input.redactionPatterns);
 
 	const event: ProviderEvent<TPayload> = {
 		eventId: input.eventId ?? buildEventId({ ...input, observedAt }),
 		providerId: input.providerId,
-		connectionId: input.connectionId,
-		serviceAccountId: input.serviceAccountId,
 		eventType: input.eventType,
-		subject: input.subject,
-		occurredAt: input.occurredAt,
 		observedAt,
 		payload,
 		session: input.session,
+		...(input.connectionId ? { connectionId: input.connectionId } : {}),
+		...(input.serviceAccountId ? { serviceAccountId: input.serviceAccountId } : {}),
+		...(input.subject ? { subject: input.subject } : {}),
+		...(input.occurredAt ? { occurredAt: input.occurredAt } : {}),
 		...(input.providerCursor ? { providerCursor: input.providerCursor } : {}),
 		...(input.dedupeKey ? { dedupeKey: input.dedupeKey } : {}),
 		...(input.rawRef ? { rawRef: input.rawRef } : {}),
@@ -126,9 +144,12 @@ export function buildProviderEvent<
 	return event;
 }
 
-export function redactProviderEventPayload<TPayload>(payload: TPayload): TPayload {
+export function redactProviderEventPayload<TPayload>(
+	payload: TPayload,
+	extraPatterns: readonly RegExp[] = [],
+): TPayload {
 	const cloned = structuredClone(payload);
-	redactValueInPlace(cloned);
+	redactValueInPlace(cloned, [CREDENTIAL_KEY_PATTERN, ...extraPatterns]);
 	return cloned;
 }
 
@@ -179,10 +200,10 @@ export class InMemoryProviderEventLog implements ProviderEventLog {
 			events = events.filter((event) => event.eventType === options.eventType);
 		}
 		if (options.subjectKind) {
-			events = events.filter((event) => event.subject.kind === options.subjectKind);
+			events = events.filter((event) => event.subject?.kind === options.subjectKind);
 		}
 		if (options.subjectId) {
-			events = events.filter((event) => event.subject.id === options.subjectId);
+			events = events.filter((event) => event.subject?.id === options.subjectId);
 		}
 		if (options.afterObservedAt) {
 			const afterMs = Date.parse(options.afterObservedAt);
@@ -199,8 +220,12 @@ export class ProviderEventEmitter {
 
 	constructor(log: ProviderEventLog, defaults: ProviderEventEmitterDefaults) {
 		validateRequiredString("providerId", defaults.providerId);
-		validateRequiredString("connectionId", defaults.connectionId);
-		validateRequiredString("serviceAccountId", defaults.serviceAccountId);
+		if (defaults.connectionId !== undefined) {
+			validateRequiredString("connectionId", defaults.connectionId);
+		}
+		if (defaults.serviceAccountId !== undefined) {
+			validateRequiredString("serviceAccountId", defaults.serviceAccountId);
+		}
 		validateSession(defaults.session);
 		this.#log = log;
 		this.#defaults = defaults;
@@ -219,6 +244,7 @@ export class ProviderEventEmitter {
 			idFactory: input.idFactory ?? this.#defaults.idFactory,
 			maxPayloadBytes: input.maxPayloadBytes ?? this.#defaults.maxPayloadBytes,
 			shouldRedactPayload: input.shouldRedactPayload ?? this.#defaults.shouldRedactPayload,
+			redactionPatterns: input.redactionPatterns ?? this.#defaults.redactionPatterns,
 		});
 		return this.#log.append(event);
 	}
@@ -232,7 +258,7 @@ function buildEventId<TPayload extends Record<string, unknown>>(
 	if (input.dedupeKey) {
 		return deterministicProviderEventId([
 			input.providerId,
-			input.connectionId,
+			input.connectionId ?? "",
 			input.eventType,
 			input.dedupeKey,
 		]);
@@ -242,10 +268,10 @@ function buildEventId<TPayload extends Record<string, unknown>>(
 		input.idFactory?.() ??
 		deterministicProviderEventId([
 			input.providerId,
-			input.connectionId,
+			input.connectionId ?? "",
 			input.eventType,
-			input.subject.kind,
-			input.subject.id,
+			input.subject?.kind ?? "",
+			input.subject?.id ?? "",
 			input.observedAt,
 		])
 	);
@@ -261,14 +287,20 @@ function validateProviderEvent(
 ): void {
 	validateRequiredString("eventId", event.eventId);
 	validateRequiredString("providerId", event.providerId);
-	validateRequiredString("connectionId", event.connectionId);
-	validateRequiredString("serviceAccountId", event.serviceAccountId);
+	if (event.connectionId !== undefined) validateRequiredString("connectionId", event.connectionId);
+	if (event.serviceAccountId !== undefined) {
+		validateRequiredString("serviceAccountId", event.serviceAccountId);
+	}
 	validateRequiredString("eventType", event.eventType);
-	validateRequiredString("subject.kind", event.subject?.kind);
-	validateRequiredString("subject.id", event.subject?.id);
-	validateRequiredString("occurredAt", event.occurredAt);
+	if (event.subject) {
+		validateRequiredString("subject.kind", event.subject.kind);
+		validateRequiredString("subject.id", event.subject.id);
+	}
+	if (event.occurredAt !== undefined) {
+		validateRequiredString("occurredAt", event.occurredAt);
+		validateTimestamp("occurredAt", event.occurredAt);
+	}
 	validateRequiredString("observedAt", event.observedAt);
-	validateTimestamp("occurredAt", event.occurredAt);
 	validateTimestamp("observedAt", event.observedAt);
 	validateSession(event.session);
 	if (event.providerCursor !== undefined) {
@@ -378,16 +410,16 @@ function assertJsonValue(
 	throw new ProviderEventValidationError(`ProviderEvent ${path} must be JSON-serializable.`);
 }
 
-function redactValueInPlace(value: unknown): void {
+function redactValueInPlace(value: unknown, patterns: readonly RegExp[]): void {
 	if (Array.isArray(value)) {
-		for (const entry of value) redactValueInPlace(entry);
+		for (const entry of value) redactValueInPlace(entry, patterns);
 		return;
 	}
 	if (!isPlainRecord(value)) return;
 
 	for (const [key, entry] of Object.entries(value)) {
-		if (SECRET_KEY_PATTERN.test(key)) value[key] = REDACTED_VALUE;
-		else redactValueInPlace(entry);
+		if (patterns.some((pattern) => matchesPattern(pattern, key))) value[key] = REDACTED_VALUE;
+		else redactValueInPlace(entry, patterns);
 	}
 }
 
@@ -401,9 +433,19 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function buildDedupeTuple(event: ProviderEvent): string {
-	return [event.serviceAccountId, event.providerId, event.connectionId, event.dedupeKey].join(
-		"\u001f",
-	);
+	return [
+		event.serviceAccountId ?? "",
+		event.providerId,
+		event.connectionId ?? "",
+		event.dedupeKey,
+	].join("\u001f");
+}
+
+function matchesPattern(pattern: RegExp, value: string): boolean {
+	pattern.lastIndex = 0;
+	const matched = pattern.test(value);
+	pattern.lastIndex = 0;
+	return matched;
 }
 
 function validateListOptions(options: ProviderEventListOptions): void {

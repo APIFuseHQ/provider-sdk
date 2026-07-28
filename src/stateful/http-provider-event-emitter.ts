@@ -216,10 +216,11 @@ export class HttpProviderEventEmitter implements ProviderEventPublisher {
 
 	async #send(buffered: BufferedEvent): Promise<boolean> {
 		const timestamp = this.#clock().toISOString();
+		const path = "/v1/stateful/events";
 		const abortController = new AbortController();
 		buffered.abortController = abortController;
 		try {
-			const response = await this.#fetch(`${this.#baseUrl}/v1/stateful/events`, {
+			const response = await this.#fetch(`${this.#baseUrl}${path}`, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
@@ -228,6 +229,8 @@ export class HttpProviderEventEmitter implements ProviderEventPublisher {
 						secret: this.#secret,
 						timestamp,
 						rawBody: buffered.rawBody,
+						method: "POST",
+						path,
 					}),
 				},
 				body: buffered.rawBody,

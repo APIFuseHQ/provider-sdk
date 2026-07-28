@@ -121,7 +121,7 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 		});
 		const manager = new StatefulProviderSessionManager({
 			adapter,
-			poolPolicy: { maxSessions: 2, idleTimeoutMs: 60_000, absoluteMaxLifetimeMs: 60_000 },
+			poolPolicy: { maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
 		});
 		const router = new StatefulSessionRouter({
 			currentPod,
@@ -162,7 +162,7 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 		});
 		const manager = new StatefulProviderSessionManager({
 			adapter,
-			poolPolicy: { maxSessions: 2, idleTimeoutMs: 60_000, absoluteMaxLifetimeMs: 60_000 },
+			poolPolicy: { maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
 		});
 		const router = new StatefulSessionRouter({
 			currentPod,
@@ -197,7 +197,7 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 		});
 		const manager = new StatefulProviderSessionManager({
 			adapter,
-			poolPolicy: { maxSessions: 2, idleTimeoutMs: 60_000, absoluteMaxLifetimeMs: 60_000 },
+			poolPolicy: { maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
 		});
 		const router = new StatefulSessionRouter({
 			currentPod,
@@ -217,12 +217,9 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 function makeAdapter(overrides = {}) {
 	return {
 		providerId: "test-provider",
-		capabilities: { supportsReconnect: true },
-		restore: async () => ({}),
+		policy: { concurrency: { mode: "serialize" }, reconnect: "resume" },
 		connect: async () => ({}),
 		invoke: async () => ({ output: "ok" }),
-		snapshot: async () => undefined,
-		health: async () => ({ status: "ready" }),
 		close: async () => {},
 		...overrides,
 	};

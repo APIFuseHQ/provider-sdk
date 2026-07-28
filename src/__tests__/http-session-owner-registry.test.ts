@@ -35,8 +35,10 @@ describe("HttpSessionOwnerRegistry", () => {
 			async fetch(request) {
 				const rawBody = await request.text();
 				const timestamp = request.headers.get("x-apifuse-stateful-timestamp") ?? "";
+				const nonce = request.headers.get("x-apifuse-stateful-nonce") ?? "";
+				const path = new URL(request.url).pathname;
 				const expected = `v1=${createHmac("sha256", SECRET)
-					.update(`${timestamp}.${rawBody}`)
+					.update(`v1:POST:${path}:${timestamp}:${nonce}.${rawBody}`)
 					.digest("hex")}`;
 				expect(request.headers.get("x-apifuse-stateful-signature")).toBe(expected);
 				const operation = new URL(request.url).pathname.split("/").at(-1) ?? "";

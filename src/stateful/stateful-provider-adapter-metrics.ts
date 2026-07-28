@@ -22,7 +22,7 @@ export function emitStatefulSessionInvalidatedMetric(input: {
 	readonly reason: string;
 }): void {
 	input.metricEmitter.increment(
-		"apifuse_stateful_provider_lru_evictions_total",
+		"apifuse_stateful_provider_session_invalidations_total",
 		statefulSessionMetricLabels(input.request, input.owner, {
 			redactedErrorCode: input.reason,
 		}),

@@ -211,10 +211,11 @@ export class HttpSessionOwnerRegistry implements SessionOwnerRegistry {
 	): Promise<Response> {
 		const rawBody = JSON.stringify(body);
 		const timestamp = this.#clock().toISOString();
+		const path = `/v1/stateful/sessions/owners/${operation}`;
 		const timeoutSignal = AbortSignal.timeout(this.#requestTimeoutMs);
 		const signal = AbortSignal.any(callerSignal ? [callerSignal, timeoutSignal] : [timeoutSignal]);
 		try {
-			return await this.#fetch(`${this.#baseUrl}/v1/stateful/sessions/owners/${operation}`, {
+			return await this.#fetch(`${this.#baseUrl}${path}`, {
 				method: "POST",
 				headers: {
 					"content-type": "application/json",
@@ -222,6 +223,8 @@ export class HttpSessionOwnerRegistry implements SessionOwnerRegistry {
 						secret: this.#secret,
 						timestamp,
 						rawBody,
+						method: "POST",
+						path,
 					}),
 				},
 				body: rawBody,

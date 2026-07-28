@@ -169,7 +169,7 @@ describe("PodLocalSessionPool", () => {
 	it("evicts the least recently used session at capacity", async () => {
 		const closed: Array<{ key: string; reason: string }> = [];
 		const pool = new PodLocalSessionPool<string>(
-			{ maxSessions: 2, idleTimeoutMs: 60_000, absoluteMaxLifetimeMs: 60_000 },
+			{ maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
 			(session, reason) => closed.push({ key: session.sessionKey, reason }),
 		);
 		const startedAt = new Date("2026-01-01T00:00:00.000Z");
@@ -186,7 +186,7 @@ describe("PodLocalSessionPool", () => {
 
 	it("serializes work per session key", async () => {
 		const pool = new PodLocalSessionPool<string>(
-			{ maxSessions: 2, idleTimeoutMs: 60_000, absoluteMaxLifetimeMs: 60_000 },
+			{ maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
 			() => {},
 		);
 		const order: string[] = [];

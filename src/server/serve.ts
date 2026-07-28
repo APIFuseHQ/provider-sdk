@@ -57,6 +57,7 @@ import { createTraceContext } from "../runtime/trace.js";
 import { parseSchema } from "../schema.js";
 import { getStealthProfile } from "../stealth/profiles.js";
 import {
+	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
 	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
 	STATEFUL_TIMESTAMP_HEADER as STATEFUL_FORWARDING_TIMESTAMP_HEADER,
 	verifyStatefulRequestSignature,
@@ -97,6 +98,7 @@ import {
 	type AuthFlowResponse,
 	type AuthFlowSuccessResponse,
 	type OperationErrorResponse,
+	OperationConnectionSchema,
 	type OperationRequest,
 	OperationRequestSchema,
 	type OperationResponse,
@@ -108,9 +110,51 @@ const DEFAULT_PORT = 3000;
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
+const STATEFUL_FORWARDING_SOURCE_POD_HEADER = "x-apifuse-stateful-source-pod";
 const DEFAULT_STATEFUL_FORWARDING_MAX_SKEW_MS = 5 * 60_000;
+const DEFAULT_STATEFUL_FORWARDING_REPLAY_CACHE_MAX_ENTRIES = 10_000;
 
-export type ProviderServerStatefulForwardEnvelope = Readonly<Record<string, unknown>>;
+export const ProviderServerStatefulForwardEnvelopeSchema = z
+	.object({
+		requestId: z.string().min(1),
+		providerId: z.string().min(1),
+		operationId: z.string().min(1),
+		sessionKey: z.string().min(1),
+		connectionId: z.string().min(1),
+		serviceAccountId: z.string().min(1),
+		ownerPodId: z.string().min(1),
+		generation: z.number().int().positive(),
+		sourcePodId: z.string().min(1),
+		forwardedAt: z.string().refine((value) => Number.isFinite(Date.parse(value))),
+		idempotencyKey: z.string().min(1).optional(),
+		operationRequest: OperationRequestSchema.extend({
+			connection: OperationConnectionSchema.strict().optional(),
+		}).strict(),
+	})
+	.strict();
+
+export type ProviderServerStatefulForwardEnvelope = Readonly<
+	z.infer<typeof ProviderServerStatefulForwardEnvelopeSchema>
+>;
+
+export type ProviderServerStatefulOwnerFence = Readonly<
+	Pick<
+		ProviderServerStatefulForwardEnvelope,
+		| "providerId"
+		| "sessionKey"
+		| "ownerPodId"
+		| "generation"
+		| "sourcePodId"
+		| "forwardedAt"
+		| "requestId"
+		| "idempotencyKey"
+	>
+>;
+
+export type ProviderServerStatefulOwnerFenceValidator = (
+	fence: ProviderServerStatefulOwnerFence,
+	signal: AbortSignal,
+) => boolean | Promise<boolean>;
 
 export type ProviderServerOperationExecutorInput = {
 	readonly provider: ProviderDefinition;
@@ -472,6 +516,9 @@ export type ProviderServerOptions = {
 	statefulForwarding?: {
 		readonly secret: string;
 		readonly maxSkewMs?: number;
+		readonly replayCacheMaxEntries?: number;
+		/** Required fail-closed check against the SDK/runtime owner registry. */
+		readonly validateOwnerFence: ProviderServerStatefulOwnerFenceValidator;
 	};
 	/** Optional STT override for tests or custom hosts; local/prod normally resolves from env. */
 	stt?: SttContext;
@@ -1380,10 +1427,29 @@ async function handleAuthFlow(
 	}
 }
 
+class StatefulForwardingReplayCache {
+	readonly #nonces = new Map<string, number>();
+
+	constructor(private readonly maxEntries: number) {}
+
+	claim(nonce: string, expiresAtMs: number, nowMs: number): "accepted" | "replayed" | "full" {
+		for (const [cachedNonce, expiry] of this.#nonces) {
+			if (expiry < nowMs) this.#nonces.delete(cachedNonce);
+		}
+		if (this.#nonces.has(nonce)) return "replayed";
+		if (this.#nonces.size >= this.maxEntries) return "full";
+		this.#nonces.set(nonce, expiresAtMs);
+		return "accepted";
+	}
+}
+
 function verifyStatefulForwardingRequest(input: {
 	readonly options: ProviderServerOptions;
 	readonly rawBody: string;
 	readonly headers: Headers;
+	readonly method: string;
+	readonly path: string;
+	readonly replayCache: StatefulForwardingReplayCache;
 }): void {
 	const config = input.options.statefulForwarding;
 	if (!config?.secret) {
@@ -1393,9 +1459,15 @@ function verifyStatefulForwardingRequest(input: {
 	}
 	const timestamp = input.headers.get(STATEFUL_FORWARDING_TIMESTAMP_HEADER) ?? "";
 	const signature = input.headers.get(STATEFUL_FORWARDING_SIGNATURE_HEADER) ?? "";
-	if (!timestamp || !signature) {
+	const nonce = input.headers.get(STATEFUL_FORWARDING_NONCE_HEADER) ?? "";
+	if (!timestamp || !signature || !nonce) {
 		throw new ProviderError("Stateful forwarding signature headers are missing.", {
 			code: "STATEFUL_FORWARDING_SIGNATURE_MISSING",
+		});
+	}
+	if (nonce.length > 256) {
+		throw new ProviderError("Stateful forwarding nonce is invalid.", {
+			code: "STATEFUL_FORWARDING_NONCE_INVALID",
 		});
 	}
 	const timestampMs = Date.parse(timestamp);
@@ -1411,6 +1483,9 @@ function verifyStatefulForwardingRequest(input: {
 			secret: config.secret,
 			timestamp,
 			rawBody: input.rawBody,
+			method: input.method,
+			path: input.path,
+			nonce,
 			signature,
 		})
 	) {
@@ -1418,17 +1493,31 @@ function verifyStatefulForwardingRequest(input: {
 			code: "STATEFUL_FORWARDING_SIGNATURE_INVALID",
 		});
 	}
+	const replayResult = input.replayCache.claim(nonce, timestampMs + maxSkewMs, Date.now());
+	if (replayResult === "replayed") {
+		throw new ProviderError("Stateful forwarding nonce has already been used.", {
+			code: "STATEFUL_FORWARDING_REPLAY_DETECTED",
+		});
+	}
+	if (replayResult === "full") {
+		throw new ProviderError("Stateful forwarding replay cache is at capacity.", {
+			code: "STATEFUL_FORWARDING_REPLAY_CACHE_FULL",
+		});
+	}
 }
 
 function operationRequestFromForwardingEnvelope(
 	envelope: ProviderServerStatefulForwardEnvelope,
 ): OperationRequest {
-	return OperationRequestSchema.parse({
-		requestId: envelope.requestId,
-		input: envelope.input,
-		connection: envelope.connection,
-		headers: envelope.headers,
-		trace: envelope.trace,
+	return envelope.operationRequest;
+}
+
+function parseStatefulForwardingEnvelope(rawBody: unknown): ProviderServerStatefulForwardEnvelope {
+	const parsed = ProviderServerStatefulForwardEnvelopeSchema.safeParse(rawBody);
+	if (parsed.success) return parsed.data;
+	throw new ProviderError("Stateful forwarding envelope is invalid.", {
+		code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
+		details: zodDetails(parsed.error),
 	});
 }
 
@@ -1439,6 +1528,10 @@ export function createServerApp(
 	validateStatefulServerConfig(options);
 	const app = new Hono();
 	const logger = options.logger ?? defaultProviderServerLogger;
+	const statefulForwardingReplayCache = new StatefulForwardingReplayCache(
+		options.statefulForwarding?.replayCacheMaxEntries ??
+			DEFAULT_STATEFUL_FORWARDING_REPLAY_CACHE_MAX_ENTRIES,
+	);
 	const state =
 		options.state ??
 		createProviderRuntimeStateFromEnv({
@@ -1500,16 +1593,65 @@ export function createServerApp(
 				options,
 				rawBody: rawBodyText,
 				headers: c.req.raw.headers,
+				method: c.req.raw.method,
+				path: STATEFUL_INTERNAL_OPERATIONS_ROUTE,
+				replayCache: statefulForwardingReplayCache,
 			});
-			rawBody = JSON.parse(rawBodyText);
-			if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
-				throw new ProviderError("Stateful forwarding envelope must be an object.", {
+			try {
+				rawBody = JSON.parse(rawBodyText);
+			} catch {
+				throw new ProviderError("Stateful forwarding envelope is not valid JSON.", {
 					code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
 				});
 			}
-			const envelope = rawBody as ProviderServerStatefulForwardEnvelope;
+			const envelope = parseStatefulForwardingEnvelope(rawBody);
+			if (envelope.providerId !== provider.id) {
+				throw new ProviderError(
+					"Stateful forwarding envelope providerId does not match the served provider.",
+					{ code: "STATEFUL_FORWARDING_PROVIDER_MISMATCH" },
+				);
+			}
+			if (envelope.requestId !== envelope.operationRequest.requestId) {
+				throw new ProviderError("Stateful forwarding requestId values do not match.", {
+					code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
+				});
+			}
+			if (
+				envelope.sourcePodId !==
+				(c.req.raw.headers.get(STATEFUL_FORWARDING_SOURCE_POD_HEADER) ?? "")
+			) {
+				throw new ProviderError("Stateful forwarding source pod does not match its header.", {
+					code: "STATEFUL_FORWARDING_SOURCE_POD_MISMATCH",
+				});
+			}
+			if (
+				envelope.forwardedAt !== (c.req.raw.headers.get(STATEFUL_FORWARDING_TIMESTAMP_HEADER) ?? "")
+			) {
+				throw new ProviderError(
+					"Stateful forwarding forwardedAt does not match its signature timestamp.",
+					{ code: "STATEFUL_FORWARDING_ENVELOPE_INVALID" },
+				);
+			}
+			const ownerFenceValid = await options.statefulForwarding?.validateOwnerFence(
+				{
+					providerId: envelope.providerId,
+					sessionKey: envelope.sessionKey,
+					ownerPodId: envelope.ownerPodId,
+					generation: envelope.generation,
+					sourcePodId: envelope.sourcePodId,
+					forwardedAt: envelope.forwardedAt,
+					requestId: envelope.requestId,
+					...(envelope.idempotencyKey ? { idempotencyKey: envelope.idempotencyKey } : {}),
+				},
+				c.req.raw.signal,
+			);
+			if (ownerFenceValid !== true) {
+				throw new ProviderError("Stateful forwarding owner fence is no longer current.", {
+					code: "STATEFUL_FORWARDING_OWNER_FENCE_INVALID",
+				});
+			}
 			const request = operationRequestFromForwardingEnvelope(envelope);
-			const operationId = typeof envelope.operationId === "string" ? envelope.operationId : "";
+			const operationId = envelope.operationId;
 			const ctx = createProviderContext(provider, request, operationId, options, state);
 			const output = await options.internalOperationExecutor({
 				provider,
@@ -1807,6 +1949,30 @@ function validateStatefulServerConfig(options: ProviderServerOptions): void {
 	if (options.internalOperationExecutor && !options.statefulForwarding?.secret) {
 		throw new Error(
 			"Invalid provider server configuration: internalOperationExecutor requires statefulForwarding.secret; missing option statefulForwarding.secret.",
+		);
+	}
+	if (
+		options.statefulForwarding &&
+		typeof options.statefulForwarding.validateOwnerFence !== "function"
+	) {
+		throw new Error(
+			"Invalid provider server configuration: statefulForwarding requires validateOwnerFence.",
+		);
+	}
+	if (
+		options.statefulForwarding?.maxSkewMs !== undefined &&
+		(!Number.isFinite(options.statefulForwarding.maxSkewMs) ||
+			options.statefulForwarding.maxSkewMs <= 0)
+	) {
+		throw new Error("Invalid provider server configuration: maxSkewMs must be positive.");
+	}
+	if (
+		options.statefulForwarding?.replayCacheMaxEntries !== undefined &&
+		(!Number.isInteger(options.statefulForwarding.replayCacheMaxEntries) ||
+			options.statefulForwarding.replayCacheMaxEntries <= 0)
+	) {
+		throw new Error(
+			"Invalid provider server configuration: replayCacheMaxEntries must be a positive integer.",
 		);
 	}
 }
