@@ -1,0 +1,240 @@
+import {
+	type OperationConnection,
+	OperationErrorResponseSchema,
+	OperationSuccessResponseSchema,
+} from "../server/index.js";
+import { z } from "zod";
+
+import { signStatefulRequestBody } from "../stateful-signing.js";
+
+import type {
+	StatefulOperationRequest,
+	StatefulOperationResult,
+	StatefulOwnerForwarder,
+} from "./stateful-provider-session-routing.js";
+import { forwardingContextFromStatefulRuntimeContext } from "./stateful-provider-session-routing.js";
+import type { SessionOwnerRecord } from "./stateful-provider-session-runtime.js";
+
+export const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
+export const STATEFUL_FORWARDING_SIGNATURE_HEADER = "x-apifuse-stateful-signature";
+export const STATEFUL_FORWARDING_TIMESTAMP_HEADER = "x-apifuse-stateful-timestamp";
+export const STATEFUL_FORWARDING_SOURCE_POD_HEADER = "x-apifuse-stateful-source-pod";
+
+export interface StatefulOwnerForwarderOptions {
+	readonly currentPodId: string;
+	readonly secret: string;
+	readonly fetch?: FetchTransport;
+	readonly clock?: () => Date;
+}
+
+type FetchTransport = (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+const MAX_FORWARDED_HEADERS = 32;
+const MAX_FORWARDED_HEADER_BYTES = 8 * 1024;
+const SENSITIVE_HEADER_NAMES = new Set([
+	"authorization",
+	"cookie",
+	"set-cookie",
+	STATEFUL_FORWARDING_SIGNATURE_HEADER,
+	STATEFUL_FORWARDING_TIMESTAMP_HEADER,
+]);
+
+export class StatefulOwnerForwardingError extends Error {
+	readonly code: string;
+	readonly status?: number;
+
+	constructor(input: {
+		readonly code: string;
+		readonly message: string;
+		readonly status?: number;
+	}) {
+		super(input.message);
+		this.name = "StatefulOwnerForwardingError";
+		this.code = input.code;
+		this.status = input.status;
+	}
+}
+
+export class HttpStatefulOwnerForwarder implements StatefulOwnerForwarder {
+	readonly #currentPodId: string;
+	readonly #secret: string;
+	readonly #fetch: FetchTransport;
+	readonly #clock: () => Date;
+
+	constructor(options: StatefulOwnerForwarderOptions) {
+		if (options.secret.trim().length === 0) {
+			throw new Error("Stateful owner forwarding secret is required.");
+		}
+		this.#currentPodId = options.currentPodId;
+		this.#secret = options.secret;
+		this.#fetch = options.fetch ?? globalThis.fetch;
+		this.#clock = options.clock ?? (() => new Date());
+	}
+
+	async forward(
+		owner: SessionOwnerRecord,
+		request: StatefulOperationRequest,
+		signal: AbortSignal,
+	): Promise<StatefulOperationResult> {
+		assertNoRequestScopedFiles(request.input);
+		const forwardedAt = this.#clock().toISOString();
+		const envelope = buildForwardingEnvelope({
+			owner,
+			request,
+			sourcePodId: this.#currentPodId,
+			forwardedAt,
+		});
+		const rawBody = JSON.stringify(envelope);
+		const signature = signStatefulForwardingBody({
+			secret: this.#secret,
+			timestamp: forwardedAt,
+			rawBody,
+		});
+		const response = await this.#fetch(
+			`${owner.ownerEndpoint.replace(/\/+$/, "")}${STATEFUL_INTERNAL_OPERATIONS_ROUTE}`,
+			{
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					[STATEFUL_FORWARDING_TIMESTAMP_HEADER]: forwardedAt,
+					[STATEFUL_FORWARDING_SIGNATURE_HEADER]: signature,
+					[STATEFUL_FORWARDING_SOURCE_POD_HEADER]: this.#currentPodId,
+				},
+				body: rawBody,
+				signal,
+			},
+		);
+		return parseForwardedResponse(response);
+	}
+}
+
+export function signStatefulForwardingBody(input: {
+	readonly secret: string;
+	readonly timestamp: string;
+	readonly rawBody: string;
+}): string {
+	return signStatefulRequestBody(input);
+}
+
+function assertNoRequestScopedFiles(input: unknown): void {
+	if (!containsRequestScopedFile(input)) return;
+	throw new StatefulOwnerForwardingError({
+		code: "STATEFUL_FILE_FORWARDING_UNSUPPORTED",
+		message:
+			"Request-scoped files cannot be forwarded to a remote stateful owner. Use staged upload once available so the forwarding envelope carries only durable file_ref values, or route the request to the owner-local provider process.",
+	});
+}
+
+function containsRequestScopedFile(value: unknown): boolean {
+	if (isRequestScopedFileRef(value)) return true;
+	if (Array.isArray(value)) return value.some((item) => containsRequestScopedFile(item));
+	if (!value || typeof value !== "object") return false;
+	return Object.values(value).some((item) => containsRequestScopedFile(item));
+}
+
+function isRequestScopedFileRef(value: unknown): boolean {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const record = Object.fromEntries(Object.entries(value));
+	return record.type === "request_file" && typeof record.id === "string";
+}
+
+function buildForwardingEnvelope(input: {
+	readonly owner: SessionOwnerRecord;
+	readonly request: StatefulOperationRequest;
+	readonly sourcePodId: string;
+	readonly forwardedAt: string;
+}): Record<string, unknown> {
+	const metadata = forwardedMetadata(input.request);
+	return {
+		requestId: input.request.requestId,
+		providerId: input.request.providerId,
+		operationId: input.request.operationId,
+		sessionKey: input.request.sessionKey,
+		connectionId: input.request.connectionId,
+		serviceAccountId: input.request.serviceAccountId,
+		input: input.request.input,
+		connection: metadata.connection,
+		headers: sanitizeForwardedHeaders(metadata.headers),
+		...(metadata.trace ? { trace: metadata.trace } : {}),
+		...(input.request.deadlineAt ? { deadlineAt: input.request.deadlineAt } : {}),
+		...(input.request.idempotencyKey ? { idempotencyKey: input.request.idempotencyKey } : {}),
+		sourcePodId: input.sourcePodId,
+		forwardedAt: input.forwardedAt,
+		owner: input.owner,
+	};
+}
+
+function forwardedMetadata(request: StatefulOperationRequest): {
+	readonly connection: OperationConnection;
+	readonly headers?: Record<string, string>;
+	readonly trace?: Record<string, string>;
+} {
+	const forwardingContext = forwardingContextFromStatefulRuntimeContext(request.runtimeContext);
+	if (!forwardingContext) {
+		throw new StatefulOwnerForwardingError({
+			code: "STATEFUL_FORWARDING_CONTEXT_MISSING",
+			message: "Stateful operation forwarding requires request context metadata.",
+		});
+	}
+	const operationRequest = forwardingContext.operationRequest;
+	const connection = OperationConnectionSchema.parse(operationRequest?.connection);
+	return {
+		connection,
+		...(operationRequest?.headers ? { headers: operationRequest.headers } : {}),
+		...(operationRequest?.trace ? { trace: operationRequest.trace } : {}),
+	};
+}
+
+function sanitizeForwardedHeaders(
+	headers: Record<string, string> | undefined,
+): Record<string, string> {
+	if (!headers) return {};
+	const forwarded: Record<string, string> = {};
+	let totalBytes = 0;
+	for (const [name, value] of Object.entries(headers)) {
+		const normalized = name.toLowerCase();
+		if (SENSITIVE_HEADER_NAMES.has(normalized)) continue;
+		const nextBytes = Buffer.byteLength(name) + Buffer.byteLength(value);
+		if (
+			Object.keys(forwarded).length >= MAX_FORWARDED_HEADERS ||
+			totalBytes + nextBytes > MAX_FORWARDED_HEADER_BYTES
+		) {
+			break;
+		}
+		forwarded[name] = value;
+		totalBytes += nextBytes;
+	}
+	return forwarded;
+}
+
+async function parseForwardedResponse(response: Response): Promise<StatefulOperationResult> {
+	const body = await response.json().catch(() => undefined);
+	const success = OperationSuccessResponseSchema.safeParse(body);
+	if (response.ok && success.success) {
+		return { output: success.data.data };
+	}
+
+	const error = OperationErrorResponseSchema.safeParse(body);
+	if (error.success) {
+		throw new StatefulOwnerForwardingError({
+			code: error.data.error.code,
+			message: error.data.error.message,
+			status: response.status,
+		});
+	}
+
+	throw new StatefulOwnerForwardingError({
+		code: "STATEFUL_FORWARDING_BAD_RESPONSE",
+		message: `Stateful owner returned an invalid response with status ${response.status}.`,
+		status: response.status,
+	});
+}
+
+const OperationConnectionSchema = z.object({
+	id: z.string(),
+	mode: z.enum(["oauth2", "credentials", "platform-managed", "none"]),
+	secrets: z.record(z.string(), z.string()),
+	scopes: z.array(z.string()).optional(),
+	metadata: z.record(z.string(), z.unknown()),
+	externalRef: z.string(),
+});

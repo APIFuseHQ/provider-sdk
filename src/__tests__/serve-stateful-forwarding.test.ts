@@ -1,8 +1,7 @@
-import { createHmac } from "node:crypto";
-
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
+import { statefulSignedHeaders } from "../../dist/stateful/index.js";
 import { createServerApp, type ProviderServerOperationExecutorInput } from "../server/serve.js";
 import type { ProviderDefinition } from "../types.js";
 
@@ -52,15 +51,10 @@ function forwardingBody(): string {
 	});
 }
 
-function signature(secret: string, timestamp: string, body: string): string {
-	return `v1=${createHmac("sha256", secret).update(`${timestamp}.${body}`).digest("hex")}`;
-}
-
 function signedHeaders(secret: string, timestamp: string, body: string): Record<string, string> {
 	return {
 		"content-type": "application/json",
-		[SIGNATURE_HEADER]: signature(secret, timestamp, body),
-		[TIMESTAMP_HEADER]: timestamp,
+		...statefulSignedHeaders({ secret, timestamp, rawBody: body }),
 	};
 }
 

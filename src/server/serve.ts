@@ -1,4 +1,3 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -58,6 +57,11 @@ import { createTraceContext } from "../runtime/trace.js";
 import { parseSchema } from "../schema.js";
 import { getStealthProfile } from "../stealth/profiles.js";
 import {
+	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
+	STATEFUL_TIMESTAMP_HEADER as STATEFUL_FORWARDING_TIMESTAMP_HEADER,
+	verifyStatefulRequestSignature,
+} from "../stateful-signing.js";
+import {
 	APIFUSE_STREAM_DONE_EVENT,
 	APIFUSE_STREAM_ERROR_EVENT,
 	encodeSseEvent,
@@ -104,8 +108,6 @@ const DEFAULT_PORT = 3000;
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
-const STATEFUL_FORWARDING_SIGNATURE_HEADER = "x-apifuse-stateful-signature";
-const STATEFUL_FORWARDING_TIMESTAMP_HEADER = "x-apifuse-stateful-timestamp";
 const DEFAULT_STATEFUL_FORWARDING_MAX_SKEW_MS = 5 * 60_000;
 
 export type ProviderServerStatefulForwardEnvelope = Readonly<Record<string, unknown>>;
@@ -1374,21 +1376,18 @@ function verifyStatefulForwardingRequest(input: {
 			{ code: "STATEFUL_FORWARDING_TIMESTAMP_INVALID" },
 		);
 	}
-	const expected = `v1=${createHmac("sha256", config.secret)
-		.update(`${timestamp}.${input.rawBody}`)
-		.digest("hex")}`;
-	if (!safeEqualAscii(signature, expected)) {
+	if (
+		!verifyStatefulRequestSignature({
+			secret: config.secret,
+			timestamp,
+			rawBody: input.rawBody,
+			signature,
+		})
+	) {
 		throw new ProviderError("Stateful forwarding signature is invalid.", {
 			code: "STATEFUL_FORWARDING_SIGNATURE_INVALID",
 		});
 	}
-}
-
-function safeEqualAscii(actual: string, expected: string): boolean {
-	const actualBytes = Buffer.from(actual);
-	const expectedBytes = Buffer.from(expected);
-	if (actualBytes.byteLength !== expectedBytes.byteLength) return false;
-	return timingSafeEqual(actualBytes, expectedBytes);
 }
 
 function operationRequestFromForwardingEnvelope(
