@@ -1,3 +1,4 @@
+import { createHmac, timingSafeEqual } from "node:crypto";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
@@ -102,6 +103,25 @@ const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_PORT = 3000;
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
+const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
+const STATEFUL_FORWARDING_SIGNATURE_HEADER = "x-apifuse-stateful-signature";
+const STATEFUL_FORWARDING_TIMESTAMP_HEADER = "x-apifuse-stateful-timestamp";
+const DEFAULT_STATEFUL_FORWARDING_MAX_SKEW_MS = 5 * 60_000;
+
+export type ProviderServerStatefulForwardEnvelope = Readonly<Record<string, unknown>>;
+
+export type ProviderServerOperationExecutorInput = {
+	readonly provider: ProviderDefinition;
+	readonly operationId: string;
+	readonly ctx: ProviderContext;
+	readonly request: OperationRequest;
+	readonly signal?: AbortSignal;
+	readonly internalStatefulForward?: ProviderServerStatefulForwardEnvelope;
+};
+
+export type ProviderServerOperationExecutor = (
+	input: ProviderServerOperationExecutorInput,
+) => Promise<unknown>;
 
 type RequestCleanup = () => void | Promise<void>;
 
@@ -435,6 +455,14 @@ export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
 
 export type ProviderServerOptions = {
 	logger?: ProviderServerLogger;
+	/** Optional provider-specific operation executor. Stateful providers use this to preserve provider-local runtime semantics. */
+	operationExecutor?: ProviderServerOperationExecutor;
+	/** Optional signed internal executor for stateful owner forwarding. */
+	internalOperationExecutor?: ProviderServerOperationExecutor;
+	statefulForwarding?: {
+		readonly secret: string;
+		readonly maxSkewMs?: number;
+	};
 	/** Optional STT override for tests or custom hosts; local/prod normally resolves from env. */
 	stt?: SttContext;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */
@@ -1218,7 +1246,14 @@ async function handleOperation(
 		}
 	};
 	try {
-		const result = await executeOperation(provider, operationId, ctx, request.input);
+		const result = options.operationExecutor
+			? await options.operationExecutor({
+					provider,
+					operationId,
+					ctx,
+					request,
+				})
+			: await executeOperation(provider, operationId, ctx, request.input);
 		if (streaming && operation) {
 			return toStreamingResponse(operation, result, cleanup, request.requestId);
 		}
@@ -1313,6 +1348,61 @@ async function handleAuthFlow(
 	}
 }
 
+function verifyStatefulForwardingRequest(input: {
+	readonly options: ProviderServerOptions;
+	readonly rawBody: string;
+	readonly headers: Headers;
+}): void {
+	const config = input.options.statefulForwarding;
+	if (!config?.secret) {
+		throw new ProviderError("Stateful forwarding is not configured.", {
+			code: "STATEFUL_FORWARDING_NOT_CONFIGURED",
+		});
+	}
+	const timestamp = input.headers.get(STATEFUL_FORWARDING_TIMESTAMP_HEADER) ?? "";
+	const signature = input.headers.get(STATEFUL_FORWARDING_SIGNATURE_HEADER) ?? "";
+	if (!timestamp || !signature) {
+		throw new ProviderError("Stateful forwarding signature headers are missing.", {
+			code: "STATEFUL_FORWARDING_SIGNATURE_MISSING",
+		});
+	}
+	const timestampMs = Date.parse(timestamp);
+	const maxSkewMs = config.maxSkewMs ?? DEFAULT_STATEFUL_FORWARDING_MAX_SKEW_MS;
+	if (!Number.isFinite(timestampMs) || Math.abs(Date.now() - timestampMs) > maxSkewMs) {
+		throw new ProviderError(
+			"Stateful forwarding signature timestamp is outside the allowed skew.",
+			{ code: "STATEFUL_FORWARDING_TIMESTAMP_INVALID" },
+		);
+	}
+	const expected = `v1=${createHmac("sha256", config.secret)
+		.update(`${timestamp}.${input.rawBody}`)
+		.digest("hex")}`;
+	if (!safeEqualAscii(signature, expected)) {
+		throw new ProviderError("Stateful forwarding signature is invalid.", {
+			code: "STATEFUL_FORWARDING_SIGNATURE_INVALID",
+		});
+	}
+}
+
+function safeEqualAscii(actual: string, expected: string): boolean {
+	const actualBytes = Buffer.from(actual);
+	const expectedBytes = Buffer.from(expected);
+	if (actualBytes.byteLength !== expectedBytes.byteLength) return false;
+	return timingSafeEqual(actualBytes, expectedBytes);
+}
+
+function operationRequestFromForwardingEnvelope(
+	envelope: ProviderServerStatefulForwardEnvelope,
+): OperationRequest {
+	return OperationRequestSchema.parse({
+		requestId: envelope.requestId,
+		input: envelope.input,
+		connection: envelope.connection,
+		headers: envelope.headers,
+		trace: envelope.trace,
+	});
+}
+
 export function createServerApp(
 	provider: ProviderDefinition,
 	options: ProviderServerOptions = {},
@@ -1363,6 +1453,68 @@ export function createServerApp(
 			version: provider.version,
 		}),
 	);
+
+	app.post(STATEFUL_INTERNAL_OPERATIONS_ROUTE, async (c) => {
+		let rawBodyText = "";
+		let rawBody: unknown;
+		const operation = "stateful-internal";
+		const requestCost = startRequestCost();
+		try {
+			if (!options.internalOperationExecutor) {
+				throw new ProviderError("Stateful internal operation executor is not configured.", {
+					code: "STATEFUL_INTERNAL_EXECUTOR_NOT_CONFIGURED",
+				});
+			}
+			rawBodyText = await c.req.raw.clone().text();
+			verifyStatefulForwardingRequest({
+				options,
+				rawBody: rawBodyText,
+				headers: c.req.raw.headers,
+			});
+			rawBody = JSON.parse(rawBodyText);
+			if (!rawBody || typeof rawBody !== "object" || Array.isArray(rawBody)) {
+				throw new ProviderError("Stateful forwarding envelope must be an object.", {
+					code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
+				});
+			}
+			const envelope = rawBody as ProviderServerStatefulForwardEnvelope;
+			const request = operationRequestFromForwardingEnvelope(envelope);
+			const operationId = typeof envelope.operationId === "string" ? envelope.operationId : "";
+			const ctx = createProviderContext(provider, request, operationId, options, state);
+			const output = await options.internalOperationExecutor({
+				provider,
+				operationId,
+				ctx,
+				request,
+				internalStatefulForward: envelope,
+				signal: c.req.raw.signal,
+			});
+			logProviderSuccess(
+				logger,
+				provider,
+				"operation",
+				operationId || operation,
+				request.requestId,
+				200,
+				finishRequestCost(requestCost),
+			);
+			return c.json({ data: output });
+		} catch (error) {
+			const status = toStatusCode(error);
+			const requestId = extractRequestId(rawBody);
+			logProviderError(
+				logger,
+				provider,
+				"operation",
+				operation,
+				requestId,
+				error,
+				status,
+				finishRequestCost(requestCost),
+			);
+			return c.json(toErrorResponse(error, requestId), status);
+		}
+	});
 
 	app.post("/v1/:operation", async (c) => {
 		let rawBody: unknown;
@@ -1668,6 +1820,11 @@ export async function serve(
 	const app = createServerApp(provider, {
 		logger: options.logger,
 		stt: options.stt,
+		state: options.state,
+		allowMemoryStateFallback: options.allowMemoryStateFallback,
+		operationExecutor: options.operationExecutor,
+		internalOperationExecutor: options.internalOperationExecutor,
+		statefulForwarding: options.statefulForwarding,
 	});
 
 	bunRuntime.serve({

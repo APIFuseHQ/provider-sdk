@@ -1,4 +1,11 @@
-export { createServerApp, type ServeOptions, serve } from "./serve.js";
+export {
+	createServerApp,
+	type ProviderServerOperationExecutor,
+	type ProviderServerOperationExecutorInput,
+	type ProviderServerStatefulForwardEnvelope,
+	type ServeOptions,
+	serve,
+} from "./serve.js";
 export {
 	computeSelfTestPlanDigest,
 	createSelfTestApp,
