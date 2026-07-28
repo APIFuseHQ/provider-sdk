@@ -1,3 +1,4 @@
+import type { SessionKey } from "./session-key.js";
 import type { StatefulProviderMetricEmitter } from "./stateful-provider-observability.js";
 import {
 	type StatefulOperationExecutor,
@@ -11,7 +12,7 @@ import type { SessionOwnerRegistry } from "./stateful-provider-session-runtime.j
 
 export interface StatefulProviderInvocationMetadata<TInput = unknown> {
 	readonly requestId: string;
-	readonly sessionKey: string;
+	readonly sessionKey: SessionKey;
 	readonly providerId: string;
 	readonly operationId: string;
 	readonly connectionId: string;
@@ -28,6 +29,7 @@ export interface StatefulProviderRuntimeExecutorOptions {
 	readonly forwarder: StatefulOwnerForwarder;
 	readonly executor: StatefulOperationExecutor;
 	readonly leaseDurationMs: number;
+	readonly leaseRenewalFraction?: number;
 	readonly clock?: () => Date;
 	readonly metricEmitter?: StatefulProviderMetricEmitter;
 }
@@ -42,7 +44,9 @@ export class StatefulProviderRuntimeExecutor {
 			forwarder: options.forwarder,
 			executor: options.executor,
 			leaseDurationMs: options.leaseDurationMs,
-			ownerStatus: "connected",
+			...(options.leaseRenewalFraction !== undefined
+				? { leaseRenewalFraction: options.leaseRenewalFraction }
+				: {}),
 			...(options.clock ? { clock: options.clock } : {}),
 			...(options.metricEmitter ? { metricEmitter: options.metricEmitter } : {}),
 		});
@@ -50,6 +54,14 @@ export class StatefulProviderRuntimeExecutor {
 
 	invoke(request: StatefulOperationRequest): Promise<StatefulOperationResult> {
 		return this.#router.route(request);
+	}
+
+	release(): Promise<void> {
+		return this.#router.release();
+	}
+
+	releaseSession(sessionKey: SessionKey): Promise<boolean> {
+		return this.#router.releaseSession(sessionKey);
 	}
 }
 

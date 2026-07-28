@@ -1,7 +1,11 @@
-export type StatefulProviderSessionKey = string;
+import type { SessionKey } from "./session-key.js";
+
+/** @deprecated Use SessionKey from session-key.ts. */
+export type StatefulProviderSessionKey = SessionKey;
 export type SessionOwnerStatus = "acquiring" | "connected" | "draining" | "expired";
 
 export interface SessionOwnerRecord {
+	/** Runtime-decoded key; registry inputs use the opaque SessionKey type. */
 	readonly sessionKey: string;
 	readonly ownerPodId: string;
 	readonly ownerEndpoint: string;
@@ -12,7 +16,7 @@ export interface SessionOwnerRecord {
 }
 
 export interface AcquireSessionOwnerInput {
-	readonly sessionKey: string;
+	readonly sessionKey: SessionKey;
 	readonly ownerPodId: string;
 	readonly ownerEndpoint: string;
 	readonly leaseDurationMs: number;
@@ -26,7 +30,7 @@ export interface AcquireSessionOwnerResult {
 }
 
 export interface RenewSessionOwnerInput {
-	readonly sessionKey: string;
+	readonly sessionKey: SessionKey;
 	readonly ownerPodId: string;
 	readonly generation: number;
 	readonly leaseDurationMs: number;
@@ -35,16 +39,29 @@ export interface RenewSessionOwnerInput {
 }
 
 export interface ReleaseSessionOwnerInput {
-	readonly sessionKey: string;
+	readonly sessionKey: SessionKey;
 	readonly ownerPodId: string;
 	readonly generation: number;
 }
 
+/**
+ * A session-owner registry is a fencing authority. Generations MUST be positive integers and
+ * strictly increase for each successful takeover of a session key, including after expiry or
+ * release. Implementations must retain a high-water mark (a tombstone) for at least the registry's
+ * lifetime; generation values must never be reused.
+ */
 export interface SessionOwnerRegistry {
-	resolve(sessionKey: StatefulProviderSessionKey, now?: Date): Promise<SessionOwnerRecord | null>;
-	acquire(input: AcquireSessionOwnerInput): Promise<AcquireSessionOwnerResult>;
-	renew(input: RenewSessionOwnerInput): Promise<SessionOwnerRecord | null>;
-	release(input: ReleaseSessionOwnerInput): Promise<boolean>;
+	resolve(
+		sessionKey: SessionKey,
+		now?: Date,
+		signal?: AbortSignal,
+	): Promise<SessionOwnerRecord | null>;
+	acquire(
+		input: AcquireSessionOwnerInput,
+		signal?: AbortSignal,
+	): Promise<AcquireSessionOwnerResult>;
+	renew(input: RenewSessionOwnerInput, signal?: AbortSignal): Promise<SessionOwnerRecord | null>;
+	release(input: ReleaseSessionOwnerInput, signal?: AbortSignal): Promise<boolean>;
 }
 
 export interface SessionPoolPolicy {
@@ -64,22 +81,31 @@ export interface ManagedSession<T> {
 type SessionFactory<T> = () => T | Promise<T>;
 type SessionCloseHook<T> = (session: ManagedSession<T>, reason: string) => void | Promise<void>;
 export class InMemorySessionOwnerRegistry implements SessionOwnerRegistry {
-	readonly #owners = new Map<string, SessionOwnerRecord>();
+	readonly #owners = new Map<StatefulProviderSessionKey, SessionOwnerRecord>();
+	readonly #generationHighWater = new Map<StatefulProviderSessionKey, number>();
 
 	async resolve(
-		sessionKey: StatefulProviderSessionKey,
+		sessionKey: SessionKey,
 		now: Date = new Date(),
+		signal?: AbortSignal,
 	): Promise<SessionOwnerRecord | null> {
+		signal?.throwIfAborted();
 		const current = this.#owners.get(sessionKey);
 		if (!current || isLeaseExpired(current, now)) return null;
+		validateGeneration(current.generation);
 		return current;
 	}
 
-	async acquire(input: AcquireSessionOwnerInput): Promise<AcquireSessionOwnerResult> {
+	async acquire(
+		input: AcquireSessionOwnerInput,
+		signal?: AbortSignal,
+	): Promise<AcquireSessionOwnerResult> {
+		signal?.throwIfAborted();
 		validateLeaseDuration(input.leaseDurationMs);
 		const now = input.now ?? new Date();
 		const current = this.#owners.get(input.sessionKey);
 		if (current && !isLeaseExpired(current, now)) {
+			validateGeneration(current.generation);
 			if (current.ownerPodId !== input.ownerPodId) {
 				return { record: current, acquired: false };
 			}
@@ -88,13 +114,20 @@ export class InMemorySessionOwnerRegistry implements SessionOwnerRegistry {
 			return { record, acquired: true };
 		}
 
-		const generation = current ? current.generation + 1 : 1;
+		const generation =
+			Math.max(current?.generation ?? 0, this.#generationHighWater.get(input.sessionKey) ?? 0) + 1;
 		const record = makeOwnerRecord(input, generation, now);
 		this.#owners.set(input.sessionKey, record);
+		this.#generationHighWater.set(input.sessionKey, generation);
 		return { record, acquired: true };
 	}
 
-	async renew(input: RenewSessionOwnerInput): Promise<SessionOwnerRecord | null> {
+	async renew(
+		input: RenewSessionOwnerInput,
+		signal?: AbortSignal,
+	): Promise<SessionOwnerRecord | null> {
+		signal?.throwIfAborted();
+		validateGeneration(input.generation);
 		validateLeaseDuration(input.leaseDurationMs);
 		const now = input.now ?? new Date();
 		const current = this.#owners.get(input.sessionKey);
@@ -117,7 +150,9 @@ export class InMemorySessionOwnerRegistry implements SessionOwnerRegistry {
 		return record;
 	}
 
-	async release(input: ReleaseSessionOwnerInput): Promise<boolean> {
+	async release(input: ReleaseSessionOwnerInput, signal?: AbortSignal): Promise<boolean> {
+		signal?.throwIfAborted();
+		validateGeneration(input.generation);
 		const current = this.#owners.get(input.sessionKey);
 		if (
 			!current ||
@@ -126,6 +161,10 @@ export class InMemorySessionOwnerRegistry implements SessionOwnerRegistry {
 		) {
 			return false;
 		}
+		this.#generationHighWater.set(
+			input.sessionKey,
+			Math.max(this.#generationHighWater.get(input.sessionKey) ?? 0, current.generation),
+		);
 		this.#owners.delete(input.sessionKey);
 		return true;
 	}
@@ -144,11 +183,12 @@ export class PodLocalSessionPool<T> {
 	}
 
 	async getOrCreate(
-		sessionKey: StatefulProviderSessionKey,
+		sessionKey: string,
 		generation: number,
 		factory: SessionFactory<T>,
 		now: Date = new Date(),
 	): Promise<ManagedSession<T>> {
+		validateGeneration(generation);
 		const existingCreate = this.#creates.get(sessionKey);
 		if (existingCreate) {
 			try {
@@ -165,7 +205,7 @@ export class PodLocalSessionPool<T> {
 	}
 
 	private async getOrCreateUnlocked(
-		sessionKey: StatefulProviderSessionKey,
+		sessionKey: string,
 		generation: number,
 		factory: SessionFactory<T>,
 		now: Date,
@@ -199,14 +239,11 @@ export class PodLocalSessionPool<T> {
 		}
 	}
 
-	async invalidate(sessionKey: StatefulProviderSessionKey, reason: string): Promise<void> {
+	async invalidate(sessionKey: string, reason: string): Promise<void> {
 		await this.closeOne(sessionKey, reason);
 	}
 
-	async runExclusive<R>(
-		sessionKey: StatefulProviderSessionKey,
-		task: () => R | Promise<R>,
-	): Promise<R> {
+	async runExclusive<R>(sessionKey: string, task: () => R | Promise<R>): Promise<R> {
 		const previous = this.#queues.get(sessionKey) ?? Promise.resolve();
 		const next = previous.then(task, task);
 		const settled = next.then(
@@ -251,6 +288,7 @@ function makeOwnerRecord(
 	generation: number,
 	now: Date,
 ): SessionOwnerRecord {
+	validateGeneration(generation);
 	return {
 		sessionKey: input.sessionKey,
 		ownerPodId: input.ownerPodId,
@@ -281,6 +319,12 @@ function isSessionExpired<T>(
 function validateLeaseDuration(leaseDurationMs: number): void {
 	if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) {
 		throw new Error("Session owner leaseDurationMs must be a positive finite number.");
+	}
+}
+
+function validateGeneration(generation: number): void {
+	if (!Number.isInteger(generation) || generation <= 0) {
+		throw new Error("Session owner generation must be a positive integer.");
 	}
 }
 

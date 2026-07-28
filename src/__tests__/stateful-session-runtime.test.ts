@@ -103,6 +103,66 @@ describe("InMemorySessionOwnerRegistry", () => {
 			}),
 		).toBe(false);
 	});
+
+	it("increments generation after release and rejects the released generation", async () => {
+		const registry = new InMemorySessionOwnerRegistry();
+		const first = await registry.acquire({
+			sessionKey: "released-session",
+			ownerPodId: "pod-a",
+			ownerEndpoint: "http://pod-a",
+			leaseDurationMs: 60_000,
+		});
+		expect(first.record.generation).toBe(1);
+		expect(
+			await registry.release({
+				sessionKey: "released-session",
+				ownerPodId: "pod-a",
+				generation: 1,
+			}),
+		).toBe(true);
+
+		const second = await registry.acquire({
+			sessionKey: "released-session",
+			ownerPodId: "pod-a",
+			ownerEndpoint: "http://pod-a",
+			leaseDurationMs: 60_000,
+		});
+		expect(second.record.generation).toBe(2);
+		expect(
+			await registry.renew({
+				sessionKey: "released-session",
+				ownerPodId: "pod-a",
+				generation: 1,
+				leaseDurationMs: 60_000,
+			}),
+		).toBeNull();
+		expect(
+			await registry.release({
+				sessionKey: "released-session",
+				ownerPodId: "pod-a",
+				generation: 1,
+			}),
+		).toBe(false);
+	});
+
+	it("rejects generation zero at runtime boundaries", async () => {
+		const registry = new InMemorySessionOwnerRegistry();
+		await expect(
+			registry.renew({
+				sessionKey: "invalid-generation",
+				ownerPodId: "pod-a",
+				generation: 0,
+				leaseDurationMs: 60_000,
+			}),
+		).rejects.toThrow("positive integer");
+		await expect(
+			registry.release({
+				sessionKey: "invalid-generation",
+				ownerPodId: "pod-a",
+				generation: 0,
+			}),
+		).rejects.toThrow("positive integer");
+	});
 });
 
 describe("PodLocalSessionPool", () => {

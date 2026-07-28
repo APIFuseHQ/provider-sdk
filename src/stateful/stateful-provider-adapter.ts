@@ -14,6 +14,7 @@ import type {
 	StatefulOperationExecutor,
 	StatefulOperationRequest,
 	StatefulOperationResult,
+	StatefulOwnershipValidator,
 } from "./stateful-provider-session-routing.js";
 import type {
 	ManagedSession,
@@ -128,6 +129,7 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown>
 		owner: SessionOwnerRecord,
 		request: StatefulOperationRequest,
 		signal: AbortSignal,
+		validateOwnership?: StatefulOwnershipValidator,
 	): Promise<StatefulOperationResult> {
 		const startedAt = this.#clock().getTime();
 		const run = async () => {
@@ -137,9 +139,10 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown>
 				() => this.connect(owner, request, signal),
 				this.#clock(),
 			);
+			const validatedOwner = validateOwnership ? await validateOwnership(owner, signal) : owner;
 			const ctx = makeStatefulProviderSessionContext(
 				this.#adapter.providerId,
-				owner,
+				validatedOwner,
 				request,
 				signal,
 			);
@@ -168,7 +171,14 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown>
 					() => this.connect(owner, request, signal),
 					this.#clock(),
 				);
-				const result = await this.#adapter.invoke(ctx, reconnected.value, request);
+				const revalidatedOwner = validateOwnership ? await validateOwnership(owner, signal) : owner;
+				const reconnectedCtx = makeStatefulProviderSessionContext(
+					this.#adapter.providerId,
+					revalidatedOwner,
+					request,
+					signal,
+				);
+				const result = await this.#adapter.invoke(reconnectedCtx, reconnected.value, request);
 				observeStatefulSessionOperationDuration({
 					metricEmitter: this.#metricEmitter,
 					request,
@@ -187,8 +197,9 @@ export class StatefulProviderSessionManager<TSession, TSharedState = unknown>
 		request: StatefulOperationRequest,
 		owner: SessionOwnerRecord,
 		signal: AbortSignal,
+		validateOwnership?: StatefulOwnershipValidator,
 	): Promise<StatefulOperationResult> {
-		return this.invoke(owner, request, signal);
+		return this.invoke(owner, request, signal, validateOwnership);
 	}
 
 	closeAll(reason: string): Promise<void> {

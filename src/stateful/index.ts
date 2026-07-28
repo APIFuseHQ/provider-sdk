@@ -6,6 +6,7 @@ export * from "./provider-event-delivery-failures.js";
 export * from "./provider-event-pipeline-metrics.js";
 export * from "./provider-event-pipeline.js";
 export * from "./provider-events.js";
+export * from "./session-key.js";
 export * from "./stateful-provider-adapter-context.js";
 export * from "./stateful-provider-adapter-metrics.js";
 export * from "./stateful-provider-adapter.js";
