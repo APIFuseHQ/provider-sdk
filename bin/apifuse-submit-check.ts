@@ -22,6 +22,7 @@ import {
 } from "../src/i18n/index.js";
 import type { ProviderDefinition } from "../src/index.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, safeParseSchemaSync } from "../src/schema.js";
+import { isStreamEvidenceRecord } from "../src/stream-evidence.js";
 import { type CheckResult, PROMPT_ASSETS_CHECK_MESSAGE, runChecks } from "./apifuse-check.js";
 import { hasSubstantiveDelimitedTextStructure } from "./submit-check-delimited-text.js";
 import { hasSubstantiveXmlStructure } from "./submit-check-xml.js";
@@ -2225,6 +2226,9 @@ function recordedFixtureStats(
 	value: unknown,
 	depth: number,
 ): { hasNestedSubstance: boolean; leafValues: number } {
+	if (isStreamEvidenceRecord(value)) {
+		return { hasNestedSubstance: true, leafValues: 1 };
+	}
 	if (value === null || value === undefined) {
 		return { hasNestedSubstance: false, leafValues: 0 };
 	}

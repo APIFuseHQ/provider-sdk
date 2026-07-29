@@ -962,6 +962,20 @@ ${assertionLines(21)}
 		expect(check?.status).toBe("pass");
 	});
 
+	it("accepts a stream evidence fixture with one allowlisted header", () => {
+		expect(
+			hasNonEmptyRecordedFixture({
+				__apifuse_stream__: true,
+				status: 200,
+				ok: true,
+				headers: { "content-type": "application/zip" },
+				body_sha256: "a".repeat(64),
+				body_bytes: 805_000,
+				body_preview_base64: "UEsDBA==",
+			}),
+		).toBeTrue();
+	});
+
 	it("accepts a top-level recorded Cabinet Office-shaped Japanese CSV payload", async () => {
 		const rawCsv = [
 			"国民の祝日・休日月日,国民の祝日・休日名称",

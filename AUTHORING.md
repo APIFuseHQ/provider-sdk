@@ -658,6 +658,22 @@ session base origin. Do not use the flat form for new persistence code. Cookie
 headers remain origin-filtered: use `toHeader(url)` for a particular request and
 never build a request header from serialized or snapshotted persistence data.
 
+### Recording and replaying streaming responses
+
+`apifuse record` fully consumes responses returned by `ctx.http.stream()` and writes a
+JSON evidence record to `__fixtures__/raw.json`. The record contains the status, success
+flag, `content-type`/`content-length`/`content-disposition` headers when present, the
+full body SHA-256 and byte count, and the first 4096 bytes as base64. It passes through
+the same fixture sanitization pipeline as other recorded payloads.
+
+Stream fixture replay in `runStandardTests(..., { snapshot: true })` is evidence-only:
+`ctx.http.stream()` returns a usable stream containing exactly the recorded preview,
+not a fabricated full body. The replay response also carries runtime metadata
+`evidence_only: true`, `body_sha256`, and `body_bytes` for assertions about the original
+capture. Do not assert that the replay body hashes to `body_sha256` when `body_bytes`
+exceeds the decoded preview length; use the metadata for full-body integrity and limit
+body-content assertions to the preview.
+
 ### Running the pre-submission report
 
 ```bash

@@ -5,6 +5,7 @@ import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import { createUnsupportedSttClient } from "../runtime/stt.js";
 import { safeParseSchemaSync } from "../schema.js";
+import { isStreamEvidenceRecord, replayStreamEvidence } from "../stream-evidence.js";
 import type {
 	AuthMode,
 	BrowserPage,
@@ -580,7 +581,10 @@ function createSnapshotContext(rawFixture: unknown): ProviderContext {
 			post: async () => jsonResponse(rawFixture),
 			put: async () => jsonResponse(rawFixture),
 			delete: async () => jsonResponse(rawFixture),
-			stream: async () => unsupported("ctx.http.stream"),
+			stream: async () =>
+				isStreamEvidenceRecord(rawFixture)
+					? replayStreamEvidence(rawFixture)
+					: unsupported("ctx.http.stream without a stream evidence fixture"),
 			sse: async () => unsupported("ctx.http.sse"),
 		},
 		cache: createProviderCache({ providerId: "standard-test" }),

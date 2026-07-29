@@ -22,6 +22,7 @@ import {
 	ValidationError,
 } from "../src/index.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { captureStreamEvidence } from "../src/stream-evidence.js";
 
 type CliArgs = {
 	append: boolean;
@@ -38,6 +39,10 @@ type MutableRecord = Record<string, unknown>;
 const HELP_TEXT = `Usage: apifuse record [path] --operation <operation> --params '<json>'
 
 Calls a real upstream-backed operation through ctx.http or ctx.stealth and writes __fixtures__/raw.json.
+
+Streaming responses are recorded as evidence (status, selected headers, full-body SHA-256 and byte
+count, plus a 4096-byte base64 preview). Test replay is evidence-only: ctx.http.stream exposes the
+preview as its body and the original body_sha256/body_bytes as response metadata.
 
 Options:
   --operation, -o <name>   operation to call
@@ -312,8 +317,15 @@ function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: strin
 function createCaptureContext(provider: ProviderRuntime, baseUrl: string) {
 	let capturedRaw: unknown;
 
-	const http = proxyHttpClient(createHttpClient(baseUrl), (response) => {
+	const http = proxyHttpClient(createHttpClient(baseUrl), async (method, response) => {
+		if (method === "stream") {
+			const captured = await captureStreamEvidence(response);
+			capturedRaw = captured.evidence;
+			return captured.response;
+		}
+
 		capturedRaw = response.data;
+		return response;
 	});
 	const stealth = proxyStealthClient(createStealthClient(baseUrl), (response) => {
 		capturedRaw = normalizeCapturedStealthResponse(response);
@@ -380,7 +392,7 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string) {
 
 function proxyHttpClient(
 	client: HttpClient,
-	onResponse: (response: Awaited<ReturnType<HttpClient["get"]>>) => void,
+	onResponse: (method: PropertyKey, response: unknown) => Promise<unknown>,
 ): HttpClient {
 	return new Proxy(client, {
 		get(target, prop, receiver) {
@@ -392,8 +404,7 @@ function proxyHttpClient(
 
 			return async (...args: unknown[]) => {
 				const response = await value.apply(target, args);
-				onResponse(response);
-				return response;
+				return await onResponse(prop, response);
 			};
 		},
 	}) as HttpClient;

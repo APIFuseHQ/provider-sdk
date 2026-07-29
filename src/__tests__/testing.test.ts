@@ -40,6 +40,18 @@ const testProvider = defineProvider({
 
 const snapshotFixtureDir = `/tmp/apifuse-standard-tests-${Date.now()}/__fixtures__`;
 mkdirSync(snapshotFixtureDir, { recursive: true });
+const streamSnapshotFixtureDir = `/tmp/apifuse-stream-standard-tests-${Date.now()}/__fixtures__`;
+mkdirSync(streamSnapshotFixtureDir, { recursive: true });
+
+const streamEvidenceFixture = {
+	__apifuse_stream__: true as const,
+	status: 200,
+	ok: true,
+	headers: { "content-type": "application/octet-stream" },
+	body_sha256: "a".repeat(64),
+	body_bytes: 805_000,
+	body_preview_base64: Buffer.from("recorded stream preview").toString("base64"),
+};
 
 const fixtureHarnessProvider = defineProvider({
 	id: "fixture-harness-provider",
@@ -78,6 +90,60 @@ const snapshotHarnessProvider = defineProvider({
 			fixtures: {
 				request: { id: "snap" },
 				response: { id: "snap", label: "golden" },
+			},
+			healthCheckUnsupported: { reason: "test fixture" },
+		},
+	},
+});
+
+const streamSnapshotHarnessProvider = defineProvider({
+	id: "stream-snapshot-harness-provider",
+	version: "1.0.0",
+	runtime: "standard",
+	meta: { displayName: "Stream Snapshot Harness Provider", category: "test" },
+	operations: {
+		download: {
+			input: z.object({}),
+			output: z.object({
+				body: z.string(),
+				bodyBytes: z.number(),
+				bodySha256: z.string(),
+				evidenceOnly: z.boolean(),
+			}),
+			handler: async (ctx) => {
+				const response = await ctx.http.stream("https://example.test/download");
+				const replay = response as typeof response & {
+					evidence_only: true;
+					body_sha256: string;
+					body_bytes: number;
+				};
+				const chunks: Uint8Array[] = [];
+				for await (const chunk of response.bytes()) chunks.push(chunk);
+				const body = Buffer.concat(chunks).toString("utf8");
+				if (
+					body !== "recorded stream preview" ||
+					replay.evidence_only !== true ||
+					replay.body_sha256 !== streamEvidenceFixture.body_sha256 ||
+					replay.body_bytes !== streamEvidenceFixture.body_bytes
+				) {
+					throw new Error("stream evidence replay did not preserve preview and metadata");
+				}
+
+				return {
+					body,
+					bodyBytes: replay.body_bytes,
+					bodySha256: replay.body_sha256,
+					evidenceOnly: replay.evidence_only,
+				};
+			},
+			fixtures: {
+				request: {},
+				response: {
+					body: "recorded stream preview",
+					bodyBytes: 805_000,
+					bodySha256: "a".repeat(64),
+					evidenceOnly: true,
+				},
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
@@ -170,6 +236,11 @@ runStandardTests(
 runStandardTests(snapshotHarnessProvider, { label: "golden" }, undefined, {
 	snapshot: true,
 	fixtureDir: snapshotFixtureDir,
+});
+
+runStandardTests(streamSnapshotHarnessProvider, streamEvidenceFixture, undefined, {
+	snapshot: true,
+	fixtureDir: streamSnapshotFixtureDir,
 });
 
 runStandardTests(
