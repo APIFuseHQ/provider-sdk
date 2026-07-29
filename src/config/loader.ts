@@ -156,10 +156,19 @@ export type ProxyTelemetrySink = {
 	recordProxyVendorFailover?(event: ProxyVendorFailoverTelemetryEvent): void;
 };
 
+export type ProxyResolutionSource =
+	| "explicit"
+	| "env"
+	| "config"
+	| "smartproxy-allocator"
+	| "nodemaven-gateway";
+
 export type ResolvedProxyConfig = {
 	shouldWarn: boolean;
 	url?: string;
-	source?: "explicit" | "env" | "config" | "smartproxy-allocator" | "nodemaven-gateway";
+	/** SDK-native vendor that supplied the URL, when applicable. */
+	vendor?: ProxyVendorName;
+	source?: ProxyResolutionSource;
 	protocol?: ProxyProtocol;
 	diagnostics?: Record<string, string | number | boolean>;
 };
@@ -654,6 +663,18 @@ export async function resolveProxyConfigAsync(
 		);
 	}
 	return { shouldWarn: true };
+}
+
+/**
+ * Resolve the proxy URL for a provider-owned consumer such as a CAPTCHA solver.
+ * Vendor allocation and failover remain owned by the SDK.
+ */
+export async function resolveProxy(
+	options: ProxyResolutionOptions = {},
+): Promise<ResolvedProxyConfig> {
+	const resolved = await resolveProxyConfigAsync(options);
+	const vendor = vendorFromResolvedSource(resolved.source);
+	return vendor ? { ...resolved, vendor } : resolved;
 }
 
 /**

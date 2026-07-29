@@ -146,6 +146,24 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   `profile` such as `chrome-146`; do not tune JA3, HTTP/2 SETTINGS, or
   pseudo-header order in provider code. Chrome/Firefox-style profiles are
   supported; use `ctx.browser` when Safari-specific behavior is required.
+- **Proxy URLs for non-stealth consumers**: use `resolveProxy()` when a
+  provider-owned client outside `ctx.stealth` needs the provider's proxy, such
+  as a CAPTCHA solver that must use matching egress. Pass the provider proxy
+  policy used by the provider and consume the returned `url`; the SDK owns
+  vendor selection, allocation, failover, and URL formats. Never call proxy
+  allocator APIs or hardcode proxy vendor hostnames in provider code.
+
+  ```ts
+  import { resolveProxy } from "@apifuse/provider-sdk"
+
+  const resolvedProxy = await resolveProxy({
+    proxyPolicy,
+    affinityKey: connectionId,
+  })
+
+  if (!resolvedProxy.url) throw new Error("This login requires proxy egress")
+  const captchaTask = { proxy: resolvedProxy.url }
+  ```
 - **Browser providers**: for TypeScript Providers use `runtime: "browser"` plus
   `browser.engine: "playwright-stealth"`; `nodriver` is a Python-runtime path.
   Install local browser assets with `bunx playwright install chromium` when

@@ -7,9 +7,14 @@ export type {
 	ApiFuseConfig,
 	BrowserConfig,
 	ProxyConfig,
+	ProxyProtocol,
+	ProxyResolutionOptions,
+	ProxyResolutionSource,
+	ProxyVendorName,
+	ResolvedProxyConfig,
 	SessionConfig,
 } from "./config/loader.js";
-export { defineConfig, loadApiFuseConfig } from "./config/loader.js";
+export { defineConfig, loadApiFuseConfig, resolveProxy } from "./config/loader.js";
 export {
 	canonicalJson,
 	digestProviderContract,
