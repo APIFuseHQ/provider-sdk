@@ -1,8 +1,12 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { SDKError, TransportError } from "../errors.js";
+import { SDKError, StealthCookieStoreVersionError, TransportError } from "../errors.js";
 import { normalizeResponse } from "../runtime/stealth.js";
-import { type DeclarativeStealthResponse, HttpRetryUnsafeMethodPolicy } from "../types.js";
+import {
+	type DeclarativeStealthResponse,
+	HttpRetryUnsafeMethodPolicy,
+	type StealthCookieStoreV1,
+} from "../types.js";
 
 type MockImpitResponse = {
 	status: number;
@@ -321,6 +325,222 @@ describe("createStealthClient", () => {
 		});
 	});
 
+	it("does not attach a host-only cookie to a request for another host", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 200,
+				body: "first",
+				headers: { "set-cookie": "sid=host-a; Path=/" },
+				url: "https://host-a.example/first",
+			},
+			{
+				status: 200,
+				body: "second",
+				headers: {},
+				url: "https://host-b.example/second",
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://host-a.example").createSession();
+
+		await session.fetch("/first");
+		await session.fetch("https://host-b.example/second");
+
+		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
+	});
+
+	it("passes request URLs through the impit cookie bridge on set and get", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+		await session.fetch("/");
+		const impitCookieJar = mockStealthState.clients[0]?.options?.cookieJar as {
+			setCookie(cookie: string, url: string): void | Promise<void>;
+			getCookieString(url: string): string | Promise<string>;
+		};
+
+		await impitCookieJar.setCookie("bridge=host-a; Path=/", "https://host-a.example/login");
+
+		expect(await impitCookieJar.getCookieString("https://host-a.example/next")).toBe(
+			"bridge=host-a",
+		);
+		expect(await impitCookieJar.getCookieString("https://host-b.example/next")).toBe("");
+	});
+
+	it("applies Domain suffix rules and rejects unrelated or public-suffix domains", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const cookies = createStealthClient("https://example.com").createSession().cookies;
+
+		cookies.setFromCookieStrings(
+			[
+				"shared=ok; Domain=.example.com; Path=/",
+				"poison=bad; Domain=unrelated.test; Path=/",
+				"public=bad; Domain=com; Path=/",
+			],
+			"https://example.com/login",
+		);
+
+		expect(cookies.toHeader("https://sub.example.com/account")).toBe("shared=ok");
+		expect(cookies.toHeader("https://unrelated.test/")).toBe("");
+		expect(cookies.toHeader("https://example.com/")).toBe("shared=ok");
+	});
+
+	it("does not send Secure cookies over HTTP", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const cookies = createStealthClient("https://example.com").createSession().cookies;
+
+		cookies.setFromCookieStrings(["secure_sid=secret; Secure; Path=/"], "https://example.com/");
+		const state = cookies.serialize();
+		cookies.clear();
+		cookies.deserialize(state);
+
+		expect(cookies.toHeader("https://example.com/")).toBe("secure_sid=secret");
+		expect(cookies.toHeader("http://example.com/")).toBe("");
+	});
+
+	it("drops cookies expired by Expires or Max-Age", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const cookies = createStealthClient("https://example.com").createSession().cookies;
+
+		cookies.setFromCookieStrings(
+			[
+				"expires_past=gone; Expires=Wed, 21 Oct 2015 07:28:00 GMT; Path=/",
+				"max_age_zero=gone; Max-Age=0; Path=/",
+			],
+			"https://example.com/",
+		);
+		const state = cookies.serialize();
+		cookies.clear();
+		cookies.deserialize(state);
+
+		expect(cookies.toHeader("https://example.com/")).toBe("");
+		expect(cookies.getAll("https://example.com/")).toEqual({});
+	});
+
+	it("respects Path scope", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const cookies = createStealthClient("https://example.com").createSession().cookies;
+
+		cookies.setFromCookieStrings(
+			["root=yes; Path=/", "account=yes; Path=/account"],
+			"https://example.com/login",
+		);
+
+		expect(cookies.toHeader("https://example.com/other")).toBe("root=yes");
+		expect(cookies.toHeader("https://example.com/account/profile")).toBe("account=yes; root=yes");
+	});
+
+	it("emits only the most-specific matching cookie when names collide", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const cookies = createStealthClient("https://example.com").createSession().cookies;
+
+		cookies.setFromCookieStrings(
+			["sid=root; Path=/", "sid=account; Path=/account"],
+			"https://example.com/account/login",
+		);
+
+		const header = cookies.toHeader("https://example.com/account/profile");
+		expect(header).toBe("sid=account");
+		expect(header.match(/sid=/g)).toHaveLength(1);
+	});
+
+	it("round-trips a flat snapshot as sendable cookies on the session origin", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const cookies = createStealthClient("https://example.com").createSession().cookies;
+		cookies.setFromCookieStrings(["sid=abc; Path=/", "csrf=def; Path=/"]);
+		expect(cookies.find?.((cookie) => cookie.startsWith("csrf="))).toBe("csrf=def");
+
+		const snapshot = cookies.snapshot();
+		cookies.clear();
+		cookies.restore(snapshot);
+
+		expect(snapshot).toEqual({ sid: "abc", csrf: "def" });
+		expect(cookies.toHeader("https://example.com/next")).toBe("sid=abc; csrf=def");
+	});
+
+	it("includes cookies from every host in the backward-compatible flat snapshot", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const cookies = createStealthClient("https://tabelog.com").createSession().cookies;
+
+		cookies.setFromCookieStrings(["kaki=abc; Path=/"], "https://account.tabelog.com/login");
+		cookies.setFromCookieStrings(["_tabelog_session_id=s1; Path=/"], "https://tabelog.com/");
+		cookies.setFromCookieStrings(["yoyaku_tok=yy; Path=/"], "https://yoyaku.tabelog.com/");
+
+		expect(cookies.snapshot()).toEqual({
+			kaki: "abc",
+			_tabelog_session_id: "s1",
+			yoyaku_tok: "yy",
+		});
+	});
+
+	it("round-trips JSON-safe cookie state without losing origin attributes", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const cookies = createStealthClient("https://example.com").createSession().cookies;
+
+		cookies.setFromCookieStrings(
+			["shared=domain; Domain=.example.com; Path=/account; Secure"],
+			"https://example.com/account/login",
+		);
+		cookies.setFromCookieStrings(
+			["host_session=host-only; Path=/; Secure"],
+			"https://account.example.com/login",
+		);
+
+		const state = JSON.parse(JSON.stringify(cookies.serialize())) as StealthCookieStoreV1;
+		const shared = state.jar.cookies.find((cookie) => cookie.key === "shared");
+		const hostOnly = state.jar.cookies.find((cookie) => cookie.key === "host_session");
+		expect(state.version).toBe(1);
+		expect(shared).toMatchObject({
+			domain: "example.com",
+			hostOnly: false,
+			path: "/account",
+			secure: true,
+		});
+		expect(hostOnly).toMatchObject({
+			domain: "account.example.com",
+			hostOnly: true,
+			path: "/",
+			secure: true,
+		});
+
+		cookies.clear();
+		cookies.deserialize(state);
+
+		expect(cookies.toHeader("https://sub.example.com/account/profile")).toBe("shared=domain");
+		expect(cookies.toHeader("https://account.example.com/account/profile")).toBe(
+			"shared=domain; host_session=host-only",
+		);
+		expect(cookies.toHeader("https://other.example.com/")).toBe("");
+		expect(cookies.toHeader("https://sub.example.com/other")).toBe("");
+	});
+
+	it("rejects unsupported cookie-store versions with a typed error", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const cookies = createStealthClient("https://example.com").createSession().cookies;
+		const futureState = {
+			version: 2,
+			jar: cookies.serialize().jar,
+		} as unknown as StealthCookieStoreV1;
+
+		expect(() => cookies.deserialize(futureState)).toThrow(StealthCookieStoreVersionError);
+		expect(() => cookies.deserialize(futureState)).toThrow(
+			"Unsupported stealth cookie store version: 2",
+		);
+	});
+
+	it("restores a legacy flat map without leaking beyond the session host", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const cookies = createStealthClient("https://example.com").createSession().cookies;
+
+		cookies.restore({ legacy_sid: "abc", legacy_csrf: "def" });
+
+		expect(cookies.toHeader("https://example.com/next")).toBe("legacy_sid=abc; legacy_csrf=def");
+		expect(cookies.toHeader("https://sub.example.com/next")).toBe("");
+		expect(cookies.toHeader("https://unrelated.test/next")).toBe("");
+	});
+
 	it("rejects removed Chrome profile names before starting impit", async () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
 
@@ -585,6 +805,8 @@ describe("createStealthClient", () => {
 			},
 		]);
 		expect(result.cookies).toEqual({ a: "1", b: "2", c: "3" });
+		expect(result.cookieStore.version).toBe(1);
+		expect(result.cookieStore.jar.cookies.map((cookie) => cookie.key)).toEqual(["a", "b", "c"]);
 		expect(mockStealthState.clients[0]?.calls).toEqual([
 			expect.objectContaining({
 				url: "https://example.com/login",
@@ -610,6 +832,47 @@ describe("createStealthClient", () => {
 			}),
 		]);
 		expect(mockStealthState.clients[0]?.calls[1]?.init).not.toHaveProperty("body");
+	});
+
+	it("redirects.run returns cookies set by intermediate hops on different hosts", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 302,
+				body: "",
+				headers: {
+					location: "https://yoyaku.tabelog.com/booking",
+					"set-cookie": "kaki=abc; Path=/",
+				},
+				url: "https://account.tabelog.com/login",
+			},
+			{
+				status: 302,
+				body: "",
+				headers: { location: "https://tabelog.com/done", "set-cookie": "yoyaku_tok=yy; Path=/" },
+				url: "https://yoyaku.tabelog.com/booking",
+			},
+			{
+				status: 200,
+				body: "done",
+				headers: { "set-cookie": "_tabelog_session_id=s1; Path=/" },
+				url: "https://tabelog.com/done",
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://tabelog.com").createSession();
+
+		const result = await session.redirects.run({ url: "https://account.tabelog.com/login" });
+
+		expect(result.reason).toBe("completed");
+		expect(result.cookies).toEqual({
+			kaki: "abc",
+			yoyaku_tok: "yy",
+			_tabelog_session_id: "s1",
+		});
+		expect(result.cookieStore.jar.cookies).toHaveLength(3);
+		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
+		expect(mockStealthState.clients[0]?.calls[2]?.init?.headers).not.toHaveProperty("Cookie");
 	});
 
 	it("redirects.run preserves method and body for 307 redirects", async () => {

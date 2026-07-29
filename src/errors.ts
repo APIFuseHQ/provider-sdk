@@ -79,6 +79,21 @@ export class SDKError extends ProviderError {
 	}
 }
 
+/** Raised when persisted stealth cookies use a store version this SDK cannot read. */
+export class StealthCookieStoreVersionError extends SDKError {
+	constructor(public readonly version: unknown) {
+		const displayedVersion =
+			typeof version === "string" || typeof version === "number"
+				? String(version)
+				: "missing or invalid";
+		super(`Unsupported stealth cookie store version: ${displayedVersion}`, {
+			code: "unsupported_stealth_cookie_store_version",
+			details: { receivedVersion: version, supportedVersions: [1] },
+		});
+		this.name = "StealthCookieStoreVersionError";
+	}
+}
+
 export class AuthError extends ProviderError {
 	constructor(message: string, options?: ProviderErrorOptions) {
 		super(message, options);

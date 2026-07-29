@@ -1,24 +1,27 @@
 import { createHash } from "node:crypto";
 import type { Browser, ImpitOptions, ImpitResponse, RequestInit } from "impit";
 import { Impit } from "impit";
+import { Cookie, CookieJar as ToughCookieJar } from "tough-cookie";
 
 import type { ProxyResolutionOptions, ProxyVendorName } from "../config/loader.js";
 import {
 	DEFAULT_SMARTPROXY_POOL_SIZE,
 	invalidateProxyResolutionCacheAsync,
-	policyResolvesRegistryVendorChain,
 	ProxyResolutionError,
+	policyResolvesRegistryVendorChain,
 	resolvePolicyProxyPoolSpan,
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
 	vendorFromResolvedSource,
 } from "../config/loader.js";
-import { SDKError, TransportError } from "../errors.js";
+import { SDKError, StealthCookieStoreVersionError, TransportError } from "../errors.js";
 import { getStealthProfile } from "../stealth/profiles.js";
 import type {
 	CookieJar,
 	HttpMethod,
 	StealthClient,
+	StealthCookieStore,
+	StealthCookieStoreV1,
 	StealthFetchOptions,
 	StealthRedirectHop,
 	StealthResponse,
@@ -127,80 +130,144 @@ function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
-class CookieJarImpl implements CookieJar {
-	private readonly cookies: Record<string, string>;
+const LEGACY_COOKIE_ORIGIN = "https://legacy-cookie.invalid/";
 
-	constructor(cookieStrings: string[]) {
-		this.cookies = {};
+class CookieJarImpl implements CookieJar {
+	private cookies: ToughCookieJar;
+	private readonly defaultUrl: string;
+
+	constructor(cookieStrings: readonly string[], defaultUrl = LEGACY_COOKIE_ORIGIN) {
+		this.cookies = new ToughCookieJar(undefined, {
+			allowSecureOnLocal: false,
+			rejectPublicSuffixes: true,
+		});
+		this.defaultUrl = this.normalizeUrl(defaultUrl) ?? LEGACY_COOKIE_ORIGIN;
 		this.setFromCookieStrings(cookieStrings);
 	}
 
-	setFromCookieStrings(cookieStrings: readonly string[]): void {
+	/**
+	 * URL-less legacy operations are scoped to this jar's default URL. Session
+	 * jars use the client's base URL and response jars use the response URL. A
+	 * flat restore has no attributes to recover, so it creates host-only Path=/
+	 * cookies for that default URL instead of making them visible to every host.
+	 */
+	setFromCookieStrings(cookieStrings: readonly string[], url = this.defaultUrl): void {
+		const cookieUrl = this.normalizeUrl(url);
+		if (!cookieUrl) return;
+
 		for (const cookieString of cookieStrings) {
-			const [nameValue] = cookieString.split(";");
-			if (!nameValue) {
-				continue;
-			}
-
-			const separatorIndex = nameValue.indexOf("=");
-			if (separatorIndex === -1) {
-				continue;
-			}
-
-			const name = nameValue.slice(0, separatorIndex).trim();
-			const value = nameValue.slice(separatorIndex + 1).trim();
-			if (name) this.cookies[name] = value;
+			this.cookies.setCookieSync(cookieString, cookieUrl, { ignoreError: true });
 		}
 	}
 
-	get(name: string): string | undefined {
-		return this.cookies[name];
+	get(name: string, url?: string): string | undefined {
+		return this.getAll(url)[name];
 	}
 
-	getAll(): Record<string, string> {
-		return { ...this.cookies };
+	getAll(url?: string): Record<string, string> {
+		return Object.fromEntries(
+			this.getUniqueCookies(url ?? this.defaultUrl).map((cookie) => [cookie.key, cookie.value]),
+		);
 	}
 
-	has(name: string): boolean {
-		return Object.hasOwn(this.cookies, name);
+	has(name: string, url?: string): boolean {
+		return Object.hasOwn(this.getAll(url), name);
 	}
 
-	toString(): string {
-		return Object.entries(this.cookies)
-			.map(([name, value]) => `${name}=${value}`)
+	toString(url?: string): string {
+		return this.getUniqueCookies(url ?? this.defaultUrl)
+			.map((cookie) => cookie.cookieString())
 			.join("; ");
 	}
 
-	toHeader(): string {
-		return this.toString();
+	toHeader(url?: string): string {
+		return this.toString(url);
 	}
 
 	snapshot(): Record<string, string> {
-		return this.getAll();
+		// This compatibility view deliberately enumerates the serialized store,
+		// not getAll(defaultUrl): persistence must include sibling hosts and paths.
+		// Duplicate names still collapse because a flat map cannot represent them.
+		const entries: [string, string][] = [];
+		for (const cookie of this.serialize().jar.cookies) {
+			if (typeof cookie.key === "string" && typeof cookie.value === "string" && cookie.key) {
+				entries.push([cookie.key, cookie.value]);
+			}
+		}
+		return Object.fromEntries(entries);
 	}
 
 	restore(cookies: Record<string, string>): void {
 		this.clear();
 		for (const [name, value] of Object.entries(cookies)) {
-			if (name) this.cookies[name] = value;
+			if (!name) continue;
+			this.cookies.setCookieSync(new Cookie({ key: name, path: "/", value }), this.defaultUrl, {
+				ignoreError: true,
+			});
 		}
+	}
+
+	serialize(): StealthCookieStoreV1 {
+		const jar = this.cookies.serializeSync();
+		if (!jar) {
+			throw new SDKError("Stealth cookie store could not be serialized", {
+				code: "stealth_cookie_store_serialize_failed",
+			});
+		}
+		return { version: 1, jar };
+	}
+
+	deserialize(state: StealthCookieStore): void {
+		const version = isRecord(state) ? state.version : undefined;
+		if (version !== 1) {
+			throw new StealthCookieStoreVersionError(version);
+		}
+
+		// Deserialize into a new jar first so invalid state cannot partially clear
+		// or replace a live session. tough-cookie restores the cookie attributes and
+		// matching semantics represented in its own serialized format.
+		const restored = ToughCookieJar.deserializeSync(state.jar);
+		// tough-cookie 6 does not include this option in serializeSync(). Preserve
+		// the SDK's stricter setting across restoration.
+		Reflect.set(restored, "allowSecureOnLocal", false);
+		this.cookies = restored;
 	}
 
 	clear(): void {
-		for (const name of Object.keys(this.cookies)) {
-			delete this.cookies[name];
-		}
+		this.cookies.removeAllCookiesSync();
 	}
 
-	find(predicate: (cookie: string) => boolean): string | undefined {
-		for (const [name, value] of Object.entries(this.cookies)) {
-			const cookie = `${name}=${value}`;
-			if (predicate(cookie)) {
-				return cookie;
+	find(predicate: (cookie: string) => boolean, url?: string): string | undefined {
+		for (const cookie of this.getUniqueCookies(url ?? this.defaultUrl)) {
+			const cookieString = cookie.cookieString();
+			if (predicate(cookieString)) {
+				return cookieString;
 			}
 		}
 
 		return undefined;
+	}
+
+	private normalizeUrl(url: string): string | undefined {
+		try {
+			return new URL(url).toString();
+		} catch {
+			return undefined;
+		}
+	}
+
+	private getUniqueCookies(url: string): Cookie[] {
+		const cookieUrl = this.normalizeUrl(url);
+		if (!cookieUrl) return [];
+
+		// tough-cookie returns longer (more-specific) paths first. Keeping the
+		// first cookie for each name prevents ambiguous duplicate-name headers.
+		const names = new Set<string>();
+		return this.cookies.getCookiesSync(cookieUrl).filter((cookie) => {
+			if (names.has(cookie.key)) return false;
+			names.add(cookie.key);
+			return true;
+		});
 	}
 }
 
@@ -282,12 +349,12 @@ function hasOwn(object: object, key: string): boolean {
 }
 function toImpitCookieJar(cookieJar: CookieJarImpl): NonNullable<ImpitOptions["cookieJar"]> {
 	return {
-		setCookie(cookie: string, _url: string, cb?: (error?: unknown) => void) {
-			cookieJar.setFromCookieStrings([cookie]);
+		setCookie(cookie: string, url: string, cb?: (error?: unknown) => void) {
+			cookieJar.setFromCookieStrings([cookie], url);
 			if (typeof cb === "function") cb();
 		},
-		getCookieString(_url: string) {
-			return cookieJar.toString();
+		getCookieString(url: string) {
+			return cookieJar.toHeader(url);
 		},
 	};
 }
@@ -341,7 +408,10 @@ export async function normalizeResponse(
 	requestUrl?: string,
 ): Promise<StealthResponse> {
 	const headers = Object.fromEntries(response.headers.entries());
-	const cookies = new CookieJarImpl(setCookieHeadersFromResponse(response.headers));
+	const cookies = new CookieJarImpl(
+		setCookieHeadersFromResponse(response.headers),
+		response.url ?? requestUrl,
+	);
 	const bodyBytes = await response.arrayBuffer();
 	const body = new TextDecoder().decode(bodyBytes);
 
@@ -588,7 +658,7 @@ function createSessionFetcher(
 	let closed = false;
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
-	const cookieJar = new CookieJarImpl([]);
+	const cookieJar = new CookieJarImpl([], baseUrl);
 	const impitCookieJar = toImpitCookieJar(cookieJar);
 
 	function getClient(
@@ -757,7 +827,7 @@ function createSessionFetcher(
 						const requestUrl = appendQueryParams(resolveUrl(baseUrl, url), options.params);
 						const headers = { ...(options.headers ?? {}) };
 						if (!hasHeader(headers, "Cookie")) {
-							const cookieHeader = cookieJar.toString();
+							const cookieHeader = cookieJar.toHeader(requestUrl);
 							if (cookieHeader) headers.Cookie = cookieHeader;
 						}
 						const requestInit: StealthRequestInit = {
@@ -774,7 +844,10 @@ function createSessionFetcher(
 							requestInit,
 						);
 						const normalized = await normalizeResponse(response, requestUrl);
-						cookieJar.setFromCookieStrings(setCookieHeadersFromResponse(response.headers));
+						cookieJar.setFromCookieStrings(
+							setCookieHeadersFromResponse(response.headers),
+							response.url ?? requestUrl,
+						);
 
 						if (proxy && isProxyConnectFailureResponse(response, normalized.body)) {
 							throw createProxyConnectFailureError(normalized.body);
@@ -954,6 +1027,7 @@ function createSessionFetcher(
 							hops,
 							reason: "completed",
 							cookies: cookieJar.snapshot(),
+							cookieStore: cookieJar.serialize(),
 						};
 					}
 
@@ -976,6 +1050,7 @@ function createSessionFetcher(
 							hops,
 							reason: "stopped",
 							cookies: cookieJar.snapshot(),
+							cookieStore: cookieJar.serialize(),
 						};
 					}
 
@@ -985,6 +1060,7 @@ function createSessionFetcher(
 							hops,
 							reason: "missing_location",
 							cookies: cookieJar.snapshot(),
+							cookieStore: cookieJar.serialize(),
 						};
 					}
 
@@ -994,6 +1070,7 @@ function createSessionFetcher(
 							hops,
 							reason: "max_hops",
 							cookies: cookieJar.snapshot(),
+							cookieStore: cookieJar.serialize(),
 						};
 					}
 
@@ -1007,6 +1084,7 @@ function createSessionFetcher(
 							hops,
 							reason: "loop",
 							cookies: cookieJar.snapshot(),
+							cookieStore: cookieJar.serialize(),
 						};
 					}
 					method = nextMethod;
@@ -1028,6 +1106,7 @@ function createSessionFetcher(
 					hops,
 					reason: "max_hops",
 					cookies: cookieJar.snapshot(),
+					cookieStore: cookieJar.serialize(),
 				};
 			},
 		},

@@ -250,6 +250,8 @@ export type {
 	StateValue,
 	StateWriteOptions,
 	StealthClient,
+	StealthCookieStore,
+	StealthCookieStoreV1,
 	StealthFetchOptions,
 	StealthPlatform,
 	StealthProfile,

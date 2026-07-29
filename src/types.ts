@@ -1,4 +1,5 @@
 import type ms from "ms";
+import type { SerializedCookieJar } from "tough-cookie";
 
 import type { infer as ZodInfer, ZodType } from "zod";
 
@@ -1051,18 +1052,45 @@ export interface StealthFetchOptions extends RequestOptions {
 }
 
 export interface CookieJar {
-	get(name: string): string | undefined;
-	getAll(): Record<string, string>;
-	toString(): string;
-	find?(predicate: (cookie: string) => boolean): string | undefined;
+	/** URL-less reads use the jar's response URL or session base URL. */
+	get(name: string, url?: string): string | undefined;
+	getAll(url?: string): Record<string, string>;
+	toString(url?: string): string;
+	find?(predicate: (cookie: string) => boolean, url?: string): string | undefined;
 }
 
+/**
+ * Version 1 of the JSON-safe, attribute-preserving stealth cookie store.
+ * The nested jar is tough-cookie's serialized form and retains cookie origin,
+ * Path, Secure, expiry, host-only, and other RFC attributes.
+ */
+export interface StealthCookieStoreV1 {
+	readonly version: 1;
+	readonly jar: SerializedCookieJar;
+}
+
+/** Cookie persistence formats understood by this SDK version. */
+export type StealthCookieStore = StealthCookieStoreV1;
+
 export interface StealthSessionCookies extends CookieJar {
-	has(name: string): boolean;
-	setFromCookieStrings(cookieStrings: readonly string[]): void;
-	toHeader(): string;
+	has(name: string, url?: string): boolean;
+	/** URL-less writes are scoped to the session base URL. */
+	setFromCookieStrings(cookieStrings: readonly string[], url?: string): void;
+	toHeader(url?: string): string;
+	/**
+	 * Returns every cookie as a flat name/value map, collapsing duplicate names.
+	 * @deprecated Use serialize() for lossless, attribute-preserving persistence.
+	 */
 	snapshot(): Record<string, string>;
+	/**
+	 * Restores flat values as host-only, Path=/ cookies on the session base URL.
+	 * @deprecated Use deserialize() with state produced by serialize().
+	 */
 	restore(cookies: Record<string, string>): void;
+	/** Returns a versioned, JSON-safe, attribute-preserving representation of every cookie. */
+	serialize(): StealthCookieStoreV1;
+	/** Replaces the jar with a previously serialized, attribute-preserving cookie store. */
+	deserialize(state: StealthCookieStore): void;
 	clear(): void;
 }
 
@@ -1108,7 +1136,13 @@ export interface StealthRedirectRunResult {
 	final: StealthResponse;
 	hops: StealthRedirectHop[];
 	reason: "completed" | "stopped" | "max_hops" | "missing_location" | "loop";
+	/**
+	 * Complete flat view across all redirect hosts. Attributes and duplicate names are lost.
+	 * @deprecated Use cookieStore for lossless persistence.
+	 */
 	cookies: Record<string, string>;
+	/** Versioned, attribute-preserving cookie state accumulated across the redirect chain. */
+	cookieStore: StealthCookieStoreV1;
 }
 
 export interface StealthSession {
