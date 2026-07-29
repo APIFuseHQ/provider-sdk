@@ -517,6 +517,43 @@ const credentialsAuth = defineCredentialsAuth({
   `bunx playwright install chromium`, or set
   `APIFUSE__CDP_POOL__URL` for remote browser debugging.
 
+### Persisting stealth session cookies
+
+Persist `session.cookies.serialize()` as JSON when an authenticated session must
+survive a restart or move to another replica. The returned
+`StealthCookieStoreV1` has an explicit version and retains every cookie together
+with its Domain, Path, Secure, expiry, host-only, and other cookie attributes.
+Restore it with `session.cookies.deserialize()`. Unsupported future versions
+fail explicitly instead of being accepted as a partial cookie jar.
+
+Credential values are strings, so stringify the store at the credential
+boundary and parse it when rebuilding the session:
+
+```ts
+// After login (including any redirects across sibling hosts):
+const result = await session.redirects.run({ url: loginUrl });
+return {
+  credential: {
+    cookieStore: JSON.stringify(result.cookieStore),
+  },
+};
+
+// In a later operation or replica:
+const persisted = ctx.credential.get("cookieStore");
+if (persisted) {
+  session.cookies.deserialize(JSON.parse(persisted));
+}
+```
+
+`snapshot()` and `restore()` remain only for backward compatibility with flat
+`Record<string, string>` credentials. `snapshot()` enumerates cookies across all
+hosts and paths, but the flat shape is inherently lossy: duplicate names
+collapse and Domain, Path, Secure, expiry, and host-only attributes cannot be
+represented. `restore()` therefore recreates host-only `Path=/` cookies on the
+session base origin. Do not use the flat form for new persistence code. Cookie
+headers remain origin-filtered: use `toHeader(url)` for a particular request and
+never build a request header from serialized or snapshotted persistence data.
+
 ### Running the pre-submission report
 
 ```bash
