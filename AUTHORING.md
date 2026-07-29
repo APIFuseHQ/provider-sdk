@@ -446,6 +446,26 @@ Note the asymmetry: the gate treats whitespace-only values as missing, but
 `ctx.env.get()` still returns the raw value to handlers — trim at the point of
 use if the upstream is whitespace-sensitive.
 
+### Credentials forced into query parameters
+
+Prefer an authorization header or request body whenever the upstream supports
+one. When the upstream requires a credential in the URL query (for example
+`serviceKey`, `confmKey`, or `crtfc_key`), use `sensitiveParams`:
+
+```ts
+const response = await ctx.http.get("/openapi/lookup", {
+	params: { pageNo: 1, numOfRows: 100 },
+	sensitiveParams: {
+		serviceKey: ctx.env.get("APIFUSE__PROVIDER__EXAMPLE__SERVICE_KEY")!,
+	},
+});
+```
+
+`sensitiveParams` is merged into the outgoing query like `params`, while its
+values are redacted from SDK transport errors, traces, and `apifuse record`
+fixtures. Do not put query credentials in `params`, and do not hand-build a URL
+containing a key; those paths cannot declare which query values are secret.
+
 ### Public local debugging checklist
 
 - Operation smoke requests use the provider server envelope:

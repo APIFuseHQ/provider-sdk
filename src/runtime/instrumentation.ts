@@ -1,4 +1,5 @@
 import type { ProviderContext } from "../types.js";
+import { redactSensitiveError, redactSensitiveText } from "./request-options.js";
 import {
 	type CreateTraceContextOptions,
 	createTraceContext,
@@ -92,6 +93,28 @@ function getUrl(
 	return undefined;
 }
 
+function getSensitiveValues(
+	namespace: InstrumentedNamespace,
+	methodName: string,
+	args: unknown[],
+): readonly string[] {
+	let options: unknown;
+	if (namespace === "stealth") {
+		options = args[1];
+	} else if (namespace === "http") {
+		options = methodName === "post" || methodName === "put" ? args[2] : args[1];
+	}
+
+	if (!options || typeof options !== "object" || !("sensitiveParams" in options)) {
+		return [];
+	}
+	const sensitiveParams = options.sensitiveParams;
+	if (!sensitiveParams || typeof sensitiveParams !== "object") return [];
+	return Object.values(sensitiveParams).filter(
+		(value): value is string => typeof value === "string",
+	);
+}
+
 function getMethod(
 	namespace: InstrumentedNamespace,
 	methodName: string,
@@ -121,7 +144,9 @@ function buildSpanAttributes(
 	error?: unknown,
 ): Record<string, string | number | boolean> {
 	const attributes: Record<string, string | number | boolean> = {};
-	const url = getUrl(namespace, args, result);
+	const sensitiveValues = getSensitiveValues(namespace, methodName, args);
+	const rawUrl = getUrl(namespace, args, result);
+	const url = rawUrl ? redactSensitiveText(rawUrl, sensitiveValues) : undefined;
 	const method = getMethod(namespace, methodName, args);
 	const status = error ? getErrorStatus(error) : getResponseStatus(namespace, result);
 	const duration = error ? undefined : getResponseDuration(result);
@@ -351,6 +376,10 @@ function wrapNamespace<T extends object>(
 				try {
 					result = Reflect.apply(value, namespaceTarget, args);
 				} catch (error) {
+					const sanitizedError = redactSensitiveError(
+						error,
+						getSensitiveValues(namespace, methodName, args),
+					);
 					// A promise-returning implementation may still throw
 					// SYNCHRONOUSLY during pre-flight validation. Preserve the
 					// synchronous throw contract, but keep recording the failure
@@ -359,7 +388,7 @@ function wrapNamespace<T extends object>(
 						.runSpan(
 							`${namespace}.${methodName}`,
 							() => {
-								throw error;
+								throw sanitizedError;
 							},
 							{
 								onError: (spanError) =>
@@ -367,7 +396,7 @@ function wrapNamespace<T extends object>(
 							},
 						)
 						.catch(() => undefined);
-					throw error;
+					throw sanitizedError;
 				}
 				if (!isThenable(result)) {
 					// The state namespace factory returns the object whose METHODS
@@ -384,9 +413,12 @@ function wrapNamespace<T extends object>(
 					}
 					return result;
 				}
-				return recorder.runSpan(`${namespace}.${methodName}`, () => result, {
-					onSuccess: (spanResult) =>
-						buildSpanAttributes(namespace, methodName, args, spanResult),
+				const sensitiveValues = getSensitiveValues(namespace, methodName, args);
+				const sanitizedResult = Promise.resolve(result).catch((error: unknown) => {
+					throw redactSensitiveError(error, sensitiveValues);
+				});
+				return recorder.runSpan(`${namespace}.${methodName}`, () => sanitizedResult, {
+					onSuccess: (spanResult) => buildSpanAttributes(namespace, methodName, args, spanResult),
 					onError: (error) => buildSpanAttributes(namespace, methodName, args, undefined, error),
 				});
 			};

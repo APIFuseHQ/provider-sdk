@@ -50,7 +50,11 @@ import {
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
-import { appendQueryParams } from "./request-options.js";
+import {
+	redactSensitiveError,
+	redactSensitiveText,
+	serializeRequestUrl,
+} from "./request-options.js";
 
 const DEFAULT_PROFILE = "chrome-146";
 
@@ -907,7 +911,12 @@ function createSessionFetcher(
 								(!hasPolicyProxy && proxy && clientOptions.proxyStealth?.insecureSkipVerify),
 						);
 						const profileName = options.profile ?? defaultProfile;
-						const requestUrl = appendQueryParams(resolveUrl(baseUrl, url), options.params);
+						const serializedUrl = serializeRequestUrl(
+							resolveUrl(baseUrl, url),
+							options.params,
+							options.sensitiveParams,
+						);
+						const { requestUrl } = serializedUrl;
 						const headers = { ...(options.headers ?? {}) };
 						if (!hasHeader(headers, "Cookie")) {
 							const cookieHeader = cookieJar.toHeader(requestUrl);
@@ -927,6 +936,14 @@ function createSessionFetcher(
 							requestInit,
 						);
 						const normalized = await normalizeResponse(response, requestUrl, options.maxBodyBytes);
+						if (normalized.url) {
+							normalized.url = redactSensitiveText(
+								normalized.url,
+								serializedUrl.sensitiveValues,
+								serializedUrl.requestUrl,
+								serializedUrl.redactedUrl,
+							);
+						}
 						cookieJar.setFromCookieStrings(
 							setCookieHeadersFromResponse(response.headers),
 							response.url ?? requestUrl,
@@ -974,7 +991,28 @@ function createSessionFetcher(
 						recordProxyAttempt("ok", undefined, response.status);
 						return normalized;
 					} catch (error) {
-						const normalizedError = normalizeStealthTransportError(error);
+						const requestUrl = serializeRequestUrl(
+							resolveUrl(baseUrl, url),
+							options.params,
+							options.sensitiveParams,
+						);
+						let normalizedError: TransportError;
+						try {
+							normalizedError = normalizeStealthTransportError(error);
+						} catch (normalizationError) {
+							throw redactSensitiveError(
+								normalizationError,
+								requestUrl.sensitiveValues,
+								requestUrl.requestUrl,
+								requestUrl.redactedUrl,
+							);
+						}
+						normalizedError = redactSensitiveError(
+							normalizedError,
+							requestUrl.sensitiveValues,
+							requestUrl.requestUrl,
+							requestUrl.redactedUrl,
+						);
 						recordProxyAttempt(
 							"error",
 							proxyAttemptErrorCode(normalizedError),
@@ -1090,19 +1128,36 @@ function createSessionFetcher(
 				let body = options.body;
 				let response: StealthResponse | undefined;
 				const visitedRequests = new Set<string>();
+				const sensitiveValues = Object.values(options.sensitiveParams ?? {});
 
-				const { url: _url, maxHops: _maxHops, stopWhen, params, ...fetchOptions } = options;
+				const {
+					url: _url,
+					maxHops: _maxHops,
+					stopWhen,
+					params,
+					sensitiveParams,
+					...fetchOptions
+				} = options;
 
 				for (let hopIndex = 0; hopIndex <= maxHops; hopIndex += 1) {
 					visitedRequests.add(`${method} ${currentUrl}`);
-					response = await session.fetch(currentUrl, {
-						...fetchOptions,
-						body,
-						method,
-						...(hopIndex === 0 && params ? { params } : {}),
-						redirect: "manual",
-						throwOnHttpError: false,
-					});
+					try {
+						response = await session.fetch(currentUrl, {
+							...fetchOptions,
+							body,
+							method,
+							...(hopIndex === 0 && params ? { params } : {}),
+							...(hopIndex === 0 && sensitiveParams ? { sensitiveParams } : {}),
+							redirect: "manual",
+							throwOnHttpError: false,
+						});
+					} catch (error) {
+						throw redactSensitiveError(error, sensitiveValues);
+					}
+					const responseUrl = response.url ?? currentUrl;
+					if (response.url) {
+						response.url = redactSensitiveText(response.url, sensitiveValues);
+					}
 
 					if (!isRedirectStatus(response.status)) {
 						return {
@@ -1115,15 +1170,13 @@ function createSessionFetcher(
 					}
 
 					const location = locationHeader(response.headers);
-					const nextUrl = location
-						? new URL(location, response.url ?? currentUrl).toString()
-						: undefined;
+					const nextUrl = location ? new URL(location, responseUrl).toString() : undefined;
 					const hop: StealthRedirectHop = {
-						url: response.url ?? currentUrl,
+						url: redactSensitiveText(responseUrl, sensitiveValues),
 						status: response.status,
 						method,
-						...(location ? { location } : {}),
-						...(nextUrl ? { nextUrl } : {}),
+						...(location ? { location: redactSensitiveText(location, sensitiveValues) } : {}),
+						...(nextUrl ? { nextUrl: redactSensitiveText(nextUrl, sensitiveValues) } : {}),
 					};
 					hops.push(hop);
 

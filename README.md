@@ -138,7 +138,7 @@ the bad request path; provider/runtime failures include `code`, `message`, and
 - **Stealth-sensitive providers**: use `ctx.http` for normal JSON/REST calls and
   `ctx.stealth.fetch()` when you need browser-like session or cookie control.
   `ctx.stealth.fetch()` uses the impit-backed browser stealth transport and
-  accepts request controls for `params`, `proxy`, `timeout`, `profile`,
+  accepts request controls for `params`, `sensitiveParams`, `proxy`, `timeout`, `profile`,
   `maxBodyBytes`, `redirect`, `throwOnHttpError`, and
   `stealth.insecureSkipVerify`. For login
   flows that must inspect intermediate `Location`/`Set-Cookie` headers, create
@@ -147,6 +147,19 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   `profile` such as `chrome-146`; do not tune JA3, HTTP/2 SETTINGS, or
   pseudo-header order in provider code. Chrome/Firefox-style profiles are
   supported; use `ctx.browser` when Safari-specific behavior is required.
+- **Query-parameter credentials**: when an upstream requires a credential in
+  its URL query, pass it through `sensitiveParams`, not `params` and never a
+  hand-built URL. It is sent as a normal query parameter while the SDK redacts
+  its value from transport errors, traces, and recorded fixtures:
+
+  ```ts
+  const response = await ctx.http.get("/openapi/service", {
+    params: { page: 1 },
+    sensitiveParams: { serviceKey: ctx.env.get("APIFUSE__PROVIDER__EXAMPLE__API_KEY")! },
+  });
+  ```
+
+  Use this only when the upstream offers no header or body credential channel.
 - **Proxy URLs for non-stealth consumers**: use `resolveProxy()` when a
   provider-owned client outside `ctx.stealth` needs the provider's proxy, such
   as a CAPTCHA solver that must use matching egress. Pass the provider proxy

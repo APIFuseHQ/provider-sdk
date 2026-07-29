@@ -125,7 +125,7 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 		[
 			'import { ProviderError, resolveProxy, SessionExpiredError, z } from "@apifuse/provider-sdk";',
 			'import type { NativeNetworkClient, NativeNetworkConnection, NativeProviderConfig, NativeProviderContext, NativeTcpEgressGrant, ProviderContext, ProviderFileRef, ProviderFilesContext, ProviderResolvedFile } from "@apifuse/provider-sdk";',
-			'import type { ProxyProtocol, ProxyResolutionOptions, ProxyResolutionSource, ProxyVendorName, ResolvedProxyConfig } from "@apifuse/provider-sdk";',
+			'import type { ProxyProtocol, ProxyResolutionOptions, ProxyResolutionSource, ProxyVendorName, RequestOptions, ResolvedProxyConfig } from "@apifuse/provider-sdk";',
 			'import { defineCredentialsAuth } from "@apifuse/provider-sdk/provider";',
 			'import type { NativeNetworkClient as ProviderEntryNativeNetworkClient, ProviderFilesContext as ProviderEntryFilesContext } from "@apifuse/provider-sdk/provider";',
 			'import { extractProviderContract } from "@apifuse/provider-sdk/contract";',
@@ -151,6 +151,7 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			"const proxyResult: Promise<ResolvedProxyConfig> = resolveProxy(proxyOptions);",
 			'const proxySource: ProxyResolutionSource = "smartproxy-allocator";',
 			'const proxyVendor: ProxyVendorName = "smartproxy";',
+<<<<<<< HEAD
 			'const requestFile: ProviderFileRef = { type: "request_file", id: "photo", filename: "photo.jpg", mime_type: "image/jpeg", size: 4 };',
 			'const resolvedFile: ProviderResolvedFile = { type: "request_file", id: requestFile.id, filename: requestFile.filename, size: requestFile.size, sha256: requestFile.sha256, mimeType: requestFile.mime_type, arrayBuffer: async () => new ArrayBuffer(0), bytes: async () => new Uint8Array(), stream: () => new ReadableStream<Uint8Array>() };',
 			"const files: ProviderFilesContext = { has: () => true, resolve: async () => resolvedFile };",
@@ -164,6 +165,9 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			"const providerContext = undefined as unknown as ProviderContext;",
 			"const optionalFiles: ProviderFilesContext | undefined = providerContext.files;",
 			"const optionalNative: NativeProviderContext | undefined = providerContext.native;",
+=======
+			'const queryCredentialOptions: RequestOptions = { sensitiveParams: { serviceKey: "type-test-key" } };',
+>>>>>>> a86f7dc (feat(http): first-class sensitiveParams for query-string credentials)
 			"",
 			"export const witnesses = {",
 			"	inheritedName,",

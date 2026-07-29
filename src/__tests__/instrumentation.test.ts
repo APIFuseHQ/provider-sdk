@@ -277,6 +277,25 @@ describe("wrapWithInstrumentation", () => {
 			},
 		});
 	});
+
+	it("redacts sensitiveParams from traced transport errors", async () => {
+		const secret = "trace-test-secret";
+		const ctx = createMockContext();
+		ctx.http.get = mock(async () => {
+			throw new Error(`Failed https://api.example.com/items?serviceKey=${secret}`);
+		});
+
+		const instrumented = wrapWithInstrumentation(ctx);
+		await expect(
+			instrumented.http.get("https://api.example.com/items", {
+				sensitiveParams: { serviceKey: secret },
+			}),
+		).rejects.toThrow("serviceKey=[REDACTED]");
+
+		const serializedSpan = JSON.stringify(instrumented.trace.getSpans()[0]);
+		expect(serializedSpan).toContain("[REDACTED]");
+		expect(serializedSpan).not.toContain(secret);
+	});
 });
 
 describe("synchronous return fidelity (state + stealth factories)", () => {

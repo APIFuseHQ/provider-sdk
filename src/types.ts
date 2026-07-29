@@ -1006,6 +1006,11 @@ export interface HttpRetrySummary {
 export interface RequestOptions {
 	headers?: Record<string, string>;
 	params?: RequestParams;
+	/**
+	 * Query parameters whose values contain credentials or other secret material.
+	 * They are sent like `params`, but redacted from SDK errors, traces, and recorded fixtures.
+	 */
+	sensitiveParams?: Record<string, string>;
 	proxy?: string;
 	timeout?: number;
 	/**

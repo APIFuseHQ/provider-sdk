@@ -22,6 +22,7 @@ type MockNativeFetchCall = {
 const mockNativeFetchState = {
 	calls: [] as MockNativeFetchCall[],
 	lastResponse: undefined as Response | undefined,
+	queuedNativeResponses: [] as Response[],
 	queuedResponses: [] as MockImpitResponse[],
 	queuedErrors: [] as Error[],
 };
@@ -32,12 +33,18 @@ describe("createHttpClient", () => {
 	beforeEach(() => {
 		mockNativeFetchState.calls.length = 0;
 		mockNativeFetchState.lastResponse = undefined;
+		mockNativeFetchState.queuedNativeResponses.length = 0;
 		mockNativeFetchState.queuedResponses.length = 0;
 		mockNativeFetchState.queuedErrors.length = 0;
 		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
 			mockNativeFetchState.calls.push({ url: String(input), init });
 			const error = mockNativeFetchState.queuedErrors.shift();
 			if (error) throw error;
+			const queuedNativeResponse = mockNativeFetchState.queuedNativeResponses.shift();
+			if (queuedNativeResponse) {
+				mockNativeFetchState.lastResponse = queuedNativeResponse;
+				return queuedNativeResponse;
+			}
 			const response = mockNativeFetchState.queuedResponses.shift();
 			if (!response) throw new Error("No queued native response");
 			const body =
@@ -161,7 +168,7 @@ describe("createHttpClient", () => {
 		expect(await result.json()).toBeNull();
 	});
 
-	it("normalizes rich params and preserves existing query strings", async () => {
+	it("keeps params-only URL serialization byte-identical", async () => {
 		mockNativeFetchState.queuedResponses.push({
 			status: 200,
 			body: "ok",
@@ -184,6 +191,26 @@ describe("createHttpClient", () => {
 
 		expect(mockNativeFetchState.calls[0]?.url).toBe(
 			"https://example.com/items?existing=1&enabled=true&page=2&q=chair&tag=a&tag=b",
+		);
+	});
+
+	it("merges sensitiveParams into the outgoing query", async () => {
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: "ok",
+			headers: { "content-type": "text/plain" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com");
+
+		await http.get("/items?existing=1", {
+			params: { page: 2 },
+			sensitiveParams: { serviceKey: "test key/with+symbols" },
+		});
+
+		expect(mockNativeFetchState.calls[0]?.url).toBe(
+			"https://example.com/items?existing=1&page=2&serviceKey=test+key%2Fwith%2Bsymbols",
 		);
 	});
 
@@ -214,14 +241,55 @@ describe("createHttpClient", () => {
 
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
-		const response = await http.stream("https://example.com/logs");
+		const response = await http.stream("https://example.com/logs", {
+			sensitiveParams: { crtfc_key: "stream-test-secret" },
+		});
 
 		expect(response.status).toBe(200);
 		expect(response.headers["content-type"]).toBe("text/plain");
+		expect(mockNativeFetchState.calls[0]?.url).toBe(
+			"https://example.com/logs?crtfc_key=stream-test-secret",
+		);
 		expect(mockNativeFetchState.lastResponse?.bodyUsed).toBe(false);
 		const lines: string[] = [];
 		for await (const line of response.lines()) lines.push(line);
 		expect(lines).toEqual(["first", "second"]);
+	});
+
+	it("redacts sensitiveParams from mid-stream transport errors", async () => {
+		const secret = "mid-stream-test-secret";
+		mockNativeFetchState.queuedNativeResponses.push(
+			new Response(
+				new ReadableStream<Uint8Array>({
+					pull(controller) {
+						controller.error(
+							new TransportError(`Stream failed at https://example.com/logs?crtfc_key=${secret}`, {
+								code: "transport_network_error",
+								status: 0,
+							}),
+						);
+					},
+				}),
+				{ status: 200 },
+			),
+		);
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const response = await createHttpClient().stream("https://example.com/logs", {
+			sensitiveParams: { crtfc_key: secret },
+		});
+		let caught: unknown;
+		try {
+			for await (const _line of response.lines()) {
+				// The test stream fails before yielding a line.
+			}
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBeInstanceOf(TransportError);
+		expect((caught as Error).message).toContain("crtfc_key=[REDACTED]");
+		expect((caught as Error).message).not.toContain(secret);
 	});
 
 	it("sse() parses native EventSource frames incrementally", async () => {
@@ -375,6 +443,33 @@ describe("createHttpClient", () => {
 			status: 0,
 			message: "Network error",
 		});
+	});
+
+	it("redacts sensitiveParams from transport errors that embed the request URL", async () => {
+		const secret = "transport-error-test-secret";
+		mockNativeFetchState.queuedErrors.push(
+			new TransportError(`Failed to fetch https://example.com/data?serviceKey=${secret}`, {
+				code: "transport_network_error",
+				status: 0,
+			}),
+		);
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient();
+		let caught: unknown;
+		try {
+			await http.get("https://example.com/data", {
+				sensitiveParams: { serviceKey: secret },
+			});
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBeInstanceOf(TransportError);
+		expect((caught as Error).message).toBe(
+			"Failed to fetch https://example.com/data?serviceKey=[REDACTED]",
+		);
+		expect(JSON.stringify(caught)).not.toContain(secret);
 	});
 
 	it("does not retry when retry is omitted", async () => {

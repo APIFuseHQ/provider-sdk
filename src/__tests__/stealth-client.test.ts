@@ -477,6 +477,28 @@ describe("createStealthClient", () => {
 		);
 	});
 
+	it("sends sensitiveParams while redacting returned request URL metadata", async () => {
+		const secret = "stealth-test-secret";
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "ok",
+			headers: { "content-type": "text/plain" },
+			url: `https://example.com/items?page=1&confmKey=${secret}`,
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		const response = await client.fetch("/items", {
+			params: { page: 1 },
+			sensitiveParams: { confmKey: secret },
+		});
+
+		expect(mockStealthState.clients[0]?.calls[0]?.url).toBe(
+			`https://example.com/items?page=1&confmKey=${secret}`,
+		);
+		expect(response.url).toBe("https://example.com/items?page=1&confmKey=[REDACTED]");
+	});
+
 	it("createSession reuses the same impit client for matching browser/proxy settings", async () => {
 		mockStealthState.queuedResponses.push(
 			{ status: 200, body: "first", headers: { a: "1" } },
@@ -1365,6 +1387,35 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients[0]?.calls[1]?.url).toBe(
 			"https://example.com/callback?code=123",
 		);
+	});
+
+	it("redirects.run applies sensitiveParams only to the initial request", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 302,
+				body: "",
+				headers: { location: "/callback" },
+				url: "https://example.com/login?serviceKey=redirect-test-secret",
+			},
+			{
+				status: 200,
+				body: "done",
+				headers: {},
+				url: "https://example.com/callback",
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+		await session.redirects.run({
+			url: "/login",
+			sensitiveParams: { serviceKey: "redirect-test-secret" },
+		});
+
+		expect(mockStealthState.clients[0]?.calls[0]?.url).toBe(
+			"https://example.com/login?serviceKey=redirect-test-secret",
+		);
+		expect(mockStealthState.clients[0]?.calls[1]?.url).toBe("https://example.com/callback");
 	});
 
 	it("wraps network failures in TransportError", async () => {

@@ -22,6 +22,7 @@ import {
 	ValidationError,
 } from "../src/index.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { REDACTED_QUERY_VALUE, redactSensitiveText } from "../src/runtime/request-options.js";
 
 type CliArgs = {
 	append: boolean;
@@ -44,7 +45,7 @@ Options:
   --params, -p <json>      JSON input passed to the operation (default: {})
   --append                 preserve the existing fixture and append this capture
   --sanitize               redact common token/header fields (default)
-  --no-sanitize            write the captured upstream payload as-is
+  --no-sanitize            disable common-field redaction (sensitiveParams are always redacted)
   --help, -h               show this help
 
 Example:
@@ -73,7 +74,10 @@ export async function main() {
 			throw new Error(`No upstream response was captured for ${provider.id}.${operationName}.`);
 		}
 
-		const rawPayload = args.sanitize ? sanitizeFixture(captured) : captured;
+		const sensitiveParams = capture.getCapturedSensitiveParams();
+		const rawPayload = args.sanitize
+			? sanitizeFixture(captured, sensitiveParams)
+			: redactCapturedSensitiveParams(captured, sensitiveParams);
 		const fixturePath = resolve(location.rootDir, "__fixtures__", "raw.json");
 		const nextPayload = await prepareFixturePayload(fixturePath, rawPayload, args.append);
 
@@ -311,13 +315,25 @@ function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: strin
 
 function createCaptureContext(provider: ProviderRuntime, baseUrl: string) {
 	let capturedRaw: unknown;
+	const sensitiveParamNames = new Set<string>();
+	const sensitiveParamValues = new Set<string>();
+	const captureSensitiveParams = (params?: Record<string, string>) => {
+		for (const [key, value] of Object.entries(params ?? {})) {
+			sensitiveParamNames.add(key);
+			sensitiveParamValues.add(value);
+		}
+	};
 
-	const http = proxyHttpClient(createHttpClient(baseUrl), (response) => {
+	const http = proxyHttpClient(createHttpClient(baseUrl), captureSensitiveParams, (response) => {
 		capturedRaw = response.data;
 	});
-	const stealth = proxyStealthClient(createStealthClient(baseUrl), (response) => {
-		capturedRaw = normalizeCapturedStealthResponse(response);
-	});
+	const stealth = proxyStealthClient(
+		createStealthClient(baseUrl),
+		captureSensitiveParams,
+		(response) => {
+			capturedRaw = normalizeCapturedStealthResponse(response);
+		},
+	);
 
 	const env = {
 		get: (key: string) => process.env[key],
@@ -375,11 +391,36 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string) {
 	return {
 		ctx,
 		getCapturedRaw: () => capturedRaw,
+		getCapturedSensitiveParams: () => ({
+			names: [...sensitiveParamNames],
+			values: [...sensitiveParamValues],
+		}),
 	};
+}
+
+type CapturedSensitiveParams = {
+	names: readonly string[];
+	values: readonly string[];
+};
+
+function requestOptionsForHttpCall(method: PropertyKey, args: unknown[]): unknown {
+	return method === "post" || method === "put" ? args[2] : args[1];
+}
+
+function sensitiveParamsFromOptions(value: unknown): Record<string, string> | undefined {
+	if (!value || typeof value !== "object" || !("sensitiveParams" in value)) return undefined;
+	const params = value.sensitiveParams;
+	if (!params || typeof params !== "object") return undefined;
+	return Object.fromEntries(
+		Object.entries(params).filter(
+			(entry): entry is [string, string] => typeof entry[1] === "string",
+		),
+	);
 }
 
 function proxyHttpClient(
 	client: HttpClient,
+	onSensitiveParams: (params?: Record<string, string>) => void,
 	onResponse: (response: Awaited<ReturnType<HttpClient["get"]>>) => void,
 ): HttpClient {
 	return new Proxy(client, {
@@ -391,6 +432,7 @@ function proxyHttpClient(
 			}
 
 			return async (...args: unknown[]) => {
+				onSensitiveParams(sensitiveParamsFromOptions(requestOptionsForHttpCall(prop, args)));
 				const response = await value.apply(target, args);
 				onResponse(response);
 				return response;
@@ -403,28 +445,41 @@ type StealthSession = ReturnType<StealthClient["createSession"]>;
 
 function proxyStealthClient(
 	client: StealthClient,
+	onSensitiveParams: (params?: Record<string, string>) => void,
 	onResponse: (response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
 ): StealthClient {
 	return {
 		fetch: async (...args: Parameters<StealthClient["fetch"]>) => {
+			onSensitiveParams(args[1]?.sensitiveParams);
 			const response = await client.fetch(...args);
 			onResponse(response);
 			return response;
 		},
 		createSession: (...args: Parameters<StealthClient["createSession"]>) =>
-			proxyStealthSession(client.createSession(...args), onResponse),
+			proxyStealthSession(client.createSession(...args), onSensitiveParams, onResponse),
 	};
 }
 
 function proxyStealthSession(
 	session: StealthSession,
+	onSensitiveParams: (params?: Record<string, string>) => void,
 	onResponse: (response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
 ): StealthSession {
 	return {
 		fetch: async (...args: Parameters<StealthSession["fetch"]>) => {
+			onSensitiveParams(args[1]?.sensitiveParams);
 			const response = await session.fetch(...args);
 			onResponse(response);
 			return response;
+		},
+		cookies: session.cookies,
+		redirects: {
+			run: async (...args: Parameters<StealthSession["redirects"]["run"]>) => {
+				onSensitiveParams(args[0]?.sensitiveParams);
+				const result = await session.redirects.run(...args);
+				onResponse(result.final);
+				return result;
+			},
 		},
 		close: () => session.close(),
 	};
@@ -438,9 +493,16 @@ function normalizeCapturedStealthResponse(response: Awaited<ReturnType<StealthCl
 	}
 }
 
-function sanitizeFixture(value: unknown): unknown {
+function redactCapturedSensitiveParams(
+	value: unknown,
+	sensitiveParams: CapturedSensitiveParams,
+): unknown {
 	if (Array.isArray(value)) {
-		return value.map((item) => sanitizeFixture(item));
+		return value.map((item) => redactCapturedSensitiveParams(item, sensitiveParams));
+	}
+
+	if (typeof value === "string") {
+		return redactSensitiveText(value, sensitiveParams.values);
 	}
 
 	if (!value || typeof value !== "object") {
@@ -448,14 +510,29 @@ function sanitizeFixture(value: unknown): unknown {
 	}
 
 	const entries = Object.entries(value as MutableRecord).map(([key, entryValue]) => {
-		if (isSensitiveKey(key)) {
-			return [key, "[REDACTED]"] as const;
+		if (sensitiveParams.names.includes(key)) {
+			return [key, REDACTED_QUERY_VALUE] as const;
 		}
 
-		return [key, sanitizeFixture(entryValue)] as const;
+		return [key, redactCapturedSensitiveParams(entryValue, sensitiveParams)] as const;
 	});
 
 	return Object.fromEntries(entries);
+}
+
+function sanitizeFixture(value: unknown, sensitiveParams: CapturedSensitiveParams): unknown {
+	const redacted = redactCapturedSensitiveParams(value, sensitiveParams);
+	if (Array.isArray(redacted)) {
+		return redacted.map((item) => sanitizeFixture(item, sensitiveParams));
+	}
+
+	if (!redacted || typeof redacted !== "object") return redacted;
+	return Object.fromEntries(
+		Object.entries(redacted as MutableRecord).map(([key, entryValue]) => [
+			key,
+			isSensitiveKey(key) ? REDACTED_QUERY_VALUE : sanitizeFixture(entryValue, sensitiveParams),
+		]),
+	);
 }
 
 function isSensitiveKey(key: string): boolean {
