@@ -440,7 +440,7 @@ function validateProviderProxy(config: {
 		}
 		rejectUnknownFields(
 			proxy.session,
-			new Set(["affinity", "lifetimeMinutes", "poolSize"]),
+			new Set(["affinity", "lifetimeMinutes", "poolSize", "drainLeadSeconds"]),
 			"proxy.session",
 		);
 		if (proxy.session.affinity !== undefined) {
@@ -461,6 +461,34 @@ function validateProviderProxy(config: {
 		if (poolSize !== undefined && (!Number.isInteger(poolSize) || poolSize <= 0)) {
 			throw new ValidationError(
 				`Provider "${config.id}" has invalid proxy.session.poolSize: must be a positive integer.`,
+			);
+		}
+		const drainLeadSeconds = proxy.session.drainLeadSeconds;
+		if (
+			drainLeadSeconds !== undefined &&
+			(!Number.isFinite(drainLeadSeconds) || drainLeadSeconds <= 0)
+		) {
+			throw new ValidationError(
+				`Provider "${config.id}" has invalid proxy.session.drainLeadSeconds: must be a positive number of seconds.`,
+				{
+					fix: `Use proxy.session.drainLeadSeconds: 120 to receive the sticky-expiry drain event 120s before hard expiry.`,
+				},
+			);
+		}
+		// A drain lead longer than the sticky lifetime would fire the expiring
+		// event before the session is even established, so the provider would
+		// never get a usable window. Reject the contradiction at build time.
+		if (
+			drainLeadSeconds !== undefined &&
+			lifetime !== undefined &&
+			Number.isFinite(lifetime) &&
+			drainLeadSeconds >= lifetime * 60
+		) {
+			throw new ValidationError(
+				`Provider "${config.id}" has proxy.session.drainLeadSeconds (${drainLeadSeconds}s) greater than or equal to proxy.session.lifetimeMinutes (${lifetime}m).`,
+				{
+					fix: `Lower drainLeadSeconds below the sticky lifetime so the drain event leaves a usable session window.`,
+				},
 			);
 		}
 	}

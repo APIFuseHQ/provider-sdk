@@ -798,4 +798,87 @@ describe("defineProvider", () => {
 			);
 		});
 	});
+
+	describe("proxy.session.drainLeadSeconds", () => {
+		const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
+		const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
+		const credentialedSecrets = [
+			{ name: NODEMAVEN_USERNAME_SECRET, required: true },
+			{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
+		];
+
+		// Regression guard: the type surface and the runtime validator drifted
+		// apart once (drainLeadSeconds was typed but rejected by the allowlist),
+		// so a provider could not declare the field the drain contract needs.
+		// Every native-proxy policy field MUST survive a defineProvider round trip.
+		it("accepts a declared drain lead time through defineProvider", () => {
+			const provider = defineProvider({
+				...validConfig,
+				proxy: {
+					mode: "required",
+					providers: ["nodemaven"],
+					session: {
+						affinity: "connection",
+						lifetimeMinutes: 1440,
+						drainLeadSeconds: 120,
+					},
+				},
+				secrets: credentialedSecrets,
+			});
+
+			expect(provider.proxy).toBeDefined();
+			const proxy = provider.proxy;
+			if (!proxy || typeof proxy === "boolean") throw new Error("expected a proxy policy");
+			expect(proxy.session?.drainLeadSeconds).toBe(120);
+		});
+
+		it("rejects a non-positive drain lead time", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", drainLeadSeconds: 0 },
+					},
+					secrets: credentialedSecrets,
+				}),
+			).toThrow(/invalid proxy\.session\.drainLeadSeconds/);
+		});
+
+		it("rejects a drain lead time that swallows the whole sticky lifetime", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: {
+							affinity: "connection",
+							lifetimeMinutes: 1,
+							drainLeadSeconds: 60,
+						},
+					},
+					secrets: credentialedSecrets,
+				}),
+			).toThrow(/greater than or equal to proxy\.session\.lifetimeMinutes/);
+		});
+
+		it("still rejects genuinely unknown session fields", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						// Runtime allowlist is the enforcement point here; the config
+						// parameter is structurally loose enough that TS alone does not
+						// catch this typo, which is exactly why the validator must.
+						session: { affinity: "connection", drainLeadSecond: 120 },
+					},
+					secrets: credentialedSecrets,
+				}),
+			).toThrow(/Unknown field "drainLeadSecond" on proxy\.session/);
+		});
+	});
 });

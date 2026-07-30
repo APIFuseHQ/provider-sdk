@@ -84,6 +84,7 @@
 - Export native-network and request-file TypeScript contracts from the package root and `./provider`, including typed native provider declarations and optional runtime capabilities on provider/auth contexts.
 - Add `arrayBuffer()` and `bytes()` to `HttpResponse` so `ctx.http` consumers can read binary-safe upstream bodies; internal response handling is now byte-first.
 - Preserve identity-only operation `connectionId` values in `ProviderContext` without requiring credential material.
+- Accept and validate `proxy.session.drainLeadSeconds` in `defineProvider`, so providers can actually declare the native sticky-expiry drain lead time the type surface already exposed; a non-positive value, or one that meets or exceeds the sticky lifetime, is rejected at define time.
 
 ## 2.1.0-beta.15
 
