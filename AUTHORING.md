@@ -670,8 +670,8 @@ Textual previews are decoded and passed through the fixture sanitizer before bas
 Classification uses both the declared content type and the preview bytes, so missing or incorrect
 content-type headers do not bypass sanitization. PEM private-key blocks and long high-entropy
 tokens in otherwise unstructured text are redacted as well. If the full preview is not valid UTF-8,
-the longest valid prefix is scanned and sanitized while its undecodable tail is retained. Only a
-magic-number-confirmed binary preview with no textual-secret pattern in that window bypasses
+the entire lossy-decoded preview is scanned and matching decodable byte windows are sanitized. Only a
+magic-number-confirmed binary preview with no textual-secret pattern anywhere in the preview bypasses
 sanitization; other undecodable data fails closed.
 Sanitized previews carry `preview_sanitized: true`, plus a
 `preview_redaction_reason` when capture had to fail closed. The original hash and byte count always

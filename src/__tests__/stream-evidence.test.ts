@@ -139,10 +139,12 @@ describe("stream evidence capture", () => {
 		expect(evidence.preview_sanitized).toBeTrue();
 	});
 
-	it("scans magic-number binary prefixes and allowlisted header string values for secrets", async () => {
-		const secret = "header-and-pdf-secret-that-must-not-persist";
-		const prefix = Buffer.from(`%PDF-1.7 token=${secret}`);
-		const body = Buffer.concat([prefix, Buffer.from([0xff])]);
+	it("scans binary text after invalid bytes and all retained header values for secrets", async () => {
+		const secret = "header-and-png-secret-that-must-not-persist";
+		const body = Buffer.concat([
+			Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff]),
+			Buffer.from(` token=${secret}`),
+		]);
 		const source = new ReadableStream<Uint8Array>({
 			start(controller) {
 				controller.enqueue(body);
@@ -152,7 +154,7 @@ describe("stream evidence capture", () => {
 		const capture = captureStreamEvidence(
 			streamResponse(source, {
 				"content-disposition": `attachment; filename="https://example.test/file?token=${secret}"`,
-				"content-type": "application/pdf",
+				"content-type": `application/octet-stream; token=${secret}`,
 			}),
 			{ requestUrl: "https://example.test/document", sanitizeFixture },
 		);
@@ -161,10 +163,12 @@ describe("stream evidence capture", () => {
 		}
 		const evidence = await capture.getEvidence();
 		const retained = Buffer.from(evidence.body_preview_base64, "base64");
-		expect(retained.subarray(-1)).toEqual(Buffer.from([0xff]));
+		expect(retained.subarray(0, 5)).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0xff]));
 		expect(retained.toString("utf8")).not.toContain(secret);
 		expect(evidence.headers["content-disposition"]).not.toContain(secret);
 		expect(evidence.headers["content-disposition"]).toContain("?[REDACTED]");
+		expect(evidence.headers["content-type"]).not.toContain(secret);
+		expect(evidence.headers["content-type"]).toContain("token=[REDACTED]");
 	});
 
 	it("fails closed for PEM private keys and bare high-entropy tokens", async () => {
@@ -476,6 +480,24 @@ describe("stream evidence validation and replay", () => {
 				body_bytes: STREAM_PREVIEW_BYTES + 1,
 			}),
 		).toThrow(new RegExp(`preview must decode to ${STREAM_PREVIEW_BYTES} bytes`));
+		expect(() =>
+			parseStreamEvidenceRecord({
+				...evidenceFor(new Uint8Array([1, 2, 3])),
+				body_sha256: "a".repeat(64),
+			}),
+		).toThrow(/body_sha256.*complete unsanitized preview/);
+		const injectedHeader = "x-spoof\nname\u202e";
+		try {
+			parseStreamEvidenceRecord({
+				...evidenceFor(new Uint8Array([1, 2, 3])),
+				headers: { [injectedHeader]: "value" },
+			});
+			throw new Error("Expected an unsafe header name to be rejected.");
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			expect(message).not.toContain("\n");
+			expect(message).not.toContain("\u202e");
+		}
 	});
 
 	it("selects the latest appended evidence record and diagnoses malformed markers", () => {
@@ -498,6 +520,9 @@ describe("stream evidence validation and replay", () => {
 		};
 		expect(findStreamEvidenceRecords([first, second])).toEqual([first, second]);
 		expect(findStreamEvidenceRecords([first, second, [first]])).toEqual([first]);
+		expect(findStreamCaptureGroup([{ old: "ordinary" }, first])?.items).toEqual([
+			{ kind: "stream", evidence: first },
+		]);
 	});
 
 	it("uses tagged envelopes so a later ordinary append cannot replay stale stream evidence", () => {

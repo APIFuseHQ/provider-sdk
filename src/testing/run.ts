@@ -25,6 +25,10 @@ import type {
 const CONNECTOR_ID_REGEX = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/;
 const VALID_AUTH_MODES = ["none", "platform-managed", "credentials", "oauth2"] as const;
 const UPDATE_SNAPSHOT_ARGS = new Set(["-u", "--update-snapshots"]);
+const snapshotCaptureStates = new WeakMap<
+	ProviderContext,
+	{ assertConsumed(): void; consumed(): number }
+>();
 
 export interface StandardTestsManifest {
 	id?: string;
@@ -592,7 +596,7 @@ export function createSnapshotContext(rawFixture: unknown): ProviderContext {
 		return jsonResponse(item.value);
 	};
 
-	return {
+	const context: ProviderContext = {
 		env: { get: () => undefined },
 		credential,
 		request,
@@ -659,15 +663,25 @@ export function createSnapshotContext(rawFixture: unknown): ProviderContext {
 			state,
 		}),
 	};
+	snapshotCaptureStates.set(context, {
+		assertConsumed() {
+			if (streamCaptureGroup && nextCaptureItem !== streamCaptureGroup.items.length) {
+				throw new Error(
+					`Stream fixture has ${streamCaptureGroup.items.length - nextCaptureItem} unconsumed capture item${streamCaptureGroup.items.length - nextCaptureItem === 1 ? "" : "s"} after handler completion.`,
+				);
+			}
+		},
+		consumed: () => nextCaptureItem,
+	});
+	return context;
 }
 
 function replayRequestPath(requestUrl: string, expectedPath: string): string {
 	if (/^[a-z][a-z\d+.-]*:\/\//i.test(requestUrl) || requestUrl.startsWith("/")) {
 		return requestPathForFixture(requestUrl);
 	}
-	const basePath = expectedPath.replace(/[^/]*$/, "");
 	return requestPathForFixture(
-		new URL(requestUrl, `https://fixture.invalid${basePath}`).toString(),
+		new URL(requestUrl, `https://fixture.invalid${expectedPath}`).toString(),
 	);
 }
 
@@ -676,14 +690,21 @@ async function transformSnapshotOutput(
 	rawFixture: unknown,
 ): Promise<unknown> {
 	const entries = Object.entries(provider.operations);
-	const context = createSnapshotContext(rawFixture);
+	const captureStates: Array<{ assertConsumed(): void; consumed(): number }> = [];
 	const outputs = await Promise.all(
 		entries.map(async ([operationName, operation]) => {
+			const context = createSnapshotContext(rawFixture);
 			const request = operation.fixtures?.request ?? {};
 			const output = await operation.handler(context, request);
+			const captureState = snapshotCaptureStates.get(context);
+			if (captureState) captureStates.push(captureState);
+			if (captureState?.consumed()) captureState.assertConsumed();
 			return [operationName, output] as const;
 		}),
 	);
+	if (findStreamCaptureGroup(rawFixture) && !captureStates.some((state) => state.consumed() > 0)) {
+		captureStates[0]?.assertConsumed();
+	}
 
 	if (outputs.length === 1) {
 		return outputs[0]?.[1];

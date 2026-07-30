@@ -137,11 +137,6 @@ export {
 export { createServerApp, type ServeOptions, serve } from "./server/index.js";
 export { getStealthProfile, listStealthProfiles } from "./stealth/profiles.js";
 export * from "./stream.js";
-export {
-	isStreamEvidenceReplayResponse,
-	type StreamEvidenceRedactionReason,
-	type StreamEvidenceReplayResponse,
-} from "./stream-evidence.js";
 export type {
 	ApiFuseResponse,
 	AuthConfig,
@@ -290,7 +285,6 @@ export type {
 	StateNamespaceOptions,
 	StateValue,
 	StateWriteOptions,
-	StreamPreviewRedactionReason,
 	StealthClient,
 	StealthCookieStore,
 	StealthCookieStoreV1,

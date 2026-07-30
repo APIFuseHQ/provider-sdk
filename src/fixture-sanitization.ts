@@ -11,14 +11,16 @@ const PEM_PRIVATE_KEY =
 /** Matches credential field names without treating benign prefixes such as `author` as `auth`. */
 export function isSensitiveFixtureKey(key: string): boolean {
 	const normalized = key.replace(/[-_\s]/g, "").toLowerCase();
-	return (
-		/^(?:authorization|authentication|auth|bearer|cookie|credential|password|passwd|privatekey|secret|session|sessionid|token)$/.test(
-			normalized,
-		) ||
-		/^(?:api|client|service|access|consumer)(?:key|secret|token)$/.test(normalized) ||
-		/(?:authorization|credential|password|passwd|privatekey|secret|sessionid|token)$/.test(
-			normalized,
-		)
+	const candidates = [normalized, normalized.replace(/(?:value|payload|header)$/, "")];
+	return candidates.some(
+		(candidate) =>
+			/^(?:authorization|authentication|auth|bearer|cookie|credential|password|passwd|privatekey|secret|session|sessionid|token)$/.test(
+				candidate,
+			) ||
+			/^(?:api|client|service|access|consumer)(?:key|secret|token)$/.test(candidate) ||
+			/(?:authorization|credential|password|passwd|privatekey|secret|sessionid|token)$/.test(
+				candidate,
+			),
 	);
 }
 
@@ -42,17 +44,14 @@ export function sanitizeFixture(value: JsonValue): JsonValue {
 	);
 }
 
-/** Preserves the recorder's pre-stream key policy while adding primitive-string protection. */
+/** Applies the shared credential-key policy to ordinary JSON fixtures. */
 export function sanitizeOrdinaryFixture(value: JsonValue): JsonValue {
 	if (Array.isArray(value)) return value.map((item) => sanitizeOrdinaryFixture(item));
-	if (typeof value === "string") return sanitizeFixtureString(value);
 	if (value === null || typeof value !== "object") return value;
 	return Object.fromEntries(
 		Object.entries(value).map(([key, entryValue]) => [
 			key,
-			/authorization|token|api[-_]?key/i.test(key)
-				? REDACTED_FIXTURE_VALUE
-				: sanitizeOrdinaryFixture(entryValue),
+			isSensitiveFixtureKey(key) ? REDACTED_FIXTURE_VALUE : sanitizeOrdinaryFixture(entryValue),
 		]),
 	);
 }
@@ -97,7 +96,7 @@ export function sanitizePathname(pathname: string): string {
 			const decoded = decodePathSegment(segment);
 			const previous = index > 0 ? decodePathSegment(segments[index - 1] as string) : "";
 			if (
-				isSensitiveFixtureKey(decoded) ||
+				isSensitivePathSegment(decoded) ||
 				isCredentialPathKey(previous) ||
 				isSensitiveFixtureValue(decoded)
 			) {
@@ -109,12 +108,15 @@ export function sanitizePathname(pathname: string): string {
 }
 
 function isCredentialPathKey(key: string): boolean {
-	const normalized = key.replace(/[-_\s]/g, "").toLowerCase();
-	return (
-		/^(?:authorization|authentication|auth|bearer|cookie|credential|password|passwd|privatekey|secret|session|sessionid|token)$/.test(
-			normalized,
-		) || /^(?:api|client|service|access|consumer)(?:key|secret|token)$/.test(normalized)
-	);
+	const finalPathPart = key.split("/").at(-1) ?? "";
+	const baseSegment = finalPathPart.split(";", 1)[0] ?? "";
+	return isSensitiveFixtureKey(baseSegment.split(/[=:]/, 1)[0] ?? "");
+}
+
+function isSensitivePathSegment(segment: string): boolean {
+	return segment
+		.split(/[;/]/)
+		.some((part) => isSensitiveFixtureKey(part.split(/[=:]/, 1)[0] ?? ""));
 }
 
 /** Removes userinfo, query values, fragments, and credential-like path segments from log URLs. */
@@ -205,8 +207,11 @@ function encodeDiagnosticControls(value: string): string {
 		if (code === 0x0a || code === 0x0d || code === 0x2028 || code === 0x2029) {
 			result += " ";
 		} else if (
-			code === 0x1b ||
+			(code >= 0 && code <= 0x1f) ||
 			(code >= 0x7f && code <= 0x9f) ||
+			code === 0x061c ||
+			code === 0x200e ||
+			code === 0x200f ||
 			(code >= 0x202a && code <= 0x202e) ||
 			(code >= 0x2066 && code <= 0x2069)
 		) {

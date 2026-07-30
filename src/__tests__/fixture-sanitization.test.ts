@@ -4,6 +4,7 @@ import {
 	requestPathForFixture,
 	sanitizeDiagnosticText,
 	sanitizeFixture,
+	sanitizeOrdinaryFixture,
 	sanitizeUrlForLogs,
 } from "../fixture-sanitization.js";
 
@@ -24,6 +25,26 @@ describe("fixture sanitization", () => {
 		});
 	});
 
+	it("uses the shared key policy for ordinary JSON without primitive heuristics", () => {
+		expect(
+			sanitizeOrdinaryFixture({
+				password: "hunter2",
+				client_secret: "short-client-secret",
+				client_secret_value: "ordinary-value",
+				cookie: "session=ordinary-value",
+				public_id: "0123456789abcdef0123456789abcdef",
+				next: "https://example.test/items?page=2",
+			}),
+		).toEqual({
+			password: "[REDACTED]",
+			client_secret: "[REDACTED]",
+			client_secret_value: "[REDACTED]",
+			cookie: "[REDACTED]",
+			public_id: "0123456789abcdef0123456789abcdef",
+			next: "https://example.test/items?page=2",
+		});
+	});
+
 	it("removes path-embedded credentials from provenance and diagnostics", () => {
 		const token = "bot123456789:AAE9c8QvL1nX7wZ2rP6sT4uY5iO0aB3c";
 		const url = `https://user:password@example.test/${token}/download?access_token=live`;
@@ -33,8 +54,14 @@ describe("fixture sanitization", () => {
 	});
 
 	it("redacts values following a credential-like path key", () => {
-		expect(requestPathForFixture("/password/short-secret/download?ignored=yes")).toBe(
+		expect(requestPathForFixture("/refreshToken/ordinary-value/download?ignored=yes")).toBe(
 			"/[REDACTED]/[REDACTED]/download",
+		);
+		expect(requestPathForFixture("/password;format=raw/ordinary-value")).toBe(
+			"/[REDACTED]/[REDACTED]",
+		);
+		expect(requestPathForFixture("/password%2Fordinary-value/download")).toBe(
+			"/[REDACTED]/download",
 		);
 	});
 
@@ -66,12 +93,19 @@ describe("fixture sanitization", () => {
 			sessionCount: 12,
 		});
 		const diagnostic = sanitizeDiagnosticText(
-			`service_key=abc123 request_id=${requestId}\n\u001b[31mspoof\u202e`,
+			`service_key=abc123 request_id=${requestId}\n\u0000\u0007\b\f\u001b[31mspoof\u061c\u200e\u200f\u202e`,
 		);
 		expect(diagnostic).toContain("service_key=[REDACTED]");
 		expect(diagnostic).toContain(`request_id=${requestId}`);
 		expect(diagnostic).not.toContain("\n");
 		expect(diagnostic).not.toContain("\u001b");
 		expect(diagnostic).not.toContain("\u202e");
+		expect(diagnostic).not.toContain("\u0000");
+		expect(diagnostic).not.toContain("\u0007");
+		expect(diagnostic).not.toContain("\b");
+		expect(diagnostic).not.toContain("\f");
+		expect(diagnostic).not.toContain("\u061c");
+		expect(diagnostic).not.toContain("\u200e");
+		expect(diagnostic).not.toContain("\u200f");
 	});
 });

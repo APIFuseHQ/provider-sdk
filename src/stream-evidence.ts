@@ -4,12 +4,13 @@ import {
 	isSensitiveFixtureKey,
 	isSensitiveFixtureValue,
 	REDACTED_FIXTURE_VALUE,
+	sanitizeDiagnosticText,
 	sanitizeFixtureString,
 	sanitizeUrlForLogs,
 } from "./fixture-sanitization.js";
 import { toJsonValue, type JsonValue } from "./contract-json.js";
 import { readableBytes, readableLines, readableTextChunks } from "./stream.js";
-import type { HttpStreamResponse, StreamPreviewRedactionReason } from "./types.js";
+import type { HttpStreamResponse } from "./types.js";
 
 export const STREAM_PREVIEW_BYTES = 4096;
 export const STREAM_FINALIZE_TIMEOUT_MS = 30_000;
@@ -34,16 +35,15 @@ const STREAM_EVIDENCE_REDACTION_REASONS = [
 	"malformed-json",
 	"pem-private-key",
 	"sanitized-preview-too-large",
-	"sanitizer-error",
 	"sanitizer-output-invalid",
 	"sensitive-delimited-column",
 	"textual-xml",
 	"truncated-form",
 	"truncated-json",
 	"undecodable-text",
-] as const satisfies readonly StreamPreviewRedactionReason[];
+] as const;
 const STREAM_EVIDENCE_REDACTION_REASON_SET = new Set<string>(STREAM_EVIDENCE_REDACTION_REASONS);
-export type StreamEvidenceRedactionReason = StreamPreviewRedactionReason;
+export type StreamEvidenceRedactionReason = (typeof STREAM_EVIDENCE_REDACTION_REASONS)[number];
 
 export interface StreamEvidenceRecord {
 	__apifuse_stream__: true;
@@ -118,7 +118,9 @@ export function parseStreamEvidenceRecord(value: unknown): StreamEvidenceRecord 
 	}
 	for (const name of Object.keys(record.headers)) {
 		if (!STREAM_EVIDENCE_HEADERS.has(name)) {
-			throw new Error(`Stream evidence header "${name}" is not allowlisted.`);
+			throw new Error(
+				`Stream evidence header "${sanitizeDiagnosticText(name)}" is not allowlisted.`,
+			);
 		}
 	}
 	if (typeof record.body_sha256 !== "string" || !/^[a-f0-9]{64}$/.test(record.body_sha256)) {
@@ -154,6 +156,15 @@ export function parseStreamEvidenceRecord(value: unknown): StreamEvidenceRecord 
 	if (preview.byteLength !== expectedPreviewBytes) {
 		throw new Error(
 			`Stream evidence preview must decode to ${expectedPreviewBytes} bytes for body_bytes=${String(record.body_bytes)}.`,
+		);
+	}
+	if (
+		record.preview_sanitized !== true &&
+		(record.body_bytes as number) <= STREAM_PREVIEW_BYTES &&
+		createHash("sha256").update(preview).digest("hex") !== record.body_sha256
+	) {
+		throw new Error(
+			'Stream evidence field "body_sha256" must match a complete unsanitized preview.',
 		);
 	}
 
@@ -551,12 +562,8 @@ function sanitizePreview(
 }
 
 function sanitizePartiallyDecodablePreview(preview: Uint8Array): SanitizedPreview | undefined {
-	const prefixLength = longestValidUtf8PrefixLength(preview);
-	const prefix = preview.subarray(0, prefixLength);
-	const tail = preview.subarray(prefixLength);
-	const text = new TextDecoder("utf-8", { fatal: true }).decode(prefix);
-	const sanitizedText = sanitizeFixtureString(text);
-	const containsTextualSecret = sanitizedText !== text;
+	const text = new TextDecoder("utf-8").decode(preview);
+	const containsTextualSecret = sanitizeFixtureString(text) !== text;
 
 	if (!containsTextualSecret) {
 		if (hasKnownBinaryMagic(preview)) return undefined;
@@ -564,13 +571,11 @@ function sanitizePartiallyDecodablePreview(preview: Uint8Array): SanitizedPrevie
 		return redactedSanitizedPreview(preview.byteLength, "undecodable-text");
 	}
 
-	const sanitizedPrefix = fitSanitizedPreview(
-		new TextEncoder().encode(sanitizedText),
-		prefix.byteLength,
-	);
-	const sanitized = new Uint8Array(preview.byteLength);
-	sanitized.set(sanitizedPrefix);
-	sanitized.set(tail, prefix.byteLength);
+	let sanitized = sanitizeDecodableWindows(preview);
+	const retainedText = new TextDecoder("utf-8").decode(sanitized);
+	if (sanitizeFixtureString(retainedText) !== retainedText) {
+		sanitized = redactedPreview(preview.byteLength);
+	}
 	return {
 		preview: sanitized,
 		...(looksLikePemPrivateKey(text)
@@ -581,17 +586,26 @@ function sanitizePartiallyDecodablePreview(preview: Uint8Array): SanitizedPrevie
 	};
 }
 
-function longestValidUtf8PrefixLength(bytes: Uint8Array): number {
-	const decoder = new TextDecoder("utf-8", { fatal: true });
-	for (let length = bytes.byteLength; length > 0; length -= 1) {
-		try {
-			decoder.decode(bytes.subarray(0, length));
-			return length;
-		} catch {
-			// Keep walking back until no invalid or incomplete UTF-8 sequence remains.
+function sanitizeDecodableWindows(preview: Uint8Array): Uint8Array {
+	const sanitized = preview.slice();
+	let start = 0;
+	for (let index = 0; index <= preview.byteLength; index += 1) {
+		const byte = preview[index];
+		if (index < preview.byteLength && byte !== undefined && byte < 0x80) continue;
+		if (index > start) {
+			const window = preview.subarray(start, index);
+			const text = new TextDecoder("utf-8", { fatal: true }).decode(window);
+			const safeText = sanitizeFixtureString(text);
+			if (safeText !== text) {
+				sanitized.set(
+					fitSanitizedPreview(new TextEncoder().encode(safeText), window.byteLength),
+					start,
+				);
+			}
 		}
+		start = index + 1;
 	}
-	return 0;
+	return sanitized;
 }
 
 function looksLikePemPrivateKey(text: string): boolean {
@@ -781,7 +795,7 @@ function findLatestStreamCaptureGroup(value: unknown): unknown[] | undefined {
 		return [value[rightmostDirectMarker]];
 	}
 
-	let startIndex = 0;
+	let startIndex = directRecords[0]?.index ?? 0;
 	let previous = directRecords[0];
 	if (!previous) return undefined;
 	for (const current of directRecords.slice(1)) {
@@ -867,10 +881,18 @@ function evidenceHeaders(
 			const normalizedName = name.toLowerCase();
 			return [
 				normalizedName,
-				sanitize && normalizedName === "content-disposition" ? sanitizeFixtureString(value) : value,
+				sanitize ? sanitizeEvidenceHeaderValue(normalizedName, value) : value,
 			];
 		}),
 	);
+}
+
+function sanitizeEvidenceHeaderValue(name: string, value: string): string {
+	if (name === "content-disposition") return sanitizeFixtureString(value);
+	if (name !== "content-type") return value;
+	const [mediaType = "", ...parameters] = value.split(";");
+	if (parameters.length === 0) return mediaType;
+	return [mediaType, ...parameters.map((parameter) => sanitizeFixtureString(parameter))].join(";");
 }
 
 function selectEvidenceHeaders(

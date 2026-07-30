@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { createServer } from "node:http";
 import { dirname, join } from "node:path";
@@ -77,7 +77,7 @@ describe("prepareFixturePayload", () => {
 			status: 200,
 			ok: true,
 			headers: {},
-			body_sha256: "a".repeat(64),
+			body_sha256: createHash("sha256").update("").digest("hex"),
 			body_bytes: 0,
 			body_preview_base64: "",
 		};
@@ -106,6 +106,141 @@ describe("prepareFixturePayload", () => {
 });
 
 describe("record CLI", () => {
+	it("sanitizes ordinary JSON with the shared credential-key policy", async () => {
+		const upstream = createServer((_request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(
+				JSON.stringify({
+					password: "hunter2",
+					client_secret: "short-client-secret",
+					cookie: "session=ordinary-value",
+					public: "retained",
+				}),
+			);
+		});
+		await new Promise<void>((resolve, reject) => {
+			upstream.once("error", reject);
+			upstream.listen(0, "127.0.0.1", resolve);
+		});
+
+		try {
+			const address = upstream.address();
+			if (address === null || typeof address === "string") throw new Error("Expected IP address");
+			const providerDir = makeTempDir("ordinary-sanitize-");
+			writeFileSync(join(providerDir, "package.json"), '{"type":"module"}\n');
+			writeFileSync(
+				join(providerDir, "index.ts"),
+				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
+export default {
+  id: "record-ordinary-sanitize", version: "1.0.0", runtime: "standard",
+  operations: { lookup: {
+    input: z.object({}), output: z.object({ public: z.string() }),
+    upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
+    handler: async (ctx) => (await ctx.http.get("/payload")).data,
+  } },
+};
+`,
+			);
+
+			const process = Bun.spawn({
+				cmd: [
+					"bun",
+					join(repoRoot, "bin", "apifuse.ts"),
+					"record",
+					providerDir,
+					"--operation",
+					"lookup",
+				],
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stderr, exitCode] = await Promise.all([
+				new Response(process.stderr).text(),
+				process.exited,
+			]);
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+			expect(
+				JSON.parse(readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8")),
+			).toEqual({
+				password: "[REDACTED]",
+				client_secret: "[REDACTED]",
+				cookie: "[REDACTED]",
+				public: "retained",
+			});
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				upstream.close((error) => (error ? reject(error) : resolve()));
+			});
+		}
+	});
+
+	it("rejects SSE after an ordinary response without persisting the earlier capture", async () => {
+		const upstream = createServer((request, response) => {
+			if (request.url === "/ordinary") {
+				response.writeHead(200, { "content-type": "application/json" });
+				response.end('{"retained":true}');
+				return;
+			}
+			response.writeHead(200, { "content-type": "text/event-stream" });
+			response.end("event: ready\ndata: {}\n\n");
+		});
+		await new Promise<void>((resolve, reject) => {
+			upstream.once("error", reject);
+			upstream.listen(0, "127.0.0.1", resolve);
+		});
+
+		try {
+			const address = upstream.address();
+			if (address === null || typeof address === "string") throw new Error("Expected IP address");
+			const providerDir = makeTempDir("ordinary-then-sse-");
+			writeFileSync(join(providerDir, "package.json"), '{"type":"module"}\n');
+			writeFileSync(
+				join(providerDir, "index.ts"),
+				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
+export default {
+  id: "record-ordinary-then-sse", version: "1.0.0", runtime: "standard",
+  operations: { events: {
+    input: z.object({}), output: z.object({ ok: z.boolean() }),
+    upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
+    handler: async (ctx) => {
+      await ctx.http.get("/ordinary");
+      await ctx.http.sse("/events");
+      return { ok: true };
+    },
+  } },
+};
+`,
+			);
+
+			const process = Bun.spawn({
+				cmd: [
+					"bun",
+					join(repoRoot, "bin", "apifuse.ts"),
+					"record",
+					providerDir,
+					"--operation",
+					"events",
+				],
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stderr, exitCode] = await Promise.all([
+				new Response(process.stderr).text(),
+				process.exited,
+			]);
+			expect(exitCode).toBe(1);
+			expect(stderr).toContain("does not support ctx.http.sse(): method=GET path=/events call=2");
+			expect(existsSync(join(providerDir, "__fixtures__", "raw.json"))).toBeFalse();
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				upstream.close((error) => (error ? reject(error) : resolve()));
+			});
+		}
+	});
+
 	it("invokes the operation once through the apifuse command dispatcher", async () => {
 		let requestCount = 0;
 		const upstream = createServer((_request, response) => {
@@ -135,13 +270,7 @@ export default {
   runtime: "standard",
   operations: {
     lookup: {
-	  input: {
-		"~standard": {
-		  version: 1,
-		  vendor: "record-test",
-		  validate: (value) => ({ value }),
-		},
-	  },
+				  input: z.object({}),
       output: z.string(),
       upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
       handler: async (ctx) => (await ctx.http.get("/payload")).data,
@@ -187,7 +316,7 @@ export default {
 	it("captures stream evidence and gives the handler a complete replacement stream", async () => {
 		const upstreamBody = Buffer.allocUnsafe(6000);
 		for (let index = 0; index < upstreamBody.byteLength; index += 1) {
-			upstreamBody[index] = index % 251;
+			upstreamBody[index] = [0xff, 0x00, 0x10, 0x80][index % 4] as number;
 		}
 		upstreamBody.set([0x89, 0x50, 0x4e, 0x47]);
 		const expectedSha256 = createHash("sha256").update(upstreamBody).digest("hex");
