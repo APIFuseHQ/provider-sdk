@@ -2,9 +2,11 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 
 import { readableBytes, readableLines, readableTextChunks } from "../stream.js";
+import { sanitizeFixture } from "../fixture-sanitization.js";
 import {
 	captureStreamEvidence,
 	findStreamEvidenceRecord,
+	findStreamEvidenceRecords,
 	parseStreamEvidenceRecord,
 	replayStreamEvidence,
 	STREAM_PREVIEW_BYTES,
@@ -42,6 +44,74 @@ function evidenceFor(preview: Uint8Array, bodyBytes = preview.byteLength) {
 }
 
 describe("stream evidence capture", () => {
+	it("sanitizes sniffed JSON without trusting a missing or binary content type", async () => {
+		const body = Buffer.from('{"access_token":"live-secret","public":"retained"}');
+		for (const headers of [{}, { "content-type": "application/octet-stream" }]) {
+			const source = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(body);
+					controller.close();
+				},
+			});
+			const capture = captureStreamEvidence(streamResponse(source, headers), {
+				requestUrl: "https://example.test/payload",
+				sanitizeFixture,
+			});
+			for await (const _chunk of capture.response.bytes()) {
+				// Drain the handler-facing stream.
+			}
+			const evidence = await capture.getEvidence();
+			const preview = Buffer.from(evidence.body_preview_base64, "base64").toString("utf8");
+			expect(JSON.parse(preview)).toEqual({
+				access_token: "[REDACTED]",
+				public: "retained",
+			});
+			expect(evidence.preview_sanitized).toBeTrue();
+			expect(preview).not.toContain("live-secret");
+		}
+	});
+
+	it("retains genuinely binary preview bytes under default sanitization", async () => {
+		const body = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0, 0xff, 0x10, 0x80]);
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(body);
+				controller.close();
+			},
+		});
+		const capture = captureStreamEvidence(streamResponse(source), {
+			requestUrl: "https://example.test/image.png",
+			sanitizeFixture,
+		});
+		for await (const _chunk of capture.response.bytes()) {
+			// Drain the handler-facing stream.
+		}
+		const evidence = await capture.getEvidence();
+		expect(Buffer.from(evidence.body_preview_base64, "base64")).toEqual(Buffer.from(body));
+		expect(evidence.preview_sanitized).toBeUndefined();
+	});
+
+	it("fails closed for a sensitive delimited-text column", async () => {
+		const body = Buffer.from("access_token,public\nlive-secret,retained\n");
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(body);
+				controller.close();
+			},
+		});
+		const capture = captureStreamEvidence(streamResponse(source, {}), {
+			requestUrl: "https://example.test/export",
+			sanitizeFixture,
+		});
+		for await (const _chunk of capture.response.bytes()) {
+			// Drain the handler-facing stream.
+		}
+		const evidence = await capture.getEvidence();
+		const preview = Buffer.from(evidence.body_preview_base64, "base64").toString("utf8");
+		expect(preview).not.toContain("live-secret");
+		expect(evidence.preview_redaction_reason).toBe("sensitive-delimited-column");
+	});
+
 	it("passes chunks through before EOF and retains only the configured preview", async () => {
 		let nextChunk = 0;
 		const chunk = new Uint8Array(1024).fill(0x61);
@@ -208,6 +278,50 @@ describe("stream evidence capture", () => {
 		);
 		expect((thrown as Error).cause).toBe(originalError);
 	});
+
+	it("redacts URL credentials in mid-stream errors", async () => {
+		const source = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				controller.error(new Error("socket reset"));
+			},
+		});
+		const capture = captureStreamEvidence(streamResponse(source), {
+			requestUrl: "https://user:password@example.test/fails?access_token=live-secret",
+		});
+		let thrown: unknown;
+		try {
+			for await (const _chunk of capture.response.bytes()) {
+				// Consume until failure.
+			}
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as Error).message).toContain("https://example.test/fails?[REDACTED]");
+		expect((thrown as Error).message).not.toContain("password");
+		expect((thrown as Error).message).not.toContain("live-secret");
+	});
+
+	it("bounds finalization and cancels a stalled upstream reader", async () => {
+		let upstreamCanceled = false;
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new Uint8Array([1, 2, 3]));
+			},
+			cancel() {
+				upstreamCanceled = true;
+			},
+		});
+		const capture = captureStreamEvidence(streamResponse(source), {
+			requestUrl: "https://example.test/stalled",
+			finalizeTimeoutMs: 10,
+		});
+		const reader = capture.response.body.getReader();
+		await reader.read();
+		reader.releaseLock();
+		await expect(capture.getEvidence()).rejects.toThrow(/finalization timed out/);
+		expect(upstreamCanceled).toBeTrue();
+	});
 });
 
 describe("stream evidence validation and replay", () => {
@@ -241,14 +355,33 @@ describe("stream evidence validation and replay", () => {
 		).toThrow(/body_preview_base64.*canonical base64/);
 	});
 
+	it("selects every ordinal stream in the latest recording group", () => {
+		const first = {
+			...evidenceFor(new Uint8Array([1])),
+			request: { ordinal: 1, method: "GET", path: "/first" },
+		};
+		const second = {
+			...evidenceFor(new Uint8Array([2])),
+			request: { ordinal: 2, method: "POST", path: "/second" },
+		};
+		expect(findStreamEvidenceRecords([first, second])).toEqual([first, second]);
+		expect(findStreamEvidenceRecords([first, second, [first]])).toEqual([first]);
+	});
+
 	it("omits the original content-length when replaying only the preview", async () => {
 		const preview = new Uint8Array(STREAM_PREVIEW_BYTES).fill(0x63);
-		const replay = replayStreamEvidence(evidenceFor(preview, 9000));
+		const replay = replayStreamEvidence({
+			...evidenceFor(preview, 9000),
+			preview_sanitized: true,
+			preview_redaction_reason: "truncated-json",
+		});
 		let replayBytes = 0;
 		for await (const chunk of replay.bytes()) replayBytes += chunk.byteLength;
 
 		expect(replayBytes).toBe(STREAM_PREVIEW_BYTES);
 		expect(replay.headers["content-length"]).toBeUndefined();
 		expect(replay.body_bytes).toBe(9000);
+		expect(replay.preview_sanitized).toBeTrue();
+		expect(replay.preview_redaction_reason).toBe("truncated-json");
 	});
 });

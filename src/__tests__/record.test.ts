@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { prepareFixturePayload } from "../../bin/apifuse-record.js";
-import { STREAM_PREVIEW_BYTES } from "../stream-evidence.js";
+import { parseStreamEvidenceRecord, STREAM_PREVIEW_BYTES } from "../stream-evidence.js";
 
 const repoRoot = dirname(dirname(import.meta.dir));
 const tempRoot = join(repoRoot, ".tmp-provider-sdk-record-tests");
@@ -228,9 +228,11 @@ export default {
 
 			expect(stderr).toBe("");
 			expect(exitCode).toBe(0);
-			expect(
-				JSON.parse(readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8")),
-			).toEqual({
+			const recordedTimeline = JSON.parse(
+				readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8"),
+			) as unknown[];
+			expect(recordedTimeline).toHaveLength(2);
+			expect(parseStreamEvidenceRecord(recordedTimeline[0])).toEqual({
 				__apifuse_stream__: true,
 				status: 200,
 				ok: true,
@@ -242,7 +244,9 @@ export default {
 				body_sha256: expectedSha256,
 				body_bytes: upstreamBody.byteLength,
 				body_preview_base64: upstreamBody.subarray(0, STREAM_PREVIEW_BYTES).toString("base64"),
+				request: { ordinal: 1, method: "GET", path: "/payload" },
 			});
+			expect(recordedTimeline[1]).toEqual({ cleanup: "complete" });
 		} finally {
 			await new Promise<void>((resolve, reject) => {
 				upstream.close((error) => (error ? reject(error) : resolve()));
@@ -250,7 +254,97 @@ export default {
 		}
 	});
 
-	it("sanitizes credentials inside a streamed JSON body before base64 encoding", async () => {
+	it("records and finalizes every stream opened by one operation in call order", async () => {
+		const firstBody = Buffer.from("first stream body");
+		const secondBody = Buffer.from("second stream body");
+		const upstream = createServer((request, response) => {
+			const body = request.url === "/first" ? firstBody : secondBody;
+			response.writeHead(200, {
+				"content-length": String(body.byteLength),
+				"content-type": "application/octet-stream",
+			});
+			response.end(body);
+		});
+		await new Promise<void>((resolve, reject) => {
+			upstream.once("error", reject);
+			upstream.listen(0, "127.0.0.1", resolve);
+		});
+
+		try {
+			const address = upstream.address();
+			if (address === null || typeof address === "string") {
+				throw new Error(`Expected an IP upstream address, received ${String(address)}`);
+			}
+			const providerDir = makeTempDir("multi-stream-capture-");
+			writeFileSync(join(providerDir, "package.json"), '{"type":"module"}\n');
+			writeFileSync(
+				join(providerDir, "index.ts"),
+				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
+
+export default {
+  id: "record-multi-stream-capture",
+  version: "1.0.0",
+  runtime: "standard",
+  operations: {
+    download: {
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
+      handler: async (ctx) => {
+        const first = await ctx.http.stream("/first");
+        const firstReader = first.body.getReader();
+        await firstReader.read();
+        await firstReader.cancel("probe complete");
+        const second = await ctx.http.stream("/second");
+        for await (const _chunk of second.bytes()) {}
+        return { ok: true };
+      },
+    },
+  },
+};
+`,
+			);
+
+			const process = Bun.spawn({
+				cmd: [
+					"bun",
+					join(repoRoot, "bin", "apifuse.ts"),
+					"record",
+					providerDir,
+					"--operation",
+					"download",
+				],
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stderr, exitCode] = await Promise.all([
+				new Response(process.stderr).text(),
+				process.exited,
+			]);
+
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+			const rawFixture = JSON.parse(
+				readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8"),
+			) as unknown[];
+			const records = rawFixture.map((value) => parseStreamEvidenceRecord(value));
+			expect(records.map((record) => record.request)).toEqual([
+				{ ordinal: 1, method: "GET", path: "/first" },
+				{ ordinal: 2, method: "GET", path: "/second" },
+			]);
+			expect(records.map((record) => record.body_sha256)).toEqual([
+				createHash("sha256").update(firstBody).digest("hex"),
+				createHash("sha256").update(secondBody).digest("hex"),
+			]);
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				upstream.close((error) => (error ? reject(error) : resolve()));
+			});
+		}
+	});
+
+	it("sanitizes credentials in streamed JSON with no content type before base64 encoding", async () => {
 		const accessToken = "streamed-access-token-that-must-never-reach-the-fixture";
 		const apiKey = "streamed-api-key-that-must-never-reach-the-fixture";
 		const upstreamBody = Buffer.from(
@@ -259,7 +353,6 @@ export default {
 		const upstream = createServer((_request, response) => {
 			response.writeHead(200, {
 				"content-length": String(upstreamBody.byteLength),
-				"content-type": "application/json; charset=utf-8",
 			});
 			response.end(upstreamBody);
 		});
@@ -324,9 +417,9 @@ export default {
 
 			expect(stderr).toBe("");
 			expect(exitCode).toBe(0);
-			const rawFixture = JSON.parse(
-				readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8"),
-			) as { body_bytes: number; body_preview_base64: string };
+			const rawFixture = parseStreamEvidenceRecord(
+				JSON.parse(readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8")),
+			);
 			const fixtureSource = readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8");
 			const decodedPreview = Buffer.from(rawFixture.body_preview_base64, "base64");
 

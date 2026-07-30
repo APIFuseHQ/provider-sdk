@@ -22,8 +22,8 @@ import {
 	TransportError,
 	ValidationError,
 } from "../src/index.js";
+import { requestPathForFixture, sanitizeFixture } from "../src/fixture-sanitization.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
-import { parseSchema } from "../src/schema.js";
 import {
 	captureStreamEvidence,
 	STREAM_PREVIEW_BYTES,
@@ -40,8 +40,6 @@ type CliArgs = {
 
 type ProviderRuntime = ProviderDefinition;
 
-type MutableRecord = Record<string, unknown>;
-
 const HELP_TEXT = `Usage: apifuse record [path] --operation <operation> --params '<json>'
 
 Calls a real upstream-backed operation through ctx.http or ctx.stealth and writes __fixtures__/raw.json.
@@ -49,6 +47,9 @@ Calls a real upstream-backed operation through ctx.http or ctx.stealth and write
 Streaming responses are recorded as evidence (status, selected headers, full-body SHA-256 and byte
 count, plus a ${STREAM_PREVIEW_BYTES}-byte base64 preview). Test replay is evidence-only: ctx.http.stream exposes the
 preview as its body and the original body_sha256/body_bytes as response metadata.
+When an operation opens multiple streams, all evidence records are saved in stream call order.
+Mixed JSON/stream operations save a call-ordered array so snapshot replay can route each response.
+ctx.http.sse() recording is unsupported and fails explicitly.
 
 Options:
   --operation, -o <name>   operation to call
@@ -68,7 +69,7 @@ export async function main() {
 		const provider = await loadProvider(location.rootDir);
 		const operationName = resolveOperationName(provider, args.operation);
 		const operation = provider.operations[operationName];
-		const parsedParams = await parseParams(operation, args.params);
+		const parsedParams = parseParams(operation, args.params);
 
 		const capture = createCaptureContext(
 			provider,
@@ -296,10 +297,7 @@ function resolveOperationName(provider: ProviderRuntime, operationName?: string)
 	return firstOperation;
 }
 
-async function parseParams(
-	operation: ProviderRuntime["operations"][string],
-	value: string,
-): Promise<unknown> {
+function parseParams(operation: ProviderRuntime["operations"][string], value: string): unknown {
 	let parsed: unknown;
 
 	try {
@@ -310,7 +308,13 @@ async function parseParams(
 		);
 	}
 
-	return operation.input ? await parseSchema(operation.input, parsed, "operation input") : parsed;
+	if (!operation.input) return parsed;
+	if (!("parse" in operation.input) || typeof operation.input.parse !== "function") {
+		throw new Error(
+			"apifuse record requires an operation input schema with a synchronous parse().",
+		);
+	}
+	return operation.input.parse(parsed);
 }
 
 function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: string): string {
@@ -326,26 +330,41 @@ function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: strin
 
 function createCaptureContext(provider: ProviderRuntime, baseUrl: string, sanitize: boolean) {
 	let nextCaptureOrder = 0;
-	let capturedRaw: { order: number; value: unknown } | undefined;
-	let capturedStream: { order: number; capture: StreamEvidenceCapture } | undefined;
+	let nextStreamOrdinal = 0;
+	let capturedRaw: unknown;
+	const rawCaptures: Array<{ order: number; value: unknown }> = [];
+	const streamCaptures: Array<{ order: number; capture: StreamEvidenceCapture }> = [];
+	let capturedSse = false;
 	const reserveCaptureOrder = () => {
 		nextCaptureOrder += 1;
 		return nextCaptureOrder;
 	};
 	const retainRawCapture = (order: number, value: unknown) => {
-		if (!capturedRaw || order > capturedRaw.order) capturedRaw = { order, value };
+		capturedRaw = value;
+		rawCaptures.push({ order, value });
 	};
 
 	const http = captureHttpClient(createHttpClient(baseUrl), {
 		reserveOrder: reserveCaptureOrder,
 		onResponse: (order, response) => retainRawCapture(order, response.data),
-		onStreamResponse: (order, requestUrl, response) => {
+		onStreamResponse: (order, requestUrl, method, response) => {
+			nextStreamOrdinal += 1;
+			const resolvedRequestUrl = new URL(requestUrl, baseUrl).toString();
 			const capture = captureStreamEvidence(response, {
-				requestUrl: resolveCaptureUrl(baseUrl, requestUrl),
+				requestUrl: resolvedRequestUrl,
+				request: {
+					ordinal: nextStreamOrdinal,
+					method,
+					path: requestPathForFixture(resolvedRequestUrl),
+				},
 				...(sanitize ? { sanitizeFixture } : {}),
 			});
-			if (!capturedStream || order > capturedStream.order) capturedStream = { order, capture };
+			streamCaptures.push({ order, capture });
 			return capture.response;
+		},
+		onSseResponse: () => {
+			capturedSse = true;
+			capturedRaw = undefined;
 		},
 	});
 	const stealth = proxyStealthClient(
@@ -409,8 +428,24 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 
 	return {
 		ctx,
-		getCapturedRaw: async () =>
-			capturedStream ? await capturedStream.capture.getEvidence() : capturedRaw?.value,
+		getCapturedRaw: async () => {
+			if (streamCaptures.length === 0) {
+				if (capturedSse) throw new Error("apifuse record does not support ctx.http.sse().");
+				return capturedRaw;
+			}
+
+			const evidence = await Promise.all(
+				streamCaptures.map(async ({ order, capture }) => ({
+					order,
+					value: await capture.getEvidence(),
+				})),
+			);
+			if (capturedSse) throw new Error("apifuse record does not support ctx.http.sse().");
+			const timeline = [...rawCaptures, ...evidence]
+				.sort((left, right) => left.order - right.order)
+				.map(({ value }) => value);
+			return timeline.length === 1 ? timeline[0] : timeline;
+		},
 	};
 }
 
@@ -420,8 +455,10 @@ type HttpCaptureCallbacks = {
 	onStreamResponse(
 		order: number,
 		requestUrl: string,
+		method: string,
 		response: HttpStreamResponse,
 	): HttpStreamResponse;
+	onSseResponse(order: number): void;
 };
 
 function captureHttpClient(client: HttpClient, callbacks: HttpCaptureCallbacks): HttpClient {
@@ -448,9 +485,19 @@ function captureHttpClient(client: HttpClient, callbacks: HttpCaptureCallbacks):
 		stream: async (...args: Parameters<HttpClient["stream"]>) => {
 			const order = callbacks.reserveOrder();
 			const response = await client.stream(...args);
-			return callbacks.onStreamResponse(order, args[0], response);
+			return callbacks.onStreamResponse(
+				order,
+				args[0],
+				(args[1]?.method ?? "GET").toUpperCase(),
+				response,
+			);
 		},
-		sse: (...args: Parameters<HttpClient["sse"]>) => client.sse(...args),
+		sse: async (...args: Parameters<HttpClient["sse"]>) => {
+			const order = callbacks.reserveOrder();
+			const response = await client.sse(...args);
+			callbacks.onSseResponse(order);
+			return response;
+		},
 	};
 }
 
@@ -486,17 +533,16 @@ function proxyStealthSession(
 			return response;
 		},
 		cookies: session.cookies,
-		redirects: session.redirects,
+		redirects: {
+			run: async (...args: Parameters<StealthSession["redirects"]["run"]>) => {
+				const order = reserveOrder();
+				const result = await session.redirects.run(...args);
+				onResponse(order, result.final);
+				return result;
+			},
+		},
 		close: () => session.close(),
 	};
-}
-
-function resolveCaptureUrl(baseUrl: string, requestUrl: string): string {
-	try {
-		return new URL(requestUrl, baseUrl).toString();
-	} catch {
-		return requestUrl;
-	}
 }
 
 function normalizeCapturedStealthResponse(response: Awaited<ReturnType<StealthClient["fetch"]>>) {
@@ -505,30 +551,6 @@ function normalizeCapturedStealthResponse(response: Awaited<ReturnType<StealthCl
 	} catch {
 		return response.body;
 	}
-}
-
-function sanitizeFixture(value: unknown): unknown {
-	if (Array.isArray(value)) {
-		return value.map((item) => sanitizeFixture(item));
-	}
-
-	if (!value || typeof value !== "object") {
-		return value;
-	}
-
-	const entries = Object.entries(value as MutableRecord).map(([key, entryValue]) => {
-		if (isSensitiveKey(key)) {
-			return [key, "[REDACTED]"] as const;
-		}
-
-		return [key, sanitizeFixture(entryValue)] as const;
-	});
-
-	return Object.fromEntries(entries);
-}
-
-function isSensitiveKey(key: string): boolean {
-	return /authorization|token|api[-_]?key/i.test(key);
 }
 
 export async function prepareFixturePayload(

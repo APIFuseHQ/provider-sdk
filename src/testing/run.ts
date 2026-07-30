@@ -5,7 +5,12 @@ import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import { createUnsupportedSttClient } from "../runtime/stt.js";
 import { safeParseSchemaSync } from "../schema.js";
-import { findStreamEvidenceRecord, replayStreamEvidence } from "../stream-evidence.js";
+import {
+	findStreamCaptureGroup,
+	hasStreamEvidenceMarker,
+	parseStreamEvidenceRecord,
+	replayStreamEvidence,
+} from "../stream-evidence.js";
 import type {
 	AuthMode,
 	BrowserPage,
@@ -570,19 +575,36 @@ function createSnapshotContext(rawFixture: unknown): ProviderContext {
 	};
 	const request = { headers: {} };
 	const state = createMemoryProviderRuntimeState();
+	const streamCaptureGroup = findStreamCaptureGroup(rawFixture);
+	const streamEvidence = (streamCaptureGroup ?? [])
+		.filter(hasStreamEvidenceMarker)
+		.map((value) => parseStreamEvidenceRecord(value));
+	const ordinaryResponses = (streamCaptureGroup ?? []).filter(
+		(value) => !hasStreamEvidenceMarker(value),
+	);
+	let nextStreamResponse = 0;
+	let nextOrdinaryResponse = 0;
+	const replayJsonResponse = () => {
+		if (!streamCaptureGroup) return jsonResponse(rawFixture);
+		const response = ordinaryResponses[nextOrdinaryResponse];
+		if (response === undefined) return unsupported("mixed ctx.http JSON response");
+		nextOrdinaryResponse += 1;
+		return jsonResponse(response);
+	};
 
 	return {
 		env: { get: () => undefined },
 		credential,
 		request,
 		http: {
-			request: async () => jsonResponse(rawFixture),
-			get: async () => jsonResponse(rawFixture),
-			post: async () => jsonResponse(rawFixture),
-			put: async () => jsonResponse(rawFixture),
-			delete: async () => jsonResponse(rawFixture),
+			request: async () => replayJsonResponse(),
+			get: async () => replayJsonResponse(),
+			post: async () => replayJsonResponse(),
+			put: async () => replayJsonResponse(),
+			delete: async () => replayJsonResponse(),
 			stream: async () => {
-				const evidence = findStreamEvidenceRecord(rawFixture);
+				const evidence = streamEvidence[nextStreamResponse];
+				nextStreamResponse += 1;
 				return evidence ? replayStreamEvidence(evidence) : unsupported("ctx.http.stream");
 			},
 			sse: async () => unsupported("ctx.http.sse"),

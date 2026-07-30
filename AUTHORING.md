@@ -666,17 +666,29 @@ reader before EOF, the recorder drains the retained upstream reader before writi
 record to `__fixtures__/raw.json`. The record contains the status, success
 flag, `content-type`/`content-length`/`content-disposition` headers when present, the
 full body SHA-256 and byte count, and a base64 preview up to the configured stream preview limit.
-Textual previews are decoded and passed through the fixture sanitizer before base64 encoding;
-binary previews retain their original bytes. Appended fixtures replay the most recently appended
-stream evidence record.
+Textual previews are decoded and passed through the fixture sanitizer before base64 encoding.
+Classification uses both the declared content type and the preview bytes, so missing or incorrect
+content-type headers do not bypass sanitization; genuinely binary previews retain their original
+bytes. Sanitized previews carry `preview_sanitized: true`, plus a
+`preview_redaction_reason` when capture had to fail closed. The original hash and byte count always
+describe upstream bytes, not a sanitized preview.
+
+Each record includes query-free request provenance (`method`, `path`, and a one-based stream call
+ordinal). If an operation opens multiple streams, the recorder finalizes every retained reader and
+writes all evidence records in stream call order. Mixed ordinary HTTP and stream responses are
+written as a call-ordered array; evidence-only snapshot replay routes ordinary and stream calls to
+their respective next recorded response. A single-stream-only capture keeps the legacy object
+shape. Appended fixtures replay the latest invocation group. SSE recording remains unsupported and
+fails explicitly instead of retaining an unrelated earlier response.
 
 Stream fixture replay in `runStandardTests(..., { snapshot: true })` is evidence-only:
 `ctx.http.stream()` returns a usable stream containing exactly the recorded preview,
 not a fabricated full body. The replay response also carries runtime metadata
-`evidence_only: true`, `body_sha256`, and `body_bytes` for assertions about the original
-capture. Do not assert that the replay body hashes to `body_sha256` when `body_bytes`
-exceeds the decoded preview length; use the metadata for full-body integrity and limit
-body-content assertions to the preview.
+`evidence_only: true`, `body_sha256`, `body_bytes`, and the optional preview sanitization fields
+for assertions about the original capture. Do not assert that the replay body hashes to
+`body_sha256` when `body_bytes`
+exceeds the decoded preview length or `preview_sanitized` is present; use the metadata for
+full-body integrity and limit body-content assertions to the preview.
 
 ### Running the pre-submission report
 

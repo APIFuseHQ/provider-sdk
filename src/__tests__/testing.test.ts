@@ -43,6 +43,8 @@ const snapshotFixtureDir = `/tmp/apifuse-standard-tests-${Date.now()}/__fixtures
 mkdirSync(snapshotFixtureDir, { recursive: true });
 const streamSnapshotFixtureDir = `/tmp/apifuse-stream-standard-tests-${Date.now()}/__fixtures__`;
 mkdirSync(streamSnapshotFixtureDir, { recursive: true });
+const multiStreamSnapshotFixtureDir = `/tmp/apifuse-multi-stream-standard-tests-${Date.now()}/__fixtures__`;
+mkdirSync(multiStreamSnapshotFixtureDir, { recursive: true });
 
 const streamPreview = "recorded stream preview";
 const streamEvidenceFixture = {
@@ -53,6 +55,15 @@ const streamEvidenceFixture = {
 	body_sha256: "a".repeat(64),
 	body_bytes: Buffer.byteLength(streamPreview),
 	body_preview_base64: Buffer.from(streamPreview).toString("base64"),
+	request: { ordinal: 1, method: "GET", path: "/download" },
+};
+const secondStreamPreview = "second recorded stream preview";
+const secondStreamEvidenceFixture = {
+	...streamEvidenceFixture,
+	body_sha256: "b".repeat(64),
+	body_bytes: Buffer.byteLength(secondStreamPreview),
+	body_preview_base64: Buffer.from(secondStreamPreview).toString("base64"),
+	request: { ordinal: 2, method: "GET", path: "/second" },
 };
 
 const fixtureHarnessProvider = defineProvider({
@@ -111,6 +122,7 @@ const streamSnapshotHarnessProvider = defineProvider({
 				bodyBytes: z.number(),
 				bodySha256: z.string(),
 				evidenceOnly: z.boolean(),
+				cleanup: z.string(),
 			}),
 			handler: async (ctx) => {
 				const response = await ctx.http.stream("https://example.test/download");
@@ -122,18 +134,20 @@ const streamSnapshotHarnessProvider = defineProvider({
 				const body = Buffer.concat(chunks).toString("utf8");
 				if (
 					body !== streamPreview ||
-					response.evidence_only !== true ||
 					response.body_sha256 !== streamEvidenceFixture.body_sha256 ||
 					response.body_bytes !== streamEvidenceFixture.body_bytes
 				) {
 					throw new Error("stream evidence replay did not preserve preview and metadata");
 				}
+				const cleanupResponse = await ctx.http.get("https://example.test/cleanup");
+				const cleanup = await cleanupResponse.json<{ cleanup: string }>();
 
 				return {
 					body,
 					bodyBytes: response.body_bytes,
 					bodySha256: response.body_sha256,
 					evidenceOnly: response.evidence_only,
+					cleanup: cleanup.cleanup,
 				};
 			},
 			fixtures: {
@@ -143,7 +157,35 @@ const streamSnapshotHarnessProvider = defineProvider({
 					bodyBytes: Buffer.byteLength(streamPreview),
 					bodySha256: "a".repeat(64),
 					evidenceOnly: true,
+					cleanup: "complete",
 				},
+			},
+			healthCheckUnsupported: { reason: "test fixture" },
+		},
+	},
+});
+
+const multiStreamSnapshotHarnessProvider = defineProvider({
+	id: "multi-stream-snapshot-harness-provider",
+	version: "1.0.0",
+	runtime: "standard",
+	meta: { displayName: "Multi Stream Snapshot Harness Provider", category: "test" },
+	operations: {
+		download: {
+			input: z.object({}),
+			output: z.object({ first: z.string(), second: z.string() }),
+			handler: async (ctx) => {
+				const read = async (path: string) => {
+					const response = await ctx.http.stream(`https://example.test${path}`);
+					const chunks: Uint8Array[] = [];
+					for await (const chunk of response.bytes()) chunks.push(chunk);
+					return Buffer.concat(chunks).toString("utf8");
+				};
+				return { first: await read("/first"), second: await read("/second") };
+			},
+			fixtures: {
+				request: {},
+				response: { first: streamPreview, second: secondStreamPreview },
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
@@ -240,12 +282,19 @@ runStandardTests(snapshotHarnessProvider, { label: "golden" }, undefined, {
 
 runStandardTests(
 	streamSnapshotHarnessProvider,
-	[{ cleanup: "complete" }, streamEvidenceFixture],
+	[streamEvidenceFixture, { cleanup: "complete" }],
 	undefined,
 	{
 		snapshot: true,
 		fixtureDir: streamSnapshotFixtureDir,
 	},
+);
+
+runStandardTests(
+	multiStreamSnapshotHarnessProvider,
+	[streamEvidenceFixture, secondStreamEvidenceFixture],
+	undefined,
+	{ snapshot: true, fixtureDir: multiStreamSnapshotFixtureDir },
 );
 
 runStandardTests(
