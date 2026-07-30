@@ -6,6 +6,11 @@
 			"reason": "resolveVendorChain reads the deprecated singular proxy.provider field to build a single-vendor chain for backwards compatibility."
 		},
 		{
+			"file": "src/runtime/native-network.ts",
+			"symbol": "provider",
+			"reason": "resolveNativeVendorChain reads the deprecated singular proxy.provider field to preserve existing provider policies while preferring providers[]."
+		},
+		{
 			"file": "src/define.ts",
 			"symbol": "provider",
 			"reason": "validateProviderProxy accepts the deprecated singular proxy.provider field and validates it for backwards compatibility."

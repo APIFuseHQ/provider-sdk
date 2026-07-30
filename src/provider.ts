@@ -158,6 +158,17 @@ export type {
 	StateWriteOptions,
 } from "./types.js";
 export {
+	createNativeNetworkClient,
+	NativeNetworkError,
+	resolveNativeGatewayProxy,
+	type NativeGatewayProxy,
+	type NativeGatewayProxyResolutionInput,
+	type NativeGatewayProxySynthesizer,
+	type NativeGatewayProxySynthesisInput,
+	type NativeNetworkClientOptions,
+	type NativeNetworkErrorCode,
+} from "./runtime/native-network.js";
+export {
 	HttpRetryAfterPolicy,
 	HttpRetryDelayStrategy,
 	HttpRetryJitter,

@@ -60,7 +60,7 @@ export function nodemavenPoolSize(policy: ProviderProxyPolicy): number {
 	);
 }
 
-function nodemavenLifetimeMinutes(policy: ProviderProxyPolicy): number {
+export function nodemavenLifetimeMinutes(policy: ProviderProxyPolicy): number {
 	const configured = policy.session?.lifetimeMinutes;
 	if (typeof configured !== "number" || !Number.isFinite(configured) || configured <= 0) {
 		return NODEMAVEN_MAX_LIFETIME_MINUTES;
@@ -121,11 +121,16 @@ export type NodemavenSynthesisInput = {
 	refreshEpoch: number;
 	/** ISO 3166-1 alpha-2, already resolved by the caller (falls back to env). */
 	country?: string;
+	/** Clock injection used by native sticky-expiry lifecycle tests. */
+	now?: number;
 };
 
 export type NodemavenSynthesis = {
 	url: string;
 	protocol: ProxyProtocol;
+	sticky: boolean;
+	sessionId: string;
+	expiresAt?: string;
 	diagnostics: Record<string, string | number | boolean>;
 };
 
@@ -146,6 +151,7 @@ export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): Nodema
 	const sid = deriveSid(input.policy, input.affinityKey, input.poolIndex, input.refreshEpoch);
 	const port = selectPort(input.protocol, sid, input.poolIndex);
 	const lifetimeMinutes = nodemavenLifetimeMinutes(input.policy);
+	const sticky = isStickyAffinity(input.policy);
 
 	const country = slugifyGeo(input.country ?? input.policy.geo?.country);
 	const region = slugifyGeo(input.policy.geo?.subdivision);
@@ -166,10 +172,15 @@ export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): Nodema
 	return {
 		url,
 		protocol: input.protocol,
+		sticky,
+		sessionId: sid,
+		...(sticky
+			? { expiresAt: new Date((input.now ?? Date.now()) + lifetimeMinutes * 60_000).toISOString() }
+			: {}),
 		diagnostics: {
 			vendor: "nodemaven",
 			protocol: input.protocol,
-			sticky: isStickyAffinity(input.policy),
+			sticky,
 			filter,
 			lifetimeMinutes,
 			...(country ? { country } : {}),

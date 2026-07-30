@@ -70,6 +70,17 @@ export {
 export { createEnvContext } from "./runtime/env.js";
 export { executeOperation } from "./runtime/executor.js";
 export { createHttpClient } from "./runtime/http.js";
+export {
+	createNativeNetworkClient,
+	NativeNetworkError,
+	resolveNativeGatewayProxy,
+	type NativeGatewayProxy,
+	type NativeGatewayProxyResolutionInput,
+	type NativeGatewayProxySynthesizer,
+	type NativeGatewayProxySynthesisInput,
+	type NativeNetworkClientOptions,
+	type NativeNetworkErrorCode,
+} from "./runtime/native-network.js";
 export type { Insight, InsightSeverity } from "./runtime/insights.js";
 export { generateInsights } from "./runtime/insights.js";
 export {
