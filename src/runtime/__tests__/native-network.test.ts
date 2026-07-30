@@ -1,0 +1,324 @@
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { type Server, Socket, createServer } from "node:net";
+import { createServer as createTlsServer } from "node:tls";
+
+import { ProxyResolutionError } from "../../config/loader.js";
+import {
+	createNativeNetworkClient,
+	resolveNativeGatewayProxy,
+	type NativeGatewayProxySynthesizer,
+} from "../native-network.js";
+
+type ListeningFixture = {
+	host: string;
+	port: number;
+	server: Server;
+	sockets: Set<Socket>;
+};
+
+const fixtures: ListeningFixture[] = [];
+let tlsKey: Buffer;
+let tlsCert: Buffer;
+
+beforeAll(() => {
+	const directory = mkdtempSync(join(tmpdir(), "apifuse-native-network-"));
+	const keyPath = join(directory, "key.pem");
+	const certPath = join(directory, "cert.pem");
+	const generated = Bun.spawnSync([
+		"openssl",
+		"req",
+		"-x509",
+		"-newkey",
+		"rsa:2048",
+		"-nodes",
+		"-keyout",
+		keyPath,
+		"-out",
+		certPath,
+		"-days",
+		"1",
+		"-subj",
+		"/CN=localhost",
+	]);
+	if (generated.exitCode !== 0) {
+		throw new Error("Failed to create the local TLS test certificate");
+	}
+	tlsKey = readFileSync(keyPath);
+	tlsCert = readFileSync(certPath);
+	rmSync(directory, { recursive: true });
+});
+
+afterEach(async () => {
+	while (fixtures.length > 0) {
+		const fixture = fixtures.pop();
+		if (!fixture) continue;
+		for (const socket of fixture.sockets) socket.destroy();
+		await new Promise<void>((resolve) => fixture.server.close(() => resolve()));
+	}
+});
+
+async function listen(server: Server): Promise<ListeningFixture> {
+	const sockets = new Set<Socket>();
+	server.on("connection", (socket: Socket) => {
+		sockets.add(socket);
+		socket.on("close", () => sockets.delete(socket));
+	});
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", () => {
+			server.off("error", reject);
+			resolve();
+		});
+	});
+	const address = server.address();
+	if (!address || typeof address === "string") throw new Error("Fixture did not bind TCP");
+	const fixture = { host: "127.0.0.1", port: address.port, server, sockets };
+	fixtures.push(fixture);
+	return fixture;
+}
+
+function take(buffer: Buffer, count: number): [Buffer, Buffer] | undefined {
+	if (buffer.length < count) return undefined;
+	return [buffer.subarray(0, count), buffer.subarray(count)];
+}
+
+async function startSocks5Server(
+	options: { stall?: boolean } = {},
+): Promise<ListeningFixture & { destinations: Array<{ host: string; port: number }> }> {
+	const destinations: Array<{ host: string; port: number }> = [];
+	const server = createServer((client) => {
+		if (options.stall) return;
+		let buffered = Buffer.alloc(0);
+		let state: "greeting" | "auth" | "request" | "tunnel" = "greeting";
+
+		client.on("data", (chunk: Buffer) => {
+			if (state === "tunnel") return;
+			buffered = Buffer.concat([buffered, chunk]);
+			while (state !== "tunnel") {
+				if (state === "greeting") {
+					if (buffered.length < 2) return;
+					const methods = buffered[1] ?? 0;
+					const packet = take(buffered, 2 + methods);
+					if (!packet) return;
+					buffered = packet[1];
+					client.write(Buffer.from([5, 2]));
+					state = "auth";
+					continue;
+				}
+
+				if (state === "auth") {
+					if (buffered.length < 2) return;
+					const usernameLength = buffered[1] ?? 0;
+					if (buffered.length < 3 + usernameLength) return;
+					const passwordLength = buffered[2 + usernameLength] ?? 0;
+					const packet = take(buffered, 3 + usernameLength + passwordLength);
+					if (!packet) return;
+					buffered = packet[1];
+					client.write(Buffer.from([1, 0]));
+					state = "request";
+					continue;
+				}
+
+				if (buffered.length < 5) return;
+				const addressType = buffered[3];
+				let offset = 4;
+				let host: string;
+				if (addressType === 1) {
+					if (buffered.length < 10) return;
+					host = Array.from(buffered.subarray(offset, offset + 4)).join(".");
+					offset += 4;
+				} else if (addressType === 3) {
+					const length = buffered[offset] ?? 0;
+					offset += 1;
+					if (buffered.length < offset + length + 2) return;
+					host = buffered.subarray(offset, offset + length).toString("utf8");
+					offset += length;
+				} else {
+					client.destroy(new Error("Unsupported SOCKS test address type"));
+					return;
+				}
+				const packet = take(buffered, offset + 2);
+				if (!packet) return;
+				const port = packet[0].readUInt16BE(offset);
+				buffered = packet[1];
+				destinations.push({ host, port });
+				const upstream = new Socket();
+				upstream.once("error", () => {
+					client.write(Buffer.from([5, 5, 0, 1, 0, 0, 0, 0, 0, 0]));
+					client.destroy();
+				});
+				upstream.connect(port, host, () => {
+					client.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, 0, 0]));
+					state = "tunnel";
+					if (buffered.length > 0) upstream.write(buffered);
+					client.pipe(upstream);
+					upstream.pipe(client);
+				});
+				return;
+			}
+		});
+	});
+	return Object.assign(await listen(server), { destinations });
+}
+
+function localSynthesizer(proxy: ListeningFixture): NativeGatewayProxySynthesizer {
+	const password = randomUUID();
+	return () => ({
+		url: `socks5://fixture-user:${encodeURIComponent(password)}@${proxy.host}:${proxy.port}`,
+		vendor: "nodemaven",
+		sticky: false,
+	});
+}
+
+describe("native network runtime", () => {
+	it("establishes a TCP tunnel to the requested host and port", async () => {
+		const destination = await listen(
+			createServer((socket) => socket.on("data", (chunk) => socket.write(chunk))),
+		);
+		const proxy = await startSocks5Server();
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localSynthesizer(proxy)],
+		});
+
+		const connection = await client.connectTcp({
+			host: destination.host,
+			port: destination.port,
+			timeoutMs: 1_000,
+		});
+		await connection.write(new TextEncoder().encode("hello"));
+		expect(new TextDecoder().decode(await connection.read())).toBe("hello");
+		expect(proxy.destinations).toEqual([{ host: destination.host, port: destination.port }]);
+		expect(connection.proxy).toMatchObject({ vendor: "nodemaven", sticky: false });
+		await connection.close();
+	});
+
+	it("negotiates TLS on top of the SOCKS tunnel", async () => {
+		const destination = await listen(
+			createTlsServer({ key: tlsKey, cert: tlsCert }, (socket) => {
+				socket.on("data", (chunk) => socket.write(chunk));
+			}),
+		);
+		const proxy = await startSocks5Server();
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localSynthesizer(proxy)],
+		});
+
+		const connection = await client.connectTls({
+			host: destination.host,
+			port: destination.port,
+			serverName: "localhost",
+			rejectUnauthorized: false,
+			timeoutMs: 1_000,
+		});
+		await connection.write(new TextEncoder().encode("secure"));
+		expect(new TextDecoder().decode(await connection.read())).toBe("secure");
+		expect(proxy.destinations[0]).toEqual({ host: destination.host, port: destination.port });
+		await connection.close();
+	});
+
+	it("fails closed with a typed error when required proxy credentials do not resolve", async () => {
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [() => undefined],
+		});
+
+		const attempt = client.connectTcp({ host: "127.0.0.1", port: 9, timeoutMs: 50 });
+		await expect(attempt).rejects.toBeInstanceOf(ProxyResolutionError);
+		await expect(attempt).rejects.toMatchObject({ code: "PROXY_REQUIRED" });
+	});
+
+	it("connects directly when proxy mode is disabled", async () => {
+		const destination = await listen(
+			createServer((socket) => socket.on("data", (chunk) => socket.write(chunk))),
+		);
+		const client = createNativeNetworkClient({ proxyPolicy: { mode: "disabled" } });
+		const connection = await client.connectTcp({
+			host: destination.host,
+			port: destination.port,
+			timeoutMs: 1_000,
+		});
+		await connection.write(new TextEncoder().encode("direct"));
+		expect(new TextDecoder().decode(await connection.read())).toBe("direct");
+		expect(connection.proxy).toBeUndefined();
+		await connection.close();
+	});
+
+	it("connects directly when an optional vendor chain does not resolve", async () => {
+		const destination = await listen(createServer((socket) => socket.end("optional-direct")));
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "optional", providers: ["smartproxy", "nodemaven"] },
+			gatewaySynthesizers: [() => undefined],
+		});
+		const connection = await client.connectTcp({
+			host: destination.host,
+			port: destination.port,
+			timeoutMs: 1_000,
+		});
+		expect(new TextDecoder().decode(await connection.read())).toBe("optional-direct");
+		expect(connection.proxy).toBeUndefined();
+		await connection.close();
+	});
+
+	it("aborts a stalled SOCKS handshake", async () => {
+		const proxy = await startSocks5Server({ stall: true });
+		const controller = new AbortController();
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localSynthesizer(proxy)],
+		});
+		const attempt = client.connectTcp({
+			host: "127.0.0.1",
+			port: 9,
+			timeoutMs: 5_000,
+			signal: controller.signal,
+		});
+		controller.abort();
+		await expect(attempt).rejects.toMatchObject({ code: "native_connection_aborted" });
+	});
+
+	it("applies timeoutMs to the SOCKS negotiation phase", async () => {
+		const proxy = await startSocks5Server({ stall: true });
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localSynthesizer(proxy)],
+		});
+		const startedAt = Date.now();
+		await expect(
+			client.connectTcp({ host: "127.0.0.1", port: 9, timeoutMs: 30 }),
+		).rejects.toMatchObject({ code: "native_connection_timeout" });
+		expect(Date.now() - startedAt).toBeLessThan(500);
+	});
+
+	it("forces SOCKS5 when resolving NodeMaven for native connections", () => {
+		const usernameBefore = process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
+		const passwordBefore = process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
+		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = `fixture-${randomUUID()}`;
+		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = randomUUID();
+		try {
+			const resolved = resolveNativeGatewayProxy({
+				policy: {
+					mode: "required",
+					providers: ["smartproxy", "nodemaven"],
+					session: { affinity: "connection", lifetimeMinutes: 60 },
+				},
+				affinityKey: "hashed-account-identity",
+			});
+			expect(resolved?.vendor).toBe("nodemaven");
+			expect(resolved?.url).toMatch(/^socks5:\/\//);
+			const port = Number(new URL(resolved?.url ?? "").port);
+			expect(port).toBeGreaterThanOrEqual(1080);
+			expect(port).toBeLessThanOrEqual(2080);
+		} finally {
+			if (usernameBefore === undefined) delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
+			else process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = usernameBefore;
+			if (passwordBefore === undefined) delete process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
+			else process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = passwordBefore;
+		}
+	});
+});

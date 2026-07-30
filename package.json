@@ -114,6 +114,7 @@
 		"puppeteer-extra-plugin-stealth": "^2.11.2",
 		"re2-wasm": "^1.0",
 		"safe-regex": "^2.1",
+		"socks": "^2.8.9",
 		"tough-cookie": "^6.0.2",
 		"zod": "^4.4.3"
 	},

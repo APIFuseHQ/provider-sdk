@@ -70,6 +70,19 @@ export {
 export { createEnvContext } from "./runtime/env.js";
 export { executeOperation } from "./runtime/executor.js";
 export { createHttpClient } from "./runtime/http.js";
+export {
+	createNativeNetworkClient,
+	deriveNativeCredentialAffinityKey,
+	NativeNetworkError,
+	NativeProxyExpiredError,
+	resolveNativeGatewayProxy,
+	type NativeGatewayProxy,
+	type NativeGatewayProxyResolutionInput,
+	type NativeGatewayProxySynthesizer,
+	type NativeGatewayProxySynthesisInput,
+	type NativeNetworkClientOptions,
+	type NativeNetworkErrorCode,
+} from "./runtime/native-network.js";
 export type { Insight, InsightSeverity } from "./runtime/insights.js";
 export { generateInsights } from "./runtime/insights.js";
 export {
@@ -181,6 +194,7 @@ export type {
 	Iso8601Duration,
 	NativeContext,
 	NativeNetworkClient,
+	NativeNetworkCloseReason,
 	NativeNetworkConnection,
 	NativeNetworkConnectInput,
 	NativeNetworkConnectOptions,
@@ -188,6 +202,10 @@ export type {
 	NativeNetworkEgressGrant,
 	NativeProviderConfig,
 	NativeProviderContext,
+	NativeProxyDrainHandler,
+	NativeProxyEgressInfo,
+	NativeProxyExpiringEvent,
+	NativeProxyExpiringReason,
 	NativeTcpDynamicEgressRule,
 	NativeTcpEgressGrant,
 	NativeTcpEgressRule,

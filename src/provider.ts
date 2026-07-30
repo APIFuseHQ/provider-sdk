@@ -96,6 +96,7 @@ export type {
 	InferSchemaOutput,
 	NativeContext,
 	NativeNetworkClient,
+	NativeNetworkCloseReason,
 	NativeNetworkConnection,
 	NativeNetworkConnectInput,
 	NativeNetworkConnectOptions,
@@ -103,6 +104,10 @@ export type {
 	NativeNetworkEgressGrant,
 	NativeProviderConfig,
 	NativeProviderContext,
+	NativeProxyDrainHandler,
+	NativeProxyEgressInfo,
+	NativeProxyExpiringEvent,
+	NativeProxyExpiringReason,
 	NativeTcpDynamicEgressRule,
 	NativeTcpEgressGrant,
 	NativeTcpEgressRule,
@@ -153,6 +158,19 @@ export type {
 	StateValue,
 	StateWriteOptions,
 } from "./types.js";
+export {
+	createNativeNetworkClient,
+	deriveNativeCredentialAffinityKey,
+	NativeNetworkError,
+	NativeProxyExpiredError,
+	resolveNativeGatewayProxy,
+	type NativeGatewayProxy,
+	type NativeGatewayProxyResolutionInput,
+	type NativeGatewayProxySynthesizer,
+	type NativeGatewayProxySynthesisInput,
+	type NativeNetworkClientOptions,
+	type NativeNetworkErrorCode,
+} from "./runtime/native-network.js";
 export {
 	HttpRetryAfterPolicy,
 	HttpRetryDelayStrategy,
