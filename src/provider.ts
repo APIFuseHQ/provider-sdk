@@ -96,6 +96,7 @@ export type {
 	InferSchemaOutput,
 	NativeContext,
 	NativeNetworkClient,
+	NativeNetworkCloseReason,
 	NativeNetworkConnection,
 	NativeNetworkConnectInput,
 	NativeNetworkConnectOptions,
@@ -160,6 +161,7 @@ export type {
 export {
 	createNativeNetworkClient,
 	NativeNetworkError,
+	NativeProxyExpiredError,
 	resolveNativeGatewayProxy,
 	type NativeGatewayProxy,
 	type NativeGatewayProxyResolutionInput,

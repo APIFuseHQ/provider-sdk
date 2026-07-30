@@ -11,7 +11,9 @@ import type {
 	NativeNetworkConnectInput,
 	NativeNetworkDynamicGrantOptions,
 	NativeNetworkEgressGrant,
+	NativeProxyDrainHandler,
 	NativeProxyEgressInfo,
+	NativeProxyExpiringEvent,
 	ProviderProxyPolicy,
 	ProviderProxyProvider,
 } from "../types.js";
@@ -23,12 +25,24 @@ export type NativeNetworkErrorCode =
 	| "native_connection_failed"
 	| "native_connection_timeout"
 	| "native_dynamic_egress_unsupported"
+	| "native_proxy_expired"
 	| "native_proxy_invalid";
 
 export class NativeNetworkError extends TransportError {
 	constructor(message: string, code: NativeNetworkErrorCode) {
 		super(message, { code, status: 0 });
 		this.name = "NativeNetworkError";
+	}
+
+	override get code(): NativeNetworkErrorCode {
+		return super.code as NativeNetworkErrorCode;
+	}
+}
+
+export class NativeProxyExpiredError extends NativeNetworkError {
+	constructor(readonly expiresAt: string) {
+		super("Native connection closed at sticky proxy expiry", "native_proxy_expired");
+		this.name = "NativeProxyExpiredError";
 	}
 }
 
@@ -60,6 +74,8 @@ export type NativeNetworkClientOptions = {
 	readonly affinityKey?: string;
 	/** Vendor adapters in priority order within each policy vendor slot. */
 	readonly gatewaySynthesizers?: readonly NativeGatewayProxySynthesizer[];
+	/** Warning-level lifecycle diagnostic sink. */
+	readonly warn?: (message: string) => void;
 	/** Delegate to the deployment's native egress authorization layer. */
 	readonly grantTcpEgress?: (input: NativeNetworkDynamicGrantOptions) => NativeNetworkEgressGrant;
 };
@@ -326,16 +342,78 @@ async function upgradeTls(
 	return tlsSocket;
 }
 
-function createConnection(
+export function createNativeNetworkConnection(
 	socket: Socket | TLSSocket,
 	proxy: NativeGatewayProxy | undefined,
+	options: NativeNetworkClientOptions,
 ): NativeNetworkConnection {
 	let terminalError: Error | undefined;
+	let closeReason: NativeNetworkError | undefined;
+	let drainHandler: NativeProxyDrainHandler | undefined;
+	let expiringTimer: ReturnType<typeof setTimeout> | undefined;
+	let hardExpiryTimer: ReturnType<typeof setTimeout> | undefined;
+	let lifecycleSettled = false;
+	let settleLifecycle: () => void = () => undefined;
+	const lifecycleCutoff = new Promise<void>((resolve) => {
+		settleLifecycle = resolve;
+	});
+	const clearLifecycle = () => {
+		if (lifecycleSettled) return;
+		lifecycleSettled = true;
+		if (expiringTimer) clearTimeout(expiringTimer);
+		if (hardExpiryTimer) clearTimeout(hardExpiryTimer);
+		settleLifecycle();
+	};
 	socket.on("error", (error) => {
 		terminalError = error;
 	});
+	socket.once("close", clearLifecycle);
+
+	const expiresAt = proxy?.sticky ? proxy.expiresAt : undefined;
+	const leadSeconds = options.proxyPolicy?.session?.drainLeadSeconds;
+	const expiresAtMs = expiresAt ? Date.parse(expiresAt) : Number.NaN;
+	if (
+		expiresAt &&
+		Number.isFinite(expiresAtMs) &&
+		typeof leadSeconds === "number" &&
+		Number.isFinite(leadSeconds) &&
+		leadSeconds >= 0
+	) {
+		const event: NativeProxyExpiringEvent = {
+			expiresAt,
+			leadSeconds,
+			reason: "sticky_expiry",
+		};
+		const remaining = Math.max(0, expiresAtMs - Date.now());
+		const leadDelay = Math.max(0, remaining - leadSeconds * 1_000);
+		expiringTimer = setTimeout(() => {
+			expiringTimer = undefined;
+			const handler = drainHandler;
+			if (!handler) {
+				options.warn?.("Native sticky proxy is expiring without a drain handler");
+				return;
+			}
+			void (async () => {
+				try {
+					await Promise.race([Promise.resolve(handler(event)), lifecycleCutoff]);
+				} catch {
+					// Drain failures do not bypass the hard-expiry fail-safe.
+				}
+			})();
+		}, leadDelay);
+		expiringTimer.unref?.();
+		hardExpiryTimer = setTimeout(() => {
+			hardExpiryTimer = undefined;
+			if (socket.destroyed) return;
+			closeReason = new NativeProxyExpiredError(expiresAt);
+			settleLifecycle();
+			socket.destroy();
+		}, remaining);
+		hardExpiryTimer.unref?.();
+	}
 
 	const read = async (): Promise<Uint8Array | null> => {
+		if (closeReason) throw closeReason;
 		if (terminalError) throw failedError();
 		const chunk = socket.read() as Buffer | null;
 		if (chunk) return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
@@ -364,6 +442,9 @@ function createConnection(
 	};
 
 	return {
+		get closeReason() {
+			return closeReason;
+		},
 		...(proxy
 			? {
 					proxy: {
@@ -375,7 +456,11 @@ function createConnection(
 				}
 			: {}),
 		read,
+		onExpiring: (handler) => {
+			drainHandler = handler;
+		},
 		write: async (data) => {
+			if (closeReason) throw closeReason;
 			if (socket.destroyed) {
 				throw new NativeNetworkError("Native connection is closed", "native_connection_closed");
 			}
@@ -387,7 +472,10 @@ function createConnection(
 			});
 		},
 		close: async () => {
-			if (socket.closed || socket.destroyed) return;
+			if (socket.closed || socket.destroyed) {
+				clearLifecycle();
+				return;
+			}
 			await new Promise<void>((resolve) => {
 				socket.once("close", () => resolve());
 				socket.destroy();
@@ -423,7 +511,7 @@ export function createNativeNetworkClient(
 			const socket = proxy
 				? await connectSocksTunnel(proxy, input, deadline)
 				: await connectPlainSocket(input.host, input.port, input.signal, deadline);
-			return createConnection(socket, proxy);
+			return createNativeNetworkConnection(socket, proxy, options);
 		},
 		connectTls: async (input) => {
 			const deadline = deadlineFrom(input.timeoutMs);
@@ -431,7 +519,7 @@ export function createNativeNetworkClient(
 			const proxy = await resolveConnectionProxy(options, input);
 			const tunnel = proxy ? await connectSocksTunnel(proxy, input, deadline) : undefined;
 			const socket = await upgradeTls(tunnel, input, deadline);
-			return createConnection(socket, proxy);
+			return createNativeNetworkConnection(socket, proxy, options);
 		},
 		grantTcpEgress: (input) => {
 			if (options.grantTcpEgress) return options.grantTcpEgress(input);

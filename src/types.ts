@@ -1354,10 +1354,18 @@ export type NativeProxyDrainHandler = (
 	event: NativeProxyExpiringEvent,
 ) => void | Promise<void>;
 
+/** Typed reason recorded when the SDK closes a native connection intentionally. */
+export interface NativeNetworkCloseReason {
+	readonly code: string;
+	readonly message: string;
+}
+
 /** Byte-oriented connection returned by the native TCP/TLS runtime. */
 export interface NativeNetworkConnection {
 	/** Present when the connection was routed through a proxy. */
 	readonly proxy?: NativeProxyEgressInfo;
+	/** Present after an SDK-planned close, such as sticky proxy expiry. */
+	readonly closeReason?: NativeNetworkCloseReason;
 	/** Register a cooperative drain handler for sticky-expiry reconnects. */
 	onExpiring?(handler: NativeProxyDrainHandler): void;
 	read(): Promise<Uint8Array | null>;

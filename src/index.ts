@@ -73,6 +73,7 @@ export { createHttpClient } from "./runtime/http.js";
 export {
 	createNativeNetworkClient,
 	NativeNetworkError,
+	NativeProxyExpiredError,
 	resolveNativeGatewayProxy,
 	type NativeGatewayProxy,
 	type NativeGatewayProxyResolutionInput,
@@ -192,6 +193,7 @@ export type {
 	Iso8601Duration,
 	NativeContext,
 	NativeNetworkClient,
+	NativeNetworkCloseReason,
 	NativeNetworkConnection,
 	NativeNetworkConnectInput,
 	NativeNetworkConnectOptions,
