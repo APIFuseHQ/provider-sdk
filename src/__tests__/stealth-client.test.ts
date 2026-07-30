@@ -13,8 +13,17 @@ type MockImpitResponse = {
 	body: string;
 	headers?: Record<string, string | string[]>;
 	arrayBufferBody?: Uint8Array;
+	streamChunks?: Uint8Array[];
+	streamState?: MockBodyState;
 	url?: string;
 	redirected?: boolean;
+};
+
+type MockBodyState = {
+	arrayBufferCalls: number;
+	pulledChunks: number;
+	cancelled: boolean;
+	aborted: boolean;
 };
 
 type MockImpitCall = {
@@ -49,9 +58,26 @@ function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
 	return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
 }
 
+function createMockBodyState(): MockBodyState {
+	return {
+		arrayBufferCalls: 0,
+		pulledChunks: 0,
+		cancelled: false,
+		aborted: false,
+	};
+}
+
+function byteChunks(...chunks: string[]): Uint8Array[] {
+	return chunks.map((chunk) => new TextEncoder().encode(chunk));
+}
+
 function toImpitResponse(response: MockImpitResponse) {
 	const headers = toHeaders(response.headers);
 	const responseBytes = response.arrayBufferBody ?? new TextEncoder().encode(response.body);
+	const streamChunks = response.streamChunks ?? [responseBytes];
+	const streamState = response.streamState ?? createMockBodyState();
+	let stream: ReadableStream<Uint8Array> | undefined;
+	let nextChunk = 0;
 	return {
 		status: response.status,
 		ok: response.status >= 200 && response.status < 300,
@@ -60,7 +86,32 @@ function toImpitResponse(response: MockImpitResponse) {
 		redirected: response.redirected,
 		json: async () => JSON.parse(response.body),
 		text: async () => response.body,
-		arrayBuffer: async () => toArrayBuffer(responseBytes),
+		arrayBuffer: async () => {
+			streamState.arrayBufferCalls += 1;
+			return toArrayBuffer(responseBytes);
+		},
+		get body() {
+			stream ??= new ReadableStream<Uint8Array>({
+				pull(controller) {
+					const chunk = streamChunks[nextChunk];
+					if (!chunk) {
+						controller.close();
+						return;
+					}
+					nextChunk += 1;
+					streamState.pulledChunks += 1;
+					controller.enqueue(chunk);
+					if (nextChunk === streamChunks.length) controller.close();
+				},
+				cancel() {
+					streamState.cancelled = true;
+				},
+			});
+			return stream;
+		},
+		abort() {
+			streamState.aborted = true;
+		},
 	};
 }
 
@@ -134,6 +185,169 @@ describe("createStealthClient", () => {
 		expect(response.cookies.toString()).toBe("sid=abc");
 		await expect(response.json<{ ok: boolean }>()).resolves.toEqual({
 			ok: true,
+		});
+	});
+
+	it("keeps the uncapped response path on impit arrayBuffer", async () => {
+		const streamState = createMockBodyState();
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: '{"source":"arrayBuffer"}',
+			headers: { "content-type": "application/json" },
+			streamChunks: byteChunks('{"source":"stream"}'),
+			streamState,
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const response = await createStealthClient("https://example.com").fetch("/uncapped");
+
+		expect(response.body).toBe('{"source":"arrayBuffer"}');
+		expect(streamState).toEqual({
+			arrayBufferCalls: 1,
+			pulledChunks: 0,
+			cancelled: false,
+			aborted: false,
+		});
+	});
+
+	it("returns a byte-identical response when the streamed body is under the cap", async () => {
+		const bytes = new TextEncoder().encode('{"value":"decoded ☃"}');
+		mockStealthState.queuedResponses.push(
+			{
+				status: 200,
+				body: "unused",
+				headers: { "content-type": "application/octet-stream" },
+				arrayBufferBody: bytes,
+			},
+			{
+				status: 200,
+				body: "unused",
+				headers: { "content-type": "application/octet-stream" },
+				arrayBufferBody: bytes,
+				streamChunks: [bytes.slice(0, 2), bytes.slice(2, 5), bytes.slice(5)],
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		const uncapped = await client.fetch("/binary");
+		const capped = await client.fetch("/binary", { maxBodyBytes: 100 });
+
+		expect(capped.body).toBe(uncapped.body);
+		expect(new Uint8Array(await capped.arrayBuffer())).toEqual(
+			new Uint8Array(await uncapped.arrayBuffer()),
+		);
+		expect(await capped.bytes()).toEqual(await uncapped.bytes());
+		await expect(capped.json<{ value: string }>()).resolves.toEqual({ value: "decoded ☃" });
+		expect(capped.headers).toEqual(uncapped.headers);
+		expect(capped.rawHeaders).toEqual(uncapped.rawHeaders);
+	});
+
+	it("allows a streamed body exactly at maxBodyBytes", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "exact",
+			headers: {},
+			streamChunks: byteChunks("ex", "act"),
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const response = await createStealthClient("https://example.com").fetch("/exact", {
+			maxBodyBytes: 5,
+		});
+
+		expect(response.body).toBe("exact");
+	});
+
+	it("aborts a chunked response as soon as its streamed body exceeds maxBodyBytes", async () => {
+		const streamState = createMockBodyState();
+		const streamChunks = byteChunks("abc", "def", "ghi", "jkl", "mno");
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: streamChunks.map((chunk) => new TextDecoder().decode(chunk)).join(""),
+			headers: {},
+			streamChunks,
+			streamState,
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const request = createStealthClient("https://example.com").fetch("/chunked", {
+			maxBodyBytes: 5,
+		});
+
+		await expect(request).rejects.toMatchObject({
+			name: "TransportError",
+			code: "response_too_large",
+			message: "Response body exceeded maxBodyBytes limit of 5 bytes (observed 6 bytes)",
+			options: {
+				category: "upstream_http",
+				retryable: false,
+			},
+		});
+		expect(streamState.cancelled).toBe(true);
+		expect(streamState.aborted).toBe(true);
+		expect(streamState.pulledChunks).toBeLessThan(streamChunks.length);
+	});
+
+	it("fast-fails an over-cap Content-Length before reading the body", async () => {
+		const streamState = createMockBodyState();
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "never read",
+			headers: { "content-length": "100" },
+			streamChunks: byteChunks("never", " read"),
+			streamState,
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const request = createStealthClient("https://example.com").fetch("/declared-large", {
+			maxBodyBytes: 10,
+		});
+
+		await expect(request).rejects.toMatchObject({
+			code: "response_too_large",
+			message: "Response body exceeded maxBodyBytes limit of 10 bytes (observed 100 bytes)",
+		});
+		expect(streamState.pulledChunks).toBe(0);
+		expect(streamState.arrayBufferCalls).toBe(0);
+		expect(streamState.aborted).toBe(true);
+	});
+
+	it("enforces streamed bytes when Content-Length lies below the cap", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "abcdef",
+			headers: { "content-length": "2" },
+			streamChunks: byteChunks("abc", "def"),
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await expect(
+			createStealthClient("https://example.com").fetch("/lying-length", {
+				maxBodyBytes: 5,
+			}),
+		).rejects.toMatchObject({
+			code: "response_too_large",
+			message: "Response body exceeded maxBodyBytes limit of 5 bytes (observed 6 bytes)",
+		});
+	});
+
+	it("counts decoded chunks for compressed responses", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "expanded-body",
+			headers: { "content-encoding": "gzip", "content-length": "4" },
+			streamChunks: byteChunks("expanded", "-body"),
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await expect(
+			createStealthClient("https://example.com").fetch("/compressed", {
+				maxBodyBytes: 10,
+			}),
+		).rejects.toMatchObject({
+			code: "response_too_large",
+			message: "Response body exceeded maxBodyBytes limit of 10 bytes (observed 13 bytes)",
 		});
 	});
 
@@ -832,6 +1046,38 @@ describe("createStealthClient", () => {
 			}),
 		]);
 		expect(mockStealthState.clients[0]?.calls[1]?.init).not.toHaveProperty("body");
+	});
+
+	it("enforces maxBodyBytes on every redirect hop", async () => {
+		const hopStreamState = createMockBodyState();
+		mockStealthState.queuedResponses.push(
+			{
+				status: 302,
+				body: "oversized redirect body",
+				headers: { location: "/final" },
+				streamChunks: byteChunks("over", "sized", " redirect body"),
+				streamState: hopStreamState,
+				url: "https://example.com/start",
+			},
+			{
+				status: 200,
+				body: "ok",
+				headers: {},
+				streamChunks: byteChunks("ok"),
+				url: "https://example.com/final",
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+
+		await expect(session.redirects.run({ url: "/start", maxBodyBytes: 8 })).rejects.toMatchObject({
+			code: "response_too_large",
+			options: { category: "upstream_http", retryable: false },
+		});
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
+		expect(mockStealthState.queuedResponses).toHaveLength(1);
+		expect(hopStreamState.cancelled).toBe(true);
 	});
 
 	it("redirects.run returns cookies set by intermediate hops on different hosts", async () => {

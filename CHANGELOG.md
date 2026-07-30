@@ -78,6 +78,7 @@
 
 ## Unreleased
 
+- Add opt-in `maxBodyBytes` enforcement to stealth fetches and redirect hops, aborting oversized decoded response streams with `response_too_large`.
 - Export native-network and request-file TypeScript contracts from the package root and `./provider`, including typed native provider declarations and optional runtime capabilities on provider/auth contexts.
 - Add `arrayBuffer()` and `bytes()` to `HttpResponse` so `ctx.http` consumers can read binary-safe upstream bodies; internal response handling is now byte-first.
 - Preserve identity-only operation `connectionId` values in `ProviderContext` without requiring credential material.

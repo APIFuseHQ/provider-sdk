@@ -139,7 +139,8 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   `ctx.stealth.fetch()` when you need browser-like session or cookie control.
   `ctx.stealth.fetch()` uses the impit-backed browser stealth transport and
   accepts request controls for `params`, `proxy`, `timeout`, `profile`,
-  `redirect`, `throwOnHttpError`, and `stealth.insecureSkipVerify`. For login
+  `maxBodyBytes`, `redirect`, `throwOnHttpError`, and
+  `stealth.insecureSkipVerify`. For login
   flows that must inspect intermediate `Location`/`Set-Cookie` headers, create
   a session with `ctx.stealth.createSession()` and use `session.redirects.run()`;
   inspect accumulated cookies through `session.cookies`. Select an SDK stealth

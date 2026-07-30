@@ -1033,6 +1033,12 @@ export interface StealthFetchOptions extends RequestOptions {
 	body?: string | Buffer;
 	redirect?: "follow" | "manual" | "error";
 	/**
+	 * Maximum decoded response-body bytes to buffer. When set, the stealth
+	 * transport aborts the response and throws `response_too_large` if the
+	 * declared or streamed body exceeds this limit.
+	 */
+	maxBodyBytes?: number;
+	/**
 	 * Offsets policy-managed proxy pool selection for caller-managed retries.
 	 * Use when a request receives an upstream challenge page rather than a
 	 * transport error, so the next logical retry does not restart at the same
