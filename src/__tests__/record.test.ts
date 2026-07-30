@@ -207,7 +207,7 @@ export default {
 					page: url.searchParams.get("page"),
 					requestUrl: request.url,
 					unrelatedEcho: url.searchParams.get("serviceKey"),
-					embeddedShortEcho: "prefix-api-suffix",
+					embeddedShortEcho: "prefix-pin-suffix",
 					numericEcho: 123456,
 					serviceKey: "public-result",
 					"prefixrecord-test-secretsuffix": true,
@@ -246,7 +246,7 @@ export default {
 			    sensitiveParams: {
 			      serviceKey: "record-test-secret",
 			      encodedKey: "space +/%=",
-			      shortKey: "api",
+			      shortKey: "pin",
 			    },
       })).data,
     },
@@ -258,8 +258,10 @@ export default {
 			writeFileSync(
 				join(providerDir, "__fixtures__", "raw.json"),
 				JSON.stringify({
-					legacy: "/payload?serviceKey=old-secret",
-					echo: "old-secret",
+					legacy: "/payload?serviceKey=legacy-url-secret",
+					echo: "legacy-url-secret",
+					prose:
+						"request https://api.test/x?serviceKey=old-secret failed; retry later",
 					authorization: "historical-public-value",
 				}),
 			);
@@ -286,7 +288,7 @@ export default {
 			expect(stderr).toBe("");
 			expect(exitCode).toBe(0);
 			expect(requestedUrl).toBe(
-				"/payload?serviceKey=url-secret&page=1&serviceKey=params-secret&serviceKey=123456&serviceKey=record-test-secret&encodedKey=space+%2B%2F%25%3D&shortKey=api",
+				"/payload?serviceKey=url-secret&page=1&serviceKey=params-secret&serviceKey=123456&serviceKey=record-test-secret&encodedKey=space+%2B%2F%25%3D&shortKey=pin",
 			);
 			const fixtureSource = readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8");
 			expect(fixtureSource).not.toContain("record-test-secret");
@@ -298,6 +300,8 @@ export default {
 				{
 					legacy: "/payload?serviceKey=[REDACTED]",
 					echo: "[REDACTED]",
+					prose:
+						"request https://api.test/x?serviceKey=[REDACTED] failed; retry later",
 					authorization: "historical-public-value",
 				},
 				{

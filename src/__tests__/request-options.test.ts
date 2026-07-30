@@ -179,7 +179,7 @@ describe("sensitive request diagnostics", () => {
 		expect(redacted.message).toBe("request failed for [REDACTED]");
 		expect(redacted).toMatchObject({
 			name: "Upstream [REDACTED] Error",
-			code: "UPSTREAM_ERROR",
+			code: REDACTED_QUERY_VALUE,
 			status: 500,
 			upstreamStatus: 500,
 		});
@@ -214,15 +214,37 @@ describe("sensitive request diagnostics", () => {
 		});
 	});
 
-	it("preserves SDK semantic error codes without a duplicated allowlist", () => {
+	it("scrubs credentials inside semantic-shaped ProviderError codes", () => {
+		const secret = "sk_live_abc123";
+		const secretError = new ProviderError("upstream failed", {
+			code: `failure_${secret}`,
+			details: { code: secret },
+		});
+		const cleanError = new ProviderError("upstream failed", { code: "UPSTREAM_ERROR" });
+
+		redactSensitiveError(secretError, [secret]);
+		redactSensitiveError(cleanError, [secret]);
+
+		expect(secretError.code).toBe(`failure_${REDACTED_QUERY_VALUE}`);
+		expect(secretError.details).toEqual({ code: REDACTED_QUERY_VALUE });
+		expect(cleanError.code).toBe("UPSTREAM_ERROR");
+	});
+
+	it("scrubs declared credentials before preserving clean SDK semantic error codes", () => {
 		const cookieError = new StealthCookieStoreVersionError("unsupported");
 		const secretError = new ProviderSecretError("missing provider secret");
+		const cleanCookieError = new StealthCookieStoreVersionError("other-version");
+		const cleanSecretError = new ProviderSecretError("missing provider secret");
 
 		redactSensitiveError(cookieError, ["unsupported"]);
 		redactSensitiveError(secretError, ["provider"]);
+		redactSensitiveError(cleanCookieError, ["declared-secret"]);
+		redactSensitiveError(cleanSecretError, ["declared-secret"]);
 
-		expect(cookieError.code).toBe("unsupported_stealth_cookie_store_version");
-		expect(secretError.code).toBe("provider_secret_error");
+		expect(cookieError.code).toBe(`${REDACTED_QUERY_VALUE}_stealth_cookie_store_version`);
+		expect(secretError.code).toBe(`${REDACTED_QUERY_VALUE}_secret_error`);
+		expect(cleanCookieError.code).toBe("unsupported_stealth_cookie_store_version");
+		expect(cleanSecretError.code).toBe("provider_secret_error");
 	});
 
 	it("scrubs built-in diagnostic containers, symbol values, and serializers", () => {

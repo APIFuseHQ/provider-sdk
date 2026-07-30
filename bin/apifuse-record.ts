@@ -640,9 +640,29 @@ function discoverSensitiveQueryValues(
 	sensitiveParams: CapturedSensitiveParams,
 ): CapturedSensitiveParams {
 	const values = new Set(sensitiveParams.values);
-	const visitText = (text: string) => {
-		for (const discovered of redactUrlQueryParams(text, sensitiveParams.names).sensitiveValues) {
+	const absoluteUrl = /\b[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s<>"']+/g;
+	const discoverFromUrl = (url: string) => {
+		for (const discovered of redactUrlQueryParams(url, sensitiveParams.names).sensitiveValues) {
 			if (discovered !== "" && discovered !== REDACTED_QUERY_VALUE) values.add(discovered);
+		}
+	};
+	const visitText = (text: string) => {
+		if (!/\s/.test(text)) {
+			try {
+				new URL(text, "http://apifuse.invalid");
+				discoverFromUrl(text);
+				return;
+			} catch {
+				// Fall through to extracting absolute URL spans from prose.
+			}
+		}
+		for (const match of text.matchAll(absoluteUrl)) {
+			try {
+				new URL(match[0]);
+				discoverFromUrl(match[0]);
+			} catch {
+				// Ignore URI-like prose that is not a parseable URL.
+			}
 		}
 	};
 	const visit = (current: unknown): void => {

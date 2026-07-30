@@ -11,7 +11,7 @@ export const REDACTED_QUERY_VALUE = "[REDACTED]";
 
 /** Internal heuristic shared by diagnostic and fixture structural redaction. */
 export function isSensitiveKey(key: string): boolean {
-	return /authorization|token|api[-_]?key|(^|[-_])(code|key|secret|signature|session)($|[-_])/i.test(
+	return /authorization|token|api[-_]?key|(^|[-_])(code|key|secret|signature|session|state)($|[-_])/i.test(
 		key,
 	);
 }
@@ -460,10 +460,10 @@ function redactDiagnosticValue(
 	const classificationField = isClassificationField(context, propertyName, parent);
 	if (classificationField && typeof value !== "string") return value;
 	if (typeof value === "string") {
-		if (propertyName === "code" && isSemanticErrorCode(value)) return value;
-		return classificationField
-			? redactClassificationString(value, context)
-			: redactDiagnosticString(value, context);
+		if (!classificationField) return redactDiagnosticString(value, context);
+		const redacted = redactClassificationString(value, context);
+		if (propertyName === "code" && redacted === value && isSemanticErrorCode(value)) return value;
+		return redacted;
 	}
 	if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
 		return context.sensitiveValues.includes(String(value)) ? REDACTED_QUERY_VALUE : value;

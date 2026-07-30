@@ -610,6 +610,8 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 	});
 
 	it("instruments ordinary session traffic and redacts redirect termination details", async () => {
+		const responseCodeSecret = "response-code-secret";
+		const responseStateSecret = "response-state-secret";
 		const ctx = createMockContext();
 		const final = await ctx.stealth.fetch("https://secure.example.com/final");
 		const cookies: StealthSession["cookies"] = {
@@ -647,13 +649,13 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 							url: options.url,
 							status: 302,
 							method: "GET",
-							nextUrl: `${options.url}?${options.sensitiveParams ? "serviceKey=rotated-session-secret&" : ""}code=fresh-secret`,
+							nextUrl: `${options.url}?${options.sensitiveParams ? "serviceKey=rotated-session-secret&" : ""}code=${responseCodeSecret}`,
 						},
 						{
-							url: `${options.url}?code=fresh-secret`,
+							url: `${options.url}?code=${responseCodeSecret}`,
 							status: 302,
 							method: "GET",
-							nextUrl: `${options.url}?state=fresh-secret`,
+							nextUrl: `${options.url}?state=${responseStateSecret}`,
 						},
 					],
 					reason: "loop" as const,
@@ -684,7 +686,8 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 			"stealth.fetch",
 			"stealth.redirects.run",
 		]);
-		expect(JSON.stringify(instrumented.trace.getSpans())).not.toContain("fresh-secret");
+		expect(JSON.stringify(instrumented.trace.getSpans())).not.toContain(responseCodeSecret);
+		expect(JSON.stringify(instrumented.trace.getSpans())).not.toContain(responseStateSecret);
 		await session.redirects.run({
 			url: "https://secure.example.com/login",
 			sensitiveParams: { serviceKey: "session-secret" },
@@ -700,9 +703,11 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 		});
 		expect(redirectSpan?.attributes.redirect_path).toContain("serviceKey=[REDACTED]");
 		expect(redirectSpan?.attributes.redirect_path).toContain("code=[REDACTED]");
+		expect(redirectSpan?.attributes.redirect_path).toContain("state=[REDACTED]");
 		expect(JSON.stringify(redirectSpan)).not.toContain("session-secret");
 		expect(JSON.stringify(redirectSpan)).not.toContain("rotated-session-secret");
-		expect(JSON.stringify(redirectSpan)).not.toContain("fresh-secret");
+		expect(JSON.stringify(redirectSpan)).not.toContain(responseCodeSecret);
+		expect(JSON.stringify(redirectSpan)).not.toContain(responseStateSecret);
 	});
 });
 

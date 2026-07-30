@@ -466,6 +466,8 @@ values are redacted from SDK transport errors, traces, and `apifuse record`
 fixtures. Do not put query credentials in `params`, and do not hand-build a URL
 containing a key; those paths cannot declare which query values are secret.
 
+#### Residual risks
+
 Redaction is unconditional in structural positions (declared query keys and
 exact scalar fixture/error fields) for values of every length. In unstructured
 free text, values of four or more characters are replaced as substrings; shorter

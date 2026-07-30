@@ -51,6 +51,7 @@ import {
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
 import {
+	isSensitiveKey,
 	redactSensitiveError,
 	redactSensitiveRequestError,
 	redactSensitiveText,
@@ -71,6 +72,14 @@ const PROXY_CONNECT_FAILURE_BODY_PATTERN =
 const PROXY_AUTH_DIAGNOSTIC_URL = "http://example.com/";
 const PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS = 5_000;
 const STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES = [PROXY_CONNECT_FAILURE_CODE] as const;
+
+function sensitiveQueryParamNames(url: string): string[] {
+	const queryStart = url.indexOf("?");
+	if (queryStart === -1) return [];
+	const fragmentStart = url.indexOf("#", queryStart);
+	const query = url.slice(queryStart + 1, fragmentStart === -1 ? undefined : fragmentStart);
+	return [...new URLSearchParams(query).keys()].filter(isSensitiveKey);
+}
 
 export type StealthClientOptions = ProxyResolutionOptions & {
 	warn?: (message: string) => void;
@@ -1020,6 +1029,9 @@ function createSessionFetcher(
 								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
 							);
 						}
+						const retryErrorCode = proxyAttemptErrorCode(normalizedError);
+						const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);
+						const runProxyAuthDiagnostic = shouldRunProxyAuthDiagnostic(normalizedError);
 						normalizedError = redactSensitiveError(
 							normalizedError,
 							sensitiveValues,
@@ -1032,9 +1044,9 @@ function createSessionFetcher(
 							proxyAttemptStatus(normalizedError),
 						);
 						lastError = normalizedError;
-						if (proxy && rotatesRegistryChain && isProxyPoolRefreshableError(normalizedError)) {
+						if (proxy && rotatesRegistryChain && refreshableProxyError) {
 							stalePoolError = normalizedError;
-							if (shouldRunProxyAuthDiagnostic(normalizedError)) {
+							if (runProxyAuthDiagnostic) {
 								stalePoolDiagnosticProxy = proxy;
 							}
 							if (attempt + 1 < maxAttempts) {
@@ -1065,7 +1077,7 @@ function createSessionFetcher(
 						if (
 							attempt + 1 < transportRetryCap &&
 							shouldRetryProxyTransportAttempt({
-								error: normalizedError,
+								error: { code: retryErrorCode },
 								explicitRetry: hasExplicitRetryPolicy,
 								method,
 								options: stealthRetryOptions,
@@ -1171,7 +1183,9 @@ function createSessionFetcher(
 					].filter((value) => value !== ""),
 				);
 				const redactRedirectUrl = (value: string): string => {
-					const structural = redactUrlQueryParams(value, sensitiveParamNames);
+					const structural = redactUrlQueryParams(value, [
+						...new Set([...sensitiveParamNames, ...sensitiveQueryParamNames(value)]),
+					]);
 					for (const sensitiveValue of structural.sensitiveValues) {
 						sensitiveValues.add(sensitiveValue);
 					}

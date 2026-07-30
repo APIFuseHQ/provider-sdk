@@ -1623,10 +1623,13 @@ describe("createStealthClient", () => {
 
 	it("redacts rotated sensitive-key values while stopWhen receives the real hop", async () => {
 		const rotatedSecret = "rotated-secret";
+		const responseCodeSecret = "response-only-code-secret";
 		mockStealthState.queuedResponses.push({
 			status: 302,
 			body: "",
-			headers: { location: `/next?serviceKey=${rotatedSecret}` },
+			headers: {
+				location: `/next?serviceKey=${rotatedSecret}&code=${responseCodeSecret}`,
+			},
 			url: "https://example.com/login?serviceKey=initial-secret",
 		});
 
@@ -1638,15 +1641,25 @@ describe("createStealthClient", () => {
 			sensitiveParams: { serviceKey: "initial-secret" },
 			stopWhen: (hop) => {
 				callbackHop = hop;
-				return hop.nextUrl?.includes(rotatedSecret) === true;
+				return (
+					hop.nextUrl?.includes(rotatedSecret) === true &&
+					hop.nextUrl.includes(responseCodeSecret)
+				);
 			},
 		});
 
 		expect(result.reason).toBe("stopped");
 		expect(callbackHop?.nextUrl).toContain(rotatedSecret);
+		expect(callbackHop?.nextUrl).toContain(responseCodeSecret);
 		expect(JSON.stringify(result.hops)).not.toContain("initial-secret");
 		expect(JSON.stringify(result.hops)).not.toContain(rotatedSecret);
-		expect(result.hops[0]?.nextUrl).toBe("https://example.com/next?serviceKey=[REDACTED]");
+		expect(JSON.stringify(result.hops)).not.toContain(responseCodeSecret);
+		expect(result.hops[0]?.location).toBe(
+			"/next?serviceKey=[REDACTED]&code=[REDACTED]",
+		);
+		expect(result.hops[0]?.nextUrl).toBe(
+			"https://example.com/next?serviceKey=[REDACTED]&code=[REDACTED]",
+		);
 	});
 
 	it("redirects.run redacts malformed credential-bearing Locations in URL errors", async () => {

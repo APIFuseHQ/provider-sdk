@@ -626,7 +626,7 @@ describe("createHttpClient", () => {
 		]);
 	});
 
-	it("classifies timeout failures before redacting a matching sensitive value", async () => {
+	it("classifies timeout failures before scrubbing the sensitive value from their code", async () => {
 		mockNativeFetchState.queuedErrors.push(new Error("request timeout"));
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
@@ -635,7 +635,7 @@ describe("createHttpClient", () => {
 			http.get("https://example.com/slow", {
 				sensitiveParams: { serviceKey: "timeout" },
 			}),
-		).rejects.toMatchObject({ code: "transport_timeout", status: 0 });
+		).rejects.toMatchObject({ code: "transport_[REDACTED]", status: 0 });
 	});
 
 	it("redacts declared keys when malformed request URLs fail before fetch", async () => {
