@@ -20,6 +20,7 @@ import type {
 	OperationSseTransport,
 	OperationTransport,
 	OperationWebSocketTransport,
+	NativeProviderConfig,
 	ProviderAccessConfig,
 	ProviderDefinition,
 	ProviderDeploymentOverrides,
@@ -205,6 +206,7 @@ export interface ProviderConfig<TOperations extends Record<string, ProviderOpera
 	 */
 	deployment?: ProviderDeploymentOverrides;
 	allowedHosts?: string[];
+	native?: NativeProviderConfig;
 	stealth?: {
 		profile: string;
 		platform: StealthPlatform;
@@ -2149,6 +2151,7 @@ export function defineProvider<
 		// are owned by the APIFuse registry builder, not the SDK.
 		deployment: config.deployment,
 		allowedHosts: config.allowedHosts,
+		native: config.native,
 		stealth: config.stealth,
 		proxy: config.proxy,
 		stt: config.stt,

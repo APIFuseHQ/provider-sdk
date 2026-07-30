@@ -1232,6 +1232,125 @@ export interface HttpClient {
 	): Promise<AsyncIterable<SseMessage>>;
 }
 
+/** Request-scoped file reference accepted by provider operation inputs. */
+export interface ProviderFileRef {
+	readonly type: "request_file";
+	readonly id: string;
+	readonly filename: string;
+	readonly mime_type?: string;
+	readonly size: number;
+	readonly sha256?: string;
+}
+
+/** File body resolved from a request-scoped {@link ProviderFileRef}. */
+export type ProviderResolvedFile = Omit<ProviderFileRef, "mime_type"> & {
+	readonly mimeType?: string;
+	arrayBuffer(): Promise<ArrayBuffer>;
+	bytes(): Promise<Uint8Array>;
+	stream(): ReadableStream<Uint8Array>;
+};
+
+/** Resolver supplied by runtimes that accept request-scoped file inputs. */
+export interface ProviderFilesContext {
+	has(input: string | ProviderFileRef): boolean;
+	resolve(input: string | ProviderFileRef): Promise<ProviderResolvedFile>;
+}
+
+export type NativeTcpTlsMode = "required" | "allowed" | "disabled";
+
+export interface NativeTcpPortRange {
+	readonly start: number;
+	readonly end: number;
+}
+
+/** Static native TCP egress declared by a provider. */
+export interface NativeTcpEgressRule {
+	readonly host: string;
+	readonly ports: readonly number[];
+	readonly tls: NativeTcpTlsMode;
+}
+
+/**
+ * Bounded native TCP egress discovered through a declared bootstrap endpoint.
+ * Host suffixes are exact DNS suffixes, not wildcard patterns.
+ */
+export interface NativeTcpDynamicEgressRule {
+	readonly sourceHost?: string;
+	readonly sourceHostSuffixes?: readonly string[];
+	readonly sourcePorts?: readonly number[];
+	readonly sourcePortRanges?: readonly NativeTcpPortRange[];
+	readonly targetHostSuffixes: readonly string[];
+	readonly targetPorts?: readonly number[];
+	readonly targetPortRanges?: readonly NativeTcpPortRange[];
+	readonly tls: NativeTcpTlsMode;
+	readonly ttlMs?: number;
+	readonly maxGrants?: number;
+}
+
+/** Common TCP/TLS connection input supported by the native runtime. */
+export interface NativeNetworkConnectInput {
+	readonly host: string;
+	readonly port: number;
+	readonly serverName?: string;
+	readonly rejectUnauthorized?: boolean;
+	readonly timeoutMs?: number;
+	readonly signal?: AbortSignal;
+}
+
+export type NativeNetworkConnectOptions = Omit<
+	NativeNetworkConnectInput,
+	"serverName" | "rejectUnauthorized"
+>;
+
+export type NativeTlsConnectOptions = NativeNetworkConnectInput;
+
+export interface NativeNetworkDynamicGrantOptions {
+	readonly sourceHost: string;
+	readonly sourcePort: number;
+	readonly host: string;
+	readonly port: number;
+	readonly tls: NativeTcpTlsMode;
+	readonly ttlMs?: number;
+}
+
+export interface NativeNetworkEgressGrant {
+	revoke(): void;
+}
+
+/** Consumer-facing alias used by native TCP providers. */
+export type NativeTcpEgressGrant = NativeNetworkEgressGrant;
+
+/** Byte-oriented connection returned by the native TCP/TLS runtime. */
+export interface NativeNetworkConnection {
+	read(): Promise<Uint8Array | null>;
+	write(data: Uint8Array): Promise<void>;
+	close(): Promise<void>;
+}
+
+export interface NativeNetworkClient {
+	connectTcp(
+		input: NativeNetworkConnectOptions,
+	): Promise<NativeNetworkConnection>;
+	connectTls(input: NativeTlsConnectOptions): Promise<NativeNetworkConnection>;
+	grantTcpEgress(
+		input: NativeNetworkDynamicGrantOptions,
+	): NativeNetworkEgressGrant;
+}
+
+export interface NativeContext {
+	readonly network: NativeNetworkClient;
+}
+
+/** Consumer-facing alias for the native capability on provider contexts. */
+export type NativeProviderContext = NativeContext;
+
+export interface NativeProviderConfig {
+	readonly network?: {
+		readonly tcp?: readonly NativeTcpEgressRule[];
+		readonly dynamicTcp?: readonly NativeTcpDynamicEgressRule[];
+	};
+}
+
 export interface ProviderCacheKeyOptions {
 	/**
 	 * Additional field names to omit from stable key material. The SDK always
@@ -1649,6 +1768,8 @@ export interface FlowContext {
 	tenantId: string;
 	providerId: string;
 	http: HttpClient;
+	/** Present when the selected runtime supplies native network capabilities. */
+	readonly native?: NativeProviderContext;
 	stealth: StealthClient;
 	env: EnvContext;
 	credential?: CredentialContext;
@@ -1768,6 +1889,10 @@ export interface ProviderContext {
 	credential: CredentialContext;
 	request?: ProviderRequestContext;
 	http: HttpClient;
+	/** Present for requests carrying runtime-resolvable file references. */
+	readonly files?: ProviderFilesContext;
+	/** Present when the selected runtime supplies native network capabilities. */
+	readonly native?: NativeProviderContext;
 	cache: ProviderCache;
 	state: ProviderRuntimeState;
 	stealth: StealthClient;
@@ -1923,6 +2048,7 @@ export interface ProviderDefinition {
 	 */
 	deployment?: ProviderDeploymentOverrides;
 	allowedHosts?: string[];
+	native?: NativeProviderConfig;
 	stealth?: {
 		profile: string;
 		platform: StealthPlatform;
