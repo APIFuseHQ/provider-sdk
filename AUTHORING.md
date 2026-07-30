@@ -660,11 +660,15 @@ never build a request header from serialized or snapshotted persistence data.
 
 ### Recording and replaying streaming responses
 
-`apifuse record` fully consumes responses returned by `ctx.http.stream()` and writes a
-JSON evidence record to `__fixtures__/raw.json`. The record contains the status, success
+`apifuse record` passes responses returned by `ctx.http.stream()` directly to the operation
+handler while incrementally capturing a bounded preview. If the handler returns or cancels its
+reader before EOF, the recorder drains the retained upstream reader before writing a JSON evidence
+record to `__fixtures__/raw.json`. The record contains the status, success
 flag, `content-type`/`content-length`/`content-disposition` headers when present, the
-full body SHA-256 and byte count, and the first 4096 bytes as base64. It passes through
-the same fixture sanitization pipeline as other recorded payloads.
+full body SHA-256 and byte count, and a base64 preview up to the configured stream preview limit.
+Textual previews are decoded and passed through the fixture sanitizer before base64 encoding;
+binary previews retain their original bytes. Appended fixtures replay the most recently appended
+stream evidence record.
 
 Stream fixture replay in `runStandardTests(..., { snapshot: true })` is evidence-only:
 `ctx.http.stream()` returns a usable stream containing exactly the recorded preview,

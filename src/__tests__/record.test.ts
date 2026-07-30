@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { prepareFixturePayload } from "../../bin/apifuse-record.js";
+import { STREAM_PREVIEW_BYTES } from "../stream-evidence.js";
 
 const repoRoot = dirname(dirname(import.meta.dir));
 const tempRoot = join(repoRoot, ".tmp-provider-sdk-record-tests");
@@ -145,7 +146,12 @@ export default {
 			upstreamBody[index] = index % 251;
 		}
 		const expectedSha256 = createHash("sha256").update(upstreamBody).digest("hex");
-		const upstream = createServer((_request, response) => {
+		const upstream = createServer((request, response) => {
+			if (request.url === "/status") {
+				response.writeHead(200, { "content-type": "application/json" });
+				response.end('{"cleanup":"complete"}');
+				return;
+			}
 			response.writeHead(200, {
 				"content-disposition": 'attachment; filename="evidence.bin"',
 				"content-length": String(upstreamBody.byteLength),
@@ -193,6 +199,7 @@ export default {
         if (bodyBytes !== ${upstreamBody.byteLength} || bodySha256 !== ${JSON.stringify(expectedSha256)}) {
           throw new Error("record handler received an incomplete replacement stream");
         }
+        await ctx.http.get("/status");
         return { bodyBytes, bodySha256 };
       },
     },
@@ -234,7 +241,104 @@ export default {
 				},
 				body_sha256: expectedSha256,
 				body_bytes: upstreamBody.byteLength,
-				body_preview_base64: upstreamBody.subarray(0, 4096).toString("base64"),
+				body_preview_base64: upstreamBody.subarray(0, STREAM_PREVIEW_BYTES).toString("base64"),
+			});
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				upstream.close((error) => (error ? reject(error) : resolve()));
+			});
+		}
+	});
+
+	it("sanitizes credentials inside a streamed JSON body before base64 encoding", async () => {
+		const accessToken = "streamed-access-token-that-must-never-reach-the-fixture";
+		const apiKey = "streamed-api-key-that-must-never-reach-the-fixture";
+		const upstreamBody = Buffer.from(
+			JSON.stringify({ access_token: accessToken, nested: { apiKey }, public: "retained" }),
+		);
+		const upstream = createServer((_request, response) => {
+			response.writeHead(200, {
+				"content-length": String(upstreamBody.byteLength),
+				"content-type": "application/json; charset=utf-8",
+			});
+			response.end(upstreamBody);
+		});
+		await new Promise<void>((resolve, reject) => {
+			upstream.once("error", reject);
+			upstream.listen(0, "127.0.0.1", resolve);
+		});
+
+		try {
+			const address = upstream.address();
+			if (address === null || typeof address === "string") {
+				throw new Error(`Expected an IP upstream address, received ${String(address)}`);
+			}
+			const providerDir = makeTempDir("stream-json-sanitize-");
+			writeFileSync(join(providerDir, "package.json"), '{"type":"module"}\n');
+			writeFileSync(
+				join(providerDir, "index.ts"),
+				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
+
+export default {
+  id: "record-stream-json-sanitize",
+  version: "1.0.0",
+  runtime: "standard",
+  operations: {
+    download: {
+      input: z.object({}),
+      output: z.object({ public: z.string() }),
+      upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
+      handler: async (ctx) => {
+        const response = await ctx.http.stream("/payload");
+        const chunks = [];
+        for await (const chunk of response.bytes()) chunks.push(chunk);
+        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        if (parsed.access_token !== ${JSON.stringify(accessToken)} || parsed.nested.apiKey !== ${JSON.stringify(apiKey)}) {
+          throw new Error("record handler did not receive the original streamed JSON body");
+        }
+        return { public: parsed.public };
+      },
+    },
+  },
+};
+`,
+			);
+
+			const process = Bun.spawn({
+				cmd: [
+					"bun",
+					join(repoRoot, "bin", "apifuse.ts"),
+					"record",
+					providerDir,
+					"--operation",
+					"download",
+				],
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stderr, exitCode] = await Promise.all([
+				new Response(process.stderr).text(),
+				process.exited,
+			]);
+
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+			const rawFixture = JSON.parse(
+				readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8"),
+			) as { body_bytes: number; body_preview_base64: string };
+			const fixtureSource = readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8");
+			const decodedPreview = Buffer.from(rawFixture.body_preview_base64, "base64");
+
+			expect(fixtureSource).not.toContain(accessToken);
+			expect(fixtureSource).not.toContain(apiKey);
+			expect(decodedPreview).toHaveLength(rawFixture.body_bytes);
+			expect(decodedPreview.toString("utf8")).not.toContain(accessToken);
+			expect(decodedPreview.toString("utf8")).not.toContain(apiKey);
+			expect(JSON.parse(decodedPreview.toString("utf8"))).toEqual({
+				access_token: "[REDACTED]",
+				nested: { apiKey: "[REDACTED]" },
+				public: "retained",
 			});
 		} finally {
 			await new Promise<void>((resolve, reject) => {

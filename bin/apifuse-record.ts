@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-// @ts-nocheck
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -14,6 +13,8 @@ import {
 	createSttClientFromEnv,
 	executeOperation,
 	type HttpClient,
+	type HttpResponse,
+	type HttpStreamResponse,
 	type ProviderContext,
 	type ProviderDefinition,
 	ProviderError,
@@ -22,7 +23,12 @@ import {
 	ValidationError,
 } from "../src/index.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
-import { captureStreamEvidence } from "../src/stream-evidence.js";
+import { parseSchema } from "../src/schema.js";
+import {
+	captureStreamEvidence,
+	STREAM_PREVIEW_BYTES,
+	type StreamEvidenceCapture,
+} from "../src/stream-evidence.js";
 
 type CliArgs = {
 	append: boolean;
@@ -41,7 +47,7 @@ const HELP_TEXT = `Usage: apifuse record [path] --operation <operation> --params
 Calls a real upstream-backed operation through ctx.http or ctx.stealth and writes __fixtures__/raw.json.
 
 Streaming responses are recorded as evidence (status, selected headers, full-body SHA-256 and byte
-count, plus a 4096-byte base64 preview). Test replay is evidence-only: ctx.http.stream exposes the
+count, plus a ${STREAM_PREVIEW_BYTES}-byte base64 preview). Test replay is evidence-only: ctx.http.stream exposes the
 preview as its body and the original body_sha256/body_bytes as response metadata.
 
 Options:
@@ -62,17 +68,18 @@ export async function main() {
 		const provider = await loadProvider(location.rootDir);
 		const operationName = resolveOperationName(provider, args.operation);
 		const operation = provider.operations[operationName];
-		const parsedParams = parseParams(operation, args.params);
+		const parsedParams = await parseParams(operation, args.params);
 
 		const capture = createCaptureContext(
 			provider,
 			resolveOperationBaseUrl(provider, operationName),
+			args.sanitize,
 		);
 
 		console.log(`[apifuse record] Calling ${operationName} on ${provider.id}...`);
 
 		const result = await executeOperation(provider, operationName, capture.ctx, parsedParams);
-		const captured = capture.getCapturedRaw();
+		const captured = await capture.getCapturedRaw();
 
 		if (captured === undefined) {
 			throw new Error(`No upstream response was captured for ${provider.id}.${operationName}.`);
@@ -289,7 +296,10 @@ function resolveOperationName(provider: ProviderRuntime, operationName?: string)
 	return firstOperation;
 }
 
-function parseParams(operation: ProviderRuntime["operations"][string], value: string): unknown {
+async function parseParams(
+	operation: ProviderRuntime["operations"][string],
+	value: string,
+): Promise<unknown> {
 	let parsed: unknown;
 
 	try {
@@ -300,7 +310,7 @@ function parseParams(operation: ProviderRuntime["operations"][string], value: st
 		);
 	}
 
-	return operation.input ? operation.input.parse(parsed) : parsed;
+	return operation.input ? await parseSchema(operation.input, parsed, "operation input") : parsed;
 }
 
 function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: string): string {
@@ -314,22 +324,35 @@ function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: strin
 	return baseUrl;
 }
 
-function createCaptureContext(provider: ProviderRuntime, baseUrl: string) {
-	let capturedRaw: unknown;
+function createCaptureContext(provider: ProviderRuntime, baseUrl: string, sanitize: boolean) {
+	let nextCaptureOrder = 0;
+	let capturedRaw: { order: number; value: unknown } | undefined;
+	let capturedStream: { order: number; capture: StreamEvidenceCapture } | undefined;
+	const reserveCaptureOrder = () => {
+		nextCaptureOrder += 1;
+		return nextCaptureOrder;
+	};
+	const retainRawCapture = (order: number, value: unknown) => {
+		if (!capturedRaw || order > capturedRaw.order) capturedRaw = { order, value };
+	};
 
-	const http = proxyHttpClient(createHttpClient(baseUrl), async (method, response) => {
-		if (method === "stream") {
-			const captured = await captureStreamEvidence(response);
-			capturedRaw = captured.evidence;
-			return captured.response;
-		}
-
-		capturedRaw = response.data;
-		return response;
+	const http = captureHttpClient(createHttpClient(baseUrl), {
+		reserveOrder: reserveCaptureOrder,
+		onResponse: (order, response) => retainRawCapture(order, response.data),
+		onStreamResponse: (order, requestUrl, response) => {
+			const capture = captureStreamEvidence(response, {
+				requestUrl: resolveCaptureUrl(baseUrl, requestUrl),
+				...(sanitize ? { sanitizeFixture } : {}),
+			});
+			if (!capturedStream || order > capturedStream.order) capturedStream = { order, capture };
+			return capture.response;
+		},
 	});
-	const stealth = proxyStealthClient(createStealthClient(baseUrl), (response) => {
-		capturedRaw = normalizeCapturedStealthResponse(response);
-	});
+	const stealth = proxyStealthClient(
+		createStealthClient(baseUrl),
+		(order, response) => retainRawCapture(order, normalizeCapturedStealthResponse(response)),
+		reserveCaptureOrder,
+	);
 
 	const env = {
 		get: (key: string) => process.env[key],
@@ -386,59 +409,94 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string) {
 
 	return {
 		ctx,
-		getCapturedRaw: () => capturedRaw,
+		getCapturedRaw: async () =>
+			capturedStream ? await capturedStream.capture.getEvidence() : capturedRaw?.value,
 	};
 }
 
-function proxyHttpClient(
-	client: HttpClient,
-	onResponse: (method: PropertyKey, response: unknown) => Promise<unknown>,
-): HttpClient {
-	return new Proxy(client, {
-		get(target, prop, receiver) {
-			const value = Reflect.get(target, prop, receiver);
+type HttpCaptureCallbacks = {
+	reserveOrder(): number;
+	onResponse(order: number, response: HttpResponse): void;
+	onStreamResponse(
+		order: number,
+		requestUrl: string,
+		response: HttpStreamResponse,
+	): HttpStreamResponse;
+};
 
-			if (typeof value !== "function") {
-				return value;
-			}
+function captureHttpClient(client: HttpClient, callbacks: HttpCaptureCallbacks): HttpClient {
+	const captureResponse = async (
+		order: number,
+		responsePromise: Promise<HttpResponse>,
+	): Promise<HttpResponse> => {
+		const response = await responsePromise;
+		callbacks.onResponse(order, response);
+		return response;
+	};
 
-			return async (...args: unknown[]) => {
-				const response = await value.apply(target, args);
-				return await onResponse(prop, response);
-			};
+	return {
+		request: (...args: Parameters<HttpClient["request"]>) =>
+			captureResponse(callbacks.reserveOrder(), client.request(...args)),
+		get: (...args: Parameters<HttpClient["get"]>) =>
+			captureResponse(callbacks.reserveOrder(), client.get(...args)),
+		post: (...args: Parameters<HttpClient["post"]>) =>
+			captureResponse(callbacks.reserveOrder(), client.post(...args)),
+		put: (...args: Parameters<HttpClient["put"]>) =>
+			captureResponse(callbacks.reserveOrder(), client.put(...args)),
+		delete: (...args: Parameters<HttpClient["delete"]>) =>
+			captureResponse(callbacks.reserveOrder(), client.delete(...args)),
+		stream: async (...args: Parameters<HttpClient["stream"]>) => {
+			const order = callbacks.reserveOrder();
+			const response = await client.stream(...args);
+			return callbacks.onStreamResponse(order, args[0], response);
 		},
-	}) as HttpClient;
+		sse: (...args: Parameters<HttpClient["sse"]>) => client.sse(...args),
+	};
 }
 
 type StealthSession = ReturnType<StealthClient["createSession"]>;
 
 function proxyStealthClient(
 	client: StealthClient,
-	onResponse: (response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
+	onResponse: (order: number, response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
+	reserveOrder: () => number,
 ): StealthClient {
 	return {
 		fetch: async (...args: Parameters<StealthClient["fetch"]>) => {
+			const order = reserveOrder();
 			const response = await client.fetch(...args);
-			onResponse(response);
+			onResponse(order, response);
 			return response;
 		},
 		createSession: (...args: Parameters<StealthClient["createSession"]>) =>
-			proxyStealthSession(client.createSession(...args), onResponse),
+			proxyStealthSession(client.createSession(...args), onResponse, reserveOrder),
 	};
 }
 
 function proxyStealthSession(
 	session: StealthSession,
-	onResponse: (response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
+	onResponse: (order: number, response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
+	reserveOrder: () => number,
 ): StealthSession {
 	return {
 		fetch: async (...args: Parameters<StealthSession["fetch"]>) => {
+			const order = reserveOrder();
 			const response = await session.fetch(...args);
-			onResponse(response);
+			onResponse(order, response);
 			return response;
 		},
+		cookies: session.cookies,
+		redirects: session.redirects,
 		close: () => session.close(),
 	};
+}
+
+function resolveCaptureUrl(baseUrl: string, requestUrl: string): string {
+	try {
+		return new URL(requestUrl, baseUrl).toString();
+	} catch {
+		return requestUrl;
+	}
 }
 
 function normalizeCapturedStealthResponse(response: Awaited<ReturnType<StealthClient["fetch"]>>) {

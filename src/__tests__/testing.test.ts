@@ -4,6 +4,7 @@ import { z } from "zod";
 
 import { defineProvider } from "../define.js";
 import * as sdk from "../index.js";
+import { isStreamEvidenceReplayResponse } from "../stream-evidence.js";
 import {
 	describeTransform,
 	runStandardTests,
@@ -43,14 +44,15 @@ mkdirSync(snapshotFixtureDir, { recursive: true });
 const streamSnapshotFixtureDir = `/tmp/apifuse-stream-standard-tests-${Date.now()}/__fixtures__`;
 mkdirSync(streamSnapshotFixtureDir, { recursive: true });
 
+const streamPreview = "recorded stream preview";
 const streamEvidenceFixture = {
 	__apifuse_stream__: true as const,
 	status: 200,
 	ok: true,
 	headers: { "content-type": "application/octet-stream" },
 	body_sha256: "a".repeat(64),
-	body_bytes: 805_000,
-	body_preview_base64: Buffer.from("recorded stream preview").toString("base64"),
+	body_bytes: Buffer.byteLength(streamPreview),
+	body_preview_base64: Buffer.from(streamPreview).toString("base64"),
 };
 
 const fixtureHarnessProvider = defineProvider({
@@ -112,35 +114,33 @@ const streamSnapshotHarnessProvider = defineProvider({
 			}),
 			handler: async (ctx) => {
 				const response = await ctx.http.stream("https://example.test/download");
-				const replay = response as typeof response & {
-					evidence_only: true;
-					body_sha256: string;
-					body_bytes: number;
-				};
+				if (!isStreamEvidenceReplayResponse(response)) {
+					throw new Error("stream evidence replay metadata is missing");
+				}
 				const chunks: Uint8Array[] = [];
 				for await (const chunk of response.bytes()) chunks.push(chunk);
 				const body = Buffer.concat(chunks).toString("utf8");
 				if (
-					body !== "recorded stream preview" ||
-					replay.evidence_only !== true ||
-					replay.body_sha256 !== streamEvidenceFixture.body_sha256 ||
-					replay.body_bytes !== streamEvidenceFixture.body_bytes
+					body !== streamPreview ||
+					response.evidence_only !== true ||
+					response.body_sha256 !== streamEvidenceFixture.body_sha256 ||
+					response.body_bytes !== streamEvidenceFixture.body_bytes
 				) {
 					throw new Error("stream evidence replay did not preserve preview and metadata");
 				}
 
 				return {
 					body,
-					bodyBytes: replay.body_bytes,
-					bodySha256: replay.body_sha256,
-					evidenceOnly: replay.evidence_only,
+					bodyBytes: response.body_bytes,
+					bodySha256: response.body_sha256,
+					evidenceOnly: response.evidence_only,
 				};
 			},
 			fixtures: {
 				request: {},
 				response: {
-					body: "recorded stream preview",
-					bodyBytes: 805_000,
+					body: streamPreview,
+					bodyBytes: Buffer.byteLength(streamPreview),
 					bodySha256: "a".repeat(64),
 					evidenceOnly: true,
 				},
@@ -238,10 +238,15 @@ runStandardTests(snapshotHarnessProvider, { label: "golden" }, undefined, {
 	fixtureDir: snapshotFixtureDir,
 });
 
-runStandardTests(streamSnapshotHarnessProvider, streamEvidenceFixture, undefined, {
-	snapshot: true,
-	fixtureDir: streamSnapshotFixtureDir,
-});
+runStandardTests(
+	streamSnapshotHarnessProvider,
+	[{ cleanup: "complete" }, streamEvidenceFixture],
+	undefined,
+	{
+		snapshot: true,
+		fixtureDir: streamSnapshotFixtureDir,
+	},
+);
 
 runStandardTests(
 	authHarnessProvider,

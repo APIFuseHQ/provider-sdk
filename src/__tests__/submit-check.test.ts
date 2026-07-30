@@ -18,6 +18,7 @@ import {
 	renderMarkdown,
 	type SubmitCheckReport,
 } from "../../bin/apifuse-submit-check.js";
+import { STREAM_PREVIEW_BYTES } from "../stream-evidence.js";
 import { hasSubstantiveDelimitedTextStructure } from "../../bin/submit-check-delimited-text.js";
 import { syncPromptAssets } from "../cli/prompt-assets.js";
 
@@ -963,6 +964,7 @@ ${assertionLines(21)}
 	});
 
 	it("accepts a stream evidence fixture with one allowlisted header", () => {
+		const preview = Buffer.alloc(STREAM_PREVIEW_BYTES, 0x50);
 		expect(
 			hasNonEmptyRecordedFixture({
 				__apifuse_stream__: true,
@@ -971,9 +973,31 @@ ${assertionLines(21)}
 				headers: { "content-type": "application/zip" },
 				body_sha256: "a".repeat(64),
 				body_bytes: 805_000,
-				body_preview_base64: "UEsDBA==",
+				body_preview_base64: preview.toString("base64"),
 			}),
 		).toBeTrue();
+	});
+
+	it("rejects structurally inconsistent or unsafe stream evidence fixtures", () => {
+		const validEvidence = {
+			__apifuse_stream__: true,
+			status: 200,
+			ok: true,
+			headers: { "content-type": "application/zip" },
+			body_sha256: "a".repeat(64),
+			body_bytes: 805_000,
+			body_preview_base64: Buffer.alloc(STREAM_PREVIEW_BYTES, 0x50).toString("base64"),
+		};
+
+		expect(
+			hasNonEmptyRecordedFixture({ ...validEvidence, body_preview_base64: "UEsDBA==" }),
+		).toBeFalse();
+		expect(
+			hasNonEmptyRecordedFixture({
+				...validEvidence,
+				headers: { authorization: "Bearer must-not-replay" },
+			}),
+		).toBeFalse();
 	});
 
 	it("accepts a top-level recorded Cabinet Office-shaped Japanese CSV payload", async () => {

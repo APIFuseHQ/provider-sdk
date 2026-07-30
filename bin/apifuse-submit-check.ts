@@ -2229,6 +2229,14 @@ function recordedFixtureStats(
 	if (isStreamEvidenceRecord(value)) {
 		return { hasNestedSubstance: true, leafValues: 1 };
 	}
+	if (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		"__apifuse_stream__" in value
+	) {
+		return { hasNestedSubstance: false, leafValues: 0 };
+	}
 	if (value === null || value === undefined) {
 		return { hasNestedSubstance: false, leafValues: 0 };
 	}
