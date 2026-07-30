@@ -85,6 +85,34 @@ describe("defineProvider", () => {
 		expect(provider.operations.prices.transport).toBeUndefined();
 	});
 
+	it("preserves typed native network declarations", () => {
+		const native = {
+			network: {
+				tcp: [
+					{
+						host: "booking-loco.kakao.com",
+						ports: [443],
+						tls: "required",
+					},
+				],
+				dynamicTcp: [
+					{
+						sourceHost: "booking-loco.kakao.com",
+						sourcePorts: [443],
+						targetHostSuffixes: ["kakao.com"],
+						targetPorts: [5228],
+						tls: "disabled",
+						ttlMs: 30_000,
+						maxGrants: 2,
+					},
+				],
+			},
+		} as const;
+		const provider = defineProvider({ ...validConfig, native });
+
+		expect(provider.native).toBe(native);
+	});
+
 	it("rejects invalid operation transport metadata", () => {
 		expect(() =>
 			defineProvider({
