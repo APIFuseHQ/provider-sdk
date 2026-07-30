@@ -500,7 +500,7 @@ function sanitizePreview(
 	const sanitizedPrimitive = sanitizeFixtureString(text);
 	const containsTextualSecret = sanitizedPrimitive !== text;
 	if (hasKnownBinaryMagic(preview) && !containsTextualSecret) return undefined;
-	if (!declaredTextual && !sniffedTextual) return undefined;
+	if (!declaredTextual && !sniffedTextual && !containsTextualSecret) return undefined;
 
 	const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
 	if (looksLikePemPrivateKey(text)) {

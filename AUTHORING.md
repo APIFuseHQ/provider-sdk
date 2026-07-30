@@ -691,6 +691,19 @@ Appended fixtures replay a stream envelope only when it is the latest invocation
 recording remains unsupported and fails explicitly instead of retaining an unrelated earlier
 response.
 
+#### Residual risks
+
+- Credential-path sanitization decodes each URL path segment once. Double-encoded separators or
+  values such as `%252F` are not decoded recursively, so they can conceal a credential-shaped
+  segment from the recorder. This single-pass policy keeps path handling deterministic and avoids
+  interpreting ambiguous or intentionally layered encodings differently from the upstream. Never
+  place credentials in URL paths, and review recorded provenance before committing fixtures.
+- Primitive strings embedded in prose are redacted only when they match the current PEM,
+  credential-assignment, known-token, or entropy heuristics. Other secret formats can remain because
+  blanket redaction of ordinary strings would destroy useful fixture content and create broad false
+  positives. Keep secrets under credential-named structured fields where possible and manually
+  inspect sanitized fixture text before committing it.
+
 Stream fixture replay in `runStandardTests(..., { snapshot: true })` is evidence-only:
 `ctx.http.stream()` returns a usable stream containing exactly the recorded preview,
 not a fabricated full body. The replay response also carries runtime metadata

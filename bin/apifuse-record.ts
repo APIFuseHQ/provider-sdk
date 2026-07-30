@@ -30,6 +30,7 @@ import {
 	sanitizeOrdinaryFixture,
 } from "../src/fixture-sanitization.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { parseSchema } from "../src/schema.js";
 import {
 	captureStreamEvidence,
 	createStreamCaptureEnvelope,
@@ -82,7 +83,7 @@ export async function main() {
 		const provider = await loadProvider(location.rootDir);
 		const operationName = resolveOperationName(provider, args.operation);
 		const operation = provider.operations[operationName];
-		const parsedParams = parseParams(operation, args.params);
+		const parsedParams = await parseParams(operation, args.params);
 
 		const capture = createCaptureContext(
 			provider,
@@ -367,7 +368,10 @@ function resolveOperationName(provider: ProviderRuntime, operationName?: string)
 	return firstOperation;
 }
 
-function parseParams(operation: ProviderRuntime["operations"][string], value: string): unknown {
+async function parseParams(
+	operation: ProviderRuntime["operations"][string],
+	value: string,
+): Promise<unknown> {
 	let parsed: unknown;
 
 	try {
@@ -378,9 +382,7 @@ function parseParams(operation: ProviderRuntime["operations"][string], value: st
 		);
 	}
 
-	return operation.input
-		? (operation.input as { parse(value: unknown): unknown }).parse(parsed)
-		: parsed;
+	return operation.input ? parseSchema(operation.input, parsed, "record.params") : parsed;
 }
 
 function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: string): string {
@@ -634,8 +636,10 @@ function proxyStealthSession(
 			onResponse(order, response);
 			return response;
 		},
+		cookies: session.cookies,
+		redirects: session.redirects,
 		close: () => session.close(),
-	} as StealthSession;
+	};
 }
 
 function normalizeCapturedStealthResponse(response: Awaited<ReturnType<StealthClient["fetch"]>>) {
@@ -685,7 +689,8 @@ export async function prepareFixturePayload(
 		if (existing.some((item) => hasStreamEvidenceMarker(item))) {
 			const legacyGroup = findStreamCaptureGroup(existing);
 			if (legacyGroup) {
-				return [createStreamCaptureEnvelope(legacyGroup.items), payload];
+				const prefix = existing.slice(0, -legacyGroup.items.length);
+				return [...prefix, createStreamCaptureEnvelope(legacyGroup.items), payload];
 			}
 		}
 		return [...existing, payload];

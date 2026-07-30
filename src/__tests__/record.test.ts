@@ -94,6 +94,30 @@ describe("prepareFixturePayload", () => {
 		]);
 	});
 
+	it("preserves ordinary captures before legacy stream evidence during append migration", async () => {
+		const fixturePath = join(makeTempDir("append-prefixed-legacy-stream-"), "raw.json");
+		const ordinaryCapture = { capture: "ordinary-before-stream" };
+		const evidence = {
+			__apifuse_stream__: true,
+			status: 200,
+			ok: true,
+			headers: {},
+			body_sha256: createHash("sha256").update("").digest("hex"),
+			body_bytes: 0,
+			body_preview_base64: "",
+		};
+		writeFileSync(fixturePath, JSON.stringify([ordinaryCapture, evidence]));
+
+		expect(await prepareFixturePayload(fixturePath, { latest: "ordinary" }, true)).toEqual([
+			ordinaryCapture,
+			{
+				__apifuse_capture__: true,
+				items: [{ kind: "stream", evidence }],
+			},
+			{ latest: "ordinary" },
+		]);
+	});
+
 	it("refuses to overwrite a corrupt fixture while appending", async () => {
 		const fixturePath = join(makeTempDir("append-corrupt-"), "raw.json");
 		writeFileSync(fixturePath, '{"capture":');
@@ -106,6 +130,149 @@ describe("prepareFixturePayload", () => {
 });
 
 describe("record CLI", () => {
+	it("accepts operation params through a Standard Schema input", async () => {
+		const upstream = createServer((request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ path: request.url }));
+		});
+		await new Promise<void>((resolve, reject) => {
+			upstream.once("error", reject);
+			upstream.listen(0, "127.0.0.1", resolve);
+		});
+
+		try {
+			const address = upstream.address();
+			if (address === null || typeof address === "string") throw new Error("Expected IP address");
+			const providerDir = makeTempDir("standard-schema-input-");
+			writeFileSync(join(providerDir, "package.json"), '{"type":"module"}\n');
+			writeFileSync(
+				join(providerDir, "index.ts"),
+				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
+const input = {
+  "~standard": {
+    version: 1,
+    vendor: "record-test",
+    validate(value) {
+      if (value && typeof value === "object" && typeof value.slug === "string") {
+        return { value: { slug: value.slug } };
+      }
+      return { issues: [{ message: "slug must be a string" }] };
+    },
+  },
+};
+export default {
+  id: "record-standard-schema", version: "1.0.0", runtime: "standard",
+  operations: { lookup: {
+    input, output: z.object({ path: z.string() }),
+    upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
+    handler: async (ctx, params) => (await ctx.http.get(\`/\${params.slug}\`)).data,
+  } },
+};
+`,
+			);
+
+			const process = Bun.spawn({
+				cmd: [
+					"bun",
+					join(repoRoot, "bin", "apifuse.ts"),
+					"record",
+					providerDir,
+					"--operation",
+					"lookup",
+					"--params",
+					'{"slug":"standard-schema"}',
+				],
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stderr, exitCode] = await Promise.all([
+				new Response(process.stderr).text(),
+				process.exited,
+			]);
+
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+			expect(
+				JSON.parse(readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8")),
+			).toEqual({ path: "/standard-schema" });
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				upstream.close((error) => (error ? reject(error) : resolve()));
+			});
+		}
+	});
+
+	it("forwards session cookies while recording an operation", async () => {
+		const upstream = createServer((request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ received: request.headers.cookie ?? "" }));
+		});
+		await new Promise<void>((resolve, reject) => {
+			upstream.once("error", reject);
+			upstream.listen(0, "127.0.0.1", resolve);
+		});
+
+		try {
+			const address = upstream.address();
+			if (address === null || typeof address === "string") throw new Error("Expected IP address");
+			const providerDir = makeTempDir("stealth-session-cookies-");
+			writeFileSync(join(providerDir, "package.json"), '{"type":"module"}\n');
+			writeFileSync(
+				join(providerDir, "index.ts"),
+				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
+export default {
+  id: "record-stealth-session-cookies", version: "1.0.0", runtime: "standard",
+  operations: { lookup: {
+    input: z.object({}), output: z.object({ received: z.string() }),
+    upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
+    handler: async (ctx) => {
+      const session = ctx.stealth.createSession();
+      try {
+        session.cookies.restore({ sid: "session-cookie-value" });
+        if (typeof session.redirects.run !== "function") throw new Error("missing redirects API");
+        return (await ctx.http.get("/cookie", {
+          headers: { cookie: session.cookies.toHeader() },
+        })).data;
+      } finally {
+        session.close();
+      }
+    },
+  } },
+};
+`,
+			);
+
+			const process = Bun.spawn({
+				cmd: [
+					"bun",
+					join(repoRoot, "bin", "apifuse.ts"),
+					"record",
+					providerDir,
+					"--operation",
+					"lookup",
+				],
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stderr, exitCode] = await Promise.all([
+				new Response(process.stderr).text(),
+				process.exited,
+			]);
+
+			expect(stderr).toBe("");
+			expect(exitCode).toBe(0);
+			expect(
+				JSON.parse(readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8")),
+			).toEqual({ received: "sid=session-cookie-value" });
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				upstream.close((error) => (error ? reject(error) : resolve()));
+			});
+		}
+	});
+
 	it("sanitizes ordinary JSON with the shared credential-key policy", async () => {
 		const upstream = createServer((_request, response) => {
 			response.writeHead(200, { "content-type": "application/json" });

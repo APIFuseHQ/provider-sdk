@@ -93,6 +93,30 @@ describe("stream evidence capture", () => {
 		expect(evidence.preview_sanitized).toBeUndefined();
 	});
 
+	it("redacts a detected token assignment in a NUL-prefixed binary preview", async () => {
+		const secret = "octet-stream-secret-that-must-not-persist";
+		const body = Buffer.from(`\0token=${secret}`);
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(body);
+				controller.close();
+			},
+		});
+		const capture = captureStreamEvidence(streamResponse(source), {
+			requestUrl: "https://example.test/binary-secret",
+			sanitizeFixture,
+		});
+		for await (const _chunk of capture.response.bytes()) {
+			// Drain the handler-facing stream.
+		}
+
+		const evidence = await capture.getEvidence();
+		const retained = Buffer.from(evidence.body_preview_base64, "base64").toString("utf8");
+		expect(retained).not.toContain(secret);
+		expect(retained).toContain("[REDACTED]");
+		expect(evidence.preview_sanitized).toBeTrue();
+	});
+
 	it("fails closed for undecodable declared text without a recognizable secret", async () => {
 		const body = new Uint8Array([0xc3, 0x28, 0xff, 0x00]);
 		const source = new ReadableStream<Uint8Array>({
