@@ -73,6 +73,7 @@ export { createHttpClient } from "./runtime/http.js";
 export {
 	createNativeNetworkClient,
 	deriveNativeCredentialAffinityKey,
+	NativeIdleTimeoutError,
 	NativeNetworkError,
 	NativeProxyExpiredError,
 	resolveNativeGatewayProxy,

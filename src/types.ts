@@ -1305,6 +1305,12 @@ export interface NativeNetworkConnectInput {
 	readonly port: number;
 	readonly serverName?: string;
 	readonly rejectUnauthorized?: boolean;
+	/**
+	 * Maximum time without a successful socket read before the connection is
+	 * closed. Opt-in; when absent, reads can remain pending indefinitely.
+	 */
+	readonly idleTimeoutMs?: number;
+	/** Maximum time allowed to establish the TCP/SOCKS/TLS connection. */
 	readonly timeoutMs?: number;
 	readonly signal?: AbortSignal;
 	/** Overrides the credential-derived sticky affinity key. */
