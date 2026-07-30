@@ -28,6 +28,7 @@ export type NativeNetworkErrorCode =
 	| "native_connection_aborted"
 	| "native_connection_closed"
 	| "native_connection_failed"
+	| "native_connection_idle_timeout"
 	| "native_connection_timeout"
 	| "native_dynamic_egress_unsupported"
 	| "native_proxy_expired"
@@ -48,6 +49,17 @@ export class NativeProxyExpiredError extends NativeNetworkError {
 	constructor(readonly expiresAt: string) {
 		super("Native connection closed at sticky proxy expiry", "native_proxy_expired");
 		this.name = "NativeProxyExpiredError";
+	}
+}
+
+/** Raised when an established connection exceeds its opt-in read-idle window. */
+export class NativeIdleTimeoutError extends NativeNetworkError {
+	constructor() {
+		super(
+			"Native network socket timed out while reading.",
+			"native_connection_idle_timeout",
+		);
+		this.name = "NativeIdleTimeoutError";
 	}
 }
 
@@ -372,11 +384,13 @@ export function createNativeNetworkConnection(
 	socket: Socket | TLSSocket,
 	proxy: NativeGatewayProxy | undefined,
 	options: NativeNetworkClientOptions,
+	idleTimeoutMs?: number,
 ): NativeNetworkConnection {
 	const warn = options.warn ?? console.warn;
 	let terminalError: Error | undefined;
 	let closeReason: NativeNetworkError | undefined;
 	let drainHandler: NativeProxyDrainHandler | undefined;
+	let idleTimer: ReturnType<typeof setTimeout> | undefined;
 	let expiringTimer: ReturnType<typeof setTimeout> | undefined;
 	let hardExpiryTimer: ReturnType<typeof setTimeout> | undefined;
 	let lifecycleSettled = false;
@@ -384,7 +398,23 @@ export function createNativeNetworkConnection(
 	const lifecycleCutoff = new Promise<void>((resolve) => {
 		settleLifecycle = resolve;
 	});
+	const clearIdleTimer = () => {
+		if (idleTimer) clearTimeout(idleTimer);
+		idleTimer = undefined;
+	};
+	const resetIdleTimer = () => {
+		clearIdleTimer();
+		if (idleTimeoutMs === undefined || socket.readableEnded || socket.destroyed) return;
+		idleTimer = setTimeout(() => {
+			idleTimer = undefined;
+			if (socket.readableEnded || socket.destroyed) return;
+			closeReason = new NativeIdleTimeoutError();
+			socket.destroy(closeReason);
+		}, Math.max(0, idleTimeoutMs));
+		idleTimer.unref?.();
+	};
 	const clearLifecycle = () => {
+		clearIdleTimer();
 		if (lifecycleSettled) return;
 		lifecycleSettled = true;
 		if (expiringTimer) clearTimeout(expiringTimer);
@@ -394,7 +424,9 @@ export function createNativeNetworkConnection(
 	socket.on("error", (error) => {
 		terminalError = error;
 	});
+	socket.once("end", clearIdleTimer);
 	socket.once("close", clearLifecycle);
+	resetIdleTimer();
 
 	const expiresAt = proxy?.sticky ? proxy.expiresAt : undefined;
 	const leadSeconds = options.proxyPolicy?.session?.drainLeadSeconds;
@@ -443,7 +475,10 @@ export function createNativeNetworkConnection(
 		if (closeReason) throw closeReason;
 		if (terminalError) throw failedError();
 		const chunk = socket.read() as Buffer | null;
-		if (chunk) return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+		if (chunk) {
+			resetIdleTimer();
+			return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
+		}
 		if (socket.readableEnded || socket.destroyed) return null;
 		await new Promise<void>((resolve) => {
 			const cleanup = () => {
@@ -544,7 +579,7 @@ export function createNativeNetworkClient(
 			const socket = proxy
 				? await connectSocksTunnel(proxy, input, deadline)
 				: await connectPlainSocket(input.host, input.port, input.signal, deadline);
-			return createNativeNetworkConnection(socket, proxy, options);
+			return createNativeNetworkConnection(socket, proxy, options, input.idleTimeoutMs);
 		},
 		connectTls: async (input) => {
 			const deadline = deadlineFrom(input.timeoutMs);
@@ -552,7 +587,7 @@ export function createNativeNetworkClient(
 			const proxy = await resolveConnectionProxy(options, input);
 			const tunnel = proxy ? await connectSocksTunnel(proxy, input, deadline) : undefined;
 			const socket = await upgradeTls(tunnel, input, deadline);
-			return createNativeNetworkConnection(socket, proxy, options);
+			return createNativeNetworkConnection(socket, proxy, options, input.idleTimeoutMs);
 		},
 		grantTcpEgress: (input) => {
 			if (options.grantTcpEgress) return options.grantTcpEgress(input);

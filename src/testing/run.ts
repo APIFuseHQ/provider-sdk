@@ -5,6 +5,8 @@ import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import { createUnsupportedSttClient } from "../runtime/stt.js";
 import { safeParseSchemaSync } from "../schema.js";
+import { requestPathForFixture } from "../fixture-sanitization.js";
+import { findStreamCaptureGroup, replayStreamEvidence } from "../stream-evidence.js";
 import type {
 	AuthMode,
 	BrowserPage,
@@ -23,6 +25,10 @@ import type {
 const CONNECTOR_ID_REGEX = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/;
 const VALID_AUTH_MODES = ["none", "platform-managed", "credentials", "oauth2"] as const;
 const UPDATE_SNAPSHOT_ARGS = new Set(["-u", "--update-snapshots"]);
+const snapshotCaptureStates = new WeakMap<
+	ProviderContext,
+	{ assertConsumed(): void; consumed(): number }
+>();
 
 export interface StandardTestsManifest {
 	id?: string;
@@ -50,6 +56,8 @@ export interface StandardTestsOptions {
 	fixtureDir?: string;
 	/** Opt in to real-handler E2E with strict, offline canned upstream responses. */
 	upstreamStub?: StandardTestsUpstreamStub;
+	/** Require a committed snapshot; missing files fail unless --update-snapshots is passed. */
+	requireSnapshot?: boolean;
 }
 
 export interface StandardTestsUpstreamCall {
@@ -559,7 +567,7 @@ function unsupported(name: string): never {
 	throw new Error(`Standard test snapshot context does not support ${name}`);
 }
 
-function createSnapshotContext(rawFixture: unknown): ProviderContext {
+export function createSnapshotContext(rawFixture: unknown): ProviderContext {
 	const credential: CredentialContext = {
 		mode: "none",
 		get: () => undefined,
@@ -569,18 +577,61 @@ function createSnapshotContext(rawFixture: unknown): ProviderContext {
 	};
 	const request = { headers: {} };
 	const state = createMemoryProviderRuntimeState();
+	const streamCaptureGroup = findStreamCaptureGroup(rawFixture);
+	let nextCaptureItem = 0;
+	const replayJsonResponse = () => {
+		if (!streamCaptureGroup) return jsonResponse(rawFixture);
+		const item = streamCaptureGroup.items[nextCaptureItem];
+		if (!item) {
+			throw new Error(
+				`Stream fixture exhausted: no recorded response exists for ordinary HTTP call ${nextCaptureItem + 1}.`,
+			);
+		}
+		if (item.kind !== "response") {
+			throw new Error(
+				`Stream fixture call-order mismatch: expected a stream call at position ${nextCaptureItem + 1}, received an ordinary HTTP call.`,
+			);
+		}
+		nextCaptureItem += 1;
+		return jsonResponse(item.value);
+	};
 
-	return {
+	const context: ProviderContext = {
 		env: { get: () => undefined },
 		credential,
 		request,
 		http: {
-			request: async () => jsonResponse(rawFixture),
-			get: async () => jsonResponse(rawFixture),
-			post: async () => jsonResponse(rawFixture),
-			put: async () => jsonResponse(rawFixture),
-			delete: async () => jsonResponse(rawFixture),
-			stream: async () => unsupported("ctx.http.stream"),
+			request: async () => replayJsonResponse(),
+			get: async () => replayJsonResponse(),
+			post: async () => replayJsonResponse(),
+			put: async () => replayJsonResponse(),
+			delete: async () => replayJsonResponse(),
+			stream: async (...args) => {
+				if (!streamCaptureGroup) return unsupported("ctx.http.stream");
+				const item = streamCaptureGroup.items[nextCaptureItem];
+				if (!item) {
+					throw new Error(
+						`Stream fixture exhausted: no recorded evidence exists for stream call ${nextCaptureItem + 1}.`,
+					);
+				}
+				if (item.kind !== "stream") {
+					throw new Error(
+						`Stream fixture call-order mismatch: expected an ordinary HTTP call at position ${nextCaptureItem + 1}, received a stream call.`,
+					);
+				}
+				if (item.evidence.request) {
+					const expected = item.evidence.request;
+					const actualMethod = (args[1]?.method ?? "GET").toUpperCase();
+					const actualPath = replayRequestPath(args[0], expected.path);
+					if (actualMethod !== expected.method || actualPath !== expected.path) {
+						throw new Error(
+							`Stream fixture request mismatch: expected ${expected.method} ${expected.path}, received ${actualMethod} ${actualPath}.`,
+						);
+					}
+				}
+				nextCaptureItem += 1;
+				return replayStreamEvidence(item.evidence);
+			},
 			sse: async () => unsupported("ctx.http.sse"),
 		},
 		cache: createProviderCache({ providerId: "standard-test" }),
@@ -612,6 +663,26 @@ function createSnapshotContext(rawFixture: unknown): ProviderContext {
 			state,
 		}),
 	};
+	snapshotCaptureStates.set(context, {
+		assertConsumed() {
+			if (streamCaptureGroup && nextCaptureItem !== streamCaptureGroup.items.length) {
+				throw new Error(
+					`Stream fixture has ${streamCaptureGroup.items.length - nextCaptureItem} unconsumed capture item${streamCaptureGroup.items.length - nextCaptureItem === 1 ? "" : "s"} after handler completion.`,
+				);
+			}
+		},
+		consumed: () => nextCaptureItem,
+	});
+	return context;
+}
+
+function replayRequestPath(requestUrl: string, expectedPath: string): string {
+	if (/^[a-z][a-z\d+.-]*:\/\//i.test(requestUrl) || requestUrl.startsWith("/")) {
+		return requestPathForFixture(requestUrl);
+	}
+	return requestPathForFixture(
+		new URL(requestUrl, `https://fixture.invalid${expectedPath}`).toString(),
+	);
 }
 
 async function transformSnapshotOutput(
@@ -619,14 +690,21 @@ async function transformSnapshotOutput(
 	rawFixture: unknown,
 ): Promise<unknown> {
 	const entries = Object.entries(provider.operations);
-	const context = createSnapshotContext(rawFixture);
+	const captureStates: Array<{ assertConsumed(): void; consumed(): number }> = [];
 	const outputs = await Promise.all(
 		entries.map(async ([operationName, operation]) => {
+			const context = createSnapshotContext(rawFixture);
 			const request = operation.fixtures?.request ?? {};
 			const output = await operation.handler(context, request);
+			const captureState = snapshotCaptureStates.get(context);
+			if (captureState) captureStates.push(captureState);
+			if (captureState?.consumed()) captureState.assertConsumed();
 			return [operationName, output] as const;
 		}),
 	);
+	if (findStreamCaptureGroup(rawFixture) && !captureStates.some((state) => state.consumed() > 0)) {
+		captureStates[0]?.assertConsumed();
+	}
 
 	if (outputs.length === 1) {
 		return outputs[0]?.[1];
@@ -918,7 +996,13 @@ export function runStandardTests(
 				const serialized = stableStringify(actual);
 				const snapshotFile = Bun.file(snapshotPath);
 
-				if (shouldUpdateSnapshots() || !(await snapshotFile.exists())) {
+				const snapshotExists = await snapshotFile.exists();
+				if (!snapshotExists && options.requireSnapshot && !shouldUpdateSnapshots()) {
+					throw new Error(
+						`Required golden snapshot is missing: ${snapshotPath}. Regenerate it with bun test --update-snapshots.`,
+					);
+				}
+				if (shouldUpdateSnapshots() || !snapshotExists) {
 					await Bun.write(snapshotPath, serialized);
 				}
 

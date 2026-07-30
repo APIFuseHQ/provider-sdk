@@ -696,6 +696,65 @@ session base origin. Do not use the flat form for new persistence code. Cookie
 headers remain origin-filtered: use `toHeader(url)` for a particular request and
 never build a request header from serialized or snapshotted persistence data.
 
+### Recording and replaying streaming responses
+
+`apifuse record` passes responses returned by `ctx.http.stream()` directly to the operation
+handler while incrementally capturing a bounded preview. If the handler returns or cancels its
+reader before EOF, the recorder drains the retained upstream reader before writing a JSON evidence
+record to `__fixtures__/raw.json`. The record contains the status, success
+flag, `content-type`/`content-length`/`content-disposition` headers when present, the
+full body SHA-256 and byte count, and a base64 preview up to the configured stream preview limit.
+Textual previews are decoded and passed through the fixture sanitizer before base64 encoding.
+Classification uses both the declared content type and the preview bytes, so missing or incorrect
+content-type headers do not bypass sanitization. PEM private-key blocks and long high-entropy
+tokens in otherwise unstructured text are redacted as well. If the full preview is not valid UTF-8,
+the entire lossy-decoded preview is scanned and matching decodable byte windows are sanitized. Only a
+magic-number-confirmed binary preview with no textual-secret pattern anywhere in the preview bypasses
+sanitization; other undecodable data fails closed.
+Sanitized previews carry `preview_sanitized: true`, plus a
+`preview_redaction_reason` when capture had to fail closed. The original hash and byte count always
+describe upstream bytes, not a sanitized preview.
+
+Each record includes query-free request provenance (`method`, `path`, and a one-based stream call
+ordinal). Provenance never stores the origin, URL userinfo, query, or fragment. Every retained path
+segment is scrubbed before persistence: credential-key segments, values following those keys,
+known token shapes, and long high-entropy opaque segments become `[REDACTED]`. If an operation
+opens multiple streams, the recorder finalizes every retained reader and
+writes all evidence records in stream call order. Stream invocations use a tagged capture envelope
+whose items distinguish stream evidence from ordinary JSON responses. Evidence-only snapshot replay
+consumes that exact call order and fails immediately when evidence is exhausted or a call kind is
+reordered. When request provenance is present, replay also rejects method or path changes (relative
+URLs are resolved against the recorded path prefix); ordinals remain diagnostic and are not matched.
+Appended fixtures replay a stream envelope only when it is the latest invocation. SSE
+recording remains unsupported and fails explicitly instead of retaining an unrelated earlier
+response.
+
+#### Residual risks
+
+- Credential-path sanitization decodes each URL path segment once. Double-encoded separators or
+  values such as `%252F` are not decoded recursively, so they can conceal a credential-shaped
+  segment from the recorder. This single-pass policy keeps path handling deterministic and avoids
+  interpreting ambiguous or intentionally layered encodings differently from the upstream. Never
+  place credentials in URL paths, and review recorded provenance before committing fixtures.
+- Primitive strings embedded in prose are redacted only when they match the current PEM,
+  credential-assignment, known-token, or entropy heuristics. Other secret formats can remain because
+  blanket redaction of ordinary strings would destroy useful fixture content and create broad false
+  positives. Keep secrets under credential-named structured fields where possible and manually
+  inspect sanitized fixture text before committing it.
+
+Stream fixture replay in `runStandardTests(..., { snapshot: true })` is evidence-only:
+`ctx.http.stream()` returns a usable stream containing exactly the recorded preview,
+not a fabricated full body. The replay response also carries runtime metadata
+`evidence_only: true`, `body_sha256`, `body_bytes`, and the optional preview sanitization fields
+for assertions about the original capture. Do not assert that the replay body hashes to
+`body_sha256` when `body_bytes`
+exceeds the decoded preview length or `preview_sanitized` is present; use the metadata for
+full-body integrity and limit body-content assertions to the preview.
+
+Golden snapshot suites can set `requireSnapshot: true` so a missing committed snapshot fails instead
+of being created implicitly. Regenerate intentional changes with
+`bun test --update-snapshots`; review and commit the resulting `transform.snap.json` file.
+
 ### Running the pre-submission report
 
 ```bash

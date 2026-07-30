@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import type {
 	NativeNetworkClient,
 	NativeNetworkConnection,
+	NativeNetworkConnectInput,
 	NativeProviderConfig,
 	NativeProviderContext,
 	NativeTcpEgressGrant,
@@ -45,6 +46,7 @@ type KakaoNativeNetworkConnectInput = {
 	readonly port: number;
 	readonly serverName?: string;
 	readonly rejectUnauthorized?: boolean;
+	readonly idleTimeoutMs?: number;
 	readonly timeoutMs?: number;
 };
 
@@ -122,6 +124,12 @@ const publicResolvedFile: ProviderResolvedFile = bridgeResolvedFile;
 const publicFiles: ProviderFilesContext = bridgeFiles;
 const providerEntryFiles: ProviderEntryFilesContext = bridgeFiles;
 const publicConnection: NativeNetworkConnection = bridgeConnection;
+const publicConnectInput: NativeNetworkConnectInput = {
+	host: "booking-loco.kakao.com",
+	port: 443,
+	timeoutMs: 15_000,
+	idleTimeoutMs: 60_000,
+};
 const publicGrant: NativeTcpEgressGrant = bridgeNetwork.grantTcpEgress({});
 const publicNetwork: NativeNetworkClient = bridgeNetwork;
 const providerEntryNetwork: ProviderEntryNativeNetworkClient = bridgeNetwork;
@@ -155,6 +163,7 @@ function contextCapabilities(ctx: ProviderContext): {
 
 describe("public native runtime contracts", () => {
 	it("accepts the KakaoTalk bridge shapes from both core entrypoints", async () => {
+		expect(publicConnectInput.idleTimeoutMs).toBe(60_000);
 		expect(publicFileRef.mime_type).toBe("image/jpeg");
 		expect((await publicResolvedFile.bytes()).byteLength).toBe(0);
 		expect(publicFiles.has(publicFileRef)).toBe(true);

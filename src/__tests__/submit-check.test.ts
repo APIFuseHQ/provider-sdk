@@ -18,6 +18,7 @@ import {
 	renderMarkdown,
 	type SubmitCheckReport,
 } from "../../bin/apifuse-submit-check.js";
+import { STREAM_PREVIEW_BYTES } from "../stream-evidence.js";
 import { hasSubstantiveDelimitedTextStructure } from "../../bin/submit-check-delimited-text.js";
 import { syncPromptAssets } from "../cli/prompt-assets.js";
 
@@ -960,6 +961,76 @@ ${assertionLines(21)}
 		const check = report.checks.find((item) => item.id === "fixture-provenance");
 
 		expect(check?.status).toBe("pass");
+	});
+
+	it("accepts a stream evidence fixture with one allowlisted header", () => {
+		const preview = Buffer.alloc(STREAM_PREVIEW_BYTES, 0x50);
+		expect(
+			hasNonEmptyRecordedFixture({
+				__apifuse_stream__: true,
+				status: 200,
+				ok: true,
+				headers: { "content-type": "application/zip" },
+				body_sha256: "a".repeat(64),
+				body_bytes: 805_000,
+				body_preview_base64: preview.toString("base64"),
+			}),
+		).toBeTrue();
+	});
+
+	it("rejects structurally inconsistent or unsafe stream evidence fixtures", () => {
+		const validEvidence = {
+			__apifuse_stream__: true,
+			status: 200,
+			ok: true,
+			headers: { "content-type": "application/zip" },
+			body_sha256: "a".repeat(64),
+			body_bytes: 805_000,
+			body_preview_base64: Buffer.alloc(STREAM_PREVIEW_BYTES, 0x50).toString("base64"),
+		};
+
+		expect(
+			hasNonEmptyRecordedFixture({ ...validEvidence, body_preview_base64: "UEsDBA==" }),
+		).toBeFalse();
+		expect(
+			hasNonEmptyRecordedFixture({
+				...validEvidence,
+				headers: { authorization: "Bearer must-not-replay" },
+			}),
+		).toBeFalse();
+	});
+
+	it("does not discard ordinary fixtures that merely reuse the marker field name", () => {
+		for (const markerValue of ["upstream-domain-value", true]) {
+			expect(
+				hasNonEmptyRecordedFixture({
+					__apifuse_stream__: markerValue,
+					items: [{ id: "one", label: "retained" }],
+				}),
+			).toBeTrue();
+		}
+	});
+
+	it("surfaces a field-specific malformed stream evidence diagnostic", async () => {
+		const dir = makeProviderDir("submit-malformed-stream-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(
+			join(dir, "__fixtures__", "raw.json"),
+			JSON.stringify({
+				__apifuse_stream__: true,
+				status: 200,
+				ok: true,
+				headers: {},
+				body_sha256: "a".repeat(64),
+				body_bytes: 3,
+				body_preview_base64: "%%%",
+			}),
+		);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "fixture-provenance");
+		expect(check?.status).toBe("fail");
+		expect(check?.message).toContain("body_preview_base64");
+		expect(check?.message).not.toContain("empty or missing");
 	});
 
 	it("accepts a top-level recorded Cabinet Office-shaped Japanese CSV payload", async () => {

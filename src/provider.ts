@@ -161,6 +161,7 @@ export type {
 export {
 	createNativeNetworkClient,
 	deriveNativeCredentialAffinityKey,
+	NativeIdleTimeoutError,
 	NativeNetworkError,
 	NativeProxyExpiredError,
 	resolveNativeGatewayProxy,
