@@ -87,6 +87,29 @@ describe("native credential affinity", () => {
 		expect(first?.sessionId).not.toBe(second?.sessionId);
 	});
 
+	it("aligns sid rotation and expiry to a process-independent session window", () => {
+		const affinityKey = deriveNativeCredentialAffinityKey(`account-${randomUUID()}`);
+		const first = resolveNativeGatewayProxy({
+			policy: POLICY,
+			affinityKey,
+			now: Date.parse("2026-07-30T12:34:00.000Z"),
+		});
+		const sameWindow = resolveNativeGatewayProxy({
+			policy: POLICY,
+			affinityKey,
+			now: Date.parse("2026-07-30T12:59:59.999Z"),
+		});
+		const nextWindow = resolveNativeGatewayProxy({
+			policy: POLICY,
+			affinityKey,
+			now: Date.parse("2026-07-30T13:00:00.000Z"),
+		});
+
+		expect(first?.expiresAt).toBe("2026-07-30T13:00:00.000Z");
+		expect(first?.sessionId).toBe(sameWindow?.sessionId);
+		expect(first?.sessionId).not.toBe(nextWindow?.sessionId);
+	});
+
 	it("lets an explicit per-connect affinity key win", async () => {
 		let offeredAffinity: string | undefined;
 		const client = createNativeNetworkClient({

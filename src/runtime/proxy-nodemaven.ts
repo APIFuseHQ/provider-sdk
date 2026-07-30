@@ -68,6 +68,24 @@ export function nodemavenLifetimeMinutes(policy: ProviderProxyPolicy): number {
 	return Math.min(NODEMAVEN_MAX_LIFETIME_MINUTES, Math.max(1, Math.floor(configured)));
 }
 
+export type NodemavenSessionWindow = {
+	refreshEpoch: number;
+	expiresAt: string;
+};
+
+/** Stable wall-clock window shared by every process deriving the same sticky sid. */
+export function nodemavenSessionWindow(
+	policy: ProviderProxyPolicy,
+	now = Date.now(),
+): NodemavenSessionWindow {
+	const lifetimeMs = nodemavenLifetimeMinutes(policy) * 60_000;
+	const refreshEpoch = Math.floor(now / lifetimeMs);
+	return {
+		refreshEpoch,
+		expiresAt: new Date((refreshEpoch + 1) * lifetimeMs).toISOString(),
+	};
+}
+
 /** NodeMaven username tokens accept `[a-z0-9]`; slugify geo values to that set. */
 function slugifyGeo(value: string | undefined): string | undefined {
 	if (!value) return undefined;
@@ -123,6 +141,8 @@ export type NodemavenSynthesisInput = {
 	country?: string;
 	/** Clock injection used by native sticky-expiry lifecycle tests. */
 	now?: number;
+	/** Stable caller-owned hard expiry when the refresh epoch is wall-clock-derived. */
+	expiresAt?: string;
 };
 
 export type NodemavenSynthesis = {
@@ -175,7 +195,11 @@ export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): Nodema
 		sticky,
 		sessionId: sid,
 		...(sticky
-			? { expiresAt: new Date((input.now ?? Date.now()) + lifetimeMinutes * 60_000).toISOString() }
+			? {
+					expiresAt:
+						input.expiresAt ??
+						new Date((input.now ?? Date.now()) + lifetimeMinutes * 60_000).toISOString(),
+				}
 			: {}),
 		diagnostics: {
 			vendor: "nodemaven",

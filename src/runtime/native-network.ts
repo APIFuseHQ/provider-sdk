@@ -18,7 +18,11 @@ import type {
 	ProviderProxyPolicy,
 	ProviderProxyProvider,
 } from "../types.js";
-import { hasNodemavenCredentials, synthesizeNodemavenProxy } from "./proxy-nodemaven.js";
+import {
+	hasNodemavenCredentials,
+	nodemavenSessionWindow,
+	synthesizeNodemavenProxy,
+} from "./proxy-nodemaven.js";
 
 export type NativeNetworkErrorCode =
 	| "native_connection_aborted"
@@ -91,13 +95,15 @@ function synthesizeNodemavenGateway(
 	// NodeMaven defaults ctx.http to HTTP CONNECT because SOCKS5 adds ~500ms per
 	// request. Native LOCO pays this once per long-lived connection and must reach
 	// arbitrary destination ports, so SOCKS5 is mandatory here.
+	const sessionWindow = nodemavenSessionWindow(input.policy, input.now);
 	const synthesized = synthesizeNodemavenProxy({
 		policy: input.policy,
 		affinityKey: input.affinityKey,
 		protocol: "socks5",
 		poolIndex: 0,
-		refreshEpoch: 0,
+		refreshEpoch: sessionWindow.refreshEpoch,
 		now: input.now,
+		expiresAt: sessionWindow.expiresAt,
 	});
 	return {
 		url: synthesized.url,
@@ -362,6 +368,7 @@ export function createNativeNetworkConnection(
 	proxy: NativeGatewayProxy | undefined,
 	options: NativeNetworkClientOptions,
 ): NativeNetworkConnection {
+	const warn = options.warn ?? console.warn;
 	let terminalError: Error | undefined;
 	let closeReason: NativeNetworkError | undefined;
 	let drainHandler: NativeProxyDrainHandler | undefined;
@@ -405,7 +412,7 @@ export function createNativeNetworkConnection(
 			expiringTimer = undefined;
 			const handler = drainHandler;
 			if (!handler) {
-				options.warn?.("Native sticky proxy is expiring without a drain handler");
+				warn("Native sticky proxy is expiring without a drain handler");
 				return;
 			}
 			void (async () => {
