@@ -5,12 +5,8 @@ import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import { createUnsupportedSttClient } from "../runtime/stt.js";
 import { safeParseSchemaSync } from "../schema.js";
-import {
-	findStreamCaptureGroup,
-	hasStreamEvidenceMarker,
-	parseStreamEvidenceRecord,
-	replayStreamEvidence,
-} from "../stream-evidence.js";
+import { requestPathForFixture } from "../fixture-sanitization.js";
+import { findStreamCaptureGroup, replayStreamEvidence } from "../stream-evidence.js";
 import type {
 	AuthMode,
 	BrowserPage,
@@ -565,7 +561,7 @@ function unsupported(name: string): never {
 	throw new Error(`Standard test snapshot context does not support ${name}`);
 }
 
-function createSnapshotContext(rawFixture: unknown): ProviderContext {
+export function createSnapshotContext(rawFixture: unknown): ProviderContext {
 	const credential: CredentialContext = {
 		mode: "none",
 		get: () => undefined,
@@ -576,18 +572,18 @@ function createSnapshotContext(rawFixture: unknown): ProviderContext {
 	const request = { headers: {} };
 	const state = createMemoryProviderRuntimeState();
 	const streamCaptureGroup = findStreamCaptureGroup(rawFixture);
-	const streamEvidence = (streamCaptureGroup ?? [])
-		.filter(hasStreamEvidenceMarker)
-		.map((value) => parseStreamEvidenceRecord(value));
-	const ordinaryResponses = (streamCaptureGroup ?? []).filter(
-		(value) => !hasStreamEvidenceMarker(value),
+	const streamEvidence = (streamCaptureGroup?.items ?? []).flatMap((item) =>
+		item.kind === "stream" ? [item.evidence] : [],
+	);
+	const ordinaryResponses = (streamCaptureGroup?.items ?? []).flatMap((item) =>
+		item.kind === "response" ? [item.value] : [],
 	);
 	let nextStreamResponse = 0;
 	let nextOrdinaryResponse = 0;
 	const replayJsonResponse = () => {
 		if (!streamCaptureGroup) return jsonResponse(rawFixture);
 		const response = ordinaryResponses[nextOrdinaryResponse];
-		if (response === undefined) return unsupported("mixed ctx.http JSON response");
+		if (response === undefined) return jsonResponse(rawFixture);
 		nextOrdinaryResponse += 1;
 		return jsonResponse(response);
 	};
@@ -602,10 +598,27 @@ function createSnapshotContext(rawFixture: unknown): ProviderContext {
 			post: async () => replayJsonResponse(),
 			put: async () => replayJsonResponse(),
 			delete: async () => replayJsonResponse(),
-			stream: async () => {
+			stream: async (...args) => {
 				const evidence = streamEvidence[nextStreamResponse];
 				nextStreamResponse += 1;
-				return evidence ? replayStreamEvidence(evidence) : unsupported("ctx.http.stream");
+				if (!evidence) return unsupported("ctx.http.stream");
+				if (evidence.request) {
+					const actual = {
+						ordinal: nextStreamResponse,
+						method: (args[1]?.method ?? "GET").toUpperCase(),
+						path: requestPathForFixture(args[0]),
+					};
+					if (
+						actual.ordinal !== evidence.request.ordinal ||
+						actual.method !== evidence.request.method ||
+						actual.path !== evidence.request.path
+					) {
+						throw new Error(
+							`Stream fixture request mismatch: expected ${evidence.request.method} ${evidence.request.path} (ordinal ${evidence.request.ordinal}), received ${actual.method} ${actual.path} (ordinal ${actual.ordinal}).`,
+						);
+					}
+				}
+				return replayStreamEvidence(evidence);
 			},
 			sse: async () => unsupported("ctx.http.sse"),
 		},
@@ -645,9 +658,9 @@ async function transformSnapshotOutput(
 	rawFixture: unknown,
 ): Promise<unknown> {
 	const entries = Object.entries(provider.operations);
-	const context = createSnapshotContext(rawFixture);
 	const outputs = await Promise.all(
 		entries.map(async ([operationName, operation]) => {
+			const context = createSnapshotContext(rawFixture);
 			const request = operation.fixtures?.request ?? {};
 			const output = await operation.handler(context, request);
 			return [operationName, output] as const;

@@ -5,6 +5,7 @@ import { z } from "zod";
 import { defineProvider } from "../define.js";
 import * as sdk from "../index.js";
 import { isStreamEvidenceReplayResponse } from "../stream-evidence.js";
+import { createSnapshotContext } from "../testing/run.js";
 import {
 	describeTransform,
 	runStandardTests,
@@ -58,6 +59,10 @@ const streamEvidenceFixture = {
 	request: { ordinal: 1, method: "GET", path: "/download" },
 };
 const secondStreamPreview = "second recorded stream preview";
+const firstStreamEvidenceFixture = {
+	...streamEvidenceFixture,
+	request: { ordinal: 1, method: "GET", path: "/first" },
+};
 const secondStreamEvidenceFixture = {
 	...streamEvidenceFixture,
 	body_sha256: "b".repeat(64),
@@ -292,7 +297,7 @@ runStandardTests(
 
 runStandardTests(
 	multiStreamSnapshotHarnessProvider,
-	[streamEvidenceFixture, secondStreamEvidenceFixture],
+	[firstStreamEvidenceFixture, secondStreamEvidenceFixture],
 	undefined,
 	{ snapshot: true, fixtureDir: multiStreamSnapshotFixtureDir },
 );
@@ -376,6 +381,13 @@ describe("runStandardTests handler E2E", () => {
 });
 
 describe("testing exports", () => {
+	it("diagnoses stream replay request provenance mismatches", async () => {
+		const context = createSnapshotContext(streamEvidenceFixture);
+		await expect(
+			context.http.stream("https://example.test/not-download", { method: "POST" }),
+		).rejects.toThrow(/expected GET \/download.*received POST \/not-download/);
+	});
+
 	it("does not re-export Bun-only testing helpers from package root", () => {
 		expect("runStandardTests" in sdk).toBe(false);
 		expect("describeTransform" in sdk).toBe(false);

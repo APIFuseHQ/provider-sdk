@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { prepareFixturePayload } from "../../bin/apifuse-record.js";
+import { formatCliError, prepareFixturePayload } from "../../bin/apifuse-record.js";
 import { parseStreamEvidenceRecord, STREAM_PREVIEW_BYTES } from "../stream-evidence.js";
 
 const repoRoot = dirname(dirname(import.meta.dir));
@@ -26,6 +26,15 @@ afterEach(() => {
 });
 
 describe("prepareFixturePayload", () => {
+	it("includes a sanitized cause chain in CLI errors", () => {
+		const token = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+		const cause = Object.assign(new Error(`socket reset token=${token}`), { code: "ECONNRESET" });
+		const formatted = formatCliError(new Error("Stream capture read failed", { cause }));
+		expect(formatted).toContain("cause=socket reset token=[REDACTED]");
+		expect(formatted).toContain("code=ECONNRESET");
+		expect(formatted).not.toContain(token);
+	});
+
 	it("appends to an existing array fixture", async () => {
 		const fixturePath = join(makeTempDir("append-array-"), "raw.json");
 		writeFileSync(fixturePath, JSON.stringify([{ capture: 1 }]));
@@ -97,7 +106,13 @@ export default {
   runtime: "standard",
   operations: {
     lookup: {
-      input: z.object({}),
+	  input: {
+		"~standard": {
+		  version: 1,
+		  vendor: "record-test",
+		  validate: (value) => ({ value }),
+		},
+	  },
       output: z.string(),
       upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
       handler: async (ctx) => (await ctx.http.get("/payload")).data,
@@ -257,13 +272,27 @@ export default {
 	it("records and finalizes every stream opened by one operation in call order", async () => {
 		const firstBody = Buffer.from("first stream body");
 		const secondBody = Buffer.from("second stream body");
+		const responseResolutionOrder: string[] = [];
+		let firstResponse: import("node:http").ServerResponse | undefined;
 		const upstream = createServer((request, response) => {
-			const body = request.url === "/first" ? firstBody : secondBody;
+			if (request.url === "/first") {
+				firstResponse = response;
+				return;
+			}
+			responseResolutionOrder.push("second");
 			response.writeHead(200, {
-				"content-length": String(body.byteLength),
+				"content-length": String(secondBody.byteLength),
 				"content-type": "application/octet-stream",
 			});
-			response.end(body);
+			response.end(secondBody);
+			setTimeout(() => {
+				responseResolutionOrder.push("first");
+				firstResponse?.writeHead(200, {
+					"content-length": String(firstBody.byteLength),
+					"content-type": "application/octet-stream",
+				});
+				firstResponse?.end(firstBody);
+			}, 10);
 		});
 		await new Promise<void>((resolve, reject) => {
 			upstream.once("error", reject);
@@ -291,11 +320,12 @@ export default {
       output: z.object({ ok: z.boolean() }),
       upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
       handler: async (ctx) => {
-        const first = await ctx.http.stream("/first");
+		const firstPromise = ctx.http.stream("/first");
+		const secondPromise = ctx.http.stream("/second");
+		const [first, second] = await Promise.all([firstPromise, secondPromise]);
         const firstReader = first.body.getReader();
         await firstReader.read();
         await firstReader.cancel("probe complete");
-        const second = await ctx.http.stream("/second");
         for await (const _chunk of second.bytes()) {}
         return { ok: true };
       },
@@ -337,6 +367,7 @@ export default {
 				createHash("sha256").update(firstBody).digest("hex"),
 				createHash("sha256").update(secondBody).digest("hex"),
 			]);
+			expect(responseResolutionOrder).toEqual(["second", "first"]);
 		} finally {
 			await new Promise<void>((resolve, reject) => {
 				upstream.close((error) => (error ? reject(error) : resolve()));
@@ -347,6 +378,7 @@ export default {
 	it("sanitizes credentials in streamed JSON with no content type before base64 encoding", async () => {
 		const accessToken = "streamed-access-token-that-must-never-reach-the-fixture";
 		const apiKey = "streamed-api-key-that-must-never-reach-the-fixture";
+		const pathToken = "bot123456789:AAE9c8QvL1nX7wZ2rP6sT4uY5iO0aB3c";
 		const upstreamBody = Buffer.from(
 			JSON.stringify({ access_token: accessToken, nested: { apiKey }, public: "retained" }),
 		);
@@ -382,7 +414,7 @@ export default {
       output: z.object({ public: z.string() }),
       upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
       handler: async (ctx) => {
-        const response = await ctx.http.stream("/payload");
+        const response = await ctx.http.stream(${JSON.stringify(`/${pathToken}/download`)});
         const chunks = [];
         for await (const chunk of response.bytes()) chunks.push(chunk);
         const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -425,6 +457,8 @@ export default {
 
 			expect(fixtureSource).not.toContain(accessToken);
 			expect(fixtureSource).not.toContain(apiKey);
+			expect(fixtureSource).not.toContain(pathToken);
+			expect(rawFixture.request?.path).toBe("/[REDACTED]/download");
 			expect(decodedPreview).toHaveLength(rawFixture.body_bytes);
 			expect(decodedPreview.toString("utf8")).not.toContain(accessToken);
 			expect(decodedPreview.toString("utf8")).not.toContain(apiKey);

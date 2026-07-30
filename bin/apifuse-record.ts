@@ -22,8 +22,14 @@ import {
 	TransportError,
 	ValidationError,
 } from "../src/index.js";
-import { requestPathForFixture, sanitizeFixture } from "../src/fixture-sanitization.js";
+import { toJsonValue, type JsonValue } from "../src/contract-json.js";
+import {
+	requestPathForFixture,
+	sanitizeDiagnosticText,
+	sanitizeFixture,
+} from "../src/fixture-sanitization.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { parseSchema } from "../src/schema.js";
 import {
 	captureStreamEvidence,
 	STREAM_PREVIEW_BYTES,
@@ -69,7 +75,7 @@ export async function main() {
 		const provider = await loadProvider(location.rootDir);
 		const operationName = resolveOperationName(provider, args.operation);
 		const operation = provider.operations[operationName];
-		const parsedParams = parseParams(operation, args.params);
+		const parsedParams = await parseParams(operation, args.params);
 
 		const capture = createCaptureContext(
 			provider,
@@ -86,7 +92,7 @@ export async function main() {
 			throw new Error(`No upstream response was captured for ${provider.id}.${operationName}.`);
 		}
 
-		const rawPayload = args.sanitize ? sanitizeFixture(captured) : captured;
+		const rawPayload = args.sanitize ? sanitizeFixture(jsonFixtureValue(captured)) : captured;
 		const fixturePath = resolve(location.rootDir, "__fixtures__", "raw.json");
 		const nextPayload = await prepareFixturePayload(fixturePath, rawPayload, args.append);
 
@@ -193,7 +199,7 @@ function handleCliError(error: unknown): never {
 	process.exit(1);
 }
 
-function formatCliError(error: unknown): string {
+export function formatCliError(error: unknown): string {
 	if (error instanceof TransportError) {
 		return [
 			error.message,
@@ -214,7 +220,23 @@ function formatCliError(error: unknown): string {
 	}
 
 	if (error instanceof Error) {
-		return error.message;
+		const causes: string[] = [];
+		let cause = error.cause;
+		const seen = new Set<unknown>();
+		while (cause !== undefined && !seen.has(cause) && causes.length < 4) {
+			seen.add(cause);
+			if (cause instanceof Error) {
+				const code = "code" in cause && typeof cause.code === "string" ? ` code=${cause.code}` : "";
+				causes.push(`${sanitizeDiagnosticText(cause.message)}${code}`);
+				cause = cause.cause;
+			} else {
+				causes.push(sanitizeDiagnosticText(String(cause)));
+				break;
+			}
+		}
+		return [sanitizeDiagnosticText(error.message), ...causes.map((item) => `cause=${item}`)].join(
+			" ",
+		);
 	}
 
 	return String(error);
@@ -297,7 +319,10 @@ function resolveOperationName(provider: ProviderRuntime, operationName?: string)
 	return firstOperation;
 }
 
-function parseParams(operation: ProviderRuntime["operations"][string], value: string): unknown {
+async function parseParams(
+	operation: ProviderRuntime["operations"][string],
+	value: string,
+): Promise<unknown> {
 	let parsed: unknown;
 
 	try {
@@ -309,12 +334,7 @@ function parseParams(operation: ProviderRuntime["operations"][string], value: st
 	}
 
 	if (!operation.input) return parsed;
-	if (!("parse" in operation.input) || typeof operation.input.parse !== "function") {
-		throw new Error(
-			"apifuse record requires an operation input schema with a synchronous parse().",
-		);
-	}
-	return operation.input.parse(parsed);
+	return parseSchema(operation.input, parsed, "record operation input");
 }
 
 function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: string): string {
@@ -346,14 +366,17 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 
 	const http = captureHttpClient(createHttpClient(baseUrl), {
 		reserveOrder: reserveCaptureOrder,
-		onResponse: (order, response) => retainRawCapture(order, response.data),
-		onStreamResponse: (order, requestUrl, method, response) => {
+		reserveStreamOrdinal: () => {
 			nextStreamOrdinal += 1;
+			return nextStreamOrdinal;
+		},
+		onResponse: (order, response) => retainRawCapture(order, response.data),
+		onStreamResponse: (order, ordinal, requestUrl, method, response) => {
 			const resolvedRequestUrl = new URL(requestUrl, baseUrl).toString();
 			const capture = captureStreamEvidence(response, {
 				requestUrl: resolvedRequestUrl,
 				request: {
-					ordinal: nextStreamOrdinal,
+					ordinal,
 					method,
 					path: requestPathForFixture(resolvedRequestUrl),
 				},
@@ -364,7 +387,6 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 		},
 		onSseResponse: () => {
 			capturedSse = true;
-			capturedRaw = undefined;
 		},
 	});
 	const stealth = proxyStealthClient(
@@ -451,9 +473,11 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 
 type HttpCaptureCallbacks = {
 	reserveOrder(): number;
+	reserveStreamOrdinal(): number;
 	onResponse(order: number, response: HttpResponse): void;
 	onStreamResponse(
 		order: number,
+		ordinal: number,
 		requestUrl: string,
 		method: string,
 		response: HttpStreamResponse,
@@ -484,9 +508,11 @@ function captureHttpClient(client: HttpClient, callbacks: HttpCaptureCallbacks):
 			captureResponse(callbacks.reserveOrder(), client.delete(...args)),
 		stream: async (...args: Parameters<HttpClient["stream"]>) => {
 			const order = callbacks.reserveOrder();
+			const ordinal = callbacks.reserveStreamOrdinal();
 			const response = await client.stream(...args);
 			return callbacks.onStreamResponse(
 				order,
+				ordinal,
 				args[0],
 				(args[1]?.method ?? "GET").toUpperCase(),
 				response,
@@ -525,6 +551,7 @@ function proxyStealthSession(
 	onResponse: (order: number, response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
 	reserveOrder: () => number,
 ): StealthSession {
+	// Preserve the recorder's pre-streaming session surface: only fetch and close are proxied.
 	return {
 		fetch: async (...args: Parameters<StealthSession["fetch"]>) => {
 			const order = reserveOrder();
@@ -532,14 +559,11 @@ function proxyStealthSession(
 			onResponse(order, response);
 			return response;
 		},
-		cookies: session.cookies,
-		redirects: {
-			run: async (...args: Parameters<StealthSession["redirects"]["run"]>) => {
-				const order = reserveOrder();
-				const result = await session.redirects.run(...args);
-				onResponse(order, result.final);
-				return result;
-			},
+		get cookies(): StealthSession["cookies"] {
+			throw new Error("Stealth session cookies are not available in apifuse record.");
+		},
+		get redirects(): StealthSession["redirects"] {
+			throw new Error("Stealth session redirects are not available in apifuse record.");
 		},
 		close: () => session.close(),
 	};
@@ -599,6 +623,14 @@ function formatBytes(bytes: number): string {
 	}
 
 	return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function jsonFixtureValue(value: unknown): JsonValue {
+	const json = toJsonValue(value);
+	if (json === undefined) {
+		throw new Error("Captured upstream response is not JSON-compatible and cannot be sanitized.");
+	}
+	return json;
 }
 
 if (import.meta.main) {

@@ -668,13 +668,18 @@ flag, `content-type`/`content-length`/`content-disposition` headers when present
 full body SHA-256 and byte count, and a base64 preview up to the configured stream preview limit.
 Textual previews are decoded and passed through the fixture sanitizer before base64 encoding.
 Classification uses both the declared content type and the preview bytes, so missing or incorrect
-content-type headers do not bypass sanitization; genuinely binary previews retain their original
-bytes. Sanitized previews carry `preview_sanitized: true`, plus a
+content-type headers do not bypass sanitization. PEM private-key blocks and long high-entropy
+tokens in otherwise unstructured text are redacted as well; genuinely binary previews (including
+known binary signatures and data that cannot be decoded as UTF-8) retain their original bytes.
+Sanitized previews carry `preview_sanitized: true`, plus a
 `preview_redaction_reason` when capture had to fail closed. The original hash and byte count always
 describe upstream bytes, not a sanitized preview.
 
 Each record includes query-free request provenance (`method`, `path`, and a one-based stream call
-ordinal). If an operation opens multiple streams, the recorder finalizes every retained reader and
+ordinal). Provenance never stores the origin, URL userinfo, query, or fragment. Every retained path
+segment is scrubbed before persistence: credential-key segments, values following those keys,
+known token shapes, and long high-entropy opaque segments become `[REDACTED]`. If an operation
+opens multiple streams, the recorder finalizes every retained reader and
 writes all evidence records in stream call order. Mixed ordinary HTTP and stream responses are
 written as a call-ordered array; evidence-only snapshot replay routes ordinary and stream calls to
 their respective next recorded response. A single-stream-only capture keeps the legacy object

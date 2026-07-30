@@ -91,6 +91,76 @@ describe("stream evidence capture", () => {
 		expect(evidence.preview_sanitized).toBeUndefined();
 	});
 
+	it("retains non-UTF8 bytes even when the declared content type is textual", async () => {
+		const body = new Uint8Array([0xc3, 0x28, 0xff, 0x00]);
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(body);
+				controller.close();
+			},
+		});
+		const capture = captureStreamEvidence(
+			streamResponse(source, { "content-type": "text/plain" }),
+			{ requestUrl: "https://example.test/non-utf8", sanitizeFixture },
+		);
+		for await (const _chunk of capture.response.bytes()) {
+			// Drain the handler-facing stream.
+		}
+		const evidence = await capture.getEvidence();
+		expect(Buffer.from(evidence.body_preview_base64, "base64")).toEqual(Buffer.from(body));
+		expect(evidence.preview_sanitized).toBeUndefined();
+	});
+
+	it("fails closed for PEM private keys and bare high-entropy tokens", async () => {
+		const previews = [
+			{
+				body: "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC\n-----END PRIVATE KEY-----",
+				reason: "pem-private-key",
+			},
+			{
+				body: "upstream response: qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z",
+				reason: "high-entropy-token",
+			},
+		] as const;
+
+		for (const item of previews) {
+			const source = new ReadableStream<Uint8Array>({
+				start(controller) {
+					controller.enqueue(Buffer.from(item.body));
+					controller.close();
+				},
+			});
+			const capture = captureStreamEvidence(streamResponse(source, {}), {
+				requestUrl: "https://example.test/text-secret",
+				sanitizeFixture,
+			});
+			for await (const _chunk of capture.response.bytes()) {
+				// Drain the handler-facing stream.
+			}
+			const evidence = await capture.getEvidence();
+			const retained = Buffer.from(evidence.body_preview_base64, "base64").toString("utf8");
+			expect(retained).not.toContain(item.body);
+			expect(evidence.preview_sanitized).toBeTrue();
+			expect(evidence.preview_redaction_reason).toBe(item.reason);
+		}
+	});
+
+	it("keeps zero-byte fail-closed evidence structurally valid", async () => {
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.close();
+			},
+		});
+		const capture = captureStreamEvidence(
+			streamResponse(source, { "content-type": "application/json" }),
+			{ requestUrl: "https://example.test/empty.json", sanitizeFixture },
+		);
+		const evidence = await capture.getEvidence();
+		expect(evidence.preview_sanitized).toBeTrue();
+		expect(evidence.preview_redaction_reason).toBe("malformed-json");
+		expect(parseStreamEvidenceRecord(evidence)).toEqual(evidence);
+	});
+
 	it("fails closed for a sensitive delimited-text column", async () => {
 		const body = Buffer.from("access_token,public\nlive-secret,retained\n");
 		const source = new ReadableStream<Uint8Array>({
@@ -286,7 +356,8 @@ describe("stream evidence capture", () => {
 			},
 		});
 		const capture = captureStreamEvidence(streamResponse(source), {
-			requestUrl: "https://user:password@example.test/fails?access_token=live-secret",
+			requestUrl:
+				"https://user:password@example.test/bot123456789:AAE9c8QvL1nX7wZ2rP6sT4uY5iO0aB3c/download?access_token=live-secret",
 		});
 		let thrown: unknown;
 		try {
@@ -297,7 +368,9 @@ describe("stream evidence capture", () => {
 			thrown = error;
 		}
 		expect(thrown).toBeInstanceOf(Error);
-		expect((thrown as Error).message).toContain("https://example.test/fails?[REDACTED]");
+		expect((thrown as Error).message).toContain(
+			"https://example.test/[REDACTED]/download?[REDACTED]",
+		);
 		expect((thrown as Error).message).not.toContain("password");
 		expect((thrown as Error).message).not.toContain("live-secret");
 	});
@@ -310,6 +383,9 @@ describe("stream evidence capture", () => {
 			},
 			cancel() {
 				upstreamCanceled = true;
+				return new Promise<void>(() => {
+					// A transport cancellation hook is allowed to remain unsettled forever.
+				});
 			},
 		});
 		const capture = captureStreamEvidence(streamResponse(source), {

@@ -2,9 +2,11 @@ import { createHash } from "node:crypto";
 
 import {
 	isSensitiveFixtureKey,
+	isSensitiveFixtureValue,
 	REDACTED_FIXTURE_VALUE,
 	sanitizeUrlForLogs,
 } from "./fixture-sanitization.js";
+import { toJsonValue, type JsonValue } from "./contract-json.js";
 import { readableBytes, readableLines, readableTextChunks } from "./stream.js";
 import type { HttpStreamResponse } from "./types.js";
 
@@ -15,13 +17,10 @@ const STREAM_EVIDENCE_HEADER_NAMES = [
 	"content-length",
 	"content-type",
 ] as const;
+type StreamEvidenceHeaderName = (typeof STREAM_EVIDENCE_HEADER_NAMES)[number];
 const STREAM_EVIDENCE_HEADERS = new Set<string>(STREAM_EVIDENCE_HEADER_NAMES);
 
-export interface StreamEvidenceHeaders {
-	"content-disposition"?: string;
-	"content-length"?: string;
-	"content-type"?: string;
-}
+export type StreamEvidenceHeaders = Partial<Record<StreamEvidenceHeaderName, string>>;
 
 export interface StreamEvidenceRequest {
 	ordinal: number;
@@ -29,15 +28,19 @@ export interface StreamEvidenceRequest {
 	path: string;
 }
 
-export type StreamEvidenceRedactionReason =
-	| "invalid-utf8"
-	| "malformed-json"
-	| "sanitized-preview-too-large"
-	| "sanitizer-error"
-	| "sanitizer-output-invalid"
-	| "sensitive-delimited-column"
-	| "textual-xml"
-	| "truncated-json";
+const STREAM_EVIDENCE_REDACTION_REASONS = [
+	"high-entropy-token",
+	"malformed-json",
+	"pem-private-key",
+	"sanitized-preview-too-large",
+	"sanitizer-error",
+	"sanitizer-output-invalid",
+	"sensitive-delimited-column",
+	"textual-xml",
+	"truncated-json",
+] as const;
+const STREAM_EVIDENCE_REDACTION_REASON_SET = new Set<string>(STREAM_EVIDENCE_REDACTION_REASONS);
+export type StreamEvidenceRedactionReason = (typeof STREAM_EVIDENCE_REDACTION_REASONS)[number];
 
 export interface StreamEvidenceRecord {
 	__apifuse_stream__: true;
@@ -65,9 +68,17 @@ export interface StreamEvidenceCapture {
 	getEvidence(): Promise<StreamEvidenceRecord>;
 }
 
+export type StreamCaptureGroupItem =
+	| { kind: "stream"; evidence: StreamEvidenceRecord }
+	| { kind: "response"; value: JsonValue };
+
+export interface StreamCaptureGroup {
+	items: StreamCaptureGroupItem[];
+}
+
 export type StreamEvidenceCaptureOptions = {
 	requestUrl: string;
-	sanitizeFixture?: (value: unknown) => unknown;
+	sanitizeFixture?: (value: JsonValue) => JsonValue;
 	request?: StreamEvidenceRequest;
 	finalizeTimeoutMs?: number;
 };
@@ -180,9 +191,22 @@ export function findStreamEvidenceRecords(value: unknown): StreamEvidenceRecord[
 		.map((candidate) => parseStreamEvidenceRecord(candidate));
 }
 
-/** Returns the latest mixed response group used by evidence-only snapshot replay. */
-export function findStreamCaptureGroup(value: unknown): unknown[] | undefined {
-	return findLatestStreamCaptureGroup(value);
+/** Returns a tagged latest mixed response group used by evidence-only snapshot replay. */
+export function findStreamCaptureGroup(value: unknown): StreamCaptureGroup | undefined {
+	const group = findLatestStreamCaptureGroup(value);
+	if (!group) return undefined;
+	return {
+		items: group.map((item): StreamCaptureGroupItem => {
+			if (hasStreamEvidenceMarker(item)) {
+				return { kind: "stream", evidence: parseStreamEvidenceRecord(item) };
+			}
+			const json = toJsonValue(item);
+			if (json === undefined) {
+				throw new Error("Stream capture group contains a non-JSON response value.");
+			}
+			return { kind: "response", value: json };
+		}),
+	};
 }
 
 export function isStreamEvidenceReplayResponse(
@@ -304,7 +328,7 @@ export function captureStreamEvidence(
 				}
 			})();
 			const timeoutMs = options.finalizeTimeoutMs ?? STREAM_FINALIZE_TIMEOUT_MS;
-			evidencePromise = withFinalizationTimeout(drainPromise, timeoutMs, async () => {
+			evidencePromise = withFinalizationTimeout(drainPromise, timeoutMs, () => {
 				const timeoutError = streamCaptureError(
 					`finalization timed out after ${timeoutMs}ms`,
 					options.requestUrl,
@@ -312,7 +336,9 @@ export function captureStreamEvidence(
 					bodyBytes,
 				);
 				terminalError ??= timeoutError;
-				await reader.cancel(timeoutError).catch(() => undefined);
+				void reader.cancel(timeoutError).catch((cancelError: unknown) => {
+					timeoutError.cause = cancelError;
+				});
 				return timeoutError;
 			});
 			return evidencePromise;
@@ -343,7 +369,7 @@ function createEvidenceRecord(
 	bodySha256: string,
 	bodyBytes: number,
 	preview: Uint8Array,
-	sanitizeFixture?: (value: unknown) => unknown,
+	sanitizeFixture?: (value: JsonValue) => JsonValue,
 	request?: StreamEvidenceRequest,
 ): StreamEvidenceRecord {
 	const contentType = headerValue(response.headers, "content-type");
@@ -352,6 +378,7 @@ function createEvidenceRecord(
 		: undefined;
 	const safePreview = sanitized?.preview ?? preview;
 	const previewChanged = !bytesEqual(safePreview, preview);
+	const previewSanitized = previewChanged || sanitized?.redactionReason !== undefined;
 
 	return {
 		__apifuse_stream__: true,
@@ -362,7 +389,7 @@ function createEvidenceRecord(
 		body_bytes: bodyBytes,
 		body_preview_base64: Buffer.from(safePreview).toString("base64"),
 		...(request ? { request } : {}),
-		...(previewChanged ? { preview_sanitized: true as const } : {}),
+		...(previewSanitized ? { preview_sanitized: true as const } : {}),
 		...(sanitized?.redactionReason ? { preview_redaction_reason: sanitized.redactionReason } : {}),
 	};
 }
@@ -376,22 +403,26 @@ function sanitizePreview(
 	preview: Uint8Array,
 	bodyBytes: number,
 	contentType: string | undefined,
-	sanitizeFixture: (value: unknown) => unknown,
+	sanitizeFixture: (value: JsonValue) => JsonValue,
 ): SanitizedPreview | undefined {
-	const decodedText = new TextDecoder().decode(preview);
-	const declaredTextual = isTextualContentType(contentType);
-	const sniffedTextual =
-		looksLikeJson(decodedText) || looksLikeXml(decodedText) || looksLikeText(decodedText);
-	if (!declaredTextual && !sniffedTextual) return undefined;
+	if (hasKnownBinaryMagic(preview)) return undefined;
 
-	let text = decodedText;
+	let text: string;
 	try {
 		text = new TextDecoder("utf-8", { fatal: true }).decode(preview);
 	} catch {
-		return redactedSanitizedPreview(preview.byteLength, "invalid-utf8");
+		// Sanitized recording deliberately retains genuinely non-textual bytes.
+		return undefined;
 	}
 
+	const declaredTextual = isTextualContentType(contentType);
+	const sniffedTextual = looksLikeJson(text) || looksLikeXml(text) || looksLikeText(text);
+	if (!declaredTextual && !sniffedTextual) return undefined;
+
 	const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
+	if (looksLikePemPrivateKey(text)) {
+		return redactedSanitizedPreview(preview.byteLength, "pem-private-key");
+	}
 	if (mediaType.includes("xml") || looksLikeXml(text)) {
 		return redactedSanitizedPreview(preview.byteLength, "textual-xml");
 	}
@@ -402,7 +433,7 @@ function sanitizePreview(
 			return redactedSanitizedPreview(preview.byteLength, "truncated-json");
 		}
 		try {
-			sanitizedText = JSON.stringify(sanitizeFixture(JSON.parse(text)));
+			sanitizedText = JSON.stringify(sanitizeFixture(JSON.parse(text) as JsonValue));
 		} catch (error) {
 			return redactedSanitizedPreview(
 				preview.byteLength,
@@ -415,7 +446,7 @@ function sanitizePreview(
 			return redactedSanitizedPreview(preview.byteLength, "sanitizer-error");
 		}
 		const form = new URLSearchParams(text);
-		let sanitized: unknown;
+		let sanitized: JsonValue;
 		try {
 			sanitized = sanitizeFixture(Object.fromEntries(form.entries()));
 		} catch {
@@ -430,6 +461,18 @@ function sanitizePreview(
 			return redactedSanitizedPreview(preview.byteLength, "sensitive-delimited-column");
 		}
 		sanitizedText = redactSensitiveTextAssignments(text);
+		const tokenRedaction = redactHighEntropyTokens(sanitizedText);
+		if (tokenRedaction.redacted) {
+			sanitizedText = tokenRedaction.text;
+		}
+		const sanitizedBytes = new TextEncoder().encode(sanitizedText);
+		if (sanitizedBytes.byteLength > preview.byteLength) {
+			return redactedSanitizedPreview(preview.byteLength, "sanitized-preview-too-large");
+		}
+		return {
+			preview: fitSanitizedPreview(sanitizedBytes, preview.byteLength),
+			...(tokenRedaction.redacted ? { redactionReason: "high-entropy-token" as const } : {}),
+		};
 	}
 
 	const sanitizedBytes = new TextEncoder().encode(sanitizedText);
@@ -437,6 +480,20 @@ function sanitizePreview(
 		return redactedSanitizedPreview(preview.byteLength, "sanitized-preview-too-large", jsonPreview);
 	}
 	return { preview: fitSanitizedPreview(sanitizedBytes, preview.byteLength) };
+}
+
+function looksLikePemPrivateKey(text: string): boolean {
+	return /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(text);
+}
+
+function redactHighEntropyTokens(text: string): { text: string; redacted: boolean } {
+	let redacted = false;
+	const sanitized = text.replace(/[A-Za-z0-9_+/=.:~-]{24,}/g, (candidate) => {
+		if (!isSensitiveFixtureValue(candidate)) return candidate;
+		redacted = true;
+		return REDACTED_FIXTURE_VALUE;
+	});
+	return { text: sanitized, redacted };
 }
 
 function redactSensitiveTextAssignments(text: string): string {
@@ -469,7 +526,7 @@ function splitDelimitedRow(row: string, delimiter: string): string[] {
 	let value = "";
 	let quote = "";
 	for (let index = 0; index < row.length; index += 1) {
-		const character = row[index] ?? "";
+		const character = row.charAt(index);
 		if (quote) {
 			if (character === quote && row[index + 1] === quote) {
 				value += quote;
@@ -569,6 +626,25 @@ function looksLikeText(text: string): boolean {
 	return readable > 0 && suspicious / (readable + suspicious) < 0.02;
 }
 
+function hasKnownBinaryMagic(bytes: Uint8Array): boolean {
+	const signatures = [
+		[0x89, 0x50, 0x4e, 0x47], // PNG
+		[0xff, 0xd8, 0xff], // JPEG
+		[0x47, 0x49, 0x46, 0x38], // GIF
+		[0x25, 0x50, 0x44, 0x46], // PDF
+		[0x50, 0x4b, 0x03, 0x04], // ZIP and ZIP-based formats
+		[0x1f, 0x8b], // gzip
+		[0x7f, 0x45, 0x4c, 0x46], // ELF
+		[0x52, 0x61, 0x72, 0x21], // RAR
+		[0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c], // 7z
+	] as const;
+	return signatures.some(
+		(signature) =>
+			bytes.byteLength >= signature.length &&
+			signature.every((byte, index) => bytes[index] === byte),
+	);
+}
+
 function findLatestStreamCaptureGroup(value: unknown): unknown[] | undefined {
 	if (hasStreamEvidenceMarker(value)) {
 		parseStreamEvidenceRecord(value);
@@ -605,10 +681,18 @@ function findLatestStreamCaptureGroup(value: unknown): unknown[] | undefined {
 	}
 
 	let startIndex = 0;
-	for (let index = 1; index < directRecords.length; index += 1) {
-		const previous = directRecords[index - 1]?.record.request?.ordinal ?? 0;
-		const current = directRecords[index]?.record.request?.ordinal ?? 0;
-		if (current <= previous) startIndex = directRecords[index]?.index ?? startIndex;
+	let previous = directRecords[0];
+	if (!previous) return undefined;
+	for (const current of directRecords.slice(1)) {
+		const previousRequest = previous.record.request;
+		const currentRequest = current.record.request;
+		if (!previousRequest || !currentRequest) {
+			throw new Error("Stream capture grouping invariant violated: request provenance is missing.");
+		}
+		if (currentRequest.ordinal <= previousRequest.ordinal) {
+			startIndex = current.index;
+		}
+		previous = current;
 	}
 	return value.slice(startIndex);
 }
@@ -666,39 +750,29 @@ function streamEvidenceRequest(value: unknown): StreamEvidenceRequest {
 }
 
 function isStreamEvidenceRedactionReason(value: unknown): value is StreamEvidenceRedactionReason {
-	return (
-		value === "invalid-utf8" ||
-		value === "malformed-json" ||
-		value === "sanitized-preview-too-large" ||
-		value === "sanitizer-error" ||
-		value === "sanitizer-output-invalid" ||
-		value === "sensitive-delimited-column" ||
-		value === "textual-xml" ||
-		value === "truncated-json"
-	);
+	return typeof value === "string" && STREAM_EVIDENCE_REDACTION_REASON_SET.has(value);
 }
 
 function streamEvidenceHeaders(headers: Record<string, string>): StreamEvidenceHeaders {
-	return {
-		...(headers["content-disposition"] === undefined
-			? {}
-			: { "content-disposition": headers["content-disposition"] }),
-		...(headers["content-length"] === undefined
-			? {}
-			: { "content-length": headers["content-length"] }),
-		...(headers["content-type"] === undefined ? {} : { "content-type": headers["content-type"] }),
-	};
+	return selectEvidenceHeaders(Object.entries(headers));
 }
 
 function evidenceHeaders(headers: Record<string, string>): StreamEvidenceHeaders {
-	const evidence: StreamEvidenceHeaders = {};
-	for (const [name, value] of Object.entries(headers)) {
-		const normalizedName = name.toLowerCase();
-		if (normalizedName === "content-disposition") evidence["content-disposition"] = value;
-		if (normalizedName === "content-length") evidence["content-length"] = value;
-		if (normalizedName === "content-type") evidence["content-type"] = value;
-	}
-	return evidence;
+	return selectEvidenceHeaders(
+		Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]),
+	);
+}
+
+function selectEvidenceHeaders(
+	entries: Iterable<readonly [string, string]>,
+): StreamEvidenceHeaders {
+	const source = Object.fromEntries(entries);
+	return Object.fromEntries(
+		STREAM_EVIDENCE_HEADER_NAMES.flatMap((name) => {
+			const value = source[name];
+			return value === undefined ? [] : [[name, value]];
+		}),
+	);
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
@@ -709,12 +783,12 @@ function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
 function withFinalizationTimeout<T>(
 	promise: Promise<T>,
 	timeoutMs: number,
-	onTimeout: () => Promise<Error>,
+	onTimeout: () => Error,
 ): Promise<T> {
 	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
 	return new Promise<T>((resolve, reject) => {
 		const timeout = setTimeout(() => {
-			void onTimeout().then(reject, reject);
+			reject(onTimeout());
 		}, timeoutMs);
 		promise.then(
 			(value) => {
