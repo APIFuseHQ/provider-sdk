@@ -1216,7 +1216,8 @@ function createSessionFetcher(
 					}
 					// StealthResponse.url is programmatic metadata and remains raw. Only the
 					// redirect hop emitted below is a diagnostic surface.
-					const responseUrl = response.url ?? outboundUrl;
+					const responseUrl =
+						response.url ?? (hopIndex === 0 && initialSensitiveParams ? outboundUrl : currentUrl);
 
 					if (!isRedirectStatus(response.status)) {
 						return {

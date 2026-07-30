@@ -21,6 +21,13 @@ const HTTP_REQUEST_METHOD_CONFIG = {
 
 export type HttpRequestMethod = keyof typeof HTTP_REQUEST_METHOD_CONFIG;
 
+export type HttpRequestInvocation = {
+	[M in HttpRequestMethod]: {
+		method: M;
+		args: Parameters<HttpClient[M]>;
+	};
+}[HttpRequestMethod];
+
 export const HTTP_REQUEST_METHOD_NAMES = Object.keys(
 	HTTP_REQUEST_METHOD_CONFIG,
 ) as HttpRequestMethod[];
@@ -157,7 +164,14 @@ function sensitiveValueVariants(value: string): string[] {
 	if (!value || value === REDACTED_QUERY_VALUE) return [];
 
 	const formEncoded = new URLSearchParams({ value }).toString().slice("value=".length);
-	const componentEncoded = encodeURIComponent(value);
+	let componentEncoded: string;
+	try {
+		componentEncoded = encodeURIComponent(value);
+	} catch {
+		// encodeURIComponent rejects lone UTF-16 surrogates. The raw value is
+		// still safe to scrub, and URLSearchParams supplies its well-formed form.
+		componentEncoded = value;
+	}
 	return [...new Set([value, componentEncoded, formEncoded].map(normalizePercentEscapes))];
 }
 
@@ -246,13 +260,31 @@ function redactDiagnosticString(value: string, context: RedactionContext): strin
 	);
 }
 
+function redactClassificationString(value: string, context: RedactionContext): string {
+	let redacted =
+		context.requestUrl && context.redactedUrl
+			? value.replaceAll(context.requestUrl, context.redactedUrl)
+			: value;
+	for (const variant of allSensitiveValueVariants(context.sensitiveValues)) {
+		redacted = replaceSensitiveVariant(redacted, {
+			...variant,
+			requiresTokenBoundary: false,
+		});
+	}
+	return redacted;
+}
+
 function cloneForRedaction(source: object): object {
 	let clone: object;
 	try {
-		clone =
-			source instanceof DOMException
+		clone = Array.isArray(source)
+			? []
+			: source instanceof DOMException
 				? new DOMException(source.message, source.name)
 				: Object.create(Object.getPrototypeOf(source));
+		if (Array.isArray(source) && Object.getPrototypeOf(source) !== Array.prototype) {
+			Object.setPrototypeOf(clone, Object.getPrototypeOf(source));
+		}
 	} catch {
 		clone = source instanceof Error ? new Error() : {};
 	}
@@ -260,6 +292,7 @@ function cloneForRedaction(source: object): object {
 	for (const key of Reflect.ownKeys(source)) {
 		const descriptor = Object.getOwnPropertyDescriptor(source, key);
 		if (!descriptor) continue;
+		if (Array.isArray(source) && key === "length") continue;
 		try {
 			// Symbol properties include the SDK's immutable error brands. Preserve
 			// their descriptors exactly so replacement Provider/TransportErrors
@@ -355,7 +388,62 @@ function readDiagnosticProperty(
 	}
 }
 
-const DIAGNOSTIC_CLASSIFICATION_FIELDS = new Set(["name", "code", "status", "upstreamStatus"]);
+// These fields control error identity/classification downstream. Their values
+// are exempt from whole-value replacement, but strings are still scrubbed when
+// they contain an actual declared credential or request URL.
+const DIAGNOSTIC_CLASSIFICATION_FIELDS = new Set([
+	"name",
+	"code",
+	"status",
+	"upstreamStatus",
+	"category",
+	"retryable",
+]);
+
+// These SDK/server contract codes are semantic identities, not diagnostic
+// payload. Preserve them even when a low-entropy credential happens to match a
+// token inside the code; attacker-controlled code strings still take the
+// substring-scrubbing path below.
+const CANONICAL_ERROR_CODES = new Set([
+	"UPSTREAM_ERROR",
+	"reauth_required",
+	"transport_invalid_method",
+	"transport_invalid_url",
+	"transport_network_error",
+	"transport_stream_unavailable",
+	"transport_timeout",
+	"upstream_http_error",
+]);
+
+function isClassificationField(
+	context: RedactionContext,
+	propertyName: string | undefined,
+	parent: object | undefined,
+): boolean {
+	return Boolean(
+		propertyName &&
+			parent &&
+			context.classificationObjects.has(parent) &&
+			DIAGNOSTIC_CLASSIFICATION_FIELDS.has(propertyName),
+	);
+}
+
+function redactedDiagnosticKey(key: string, context: RedactionContext): string {
+	return redactClassificationString(key, context);
+}
+
+function hasRedactedOwnKey(value: object, context: RedactionContext): boolean {
+	return Object.getOwnPropertyNames(value).some(
+		(key) => redactedDiagnosticKey(key, context) !== key,
+	);
+}
+
+function collisionSafeDiagnosticKey(target: object, preferredKey: string): string {
+	if (!Object.hasOwn(target, preferredKey)) return preferredKey;
+	let suffix = 2;
+	while (Object.hasOwn(target, `${preferredKey}#${suffix}`)) suffix += 1;
+	return `${preferredKey}#${suffix}`;
+}
 
 function redactDiagnosticValue(
 	value: unknown,
@@ -363,19 +451,27 @@ function redactDiagnosticValue(
 	propertyName?: string,
 	parent?: object,
 ): unknown {
-	if (
-		propertyName &&
-		parent !== undefined &&
-		context.classificationObjects.has(parent) &&
-		DIAGNOSTIC_CLASSIFICATION_FIELDS.has(propertyName)
-	) {
-		return value;
+	const classificationField = isClassificationField(context, propertyName, parent);
+	if (classificationField && typeof value !== "string") return value;
+	if (typeof value === "string") {
+		if (propertyName === "code" && CANONICAL_ERROR_CODES.has(value)) return value;
+		return classificationField
+			? redactClassificationString(value, context)
+			: redactDiagnosticString(value, context);
 	}
-	if (typeof value === "string") return redactDiagnosticString(value, context);
 	if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
 		return context.sensitiveValues.includes(String(value)) ? REDACTED_QUERY_VALUE : value;
 	}
 	if ((typeof value !== "object" && typeof value !== "function") || value === null) return value;
+	if (value instanceof URL) {
+		const redactedUrl = redactDiagnosticString(value.toString(), context);
+		if (redactedUrl === value.toString()) return value;
+		try {
+			return new URL(redactedUrl);
+		} catch {
+			return redactedUrl;
+		}
+	}
 
 	const previouslySeen = context.seen.get(value);
 	if (previouslySeen !== undefined) return previouslySeen;
@@ -386,7 +482,9 @@ function redactDiagnosticValue(
 	// secret through the cloned node's earlier self-reference.
 	const keys = diagnosticPropertyKeys(value);
 	let target: object =
-		Object.isExtensible(value) && !requiresCloneBeforeRedaction(value, keys)
+		Object.isExtensible(value) &&
+		!requiresCloneBeforeRedaction(value, keys) &&
+		!hasRedactedOwnKey(value, context)
 			? value
 			: cloneForRedaction(value);
 	context.seen.set(value, target);
@@ -395,22 +493,34 @@ function redactDiagnosticValue(
 		const current = readDiagnosticProperty(value, key);
 		if (!current.ok) continue;
 		const redacted = redactDiagnosticValue(current.value, context, key, value);
-		if (Object.is(redacted, current.value)) continue;
+		const ownKey = Object.hasOwn(value, key);
+		const preferredKey = ownKey ? redactedDiagnosticKey(key, context) : key;
+		let targetKey = key;
+		if (preferredKey !== key) {
+			try {
+				Reflect.deleteProperty(target, key);
+			} catch {
+				// A clone is selected before traversal whenever an own key changes,
+				// so this is only a defensive fallback for exotic proxies.
+			}
+			targetKey = collisionSafeDiagnosticKey(target, preferredKey);
+		}
+		if (targetKey === key && Object.is(redacted, current.value)) continue;
 
-		if (!setDiagnosticProperty(target, key, redacted)) {
+		if (!setDiagnosticProperty(target, targetKey, redacted)) {
 			if (target === value) {
 				target = cloneForRedaction(value);
 				context.seen.set(value, target);
 			}
-			if (!setDiagnosticProperty(target, key, redacted)) {
+			if (!setDiagnosticProperty(target, targetKey, redacted)) {
 				// cloneForRedaction deliberately makes string-keyed own properties
 				// configurable. This is a last-resort path for inherited readonly
 				// accessors such as DOMException.message.
 				try {
-					Object.defineProperty(target, key, {
+					Object.defineProperty(target, targetKey, {
 						value: redacted,
 						configurable: true,
-						enumerable: key !== "message" && key !== "stack" && key !== "cause",
+						enumerable: targetKey !== "message" && targetKey !== "stack" && targetKey !== "cause",
 						writable: true,
 					});
 				} catch {
@@ -435,7 +545,9 @@ export function redactSensitiveError(
 	requestUrl?: string,
 	redactedUrl?: string,
 ): unknown {
-	if (sensitiveValues.length === 0) return error;
+	if (sensitiveValues.length === 0 && (!requestUrl || !redactedUrl || requestUrl === redactedUrl)) {
+		return error;
+	}
 	const classificationObjects = new Set<object>();
 	if ((typeof error === "object" || typeof error === "function") && error !== null) {
 		classificationObjects.add(error);
@@ -459,24 +571,37 @@ function isRequestOptions(value: unknown): value is RequestOptions {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/** Validates an untyped proxy invocation before narrowing it to the HttpClient contract. */
+export function parseHttpRequestInvocation(
+	method: PropertyKey,
+	args: unknown[],
+): HttpRequestInvocation | undefined {
+	if (!isHttpRequestMethod(method) || typeof args[0] !== "string") return undefined;
+	const optionsIndex = HTTP_REQUEST_METHOD_CONFIG[method].optionsIndex;
+	const options = args[optionsIndex];
+	if (options !== undefined && !isRequestOptions(options)) return undefined;
+
+	if (method === "post" || method === "put") {
+		if (args.length < 2 || args.length > 3) return undefined;
+		return { method, args: args as Parameters<HttpClient[typeof method]> };
+	}
+	if (args.length > 2) return undefined;
+	return { method, args: args as Parameters<HttpClient[typeof method]> };
+}
+
 /** Internal typed registry for the request-options position of HttpClient calls. */
 export function requestOptionsFromHttpInvocation(
-	method: PropertyKey,
-	args: readonly unknown[],
+	invocation: HttpRequestInvocation,
 ): RequestOptions | undefined {
-	if (!isHttpRequestMethod(method)) return undefined;
-	const candidate = args[HTTP_REQUEST_METHOD_CONFIG[method].optionsIndex];
+	const candidate = invocation.args[HTTP_REQUEST_METHOD_CONFIG[invocation.method].optionsIndex];
 	return isRequestOptions(candidate) ? candidate : undefined;
 }
 
 export function replaceRequestOptionsInHttpInvocation(
-	method: PropertyKey,
-	args: unknown[],
+	invocation: HttpRequestInvocation,
 	options: RequestOptions,
-): boolean {
-	if (!isHttpRequestMethod(method)) return false;
-	args[HTTP_REQUEST_METHOD_CONFIG[method].optionsIndex] = options;
-	return true;
+): void {
+	invocation.args[HTTP_REQUEST_METHOD_CONFIG[invocation.method].optionsIndex] = options;
 }
 
 export function normalizeHttpRequestBody(body: unknown): string | Buffer | undefined {

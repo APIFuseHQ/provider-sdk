@@ -26,6 +26,7 @@ import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import {
 	REDACTED_QUERY_VALUE,
 	normalizeSensitiveParams,
+	parseHttpRequestInvocation,
 	redactSensitiveError,
 	redactSensitiveText,
 	redactUrlQueryParams,
@@ -86,11 +87,14 @@ export async function main() {
 
 		const sensitiveParams = capture.getCapturedSensitiveParams();
 		const fixturePath = resolve(location.rootDir, "__fixtures__", "raw.json");
-		const mergedPayload = await prepareFixturePayload(fixturePath, captured, args.append);
-		// Redact after append history has been merged. A credential moved from
-		// ordinary params to sensitiveParams must also be removed from older entries.
-		const nextPayload = redactFixture(mergedPayload, sensitiveParams, args.sanitize);
 		const redactedCapture = redactFixture(captured, sensitiveParams, args.sanitize);
+		const mergedPayload = await prepareFixturePayload(fixturePath, redactedCapture, args.append);
+		// Mandatory query-secret redaction applies to the merged history, including
+		// values discovered in older declared-key URL positions. Optional common-
+		// field sanitization applies only to this run's new capture so --append does
+		// not rewrite deliberately preserved historical fields.
+		const historicalSensitiveParams = discoverSensitiveQueryValues(mergedPayload, sensitiveParams);
+		const nextPayload = redactFixture(mergedPayload, historicalSensitiveParams, false);
 
 		await mkdir(dirname(fixturePath), { recursive: true });
 		await writeFile(fixturePath, `${JSON.stringify(nextPayload, null, 2)}\n`);
@@ -438,7 +442,12 @@ function captureSensitiveRequestValues(
 		serializedUrl = serializeRequestUrl(absoluteUrl, options.params, sensitiveParams);
 	} catch (error) {
 		const structural = redactUrlQueryParams(String(url), [...names]);
-		throw new TypeError("Cannot securely record sensitiveParams for an invalid request URL.", {
+		const safeUrl = redactSensitiveText(structural.redactedUrl, [
+			...values,
+			...structural.sensitiveValues,
+		]);
+		const causeKind = error instanceof Error ? error.name : typeof error;
+		throw new TypeError(`Cannot securely record sensitiveParams for "${safeUrl}" (${causeKind}).`, {
 			cause: redactSensitiveError(
 				error,
 				[...values, ...structural.sensitiveValues],
@@ -486,11 +495,12 @@ function proxyHttpClient(
 			}
 
 			return async (...args: unknown[]) => {
-				const options = requestOptionsFromHttpInvocation(prop, args);
-				if (options) {
+				const invocation = parseHttpRequestInvocation(prop, args);
+				const options = invocation ? requestOptionsFromHttpInvocation(invocation) : undefined;
+				if (invocation && options) {
 					const snapshot = snapshotRequestOptions(options);
 					onSensitiveParams(String(args[0]), snapshot);
-					replaceRequestOptionsInHttpInvocation(prop, args, snapshot);
+					replaceRequestOptionsInHttpInvocation(invocation, snapshot);
 				}
 				const response = await value.apply(target, args);
 				onResponse(response);
@@ -512,6 +522,7 @@ function proxyStealthClient(
 			if (args[1]) args[1] = snapshotRequestOptions(args[1]);
 			onSensitiveParams(args[0], args[1]);
 			const response = await client.fetch(...args);
+			if (response.url) onSensitiveParams(response.url, args[1]);
 			onResponse(response);
 			return response;
 		},
@@ -530,6 +541,7 @@ function proxyStealthSession(
 			if (args[1]) args[1] = snapshotRequestOptions(args[1]);
 			onSensitiveParams(args[0], args[1]);
 			const response = await session.fetch(...args);
+			if (response.url) onSensitiveParams(response.url, args[1]);
 			onResponse(response);
 			return response;
 		},
@@ -545,6 +557,7 @@ function proxyStealthSession(
 					return callerStopWhen ? await callerStopWhen(hop) : false;
 				};
 				const result = await session.redirects.run(...args);
+				if (result.final.url) onSensitiveParams(result.final.url, args[0]);
 				onResponse(result.final);
 				return result;
 			},
@@ -601,9 +614,15 @@ function redactFixtureText(text: string, sensitiveParams: CapturedSensitiveParam
 	// and declared query-key positions are structurally redacted for every length.
 	let redacted = redactSensitiveText(text, sensitiveParams.values);
 	for (const name of sensitiveParams.names) {
+		let componentEncodedName = name;
+		try {
+			componentEncodedName = encodeURIComponent(name);
+		} catch {
+			// Lone surrogates remain covered by the raw and form-encoded variants.
+		}
 		const keyVariants = new Set([
 			name,
-			encodeURIComponent(name),
+			componentEncodedName,
 			new URLSearchParams({ [name]: "" }).toString().slice(0, -1),
 		]);
 		for (const key of keyVariants) {
@@ -615,6 +634,35 @@ function redactFixtureText(text: string, sensitiveParams: CapturedSensitiveParam
 		}
 	}
 	return redacted;
+}
+
+function discoverSensitiveQueryValues(
+	value: unknown,
+	sensitiveParams: CapturedSensitiveParams,
+): CapturedSensitiveParams {
+	const values = new Set(sensitiveParams.values);
+	const visitText = (text: string) => {
+		for (const discovered of redactUrlQueryParams(text, sensitiveParams.names).sensitiveValues) {
+			if (discovered !== "" && discovered !== REDACTED_QUERY_VALUE) values.add(discovered);
+		}
+	};
+	const visit = (current: unknown): void => {
+		if (typeof current === "string") {
+			visitText(current);
+			return;
+		}
+		if (Array.isArray(current)) {
+			for (const item of current) visit(item);
+			return;
+		}
+		if (!current || typeof current !== "object") return;
+		for (const [key, entryValue] of Object.entries(current as MutableRecord)) {
+			visitText(key);
+			visit(entryValue);
+		}
+	};
+	visit(value);
+	return { names: sensitiveParams.names, values: [...values] };
 }
 
 function collisionSafeKey(record: MutableRecord, preferredKey: string): string {

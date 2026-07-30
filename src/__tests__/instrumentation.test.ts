@@ -13,6 +13,7 @@ import type {
 	HttpClient,
 	ProviderContext,
 	StealthClient,
+	StealthSession,
 } from "../types.js";
 
 function createMockHttpResponse(requestId: string, duration: number) {
@@ -294,9 +295,7 @@ describe("wrapWithInstrumentation", () => {
 		).rejects.toThrow("serviceKey=[REDACTED]");
 
 		const span = instrumented.trace.getSpans()[0];
-		expect(span?.attributes.url).toBe(
-			"https://api.example.com/items?page=2&legacyKey=[REDACTED]&serviceKey=[REDACTED]",
-		);
+		expect(span?.attributes.url).toBe("https://api.example.com/items?serviceKey=[REDACTED]");
 		const serializedSpan = JSON.stringify(span);
 		expect(serializedSpan).toContain("[REDACTED]");
 		expect(serializedSpan).not.toContain(secret);
@@ -461,7 +460,7 @@ describe("wrapWithInstrumentation", () => {
 		expect(JSON.stringify(spans)).not.toContain(secret);
 	});
 
-	it("records lazy stream and SSE consumption failures without sensitiveParams", async () => {
+	it("does not expand tracing for lazy stream and SSE consumption without sensitiveParams", async () => {
 		const ctx = createMockContext();
 		ctx.http.stream = mock(async () => {
 			const body = new ReadableStream<Uint8Array>({
@@ -491,21 +490,21 @@ describe("wrapWithInstrumentation", () => {
 		const instrumented = wrapWithInstrumentation(ctx);
 
 		const stream = await instrumented.http.stream("https://api.example.com/logs");
-		await expect(async () => {
-			for await (const _line of stream.lines()) {
-				// The source errors before yielding a line.
-			}
-		}).toThrow("ordinary stream failed");
+		await expect(stream.body.getReader().read()).rejects.toThrow("ordinary stream failed");
 		const events = await instrumented.http.sse("https://api.example.com/events");
-		await expect(async () => {
-			for await (const _event of events) {
-				// The source errors before yielding an event.
-			}
-		}).toThrow("ordinary SSE failed");
+		await expect(
+			(async () => {
+				for await (const _event of events) {
+					// The source errors before yielding an event.
+				}
+			})(),
+		).rejects.toThrow("ordinary SSE failed");
 
 		const spans = instrumented.trace.getSpans();
-		expect(spans.find((span) => span.name === "http.stream.consume")?.status).toBe("error");
-		expect(spans.find((span) => span.name === "http.sse.consume")?.status).toBe("error");
+		expect(spans.filter((span) => span.name === "http.stream")).toHaveLength(1);
+		expect(spans.filter((span) => span.name === "http.sse")).toHaveLength(1);
+		expect(spans.some((span) => span.name === "http.stream.consume")).toBe(false);
+		expect(spans.some((span) => span.name === "http.sse.consume")).toBe(false);
 	});
 });
 
@@ -597,21 +596,55 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 		// instrumented namespace and must not come back as a Promise.
 		const session = instrumented.stealth.createSession();
 		expect(isThenableForTest(session)).toBe(false);
-		const response = await session.fetch("https://secure.example.com/home");
+		const response = await session.fetch("https://secure.example.com/home", {
+			sensitiveParams: { serviceKey: "session-secret" },
+		});
 		expect(response.ok).toBe(true);
 		expect(instrumented.trace.getSpans().some((span) => span.name === "stealth.fetch")).toBe(true);
 	});
 
-	it("instruments redirects.run on a synchronous stealth session", async () => {
+	it("instruments only sensitive session traffic and records redirect termination details", async () => {
 		const ctx = createMockContext();
 		const final = await ctx.stealth.fetch("https://secure.example.com/final");
-		ctx.stealth.createSession = mock(() => ({
+		const cookies: StealthSession["cookies"] = {
+			get: () => undefined,
+			getAll: () => ({}),
+			toString: () => "",
+			has: () => false,
+			setFromCookieStrings: () => {},
+			toHeader: () => "",
+			snapshot: () => ({}),
+			restore: () => {},
+			serialize: () => ({
+				version: 1,
+				jar: {
+					version: "tough-cookie@6.0.0",
+					storeType: "MemoryCookieStore",
+					rejectPublicSuffixes: true,
+					enableLooseMode: false,
+					allowSpecialUseDomain: true,
+					prefixSecurity: "silent",
+					cookies: [],
+				},
+			}),
+			deserialize: () => {},
+			clear: () => {},
+		};
+		const mockSession = {
 			fetch: ctx.stealth.fetch,
+			cookies,
 			redirects: {
-				run: async () => ({
+				run: async (options) => ({
 					final,
-					hops: [],
-					reason: "completed" as const,
+					hops: [
+						{
+							url: options.url,
+							status: 302,
+							method: "GET",
+							nextUrl: `${options.url}?serviceKey=rotated-session-secret`,
+						},
+					],
+					reason: "loop" as const,
 					cookies: {},
 					cookieStore: {
 						version: 1 as const,
@@ -628,15 +661,30 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 				}),
 			},
 			close: () => {},
-		})) as unknown as StealthClient["createSession"];
+		} satisfies StealthSession;
+		ctx.stealth.createSession = mock(() => mockSession);
 		const instrumented = wrapWithInstrumentation(ctx);
 
 		const session = instrumented.stealth.createSession();
-		await session.redirects.run({ url: "https://secure.example.com/login" });
+		await session.fetch("https://secure.example.com/ordinary");
+		await session.redirects.run({ url: "https://secure.example.com/ordinary" });
+		expect(instrumented.trace.getSpans()).toHaveLength(0);
+		await session.redirects.run({
+			url: "https://secure.example.com/login",
+			sensitiveParams: { serviceKey: "session-secret" },
+		});
 
-		expect(
-			instrumented.trace.getSpans().some((span) => span.name === "stealth.redirects.run"),
-		).toBe(true);
+		const redirectSpan = instrumented.trace
+			.getSpans()
+			.find((span) => span.name === "stealth.redirects.run");
+		expect(redirectSpan?.attributes).toMatchObject({
+			redirect_reason: "loop",
+			redirect_hop_count: 1,
+			status: 201,
+		});
+		expect(redirectSpan?.attributes.redirect_path).toContain("serviceKey=[REDACTED]");
+		expect(JSON.stringify(redirectSpan)).not.toContain("session-secret");
+		expect(JSON.stringify(redirectSpan)).not.toContain("rotated-session-secret");
 	});
 });
 

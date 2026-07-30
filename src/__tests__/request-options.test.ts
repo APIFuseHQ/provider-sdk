@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { TransportError } from "../errors.js";
+import { ProviderError, SessionExpiredError, TransportError } from "../errors.js";
 import {
 	REDACTED_QUERY_VALUE,
 	redactSensitiveError,
@@ -138,15 +138,60 @@ describe("sensitive request diagnostics", () => {
 		expect(redacted.endpoint).toBe("https://example.com/?key=[REDACTED]");
 	});
 
-	it("preserves error classification fields that equal a sensitive value", () => {
-		const error = Object.assign(new Error("request timeout for timeout"), {
-			code: "timeout",
+	it("scrubs secrets inside string classification fields while preserving normal error identity", () => {
+		const secret = "classification-secret";
+		const requestUrl = `https://example.com/next?serviceKey=${secret}`;
+		const redactedUrl = "https://example.com/next?serviceKey=[REDACTED]";
+		const error = Object.assign(new Error(`request failed for ${secret}`), {
+			name: `Upstream ${secret} Error`,
+			code: "UPSTREAM_ERROR",
 			status: 500,
 			upstreamStatus: 500,
 		});
-		const redacted = redactSensitiveError(error, ["timeout", "500"]);
-		expect(redacted.message).toBe("request [REDACTED] for [REDACTED]");
-		expect(redacted).toMatchObject({ code: "timeout", status: 500, upstreamStatus: 500 });
+		const providerError = new ProviderError("redirect failed", {
+			code: requestUrl,
+			category: "upstream",
+			retryable: false,
+		});
+		const shortSecretError = Object.assign(new Error("short"), {
+			code: "prefixapisuffix",
+		});
+
+		const redacted = redactSensitiveError(
+			error,
+			[secret, "500", "UPSTREAM_ERROR"],
+			requestUrl,
+			redactedUrl,
+		);
+		const redactedProviderError = redactSensitiveError(
+			providerError,
+			[secret, "false", "upstream"],
+			requestUrl,
+			redactedUrl,
+		);
+		redactSensitiveError(shortSecretError, ["api"]);
+		expect(redacted.message).toBe("request failed for [REDACTED]");
+		expect(redacted).toMatchObject({
+			name: "Upstream [REDACTED] Error",
+			code: "UPSTREAM_ERROR",
+			status: 500,
+			upstreamStatus: 500,
+		});
+		expect(redactedProviderError).toBe(providerError);
+		expect(providerError.code).toBe(redactedUrl);
+		expect(providerError.options).toMatchObject({
+			category: REDACTED_QUERY_VALUE,
+			retryable: false,
+		});
+		expect(shortSecretError.code).toBe("prefix[REDACTED]suffix");
+
+		const sessionExpired = new SessionExpiredError();
+		redactSensitiveError(sessionExpired, [secret]);
+		expect(sessionExpired).toMatchObject({ name: "SessionExpiredError", code: "reauth_required" });
+		expect(sessionExpired.options).toMatchObject({
+			category: "credential_expired",
+			retryable: false,
+		});
 	});
 
 	it("redacts untrusted nested name and code metadata", () => {
@@ -182,6 +227,30 @@ describe("sensitive request diagnostics", () => {
 		expect(redactedCycle).not.toBe(cycle);
 		expect(redactedCycle.self).toBe(redactedCycle);
 		expect(redactedCycle.url).toBe("https://example.com/?serviceKey=[REDACTED]");
+
+		const frozenArray = Object.freeze(["safe", `value=${secret}`]);
+		const redactedArray = redactSensitiveError(frozenArray, [secret]);
+		expect(Array.isArray(redactedArray)).toBe(true);
+		expect(redactedArray).toEqual(["safe", "value=[REDACTED]"]);
+	});
+
+	it("scrubs sensitive property names, URL internal data, and lone surrogates", () => {
+		const secret = "key-secret";
+		const diagnostic = {
+			[secret]: true,
+			"[REDACTED]": false,
+			prefixapisuffix: "short-key",
+			endpoint: new URL(`https://example.com/?serviceKey=${secret}`),
+		};
+		const redacted = redactSensitiveError(diagnostic, [secret, "api", "\ud800"]);
+		expect(new Set(Object.keys(redacted))).toEqual(
+			new Set(["[REDACTED]", "prefix[REDACTED]suffix", "endpoint", "[REDACTED]#2"]),
+		);
+		expect(String(redacted.endpoint)).toBe("https://example.com/?serviceKey=[REDACTED]");
+		expect(() => redactSensitiveText("bad \ud800 diagnostic", ["\ud800"])).not.toThrow();
+		expect(redactSensitiveText("bad \ud800 diagnostic", ["\ud800"])).toBe(
+			"bad [REDACTED] diagnostic",
+		);
 	});
 
 	it("redacts non-Error thrown values", () => {

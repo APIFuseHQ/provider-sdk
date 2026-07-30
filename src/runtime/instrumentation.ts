@@ -1,15 +1,15 @@
 import type {
-	HttpClient,
 	HttpStreamResponse,
 	ProviderContext,
 	RequestOptions,
 	SseMessage,
-	StealthClient,
 	StealthSession,
+	StealthRedirectRunResult,
 } from "../types.js";
 import { readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import {
-	isHttpRequestMethod,
+	parseHttpRequestInvocation,
+	normalizeSensitiveParams,
 	redactSensitiveError,
 	redactSensitiveText,
 	redactUrlQueryParams,
@@ -37,27 +37,12 @@ const DIAGNOSTIC_BASE_URL = "http://apifuse-instrumentation.invalid";
 
 type RequestDiagnostics = {
 	diagnosticUrlDegraded?: boolean;
-	hasSensitiveParams?: boolean;
 	requestId?: string;
 	serializedUrl?: SerializedRequestUrl;
+	sensitiveParamNames: readonly string[];
 	sensitiveValues: readonly string[];
+	traceUrl?: string;
 };
-
-type HttpRequestInvocation = {
-	[M in keyof HttpClient]: {
-		namespace: "http";
-		method: M;
-		args: Parameters<HttpClient[M]>;
-	};
-}[keyof HttpClient];
-
-type InstrumentedRequestInvocation =
-	| HttpRequestInvocation
-	| {
-			namespace: "stealth";
-			method: "fetch";
-			args: Parameters<StealthClient["fetch"]>;
-	  };
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
 	return (
@@ -135,29 +120,21 @@ function getUrl(
 	return undefined;
 }
 
-function requestInvocation(
+function requestOptionsForInvocation(
 	namespace: InstrumentedNamespace,
 	methodName: string,
 	args: readonly unknown[],
-): InstrumentedRequestInvocation | undefined {
-	if (namespace === "http" && isHttpRequestMethod(methodName)) {
-		return { namespace, method: methodName, args } as HttpRequestInvocation;
-	}
-	return namespace === "stealth" && methodName === "fetch"
-		? ({ namespace, method: methodName, args } as InstrumentedRequestInvocation)
-		: undefined;
-}
-
-function requestOptionsForInvocation(
-	invocation: InstrumentedRequestInvocation | undefined,
 ): RequestOptions | undefined {
-	if (!invocation) return undefined;
-	if (invocation.namespace === "http") {
-		return requestOptionsFromHttpInvocation(invocation.method, invocation.args);
+	if (namespace === "http") {
+		const invocation = parseHttpRequestInvocation(methodName, [...args]);
+		return invocation ? requestOptionsFromHttpInvocation(invocation) : undefined;
 	}
-	const options = invocation.args[1];
-	return options && typeof options === "object"
-		? (options as Parameters<StealthClient["fetch"]>[1])
+	if (namespace !== "stealth" || methodName !== "fetch" || typeof args[0] !== "string") {
+		return undefined;
+	}
+	const options = args[1];
+	return options !== null && typeof options === "object" && !Array.isArray(options)
+		? (options as RequestOptions)
 		: undefined;
 }
 
@@ -218,22 +195,27 @@ function snapshotRequestDiagnostics(
 	methodName: string,
 	args: readonly unknown[],
 ): RequestDiagnostics {
-	const options = requestOptionsForInvocation(requestInvocation(namespace, methodName, args));
+	const options = requestOptionsForInvocation(namespace, methodName, args);
 	const url = typeof args[0] === "string" ? args[0] : undefined;
 	const hasSensitiveParams = Boolean(
 		options?.sensitiveParams && Object.keys(options.sensitiveParams).length > 0,
 	);
+	const sensitiveParamNames = Object.keys(options?.sensitiveParams ?? {});
 	const diagnosticUrl =
 		hasSensitiveParams && url ? serializeDiagnosticUrl(url, options) : undefined;
-	const tracksLazyConsumption =
-		namespace === "http" && (methodName === "stream" || methodName === "sse");
+	const traceUrl =
+		hasSensitiveParams && url
+			? serializeDiagnosticUrl(url, { sensitiveParams: options?.sensitiveParams }).serializedUrl
+					.redactedUrl
+			: undefined;
 	return {
-		hasSensitiveParams,
 		...(diagnosticUrl?.degraded ? { diagnosticUrlDegraded: true } : {}),
-		...(hasSensitiveParams || tracksLazyConsumption ? { requestId: crypto.randomUUID() } : {}),
+		...(hasSensitiveParams ? { requestId: crypto.randomUUID() } : {}),
 		serializedUrl: diagnosticUrl?.serializedUrl,
+		sensitiveParamNames,
 		sensitiveValues:
 			diagnosticUrl?.serializedUrl.sensitiveValues ?? fallbackSensitiveValues(options),
+		traceUrl,
 	};
 }
 
@@ -380,11 +362,11 @@ function buildSpanAttributes(
 	args: unknown[],
 	result?: unknown,
 	error?: unknown,
-	diagnostics: RequestDiagnostics = { sensitiveValues: [] },
+	diagnostics: RequestDiagnostics = { sensitiveParamNames: [], sensitiveValues: [] },
 ): Record<string, string | number | boolean> {
 	const attributes: Record<string, string | number | boolean> = {};
 	const rawUrl = getUrl(namespace, args, result);
-	const structuralUrl = diagnostics.serializedUrl?.redactedUrl ?? rawUrl;
+	const structuralUrl = diagnostics.traceUrl ?? rawUrl;
 	const url = structuralUrl
 		? redactSensitiveText(
 				structuralUrl,
@@ -423,6 +405,56 @@ function buildSpanAttributes(
 		}
 	}
 
+	return attributes;
+}
+
+function isStealthRedirectRunResult(value: unknown): value is StealthRedirectRunResult {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"reason" in value &&
+		typeof value.reason === "string" &&
+		"hops" in value &&
+		Array.isArray(value.hops) &&
+		"final" in value &&
+		typeof value.final === "object" &&
+		value.final !== null
+	);
+}
+
+function buildStealthRedirectAttributes(
+	args: unknown[],
+	result: unknown,
+	error: unknown,
+	diagnostics: RequestDiagnostics,
+): Record<string, string | number | boolean> {
+	const attributes = buildSpanAttributes("stealth", "fetch", args, undefined, error, diagnostics);
+	if (!isStealthRedirectRunResult(result)) return attributes;
+
+	attributes.redirect_reason = result.reason;
+	attributes.redirect_hop_count = result.hops.length;
+	attributes.status = result.final.status;
+	if (result.hops.length > 0) {
+		const path = result.hops
+			.map((hop) => {
+				const structural = redactUrlQueryParams(
+					hop.nextUrl ?? hop.url,
+					diagnostics.sensitiveParamNames,
+				);
+				const safeUrl = redactSensitiveText(structural.redactedUrl, [
+					...diagnostics.sensitiveValues,
+					...structural.sensitiveValues,
+				]);
+				return `${hop.method} ${hop.status} ${safeUrl}`;
+			})
+			.join(" -> ");
+		attributes.redirect_path = redactSensitiveText(
+			path,
+			diagnostics.sensitiveValues,
+			diagnostics.serializedUrl?.requestUrl,
+			diagnostics.serializedUrl?.redactedUrl,
+		);
+	}
 	return attributes;
 }
 
@@ -520,6 +552,9 @@ function wrapStealthRedirects(
 
 	return {
 		run(...args: Parameters<StealthSession["redirects"]["run"]>) {
+			if (!normalizeSensitiveParams(args[0].sensitiveParams)) {
+				return redirects.run(...args);
+			}
 			const diagnosticArgs = [args[0].url, args[0]];
 			const diagnostics = snapshotRequestDiagnostics("stealth", "fetch", diagnosticArgs);
 			let result: ReturnType<StealthSession["redirects"]["run"]>;
@@ -535,14 +570,7 @@ function wrapStealthRedirects(
 						},
 						{
 							onError: (spanError) =>
-								buildSpanAttributes(
-									"stealth",
-									"fetch",
-									diagnosticArgs,
-									undefined,
-									spanError,
-									diagnostics,
-								),
+								buildStealthRedirectAttributes(diagnosticArgs, undefined, spanError, diagnostics),
 						},
 					)
 					.catch(() => undefined);
@@ -554,23 +582,27 @@ function wrapStealthRedirects(
 			});
 			return recorder.runSpan("stealth.redirects.run", () => sanitizedResult, {
 				onSuccess: (spanResult) =>
-					buildSpanAttributes(
-						"stealth",
-						"fetch",
-						diagnosticArgs,
-						spanResult,
-						undefined,
-						diagnostics,
-					),
+					buildStealthRedirectAttributes(diagnosticArgs, spanResult, undefined, diagnostics),
 				onError: (error) =>
-					buildSpanAttributes("stealth", "fetch", diagnosticArgs, undefined, error, diagnostics),
+					buildStealthRedirectAttributes(diagnosticArgs, undefined, error, diagnostics),
 			});
 		},
 	};
 }
 
 function wrapStealthSession(session: StealthSession, trace: TraceContext): StealthSession {
-	const wrappedSession = wrapNamespace("stealth", session, trace);
+	const wrappedSession = wrapNamespace(
+		"stealth",
+		session,
+		trace,
+		(methodName, args) =>
+			methodName === "fetch" &&
+			Boolean(
+				normalizeSensitiveParams(
+					requestOptionsForInvocation("stealth", methodName, args)?.sensitiveParams,
+				),
+			),
+	);
 	if (!session.redirects) return wrappedSession;
 	const redirects = wrapStealthRedirects(session.redirects, trace);
 	return new Proxy(wrappedSession, {
@@ -584,6 +616,7 @@ function wrapNamespace<T extends object>(
 	namespace: InstrumentedNamespace,
 	target: T,
 	trace: TraceContext,
+	shouldInstrument?: (methodName: string, args: unknown[]) => boolean,
 ): T {
 	const recorder = getTraceRecorder(trace);
 	if (!recorder) {
@@ -680,6 +713,9 @@ function wrapNamespace<T extends object>(
 			}
 
 			const wrapped = (...args: unknown[]) => {
+				if (shouldInstrument && !shouldInstrument(methodName, args)) {
+					return Reflect.apply(value, namespaceTarget, args);
+				}
 				const requestDiagnostics = snapshotRequestDiagnostics(namespace, methodName, args);
 				// Invoke first and decide by the RETURN VALUE. `runSpan` always
 				// returns a Promise, so unconditionally span-wrapping every member
@@ -759,13 +795,13 @@ function wrapNamespace<T extends object>(
 					onError: (error) =>
 						buildSpanAttributes(namespace, methodName, args, undefined, error, requestDiagnostics),
 				});
-				return namespace === "http" && methodName === "stream"
+				return namespace === "http" && methodName === "stream" && requestDiagnostics.requestId
 					? tracedResult.then((spanResult) =>
 							isHttpStreamResponse(spanResult)
 								? instrumentHttpStreamConsumption(spanResult, recorder, args, requestDiagnostics)
 								: spanResult,
 						)
-					: namespace === "http" && methodName === "sse"
+					: namespace === "http" && methodName === "sse" && requestDiagnostics.requestId
 						? tracedResult.then((spanResult) =>
 								isAsyncIterable<SseMessage>(spanResult)
 									? instrumentHttpSseConsumption(spanResult, recorder, args, requestDiagnostics)

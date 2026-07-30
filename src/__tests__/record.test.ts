@@ -138,7 +138,7 @@ export default {
 		}
 	});
 
-	it("redacts every declared-key value, scalar echo, property key, and append-history entry", async () => {
+	it("redacts declared append-history secrets without re-sanitizing historical common fields", async () => {
 		let requestedUrl: string | undefined;
 		const upstream = createServer((request, response) => {
 			requestedUrl = request.url;
@@ -199,7 +199,11 @@ export default {
 			mkdirSync(join(providerDir, "__fixtures__"), { recursive: true });
 			writeFileSync(
 				join(providerDir, "__fixtures__", "raw.json"),
-				JSON.stringify({ legacy: "/payload?serviceKey=params-secret" }),
+				JSON.stringify({
+					legacy: "/payload?serviceKey=old-secret",
+					echo: "old-secret",
+					authorization: "historical-public-value",
+				}),
 			);
 
 			const process = Bun.spawn({
@@ -210,7 +214,6 @@ export default {
 					providerDir,
 					"--operation",
 					"lookup",
-					"--no-sanitize",
 					"--append",
 				],
 				cwd: repoRoot,
@@ -234,7 +237,11 @@ export default {
 			expect(fixtureSource).not.toContain("space +/%=");
 			expect(fixtureSource).not.toContain("space+%2B%2f%25%3d");
 			expect(JSON.parse(fixtureSource)).toEqual([
-				{ legacy: "/payload?serviceKey=[REDACTED]" },
+				{
+					legacy: "/payload?serviceKey=[REDACTED]",
+					echo: "[REDACTED]",
+					authorization: "historical-public-value",
+				},
 				{
 					page: "1",
 					requestUrl:
@@ -338,6 +345,11 @@ export default {
 				const value = url.searchParams.get(key);
 				if (value) receivedSecrets.push(value);
 			}
+			if (url.pathname === "/direct") {
+				response.writeHead(302, { location: "/direct-final?directKey=rotated-direct-secret" });
+				response.end();
+				return;
+			}
 			if (url.pathname === "/redirect") {
 				response.writeHead(302, { location: "/final?redirectKey=rotated-secret" });
 				response.end();
@@ -399,6 +411,7 @@ export default {
 			expect(exitCode).toBe(0);
 			expect(receivedSecrets).toEqual([
 				"direct-secret",
+				"rotated-direct-secret",
 				"session-secret",
 				"redirect-secret",
 				"rotated-secret",
@@ -406,7 +419,7 @@ export default {
 			const fixtureSource = readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8");
 			for (const secret of receivedSecrets) expect(fixtureSource).not.toContain(secret);
 			expect(JSON.parse(fixtureSource)).toEqual({
-				receivedSecrets: ["[REDACTED]", "[REDACTED]", "[REDACTED]", "[REDACTED]"],
+				receivedSecrets: ["[REDACTED]", "[REDACTED]", "[REDACTED]", "[REDACTED]", "[REDACTED]"],
 			});
 		} finally {
 			await new Promise<void>((resolve, reject) => {

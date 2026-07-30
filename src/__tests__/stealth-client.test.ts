@@ -1,6 +1,11 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { SDKError, StealthCookieStoreVersionError, TransportError } from "../errors.js";
+import {
+	ProviderError,
+	SDKError,
+	StealthCookieStoreVersionError,
+	TransportError,
+} from "../errors.js";
 import { normalizeResponse } from "../runtime/stealth.js";
 import {
 	type DeclarativeStealthResponse,
@@ -17,6 +22,7 @@ type MockImpitResponse = {
 	streamChunks?: Uint8Array[];
 	streamState?: MockBodyState;
 	url?: string;
+	omitUrl?: boolean;
 	redirected?: boolean;
 };
 
@@ -83,7 +89,7 @@ function toImpitResponse(response: MockImpitResponse) {
 		status: response.status,
 		ok: response.status >= 200 && response.status < 300,
 		headers,
-		url: response.url ?? "https://example.com/final",
+		...(response.omitUrl ? {} : { url: response.url ?? "https://example.com/final" }),
 		redirected: response.redirected,
 		json: async () => JSON.parse(response.body),
 		text: async () => response.body,
@@ -1390,6 +1396,37 @@ describe("createStealthClient", () => {
 		);
 	});
 
+	it("preserves params-only fragment redirects when the transport omits response.url", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 302,
+				body: "",
+				headers: { location: "#continue" },
+				omitUrl: true,
+			},
+			{
+				status: 200,
+				body: "done",
+				headers: {},
+				url: "https://example.com/login#continue",
+			},
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+
+		const result = await session.redirects.run({
+			url: "/login",
+			params: { client_id: "abc" },
+		});
+
+		expect(mockStealthState.clients[0]?.calls.map((call) => call.url)).toEqual([
+			"https://example.com/login?client_id=abc",
+			"https://example.com/login#continue",
+		]);
+		expect(result.hops[0]?.url).toBe("https://example.com/login");
+		expect(result.hops[0]?.nextUrl).toBe("https://example.com/login#continue");
+	});
+
 	it("keeps params-only redirect loop detection on the caller URL", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 302,
@@ -1634,7 +1671,7 @@ describe("createStealthClient", () => {
 		expect(String(thrown)).toContain("[REDACTED]");
 	});
 
-	it("redacts raw hop URLs from stopWhen exceptions", async () => {
+	it("redacts raw hop URLs from ProviderError classification fields in stopWhen", async () => {
 		const secret = "stop-callback-secret";
 		mockStealthState.queuedResponses.push({
 			status: 302,
@@ -1650,7 +1687,11 @@ describe("createStealthClient", () => {
 				url: "/login",
 				sensitiveParams: { serviceKey: secret },
 				stopWhen: (hop) => {
-					throw new Error(`Unexpected redirect to ${hop.nextUrl}`);
+					throw new ProviderError(`Unexpected redirect to ${hop.nextUrl}`, {
+						code: hop.nextUrl,
+						category: "upstream",
+						retryable: false,
+					});
 				},
 			});
 		} catch (error) {
@@ -1660,6 +1701,12 @@ describe("createStealthClient", () => {
 		expect(String(thrown)).toContain("serviceKey=[REDACTED]");
 		expect(String(thrown)).not.toContain(secret);
 		expect((thrown as Error).stack).not.toContain(secret);
+		expect(thrown).toBeInstanceOf(ProviderError);
+		expect((thrown as ProviderError).code).toBe("https://example.com/next?serviceKey=[REDACTED]");
+		expect((thrown as ProviderError).options).toMatchObject({
+			category: "upstream",
+			retryable: false,
+		});
 	});
 
 	it("wraps network failures in TransportError", async () => {
