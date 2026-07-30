@@ -314,7 +314,12 @@ async function waitForSocksHandshake(
 		if (remaining !== undefined) timer = setTimeout(() => finish(timeoutError()), remaining);
 		void promise.then(
 			(result) => finish(undefined, result.socket),
-			() => finish(failedError()),
+			(error) =>
+				finish(
+					error instanceof Error && /\b(?:timed out|timeout)\b/i.test(error.message)
+						? timeoutError()
+						: failedError(),
+				),
 		);
 	});
 }
