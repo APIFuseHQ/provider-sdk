@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { Socket } from "node:net";
 import { connect as connectTlsSocket, type TLSSocket } from "node:tls";
 
@@ -72,6 +73,8 @@ export type NativeGatewayProxyResolutionInput = {
 export type NativeNetworkClientOptions = {
 	readonly proxyPolicy?: ProviderProxyPolicy;
 	readonly affinityKey?: string;
+	/** Stable credential/account identity; hashed before vendor synthesis. */
+	readonly credentialIdentity?: string;
 	/** Vendor adapters in priority order within each policy vendor slot. */
 	readonly gatewaySynthesizers?: readonly NativeGatewayProxySynthesizer[];
 	/** Warning-level lifecycle diagnostic sink. */
@@ -108,6 +111,18 @@ function synthesizeNodemavenGateway(
 const DEFAULT_GATEWAY_SYNTHESIZERS: readonly NativeGatewayProxySynthesizer[] = [
 	synthesizeNodemavenGateway,
 ];
+
+/** Domain-separated, process-independent affinity derived from credential identity. */
+export function deriveNativeCredentialAffinityKey(credentialIdentity: string): string {
+	return createHash("sha256")
+		.update("apifuse-native-proxy-affinity:v1\0")
+		.update(credentialIdentity)
+		.digest("hex");
+}
+
+function isStickyPolicy(policy: ProviderProxyPolicy): boolean {
+	return (policy.session?.affinity ?? "request") !== "request";
+}
 
 function resolveNativeVendorChain(policy: ProviderProxyPolicy): ProviderProxyProvider[] {
 	const declared = policy.providers?.length
@@ -490,9 +505,15 @@ async function resolveConnectionProxy(
 ): Promise<NativeGatewayProxy | undefined> {
 	const policy = options.proxyPolicy;
 	if (!policy || policy.mode === "disabled") return undefined;
+	const explicitAffinityKey = input.affinityKey ?? options.affinityKey;
+	const affinityKey =
+		explicitAffinityKey ??
+		(isStickyPolicy(policy) && options.credentialIdentity !== undefined
+			? deriveNativeCredentialAffinityKey(options.credentialIdentity)
+			: undefined);
 	const resolved = resolveNativeGatewayProxy({
 		policy,
-		affinityKey: input.affinityKey ?? options.affinityKey,
+		affinityKey,
 		gatewaySynthesizers: options.gatewaySynthesizers,
 	});
 	if (!resolved && policy.mode === "required") throw proxyRequiredError(policy);

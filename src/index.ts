@@ -72,6 +72,7 @@ export { executeOperation } from "./runtime/executor.js";
 export { createHttpClient } from "./runtime/http.js";
 export {
 	createNativeNetworkClient,
+	deriveNativeCredentialAffinityKey,
 	NativeNetworkError,
 	NativeProxyExpiredError,
 	resolveNativeGatewayProxy,

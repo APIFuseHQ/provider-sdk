@@ -160,6 +160,7 @@ export type {
 } from "./types.js";
 export {
 	createNativeNetworkClient,
+	deriveNativeCredentialAffinityKey,
 	NativeNetworkError,
 	NativeProxyExpiredError,
 	resolveNativeGatewayProxy,
