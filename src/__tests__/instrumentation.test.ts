@@ -288,16 +288,44 @@ describe("wrapWithInstrumentation", () => {
 		const instrumented = wrapWithInstrumentation(ctx);
 		await expect(
 			instrumented.http.get("https://api.example.com/items", {
-				params: { page: 2 },
+				params: { page: 2, legacyKey: secret },
 				sensitiveParams: { serviceKey: secret },
 			}),
 		).rejects.toThrow("serviceKey=[REDACTED]");
 
 		const span = instrumented.trace.getSpans()[0];
-		expect(span?.attributes.url).toBe("https://api.example.com/items?page=2&serviceKey=[REDACTED]");
+		expect(span?.attributes.url).toBe(
+			"https://api.example.com/items?page=2&legacyKey=[REDACTED]&serviceKey=[REDACTED]",
+		);
 		const serializedSpan = JSON.stringify(span);
 		expect(serializedSpan).toContain("[REDACTED]");
 		expect(serializedSpan).not.toContain(secret);
+	});
+
+	it("preserves caller URLs, generic method names, and response identity without sensitiveParams", async () => {
+		const ctx = createMockContext();
+		const body = new ReadableStream<Uint8Array>();
+		const original = {
+			status: 200,
+			ok: true,
+			headers: {},
+			body,
+			bytes: async function* () {},
+			textChunks: async function* () {},
+			lines: async function* () {},
+		};
+		ctx.http.stream = mock(async () => original);
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		const response = await instrumented.http.stream("https://api.example.com/logs", {
+			params: { legacyToken: "visible-by-existing-contract" },
+		});
+
+		expect(response).toBe(original);
+		expect(instrumented.trace.getSpans()[0]?.attributes).toMatchObject({
+			url: "https://api.example.com/logs",
+			method: "STREAM",
+		});
 	});
 
 	it("redacts raw and encoded sensitive values from HTTP and stealth traces", async () => {
@@ -377,10 +405,45 @@ describe("wrapWithInstrumentation", () => {
 			error: "Stream failed at https://api.example.com/logs?serviceKey=[REDACTED]",
 			attributes: {
 				url: "https://api.example.com/logs?serviceKey=[REDACTED]",
-				method: "GET",
+				method: "STREAM",
 			},
 		});
+		expect(consumptionSpan?.attributes.request_id).toBe(requestSpan?.attributes.request_id);
 		expect(JSON.stringify(instrumented.trace.getSpans())).not.toContain(secret);
+	});
+
+	it("records and correlates sensitive SSE failures during lazy consumption", async () => {
+		const secret = "sse-secret";
+		const ctx = createMockContext();
+		ctx.http.sse = mock(async () => ({
+			[Symbol.asyncIterator]() {
+				return {
+					next: async () => {
+						throw new Error(`SSE failed for serviceKey=${secret}`);
+					},
+				};
+			},
+		}));
+		const instrumented = wrapWithInstrumentation(ctx);
+		const events = await instrumented.http.sse("https://api.example.com/events", {
+			sensitiveParams: { serviceKey: secret },
+		});
+
+		await expect(async () => {
+			for await (const _event of events) {
+				// The source errors before yielding an event.
+			}
+		}).toThrow("serviceKey=[REDACTED]");
+
+		const spans = instrumented.trace.getSpans();
+		const requestSpan = spans.find((span) => span.name === "http.sse");
+		const consumptionSpan = spans.find((span) => span.name === "http.sse.consume");
+		expect(consumptionSpan).toMatchObject({
+			status: "error",
+			attributes: { method: "SSE", url: "https://api.example.com/events?serviceKey=[REDACTED]" },
+		});
+		expect(consumptionSpan?.attributes.request_id).toBe(requestSpan?.attributes.request_id);
+		expect(JSON.stringify(spans)).not.toContain(secret);
 	});
 });
 

@@ -6,6 +6,7 @@ import {
 	type DeclarativeStealthResponse,
 	HttpRetryUnsafeMethodPolicy,
 	type StealthCookieStoreV1,
+	type StealthRedirectHop,
 } from "../types.js";
 
 type MockImpitResponse = {
@@ -1389,6 +1390,25 @@ describe("createStealthClient", () => {
 		);
 	});
 
+	it("keeps params-only redirect loop detection on the caller URL", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: "/login" },
+			url: "https://example.com/login?client_id=abc",
+		});
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+
+		const result = await session.redirects.run({
+			url: "/login",
+			params: { client_id: "abc" },
+		});
+
+		expect(result.reason).toBe("loop");
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
+	});
+
 	it("redirects.run applies sensitiveParams only to the initial request", async () => {
 		mockStealthState.queuedResponses.push(
 			{
@@ -1485,6 +1505,62 @@ describe("createStealthClient", () => {
 			nextUrl: "https://example.com/next?serviceKey=[REDACTED]",
 		});
 		expect(JSON.stringify(result.hops)).not.toContain(secret);
+	});
+
+	it("redirects.run structurally redacts one-character credentials in every hop URL", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: "/next?pin=1" },
+			url: "https://example.com/login?pin=1",
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+		const result = await session.redirects.run({
+			url: "/login",
+			maxHops: 0,
+			sensitiveParams: { pin: "1" },
+		});
+
+		expect(result.hops).toEqual([
+			{
+				url: "https://example.com/login?pin=[REDACTED]",
+				status: 302,
+				method: "GET",
+				location: "/next?pin=[REDACTED]",
+				nextUrl: "https://example.com/next?pin=[REDACTED]",
+			},
+		]);
+		expect(JSON.stringify(result.hops)).not.toContain("pin=1");
+	});
+
+	it("redacts rotated sensitive-key values while stopWhen receives the real hop", async () => {
+		const rotatedSecret = "rotated-secret";
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: `/next?serviceKey=${rotatedSecret}` },
+			url: "https://example.com/login?serviceKey=initial-secret",
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+		let callbackHop: StealthRedirectHop | undefined;
+		const result = await session.redirects.run({
+			url: "/login",
+			sensitiveParams: { serviceKey: "initial-secret" },
+			stopWhen: (hop) => {
+				callbackHop = hop;
+				return hop.nextUrl?.includes(rotatedSecret) === true;
+			},
+		});
+
+		expect(result.reason).toBe("stopped");
+		expect(callbackHop?.nextUrl).toContain(rotatedSecret);
+		expect(JSON.stringify(result.hops)).not.toContain("initial-secret");
+		expect(JSON.stringify(result.hops)).not.toContain(rotatedSecret);
+		expect(result.hops[0]?.nextUrl).toBe("https://example.com/next?serviceKey=[REDACTED]");
 	});
 
 	it("redirects.run redacts malformed credential-bearing Locations in URL errors", async () => {

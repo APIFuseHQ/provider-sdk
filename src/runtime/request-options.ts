@@ -8,6 +8,24 @@ import type {
 
 export const REDACTED_QUERY_VALUE = "[REDACTED]";
 
+export const HTTP_REQUEST_METHOD_NAMES = [
+	"request",
+	"get",
+	"post",
+	"put",
+	"delete",
+	"stream",
+	"sse",
+] as const satisfies readonly (keyof HttpClient)[];
+
+export type HttpRequestMethod = (typeof HTTP_REQUEST_METHOD_NAMES)[number];
+
+const HTTP_REQUEST_METHOD_SET = new Set<string>(HTTP_REQUEST_METHOD_NAMES);
+
+export function isHttpRequestMethod(method: PropertyKey): method is HttpRequestMethod {
+	return typeof method === "string" && HTTP_REQUEST_METHOD_SET.has(method);
+}
+
 export type SerializedRequestUrl = {
 	requestUrl: string;
 	redactedUrl: string;
@@ -34,20 +52,65 @@ export function appendQueryParams(url: string, params?: RequestParams): string {
 		return url;
 	}
 
-	const parsed = new URL(url);
+	const appended = new URLSearchParams();
 	for (const [key, value] of Object.entries(params)) {
 		if (isParamArray(value)) {
-			for (const item of value) appendQueryValue(parsed.searchParams, key, item);
+			for (const item of value) appendQueryValue(appended, key, item);
 			continue;
 		}
-		appendQueryValue(parsed.searchParams, key, value);
+		appendQueryValue(appended, key, value);
 	}
 
-	return parsed.toString();
+	const query = appended.toString();
+	if (!query) return url;
+	const fragmentIndex = url.indexOf("#");
+	const beforeFragment = fragmentIndex === -1 ? url : url.slice(0, fragmentIndex);
+	const fragment = fragmentIndex === -1 ? "" : url.slice(fragmentIndex);
+	const separator =
+		beforeFragment.includes("?") && !beforeFragment.endsWith("?") && !beforeFragment.endsWith("&")
+			? "&"
+			: beforeFragment.includes("?")
+				? ""
+				: "?";
+	return `${beforeFragment}${separator}${query}${fragment}`;
 }
 
-function displayRedactedUrl(url: URL): string {
-	return url.toString().replaceAll(encodeURIComponent(REDACTED_QUERY_VALUE), REDACTED_QUERY_VALUE);
+function decodeQueryComponent(value: string): string {
+	try {
+		return decodeURIComponent(value.replaceAll("+", " "));
+	} catch {
+		return value;
+	}
+}
+
+/** Redacts matching query keys without reserializing any other URL bytes. */
+export function redactUrlQueryParams(
+	url: string,
+	sensitiveParamNames: readonly string[],
+): { redactedUrl: string; sensitiveValues: readonly string[] } {
+	if (sensitiveParamNames.length === 0) return { redactedUrl: url, sensitiveValues: [] };
+	const names = new Set(sensitiveParamNames);
+	const queryStart = url.indexOf("?");
+	if (queryStart === -1) return { redactedUrl: url, sensitiveValues: [] };
+	const fragmentStart = url.indexOf("#", queryStart);
+	const queryEnd = fragmentStart === -1 ? url.length : fragmentStart;
+	const query = url.slice(queryStart + 1, queryEnd);
+	const sensitiveValues: string[] = [];
+	const redactedQuery = query
+		.split("&")
+		.map((part) => {
+			const assignment = part.indexOf("=");
+			const encodedKey = assignment === -1 ? part : part.slice(0, assignment);
+			if (!names.has(decodeQueryComponent(encodedKey))) return part;
+			const encodedValue = assignment === -1 ? "" : part.slice(assignment + 1);
+			sensitiveValues.push(decodeQueryComponent(encodedValue));
+			return `${encodedKey}=${REDACTED_QUERY_VALUE}`;
+		})
+		.join("&");
+	return {
+		redactedUrl: `${url.slice(0, queryStart + 1)}${redactedQuery}${url.slice(queryEnd)}`,
+		sensitiveValues,
+	};
 }
 
 /**
@@ -64,35 +127,29 @@ export function serializeRequestUrl(
 		return { requestUrl: urlWithParams, redactedUrl: urlWithParams, sensitiveValues: [] };
 	}
 
-	const requestUrl = new URL(urlWithParams);
-	const redactedUrl = new URL(urlWithParams);
-	const sensitiveValues = new Set<string>();
+	const sensitiveParamNames = Object.keys(sensitiveParams);
+	const existing = redactUrlQueryParams(urlWithParams, sensitiveParamNames);
+	const sensitiveValues = new Set(existing.sensitiveValues);
+	let requestUrl = urlWithParams;
 
 	for (const [key, value] of Object.entries(sensitiveParams)) {
 		const serializedValue = String(value);
-		// Declaring a key sensitive applies to every occurrence of that key,
-		// including values already present in the URL or ordinary params.
-		for (const existingValue of requestUrl.searchParams.getAll(key)) {
-			sensitiveValues.add(existingValue);
-		}
-		requestUrl.searchParams.append(key, serializedValue);
-		// A matching key already present in the URL or ordinary params is
-		// conservatively secret once the caller declares that key sensitive.
-		redactedUrl.searchParams.set(key, REDACTED_QUERY_VALUE);
+		requestUrl = appendQueryParams(requestUrl, { [key]: serializedValue });
 		sensitiveValues.add(serializedValue);
 	}
+	const redacted = redactUrlQueryParams(requestUrl, sensitiveParamNames);
 
 	return {
-		requestUrl: requestUrl.toString(),
-		redactedUrl: displayRedactedUrl(redactedUrl),
+		requestUrl,
+		redactedUrl: redacted.redactedUrl,
 		sensitiveValues: [...sensitiveValues],
 	};
 }
 
 const MIN_UNSCOPED_SENSITIVE_VALUE_LENGTH = 4;
 
-function lowercasePercentEscapes(value: string): string {
-	return value.replace(/%[\dA-F]{2}/g, (percentEscape) => percentEscape.toLowerCase());
+function normalizePercentEscapes(value: string): string {
+	return value.replace(/%[\da-f]{2}/gi, (percentEscape) => percentEscape.toUpperCase());
 }
 
 function sensitiveValueVariants(value: string): string[] {
@@ -100,25 +157,59 @@ function sensitiveValueVariants(value: string): string[] {
 
 	const formEncoded = new URLSearchParams({ value }).toString().slice("value=".length);
 	const componentEncoded = encodeURIComponent(value);
-	return [
-		...new Set([
-			value,
-			componentEncoded,
-			lowercasePercentEscapes(componentEncoded),
-			formEncoded,
-			lowercasePercentEscapes(formEncoded),
-		]),
-	];
+	return [...new Set([value, componentEncoded, formEncoded].map(normalizePercentEscapes))];
 }
 
-function allSensitiveValueVariants(sensitiveValues: readonly string[]): string[] {
-	return [
-		...new Set(
-			sensitiveValues
-				.filter((value) => value.length >= MIN_UNSCOPED_SENSITIVE_VALUE_LENGTH)
-				.flatMap(sensitiveValueVariants),
-		),
-	].sort((left, right) => right.length - left.length || left.localeCompare(right));
+type SensitiveValueVariant = { value: string; requiresTokenBoundary: boolean };
+
+function allSensitiveValueVariants(
+	sensitiveValues: readonly string[],
+	requireTokenBoundary: boolean,
+): SensitiveValueVariant[] {
+	const variants = new Map<string, SensitiveValueVariant>();
+	for (const sensitiveValue of sensitiveValues) {
+		const requiresTokenBoundary =
+			requireTokenBoundary || sensitiveValue.length < MIN_UNSCOPED_SENSITIVE_VALUE_LENGTH;
+		for (const value of sensitiveValueVariants(sensitiveValue)) {
+			const existing = variants.get(value);
+			variants.set(value, {
+				value,
+				requiresTokenBoundary: existing
+					? existing.requiresTokenBoundary && requiresTokenBoundary
+					: requiresTokenBoundary,
+			});
+		}
+	}
+	return [...variants.values()].sort(
+		(left, right) =>
+			right.value.length - left.value.length || left.value.localeCompare(right.value),
+	);
+}
+
+function isTokenCharacter(value: string | undefined): boolean {
+	return value !== undefined && /[\p{L}\p{N}]/u.test(value);
+}
+
+function replaceSensitiveVariant(text: string, variant: SensitiveValueVariant): string {
+	const normalizedNeedle = normalizePercentEscapes(variant.value);
+	let result = text;
+	let fromIndex = 0;
+	while (fromIndex <= result.length - variant.value.length) {
+		const normalizedText = normalizePercentEscapes(result);
+		const index = normalizedText.indexOf(normalizedNeedle, fromIndex);
+		if (index === -1) break;
+		const end = index + variant.value.length;
+		if (
+			variant.requiresTokenBoundary &&
+			(isTokenCharacter(result[index - 1]) || isTokenCharacter(result[end]))
+		) {
+			fromIndex = index + 1;
+			continue;
+		}
+		result = `${result.slice(0, index)}${REDACTED_QUERY_VALUE}${result.slice(end)}`;
+		fromIndex = index + REDACTED_QUERY_VALUE.length;
+	}
+	return result;
 }
 
 /** Scrubs raw and URL-encoded secret values from diagnostic text. */
@@ -127,13 +218,17 @@ export function redactSensitiveText(
 	sensitiveValues: readonly string[],
 	requestUrl?: string,
 	redactedUrl?: string,
+	options: { requireTokenBoundary?: boolean } = {},
 ): string {
 	let redacted = requestUrl && redactedUrl ? text.replaceAll(requestUrl, redactedUrl) : text;
-	for (const variant of allSensitiveValueVariants(sensitiveValues)) {
-		// Very short values have too little entropy for safe unscoped substring
-		// replacement (for example, secret "1" must not corrupt timestamps).
-		// Their complete outbound URL is still structurally redacted above.
-		redacted = redacted.replaceAll(variant, REDACTED_QUERY_VALUE);
+	for (const variant of allSensitiveValueVariants(
+		sensitiveValues,
+		options.requireTokenBoundary === true,
+	)) {
+		// Low-entropy values are still redacted, but only as complete tokens. This
+		// covers query values and diagnostic phrases such as "credential api rejected"
+		// without corrupting timestamps or words such as "rapid".
+		redacted = replaceSensitiveVariant(redacted, variant);
 	}
 	return redacted;
 }
@@ -219,7 +314,7 @@ function setDiagnosticProperty(target: object, key: string, value: unknown): boo
 }
 
 function diagnosticPropertyKeys(value: object): string[] {
-	const keys = new Set(Object.keys(value));
+	const keys = new Set(Object.getOwnPropertyNames(value));
 	if (value instanceof Error) {
 		// Built-in error text and AggregateError.errors are commonly
 		// non-enumerable, while SDK options carry serializable details.
@@ -228,6 +323,25 @@ function diagnosticPropertyKeys(value: object): string[] {
 		}
 	}
 	return [...keys];
+}
+
+function requiresCloneBeforeRedaction(value: object, keys: readonly string[]): boolean {
+	for (const key of keys) {
+		let owner: object | null = value;
+		while (owner) {
+			const descriptor = Object.getOwnPropertyDescriptor(owner, key);
+			if (descriptor) {
+				if (Object.hasOwn(descriptor, "value")) {
+					if (owner === value && descriptor.writable === false) return true;
+				} else if (descriptor.set === undefined) {
+					return true;
+				}
+				break;
+			}
+			owner = Object.getPrototypeOf(owner);
+		}
+	}
+	return false;
 }
 
 function readDiagnosticProperty(
@@ -241,16 +355,15 @@ function readDiagnosticProperty(
 	}
 }
 
-function redactDiagnosticValue(value: unknown, context: RedactionContext): unknown {
+const DIAGNOSTIC_CLASSIFICATION_FIELDS = new Set(["name", "code", "status", "upstreamStatus"]);
+
+function redactDiagnosticValue(
+	value: unknown,
+	context: RedactionContext,
+	propertyName?: string,
+): unknown {
+	if (propertyName && DIAGNOSTIC_CLASSIFICATION_FIELDS.has(propertyName)) return value;
 	if (typeof value === "string") return redactDiagnosticString(value, context);
-	if (
-		(typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") &&
-		context.sensitiveValues.includes(String(value))
-	) {
-		// JSON parsers can turn a numeric-looking credential into a number. Exact
-		// primitive equality is scoped enough to remain safe even for short values.
-		return REDACTED_QUERY_VALUE;
-	}
 	if ((typeof value !== "object" && typeof value !== "function") || value === null) return value;
 
 	const previouslySeen = context.seen.get(value);
@@ -260,13 +373,17 @@ function redactDiagnosticValue(value: unknown, context: RedactionContext): unkno
 	// a secret-bearing readonly field already point at the eventual replacement.
 	// Without this, a frozen `error.cause = error` graph could retain the original
 	// secret through the cloned node's earlier self-reference.
-	let target: object = Object.isExtensible(value) ? value : cloneForRedaction(value);
+	const keys = diagnosticPropertyKeys(value);
+	let target: object =
+		Object.isExtensible(value) && !requiresCloneBeforeRedaction(value, keys)
+			? value
+			: cloneForRedaction(value);
 	context.seen.set(value, target);
 
-	for (const key of diagnosticPropertyKeys(value)) {
+	for (const key of keys) {
 		const current = readDiagnosticProperty(value, key);
 		if (!current.ok) continue;
-		const redacted = redactDiagnosticValue(current.value, context);
+		const redacted = redactDiagnosticValue(current.value, context, key);
 		if (Object.is(redacted, current.value)) continue;
 
 		if (!setDiagnosticProperty(target, key, redacted)) {
@@ -322,9 +439,10 @@ function isRequestOptions(value: unknown): value is RequestOptions {
 
 /** Internal typed registry for the request-options position of HttpClient calls. */
 export function requestOptionsFromHttpInvocation(
-	method: keyof HttpClient,
+	method: PropertyKey,
 	args: readonly unknown[],
 ): RequestOptions | undefined {
+	if (!isHttpRequestMethod(method)) return undefined;
 	let candidate: unknown;
 	switch (method) {
 		case "post":

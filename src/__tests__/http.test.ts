@@ -603,6 +603,35 @@ describe("createHttpClient", () => {
 		]);
 	});
 
+	it("classifies timeout failures before redacting a matching sensitive value", async () => {
+		mockNativeFetchState.queuedErrors.push(new Error("request timeout"));
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient();
+
+		await expect(
+			http.get("https://example.com/slow", {
+				sensitiveParams: { serviceKey: "timeout" },
+			}),
+		).rejects.toMatchObject({ code: "transport_timeout", status: 0 });
+	});
+
+	it("redacts declared keys when malformed request URLs fail before fetch", async () => {
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient();
+		let thrown: unknown;
+		try {
+			await http.get("http://[bad]/?serviceKey=api", {
+				sensitiveParams: { serviceKey: "api" },
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(String(thrown)).not.toContain("serviceKey=api");
+		expect(String(thrown)).toContain("serviceKey=[REDACTED]");
+		expect(mockNativeFetchState.calls).toHaveLength(0);
+	});
+
 	it("TransportTransient does not retry HTTP status failures", async () => {
 		mockNativeFetchState.queuedResponses.push(
 			{

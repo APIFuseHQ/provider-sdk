@@ -27,6 +27,7 @@ import {
 	REDACTED_QUERY_VALUE,
 	redactSensitiveText,
 	requestOptionsFromHttpInvocation,
+	serializeRequestUrl,
 } from "../src/runtime/request-options.js";
 
 type CliArgs = {
@@ -81,17 +82,15 @@ export async function main() {
 
 		const sensitiveParams = capture.getCapturedSensitiveParams();
 		const fixturePath = resolve(location.rootDir, "__fixtures__", "raw.json");
-		const mergedPayload = await prepareFixturePayload(fixturePath, captured, args.append);
-		// Redact after append so existing params-era captures cannot retain a value
-		// that this run has declared sensitive.
-		const nextPayload = redactFixture(mergedPayload, sensitiveParams, args.sanitize);
+		const redactedCapture = redactFixture(captured, sensitiveParams, args.sanitize);
+		const nextPayload = await prepareFixturePayload(fixturePath, redactedCapture, args.append);
 
 		await mkdir(dirname(fixturePath), { recursive: true });
 		await writeFile(fixturePath, `${JSON.stringify(nextPayload, null, 2)}\n`);
 
 		console.log(
 			`[apifuse record] Captured response (${formatBytes(
-				Buffer.byteLength(JSON.stringify(nextPayload)),
+				Buffer.byteLength(JSON.stringify(redactedCapture)),
 			)})`,
 		);
 		console.log(`[apifuse record] Saved to ${relative(process.cwd(), fixturePath)}`);
@@ -426,21 +425,32 @@ function captureSensitiveRequestValues(
 		values.add(value);
 	}
 
-	let parsedUrl: URL;
+	let serializedUrl: ReturnType<typeof serializeRequestUrl>;
 	try {
-		parsedUrl = new URL(String(url), "http://apifuse.invalid");
+		const absoluteUrl = new URL(String(url), "http://apifuse.invalid").toString();
+		serializedUrl = serializeRequestUrl(absoluteUrl, options.params, sensitiveParams);
 	} catch {
 		throw new TypeError("Cannot securely record sensitiveParams for an invalid request URL.");
 	}
 
-	for (const [key] of entries) {
-		for (const value of parsedUrl.searchParams.getAll(key)) values.add(value);
-		const ordinaryValue = options?.params?.[key];
-		const ordinaryValues = Array.isArray(ordinaryValue) ? ordinaryValue : [ordinaryValue];
-		for (const value of ordinaryValues) {
-			if (value !== null && value !== undefined) values.add(String(value));
-		}
-	}
+	for (const value of serializedUrl.sensitiveValues) values.add(value);
+}
+
+function snapshotRequestOptions(options: RequestOptions): RequestOptions {
+	return {
+		...options,
+		...(options.params
+			? {
+					params: Object.fromEntries(
+						Object.entries(options.params).map(([key, value]) => [
+							key,
+							Array.isArray(value) ? [...value] : value,
+						]),
+					),
+				}
+			: {}),
+		...(options.sensitiveParams ? { sensitiveParams: { ...options.sensitiveParams } } : {}),
+	};
 }
 
 function proxyHttpClient(
@@ -457,12 +467,12 @@ function proxyHttpClient(
 			}
 
 			return async (...args: unknown[]) => {
-				const options =
-					typeof prop === "string"
-						? requestOptionsFromHttpInvocation(prop as keyof HttpClient, args)
-						: undefined;
+				const options = requestOptionsFromHttpInvocation(prop, args);
 				if (options) {
-					onSensitiveParams(String(args[0]), options);
+					const snapshot = snapshotRequestOptions(options);
+					onSensitiveParams(String(args[0]), snapshot);
+					const optionsIndex = prop === "post" || prop === "put" ? 2 : 1;
+					args[optionsIndex] = snapshot;
 				}
 				const response = await value.apply(target, args);
 				onResponse(response);
@@ -481,6 +491,7 @@ function proxyStealthClient(
 ): StealthClient {
 	return {
 		fetch: async (...args: Parameters<StealthClient["fetch"]>) => {
+			if (args[1]) args[1] = snapshotRequestOptions(args[1]);
 			onSensitiveParams(args[0], args[1]);
 			const response = await client.fetch(...args);
 			onResponse(response);
@@ -498,6 +509,7 @@ function proxyStealthSession(
 ): StealthSession {
 	return {
 		fetch: async (...args: Parameters<StealthSession["fetch"]>) => {
+			if (args[1]) args[1] = snapshotRequestOptions(args[1]);
 			onSensitiveParams(args[0], args[1]);
 			const response = await session.fetch(...args);
 			onResponse(response);
@@ -505,6 +517,7 @@ function proxyStealthSession(
 		},
 		redirects: {
 			run: async (...args: Parameters<StealthSession["redirects"]["run"]>) => {
+				args[0] = snapshotRequestOptions(args[0]) as (typeof args)[0];
 				onSensitiveParams(args[0].url, args[0]);
 				const result = await session.redirects.run(...args);
 				onResponse(result.final);
@@ -533,10 +546,6 @@ function redactFixture(
 		return redactFixtureText(value, sensitiveParams);
 	}
 
-	if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
-		return sensitiveParams.values.includes(String(value)) ? REDACTED_QUERY_VALUE : value;
-	}
-
 	if (Array.isArray(value)) {
 		return value.map((item) => redactFixture(item, sensitiveParams, sanitizeCommonFields));
 	}
@@ -558,11 +567,14 @@ function redactFixture(
 }
 
 function redactFixtureText(text: string, sensitiveParams: CapturedSensitiveParams): string {
-	// Broad substring replacement is unsafe for low-entropy values such as "1"
-	// or "api". Those are still redacted when they are exact scalar echoes (above)
-	// or occur under their declared query key (below).
-	const substringSafeValues = sensitiveParams.values.filter((value) => value.length >= 4);
-	let redacted = redactSensitiveText(text, substringSafeValues);
+	// Recorder payloads use token boundaries for every declared value, regardless
+	// of length. This redacts exact and delimited echoes (including prefix-api-suffix)
+	// without corrupting unrelated text such as "rapid" or "contest". A secret
+	// concatenated directly to letters or digits can remain ambiguous; query keys
+	// below and exact scalar matching above are the structural backstops.
+	let redacted = redactSensitiveText(text, sensitiveParams.values, undefined, undefined, {
+		requireTokenBoundary: true,
+	});
 	for (const name of sensitiveParams.names) {
 		const keyVariants = new Set([
 			name,
@@ -571,7 +583,7 @@ function redactFixtureText(text: string, sensitiveParams: CapturedSensitiveParam
 		]);
 		for (const key of keyVariants) {
 			const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-			const queryValue = new RegExp(`(^|[?&])(${escapedKey}=)[^&#\\s"]*`, "g");
+			const queryValue = new RegExp(`(^|[?&])(${escapedKey}=)[^&#\\s"]*`, "gi");
 			redacted = redacted.replace(queryValue, (_match, prefix, assignment) => {
 				return `${prefix}${assignment}${REDACTED_QUERY_VALUE}`;
 			});

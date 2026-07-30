@@ -53,6 +53,7 @@ import {
 import {
 	redactSensitiveError,
 	redactSensitiveText,
+	redactUrlQueryParams,
 	serializeRequestUrl,
 } from "./request-options.js";
 
@@ -1139,12 +1140,25 @@ function createSessionFetcher(
 					: undefined;
 				const initialSensitiveParams = sensitiveParams ? { ...sensitiveParams } : undefined;
 				const initialUrl = serializeRequestUrl(currentUrl, initialParams, initialSensitiveParams);
-				const sensitiveValues = initialUrl.sensitiveValues;
+				const sensitiveParamNames = initialSensitiveParams
+					? Object.keys(initialSensitiveParams)
+					: [];
+				const sensitiveValues = new Set(initialUrl.sensitiveValues);
+				const redactRedirectUrl = (value: string): string => {
+					const structural = redactUrlQueryParams(value, sensitiveParamNames);
+					for (const sensitiveValue of structural.sensitiveValues) {
+						sensitiveValues.add(sensitiveValue);
+					}
+					return redactSensitiveText(structural.redactedUrl, [...sensitiveValues]);
+				};
 
 				for (let hopIndex = 0; hopIndex <= maxHops; hopIndex += 1) {
 					const outboundUrl =
 						hopIndex === 0 ? initialUrl.requestUrl : serializeRequestUrl(currentUrl).requestUrl;
-					visitedRequests.add(`${method} ${outboundUrl}`);
+					// Preserve params-only loop bookkeeping from before sensitiveParams:
+					// the first visited key is the caller's resolved URL, not its expanded query.
+					const visitedUrl = hopIndex === 0 && !initialSensitiveParams ? currentUrl : outboundUrl;
+					visitedRequests.add(`${method} ${visitedUrl}`);
 					try {
 						response = await session.fetch(currentUrl, {
 							...fetchOptions,
@@ -1160,9 +1174,9 @@ function createSessionFetcher(
 					} catch (error) {
 						throw redactSensitiveError(
 							error,
-							sensitiveValues,
-							initialUrl.requestUrl,
-							initialUrl.redactedUrl,
+							[...sensitiveValues],
+							outboundUrl,
+							redactRedirectUrl(outboundUrl),
 						);
 					}
 					// StealthResponse.url is programmatic metadata and remains raw. Only the
@@ -1180,27 +1194,30 @@ function createSessionFetcher(
 					}
 
 					const location = locationHeader(response.headers);
+					const redactedResponseUrl = redactRedirectUrl(responseUrl);
+					const redactedLocation = location ? redactRedirectUrl(location) : undefined;
 					let nextUrl: string | undefined;
 					try {
 						nextUrl = location ? new URL(location, responseUrl).toString() : undefined;
 					} catch (error) {
-						throw redactSensitiveError(
-							error,
-							sensitiveValues,
-							initialUrl.requestUrl,
-							initialUrl.redactedUrl,
-						);
+						throw redactSensitiveError(error, [...sensitiveValues], location, redactedLocation);
 					}
-					const hop: StealthRedirectHop = {
-						url: redactSensitiveText(responseUrl, sensitiveValues),
+					const realHop: StealthRedirectHop = {
+						url: responseUrl,
 						status: response.status,
 						method,
-						...(location ? { location: redactSensitiveText(location, sensitiveValues) } : {}),
-						...(nextUrl ? { nextUrl: redactSensitiveText(nextUrl, sensitiveValues) } : {}),
+						...(location ? { location } : {}),
+						...(nextUrl ? { nextUrl } : {}),
+					};
+					const hop: StealthRedirectHop = {
+						...realHop,
+						url: redactedResponseUrl,
+						...(redactedLocation ? { location: redactedLocation } : {}),
+						...(nextUrl ? { nextUrl: redactRedirectUrl(nextUrl) } : {}),
 					};
 					hops.push(hop);
 
-					if (stopWhen && (await stopWhen(hop))) {
+					if (stopWhen && (await stopWhen(realHop))) {
 						return {
 							final: response,
 							hops,

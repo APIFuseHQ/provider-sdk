@@ -138,7 +138,7 @@ export default {
 		}
 	});
 
-	it("redacts every declared-key value, scalar echo, property key, and appended legacy capture", async () => {
+	it("redacts every declared-key value, scalar echo, and property key while preserving append history", async () => {
 		let requestedUrl: string | undefined;
 		const upstream = createServer((request, response) => {
 			requestedUrl = request.url;
@@ -149,6 +149,7 @@ export default {
 					page: url.searchParams.get("page"),
 					requestUrl: request.url,
 					unrelatedEcho: url.searchParams.get("serviceKey"),
+					embeddedShortEcho: "prefix-api-suffix",
 					numericEcho: 123456,
 					serviceKey: "public-result",
 					"prefix-record-test-secret-suffix": true,
@@ -187,6 +188,7 @@ export default {
 			    sensitiveParams: {
 			      serviceKey: "record-test-secret",
 			      encodedKey: "space +/%=",
+			      shortKey: "api",
 			    },
       })).data,
     },
@@ -223,27 +225,30 @@ export default {
 			expect(stderr).toBe("");
 			expect(exitCode).toBe(0);
 			expect(requestedUrl).toBe(
-				"/payload?serviceKey=url-secret&page=1&serviceKey=params-secret&serviceKey=123456&serviceKey=record-test-secret&encodedKey=space+%2B%2F%25%3D",
+				"/payload?serviceKey=url-secret&page=1&serviceKey=params-secret&serviceKey=123456&serviceKey=record-test-secret&encodedKey=space+%2B%2F%25%3D&shortKey=api",
 			);
 			const fixtureSource = readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8");
 			expect(fixtureSource).not.toContain("record-test-secret");
-			expect(fixtureSource).not.toContain("params-secret");
+			// Append preserves existing fixture bytes, including captures that were
+			// intentionally recorded under an earlier sanitization policy.
+			expect(fixtureSource).toContain("params-secret");
 			expect(fixtureSource).not.toContain("url-secret");
 			expect(fixtureSource).not.toContain("space +/%=");
 			expect(fixtureSource).not.toContain("space+%2B%2f%25%3d");
 			expect(JSON.parse(fixtureSource)).toEqual([
-				{ legacy: "/payload?serviceKey=[REDACTED]" },
+				{ legacy: "/payload?serviceKey=params-secret" },
 				{
 					page: "1",
 					requestUrl:
-						"/payload?serviceKey=[REDACTED]&page=1&serviceKey=[REDACTED]&serviceKey=[REDACTED]&serviceKey=[REDACTED]&encodedKey=[REDACTED]",
+						"/payload?serviceKey=[REDACTED]&page=1&serviceKey=[REDACTED]&serviceKey=[REDACTED]&serviceKey=[REDACTED]&encodedKey=[REDACTED]&shortKey=[REDACTED]",
 					unrelatedEcho: "[REDACTED]",
-					numericEcho: "[REDACTED]",
+					embeddedShortEcho: "prefix-[REDACTED]-suffix",
+					numericEcho: 123456,
 					serviceKey: "public-result",
 					"prefix-[REDACTED]-suffix": true,
 					"prefix-[REDACTED]-suffix#2": false,
 					encodedUrl:
-						"/payload?serviceKey=[REDACTED]&page=1&serviceKey=[REDACTED]&serviceKey=[REDACTED]&serviceKey=[REDACTED]&encodedKey=[REDACTED]",
+						"/payload?serviceKey=[REDACTED]&page=1&serviceKey=[REDACTED]&serviceKey=[REDACTED]&serviceKey=[REDACTED]&encodedKey=[REDACTED]&shortKey=[REDACTED]",
 				},
 			]);
 		} finally {
@@ -314,11 +319,11 @@ export default {
 			expect(exitCode).toBe(0);
 			const fixtureSource = readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8");
 			expect(fixtureSource).not.toContain("post-secret");
-			expect(fixtureSource).not.toContain("654321");
+			expect(fixtureSource).toContain("654321");
 			expect(JSON.parse(fixtureSource)).toEqual({
 				postEcho: "[REDACTED]",
 				putEcho: "[REDACTED]",
-				numericEcho: "[REDACTED]",
+				numericEcho: 654321,
 			});
 		} finally {
 			await new Promise<void>((resolve, reject) => {
@@ -416,7 +421,9 @@ export default {
 					serviceKey: "public-result",
 					echo: "default-secret",
 					exactShortEcho: "api",
+					embeddedShortEcho: "prefix-api-suffix",
 					unrelatedShortText: "rapid response",
+					unrelatedLongText: "contest result",
 				}),
 			);
 		});
@@ -437,7 +444,7 @@ export default { id: "record-default", version: "1.0.0", runtime: "standard",
  operations: { lookup: { input: z.object({}), output: z.unknown(),
  upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
  handler: async (ctx) => (await ctx.http.get("/", {
-   sensitiveParams: { serviceKey: "default-secret", shortKey: "api" },
+   sensitiveParams: { serviceKey: "default-secret", shortKey: "api", longKey: "test" },
  })).data,
  } } };
 `,
@@ -468,7 +475,9 @@ export default { id: "record-default", version: "1.0.0", runtime: "standard",
 				serviceKey: "public-result",
 				echo: "[REDACTED]",
 				exactShortEcho: "[REDACTED]",
+				embeddedShortEcho: "prefix-[REDACTED]-suffix",
 				unrelatedShortText: "rapid response",
+				unrelatedLongText: "contest result",
 			});
 		} finally {
 			await new Promise<void>((resolve, reject) => {

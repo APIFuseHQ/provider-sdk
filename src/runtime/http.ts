@@ -31,6 +31,7 @@ import {
 import {
 	normalizeHttpRequestBody,
 	redactSensitiveError,
+	redactUrlQueryParams,
 	type SerializedRequestUrl,
 	serializeRequestUrl,
 } from "./request-options.js";
@@ -350,6 +351,29 @@ function normalizeNativeFetchBody(body: unknown): string | ArrayBuffer | undefin
 	return copied.buffer;
 }
 
+function serializeHttpRequestUrl(
+	baseUrl: string | undefined,
+	url: string,
+	options: RequestOptions,
+): SerializedRequestUrl {
+	try {
+		return serializeRequestUrl(
+			resolveHttpUrl(baseUrl, url),
+			options.params,
+			options.sensitiveParams,
+		);
+	} catch (error) {
+		const sensitiveParamNames = Object.keys(options.sensitiveParams ?? {});
+		const structural = redactUrlQueryParams(url, sensitiveParamNames);
+		throw redactSensitiveError(
+			error,
+			[...structural.sensitiveValues, ...Object.values(options.sensitiveParams ?? {})],
+			url,
+			structural.redactedUrl,
+		);
+	}
+}
+
 async function fetchNativeHttp(
 	baseUrl: string | undefined,
 	url: string,
@@ -361,11 +385,7 @@ async function fetchNativeHttp(
 	proxyAttemptOffset = 0,
 	dedupe?: { attempted: Set<string> },
 ): Promise<NativeHttpAttemptOutcome> {
-	const serializedUrl = serializeRequestUrl(
-		resolveHttpUrl(baseUrl, url),
-		options.params,
-		options.sensitiveParams,
-	);
+	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
 	const { requestUrl } = serializedUrl;
 	const controller = options.timeout ? new AbortController() : undefined;
 	const timeoutHandle = options.timeout
@@ -431,13 +451,11 @@ async function fetchNativeHttp(
 				serializedUrl.redactedUrl,
 			);
 		}
-		const transportError = toHttpTransportError(
-			redactSensitiveError(
-				error,
-				serializedUrl.sensitiveValues,
-				serializedUrl.requestUrl,
-				serializedUrl.redactedUrl,
-			),
+		const transportError = redactSensitiveError(
+			toHttpTransportError(error),
+			serializedUrl.sensitiveValues,
+			serializedUrl.requestUrl,
+			serializedUrl.redactedUrl,
 		) as NativeHttpAttemptError;
 		transportError.proxyUsed = Boolean(proxy);
 		throw transportError;
@@ -454,11 +472,7 @@ async function fetchNativeHttpStream(
 	clientOptions: HttpClientOptions,
 	warn: (message: string) => void,
 ): Promise<HttpStreamResponse> {
-	const serializedUrl = serializeRequestUrl(
-		resolveHttpUrl(baseUrl, url),
-		options.params,
-		options.sensitiveParams,
-	);
+	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
 	const { requestUrl } = serializedUrl;
 	const controller = options.timeout ? new AbortController() : undefined;
 	const timeoutHandle = options.timeout
@@ -498,13 +512,11 @@ async function fetchNativeHttpStream(
 				serializedUrl.redactedUrl,
 			);
 		}
-		throw toHttpTransportError(
-			redactSensitiveError(
-				error,
-				serializedUrl.sensitiveValues,
-				serializedUrl.requestUrl,
-				serializedUrl.redactedUrl,
-			),
+		throw redactSensitiveError(
+			toHttpTransportError(error),
+			serializedUrl.sensitiveValues,
+			serializedUrl.requestUrl,
+			serializedUrl.redactedUrl,
 		);
 	} finally {
 		if (timeoutHandle) clearTimeout(timeoutHandle);
@@ -610,9 +622,7 @@ export function createHttpClient(
 			explicitRetry,
 			method: methodName,
 		});
-		const dedupeContext = dedupeAllocatorEndpoints
-			? { attempted: new Set<string>() }
-			: undefined;
+		const dedupeContext = dedupeAllocatorEndpoints ? { attempted: new Set<string>() } : undefined;
 
 		const executeOnce = (proxyAttemptOffset = 0): Promise<NativeHttpAttemptOutcome> =>
 			fetchNativeHttp(

@@ -7,6 +7,7 @@ import type {
 } from "../types.js";
 import { readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import {
+	isHttpRequestMethod,
 	redactSensitiveError,
 	redactSensitiveText,
 	requestOptionsFromHttpInvocation,
@@ -29,18 +30,11 @@ export type InstrumentedProviderContext<T extends ProviderContext> = Omit<T, "tr
 type InstrumentedNamespace = "http" | "stealth" | "browser" | "session" | "state";
 
 const BROWSER_PAGE_METHODS = new Set(["goto", "fill", "click", "type", "waitForSelector"]);
-const HTTP_REQUEST_METHODS = new Set<keyof HttpClient>([
-	"request",
-	"get",
-	"post",
-	"put",
-	"delete",
-	"stream",
-	"sse",
-]);
+const DIAGNOSTIC_BASE_URL = "http://apifuse-instrumentation.invalid";
 
 type RequestDiagnostics = {
-	options?: RequestOptions;
+	hasSensitiveParams?: boolean;
+	requestId?: string;
 	serializedUrl?: SerializedRequestUrl;
 	sensitiveValues: readonly string[];
 };
@@ -133,10 +127,6 @@ function getUrl(
 	return undefined;
 }
 
-function isHttpRequestMethod(methodName: string): methodName is keyof HttpClient {
-	return HTTP_REQUEST_METHODS.has(methodName as keyof HttpClient);
-}
-
 function requestInvocation(
 	namespace: InstrumentedNamespace,
 	methodName: string,
@@ -170,8 +160,7 @@ function fallbackSensitiveValues(options?: RequestOptions): readonly string[] {
 }
 
 function stripDiagnosticBase(url: string): string {
-	const diagnosticBase = "http://apifuse-instrumentation.invalid";
-	return url.startsWith(diagnosticBase) ? url.slice(diagnosticBase.length) || "/" : url;
+	return url.startsWith(DIAGNOSTIC_BASE_URL) ? url.slice(DIAGNOSTIC_BASE_URL.length) || "/" : url;
 }
 
 function serializeDiagnosticUrl(
@@ -182,7 +171,7 @@ function serializeDiagnosticUrl(
 		return serializeRequestUrl(url, options?.params, options?.sensitiveParams);
 	} catch {
 		try {
-			const absoluteUrl = new URL(url, "http://apifuse-instrumentation.invalid").toString();
+			const absoluteUrl = new URL(url, DIAGNOSTIC_BASE_URL).toString();
 			const serialized = serializeRequestUrl(
 				absoluteUrl,
 				options?.params,
@@ -206,9 +195,14 @@ function snapshotRequestDiagnostics(
 ): RequestDiagnostics {
 	const options = requestOptionsForInvocation(requestInvocation(namespace, methodName, args));
 	const url = typeof args[0] === "string" ? args[0] : undefined;
-	const serializedUrl = url ? serializeDiagnosticUrl(url, options) : undefined;
+	const hasSensitiveParams = Boolean(
+		options?.sensitiveParams && Object.keys(options.sensitiveParams).length > 0,
+	);
+	const serializedUrl =
+		hasSensitiveParams && url ? serializeDiagnosticUrl(url, options) : undefined;
 	return {
-		options,
+		hasSensitiveParams,
+		...(hasSensitiveParams ? { requestId: crypto.randomUUID() } : {}),
 		serializedUrl,
 		sensitiveValues: serializedUrl?.sensitiveValues ?? fallbackSensitiveValues(options),
 	};
@@ -287,26 +281,52 @@ function instrumentHttpStreamConsumption(
 	} satisfies HttpStreamResponse;
 }
 
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		Symbol.asyncIterator in value &&
+		typeof value[Symbol.asyncIterator] === "function"
+	);
+}
+
+function instrumentHttpSseConsumption(
+	value: unknown,
+	recorder: NonNullable<ReturnType<typeof getTraceRecorder>>,
+	args: unknown[],
+	diagnostics: RequestDiagnostics,
+): unknown {
+	if (!isAsyncIterable(value)) return value;
+	const source = value;
+	return {
+		async *[Symbol.asyncIterator]() {
+			try {
+				for await (const event of source) yield event;
+			} catch (error) {
+				const sanitizedError = sanitizeRequestError(error, diagnostics);
+				return await recorder.runSpan(
+					"http.sse.consume",
+					() => {
+						throw sanitizedError;
+					},
+					{
+						onError: (spanError) =>
+							buildSpanAttributes("http", "sse", args, undefined, spanError, diagnostics),
+					},
+				);
+			}
+		},
+	};
+}
+
 function getMethod(
 	namespace: InstrumentedNamespace,
 	methodName: string,
 	args: unknown[],
 ): string | undefined {
 	if (namespace === "http") {
-		if (isHttpRequestMethod(methodName)) {
-			const options = requestOptionsFromHttpInvocation(methodName, args);
-			if (
-				(methodName === "request" || methodName === "stream" || methodName === "sse") &&
-				options &&
-				"method" in options &&
-				typeof options.method === "string"
-			) {
-				return options.method.toUpperCase();
-			}
-			if (methodName === "request" || methodName === "stream" || methodName === "sse") {
-				return "GET";
-			}
-		}
+		// Preserve the original instrumentation contract: generic entry points are
+		// reported as REQUEST/STREAM/SSE, independent of transport options.
 		return methodName.toUpperCase();
 	}
 
@@ -332,16 +352,15 @@ function buildSpanAttributes(
 ): Record<string, string | number | boolean> {
 	const attributes: Record<string, string | number | boolean> = {};
 	const rawUrl = getUrl(namespace, args, result);
-	const url =
-		diagnostics.serializedUrl?.redactedUrl ??
-		(rawUrl
-			? redactSensitiveText(
-					rawUrl,
-					diagnostics.sensitiveValues,
-					diagnostics.serializedUrl?.requestUrl,
-					diagnostics.serializedUrl?.redactedUrl,
-				)
-			: undefined);
+	const structuralUrl = diagnostics.serializedUrl?.redactedUrl ?? rawUrl;
+	const url = structuralUrl
+		? redactSensitiveText(
+				structuralUrl,
+				diagnostics.sensitiveValues,
+				diagnostics.serializedUrl?.requestUrl,
+				diagnostics.serializedUrl?.redactedUrl,
+			)
+		: undefined;
 	const method = getMethod(namespace, methodName, args);
 	const status = error ? getErrorStatus(error) : getResponseStatus(namespace, result);
 	const duration = error ? undefined : getResponseDuration(result);
@@ -349,6 +368,7 @@ function buildSpanAttributes(
 	if (url) {
 		attributes.url = url;
 	}
+	if (diagnostics.requestId) attributes.request_id = diagnostics.requestId;
 
 	if (method) {
 		attributes.method = method;
@@ -629,11 +649,17 @@ function wrapNamespace<T extends object>(
 					onError: (error) =>
 						buildSpanAttributes(namespace, methodName, args, undefined, error, requestDiagnostics),
 				});
-				return namespace === "http" && methodName === "stream"
+				return namespace === "http" &&
+					methodName === "stream" &&
+					requestDiagnostics.hasSensitiveParams
 					? tracedResult.then((spanResult) =>
 							instrumentHttpStreamConsumption(spanResult, recorder, args, requestDiagnostics),
 						)
-					: tracedResult;
+					: namespace === "http" && methodName === "sse" && requestDiagnostics.hasSensitiveParams
+						? tracedResult.then((spanResult) =>
+								instrumentHttpSseConsumption(spanResult, recorder, args, requestDiagnostics),
+							)
+						: tracedResult;
 			};
 
 			wrappedMethods.set(property, wrapped);
