@@ -1,5 +1,18 @@
-import type { ProviderContext } from "../types.js";
-import { redactSensitiveError, redactSensitiveText } from "./request-options.js";
+import type {
+	HttpClient,
+	HttpStreamResponse,
+	ProviderContext,
+	RequestOptions,
+	StealthClient,
+} from "../types.js";
+import { readableBytes, readableLines, readableTextChunks } from "../stream.js";
+import {
+	redactSensitiveError,
+	redactSensitiveText,
+	requestOptionsFromHttpInvocation,
+	serializeRequestUrl,
+	type SerializedRequestUrl,
+} from "./request-options.js";
 import {
 	type CreateTraceContextOptions,
 	createTraceContext,
@@ -16,6 +29,33 @@ export type InstrumentedProviderContext<T extends ProviderContext> = Omit<T, "tr
 type InstrumentedNamespace = "http" | "stealth" | "browser" | "session" | "state";
 
 const BROWSER_PAGE_METHODS = new Set(["goto", "fill", "click", "type", "waitForSelector"]);
+const HTTP_REQUEST_METHODS = new Set<keyof HttpClient>([
+	"request",
+	"get",
+	"post",
+	"put",
+	"delete",
+	"stream",
+	"sse",
+]);
+
+type RequestDiagnostics = {
+	options?: RequestOptions;
+	serializedUrl?: SerializedRequestUrl;
+	sensitiveValues: readonly string[];
+};
+
+type InstrumentedRequestInvocation =
+	| {
+			namespace: "http";
+			method: keyof HttpClient;
+			args: readonly unknown[];
+	  }
+	| {
+			namespace: "stealth";
+			method: "fetch";
+			args: readonly unknown[];
+	  };
 
 function isThenable(value: unknown): value is PromiseLike<unknown> {
 	return (
@@ -93,26 +133,158 @@ function getUrl(
 	return undefined;
 }
 
-function getSensitiveValues(
+function isHttpRequestMethod(methodName: string): methodName is keyof HttpClient {
+	return HTTP_REQUEST_METHODS.has(methodName as keyof HttpClient);
+}
+
+function requestInvocation(
 	namespace: InstrumentedNamespace,
 	methodName: string,
-	args: unknown[],
-): readonly string[] {
-	let options: unknown;
-	if (namespace === "stealth") {
-		options = args[1];
-	} else if (namespace === "http") {
-		options = methodName === "post" || methodName === "put" ? args[2] : args[1];
+	args: readonly unknown[],
+): InstrumentedRequestInvocation | undefined {
+	if (namespace === "http" && isHttpRequestMethod(methodName)) {
+		return { namespace, method: methodName, args };
 	}
+	return namespace === "stealth" && methodName === "fetch"
+		? { namespace, method: methodName, args }
+		: undefined;
+}
 
-	if (!options || typeof options !== "object" || !("sensitiveParams" in options)) {
-		return [];
+function requestOptionsForInvocation(
+	invocation: InstrumentedRequestInvocation | undefined,
+): RequestOptions | undefined {
+	if (!invocation) return undefined;
+	if (invocation.namespace === "http") {
+		return requestOptionsFromHttpInvocation(invocation.method, invocation.args);
 	}
-	const sensitiveParams = options.sensitiveParams;
+	const options = invocation.args[1];
+	return options && typeof options === "object"
+		? (options as Parameters<StealthClient["fetch"]>[1])
+		: undefined;
+}
+
+function fallbackSensitiveValues(options?: RequestOptions): readonly string[] {
+	const sensitiveParams = options?.sensitiveParams;
 	if (!sensitiveParams || typeof sensitiveParams !== "object") return [];
-	return Object.values(sensitiveParams).filter(
-		(value): value is string => typeof value === "string",
+	return Object.values(sensitiveParams).map(String);
+}
+
+function stripDiagnosticBase(url: string): string {
+	const diagnosticBase = "http://apifuse-instrumentation.invalid";
+	return url.startsWith(diagnosticBase) ? url.slice(diagnosticBase.length) || "/" : url;
+}
+
+function serializeDiagnosticUrl(
+	url: string,
+	options?: RequestOptions,
+): SerializedRequestUrl | undefined {
+	try {
+		return serializeRequestUrl(url, options?.params, options?.sensitiveParams);
+	} catch {
+		try {
+			const absoluteUrl = new URL(url, "http://apifuse-instrumentation.invalid").toString();
+			const serialized = serializeRequestUrl(
+				absoluteUrl,
+				options?.params,
+				options?.sensitiveParams,
+			);
+			return {
+				requestUrl: stripDiagnosticBase(serialized.requestUrl),
+				redactedUrl: stripDiagnosticBase(serialized.redactedUrl),
+				sensitiveValues: serialized.sensitiveValues,
+			};
+		} catch {
+			return undefined;
+		}
+	}
+}
+
+function snapshotRequestDiagnostics(
+	namespace: InstrumentedNamespace,
+	methodName: string,
+	args: readonly unknown[],
+): RequestDiagnostics {
+	const options = requestOptionsForInvocation(requestInvocation(namespace, methodName, args));
+	const url = typeof args[0] === "string" ? args[0] : undefined;
+	const serializedUrl = url ? serializeDiagnosticUrl(url, options) : undefined;
+	return {
+		options,
+		serializedUrl,
+		sensitiveValues: serializedUrl?.sensitiveValues ?? fallbackSensitiveValues(options),
+	};
+}
+
+function sanitizeRequestError(error: unknown, diagnostics: RequestDiagnostics): unknown {
+	return redactSensitiveError(
+		error,
+		diagnostics.sensitiveValues,
+		diagnostics.serializedUrl?.requestUrl,
+		diagnostics.serializedUrl?.redactedUrl,
 	);
+}
+
+function isHttpStreamResponse(value: unknown): value is HttpStreamResponse {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"body" in value &&
+		value.body instanceof ReadableStream
+	);
+}
+
+function instrumentHttpStreamConsumption(
+	value: unknown,
+	recorder: NonNullable<ReturnType<typeof getTraceRecorder>>,
+	args: unknown[],
+	diagnostics: RequestDiagnostics,
+): unknown {
+	if (!isHttpStreamResponse(value)) return value;
+
+	const source = value.body;
+	let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+	const body = new ReadableStream<Uint8Array>(
+		{
+			async pull(controller) {
+				try {
+					reader ??= source.getReader();
+					const chunk = await reader.read();
+					if (chunk.done) {
+						controller.close();
+						return;
+					}
+					controller.enqueue(chunk.value);
+				} catch (error) {
+					const sanitizedError = sanitizeRequestError(error, diagnostics);
+					try {
+						await recorder.runSpan(
+							"http.stream.consume",
+							() => {
+								throw sanitizedError;
+							},
+							{
+								onError: (spanError) =>
+									buildSpanAttributes("http", "stream", args, undefined, spanError, diagnostics),
+							},
+						);
+					} catch (recordedError) {
+						controller.error(recordedError);
+					}
+				}
+			},
+			cancel(reason) {
+				return reader ? reader.cancel(reason) : source.cancel(reason);
+			},
+		},
+		{ highWaterMark: 0 },
+	);
+
+	return {
+		...value,
+		body,
+		bytes: () => readableBytes(body),
+		textChunks: () => readableTextChunks(body),
+		lines: () => readableLines(body),
+	} satisfies HttpStreamResponse;
 }
 
 function getMethod(
@@ -121,6 +293,20 @@ function getMethod(
 	args: unknown[],
 ): string | undefined {
 	if (namespace === "http") {
+		if (isHttpRequestMethod(methodName)) {
+			const options = requestOptionsFromHttpInvocation(methodName, args);
+			if (
+				(methodName === "request" || methodName === "stream" || methodName === "sse") &&
+				options &&
+				"method" in options &&
+				typeof options.method === "string"
+			) {
+				return options.method.toUpperCase();
+			}
+			if (methodName === "request" || methodName === "stream" || methodName === "sse") {
+				return "GET";
+			}
+		}
 		return methodName.toUpperCase();
 	}
 
@@ -142,11 +328,20 @@ function buildSpanAttributes(
 	args: unknown[],
 	result?: unknown,
 	error?: unknown,
+	diagnostics: RequestDiagnostics = { sensitiveValues: [] },
 ): Record<string, string | number | boolean> {
 	const attributes: Record<string, string | number | boolean> = {};
-	const sensitiveValues = getSensitiveValues(namespace, methodName, args);
 	const rawUrl = getUrl(namespace, args, result);
-	const url = rawUrl ? redactSensitiveText(rawUrl, sensitiveValues) : undefined;
+	const url =
+		diagnostics.serializedUrl?.redactedUrl ??
+		(rawUrl
+			? redactSensitiveText(
+					rawUrl,
+					diagnostics.sensitiveValues,
+					diagnostics.serializedUrl?.requestUrl,
+					diagnostics.serializedUrl?.redactedUrl,
+				)
+			: undefined);
 	const method = getMethod(namespace, methodName, args);
 	const status = error ? getErrorStatus(error) : getResponseStatus(namespace, result);
 	const duration = error ? undefined : getResponseDuration(result);
@@ -363,6 +558,7 @@ function wrapNamespace<T extends object>(
 			}
 
 			const wrapped = (...args: unknown[]) => {
+				const requestDiagnostics = snapshotRequestDiagnostics(namespace, methodName, args);
 				// Invoke first and decide by the RETURN VALUE. `runSpan` always
 				// returns a Promise, so unconditionally span-wrapping every member
 				// silently rewrote synchronous contracts: `ctx.state.namespace()`
@@ -376,10 +572,7 @@ function wrapNamespace<T extends object>(
 				try {
 					result = Reflect.apply(value, namespaceTarget, args);
 				} catch (error) {
-					const sanitizedError = redactSensitiveError(
-						error,
-						getSensitiveValues(namespace, methodName, args),
-					);
+					const sanitizedError = sanitizeRequestError(error, requestDiagnostics);
 					// A promise-returning implementation may still throw
 					// SYNCHRONOUSLY during pre-flight validation. Preserve the
 					// synchronous throw contract, but keep recording the failure
@@ -392,7 +585,14 @@ function wrapNamespace<T extends object>(
 							},
 							{
 								onError: (spanError) =>
-									buildSpanAttributes(namespace, methodName, args, undefined, spanError),
+									buildSpanAttributes(
+										namespace,
+										methodName,
+										args,
+										undefined,
+										spanError,
+										requestDiagnostics,
+									),
 							},
 						)
 						.catch(() => undefined);
@@ -413,14 +613,27 @@ function wrapNamespace<T extends object>(
 					}
 					return result;
 				}
-				const sensitiveValues = getSensitiveValues(namespace, methodName, args);
 				const sanitizedResult = Promise.resolve(result).catch((error: unknown) => {
-					throw redactSensitiveError(error, sensitiveValues);
+					throw sanitizeRequestError(error, requestDiagnostics);
 				});
-				return recorder.runSpan(`${namespace}.${methodName}`, () => sanitizedResult, {
-					onSuccess: (spanResult) => buildSpanAttributes(namespace, methodName, args, spanResult),
-					onError: (error) => buildSpanAttributes(namespace, methodName, args, undefined, error),
+				const tracedResult = recorder.runSpan(`${namespace}.${methodName}`, () => sanitizedResult, {
+					onSuccess: (spanResult) =>
+						buildSpanAttributes(
+							namespace,
+							methodName,
+							args,
+							spanResult,
+							undefined,
+							requestDiagnostics,
+						),
+					onError: (error) =>
+						buildSpanAttributes(namespace, methodName, args, undefined, error, requestDiagnostics),
 				});
+				return namespace === "http" && methodName === "stream"
+					? tracedResult.then((spanResult) =>
+							instrumentHttpStreamConsumption(spanResult, recorder, args, requestDiagnostics),
+						)
+					: tracedResult;
 			};
 
 			wrappedMethods.set(property, wrapped);

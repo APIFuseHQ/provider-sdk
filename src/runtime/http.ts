@@ -233,13 +233,11 @@ function sanitizeStreamErrors(
 					controller.enqueue(chunk.value);
 				} catch (error) {
 					controller.error(
-						toHttpTransportError(
-							redactSensitiveError(
-								error,
-								serializedUrl.sensitiveValues,
-								serializedUrl.requestUrl,
-								serializedUrl.redactedUrl,
-							),
+						redactSensitiveError(
+							error,
+							serializedUrl.sensitiveValues,
+							serializedUrl.requestUrl,
+							serializedUrl.redactedUrl,
 						),
 					);
 				}
@@ -612,7 +610,9 @@ export function createHttpClient(
 			explicitRetry,
 			method: methodName,
 		});
-		const dedupeContext = dedupeAllocatorEndpoints ? { attempted: new Set<string>() } : undefined;
+		const dedupeContext = dedupeAllocatorEndpoints
+			? { attempted: new Set<string>() }
+			: undefined;
 
 		const executeOnce = (proxyAttemptOffset = 0): Promise<NativeHttpAttemptOutcome> =>
 			fetchNativeHttp(

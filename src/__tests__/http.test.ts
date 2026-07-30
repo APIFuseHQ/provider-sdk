@@ -292,6 +292,42 @@ describe("createHttpClient", () => {
 		expect((caught as Error).message).not.toContain(secret);
 	});
 
+	it("preserves mid-stream error semantics while redacting sensitiveParams", async () => {
+		const secret = "stream-semantics-secret";
+		const streamError = new Error(`Socket closed at https://example.com/logs?crtfc_key=${secret}`);
+		streamError.name = "SocketError";
+		mockNativeFetchState.queuedNativeResponses.push(
+			new Response(
+				new ReadableStream<Uint8Array>({
+					pull(controller) {
+						controller.error(streamError);
+					},
+				}),
+				{ status: 200 },
+			),
+		);
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const response = await createHttpClient().stream("https://example.com/logs", {
+			sensitiveParams: { crtfc_key: secret },
+		});
+		let caught: unknown;
+		try {
+			for await (const _line of response.lines()) {
+				// The test stream fails before yielding a line.
+			}
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBe(streamError);
+		expect(caught).not.toBeInstanceOf(TransportError);
+		expect(caught).toMatchObject({
+			name: "SocketError",
+			message: "Socket closed at https://example.com/logs?crtfc_key=[REDACTED]",
+		});
+	});
+
 	it("sse() parses native EventSource frames incrementally", async () => {
 		mockNativeFetchState.queuedResponses.push({
 			status: 200,
@@ -520,6 +556,49 @@ describe("createHttpClient", () => {
 				preset: HttpRetryPreset.TransportTransient,
 				transport: "native",
 				lastErrorCode: "transport_network_error",
+			},
+		]);
+	});
+
+	it("keeps readonly sensitive timeout errors classified and retryable", async () => {
+		const secret = "http-timeout-secret";
+		const summaries: unknown[] = [];
+		const originalRandom = Math.random;
+		Math.random = () => 0;
+		mockNativeFetchState.queuedErrors.push(
+			new DOMException(
+				`request aborted at https://example.com/slow?serviceKey=${secret}`,
+				"AbortError",
+			),
+		);
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		let response: Awaited<ReturnType<ReturnType<typeof createHttpClient>["get"]>> | undefined;
+		try {
+			response = await createHttpClient(undefined, {
+				onRetrySummary: (summary) => summaries.push(summary),
+			}).get("https://example.com/slow", {
+				retry: true,
+				sensitiveParams: { serviceKey: secret },
+			});
+		} finally {
+			Math.random = originalRandom;
+		}
+
+		expect(response?.data).toEqual({ ok: true });
+		expect(mockNativeFetchState.calls).toHaveLength(2);
+		expect(summaries).toEqual([
+			{
+				attempts: 2,
+				retries: 1,
+				preset: HttpRetryPreset.TransportTransient,
+				transport: "native",
+				lastErrorCode: "transport_timeout",
 			},
 		]);
 	});

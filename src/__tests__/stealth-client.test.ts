@@ -39,7 +39,7 @@ type MockStealthClientState = {
 const mockStealthState = {
 	clients: [] as MockStealthClientState[],
 	queuedResponses: [] as MockImpitResponse[],
-	queuedErrors: [] as Error[],
+	queuedErrors: [] as (Error | (() => Error))[],
 };
 
 function toHeaders(headers: MockImpitResponse["headers"]): Headers {
@@ -125,8 +125,8 @@ class MockImpit {
 
 	async fetch(url: string, init?: Record<string, unknown>) {
 		this.state.calls.push({ url, init });
-		const error = mockStealthState.queuedErrors.shift();
-		if (error) throw error;
+		const queuedError = mockStealthState.queuedErrors.shift();
+		if (queuedError) throw typeof queuedError === "function" ? queuedError() : queuedError;
 		const response = mockStealthState.queuedResponses.shift();
 		if (!response) throw new Error("No queued response");
 		return toImpitResponse(response);
@@ -477,7 +477,7 @@ describe("createStealthClient", () => {
 		);
 	});
 
-	it("sends sensitiveParams while redacting returned request URL metadata", async () => {
+	it("sends sensitiveParams while preserving programmatic response URL metadata", async () => {
 		const secret = "stealth-test-secret";
 		mockStealthState.queuedResponses.push({
 			status: 200,
@@ -496,7 +496,7 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients[0]?.calls[0]?.url).toBe(
 			`https://example.com/items?page=1&confmKey=${secret}`,
 		);
-		expect(response.url).toBe("https://example.com/items?page=1&confmKey=[REDACTED]");
+		expect(response.url).toBe(`https://example.com/items?page=1&confmKey=${secret}`);
 	});
 
 	it("createSession reuses the same impit client for matching browser/proxy settings", async () => {
@@ -1418,6 +1418,102 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients[0]?.calls[1]?.url).toBe("https://example.com/callback");
 	});
 
+	it("redirects.run resolves fragment redirects with the real URL and redacts hop metadata", async () => {
+		const secret = "redirect-fragment-secret";
+		mockStealthState.queuedResponses.push(
+			{
+				status: 302,
+				body: "",
+				headers: { location: "#continue" },
+				url: `https://example.com/login?serviceKey=${secret}`,
+			},
+			{
+				status: 200,
+				body: "done",
+				headers: {},
+				url: `https://example.com/login?serviceKey=${secret}#continue`,
+			},
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+		const result = await session.redirects.run({
+			url: "/login",
+			sensitiveParams: { serviceKey: secret },
+		});
+
+		expect(mockStealthState.clients[0]?.calls.map((call) => call.url)).toEqual([
+			`https://example.com/login?serviceKey=${secret}`,
+			`https://example.com/login?serviceKey=${secret}#continue`,
+		]);
+		expect(result.hops).toEqual([
+			{
+				url: "https://example.com/login?serviceKey=[REDACTED]",
+				status: 302,
+				method: "GET",
+				location: "#continue",
+				nextUrl: "https://example.com/login?serviceKey=[REDACTED]#continue",
+			},
+		]);
+		// The final response remains programmatic response data, not diagnostic metadata.
+		expect(result.final.url).toBe(`https://example.com/login?serviceKey=${secret}#continue`);
+	});
+
+	it("redirects.run redacts credential-bearing relative Location diagnostics", async () => {
+		const secret = "redirect-location-secret";
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: `../next?serviceKey=${secret}` },
+			url: `https://example.com/auth/login?serviceKey=${secret}`,
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+		const result = await session.redirects.run({
+			url: "/auth/login",
+			maxHops: 0,
+			sensitiveParams: { serviceKey: secret },
+		});
+
+		expect(result.reason).toBe("max_hops");
+		expect(result.hops[0]).toEqual({
+			url: "https://example.com/auth/login?serviceKey=[REDACTED]",
+			status: 302,
+			method: "GET",
+			location: "../next?serviceKey=[REDACTED]",
+			nextUrl: "https://example.com/next?serviceKey=[REDACTED]",
+		});
+		expect(JSON.stringify(result.hops)).not.toContain(secret);
+	});
+
+	it("redirects.run redacts malformed credential-bearing Locations in URL errors", async () => {
+		const secret = "redirect-malformed-secret";
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: `https://[bad]/?serviceKey=${secret}` },
+			url: `https://example.com/login?serviceKey=${secret}`,
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+		let thrown: unknown;
+		try {
+			await session.redirects.run({
+				url: "/login",
+				sensitiveParams: { serviceKey: secret },
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(Error);
+		expect(String(thrown)).not.toContain(secret);
+		expect((thrown as Error).stack).not.toContain(secret);
+		expect(String(thrown)).toContain("[REDACTED]");
+	});
+
 	it("wraps network failures in TransportError", async () => {
 		mockStealthState.queuedErrors.push(new Error("socket hang up"));
 
@@ -1431,6 +1527,92 @@ describe("createStealthClient", () => {
 			status: 0,
 			message: "Network error",
 		});
+	});
+
+	it("redacts sensitive request URLs from stealth transport errors and their metadata", async () => {
+		const secret = "stealth-network-secret";
+		const requestUrl = `https://example.com/network?serviceKey=${secret}`;
+		const failure = new Error(`connect failed for ${requestUrl}`);
+		Object.assign(failure, {
+			url: requestUrl,
+			request: { url: requestUrl },
+			details: { endpoint: requestUrl },
+		});
+		mockStealthState.queuedErrors.push(failure);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		let thrown: unknown;
+		try {
+			await client.fetch("/network", {
+				sensitiveParams: { serviceKey: secret },
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(TransportError);
+		const transportError = thrown as TransportError;
+		expect(transportError.message).toBe("Network error");
+		expect(String(transportError.cause)).not.toContain(secret);
+		expect((transportError.cause as Error).stack).not.toContain(secret);
+		expect(JSON.stringify(transportError.cause)).not.toContain(secret);
+	});
+
+	it("redacts readonly timeout errors without losing timeout classification", async () => {
+		const secret = "stealth-timeout-secret";
+		mockStealthState.queuedErrors.push(
+			new DOMException(
+				`request timeout for https://example.com/slow?serviceKey=${secret}`,
+				"TimeoutError",
+			),
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		let thrown: unknown;
+		try {
+			await client.fetch("/slow", {
+				timeout: 10,
+				sensitiveParams: { serviceKey: secret },
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(TransportError);
+		expect(thrown).toMatchObject({
+			code: "transport_timeout",
+			status: 0,
+			message: "Request timed out",
+		});
+		expect(String((thrown as TransportError).cause)).not.toContain(secret);
+		expect(((thrown as TransportError).cause as Error).stack).not.toContain(secret);
+	});
+
+	it("redacts against the serialized request snapshot when options mutate in flight", async () => {
+		const sentSecret = "stealth-snapshot-sent-secret";
+		const laterSecret = "stealth-snapshot-later-secret";
+		const sensitiveParams = { serviceKey: sentSecret };
+		mockStealthState.queuedErrors.push(() => {
+			sensitiveParams.serviceKey = laterSecret;
+			return new Error(`connect failed for https://example.com/network?serviceKey=${sentSecret}`);
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		let thrown: unknown;
+		try {
+			await client.fetch("/network", { sensitiveParams });
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(mockStealthState.clients[0]?.calls[0]?.url).toBe(
+			`https://example.com/network?serviceKey=${sentSecret}`,
+		);
+		expect(String((thrown as TransportError).cause)).not.toContain(sentSecret);
+		expect(((thrown as TransportError).cause as Error).stack).not.toContain(sentSecret);
 	});
 
 	it("maps impit timeout failures to transport_timeout", async () => {

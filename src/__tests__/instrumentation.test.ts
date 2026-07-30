@@ -288,13 +288,99 @@ describe("wrapWithInstrumentation", () => {
 		const instrumented = wrapWithInstrumentation(ctx);
 		await expect(
 			instrumented.http.get("https://api.example.com/items", {
+				params: { page: 2 },
 				sensitiveParams: { serviceKey: secret },
 			}),
 		).rejects.toThrow("serviceKey=[REDACTED]");
 
-		const serializedSpan = JSON.stringify(instrumented.trace.getSpans()[0]);
+		const span = instrumented.trace.getSpans()[0];
+		expect(span?.attributes.url).toBe("https://api.example.com/items?page=2&serviceKey=[REDACTED]");
+		const serializedSpan = JSON.stringify(span);
 		expect(serializedSpan).toContain("[REDACTED]");
 		expect(serializedSpan).not.toContain(secret);
+	});
+
+	it("redacts raw and encoded sensitive values from HTTP and stealth traces", async () => {
+		const secret = "trace key+/=%";
+		const percentEncoded = encodeURIComponent(secret);
+		const formEncoded = new URLSearchParams({ value: secret }).toString().slice("value=".length);
+		const ctx = createMockContext();
+		ctx.http.get = mock(async () => {
+			throw new Error(`HTTP failed: raw=${secret} encoded=${percentEncoded} form=${formEncoded}`);
+		});
+		ctx.stealth.fetch = mock(async () => {
+			throw new Error(
+				`Stealth failed: raw=${secret} encoded=${percentEncoded} form=${formEncoded}`,
+			);
+		});
+
+		const instrumented = wrapWithInstrumentation(ctx);
+		for (const request of [
+			() =>
+				instrumented.http.get("https://api.example.com/items", {
+					sensitiveParams: { serviceKey: secret },
+				}),
+			() =>
+				instrumented.stealth.fetch("https://api.example.com/items", {
+					sensitiveParams: { serviceKey: secret },
+				}),
+		]) {
+			await expect(request()).rejects.toThrow("[REDACTED]");
+		}
+
+		const serializedSpans = JSON.stringify(instrumented.trace.getSpans());
+		expect(serializedSpans).not.toContain(secret);
+		expect(serializedSpans).not.toContain(percentEncoded);
+		expect(serializedSpans).not.toContain(formEncoded);
+		expect(serializedSpans.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("records a correlated failure when an HTTP stream fails during consumption", async () => {
+		const secret = "trace-stream-secret";
+		const ctx = createMockContext();
+		ctx.http.stream = mock(async () => {
+			const body = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					controller.error(
+						new Error(`Stream failed at https://api.example.com/logs?serviceKey=${secret}`),
+					);
+				},
+			});
+			return {
+				status: 200,
+				ok: true,
+				headers: {},
+				body,
+				bytes: async function* () {},
+				textChunks: async function* () {},
+				lines: async function* () {},
+			};
+		});
+
+		const instrumented = wrapWithInstrumentation(ctx);
+		const response = await instrumented.http.stream("https://api.example.com/logs", {
+			sensitiveParams: { serviceKey: secret },
+		});
+		await expect(async () => {
+			for await (const _line of response.lines()) {
+				// The source errors before yielding a line.
+			}
+		}).toThrow("serviceKey=[REDACTED]");
+
+		const requestSpan = instrumented.trace.getSpans().find((span) => span.name === "http.stream");
+		const consumptionSpan = instrumented.trace
+			.getSpans()
+			.find((span) => span.name === "http.stream.consume");
+		expect(requestSpan?.status).toBe("ok");
+		expect(consumptionSpan).toMatchObject({
+			status: "error",
+			error: "Stream failed at https://api.example.com/logs?serviceKey=[REDACTED]",
+			attributes: {
+				url: "https://api.example.com/logs?serviceKey=[REDACTED]",
+				method: "GET",
+			},
+		});
+		expect(JSON.stringify(instrumented.trace.getSpans())).not.toContain(secret);
 	});
 });
 

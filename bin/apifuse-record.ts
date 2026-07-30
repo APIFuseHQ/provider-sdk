@@ -17,12 +17,17 @@ import {
 	type ProviderContext,
 	type ProviderDefinition,
 	ProviderError,
+	type RequestOptions,
 	type StealthClient,
 	TransportError,
 	ValidationError,
 } from "../src/index.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
-import { REDACTED_QUERY_VALUE, redactSensitiveText } from "../src/runtime/request-options.js";
+import {
+	REDACTED_QUERY_VALUE,
+	redactSensitiveText,
+	requestOptionsFromHttpInvocation,
+} from "../src/runtime/request-options.js";
 
 type CliArgs = {
 	append: boolean;
@@ -75,18 +80,18 @@ export async function main() {
 		}
 
 		const sensitiveParams = capture.getCapturedSensitiveParams();
-		const rawPayload = args.sanitize
-			? sanitizeFixture(captured, sensitiveParams)
-			: redactCapturedSensitiveParams(captured, sensitiveParams);
 		const fixturePath = resolve(location.rootDir, "__fixtures__", "raw.json");
-		const nextPayload = await prepareFixturePayload(fixturePath, rawPayload, args.append);
+		const mergedPayload = await prepareFixturePayload(fixturePath, captured, args.append);
+		// Redact after append so existing params-era captures cannot retain a value
+		// that this run has declared sensitive.
+		const nextPayload = redactFixture(mergedPayload, sensitiveParams, args.sanitize);
 
 		await mkdir(dirname(fixturePath), { recursive: true });
 		await writeFile(fixturePath, `${JSON.stringify(nextPayload, null, 2)}\n`);
 
 		console.log(
 			`[apifuse record] Captured response (${formatBytes(
-				Buffer.byteLength(JSON.stringify(rawPayload)),
+				Buffer.byteLength(JSON.stringify(nextPayload)),
 			)})`,
 		);
 		console.log(`[apifuse record] Saved to ${relative(process.cwd(), fixturePath)}`);
@@ -317,11 +322,8 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string) {
 	let capturedRaw: unknown;
 	const sensitiveParamNames = new Set<string>();
 	const sensitiveParamValues = new Set<string>();
-	const captureSensitiveParams = (params?: Record<string, string>) => {
-		for (const [key, value] of Object.entries(params ?? {})) {
-			sensitiveParamNames.add(key);
-			sensitiveParamValues.add(value);
-		}
+	const captureSensitiveParams = (url: string, options?: RequestOptions) => {
+		captureSensitiveRequestValues(url, options, sensitiveParamNames, sensitiveParamValues);
 	};
 
 	const http = proxyHttpClient(createHttpClient(baseUrl), captureSensitiveParams, (response) => {
@@ -403,24 +405,47 @@ type CapturedSensitiveParams = {
 	values: readonly string[];
 };
 
-function requestOptionsForHttpCall(method: PropertyKey, args: unknown[]): unknown {
-	return method === "post" || method === "put" ? args[2] : args[1];
-}
+function captureSensitiveRequestValues(
+	url: string,
+	options: RequestOptions | undefined,
+	names: Set<string>,
+	values: Set<string>,
+): void {
+	const sensitiveParams = options?.sensitiveParams;
+	if (sensitiveParams === undefined) return;
+	if (!sensitiveParams || typeof sensitiveParams !== "object" || Array.isArray(sensitiveParams)) {
+		throw new TypeError("sensitiveParams must be an object whose values are strings.");
+	}
 
-function sensitiveParamsFromOptions(value: unknown): Record<string, string> | undefined {
-	if (!value || typeof value !== "object" || !("sensitiveParams" in value)) return undefined;
-	const params = value.sensitiveParams;
-	if (!params || typeof params !== "object") return undefined;
-	return Object.fromEntries(
-		Object.entries(params).filter(
-			(entry): entry is [string, string] => typeof entry[1] === "string",
-		),
-	);
+	const entries = Object.entries(sensitiveParams);
+	for (const [key, value] of entries) {
+		if (typeof value !== "string") {
+			throw new TypeError(`sensitiveParams.${key} must be a string.`);
+		}
+		names.add(key);
+		values.add(value);
+	}
+
+	let parsedUrl: URL;
+	try {
+		parsedUrl = new URL(String(url), "http://apifuse.invalid");
+	} catch {
+		throw new TypeError("Cannot securely record sensitiveParams for an invalid request URL.");
+	}
+
+	for (const [key] of entries) {
+		for (const value of parsedUrl.searchParams.getAll(key)) values.add(value);
+		const ordinaryValue = options?.params?.[key];
+		const ordinaryValues = Array.isArray(ordinaryValue) ? ordinaryValue : [ordinaryValue];
+		for (const value of ordinaryValues) {
+			if (value !== null && value !== undefined) values.add(String(value));
+		}
+	}
 }
 
 function proxyHttpClient(
 	client: HttpClient,
-	onSensitiveParams: (params?: Record<string, string>) => void,
+	onSensitiveParams: (url: string, options?: RequestOptions) => void,
 	onResponse: (response: Awaited<ReturnType<HttpClient["get"]>>) => void,
 ): HttpClient {
 	return new Proxy(client, {
@@ -432,7 +457,13 @@ function proxyHttpClient(
 			}
 
 			return async (...args: unknown[]) => {
-				onSensitiveParams(sensitiveParamsFromOptions(requestOptionsForHttpCall(prop, args)));
+				const options =
+					typeof prop === "string"
+						? requestOptionsFromHttpInvocation(prop as keyof HttpClient, args)
+						: undefined;
+				if (options) {
+					onSensitiveParams(String(args[0]), options);
+				}
 				const response = await value.apply(target, args);
 				onResponse(response);
 				return response;
@@ -445,12 +476,12 @@ type StealthSession = ReturnType<StealthClient["createSession"]>;
 
 function proxyStealthClient(
 	client: StealthClient,
-	onSensitiveParams: (params?: Record<string, string>) => void,
+	onSensitiveParams: (url: string, options?: RequestOptions) => void,
 	onResponse: (response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
 ): StealthClient {
 	return {
 		fetch: async (...args: Parameters<StealthClient["fetch"]>) => {
-			onSensitiveParams(args[1]?.sensitiveParams);
+			onSensitiveParams(args[0], args[1]);
 			const response = await client.fetch(...args);
 			onResponse(response);
 			return response;
@@ -462,20 +493,19 @@ function proxyStealthClient(
 
 function proxyStealthSession(
 	session: StealthSession,
-	onSensitiveParams: (params?: Record<string, string>) => void,
+	onSensitiveParams: (url: string, options?: RequestOptions) => void,
 	onResponse: (response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
 ): StealthSession {
 	return {
 		fetch: async (...args: Parameters<StealthSession["fetch"]>) => {
-			onSensitiveParams(args[1]?.sensitiveParams);
+			onSensitiveParams(args[0], args[1]);
 			const response = await session.fetch(...args);
 			onResponse(response);
 			return response;
 		},
-		cookies: session.cookies,
 		redirects: {
 			run: async (...args: Parameters<StealthSession["redirects"]["run"]>) => {
-				onSensitiveParams(args[0]?.sensitiveParams);
+				onSensitiveParams(args[0].url, args[0]);
 				const result = await session.redirects.run(...args);
 				onResponse(result.final);
 				return result;
@@ -493,46 +523,68 @@ function normalizeCapturedStealthResponse(response: Awaited<ReturnType<StealthCl
 	}
 }
 
-function redactCapturedSensitiveParams(
+function redactFixture(
 	value: unknown,
 	sensitiveParams: CapturedSensitiveParams,
+	sanitizeCommonFields: boolean,
 ): unknown {
-	if (Array.isArray(value)) {
-		return value.map((item) => redactCapturedSensitiveParams(item, sensitiveParams));
-	}
-
 	if (typeof value === "string") {
-		return redactSensitiveText(value, sensitiveParams.values);
+		if (sensitiveParams.values.includes(value)) return REDACTED_QUERY_VALUE;
+		return redactFixtureText(value, sensitiveParams);
 	}
 
-	if (!value || typeof value !== "object") {
-		return value;
+	if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+		return sensitiveParams.values.includes(String(value)) ? REDACTED_QUERY_VALUE : value;
 	}
 
-	const entries = Object.entries(value as MutableRecord).map(([key, entryValue]) => {
-		if (sensitiveParams.names.includes(key)) {
-			return [key, REDACTED_QUERY_VALUE] as const;
-		}
+	if (Array.isArray(value)) {
+		return value.map((item) => redactFixture(item, sensitiveParams, sanitizeCommonFields));
+	}
 
-		return [key, redactCapturedSensitiveParams(entryValue, sensitiveParams)] as const;
-	});
+	if (!value || typeof value !== "object") return value;
 
-	return Object.fromEntries(entries);
+	const result: MutableRecord = Object.create(null) as MutableRecord;
+	for (const [key, entryValue] of Object.entries(value as MutableRecord)) {
+		const redactedKey = sensitiveParams.values.includes(key)
+			? REDACTED_QUERY_VALUE
+			: redactFixtureText(key, sensitiveParams);
+		const uniqueKey = collisionSafeKey(result, redactedKey);
+		result[uniqueKey] =
+			sanitizeCommonFields && isSensitiveKey(key)
+				? REDACTED_QUERY_VALUE
+				: redactFixture(entryValue, sensitiveParams, sanitizeCommonFields);
+	}
+	return result;
 }
 
-function sanitizeFixture(value: unknown, sensitiveParams: CapturedSensitiveParams): unknown {
-	const redacted = redactCapturedSensitiveParams(value, sensitiveParams);
-	if (Array.isArray(redacted)) {
-		return redacted.map((item) => sanitizeFixture(item, sensitiveParams));
+function redactFixtureText(text: string, sensitiveParams: CapturedSensitiveParams): string {
+	// Broad substring replacement is unsafe for low-entropy values such as "1"
+	// or "api". Those are still redacted when they are exact scalar echoes (above)
+	// or occur under their declared query key (below).
+	const substringSafeValues = sensitiveParams.values.filter((value) => value.length >= 4);
+	let redacted = redactSensitiveText(text, substringSafeValues);
+	for (const name of sensitiveParams.names) {
+		const keyVariants = new Set([
+			name,
+			encodeURIComponent(name),
+			new URLSearchParams({ [name]: "" }).toString().slice(0, -1),
+		]);
+		for (const key of keyVariants) {
+			const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const queryValue = new RegExp(`(^|[?&])(${escapedKey}=)[^&#\\s"]*`, "g");
+			redacted = redacted.replace(queryValue, (_match, prefix, assignment) => {
+				return `${prefix}${assignment}${REDACTED_QUERY_VALUE}`;
+			});
+		}
 	}
+	return redacted;
+}
 
-	if (!redacted || typeof redacted !== "object") return redacted;
-	return Object.fromEntries(
-		Object.entries(redacted as MutableRecord).map(([key, entryValue]) => [
-			key,
-			isSensitiveKey(key) ? REDACTED_QUERY_VALUE : sanitizeFixture(entryValue, sensitiveParams),
-		]),
-	);
+function collisionSafeKey(record: MutableRecord, preferredKey: string): string {
+	if (!(preferredKey in record)) return preferredKey;
+	let suffix = 2;
+	while (`${preferredKey}#${suffix}` in record) suffix += 1;
+	return `${preferredKey}#${suffix}`;
 }
 
 function isSensitiveKey(key: string): boolean {
