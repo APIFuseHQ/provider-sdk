@@ -4,11 +4,12 @@ import {
 	isSensitiveFixtureKey,
 	isSensitiveFixtureValue,
 	REDACTED_FIXTURE_VALUE,
+	sanitizeFixtureString,
 	sanitizeUrlForLogs,
 } from "./fixture-sanitization.js";
 import { toJsonValue, type JsonValue } from "./contract-json.js";
 import { readableBytes, readableLines, readableTextChunks } from "./stream.js";
-import type { HttpStreamResponse } from "./types.js";
+import type { HttpStreamResponse, StreamPreviewRedactionReason } from "./types.js";
 
 export const STREAM_PREVIEW_BYTES = 4096;
 export const STREAM_FINALIZE_TIMEOUT_MS = 30_000;
@@ -37,10 +38,12 @@ const STREAM_EVIDENCE_REDACTION_REASONS = [
 	"sanitizer-output-invalid",
 	"sensitive-delimited-column",
 	"textual-xml",
+	"truncated-form",
 	"truncated-json",
-] as const;
+	"undecodable-text",
+] as const satisfies readonly StreamPreviewRedactionReason[];
 const STREAM_EVIDENCE_REDACTION_REASON_SET = new Set<string>(STREAM_EVIDENCE_REDACTION_REASONS);
-export type StreamEvidenceRedactionReason = (typeof STREAM_EVIDENCE_REDACTION_REASONS)[number];
+export type StreamEvidenceRedactionReason = StreamPreviewRedactionReason;
 
 export interface StreamEvidenceRecord {
 	__apifuse_stream__: true;
@@ -73,6 +76,11 @@ export type StreamCaptureGroupItem =
 	| { kind: "response"; value: JsonValue };
 
 export interface StreamCaptureGroup {
+	items: StreamCaptureGroupItem[];
+}
+
+export interface StreamCaptureEnvelope {
+	__apifuse_capture__: true;
 	items: StreamCaptureGroupItem[];
 }
 
@@ -184,6 +192,16 @@ export function findStreamEvidenceRecord(value: unknown): StreamEvidenceRecord |
  * Evidence without request ordinals uses the legacy latest-record-only behavior.
  */
 export function findStreamEvidenceRecords(value: unknown): StreamEvidenceRecord[] {
+	if (isStreamCaptureEnvelope(value)) {
+		return parseStreamCaptureEnvelope(value).items.flatMap((item) =>
+			item.kind === "stream" ? [item.evidence] : [],
+		);
+	}
+	if (Array.isArray(value) && isStreamCaptureEnvelope(value.at(-1))) {
+		return parseStreamCaptureEnvelope(value.at(-1) as StreamCaptureEnvelope).items.flatMap(
+			(item) => (item.kind === "stream" ? [item.evidence] : []),
+		);
+	}
 	const group = findLatestStreamCaptureGroup(value);
 	if (!group) return [];
 	return group
@@ -193,6 +211,15 @@ export function findStreamEvidenceRecords(value: unknown): StreamEvidenceRecord[
 
 /** Returns a tagged latest mixed response group used by evidence-only snapshot replay. */
 export function findStreamCaptureGroup(value: unknown): StreamCaptureGroup | undefined {
+	if (isStreamCaptureEnvelope(value)) return parseStreamCaptureEnvelope(value);
+	if (Array.isArray(value)) {
+		const latest = value.at(-1);
+		if (isStreamCaptureEnvelope(latest)) return parseStreamCaptureEnvelope(latest);
+		if (Array.isArray(latest)) {
+			const nested = findStreamCaptureGroup(latest);
+			if (nested) return nested;
+		}
+	}
 	const group = findLatestStreamCaptureGroup(value);
 	if (!group) return undefined;
 	return {
@@ -207,6 +234,51 @@ export function findStreamCaptureGroup(value: unknown): StreamCaptureGroup | und
 			return { kind: "response", value: json };
 		}),
 	};
+}
+
+/** Creates a discriminated invocation envelope so ordinary arrays cannot mimic capture timelines. */
+export function createStreamCaptureEnvelope(
+	items: StreamCaptureGroupItem[],
+): StreamCaptureEnvelope {
+	if (!items.some((item) => item.kind === "stream")) {
+		throw new Error("A stream capture envelope must contain at least one stream item.");
+	}
+	return { __apifuse_capture__: true, items };
+}
+
+function isStreamCaptureEnvelope(value: unknown): value is StreamCaptureEnvelope {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		(value as Record<string, unknown>).__apifuse_capture__ === true
+	);
+}
+
+function parseStreamCaptureEnvelope(value: StreamCaptureEnvelope): StreamCaptureGroup {
+	if (!Array.isArray(value.items) || value.items.length === 0) {
+		throw new Error("Stream capture envelope items must be a non-empty array.");
+	}
+	const items = value.items.map((item): StreamCaptureGroupItem => {
+		if (item === null || typeof item !== "object" || Array.isArray(item)) {
+			throw new Error("Stream capture envelope item must be an object.");
+		}
+		if (item.kind === "stream") {
+			return { kind: "stream", evidence: parseStreamEvidenceRecord(item.evidence) };
+		}
+		if (item.kind === "response") {
+			const json = toJsonValue(item.value);
+			if (json === undefined) {
+				throw new Error("Stream capture response item must contain a JSON value.");
+			}
+			return { kind: "response", value: json };
+		}
+		throw new Error('Stream capture envelope item kind must be "stream" or "response".');
+	});
+	if (!items.some((item) => item.kind === "stream")) {
+		throw new Error("Stream capture envelope must contain at least one stream item.");
+	}
+	return { items };
 }
 
 export function isStreamEvidenceReplayResponse(
@@ -384,7 +456,7 @@ function createEvidenceRecord(
 		__apifuse_stream__: true,
 		status: response.status,
 		ok: response.ok,
-		headers: evidenceHeaders(response.headers),
+		headers: evidenceHeaders(response.headers, sanitizeFixture !== undefined),
 		body_sha256: bodySha256,
 		body_bytes: bodyBytes,
 		body_preview_base64: Buffer.from(safePreview).toString("base64"),
@@ -405,18 +477,18 @@ function sanitizePreview(
 	contentType: string | undefined,
 	sanitizeFixture: (value: JsonValue) => JsonValue,
 ): SanitizedPreview | undefined {
-	if (hasKnownBinaryMagic(preview)) return undefined;
-
 	let text: string;
 	try {
 		text = new TextDecoder("utf-8", { fatal: true }).decode(preview);
 	} catch {
-		// Sanitized recording deliberately retains genuinely non-textual bytes.
-		return undefined;
+		return sanitizePartiallyDecodablePreview(preview);
 	}
 
 	const declaredTextual = isTextualContentType(contentType);
 	const sniffedTextual = looksLikeJson(text) || looksLikeXml(text) || looksLikeText(text);
+	const sanitizedPrimitive = sanitizeFixtureString(text);
+	const containsTextualSecret = sanitizedPrimitive !== text;
+	if (hasKnownBinaryMagic(preview) && !containsTextualSecret) return undefined;
 	if (!declaredTextual && !sniffedTextual) return undefined;
 
 	const mediaType = contentType?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
@@ -435,22 +507,21 @@ function sanitizePreview(
 		try {
 			sanitizedText = JSON.stringify(sanitizeFixture(JSON.parse(text) as JsonValue));
 		} catch (error) {
-			return redactedSanitizedPreview(
-				preview.byteLength,
-				error instanceof SyntaxError ? "malformed-json" : "sanitizer-error",
-				true,
-			);
+			if (!(error instanceof SyntaxError)) {
+				throw new Error("Stream JSON preview sanitizer failed.", { cause: error });
+			}
+			return redactedSanitizedPreview(preview.byteLength, "malformed-json", true);
 		}
 	} else if (mediaType === "application/x-www-form-urlencoded") {
 		if (bodyBytes > preview.byteLength) {
-			return redactedSanitizedPreview(preview.byteLength, "sanitizer-error");
+			return redactedSanitizedPreview(preview.byteLength, "truncated-form");
 		}
 		const form = new URLSearchParams(text);
 		let sanitized: JsonValue;
 		try {
 			sanitized = sanitizeFixture(Object.fromEntries(form.entries()));
-		} catch {
-			return redactedSanitizedPreview(preview.byteLength, "sanitizer-error");
+		} catch (error) {
+			throw new Error("Stream form preview sanitizer failed.", { cause: error });
 		}
 		if (!isStringRecord(sanitized)) {
 			return redactedSanitizedPreview(preview.byteLength, "sanitizer-output-invalid");
@@ -460,11 +531,8 @@ function sanitizePreview(
 		if (hasSensitiveDelimitedHeader(text)) {
 			return redactedSanitizedPreview(preview.byteLength, "sensitive-delimited-column");
 		}
-		sanitizedText = redactSensitiveTextAssignments(text);
-		const tokenRedaction = redactHighEntropyTokens(sanitizedText);
-		if (tokenRedaction.redacted) {
-			sanitizedText = tokenRedaction.text;
-		}
+		const tokenRedaction = redactHighEntropyTokens(text);
+		sanitizedText = sanitizeFixtureString(tokenRedaction.text);
 		const sanitizedBytes = new TextEncoder().encode(sanitizedText);
 		if (sanitizedBytes.byteLength > preview.byteLength) {
 			return redactedSanitizedPreview(preview.byteLength, "sanitized-preview-too-large");
@@ -482,6 +550,50 @@ function sanitizePreview(
 	return { preview: fitSanitizedPreview(sanitizedBytes, preview.byteLength) };
 }
 
+function sanitizePartiallyDecodablePreview(preview: Uint8Array): SanitizedPreview | undefined {
+	const prefixLength = longestValidUtf8PrefixLength(preview);
+	const prefix = preview.subarray(0, prefixLength);
+	const tail = preview.subarray(prefixLength);
+	const text = new TextDecoder("utf-8", { fatal: true }).decode(prefix);
+	const sanitizedText = sanitizeFixtureString(text);
+	const containsTextualSecret = sanitizedText !== text;
+
+	if (!containsTextualSecret) {
+		if (hasKnownBinaryMagic(preview)) return undefined;
+		// Undecodable non-binary data cannot be proven safe. Declared text in particular must fail closed.
+		return redactedSanitizedPreview(preview.byteLength, "undecodable-text");
+	}
+
+	const sanitizedPrefix = fitSanitizedPreview(
+		new TextEncoder().encode(sanitizedText),
+		prefix.byteLength,
+	);
+	const sanitized = new Uint8Array(preview.byteLength);
+	sanitized.set(sanitizedPrefix);
+	sanitized.set(tail, prefix.byteLength);
+	return {
+		preview: sanitized,
+		...(looksLikePemPrivateKey(text)
+			? { redactionReason: "pem-private-key" as const }
+			: redactHighEntropyTokens(text).redacted
+				? { redactionReason: "high-entropy-token" as const }
+				: {}),
+	};
+}
+
+function longestValidUtf8PrefixLength(bytes: Uint8Array): number {
+	const decoder = new TextDecoder("utf-8", { fatal: true });
+	for (let length = bytes.byteLength; length > 0; length -= 1) {
+		try {
+			decoder.decode(bytes.subarray(0, length));
+			return length;
+		} catch {
+			// Keep walking back until no invalid or incomplete UTF-8 sequence remains.
+		}
+	}
+	return 0;
+}
+
 function looksLikePemPrivateKey(text: string): boolean {
 	return /-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/.test(text);
 }
@@ -494,17 +606,6 @@ function redactHighEntropyTokens(text: string): { text: string; redacted: boolea
 		return REDACTED_FIXTURE_VALUE;
 	});
 	return { text: sanitized, redacted };
-}
-
-function redactSensitiveTextAssignments(text: string): string {
-	return text.replace(
-		/((["']?)([\w-]+)\2\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\r\n&,;]+)/gi,
-		(match, prefix: string, _keyQuote: string, key: string, value: string) => {
-			if (!isSensitiveFixtureKey(key)) return match;
-			const quote = value.startsWith('"') ? '"' : value.startsWith("'") ? "'" : "";
-			return `${prefix}${quote}${REDACTED_FIXTURE_VALUE}${quote}`;
-		},
-	);
 }
 
 function hasSensitiveDelimitedHeader(text: string): boolean {
@@ -757,9 +858,18 @@ function streamEvidenceHeaders(headers: Record<string, string>): StreamEvidenceH
 	return selectEvidenceHeaders(Object.entries(headers));
 }
 
-function evidenceHeaders(headers: Record<string, string>): StreamEvidenceHeaders {
+function evidenceHeaders(
+	headers: Record<string, string>,
+	sanitize: boolean,
+): StreamEvidenceHeaders {
 	return selectEvidenceHeaders(
-		Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value]),
+		Object.entries(headers).map(([name, value]) => {
+			const normalizedName = name.toLowerCase();
+			return [
+				normalizedName,
+				sanitize && normalizedName === "content-disposition" ? sanitizeFixtureString(value) : value,
+			];
+		}),
 	);
 }
 

@@ -5,6 +5,8 @@ import { readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import { sanitizeFixture } from "../fixture-sanitization.js";
 import {
 	captureStreamEvidence,
+	createStreamCaptureEnvelope,
+	findStreamCaptureGroup,
 	findStreamEvidenceRecord,
 	findStreamEvidenceRecords,
 	parseStreamEvidenceRecord,
@@ -91,7 +93,7 @@ describe("stream evidence capture", () => {
 		expect(evidence.preview_sanitized).toBeUndefined();
 	});
 
-	it("retains non-UTF8 bytes even when the declared content type is textual", async () => {
+	it("fails closed for undecodable declared text without a recognizable secret", async () => {
 		const body = new Uint8Array([0xc3, 0x28, 0xff, 0x00]);
 		const source = new ReadableStream<Uint8Array>({
 			start(controller) {
@@ -107,8 +109,62 @@ describe("stream evidence capture", () => {
 			// Drain the handler-facing stream.
 		}
 		const evidence = await capture.getEvidence();
-		expect(Buffer.from(evidence.body_preview_base64, "base64")).toEqual(Buffer.from(body));
-		expect(evidence.preview_sanitized).toBeUndefined();
+		expect(Buffer.from(evidence.body_preview_base64, "base64")).not.toEqual(Buffer.from(body));
+		expect(evidence.preview_sanitized).toBeTrue();
+		expect(evidence.preview_redaction_reason).toBe("undecodable-text");
+	});
+
+	it("redacts a token assignment in the valid prefix and retains its undecodable tail", async () => {
+		const secret = "live-secret-that-must-not-reach-the-fixture";
+		const prefix = Buffer.from(`status=failed token=${secret}`);
+		const body = Buffer.concat([prefix, Buffer.from([0xff, 0x80])]);
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(body);
+				controller.close();
+			},
+		});
+		const capture = captureStreamEvidence(
+			streamResponse(source, { "content-type": "text/plain" }),
+			{ requestUrl: "https://example.test/partial-text", sanitizeFixture },
+		);
+		for await (const _chunk of capture.response.bytes()) {
+			// Drain the handler-facing stream.
+		}
+		const evidence = await capture.getEvidence();
+		const retained = Buffer.from(evidence.body_preview_base64, "base64");
+		expect(retained.subarray(-2)).toEqual(Buffer.from([0xff, 0x80]));
+		expect(retained.subarray(0, -2).toString("utf8")).toContain("token=[REDACTED]");
+		expect(retained.toString("utf8")).not.toContain(secret);
+		expect(evidence.preview_sanitized).toBeTrue();
+	});
+
+	it("scans magic-number binary prefixes and allowlisted header string values for secrets", async () => {
+		const secret = "header-and-pdf-secret-that-must-not-persist";
+		const prefix = Buffer.from(`%PDF-1.7 token=${secret}`);
+		const body = Buffer.concat([prefix, Buffer.from([0xff])]);
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(body);
+				controller.close();
+			},
+		});
+		const capture = captureStreamEvidence(
+			streamResponse(source, {
+				"content-disposition": `attachment; filename="https://example.test/file?token=${secret}"`,
+				"content-type": "application/pdf",
+			}),
+			{ requestUrl: "https://example.test/document", sanitizeFixture },
+		);
+		for await (const _chunk of capture.response.bytes()) {
+			// Drain the handler-facing stream.
+		}
+		const evidence = await capture.getEvidence();
+		const retained = Buffer.from(evidence.body_preview_base64, "base64");
+		expect(retained.subarray(-1)).toEqual(Buffer.from([0xff]));
+		expect(retained.toString("utf8")).not.toContain(secret);
+		expect(evidence.headers["content-disposition"]).not.toContain(secret);
+		expect(evidence.headers["content-disposition"]).toContain("?[REDACTED]");
 	});
 
 	it("fails closed for PEM private keys and bare high-entropy tokens", async () => {
@@ -442,6 +498,14 @@ describe("stream evidence validation and replay", () => {
 		};
 		expect(findStreamEvidenceRecords([first, second])).toEqual([first, second]);
 		expect(findStreamEvidenceRecords([first, second, [first]])).toEqual([first]);
+	});
+
+	it("uses tagged envelopes so a later ordinary append cannot replay stale stream evidence", () => {
+		const evidence = evidenceFor(new Uint8Array([1]));
+		const envelope = createStreamCaptureEnvelope([{ kind: "stream", evidence }]);
+		expect(findStreamCaptureGroup(envelope)?.items).toEqual([{ kind: "stream", evidence }]);
+		expect(findStreamCaptureGroup([envelope, { latest: "ordinary" }])).toBeUndefined();
+		expect(findStreamEvidenceRecords([envelope, { latest: "ordinary" }])).toEqual([]);
 	});
 
 	it("omits the original content-length when replaying only the preview", async () => {

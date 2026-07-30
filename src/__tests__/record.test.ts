@@ -6,7 +6,12 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { formatCliError, prepareFixturePayload } from "../../bin/apifuse-record.js";
-import { parseStreamEvidenceRecord, STREAM_PREVIEW_BYTES } from "../stream-evidence.js";
+import {
+	findStreamCaptureGroup,
+	findStreamEvidenceRecord,
+	parseStreamEvidenceRecord,
+	STREAM_PREVIEW_BYTES,
+} from "../stream-evidence.js";
 
 const repoRoot = dirname(dirname(import.meta.dir));
 const tempRoot = join(repoRoot, ".tmp-provider-sdk-record-tests");
@@ -62,6 +67,30 @@ describe("prepareFixturePayload", () => {
 		expect(await prepareFixturePayload(fixturePath, { capture: 2 }, true)).toEqual([
 			{ capture: 1 },
 			{ capture: 2 },
+		]);
+	});
+
+	it("migrates legacy stream evidence before appending a later ordinary invocation", async () => {
+		const fixturePath = join(makeTempDir("append-legacy-stream-"), "raw.json");
+		const evidence = {
+			__apifuse_stream__: true,
+			status: 200,
+			ok: true,
+			headers: {},
+			body_sha256: "a".repeat(64),
+			body_bytes: 0,
+			body_preview_base64: "",
+		};
+		writeFileSync(fixturePath, JSON.stringify(evidence));
+
+		const appended = await prepareFixturePayload(fixturePath, { latest: "ordinary" }, true);
+		expect(findStreamCaptureGroup(appended)).toBeUndefined();
+		expect(appended).toEqual([
+			{
+				__apifuse_capture__: true,
+				items: [{ kind: "stream", evidence }],
+			},
+			{ latest: "ordinary" },
 		]);
 	});
 
@@ -160,6 +189,7 @@ export default {
 		for (let index = 0; index < upstreamBody.byteLength; index += 1) {
 			upstreamBody[index] = index % 251;
 		}
+		upstreamBody.set([0x89, 0x50, 0x4e, 0x47]);
 		const expectedSha256 = createHash("sha256").update(upstreamBody).digest("hex");
 		const upstream = createServer((request, response) => {
 			if (request.url === "/status") {
@@ -243,11 +273,17 @@ export default {
 
 			expect(stderr).toBe("");
 			expect(exitCode).toBe(0);
-			const recordedTimeline = JSON.parse(
+			const recordedCapture = JSON.parse(
 				readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8"),
-			) as unknown[];
+			) as unknown;
+			const recordedTimeline = findStreamCaptureGroup(recordedCapture)?.items;
 			expect(recordedTimeline).toHaveLength(2);
-			expect(parseStreamEvidenceRecord(recordedTimeline[0])).toEqual({
+			expect(recordedTimeline?.[0]?.kind).toBe("stream");
+			const firstEvidence = recordedTimeline?.[0];
+			if (firstEvidence?.kind !== "stream") {
+				throw new Error("Expected first recorded item to be stream evidence.");
+			}
+			expect(parseStreamEvidenceRecord(firstEvidence.evidence)).toEqual({
 				__apifuse_stream__: true,
 				status: 200,
 				ok: true,
@@ -261,7 +297,10 @@ export default {
 				body_preview_base64: upstreamBody.subarray(0, STREAM_PREVIEW_BYTES).toString("base64"),
 				request: { ordinal: 1, method: "GET", path: "/payload" },
 			});
-			expect(recordedTimeline[1]).toEqual({ cleanup: "complete" });
+			expect(recordedTimeline?.[1]).toEqual({
+				kind: "response",
+				value: { cleanup: "complete" },
+			});
 		} finally {
 			await new Promise<void>((resolve, reject) => {
 				upstream.close((error) => (error ? reject(error) : resolve()));
@@ -357,8 +396,10 @@ export default {
 			expect(exitCode).toBe(0);
 			const rawFixture = JSON.parse(
 				readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8"),
-			) as unknown[];
-			const records = rawFixture.map((value) => parseStreamEvidenceRecord(value));
+			) as unknown;
+			const records = (findStreamCaptureGroup(rawFixture)?.items ?? []).flatMap((item) =>
+				item.kind === "stream" ? [item.evidence] : [],
+			);
 			expect(records.map((record) => record.request)).toEqual([
 				{ ordinal: 1, method: "GET", path: "/first" },
 				{ ordinal: 2, method: "GET", path: "/second" },
@@ -449,9 +490,11 @@ export default {
 
 			expect(stderr).toBe("");
 			expect(exitCode).toBe(0);
-			const rawFixture = parseStreamEvidenceRecord(
-				JSON.parse(readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8")),
-			);
+			const rawCapture = JSON.parse(
+				readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8"),
+			) as unknown;
+			const rawFixture = findStreamEvidenceRecord(rawCapture);
+			if (!rawFixture) throw new Error("Expected recorded stream evidence.");
 			const fixtureSource = readFileSync(join(providerDir, "__fixtures__", "raw.json"), "utf8");
 			const decodedPreview = Buffer.from(rawFixture.body_preview_base64, "base64");
 

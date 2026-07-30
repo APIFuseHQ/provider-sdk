@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 import { z } from "zod";
 
 import { defineProvider } from "../define.js";
@@ -42,10 +43,8 @@ const testProvider = defineProvider({
 
 const snapshotFixtureDir = `/tmp/apifuse-standard-tests-${Date.now()}/__fixtures__`;
 mkdirSync(snapshotFixtureDir, { recursive: true });
-const streamSnapshotFixtureDir = `/tmp/apifuse-stream-standard-tests-${Date.now()}/__fixtures__`;
-mkdirSync(streamSnapshotFixtureDir, { recursive: true });
-const multiStreamSnapshotFixtureDir = `/tmp/apifuse-multi-stream-standard-tests-${Date.now()}/__fixtures__`;
-mkdirSync(multiStreamSnapshotFixtureDir, { recursive: true });
+const streamSnapshotFixtureDir = join(import.meta.dir, "fixtures", "stream-snapshot");
+const multiStreamSnapshotFixtureDir = join(import.meta.dir, "fixtures", "multi-stream-snapshot");
 
 const streamPreview = "recorded stream preview";
 const streamEvidenceFixture = {
@@ -287,19 +286,32 @@ runStandardTests(snapshotHarnessProvider, { label: "golden" }, undefined, {
 
 runStandardTests(
 	streamSnapshotHarnessProvider,
-	[streamEvidenceFixture, { cleanup: "complete" }],
+	{
+		__apifuse_capture__: true,
+		items: [
+			{ kind: "stream", evidence: streamEvidenceFixture },
+			{ kind: "response", value: { cleanup: "complete" } },
+		],
+	},
 	undefined,
 	{
 		snapshot: true,
 		fixtureDir: streamSnapshotFixtureDir,
+		requireSnapshot: true,
 	},
 );
 
 runStandardTests(
 	multiStreamSnapshotHarnessProvider,
-	[firstStreamEvidenceFixture, secondStreamEvidenceFixture],
+	{
+		__apifuse_capture__: true,
+		items: [
+			{ kind: "stream", evidence: firstStreamEvidenceFixture },
+			{ kind: "stream", evidence: secondStreamEvidenceFixture },
+		],
+	},
 	undefined,
-	{ snapshot: true, fixtureDir: multiStreamSnapshotFixtureDir },
+	{ snapshot: true, fixtureDir: multiStreamSnapshotFixtureDir, requireSnapshot: true },
 );
 
 runStandardTests(
@@ -386,6 +398,22 @@ describe("testing exports", () => {
 		await expect(
 			context.http.stream("https://example.test/not-download", { method: "POST" }),
 		).rejects.toThrow(/expected GET \/download.*received POST \/not-download/);
+	});
+
+	it("fails fast when a mixed replay exhausts its ordinary responses", async () => {
+		const context = createSnapshotContext({
+			__apifuse_capture__: true,
+			items: [
+				{ kind: "response", value: { cleanup: "complete" } },
+				{ kind: "stream", evidence: streamEvidenceFixture },
+			],
+		});
+		expect((await context.http.get("https://example.test/cleanup")).data).toEqual({
+			cleanup: "complete",
+		});
+		await expect(context.http.get("https://example.test/extra")).rejects.toThrow(
+			/call-order mismatch.*expected a stream call.*ordinary HTTP call/,
+		);
 	});
 
 	it("does not re-export Bun-only testing helpers from package root", () => {

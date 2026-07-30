@@ -22,18 +22,26 @@ import {
 	TransportError,
 	ValidationError,
 } from "../src/index.js";
-import { toJsonValue, type JsonValue } from "../src/contract-json.js";
+import type { JsonValue } from "../src/contract-json.js";
 import {
 	requestPathForFixture,
 	sanitizeDiagnosticText,
 	sanitizeFixture,
+	sanitizeOrdinaryFixture,
 } from "../src/fixture-sanitization.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import { parseSchema } from "../src/schema.js";
 import {
 	captureStreamEvidence,
+	createStreamCaptureEnvelope,
+	findStreamCaptureGroup,
+	findStreamEvidenceRecords,
+	hasStreamEvidenceMarker,
+	parseStreamEvidenceRecord,
 	STREAM_PREVIEW_BYTES,
+	type StreamCaptureGroupItem,
 	type StreamEvidenceCapture,
+	type StreamEvidenceRequest,
 } from "../src/stream-evidence.js";
 
 type CliArgs = {
@@ -54,7 +62,7 @@ Streaming responses are recorded as evidence (status, selected headers, full-bod
 count, plus a ${STREAM_PREVIEW_BYTES}-byte base64 preview). Test replay is evidence-only: ctx.http.stream exposes the
 preview as its body and the original body_sha256/body_bytes as response metadata.
 When an operation opens multiple streams, all evidence records are saved in stream call order.
-Mixed JSON/stream operations save a call-ordered array so snapshot replay can route each response.
+Mixed JSON/stream operations save a tagged call-ordered envelope so snapshot replay can route each response.
 ctx.http.sse() recording is unsupported and fails explicitly.
 
 Options:
@@ -85,14 +93,35 @@ export async function main() {
 
 		console.log(`[apifuse record] Calling ${operationName} on ${provider.id}...`);
 
-		const result = await executeOperation(provider, operationName, capture.ctx, parsedParams);
+		let result: unknown;
+		try {
+			result = await executeOperation(provider, operationName, capture.ctx, parsedParams);
+		} catch (operationError) {
+			let partial: unknown;
+			try {
+				partial = await capture.getCapturedRaw();
+			} catch (finalizationError) {
+				throw new StreamRecorderError("Operation and stream finalization both failed.", [
+					operationError,
+					finalizationError,
+				]);
+			}
+			const streamCount = findStreamEvidenceRecords(partial).length;
+			if (streamCount > 0) {
+				throw new StreamRecorderError(
+					`Operation failed after finalizing ${streamCount} stream capture${streamCount === 1 ? "" : "s"}.`,
+					[operationError],
+				);
+			}
+			throw operationError;
+		}
 		const captured = await capture.getCapturedRaw();
 
 		if (captured === undefined) {
 			throw new Error(`No upstream response was captured for ${provider.id}.${operationName}.`);
 		}
 
-		const rawPayload = args.sanitize ? sanitizeFixture(jsonFixtureValue(captured)) : captured;
+		const rawPayload = jsonFixtureValue(captured);
 		const fixturePath = resolve(location.rootDir, "__fixtures__", "raw.json");
 		const nextPayload = await prepareFixturePayload(fixturePath, rawPayload, args.append);
 
@@ -199,47 +228,83 @@ function handleCliError(error: unknown): never {
 	process.exit(1);
 }
 
+class StreamRecorderError extends Error {
+	readonly diagnosticCauses: readonly unknown[];
+
+	constructor(message: string, diagnosticCauses: readonly unknown[]) {
+		super(message, { cause: diagnosticCauses[0] });
+		this.name = "StreamRecorderError";
+		this.diagnosticCauses = diagnosticCauses;
+	}
+}
+
+class StreamRequestError extends StreamRecorderError {
+	constructor(request: StreamEvidenceRequest, cause: unknown) {
+		super(
+			`Stream request failed before a response: method=${request.method} path=${request.path} ordinal=${request.ordinal}.`,
+			[cause],
+		);
+		this.name = "StreamRequestError";
+	}
+}
+
 export function formatCliError(error: unknown): string {
+	if (error instanceof StreamRecorderError) {
+		return [
+			sanitizeDiagnosticText(error.message),
+			...error.diagnosticCauses.map((cause) => `cause=${formatDiagnosticCause(cause)}`),
+		].join(" ");
+	}
 	if (error instanceof TransportError) {
 		return [
-			error.message,
+			sanitizeDiagnosticText(error.message),
 			error.upstreamStatus ? `status=${error.upstreamStatus}` : undefined,
 			error.options?.retryable !== undefined
 				? `retryable=${String(error.options.retryable)}`
 				: undefined,
-			error.fix ? `fix=${error.fix}` : undefined,
+			error.code ? `code=${sanitizeDiagnosticText(error.code)}` : undefined,
+			error.fix ? `fix=${sanitizeDiagnosticText(error.fix)}` : undefined,
+			error.cause !== undefined ? `cause=${formatDiagnosticCause(error.cause)}` : undefined,
 		]
 			.filter(Boolean)
 			.join(" ");
 	}
 
 	if (error instanceof ProviderError || error instanceof ValidationError) {
-		return [error.message, error.code ? `code=${error.code}` : undefined, error.fix]
+		return [
+			sanitizeDiagnosticText(error.message),
+			error.code ? `code=${sanitizeDiagnosticText(error.code)}` : undefined,
+			error.fix ? sanitizeDiagnosticText(error.fix) : undefined,
+		]
 			.filter(Boolean)
 			.join(" ");
 	}
 
 	if (error instanceof Error) {
-		const causes: string[] = [];
-		let cause = error.cause;
-		const seen = new Set<unknown>();
-		while (cause !== undefined && !seen.has(cause) && causes.length < 4) {
-			seen.add(cause);
-			if (cause instanceof Error) {
-				const code = "code" in cause && typeof cause.code === "string" ? ` code=${cause.code}` : "";
-				causes.push(`${sanitizeDiagnosticText(cause.message)}${code}`);
-				cause = cause.cause;
-			} else {
-				causes.push(sanitizeDiagnosticText(String(cause)));
-				break;
-			}
+		if (/^Stream capture\b/.test(error.message) && error.cause !== undefined) {
+			return `${sanitizeDiagnosticText(error.message)} cause=${formatDiagnosticCause(error.cause)}`;
 		}
-		return [sanitizeDiagnosticText(error.message), ...causes.map((item) => `cause=${item}`)].join(
-			" ",
-		);
+		return sanitizeDiagnosticText(error.message);
 	}
 
-	return String(error);
+	return sanitizeDiagnosticText(String(error));
+}
+
+function formatDiagnosticCause(cause: unknown): string {
+	if (cause instanceof StreamRecorderError) {
+		return [
+			sanitizeDiagnosticText(cause.message),
+			...cause.diagnosticCauses
+				.slice(0, 2)
+				.map((nested) => `cause=${formatDiagnosticCause(nested)}`),
+		].join(" ");
+	}
+	if (!(cause instanceof Error)) return sanitizeDiagnosticText(String(cause));
+	const code =
+		"code" in cause && typeof cause.code === "string"
+			? ` code=${sanitizeDiagnosticText(cause.code)}`
+			: "";
+	return `${sanitizeDiagnosticText(cause.message)}${code}`;
 }
 
 function resolveProviderLocation(inputPath?: string) {
@@ -334,6 +399,9 @@ async function parseParams(
 	}
 
 	if (!operation.input) return parsed;
+	if ("parse" in operation.input && typeof operation.input.parse === "function") {
+		return operation.input.parse(parsed);
+	}
 	return parseSchema(operation.input, parsed, "record operation input");
 }
 
@@ -351,17 +419,23 @@ function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: strin
 function createCaptureContext(provider: ProviderRuntime, baseUrl: string, sanitize: boolean) {
 	let nextCaptureOrder = 0;
 	let nextStreamOrdinal = 0;
-	let capturedRaw: unknown;
-	const rawCaptures: Array<{ order: number; value: unknown }> = [];
-	const streamCaptures: Array<{ order: number; capture: StreamEvidenceCapture }> = [];
+	let capturedRaw: JsonValue | undefined;
+	const rawCaptures: Array<{ order: number; value: JsonValue }> = [];
+	const streamCaptures: Array<{
+		order: number;
+		request: StreamEvidenceRequest;
+		capture: StreamEvidenceCapture;
+	}> = [];
 	let capturedSse = false;
 	const reserveCaptureOrder = () => {
 		nextCaptureOrder += 1;
 		return nextCaptureOrder;
 	};
 	const retainRawCapture = (order: number, value: unknown) => {
-		capturedRaw = value;
-		rawCaptures.push({ order, value });
+		const json = jsonFixtureValue(value);
+		const retained = sanitize ? sanitizeOrdinaryFixture(json) : json;
+		capturedRaw = retained;
+		rawCaptures.push({ order, value: retained });
 	};
 
 	const http = captureHttpClient(createHttpClient(baseUrl), {
@@ -373,17 +447,25 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 		onResponse: (order, response) => retainRawCapture(order, response.data),
 		onStreamResponse: (order, ordinal, requestUrl, method, response) => {
 			const resolvedRequestUrl = new URL(requestUrl, baseUrl).toString();
+			const request = {
+				ordinal,
+				method,
+				path: requestPathForFixture(resolvedRequestUrl),
+			};
 			const capture = captureStreamEvidence(response, {
 				requestUrl: resolvedRequestUrl,
-				request: {
-					ordinal,
-					method,
-					path: requestPathForFixture(resolvedRequestUrl),
-				},
+				request,
 				...(sanitize ? { sanitizeFixture } : {}),
 			});
-			streamCaptures.push({ order, capture });
+			streamCaptures.push({ order, request, capture });
 			return capture.response;
+		},
+		onStreamError: (ordinal, requestUrl, method, error) => {
+			const resolvedRequestUrl = new URL(requestUrl, baseUrl).toString();
+			throw new StreamRequestError(
+				{ ordinal, method, path: requestPathForFixture(resolvedRequestUrl) },
+				error,
+			);
 		},
 		onSseResponse: () => {
 			capturedSse = true;
@@ -456,17 +538,41 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 				return capturedRaw;
 			}
 
-			const evidence = await Promise.all(
-				streamCaptures.map(async ({ order, capture }) => ({
+			const settled = await Promise.allSettled(
+				streamCaptures.map(async ({ order, request, capture }) => ({
 					order,
+					request,
 					value: await capture.getEvidence(),
 				})),
 			);
+			const failures = settled.flatMap((result, index) =>
+				result.status === "rejected"
+					? [
+							new StreamRecorderError(
+								`Stream finalization failed: method=${streamCaptures[index]?.request.method ?? "UNKNOWN"} path=${streamCaptures[index]?.request.path ?? "/"} ordinal=${streamCaptures[index]?.request.ordinal ?? index + 1}.`,
+								[result.reason],
+							),
+						]
+					: [],
+			);
+			if (failures.length > 0) {
+				throw new StreamRecorderError(
+					`${failures.length} stream capture${failures.length === 1 ? "" : "s"} failed to finalize.`,
+					failures,
+				);
+			}
+			const evidence = settled.flatMap((result) =>
+				result.status === "fulfilled" ? [result.value] : [],
+			);
 			if (capturedSse) throw new Error("apifuse record does not support ctx.http.sse().");
-			const timeline = [...rawCaptures, ...evidence]
+			const timeline: StreamCaptureGroupItem[] = [...rawCaptures, ...evidence]
 				.sort((left, right) => left.order - right.order)
-				.map(({ value }) => value);
-			return timeline.length === 1 ? timeline[0] : timeline;
+				.map((item) =>
+					"request" in item
+						? { kind: "stream" as const, evidence: item.value }
+						: { kind: "response" as const, value: item.value },
+				);
+			return createStreamCaptureEnvelope(timeline);
 		},
 	};
 }
@@ -482,6 +588,7 @@ type HttpCaptureCallbacks = {
 		method: string,
 		response: HttpStreamResponse,
 	): HttpStreamResponse;
+	onStreamError(ordinal: number, requestUrl: string, method: string, error: unknown): never;
 	onSseResponse(order: number): void;
 };
 
@@ -509,14 +616,14 @@ function captureHttpClient(client: HttpClient, callbacks: HttpCaptureCallbacks):
 		stream: async (...args: Parameters<HttpClient["stream"]>) => {
 			const order = callbacks.reserveOrder();
 			const ordinal = callbacks.reserveStreamOrdinal();
-			const response = await client.stream(...args);
-			return callbacks.onStreamResponse(
-				order,
-				ordinal,
-				args[0],
-				(args[1]?.method ?? "GET").toUpperCase(),
-				response,
-			);
+			const method = (args[1]?.method ?? "GET").toUpperCase();
+			let response: HttpStreamResponse;
+			try {
+				response = await client.stream(...args);
+			} catch (error) {
+				return callbacks.onStreamError(ordinal, args[0], method, error);
+			}
+			return callbacks.onStreamResponse(order, ordinal, args[0], method, response);
 		},
 		sse: async (...args: Parameters<HttpClient["sse"]>) => {
 			const order = callbacks.reserveOrder();
@@ -560,10 +667,10 @@ function proxyStealthSession(
 			return response;
 		},
 		get cookies(): StealthSession["cookies"] {
-			throw new Error("Stealth session cookies are not available in apifuse record.");
+			return session.cookies;
 		},
 		get redirects(): StealthSession["redirects"] {
-			throw new Error("Stealth session redirects are not available in apifuse record.");
+			return session.redirects;
 		},
 		close: () => session.close(),
 	};
@@ -608,7 +715,17 @@ export async function prepareFixturePayload(
 		);
 	}
 
+	if (hasStreamEvidenceMarker(existing)) {
+		const evidence = parseStreamEvidenceRecord(existing);
+		return [createStreamCaptureEnvelope([{ kind: "stream", evidence }]), payload];
+	}
 	if (Array.isArray(existing)) {
+		if (existing.some((item) => hasStreamEvidenceMarker(item))) {
+			const legacyGroup = findStreamCaptureGroup(existing);
+			if (legacyGroup) {
+				return [createStreamCaptureEnvelope(legacyGroup.items), payload];
+			}
+		}
 		return [...existing, payload];
 	}
 	if (existing !== null) {
@@ -626,11 +743,45 @@ function formatBytes(bytes: number): string {
 }
 
 function jsonFixtureValue(value: unknown): JsonValue {
-	const json = toJsonValue(value);
-	if (json === undefined) {
-		throw new Error("Captured upstream response is not JSON-compatible and cannot be sanitized.");
+	return strictJsonFixtureValue(value, "$", new WeakSet<object>());
+}
+
+function strictJsonFixtureValue(
+	value: unknown,
+	path: string,
+	ancestors: WeakSet<object>,
+): JsonValue {
+	if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+	if (typeof value === "number") {
+		if (Number.isFinite(value)) return value;
+		throw new Error(`Captured upstream response contains a non-finite number at ${path}.`);
 	}
-	return json;
+	if (typeof value !== "object") {
+		throw new Error(`Captured upstream response contains a non-JSON value at ${path}.`);
+	}
+	if (ancestors.has(value)) {
+		throw new Error(`Captured upstream response contains a cycle at ${path}.`);
+	}
+	ancestors.add(value);
+	try {
+		if (Array.isArray(value)) {
+			return value.map((item, index) =>
+				strictJsonFixtureValue(item, `${path}[${index}]`, ancestors),
+			);
+		}
+		const prototype = Object.getPrototypeOf(value);
+		if (prototype !== Object.prototype && prototype !== null) {
+			throw new Error(`Captured upstream response contains a non-plain object at ${path}.`);
+		}
+		return Object.fromEntries(
+			Object.entries(value).map(([key, item]) => [
+				key,
+				strictJsonFixtureValue(item, `${path}.${key}`, ancestors),
+			]),
+		);
+	} finally {
+		ancestors.delete(value);
+	}
 }
 
 if (import.meta.main) {

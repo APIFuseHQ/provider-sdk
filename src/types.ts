@@ -1189,10 +1189,31 @@ export interface HttpResponse<T = unknown> {
 	bytes(): Promise<Uint8Array>;
 }
 
+export type StreamPreviewRedactionReason =
+	| "high-entropy-token"
+	| "malformed-json"
+	| "pem-private-key"
+	| "sanitized-preview-too-large"
+	| "sanitizer-error"
+	| "sanitizer-output-invalid"
+	| "sensitive-delimited-column"
+	| "textual-xml"
+	| "truncated-form"
+	| "truncated-json"
+	| "undecodable-text";
+
 export interface HttpStreamResponse {
 	status: number;
 	ok: boolean;
 	headers: Record<string, string>;
+	/** True only for snapshot replay backed by bounded stream evidence. */
+	readonly evidence_only?: true;
+	/** SHA-256 of the original complete body when evidence_only is true. */
+	readonly body_sha256?: string;
+	/** Byte count of the original complete body when evidence_only is true. */
+	readonly body_bytes?: number;
+	readonly preview_sanitized?: true;
+	readonly preview_redaction_reason?: StreamPreviewRedactionReason;
 	body: ReadableStream<Uint8Array>;
 	bytes(): AsyncIterable<Uint8Array>;
 	textChunks(): AsyncIterable<string>;

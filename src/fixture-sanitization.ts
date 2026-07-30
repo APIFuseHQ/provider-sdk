@@ -2,26 +2,37 @@ import type { JsonValue } from "./contract-json.js";
 
 export const REDACTED_FIXTURE_VALUE = "[REDACTED]";
 
-const SENSITIVE_FIXTURE_KEY =
-	/authorization|auth(?:entication)?|bearer|cookie|credential|password|passwd|private[-_]?key|secret|session(?:[-_]?id)?|token|(?:api|client|service|access|consumer)[-_]?key/i;
 const OPAQUE_TOKEN = /^[A-Za-z0-9_+/=.:~-]+$/;
+const OPAQUE_TOKEN_RUN = /[A-Za-z0-9_+/=.:~-]{24,}/g;
+const URL_RUN = /https?:\/\/[^\s"'<>]+/gi;
+const PEM_PRIVATE_KEY =
+	/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g;
 
+/** Matches credential field names without treating benign prefixes such as `author` as `auth`. */
 export function isSensitiveFixtureKey(key: string): boolean {
-	return SENSITIVE_FIXTURE_KEY.test(key);
+	const normalized = key.replace(/[-_\s]/g, "").toLowerCase();
+	return (
+		/^(?:authorization|authentication|auth|bearer|cookie|credential|password|passwd|privatekey|secret|session|sessionid|token)$/.test(
+			normalized,
+		) ||
+		/^(?:api|client|service|access|consumer)(?:key|secret|token)$/.test(normalized) ||
+		/(?:authorization|credential|password|passwd|privatekey|secret|sessionid|token)$/.test(
+			normalized,
+		)
+	);
 }
 
 /**
- * Returns JSON fixture data with values under common credential-bearing keys replaced.
- * The return type intentionally models JSON rather than promising the caller's input type.
+ * Returns JSON fixture data with credential-bearing keys and heuristic-confirmed string secrets
+ * replaced. Ordinary short prose and identifiers are retained.
  */
 export function sanitizeFixture(value: JsonValue): JsonValue {
 	if (Array.isArray(value)) {
 		return value.map((item) => sanitizeFixture(item));
 	}
 
-	if (value === null || typeof value !== "object") {
-		return value;
-	}
+	if (typeof value === "string") return sanitizeFixtureString(value);
+	if (value === null || typeof value !== "object") return value;
 
 	return Object.fromEntries(
 		Object.entries(value).map(([key, entryValue]) => [
@@ -29,6 +40,41 @@ export function sanitizeFixture(value: JsonValue): JsonValue {
 			isSensitiveFixtureKey(key) ? REDACTED_FIXTURE_VALUE : sanitizeFixture(entryValue),
 		]),
 	);
+}
+
+/** Preserves the recorder's pre-stream key policy while adding primitive-string protection. */
+export function sanitizeOrdinaryFixture(value: JsonValue): JsonValue {
+	if (Array.isArray(value)) return value.map((item) => sanitizeOrdinaryFixture(item));
+	if (typeof value === "string") return sanitizeFixtureString(value);
+	if (value === null || typeof value !== "object") return value;
+	return Object.fromEntries(
+		Object.entries(value).map(([key, entryValue]) => [
+			key,
+			/authorization|token|api[-_]?key/i.test(key)
+				? REDACTED_FIXTURE_VALUE
+				: sanitizeOrdinaryFixture(entryValue),
+		]),
+	);
+}
+
+/** Sanitizes a primitive fixture string only when textual-secret heuristics match. */
+export function sanitizeFixtureString(value: string): string {
+	let sanitized = value.replace(PEM_PRIVATE_KEY, REDACTED_FIXTURE_VALUE);
+	const retainedUrls: string[] = [];
+	sanitized = sanitized.replace(URL_RUN, (url) => {
+		const index =
+			retainedUrls.push(isCredentialBearingUrl(url) ? sanitizeUrlForLogs(url) : url) - 1;
+		return `APIFUSEURL${index}X`;
+	});
+	sanitized = redactSensitiveAssignments(sanitized);
+	sanitized = sanitized.replace(OPAQUE_TOKEN_RUN, (candidate) =>
+		isSensitiveFixtureValue(candidate) ? REDACTED_FIXTURE_VALUE : candidate,
+	);
+	sanitized = sanitized.replace(
+		/APIFUSEURL(\d+)X/g,
+		(_match, index: string) => retainedUrls[Number(index)] ?? REDACTED_FIXTURE_VALUE,
+	);
+	return sanitized;
 }
 
 /** True for opaque values that are unsafe to retain in paths or unstructured text. */
@@ -52,7 +98,7 @@ export function sanitizePathname(pathname: string): string {
 			const previous = index > 0 ? decodePathSegment(segments[index - 1] as string) : "";
 			if (
 				isSensitiveFixtureKey(decoded) ||
-				isSensitivePathKey(previous) ||
+				isCredentialPathKey(previous) ||
 				isSensitiveFixtureValue(decoded)
 			) {
 				return REDACTED_FIXTURE_VALUE;
@@ -62,9 +108,12 @@ export function sanitizePathname(pathname: string): string {
 		.join("/");
 }
 
-function isSensitivePathKey(value: string): boolean {
-	return /^(?:authorization|auth(?:entication)?|bearer|cookie|credential|password|passwd|private[-_]?key|secret|session(?:[-_]?id)?|token|(?:api|client|service|access|consumer)[-_]?key)$/i.test(
-		value,
+function isCredentialPathKey(key: string): boolean {
+	const normalized = key.replace(/[-_\s]/g, "").toLowerCase();
+	return (
+		/^(?:authorization|authentication|auth|bearer|cookie|credential|password|passwd|privatekey|secret|session|sessionid|token)$/.test(
+			normalized,
+		) || /^(?:api|client|service|access|consumer)(?:key|secret|token)$/.test(normalized)
 	);
 }
 
@@ -96,18 +145,77 @@ export function requestPathForFixture(value: string): string {
 	}
 }
 
-/** Scrubs common secret forms from an error/cause message before it is printed. */
+/** Scrubs secrets and terminal/log control characters before diagnostic text is emitted. */
 export function sanitizeDiagnosticText(value: string): string {
-	return value
-		.replace(/https?:\/\/[^\s"'<>]+/gi, (url) => sanitizeUrlForLogs(url))
-		.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED_FIXTURE_VALUE}`)
-		.replace(
-			/((?:authorization|cookie|credential|password|passwd|secret|token|api[-_]?key|client[-_]?secret)\s*[:=]\s*)([^\s,;]+)/gi,
-			`$1${REDACTED_FIXTURE_VALUE}`,
-		)
-		.replace(/[A-Za-z0-9_+/=.:~-]{24,}/g, (candidate) =>
-			isSensitiveFixtureValue(candidate) ? REDACTED_FIXTURE_VALUE : candidate,
+	let sanitized = value
+		.replace(URL_RUN, (url) => sanitizeUrlForLogs(url))
+		.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED_FIXTURE_VALUE}`);
+	sanitized = redactSensitiveAssignments(sanitized);
+	sanitized = sanitized.replace(OPAQUE_TOKEN_RUN, (candidate, offset: number, source: string) => {
+		if (/^(?:request|trace|correlation)[-_]?id[:=]/i.test(candidate)) return candidate;
+		const prefix = source.slice(Math.max(0, offset - 32), offset);
+		if (/(?:request|trace|correlation)[-_]?id\s*[:=]\s*$/i.test(prefix)) return candidate;
+		return isSensitiveFixtureValue(candidate) ? REDACTED_FIXTURE_VALUE : candidate;
+	});
+	return encodeDiagnosticControls(sanitized);
+}
+
+function redactSensitiveAssignments(value: string): string {
+	return value.replace(
+		/((["']?)([\w-]+)\2\s*[:=]\s*)("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|[^\s,;&]+)/gi,
+		(match, prefix: string, _quote: string, key: string, assignmentValue: string) => {
+			if (!isSensitiveFixtureKey(key) && key.toLowerCase() !== "key") return match;
+			const quote = assignmentValue.startsWith('"')
+				? '"'
+				: assignmentValue.startsWith("'")
+					? "'"
+					: "";
+			return `${prefix}${quote}${REDACTED_FIXTURE_VALUE}${quote}`;
+		},
+	);
+}
+
+function isCredentialBearingUrl(value: string): boolean {
+	try {
+		const parsed = new URL(value);
+		return (
+			parsed.username !== "" ||
+			parsed.password !== "" ||
+			parsed.hash !== "" ||
+			parsed.search !== "" ||
+			parsed.pathname.split("/").some((segment, index, segments) => {
+				const decoded = decodePathSegment(segment);
+				const previous = decodePathSegment(segments[index - 1] ?? "");
+				return (
+					isSensitiveFixtureKey(decoded) ||
+					isCredentialPathKey(previous) ||
+					isSensitiveFixtureValue(decoded)
+				);
+			})
 		);
+	} catch {
+		return false;
+	}
+}
+
+function encodeDiagnosticControls(value: string): string {
+	let result = "";
+	for (const character of value) {
+		const code = character.codePointAt(0) ?? 0;
+		if (code === 0x0a || code === 0x0d || code === 0x2028 || code === 0x2029) {
+			result += " ";
+		} else if (
+			code === 0x1b ||
+			(code >= 0x7f && code <= 0x9f) ||
+			(code >= 0x202a && code <= 0x202e) ||
+			(code >= 0x2066 && code <= 0x2069)
+		) {
+			result += `\\u${code.toString(16).padStart(4, "0")}`;
+		} else {
+			result += character;
+		}
+	}
+	return result;
 }
 
 function decodePathSegment(value: string): string {

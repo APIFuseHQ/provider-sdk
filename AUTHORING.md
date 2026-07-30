@@ -669,8 +669,10 @@ full body SHA-256 and byte count, and a base64 preview up to the configured stre
 Textual previews are decoded and passed through the fixture sanitizer before base64 encoding.
 Classification uses both the declared content type and the preview bytes, so missing or incorrect
 content-type headers do not bypass sanitization. PEM private-key blocks and long high-entropy
-tokens in otherwise unstructured text are redacted as well; genuinely binary previews (including
-known binary signatures and data that cannot be decoded as UTF-8) retain their original bytes.
+tokens in otherwise unstructured text are redacted as well. If the full preview is not valid UTF-8,
+the longest valid prefix is scanned and sanitized while its undecodable tail is retained. Only a
+magic-number-confirmed binary preview with no textual-secret pattern in that window bypasses
+sanitization; other undecodable data fails closed.
 Sanitized previews carry `preview_sanitized: true`, plus a
 `preview_redaction_reason` when capture had to fail closed. The original hash and byte count always
 describe upstream bytes, not a sanitized preview.
@@ -680,11 +682,14 @@ ordinal). Provenance never stores the origin, URL userinfo, query, or fragment. 
 segment is scrubbed before persistence: credential-key segments, values following those keys,
 known token shapes, and long high-entropy opaque segments become `[REDACTED]`. If an operation
 opens multiple streams, the recorder finalizes every retained reader and
-writes all evidence records in stream call order. Mixed ordinary HTTP and stream responses are
-written as a call-ordered array; evidence-only snapshot replay routes ordinary and stream calls to
-their respective next recorded response. A single-stream-only capture keeps the legacy object
-shape. Appended fixtures replay the latest invocation group. SSE recording remains unsupported and
-fails explicitly instead of retaining an unrelated earlier response.
+writes all evidence records in stream call order. Stream invocations use a tagged capture envelope
+whose items distinguish stream evidence from ordinary JSON responses. Evidence-only snapshot replay
+consumes that exact call order and fails immediately when evidence is exhausted or a call kind is
+reordered. When request provenance is present, replay also rejects method or path changes (relative
+URLs are resolved against the recorded path prefix); ordinals remain diagnostic and are not matched.
+Appended fixtures replay a stream envelope only when it is the latest invocation. SSE
+recording remains unsupported and fails explicitly instead of retaining an unrelated earlier
+response.
 
 Stream fixture replay in `runStandardTests(..., { snapshot: true })` is evidence-only:
 `ctx.http.stream()` returns a usable stream containing exactly the recorded preview,
@@ -694,6 +699,10 @@ for assertions about the original capture. Do not assert that the replay body ha
 `body_sha256` when `body_bytes`
 exceeds the decoded preview length or `preview_sanitized` is present; use the metadata for
 full-body integrity and limit body-content assertions to the preview.
+
+Golden snapshot suites can set `requireSnapshot: true` so a missing committed snapshot fails instead
+of being created implicitly. Regenerate intentional changes with
+`bun test --update-snapshots`; review and commit the resulting `transform.snap.json` file.
 
 ### Running the pre-submission report
 

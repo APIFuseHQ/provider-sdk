@@ -11,10 +11,7 @@ import * as acorn from "acorn";
 import { z } from "zod";
 
 import packageJson from "../package.json";
-import {
-	formatPromptAssetIssues,
-	verifyPromptAssets,
-} from "../src/cli/prompt-assets.js";
+import { formatPromptAssetIssues, verifyPromptAssets } from "../src/cli/prompt-assets.js";
 import {
 	loadProviderLocaleCatalogs,
 	type ProviderLocale,
@@ -22,7 +19,11 @@ import {
 } from "../src/i18n/index.js";
 import type { ProviderDefinition } from "../src/index.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, safeParseSchemaSync } from "../src/schema.js";
-import { hasStreamEvidenceMarker, parseStreamEvidenceRecord } from "../src/stream-evidence.js";
+import {
+	findStreamCaptureGroup,
+	hasStreamEvidenceMarker,
+	parseStreamEvidenceRecord,
+} from "../src/stream-evidence.js";
 import { type CheckResult, PROMPT_ASSETS_CHECK_MESSAGE, runChecks } from "./apifuse-check.js";
 import { hasSubstantiveDelimitedTextStructure } from "./submit-check-delimited-text.js";
 import { hasSubstantiveXmlStructure } from "./submit-check-xml.js";
@@ -2245,6 +2246,16 @@ function recordedFixtureStats(
 	value: unknown,
 	depth: number,
 ): { hasNestedSubstance: boolean; leafValues: number } {
+	if (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		(value as Record<string, unknown>).__apifuse_capture__ === true
+	) {
+		const group = findStreamCaptureGroup(value);
+		if (!group) throw new Error("Stream capture envelope is invalid.");
+		return { hasNestedSubstance: true, leafValues: group.items.length };
+	}
 	if (hasStreamEvidenceMarker(value)) {
 		parseStreamEvidenceRecord(value);
 		return { hasNestedSubstance: true, leafValues: 1 };
@@ -4051,9 +4062,7 @@ type LineStringLiteral = {
 // Stable identity for the container a literal sits in ("top" when the
 // literal is not inside any bracket on the line).
 function literalContainerKey(literal: LineStringLiteral): string {
-	return literal.container
-		? `${literal.container.bracket}${literal.container.index}`
-		: "top";
+	return literal.container ? `${literal.container.bracket}${literal.container.index}` : "top";
 }
 
 // Single-pass line tokenizer: extracts every string literal with its span and
