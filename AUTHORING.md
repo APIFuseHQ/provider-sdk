@@ -477,9 +477,10 @@ credential channel, whenever the upstream permits it. An empty
 `sensitiveParams: {}` is treated exactly as if the option were omitted.
 
 For `session.redirects.run()`, returned hop URLs are diagnostic metadata and
-therefore keep declared query values redacted. If a login flow must consume a
-rotated credential from `Location`, inspect it inside `stopWhen`; that callback
-receives the real hop while callback failures are sanitized before propagation.
+therefore keep declared query values and common response-only credential keys
+redacted. If a login flow must consume a rotated credential from `Location`,
+inspect it inside `stopWhen`; that callback receives the real hop while callback
+failures are sanitized before propagation.
 
 ### Public local debugging checklist
 

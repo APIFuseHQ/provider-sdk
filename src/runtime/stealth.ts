@@ -52,6 +52,7 @@ import {
 } from "./proxy-retry-policy.js";
 import {
 	redactSensitiveError,
+	redactSensitiveRequestError,
 	redactSensitiveText,
 	redactUrlQueryParams,
 	normalizeSensitiveParams,
@@ -811,22 +812,29 @@ function createSessionFetcher(
 
 	const session: StealthSession = {
 		async fetch(url, options: StealthFetchOptions = {}) {
-			const method = normalizeMethod(options.method ?? "GET");
-			const hasExplicitRetryPolicy = options.retry !== undefined;
-			const stealthRetryOptions =
-				normalizeProxyTransportRetryOptions(options.retry, {
-					extraErrorCodes: STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES,
-					label: "Stealth",
-				}) ??
-				(hasExplicitRetryPolicy
-					? undefined
-					: createDefaultProxyTransportRetryOptions({
+			const { hasExplicitRetryPolicy, method, stealthRetryOptions } = (() => {
+				try {
+					const method = normalizeMethod(options.method ?? "GET");
+					const hasExplicitRetryPolicy = options.retry !== undefined;
+					const stealthRetryOptions =
+						normalizeProxyTransportRetryOptions(options.retry, {
 							extraErrorCodes: STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES,
 							label: "Stealth",
-						}));
-			if (stealthRetryOptions) {
-				validateUnsafeProxyTransportRetryMethods(stealthRetryOptions, "Stealth");
-			}
+						}) ??
+						(hasExplicitRetryPolicy
+							? undefined
+							: createDefaultProxyTransportRetryOptions({
+									extraErrorCodes: STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES,
+									label: "Stealth",
+								}));
+					if (stealthRetryOptions) {
+						validateUnsafeProxyTransportRetryMethods(stealthRetryOptions, "Stealth");
+					}
+					return { hasExplicitRetryPolicy, method, stealthRetryOptions };
+				} catch (error) {
+					throw redactSensitiveRequestError(error, url, options.sensitiveParams);
+				}
+			})();
 			const hasPolicyProxy = isPolicyManagedProxy(clientOptions);
 			const usesPolicyAllocator = hasPolicyProxy && !options.proxy && !clientOptions.proxy;
 			const retryAttemptCap = Math.max(1, stealthRetryOptions?.attempts ?? 1);
@@ -1017,7 +1025,7 @@ function createSessionFetcher(
 							sensitiveValues,
 							serializedUrl?.requestUrl ?? fallbackRequestUrl,
 							serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
-						) as TransportError;
+						);
 						recordProxyAttempt(
 							"error",
 							proxyAttemptErrorCode(normalizedError),

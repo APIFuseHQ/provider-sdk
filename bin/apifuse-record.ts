@@ -25,6 +25,7 @@ import {
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import {
 	REDACTED_QUERY_VALUE,
+	isSensitiveKey,
 	normalizeSensitiveParams,
 	parseHttpRequestInvocation,
 	redactSensitiveError,
@@ -63,6 +64,7 @@ Example:
   apifuse record providers/korea-air-quality --operation realtime --params '{"stationName":"jongno"}'`;
 
 export async function main() {
+	let capture: ReturnType<typeof createCaptureContext> | undefined;
 	try {
 		const args = parseArgs(normalizeArgs(process.argv.slice(2)));
 		const location = resolveProviderLocation(args.providerPath);
@@ -71,10 +73,7 @@ export async function main() {
 		const operation = provider.operations[operationName];
 		const parsedParams = parseParams(operation, args.params);
 
-		const capture = createCaptureContext(
-			provider,
-			resolveOperationBaseUrl(provider, operationName),
-		);
+		capture = createCaptureContext(provider, resolveOperationBaseUrl(provider, operationName));
 
 		console.log(`[apifuse record] Calling ${operationName} on ${provider.id}...`);
 
@@ -108,7 +107,7 @@ export async function main() {
 
 		void result;
 	} catch (error) {
-		handleCliError(error);
+		handleCliError(error, capture?.getCapturedSensitiveParams().values);
 	}
 }
 
@@ -193,8 +192,8 @@ function parseArgs(argv: string[]): CliArgs {
 	return { append, providerPath, operation, params, sanitize };
 }
 
-function handleCliError(error: unknown): never {
-	const message = formatCliError(error);
+function handleCliError(error: unknown, sensitiveValues: readonly string[] = []): never {
+	const message = redactSensitiveText(formatCliError(error), sensitiveValues);
 	console.error(`[apifuse record] ${message}`);
 	process.exit(1);
 }
@@ -627,7 +626,7 @@ function redactFixtureText(text: string, sensitiveParams: CapturedSensitiveParam
 		]);
 		for (const key of keyVariants) {
 			const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-			const queryValue = new RegExp(`(^|[?&])(${escapedKey}=)[^&#\\s"]*`, "gi");
+			const queryValue = new RegExp(`(^|[?&])(${escapedKey}=)[^&#\\s"]*`, "g");
 			redacted = redacted.replace(queryValue, (_match, prefix, assignment) => {
 				return `${prefix}${assignment}${REDACTED_QUERY_VALUE}`;
 			});
@@ -670,10 +669,6 @@ function collisionSafeKey(record: MutableRecord, preferredKey: string): string {
 	let suffix = 2;
 	while (`${preferredKey}#${suffix}` in record) suffix += 1;
 	return `${preferredKey}#${suffix}`;
-}
-
-function isSensitiveKey(key: string): boolean {
-	return /authorization|token|api[-_]?key/i.test(key);
 }
 
 export async function prepareFixturePayload(

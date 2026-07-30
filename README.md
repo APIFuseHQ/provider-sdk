@@ -166,7 +166,8 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   words or timestamps. Consequently, a sub-four-character secret embedded in a
   larger alphanumeric token can remain in free text; prefer higher-entropy or
   non-query credentials when possible. `sensitiveParams: {}` is equivalent to
-  omitting the option. Redirect results keep sensitive hop URLs redacted; use
+  omitting the option. Redirect results structurally redact declared keys and
+  common response-only credential keys from hop URLs; use
   `redirects.run({ stopWhen })` to inspect a real intermediate `Location` during
   the run when a login flow needs a rotated value.
 - **Proxy URLs for non-stealth consumers**: use `resolveProxy()` when a

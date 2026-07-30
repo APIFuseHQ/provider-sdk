@@ -328,6 +328,29 @@ describe("createHttpClient", () => {
 		});
 	});
 
+	it("redacts sensitiveParams from stream cancellation errors", async () => {
+		const secret = "cancel-stream-secret";
+		mockNativeFetchState.queuedNativeResponses.push(
+			new Response(
+				new ReadableStream<Uint8Array>({
+					cancel() {
+						throw new Error(`Cancel failed at https://example.com/logs?crtfc_key=${secret}`);
+					},
+				}),
+				{ status: 200 },
+			),
+		);
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const response = await createHttpClient().stream("https://example.com/logs", {
+			sensitiveParams: { crtfc_key: secret },
+		});
+
+		await expect(response.body.cancel()).rejects.toThrow(
+			"https://example.com/logs?crtfc_key=[REDACTED]",
+		);
+	});
+
 	it("sse() parses native EventSource frames incrementally", async () => {
 		mockNativeFetchState.queuedResponses.push({
 			status: 200,
@@ -1029,6 +1052,36 @@ describe("createHttpClient", () => {
 				},
 			}),
 		).rejects.toMatchObject({ code: "retry_invalid_policy" });
+		expect(mockNativeFetchState.calls).toHaveLength(0);
+	});
+
+	it("redacts sensitiveParams from method and retry preflight failures", async () => {
+		const methodSecret = "INVALID_METHOD_SECRET";
+		const retrySecret = "definitely_not_a_preset";
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient();
+
+		await expect(
+			http.request("https://example.com", {
+				method: methodSecret as never,
+				sensitiveParams: { token: methodSecret },
+			}),
+		).rejects.toMatchObject({
+			code: "transport_invalid_method",
+			message: "Unsupported HTTP method: [REDACTED]",
+		});
+		let retryError: unknown;
+		try {
+			await http.get("https://example.com", {
+				retry: retrySecret as HttpRetryPreset,
+				sensitiveParams: { token: retrySecret },
+			});
+		} catch (error) {
+			retryError = error;
+		}
+		expect(retryError).toBeInstanceOf(Error);
+		expect((retryError as Error).message).not.toContain(retrySecret);
+		expect(JSON.stringify(retryError)).not.toContain(retrySecret);
 		expect(mockNativeFetchState.calls).toHaveLength(0);
 	});
 

@@ -31,7 +31,7 @@ import {
 import {
 	normalizeHttpRequestBody,
 	redactSensitiveError,
-	redactUrlQueryParams,
+	redactSensitiveRequestError,
 	type SerializedRequestUrl,
 	serializeRequestUrl,
 } from "./request-options.js";
@@ -243,8 +243,17 @@ function sanitizeStreamErrors(
 					);
 				}
 			},
-			cancel(reason) {
-				return reader ? reader.cancel(reason) : body.cancel(reason);
+			async cancel(reason) {
+				try {
+					await (reader ? reader.cancel(reason) : body.cancel(reason));
+				} catch (error) {
+					throw redactSensitiveError(
+						error,
+						serializedUrl.sensitiveValues,
+						serializedUrl.requestUrl,
+						serializedUrl.redactedUrl,
+					);
+				}
 			},
 		},
 		{ highWaterMark: 0 },
@@ -363,14 +372,7 @@ function serializeHttpRequestUrl(
 			options.sensitiveParams,
 		);
 	} catch (error) {
-		const sensitiveParamNames = Object.keys(options.sensitiveParams ?? {});
-		const structural = redactUrlQueryParams(url, sensitiveParamNames);
-		throw redactSensitiveError(
-			error,
-			[...structural.sensitiveValues, ...Object.values(options.sensitiveParams ?? {})],
-			url,
-			structural.redactedUrl,
-		);
+		throw redactSensitiveRequestError(error, url, options.sensitiveParams);
 	}
 }
 
@@ -451,12 +453,12 @@ async function fetchNativeHttp(
 				serializedUrl.redactedUrl,
 			);
 		}
-		const transportError = redactSensitiveError(
+		const transportError: NativeHttpAttemptError = redactSensitiveError(
 			toHttpTransportError(error),
 			serializedUrl.sensitiveValues,
 			serializedUrl.requestUrl,
 			serializedUrl.redactedUrl,
-		) as NativeHttpAttemptError;
+		);
 		transportError.proxyUsed = Boolean(proxy);
 		throw transportError;
 	} finally {
@@ -542,22 +544,29 @@ export function createHttpClient(
 		method: string,
 		options: RequestOptions & { body?: unknown } = {},
 	): Promise<HttpResponse> {
-		if (!baseUrl && !isAbsoluteUrl(url)) {
-			throw new TransportError(
-				"ctx.http requires an absolute URL when provider.upstream.baseUrl is not declared",
-				{ code: "transport_invalid_url" },
-			);
-		}
-		assertNoHttpTransportOverrides(options);
-		const headersOptions = withClientHeaders(options, clientOptions, options.body);
-		const methodName = normalizeHttpMethod(method);
-		const explicitRetry = headersOptions.retry !== undefined;
-		const retryOptions =
-			normalizeProxyTransportRetryOptions(headersOptions.retry, {
-				label: "HTTP",
-			}) ??
-			(explicitRetry ? undefined : createDefaultProxyTransportRetryOptions({ label: "HTTP" }));
-		if (retryOptions) validateUnsafeProxyTransportRetryMethods(retryOptions, "HTTP");
+		const { explicitRetry, headersOptions, methodName, retryOptions } = (() => {
+			try {
+				if (!baseUrl && !isAbsoluteUrl(url)) {
+					throw new TransportError(
+						"ctx.http requires an absolute URL when provider.upstream.baseUrl is not declared",
+						{ code: "transport_invalid_url" },
+					);
+				}
+				assertNoHttpTransportOverrides(options);
+				const headersOptions = withClientHeaders(options, clientOptions, options.body);
+				const methodName = normalizeHttpMethod(method);
+				const explicitRetry = headersOptions.retry !== undefined;
+				const retryOptions =
+					normalizeProxyTransportRetryOptions(headersOptions.retry, {
+						label: "HTTP",
+					}) ??
+					(explicitRetry ? undefined : createDefaultProxyTransportRetryOptions({ label: "HTTP" }));
+				if (retryOptions) validateUnsafeProxyTransportRetryMethods(retryOptions, "HTTP");
+				return { explicitRetry, headersOptions, methodName, retryOptions };
+			} catch (error) {
+				throw redactSensitiveRequestError(error, url, options.sensitiveParams);
+			}
+		})();
 		const retryEnabled = Boolean(
 			retryOptions &&
 				retryOptions.attempts > 1 &&
@@ -743,15 +752,23 @@ export function createHttpClient(
 		method: string,
 		options: RequestOptions & { body?: unknown } = {},
 	): Promise<HttpStreamResponse> {
-		if (!baseUrl && !isAbsoluteUrl(url)) {
-			throw new TransportError(
-				"ctx.http requires an absolute URL when provider.upstream.baseUrl is not declared",
-				{ code: "transport_invalid_url" },
-			);
-		}
-		assertNoHttpTransportOverrides(options);
-		const headersOptions = withClientHeaders(options, clientOptions, options.body);
-		const methodName = normalizeHttpMethod(method);
+		const { headersOptions, methodName } = (() => {
+			try {
+				if (!baseUrl && !isAbsoluteUrl(url)) {
+					throw new TransportError(
+						"ctx.http requires an absolute URL when provider.upstream.baseUrl is not declared",
+						{ code: "transport_invalid_url" },
+					);
+				}
+				assertNoHttpTransportOverrides(options);
+				return {
+					headersOptions: withClientHeaders(options, clientOptions, options.body),
+					methodName: normalizeHttpMethod(method),
+				};
+			} catch (error) {
+				throw redactSensitiveRequestError(error, url, options.sensitiveParams);
+			}
+		})();
 		return fetchNativeHttpStream(baseUrl, url, methodName, headersOptions, clientOptions, warnOnce);
 	}
 

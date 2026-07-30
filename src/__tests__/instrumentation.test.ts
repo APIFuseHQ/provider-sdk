@@ -460,7 +460,7 @@ describe("wrapWithInstrumentation", () => {
 		expect(JSON.stringify(spans)).not.toContain(secret);
 	});
 
-	it("does not expand tracing for lazy stream and SSE consumption without sensitiveParams", async () => {
+	it("records lazy stream and SSE consumption failures without sensitiveParams", async () => {
 		const ctx = createMockContext();
 		ctx.http.stream = mock(async () => {
 			const body = new ReadableStream<Uint8Array>({
@@ -503,8 +503,14 @@ describe("wrapWithInstrumentation", () => {
 		const spans = instrumented.trace.getSpans();
 		expect(spans.filter((span) => span.name === "http.stream")).toHaveLength(1);
 		expect(spans.filter((span) => span.name === "http.sse")).toHaveLength(1);
-		expect(spans.some((span) => span.name === "http.stream.consume")).toBe(false);
-		expect(spans.some((span) => span.name === "http.sse.consume")).toBe(false);
+		expect(spans.find((span) => span.name === "http.stream.consume")).toMatchObject({
+			status: "error",
+			error: "ordinary stream failed",
+		});
+		expect(spans.find((span) => span.name === "http.sse.consume")).toMatchObject({
+			status: "error",
+			error: "ordinary SSE failed",
+		});
 	});
 });
 
@@ -603,7 +609,7 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 		expect(instrumented.trace.getSpans().some((span) => span.name === "stealth.fetch")).toBe(true);
 	});
 
-	it("instruments only sensitive session traffic and records redirect termination details", async () => {
+	it("instruments ordinary session traffic and redacts redirect termination details", async () => {
 		const ctx = createMockContext();
 		const final = await ctx.stealth.fetch("https://secure.example.com/final");
 		const cookies: StealthSession["cookies"] = {
@@ -641,7 +647,13 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 							url: options.url,
 							status: 302,
 							method: "GET",
-							nextUrl: `${options.url}?serviceKey=rotated-session-secret`,
+							nextUrl: `${options.url}?${options.sensitiveParams ? "serviceKey=rotated-session-secret&" : ""}code=fresh-secret`,
+						},
+						{
+							url: `${options.url}?code=fresh-secret`,
+							status: 302,
+							method: "GET",
+							nextUrl: `${options.url}?state=fresh-secret`,
 						},
 					],
 					reason: "loop" as const,
@@ -668,7 +680,11 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 		const session = instrumented.stealth.createSession();
 		await session.fetch("https://secure.example.com/ordinary");
 		await session.redirects.run({ url: "https://secure.example.com/ordinary" });
-		expect(instrumented.trace.getSpans()).toHaveLength(0);
+		expect(instrumented.trace.getSpans().map((span) => span.name)).toEqual([
+			"stealth.fetch",
+			"stealth.redirects.run",
+		]);
+		expect(JSON.stringify(instrumented.trace.getSpans())).not.toContain("fresh-secret");
 		await session.redirects.run({
 			url: "https://secure.example.com/login",
 			sensitiveParams: { serviceKey: "session-secret" },
@@ -676,15 +692,17 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 
 		const redirectSpan = instrumented.trace
 			.getSpans()
-			.find((span) => span.name === "stealth.redirects.run");
+			.findLast((span) => span.name === "stealth.redirects.run");
 		expect(redirectSpan?.attributes).toMatchObject({
 			redirect_reason: "loop",
-			redirect_hop_count: 1,
+			redirect_hop_count: 2,
 			status: 201,
 		});
 		expect(redirectSpan?.attributes.redirect_path).toContain("serviceKey=[REDACTED]");
+		expect(redirectSpan?.attributes.redirect_path).toContain("code=[REDACTED]");
 		expect(JSON.stringify(redirectSpan)).not.toContain("session-secret");
 		expect(JSON.stringify(redirectSpan)).not.toContain("rotated-session-secret");
+		expect(JSON.stringify(redirectSpan)).not.toContain("fresh-secret");
 	});
 });
 

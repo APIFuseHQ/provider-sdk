@@ -9,6 +9,13 @@ import { isProviderError } from "../errors.js";
 
 export const REDACTED_QUERY_VALUE = "[REDACTED]";
 
+/** Internal heuristic shared by diagnostic and fixture structural redaction. */
+export function isSensitiveKey(key: string): boolean {
+	return /authorization|token|api[-_]?key|(^|[-_])(code|key|secret|signature|session)($|[-_])/i.test(
+		key,
+	);
+}
+
 const HTTP_REQUEST_METHOD_CONFIG = {
 	request: { optionsIndex: 1 },
 	get: { optionsIndex: 1 },
@@ -251,6 +258,13 @@ type RedactionContext = {
 	classificationObjects: Set<object>;
 };
 
+function isSdkErrorBrand(key: PropertyKey): boolean {
+	return (
+		typeof key === "symbol" &&
+		Symbol.keyFor(key)?.startsWith("@apifuse/provider-sdk/error-") === true
+	);
+}
+
 function redactDiagnosticString(value: string, context: RedactionContext): string {
 	return redactSensitiveText(
 		value,
@@ -294,13 +308,11 @@ function cloneForRedaction(source: object): object {
 		if (!descriptor) continue;
 		if (Array.isArray(source) && key === "length") continue;
 		try {
-			// Symbol properties include the SDK's immutable error brands. Preserve
-			// their descriptors exactly so replacement Provider/TransportErrors
-			// retain their cross-realm identity semantics.
+			const preserveSdkBrand = isSdkErrorBrand(key);
 			Object.defineProperty(
 				clone,
 				key,
-				typeof key === "symbol"
+				preserveSdkBrand
 					? descriptor
 					: {
 							...descriptor,
@@ -338,7 +350,7 @@ function cloneForRedaction(source: object): object {
 	return clone;
 }
 
-function setDiagnosticProperty(target: object, key: string, value: unknown): boolean {
+function setDiagnosticProperty(target: object, key: PropertyKey, value: unknown): boolean {
 	try {
 		return Reflect.set(target, key, value, target);
 	} catch {
@@ -346,8 +358,8 @@ function setDiagnosticProperty(target: object, key: string, value: unknown): boo
 	}
 }
 
-function diagnosticPropertyKeys(value: object): string[] {
-	const keys = new Set(Object.getOwnPropertyNames(value));
+function diagnosticPropertyKeys(value: object): PropertyKey[] {
+	const keys = new Set<PropertyKey>(Reflect.ownKeys(value));
 	if (value instanceof Error) {
 		// Built-in error text and AggregateError.errors are commonly
 		// non-enumerable, while SDK options carry serializable details.
@@ -355,11 +367,13 @@ function diagnosticPropertyKeys(value: object): string[] {
 			if (key in value) keys.add(key);
 		}
 	}
+	if (!(value instanceof Error) && "toJSON" in value) keys.add("toJSON");
 	return [...keys];
 }
 
-function requiresCloneBeforeRedaction(value: object, keys: readonly string[]): boolean {
+function requiresCloneBeforeRedaction(value: object, keys: readonly PropertyKey[]): boolean {
 	for (const key of keys) {
+		if (isSdkErrorBrand(key)) continue;
 		let owner: object | null = value;
 		while (owner) {
 			const descriptor = Object.getOwnPropertyDescriptor(owner, key);
@@ -379,7 +393,7 @@ function requiresCloneBeforeRedaction(value: object, keys: readonly string[]): b
 
 function readDiagnosticProperty(
 	value: object,
-	key: string,
+	key: PropertyKey,
 ): { ok: true; value: unknown } | { ok: false } {
 	try {
 		return { ok: true, value: Reflect.get(value, key, value) };
@@ -400,20 +414,12 @@ const DIAGNOSTIC_CLASSIFICATION_FIELDS = new Set([
 	"retryable",
 ]);
 
-// These SDK/server contract codes are semantic identities, not diagnostic
-// payload. Preserve them even when a low-entropy credential happens to match a
-// token inside the code; attacker-controlled code strings still take the
-// substring-scrubbing path below.
-const CANONICAL_ERROR_CODES = new Set([
-	"UPSTREAM_ERROR",
-	"reauth_required",
-	"transport_invalid_method",
-	"transport_invalid_url",
-	"transport_network_error",
-	"transport_stream_unavailable",
-	"transport_timeout",
-	"upstream_http_error",
-]);
+// Underscore-delimited error codes are semantic identities, not diagnostic
+// payload. Preserve the shared SDK/provider code convention without maintaining
+// a second, inevitably partial list of codes declared by individual transports.
+function isSemanticErrorCode(value: string): boolean {
+	return /^(?:[A-Za-z][A-Za-z0-9]*_)+[A-Za-z0-9]+$/.test(value);
+}
 
 function isClassificationField(
 	context: RedactionContext,
@@ -454,7 +460,7 @@ function redactDiagnosticValue(
 	const classificationField = isClassificationField(context, propertyName, parent);
 	if (classificationField && typeof value !== "string") return value;
 	if (typeof value === "string") {
-		if (propertyName === "code" && CANONICAL_ERROR_CODES.has(value)) return value;
+		if (propertyName === "code" && isSemanticErrorCode(value)) return value;
 		return classificationField
 			? redactClassificationString(value, context)
 			: redactDiagnosticString(value, context);
@@ -472,9 +478,80 @@ function redactDiagnosticValue(
 			return redactedUrl;
 		}
 	}
+	if (value instanceof Headers) {
+		const redactedHeaders = new Headers();
+		for (const [key, headerValue] of value.entries()) {
+			redactedHeaders.append(key, redactDiagnosticString(headerValue, context));
+		}
+		return redactedHeaders;
+	}
+	if (value instanceof Request) {
+		const redactedUrl = redactDiagnosticString(value.url, context);
+		const redactedHeaders = redactDiagnosticValue(value.headers, context) as Headers;
+		if (
+			redactedUrl === value.url &&
+			[...value.headers].every(([key, headerValue]) => {
+				return redactedHeaders.get(key) === headerValue;
+			})
+		) {
+			return value;
+		}
+		try {
+			const redactedRequest = new Request(redactedUrl, value);
+			for (const key of [...redactedRequest.headers.keys()]) redactedRequest.headers.delete(key);
+			for (const [key, headerValue] of redactedHeaders) {
+				redactedRequest.headers.append(key, headerValue);
+			}
+			return redactedRequest;
+		} catch {
+			const redactedRequest = Object.create(Object.getPrototypeOf(value)) as object;
+			Object.defineProperties(redactedRequest, {
+				headers: { value: redactedHeaders, enumerable: true },
+				url: { value: redactedUrl, enumerable: true },
+			});
+			return redactedRequest;
+		}
+	}
+	if (value instanceof Response) {
+		const redactedUrl = redactDiagnosticString(value.url, context);
+		const redactedHeaders = redactDiagnosticValue(value.headers, context) as Headers;
+		if (
+			redactedUrl === value.url &&
+			[...value.headers].every(([key, headerValue]) => {
+				return redactedHeaders.get(key) === headerValue;
+			})
+		) {
+			return value;
+		}
+		const redactedResponse = Object.create(Object.getPrototypeOf(value)) as object;
+		Object.defineProperties(redactedResponse, {
+			headers: { value: redactedHeaders, enumerable: true },
+			ok: { value: value.ok, enumerable: true },
+			redirected: { value: value.redirected, enumerable: true },
+			status: { value: value.status, enumerable: true },
+			statusText: {
+				value: redactDiagnosticString(value.statusText, context),
+				enumerable: true,
+			},
+			type: { value: value.type, enumerable: true },
+			url: { value: redactedUrl, enumerable: true },
+		});
+		return redactedResponse;
+	}
 
 	const previouslySeen = context.seen.get(value);
 	if (previouslySeen !== undefined) return previouslySeen;
+	if (value instanceof Map) {
+		const redactedMap = new Map<unknown, unknown>();
+		context.seen.set(value, redactedMap);
+		for (const [key, entryValue] of value) {
+			redactedMap.set(
+				redactDiagnosticValue(key, context),
+				redactDiagnosticValue(entryValue, context),
+			);
+		}
+		return redactedMap;
+	}
 
 	// Clone non-extensible graphs before descending so cycles encountered before
 	// a secret-bearing readonly field already point at the eventual replacement.
@@ -492,9 +569,18 @@ function redactDiagnosticValue(
 	for (const key of keys) {
 		const current = readDiagnosticProperty(value, key);
 		if (!current.ok) continue;
-		const redacted = redactDiagnosticValue(current.value, context, key, value);
+		const propertyName = typeof key === "string" ? key : undefined;
+		const redacted =
+			key === "toJSON" && typeof current.value === "function"
+				? (...args: unknown[]) =>
+						redactDiagnosticValue(
+							Reflect.apply(current.value as (...args: unknown[]) => unknown, value, args),
+							context,
+						)
+				: redactDiagnosticValue(current.value, context, propertyName, value);
 		const ownKey = Object.hasOwn(value, key);
-		const preferredKey = ownKey ? redactedDiagnosticKey(key, context) : key;
+		const preferredKey =
+			ownKey && typeof key === "string" ? redactedDiagnosticKey(key, context) : key;
 		let targetKey = key;
 		if (preferredKey !== key) {
 			try {
@@ -503,7 +589,7 @@ function redactDiagnosticValue(
 				// A clone is selected before traversal whenever an own key changes,
 				// so this is only a defensive fallback for exotic proxies.
 			}
-			targetKey = collisionSafeDiagnosticKey(target, preferredKey);
+			targetKey = collisionSafeDiagnosticKey(target, preferredKey as string);
 		}
 		if (targetKey === key && Object.is(redacted, current.value)) continue;
 
@@ -539,12 +625,12 @@ function redactDiagnosticValue(
  * Mutable errors retain identity; readonly/frozen errors may be replaced, so
  * callers must use the returned value.
  */
-export function redactSensitiveError(
-	error: unknown,
+export function redactSensitiveError<T>(
+	error: T,
 	sensitiveValues: readonly string[],
 	requestUrl?: string,
 	redactedUrl?: string,
-): unknown {
+): T {
 	if (sensitiveValues.length === 0 && (!requestUrl || !redactedUrl || requestUrl === redactedUrl)) {
 		return error;
 	}
@@ -564,7 +650,28 @@ export function redactSensitiveError(
 		requestUrl,
 		redactedUrl,
 		seen: new Map(),
-	});
+	}) as T;
+}
+
+/** Redacts failures that occur before a request URL can be fully serialized. */
+export function redactSensitiveRequestError<T>(
+	error: T,
+	url: string,
+	sensitiveParams?: Record<string, string>,
+): T {
+	const normalizedSensitiveParams = normalizeSensitiveParams(sensitiveParams);
+	const structural = redactUrlQueryParams(url, Object.keys(normalizedSensitiveParams ?? {}));
+	return redactSensitiveError(
+		error,
+		[
+			...new Set([
+				...Object.values(normalizedSensitiveParams ?? {}).map(String),
+				...structural.sensitiveValues,
+			]),
+		],
+		url,
+		structural.redactedUrl,
+	);
 }
 
 function isRequestOptions(value: unknown): value is RequestOptions {

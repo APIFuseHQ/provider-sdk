@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { ProviderError, SessionExpiredError, TransportError } from "../errors.js";
+import {
+	ProviderError,
+	ProviderSecretError,
+	SessionExpiredError,
+	StealthCookieStoreVersionError,
+	TransportError,
+} from "../errors.js";
 import {
 	REDACTED_QUERY_VALUE,
 	redactSensitiveError,
@@ -206,6 +212,51 @@ describe("sensitive request diagnostics", () => {
 			name: "failure-[REDACTED]",
 			code: REDACTED_QUERY_VALUE,
 		});
+	});
+
+	it("preserves SDK semantic error codes without a duplicated allowlist", () => {
+		const cookieError = new StealthCookieStoreVersionError("unsupported");
+		const secretError = new ProviderSecretError("missing provider secret");
+
+		redactSensitiveError(cookieError, ["unsupported"]);
+		redactSensitiveError(secretError, ["provider"]);
+
+		expect(cookieError.code).toBe("unsupported_stealth_cookie_store_version");
+		expect(secretError.code).toBe("provider_secret_error");
+	});
+
+	it("scrubs built-in diagnostic containers, symbol values, and serializers", () => {
+		const secret = "built-in-secret";
+		const requestUrl = `https://example.com/items?token=${secret}`;
+		const diagnosticSymbol = Symbol("diagnostic");
+		const request = new Request(requestUrl, {
+			headers: { "x-diagnostic": `credential ${secret}` },
+		});
+		const response = Response.redirect(requestUrl);
+		const map = new Map<unknown, unknown>([["request", request]]);
+		const serializer = {
+			toJSON: () => ({ url: requestUrl }),
+		};
+		const diagnostic = {
+			request,
+			response,
+			headers: request.headers,
+			map,
+			serializer,
+			[diagnosticSymbol]: requestUrl,
+		};
+
+		const redacted = redactSensitiveError(diagnostic, [secret]);
+
+		expect(redacted.request.url).toBe("https://example.com/items?token=[REDACTED]");
+		expect(redacted.request.headers.get("x-diagnostic")).toBe("credential [REDACTED]");
+		expect(redacted.response.headers.get("location")).toBe(
+			"https://example.com/items?token=[REDACTED]",
+		);
+		expect(redacted.headers.get("x-diagnostic")).toBe("credential [REDACTED]");
+		expect((redacted.map.get("request") as Request).url).not.toContain(secret);
+		expect(redacted[diagnosticSymbol]).not.toContain(secret);
+		expect(JSON.stringify(redacted.serializer)).not.toContain(secret);
 	});
 
 	it("replaces readonly errors and frozen self-cycles without exposing the original graph", () => {

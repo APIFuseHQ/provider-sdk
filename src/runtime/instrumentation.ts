@@ -9,7 +9,7 @@ import type {
 import { readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import {
 	parseHttpRequestInvocation,
-	normalizeSensitiveParams,
+	isSensitiveKey,
 	redactSensitiveError,
 	redactSensitiveText,
 	redactUrlQueryParams,
@@ -274,8 +274,12 @@ function instrumentHttpStreamConsumption(
 					}
 				}
 			},
-			cancel(reason) {
-				return reader ? reader.cancel(reason) : source.cancel(reason);
+			async cancel(reason) {
+				try {
+					await (reader ? reader.cancel(reason) : source.cancel(reason));
+				} catch (error) {
+					throw sanitizeRequestError(error, diagnostics);
+				}
 			},
 		},
 		{ highWaterMark: 0 },
@@ -435,27 +439,35 @@ function buildStealthRedirectAttributes(
 	attributes.redirect_hop_count = result.hops.length;
 	attributes.status = result.final.status;
 	if (result.hops.length > 0) {
+		const sensitiveValues = new Set(diagnostics.sensitiveValues);
 		const path = result.hops
 			.map((hop) => {
-				const structural = redactUrlQueryParams(
-					hop.nextUrl ?? hop.url,
-					diagnostics.sensitiveParamNames,
-				);
-				const safeUrl = redactSensitiveText(structural.redactedUrl, [
-					...diagnostics.sensitiveValues,
-					...structural.sensitiveValues,
+				const hopUrl = hop.nextUrl ?? hop.url;
+				const responseSensitiveParamNames = [...queryParamNames(hopUrl)].filter(isSensitiveKey);
+				const structural = redactUrlQueryParams(hopUrl, [
+					...new Set([...diagnostics.sensitiveParamNames, ...responseSensitiveParamNames]),
 				]);
+				for (const value of structural.sensitiveValues) sensitiveValues.add(value);
+				const safeUrl = redactSensitiveText(structural.redactedUrl, [...sensitiveValues]);
 				return `${hop.method} ${hop.status} ${safeUrl}`;
 			})
 			.join(" -> ");
 		attributes.redirect_path = redactSensitiveText(
 			path,
-			diagnostics.sensitiveValues,
+			[...sensitiveValues],
 			diagnostics.serializedUrl?.requestUrl,
 			diagnostics.serializedUrl?.redactedUrl,
 		);
 	}
 	return attributes;
+}
+
+function queryParamNames(url: string): Set<string> {
+	const queryStart = url.indexOf("?");
+	if (queryStart === -1) return new Set();
+	const fragmentStart = url.indexOf("#", queryStart);
+	const query = url.slice(queryStart + 1, fragmentStart === -1 ? undefined : fragmentStart);
+	return new Set(new URLSearchParams(query).keys());
 }
 
 function getBrowserPageAttributes(
@@ -552,9 +564,6 @@ function wrapStealthRedirects(
 
 	return {
 		run(...args: Parameters<StealthSession["redirects"]["run"]>) {
-			if (!normalizeSensitiveParams(args[0].sensitiveParams)) {
-				return redirects.run(...args);
-			}
 			const diagnosticArgs = [args[0].url, args[0]];
 			const diagnostics = snapshotRequestDiagnostics("stealth", "fetch", diagnosticArgs);
 			let result: ReturnType<StealthSession["redirects"]["run"]>;
@@ -591,19 +600,7 @@ function wrapStealthRedirects(
 }
 
 function wrapStealthSession(session: StealthSession, trace: TraceContext): StealthSession {
-	const wrappedSession = wrapNamespace(
-		"stealth",
-		session,
-		trace,
-		(methodName, args) =>
-			methodName === "fetch" &&
-			Boolean(
-				normalizeSensitiveParams(
-					requestOptionsForInvocation("stealth", methodName, args)?.sensitiveParams,
-				),
-			),
-	);
-	if (!session.redirects) return wrappedSession;
+	const wrappedSession = wrapNamespace("stealth", session, trace);
 	const redirects = wrapStealthRedirects(session.redirects, trace);
 	return new Proxy(wrappedSession, {
 		get(target, property, receiver) {
@@ -795,13 +792,13 @@ function wrapNamespace<T extends object>(
 					onError: (error) =>
 						buildSpanAttributes(namespace, methodName, args, undefined, error, requestDiagnostics),
 				});
-				return namespace === "http" && methodName === "stream" && requestDiagnostics.requestId
+				return namespace === "http" && methodName === "stream"
 					? tracedResult.then((spanResult) =>
 							isHttpStreamResponse(spanResult)
 								? instrumentHttpStreamConsumption(spanResult, recorder, args, requestDiagnostics)
 								: spanResult,
 						)
-					: namespace === "http" && methodName === "sse" && requestDiagnostics.requestId
+					: namespace === "http" && methodName === "sse"
 						? tracedResult.then((spanResult) =>
 								isAsyncIterable<SseMessage>(spanResult)
 									? instrumentHttpSseConsumption(spanResult, recorder, args, requestDiagnostics)

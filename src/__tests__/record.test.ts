@@ -66,6 +66,64 @@ describe("prepareFixturePayload", () => {
 });
 
 describe("record CLI", () => {
+	it("redacts captured sensitive values when the operation throws after a request", async () => {
+		const secret = "record-error-secret";
+		const upstream = createServer((_request, response) => {
+			response.writeHead(200, { "content-type": "application/json" });
+			response.end(JSON.stringify({ ok: true }));
+		});
+		await new Promise<void>((resolve, reject) => {
+			upstream.once("error", reject);
+			upstream.listen(0, "127.0.0.1", resolve);
+		});
+
+		try {
+			const address = upstream.address();
+			if (address === null || typeof address === "string") throw new Error("Expected IP address");
+			const providerDir = makeTempDir("error-redaction-");
+			writeFileSync(join(providerDir, "package.json"), '{"type":"module"}\n');
+			writeFileSync(
+				join(providerDir, "index.ts"),
+				`import { ProviderError, z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "src", "index.ts")).href)};
+export default { id: "record-error-redaction", version: "1.0.0", runtime: "standard",
+ operations: { lookup: { input: z.object({}), output: z.unknown(),
+ upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
+ handler: async (ctx) => {
+   await ctx.http.get("/", { sensitiveParams: { token: ${JSON.stringify(secret)} } });
+   throw new ProviderError("upstream echoed ${secret}", { code: "failure_${secret}" });
+ },
+ } } };
+`,
+			);
+			const process = Bun.spawn({
+				cmd: [
+					"bun",
+					join(repoRoot, "bin", "apifuse.ts"),
+					"record",
+					providerDir,
+					"--operation",
+					"lookup",
+				],
+				cwd: repoRoot,
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [stderr, exitCode] = await Promise.all([
+				new Response(process.stderr).text(),
+				process.exited,
+			]);
+
+			expect(exitCode).toBe(1);
+			expect(stderr).toContain("upstream echoed [REDACTED]");
+			expect(stderr).toContain("code=failure_[REDACTED]");
+			expect(stderr).not.toContain(secret);
+		} finally {
+			await new Promise<void>((resolve, reject) => {
+				upstream.close((error) => (error ? reject(error) : resolve()));
+			});
+		}
+	});
+
 	it("invokes the operation once through the apifuse command dispatcher", async () => {
 		let requestCount = 0;
 		const upstream = createServer((_request, response) => {
@@ -440,6 +498,7 @@ export default {
 					embeddedShortEcho: "prefix-api-suffix",
 					unrelatedShortText: "rapid response",
 					unrelatedLongText: "contest result",
+					differentlyCasedUrl: "/callback?ServiceKey=public",
 					emptyName: "",
 					emptyNote: "",
 				}),
@@ -496,6 +555,7 @@ export default { id: "record-default", version: "1.0.0", runtime: "standard",
 				embeddedShortEcho: "prefix-[REDACTED]-suffix",
 				unrelatedShortText: "rapid response",
 				unrelatedLongText: "contest result",
+				differentlyCasedUrl: "/callback?ServiceKey=public",
 				emptyName: "",
 				emptyNote: "",
 			});

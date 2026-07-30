@@ -915,6 +915,33 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients).toHaveLength(1);
 	});
 
+	it("redacts sensitiveParams from method and retry preflight failures", async () => {
+		const methodSecret = "INVALID_STEALTH_METHOD";
+		const retrySecret = "invalid_stealth_retry";
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+
+		await expect(
+			client.fetch("/method", {
+				method: methodSecret as never,
+				sensitiveParams: { token: methodSecret },
+			}),
+		).rejects.toMatchObject({ message: "Unsupported stealth method: [REDACTED]" });
+		let retryError: unknown;
+		try {
+			await client.fetch("/retry", {
+				retry: retrySecret as never,
+				sensitiveParams: { token: retrySecret },
+			});
+		} catch (error) {
+			retryError = error;
+		}
+		expect(retryError).toBeInstanceOf(Error);
+		expect((retryError as Error).message).not.toContain(retrySecret);
+		expect(JSON.stringify(retryError)).not.toContain(retrySecret);
+		expect(mockStealthState.clients).toHaveLength(0);
+	});
+
 	it("passes request method, body, timeout, and headers through impit fetch", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 200,
@@ -1865,6 +1892,25 @@ describe("createStealthClient", () => {
 		expect(response.status).toBe(200);
 		expect(mockStealthState.clients[0]?.calls).toHaveLength(2);
 		expect(mockStealthState.clients[0]?.options?.proxyUrl).toBe("http://proxy.test");
+	});
+
+	it("keeps proxy_connect_failed retryable when a sensitive value matches its prefix", async () => {
+		mockStealthState.queuedErrors.push(new Error("proxy CONNECT failed"));
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+
+		const response = await client.fetch("/health", {
+			proxy: "http://proxy.test",
+			sensitiveParams: { token: "proxy" },
+		});
+
+		expect(response.status).toBe(200);
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(2);
 	});
 
 	it("defaults proxy-routed GET timeout failures to transient transport retry", async () => {
