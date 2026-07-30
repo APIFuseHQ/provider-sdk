@@ -117,6 +117,8 @@ type StealthTransportResponse = Pick<
 	ImpitResponse,
 	"arrayBuffer" | "headers" | "json" | "ok" | "status" | "text"
 > & {
+	body?: ReadableStream<Uint8Array>;
+	abort?: () => void;
 	url?: string;
 	redirected?: boolean;
 };
@@ -406,13 +408,17 @@ function splitCombinedSetCookieHeader(headerValue: string): string[] {
 export async function normalizeResponse(
 	response: StealthTransportResponse,
 	requestUrl?: string,
+	maxBodyBytes?: number,
 ): Promise<StealthResponse> {
 	const headers = Object.fromEntries(response.headers.entries());
 	const cookies = new CookieJarImpl(
 		setCookieHeadersFromResponse(response.headers),
 		response.url ?? requestUrl,
 	);
-	const bodyBytes = await response.arrayBuffer();
+	const bodyBytes =
+		maxBodyBytes === undefined
+			? await response.arrayBuffer()
+			: await readResponseBodyWithLimit(response, maxBodyBytes);
 	const body = new TextDecoder().decode(bodyBytes);
 
 	return {
@@ -438,6 +444,83 @@ export async function normalizeResponse(
 			return Promise.resolve(new Uint8Array(bodyBytes.slice(0)));
 		},
 	};
+}
+
+function responseTooLargeError(maxBodyBytes: number, observedBytes: number): TransportError {
+	return new TransportError(
+		`Response body exceeded maxBodyBytes limit of ${maxBodyBytes} bytes (observed ${observedBytes} bytes)`,
+		{
+			code: "response_too_large",
+			category: "upstream_http",
+			retryable: false,
+			status: 0,
+		},
+	);
+}
+
+function declaredContentLength(headers: Headers): number | undefined {
+	const contentLength = headers.get("content-length")?.trim();
+	if (!contentLength || !/^\d+$/.test(contentLength)) return undefined;
+	const parsed = Number(contentLength);
+	return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function abortTransportResponse(response: StealthTransportResponse): boolean {
+	if (!response.abort) return false;
+	try {
+		response.abort();
+	} catch {
+		// The size error remains the primary failure if impit has already closed the response.
+	}
+	return true;
+}
+
+async function readResponseBodyWithLimit(
+	response: StealthTransportResponse,
+	maxBodyBytes: number,
+): Promise<ArrayBuffer> {
+	const contentLength = declaredContentLength(response.headers);
+	if (contentLength !== undefined && contentLength > maxBodyBytes) {
+		if (!abortTransportResponse(response)) {
+			await response.body?.cancel().catch(() => undefined);
+		}
+		throw responseTooLargeError(maxBodyBytes, contentLength);
+	}
+
+	if (!response.body) {
+		throw new TransportError("Response body stream is unavailable", {
+			code: "transport_stream_unavailable",
+			category: "upstream_http",
+			status: 0,
+		});
+	}
+
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let receivedBytes = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			receivedBytes += value.byteLength;
+			if (receivedBytes > maxBodyBytes) {
+				await reader.cancel().catch(() => undefined);
+				abortTransportResponse(response);
+				throw responseTooLargeError(maxBodyBytes, receivedBytes);
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+
+	const bodyBytes = new Uint8Array(receivedBytes);
+	let offset = 0;
+	for (const chunk of chunks) {
+		bodyBytes.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return bodyBytes.buffer;
 }
 
 function normalizeBody(body: StealthFetchOptions["body"]): string {
@@ -843,7 +926,7 @@ function createSessionFetcher(
 							requestUrl,
 							requestInit,
 						);
-						const normalized = await normalizeResponse(response, requestUrl);
+						const normalized = await normalizeResponse(response, requestUrl, options.maxBodyBytes);
 						cookieJar.setFromCookieStrings(
 							setCookieHeadersFromResponse(response.headers),
 							response.url ?? requestUrl,

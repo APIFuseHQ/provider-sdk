@@ -216,6 +216,7 @@ describe("ProviderDefinition types", () => {
 
 		const options = {
 			method: "GET",
+			maxBodyBytes: 1_000_000,
 			profile: "chrome-146",
 			stealth: {
 				insecureSkipVerify: true,
@@ -235,6 +236,7 @@ describe("ProviderDefinition types", () => {
 		};
 
 		expect(options.stealth?.insecureSkipVerify).toBe(true);
+		expect(options.maxBodyBytes).toBe(1_000_000);
 		expect(response.cookies.get("sid")).toBe("abc");
 		await expect(response.json<{ ok: boolean }>()).resolves.toEqual({
 			ok: true,

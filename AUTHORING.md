@@ -517,6 +517,26 @@ const credentialsAuth = defineCredentialsAuth({
   `bunx playwright install chromium`, or set
   `APIFUSE__CDP_POOL__URL` for remote browser debugging.
 
+### Limiting stealth response bodies
+
+Set `maxBodyBytes` on `ctx.stealth.fetch()` or `session.redirects.run()` when an
+upstream response has a known safe maximum. The limit is opt-in and counts
+decoded bytes as impit streams them. It applies to every redirect hop, uses a
+parseable `Content-Length` for an early rejection, and still enforces the limit
+incrementally when the header is absent or inaccurate. Exceeding the limit
+aborts the response and throws a non-retryable `TransportError` with code
+`response_too_large`.
+
+Pass the limit to the transport instead of checking `Content-Length` in provider
+code:
+
+```ts
+const response = await ctx.stealth.fetch("/api/search", {
+  params: { query: input.query },
+  maxBodyBytes: 2 * 1024 * 1024,
+})
+```
+
 ### Persisting stealth session cookies
 
 Persist `session.cookies.serialize()` as JSON when an authenticated session must
