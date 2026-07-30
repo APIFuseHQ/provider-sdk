@@ -28,7 +28,13 @@ import {
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
-import { appendQueryParams, normalizeHttpRequestBody } from "./request-options.js";
+import {
+	normalizeHttpRequestBody,
+	redactSensitiveError,
+	redactSensitiveRequestError,
+	type SerializedRequestUrl,
+	serializeRequestUrl,
+} from "./request-options.js";
 
 const DEFAULT_HTTP_BASE_URL = "http://localhost";
 
@@ -208,9 +214,58 @@ function requireNativeResponseBody(response: Response): ReadableStream<Uint8Arra
 	return response.body;
 }
 
-function toNativeHttpStreamResponse(response: Response): HttpStreamResponse {
+function sanitizeStreamErrors(
+	body: ReadableStream<Uint8Array>,
+	serializedUrl: SerializedRequestUrl,
+): ReadableStream<Uint8Array> {
+	if (serializedUrl.sensitiveValues.length === 0) return body;
+
+	let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+	return new ReadableStream<Uint8Array>(
+		{
+			async pull(controller) {
+				try {
+					reader ??= body.getReader();
+					const chunk = await reader.read();
+					if (chunk.done) {
+						controller.close();
+						return;
+					}
+					controller.enqueue(chunk.value);
+				} catch (error) {
+					controller.error(
+						redactSensitiveError(
+							error,
+							serializedUrl.sensitiveValues,
+							serializedUrl.requestUrl,
+							serializedUrl.redactedUrl,
+						),
+					);
+				}
+			},
+			async cancel(reason) {
+				try {
+					await (reader ? reader.cancel(reason) : body.cancel(reason));
+				} catch (error) {
+					throw redactSensitiveError(
+						error,
+						serializedUrl.sensitiveValues,
+						serializedUrl.requestUrl,
+						serializedUrl.redactedUrl,
+					);
+				}
+			},
+		},
+		{ highWaterMark: 0 },
+	);
+}
+
+function toNativeHttpStreamResponse(
+	response: Response,
+	serializedUrl: SerializedRequestUrl,
+): HttpStreamResponse {
 	const headers = Object.fromEntries(response.headers.entries());
-	const body = requireNativeResponseBody(response);
+	const body = sanitizeStreamErrors(requireNativeResponseBody(response), serializedUrl);
 	return {
 		body,
 		headers,
@@ -305,6 +360,22 @@ function normalizeNativeFetchBody(body: unknown): string | ArrayBuffer | undefin
 	return copied.buffer;
 }
 
+function serializeHttpRequestUrl(
+	baseUrl: string | undefined,
+	url: string,
+	options: RequestOptions,
+): SerializedRequestUrl {
+	try {
+		return serializeRequestUrl(
+			resolveHttpUrl(baseUrl, url),
+			options.params,
+			options.sensitiveParams,
+		);
+	} catch (error) {
+		throw redactSensitiveRequestError(error, url, options.sensitiveParams);
+	}
+}
+
 async function fetchNativeHttp(
 	baseUrl: string | undefined,
 	url: string,
@@ -316,7 +387,8 @@ async function fetchNativeHttp(
 	proxyAttemptOffset = 0,
 	dedupe?: { attempted: Set<string> },
 ): Promise<NativeHttpAttemptOutcome> {
-	const requestUrl = appendQueryParams(resolveHttpUrl(baseUrl, url), options.params);
+	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
+	const { requestUrl } = serializedUrl;
 	const controller = options.timeout ? new AbortController() : undefined;
 	const timeoutHandle = options.timeout
 		? setTimeout(() => controller?.abort(), options.timeout)
@@ -374,9 +446,19 @@ async function fetchNativeHttp(
 		return toNativeHttpResponse(response);
 	} catch (error) {
 		if (error instanceof SyntaxError) {
-			throw error;
+			throw redactSensitiveError(
+				error,
+				serializedUrl.sensitiveValues,
+				serializedUrl.requestUrl,
+				serializedUrl.redactedUrl,
+			);
 		}
-		const transportError = toHttpTransportError(error) as NativeHttpAttemptError;
+		const transportError: NativeHttpAttemptError = redactSensitiveError(
+			toHttpTransportError(error),
+			serializedUrl.sensitiveValues,
+			serializedUrl.requestUrl,
+			serializedUrl.redactedUrl,
+		);
 		transportError.proxyUsed = Boolean(proxy);
 		throw transportError;
 	} finally {
@@ -392,7 +474,8 @@ async function fetchNativeHttpStream(
 	clientOptions: HttpClientOptions,
 	warn: (message: string) => void,
 ): Promise<HttpStreamResponse> {
-	const requestUrl = appendQueryParams(resolveHttpUrl(baseUrl, url), options.params);
+	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
+	const { requestUrl } = serializedUrl;
 	const controller = options.timeout ? new AbortController() : undefined;
 	const timeoutHandle = options.timeout
 		? setTimeout(() => controller?.abort(), options.timeout)
@@ -421,12 +504,22 @@ async function fetchNativeHttpStream(
 			});
 		}
 
-		return toNativeHttpStreamResponse(response);
+		return toNativeHttpStreamResponse(response, serializedUrl);
 	} catch (error) {
 		if (error instanceof SyntaxError) {
-			throw error;
+			throw redactSensitiveError(
+				error,
+				serializedUrl.sensitiveValues,
+				serializedUrl.requestUrl,
+				serializedUrl.redactedUrl,
+			);
 		}
-		throw toHttpTransportError(error);
+		throw redactSensitiveError(
+			toHttpTransportError(error),
+			serializedUrl.sensitiveValues,
+			serializedUrl.requestUrl,
+			serializedUrl.redactedUrl,
+		);
 	} finally {
 		if (timeoutHandle) clearTimeout(timeoutHandle);
 	}
@@ -451,22 +544,29 @@ export function createHttpClient(
 		method: string,
 		options: RequestOptions & { body?: unknown } = {},
 	): Promise<HttpResponse> {
-		if (!baseUrl && !isAbsoluteUrl(url)) {
-			throw new TransportError(
-				"ctx.http requires an absolute URL when provider.upstream.baseUrl is not declared",
-				{ code: "transport_invalid_url" },
-			);
-		}
-		assertNoHttpTransportOverrides(options);
-		const headersOptions = withClientHeaders(options, clientOptions, options.body);
-		const methodName = normalizeHttpMethod(method);
-		const explicitRetry = headersOptions.retry !== undefined;
-		const retryOptions =
-			normalizeProxyTransportRetryOptions(headersOptions.retry, {
-				label: "HTTP",
-			}) ??
-			(explicitRetry ? undefined : createDefaultProxyTransportRetryOptions({ label: "HTTP" }));
-		if (retryOptions) validateUnsafeProxyTransportRetryMethods(retryOptions, "HTTP");
+		const { explicitRetry, headersOptions, methodName, retryOptions } = (() => {
+			try {
+				if (!baseUrl && !isAbsoluteUrl(url)) {
+					throw new TransportError(
+						"ctx.http requires an absolute URL when provider.upstream.baseUrl is not declared",
+						{ code: "transport_invalid_url" },
+					);
+				}
+				assertNoHttpTransportOverrides(options);
+				const headersOptions = withClientHeaders(options, clientOptions, options.body);
+				const methodName = normalizeHttpMethod(method);
+				const explicitRetry = headersOptions.retry !== undefined;
+				const retryOptions =
+					normalizeProxyTransportRetryOptions(headersOptions.retry, {
+						label: "HTTP",
+					}) ??
+					(explicitRetry ? undefined : createDefaultProxyTransportRetryOptions({ label: "HTTP" }));
+				if (retryOptions) validateUnsafeProxyTransportRetryMethods(retryOptions, "HTTP");
+				return { explicitRetry, headersOptions, methodName, retryOptions };
+			} catch (error) {
+				throw redactSensitiveRequestError(error, url, options.sensitiveParams);
+			}
+		})();
 		const retryEnabled = Boolean(
 			retryOptions &&
 				retryOptions.attempts > 1 &&
@@ -531,9 +631,7 @@ export function createHttpClient(
 			explicitRetry,
 			method: methodName,
 		});
-		const dedupeContext = dedupeAllocatorEndpoints
-			? { attempted: new Set<string>() }
-			: undefined;
+		const dedupeContext = dedupeAllocatorEndpoints ? { attempted: new Set<string>() } : undefined;
 
 		const executeOnce = (proxyAttemptOffset = 0): Promise<NativeHttpAttemptOutcome> =>
 			fetchNativeHttp(
@@ -654,15 +752,23 @@ export function createHttpClient(
 		method: string,
 		options: RequestOptions & { body?: unknown } = {},
 	): Promise<HttpStreamResponse> {
-		if (!baseUrl && !isAbsoluteUrl(url)) {
-			throw new TransportError(
-				"ctx.http requires an absolute URL when provider.upstream.baseUrl is not declared",
-				{ code: "transport_invalid_url" },
-			);
-		}
-		assertNoHttpTransportOverrides(options);
-		const headersOptions = withClientHeaders(options, clientOptions, options.body);
-		const methodName = normalizeHttpMethod(method);
+		const { headersOptions, methodName } = (() => {
+			try {
+				if (!baseUrl && !isAbsoluteUrl(url)) {
+					throw new TransportError(
+						"ctx.http requires an absolute URL when provider.upstream.baseUrl is not declared",
+						{ code: "transport_invalid_url" },
+					);
+				}
+				assertNoHttpTransportOverrides(options);
+				return {
+					headersOptions: withClientHeaders(options, clientOptions, options.body),
+					methodName: normalizeHttpMethod(method),
+				};
+			} catch (error) {
+				throw redactSensitiveRequestError(error, url, options.sensitiveParams);
+			}
+		})();
 		return fetchNativeHttpStream(baseUrl, url, methodName, headersOptions, clientOptions, warnOnce);
 	}
 

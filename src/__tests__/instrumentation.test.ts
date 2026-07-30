@@ -13,6 +13,7 @@ import type {
 	HttpClient,
 	ProviderContext,
 	StealthClient,
+	StealthSession,
 } from "../types.js";
 
 function createMockHttpResponse(requestId: string, duration: number) {
@@ -277,6 +278,240 @@ describe("wrapWithInstrumentation", () => {
 			},
 		});
 	});
+
+	it("redacts sensitiveParams from traced transport errors", async () => {
+		const secret = "trace-test-secret";
+		const ctx = createMockContext();
+		ctx.http.get = mock(async () => {
+			throw new Error(`Failed https://api.example.com/items?serviceKey=${secret}`);
+		});
+
+		const instrumented = wrapWithInstrumentation(ctx);
+		await expect(
+			instrumented.http.get("https://api.example.com/items", {
+				params: { page: 2, legacyKey: secret },
+				sensitiveParams: { serviceKey: secret },
+			}),
+		).rejects.toThrow("serviceKey=[REDACTED]");
+
+		const span = instrumented.trace.getSpans()[0];
+		expect(span?.attributes.url).toBe("https://api.example.com/items?serviceKey=[REDACTED]");
+		const serializedSpan = JSON.stringify(span);
+		expect(serializedSpan).toContain("[REDACTED]");
+		expect(serializedSpan).not.toContain(secret);
+	});
+
+	it("preserves caller URLs, generic method names, and response identity without sensitiveParams", async () => {
+		const ctx = createMockContext();
+		const body = new ReadableStream<Uint8Array>();
+		const original = {
+			status: 200,
+			ok: true,
+			headers: {},
+			body,
+			bytes: async function* () {},
+			textChunks: async function* () {},
+			lines: async function* () {},
+		};
+		ctx.http.stream = mock(async () => original);
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		const response = await instrumented.http.stream("https://api.example.com/logs", {
+			params: { legacyToken: "visible-by-existing-contract" },
+		});
+
+		expect(response).toBe(original);
+		expect(instrumented.trace.getSpans()[0]?.attributes).toMatchObject({
+			url: "https://api.example.com/logs",
+			method: "STREAM",
+		});
+	});
+
+	it("treats empty sensitiveParams as absent from trace URL serialization", async () => {
+		const ctx = createMockContext();
+		const instrumented = wrapWithInstrumentation(ctx);
+		const url = "https://EXAMPLE.com:443/items?q=a%20b&tilde=~";
+
+		await instrumented.http.get(url, { params: { page: 1 } });
+		await instrumented.http.get(url, { params: { page: 1 }, sensitiveParams: {} });
+
+		const urls = instrumented.trace
+			.getSpans()
+			.filter((span) => span.name === "http.get")
+			.map((span) => span.attributes.url);
+		expect(urls).toEqual([url, url]);
+	});
+
+	it("redacts raw and encoded sensitive values from HTTP and stealth traces", async () => {
+		const secret = "trace key+/=%";
+		const percentEncoded = encodeURIComponent(secret);
+		const formEncoded = new URLSearchParams({ value: secret }).toString().slice("value=".length);
+		const ctx = createMockContext();
+		ctx.http.get = mock(async () => {
+			throw new Error(`HTTP failed: raw=${secret} encoded=${percentEncoded} form=${formEncoded}`);
+		});
+		ctx.stealth.fetch = mock(async () => {
+			throw new Error(
+				`Stealth failed: raw=${secret} encoded=${percentEncoded} form=${formEncoded}`,
+			);
+		});
+
+		const instrumented = wrapWithInstrumentation(ctx);
+		for (const request of [
+			() =>
+				instrumented.http.get("https://api.example.com/items", {
+					sensitiveParams: { serviceKey: secret },
+				}),
+			() =>
+				instrumented.stealth.fetch("https://api.example.com/items", {
+					sensitiveParams: { serviceKey: secret },
+				}),
+		]) {
+			await expect(request()).rejects.toThrow("[REDACTED]");
+		}
+
+		const serializedSpans = JSON.stringify(instrumented.trace.getSpans());
+		expect(serializedSpans).not.toContain(secret);
+		expect(serializedSpans).not.toContain(percentEncoded);
+		expect(serializedSpans).not.toContain(formEncoded);
+		expect(serializedSpans.match(/\[REDACTED\]/g)?.length).toBeGreaterThanOrEqual(2);
+	});
+
+	it("records a correlated failure when an HTTP stream fails during consumption", async () => {
+		const secret = "trace-stream-secret";
+		const ctx = createMockContext();
+		ctx.http.stream = mock(async () => {
+			const body = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					controller.error(
+						new Error(`Stream failed at https://api.example.com/logs?serviceKey=${secret}`),
+					);
+				},
+			});
+			return {
+				status: 200,
+				ok: true,
+				headers: {},
+				body,
+				bytes: async function* () {},
+				textChunks: async function* () {},
+				lines: async function* () {},
+			};
+		});
+
+		const instrumented = wrapWithInstrumentation(ctx);
+		const response = await instrumented.http.stream("https://api.example.com/logs", {
+			sensitiveParams: { serviceKey: secret },
+		});
+		await expect(async () => {
+			for await (const _line of response.lines()) {
+				// The source errors before yielding a line.
+			}
+		}).toThrow("serviceKey=[REDACTED]");
+
+		const requestSpan = instrumented.trace.getSpans().find((span) => span.name === "http.stream");
+		const consumptionSpan = instrumented.trace
+			.getSpans()
+			.find((span) => span.name === "http.stream.consume");
+		expect(requestSpan?.status).toBe("ok");
+		expect(consumptionSpan).toMatchObject({
+			status: "error",
+			error: "Stream failed at https://api.example.com/logs?serviceKey=[REDACTED]",
+			attributes: {
+				url: "https://api.example.com/logs?serviceKey=[REDACTED]",
+				method: "STREAM",
+			},
+		});
+		expect(consumptionSpan?.attributes.request_id).toBe(requestSpan?.attributes.request_id);
+		expect(JSON.stringify(instrumented.trace.getSpans())).not.toContain(secret);
+	});
+
+	it("records and correlates sensitive SSE failures during lazy consumption", async () => {
+		const secret = "sse-secret";
+		const ctx = createMockContext();
+		ctx.http.sse = mock(async () => ({
+			[Symbol.asyncIterator]() {
+				return {
+					next: async () => {
+						throw new Error(`SSE failed for serviceKey=${secret}`);
+					},
+				};
+			},
+		}));
+		const instrumented = wrapWithInstrumentation(ctx);
+		const events = await instrumented.http.sse("https://api.example.com/events", {
+			sensitiveParams: { serviceKey: secret },
+		});
+
+		await expect(async () => {
+			for await (const _event of events) {
+				// The source errors before yielding an event.
+			}
+		}).toThrow("serviceKey=[REDACTED]");
+
+		const spans = instrumented.trace.getSpans();
+		const requestSpan = spans.find((span) => span.name === "http.sse");
+		const consumptionSpan = spans.find((span) => span.name === "http.sse.consume");
+		expect(consumptionSpan).toMatchObject({
+			status: "error",
+			attributes: { method: "SSE", url: "https://api.example.com/events?serviceKey=[REDACTED]" },
+		});
+		expect(consumptionSpan?.attributes.request_id).toBe(requestSpan?.attributes.request_id);
+		expect(JSON.stringify(spans)).not.toContain(secret);
+	});
+
+	it("records lazy stream and SSE consumption failures without sensitiveParams", async () => {
+		const ctx = createMockContext();
+		ctx.http.stream = mock(async () => {
+			const body = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					controller.error(new Error("ordinary stream failed"));
+				},
+			});
+			return {
+				status: 200,
+				ok: true,
+				headers: {},
+				body,
+				bytes: async function* () {},
+				textChunks: async function* () {},
+				lines: async function* () {},
+			};
+		});
+		ctx.http.sse = mock(async () => ({
+			[Symbol.asyncIterator]() {
+				return {
+					next: async () => {
+						throw new Error("ordinary SSE failed");
+					},
+				};
+			},
+		}));
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		const stream = await instrumented.http.stream("https://api.example.com/logs");
+		await expect(stream.body.getReader().read()).rejects.toThrow("ordinary stream failed");
+		const events = await instrumented.http.sse("https://api.example.com/events");
+		await expect(
+			(async () => {
+				for await (const _event of events) {
+					// The source errors before yielding an event.
+				}
+			})(),
+		).rejects.toThrow("ordinary SSE failed");
+
+		const spans = instrumented.trace.getSpans();
+		expect(spans.filter((span) => span.name === "http.stream")).toHaveLength(1);
+		expect(spans.filter((span) => span.name === "http.sse")).toHaveLength(1);
+		expect(spans.find((span) => span.name === "http.stream.consume")).toMatchObject({
+			status: "error",
+			error: "ordinary stream failed",
+		});
+		expect(spans.find((span) => span.name === "http.sse.consume")).toMatchObject({
+			status: "error",
+			error: "ordinary SSE failed",
+		});
+	});
 });
 
 describe("synchronous return fidelity (state + stealth factories)", () => {
@@ -367,8 +602,112 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 		// instrumented namespace and must not come back as a Promise.
 		const session = instrumented.stealth.createSession();
 		expect(isThenableForTest(session)).toBe(false);
-		const response = await session.fetch("https://secure.example.com/home");
+		const response = await session.fetch("https://secure.example.com/home", {
+			sensitiveParams: { serviceKey: "session-secret" },
+		});
 		expect(response.ok).toBe(true);
+		expect(instrumented.trace.getSpans().some((span) => span.name === "stealth.fetch")).toBe(true);
+	});
+
+	it("instruments ordinary session traffic and redacts redirect termination details", async () => {
+		const responseCodeSecret = "response-code-secret";
+		const responseStateSecret = "response-state-secret";
+		const ctx = createMockContext();
+		const final = await ctx.stealth.fetch("https://secure.example.com/final");
+		const cookies: StealthSession["cookies"] = {
+			get: () => undefined,
+			getAll: () => ({}),
+			toString: () => "",
+			has: () => false,
+			setFromCookieStrings: () => {},
+			toHeader: () => "",
+			snapshot: () => ({}),
+			restore: () => {},
+			serialize: () => ({
+				version: 1,
+				jar: {
+					version: "tough-cookie@6.0.0",
+					storeType: "MemoryCookieStore",
+					rejectPublicSuffixes: true,
+					enableLooseMode: false,
+					allowSpecialUseDomain: true,
+					prefixSecurity: "silent",
+					cookies: [],
+				},
+			}),
+			deserialize: () => {},
+			clear: () => {},
+		};
+		const mockSession = {
+			fetch: ctx.stealth.fetch,
+			cookies,
+			redirects: {
+				run: async (options) => ({
+					final,
+					hops: [
+						{
+							url: options.url,
+							status: 302,
+							method: "GET",
+							nextUrl: `${options.url}?${options.sensitiveParams ? "serviceKey=rotated-session-secret&" : ""}code=${responseCodeSecret}`,
+						},
+						{
+							url: `${options.url}?code=${responseCodeSecret}`,
+							status: 302,
+							method: "GET",
+							nextUrl: `${options.url}?state=${responseStateSecret}`,
+						},
+					],
+					reason: "loop" as const,
+					cookies: {},
+					cookieStore: {
+						version: 1 as const,
+						jar: {
+							version: "tough-cookie@6.0.0",
+							storeType: "MemoryCookieStore",
+							rejectPublicSuffixes: true,
+							enableLooseMode: false,
+							allowSpecialUseDomain: true,
+							prefixSecurity: "silent",
+							cookies: [],
+						},
+					},
+				}),
+			},
+			close: () => {},
+		} satisfies StealthSession;
+		ctx.stealth.createSession = mock(() => mockSession);
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		const session = instrumented.stealth.createSession();
+		await session.fetch("https://secure.example.com/ordinary");
+		await session.redirects.run({ url: "https://secure.example.com/ordinary" });
+		expect(instrumented.trace.getSpans().map((span) => span.name)).toEqual([
+			"stealth.fetch",
+			"stealth.redirects.run",
+		]);
+		expect(JSON.stringify(instrumented.trace.getSpans())).not.toContain(responseCodeSecret);
+		expect(JSON.stringify(instrumented.trace.getSpans())).not.toContain(responseStateSecret);
+		await session.redirects.run({
+			url: "https://secure.example.com/login",
+			sensitiveParams: { serviceKey: "session-secret" },
+		});
+
+		const redirectSpan = instrumented.trace
+			.getSpans()
+			.findLast((span) => span.name === "stealth.redirects.run");
+		expect(redirectSpan?.attributes).toMatchObject({
+			redirect_reason: "loop",
+			redirect_hop_count: 2,
+			status: 201,
+		});
+		expect(redirectSpan?.attributes.redirect_path).toContain("serviceKey=[REDACTED]");
+		expect(redirectSpan?.attributes.redirect_path).toContain("code=[REDACTED]");
+		expect(redirectSpan?.attributes.redirect_path).toContain("state=[REDACTED]");
+		expect(JSON.stringify(redirectSpan)).not.toContain("session-secret");
+		expect(JSON.stringify(redirectSpan)).not.toContain("rotated-session-secret");
+		expect(JSON.stringify(redirectSpan)).not.toContain(responseCodeSecret);
+		expect(JSON.stringify(redirectSpan)).not.toContain(responseStateSecret);
 	});
 });
 

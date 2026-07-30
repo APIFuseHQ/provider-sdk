@@ -18,18 +18,31 @@ import {
 	type ProviderContext,
 	type ProviderDefinition,
 	ProviderError,
+	type RequestOptions,
 	type StealthClient,
 	TransportError,
 	ValidationError,
 } from "../src/index.js";
 import type { JsonValue } from "../src/contract-json.js";
 import {
+	isSensitiveFixtureKey,
 	requestPathForFixture,
 	sanitizeDiagnosticText,
-	sanitizeFixture,
-	sanitizeOrdinaryFixture,
+	sanitizeFixtureString,
 } from "../src/fixture-sanitization.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import {
+	REDACTED_QUERY_VALUE,
+	isSensitiveKey,
+	normalizeSensitiveParams,
+	parseHttpRequestInvocation,
+	redactSensitiveError,
+	redactSensitiveText,
+	redactUrlQueryParams,
+	replaceRequestOptionsInHttpInvocation,
+	requestOptionsFromHttpInvocation,
+	serializeRequestUrl,
+} from "../src/runtime/request-options.js";
 import { parseSchema } from "../src/schema.js";
 import {
 	captureStreamEvidence,
@@ -54,6 +67,8 @@ type CliArgs = {
 
 type ProviderRuntime = ProviderDefinition;
 
+type MutableRecord = Record<string, unknown>;
+
 const HELP_TEXT = `Usage: apifuse record [path] --operation <operation> --params '<json>'
 
 Calls a real upstream-backed operation through ctx.http or ctx.stealth and writes __fixtures__/raw.json.
@@ -70,13 +85,14 @@ Options:
   --params, -p <json>      JSON input passed to the operation (default: {})
   --append                 preserve the existing fixture and append this capture
   --sanitize               redact common token/header fields (default)
-  --no-sanitize            write the captured upstream payload as-is
+  --no-sanitize            disable common-field redaction (sensitiveParams are always redacted)
   --help, -h               show this help
 
 Example:
   apifuse record providers/korea-air-quality --operation realtime --params '{"stationName":"jongno"}'`;
 
 export async function main() {
+	let capture: ReturnType<typeof createCaptureContext> | undefined;
 	try {
 		const args = parseArgs(normalizeArgs(process.argv.slice(2)));
 		const location = resolveProviderLocation(args.providerPath);
@@ -85,7 +101,7 @@ export async function main() {
 		const operation = provider.operations[operationName];
 		const parsedParams = await parseParams(operation, args.params);
 
-		const capture = createCaptureContext(
+		capture = createCaptureContext(
 			provider,
 			resolveOperationBaseUrl(provider, operationName),
 			args.sanitize,
@@ -121,23 +137,31 @@ export async function main() {
 			throw new Error(`No upstream response was captured for ${provider.id}.${operationName}.`);
 		}
 
+		const sensitiveParams = capture.getCapturedSensitiveParams();
 		const rawPayload = jsonFixtureValue(captured);
 		const fixturePath = resolve(location.rootDir, "__fixtures__", "raw.json");
-		const nextPayload = await prepareFixturePayload(fixturePath, rawPayload, args.append);
+		const redactedCapture = redactFixture(rawPayload, sensitiveParams, args.sanitize);
+		const mergedPayload = await prepareFixturePayload(fixturePath, redactedCapture, args.append);
+		// Mandatory query-secret redaction applies to the merged history, including
+		// values discovered in older declared-key URL positions. Optional common-
+		// field sanitization applies only to this run's new capture so --append does
+		// not rewrite deliberately preserved historical fields.
+		const historicalSensitiveParams = discoverSensitiveQueryValues(mergedPayload, sensitiveParams);
+		const nextPayload = redactFixture(mergedPayload, historicalSensitiveParams, false);
 
 		await mkdir(dirname(fixturePath), { recursive: true });
 		await writeFile(fixturePath, `${JSON.stringify(nextPayload, null, 2)}\n`);
 
 		console.log(
 			`[apifuse record] Captured response (${formatBytes(
-				Buffer.byteLength(JSON.stringify(rawPayload)),
+				Buffer.byteLength(JSON.stringify(redactedCapture)),
 			)})`,
 		);
 		console.log(`[apifuse record] Saved to ${relative(process.cwd(), fixturePath)}`);
 
 		void result;
 	} catch (error) {
-		handleCliError(error);
+		handleCliError(error, capture?.getCapturedSensitiveParams().values);
 	}
 }
 
@@ -222,8 +246,8 @@ function parseArgs(argv: string[]): CliArgs {
 	return { append, providerPath, operation, params, sanitize };
 }
 
-function handleCliError(error: unknown): never {
-	const message = formatCliError(error);
+function handleCliError(error: unknown, sensitiveValues: readonly string[] = []): never {
+	const message = redactSensitiveText(formatCliError(error), sensitiveValues);
 	console.error(`[apifuse record] ${message}`);
 	process.exit(1);
 }
@@ -407,15 +431,23 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 		capture: StreamEvidenceCapture;
 	}> = [];
 	let capturedSse: { order: number; method: string; path: string } | undefined;
+	const sensitiveParamNames = new Set<string>();
+	const sensitiveParamValues = new Set<string>();
+	const captureSensitiveParams = (url: string, options?: RequestOptions) => {
+		captureSensitiveRequestValues(url, options, sensitiveParamNames, sensitiveParamValues);
+	};
+	const getCapturedSensitiveParams = (): CapturedSensitiveParams => ({
+		names: [...sensitiveParamNames],
+		values: [...sensitiveParamValues],
+	});
 	const reserveCaptureOrder = () => {
 		nextCaptureOrder += 1;
 		return nextCaptureOrder;
 	};
 	const retainRawCapture = (order: number, value: unknown) => {
 		const json = jsonFixtureValue(value);
-		const retained = sanitize ? sanitizeOrdinaryFixture(json) : json;
-		capturedRaw = retained;
-		rawCaptures.push({ order, value: retained });
+		capturedRaw = json;
+		rawCaptures.push({ order, value: json });
 	};
 
 	const http = captureHttpClient(createHttpClient(baseUrl), {
@@ -424,6 +456,7 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 			nextStreamOrdinal += 1;
 			return nextStreamOrdinal;
 		},
+		onSensitiveParams: captureSensitiveParams,
 		onResponse: (order, response) => retainRawCapture(order, response.data),
 		onStreamResponse: (order, ordinal, requestUrl, method, response) => {
 			const resolvedRequestUrl = new URL(requestUrl, baseUrl).toString();
@@ -435,7 +468,12 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 			const capture = captureStreamEvidence(response, {
 				requestUrl: resolvedRequestUrl,
 				request,
-				...(sanitize ? { sanitizeFixture } : {}),
+				...(sanitize
+					? {
+							sanitizeFixture: (value: JsonValue) =>
+								jsonFixtureValue(sanitizeStreamFixture(value, getCapturedSensitiveParams())),
+						}
+					: {}),
 			});
 			streamCaptures.push({ order, request, capture });
 			return capture.response;
@@ -450,6 +488,7 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 	});
 	const stealth = proxyStealthClient(
 		createStealthClient(baseUrl),
+		captureSensitiveParams,
 		(order, response) => retainRawCapture(order, normalizeCapturedStealthResponse(response)),
 		reserveCaptureOrder,
 	);
@@ -519,7 +558,7 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 				streamCaptures.map(async ({ order, request, capture }) => ({
 					order,
 					request,
-					value: await capture.getEvidence(),
+					value: redactStreamEvidence(await capture.getEvidence(), getCapturedSensitiveParams()),
 				})),
 			);
 			const failures = settled.flatMap((result, index) =>
@@ -551,12 +590,85 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 				);
 			return createStreamCaptureEnvelope(timeline);
 		},
+		getCapturedSensitiveParams,
+	};
+}
+
+type CapturedSensitiveParams = {
+	names: readonly string[];
+	values: readonly string[];
+};
+
+function captureSensitiveRequestValues(
+	url: string,
+	options: RequestOptions | undefined,
+	names: Set<string>,
+	values: Set<string>,
+): void {
+	const sensitiveParams = normalizeSensitiveParams(options?.sensitiveParams);
+	if (sensitiveParams === undefined) return;
+	if (!sensitiveParams || typeof sensitiveParams !== "object" || Array.isArray(sensitiveParams)) {
+		throw new TypeError("sensitiveParams must be an object whose values are strings.");
+	}
+
+	const entries = Object.entries(sensitiveParams);
+	for (const [key, value] of entries) {
+		if (typeof value !== "string") {
+			throw new TypeError(`sensitiveParams.${key} must be a string.`);
+		}
+		names.add(key);
+		if (value !== "") values.add(value);
+	}
+
+	let serializedUrl: ReturnType<typeof serializeRequestUrl>;
+	try {
+		const absoluteUrl = new URL(String(url), "http://apifuse.invalid").toString();
+		serializedUrl = serializeRequestUrl(absoluteUrl, options?.params, sensitiveParams);
+	} catch (error) {
+		const structural = redactUrlQueryParams(String(url), [...names]);
+		const safeUrl = redactSensitiveText(structural.redactedUrl, [
+			...values,
+			...structural.sensitiveValues,
+		]);
+		const causeKind = error instanceof Error ? error.name : typeof error;
+		throw new TypeError(`Cannot securely record sensitiveParams for "${safeUrl}" (${causeKind}).`, {
+			cause: redactSensitiveError(
+				error,
+				[...values, ...structural.sensitiveValues],
+				String(url),
+				structural.redactedUrl,
+			),
+		});
+	}
+
+	for (const value of serializedUrl.sensitiveValues) {
+		if (value !== "") values.add(value);
+	}
+}
+
+function snapshotRequestOptions<T extends RequestOptions>(options: T): T {
+	return {
+		...options,
+		...(options.params
+			? {
+					params: Object.fromEntries(
+						Object.entries(options.params).map(([key, value]) => [
+							key,
+							Array.isArray(value) ? [...value] : value,
+						]),
+					),
+				}
+			: {}),
+		...(normalizeSensitiveParams(options.sensitiveParams)
+			? { sensitiveParams: { ...options.sensitiveParams } }
+			: {}),
 	};
 }
 
 type HttpCaptureCallbacks = {
 	reserveOrder(): number;
 	reserveStreamOrdinal(): number;
+	onSensitiveParams(url: string, options?: RequestOptions): void;
 	onResponse(order: number, response: HttpResponse): void;
 	onStreamResponse(
 		order: number,
@@ -577,19 +689,38 @@ function captureHttpClient(client: HttpClient, callbacks: HttpCaptureCallbacks):
 		callbacks.onResponse(order, response);
 		return response;
 	};
+	const captureRequestOptions = (method: PropertyKey, args: unknown[]) => {
+		const invocation = parseHttpRequestInvocation(method, args);
+		const options = invocation ? requestOptionsFromHttpInvocation(invocation) : undefined;
+		if (!invocation || !options) return;
+		const snapshot = snapshotRequestOptions(options);
+		callbacks.onSensitiveParams(String(args[0]), snapshot);
+		replaceRequestOptionsInHttpInvocation(invocation, snapshot);
+	};
 
 	return {
-		request: (...args: Parameters<HttpClient["request"]>) =>
-			captureResponse(callbacks.reserveOrder(), client.request(...args)),
-		get: (...args: Parameters<HttpClient["get"]>) =>
-			captureResponse(callbacks.reserveOrder(), client.get(...args)),
-		post: (...args: Parameters<HttpClient["post"]>) =>
-			captureResponse(callbacks.reserveOrder(), client.post(...args)),
-		put: (...args: Parameters<HttpClient["put"]>) =>
-			captureResponse(callbacks.reserveOrder(), client.put(...args)),
-		delete: (...args: Parameters<HttpClient["delete"]>) =>
-			captureResponse(callbacks.reserveOrder(), client.delete(...args)),
+		request: (...args: Parameters<HttpClient["request"]>) => {
+			captureRequestOptions("request", args);
+			return captureResponse(callbacks.reserveOrder(), client.request(...args));
+		},
+		get: (...args: Parameters<HttpClient["get"]>) => {
+			captureRequestOptions("get", args);
+			return captureResponse(callbacks.reserveOrder(), client.get(...args));
+		},
+		post: (...args: Parameters<HttpClient["post"]>) => {
+			captureRequestOptions("post", args);
+			return captureResponse(callbacks.reserveOrder(), client.post(...args));
+		},
+		put: (...args: Parameters<HttpClient["put"]>) => {
+			captureRequestOptions("put", args);
+			return captureResponse(callbacks.reserveOrder(), client.put(...args));
+		},
+		delete: (...args: Parameters<HttpClient["delete"]>) => {
+			captureRequestOptions("delete", args);
+			return captureResponse(callbacks.reserveOrder(), client.delete(...args));
+		},
 		stream: async (...args: Parameters<HttpClient["stream"]>) => {
+			captureRequestOptions("stream", args);
 			const order = callbacks.reserveOrder();
 			const ordinal = callbacks.reserveStreamOrdinal();
 			const method = (args[1]?.method ?? "GET").toUpperCase();
@@ -597,6 +728,7 @@ function captureHttpClient(client: HttpClient, callbacks: HttpCaptureCallbacks):
 			return callbacks.onStreamResponse(order, ordinal, args[0], method, response);
 		},
 		sse: async (...args: Parameters<HttpClient["sse"]>) => {
+			captureRequestOptions("sse", args);
 			const order = callbacks.reserveOrder();
 			const response = await client.sse(...args);
 			callbacks.onSseResponse(order, args[0], (args[1]?.method ?? "GET").toUpperCase());
@@ -609,35 +741,65 @@ type StealthSession = ReturnType<StealthClient["createSession"]>;
 
 function proxyStealthClient(
 	client: StealthClient,
+	onSensitiveParams: (url: string, options?: RequestOptions) => void,
 	onResponse: (order: number, response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
 	reserveOrder: () => number,
 ): StealthClient {
 	return {
 		fetch: async (...args: Parameters<StealthClient["fetch"]>) => {
 			const order = reserveOrder();
+			if (args[1]) args[1] = snapshotRequestOptions(args[1]);
+			onSensitiveParams(args[0], args[1]);
 			const response = await client.fetch(...args);
+			if (response.url) onSensitiveParams(response.url, args[1]);
 			onResponse(order, response);
 			return response;
 		},
 		createSession: (...args: Parameters<StealthClient["createSession"]>) =>
-			proxyStealthSession(client.createSession(...args), onResponse, reserveOrder),
+			proxyStealthSession(
+				client.createSession(...args),
+				onSensitiveParams,
+				onResponse,
+				reserveOrder,
+			),
 	};
 }
 
 function proxyStealthSession(
 	session: StealthSession,
+	onSensitiveParams: (url: string, options?: RequestOptions) => void,
 	onResponse: (order: number, response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
 	reserveOrder: () => number,
 ): StealthSession {
 	return {
 		fetch: async (...args: Parameters<StealthSession["fetch"]>) => {
 			const order = reserveOrder();
+			if (args[1]) args[1] = snapshotRequestOptions(args[1]);
+			onSensitiveParams(args[0], args[1]);
 			const response = await session.fetch(...args);
+			if (response.url) onSensitiveParams(response.url, args[1]);
 			onResponse(order, response);
 			return response;
 		},
 		cookies: session.cookies,
-		redirects: session.redirects,
+		redirects: {
+			run: async (...args: Parameters<StealthSession["redirects"]["run"]>) => {
+				const order = reserveOrder();
+				args[0] = snapshotRequestOptions(args[0]);
+				onSensitiveParams(args[0].url, args[0]);
+				const callerStopWhen = args[0].stopWhen;
+				args[0].stopWhen = async (hop) => {
+					for (const url of [hop.url, hop.location, hop.nextUrl]) {
+						if (url) onSensitiveParams(url, args[0]);
+					}
+					return callerStopWhen ? await callerStopWhen(hop) : false;
+				};
+				const result = await session.redirects.run(...args);
+				if (result.final.url) onSensitiveParams(result.final.url, args[0]);
+				onResponse(order, result.final);
+				return result;
+			},
+		},
 		close: () => session.close(),
 	};
 }
@@ -650,6 +812,192 @@ function normalizeCapturedStealthResponse(response: Awaited<ReturnType<StealthCl
 	}
 }
 
+function redactStreamEvidence(
+	evidence: Awaited<ReturnType<StreamEvidenceCapture["getEvidence"]>>,
+	sensitiveParams: CapturedSensitiveParams,
+): Awaited<ReturnType<StreamEvidenceCapture["getEvidence"]>> {
+	return parseStreamEvidenceRecord(redactFixture(evidence, sensitiveParams, false));
+}
+
+function sanitizeStreamFixture(value: unknown, sensitiveParams: CapturedSensitiveParams): unknown {
+	if (typeof value === "string") {
+		if (value !== "" && sensitiveParams.values.includes(value)) return REDACTED_QUERY_VALUE;
+		return sanitizeFixtureString(redactFixtureText(value, sensitiveParams));
+	}
+	if (Array.isArray(value)) {
+		return value.map((item) => sanitizeStreamFixture(item, sensitiveParams));
+	}
+	if (!value || typeof value !== "object") {
+		return redactFixture(value, sensitiveParams, false);
+	}
+
+	const result: MutableRecord = Object.create(null) as MutableRecord;
+	for (const [key, entryValue] of Object.entries(value as MutableRecord)) {
+		const redactedKey = sensitiveParams.values.includes(key)
+			? REDACTED_QUERY_VALUE
+			: redactFixtureText(key, sensitiveParams);
+		const uniqueKey = collisionSafeKey(result, redactedKey);
+		result[uniqueKey] =
+			isSensitiveFixtureKey(key) && !sensitiveParams.names.includes(key)
+				? REDACTED_QUERY_VALUE
+				: sanitizeStreamFixture(entryValue, sensitiveParams);
+	}
+	return result;
+}
+
+function redactStreamPreview(
+	bodyPreviewBase64: string,
+	sensitiveParams: CapturedSensitiveParams,
+): { bodyPreviewBase64: string; changed: boolean } {
+	const preview = Buffer.from(bodyPreviewBase64, "base64");
+	if (preview.byteLength === 0) return { bodyPreviewBase64, changed: false };
+
+	const text = new TextDecoder().decode(preview);
+	let redactedText = redactFixtureText(text, sensitiveParams);
+	const trimmed = text.trimEnd();
+	try {
+		const parsed = JSON.parse(trimmed) as unknown;
+		const structurallyRedacted = JSON.stringify(redactFixture(parsed, sensitiveParams, false));
+		if (structurallyRedacted !== JSON.stringify(parsed)) redactedText = structurallyRedacted;
+	} catch {
+		// Non-JSON previews still use the shared free-text sensitive-value policy.
+	}
+	if (redactedText === text) return { bodyPreviewBase64, changed: false };
+
+	const fitted = Buffer.alloc(preview.byteLength, 0x20);
+	let redactedBytes = Buffer.from(redactedText);
+	if (redactedBytes.byteLength > fitted.byteLength) {
+		redactedBytes = Buffer.from(REDACTED_QUERY_VALUE);
+	}
+	redactedBytes.copy(fitted, 0, 0, Math.min(redactedBytes.byteLength, fitted.byteLength));
+	return { bodyPreviewBase64: fitted.toString("base64"), changed: true };
+}
+
+function redactFixture(
+	value: unknown,
+	sensitiveParams: CapturedSensitiveParams,
+	sanitizeCommonFields: boolean,
+): unknown {
+	if (typeof value === "string") {
+		if (value !== "" && sensitiveParams.values.includes(value)) return REDACTED_QUERY_VALUE;
+		return redactFixtureText(value, sensitiveParams);
+	}
+
+	if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+		return sensitiveParams.values.includes(String(value)) ? REDACTED_QUERY_VALUE : value;
+	}
+
+	if (Array.isArray(value)) {
+		return value.map((item) => redactFixture(item, sensitiveParams, sanitizeCommonFields));
+	}
+
+	if (!value || typeof value !== "object") return value;
+
+	const result: MutableRecord = Object.create(null) as MutableRecord;
+	for (const [key, entryValue] of Object.entries(value as MutableRecord)) {
+		const redactedKey = sensitiveParams.values.includes(key)
+			? REDACTED_QUERY_VALUE
+			: redactFixtureText(key, sensitiveParams);
+		const uniqueKey = collisionSafeKey(result, redactedKey);
+		result[uniqueKey] =
+			sanitizeCommonFields &&
+			(isSensitiveKey(key) || isSensitiveFixtureKey(key)) &&
+			!sensitiveParams.names.includes(key)
+				? REDACTED_QUERY_VALUE
+				: redactFixture(entryValue, sensitiveParams, sanitizeCommonFields);
+	}
+	const record = value as MutableRecord;
+	if (record.__apifuse_stream__ === true && typeof record.body_preview_base64 === "string") {
+		const preview = redactStreamPreview(record.body_preview_base64, sensitiveParams);
+		result.body_preview_base64 = preview.bodyPreviewBase64;
+		if (preview.changed) result.preview_sanitized = true;
+	}
+	return result;
+}
+
+function redactFixtureText(text: string, sensitiveParams: CapturedSensitiveParams): string {
+	// Shared free-text policy: long values are unconditional substrings; values
+	// shorter than four characters require token boundaries. Exact scalar echoes
+	// and declared query-key positions are structurally redacted for every length.
+	let redacted = redactSensitiveText(text, sensitiveParams.values);
+	for (const name of sensitiveParams.names) {
+		let componentEncodedName = name;
+		try {
+			componentEncodedName = encodeURIComponent(name);
+		} catch {
+			// Lone surrogates remain covered by the raw and form-encoded variants.
+		}
+		const keyVariants = new Set([
+			name,
+			componentEncodedName,
+			new URLSearchParams({ [name]: "" }).toString().slice(0, -1),
+		]);
+		for (const key of keyVariants) {
+			const escapedKey = key.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+			const queryValue = new RegExp(`(^|[?&])(${escapedKey}=)[^&#\\s"]*`, "g");
+			redacted = redacted.replace(queryValue, (_match, prefix, assignment) => {
+				return `${prefix}${assignment}${REDACTED_QUERY_VALUE}`;
+			});
+		}
+	}
+	return redacted;
+}
+
+function discoverSensitiveQueryValues(
+	value: unknown,
+	sensitiveParams: CapturedSensitiveParams,
+): CapturedSensitiveParams {
+	const values = new Set(sensitiveParams.values);
+	const absoluteUrl = /\b[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s<>"']+/g;
+	const discoverFromUrl = (url: string) => {
+		for (const discovered of redactUrlQueryParams(url, sensitiveParams.names).sensitiveValues) {
+			if (discovered !== "" && discovered !== REDACTED_QUERY_VALUE) values.add(discovered);
+		}
+	};
+	const visitText = (text: string) => {
+		if (!/\s/.test(text)) {
+			try {
+				new URL(text, "http://apifuse.invalid");
+				discoverFromUrl(text);
+				return;
+			} catch {
+				// Fall through to extracting absolute URL spans from prose.
+			}
+		}
+		for (const match of text.matchAll(absoluteUrl)) {
+			try {
+				new URL(match[0]);
+				discoverFromUrl(match[0]);
+			} catch {
+				// Ignore URI-like prose that is not a parseable URL.
+			}
+		}
+	};
+	const visit = (current: unknown): void => {
+		if (typeof current === "string") {
+			visitText(current);
+			return;
+		}
+		if (Array.isArray(current)) {
+			for (const item of current) visit(item);
+			return;
+		}
+		if (!current || typeof current !== "object") return;
+		for (const [key, entryValue] of Object.entries(current as MutableRecord)) {
+			visitText(key);
+			visit(entryValue);
+		}
+	};
+	visit(value);
+	return { names: sensitiveParams.names, values: [...values] };
+}
+
+function collisionSafeKey(record: MutableRecord, preferredKey: string): string {
+	if (!(preferredKey in record)) return preferredKey;
+	let suffix = 2;
+	while (`${preferredKey}#${suffix}` in record) suffix += 1;
+	return `${preferredKey}#${suffix}`;
+}
 export async function prepareFixturePayload(
 	fixturePath: string,
 	payload: unknown,

@@ -446,6 +446,44 @@ Note the asymmetry: the gate treats whitespace-only values as missing, but
 `ctx.env.get()` still returns the raw value to handlers — trim at the point of
 use if the upstream is whitespace-sensitive.
 
+### Credentials forced into query parameters
+
+Prefer an authorization header or request body whenever the upstream supports
+one. When the upstream requires a credential in the URL query (for example
+`serviceKey`, `confmKey`, or `crtfc_key`), use `sensitiveParams`:
+
+```ts
+const response = await ctx.http.get("/openapi/lookup", {
+	params: { pageNo: 1, numOfRows: 100 },
+	sensitiveParams: {
+		serviceKey: ctx.env.get("APIFUSE__PROVIDER__EXAMPLE__SERVICE_KEY")!,
+	},
+});
+```
+
+`sensitiveParams` is merged into the outgoing query like `params`, while its
+values are redacted from SDK transport errors, traces, and `apifuse record`
+fixtures. Do not put query credentials in `params`, and do not hand-build a URL
+containing a key; those paths cannot declare which query values are secret.
+
+#### Residual risks
+
+Redaction is unconditional in structural positions (declared query keys and
+exact scalar fixture/error fields) for values of every length. In unstructured
+free text, values of four or more characters are replaced as substrings; shorter
+values are replaced only at token boundaries to avoid corrupting unrelated text
+(for example, a secret `api` must not rewrite `rapid`). The residual risk is that
+a sub-four-character secret embedded directly inside a larger alphanumeric token
+can remain in free text. Prefer a higher-entropy credential, or a header/body
+credential channel, whenever the upstream permits it. An empty
+`sensitiveParams: {}` is treated exactly as if the option were omitted.
+
+For `session.redirects.run()`, returned hop URLs are diagnostic metadata and
+therefore keep declared query values and common response-only credential keys
+redacted. If a login flow must consume a rotated credential from `Location`,
+inspect it inside `stopWhen`; that callback receives the real hop while callback
+failures are sanitized before propagation.
+
 ### Public local debugging checklist
 
 - Operation smoke requests use the provider server envelope:

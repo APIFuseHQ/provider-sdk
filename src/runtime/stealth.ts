@@ -50,7 +50,15 @@ import {
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
-import { appendQueryParams } from "./request-options.js";
+import {
+	isSensitiveKey,
+	redactSensitiveError,
+	redactSensitiveRequestError,
+	redactSensitiveText,
+	redactUrlQueryParams,
+	normalizeSensitiveParams,
+	serializeRequestUrl,
+} from "./request-options.js";
 
 const DEFAULT_PROFILE = "chrome-146";
 
@@ -64,6 +72,14 @@ const PROXY_CONNECT_FAILURE_BODY_PATTERN =
 const PROXY_AUTH_DIAGNOSTIC_URL = "http://example.com/";
 const PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS = 5_000;
 const STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES = [PROXY_CONNECT_FAILURE_CODE] as const;
+
+function sensitiveQueryParamNames(url: string): string[] {
+	const queryStart = url.indexOf("?");
+	if (queryStart === -1) return [];
+	const fragmentStart = url.indexOf("#", queryStart);
+	const query = url.slice(queryStart + 1, fragmentStart === -1 ? undefined : fragmentStart);
+	return [...new URLSearchParams(query).keys()].filter(isSensitiveKey);
+}
 
 export type StealthClientOptions = ProxyResolutionOptions & {
 	warn?: (message: string) => void;
@@ -805,22 +821,29 @@ function createSessionFetcher(
 
 	const session: StealthSession = {
 		async fetch(url, options: StealthFetchOptions = {}) {
-			const method = normalizeMethod(options.method ?? "GET");
-			const hasExplicitRetryPolicy = options.retry !== undefined;
-			const stealthRetryOptions =
-				normalizeProxyTransportRetryOptions(options.retry, {
-					extraErrorCodes: STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES,
-					label: "Stealth",
-				}) ??
-				(hasExplicitRetryPolicy
-					? undefined
-					: createDefaultProxyTransportRetryOptions({
+			const { hasExplicitRetryPolicy, method, stealthRetryOptions } = (() => {
+				try {
+					const method = normalizeMethod(options.method ?? "GET");
+					const hasExplicitRetryPolicy = options.retry !== undefined;
+					const stealthRetryOptions =
+						normalizeProxyTransportRetryOptions(options.retry, {
 							extraErrorCodes: STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES,
 							label: "Stealth",
-						}));
-			if (stealthRetryOptions) {
-				validateUnsafeProxyTransportRetryMethods(stealthRetryOptions, "Stealth");
-			}
+						}) ??
+						(hasExplicitRetryPolicy
+							? undefined
+							: createDefaultProxyTransportRetryOptions({
+									extraErrorCodes: STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES,
+									label: "Stealth",
+								}));
+					if (stealthRetryOptions) {
+						validateUnsafeProxyTransportRetryMethods(stealthRetryOptions, "Stealth");
+					}
+					return { hasExplicitRetryPolicy, method, stealthRetryOptions };
+				} catch (error) {
+					throw redactSensitiveRequestError(error, url, options.sensitiveParams);
+				}
+			})();
 			const hasPolicyProxy = isPolicyManagedProxy(clientOptions);
 			const usesPolicyAllocator = hasPolicyProxy && !options.proxy && !clientOptions.proxy;
 			const retryAttemptCap = Math.max(1, stealthRetryOptions?.attempts ?? 1);
@@ -865,6 +888,11 @@ function createSessionFetcher(
 				for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
 					let proxy: string | undefined;
 					let attemptProxy: ResolvedAttemptProxy | undefined;
+					// Reuse the exact serialization used by this outbound attempt in its catch path.
+					let serializedUrl: ReturnType<typeof serializeRequestUrl> | undefined;
+					let fallbackSensitiveValues: readonly string[] = [];
+					let fallbackRequestUrl: string | undefined;
+					let fallbackRedactedUrl: string | undefined;
 					const attemptStartedAt = Date.now();
 					let attemptRecorded = false;
 					const recordProxyAttempt = (
@@ -888,6 +916,16 @@ function createSessionFetcher(
 						});
 					};
 					try {
+						const sensitiveParams = normalizeSensitiveParams(options.sensitiveParams);
+						const structural = redactUrlQueryParams(url, Object.keys(sensitiveParams ?? {}));
+						fallbackSensitiveValues = [
+							...new Set([
+								...Object.values(sensitiveParams ?? {}).map(String),
+								...structural.sensitiveValues,
+							]),
+						].filter((value) => value !== "");
+						fallbackRequestUrl = url;
+						fallbackRedactedUrl = structural.redactedUrl;
 						assertNoUnsupportedFingerprintOverrides(options);
 						attemptProxy = await resolveRequestProxy(options, attempt, refreshAttempt);
 						proxy = attemptProxy.url;
@@ -907,7 +945,12 @@ function createSessionFetcher(
 								(!hasPolicyProxy && proxy && clientOptions.proxyStealth?.insecureSkipVerify),
 						);
 						const profileName = options.profile ?? defaultProfile;
-						const requestUrl = appendQueryParams(resolveUrl(baseUrl, url), options.params);
+						serializedUrl = serializeRequestUrl(
+							resolveUrl(baseUrl, url),
+							options.params,
+							sensitiveParams,
+						);
+						const { requestUrl } = serializedUrl;
 						const headers = { ...(options.headers ?? {}) };
 						if (!hasHeader(headers, "Cookie")) {
 							const cookieHeader = cookieJar.toHeader(requestUrl);
@@ -974,16 +1017,36 @@ function createSessionFetcher(
 						recordProxyAttempt("ok", undefined, response.status);
 						return normalized;
 					} catch (error) {
-						const normalizedError = normalizeStealthTransportError(error);
+						const sensitiveValues = serializedUrl?.sensitiveValues ?? fallbackSensitiveValues;
+						let normalizedError: TransportError;
+						try {
+							normalizedError = normalizeStealthTransportError(error);
+						} catch (normalizationError) {
+							throw redactSensitiveError(
+								normalizationError,
+								sensitiveValues,
+								serializedUrl?.requestUrl ?? fallbackRequestUrl,
+								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
+							);
+						}
+						const retryErrorCode = proxyAttemptErrorCode(normalizedError);
+						const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);
+						const runProxyAuthDiagnostic = shouldRunProxyAuthDiagnostic(normalizedError);
+						normalizedError = redactSensitiveError(
+							normalizedError,
+							sensitiveValues,
+							serializedUrl?.requestUrl ?? fallbackRequestUrl,
+							serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
+						);
 						recordProxyAttempt(
 							"error",
 							proxyAttemptErrorCode(normalizedError),
 							proxyAttemptStatus(normalizedError),
 						);
 						lastError = normalizedError;
-						if (proxy && rotatesRegistryChain && isProxyPoolRefreshableError(normalizedError)) {
+						if (proxy && rotatesRegistryChain && refreshableProxyError) {
 							stalePoolError = normalizedError;
-							if (shouldRunProxyAuthDiagnostic(normalizedError)) {
+							if (runProxyAuthDiagnostic) {
 								stalePoolDiagnosticProxy = proxy;
 							}
 							if (attempt + 1 < maxAttempts) {
@@ -1014,7 +1077,7 @@ function createSessionFetcher(
 						if (
 							attempt + 1 < transportRetryCap &&
 							shouldRetryProxyTransportAttempt({
-								error: normalizedError,
+								error: { code: retryErrorCode },
 								explicitRetry: hasExplicitRetryPolicy,
 								method,
 								options: stealthRetryOptions,
@@ -1084,25 +1147,99 @@ function createSessionFetcher(
 					options.maxHops === undefined || !Number.isFinite(options.maxHops)
 						? 10
 						: Math.max(0, Math.floor(options.maxHops));
+				const {
+					url: _url,
+					maxHops: _maxHops,
+					stopWhen,
+					params,
+					sensitiveParams,
+					...fetchOptions
+				} = options;
 				const hops: StealthRedirectHop[] = [];
-				let currentUrl = resolveUrl(baseUrl, options.url);
 				let method = normalizeMethod(options.method ?? "GET");
 				let body = options.body;
 				let response: StealthResponse | undefined;
 				const visitedRequests = new Set<string>();
-
-				const { url: _url, maxHops: _maxHops, stopWhen, params, ...fetchOptions } = options;
+				const initialParams = params
+					? Object.fromEntries(
+							Object.entries(params).map(([key, value]) => [
+								key,
+								Array.isArray(value) ? [...value] : value,
+							]),
+						)
+					: undefined;
+				const normalizedSensitiveParams = normalizeSensitiveParams(sensitiveParams);
+				const initialSensitiveParams = normalizedSensitiveParams
+					? { ...normalizedSensitiveParams }
+					: undefined;
+				const sensitiveParamNames = initialSensitiveParams
+					? Object.keys(initialSensitiveParams)
+					: [];
+				const callerStructural = redactUrlQueryParams(options.url, sensitiveParamNames);
+				const sensitiveValues = new Set(
+					[
+						...Object.values(initialSensitiveParams ?? {}),
+						...callerStructural.sensitiveValues,
+					].filter((value) => value !== ""),
+				);
+				const redactRedirectUrl = (value: string): string => {
+					const structural = redactUrlQueryParams(value, [
+						...new Set([...sensitiveParamNames, ...sensitiveQueryParamNames(value)]),
+					]);
+					for (const sensitiveValue of structural.sensitiveValues) {
+						sensitiveValues.add(sensitiveValue);
+					}
+					return redactSensitiveText(structural.redactedUrl, [...sensitiveValues]);
+				};
+				let currentUrl: string;
+				let initialUrl: ReturnType<typeof serializeRequestUrl>;
+				try {
+					currentUrl = resolveUrl(baseUrl, options.url);
+					redactRedirectUrl(currentUrl);
+					initialUrl = serializeRequestUrl(currentUrl, initialParams, initialSensitiveParams);
+					for (const value of initialUrl.sensitiveValues) {
+						if (value !== "") sensitiveValues.add(value);
+					}
+				} catch (error) {
+					throw redactSensitiveError(
+						error,
+						[...sensitiveValues],
+						options.url,
+						redactRedirectUrl(options.url),
+					);
+				}
 
 				for (let hopIndex = 0; hopIndex <= maxHops; hopIndex += 1) {
-					visitedRequests.add(`${method} ${currentUrl}`);
-					response = await session.fetch(currentUrl, {
-						...fetchOptions,
-						body,
-						method,
-						...(hopIndex === 0 && params ? { params } : {}),
-						redirect: "manual",
-						throwOnHttpError: false,
-					});
+					const outboundUrl =
+						hopIndex === 0 ? initialUrl.requestUrl : serializeRequestUrl(currentUrl).requestUrl;
+					// Preserve params-only loop bookkeeping from before sensitiveParams:
+					// the first visited key is the caller's resolved URL, not its expanded query.
+					const visitedUrl = hopIndex === 0 && !initialSensitiveParams ? currentUrl : outboundUrl;
+					visitedRequests.add(`${method} ${visitedUrl}`);
+					try {
+						response = await session.fetch(currentUrl, {
+							...fetchOptions,
+							body,
+							method,
+							...(hopIndex === 0 && initialParams ? { params: initialParams } : {}),
+							...(hopIndex === 0 && initialSensitiveParams
+								? { sensitiveParams: initialSensitiveParams }
+								: {}),
+							redirect: "manual",
+							throwOnHttpError: false,
+						});
+					} catch (error) {
+						throw redactSensitiveError(
+							error,
+							[...sensitiveValues],
+							outboundUrl,
+							redactRedirectUrl(outboundUrl),
+						);
+					}
+					// StealthResponse.url is programmatic metadata and remains raw. Only the
+					// redirect hop emitted below is a diagnostic surface.
+					const responseUrl =
+						response.url ?? (hopIndex === 0 && initialSensitiveParams ? outboundUrl : currentUrl);
 
 					if (!isRedirectStatus(response.status)) {
 						return {
@@ -1115,19 +1252,52 @@ function createSessionFetcher(
 					}
 
 					const location = locationHeader(response.headers);
-					const nextUrl = location
-						? new URL(location, response.url ?? currentUrl).toString()
-						: undefined;
-					const hop: StealthRedirectHop = {
-						url: response.url ?? currentUrl,
+					const redactedResponseUrl = redactRedirectUrl(responseUrl);
+					const redactedLocation = location ? redactRedirectUrl(location) : undefined;
+					let nextUrl: string | undefined;
+					try {
+						nextUrl = location ? new URL(location, responseUrl).toString() : undefined;
+					} catch (error) {
+						throw redactSensitiveError(error, [...sensitiveValues], location, redactedLocation);
+					}
+					const realHop: StealthRedirectHop = {
+						url: responseUrl,
 						status: response.status,
 						method,
 						...(location ? { location } : {}),
 						...(nextUrl ? { nextUrl } : {}),
 					};
+					const hop: StealthRedirectHop = {
+						...realHop,
+						url: redactedResponseUrl,
+						...(redactedLocation ? { location: redactedLocation } : {}),
+						...(nextUrl ? { nextUrl: redactRedirectUrl(nextUrl) } : {}),
+					};
 					hops.push(hop);
 
-					if (stopWhen && (await stopWhen(hop))) {
+					let shouldStop = false;
+					if (stopWhen) {
+						try {
+							shouldStop = await stopWhen(realHop);
+						} catch (error) {
+							let sanitizedError: unknown = error;
+							for (const [rawUrl, safeUrl] of [
+								[responseUrl, redactedResponseUrl],
+								[location, redactedLocation],
+								[nextUrl, nextUrl ? redactRedirectUrl(nextUrl) : undefined],
+							] as const) {
+								if (!rawUrl || !safeUrl) continue;
+								sanitizedError = redactSensitiveError(
+									sanitizedError,
+									[...sensitiveValues],
+									rawUrl,
+									safeUrl,
+								);
+							}
+							throw sanitizedError;
+						}
+					}
+					if (shouldStop) {
 						return {
 							final: response,
 							hops,
