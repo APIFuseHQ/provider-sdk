@@ -25,7 +25,11 @@ import {
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import {
 	REDACTED_QUERY_VALUE,
+	normalizeSensitiveParams,
+	redactSensitiveError,
 	redactSensitiveText,
+	redactUrlQueryParams,
+	replaceRequestOptionsInHttpInvocation,
 	requestOptionsFromHttpInvocation,
 	serializeRequestUrl,
 } from "../src/runtime/request-options.js";
@@ -82,8 +86,11 @@ export async function main() {
 
 		const sensitiveParams = capture.getCapturedSensitiveParams();
 		const fixturePath = resolve(location.rootDir, "__fixtures__", "raw.json");
+		const mergedPayload = await prepareFixturePayload(fixturePath, captured, args.append);
+		// Redact after append history has been merged. A credential moved from
+		// ordinary params to sensitiveParams must also be removed from older entries.
+		const nextPayload = redactFixture(mergedPayload, sensitiveParams, args.sanitize);
 		const redactedCapture = redactFixture(captured, sensitiveParams, args.sanitize);
-		const nextPayload = await prepareFixturePayload(fixturePath, redactedCapture, args.append);
 
 		await mkdir(dirname(fixturePath), { recursive: true });
 		await writeFile(fixturePath, `${JSON.stringify(nextPayload, null, 2)}\n`);
@@ -410,7 +417,7 @@ function captureSensitiveRequestValues(
 	names: Set<string>,
 	values: Set<string>,
 ): void {
-	const sensitiveParams = options?.sensitiveParams;
+	const sensitiveParams = normalizeSensitiveParams(options?.sensitiveParams);
 	if (sensitiveParams === undefined) return;
 	if (!sensitiveParams || typeof sensitiveParams !== "object" || Array.isArray(sensitiveParams)) {
 		throw new TypeError("sensitiveParams must be an object whose values are strings.");
@@ -422,21 +429,31 @@ function captureSensitiveRequestValues(
 			throw new TypeError(`sensitiveParams.${key} must be a string.`);
 		}
 		names.add(key);
-		values.add(value);
+		if (value !== "") values.add(value);
 	}
 
 	let serializedUrl: ReturnType<typeof serializeRequestUrl>;
 	try {
 		const absoluteUrl = new URL(String(url), "http://apifuse.invalid").toString();
 		serializedUrl = serializeRequestUrl(absoluteUrl, options.params, sensitiveParams);
-	} catch {
-		throw new TypeError("Cannot securely record sensitiveParams for an invalid request URL.");
+	} catch (error) {
+		const structural = redactUrlQueryParams(String(url), [...names]);
+		throw new TypeError("Cannot securely record sensitiveParams for an invalid request URL.", {
+			cause: redactSensitiveError(
+				error,
+				[...values, ...structural.sensitiveValues],
+				String(url),
+				structural.redactedUrl,
+			),
+		});
 	}
 
-	for (const value of serializedUrl.sensitiveValues) values.add(value);
+	for (const value of serializedUrl.sensitiveValues) {
+		if (value !== "") values.add(value);
+	}
 }
 
-function snapshotRequestOptions(options: RequestOptions): RequestOptions {
+function snapshotRequestOptions<T extends RequestOptions>(options: T): T {
 	return {
 		...options,
 		...(options.params
@@ -449,7 +466,9 @@ function snapshotRequestOptions(options: RequestOptions): RequestOptions {
 					),
 				}
 			: {}),
-		...(options.sensitiveParams ? { sensitiveParams: { ...options.sensitiveParams } } : {}),
+		...(normalizeSensitiveParams(options.sensitiveParams)
+			? { sensitiveParams: { ...options.sensitiveParams } }
+			: {}),
 	};
 }
 
@@ -471,8 +490,7 @@ function proxyHttpClient(
 				if (options) {
 					const snapshot = snapshotRequestOptions(options);
 					onSensitiveParams(String(args[0]), snapshot);
-					const optionsIndex = prop === "post" || prop === "put" ? 2 : 1;
-					args[optionsIndex] = snapshot;
+					replaceRequestOptionsInHttpInvocation(prop, args, snapshot);
 				}
 				const response = await value.apply(target, args);
 				onResponse(response);
@@ -517,8 +535,15 @@ function proxyStealthSession(
 		},
 		redirects: {
 			run: async (...args: Parameters<StealthSession["redirects"]["run"]>) => {
-				args[0] = snapshotRequestOptions(args[0]) as (typeof args)[0];
+				args[0] = snapshotRequestOptions(args[0]);
 				onSensitiveParams(args[0].url, args[0]);
+				const callerStopWhen = args[0].stopWhen;
+				args[0].stopWhen = async (hop) => {
+					for (const url of [hop.url, hop.location, hop.nextUrl]) {
+						if (url) onSensitiveParams(url, args[0]);
+					}
+					return callerStopWhen ? await callerStopWhen(hop) : false;
+				};
 				const result = await session.redirects.run(...args);
 				onResponse(result.final);
 				return result;
@@ -542,8 +567,12 @@ function redactFixture(
 	sanitizeCommonFields: boolean,
 ): unknown {
 	if (typeof value === "string") {
-		if (sensitiveParams.values.includes(value)) return REDACTED_QUERY_VALUE;
+		if (value !== "" && sensitiveParams.values.includes(value)) return REDACTED_QUERY_VALUE;
 		return redactFixtureText(value, sensitiveParams);
+	}
+
+	if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") {
+		return sensitiveParams.values.includes(String(value)) ? REDACTED_QUERY_VALUE : value;
 	}
 
 	if (Array.isArray(value)) {
@@ -567,14 +596,10 @@ function redactFixture(
 }
 
 function redactFixtureText(text: string, sensitiveParams: CapturedSensitiveParams): string {
-	// Recorder payloads use token boundaries for every declared value, regardless
-	// of length. This redacts exact and delimited echoes (including prefix-api-suffix)
-	// without corrupting unrelated text such as "rapid" or "contest". A secret
-	// concatenated directly to letters or digits can remain ambiguous; query keys
-	// below and exact scalar matching above are the structural backstops.
-	let redacted = redactSensitiveText(text, sensitiveParams.values, undefined, undefined, {
-		requireTokenBoundary: true,
-	});
+	// Shared free-text policy: long values are unconditional substrings; values
+	// shorter than four characters require token boundaries. Exact scalar echoes
+	// and declared query-key positions are structurally redacted for every length.
+	let redacted = redactSensitiveText(text, sensitiveParams.values);
 	for (const name of sensitiveParams.names) {
 		const keyVariants = new Set([
 			name,

@@ -466,6 +466,21 @@ values are redacted from SDK transport errors, traces, and `apifuse record`
 fixtures. Do not put query credentials in `params`, and do not hand-build a URL
 containing a key; those paths cannot declare which query values are secret.
 
+Redaction is unconditional in structural positions (declared query keys and
+exact scalar fixture/error fields) for values of every length. In unstructured
+free text, values of four or more characters are replaced as substrings; shorter
+values are replaced only at token boundaries to avoid corrupting unrelated text
+(for example, a secret `api` must not rewrite `rapid`). The residual risk is that
+a sub-four-character secret embedded directly inside a larger alphanumeric token
+can remain in free text. Prefer a higher-entropy credential, or a header/body
+credential channel, whenever the upstream permits it. An empty
+`sensitiveParams: {}` is treated exactly as if the option were omitted.
+
+For `session.redirects.run()`, returned hop URLs are diagnostic metadata and
+therefore keep declared query values redacted. If a login flow must consume a
+rotated credential from `Location`, inspect it inside `stopWhen`; that callback
+receives the real hop while callback failures are sanitized before propagation.
+
 ### Public local debugging checklist
 
 - Operation smoke requests use the provider server envelope:

@@ -54,6 +54,7 @@ import {
 	redactSensitiveError,
 	redactSensitiveText,
 	redactUrlQueryParams,
+	normalizeSensitiveParams,
 	serializeRequestUrl,
 } from "./request-options.js";
 
@@ -873,6 +874,8 @@ function createSessionFetcher(
 					// Reuse the exact serialization used by this outbound attempt in its catch path.
 					let serializedUrl: ReturnType<typeof serializeRequestUrl> | undefined;
 					let fallbackSensitiveValues: readonly string[] = [];
+					let fallbackRequestUrl: string | undefined;
+					let fallbackRedactedUrl: string | undefined;
 					const attemptStartedAt = Date.now();
 					let attemptRecorded = false;
 					const recordProxyAttempt = (
@@ -896,7 +899,16 @@ function createSessionFetcher(
 						});
 					};
 					try {
-						fallbackSensitiveValues = Object.values(options.sensitiveParams ?? {}).map(String);
+						const sensitiveParams = normalizeSensitiveParams(options.sensitiveParams);
+						const structural = redactUrlQueryParams(url, Object.keys(sensitiveParams ?? {}));
+						fallbackSensitiveValues = [
+							...new Set([
+								...Object.values(sensitiveParams ?? {}).map(String),
+								...structural.sensitiveValues,
+							]),
+						].filter((value) => value !== "");
+						fallbackRequestUrl = url;
+						fallbackRedactedUrl = structural.redactedUrl;
 						assertNoUnsupportedFingerprintOverrides(options);
 						attemptProxy = await resolveRequestProxy(options, attempt, refreshAttempt);
 						proxy = attemptProxy.url;
@@ -919,7 +931,7 @@ function createSessionFetcher(
 						serializedUrl = serializeRequestUrl(
 							resolveUrl(baseUrl, url),
 							options.params,
-							options.sensitiveParams,
+							sensitiveParams,
 						);
 						const { requestUrl } = serializedUrl;
 						const headers = { ...(options.headers ?? {}) };
@@ -996,16 +1008,16 @@ function createSessionFetcher(
 							throw redactSensitiveError(
 								normalizationError,
 								sensitiveValues,
-								serializedUrl?.requestUrl,
-								serializedUrl?.redactedUrl,
+								serializedUrl?.requestUrl ?? fallbackRequestUrl,
+								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
 							);
 						}
 						normalizedError = redactSensitiveError(
 							normalizedError,
 							sensitiveValues,
-							serializedUrl?.requestUrl,
-							serializedUrl?.redactedUrl,
-						);
+							serializedUrl?.requestUrl ?? fallbackRequestUrl,
+							serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
+						) as TransportError;
 						recordProxyAttempt(
 							"error",
 							proxyAttemptErrorCode(normalizedError),
@@ -1115,13 +1127,6 @@ function createSessionFetcher(
 					options.maxHops === undefined || !Number.isFinite(options.maxHops)
 						? 10
 						: Math.max(0, Math.floor(options.maxHops));
-				const hops: StealthRedirectHop[] = [];
-				let currentUrl = resolveUrl(baseUrl, options.url);
-				let method = normalizeMethod(options.method ?? "GET");
-				let body = options.body;
-				let response: StealthResponse | undefined;
-				const visitedRequests = new Set<string>();
-
 				const {
 					url: _url,
 					maxHops: _maxHops,
@@ -1130,6 +1135,11 @@ function createSessionFetcher(
 					sensitiveParams,
 					...fetchOptions
 				} = options;
+				const hops: StealthRedirectHop[] = [];
+				let method = normalizeMethod(options.method ?? "GET");
+				let body = options.body;
+				let response: StealthResponse | undefined;
+				const visitedRequests = new Set<string>();
 				const initialParams = params
 					? Object.fromEntries(
 							Object.entries(params).map(([key, value]) => [
@@ -1138,12 +1148,20 @@ function createSessionFetcher(
 							]),
 						)
 					: undefined;
-				const initialSensitiveParams = sensitiveParams ? { ...sensitiveParams } : undefined;
-				const initialUrl = serializeRequestUrl(currentUrl, initialParams, initialSensitiveParams);
+				const normalizedSensitiveParams = normalizeSensitiveParams(sensitiveParams);
+				const initialSensitiveParams = normalizedSensitiveParams
+					? { ...normalizedSensitiveParams }
+					: undefined;
 				const sensitiveParamNames = initialSensitiveParams
 					? Object.keys(initialSensitiveParams)
 					: [];
-				const sensitiveValues = new Set(initialUrl.sensitiveValues);
+				const callerStructural = redactUrlQueryParams(options.url, sensitiveParamNames);
+				const sensitiveValues = new Set(
+					[
+						...Object.values(initialSensitiveParams ?? {}),
+						...callerStructural.sensitiveValues,
+					].filter((value) => value !== ""),
+				);
 				const redactRedirectUrl = (value: string): string => {
 					const structural = redactUrlQueryParams(value, sensitiveParamNames);
 					for (const sensitiveValue of structural.sensitiveValues) {
@@ -1151,6 +1169,23 @@ function createSessionFetcher(
 					}
 					return redactSensitiveText(structural.redactedUrl, [...sensitiveValues]);
 				};
+				let currentUrl: string;
+				let initialUrl: ReturnType<typeof serializeRequestUrl>;
+				try {
+					currentUrl = resolveUrl(baseUrl, options.url);
+					redactRedirectUrl(currentUrl);
+					initialUrl = serializeRequestUrl(currentUrl, initialParams, initialSensitiveParams);
+					for (const value of initialUrl.sensitiveValues) {
+						if (value !== "") sensitiveValues.add(value);
+					}
+				} catch (error) {
+					throw redactSensitiveError(
+						error,
+						[...sensitiveValues],
+						options.url,
+						redactRedirectUrl(options.url),
+					);
+				}
 
 				for (let hopIndex = 0; hopIndex <= maxHops; hopIndex += 1) {
 					const outboundUrl =
@@ -1217,7 +1252,29 @@ function createSessionFetcher(
 					};
 					hops.push(hop);
 
-					if (stopWhen && (await stopWhen(realHop))) {
+					let shouldStop = false;
+					if (stopWhen) {
+						try {
+							shouldStop = await stopWhen(realHop);
+						} catch (error) {
+							let sanitizedError: unknown = error;
+							for (const [rawUrl, safeUrl] of [
+								[responseUrl, redactedResponseUrl],
+								[location, redactedLocation],
+								[nextUrl, nextUrl ? redactRedirectUrl(nextUrl) : undefined],
+							] as const) {
+								if (!rawUrl || !safeUrl) continue;
+								sanitizedError = redactSensitiveError(
+									sanitizedError,
+									[...sensitiveValues],
+									rawUrl,
+									safeUrl,
+								);
+							}
+							throw sanitizedError;
+						}
+					}
+					if (shouldStop) {
 						return {
 							final: response,
 							hops,

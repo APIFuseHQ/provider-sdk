@@ -1409,6 +1409,28 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
 	});
 
+	it("treats empty sensitiveParams as absent for redirect loop detection", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 307,
+			body: "",
+			headers: { location: "/charge" },
+			url: "https://example.com/charge?attempt=1",
+		});
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+
+		const result = await session.redirects.run({
+			url: "/charge",
+			method: "POST",
+			body: "payment",
+			params: { attempt: 1 },
+			sensitiveParams: {},
+		});
+
+		expect(result.reason).toBe("loop");
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
+	});
+
 	it("redirects.run applies sensitiveParams only to the initial request", async () => {
 		mockStealthState.queuedResponses.push(
 			{
@@ -1590,6 +1612,56 @@ describe("createStealthClient", () => {
 		expect(String(thrown)).toContain("[REDACTED]");
 	});
 
+	it("redirects.run redacts malformed initial URLs before resolution", async () => {
+		const secret = "initial-url-secret";
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient().createSession();
+		let thrown: unknown;
+		try {
+			await session.redirects.run({
+				url: `https://[bad]/?serviceKey=${secret}`,
+				sensitiveParams: { serviceKey: "replacement-secret" },
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(Error);
+		const serialized = JSON.stringify(thrown);
+		expect(String(thrown)).not.toContain(secret);
+		expect((thrown as Error).stack).not.toContain(secret);
+		expect(serialized).not.toContain(secret);
+		expect(String(thrown)).toContain("[REDACTED]");
+	});
+
+	it("redacts raw hop URLs from stopWhen exceptions", async () => {
+		const secret = "stop-callback-secret";
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: `/next?serviceKey=${secret}` },
+			url: `https://example.com/login?serviceKey=${secret}`,
+		});
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+		let thrown: unknown;
+		try {
+			await session.redirects.run({
+				url: "/login",
+				sensitiveParams: { serviceKey: secret },
+				stopWhen: (hop) => {
+					throw new Error(`Unexpected redirect to ${hop.nextUrl}`);
+				},
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(String(thrown)).toContain("serviceKey=[REDACTED]");
+		expect(String(thrown)).not.toContain(secret);
+		expect((thrown as Error).stack).not.toContain(secret);
+	});
+
 	it("wraps network failures in TransportError", async () => {
 		mockStealthState.queuedErrors.push(new Error("socket hang up"));
 
@@ -1633,6 +1705,28 @@ describe("createStealthClient", () => {
 		expect(String(transportError.cause)).not.toContain(secret);
 		expect((transportError.cause as Error).stack).not.toContain(secret);
 		expect(JSON.stringify(transportError.cause)).not.toContain(secret);
+	});
+
+	it("collects declared-key values from malformed caller URLs before serialization", async () => {
+		const oldSecret = "caller-url-secret";
+		const newSecret = "replacement-secret";
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient();
+		let thrown: unknown;
+		try {
+			await client.fetch(`http://[bad]/?serviceKey=${oldSecret}`, {
+				sensitiveParams: { serviceKey: newSecret },
+			});
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(TransportError);
+		const serialized = JSON.stringify(thrown);
+		expect(String(thrown)).not.toContain(oldSecret);
+		expect((thrown as Error).stack).not.toContain(oldSecret);
+		expect(serialized).not.toContain(oldSecret);
+		expect(String((thrown as TransportError).cause)).not.toContain(oldSecret);
 	});
 
 	it("redacts readonly timeout errors without losing timeout classification", async () => {

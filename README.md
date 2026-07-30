@@ -160,6 +160,15 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   ```
 
   Use this only when the upstream offers no header or body credential channel.
+  Declared query-key positions and exact scalar diagnostics are always redacted.
+  Free-text values of four or more characters are redacted as substrings; shorter
+  values require token boundaries so low-entropy values do not corrupt unrelated
+  words or timestamps. Consequently, a sub-four-character secret embedded in a
+  larger alphanumeric token can remain in free text; prefer higher-entropy or
+  non-query credentials when possible. `sensitiveParams: {}` is equivalent to
+  omitting the option. Redirect results keep sensitive hop URLs redacted; use
+  `redirects.run({ stopWhen })` to inspect a real intermediate `Location` during
+  the run when a login flow needs a rotated value.
 - **Proxy URLs for non-stealth consumers**: use `resolveProxy()` when a
   provider-owned client outside `ctx.stealth` needs the provider's proxy, such
   as a CAPTCHA solver that must use matching egress. Pass the provider proxy

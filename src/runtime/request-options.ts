@@ -5,20 +5,25 @@ import type {
 	RequestParams,
 	RequestParamValue,
 } from "../types.js";
+import { isProviderError } from "../errors.js";
 
 export const REDACTED_QUERY_VALUE = "[REDACTED]";
 
-export const HTTP_REQUEST_METHOD_NAMES = [
-	"request",
-	"get",
-	"post",
-	"put",
-	"delete",
-	"stream",
-	"sse",
-] as const satisfies readonly (keyof HttpClient)[];
+const HTTP_REQUEST_METHOD_CONFIG = {
+	request: { optionsIndex: 1 },
+	get: { optionsIndex: 1 },
+	post: { optionsIndex: 2 },
+	put: { optionsIndex: 2 },
+	delete: { optionsIndex: 1 },
+	stream: { optionsIndex: 1 },
+	sse: { optionsIndex: 1 },
+} as const satisfies Record<keyof HttpClient, { optionsIndex: number }>;
 
-export type HttpRequestMethod = (typeof HTTP_REQUEST_METHOD_NAMES)[number];
+export type HttpRequestMethod = keyof typeof HTTP_REQUEST_METHOD_CONFIG;
+
+export const HTTP_REQUEST_METHOD_NAMES = Object.keys(
+	HTTP_REQUEST_METHOD_CONFIG,
+) as HttpRequestMethod[];
 
 const HTTP_REQUEST_METHOD_SET = new Set<string>(HTTP_REQUEST_METHOD_NAMES);
 
@@ -31,6 +36,12 @@ export type SerializedRequestUrl = {
 	redactedUrl: string;
 	sensitiveValues: readonly string[];
 };
+
+export function normalizeSensitiveParams(
+	sensitiveParams?: Record<string, string>,
+): Record<string, string> | undefined {
+	return sensitiveParams && Object.keys(sensitiveParams).length > 0 ? sensitiveParams : undefined;
+}
 
 function isParamArray(value: RequestParamValue): value is readonly RequestParamPrimitive[] {
 	return Array.isArray(value);
@@ -52,27 +63,16 @@ export function appendQueryParams(url: string, params?: RequestParams): string {
 		return url;
 	}
 
-	const appended = new URLSearchParams();
+	const parsed = new URL(url);
 	for (const [key, value] of Object.entries(params)) {
 		if (isParamArray(value)) {
-			for (const item of value) appendQueryValue(appended, key, item);
+			for (const item of value) appendQueryValue(parsed.searchParams, key, item);
 			continue;
 		}
-		appendQueryValue(appended, key, value);
+		appendQueryValue(parsed.searchParams, key, value);
 	}
 
-	const query = appended.toString();
-	if (!query) return url;
-	const fragmentIndex = url.indexOf("#");
-	const beforeFragment = fragmentIndex === -1 ? url : url.slice(0, fragmentIndex);
-	const fragment = fragmentIndex === -1 ? "" : url.slice(fragmentIndex);
-	const separator =
-		beforeFragment.includes("?") && !beforeFragment.endsWith("?") && !beforeFragment.endsWith("&")
-			? "&"
-			: beforeFragment.includes("?")
-				? ""
-				: "?";
-	return `${beforeFragment}${separator}${query}${fragment}`;
+	return parsed.toString();
 }
 
 function decodeQueryComponent(value: string): string {
@@ -123,16 +123,17 @@ export function serializeRequestUrl(
 	sensitiveParams?: Record<string, string>,
 ): SerializedRequestUrl {
 	const urlWithParams = appendQueryParams(url, params);
-	if (!sensitiveParams || Object.keys(sensitiveParams).length === 0) {
+	const normalizedSensitiveParams = normalizeSensitiveParams(sensitiveParams);
+	if (!normalizedSensitiveParams) {
 		return { requestUrl: urlWithParams, redactedUrl: urlWithParams, sensitiveValues: [] };
 	}
 
-	const sensitiveParamNames = Object.keys(sensitiveParams);
+	const sensitiveParamNames = Object.keys(normalizedSensitiveParams);
 	const existing = redactUrlQueryParams(urlWithParams, sensitiveParamNames);
 	const sensitiveValues = new Set(existing.sensitiveValues);
 	let requestUrl = urlWithParams;
 
-	for (const [key, value] of Object.entries(sensitiveParams)) {
+	for (const [key, value] of Object.entries(normalizedSensitiveParams)) {
 		const serializedValue = String(value);
 		requestUrl = appendQueryParams(requestUrl, { [key]: serializedValue });
 		sensitiveValues.add(serializedValue);
@@ -162,14 +163,10 @@ function sensitiveValueVariants(value: string): string[] {
 
 type SensitiveValueVariant = { value: string; requiresTokenBoundary: boolean };
 
-function allSensitiveValueVariants(
-	sensitiveValues: readonly string[],
-	requireTokenBoundary: boolean,
-): SensitiveValueVariant[] {
+function allSensitiveValueVariants(sensitiveValues: readonly string[]): SensitiveValueVariant[] {
 	const variants = new Map<string, SensitiveValueVariant>();
 	for (const sensitiveValue of sensitiveValues) {
-		const requiresTokenBoundary =
-			requireTokenBoundary || sensitiveValue.length < MIN_UNSCOPED_SENSITIVE_VALUE_LENGTH;
+		const requiresTokenBoundary = sensitiveValue.length < MIN_UNSCOPED_SENSITIVE_VALUE_LENGTH;
 		for (const value of sensitiveValueVariants(sensitiveValue)) {
 			const existing = variants.get(value);
 			variants.set(value, {
@@ -191,25 +188,28 @@ function isTokenCharacter(value: string | undefined): boolean {
 }
 
 function replaceSensitiveVariant(text: string, variant: SensitiveValueVariant): string {
-	const normalizedNeedle = normalizePercentEscapes(variant.value);
-	let result = text;
-	let fromIndex = 0;
-	while (fromIndex <= result.length - variant.value.length) {
-		const normalizedText = normalizePercentEscapes(result);
-		const index = normalizedText.indexOf(normalizedNeedle, fromIndex);
-		if (index === -1) break;
-		const end = index + variant.value.length;
+	const pattern = variant.value.replace(/%([\da-f]{2})|[.*+?^${}()|[\]\\]/gi, (match, hex) => {
+		if (hex) {
+			return `%${[...String(hex)]
+				.map((character) =>
+					/[a-f]/i.test(character)
+						? `[${character.toLowerCase()}${character.toUpperCase()}]`
+						: character,
+				)
+				.join("")}`;
+		}
+		return `\\${match}`;
+	});
+	return text.replace(new RegExp(pattern, "gu"), (match, offset: number, source: string) => {
+		const end = offset + match.length;
 		if (
 			variant.requiresTokenBoundary &&
-			(isTokenCharacter(result[index - 1]) || isTokenCharacter(result[end]))
+			(isTokenCharacter(source[offset - 1]) || isTokenCharacter(source[end]))
 		) {
-			fromIndex = index + 1;
-			continue;
+			return match;
 		}
-		result = `${result.slice(0, index)}${REDACTED_QUERY_VALUE}${result.slice(end)}`;
-		fromIndex = index + REDACTED_QUERY_VALUE.length;
-	}
-	return result;
+		return REDACTED_QUERY_VALUE;
+	});
 }
 
 /** Scrubs raw and URL-encoded secret values from diagnostic text. */
@@ -218,13 +218,9 @@ export function redactSensitiveText(
 	sensitiveValues: readonly string[],
 	requestUrl?: string,
 	redactedUrl?: string,
-	options: { requireTokenBoundary?: boolean } = {},
 ): string {
 	let redacted = requestUrl && redactedUrl ? text.replaceAll(requestUrl, redactedUrl) : text;
-	for (const variant of allSensitiveValueVariants(
-		sensitiveValues,
-		options.requireTokenBoundary === true,
-	)) {
+	for (const variant of allSensitiveValueVariants(sensitiveValues)) {
 		// Low-entropy values are still redacted, but only as complete tokens. This
 		// covers query values and diagnostic phrases such as "credential api rejected"
 		// without corrupting timestamps or words such as "rapid".
@@ -238,6 +234,7 @@ type RedactionContext = {
 	requestUrl?: string;
 	redactedUrl?: string;
 	seen: Map<object, unknown>;
+	classificationObjects: Set<object>;
 };
 
 function redactDiagnosticString(value: string, context: RedactionContext): string {
@@ -252,7 +249,10 @@ function redactDiagnosticString(value: string, context: RedactionContext): strin
 function cloneForRedaction(source: object): object {
 	let clone: object;
 	try {
-		clone = Object.create(Object.getPrototypeOf(source));
+		clone =
+			source instanceof DOMException
+				? new DOMException(source.message, source.name)
+				: Object.create(Object.getPrototypeOf(source));
 	} catch {
 		clone = source instanceof Error ? new Error() : {};
 	}
@@ -361,9 +361,20 @@ function redactDiagnosticValue(
 	value: unknown,
 	context: RedactionContext,
 	propertyName?: string,
+	parent?: object,
 ): unknown {
-	if (propertyName && DIAGNOSTIC_CLASSIFICATION_FIELDS.has(propertyName)) return value;
+	if (
+		propertyName &&
+		parent !== undefined &&
+		context.classificationObjects.has(parent) &&
+		DIAGNOSTIC_CLASSIFICATION_FIELDS.has(propertyName)
+	) {
+		return value;
+	}
 	if (typeof value === "string") return redactDiagnosticString(value, context);
+	if (typeof value === "number" || typeof value === "bigint" || typeof value === "boolean") {
+		return context.sensitiveValues.includes(String(value)) ? REDACTED_QUERY_VALUE : value;
+	}
 	if ((typeof value !== "object" && typeof value !== "function") || value === null) return value;
 
 	const previouslySeen = context.seen.get(value);
@@ -383,7 +394,7 @@ function redactDiagnosticValue(
 	for (const key of keys) {
 		const current = readDiagnosticProperty(value, key);
 		if (!current.ok) continue;
-		const redacted = redactDiagnosticValue(current.value, context, key);
+		const redacted = redactDiagnosticValue(current.value, context, key, value);
 		if (Object.is(redacted, current.value)) continue;
 
 		if (!setDiagnosticProperty(target, key, redacted)) {
@@ -418,19 +429,30 @@ function redactDiagnosticValue(
  * Mutable errors retain identity; readonly/frozen errors may be replaced, so
  * callers must use the returned value.
  */
-export function redactSensitiveError<T>(
-	error: T,
+export function redactSensitiveError(
+	error: unknown,
 	sensitiveValues: readonly string[],
 	requestUrl?: string,
 	redactedUrl?: string,
-): T {
+): unknown {
 	if (sensitiveValues.length === 0) return error;
+	const classificationObjects = new Set<object>();
+	if ((typeof error === "object" || typeof error === "function") && error !== null) {
+		classificationObjects.add(error);
+		if (isProviderError(error)) {
+			const options = readDiagnosticProperty(error, "options");
+			if (options.ok && typeof options.value === "object" && options.value !== null) {
+				classificationObjects.add(options.value);
+			}
+		}
+	}
 	return redactDiagnosticValue(error, {
+		classificationObjects,
 		sensitiveValues,
 		requestUrl,
 		redactedUrl,
 		seen: new Map(),
-	}) as T;
+	});
 }
 
 function isRequestOptions(value: unknown): value is RequestOptions {
@@ -443,23 +465,18 @@ export function requestOptionsFromHttpInvocation(
 	args: readonly unknown[],
 ): RequestOptions | undefined {
 	if (!isHttpRequestMethod(method)) return undefined;
-	let candidate: unknown;
-	switch (method) {
-		case "post":
-		case "put":
-			candidate = args[2];
-			break;
-		case "request":
-		case "get":
-		case "delete":
-		case "stream":
-		case "sse":
-			candidate = args[1];
-			break;
-		default:
-			return undefined;
-	}
+	const candidate = args[HTTP_REQUEST_METHOD_CONFIG[method].optionsIndex];
 	return isRequestOptions(candidate) ? candidate : undefined;
+}
+
+export function replaceRequestOptionsInHttpInvocation(
+	method: PropertyKey,
+	args: unknown[],
+	options: RequestOptions,
+): boolean {
+	if (!isHttpRequestMethod(method)) return false;
+	args[HTTP_REQUEST_METHOD_CONFIG[method].optionsIndex] = options;
+	return true;
 }
 
 export function normalizeHttpRequestBody(body: unknown): string | Buffer | undefined {

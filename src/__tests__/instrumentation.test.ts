@@ -328,6 +328,21 @@ describe("wrapWithInstrumentation", () => {
 		});
 	});
 
+	it("treats empty sensitiveParams as absent from trace URL serialization", async () => {
+		const ctx = createMockContext();
+		const instrumented = wrapWithInstrumentation(ctx);
+		const url = "https://EXAMPLE.com:443/items?q=a%20b&tilde=~";
+
+		await instrumented.http.get(url, { params: { page: 1 } });
+		await instrumented.http.get(url, { params: { page: 1 }, sensitiveParams: {} });
+
+		const urls = instrumented.trace
+			.getSpans()
+			.filter((span) => span.name === "http.get")
+			.map((span) => span.attributes.url);
+		expect(urls).toEqual([url, url]);
+	});
+
 	it("redacts raw and encoded sensitive values from HTTP and stealth traces", async () => {
 		const secret = "trace key+/=%";
 		const percentEncoded = encodeURIComponent(secret);
@@ -445,6 +460,53 @@ describe("wrapWithInstrumentation", () => {
 		expect(consumptionSpan?.attributes.request_id).toBe(requestSpan?.attributes.request_id);
 		expect(JSON.stringify(spans)).not.toContain(secret);
 	});
+
+	it("records lazy stream and SSE consumption failures without sensitiveParams", async () => {
+		const ctx = createMockContext();
+		ctx.http.stream = mock(async () => {
+			const body = new ReadableStream<Uint8Array>({
+				pull(controller) {
+					controller.error(new Error("ordinary stream failed"));
+				},
+			});
+			return {
+				status: 200,
+				ok: true,
+				headers: {},
+				body,
+				bytes: async function* () {},
+				textChunks: async function* () {},
+				lines: async function* () {},
+			};
+		});
+		ctx.http.sse = mock(async () => ({
+			[Symbol.asyncIterator]() {
+				return {
+					next: async () => {
+						throw new Error("ordinary SSE failed");
+					},
+				};
+			},
+		}));
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		const stream = await instrumented.http.stream("https://api.example.com/logs");
+		await expect(async () => {
+			for await (const _line of stream.lines()) {
+				// The source errors before yielding a line.
+			}
+		}).toThrow("ordinary stream failed");
+		const events = await instrumented.http.sse("https://api.example.com/events");
+		await expect(async () => {
+			for await (const _event of events) {
+				// The source errors before yielding an event.
+			}
+		}).toThrow("ordinary SSE failed");
+
+		const spans = instrumented.trace.getSpans();
+		expect(spans.find((span) => span.name === "http.stream.consume")?.status).toBe("error");
+		expect(spans.find((span) => span.name === "http.sse.consume")?.status).toBe("error");
+	});
 });
 
 describe("synchronous return fidelity (state + stealth factories)", () => {
@@ -537,6 +599,44 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 		expect(isThenableForTest(session)).toBe(false);
 		const response = await session.fetch("https://secure.example.com/home");
 		expect(response.ok).toBe(true);
+		expect(instrumented.trace.getSpans().some((span) => span.name === "stealth.fetch")).toBe(true);
+	});
+
+	it("instruments redirects.run on a synchronous stealth session", async () => {
+		const ctx = createMockContext();
+		const final = await ctx.stealth.fetch("https://secure.example.com/final");
+		ctx.stealth.createSession = mock(() => ({
+			fetch: ctx.stealth.fetch,
+			redirects: {
+				run: async () => ({
+					final,
+					hops: [],
+					reason: "completed" as const,
+					cookies: {},
+					cookieStore: {
+						version: 1 as const,
+						jar: {
+							version: "tough-cookie@6.0.0",
+							storeType: "MemoryCookieStore",
+							rejectPublicSuffixes: true,
+							enableLooseMode: false,
+							allowSpecialUseDomain: true,
+							prefixSecurity: "silent",
+							cookies: [],
+						},
+					},
+				}),
+			},
+			close: () => {},
+		})) as unknown as StealthClient["createSession"];
+		const instrumented = wrapWithInstrumentation(ctx);
+
+		const session = instrumented.stealth.createSession();
+		await session.redirects.run({ url: "https://secure.example.com/login" });
+
+		expect(
+			instrumented.trace.getSpans().some((span) => span.name === "stealth.redirects.run"),
+		).toBe(true);
 	});
 });
 

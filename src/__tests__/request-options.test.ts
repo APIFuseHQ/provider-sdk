@@ -31,12 +31,21 @@ describe("sensitive request diagnostics", () => {
 		expect(redacted.match(/\[REDACTED\]/g)).toHaveLength(3);
 	});
 
-	it("preserves existing query bytes while appending and redacting sensitive params", () => {
+	it("keeps params-only serialization identical when sensitiveParams is omitted or empty", () => {
+		const url = "https://EXAMPLE.com:443/items?q=a%20b&tilde=~";
+		const params = { page: 1 };
+		const base = serializeRequestUrl(url, params);
+		const empty = serializeRequestUrl(url, params, {});
+		expect(empty).toEqual(base);
+		expect(base.requestUrl).toBe("https://example.com/items?q=a+b&tilde=%7E&page=1");
+	});
+
+	it("structurally redacts sensitive params after URL normalization", () => {
 		const serialized = serializeRequestUrl("https://example.com/items?q=a%20b&tilde=~", undefined, {
 			pin: "1",
 		});
-		expect(serialized.requestUrl).toBe("https://example.com/items?q=a%20b&tilde=~&pin=1");
-		expect(serialized.redactedUrl).toBe("https://example.com/items?q=a%20b&tilde=~&pin=[REDACTED]");
+		expect(serialized.requestUrl).toBe("https://example.com/items?q=a+b&tilde=%7E&pin=1");
+		expect(serialized.redactedUrl).toBe("https://example.com/items?q=a+b&tilde=%7E&pin=[REDACTED]");
 	});
 
 	it("redacts overlapping credentials longest-first and compares percent escapes case-insensitively", () => {
@@ -64,6 +73,7 @@ describe("sensitive request diagnostics", () => {
 			"rapid [REDACTED] response a%20value at 2026-01-01",
 		);
 		expect(redactSensitiveText("rapid response", ["api"])).toBe("rapid response");
+		expect(redactSensitiveText("prefixapisuffix", ["api"])).toBe("prefixapisuffix");
 
 		const requestUrl = "https://example.com/items?pin=1";
 		const redactedUrl = "https://example.com/items?pin=[REDACTED]";
@@ -72,7 +82,15 @@ describe("sensitive request diagnostics", () => {
 		);
 	});
 
-	it("scrubs structured error fields and cause cycles without rewriting typed numeric fields", () => {
+	it("redacts long credentials as unconditional raw and encoded substrings", () => {
+		const secret = "long-test-secret";
+		const encoded = encodeURIComponent(secret);
+		expect(redactSensitiveText(`prefix${secret}suffix prefix${encoded}suffix`, [secret])).toBe(
+			"prefix[REDACTED]suffix prefix[REDACTED]suffix",
+		);
+	});
+
+	it("scrubs structured error fields, exact numeric echoes, and cause cycles", () => {
 		const secret = "structured-secret";
 		const requestUrl = `https://example.com/items?serviceKey=${secret}`;
 		const redactedUrl = "https://example.com/items?serviceKey=[REDACTED]";
@@ -94,14 +112,14 @@ describe("sensitive request diagnostics", () => {
 
 		const redacted = redactSensitiveError(outer, [secret, "123456"], requestUrl, redactedUrl);
 		expect(redacted).toBe(outer);
-		expect(redacted.details).toEqual({ url: redactedUrl, received: 123456 });
+		expect(redacted.details).toEqual({ url: redactedUrl, received: REDACTED_QUERY_VALUE });
 		expect(aggregate.message).not.toContain(secret);
 		expect(first.message).toContain(REDACTED_QUERY_VALUE);
 		expect(first.url).toBe(redactedUrl);
 		expect(first.request.url).toBe(redactedUrl);
 		expect(first.cause).toBe(aggregate);
 		expect(second.message).not.toContain(secret);
-		expect(second.details.received).toBe(123456);
+		expect(second.details.received).toBe(REDACTED_QUERY_VALUE);
 	});
 
 	it("clones before traversing readonly cycles and scrubs custom non-enumerable fields", () => {
@@ -131,11 +149,27 @@ describe("sensitive request diagnostics", () => {
 		expect(redacted).toMatchObject({ code: "timeout", status: 500, upstreamStatus: 500 });
 	});
 
+	it("redacts untrusted nested name and code metadata", () => {
+		const secret = "nested-secret";
+		const error = Object.assign(new Error("outer"), {
+			code: "transport_network_error",
+			cause: { name: `failure-${secret}`, code: secret },
+		});
+		const redacted = redactSensitiveError(error, [secret]);
+		expect(redacted.code).toBe("transport_network_error");
+		expect(redacted.cause).toEqual({
+			name: "failure-[REDACTED]",
+			code: REDACTED_QUERY_VALUE,
+		});
+	});
+
 	it("replaces readonly errors and frozen self-cycles without exposing the original graph", () => {
 		const secret = "readonly-secret";
 		const domError = new DOMException(`aborted for ${secret}`, "AbortError");
 		const redactedDomError = redactSensitiveError(domError, [secret]);
 		expect(redactedDomError).not.toBe(domError);
+		expect(redactedDomError).toBeInstanceOf(DOMException);
+		expect(() => redactedDomError.code).not.toThrow();
 		expect(redactedDomError.name).toBe("AbortError");
 		expect(redactedDomError.message).toBe(`aborted for ${REDACTED_QUERY_VALUE}`);
 
