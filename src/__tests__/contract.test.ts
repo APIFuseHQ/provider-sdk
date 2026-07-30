@@ -90,6 +90,7 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 					fixtures: {
 						request: { query: operationId },
 						response: { name: operationId, score: 1 },
+						recordedAt: "2025-12-31",
 					},
 					upstream: { baseUrl: "https://api.example.com", proxy: false },
 					hints: { cache: "short" },
@@ -173,6 +174,17 @@ describe("provider contract extraction", () => {
 		expect(encoded).not.toContain('"assertions"');
 		expect(encoded).not.toContain('"enabled"');
 		expect(encoded).not.toContain('"run"');
+	});
+
+	it("exposes fixture recordedAt evidence metadata to contract tooling", () => {
+		const snapshot = extractProviderContract(buildProvider(["zeta-search", "alpha-search"]));
+		const operation = snapshot.operations.find((candidate) => candidate.id === "alpha-search");
+
+		expect(operation?.fixtures).toEqual({
+			request: { query: "alpha-search" },
+			response: { name: "alpha-search", score: 1 },
+			recordedAt: "2025-12-31",
+		});
 	});
 
 	it("produces a stable digest for semantically identical provider definitions", () => {

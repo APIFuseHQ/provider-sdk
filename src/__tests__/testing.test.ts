@@ -10,6 +10,7 @@ import {
 	snapshotTransform,
 	toMatchShape,
 } from "../testing/index.js";
+import { executeStandardTestHandler } from "../testing/run.js";
 
 const testProvider = defineProvider({
 	id: "test-provider",
@@ -107,7 +108,57 @@ const authHarnessProvider = defineProvider({
 	},
 });
 
-runStandardTests(testProvider);
+const handlerE2eProvider = defineProvider({
+	id: "handler-e2e-provider",
+	version: "1.0.0",
+	runtime: "standard",
+	meta: { displayName: "Handler E2E Provider", category: "test" },
+	operations: {
+		lookup: {
+			input: z.object({
+				id: z.string(),
+				date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+			}),
+			output: z.object({ result: z.string() }),
+			handler: async (ctx, input) => {
+				const response = await ctx.http.get(
+					`https://example.test/items/${input.id}?date=${input.date}`,
+				);
+				const body = await response.json<{ label: string }>();
+				return { result: body.label };
+			},
+			fixtures: {
+				request: { id: "fixture-id", date: "+45d" },
+				response: { result: "Recorded label" },
+			},
+			healthCheckUnsupported: { reason: "test fixture" },
+		},
+	},
+});
+
+const brokenHandlerProvider = defineProvider({
+	...handlerE2eProvider,
+	id: "broken-handler-provider",
+	operations: {
+		lookup: {
+			...handlerE2eProvider.operations.lookup,
+			handler: async (ctx, input) => {
+				const response = await ctx.http.get(
+					`https://example.test/items/${input.id}?date=${input.date}`,
+				);
+				const body = await response.json<{ label: string }>();
+				return { wrong: body.label } as unknown as { result: string };
+			},
+		},
+	},
+});
+
+const handlerE2eStub = ({ url }: { url?: string }) =>
+	/^https:\/\/example\.test\/items\/fixture-id\?date=\d{4}-\d{2}-\d{2}$/.test(url ?? "")
+		? { body: { label: "Live normalized label" } }
+		: undefined;
+
+const standardTestsResult = runStandardTests(testProvider);
 
 runStandardTests(
 	fixtureHarnessProvider,
@@ -127,6 +178,8 @@ runStandardTests(
 	{ auth: "credentials" },
 	{ validateAuthMode: true },
 );
+
+runStandardTests(handlerE2eProvider, { upstreamStub: handlerE2eStub });
 
 describeTransform("double-value", { value: 2 }, { doubled: 4 }, (raw) => ({
 	doubled: raw.value * 2,
@@ -168,6 +221,32 @@ describe("toMatchShape", () => {
 		expect(() => {
 			toMatchShape({ name: 123 }, { name: "string" });
 		}).toThrow();
+	});
+});
+
+describe("runStandardTests handler E2E", () => {
+	it("returns a valid real-handler result using the canned upstream", async () => {
+		await expect(
+			executeStandardTestHandler(handlerE2eProvider, "lookup", handlerE2eStub),
+		).resolves.toEqual({ result: "Live normalized label" });
+	});
+
+	it("fails with a JSON diff when handler wiring returns the wrong shape", async () => {
+		await expect(
+			executeStandardTestHandler(brokenHandlerProvider, "lookup", handlerE2eStub),
+		).rejects.toThrow(/Handler output.*failed schema validation[\s\S]*JSON diff/);
+	});
+
+	it("rejects unmatched upstream calls instead of passing through to live network", async () => {
+		await expect(
+			executeStandardTestHandler(handlerE2eProvider, "lookup", () => undefined),
+		).rejects.toThrow(/Unmatched upstream call.*live network passthrough is disabled/);
+	});
+
+	it("surfaces per-operation warnings when upstreamStub is omitted", () => {
+		expect(standardTestsResult.warnings).toEqual([
+			'[provider-sdk] Operation "test-provider.search" has no handler E2E coverage in runStandardTests; configure upstreamStub to invoke the real handler.',
+		]);
 	});
 });
 

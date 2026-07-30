@@ -35,7 +35,10 @@ export {
 	SelfTestRequestSchema,
 	type SelfTestResponse,
 } from "./self-test.js";
-export { resolveHealthCheckInputDateTokens } from "./self-test-input-tokens.js";
+export {
+	type InputDateTokenCalendar,
+	resolveHealthCheckInputDateTokens,
+} from "./self-test-input-tokens.js";
 export {
 	collectSelfTestSensitiveValues,
 	redactSelfTestText,

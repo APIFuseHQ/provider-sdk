@@ -7,10 +7,14 @@ import { createUnsupportedSttClient } from "../runtime/stt.js";
 import { safeParseSchemaSync } from "../schema.js";
 import type {
 	AuthMode,
+	BrowserPage,
 	CredentialContext,
 	HttpResponse,
+	NativeNetworkConnection,
 	ProviderContext,
 	ProviderDefinition,
+	StealthCookieStoreV1,
+	StealthResponse,
 } from "../types.js";
 
 // Mirrors CONNECTOR_ID_REGEX in ../define.ts, which defineProvider() enforces.
@@ -44,6 +48,38 @@ export interface StandardTestsOptions {
 	validateAuthMode?: boolean;
 	/** Override inferred __fixtures__ directory for tests generated outside providers/<id>. */
 	fixtureDir?: string;
+	/** Opt in to real-handler E2E with strict, offline canned upstream responses. */
+	upstreamStub?: StandardTestsUpstreamStub;
+}
+
+export interface StandardTestsUpstreamCall {
+	/** Operation whose real handler initiated the call. */
+	operationName: string;
+	/** ProviderContext transport surface used by the handler. */
+	transport: "http" | "stealth" | "browser" | "native";
+	method: string;
+	url?: string;
+	body?: unknown;
+	options?: unknown;
+}
+
+export interface StandardTestsUpstreamResponse {
+	status?: number;
+	headers?: Readonly<Record<string, string>>;
+	/** JSON-compatible values are encoded as JSON; strings and bytes are preserved. */
+	body?: unknown;
+}
+
+export type StandardTestsUpstreamStub = (
+	call: StandardTestsUpstreamCall,
+) =>
+	| Response
+	| StandardTestsUpstreamResponse
+	| undefined
+	| Promise<Response | StandardTestsUpstreamResponse | undefined>;
+
+export interface StandardTestsResult {
+	warnings: readonly string[];
 }
 
 interface FixtureEnvelope {
@@ -133,6 +169,389 @@ function jsonResponse(data: unknown): HttpResponse {
 		arrayBuffer: async () =>
 			bodyBytes.buffer.slice(bodyBytes.byteOffset, bodyBytes.byteOffset + bodyBytes.byteLength),
 		bytes: async () => bodyBytes.slice(0),
+	};
+}
+
+interface NormalizedUpstreamResponse {
+	status: number;
+	headers: Record<string, string>;
+	data: unknown;
+	text: string;
+	bytes: Uint8Array;
+}
+
+function headersToRecord(headers: Headers): Record<string, string> {
+	return Object.fromEntries(headers.entries());
+}
+
+async function normalizeUpstreamResponse(
+	response: Response | StandardTestsUpstreamResponse,
+): Promise<NormalizedUpstreamResponse> {
+	if (response instanceof Response) {
+		const bytes = new Uint8Array(await response.arrayBuffer());
+		const text = new TextDecoder().decode(bytes);
+		const headers = headersToRecord(response.headers);
+		let data: unknown = text;
+		if (response.headers.get("content-type")?.includes("application/json")) {
+			data = text.length > 0 ? JSON.parse(text) : null;
+		}
+		return { status: response.status, headers, data, text, bytes };
+	}
+
+	const headers = { ...(response.headers ?? {}) };
+	const body = response.body ?? null;
+	let bytes: Uint8Array;
+	let text: string;
+	let data: unknown;
+	if (body instanceof Uint8Array) {
+		bytes = body.slice(0);
+		text = new TextDecoder().decode(bytes);
+		data = text;
+	} else if (body instanceof ArrayBuffer) {
+		bytes = new Uint8Array(body.slice(0));
+		text = new TextDecoder().decode(bytes);
+		data = text;
+	} else if (typeof body === "string") {
+		text = body;
+		bytes = new TextEncoder().encode(text);
+		data = body;
+	} else {
+		text = JSON.stringify(body);
+		bytes = new TextEncoder().encode(text);
+		data = body;
+		if (!Object.keys(headers).some((name) => name.toLowerCase() === "content-type")) {
+			headers["content-type"] = "application/json";
+		}
+	}
+	return { status: response.status ?? 200, headers, data, text, bytes };
+}
+
+function toHttpResponse(response: NormalizedUpstreamResponse): HttpResponse {
+	return {
+		status: response.status,
+		ok: response.status >= 200 && response.status < 300,
+		headers: response.headers,
+		data: response.data,
+		json: async <T = unknown>() => JSON.parse(response.text) as T,
+		text: async () => response.text,
+		arrayBuffer: async () => response.bytes.slice(0).buffer,
+		bytes: async () => response.bytes.slice(0),
+	};
+}
+
+const emptyCookieJar = {
+	get: () => undefined,
+	getAll: () => ({}),
+	toString: () => "",
+};
+
+function emptyCookieStore(): StealthCookieStoreV1 {
+	return {
+		version: 1,
+		jar: { cookies: [] } as unknown as StealthCookieStoreV1["jar"],
+	};
+}
+
+function toStealthResponse(response: NormalizedUpstreamResponse, url?: string): StealthResponse {
+	return {
+		status: response.status,
+		ok: response.status >= 200 && response.status < 300,
+		url,
+		redirected: false,
+		headers: response.headers,
+		rawHeaders: Object.entries(response.headers),
+		body: response.text,
+		cookies: emptyCookieJar,
+		json: async <T>() => JSON.parse(response.text) as T,
+		arrayBuffer: async () => response.bytes.slice(0).buffer,
+		bytes: async () => response.bytes.slice(0),
+	};
+}
+
+function streamFromBytes(bytes: Uint8Array): ReadableStream<Uint8Array> {
+	return new ReadableStream({
+		start(controller) {
+			controller.enqueue(bytes.slice(0));
+			controller.close();
+		},
+	});
+}
+
+async function* singleBytes(bytes: Uint8Array): AsyncIterable<Uint8Array> {
+	yield bytes.slice(0);
+}
+
+async function* singleText(textValue: string): AsyncIterable<string> {
+	yield textValue;
+}
+
+function createUpstreamContext(
+	provider: ProviderDefinition,
+	operationName: string,
+	upstreamStub: StandardTestsUpstreamStub,
+): ProviderContext {
+	const credential: CredentialContext = {
+		mode: "none",
+		get: () => undefined,
+		getAll: () => ({}),
+		getAccessToken: () => undefined,
+		getScopes: () => [],
+	};
+	const request = { headers: {} };
+	const state = createMemoryProviderRuntimeState();
+	const dispatch = async (
+		call: Omit<StandardTestsUpstreamCall, "operationName">,
+	): Promise<NormalizedUpstreamResponse> => {
+		const canned = await upstreamStub({ operationName, ...call });
+		if (canned === undefined) {
+			throw new Error(
+				`Unmatched upstream call for operation "${operationName}": ${call.transport}.${call.method}${call.url ? ` ${call.url}` : ""}. Add a canned response to upstreamStub; live network passthrough is disabled.`,
+			);
+		}
+		return normalizeUpstreamResponse(canned);
+	};
+	const httpCall = async (
+		method: string,
+		url: string,
+		body?: unknown,
+		options?: unknown,
+	): Promise<HttpResponse> =>
+		toHttpResponse(await dispatch({ transport: "http", method, url, body, options }));
+	const stealthCall = async (url: string, options?: { method?: string; body?: unknown }) =>
+		toStealthResponse(
+			await dispatch({
+				transport: "stealth",
+				method: options?.method?.toUpperCase() ?? "GET",
+				url,
+				body: options?.body,
+				options,
+			}),
+			url,
+		);
+
+	const createBrowserPage = (): BrowserPage => {
+		let currentUrl = "about:blank";
+		let currentResponse: NormalizedUpstreamResponse | undefined;
+		const browserAction = async (method: string, body?: unknown) => {
+			currentResponse = await dispatch({
+				transport: "browser",
+				method,
+				url: currentUrl,
+				body,
+			});
+			return currentResponse;
+		};
+		const page: BrowserPage = {
+			id: `standard-test-${operationName}`,
+			url: async () => currentUrl,
+			title: async () => currentResponse?.text.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] ?? "",
+			content: async () => currentResponse?.text ?? "",
+			evaluate: async <T>(fn: string | (() => T)) =>
+				(await browserAction("evaluate", typeof fn === "string" ? fn : String(fn))).data as T,
+			locator: (selector) => ({
+				click: async () => {
+					await browserAction("locator.click", { selector });
+				},
+				fill: async (textValue) => {
+					await browserAction("locator.fill", { selector, text: textValue });
+				},
+				textContent: async () => {
+					const value = (await browserAction("locator.textContent", { selector })).data;
+					return value === null || value === undefined ? null : String(value);
+				},
+				waitFor: async (options) => {
+					await browserAction("locator.waitFor", { selector, options });
+				},
+			}),
+			close: async () => {},
+			fill: async (selector, textValue) => {
+				await browserAction("fill", { selector, text: textValue });
+			},
+			goto: async (url) => {
+				currentUrl = url;
+				await browserAction("goto");
+			},
+			screenshot: async (options) =>
+				Buffer.from((await browserAction("screenshot", options)).bytes),
+			click: async (selector) => {
+				await browserAction("click", { selector });
+			},
+			type: async (selector, textValue) => {
+				await browserAction("type", { selector, text: textValue });
+			},
+			waitForSelector: async (selector, options) => {
+				await browserAction("waitForSelector", { selector, options });
+			},
+			frames: async () => [page],
+			withResourcePolicy: async (_policy, run) => run(),
+		};
+		return page;
+	};
+
+	const createStealthSession = (): ReturnType<ProviderContext["stealth"]["createSession"]> => ({
+		fetch: stealthCall,
+		cookies: {
+			...emptyCookieJar,
+			has: () => false,
+			setFromCookieStrings: () => {},
+			toHeader: () => "",
+			snapshot: () => ({}),
+			restore: () => {},
+			serialize: emptyCookieStore,
+			deserialize: () => {},
+			clear: () => {},
+		},
+		redirects: {
+			run: async (options) => {
+				const final = await stealthCall(options.url, options);
+				return {
+					final,
+					hops: [],
+					reason: "completed",
+					cookies: {},
+					cookieStore: emptyCookieStore(),
+				};
+			},
+		},
+		close: () => {},
+	});
+
+	return {
+		env: { get: () => undefined },
+		credential,
+		request,
+		http: {
+			request: (url, options) =>
+				httpCall(options?.method?.toUpperCase() ?? "GET", url, options?.body, options),
+			get: (url, options) => httpCall("GET", url, undefined, options),
+			post: (url, body, options) => httpCall("POST", url, body, options),
+			put: (url, body, options) => httpCall("PUT", url, body, options),
+			delete: (url, options) => httpCall("DELETE", url, undefined, options),
+			stream: async (url, options) => {
+				const response = await dispatch({
+					transport: "http",
+					method: options?.method?.toUpperCase() ?? "GET",
+					url,
+					body: options?.body,
+					options,
+				});
+				return {
+					status: response.status,
+					ok: response.status >= 200 && response.status < 300,
+					headers: response.headers,
+					body: streamFromBytes(response.bytes),
+					bytes: () => singleBytes(response.bytes),
+					textChunks: () => singleText(response.text),
+					lines: () => singleText(response.text),
+				};
+			},
+			sse: async (url, options) => {
+				const response = await dispatch({
+					transport: "http",
+					method: options?.method?.toUpperCase() ?? "GET",
+					url,
+					body: options?.body,
+					options,
+				});
+				async function* messages() {
+					for (const block of response.text.split(/\r?\n\r?\n/)) {
+						const data = block
+							.split(/\r?\n/)
+							.filter((line) => line.startsWith("data:"))
+							.map((line) => line.slice(5).trimStart())
+							.join("\n");
+						if (!data) continue;
+						yield { event: "message", data, json: <T>() => JSON.parse(data) as T };
+					}
+				}
+				return messages();
+			},
+		},
+		cache: createProviderCache({ providerId: `standard-test-${operationName}` }),
+		state,
+		stealth: {
+			fetch: stealthCall,
+			createSession: createStealthSession,
+		},
+		browser: {
+			engine: "playwright-stealth",
+			newPage: async () => createBrowserPage(),
+			rawPage: async () => createBrowserPage(),
+			withIsolatedContext: async (handler) => handler(createBrowserPage()),
+			solveChallenge: async (challenge) =>
+				(
+					await dispatch({
+						transport: "browser",
+						method: "solveChallenge",
+						body: challenge,
+					})
+				).data as Awaited<ReturnType<ProviderContext["browser"]["solveChallenge"]>>,
+		},
+		...(provider.native
+			? {
+					native: {
+						network: {
+							connectTcp: async (options) =>
+								createNativeConnection(
+									await dispatch({
+										transport: "native",
+										method: "connectTcp",
+										url: `tcp://${options.host}:${options.port}`,
+										options,
+									}),
+									dispatch,
+									`tcp://${options.host}:${options.port}`,
+								),
+							connectTls: async (options) =>
+								createNativeConnection(
+									await dispatch({
+										transport: "native",
+										method: "connectTls",
+										url: `tls://${options.host}:${options.port}`,
+										options,
+									}),
+									dispatch,
+									`tls://${options.host}:${options.port}`,
+								),
+							grantTcpEgress: () => ({ revoke: () => {} }),
+						},
+					},
+				}
+			: {}),
+		trace: { span: async (_name, fn) => fn() },
+		auth: { requestField: async (name) => unsupported(`ctx.auth.requestField(${name})`) },
+		stt: createUnsupportedSttClient(
+			"Standard test upstream context does not support ctx.stt.transcribe",
+		),
+		choice: createTestProviderChoiceContext({
+			providerId: `standard-test-${operationName}`,
+			request,
+			credential,
+			state,
+		}),
+	};
+}
+
+function createNativeConnection(
+	initialResponse: NormalizedUpstreamResponse,
+	dispatch: (
+		call: Omit<StandardTestsUpstreamCall, "operationName">,
+	) => Promise<NormalizedUpstreamResponse>,
+	url: string,
+): NativeNetworkConnection {
+	let unread = initialResponse.bytes.slice(0);
+	return {
+		read: async () => {
+			if (unread.byteLength === 0) return null;
+			const bytes = unread;
+			unread = new Uint8Array();
+			return bytes;
+		},
+		write: async (body) => {
+			const response = await dispatch({ transport: "native", method: "write", url, body });
+			unread = response.bytes.slice(0);
+		},
+		close: async () => {},
 	};
 }
 
@@ -284,6 +703,58 @@ function parseSchemaFixture(
 	);
 }
 
+async function materializeHandlerOutput(output: unknown): Promise<unknown> {
+	if (!(output instanceof Response)) return output;
+	const contentType = output.headers.get("content-type") ?? "";
+	if (contentType.includes("application/json")) return output.json();
+	return output.text();
+}
+
+/** Internal execution seam exported for focused SDK tests; use runStandardTests as public API. */
+export async function executeStandardTestHandler(
+	provider: ProviderDefinition,
+	operationName: string,
+	upstreamStub: StandardTestsUpstreamStub,
+): Promise<unknown> {
+	const operation = provider.operations[operationName];
+	if (!operation) throw new Error(`Unknown operation "${operationName}".`);
+	if (operation.fixtures?.request === undefined) {
+		throw new Error(
+			`Operation "${operationName}" has no fixtures.request for handler E2E execution.`,
+		);
+	}
+	const context = createUpstreamContext(provider, operationName, upstreamStub);
+	const output = await materializeHandlerOutput(
+		await operation.handler(context, operation.fixtures.request),
+	);
+	const result = safeParseSchemaSync(
+		operation.output,
+		output,
+		`operations.${operationName}.handler.output`,
+	);
+	if (!result.success) {
+		throw new Error(
+			[
+				`Handler output for operation "${operationName}" failed schema validation.`,
+				formatJsonDiff(
+					{ valid: false, value: output, error: result.error },
+					{ valid: true, value: output },
+				),
+			].join("\n"),
+		);
+	}
+	return output;
+}
+
+function isOptionsShortcut(value: unknown): value is StandardTestsOptions {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		Object.hasOwn(value, "upstreamStub")
+	);
+}
+
 /**
  * Run standard SDK tests for a provider in one line.
  *
@@ -294,11 +765,37 @@ function parseSchemaFixture(
  */
 export function runStandardTests(
 	provider: ProviderDefinition,
+	options: StandardTestsOptions & { upstreamStub: StandardTestsUpstreamStub },
+): StandardTestsResult;
+export function runStandardTests(
+	provider: ProviderDefinition,
 	rawFixture?: unknown,
 	manifest?: StandardTestsManifest,
-	options: StandardTestsOptions = {},
-): void {
+	options?: StandardTestsOptions,
+): StandardTestsResult;
+export function runStandardTests(
+	provider: ProviderDefinition,
+	rawFixtureOrOptions?: unknown,
+	manifest?: StandardTestsManifest,
+	legacyOptions?: StandardTestsOptions,
+): StandardTestsResult {
+	const shortcut =
+		manifest === undefined && legacyOptions === undefined && isOptionsShortcut(rawFixtureOrOptions);
+	const rawFixture = shortcut ? undefined : rawFixtureOrOptions;
+	const options = shortcut ? rawFixtureOrOptions : (legacyOptions ?? {});
 	const operations = Object.entries(provider.operations);
+	const warnings = options.upstreamStub
+		? operations
+				.filter(([, operation]) => operation.fixtures?.request === undefined)
+				.map(
+					([operationName]) =>
+						`[provider-sdk] Operation "${provider.id}.${operationName}" has no fixtures.request, so runStandardTests cannot invoke its handler E2E.`,
+				)
+		: operations.map(
+				([operationName]) =>
+					`[provider-sdk] Operation "${provider.id}.${operationName}" has no handler E2E coverage in runStandardTests; configure upstreamStub to invoke the real handler.`,
+			);
+	for (const warning of warnings) console.warn(warning);
 
 	const assertFixtureValidation = (): void => {
 		expect(rawFixture).toBeDefined();
@@ -429,5 +926,20 @@ export function runStandardTests(
 				expect(actual).toEqual(expected);
 			});
 		}
+
+		if (options.upstreamStub) {
+			for (const [operationName, operation] of operations) {
+				if (operation.fixtures?.request === undefined) continue;
+				it(`invokes the real ${operationName} handler with canned upstream responses`, async () => {
+					await executeStandardTestHandler(
+						provider,
+						operationName,
+						options.upstreamStub as StandardTestsUpstreamStub,
+					);
+				});
+			}
+		}
 	});
+
+	return { warnings };
 }

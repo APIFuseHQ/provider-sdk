@@ -106,6 +106,90 @@ description:
 
 Use `defineOperation()` when an operation is large enough to live beside helper functions or in a separate module. It preserves the same type inference as inline `defineProvider()` operations and can be placed directly in the provider `operations` map. `defineProvider()` accepts Zod and Standard Schema v1-compatible schemas. If config validation fails, the SDK names the field to fix, for example `runtime`, `auth.mode`, `operations.<id>.handler`, or `operations.<id>.fixtures.response`.
 
+### Replay-safe fixtures
+
+Keep public operation schemas strict: date fields should accept absolute dates,
+not relative tokens. Inside `fixtures.request` only, the SDK resolves `+Nd` and
+`+Nd:YYYYMMDD` (1–365 days ahead) before import-time schema validation and
+stores the resolved request in provider metadata. Health-check case inputs use
+the same resolver when a probe runs. The default calendar is **KST**, including
+the 15:00–23:59 UTC window when KST is already on the next day.
+
+`fixtures.recordedAt` is the KST `YYYY-MM-DD` date when the response evidence
+was captured. It must be a real, non-future calendar date. Response date fields
+are expected to align with `recordedAt`, not with the newly resolved request;
+this permits stable recorded evidence alongside a replay-safe request.
+
+```ts
+const FlightInput = z.object({
+  departureDate: z.string().date(), // public calls remain absolute-date only
+});
+
+const searchFlights = {
+  input: FlightInput,
+  output: FlightOutput,
+  async handler(ctx, input) {
+    return fetchAndNormalizeFlights(ctx, input);
+  },
+  fixtures: {
+    request: { departureDate: "+45d" },
+    response: recordedFlightResponse, // dates reflect the capture below
+    recordedAt: "2026-07-15",
+  },
+  healthCheckUnsupported: { reason: "Upstream search is cost-bearing." },
+};
+```
+
+For code that explicitly calls the shared resolver, omit the third argument to
+use KST or pass `"UTC"` deliberately:
+
+```ts
+import { resolveHealthCheckInputDateTokens } from "@apifuse/provider-sdk/server";
+
+const kstInput = resolveHealthCheckInputDateTokens({ date: "+45d" });
+const utcInput = resolveHealthCheckInputDateTokens({ date: "+45d" }, new Date(), "UTC");
+```
+
+Do not re-resolve a health assertion's dates in UTC when its case input used the
+default KST calendar.
+
+### Real-handler E2E in standard tests
+
+`runStandardTests(provider)` validates declarations and fixtures but reports a
+per-operation warning because it has no handler E2E coverage. Opt in with an
+`upstreamStub`: the runner calls each fixture-backed real handler with its
+already-resolved fixture request, routes ProviderContext upstream transports to
+the stub, and validates the result against the output schema. It never compares
+the result to the recorded response because that evidence belongs to
+`recordedAt`.
+
+```ts
+import { runStandardTests } from "@apifuse/provider-sdk/testing";
+import provider from "../index.js";
+
+runStandardTests(provider, {
+  upstreamStub: ({ transport, method, url }) => {
+    if (
+      transport === "http" &&
+      method === "GET" &&
+      url === "https://api.example.test/flights"
+    ) {
+      return Response.json({ flights: [{ id: "fixture-flight" }] });
+    }
+    return undefined; // fails the test: live-network passthrough is forbidden
+  },
+});
+```
+
+The stub also identifies `stealth`, `browser`, and `native` interactions. Return
+a Web `Response` or `{ status, headers, body }`; an unmatched call fails with
+the operation, transport, and method named in the error. Browser handlers expose
+method-level calls such as `goto`, `evaluate`, and `locator.click`, so provide a
+canned result for each method the handler uses. Native connections similarly
+identify `connectTcp`/`connectTls` and subsequent `write` calls. Direct global
+`fetch` or socket usage is outside this ProviderContext seam and should not be
+used by provider handlers.
+
 ### Health assertion context
 
 `healthCheck.cases[].assertions` receives a `HealthCheckAssertionContext` with
