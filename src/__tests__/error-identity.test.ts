@@ -32,6 +32,7 @@ describe("cross-module ProviderError brand guards", () => {
 		expect(SDK.isProviderError(err)).toBe(true);
 		expect(SDK.isSessionExpiredError(err)).toBe(false);
 		expect(SDK.isTransportError(err)).toBe(false);
+		expect(SDK.isValidationError(err)).toBe(false);
 	});
 
 	it("recognizes a SessionExpiredError created by a duplicate SDK module instance", async () => {
@@ -42,6 +43,7 @@ describe("cross-module ProviderError brand guards", () => {
 		expect(SDK.isProviderError(err)).toBe(true);
 		expect(SDK.isSessionExpiredError(err)).toBe(true);
 		expect(SDK.isTransportError(err)).toBe(false);
+		expect(SDK.isValidationError(err)).toBe(false);
 	});
 
 	it("recognizes a TransportError created by a duplicate SDK module instance", async () => {
@@ -54,6 +56,18 @@ describe("cross-module ProviderError brand guards", () => {
 		expect(SDK.isProviderError(err)).toBe(true);
 		expect(SDK.isTransportError(err)).toBe(true);
 		expect(SDK.isSessionExpiredError(err)).toBe(false);
+		expect(SDK.isValidationError(err)).toBe(false);
+	});
+
+	it("recognizes a ValidationError created by a duplicate SDK module instance", async () => {
+		const Dup = await duplicateSdk;
+		const err = new Dup.ValidationError("Invalid input", { code: "SOME_NEW_CODE" });
+
+		expect(err instanceof SDK.ValidationError).toBe(false);
+		expect(SDK.isProviderError(err)).toBe(true);
+		expect(SDK.isValidationError(err)).toBe(true);
+		expect(SDK.isSessionExpiredError(err)).toBe(false);
+		expect(SDK.isTransportError(err)).toBe(false);
 	});
 
 	it("does not accept an unbranded name-only lookalike", () => {
@@ -67,6 +81,7 @@ describe("cross-module ProviderError brand guards", () => {
 		expect(SDK.isProviderError(lookalike)).toBe(false);
 		expect(SDK.isSessionExpiredError(lookalike)).toBe(false);
 		expect(SDK.isTransportError(lookalike)).toBe(false);
+		expect(SDK.isValidationError(lookalike)).toBe(false);
 	});
 
 	it("rejects an accessor-defined brand without invoking the getter", () => {

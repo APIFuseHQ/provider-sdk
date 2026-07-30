@@ -2,17 +2,31 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
 import { clearProxyResolutionCache } from "../config/loader.js";
-import { AuthError, ProviderError, SessionExpiredError, TransportError } from "../errors.js";
+import {
+	AuthError,
+	ProviderError,
+	SessionExpiredError,
+	TransportError,
+	ValidationError,
+} from "../errors.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import {
 	createServerApp,
+	ERROR_OBSERVABILITY_HEADER,
 	type ProviderServerLogEvent,
 	resolveProviderProxyAffinityKey,
 } from "../server/serve.js";
 import { event } from "../stream.js";
 import type { ProviderDefinition } from "../types.js";
 import { HttpRetryPreset } from "../types.js";
+
+function errorObservability(response: Response): Record<string, unknown> {
+	const value = response.headers.get(ERROR_OBSERVABILITY_HEADER);
+	expect(value).toBeTruthy();
+	expect(value).not.toMatch(/[\r\n]/);
+	return JSON.parse(value ?? "");
+}
 
 function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 	return {
@@ -326,7 +340,14 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
-					throw new ProviderError("Bad input", { code: "BAD_INPUT" });
+					throw new ProviderError("New provider failure", { code: "SOME_NEW_CODE" });
+				},
+			},
+			validationError: {
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async () => {
+					throw new ValidationError("Invalid provider input", { code: "SOME_NEW_CODE" });
 				},
 			},
 			providerActionRequired: {
@@ -404,6 +425,49 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 					throw new TransportError("Network error", {
 						code: "transport_network_error",
 						status: 0,
+					});
+				},
+			},
+			transportWithDetails: {
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async () => {
+					throw new TransportError("Upstream failed", {
+						code: "upstream_http_error",
+						status: 502,
+						details: { providerReason: "inventory_unavailable" },
+					});
+				},
+			},
+			transportExplicitNonRetryable: {
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async () => {
+					throw new TransportError("Upstream failed", {
+						code: "upstream_http_error",
+						status: 502,
+						retryable: false,
+						details: { retryable: true, providerPolicy: "independent" },
+					});
+				},
+			},
+			transportStringDetails: {
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async () => {
+					throw new TransportError("Network error", {
+						code: "transport_network_error",
+						details: "provider diagnostic",
+					});
+				},
+			},
+			transportArrayDetails: {
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async () => {
+					throw new TransportError("Network error", {
+						code: "transport_network_error",
+						details: ["first", { providerCode: 17 }],
 					});
 				},
 			},
@@ -635,12 +699,13 @@ describe("provider HTTP server", () => {
 				}),
 			});
 
-			expect(response.status).toBe(400);
+			expect(response.status).toBe(500);
 			expect(await response.json()).toEqual({
 				error: {
 					code: "BROWSER_CDP_POOL_REQUIRED",
 					message: "Managed CDP Pool is required for browser providers in production",
 					requestId: "req_browser_no_pool",
+					retryable: false,
 					fix: "Set APIFUSE__CDP_POOL__URL for deployed browser providers. Local standalone development may omit it.",
 				},
 			});
@@ -681,7 +746,7 @@ describe("provider HTTP server", () => {
 				}),
 			});
 
-			expect(response.status).toBe(400);
+			expect(response.status).toBe(500);
 			expect(await response.json()).toMatchObject({
 				error: { code: "PROVIDER_STATE_UNSUPPORTED" },
 			});
@@ -927,7 +992,7 @@ describe("provider HTTP server", () => {
 			}),
 		});
 
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expect(await response.json()).toMatchObject({
 			error: {
 				code: "SSE_RESULT_UNSUPPORTED",
@@ -1189,7 +1254,7 @@ describe("provider HTTP server", () => {
 			}),
 		});
 
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expect(await response.json()).toMatchObject({
 			error: {
 				code: "refresh_not_supported",
@@ -1218,7 +1283,7 @@ describe("provider HTTP server", () => {
 		});
 	});
 
-	it("maps ProviderError to 4xx", async () => {
+	it("maps an unregistered ProviderError code to 500", async () => {
 		const response = await app.request("/v1/providerError", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -1228,12 +1293,13 @@ describe("provider HTTP server", () => {
 			}),
 		});
 
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expect(await response.json()).toEqual({
 			error: {
-				code: "BAD_INPUT",
-				message: "Bad input",
+				code: "SOME_NEW_CODE",
+				message: "New provider failure",
 				requestId: "req_4",
+				retryable: false,
 			},
 		});
 	});
@@ -1248,12 +1314,13 @@ describe("provider HTTP server", () => {
 			}),
 		});
 
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expect(await response.json()).toEqual({
 			error: {
 				code: "TABLE_SELECTION_REQUIRED",
 				message: "Table choice required",
 				requestId: "req_action_required",
+				retryable: false,
 				fix: "Call availability and pass one reservation_choices[].reservation_choice.",
 				details: {
 					next_action: "ask_user_to_pick_table_then_call_reserve_with_reservation_choice",
@@ -1279,36 +1346,49 @@ describe("provider HTTP server", () => {
 				code: "NO_DATA",
 				message: "No upstream data",
 				requestId: "req_no_data",
+				retryable: false,
 			},
 		});
 	});
 
-	it("maps provider docs-style error codes to their public statuses", async () => {
+	it("keeps every explicitly registered ProviderError code status mapping unchanged", async () => {
 		const cases = [
-			{ operation: "lowercaseNotFound", status: 404, code: "not_found" },
-			{
-				operation: "upstreamProviderError",
-				status: 502,
-				code: "UPSTREAM_ERROR",
-			},
-			{
-				operation: "blockedProviderError",
-				status: 502,
-				code: "BLOCKED",
-			},
-			{
-				operation: "rateLimitedProviderError",
-				status: 429,
-				code: "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR",
-			},
-		];
+			{ code: "AUTH_REQUIRED", status: 401 },
+			{ code: "reauth_required", status: 401 },
+			{ code: "MISSING_SECRET", status: 400 },
+			{ code: "NOT_FOUND", status: 404 },
+			{ code: "not_found", status: 404 },
+			{ code: "NO_DATA", status: 404 },
+			{ code: "RATE_LIMITED", status: 429 },
+			{ code: "UPSTREAM_RATE_LIMIT", status: 429 },
+			{ code: "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR", status: 429 },
+			{ code: "UPSTREAM_ERROR", status: 502 },
+			{ code: "BLOCKED", status: 502 },
+			{ code: "STT_UNAVAILABLE", status: 503 },
+			{ code: "UNSUPPORTED_STT_BACKEND", status: 503 },
+			{ code: "STATEFUL_FORWARDING_REPLAY_CACHE_FULL", status: 503 },
+		] as const;
 
 		for (const testCase of cases) {
-			const response = await app.request(`/v1/${testCase.operation}`, {
+			const base = createTestProvider();
+			const provider = {
+				...base,
+				operations: {
+					statusProbe: {
+						input: z.object({ value: z.string() }),
+						output: z.object({ ok: z.boolean() }),
+						handler: async () => {
+							throw new ProviderError("status probe", { code: testCase.code });
+						},
+					},
+				},
+			} satisfies ProviderDefinition;
+			const statusApp = createServerApp(provider, { logger: () => undefined });
+			const response = await statusApp.request("/v1/statusProbe", {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({
-					requestId: `req_${testCase.operation}`,
+					requestId: `req_${testCase.code}`,
 					input: { value: "hello" },
 				}),
 			});
@@ -1334,14 +1414,15 @@ describe("provider HTTP server", () => {
 				code: "transport_timeout",
 				message: "Request timed out",
 				requestId: "req_timeout",
+				retryable: true,
 				fix: "Increase timeout option",
-				details: {
-					next_action: "retry_with_longer_timeout",
-					category: "timeout",
-					taxonomyVersion: "2026-05-26",
-					retryable: true,
-				},
+				details: { next_action: "retry_with_longer_timeout" },
 			},
+		});
+		expect(errorObservability(response)).toEqual({
+			category: "timeout",
+			taxonomyVersion: "2026-05-26",
+			retryable: true,
 		});
 	});
 
@@ -1361,13 +1442,71 @@ describe("provider HTTP server", () => {
 				code: "transport_network_error",
 				message: "Network error",
 				requestId: "req_network",
-				details: {
-					category: "network",
-					taxonomyVersion: "2026-05-26",
-					retryable: true,
-				},
+				retryable: true,
 			},
 		});
+		expect(errorObservability(response)).toEqual({
+			category: "network",
+			taxonomyVersion: "2026-05-26",
+			retryable: true,
+		});
+	});
+
+	it("keeps TransportError details provider-owned and moves all observability fields to the header", async () => {
+		const response = await app.request("/v1/transportWithDetails", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_transport_details", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(502);
+		const body = await response.json();
+		expect(body.error.retryable).toBe(true);
+		expect(body.error.details).toEqual({ providerReason: "inventory_unavailable" });
+		expect(body.error.details).not.toHaveProperty("category");
+		expect(body.error.details).not.toHaveProperty("taxonomyVersion");
+		expect(body.error.details).not.toHaveProperty("upstreamStatus");
+		expect(errorObservability(response)).toEqual({
+			category: "upstream_http",
+			taxonomyVersion: "2026-05-26",
+			retryable: true,
+			upstreamStatus: 502,
+		});
+	});
+
+	it("lets provider-declared retryable:false override SDK derivation in body and header", async () => {
+		const response = await app.request("/v1/transportExplicitNonRetryable", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_explicit_retry", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(502);
+		const body = await response.json();
+		expect(body.error.retryable).toBe(false);
+		expect(body.error.details).toEqual({ retryable: true, providerPolicy: "independent" });
+		expect(errorObservability(response)).toEqual({
+			category: "upstream_http",
+			taxonomyVersion: "2026-05-26",
+			retryable: false,
+			upstreamStatus: 502,
+		});
+	});
+
+	it("passes non-record provider details through verbatim without a split wrapper", async () => {
+		for (const [operation, expected] of [
+			["transportStringDetails", "provider diagnostic"],
+			["transportArrayDetails", ["first", { providerCode: 17 }]],
+		] as const) {
+			const response = await app.request(`/v1/${operation}`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: `req_${operation}`, input: { value: "hello" } }),
+			});
+
+			expect(response.status).toBe(502);
+			expect((await response.json()).error.details).toEqual(expected);
+		}
 	});
 
 	it("surfaces credential_expired + retryable:true in the HTTP error for retryOnAuthRefresh operations", async () => {
@@ -1381,13 +1520,17 @@ describe("provider HTTP server", () => {
 		});
 
 		expect(response.status).toBe(401);
-		const body = (await response.json()) as {
-			error: { details?: Record<string, unknown> };
-		};
-		// Codex P1: the refresh/re-drive signal must reach Gateway/Credential
-		// Service end-to-end, not just live in memory.
-		expect(body.error.details).toMatchObject({
+		expect(await response.json()).toEqual({
+			error: {
+				code: "reauth_required",
+				message: "Provider session expired",
+				requestId: "req_session_retry",
+				retryable: true,
+			},
+		});
+		expect(errorObservability(response)).toEqual({
 			category: "credential_expired",
+			taxonomyVersion: "2026-05-26",
 			retryable: true,
 		});
 	});
@@ -1403,11 +1546,17 @@ describe("provider HTTP server", () => {
 		});
 
 		expect(response.status).toBe(401);
-		const body = (await response.json()) as {
-			error: { details?: Record<string, unknown> };
-		};
-		expect(body.error.details).toMatchObject({
+		expect(await response.json()).toEqual({
+			error: {
+				code: "reauth_required",
+				message: "Provider session expired",
+				requestId: "req_session_unmarked",
+				retryable: false,
+			},
+		});
+		expect(errorObservability(response)).toEqual({
 			category: "credential_expired",
+			taxonomyVersion: "2026-05-26",
 			retryable: false,
 		});
 	});
@@ -1428,13 +1577,14 @@ describe("provider HTTP server", () => {
 				code: "upstream_http_error",
 				message: "Upstream request failed with status 400",
 				requestId: "req_upstream_400",
-				details: {
-					category: "upstream_http",
-					taxonomyVersion: "2026-05-26",
-					retryable: false,
-					upstreamStatus: 400,
-				},
+				retryable: false,
 			},
+		});
+		expect(errorObservability(response)).toEqual({
+			category: "upstream_http",
+			taxonomyVersion: "2026-05-26",
+			retryable: false,
+			upstreamStatus: 400,
 		});
 	});
 
@@ -1455,12 +1605,13 @@ describe("provider HTTP server", () => {
 				message:
 					"Proxy source IP is not authorized. Add the runtime egress IP to the proxy provider allowlist.",
 				requestId: "req_proxy_auth_ip",
-				details: {
-					category: "anti_bot_blocked",
-					taxonomyVersion: "2026-05-26",
-					retryable: false,
-				},
+				retryable: false,
 			},
+		});
+		expect(errorObservability(response)).toEqual({
+			category: "anti_bot_blocked",
+			taxonomyVersion: "2026-05-26",
+			retryable: false,
 		});
 	});
 
@@ -1481,12 +1632,13 @@ describe("provider HTTP server", () => {
 				message:
 					"Proxy provider rejected a candidate endpoint during authentication. The SDK will retry or refresh the proxy pool when safe.",
 				requestId: "req_proxy_edge_auth",
-				details: {
-					category: "proxy_pool",
-					taxonomyVersion: "2026-05-26",
-					retryable: true,
-				},
+				retryable: true,
 			},
+		});
+		expect(errorObservability(response)).toEqual({
+			category: "proxy_pool",
+			taxonomyVersion: "2026-05-26",
+			retryable: true,
 		});
 	});
 
@@ -1555,8 +1707,13 @@ describe("provider HTTP server", () => {
 			});
 			const body = await response.json();
 			expect(body.error.code).toBe("PROXY_ALLOCATION_FAILED");
-			expect(body.error.details.category).toBe("proxy_pool");
-			const serialized = JSON.stringify({ body, decoded });
+			expect(body.error.retryable).toBe(true);
+			expect(body.error.details).toBeUndefined();
+			expect(errorObservability(response)).toMatchObject({
+				category: "proxy_pool",
+				retryable: true,
+			});
+			const serialized = JSON.stringify({ body, decoded, error: errorObservability(response) });
 			expect(serialized).not.toContain("redacted-test-key");
 			expect(serialized).not.toContain("5.78.24.25");
 			expect(serialized).not.toContain("af_con_failure");
@@ -1587,6 +1744,7 @@ describe("provider HTTP server", () => {
 				code: "internal_error",
 				message: "Internal error",
 				requestId: "req_5",
+				retryable: false,
 				details: {
 					retryable: false,
 					category: "internal_error",
@@ -1616,6 +1774,11 @@ describe("provider HTTP server", () => {
 		expect(body.error.details?.retryable).toBe(false);
 		expect(body.error.details?.category).toBe("internal_error");
 		expect(body.error.details?.errorClass).toBe("Error");
+		expect(errorObservability(response)).toEqual({
+			category: "internal_error",
+			taxonomyVersion: "2026-05-26",
+			retryable: false,
+		});
 	});
 
 	it("emits provider failure events through the injected logger", async () => {
@@ -1624,33 +1787,94 @@ describe("provider HTTP server", () => {
 			logger: (event) => events.push(event),
 		});
 
-		const response = await appWithLogger.request("/v1/transportTimeout", {
+		const response = await appWithLogger.request("/v1/transportWithDetails", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
-				requestId: "req_logged_timeout",
+				requestId: "req_logged_upstream",
 				input: { value: "hello" },
 			}),
 		});
 
-		expect(response.status).toBe(504);
+		expect(response.status).toBe(502);
+		const header = errorObservability(response);
 		expect(events).toEqual([
 			expect.objectContaining({
 				level: "error",
 				event: "provider_request_failed",
 				providerId: "test-provider",
 				kind: "operation",
-				route: "transportTimeout",
-				requestId: "req_logged_timeout",
-				status: 504,
+				route: "transportWithDetails",
+				requestId: "req_logged_upstream",
+				status: 502,
 				durationMs: expect.any(Number),
 				cpuUserMicros: expect.any(Number),
 				cpuSystemMicros: expect.any(Number),
 				cpuTotalMicros: expect.any(Number),
-				code: "transport_timeout",
+				code: "upstream_http_error",
 				errorClass: "TransportError",
+				upstreamStatus: header.upstreamStatus,
+				errorCategory: header.category,
+				taxonomyVersion: header.taxonomyVersion,
+				retryable: header.retryable,
 			}),
 		]);
+	});
+
+	it("emits a greppable signal for an unregistered code and preserves ValidationError as 400", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const appWithLogger = createServerApp(createTestProvider(), {
+			logger: (event) => events.push(event),
+		});
+
+		const unregistered = await appWithLogger.request("/v1/providerError", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_unregistered", input: { value: "hello" } }),
+		});
+		expect(unregistered.status).toBe(500);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_failed",
+				code: "SOME_NEW_CODE",
+				signal: "unregistered_provider_error_code",
+			}),
+		);
+
+		const validation = await appWithLogger.request("/v1/validationError", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_validation", input: { value: "hello" } }),
+		});
+		expect(validation.status).toBe(400);
+		expect(await validation.json()).toMatchObject({
+			error: { code: "SOME_NEW_CODE", retryable: false },
+		});
+		expect(errorObservability(validation)).toMatchObject({
+			category: "input_validation",
+			retryable: false,
+		});
+	});
+
+	it("returns zod invalid_request details with top-level retryability and observability header", async () => {
+		const response = await app.request("/v1/echo", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(400);
+		const body = await response.json();
+		expect(body.error.code).toBe("invalid_request");
+		expect(body.error.retryable).toBe(false);
+		expect(body.error.details).toEqual(
+			expect.arrayContaining([expect.objectContaining({ path: "requestId" })]),
+		);
+		expect(errorObservability(response)).toEqual({
+			category: "input_validation",
+			taxonomyVersion: "2026-05-26",
+			retryable: false,
+		});
 	});
 
 	it("returns 404 for unknown routes", async () => {
@@ -1661,7 +1885,12 @@ describe("provider HTTP server", () => {
 			error: {
 				code: "not_found",
 				message: "Not found",
+				retryable: false,
 			},
+		});
+		expect(errorObservability(response)).toMatchObject({
+			category: "provider_error",
+			retryable: false,
 		});
 	});
 });
@@ -1703,6 +1932,15 @@ describe("provider HTTP server cross-module error identity", () => {
 						});
 					},
 				},
+				dupValidation: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					handler: async () => {
+						throw new Dup.ValidationError("Invalid provider input", {
+							code: "SOME_NEW_CODE",
+						});
+					},
+				},
 				unbrandedLookalike: {
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
@@ -1730,16 +1968,17 @@ describe("provider HTTP server cross-module error identity", () => {
 		});
 	}
 
-	it("classifies a duplicate-instance ProviderError instead of 500 internal_error", async () => {
+	it("classifies a duplicate-instance unregistered ProviderError as provider-owned 500", async () => {
 		const app = await createDuplicateInstanceApp();
 		const response = await requestOperation(app, "dupProviderError");
 
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expect(await response.json()).toEqual({
 			error: {
 				code: "CONFIGURATION_ERROR",
 				message: "Missing provider service key",
 				requestId: "req_dupProviderError",
+				retryable: false,
 				fix: "Set the provider service key.",
 			},
 		});
@@ -1750,9 +1989,18 @@ describe("provider HTTP server cross-module error identity", () => {
 		const response = await requestOperation(app, "dupSessionExpired");
 
 		expect(response.status).toBe(401);
-		const body = await response.json();
-		expect(body.error.code).toBe("reauth_required");
-		expect(body.error.details.category).toBe("credential_expired");
+		expect(await response.json()).toEqual({
+			error: {
+				code: "reauth_required",
+				message: "Provider session expired",
+				requestId: "req_dupSessionExpired",
+				retryable: false,
+			},
+		});
+		expect(errorObservability(response)).toMatchObject({
+			category: "credential_expired",
+			retryable: false,
+		});
 	});
 
 	it("classifies a duplicate-instance TransportError as a 504 upstream failure", async () => {
@@ -1761,6 +2009,17 @@ describe("provider HTTP server cross-module error identity", () => {
 
 		expect(response.status).toBe(504);
 		expect((await response.json()).error.code).toBe("transport_timeout");
+	});
+
+	it("keeps a duplicate-instance ValidationError with an unregistered code at 400", async () => {
+		const app = await createDuplicateInstanceApp();
+		const response = await requestOperation(app, "dupValidation");
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toMatchObject({
+			error: { code: "SOME_NEW_CODE", retryable: false },
+		});
+		expect(errorObservability(response)).toMatchObject({ category: "input_validation" });
 	});
 
 	it("keeps an unbranded lookalike as 500 internal_error", async () => {
@@ -1773,6 +2032,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				code: "internal_error",
 				message: "Internal error",
 				requestId: "req_unbrandedLookalike",
+				retryable: false,
 				details: {
 					retryable: false,
 					category: "internal_error",
@@ -1824,9 +2084,11 @@ describe("SDK-owned secret enforcement over HTTP", () => {
 			expect(body.error.code).toBe("MISSING_SECRET");
 			expect(body.error.message).toBe(`Missing required provider secret: ${API_KEY_ENV}`);
 			expect(body.error.fix).toContain(API_KEY_ENV);
-			expect(body.error.details).toEqual({
+			expect(body.error.retryable).toBe(false);
+			expect(body.error.details).toBeUndefined();
+			expect(errorObservability(response)).toEqual({
 				category: "credential_unavailable",
-				taxonomyVersion: expect.any(String),
+				taxonomyVersion: "2026-05-26",
 				retryable: false,
 			});
 
@@ -1884,7 +2146,12 @@ describe("SDK-owned secret enforcement over HTTP", () => {
 			expect(response.status).toBe(400);
 			const body = await response.json();
 			expect(body.error.code).toBe("MISSING_SECRET");
-			expect(body.error.details.category).toBe("credential_unavailable");
+			expect(body.error.retryable).toBe(false);
+			expect(body.error.details).toBeUndefined();
+			expect(errorObservability(response)).toMatchObject({
+				category: "credential_unavailable",
+				retryable: false,
+			});
 		});
 	});
 

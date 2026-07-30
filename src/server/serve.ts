@@ -9,6 +9,7 @@ import {
 	isProviderError,
 	isSessionExpiredError,
 	isTransportError,
+	isValidationError,
 	ProviderError,
 } from "../errors.js";
 import {
@@ -108,6 +109,8 @@ import {
 
 const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_PORT = 3000;
+/** Compact SDK-owned error classification emitted separately from the public response body. */
+export const ERROR_OBSERVABILITY_HEADER = "X-ApiFuse-Error-Observability";
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
@@ -486,6 +489,7 @@ export type ProviderServerLogEvent =
 			errorCategory?: ProviderErrorCategory;
 			taxonomyVersion?: string;
 			retryable?: boolean;
+			signal?: "unregistered_provider_error_code";
 			issues?: Array<{ path: string; code: string; message: string }>;
 	  })
 	| {
@@ -604,26 +608,29 @@ function zodDetails(error: z.ZodError): Array<{
 }
 
 function toErrorResponse(error: unknown, requestId?: string): OperationErrorResponse {
+	const observability = errorObservabilityDetails(error);
 	if (error instanceof StatefulRoutingDeadlineError) {
 		return {
 			error: {
 				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
 				message: "Stateful forwarding deadline expired.",
 				...(requestId ? { requestId } : {}),
+				retryable: observability.retryable,
 				details: { retryable: false },
 			},
 		};
 	}
 
 	if (isProviderError(error)) {
-		const details = publicProviderErrorDetails(error);
+		const details = error.details;
 		return {
 			error: {
 				code: error.code ?? "provider_error",
 				message: publicProviderErrorMessage(error),
 				...(requestId ? { requestId } : {}),
+				retryable: observability.retryable,
 				...(error.fix ? { fix: error.fix } : {}),
-				...(details ? { details } : {}),
+				...(details !== undefined ? { details } : {}),
 			},
 		};
 	}
@@ -634,6 +641,7 @@ function toErrorResponse(error: unknown, requestId?: string): OperationErrorResp
 				code: "invalid_request",
 				message: "Invalid request body",
 				...(requestId ? { requestId } : {}),
+				retryable: observability.retryable,
 				details: zodDetails(error),
 			},
 		};
@@ -650,6 +658,7 @@ function toErrorResponse(error: unknown, requestId?: string): OperationErrorResp
 			code: "internal_error",
 			message: "Internal error",
 			...(requestId ? { requestId } : {}),
+			retryable: observability.retryable,
 			details: {
 				retryable: false,
 				category: "internal_error",
@@ -657,29 +666,6 @@ function toErrorResponse(error: unknown, requestId?: string): OperationErrorResp
 			},
 		},
 	};
-}
-
-function publicProviderErrorDetails(error: ProviderError): unknown {
-	const providerDetails = error.details;
-	const observabilityDetails = providerObservabilityDetails(error);
-
-	if (providerDetails === undefined) {
-		return observabilityDetails;
-	}
-	if (observabilityDetails === undefined) {
-		return providerDetails;
-	}
-	if (isPlainRecord(providerDetails) && isPlainRecord(observabilityDetails)) {
-		return { ...providerDetails, ...observabilityDetails };
-	}
-	return {
-		provider: providerDetails,
-		observability: observabilityDetails,
-	};
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 // Accepts `unknown` so the branded guards narrow cleanly from the top: the
@@ -751,6 +737,58 @@ function providerObservabilityDetails(error: unknown):
 	};
 }
 
+type ErrorObservabilityDetails = {
+	category: ProviderErrorCategory;
+	taxonomyVersion: string;
+	retryable: boolean;
+	upstreamStatus?: number;
+};
+
+function errorObservabilityDetails(error: unknown): ErrorObservabilityDetails {
+	const providerDetails = providerObservabilityDetails(error);
+	if (providerDetails) return providerDetails;
+
+	if (error instanceof z.ZodError || isValidationError(error)) {
+		return {
+			category: "input_validation",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: isProviderError(error) ? (error.options?.retryable ?? false) : false,
+		};
+	}
+
+	if (error instanceof StatefulRoutingDeadlineError) {
+		return {
+			category: "timeout",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: false,
+		};
+	}
+
+	if (isProviderError(error)) {
+		return {
+			category: error.options?.category ?? "provider_error",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: error.options?.retryable ?? false,
+		};
+	}
+
+	return {
+		category: "internal_error",
+		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+		retryable: false,
+	};
+}
+
+function responseWithErrorObservability(response: Response, error: unknown): Response {
+	const headers = new Headers(response.headers);
+	headers.set(ERROR_OBSERVABILITY_HEADER, JSON.stringify(errorObservabilityDetails(error)));
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
 function publicProviderErrorMessage(error: ProviderError): string {
 	if (isTransportError(error)) {
 		if (error.code === PROXY_AUTH_IP_DENIED_CODE) {
@@ -781,6 +819,9 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 	}
 	if (error instanceof StatefulRoutingDeadlineError) {
 		return 504;
+	}
+	if (isValidationError(error)) {
+		return 400;
 	}
 
 	if (isTransportError(error)) {
@@ -813,7 +854,7 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 				return 503;
 		}
 
-		return 400;
+		return 500;
 	}
 
 	return 500;
@@ -847,7 +888,9 @@ function logProviderError(
 				: "internal_error";
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
-	const details = isProviderError(error) ? providerObservabilityDetails(error) : undefined;
+	const details = errorObservabilityDetails(error);
+	const isUnregisteredProviderErrorCode =
+		status === 500 && isProviderError(error) && !isValidationError(error);
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	emit({
 		level: status >= 500 ? "error" : "warn",
@@ -861,15 +904,12 @@ function logProviderError(
 		code,
 		errorClass,
 		message,
-		...(isTransportError(error) && error.upstreamStatus
-			? { upstreamStatus: error.upstreamStatus }
-			: {}),
-		...(details
-			? {
-					errorCategory: details.category,
-					taxonomyVersion: details.taxonomyVersion,
-					retryable: details.retryable,
-				}
+		...(details.upstreamStatus ? { upstreamStatus: details.upstreamStatus } : {}),
+		errorCategory: details.category,
+		taxonomyVersion: details.taxonomyVersion,
+		retryable: details.retryable,
+		...(isUnregisteredProviderErrorCode
+			? { signal: "unregistered_provider_error_code" as const }
 			: {}),
 		...(error instanceof z.ZodError ? { issues: zodDetails(error) } : {}),
 	});
@@ -1614,17 +1654,10 @@ export function createServerApp(
 		});
 	}
 
-	app.notFound((c) =>
-		c.json(
-			{
-				error: {
-					code: "not_found",
-					message: "Not found",
-				},
-			},
-			404,
-		),
-	);
+	app.notFound((c) => {
+		const error = new ProviderError("Not found", { code: "not_found", retryable: false });
+		return responseWithErrorObservability(c.json(toErrorResponse(error), 404), error);
+	});
 
 	app.get("/health", (c) =>
 		c.json({
@@ -1786,7 +1819,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -1850,7 +1886,10 @@ export function createServerApp(
 			);
 			const telemetryHeader = proxyTelemetry.toHeaderValue();
 			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -1887,7 +1926,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -1924,7 +1966,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -1961,7 +2006,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -1998,7 +2046,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -2035,7 +2086,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 

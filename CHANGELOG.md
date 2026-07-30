@@ -82,6 +82,8 @@
 
 ## Unreleased
 
+- **Breaking:** Provider error `details` is now passed through verbatim; SDK observability fields (`category`, `taxonomyVersion`, `upstreamStatus`, and derived `retryable`) are no longer merged into the public body. Error envelopes now require top-level `retryable`, and the removed observability metadata is available in the new `X-ApiFuse-Error-Observability` response header.
+- Unregistered `ProviderError` codes now default to HTTP 500 instead of 400 and emit an `unregistered_provider_error_code` structured-log signal; registered mappings and `ValidationError` HTTP 400 behavior are unchanged.
 - Add an opt-in native connection idle read timeout with a typed error, independently from TCP/SOCKS/TLS establishment deadlines.
 - Add opt-in `maxBodyBytes` enforcement to stealth fetches and redirect hops, aborting oversized decoded response streams with `response_too_large`.
 - Resolve relative date tokens in fixture requests before input-schema validation, add KST capture-date `fixtures.recordedAt` metadata, and support explicit KST/UTC calendars in the shared health-input resolver.

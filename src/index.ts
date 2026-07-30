@@ -135,7 +135,12 @@ export {
 	sensitive,
 	z,
 } from "./schema.js";
-export { createServerApp, type ServeOptions, serve } from "./server/index.js";
+export {
+	createServerApp,
+	ERROR_OBSERVABILITY_HEADER,
+	type ServeOptions,
+	serve,
+} from "./server/index.js";
 export { getStealthProfile, listStealthProfiles } from "./stealth/profiles.js";
 export * from "./stream.js";
 export type {
