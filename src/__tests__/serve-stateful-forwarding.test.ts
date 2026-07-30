@@ -2,7 +2,11 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
 import { statefulSignedHeaders } from "../../dist/stateful/index.js";
-import { createServerApp, type ProviderServerOperationExecutorInput } from "../server/serve.js";
+import {
+	createServerApp,
+	type ProviderServerLogEvent,
+	type ProviderServerOperationExecutorInput,
+} from "../server/serve.js";
 import type { ProviderDefinition } from "../types.js";
 
 const STATEFUL_ROUTE = "/__apifuse/stateful/operations";
@@ -217,7 +221,6 @@ describe("signed stateful operation forwarding", () => {
 				message: "Stateful forwarding deadline expired.",
 				requestId: "req-stateful-forward",
 				retryable: false,
-				details: { retryable: false },
 			},
 		});
 		expect(executions).toBe(0);
@@ -257,7 +260,6 @@ describe("signed stateful operation forwarding", () => {
 				message: "Stateful forwarding deadline expired.",
 				requestId: "req-stateful-forward",
 				retryable: false,
-				details: { retryable: false },
 			},
 		});
 		expect(validationSignal?.aborted).toBe(true);
@@ -291,8 +293,9 @@ describe("signed stateful operation forwarding", () => {
 	});
 
 	it("rejects missing signature headers with a structured provider error", async () => {
+		const events: ProviderServerLogEvent[] = [];
 		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
-			logger: () => {},
+			logger: (event) => events.push(event),
 			statefulForwarding: forwardingConfig(),
 			internalOperationExecutor: async () => ({ accepted: true }),
 		});
@@ -312,6 +315,15 @@ describe("signed stateful operation forwarding", () => {
 		);
 		expect(responseText).not.toContain(FORWARDING_SECRET);
 		expect(responseText).not.toContain("sensitive-envelope-material");
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_failed",
+				code: "STATEFUL_FORWARDING_SIGNATURE_MISSING",
+			}),
+		);
+		expect(events).not.toContainEqual(
+			expect.objectContaining({ signal: "unregistered_provider_error_code" }),
+		);
 	});
 
 	it("rejects an invalid signature without echoing secret material", async () => {

@@ -409,10 +409,13 @@ Provider-server failures use a stable public envelope:
 }
 ```
 
-`retryable` is always present. Set `retryable` in the `ProviderError` options
-when the provider knows the answer; an explicit `true` or `false` wins over SDK
-derivation. When it is omitted, the SDK derives the value for its known error
-classes and otherwise defaults to `false`. Existing optional `fix` guidance is
+`retryable` is always present on responses emitted by the current SDK. Set
+`retryable` in the `ProviderError` options when the provider knows the answer;
+an explicit `true` or `false` wins over SDK derivation. When it is omitted, the
+SDK derives the value for its known error classes and otherwise defaults to
+`false`. During stateful rolling upgrades, the forwarding client also accepts
+an older owner response that omits `retryable` and treats it as `false` without
+loosening the emitted response contract. Existing optional `fix` guidance is
 also preserved when a `ProviderError` supplies it.
 
 `details` belongs exclusively to the provider. The server passes
@@ -432,14 +435,27 @@ Treat this header as telemetry, not as provider-controlled public error detail.
 Its category, taxonomy version, retryability, and optional upstream status match
 the structured `provider_request_failed` log event.
 
-Only error codes registered in the SDK status mapping receive a non-500 HTTP
-status. An unregistered `ProviderError` code returns HTTP 500 and emits the
-greppable `unregistered_provider_error_code` signal with the code in the
+Registered error-code mappings take precedence for every `ProviderError`,
+including `ValidationError`:
+
+| Error code or fallback | HTTP status |
+| --- | ---: |
+| `AUTH_REQUIRED`, `reauth_required` | 401 |
+| `MISSING_SECRET` | 400 |
+| `NOT_FOUND`, `not_found`, `NO_DATA` | 404 |
+| `RATE_LIMITED`, `UPSTREAM_RATE_LIMIT`, `LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR` | 429 |
+| `UPSTREAM_ERROR`, `BLOCKED` | 502 |
+| `STT_UNAVAILABLE`, `UNSUPPORTED_STT_BACKEND`, `STATEFUL_FORWARDING_REPLAY_CACHE_FULL` | 503 |
+| Unregistered input `ValidationError` code | 400 |
+| Other unregistered `ProviderError` code | 500 |
+
+An unregistered non-validation `ProviderError` code returns HTTP 500 and emits
+the greppable `unregistered_provider_error_code` signal with the code in the
 structured failure log. Before publishing a new code, register its status in
 the SDK mapping and add it to the mapping tests; declaring it only in operation
-documentation does not change runtime status selection. `ValidationError`
-remains HTTP 400 even when its code is new, because it represents caller input
-validation.
+documentation does not change runtime status selection. The HTTP 400
+`ValidationError` behavior is only the fallback for unregistered input
+validation codes; a registered code such as `NOT_FOUND` retains its mapped 404.
 
 ### Declared secrets are SDK-enforced
 

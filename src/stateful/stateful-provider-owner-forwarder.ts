@@ -35,6 +35,14 @@ type FetchTransport = (url: string | URL | Request, init?: RequestInit) => Promi
 
 const MAX_FORWARDED_HEADERS = 32;
 const MAX_FORWARDED_HEADER_BYTES = 8 * 1024;
+// Inbound compatibility boundary for rolling deploys: older owner pods omit
+// top-level retryable. Emitted responses remain strict via
+// OperationErrorResponseSchema.
+const ForwardedOperationErrorResponseSchema = OperationErrorResponseSchema.extend({
+	error: OperationErrorResponseSchema.shape.error.extend({
+		retryable: z.boolean().optional().default(false),
+	}),
+});
 const SENSITIVE_HEADER_NAMES = new Set([
 	"authorization",
 	"cookie",
@@ -253,7 +261,7 @@ async function parseForwardedResponse(response: Response): Promise<StatefulOpera
 		return { output: success.data.data };
 	}
 
-	const error = OperationErrorResponseSchema.safeParse(body);
+	const error = ForwardedOperationErrorResponseSchema.safeParse(body);
 	if (error.success) {
 		throw new StatefulOwnerForwardingError({
 			code: error.data.error.code,

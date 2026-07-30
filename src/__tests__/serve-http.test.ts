@@ -14,6 +14,7 @@ import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
+	type ErrorObservabilityDetails,
 	type ProviderServerLogEvent,
 	resolveProviderProxyAffinityKey,
 } from "../server/serve.js";
@@ -21,11 +22,11 @@ import { event } from "../stream.js";
 import type { ProviderDefinition } from "../types.js";
 import { HttpRetryPreset } from "../types.js";
 
-function errorObservability(response: Response): Record<string, unknown> {
+function errorObservability(response: Response): ErrorObservabilityDetails {
 	const value = response.headers.get(ERROR_OBSERVABILITY_HEADER);
 	expect(value).toBeTruthy();
 	expect(value).not.toMatch(/[\r\n]/);
-	return JSON.parse(value ?? "");
+	return JSON.parse(value as string) as ErrorObservabilityDetails;
 }
 
 function createTestProvider(state: { streamCancelled?: boolean } = {}) {
@@ -349,6 +350,11 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 				handler: async () => {
 					throw new ValidationError("Invalid provider input", { code: "SOME_NEW_CODE" });
 				},
+			},
+			invalidOutput: {
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async () => ({ ok: "not-a-boolean" }) as never,
 			},
 			providerActionRequired: {
 				input: z.object({ value: z.string() }),
@@ -1398,6 +1404,45 @@ describe("provider HTTP server", () => {
 		}
 	});
 
+	it("applies registered statuses before the ValidationError fallback", async () => {
+		const cases = [
+			{ kind: "validation", code: "NOT_FOUND", status: 404 },
+			{ kind: "validation", code: "RATE_LIMITED", status: 429 },
+			{ kind: "validation", code: "UNREGISTERED_VALIDATION", status: 400 },
+			{ kind: "provider", code: "UNREGISTERED_PROVIDER", status: 500 },
+		] as const;
+
+		for (const testCase of cases) {
+			const base = createTestProvider();
+			const provider = {
+				...base,
+				operations: {
+					statusProbe: {
+						input: z.object({ value: z.string() }),
+						output: z.object({ ok: z.boolean() }),
+						handler: async () => {
+							const ErrorConstructor =
+								testCase.kind === "validation" ? ValidationError : ProviderError;
+							throw new ErrorConstructor("status probe", { code: testCase.code });
+						},
+					},
+				},
+			} satisfies ProviderDefinition;
+			const statusApp = createServerApp(provider, { logger: () => undefined });
+			const response = await statusApp.request("/v1/statusProbe", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: `req_${testCase.code}`,
+					input: { value: "hello" },
+				}),
+			});
+
+			expect(response.status).toBe(testCase.status);
+			expect((await response.json()).error.code).toBe(testCase.code);
+		}
+	});
+
 	it("maps provider transport timeout to 504 instead of caller 400", async () => {
 		const response = await app.request("/v1/transportTimeout", {
 			method: "POST",
@@ -1854,6 +1899,25 @@ describe("provider HTTP server", () => {
 			category: "input_validation",
 			retryable: false,
 		});
+
+		const sdkOwned = await appWithLogger.request("/v1/rawSseResponse", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_sdk_owned", input: { value: "hello" } }),
+		});
+		expect(sdkOwned.status).toBe(500);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_failed",
+				code: "SSE_RESULT_UNSUPPORTED",
+			}),
+		);
+		expect(events).not.toContainEqual(
+			expect.objectContaining({
+				code: "SSE_RESULT_UNSUPPORTED",
+				signal: "unregistered_provider_error_code",
+			}),
+		);
 	});
 
 	it("returns zod invalid_request details with top-level retryability and observability header", async () => {
@@ -1872,6 +1936,28 @@ describe("provider HTTP server", () => {
 		);
 		expect(errorObservability(response)).toEqual({
 			category: "input_validation",
+			taxonomyVersion: "2026-05-26",
+			retryable: false,
+		});
+	});
+
+	it("classifies invalid handler output as a non-client output validation failure", async () => {
+		const response = await app.request("/v1/invalidOutput", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_invalid_output", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(500);
+		expect(await response.json()).toMatchObject({
+			error: {
+				code: "OUTPUT_VALIDATION_FAILED",
+				requestId: "req_invalid_output",
+				retryable: false,
+			},
+		});
+		expect(errorObservability(response)).toEqual({
+			category: "output_validation",
 			taxonomyVersion: "2026-05-26",
 			retryable: false,
 		});
@@ -1939,6 +2025,17 @@ describe("provider HTTP server cross-module error identity", () => {
 						throw new Dup.ValidationError("Invalid provider input", {
 							code: "SOME_NEW_CODE",
 						});
+					},
+				},
+				preBrandValidation: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					handler: async () => {
+						const error = new Dup.ProviderError("Invalid provider input", {
+							code: "SOME_NEW_CODE",
+						});
+						error.name = "ValidationError";
+						throw error;
 					},
 				},
 				unbrandedLookalike: {
@@ -2014,6 +2111,17 @@ describe("provider HTTP server cross-module error identity", () => {
 	it("keeps a duplicate-instance ValidationError with an unregistered code at 400", async () => {
 		const app = await createDuplicateInstanceApp();
 		const response = await requestOperation(app, "dupValidation");
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toMatchObject({
+			error: { code: "SOME_NEW_CODE", retryable: false },
+		});
+		expect(errorObservability(response)).toMatchObject({ category: "input_validation" });
+	});
+
+	it("keeps a pre-validation-brand cross-module ValidationError at 400", async () => {
+		const app = await createDuplicateInstanceApp();
+		const response = await requestOperation(app, "preBrandValidation");
 
 		expect(response.status).toBe(400);
 		expect(await response.json()).toMatchObject({

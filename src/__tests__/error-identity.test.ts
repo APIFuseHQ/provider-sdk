@@ -70,6 +70,20 @@ describe("cross-module ProviderError brand guards", () => {
 		expect(SDK.isTransportError(err)).toBe(false);
 	});
 
+	it("recognizes a pre-validation-brand ValidationError by ProviderError brand and name", () => {
+		const err = new SDK.ProviderError("Invalid input", { code: "SOME_NEW_CODE" });
+		err.name = "ValidationError";
+
+		expect(
+			Object.getOwnPropertyDescriptor(
+				err,
+				Symbol.for("@apifuse/provider-sdk/error-kind/validation@1"),
+			),
+		).toBeUndefined();
+		expect(SDK.isProviderError(err)).toBe(true);
+		expect(SDK.isValidationError(err)).toBe(true);
+	});
+
 	it("does not accept an unbranded name-only lookalike", () => {
 		const lookalike = {
 			name: "ProviderError",

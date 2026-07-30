@@ -111,6 +111,12 @@ const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_PORT = 3000;
 /** Compact SDK-owned error classification emitted separately from the public response body. */
 export const ERROR_OBSERVABILITY_HEADER = "X-ApiFuse-Error-Observability";
+export type ErrorObservabilityDetails = {
+	category: ProviderErrorCategory;
+	taxonomyVersion: string;
+	retryable: boolean;
+	upstreamStatus?: number;
+};
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
@@ -616,7 +622,6 @@ function toErrorResponse(error: unknown, requestId?: string): OperationErrorResp
 				message: "Stateful forwarding deadline expired.",
 				...(requestId ? { requestId } : {}),
 				retryable: observability.retryable,
-				details: { retryable: false },
 			},
 		};
 	}
@@ -673,14 +678,7 @@ function toErrorResponse(error: unknown, requestId?: string): OperationErrorResp
 // narrowing from a ProviderError-typed value would collapse the negative branch
 // to `never`. Narrowing from unknown avoids that while still recognizing errors
 // from a duplicate SDK module instance.
-function providerObservabilityDetails(error: unknown):
-	| {
-			category: ProviderErrorCategory;
-			taxonomyVersion: string;
-			retryable: boolean;
-			upstreamStatus?: number;
-	  }
-	| undefined {
+function providerObservabilityDetails(error: unknown): ErrorObservabilityDetails | undefined {
 	// Session-expiry surfaces the credential_expired category + the opt-in
 	// retryable signal so Gateway/Credential Service can refresh and re-drive the
 	// operation (see design.md §4.3 D3). Without this branch the auth error would
@@ -737,20 +735,16 @@ function providerObservabilityDetails(error: unknown):
 	};
 }
 
-type ErrorObservabilityDetails = {
-	category: ProviderErrorCategory;
-	taxonomyVersion: string;
-	retryable: boolean;
-	upstreamStatus?: number;
-};
-
 function errorObservabilityDetails(error: unknown): ErrorObservabilityDetails {
 	const providerDetails = providerObservabilityDetails(error);
 	if (providerDetails) return providerDetails;
 
 	if (error instanceof z.ZodError || isValidationError(error)) {
 		return {
-			category: "input_validation",
+			category:
+				isProviderError(error) && error.options?.category
+					? error.options.category
+					: "input_validation",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: isProviderError(error) ? (error.options?.retryable ?? false) : false,
 		};
@@ -820,14 +814,6 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 	if (error instanceof StatefulRoutingDeadlineError) {
 		return 504;
 	}
-	if (isValidationError(error)) {
-		return 400;
-	}
-
-	if (isTransportError(error)) {
-		return error.code === "transport_timeout" ? 504 : 502;
-	}
-
 	if (isProviderError(error)) {
 		switch (error.code) {
 			case "AUTH_REQUIRED":
@@ -853,12 +839,90 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 			case "STATEFUL_FORWARDING_REPLAY_CACHE_FULL":
 				return 503;
 		}
+		if (isTransportError(error)) {
+			return error.code === "transport_timeout" ? 504 : 502;
+		}
+		if (isValidationError(error)) {
+			return error.options?.category === "output_validation" ? 500 : 400;
+		}
 
 		return 500;
 	}
 
 	return 500;
 }
+
+// Codes emitted by SDK-owned paths must never be attributed to provider
+// authors by the unregistered-code signal, even when their intentional status
+// is 500. Provider-authored codes not in this registry retain the signal.
+const SDK_OWNED_PROVIDER_ERROR_CODES = new Set([
+	"AUTH_PROMPT_UNAVAILABLE",
+	"BROWSER_CDP_POOL_REQUIRED",
+	"BROWSER_RUNTIME_UNSUPPORTED",
+	"STEALTH_RUNTIME_UNSUPPORTED",
+	"SSE_EVENT_UNDECLARED",
+	"STREAM_EVENT_TOO_LARGE",
+	"STREAM_CHUNK_TOO_LARGE",
+	"SSE_RESULT_UNSUPPORTED",
+	"STREAM_RESULT_UNSUPPORTED",
+	"AUTH_FLOW_NOT_CONFIGURED",
+	"refresh_not_supported",
+	"RUNTIME_UNSUPPORTED",
+	"PROVIDER_STATE_UNSUPPORTED",
+	"CHOICE_TOKEN_MASTER_SECRET_NOT_CONFIGURED",
+	"CHOICE_STATE_PAYLOAD_TOO_LARGE",
+	"CHOICE_STATE_UNAVAILABLE",
+	"CHOICE_CONTEXT_REQUIRED",
+	"unsupported_stealth_cookie_store_version",
+	"provider_secret_error",
+	"credential_key_error",
+	"credential_mode_error",
+	"flow_expired",
+	"turn_validation_error",
+	"context_access_error",
+	"UNSUPPORTED_STT_OPTION",
+	"INVALID_STT_AUDIO",
+	"STT_AUDIO_TOO_LARGE",
+	"STT_UPSTREAM_FAILED",
+	"INVALID_STT_VERIFICATION_CODE_OPTIONS",
+	"NO_CODE_FOUND",
+	"AMBIGUOUS_CODE",
+	"retry_invalid_policy",
+	"retry_unsafe_method",
+	"stealth_cookie_store_serialize_failed",
+	"response_too_large",
+	"transport_stream_unavailable",
+	"transport_invalid_method",
+	"http_transport_override_unsupported",
+	"transport_invalid_url",
+	"retry_exhausted",
+	"auth_abort_unsafe_data",
+	"credentials_auth_missing_credential_keys",
+	"credentials_auth_missing_credential",
+	"credentials_auth_invalid_login_result",
+	"credentials_auth_unknown_challenge",
+	"credentials_auth_unknown_pending_challenge",
+	"STATEFUL_FORWARDING_NOT_CONFIGURED",
+	"STATEFUL_FORWARDING_SIGNATURE_MISSING",
+	"STATEFUL_FORWARDING_NONCE_INVALID",
+	"STATEFUL_FORWARDING_TIMESTAMP_INVALID",
+	"STATEFUL_FORWARDING_SIGNATURE_INVALID",
+	"STATEFUL_FORWARDING_REPLAY_DETECTED",
+	"STATEFUL_FORWARDING_REPLAY_CACHE_FULL",
+	"STATEFUL_FORWARDING_ENVELOPE_INVALID",
+	"STATEFUL_FORWARDING_PROVIDER_MISMATCH",
+	"STATEFUL_FORWARDING_SOURCE_POD_MISMATCH",
+	"STATEFUL_FORWARDING_OWNER_FENCE_INVALID",
+	"STATEFUL_FORWARDING_REQUEST_FAILED",
+	"STATEFUL_FORWARDING_CONTEXT_MISSING",
+	"STATEFUL_FORWARDING_BAD_RESPONSE",
+	"STATEFUL_INTERNAL_EXECUTOR_NOT_CONFIGURED",
+	"STATEFUL_FILE_FORWARDING_UNSUPPORTED",
+	"STATEFUL_CONTROL_PLANE_OPERATION_AMBIGUOUS",
+	"STATEFUL_CONTROL_PLANE_REQUEST_FAILED",
+	"STATEFUL_CONTROL_PLANE_HTTP_ERROR",
+	"STATEFUL_CONTROL_PLANE_INVALID_RESPONSE",
+]);
 
 function extractRequestId(raw: unknown): string | undefined {
 	if (!raw || typeof raw !== "object") {
@@ -890,7 +954,11 @@ function logProviderError(
 	const message = error instanceof Error ? error.message : String(error);
 	const details = errorObservabilityDetails(error);
 	const isUnregisteredProviderErrorCode =
-		status === 500 && isProviderError(error) && !isValidationError(error);
+		status === 500 &&
+		isProviderError(error) &&
+		!isValidationError(error) &&
+		typeof error.code === "string" &&
+		!SDK_OWNED_PROVIDER_ERROR_CODES.has(error.code);
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	emit({
 		level: status >= 500 ? "error" : "warn",

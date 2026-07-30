@@ -165,7 +165,10 @@ export function isTransportError(value: unknown): value is TransportError {
 }
 
 export function isValidationError(value: unknown): value is ValidationError {
-	return isProviderError(value) && hasOwnBrand(value, VALIDATION_BRAND, true);
+	return (
+		isProviderError(value) &&
+		(hasOwnBrand(value, VALIDATION_BRAND, true) || value.name === "ValidationError")
+	);
 }
 
 export class ProviderSecretError extends ProviderError {

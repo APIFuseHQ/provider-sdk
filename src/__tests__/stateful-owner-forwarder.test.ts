@@ -5,6 +5,7 @@ import {
 	HttpStatefulOwnerForwarder,
 	StatefulOwnerForwardingError,
 } from "../../dist/stateful/index.js";
+import { OperationErrorResponseSchema } from "../../dist/server/index.js";
 
 const sessionKey = buildSessionKey({
 	providerId: "test-provider",
@@ -50,6 +51,32 @@ const request = {
 };
 
 describe("HttpStatefulOwnerForwarder transport failures", () => {
+	it("accepts an older owner error without loosening the emitted response schema", async () => {
+		const olderOwnerError = {
+			error: {
+				code: "reauth_required",
+				message: "Provider session expired",
+			},
+		};
+		expect(OperationErrorResponseSchema.safeParse(olderOwnerError).success).toBe(false);
+
+		const forwarder = new HttpStatefulOwnerForwarder({
+			currentPodId: "pod-source",
+			secret: "secret",
+			fetch: async () => Response.json(olderOwnerError, { status: 401 }),
+		});
+		const error = await forwarder
+			.forward(owner("http://pod-owner"), request, new AbortController().signal)
+			.catch((cause) => cause);
+
+		expect(error).toBeInstanceOf(StatefulOwnerForwardingError);
+		expect(error).toMatchObject({
+			code: "reauth_required",
+			message: "Provider session expired",
+			status: 401,
+		});
+	});
+
 	it("wraps URL construction errors", async () => {
 		const forwarder = new HttpStatefulOwnerForwarder({
 			currentPodId: "pod-source",

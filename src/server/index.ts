@@ -1,6 +1,7 @@
 export {
 	createServerApp,
 	ERROR_OBSERVABILITY_HEADER,
+	type ErrorObservabilityDetails,
 	type ProviderServerCloseOptions,
 	type ProviderServerHandle,
 	type ProviderServerLogEvent,
