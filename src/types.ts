@@ -824,6 +824,12 @@ export interface ProviderProxyPolicy {
 		affinity?: ProviderProxySessionAffinity;
 		lifetimeMinutes?: number;
 		poolSize?: number;
+		/**
+		 * Seconds before hard sticky expiry at which native connections receive
+		 * the `expiring` event so the provider can drain and reconnect cleanly.
+		 * Declared by the provider; the SDK does not assume a default cut point.
+		 */
+		drainLeadSeconds?: number;
 	};
 }
 
@@ -1295,6 +1301,8 @@ export interface NativeNetworkConnectInput {
 	readonly rejectUnauthorized?: boolean;
 	readonly timeoutMs?: number;
 	readonly signal?: AbortSignal;
+	/** Overrides the credential-derived sticky affinity key. */
+	readonly affinityKey?: string;
 }
 
 export type NativeNetworkConnectOptions = Omit<
@@ -1320,8 +1328,38 @@ export interface NativeNetworkEgressGrant {
 /** Consumer-facing alias used by native TCP providers. */
 export type NativeTcpEgressGrant = NativeNetworkEgressGrant;
 
+/** Resolved egress identity for a native connection routed through a proxy. */
+export interface NativeProxyEgressInfo {
+	readonly vendor: ProviderProxyProvider;
+	readonly sticky: boolean;
+	/** Vendor sticky session id (sid). Absent for rotating sessions. */
+	readonly sessionId?: string;
+	/** Hard expiry of the sticky binding, ISO 8601. */
+	readonly expiresAt?: string;
+}
+
+export type NativeProxyExpiringReason = "sticky_expiry";
+
+export interface NativeProxyExpiringEvent {
+	readonly expiresAt: string;
+	readonly leadSeconds: number;
+	readonly reason: NativeProxyExpiringReason;
+}
+
+/**
+ * Cooperative drain handler. The SDK awaits this before closing a socket whose
+ * sticky proxy binding is about to expire, then force-closes at hard expiry.
+ */
+export type NativeProxyDrainHandler = (
+	event: NativeProxyExpiringEvent,
+) => void | Promise<void>;
+
 /** Byte-oriented connection returned by the native TCP/TLS runtime. */
 export interface NativeNetworkConnection {
+	/** Present when the connection was routed through a proxy. */
+	readonly proxy?: NativeProxyEgressInfo;
+	/** Register a cooperative drain handler for sticky-expiry reconnects. */
+	onExpiring?(handler: NativeProxyDrainHandler): void;
 	read(): Promise<Uint8Array | null>;
 	write(data: Uint8Array): Promise<void>;
 	close(): Promise<void>;
