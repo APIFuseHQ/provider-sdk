@@ -11,10 +11,7 @@ import * as acorn from "acorn";
 import { z } from "zod";
 
 import packageJson from "../package.json";
-import {
-	formatPromptAssetIssues,
-	verifyPromptAssets,
-} from "../src/cli/prompt-assets.js";
+import { formatPromptAssetIssues, verifyPromptAssets } from "../src/cli/prompt-assets.js";
 import {
 	loadProviderLocaleCatalogs,
 	type ProviderLocale,
@@ -22,6 +19,11 @@ import {
 } from "../src/i18n/index.js";
 import type { ProviderDefinition } from "../src/index.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, safeParseSchemaSync } from "../src/schema.js";
+import {
+	findStreamCaptureGroup,
+	hasStreamEvidenceMarker,
+	parseStreamEvidenceRecord,
+} from "../src/stream-evidence.js";
 import { type CheckResult, PROMPT_ASSETS_CHECK_MESSAGE, runChecks } from "./apifuse-check.js";
 import { hasSubstantiveDelimitedTextStructure } from "./submit-check-delimited-text.js";
 import { hasSubstantiveXmlStructure } from "./submit-check-xml.js";
@@ -2174,11 +2176,16 @@ const GENERATED_LOCAL_ONLY_SCAFFOLD_REASON = /generated local-only scaffold/i;
 function scoreFixtureProvenance(providerRoot: string, provider: ProviderDefinition): SubmitCheck {
 	const rawPath = resolve(providerRoot, "__fixtures__", "raw.json");
 	let hasRecordedEvidence = false;
+	let fixtureValidationError: string | undefined;
 	if (existsSync(rawPath)) {
 		try {
-			hasRecordedEvidence = hasNonEmptyRecordedFixture(JSON.parse(readFileSync(rawPath, "utf8")));
-		} catch {
+			hasRecordedEvidence = recordedFixtureStats(
+				JSON.parse(readFileSync(rawPath, "utf8")),
+				0,
+			).hasNestedSubstance;
+		} catch (error) {
 			hasRecordedEvidence = false;
+			fixtureValidationError = error instanceof Error ? error.message : String(error);
 		}
 	}
 
@@ -2188,6 +2195,16 @@ function scoreFixtureProvenance(providerRoot: string, provider: ProviderDefiniti
 			"fixtures",
 			"Recorded upstream fixture evidence is present.",
 			0,
+		);
+	}
+	if (fixtureValidationError) {
+		return blocker(
+			"fixture-provenance",
+			"fixtures",
+			`Malformed recorded fixture evidence in __fixtures__/raw.json: ${fixtureValidationError}`,
+			"Re-run `bun run record` to replace the malformed stream evidence, or repair the named field using the stream evidence contract.",
+			0,
+			["__fixtures__/raw.json"],
 		);
 	}
 
@@ -2218,13 +2235,31 @@ function scoreFixtureProvenance(providerRoot: string, provider: ProviderDefiniti
 }
 
 export function hasNonEmptyRecordedFixture(value: unknown): boolean {
-	return recordedFixtureStats(value, 0).hasNestedSubstance;
+	try {
+		return recordedFixtureStats(value, 0).hasNestedSubstance;
+	} catch {
+		return false;
+	}
 }
 
 function recordedFixtureStats(
 	value: unknown,
 	depth: number,
 ): { hasNestedSubstance: boolean; leafValues: number } {
+	if (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		(value as Record<string, unknown>).__apifuse_capture__ === true
+	) {
+		const group = findStreamCaptureGroup(value);
+		if (!group) throw new Error("Stream capture envelope is invalid.");
+		return { hasNestedSubstance: true, leafValues: group.items.length };
+	}
+	if (hasStreamEvidenceMarker(value)) {
+		parseStreamEvidenceRecord(value);
+		return { hasNestedSubstance: true, leafValues: 1 };
+	}
 	if (value === null || value === undefined) {
 		return { hasNestedSubstance: false, leafValues: 0 };
 	}
@@ -4027,9 +4062,7 @@ type LineStringLiteral = {
 // Stable identity for the container a literal sits in ("top" when the
 // literal is not inside any bracket on the line).
 function literalContainerKey(literal: LineStringLiteral): string {
-	return literal.container
-		? `${literal.container.bracket}${literal.container.index}`
-		: "top";
+	return literal.container ? `${literal.container.bracket}${literal.container.index}` : "top";
 }
 
 // Single-pass line tokenizer: extracts every string literal with its span and

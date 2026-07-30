@@ -1,5 +1,4 @@
 #!/usr/bin/env bun
-// @ts-nocheck
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -14,6 +13,8 @@ import {
 	createSttClientFromEnv,
 	executeOperation,
 	type HttpClient,
+	type HttpResponse,
+	type HttpStreamResponse,
 	type ProviderContext,
 	type ProviderDefinition,
 	ProviderError,
@@ -21,7 +22,27 @@ import {
 	TransportError,
 	ValidationError,
 } from "../src/index.js";
+import type { JsonValue } from "../src/contract-json.js";
+import {
+	requestPathForFixture,
+	sanitizeDiagnosticText,
+	sanitizeFixture,
+	sanitizeOrdinaryFixture,
+} from "../src/fixture-sanitization.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { parseSchema } from "../src/schema.js";
+import {
+	captureStreamEvidence,
+	createStreamCaptureEnvelope,
+	findStreamCaptureGroup,
+	findStreamEvidenceRecords,
+	hasStreamEvidenceMarker,
+	parseStreamEvidenceRecord,
+	STREAM_PREVIEW_BYTES,
+	type StreamCaptureGroupItem,
+	type StreamEvidenceCapture,
+	type StreamEvidenceRequest,
+} from "../src/stream-evidence.js";
 
 type CliArgs = {
 	append: boolean;
@@ -33,11 +54,16 @@ type CliArgs = {
 
 type ProviderRuntime = ProviderDefinition;
 
-type MutableRecord = Record<string, unknown>;
-
 const HELP_TEXT = `Usage: apifuse record [path] --operation <operation> --params '<json>'
 
 Calls a real upstream-backed operation through ctx.http or ctx.stealth and writes __fixtures__/raw.json.
+
+Streaming responses are recorded as evidence (status, selected headers, full-body SHA-256 and byte
+count, plus a ${STREAM_PREVIEW_BYTES}-byte base64 preview). Test replay is evidence-only: ctx.http.stream exposes the
+preview as its body and the original body_sha256/body_bytes as response metadata.
+When an operation opens multiple streams, all evidence records are saved in stream call order.
+Mixed JSON/stream operations save a tagged call-ordered envelope so snapshot replay can route each response.
+ctx.http.sse() recording is unsupported and fails explicitly.
 
 Options:
   --operation, -o <name>   operation to call
@@ -57,23 +83,45 @@ export async function main() {
 		const provider = await loadProvider(location.rootDir);
 		const operationName = resolveOperationName(provider, args.operation);
 		const operation = provider.operations[operationName];
-		const parsedParams = parseParams(operation, args.params);
+		const parsedParams = await parseParams(operation, args.params);
 
 		const capture = createCaptureContext(
 			provider,
 			resolveOperationBaseUrl(provider, operationName),
+			args.sanitize,
 		);
 
 		console.log(`[apifuse record] Calling ${operationName} on ${provider.id}...`);
 
-		const result = await executeOperation(provider, operationName, capture.ctx, parsedParams);
-		const captured = capture.getCapturedRaw();
+		let result: unknown;
+		try {
+			result = await executeOperation(provider, operationName, capture.ctx, parsedParams);
+		} catch (operationError) {
+			let partial: unknown;
+			try {
+				partial = await capture.getCapturedRaw();
+			} catch (finalizationError) {
+				throw new StreamRecorderError("Operation and stream finalization both failed.", [
+					operationError,
+					finalizationError,
+				]);
+			}
+			const streamCount = findStreamEvidenceRecords(partial).length;
+			if (streamCount > 0) {
+				throw new StreamRecorderError(
+					`Operation failed after finalizing ${streamCount} stream capture${streamCount === 1 ? "" : "s"}.`,
+					[operationError],
+				);
+			}
+			throw operationError;
+		}
+		const captured = await capture.getCapturedRaw();
 
 		if (captured === undefined) {
 			throw new Error(`No upstream response was captured for ${provider.id}.${operationName}.`);
 		}
 
-		const rawPayload = args.sanitize ? sanitizeFixture(captured) : captured;
+		const rawPayload = jsonFixtureValue(captured);
 		const fixturePath = resolve(location.rootDir, "__fixtures__", "raw.json");
 		const nextPayload = await prepareFixturePayload(fixturePath, rawPayload, args.append);
 
@@ -180,7 +228,23 @@ function handleCliError(error: unknown): never {
 	process.exit(1);
 }
 
-function formatCliError(error: unknown): string {
+class StreamRecorderError extends Error {
+	readonly diagnosticCauses: readonly unknown[];
+
+	constructor(message: string, diagnosticCauses: readonly unknown[]) {
+		super(message, { cause: diagnosticCauses[0] });
+		this.name = "StreamRecorderError";
+		this.diagnosticCauses = diagnosticCauses;
+	}
+}
+
+export function formatCliError(error: unknown): string {
+	if (error instanceof StreamRecorderError) {
+		return [
+			sanitizeDiagnosticText(error.message),
+			...error.diagnosticCauses.map((cause) => `cause=${formatDiagnosticCause(cause)}`),
+		].join(" ");
+	}
 	if (error instanceof TransportError) {
 		return [
 			error.message,
@@ -201,10 +265,30 @@ function formatCliError(error: unknown): string {
 	}
 
 	if (error instanceof Error) {
+		if (/^Stream capture\b/.test(error.message) && error.cause !== undefined) {
+			return `${sanitizeDiagnosticText(error.message)} cause=${formatDiagnosticCause(error.cause)}`;
+		}
 		return error.message;
 	}
 
 	return String(error);
+}
+
+function formatDiagnosticCause(cause: unknown): string {
+	if (cause instanceof StreamRecorderError) {
+		return [
+			sanitizeDiagnosticText(cause.message),
+			...cause.diagnosticCauses.map((nested) => `cause=${formatDiagnosticCause(nested)}`),
+		].join(" ");
+	}
+	if (!(cause instanceof Error)) return sanitizeDiagnosticText(String(cause));
+	const code =
+		"code" in cause && typeof cause.code === "string"
+			? ` code=${sanitizeDiagnosticText(cause.code)}`
+			: "";
+	const nestedCause =
+		cause.cause === undefined ? "" : ` cause=${formatDiagnosticCause(cause.cause)}`;
+	return `${sanitizeDiagnosticText(cause.message)}${code}${nestedCause}`;
 }
 
 function resolveProviderLocation(inputPath?: string) {
@@ -284,7 +368,10 @@ function resolveOperationName(provider: ProviderRuntime, operationName?: string)
 	return firstOperation;
 }
 
-function parseParams(operation: ProviderRuntime["operations"][string], value: string): unknown {
+async function parseParams(
+	operation: ProviderRuntime["operations"][string],
+	value: string,
+): Promise<unknown> {
 	let parsed: unknown;
 
 	try {
@@ -295,7 +382,7 @@ function parseParams(operation: ProviderRuntime["operations"][string], value: st
 		);
 	}
 
-	return operation.input ? operation.input.parse(parsed) : parsed;
+	return operation.input ? parseSchema(operation.input, parsed, "record.params") : parsed;
 }
 
 function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: string): string {
@@ -309,15 +396,63 @@ function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: strin
 	return baseUrl;
 }
 
-function createCaptureContext(provider: ProviderRuntime, baseUrl: string) {
-	let capturedRaw: unknown;
+function createCaptureContext(provider: ProviderRuntime, baseUrl: string, sanitize: boolean) {
+	let nextCaptureOrder = 0;
+	let nextStreamOrdinal = 0;
+	let capturedRaw: JsonValue | undefined;
+	const rawCaptures: Array<{ order: number; value: JsonValue }> = [];
+	const streamCaptures: Array<{
+		order: number;
+		request: StreamEvidenceRequest;
+		capture: StreamEvidenceCapture;
+	}> = [];
+	let capturedSse: { order: number; method: string; path: string } | undefined;
+	const reserveCaptureOrder = () => {
+		nextCaptureOrder += 1;
+		return nextCaptureOrder;
+	};
+	const retainRawCapture = (order: number, value: unknown) => {
+		const json = jsonFixtureValue(value);
+		const retained = sanitize ? sanitizeOrdinaryFixture(json) : json;
+		capturedRaw = retained;
+		rawCaptures.push({ order, value: retained });
+	};
 
-	const http = proxyHttpClient(createHttpClient(baseUrl), (response) => {
-		capturedRaw = response.data;
+	const http = captureHttpClient(createHttpClient(baseUrl), {
+		reserveOrder: reserveCaptureOrder,
+		reserveStreamOrdinal: () => {
+			nextStreamOrdinal += 1;
+			return nextStreamOrdinal;
+		},
+		onResponse: (order, response) => retainRawCapture(order, response.data),
+		onStreamResponse: (order, ordinal, requestUrl, method, response) => {
+			const resolvedRequestUrl = new URL(requestUrl, baseUrl).toString();
+			const request = {
+				ordinal,
+				method,
+				path: requestPathForFixture(resolvedRequestUrl),
+			};
+			const capture = captureStreamEvidence(response, {
+				requestUrl: resolvedRequestUrl,
+				request,
+				...(sanitize ? { sanitizeFixture } : {}),
+			});
+			streamCaptures.push({ order, request, capture });
+			return capture.response;
+		},
+		onSseResponse: (order, requestUrl, method) => {
+			capturedSse = {
+				order,
+				method,
+				path: requestPathForFixture(new URL(requestUrl, baseUrl).toString()),
+			};
+		},
 	});
-	const stealth = proxyStealthClient(createStealthClient(baseUrl), (response) => {
-		capturedRaw = normalizeCapturedStealthResponse(response);
-	});
+	const stealth = proxyStealthClient(
+		createStealthClient(baseUrl),
+		(order, response) => retainRawCapture(order, normalizeCapturedStealthResponse(response)),
+		reserveCaptureOrder,
+	);
 
 	const env = {
 		get: (key: string) => process.env[key],
@@ -374,58 +509,135 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string) {
 
 	return {
 		ctx,
-		getCapturedRaw: () => capturedRaw,
+		getCapturedRaw: async () => {
+			if (streamCaptures.length === 0) {
+				if (capturedSse) throw unsupportedSseCaptureError(capturedSse);
+				return capturedRaw;
+			}
+
+			const settled = await Promise.allSettled(
+				streamCaptures.map(async ({ order, request, capture }) => ({
+					order,
+					request,
+					value: await capture.getEvidence(),
+				})),
+			);
+			const failures = settled.flatMap((result, index) =>
+				result.status === "rejected"
+					? [
+							new StreamRecorderError(
+								`Stream finalization failed: method=${streamCaptures[index]!.request.method} path=${streamCaptures[index]!.request.path} ordinal=${streamCaptures[index]!.request.ordinal}.`,
+								[result.reason],
+							),
+						]
+					: [],
+			);
+			if (failures.length > 0) {
+				throw new StreamRecorderError(
+					`${failures.length} stream capture${failures.length === 1 ? "" : "s"} failed to finalize.`,
+					failures,
+				);
+			}
+			const evidence = settled.flatMap((result) =>
+				result.status === "fulfilled" ? [result.value] : [],
+			);
+			if (capturedSse) throw unsupportedSseCaptureError(capturedSse);
+			const timeline: StreamCaptureGroupItem[] = [...rawCaptures, ...evidence]
+				.sort((left, right) => left.order - right.order)
+				.map((item) =>
+					"request" in item
+						? { kind: "stream" as const, evidence: item.value }
+						: { kind: "response" as const, value: item.value },
+				);
+			return createStreamCaptureEnvelope(timeline);
+		},
 	};
 }
 
-function proxyHttpClient(
-	client: HttpClient,
-	onResponse: (response: Awaited<ReturnType<HttpClient["get"]>>) => void,
-): HttpClient {
-	return new Proxy(client, {
-		get(target, prop, receiver) {
-			const value = Reflect.get(target, prop, receiver);
+type HttpCaptureCallbacks = {
+	reserveOrder(): number;
+	reserveStreamOrdinal(): number;
+	onResponse(order: number, response: HttpResponse): void;
+	onStreamResponse(
+		order: number,
+		ordinal: number,
+		requestUrl: string,
+		method: string,
+		response: HttpStreamResponse,
+	): HttpStreamResponse;
+	onSseResponse(order: number, requestUrl: string, method: string): void;
+};
 
-			if (typeof value !== "function") {
-				return value;
-			}
+function captureHttpClient(client: HttpClient, callbacks: HttpCaptureCallbacks): HttpClient {
+	const captureResponse = async (
+		order: number,
+		responsePromise: Promise<HttpResponse>,
+	): Promise<HttpResponse> => {
+		const response = await responsePromise;
+		callbacks.onResponse(order, response);
+		return response;
+	};
 
-			return async (...args: unknown[]) => {
-				const response = await value.apply(target, args);
-				onResponse(response);
-				return response;
-			};
+	return {
+		request: (...args: Parameters<HttpClient["request"]>) =>
+			captureResponse(callbacks.reserveOrder(), client.request(...args)),
+		get: (...args: Parameters<HttpClient["get"]>) =>
+			captureResponse(callbacks.reserveOrder(), client.get(...args)),
+		post: (...args: Parameters<HttpClient["post"]>) =>
+			captureResponse(callbacks.reserveOrder(), client.post(...args)),
+		put: (...args: Parameters<HttpClient["put"]>) =>
+			captureResponse(callbacks.reserveOrder(), client.put(...args)),
+		delete: (...args: Parameters<HttpClient["delete"]>) =>
+			captureResponse(callbacks.reserveOrder(), client.delete(...args)),
+		stream: async (...args: Parameters<HttpClient["stream"]>) => {
+			const order = callbacks.reserveOrder();
+			const ordinal = callbacks.reserveStreamOrdinal();
+			const method = (args[1]?.method ?? "GET").toUpperCase();
+			const response = await client.stream(...args);
+			return callbacks.onStreamResponse(order, ordinal, args[0], method, response);
 		},
-	}) as HttpClient;
+		sse: async (...args: Parameters<HttpClient["sse"]>) => {
+			const order = callbacks.reserveOrder();
+			const response = await client.sse(...args);
+			callbacks.onSseResponse(order, args[0], (args[1]?.method ?? "GET").toUpperCase());
+			return response;
+		},
+	};
 }
 
 type StealthSession = ReturnType<StealthClient["createSession"]>;
 
 function proxyStealthClient(
 	client: StealthClient,
-	onResponse: (response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
+	onResponse: (order: number, response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
+	reserveOrder: () => number,
 ): StealthClient {
 	return {
 		fetch: async (...args: Parameters<StealthClient["fetch"]>) => {
+			const order = reserveOrder();
 			const response = await client.fetch(...args);
-			onResponse(response);
+			onResponse(order, response);
 			return response;
 		},
 		createSession: (...args: Parameters<StealthClient["createSession"]>) =>
-			proxyStealthSession(client.createSession(...args), onResponse),
+			proxyStealthSession(client.createSession(...args), onResponse, reserveOrder),
 	};
 }
 
 function proxyStealthSession(
 	session: StealthSession,
-	onResponse: (response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
+	onResponse: (order: number, response: Awaited<ReturnType<StealthClient["fetch"]>>) => void,
+	reserveOrder: () => number,
 ): StealthSession {
 	return {
 		fetch: async (...args: Parameters<StealthSession["fetch"]>) => {
+			const order = reserveOrder();
 			const response = await session.fetch(...args);
-			onResponse(response);
+			onResponse(order, response);
 			return response;
 		},
+		cookies: session.cookies,
+		redirects: session.redirects,
 		close: () => session.close(),
 	};
 }
@@ -436,30 +648,6 @@ function normalizeCapturedStealthResponse(response: Awaited<ReturnType<StealthCl
 	} catch {
 		return response.body;
 	}
-}
-
-function sanitizeFixture(value: unknown): unknown {
-	if (Array.isArray(value)) {
-		return value.map((item) => sanitizeFixture(item));
-	}
-
-	if (!value || typeof value !== "object") {
-		return value;
-	}
-
-	const entries = Object.entries(value as MutableRecord).map(([key, entryValue]) => {
-		if (isSensitiveKey(key)) {
-			return [key, "[REDACTED]"] as const;
-		}
-
-		return [key, sanitizeFixture(entryValue)] as const;
-	});
-
-	return Object.fromEntries(entries);
-}
-
-function isSensitiveKey(key: string): boolean {
-	return /authorization|token|api[-_]?key/i.test(key);
 }
 
 export async function prepareFixturePayload(
@@ -493,7 +681,18 @@ export async function prepareFixturePayload(
 		);
 	}
 
+	if (hasStreamEvidenceMarker(existing)) {
+		const evidence = parseStreamEvidenceRecord(existing);
+		return [createStreamCaptureEnvelope([{ kind: "stream", evidence }]), payload];
+	}
 	if (Array.isArray(existing)) {
+		if (existing.some((item) => hasStreamEvidenceMarker(item))) {
+			const legacyGroup = findStreamCaptureGroup(existing);
+			if (legacyGroup) {
+				const prefix = existing.slice(0, -legacyGroup.items.length);
+				return [...prefix, createStreamCaptureEnvelope(legacyGroup.items), payload];
+			}
+		}
 		return [...existing, payload];
 	}
 	if (existing !== null) {
@@ -508,6 +707,24 @@ function formatBytes(bytes: number): string {
 	}
 
 	return `${(bytes / 1024).toFixed(1)} KB`;
+}
+
+function jsonFixtureValue(value: unknown): JsonValue {
+	const serialized = JSON.stringify(value);
+	if (serialized === undefined) {
+		throw new Error("Captured upstream response is not JSON-serializable.");
+	}
+	return JSON.parse(serialized) as JsonValue;
+}
+
+function unsupportedSseCaptureError(request: {
+	order: number;
+	method: string;
+	path: string;
+}): Error {
+	return new Error(
+		`apifuse record does not support ctx.http.sse(): method=${request.method} path=${request.path} call=${request.order}.`,
+	);
 }
 
 if (import.meta.main) {

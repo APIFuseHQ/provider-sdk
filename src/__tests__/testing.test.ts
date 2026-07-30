@@ -1,9 +1,14 @@
 import { describe, expect, it } from "bun:test";
-import { mkdirSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { z } from "zod";
 
 import { defineProvider } from "../define.js";
 import * as sdk from "../index.js";
+import { isStreamEvidenceReplayResponse } from "../stream-evidence.js";
+import { createSnapshotContext } from "../testing/run.js";
 import {
 	describeTransform,
 	runStandardTests,
@@ -40,6 +45,54 @@ const testProvider = defineProvider({
 
 const snapshotFixtureDir = `/tmp/apifuse-standard-tests-${Date.now()}/__fixtures__`;
 mkdirSync(snapshotFixtureDir, { recursive: true });
+const streamSnapshotFixtureDir = join(import.meta.dir, "fixtures", "stream-snapshot");
+const multiStreamSnapshotFixtureDir = join(import.meta.dir, "fixtures", "multi-stream-snapshot");
+
+async function runGeneratedStandardTest(source: string): Promise<{
+	exitCode: number;
+	output: string;
+}> {
+	const testPath = join(snapshotFixtureDir, `generated-${randomUUID()}.test.ts`);
+	writeFileSync(testPath, source);
+	const process = Bun.spawn({
+		cmd: ["bun", "test", testPath],
+		cwd: join(import.meta.dir, "..", ".."),
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	const [stdout, stderr, exitCode] = await Promise.all([
+		new Response(process.stdout).text(),
+		new Response(process.stderr).text(),
+		process.exited,
+	]);
+	return { exitCode, output: `${stdout}\n${stderr}` };
+}
+
+const streamPreview = "recorded stream preview";
+const streamPreviewSha256 = createHash("sha256").update(streamPreview).digest("hex");
+const streamEvidenceFixture = {
+	__apifuse_stream__: true as const,
+	status: 200,
+	ok: true,
+	headers: { "content-type": "application/octet-stream" },
+	body_sha256: streamPreviewSha256,
+	body_bytes: Buffer.byteLength(streamPreview),
+	body_preview_base64: Buffer.from(streamPreview).toString("base64"),
+	request: { ordinal: 1, method: "GET", path: "/download" },
+};
+const secondStreamPreview = "second recorded stream preview";
+const secondStreamPreviewSha256 = createHash("sha256").update(secondStreamPreview).digest("hex");
+const firstStreamEvidenceFixture = {
+	...streamEvidenceFixture,
+	request: { ordinal: 1, method: "GET", path: "/first" },
+};
+const secondStreamEvidenceFixture = {
+	...streamEvidenceFixture,
+	body_sha256: secondStreamPreviewSha256,
+	body_bytes: Buffer.byteLength(secondStreamPreview),
+	body_preview_base64: Buffer.from(secondStreamPreview).toString("base64"),
+	request: { ordinal: 2, method: "GET", path: "/second" },
+};
 
 const fixtureHarnessProvider = defineProvider({
 	id: "fixture-harness-provider",
@@ -78,6 +131,89 @@ const snapshotHarnessProvider = defineProvider({
 			fixtures: {
 				request: { id: "snap" },
 				response: { id: "snap", label: "golden" },
+			},
+			healthCheckUnsupported: { reason: "test fixture" },
+		},
+	},
+});
+
+const streamSnapshotHarnessProvider = defineProvider({
+	id: "stream-snapshot-harness-provider",
+	version: "1.0.0",
+	runtime: "standard",
+	meta: { displayName: "Stream Snapshot Harness Provider", category: "test" },
+	operations: {
+		download: {
+			input: z.object({}),
+			output: z.object({
+				body: z.string(),
+				bodyBytes: z.number(),
+				bodySha256: z.string(),
+				evidenceOnly: z.boolean(),
+				cleanup: z.string(),
+			}),
+			handler: async (ctx) => {
+				const response = await ctx.http.stream("https://example.test/download");
+				if (!isStreamEvidenceReplayResponse(response)) {
+					throw new Error("stream evidence replay metadata is missing");
+				}
+				const chunks: Uint8Array[] = [];
+				for await (const chunk of response.bytes()) chunks.push(chunk);
+				const body = Buffer.concat(chunks).toString("utf8");
+				if (
+					body !== streamPreview ||
+					response.body_sha256 !== streamEvidenceFixture.body_sha256 ||
+					response.body_bytes !== streamEvidenceFixture.body_bytes
+				) {
+					throw new Error("stream evidence replay did not preserve preview and metadata");
+				}
+				const cleanupResponse = await ctx.http.get("https://example.test/cleanup");
+				const cleanup = await cleanupResponse.json<{ cleanup: string }>();
+
+				return {
+					body,
+					bodyBytes: response.body_bytes,
+					bodySha256: response.body_sha256,
+					evidenceOnly: response.evidence_only,
+					cleanup: cleanup.cleanup,
+				};
+			},
+			fixtures: {
+				request: {},
+				response: {
+					body: streamPreview,
+					bodyBytes: Buffer.byteLength(streamPreview),
+					bodySha256: streamPreviewSha256,
+					evidenceOnly: true,
+					cleanup: "complete",
+				},
+			},
+			healthCheckUnsupported: { reason: "test fixture" },
+		},
+	},
+});
+
+const multiStreamSnapshotHarnessProvider = defineProvider({
+	id: "multi-stream-snapshot-harness-provider",
+	version: "1.0.0",
+	runtime: "standard",
+	meta: { displayName: "Multi Stream Snapshot Harness Provider", category: "test" },
+	operations: {
+		download: {
+			input: z.object({}),
+			output: z.object({ first: z.string(), second: z.string() }),
+			handler: async (ctx) => {
+				const read = async (path: string) => {
+					const response = await ctx.http.stream(`https://example.test${path}`);
+					const chunks: Uint8Array[] = [];
+					for await (const chunk of response.bytes()) chunks.push(chunk);
+					return Buffer.concat(chunks).toString("utf8");
+				};
+				return { first: await read("/first"), second: await read("/second") };
+			},
+			fixtures: {
+				request: {},
+				response: { first: streamPreview, second: secondStreamPreview },
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
@@ -173,6 +309,36 @@ runStandardTests(snapshotHarnessProvider, { label: "golden" }, undefined, {
 });
 
 runStandardTests(
+	streamSnapshotHarnessProvider,
+	{
+		__apifuse_capture__: true,
+		items: [
+			{ kind: "stream", evidence: streamEvidenceFixture },
+			{ kind: "response", value: { cleanup: "complete" } },
+		],
+	},
+	undefined,
+	{
+		snapshot: true,
+		fixtureDir: streamSnapshotFixtureDir,
+		requireSnapshot: true,
+	},
+);
+
+runStandardTests(
+	multiStreamSnapshotHarnessProvider,
+	{
+		__apifuse_capture__: true,
+		items: [
+			{ kind: "stream", evidence: firstStreamEvidenceFixture },
+			{ kind: "stream", evidence: secondStreamEvidenceFixture },
+		],
+	},
+	undefined,
+	{ snapshot: true, fixtureDir: multiStreamSnapshotFixtureDir, requireSnapshot: true },
+);
+
+runStandardTests(
 	authHarnessProvider,
 	{ ok: true },
 	{ auth: "credentials" },
@@ -251,11 +417,102 @@ describe("runStandardTests handler E2E", () => {
 });
 
 describe("testing exports", () => {
+	it("fails closed when requireSnapshot points to a missing snapshot", async () => {
+		const fixtureDir = join(snapshotFixtureDir, "missing-required-snapshot");
+		const testingModule = pathToFileURL(join(import.meta.dir, "..", "testing", "run.ts")).href;
+		const result = await runGeneratedStandardTest(`
+import { runStandardTests } from ${JSON.stringify(testingModule)};
+const provider = {
+  id: "missing-snapshot-harness", version: "1.0.0", runtime: "standard",
+  meta: { displayName: "Missing Snapshot Harness", category: "test" },
+  operations: { check: { input: {}, output: {}, handler: async () => ({ ok: true }) } },
+};
+runStandardTests(provider as never, {}, undefined, {
+  snapshot: true,
+  fixtureDir: ${JSON.stringify(fixtureDir)},
+  requireSnapshot: true,
+});
+`);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("Required golden snapshot is missing");
+	});
+
+	it("rejects a replay envelope with a trailing unconsumed capture", async () => {
+		const testingModule = pathToFileURL(join(import.meta.dir, "..", "testing", "run.ts")).href;
+		const preview = "recorded stream preview";
+		const digest = createHash("sha256").update(preview).digest("hex");
+		const result = await runGeneratedStandardTest(`
+import { runStandardTests } from ${JSON.stringify(testingModule)};
+const provider = {
+  id: "unconsumed-capture-harness", version: "1.0.0", runtime: "standard",
+  meta: { displayName: "Unconsumed Capture Harness", category: "test" },
+  operations: { check: {
+    input: {}, output: {},
+    handler: async (ctx) => { await ctx.http.stream("https://example.test/download"); return { ok: true }; },
+  } },
+};
+runStandardTests(provider as never, {
+  __apifuse_capture__: true,
+  items: [
+    { kind: "stream", evidence: {
+      __apifuse_stream__: true, status: 200, ok: true, headers: {},
+      body_sha256: ${JSON.stringify(digest)},
+      body_bytes: ${Buffer.byteLength(preview)},
+      body_preview_base64: ${JSON.stringify(Buffer.from(preview).toString("base64"))},
+      request: { ordinal: 1, method: "GET", path: "/download" },
+    } },
+    { kind: "response", value: { trailing: true } },
+  ],
+}, undefined, { snapshot: true, fixtureDir: ${JSON.stringify(join(snapshotFixtureDir, "unconsumed"))} });
+`);
+		expect(result.exitCode).toBe(1);
+		expect(result.output).toContain("1 unconsumed capture item after handler completion");
+	});
+
+	it("diagnoses a method-only stream replay provenance mismatch", async () => {
+		const context = createSnapshotContext(streamEvidenceFixture);
+		await expect(
+			context.http.stream("https://example.test/download", { method: "POST" }),
+		).rejects.toThrow(/expected GET \/download.*received POST \/download/);
+	});
+
+	it("diagnoses a path-only stream replay provenance mismatch", async () => {
+		const context = createSnapshotContext(streamEvidenceFixture);
+		await expect(context.http.stream("https://example.test/not-download")).rejects.toThrow(
+			/expected GET \/download.*received GET \/not-download/,
+		);
+	});
+
+	it("resolves a query-only replay request against the recorded resource path", async () => {
+		const context = createSnapshotContext({
+			...streamEvidenceFixture,
+			request: { ordinal: 1, method: "GET", path: "/resource" },
+		});
+		await expect(context.http.stream("?format=raw")).resolves.toBeDefined();
+	});
+
+	it("fails fast when a mixed replay exhausts its ordinary responses", async () => {
+		const context = createSnapshotContext({
+			__apifuse_capture__: true,
+			items: [
+				{ kind: "response", value: { cleanup: "complete" } },
+				{ kind: "stream", evidence: streamEvidenceFixture },
+			],
+		});
+		expect((await context.http.get("https://example.test/cleanup")).data).toEqual({
+			cleanup: "complete",
+		});
+		await expect(context.http.get("https://example.test/extra")).rejects.toThrow(
+			/call-order mismatch.*expected a stream call.*ordinary HTTP call/,
+		);
+	});
+
 	it("does not re-export Bun-only testing helpers from package root", () => {
 		expect("runStandardTests" in sdk).toBe(false);
 		expect("describeTransform" in sdk).toBe(false);
 		expect("toMatchShape" in sdk).toBe(false);
 		expect("snapshotTransform" in sdk).toBe(false);
+		expect("isStreamEvidenceReplayResponse" in sdk).toBe(false);
 	});
 
 	it("exposes snapshotTransform from testing entrypoint", () => {
