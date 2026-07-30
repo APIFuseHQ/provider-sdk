@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, setSystemTime } from "bun:test";
 import { z } from "zod";
 
 import { defineProvider } from "../define.js";
@@ -239,6 +239,7 @@ describe("defineProvider", () => {
 
 	it("preserves operation definitions", async () => {
 		const provider = defineProvider(validConfig);
+		expect(provider.operations).toBe(validConfig.operations);
 		await expect(
 			provider.operations.prices.handler?.({} as never, { id: "bitcoin" }),
 		).resolves.toEqual({ name: "bitcoin", price: 50_000 });
@@ -309,6 +310,135 @@ describe("defineProvider", () => {
 		};
 
 		expect(() => defineProvider(badConfig)).toThrow(ValidationError);
+	});
+
+	it("resolves relative fixture dates before validating past-date-rejecting schemas", () => {
+		const kstToday = () => new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+		const absoluteFutureInput = z.object({
+			date: z
+				.string()
+				.regex(/^\d{4}-\d{2}-\d{2}$/)
+				.refine((date) => date >= kstToday(), "date must not be in the past"),
+		});
+		const build = () =>
+			defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						input: absoluteFutureInput,
+						handler: async () => ({ name: "fixture", price: 1 }),
+						fixtures: {
+							request: { date: "+45d" },
+							response: { name: "Fixture", price: 1 },
+						},
+					},
+				},
+			});
+
+		try {
+			setSystemTime(new Date("2026-01-01T12:00:00.000Z"));
+			const first = build();
+			expect(first.operations.prices.fixtures?.request).toEqual({ date: "2026-02-15" });
+
+			setSystemTime(new Date("2026-10-01T12:00:00.000Z"));
+			const importedLater = build();
+			expect(importedLater.operations.prices.fixtures?.request).toEqual({
+				date: "2026-11-15",
+			});
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	it("does not widen the public operation input schema to accept fixture tokens", () => {
+		const absoluteInput = z.object({ date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/) });
+		const provider = defineProvider({
+			...validConfig,
+			operations: {
+				prices: {
+					...validConfig.operations.prices,
+					input: absoluteInput,
+					handler: async () => ({ name: "fixture", price: 1 }),
+					fixtures: {
+						request: { date: "+45d" },
+						response: { name: "Fixture", price: 1 },
+					},
+				},
+			},
+		});
+
+		expect(provider.operations.prices.input.safeParse({ date: "+45d" }).success).toBe(false);
+		expect(provider.operations.prices.fixtures?.request).toEqual({
+			date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+		});
+	});
+
+	it("accepts a valid fixture recordedAt capture date", () => {
+		const provider = defineProvider({
+			...validConfig,
+			operations: {
+				prices: {
+					...validConfig.operations.prices,
+					fixtures: {
+						...validConfig.operations.prices.fixtures,
+						recordedAt: "2025-12-31",
+					},
+				},
+			},
+		});
+
+		expect(provider.operations.prices.fixtures?.recordedAt).toBe("2025-12-31");
+	});
+
+	it("accepts KST today as recordedAt after KST has crossed midnight", () => {
+		try {
+			setSystemTime(new Date("2026-07-29T16:00:00.000Z"));
+			const provider = defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						fixtures: {
+							...validConfig.operations.prices.fixtures,
+							recordedAt: "2026-07-30",
+						},
+					},
+				},
+			});
+
+			expect(provider.operations.prices.fixtures?.recordedAt).toBe("2026-07-30");
+		} finally {
+			setSystemTime();
+		}
+	});
+
+	it("rejects future and malformed fixture recordedAt values with a fix hint", () => {
+		try {
+			setSystemTime(new Date("2026-07-29T16:00:00.000Z"));
+			for (const recordedAt of ["2026-07-31", "not-a-date", "2026-02-30"]) {
+				try {
+					defineProvider({
+						...validConfig,
+						operations: {
+							prices: {
+								...validConfig.operations.prices,
+								fixtures: {
+									...validConfig.operations.prices.fixtures,
+									recordedAt,
+								},
+							},
+						},
+					});
+					throw new Error("expected defineProvider to reject recordedAt");
+				} catch (error) {
+					expect(error).toBeInstanceOf(ValidationError);
+					expect((error as ValidationError).fix).toContain("YYYY-MM-DD");
+				}
+			}
+		} finally {
+			setSystemTime();
+		}
 	});
 
 	it("ValidationError includes zodError for actionable debugging", () => {

@@ -79,6 +79,8 @@
 ## Unreleased
 
 - Add opt-in `maxBodyBytes` enforcement to stealth fetches and redirect hops, aborting oversized decoded response streams with `response_too_large`.
+- Resolve relative date tokens in fixture requests before input-schema validation, add KST capture-date `fixtures.recordedAt` metadata, and support explicit KST/UTC calendars in the shared health-input resolver.
+- Add opt-in `runStandardTests(provider, { upstreamStub })` real-handler E2E coverage with strict offline transport stubs, output-schema validation, and per-operation warnings when handler E2E is not enabled.
 - Export native-network and request-file TypeScript contracts from the package root and `./provider`, including typed native provider declarations and optional runtime capabilities on provider/auth contexts.
 - Add `arrayBuffer()` and `bytes()` to `HttpResponse` so `ctx.http` consumers can read binary-safe upstream bodies; internal response handling is now byte-first.
 - Preserve identity-only operation `connectionId` values in `ProviderContext` without requiring credential material.

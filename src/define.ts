@@ -2,6 +2,7 @@ import ms from "ms";
 
 import { ProviderError, ValidationError } from "./errors.js";
 import { safeParseSchemaSync } from "./schema.js";
+import { resolveHealthCheckInputDateTokens } from "./server/self-test-input-tokens.js";
 import type {
 	AuthConfig,
 	BrowserEngine,
@@ -2042,6 +2043,26 @@ function validateOperationFixtures(
 					fix: `Add operations.${operationName}.handler as an async function with signature (ctx, input) => Promise<output>`,
 				},
 			);
+		if (operation.fixtures?.recordedAt !== undefined) {
+			const recordedAt = operation.fixtures.recordedAt;
+			const parsed =
+				typeof recordedAt === "string"
+					? new Date(`${recordedAt}T00:00:00.000Z`)
+					: new Date(Number.NaN);
+			const isCalendarDate =
+				typeof recordedAt === "string" &&
+				/^\d{4}-\d{2}-\d{2}$/.test(recordedAt) &&
+				!Number.isNaN(parsed.getTime()) &&
+				parsed.toISOString().slice(0, 10) === recordedAt;
+			const kstToday = new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
+			if (!isCalendarDate || recordedAt > kstToday)
+				throw new ValidationError(
+					`Fixture recordedAt must be a valid, non-future KST calendar date for provider "${providerId}" operation "${operationName}"`,
+					{
+						fix: `Set operations.${operationName}.fixtures.recordedAt to the KST capture date in YYYY-MM-DD format; it must not be in the future.`,
+					},
+				);
+		}
 		if (operation.fixtures?.request !== undefined) {
 			const result = safeParseSchemaSync(
 				operation.input,
@@ -2075,6 +2096,31 @@ function validateOperationFixtures(
 	}
 }
 
+function resolveOperationFixtureRequests<TOperations extends Record<string, ProviderOperation>>(
+	operations: TOperations,
+): TOperations {
+	let changed = false;
+	const resolvedOperations = Object.fromEntries(
+		Object.entries(operations).map(([operationName, operation]) => {
+			if (operation.fixtures?.request === undefined) return [operationName, operation];
+			const request = resolveHealthCheckInputDateTokens(operation.fixtures.request);
+			if (request === operation.fixtures.request) return [operationName, operation];
+			changed = true;
+			return [
+				operationName,
+				{
+					...operation,
+					fixtures: {
+						...operation.fixtures,
+						request,
+					},
+				},
+			];
+		}),
+	) as TOperations;
+	return changed ? resolvedOperations : operations;
+}
+
 /**
  * Shallow shape guard only: the `deployment` object is passed through
  * verbatim and deliberately not deep-validated by the SDK — the APIFuse
@@ -2095,6 +2141,7 @@ export function defineProvider<
 	config: TConfig & AuthStartNoInputGuard<TConfig>,
 ): ProviderDefinition & { operations: OperationMapConfig<TOperations> } {
 	validateProviderShape(config);
+	const operations = resolveOperationFixtureRequests(config.operations);
 	if (!CONNECTOR_ID_REGEX.test(config.id))
 		throw new ProviderError(`Invalid provider id: "${config.id}"`, {
 			fix: 'Use lowercase alphanumeric with dashes, e.g., "korea-air-quality"',
@@ -2127,7 +2174,7 @@ export function defineProvider<
 		config.healthProbe ?? config.healthMonitor,
 		config.healthProbe !== undefined ? "healthProbe" : "healthMonitor",
 	);
-	validateOperationFixtures(config.id, config.operations);
+	validateOperationFixtures(config.id, operations);
 	validateProviderDeployment(config.id, config.deployment);
 	validateProviderProxy(config);
 	validateProviderStt(config);
@@ -2163,7 +2210,7 @@ export function defineProvider<
 		credential: config.credential,
 		context: config.context,
 		meta: config.meta,
-		operations: config.operations,
+		operations,
 		// Transitional healthMonitor → healthProbe alias: mirror whichever field
 		// was declared onto both so old and new consumers keep working.
 		healthMonitor: config.healthMonitor ?? config.healthProbe,

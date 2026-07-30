@@ -2037,6 +2037,11 @@ export interface OperationDefinition<
 	fixtures?: {
 		request: InferSchemaOutput<TInput>;
 		response: InferSchemaOutput<TOutput>;
+		/**
+		 * KST calendar date when `response` evidence was captured. Date fields in
+		 * the response align with this date, not a resolved relative request date.
+		 */
+		recordedAt?: string;
 	};
 	upstream?: {
 		baseUrl?: string;
