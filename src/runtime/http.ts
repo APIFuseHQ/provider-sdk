@@ -4,11 +4,12 @@ import {
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
 } from "../config/loader.js";
-import { ProviderError, TransportError } from "../errors.js";
+import { HttpRedirectError, ProviderError, TransportError } from "../errors.js";
 import { parseSseStream, readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import type {
 	HttpClient,
 	HttpMethod,
+	HttpRedirectPolicy,
 	HttpResponse,
 	HttpRetrySummary,
 	HttpStreamResponse,
@@ -28,6 +29,7 @@ import {
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
+import { evaluateRedirectHop, isRedirectStatus, resolveRedirectUrl } from "./redirects.js";
 import {
 	normalizeHttpRequestBody,
 	redactSensitiveError,
@@ -312,6 +314,200 @@ function resolveHttpUrl(baseUrl: string | undefined, url: string): string {
 
 type NativeFetchInit = RequestInit & { proxy?: string };
 
+const MAX_HTTP_REDIRECT_HOPS = 20;
+const HTTP_REDIRECT_POLICY_FIELDS = new Set(["mode", "maxHops"]);
+const REDIRECT_BODY_HEADERS = new Set([
+	"content-encoding",
+	"content-language",
+	"content-location",
+	"content-type",
+]);
+const MALFORMED_REDIRECT_TARGET = "[malformed redirect target]";
+
+function invalidHttpRedirectPolicy(message: string, cause?: Error): TransportError {
+	return new TransportError(`Invalid ctx.http redirectPolicy: ${message}`, {
+		code: "http_redirect_policy_invalid",
+		...(cause ? { cause } : {}),
+	});
+}
+
+/** Snapshot untrusted caller input synchronously, before proxy resolution or fetch. */
+function normalizeHttpRedirectPolicy(value: unknown): HttpRedirectPolicy | undefined {
+	if (value === undefined) return undefined;
+	if (value === null || typeof value !== "object" || Array.isArray(value)) {
+		throw invalidHttpRedirectPolicy("expected an object");
+	}
+
+	try {
+		const keys = Reflect.ownKeys(value);
+		for (const key of keys) {
+			if (typeof key !== "string" || !HTTP_REDIRECT_POLICY_FIELDS.has(key)) {
+				throw invalidHttpRedirectPolicy(`unknown field ${String(key)}`);
+			}
+		}
+		for (const field of HTTP_REDIRECT_POLICY_FIELDS) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, field);
+			if (!descriptor || !("value" in descriptor)) {
+				throw invalidHttpRedirectPolicy(`${field} must be an own data property`);
+			}
+		}
+
+		const record = value as Record<string, unknown>;
+		if (record.mode !== "same-origin") {
+			throw invalidHttpRedirectPolicy('mode must be "same-origin"');
+		}
+		if (
+			typeof record.maxHops !== "number" ||
+			!Number.isInteger(record.maxHops) ||
+			record.maxHops < 0 ||
+			record.maxHops > MAX_HTTP_REDIRECT_HOPS
+		) {
+			throw invalidHttpRedirectPolicy(
+				`maxHops must be an integer from 0 to ${MAX_HTTP_REDIRECT_HOPS}`,
+			);
+		}
+
+		return { mode: "same-origin", maxHops: record.maxHops };
+	} catch (error) {
+		if (error instanceof TransportError) throw error;
+		throw invalidHttpRedirectPolicy(
+			"could not be inspected safely",
+			error instanceof Error ? error : undefined,
+		);
+	}
+}
+
+function snapshotHttpRedirectPolicy(options: RequestOptions): HttpRedirectPolicy | undefined {
+	try {
+		return normalizeHttpRedirectPolicy(options.redirectPolicy);
+	} catch (error) {
+		if (error instanceof TransportError) throw error;
+		throw invalidHttpRedirectPolicy(
+			"could not be read safely",
+			error instanceof Error ? error : undefined,
+		);
+	}
+}
+
+function withoutRedirectBodyHeaders(headers: HeadersInit | undefined): Headers {
+	const nextHeaders = new Headers(headers);
+	for (const name of REDIRECT_BODY_HEADERS) nextHeaders.delete(name);
+	return nextHeaders;
+}
+
+function redirectDiagnosticTarget(value: string): string {
+	try {
+		const parsed = new URL(value);
+		// Origin omits URL userinfo. Keeping only origin + path makes diagnostics
+		// useful while structurally excluding every query value and fragment,
+		// including attacker-chosen keys the provider did not declare sensitive.
+		const redactedQuery = parsed.search ? "?[REDACTED]" : "";
+		return parsed.origin === "null"
+			? `${parsed.protocol}<opaque-target>`
+			: `${parsed.origin}${parsed.pathname}${redactedQuery}`;
+	} catch {
+		return MALFORMED_REDIRECT_TARGET;
+	}
+}
+
+function discardRedirectResponseBody(response: Response): void {
+	try {
+		const cancellation = response.body?.cancel();
+		if (cancellation) void cancellation.catch(() => undefined);
+	} catch {
+		// The redirect decision is security-significant and must not be replaced
+		// or delayed by an upstream body's cancellation failure. Cancellation was
+		// attempted; redirect evaluation continues without awaiting its completion.
+	}
+}
+
+async function fetchWithHttpRedirectPolicy(
+	requestUrl: string,
+	requestInit: NativeFetchInit,
+	policy: HttpRedirectPolicy | undefined,
+): Promise<Response> {
+	if (!policy) return fetch(requestUrl, requestInit);
+
+	const initialUrl = new URL(requestUrl);
+	if (initialUrl.protocol !== "http:" && initialUrl.protocol !== "https:") {
+		throw new TransportError("ctx.http redirectPolicy requires an HTTP(S) origin", {
+			code: "transport_invalid_url",
+		});
+	}
+
+	const initialOrigin = initialUrl.origin;
+	let currentUrl = requestUrl;
+	let method = normalizeHttpMethod(requestInit.method ?? "GET");
+	let body = requestInit.body;
+	let headers = requestInit.headers;
+	let followedHops = 0;
+	const visitedRequests = new Set([`${method} ${currentUrl}`]);
+
+	while (true) {
+		const response = await fetch(currentUrl, {
+			...requestInit,
+			body,
+			headers,
+			method,
+			redirect: "manual",
+		});
+		if (!isRedirectStatus(response.status)) return response;
+
+		const location = response.headers.get("location");
+		discardRedirectResponseBody(response);
+		let nextUrlString: string | undefined;
+		try {
+			nextUrlString = resolveRedirectUrl(location || undefined, currentUrl);
+		} catch {
+			const target = MALFORMED_REDIRECT_TARGET;
+			throw new HttpRedirectError(`Redirect response has malformed Location target ${target}`, {
+				reason: "missing_location",
+				target,
+				status: response.status,
+			});
+		}
+
+		const decision = evaluateRedirectHop({
+			status: response.status,
+			method,
+			nextUrl: nextUrlString,
+			shouldStop: nextUrlString ? new URL(nextUrlString).origin !== initialOrigin : false,
+			redirectCount: followedHops + 1,
+			maxHops: policy.maxHops,
+			visitedRequests,
+		});
+		if (decision.kind === "stop") {
+			const target = decision.nextUrl ? redirectDiagnosticTarget(decision.nextUrl) : undefined;
+			const message = (() => {
+				switch (decision.reason) {
+					case "stopped":
+						return `Redirect policy refused cross-origin target ${target}`;
+					case "max_hops":
+						return `Redirect policy reached maxHops before target ${target}`;
+					case "loop":
+						return `Redirect loop refused target ${target}`;
+					case "missing_location":
+						return `Redirect response from ${redirectDiagnosticTarget(currentUrl)} is missing Location`;
+			}
+			})();
+			throw new HttpRedirectError(message, {
+				reason: decision.reason,
+				...(target ? { target } : {}),
+				status: response.status,
+			});
+		}
+		if (decision.nextMethod !== method) {
+			body = undefined;
+			headers = withoutRedirectBodyHeaders(headers);
+		}
+
+		method = decision.nextMethod;
+		currentUrl = decision.nextUrl;
+		followedHops += 1;
+		visitedRequests.add(`${method} ${currentUrl}`);
+	}
+}
+
 async function resolveNativeProxy(
 	options: RequestOptions,
 	clientOptions: HttpClientOptions,
@@ -419,9 +615,11 @@ async function fetchNativeHttp(
 		if (options.body !== undefined) {
 			requestInit.body = normalizeNativeFetchBody(options.body);
 		}
-		const response = await fetch(requestUrl, {
-			...requestInit,
-		});
+		const response = await fetchWithHttpRedirectPolicy(
+			requestUrl,
+			requestInit,
+			options.redirectPolicy,
+		);
 		const headers = Object.fromEntries(response.headers.entries());
 
 		if (statusRetryCodes && response.status >= 400) {
@@ -492,9 +690,11 @@ async function fetchNativeHttpStream(
 		if (options.body !== undefined) {
 			requestInit.body = normalizeNativeFetchBody(options.body);
 		}
-		const response = await fetch(requestUrl, {
-			...requestInit,
-		});
+		const response = await fetchWithHttpRedirectPolicy(
+			requestUrl,
+			requestInit,
+			options.redirectPolicy,
+		);
 
 		if (response.status >= 400 && options.throwOnHttpError !== false) {
 			await drainNativeResponseBody(response);
@@ -553,7 +753,11 @@ export function createHttpClient(
 					);
 				}
 				assertNoHttpTransportOverrides(options);
-				const headersOptions = withClientHeaders(options, clientOptions, options.body);
+				const redirectPolicy = snapshotHttpRedirectPolicy(options);
+				const headersOptions = {
+					...withClientHeaders(options, clientOptions, options.body),
+					redirectPolicy,
+				};
 				const methodName = normalizeHttpMethod(method);
 				const explicitRetry = headersOptions.retry !== undefined;
 				const retryOptions =
@@ -761,8 +965,12 @@ export function createHttpClient(
 					);
 				}
 				assertNoHttpTransportOverrides(options);
+				const redirectPolicy = snapshotHttpRedirectPolicy(options);
 				return {
-					headersOptions: withClientHeaders(options, clientOptions, options.body),
+					headersOptions: {
+						...withClientHeaders(options, clientOptions, options.body),
+						redirectPolicy,
+					},
 					methodName: normalizeHttpMethod(method),
 				};
 			} catch (error) {

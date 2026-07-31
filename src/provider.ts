@@ -37,6 +37,7 @@ export {
 } from "./define.js";
 export {
 	AuthError,
+	HttpRedirectError,
 	isProviderError,
 	isSessionExpiredError,
 	isTransportError,
@@ -91,6 +92,9 @@ export type {
 	HealthJourneyRunContext,
 	HealthJourneyRunResult,
 	HealthScheduleRandomization,
+	HttpRedirectFailureReason,
+	HttpRedirectPolicy,
+	HttpRedirectPolicyMode,
 	HttpRetryOptions,
 	HttpRetrySummary,
 	InferSchemaOutput,
@@ -150,6 +154,7 @@ export type {
 	ProviderStateDurationString,
 	ProviderStateNamespace,
 	ProviderSupportLevel,
+	RedirectRunReason,
 	SchemaLike,
 	SmsOtpMatcherDefinition,
 	StandardSchemaV1,

@@ -51,6 +51,11 @@ import {
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
 import {
+	evaluateRedirectHop,
+	isRedirectStatus,
+	resolveRedirectUrl,
+} from "./redirects.js";
+import {
 	isSensitiveKey,
 	redactSensitiveError,
 	redactSensitiveRequestError,
@@ -731,16 +736,6 @@ function normalizeMethod(method: HttpMethod | string): StealthMethod {
 	}
 }
 
-function isRedirectStatus(status: number): boolean {
-	return [301, 302, 303, 307, 308].includes(status);
-}
-
-function nextRedirectMethod(status: number, method: StealthMethod): StealthMethod {
-	if (status === 303 && method !== "HEAD") return "GET";
-	if ((status === 301 || status === 302) && method === "POST") return "GET";
-	return method;
-}
-
 function locationHeader(headers: Record<string, string>): string | undefined {
 	for (const [name, value] of Object.entries(headers)) {
 		if (name.toLowerCase() === "location") return value;
@@ -1256,7 +1251,7 @@ function createSessionFetcher(
 					const redactedLocation = location ? redactRedirectUrl(location) : undefined;
 					let nextUrl: string | undefined;
 					try {
-						nextUrl = location ? new URL(location, responseUrl).toString() : undefined;
+						nextUrl = resolveRedirectUrl(location, responseUrl);
 					} catch (error) {
 						throw redactSensitiveError(error, [...sensitiveValues], location, redactedLocation);
 					}
@@ -1297,51 +1292,29 @@ function createSessionFetcher(
 							throw sanitizedError;
 						}
 					}
-					if (shouldStop) {
+					const decision = evaluateRedirectHop({
+						status: response.status,
+						method,
+						nextUrl,
+						shouldStop,
+						redirectCount: hops.length,
+						maxHops,
+						visitedRequests,
+					});
+					if (decision.kind === "stop") {
 						return {
 							final: response,
 							hops,
-							reason: "stopped",
+							reason: decision.reason,
 							cookies: cookieJar.snapshot(),
 							cookieStore: cookieJar.serialize(),
 						};
 					}
-
-					if (!nextUrl) {
-						return {
-							final: response,
-							hops,
-							reason: "missing_location",
-							cookies: cookieJar.snapshot(),
-							cookieStore: cookieJar.serialize(),
-						};
-					}
-
-					if (hops.length > maxHops) {
-						return {
-							final: response,
-							hops,
-							reason: "max_hops",
-							cookies: cookieJar.snapshot(),
-							cookieStore: cookieJar.serialize(),
-						};
-					}
-
-					const nextMethod = nextRedirectMethod(response.status, method);
-					if (nextMethod !== method) {
+					if (decision.nextMethod !== method) {
 						body = undefined;
 					}
-					if (visitedRequests.has(`${nextMethod} ${nextUrl}`)) {
-						return {
-							final: response,
-							hops,
-							reason: "loop",
-							cookies: cookieJar.snapshot(),
-							cookieStore: cookieJar.serialize(),
-						};
-					}
-					method = nextMethod;
-					currentUrl = nextUrl;
+					method = decision.nextMethod;
+					currentUrl = decision.nextUrl;
 				}
 
 				if (!response) {

@@ -1,4 +1,5 @@
 import type { ProviderErrorCategory } from "./observability.js";
+import type { HttpRedirectFailureReason } from "./types.js";
 
 // Versioned, cross-realm brands. `Symbol.for` resolves to the same symbol in
 // any copy/entrypoint of this SDK major version, so an error created by a
@@ -145,6 +146,33 @@ export class TransportError extends ProviderError {
 		this.status = options?.status;
 		this.upstreamStatus = options?.upstreamStatus ?? options?.status;
 		defineErrorBrand(this, TRANSPORT_BRAND, true);
+	}
+}
+
+export type HttpRedirectErrorOptions = TransportErrorOptions & {
+	reason: HttpRedirectFailureReason;
+	/** Redacted redirect target suitable for provider diagnostics. */
+	target?: string;
+};
+
+/** Raised when an opt-in ctx.http redirect policy refuses or cannot resolve a hop. */
+export class HttpRedirectError extends TransportError {
+	readonly reason: HttpRedirectFailureReason;
+	readonly target?: string;
+
+	constructor(message: string, options: HttpRedirectErrorOptions) {
+		const { reason, target, ...transportOptions } = options;
+		super(message, {
+			...transportOptions,
+			code: `http_redirect_${reason}`,
+			details: {
+				reason,
+				...(target ? { target } : {}),
+			},
+		});
+		this.name = "HttpRedirectError";
+		this.reason = reason;
+		this.target = target;
 	}
 }
 

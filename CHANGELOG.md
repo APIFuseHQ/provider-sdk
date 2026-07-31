@@ -86,6 +86,7 @@
 
 ## Unreleased
 
+- Add an opt-in same-origin redirect hop policy to `ctx.http`, with bounded manual following and typed failures before a refused target is requested.
 - **Breaking:** Provider error `details` is now passed through verbatim; SDK observability fields (`category`, `taxonomyVersion`, `upstreamStatus`, and derived `retryable`) are no longer merged into the public body. Emitted error envelopes now require top-level `retryable`, while inbound stateful forwarding tolerates an older owner response that omits it and defaults it to `false`. The removed observability metadata is available in the new `X-ApiFuse-Error-Observability` response header.
 - Unregistered `ProviderError` codes now default to HTTP 500 instead of 400 and emit an `unregistered_provider_error_code` structured-log signal; registered mappings remain unchanged and take precedence over the HTTP 400 fallback for unregistered input `ValidationError` codes.
 - Add an opt-in native connection idle read timeout with a typed error, independently from TCP/SOCKS/TLS establishment deadlines.
