@@ -7,15 +7,15 @@ import { SocksClient } from "socks";
 import { ProxyResolutionError } from "../config/loader.js";
 import { TransportError } from "../errors.js";
 import {
+	type DynamicEgressRuleSnapshot,
 	NativeEgressPolicyValidationError,
 	parseNativeEgressPolicy,
-	type DynamicEgressRuleSnapshot,
 	type StaticEgressRuleSnapshot,
 } from "../native-egress-policy.js";
 import type {
 	NativeNetworkClient,
-	NativeNetworkConnection,
 	NativeNetworkConnectInput,
+	NativeNetworkConnection,
 	NativeNetworkDynamicGrantOptions,
 	NativeNetworkEgressGrant,
 	NativeProviderConfig,
@@ -32,6 +32,7 @@ import {
 	nodemavenSessionWindow,
 	synthesizeNodemavenProxy,
 } from "./proxy-nodemaven.js";
+import { redactSensitiveError } from "./request-options.js";
 
 export type NativeNetworkErrorCode =
 	| "native_connection_aborted"
@@ -51,12 +52,13 @@ export type NativeNetworkErrorCode =
 	| "native_proxy_invalid";
 
 export class NativeNetworkError extends TransportError {
-	constructor(message: string, code: NativeNetworkErrorCode) {
+	constructor(message: string, code: NativeNetworkErrorCode, cause?: Error) {
 		const isEgressPolicyFailure =
 			code.startsWith("native_egress_") || code === "native_dynamic_egress_unsupported";
 		super(message, {
 			code,
 			status: 0,
+			...(cause ? { cause } : {}),
 			...(isEgressPolicyFailure ? { category: "provider_error" as const, retryable: false } : {}),
 		});
 		this.name = "NativeNetworkError";
@@ -111,10 +113,7 @@ export class NativeEgressGrantExpiredError extends NativeNetworkError {
 /** Raised when an established connection exceeds its opt-in read-idle window. */
 export class NativeIdleTimeoutError extends NativeNetworkError {
 	constructor() {
-		super(
-			"Native network socket timed out while reading.",
-			"native_connection_idle_timeout",
-		);
+		super("Native network socket timed out while reading.", "native_connection_idle_timeout");
 		this.name = "NativeIdleTimeoutError";
 	}
 }
@@ -268,8 +267,8 @@ function timeoutError(): NativeNetworkError {
 	return new NativeNetworkError("Native connection timed out", "native_connection_timeout");
 }
 
-function failedError(): NativeNetworkError {
-	return new NativeNetworkError("Native connection failed", "native_connection_failed");
+function failedError(cause?: Error): NativeNetworkError {
+	return new NativeNetworkError("Native connection failed", "native_connection_failed", cause);
 }
 
 function assertCanStart(signal: AbortSignal | undefined, deadline: Deadline): void {
@@ -302,7 +301,7 @@ async function waitForSocketEvent(
 			} else resolve();
 		};
 		const onReady = () => finish();
-		const onError = () => finish(failedError());
+		const onError = (cause: Error) => finish(failedError(cause));
 		const onClose = () => finish(failedError());
 		const onAbort = () => finish(abortError());
 
@@ -357,11 +356,84 @@ function parseSocks5Proxy(proxyUrl: string): {
 	}
 }
 
+const SOCKS5_REPLY_CODES = {
+	Failure: 0x01,
+	NotAllowed: 0x02,
+	NetworkUnreachable: 0x03,
+	HostUnreachable: 0x04,
+	ConnectionRefused: 0x05,
+	TTLExpired: 0x06,
+	CommandNotSupported: 0x07,
+	AddressNotSupported: 0x08,
+} as const;
+
+function socks5ReplyCode(error: Error): number | undefined {
+	const match = /Socks5 proxy rejected connection - ([A-Za-z]+)/i.exec(error.message);
+	if (!match?.[1]) return undefined;
+	const reply = Object.entries(SOCKS5_REPLY_CODES).find(
+		([name]) => name.toLowerCase() === match[1]?.toLowerCase(),
+	);
+	return reply?.[1];
+}
+
+function sanitizeProxyFailureCause(
+	error: Error,
+	proxyUrl: string,
+	credentials: { readonly userId?: string; readonly password?: string },
+): Error {
+	// socks' SocksClientError retains the live socket in options. It is neither
+	// useful diagnostic payload nor serializable, so preserve the original error
+	// while replacing only that options object with a socket-free snapshot.
+	const options = Reflect.get(error, "options");
+	if (options && typeof options === "object" && !Array.isArray(options)) {
+		const snapshot = { ...(options as Record<string, unknown>) };
+		delete snapshot.existing_socket;
+		try {
+			Reflect.set(error, "options", snapshot);
+		} catch {
+			// The recursive redactor below clones readonly diagnostics safely.
+		}
+	}
+
+	const replyCode = socks5ReplyCode(error);
+	if (replyCode !== undefined) {
+		try {
+			Object.defineProperty(error, "socks5ReplyCode", {
+				value: replyCode,
+				configurable: true,
+				enumerable: true,
+				writable: false,
+			});
+		} catch {
+			// The reply label remains in message if an exotic error is immutable.
+		}
+	}
+
+	let redactedProxyUrl = proxyUrl;
+	try {
+		const parsed = new URL(proxyUrl);
+		parsed.username = "[REDACTED]";
+		parsed.password = "[REDACTED]";
+		redactedProxyUrl = parsed.toString();
+	} catch {
+		// parseSocks5Proxy already validated this URL; keep a defensive fallback.
+	}
+	return redactSensitiveError(
+		error,
+		[credentials.userId, credentials.password].filter(
+			(value): value is string => typeof value === "string" && value.length > 0,
+		),
+		proxyUrl,
+		redactedProxyUrl,
+	);
+}
+
 async function waitForSocksHandshake(
 	proxySocket: Socket,
 	promise: ReturnType<typeof SocksClient.createConnection>,
 	signal: AbortSignal | undefined,
 	deadline: Deadline,
+	sanitizeFailure: (error: Error) => Error,
 ): Promise<Socket> {
 	assertCanStart(signal, deadline);
 	return await new Promise<Socket>((resolve, reject) => {
@@ -391,7 +463,9 @@ async function waitForSocksHandshake(
 				finish(
 					error instanceof Error && /\b(?:timed out|timeout)\b/i.test(error.message)
 						? timeoutError()
-						: failedError(),
+						: failedError(
+								sanitizeFailure(error instanceof Error ? error : new Error(String(error))),
+							),
 				),
 		);
 	});
@@ -423,7 +497,9 @@ async function connectSocksTunnel(
 		existing_socket: proxySocket,
 		...(remaining === undefined ? {} : { timeout: Math.max(1, remaining) }),
 	});
-	return await waitForSocksHandshake(proxySocket, handshake, input.signal, deadline);
+	return await waitForSocksHandshake(proxySocket, handshake, input.signal, deadline, (error) =>
+		sanitizeProxyFailureCause(error, proxy.url, parsed),
+	);
 }
 
 async function upgradeTls(
@@ -473,12 +549,15 @@ export function createNativeNetworkConnection(
 	const resetIdleTimer = () => {
 		clearIdleTimer();
 		if (idleTimeoutMs === undefined || socket.readableEnded || socket.destroyed) return;
-		idleTimer = setTimeout(() => {
-			idleTimer = undefined;
-			if (socket.readableEnded || socket.destroyed) return;
-			closeReason = new NativeIdleTimeoutError();
-			socket.destroy(closeReason);
-		}, Math.max(0, idleTimeoutMs));
+		idleTimer = setTimeout(
+			() => {
+				idleTimer = undefined;
+				if (socket.readableEnded || socket.destroyed) return;
+				closeReason = new NativeIdleTimeoutError();
+				socket.destroy(closeReason);
+			},
+			Math.max(0, idleTimeoutMs),
+		);
 		idleTimer.unref?.();
 	};
 	const clearLifecycle = () => {
@@ -541,7 +620,7 @@ export function createNativeNetworkConnection(
 
 	const read = async (): Promise<Uint8Array | null> => {
 		if (closeReason) throw closeReason;
-		if (terminalError) throw failedError();
+		if (terminalError) throw failedError(terminalError);
 		const chunk = socket.read() as Buffer | null;
 		if (chunk) {
 			resetIdleTimer();
@@ -596,7 +675,7 @@ export function createNativeNetworkConnection(
 			}
 			await new Promise<void>((resolve, reject) => {
 				socket.write(data, (error) => {
-					if (error) reject(failedError());
+					if (error) reject(failedError(error));
 					else resolve();
 				});
 			});
@@ -890,9 +969,7 @@ export function createNativeEgressAuthorization(options: NativeNetworkClientOpti
 		const expired = [...expiredEvidence.values()]
 			.filter(
 				(grant) =>
-					grant.host === host &&
-					grant.port === input.port &&
-					tlsModeAllows(grant.tls, tls),
+					grant.host === host && grant.port === input.port && tlsModeAllows(grant.tls, tls),
 			)
 			.sort((left, right) => (right.expiresAtMs ?? 0) - (left.expiresAtMs ?? 0))[0];
 		if (expired?.expiresAtMs !== undefined)
