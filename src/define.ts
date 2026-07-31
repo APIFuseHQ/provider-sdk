@@ -1,5 +1,6 @@
 import ms from "ms";
 
+import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
 import {
 	NativeEgressPolicyValidationError,
@@ -56,6 +57,7 @@ import {
 	STREAM_IDLE_TIMEOUT_MS_MIN,
 	STREAM_MAX_DURATION_MS_MAX,
 	STREAM_MAX_DURATION_MS_MIN,
+	VALID_OPERATION_ERROR_STATUSES,
 } from "./types.js";
 
 type ProviderImplementationSourceAccess =
@@ -113,7 +115,6 @@ const MCP_TOOL_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
 const VALID_OPERATION_RISK_CLASSES = ["read", "write", "destructive", "external-send"] as const;
 const VALID_OPERATION_APPROVAL_POLICIES = ["never", "risk-based", "always"] as const;
 const VALID_OPERATION_TRANSPORT_KINDS = ["json", "sse", "http-stream", "websocket"] as const;
-const VALID_OPERATION_ERROR_STATUSES = [400, 401, 404, 429, 500, 502, 503, 504] as const;
 const SSE_EVENT_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const WEBSOCKET_SUBPROTOCOL_REGEX = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
@@ -817,6 +818,14 @@ function validateOperationErrorCodes(
 					{
 						fix: `Set ${field} to one of ${VALID_OPERATION_ERROR_STATUSES.join(", ")}, or omit it.`,
 					},
+				);
+			}
+			if (
+				errorCode.status !== undefined &&
+				SDK_RUNTIME_OWNED_ERROR_CODES.has(errorCode.code)
+			) {
+				console.warn(
+					`[provider-sdk] Provider "${providerId}" operation "${operationName}" declares status ${errorCode.status} for SDK-owned error code "${errorCode.code}"; the declared status is documentation-only and will be ignored at runtime.`,
 				);
 			}
 		}

@@ -123,6 +123,7 @@ export type {
 	OperationDefinition,
 	OperationDocMeta,
 	OperationErrorCode,
+	ProviderErrorStatus,
 	OperationInputExample,
 	OperationLifecycle,
 	OperationObservabilityConfig,

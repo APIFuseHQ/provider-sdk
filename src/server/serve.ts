@@ -5,6 +5,10 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import {
+	SDK_OWNED_PROVIDER_ERROR_CODES,
+	SDK_RUNTIME_OWNED_ERROR_CODES,
+} from "../error-resolution.js";
+import {
 	AuthError,
 	isProviderError,
 	isSessionExpiredError,
@@ -82,6 +86,7 @@ import type {
 	OperationErrorCode,
 	OperationHttpStreamTransport,
 	OperationSseTransport,
+	ProviderErrorStatus,
 	ProviderContext,
 	ProviderDefinition,
 	ProviderProxyPolicy,
@@ -90,6 +95,7 @@ import type {
 	StealthClient,
 	SttContext,
 } from "../types.js";
+import { VALID_OPERATION_ERROR_STATUSES } from "../types.js";
 import {
 	createSelfTestApp,
 	createSelfTestAuthFlowInvoke,
@@ -786,11 +792,14 @@ function errorObservabilityDetails(
 	if (providerDetails) return providerDetails;
 
 	if (error instanceof z.ZodError || isValidationError(error)) {
+		const declaredStatus = effectiveDeclaration?.status;
 		return {
 			category:
 				isProviderError(error) && error.options?.category
 					? error.options.category
-					: "input_validation",
+					: isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
+						? "provider_error"
+						: "input_validation",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: isProviderError(error)
 				? (error.options?.retryable ?? effectiveDeclaration?.retryable ?? false)
@@ -862,7 +871,12 @@ function publicProviderErrorMessage(error: ProviderError): string {
 	return error.message;
 }
 
-type ProviderErrorStatus = 400 | 401 | 404 | 429 | 500 | 502 | 503 | 504;
+function isEmittableErrorStatus(value: unknown): value is ProviderErrorStatus {
+	return (
+		typeof value === "number" &&
+		VALID_OPERATION_ERROR_STATUSES.some((status) => status === value)
+	);
+}
 
 function toStatusCode(error: unknown, declaredErrorCode?: OperationErrorCode): ProviderErrorStatus {
 	if (error instanceof z.ZodError) {
@@ -872,8 +886,11 @@ function toStatusCode(error: unknown, declaredErrorCode?: OperationErrorCode): P
 		return 504;
 	}
 	if (isProviderError(error)) {
-		if (!sdkOwnsErrorResolution(error) && declaredErrorCode?.status !== undefined) {
-			return declaredErrorCode.status as ProviderErrorStatus;
+		if (
+			!sdkOwnsErrorResolution(error) &&
+			isEmittableErrorStatus(declaredErrorCode?.status)
+		) {
+			return declaredErrorCode.status;
 		}
 		switch (error.code) {
 			case "AUTH_REQUIRED":
@@ -912,92 +929,15 @@ function toStatusCode(error: unknown, declaredErrorCode?: OperationErrorCode): P
 	return 500;
 }
 
-// Codes emitted by SDK-owned paths must never be attributed to provider
-// authors by the unregistered-code signal, even when their intentional status
-// is 500. Provider-authored codes not in this registry retain the signal.
-const SDK_OWNED_PROVIDER_ERROR_CODES = new Set([
-	MISSING_SECRET_CODE,
-	"AUTH_PROMPT_UNAVAILABLE",
-	"BROWSER_CDP_POOL_REQUIRED",
-	"BROWSER_RUNTIME_UNSUPPORTED",
-	"STEALTH_RUNTIME_UNSUPPORTED",
-	"SSE_EVENT_UNDECLARED",
-	"STREAM_EVENT_TOO_LARGE",
-	"STREAM_CHUNK_TOO_LARGE",
-	"SSE_RESULT_UNSUPPORTED",
-	"STREAM_RESULT_UNSUPPORTED",
-	"AUTH_FLOW_NOT_CONFIGURED",
-	"refresh_not_supported",
-	"RUNTIME_UNSUPPORTED",
-	"PROVIDER_STATE_UNSUPPORTED",
-	"CHOICE_TOKEN_MASTER_SECRET_NOT_CONFIGURED",
-	"CHOICE_STATE_PAYLOAD_TOO_LARGE",
-	"CHOICE_STATE_UNAVAILABLE",
-	"CHOICE_CONTEXT_REQUIRED",
-	"unsupported_stealth_cookie_store_version",
-	"provider_secret_error",
-	"credential_key_error",
-	"credential_mode_error",
-	"flow_expired",
-	"turn_validation_error",
-	"context_access_error",
-	"UNSUPPORTED_STT_OPTION",
-	"INVALID_STT_AUDIO",
-	"STT_AUDIO_TOO_LARGE",
-	"STT_UPSTREAM_FAILED",
-	"INVALID_STT_VERIFICATION_CODE_OPTIONS",
-	"NO_CODE_FOUND",
-	"AMBIGUOUS_CODE",
-	"retry_invalid_policy",
-	"retry_unsafe_method",
-	"stealth_cookie_store_serialize_failed",
-	"response_too_large",
-	"transport_stream_unavailable",
-	"transport_invalid_method",
-	"http_transport_override_unsupported",
-	"http_redirect_policy_invalid",
-	"http_redirect_stopped",
-	"http_redirect_max_hops",
-	"http_redirect_missing_location",
-	"http_redirect_loop",
-	"transport_invalid_url",
-	"retry_exhausted",
-	"auth_abort_unsafe_data",
-	"credentials_auth_missing_credential_keys",
-	"credentials_auth_missing_credential",
-	"credentials_auth_invalid_login_result",
-	"credentials_auth_unknown_challenge",
-	"credentials_auth_unknown_pending_challenge",
-	"STATEFUL_FORWARDING_NOT_CONFIGURED",
-	"STATEFUL_FORWARDING_SIGNATURE_MISSING",
-	"STATEFUL_FORWARDING_NONCE_INVALID",
-	"STATEFUL_FORWARDING_TIMESTAMP_INVALID",
-	"STATEFUL_FORWARDING_SIGNATURE_INVALID",
-	"STATEFUL_FORWARDING_REPLAY_DETECTED",
-	"STATEFUL_FORWARDING_REPLAY_CACHE_FULL",
-	"STATEFUL_FORWARDING_ENVELOPE_INVALID",
-	"STATEFUL_FORWARDING_PROVIDER_MISMATCH",
-	"STATEFUL_FORWARDING_SOURCE_POD_MISMATCH",
-	"STATEFUL_FORWARDING_OWNER_FENCE_INVALID",
-	"STATEFUL_FORWARDING_REQUEST_FAILED",
-	"STATEFUL_FORWARDING_CONTEXT_MISSING",
-	"STATEFUL_FORWARDING_BAD_RESPONSE",
-	"STATEFUL_INTERNAL_EXECUTOR_NOT_CONFIGURED",
-	"STATEFUL_FILE_FORWARDING_UNSUPPORTED",
-	"STATEFUL_CONTROL_PLANE_OPERATION_AMBIGUOUS",
-	"STATEFUL_CONTROL_PLANE_REQUEST_FAILED",
-	"STATEFUL_CONTROL_PLANE_HTTP_ERROR",
-	"STATEFUL_CONTROL_PLANE_INVALID_RESPONSE",
-]);
-
 function sdkOwnsErrorResolution(error: unknown): boolean {
+	if (isSessionExpiredError(error)) return true;
+	if (isTransportError(error)) return true;
+	if (error instanceof z.ZodError) return true;
+	if (error instanceof StatefulRoutingDeadlineError) return true;
 	return (
-		error instanceof z.ZodError ||
-		error instanceof StatefulRoutingDeadlineError ||
-		isTransportError(error) ||
-		(isProviderError(error) &&
-			typeof error.code === "string" &&
-			SDK_OWNED_PROVIDER_ERROR_CODES.has(error.code))
+		isProviderError(error) &&
+		typeof error.code === "string" &&
+		SDK_RUNTIME_OWNED_ERROR_CODES.has(error.code)
 	);
 }
 
@@ -1985,7 +1925,7 @@ export function createServerApp(
 				logger,
 				provider,
 				"operation",
-				operation,
+				operationId || operation,
 				requestId,
 				error,
 				status,
