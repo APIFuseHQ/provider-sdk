@@ -742,6 +742,46 @@ const credentialsAuth = defineCredentialsAuth({
   `bunx playwright install chromium`, or set
   `APIFUSE__CDP_POOL__URL` for remote browser debugging.
 
+### Native gateway adapter migration
+
+Native proxy resolution supports both HTTP CONNECT and SOCKS5 without
+terminating origin TLS. The built-in vendor order follows `proxy.providers`
+exactly: `smartproxy` means the `api.smartproxy.org` allocation vendor (raw
+`ip:port` endpoints), while `nodemaven` is the credentialed gateway. It is not
+the company formerly called Smartproxy; that separate company is represented
+by the deprecated `decodo` name.
+
+Custom `gatewaySynthesizers` must now accept the selected `protocol` and the
+injected `credentials` resolver on `NativeGatewayProxySynthesisInput`.
+Synthesizers may be async because allocation vendors perform network I/O. They
+may return a proxy, `undefined` when they do not implement the offered vendor,
+or `{ kind: "skipped", reason }` so an exhausted required chain can explain an
+absent credential, unsupported protocol, or allocation failure. Accordingly,
+`resolveNativeGatewayProxy(...)` must now be awaited.
+
+Callers that do not supply custom synthesizers or credentials keep env-backed
+behavior. Hosts that already have an allowlisted `EnvContext` can inject it
+explicitly, and vault-backed or per-tenant hosts can supply their own resolver:
+
+```ts
+import {
+  createEnvVendorCredentialResolver,
+  createNativeNetworkClient,
+} from "@apifuse/provider-sdk";
+
+const network = createNativeNetworkClient({
+  proxyPolicy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
+  credentials: createEnvVendorCredentialResolver(ctx.env),
+  // Optional advanced override; omit for each vendor's default.
+  proxyProtocol: "socks5",
+});
+```
+
+Never include credential values in adapter skip messages or thrown errors. The
+SDK redacts built-in proxy URL userinfo, CONNECT authentication, and allocator
+causes, but a custom adapter remains responsible for not publishing secrets in
+its own diagnostics.
+
 ### Limiting stealth response bodies
 
 Set `maxBodyBytes` on `ctx.stealth.fetch()` or `session.redirects.run()` when an

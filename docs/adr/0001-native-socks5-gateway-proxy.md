@@ -5,6 +5,12 @@
 - Deciders: Taehoon (owner), Soju (agent)
 - Scope: `@apifuse/provider-sdk` native network capability (`ctx.native.network`), first consumer `APIFuseHQ/apifuse-provider-kakaotalk`
 
+> **Status note (2026-07-31):** ADR 0003 supersedes the SOCKS5-only and
+> gateway-only parts of this decision. Native transport now selects HTTP CONNECT
+> or SOCKS5 per vendor, and smartproxy participates through its allocation API.
+> The affinity, expiry, drain, No-MITM, and provider-owned port-selection
+> decisions here remain in force.
+
 ## Context
 
 `ctx.native.network.connectTcp/connectTls` opens raw sockets straight from the provider pod (`node:net` / `node:tls`). Unlike `ctx.http` and `ctx.stealth`, the native contract has no proxy concept at all: `NativeNetworkConnectInput` carries only `host`, `port`, `serverName`, `rejectUnauthorized`, `timeoutMs`, `signal`.

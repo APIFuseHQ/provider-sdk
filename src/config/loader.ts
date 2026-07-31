@@ -7,7 +7,10 @@ import { Redis } from "ioredis";
 import type { ProviderProxyPolicy, ProviderProxyProvider, TraceConfig } from "../types.js";
 import {
 	NODEMAVEN_DEFAULT_PROTOCOL,
+	NODEMAVEN_FILTER_ENV,
 	NODEMAVEN_MAX_POOL_SIZE,
+	NODEMAVEN_PASSWORD_ENV,
+	NODEMAVEN_USERNAME_ENV,
 	type ProxyProtocol,
 	hasNodemavenCredentials,
 	nodemavenPoolSize,
@@ -683,7 +686,7 @@ export async function resolveProxy(
  * for smartproxy, and is the only protocol ctx.http (Bun native fetch) supports.
  * Override per call via ProxyResolutionOptions.protocol (harness/tests).
  */
-const VENDOR_DEFAULT_PROTOCOL: Record<ProxyVendorName, ProxyProtocol> = {
+export const VENDOR_DEFAULT_PROTOCOL: Readonly<Record<ProxyVendorName, ProxyProtocol>> = {
 	smartproxy: "http",
 	nodemaven: NODEMAVEN_DEFAULT_PROTOCOL,
 };
@@ -708,21 +711,59 @@ export function assertTunnelingScheme(url: string): void {
 	}
 }
 
-async function resolveWithVendor(
+export type ProxyVendorResolutionContext = {
+	readonly protocol: ProxyProtocol;
+	readonly poolIndex: number;
+	readonly refreshEpoch: number;
+	/** Explicit vendor credentials. Omit only on the legacy ambient-env path. */
+	readonly credentials?: Readonly<Record<string, string>>;
+	/** Disable non-policy env defaults for deterministic injected adapters. */
+	readonly ambientDefaults?: boolean;
+	/** Disable env-discovered Redis sharing for deterministic injected adapters. */
+	readonly sharedCache?: boolean;
+};
+
+export async function resolveWithVendor(
 	vendor: ProxyVendorName,
 	policy: ProviderProxyPolicy,
 	options: ProxyResolutionOptions,
-	context: { protocol: ProxyProtocol; poolIndex: number; refreshEpoch: number },
+	context: ProxyVendorResolutionContext,
 ): Promise<ResolvedProxyConfig> {
 	if (vendor === "nodemaven") {
 		const startedAt = Date.now();
+		const username = (
+			context.credentials === undefined
+				? process.env[NODEMAVEN_USERNAME_ENV]
+				: context.credentials[NODEMAVEN_USERNAME_ENV]
+		)?.trim();
+		const password = (
+			context.credentials === undefined
+				? process.env[NODEMAVEN_PASSWORD_ENV]
+				: context.credentials[NODEMAVEN_PASSWORD_ENV]
+		)?.trim();
+		const filter =
+			context.credentials === undefined
+				? process.env[NODEMAVEN_FILTER_ENV]
+				: context.credentials[NODEMAVEN_FILTER_ENV];
+		if (!username || !password) {
+			throw new ProxyResolutionError(
+				"PROXY_ALLOCATION_FAILED",
+				`NodeMaven credentials missing: set ${NODEMAVEN_USERNAME_ENV} and ${NODEMAVEN_PASSWORD_ENV}.`,
+				{ vendor: "nodemaven" },
+			);
+		}
 		const synthesized = synthesizeNodemavenProxy({
 			policy,
+			credentials: {
+				username,
+				password,
+				...(filter ? { filter } : {}),
+			},
 			affinityKey: options.affinityKey,
 			protocol: context.protocol,
 			poolIndex: context.poolIndex,
 			refreshEpoch: context.refreshEpoch,
-			country: resolveSmartproxyCountry(policy),
+			country: resolveSmartproxyCountry(policy, context.ambientDefaults !== false),
 		});
 		options.telemetry?.recordProxyResolution({
 			provider: "nodemaven",
@@ -746,7 +787,11 @@ async function resolveWithVendor(
 	}
 
 	// smartproxy allocation-style vendor.
-	const appKey = process.env[SMARTPROXY_APP_KEY_ENV]?.trim();
+	const appKey = (
+		context.credentials === undefined
+			? process.env[SMARTPROXY_APP_KEY_ENV]
+			: context.credentials[SMARTPROXY_APP_KEY_ENV]
+	)?.trim();
 	if (!appKey) {
 		// Guarded by vendorHasCredentials; treated as a vendor-internal failure.
 		throw new ProxyResolutionError(
@@ -755,13 +800,15 @@ async function resolveWithVendor(
 			{ vendor: "smartproxy" },
 		);
 	}
-	const lifetimeMinutes = resolveSmartproxyLifetime(policy);
+	const lifetimeMinutes = resolveSmartproxyLifetime(policy, context.ambientDefaults !== false);
 	const allocated = await allocateSmartproxy(
 		policy,
 		appKey,
 		lifetimeMinutes,
 		options.affinityKey,
 		context.protocol,
+		context.ambientDefaults !== false,
+		context.sharedCache !== false,
 	);
 	options.telemetry?.recordProxyResolution({ ...allocated.telemetry, protocol: context.protocol });
 	const poolIndex = selectProxyPoolIndex(allocated.pool.urls.length, context.poolIndex);
@@ -985,15 +1032,22 @@ export function mapFlatAttempt(
 	return { vendorIndex: 0, poolIndex: 0 };
 }
 
-function resolveSmartproxyCountry(policy: ProviderProxyPolicy): string | undefined {
+function resolveSmartproxyCountry(
+	policy: ProviderProxyPolicy,
+	ambientDefaults = true,
+): string | undefined {
 	return (
-		policy.geo?.country ?? process.env[DEFAULT_PROXY_COUNTRY_ENV]?.trim().toUpperCase() ?? undefined
+		policy.geo?.country ??
+		(ambientDefaults
+			? process.env[DEFAULT_PROXY_COUNTRY_ENV]?.trim().toUpperCase() || undefined
+			: undefined)
 	);
 }
 
-function resolveSmartproxyLifetime(policy: ProviderProxyPolicy): number {
+function resolveSmartproxyLifetime(policy: ProviderProxyPolicy, ambientDefaults = true): number {
 	const configuredLifetime =
-		policy.session?.lifetimeMinutes ?? readPositiveNumberEnv(DEFAULT_PROXY_LIFETIME_ENV, 30);
+		policy.session?.lifetimeMinutes ??
+		(ambientDefaults ? readPositiveNumberEnv(DEFAULT_PROXY_LIFETIME_ENV, 30) : 30);
 	return Math.min(SMARTPROXY_MAX_LIFETIME_MINUTES, Math.max(1, Math.floor(configuredLifetime)));
 }
 
@@ -1024,15 +1078,21 @@ function selectProxyPoolIndex(poolSize: number, attempt = 0): number {
 
 function buildSmartproxyCacheKey(
 	policy: ProviderProxyPolicy,
+	appKey: string,
 	affinityKey: string | undefined,
 	lifetimeMinutes: number,
 	protocol: ProxyProtocol,
+	ambientDefaults = true,
 ): string {
 	const poolSize = resolveSmartproxyPoolSize(policy);
 	return JSON.stringify({
 		provider: "smartproxy",
+		credentialHash: createHash("sha256")
+			.update("apifuse-smartproxy-credential:v1\0")
+			.update(appKey)
+			.digest("hex"),
 		protocol,
-		country: resolveSmartproxyCountry(policy),
+		country: resolveSmartproxyCountry(policy, ambientDefaults),
 		affinity: policy.session?.affinity ?? "request",
 		affinityKey: (policy.session?.affinity ?? "request") === "request" ? undefined : affinityKey,
 		lifetimeMinutes,
@@ -1046,8 +1106,17 @@ async function allocateSmartproxy(
 	lifetimeMinutes: number,
 	affinityKey: string | undefined,
 	protocol: ProxyProtocol,
+	ambientDefaults = true,
+	sharedCache = true,
 ): Promise<SmartproxyAllocationResult> {
-	const cacheKey = buildSmartproxyCacheKey(policy, affinityKey, lifetimeMinutes, protocol);
+	const cacheKey = buildSmartproxyCacheKey(
+		policy,
+		appKey,
+		affinityKey,
+		lifetimeMinutes,
+		protocol,
+		ambientDefaults,
+	);
 	const startedAt = Date.now();
 	const now = startedAt;
 	const invalidatedUntil = invalidatedProxyKeys.get(cacheKey) ?? 0;
@@ -1055,7 +1124,15 @@ async function allocateSmartproxy(
 	const cached = proxyCache.get(cacheKey);
 	if (!skipCached && cached && isFresh(cached, now)) {
 		if (shouldSoftRefresh(cached, now)) {
-			void refreshSmartproxyPool(cacheKey, policy, appKey, lifetimeMinutes, protocol);
+			void refreshSmartproxyPool(
+				cacheKey,
+				policy,
+				appKey,
+				lifetimeMinutes,
+				protocol,
+				ambientDefaults,
+				sharedCache,
+			);
 			return {
 				pool: cached,
 				telemetry: telemetryForPool(cached, "soft_stale_refresh", startedAt, {
@@ -1069,7 +1146,7 @@ async function allocateSmartproxy(
 		};
 	}
 
-	if (!skipCached) {
+	if (!skipCached && sharedCache) {
 		const redisResult = await readSmartproxyRedisPool(cacheKey, startedAt);
 		if (redisResult) return redisResult;
 	}
@@ -1092,6 +1169,8 @@ async function allocateSmartproxy(
 		lifetimeMinutes,
 		startedAt,
 		protocol,
+		ambientDefaults,
+		sharedCache,
 	).finally(() => {
 		proxyInflight.delete(cacheKey);
 	});
@@ -1131,6 +1210,8 @@ async function refreshSmartproxyPool(
 	appKey: string,
 	lifetimeMinutes: number,
 	protocol: ProxyProtocol,
+	ambientDefaults: boolean,
+	sharedCache: boolean,
 ): Promise<void> {
 	try {
 		await allocateSmartproxyShared(
@@ -1140,6 +1221,8 @@ async function refreshSmartproxyPool(
 			lifetimeMinutes,
 			Date.now(),
 			protocol,
+			ambientDefaults,
+			sharedCache,
 			{
 				background: true,
 			},
@@ -1156,9 +1239,11 @@ async function allocateSmartproxyShared(
 	lifetimeMinutes: number,
 	startedAt: number,
 	protocol: ProxyProtocol,
+	ambientDefaults: boolean,
+	sharedCache: boolean,
 	options: { background?: boolean } = {},
 ): Promise<SmartproxyAllocationResult> {
-	const redis = getProxyRedis();
+	const redis = sharedCache ? getProxyRedis() : undefined;
 	if (!redis || !(await ensureRedisReady(redis))) {
 		return await allocateAndStoreSmartproxyPool(
 			cacheKey,
@@ -1166,7 +1251,7 @@ async function allocateSmartproxyShared(
 			appKey,
 			lifetimeMinutes,
 			startedAt,
-			{ cacheStatus: "allocator", protocol },
+			{ cacheStatus: "allocator", protocol, ambientDefaults },
 		);
 	}
 
@@ -1192,6 +1277,7 @@ async function allocateSmartproxyShared(
 						redis,
 						poolKey,
 						protocol,
+						ambientDefaults,
 					},
 				);
 			} finally {
@@ -1348,6 +1434,7 @@ async function allocateAndStoreSmartproxyPool(
 		redis?: ProxyRedisClient;
 		poolKey?: string;
 		protocol: ProxyProtocol;
+		ambientDefaults: boolean;
 	},
 ): Promise<SmartproxyAllocationResult> {
 	const poolSize = resolveSmartproxyPoolSize(policy);
@@ -1357,6 +1444,7 @@ async function allocateAndStoreSmartproxyPool(
 		lifetimeMinutes,
 		poolSize,
 		options.protocol,
+		options.ambientDefaults,
 	);
 	const allocatorStartedAt = Date.now();
 	const allocatorDeadlineAt = allocatorStartedAt + smartproxyAllocatorDeadlineMs();
@@ -1427,7 +1515,7 @@ async function allocateAndStoreSmartproxyPool(
 		expiresAt: allocatedAt + ttlMs,
 		diagnostics: {
 			provider: "smartproxy",
-			country: resolveSmartproxyCountry(policy) ?? "default",
+			country: resolveSmartproxyCountry(policy, options.ambientDefaults) ?? "default",
 			lifetimeMinutes,
 			affinity: policy.session?.affinity ?? "request",
 			rawConnect: true,
@@ -1590,6 +1678,7 @@ function buildSmartproxyAllocatorUrl(
 	lifetimeMinutes: number,
 	poolSize: number,
 	protocol: ProxyProtocol,
+	ambientDefaults = true,
 ): string {
 	const params = new URLSearchParams({
 		app_key: appKey,
@@ -1600,7 +1689,7 @@ function buildSmartproxyAllocatorUrl(
 		format: "txt",
 		lb: "\\n",
 	});
-	const country = resolveSmartproxyCountry(policy);
+	const country = resolveSmartproxyCountry(policy, ambientDefaults);
 	if (country) {
 		params.set("cc", country);
 	}
@@ -1681,8 +1770,11 @@ function markSmartproxyCacheInvalidated(options: ProxyResolutionOptions = {}): s
 	}
 
 	const lifetimeMinutes = resolveSmartproxyLifetime(policy);
+	const appKey = process.env[SMARTPROXY_APP_KEY_ENV]?.trim();
+	if (!appKey) return undefined;
 	const cacheKey = buildSmartproxyCacheKey(
 		policy,
+		appKey,
 		options.affinityKey,
 		lifetimeMinutes,
 		options.protocol ?? VENDOR_DEFAULT_PROTOCOL.smartproxy,

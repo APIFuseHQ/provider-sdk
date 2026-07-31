@@ -8,6 +8,12 @@ export const NODEMAVEN_FILTER_ENV = "APIFUSE__PROXY__NODEMAVEN_FILTER";
 
 export const NODEMAVEN_GATEWAY_HOST = "gate.nodemaven.com";
 
+export type NodemavenCredentials = {
+	readonly username: string;
+	readonly password: string;
+	readonly filter?: string;
+};
+
 /** Both schemes tunnel bytes end-to-end, preserving the client TLS handshake. */
 export type ProxyProtocol = "http" | "socks5";
 
@@ -44,8 +50,8 @@ function readNodemavenPassword(): string | undefined {
 	return process.env[NODEMAVEN_PASSWORD_ENV]?.trim() || undefined;
 }
 
-function resolveNodemavenFilter(): string {
-	const raw = process.env[NODEMAVEN_FILTER_ENV]?.trim().toLowerCase();
+function resolveNodemavenFilter(value: string | undefined): string {
+	const raw = value?.trim().toLowerCase();
 	if (!raw) return DEFAULT_NODEMAVEN_FILTER;
 	if (!NODEMAVEN_FILTERS.has(raw)) {
 		throw new Error(`${NODEMAVEN_FILTER_ENV} must be "medium" or "high"`);
@@ -133,6 +139,8 @@ function selectPort(protocol: ProxyProtocol, sid: string, poolIndex: number): nu
 
 export type NodemavenSynthesisInput = {
 	policy: ProviderProxyPolicy;
+	/** Explicit credentials; synthesis never reads process-global state. */
+	credentials: NodemavenCredentials;
 	affinityKey: string | undefined;
 	protocol: ProxyProtocol;
 	poolIndex: number;
@@ -159,15 +167,15 @@ export type NodemavenSynthesis = {
  * There is no allocation API — geo/session are encoded in the username.
  */
 export function synthesizeNodemavenProxy(input: NodemavenSynthesisInput): NodemavenSynthesis {
-	const username = readNodemavenUsername();
-	const password = readNodemavenPassword();
+	const username = input.credentials.username.trim();
+	const password = input.credentials.password.trim();
 	if (!username || !password) {
 		throw new Error(
 			`NodeMaven credentials missing: set ${NODEMAVEN_USERNAME_ENV} and ${NODEMAVEN_PASSWORD_ENV}.`,
 		);
 	}
 
-	const filter = resolveNodemavenFilter();
+	const filter = resolveNodemavenFilter(input.credentials.filter);
 	const sid = deriveSid(input.policy, input.affinityKey, input.poolIndex, input.refreshEpoch);
 	const port = selectPort(input.protocol, sid, input.poolIndex);
 	const lifetimeMinutes = nodemavenLifetimeMinutes(input.policy);

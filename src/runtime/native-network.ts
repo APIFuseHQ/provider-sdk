@@ -4,7 +4,14 @@ import { connect as connectTlsSocket, type TLSSocket } from "node:tls";
 
 import { SocksClient } from "socks";
 
-import { ProxyResolutionError } from "../config/loader.js";
+import {
+	assertTunnelingScheme,
+	ProxyResolutionError,
+	SMARTPROXY_APP_KEY_ENV,
+	type ProxyProtocol,
+	VENDOR_DEFAULT_PROTOCOL,
+	resolveWithVendor,
+} from "../config/loader.js";
 import { TransportError } from "../errors.js";
 import {
 	type DynamicEgressRuleSnapshot,
@@ -26,9 +33,13 @@ import type {
 	NativeTcpTlsMode,
 	ProviderProxyPolicy,
 	ProviderProxyProvider,
+	EnvContext,
 } from "../types.js";
+import { createEnvContext } from "./env.js";
 import {
-	hasNodemavenCredentials,
+	NODEMAVEN_FILTER_ENV,
+	NODEMAVEN_PASSWORD_ENV,
+	NODEMAVEN_USERNAME_ENV,
 	nodemavenSessionWindow,
 	synthesizeNodemavenProxy,
 } from "./proxy-nodemaven.js";
@@ -127,17 +138,38 @@ export type NativeGatewayProxySynthesisInput = {
 	readonly policy: ProviderProxyPolicy;
 	readonly affinityKey?: string;
 	readonly now: number;
+	readonly protocol: ProxyProtocol;
+	readonly credentials: VendorCredentialResolver;
 };
+
+export type VendorCredentialLookup =
+	| { readonly kind: "present"; readonly values: Readonly<Record<string, string>> }
+	| { readonly kind: "absent"; readonly missing: readonly string[] };
+
+export type VendorCredentialResolver = (vendor: ProviderProxyProvider) => VendorCredentialLookup;
+
+export type NativeGatewayProxySkipReason =
+	| { readonly kind: "credentials_absent"; readonly missing: readonly string[] }
+	| { readonly kind: "protocol_unsupported"; readonly protocol: string }
+	| { readonly kind: "allocation_failed"; readonly cause: Error }
+	| { readonly kind: "credential_lookup_failed"; readonly cause: Error };
+
+export type NativeGatewayProxySynthesisResult =
+	| NativeGatewayProxy
+	| { readonly kind: "skipped"; readonly reason: NativeGatewayProxySkipReason }
+	| undefined;
 
 /** A vendor adapter in the ordered native gateway resolution chain. */
 export type NativeGatewayProxySynthesizer = (
 	input: NativeGatewayProxySynthesisInput,
-) => NativeGatewayProxy | undefined;
+) => NativeGatewayProxySynthesisResult | Promise<NativeGatewayProxySynthesisResult>;
 
 export type NativeGatewayProxyResolutionInput = {
 	readonly policy: ProviderProxyPolicy;
 	readonly affinityKey?: string;
 	readonly now?: number;
+	readonly protocol?: ProxyProtocol;
+	readonly credentials?: VendorCredentialResolver;
 	readonly gatewaySynthesizers?: readonly NativeGatewayProxySynthesizer[];
 };
 
@@ -146,6 +178,10 @@ export type NativeNetworkClientOptions = {
 	readonly affinityKey?: string;
 	/** Stable credential/account identity; hashed before vendor synthesis. */
 	readonly credentialIdentity?: string;
+	/** Vendor credential lookup; defaults to the process EnvContext. */
+	readonly credentials?: VendorCredentialResolver;
+	/** Explicit CONNECT/SOCKS5 override; vendors otherwise choose their default. */
+	readonly proxyProtocol?: ProxyProtocol;
 	/** Vendor adapters in priority order within each policy vendor slot. */
 	readonly gatewaySynthesizers?: readonly NativeGatewayProxySynthesizer[];
 	/** Warning-level lifecycle diagnostic sink. */
@@ -159,19 +195,74 @@ export type NativeNetworkClientOptions = {
 	readonly grantTcpEgress?: (input: NativeNetworkDynamicGrantOptions) => NativeNetworkEgressGrant;
 };
 
+const VENDOR_CREDENTIAL_NAMES: Readonly<Partial<Record<ProviderProxyProvider, readonly string[]>>> =
+	{
+		smartproxy: [SMARTPROXY_APP_KEY_ENV],
+		nodemaven: [NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV],
+	};
+
+/** Build a resolver over the SDK's existing injectable environment context. */
+export function createEnvVendorCredentialResolver(
+	env: EnvContext = createEnvContext(),
+): VendorCredentialResolver {
+	return (vendor) => {
+		const names = VENDOR_CREDENTIAL_NAMES[vendor] ?? [];
+		const values: Record<string, string> = {};
+		const missing: string[] = [];
+		for (const name of names) {
+			const value = env.get(name)?.trim();
+			if (value) values[name] = value;
+			else missing.push(name);
+		}
+		if (missing.length > 0 || names.length === 0) return { kind: "absent", missing };
+		if (vendor === "nodemaven") {
+			const filter = env.get(NODEMAVEN_FILTER_ENV)?.trim();
+			if (filter) values[NODEMAVEN_FILTER_ENV] = filter;
+		}
+		return { kind: "present", values };
+	};
+}
+
+function skipped(reason: NativeGatewayProxySkipReason): NativeGatewayProxySynthesisResult {
+	return { kind: "skipped", reason };
+}
+
+function lookupCredentials(
+	input: NativeGatewayProxySynthesisInput,
+): VendorCredentialLookup | { readonly kind: "error"; readonly cause: Error } {
+	try {
+		return input.credentials(input.vendor);
+	} catch (error) {
+		return {
+			kind: "error",
+			cause: error instanceof Error ? error : new Error(String(error)),
+		};
+	}
+}
+
 function synthesizeNodemavenGateway(
 	input: NativeGatewayProxySynthesisInput,
-): NativeGatewayProxy | undefined {
-	if (input.vendor !== "nodemaven" || !hasNodemavenCredentials()) return undefined;
-
-	// NodeMaven defaults ctx.http to HTTP CONNECT because SOCKS5 adds ~500ms per
-	// request. Native LOCO pays this once per long-lived connection and must reach
-	// arbitrary destination ports, so SOCKS5 is mandatory here.
+): NativeGatewayProxySynthesisResult {
+	if (input.vendor !== "nodemaven") return undefined;
+	const lookup = lookupCredentials(input);
+	if (lookup.kind === "error") {
+		return skipped({ kind: "credential_lookup_failed", cause: lookup.cause });
+	}
+	if (lookup.kind === "absent") {
+		return skipped({ kind: "credentials_absent", missing: lookup.missing });
+	}
 	const sessionWindow = nodemavenSessionWindow(input.policy, input.now);
 	const synthesized = synthesizeNodemavenProxy({
 		policy: input.policy,
+		credentials: {
+			username: lookup.values[NODEMAVEN_USERNAME_ENV] ?? "",
+			password: lookup.values[NODEMAVEN_PASSWORD_ENV] ?? "",
+			...(lookup.values[NODEMAVEN_FILTER_ENV]
+				? { filter: lookup.values[NODEMAVEN_FILTER_ENV] }
+				: {}),
+		},
 		affinityKey: input.affinityKey,
-		protocol: "socks5",
+		protocol: input.protocol,
 		poolIndex: 0,
 		refreshEpoch: sessionWindow.refreshEpoch,
 		now: input.now,
@@ -186,7 +277,54 @@ function synthesizeNodemavenGateway(
 	};
 }
 
+async function synthesizeSmartproxyGateway(
+	input: NativeGatewayProxySynthesisInput,
+): Promise<NativeGatewayProxySynthesisResult> {
+	if (input.vendor !== "smartproxy") return undefined;
+	const lookup = lookupCredentials(input);
+	if (lookup.kind === "error") {
+		return skipped({ kind: "credential_lookup_failed", cause: lookup.cause });
+	}
+	if (lookup.kind === "absent") {
+		return skipped({ kind: "credentials_absent", missing: lookup.missing });
+	}
+	try {
+		const resolved = await resolveWithVendor(
+			"smartproxy",
+			input.policy,
+			{
+				proxyPolicy: input.policy,
+				affinityKey: input.affinityKey,
+				protocol: input.protocol,
+			},
+			{
+				protocol: input.protocol,
+				poolIndex: 0,
+				refreshEpoch: 0,
+				credentials: lookup.values,
+				ambientDefaults: false,
+				sharedCache: false,
+			},
+		);
+		if (!resolved.url) {
+			return skipped({ kind: "allocation_failed", cause: new Error("No endpoint returned") });
+		}
+		return {
+			url: resolved.url,
+			vendor: "smartproxy",
+			sticky: isStickyPolicy(input.policy),
+		};
+	} catch (error) {
+		const cause = error instanceof Error ? error : new Error(String(error));
+		return skipped({
+			kind: "allocation_failed",
+			cause: redactSensitiveError(cause, Object.values(lookup.values)),
+		});
+	}
+}
+
 const DEFAULT_GATEWAY_SYNTHESIZERS: readonly NativeGatewayProxySynthesizer[] = [
+	synthesizeSmartproxyGateway,
 	synthesizeNodemavenGateway,
 ];
 
@@ -215,35 +353,135 @@ function resolveNativeVendorChain(policy: ProviderProxyPolicy): ProviderProxyPro
 	return chain;
 }
 
-/** Resolve the first configured native gateway without invoking an allocator API. */
-export function resolveNativeGatewayProxy(
-	input: NativeGatewayProxyResolutionInput,
-): NativeGatewayProxy | undefined {
-	if (input.policy.mode === "disabled") return undefined;
-	const synthesizers = input.gatewaySynthesizers ?? DEFAULT_GATEWAY_SYNTHESIZERS;
-	const now = input.now ?? Date.now();
-	for (const vendor of resolveNativeVendorChain(input.policy)) {
-		for (const synthesize of synthesizers) {
-			const resolved = synthesize({
-				vendor,
-				policy: input.policy,
-				affinityKey: input.affinityKey,
-				now,
-			});
-			if (resolved && resolved.vendor === vendor) return resolved;
-		}
-	}
-	return undefined;
+type NativeGatewayVendorSkip = {
+	readonly vendor: ProviderProxyProvider;
+	readonly reason: NativeGatewayProxySkipReason | { readonly kind: "adapter_unavailable" };
+};
+
+function isProxyProtocol(value: unknown): value is ProxyProtocol {
+	return value === "http" || value === "socks5";
 }
 
-function proxyRequiredError(policy: ProviderProxyPolicy): ProxyResolutionError {
+function isSkippedSynthesis(
+	result: Exclude<NativeGatewayProxySynthesisResult, undefined>,
+): result is { readonly kind: "skipped"; readonly reason: NativeGatewayProxySkipReason } {
+	return "kind" in result && result.kind === "skipped";
+}
+
+function sanitizeVendorResolutionCause(
+	error: unknown,
+	vendor: ProviderProxyProvider,
+	credentials: VendorCredentialResolver,
+): Error {
+	const cause = error instanceof Error ? error : new Error(String(error));
+	try {
+		const lookup = credentials(vendor);
+		return lookup.kind === "present"
+			? redactSensitiveError(cause, Object.values(lookup.values))
+			: cause;
+	} catch {
+		return cause;
+	}
+}
+
+function sanitizeVendorSkipReason(
+	reason: NativeGatewayProxySkipReason,
+	vendor: ProviderProxyProvider,
+	credentials: VendorCredentialResolver,
+): NativeGatewayProxySkipReason {
+	return reason.kind === "allocation_failed" || reason.kind === "credential_lookup_failed"
+		? {
+				...reason,
+				cause: sanitizeVendorResolutionCause(reason.cause, vendor, credentials),
+			}
+		: reason;
+}
+
+function defaultVendorProtocol(vendor: ProviderProxyProvider): ProxyProtocol {
+	return vendor === "smartproxy" || vendor === "nodemaven"
+		? VENDOR_DEFAULT_PROTOCOL[vendor]
+		: "http";
+}
+
+async function resolveNativeGatewayProxyDetailed(
+	input: NativeGatewayProxyResolutionInput,
+): Promise<{ proxy?: NativeGatewayProxy; skips: readonly NativeGatewayVendorSkip[] }> {
+	if (input.policy.mode === "disabled") return { skips: [] };
+	const synthesizers = input.gatewaySynthesizers ?? DEFAULT_GATEWAY_SYNTHESIZERS;
+	const credentials = input.credentials ?? createEnvVendorCredentialResolver();
+	const now = input.now ?? Date.now();
+	const skips: NativeGatewayVendorSkip[] = [];
+	for (const vendor of resolveNativeVendorChain(input.policy)) {
+		const protocol = input.protocol ?? defaultVendorProtocol(vendor);
+		if (!isProxyProtocol(protocol)) {
+			skips.push({ vendor, reason: { kind: "protocol_unsupported", protocol: String(protocol) } });
+			continue;
+		}
+		let vendorSkip: NativeGatewayVendorSkip["reason"] | undefined;
+		for (const synthesize of synthesizers) {
+			try {
+				const resolved = await synthesize({
+					vendor,
+					policy: input.policy,
+					affinityKey: input.affinityKey,
+					now,
+					protocol,
+					credentials,
+				});
+				if (!resolved) continue;
+				if (isSkippedSynthesis(resolved)) {
+					vendorSkip = sanitizeVendorSkipReason(resolved.reason, vendor, credentials);
+					continue;
+				}
+				if (resolved.vendor === vendor) {
+					assertTunnelingScheme(resolved.url);
+					return { proxy: resolved, skips };
+				}
+			} catch (error) {
+				vendorSkip = {
+					kind: "allocation_failed",
+					cause: sanitizeVendorResolutionCause(error, vendor, credentials),
+				};
+			}
+		}
+		skips.push({ vendor, reason: vendorSkip ?? { kind: "adapter_unavailable" } });
+	}
+	return { skips };
+}
+
+/** Resolve the first configured native gateway, including allocation vendors. */
+export async function resolveNativeGatewayProxy(
+	input: NativeGatewayProxyResolutionInput,
+): Promise<NativeGatewayProxy | undefined> {
+	return (await resolveNativeGatewayProxyDetailed(input)).proxy;
+}
+
+function formatVendorSkip(skip: NativeGatewayVendorSkip): string {
+	switch (skip.reason.kind) {
+		case "credentials_absent":
+			return `${skip.vendor}: credentials absent (missing ${skip.reason.missing.join(", ") || "unspecified variables"})`;
+		case "protocol_unsupported":
+			return `${skip.vendor}: protocol ${skip.reason.protocol} is unsupported`;
+		case "allocation_failed":
+			return `${skip.vendor}: allocation failed (${skip.reason.cause.message})`;
+		case "credential_lookup_failed":
+			return `${skip.vendor}: credential lookup failed (${skip.reason.cause.message})`;
+		case "adapter_unavailable":
+			return `${skip.vendor}: no native adapter is registered`;
+	}
+}
+
+function proxyRequiredError(
+	policy: ProviderProxyPolicy,
+	skips: readonly NativeGatewayVendorSkip[],
+): ProxyResolutionError {
 	const chain = resolveNativeVendorChain(policy).filter(
 		(vendor): vendor is "smartproxy" | "nodemaven" =>
 			vendor === "smartproxy" || vendor === "nodemaven",
 	);
 	return new ProxyResolutionError(
 		"PROXY_REQUIRED",
-		`Native proxy egress is required but no gateway vendor in [${chain.join(", ") || "none"}] resolved.`,
+		`Native proxy egress is required but the vendor chain was exhausted: ${skips.map(formatVendorSkip).join("; ") || "no vendors declared"}.`,
 		{ vendorChain: chain },
 	);
 }
@@ -356,6 +594,42 @@ function parseSocks5Proxy(proxyUrl: string): {
 	}
 }
 
+function parseHttpConnectProxy(proxyUrl: string): {
+	host: string;
+	port: number;
+	userId?: string;
+	password?: string;
+} {
+	let parsed: URL;
+	try {
+		parsed = new URL(proxyUrl);
+	} catch {
+		throw new NativeNetworkError("Native proxy URL is invalid", "native_proxy_invalid");
+	}
+	const port = Number(parsed.port || "80");
+	if (
+		parsed.protocol !== "http:" ||
+		!parsed.hostname ||
+		!Number.isInteger(port) ||
+		port <= 0 ||
+		parsed.pathname !== "/" ||
+		parsed.search ||
+		parsed.hash
+	) {
+		throw new NativeNetworkError("Native proxy URL is invalid", "native_proxy_invalid");
+	}
+	try {
+		return {
+			host: parsed.hostname,
+			port,
+			...(parsed.username ? { userId: decodeURIComponent(parsed.username) } : {}),
+			...(parsed.password ? { password: decodeURIComponent(parsed.password) } : {}),
+		};
+	} catch {
+		throw new NativeNetworkError("Native proxy URL is invalid", "native_proxy_invalid");
+	}
+}
+
 const SOCKS5_REPLY_CODES = {
 	Failure: 0x01,
 	NotAllowed: 0x02,
@@ -420,9 +694,18 @@ function sanitizeProxyFailureCause(
 	}
 	return redactSensitiveError(
 		error,
-		[credentials.userId, credentials.password].filter(
-			(value): value is string => typeof value === "string" && value.length > 0,
-		),
+		[
+			credentials.userId,
+			credentials.password,
+			credentials.userId !== undefined || credentials.password !== undefined
+				? `${credentials.userId ?? ""}:${credentials.password ?? ""}`
+				: undefined,
+			credentials.userId !== undefined || credentials.password !== undefined
+				? Buffer.from(`${credentials.userId ?? ""}:${credentials.password ?? ""}`).toString(
+						"base64",
+					)
+				: undefined,
+		].filter((value): value is string => typeof value === "string" && value.length > 0),
 		proxyUrl,
 		redactedProxyUrl,
 	);
@@ -500,6 +783,135 @@ async function connectSocksTunnel(
 	return await waitForSocksHandshake(proxySocket, handshake, input.signal, deadline, (error) =>
 		sanitizeProxyFailureCause(error, proxy.url, parsed),
 	);
+}
+
+function connectAuthority(host: string, port: number): string {
+	return `${host.includes(":") && !host.startsWith("[") ? `[${host}]` : host}:${port}`;
+}
+
+function connectStatusError(statusLine: string, statusCode?: number): Error {
+	const error = new Error(
+		`HTTP CONNECT proxy rejected tunnel: ${statusLine || "invalid response"}`,
+	);
+	Object.defineProperties(error, {
+		connectStatusLine: {
+			value: statusLine || "invalid response",
+			configurable: true,
+			enumerable: true,
+		},
+		...(statusCode === undefined
+			? {}
+			: {
+					connectStatusCode: {
+						value: statusCode,
+						configurable: true,
+						enumerable: true,
+					},
+				}),
+	});
+	return error;
+}
+
+async function waitForConnectResponse(
+	proxySocket: Socket,
+	signal: AbortSignal | undefined,
+	deadline: Deadline,
+	sanitizeFailure: (error: Error) => Error,
+): Promise<Socket> {
+	assertCanStart(signal, deadline);
+	return await new Promise<Socket>((resolve, reject) => {
+		let settled = false;
+		let buffered = Buffer.alloc(0);
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const cleanup = () => {
+			if (timer) clearTimeout(timer);
+			proxySocket.off("data", onData);
+			proxySocket.off("error", onError);
+			proxySocket.off("close", onClose);
+			signal?.removeEventListener("abort", onAbort);
+		};
+		const finish = (error?: Error) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			if (error) {
+				proxySocket.on("error", () => undefined);
+				proxySocket.destroy();
+				reject(error);
+			} else resolve(proxySocket);
+		};
+		const onError = (cause: Error) => finish(failedError(sanitizeFailure(cause)));
+		const onClose = () =>
+			finish(failedError(sanitizeFailure(new Error("HTTP CONNECT proxy closed before response"))));
+		const onAbort = () => finish(abortError());
+		const onData = (chunk: Buffer) => {
+			buffered = Buffer.concat([buffered, chunk]);
+			if (buffered.length > 64 * 1024) {
+				finish(failedError(sanitizeFailure(connectStatusError("response headers too large"))));
+				return;
+			}
+			const headerEnd = buffered.indexOf("\r\n\r\n");
+			if (headerEnd < 0) return;
+			const header = buffered.subarray(0, headerEnd).toString("latin1");
+			const statusLine = header.split("\r\n", 1)[0] ?? "";
+			const match = /^HTTP\/1\.[01] ([0-9]{3})(?: |$)/.exec(statusLine);
+			const statusCode = match?.[1] ? Number(match[1]) : undefined;
+			if (statusCode === undefined || statusCode < 200 || statusCode >= 300) {
+				finish(failedError(sanitizeFailure(connectStatusError(statusLine, statusCode))));
+				return;
+			}
+			const remaining = buffered.subarray(headerEnd + 4);
+			cleanup();
+			if (remaining.length > 0) proxySocket.unshift(remaining);
+			finish();
+		};
+
+		proxySocket.on("data", onData);
+		proxySocket.once("error", onError);
+		proxySocket.once("close", onClose);
+		signal?.addEventListener("abort", onAbort, { once: true });
+		const remaining = remainingMs(deadline);
+		if (remaining !== undefined) timer = setTimeout(() => finish(timeoutError()), remaining);
+	});
+}
+
+async function connectHttpTunnel(
+	proxy: NativeGatewayProxy,
+	input: NativeNetworkConnectInput,
+	deadline: Deadline,
+	beforeDestinationConnect: () => void,
+): Promise<Socket> {
+	const parsed = parseHttpConnectProxy(proxy.url);
+	const proxySocket = await connectPlainSocket(parsed.host, parsed.port, input.signal, deadline);
+	const sanitizeFailure = (error: Error) => sanitizeProxyFailureCause(error, proxy.url, parsed);
+	try {
+		beforeDestinationConnect();
+	} catch (error) {
+		proxySocket.destroy();
+		throw error;
+	}
+	const authority = connectAuthority(input.host, input.port);
+	const authorization =
+		parsed.userId !== undefined || parsed.password !== undefined
+			? `Proxy-Authorization: Basic ${Buffer.from(`${parsed.userId ?? ""}:${parsed.password ?? ""}`).toString("base64")}\r\n`
+			: "";
+	const response = waitForConnectResponse(proxySocket, input.signal, deadline, sanitizeFailure);
+	proxySocket.write(
+		`CONNECT ${authority} HTTP/1.1\r\nHost: ${authority}\r\n${authorization}Proxy-Connection: Keep-Alive\r\n\r\n`,
+	);
+	return await response;
+}
+
+async function connectProxyTunnel(
+	proxy: NativeGatewayProxy,
+	input: NativeNetworkConnectInput,
+	deadline: Deadline,
+	beforeDestinationConnect: () => void,
+): Promise<Socket> {
+	assertTunnelingScheme(proxy.url);
+	return new URL(proxy.url).protocol === "http:"
+		? await connectHttpTunnel(proxy, input, deadline, beforeDestinationConnect)
+		: await connectSocksTunnel(proxy, input, deadline, beforeDestinationConnect);
 }
 
 async function upgradeTls(
@@ -696,6 +1108,7 @@ export function createNativeNetworkConnection(
 async function resolveConnectionProxy(
 	options: NativeNetworkClientOptions,
 	input: NativeNetworkConnectInput,
+	deadline: Deadline,
 ): Promise<NativeGatewayProxy | undefined> {
 	const policy = options.proxyPolicy;
 	if (!policy || policy.mode === "disabled") return undefined;
@@ -705,13 +1118,54 @@ async function resolveConnectionProxy(
 		(isStickyPolicy(policy) && options.credentialIdentity !== undefined
 			? deriveNativeCredentialAffinityKey(options.credentialIdentity)
 			: undefined);
-	const resolved = resolveNativeGatewayProxy({
-		policy,
-		affinityKey,
-		gatewaySynthesizers: options.gatewaySynthesizers,
+	const resolution = await waitForProxyResolution(
+		resolveNativeGatewayProxyDetailed({
+			policy,
+			affinityKey,
+			protocol: options.proxyProtocol,
+			credentials: options.credentials,
+			gatewaySynthesizers: options.gatewaySynthesizers,
+		}),
+		input.signal,
+		deadline,
+	);
+	if (!resolution.proxy && policy.mode === "required") {
+		throw proxyRequiredError(policy, resolution.skips);
+	}
+	return resolution.proxy;
+}
+
+async function waitForProxyResolution<T>(
+	promise: Promise<T>,
+	signal: AbortSignal | undefined,
+	deadline: Deadline,
+): Promise<T> {
+	assertCanStart(signal, deadline);
+	return await new Promise<T>((resolve, reject) => {
+		let settled = false;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const cleanup = () => {
+			if (timer) clearTimeout(timer);
+			signal?.removeEventListener("abort", onAbort);
+		};
+		const finish = (value?: T, error?: unknown) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			if (error !== undefined) reject(error);
+			else resolve(value as T);
+		};
+		const onAbort = () => finish(undefined, abortError());
+		signal?.addEventListener("abort", onAbort, { once: true });
+		const remaining = remainingMs(deadline);
+		if (remaining !== undefined) {
+			timer = setTimeout(() => finish(undefined, timeoutError()), remaining);
+		}
+		void promise.then(
+			(value) => finish(value),
+			(error) => finish(undefined, error),
+		);
 	});
-	if (!resolved && policy.mode === "required") throw proxyRequiredError(policy);
-	return resolved;
 }
 
 type NativeConnectTls = "required" | "disabled";
@@ -1100,10 +1554,10 @@ export function createNativeNetworkClient(
 			egress.assertConnect(request, "disabled");
 			const deadline = deadlineFrom(request.timeoutMs);
 			assertCanStart(request.signal, deadline);
-			const proxy = await resolveConnectionProxy(options, request);
+			const proxy = await resolveConnectionProxy(options, request, deadline);
 			egress.assertConnect(request, "disabled");
 			const socket = proxy
-				? await connectSocksTunnel(proxy, request, deadline, () =>
+				? await connectProxyTunnel(proxy, request, deadline, () =>
 						egress.assertConnect(request, "disabled"),
 					)
 				: await connectPlainSocket(request.host, request.port, request.signal, deadline);
@@ -1114,10 +1568,10 @@ export function createNativeNetworkClient(
 			egress.assertConnect(request, "required");
 			const deadline = deadlineFrom(request.timeoutMs);
 			assertCanStart(request.signal, deadline);
-			const proxy = await resolveConnectionProxy(options, request);
+			const proxy = await resolveConnectionProxy(options, request, deadline);
 			egress.assertConnect(request, "required");
 			const tunnel = proxy
-				? await connectSocksTunnel(proxy, request, deadline, () =>
+				? await connectProxyTunnel(proxy, request, deadline, () =>
 						egress.assertConnect(request, "required"),
 					)
 				: undefined;

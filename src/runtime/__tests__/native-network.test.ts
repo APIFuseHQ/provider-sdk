@@ -172,10 +172,54 @@ async function startSocks5Server(
 	return Object.assign(await listen(server), { destinations });
 }
 
+async function startHttpConnectServer(): Promise<
+	ListeningFixture & { destinations: Array<{ host: string; port: number }> }
+> {
+	const destinations: Array<{ host: string; port: number }> = [];
+	const server = createServer((client) => {
+		let buffered = Buffer.alloc(0);
+		client.on("data", function onData(chunk: Buffer) {
+			buffered = Buffer.concat([buffered, chunk]);
+			const headerEnd = buffered.indexOf("\r\n\r\n");
+			if (headerEnd < 0) return;
+			client.off("data", onData);
+			const requestLine = buffered.subarray(0, headerEnd).toString("latin1").split("\r\n")[0];
+			const authority = requestLine?.split(" ")[1];
+			if (!authority) {
+				client.end("HTTP/1.1 400 Bad Request\r\n\r\n");
+				return;
+			}
+			const separator = authority.lastIndexOf(":");
+			const host = authority.slice(0, separator).replace(/^\[|\]$/g, "");
+			const port = Number(authority.slice(separator + 1));
+			destinations.push({ host, port });
+			const upstream = new Socket();
+			upstream.once("error", () => client.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"));
+			upstream.connect(port, host, () => {
+				client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+				const remaining = buffered.subarray(headerEnd + 4);
+				if (remaining.length > 0) upstream.write(remaining);
+				client.pipe(upstream);
+				upstream.pipe(client);
+			});
+		});
+	});
+	return Object.assign(await listen(server), { destinations });
+}
+
 function localSynthesizer(proxy: ListeningFixture): NativeGatewayProxySynthesizer {
 	const password = randomUUID();
 	return () => ({
 		url: `socks5://fixture-user:${encodeURIComponent(password)}@${proxy.host}:${proxy.port}`,
+		vendor: "nodemaven",
+		sticky: false,
+	});
+}
+
+function localHttpSynthesizer(proxy: ListeningFixture): NativeGatewayProxySynthesizer {
+	const password = randomUUID();
+	return () => ({
+		url: `http://fixture-user:${encodeURIComponent(password)}@${proxy.host}:${proxy.port}`,
 		vendor: "nodemaven",
 		sticky: false,
 	});
@@ -226,6 +270,31 @@ describe("native network runtime", () => {
 		await connection.write(new TextEncoder().encode("secure"));
 		expect(new TextDecoder().decode(await connection.read())).toBe("secure");
 		expect(proxy.destinations[0]).toEqual({ host: destination.host, port: destination.port });
+		await connection.close();
+	});
+
+	it("negotiates origin TLS on top of an HTTP CONNECT tunnel", async () => {
+		const destination = await listen(
+			createTlsServer({ key: tlsKey, cert: tlsCert }, (socket) => {
+				socket.on("data", (chunk) => socket.write(chunk));
+			}),
+		);
+		const proxy = await startHttpConnectServer();
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localHttpSynthesizer(proxy)],
+		});
+
+		const connection = await client.connectTls({
+			host: destination.host,
+			port: destination.port,
+			serverName: "localhost",
+			rejectUnauthorized: false,
+			timeoutMs: 1_000,
+		});
+		await connection.write(new TextEncoder().encode("connect-secure"));
+		expect(new TextDecoder().decode(await connection.read())).toBe("connect-secure");
+		expect(proxy.destinations).toEqual([{ host: destination.host, port: destination.port }]);
 		await connection.close();
 	});
 
@@ -390,13 +459,13 @@ describe("native network runtime", () => {
 		expect(proxy.destinations).toEqual([]);
 	});
 
-	it("forces SOCKS5 when resolving NodeMaven for native connections", () => {
+	it("defaults NodeMaven native connections to CONNECT and allows a SOCKS5 override", async () => {
 		const usernameBefore = process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
 		const passwordBefore = process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = `fixture-${randomUUID()}`;
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = randomUUID();
 		try {
-			const resolved = resolveNativeGatewayProxy({
+			const resolved = await resolveNativeGatewayProxy({
 				policy: {
 					mode: "required",
 					providers: ["smartproxy", "nodemaven"],
@@ -405,10 +474,17 @@ describe("native network runtime", () => {
 				affinityKey: "hashed-account-identity",
 			});
 			expect(resolved?.vendor).toBe("nodemaven");
-			expect(resolved?.url).toMatch(/^socks5:\/\//);
+			expect(resolved?.url).toMatch(/^http:\/\//);
 			const port = Number(new URL(resolved?.url ?? "").port);
-			expect(port).toBeGreaterThanOrEqual(1080);
-			expect(port).toBeLessThanOrEqual(2080);
+			expect(port).toBeGreaterThanOrEqual(8080);
+			expect(port).toBeLessThanOrEqual(9080);
+
+			const socks = await resolveNativeGatewayProxy({
+				policy: { mode: "required", providers: ["nodemaven"] },
+				affinityKey: "hashed-account-identity",
+				protocol: "socks5",
+			});
+			expect(socks?.url).toMatch(/^socks5:\/\//);
 		} finally {
 			if (usernameBefore === undefined) delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
 			else process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = usernameBefore;

@@ -40,7 +40,10 @@ import { createEnvContext } from "../runtime/env.js";
 import { executeOperation } from "../runtime/executor.js";
 import { createHttpClient } from "../runtime/http.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
-import { createNativeNetworkClient } from "../runtime/native-network.js";
+import {
+	createEnvVendorCredentialResolver,
+	createNativeNetworkClient,
+} from "../runtime/native-network.js";
 import { getProviderBaseUrl } from "../runtime/provider.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
@@ -376,6 +379,7 @@ function createProviderContext(
 							egress: provider.native.network,
 							proxyPolicy: resolveNativeProxyPolicy(provider),
 							affinityKey: proxyClientOptions.affinityKey,
+							credentials: createEnvVendorCredentialResolver(env),
 						}),
 					},
 				}
@@ -489,6 +493,9 @@ function createAuthFlowContext(
 								egress: provider.native.network,
 								proxyPolicy: resolveNativeProxyPolicy(provider),
 								affinityKey: proxyClientOptions.affinityKey,
+								credentials: createEnvVendorCredentialResolver(
+									createEnvContext(provider.secrets?.map((secret) => secret.name)),
+								),
 							}),
 						},
 					}
