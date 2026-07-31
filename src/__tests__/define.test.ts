@@ -42,6 +42,28 @@ const validConfig = {
 };
 
 describe("defineProvider", () => {
+	it("rejects operation error statuses the server cannot emit", () => {
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						docs: {
+							errorCodes: [
+								{
+									code: "UPSTREAM_TEAPOT",
+									status: 418,
+									description: "Unsupported upstream response",
+								},
+							],
+						},
+					},
+				},
+			}),
+		).toThrow(/errorCodes\[0\]\.status: 418.*not an emittable provider error status/);
+	});
+
 	it("accepts operation contract metadata", () => {
 		const provider = defineProvider({
 			...validConfig,

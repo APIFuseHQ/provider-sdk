@@ -411,12 +411,14 @@ Provider-server failures use a stable public envelope:
 
 `retryable` is always present on responses emitted by the current SDK. Set
 `retryable` in the `ProviderError` options when the provider knows the answer;
-an explicit `true` or `false` wins over SDK derivation. When it is omitted, the
-SDK derives the value for its known error classes and otherwise defaults to
-`false`. During stateful rolling upgrades, the forwarding client also accepts
-an older owner response that omits `retryable` and treats it as `false` without
-loosening the emitted response contract. Existing optional `fix` guidance is
-also preserved when a `ProviderError` supplies it.
+an explicit `true` or `false` wins over the matching operation declaration and
+SDK derivation. When it is omitted, `operations.<id>.docs.errorCodes[].retryable`
+is used for a matching provider-owned code, followed by SDK derivation (which
+defaults ordinary `ProviderError` values to `false`). During stateful rolling
+upgrades, the forwarding client also accepts an older owner response that omits
+`retryable` and treats it as `false` without loosening the emitted response
+contract. Existing optional `fix` guidance is also preserved when a
+`ProviderError` supplies it.
 
 `details` belongs exclusively to the provider. The server passes
 `ProviderError.options.details` through verbatim, including strings and arrays,
@@ -435,8 +437,41 @@ Treat this header as telemetry, not as provider-controlled public error detail.
 Its category, taxonomy version, retryability, and optional upstream status match
 the structured `provider_request_failed` log event.
 
-Registered error-code mappings take precedence for every `ProviderError`,
-including `ValidationError`:
+Declare provider-owned operation failures next to their documentation. The
+server builds a lookup once at startup and applies it to failures from that
+operation:
+
+```ts
+docs: {
+  errorCodes: [{
+    code: "UPSTREAM_SCHEMA_ERROR",
+    status: 502,
+    retryable: true,
+    description: "The upstream response no longer matches its schema.",
+  }],
+},
+handler: async () => {
+  throw new ProviderError("Upstream schema changed", {
+    code: "UPSTREAM_SCHEMA_ERROR",
+  });
+},
+```
+
+`defineProvider` accepts only statuses the server can emit: 400, 401, 404, 429,
+500, 502, 503, and 504. Invalid declared statuses fail provider definition,
+not a live request. Status selection uses this order:
+
+1. SDK-owned errors retain SDK status semantics. Operation declarations cannot
+   override SDK-owned codes, stateful-forwarding failures, Zod/deadline errors,
+   or `TransportError` values.
+2. A matching operation `errorCodes` entry with `status` supplies the status.
+   This slot applies to `ValidationError` as well as ordinary `ProviderError`.
+3. The registered mappings below apply.
+4. Existing fallbacks apply: `TransportError` 502/504, unregistered input
+   `ValidationError` 400 (output validation 500), and other unregistered
+   `ProviderError` values 500.
+
+The registered mappings are:
 
 | Error code or fallback | HTTP status |
 | --- | ---: |
@@ -451,11 +486,15 @@ including `ValidationError`:
 
 An unregistered non-validation `ProviderError` code returns HTTP 500 and emits
 the greppable `unregistered_provider_error_code` signal with the code in the
-structured failure log. Before publishing a new code, register its status in
-the SDK mapping and add it to the mapping tests; declaring it only in operation
-documentation does not change runtime status selection. The HTTP 400
-`ValidationError` behavior is only the fallback for unregistered input
-validation codes; a registered code such as `NOT_FOUND` retains its mapped 404.
+structured failure log. A matching operation declaration, including one that
+omits `status`, makes the code registered for this signal and may independently
+supply `retryable`. The HTTP 400 `ValidationError` behavior is only the fallback
+when neither an operation status nor a registered mapping applies.
+
+Throw the domain `ProviderError` directly. Subclassing or wrapping it as a
+`TransportError` solely to preserve a 5xx response is obsolete; declare the
+domain code's `status` instead. Genuine `TransportError` values remain
+SDK-owned and keep their 502/504 mapping.
 
 ### Declared secrets are SDK-enforced
 

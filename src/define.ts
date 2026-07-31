@@ -113,6 +113,7 @@ const MCP_TOOL_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
 const VALID_OPERATION_RISK_CLASSES = ["read", "write", "destructive", "external-send"] as const;
 const VALID_OPERATION_APPROVAL_POLICIES = ["never", "risk-based", "always"] as const;
 const VALID_OPERATION_TRANSPORT_KINDS = ["json", "sse", "http-stream", "websocket"] as const;
+const VALID_OPERATION_ERROR_STATUSES = [400, 401, 404, 429, 500, 502, 503, 504] as const;
 const SSE_EVENT_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const WEBSOCKET_SUBPROTOCOL_REGEX = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
@@ -795,6 +796,28 @@ function validateOperationObservability(
 						},
 					);
 				}
+			}
+		}
+	}
+}
+
+function validateOperationErrorCodes(
+	providerId: string,
+	operations: Record<string, ProviderOperation>,
+): void {
+	for (const [operationName, operation] of Object.entries(operations)) {
+		for (const [index, errorCode] of (operation.docs?.errorCodes ?? []).entries()) {
+			if (
+				errorCode.status !== undefined &&
+				!VALID_OPERATION_ERROR_STATUSES.some((status) => status === errorCode.status)
+			) {
+				const field = `operations.${operationName}.docs.errorCodes[${index}].status`;
+				throw new ValidationError(
+					`Provider "${providerId}" has invalid ${field}: ${String(errorCode.status)} is not an emittable provider error status.`,
+					{
+						fix: `Set ${field} to one of ${VALID_OPERATION_ERROR_STATUSES.join(", ")}, or omit it.`,
+					},
+				);
 			}
 		}
 	}
@@ -2185,6 +2208,7 @@ export function defineProvider<
 	validateOperationIds(config.id, config.operations);
 	validateOperationAnnotations(config.id, config.operations);
 	validateOperationObservability(config.id, config.operations);
+	validateOperationErrorCodes(config.id, config.operations);
 	validateOperationTransports(config.id, config.operations);
 	validateOperationContracts(config.id, config.operations);
 	validateToolRouterMetadata(config.id, config.operations);

@@ -90,6 +90,7 @@
 
 ## Unreleased
 
+- Honor operation `docs.errorCodes` at runtime: declared provider-owned statuses and retryability now drive the HTTP envelope, observability header, and structured log; invalid statuses fail `defineProvider`, declared codes no longer emit the unregistered-code signal, and `TransportError` status-preservation workarounds are obsolete.
 - Add an opt-in same-origin redirect hop policy to `ctx.http`, with bounded manual following and typed failures before a refused target is requested.
 - Enforce provider-declared native TCP/TLS egress before proxy or socket setup, with revocable and expiring dynamic grants plus typed authorization failures; providers without a native egress declaration retain legacy behavior.
 - **Breaking:** Provider error `details` is now passed through verbatim; SDK observability fields (`category`, `taxonomyVersion`, `upstreamStatus`, and derived `retryable`) are no longer merged into the public body. Emitted error envelopes now require top-level `retryable`, while inbound stateful forwarding tolerates an older owner response that omits it and defaults it to `false`. The removed observability metadata is available in the new `X-ApiFuse-Error-Observability` response header.
