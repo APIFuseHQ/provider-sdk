@@ -1,4 +1,4 @@
-import { describe, expect, it, setSystemTime } from "bun:test";
+import { describe, expect, it, setSystemTime, spyOn } from "bun:test";
 import { z } from "zod";
 
 import { defineProvider } from "../define.js";
@@ -42,6 +42,58 @@ const validConfig = {
 };
 
 describe("defineProvider", () => {
+	it("rejects operation error statuses the server cannot emit", () => {
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						docs: {
+							errorCodes: [
+								{
+									code: "UPSTREAM_TEAPOT",
+									status: 418,
+									description: "Unsupported upstream response",
+								},
+							],
+						},
+					},
+				},
+			}),
+		).toThrow(/errorCodes\[0\]\.status: 418.*not an emittable provider error status/);
+	});
+
+	it("warns when an SDK-owned error code declares an ignored runtime status", () => {
+		const warn = spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const provider = defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						docs: {
+							errorCodes: [
+								{
+									code: "reauth_required",
+									status: 502,
+									description: "Provider session expired",
+								},
+							],
+						},
+					},
+				},
+			});
+
+			expect(provider.operations.prices.docs?.errorCodes?.[0]?.status).toBe(502);
+			expect(warn).toHaveBeenCalledWith(
+				'[provider-sdk] Provider "korea-air-quality" operation "prices" declares status 502 for SDK-owned error code "reauth_required"; the declared status is documentation-only and will be ignored at runtime.',
+			);
+		} finally {
+			warn.mockRestore();
+		}
+	});
+
 	it("accepts operation contract metadata", () => {
 		const provider = defineProvider({
 			...validConfig,

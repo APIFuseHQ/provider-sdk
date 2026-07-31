@@ -20,7 +20,7 @@ import {
 	resolveProviderProxyAffinityKey,
 } from "../server/serve.js";
 import { event } from "../stream.js";
-import type { ProviderContext, ProviderDefinition } from "../types.js";
+import type { OperationErrorCode, ProviderContext, ProviderDefinition } from "../types.js";
 import { HttpRetryPreset } from "../types.js";
 
 function errorObservability(response: Response): ErrorObservabilityDetails {
@@ -2088,6 +2088,334 @@ describe("provider HTTP server", () => {
 	});
 });
 
+describe("operation-declared error resolution", () => {
+	function createDeclaredErrorApp(input: {
+		entry?: OperationErrorCode;
+		createError: () => ProviderError;
+		logger?: (event: ProviderServerLogEvent) => void;
+	}) {
+		const base = createTestProvider() as ProviderDefinition;
+		const provider = {
+			...base,
+			operations: {
+				declaredError: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					...(input.entry ? { docs: { errorCodes: [input.entry] } } : {}),
+					handler: async () => {
+						throw input.createError();
+					},
+				},
+			},
+		} satisfies ProviderDefinition;
+		return createServerApp(provider, { logger: input.logger ?? (() => undefined) });
+	}
+
+	function requestDeclaredError(app: ReturnType<typeof createServerApp>) {
+		return app.request("/v1/declaredError", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_declared_error", input: { value: "hello" } }),
+		});
+	}
+
+	it("uses a declared 502 and retryability consistently without an unregistered signal", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestDeclaredError(
+			createDeclaredErrorApp({
+				entry: {
+					code: "UPSTREAM_SCHEMA_ERROR",
+					status: 502,
+					description: "Upstream schema changed",
+					retryable: true,
+				},
+				createError: () =>
+					new ProviderError("Upstream schema changed", { code: "UPSTREAM_SCHEMA_ERROR" }),
+				logger: (event) => events.push(event),
+			}),
+		);
+
+		expect(response.status).toBe(502);
+		const body = await response.json();
+		const header = errorObservability(response);
+		expect(body.error.retryable).toBe(true);
+		expect(header).toEqual({
+			category: "provider_error",
+			taxonomyVersion: "2026-05-26",
+			retryable: true,
+		});
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			event: "provider_request_failed",
+			status: 502,
+			code: "UPSTREAM_SCHEMA_ERROR",
+			errorCategory: header.category,
+			taxonomyVersion: header.taxonomyVersion,
+			retryable: header.retryable,
+		});
+		expect(events[0]).not.toHaveProperty("signal");
+	});
+
+	it("applies declared status and retryable precedence in one resolution order", async () => {
+		const cases = [
+			{
+				name: "statusless declaration",
+				entry: {
+					code: "STATUSLESS_CUSTOM",
+					description: "Custom failure",
+					retryable: true,
+				},
+				createError: () => new ProviderError("Custom failure", { code: "STATUSLESS_CUSTOM" }),
+				status: 500,
+				retryable: true,
+			},
+			{
+				name: "instance-explicit retryable",
+				entry: {
+					code: "INSTANCE_POLICY",
+					status: 502,
+					description: "Instance owns retry policy",
+					retryable: true,
+				},
+				createError: () =>
+					new ProviderError("Do not retry", { code: "INSTANCE_POLICY", retryable: false }),
+				status: 502,
+				retryable: false,
+			},
+			{
+				name: "declared ValidationError",
+				entry: {
+					code: "UPSTREAM_VALIDATION_FAILURE",
+					status: 502,
+					description: "Upstream response was invalid",
+					retryable: true,
+				},
+				createError: () =>
+					new ValidationError("Upstream response was invalid", {
+						code: "UPSTREAM_VALIDATION_FAILURE",
+					}),
+				status: 502,
+				retryable: true,
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const events: ProviderServerLogEvent[] = [];
+			const response = await requestDeclaredError(
+				createDeclaredErrorApp({
+					entry: testCase.entry,
+					createError: testCase.createError,
+					logger: (event) => events.push(event),
+				}),
+			);
+
+			expect(response.status, testCase.name).toBe(testCase.status);
+			expect((await response.json()).error.retryable, testCase.name).toBe(testCase.retryable);
+			expect(errorObservability(response).retryable, testCase.name).toBe(testCase.retryable);
+			expect(events[0], testCase.name).toMatchObject({ retryable: testCase.retryable });
+			expect(events[0], testCase.name).not.toHaveProperty("signal");
+		}
+	});
+
+	it("does not let a declaration override an SDK-owned code", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestDeclaredError(
+			createDeclaredErrorApp({
+				entry: {
+					code: "SSE_RESULT_UNSUPPORTED",
+					status: 502,
+					description: "Conflicts with the SDK mapping",
+					retryable: true,
+				},
+				createError: () =>
+					new ProviderError("SDK-owned failure", { code: "SSE_RESULT_UNSUPPORTED" }),
+				logger: (event) => events.push(event),
+			}),
+		);
+
+		expect(response.status).toBe(500);
+		expect((await response.json()).error.retryable).toBe(false);
+		expect(errorObservability(response).retryable).toBe(false);
+		expect(events[0]).not.toHaveProperty("signal");
+	});
+
+	it("preserves canonical resolution for declared SDK-generated errors", async () => {
+		const cases = [
+			{
+				name: "session expiry",
+				entry: {
+					code: "reauth_required",
+					status: 502,
+					description: "Conflicts with credential refresh detection",
+				},
+				createError: () => new SessionExpiredError(),
+				status: 401,
+				category: "credential_expired",
+				code: "reauth_required",
+			},
+			{
+				name: "output validation failure",
+				entry: {
+					code: "OUTPUT_VALIDATION_FAILED",
+					status: 400,
+					description: "Conflicts with SDK output validation",
+				},
+				createError: () =>
+					new ValidationError("Operation handler output failed schema validation.", {
+						code: "OUTPUT_VALIDATION_FAILED",
+						category: "output_validation",
+						retryable: false,
+					}),
+				status: 500,
+				category: "output_validation",
+				code: "OUTPUT_VALIDATION_FAILED",
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			const events: ProviderServerLogEvent[] = [];
+			const response = await requestDeclaredError(
+				createDeclaredErrorApp({
+					entry: testCase.entry,
+					createError: testCase.createError,
+					logger: (event) => events.push(event),
+				}),
+			);
+
+			expect(response.status, testCase.name).toBe(testCase.status);
+			expect(await response.json(), testCase.name).toMatchObject({
+				error: { code: testCase.code, retryable: false },
+			});
+			expect(errorObservability(response), testCase.name).toMatchObject({
+				category: testCase.category,
+				retryable: false,
+			});
+			expect(events[0], testCase.name).toMatchObject({
+				status: testCase.status,
+				errorCategory: testCase.category,
+				retryable: false,
+			});
+			expect(events[0], testCase.name).not.toHaveProperty("signal");
+		}
+	});
+
+	it("classifies ValidationError from the effective declared status unless instance-explicit", async () => {
+		const cases: Array<{
+			name: string;
+			entry?: OperationErrorCode;
+			createError: () => ValidationError;
+			status: number;
+			category: string;
+		}> = [
+			{
+				name: "declared provider failure",
+				entry: {
+					code: "UPSTREAM_VALIDATION_FAILURE",
+					status: 502,
+					description: "Upstream response was invalid",
+				},
+				createError: () =>
+					new ValidationError("Upstream response was invalid", {
+						code: "UPSTREAM_VALIDATION_FAILURE",
+					}),
+				status: 502,
+				category: "provider_error",
+			},
+			{
+				name: "instance-explicit output failure",
+				entry: {
+					code: "EXPLICIT_OUTPUT_VALIDATION_FAILURE",
+					status: 502,
+					description: "Output was invalid",
+				},
+				createError: () =>
+					new ValidationError("Output was invalid", {
+						code: "EXPLICIT_OUTPUT_VALIDATION_FAILURE",
+						category: "output_validation",
+					}),
+				status: 502,
+				category: "output_validation",
+			},
+			{
+				name: "undeclared input failure",
+				createError: () =>
+					new ValidationError("Input was invalid", { code: "UNDECLARED_VALIDATION_FAILURE" }),
+				status: 400,
+				category: "input_validation",
+			},
+		];
+
+		for (const testCase of cases) {
+			const events: ProviderServerLogEvent[] = [];
+			const response = await requestDeclaredError(
+				createDeclaredErrorApp({
+					entry: testCase.entry,
+					createError: testCase.createError,
+					logger: (event) => events.push(event),
+				}),
+			);
+
+			expect(response.status, testCase.name).toBe(testCase.status);
+			expect(errorObservability(response), testCase.name).toMatchObject({
+				category: testCase.category,
+			});
+			expect(events[0], testCase.name).toMatchObject({
+				status: testCase.status,
+				errorCategory: testCase.category,
+			});
+		}
+	});
+
+	it("ignores a structurally supplied non-emittable declared status", async () => {
+		const base = createTestProvider() as ProviderDefinition;
+		const provider = {
+			...base,
+			operations: {
+				structuralError: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					docs: {
+						errorCodes: [
+							{
+								code: "STRUCTURAL_INVALID_STATUS",
+								status: 600,
+								description: "Invalid structural status",
+							},
+						],
+					},
+					handler: async () => {
+						throw new ProviderError("Structural failure", {
+							code: "STRUCTURAL_INVALID_STATUS",
+						});
+					},
+				},
+			},
+		} as unknown as ProviderDefinition;
+		const app = createServerApp(provider, { logger: () => undefined });
+
+		const response = await app.request("/v1/structuralError", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_structural", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(500);
+		expect(await response.json()).toEqual({
+			error: {
+				code: "STRUCTURAL_INVALID_STATUS",
+				message: "Structural failure",
+				requestId: "req_structural",
+				retryable: false,
+			},
+		});
+		expect(errorObservability(response)).toEqual({
+			category: "provider_error",
+			taxonomyVersion: "2026-05-26",
+			retryable: false,
+		});
+	});
+});
+
 describe("provider HTTP server cross-module error identity", () => {
 	async function createDuplicateInstanceApp() {
 		// Genuine second module identity for the SDK errors, modelling the packaged
@@ -2106,6 +2434,25 @@ describe("provider HTTP server cross-module error identity", () => {
 						throw new Dup.ProviderError("Missing provider service key", {
 							code: "CONFIGURATION_ERROR",
 							fix: "Set the provider service key.",
+						});
+					},
+				},
+				dupDeclaredProviderError: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					docs: {
+						errorCodes: [
+							{
+								code: "DUPLICATE_DECLARED_ERROR",
+								status: 502,
+								description: "Duplicate-module declared failure",
+								retryable: true,
+							},
+						],
+					},
+					handler: async () => {
+						throw new Dup.ProviderError("Duplicate declared failure", {
+							code: "DUPLICATE_DECLARED_ERROR",
 						});
 					},
 				},
@@ -2186,6 +2533,17 @@ describe("provider HTTP server cross-module error identity", () => {
 				fix: "Set the provider service key.",
 			},
 		});
+	});
+
+	it("honors declarations for duplicate-instance ProviderError values", async () => {
+		const app = await createDuplicateInstanceApp();
+		const response = await requestOperation(app, "dupDeclaredProviderError");
+
+		expect(response.status).toBe(502);
+		expect(await response.json()).toMatchObject({
+			error: { code: "DUPLICATE_DECLARED_ERROR", retryable: true },
+		});
+		expect(errorObservability(response).retryable).toBe(true);
 	});
 
 	it("classifies a duplicate-instance SessionExpiredError as reauth_required", async () => {

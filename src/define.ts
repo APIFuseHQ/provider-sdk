@@ -1,5 +1,6 @@
 import ms from "ms";
 
+import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
 import {
 	NativeEgressPolicyValidationError,
@@ -56,6 +57,7 @@ import {
 	STREAM_IDLE_TIMEOUT_MS_MIN,
 	STREAM_MAX_DURATION_MS_MAX,
 	STREAM_MAX_DURATION_MS_MIN,
+	VALID_OPERATION_ERROR_STATUSES,
 } from "./types.js";
 
 type ProviderImplementationSourceAccess =
@@ -795,6 +797,36 @@ function validateOperationObservability(
 						},
 					);
 				}
+			}
+		}
+	}
+}
+
+function validateOperationErrorCodes(
+	providerId: string,
+	operations: Record<string, ProviderOperation>,
+): void {
+	for (const [operationName, operation] of Object.entries(operations)) {
+		for (const [index, errorCode] of (operation.docs?.errorCodes ?? []).entries()) {
+			if (
+				errorCode.status !== undefined &&
+				!VALID_OPERATION_ERROR_STATUSES.some((status) => status === errorCode.status)
+			) {
+				const field = `operations.${operationName}.docs.errorCodes[${index}].status`;
+				throw new ValidationError(
+					`Provider "${providerId}" has invalid ${field}: ${String(errorCode.status)} is not an emittable provider error status.`,
+					{
+						fix: `Set ${field} to one of ${VALID_OPERATION_ERROR_STATUSES.join(", ")}, or omit it.`,
+					},
+				);
+			}
+			if (
+				errorCode.status !== undefined &&
+				SDK_RUNTIME_OWNED_ERROR_CODES.has(errorCode.code)
+			) {
+				console.warn(
+					`[provider-sdk] Provider "${providerId}" operation "${operationName}" declares status ${errorCode.status} for SDK-owned error code "${errorCode.code}"; the declared status is documentation-only and will be ignored at runtime.`,
+				);
 			}
 		}
 	}
@@ -2185,6 +2217,7 @@ export function defineProvider<
 	validateOperationIds(config.id, config.operations);
 	validateOperationAnnotations(config.id, config.operations);
 	validateOperationObservability(config.id, config.operations);
+	validateOperationErrorCodes(config.id, config.operations);
 	validateOperationTransports(config.id, config.operations);
 	validateOperationContracts(config.id, config.operations);
 	validateToolRouterMetadata(config.id, config.operations);

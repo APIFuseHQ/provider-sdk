@@ -719,9 +719,13 @@ export interface HealthMonitorProbeOverride {
 	degradedThresholdMs?: number;
 }
 
+export const VALID_OPERATION_ERROR_STATUSES = [400, 401, 404, 429, 500, 502, 503, 504] as const;
+
+export type ProviderErrorStatus = (typeof VALID_OPERATION_ERROR_STATUSES)[number];
+
 export interface OperationErrorCode {
 	code: string;
-	status?: number;
+	status?: ProviderErrorStatus;
 	description: string;
 	retryable?: boolean;
 }

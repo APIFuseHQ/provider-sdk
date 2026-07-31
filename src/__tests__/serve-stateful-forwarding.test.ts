@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
 import { statefulSignedHeaders } from "../../dist/stateful/index.js";
+import { ProviderError } from "../errors.js";
 import {
 	createServerApp,
 	type ProviderServerLogEvent,
@@ -192,6 +193,35 @@ describe("signed stateful operation forwarding", () => {
 		});
 		expect(received?.internalStatefulForward).toEqual(JSON.parse(body));
 		expect(received?.signal).toBeInstanceOf(AbortSignal);
+	});
+
+	it("logs the forwarded operation id when internal execution fails", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
+			logger: (event) => events.push(event),
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async () => {
+				throw new ProviderError("Forwarded operation failed", { code: "FORWARDED_FAILURE" });
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp });
+
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+
+		expect(response.status).toBe(500);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_failed",
+				route: "echo",
+				requestId: "req-stateful-forward",
+				code: "FORWARDED_FAILURE",
+			}),
+		);
 	});
 
 	it("rejects an expired forwarded deadline without invoking the executor", async () => {

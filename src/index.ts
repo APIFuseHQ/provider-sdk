@@ -230,6 +230,7 @@ export type {
 	OperationDeprecationMetadata,
 	OperationDocMeta,
 	OperationErrorCode,
+	ProviderErrorStatus,
 	OperationHandlerResult,
 	OperationInputExample,
 	OperationLifecycle,
