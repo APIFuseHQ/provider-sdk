@@ -97,9 +97,17 @@ The `POST /v1/{operation}` body is a request envelope:
 - `requestId` is required and can be any unique local debugging string.
 - `input` contains the operation input shape.
 - `headers` is optional.
-- `connection` is optional; omit it for no-auth/public operations. For
-  credential debugging, pass `{ "id", "mode", "secrets", "metadata",
-  "externalRef" }` with local-only secret values.
+- `connectionId` is optional connection identity only and does not include
+  credentials. The gateway sends it for `optional` connection mode.
+- `connection` is optional credential-bearing connection data. The gateway
+  sends it for `required` connection mode; for local debugging, pass
+  `{ "id", "mode", "secrets", "metadata", "externalRef" }` with local-only
+  secret values.
+
+The gateway sends only `connection` for `required` mode, only `connectionId`
+for `optional` mode, and neither field for `none` mode. If a malformed or
+manually constructed envelope contains both, nested `connection.id` takes
+precedence over the top-level `connectionId`.
 
 Structured errors return an `error` object with `code`, `message`,
 `requestId`, and optional `details`; validation failures include field paths in
