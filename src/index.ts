@@ -72,6 +72,7 @@ export { executeOperation } from "./runtime/executor.js";
 export { createHttpClient } from "./runtime/http.js";
 export {
 	createNativeNetworkClient,
+	createEnvVendorCredentialResolver,
 	deriveNativeCredentialAffinityKey,
 	NativeEgressGrantExpiredError,
 	NativeEgressNotDeclaredError,
@@ -81,10 +82,14 @@ export {
 	resolveNativeGatewayProxy,
 	type NativeGatewayProxy,
 	type NativeGatewayProxyResolutionInput,
+	type NativeGatewayProxySkipReason,
 	type NativeGatewayProxySynthesizer,
+	type NativeGatewayProxySynthesisResult,
 	type NativeGatewayProxySynthesisInput,
 	type NativeNetworkClientOptions,
 	type NativeNetworkErrorCode,
+	type VendorCredentialLookup,
+	type VendorCredentialResolver,
 } from "./runtime/native-network.js";
 export type { Insight, InsightSeverity } from "./runtime/insights.js";
 export { generateInsights } from "./runtime/insights.js";

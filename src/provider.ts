@@ -166,6 +166,7 @@ export type {
 } from "./types.js";
 export {
 	createNativeNetworkClient,
+	createEnvVendorCredentialResolver,
 	deriveNativeCredentialAffinityKey,
 	NativeEgressGrantExpiredError,
 	NativeEgressNotDeclaredError,
@@ -175,10 +176,14 @@ export {
 	resolveNativeGatewayProxy,
 	type NativeGatewayProxy,
 	type NativeGatewayProxyResolutionInput,
+	type NativeGatewayProxySkipReason,
 	type NativeGatewayProxySynthesizer,
+	type NativeGatewayProxySynthesisResult,
 	type NativeGatewayProxySynthesisInput,
 	type NativeNetworkClientOptions,
 	type NativeNetworkErrorCode,
+	type VendorCredentialLookup,
+	type VendorCredentialResolver,
 } from "./runtime/native-network.js";
 export {
 	HttpRetryAfterPolicy,

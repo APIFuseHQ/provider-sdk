@@ -1,9 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import type {
-	NativeNetworkConnection,
-	NativeProxyEgressInfo,
-	NativeProxyExpiringEvent,
-	NativeTlsConnectOptions,
+import {
+	createEnvVendorCredentialResolver,
+	type NativeGatewayProxySynthesizer,
+	type NativeNetworkConnection,
+	type NativeProxyEgressInfo,
+	type NativeProxyExpiringEvent,
+	type NativeTlsConnectOptions,
+	type VendorCredentialLookup,
 } from "../index.js";
 
 describe("native proxy contracts", () => {
@@ -38,5 +41,31 @@ describe("native proxy contracts", () => {
 			close: async () => undefined,
 		};
 		expect(connection.proxy).toBeUndefined();
+	});
+
+	it("exports injected credential and async synthesizer contracts from the package root", async () => {
+		const credentials = createEnvVendorCredentialResolver({
+			get: (name) => (name.endsWith("USERNAME") ? "injected-user" : undefined),
+		});
+		const lookup: VendorCredentialLookup = credentials("nodemaven");
+		const synthesizer: NativeGatewayProxySynthesizer = async (input) => {
+			expect(input.credentials).toBe(credentials);
+			expect(input.protocol).toBe("http");
+			return undefined;
+		};
+
+		expect(lookup).toEqual({
+			kind: "absent",
+			missing: ["APIFUSE__PROXY__NODEMAVEN_PASSWORD"],
+		});
+		await expect(
+			synthesizer({
+				vendor: "nodemaven",
+				policy: { mode: "required", providers: ["nodemaven"] },
+				now: 0,
+				protocol: "http",
+				credentials,
+			}),
+		).resolves.toBeUndefined();
 	});
 });

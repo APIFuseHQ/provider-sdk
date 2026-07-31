@@ -94,6 +94,7 @@
 
 ## Unreleased
 
+- **Breaking for custom native gateway adapters:** `NativeGatewayProxySynthesisInput` now includes an injected `credentials` resolver and selected `protocol`; synthesizers may return promises and structured skip reasons, and `resolveNativeGatewayProxy` is async. Default callers retain env-backed behavior. Native transport now supports both HTTP CONNECT and SOCKS5, defaults per vendor with an explicit runtime override, registers smartproxy allocation ahead of nodemaven when declared in that order, and reports every exhausted vendor reason without exposing proxy credentials.
 - Honor operation `docs.errorCodes` at runtime: declared provider-owned statuses and retryability now drive the HTTP envelope, observability header, and structured log; invalid statuses fail `defineProvider`, declared codes no longer emit the unregistered-code signal, and `TransportError` status-preservation workarounds are obsolete.
 - Add an opt-in same-origin redirect hop policy to `ctx.http`, with bounded manual following and typed failures before a refused target is requested.
 - Enforce provider-declared native TCP/TLS egress before proxy or socket setup, with revocable and expiring dynamic grants plus typed authorization failures; providers without a native egress declaration retain legacy behavior.
