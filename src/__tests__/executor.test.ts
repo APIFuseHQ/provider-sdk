@@ -141,6 +141,47 @@ describe("executeOperation", () => {
 		expect(result).toEqual({ results: ["result1", "result2"] });
 	});
 
+	it("marks handler output schema failures as output validation", async () => {
+		const ctx = createMockCtx({});
+		const provider = createMockProvider({
+			handler: async () => ({ results: [42] }),
+		});
+
+		await expect(
+			executeOperation(provider, "search", ctx, { query: "test" }),
+		).rejects.toMatchObject({
+			name: "ValidationError",
+			options: {
+				code: "OUTPUT_VALIDATION_FAILED",
+				category: "output_validation",
+				retryable: false,
+			},
+		});
+	});
+
+	it("preserves non-validation exceptions thrown by output schema logic", async () => {
+		const ctx = createMockCtx({});
+		const schemaError = new (await duplicateSdk).ProviderError("schema transform failed", {
+			code: "SCHEMA_TRANSFORM_FAILED",
+		});
+		const base = createMockProvider();
+		const provider = {
+			...base,
+			operations: {
+				search: {
+					...base.operations.search,
+					output: z.object({ results: z.array(z.string()) }).transform(() => {
+						throw schemaError;
+					}),
+				},
+			},
+		} as ProviderDefinition;
+
+		await expect(executeOperation(provider, "search", ctx, { query: "test" })).rejects.toBe(
+			schemaError,
+		);
+	});
+
 	it("throws ProviderError when operation not found", async () => {
 		const ctx = createMockCtx({});
 		const provider = createMockProvider();

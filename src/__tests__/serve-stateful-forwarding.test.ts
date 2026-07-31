@@ -2,7 +2,11 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
 import { statefulSignedHeaders } from "../../dist/stateful/index.js";
-import { createServerApp, type ProviderServerOperationExecutorInput } from "../server/serve.js";
+import {
+	createServerApp,
+	type ProviderServerLogEvent,
+	type ProviderServerOperationExecutorInput,
+} from "../server/serve.js";
 import type { ProviderDefinition } from "../types.js";
 
 const STATEFUL_ROUTE = "/__apifuse/stateful/operations";
@@ -97,8 +101,8 @@ function expectStructuredError(
 	body: unknown,
 	code: string,
 	message: string,
-): asserts body is { error: { code: string; message: string } } {
-	expect(body).toEqual({ error: { code, message } });
+): asserts body is { error: { code: string; message: string; retryable: boolean } } {
+	expect(body).toEqual({ error: { code, message, retryable: false } });
 }
 
 describe("provider server operation executors", () => {
@@ -216,7 +220,7 @@ describe("signed stateful operation forwarding", () => {
 				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
 				message: "Stateful forwarding deadline expired.",
 				requestId: "req-stateful-forward",
-				details: { retryable: false },
+				retryable: false,
 			},
 		});
 		expect(executions).toBe(0);
@@ -255,7 +259,7 @@ describe("signed stateful operation forwarding", () => {
 				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
 				message: "Stateful forwarding deadline expired.",
 				requestId: "req-stateful-forward",
-				details: { retryable: false },
+				retryable: false,
 			},
 		});
 		expect(validationSignal?.aborted).toBe(true);
@@ -289,8 +293,9 @@ describe("signed stateful operation forwarding", () => {
 	});
 
 	it("rejects missing signature headers with a structured provider error", async () => {
+		const events: ProviderServerLogEvent[] = [];
 		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
-			logger: () => {},
+			logger: (event) => events.push(event),
 			statefulForwarding: forwardingConfig(),
 			internalOperationExecutor: async () => ({ accepted: true }),
 		});
@@ -302,7 +307,7 @@ describe("signed stateful operation forwarding", () => {
 		});
 		const responseText = await response.text();
 
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expectStructuredError(
 			JSON.parse(responseText),
 			"STATEFUL_FORWARDING_SIGNATURE_MISSING",
@@ -310,6 +315,15 @@ describe("signed stateful operation forwarding", () => {
 		);
 		expect(responseText).not.toContain(FORWARDING_SECRET);
 		expect(responseText).not.toContain("sensitive-envelope-material");
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_failed",
+				code: "STATEFUL_FORWARDING_SIGNATURE_MISSING",
+			}),
+		);
+		expect(events).not.toContainEqual(
+			expect.objectContaining({ signal: "unregistered_provider_error_code" }),
+		);
 	});
 
 	it("rejects an invalid signature without echoing secret material", async () => {
@@ -334,7 +348,7 @@ describe("signed stateful operation forwarding", () => {
 		});
 		const responseText = await response.text();
 
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expectStructuredError(
 			JSON.parse(responseText),
 			"STATEFUL_FORWARDING_SIGNATURE_INVALID",
@@ -360,7 +374,7 @@ describe("signed stateful operation forwarding", () => {
 		});
 		const responseText = await response.text();
 
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expectStructuredError(
 			JSON.parse(responseText),
 			"STATEFUL_FORWARDING_TIMESTAMP_INVALID",
@@ -403,7 +417,7 @@ describe("signed stateful operation forwarding", () => {
 			body,
 		});
 
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		const error = await response.json();
 		expect(error.error).toMatchObject({
 			code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
@@ -429,7 +443,7 @@ describe("signed stateful operation forwarding", () => {
 
 		expect((await app.request(STATEFUL_ROUTE, { method: "POST", headers, body })).status).toBe(200);
 		const replay = await app.request(STATEFUL_ROUTE, { method: "POST", headers, body });
-		expect(replay.status).toBe(400);
+		expect(replay.status).toBe(500);
 		expectStructuredError(
 			await replay.json(),
 			"STATEFUL_FORWARDING_REPLAY_DETECTED",
@@ -516,7 +530,7 @@ describe("signed stateful operation forwarding", () => {
 			}),
 			body,
 		});
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expectStructuredError(
 			await response.json(),
 			"STATEFUL_FORWARDING_SIGNATURE_INVALID",
@@ -543,7 +557,7 @@ describe("signed stateful operation forwarding", () => {
 			headers: signedHeaders(FORWARDING_SECRET, missingFenceTimestamp, missingFenceBody),
 			body: missingFenceBody,
 		});
-		expect(missingFence.status).toBe(400);
+		expect(missingFence.status).toBe(500);
 		expect((await missingFence.json()).error.code).toBe("STATEFUL_FORWARDING_ENVELOPE_INVALID");
 
 		const mismatchTimestamp = new Date().toISOString();
@@ -556,7 +570,7 @@ describe("signed stateful operation forwarding", () => {
 			headers: signedHeaders(FORWARDING_SECRET, mismatchTimestamp, mismatchBody),
 			body: mismatchBody,
 		});
-		expect(mismatch.status).toBe(400);
+		expect(mismatch.status).toBe(500);
 		expect((await mismatch.json()).error.code).toBe("STATEFUL_FORWARDING_PROVIDER_MISMATCH");
 
 		const unknownFieldTimestamp = new Date().toISOString();
@@ -569,7 +583,7 @@ describe("signed stateful operation forwarding", () => {
 			headers: signedHeaders(FORWARDING_SECRET, unknownFieldTimestamp, unknownFieldBody),
 			body: unknownFieldBody,
 		});
-		expect(unknownField.status).toBe(400);
+		expect(unknownField.status).toBe(500);
 		expect((await unknownField.json()).error.code).toBe("STATEFUL_FORWARDING_ENVELOPE_INVALID");
 		expect(executions).toBe(0);
 	});
@@ -587,7 +601,7 @@ describe("signed stateful operation forwarding", () => {
 			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
 			body,
 		});
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expect((await response.json()).error.code).toBe("STATEFUL_FORWARDING_ENVELOPE_INVALID");
 	});
 
@@ -605,7 +619,7 @@ describe("signed stateful operation forwarding", () => {
 			body,
 		});
 
-		expect(response.status).toBe(400);
+		expect(response.status).toBe(500);
 		expect((await response.json()).error).toMatchObject({
 			code: "STATEFUL_FORWARDING_OWNER_FENCE_INVALID",
 			message: "Stateful forwarding owner fence is no longer current.",

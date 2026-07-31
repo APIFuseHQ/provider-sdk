@@ -9,6 +9,7 @@ import {
 	isProviderError,
 	isSessionExpiredError,
 	isTransportError,
+	isValidationError,
 	ProviderError,
 } from "../errors.js";
 import {
@@ -108,6 +109,14 @@ import {
 
 const DEFAULT_HOST = "0.0.0.0";
 const DEFAULT_PORT = 3000;
+/** Compact SDK-owned error classification emitted separately from the public response body. */
+export const ERROR_OBSERVABILITY_HEADER = "X-ApiFuse-Error-Observability";
+export type ErrorObservabilityDetails = {
+	category: ProviderErrorCategory;
+	taxonomyVersion: string;
+	retryable: boolean;
+	upstreamStatus?: number;
+};
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
@@ -486,6 +495,7 @@ export type ProviderServerLogEvent =
 			errorCategory?: ProviderErrorCategory;
 			taxonomyVersion?: string;
 			retryable?: boolean;
+			signal?: "unregistered_provider_error_code";
 			issues?: Array<{ path: string; code: string; message: string }>;
 	  })
 	| {
@@ -604,26 +614,28 @@ function zodDetails(error: z.ZodError): Array<{
 }
 
 function toErrorResponse(error: unknown, requestId?: string): OperationErrorResponse {
+	const observability = errorObservabilityDetails(error);
 	if (error instanceof StatefulRoutingDeadlineError) {
 		return {
 			error: {
 				code: "STATEFUL_FORWARDING_DEADLINE_EXPIRED",
 				message: "Stateful forwarding deadline expired.",
 				...(requestId ? { requestId } : {}),
-				details: { retryable: false },
+				retryable: observability.retryable,
 			},
 		};
 	}
 
 	if (isProviderError(error)) {
-		const details = publicProviderErrorDetails(error);
+		const details = error.details;
 		return {
 			error: {
 				code: error.code ?? "provider_error",
 				message: publicProviderErrorMessage(error),
 				...(requestId ? { requestId } : {}),
+				retryable: observability.retryable,
 				...(error.fix ? { fix: error.fix } : {}),
-				...(details ? { details } : {}),
+				...(details !== undefined ? { details } : {}),
 			},
 		};
 	}
@@ -634,6 +646,7 @@ function toErrorResponse(error: unknown, requestId?: string): OperationErrorResp
 				code: "invalid_request",
 				message: "Invalid request body",
 				...(requestId ? { requestId } : {}),
+				retryable: observability.retryable,
 				details: zodDetails(error),
 			},
 		};
@@ -650,6 +663,7 @@ function toErrorResponse(error: unknown, requestId?: string): OperationErrorResp
 			code: "internal_error",
 			message: "Internal error",
 			...(requestId ? { requestId } : {}),
+			retryable: observability.retryable,
 			details: {
 				retryable: false,
 				category: "internal_error",
@@ -659,42 +673,12 @@ function toErrorResponse(error: unknown, requestId?: string): OperationErrorResp
 	};
 }
 
-function publicProviderErrorDetails(error: ProviderError): unknown {
-	const providerDetails = error.details;
-	const observabilityDetails = providerObservabilityDetails(error);
-
-	if (providerDetails === undefined) {
-		return observabilityDetails;
-	}
-	if (observabilityDetails === undefined) {
-		return providerDetails;
-	}
-	if (isPlainRecord(providerDetails) && isPlainRecord(observabilityDetails)) {
-		return { ...providerDetails, ...observabilityDetails };
-	}
-	return {
-		provider: providerDetails,
-		observability: observabilityDetails,
-	};
-}
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
 // Accepts `unknown` so the branded guards narrow cleanly from the top: the
 // subtype error classes are structurally compatible with ProviderError, so
 // narrowing from a ProviderError-typed value would collapse the negative branch
 // to `never`. Narrowing from unknown avoids that while still recognizing errors
 // from a duplicate SDK module instance.
-function providerObservabilityDetails(error: unknown):
-	| {
-			category: ProviderErrorCategory;
-			taxonomyVersion: string;
-			retryable: boolean;
-			upstreamStatus?: number;
-	  }
-	| undefined {
+function providerObservabilityDetails(error: unknown): ErrorObservabilityDetails | undefined {
 	// Session-expiry surfaces the credential_expired category + the opt-in
 	// retryable signal so Gateway/Credential Service can refresh and re-drive the
 	// operation (see design.md §4.3 D3). Without this branch the auth error would
@@ -751,6 +735,54 @@ function providerObservabilityDetails(error: unknown):
 	};
 }
 
+function errorObservabilityDetails(error: unknown): ErrorObservabilityDetails {
+	const providerDetails = providerObservabilityDetails(error);
+	if (providerDetails) return providerDetails;
+
+	if (error instanceof z.ZodError || isValidationError(error)) {
+		return {
+			category:
+				isProviderError(error) && error.options?.category
+					? error.options.category
+					: "input_validation",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: isProviderError(error) ? (error.options?.retryable ?? false) : false,
+		};
+	}
+
+	if (error instanceof StatefulRoutingDeadlineError) {
+		return {
+			category: "timeout",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: false,
+		};
+	}
+
+	if (isProviderError(error)) {
+		return {
+			category: error.options?.category ?? "provider_error",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: error.options?.retryable ?? false,
+		};
+	}
+
+	return {
+		category: "internal_error",
+		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+		retryable: false,
+	};
+}
+
+function responseWithErrorObservability(response: Response, error: unknown): Response {
+	const headers = new Headers(response.headers);
+	headers.set(ERROR_OBSERVABILITY_HEADER, JSON.stringify(errorObservabilityDetails(error)));
+	return new Response(response.body, {
+		status: response.status,
+		statusText: response.statusText,
+		headers,
+	});
+}
+
 function publicProviderErrorMessage(error: ProviderError): string {
 	if (isTransportError(error)) {
 		if (error.code === PROXY_AUTH_IP_DENIED_CODE) {
@@ -782,11 +814,6 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 	if (error instanceof StatefulRoutingDeadlineError) {
 		return 504;
 	}
-
-	if (isTransportError(error)) {
-		return error.code === "transport_timeout" ? 504 : 502;
-	}
-
 	if (isProviderError(error)) {
 		switch (error.code) {
 			case "AUTH_REQUIRED":
@@ -812,12 +839,90 @@ function toStatusCode(error: unknown): 400 | 401 | 404 | 429 | 500 | 502 | 503 |
 			case "STATEFUL_FORWARDING_REPLAY_CACHE_FULL":
 				return 503;
 		}
+		if (isTransportError(error)) {
+			return error.code === "transport_timeout" ? 504 : 502;
+		}
+		if (isValidationError(error)) {
+			return error.options?.category === "output_validation" ? 500 : 400;
+		}
 
-		return 400;
+		return 500;
 	}
 
 	return 500;
 }
+
+// Codes emitted by SDK-owned paths must never be attributed to provider
+// authors by the unregistered-code signal, even when their intentional status
+// is 500. Provider-authored codes not in this registry retain the signal.
+const SDK_OWNED_PROVIDER_ERROR_CODES = new Set([
+	"AUTH_PROMPT_UNAVAILABLE",
+	"BROWSER_CDP_POOL_REQUIRED",
+	"BROWSER_RUNTIME_UNSUPPORTED",
+	"STEALTH_RUNTIME_UNSUPPORTED",
+	"SSE_EVENT_UNDECLARED",
+	"STREAM_EVENT_TOO_LARGE",
+	"STREAM_CHUNK_TOO_LARGE",
+	"SSE_RESULT_UNSUPPORTED",
+	"STREAM_RESULT_UNSUPPORTED",
+	"AUTH_FLOW_NOT_CONFIGURED",
+	"refresh_not_supported",
+	"RUNTIME_UNSUPPORTED",
+	"PROVIDER_STATE_UNSUPPORTED",
+	"CHOICE_TOKEN_MASTER_SECRET_NOT_CONFIGURED",
+	"CHOICE_STATE_PAYLOAD_TOO_LARGE",
+	"CHOICE_STATE_UNAVAILABLE",
+	"CHOICE_CONTEXT_REQUIRED",
+	"unsupported_stealth_cookie_store_version",
+	"provider_secret_error",
+	"credential_key_error",
+	"credential_mode_error",
+	"flow_expired",
+	"turn_validation_error",
+	"context_access_error",
+	"UNSUPPORTED_STT_OPTION",
+	"INVALID_STT_AUDIO",
+	"STT_AUDIO_TOO_LARGE",
+	"STT_UPSTREAM_FAILED",
+	"INVALID_STT_VERIFICATION_CODE_OPTIONS",
+	"NO_CODE_FOUND",
+	"AMBIGUOUS_CODE",
+	"retry_invalid_policy",
+	"retry_unsafe_method",
+	"stealth_cookie_store_serialize_failed",
+	"response_too_large",
+	"transport_stream_unavailable",
+	"transport_invalid_method",
+	"http_transport_override_unsupported",
+	"transport_invalid_url",
+	"retry_exhausted",
+	"auth_abort_unsafe_data",
+	"credentials_auth_missing_credential_keys",
+	"credentials_auth_missing_credential",
+	"credentials_auth_invalid_login_result",
+	"credentials_auth_unknown_challenge",
+	"credentials_auth_unknown_pending_challenge",
+	"STATEFUL_FORWARDING_NOT_CONFIGURED",
+	"STATEFUL_FORWARDING_SIGNATURE_MISSING",
+	"STATEFUL_FORWARDING_NONCE_INVALID",
+	"STATEFUL_FORWARDING_TIMESTAMP_INVALID",
+	"STATEFUL_FORWARDING_SIGNATURE_INVALID",
+	"STATEFUL_FORWARDING_REPLAY_DETECTED",
+	"STATEFUL_FORWARDING_REPLAY_CACHE_FULL",
+	"STATEFUL_FORWARDING_ENVELOPE_INVALID",
+	"STATEFUL_FORWARDING_PROVIDER_MISMATCH",
+	"STATEFUL_FORWARDING_SOURCE_POD_MISMATCH",
+	"STATEFUL_FORWARDING_OWNER_FENCE_INVALID",
+	"STATEFUL_FORWARDING_REQUEST_FAILED",
+	"STATEFUL_FORWARDING_CONTEXT_MISSING",
+	"STATEFUL_FORWARDING_BAD_RESPONSE",
+	"STATEFUL_INTERNAL_EXECUTOR_NOT_CONFIGURED",
+	"STATEFUL_FILE_FORWARDING_UNSUPPORTED",
+	"STATEFUL_CONTROL_PLANE_OPERATION_AMBIGUOUS",
+	"STATEFUL_CONTROL_PLANE_REQUEST_FAILED",
+	"STATEFUL_CONTROL_PLANE_HTTP_ERROR",
+	"STATEFUL_CONTROL_PLANE_INVALID_RESPONSE",
+]);
 
 function extractRequestId(raw: unknown): string | undefined {
 	if (!raw || typeof raw !== "object") {
@@ -847,7 +952,13 @@ function logProviderError(
 				: "internal_error";
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
-	const details = isProviderError(error) ? providerObservabilityDetails(error) : undefined;
+	const details = errorObservabilityDetails(error);
+	const isUnregisteredProviderErrorCode =
+		status === 500 &&
+		isProviderError(error) &&
+		!isValidationError(error) &&
+		typeof error.code === "string" &&
+		!SDK_OWNED_PROVIDER_ERROR_CODES.has(error.code);
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	emit({
 		level: status >= 500 ? "error" : "warn",
@@ -861,15 +972,12 @@ function logProviderError(
 		code,
 		errorClass,
 		message,
-		...(isTransportError(error) && error.upstreamStatus
-			? { upstreamStatus: error.upstreamStatus }
-			: {}),
-		...(details
-			? {
-					errorCategory: details.category,
-					taxonomyVersion: details.taxonomyVersion,
-					retryable: details.retryable,
-				}
+		...(details.upstreamStatus ? { upstreamStatus: details.upstreamStatus } : {}),
+		errorCategory: details.category,
+		taxonomyVersion: details.taxonomyVersion,
+		retryable: details.retryable,
+		...(isUnregisteredProviderErrorCode
+			? { signal: "unregistered_provider_error_code" as const }
 			: {}),
 		...(error instanceof z.ZodError ? { issues: zodDetails(error) } : {}),
 	});
@@ -1614,17 +1722,10 @@ export function createServerApp(
 		});
 	}
 
-	app.notFound((c) =>
-		c.json(
-			{
-				error: {
-					code: "not_found",
-					message: "Not found",
-				},
-			},
-			404,
-		),
-	);
+	app.notFound((c) => {
+		const error = new ProviderError("Not found", { code: "not_found", retryable: false });
+		return responseWithErrorObservability(c.json(toErrorResponse(error), 404), error);
+	});
 
 	app.get("/health", (c) =>
 		c.json({
@@ -1786,7 +1887,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -1850,7 +1954,10 @@ export function createServerApp(
 			);
 			const telemetryHeader = proxyTelemetry.toHeaderValue();
 			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -1887,7 +1994,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -1924,7 +2034,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -1961,7 +2074,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -1998,7 +2114,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 
@@ -2035,7 +2154,10 @@ export function createServerApp(
 				status,
 				finishRequestCost(requestCost),
 			);
-			return c.json(toErrorResponse(error, requestId), status);
+			return responseWithErrorObservability(
+				c.json(toErrorResponse(error, requestId), status),
+				error,
+			);
 		}
 	});
 

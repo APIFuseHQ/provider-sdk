@@ -26,6 +26,7 @@ export const ErrorEnvelopeSchema = z.object({
 	code: z.string(),
 	message: z.string(),
 	requestId: z.string().optional(),
+	retryable: z.boolean(),
 	fix: z.string().optional(),
 	details: z.unknown().optional(),
 });

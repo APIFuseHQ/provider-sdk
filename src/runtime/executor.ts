@@ -1,4 +1,11 @@
-import { isSessionExpiredError, ProviderError, SessionExpiredError } from "../errors.js";
+import {
+	isSessionExpiredError,
+	isValidationError,
+	ProviderError,
+	SessionExpiredError,
+	ValidationError,
+} from "../errors.js";
+import { z } from "zod";
 import { parseSchema } from "../schema.js";
 import type { ProviderContext, ProviderDefinition } from "../types.js";
 import { assertRequiredSecretsPresent } from "./secrets.js";
@@ -81,5 +88,18 @@ export async function executeOperation(
 		return result;
 	}
 
-	return parseSchema(operation.output, result, `operations.${operationId}.output`);
+	try {
+		return await parseSchema(operation.output, result, `operations.${operationId}.output`);
+	} catch (cause) {
+		if (!(cause instanceof z.ZodError) && !isValidationError(cause)) {
+			throw cause;
+		}
+		throw new ValidationError(`Operation handler output failed schema validation.`, {
+			code: "OUTPUT_VALIDATION_FAILED",
+			category: "output_validation",
+			retryable: false,
+			zodError: isValidationError(cause) ? cause.zodError : cause,
+			...(cause instanceof Error ? { cause } : {}),
+		});
+	}
 }

@@ -393,6 +393,70 @@ External contributors are expected to submit standalone Provider source plus:
 Maintainers own monorepo import under `providers/<id>/`, registry generation,
 deployment projection checks, and release workflows.
 
+### Error responses
+
+Provider-server failures use a stable public envelope:
+
+```json
+{
+  "error": {
+    "code": "UPSTREAM_ERROR",
+    "message": "The upstream service failed",
+    "requestId": "req_123",
+    "retryable": true,
+    "details": { "providerReason": "temporarily_unavailable" }
+  }
+}
+```
+
+`retryable` is always present on responses emitted by the current SDK. Set
+`retryable` in the `ProviderError` options when the provider knows the answer;
+an explicit `true` or `false` wins over SDK derivation. When it is omitted, the
+SDK derives the value for its known error classes and otherwise defaults to
+`false`. During stateful rolling upgrades, the forwarding client also accepts
+an older owner response that omits `retryable` and treats it as `false` without
+loosening the emitted response contract. Existing optional `fix` guidance is
+also preserved when a `ProviderError` supplies it.
+
+`details` belongs exclusively to the provider. The server passes
+`ProviderError.options.details` through verbatim, including strings and arrays,
+and never merges, overwrites, or wraps it. Do not put SDK taxonomy fields there.
+SDK-owned validation and masked-internal-error paths retain their own diagnostic
+details.
+
+SDK observability is emitted separately in the
+`X-ApiFuse-Error-Observability` response header as compact, single-line JSON:
+
+```json
+{"category":"upstream_http","taxonomyVersion":"2026-05-26","retryable":true,"upstreamStatus":502}
+```
+
+Treat this header as telemetry, not as provider-controlled public error detail.
+Its category, taxonomy version, retryability, and optional upstream status match
+the structured `provider_request_failed` log event.
+
+Registered error-code mappings take precedence for every `ProviderError`,
+including `ValidationError`:
+
+| Error code or fallback | HTTP status |
+| --- | ---: |
+| `AUTH_REQUIRED`, `reauth_required` | 401 |
+| `MISSING_SECRET` | 400 |
+| `NOT_FOUND`, `not_found`, `NO_DATA` | 404 |
+| `RATE_LIMITED`, `UPSTREAM_RATE_LIMIT`, `LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR` | 429 |
+| `UPSTREAM_ERROR`, `BLOCKED` | 502 |
+| `STT_UNAVAILABLE`, `UNSUPPORTED_STT_BACKEND`, `STATEFUL_FORWARDING_REPLAY_CACHE_FULL` | 503 |
+| Unregistered input `ValidationError` code | 400 |
+| Other unregistered `ProviderError` code | 500 |
+
+An unregistered non-validation `ProviderError` code returns HTTP 500 and emits
+the greppable `unregistered_provider_error_code` signal with the code in the
+structured failure log. Before publishing a new code, register its status in
+the SDK mapping and add it to the mapping tests; declaring it only in operation
+documentation does not change runtime status selection. The HTTP 400
+`ValidationError` behavior is only the fallback for unregistered input
+validation codes; a registered code such as `NOT_FOUND` retains its mapped 404.
+
 ### Declared secrets are SDK-enforced
 
 Environment/secret presence validation is single-sourced in the SDK. Declare
@@ -411,12 +475,12 @@ secrets: [
 The runtime validates every `required: true` declaration before any operation
 handler or auth-flow handler (except `abort`) runs. When a required secret is
 unset or whitespace-only, the invocation fails with the canonical structured
-error — code `MISSING_SECRET`, HTTP 400, `details.category:
-"credential_unavailable"`, `retryable: false`, and a `fix` naming every missing
-secret — across `/v1/{operation}`, self-test probes, `apifuse perf`, and
-`apifuse record`. The server also emits a `provider_secrets_missing` warn log
-at boot so unprovisioned deployments are visible immediately without crashing
-the pod.
+error — code `MISSING_SECRET`, HTTP 400, top-level `retryable: false`, and a
+`fix` naming every missing secret — across `/v1/{operation}`, self-test probes,
+`apifuse perf`, and `apifuse record`. Its error-observability header carries the
+`credential_unavailable` category. The server also emits a
+`provider_secrets_missing` warn log at boot so unprovisioned deployments are
+visible immediately without crashing the pod.
 
 Provider-local presence re-validation is **deprecated**: do not write
 `requireServiceKey`/`requireApiKey`-style guards that re-check `ctx.env.get()`
