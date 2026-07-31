@@ -4,6 +4,12 @@ import { createProviderCache } from "../runtime/cache.js";
 import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import { createUnsupportedSttClient } from "../runtime/stt.js";
+import {
+	createNativeEgressAuthorization,
+	NativeNetworkError,
+	snapshotNativeConnectInput,
+	snapshotNativeGrantInput,
+} from "../runtime/native-network.js";
 import { safeParseSchemaSync } from "../schema.js";
 import { requestPathForFixture } from "../fixture-sanitization.js";
 import { findStreamCaptureGroup, replayStreamEvidence } from "../stream-evidence.js";
@@ -307,6 +313,17 @@ function createUpstreamContext(
 	};
 	const request = { headers: {} };
 	const state = createMemoryProviderRuntimeState();
+	const nativeEgress = provider.native
+		? createNativeEgressAuthorization({ egress: provider.native.network })
+		: undefined;
+	const requireNativeEgress = () => {
+		if (!nativeEgress)
+			throw new NativeNetworkError(
+				"Native egress authorization is unavailable",
+				"native_egress_policy_invalid",
+			);
+		return nativeEgress;
+	};
 	const dispatch = async (
 		call: Omit<StandardTestsUpstreamCall, "operationName">,
 	): Promise<NormalizedUpstreamResponse> => {
@@ -498,30 +515,38 @@ function createUpstreamContext(
 		...(provider.native
 			? {
 					native: {
-						network: {
-							connectTcp: async (options) =>
-								createNativeConnection(
+					network: {
+							connectTcp: async (options) => {
+								const request = snapshotNativeConnectInput(options);
+								requireNativeEgress().assertConnect(request, "disabled");
+								return createNativeConnection(
 									await dispatch({
 										transport: "native",
 										method: "connectTcp",
-										url: `tcp://${options.host}:${options.port}`,
-										options,
+										url: `tcp://${request.host}:${request.port}`,
+										options: request,
 									}),
 									dispatch,
-									`tcp://${options.host}:${options.port}`,
-								),
-							connectTls: async (options) =>
-								createNativeConnection(
+									`tcp://${request.host}:${request.port}`,
+								);
+							},
+							connectTls: async (options) => {
+								const request = snapshotNativeConnectInput(options);
+								requireNativeEgress().assertConnect(request, "required");
+								return createNativeConnection(
 									await dispatch({
 										transport: "native",
 										method: "connectTls",
-										url: `tls://${options.host}:${options.port}`,
-										options,
+										url: `tls://${request.host}:${request.port}`,
+										options: request,
 									}),
 									dispatch,
-									`tls://${options.host}:${options.port}`,
-								),
-							grantTcpEgress: () => ({ revoke: () => {} }),
+									`tls://${request.host}:${request.port}`,
+								);
+							},
+							grantTcpEgress: (input) => {
+								return requireNativeEgress().grant(snapshotNativeGrantInput(input));
+							},
 						},
 					},
 				}

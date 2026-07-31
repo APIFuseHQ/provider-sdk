@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it, setSystemTime } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -53,6 +53,7 @@ beforeAll(() => {
 });
 
 afterEach(async () => {
+	setSystemTime();
 	while (fixtures.length > 0) {
 		const fixture = fixtures.pop();
 		if (!fixture) continue;
@@ -87,10 +88,11 @@ function take(buffer: Buffer, count: number): [Buffer, Buffer] | undefined {
 }
 
 async function startSocks5Server(
-	options: { stall?: boolean } = {},
+	options: { stall?: boolean; onConnection?: () => void } = {},
 ): Promise<ListeningFixture & { destinations: Array<{ host: string; port: number }> }> {
 	const destinations: Array<{ host: string; port: number }> = [];
 	const server = createServer((client) => {
+		options.onConnection?.();
 		if (options.stall) return;
 		let buffered = Buffer.alloc(0);
 		let state: "greeting" | "auth" | "request" | "tunnel" = "greeting";
@@ -293,6 +295,43 @@ describe("native network runtime", () => {
 			client.connectTcp({ host: "127.0.0.1", port: 9, timeoutMs: 30 }),
 		).rejects.toMatchObject({ code: "native_connection_timeout" });
 		expect(Date.now() - startedAt).toBeLessThan(500);
+	});
+
+	it("revalidates an expiring grant after the proxy socket connects and before SOCKS CONNECT", async () => {
+		const destination = await listen(createServer());
+		const startedAt = new Date("2026-07-31T00:00:00.000Z");
+		setSystemTime(startedAt);
+		const proxy = await startSocks5Server({
+			onConnection: () => setSystemTime(new Date(startedAt.getTime() + 10)),
+		});
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localSynthesizer(proxy)],
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetHostSuffixes: ["0.0.1"],
+						targetPorts: [destination.port],
+						tls: "disabled",
+						ttlMs: 10,
+					},
+				],
+			},
+		});
+		client.grantTcpEgress({
+			sourceHost: "bootstrap.example",
+			sourcePort: 443,
+			host: destination.host,
+			port: destination.port,
+			tls: "disabled",
+		});
+
+		await expect(
+			client.connectTcp({ host: destination.host, port: destination.port, timeoutMs: 1_000 }),
+		).rejects.toMatchObject({ code: "native_egress_grant_expired" });
+		expect(proxy.destinations).toEqual([]);
 	});
 
 	it("forces SOCKS5 when resolving NodeMaven for native connections", () => {

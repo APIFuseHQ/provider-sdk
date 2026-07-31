@@ -1,6 +1,10 @@
 import ms from "ms";
 
 import { ProviderError, ValidationError } from "./errors.js";
+import {
+	NativeEgressPolicyValidationError,
+	validateNativeProviderConfig,
+} from "./native-egress-policy.js";
 import { safeParseSchemaSync } from "./schema.js";
 import { resolveHealthCheckInputDateTokens } from "./server/self-test-input-tokens.js";
 import type {
@@ -2204,6 +2208,13 @@ export function defineProvider<
 	);
 	validateOperationFixtures(config.id, operations);
 	validateProviderDeployment(config.id, config.deployment);
+	try {
+		validateNativeProviderConfig(config.native);
+	} catch (error) {
+		if (error instanceof NativeEgressPolicyValidationError)
+			throw new ValidationError(error.message);
+		throw error;
+	}
 	validateProviderProxy(config);
 	validateProviderStt(config);
 	if (config.runtime === "browser" && !config.browser)

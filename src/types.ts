@@ -1314,6 +1314,12 @@ export interface NativeTcpEgressRule {
 /**
  * Bounded native TCP egress discovered through a declared bootstrap endpoint.
  * Host suffixes are exact DNS suffixes, not wildcard patterns.
+ *
+ * Dynamic rules are ordered. The first rule whose source, target, port, and TLS
+ * selectors match exclusively owns the grant; its ttlMs and maxGrants bounds
+ * apply, and an exhausted/shorter rule never falls through to a later overlap.
+ * Every rule must declare a source host selector, source port list/range, and
+ * target port list/range; omitted ttlMs/maxGrants remain unbounded.
  */
 export interface NativeTcpDynamicEgressRule {
 	readonly sourceHost?: string;
