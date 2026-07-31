@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { type Socket, createServer } from "node:net";
 import { z } from "zod";
 
 import { clearProxyResolutionCache } from "../config/loader.js";
@@ -19,7 +20,7 @@ import {
 	resolveProviderProxyAffinityKey,
 } from "../server/serve.js";
 import { event } from "../stream.js";
-import type { ProviderDefinition } from "../types.js";
+import type { ProviderContext, ProviderDefinition } from "../types.js";
 import { HttpRetryPreset } from "../types.js";
 
 function errorObservability(response: Response): ErrorObservabilityDetails {
@@ -671,6 +672,112 @@ describe("provider HTTP server", () => {
 				connectionId: "af_con_0123456789ABCDEFGHJKMN",
 			},
 		});
+	});
+
+	it("binds native declarations into the server context while undeclared providers stay open", async () => {
+		let accepted = 0;
+		const sockets = new Set<Socket>();
+		const destination = createServer((socket) => {
+			accepted += 1;
+			sockets.add(socket);
+			socket.on("close", () => sockets.delete(socket));
+		});
+		await new Promise<void>((resolve, reject) => {
+			destination.once("error", reject);
+			destination.listen(0, "127.0.0.1", () => resolve());
+		});
+		const address = destination.address();
+		if (!address || typeof address === "string") throw new Error("native fixture did not bind");
+		const target = { host: "127.0.0.1", port: address.port };
+		const operation = {
+			input: z.object({}),
+			output: z.object({ ok: z.boolean() }),
+			handler: async (ctx: ProviderContext) => {
+				const connection = await ctx.native?.network.connectTcp(target);
+				if (!connection) throw new Error("native context missing");
+				await connection.close();
+				return { ok: true };
+			},
+		};
+
+		try {
+			const openProvider = {
+				...createTestProvider(),
+				native: {},
+				operations: { nativeConnect: operation },
+			} satisfies ProviderDefinition;
+			const openResponse = await createServerApp(openProvider).request("/v1/nativeConnect", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_native_open", input: {} }),
+			});
+			expect(openResponse.status).toBe(200);
+			expect(accepted).toBe(1);
+
+			const unsupportedGrantProvider = {
+				...createTestProvider(),
+				native: {},
+				operations: {
+					unsupportedGrant: {
+						input: z.object({}),
+						output: z.object({ ok: z.boolean() }),
+						handler: async (ctx: ProviderContext) => {
+							ctx.native?.network.grantTcpEgress({
+								sourceHost: "bootstrap.example",
+								sourcePort: 443,
+								host: "session.example",
+								port: 5228,
+								tls: "disabled",
+							});
+							return { ok: true };
+						},
+					},
+				},
+			} satisfies ProviderDefinition;
+			const unsupportedGrantResponse = await createServerApp(unsupportedGrantProvider).request(
+				"/v1/unsupportedGrant",
+				{
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: "req_native_grant_unsupported", input: {} }),
+				},
+			);
+			expect(unsupportedGrantResponse.status).toBe(502);
+			expect(await unsupportedGrantResponse.json()).toMatchObject({
+				error: { code: "native_dynamic_egress_unsupported" },
+			});
+			expect(errorObservability(unsupportedGrantResponse)).toMatchObject({
+				category: "provider_error",
+				retryable: false,
+			});
+
+			const enforcedProvider = {
+				...createTestProvider(),
+				native: {
+					network: {
+						tcp: [{ host: "elsewhere.example", ports: [443], tls: "disabled" }],
+					},
+				},
+				operations: { nativeConnect: operation },
+			} satisfies ProviderDefinition;
+			const deniedResponse = await createServerApp(enforcedProvider).request("/v1/nativeConnect", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_native_denied", input: {} }),
+			});
+			expect(deniedResponse.status).toBe(502);
+			expect(await deniedResponse.json()).toMatchObject({
+				error: { code: "native_egress_not_declared", requestId: "req_native_denied" },
+			});
+			expect(errorObservability(deniedResponse)).toMatchObject({
+				category: "provider_error",
+				retryable: false,
+			});
+			expect(accepted).toBe(1);
+		} finally {
+			for (const socket of sockets) socket.destroy();
+			await new Promise<void>((resolve) => destination.close(() => resolve()));
+		}
 	});
 
 	it("fails closed for deployed browser providers when the CDP pool URL is missing", async () => {

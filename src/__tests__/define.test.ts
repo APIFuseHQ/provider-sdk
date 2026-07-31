@@ -98,9 +98,12 @@ describe("defineProvider", () => {
 				dynamicTcp: [
 					{
 						sourceHost: "booking-loco.kakao.com",
+						sourceHostSuffixes: ["kakao.com"],
 						sourcePorts: [443],
+						sourcePortRanges: [{ start: 400, end: 499 }],
 						targetHostSuffixes: ["kakao.com"],
 						targetPorts: [5228],
+						targetPortRanges: [{ start: 5200, end: 5299 }],
 						tls: "disabled",
 						ttlMs: 30_000,
 						maxGrants: 2,
@@ -111,6 +114,84 @@ describe("defineProvider", () => {
 		const provider = defineProvider({ ...validConfig, native });
 
 		expect(provider.native).toBe(native);
+		expect(provider.native).toEqual(native);
+	});
+
+	it("rejects unknown and invalid native egress fields through defineProvider", () => {
+		const dynamic = {
+			sourceHostSuffixes: ["bootstrap.example"],
+			sourcePorts: [443],
+			targetHostSuffixes: ["kakao.com"],
+			targetPortRanges: [{ start: 1, end: 65_535 }],
+			tls: "disabled" as const,
+		};
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				native: { network: { dynamicTcp: [{ ...dynamic, targetIpCidrs: ["10.0.0.0/8"] }] } },
+			}),
+		).toThrow(ValidationError);
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				native: { network: { dynamicTcp: [{ ...dynamic, targetHostSuffixes: ["*.kakao.com"] }] } },
+			}),
+		).toThrow(ValidationError);
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				native: {
+					network: { dynamicTcp: [{ ...dynamic, targetPortRanges: [{ start: 443, end: 1 }] }] },
+				},
+			}),
+		).toThrow(ValidationError);
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				native: { network: { dynamicTcp: [{ ...dynamic, ttlMs: 0 }] } },
+			}),
+		).toThrow(ValidationError);
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				native: { network: { dynamicTcp: [{ ...dynamic, maxGrants: 0 }] } },
+			}),
+		).toThrow(ValidationError);
+		const { sourceHostSuffixes: _sourceHostSuffixes, ...withoutSourceHost } = dynamic;
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				native: { network: { dynamicTcp: [withoutSourceHost] } },
+			}),
+		).toThrow(ValidationError);
+		const { sourcePorts: _sourcePorts, ...withoutSourcePorts } = dynamic;
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				native: { network: { dynamicTcp: [withoutSourcePorts] } },
+			}),
+		).toThrow(ValidationError);
+		const { targetPortRanges: _targetPortRanges, ...withoutTargetPorts } = dynamic;
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				native: { network: { dynamicTcp: [withoutTargetPorts] } },
+			}),
+		).toThrow(ValidationError);
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				native: { network: { tcp: [{ host: "empty.example", ports: [], tls: "disabled" }] } },
+			}),
+		).toThrow(ValidationError);
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				native: {
+					network: { dynamicTcp: [{ ...dynamic, sourceHostSuffixes: ["bad\0.example"] }] },
+				},
+			}),
+		).toThrow(ValidationError);
 	});
 
 	it("rejects invalid operation transport metadata", () => {

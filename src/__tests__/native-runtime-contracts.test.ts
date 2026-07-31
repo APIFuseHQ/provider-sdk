@@ -143,7 +143,6 @@ const kakaoNativeDeclaration = {
 				sourceHostSuffixes: ["kakao.com"],
 				sourcePortRanges: [{ start: 1, end: 65_535 }],
 				targetHostSuffixes: ["kakao.com"],
-				targetIpCidrs: ["203.0.113.0/24"],
 				targetPortRanges: [{ start: 1, end: 65_535 }],
 				tls: "disabled",
 				ttlMs: 60_000,
@@ -151,7 +150,7 @@ const kakaoNativeDeclaration = {
 			},
 		],
 	},
-} as const;
+} as const satisfies NativeProviderConfig;
 const publicNativeDeclaration: NativeProviderConfig = kakaoNativeDeclaration;
 
 function contextCapabilities(ctx: ProviderContext): {

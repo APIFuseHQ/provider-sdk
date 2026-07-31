@@ -289,6 +289,89 @@ const brokenHandlerProvider = defineProvider({
 	},
 });
 
+const nativeEgressHarnessProvider = defineProvider({
+	id: "native-egress-harness",
+	version: "1.0.0",
+	runtime: "standard",
+	meta: { displayName: "Native Egress Harness", descriptionKey: "meta.description", category: "test" },
+	native: {
+		network: {
+			tcp: [{ host: "allowed.example", ports: [443], tls: "disabled" }],
+			dynamicTcp: [
+				{
+					sourceHost: "bootstrap.example",
+					sourcePorts: [443],
+					targetHostSuffixes: ["session.example"],
+					targetPorts: [5228],
+					tls: "disabled",
+					ttlMs: 30_000,
+					maxGrants: 1,
+				},
+			],
+		},
+	},
+	operations: {
+		"snapshot-connect": {
+			input: z.object({}),
+			output: z.object({ reads: z.number() }),
+			fixtures: { request: {}, response: { reads: 1 } },
+			healthCheckUnsupported: { reason: "native transport harness" },
+			handler: async (ctx) => {
+				const network = ctx.native?.network;
+				if (!network) throw new Error("native test context missing");
+				let reads = 0;
+				const target = {
+					get host() {
+						reads += 1;
+						return reads === 1 ? "allowed.example" : "evil.example";
+					},
+					port: 443,
+				};
+				await (await network.connectTcp(target)).close();
+				return { reads };
+			},
+		},
+		denied: {
+			input: z.object({}),
+			output: z.object({ ok: z.boolean() }),
+			fixtures: { request: {}, response: { ok: true } },
+			healthCheckUnsupported: { reason: "native transport harness" },
+			handler: async (ctx) => {
+				await ctx.native?.network.connectTcp({ host: "undeclared.example", port: 5228 });
+				return { ok: true };
+			},
+		},
+		"grant-lifecycle": {
+			input: z.object({}),
+			output: z.object({ revokedCode: z.string() }),
+			fixtures: {
+				request: {},
+				response: { revokedCode: "native_egress_not_declared" },
+			},
+			healthCheckUnsupported: { reason: "native transport harness" },
+			handler: async (ctx) => {
+				const network = ctx.native?.network;
+				if (!network) throw new Error("native test context missing");
+				const target = { host: "session.example", port: 5228 };
+				const grant = network.grantTcpEgress({
+					sourceHost: "bootstrap.example",
+					sourcePort: 443,
+					...target,
+					tls: "disabled",
+				});
+				await (await network.connectTcp(target)).close();
+				grant.revoke();
+				try {
+					await network.connectTcp(target);
+				} catch (error) {
+					return { revokedCode: String((error as { code?: unknown }).code) };
+				}
+				return { revokedCode: "missing_denial" };
+			},
+		},
+	},
+});
+
 const handlerE2eStub = ({ url }: { url?: string }) =>
 	/^https:\/\/example\.test\/items\/fixture-id\?date=\d{4}-\d{2}-\d{2}$/.test(url ?? "")
 		? { body: { label: "Live normalized label" } }
@@ -413,6 +496,28 @@ describe("runStandardTests handler E2E", () => {
 		expect(standardTestsResult.warnings).toEqual([
 			'[provider-sdk] Operation "test-provider.search" has no handler E2E coverage in runStandardTests; configure upstreamStub to invoke the real handler.',
 		]);
+	});
+
+	it("enforces native declarations in the offline transport double", async () => {
+		let calls = 0;
+		const urls: string[] = [];
+		const stub = ({ url }: { url?: string }) => {
+			calls += 1;
+			if (url) urls.push(url);
+			return { body: "" };
+		};
+		await expect(
+			executeStandardTestHandler(nativeEgressHarnessProvider, "snapshot-connect", stub),
+		).resolves.toEqual({ reads: 1 });
+		expect(urls).toEqual(["tcp://allowed.example:443"]);
+		await expect(
+			executeStandardTestHandler(nativeEgressHarnessProvider, "denied", stub),
+		).rejects.toMatchObject({ code: "native_egress_not_declared" });
+		expect(calls).toBe(1);
+		await expect(
+			executeStandardTestHandler(nativeEgressHarnessProvider, "grant-lifecycle", stub),
+		).resolves.toEqual({ revokedCode: "native_egress_not_declared" });
+		expect(calls).toBe(2);
 	});
 });
 

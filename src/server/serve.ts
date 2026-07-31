@@ -36,6 +36,7 @@ import { createEnvContext } from "../runtime/env.js";
 import { executeOperation } from "../runtime/executor.js";
 import { createHttpClient } from "../runtime/http.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
+import { createNativeNetworkClient } from "../runtime/native-network.js";
 import { getProviderBaseUrl } from "../runtime/provider.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
@@ -82,6 +83,7 @@ import type {
 	OperationSseTransport,
 	ProviderContext,
 	ProviderDefinition,
+	ProviderProxyPolicy,
 	ProviderRuntimeState,
 	ProviderStreamEvent,
 	StealthClient,
@@ -287,6 +289,13 @@ function resolveOperationConnectionId(request: OperationRequest): string | undef
 	return request.connection?.id ?? request.connectionId;
 }
 
+function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPolicy | undefined {
+	if (typeof provider.proxy === "object") return provider.proxy;
+	if (provider.proxy === true) return { mode: "optional" };
+	if (provider.proxy === false) return { mode: "disabled" };
+	return undefined;
+}
+
 function createProviderContext(
 	provider: ProviderDefinition,
 	request: OperationRequest,
@@ -353,6 +362,17 @@ function createProviderContext(
 						engine: provider.browser?.engine,
 					})
 				: createBrowserStub(),
+		...(provider.native
+			? {
+					native: {
+						network: createNativeNetworkClient({
+							egress: provider.native.network,
+							proxyPolicy: resolveNativeProxyPolicy(provider),
+							affinityKey: proxyClientOptions.affinityKey,
+						}),
+					},
+				}
+			: {}),
 		trace: createTraceContext(),
 		auth: createAuthStub(),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
@@ -455,6 +475,17 @@ function createAuthFlowContext(
 					? createStealthClient(stealthBaseUrl, stealthProfile.name, stealthClientOptions)
 					: createStealthClient(stealthBaseUrl, stealthClientOptions)
 				: createStealthStub(),
+			...(provider.native
+				? {
+						native: {
+							network: createNativeNetworkClient({
+								egress: provider.native.network,
+								proxyPolicy: resolveNativeProxyPolicy(provider),
+								affinityKey: proxyClientOptions.affinityKey,
+							}),
+						},
+					}
+				: {}),
 			env: createEnvContext(provider.secrets?.map((secret) => secret.name)),
 			credential,
 			context: flowContextStore.context,
