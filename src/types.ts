@@ -1019,7 +1019,31 @@ export interface RequestOptions {
 	 */
 	throwOnHttpError?: boolean;
 	retry?: boolean | HttpRetryPreset | HttpRetryOptions;
+	/**
+	 * Opt-in redirect-hop enforcement for ctx.http. When present, redirects are
+	 * evaluated before the next request is issued. Existing callers that omit
+	 * this policy retain the native fetch redirect behavior.
+	 */
+	redirectPolicy?: HttpRedirectPolicy;
 }
+
+export type RedirectRunReason =
+	| "completed"
+	| "stopped"
+	| "max_hops"
+	| "missing_location"
+	| "loop";
+
+export type HttpRedirectPolicyMode = "same-origin";
+
+export interface HttpRedirectPolicy {
+	/** Only follow redirects whose canonical scheme, host, and port match the initial URL. */
+	mode: HttpRedirectPolicyMode;
+	/** Maximum number of redirect hops that may be followed. Must be an integer from 0 to 20. */
+	maxHops: number;
+}
+
+export type HttpRedirectFailureReason = Exclude<RedirectRunReason, "completed">;
 
 export type HttpMethod =
 	| "HEAD"
@@ -1039,7 +1063,7 @@ export type HttpMethod =
 	| "PATCH"
 	| "patch";
 
-export interface StealthFetchOptions extends RequestOptions {
+export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy"> {
 	method?: HttpMethod;
 	body?: string | Buffer;
 	redirect?: "follow" | "manual" | "error";
@@ -1152,7 +1176,7 @@ export interface StealthRedirectRunOptions
 export interface StealthRedirectRunResult {
 	final: StealthResponse;
 	hops: StealthRedirectHop[];
-	reason: "completed" | "stopped" | "max_hops" | "missing_location" | "loop";
+	reason: RedirectRunReason;
 	/**
 	 * Complete flat view across all redirect hosts. Attributes and duplicate names are lost.
 	 * @deprecated Use cookieStore for lossless persistence.

