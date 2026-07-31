@@ -1,16 +1,16 @@
 import { afterEach, beforeAll, describe, expect, it, setSystemTime } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { createServer, type Server, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { type Server, Socket, createServer } from "node:net";
 import { createServer as createTlsServer } from "node:tls";
 
 import { ProxyResolutionError } from "../../config/loader.js";
 import {
 	createNativeNetworkClient,
-	resolveNativeGatewayProxy,
 	type NativeGatewayProxySynthesizer,
+	resolveNativeGatewayProxy,
 } from "../native-network.js";
 
 type ListeningFixture = {
@@ -88,7 +88,7 @@ function take(buffer: Buffer, count: number): [Buffer, Buffer] | undefined {
 }
 
 async function startSocks5Server(
-	options: { stall?: boolean; onConnection?: () => void } = {},
+	options: { stall?: boolean; onConnection?: () => void; replyCode?: number } = {},
 ): Promise<ListeningFixture & { destinations: Array<{ host: string; port: number }> }> {
 	const destinations: Array<{ host: string; port: number }> = [];
 	const server = createServer((client) => {
@@ -148,6 +148,11 @@ async function startSocks5Server(
 				const port = packet[0].readUInt16BE(offset);
 				buffered = packet[1];
 				destinations.push({ host, port });
+				if (options.replyCode !== undefined) {
+					client.end(Buffer.from([5, options.replyCode, 0, 1, 0, 0, 0, 0, 0, 0]));
+					state = "tunnel";
+					return;
+				}
 				const upstream = new Socket();
 				upstream.once("error", () => {
 					client.write(Buffer.from([5, 5, 0, 1, 0, 0, 0, 0, 0, 0]));
@@ -249,6 +254,57 @@ describe("native network runtime", () => {
 		expect(new TextDecoder().decode(await connection.read())).toBe("direct");
 		expect(connection.proxy).toBeUndefined();
 		await connection.close();
+	});
+
+	it("preserves a refused direct connect as the native failure cause", async () => {
+		const closed = await listen(createServer());
+		const { host, port } = closed;
+		fixtures.pop();
+		await new Promise<void>((resolve) => closed.server.close(() => resolve()));
+		const client = createNativeNetworkClient({ proxyPolicy: { mode: "disabled" } });
+
+		let thrown: unknown;
+		try {
+			await client.connectTcp({ host, port, timeoutMs: 1_000 });
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toMatchObject({ code: "native_connection_failed" });
+		expect((thrown as Error).cause).toMatchObject({ code: "ECONNREFUSED" });
+	});
+
+	it("preserves a proxy rejection reply and redacts proxy credentials", async () => {
+		const proxy = await startSocks5Server({ replyCode: 0x02 });
+		const username = `fixture-user-${randomUUID()}`;
+		const password = `fixture-password-${randomUUID()}`;
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [
+				() => ({
+					url: `socks5://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${proxy.host}:${proxy.port}`,
+					vendor: "nodemaven",
+					sticky: false,
+				}),
+			],
+		});
+
+		let thrown: unknown;
+		try {
+			await client.connectTcp({ host: "blocked.example", port: 995, timeoutMs: 1_000 });
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toMatchObject({ code: "native_connection_failed" });
+		expect((thrown as Error).cause).toMatchObject({
+			message: "Socks5 proxy rejected connection - NotAllowed",
+			socks5ReplyCode: 0x02,
+		});
+		const serialized = JSON.stringify(thrown);
+		expect(serialized).not.toContain(username);
+		expect(serialized).not.toContain(password);
+		expect(serialized).toContain("[REDACTED]");
 	});
 
 	it("connects directly when an optional vendor chain does not resolve", async () => {
