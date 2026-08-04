@@ -88,7 +88,12 @@ function take(buffer: Buffer, count: number): [Buffer, Buffer] | undefined {
 }
 
 async function startSocks5Server(
-	options: { stall?: boolean; onConnection?: () => void; replyCode?: number } = {},
+	options: {
+		stall?: boolean;
+		onConnection?: () => void;
+		replyCode?: number;
+		upstreamHost?: string;
+	} = {},
 ): Promise<ListeningFixture & { destinations: Array<{ host: string; port: number }> }> {
 	const destinations: Array<{ host: string; port: number }> = [];
 	const server = createServer((client) => {
@@ -158,7 +163,7 @@ async function startSocks5Server(
 					client.write(Buffer.from([5, 5, 0, 1, 0, 0, 0, 0, 0, 0]));
 					client.destroy();
 				});
-				upstream.connect(port, host, () => {
+				upstream.connect(port, options.upstreamHost ?? host, () => {
 					client.write(Buffer.from([5, 0, 0, 1, 127, 0, 0, 1, 0, 0]));
 					state = "tunnel";
 					if (buffered.length > 0) upstream.write(buffered);
@@ -173,9 +178,13 @@ async function startSocks5Server(
 }
 
 async function startHttpConnectServer(): Promise<
-	ListeningFixture & { destinations: Array<{ host: string; port: number }> }
+	ListeningFixture & {
+		destinations: Array<{ host: string; port: number }>;
+		requests: string[];
+	}
 > {
 	const destinations: Array<{ host: string; port: number }> = [];
+	const requests: string[] = [];
 	const server = createServer((client) => {
 		let buffered = Buffer.alloc(0);
 		client.on("data", function onData(chunk: Buffer) {
@@ -183,7 +192,9 @@ async function startHttpConnectServer(): Promise<
 			const headerEnd = buffered.indexOf("\r\n\r\n");
 			if (headerEnd < 0) return;
 			client.off("data", onData);
-			const requestLine = buffered.subarray(0, headerEnd).toString("latin1").split("\r\n")[0];
+			const request = buffered.subarray(0, headerEnd).toString("latin1");
+			requests.push(request);
+			const requestLine = request.split("\r\n")[0];
 			const authority = requestLine?.split(" ")[1];
 			if (!authority) {
 				client.end("HTTP/1.1 400 Bad Request\r\n\r\n");
@@ -204,7 +215,7 @@ async function startHttpConnectServer(): Promise<
 			});
 		});
 	});
-	return Object.assign(await listen(server), { destinations });
+	return Object.assign(await listen(server), { destinations, requests });
 }
 
 function localSynthesizer(proxy: ListeningFixture): NativeGatewayProxySynthesizer {
@@ -325,6 +336,99 @@ describe("native network runtime", () => {
 		await connection.close();
 	});
 
+	it("sends the canonical authorized host to direct, SOCKS5, and HTTP CONNECT sinks", async () => {
+		const destination = await listen(
+			createServer((socket) => socket.on("data", (chunk) => socket.write(chunk))),
+		);
+		const suppliedHost = "１２７．０．０．１。";
+		const egress = {
+			tcp: [{ host: destination.host, ports: [destination.port], tls: "disabled" as const }],
+		};
+
+		const direct = createNativeNetworkClient({ proxyPolicy: { mode: "disabled" }, egress });
+		const directConnection = await direct.connectTcp({
+			host: suppliedHost,
+			port: destination.port,
+			timeoutMs: 1_000,
+		});
+		await directConnection.close();
+
+		const socksProxy = await startSocks5Server();
+		const socks = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localSynthesizer(socksProxy)],
+			egress,
+		});
+		const socksConnection = await socks.connectTcp({
+			host: suppliedHost,
+			port: destination.port,
+			timeoutMs: 1_000,
+		});
+		expect(socksProxy.destinations).toEqual([{ host: destination.host, port: destination.port }]);
+		await socksConnection.close();
+
+		const httpProxy = await startHttpConnectServer();
+		const http = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localHttpSynthesizer(httpProxy)],
+			egress,
+		});
+		const httpConnection = await http.connectTcp({
+			host: suppliedHost,
+			port: destination.port,
+			timeoutMs: 1_000,
+		});
+		const authority = `${destination.host}:${destination.port}`;
+		expect(httpProxy.requests).toHaveLength(1);
+		expect(httpProxy.requests[0]).toContain(`CONNECT ${authority} HTTP/1.1`);
+		expect(httpProxy.requests[0]).toContain(`\r\nHost: ${authority}\r\n`);
+		expect(httpProxy.requests[0]).not.toContain(suppliedHost);
+		await httpConnection.close();
+	});
+
+	it("round-trips Unicode and punycode grant spellings through the canonical SOCKS sink", async () => {
+		const destination = await listen(
+			createServer((socket) => socket.on("data", (chunk) => socket.write(chunk))),
+		);
+		const proxy = await startSocks5Server({ upstreamHost: destination.host });
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localSynthesizer(proxy)],
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetHostSuffixes: ["한글.kr"],
+						targetPorts: [destination.port],
+						tls: "disabled",
+					},
+				],
+			},
+		});
+		client.grantTcpEgress({
+			sourceHost: "bootstrap.example",
+			sourcePort: 443,
+			host: "한글.kr",
+			port: destination.port,
+			tls: "disabled",
+		});
+		for (const host of ["한글.kr", "xn--bj0bj06e.kr"]) {
+			const connection = await client.connectTcp({
+				host,
+				port: destination.port,
+				timeoutMs: 1_000,
+			});
+			await connection.write(new TextEncoder().encode("idn"));
+			expect(new TextDecoder().decode(await connection.read())).toBe("idn");
+			await connection.close();
+		}
+		expect(proxy.destinations).toEqual([
+			{ host: "xn--bj0bj06e.kr", port: destination.port },
+			{ host: "xn--bj0bj06e.kr", port: destination.port },
+		]);
+	});
+
 	it("preserves a refused direct connect as the native failure cause", async () => {
 		const closed = await listen(createServer());
 		const { host, port } = closed;
@@ -437,7 +541,7 @@ describe("native network runtime", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["0.0.1"],
+						targetIpv4Cidrs: ["127.0.0.1/32"],
 						targetPorts: [destination.port],
 						tls: "disabled",
 						ttlMs: 10,
