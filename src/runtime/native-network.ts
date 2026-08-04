@@ -1212,7 +1212,10 @@ function matchesDnsSuffix(host: string, suffix: string): boolean {
 	return host === suffix || host.endsWith(`.${suffix}`);
 }
 
-function matchesSourceHost(rule: DynamicEgressRuleSnapshot, host: string): boolean {
+/** Internal validator-independent source selector matcher. */
+export function matchesSourceHost(rule: DynamicEgressRuleSnapshot, host: string): boolean {
+	const kind = classifyEgressHost(host);
+	if (kind === "numeric-ambiguous") return false;
 	const hasSelector =
 		rule.sourceHost !== undefined ||
 		rule.sourceHostSuffixes.length > 0 ||

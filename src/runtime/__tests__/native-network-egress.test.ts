@@ -12,9 +12,13 @@ import {
 	parseIpv6Cidr,
 	parseStrictIpv4,
 } from "../../native-address.js";
-import { parseNativeEgressPolicy } from "../../native-egress-policy.js";
+import {
+	type DynamicEgressRuleSnapshot,
+	parseNativeEgressPolicy,
+} from "../../native-egress-policy.js";
 import {
 	createNativeNetworkClient,
+	matchesSourceHost,
 	NATIVE_EGRESS_EXPIRED_EVIDENCE_LIMIT,
 	NativeEgressGrantExpiredError,
 	NativeEgressNotDeclaredError,
@@ -309,6 +313,159 @@ describe("native egress enforcement", () => {
 		expect(destination.accepted()).toBe(0);
 	});
 
+	it("rejects numeric-ambiguous spellings in every declared host field", () => {
+		const ambiguousHosts = [
+			"2130706433",
+			"0177.0.0.1",
+			"127.1",
+			"0x7f.0.0.1",
+			"1.2.3.04",
+			"2404::4600::1",
+			"12345::1",
+		] as const;
+		const declarations = (ambiguousHost: string) =>
+			[
+				[
+					{ tcp: [{ host: ambiguousHost, ports: [443], tls: "disabled" as const }] },
+					"native.network.tcp[0].host",
+				],
+				[
+					{
+						dynamicTcp: [
+							{
+								sourceHost: ambiguousHost,
+								sourcePorts: [443],
+								targetHostSuffixes: ["session.example"],
+								targetPorts: [5223],
+								tls: "disabled" as const,
+							},
+						],
+					},
+					"native.network.dynamicTcp[0].sourceHost",
+				],
+				[
+					{
+						dynamicTcp: [
+							{
+								sourceHostSuffixes: [ambiguousHost],
+								sourcePorts: [443],
+								targetHostSuffixes: ["session.example"],
+								targetPorts: [5223],
+								tls: "disabled" as const,
+							},
+						],
+					},
+					"native.network.dynamicTcp[0].sourceHostSuffixes[0]",
+				],
+				[
+					{
+						dynamicTcp: [
+							{
+								sourceHost: "bootstrap.example",
+								sourcePorts: [443],
+								targetHostSuffixes: [ambiguousHost],
+								targetPorts: [5223],
+								tls: "disabled" as const,
+							},
+						],
+					},
+					"native.network.dynamicTcp[0].targetHostSuffixes[0]",
+				],
+			] as const;
+
+		for (const ambiguousHost of ambiguousHosts) {
+			for (const [egress, fieldPath] of declarations(ambiguousHost)) {
+				const error = captureNativeError(() => createNativeNetworkClient({ egress }));
+				expect(error.code).toBe("native_egress_policy_invalid");
+				expect(error.message).toContain(fieldPath);
+				expect(error.message).toContain("unresolvable numeric-ambiguous spelling");
+				expect(error.message).not.toContain(ambiguousHost);
+			}
+		}
+	});
+
+	it("rejects canonical IP literals from DNS suffix declarations", () => {
+		for (const literal of ["203.0.113.7", "2404:4600:9:2dc::228"] as const) {
+			for (const [field, fieldPath] of [
+				["sourceHostSuffixes", "native.network.dynamicTcp[0].sourceHostSuffixes[0]"],
+				["targetHostSuffixes", "native.network.dynamicTcp[0].targetHostSuffixes[0]"],
+			] as const) {
+				const rule = {
+					sourceHost: "bootstrap.example",
+					sourcePorts: [443],
+					targetHostSuffixes: ["session.example"],
+					targetPorts: [5223],
+					tls: "disabled" as const,
+					[field]: [literal],
+				};
+				const error = captureNativeError(() =>
+					createNativeNetworkClient({ egress: { dynamicTcp: [rule] } }),
+				);
+				expect(error.code).toBe("native_egress_policy_invalid");
+				expect(error.message).toContain(fieldPath);
+				expect(error.message).toContain("must be a DNS suffix, not an IPv");
+			}
+		}
+	});
+
+	it("classifies source hosts before validator-independent exact matching", () => {
+		const rule = (sourceHost: string): DynamicEgressRuleSnapshot => ({
+			sourceHost,
+			sourceHostSuffixes: [],
+			sourceIpv4Cidrs: [],
+			sourceIpv6Cidrs: [],
+			sourcePorts: [443],
+			sourcePortRanges: [],
+			targetHostSuffixes: ["session.example"],
+			targetIpv4Cidrs: [],
+			targetIpv6Cidrs: [],
+			targetPorts: [5223],
+			targetPortRanges: [],
+			tls: "disabled",
+		});
+		for (const ambiguousHost of [
+			"2130706433",
+			"0177.0.0.1",
+			"127.1",
+			"0x7f.0.0.1",
+			"1.2.3.04",
+			"2404::4600::1",
+			"12345::1",
+		])
+			expect(matchesSourceHost(rule(ambiguousHost), ambiguousHost)).toBeFalse();
+	});
+
+	it("authorizes exact DNS, canonical IPv4, and canonical IPv6 source hosts", () => {
+		for (const [declaredSource, grantedSource] of [
+			["bootstrap.example", "BOOTSTRAP.EXAMPLE."],
+			["211.183.222.6", "211.183.222.6"],
+			["2404:4600:9:2dc::228", "2404:4600:0009:02DC:0:0:0:228"],
+		] as const) {
+			const client = createNativeNetworkClient({
+				egress: {
+					dynamicTcp: [
+						{
+							sourceHost: declaredSource,
+							sourcePorts: [443],
+							targetHostSuffixes: ["session.example"],
+							targetPorts: [5223],
+							tls: "disabled",
+						},
+					],
+				},
+			});
+			client
+				.grantTcpEgress({
+					sourceHost: grantedSource,
+					sourcePort: 443,
+					host: "node.session.example",
+					port: 5223,
+					tls: "disabled",
+				})
+				.revoke();
+		}
+	});
+
 	it("uses label-boundary DNS suffixes and never wildcard syntax", () => {
 		const client = createNativeNetworkClient({
 			egress: {
@@ -525,7 +682,7 @@ describe("native egress enforcement", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["0.0.1", "kakao.com"],
+						targetHostSuffixes: ["kakao.com"],
 						targetPorts: [5223],
 						tls: "disabled",
 					},
@@ -569,7 +726,7 @@ describe("native egress enforcement", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["0.0.1"],
+						targetHostSuffixes: ["example"],
 						targetPorts: [destination.port],
 						tls: "disabled",
 					},
@@ -600,7 +757,7 @@ describe("native egress enforcement", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["0.0.1"],
+						targetHostSuffixes: ["example"],
 						targetPorts: [5223],
 						tls: "disabled",
 					},
@@ -756,16 +913,8 @@ describe("native egress enforcement", () => {
 			["211.183.211.10", "211.183.211.10"],
 			["0.0.0.0", "0.0.0.0"],
 			["255.255.255.255", "255.255.255.255"],
-			["０177.0.0.1", "0177.0.0.1"],
 			["１２７.0.0.1", "127.0.0.1"],
-			["２１３０７０６４３３", "2130706433"],
 			["127．0．0．1", "127.0.0.1"],
-			["0177.0.0.1", "0177.0.0.1"],
-			["127.1", "127.1"],
-			["2130706433", "2130706433"],
-			["0x7f.0.0.1", "0x7f.0.0.1"],
-			["1.2.3.04", "1.2.3.04"],
-			["011.183.208.5", "011.183.208.5"],
 			["::1", "::1"],
 			["한글.kr", "xn--bj0bj06e.kr"],
 			["xn--bj0bj06e.kr", "xn--bj0bj06e.kr"],
@@ -944,7 +1093,7 @@ describe("native egress enforcement", () => {
 
 		const suffixOnly = createNativeNetworkClient({
 			egress: {
-				dynamicTcp: [{ ...source, targetHostSuffixes: ["183.211.10"] }],
+				dynamicTcp: [{ ...source, targetHostSuffixes: ["example"] }],
 			},
 		});
 		expectNativeCode(
@@ -1029,7 +1178,7 @@ describe("native egress enforcement", () => {
 		};
 		for (const targetSelectors of [
 			{ targetIpv4Cidrs: ["0.0.0.0/0"] },
-			{ targetHostSuffixes: ["228"] },
+			{ targetHostSuffixes: ["example"] },
 		]) {
 			const client = createNativeNetworkClient({
 				egress: { dynamicTcp: [{ ...selectorBase, ...targetSelectors }] },
@@ -1249,7 +1398,7 @@ describe("native egress enforcement", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["183.211.10"],
+						targetHostSuffixes: ["example"],
 						targetIpv4Cidrs: ["211.183.208.0/20"],
 						targetPorts: [5223],
 						tls: "disabled",
@@ -1277,7 +1426,7 @@ describe("native egress enforcement", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["0.0.1"],
+						targetHostSuffixes: ["example"],
 						targetPorts: [5223],
 						tls: "disabled",
 					},

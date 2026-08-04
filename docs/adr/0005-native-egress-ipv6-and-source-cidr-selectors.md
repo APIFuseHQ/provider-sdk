@@ -67,7 +67,7 @@ Matching is family-disjoint:
 | DNS name | host/suffix selectors only |
 | numeric-ambiguous input | none |
 
-Exact `sourceHost` remains an exact canonical host match for every family. Resolver-numeric forms, reserved delimiters, percent escapes, format controls, zone IDs, and malformed colon-bearing forms remain numeric-ambiguous or are rejected at the canonical input boundary.
+Exact `sourceHost` remains an exact canonical match for DNS names and canonical IPv4 or IPv6 literals. Resolver-numeric forms and malformed colon-bearing forms are numeric-ambiguous and are rejected at the declaration boundary; reserved delimiters, percent escapes, format controls, and zone IDs remain rejected at the canonical input boundary.
 
 ### 2. Mapped and compatible IPv4 space requires explicit IPv4 authority
 
@@ -90,6 +90,26 @@ Zone IDs contain `%` and stay rejected as reserved-delimiter inputs. Brackets ar
 Every valid IPv6 input is formatted from its parsed bytes as lowercase RFC 5952 text: no leading group zeroes and the first longest run of at least two zero groups compressed once. Grant storage and connection lookup use this form, so equivalent input spellings share a grant.
 
 Direct TCP, the SOCKS5 destination, and default TLS SNI receive the unbracketed canonical host. HTTP CONNECT request-target and `Host` authorities receive the same canonical host in brackets. No caller-supplied non-canonical spelling reaches a transport sink.
+
+### 5. Numeric-ambiguous declarations fail at both policy and match boundaries
+
+Every declared exact host and DNS suffix is classified after canonicalization. A `numeric-ambiguous` static `host`, exact `sourceHost`, `sourceHostSuffixes` entry, or `targetHostSuffixes` entry makes policy construction fail with `native_egress_policy_invalid`; the diagnostic names the field path and only the safe `numeric-ambiguous` classification. Suffix lists additionally reject canonical IPv4 and IPv6 literals because an address literal is not a DNS suffix. Exact `sourceHost` continues to accept canonical literals of either family.
+
+The source matcher independently classifies its incoming host before any exact-string comparison and returns false for `numeric-ambiguous`. This guard does not rely on the current policy parser, so a future internal snapshot construction path cannot restore exact-match authority by skipping declaration validation. `canonicalizeEgressHost` still returns numeric-ambiguous spellings unchanged: preserving their spelling is what prevents resolver normalization from widening them into canonical IPv4 with CIDR authority.
+
+The defect was measured both on this PR's pre-fix head and on `origin/main`, where declaring and granting the same spelling produced:
+
+| Declared and granted `sourceHost` | Policy | Grant | Resolver observation |
+| --- | --- | --- | --- |
+| `2130706433` | accepted | granted | `dns.lookup` resolved to `127.0.0.1` |
+| `0177.0.0.1` | accepted | granted | `dns.lookup` resolved to `127.0.0.1` |
+| `127.1` | accepted | granted | `dns.lookup` resolved to `127.0.0.1` |
+| `0x7f.0.0.1` | accepted | granted | `dns.lookup` resolved to `127.0.0.1` |
+| `1.2.3.04` | accepted | granted | `dns.lookup` resolved to `1.2.3.4` |
+| `2404::4600::1` | accepted | granted | malformed IPv6; `ENOTFOUND` |
+| `12345::1` | accepted | granted | malformed IPv6; `ENOTFOUND` |
+
+The scope is narrow but fail-open relative to the declared invariant that numeric-ambiguous input matches no selector. The operator had to write the ambiguous spelling into policy; an undeclared ambiguous source was refused, and a declaration authorized only the byte-identical spelling, with neither canonical-IP widening nor cross-spelling authority. The target side was unaffected even when all target selector classes were declared. This is therefore an operator footgun rather than a remote-input bypass: a policy value that looks like an address was silently treated as an opaque exact name. The behavior pre-dated this PR on `origin/main`, but this change closes it because the PR establishes family-disjoint source selectors.
 
 ## Consequences
 

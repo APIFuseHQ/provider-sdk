@@ -7,6 +7,7 @@ import type {
 } from "./types.js";
 import {
 	canonicalizeEgressHost,
+	classifyEgressHost,
 	formatIpv6,
 	parseIpv4Cidr,
 	parseIpv6Cidr,
@@ -136,6 +137,13 @@ function host(value: unknown, fieldPath: string, suffix = false): string {
 		fail(`${fieldPath} must be an exact ${suffix ? "DNS suffix" : "hostname"}, not a wildcard`);
 	const canonical = canonicalizeEgressHost(value);
 	if (!canonical.ok) fail(`${fieldPath} must be a non-empty hostname`);
+	const kind = classifyEgressHost(canonical.host);
+	if (kind === "numeric-ambiguous")
+		fail(`${fieldPath} value is an unresolvable numeric-ambiguous spelling`);
+	if (suffix && kind !== "dns") {
+		const family = kind === "ipv4" ? "IPv4" : "IPv6";
+		fail(`${fieldPath} must be a DNS suffix, not an ${family} literal`);
+	}
 	return canonical.host;
 }
 
