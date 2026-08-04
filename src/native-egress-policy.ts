@@ -5,6 +5,7 @@ import type {
 	NativeTcpPortRange,
 	NativeTcpTlsMode,
 } from "./types.js";
+import { parseIpv4Cidr, parseStrictIpv4 } from "./native-ipv4.js";
 
 type NativeNetworkDeclaration = NonNullable<NativeProviderConfig["network"]>;
 
@@ -164,27 +165,24 @@ function ipv4Cidrs(value: unknown, fieldPath: string): readonly string[] {
 	return dataArray(value, fieldPath).map((value, index) => {
 		const cidrPath = `${fieldPath}[${index}]`;
 		if (typeof value !== "string") fail(`${cidrPath} must be an IPv4 CIDR in a.b.c.d/nn form`);
-		// Leading-zero octets are rejected to match the runtime matcher: octal
-		// interpretation by resolvers must never diverge from this validation.
-		const match =
-			/^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\/(0|[1-9]\d?)$/.exec(
-				value,
-			);
-		if (!match) fail(`${cidrPath} must be an IPv4 CIDR in a.b.c.d/nn form`);
-		const octets = match.slice(1, 5).map(Number);
-		const prefix = Number(match[5]);
-		if (octets.some((octet) => octet > 255) || prefix > 32)
+		const parsed = parseIpv4Cidr(value);
+		if (!parsed) {
+			const separator = value.indexOf("/");
+			const prefixText = value.slice(separator + 1);
+			const prefix = Number(prefixText);
+			const hasValidForm =
+				separator > 0 &&
+				separator === value.lastIndexOf("/") &&
+				parseStrictIpv4(value.slice(0, separator)) !== undefined &&
+				Number.isInteger(prefix) &&
+				prefix >= 0 &&
+				prefix <= 32 &&
+				String(prefix) === prefixText;
+			if (hasValidForm)
+				fail(`${cidrPath} must use the canonical network address with no host bits set`);
 			fail(`${cidrPath} must be an IPv4 CIDR in a.b.c.d/nn form`);
-		const address =
-			((octets[0] ?? 0) * 0x1000000 +
-				(octets[1] ?? 0) * 0x10000 +
-				(octets[2] ?? 0) * 0x100 +
-				(octets[3] ?? 0)) >>>
-			0;
-		const network = prefix === 0 ? 0 : (address & (0xffffffff << (32 - prefix))) >>> 0;
-		if (address !== network)
-			fail(`${cidrPath} must use the canonical network address with no host bits set`);
-		const duplicateKey = `${address}/${prefix}`;
+		}
+		const duplicateKey = `${parsed.network}/${parsed.prefix}`;
 		if (seen.has(duplicateKey)) fail(`${fieldPath} must not contain duplicate CIDRs`);
 		seen.add(duplicateKey);
 		return value;

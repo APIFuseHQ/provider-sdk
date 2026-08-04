@@ -2,6 +2,12 @@ import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { type Server, type Socket, createServer } from "node:net";
 
 import {
+	classifyEgressTargetHost,
+	ipv4InCidr,
+	parseIpv4Cidr,
+	parseStrictIpv4,
+} from "../../native-ipv4.js";
+import {
 	NativeEgressGrantExpiredError,
 	NativeEgressNotDeclaredError,
 	NATIVE_EGRESS_EXPIRED_EVIDENCE_LIMIT,
@@ -67,6 +73,47 @@ afterEach(async () => {
 		for (const socket of fixture.sockets) socket.destroy();
 		await new Promise<void>((resolve) => fixture.server.close(() => resolve()));
 	}
+});
+
+describe("native IPv4 authorization parsing", () => {
+	it("classifies canonical IPv4, resolver-numeric forms, and DNS names", () => {
+		const cases = [
+			["0.0.0.0", "ipv4"],
+			["255.255.255.255", "ipv4"],
+			["211.183.211.10", "ipv4"],
+			["0211.183.211.10", "numeric-ambiguous"],
+			["0177.0.0.1", "numeric-ambiguous"],
+			["011.183.208.5", "numeric-ambiguous"],
+			["1.2.3.04", "numeric-ambiguous"],
+			["127.1", "numeric-ambiguous"],
+			["10.0.1", "numeric-ambiguous"],
+			["1.2.3.4.5", "numeric-ambiguous"],
+			["2130706433", "numeric-ambiguous"],
+			["0x7f.0.0.1", "numeric-ambiguous"],
+			["0X7f.0.0.1", "numeric-ambiguous"],
+			["::1", "numeric-ambiguous"],
+			["[::1]", "numeric-ambiguous"],
+			["loco.kakao.com", "dns"],
+			["0211.example.com", "dns"],
+		] as const;
+		for (const [host, expected] of cases) expect(classifyEgressTargetHost(host)).toBe(expected);
+	});
+
+	it("parses and matches only canonical IPv4 and CIDR spellings", () => {
+		expect(parseStrictIpv4("0.0.0.0")).toBe(0);
+		expect(parseStrictIpv4("255.255.255.255")).toBe(0xffffffff);
+		expect(parseStrictIpv4("1.2.3.04")).toBeUndefined();
+		expect(parseIpv4Cidr("211.183.208.0/20")).toEqual({ network: 0xd3b7d000, prefix: 20 });
+		expect(parseIpv4Cidr("211.183.211.10/20")).toBeUndefined();
+		expect(parseIpv4Cidr("211.183.208.0/020")).toBeUndefined();
+		const inside = parseStrictIpv4("211.183.211.10");
+		const outside = parseStrictIpv4("211.183.192.1");
+		expect(inside).toBeDefined();
+		expect(outside).toBeDefined();
+		expect(ipv4InCidr(inside as number, "211.183.208.0/20")).toBeTrue();
+		expect(ipv4InCidr(outside as number, "211.183.208.0/20")).toBeFalse();
+		expect(ipv4InCidr(0xffffffff, "0.0.0.0/0")).toBeTrue();
+	});
 });
 
 describe("native egress enforcement", () => {
@@ -209,7 +256,7 @@ describe("native egress enforcement", () => {
 		);
 	});
 
-	it("rejects malformed, non-canonical, and duplicate IPv4 CIDR selectors", () => {
+	it("rejects malformed, non-canonical, and duplicate IPv4 CIDRs with distinct messages", () => {
 		const rule = {
 			sourceHost: "bootstrap.example",
 			sourcePorts: [443],
@@ -223,7 +270,6 @@ describe("native egress enforcement", () => {
 			"211.183.208.0 /20",
 			"211.183.208.0/33",
 			"256.183.208.0/20",
-			"121.53.93.47/20",
 			"011.183.208.0/20",
 			"211.183.208.0/07",
 		]) {
@@ -235,25 +281,26 @@ describe("native egress enforcement", () => {
 			} catch (error) {
 				expect(error).toBeInstanceOf(NativeNetworkError);
 				expect(error).toMatchObject({ code: "native_egress_policy_invalid" });
-				expect((error as Error).message).toContain(
-					"native.network.dynamicTcp[0].targetIpv4Cidrs[0]",
-				);
+				expect((error as Error).message).toContain("must be an IPv4 CIDR in a.b.c.d/nn form");
 			}
 		}
-		expectNativeCode(
-			() =>
+		for (const [targetIpv4Cidrs, message] of [
+			[["121.53.93.47/20"], "must use the canonical network address with no host bits set"],
+			[["211.183.208.0/20", "211.183.208.0/20"], "must not contain duplicate CIDRs"],
+		] as const) {
+			try {
 				createNativeNetworkClient({
 					egress: {
-						dynamicTcp: [
-							{
-								...rule,
-								targetIpv4Cidrs: ["211.183.208.0/20", "211.183.208.0/20"],
-							},
-						],
+						dynamicTcp: [{ ...rule, targetIpv4Cidrs: [...targetIpv4Cidrs] }],
 					},
-				}),
-			"native_egress_policy_invalid",
-		);
+				});
+				throw new Error(`Expected ${targetIpv4Cidrs.join(",")} to be rejected`);
+			} catch (error) {
+				expect(error).toBeInstanceOf(NativeNetworkError);
+				expect(error).toMatchObject({ code: "native_egress_policy_invalid" });
+				expect((error as Error).message).toContain(message);
+			}
+		}
 		expectNativeCode(
 			() =>
 				createNativeNetworkClient({
@@ -263,6 +310,31 @@ describe("native egress enforcement", () => {
 				}),
 			"native_egress_policy_invalid",
 		);
+	});
+
+	it("uses the same accepted CIDR spelling in policy validation and runtime matching", () => {
+		const client = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetIpv4Cidrs: ["211.183.208.0/20"],
+						targetPorts: [5223],
+						tls: "disabled",
+					},
+				],
+			},
+		});
+		client
+			.grantTcpEgress({
+				sourceHost: "bootstrap.example",
+				sourcePort: 443,
+				host: "211.183.211.10",
+				port: 5223,
+				tls: "disabled",
+			})
+			.revoke();
 	});
 
 	it("accepts CIDR-only rules and rejects rules without a target selector", () => {
@@ -343,6 +415,145 @@ describe("native egress enforcement", () => {
 			() => anyIpv4.grantTcpEgress({ ...grant, host: "0211.183.211.10" }),
 			"native_egress_not_declared",
 		);
+	});
+
+	it("rejects the exact leading-zero bypass when a rule has both target selector classes", () => {
+		const client = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetHostSuffixes: ["183.211.10"],
+						targetIpv4Cidrs: ["211.183.208.0/20"],
+						targetPorts: [5223],
+						tls: "disabled",
+					},
+				],
+			},
+		});
+		const grant = {
+			sourceHost: "bootstrap.example",
+			sourcePort: 443,
+			port: 5223,
+			tls: "disabled" as const,
+		};
+		client.grantTcpEgress({ ...grant, host: "211.183.211.10" }).revoke();
+		expectNativeCode(
+			() => client.grantTcpEgress({ ...grant, host: "0211.183.211.10" }),
+			"native_egress_not_declared",
+		);
+	});
+
+	it("rejects every resolver-numeric target under a suffix-only rule", () => {
+		const client = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetHostSuffixes: ["0.0.1"],
+						targetPorts: [5223],
+						tls: "disabled",
+					},
+				],
+			},
+		});
+		for (const host of [
+			"0211.183.211.10",
+			"0177.0.0.1",
+			"011.0.0.1",
+			"011.183.208.5",
+			"1.2.3.04",
+			"127.1",
+			"2130706433",
+			"0x7f.0.0.1",
+			"::1",
+			"[::1]",
+		]) {
+			expectNativeCode(
+				() =>
+					client.grantTcpEgress({
+						sourceHost: "bootstrap.example",
+						sourcePort: 443,
+						host,
+						port: 5223,
+						tls: "disabled",
+					}),
+				"native_egress_not_declared",
+			);
+		}
+	});
+
+	it("continues matching legitimate DNS names, including numeric-leading labels", () => {
+		const client = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetHostSuffixes: ["kakao.com", "example.com"],
+						targetPorts: [5223],
+						tls: "disabled",
+					},
+				],
+			},
+		});
+		for (const host of ["loco.kakao.com", "0211.example.com"]) {
+			client
+				.grantTcpEgress({
+					sourceHost: "bootstrap.example",
+					sourcePort: 443,
+					host,
+					port: 5223,
+					tls: "disabled",
+				})
+				.revoke();
+		}
+	});
+
+	it("diagnoses source-selector and target-selector grant denials", () => {
+		const client = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetHostSuffixes: ["session.example"],
+						targetPorts: [5223],
+						tls: "disabled",
+					},
+				],
+			},
+		});
+		for (const [sourceHost, host, details] of [
+			[
+				"wrong.example",
+				"node.session.example",
+				["target kind: dns", "no rule matched this source"],
+			],
+			[
+				"bootstrap.example",
+				"0177.0.0.1",
+				["target kind: numeric-ambiguous", "source matched but target/port/TLS did not"],
+			],
+		] as const) {
+			try {
+				client.grantTcpEgress({
+					sourceHost,
+					sourcePort: 443,
+					host,
+					port: 5223,
+					tls: "disabled",
+				});
+				throw new Error("Expected grant to be denied");
+			} catch (error) {
+				expect(error).toBeInstanceOf(NativeNetworkError);
+				expect(error).toMatchObject({ code: "native_egress_not_declared" });
+				expect((error as Error).message).toContain(`source ${sourceHost}:443`);
+				for (const detail of details) expect((error as Error).message).toContain(detail);
+			}
+		}
 	});
 
 	it("enforces dynamic source suffix, source port, target range, and TLS selectors", async () => {

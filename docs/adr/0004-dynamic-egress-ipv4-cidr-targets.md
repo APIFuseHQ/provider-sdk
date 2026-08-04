@@ -42,3 +42,21 @@ Negative / accepted:
 ## Rejected alternatives
 
 - **Trust the bootstrap endpoint.** Allow any IP returned through a grant whose `sourceHost` is declared. This is a wider trust delegation: compromise or unexpected behavior at the bootstrap layer could authorize destinations with no provider-pinned ownership boundary. It may be layered later as a separate, explicit decision, but is not implied by this CIDR selector.
+
+## Resolver-numeric host forms
+
+Hosts that are not canonical dotted-quad IPv4 but that a resolver may interpret as numeric addresses are rejected outright. They match neither `targetIpv4Cidrs` nor `targetHostSuffixes`; IPv6 literals are likewise rejected until an explicit IPv6 selector exists. Mixed DNS names with non-numeric labels remain DNS names.
+
+This fail-closed classification is based on measured Node `dns.lookup(host, { family: 4 })` behavior on the development host:
+
+| Supplied host | Resolved IPv4 address |
+| --- | --- |
+| `0211.183.211.10` | `137.183.211.10` |
+| `0177.0.0.1` | `127.0.0.1` |
+| `011.183.208.5` | `9.183.208.5` |
+| `1.2.3.04` | `1.2.3.4` |
+| `127.1` | `127.0.0.1` |
+| `2130706433` | `127.0.0.1` |
+| `0x7f.0.0.1` | `127.0.0.1` |
+
+IPv4 address and CIDR parsing lives in the shared internal `src/native-ipv4.ts` module. Policy validation and runtime authorization therefore use one grammar and one 32-bit conversion implementation and cannot drift independently.

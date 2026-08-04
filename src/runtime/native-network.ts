@@ -19,6 +19,7 @@ import {
 	parseNativeEgressPolicy,
 	type StaticEgressRuleSnapshot,
 } from "../native-egress-policy.js";
+import { classifyEgressTargetHost, ipv4InCidr, parseStrictIpv4 } from "../native-ipv4.js";
 import type {
 	NativeNetworkClient,
 	NativeNetworkConnectInput,
@@ -1193,31 +1194,6 @@ function matchesDnsSuffix(host: string, suffix: string): boolean {
 	return host === suffix || host.endsWith(`.${suffix}`);
 }
 
-function parseIpv4(host: string): number | undefined {
-	// Leading-zero octets are rejected: resolvers interpret them as octal
-	// (inet_aton), so accepting them as decimal here would let a matcher
-	// decision diverge from the address the socket actually connects to.
-	const match = /^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})$/.exec(host);
-	if (!match) return undefined;
-	const octets = match.slice(1).map(Number);
-	if (octets.some((octet) => octet > 255)) return undefined;
-	return (
-		((octets[0] ?? 0) * 0x1000000 +
-			(octets[1] ?? 0) * 0x10000 +
-			(octets[2] ?? 0) * 0x100 +
-			(octets[3] ?? 0)) >>>
-		0
-	);
-}
-
-function ipv4InCidr(addr: number, cidr: string): boolean {
-	const separator = cidr.lastIndexOf("/");
-	const network = parseIpv4(cidr.slice(0, separator));
-	const prefix = Number(cidr.slice(separator + 1));
-	if (network === undefined || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
-	return prefix === 0 || addr >>> (32 - prefix) === network >>> (32 - prefix);
-}
-
 function matchesSourceHost(rule: DynamicEgressRuleSnapshot, host: string): boolean {
 	const hasSelector = rule.sourceHost !== undefined || rule.sourceHostSuffixes.length > 0;
 	if (!hasSelector) return false;
@@ -1254,11 +1230,15 @@ function matchesDynamicRuleSelectors(
 ): boolean {
 	const sourceHost = normalizeEgressHost(input.sourceHost);
 	const targetHost = normalizeEgressHost(input.host);
-	const targetIp = parseIpv4(targetHost);
-	const targetMatches =
-		targetIp !== undefined
-			? rule.targetIpv4Cidrs.some((cidr) => ipv4InCidr(targetIp, cidr))
-			: rule.targetHostSuffixes.some((suffix) => matchesDnsSuffix(targetHost, suffix));
+	const targetKind = classifyEgressTargetHost(targetHost);
+	let targetMatches = false;
+	if (targetKind === "ipv4") {
+		const targetIp = parseStrictIpv4(targetHost);
+		targetMatches =
+			targetIp !== undefined && rule.targetIpv4Cidrs.some((cidr) => ipv4InCidr(targetIp, cidr));
+	} else if (targetKind === "dns") {
+		targetMatches = rule.targetHostSuffixes.some((suffix) => matchesDnsSuffix(targetHost, suffix));
+	}
 	return (
 		matchesSourceHost(rule, sourceHost) &&
 		matchesPortSelectors(input.sourcePort, rule.sourcePorts, rule.sourcePortRanges) &&
@@ -1469,11 +1449,19 @@ export function createNativeEgressAuthorization(options: NativeNetworkClientOpti
 	const grantLocal = (input: NativeNetworkDynamicGrantOptions): NativeNetworkEgressGrant => {
 		assertValidGrantInput(input);
 		const ruleIndex = dynamicRules.findIndex((rule) => matchesDynamicRuleSelectors(rule, input));
-		if (ruleIndex < 0)
+		if (ruleIndex < 0) {
+			const sourceHost = normalizeEgressHost(input.sourceHost);
+			const sourceMatched = dynamicRules.some(
+				(rule) =>
+					matchesSourceHost(rule, sourceHost) &&
+					matchesPortSelectors(input.sourcePort, rule.sourcePorts, rule.sourcePortRanges),
+			);
+			const targetKind = classifyEgressTargetHost(normalizeEgressHost(input.host));
 			throw new NativeNetworkError(
-				`Native TCP egress grant is not declared for ${input.host}:${input.port} (${input.tls})`,
+				`Native TCP egress grant is not declared for source ${input.sourceHost}:${input.sourcePort} to target ${input.host}:${input.port} (${input.tls}); target kind: ${targetKind}; ${sourceMatched ? "source matched but target/port/TLS did not" : "no rule matched this source"}`,
 				"native_egress_not_declared",
 			);
+		}
 		const rule = dynamicRules[ruleIndex];
 		if (!rule) throw invalidGrant("Native TCP egress declaration is missing its matched rule");
 		if (input.ttlMs !== undefined && rule.ttlMs !== undefined && input.ttlMs > rule.ttlMs)
