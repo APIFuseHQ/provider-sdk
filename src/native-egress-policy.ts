@@ -5,7 +5,12 @@ import type {
 	NativeTcpPortRange,
 	NativeTcpTlsMode,
 } from "./types.js";
-import { canonicalizeEgressHost, parseIpv4Cidr } from "./native-ipv4.js";
+import {
+	canonicalizeEgressHost,
+	formatIpv6,
+	parseIpv4Cidr,
+	parseIpv6Cidr,
+} from "./native-address.js";
 
 type NativeNetworkDeclaration = NonNullable<NativeProviderConfig["network"]>;
 
@@ -24,10 +29,13 @@ const NATIVE_TCP_RULE_FIELD_RECORD = {
 const NATIVE_DYNAMIC_TCP_RULE_FIELD_RECORD = {
 	sourceHost: true,
 	sourceHostSuffixes: true,
+	sourceIpv4Cidrs: true,
+	sourceIpv6Cidrs: true,
 	sourcePorts: true,
 	sourcePortRanges: true,
 	targetHostSuffixes: true,
 	targetIpv4Cidrs: true,
+	targetIpv6Cidrs: true,
 	targetPorts: true,
 	targetPortRanges: true,
 	tls: true,
@@ -54,10 +62,13 @@ export type StaticEgressRuleSnapshot = {
 export type DynamicEgressRuleSnapshot = {
 	readonly sourceHost?: string;
 	readonly sourceHostSuffixes: readonly string[];
+	readonly sourceIpv4Cidrs: readonly string[];
+	readonly sourceIpv6Cidrs: readonly string[];
 	readonly sourcePorts: readonly number[];
 	readonly sourcePortRanges: readonly NativeTcpPortRange[];
 	readonly targetHostSuffixes: readonly string[];
 	readonly targetIpv4Cidrs: readonly string[];
+	readonly targetIpv6Cidrs: readonly string[];
 	readonly targetPorts: readonly number[];
 	readonly targetPortRanges: readonly NativeTcpPortRange[];
 	readonly tls: NativeTcpTlsMode;
@@ -162,6 +173,28 @@ function ipv4Cidrs(value: unknown, fieldPath: string): readonly string[] {
 	});
 }
 
+function ipv6Cidrs(value: unknown, fieldPath: string): readonly string[] {
+	const seen = new Set<string>();
+	return dataArray(value, fieldPath).map((value, index) => {
+		const cidrPath = `${fieldPath}[${index}]`;
+		if (typeof value !== "string") fail(`${cidrPath} must be an IPv6 CIDR in address/nn form`);
+		const parsed = parseIpv6Cidr(value);
+		if (!parsed.ok) {
+			if (parsed.reason === "non-canonical-network")
+				fail(`${cidrPath} must use the canonical network address with no host bits set`);
+			if (parsed.overlap === "ipv4-mapped")
+				fail(`${cidrPath} overlaps IPv4-mapped ::ffff:0:0/96 address space`);
+			if (parsed.overlap === "ipv4-compatible")
+				fail(`${cidrPath} overlaps IPv4-compatible ::/96 address space`);
+			fail(`${cidrPath} must be an IPv6 CIDR in address/nn form`);
+		}
+		const duplicateKey = `${formatIpv6(parsed.network)}/${parsed.prefix}`;
+		if (seen.has(duplicateKey)) fail(`${fieldPath} must not contain duplicate CIDRs`);
+		seen.add(duplicateKey);
+		return value;
+	});
+}
+
 function ranges(value: unknown, fieldPath: string): readonly NativeTcpPortRange[] {
 	return dataArray(value, fieldPath).map((value, index) => {
 		const rangePath = `${fieldPath}[${index}]`;
@@ -216,8 +249,23 @@ export function parseNativeEgressPolicy(value: unknown): NativeEgressPolicySnaps
 							rule.sourceHostSuffixes === undefined
 								? []
 								: hostSuffixes(rule.sourceHostSuffixes, `${fieldPath}.sourceHostSuffixes`);
-						if (sourceHost === undefined && sourceHostSuffixes.length === 0)
-							fail(`${fieldPath} must declare sourceHost or a non-empty sourceHostSuffixes list`);
+						const sourceIpv4Cidrs =
+							rule.sourceIpv4Cidrs === undefined
+								? []
+								: ipv4Cidrs(rule.sourceIpv4Cidrs, `${fieldPath}.sourceIpv4Cidrs`);
+						const sourceIpv6Cidrs =
+							rule.sourceIpv6Cidrs === undefined
+								? []
+								: ipv6Cidrs(rule.sourceIpv6Cidrs, `${fieldPath}.sourceIpv6Cidrs`);
+						if (
+							sourceHost === undefined &&
+							sourceHostSuffixes.length === 0 &&
+							sourceIpv4Cidrs.length === 0 &&
+							sourceIpv6Cidrs.length === 0
+						)
+							fail(
+								`${fieldPath} must declare sourceHost or a non-empty sourceHostSuffixes, sourceIpv4Cidrs, or sourceIpv6Cidrs list`,
+							);
 						const sourcePorts =
 							rule.sourcePorts === undefined
 								? []
@@ -236,9 +284,17 @@ export function parseNativeEgressPolicy(value: unknown): NativeEgressPolicySnaps
 							rule.targetIpv4Cidrs === undefined
 								? []
 								: ipv4Cidrs(rule.targetIpv4Cidrs, `${fieldPath}.targetIpv4Cidrs`);
-						if (targetHostSuffixes.length === 0 && targetIpv4Cidrs.length === 0)
+						const targetIpv6Cidrs =
+							rule.targetIpv6Cidrs === undefined
+								? []
+								: ipv6Cidrs(rule.targetIpv6Cidrs, `${fieldPath}.targetIpv6Cidrs`);
+						if (
+							targetHostSuffixes.length === 0 &&
+							targetIpv4Cidrs.length === 0 &&
+							targetIpv6Cidrs.length === 0
+						)
 							fail(
-								`${fieldPath} must declare a non-empty targetHostSuffixes or targetIpv4Cidrs list`,
+								`${fieldPath} must declare a non-empty targetHostSuffixes, targetIpv4Cidrs, or targetIpv6Cidrs list`,
 							);
 						const targetPorts =
 							rule.targetPorts === undefined
@@ -253,10 +309,13 @@ export function parseNativeEgressPolicy(value: unknown): NativeEgressPolicySnaps
 						return {
 							...(sourceHost === undefined ? {} : { sourceHost }),
 							sourceHostSuffixes,
+							sourceIpv4Cidrs,
+							sourceIpv6Cidrs,
 							sourcePorts,
 							sourcePortRanges,
 							targetHostSuffixes,
 							targetIpv4Cidrs,
+							targetIpv6Cidrs,
 							targetPorts,
 							targetPortRanges,
 							tls: tls(rule.tls, `${fieldPath}.tls`),

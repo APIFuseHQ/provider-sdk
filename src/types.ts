@@ -1319,9 +1319,10 @@ export interface NativeTcpEgressRule {
  * Bounded native TCP egress discovered through a declared bootstrap endpoint.
  * Host suffixes are exact DNS suffixes, not wildcard patterns.
  * Dynamic rules must declare at least one target host selector through
- * targetHostSuffixes and/or targetIpv4Cidrs. IPv4-literal grant targets match
- * only targetIpv4Cidrs, while DNS-name targets match only targetHostSuffixes.
- * CIDRs are exact IPv4 networks in a.b.c.d/nn form.
+ * targetHostSuffixes, targetIpv4Cidrs, and/or targetIpv6Cidrs. Literal grant
+ * sources and targets match only same-family selectors (except exact
+ * sourceHost); DNS names match only host/suffix selectors. IPv4-mapped and
+ * IPv4-compatible IPv6 literals are authorized only by IPv4 CIDRs.
  *
  * Dynamic rules are ordered. The first rule whose source, target, port, and TLS
  * selectors match exclusively owns the grant; its ttlMs and maxGrants bounds
@@ -1332,10 +1333,13 @@ export interface NativeTcpEgressRule {
 export interface NativeTcpDynamicEgressRule {
 	readonly sourceHost?: string;
 	readonly sourceHostSuffixes?: readonly string[];
+	readonly sourceIpv4Cidrs?: readonly string[];
+	readonly sourceIpv6Cidrs?: readonly string[];
 	readonly sourcePorts?: readonly number[];
 	readonly sourcePortRanges?: readonly NativeTcpPortRange[];
 	readonly targetHostSuffixes?: readonly string[];
 	readonly targetIpv4Cidrs?: readonly string[];
+	readonly targetIpv6Cidrs?: readonly string[];
 	readonly targetPorts?: readonly number[];
 	readonly targetPortRanges?: readonly NativeTcpPortRange[];
 	readonly tls: NativeTcpTlsMode;
