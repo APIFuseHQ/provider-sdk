@@ -130,11 +130,16 @@ function hasControlCharacter(value: string): boolean {
 	return false;
 }
 
+function hasReservedEgressHostDelimiter(value: string): boolean {
+	return ["/", "\\", "?", "#", "@", "[", "]", " "].some((delimiter) => value.includes(delimiter));
+}
+
 function host(value: unknown, fieldPath: string, suffix = false): string {
 	if (
 		typeof value !== "string" ||
 		!value.trim() ||
 		hasControlCharacter(value) ||
+		hasReservedEgressHostDelimiter(value) ||
 		/\s/.test(value) ||
 		value.includes("://")
 	)

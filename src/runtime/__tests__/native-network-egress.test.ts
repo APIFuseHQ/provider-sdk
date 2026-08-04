@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
-import { type Server, type Socket, createServer } from "node:net";
+import { createServer, type Server, type Socket } from "node:net";
 
 import {
 	classifyEgressTargetHost,
@@ -8,11 +8,11 @@ import {
 	parseStrictIpv4,
 } from "../../native-ipv4.js";
 import {
+	createNativeNetworkClient,
+	NATIVE_EGRESS_EXPIRED_EVIDENCE_LIMIT,
 	NativeEgressGrantExpiredError,
 	NativeEgressNotDeclaredError,
-	NATIVE_EGRESS_EXPIRED_EVIDENCE_LIMIT,
 	NativeNetworkError,
-	createNativeNetworkClient,
 } from "../native-network.js";
 
 type Fixture = {
@@ -266,6 +266,61 @@ describe("native egress enforcement", () => {
 		);
 	});
 
+	it("rejects reserved delimiters before grant or connect host canonicalization", async () => {
+		const client = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetHostSuffixes: ["kakao.com"],
+						targetPorts: [5223],
+						tls: "disabled",
+					},
+				],
+			},
+		});
+		const hosts = [
+			"kakao.com\\@127.0.0.1",
+			"kakao.com/@127.0.0.1",
+			"kakao.com#@127.0.0.1",
+			"kakao.com?@127.0.0.1",
+			"kakao.com/../evil.com",
+			"allowed.com@169.254.169.254",
+			"kakao.com:8080@evil.com",
+			"kakao.com[evil]",
+			"kakao.com]evil",
+			"kakao.com ",
+		];
+		for (const host of hosts) {
+			expectNativeCode(
+				() =>
+					client.grantTcpEgress({
+						sourceHost: "bootstrap.example",
+						sourcePort: 443,
+						host,
+						port: 5223,
+						tls: "disabled",
+					}),
+				"native_egress_grant_invalid",
+			);
+			expectNativeCode(
+				() =>
+					client.grantTcpEgress({
+						sourceHost: host,
+						sourcePort: 443,
+						host: "kakao.com",
+						port: 5223,
+						tls: "disabled",
+					}),
+				"native_egress_grant_invalid",
+			);
+			await expect(client.connectTcp({ host, port: 5223 })).rejects.toMatchObject({
+				code: "native_egress_input_invalid",
+			});
+		}
+	});
+
 	it("canonicalizes Unicode resolver spellings before suffix classification and grant storage", async () => {
 		const client = createNativeNetworkClient({
 			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
@@ -285,18 +340,16 @@ describe("native egress enforcement", () => {
 		for (const host of ["０177.0.0.1", "１２７.0.0.1", "２１３０７０６４３３", "127．0．0．1"]) {
 			try {
 				client.grantTcpEgress({
-						sourceHost: "bootstrap.example",
-						sourcePort: 443,
-						host,
-						port: 5223,
-						tls: "disabled",
-					});
+					sourceHost: "bootstrap.example",
+					sourcePort: 443,
+					host,
+					port: 5223,
+					tls: "disabled",
+				});
 				throw new Error(`Expected ${host} to be denied`);
 			} catch (error) {
 				expect(error).toMatchObject({ code: "native_egress_not_declared" });
-				expect((error as Error).message).toMatch(
-					/target kind: (?:ipv4|numeric-ambiguous)/,
-				);
+				expect((error as Error).message).toMatch(/target kind: (?:ipv4|numeric-ambiguous)/);
 			}
 		}
 
@@ -369,7 +422,7 @@ describe("native egress enforcement", () => {
 			});
 		expectNativeCode(() => grant("١٢٧.0.0.1"), "native_egress_grant_invalid");
 		expectNativeCode(() => grant("::1"), "native_egress_not_declared");
-		expectNativeCode(() => grant("[::1]"), "native_egress_not_declared");
+		expectNativeCode(() => grant("[::1]"), "native_egress_grant_invalid");
 	});
 
 	it("round-trips IDN grants across Unicode and punycode spellings", async () => {
@@ -436,6 +489,42 @@ describe("native egress enforcement", () => {
 		}
 	});
 
+	it("rejects reserved delimiters in every declared host selector", () => {
+		const baseDynamic = {
+			sourceHost: "bootstrap.example",
+			sourcePorts: [443],
+			targetHostSuffixes: ["kakao.com"],
+			targetPorts: [5223],
+			tls: "disabled" as const,
+		};
+		for (const delimiterHost of [
+			"allowed.com/path",
+			"allowed.com\\path",
+			"allowed.com?query",
+			"allowed.com#fragment",
+			"allowed.com@127.0.0.1",
+			"allowed.com[part",
+			"allowed.com]part",
+			"allowed.com ",
+		]) {
+			for (const egress of [
+				{ tcp: [{ host: delimiterHost, ports: [443], tls: "disabled" as const }] },
+				{ dynamicTcp: [{ ...baseDynamic, sourceHost: delimiterHost }] },
+				{
+					dynamicTcp: [
+						{ ...baseDynamic, sourceHost: undefined, sourceHostSuffixes: [delimiterHost] },
+					],
+				},
+				{ dynamicTcp: [{ ...baseDynamic, targetHostSuffixes: [delimiterHost] }] },
+			]) {
+				expectNativeCode(
+					() => createNativeNetworkClient({ egress }),
+					"native_egress_policy_invalid",
+				);
+			}
+		}
+	});
+
 	it("rejects malformed, non-canonical, and duplicate IPv4 CIDRs with distinct messages", () => {
 		const rule = {
 			sourceHost: "bootstrap.example",
@@ -448,6 +537,8 @@ describe("native egress enforcement", () => {
 			"211.183.208.0/",
 			"211.183.208.0/+20",
 			"211.183.208.0 /20",
+			"211.183.208.0/ 20",
+			"211.183.208.0/20 ",
 			"211.183.208.0/33",
 			"256.183.208.0/20",
 			"011.183.208.0/20",
@@ -607,7 +698,7 @@ describe("native egress enforcement", () => {
 		]) {
 			expectNativeCode(
 				() => anyIpv4.grantTcpEgress({ ...grant, host }),
-				"native_egress_not_declared",
+				host === "[::1]" ? "native_egress_grant_invalid" : "native_egress_not_declared",
 			);
 		}
 	});
@@ -675,7 +766,7 @@ describe("native egress enforcement", () => {
 						port: 5223,
 						tls: "disabled",
 					}),
-				"native_egress_not_declared",
+				host === "[::1]" ? "native_egress_grant_invalid" : "native_egress_not_declared",
 			);
 		}
 	});
@@ -721,26 +812,37 @@ describe("native egress enforcement", () => {
 				],
 			},
 		});
-		for (const [sourceHost, host, details] of [
+		for (const [sourceHost, sourcePort, host, details, absentDimension] of [
 			[
 				"wrong.example",
+				443,
 				"node.session.example",
-				["target kind: dns", "no rule matched this source"],
+				["target kind: dns", "source-matching rule indices: []", "rule 0: source-host"],
+				"source-port",
 			],
 			[
 				"bootstrap.example",
+				444,
+				"node.session.example",
+				["target kind: dns", "source-matching rule indices: []", "rule 0: source-port"],
+				"source-host",
+			],
+			[
+				"bootstrap.example",
+				443,
 				"0177.0.0.1",
 				[
 					"target kind: numeric-ambiguous",
 					"source-matching rule indices: [0]",
-					"failed selector dimensions: target-host",
+					"failed selector dimensions by rule: rule 0: target-host",
 				],
+				"source-host",
 			],
 		] as const) {
 			try {
 				client.grantTcpEgress({
 					sourceHost,
-					sourcePort: 443,
+					sourcePort,
 					host,
 					port: 5223,
 					tls: "disabled",
@@ -749,43 +851,48 @@ describe("native egress enforcement", () => {
 			} catch (error) {
 				expect(error).toBeInstanceOf(NativeNetworkError);
 				expect(error).toMatchObject({ code: "native_egress_not_declared" });
-				expect((error as Error).message).toContain(`source ${sourceHost}:443`);
+				const message = (error as Error).message;
+				expect(message).toContain(`source ${sourceHost}:${sourcePort}`);
 				for (const detail of details) expect((error as Error).message).toContain(detail);
+				expect(message).not.toContain(`rule 0: ${absentDimension}`);
 			}
 		}
 	});
 
-	it("names each failed dynamic selector dimension without exposing declarations", () => {
-		const rule = {
+	it("reports target selector failures along each source-matching rule path", () => {
+		const sourceAndTarget = {
 			sourceHost: "bootstrap.example",
 			sourcePorts: [443],
 			targetHostSuffixes: ["session.example"],
-			targetPorts: [5223],
-			tls: "disabled" as const,
 		};
 		const client = createNativeNetworkClient({
-			egress: { dynamicTcp: [rule, { ...rule }] },
+			egress: {
+				dynamicTcp: [
+					{ ...sourceAndTarget, targetPorts: [5224], tls: "disabled" },
+					{ ...sourceAndTarget, targetPorts: [5223], tls: "required" },
+				],
+			},
 		});
-		const baseline = {
-			sourceHost: "bootstrap.example",
-			sourcePort: 443,
-			host: "node.session.example",
-			port: 5223,
-			tls: "disabled" as const,
-		};
-		for (const [input, dimension] of [
-			[{ ...baseline, host: "wrong.example" }, "target-host"],
-			[{ ...baseline, port: 5224 }, "target-port"],
-			[{ ...baseline, tls: "required" as const }, "tls"],
-		] as const) {
-			try {
-				client.grantTcpEgress(input);
-				throw new Error(`Expected ${dimension} mismatch to be denied`);
-			} catch (error) {
-				expect(error).toMatchObject({ code: "native_egress_not_declared" });
-				expect((error as Error).message).toContain("source-matching rule indices: [0, 1]");
-				expect((error as Error).message).toContain(`failed selector dimensions: ${dimension}`);
-			}
+		try {
+			client.grantTcpEgress({
+				sourceHost: "bootstrap.example",
+				sourcePort: 443,
+				host: "node.session.example",
+				port: 5223,
+				tls: "disabled",
+			});
+			throw new Error("Expected overlapping rules to deny the grant");
+		} catch (error) {
+			expect(error).toMatchObject({ code: "native_egress_not_declared" });
+			const message = (error as Error).message;
+			expect(message).toContain("source-matching rule indices: [0, 1]");
+			expect(message).toContain(
+				"failed selector dimensions by rule: rule 0: target-port; rule 1: tls",
+			);
+			expect(message).not.toContain("rule 0: tls");
+			expect(message).not.toContain("rule 1: target-port");
+			expect(message).not.toContain("5224");
+			expect(message).not.toContain("required");
 		}
 	});
 
@@ -813,10 +920,14 @@ describe("native egress enforcement", () => {
 			tls: "allowed" as const,
 		};
 		client.grantTcpEgress(baseline);
-		await expect(client.connectTcp({ host: baseline.host, port: baseline.port })).rejects.toMatchObject({
+		await expect(
+			client.connectTcp({ host: baseline.host, port: baseline.port }),
+		).rejects.toMatchObject({
 			code: "PROXY_REQUIRED",
 		});
-		await expect(client.connectTls({ host: baseline.host, port: baseline.port })).rejects.toMatchObject({
+		await expect(
+			client.connectTls({ host: baseline.host, port: baseline.port }),
+		).rejects.toMatchObject({
 			code: "PROXY_REQUIRED",
 		});
 		for (const input of [
@@ -826,7 +937,11 @@ describe("native egress enforcement", () => {
 		]) {
 			expectNativeCode(() => client.grantTcpEgress(input), "native_egress_not_declared");
 		}
-		const tlsOnly = client.grantTcpEgress({ ...baseline, host: "tls.session.example", tls: "required" });
+		const tlsOnly = client.grantTcpEgress({
+			...baseline,
+			host: "tls.session.example",
+			tls: "required",
+		});
 		await expect(
 			client.connectTcp({ host: "tls.session.example", port: baseline.port }),
 		).rejects.toMatchObject({ code: "native_egress_not_declared", tls: "disabled" });
@@ -1082,13 +1197,12 @@ describe("native egress enforcement", () => {
 			() => ({}) as never,
 		]) {
 			const client = createNativeNetworkClient({ egress: declaration, grantTcpEgress });
-			expectNativeCode(
-				() => client.grantTcpEgress(input),
-				"native_egress_authorization_failed",
+			expectNativeCode(() => client.grantTcpEgress(input), "native_egress_authorization_failed");
+			await expect(client.connectTcp({ host: input.host, port: input.port })).rejects.toMatchObject(
+				{
+					code: "native_egress_not_declared",
+				},
 			);
-			await expect(client.connectTcp({ host: input.host, port: input.port })).rejects.toMatchObject({
-				code: "native_egress_not_declared",
-			});
 		}
 	});
 
