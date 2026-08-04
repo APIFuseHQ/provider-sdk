@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { createServer as createTlsServer } from "node:tls";
 
 import { ProxyResolutionError } from "../../config/loader.js";
+import { formatIpv6 } from "../../native-address.js";
 import {
 	createNativeNetworkClient,
 	type NativeGatewayProxySynthesizer,
@@ -144,6 +145,10 @@ async function startSocks5Server(
 					if (buffered.length < offset + length + 2) return;
 					host = buffered.subarray(offset, offset + length).toString("utf8");
 					offset += length;
+				} else if (addressType === 4) {
+					if (buffered.length < 22) return;
+					host = formatIpv6(buffered.subarray(offset, offset + 16));
+					offset += 16;
 				} else {
 					client.destroy(new Error("Unsupported SOCKS test address type"));
 					return;
@@ -177,7 +182,7 @@ async function startSocks5Server(
 	return Object.assign(await listen(server), { destinations });
 }
 
-async function startHttpConnectServer(): Promise<
+async function startHttpConnectServer(options: { upstreamHost?: string } = {}): Promise<
 	ListeningFixture & {
 		destinations: Array<{ host: string; port: number }>;
 		requests: string[];
@@ -206,7 +211,7 @@ async function startHttpConnectServer(): Promise<
 			destinations.push({ host, port });
 			const upstream = new Socket();
 			upstream.once("error", () => client.end("HTTP/1.1 502 Bad Gateway\r\n\r\n"));
-			upstream.connect(port, host, () => {
+			upstream.connect(port, options.upstreamHost ?? host, () => {
 				client.write("HTTP/1.1 200 Connection Established\r\n\r\n");
 				const remaining = buffered.subarray(headerEnd + 4);
 				if (remaining.length > 0) upstream.write(remaining);
@@ -384,6 +389,88 @@ describe("native network runtime", () => {
 		expect(httpProxy.requests[0]).toContain(`\r\nHost: ${authority}\r\n`);
 		expect(httpProxy.requests[0]).not.toContain(suppliedHost);
 		await httpConnection.close();
+	});
+
+	it("sends canonical IPv6 unbracketed to SOCKS5 and bracketed to HTTP CONNECT", async () => {
+		const destination = await listen(
+			createServer((socket) => socket.on("data", (chunk) => socket.write(chunk))),
+		);
+		const suppliedHost = "2404:4600:0009:02DC:0000:0000:0000:0228";
+		const canonicalHost = "2404:4600:9:2dc::228";
+		const egress = {
+			tcp: [{ host: canonicalHost, ports: [destination.port], tls: "disabled" as const }],
+		};
+
+		const socksProxy = await startSocks5Server({ upstreamHost: destination.host });
+		const socks = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localSynthesizer(socksProxy)],
+			egress,
+		});
+		const socksConnection = await socks.connectTcp({
+			host: suppliedHost,
+			port: destination.port,
+			timeoutMs: 1_000,
+		});
+		expect(socksProxy.destinations).toEqual([{ host: canonicalHost, port: destination.port }]);
+		await socksConnection.close();
+
+		const httpProxy = await startHttpConnectServer({ upstreamHost: destination.host });
+		const http = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localHttpSynthesizer(httpProxy)],
+			egress,
+		});
+		const httpConnection = await http.connectTcp({
+			host: suppliedHost,
+			port: destination.port,
+			timeoutMs: 1_000,
+		});
+		const authority = `[${canonicalHost}]:${destination.port}`;
+		expect(httpProxy.requests).toHaveLength(1);
+		expect(httpProxy.requests[0]).toContain(`CONNECT ${authority} HTTP/1.1`);
+		expect(httpProxy.requests[0]).toContain(`\r\nHost: ${authority}\r\n`);
+		expect(httpProxy.requests[0]).not.toContain(suppliedHost);
+		await httpConnection.close();
+	});
+
+	it("round-trips IPv6 grants across equivalent spellings", async () => {
+		const destination = await listen(
+			createServer((socket) => socket.on("data", (chunk) => socket.write(chunk))),
+		);
+		const proxy = await startSocks5Server({ upstreamHost: destination.host });
+		const client = createNativeNetworkClient({
+			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
+			gatewaySynthesizers: [localSynthesizer(proxy)],
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetIpv6Cidrs: ["2404:4600:9:2dc::/64"],
+						targetPorts: [destination.port],
+						tls: "disabled",
+					},
+				],
+			},
+		});
+		client.grantTcpEgress({
+			sourceHost: "bootstrap.example",
+			sourcePort: 443,
+			host: "2404:4600:0009:02dc:0000:0000:0000:0228",
+			port: destination.port,
+			tls: "disabled",
+		});
+		const connection = await client.connectTcp({
+			host: "2404:4600:9:2DC::0.0.2.40",
+			port: destination.port,
+			timeoutMs: 1_000,
+		});
+		expect(proxy.destinations).toEqual([{ host: "2404:4600:9:2dc::228", port: destination.port }]);
+		await connection.close();
+		await expect(
+			client.connectTcp({ host: "2404:4600:9:2dc::229", port: destination.port }),
+		).rejects.toMatchObject({ code: "native_egress_not_declared" });
 	});
 
 	it("round-trips Unicode and punycode grant spellings through the canonical SOCKS sink", async () => {
