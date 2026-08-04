@@ -164,7 +164,12 @@ function ipv4Cidrs(value: unknown, fieldPath: string): readonly string[] {
 	return dataArray(value, fieldPath).map((value, index) => {
 		const cidrPath = `${fieldPath}[${index}]`;
 		if (typeof value !== "string") fail(`${cidrPath} must be an IPv4 CIDR in a.b.c.d/nn form`);
-		const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(value);
+		// Leading-zero octets are rejected to match the runtime matcher: octal
+		// interpretation by resolvers must never diverge from this validation.
+		const match =
+			/^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\/(0|[1-9]\d?)$/.exec(
+				value,
+			);
 		if (!match) fail(`${cidrPath} must be an IPv4 CIDR in a.b.c.d/nn form`);
 		const octets = match.slice(1, 5).map(Number);
 		const prefix = Number(match[5]);

@@ -224,6 +224,8 @@ describe("native egress enforcement", () => {
 			"211.183.208.0/33",
 			"256.183.208.0/20",
 			"121.53.93.47/20",
+			"011.183.208.0/20",
+			"211.183.208.0/07",
 		]) {
 			try {
 				createNativeNetworkClient({
@@ -335,6 +337,12 @@ describe("native egress enforcement", () => {
 			},
 		});
 		anyIpv4.grantTcpEgress({ ...grant, host: "203.0.113.7" }).revoke();
+		// Octal-looking literals are not IPv4 to this matcher and must not be
+		// granted as DNS names either.
+		expectNativeCode(
+			() => anyIpv4.grantTcpEgress({ ...grant, host: "0211.183.211.10" }),
+			"native_egress_not_declared",
+		);
 	});
 
 	it("enforces dynamic source suffix, source port, target range, and TLS selectors", async () => {

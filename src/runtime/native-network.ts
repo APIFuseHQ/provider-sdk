@@ -1194,7 +1194,10 @@ function matchesDnsSuffix(host: string, suffix: string): boolean {
 }
 
 function parseIpv4(host: string): number | undefined {
-	const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+	// Leading-zero octets are rejected: resolvers interpret them as octal
+	// (inet_aton), so accepting them as decimal here would let a matcher
+	// decision diverge from the address the socket actually connects to.
+	const match = /^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})$/.exec(host);
 	if (!match) return undefined;
 	const octets = match.slice(1).map(Number);
 	if (octets.some((octet) => octet > 255)) return undefined;
