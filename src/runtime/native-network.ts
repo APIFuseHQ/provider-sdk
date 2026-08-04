@@ -21,11 +21,14 @@ import {
 } from "../native-egress-policy.js";
 import {
 	canonicalizeEgressHost,
-	classifyEgressTargetHost,
+	classifyEgressHost,
 	type EgressHostCanonicalizationFailure,
+	embeddedIpv4FromIpv6,
 	ipv4InCidr,
+	ipv6InCidr,
+	parseIpv6,
 	parseStrictIpv4,
-} from "../native-ipv4.js";
+} from "../native-address.js";
 import type {
 	NativeNetworkClient,
 	NativeNetworkConnectInput,
@@ -1209,13 +1212,46 @@ function matchesDnsSuffix(host: string, suffix: string): boolean {
 	return host === suffix || host.endsWith(`.${suffix}`);
 }
 
-function matchesSourceHost(rule: DynamicEgressRuleSnapshot, host: string): boolean {
-	const hasSelector = rule.sourceHost !== undefined || rule.sourceHostSuffixes.length > 0;
+/** Internal validator-independent source selector matcher. */
+export function matchesSourceHost(rule: DynamicEgressRuleSnapshot, host: string): boolean {
+	const kind = classifyEgressHost(host);
+	if (kind === "numeric-ambiguous") return false;
+	const hasSelector =
+		rule.sourceHost !== undefined ||
+		rule.sourceHostSuffixes.length > 0 ||
+		rule.sourceIpv4Cidrs.length > 0 ||
+		rule.sourceIpv6Cidrs.length > 0;
 	if (!hasSelector) return false;
-	return (
-		host === rule.sourceHost ||
-		rule.sourceHostSuffixes.some((suffix) => matchesDnsSuffix(host, suffix))
+	if (host === rule.sourceHost) return true;
+	return matchesHostFamilySelectors(
+		host,
+		rule.sourceHostSuffixes,
+		rule.sourceIpv4Cidrs,
+		rule.sourceIpv6Cidrs,
 	);
+}
+
+function matchesHostFamilySelectors(
+	host: string,
+	hostSuffixes: readonly string[],
+	ipv4Cidrs: readonly string[],
+	ipv6Cidrs: readonly string[],
+): boolean {
+	const kind = classifyEgressHost(host);
+	if (kind === "ipv4") {
+		const address = parseStrictIpv4(host);
+		return address !== undefined && ipv4Cidrs.some((cidr) => ipv4InCidr(address, cidr));
+	}
+	if (kind === "ipv4-mapped-ipv6") {
+		const address = parseIpv6(host);
+		const embedded = address && embeddedIpv4FromIpv6(address);
+		return embedded !== undefined && ipv4Cidrs.some((cidr) => ipv4InCidr(embedded, cidr));
+	}
+	if (kind === "ipv6") {
+		const address = parseIpv6(host);
+		return address !== undefined && ipv6Cidrs.some((cidr) => ipv6InCidr(address, cidr));
+	}
+	return kind === "dns" && hostSuffixes.some((suffix) => matchesDnsSuffix(host, suffix));
 }
 
 function matchesPortSelectors(
@@ -1253,16 +1289,11 @@ function matchesDynamicRuleSelectors(
 }
 
 function matchesDynamicTargetHost(rule: DynamicEgressRuleSnapshot, targetHost: string): boolean {
-	const targetKind = classifyEgressTargetHost(targetHost);
-	if (targetKind === "ipv4") {
-		const targetIp = parseStrictIpv4(targetHost);
-		return (
-			targetIp !== undefined && rule.targetIpv4Cidrs.some((cidr) => ipv4InCidr(targetIp, cidr))
-		);
-	}
-	return (
-		targetKind === "dns" &&
-		rule.targetHostSuffixes.some((suffix) => matchesDnsSuffix(targetHost, suffix))
+	return matchesHostFamilySelectors(
+		targetHost,
+		rule.targetHostSuffixes,
+		rule.targetIpv4Cidrs,
+		rule.targetIpv6Cidrs,
 	);
 }
 
@@ -1487,7 +1518,7 @@ export function createNativeEgressAuthorization(options: NativeNetworkClientOpti
 					? [index]
 					: [],
 			);
-			const targetKind = classifyEgressTargetHost(diagnosticTargetHost);
+			const targetKind = classifyEgressHost(diagnosticTargetHost);
 			let selectorDetails: string;
 			if (sourceMatchingRuleIndices.length > 0) {
 				const failedByRule: string[] = [];
