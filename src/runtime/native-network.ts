@@ -22,6 +22,7 @@ import {
 import {
 	canonicalizeEgressHost,
 	classifyEgressTargetHost,
+	type EgressHostCanonicalizationFailure,
 	ipv4InCidr,
 	parseStrictIpv4,
 } from "../native-ipv4.js";
@@ -86,6 +87,11 @@ export class NativeNetworkError extends TransportError {
 	}
 }
 
+function safeDiagnosticEgressHost(value: unknown): string {
+	const canonical = canonicalizeEgressHost(value);
+	return canonical.ok ? canonical.host : `<invalid-host:${canonical.reason}>`;
+}
+
 export class NativeProxyExpiredError extends NativeNetworkError {
 	constructor(readonly expiresAt: string) {
 		super("Native connection closed at sticky proxy expiry", "native_proxy_expired");
@@ -95,15 +101,19 @@ export class NativeProxyExpiredError extends NativeNetworkError {
 
 /** Raised before transport setup when a native destination is not authorized. */
 export class NativeEgressNotDeclaredError extends NativeNetworkError {
+	readonly host: string;
+
 	constructor(
-		readonly host: string,
+		host: string,
 		readonly port: number,
 		readonly tls: "required" | "disabled",
 	) {
+		const diagnosticHost = safeDiagnosticEgressHost(host);
 		super(
-			`Native ${tls === "required" ? "TLS" : "TCP"} egress is not declared for ${host}:${port}`,
+			`Native ${tls === "required" ? "TLS" : "TCP"} egress is not declared for ${diagnosticHost}:${port}`,
 			"native_egress_not_declared",
 		);
+		this.host = diagnosticHost;
 		this.name = "NativeEgressNotDeclaredError";
 	}
 }
@@ -113,16 +123,20 @@ export class NativeEgressNotDeclaredError extends NativeNetworkError {
  * its expiry remains in the client's bounded recent-expiry evidence window.
  */
 export class NativeEgressGrantExpiredError extends NativeNetworkError {
+	readonly host: string;
+
 	constructor(
-		readonly host: string,
+		host: string,
 		readonly port: number,
 		readonly tls: "required" | "disabled",
 		readonly expiresAt: string,
 	) {
+		const diagnosticHost = safeDiagnosticEgressHost(host);
 		super(
-			`Native ${tls === "required" ? "TLS" : "TCP"} egress grant expired for ${host}:${port}`,
+			`Native ${tls === "required" ? "TLS" : "TCP"} egress grant expired for ${diagnosticHost}:${port}`,
 			"native_egress_grant_expired",
 		);
+		this.host = diagnosticHost;
 		this.name = "NativeEgressGrantExpiredError";
 	}
 }
@@ -1283,40 +1297,58 @@ function assertValidGrantInput(input: NativeNetworkDynamicGrantOptions): void {
 		throw invalidGrant("Native TCP egress grant ttlMs must be a positive integer");
 }
 
+type NativeConnectInputRejectionReason =
+	| EgressHostCanonicalizationFailure
+	| "port-range"
+	| "inspection-failure";
+
+function invalidNativeConnectInput(
+	field: keyof NativeNetworkConnectInput,
+	reason: NativeConnectInputRejectionReason,
+): NativeNetworkError {
+	return new NativeNetworkError(
+		`Native connection input rejected: field=${field}; reason=${reason}`,
+		"native_egress_input_invalid",
+	);
+}
+
+function inspectNativeConnectInputField<K extends keyof NativeNetworkConnectInput>(
+	input: NativeNetworkConnectInput,
+	field: K,
+): NativeNetworkConnectInput[K] {
+	try {
+		return input[field];
+	} catch {
+		throw invalidNativeConnectInput(field, "inspection-failure");
+	}
+}
+
 /** Internal canonical snapshot shared by production and SDK transport test doubles. */
 export function snapshotNativeConnectInput(
 	input: NativeNetworkConnectInput,
 ): NativeNetworkConnectInput {
-	try {
-		const host = input.host;
-		const port = input.port;
-		const serverName = input.serverName;
-		const rejectUnauthorized = input.rejectUnauthorized;
-		const idleTimeoutMs = input.idleTimeoutMs;
-		const timeoutMs = input.timeoutMs;
-		const signal = input.signal;
-		const affinityKey = input.affinityKey;
-		const canonicalHost = canonicalizeEgressHost(host);
-		if (!canonicalHost.ok) throw new TypeError("invalid native connection host");
-		const snapshot: NativeNetworkConnectInput = {
-			host: canonicalHost.host,
-			port,
-			...(serverName === undefined ? {} : { serverName }),
-			...(rejectUnauthorized === undefined ? {} : { rejectUnauthorized }),
-			...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),
-			...(timeoutMs === undefined ? {} : { timeoutMs }),
-			...(signal === undefined ? {} : { signal }),
-			...(affinityKey === undefined ? {} : { affinityKey }),
-		};
-		if (!Number.isInteger(snapshot.port) || snapshot.port < 1 || snapshot.port > 65_535)
-			throw new TypeError("invalid native connection target");
-		return snapshot;
-	} catch {
-		throw new NativeNetworkError(
-			"Native connection input could not be inspected safely",
-			"native_egress_input_invalid",
-		);
-	}
+	const host = inspectNativeConnectInputField(input, "host");
+	const canonicalHost = canonicalizeEgressHost(host);
+	if (!canonicalHost.ok) throw invalidNativeConnectInput("host", canonicalHost.reason);
+	const port = inspectNativeConnectInputField(input, "port");
+	if (!Number.isInteger(port) || port < 1 || port > 65_535)
+		throw invalidNativeConnectInput("port", "port-range");
+	const serverName = inspectNativeConnectInputField(input, "serverName");
+	const rejectUnauthorized = inspectNativeConnectInputField(input, "rejectUnauthorized");
+	const idleTimeoutMs = inspectNativeConnectInputField(input, "idleTimeoutMs");
+	const timeoutMs = inspectNativeConnectInputField(input, "timeoutMs");
+	const signal = inspectNativeConnectInputField(input, "signal");
+	const affinityKey = inspectNativeConnectInputField(input, "affinityKey");
+	return {
+		host: canonicalHost.host,
+		port,
+		...(serverName === undefined ? {} : { serverName }),
+		...(rejectUnauthorized === undefined ? {} : { rejectUnauthorized }),
+		...(idleTimeoutMs === undefined ? {} : { idleTimeoutMs }),
+		...(timeoutMs === undefined ? {} : { timeoutMs }),
+		...(signal === undefined ? {} : { signal }),
+		...(affinityKey === undefined ? {} : { affinityKey }),
+	};
 }
 
 /** Internal canonical snapshot shared by production and SDK transport test doubles. */
@@ -1447,13 +1479,15 @@ export function createNativeEgressAuthorization(options: NativeNetworkClientOpti
 		assertValidGrantInput(input);
 		const ruleIndex = dynamicRules.findIndex((rule) => matchesDynamicRuleSelectors(rule, input));
 		if (ruleIndex < 0) {
+			const diagnosticSourceHost = safeDiagnosticEgressHost(input.sourceHost);
+			const diagnosticTargetHost = safeDiagnosticEgressHost(input.host);
 			const sourceMatchingRuleIndices = dynamicRules.flatMap((rule, index) =>
 				matchesSourceHost(rule, input.sourceHost) &&
 				matchesPortSelectors(input.sourcePort, rule.sourcePorts, rule.sourcePortRanges)
 					? [index]
 					: [],
 			);
-			const targetKind = classifyEgressTargetHost(input.host);
+			const targetKind = classifyEgressTargetHost(diagnosticTargetHost);
 			let selectorDetails: string;
 			if (sourceMatchingRuleIndices.length > 0) {
 				const failedByRule: string[] = [];
@@ -1479,7 +1513,7 @@ export function createNativeEgressAuthorization(options: NativeNetworkClientOpti
 				selectorDetails = `source-matching rule indices: []; failed selector dimensions by rule: ${failedByRule.join("; ")}`;
 			}
 			throw new NativeNetworkError(
-				`Native TCP egress grant is not declared for source ${input.sourceHost}:${input.sourcePort} to target ${input.host}:${input.port} (${input.tls}); target kind: ${targetKind}; ${selectorDetails}`,
+				`Native TCP egress grant is not declared for source ${diagnosticSourceHost}:${input.sourcePort} to target ${diagnosticTargetHost}:${input.port} (${input.tls}); target kind: ${targetKind}; ${selectorDetails}`,
 				"native_egress_not_declared",
 			);
 		}

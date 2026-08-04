@@ -1055,6 +1055,17 @@ describe("native egress enforcement", () => {
 		}
 	});
 
+	it("canonicalizes Unicode hosts before including them in denial diagnostics", async () => {
+		const rawHost = "차단.example";
+		const client = createNativeNetworkClient({ egress: {} });
+		const error = await client
+			.connectTcp({ host: rawHost, port: 443 })
+			.catch((error: unknown) => error);
+		expect(error).toBeInstanceOf(NativeEgressNotDeclaredError);
+		expect((error as Error).message).not.toContain(rawHost);
+		expect((error as Error).message).toContain("xn--6j1bv29b.example:443");
+	});
+
 	it("reports target selector failures along each source-matching rule path", () => {
 		const sourceAndTarget = {
 			sourceHost: "bootstrap.example",
@@ -1367,6 +1378,39 @@ describe("native egress enforcement", () => {
 		});
 	});
 
+	it("passes canonical source and target hosts to the deployment grant delegate", () => {
+		let delegatedInput: unknown;
+		const client = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetHostSuffixes: ["kakao.com"],
+						targetPorts: [5223],
+						tls: "disabled",
+					},
+				],
+			},
+			grantTcpEgress: (input) => {
+				delegatedInput = input;
+				return { revoke() {} };
+			},
+		});
+
+		client.grantTcpEgress({
+			sourceHost: "BOOTSTRAP.EXAMPLE。",
+			sourcePort: 443,
+			host: "Node.KAKAO.COM。",
+			port: 5223,
+			tls: "disabled",
+		});
+		expect(delegatedInput).toMatchObject({
+			sourceHost: "bootstrap.example",
+			host: "node.kakao.com",
+		});
+	});
+
 	it("rolls back local authorization when the deployment delegate fails", async () => {
 		const declaration = {
 			dynamicTcp: [
@@ -1440,5 +1484,34 @@ describe("native egress enforcement", () => {
 				),
 			"native_egress_input_invalid",
 		);
+	});
+
+	it("reports safe field-specific native connect input rejection reasons", () => {
+		const cases = [
+			[{ host: "%41.kakao.com", port: 443 }, "host", "reserved-delimiter"],
+			[{ host: "node\u200ekakao.com", port: 443 }, "host", "control-character"],
+			[{ host: "...", port: 443 }, "host", "canonicalization-empty"],
+			[{ host: "kakao.com", port: 0 }, "port", "port-range"],
+		] as const;
+		for (const [input, field, reason] of cases) {
+			const error = captureNativeError(() => snapshotNativeConnectInput(input));
+			expect(error.code).toBe("native_egress_input_invalid");
+			expect(error.message).toContain(`field=${field}`);
+			expect(error.message).toContain(`reason=${reason}`);
+			expect(error.message).not.toContain(input.host);
+		}
+
+		for (const field of ["host", "port"] as const) {
+			const input = Object.defineProperty({ host: "kakao.com", port: 443 }, field, {
+				get: () => {
+					throw new Error("raw getter failure");
+				},
+			}) as never;
+			const error = captureNativeError(() => snapshotNativeConnectInput(input));
+			expect(error.code).toBe("native_egress_input_invalid");
+			expect(error.message).toContain(`field=${field}`);
+			expect(error.message).toContain("reason=inspection-failure");
+			expect(error.message).not.toContain("raw getter failure");
+		}
 	});
 });

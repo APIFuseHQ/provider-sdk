@@ -27,6 +27,7 @@ This keeps address-family authorization explicit. IPv6 can be added later under 
 ## Scope of behavior changes beyond the CIDR selector
 
 - Host canonicalization applies to static rules, source-host selectors, and every declared policy host, not only dynamic target hosts. Authorization and dialing must agree at one choke point; normalizing only one flow can create an authorize/dial divergence. Unicode and punycode spellings are consequently interchangeable, while a declaration that canonicalizes to an empty host is rejected.
+- Deployment `grantTcpEgress` delegates receive canonical `sourceHost` and `host` values. Delegates must authorize the same host spelling that the runtime stores and ultimately dials; forwarding the caller's raw spelling would recreate a decision/dial split.
 - Resolver-numeric target forms, including `127.1`, `2130706433`, `0x7f.0.0.1`, leading-zero octets, and IPv6 literals, no longer match DNS-suffix rules. The matcher must not authorize a spelling that the resolver turns into an unauthorized numeric address.
 - The `native_egress_not_declared` message now includes the source endpoint, target classification, source-matching rule indices, and failed selector dimensions per rule. The error class and code string are unchanged; only the human-readable diagnostic is richer.
 
