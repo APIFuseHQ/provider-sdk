@@ -209,6 +209,134 @@ describe("native egress enforcement", () => {
 		);
 	});
 
+	it("rejects malformed, non-canonical, and duplicate IPv4 CIDR selectors", () => {
+		const rule = {
+			sourceHost: "bootstrap.example",
+			sourcePorts: [443],
+			targetPorts: [5223],
+			tls: "disabled" as const,
+		};
+		for (const cidr of [
+			"211.183.211.10",
+			"211.183.208.0/",
+			"211.183.208.0/+20",
+			"211.183.208.0 /20",
+			"211.183.208.0/33",
+			"256.183.208.0/20",
+			"121.53.93.47/20",
+		]) {
+			try {
+				createNativeNetworkClient({
+					egress: { dynamicTcp: [{ ...rule, targetIpv4Cidrs: [cidr] }] },
+				});
+				throw new Error(`Expected ${cidr} to be rejected`);
+			} catch (error) {
+				expect(error).toBeInstanceOf(NativeNetworkError);
+				expect(error).toMatchObject({ code: "native_egress_policy_invalid" });
+				expect((error as Error).message).toContain(
+					"native.network.dynamicTcp[0].targetIpv4Cidrs[0]",
+				);
+			}
+		}
+		expectNativeCode(
+			() =>
+				createNativeNetworkClient({
+					egress: {
+						dynamicTcp: [
+							{
+								...rule,
+								targetIpv4Cidrs: ["211.183.208.0/20", "211.183.208.0/20"],
+							},
+						],
+					},
+				}),
+			"native_egress_policy_invalid",
+		);
+		expectNativeCode(
+			() =>
+				createNativeNetworkClient({
+					egress: {
+						dynamicTcp: [{ ...rule, targetIpv4Cidrs: [211_183_208_000] }],
+					} as never,
+				}),
+			"native_egress_policy_invalid",
+		);
+	});
+
+	it("accepts CIDR-only rules and rejects rules without a target selector", () => {
+		const rule = {
+			sourceHost: "bootstrap.example",
+			sourcePorts: [443],
+			targetPorts: [5223],
+			tls: "disabled" as const,
+		};
+		expect(() =>
+			createNativeNetworkClient({
+				egress: { dynamicTcp: [{ ...rule, targetIpv4Cidrs: ["211.183.208.0/20"] }] },
+			}),
+		).not.toThrow();
+
+		for (const targetSelectors of [{}, { targetHostSuffixes: [], targetIpv4Cidrs: [] }]) {
+			try {
+				createNativeNetworkClient({
+					egress: { dynamicTcp: [{ ...rule, ...targetSelectors }] },
+				});
+				throw new Error("Expected missing target selectors to be rejected");
+			} catch (error) {
+				expect(error).toMatchObject({ code: "native_egress_policy_invalid" });
+				expect((error as Error).message).toContain(
+					"native.network.dynamicTcp[0] must declare a non-empty targetHostSuffixes or targetIpv4Cidrs list",
+				);
+			}
+		}
+	});
+
+	it("keeps IPv4 CIDR and DNS suffix target selectors disjoint", () => {
+		const source = {
+			sourceHost: "bootstrap.example",
+			sourcePorts: [443],
+			targetPortRanges: [{ start: 5_200, end: 5_299 }],
+			tls: "disabled" as const,
+		};
+		const grant = {
+			sourceHost: "bootstrap.example",
+			sourcePort: 443,
+			port: 5223,
+			tls: "disabled" as const,
+		};
+		const cidrOnly = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [{ ...source, targetIpv4Cidrs: ["211.183.208.0/20"] }],
+			},
+		});
+		cidrOnly.grantTcpEgress({ ...grant, host: "211.183.211.10" }).revoke();
+		expectNativeCode(
+			() => cidrOnly.grantTcpEgress({ ...grant, host: "211.183.192.1" }),
+			"native_egress_not_declared",
+		);
+		expectNativeCode(
+			() => cidrOnly.grantTcpEgress({ ...grant, host: "evil.example.com" }),
+			"native_egress_not_declared",
+		);
+
+		const suffixOnly = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [{ ...source, targetHostSuffixes: ["183.211.10"] }],
+			},
+		});
+		expectNativeCode(
+			() => suffixOnly.grantTcpEgress({ ...grant, host: "211.183.211.10" }),
+			"native_egress_not_declared",
+		);
+
+		const anyIpv4 = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [{ ...source, targetIpv4Cidrs: ["0.0.0.0/0"] }],
+			},
+		});
+		anyIpv4.grantTcpEgress({ ...grant, host: "203.0.113.7" }).revoke();
+	});
+
 	it("enforces dynamic source suffix, source port, target range, and TLS selectors", async () => {
 		const client = createNativeNetworkClient({
 			proxyPolicy: { mode: "required", providers: ["nodemaven"] },
@@ -262,7 +390,7 @@ describe("native egress enforcement", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["0.0.1"],
+						targetIpv4Cidrs: ["127.0.0.1/32"],
 						targetPorts: [destination.port],
 						tls: "disabled",
 					},
@@ -296,7 +424,7 @@ describe("native egress enforcement", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["0.0.1"],
+						targetIpv4Cidrs: ["127.0.0.1/32"],
 						targetPorts: [destination.port],
 						tls: "disabled",
 					},
@@ -316,7 +444,7 @@ describe("native egress enforcement", () => {
 		expect(destination.accepted()).toBe(0);
 	});
 
-	it("distinguishes an expired grant from a destination that was never granted", async () => {
+	it("allows a CIDR-matched grant before expiry and denies it after expiry", async () => {
 		const destination = await listen();
 		const startedAt = new Date("2026-07-31T00:00:00.000Z");
 		setSystemTime(startedAt);
@@ -326,7 +454,7 @@ describe("native egress enforcement", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["0.0.1"],
+						targetIpv4Cidrs: ["127.0.0.1/32"],
 						targetPortRanges: [{ start: 1, end: 65_535 }],
 						tls: "disabled",
 						ttlMs: 50,
@@ -341,6 +469,8 @@ describe("native egress enforcement", () => {
 			port: destination.port,
 			tls: "disabled",
 		});
+		const connection = await client.connectTcp(destination);
+		await connection.close();
 		setSystemTime(new Date(startedAt.getTime() + 50));
 
 		const expired = client.connectTcp(destination);
@@ -352,7 +482,7 @@ describe("native egress enforcement", () => {
 		await expect(
 			client.connectTcp({ host: destination.host, port: destination.port - 1 }),
 		).rejects.toMatchObject({ code: "native_egress_not_declared" });
-		expect(destination.accepted()).toBe(0);
+		expect(destination.accepted()).toBe(1);
 	});
 
 	it("bounds expiry evidence and degrades evicted history to not declared", async () => {
@@ -393,14 +523,14 @@ describe("native egress enforcement", () => {
 		).rejects.toMatchObject({ code: "native_egress_not_declared" });
 	});
 
-	it("binds overlapping grants to the first matching rule without TTL or quota spill", async () => {
+	it("binds CIDR-matched grants to the first rule without TTL or quota spill", async () => {
 		const destination = await listen();
 		const startedAt = new Date("2026-07-31T00:00:00.000Z");
 		setSystemTime(startedAt);
 		const selector = {
 			sourceHost: "bootstrap.example",
 			sourcePorts: [443],
-			targetHostSuffixes: ["0.0.1"],
+			targetIpv4Cidrs: ["127.0.0.1/32"],
 			targetPorts: [destination.port],
 			tls: "disabled" as const,
 		};
@@ -443,7 +573,7 @@ describe("native egress enforcement", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["0.0.1"],
+						targetIpv4Cidrs: ["127.0.0.1/32"],
 						targetPorts: [destination.port],
 						tls: "disabled",
 					},

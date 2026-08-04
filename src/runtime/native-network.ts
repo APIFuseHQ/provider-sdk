@@ -1193,6 +1193,28 @@ function matchesDnsSuffix(host: string, suffix: string): boolean {
 	return host === suffix || host.endsWith(`.${suffix}`);
 }
 
+function parseIpv4(host: string): number | undefined {
+	const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+	if (!match) return undefined;
+	const octets = match.slice(1).map(Number);
+	if (octets.some((octet) => octet > 255)) return undefined;
+	return (
+		((octets[0] ?? 0) * 0x1000000 +
+			(octets[1] ?? 0) * 0x10000 +
+			(octets[2] ?? 0) * 0x100 +
+			(octets[3] ?? 0)) >>>
+		0
+	);
+}
+
+function ipv4InCidr(addr: number, cidr: string): boolean {
+	const separator = cidr.lastIndexOf("/");
+	const network = parseIpv4(cidr.slice(0, separator));
+	const prefix = Number(cidr.slice(separator + 1));
+	if (network === undefined || !Number.isInteger(prefix) || prefix < 0 || prefix > 32) return false;
+	return prefix === 0 || addr >>> (32 - prefix) === network >>> (32 - prefix);
+}
+
 function matchesSourceHost(rule: DynamicEgressRuleSnapshot, host: string): boolean {
 	const hasSelector = rule.sourceHost !== undefined || rule.sourceHostSuffixes.length > 0;
 	if (!hasSelector) return false;
@@ -1229,10 +1251,15 @@ function matchesDynamicRuleSelectors(
 ): boolean {
 	const sourceHost = normalizeEgressHost(input.sourceHost);
 	const targetHost = normalizeEgressHost(input.host);
+	const targetIp = parseIpv4(targetHost);
+	const targetMatches =
+		targetIp !== undefined
+			? rule.targetIpv4Cidrs.some((cidr) => ipv4InCidr(targetIp, cidr))
+			: rule.targetHostSuffixes.some((suffix) => matchesDnsSuffix(targetHost, suffix));
 	return (
 		matchesSourceHost(rule, sourceHost) &&
 		matchesPortSelectors(input.sourcePort, rule.sourcePorts, rule.sourcePortRanges) &&
-		rule.targetHostSuffixes.some((suffix) => matchesDnsSuffix(targetHost, suffix)) &&
+		targetMatches &&
 		matchesPortSelectors(input.port, rule.targetPorts, rule.targetPortRanges) &&
 		grantTlsFitsRule(input.tls, rule.tls)
 	);

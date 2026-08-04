@@ -142,7 +142,7 @@ const kakaoNativeDeclaration = {
 			{
 				sourceHostSuffixes: ["kakao.com"],
 				sourcePortRanges: [{ start: 1, end: 65_535 }],
-				targetHostSuffixes: ["kakao.com"],
+				targetIpv4Cidrs: ["211.183.208.0/20"],
 				targetPortRanges: [{ start: 1, end: 65_535 }],
 				tls: "disabled",
 				ttlMs: 60_000,

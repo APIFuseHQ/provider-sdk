@@ -26,6 +26,7 @@ const NATIVE_DYNAMIC_TCP_RULE_FIELD_RECORD = {
 	sourcePorts: true,
 	sourcePortRanges: true,
 	targetHostSuffixes: true,
+	targetIpv4Cidrs: true,
 	targetPorts: true,
 	targetPortRanges: true,
 	tls: true,
@@ -55,6 +56,7 @@ export type DynamicEgressRuleSnapshot = {
 	readonly sourcePorts: readonly number[];
 	readonly sourcePortRanges: readonly NativeTcpPortRange[];
 	readonly targetHostSuffixes: readonly string[];
+	readonly targetIpv4Cidrs: readonly string[];
 	readonly targetPorts: readonly number[];
 	readonly targetPortRanges: readonly NativeTcpPortRange[];
 	readonly tls: NativeTcpTlsMode;
@@ -157,6 +159,33 @@ function hostSuffixes(value: unknown, fieldPath: string): readonly string[] {
 	);
 }
 
+function ipv4Cidrs(value: unknown, fieldPath: string): readonly string[] {
+	const seen = new Set<string>();
+	return dataArray(value, fieldPath).map((value, index) => {
+		const cidrPath = `${fieldPath}[${index}]`;
+		if (typeof value !== "string") fail(`${cidrPath} must be an IPv4 CIDR in a.b.c.d/nn form`);
+		const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(value);
+		if (!match) fail(`${cidrPath} must be an IPv4 CIDR in a.b.c.d/nn form`);
+		const octets = match.slice(1, 5).map(Number);
+		const prefix = Number(match[5]);
+		if (octets.some((octet) => octet > 255) || prefix > 32)
+			fail(`${cidrPath} must be an IPv4 CIDR in a.b.c.d/nn form`);
+		const address =
+			((octets[0] ?? 0) * 0x1000000 +
+				(octets[1] ?? 0) * 0x10000 +
+				(octets[2] ?? 0) * 0x100 +
+				(octets[3] ?? 0)) >>>
+			0;
+		const network = prefix === 0 ? 0 : (address & (0xffffffff << (32 - prefix))) >>> 0;
+		if (address !== network)
+			fail(`${cidrPath} must use the canonical network address with no host bits set`);
+		const duplicateKey = `${address}/${prefix}`;
+		if (seen.has(duplicateKey)) fail(`${fieldPath} must not contain duplicate CIDRs`);
+		seen.add(duplicateKey);
+		return value;
+	});
+}
+
 function ranges(value: unknown, fieldPath: string): readonly NativeTcpPortRange[] {
 	return dataArray(value, fieldPath).map((value, index) => {
 		const rangePath = `${fieldPath}[${index}]`;
@@ -227,12 +256,18 @@ export function parseNativeEgressPolicy(value: unknown): NativeEgressPolicySnaps
 							fail(
 								`${fieldPath} must declare a non-empty sourcePorts or sourcePortRanges list`,
 							);
-						const targetHostSuffixes = hostSuffixes(
-							rule.targetHostSuffixes,
-							`${fieldPath}.targetHostSuffixes`,
-						);
-						if (targetHostSuffixes.length === 0)
-							fail(`${fieldPath}.targetHostSuffixes must not be empty`);
+						const targetHostSuffixes =
+							rule.targetHostSuffixes === undefined
+								? []
+								: hostSuffixes(rule.targetHostSuffixes, `${fieldPath}.targetHostSuffixes`);
+						const targetIpv4Cidrs =
+							rule.targetIpv4Cidrs === undefined
+								? []
+								: ipv4Cidrs(rule.targetIpv4Cidrs, `${fieldPath}.targetIpv4Cidrs`);
+						if (targetHostSuffixes.length === 0 && targetIpv4Cidrs.length === 0)
+							fail(
+								`${fieldPath} must declare a non-empty targetHostSuffixes or targetIpv4Cidrs list`,
+							);
 						const targetPorts =
 							rule.targetPorts === undefined
 								? []
@@ -251,6 +286,7 @@ export function parseNativeEgressPolicy(value: unknown): NativeEgressPolicySnaps
 							sourcePorts,
 							sourcePortRanges,
 							targetHostSuffixes,
+							targetIpv4Cidrs,
 							targetPorts,
 							targetPortRanges,
 							tls: tls(rule.tls, `${fieldPath}.tls`),

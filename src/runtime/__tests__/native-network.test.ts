@@ -437,7 +437,7 @@ describe("native network runtime", () => {
 					{
 						sourceHost: "bootstrap.example",
 						sourcePorts: [443],
-						targetHostSuffixes: ["0.0.1"],
+						targetIpv4Cidrs: ["127.0.0.1/32"],
 						targetPorts: [destination.port],
 						tls: "disabled",
 						ttlMs: 10,
