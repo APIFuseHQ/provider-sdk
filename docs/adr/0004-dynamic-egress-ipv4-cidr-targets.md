@@ -6,6 +6,8 @@
 - Scope: `@apifuse/provider-sdk` native dynamic TCP egress declarations and grants
 - Builds on: `0001-native-socks5-gateway-proxy.md`, `0002-structural-gates-for-contract-integrity.md`, `0003-native-gateway-credential-injection-and-http-connect.md`
 
+> Superseded for address-family scope by `0005-native-egress-ipv6-and-source-cidr-selectors.md`. The IPv4 field and behavior decided here remain supported; ADR 0005 adds first-class IPv6 and source CIDR selectors and renames the shared internal parser.
+
 ## Context
 
 Stateful providers can discover their session endpoint only after contacting a declared bootstrap endpoint. KakaoTalk LOCO is the first concrete case: CHECKIN returns both DNS names and raw IPv4 literals, and later session endpoints can also be IPv4 literals on non-HTTP ports.
