@@ -1,3 +1,5 @@
+import { domainToASCII } from "node:url";
+
 import type {
 	NativeProviderConfig,
 	NativeTcpDynamicEgressRule,
@@ -5,7 +7,7 @@ import type {
 	NativeTcpPortRange,
 	NativeTcpTlsMode,
 } from "./types.js";
-import { parseIpv4Cidr, parseStrictIpv4 } from "./native-ipv4.js";
+import { classifyEgressTargetHost, parseIpv4Cidr } from "./native-ipv4.js";
 
 type NativeNetworkDeclaration = NonNullable<NativeProviderConfig["network"]>;
 
@@ -139,7 +141,15 @@ function host(value: unknown, fieldPath: string, suffix = false): string {
 		fail(`${fieldPath} must be a non-empty hostname`);
 	if (value.includes("*"))
 		fail(`${fieldPath} must be an exact ${suffix ? "DNS suffix" : "hostname"}, not a wildcard`);
-	const normalized = value.trim().toLowerCase().replace(/\.$/, "");
+	const raw = value.trim().replace(/\.$/, "");
+	const ascii = domainToASCII(raw);
+	const normalizedRaw = raw.toLowerCase();
+	const normalized =
+		classifyEgressTargetHost(normalizedRaw) === "numeric-ambiguous"
+			? normalizedRaw
+			: ascii
+				? ascii.toLowerCase()
+				: "";
 	if (!normalized) fail(`${fieldPath} must be a non-empty hostname`);
 	return normalized;
 }
@@ -166,19 +176,8 @@ function ipv4Cidrs(value: unknown, fieldPath: string): readonly string[] {
 		const cidrPath = `${fieldPath}[${index}]`;
 		if (typeof value !== "string") fail(`${cidrPath} must be an IPv4 CIDR in a.b.c.d/nn form`);
 		const parsed = parseIpv4Cidr(value);
-		if (!parsed) {
-			const separator = value.indexOf("/");
-			const prefixText = value.slice(separator + 1);
-			const prefix = Number(prefixText);
-			const hasValidForm =
-				separator > 0 &&
-				separator === value.lastIndexOf("/") &&
-				parseStrictIpv4(value.slice(0, separator)) !== undefined &&
-				Number.isInteger(prefix) &&
-				prefix >= 0 &&
-				prefix <= 32 &&
-				String(prefix) === prefixText;
-			if (hasValidForm)
+		if (!parsed.ok) {
+			if (parsed.reason === "non-canonical-network")
 				fail(`${cidrPath} must use the canonical network address with no host bits set`);
 			fail(`${cidrPath} must be an IPv4 CIDR in a.b.c.d/nn form`);
 		}

@@ -60,3 +60,9 @@ This fail-closed classification is based on measured Node `dns.lookup(host, { fa
 | `0x7f.0.0.1` | `127.0.0.1` |
 
 IPv4 address and CIDR parsing lives in the shared internal `src/native-ipv4.ts` module. Policy validation and runtime authorization therefore use one grammar and one 32-bit conversion implementation and cannot drift independently.
+
+## Resolver-aligned host canonicalization
+
+Egress hosts are canonicalized with Node's `domainToASCII` before policy matching, target classification, and grant storage. This applies the same IDNA/UTS-46 processing used by the resolver, so Unicode spellings cannot be authorized as DNS names and then resolved as numeric addresses. Inputs that cannot be processed as domains fail closed; colon-bearing literals are retained only long enough to be classified and rejected as unsupported numeric targets. Hosts already recognized as resolver-numeric ASCII forms retain that classification instead of being widened into canonical IPv4 CIDR matches by `domainToASCII`.
+
+Measurements on the development host show why normalization must precede classification: `０177.0.0.1`, `１２７.0.0.1`, `２１３０７０６４３３`, and `127．0．0．1` all become `127.0.0.1`; `evil。kakao.com` becomes `evil.kakao.com`; `LOCO.Kakao.COM` becomes `loco.kakao.com`; and `한글.kr` becomes `xn--bj0bj06e.kr`. The invalid Arabic-Indic numeric spelling `١٢٧.0.0.1` produces an empty result and is rejected rather than falling back to the original spelling. Existing canonical ASCII names, punycode names, and numeric-leading DNS labels such as `0211.example.com` remain unchanged.

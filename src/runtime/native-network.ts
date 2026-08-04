@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { Socket } from "node:net";
 import { connect as connectTlsSocket, type TLSSocket } from "node:tls";
+import { domainToASCII } from "node:url";
 
 import { SocksClient } from "socks";
 
@@ -1183,7 +1184,12 @@ type StoredEgressGrant = {
 export const NATIVE_EGRESS_EXPIRED_EVIDENCE_LIMIT = 256;
 
 function normalizeEgressHost(host: string): string {
-	return host.trim().toLowerCase().replace(/\.$/, "");
+	const raw = host.trim().replace(/\.$/, "");
+	const ascii = domainToASCII(raw);
+	const normalizedRaw = raw.toLowerCase();
+	if (classifyEgressTargetHost(normalizedRaw) === "numeric-ambiguous") return normalizedRaw;
+	if (ascii) return ascii.toLowerCase();
+	return "";
 }
 
 function invalidPolicy(message: string): NativeNetworkError {
@@ -1230,21 +1236,26 @@ function matchesDynamicRuleSelectors(
 ): boolean {
 	const sourceHost = normalizeEgressHost(input.sourceHost);
 	const targetHost = normalizeEgressHost(input.host);
-	const targetKind = classifyEgressTargetHost(targetHost);
-	let targetMatches = false;
-	if (targetKind === "ipv4") {
-		const targetIp = parseStrictIpv4(targetHost);
-		targetMatches =
-			targetIp !== undefined && rule.targetIpv4Cidrs.some((cidr) => ipv4InCidr(targetIp, cidr));
-	} else if (targetKind === "dns") {
-		targetMatches = rule.targetHostSuffixes.some((suffix) => matchesDnsSuffix(targetHost, suffix));
-	}
 	return (
 		matchesSourceHost(rule, sourceHost) &&
 		matchesPortSelectors(input.sourcePort, rule.sourcePorts, rule.sourcePortRanges) &&
-		targetMatches &&
+		matchesDynamicTargetHost(rule, targetHost) &&
 		matchesPortSelectors(input.port, rule.targetPorts, rule.targetPortRanges) &&
 		grantTlsFitsRule(input.tls, rule.tls)
+	);
+}
+
+function matchesDynamicTargetHost(rule: DynamicEgressRuleSnapshot, targetHost: string): boolean {
+	const targetKind = classifyEgressTargetHost(targetHost);
+	if (targetKind === "ipv4") {
+		const targetIp = parseStrictIpv4(targetHost);
+		return (
+			targetIp !== undefined && rule.targetIpv4Cidrs.some((cidr) => ipv4InCidr(targetIp, cidr))
+		);
+	}
+	return (
+		targetKind === "dns" &&
+		rule.targetHostSuffixes.some((suffix) => matchesDnsSuffix(targetHost, suffix))
 	);
 }
 
@@ -1451,14 +1462,29 @@ export function createNativeEgressAuthorization(options: NativeNetworkClientOpti
 		const ruleIndex = dynamicRules.findIndex((rule) => matchesDynamicRuleSelectors(rule, input));
 		if (ruleIndex < 0) {
 			const sourceHost = normalizeEgressHost(input.sourceHost);
-			const sourceMatched = dynamicRules.some(
-				(rule) =>
-					matchesSourceHost(rule, sourceHost) &&
-					matchesPortSelectors(input.sourcePort, rule.sourcePorts, rule.sourcePortRanges),
+			const targetHost = normalizeEgressHost(input.host);
+			const sourceMatchingRuleIndices = dynamicRules.flatMap((rule, index) =>
+				matchesSourceHost(rule, sourceHost) &&
+				matchesPortSelectors(input.sourcePort, rule.sourcePorts, rule.sourcePortRanges)
+					? [index]
+					: [],
 			);
-			const targetKind = classifyEgressTargetHost(normalizeEgressHost(input.host));
+			const targetKind = classifyEgressTargetHost(targetHost);
+			let selectorDetails = "no rule matched this source";
+			if (sourceMatchingRuleIndices.length > 0) {
+				const failedDimensions = new Set<string>();
+				for (const index of sourceMatchingRuleIndices) {
+					const rule = dynamicRules[index];
+					if (!rule) continue;
+					if (!matchesDynamicTargetHost(rule, targetHost)) failedDimensions.add("target-host");
+					if (!matchesPortSelectors(input.port, rule.targetPorts, rule.targetPortRanges))
+						failedDimensions.add("target-port");
+					if (!grantTlsFitsRule(input.tls, rule.tls)) failedDimensions.add("tls");
+				}
+				selectorDetails = `source-matching rule indices: [${sourceMatchingRuleIndices.join(", ")}]; failed selector dimensions: ${[...failedDimensions].join(", ")}`;
+			}
 			throw new NativeNetworkError(
-				`Native TCP egress grant is not declared for source ${input.sourceHost}:${input.sourcePort} to target ${input.host}:${input.port} (${input.tls}); target kind: ${targetKind}; ${sourceMatched ? "source matched but target/port/TLS did not" : "no rule matched this source"}`,
+				`Native TCP egress grant is not declared for source ${input.sourceHost}:${input.sourcePort} to target ${input.host}:${input.port} (${input.tls}); target kind: ${targetKind}; ${selectorDetails}`,
 				"native_egress_not_declared",
 			);
 		}

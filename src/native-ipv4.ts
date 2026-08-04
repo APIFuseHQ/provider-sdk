@@ -33,9 +33,12 @@ export function classifyEgressTargetHost(host: string): "ipv4" | "numeric-ambigu
 
 export function parseIpv4Cidr(
 	value: string,
-): { readonly network: number; readonly prefix: number } | undefined {
+):
+	| { readonly ok: true; readonly network: number; readonly prefix: number }
+	| { readonly ok: false; readonly reason: "malformed" | "non-canonical-network" } {
 	const separator = value.indexOf("/");
-	if (separator <= 0 || separator !== value.lastIndexOf("/")) return undefined;
+	if (separator <= 0 || separator !== value.lastIndexOf("/"))
+		return { ok: false, reason: "malformed" };
 	const address = parseStrictIpv4(value.slice(0, separator));
 	const prefixText = value.slice(separator + 1);
 	const prefix = Number(prefixText);
@@ -46,16 +49,16 @@ export function parseIpv4Cidr(
 		prefix > 32 ||
 		String(prefix) !== prefixText
 	)
-		return undefined;
+		return { ok: false, reason: "malformed" };
 	const mask = prefix === 0 ? 0 : (0xffffffff << (32 - prefix)) >>> 0;
 	const network = (address & mask) >>> 0;
-	if (address !== network) return undefined;
-	return { network, prefix };
+	if (address !== network) return { ok: false, reason: "non-canonical-network" };
+	return { ok: true, network, prefix };
 }
 
 export function ipv4InCidr(address: number, cidr: string): boolean {
 	const parsed = parseIpv4Cidr(cidr);
-	if (!parsed) return false;
+	if (!parsed.ok) return false;
 	return (
 		parsed.prefix === 0 ||
 		address >>> (32 - parsed.prefix) === parsed.network >>> (32 - parsed.prefix)
