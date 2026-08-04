@@ -7,12 +7,14 @@ import {
 	parseIpv4Cidr,
 	parseStrictIpv4,
 } from "../../native-ipv4.js";
+import { parseNativeEgressPolicy } from "../../native-egress-policy.js";
 import {
 	createNativeNetworkClient,
 	NATIVE_EGRESS_EXPIRED_EVIDENCE_LIMIT,
 	NativeEgressGrantExpiredError,
 	NativeEgressNotDeclaredError,
 	NativeNetworkError,
+	snapshotNativeConnectInput,
 } from "../native-network.js";
 
 type Fixture = {
@@ -31,6 +33,16 @@ function expectNativeCode(run: () => unknown, code: string): void {
 	} catch (error) {
 		expect(error).toBeInstanceOf(NativeNetworkError);
 		expect(error).toMatchObject({ code });
+	}
+}
+
+function captureNativeError(run: () => unknown): NativeNetworkError {
+	try {
+		run();
+		throw new Error("Expected NativeNetworkError");
+	} catch (error) {
+		expect(error).toBeInstanceOf(NativeNetworkError);
+		return error as NativeNetworkError;
 	}
 }
 
@@ -291,6 +303,10 @@ describe("native egress enforcement", () => {
 			"kakao.com[evil]",
 			"kakao.com]evil",
 			"kakao.com ",
+			"%31%32%37.0.0.1",
+			"%31%32%37%2e0%2e0%2e1",
+			"%6b%61%6b%61%6f.com",
+			"%41.kakao.com",
 		];
 		for (const host of hosts) {
 			expectNativeCode(
@@ -318,6 +334,103 @@ describe("native egress enforcement", () => {
 			await expect(client.connectTcp({ host, port: 5223 })).rejects.toMatchObject({
 				code: "native_egress_input_invalid",
 			});
+		}
+	});
+
+	it("authorizes ASCII and IDNA-mapped trailing root dots identically", () => {
+		const client = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetHostSuffixes: ["kakao.com"],
+						targetPorts: [5223],
+						tls: "disabled",
+					},
+				],
+			},
+		});
+		for (const host of ["node.kakao.com", "node.kakao.com.", "node.kakao.com。"]) {
+			client
+				.grantTcpEgress({
+					sourceHost: "bootstrap.example",
+					sourcePort: 443,
+					host,
+					port: 5223,
+					tls: "disabled",
+				})
+				.revoke();
+		}
+
+		const declared = parseNativeEgressPolicy({
+			dynamicTcp: [
+				{
+					sourceHost: "bootstrap.example。",
+					sourceHostSuffixes: ["example。"],
+					sourcePorts: [443],
+					targetHostSuffixes: ["kakao.com。"],
+					targetPorts: [5223],
+					tls: "disabled",
+				},
+			],
+		});
+		expect(declared.dynamicRules[0]).toMatchObject({
+			sourceHost: "bootstrap.example",
+			sourceHostSuffixes: ["example"],
+			targetHostSuffixes: ["kakao.com"],
+		});
+	});
+
+	it("rejects bidi and format controls in every runtime host field without echoing them", async () => {
+		const client = createNativeNetworkClient({
+			egress: {
+				dynamicTcp: [
+					{
+						sourceHost: "bootstrap.example",
+						sourcePorts: [443],
+						targetHostSuffixes: ["kakao.com"],
+						targetPorts: [5223],
+						tls: "disabled",
+					},
+				],
+			},
+		});
+		for (const rawHost of ["::\u202eevil", "node\u200ekakao.com", "\uFEFFnode.kakao.com"]) {
+			for (const input of [
+				{
+					sourceHost: "bootstrap.example",
+					sourcePort: 443,
+					host: rawHost,
+					port: 5223,
+					tls: "disabled" as const,
+				},
+				{
+					sourceHost: rawHost,
+					sourcePort: 443,
+					host: "node.kakao.com",
+					port: 5223,
+					tls: "disabled" as const,
+				},
+			]) {
+				const error = captureNativeError(() => client.grantTcpEgress(input));
+				expect(error.code).toBe("native_egress_grant_invalid");
+				expect(error.message).not.toContain(rawHost);
+			}
+			const connectError = await client
+				.connectTcp({ host: rawHost, port: 5223 })
+				.catch((error: unknown) => error);
+			expect(connectError).toBeInstanceOf(NativeNetworkError);
+			expect(connectError).toMatchObject({ code: "native_egress_input_invalid" });
+			expect((connectError as Error).message).not.toContain(rawHost);
+
+			const policyError = captureNativeError(() =>
+				createNativeNetworkClient({
+					egress: { tcp: [{ host: rawHost, ports: [443], tls: "disabled" }] },
+				}),
+			);
+			expect(policyError.code).toBe("native_egress_policy_invalid");
+			expect(policyError.message).not.toContain(rawHost);
 		}
 	});
 
@@ -470,22 +583,42 @@ describe("native egress enforcement", () => {
 		}
 	});
 
-	it("rejects declared hosts that canonicalize to empty", () => {
-		for (const egress of [
-			{ tcp: [{ host: "١٢٧.0.0.1", ports: [443], tls: "disabled" as const }] },
-			{
-				dynamicTcp: [
-					{
+	it("rejects declared and runtime hosts that canonicalize to empty", async () => {
+		for (const emptyHost of ["١٢٧.0.0.1", ".", "...", "。。"]) {
+			for (const egress of [
+				{ tcp: [{ host: emptyHost, ports: [443], tls: "disabled" as const }] },
+				{
+					dynamicTcp: [
+						{
+							sourceHost: "bootstrap.example",
+							sourcePorts: [443],
+							targetHostSuffixes: [emptyHost],
+							targetPorts: [5223],
+							tls: "disabled" as const,
+						},
+					],
+				},
+			]) {
+				expectNativeCode(
+					() => createNativeNetworkClient({ egress }),
+					"native_egress_policy_invalid",
+				);
+			}
+			const client = createNativeNetworkClient({ egress: {} });
+			expectNativeCode(
+				() =>
+					client.grantTcpEgress({
 						sourceHost: "bootstrap.example",
-						sourcePorts: [443],
-						targetHostSuffixes: ["١٢٧.0.0.1"],
-						targetPorts: [5223],
-						tls: "disabled" as const,
-					},
-				],
-			},
-		]) {
-			expectNativeCode(() => createNativeNetworkClient({ egress }), "native_egress_policy_invalid");
+						sourcePort: 443,
+						host: emptyHost,
+						port: 5223,
+						tls: "disabled",
+					}),
+				"native_egress_grant_invalid",
+			);
+			await expect(client.connectTcp({ host: emptyHost, port: 5223 })).rejects.toMatchObject({
+				code: "native_egress_input_invalid",
+			});
 		}
 	});
 
@@ -506,6 +639,10 @@ describe("native egress enforcement", () => {
 			"allowed.com[part",
 			"allowed.com]part",
 			"allowed.com ",
+			"%31%32%37.0.0.1",
+			"%31%32%37%2e0%2e0%2e1",
+			"%6b%61%6b%61%6f.com",
+			"%41.kakao.com",
 		]) {
 			for (const egress of [
 				{ tcp: [{ host: delimiterHost, ports: [443], tls: "disabled" as const }] },
@@ -522,6 +659,65 @@ describe("native egress enforcement", () => {
 					"native_egress_policy_invalid",
 				);
 			}
+		}
+	});
+
+	it("uses one canonicalization table for declarations and runtime inputs", () => {
+		const cases = [
+			["loco.kakao.com", "loco.kakao.com"],
+			["LOCO.Kakao.COM", "loco.kakao.com"],
+			["node.kakao.com.", "node.kakao.com"],
+			["node.kakao.com。", "node.kakao.com"],
+			["node.kakao.com..", "node.kakao.com."],
+			["evil。kakao.com", "evil.kakao.com"],
+			["0211.example.com", "0211.example.com"],
+			["211.183.211.10", "211.183.211.10"],
+			["0.0.0.0", "0.0.0.0"],
+			["255.255.255.255", "255.255.255.255"],
+			["０177.0.0.1", "0177.0.0.1"],
+			["１２７.0.0.1", "127.0.0.1"],
+			["２１３０７０６４３３", "2130706433"],
+			["127．0．0．1", "127.0.0.1"],
+			["0177.0.0.1", "0177.0.0.1"],
+			["127.1", "127.1"],
+			["2130706433", "2130706433"],
+			["0x7f.0.0.1", "0x7f.0.0.1"],
+			["1.2.3.04", "1.2.3.04"],
+			["011.183.208.5", "011.183.208.5"],
+			["::1", "::1"],
+			["한글.kr", "xn--bj0bj06e.kr"],
+			["xn--bj0bj06e.kr", "xn--bj0bj06e.kr"],
+		] as const;
+		for (const [spelling, expected] of cases) {
+			const declared = parseNativeEgressPolicy({
+				tcp: [{ host: spelling, ports: [443], tls: "disabled" }],
+			});
+			const runtime = snapshotNativeConnectInput({ host: spelling, port: 443 });
+			expect(declared.staticRules[0]?.host).toBe(expected);
+			expect(runtime.host).toBe(expected);
+		}
+
+		for (const spelling of [
+			"%31%32%37.0.0.1",
+			"%31%32%37%2e0%2e0%2e1",
+			"%6b%61%6b%61%6f.com",
+			"%41.kakao.com",
+			"::\u202eevil",
+			"node\u200ekakao.com",
+			"\uFEFFnode.kakao.com",
+			"...",
+			"[::1]",
+			"kakao.com\\@127.0.0.1",
+		]) {
+			expect(() =>
+				parseNativeEgressPolicy({
+					tcp: [{ host: spelling, ports: [443], tls: "disabled" }],
+				}),
+			).toThrow();
+			expectNativeCode(
+				() => snapshotNativeConnectInput({ host: spelling, port: 443 }),
+				"native_egress_input_invalid",
+			);
 		}
 	});
 

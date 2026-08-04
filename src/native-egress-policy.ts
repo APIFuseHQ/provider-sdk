@@ -1,5 +1,3 @@
-import { domainToASCII } from "node:url";
-
 import type {
 	NativeProviderConfig,
 	NativeTcpDynamicEgressRule,
@@ -7,7 +5,7 @@ import type {
 	NativeTcpPortRange,
 	NativeTcpTlsMode,
 } from "./types.js";
-import { classifyEgressTargetHost, parseIpv4Cidr } from "./native-ipv4.js";
+import { canonicalizeEgressHost, parseIpv4Cidr } from "./native-ipv4.js";
 
 type NativeNetworkDeclaration = NonNullable<NativeProviderConfig["network"]>;
 
@@ -122,41 +120,12 @@ function dataArray(value: unknown, fieldPath: string): readonly unknown[] {
 	return result;
 }
 
-function hasControlCharacter(value: string): boolean {
-	for (let index = 0; index < value.length; index += 1) {
-		const code = value.charCodeAt(index);
-		if (code <= 31 || code === 127) return true;
-	}
-	return false;
-}
-
-function hasReservedEgressHostDelimiter(value: string): boolean {
-	return ["/", "\\", "?", "#", "@", "[", "]", " "].some((delimiter) => value.includes(delimiter));
-}
-
 function host(value: unknown, fieldPath: string, suffix = false): string {
-	if (
-		typeof value !== "string" ||
-		!value.trim() ||
-		hasControlCharacter(value) ||
-		hasReservedEgressHostDelimiter(value) ||
-		/\s/.test(value) ||
-		value.includes("://")
-	)
-		fail(`${fieldPath} must be a non-empty hostname`);
-	if (value.includes("*"))
+	if (typeof value === "string" && value.includes("*"))
 		fail(`${fieldPath} must be an exact ${suffix ? "DNS suffix" : "hostname"}, not a wildcard`);
-	const raw = value.trim().replace(/\.$/, "");
-	const ascii = domainToASCII(raw);
-	const normalizedRaw = raw.toLowerCase();
-	const normalized =
-		classifyEgressTargetHost(normalizedRaw) === "numeric-ambiguous"
-			? normalizedRaw
-			: ascii
-				? ascii.toLowerCase()
-				: "";
-	if (!normalized) fail(`${fieldPath} must be a non-empty hostname`);
-	return normalized;
+	const canonical = canonicalizeEgressHost(value);
+	if (!canonical.ok) fail(`${fieldPath} must be a non-empty hostname`);
+	return canonical.host;
 }
 
 function port(value: unknown, fieldPath: string): number {
@@ -248,9 +217,7 @@ export function parseNativeEgressPolicy(value: unknown): NativeEgressPolicySnaps
 								? []
 								: hostSuffixes(rule.sourceHostSuffixes, `${fieldPath}.sourceHostSuffixes`);
 						if (sourceHost === undefined && sourceHostSuffixes.length === 0)
-							fail(
-								`${fieldPath} must declare sourceHost or a non-empty sourceHostSuffixes list`,
-							);
+							fail(`${fieldPath} must declare sourceHost or a non-empty sourceHostSuffixes list`);
 						const sourcePorts =
 							rule.sourcePorts === undefined
 								? []
@@ -260,9 +227,7 @@ export function parseNativeEgressPolicy(value: unknown): NativeEgressPolicySnaps
 								? []
 								: ranges(rule.sourcePortRanges, `${fieldPath}.sourcePortRanges`);
 						if (sourcePorts.length === 0 && sourcePortRanges.length === 0)
-							fail(
-								`${fieldPath} must declare a non-empty sourcePorts or sourcePortRanges list`,
-							);
+							fail(`${fieldPath} must declare a non-empty sourcePorts or sourcePortRanges list`);
 						const targetHostSuffixes =
 							rule.targetHostSuffixes === undefined
 								? []
@@ -284,9 +249,7 @@ export function parseNativeEgressPolicy(value: unknown): NativeEgressPolicySnaps
 								? []
 								: ranges(rule.targetPortRanges, `${fieldPath}.targetPortRanges`);
 						if (targetPorts.length === 0 && targetPortRanges.length === 0)
-							fail(
-								`${fieldPath} must declare a non-empty targetPorts or targetPortRanges list`,
-							);
+							fail(`${fieldPath} must declare a non-empty targetPorts or targetPortRanges list`);
 						return {
 							...(sourceHost === undefined ? {} : { sourceHost }),
 							sourceHostSuffixes,

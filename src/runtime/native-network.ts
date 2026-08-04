@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 import { Socket } from "node:net";
 import { connect as connectTlsSocket, type TLSSocket } from "node:tls";
-import { domainToASCII } from "node:url";
 
 import { SocksClient } from "socks";
 
@@ -20,7 +19,12 @@ import {
 	parseNativeEgressPolicy,
 	type StaticEgressRuleSnapshot,
 } from "../native-egress-policy.js";
-import { classifyEgressTargetHost, ipv4InCidr, parseStrictIpv4 } from "../native-ipv4.js";
+import {
+	canonicalizeEgressHost,
+	classifyEgressTargetHost,
+	ipv4InCidr,
+	parseStrictIpv4,
+} from "../native-ipv4.js";
 import type {
 	NativeNetworkClient,
 	NativeNetworkConnectInput,
@@ -1183,15 +1187,6 @@ type StoredEgressGrant = {
 
 export const NATIVE_EGRESS_EXPIRED_EVIDENCE_LIMIT = 256;
 
-function normalizeEgressHost(host: string): string {
-	const raw = host.trim().replace(/\.$/, "");
-	const ascii = domainToASCII(raw);
-	const normalizedRaw = raw.toLowerCase();
-	if (classifyEgressTargetHost(normalizedRaw) === "numeric-ambiguous") return normalizedRaw;
-	if (ascii) return ascii.toLowerCase();
-	return "";
-}
-
 function invalidPolicy(message: string): NativeNetworkError {
 	return new NativeNetworkError(message, "native_egress_policy_invalid");
 }
@@ -1261,36 +1256,18 @@ function invalidGrant(message: string): NativeNetworkError {
 	return new NativeNetworkError(message, "native_egress_grant_invalid");
 }
 
-function hasControlCharacter(value: string): boolean {
-	for (let index = 0; index < value.length; index += 1) {
-		const code = value.charCodeAt(index);
-		if (code <= 31 || code === 127) return true;
-	}
-	return false;
-}
-
-function hasReservedEgressHostDelimiter(value: string): boolean {
-	return ["/", "\\", "?", "#", "@", "[", "]", " "].some((delimiter) => value.includes(delimiter));
+function canonicalGrantHost(value: unknown): string {
+	if (typeof value === "string" && value.includes("*"))
+		throw invalidGrant("Native TCP egress grant hosts must be exact non-empty hostnames");
+	const canonical = canonicalizeEgressHost(value);
+	if (!canonical.ok)
+		throw invalidGrant("Native TCP egress grant hosts must be exact non-empty hostnames");
+	return canonical.host;
 }
 
 function assertValidGrantInput(input: NativeNetworkDynamicGrantOptions): void {
-	if (
-		typeof input.sourceHost !== "string" ||
-		typeof input.host !== "string" ||
-		hasControlCharacter(input.sourceHost) ||
-		hasControlCharacter(input.host) ||
-		hasReservedEgressHostDelimiter(input.sourceHost) ||
-		hasReservedEgressHostDelimiter(input.host) ||
-		/\s/.test(input.sourceHost) ||
-		/\s/.test(input.host) ||
-		input.sourceHost.includes("://") ||
-		input.host.includes("://") ||
-		input.sourceHost.includes("*") ||
-		input.host.includes("*") ||
-		!normalizeEgressHost(input.sourceHost) ||
-		!normalizeEgressHost(input.host)
-	)
-		throw invalidGrant("Native TCP egress grant hosts must be exact non-empty hostnames");
+	canonicalGrantHost(input.sourceHost);
+	canonicalGrantHost(input.host);
 	if (
 		!Number.isSafeInteger(input.sourcePort) ||
 		input.sourcePort < 1 ||
@@ -1319,18 +1296,10 @@ export function snapshotNativeConnectInput(
 		const timeoutMs = input.timeoutMs;
 		const signal = input.signal;
 		const affinityKey = input.affinityKey;
-		if (
-			typeof host !== "string" ||
-			!host.trim() ||
-			hasControlCharacter(host) ||
-			hasReservedEgressHostDelimiter(host) ||
-			/\s/.test(host)
-		)
-			throw new TypeError("invalid native connection host");
-		const canonicalHost = normalizeEgressHost(host);
-		if (!canonicalHost) throw new TypeError("invalid native connection host");
+		const canonicalHost = canonicalizeEgressHost(host);
+		if (!canonicalHost.ok) throw new TypeError("invalid native connection host");
 		const snapshot: NativeNetworkConnectInput = {
-			host: canonicalHost,
+			host: canonicalHost.host,
 			port,
 			...(serverName === undefined ? {} : { serverName }),
 			...(rejectUnauthorized === undefined ? {} : { rejectUnauthorized }),
@@ -1379,8 +1348,8 @@ export function snapshotNativeGrantInput(
 	assertValidGrantInput(snapshot);
 	return {
 		...snapshot,
-		sourceHost: normalizeEgressHost(snapshot.sourceHost),
-		host: normalizeEgressHost(snapshot.host),
+		sourceHost: canonicalGrantHost(snapshot.sourceHost),
+		host: canonicalGrantHost(snapshot.host),
 	};
 }
 

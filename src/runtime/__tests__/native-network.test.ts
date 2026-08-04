@@ -340,7 +340,7 @@ describe("native network runtime", () => {
 		const destination = await listen(
 			createServer((socket) => socket.on("data", (chunk) => socket.write(chunk))),
 		);
-		const suppliedHost = "１２７．０．０．１";
+		const suppliedHost = "１２７．０．０．１。";
 		const egress = {
 			tcp: [{ host: destination.host, ports: [destination.port], tls: "disabled" as const }],
 		};
@@ -382,6 +382,7 @@ describe("native network runtime", () => {
 		expect(httpProxy.requests).toHaveLength(1);
 		expect(httpProxy.requests[0]).toContain(`CONNECT ${authority} HTTP/1.1`);
 		expect(httpProxy.requests[0]).toContain(`\r\nHost: ${authority}\r\n`);
+		expect(httpProxy.requests[0]).not.toContain(suppliedHost);
 		await httpConnection.close();
 	});
 
