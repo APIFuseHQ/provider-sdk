@@ -4,7 +4,6 @@ const STRICT_IPV4_PATTERN =
 	/^(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})\.(0|[1-9]\d{0,2})$/;
 const DECIMAL_COMPONENT_PATTERN = /^\d+$/;
 const HEX_COMPONENT_PATTERN = /^0[xX][\da-fA-F]+$/;
-const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001f\u007f]/;
 const FORMAT_CONTROL_PATTERN = /\p{Cf}/u;
 const RESERVED_EGRESS_HOST_DELIMITERS = ["/", "\\", "?", "#", "@", "[", "]", " ", "%"];
 
@@ -52,7 +51,11 @@ export function hasReservedEgressHostDelimiter(value: string): boolean {
 }
 
 export function hasEgressHostControlCharacter(value: string): boolean {
-	return CONTROL_CHARACTER_PATTERN.test(value) || FORMAT_CONTROL_PATTERN.test(value);
+	for (let index = 0; index < value.length; index += 1) {
+		const code = value.charCodeAt(index);
+		if (code <= 31 || code === 127) return true;
+	}
+	return FORMAT_CONTROL_PATTERN.test(value);
 }
 
 export function canonicalizeEgressHost(value: unknown): EgressHostCanonicalizationResult {
