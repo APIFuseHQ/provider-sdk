@@ -135,6 +135,7 @@ export {
 	extractVerificationCode,
 	resolveSttPrompt,
 } from "./runtime/stt.js";
+export { createUnsupportedResolverClient } from "./runtime/resolver.js";
 export {
 	type CreateTraceContextOptions,
 	createTraceContext,
@@ -184,6 +185,7 @@ export type {
 	BrowserResourcePolicy,
 	BrowserResourceRequest,
 	BrowserResourceRoute,
+	ChallengeSolution,
 	ConnectionMode,
 	ContextDeclaration,
 	CookieJar,
@@ -284,6 +286,8 @@ export type {
 	ProviderChoiceContext,
 	ProviderChoiceIssueOptions,
 	ProviderChoiceParseOptions,
+	ProviderChallenge,
+	ProviderChallengeKind,
 	ProviderContext,
 	ProviderDefinition,
 	ProviderDeploymentOverrides,
@@ -308,6 +312,8 @@ export type {
 	ProviderPublicProfile,
 	ProviderReviewed,
 	ProviderResolvedFile,
+	ProviderResolverConfig,
+	ProviderResolverVendor,
 	ProviderRuntimeState,
 	ProviderSecretDeclaration,
 	ProviderStateDurationString,
@@ -318,6 +324,7 @@ export type {
 	ProviderSupportLevel,
 	RequestOptions,
 	RedirectRunReason,
+	ResolverContext,
 	Rfc3339Instant,
 	SchemaLike,
 	SmsOrigin,

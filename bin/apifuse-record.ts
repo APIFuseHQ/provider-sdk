@@ -12,6 +12,7 @@ import {
 	createProviderChoiceContext,
 	createStealthClient,
 	createSttClientFromEnv,
+	createUnsupportedResolverClient,
 	executeOperation,
 	type HttpClient,
 	type HttpResponse,
@@ -539,6 +540,7 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 		},
 		ocr: createOcrClientFromEnv(provider.ocr),
 		stt: createSttClientFromEnv(provider.stt),
+		resolver: createUnsupportedResolverClient("Resolver is not available in apifuse record"),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
 			env,

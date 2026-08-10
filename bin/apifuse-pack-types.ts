@@ -18,7 +18,7 @@
 //   3. A Node (not bun) ESM runtime import — node does not tolerate
 //      extensionless relative specifiers, bun does.
 //
-// A deliberate negative control proves the fixture compiler actually fails on
+// Deliberate negative controls prove the fixture compiler actually fails on
 // type errors, so this check cannot rot into a false-positive green.
 
 import { execFileSync, spawnSync } from "node:child_process";
@@ -35,6 +35,94 @@ const PACK_RESULT_SCHEMA = z.array(
 
 const KEEP_TEMP = process.env.APIFUSE__PACK_TYPES__KEEP_TEMP === "1";
 const sdkRoot = process.cwd();
+
+const NEGATIVE_CONTROLS = [
+	{
+		filename: "negative-control-provider-error-name.ts",
+		expectedCode: "TS2322",
+		description: "ProviderError.name remains a string",
+		source: [
+			'import { ProviderError } from "@apifuse/provider-sdk";',
+			"",
+			"// Intentionally wrong: name is a string. If this file compiles, the",
+			"// fixture consumer is not actually type-checking and the guard is void.",
+			'export const mustNotCompile: number = new ProviderError("boom").name;',
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-unknown-resolver-vendor.ts",
+		expectedCode: "TS2322",
+		description: "ProviderResolverConfig rejects an unknown vendor",
+		source: [
+			'import type { ProviderResolverConfig } from "@apifuse/provider-sdk";',
+			"",
+			"export const mustNotCompile: ProviderResolverConfig = {",
+			'\tvendors: ["unknown-vendor"],',
+			'\tkinds: ["turnstile"],',
+			"};",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-unknown-challenge-kind.ts",
+		expectedCode: "TS2820",
+		description: "ProviderChallenge rejects an unknown challenge kind",
+		source: [
+			'import type { ProviderChallenge } from "@apifuse/provider-sdk";',
+			"",
+			"export const mustNotCompile: ProviderChallenge = {",
+			'\tkind: "funcaptcha",',
+			'\tsiteKey: "key",',
+			'\tpageUrl: "https://example.com",',
+			"};",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-cookie-solution-token-read.ts",
+		expectedCode: "TS2339",
+		description: "ChallengeSolution requires narrowing before reading token",
+		source: [
+			'import type { ChallengeSolution } from "@apifuse/provider-sdk";',
+			"",
+			"export function mustNotCompile(solution: ChallengeSolution): string {",
+			"\treturn solution.token;",
+			"}",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-cookie-challenge-site-key.ts",
+		expectedCode: "TS2353",
+		description: "cookie-family challenges reject token-family fields",
+		source: [
+			'import type { ProviderChallenge } from "@apifuse/provider-sdk";',
+			"",
+			"export const mustNotCompile: ProviderChallenge = {",
+			'\tkind: "cloudflare_interstitial",',
+			'\tpageUrl: "https://example.com",',
+			'\tsiteKey: "not-allowed",',
+			"};",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-recaptcha-v3-action.ts",
+		expectedCode: "TS2322",
+		description: "recaptcha_v3 challenges require action",
+		source: [
+			'import type { ProviderChallenge } from "@apifuse/provider-sdk";',
+			"",
+			"export const mustNotCompile: ProviderChallenge = {",
+			'\tkind: "recaptcha_v3",',
+			'\tsiteKey: "key",',
+			'\tpageUrl: "https://example.com",',
+			"};",
+			"",
+		].join("\n"),
+	},
+] as const;
 
 const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-types-"));
 const packDir = join(tempRoot, "pack");
@@ -124,7 +212,7 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 		join(consumerDir, "consumer.ts"),
 		[
 			'import { ProviderError, resolveProxy, SessionExpiredError, z } from "@apifuse/provider-sdk";',
-			'import type { NativeNetworkClient, NativeNetworkConnection, NativeProviderConfig, NativeProviderContext, NativeTcpEgressGrant, ProviderContext, ProviderFileRef, ProviderFilesContext, ProviderResolvedFile } from "@apifuse/provider-sdk";',
+			'import type { ChallengeSolution, NativeNetworkClient, NativeNetworkConnection, NativeProviderConfig, NativeProviderContext, NativeTcpEgressGrant, ProviderChallenge, ProviderContext, ProviderFileRef, ProviderFilesContext, ProviderResolvedFile, ProviderResolverConfig, ResolverContext } from "@apifuse/provider-sdk";',
 			'import type { ProxyProtocol, ProxyResolutionOptions, ProxyResolutionSource, ProxyVendorName, RequestOptions, ResolvedProxyConfig } from "@apifuse/provider-sdk";',
 			'import { defineCredentialsAuth } from "@apifuse/provider-sdk/provider";',
 			'import type { NativeNetworkClient as ProviderEntryNativeNetworkClient, ProviderFilesContext as ProviderEntryFilesContext } from "@apifuse/provider-sdk/provider";',
@@ -164,6 +252,18 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			"const providerContext = undefined as unknown as ProviderContext;",
 			"const optionalFiles: ProviderFilesContext | undefined = providerContext.files;",
 			"const optionalNative: NativeProviderContext | undefined = providerContext.native;",
+			"export const providerResolver: ResolverContext = providerContext.resolver;",
+			"",
+			'export const turnstileChallenge: ProviderChallenge = { kind: "turnstile", siteKey: "key", pageUrl: "https://example.com" };',
+			'export const recaptchaV2Challenge: ProviderChallenge = { kind: "recaptcha_v2", siteKey: "key", pageUrl: "https://example.com" };',
+			'export const recaptchaV3Challenge: ProviderChallenge = { kind: "recaptcha_v3", siteKey: "key", pageUrl: "https://example.com", action: "login" };',
+			'export const hcaptchaChallenge: ProviderChallenge = { kind: "hcaptcha", siteKey: "key", pageUrl: "https://example.com" };',
+			'export const cloudflareInterstitialChallenge: ProviderChallenge = { kind: "cloudflare_interstitial", pageUrl: "https://example.com", blockedHtml: "<html></html>" };',
+			'export const awsWafChallenge: ProviderChallenge = { kind: "aws_waf", pageUrl: "https://example.com", captchaScript: "script" };',
+			'export const tokenSolution: ChallengeSolution = { form: "token", token: "solved-token" };',
+			'export const cookieSolution: ChallengeSolution = { form: "cookies", cookies: { cf_clearance: "clearance" }, userAgent: "fixture-agent" };',
+			'export const resolverConfig: ProviderResolverConfig = { vendors: ["browser", "capsolver"], kinds: ["cloudflare_interstitial", "turnstile"] };',
+			"export const resolverContext: ResolverContext = { solve: async () => tokenSolution };",
 			'const queryCredentialOptions: RequestOptions = { sensitiveParams: { serviceKey: "type-test-key" } };',
 			"",
 			"export const witnesses = {",
@@ -201,17 +301,9 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 		].join("\n"),
 	);
 
-	writeFileSync(
-		join(consumerDir, "negative-control.ts"),
-		[
-			'import { ProviderError } from "@apifuse/provider-sdk";',
-			"",
-			"// Intentionally wrong: name is a string. If this file compiles, the",
-			"// fixture consumer is not actually type-checking and the guard is void.",
-			'export const mustNotCompile: number = new ProviderError("boom").name;',
-			"",
-		].join("\n"),
-	);
+	for (const negativeControl of NEGATIVE_CONTROLS) {
+		writeFileSync(join(consumerDir, negativeControl.filename), negativeControl.source);
+	}
 }
 
 function compileFixtureConsumer(consumerDir: string): void {
@@ -223,31 +315,38 @@ function compileFixtureConsumer(consumerDir: string): void {
 }
 
 function assertNegativeControlFails(consumerDir: string): void {
-	const result = spawnSync(
-		"bun",
-		[
-			join(consumerDir, "node_modules", ".bin", "tsc"),
-			"--target",
-			"ES2022",
-			"--module",
-			"nodenext",
-			"--moduleResolution",
-			"nodenext",
-			"--strict",
-			"--noEmit",
-			"negative-control.ts",
-		],
-		{ cwd: consumerDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
-	);
-	if (result.status === 0) {
-		throw new Error(
-			"Negative control compiled cleanly: the fixture consumer is not detecting type errors, so the nodenext guard proves nothing.",
+	for (const negativeControl of NEGATIVE_CONTROLS) {
+		const result = spawnSync(
+			"bun",
+			[
+				join(consumerDir, "node_modules", ".bin", "tsc"),
+				"--target",
+				"ES2022",
+				"--module",
+				"nodenext",
+				"--moduleResolution",
+				"nodenext",
+				"--strict",
+				"--noEmit",
+				negativeControl.filename,
+			],
+			{ cwd: consumerDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
 		);
-	}
-	if (!`${result.stdout}\n${result.stderr}`.includes("TS2322")) {
-		throw new Error(
-			`Negative control failed for an unexpected reason (wanted TS2322):\n${result.stdout}\n${result.stderr}`,
-		);
+		if (result.status === 0) {
+			throw new Error(
+				'Negative control "' +
+					negativeControl.description +
+					'" (' +
+					negativeControl.filename +
+					") compiled cleanly: the fixture consumer is not detecting its error, so the guard proves nothing.",
+			);
+		}
+		const output = `${result.stdout}\n${result.stderr}`;
+		if (!output.includes(negativeControl.expectedCode)) {
+			throw new Error(
+				`Negative control "${negativeControl.description}" (${negativeControl.filename}) failed for an unexpected reason (wanted ${negativeControl.expectedCode}):\n${output}`,
+			);
+		}
 	}
 }
 

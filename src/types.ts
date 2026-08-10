@@ -307,6 +307,96 @@ export interface ProviderSttConfig {
 	mode: ProviderSttMode;
 }
 
+export type ProviderChallengeKind =
+	| "turnstile"
+	| "recaptcha_v2"
+	| "recaptcha_v3"
+	| "hcaptcha"
+	| "cloudflare_interstitial"
+	| "aws_waf";
+
+/**
+ * `browser` is the in-house CDP pool (`apps/cdp-pool`, reached through
+ * `createBrowserClient`) and is a first-class vendor rather than an escape hatch:
+ * for fingerprint-family kinds, it was measured faster than a paid vendor
+ * (4.5 s vs 17.5 s) at zero marginal cost.
+ *
+ * `2captcha` is the vendor already carrying production traffic in
+ * `apifuse-provider-tabelog`.
+ *
+ * Union order is documentation only; the effective fallback order is whatever
+ * `ProviderResolverConfig.vendors` declares.
+ */
+export type ProviderResolverVendor =
+	| "browser"
+	| "capsolver"
+	| "capmonster"
+	| "2captcha"
+	| "custom";
+
+/**
+ * Token-family kinds resolve to `{ form: "token" }` and carry no network-identity
+ * binding. Cookie-family kinds resolve to `{ form: "cookies" }`; their cookies
+ * are bound to the egress IP and user agent that produced them.
+ */
+export type ProviderChallenge =
+	| {
+			readonly kind: "turnstile";
+			readonly siteKey: string;
+			readonly pageUrl: string;
+			readonly action?: string;
+			readonly cdata?: string;
+		}
+	| {
+			readonly kind: "recaptcha_v2";
+			readonly siteKey: string;
+			readonly pageUrl: string;
+		}
+	| {
+			readonly kind: "recaptcha_v3";
+			readonly siteKey: string;
+			readonly pageUrl: string;
+			readonly action: string;
+			readonly minScore?: number;
+		}
+	| {
+			readonly kind: "hcaptcha";
+			readonly siteKey: string;
+			readonly pageUrl: string;
+		}
+	| {
+			readonly kind: "cloudflare_interstitial";
+			readonly pageUrl: string;
+			readonly blockedHtml?: string;
+		}
+	| {
+			readonly kind: "aws_waf";
+			readonly pageUrl: string;
+			readonly captchaScript?: string;
+			readonly context?: string;
+			readonly iv?: string;
+		};
+
+/**
+ * Token solutions carry no network-identity binding. Cookie solutions are bound
+ * to the egress IP and user agent that produced them, and the SDK—not the
+ * provider—installs them.
+ */
+export type ChallengeSolution =
+	| { readonly form: "token"; readonly token: string }
+	| {
+			readonly form: "cookies";
+			readonly cookies: Readonly<Record<string, string>>;
+			readonly userAgent: string;
+		};
+
+export interface ProviderResolverConfig {
+	/** Ordered vendor fallback chain, tried first to last. */
+	readonly vendors: readonly ProviderResolverVendor[];
+	/** Challenge kinds this provider is permitted to request. */
+	readonly kinds: readonly ProviderChallengeKind[];
+}
+
 export type SttAudioInput = {
 	kind: "base64";
 	data: string;
@@ -383,6 +473,10 @@ export interface SttContext {
 		text: string,
 		options?: SttVerificationCodeOptions,
 	): VerificationCodeExtractionResult;
+}
+
+export interface ResolverContext {
+	solve(challenge: ProviderChallenge): Promise<ChallengeSolution>;
 }
 
 export interface HealthJourneySchedule {
@@ -1948,6 +2042,7 @@ export interface FlowContext {
 	context: ContextScratchpad;
 	ocr: OcrContext;
 	stt: SttContext;
+	resolver: ResolverContext;
 	auth: AuthFlowTerminalContext;
 }
 
@@ -2086,6 +2181,7 @@ export interface ProviderContext {
 	auth: AuthContext;
 	ocr: OcrContext;
 	stt: SttContext;
+	resolver: ResolverContext;
 	choice: ProviderChoiceContext;
 }
 
@@ -2260,6 +2356,7 @@ export interface ProviderDefinition {
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;
+	resolver?: ProviderResolverConfig;
 	browser?: {
 		engine: BrowserEngine;
 	};

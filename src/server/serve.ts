@@ -55,6 +55,7 @@ import {
 	PROXY_POOL_EXHAUSTED_CODE,
 } from "../runtime/proxy-errors.js";
 import { PROVIDER_TELEMETRY_HEADER, ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
+import { createUnsupportedResolverClient } from "../runtime/resolver.js";
 import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
@@ -394,6 +395,9 @@ function createProviderContext(
 		auth: createAuthStub(),
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
+		resolver: createUnsupportedResolverClient(
+			"Resolver is not available in provider server operation context",
+		),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
 			env,
@@ -518,6 +522,9 @@ function createAuthFlowContext(
 			context: flowContextStore.context,
 			ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
+			resolver: createUnsupportedResolverClient(
+				"Resolver is not available in provider server auth flow context",
+			),
 			auth: createAuthFlowHelpers({ signal }),
 		},
 		getPatch: flowContextStore.getPatch,
