@@ -48,6 +48,7 @@ export function createScratchpad(
 }
 
 export function createFlowContext(options: {
+	flowId?: string;
 	http: HttpClient;
 	stealth: StealthClient;
 	env: EnvContext;
@@ -60,6 +61,7 @@ export function createFlowContext(options: {
 	stt?: SttContext;
 }): FlowContext {
 	return {
+		flowId: options.flowId,
 		connectionId: options.connectionId,
 		externalRef: options.externalRef,
 		tenantId: options.tenantId,

@@ -84,7 +84,36 @@ interface ProviderImplementationProfile {
 const CONNECTOR_ID_REGEX = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/;
 const OPERATION_ID_REGEX = /^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/;
 const VALID_RUNTIMES = ["standard", "shared", "browser"] as const;
-const VALID_AUTH_MODES = ["none", "platform-managed", "credentials", "oauth2"] as const;
+const VALID_AUTH_MODES = [
+	"none",
+	"platform-managed",
+	"credentials",
+	"oauth2",
+	"oauth2_proxied",
+] as const;
+const PROXIED_OAUTH_REQUIRED_FIELDS = [
+	"authorizeUrl",
+	"tokenUrl",
+	"customScheme",
+	"rewriteProfile",
+	"clientIdEnvKey",
+] as const;
+const PROXIED_OAUTH_ALLOWED_FIELDS = new Set([
+	...PROXIED_OAUTH_REQUIRED_FIELDS,
+	"pkce",
+	"authorizeParams",
+	"tokenParams",
+]);
+const PROXIED_OAUTH_RESERVED_AUTHORIZE_PARAMS = new Set([
+	"client_id",
+	"response_type",
+	"state",
+	"code_challenge",
+	"code_challenge_method",
+]);
+const PROXIED_OAUTH_PROFILE_REGEX = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+const PROXIED_OAUTH_ENV_KEY_REGEX = /^[A-Z][A-Z0-9_]*__[A-Z0-9_]+$/;
+const CUSTOM_SCHEME_REGEX = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/\S+$/;
 const VALID_PROVIDER_ACCESS_VISIBILITIES = ["public", "early_access"] as const;
 const VALID_PROVIDER_PROXY_MODES = ["disabled", "optional", "required"] as const;
 const VALID_PROVIDER_PROXY_PROVIDERS = ["smartproxy", "nodemaven", "decodo", "custom"] as const;
@@ -303,6 +332,111 @@ function assertLiteralField<TValue extends string>(
 		);
 	}
 }
+
+function validateProxiedOAuthParams(
+	value: unknown,
+	field: "authorizeParams" | "tokenParams",
+	providerId: string,
+): void {
+	if (value === undefined) return;
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new ValidationError(
+			`Provider "${providerId}" auth.proxied.${field} must be an object of string values.`,
+		);
+	}
+	for (const [key, paramValue] of Object.entries(value)) {
+		if (!key.trim() || typeof paramValue !== "string") {
+			throw new ValidationError(
+				`Provider "${providerId}" auth.proxied.${field} must contain non-empty keys and string values.`,
+			);
+		}
+		if (
+			field === "authorizeParams" &&
+			PROXIED_OAUTH_RESERVED_AUTHORIZE_PARAMS.has(key.toLowerCase())
+		) {
+			throw new ValidationError(
+				`Provider "${providerId}" auth.proxied.authorizeParams cannot override reserved parameter "${key}".`,
+			);
+		}
+	}
+}
+
+function validateProxiedOAuthAuth(auth: Record<string, unknown>, providerId: string): void {
+	const proxied = auth.proxied;
+	if (auth.mode !== "oauth2_proxied") {
+		if (proxied !== undefined) {
+			throw new ValidationError(
+				`Provider "${providerId}" auth.proxied is only valid when auth.mode is "oauth2_proxied".`,
+			);
+		}
+		return;
+	}
+	if (!proxied || typeof proxied !== "object" || Array.isArray(proxied)) {
+		throw new ValidationError(
+			`Provider "${providerId}" with auth.mode "oauth2_proxied" must declare auth.proxied.`,
+		);
+	}
+	const config = Object.fromEntries(Object.entries(proxied));
+	for (const key of Object.keys(config)) {
+		if (!PROXIED_OAUTH_ALLOWED_FIELDS.has(key)) {
+			throw new ValidationError(
+				`Provider "${providerId}" has unknown auth.proxied field "${key}".`,
+			);
+		}
+	}
+	for (const field of PROXIED_OAUTH_REQUIRED_FIELDS) {
+		if (typeof config[field] !== "string" || !config[field].trim()) {
+			throw new ValidationError(
+				`Provider "${providerId}" auth.proxied.${field} must be a non-empty string.`,
+			);
+		}
+	}
+	for (const field of ["authorizeUrl", "tokenUrl"] as const) {
+		try {
+			const endpoint = new URL(String(config[field]));
+			if (
+				endpoint.protocol !== "https:" ||
+				endpoint.username ||
+				endpoint.password ||
+				endpoint.hash
+			) {
+				throw new Error("invalid endpoint");
+			}
+		} catch {
+			throw new ValidationError(
+				`Provider "${providerId}" auth.proxied.${field} must be an absolute HTTPS URL without credentials or a fragment.`,
+			);
+		}
+	}
+	const customScheme = String(config.customScheme);
+	if (
+		!CUSTOM_SCHEME_REGEX.test(customScheme) ||
+		customScheme.toLowerCase().startsWith("http://") ||
+		customScheme.toLowerCase().startsWith("https://")
+	) {
+		throw new ValidationError(
+			`Provider "${providerId}" auth.proxied.customScheme must be a non-HTTP custom-scheme URL prefix.`,
+		);
+	}
+	if (!PROXIED_OAUTH_PROFILE_REGEX.test(String(config.rewriteProfile))) {
+		throw new ValidationError(
+			`Provider "${providerId}" auth.proxied.rewriteProfile must be a kebab-case profile name.`,
+		);
+	}
+	if (!PROXIED_OAUTH_ENV_KEY_REGEX.test(String(config.clientIdEnvKey))) {
+		throw new ValidationError(
+			`Provider "${providerId}" auth.proxied.clientIdEnvKey must be an APIFuse-style uppercase environment key.`,
+		);
+	}
+	if (config.pkce !== undefined && config.pkce !== "S256" && config.pkce !== "none") {
+		throw new ValidationError(
+			`Provider "${providerId}" auth.proxied.pkce must be "S256" or "none".`,
+		);
+	}
+	validateProxiedOAuthParams(config.authorizeParams, "authorizeParams", providerId);
+	validateProxiedOAuthParams(config.tokenParams, "tokenParams", providerId);
+}
+
 function validateProviderShape(config: unknown): void {
 	assertObjectConfig(config);
 	assertRequiredField(config, "id");
@@ -315,6 +449,9 @@ function validateProviderShape(config: unknown): void {
 	const auth = config.auth;
 	if (auth && typeof auth === "object" && "mode" in auth && typeof auth.mode === "string")
 		assertLiteralField(auth.mode, "auth.mode", VALID_AUTH_MODES, String(config.id));
+	if (auth && typeof auth === "object" && !Array.isArray(auth)) {
+		validateProxiedOAuthAuth(Object.fromEntries(Object.entries(auth)), String(config.id));
+	}
 	if (auth && typeof auth === "object" && "exchange" in auth) {
 		throw new ProviderError(
 			`Provider "${String(config.id)}" auth.exchange is not part of the Provider SDK auth contract`,

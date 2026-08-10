@@ -478,6 +478,7 @@ function createAuthFlowContext(
 
 	return {
 		context: {
+			flowId: request.flowId,
 			connectionId: request.connectionId,
 			externalRef: request.externalRef,
 			tenantId: request.tenantId ?? "",
@@ -502,7 +503,12 @@ function createAuthFlowContext(
 						},
 					}
 				: {}),
-			env: createEnvContext(provider.secrets?.map((secret) => secret.name)),
+			env: createEnvContext([
+				...(provider.secrets?.map((secret) => secret.name) ?? []),
+				...(provider.auth?.mode === "oauth2_proxied"
+					? ["APIFUSE__AUTH_PROXY__URL"]
+					: []),
+			]),
 			credential,
 			context: flowContextStore.context,
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
@@ -531,7 +537,7 @@ export type ProviderServerLogEvent =
 	| (ProviderServerLogEventBase & {
 			level: "info";
 			event: "provider_request_completed";
-	  })
+		})
 	| (ProviderServerLogEventBase & {
 			level: "warn" | "error";
 			event: "provider_request_failed";
@@ -545,13 +551,13 @@ export type ProviderServerLogEvent =
 			signal?: "unregistered_provider_error_code";
 			signalFix?: string;
 			issues?: Array<{ path: string; code: string; message: string }>;
-	  })
+		})
 	| {
 			level: "warn";
 			event: "provider_secrets_missing";
 			providerId: string;
 			missingSecrets: string[];
-	  }
+		}
 	| {
 			level: "warn";
 			event: "provider_cleanup_failed";
@@ -562,7 +568,7 @@ export type ProviderServerLogEvent =
 			resource: "browser" | "stealth";
 			errorClass: string;
 			message: string;
-	  }
+		}
 	| {
 			level: "error";
 			event: "provider_shutdown_hook_failed";
@@ -570,7 +576,7 @@ export type ProviderServerLogEvent =
 			hookIndex: number;
 			errorClass: string;
 			message: string;
-	  };
+		};
 
 export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
 
@@ -599,14 +605,14 @@ export type ProviderServerOptions = {
 	 * @example
 	 * ```ts
 	 * await serve(provider, {
-	 *   shutdown: {
-	 *     hooks: [
-	 *       async () => { await emitter.flush(); },
-	 *       async () => { await sessionManager.closeAll("server-shutdown"); },
-	 *       async () => { await lease.release(); },
-	 *       async () => { await router.close(); },
-	 *     ],
-	 *   },
+	 *	 shutdown: {
+	 *		 hooks: [
+	 *			 async () => { await emitter.flush(); },
+	 *			 async () => { await sessionManager.closeAll("server-shutdown"); },
+	 *			 async () => { await lease.release(); },
+	 *			 async () => { await router.close(); },
+	 *		 ],
+	 *	 },
 	 * });
 	 * ```
 	 */

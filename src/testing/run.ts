@@ -29,7 +29,13 @@ import type {
 // A single lowercase segment (no hyphen) is a valid id, so the trailing group
 // is optional (`*`), matching providers like `kakaomap`, `kstartup`, `triple`.
 const CONNECTOR_ID_REGEX = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/;
-const VALID_AUTH_MODES = ["none", "platform-managed", "credentials", "oauth2"] as const;
+const VALID_AUTH_MODES = [
+	"none",
+	"platform-managed",
+	"credentials",
+	"oauth2",
+	"oauth2_proxied",
+] as const;
 const UPDATE_SNAPSHOT_ARGS = new Set(["-u", "--update-snapshots"]);
 const snapshotCaptureStates = new WeakMap<
 	ProviderContext,
@@ -754,7 +760,7 @@ function formatJsonDiff(current: unknown, expected: unknown): string {
 
 		if (currentLine === expectedLine) {
 			if (currentLine !== undefined) {
-				lines.push(`  ${currentLine}`);
+				lines.push(`	${currentLine}`);
 			}
 			continue;
 		}

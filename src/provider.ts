@@ -148,6 +148,7 @@ export type {
 	ProviderLocaleKeyInput,
 	ProviderLogoProfile,
 	ProviderProxyPolicy,
+	ProxiedOAuthConfig,
 	ProviderPublicConnectionMode,
 	ProviderPublicProfile,
 	ProviderResolvedFile,
