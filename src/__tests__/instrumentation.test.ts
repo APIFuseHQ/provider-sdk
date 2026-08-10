@@ -562,9 +562,11 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 
 		let thrown: unknown;
 		try {
-			// The in-memory backend deliberately rejects CAS with a BRANDED error;
-			// the instrumented path must surface exactly that, not a TypeError.
-			await ns.compareAndSet("k", 0, { status: "confirming" }, { ttl: "3m" });
+			// The in-memory backend supports CAS since the oauth2-proxied
+			// ceremony work, but its write policy still rejects oversized
+			// values with a BRANDED error; the instrumented path must surface
+			// exactly that, not a TypeError.
+			await ns.compareAndSet("k", 0, { status: "x".repeat(4096) }, { ttl: "3m" });
 		} catch (error) {
 			thrown = error;
 		}

@@ -26,6 +26,15 @@ const validateAuthTurn = ajv.compile(AUTH_TURN_SCHEMA);
 
 const OAUTH2_STATE_KEY = "__oauth2_state";
 const OAUTH2_PKCE_VERIFIER_KEY = "__oauth2_pkce_verifier";
+export const OAUTH2_PROXIED_AUTH_PROXY_ORIGIN_ENV_KEY = "APIFUSE__AUTH_PROXY__URL";
+export const OAUTH2_PROXIED_PKCE_VERIFIER_KEY = "__oauth2_proxied_pkce_verifier";
+const OAUTH2_PROXIED_RESERVED_AUTHORIZE_PARAMS = new Set([
+	"client_id",
+	"response_type",
+	"state",
+	"code_challenge",
+	"code_challenge_method",
+]);
 const DEVICE_FLOW_KEY = "__device_flow";
 const MAGIC_LINK_KEY = "__magic_link";
 const COMBINED_STAGE_KEY = "__combined_stage";
@@ -246,6 +255,76 @@ export function createOAuth2Ceremony(options: {
 			),
 		abort: async () => validateCeremonyOutput(createTurn("abort", { hint: "OAuth flow aborted." })),
 	};
+}
+
+/**
+ * Builds the start handler for a custom-scheme OAuth provider. The shared
+ * auth-proxy owns state minting and callback capture, while the provider owns
+ * token exchange and any following authentication turns.
+ */
+export function createOAuth2ProxiedStart(
+	options: import("../types.js").ProxiedOAuthConfig,
+): import("../types.js").AuthFlowStartHandler {
+	const pkce = options.pkce ?? "S256";
+
+	return (ctx) =>
+		runCeremonyHandler(
+			async () => {
+				for (const key of Object.keys(options.authorizeParams ?? {})) {
+					if (OAUTH2_PROXIED_RESERVED_AUTHORIZE_PARAMS.has(key.toLowerCase())) {
+						throw new ValidationError(
+							`OAuth2 proxied authorizeParams cannot override reserved parameter "${key}".`,
+						);
+					}
+				}
+				const proxyOrigin = ctx.env.get(OAUTH2_PROXIED_AUTH_PROXY_ORIGIN_ENV_KEY);
+				if (!proxyOrigin) {
+					throw new ProviderSecretError(
+						`Missing required platform environment: ${OAUTH2_PROXIED_AUTH_PROXY_ORIGIN_ENV_KEY}`,
+					);
+				}
+				const clientId = getRequiredEnv(ctx, options.clientIdEnvKey);
+				if (!ctx.flowId) {
+					throw new ValidationError(
+						"OAuth2 proxied start requires the gateway flow id.",
+					);
+				}
+
+				const authorizePath = new URL(options.authorizeUrl).pathname;
+				const url = new URL(
+					`/p/${encodeURIComponent(ctx.providerId)}/f/${encodeURIComponent(ctx.flowId)}${authorizePath}`,
+					proxyOrigin,
+				);
+				url.searchParams.set("client_id", clientId);
+				url.searchParams.set("response_type", "code");
+
+				if (pkce === "S256") {
+					const verifier = createCodeVerifier();
+					ctx.context.set(OAUTH2_PROXIED_PKCE_VERIFIER_KEY, verifier);
+					url.searchParams.set("code_challenge", createCodeChallenge(verifier));
+					url.searchParams.set("code_challenge_method", "S256");
+				}
+
+				for (const [key, value] of Object.entries(options.authorizeParams ?? {})) {
+					url.searchParams.set(key, value);
+				}
+
+				return createTurn("redirect", {
+					data: { url: url.toString() },
+					hint: "Open the provider authorization page to continue.",
+					expectedInput: {
+						type: "object",
+						required: ["code", "state"],
+						properties: {
+							code: { type: "string" },
+							state: { type: "string" },
+						},
+					},
+				});
+			},
+			"OAuth2 proxied start failed",
+			ctx,
+		);
 }
 
 export function createDeviceFlowCeremony(options: {

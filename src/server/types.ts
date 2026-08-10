@@ -3,7 +3,13 @@ import { PROVIDER_ERROR_SOURCES } from "../observability.js";
 
 import { HttpRetryPreset } from "../types.js";
 
-export const ConnectionModeSchema = z.enum(["oauth2", "credentials", "platform-managed", "none"]);
+export const ConnectionModeSchema = z.enum([
+	"oauth2",
+	"oauth2_proxied",
+	"credentials",
+	"platform-managed",
+	"none",
+]);
 
 export const OperationConnectionSchema = z.object({
 	id: z.string(),

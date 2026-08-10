@@ -277,6 +277,7 @@ export type {
 	ProviderProxyConfig,
 	ProviderProxyMode,
 	ProviderProxyPolicy,
+	ProxiedOAuthConfig,
 	ProviderProxyProvider,
 	ProviderProxySessionAffinity,
 	ProviderPublicConnectionMode,

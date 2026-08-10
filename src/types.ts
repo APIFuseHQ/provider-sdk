@@ -63,6 +63,8 @@ export interface OperationToolRouterMetadata {
 	riskClass?: OperationRiskClass;
 	/** OpenAI remote-MCP approval hint. Defaults from riskClass. */
 	approval?: OperationApprovalPolicy;
+	/** Canonical operation-level connection requirement consumed by the registry and Gateway. */
+	connectionMode?: "none" | "optional" | "required";
 	/** Override connection requirement when provider auth + openWorld inference is insufficient. */
 	requiresConnection?: boolean;
 	/** Public argument used to resolve the tenant-owned connection. Defaults to externalRef. */
@@ -211,14 +213,14 @@ export type SmsOrigin =
 			kind: "e164";
 			value: E164PhoneNumber;
 			display?: string;
-	  }
+		}
 	| {
 			/** Country-local service sender, for example KR 1661-5270. */
 			kind: "nationalServiceCode";
 			country: Iso3166Alpha2CountryCode;
 			value: string;
 			display?: string;
-	  };
+		};
 
 export interface SmsOtpExtractionPattern {
 	/** RegExp or source string containing exactly one usable OTP capture. */
@@ -340,11 +342,11 @@ export type HealthScheduleRandomization =
 	| {
 			mode: "centered";
 			maxOffset: Iso8601Duration;
-	  }
+		}
 	| {
 			mode: "delayed";
 			maxDelay: Iso8601Duration;
-	  };
+		};
 
 export interface HealthJourneyStep {
 	id: string;
@@ -459,7 +461,7 @@ export type HealthJourneyManualTriggerPolicy =
 			/** ISO 8601 duration. Minimum time between manual executions. */
 			minManualInterval: Iso8601Duration;
 			publicRationale: string;
-	  };
+		};
 
 export interface HealthJourneyRunResult {
 	status?: "ok" | "degraded" | "down" | "unknown";
@@ -764,7 +766,12 @@ export interface StealthProfile {
 	headerOrder?: string[];
 }
 
-export type AuthMode = "none" | "platform-managed" | "credentials" | "oauth2";
+export type AuthMode =
+	| "none"
+	| "platform-managed"
+	| "credentials"
+	| "oauth2"
+	| "oauth2_proxied";
 
 export type ConnectionMode = AuthMode;
 
@@ -779,18 +786,18 @@ export type ProviderProxyMode = "disabled" | "optional" | "required";
  * (a common mistake because the names collide with a well-known rebrand):
  *
  * - `smartproxy` — **api.smartproxy.org**, a residential proxy with an IP
- *   *extraction/allocation* API (app_key → a pool of raw `ip:port` CONNECT
- *   endpoints). This is our own vendor. It is NOT the company formerly named
- *   "Smartproxy". Credentials: `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ *	 *extraction/allocation* API (app_key → a pool of raw `ip:port` CONNECT
+ *	 endpoints). This is our own vendor. It is NOT the company formerly named
+ *	 "Smartproxy". Credentials: `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
  * - `nodemaven` — **gate.nodemaven.com**, a *gateway* proxy with static
- *   credentials; geo/session encoded in the username, no allocation API.
+ *	 credentials; geo/session encoded in the username, no allocation API.
  * - `decodo` — **decodo.com**, the *gateway* proxy that was named "Smartproxy"
- *   (smartproxy.com) before its 2025 rebrand to Decodo. Sticky sessions via
- *   username params. A different company from `smartproxy` above.
- *   **@deprecated** — unused; no managed adapter. Use `smartproxy`/`nodemaven`,
- *   or the `APIFUSE__PROXY__URL` bring-your-own escape hatch.
+ *	 (smartproxy.com) before its 2025 rebrand to Decodo. Sticky sessions via
+ *	 username params. A different company from `smartproxy` above.
+ *	 **@deprecated** — unused; no managed adapter. Use `smartproxy`/`nodemaven`,
+ *	 or the `APIFUSE__PROXY__URL` bring-your-own escape hatch.
  * - `custom` — **@deprecated** bring-your-own static proxy URL marker. The
- *   `APIFUSE__PROXY__URL` env still works without declaring this value.
+ *	 `APIFUSE__PROXY__URL` env still works without declaring this value.
  */
 export type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 
@@ -844,9 +851,9 @@ export interface ProviderAccessConfig {
 	 * Provider-level rollout visibility.
 	 *
 	 * - `public`: visible in public docs/catalog/OpenAPI and callable through
-	 *   the existing provider policy stack.
+	 *	 the existing provider policy stack.
 	 * - `early_access`: hidden from public discovery and callable only when the
-	 *   active customer organization has a provider-level access grant.
+	 *	 active customer organization has a provider-level access grant.
 	 *
 	 * This is intentionally provider-level only. It does not alter auth mode,
 	 * operation schemas, health-check authoring, `openWorld`, or Connection
@@ -868,12 +875,12 @@ export type ProviderLogoProfile =
 			 */
 			url?: string;
 			background?: string;
-	  }
+		}
 	| {
 			source: "monogram" | "none";
 			background?: string;
 			fallbackReason: string;
-	  };
+		};
 
 export type ProviderPublicConnectionMode =
 	| "apifuse_managed"
@@ -1573,11 +1580,11 @@ export type BrowserResourceDecision =
 			readonly status?: number;
 			readonly headers?: Readonly<Record<string, string>>;
 			readonly body?: BrowserResourceBody;
-	  }
+		}
 	| {
 			readonly action: "block";
 			readonly reason?: string;
-	  };
+		};
 
 export type BrowserResourceRoute = {
 	readonly match:
@@ -1689,7 +1696,7 @@ export interface ProviderChoiceBindingOptions {
 export type ProviderChoiceStorageOptions =
 	| {
 			readonly mode: "inline";
-	  }
+		}
 	| {
 			readonly mode: "server";
 			readonly namespace: string;
@@ -1698,7 +1705,7 @@ export type ProviderChoiceStorageOptions =
 			readonly maxEntries: number;
 			readonly maxValueBytes: number;
 			readonly unavailable?: "reject";
-	  }
+		}
 	| {
 			readonly mode: "auto";
 			readonly namespace: string;
@@ -1708,7 +1715,7 @@ export type ProviderChoiceStorageOptions =
 			readonly maxEntries: number;
 			readonly maxValueBytes: number;
 			readonly unavailable?: "reject";
-	  };
+		};
 
 export interface ProviderChoiceIssueOptions<
 	TPayload extends Record<string, unknown>,
@@ -1852,11 +1859,11 @@ export interface AuthFlowTerminalContext {
 						}
 					>;
 					readonly expectedInput?: never;
-			  }
+				}
 			| {
 					readonly expectedInput: Record<string, unknown>;
 					readonly fields?: never;
-			  }
+				}
 		),
 	): AuthTurn;
 	nextPoll(options?: {
@@ -1869,6 +1876,8 @@ export interface AuthFlowTerminalContext {
 }
 
 export interface FlowContext {
+	/** Gateway auth-flow id. Required by flow-scoped auth ceremonies. */
+	flowId?: string;
 	connectionId?: string;
 	externalRef?: string;
 	tenantId: string;
@@ -2009,8 +2018,21 @@ export interface ProviderContext {
 	choice: ProviderChoiceContext;
 }
 
+export interface ProxiedOAuthConfig {
+	authorizeUrl: string;
+	tokenUrl: string;
+	customScheme: string;
+	rewriteProfile: string;
+	clientIdEnvKey: string;
+	pkce?: "S256" | "none";
+	authorizeParams?: Record<string, string>;
+	tokenParams?: Record<string, string>;
+}
+
 export interface AuthConfig {
 	mode: AuthMode;
+	/** Browser reverse-proxy contract for providers with custom-scheme OAuth callbacks. */
+	proxied?: ProxiedOAuthConfig;
 	flow?: AuthFlowDefinition;
 }
 
