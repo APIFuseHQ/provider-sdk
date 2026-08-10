@@ -55,7 +55,7 @@ import {
 	PROXY_POOL_EXHAUSTED_CODE,
 } from "../runtime/proxy-errors.js";
 import { PROVIDER_TELEMETRY_HEADER, ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
-import { createUnsupportedResolverClient } from "../runtime/resolver.js";
+import { createResolverClientFromEnv } from "../runtime/resolver.js";
 import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
@@ -101,6 +101,7 @@ import type {
 	ProviderProxyPolicy,
 	ProviderRuntimeState,
 	ProviderStreamEvent,
+	ResolverContext,
 	StealthClient,
 	SttContext,
 } from "../types.js";
@@ -395,9 +396,7 @@ function createProviderContext(
 		auth: createAuthStub(),
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
-		resolver: createUnsupportedResolverClient(
-			"Resolver is not available in provider server operation context",
-		),
+		resolver: options.resolver ?? createResolverClientFromEnv(provider.resolver),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
 			env,
@@ -522,9 +521,7 @@ function createAuthFlowContext(
 			context: flowContextStore.context,
 			ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
-			resolver: createUnsupportedResolverClient(
-				"Resolver is not available in provider server auth flow context",
-			),
+			resolver: options.resolver ?? createResolverClientFromEnv(provider.resolver),
 			auth: createAuthFlowHelpers({ signal }),
 		},
 		getPatch: flowContextStore.getPatch,
@@ -610,6 +607,8 @@ export type ProviderServerOptions = {
 	stt?: SttContext;
 	/** Optional OCR override for tests or custom hosts; local/prod normally resolves from env. */
 	ocr?: OcrContext;
+	/** Optional resolver override for tests or custom hosts; local/prod normally resolves from env. */
+	resolver?: ResolverContext;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */
 	state?: ProviderRuntimeState;
 	/** Allow process-local runtime state only for local development and tests. */
@@ -2397,6 +2396,7 @@ export async function serve(
 		logger: options.logger,
 		ocr: options.ocr,
 		stt: options.stt,
+		resolver: options.resolver,
 		state: options.state,
 		allowMemoryStateFallback: options.allowMemoryStateFallback,
 		operationExecutor: options.operationExecutor,

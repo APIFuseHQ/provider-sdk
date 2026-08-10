@@ -101,6 +101,16 @@ export {
 export { type PrevalidateResult, prevalidate } from "./runtime/prevalidate.js";
 export { getProviderBaseUrl } from "./runtime/provider.js";
 export {
+	APIFUSE__CDP_POOL__URL,
+	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
+	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
+	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+	APIFUSE__RESOLVER__TIMEOUT_MS,
+	createResolverClientFromEnv,
+	createUnsupportedResolverClient,
+	DEFAULT_RESOLVER_TIMEOUT_MS,
+} from "./runtime/resolver.js";
+export {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
 	MISSING_SECRET_CODE,
@@ -135,7 +145,6 @@ export {
 	extractVerificationCode,
 	resolveSttPrompt,
 } from "./runtime/stt.js";
-export { createUnsupportedResolverClient } from "./runtime/resolver.js";
 export {
 	type CreateTraceContextOptions,
 	createTraceContext,
