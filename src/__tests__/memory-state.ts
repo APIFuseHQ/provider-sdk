@@ -31,6 +31,8 @@ export class MemoryProviderRuntimeState implements ProviderRuntimeState {
 
 class MemoryProviderStateNamespace implements ProviderStateNamespace {
 	readonly values = new Map<string, StateValue>();
+	readonly compareAndSetKeys: string[] = [];
+	forcedCreateCollisions = 0;
 
 	async list<T = unknown>(options?: { limit?: number; prefix?: string }): Promise<StateValue<T>[]> {
 		const rows = Array.from(this.values.values()).filter((value) =>
@@ -68,12 +70,31 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 	}
 
 	async compareAndSet<T = unknown>(
-		_key: string,
-		_expectedVersion: number,
-		_value: T,
+		key: string,
+		expectedVersion: number,
+		value: T,
 		_options?: StateWriteOptions,
 	): Promise<StateCasResult<T>> {
-		throw new Error("MemoryProviderStateNamespace.compareAndSet is not implemented.");
+		this.compareAndSetKeys.push(key);
+		if (expectedVersion === 0 && this.forcedCreateCollisions > 0) {
+			this.forcedCreateCollisions -= 1;
+			return { ok: false, current: null };
+		}
+		const current = this.values.get(key) as StateValue<T> | undefined;
+		if ((current?.version ?? 0) !== expectedVersion) {
+			return { ok: false, current: current ?? null };
+		}
+		const now = new Date(0).toISOString();
+		const stored = {
+			key,
+			value,
+			version: expectedVersion + 1,
+			expiresAt: new Date(60_000).toISOString(),
+			createdAt: current?.createdAt ?? now,
+			updatedAt: now,
+		} satisfies StateValue<T>;
+		this.values.set(key, stored);
+		return { ok: true, value: stored };
 	}
 
 	async delete(key: string): Promise<void> {

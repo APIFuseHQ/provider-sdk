@@ -1,7 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import { ProviderChoiceTokenError } from "../choice-token.js";
 import { ProviderError } from "../errors.js";
-import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import {
+	createProviderChoiceContext,
+	createTestProviderChoiceContext,
+} from "../runtime/choice.js";
 import { createUnsupportedProviderRuntimeState } from "../runtime/state.js";
 import type { CredentialContext, ProviderRuntimeState } from "../types.js";
 import { MemoryProviderRuntimeState } from "./memory-state.js";
@@ -13,6 +16,28 @@ const STORAGE_OPTIONS = {
 	maxEntries: 20,
 	maxValueBytes: 10_000,
 } as const;
+
+const WORD_PREFIX = "modu_page_";
+const LEGACY_SERVER_TOKEN =
+	"provider_choice_v2.v1.aA_KfqXRMfW1vAMH.rGa_m8X_WGzM31XYi3hMlS1FV4ERTusU8P-qWH5orEEzq68xs0mAyCe2YS2a614PdSllsaM0Jwd9ArQpSC83SQRgHFMLZNZ0VkaA7ldfYnmB2daa9dYl0J41PBKqft6EHjuShG-szFVYpnvKluDnQOCDIjB3fwI2asuZq6nThhUWW_6TULEzPwuAuJ6bNFUbdn1lYJh5Mx8yHlXyc6CCODivRauGfW1YV9sv1QaHH_6Y3tU3ELJ__4BcwVNnQo8bYDXRG8d7ztBji8-HptLYjq8AMNHzT_JOCU1CELEdg8A7trLwolANlrX1pWlpk3luYpcp1j_b9OTM6gM.UrRsI38KfHhEOzWnYKnL3A.NGgP1GKQX77AXxd6T0S3K1jPexBfhiLHNDwyZ7cGRPc";
+const LEGACY_SERVER_STATE_KEY = "choice_ZAcETxGY58SoG6QxsbCbgw";
+
+function tokenWordCount(token: string, prefix: string): number {
+	const body = token.slice(prefix.length);
+	const internalHyphens = body.match(/yo-yo/g)?.length ?? 0;
+	return body.split("-").length - internalHyphens;
+}
+
+async function expectWordChoiceNotFound(promise: Promise<unknown>): Promise<void> {
+	try {
+		await promise;
+		throw new Error("Expected word choice parsing to reject.");
+	} catch (error) {
+		expect(error).toBeInstanceOf(ProviderChoiceTokenError);
+		expect((error as ProviderChoiceTokenError).reason).toBe("invalid_payload");
+		expect((error as Error).message).toBe("Provider choice token was not found.");
+	}
+}
 
 function createManagedChoiceFixture(options?: {
 	readonly connectionId?: string;
@@ -62,7 +87,30 @@ describe("managed choice storage", () => {
 		expect(parsed).toEqual({ choice_id: "A" });
 	});
 
-	it("stores large managed provider choices in server state", async () => {
+	it("parses a legacy encrypted server handle during the compatibility window", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const namespace = state.namespace(STORAGE_OPTIONS.namespace, {
+			defaultTtl: STORAGE_OPTIONS.ttl,
+			maxTtl: STORAGE_OPTIONS.ttl,
+			maxEntries: STORAGE_OPTIONS.maxEntries,
+			maxValueBytes: STORAGE_OPTIONS.maxValueBytes,
+		});
+		await namespace.set(LEGACY_SERVER_STATE_KEY, { choice_id: "legacy-A" });
+		const choice = createManagedChoiceFixture({ state });
+
+		const parsed = await choice.parse({
+			token: LEGACY_SERVER_TOKEN,
+			prefix: "provider_choice_v2",
+			purpose: "reservation",
+			ttlMs: 60_000,
+			nowMs: 2_000,
+			storage: STORAGE_OPTIONS,
+		});
+
+		expect(parsed).toEqual({ choice_id: "legacy-A" });
+	});
+
+	it("round-trips a four-word server-stored choice", async () => {
 		const state = new MemoryProviderRuntimeState();
 		const choice = createManagedChoiceFixture({ state });
 		const payload = {
@@ -95,7 +143,178 @@ describe("managed choice storage", () => {
 		});
 
 		expect(serverToken.length).toBeLessThan(inlineToken.length / 2);
+		expect(serverToken).toStartWith("provider_choice_v2");
+		expect(tokenWordCount(serverToken, "provider_choice_v2")).toBe(4);
 		expect(parsed).toEqual(payload);
+		const stored = await state.firstNamespace().list({ limit: 1 });
+		expect(stored[0]?.key).toBe(serverToken.slice("provider_choice_v2".length));
+		expect(stored[0]?.value).toMatchObject({
+			v: 1,
+			storage: "server",
+			status: "consumed",
+			provider_id: "provider-a",
+			purpose: "reservation",
+			issued_at_ms: 1_000,
+			ttl_ms: 60_000,
+			payload,
+			payload_digest: expect.any(String),
+		});
+	});
+
+	it("round-trips a five-word high-strength server-stored choice", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({ state });
+		const payload = { page: 7, cursor: "high-strength" };
+
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "search-page",
+			payload,
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			strength: "high",
+			storage: STORAGE_OPTIONS,
+		});
+		const parsed = await choice.parse({
+			token,
+			prefix: WORD_PREFIX,
+			purpose: "search-page",
+			ttlMs: 60_000,
+			nowMs: 2_000,
+			storage: STORAGE_OPTIONS,
+		});
+
+		expect(tokenWordCount(token, WORD_PREFIX)).toBe(5);
+		expect(parsed).toEqual(payload);
+	});
+
+	it("uses word format when auto storage resolves server-side", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({ state });
+		const autoStorage = {
+			...STORAGE_OPTIONS,
+			mode: "auto",
+			maxInlineBytes: 10,
+		} as const;
+
+		const issued = choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "search-page",
+			payload: { cursor: "stored-server-side" },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: autoStorage,
+		});
+		const token = typeof issued === "string" ? issued : await issued;
+
+		expect(token).toStartWith(WORD_PREFIX);
+		expect(tokenWordCount(token, WORD_PREFIX)).toBe(4);
+	});
+
+	it("does not require the envelope master secret for unbound word choices", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createProviderChoiceContext({ providerId: "provider-a", state });
+		const payload = { cursor: "no-envelope-secret" };
+
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "search-page",
+			payload,
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+		const parsed = await choice.parse({
+			token,
+			prefix: WORD_PREFIX,
+			purpose: "search-page",
+			ttlMs: 60_000,
+			nowMs: 2_000,
+			storage: STORAGE_OPTIONS,
+		});
+
+		expect(parsed).toEqual(payload);
+	});
+
+	it("regenerates the word sequence after a state-key collision", async () => {
+		const state = new MemoryProviderRuntimeState();
+		state.namespace(STORAGE_OPTIONS.namespace, {
+			defaultTtl: STORAGE_OPTIONS.ttl,
+			maxTtl: STORAGE_OPTIONS.ttl,
+			maxEntries: STORAGE_OPTIONS.maxEntries,
+			maxValueBytes: STORAGE_OPTIONS.maxValueBytes,
+		});
+		const namespace = state.firstNamespace();
+		namespace.forcedCreateCollisions = 1;
+		const choice = createManagedChoiceFixture({ state });
+
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "search-page",
+			payload: { cursor: "collision-retry" },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+
+		expect(namespace.compareAndSetKeys).toHaveLength(2);
+		expect(namespace.compareAndSetKeys[1]).not.toBe(namespace.compareAndSetKeys[0]);
+		expect(token).toBe(`${WORD_PREFIX}${namespace.compareAndSetKeys[1]}`);
+	});
+
+	it("fails with choice-state unavailable after five collisions", async () => {
+		const state = new MemoryProviderRuntimeState();
+		state.namespace(STORAGE_OPTIONS.namespace, {
+			defaultTtl: STORAGE_OPTIONS.ttl,
+			maxTtl: STORAGE_OPTIONS.ttl,
+			maxEntries: STORAGE_OPTIONS.maxEntries,
+			maxValueBytes: STORAGE_OPTIONS.maxValueBytes,
+		});
+		const namespace = state.firstNamespace();
+		namespace.forcedCreateCollisions = 5;
+		const choice = createManagedChoiceFixture({ state });
+
+		try {
+			await choice.issue({
+				prefix: WORD_PREFIX,
+				purpose: "search-page",
+				payload: { cursor: "collision-exhaustion" },
+				ttlMs: 60_000,
+				nowMs: 1_000,
+				storage: STORAGE_OPTIONS,
+			});
+			throw new Error("Expected choice issuance to reject.");
+		} catch (error) {
+			expect(error).toBeInstanceOf(ProviderError);
+			expect((error as ProviderError).code).toBe("CHOICE_STATE_UNAVAILABLE");
+		}
+		expect(namespace.compareAndSetKeys).toHaveLength(5);
+	});
+
+	it("prints real standard and high-strength examples on request", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({ state });
+		const standard = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "example-standard",
+			payload: { page: 1 },
+			ttlMs: 60_000,
+			storage: STORAGE_OPTIONS,
+		});
+		const high = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "example-high",
+			payload: { page: 2 },
+			ttlMs: 60_000,
+			strength: "high",
+			storage: STORAGE_OPTIONS,
+		});
+
+		if (process.env.PRINT_CHOICE_TOKEN_EXAMPLES === "1") {
+			console.log(`word choice token examples: standard=${standard} high=${high}`);
+		}
+		expect(tokenWordCount(standard, WORD_PREFIX)).toBe(4);
+		expect(tokenWordCount(high, WORD_PREFIX)).toBe(5);
 	});
 
 	it("rejects managed server choices when stored state is missing", async () => {
@@ -115,7 +334,7 @@ describe("managed choice storage", () => {
 		if (!key) throw new Error("Expected stored choice payload.");
 		await namespace.delete(key);
 
-		await expect(
+		await expectWordChoiceNotFound(
 			choice.parse({
 				token,
 				prefix: "provider_choice_v2",
@@ -124,7 +343,105 @@ describe("managed choice storage", () => {
 				nowMs: 2_000,
 				storage: STORAGE_OPTIONS,
 			}),
-		).rejects.toThrow(ProviderChoiceTokenError);
+		);
+	});
+
+	it("does not invoke legacy fallback for a valid-word sequence that is not found", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({ state });
+		const issued = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "search-page",
+			payload: { cursor: "original" },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+		const namespace = state.firstNamespace();
+		let stateReads = 0;
+		const originalGet = namespace.get.bind(namespace);
+		namespace.get = async <T>(key: string) => {
+			stateReads += 1;
+			return originalGet<T>(key);
+		};
+		const candidates = [
+			`${WORD_PREFIX}aardvark-abandoned-abbreviate-yo-yo`,
+			`${WORD_PREFIX}abdomen-abhorrence-abiding-abnormal`,
+		];
+		const token = candidates.find((candidate) => candidate !== issued);
+		if (!token) throw new Error("Expected a distinct valid-word token.");
+
+		await expectWordChoiceNotFound(
+			choice.parse({
+				token,
+				prefix: WORD_PREFIX,
+				purpose: "search-page",
+				ttlMs: 60_000,
+				nowMs: 2_000,
+				storage: STORAGE_OPTIONS,
+			}),
+		);
+		expect(stateReads).toBe(1);
+	});
+
+	it("returns the uniform not-found error for an expired word record", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({ state });
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "search-page",
+			payload: { cursor: "expired" },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+
+		await expectWordChoiceNotFound(
+			choice.parse({
+				token,
+				prefix: WORD_PREFIX,
+				purpose: "search-page",
+				ttlMs: 60_000,
+				nowMs: 61_001,
+				storage: STORAGE_OPTIONS,
+			}),
+		);
+	});
+
+	it("atomically consumes word choices after one successful parse", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({ state });
+		const payload = { choice_id: "single-use" };
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "reservation",
+			payload,
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+		const parseOptions = {
+			token,
+			prefix: WORD_PREFIX,
+			purpose: "reservation",
+			ttlMs: 60_000,
+			nowMs: 2_000,
+			storage: STORAGE_OPTIONS,
+		} as const;
+
+		const results = await Promise.allSettled([
+			choice.parse(parseOptions),
+			choice.parse(parseOptions),
+		]);
+		const fulfilled = results.filter((result) => result.status === "fulfilled");
+		const rejected = results.filter((result) => result.status === "rejected");
+		expect(fulfilled).toHaveLength(1);
+		expect(fulfilled[0]).toMatchObject({ value: payload });
+		expect(rejected).toHaveLength(1);
+		await expectWordChoiceNotFound(Promise.reject(rejected[0]?.reason));
+		await expectWordChoiceNotFound(choice.parse(parseOptions));
+		const stored = await state.firstNamespace().list<{ status: string }>({ limit: 1 });
+		expect(stored[0]?.value.status).toBe("consumed");
 	});
 
 	it("rejects a corrupt/undecodable server choice as a branded token error, not a raw SyntaxError", async () => {
@@ -216,7 +533,7 @@ describe("managed choice storage", () => {
 			state,
 		});
 
-		expect(() =>
+		await expectWordChoiceNotFound(
 			parser.parse({
 				token,
 				prefix: "provider_choice_v2",
@@ -226,7 +543,12 @@ describe("managed choice storage", () => {
 				bind: { connection: true },
 				storage: STORAGE_OPTIONS,
 			}),
-		).toThrow(ProviderChoiceTokenError);
+		);
+		const stored = await state.firstNamespace().list({ limit: 1 });
+		expect(stored[0]?.value).toMatchObject({
+			status: "active",
+			binding: { connection_hash: expect.any(String) },
+		});
 	});
 
 	it("rejects managed server choices when runtime state is unsupported", async () => {

@@ -1925,6 +1925,8 @@ export interface ProviderChoiceIssueOptions<
 	ttlMs: number;
 	nowMs?: number;
 	bind?: ProviderChoiceBindingOptions;
+	/** Server storage only: standard emits four words; high emits five. */
+	strength?: "standard" | "high";
 	storage?: ProviderChoiceStorageOptions;
 }
 
