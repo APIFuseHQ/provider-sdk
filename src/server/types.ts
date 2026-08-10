@@ -27,6 +27,9 @@ export const ErrorEnvelopeSchema = z.object({
 	message: z.string(),
 	requestId: z.string().optional(),
 	retryable: z.boolean(),
+	// Who stopped the request (honest-provider-error-contract); optional so
+	// older peers (stateful forwarding owners) remain parseable.
+	source: z.enum(["client", "upstream_rule", "upstream_failure", "apifuse"]).optional(),
 	fix: z.string().optional(),
 	details: z.unknown().optional(),
 });
