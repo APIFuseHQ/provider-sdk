@@ -1,10 +1,27 @@
 # ADR: Challenge resolver context
 
 - Status: proposed
-- Date: 2026-08-10
+- Date: 2026-08-10 (revised same day — see Revision history)
 - Deciders: Taehoon (owner), Soju (agent)
 - Scope: `@apifuse/provider-sdk` anti-bot challenge resolution — provider declaration, `ProviderContext` surface, vendor adapters, and identity binding
 - Builds on: `0004-dynamic-egress-ipv4-cidr-targets.md`, `0005-native-egress-ipv6-and-source-cidr-selectors.md` (Pitfall 13 precedent)
+
+## Revision history
+
+This ADR is still `proposed`; the record below is amended in place rather than
+superseded, because the decision did not reverse — an axis was added to it.
+
+**Revision 1 (2026-08-10).** A second consumer, `buyee`, was measured after the
+first draft. It contradicted a premise that had been carried from vendor
+documentation alone: that solver vendors are the natural implementation of
+every kind. Measured, a local browser resolves the same `aws_waf` challenge
+roughly 4x faster than a paid vendor and at zero marginal cost. `"browser"` is
+therefore added as a first-class vendor in the chain rather than being treated
+as the thing the SDK avoids. Sections changed: Context (Second consumer),
+Decision 3, Decision 4 (vendor union), Rejected alternatives (the
+browser entry is narrowed to what was actually rejected), Verification, and
+Consequences. ADR 0005 Pitfall 13 is the reason this landed as an amendment
+now and not as a later widening release.
 
 ## Context
 
@@ -47,10 +64,44 @@ ADR 0005 Pitfall 13 applies directly: this is a public SDK surface whose first
 consumer is known, so the extension axis — challenge kind and vendor — is in
 scope now rather than after a breaking release.
 
+### 2captcha is already in production, without an SDK surface
+
+The gap is not hypothetical. `apifuse-provider-tabelog` solves reCAPTCHA today
+from its own provider source, because no SDK surface exists. Measured
+2026-08-10:
+
+- Doppler `apifuse/dev` carries `TABELOG_AUTH_CAPTCHA_PROVIDER=2captcha` and a
+  populated `TABELOG_AUTH_CAPTCHA_API_KEY`.
+- `upstream/auth.ts` (2341 lines) contains `solveRecaptchaTokenWithTwoCaptcha`,
+  a full `createTask` / `getTaskResult` client with a 3 s poll interval and a
+  180 s ceiling.
+- That provider already declares its own solver-vendor union,
+  `"2captcha" | "capsolver" | "http"`, and its own captcha proxy policy:
+
+```ts
+const TABELOG_CAPTCHA_PROXY_POLICY = {
+	mode: "optional",
+	providers: ["smartproxy", "nodemaven"],
+	geo: { country: "JP" },
+	session: { affinity: "auth-flow", lifetimeMinutes: 30, poolSize: 1 },
+} satisfies ProviderProxyPolicy;
+```
+
+Two conclusions follow. First, a provider re-implementing a vendor client and a
+vendor union inside its own source is evidence of a missing SDK capability,
+mirroring the `ctx.ocr` track's origin. Second, `ProviderProxyPolicy` is
+already the shape a real consumer reached for when binding a solver to network
+identity, including an `auth-flow` session affinity — which is the
+identity-binding requirement of Decision 5, discovered independently.
+
+`2captcha` is therefore a first-class vendor in this contract, not a future
+addition.
+
 ### Measured vendor contracts
 
-Vendor task shapes were read from vendor documentation rather than inferred.
-Two families exist, and they differ in what they return and what they require:
+Vendor task shapes were read from vendor documentation and from the measured
+tabelog implementation, rather than inferred. Two families exist, and they
+differ in what they return and what they require:
 
 | Family | Vendor task (Capsolver / CapMonster) | Required inputs | Solution | Proxy |
 | --- | --- | --- | --- | --- |
@@ -61,8 +112,93 @@ Two families exist, and they differ in what they return and what they require:
 
 The Cloudflare task documents `proxy` as `Required`, and the AWS WAF solution
 returns a `userAgent` alongside `aws-waf-token`. Cookie-family solutions are
-therefore bound to the network identity that produced them; token-family
-solutions are not.
+therefore always bound to the network identity that produced them.
+
+Token-family solutions are **conditionally** bound. Capsolver's Turnstile task
+is proxyless, but the measured tabelog client selects its 2captcha task by mode:
+
+```ts
+type: proxy ? "RecaptchaV2Task" : "RecaptchaV2TaskProxyless",
+// and, when proxied, forwards userAgent and cookies alongside the proxy fields
+```
+
+A proxied token task is solved from the caller's egress identity, and a
+reCAPTCHA token minted that way can be scored against that identity. Binding is
+therefore a property of `(kind, vendor, mode)`, not of the kind alone. Recording
+it as a per-kind constant would repeat the ADR 0005 Pitfall 13 failure — a
+narrowed axis discovered too late by the first real consumer — except that here
+the consumer already exists and its code says otherwise.
+
+### Second consumer, measured: `buyee` (2026-08-10)
+
+`buyee` reaches production the same day this ADR was drafted. Four of its
+upstream lanes (`mercari`, `rakuma`, `paypayfleamarket`, and Yahoo Auctions)
+sit behind AWS WAF, so it is the first real `aws_waf` consumer. Per ADR 0005
+Pitfall 13, its measured inputs — not its documentation — were read before
+freezing this contract. Every number below is from a live probe against
+`https://buyee.jp/mercari/search?keyword=pokemon&lang=en`.
+
+**The challenge is fingerprint-based, not proof-of-work.** The name "JS
+challenge" invites the assumption that a JS engine suffices. It does not.
+`challenge.js` is 643 KB on one line with 27,462 `_0x`-style identifiers, and
+what it computes is a browser fingerprint: canvas rendering (`toDataURL`,
+`fillText`, `globalCompositeOperation`), `AudioContext` oscillator output,
+`navigator.webdriver` / `plugins` / `hardwareConcurrency` / `battery`, plus
+layout and interaction signals (`getBoundingClientRect`, `scrollX/Y`,
+`clicks`, `pageY`). It contains no `eval` and no `new Function`.
+
+Execution attempts, in ascending order of environment fidelity:
+
+| Environment | Result |
+| --- | --- |
+| `curl_cffi` TLS impersonation (`chrome`, `chrome131`, `safari17_0`) | 202 `x-amzn-waf-action: challenge` on all four lanes; JS never runs |
+| Warm-up on a WAF-free lane, then cookie carry-over | still 202 |
+| Node, no browser globals | `ReferenceError: window is not defined` |
+| Node + `window`/`document`/`navigator` shim | `TypeError: document.addEventListener is not a function` |
+| Headless Chromium (Playwright) | **solved in 4.5 s**, unattended |
+| 2captcha `AmazonTaskProxyless` | **solved in 17.5 s and 25.1 s** across two runs |
+
+Shimming further leads to jsdom, which has no canvas rasterisation, no
+WebAudio, and no layout engine — precisely the three signal sources the script
+reads. That path is not "add a few globals"; it is authoring a synthetic
+browser that must be re-authored whenever the fingerprint logic changes.
+
+**The token is portable and long-lived.** The browser is needed to *mint* the
+token, not to serve traffic. Once minted, the `aws-waf-token` cookie (310
+chars) transplants into an ordinary stealth session and works there:
+`mercari` and Yahoo Auctions both returned 200 with real listings parsed, and
+pages 1-3 of a paginated search reused the same token with no re-challenge.
+Measured TTL is **345,035 s ≈ 4.0 days** (`expires` 1786698176, minted
+2026-08-10T09:12Z). One 4.5 s bootstrap therefore covers roughly four days of
+requests, which changes the cost shape of a browser from per-request to
+per-lease.
+
+**The solver path works but is strictly worse here**, and two vendor-contract
+details in this ADR's original table were wrong for 2captcha and are corrected
+by measurement:
+
+- The task type is `AmazonTaskProxyless`, not the Capsolver-vocabulary
+  `AntiAwsWafTask`. Sending the latter returns `ERROR_TASK_ABSENT`.
+- The solution's token is under `existing_token`, not `cookie` or `token`.
+  Reading `cookie` yields an empty string and a silently unusable result — the
+  first probe run reported success and then failed verification for exactly
+  this reason.
+- The page supplies `window.gokuProps` (`key`, `iv`, `context`) plus the
+  `challenge.js` URL, so the full-context request shape is available.
+
+**A solver vendor is itself a browser.** Vendors solve a fingerprint challenge
+by running a real browser on their own infrastructure. Choosing a vendor for
+this kind is not choosing "no browser"; it is renting someone else's, with a
+network round trip and per-solve billing attached.
+
+**We already operate the browser fleet.** `apps/cdp-pool` is a running service
+(~1,400 lines) with endpoint health checks, quarantine, queue depth limits, and
+per-endpoint page caps, and `createBrowserClient({ cdpUrl })` already attaches
+to it. Meanwhile the monorepo contains no solver client at all: the only
+solver integration anywhere is `apifuse-provider-tabelog`, which hand-rolled a
+`"2captcha" | "capsolver" | "http"` selector inside the provider — evidence
+both that the capability belongs in the SDK and that a vendor abstraction with
+one in-tree implementation is the status quo being replaced.
 
 ## Decision
 
@@ -101,6 +237,11 @@ export interface ProviderResolverConfig {
 `ProviderDefinition.resolver?: ProviderResolverConfig`, and
 `ProviderContext.resolver: ResolverContext`.
 
+`ProviderResolverVendor` is `"2captcha" | "capsolver" | "capmonster" |
+"custom"`. `2captcha` is listed first because it is the vendor already carrying
+production traffic; union order is documentation only, and the effective
+fallback order is whatever `vendors` declares.
+
 An undeclared provider receives an unsupported client whose every call throws,
 matching `createUnsupportedSttClient`. Requesting a kind outside the declared
 `kinds` is a declaration error, not a silent pass-through: the declaration is
@@ -119,6 +260,78 @@ Failover advances on: missing credentials, vendor-reported balance exhaustion,
 vendor outage or transport failure, and per-vendor timeout. It does not advance
 on a vendor's negative verdict about the challenge itself, which is a result,
 not a vendor fault.
+
+Vendors do not cover the same kinds. A chain therefore skips a vendor that does
+not support the requested kind, and exhausting every supporting vendor is
+distinct from declaring a chain whose vendors all lack the kind — the latter is
+a declaration error surfaced before any network call.
+
+#### 3a. `"browser"` is a first-class vendor, not an escape hatch
+
+```ts
+export type ProviderResolverVendor =
+	| "browser"      // in-house CDP pool (apps/cdp-pool) via createBrowserClient
+	| "capsolver"
+	| "capmonster"
+	| "2captcha"     // measured in tabelog; see Measured vendor contracts
+	| "custom";
+```
+
+The `buyee` measurement above showed the first draft had an inverted default:
+it modelled resolution as inherently outsourced, when for fingerprint-family
+kinds the in-house browser is faster (4.5 s vs 17.5 s), free at the margin,
+and already operated as a shared service. A vendor union that omitted
+`"browser"` would have forced every AWS WAF provider to pay a vendor to run a
+browser we already run.
+
+`"browser"` participates in the chain under the same rules as any other
+vendor, which is what makes this an addition rather than a special case. Its
+failover triggers map cleanly onto the existing four:
+
+| Chain rule | `"browser"` instance |
+| --- | --- |
+| missing credentials | no `cdpUrl` configured |
+| allocation exhausted | pool queue depth exceeded, no endpoint available |
+| outage / transport failure | CDP connect failure, endpoint quarantined |
+| per-vendor timeout | navigation or solve budget elapsed |
+| *not* a failover cause | the challenge itself proving unsolvable in a browser |
+
+That last row is the important one and it is load-bearing: if AWS promotes a
+lane from `challenge` to `captcha` — a human puzzle — the browser cannot solve
+it unattended, and that is a challenge verdict rather than a browser fault.
+A declaration of `vendors: ["browser", "capsolver"]` is what makes that
+transition survivable without a code change, because a paid vendor with human
+solvers remains the only path for a true CAPTCHA. This is the concrete reason
+the chain must be ordered and heterogeneous rather than a single selector.
+
+Recommended orderings, from the measured families:
+
+| Kind | Recommended `vendors` | Why |
+| --- | --- | --- |
+| `aws_waf`, `cloudflare_interstitial` | `["browser", "capsolver"]` | fingerprint work the in-house pool does faster and free; vendor covers promotion to a human puzzle |
+| `turnstile`, `recaptcha_v2/v3`, `hcaptcha` | `["capsolver", "capmonster"]` | vendors document proxyless operation and a browser adds cost with no fidelity gain |
+
+The `aws_waf` row is measured rather than recommended by analogy: with
+`["browser", "capsolver"]`, the `buyee` probe resolved in 4.5 s on the first
+leg and never reached the second. `2captcha` is a valid substitute in either
+row — it resolved the same `aws_waf` challenge in 17.5 s — and is the vendor a
+provider already in production (`tabelog`) uses, so an existing credential
+covers it.
+
+#### 3b. Solutions are cached to their measured lifetime
+
+A 4-day token obtained in 4.5 s is wasted if it is re-minted per request. The
+resolver caches a solution against its issuing identity for the lifetime the
+upstream advertised, and only re-resolves on expiry or rejection. Cache key
+and storage layer are implementation concerns for the plan, but two properties
+are decided here because they are correctness, not tuning:
+
+- A cookie-family solution is cached against the identity that produced it
+  (proxy lease plus user agent, per Decision 5), never globally. A token valid
+  on one egress is invalid on another, so a global cache would serve poison.
+- Expiry is taken from the upstream's own signal (the cookie's `expires`)
+  rather than a hardcoded constant, so a vendor or upstream shortening the
+  lifetime cannot strand the SDK on a stale token.
 
 ### 4. SDK-owned neutral challenge and solution types
 
@@ -160,13 +373,28 @@ success and the next upstream request is refused. The provider also cannot
 implement it correctly even in principle, because lease assignment is internal
 SDK state.
 
-Token-family kinds carry no identity binding, so the same call path performs no
-binding work for them.
+Token-family binding is conditional rather than absent. When the selected
+vendor and kind support a proxyless task, no binding work is performed. When
+the resolved chain uses a proxied token task — as the measured tabelog 2captcha
+path does — the same SDK-owned binding applies, because the token is then
+minted from the caller's egress identity. The provider never chooses between
+these modes; the SDK selects from the vendor's capabilities and the provider's
+proxy policy.
 
 `ctx.stealth` currently has no user-agent concept; its impit clients derive one
 from a browser profile. Cookie-family binding requires the SDK to expose and
 pin that value so the vendor is told the same user agent the session will send.
 This is new work introduced by this decision, not an existing capability.
+
+**The `"browser"` vendor reaches this from the other side.** A CDP page knows
+its own user agent (`navigator.userAgent` is readable, and CDP can set it), so
+for that vendor the binding value is available at mint time without impit
+having to expose anything. This does not remove the impit work — a
+`"capsolver"` leg in the same chain still needs the session's UA — but it does
+mean the risk is no longer all-or-nothing: the browser leg of cookie-family
+binding can be implemented and verified before the impit question is settled.
+If impit turns out not to expose or override its UA, cookie-family support
+ships browser-only rather than not at all.
 
 ### 6. Fail closed, never silently degrade
 
@@ -176,12 +404,33 @@ timeout all raise a typed `ProviderError` carrying a `fix` message, following
 no partial success. A caller that receives a `ChallengeSolution` has material
 that a vendor asserted is valid.
 
+### 7. tabelog is the first migration target
+
+`apifuse-provider-tabelog` is the reference consumer and the first planned
+migration: its in-provider `solveRecaptchaTokenWithTwoCaptcha`, vendor union,
+and captcha proxy policy are replaced by a `resolver` declaration and
+`ctx.resolver.solve({ kind: "recaptcha_v2", ... })`.
+
+That migration is explicitly **not** part of this ADR's implementation. tabelog
+is a separate SoT repository with its own release and deploy gates, and it is
+currently serving production traffic through the code being replaced. It is
+recorded here so the SDK contract is validated against a real consumer rather
+than against documentation, and so the token-family binding axis in Decision 5
+stays honest.
+
+Migration preconditions: the SDK surface ships, a `2captcha` adapter exists,
+and a live reCAPTCHA v2 solve is verified through `ctx.resolver` producing a
+token tabelog's upstream accepts.
+
 ## Consequences
 
 Positive:
 
 - Providers behind Turnstile, reCAPTCHA v2/v3, hCaptcha, Cloudflare
   interstitials, or AWS WAF share one declaration and one call.
+- The existing in-provider 2captcha client in tabelog has a defined
+  destination, so the next provider hitting a captcha does not write a third
+  one.
 - Vendor substitution is a declaration edit; provider code does not name a
   vendor task type.
 - Cookie/token confusion is prevented by the type system rather than review.
@@ -218,14 +467,51 @@ Negative / accepted:
 - **Require a browser for every kind.** Token-family vendors document
   proxyless operation, and the measured NOL login path needs no browser at all.
   Mandating a CDP lease would add cost and failure surface to the common case.
+  This rejection stands, and Revision 1 does not weaken it: `"browser"` is one
+  vendor a provider may order first, not a mandatory leg. A Turnstile-only
+  provider declaring `["capsolver", "capmonster"]` never acquires a CDP lease.
+- **Exclude the in-house browser from the vendor union** *(rejected in
+  Revision 1; it was the original draft's implicit position)*. Modelling
+  resolution as inherently outsourced fails the measured `aws_waf` case in
+  three ways at once: it is ~4x slower (17.5 s vs 4.5 s), it bills per solve
+  for work `apps/cdp-pool` already performs for free, and it adds an external
+  dependency to a path that has an in-house implementation. It is also
+  self-defeating, since the vendor satisfies a fingerprint challenge by running
+  a browser anyway — the choice was never browser-or-not, only whose browser.
+- **Solve fingerprint challenges in a JS engine without a browser.** Measured
+  and rejected on evidence, not preference: `challenge.js` reads canvas,
+  WebAudio, and layout, so Node fails at `window is not defined` and a
+  hand-written shim fails at the first real DOM call. Completing that path
+  means maintaining a synthetic browser whose fidelity must track an
+  adversary's fingerprint changes. The SDK does not take that maintenance on.
+- **Mint a fresh solution per request.** The measured token lives ~4 days and
+  transplants across sessions on the same identity, so per-request resolution
+  would multiply latency and vendor cost by roughly three orders of magnitude
+  against no correctness gain. See Decision 3b.
 
 ## Verification
 
 These must hold before `Status: accepted`:
 
 - A live token-family solve against a real vendor account returns a token that
-  the upstream accepts. Not yet run: no solver vendor credential exists in the
-  secret store as of this date.
+  the upstream accepts. A 2captcha credential does exist
+  (`TABELOG_AUTH_CAPTCHA_API_KEY` in Doppler `apifuse/dev`), so reCAPTCHA v2 is
+  verifiable now. Two caveats: that key funds tabelog's production traffic, so
+  verification spends live balance and needs owner approval; and 2captcha's
+  coverage of `turnstile` and `cloudflare_interstitial` has not been confirmed,
+  so those kinds may still need a second vendor account.
+- **`aws_waf` on 2captcha is confirmed** (2026-08-10, that same key): task type
+  `AmazonTaskProxyless`, solved in 17.5 s, and the returned token authorized a
+  subsequent stealth request. Note the two contract corrections in Context —
+  the task name is not Capsolver's `AntiAwsWafTask`, and the token arrives as
+  `solution.existing_token`, not `solution.cookie`. Reading `cookie` returns an
+  empty string and produces a solution that silently fails verification.
+- **`aws_waf` on `"browser"` is confirmed** (2026-08-10): headless Chromium
+  resolved the same challenge unattended in 4.5 s with no credential and no
+  spend, and the minted token served paginated requests for a measured
+  345,035 s. Because this leg needs no vendor account, it is the one
+  verification item that can run in CI-like conditions rather than requiring
+  owner-approved live balance.
 - A live `cloudflare_interstitial` solve returns `cf_clearance` that authorizes
   a subsequent `ctx.stealth` request over the same proxy lease and user agent.
   The `AntiCloudflareTask` `html` field expects the actual 403 body, so the
@@ -241,6 +527,8 @@ These must hold before `Status: accepted`:
   kind from the token family to the cookie family.
 - Cloudflare or AWS binds a token-family solution to network identity, which
   would collapse the two families into one and make binding universal.
+- A vendor drops proxyless support for a kind, moving that kind's binding from
+  conditional to mandatory.
 - A challenge kind appears whose solution is neither a form token nor cookies,
   for example a required header or a signed request body.
 
@@ -255,3 +543,6 @@ These must hold before `Status: accepted`:
 - Capsolver documentation: Cloudflare Challenge (`AntiCloudflareTask`, proxy
   required), Turnstile (`AntiTurnstileTaskProxyLess`)
 - CapMonster documentation: `AmazonTask` with `cookieSolution`
+- `APIFuseHQ/apifuse-provider-tabelog` — `upstream/auth.ts:66-71` (captcha
+  proxy policy), `:1031-1140` (`solveRecaptchaTokenWithTwoCaptcha`),
+  `domain/runtime-env.ts:3` (in-provider vendor union)
