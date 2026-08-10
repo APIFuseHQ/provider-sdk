@@ -103,7 +103,7 @@ function expectStructuredError(
 	code: string,
 	message: string,
 ): asserts body is { error: { code: string; message: string; retryable: boolean } } {
-	expect(body).toEqual({ error: { code, message, retryable: false } });
+	expect(body).toEqual({ error: { code, message, retryable: false, source: "apifuse" } });
 }
 
 describe("provider server operation executors", () => {
@@ -251,6 +251,7 @@ describe("signed stateful operation forwarding", () => {
 				message: "Stateful forwarding deadline expired.",
 				requestId: "req-stateful-forward",
 				retryable: false,
+				source: "apifuse",
 			},
 		});
 		expect(executions).toBe(0);
@@ -290,6 +291,7 @@ describe("signed stateful operation forwarding", () => {
 				message: "Stateful forwarding deadline expired.",
 				requestId: "req-stateful-forward",
 				retryable: false,
+				source: "apifuse",
 			},
 		});
 		expect(validationSignal?.aborted).toBe(true);

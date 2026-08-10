@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { PROVIDER_ERROR_SOURCES } from "../observability.js";
 
 import { HttpRetryPreset } from "../types.js";
 
@@ -27,6 +28,10 @@ export const ErrorEnvelopeSchema = z.object({
 	message: z.string(),
 	requestId: z.string().optional(),
 	retryable: z.boolean(),
+	// Who stopped the request (honest-provider-error-contract); optional so
+	// older peers (stateful forwarding owners) remain parseable. Derived from
+	// the PROVIDER_ERROR_SOURCES registry so the enum cannot drift.
+	source: z.enum(PROVIDER_ERROR_SOURCES).optional(),
 	fix: z.string().optional(),
 	details: z.unknown().optional(),
 });

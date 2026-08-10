@@ -819,6 +819,7 @@ describe("provider HTTP server", () => {
 					message: "Managed CDP Pool is required for browser providers in production",
 					requestId: "req_browser_no_pool",
 					retryable: false,
+					source: "apifuse",
 					fix: "Set APIFUSE__CDP_POOL__URL for deployed browser providers. Local standalone development may omit it.",
 				},
 			});
@@ -1413,6 +1414,7 @@ describe("provider HTTP server", () => {
 				message: "New provider failure",
 				requestId: "req_4",
 				retryable: false,
+				source: "apifuse",
 			},
 		});
 	});
@@ -1434,6 +1436,7 @@ describe("provider HTTP server", () => {
 				message: "Table choice required",
 				requestId: "req_action_required",
 				retryable: false,
+				source: "apifuse",
 				fix: "Call availability and pass one reservation_choices[].reservation_choice.",
 				details: {
 					next_action: "ask_user_to_pick_table_then_call_reserve_with_reservation_choice",
@@ -1460,6 +1463,7 @@ describe("provider HTTP server", () => {
 				message: "No upstream data",
 				requestId: "req_no_data",
 				retryable: false,
+				source: "apifuse",
 			},
 		});
 	});
@@ -1509,6 +1513,85 @@ describe("provider HTTP server", () => {
 			expect(response.status).toBe(testCase.status);
 			expect((await response.json()).error.code).toBe(testCase.code);
 		}
+	});
+
+	it("serves UPSTREAM_REJECTED as a non-retryable 409 upstream rule refusal", async () => {
+		const base = createTestProvider();
+		const provider = {
+			...base,
+			operations: {
+				reserve: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					handler: async () => {
+						throw new ProviderError("The requested slot overlaps an existing reservation.", {
+							code: "UPSTREAM_REJECTED",
+							fix: "Pick a slot that does not overlap the account's existing reservations.",
+						});
+					},
+				},
+			},
+		} satisfies ProviderDefinition;
+		const app = createServerApp(provider, { logger: () => undefined });
+		const response = await app.request("/v1/reserve", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_rejected", input: { value: "x" } }),
+		});
+
+		expect(response.status).toBe(409);
+		const body = await response.json();
+		expect(body.error.code).toBe("UPSTREAM_REJECTED");
+		expect(body.error.retryable).toBe(false);
+		expect(body.error.source).toBe("upstream_rule");
+		const observability = JSON.parse(
+			response.headers.get("X-ApiFuse-Error-Observability") ?? "{}",
+		);
+		expect(observability.category).toBe("upstream_rejected");
+		expect(observability.taxonomyVersion).toBe("2026-08-07");
+	});
+
+	it("classifies operation-declared rejection statuses as upstream_rejected", async () => {
+		const base = createTestProvider();
+		const provider = {
+			...base,
+			operations: {
+				order: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					docs: {
+						description: "order",
+						errorCodes: [
+							{
+								code: "SOLD_OUT",
+								status: 422 as const,
+								description: "Item is sold out",
+								retryable: false,
+							},
+						],
+					},
+					handler: async () => {
+						throw new ProviderError("Item is sold out.", { code: "SOLD_OUT" });
+					},
+				},
+			},
+		} satisfies ProviderDefinition;
+		const app = createServerApp(provider, { logger: () => undefined });
+		const response = await app.request("/v1/order", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_sold_out", input: { value: "x" } }),
+		});
+
+		expect(response.status).toBe(422);
+		const body = await response.json();
+		expect(body.error.code).toBe("SOLD_OUT");
+		expect(body.error.retryable).toBe(false);
+		expect(body.error.source).toBe("upstream_rule");
+		const observability = JSON.parse(
+			response.headers.get("X-ApiFuse-Error-Observability") ?? "{}",
+		);
+		expect(observability.category).toBe("upstream_rejected");
 	});
 
 	it("applies registered statuses before the ValidationError fallback", async () => {
@@ -1567,13 +1650,14 @@ describe("provider HTTP server", () => {
 				message: "Request timed out",
 				requestId: "req_timeout",
 				retryable: true,
+				source: "upstream_failure",
 				fix: "Increase timeout option",
 				details: { next_action: "retry_with_longer_timeout" },
 			},
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "timeout",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: true,
 		});
 	});
@@ -1595,11 +1679,12 @@ describe("provider HTTP server", () => {
 				message: "Network error",
 				requestId: "req_network",
 				retryable: true,
+				source: "upstream_failure",
 			},
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "network",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: true,
 		});
 	});
@@ -1620,7 +1705,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.details).not.toHaveProperty("upstreamStatus");
 		expect(errorObservability(response)).toEqual({
 			category: "upstream_http",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: true,
 			upstreamStatus: 502,
 		});
@@ -1639,7 +1724,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.details).toEqual({ retryable: true, providerPolicy: "independent" });
 		expect(errorObservability(response)).toEqual({
 			category: "upstream_http",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: false,
 			upstreamStatus: 502,
 		});
@@ -1678,11 +1763,12 @@ describe("provider HTTP server", () => {
 				message: "Provider session expired",
 				requestId: "req_session_retry",
 				retryable: true,
+				source: "client",
 			},
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "credential_expired",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: true,
 		});
 	});
@@ -1704,11 +1790,12 @@ describe("provider HTTP server", () => {
 				message: "Provider session expired",
 				requestId: "req_session_unmarked",
 				retryable: false,
+				source: "client",
 			},
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "credential_expired",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: false,
 		});
 	});
@@ -1730,11 +1817,12 @@ describe("provider HTTP server", () => {
 				message: "Upstream request failed with status 400",
 				requestId: "req_upstream_400",
 				retryable: false,
+				source: "upstream_failure",
 			},
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "upstream_http",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: false,
 			upstreamStatus: 400,
 		});
@@ -1758,11 +1846,12 @@ describe("provider HTTP server", () => {
 					"Proxy source IP is not authorized. Add the runtime egress IP to the proxy provider allowlist.",
 				requestId: "req_proxy_auth_ip",
 				retryable: false,
+				source: "upstream_failure",
 			},
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "anti_bot_blocked",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: false,
 		});
 	});
@@ -1785,11 +1874,12 @@ describe("provider HTTP server", () => {
 					"Proxy provider rejected a candidate endpoint during authentication. The SDK will retry or refresh the proxy pool when safe.",
 				requestId: "req_proxy_edge_auth",
 				retryable: true,
+				source: "apifuse",
 			},
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "proxy_pool",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: true,
 		});
 	});
@@ -1897,6 +1987,7 @@ describe("provider HTTP server", () => {
 				message: "Internal error",
 				requestId: "req_5",
 				retryable: false,
+				source: "apifuse",
 				details: {
 					retryable: false,
 					category: "internal_error",
@@ -1928,7 +2019,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.details?.errorClass).toBe("Error");
 		expect(errorObservability(response)).toEqual({
 			category: "internal_error",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: false,
 		});
 	});
@@ -2043,7 +2134,7 @@ describe("provider HTTP server", () => {
 		);
 		expect(errorObservability(response)).toEqual({
 			category: "input_validation",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: false,
 		});
 	});
@@ -2065,7 +2156,7 @@ describe("provider HTTP server", () => {
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "output_validation",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: false,
 		});
 	});
@@ -2079,6 +2170,7 @@ describe("provider HTTP server", () => {
 				code: "not_found",
 				message: "Not found",
 				retryable: false,
+				source: "apifuse",
 			},
 		});
 		expect(errorObservability(response)).toMatchObject({
@@ -2141,7 +2233,7 @@ describe("operation-declared error resolution", () => {
 		expect(body.error.retryable).toBe(true);
 		expect(header).toEqual({
 			category: "provider_error",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: true,
 		});
 		expect(events).toHaveLength(1);
@@ -2406,11 +2498,12 @@ describe("operation-declared error resolution", () => {
 				message: "Structural failure",
 				requestId: "req_structural",
 				retryable: false,
+				source: "apifuse",
 			},
 		});
 		expect(errorObservability(response)).toEqual({
 			category: "provider_error",
-			taxonomyVersion: "2026-05-26",
+			taxonomyVersion: "2026-08-07",
 			retryable: false,
 		});
 	});
@@ -2530,6 +2623,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				message: "Missing provider service key",
 				requestId: "req_dupProviderError",
 				retryable: false,
+				source: "apifuse",
 				fix: "Set the provider service key.",
 			},
 		});
@@ -2557,6 +2651,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				message: "Provider session expired",
 				requestId: "req_dupSessionExpired",
 				retryable: false,
+				source: "client",
 			},
 		});
 		expect(errorObservability(response)).toMatchObject({
@@ -2606,6 +2701,7 @@ describe("provider HTTP server cross-module error identity", () => {
 				message: "Internal error",
 				requestId: "req_unbrandedLookalike",
 				retryable: false,
+				source: "apifuse",
 				details: {
 					retryable: false,
 					category: "internal_error",
@@ -2661,7 +2757,7 @@ describe("SDK-owned secret enforcement over HTTP", () => {
 			expect(body.error.details).toBeUndefined();
 			expect(errorObservability(response)).toEqual({
 				category: "credential_unavailable",
-				taxonomyVersion: "2026-05-26",
+				taxonomyVersion: "2026-08-07",
 				retryable: false,
 			});
 

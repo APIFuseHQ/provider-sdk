@@ -24,6 +24,8 @@ import {
 import type { ProviderLocale } from "../i18n/keys.js";
 import {
 	categoryForStatus,
+	type ProviderErrorSource,
+	sourceForCategory,
 	isRetryableCategory,
 	PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	type ProviderErrorCategory,
@@ -541,6 +543,7 @@ export type ProviderServerLogEvent =
 			taxonomyVersion?: string;
 			retryable?: boolean;
 			signal?: "unregistered_provider_error_code";
+			signalFix?: string;
 			issues?: Array<{ path: string; code: string; message: string }>;
 	  })
 	| {
@@ -658,12 +661,34 @@ function zodDetails(error: z.ZodError): Array<{
 	}));
 }
 
+// Category-level projection with code-aware honesty overrides: a missing
+// deployment secret is an APIFuse-side defect even though its category
+// (credential_unavailable) usually means a caller credential problem, an
+// internal stateful-routing deadline is APIFuse-owned despite its timeout
+// category, and the built-in upstream failure families keep their upstream
+// attribution even when the author left the category at the provider_error
+// default.
+function publicErrorSource(
+	error: unknown,
+	category: ProviderErrorCategory,
+): ProviderErrorSource {
+	if (error instanceof StatefulRoutingDeadlineError) return "apifuse";
+	if (isProviderError(error)) {
+		if (error.code === MISSING_SECRET_CODE) return "apifuse";
+		if (error.code === "UPSTREAM_ERROR" || error.code === "BLOCKED") {
+			return "upstream_failure";
+		}
+	}
+	return sourceForCategory(category);
+}
+
 function toErrorResponse(
 	error: unknown,
 	requestId?: string,
 	declaredErrorCode?: OperationErrorCode,
 ): OperationErrorResponse {
 	const observability = errorObservabilityDetails(error, declaredErrorCode);
+	const source = publicErrorSource(error, observability.category);
 	if (error instanceof StatefulRoutingDeadlineError) {
 		return {
 			error: {
@@ -671,6 +696,7 @@ function toErrorResponse(
 				message: "Stateful forwarding deadline expired.",
 				...(requestId ? { requestId } : {}),
 				retryable: observability.retryable,
+				source,
 			},
 		};
 	}
@@ -683,6 +709,7 @@ function toErrorResponse(
 				message: publicProviderErrorMessage(error),
 				...(requestId ? { requestId } : {}),
 				retryable: observability.retryable,
+				source,
 				...(error.fix ? { fix: error.fix } : {}),
 				...(details !== undefined ? { details } : {}),
 			},
@@ -696,6 +723,7 @@ function toErrorResponse(
 				message: "Invalid request body",
 				...(requestId ? { requestId } : {}),
 				retryable: observability.retryable,
+				source,
 				details: zodDetails(error),
 			},
 		};
@@ -713,6 +741,7 @@ function toErrorResponse(
 			message: "Internal error",
 			...(requestId ? { requestId } : {}),
 			retryable: observability.retryable,
+			source,
 			details: {
 				retryable: false,
 				category: "internal_error",
@@ -804,9 +833,12 @@ function errorObservabilityDetails(
 			category:
 				isProviderError(error) && error.options?.category
 					? error.options.category
-					: isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
-						? "provider_error"
-						: "input_validation",
+					: isEmittableErrorStatus(declaredStatus) &&
+							categoryForStatus(declaredStatus) === "upstream_rejected"
+						? "upstream_rejected"
+						: isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
+							? "provider_error"
+							: "input_validation",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: isProviderError(error)
 				? (error.options?.retryable ?? effectiveDeclaration?.retryable ?? false)
@@ -823,8 +855,19 @@ function errorObservabilityDetails(
 	}
 
 	if (isProviderError(error)) {
+		// Deterministic upstream refusals default to the rejection category:
+		// the UPSTREAM_REJECTED family and any operation-declared rejection
+		// status (409/410/422) classify as upstream_rejected unless the
+		// author set an explicit category.
+		const declaredStatus = effectiveDeclaration?.status;
+		const rejectionDefault =
+			error.code === "UPSTREAM_REJECTED" ||
+			(isEmittableErrorStatus(declaredStatus) &&
+				categoryForStatus(declaredStatus) === "upstream_rejected")
+				? ("upstream_rejected" as const)
+				: ("provider_error" as const);
 		return {
-			category: error.options?.category ?? "provider_error",
+			category: error.options?.category ?? rejectionDefault,
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: error.options?.retryable ?? effectiveDeclaration?.retryable ?? false,
 		};
@@ -915,6 +958,11 @@ function toStatusCode(error: unknown, declaredErrorCode?: OperationErrorCode): P
 			case "UPSTREAM_RATE_LIMIT":
 			case "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR":
 				return 429;
+			// Deterministic upstream business refusal (honest-provider-error-
+			// contract): the upstream evaluated the request and said no under
+			// its own rules — a conflict with upstream state, never a 5xx.
+			case "UPSTREAM_REJECTED":
+				return 409;
 			case "UPSTREAM_ERROR":
 			case "BLOCKED":
 				return 502;
@@ -1025,7 +1073,11 @@ function logProviderError(
 		taxonomyVersion: details.taxonomyVersion,
 		retryable: details.retryable,
 		...(isUnregisteredProviderErrorCode
-			? { signal: "unregistered_provider_error_code" as const }
+			? {
+					signal: "unregistered_provider_error_code" as const,
+					signalFix:
+						"Declare this code (with status and retryable) in the operation's docs.errorCodes so it serves its intended status instead of 500.",
+				}
 			: {}),
 		...(error instanceof z.ZodError ? { issues: zodDetails(error) } : {}),
 	});
