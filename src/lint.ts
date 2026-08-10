@@ -3,7 +3,13 @@ import type { ZodType } from "zod";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 
-type AuthModeLike = "none" | "platform-managed" | "credentials" | "oauth2" | "api-key";
+type AuthModeLike =
+	| "none"
+	| "platform-managed"
+	| "credentials"
+	| "oauth2"
+	| "oauth2_proxied"
+	| "api-key";
 
 type ProviderAuthLike = {
 	mode?: AuthModeLike;
