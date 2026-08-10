@@ -24,6 +24,7 @@ import {
 import type { ProviderLocale } from "../i18n/keys.js";
 import {
 	categoryForStatus,
+	type ProviderErrorSource,
 	sourceForCategory,
 	isRetryableCategory,
 	PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
@@ -660,13 +661,34 @@ function zodDetails(error: z.ZodError): Array<{
 	}));
 }
 
+// Category-level projection with code-aware honesty overrides: a missing
+// deployment secret is an APIFuse-side defect even though its category
+// (credential_unavailable) usually means a caller credential problem, an
+// internal stateful-routing deadline is APIFuse-owned despite its timeout
+// category, and the built-in upstream failure families keep their upstream
+// attribution even when the author left the category at the provider_error
+// default.
+function publicErrorSource(
+	error: unknown,
+	category: ProviderErrorCategory,
+): ProviderErrorSource {
+	if (error instanceof StatefulRoutingDeadlineError) return "apifuse";
+	if (isProviderError(error)) {
+		if (error.code === MISSING_SECRET_CODE) return "apifuse";
+		if (error.code === "UPSTREAM_ERROR" || error.code === "BLOCKED") {
+			return "upstream_failure";
+		}
+	}
+	return sourceForCategory(category);
+}
+
 function toErrorResponse(
 	error: unknown,
 	requestId?: string,
 	declaredErrorCode?: OperationErrorCode,
 ): OperationErrorResponse {
 	const observability = errorObservabilityDetails(error, declaredErrorCode);
-	const source = sourceForCategory(observability.category);
+	const source = publicErrorSource(error, observability.category);
 	if (error instanceof StatefulRoutingDeadlineError) {
 		return {
 			error: {
@@ -811,9 +833,12 @@ function errorObservabilityDetails(
 			category:
 				isProviderError(error) && error.options?.category
 					? error.options.category
-					: isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
-						? "provider_error"
-						: "input_validation",
+					: isEmittableErrorStatus(declaredStatus) &&
+							categoryForStatus(declaredStatus) === "upstream_rejected"
+						? "upstream_rejected"
+						: isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
+							? "provider_error"
+							: "input_validation",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: isProviderError(error)
 				? (error.options?.retryable ?? effectiveDeclaration?.retryable ?? false)
@@ -837,9 +862,8 @@ function errorObservabilityDetails(
 		const declaredStatus = effectiveDeclaration?.status;
 		const rejectionDefault =
 			error.code === "UPSTREAM_REJECTED" ||
-			declaredStatus === 409 ||
-			declaredStatus === 410 ||
-			declaredStatus === 422
+			(isEmittableErrorStatus(declaredStatus) &&
+				categoryForStatus(declaredStatus) === "upstream_rejected")
 				? ("upstream_rejected" as const)
 				: ("provider_error" as const);
 		return {

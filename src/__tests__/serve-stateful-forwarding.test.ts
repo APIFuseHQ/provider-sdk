@@ -251,7 +251,7 @@ describe("signed stateful operation forwarding", () => {
 				message: "Stateful forwarding deadline expired.",
 				requestId: "req-stateful-forward",
 				retryable: false,
-				source: "upstream_failure",
+				source: "apifuse",
 			},
 		});
 		expect(executions).toBe(0);
@@ -291,7 +291,7 @@ describe("signed stateful operation forwarding", () => {
 				message: "Stateful forwarding deadline expired.",
 				requestId: "req-stateful-forward",
 				retryable: false,
-				source: "upstream_failure",
+				source: "apifuse",
 			},
 		});
 		expect(validationSignal?.aborted).toBe(true);
