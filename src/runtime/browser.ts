@@ -42,19 +42,35 @@ type PoolReleaseRequest = {
 	pageId: string;
 };
 
-type JsonRpcId = number;
+type WebSocketCommandId = number;
 
-type JsonRpcError = {
+type WebSocketCommandError = {
 	code?: number;
 	message?: string;
 };
 
-type JsonRpcMessage = {
-	error?: JsonRpcError;
-	id?: JsonRpcId;
+type WebSocketCommandMessage = {
+	error?: WebSocketCommandError;
+	id?: WebSocketCommandId;
+	jsonrpc?: "2.0";
 	method?: string;
 	params?: Record<string, unknown>;
 	result?: Record<string, unknown>;
+	sessionId?: string;
+};
+
+type CdpCommandFrame = {
+	id: WebSocketCommandId;
+	method: string;
+	params: Record<string, unknown>;
+	sessionId?: string;
+};
+
+type JsonRpcCommandFrame = {
+	id: WebSocketCommandId;
+	jsonrpc: "2.0";
+	method: string;
+	params: Record<string, unknown>;
 };
 
 type CdpFrameTreeNode = {
@@ -641,12 +657,12 @@ function normalizeWebSocketEndpoint(endpoint: string): string {
 	throw new Error(`Unsupported WebSocket endpoint protocol: ${url.protocol}`);
 }
 
-class JsonRpcWebSocketClient {
+abstract class WebSocketCommandClient {
 	private nextId = 1;
 	private readonly endpoint: string;
 	private readonly listeners = new Map<string, Set<(params: unknown) => void>>();
 	private readonly pending = new Map<
-		JsonRpcId,
+		WebSocketCommandId,
 		{
 			reject: (reason?: unknown) => void;
 			resolve: (value: Record<string, unknown>) => void;
@@ -682,14 +698,7 @@ class JsonRpcWebSocketClient {
 		return await new Promise<Record<string, unknown>>((resolve, reject) => {
 			this.pending.set(id, { resolve, reject });
 
-			socket.send(
-				JSON.stringify({
-					id,
-					jsonrpc: "2.0",
-					method,
-					params,
-				}),
-			);
+			socket.send(JSON.stringify(this.createCommandFrame(id, method, params)));
 		});
 	}
 
@@ -704,6 +713,12 @@ class JsonRpcWebSocketClient {
 		this.socket = undefined;
 		this.socketPromise = undefined;
 	}
+
+	protected abstract createCommandFrame(
+		id: WebSocketCommandId,
+		method: string,
+		params: Record<string, unknown>,
+	): CdpCommandFrame | JsonRpcCommandFrame;
 
 	private async getSocket(): Promise<WebSocket> {
 		if (this.socket?.readyState === WebSocket.OPEN) {
@@ -727,7 +742,7 @@ class JsonRpcWebSocketClient {
 					typeof event.data === "string"
 						? event.data
 						: Buffer.from(event.data as ArrayBufferLike).toString("utf8");
-				const payload = JSON.parse(rawData) as JsonRpcMessage;
+				const payload = JSON.parse(rawData) as WebSocketCommandMessage;
 
 				if (typeof payload.id === "number") {
 					const pending = this.pending.get(payload.id);
@@ -738,7 +753,11 @@ class JsonRpcWebSocketClient {
 					this.pending.delete(payload.id);
 
 					if (payload.error) {
-						pending.reject(new Error(payload.error.message ?? "JSON-RPC command failed"));
+						const error = new Error(payload.error.message ?? "JSON-RPC command failed");
+						if (typeof payload.error.code === "number") {
+							Object.assign(error, { code: payload.error.code });
+						}
+						pending.reject(error);
 						return;
 					}
 
@@ -771,6 +790,38 @@ class JsonRpcWebSocketClient {
 		});
 
 		return this.socketPromise;
+	}
+}
+
+class CdpWebSocketClient extends WebSocketCommandClient {
+	constructor(
+		endpoint: string,
+		private readonly sessionId?: string,
+	) {
+		super(endpoint);
+	}
+
+	protected createCommandFrame(
+		id: WebSocketCommandId,
+		method: string,
+		params: Record<string, unknown>,
+	): CdpCommandFrame {
+		return {
+			id,
+			method,
+			params,
+			...(this.sessionId === undefined ? {} : { sessionId: this.sessionId }),
+		};
+	}
+}
+
+class JsonRpcWebSocketClient extends WebSocketCommandClient {
+	protected createCommandFrame(
+		id: WebSocketCommandId,
+		method: string,
+		params: Record<string, unknown>,
+	): JsonRpcCommandFrame {
+		return { id, jsonrpc: "2.0", method, params };
 	}
 }
 
@@ -974,7 +1025,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 	constructor(
 		readonly pageId: string,
 		private readonly browserContextId: string | undefined,
-		private readonly pageClient: JsonRpcWebSocketClient,
+		private readonly pageClient: CdpWebSocketClient,
 		private readonly release: (request: PoolReleaseRequest) => Promise<void>,
 	) {}
 
@@ -1335,7 +1386,7 @@ class CdpPoolBrowserClient implements SupportedBrowserClient {
 				...(options?.isolatedContext ? { isolationMode: "browserContext" } : {}),
 			}),
 		);
-		const pageClient = new JsonRpcWebSocketClient(acquireResult.wsEndpoint);
+		const pageClient = new CdpWebSocketClient(acquireResult.wsEndpoint);
 		const page = new CdpPoolBrowserPage(
 			acquireResult.pageId,
 			acquireResult.browserContextId,
