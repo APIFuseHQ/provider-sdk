@@ -787,7 +787,6 @@ function createSessionFetcher(
 		const resolvedProxy = await resolveProxyConfigAsync({
 			proxy: options?.proxy ?? clientOptions.proxy,
 			upstream: clientOptions.upstream,
-			apifuseConfig: clientOptions.apifuseConfig,
 			affinityKey: clientOptions.affinityKey,
 			proxyAttempt: computeProxyAttemptIndex({
 				baseProxyAttempt: clientOptions.proxyAttempt,
@@ -860,11 +859,9 @@ function createSessionFetcher(
 			// A registry vendor chain (smartproxy/nodemaven) is the only policy whose
 			// successive attempts resolve a *different* endpoint, so it is the only one
 			// that may widen the attempt cap to the pool span, de-duplicate endpoints,
-			// and drive allocator stale-pool refresh. A static custom/decodo policy
-			// resolves the same URL every attempt: widening/refreshing it would resend
-			// the request dozens of times (up to maxAttempts × refreshes) and bypass
-			// retry:false and unsafe-method controls. Static policies therefore follow
-			// the ordinary transport-retry budget instead.
+			// and drive allocator stale-pool refresh. Deprecated custom/decodo policies
+			// have no managed endpoint to rotate or refresh, so they follow the ordinary
+			// transport-retry budget instead.
 			const rotatesRegistryChain =
 				usesPolicyAllocator && policyResolvesRegistryVendorChain(policyProxy);
 			const maxAttempts = rotatesRegistryChain ? policyProxyAttemptCap : retryAttemptCap;

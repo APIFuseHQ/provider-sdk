@@ -517,7 +517,6 @@ async function resolveNativeProxy(
 	const resolvedProxy = await resolveProxyConfigAsync({
 		proxy: options.proxy ?? clientOptions.proxy,
 		upstream: clientOptions.upstream,
-		apifuseConfig: clientOptions.apifuseConfig,
 		proxyPolicy: clientOptions.proxyPolicy,
 		affinityKey: clientOptions.affinityKey,
 		proxyAttempt: computeProxyAttemptIndex({

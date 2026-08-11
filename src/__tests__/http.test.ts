@@ -1009,42 +1009,6 @@ describe("createHttpClient", () => {
 		}
 	});
 
-	it("defaults provider-policy proxy GET requests to transient transport retry", async () => {
-		const originalRandom = Math.random;
-		Math.random = () => 0;
-		mockNativeFetchState.queuedErrors.push(new Error("Network error"));
-		mockNativeFetchState.queuedResponses.push({
-			status: 200,
-			body: JSON.stringify({ ok: true }),
-			headers: { "content-type": "application/json" },
-		});
-
-		const { createHttpClient } = await import("../runtime/http.js");
-		const http = createHttpClient(undefined, {
-			upstream: {
-				proxy: {
-					mode: "optional",
-					provider: "custom",
-					geo: { country: "KR" },
-				},
-			},
-			apifuseConfig: { proxy: { url: "http://proxy.test" } },
-		});
-		let response: Awaited<ReturnType<typeof http.get>> | undefined;
-		try {
-			response = await http.get("https://example.com");
-		} finally {
-			Math.random = originalRandom;
-		}
-
-		expect(response?.ok).toBeTrue();
-		expect(response?.data).toEqual({ ok: true });
-		expect(mockNativeFetchState.calls).toHaveLength(2);
-		for (const call of mockNativeFetchState.calls) {
-			expect((call.init as RequestInit & { proxy?: string })?.proxy).toBe("http://proxy.test");
-		}
-	});
-
 	it("does not default-retry optional proxy policies that resolve without a proxy URL", async () => {
 		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;

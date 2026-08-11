@@ -18,7 +18,6 @@ const PROXY_ENV_KEYS = [
 	"APIFUSE__PROXY__PROVIDER",
 	"APIFUSE__PROXY__DEFAULT_COUNTRY",
 	"APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES",
-	"APIFUSE__PROXY__URL",
 ] as const;
 
 function captureFailovers(): {
