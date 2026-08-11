@@ -286,6 +286,44 @@ describe("OCR CAPTCHA constraint handling", () => {
 		expect(result[0]).toEqual({ text: "AbC", satisfiesConstraints: true });
 	});
 
+	it("rejects embedded forbidden characters with an unanchored charset RegExp", () => {
+		const result = extractCaptchaCandidates("ab!!cd12", {
+			charset: /[A-Za-z0-9]/,
+			maxCandidates: 1,
+		});
+
+		expect(result[0]).toEqual({ text: "ab!!cd12", satisfiesConstraints: false });
+	});
+
+	it("resets global charset RegExp state for every character", () => {
+		for (const modelText of ["ABC", "CBA"]) {
+			expect(
+				extractCaptchaCandidates(modelText, { charset: /[A-Z]/g, maxCandidates: 1 })[0]
+					?.satisfiesConstraints,
+			).toBe(true);
+		}
+	});
+
+	it("treats string and RegExp charsets equivalently", () => {
+		const stringCharset = "abcdefghijklmnopqrstuvwxyz0123456789";
+		const regexCharset = /[a-z0-9]/;
+
+		for (const modelText of ["abcd1234", "ab!!cd12"]) {
+			const stringResult = extractCaptchaCandidates(modelText, {
+				charset: stringCharset,
+				maxCandidates: 1,
+			});
+			const regexResult = extractCaptchaCandidates(modelText, {
+				charset: regexCharset,
+				maxCandidates: 1,
+			});
+
+			expect(regexResult[0]?.satisfiesConstraints).toBe(
+				stringResult[0]?.satisfiesConstraints,
+			);
+		}
+	});
+
 	it("adds ranked constraint-satisfying homoglyph alternatives and honors maxCandidates", () => {
 		const candidates = extractCaptchaCandidates("I0", {
 			length: 2,

@@ -271,6 +271,7 @@ export interface OcrResult {
 
 export interface OcrCaptchaOptions {
 	readonly length?: number;
+	/** Allowed characters. A RegExp is applied to each character, not to the whole text. */
 	readonly charset?: string | RegExp;
 	readonly caseSensitive?: boolean;
 	readonly maxCandidates?: number;

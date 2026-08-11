@@ -376,8 +376,10 @@ function matchesCharset(
 	}
 	const flags = caseSensitive || charset.flags.includes("i") ? charset.flags : `${charset.flags}i`;
 	const matcher = new RegExp(charset.source, flags);
-	matcher.lastIndex = 0;
-	return matcher.test(text);
+	return [...text].every((character) => {
+		matcher.lastIndex = 0;
+		return matcher.test(character);
+	});
 }
 
 function satisfiesCaptchaConstraints(text: string, options: OcrCaptchaOptions): boolean {
