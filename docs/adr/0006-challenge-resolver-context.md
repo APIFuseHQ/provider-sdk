@@ -11,6 +11,19 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 2 (2026-08-10).** Implementation of the `"browser"` vendor found
+that the SDK's browser contract cannot express what Decisions 3b and 5 assume.
+`BrowserPage` exposes navigation, input, `evaluate`, frames, and screenshots,
+but no cookie accessor, and `src/runtime/browser.ts` contains no cookie handling
+at all. `evaluate(() => document.cookie)` is not a substitute for two
+independent reasons: it returns only `name=value` pairs, so the `expires` signal
+Decision 3b requires cannot be read from it — the Revision 1 measurement of
+345,035 s came from a cookie-jar API, not from `document.cookie` — and it cannot
+see `httpOnly` cookies at all, which `cf_clearance` is. Decision 3c therefore
+adds a cookie accessor to the browser contract as a prerequisite. Sections
+changed: Decision 3c (new), Decision 5 (binding sources its values from that
+accessor), Verification.
+
 **Revision 1 (2026-08-10).** A second consumer, `buyee`, was measured after the
 first draft. It contradicted a premise that had been carried from vendor
 documentation alone: that solver vendors are the natural implementation of
@@ -318,6 +331,52 @@ row — it resolved the same `aws_waf` challenge in 17.5 s — and is the vendor
 provider already in production (`tabelog`) uses, so an existing credential
 covers it.
 
+#### 3c. The browser contract gains a cookie accessor
+
+The `"browser"` vendor resolves cookie-family kinds, so it must return cookies
+with their attributes. The contract has no way to do that today:
+
+```ts
+interface BrowserPage extends BrowserFrame {
+	close, fill, goto, screenshot, click, type,
+	waitForSelector, frames, withResourcePolicy
+	// evaluate<T> is inherited from BrowserFrame
+}
+```
+
+`BrowserPage` therefore gains:
+
+```ts
+cookies(): Promise<readonly BrowserCookie[]>;
+
+interface BrowserCookie {
+	readonly name: string;
+	readonly value: string;
+	readonly domain: string;
+	readonly path: string;
+	/** Unix seconds; absent for a session cookie. */
+	readonly expires?: number;
+	readonly httpOnly: boolean;
+	readonly secure: boolean;
+	readonly sameSite?: "Strict" | "Lax" | "None";
+}
+```
+
+`expires` and `httpOnly` are the two fields that make this an addition to the
+contract rather than a helper over `evaluate`. Both `BrowserPage`
+implementations must provide it: the CDP-managed page through
+`Network.getCookies`, and the local Playwright page through its browser
+context's cookie jar. A capability present on only one backend would make
+provider behaviour depend on deployment topology.
+
+This accessor is not resolver-specific. Any provider that establishes a session
+in a browser and continues it over HTTP needs the same values, and the absence
+of this method is why no provider does that today.
+
+Reading cookies stays inside `withIsolatedContext`, so cookies belong to the
+lease that produced them and the managed-pool boundary is unchanged: providers
+still reach only the pool manager, never a Chrome worker directly.
+
 #### 3b. Solutions are cached to their measured lifetime
 
 A 4-day token obtained in 4.5 s is wasted if it is re-minted per request. The
@@ -389,7 +448,9 @@ This is new work introduced by this decision, not an existing capability.
 **The `"browser"` vendor reaches this from the other side.** A CDP page knows
 its own user agent (`navigator.userAgent` is readable, and CDP can set it), so
 for that vendor the binding value is available at mint time without impit
-having to expose anything. This does not remove the impit work — a
+having to expose anything. The cookie half comes from the Decision 3c accessor,
+which also supplies the `expires` value Decision 3b caches against; neither is
+obtainable from `document.cookie`. This does not remove the impit work — a
 `"capsolver"` leg in the same chain still needs the session's UA — but it does
 mean the risk is no longer all-or-nothing: the browser leg of cookie-family
 binding can be implemented and verified before the impit question is settled.
@@ -516,6 +577,13 @@ These must hold before `Status: accepted`:
   a subsequent `ctx.stealth` request over the same proxy lease and user agent.
   The `AntiCloudflareTask` `html` field expects the actual 403 body, so the
   request shape cannot be finalized from documentation alone.
+- `BrowserPage.cookies()` returns identical attribute sets from the CDP-managed
+  and local Playwright backends for the same cookie, including `expires` and
+  `httpOnly`. A backend-dependent shape would make caching correctness depend on
+  deployment topology.
+- `cookies()` observes an `httpOnly` cookie that `evaluate(() => document.cookie)`
+  cannot see, which is the property that makes it a contract addition rather
+  than a convenience wrapper.
 - Requesting an undeclared kind throws before any vendor call.
 - A token-family provider never triggers proxy or user-agent binding.
 - Exhausting every vendor raises a typed error naming the attempted vendors and
