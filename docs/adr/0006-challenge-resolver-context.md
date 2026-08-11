@@ -379,10 +379,11 @@ export interface ProviderResolverConfig {
 `ProviderDefinition.resolver?: ProviderResolverConfig`, and
 `ProviderContext.resolver: ResolverContext`.
 
-`ProviderResolverVendor` is `"2captcha" | "capsolver" | "capmonster" |
-"custom"`. `2captcha` is listed first because it is the vendor already carrying
-production traffic; union order is documentation only, and the effective
-fallback order is whatever `vendors` declares.
+`ProviderResolverVendor` is `"browser" | "2captcha" | "capsolver" |
+"capmonster" | "custom"`. `2captcha` is listed before the other paid vendors
+because it is the vendor already carrying production traffic; union order is
+documentation only, and the effective fallback order is whatever `vendors`
+declares.
 
 An undeclared provider receives an unsupported client whose every call throws,
 matching `createUnsupportedSttClient`. Requesting a kind outside the declared
