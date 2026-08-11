@@ -35,6 +35,7 @@ export function extractProviderContract(provider: ProviderDefinition): ProviderC
 	const auth = extractAuth(provider.auth);
 	const stealth = toJsonValue(provider.stealth);
 	const proxy = toJsonValue(provider.proxy);
+	const ocr = toJsonValue(provider.ocr);
 	const stt = toJsonValue(provider.stt);
 	const browser = toJsonValue(provider.browser);
 	const reviewed = toJsonValue(provider.reviewed);
@@ -59,6 +60,7 @@ export function extractProviderContract(provider: ProviderDefinition): ProviderC
 		...(provider.allowedHosts ? { allowedHosts: [...provider.allowedHosts].sort() } : {}),
 		...(stealth === undefined ? {} : { stealth }),
 		...(proxy === undefined ? {} : { proxy }),
+		...(ocr === undefined ? {} : { ocr }),
 		...(stt === undefined ? {} : { stt }),
 		...(browser === undefined ? {} : { browser }),
 		...(auth === undefined ? {} : { auth }),

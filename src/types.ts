@@ -243,6 +243,59 @@ export interface SmsOtpMatcherDefinition {
 	extractOtp(body: string): string | null;
 }
 
+export interface ProviderOcrConfig {
+	readonly mode: "required" | "optional";
+}
+
+export type OcrImageInput =
+	| { readonly kind: "base64"; readonly data: string; readonly mediaType?: string }
+	| { readonly kind: "url"; readonly url: string };
+
+export interface OcrRecognizeRequest {
+	readonly image: OcrImageInput;
+	readonly hint?: "captcha" | "document" | "generic";
+	readonly prompt?: string;
+	readonly maxTokens?: number;
+}
+
+export interface OcrWarning {
+	readonly code: string;
+	readonly message: string;
+}
+
+export interface OcrResult {
+	readonly text: string;
+	readonly model: string;
+	readonly warnings?: readonly OcrWarning[];
+}
+
+export interface OcrCaptchaOptions {
+	readonly length?: number;
+	readonly charset?: string | RegExp;
+	readonly caseSensitive?: boolean;
+	readonly maxCandidates?: number;
+}
+
+export interface OcrCaptchaCandidate {
+	readonly text: string;
+	readonly satisfiesConstraints: boolean;
+}
+
+export interface OcrCaptchaResult {
+	readonly text: string;
+	readonly candidates: readonly OcrCaptchaCandidate[];
+	readonly satisfiesConstraints: boolean;
+	readonly model: string;
+}
+
+export interface OcrContext {
+	recognize(request: OcrRecognizeRequest): Promise<OcrResult>;
+	extractCaptchaText(
+		image: OcrImageInput,
+		options?: OcrCaptchaOptions,
+	): Promise<OcrCaptchaResult>;
+}
+
 export type SttTranscribeMode = "general" | "otp";
 export type SttPromptPolicy = "none" | "default-hint" | "custom-hint";
 export type SttUnsupportedOptionPolicy = "warn" | "error";
@@ -1889,6 +1942,7 @@ export interface FlowContext {
 	env: EnvContext;
 	credential?: CredentialContext;
 	context: ContextScratchpad;
+	ocr: OcrContext;
 	stt: SttContext;
 	auth: AuthFlowTerminalContext;
 }
@@ -2014,6 +2068,7 @@ export interface ProviderContext {
 	browser: BrowserClient;
 	trace: TraceContext;
 	auth: AuthContext;
+	ocr: OcrContext;
 	stt: SttContext;
 	choice: ProviderChoiceContext;
 }
@@ -2187,6 +2242,7 @@ export interface ProviderDefinition {
 		platform: StealthPlatform;
 	};
 	proxy?: ProviderProxyConfig;
+	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;
 	browser?: {
 		engine: BrowserEngine;
