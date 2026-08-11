@@ -11,6 +11,15 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 3 (2026-08-11).** The first live run of the `"browser"` vendor
+against the real `cdp-pool` in the production cluster failed, and the failure
+was environmental rather than a defect: the cluster's egress IP is refused by
+`buyee` before any challenge is issued. This exposes an axis both earlier
+revisions missed — reaching a challenge is itself IP-gated, so `"browser"` is
+not identity-free the way the token family is. Sections changed: Context (Third
+measurement), Decision 3a (egress prerequisite), Decision 5 (the binding axis
+is reframed from solution-family to reachability), Verification, and Consequences.
+
 **Revision 2 (2026-08-10).** Implementation of the `"browser"` vendor found
 that the SDK's browser contract cannot express what Decisions 3b and 5 assume.
 `BrowserPage` exposes navigation, input, `evaluate`, frames, and screenshots,
@@ -213,6 +222,51 @@ solver integration anywhere is `apifuse-provider-tabelog`, which hand-rolled a
 both that the capability belongs in the SDK and that a vendor abstraction with
 one in-tree implementation is the status quo being replaced.
 
+### Third measurement: reaching the challenge is IP-gated (2026-08-11)
+
+The first live run of the implemented `"browser"` vendor against the production
+`cdp-pool` failed. The proximate error was a CDP `-32000 Failed to find context
+with id ...`, which reads like a defect in the adapter. It is not. Narrowing it
+by polling `evaluate()` across the whole solve window produced this, twelve
+times identically:
+
+```
+GOTO ok
+POLL_1..12   host=buyee.jp  title="403 Forbidden"  outerHTML.length=117
+COOKIES 0
+```
+
+A 117-byte `403 Forbidden` is an upstream refusal page. The challenge page is
+2,161 bytes and carries `x-amzn-waf-action: challenge`. So the browser was not
+failing to solve a challenge — it was never offered one. The `-32000` was a
+secondary effect: an isolated world created against the 403 document is
+destroyed when the adapter re-navigates on retry.
+
+Confirmed by comparing egress identities against the same URL at the same time:
+
+| Origin | Egress | `buyee` response |
+| --- | --- | --- |
+| Dev host (the Revision 1 measurement) | residential KR IP | **202, `x-amzn-waf-action: challenge`** |
+| Production cluster pod | EKS NAT | **403 Forbidden, 117 bytes** |
+
+Two conclusions, and the second is the load-bearing one:
+
+1. The Revision 1 measurement stands. 4.5 s unattended resolution was real; it
+   was measured from an egress that AWS WAF is willing to challenge.
+2. **`aws_waf` applies an IP-reputation gate ahead of the challenge gate.** A
+   datacentre egress can be refused outright, in which case no amount of
+   browser fidelity helps, because the fingerprint script is never served.
+   Revisions 1 and 2 both modelled `"browser"` as needing no network identity —
+   that framing came from the token/cookie solution split, and it is wrong for
+   this kind. Proxy identity is not merely what binds a cookie *after* a solve;
+   for `aws_waf` and `cloudflare_interstitial` it is a precondition for the
+   solve being possible at all.
+
+This also explains why the failure appeared only now: every earlier probe ran
+from the dev host, which is exactly the environment that is not gated. A
+capability verified only from a developer workstation can be structurally
+unavailable in production.
+
 ## Decision
 
 ### 1. A new `ctx.resolver` context, separate from `ctx.ocr`
@@ -307,6 +361,7 @@ failover triggers map cleanly onto the existing four:
 | allocation exhausted | pool queue depth exceeded, no endpoint available |
 | outage / transport failure | CDP connect failure, endpoint quarantined |
 | per-vendor timeout | navigation or solve budget elapsed |
+| **egress refused before challenge** | upstream returns a block page instead of a challenge (Revision 3) |
 | *not* a failover cause | the challenge itself proving unsolvable in a browser |
 
 That last row is the important one and it is load-bearing: if AWS promotes a
@@ -317,16 +372,50 @@ transition survivable without a code change, because a paid vendor with human
 solvers remains the only path for a true CAPTCHA. This is the concrete reason
 the chain must be ordered and heterogeneous rather than a single selector.
 
+The `egress refused` row is added by Revision 3 and is a genuine vendor fault
+rather than a challenge verdict, so it advances the chain: this vendor's egress
+is unacceptable to the upstream, and the next vendor — which resolves from its
+own network — may still succeed. The adapter must distinguish it from a solve
+failure, because the two are indistinguishable at the symptom level: a block
+page yields no challenge to fail at, and any execution-context error observed
+afterwards is downstream of the refusal, not its cause. Detection is on the
+served document (block page versus challenge markers), never on the CDP error.
+
+#### 3a-bis. `"browser"` requires an egress policy for fingerprint kinds
+
+Because reaching the challenge is IP-gated, a `"browser"` leg declared for
+`aws_waf` or `cloudflare_interstitial` is only usable from an egress the
+upstream will challenge. The SDK already owns this concept:
+`ProviderProxyPolicy` with an ordered vendor chain and geo/session affinity,
+which `apifuse-provider-tabelog` uses for exactly this purpose
+(`{ mode: "optional", providers: ["smartproxy", "nodemaven"], geo: { country: "JP" } }`).
+
+Consequences for this decision:
+
+- The `"browser"` vendor participates in proxy resolution for fingerprint
+  kinds, rather than being exempt from it. Its CDP session egresses through the
+  resolved lease.
+- `mode` must be effectively required, not `optional`, for these kinds. An
+  optional policy silently degrades to the cluster's own NAT, which is the
+  measured failure — a fail-closed error naming the missing proxy policy is
+  strictly better than a 403 surfacing as an opaque CDP error.
+- The pool's own egress is a deployment property, not something a provider can
+  assert. So this cannot be validated by declaration review alone; it needs the
+  live check in Verification.
+
 Recommended orderings, from the measured families:
 
 | Kind | Recommended `vendors` | Why |
 | --- | --- | --- |
-| `aws_waf`, `cloudflare_interstitial` | `["browser", "capsolver"]` | fingerprint work the in-house pool does faster and free; vendor covers promotion to a human puzzle |
+| `aws_waf`, `cloudflare_interstitial` | `["browser", "capsolver"]` + proxy policy | fingerprint work the in-house pool does faster and free; vendor covers promotion to a human puzzle; proxy is a precondition for both legs |
 | `turnstile`, `recaptcha_v2/v3`, `hcaptcha` | `["capsolver", "capmonster"]` | vendors document proxyless operation and a browser adds cost with no fidelity gain |
 
 The `aws_waf` row is measured rather than recommended by analogy: with
 `["browser", "capsolver"]`, the `buyee` probe resolved in 4.5 s on the first
-leg and never reached the second. `2captcha` is a valid substitute in either
+leg and never reached the second — **from a residential egress**. From the
+production cluster's NAT the same first leg is refused outright (Revision 3),
+which is why the proxy policy is part of the recommendation rather than a
+tuning detail. `2captcha` is a valid substitute in either
 row — it resolved the same `aws_waf` challenge in 17.5 s — and is the vendor a
 provider already in production (`tabelog`) uses, so an existing credential
 covers it.
@@ -425,6 +514,25 @@ that will use them, through the existing
 `StealthSessionCookies.setFromCookieStrings`. The provider calls one method and
 never learns which proxy lease was assigned.
 
+Revision 3 reframes what this binding is *for*. The original framing derived it
+from the solution family: cookies are identity-bound, tokens are not. That is
+still true of the solution, but it understated the role of identity. Measured on
+`aws_waf`, egress identity gates whether a challenge is issued at all — a
+datacentre IP received a 403 block page where a residential IP received the
+challenge. So identity operates at two distinct points:
+
+| Point | What identity determines | Applies to |
+| --- | --- | --- |
+| Before the solve | whether the upstream serves a challenge instead of a block page | `aws_waf`, `cloudflare_interstitial` |
+| After the solve | whether the minted cookie is accepted on subsequent requests | cookie family |
+
+The second point was in the ADR from the start; the first is new, and it is why
+Decision 3a-bis makes a proxy policy a precondition rather than an optimisation.
+Both points are satisfied by the same lease, which is the reason they belong to
+one mechanism: the egress that earns the challenge must also be the egress that
+uses the resulting cookie. Resolving them from separate leases would produce a
+solve that succeeds and a cookie that is immediately refused.
+
 The rejected alternative is returning cookies for the provider to install. It
 fails in a specific and hard-to-debug way: a cookie minted against one egress
 IP or user agent is silently invalid on another, so the resolver reports
@@ -505,8 +613,18 @@ Negative / accepted:
 - The SDK must introduce user-agent pinning in stealth sessions.
 - Cookie-family kinds require a proxy vendor to be configured; without one they
   fail closed.
+- **Fingerprint kinds require a proxy vendor even on the `"browser"` leg**
+  (Revision 3). The in-house pool is free of *solver* cost but not of *egress*
+  cost, so `"browser"` first in the chain reduces spend rather than eliminating
+  it. A deployment whose pool egresses through plain cloud NAT cannot serve
+  `aws_waf` at all, and that is a property of the cluster rather than of any
+  provider declaration.
 - Per-solve vendor cost becomes part of a provider's operating profile and is
   charged even for attempts that do not yield a usable solution.
+- **Verification cannot be completed from developer hardware.** A residential
+  dev egress is exactly the environment that is not IP-gated, so a probe that
+  passes there proves nothing about production. Every future challenge-kind
+  measurement has to be taken from the deployment's own egress path.
 
 ## Rejected alternatives
 
@@ -567,16 +685,32 @@ These must hold before `Status: accepted`:
   the task name is not Capsolver's `AntiAwsWafTask`, and the token arrives as
   `solution.existing_token`, not `solution.cookie`. Reading `cookie` returns an
   empty string and produces a solution that silently fails verification.
-- **`aws_waf` on `"browser"` is confirmed** (2026-08-10): headless Chromium
-  resolved the same challenge unattended in 4.5 s with no credential and no
-  spend, and the minted token served paginated requests for a measured
-  345,035 s. Because this leg needs no vendor account, it is the one
-  verification item that can run in CI-like conditions rather than requiring
-  owner-approved live balance.
+- **`aws_waf` on `"browser"` is confirmed from a residential egress**
+  (2026-08-10): headless Chromium resolved the same challenge unattended in
+  4.5 s with no credential and no spend, and the minted token served paginated
+  requests for a measured 345,035 s.
+- **`aws_waf` on `"browser"` is NOT yet confirmed from a datacentre egress, and
+  is refused there today** (2026-08-11, Revision 3). The production `cdp-pool`
+  received a 117-byte 403 block page instead of a challenge, twelve polls
+  running. This retracts the previous claim that the browser leg is the one
+  verification item runnable without owner-approved spend: it needs no *solver*
+  balance, but it does need a proxy lease, which has its own cost and approval.
+  Outstanding items this creates:
+  - A `"browser"` solve through a resolved proxy lease (JP geo, the
+    `tabelog` policy shape) reaches the challenge and completes. Until this
+    passes, `"browser"` is verified only on developer hardware.
+  - The egress-refusal path is classified as a vendor fault and advances the
+    chain, asserted on the served document rather than on a CDP error code.
+  - A `"browser"` leg declared for a fingerprint kind with no proxy policy
+    fails closed naming the missing policy, rather than silently egressing
+    through the cluster NAT.
 - A live `cloudflare_interstitial` solve returns `cf_clearance` that authorizes
   a subsequent `ctx.stealth` request over the same proxy lease and user agent.
   The `AntiCloudflareTask` `html` field expects the actual 403 body, so the
   request shape cannot be finalized from documentation alone.
+- The lease that earns the challenge is the same lease that carries the minted
+  cookie (Decision 5). The negative half is what proves it: a cookie minted on
+  one lease must be refused on another.
 - `BrowserPage.cookies()` returns identical attribute sets from the CDP-managed
   and local Playwright backends for the same cookie, including `expires` and
   `httpOnly`. A backend-dependent shape would make caching correctness depend on
