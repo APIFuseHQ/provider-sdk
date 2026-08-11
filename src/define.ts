@@ -134,9 +134,8 @@ const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
 // credential fails at build/validation time rather than during a live outage: a
 // declared-but-uncredentialed fallback leg is a silently dead SPOF, which is
 // exactly the failure class the multi-vendor chain exists to remove. Vendors
-// absent from this map (e.g. `custom`/`decodo`, whose credentials come from the
-// `APIFUSE__PROXY__URL` bring-your-own escape hatch, not provider secrets) impose
-// no declaration requirement.
+// absent from this map (the deprecated `custom`/`decodo` values have no managed
+// adapter) impose no declaration requirement.
 const VENDOR_REQUIRED_SECRETS: Partial<Record<ProviderProxyProvider, readonly string[]>> = {
 	smartproxy: [SMARTPROXY_APP_KEY_SECRET],
 	nodemaven: [NODEMAVEN_USERNAME_SECRET, NODEMAVEN_PASSWORD_SECRET],
@@ -683,7 +682,7 @@ function validateProviderProxy(config: {
 	);
 	if (deprecatedVendors.length > 0) {
 		console.warn(
-			`[provider-sdk] Provider "${config.id}" uses deprecated proxy vendor(s): ${deprecatedVendors.join(", ")}. Use "smartproxy"/"nodemaven", or the APIFUSE__PROXY__URL bring-your-own escape hatch.`,
+			`[provider-sdk] Provider "${config.id}" uses deprecated proxy vendor(s): ${deprecatedVendors.join(", ")}. Use "smartproxy"/"nodemaven".`,
 		);
 	}
 }

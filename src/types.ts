@@ -849,10 +849,12 @@ export type ProviderProxyMode = "disabled" | "optional" | "required";
  * - `decodo` — **decodo.com**, the *gateway* proxy that was named "Smartproxy"
  *	 (smartproxy.com) before its 2025 rebrand to Decodo. Sticky sessions via
  *	 username params. A different company from `smartproxy` above.
- *	 **@deprecated** — unused; no managed adapter. Use `smartproxy`/`nodemaven`,
- *	 or the `APIFUSE__PROXY__URL` bring-your-own escape hatch.
- * - `custom` — **@deprecated** bring-your-own static proxy URL marker. The
- *	 `APIFUSE__PROXY__URL` env still works without declaring this value.
+ *	 **@deprecated** — unused; no managed adapter. Declare a
+ *	 `ProviderProxyPolicy` using `smartproxy` or `nodemaven` instead; the
+ *	 `smartproxy` allocator requires `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
+ * - `custom` — **@deprecated** static proxy marker with no managed adapter.
+ *	 Use `ProviderProxyPolicy` with `smartproxy`/`nodemaven`; the `smartproxy`
+ *	 allocator requires `APIFUSE__PROXY__SMARTPROXY_APP_KEY`.
  */
 export type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 
