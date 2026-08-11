@@ -1,5 +1,9 @@
 # @apifuse/provider-sdk Changelog
 
+## Unreleased
+
+- Added the `thrown-error-code-undeclared` authoring lint (warning level): `apifuse check` now statically flags literal `ProviderError`/`ValidationError` codes that are neither SDK-registered nor declared in any operation's `docs.errorCodes`, surfacing the runtime `unregistered_provider_error_code` signal at check time. The canonical SDK code→status mapping moved to `SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES` in `error-resolution.ts`, shared by the runtime status resolver and the lint.
+
 ## 2.2.0-beta.21
 
 - Release candidate for main commit 00f61024fb18db39711dc5076c4621508baa49f5.
