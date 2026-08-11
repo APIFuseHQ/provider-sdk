@@ -807,3 +807,169 @@ await fetch(endpoint + "/json/version");
 		).toBe(false);
 	});
 });
+
+describe("lintProvider thrown-error-code-undeclared", () => {
+	const undeclaredRule = (item: { rule: string }) => item.rule === "thrown-error-code-undeclared";
+
+	function providerWithSources(
+		providerSourceFiles: Record<string, string>,
+		errorCodes: ReadonlyArray<{ code: string; status?: 400 | 409; description: string }> = [],
+	) {
+		return {
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party" as const,
+			providerSourceFiles,
+			operations: {
+				lookup: {
+					descriptionKey: "operations.lookup.description",
+					input: withDescriptionKey(
+						z.object({
+							symbol: withDescriptionKey(z.string(), "operations.lookup.fields.symbol.description"),
+						}),
+						"operations.lookup.input.description",
+					),
+					output: withDescriptionKey(
+						z.object({
+							price: withDescriptionKey(z.number(), "operations.lookup.fields.price.description"),
+						}),
+						"operations.lookup.output.description",
+					),
+					fixtures: { request: { symbol: "BTC" }, response: { price: 100 } },
+					docs: { errorCodes: [...errorCodes] },
+				},
+			},
+		};
+	}
+
+	it("warns on a literal thrown code that no operation declares", () => {
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"upstream/client.ts": `throw new ProviderError("sold out", { retryable: false, code: "ITEM_SOLD_OUT" });`,
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics).toEqual([
+			expect.objectContaining({
+				rule: "thrown-error-code-undeclared",
+				level: "warn",
+				field: "sourceFiles.upstream/client.ts",
+			}),
+		]);
+		expect(diagnostics[0]?.message).toContain('"ITEM_SOLD_OUT"');
+		expect(diagnostics[0]?.message).toContain("upstream/client.ts");
+		expect(diagnostics[0]?.message).toContain("docs.errorCodes");
+	});
+
+	it("stays silent when any operation declares the thrown code", () => {
+		const diagnostics = lintProvider(
+			providerWithSources(
+				{
+					"upstream/client.ts": `throw new ProviderError("sold out", { code: "ITEM_SOLD_OUT" });`,
+				},
+				[{ code: "ITEM_SOLD_OUT", status: 409, description: "Upstream refused the purchase." }],
+			),
+		).filter(undeclaredRule);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("stays silent for SDK-registered codes", () => {
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"index.ts": [
+					`throw new ProviderError("upstream broke", { code: "UPSTREAM_ERROR" });`,
+					`throw new ProviderError("secret missing", { code: "MISSING_SECRET" });`,
+					`throw new ProviderError("relog", { code: "reauth_required" });`,
+				].join("\n"),
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("skips computed or dynamic codes silently", () => {
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"index.ts": [
+					`throw new ProviderError("dyn", { code: upstreamCode });`,
+					"throw new ProviderError(\"tpl\", { code: `UPSTREAM_${kind}` });",
+					`throw new ProviderError("ternary", { code: soldOut ? "A_CODE" : "B_CODE" });`,
+					`throw new ProviderError("concat", { code: "PREFIX_" + suffix });`,
+				].join("\n"),
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("flags ValidationError constructions too", () => {
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"index.ts": `throw new ValidationError("bad input", { code: "WEIRD_INPUT" });`,
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics).toEqual([
+			expect.objectContaining({ level: "warn", field: "sourceFiles.index.ts" }),
+		]);
+		expect(diagnostics[0]?.message).toContain('"WEIRD_INPUT"');
+	});
+
+	it("does not read codes out of message strings or nested objects", () => {
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"index.ts": [
+					`throw new ProviderError('set code: "NOT_A_CODE" upstream', { code: dynamic });`,
+					`throw new ProviderError("nested", { details: { code: "INNER_CODE" }, code: dynamic });`,
+				].join("\n"),
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("ignores test sources", () => {
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"index.test.ts": `throw new ProviderError("boom", { code: "TEST_ONLY_CODE" });`,
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("falls back to operation handler source when no source files are provided", () => {
+		const base = providerWithSources({});
+		const provider = {
+			...base,
+			providerSourceFiles: undefined,
+			operations: {
+				lookup: {
+					...base.operations.lookup,
+					source: `async () => { throw new ProviderError("nope", { code: "HANDLER_ONLY_CODE" }); }`,
+				},
+			},
+		};
+
+		const diagnostics = lintProvider(provider).filter(undeclaredRule);
+
+		expect(diagnostics).toEqual([
+			expect.objectContaining({ level: "warn", field: "operations.lookup.handler" }),
+		]);
+		expect(diagnostics[0]?.message).toContain('"HANDLER_ONLY_CODE"');
+	});
+
+	it("reports each undeclared code once per file", () => {
+		const diagnostics = lintProvider(
+			providerWithSources({
+				"index.ts": [
+					`throw new ProviderError("first", { code: "DUP_CODE" });`,
+					`throw new ProviderError("second", { code: "DUP_CODE" });`,
+				].join("\n"),
+			}),
+		).filter(undeclaredRule);
+
+		expect(diagnostics).toHaveLength(1);
+	});
+});

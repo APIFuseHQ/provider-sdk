@@ -7,6 +7,7 @@ import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
+	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 } from "../error-resolution.js";
 import {
 	AuthError,
@@ -948,34 +949,13 @@ function toStatusCode(error: unknown, declaredErrorCode?: OperationErrorCode): P
 		) {
 			return declaredErrorCode.status;
 		}
-		switch (error.code) {
-			case "AUTH_REQUIRED":
-			case "reauth_required":
-				return 401;
-			// Unprovisioned declared secret: a deployment/config defect, never an
-			// upstream failure — explicit 400 (was only reached via fallthrough).
-			case MISSING_SECRET_CODE:
-				return 400;
-			case "NOT_FOUND":
-			case "not_found":
-			case "NO_DATA":
-				return 404;
-			case "RATE_LIMITED":
-			case "UPSTREAM_RATE_LIMIT":
-			case "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR":
-				return 429;
-			// Deterministic upstream business refusal (honest-provider-error-
-			// contract): the upstream evaluated the request and said no under
-			// its own rules — a conflict with upstream state, never a 5xx.
-			case "UPSTREAM_REJECTED":
-				return 409;
-			case "UPSTREAM_ERROR":
-			case "BLOCKED":
-				return 502;
-			case "STT_UNAVAILABLE":
-			case "UNSUPPORTED_STT_BACKEND":
-			case "STATEFUL_FORWARDING_REPLAY_CACHE_FULL":
-				return 503;
+		// Canonical SDK code → status mapping lives in error-resolution.ts so
+		// the authoring lint and this runtime path share one source of truth.
+		if (typeof error.code === "string") {
+			const mappedStatus = SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(error.code);
+			if (mappedStatus !== undefined) {
+				return mappedStatus;
+			}
 		}
 		if (isTransportError(error)) {
 			return error.code === "transport_timeout" ? 504 : 502;

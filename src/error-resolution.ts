@@ -1,3 +1,5 @@
+import type { ProviderErrorStatus } from "./types.js";
+
 // This set suppresses the unregistered-provider-error-code signal for codes
 // intentionally emitted by SDK paths. It is not the complete authority for
 // runtime error resolution: branded errors and additional canonical SDK codes
@@ -89,3 +91,32 @@ export const SDK_RUNTIME_OWNED_ERROR_CODES = new Set([
 	"NOT_FOUND",
 	"not_found",
 ]);
+
+// Canonical SDK status mapping for recognized provider-thrown error codes.
+// serve.ts toStatusCode consults this map (after operation-declared overrides
+// for non-SDK-owned codes), and the authoring lint treats these codes as
+// SDK-registered. Add new codes here instead of duplicating literals in
+// either consumer.
+export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, ProviderErrorStatus> =
+	new Map<string, ProviderErrorStatus>([
+		["AUTH_REQUIRED", 401],
+		["reauth_required", 401],
+		// Unprovisioned declared secret: a deployment/config defect, never an
+		// upstream failure — explicit 400.
+		["MISSING_SECRET", 400],
+		["NOT_FOUND", 404],
+		["not_found", 404],
+		["NO_DATA", 404],
+		["RATE_LIMITED", 429],
+		["UPSTREAM_RATE_LIMIT", 429],
+		["LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR", 429],
+		// Deterministic upstream business refusal (honest-provider-error-
+		// contract): the upstream evaluated the request and said no under its
+		// own rules — a conflict with upstream state, never a 5xx.
+		["UPSTREAM_REJECTED", 409],
+		["UPSTREAM_ERROR", 502],
+		["BLOCKED", 502],
+		["STT_UNAVAILABLE", 503],
+		["UNSUPPORTED_STT_BACKEND", 503],
+		["STATEFUL_FORWARDING_REPLAY_CACHE_FULL", 503],
+	]);

@@ -1,5 +1,9 @@
 import type { ZodType } from "zod";
 
+import {
+	SDK_RUNTIME_OWNED_ERROR_CODES,
+	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
+} from "./error-resolution.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 
@@ -799,6 +803,303 @@ function lintSelfHostedBrowserPatterns(
 	return diagnostics;
 }
 
+const THROWN_ERROR_CONSTRUCTION_PATTERN = /new\s+(?:ProviderError|ValidationError)\s*\(/g;
+
+const TEST_SOURCE_FILE_PATTERN = /(?:^|\/)(?:__tests__|__mocks__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
+/**
+ * Skips a string literal starting at `startIndex` (which must point at the
+ * opening quote). Returns the index of the closing quote, or -1 when the
+ * literal is unterminated. Template literals handle nested `${...}`
+ * expressions, including strings inside them.
+ */
+function skipStringLiteral(source: string, startIndex: number): number {
+	const quote = source[startIndex];
+	for (let index = startIndex + 1; index < source.length; index++) {
+		const char = source[index];
+		if (char === "\\") {
+			index++;
+			continue;
+		}
+		if (quote === "`" && char === "$" && source[index + 1] === "{") {
+			index = skipTemplateExpression(source, index + 2);
+			if (index < 0) {
+				return -1;
+			}
+			continue;
+		}
+		if (char === quote) {
+			return index;
+		}
+		if (quote !== "`" && char === "\n") {
+			return -1;
+		}
+	}
+	return -1;
+}
+
+function skipTemplateExpression(source: string, startIndex: number): number {
+	let depth = 1;
+	for (let index = startIndex; index < source.length; index++) {
+		const char = source[index];
+		if (char === '"' || char === "'" || char === "`") {
+			index = skipStringLiteral(source, index);
+			if (index < 0) {
+				return -1;
+			}
+			continue;
+		}
+		if (char === "{") {
+			depth++;
+		} else if (char === "}") {
+			depth--;
+			if (depth === 0) {
+				return index;
+			}
+		}
+	}
+	return -1;
+}
+
+/**
+ * Extracts the argument text of a call whose opening paren has already been
+ * consumed (`startIndex` points just past it). Returns undefined when the
+ * call never closes in this source, which the caller treats as "skip
+ * silently" — this scanner is conservative by design.
+ */
+function extractBalancedCallArguments(source: string, startIndex: number): string | undefined {
+	let depth = 1;
+	for (let index = startIndex; index < source.length; index++) {
+		const char = source[index];
+		if (char === '"' || char === "'" || char === "`") {
+			index = skipStringLiteral(source, index);
+			if (index < 0) {
+				return undefined;
+			}
+			continue;
+		}
+		if (char === "/" && source[index + 1] === "/") {
+			const newline = source.indexOf("\n", index);
+			if (newline === -1) {
+				return undefined;
+			}
+			index = newline;
+			continue;
+		}
+		if (char === "/" && source[index + 1] === "*") {
+			const end = source.indexOf("*/", index + 2);
+			if (end === -1) {
+				return undefined;
+			}
+			index = end + 1;
+			continue;
+		}
+		if (char === "(") {
+			depth++;
+		} else if (char === ")") {
+			depth--;
+			if (depth === 0) {
+				return source.slice(startIndex, index);
+			}
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Collects literal string values of top-level `code:` properties inside a
+ * ProviderError/ValidationError options object. Only plain `"..."` / `'...'`
+ * literals at options-object depth count; computed codes (identifiers,
+ * ternaries, template substitutions, concatenations, escapes) are skipped
+ * silently so the rule never guesses.
+ */
+function collectLiteralErrorCodeValues(args: string): string[] {
+	const codes: string[] = [];
+	let braceDepth = 0;
+	let parenDepth = 0;
+	let bracketDepth = 0;
+	let previousSignificantChar = "";
+	for (let index = 0; index < args.length; index++) {
+		const char = args[index] ?? "";
+		if (char === '"' || char === "'" || char === "`") {
+			const end = skipStringLiteral(args, index);
+			if (end < 0) {
+				return codes;
+			}
+			index = end;
+			previousSignificantChar = char;
+			continue;
+		}
+		if (char === "/" && args[index + 1] === "/") {
+			const newline = args.indexOf("\n", index);
+			if (newline === -1) {
+				return codes;
+			}
+			index = newline;
+			continue;
+		}
+		if (char === "/" && args[index + 1] === "*") {
+			const end = args.indexOf("*/", index + 2);
+			if (end === -1) {
+				return codes;
+			}
+			index = end + 1;
+			continue;
+		}
+		if (/\s/.test(char)) {
+			continue;
+		}
+		if (char === "{") {
+			braceDepth++;
+		} else if (char === "}") {
+			braceDepth--;
+		} else if (char === "(") {
+			parenDepth++;
+		} else if (char === ")") {
+			parenDepth--;
+		} else if (char === "[") {
+			bracketDepth++;
+		} else if (char === "]") {
+			bracketDepth--;
+		} else if (
+			braceDepth === 1 &&
+			parenDepth === 0 &&
+			bracketDepth === 0 &&
+			(previousSignificantChar === "{" || previousSignificantChar === ",") &&
+			args.startsWith("code", index)
+		) {
+			let cursor = index + "code".length;
+			while (cursor < args.length && /\s/.test(args[cursor] ?? "")) {
+				cursor++;
+			}
+			if (args[cursor] === ":") {
+				cursor++;
+				while (cursor < args.length && /\s/.test(args[cursor] ?? "")) {
+					cursor++;
+				}
+				const quote = args[cursor];
+				if (quote === '"' || quote === "'") {
+					const end = skipStringLiteral(args, cursor);
+					if (end > cursor) {
+						const value = args.slice(cursor + 1, end);
+						let after = end + 1;
+						while (after < args.length && /\s/.test(args[after] ?? "")) {
+							after++;
+						}
+						const nextChar = after < args.length ? (args[after] ?? "") : "";
+						if (!value.includes("\\") && (nextChar === "," || nextChar === "}" || nextChar === "")) {
+							codes.push(value);
+						}
+						index = end;
+						previousSignificantChar = quote;
+						continue;
+					}
+					return codes;
+				}
+			}
+		}
+		previousSignificantChar = char;
+	}
+	return codes;
+}
+
+function collectLiteralThrownErrorCodes(source: string): string[] {
+	const codes: string[] = [];
+	THROWN_ERROR_CONSTRUCTION_PATTERN.lastIndex = 0;
+	for (
+		let match = THROWN_ERROR_CONSTRUCTION_PATTERN.exec(source);
+		match;
+		match = THROWN_ERROR_CONSTRUCTION_PATTERN.exec(source)
+	) {
+		const argsStart = match.index + match[0].length;
+		const args = extractBalancedCallArguments(source, argsStart);
+		if (args !== undefined) {
+			codes.push(...collectLiteralErrorCodeValues(args));
+		}
+		THROWN_ERROR_CONSTRUCTION_PATTERN.lastIndex = argsStart;
+	}
+	return codes;
+}
+
+/**
+ * Static counterpart of the runtime `unregistered_provider_error_code`
+ * signal (honest-provider-error-contract Phase 3.5.5): flags
+ * `new ProviderError(...)` / `new ValidationError(...)` constructions whose
+ * literal `code` is neither SDK-registered (SDK_RUNTIME_OWNED_ERROR_CODES
+ * plus the canonical status-mapped codes shared with serve.ts toStatusCode)
+ * nor declared in any operation's docs.errorCodes. At runtime such a code
+ * serves HTTP 500 and emits the signal; this rule surfaces it at check time.
+ *
+ * A throw site cannot be attributed to a specific operation statically —
+ * providers routinely throw from helpers shared across operations — so this
+ * rule matches against the provider-level union of declared codes. That is
+ * the honest scope: it will not catch a code declared only on the "wrong"
+ * operation, and it never claims per-operation attribution it cannot prove.
+ * Only literal string codes are checked; computed/dynamic codes and test
+ * sources are skipped silently. Warning level: the long tail of existing
+ * providers converges gradually, so this must not fail `apifuse check`.
+ */
+function lintUndeclaredThrownErrorCodes(provider: {
+	authFlowSource?: string;
+	providerSourceFiles?: Record<string, string>;
+	operations?: Record<
+		string,
+		{
+			handler?: unknown;
+			source?: string;
+			docs?: { errorCodes?: ReadonlyArray<{ code: string }> };
+		}
+	>;
+}): LintDiagnostic[] {
+	const knownCodes = new Set<string>([
+		...SDK_RUNTIME_OWNED_ERROR_CODES,
+		...SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.keys(),
+	]);
+	for (const operation of Object.values(provider.operations ?? {})) {
+		for (const entry of operation.docs?.errorCodes ?? []) {
+			if (typeof entry?.code === "string") {
+				knownCodes.add(entry.code);
+			}
+		}
+	}
+
+	const sources: Array<{ field: string; source: string }> = [];
+	const sourceFiles = Object.entries(provider.providerSourceFiles ?? {}).filter(
+		([filePath]) => !TEST_SOURCE_FILE_PATTERN.test(filePath),
+	);
+	if (sourceFiles.length > 0) {
+		for (const [filePath, source] of sourceFiles) {
+			sources.push({ field: `sourceFiles.${filePath}`, source });
+		}
+	} else {
+		if (provider.authFlowSource) {
+			sources.push({ field: "auth.flow", source: provider.authFlowSource });
+		}
+		for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+			const source = getOperationSource(operation);
+			if (source) {
+				sources.push({ field: `operations.${operationKey}.handler`, source });
+			}
+		}
+	}
+
+	const diagnostics: LintDiagnostic[] = [];
+	for (const { field, source } of sources) {
+		const undeclaredCodes = new Set(
+			collectLiteralThrownErrorCodes(source).filter((code) => !knownCodes.has(code)),
+		);
+		for (const code of undeclaredCodes) {
+			diagnostics.push({
+				rule: "thrown-error-code-undeclared",
+				level: "warn",
+				field,
+				message: `Thrown error code "${code}" (${field}) is neither SDK-registered nor declared in any operation's docs.errorCodes; at runtime it serves HTTP 500 and emits the unregistered_provider_error_code signal. Declare it in the owning operation's docs.errorCodes with status and retryable.`,
+			});
+		}
+	}
+	return diagnostics;
+}
+
 export function lintOperation(op: {
 	description?: string;
 	descriptionKey?: string;
@@ -941,6 +1242,7 @@ export function lintProvider(
 				derivations?: Record<string, string>;
 				handler?: unknown;
 				source?: string;
+				docs?: { errorCodes?: ReadonlyArray<{ code: string }> };
 			}
 		>;
 		meta?: {
@@ -958,6 +1260,7 @@ export function lintProvider(
 		...lintCredentialWriteUsage(provider),
 		...lintPlaywrightDirectImports(provider),
 		...lintSelfHostedBrowserPatterns(provider, options),
+		...lintUndeclaredThrownErrorCodes(provider),
 	];
 
 	if (provider.operations) {
