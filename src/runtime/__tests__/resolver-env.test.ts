@@ -7,6 +7,7 @@ import type { ProviderChallenge, ResolverContext } from "../../types.js";
 import {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
+	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	createResolverClientFromEnv,
 } from "../resolver.js";
@@ -27,68 +28,117 @@ describe("resolver env availability", () => {
 		});
 	});
 
-	it("fails closed when the declared vendor chain is empty", async () => {
-		await expect(
-			createResolverClientFromEnv({ vendors: [], kinds: ["turnstile"] }, {}).solve(
-				turnstileChallenge,
-			),
-		).rejects.toMatchObject({
+	it("reports an empty declared vendor chain as unavailable, not kind-unsupported", async () => {
+		const error = await createResolverClientFromEnv({ vendors: [], kinds: ["turnstile"] }, {})
+			.solve(turnstileChallenge)
+			.catch((cause) => cause);
+
+		expect(error).toMatchObject({
 			code: "RESOLVER_UNAVAILABLE",
-			message: expect.stringContaining("chain is empty"),
+			message: expect.stringContaining("vendor chain is empty"),
+		});
+		expect(error).not.toMatchObject({
+			code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN",
 		});
 	});
 
-	it("names the missing 2captcha credential", async () => {
+	it("gates undeclared kinds before reporting an empty vendor chain", async () => {
+		await expect(
+			createResolverClientFromEnv({ vendors: [], kinds: ["turnstile"] }, {}).solve({
+				kind: "aws_waf",
+				pageUrl: "https://example.com/challenge",
+			}),
+		).rejects.toMatchObject({
+			code: "RESOLVER_KIND_NOT_DECLARED",
+		});
+	});
+
+	it("reports a vendor without its credential as missing credentials", async () => {
 		await expect(
 			createResolverClientFromEnv({ vendors: ["2captcha"], kinds: ["turnstile"] }, {}).solve(
 				turnstileChallenge,
 			),
 		).rejects.toMatchObject({
-			code: "RESOLVER_UNAVAILABLE",
-			message: expect.stringContaining(APIFUSE__RESOLVER__2CAPTCHA__API_KEY),
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "2captcha", reason: "missing_credentials" }],
 		});
 	});
 
-	it("makes browser available when the CDP pool URL is configured", async () => {
+	it("reports the same vendor with its credential as not implemented", async () => {
 		await expect(
 			createResolverClientFromEnv(
-				{ vendors: ["browser"], kinds: ["turnstile"] },
-				{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
+				{ vendors: ["2captcha"], kinds: ["turnstile"] },
+				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
 			).solve(turnstileChallenge),
 		).rejects.toMatchObject({
-			code: "RESOLVER_NOT_IMPLEMENTED",
-			message: expect.stringContaining("later phase"),
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "2captcha", reason: "not_implemented" }],
 		});
 	});
 
-	it("makes browser unavailable when the CDP pool URL is missing", async () => {
+	it("reports an unsupported browser kind without CDP configuration", async () => {
+		const error = await createResolverClientFromEnv(
+			{ vendors: ["browser"], kinds: ["turnstile"] },
+			{},
+		)
+			.solve(turnstileChallenge)
+			.catch((cause) => cause);
+
+		expect(error).toMatchObject({
+			code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN",
+		});
+		expect(error).not.toMatchObject({ code: "RESOLVER_CHAIN_EXHAUSTED" });
+	});
+
+	it("reports the same unsupported browser kind with CDP configuration", async () => {
+		const error = await createResolverClientFromEnv(
+			{ vendors: ["browser"], kinds: ["turnstile"] },
+			{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
+		)
+			.solve(turnstileChallenge)
+			.catch((cause) => cause);
+
+		expect(error).toMatchObject({
+			code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN",
+		});
+		expect(error).not.toMatchObject({ code: "RESOLVER_CHAIN_EXHAUSTED" });
+	});
+
+	it("reports missing browser configuration for a supported kind", async () => {
 		await expect(
-			createResolverClientFromEnv({ vendors: ["browser"], kinds: ["turnstile"] }, {}).solve(
-				turnstileChallenge,
-			),
+			createResolverClientFromEnv({ vendors: ["browser"], kinds: ["aws_waf"] }, {}).solve({
+				kind: "aws_waf",
+				pageUrl: "https://example.com/challenge",
+			}),
 		).rejects.toMatchObject({
-			code: "RESOLVER_UNAVAILABLE",
-			message: expect.stringContaining(APIFUSE__CDP_POOL__URL),
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "browser", reason: "missing_credentials" }],
 		});
 	});
 
-	it("makes a partially resolved chain available", async () => {
+	it("reports mixed-chain availability reasons in attempt order", async () => {
 		await expect(
 			createResolverClientFromEnv(
-				{ vendors: ["2captcha", "browser"], kinds: ["turnstile"] },
-				{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
+				{ vendors: ["2captcha", "capsolver"], kinds: ["turnstile"] },
+				{ [APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-test" },
 			).solve(turnstileChallenge),
-		).rejects.toMatchObject({ code: "RESOLVER_NOT_IMPLEMENTED" });
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{ vendor: "2captcha", reason: "missing_credentials" },
+				{ vendor: "capsolver", reason: "not_implemented" },
+			],
+		});
 	});
 
-	it("treats custom as unavailable until it has a transport", async () => {
+	it("reports custom without a transport as missing transport", async () => {
 		await expect(
 			createResolverClientFromEnv({ vendors: ["custom"], kinds: ["turnstile"] }, {}).solve(
 				turnstileChallenge,
 			),
 		).rejects.toMatchObject({
-			code: "RESOLVER_UNAVAILABLE",
-			message: expect.stringContaining("no configured transport"),
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "custom", reason: "missing_transport" }],
 		});
 	});
 
@@ -114,65 +164,68 @@ describe("resolver env availability", () => {
 				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: " \t " },
 			).solve(turnstileChallenge),
 		).rejects.toMatchObject({
-			code: "RESOLVER_UNAVAILABLE",
-			message: expect.stringContaining(APIFUSE__RESOLVER__2CAPTCHA__API_KEY),
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "2captcha", reason: "missing_credentials" }],
 		});
 	});
 
-	it.each(["abc", "-5", "0", "1e999", "12.5", "0x10", "1_000"])(
-		"rejects malformed resolver timeout %p",
-		(timeout) => {
-			expect(() =>
-				createResolverClientFromEnv(
-					{ vendors: ["browser"], kinds: ["turnstile"] },
-					{
-						[APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test",
-						[APIFUSE__RESOLVER__TIMEOUT_MS]: timeout,
-					},
-				),
-			).toThrow("APIFUSE__RESOLVER__TIMEOUT_MS must be a positive integer");
-		},
-	);
-
-	it("uses the default resolver timeout when the value is whitespace-only", async () => {
-		await expect(
+	it.each([
+		"abc",
+		"-5",
+		"0",
+		"1e999",
+		"12.5",
+		"0x10",
+		"1_000",
+	])("rejects malformed resolver timeout %p", (timeout) => {
+		expect(() =>
 			createResolverClientFromEnv(
 				{ vendors: ["browser"], kinds: ["turnstile"] },
 				{
 					[APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test",
+					[APIFUSE__RESOLVER__TIMEOUT_MS]: timeout,
+				},
+			),
+		).toThrow("APIFUSE__RESOLVER__TIMEOUT_MS must be a positive integer");
+	});
+
+	it("accepts a whitespace-only resolver timeout", async () => {
+		await expect(
+			createResolverClientFromEnv(
+				{ vendors: ["browser"], kinds: ["aws_waf"] },
+				{
 					[APIFUSE__RESOLVER__TIMEOUT_MS]: "  ",
 				},
-			).solve(turnstileChallenge),
+			).solve({ kind: "aws_waf", pageUrl: "https://example.com/challenge" }),
 		).rejects.toMatchObject({
-			code: "RESOLVER_NOT_IMPLEMENTED",
-			details: { timeoutMs: 180_000 },
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "browser", reason: "missing_credentials" }],
 		});
 	});
 
-	it("uses the default resolver timeout when the variable is unset", async () => {
+	it("accepts an unset resolver timeout", async () => {
 		await expect(
-			createResolverClientFromEnv(
-				{ vendors: ["browser"], kinds: ["turnstile"] },
-				{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
-			).solve(turnstileChallenge),
+			createResolverClientFromEnv({ vendors: ["browser"], kinds: ["aws_waf"] }, {}).solve({
+				kind: "aws_waf",
+				pageUrl: "https://example.com/challenge",
+			}),
 		).rejects.toMatchObject({
-			code: "RESOLVER_NOT_IMPLEMENTED",
-			details: { timeoutMs: 180_000 },
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "browser", reason: "missing_credentials" }],
 		});
 	});
 
-	it("carries a valid resolver timeout through to the client", async () => {
+	it("accepts a valid resolver timeout", async () => {
 		await expect(
 			createResolverClientFromEnv(
-				{ vendors: ["browser"], kinds: ["turnstile"] },
+				{ vendors: ["browser"], kinds: ["aws_waf"] },
 				{
-					[APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test",
 					[APIFUSE__RESOLVER__TIMEOUT_MS]: "45000",
 				},
-			).solve(turnstileChallenge),
+			).solve({ kind: "aws_waf", pageUrl: "https://example.com/challenge" }),
 		).rejects.toMatchObject({
-			code: "RESOLVER_NOT_IMPLEMENTED",
-			details: { timeoutMs: 45_000 },
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "browser", reason: "missing_credentials" }],
 		});
 	});
 });
