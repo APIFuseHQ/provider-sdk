@@ -157,16 +157,25 @@ describe("resolver solution caching", () => {
 	it("enables caching through createResolverClientFromEnv's runtime options", async () => {
 		const { cache } = createRecordingCache();
 		const stub = createBrowserAdapter(() => persistentSolution());
+		const declaredHosts = ["example.com", "assets.example.com"];
+		let adapterHosts: readonly string[] | undefined;
 		const registry = RESOLVER_ADAPTER_REGISTRY as {
-			browser?: (configuration: string, timeoutMs: number) => ResolverVendorAdapter;
+			browser?: (
+				configuration: string,
+				timeoutMs: number,
+				allowedHosts: readonly string[],
+			) => ResolverVendorAdapter;
 		};
 		const original = registry.browser;
-		registry.browser = () => stub.adapter;
+		registry.browser = (_configuration, _timeoutMs, allowedHosts) => {
+			adapterHosts = allowedHosts;
+			return stub.adapter;
+		};
 		try {
 			const resolver = createResolverClientFromEnv(
 				{ vendors: ["browser"], kinds: ["aws_waf"] },
 				{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
-				{ cache },
+				{ allowedHosts: declaredHosts, cache },
 			);
 			await resolver.solve(CHALLENGE);
 			await resolver.solve(CHALLENGE);
@@ -175,6 +184,7 @@ describe("resolver solution caching", () => {
 		}
 
 		expect(stub.calls()).toBe(1);
+		expect(adapterHosts).toEqual(declaredHosts);
 	});
 
 	it("uses the page origin rather than its query string", async () => {
@@ -226,7 +236,11 @@ describe("resolver solution caching", () => {
 		const solutionKeyCalls = keyCalls.filter((call) => call.namespace === "resolver-solution");
 		const solutionKeys = [...new Set(solutionKeyCalls.map((call) => call.key))];
 		expect(stub.calls()).toBe(3);
-		expect(solutionKeys).toHaveLength(3);
+		if (solutionKeys.length !== 3) {
+			throw new Error(
+				"Each issuerDigest must produce a distinct resolver key; ProviderCache redacts cookie-containing field names, so renaming this field to cookieDigest collapses identities into one cache entry.",
+			);
+		}
 		expect(solutionKeys[0]).not.toBe(solutionKeys[1]);
 		expect(solutionKeys[1]).not.toBe(solutionKeys[2]);
 		expect(solutionKeyCalls[0]?.parts).toEqual({
@@ -234,6 +248,119 @@ describe("resolver solution caching", () => {
 			origin: "https://example.com",
 			issuerDigest: expect.any(String),
 		});
+
+		const issuerDigests = [
+			...new Set(
+				solutionKeyCalls.map(
+					(call) => (call.parts as { readonly issuerDigest?: unknown }).issuerDigest,
+				),
+			),
+		];
+		if (issuerDigests.length !== 3 || !issuerDigests.every((value) => typeof value === "string")) {
+			throw new Error(
+				"Resolver cache identity material must remain under issuerDigest; ProviderCache redacts field names containing cookie and would collapse identities.",
+			);
+		}
+		const firstIssuerKey = cache.key("resolver-identity-field-contrast", {
+			issuerDigest: issuerDigests[0],
+		});
+		const secondIssuerKey = cache.key("resolver-identity-field-contrast", {
+			issuerDigest: issuerDigests[1],
+		});
+		if (firstIssuerKey === secondIssuerKey) {
+			throw new Error(
+				"issuerDigest must affect resolver cache keys; renaming it to a cookie-containing field would trigger ProviderCache redaction and cross-identity collisions.",
+			);
+		}
+		const firstCookieKey = cache.key("resolver-identity-field-contrast", {
+			cookieDigest: issuerDigests[0],
+		});
+		const secondCookieKey = cache.key("resolver-identity-field-contrast", {
+			cookieDigest: issuerDigests[1],
+		});
+		if (firstCookieKey !== secondCookieKey) {
+			throw new Error(
+				"The cache-key contrast no longer demonstrates the trap: ProviderCache must redact cookie-containing field names, making different cookieDigest values collide.",
+			);
+		}
+	});
+
+	it("ignores a cached cookie solution missing userAgent and solves fresh", async () => {
+		const { cache, inner, keyCalls } = createRecordingCache();
+		const stub = createBrowserAdapter((_identity, call) =>
+			persistentSolution(`Browser/fresh-${call}`),
+		);
+		const resolver = createClient(stub.adapter, { cache });
+		await resolver.solve(CHALLENGE);
+		const solutionKey = keyCalls.find((call) => call.namespace === "resolver-solution")?.key;
+		if (!solutionKey) throw new Error("Expected the first solve to write a solution cache key");
+		const cached = await inner.get(solutionKey);
+		if (!cached || typeof cached.value !== "object" || cached.value === null) {
+			throw new Error("Expected the first solve to write a solution cache entry");
+		}
+		const entry = cached.value as {
+			readonly expiresAtMs: number;
+			readonly issuerDigest: string;
+		};
+		await inner.set(
+			solutionKey,
+			{
+				expiresAtMs: entry.expiresAtMs,
+				issuerDigest: entry.issuerDigest,
+				solution: { form: "cookies", cookies: { "aws-waf-token": "malformed" } },
+			},
+			{ ttlMs: 60_000 },
+		);
+
+		const solution = await resolver.solve(CHALLENGE);
+
+		expect(solution).toMatchObject({
+			form: "cookies",
+			cookies: { "aws-waf-token": "token-for-Browser/fresh-2" },
+			userAgent: "Browser/fresh-2",
+		});
+		expect(stub.calls()).toBe(2);
+	});
+
+	it("ignores a cached cookie solution whose cookies are not a string map", async () => {
+		const { cache, inner, keyCalls } = createRecordingCache();
+		const stub = createBrowserAdapter((_identity, call) =>
+			persistentSolution(`Browser/fresh-${call}`),
+		);
+		const resolver = createClient(stub.adapter, { cache });
+		await resolver.solve(CHALLENGE);
+		const solutionKey = keyCalls.find((call) => call.namespace === "resolver-solution")?.key;
+		if (!solutionKey) throw new Error("Expected the first solve to write a solution cache key");
+		const cached = await inner.get(solutionKey);
+		if (!cached || typeof cached.value !== "object" || cached.value === null) {
+			throw new Error("Expected the first solve to write a solution cache entry");
+		}
+		const entry = cached.value as {
+			readonly expiresAtMs: number;
+			readonly issuerDigest: string;
+		};
+		await inner.set(
+			solutionKey,
+			{
+				expiresAtMs: entry.expiresAtMs,
+				issuerDigest: entry.issuerDigest,
+				solution: {
+					form: "cookies",
+					cookies: { "aws-waf-token": 42 },
+					userAgent: "Browser/malformed",
+				},
+			},
+			{ ttlMs: 60_000 },
+		);
+
+		const solution = await resolver.solve(CHALLENGE);
+
+		expect(solution).toMatchObject({
+			form: "cookies",
+			cookies: { "aws-waf-token": "token-for-Browser/fresh-2" },
+			userAgent: "Browser/fresh-2",
+		});
+		expect(stub.calls()).toBe(2);
 	});
 
 	it("never serves a proxy-bound entry through the direct-identity locator", async () => {

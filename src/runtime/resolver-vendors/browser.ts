@@ -5,7 +5,7 @@ import type {
 	ChallengeSolution,
 	ProviderChallenge,
 } from "../../types.js";
-import { isProviderError } from "../../errors.js";
+import { isProviderError, ProviderError } from "../../errors.js";
 import { type BrowserClientOptions, createBrowserClient } from "../browser.js";
 import {
 	type ResolverIdentity,
@@ -29,7 +29,7 @@ export interface BrowserResolverVendorOptions {
 	readonly cdpUrl?: string;
 	readonly timeoutMs: number;
 	readonly pollIntervalMs?: number;
-	readonly allowedHosts?: readonly string[];
+	readonly allowedHosts: readonly string[];
 	readonly createClient?: BrowserClientFactory;
 }
 
@@ -100,6 +100,24 @@ async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
 
 function isSupportedKind(kind: string): kind is SupportedBrowserChallengeKind {
 	return Object.hasOwn(SUCCESS_COOKIE_NAMES, kind);
+}
+
+function normalizedHostname(hostname: string): string {
+	return hostname.trim().toLowerCase().replace(/\.$/, "");
+}
+
+function assertChallengeHostAllowed(pageUrl: string, allowedHosts: readonly string[]): void {
+	const challengeHost = normalizedHostname(new URL(pageUrl).hostname);
+	const isAllowed = allowedHosts.some((host) => {
+		const declaredHost = normalizedHostname(host);
+		return declaredHost.length > 0 && !declaredHost.includes("*") && declaredHost === challengeHost;
+	});
+	if (isAllowed) return;
+
+	throw new ProviderError(`Resolver challenge host "${challengeHost}" is not declared`, {
+		code: "RESOLVER_HOST_NOT_ALLOWED",
+		fix: "Add the exact challenge hostname to the provider's allowedHosts declaration.",
+	});
 }
 
 function toCookieMap(cookies: readonly BrowserCookie[]): Readonly<Record<string, string>> {
@@ -191,6 +209,7 @@ export function createBrowserResolverVendorAdapter(
 			if (!isSupportedKind(challenge.kind)) {
 				throw new TypeError(`Browser resolver does not support ${challenge.kind}`);
 			}
+			assertChallengeHostAllowed(challenge.pageUrl, options.allowedHosts);
 			const challengeKind = challenge.kind;
 			callerSignal.throwIfAborted();
 
@@ -206,9 +225,7 @@ export function createBrowserResolverVendorAdapter(
 			let handlerEntered = false;
 			try {
 				client = createClient({
-					allowedHosts: options.allowedHosts
-						? [...options.allowedHosts]
-						: [new URL(challenge.pageUrl).hostname],
+					allowedHosts: [...options.allowedHosts],
 					cdpUrl: options.cdpUrl.trim(),
 					requireCdpPool: true,
 				});

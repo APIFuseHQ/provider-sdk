@@ -128,8 +128,13 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 	return { client, state };
 }
 
-function createAdapter(stub: ReturnType<typeof createBrowserStub>, timeoutMs = 100) {
+function createAdapter(
+	stub: ReturnType<typeof createBrowserStub>,
+	timeoutMs = 100,
+	allowedHosts: readonly string[] = ["example.com"],
+) {
 	return createBrowserResolverVendorAdapter({
+		allowedHosts,
 		cdpUrl: "ws://cdp-pool.test",
 		createClient: () => stub.client,
 		pollIntervalMs: 1,
@@ -196,6 +201,76 @@ describe("browser resolver vendor", () => {
 		).toEqual({ userAgent: "Measured Chromium" });
 		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
 		expect(stub.state.contextCloseCalls).toBe(1);
+	});
+
+	it("passes only the provider-declared hosts to the browser lease", async () => {
+		const stub = createBrowserStub({
+			cookieJars: [
+				[
+					{
+						...COOKIE_BASE,
+						name: "aws-waf-token",
+						value: "waf-token",
+					},
+				],
+			],
+		});
+		const declaredHosts = ["example.com", "assets.example.com"];
+		let clientOptions: Parameters<typeof createBrowserClient>[0] | undefined;
+		const adapter = createBrowserResolverVendorAdapter({
+			allowedHosts: declaredHosts,
+			cdpUrl: "ws://cdp-pool.test",
+			createClient(options) {
+				clientOptions = options;
+				return stub.client;
+			},
+			timeoutMs: 100,
+		});
+
+		await adapter.solve(AWS_CHALLENGE, undefined, new AbortController().signal);
+
+		expect(clientOptions?.allowedHosts).toEqual(declaredHosts);
+		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
+	});
+
+	it("refuses an undeclared challenge host before creating a client or navigating", async () => {
+		const stub = createBrowserStub();
+		let createCalls = 0;
+		const adapter = createBrowserResolverVendorAdapter({
+			allowedHosts: ["api.example.com"],
+			cdpUrl: "ws://cdp-pool.test",
+			createClient() {
+				createCalls += 1;
+				return stub.client;
+			},
+			timeoutMs: 100,
+		});
+
+		await expect(
+			adapter.solve(AWS_CHALLENGE, undefined, new AbortController().signal),
+		).rejects.toMatchObject({ code: "RESOLVER_HOST_NOT_ALLOWED" });
+		expect(createCalls).toBe(0);
+		expect(stub.state.gotoUrls).toEqual([]);
+	});
+
+	it("fails closed when no usable provider host is declared", async () => {
+		const stub = createBrowserStub();
+		let createCalls = 0;
+		const adapter = createBrowserResolverVendorAdapter({
+			allowedHosts: [" ", "*"],
+			cdpUrl: "ws://cdp-pool.test",
+			createClient() {
+				createCalls += 1;
+				return stub.client;
+			},
+			timeoutMs: 100,
+		});
+
+		await expect(
+			adapter.solve(AWS_CHALLENGE, undefined, new AbortController().signal),
+		).rejects.toMatchObject({ code: "RESOLVER_HOST_NOT_ALLOWED" });
+		expect(createCalls).toBe(0);
+		expect(stub.state.gotoUrls).toEqual([]);
 	});
 
 	it("returns cf_clearance for a Cloudflare interstitial", async () => {
@@ -367,6 +442,7 @@ describe("browser resolver vendor", () => {
 	it("reports missing CDP configuration without creating a browser client", async () => {
 		let createCalls = 0;
 		const adapter = createBrowserResolverVendorAdapter({
+			allowedHosts: ["example.com"],
 			createClient: () => {
 				createCalls += 1;
 				return createBrowserStub().client;
@@ -382,6 +458,7 @@ describe("browser resolver vendor", () => {
 
 	it("maps the real BROWSER_CDP_POOL_REQUIRED ProviderError to missing_credentials", async () => {
 		const adapter = createBrowserResolverVendorAdapter({
+			allowedHosts: ["example.com"],
 			cdpUrl: "ws://resolver-configured.test",
 			createClient: () => createBrowserClient({ cdpUrl: "", requireCdpPool: true }),
 			timeoutMs: 100,

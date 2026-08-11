@@ -398,7 +398,11 @@ function createProviderContext(
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
 		resolver:
-			options.resolver ?? createResolverClientFromEnv(provider.resolver, undefined, { cache }),
+			options.resolver ??
+			createResolverClientFromEnv(provider.resolver, undefined, {
+				allowedHosts: provider.allowedHosts,
+				cache,
+			}),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
 			env,
@@ -525,7 +529,11 @@ function createAuthFlowContext(
 			ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
 			resolver:
-				options.resolver ?? createResolverClientFromEnv(provider.resolver, undefined, { cache }),
+				options.resolver ??
+				createResolverClientFromEnv(provider.resolver, undefined, {
+					allowedHosts: provider.allowedHosts,
+					cache,
+				}),
 			auth: createAuthFlowHelpers({ signal }),
 		},
 		getPatch: flowContextStore.getPatch,

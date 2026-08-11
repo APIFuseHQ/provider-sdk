@@ -51,6 +51,7 @@ type ResolverChainClient = ResolverContext & {
 };
 
 export interface ResolverRuntimeOptions {
+	readonly allowedHosts?: readonly string[];
 	readonly cache?: ProviderCache;
 }
 
@@ -74,13 +75,18 @@ const MIN_RESOLVER_CACHE_TTL_MS = 1_000;
 const resolverCaches = new WeakMap<object, ProviderCache>();
 const solutionIssuerDigests = new WeakMap<object, string>();
 
-type ResolverAdapterFactory = (configuration: string, timeoutMs: number) => ResolverVendorAdapter;
+type ResolverAdapterFactory = (
+	configuration: string,
+	timeoutMs: number,
+	allowedHosts: readonly string[],
+) => ResolverVendorAdapter;
 
 export const RESOLVER_ADAPTER_REGISTRY: Partial<
 	Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>
 > = {
-	browser(configuration, timeoutMs) {
+	browser(configuration, timeoutMs, allowedHosts) {
 		return createBrowserResolverVendorAdapter({
+			allowedHosts,
 			cdpUrl: configuration,
 			timeoutMs,
 		});
@@ -138,14 +144,18 @@ function createUnavailableAdapter(
 	};
 }
 
-function createAdapter(vendor: ResolvedResolverVendor, timeoutMs: number): ResolverVendorAdapter {
+function createAdapter(
+	vendor: ResolvedResolverVendor,
+	timeoutMs: number,
+	allowedHosts: readonly string[],
+): ResolverVendorAdapter {
 	if (!vendor.available) {
 		return createUnavailableAdapter(vendor.vendor, vendor.reason);
 	}
 
 	const factory = RESOLVER_ADAPTER_REGISTRY[vendor.vendor];
 	return (
-		factory?.(vendor.configuration, timeoutMs) ??
+		factory?.(vendor.configuration, timeoutMs, allowedHosts) ??
 		createUnavailableAdapter(vendor.vendor, "not_implemented")
 	);
 }
@@ -201,15 +211,30 @@ function resolverSolutionIndexCacheKey(cache: ProviderCache, challenge: Provider
 }
 
 function isCachedResolverSolution(value: unknown): value is CachedResolverSolution {
-	if (value === null || typeof value !== "object") return false;
-	const candidate = value as Partial<CachedResolverSolution>;
-	return (
-		typeof candidate.expiresAtMs === "number" &&
-		typeof candidate.issuerDigest === "string" &&
-		candidate.solution !== null &&
-		typeof candidate.solution === "object" &&
-		candidate.solution.form === "cookies"
-	);
+	try {
+		if (value === null || typeof value !== "object") return false;
+		const candidate = value as Partial<CachedResolverSolution>;
+		if (
+			typeof candidate.expiresAtMs !== "number" ||
+			typeof candidate.issuerDigest !== "string" ||
+			candidate.solution === null ||
+			typeof candidate.solution !== "object" ||
+			candidate.solution.form !== "cookies" ||
+			typeof candidate.solution.userAgent !== "string"
+		) {
+			return false;
+		}
+
+		const cookies: unknown = candidate.solution.cookies;
+		return (
+			cookies !== null &&
+			typeof cookies === "object" &&
+			!Array.isArray(cookies) &&
+			Object.values(cookies).every((cookie) => typeof cookie === "string")
+		);
+	} catch {
+		return false;
+	}
 }
 
 function isResolverCacheIndex(value: unknown): value is ResolverCacheIndex {
@@ -487,7 +512,8 @@ export function createResolverClientFromEnv(
 		entries: config.vendors.map((vendor) => ({
 			id: vendor,
 			supports: (kind) => resolverVendorSupports(vendor, kind),
-			createAdapter: () => createAdapter(resolveVendorAvailability(vendor, env), timeoutMs),
+			createAdapter: () =>
+				createAdapter(resolveVendorAvailability(vendor, env), timeoutMs, options.allowedHosts ?? []),
 		})),
 		cache: options.cache,
 	});

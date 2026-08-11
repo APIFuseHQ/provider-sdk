@@ -148,6 +148,19 @@ const NEGATIVE_CONTROLS = [
 			"",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-resolver-runtime-allowed-hosts.ts",
+		expectedCode: "TS2322",
+		description: "ResolverRuntimeOptions.allowedHosts accepts only host strings",
+		source: [
+			'import type { ResolverRuntimeOptions } from "@apifuse/provider-sdk";',
+			"",
+			"export const mustNotCompile: ResolverRuntimeOptions = {",
+			'\tallowedHosts: ["example.com", 42],',
+			"};",
+			"",
+		].join("\n"),
+	},
 ] as const;
 
 const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-types-"));
@@ -279,7 +292,7 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			"const optionalFiles: ProviderFilesContext | undefined = providerContext.files;",
 			"const optionalNative: NativeProviderContext | undefined = providerContext.native;",
 			"export const providerResolver: ResolverContext = providerContext.resolver;",
-			"export const resolverRuntimeOptions: ResolverRuntimeOptions = { cache: providerContext.cache };",
+			'export const resolverRuntimeOptions: ResolverRuntimeOptions = { allowedHosts: ["example.com"], cache: providerContext.cache };',
 			"",
 			'export const turnstileChallenge: ProviderChallenge = { kind: "turnstile", siteKey: "key", pageUrl: "https://example.com" };',
 			'export const recaptchaV2Challenge: ProviderChallenge = { kind: "recaptcha_v2", siteKey: "key", pageUrl: "https://example.com" };',
