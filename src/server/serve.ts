@@ -351,6 +351,7 @@ function createProviderContext(
 		headers: request.headers ?? {},
 	};
 	const requestState = state.forConnection(requestContext.connectionId);
+	const cache = createProviderCache({ providerId: provider.id });
 	const context = wrapWithInstrumentation({
 		env,
 		credential,
@@ -362,7 +363,7 @@ function createProviderContext(
 				retryResponseMeta.set(wrappedContext, summary);
 			},
 		}),
-		cache: createProviderCache({ providerId: provider.id }),
+		cache,
 		state: requestState,
 		stealth: stealthBaseUrl
 			? stealthProfile
@@ -396,7 +397,8 @@ function createProviderContext(
 		auth: createAuthStub(),
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
-		resolver: options.resolver ?? createResolverClientFromEnv(provider.resolver),
+		resolver:
+			options.resolver ?? createResolverClientFromEnv(provider.resolver, undefined, { cache }),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
 			env,
@@ -483,6 +485,7 @@ function createAuthFlowContext(
 				values: request.connection.secrets,
 			})
 		: undefined;
+	const cache = createProviderCache({ providerId: provider.id });
 
 	return {
 		context: {
@@ -521,7 +524,8 @@ function createAuthFlowContext(
 			context: flowContextStore.context,
 			ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
-			resolver: options.resolver ?? createResolverClientFromEnv(provider.resolver),
+			resolver:
+				options.resolver ?? createResolverClientFromEnv(provider.resolver, undefined, { cache }),
 			auth: createAuthFlowHelpers({ signal }),
 		},
 		getPatch: flowContextStore.getPatch,

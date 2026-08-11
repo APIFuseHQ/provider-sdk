@@ -109,6 +109,8 @@ export {
 	createResolverClientFromEnv,
 	createUnsupportedResolverClient,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
+	invalidateResolverSolution,
+	type ResolverRuntimeOptions,
 } from "./runtime/resolver.js";
 export {
 	assertRequiredSecretsPresent,

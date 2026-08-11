@@ -174,8 +174,9 @@ describe("browser resolver vendor", () => {
 			cookieJars: [[], [successCookie]],
 			userAgent: "Measured Chromium",
 		});
+		const adapter = createAdapter(stub);
 
-		const result = await createAdapter(stub).solve(
+		const result = await adapter.solve(
 			AWS_CHALLENGE,
 			undefined,
 			new AbortController().signal,
@@ -187,6 +188,12 @@ describe("browser resolver vendor", () => {
 			userAgent: "Measured Chromium",
 			expires: 1_786_698_176.5,
 		});
+		expect(
+			adapter.getIssuingIdentity?.(result, {
+				proxyUrl: "http://must-not-be-attributed.example:8080",
+				userAgent: "Caller agent",
+			}),
+		).toEqual({ userAgent: "Measured Chromium" });
 		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
 		expect(stub.state.contextCloseCalls).toBe(1);
 	});

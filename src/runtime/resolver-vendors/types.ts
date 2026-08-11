@@ -46,9 +46,20 @@ export interface ResolverIdentity {
 	readonly userAgent: string;
 }
 
+export interface ResolverIssuingIdentity {
+	/** Absent when the adapter genuinely solved without a proxy. */
+	readonly proxyUrl?: string;
+	readonly userAgent: string;
+}
+
 export interface ResolverVendorAdapter {
 	readonly id: ProviderResolverVendor;
 	supports(kind: ProviderChallengeKind): boolean;
+	/** Identity the adapter actually used, reported after a successful solve. */
+	getIssuingIdentity?(
+		solution: ChallengeSolution,
+		requestedIdentity: ResolverIdentity | undefined,
+	): ResolverIssuingIdentity | undefined;
 	solve(
 		challenge: ProviderChallenge,
 		identity: ResolverIdentity | undefined,

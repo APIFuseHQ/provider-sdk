@@ -179,6 +179,10 @@ export function createBrowserResolverVendorAdapter(
 			return isSupportedKind(kind);
 		},
 
+		getIssuingIdentity(solution) {
+			return solution.form === "cookies" ? { userAgent: solution.userAgent } : undefined;
+		},
+
 		async solve(challenge, identity, callerSignal) {
 			void identity;
 			if (!options.cdpUrl?.trim()) {

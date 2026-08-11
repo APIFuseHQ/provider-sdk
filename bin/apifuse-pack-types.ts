@@ -135,6 +135,19 @@ const NEGATIVE_CONTROLS = [
 			"",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-resolver-runtime-identity.ts",
+		expectedCode: "TS2353",
+		description: "ResolverRuntimeOptions does not accept caller-synthesized identity",
+		source: [
+			'import type { ResolverRuntimeOptions } from "@apifuse/provider-sdk";',
+			"",
+			"export const mustNotCompile: ResolverRuntimeOptions = {",
+			'\tidentity: "caller-controlled",',
+			"};",
+			"",
+		].join("\n"),
+	},
 ] as const;
 
 const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-types-"));
@@ -224,8 +237,8 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 	writeFileSync(
 		join(consumerDir, "consumer.ts"),
 		[
-			'import { ProviderError, resolveProxy, SessionExpiredError, z } from "@apifuse/provider-sdk";',
-			'import type { BrowserCookie, ChallengeSolution, NativeNetworkClient, NativeNetworkConnection, NativeProviderConfig, NativeProviderContext, NativeTcpEgressGrant, ProviderChallenge, ProviderContext, ProviderFileRef, ProviderFilesContext, ProviderResolvedFile, ProviderResolverConfig, ResolverContext } from "@apifuse/provider-sdk";',
+			'import { invalidateResolverSolution, ProviderError, resolveProxy, SessionExpiredError, z } from "@apifuse/provider-sdk";',
+			'import type { BrowserCookie, ChallengeSolution, NativeNetworkClient, NativeNetworkConnection, NativeProviderConfig, NativeProviderContext, NativeTcpEgressGrant, ProviderChallenge, ProviderContext, ProviderFileRef, ProviderFilesContext, ProviderResolvedFile, ProviderResolverConfig, ResolverContext, ResolverRuntimeOptions } from "@apifuse/provider-sdk";',
 			'import type { ProxyProtocol, ProxyResolutionOptions, ProxyResolutionSource, ProxyVendorName, RequestOptions, ResolvedProxyConfig } from "@apifuse/provider-sdk";',
 			'import { defineCredentialsAuth } from "@apifuse/provider-sdk/provider";',
 			'import type { NativeNetworkClient as ProviderEntryNativeNetworkClient, ProviderFilesContext as ProviderEntryFilesContext } from "@apifuse/provider-sdk/provider";',
@@ -266,6 +279,7 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			"const optionalFiles: ProviderFilesContext | undefined = providerContext.files;",
 			"const optionalNative: NativeProviderContext | undefined = providerContext.native;",
 			"export const providerResolver: ResolverContext = providerContext.resolver;",
+			"export const resolverRuntimeOptions: ResolverRuntimeOptions = { cache: providerContext.cache };",
 			"",
 			'export const turnstileChallenge: ProviderChallenge = { kind: "turnstile", siteKey: "key", pageUrl: "https://example.com" };',
 			'export const recaptchaV2Challenge: ProviderChallenge = { kind: "recaptcha_v2", siteKey: "key", pageUrl: "https://example.com" };',
@@ -275,6 +289,7 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			'export const awsWafChallenge: ProviderChallenge = { kind: "aws_waf", pageUrl: "https://example.com", captchaScript: "script" };',
 			'export const tokenSolution: ChallengeSolution = { form: "token", token: "solved-token" };',
 			'export const cookieSolution: ChallengeSolution = { form: "cookies", cookies: { cf_clearance: "clearance" }, userAgent: "fixture-agent" };',
+			"export const invalidation = invalidateResolverSolution(providerContext.resolver, awsWafChallenge, cookieSolution);",
 			'export const resolverConfig: ProviderResolverConfig = { vendors: ["browser", "capsolver"], kinds: ["cloudflare_interstitial", "turnstile"] };',
 			"export const resolverContext: ResolverContext = { solve: async () => tokenSolution };",
 			'export const browserCookie: BrowserCookie = { name: "persistent-id", value: "persistent-token", domain: "example.com", path: "/", expires: 1786698176, httpOnly: true, secure: true };',
