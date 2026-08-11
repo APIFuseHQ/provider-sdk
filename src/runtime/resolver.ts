@@ -12,6 +12,7 @@ import type {
 } from "../types.js";
 import { createBrowserResolverVendorAdapter } from "./resolver-vendors/browser.js";
 import {
+	RESOLVER_VENDOR_CAPABILITIES,
 	resolverVendorSupports,
 	type ResolverIdentity,
 	type ResolverIssuingIdentity,
@@ -19,6 +20,7 @@ import {
 	type ResolverVendorUnavailableReason,
 	ResolverVendorUnavailableError,
 } from "./resolver-vendors/types.js";
+import type { TraceRecorder } from "./trace.js";
 
 export const APIFUSE__RESOLVER__2CAPTCHA__API_KEY = "APIFUSE__RESOLVER__2CAPTCHA__API_KEY";
 export const APIFUSE__RESOLVER__CAPSOLVER__API_KEY = "APIFUSE__RESOLVER__CAPSOLVER__API_KEY";
@@ -47,7 +49,11 @@ type ResolverChainAttempt = {
 };
 
 type ResolverChainClient = ResolverContext & {
-	solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
+	solve(
+		challenge: ProviderChallenge,
+		signal?: AbortSignal,
+		traceRecorder?: TraceRecorder,
+	): Promise<ChallengeSolution>;
 };
 
 export interface ResolverRuntimeOptions {
@@ -92,6 +98,15 @@ export const RESOLVER_ADAPTER_REGISTRY: Partial<
 		});
 	},
 };
+
+// This is the sole allowlist for declared vendors whose registry entry may be absent.
+// Remove a vendor here when its adapter is registered.
+const KNOWN_UNIMPLEMENTED_RESOLVER_VENDORS: ReadonlySet<ProviderResolverVendor> = new Set([
+	"2captcha",
+	"capsolver",
+	"capmonster",
+	"custom",
+]);
 
 type ResolverChainEntry = {
 	readonly id: ProviderResolverVendor;
@@ -149,15 +164,25 @@ function createAdapter(
 	timeoutMs: number,
 	allowedHosts: readonly string[],
 ): ResolverVendorAdapter {
+	const factory = RESOLVER_ADAPTER_REGISTRY[vendor.vendor];
+	if (!factory && !KNOWN_UNIMPLEMENTED_RESOLVER_VENDORS.has(vendor.vendor)) {
+		throw new Error(
+			`Resolver adapter factory is missing for implemented vendor "${vendor.vendor}"`,
+		);
+	}
 	if (!vendor.available) {
 		return createUnavailableAdapter(vendor.vendor, vendor.reason);
 	}
 
-	const factory = RESOLVER_ADAPTER_REGISTRY[vendor.vendor];
-	return (
-		factory?.(vendor.configuration, timeoutMs, allowedHosts) ??
-		createUnavailableAdapter(vendor.vendor, "not_implemented")
-	);
+	if (factory) {
+		return factory(vendor.configuration, timeoutMs, allowedHosts);
+	}
+	return createUnavailableAdapter(vendor.vendor, "not_implemented");
+}
+
+function assertKnownResolverVendor(vendor: string): asserts vendor is ProviderResolverVendor {
+	if (Object.hasOwn(RESOLVER_VENDOR_CAPABILITIES, vendor)) return;
+	throw new Error(`Unknown resolver vendor "${vendor}" in resolver configuration`);
 }
 
 function throwUnsupportedKind(kind: ProviderChallengeKind): never {
@@ -386,7 +411,11 @@ function createResolverChainClient(options: {
 	readonly identity?: ResolverIdentity;
 }): ResolverChainClient {
 	const client: ResolverChainClient = {
-		async solve(challenge: ProviderChallenge, signal: AbortSignal = new AbortController().signal) {
+		async solve(
+			challenge: ProviderChallenge,
+			signal: AbortSignal = new AbortController().signal,
+			traceRecorder?: TraceRecorder,
+		) {
 			assertDeclaredKind(challenge.kind, options.kinds);
 			if (options.unavailableReason) {
 				throw new ProviderError(options.unavailableReason, {
@@ -407,7 +436,21 @@ function createResolverChainClient(options: {
 			for (const entry of supportingEntries) {
 				const adapter = entry.createAdapter();
 				try {
-					const solution = await adapter.solve(challenge, options.identity, signal);
+					const solveAttempt = () =>
+						adapter.solve(challenge, options.identity, signal, traceRecorder);
+					const solution = traceRecorder
+						? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
+								attributes: {
+									vendor: adapter.id,
+									challenge_kind: challenge.kind,
+								},
+								onError(error) {
+									return error instanceof ResolverVendorUnavailableError
+										? { unavailability_reason: error.reason }
+										: undefined;
+								},
+							})
+						: await solveAttempt();
 					if (options.cache && entry.id === "browser" && solution.form === "cookies") {
 						const issuingIdentity = adapter.getIssuingIdentity?.(solution, options.identity);
 						if (issuingIdentity) {
@@ -509,12 +552,20 @@ export function createResolverClientFromEnv(
 
 	return createResolverChainClient({
 		kinds: config.kinds,
-		entries: config.vendors.map((vendor) => ({
-			id: vendor,
-			supports: (kind) => resolverVendorSupports(vendor, kind),
-			createAdapter: () =>
-				createAdapter(resolveVendorAvailability(vendor, env), timeoutMs, options.allowedHosts ?? []),
-		})),
+		entries: config.vendors.map((configuredVendor) => {
+			assertKnownResolverVendor(configuredVendor);
+			const vendor = configuredVendor;
+			return {
+				id: vendor,
+				supports: (kind: ProviderChallengeKind) => resolverVendorSupports(vendor, kind),
+				createAdapter: () =>
+					createAdapter(
+						resolveVendorAvailability(vendor, env),
+						timeoutMs,
+						options.allowedHosts ?? [],
+					),
+			};
+		}),
 		cache: options.cache,
 	});
 }

@@ -4,6 +4,7 @@ import type {
 	ProviderChallengeKind,
 	ProviderResolverVendor,
 } from "../../types.js";
+import type { TraceRecorder } from "../trace.js";
 
 export const RESOLVER_VENDOR_CAPABILITIES = {
 	browser: ["aws_waf", "cloudflare_interstitial"],
@@ -64,6 +65,7 @@ export interface ResolverVendorAdapter {
 		challenge: ProviderChallenge,
 		identity: ResolverIdentity | undefined,
 		signal: AbortSignal,
+		traceRecorder?: TraceRecorder,
 	): Promise<ChallengeSolution>;
 }
 

@@ -7,6 +7,7 @@ import type {
 } from "../../types.js";
 import { isProviderError, ProviderError } from "../../errors.js";
 import { type BrowserClientOptions, createBrowserClient } from "../browser.js";
+import type { TraceRecorder } from "../trace.js";
 import {
 	type ResolverIdentity,
 	type ResolverVendorAdapter,
@@ -44,6 +45,7 @@ export interface BrowserResolverVendorAdapter extends ResolverVendorAdapter {
 		challenge: ProviderChallenge,
 		identity: ResolverIdentity | undefined,
 		signal: AbortSignal,
+		traceRecorder?: TraceRecorder,
 	): Promise<BrowserResolverSolution>;
 }
 
@@ -184,6 +186,41 @@ function knownUnavailableReason(
 	return undefined;
 }
 
+async function closeBrowserClient(
+	client: BrowserClient | undefined,
+	challengeKind: ProviderChallenge["kind"],
+	traceRecorder: TraceRecorder | undefined,
+): Promise<void> {
+	const close = client?.close;
+	if (!close) return;
+
+	const closeClient = () => close.call(client);
+	if (!traceRecorder) {
+		try {
+			await closeClient();
+		} catch {
+			// Cleanup remains best-effort when the resolver has no trace recorder.
+		}
+		return;
+	}
+
+	await traceRecorder
+		.runSpan("resolver.vendor.cleanup", closeClient, {
+			attributes: {
+				vendor: BROWSER_VENDOR_ID,
+				challenge_kind: challengeKind,
+				operation: "client.close",
+			},
+			onError(error) {
+				return {
+					error_message: error instanceof Error ? error.message : String(error),
+					...(error instanceof Error && error.stack ? { error_stack: error.stack } : {}),
+				};
+			},
+		})
+		.catch(() => undefined);
+}
+
 export function createBrowserResolverVendorAdapter(
 	options: BrowserResolverVendorOptions,
 ): BrowserResolverVendorAdapter {
@@ -201,7 +238,7 @@ export function createBrowserResolverVendorAdapter(
 			return solution.form === "cookies" ? { userAgent: solution.userAgent } : undefined;
 		},
 
-		async solve(challenge, identity, callerSignal) {
+		async solve(challenge, identity, callerSignal, traceRecorder) {
 			void identity;
 			if (!options.cdpUrl?.trim()) {
 				throw new ResolverVendorUnavailableError(BROWSER_VENDOR_ID, "missing_credentials");
@@ -248,7 +285,7 @@ export function createBrowserResolverVendorAdapter(
 							await contextOperation;
 							throw error;
 						}
-						await client.close?.().catch(() => undefined);
+						await closeBrowserClient(client, challengeKind, traceRecorder);
 						void contextOperation.catch(() => undefined);
 					}
 					throw error;
@@ -271,7 +308,7 @@ export function createBrowserResolverVendorAdapter(
 			} finally {
 				clearTimeout(timeout);
 				callerSignal.removeEventListener("abort", onCallerAbort);
-				await client?.close?.().catch(() => undefined);
+				await closeBrowserClient(client, challengeKind, traceRecorder);
 			}
 		},
 	};

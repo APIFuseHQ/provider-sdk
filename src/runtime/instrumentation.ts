@@ -30,7 +30,7 @@ export type InstrumentedProviderContext<T extends ProviderContext> = Omit<T, "tr
 	trace: TraceContext;
 };
 
-type InstrumentedNamespace = "http" | "stealth" | "browser" | "session" | "state";
+type InstrumentedNamespace = "http" | "stealth" | "browser" | "session" | "state" | "resolver";
 
 const BROWSER_PAGE_METHODS = new Set(["goto", "fill", "click", "type", "waitForSelector"]);
 const DIAGNOSTIC_BASE_URL = "http://apifuse-instrumentation.invalid";
@@ -630,6 +630,33 @@ function wrapNamespace<T extends object>(
 				return value;
 			}
 
+			if (namespace === "resolver" && property === "solve") {
+				if (wrappedMethods.has(property)) {
+					return wrappedMethods.get(property);
+				}
+
+				const wrapped = (...args: unknown[]) => {
+					const challenge = args[0];
+					const challengeKind =
+						typeof challenge === "object" &&
+						challenge !== null &&
+						"kind" in challenge &&
+						typeof challenge.kind === "string"
+							? challenge.kind
+							: undefined;
+					return recorder.runSpan(
+						"resolver.solve",
+						() => Reflect.apply(value, namespaceTarget, [args[0], args[1], recorder]),
+						{
+							attributes: challengeKind ? { challenge_kind: challengeKind } : undefined,
+						},
+					);
+				};
+
+				wrappedMethods.set(property, wrapped);
+				return wrapped;
+			}
+
 			if (namespace === "browser" && property === "newPage") {
 				if (wrappedMethods.has(property)) {
 					return wrappedMethods.get(property);
@@ -838,7 +865,8 @@ export function wrapWithInstrumentation<T extends ProviderContext>(
 				property === "stealth" ||
 				property === "browser" ||
 				property === "session" ||
-				property === "state"
+				property === "state" ||
+				property === "resolver"
 			) {
 				const namespace = property;
 				if (wrappedTargets.has(namespace)) {

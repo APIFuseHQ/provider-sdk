@@ -7,6 +7,7 @@ import type {
 	ProviderResolverVendor,
 } from "../../types.js";
 import {
+	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	createResolverClient,
 	createResolverClientFromEnv,
@@ -234,6 +235,38 @@ describe("resolver vendor chain", () => {
 			code: "RESOLVER_CHAIN_EXHAUSTED",
 			details: [{ vendor: "capsolver", reason: "not_implemented" }],
 		});
+	});
+
+	it("fails loudly when an implemented vendor loses its registered adapter", async () => {
+		const registry = RESOLVER_ADAPTER_REGISTRY as {
+			browser?: (configuration: string, timeoutMs: number) => ResolverVendorAdapter;
+		};
+		const original = registry.browser;
+		delete registry.browser;
+		try {
+			const resolver = createResolverClientFromEnv(
+				{ vendors: ["browser"], kinds: ["aws_waf"] },
+				{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
+			);
+
+			await expect(resolver.solve(CHALLENGE)).rejects.toThrow(
+				'Resolver adapter factory is missing for implemented vendor "browser"',
+			);
+		} finally {
+			registry.browser = original;
+		}
+	});
+
+	it("fails loudly for a vendor id outside the known union", () => {
+		expect(() =>
+			createResolverClientFromEnv(
+				{
+					vendors: ["unexpected-vendor" as ProviderResolverVendor],
+					kinds: ["aws_waf"],
+				},
+				{},
+			),
+		).toThrow('Unknown resolver vendor "unexpected-vendor" in resolver configuration');
 	});
 });
 

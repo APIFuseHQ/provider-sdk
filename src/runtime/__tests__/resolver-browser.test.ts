@@ -13,6 +13,7 @@ import {
 	ResolverChallengeVerdictError,
 	ResolverVendorUnavailableError,
 } from "../resolver-vendors/types.js";
+import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const AWS_CHALLENGE = {
 	kind: "aws_waf",
@@ -77,6 +78,7 @@ const BROWSER_TRANSPORT_ERROR_FIXTURES = [
 ] as const;
 
 type BrowserStubOptions = {
+	readonly closeError?: Error;
 	readonly connectError?: Error;
 	readonly contextCloseGate?: Promise<void>;
 	readonly cookieJars?: readonly (readonly BrowserCookie[])[];
@@ -112,6 +114,7 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 		engine: "playwright-stealth",
 		async close() {
 			state.clientCloseCalls += 1;
+			if (options.closeError) throw options.closeError;
 		},
 		async withIsolatedContext<T>(handler: (isolatedPage: BrowserPage) => Promise<T>) {
 			if (options.connectError) throw options.connectError;
@@ -437,6 +440,69 @@ describe("browser resolver vendor", () => {
 			createAdapter(stub).solve(AWS_CHALLENGE, undefined, new AbortController().signal),
 		).rejects.toThrow("navigation crashed");
 		expect(stub.state.contextCloseCalls).toBe(1);
+	});
+
+	it("records cleanup failure without replacing a successful solution", async () => {
+		const cleanupError = new Error("CDP lease release failed after success");
+		const stub = createBrowserStub({
+			closeError: cleanupError,
+			cookieJars: [
+				[
+					{
+						...COOKIE_BASE,
+						name: "aws-waf-token",
+						value: "successful-token",
+					},
+				],
+			],
+		});
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+
+		const result = await createAdapter(stub).solve(
+			AWS_CHALLENGE,
+			undefined,
+			new AbortController().signal,
+			recorder,
+		);
+
+		expect(result.cookies).toEqual({ "aws-waf-token": "successful-token" });
+		expect(stub.state.clientCloseCalls).toBe(1);
+		expect(trace.getSpans()).toHaveLength(1);
+		expect(trace.getSpans()[0]).toMatchObject({
+			name: "resolver.vendor.cleanup",
+			status: "error",
+			error: cleanupError.message,
+			attributes: {
+				vendor: "browser",
+				challenge_kind: "aws_waf",
+				operation: "client.close",
+				error_message: cleanupError.message,
+				error_stack: expect.stringContaining(cleanupError.message),
+			},
+		});
+	});
+
+	it("records cleanup failure without masking the solve-time error", async () => {
+		const solveError = new Error("navigation failed before cleanup");
+		const cleanupError = new Error("CDP lease release also failed");
+		const stub = createBrowserStub({ closeError: cleanupError, gotoError: solveError });
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+
+		await expect(
+			createAdapter(stub).solve(AWS_CHALLENGE, undefined, new AbortController().signal, recorder),
+		).rejects.toBe(solveError);
+		expect(stub.state.clientCloseCalls).toBe(1);
+		expect(trace.getSpans()[0]).toMatchObject({
+			name: "resolver.vendor.cleanup",
+			status: "error",
+			attributes: {
+				error_message: cleanupError.message,
+			},
+		});
 	});
 
 	it("reports missing CDP configuration without creating a browser client", async () => {
