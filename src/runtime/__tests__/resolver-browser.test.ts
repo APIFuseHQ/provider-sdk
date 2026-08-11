@@ -356,7 +356,21 @@ describe("browser resolver vendor", () => {
 	for (const fixture of CDP_POOL_ERROR_FIXTURES.filter(
 		(fixture) => fixture.reason === "allocation_exhausted",
 	)) {
-		it(`maps pool error ${fixture.jsonRpcCode} from ${fixture.origin}`, async () => {
+		it(`maps pool error code ${fixture.jsonRpcCode} from ${fixture.origin}`, async () => {
+			// The numeric code is what PR #119 propagates and what production must classify on.
+			// The message is deliberately unrelated so a message-only implementation fails here.
+			const codedError = Object.assign(new Error("pool rejected the acquire"), {
+				code: fixture.jsonRpcCode,
+			});
+			const stub = createBrowserStub({ connectError: codedError });
+
+			await expect(
+				createAdapter(stub).solve(AWS_CHALLENGE, undefined, new AbortController().signal),
+			).rejects.toMatchObject({ vendor: "browser", reason: fixture.reason });
+		});
+
+		it(`still maps the legacy message for ${fixture.jsonRpcCode} when no code is present`, async () => {
+			// Fallback path for pool builds predating numeric-code propagation.
 			const stub = createBrowserStub({ connectError: new Error(fixture.message) });
 
 			await expect(
@@ -368,8 +382,12 @@ describe("browser resolver vendor", () => {
 	for (const fixture of CDP_POOL_ERROR_FIXTURES.filter(
 		(fixture) => fixture.reason === undefined,
 	)) {
-		it(`propagates unclassified pool error ${fixture.jsonRpcCode} from ${fixture.origin}`, async () => {
-			const originalError = new Error(fixture.message);
+		it(`propagates unclassified pool error code ${fixture.jsonRpcCode} from ${fixture.origin}`, async () => {
+			// -32004 and -32006 are caller bugs: the next vendor would fail identically,
+			// so they must reach the caller instead of becoming a failover reason.
+			const originalError = Object.assign(new Error(fixture.message), {
+				code: fixture.jsonRpcCode,
+			});
 			const stub = createBrowserStub({ connectError: originalError });
 
 			await expect(

@@ -155,18 +155,37 @@ async function solveInPage(
 	}
 }
 
+const POOL_ALLOCATION_EXHAUSTED_CODES = new Set([
+	-32_001, // queue full
+	-32_002, // acquire timed out
+	-32_003, // shutting down
+]);
+
+function poolErrorCode(error: Error): number | undefined {
+	const code = (error as Error & { readonly code?: unknown }).code;
+	return typeof code === "number" ? code : undefined;
+}
+
 function knownUnavailableReason(
 	error: unknown,
 ): "allocation_exhausted" | "missing_credentials" | "transport_failure" | undefined {
 	// Source-grounded mappings:
-	// - apps/cdp-pool/src/index.ts: the three CDP pool acquire messages below.
+	// - apps/cdp-pool/src/index.ts: the JSON-RPC codes and messages below.
 	// - src/runtime/browser.ts: BROWSER_CDP_POOL_REQUIRED and the two WebSocket messages.
-	// JsonRpcWebSocketClient drops the pool's JSON-RPC error code, so those pool errors
-	// arrive here as plain Error instances and require exact, verified message substrings.
+	// The pool's numeric JSON-RPC code is authoritative and is preferred whenever present.
+	// The message substrings remain as a fallback for pool builds predating code
+	// propagation; they are exact strings verified against the pool source. -32004 (unknown
+	// lease) and -32006 (missing allowedHosts) are deliberately unmapped: both are caller
+	// bugs, and the next vendor would fail identically, so they propagate unchanged.
 	if (isProviderError(error)) {
 		return error.code === "BROWSER_CDP_POOL_REQUIRED" ? "missing_credentials" : undefined;
 	}
 	if (!(error instanceof Error)) return undefined;
+
+	const code = poolErrorCode(error);
+	if (code !== undefined) {
+		return POOL_ALLOCATION_EXHAUSTED_CODES.has(code) ? "allocation_exhausted" : undefined;
+	}
 
 	if (
 		error.message.includes("CDP pool acquire queue is full") ||
