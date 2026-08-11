@@ -48,6 +48,13 @@ type MockCdpFetchFailure = {
 	requestId: string;
 };
 
+type MockCommandFrame = {
+	id: number;
+	method: string;
+	params?: Record<string, unknown>;
+	[key: string]: unknown;
+};
+
 type MockRoute = {
 	abort: (errorCode?: string) => Promise<void>;
 	fulfill: (options: MockRouteFulfillOptions) => Promise<void>;
@@ -175,7 +182,10 @@ const cdpState = {
 	poolReleaseRequests: [] as Array<Record<string, unknown>>,
 	runtimeEnabled: 0,
 	pageEnabled: 0,
+	pageFrames: [] as MockCommandFrame[],
 	screenshotCalls: [] as boolean[],
+	poolAcquireError: null as { code: number; message: string } | null,
+	poolFrames: [] as MockCommandFrame[],
 	webdriverPatches: 0,
 };
 
@@ -530,14 +540,26 @@ class MockWebSocket {
 	}
 
 	send(raw: string) {
-		const message = JSON.parse(raw) as {
-			id: number;
-			method: string;
-			params?: Record<string, unknown>;
-		};
+		const message = JSON.parse(raw) as MockCommandFrame;
 
 		if (this.endpoint === "ws://pool.test" || this.endpoint === "ws://pool.test/") {
+			cdpState.poolFrames.push(message);
 			this.handlePoolMessage(message);
+			return;
+		}
+
+		cdpState.pageFrames.push(message);
+		const allowedKeys = new Set(["id", "method", "params", "sessionId"]);
+		if (Object.keys(message).some((key) => !allowedKeys.has(key))) {
+			this.emit("message", {
+				data: JSON.stringify({
+					error: {
+						code: -32600,
+						message: "Message has property other than 'id', 'method', 'sessionId', 'params'",
+					},
+					id: message.id,
+				}),
+			});
 			return;
 		}
 
@@ -565,15 +587,27 @@ class MockWebSocket {
 		}
 	}
 
-	private reply(id: number, result: Record<string, unknown>) {
+	private replyToPool(id: number, result: Record<string, unknown>) {
 		this.emit("message", {
 			data: JSON.stringify({ id, jsonrpc: "2.0", result }),
 		});
 	}
 
+	private replyToPoolWithError(id: number, error: { code: number; message: string }) {
+		this.emit("message", {
+			data: JSON.stringify({ error, id, jsonrpc: "2.0" }),
+		});
+	}
+
+	private replyToPage(id: number, result: Record<string, unknown>) {
+		this.emit("message", {
+			data: JSON.stringify({ id, result }),
+		});
+	}
+
 	private emitPageEvent(method: string, params: Record<string, unknown> = {}) {
 		this.emit("message", {
-			data: JSON.stringify({ jsonrpc: "2.0", method, params }),
+			data: JSON.stringify({ method, params }),
 		});
 	}
 
@@ -587,7 +621,11 @@ class MockWebSocket {
 				cdpState.acquireCalls += 1;
 				const pageNumber = cdpState.acquireCalls;
 				cdpState.acquireParams.push(message.params);
-				this.reply(message.id, {
+				if (cdpState.poolAcquireError) {
+					this.replyToPoolWithError(message.id, cdpState.poolAcquireError);
+					break;
+				}
+				this.replyToPool(message.id, {
 					...(message.params?.isolationMode === "browserContext"
 						? { browserContextId: `pool-context-${pageNumber}` }
 						: {}),
@@ -599,10 +637,10 @@ class MockWebSocket {
 			case "release":
 				cdpState.poolReleaseCalls.push(String(message.params?.pageId ?? ""));
 				cdpState.poolReleaseRequests.push(message.params ?? {});
-				this.reply(message.id, { released: true });
+				this.replyToPool(message.id, { released: true });
 				break;
 			default:
-				this.reply(message.id, {});
+				this.replyToPool(message.id, {});
 		}
 	}
 
@@ -614,14 +652,14 @@ class MockWebSocket {
 		switch (message.method) {
 			case "Page.enable":
 				cdpState.pageEnabled += 1;
-				this.reply(message.id, {});
+				this.replyToPage(message.id, {});
 				break;
 			case "Runtime.enable":
 				cdpState.runtimeEnabled += 1;
-				this.reply(message.id, {});
+				this.replyToPage(message.id, {});
 				break;
 			case "Page.getFrameTree":
-				this.reply(message.id, {
+				this.replyToPage(message.id, {
 					frameTree: {
 						frame: {
 							id: "main-frame",
@@ -641,13 +679,13 @@ class MockWebSocket {
 				});
 				break;
 			case "Page.createIsolatedWorld":
-				this.reply(message.id, {
+				this.replyToPage(message.id, {
 					executionContextId: message.params?.frameId === "recaptcha-frame" ? 42 : 7,
 				});
 				break;
 			case "Page.navigate":
 				cdpState.navigateUrls.push(String(message.params?.url ?? ""));
-				this.reply(message.id, {});
+				this.replyToPage(message.id, {});
 				queueMicrotask(() => this.emitPageEvent("Page.loadEventFired"));
 				break;
 			case "Runtime.evaluate": {
@@ -665,19 +703,18 @@ class MockWebSocket {
 							data: JSON.stringify({
 								error: { code: -32000, message: "Runtime init failed" },
 								id: message.id,
-								jsonrpc: "2.0",
 							}),
 						});
 						break;
 					}
 
 					cdpState.webdriverPatches += 1;
-					this.reply(message.id, { result: { value: undefined } });
+					this.replyToPage(message.id, { result: { value: undefined } });
 					break;
 				}
 
 				if (contextId === 42 && expression === "window.location.href") {
-					this.reply(message.id, {
+					this.replyToPage(message.id, {
 						result: {
 							value: "https://www.google.com/recaptcha/api2/anchor?k=site-key",
 						},
@@ -686,29 +723,29 @@ class MockWebSocket {
 				}
 
 				if (expression === "document.readyState") {
-					this.reply(message.id, { result: { value: "complete" } });
+					this.replyToPage(message.id, { result: { value: "complete" } });
 					break;
 				}
 
 				if (expression === "document.documentElement.outerHTML") {
-					this.reply(message.id, {
+					this.replyToPage(message.id, {
 						result: { value: '<html><body><input id="name" /></body></html>' },
 					});
 					break;
 				}
 
 				if (expression === "document.title") {
-					this.reply(message.id, { result: { value: "remote-title" } });
+					this.replyToPage(message.id, { result: { value: "remote-title" } });
 					break;
 				}
 
 				if (expression.includes("Boolean(document.querySelector")) {
-					this.reply(message.id, { result: { value: Boolean(selector) } });
+					this.replyToPage(message.id, { result: { value: Boolean(selector) } });
 					break;
 				}
 
 				if (expression.includes("?.textContent ?? null")) {
-					this.reply(message.id, { result: { value: null } });
+					this.replyToPage(message.id, { result: { value: null } });
 					break;
 				}
 
@@ -718,37 +755,37 @@ class MockWebSocket {
 					} else {
 						cdpState.clicks.push(selector);
 					}
-					this.reply(message.id, { result: { value: undefined } });
+					this.replyToPage(message.id, { result: { value: undefined } });
 					break;
 				}
 
 				if (expression.includes("element.focus()") && selector) {
 					cdpState.focusedSelectors.push(selector);
-					this.reply(message.id, { result: { value: undefined } });
+					this.replyToPage(message.id, { result: { value: undefined } });
 					break;
 				}
 
-				this.reply(message.id, { result: { value: undefined } });
+				this.replyToPage(message.id, { result: { value: undefined } });
 				break;
 			}
 			case "Input.insertText":
 				cdpState.insertedTexts.push(String(message.params?.text ?? ""));
-				this.reply(message.id, {});
+				this.replyToPage(message.id, {});
 				break;
 			case "Page.captureScreenshot":
 				cdpState.screenshotCalls.push(Boolean(message.params?.captureBeyondViewport));
-				this.reply(message.id, {
+				this.replyToPage(message.id, {
 					data: Buffer.from("remote-shot").toString("base64"),
 				});
 				break;
 			case "Fetch.enable":
 				cdpState.fetchEnabled += 1;
 				cdpState.fetchEnableParams.push(message.params ?? {});
-				this.reply(message.id, {});
+				this.replyToPage(message.id, {});
 				break;
 			case "Fetch.disable":
 				cdpState.fetchDisabled += 1;
-				this.reply(message.id, {});
+				this.replyToPage(message.id, {});
 				break;
 			case "Fetch.fulfillRequest":
 				cdpState.fetchFulfillments.push({
@@ -770,17 +807,17 @@ class MockWebSocket {
 							}
 						: {}),
 				});
-				this.reply(message.id, {});
+				this.replyToPage(message.id, {});
 				break;
 			case "Fetch.failRequest":
 				cdpState.fetchFailures.push({
 					errorReason: String(message.params?.errorReason ?? ""),
 					requestId: String(message.params?.requestId ?? ""),
 				});
-				this.reply(message.id, {});
+				this.replyToPage(message.id, {});
 				break;
 			default:
-				this.reply(message.id, {});
+				this.replyToPage(message.id, {});
 		}
 	}
 }
@@ -813,7 +850,10 @@ describe("createBrowserClient", () => {
 		cdpState.fetchFulfillments.length = 0;
 		cdpState.insertedTexts.length = 0;
 		cdpState.navigateUrls.length = 0;
+		cdpState.pageFrames.length = 0;
 		cdpState.pageSockets.length = 0;
+		cdpState.poolAcquireError = null;
+		cdpState.poolFrames.length = 0;
 		cdpState.poolReleaseCalls.length = 0;
 		cdpState.poolReleaseRequests.length = 0;
 		cdpState.runtimeEnabled = 0;
@@ -1327,6 +1367,58 @@ describe("createBrowserClient", () => {
 		expect(screenshot.toString()).toBe("remote-shot");
 		expect(cdpState.closedEndpoints).toContain("ws://page.test/devtools/page/pool-page-1");
 		expect(cdpState.closedEndpoints).toContain("ws://pool.test/");
+	});
+
+	it("serializes CDP page commands with only CDP top-level keys", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		await page.title();
+		const titleCommand = cdpState.pageFrames.find(
+			(frame) =>
+				frame.method === "Runtime.evaluate" && frame.params?.expression === "document.title",
+		);
+		await page.close();
+		await client.close();
+
+		expect(titleCommand).toBeDefined();
+		expect(Object.keys(titleCommand ?? {}).sort()).toEqual(["id", "method", "params"]);
+	});
+
+	it("serializes pool-manager commands as JSON-RPC 2.0", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const acquireCommand = cdpState.poolFrames.find((frame) => frame.method === "acquire");
+		await page.close();
+		await client.close();
+
+		expect(acquireCommand).toMatchObject({
+			jsonrpc: "2.0",
+			method: "acquire",
+		});
+	});
+
+	it("preserves a pool JSON-RPC error message and exposes its numeric code", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		cdpState.poolAcquireError = { code: -32001, message: "CDP queue is full" };
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+
+		const error = await client.newPage().catch((error: unknown) => error);
+		await client.close();
+
+		expect(error).toBeInstanceOf(Error);
+		expect(error).toMatchObject({
+			code: -32001,
+			message: "CDP queue is full",
+		});
 	});
 
 	it("enforces the CDP pool for rawPage and never launches local Chromium", async () => {
