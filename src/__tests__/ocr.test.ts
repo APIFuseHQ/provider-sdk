@@ -304,6 +304,33 @@ describe("OCR CAPTCHA constraint handling", () => {
 			}),
 		).toHaveLength(1);
 	});
+
+	it("returns immediately when homoglyph substitutions cannot repair length", () => {
+		const start = performance.now();
+		const candidates = extractCaptchaCandidates("IlOoSsZzBIlOo", {
+			length: 14,
+			maxCandidates: 3,
+		});
+		const elapsedMs = performance.now() - start;
+
+		expect(candidates).toEqual([
+			{ text: "IlOoSsZzBIlOo", satisfiesConstraints: false },
+		]);
+		expect(elapsedMs).toBeLessThan(200);
+	});
+
+	it("caps homoglyph exploration for a long charset-failing input", () => {
+		const modelText = "IlOoSsZzB".repeat(12);
+		const start = performance.now();
+		const candidates = extractCaptchaCandidates(modelText, {
+			charset: "x",
+			maxCandidates: 3,
+		});
+		const elapsedMs = performance.now() - start;
+
+		expect(candidates).toEqual([{ text: modelText, satisfiesConstraints: false }]);
+		expect(elapsedMs).toBeLessThan(200);
+	});
 });
 
 describe("OCR Provider SDK context integration", () => {

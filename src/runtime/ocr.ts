@@ -25,6 +25,7 @@ export const DEFAULT_CLOUDFLARE_WORKERS_AI_OCR_MODEL = "@cf/google/gemma-4-26b-a
 const DEFAULT_MAX_TOKENS = 64;
 const KIMI_MIN_MAX_TOKENS = 3_000;
 const DEFAULT_MAX_CAPTCHA_CANDIDATES = 3;
+const MAX_HOMOGLYPH_SEARCH_NODES = 512;
 const HOMOGLYPH_CLASSES = [
 	["I", "l", "1", "i"],
 	["O", "0", "o"],
@@ -403,6 +404,7 @@ export function extractCaptchaCandidates(
 		? Math.max(1, Math.floor(requestedMaxCandidates))
 		: DEFAULT_MAX_CAPTCHA_CANDIDATES;
 	if (primary.satisfiesConstraints || maxCandidates === 1) return [primary];
+	if (options.length !== undefined && [...primaryText].length !== options.length) return [primary];
 
 	const candidates: OcrCaptchaCandidate[] = [primary];
 	const queue = [primaryText];
@@ -423,6 +425,7 @@ export function extractCaptchaCandidates(
 					candidates.push({ text: next, satisfiesConstraints: true });
 					if (candidates.length >= maxCandidates) return candidates;
 				}
+				if (visited.size >= MAX_HOMOGLYPH_SEARCH_NODES) return candidates;
 			}
 		}
 	}
