@@ -123,6 +123,46 @@ describe("OCR runtime clients", () => {
 		}
 	});
 
+	it("fails closed when the openai-compatible backend has no configured model", async () => {
+		const ocr = createOcrClientFromEnv(
+			{ mode: "optional" },
+			{
+				[APIFUSE__OCR__BACKEND_ENV]: OPENAI_COMPATIBLE_OCR_BACKEND,
+				[APIFUSE__OCR__BASE_URL_ENV]: "http://ocr.internal/v1",
+			},
+		);
+
+		try {
+			await ocr.recognize({ image });
+			throw new Error("expected OCR recognition to fail");
+		} catch (error) {
+			expect(error).toBeInstanceOf(ProviderError);
+			expect(error).toMatchObject({
+				code: "OCR_UNAVAILABLE",
+				message: `OCR backend ${OPENAI_COMPATIBLE_OCR_BACKEND} requires ${APIFUSE__OCR__MODEL_ENV}`,
+			});
+			expect((error as ProviderError).fix).toContain(APIFUSE__OCR__MODEL_ENV);
+			expect((error as ProviderError).fix).toContain("zai-org/GLM-OCR");
+		}
+	});
+
+	it("sends a supplied self-hosted model ID verbatim", async () => {
+		let body: Record<string, unknown> | undefined;
+		const model = "zai-org/GLM-OCR";
+		const ocr = createOpenAiCompatibleOcrClient({
+			baseUrl: "http://ocr.internal/v1",
+			model,
+			fetch: (async (_input, init) => {
+				body = JSON.parse(String(init?.body));
+				return Response.json({ choices: [{ message: { content: "abc123" } }] });
+			}) as typeof fetch,
+		});
+
+		await ocr.recognize({ image });
+
+		expect(body?.model).toBe(model);
+	});
+
 	it("fails closed for undeclared OCR and missing backend credentials", async () => {
 		await expect(
 			createOcrClientFromEnv(undefined, {

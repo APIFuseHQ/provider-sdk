@@ -53,7 +53,7 @@ type CloudflareWorkersAiOcrClientOptions = {
 type OpenAiCompatibleOcrClientOptions = {
 	baseUrl: string;
 	apiKey?: string;
-	model?: string;
+	model: string;
 	fetch?: typeof fetch;
 };
 
@@ -107,10 +107,10 @@ export function createOcrClientFromEnv(
 
 	const backend =
 		normalizedEnvValue(env, APIFUSE__OCR__BACKEND_ENV) ?? CLOUDFLARE_WORKERS_AI_OCR_BACKEND;
-	const model =
-		normalizedEnvValue(env, APIFUSE__OCR__MODEL_ENV) ?? DEFAULT_CLOUDFLARE_WORKERS_AI_OCR_MODEL;
+	const configuredModel = normalizedEnvValue(env, APIFUSE__OCR__MODEL_ENV);
 
 	if (backend === CLOUDFLARE_WORKERS_AI_OCR_BACKEND) {
+		const model = configuredModel ?? DEFAULT_CLOUDFLARE_WORKERS_AI_OCR_MODEL;
 		const accountId = normalizedEnvValue(env, CLOUDFLARE_ACCOUNT_ID_ENV);
 		const apiToken = normalizedEnvValue(env, APIFUSE__OCR__CLOUDFLARE_API_TOKEN_ENV);
 		if (!accountId || !apiToken) {
@@ -128,10 +128,17 @@ export function createOcrClientFromEnv(
 				`OCR backend ${backend} requires ${APIFUSE__OCR__BASE_URL_ENV}`,
 			);
 		}
+		if (!configuredModel) {
+			return createErrorOcrClient({
+				code: "OCR_UNAVAILABLE",
+				message: `OCR backend ${backend} requires ${APIFUSE__OCR__MODEL_ENV}`,
+				fix: `Set ${APIFUSE__OCR__MODEL_ENV} to the exact model ID served by your self-hosted endpoint, for example ${APIFUSE__OCR__MODEL_ENV}=zai-org/GLM-OCR.`,
+			});
+		}
 		return createOpenAiCompatibleOcrClient({
 			baseUrl,
 			apiKey: normalizedEnvValue(env, APIFUSE__OCR__API_KEY_ENV),
-			model,
+			model: configuredModel,
 		});
 	}
 
@@ -327,7 +334,7 @@ export function createCloudflareWorkersAiOcrClient(
 export function createOpenAiCompatibleOcrClient(
 	options: OpenAiCompatibleOcrClientOptions,
 ): OcrContext {
-	const model = options.model ?? DEFAULT_CLOUDFLARE_WORKERS_AI_OCR_MODEL;
+	const model = options.model;
 	const runFetch = options.fetch ?? fetch;
 	return createOcrClient(model, async (request) => {
 		const headers: Record<string, string> = { "Content-Type": "application/json" };
