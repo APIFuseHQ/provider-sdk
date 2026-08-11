@@ -6,6 +6,7 @@ import type {
 	BrowserChallengeRequest,
 	BrowserChallengeResult,
 	BrowserClient as BrowserClientContract,
+	BrowserCookie,
 	BrowserEngine,
 	BrowserFrame,
 	BrowserLocator,
@@ -545,6 +546,10 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 		await this.page.close();
 	}
 
+	async cookies(): Promise<readonly BrowserCookie[]> {
+		return (await this.page.context().cookies()).map(toBrowserCookie);
+	}
+
 	async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
 		const allowedMethods = new Set(policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS);
 		const handler = async (route: Route): Promise<void> => {
@@ -843,6 +848,64 @@ function flattenCdpFrameTree(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function isBrowserCookieSameSite(value: unknown): value is BrowserCookie["sameSite"] {
+	return value === "Strict" || value === "Lax" || value === "None";
+}
+
+function toBrowserCookie(cookie: {
+	readonly name: string;
+	readonly value: string;
+	readonly domain: string;
+	readonly path: string;
+	readonly expires?: number;
+	readonly httpOnly: boolean;
+	readonly secure: boolean;
+	readonly sameSite?: unknown;
+}): BrowserCookie {
+	return {
+		name: cookie.name,
+		value: cookie.value,
+		domain: cookie.domain,
+		path: cookie.path,
+		...(cookie.expires !== undefined && cookie.expires > 0 ? { expires: cookie.expires } : {}),
+		httpOnly: cookie.httpOnly,
+		secure: cookie.secure,
+		...(isBrowserCookieSameSite(cookie.sameSite) ? { sameSite: cookie.sameSite } : {}),
+	};
+}
+
+function parseCdpCookies(value: unknown): readonly BrowserCookie[] {
+	if (!Array.isArray(value)) {
+		throw new Error("CDP Network.getCookies returned an invalid cookie list");
+	}
+
+	return value.map((cookie) => {
+		if (
+			!isRecord(cookie) ||
+			typeof cookie.name !== "string" ||
+			typeof cookie.value !== "string" ||
+			typeof cookie.domain !== "string" ||
+			typeof cookie.path !== "string" ||
+			typeof cookie.expires !== "number" ||
+			typeof cookie.httpOnly !== "boolean" ||
+			typeof cookie.secure !== "boolean"
+		) {
+			throw new Error("CDP Network.getCookies returned an invalid cookie");
+		}
+
+		return toBrowserCookie({
+			name: cookie.name,
+			value: cookie.value,
+			domain: cookie.domain,
+			path: cookie.path,
+			expires: cookie.expires,
+			httpOnly: cookie.httpOnly,
+			secure: cookie.secure,
+			sameSite: cookie.sameSite,
+		});
+	});
 }
 
 function parsePoolAcquireResponse(value: unknown): PoolAcquireResponse {
@@ -1198,6 +1261,12 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		});
 
 		return Buffer.from(String(result.data ?? ""), "base64");
+	}
+
+	async cookies(): Promise<readonly BrowserCookie[]> {
+		await this.initialize();
+		const result = await this.pageClient.send("Network.getCookies");
+		return parseCdpCookies(result.cookies);
 	}
 
 	async close(): Promise<void> {

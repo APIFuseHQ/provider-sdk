@@ -396,6 +396,8 @@ function createUpstreamContext(
 				},
 			}),
 			close: async () => {},
+			cookies: async () =>
+				(await browserAction("cookies")).data as Awaited<ReturnType<BrowserPage["cookies"]>>,
 			fill: async (selector, textValue) => {
 				await browserAction("fill", { selector, text: textValue });
 			},

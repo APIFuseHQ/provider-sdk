@@ -1714,6 +1714,18 @@ export interface BrowserFrame {
 	locator(selector: string): BrowserLocator;
 }
 
+export interface BrowserCookie {
+	readonly name: string;
+	readonly value: string;
+	readonly domain: string;
+	readonly path: string;
+	/** Unix seconds. Absent for a session cookie. */
+	readonly expires?: number;
+	readonly httpOnly: boolean;
+	readonly secure: boolean;
+	readonly sameSite?: "Strict" | "Lax" | "None";
+}
+
 export type BrowserResourceMethod = "GET" | "HEAD";
 
 export type BrowserResourceRequest = {
@@ -1755,6 +1767,11 @@ export type BrowserResourcePolicy = {
 
 export interface BrowserPage extends BrowserFrame {
 	close(): Promise<void>;
+	/**
+	 * Reads the browser context's cookie jar, including httpOnly cookies.
+	 * Cookie expiry values are Unix seconds and are absent for session cookies.
+	 */
+	cookies(): Promise<readonly BrowserCookie[]>;
 	fill(selector: string, text: string): Promise<void>;
 	goto(url: string): Promise<void>;
 	pageId?: string;

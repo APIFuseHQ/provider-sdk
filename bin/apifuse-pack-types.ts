@@ -122,6 +122,19 @@ const NEGATIVE_CONTROLS = [
 			"",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-browser-cookie-expires.ts",
+		expectedCode: "TS2322",
+		description: "BrowserCookie.expires remains optional for session cookies",
+		source: [
+			'import type { BrowserCookie } from "@apifuse/provider-sdk";',
+			"",
+			"export function mustNotCompile(cookie: BrowserCookie): number {",
+			"\treturn cookie.expires;",
+			"}",
+			"",
+		].join("\n"),
+	},
 ] as const;
 
 const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-types-"));
@@ -212,7 +225,7 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 		join(consumerDir, "consumer.ts"),
 		[
 			'import { ProviderError, resolveProxy, SessionExpiredError, z } from "@apifuse/provider-sdk";',
-			'import type { ChallengeSolution, NativeNetworkClient, NativeNetworkConnection, NativeProviderConfig, NativeProviderContext, NativeTcpEgressGrant, ProviderChallenge, ProviderContext, ProviderFileRef, ProviderFilesContext, ProviderResolvedFile, ProviderResolverConfig, ResolverContext } from "@apifuse/provider-sdk";',
+			'import type { BrowserCookie, ChallengeSolution, NativeNetworkClient, NativeNetworkConnection, NativeProviderConfig, NativeProviderContext, NativeTcpEgressGrant, ProviderChallenge, ProviderContext, ProviderFileRef, ProviderFilesContext, ProviderResolvedFile, ProviderResolverConfig, ResolverContext } from "@apifuse/provider-sdk";',
 			'import type { ProxyProtocol, ProxyResolutionOptions, ProxyResolutionSource, ProxyVendorName, RequestOptions, ResolvedProxyConfig } from "@apifuse/provider-sdk";',
 			'import { defineCredentialsAuth } from "@apifuse/provider-sdk/provider";',
 			'import type { NativeNetworkClient as ProviderEntryNativeNetworkClient, ProviderFilesContext as ProviderEntryFilesContext } from "@apifuse/provider-sdk/provider";',
@@ -264,6 +277,9 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			'export const cookieSolution: ChallengeSolution = { form: "cookies", cookies: { cf_clearance: "clearance" }, userAgent: "fixture-agent" };',
 			'export const resolverConfig: ProviderResolverConfig = { vendors: ["browser", "capsolver"], kinds: ["cloudflare_interstitial", "turnstile"] };',
 			"export const resolverContext: ResolverContext = { solve: async () => tokenSolution };",
+			'export const browserCookie: BrowserCookie = { name: "persistent-id", value: "persistent-token", domain: "example.com", path: "/", expires: 1786698176, httpOnly: true, secure: true };',
+			'const browserPage = undefined as unknown as Awaited<ReturnType<ProviderContext["browser"]["newPage"]>>;',
+			"export const browserCookies: Promise<readonly BrowserCookie[]> = browserPage.cookies();",
 			'const queryCredentialOptions: RequestOptions = { sensitiveParams: { serviceKey: "type-test-key" } };',
 			"",
 			"export const witnesses = {",
@@ -290,6 +306,8 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			"	nativeConfig,",
 			"	optionalFiles,",
 			"	optionalNative,",
+			"	browserCookie,",
+			"	browserCookies,",
 			"	queryCredentialOptions,",
 			"	defineCredentialsAuth,",
 			"	extractProviderContract,",

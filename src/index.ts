@@ -186,6 +186,7 @@ export type {
 	AuthMode,
 	AuthTurn,
 	Bcp47Locale,
+	BrowserCookie,
 	BrowserEngine,
 	BrowserOptions,
 	BrowserResourceBody,
