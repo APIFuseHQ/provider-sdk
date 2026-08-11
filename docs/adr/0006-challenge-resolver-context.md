@@ -11,6 +11,20 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 4 (2026-08-11).** The `"browser"` leg was verified end to end
+through a proxy lease, which closes the Revision 3 gap: it reaches the
+challenge and solves it from a datacentre host. The same run refuted a claim
+this ADR had held since the first draft. `aws_waf` cookie-family solutions are
+**not** bound to the egress identity that produced them — a token minted on one
+residential lease was accepted verbatim on a different lease, with controls
+proving the second lease was genuinely gated without it. Binding is therefore a
+per-kind property to be measured, not a property of the cookie family. Sections
+changed: Context (Fourth measurement), Decision 3b (cache scope keyed by a
+declared binding property), Decision 5 (binding split into a pre-solve axis
+that is confirmed and a post-solve axis that is per-kind), Verification (the
+negative binding assertion is scoped to kinds that actually bind), and
+Consequences.
+
 **Revision 3 (2026-08-11).** The first live run of the `"browser"` vendor
 against the real `cdp-pool` in the production cluster failed, and the failure
 was environmental rather than a defect: the cluster's egress IP is refused by
@@ -267,6 +281,67 @@ from the dev host, which is exactly the environment that is not gated. A
 capability verified only from a developer workstation can be structurally
 unavailable in production.
 
+### Fourth measurement: proxy closes the gate, and binding is absent for `aws_waf` (2026-08-11)
+
+Two questions were open after Revision 3: whether a proxy lease restores the
+`"browser"` leg, and whether the post-solve cookie binding this ADR assumed is
+real. Both were measured against `buyee` with NodeMaven JP residential leases.
+
+**A proxy lease restores challenge issuance.** A cheap header-only pre-check
+established this before spending a browser on it:
+
+| Egress | `buyee` response |
+| --- | --- |
+| Dev host, no proxy | 202 `x-amzn-waf-action: challenge` |
+| NodeMaven, `country-jp` sticky lease | **202 challenge** |
+| NodeMaven, no geo targeting | 202 challenge |
+| `APIFUSE__PROXY__URL` (smartproxy `as.smartproxy.net`) | **connection failure** |
+
+**The `"browser"` leg then completes from a datacentre host.** Headless Chromium
+launched with the lease as its proxy solved the challenge unattended:
+
+```
+egress_ip=14.12.148.129   elapsed=13.8s   html_len=615,882
+title="pokemon | Shop at Mercari from Japan! | Buyee"   item_anchors=92
+aws-waf-token  len=310  domain=.buyee.jp  ttl_s=345,593
+```
+
+This closes the Revision 3 outstanding item: `"browser"` is no longer verified
+only on developer hardware. Note the solve took 13.8 s rather than the 4.5 s of
+Revision 1 — the proxy round trip is a real latency cost, and 13.8 s is the
+number a production estimate should use. It is still inside the 120 s vendor
+ceiling and remains free of per-solve billing.
+
+**The cookie is NOT bound to its egress identity.** Replaying the token from
+lease A on a different lease B was accepted. Because a bare 200 on a residential
+IP proves nothing on its own, three controls were run before drawing any
+conclusion:
+
+| Control | Result |
+| --- | --- |
+| C1 — are the leases actually different egresses? | `14.12.148.129` vs `14.11.160.226`, distinct |
+| C2 — lease B with **no** cookie | **202 challenge**, 2,161 bytes, 0 items |
+| C3 — lease B with a 310-char garbage token | **202 challenge**, 0 items |
+| C4 — lease B with the real token from lease A | **200**, 633,670 bytes, 92 items |
+
+C2 is the one that makes the inference sound: lease B is gated on its own, so
+the 200 in C4 was produced by the token and not by the IP's reputation. C3 shows
+the token is genuinely validated rather than merely present. So for `aws_waf`
+the solution is portable across egress identities.
+
+This refutes a claim carried since the first draft — that a cookie minted
+against one egress is "silently invalid on another". That statement came from
+Capsolver's documentation, which requires `proxy` on the Cloudflare task and
+returns a `userAgent` with the AWS WAF solution. Documented proxy requirements
+turn out to describe how the vendor obtains the solution, not a constraint the
+upstream enforces on redemption, and the two do not have to match.
+
+The honest scope of this measurement: it covers `aws_waf` on `buyee` only.
+`cloudflare_interstitial` is untested here, and `cf_clearance` is widely
+described as IP-bound, so the likely truth is that binding varies by kind. That
+is why Revision 4 makes binding a declared, measured per-kind property instead
+of flipping the blanket assumption from "always" to "never".
+
 ## Decision
 
 ### 1. A new `ctx.resolver` context, separate from `ctx.ocr`
@@ -468,18 +543,29 @@ still reach only the pool manager, never a Chrome worker directly.
 
 #### 3b. Solutions are cached to their measured lifetime
 
-A 4-day token obtained in 4.5 s is wasted if it is re-minted per request. The
-resolver caches a solution against its issuing identity for the lifetime the
-upstream advertised, and only re-resolves on expiry or rejection. Cache key
-and storage layer are implementation concerns for the plan, but two properties
-are decided here because they are correctness, not tuning:
+A 4-day token obtained in seconds is wasted if it is re-minted per request. The
+resolver caches a solution for the lifetime the upstream advertised, and only
+re-resolves on expiry or rejection. Cache key and storage layer are
+implementation concerns for the plan, but two properties are decided here
+because they are correctness, not tuning:
 
-- A cookie-family solution is cached against the identity that produced it
-  (proxy lease plus user agent, per Decision 5), never globally. A token valid
-  on one egress is invalid on another, so a global cache would serve poison.
+- **The cache key includes the issuing identity only for kinds that are
+  identity-bound**, and whether a kind binds is a declared property of the kind
+  rather than of the solution family. Revision 4 measured `aws_waf` as *not*
+  bound: a token minted on one residential lease was accepted on a different
+  lease that was itself gated without it. Keying that kind per-lease would be a
+  pure cost — every new lease would pay a fresh solve for a token the upstream
+  would have honoured.
 - Expiry is taken from the upstream's own signal (the cookie's `expires`)
   rather than a hardcoded constant, so a vendor or upstream shortening the
   lifetime cannot strand the SDK on a stale token.
+
+The safe default for an unmeasured kind is identity-scoped. That direction of
+error only wastes solves; the opposite direction — assuming portability for a
+kind that actually binds — caches a token that the upstream will refuse, so the
+resolver would report success and the next request would fail. Widening a kind
+to portable therefore requires the control-backed measurement described in
+Verification, not an inference from a vendor's documented proxy requirement.
 
 ### 4. SDK-owned neutral challenge and solution types
 
@@ -514,24 +600,31 @@ that will use them, through the existing
 `StealthSessionCookies.setFromCookieStrings`. The provider calls one method and
 never learns which proxy lease was assigned.
 
-Revision 3 reframes what this binding is *for*. The original framing derived it
-from the solution family: cookies are identity-bound, tokens are not. That is
-still true of the solution, but it understated the role of identity. Measured on
-`aws_waf`, egress identity gates whether a challenge is issued at all — a
-datacentre IP received a 403 block page where a residential IP received the
-challenge. So identity operates at two distinct points:
+Revision 3 reframes what this binding is *for*, and Revision 4 splits it in two.
+The original framing derived binding from the solution family: cookies are
+identity-bound, tokens are not. Measured, identity operates at two independent
+points, and only the first is universal:
 
-| Point | What identity determines | Applies to |
+| Point | What identity determines | Status |
 | --- | --- | --- |
-| Before the solve | whether the upstream serves a challenge instead of a block page | `aws_waf`, `cloudflare_interstitial` |
-| After the solve | whether the minted cookie is accepted on subsequent requests | cookie family |
+| **Before** the solve | whether the upstream serves a challenge instead of a block page | **Confirmed** for `aws_waf`; datacentre NAT refused, residential/proxy lease challenged |
+| **After** the solve | whether the minted cookie is accepted on later requests | **Per-kind.** Refuted for `aws_waf` (portable across leases, controls in Context); presumed for `cloudflare_interstitial`, unmeasured |
 
-The second point was in the ADR from the start; the first is new, and it is why
-Decision 3a-bis makes a proxy policy a precondition rather than an optimisation.
-Both points are satisfied by the same lease, which is the reason they belong to
-one mechanism: the egress that earns the challenge must also be the egress that
-uses the resulting cookie. Resolving them from separate leases would produce a
-solve that succeeds and a cookie that is immediately refused.
+The pre-solve axis is why Decision 3a-bis makes a proxy policy a precondition
+rather than an optimisation: without an acceptable egress there is no challenge
+to solve, whichever vendor is selected.
+
+The post-solve axis is narrower than this ADR originally claimed. Where a kind
+does bind, the SDK still installs the cookies into the session that will use
+them and pins the user agent, and the lease that earned the challenge is the
+lease that redeems it — resolving those from different leases would produce a
+solve that succeeds and a cookie that is refused. Where a kind does not bind, as
+measured for `aws_waf`, the SDK still owns installation; it simply does not
+need to scope the cached solution to one lease.
+
+What does not change is who performs the work. The provider calls one method and
+never learns which proxy lease was assigned, because lease assignment is
+internal SDK state either way.
 
 The rejected alternative is returning cookies for the provider to install. It
 fails in a specific and hard-to-debug way: a cookie minted against one egress
@@ -625,6 +718,19 @@ Negative / accepted:
   dev egress is exactly the environment that is not IP-gated, so a probe that
   passes there proves nothing about production. Every future challenge-kind
   measurement has to be taken from the deployment's own egress path.
+- **Solve latency through a proxy is roughly 3x the direct figure** (13.8 s vs
+  4.5 s measured). Caching is what keeps that off the request path; a
+  cache-miss request pays the full lease round trip.
+- **A portable solution is a shared secret with a 4-day life.** Because
+  `aws_waf` tokens are not lease-bound, one cached token can serve every request
+  for its lifetime — which is the efficiency win, and also means a leaked cache
+  entry is usable by anyone until expiry. The cache is internal SDK state and
+  never crosses the provider boundary, but it should be treated as credential
+  material rather than as a derived value.
+- **`APIFUSE__PROXY__URL` (smartproxy `as.smartproxy.net`) does not connect**
+  as of 2026-08-11, while the NodeMaven credentials work. Any provider ordering
+  smartproxy first has no working egress today. This is an operational finding
+  outside this ADR's scope, recorded here because the measurement surfaced it.
 
 ## Rejected alternatives
 
@@ -642,7 +748,15 @@ Negative / accepted:
 - **Single backend selected by env, as `ctx.stt` does.** Solver vendors exhaust
   balance and suffer per-kind outages, so a single backend converts a vendor
   incident into a provider outage.
-- **Return cookies for the provider to install.** See Decision 5.
+- **Return cookies for the provider to install.** See Decision 5. Revision 4
+  narrows but does not remove this rejection. Its original justification — that
+  a cookie minted on one egress is silently invalid on another — is false for
+  `aws_waf` as measured, so that specific failure mode does not apply to every
+  kind. The rejection stands on the remaining grounds: a provider cannot scope a
+  cached solution correctly without knowing whether its kind binds, cannot read
+  the `expires` signal Decision 3b needs from `document.cookie`, and cannot see
+  lease assignment at all. Installation staying SDK-side is what keeps those
+  three concerns in one place.
 - **Require a browser for every kind.** Token-family vendors document
   proxyless operation, and the measured NOL login path needs no browser at all.
   Mandating a CDP lease would add cost and failure surface to the common case.
@@ -689,16 +803,13 @@ These must hold before `Status: accepted`:
   (2026-08-10): headless Chromium resolved the same challenge unattended in
   4.5 s with no credential and no spend, and the minted token served paginated
   requests for a measured 345,035 s.
-- **`aws_waf` on `"browser"` is NOT yet confirmed from a datacentre egress, and
-  is refused there today** (2026-08-11, Revision 3). The production `cdp-pool`
-  received a 117-byte 403 block page instead of a challenge, twelve polls
-  running. This retracts the previous claim that the browser leg is the one
-  verification item runnable without owner-approved spend: it needs no *solver*
-  balance, but it does need a proxy lease, which has its own cost and approval.
-  Outstanding items this creates:
-  - A `"browser"` solve through a resolved proxy lease (JP geo, the
-    `tabelog` policy shape) reaches the challenge and completes. Until this
-    passes, `"browser"` is verified only on developer hardware.
+- **`aws_waf` on `"browser"` is confirmed from a datacentre host through a
+  proxy lease** (2026-08-11, Revision 4): headless Chromium egressing via a
+  NodeMaven JP residential lease reached the challenge and solved it in 13.8 s,
+  yielding 92 parsed listings and a 310-char token with a 345,593 s TTL. Use
+  13.8 s rather than Revision 1's 4.5 s for production estimates; the delta is
+  proxy round-trip cost. The Revision 3 outstanding items are closed by this,
+  except the two below.
   - The egress-refusal path is classified as a vendor fault and advances the
     chain, asserted on the served document rather than on a CDP error code.
   - A `"browser"` leg declared for a fingerprint kind with no proxy policy
@@ -708,9 +819,21 @@ These must hold before `Status: accepted`:
   a subsequent `ctx.stealth` request over the same proxy lease and user agent.
   The `AntiCloudflareTask` `html` field expects the actual 403 body, so the
   request shape cannot be finalized from documentation alone.
-- The lease that earns the challenge is the same lease that carries the minted
-  cookie (Decision 5). The negative half is what proves it: a cookie minted on
-  one lease must be refused on another.
+- **Per-kind binding is established by measurement with controls, never by
+  assumption in either direction.** The negative assertion — a cookie minted on
+  one lease is refused on another — applies only to kinds measured as bound; it
+  is **false for `aws_waf`** and asserting it there would be a permanently
+  failing gate. The measurement protocol that makes such a result sound, from
+  Revision 4:
+  - the two leases are confirmed to be different egress IPs;
+  - the second lease is confirmed to be gated **without** any token (otherwise a
+    200 proves nothing about the token);
+  - a syntactically valid garbage token on the second lease is refused (proving
+    the upstream validates rather than merely observes the cookie);
+  - only then is the real token replayed on the second lease.
+  A vendor's documented `proxy: required` is not evidence of redemption binding:
+  it describes how the vendor obtains a solution, not what the upstream enforces
+  when the solution is used.
 - `BrowserPage.cookies()` returns identical attribute sets from the CDP-managed
   and local Playwright backends for the same cookie, including `expires` and
   `httpOnly`. A backend-dependent shape would make caching correctness depend on
