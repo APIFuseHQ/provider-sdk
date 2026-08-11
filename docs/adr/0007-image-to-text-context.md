@@ -210,6 +210,23 @@ Length is the cheap filter. moondream returned a wrong-length answer 27 times in
 `length` lets the runtime mark those results invalid before a provider submits
 them.
 
+`charset` means "the set of characters this text may contain", and both accepted
+forms mean exactly that: a string is checked per character, and **a RegExp is
+also applied per character, never to the whole string**. Whole-string matching
+was implemented first and failed open — `RegExp.prototype.test` is a substring
+search, so an unanchored `/[A-Za-z0-9]/` accepted `ab!!cd12`. A provider writing
+the natural unanchored character class must not silently lose the constraint,
+and the two forms must not diverge in meaning.
+
+Candidate generation is bounded on two independent axes, because an
+unsatisfiable constraint otherwise walks the whole homoglyph product space:
+substitution cannot change length, so a `length` mismatch short-circuits before
+the search starts, and an absolute visited-node ceiling caps charset-only
+constraints. Measured on a 13-character wrong-length input: 71,960 ms before the
+bounds, 0.02 ms after. A CAPTCHA read sits inside a login flow with a session
+timeout, so an unbounded local search defeats the p95 that selected the default
+model.
+
 ### 5. Results carry candidates, because one shot is not enough
 
 ```ts
@@ -308,6 +325,10 @@ model has a configuration under which it returns HTTP 200 with no usable text.
   calls `ctx.ocr` internally per ADR 0006 Decision 1.
 - A site's CAPTCHA proves to need rectification. Additive `preprocess` option,
   with the measurement attached.
+- A CAPTCHA alphabet needs whole-string pattern semantics rather than a
+  character set (for example a checksum or a positional pattern). `charset` is
+  deliberately per-character; that would be a new option, not a change to this
+  one.
 
 ## References
 
