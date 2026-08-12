@@ -13,6 +13,7 @@ import {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	createResolverClient,
 	createResolverClientFromEnv,
+	createResolverClientFromEnvForTests,
 	RESOLVER_ADAPTER_REGISTRY,
 } from "../resolver.js";
 import {
@@ -282,7 +283,7 @@ describe("resolver vendor chain", () => {
 				return { form: "token", token: "solved" };
 			},
 		};
-		const resolver = createResolverClientFromEnv(
+		const resolver = createResolverClientFromEnvForTests(
 			{
 				vendors: ["2captcha"],
 				kinds: ["akamai_sensor"],
@@ -291,13 +292,13 @@ describe("resolver vendor chain", () => {
 			{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
 			{
 				allowedHosts: ["example.com"],
-				adapterFactories: { "2captcha": () => adapter },
 				createTransport(input) {
 					factoryInput = input;
 					return transport;
 				},
 				identityScope,
 			},
+			{ "2captcha": () => adapter },
 		);
 
 		await expect(
@@ -338,14 +339,14 @@ describe("resolver vendor chain", () => {
 			},
 		};
 		const createResolver = (allowedHosts: readonly string[]) =>
-			createResolverClientFromEnv(
+			createResolverClientFromEnvForTests(
 				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
 				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
 				{
-					adapterFactories: { "2captcha": () => adapter },
 					allowedHosts,
 					createTransport: () => underlyingTransport,
 				},
+				{ "2captcha": () => adapter },
 			);
 
 		await expect(createResolver(["example.com"]).solve(challenge)).rejects.toMatchObject({
@@ -476,10 +477,11 @@ describe("resolver vendor chain", () => {
 	});
 
 	it("fails loudly when an implemented vendor loses its registered adapter", async () => {
-		const resolver = createResolverClientFromEnv(
+		const resolver = createResolverClientFromEnvForTests(
 			{ vendors: ["browser"], kinds: ["aws_waf"] },
 			{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
-			{ adapterFactories: {} },
+			{},
+			{},
 		);
 
 		await expect(resolver.solve(CHALLENGE)).rejects.toThrow(

@@ -14,7 +14,7 @@ import { createProviderCache } from "../cache.js";
 import {
 	APIFUSE__CDP_POOL__URL,
 	createResolverClient,
-	createResolverClientFromEnv,
+	createResolverClientFromEnvForTests,
 } from "../resolver.js";
 import { createBrowserResolverVendorAdapter } from "../resolver-vendors/browser.js";
 import {
@@ -441,16 +441,18 @@ describe("browser resolver vendor", () => {
 		} as const;
 		const env = { [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" };
 		const adapterFactories = { browser: () => adapter } as const;
-		const firstResolver = createResolverClientFromEnv(config, env, {
+		const firstResolver = createResolverClientFromEnvForTests(
+			config,
+			env,
+			{ cache, identityScope: "proxy-session-one" },
 			adapterFactories,
-			cache,
-			identityScope: "proxy-session-one",
-		});
-		const secondResolver = createResolverClientFromEnv(config, env, {
+		);
+		const secondResolver = createResolverClientFromEnvForTests(
+			config,
+			env,
+			{ cache, identityScope: "proxy-session-two" },
 			adapterFactories,
-			cache,
-			identityScope: "proxy-session-two",
-		});
+		);
 
 		const first = await firstResolver.solve(CLOUDFLARE_CHALLENGE);
 		const second = await secondResolver.solve(CLOUDFLARE_CHALLENGE);

@@ -11,6 +11,8 @@ import type {
 	ResolverContext,
 } from "../types.js";
 import {
+	resolverChallengeAllowsDirectCache,
+	resolverChallengeIsCacheable,
 	resolverChallengeIsIdentityScoped,
 	resolverChallengeIssuingIdentity,
 } from "./resolver-vendors/bindings.js";
@@ -82,10 +84,6 @@ export interface ResolverRuntimeOptions {
 		/** Server-owned proxy/context scope; the SDK never accepts a caller-built identity. */
 		readonly identityScope?: string;
 	}) => ResolverVendorTransport;
-	/** Test-only adapter factories; when supplied, they replace the production registry. */
-	readonly adapterFactories?: Partial<
-		Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>
-	>;
 }
 
 type CachedResolverSolution = {
@@ -576,6 +574,7 @@ async function cacheResolverSolution(
 	identity: ResolverIssuingIdentity,
 	identityScope: string | undefined,
 ): Promise<void> {
+	if (!resolverChallengeIsCacheable(challenge)) return;
 	const expiresAtMs = solutionExpiryMs(solution);
 	const now = Date.now();
 	if (expiresAtMs === undefined) return;
@@ -587,7 +586,7 @@ async function cacheResolverSolution(
 			? resolverIdentityScopeDigest(identityScope)
 			: undefined;
 	if (
-		resolverChallengeIsIdentityScoped(challenge) &&
+		!resolverChallengeAllowsDirectCache(challenge) &&
 		scopedDigest === undefined &&
 		identity.proxyUrl === undefined
 	) {
@@ -699,7 +698,7 @@ function createResolverChainClient(options: {
 			const supportingEntries = options.entries.filter((entry) => entry.supports(challenge.kind));
 			if (supportingEntries.length === 0) throwUnsupportedKind(challenge.kind);
 			signal.throwIfAborted();
-			if (options.cache) {
+			if (options.cache && resolverChallengeIsCacheable(challenge)) {
 				const cached = await findCachedSolution(
 					options.cache,
 					challenge,
@@ -747,6 +746,7 @@ function createResolverChainClient(options: {
 						: await solveAttempt();
 					if (
 						options.cache &&
+						resolverChallengeIsCacheable(challenge) &&
 						solution.form === "cookies" &&
 						solutionExpiryMs(solution) !== undefined
 					) {
@@ -863,10 +863,11 @@ export function bindResolverSignal(
 	return boundResolver;
 }
 
-export function createResolverClientFromEnv(
+function createResolverClientFromEnvInternal(
 	config: ProviderResolverConfig | undefined,
-	env: EnvLike = process.env,
-	options: ResolverRuntimeOptions = {},
+	env: EnvLike,
+	options: ResolverRuntimeOptions,
+	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
 ): ResolverContext {
 	if (!config) {
 		return createUnsupportedResolverClient("Provider does not declare resolver capability");
@@ -884,7 +885,6 @@ export function createResolverClientFromEnv(
 	const timeoutValue = readPositiveIntegerEnv(env, APIFUSE__RESOLVER__TIMEOUT_MS);
 	const timeoutMs = timeoutValue === undefined ? DEFAULT_RESOLVER_TIMEOUT_MS : Number(timeoutValue);
 	const allowedHosts = [...(options.allowedHosts ?? [])];
-	const adapterFactories = options.adapterFactories ?? RESOLVER_ADAPTER_REGISTRY;
 
 	return createResolverChainClient({
 		kinds: config.kinds,
@@ -910,4 +910,22 @@ export function createResolverClientFromEnv(
 		clientProfile: config.clientProfile,
 		allowedHosts,
 	});
+}
+
+export function createResolverClientFromEnv(
+	config: ProviderResolverConfig | undefined,
+	env: EnvLike = process.env,
+	options: ResolverRuntimeOptions = {},
+): ResolverContext {
+	return createResolverClientFromEnvInternal(config, env, options, RESOLVER_ADAPTER_REGISTRY);
+}
+
+/** Internal test seam; deliberately not re-exported from the package root. */
+export function createResolverClientFromEnvForTests(
+	config: ProviderResolverConfig | undefined,
+	env: EnvLike,
+	options: ResolverRuntimeOptions,
+	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
+): ResolverContext {
+	return createResolverClientFromEnvInternal(config, env, options, adapterFactories);
 }

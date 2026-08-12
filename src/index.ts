@@ -113,10 +113,7 @@ export {
 	invalidateResolverSolution,
 	type ResolverRuntimeOptions,
 } from "./runtime/resolver.js";
-export type {
-	ResolverIdentity,
-	ResolverVendorTransport,
-} from "./runtime/resolver-vendors/types.js";
+export type { ResolverVendorTransport } from "./runtime/resolver-vendors/types.js";
 export {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,

@@ -292,3 +292,9 @@ reports `missing_credentials`, while keyed `2captcha` reports `not_implemented`
 until its adapter lands. `missing_transport` is asserted through a
 `requiresTransport` stub adapter, the only reachable transport-requirement path
 in this contract-only change.
+
+Resolver cache behavior is now declared exhaustively per challenge kind beside
+its identity binding. An IP-bound artifact minted without a recorded egress
+identity is unsafe to share, so both Akamai kinds reject direct cache writes;
+`cloudflare_interstitial` retains its pre-existing direct-index behavior pending
+measurement. Token-family kinds are declared non-cacheable and skip cache reads.
