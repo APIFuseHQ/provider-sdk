@@ -27,6 +27,7 @@ import type {
 	OperationTransport,
 	OperationWebSocketTransport,
 	NativeProviderConfig,
+	ProviderOcrConfig,
 	ProviderAccessConfig,
 	ProviderDefinition,
 	ProviderDeploymentOverrides,
@@ -123,6 +124,7 @@ const VALID_PROVIDER_PROXY_AFFINITIES = [
 	"auth-flow",
 	"connection",
 ] as const;
+const VALID_PROVIDER_OCR_MODES = ["optional", "required"] as const;
 const VALID_PROVIDER_STT_MODES = ["optional", "required"] as const;
 const SMARTPROXY_APP_KEY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
@@ -248,6 +250,7 @@ export interface ProviderConfig<TOperations extends Record<string, ProviderOpera
 		platform: StealthPlatform;
 	};
 	proxy?: ProviderProxyConfig;
+	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;
 	browser?: { engine: BrowserEngine };
 	auth?: AuthConfig;
@@ -695,6 +698,18 @@ function validateProviderStt(config: { id: string; stt?: ProviderSttConfig }): v
 	}
 	rejectUnknownFields(stt, new Set(["mode"]), "stt");
 	assertLiteralField(stt.mode, "stt.mode", VALID_PROVIDER_STT_MODES, config.id);
+}
+
+function validateProviderOcr(config: { id: string; ocr?: ProviderOcrConfig }): void {
+	const ocr = config.ocr;
+	if (ocr === undefined) return;
+	if (!ocr || typeof ocr !== "object" || Array.isArray(ocr)) {
+		throw new ValidationError(`Provider "${config.id}" has invalid ocr: must be an object.`, {
+			fix: `Use ocr: { mode: "required" } or ocr: { mode: "optional" }.`,
+		});
+	}
+	rejectUnknownFields(ocr, new Set(["mode"]), "ocr");
+	assertLiteralField(ocr.mode, "ocr.mode", VALID_PROVIDER_OCR_MODES, config.id);
 }
 
 function validateOperationIds(
@@ -2386,6 +2401,7 @@ export function defineProvider<
 		throw error;
 	}
 	validateProviderProxy(config);
+	validateProviderOcr(config);
 	validateProviderStt(config);
 	if (config.runtime === "browser" && !config.browser)
 		throw new ProviderError(
@@ -2410,6 +2426,7 @@ export function defineProvider<
 		native: config.native,
 		stealth: config.stealth,
 		proxy: config.proxy,
+		ocr: config.ocr,
 		stt: config.stt,
 		browser: config.browser,
 		auth: config.auth,

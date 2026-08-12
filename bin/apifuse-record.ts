@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import {
 	createBypassProviderCache,
 	createHttpClient,
+	createOcrClientFromEnv,
 	createProviderChoiceContext,
 	createStealthClient,
 	createSttClientFromEnv,
@@ -536,6 +537,7 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 				throw new Error("Auth prompts are not available in apifuse record.");
 			},
 		},
+		ocr: createOcrClientFromEnv(provider.ocr),
 		stt: createSttClientFromEnv(provider.stt),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,

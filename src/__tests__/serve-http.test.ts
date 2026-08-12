@@ -1481,6 +1481,8 @@ describe("provider HTTP server", () => {
 			{ code: "LIMITED_NUMBER_OF_SERVICE_REQUESTS_EXCEEDS_ERROR", status: 429 },
 			{ code: "UPSTREAM_ERROR", status: 502 },
 			{ code: "BLOCKED", status: 502 },
+			{ code: "OCR_UNAVAILABLE", status: 503 },
+			{ code: "UNSUPPORTED_OCR_BACKEND", status: 503 },
 			{ code: "STT_UNAVAILABLE", status: 503 },
 			{ code: "UNSUPPORTED_STT_BACKEND", status: 503 },
 			{ code: "STATEFUL_FORWARDING_REPLAY_CACHE_FULL", status: 503 },

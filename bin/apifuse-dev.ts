@@ -8,6 +8,7 @@ import {
 	createCredentialContext,
 	createEnvContext,
 	createHttpClient,
+	createOcrClientFromEnv,
 	createProviderCache,
 	createProviderChoiceContext,
 	createStealthClient,
@@ -96,6 +97,7 @@ export function createProviderContext(provider: ProviderDefinition): {
 		state,
 		trace: createTraceContext(),
 		stealth: createStealthClient("http://localhost"),
+		ocr: createOcrClientFromEnv(provider.ocr),
 		stt: createSttClientFromEnv(provider.stt),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,

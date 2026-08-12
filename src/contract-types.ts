@@ -13,6 +13,7 @@ export interface ProviderContractSnapshot {
 	readonly allowedHosts?: readonly string[];
 	readonly stealth?: JsonValue;
 	readonly proxy?: JsonValue;
+	readonly ocr?: JsonValue;
 	readonly stt?: JsonValue;
 	readonly browser?: JsonValue;
 	readonly auth?: JsonValue;

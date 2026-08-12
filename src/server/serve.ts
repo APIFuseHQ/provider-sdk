@@ -48,6 +48,7 @@ import {
 	createNativeNetworkClient,
 } from "../runtime/native-network.js";
 import { getProviderBaseUrl } from "../runtime/provider.js";
+import { createOcrClientFromEnv } from "../runtime/ocr.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
 	PROXY_EDGE_AUTH_REJECTED_CODE,
@@ -92,6 +93,7 @@ import type {
 	OperationErrorCode,
 	OperationHttpStreamTransport,
 	OperationSseTransport,
+	OcrContext,
 	ProviderErrorStatus,
 	ProviderContext,
 	ProviderDefinition,
@@ -389,6 +391,7 @@ function createProviderContext(
 			: {}),
 		trace: createTraceContext(),
 		auth: createAuthStub(),
+		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
@@ -512,6 +515,7 @@ function createAuthFlowContext(
 			]),
 			credential,
 			context: flowContextStore.context,
+			ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
 			auth: createAuthFlowHelpers({ signal }),
 		},
@@ -596,6 +600,8 @@ export type ProviderServerOptions = {
 	};
 	/** Optional STT override for tests or custom hosts; local/prod normally resolves from env. */
 	stt?: SttContext;
+	/** Optional OCR override for tests or custom hosts; local/prod normally resolves from env. */
+	ocr?: OcrContext;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */
 	state?: ProviderRuntimeState;
 	/** Allow process-local runtime state only for local development and tests. */
@@ -2381,6 +2387,7 @@ export async function serve(
 
 	const app = createServerApp(provider, {
 		logger: options.logger,
+		ocr: options.ocr,
 		stt: options.stt,
 		state: options.state,
 		allowMemoryStateFallback: options.allowMemoryStateFallback,

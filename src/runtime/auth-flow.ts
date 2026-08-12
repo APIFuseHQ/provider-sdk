@@ -5,9 +5,11 @@ import type {
 	EnvContext,
 	FlowContext,
 	HttpClient,
+	OcrContext,
 	StealthClient,
 	SttContext,
 } from "../types.js";
+import { createUnsupportedOcrClient } from "./ocr.js";
 import { createUnsupportedSttClient } from "./stt.js";
 
 function normalizeAllowedKeys(allowedKeys: string[]): Set<string> {
@@ -58,6 +60,7 @@ export function createFlowContext(options: {
 	externalRef?: string;
 	allowedKeys: string[];
 	initialContext?: Record<string, unknown>;
+	ocr?: OcrContext;
 	stt?: SttContext;
 }): FlowContext {
 	return {
@@ -70,6 +73,7 @@ export function createFlowContext(options: {
 		stealth: options.stealth,
 		env: options.env,
 		context: createScratchpad(options.allowedKeys, options.initialContext),
+		ocr: options.ocr ?? createUnsupportedOcrClient(),
 		stt: options.stt ?? createUnsupportedSttClient(),
 		auth: createAuthFlowHelpers(),
 	};

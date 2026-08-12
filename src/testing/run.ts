@@ -3,6 +3,7 @@ import { describe, expect, it } from "bun:test";
 import { createProviderCache } from "../runtime/cache.js";
 import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
+import { createUnsupportedOcrClient } from "../runtime/ocr.js";
 import { createUnsupportedSttClient } from "../runtime/stt.js";
 import {
 	createNativeEgressAuthorization,
@@ -559,6 +560,9 @@ function createUpstreamContext(
 			: {}),
 		trace: { span: async (_name, fn) => fn() },
 		auth: { requestField: async (name) => unsupported(`ctx.auth.requestField(${name})`) },
+		ocr: createUnsupportedOcrClient(
+			"Standard test upstream context does not support ctx.ocr.recognize",
+		),
 		stt: createUnsupportedSttClient(
 			"Standard test upstream context does not support ctx.stt.transcribe",
 		),
@@ -684,6 +688,9 @@ export function createSnapshotContext(rawFixture: unknown): ProviderContext {
 		auth: {
 			requestField: async (name) => unsupported(`ctx.auth.requestField(${name})`),
 		},
+		ocr: createUnsupportedOcrClient(
+			"Standard test snapshot context does not support ctx.ocr.recognize",
+		),
 		stt: createUnsupportedSttClient(
 			"Standard test snapshot context does not support ctx.stt.transcribe",
 		),
