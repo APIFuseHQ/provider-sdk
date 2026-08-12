@@ -1,14 +1,72 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
+import { ProviderError } from "../errors.js";
 import {
+	APIFUSE__CACHE__KEY_PEPPER_ENV,
 	createBypassProviderCache,
 	createProviderCache,
 	resetProviderCacheForTests,
 } from "../runtime/cache.js";
 
+const originalCacheKeyPepper = process.env[APIFUSE__CACHE__KEY_PEPPER_ENV];
+const originalConsoleWarn = console.warn;
+
 describe("provider cache", () => {
+	beforeEach(() => {
+		process.env[APIFUSE__CACHE__KEY_PEPPER_ENV] = "cache-test-pepper";
+	});
+
 	afterEach(() => {
 		resetProviderCacheForTests();
+		console.warn = originalConsoleWarn;
+		if (originalCacheKeyPepper === undefined) {
+			delete process.env[APIFUSE__CACHE__KEY_PEPPER_ENV];
+		} else {
+			process.env[APIFUSE__CACHE__KEY_PEPPER_ENV] = originalCacheKeyPepper;
+		}
+	});
+
+	it("exports the cache-key pepper environment variable name", () => {
+		expect(APIFUSE__CACHE__KEY_PEPPER_ENV).toBe("APIFUSE__CACHE__KEY_PEPPER");
+	});
+
+	it("uses a construction-time HMAC pepper for secret selectors", () => {
+		process.env[APIFUSE__CACHE__KEY_PEPPER_ENV] = "pepper-a";
+		const firstCache = createProviderCache({ providerId: "peppered-api" });
+		const samePepperCache = createProviderCache({ providerId: "peppered-api" });
+
+		process.env[APIFUSE__CACHE__KEY_PEPPER_ENV] = "pepper-b";
+		const differentPepperCache = createProviderCache({ providerId: "peppered-api" });
+		const parts = { accountId: "account-1", password: "1234" };
+		const first = firstCache.key("profile", parts);
+		const same = samePepperCache.key("profile", parts);
+		const different = differentPepperCache.key("profile", parts);
+
+		expect(first).toBe(same);
+		expect(first).not.toBe(different);
+	});
+
+	it("preserves legacy SHA-256 keys and warns once when the pepper is unset", () => {
+		delete process.env[APIFUSE__CACHE__KEY_PEPPER_ENV];
+		const warn = mock(() => {});
+		console.warn = warn;
+		const cache = createProviderCache({ providerId: "kma" });
+
+		const key = cache.key("forecast", {
+			nx: "60",
+			ny: "127",
+			serviceKey: "secret-1",
+		});
+		cache.key("forecast", { serviceKey: "secret-2" });
+
+		expect(key).toBe("apifuse:provider-cache:v1:kma:forecast:9a1d1fcd7fea7447ed6bdad5adcb65cd");
+		expect(warn).toHaveBeenCalledTimes(1);
+		expect(JSON.parse(String(warn.mock.calls[0]?.[0]))).toEqual({
+			level: "warn",
+			event: "provider_cache_secret_key_unpeppered",
+			message:
+				"Secret-bearing cache keys are using unkeyed SHA-256 because APIFUSE__CACHE__KEY_PEPPER is not configured.",
+		});
 	});
 
 	it("hashes secret selectors without collapsing distinct values", () => {
@@ -94,6 +152,48 @@ describe("provider cache", () => {
 		expect(differentAuthorization).not.toContain("credential-b");
 	});
 
+	it("rejects undefined secret values without collapsing them with null or missing fields", () => {
+		const cache = createProviderCache({ providerId: "typed-api" });
+		const withNull = cache.key("profile", { accountId: "account-1", password: null });
+		const missing = cache.key("profile", { accountId: "account-1" });
+
+		let error: unknown;
+		try {
+			cache.key("profile", { accountId: "account-1", password: undefined });
+		} catch (caught) {
+			error = caught;
+		}
+
+		expect(withNull).not.toBe(missing);
+		expect(error).toBeInstanceOf(ProviderError);
+		expect((error as ProviderError).code).toBe("CACHE_KEY_SECRET_VALUE_UNSUPPORTED");
+		expect((error as Error).message).toContain("undefined values are unsupported");
+		expect(() => cache.key("profile", { password: () => "secret" })).toThrow(
+			"function values are unsupported",
+		);
+		expect(() => cache.key("profile", { password: Symbol("secret") })).toThrow(
+			"symbol values are unsupported",
+		);
+	});
+
+	it("rejects non-JSON-safe object secrets instead of hashing them as empty objects", () => {
+		class Credential {
+			readonly value = "secret";
+		}
+
+		const cache = createProviderCache({ providerId: "typed-api" });
+		const unsupported = [
+			new Map([["key", "value"]]),
+			new Set(["value"]),
+			new Date(0),
+			new Credential(),
+		];
+
+		for (const password of unsupported) {
+			expect(() => cache.key("profile", { password })).toThrow("non-plain objects are unsupported");
+		}
+	});
+
 	it("keeps non-secret token-shaped selectors in cache keys", () => {
 		const cache = createProviderCache({ providerId: "paged-api" });
 		const firstPage = cache.key("list", {
@@ -155,6 +255,24 @@ describe("provider cache", () => {
 		expect(calls).toBe(1);
 		expect(hit.meta.hit).toBe(true);
 		expect(hit.value).toEqual({ name: "Ada" });
+	});
+
+	it("redacts secret-scoped response metadata while preserving non-secret keys", async () => {
+		const cache = createProviderCache({ providerId: "metadata-api" });
+		const secretKey = cache.key("profile", {
+			accountId: "account-1",
+			password: "1234",
+		});
+		const publicKey = cache.key("catalog", { page: 2 });
+
+		const secretResult = await cache.getOrSet(secretKey, async () => ({ private: true }), {
+			ttlMs: 1_000,
+		});
+		await cache.getOrSet(publicKey, async () => ({ public: true }), { ttlMs: 1_000 });
+
+		expect(secretResult.meta.key).toBe(secretKey);
+		expect(cache.responseMeta()?.keys).toEqual(["[secret-scoped]", publicKey]);
+		expect(cache.responseMeta()?.keys).not.toContain(secretKey);
 	});
 
 	it("returns fresh hits without calling the loader", async () => {

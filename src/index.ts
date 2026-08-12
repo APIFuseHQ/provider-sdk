@@ -52,6 +52,7 @@ export { createFlowContext, createScratchpad } from "./runtime/auth-flow.js";
 export type { BrowserClientOptions } from "./runtime/browser.js";
 export { BrowserClient, createBrowserClient } from "./runtime/browser.js";
 export {
+	APIFUSE__CACHE__KEY_PEPPER_ENV,
 	createBypassProviderCache,
 	createProviderCache,
 	type ProviderCacheOptions,

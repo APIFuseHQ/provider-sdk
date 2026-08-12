@@ -1,6 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 
 import { providerCacheRedisUrlFromEnv } from "../config/loader.js";
+import { ProviderError } from "../errors.js";
 import type {
 	ProviderCache,
 	ProviderCacheGetOrSetOptions,
@@ -43,9 +44,12 @@ export type ProviderCacheOptions = {
 	now?: () => number;
 };
 
+export const APIFUSE__CACHE__KEY_PEPPER_ENV = "APIFUSE__CACHE__KEY_PEPPER";
+
 const DEFAULT_PREFIX = "apifuse:provider-cache:v1";
 const DEFAULT_MEMORY_MAX_ENTRIES = 1_000;
 const DEFAULT_REDIS_TIMEOUT_MS = 150;
+const SECRET_SCOPED_KEY_MARKER = "[secret-scoped]";
 const SECRET_FIELD_NAMES = new Set([
 	"authorization",
 	"cookie",
@@ -61,6 +65,7 @@ const SECRET_FIELD_NAMES = new Set([
 ]);
 
 const sharedBackends = new Map<string, SharedCacheBackend>();
+let warnedAboutUnpepperedSecretKeys = false;
 
 function backendKey(redisUrl: string | undefined): string {
 	return redisUrl ?? "memory";
@@ -107,26 +112,133 @@ function shouldRedactField(name: string, extra: Set<string>): boolean {
 	);
 }
 
-function normalizeKeyPart(value: unknown, extra: Set<string>): unknown {
-	if (Array.isArray(value)) {
-		return value.map((entry) => normalizeKeyPart(entry, extra));
-	}
-	if (isRecord(value)) {
-		const normalized: Record<string, unknown> = {};
-		for (const key of Object.keys(value).sort()) {
-			normalized[key] = shouldRedactField(key, extra)
-				? hashSecretValue(value[key], extra)
-				: normalizeKeyPart(value[key], extra);
-		}
-		return normalized;
-	}
-	return value;
+type NormalizedKeyPart = {
+	value: unknown;
+	secretScoped: boolean;
+};
+
+function unsupportedSecretValue(path: string, reason: string): never {
+	throw new ProviderError(`Secret cache-key values must be JSON-safe; ${reason} at ${path}.`, {
+		code: "CACHE_KEY_SECRET_VALUE_UNSUPPORTED",
+		fix: "Convert the secret cache-key selector to JSON-safe primitives, arrays, or plain objects.",
+	});
 }
 
-function hashSecretValue(value: unknown, extra: Set<string>): string {
-	const canonical = JSON.stringify([normalizeKeyPart(value, extra)]);
-	const digest = createHash("sha256").update(canonical).digest("hex");
-	return `sha256:${digest}`;
+function assertJsonSafeSecretValue(
+	value: unknown,
+	path = "$",
+	ancestors = new Set<object>(),
+): void {
+	if (value === null || typeof value === "string" || typeof value === "boolean") return;
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) unsupportedSecretValue(path, "non-finite numbers are unsupported");
+		if (Object.is(value, -0)) unsupportedSecretValue(path, "negative zero is unsupported");
+		return;
+	}
+	if (typeof value !== "object") {
+		unsupportedSecretValue(path, `${typeof value} values are unsupported`);
+	}
+	if (ancestors.has(value)) unsupportedSecretValue(path, "cyclic values are unsupported");
+
+	ancestors.add(value);
+	try {
+		if (Array.isArray(value)) {
+			if (Object.getOwnPropertySymbols(value).length > 0) {
+				unsupportedSecretValue(path, "symbol-keyed array properties are unsupported");
+			}
+			const expectedNames = new Set(["length"]);
+			for (let index = 0; index < value.length; index += 1) {
+				const key = String(index);
+				expectedNames.add(key);
+				const descriptor = Object.getOwnPropertyDescriptor(value, key);
+				if (!descriptor)
+					unsupportedSecretValue(`${path}[${index}]`, "sparse arrays are unsupported");
+				if (!descriptor.enumerable || !("value" in descriptor)) {
+					unsupportedSecretValue(`${path}[${index}]`, "array accessors are unsupported");
+				}
+				assertJsonSafeSecretValue(descriptor.value, `${path}[${index}]`, ancestors);
+			}
+			if (Object.getOwnPropertyNames(value).some((name) => !expectedNames.has(name))) {
+				unsupportedSecretValue(path, "custom array properties are unsupported");
+			}
+			return;
+		}
+
+		const prototype = Object.getPrototypeOf(value);
+		if (prototype !== Object.prototype && prototype !== null) {
+			unsupportedSecretValue(path, "non-plain objects are unsupported");
+		}
+		if (Object.getOwnPropertySymbols(value).length > 0) {
+			unsupportedSecretValue(path, "symbol-keyed properties are unsupported");
+		}
+		for (const key of Object.getOwnPropertyNames(value)) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (!descriptor?.enumerable || !("value" in descriptor)) {
+				unsupportedSecretValue(
+					`${path}.${key}`,
+					"non-enumerable properties and accessors are unsupported",
+				);
+			}
+			assertJsonSafeSecretValue(descriptor.value, `${path}.${key}`, ancestors);
+		}
+	} finally {
+		ancestors.delete(value);
+	}
+}
+
+function warnAboutUnpepperedSecretKey(): void {
+	if (warnedAboutUnpepperedSecretKeys) return;
+	warnedAboutUnpepperedSecretKeys = true;
+	console.warn(
+		JSON.stringify({
+			level: "warn",
+			event: "provider_cache_secret_key_unpeppered",
+			message: `Secret-bearing cache keys are using unkeyed SHA-256 because ${APIFUSE__CACHE__KEY_PEPPER_ENV} is not configured.`,
+		}),
+	);
+}
+
+function normalizeKeyPart(
+	value: unknown,
+	extra: Set<string>,
+	pepper: string | undefined,
+): NormalizedKeyPart {
+	if (Array.isArray(value)) {
+		const entries = value.map((entry) => normalizeKeyPart(entry, extra, pepper));
+		return {
+			value: entries.map((entry) => entry.value),
+			secretScoped: entries.some((entry) => entry.secretScoped),
+		};
+	}
+	if (isRecord(value)) {
+		const normalized: Record<string, unknown> = Object.create(null);
+		let secretScoped = false;
+		for (const key of Object.keys(value).sort()) {
+			const part = shouldRedactField(key, extra)
+				? hashSecretValue(value[key], extra, pepper)
+				: normalizeKeyPart(value[key], extra, pepper);
+			normalized[key] = part.value;
+			secretScoped ||= part.secretScoped;
+		}
+		return { value: normalized, secretScoped };
+	}
+	return { value, secretScoped: false };
+}
+
+function hashSecretValue(
+	value: unknown,
+	extra: Set<string>,
+	pepper: string | undefined,
+): NormalizedKeyPart {
+	assertJsonSafeSecretValue(value);
+	const canonical = JSON.stringify([normalizeKeyPart(value, extra, pepper).value]);
+	if (pepper === undefined) {
+		warnAboutUnpepperedSecretKey();
+		const digest = createHash("sha256").update(canonical).digest("hex");
+		return { value: `sha256:${digest}`, secretScoped: true };
+	}
+	const digest = createHmac("sha256", pepper).update(canonical).digest("hex");
+	return { value: `hmac-sha256:${digest}`, secretScoped: true };
 }
 
 function stableHash(value: unknown): string {
@@ -205,10 +317,13 @@ async function withRedisFallback<T>(operation: () => Promise<T>): Promise<T | un
 
 export function createProviderCache(options: ProviderCacheOptions): ProviderCache {
 	const redisUrl = options.redisUrl ?? providerCacheRedisUrlFromEnv();
+	const configuredPepper = process.env[APIFUSE__CACHE__KEY_PEPPER_ENV];
+	const pepper = configuredPepper && configuredPepper.length > 0 ? configuredPepper : undefined;
 	const backend = getSharedBackend(redisUrl);
 	const memoryMaxEntries = Math.max(1, options.memoryMaxEntries ?? DEFAULT_MEMORY_MAX_ENTRIES);
 	const now = options.now ?? Date.now;
 	const events: ProviderCacheLookupMeta[] = [];
+	const secretScopedKeys = new Set<string>();
 
 	function record(meta: ProviderCacheLookupMeta): void {
 		events.push(meta);
@@ -360,8 +475,10 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 	return {
 		key(namespace, parts, keyOptions?: ProviderCacheKeyOptions) {
 			const extra = new Set((keyOptions?.redactFields ?? []).map((field) => field.toLowerCase()));
-			const normalized = normalizeKeyPart(parts, extra);
-			return `${DEFAULT_PREFIX}:${options.providerId}:${namespace}:${stableHash(normalized)}`;
+			const normalized = normalizeKeyPart(parts, extra, pepper);
+			const key = `${DEFAULT_PREFIX}:${options.providerId}:${namespace}:${stableHash(normalized.value)}`;
+			if (normalized.secretScoped) secretScopedKeys.add(key);
+			return key;
 		},
 
 		async get<T = unknown>(key: string): Promise<ProviderCacheResult<T> | null> {
@@ -420,7 +537,13 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 			return {
 				hit: events.some((event) => event.hit),
 				stale: events.some((event) => event.stale),
-				keys: Array.from(new Set(events.map((event) => event.key))),
+				keys: Array.from(
+					new Set(
+						events.map((event) =>
+							secretScopedKeys.has(event.key) ? SECRET_SCOPED_KEY_MARKER : event.key,
+						),
+					),
+				),
 				source: sourceSummary(events),
 			};
 		},
@@ -430,13 +553,18 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 export function createBypassProviderCache(
 	options: Pick<ProviderCacheOptions, "providerId">,
 ): ProviderCache {
+	const configuredPepper = process.env[APIFUSE__CACHE__KEY_PEPPER_ENV];
+	const pepper = configuredPepper && configuredPepper.length > 0 ? configuredPepper : undefined;
 	const events: ProviderCacheLookupMeta[] = [];
+	const secretScopedKeys = new Set<string>();
 
 	return {
 		key(namespace, parts, keyOptions?: ProviderCacheKeyOptions) {
 			const extra = new Set((keyOptions?.redactFields ?? []).map((field) => field.toLowerCase()));
-			const normalized = normalizeKeyPart(parts, extra);
-			return `${DEFAULT_PREFIX}:${options.providerId}:${namespace}:${stableHash(normalized)}`;
+			const normalized = normalizeKeyPart(parts, extra, pepper);
+			const key = `${DEFAULT_PREFIX}:${options.providerId}:${namespace}:${stableHash(normalized.value)}`;
+			if (normalized.secretScoped) secretScopedKeys.add(key);
+			return key;
 		},
 
 		async get<T = unknown>(_key: string): Promise<ProviderCacheResult<T> | null> {
@@ -471,7 +599,13 @@ export function createBypassProviderCache(
 			return {
 				hit: false,
 				stale: false,
-				keys: Array.from(new Set(events.map((event) => event.key))),
+				keys: Array.from(
+					new Set(
+						events.map((event) =>
+							secretScopedKeys.has(event.key) ? SECRET_SCOPED_KEY_MARKER : event.key,
+						),
+					),
+				),
 				source: sourceSummary(events),
 			};
 		},
@@ -485,4 +619,5 @@ export function resetProviderCacheForTests(): void {
 		backend.redis?.disconnect();
 	}
 	sharedBackends.clear();
+	warnedAboutUnpepperedSecretKeys = false;
 }
