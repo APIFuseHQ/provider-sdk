@@ -20,6 +20,7 @@ import {
 	type ProviderContext,
 	type ProviderDefinition,
 	ProviderError,
+	resolveProxy,
 	type Span,
 	type StealthClient,
 	type StealthResponse,
@@ -122,7 +123,7 @@ export async function main() {
 
 		let proxySuite: ProfileSuite | undefined;
 		if (args.compareProxy) {
-			assertProxyConfigured(config);
+			await assertProxyConfigured(provider);
 			proxySuite = await runProfileSuite({
 				args,
 				config,
@@ -454,14 +455,20 @@ async function loadFixtureReplay(providerDirectory: string): Promise<FixtureRepl
 	};
 }
 
-function assertProxyConfigured(config: ApiFuseConfig): void {
-	if (config.proxy?.url || process.env.APIFUSE__PROXY__URL) {
-		return;
+async function assertProxyConfigured(provider: ProviderDefinition): Promise<void> {
+	const policy = provider.proxy;
+	if (!policy || typeof policy !== "object" || policy.mode === "disabled") {
+		throw new Error(
+			"--compare-proxy requires an enabled ProviderProxyPolicy on the provider.",
+		);
 	}
 
-	throw new Error(
-		"--compare-proxy requires a proxy URL in apifuse.config.ts or APIFUSE__PROXY__URL.",
-	);
+	const resolved = await resolveProxy({ proxyPolicy: policy });
+	if (!resolved.url) {
+		throw new Error(
+			"--compare-proxy could not resolve the provider proxy policy; configure its allocator credentials (for smartproxy, APIFUSE__PROXY__SMARTPROXY_APP_KEY).",
+		);
+	}
 }
 
 async function runProfileSuite(options: {
@@ -629,22 +636,18 @@ function createBaseContext(options: {
 	traceContext: ReturnType<typeof createTraceContext>;
 }): ProviderContext {
 	const upstream = {
-		...{ proxy: options.provider.proxy },
-		proxy: options.proxyEnabled,
+		proxy: options.proxyEnabled ? options.provider.proxy : false,
 	};
-	const apifuseConfig = options.proxyEnabled ? options.config : {};
 	const http =
 		options.forceFixtureReplay && options.fixtureReplay
 			? createFixtureHttpClient(options.fixtureReplay.raw)
 			: createHttpClient(getProviderBaseUrl(options.provider), {
-					apifuseConfig,
 					upstream,
 				});
 	const stealth =
 		options.forceFixtureReplay && options.fixtureReplay
 			? createFixtureStealthClient(options.fixtureReplay.rawText)
 			: createStealthClient(getProviderBaseUrl(options.provider), {
-					apifuseConfig,
 					upstream,
 				});
 

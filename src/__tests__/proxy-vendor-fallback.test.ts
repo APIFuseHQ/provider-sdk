@@ -18,7 +18,6 @@ const PROXY_ENV_KEYS = [
 	"APIFUSE__PROXY__PROVIDER",
 	"APIFUSE__PROXY__DEFAULT_COUNTRY",
 	"APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES",
-	"APIFUSE__PROXY__URL",
 ] as const;
 
 function captureFailovers(): {
@@ -109,6 +108,39 @@ describe("proxy vendor fallback", () => {
 			expect(
 				resolveVendorChain({ mode: "required", providers: ["smartproxy", "smartproxy"] }),
 			).toEqual(["smartproxy"]);
+		});
+	});
+
+	describe("deprecated-only policies", () => {
+		it("fails closed for a required singular deprecated provider", async () => {
+			await expect(
+				resolveProxyConfigAsync({
+					proxyPolicy: { mode: "required", provider: "custom" },
+				}),
+			).rejects.toThrow(
+				/Required proxy policy.*provider id\(s\): "custom".*Deprecated vendor\(s\): "custom".*smartproxy.*nodemaven/,
+			);
+		});
+
+		it("fails closed and names every vendor in a required all-deprecated chain", async () => {
+			await expect(
+				resolveProxyConfigAsync({
+					proxyPolicy: { mode: "required", providers: ["decodo", "custom"] },
+				}),
+			).rejects.toMatchObject({ code: "PROXY_REQUIRED" });
+			await expect(
+				resolveProxyConfigAsync({
+					proxyPolicy: { mode: "required", providers: ["decodo", "custom"] },
+				}),
+			).rejects.toThrow(/"decodo", "custom".*Use "smartproxy" or "nodemaven"/);
+		});
+
+		it("keeps optional deprecated-only policies warning-only", async () => {
+			await expect(
+				resolveProxyConfigAsync({
+					proxyPolicy: { mode: "optional", providers: ["decodo", "custom"] },
+				}),
+			).resolves.toEqual({ shouldWarn: true });
 		});
 	});
 

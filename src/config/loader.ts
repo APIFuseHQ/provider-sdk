@@ -19,7 +19,7 @@ import {
 
 export type { ProxyProtocol } from "../runtime/proxy-nodemaven.js";
 
-/** Proxy vendors the SDK resolves natively (as opposed to the static env path). */
+/** Proxy vendors with SDK-managed resolution. */
 export type ProxyVendorName = "smartproxy" | "nodemaven";
 
 // "smartproxy" here is api.smartproxy.org — a residential proxy with an IP
@@ -37,15 +37,6 @@ export const PROVIDER_CACHE_REDIS_URL_ENV = "APIFUSE__PROVIDER__CACHE_REDIS_URL"
 export const PROVIDER_STATE_REDIS_URL_ENV = "APIFUSE__PROVIDER__STATE_REDIS_URL";
 export const REDIS_URL_ENV = "APIFUSE__REDIS__URL";
 
-export type ProxyOptions = {
-	url: string;
-};
-
-export type ProxyConfig = Partial<ProxyOptions> & {
-	provider?: string;
-	apiKey?: string;
-};
-
 export type BrowserConfig = {
 	executablePath?: string;
 	headless?: boolean;
@@ -57,7 +48,6 @@ export type SessionConfig = {
 };
 
 export type ApiFuseConfig = {
-	proxy?: ProxyConfig;
 	browser?: BrowserConfig;
 	session?: SessionConfig;
 	trace?: TraceConfig;
@@ -67,7 +57,6 @@ export type ApiFuseConfig = {
 export type ProxyResolutionOptions = {
 	proxy?: string;
 	upstream?: { proxy?: boolean | ProviderProxyPolicy };
-	apifuseConfig?: Pick<ApiFuseConfig, "proxy">;
 	proxyPolicy?: ProviderProxyPolicy;
 	affinityKey?: string;
 	/** Zero-based proxy-pool attempt index used by SDK transports for failover. */
@@ -444,75 +433,7 @@ function serializeSmartproxyPool(pool: CachedProxyPool): string {
 
 function normalizeProxyUrl(url?: string): string | undefined {
 	const normalized = url?.trim();
-	return normalized ? applyStickyProxySession(normalized) : undefined;
-}
-
-function readPositiveIntegerEnv(name: string): string | undefined {
-	const raw = process.env[name]?.trim();
-	if (!raw) return undefined;
-	if (!/^[1-9]\d*$/.test(raw)) {
-		throw new Error(`${name} must be a positive integer`);
-	}
-	return raw;
-}
-
-function applyStickyProxySession(proxyUrl: string): string {
-	let parsed: URL;
-	try {
-		parsed = new URL(proxyUrl);
-	} catch {
-		return proxyUrl;
-	}
-
-	if (!parsed.hostname || !parsed.username || !parsed.password) {
-		return proxyUrl;
-	}
-
-	// This rewrites sticky-session usernames for a bring-your-own *gateway* URL
-	// (APIFUSE__PROXY__URL). The `smartproxy` host here means a smartproxy.com /
-	// Decodo-family gateway that authenticates by username — NOT the
-	// api.smartproxy.org allocation vendor, whose endpoints are raw ip:port with
-	// no credentials and therefore return early above.
-	const host = parsed.hostname.toLowerCase();
-	if (!host.includes("smartproxy") && !host.includes("decodo")) {
-		return proxyUrl;
-	}
-
-	const username = decodeURIComponent(parsed.username);
-	const sessionId = process.env.APIFUSE__PROXY__SESSION_ID?.trim() || "apifuse-shared";
-	const sessionDuration = readPositiveIntegerEnv("APIFUSE__PROXY__SESSION_DURATION");
-	const stickyUsername = host.includes("smartproxy")
-		? buildSmartproxyUsername(username, sessionId, sessionDuration)
-		: buildDecodoUsername(username, sessionId, sessionDuration ?? "60");
-
-	parsed.username = stickyUsername;
-	return parsed.toString();
-}
-
-function buildSmartproxyUsername(
-	username: string,
-	sessionId: string,
-	sessionDuration?: string,
-): string {
-	const parts = username.split("_");
-	const configuredLife = parts.find((part) => part.startsWith("life-"))?.slice("life-".length);
-	const baseUsername = parts
-		.filter((part) => !part.startsWith("session-") && !part.startsWith("life-"))
-		.join("_");
-	return `${baseUsername}_session-${sessionId}_life-${sessionDuration ?? configuredLife ?? "60"}`;
-}
-
-function buildDecodoUsername(username: string, sessionId: string, sessionDuration: string): string {
-	const withoutSticky = username.replace(/-session-.+-sessionduration-\d+$/, "");
-	const baseUsername = withoutSticky.startsWith("user-") ? withoutSticky : `user-${withoutSticky}`;
-	return `${baseUsername}-session-${sessionId}-sessionduration-${sessionDuration}`;
-}
-
-function syncProxyEnv(config: ApiFuseConfig): void {
-	const configProxyUrl = normalizeProxyUrl(config.proxy?.url);
-	if (!process.env.APIFUSE__PROXY__URL && configProxyUrl) {
-		process.env.APIFUSE__PROXY__URL = configProxyUrl;
-	}
+	return normalized || undefined;
 }
 
 export function resolveProxyConfig(options: ProxyResolutionOptions = {}): ResolvedProxyConfig {
@@ -530,16 +451,6 @@ export function resolveProxyConfig(options: ProxyResolutionOptions = {}): Resolv
 		options.upstream?.proxy === true || (!policy && options.upstream?.proxy);
 	if (!legacyProxyRequested) {
 		return { shouldWarn: false };
-	}
-
-	const envProxyUrl = normalizeProxyUrl(process.env.APIFUSE__PROXY__URL);
-	if (envProxyUrl) {
-		return { shouldWarn: false, url: envProxyUrl };
-	}
-
-	const configuredProxyUrl = normalizeProxyUrl(options.apifuseConfig?.proxy?.url);
-	if (configuredProxyUrl) {
-		return { shouldWarn: false, url: configuredProxyUrl };
 	}
 
 	return { shouldWarn: true };
@@ -563,7 +474,22 @@ export async function resolveProxyConfigAsync(
 
 	const chain = resolveVendorChain(policy);
 	if (chain.length === 0) {
-		// decodo/custom/env-static providers keep the legacy static-URL path.
+		const declared = declaredVendorChain(policy);
+		const deprecated = declared.filter((vendor) => vendor === "decodo" || vendor === "custom");
+		if (policy.mode === "required") {
+			const providerIds =
+				declared.length > 0 ? declared.map((vendor) => `"${vendor}"`).join(", ") : "none";
+			const deprecatedDetail =
+				deprecated.length > 0
+					? ` Deprecated vendor(s): ${deprecated.map((vendor) => `"${vendor}"`).join(", ")}.`
+					: "";
+			throw new ProxyResolutionError(
+				"PROXY_REQUIRED",
+				`Required proxy policy has no SDK-managed adapter for provider id(s): ${providerIds}.${deprecatedDetail} Use "smartproxy" or "nodemaven".`,
+			);
+		}
+		// Deprecated decodo/custom providers have no SDK-managed adapter. Optional
+		// policies preserve the warning-only behavior and may continue directly.
 		return resolveProxyConfig({
 			...options,
 			upstream: { proxy: true },
@@ -842,18 +768,22 @@ function isRegistryVendor(name: string | undefined): name is ProxyVendorName {
 	return name === "smartproxy" || name === "nodemaven";
 }
 
+function declaredVendorChain(policy: ProviderProxyPolicy): ProviderProxyProvider[] {
+	const declared = policy.providers?.length
+		? policy.providers
+		: [policy.provider ?? envDefaultProvider()];
+	return declared.filter((vendor): vendor is ProviderProxyProvider => vendor !== undefined);
+}
+
 /**
  * Ordered list of SDK-native proxy vendors declared by the policy. `providers`
  * takes precedence over the legacy singular `provider`; the platform default
  * env is the final fallback. Non-registry names (decodo/custom) are dropped so
- * an all-static chain falls through to the legacy env-URL path unchanged.
+ * an all-deprecated chain has no managed adapter.
  */
 export function resolveVendorChain(policy: ProviderProxyPolicy): ProxyVendorName[] {
-	const declared: (ProviderProxyProvider | undefined)[] = policy.providers?.length
-		? policy.providers
-		: [policy.provider ?? envDefaultProvider()];
 	const chain: ProxyVendorName[] = [];
-	for (const name of declared) {
+	for (const name of declaredVendorChain(policy)) {
 		if (isRegistryVendor(name) && !chain.includes(name)) {
 			chain.push(name);
 		}
@@ -924,9 +854,8 @@ const UNSAFE_TRANSPORT_RETRY_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"
  *  - the method is safe/idempotent — an unsafe request must never be duplicated
  *    across the pool even if some framework default would allow it;
  *  - the policy resolves a non-empty *registry* vendor chain (smartproxy /
- *    nodemaven). Static vendors (custom / decodo) and credential-less policies
- *    resolve no allocator pool, so every attempt would hit the same endpoint
- *    with no possible crossover — they keep the retry budget.
+ *    nodemaven). Deprecated vendors (custom / decodo) resolve no managed pool,
+ *    so there is no possible endpoint crossover — they keep the retry budget.
  *
  * The widened cap is bounded by the chain's true maximum span (sum of each
  * vendor's max pool size), so a large NodeMaven pool (≤50) stays reachable and
@@ -945,8 +874,8 @@ const UNSAFE_TRANSPORT_RETRY_METHODS = new Set(["POST", "PUT", "PATCH", "DELETE"
  *    endpoint each attempt resolves (even a repeated one), so no de-duplication;
  *  - the method is safe/idempotent — an unsafe request is never duplicated;
  *  - the policy resolves a non-empty registry vendor chain (smartproxy /
- *    nodemaven). Static vendors (custom / decodo) resolve the same URL every
- *    attempt, so there is nothing to rotate or de-duplicate.
+ *    nodemaven). Deprecated vendors (custom / decodo) resolve no managed
+ *    endpoint, so there is nothing to rotate or de-duplicate.
  */
 export function policyRotatesTransportVendorChain(input: {
 	policy: ProviderProxyPolicy | undefined;
@@ -989,9 +918,8 @@ export function resolvePolicyTransportAttemptCap(input: {
  * A registry vendor chain (smartproxy/nodemaven) resolves a potentially
  * *different* endpoint per flat attempt index, so a transport retry should
  * advance across endpoints and de-duplicate once the chain stops yielding new
- * ones. Static/custom/decodo policies (empty registry chain) resolve the *same*
- * URL every attempt by design — retrying that same endpoint is intended, so the
- * transport loop must not de-duplicate them.
+ * ones. Deprecated custom/decodo policies have an empty registry chain and no
+ * managed endpoint, so the transport loop has nothing to rotate or de-duplicate.
  */
 export function policyResolvesRegistryVendorChain(
 	policy: ProviderProxyPolicy | undefined,
@@ -1828,17 +1756,13 @@ export async function loadApiFuseConfig(dir: string = process.cwd()): Promise<Ap
 	const tsPath = path.resolve(dir, "apifuse.config.ts");
 	if (existsSync(tsPath)) {
 		const config = await importConfig(tsPath);
-		const resolvedConfig = config ?? {};
-		syncProxyEnv(resolvedConfig);
-		return resolvedConfig;
+		return config ?? {};
 	}
 
 	const jsPath = path.resolve(dir, "apifuse.config.js");
 	if (existsSync(jsPath)) {
 		const config = await importConfig(jsPath);
-		const resolvedConfig = config ?? {};
-		syncProxyEnv(resolvedConfig);
-		return resolvedConfig;
+		return config ?? {};
 	}
 
 	return {};

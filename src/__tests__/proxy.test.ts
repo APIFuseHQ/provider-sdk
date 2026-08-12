@@ -1,16 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { mkdtemp } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
 
 import {
 	__setProxyRedisForTests,
 	__setSmartproxyAllocatorDeadlineMsForTests,
 	clearProxyResolutionCache,
 	invalidateProxyResolutionCacheAsync,
-	loadApiFuseConfig,
 	resolvePolicyTransportAttemptCap,
-	resolveProxyConfig,
 	resolveProxyConfigAsync,
 	SMARTPROXY_MAX_LIFETIME_MINUTES,
 } from "../config/loader.js";
@@ -219,27 +214,18 @@ mock.module("impit", () => ({
 
 describe("proxy integration", () => {
 	let originalFetch: typeof fetch;
-	let originalProxyEnv: string | undefined;
 	let originalSmartproxyKey: string | undefined;
-	let originalProxySessionId: string | undefined;
-	let originalProxySessionDuration: string | undefined;
 	let originalProxyDefaultLifetime: string | undefined;
 	let originalNodemavenUsername: string | undefined;
 	let originalNodemavenPassword: string | undefined;
 
 	beforeEach(() => {
 		originalFetch = global.fetch;
-		originalProxyEnv = process.env.APIFUSE__PROXY__URL;
 		originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		originalProxySessionId = process.env.APIFUSE__PROXY__SESSION_ID;
-		originalProxySessionDuration = process.env.APIFUSE__PROXY__SESSION_DURATION;
 		originalProxyDefaultLifetime = process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
 		originalNodemavenUsername = process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
 		originalNodemavenPassword = process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
-		delete process.env.APIFUSE__PROXY__URL;
 		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		delete process.env.APIFUSE__PROXY__SESSION_ID;
-		delete process.env.APIFUSE__PROXY__SESSION_DURATION;
 		delete process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES;
 		delete process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME;
 		delete process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD;
@@ -253,25 +239,10 @@ describe("proxy integration", () => {
 
 	afterEach(() => {
 		global.fetch = originalFetch;
-		if (originalProxyEnv) {
-			process.env.APIFUSE__PROXY__URL = originalProxyEnv;
-		} else {
-			delete process.env.APIFUSE__PROXY__URL;
-		}
 		if (originalSmartproxyKey) {
 			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
 		} else {
 			delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
-		}
-		if (originalProxySessionId) {
-			process.env.APIFUSE__PROXY__SESSION_ID = originalProxySessionId;
-		} else {
-			delete process.env.APIFUSE__PROXY__SESSION_ID;
-		}
-		if (originalProxySessionDuration) {
-			process.env.APIFUSE__PROXY__SESSION_DURATION = originalProxySessionDuration;
-		} else {
-			delete process.env.APIFUSE__PROXY__SESSION_DURATION;
 		}
 		if (originalProxyDefaultLifetime) {
 			process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES = originalProxyDefaultLifetime;
@@ -350,42 +321,6 @@ describe("proxy integration", () => {
 		expect(JSON.stringify(decoded)).not.toContain("5.78.24.25");
 	});
 
-	it("uses apifuse config proxy when upstream proxy routing is enabled", async () => {
-		queueNativeFetchResponses({
-			status: 200,
-			body: JSON.stringify({ ok: true }),
-			headers: { "Content-Type": "application/json" },
-		});
-
-		const { createHttpClient } = await import("../runtime/http.js");
-		const http = createHttpClient("https://example.com", {
-			apifuseConfig: { proxy: { url: "https://config-proxy.example:8443" } },
-			upstream: { proxy: true },
-		});
-
-		await http.get("/health");
-
-		expect(nativeProxyCalls()).toEqual(["https://config-proxy.example:8443"]);
-	});
-
-	it("uses APIFUSE__PROXY__URL when upstream proxy routing is enabled", async () => {
-		process.env.APIFUSE__PROXY__URL = "https://env-proxy.example:8443";
-		queueNativeFetchResponses({
-			status: 200,
-			body: JSON.stringify({ ok: true }),
-			headers: { "Content-Type": "application/json" },
-		});
-
-		const { createHttpClient } = await import("../runtime/http.js");
-		const http = createHttpClient("https://example.com", {
-			upstream: { proxy: true },
-		});
-
-		await http.get("/health");
-
-		expect(nativeProxyCalls()).toEqual(["https://env-proxy.example:8443"]);
-	});
-
 	it("passes request-level proxy through ctx.http", async () => {
 		queueNativeFetchResponses({
 			status: 200,
@@ -432,51 +367,6 @@ describe("proxy integration", () => {
 		]);
 	});
 
-	it("passes resolved proxy through ctx.stealth session config and request options", async () => {
-		stealthState.queuedResponses.push({
-			status: 200,
-			body: "ok",
-			headers: { "content-type": "text/plain" },
-		});
-
-		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", {
-			apifuseConfig: { proxy: { url: "https://stealth-proxy.example:8443" } },
-			upstream: { proxy: true },
-		});
-
-		await client.fetch("/health");
-
-		expect(stealthState.clients[0]?.calls[0]?.options).toMatchObject({
-			proxy: "https://stealth-proxy.example:8443",
-		});
-		expect(stealthState.clients[0]?.calls[0]?.options).toMatchObject({
-			proxy: "https://stealth-proxy.example:8443",
-		});
-	});
-
-	it("can skip certificate verification only when proxy routing is active", async () => {
-		stealthState.queuedResponses.push({
-			status: 200,
-			body: "ok",
-			headers: { "content-type": "text/plain" },
-		});
-
-		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", {
-			apifuseConfig: { proxy: { url: "https://stealth-proxy.example:8443" } },
-			proxyStealth: { insecureSkipVerify: true },
-			upstream: { proxy: true },
-		});
-
-		await client.fetch("/health");
-
-		expect(stealthState.clients[0]?.calls[0]?.options).toMatchObject({
-			insecureSkipVerify: true,
-			proxy: "https://stealth-proxy.example:8443",
-		});
-	});
-
 	it("passes request-level proxy through ctx.stealth", async () => {
 		stealthState.queuedResponses.push({
 			status: 200,
@@ -496,87 +386,6 @@ describe("proxy integration", () => {
 		});
 		expect(stealthState.clients[0]?.calls[0]?.options).toMatchObject({
 			proxy: "https://request-stealth-proxy.example:8443",
-		});
-	});
-
-	it("resolves proxy config from env before config", () => {
-		process.env.APIFUSE__PROXY__URL = "https://env-proxy.example:8443";
-
-		expect(
-			resolveProxyConfig({
-				apifuseConfig: { proxy: { url: "https://config-proxy.example:8443" } },
-				upstream: { proxy: true },
-			}),
-		).toEqual({
-			shouldWarn: false,
-			url: "https://env-proxy.example:8443",
-		});
-	});
-
-	it("adds sticky sessions to Smartproxy-compatible proxy URLs", () => {
-		process.env.APIFUSE__PROXY__URL = "http://smart-user_area-KR:secret@proxy.smartproxy.net:3120";
-		process.env.APIFUSE__PROXY__SESSION_ID = "fixed-session";
-		process.env.APIFUSE__PROXY__SESSION_DURATION = "90";
-
-		expect(resolveProxyConfig({ upstream: { proxy: true } })).toEqual({
-			shouldWarn: false,
-			url: "http://smart-user_area-KR_session-fixed-session_life-90:secret@proxy.smartproxy.net:3120/",
-		});
-	});
-
-	it("normalizes stale Smartproxy sticky session ordering", () => {
-		process.env.APIFUSE__PROXY__URL =
-			"http://smart-user_area-KR_life-60_session-old:secret@proxy.smartproxy.net:3120";
-		process.env.APIFUSE__PROXY__SESSION_ID = "fresh-session";
-		process.env.APIFUSE__PROXY__SESSION_DURATION = "90";
-
-		expect(resolveProxyConfig({ upstream: { proxy: true } })).toEqual({
-			shouldWarn: false,
-			url: "http://smart-user_area-KR_session-fresh-session_life-90:secret@proxy.smartproxy.net:3120/",
-		});
-	});
-
-	it("uses Smartproxy username format for regional Smartproxy hosts", () => {
-		process.env.APIFUSE__PROXY__URL =
-			"http://smart-user_area-KR_life-120:secret@as.smartproxy.net:3121";
-		process.env.APIFUSE__PROXY__SESSION_ID = "fresh-session";
-		delete process.env.APIFUSE__PROXY__SESSION_DURATION;
-
-		expect(resolveProxyConfig({ upstream: { proxy: true } })).toEqual({
-			shouldWarn: false,
-			url: "http://smart-user_area-KR_session-fresh-session_life-120:secret@as.smartproxy.net:3121/",
-		});
-	});
-
-	it("falls back to Smartproxy configured life when session duration env is blank", () => {
-		process.env.APIFUSE__PROXY__URL =
-			"http://smart-user_area-KR_life-120:secret@as.smartproxy.net:3121";
-		process.env.APIFUSE__PROXY__SESSION_ID = "fresh-session";
-		process.env.APIFUSE__PROXY__SESSION_DURATION = "   ";
-
-		expect(resolveProxyConfig({ upstream: { proxy: true } })).toEqual({
-			shouldWarn: false,
-			url: "http://smart-user_area-KR_session-fresh-session_life-120:secret@as.smartproxy.net:3121/",
-		});
-	});
-
-	it("rejects malformed sticky session duration instead of embedding it in the proxy username", () => {
-		process.env.APIFUSE__PROXY__URL = "http://smart-user_area-KR:secret@proxy.smartproxy.net:3120";
-		process.env.APIFUSE__PROXY__SESSION_DURATION = "abc";
-
-		expect(() => resolveProxyConfig({ upstream: { proxy: true } })).toThrow(
-			"APIFUSE__PROXY__SESSION_DURATION must be a positive integer",
-		);
-	});
-
-	it("adds sticky sessions to Decodo proxy URLs", () => {
-		process.env.APIFUSE__PROXY__URL = "http://smart-user_area-KR:secret@gate.decodo.com:7000";
-		process.env.APIFUSE__PROXY__SESSION_ID = "fixed-session";
-		process.env.APIFUSE__PROXY__SESSION_DURATION = "90";
-
-		expect(resolveProxyConfig({ upstream: { proxy: true } })).toEqual({
-			shouldWarn: false,
-			url: "http://user-smart-user_area-KR-session-fixed-session-sessionduration-90:secret@gate.decodo.com:7000/",
 		});
 	});
 
@@ -1714,60 +1523,6 @@ describe("proxy integration", () => {
 		]);
 	});
 
-	it("does not run allocator pool-refresh retries for a static (custom) proxy policy", async () => {
-		// Regression: allocator stale-pool handling (endpoint rotation + cache
-		// refresh) is a smartproxy/nodemaven concept. A static custom/decodo policy
-		// resolves ONE URL that cannot be "refreshed", so a refreshable 512 must fall
-		// through to the ordinary transport-retry path and honour `retry: false` —
-		// not be resent maxAttempts × refreshes times (up to ~40) against the same
-		// dead endpoint. This is the failure mode gating the refresh machinery on the
-		// crude `usesPolicyAllocator` (true for static policies) would reintroduce.
-		process.env.APIFUSE__PROXY__URL = "http://static-user:secret@proxy.static.example:7000";
-		stealthState.queuedResponses.push(
-			{
-				status: 512,
-				body: "proxy pool unavailable",
-				headers: { "content-type": "text/plain" },
-			},
-			// Extra responses that must never be consumed if retry:false is honoured.
-			{
-				status: 512,
-				body: "proxy pool unavailable",
-				headers: { "content-type": "text/plain" },
-			},
-			{
-				status: 200,
-				body: JSON.stringify({ ok: true }),
-				headers: { "Content-Type": "application/json" },
-			},
-		);
-
-		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", {
-			upstream: {
-				proxy: {
-					mode: "required",
-					provider: "custom",
-					geo: { country: "KR" },
-					session: { affinity: "connection", poolSize: 4 },
-				},
-			},
-			affinityKey: "af_con_static_no_refresh",
-		});
-
-		let error: unknown;
-		try {
-			await client.fetch("/health", { retry: false });
-		} catch (caught) {
-			error = caught;
-		}
-
-		// Exactly one request is issued against the single static endpoint — the two
-		// unused queued responses prove no allocator rotation/refresh occurred.
-		expect(error).toBeInstanceOf(TransportError);
-		expect(stealthProxyCalls()).toEqual(["http://static-user:secret@proxy.static.example:7000"]);
-	});
-
 	it("refreshes stale Smartproxy stealth pools after all endpoints return 509 or 512", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const pools = [
@@ -2476,19 +2231,6 @@ describe("proxy integration", () => {
 		expect(stealthState.clients[0]?.calls[0]?.options.insecureSkipVerify).toBeUndefined();
 	});
 
-	it("hydrates APIFUSE__PROXY__URL from apifuse.config.ts when env is unset", async () => {
-		const directory = await mkdtemp(path.join(tmpdir(), "apifuse-proxy-"));
-
-		await Bun.write(
-			`${directory}/apifuse.config.ts`,
-			["export default {", "  proxy: { url: 'https://file-proxy.example:8443' },", "};"].join("\n"),
-		);
-
-		const config = await loadApiFuseConfig(directory);
-
-		expect(config.proxy?.url).toBe("https://file-proxy.example:8443");
-		expect(process.env.APIFUSE__PROXY__URL).toBe("https://file-proxy.example:8443");
-	});
 });
 
 describe("resolvePolicyTransportAttemptCap", () => {
@@ -2539,10 +2281,9 @@ describe("resolvePolicyTransportAttemptCap", () => {
 		).toBe(2);
 	});
 
-	it("keeps the retry budget for non-registry (static) vendor policies", () => {
-		// `custom`/`decodo` resolve the legacy static proxy URL, not an allocator
-		// pool — every attempt hits the same endpoint, so widening would only
-		// hammer a dead endpoint with no possible crossover.
+	it("keeps the retry budget for non-registry vendor policies", () => {
+		// Deprecated `custom`/`decodo` policies have no managed pool, so widening
+		// cannot cross over to another endpoint.
 		const staticPolicy: ProviderProxyPolicy = {
 			mode: "required",
 			provider: "custom",

@@ -6,7 +6,6 @@ export * from "./choice-token.js";
 export type {
 	ApiFuseConfig,
 	BrowserConfig,
-	ProxyConfig,
 	ProxyProtocol,
 	ProxyResolutionOptions,
 	ProxyResolutionSource,
