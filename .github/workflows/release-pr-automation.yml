@@ -19,8 +19,12 @@ on:
       - ".github/workflows/release-pr-automation.yml"
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
+
+env:
+  BUN_VERSION: "1.3.14"
+  DOPPLER_PROJECT: apifuse
+  DOPPLER_CONFIG: prd
 
 concurrency:
   group: provider-sdk-beta-release-pr
@@ -35,9 +39,57 @@ jobs:
       !startsWith(github.event.head_commit.message, 'chore: release @apifuse/provider-sdk')
     runs-on: ubuntu-latest
     steps:
+      # `github.token` cannot open the release PR: the org disallows GitHub
+      # Actions from creating pull requests, so `gh pr create` fails with
+      # "GitHub Actions is not permitted to create or approve pull requests"
+      # even though this workflow declares `pull-requests: write`. That switch
+      # is an independent guard, not a permissions scope, and the org keeps it
+      # off deliberately. A GitHub App installation token is not subject to it,
+      # which is the pattern the monorepo already uses
+      # (apifuse/.github/workflows/provider-sdk-auto-bump.yml).
+      - name: Fetch GitHub App credentials from Doppler
+        id: github_app
+        shell: bash
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DOPPLER_TOKEN}" ]; then
+            echo "::error::DOPPLER_TOKEN GitHub secret is required to read the Doppler-managed GitHub App credentials."
+            exit 1
+          fi
+          payload=$(curl -fsS \
+            -H "Authorization: Bearer ${DOPPLER_TOKEN}" \
+            -H "Accept: application/json" \
+            "https://api.doppler.com/v3/configs/config/secrets/download?project=${DOPPLER_PROJECT}&config=${DOPPLER_CONFIG}&format=json&include_dynamic_secrets=false")
+          app_id=$(jq -er '.APIFUSE__BOUNTY__GITHUB_APP_ID // empty' <<<"${payload}")
+          private_key=$(jq -er '.APIFUSE__BOUNTY__GITHUB_APP_PRIVATE_KEY // empty' <<<"${payload}")
+          if [ -z "${app_id}" ] || [ -z "${private_key}" ]; then
+            echo "::error::APIFUSE__BOUNTY__GITHUB_APP_ID and APIFUSE__BOUNTY__GITHUB_APP_PRIVATE_KEY are required in Doppler ${DOPPLER_PROJECT}/${DOPPLER_CONFIG}."
+            exit 1
+          fi
+          echo "::add-mask::${private_key}"
+          delimiter="github-app-private-key-${RANDOM}-${RANDOM}"
+          {
+            echo "app_id=${app_id}"
+            echo "private_key<<${delimiter}"
+            echo "${private_key}"
+            echo "${delimiter}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Create GitHub App token
+        id: app_token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ steps.github_app.outputs.app_id }}
+          private-key: ${{ steps.github_app.outputs.private_key }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          token: ${{ steps.app_token.outputs.token }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
@@ -50,6 +102,6 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Create or update beta release PR
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ steps.app_token.outputs.token }}
           SOURCE_SHA: ${{ github.sha }}
         run: bun scripts/prepare-beta-release-pr.ts
