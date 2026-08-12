@@ -24,6 +24,13 @@ const SUCCESS_COOKIE_NAMES = {
 
 type SupportedBrowserChallengeKind = keyof typeof SUCCESS_COOKIE_NAMES;
 
+const BROWSER_CHALLENGE_BINDINGS = {
+	aws_waf: "portable",
+	cloudflare_interstitial: "identity_scoped",
+} as const satisfies Readonly<
+	Record<SupportedBrowserChallengeKind, "identity_scoped" | "portable">
+>;
+
 type BrowserClientFactory = (options: BrowserClientOptions) => BrowserClient;
 
 export interface BrowserResolverVendorOptions {
@@ -122,8 +129,51 @@ function assertChallengeHostAllowed(pageUrl: string, allowedHosts: readonly stri
 	});
 }
 
-function toCookieMap(cookies: readonly BrowserCookie[]): Readonly<Record<string, string>> {
-	return Object.fromEntries(cookies.map((cookie) => [cookie.name, cookie.value]));
+function cookieDomainSpecificity(cookie: BrowserCookie): number {
+	return normalizedHostname(cookie.domain.replace(/^\./, "")).length;
+}
+
+function isHostOnlyCookieFor(cookie: BrowserCookie, hostname: string): boolean {
+	return (
+		!cookie.domain.startsWith(".") &&
+		normalizedHostname(cookie.domain) === normalizedHostname(hostname)
+	);
+}
+
+function cookieAppliesToUrl(cookie: BrowserCookie, url: URL): boolean {
+	const cookieDomain = normalizedHostname(cookie.domain.replace(/^\./, ""));
+	const requestHostname = normalizedHostname(url.hostname);
+	const domainMatches =
+		cookieDomain.length > 0 &&
+		(requestHostname === cookieDomain ||
+			(cookie.domain.startsWith(".") && requestHostname.endsWith(`.${cookieDomain}`)));
+	if (!domainMatches || (cookie.secure && url.protocol !== "https:")) return false;
+
+	const requestPath = url.pathname || "/";
+	const cookiePath = cookie.path;
+	return (
+		cookiePath.startsWith("/") &&
+		(requestPath === cookiePath ||
+			(requestPath.startsWith(cookiePath) &&
+				(cookiePath.endsWith("/") || requestPath[cookiePath.length] === "/")))
+	);
+}
+
+function selectSuccessCookie(
+	cookies: readonly BrowserCookie[],
+	successCookieName: string,
+	pageUrl: string,
+): BrowserCookie | undefined {
+	const url = new URL(pageUrl);
+	return cookies
+		.filter((cookie) => cookie.name === successCookieName && cookieAppliesToUrl(cookie, url))
+		.sort(
+			(left, right) =>
+				Number(isHostOnlyCookieFor(right, url.hostname)) -
+					Number(isHostOnlyCookieFor(left, url.hostname)) ||
+				cookieDomainSpecificity(right) - cookieDomainSpecificity(left) ||
+				right.path.length - left.path.length,
+		)[0];
 }
 
 async function solveInPage(
@@ -137,7 +187,7 @@ async function solveInPage(
 
 	while (true) {
 		const cookies = await raceWithAbort(() => page.cookies(), signal);
-		const successCookie = cookies.find((cookie) => cookie.name === successCookieName);
+		const successCookie = selectSuccessCookie(cookies, successCookieName, pageUrl);
 		if (successCookie) {
 			const userAgent = await raceWithAbort(
 				() => page.evaluate<string>("navigator.userAgent"),
@@ -145,7 +195,7 @@ async function solveInPage(
 			);
 			return {
 				form: "cookies",
-				cookies: toCookieMap(cookies),
+				cookies: { [successCookieName]: successCookie.value },
 				userAgent,
 				...(successCookie.expires === undefined ? {} : { expires: successCookie.expires }),
 			};
@@ -253,8 +303,15 @@ export function createBrowserResolverVendorAdapter(
 			return isSupportedKind(kind);
 		},
 
-		getIssuingIdentity(solution) {
-			return solution.form === "cookies" ? { userAgent: solution.userAgent } : undefined;
+		getIssuingIdentity(solution, requestedIdentity, challenge) {
+			if (solution.form !== "cookies" || !isSupportedKind(challenge.kind)) return undefined;
+			if (BROWSER_CHALLENGE_BINDINGS[challenge.kind] === "identity_scoped") {
+				return {
+					...(requestedIdentity ? { proxyUrl: requestedIdentity.proxyUrl } : {}),
+					userAgent: solution.userAgent,
+				};
+			}
+			return { userAgent: solution.userAgent };
 		},
 
 		async solve(challenge, identity, callerSignal, traceRecorder) {

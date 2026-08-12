@@ -78,8 +78,17 @@ type ResolverCacheIndex = {
 const RESOLVER_SOLUTION_CACHE_NAMESPACE = "resolver-solution";
 const RESOLVER_SOLUTION_INDEX_CACHE_NAMESPACE = "resolver-solution-index";
 const MIN_RESOLVER_CACHE_TTL_MS = 1_000;
-const resolverCaches = new WeakMap<object, ProviderCache>();
+const resolverCaches = new WeakMap<object, ProviderCache | null>();
 const solutionIssuerDigests = new WeakMap<object, string>();
+
+export const RESOLVER_INSTRUMENTATION_METADATA = Symbol.for(
+	"@apifuse/provider-sdk/runtime/resolver-instrumentation-metadata",
+);
+
+export type ResolverInstrumentationMetadata = {
+	readonly target: ResolverContext;
+	readonly traceRecorder: TraceRecorder;
+};
 
 type ResolverAdapterFactory = (
 	configuration: string,
@@ -386,21 +395,51 @@ export async function invalidateResolverSolution(
 	challenge: ProviderChallenge,
 	solution: ChallengeSolution,
 ): Promise<void> {
-	if (solution.form !== "cookies") return;
-	const cache = resolverCaches.get(resolver);
-	if (!cache) return;
-	const issuerDigest = solutionIssuerDigests.get(solution);
-	if (!issuerDigest) return;
-	await cache.delete(resolverSolutionCacheKey(cache, challenge, issuerDigest));
+	const metadata = (
+		resolver as ResolverContext & {
+			readonly [RESOLVER_INSTRUMENTATION_METADATA]?: ResolverInstrumentationMetadata;
+		}
+	)[RESOLVER_INSTRUMENTATION_METADATA];
+	const cacheOwner = metadata?.target ?? resolver;
+	const invalidate = async (): Promise<
+		| "cache_disabled"
+		| "entry_deleted"
+		| "index_entry_deleted"
+		| "not_cookie_solution"
+		| "solution_not_cached"
+	> => {
+		if (solution.form !== "cookies") return "not_cookie_solution";
+		if (!resolverCaches.has(cacheOwner)) {
+			throw new Error("Resolver cache registration lookup failed during solution invalidation");
+		}
+		const cache = resolverCaches.get(cacheOwner);
+		if (cache === null || cache === undefined) return "cache_disabled";
+		const issuerDigest = solutionIssuerDigests.get(solution);
+		if (!issuerDigest) return "solution_not_cached";
+		await cache.delete(resolverSolutionCacheKey(cache, challenge, issuerDigest));
 
-	const index = await cache.get(resolverSolutionIndexCacheKey(cache, challenge));
-	if (!index || !isResolverCacheIndex(index.value)) return;
-	await writeResolverCacheIndex(
-		cache,
-		challenge,
-		index.value.entries.filter((entry) => entry.issuerDigest !== issuerDigest),
-		Date.now(),
-	);
+		const index = await cache.get(resolverSolutionIndexCacheKey(cache, challenge));
+		if (!index) return "entry_deleted";
+		if (!isResolverCacheIndex(index.value)) {
+			throw new Error("Resolver solution cache index is malformed during invalidation");
+		}
+		await writeResolverCacheIndex(
+			cache,
+			challenge,
+			index.value.entries.filter((entry) => entry.issuerDigest !== issuerDigest),
+			Date.now(),
+		);
+		return "index_entry_deleted";
+	};
+
+	if (!metadata) {
+		await invalidate();
+		return;
+	}
+	await metadata.traceRecorder.runSpan("resolver.cache.invalidate", invalidate, {
+		attributes: { challenge_kind: challenge.kind },
+		onSuccess: (outcome) => ({ outcome }),
+	});
 }
 
 function createResolverChainClient(options: {
@@ -452,7 +491,11 @@ function createResolverChainClient(options: {
 							})
 						: await solveAttempt();
 					if (options.cache && entry.id === "browser" && solution.form === "cookies") {
-						const issuingIdentity = adapter.getIssuingIdentity?.(solution, options.identity);
+						const issuingIdentity = adapter.getIssuingIdentity?.(
+							solution,
+							options.identity,
+							challenge,
+						);
 						if (issuingIdentity) {
 							await cacheBrowserSolution(options.cache, challenge, solution, issuingIdentity);
 						}
@@ -468,7 +511,7 @@ function createResolverChainClient(options: {
 			throwExhausted(attempts);
 		},
 	};
-	if (options.cache) resolverCaches.set(client, options.cache);
+	resolverCaches.set(client, options.cache ?? null);
 	return client;
 }
 

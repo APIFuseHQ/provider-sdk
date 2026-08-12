@@ -5,9 +5,13 @@ import type {
 	BrowserClient,
 	BrowserCookie,
 	BrowserPage,
+	ChallengeSolution,
+	ProviderCache,
 	ProviderChallengeKind,
 } from "../../types.js";
 import { createBrowserClient } from "../browser.js";
+import { createProviderCache } from "../cache.js";
+import { createResolverClient } from "../resolver.js";
 import { createBrowserResolverVendorAdapter } from "../resolver-vendors/browser.js";
 import {
 	ResolverChallengeVerdictError,
@@ -23,6 +27,11 @@ const AWS_CHALLENGE = {
 const CLOUDFLARE_CHALLENGE = {
 	kind: "cloudflare_interstitial",
 	pageUrl: "https://example.com/protected",
+} as const;
+
+const EXPECTED_BROWSER_CHALLENGE_BINDINGS = {
+	aws_waf: "portable",
+	cloudflare_interstitial: "identity_scoped",
 } as const;
 
 const COOKIE_BASE = {
@@ -169,6 +178,12 @@ describe("browser resolver vendor", () => {
 			cloudflare_interstitial: true,
 			aws_waf: true,
 		});
+		expect(Object.keys(EXPECTED_BROWSER_CHALLENGE_BINDINGS).sort()).toEqual(
+			Object.entries(support)
+				.filter(([, supported]) => supported)
+				.map(([kind]) => kind)
+				.sort(),
+		);
 	});
 
 	it("returns the AWS WAF cookie and page user agent, then exits the isolated context", async () => {
@@ -197,13 +212,99 @@ describe("browser resolver vendor", () => {
 			expires: 1_786_698_176.5,
 		});
 		expect(
-			adapter.getIssuingIdentity?.(result, {
-				proxyUrl: "http://must-not-be-attributed.example:8080",
-				userAgent: "Caller agent",
-			}),
+			adapter.getIssuingIdentity?.(
+				result,
+				{
+					proxyUrl: "http://must-not-be-attributed.example:8080",
+					userAgent: "Caller agent",
+				},
+				AWS_CHALLENGE,
+			),
 		).toEqual({ userAgent: "Measured Chromium" });
 		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
 		expect(stub.state.contextCloseCalls).toBe(1);
+	});
+
+	it("returns and caches only the required cookie from the challenge URL's most specific domain", async () => {
+		const stub = createBrowserStub({
+			cookieJars: [
+				[
+					{
+						...COOKIE_BASE,
+						domain: "accounts.example.net",
+						name: "session",
+						value: "unrelated-http-only-credential",
+					},
+					{
+						...COOKIE_BASE,
+						domain: "redirect.example.net",
+						name: "aws-waf-token",
+						value: "wrong-host-token",
+					},
+					{
+						...COOKIE_BASE,
+						domain: ".example.com",
+						name: "aws-waf-token",
+						value: "parent-domain-token",
+						expires: 1_900_000_000,
+					},
+					{
+						...COOKIE_BASE,
+						domain: "example.com",
+						name: "aws-waf-token",
+						value: "challenge-host-token",
+						expires: 1_900_000_000,
+					},
+					{
+						...COOKIE_BASE,
+						name: "resource-session",
+						value: "unrelated-resource-cookie",
+					},
+				],
+			],
+		});
+		const adapter = createAdapter(stub);
+		const innerCache = createProviderCache({
+			providerId: `resolver-browser-cookie-scope-${crypto.randomUUID()}`,
+			redisUrl: "",
+		});
+		const writes: unknown[] = [];
+		const cache: ProviderCache = {
+			key: (namespace, parts, options) => innerCache.key(namespace, parts, options),
+			get: (key) => innerCache.get(key),
+			async set(key, value, options) {
+				writes.push(value);
+				await innerCache.set(key, value, options);
+			},
+			delete: (key) => innerCache.delete(key),
+			getOrSet: (key, loader, options) => innerCache.getOrSet(key, loader, options),
+			responseMeta: () => innerCache.responseMeta(),
+		};
+		const resolver = createResolverClient({
+			adapters: [adapter],
+			cache,
+			kinds: ["aws_waf"],
+		});
+
+		const result = await resolver.solve(AWS_CHALLENGE);
+
+		expect(result).toMatchObject({
+			form: "cookies",
+			cookies: { "aws-waf-token": "challenge-host-token" },
+		});
+		expect((result as { readonly cookies: Readonly<Record<string, string>> }).cookies).toEqual({
+			"aws-waf-token": "challenge-host-token",
+		});
+		const cachedSolution = writes.find(
+			(value) => typeof value === "object" && value !== null && "solution" in value,
+		) as { readonly solution?: ChallengeSolution } | undefined;
+		expect(cachedSolution?.solution).toMatchObject({
+			form: "cookies",
+			cookies: { "aws-waf-token": "challenge-host-token" },
+		});
+		expect(
+			(cachedSolution?.solution as Extract<ChallengeSolution, { form: "cookies" }>).cookies,
+		).toEqual({ "aws-waf-token": "challenge-host-token" });
 	});
 
 	it("passes only the provider-declared hosts to the browser lease", async () => {
@@ -304,6 +405,67 @@ describe("browser resolver vendor", () => {
 			expires: 1_800_000_000,
 		});
 		expect(stub.state.contextCloseCalls).toBe(1);
+	});
+
+	it("scopes Cloudflare cache entries to the identity that produced them", async () => {
+		const expires = 1_900_000_000;
+		const stub = createBrowserStub({
+			cookieJars: [
+				[
+					{
+						...COOKIE_BASE,
+						name: "cf_clearance",
+						value: "identity-one-token",
+						expires,
+					},
+				],
+				[
+					{
+						...COOKIE_BASE,
+						name: "cf_clearance",
+						value: "identity-two-token",
+						expires,
+					},
+				],
+			],
+			userAgent: "Cloudflare Browser/1.0",
+		});
+		const adapter = createAdapter(stub);
+		const cache = createProviderCache({
+			providerId: `resolver-browser-cloudflare-binding-${crypto.randomUUID()}`,
+			redisUrl: "",
+		});
+		const firstIdentity = {
+			proxyUrl: "http://first-egress.example:8080",
+			userAgent: "Cloudflare Browser/1.0",
+		};
+		const secondIdentity = {
+			proxyUrl: "http://second-egress.example:8080",
+			userAgent: "Cloudflare Browser/1.0",
+		};
+		const firstResolver = createResolverClient({
+			adapters: [adapter],
+			cache,
+			identity: firstIdentity,
+			kinds: ["cloudflare_interstitial"],
+		});
+		const secondResolver = createResolverClient({
+			adapters: [adapter],
+			cache,
+			identity: secondIdentity,
+			kinds: ["cloudflare_interstitial"],
+		});
+
+		const first = await firstResolver.solve(CLOUDFLARE_CHALLENGE);
+		const second = await secondResolver.solve(CLOUDFLARE_CHALLENGE);
+		const firstCached = await firstResolver.solve(CLOUDFLARE_CHALLENGE);
+		const secondCached = await secondResolver.solve(CLOUDFLARE_CHALLENGE);
+
+		expect(first).toMatchObject({ cookies: { cf_clearance: "identity-one-token" } });
+		expect(second).toMatchObject({ cookies: { cf_clearance: "identity-two-token" } });
+		expect(firstCached).toEqual(first);
+		expect(secondCached).toEqual(second);
+		expect(stub.state.contextCloseCalls).toBe(2);
 	});
 
 	it("preserves the success cookie expiry on the internal browser solution subtype", async () => {
@@ -559,7 +721,8 @@ describe("browser resolver vendor", () => {
 		expect((error.cause as ProviderError).code).toBe("BROWSER_CDP_POOL_REQUIRED");
 	});
 
-	it("keeps a human-puzzle verdict distinct from vendor unavailability", () => {
+	it("keeps the human-puzzle error type distinct from unavailability without claiming adapter classification", () => {
+		// The browser adapter intentionally does not infer a definitive verdict from a timeout.
 		const verdict = new ResolverChallengeVerdictError("browser", "human_puzzle");
 
 		expect(verdict).toMatchObject({ vendor: "browser", reason: "human_puzzle" });

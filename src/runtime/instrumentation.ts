@@ -23,6 +23,7 @@ import {
 	getTraceRecorder,
 	type TraceContext,
 } from "./trace.js";
+import { RESOLVER_INSTRUMENTATION_METADATA } from "./resolver.js";
 
 export interface InstrumentationOptions extends CreateTraceContextOptions {}
 
@@ -621,9 +622,14 @@ function wrapNamespace<T extends object>(
 	}
 
 	const wrappedMethods = new Map<PropertyKey, unknown>();
+	const resolverMetadata =
+		namespace === "resolver" ? { target, traceRecorder: recorder } : undefined;
 
 	return new Proxy(target, {
 		get(namespaceTarget, property, receiver) {
+			if (property === RESOLVER_INSTRUMENTATION_METADATA && resolverMetadata) {
+				return resolverMetadata;
+			}
 			const value = Reflect.get(namespaceTarget, property, receiver);
 
 			if (typeof value !== "function" || property === "constructor") {

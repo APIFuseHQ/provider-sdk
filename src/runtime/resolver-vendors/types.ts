@@ -60,6 +60,7 @@ export interface ResolverVendorAdapter {
 	getIssuingIdentity?(
 		solution: ChallengeSolution,
 		requestedIdentity: ResolverIdentity | undefined,
+		challenge: ProviderChallenge,
 	): ResolverIssuingIdentity | undefined;
 	solve(
 		challenge: ProviderChallenge,

@@ -2,14 +2,16 @@ import { describe, expect, it } from "bun:test";
 
 import type {
 	ChallengeSolution,
+	ProviderCache,
 	ProviderChallenge,
 	ProviderContext,
 	ProviderResolverVendor,
 	ResolverContext,
 } from "../../types.js";
+import { createProviderCache } from "../cache.js";
 import { wrapWithInstrumentation } from "../instrumentation.js";
 import { spansToOTLP } from "../otlp.js";
-import { createResolverClient } from "../resolver.js";
+import { createResolverClient, invalidateResolverSolution } from "../resolver.js";
 import type { ResolverVendorAdapter } from "../resolver-vendors/types.js";
 import { ResolverVendorUnavailableError } from "../resolver-vendors/types.js";
 import { createTraceContext } from "../trace.js";
@@ -102,5 +104,69 @@ describe("resolver tracing", () => {
 		});
 
 		await expect(resolver.solve(CHALLENGE)).resolves.toBe(solution);
+	});
+
+	it("invalidates a cached solution through an instrumented resolver wrapper", async () => {
+		const innerCache = createProviderCache({
+			providerId: `resolver-trace-invalidation-${crypto.randomUUID()}`,
+			redisUrl: "",
+		});
+		const cache: ProviderCache = {
+			key: (namespace, parts, options) => innerCache.key(namespace, parts, options),
+			get: (key) => innerCache.get(key),
+			set: (key, value, options) => innerCache.set(key, value, options),
+			delete: (key) => innerCache.delete(key),
+			getOrSet: (key, loader, options) => innerCache.getOrSet(key, loader, options),
+			responseMeta: () => innerCache.responseMeta(),
+		};
+		let vendorCalls = 0;
+		const browserAdapter: ResolverVendorAdapter = {
+			id: "browser",
+			supports: (kind) => kind === "aws_waf",
+			getIssuingIdentity(solution) {
+				return solution.form === "cookies" ? { userAgent: solution.userAgent } : undefined;
+			},
+			async solve() {
+				vendorCalls += 1;
+				return {
+					form: "cookies",
+					cookies: { "aws-waf-token": `vendor-token-${vendorCalls}` },
+					expires: (Date.now() + 60_000) / 1_000,
+					userAgent: "Instrumented Browser/1.0",
+				} as ChallengeSolution & { readonly expires: number };
+			},
+		};
+		const rawResolver = createResolverClient({
+			adapters: [browserAdapter],
+			cache,
+			kinds: ["aws_waf"],
+		});
+		const instrumented = instrumentResolver(rawResolver);
+
+		const first = await instrumented.resolver.solve(CHALLENGE);
+		const cached = await instrumented.resolver.solve(CHALLENGE);
+		expect(cached).toEqual(first);
+		expect(vendorCalls).toBe(1);
+
+		await invalidateResolverSolution(instrumented.resolver, CHALLENGE, first);
+		const refreshed = await instrumented.resolver.solve(CHALLENGE);
+
+		expect(refreshed).toMatchObject({
+			form: "cookies",
+			cookies: { "aws-waf-token": "vendor-token-2" },
+		});
+		expect(vendorCalls).toBe(2);
+		expect(instrumented.trace.getSpans()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					name: "resolver.cache.invalidate",
+					status: "ok",
+					attributes: expect.objectContaining({
+						challenge_kind: "aws_waf",
+						outcome: "index_entry_deleted",
+					}),
+				}),
+			]),
+		);
 	});
 });
