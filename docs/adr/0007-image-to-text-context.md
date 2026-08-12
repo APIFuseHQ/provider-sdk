@@ -118,9 +118,13 @@ axis table is reproduced here as the shared record:
 Two further asymmetries were measured while writing this ADR.
 `ChallengeSolution` is `{form:"token"}` or `{form:"cookies", userAgent}`; OCR
 output is plaintext a provider types into a form field and fits neither. And
-0006's identity binding — cookie solutions bound to the egress IP and user agent
-that produced them — has no analogue here, because recognised characters do not
-depend on the egress that fetched the image.
+0006's identity binding — for the solutions that bind, one is only valid on the
+egress and user agent that produced it — has no analogue here, because recognised
+characters do not depend on the egress that fetched the image. That asymmetry
+holds however narrow the binding turns out to be: 0006 treats binding as a
+property of `(kind, vendor, mode)` rather than a constant, and Revision 4 has
+since measured `aws_waf` cookies as portable across egresses, splitting cookie
+cache scope per kind. OCR output is unbound under every one of those readings.
 
 ## Decision
 
