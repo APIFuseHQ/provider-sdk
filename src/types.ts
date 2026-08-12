@@ -1990,7 +1990,14 @@ export type ProviderStateDurationString =
 	| `${number}${"ms" | "s" | "m" | "h" | "d"}`
 	| `PT${string}`;
 
+export type StateNamespaceScope = "connection" | "provider";
+
 export interface StateNamespaceOptions {
+	/**
+	 * State isolation boundary. Connection scope is the default; provider scope
+	 * must be selected explicitly for provider-wide coordination state.
+	 */
+	scope?: StateNamespaceScope;
 	/** Default TTL used when a write omits ttl. Required to avoid unbounded state. */
 	defaultTtl: ProviderStateDurationString;
 	/** Maximum allowed TTL; writes are rejected when they exceed this policy. */
@@ -2051,6 +2058,11 @@ export interface ProviderStateNamespace {
 }
 
 export interface ProviderRuntimeState {
+	/**
+	 * Returns an immutable view bound to one request connection. An unresolved
+	 * connection uses an isolated reserved sentinel, never the provider-global scope.
+	 */
+	forConnection(connectionId: string | undefined): ProviderRuntimeState;
 	namespace(
 		name: string,
 		options: StateNamespaceOptions,

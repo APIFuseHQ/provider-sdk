@@ -12,6 +12,19 @@ jobs:
   test:
     name: SDK CI
     runs-on: ubuntu-latest
+    # Runtime-state Lua scripts are tested against a real Redis. Without this
+    # service the suite skips them (describe.skipIf), so a Lua syntax error or
+    # semantic regression would pass CI silently.
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
     steps:
       - uses: actions/checkout@v6
       - uses: oven-sh/setup-bun@v2
@@ -26,6 +39,8 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bun test
+        env:
+          APIFUSE__TEST__REDIS_URL: redis://127.0.0.1:6379
       - run: bun run check
       - run: bun run pack:check
       - run: bun run pack:smoke
