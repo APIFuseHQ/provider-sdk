@@ -328,6 +328,7 @@ export type {
 	StandardSchemaV1,
 	StateCasResult,
 	StateNamespaceOptions,
+	StateNamespaceScope,
 	StateValue,
 	StateWriteOptions,
 	StealthClient,

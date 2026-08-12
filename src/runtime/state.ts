@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { providerStateRedisUrlFromEnv } from "../config/loader.js";
 import { ProviderError } from "../errors.js";
 import type {
@@ -16,7 +17,10 @@ import {
 } from "./redis.js";
 
 const DEFAULT_REDIS_TIMEOUT_MS = 250;
-const REDIS_STATE_PREFIX = "apifuse:provider-state:v1";
+const REDIS_STATE_PREFIX = "apifuse:provider-state:v2";
+const LEGACY_REDIS_STATE_PREFIX = "apifuse:provider-state:v1";
+const PROVIDER_SCOPE_DISCRIMINATOR = "scope:provider";
+const MISSING_CONNECTION_SCOPE_DISCRIMINATOR = "scope:connection:missing";
 const LEGACY_INDEX_SCAN_COUNT = 256;
 const LEGACY_INDEX_SCAN_MAX_PAGES = 8;
 const SET_WITH_QUOTA_SCRIPT = `
@@ -27,9 +31,9 @@ local index_ttl = tonumber(ARGV[4])
 local envelope = ARGV[5]
 
 redis.call("ZREMRANGEBYSCORE", KEYS[2], "-inf", now)
-local exists = redis.call("EXISTS", KEYS[1])
+redis.call("ZREM", KEYS[2], KEYS[3])
 local indexed = redis.call("ZSCORE", KEYS[2], KEYS[1])
-if exists == 0 and not indexed and redis.call("ZCARD", KEYS[2]) >= max_entries then
+if not indexed and redis.call("ZCARD", KEYS[2]) >= max_entries then
 	return {0, false}
 end
 
@@ -41,6 +45,14 @@ return {1, envelope}
 
 const COMPARE_AND_SET_WITH_QUOTA_SCRIPT = `
 local current = redis.call("GET", KEYS[1])
+if current then
+	local ok, decoded = pcall(cjson.decode, current)
+	if ok and type(decoded) == "table" and decoded.deleted == true then
+		current = false
+	end
+elseif redis.call("EXISTS", KEYS[1]) == 0 then
+	current = redis.call("GET", KEYS[3])
+end
 local current_version = 0
 if current then
 	local ok, decoded = pcall(cjson.decode, current)
@@ -59,9 +71,9 @@ local expires_at = tonumber(ARGV[4])
 local index_ttl = tonumber(ARGV[5])
 local envelope = ARGV[6]
 redis.call("ZREMRANGEBYSCORE", KEYS[2], "-inf", now)
-local exists = current and 1 or 0
+redis.call("ZREM", KEYS[2], KEYS[3])
 local indexed = redis.call("ZSCORE", KEYS[2], KEYS[1])
-if exists == 0 and not indexed and redis.call("ZCARD", KEYS[2]) >= max_entries then
+if not indexed and redis.call("ZCARD", KEYS[2]) >= max_entries then
 	return {0, false}
 end
 
@@ -72,30 +84,35 @@ return {1, envelope}
 `;
 
 const DELETE_WITH_INDEX_SCRIPT = `
-redis.call("DEL", KEYS[1])
-redis.call("ZREM", KEYS[2], KEYS[1])
+redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+redis.call("ZREM", KEYS[2], KEYS[1], KEYS[3])
 return 1
 `;
 
-// Older SDKs wrote only the value key. Every operation that depends on the
-// namespace index advances a bounded SCAN cursor and lazily imports active
-// legacy envelopes into the new ZSET. The cursor is
-// deliberately cyclic rather than permanently "complete": an old pod may
-// still write an unindexed key during a rolling deploy. Each list/write call
-// does a fixed amount of migration work; Redis KEYS and unbounded scans remain
-// forbidden.
+// Legacy v1 keys have no scope discriminator. Every operation that depends on
+// the namespace index advances a bounded SCAN cursor and lazily imports active
+// v1 envelopes into the scoped v2 ZSET. The cursor is deliberately cyclic
+// rather than permanently "complete": an old pod may still write during a
+// rolling deploy. Each list/write call does a fixed amount of migration work;
+// Redis KEYS and unbounded scans remain forbidden.
+//
+// TODO(remove v1 state dual-read): delete this migration after all v1 writers
+// are gone and the longest StateNamespaceOptions.maxTtl has elapsed.
 const BACKFILL_LEGACY_INDEX_SCRIPT = `
 local now = tonumber(ARGV[1])
 local index_ttl = tonumber(ARGV[2])
 local next_cursor = ARGV[3]
 
 redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", now)
-for i = 4, #ARGV, 3 do
+for i = 4, #ARGV, 4 do
 	local key = ARGV[i]
 	local expected = ARGV[i + 1]
 	local expires_at = tonumber(ARGV[i + 2])
-	if redis.call("GET", key) == expected then
+	local scoped_key = ARGV[i + 3]
+	if redis.call("GET", key) == expected and redis.call("EXISTS", scoped_key) == 0 then
 		redis.call("ZADD", KEYS[1], "NX", expires_at, key)
+	else
+		redis.call("ZREM", KEYS[1], key)
 	end
 end
 if redis.call("EXISTS", KEYS[1]) == 1 then
@@ -108,6 +125,8 @@ return redis.call("ZCARD", KEYS[1])
 type RedisProviderRuntimeStateOptions = {
 	readonly redisUrl: string;
 	readonly providerId?: string;
+	/** Test seam; production callers use redisUrl-backed client sharing. */
+	readonly __redisClient?: ProviderRedisClient;
 };
 
 type RedisStateEnvelope = {
@@ -118,23 +137,32 @@ type RedisStateEnvelope = {
 	readonly updatedAt: string;
 };
 
+type RedisStateTombstone = {
+	readonly deleted: true;
+};
+
 type RedisBackend = {
 	readonly redis: ProviderRedisClient;
 };
 
 const redisBackends = new Map<string, RedisBackend>();
 
-function getRedisBackend(redisUrl: string): RedisBackend {
+function getRedisBackend(
+	redisUrl: string,
+	injectedRedis?: ProviderRedisClient,
+): RedisBackend {
 	const existing = redisBackends.get(redisUrl);
 	if (existing) return existing;
-	const redis = createProviderRedisClient({
-		redisUrl,
-		timeoutMs: DEFAULT_REDIS_TIMEOUT_MS,
-		onError: () => {
-			// Runtime state operations fail closed at their call sites. Avoid noisy
-			// unhandled Redis errors from background reconnect attempts.
-		},
-	});
+	const redis =
+		injectedRedis ??
+		createProviderRedisClient({
+			redisUrl,
+			timeoutMs: DEFAULT_REDIS_TIMEOUT_MS,
+			onError: () => {
+				// Runtime state operations fail closed at their call sites. Avoid noisy
+				// unhandled Redis errors from background reconnect attempts.
+			},
+		});
 	const backend = { redis };
 	redisBackends.set(redisUrl, backend);
 	return backend;
@@ -157,21 +185,49 @@ async function requireRedisReady(redis: ProviderRedisClient): Promise<void> {
 	throw new UnsupportedProviderStateError("Provider runtime state Redis is unavailable");
 }
 
-function providerStatePrefix(providerId: string | undefined, namespace: string): string {
-	return `${REDIS_STATE_PREFIX}:${providerId ?? "default"}:${namespace}`;
+function connectionScopeDiscriminator(connectionId: string | undefined): string {
+	if (connectionId === undefined) return MISSING_CONNECTION_SCOPE_DISCRIMINATOR;
+	const digest = createHash("sha256").update(connectionId, "utf8").digest("hex");
+	return `scope:connection:sha256:${digest}`;
 }
 
-function providerStateKey(providerId: string | undefined, namespace: string, key: string): string {
-	return `${providerStatePrefix(providerId, namespace)}:${key}`;
-}
-
-function publicStateKey(
+function providerStatePrefix(
 	providerId: string | undefined,
 	namespace: string,
-	redisKey: string,
+	scopeDiscriminator: string,
 ): string {
-	const prefix = `${providerStatePrefix(providerId, namespace)}:`;
-	return redisKey.startsWith(prefix) ? redisKey.slice(prefix.length) : redisKey;
+	return `${REDIS_STATE_PREFIX}:${providerId ?? "default"}:${namespace}:${scopeDiscriminator}`;
+}
+
+function providerStateKey(
+	providerId: string | undefined,
+	namespace: string,
+	scopeDiscriminator: string,
+	key: string,
+): string {
+	return `${providerStatePrefix(providerId, namespace, scopeDiscriminator)}:${key}`;
+}
+
+function legacyProviderStatePrefix(providerId: string | undefined, namespace: string): string {
+	return `${LEGACY_REDIS_STATE_PREFIX}:${providerId ?? "default"}:${namespace}`;
+}
+
+function legacyProviderStateKey(
+	providerId: string | undefined,
+	namespace: string,
+	key: string,
+): string {
+	return `${legacyProviderStatePrefix(providerId, namespace)}:${key}`;
+}
+
+function publicStateKey(redisKey: string, prefixes: readonly string[]): string {
+	for (const prefix of prefixes) {
+		const prefixWithSeparator = `${prefix}:`;
+		if (redisKey.startsWith(prefixWithSeparator)) {
+			return redisKey.slice(prefixWithSeparator.length);
+		}
+	}
+	return redisKey;
 }
 
 function redisGlobLiteral(value: string): string {
@@ -240,6 +296,21 @@ function envelopeFromJson(
 	};
 }
 
+function isStateTombstone(raw: string | null): boolean {
+	if (!raw) return false;
+	try {
+		const parsed: unknown = JSON.parse(raw);
+		return (
+			parsed !== null &&
+			typeof parsed === "object" &&
+			!Array.isArray(parsed) &&
+			(parsed as { deleted?: unknown }).deleted === true
+		);
+	} catch {
+		return false;
+	}
+}
+
 function redisEnvelope(
 	value: unknown,
 	version: number,
@@ -256,10 +327,31 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		private readonly providerId: string | undefined,
 		private readonly namespaceName: string,
 		private readonly options: StateNamespaceOptions,
+		private readonly scopeDiscriminator: string,
 	) {}
 
 	private redisKey(key: string): string {
-		return providerStateKey(this.providerId, this.namespaceName, key);
+		return providerStateKey(
+			this.providerId,
+			this.namespaceName,
+			this.scopeDiscriminator,
+			key,
+		);
+	}
+
+	private legacyRedisKey(key: string): string {
+		return legacyProviderStateKey(this.providerId, this.namespaceName, key);
+	}
+
+	private statePrefixes(): readonly [string, string] {
+		return [
+			providerStatePrefix(
+				this.providerId,
+				this.namespaceName,
+				this.scopeDiscriminator,
+			),
+			legacyProviderStatePrefix(this.providerId, this.namespaceName),
+		];
 	}
 
 	private indexKey(): string {
@@ -267,7 +359,11 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		// any state key (including "__index"), so a suffix inside the namespace
 		// could turn the ZSET into a string and break every subsequent write.
 		const namespaceIdentity = Buffer.from(
-			providerStatePrefix(this.providerId, this.namespaceName),
+			providerStatePrefix(
+				this.providerId,
+				this.namespaceName,
+				this.scopeDiscriminator,
+			),
 			"utf8",
 		).toString("base64url");
 		return `${REDIS_STATE_PREFIX}:index:${namespaceIdentity}`;
@@ -278,7 +374,7 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 	}
 
 	private legacyPrefix(): string {
-		return `${providerStatePrefix(this.providerId, this.namespaceName)}:`;
+		return `${legacyProviderStatePrefix(this.providerId, this.namespaceName)}:`;
 	}
 
 	private async backfillLegacyIndex(): Promise<void> {
@@ -308,13 +404,16 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 			for (const [index, raw] of rawValues.entries()) {
 				const key = keys[index];
 				if (!key || !raw) continue;
-				const envelope = envelopeFromJson(
-					publicStateKey(this.providerId, this.namespaceName, key),
-					raw,
-				);
+				const publicKey = publicStateKey(key, this.statePrefixes());
+				const envelope = envelopeFromJson(publicKey, raw);
 				const expiresAtMs = envelope ? Date.parse(envelope.expiresAt) : Number.NaN;
 				if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now) continue;
-				activeLegacyArgs.push(key, raw, String(expiresAtMs));
+				activeLegacyArgs.push(
+					key,
+					raw,
+					String(expiresAtMs),
+					this.redisKey(publicKey),
+				);
 			}
 			await withRequiredRedis(() =>
 				this.backend.redis.eval(
@@ -347,6 +446,15 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 				limit,
 			);
 		});
+	}
+
+	private async readRaw(key: string): Promise<string | null> {
+		await requireRedisReady(this.backend.redis);
+		const [scopedRaw, legacyRaw] = await withRequiredRedis(() =>
+			this.backend.redis.mget(this.redisKey(key), this.legacyRedisKey(key)),
+		);
+		// A scoped tombstone intentionally suppresses legacy fallback after delete.
+		return scopedRaw ?? legacyRaw;
 	}
 
 	private enforceValueSize(value: unknown): void {
@@ -388,24 +496,28 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		const requestedLimit = Math.max(0, options?.limit ?? this.options.maxEntries);
 		if (requestedLimit === 0) return [];
 		await this.backfillLegacyIndex();
-		const keys = (await this.indexedKeys(this.options.maxEntries)).filter((key) => {
-			const publicKey = publicStateKey(this.providerId, this.namespaceName, key);
-			return options?.prefix ? publicKey.startsWith(options.prefix) : true;
-		});
-		const limited = keys.slice(0, requestedLimit);
-		if (limited.length === 0) return [];
-		const values = await withRequiredRedis(() => this.backend.redis.mget(limited));
-		return values.flatMap((raw, index) => {
-			const key = limited[index];
-			if (!key) return [];
-			const value = envelopeFromJson(publicStateKey(this.providerId, this.namespaceName, key), raw);
-			return value ? [value] : [];
-		});
+		const keys = await this.indexedKeys(this.options.maxEntries * 2);
+		if (keys.length === 0) return [];
+		const values = await withRequiredRedis(() => this.backend.redis.mget(keys));
+		const currentPrefix = `${this.statePrefixes()[0]}:`;
+		const rows = new Map<string, { value: StateValue<T>; scoped: boolean }>();
+		for (const [index, raw] of values.entries()) {
+			const redisKey = keys[index];
+			if (!redisKey) continue;
+			const publicKey = publicStateKey(redisKey, this.statePrefixes());
+			if (options?.prefix && !publicKey.startsWith(options.prefix)) continue;
+			const value = envelopeFromJson(publicKey, raw);
+			if (!value) continue;
+			const scoped = redisKey.startsWith(currentPrefix);
+			const existing = rows.get(publicKey);
+			if (!existing || (scoped && !existing.scoped)) rows.set(publicKey, { value, scoped });
+		}
+		return Array.from(rows.values(), ({ value }) => value).slice(0, requestedLimit);
 	}
 
 	async get<T>(key: string): Promise<StateValue<T> | null> {
-		await requireRedisReady(this.backend.redis);
-		const raw = await withRequiredRedis(() => this.backend.redis.get(this.redisKey(key)));
+		const raw = await this.readRaw(key);
+		if (isStateTombstone(raw)) return null;
 		return envelopeFromJson(key, raw);
 	}
 
@@ -421,9 +533,10 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		const result = await withRequiredRedis(() =>
 			this.backend.redis.eval(
 				SET_WITH_QUOTA_SCRIPT,
-				2,
+				3,
 				this.redisKey(key),
 				this.indexKey(),
+				this.legacyRedisKey(key),
 				String(Date.now()),
 				String(this.options.maxEntries),
 				String(timing.expiresAtMs),
@@ -479,9 +592,10 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		const result = await withRequiredRedis(() =>
 			this.backend.redis.eval(
 				COMPARE_AND_SET_WITH_QUOTA_SCRIPT,
-				2,
+				3,
 				this.redisKey(key),
 				this.indexKey(),
+				this.legacyRedisKey(key),
 				String(expectedVersion),
 				String(Date.now()),
 				String(this.options.maxEntries),
@@ -512,12 +626,16 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 
 	async delete(key: string): Promise<void> {
 		await requireRedisReady(this.backend.redis);
+		const tombstone = JSON.stringify({ deleted: true } satisfies RedisStateTombstone);
 		await withRequiredRedis(() =>
 			this.backend.redis.eval(
 				DELETE_WITH_INDEX_SCRIPT,
-				2,
+				3,
 				this.redisKey(key),
 				this.indexKey(),
+				this.legacyRedisKey(key),
+				tombstone,
+				String(parseStateDurationMs(this.options.maxTtl)),
 			),
 		);
 	}
@@ -537,14 +655,34 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 class RedisProviderRuntimeState implements ProviderRuntimeState {
 	readonly backend: RedisBackend;
 	readonly providerId?: string;
+	readonly redisUrl: string;
+	readonly scopeDiscriminator: string;
 
-	constructor(options: RedisProviderRuntimeStateOptions) {
-		this.backend = getRedisBackend(options.redisUrl);
+	constructor(
+		options: RedisProviderRuntimeStateOptions,
+		scopeDiscriminator = MISSING_CONNECTION_SCOPE_DISCRIMINATOR,
+	) {
+		this.backend = getRedisBackend(options.redisUrl, options.__redisClient);
 		this.providerId = options.providerId;
+		this.redisUrl = options.redisUrl;
+		this.scopeDiscriminator = scopeDiscriminator;
+	}
+
+	forConnection(connectionId: string | undefined): ProviderRuntimeState {
+		return new RedisProviderRuntimeState(
+			{ redisUrl: this.redisUrl, providerId: this.providerId },
+			connectionScopeDiscriminator(connectionId),
+		);
 	}
 
 	namespace(name: string, options: StateNamespaceOptions): ProviderStateNamespace {
-		return new RedisProviderStateNamespace(this.backend, this.providerId, name, options);
+		return new RedisProviderStateNamespace(
+			this.backend,
+			this.providerId,
+			name,
+			options,
+			options.scope === "provider" ? PROVIDER_SCOPE_DISCRIMINATOR : this.scopeDiscriminator,
+		);
 	}
 }
 
@@ -594,6 +732,10 @@ class UnsupportedProviderStateNamespace implements ProviderStateNamespace {
 }
 
 class UnsupportedProviderRuntimeState implements ProviderRuntimeState {
+	forConnection(_connectionId: string | undefined): ProviderRuntimeState {
+		return new UnsupportedProviderRuntimeState();
+	}
+
 	namespace(_name: string, _options: StateNamespaceOptions): ProviderStateNamespace {
 		return new UnsupportedProviderStateNamespace();
 	}
@@ -722,14 +864,31 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 	}
 }
 
-class MemoryProviderRuntimeState implements ProviderRuntimeState {
-	readonly namespaces = new Map<string, MemoryProviderStateNamespace>();
+type MemoryProviderStateBackend = {
+	readonly namespaces: Map<string, MemoryProviderStateNamespace>;
+};
 
-	namespace(name: string, _options: StateNamespaceOptions): ProviderStateNamespace {
-		const existing = this.namespaces.get(name);
+class MemoryProviderRuntimeState implements ProviderRuntimeState {
+	constructor(
+		private readonly backend: MemoryProviderStateBackend = { namespaces: new Map() },
+		private readonly scopeDiscriminator = MISSING_CONNECTION_SCOPE_DISCRIMINATOR,
+	) {}
+
+	forConnection(connectionId: string | undefined): ProviderRuntimeState {
+		return new MemoryProviderRuntimeState(
+			this.backend,
+			connectionScopeDiscriminator(connectionId),
+		);
+	}
+
+	namespace(name: string, options: StateNamespaceOptions): ProviderStateNamespace {
+		const scopeDiscriminator =
+			options.scope === "provider" ? PROVIDER_SCOPE_DISCRIMINATOR : this.scopeDiscriminator;
+		const namespaceIdentity = `${scopeDiscriminator}\0${name}`;
+		const existing = this.backend.namespaces.get(namespaceIdentity);
 		if (existing) return existing;
-		const created = new MemoryProviderStateNamespace(_options);
-		this.namespaces.set(name, created);
+		const created = new MemoryProviderStateNamespace(options);
+		this.backend.namespaces.set(namespaceIdentity, created);
 		return created;
 	}
 }

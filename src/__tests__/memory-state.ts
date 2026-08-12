@@ -10,6 +10,10 @@ import type {
 export class MemoryProviderRuntimeState implements ProviderRuntimeState {
 	readonly namespaces = new Map<string, MemoryProviderStateNamespace>();
 
+	forConnection(_connectionId: string | undefined): ProviderRuntimeState {
+		return this;
+	}
+
 	namespace(name: string, _options: StateNamespaceOptions): ProviderStateNamespace {
 		const existing = this.namespaces.get(name);
 		if (existing) return existing;

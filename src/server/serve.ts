@@ -348,6 +348,7 @@ function createProviderContext(
 		connectionId: resolveOperationConnectionId(request),
 		headers: request.headers ?? {},
 	};
+	const requestState = state.forConnection(requestContext.connectionId);
 	const context = wrapWithInstrumentation({
 		env,
 		credential,
@@ -360,7 +361,7 @@ function createProviderContext(
 			},
 		}),
 		cache: createProviderCache({ providerId: provider.id }),
-		state,
+		state: requestState,
 		stealth: stealthBaseUrl
 			? stealthProfile
 				? createStealthClient(stealthBaseUrl, stealthProfile.name, stealthClientOptions)
@@ -398,7 +399,7 @@ function createProviderContext(
 			env,
 			request: requestContext,
 			credential,
-			state,
+			state: requestState,
 		}),
 	});
 	wrappedContext = context;
