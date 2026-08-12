@@ -231,6 +231,96 @@ describe("resolver env availability", () => {
 });
 
 describe("resolver server wiring", () => {
+	it("threads defineProvider resolver declarations into the server without an override", async () => {
+		const declaration = { vendors: ["custom"], kinds: ["turnstile"] } as const;
+		const provider = defineProvider({
+			id: "resolver-authoring-path",
+			version: "1.0.0",
+			runtime: "standard",
+			resolver: declaration,
+			meta: { displayName: "Resolver Authoring Path", category: "test" },
+			operations: {
+				solve: {
+					input: z.object({ kind: z.enum(["turnstile", "aws_waf"]) }),
+					output: z.object({ ok: z.boolean() }),
+					async handler(ctx, input) {
+						const challenge: ProviderChallenge =
+							input.kind === "turnstile"
+								? turnstileChallenge
+								: { kind: "aws_waf", pageUrl: "https://example.com/challenge" };
+						await ctx.resolver.solve(challenge);
+						return { ok: true };
+					},
+					healthCheckUnsupported: { reason: "unit test" },
+				},
+			},
+		});
+		const app = createServerApp(provider, { logger: () => undefined });
+
+		const vendorResponse = await app.request("/v1/solve", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ requestId: "req-declared-vendor", input: { kind: "turnstile" } }),
+		});
+		expect(vendorResponse.status).toBe(500);
+		expect(await vendorResponse.json()).toMatchObject({
+			error: {
+				code: "RESOLVER_CHAIN_EXHAUSTED",
+				message: `Resolver vendor chain exhausted: ${declaration.vendors[0]}: missing_transport`,
+				details: declaration.vendors.map((vendor) => ({ vendor, reason: "missing_transport" })),
+			},
+		});
+
+		const kindResponse = await app.request("/v1/solve", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ requestId: "req-declared-kind", input: { kind: "aws_waf" } }),
+		});
+		expect(kindResponse.status).toBe(500);
+		expect(await kindResponse.json()).toMatchObject({
+			error: {
+				code: "RESOLVER_KIND_NOT_DECLARED",
+				message: `Resolver kind "aws_waf" is not declared; declared kinds: ${declaration.kinds.join(", ")}`,
+			},
+		});
+		expect(provider.resolver).toBe(declaration);
+	});
+
+	it("keeps undeclared providers on the unsupported resolver client", async () => {
+		const provider = defineProvider({
+			id: "resolver-undeclared",
+			version: "1.0.0",
+			runtime: "standard",
+			meta: { displayName: "Resolver Undeclared", category: "test" },
+			operations: {
+				solve: {
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					async handler(ctx) {
+						await ctx.resolver.solve(turnstileChallenge);
+						return { ok: true };
+					},
+					healthCheckUnsupported: { reason: "unit test" },
+				},
+			},
+		});
+		const app = createServerApp(provider, { logger: () => undefined });
+
+		expect(provider.resolver).toBeUndefined();
+		const response = await app.request("/v1/solve", {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ requestId: "req-undeclared-resolver", input: {} }),
+		});
+		expect(response.status).toBe(500);
+		expect(await response.json()).toMatchObject({
+			error: {
+				code: "RESOLVER_UNAVAILABLE",
+				message: "Provider does not declare resolver capability",
+			},
+		});
+	});
+
 	it("injects the resolver override into operation and auth contexts", async () => {
 		const resolver: ResolverContext = {
 			async solve() {
