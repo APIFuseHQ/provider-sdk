@@ -199,11 +199,7 @@ describe("browser resolver vendor", () => {
 		});
 		const adapter = createAdapter(stub);
 
-		const result = await adapter.solve(
-			AWS_CHALLENGE,
-			undefined,
-			new AbortController().signal,
-		);
+		const result = await adapter.solve(AWS_CHALLENGE, undefined, new AbortController().signal);
 
 		expect(result).toEqual({
 			form: "cookies",
@@ -541,9 +537,7 @@ describe("browser resolver vendor", () => {
 		});
 	}
 
-	for (const fixture of CDP_POOL_ERROR_FIXTURES.filter(
-		(fixture) => fixture.reason === undefined,
-	)) {
+	for (const fixture of CDP_POOL_ERROR_FIXTURES.filter((fixture) => fixture.reason === undefined)) {
 		it(`propagates unclassified pool error code ${fixture.jsonRpcCode} from ${fixture.origin}`, async () => {
 			// -32004 and -32006 are caller bugs: the next vendor would fail identically,
 			// so they must reach the caller instead of becoming a failover reason.
@@ -583,6 +577,55 @@ describe("browser resolver vendor", () => {
 
 		expect(outcome).toBe("caller cancelled");
 		expect(stub.state.contextCloseCalls).toBe(1);
+	});
+
+	it("bounds an unresponsive context release and preserves the caller abort", async () => {
+		const contextCloseGate = new Promise<void>(() => undefined);
+		const stub = createBrowserStub({
+			contextCloseGate,
+			cookieJars: [
+				[
+					{
+						...COOKIE_BASE,
+						name: "aws-waf-token",
+						value: "finished-token",
+					},
+				],
+			],
+		});
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+		const controller = new AbortController();
+		const abortError = new Error("caller cancelled during release");
+		const solve = createAdapter(stub, 10).solve(
+			AWS_CHALLENGE,
+			undefined,
+			controller.signal,
+			recorder,
+		);
+		while (stub.state.contextCloseStarted === 0) await Promise.resolve();
+		controller.abort(abortError);
+
+		const outcome = await Promise.race([
+			solve.catch((error: unknown) => error),
+			new Promise<"too slow">((resolve) => setTimeout(() => resolve("too slow"), 100)),
+		]);
+
+		expect(outcome).toBe(abortError);
+		expect(stub.state.contextCloseCalls).toBe(0);
+		expect(trace.getSpans()).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					name: "resolver.vendor.cleanup",
+					status: "error",
+					attributes: expect.objectContaining({
+						operation: "context.close",
+						error_message: "Browser resolver cleanup exceeded 10ms",
+					}),
+				}),
+			]),
+		);
 	});
 
 	it("does not turn an abort during context cleanup into success", async () => {

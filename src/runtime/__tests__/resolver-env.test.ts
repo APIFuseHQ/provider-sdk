@@ -322,8 +322,10 @@ describe("resolver server wiring", () => {
 	});
 
 	it("injects the resolver override into operation and auth contexts", async () => {
+		const resolverSignals: (AbortSignal | undefined)[] = [];
 		const resolver: ResolverContext = {
-			async solve() {
+			async solve(_challenge, signal) {
+				resolverSignals.push(signal);
 				return { form: "token", token: "override-token" };
 			},
 		};
@@ -363,14 +365,17 @@ describe("resolver server wiring", () => {
 			},
 		});
 		const app = createServerApp(provider, { resolver });
+		const operationController = new AbortController();
 
 		const operationResponse = await app.request("/v1/solve", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ requestId: "req-1", input: {} }),
+			signal: operationController.signal,
 		});
 		expect(await operationResponse.json()).toEqual({ data: { token: "override-token" } });
 
+		const authController = new AbortController();
 		const authResponse = await app.request("/auth/start", {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -380,7 +385,9 @@ describe("resolver server wiring", () => {
 				tenantId: "tenant-1",
 				providerId: "resolver-server-demo",
 			}),
+			signal: authController.signal,
 		});
 		expect(await authResponse.json()).toMatchObject({ data: { data: { form: "token" } } });
+		expect(resolverSignals).toEqual([operationController.signal, authController.signal]);
 	});
 });

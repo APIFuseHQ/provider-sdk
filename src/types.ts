@@ -335,9 +335,11 @@ export type ProviderResolverVendor =
 	| "custom";
 
 /**
- * Token-family kinds resolve to `{ form: "token" }` and carry no network-identity
- * binding. Cookie-family kinds resolve to `{ form: "cookies" }`; their cookies
- * are bound to the egress IP and user agent that produced them.
+ * Token-family kinds resolve to `{ form: "token" }`. Cookie-family kinds resolve
+ * to `{ form: "cookies" }`; network-identity binding is defined per kind. `aws_waf`
+ * was measured portable across residential leases on buyee, while `cf_clearance`
+ * remains unmeasured here and is treated as identity-scoped because it is widely
+ * described as IP-bound.
  */
 export type ProviderChallenge =
 	| {
@@ -476,7 +478,7 @@ export interface SttContext {
 }
 
 export interface ResolverContext {
-	solve(challenge: ProviderChallenge): Promise<ChallengeSolution>;
+	solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
 }
 
 export interface HealthJourneySchedule {

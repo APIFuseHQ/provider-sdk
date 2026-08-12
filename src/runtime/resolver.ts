@@ -10,15 +10,16 @@ import type {
 	ProviderResolverVendor,
 	ResolverContext,
 } from "../types.js";
+import { resolverChallengeIssuingIdentity } from "./resolver-vendors/bindings.js";
 import { createBrowserResolverVendorAdapter } from "./resolver-vendors/browser.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
-	resolverVendorSupports,
 	type ResolverIdentity,
 	type ResolverIssuingIdentity,
 	type ResolverVendorAdapter,
-	type ResolverVendorUnavailableReason,
 	ResolverVendorUnavailableError,
+	type ResolverVendorUnavailableReason,
+	resolverVendorSupports,
 } from "./resolver-vendors/types.js";
 import type { TraceRecorder } from "./trace.js";
 
@@ -321,7 +322,8 @@ async function findCachedSolution(
 ): Promise<ChallengeSolution | undefined> {
 	const now = Date.now();
 	if (identity) {
-		return await readCachedSolution(cache, challenge, resolverIdentityDigest(identity), now);
+		const lookupIdentity = resolverChallengeIssuingIdentity(challenge, identity);
+		return await readCachedSolution(cache, challenge, resolverIdentityDigest(lookupIdentity), now);
 	}
 
 	const index = await cache.get(resolverSolutionIndexCacheKey(cache, challenge));
@@ -571,6 +573,22 @@ export function createUnsupportedResolverClient(reason?: string): ResolverContex
 			});
 		},
 	};
+}
+
+export function bindResolverSignal(
+	resolver: ResolverContext,
+	defaultSignal: AbortSignal | undefined,
+): ResolverContext {
+	if (!defaultSignal) return resolver;
+	const boundResolver: ResolverContext = {
+		solve(challenge, signal = defaultSignal) {
+			return resolver.solve(challenge, signal);
+		},
+	};
+	if (resolverCaches.has(resolver)) {
+		resolverCaches.set(boundResolver, resolverCaches.get(resolver) ?? null);
+	}
+	return boundResolver;
 }
 
 export function createResolverClientFromEnv(

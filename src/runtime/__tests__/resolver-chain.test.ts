@@ -15,10 +15,10 @@ import {
 } from "../resolver.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
-	type ResolverVendorAdapter,
-	type ResolverVendorUnavailableReason,
 	ResolverChallengeVerdictError,
+	type ResolverVendorAdapter,
 	ResolverVendorUnavailableError,
+	type ResolverVendorUnavailableReason,
 } from "../resolver-vendors/types.js";
 
 const CHALLENGE = {
@@ -215,7 +215,8 @@ describe("resolver vendor chain", () => {
 		const second = createStubAdapter({ id: "capsolver" });
 		const controller = new AbortController();
 		const abortError = new Error("caller aborted");
-		const solve = createChain([first.adapter, second.adapter]).solve(CHALLENGE, controller.signal);
+		const resolver: ResolverContext = createChain([first.adapter, second.adapter]);
+		const solve = resolver.solve(CHALLENGE, controller.signal);
 		while (first.state.solveCalls === 0) await Promise.resolve();
 		controller.abort(abortError);
 

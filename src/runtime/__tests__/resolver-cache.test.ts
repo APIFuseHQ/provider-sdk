@@ -14,11 +14,17 @@ import {
 	invalidateResolverSolution,
 	RESOLVER_ADAPTER_REGISTRY,
 } from "../resolver.js";
+import { resolverChallengeIssuingIdentity } from "../resolver-vendors/bindings.js";
 import type { ResolverIdentity, ResolverVendorAdapter } from "../resolver-vendors/types.js";
 
 const CHALLENGE = {
 	kind: "aws_waf",
 	pageUrl: "https://example.com/protected?attempt=1",
+} satisfies ProviderChallenge;
+
+const IDENTITY_SCOPED_CHALLENGE = {
+	kind: "cloudflare_interstitial",
+	pageUrl: CHALLENGE.pageUrl,
 } satisfies ProviderChallenge;
 
 type BrowserSolution = Extract<ChallengeSolution, { readonly form: "cookies" }> & {
@@ -69,13 +75,13 @@ function createBrowserAdapter(
 	return {
 		adapter: {
 			id: "browser",
-			supports: (kind) => kind === "aws_waf",
-			getIssuingIdentity(solution, requestedIdentity) {
+			supports: (kind) => kind === "aws_waf" || kind === "cloudflare_interstitial",
+			getIssuingIdentity(solution, requestedIdentity, challenge) {
 				if (solution.form !== "cookies") return undefined;
-				return {
+				return resolverChallengeIssuingIdentity(challenge, {
 					...(requestedIdentity ? { proxyUrl: requestedIdentity.proxyUrl } : {}),
 					userAgent: solution.userAgent,
-				};
+				});
 			},
 			async solve(_challenge, identity) {
 				calls += 1;
@@ -100,12 +106,17 @@ function persistentSolution(
 
 function createClient(
 	adapter: ResolverVendorAdapter,
-	options: { readonly cache?: ProviderCache; readonly identity?: ResolverIdentity } = {},
+	options: {
+		readonly cache?: ProviderCache;
+		readonly identity?: ResolverIdentity;
+		readonly kinds?: readonly ProviderChallenge["kind"][];
+	} = {},
 ) {
 	return createResolverClient({
-		kinds: ["aws_waf"],
+		kinds: options.kinds ?? ["aws_waf"],
 		adapters: [adapter],
-		...options,
+		...(options.cache ? { cache: options.cache } : {}),
+		...(options.identity ? { identity: options.identity } : {}),
 	});
 }
 
@@ -213,6 +224,24 @@ describe("resolver solution caching", () => {
 		expect(stub.calls()).toBe(2);
 	});
 
+	it("shares a portable solution across proxy identities", async () => {
+		const { cache } = createRecordingCache();
+		const stub = createBrowserAdapter((identity) => persistentSolution(identity?.userAgent));
+		const firstIdentity = {
+			proxyUrl: "http://first-user:first-password@proxy.test:8080",
+			userAgent: "Browser/shared",
+		};
+		const secondIdentity = {
+			proxyUrl: "http://second-user:second-password@proxy.test:8080",
+			userAgent: "Browser/shared",
+		};
+
+		await createClient(stub.adapter, { cache, identity: firstIdentity }).solve(CHALLENGE);
+		await createClient(stub.adapter, { cache, identity: secondIdentity }).solve(CHALLENGE);
+
+		expect(stub.calls()).toBe(1);
+	});
+
 	it("separates identities in distinct solution keys and solves each one", async () => {
 		const { cache, keyCalls } = createRecordingCache();
 		const stub = createBrowserAdapter((identity) => persistentSolution(identity?.userAgent));
@@ -229,9 +258,16 @@ describe("resolver solution caching", () => {
 			userAgent: "Browser/other",
 		};
 
-		await createClient(stub.adapter, { cache, identity: firstIdentity }).solve(CHALLENGE);
-		await createClient(stub.adapter, { cache, identity: secondIdentity }).solve(CHALLENGE);
-		await createClient(stub.adapter, { cache, identity: thirdIdentity }).solve(CHALLENGE);
+		const kinds = ["cloudflare_interstitial"] as const;
+		await createClient(stub.adapter, { cache, identity: firstIdentity, kinds }).solve(
+			IDENTITY_SCOPED_CHALLENGE,
+		);
+		await createClient(stub.adapter, { cache, identity: secondIdentity, kinds }).solve(
+			IDENTITY_SCOPED_CHALLENGE,
+		);
+		await createClient(stub.adapter, { cache, identity: thirdIdentity, kinds }).solve(
+			IDENTITY_SCOPED_CHALLENGE,
+		);
 
 		const solutionKeyCalls = keyCalls.filter((call) => call.namespace === "resolver-solution");
 		const solutionKeys = [...new Set(solutionKeyCalls.map((call) => call.key))];
@@ -244,7 +280,7 @@ describe("resolver solution caching", () => {
 		expect(solutionKeys[0]).not.toBe(solutionKeys[1]);
 		expect(solutionKeys[1]).not.toBe(solutionKeys[2]);
 		expect(solutionKeyCalls[0]?.parts).toEqual({
-			kind: "aws_waf",
+			kind: "cloudflare_interstitial",
 			origin: "https://example.com",
 			issuerDigest: expect.any(String),
 		});
@@ -371,8 +407,11 @@ describe("resolver solution caching", () => {
 			userAgent: "Browser/proxied",
 		};
 
-		await createClient(stub.adapter, { cache, identity: proxyIdentity }).solve(CHALLENGE);
-		await createClient(stub.adapter, { cache }).solve(CHALLENGE);
+		const kinds = ["cloudflare_interstitial"] as const;
+		await createClient(stub.adapter, { cache, identity: proxyIdentity, kinds }).solve(
+			IDENTITY_SCOPED_CHALLENGE,
+		);
+		await createClient(stub.adapter, { cache, kinds }).solve(IDENTITY_SCOPED_CHALLENGE);
 
 		expect(stub.calls()).toBe(2);
 	});
@@ -419,25 +458,26 @@ describe("resolver solution caching", () => {
 			proxyUrl: "http://second:second-pass@proxy.test:8080",
 			userAgent: "Browser/two",
 		};
-		const firstResolver = createClient(stub.adapter, { cache, identity: firstIdentity });
-		const secondResolver = createClient(stub.adapter, { cache, identity: secondIdentity });
-		const first = await firstResolver.solve(CHALLENGE);
-		await secondResolver.solve(CHALLENGE);
+		const kinds = ["cloudflare_interstitial"] as const;
+		const firstResolver = createClient(stub.adapter, { cache, identity: firstIdentity, kinds });
+		const secondResolver = createClient(stub.adapter, { cache, identity: secondIdentity, kinds });
+		const first = await firstResolver.solve(IDENTITY_SCOPED_CHALLENGE);
+		await secondResolver.solve(IDENTITY_SCOPED_CHALLENGE);
 		const solutionKeys = [
 			...new Set(
 				keyCalls.filter((call) => call.namespace === "resolver-solution").map((call) => call.key),
 			),
 		];
 		const clonedFirst = structuredClone(first);
-		await invalidateResolverSolution(firstResolver, CHALLENGE, clonedFirst);
+		await invalidateResolverSolution(firstResolver, IDENTITY_SCOPED_CHALLENGE, clonedFirst);
 		expect(await inner.get(solutionKeys[0] as string)).not.toBeNull();
 
-		await invalidateResolverSolution(firstResolver, CHALLENGE, first);
+		await invalidateResolverSolution(firstResolver, IDENTITY_SCOPED_CHALLENGE, first);
 
 		expect(await inner.get(solutionKeys[0] as string)).toBeNull();
 		expect(await inner.get(solutionKeys[1] as string)).not.toBeNull();
-		await firstResolver.solve(CHALLENGE);
-		await secondResolver.solve(CHALLENGE);
+		await firstResolver.solve(IDENTITY_SCOPED_CHALLENGE);
+		await secondResolver.solve(IDENTITY_SCOPED_CHALLENGE);
 		expect(stub.calls()).toBe(3);
 	});
 

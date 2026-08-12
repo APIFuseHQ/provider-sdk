@@ -55,7 +55,7 @@ import {
 	PROXY_POOL_EXHAUSTED_CODE,
 } from "../runtime/proxy-errors.js";
 import { PROVIDER_TELEMETRY_HEADER, ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
-import { createResolverClientFromEnv } from "../runtime/resolver.js";
+import { bindResolverSignal, createResolverClientFromEnv } from "../runtime/resolver.js";
 import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
@@ -320,6 +320,7 @@ function createProviderContext(
 	options: ProviderServerOptions = {},
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
 	proxyTelemetry?: ProxyTelemetryCollector,
+	signal?: AbortSignal,
 ): ProviderContext {
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
@@ -397,12 +398,14 @@ function createProviderContext(
 		auth: createAuthStub(),
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
-		resolver:
+		resolver: bindResolverSignal(
 			options.resolver ??
-			createResolverClientFromEnv(provider.resolver, undefined, {
-				allowedHosts: provider.allowedHosts,
-				cache,
-			}),
+				createResolverClientFromEnv(provider.resolver, undefined, {
+					allowedHosts: provider.allowedHosts,
+					cache,
+				}),
+			signal,
+		),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
 			env,
@@ -528,12 +531,14 @@ function createAuthFlowContext(
 			context: flowContextStore.context,
 			ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
-			resolver:
+			resolver: bindResolverSignal(
 				options.resolver ??
-				createResolverClientFromEnv(provider.resolver, undefined, {
-					allowedHosts: provider.allowedHosts,
-					cache,
-				}),
+					createResolverClientFromEnv(provider.resolver, undefined, {
+						allowedHosts: provider.allowedHosts,
+						cache,
+					}),
+				signal,
+			),
 			auth: createAuthFlowHelpers({ signal }),
 		},
 		getPatch: flowContextStore.getPatch,
@@ -1536,8 +1541,17 @@ async function handleOperation(
 	options: ProviderServerOptions = {},
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
 	proxyTelemetry?: ProxyTelemetryCollector,
+	signal?: AbortSignal,
 ): Promise<Response | OperationResponse> {
-	const ctx = createProviderContext(provider, request, operationId, options, state, proxyTelemetry);
+	const ctx = createProviderContext(
+		provider,
+		request,
+		operationId,
+		options,
+		state,
+		proxyTelemetry,
+		signal,
+	);
 	const operation = provider.operations[operationId];
 	const streaming = operation?.transport?.kind && operation.transport.kind !== "json";
 	let cleanupCalled = false;
@@ -1576,6 +1590,7 @@ async function handleOperation(
 					operationId,
 					ctx,
 					request,
+					signal,
 				})
 			: await executeOperation(provider, operationId, ctx, request.input);
 		if (streaming && operation) {
@@ -1962,7 +1977,15 @@ export function createServerApp(
 			}
 			const request = operationRequestFromForwardingEnvelope(envelope);
 			operationId = envelope.operationId;
-			const ctx = createProviderContext(provider, request, operationId, options, state);
+			const ctx = createProviderContext(
+				provider,
+				request,
+				operationId,
+				options,
+				state,
+				undefined,
+				signal,
+			);
 			if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
 				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
 			}
@@ -2030,6 +2053,7 @@ export function createServerApp(
 				options,
 				state,
 				proxyTelemetry,
+				c.req.raw.signal,
 			);
 			if (response instanceof Response) {
 				logProviderSuccess(

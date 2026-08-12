@@ -186,6 +186,19 @@ const NEGATIVE_CONTROLS = [
 			"",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-resolver-signal.ts",
+		expectedCode: "TS2345",
+		description: "ResolverContext.solve accepts only AbortSignal as its optional signal",
+		source: [
+			'import type { ProviderChallenge, ResolverContext } from "@apifuse/provider-sdk";',
+			"",
+			"declare const resolver: ResolverContext;",
+			"declare const challenge: ProviderChallenge;",
+			"resolver.solve(challenge, { aborted: false });",
+			"",
+		].join("\n"),
+	},
 ] as const;
 
 const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-types-"));
@@ -320,6 +333,7 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 			'export const resolverRuntimeOptions: ResolverRuntimeOptions = { allowedHosts: ["example.com"], cache: providerContext.cache };',
 			"",
 			'export const turnstileChallenge: ProviderChallenge = { kind: "turnstile", siteKey: "key", pageUrl: "https://example.com" };',
+			"export const abortableResolverSolve = providerResolver.solve(turnstileChallenge, new AbortController().signal);",
 			'export const recaptchaV2Challenge: ProviderChallenge = { kind: "recaptcha_v2", siteKey: "key", pageUrl: "https://example.com" };',
 			'export const recaptchaV3Challenge: ProviderChallenge = { kind: "recaptcha_v3", siteKey: "key", pageUrl: "https://example.com", action: "login" };',
 			'export const hcaptchaChallenge: ProviderChallenge = { kind: "hcaptcha", siteKey: "key", pageUrl: "https://example.com" };',

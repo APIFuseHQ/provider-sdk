@@ -1,3 +1,4 @@
+import { isProviderError, ProviderError } from "../../errors.js";
 import type {
 	BrowserClient,
 	BrowserCookie,
@@ -5,9 +6,9 @@ import type {
 	ChallengeSolution,
 	ProviderChallenge,
 } from "../../types.js";
-import { isProviderError, ProviderError } from "../../errors.js";
 import { type BrowserClientOptions, createBrowserClient } from "../browser.js";
 import type { TraceRecorder } from "../trace.js";
+import { resolverChallengeIssuingIdentity } from "./bindings.js";
 import {
 	type ResolverIdentity,
 	type ResolverVendorAdapter,
@@ -23,13 +24,6 @@ const SUCCESS_COOKIE_NAMES = {
 } as const;
 
 type SupportedBrowserChallengeKind = keyof typeof SUCCESS_COOKIE_NAMES;
-
-const BROWSER_CHALLENGE_BINDINGS = {
-	aws_waf: "portable",
-	cloudflare_interstitial: "identity_scoped",
-} as const satisfies Readonly<
-	Record<SupportedBrowserChallengeKind, "identity_scoped" | "portable">
->;
 
 type BrowserClientFactory = (options: BrowserClientOptions) => BrowserClient;
 
@@ -63,6 +57,13 @@ class BrowserSolveTimeoutError extends Error {
 	}
 }
 
+class BrowserCleanupTimeoutError extends Error {
+	constructor(timeoutMs: number) {
+		super(`Browser resolver cleanup exceeded ${timeoutMs}ms`);
+		this.name = "BrowserCleanupTimeoutError";
+	}
+}
+
 function abortReason(signal: AbortSignal): unknown {
 	return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
 }
@@ -90,6 +91,49 @@ function raceWithAbort<T>(operation: () => Promise<T>, signal: AbortSignal): Pro
 			},
 		);
 	});
+}
+
+async function runBoundedCleanup(
+	cleanup: () => Promise<unknown>,
+	timeoutMs: number,
+	challengeKind: ProviderChallenge["kind"],
+	operation: "client.close" | "context.close",
+	traceRecorder: TraceRecorder | undefined,
+): Promise<void> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	const boundedCleanup = async () => {
+		try {
+			await Promise.race([
+				cleanup(),
+				new Promise<never>((_resolve, reject) => {
+					timeout = setTimeout(() => reject(new BrowserCleanupTimeoutError(timeoutMs)), timeoutMs);
+				}),
+			]);
+		} finally {
+			if (timeout !== undefined) clearTimeout(timeout);
+		}
+	};
+
+	if (!traceRecorder) {
+		await boundedCleanup().catch(() => undefined);
+		return;
+	}
+
+	await traceRecorder
+		.runSpan("resolver.vendor.cleanup", boundedCleanup, {
+			attributes: {
+				vendor: BROWSER_VENDOR_ID,
+				challenge_kind: challengeKind,
+				operation,
+			},
+			onError(error) {
+				return {
+					error_message: error instanceof Error ? error.message : String(error),
+					...(error instanceof Error && error.stack ? { error_stack: error.stack } : {}),
+				};
+			},
+		})
+		.catch(() => undefined);
 }
 
 async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
@@ -257,37 +301,19 @@ function knownUnavailableReason(
 
 async function closeBrowserClient(
 	client: BrowserClient | undefined,
+	timeoutMs: number,
 	challengeKind: ProviderChallenge["kind"],
 	traceRecorder: TraceRecorder | undefined,
 ): Promise<void> {
 	const close = client?.close;
 	if (!close) return;
-
-	const closeClient = () => close.call(client);
-	if (!traceRecorder) {
-		try {
-			await closeClient();
-		} catch {
-			// Cleanup remains best-effort when the resolver has no trace recorder.
-		}
-		return;
-	}
-
-	await traceRecorder
-		.runSpan("resolver.vendor.cleanup", closeClient, {
-			attributes: {
-				vendor: BROWSER_VENDOR_ID,
-				challenge_kind: challengeKind,
-				operation: "client.close",
-			},
-			onError(error) {
-				return {
-					error_message: error instanceof Error ? error.message : String(error),
-					...(error instanceof Error && error.stack ? { error_stack: error.stack } : {}),
-				};
-			},
-		})
-		.catch(() => undefined);
+	await runBoundedCleanup(
+		() => close.call(client),
+		timeoutMs,
+		challengeKind,
+		"client.close",
+		traceRecorder,
+	);
 }
 
 export function createBrowserResolverVendorAdapter(
@@ -305,13 +331,10 @@ export function createBrowserResolverVendorAdapter(
 
 		getIssuingIdentity(solution, requestedIdentity, challenge) {
 			if (solution.form !== "cookies" || !isSupportedKind(challenge.kind)) return undefined;
-			if (BROWSER_CHALLENGE_BINDINGS[challenge.kind] === "identity_scoped") {
-				return {
-					...(requestedIdentity ? { proxyUrl: requestedIdentity.proxyUrl } : {}),
-					userAgent: solution.userAgent,
-				};
-			}
-			return { userAgent: solution.userAgent };
+			return resolverChallengeIssuingIdentity(challenge, {
+				...(requestedIdentity ? { proxyUrl: requestedIdentity.proxyUrl } : {}),
+				userAgent: solution.userAgent,
+			});
 		},
 
 		async solve(challenge, identity, callerSignal, traceRecorder) {
@@ -358,10 +381,16 @@ export function createBrowserResolverVendorAdapter(
 				} catch (error) {
 					if (solveController.signal.aborted) {
 						if (handlerEntered) {
-							await contextOperation;
+							await runBoundedCleanup(
+								() => contextOperation,
+								options.timeoutMs,
+								challengeKind,
+								"context.close",
+								traceRecorder,
+							);
 							throw error;
 						}
-						await closeBrowserClient(client, challengeKind, traceRecorder);
+						await closeBrowserClient(client, options.timeoutMs, challengeKind, traceRecorder);
 						void contextOperation.catch(() => undefined);
 					}
 					throw error;
@@ -384,7 +413,7 @@ export function createBrowserResolverVendorAdapter(
 			} finally {
 				clearTimeout(timeout);
 				callerSignal.removeEventListener("abort", onCallerAbort);
-				await closeBrowserClient(client, challengeKind, traceRecorder);
+				await closeBrowserClient(client, options.timeoutMs, challengeKind, traceRecorder);
 			}
 		},
 	};

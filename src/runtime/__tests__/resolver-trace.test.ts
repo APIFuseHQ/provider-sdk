@@ -14,7 +14,7 @@ import { spansToOTLP } from "../otlp.js";
 import { createResolverClient, invalidateResolverSolution } from "../resolver.js";
 import type { ResolverVendorAdapter } from "../resolver-vendors/types.js";
 import { ResolverVendorUnavailableError } from "../resolver-vendors/types.js";
-import { createTraceContext } from "../trace.js";
+import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const CHALLENGE = {
 	kind: "aws_waf",
@@ -96,14 +96,17 @@ describe("resolver tracing", () => {
 		);
 	});
 
-	it("keeps a resolver with no trace context operational", async () => {
+	it("keeps a resolver operational when the input context has no trace recorder", async () => {
 		const solution = { form: "token", token: "direct-solution" } as const;
 		const resolver = createResolverClient({
 			kinds: ["aws_waf"],
 			adapters: [adapter("browser", async () => solution)],
 		});
+		const context = { trace: {}, resolver } as unknown as ProviderContext;
+		expect(getTraceRecorder(context.trace)).toBeNull();
+		const instrumented = wrapWithInstrumentation(context);
 
-		await expect(resolver.solve(CHALLENGE)).resolves.toBe(solution);
+		await expect(instrumented.resolver.solve(CHALLENGE)).resolves.toBe(solution);
 	});
 
 	it("invalidates a cached solution through an instrumented resolver wrapper", async () => {
