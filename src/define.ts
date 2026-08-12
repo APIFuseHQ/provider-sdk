@@ -20,21 +20,24 @@ import type {
 	HealthJourneySchedule,
 	HealthScheduleRandomization,
 	InferSchemaOutput,
+	NativeProviderConfig,
 	OperationDefinition,
 	OperationHandlerResult,
 	OperationHttpStreamTransport,
 	OperationSseTransport,
 	OperationTransport,
 	OperationWebSocketTransport,
-	NativeProviderConfig,
-	ProviderOcrConfig,
 	ProviderAccessConfig,
+	ProviderChallengeKind,
 	ProviderDefinition,
+	ProviderOcrConfig,
 	ProviderDeploymentOverrides,
 	ProviderHealthMonitorConfig,
 	ProviderProxyConfig,
 	ProviderProxyProvider,
 	ProviderPublicProfile,
+	ProviderResolverConfig,
+	ProviderResolverVendor,
 	ProviderReviewed,
 	ProviderSecretDeclaration,
 	ProviderStreamEvent,
@@ -126,6 +129,30 @@ const VALID_PROVIDER_PROXY_AFFINITIES = [
 ] as const;
 const VALID_PROVIDER_OCR_MODES = ["optional", "required"] as const;
 const VALID_PROVIDER_STT_MODES = ["optional", "required"] as const;
+function exhaustiveLiteralArray<TUnion extends string>() {
+	return <const TValues extends readonly TUnion[]>(
+		values: TValues,
+		..._missing: Exclude<TUnion, TValues[number]> extends never
+			? []
+			: ["Missing runtime values", Exclude<TUnion, TValues[number]>]
+	): TValues => values;
+}
+
+export const VALID_PROVIDER_RESOLVER_VENDORS = exhaustiveLiteralArray<ProviderResolverVendor>()([
+	"browser",
+	"capsolver",
+	"capmonster",
+	"2captcha",
+	"custom",
+] as const);
+export const VALID_PROVIDER_CHALLENGE_KINDS = exhaustiveLiteralArray<ProviderChallengeKind>()([
+	"turnstile",
+	"recaptcha_v2",
+	"recaptcha_v3",
+	"hcaptcha",
+	"cloudflare_interstitial",
+	"aws_waf",
+] as const);
 const SMARTPROXY_APP_KEY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
 const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
@@ -251,6 +278,7 @@ export interface ProviderConfig<TOperations extends Record<string, ProviderOpera
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;
+	resolver?: ProviderResolverConfig;
 	browser?: { engine: BrowserEngine };
 	auth?: AuthConfig;
 	reviewed?: ProviderReviewed;
@@ -721,6 +749,53 @@ function validateProviderOcr(config: { id: string; ocr?: ProviderOcrConfig }): v
 	}
 	rejectUnknownFields(ocr, new Set(["mode"]), "ocr");
 	assertLiteralField(ocr.mode, "ocr.mode", VALID_PROVIDER_OCR_MODES, config.id);
+}
+
+function validateProviderResolver(config: { id: string; resolver?: ProviderResolverConfig }): void {
+	const resolver = config.resolver;
+	if (resolver === undefined) return;
+	if (!resolver || typeof resolver !== "object" || Array.isArray(resolver)) {
+		throw new ValidationError(`Provider "${config.id}" has invalid resolver: must be an object.`, {
+			fix: `Set resolver for provider "${config.id}" to { vendors: ["2captcha"], kinds: ["turnstile"] }.`,
+		});
+	}
+	rejectUnknownFields(resolver, new Set(["vendors", "kinds"]), "resolver", config.id);
+	validateResolverLiteralArray(
+		resolver.vendors,
+		"resolver.vendors",
+		VALID_PROVIDER_RESOLVER_VENDORS,
+		config.id,
+	);
+	validateResolverLiteralArray(
+		resolver.kinds,
+		"resolver.kinds",
+		VALID_PROVIDER_CHALLENGE_KINDS,
+		config.id,
+	);
+}
+
+function validateResolverLiteralArray<TValue extends string>(
+	value: readonly TValue[],
+	field: string,
+	validValues: readonly TValue[],
+	providerId: string,
+): void {
+	if (!Array.isArray(value)) {
+		throw new ValidationError(`Provider "${providerId}" has invalid ${field}: must be an array.`, {
+			fix: `Set ${field} for provider "${providerId}" to an array containing only: ${validValues.join(", ")}.`,
+		});
+	}
+	for (const [index, item] of value.entries()) {
+		if (typeof item === "string" && validValues.some((validValue) => validValue === item)) {
+			continue;
+		}
+		throw new ValidationError(
+			`Provider "${providerId}" has invalid ${field}[${index}]: ${JSON.stringify(item)}. Expected one of: ${validValues.join(", ")}`,
+			{
+				fix: `Set ${field}[${index}] for provider "${providerId}" to one of ${validValues.map((validValue) => `"${validValue}"`).join(", ")}.`,
+			},
+		);
+	}
 }
 
 function validateOperationIds(
@@ -1320,7 +1395,12 @@ function suggestField(unknown: string, candidates: ReadonlySet<string>): string 
 	return best;
 }
 
-function rejectUnknownFields(value: object, allowed: ReadonlySet<string>, fieldPath: string): void {
+function rejectUnknownFields(
+	value: object,
+	allowed: ReadonlySet<string>,
+	fieldPath: string,
+	providerId?: string,
+): void {
 	for (const key of Object.keys(value)) {
 		if (allowed.has(key)) continue;
 		const hint = suggestField(key, allowed);
@@ -1328,7 +1408,11 @@ function rejectUnknownFields(value: object, allowed: ReadonlySet<string>, fieldP
 			hint
 				? `Unknown field "${key}" on ${fieldPath}. Did you mean "${hint}"?`
 				: `Unknown field "${key}" on ${fieldPath}.`,
-			{ fix: `Remove ${fieldPath}.${key} or rename it.` },
+			{
+				fix: providerId
+					? `Remove ${fieldPath}.${key} from provider "${providerId}" or rename it.`
+					: `Remove ${fieldPath}.${key} or rename it.`,
+			},
 		);
 	}
 }
@@ -2414,6 +2498,7 @@ export function defineProvider<
 	validateProviderProxy(config);
 	validateProviderOcr(config);
 	validateProviderStt(config);
+	validateProviderResolver(config);
 	if (config.runtime === "browser" && !config.browser)
 		throw new ProviderError(
 			`Provider "${config.id}" must define browser.engine when runtime is "browser"`,
@@ -2439,6 +2524,7 @@ export function defineProvider<
 		proxy: config.proxy,
 		ocr: config.ocr,
 		stt: config.stt,
+		resolver: config.resolver,
 		browser: config.browser,
 		auth: config.auth,
 		reviewed: config.reviewed,

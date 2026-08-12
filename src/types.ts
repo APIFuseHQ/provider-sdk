@@ -307,6 +307,94 @@ export interface ProviderSttConfig {
 	mode: ProviderSttMode;
 }
 
+/**
+ * `browser` is the in-house CDP pool (`apps/cdp-pool`, reached through
+ * `createBrowserClient`) and is a first-class vendor rather than an escape hatch:
+ * for fingerprint-family kinds, it was measured faster than a paid vendor
+ * (4.5 s vs 17.5 s) at zero marginal cost.
+ *
+ * `2captcha` is the vendor already carrying production traffic in
+ * `apifuse-provider-tabelog`.
+ *
+ * Union order is documentation only; the effective fallback order is whatever
+ * `ProviderResolverConfig.vendors` declares.
+ */
+export type ProviderResolverVendor =
+	| "browser"
+	| "capsolver"
+	| "capmonster"
+	| "2captcha"
+	| "custom";
+
+/**
+ * Token-family kinds resolve to `{ form: "token" }`. Cookie-family kinds resolve
+ * to `{ form: "cookies" }`; network-identity binding is defined per kind. `aws_waf`
+ * was measured portable across residential leases on buyee, while `cf_clearance`
+ * remains unmeasured here and is treated as identity-scoped because it is widely
+ * described as IP-bound.
+ */
+export type ProviderChallenge =
+	| {
+			readonly kind: "turnstile";
+			readonly siteKey: string;
+			readonly pageUrl: string;
+			readonly action?: string;
+			readonly cdata?: string;
+		}
+	| {
+			readonly kind: "recaptcha_v2";
+			readonly siteKey: string;
+			readonly pageUrl: string;
+		}
+	| {
+			readonly kind: "recaptcha_v3";
+			readonly siteKey: string;
+			readonly pageUrl: string;
+			readonly action: string;
+			readonly minScore?: number;
+		}
+	| {
+			readonly kind: "hcaptcha";
+			readonly siteKey: string;
+			readonly pageUrl: string;
+		}
+	| {
+			readonly kind: "cloudflare_interstitial";
+			readonly pageUrl: string;
+			readonly blockedHtml?: string;
+		}
+	| {
+			readonly kind: "aws_waf";
+			readonly pageUrl: string;
+			readonly captchaScript?: string;
+			readonly context?: string;
+			readonly iv?: string;
+		};
+
+export type ProviderChallengeKind = ProviderChallenge["kind"];
+
+/**
+ * Token solutions carry no network-identity binding. Cookie-solution binding is
+ * per challenge kind: `aws_waf` was measured portable across residential leases
+ * on buyee, while `cf_clearance` is unmeasured here and treated as scoped to the
+ * identity that produced it. The provider attaches the returned cookies to its
+ * own requests.
+ */
+export type ChallengeSolution =
+	| { readonly form: "token"; readonly token: string }
+	| {
+			readonly form: "cookies";
+			readonly cookies: Readonly<Record<string, string>>;
+			readonly userAgent: string;
+		};
+
+export interface ProviderResolverConfig {
+	/** Ordered vendor fallback chain, tried first to last. */
+	readonly vendors: readonly ProviderResolverVendor[];
+	/** Challenge kinds this provider is permitted to request. */
+	readonly kinds: readonly ProviderChallengeKind[];
+}
+
 export type SttAudioInput = {
 	kind: "base64";
 	data: string;
@@ -383,6 +471,10 @@ export interface SttContext {
 		text: string,
 		options?: SttVerificationCodeOptions,
 	): VerificationCodeExtractionResult;
+}
+
+export interface ResolverContext {
+	solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
 }
 
 export interface HealthJourneySchedule {
@@ -1620,6 +1712,18 @@ export interface BrowserFrame {
 	locator(selector: string): BrowserLocator;
 }
 
+export interface BrowserCookie {
+	readonly name: string;
+	readonly value: string;
+	readonly domain: string;
+	readonly path: string;
+	/** Unix seconds. Absent for a session cookie. */
+	readonly expires?: number;
+	readonly httpOnly: boolean;
+	readonly secure: boolean;
+	readonly sameSite?: "Strict" | "Lax" | "None";
+}
+
 export type BrowserResourceMethod = "GET" | "HEAD";
 
 export type BrowserResourceRequest = {
@@ -1661,6 +1765,11 @@ export type BrowserResourcePolicy = {
 
 export interface BrowserPage extends BrowserFrame {
 	close(): Promise<void>;
+	/**
+	 * Reads the browser context's cookie jar, including httpOnly cookies.
+	 * Cookie expiry values are Unix seconds and are absent for session cookies.
+	 */
+	cookies(): Promise<readonly BrowserCookie[]>;
 	fill(selector: string, text: string): Promise<void>;
 	goto(url: string): Promise<void>;
 	pageId?: string;
@@ -1948,6 +2057,7 @@ export interface FlowContext {
 	context: ContextScratchpad;
 	ocr: OcrContext;
 	stt: SttContext;
+	resolver: ResolverContext;
 	auth: AuthFlowTerminalContext;
 }
 
@@ -2086,6 +2196,7 @@ export interface ProviderContext {
 	auth: AuthContext;
 	ocr: OcrContext;
 	stt: SttContext;
+	resolver: ResolverContext;
 	choice: ProviderChoiceContext;
 }
 
@@ -2260,6 +2371,7 @@ export interface ProviderDefinition {
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;
+	resolver?: ProviderResolverConfig;
 	browser?: {
 		engine: BrowserEngine;
 	};

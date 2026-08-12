@@ -42,6 +42,66 @@ const validConfig = {
 };
 
 describe("defineProvider", () => {
+	it("keeps resolver runtime allowlists complete against their public unions", async () => {
+		const defineModule = await import("../define.js");
+
+		expect(defineModule.VALID_PROVIDER_RESOLVER_VENDORS).toEqual([
+			"browser",
+			"capsolver",
+			"capmonster",
+			"2captcha",
+			"custom",
+		]);
+		expect(defineModule.VALID_PROVIDER_CHALLENGE_KINDS).toEqual([
+			"turnstile",
+			"recaptcha_v2",
+			"recaptcha_v3",
+			"hcaptcha",
+			"cloudflare_interstitial",
+			"aws_waf",
+		]);
+	});
+
+	it.each([
+		["a non-object resolver", null, "invalid resolver: must be an object"],
+		[
+			"an unknown resolver field",
+			{ vendors: ["custom"], kinds: ["turnstile"], kindz: ["turnstile"] },
+			'Unknown field "kindz" on resolver',
+		],
+		[
+			"a non-array vendor declaration",
+			{ vendors: "custom", kinds: ["turnstile"] },
+			"invalid resolver.vendors: must be an array",
+		],
+		[
+			"a non-array kind declaration",
+			{ vendors: ["custom"], kinds: "turnstile" },
+			"invalid resolver.kinds: must be an array",
+		],
+		[
+			"an unknown resolver vendor",
+			{ vendors: ["unknown-vendor"], kinds: ["turnstile"] },
+			"invalid resolver.vendors[0]",
+		],
+		[
+			"an unknown resolver kind",
+			{ vendors: ["custom"], kinds: ["funcaptcha"] },
+			"invalid resolver.kinds[0]",
+		],
+	] as const)("rejects %s at definition time", (_label, resolver, message) => {
+		let caught: unknown;
+		try {
+			Reflect.apply(defineProvider, undefined, [{ ...validConfig, resolver }]);
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(caught).toBeInstanceOf(ValidationError);
+		expect(caught).toMatchObject({ message: expect.stringContaining(message) });
+		expect((caught as ValidationError).fix).toContain(`provider "${validConfig.id}"`);
+	});
+
 	it("rejects operation error statuses the server cannot emit", () => {
 		expect(() =>
 			defineProvider({

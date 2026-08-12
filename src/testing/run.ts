@@ -396,6 +396,8 @@ function createUpstreamContext(
 				},
 			}),
 			close: async () => {},
+			cookies: async () =>
+				(await browserAction("cookies")).data as Awaited<ReturnType<BrowserPage["cookies"]>>,
 			fill: async (selector, textValue) => {
 				await browserAction("fill", { selector, text: textValue });
 			},
@@ -566,6 +568,9 @@ function createUpstreamContext(
 		stt: createUnsupportedSttClient(
 			"Standard test upstream context does not support ctx.stt.transcribe",
 		),
+		resolver: {
+			solve: async () => unsupported("ctx.resolver.solve"),
+		},
 		choice: createTestProviderChoiceContext({
 			providerId: `standard-test-${operationName}`,
 			request,
@@ -694,6 +699,9 @@ export function createSnapshotContext(rawFixture: unknown): ProviderContext {
 		stt: createUnsupportedSttClient(
 			"Standard test snapshot context does not support ctx.stt.transcribe",
 		),
+		resolver: {
+			solve: async () => unsupported("ctx.resolver.solve"),
+		},
 		choice: createTestProviderChoiceContext({
 			providerId: "standard-test",
 			request,

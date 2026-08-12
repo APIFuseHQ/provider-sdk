@@ -61,10 +61,65 @@ type MockRoute = {
 	request: () => MockResourceRequest;
 };
 
+type MockBrowserCookie = {
+	name: string;
+	value: string;
+	domain: string;
+	path: string;
+	expires: number;
+	httpOnly: boolean;
+	secure: boolean;
+	sameSite?: string;
+};
+
+const RAW_BROWSER_COOKIES: readonly MockBrowserCookie[] = [
+	{
+		name: "aws-waf-token",
+		value: "persistent-token",
+		domain: ".example.com",
+		path: "/account",
+		expires: 1_786_698_176.5,
+		httpOnly: true,
+		secure: true,
+		sameSite: "None",
+	},
+	{
+		name: "session-id",
+		value: "session-token",
+		domain: "example.com",
+		path: "/",
+		expires: -1,
+		httpOnly: false,
+		secure: false,
+	},
+];
+
+const EXPECTED_BROWSER_COOKIES = [
+	{
+		name: "aws-waf-token",
+		value: "persistent-token",
+		domain: ".example.com",
+		path: "/account",
+		expires: 1_786_698_176.5,
+		httpOnly: true,
+		secure: true,
+		sameSite: "None",
+	},
+	{
+		name: "session-id",
+		value: "session-token",
+		domain: "example.com",
+		path: "/",
+		httpOnly: false,
+		secure: false,
+	},
+] as const;
+
 type MockPlaywrightPage = {
 	click: (selector: string) => Promise<void>;
 	close: () => Promise<void>;
 	content: () => Promise<string>;
+	context: () => MockBrowserContext;
 	dispatchResourceRequest: (dispatch: MockResourceDispatch) => Promise<"handled" | "unhandled">;
 	evaluate: <T>(fn: string | (() => T)) => Promise<T>;
 	fill: (selector: string, text: string) => Promise<void>;
@@ -133,9 +188,11 @@ type MockBrowserState = {
 
 type MockBrowserContext = {
 	close: () => Promise<void>;
+	cookies: () => Promise<MockBrowserCookie[]>;
 	newPage: () => Promise<MockPlaywrightPage>;
 	state: {
 		closeCalls: number;
+		cookies: MockBrowserCookie[];
 		newPageCalls: number;
 		pages: MockPlaywrightPage[];
 	};
@@ -143,6 +200,8 @@ type MockBrowserContext = {
 
 const browserState = {
 	browsers: [] as MockBrowserState[],
+	defaultContextCookies: [] as MockBrowserCookie[],
+	isolatedContextCookies: [] as MockBrowserCookie[][],
 	launchCalls: [] as LaunchCall[],
 	requireError: null as Error | null,
 };
@@ -176,6 +235,10 @@ const cdpState = {
 	fetchEnableParams: [] as Array<Record<string, unknown>>,
 	fetchFailures: [] as MockCdpFetchFailure[],
 	fetchFulfillments: [] as MockCdpFetchFulfillRequest[],
+	networkCookies: [] as MockBrowserCookie[],
+	networkCookiesByPageId: new Map<string, MockBrowserCookie[]>(),
+	networkGetCookiesCalls: [] as string[],
+	networkGetCookiesError: null as Error | null,
 	navigateUrls: [] as string[],
 	pageSockets: [] as MockWebSocket[],
 	poolReleaseCalls: [] as string[],
@@ -192,7 +255,7 @@ const cdpState = {
 const originalWebSocket = globalThis.WebSocket;
 const originalCdpPoolUrl = process.env.APIFUSE__CDP_POOL__URL;
 
-function createMockPlaywrightPage(): MockPlaywrightPage {
+function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPage {
 	const recaptchaFrame: MockPlaywrightFrame = {
 		state: {
 			clicks: [] as string[],
@@ -256,6 +319,9 @@ function createMockPlaywrightPage(): MockPlaywrightPage {
 		},
 		async content() {
 			return state.content;
+		},
+		context() {
+			return context;
 		},
 		async dispatchResourceRequest(dispatch) {
 			state.resourceRequests.push(dispatch);
@@ -366,10 +432,41 @@ function createMockPlaywrightPage(): MockPlaywrightPage {
 	};
 }
 
+function createMockBrowserContext(
+	cookies: readonly MockBrowserCookie[],
+	options: { applyStealthOnPage?: () => boolean },
+): MockBrowserContext {
+	const contextState = {
+		closeCalls: 0,
+		cookies: cookies.map((cookie) => ({ ...cookie })),
+		newPageCalls: 0,
+		pages: [] as MockPlaywrightPage[],
+	};
+	const context: MockBrowserContext = {
+		state: contextState,
+		close: async () => {
+			contextState.closeCalls += 1;
+		},
+		cookies: async () => contextState.cookies.map((cookie) => ({ ...cookie })),
+		newPage: async () => {
+			contextState.newPageCalls += 1;
+			const page = createMockPlaywrightPage(context);
+			contextState.pages.push(page);
+			if (options.applyStealthOnPage?.()) {
+				stealthState.callCount += 1;
+				stealthState.pages.push(page);
+			}
+			return page;
+		},
+	};
+	return context;
+}
+
 function createMockBrowserLauncher(options: { applyStealthOnPage?: () => boolean } = {}) {
 	return {
 		launch: async (launchOptions: LaunchCall = {}) => {
 			browserState.launchCalls.push(launchOptions);
+			const defaultContext = createMockBrowserContext(browserState.defaultContextCookies, options);
 
 			const state: MockBrowserState = {
 				connected: true,
@@ -385,33 +482,16 @@ function createMockBrowserLauncher(options: { applyStealthOnPage?: () => boolean
 					},
 					isConnected: () => state.connected,
 					newContext: async () => {
-						const contextState = {
-							closeCalls: 0,
-							newPageCalls: 0,
-							pages: [] as MockPlaywrightPage[],
-						};
-						const context: MockBrowserContext = {
-							state: contextState,
-							close: async () => {
-								contextState.closeCalls += 1;
-							},
-							newPage: async () => {
-								contextState.newPageCalls += 1;
-								const page = createMockPlaywrightPage();
-								contextState.pages.push(page);
-								if (options.applyStealthOnPage?.()) {
-									stealthState.callCount += 1;
-									stealthState.pages.push(page);
-								}
-								return page;
-							},
-						};
+						const context = createMockBrowserContext(
+							browserState.isolatedContextCookies[state.contexts.length] ?? [],
+							options,
+						);
 						state.contexts.push(context);
 						return context;
 					},
 					newPage: async () => {
 						state.newPageCalls += 1;
-						const page = createMockPlaywrightPage();
+						const page = createMockPlaywrightPage(defaultContext);
 						state.pages.push(page);
 						if (options.applyStealthOnPage?.()) {
 							stealthState.callCount += 1;
@@ -778,6 +858,24 @@ class MockWebSocket {
 					data: Buffer.from("remote-shot").toString("base64"),
 				});
 				break;
+			case "Network.getCookies": {
+				cdpState.networkGetCookiesCalls.push(this.endpoint);
+				if (cdpState.networkGetCookiesError) {
+					this.emit("message", {
+						data: JSON.stringify({
+							error: { code: -32_000, message: cdpState.networkGetCookiesError.message },
+							id: message.id,
+						}),
+					});
+					break;
+				}
+
+				const pageId = this.endpoint.split("/").at(-1) ?? "";
+				this.replyToPage(message.id, {
+					cookies: cdpState.networkCookiesByPageId.get(pageId) ?? cdpState.networkCookies,
+				});
+				break;
+			}
 			case "Fetch.enable":
 				cdpState.fetchEnabled += 1;
 				cdpState.fetchEnableParams.push(message.params ?? {});
@@ -825,6 +923,8 @@ class MockWebSocket {
 describe("createBrowserClient", () => {
 	beforeEach(() => {
 		browserState.browsers.length = 0;
+		browserState.defaultContextCookies.length = 0;
+		browserState.isolatedContextCookies.length = 0;
 		browserState.launchCalls.length = 0;
 		browserState.requireError = null;
 		stealthState.callCount = 0;
@@ -848,6 +948,10 @@ describe("createBrowserClient", () => {
 		cdpState.fetchEnableParams.length = 0;
 		cdpState.fetchFailures.length = 0;
 		cdpState.fetchFulfillments.length = 0;
+		cdpState.networkCookies.length = 0;
+		cdpState.networkCookiesByPageId.clear();
+		cdpState.networkGetCookiesCalls.length = 0;
+		cdpState.networkGetCookiesError = null;
 		cdpState.insertedTexts.length = 0;
 		cdpState.navigateUrls.length = 0;
 		cdpState.pageFrames.length = 0;
@@ -996,6 +1100,47 @@ describe("createBrowserClient", () => {
 		});
 		expect(screenshot.toString()).toBe("local-shot");
 		expect(browserState.browsers[0]?.pages[0]?.state.closed).toBeTrue();
+	});
+
+	it("normalizes CDP and Playwright context cookies to one identical public shape", async () => {
+		browserState.defaultContextCookies.push(
+			...RAW_BROWSER_COOKIES.map((cookie) => ({ ...cookie })),
+		);
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const playwrightClient = createBrowserClient();
+		const playwrightPage = await playwrightClient.newPage();
+		const playwrightCookies = await playwrightPage.cookies();
+		await playwrightPage.close();
+		await playwrightClient.close();
+
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		cdpState.networkCookies.push(...RAW_BROWSER_COOKIES.map((cookie) => ({ ...cookie })));
+		const cdpClient = createBrowserClient();
+		const cdpPage = await cdpClient.newPage();
+		const cdpCookies = await cdpPage.cookies();
+		await cdpPage.close();
+		await cdpClient.close();
+
+		expect({ cdpCookies, playwrightCookies }).toEqual({
+			cdpCookies: EXPECTED_BROWSER_COOKIES,
+			playwrightCookies: EXPECTED_BROWSER_COOKIES,
+		});
+		expect(cdpState.networkGetCookiesCalls).toEqual(["ws://page.test/devtools/page/pool-page-1"]);
+	});
+
+	it("rejects when the CDP Network.getCookies transport call fails", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		cdpState.networkGetCookiesError = new Error("cookie transport failed");
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		await expect(page.cookies()).rejects.toThrow("cookie transport failed");
+		expect(cdpState.networkGetCookiesCalls).toHaveLength(1);
+		await page.close();
+		await client.close();
 	});
 
 	it("fulfills a document-like request under a scoped resource policy", async () => {
@@ -1226,6 +1371,28 @@ describe("createBrowserClient", () => {
 		expect(browserState.browsers[0]?.contexts[0]?.state.newPageCalls).toBe(1);
 		expect(browserState.browsers[0]?.contexts[0]?.state.pages[0]?.state.closed).toBeTrue();
 		expect(browserState.browsers[0]?.contexts[0]?.state.closeCalls).toBe(1);
+	});
+
+	it("reads cookies from each isolated Playwright context without leaking jars", async () => {
+		browserState.defaultContextCookies.push({ ...RAW_BROWSER_COOKIES[0]! });
+		browserState.isolatedContextCookies.push([{ ...RAW_BROWSER_COOKIES[1]! }], []);
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const defaultPage = await client.newPage();
+		const defaultBefore = await defaultPage.cookies();
+		const firstIsolated = await client.withIsolatedContext(async (page) => page.cookies());
+		const secondIsolated = await client.withIsolatedContext(async (page) => page.cookies());
+		const defaultAfter = await defaultPage.cookies();
+		await defaultPage.close();
+		await client.close();
+
+		expect({ defaultAfter, defaultBefore, firstIsolated, secondIsolated }).toEqual({
+			defaultAfter: [EXPECTED_BROWSER_COOKIES[0]],
+			defaultBefore: [EXPECTED_BROWSER_COOKIES[0]],
+			firstIsolated: [EXPECTED_BROWSER_COOKIES[1]],
+			secondIsolated: [],
+		});
+		expect(browserState.browsers[0]?.contexts).toHaveLength(2);
 	});
 
 	it("closes the page it creates for standalone challenge solving", async () => {

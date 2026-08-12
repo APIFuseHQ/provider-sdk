@@ -10,6 +10,7 @@ import type {
 	SttContext,
 } from "../types.js";
 import { createUnsupportedOcrClient } from "./ocr.js";
+import { createUnsupportedResolverClient } from "./resolver.js";
 import { createUnsupportedSttClient } from "./stt.js";
 
 function normalizeAllowedKeys(allowedKeys: string[]): Set<string> {
@@ -75,6 +76,7 @@ export function createFlowContext(options: {
 		context: createScratchpad(options.allowedKeys, options.initialContext),
 		ocr: options.ocr ?? createUnsupportedOcrClient(),
 		stt: options.stt ?? createUnsupportedSttClient(),
+		resolver: createUnsupportedResolverClient("Resolver is not available in auth flow context"),
 		auth: createAuthFlowHelpers(),
 	};
 }

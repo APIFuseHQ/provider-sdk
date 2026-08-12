@@ -11,6 +11,7 @@ import {
 	createOcrClientFromEnv,
 	createProviderCache,
 	createProviderChoiceContext,
+	createUnsupportedResolverClient,
 	createStealthClient,
 	createSttClientFromEnv,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
@@ -99,6 +100,7 @@ export function createProviderContext(provider: ProviderDefinition): {
 		stealth: createStealthClient("http://localhost"),
 		ocr: createOcrClientFromEnv(provider.ocr),
 		stt: createSttClientFromEnv(provider.stt),
+		resolver: createUnsupportedResolverClient("Resolver is not available in apifuse dev"),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
 			env,

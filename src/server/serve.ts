@@ -55,6 +55,7 @@ import {
 	PROXY_POOL_EXHAUSTED_CODE,
 } from "../runtime/proxy-errors.js";
 import { PROVIDER_TELEMETRY_HEADER, ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
+import { bindResolverSignal, createResolverClientFromEnv } from "../runtime/resolver.js";
 import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
@@ -100,6 +101,7 @@ import type {
 	ProviderProxyPolicy,
 	ProviderRuntimeState,
 	ProviderStreamEvent,
+	ResolverContext,
 	StealthClient,
 	SttContext,
 } from "../types.js";
@@ -300,6 +302,18 @@ export function resolveProviderProxyAffinityKey(
 	return connectionKey ?? provider.id;
 }
 
+export function resolveProviderResolverIdentityScope(
+	provider: ProviderDefinition,
+	affinityKey: string,
+	contextId: string,
+): string {
+	return JSON.stringify({
+		proxy: provider.proxy ?? null,
+		affinityKey,
+		contextId,
+	});
+}
+
 function resolveOperationConnectionId(request: OperationRequest): string | undefined {
 	return request.connection?.id ?? request.connectionId;
 }
@@ -318,6 +332,7 @@ function createProviderContext(
 	options: ProviderServerOptions = {},
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
 	proxyTelemetry?: ProxyTelemetryCollector,
+	signal?: AbortSignal,
 ): ProviderContext {
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
@@ -327,6 +342,11 @@ function createProviderContext(
 		affinityKey: resolveProviderProxyAffinityKey(provider, request, operationId),
 		telemetry: proxyTelemetry,
 	};
+	const resolverIdentityScope = resolveProviderResolverIdentityScope(
+		provider,
+		proxyClientOptions.affinityKey,
+		request.requestId,
+	);
 	let wrappedContext: ProviderContext | undefined;
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
@@ -349,6 +369,7 @@ function createProviderContext(
 		headers: request.headers ?? {},
 	};
 	const requestState = state.forConnection(requestContext.connectionId);
+	const cache = createProviderCache({ providerId: provider.id });
 	const context = wrapWithInstrumentation({
 		env,
 		credential,
@@ -360,7 +381,7 @@ function createProviderContext(
 				retryResponseMeta.set(wrappedContext, summary);
 			},
 		}),
-		cache: createProviderCache({ providerId: provider.id }),
+		cache,
 		state: requestState,
 		stealth: stealthBaseUrl
 			? stealthProfile
@@ -394,6 +415,15 @@ function createProviderContext(
 		auth: createAuthStub(),
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
+		resolver: bindResolverSignal(
+			options.resolver ??
+				createResolverClientFromEnv(provider.resolver, undefined, {
+					allowedHosts: provider.allowedHosts,
+					cache,
+					identityScope: resolverIdentityScope,
+				}),
+			signal,
+		),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
 			env,
@@ -468,6 +498,11 @@ function createAuthFlowContext(
 			request.providerId ??
 			provider.id,
 	};
+	const resolverIdentityScope = resolveProviderResolverIdentityScope(
+		provider,
+		proxyClientOptions.affinityKey,
+		request.requestId,
+	);
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
@@ -480,6 +515,7 @@ function createAuthFlowContext(
 				values: request.connection.secrets,
 			})
 		: undefined;
+	const cache = createProviderCache({ providerId: provider.id });
 
 	return {
 		context: {
@@ -518,6 +554,15 @@ function createAuthFlowContext(
 			context: flowContextStore.context,
 			ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
+			resolver: bindResolverSignal(
+				options.resolver ??
+					createResolverClientFromEnv(provider.resolver, undefined, {
+						allowedHosts: provider.allowedHosts,
+						cache,
+						identityScope: resolverIdentityScope,
+					}),
+				signal,
+			),
 			auth: createAuthFlowHelpers({ signal }),
 		},
 		getPatch: flowContextStore.getPatch,
@@ -603,6 +648,8 @@ export type ProviderServerOptions = {
 	stt?: SttContext;
 	/** Optional OCR override for tests or custom hosts; local/prod normally resolves from env. */
 	ocr?: OcrContext;
+	/** Optional resolver override for tests or custom hosts; local/prod normally resolves from env. */
+	resolver?: ResolverContext;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */
 	state?: ProviderRuntimeState;
 	/** Allow process-local runtime state only for local development and tests. */
@@ -1518,8 +1565,17 @@ async function handleOperation(
 	options: ProviderServerOptions = {},
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
 	proxyTelemetry?: ProxyTelemetryCollector,
+	signal?: AbortSignal,
 ): Promise<Response | OperationResponse> {
-	const ctx = createProviderContext(provider, request, operationId, options, state, proxyTelemetry);
+	const ctx = createProviderContext(
+		provider,
+		request,
+		operationId,
+		options,
+		state,
+		proxyTelemetry,
+		signal,
+	);
 	const operation = provider.operations[operationId];
 	const streaming = operation?.transport?.kind && operation.transport.kind !== "json";
 	let cleanupCalled = false;
@@ -1558,6 +1614,7 @@ async function handleOperation(
 					operationId,
 					ctx,
 					request,
+					signal,
 				})
 			: await executeOperation(provider, operationId, ctx, request.input);
 		if (streaming && operation) {
@@ -1944,7 +2001,15 @@ export function createServerApp(
 			}
 			const request = operationRequestFromForwardingEnvelope(envelope);
 			operationId = envelope.operationId;
-			const ctx = createProviderContext(provider, request, operationId, options, state);
+			const ctx = createProviderContext(
+				provider,
+				request,
+				operationId,
+				options,
+				state,
+				undefined,
+				signal,
+			);
 			if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
 				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
 			}
@@ -2012,6 +2077,7 @@ export function createServerApp(
 				options,
 				state,
 				proxyTelemetry,
+				c.req.raw.signal,
 			);
 			if (response instanceof Response) {
 				logProviderSuccess(
@@ -2390,6 +2456,7 @@ export async function serve(
 		logger: options.logger,
 		ocr: options.ocr,
 		stt: options.stt,
+		resolver: options.resolver,
 		state: options.state,
 		allowMemoryStateFallback: options.allowMemoryStateFallback,
 		operationExecutor: options.operationExecutor,
