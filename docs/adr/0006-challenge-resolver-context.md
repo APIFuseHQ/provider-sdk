@@ -147,8 +147,12 @@ differ in what they return and what they require:
 | Cookie | `AmazonTask` with `cookieSolution: true` | `websiteURL`, `websiteKey`, `captchaScript`, `context`, `iv`, proxy fields | `cookies` map **and** `userAgent` | required |
 
 The Cloudflare task documents `proxy` as `Required`, and the AWS WAF solution
-returns a `userAgent` alongside `aws-waf-token`. Cookie-family solutions are
-therefore always bound to the network identity that produced them.
+returns a `userAgent` alongside `aws-waf-token`. Read at the time, that suggested
+cookie-family solutions are always bound to the network identity that produced
+them. Revision 4 measured otherwise: a vendor's proxy requirement describes how it
+obtains a solution, not what the upstream enforces on redemption, and `aws_waf` on
+buyee proved portable across leases. Binding is per kind — see Revision 4 and
+Decision 5.
 
 Token-family solutions are **conditionally** bound. Capsolver's Turnstile task
 is proxyless, but the measured tabelog client selects its 2captcha task by mode:

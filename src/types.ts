@@ -307,14 +307,6 @@ export interface ProviderSttConfig {
 	mode: ProviderSttMode;
 }
 
-export type ProviderChallengeKind =
-	| "turnstile"
-	| "recaptcha_v2"
-	| "recaptcha_v3"
-	| "hcaptcha"
-	| "cloudflare_interstitial"
-	| "aws_waf";
-
 /**
  * `browser` is the in-house CDP pool (`apps/cdp-pool`, reached through
  * `createBrowserClient`) and is a first-class vendor rather than an escape hatch:
@@ -379,10 +371,14 @@ export type ProviderChallenge =
 			readonly iv?: string;
 		};
 
+export type ProviderChallengeKind = ProviderChallenge["kind"];
+
 /**
- * Token solutions carry no network-identity binding. Cookie solutions are bound
- * to the egress IP and user agent that produced them, and the SDK—not the
- * provider—installs them.
+ * Token solutions carry no network-identity binding. Cookie-solution binding is
+ * per challenge kind: `aws_waf` was measured portable across residential leases
+ * on buyee, while `cf_clearance` is unmeasured here and treated as scoped to the
+ * identity that produced it. The provider attaches the returned cookies to its
+ * own requests.
  */
 export type ChallengeSolution =
 	| { readonly form: "token"; readonly token: string }

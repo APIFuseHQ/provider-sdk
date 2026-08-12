@@ -11,7 +11,12 @@ import type {
 } from "../../types.js";
 import { createBrowserClient } from "../browser.js";
 import { createProviderCache } from "../cache.js";
-import { createResolverClient } from "../resolver.js";
+import {
+	APIFUSE__CDP_POOL__URL,
+	createResolverClient,
+	createResolverClientFromEnv,
+	RESOLVER_ADAPTER_REGISTRY,
+} from "../resolver.js";
 import { createBrowserResolverVendorAdapter } from "../resolver-vendors/browser.js";
 import {
 	ResolverChallengeVerdictError,
@@ -431,31 +436,37 @@ describe("browser resolver vendor", () => {
 			providerId: `resolver-browser-cloudflare-binding-${crypto.randomUUID()}`,
 			redisUrl: "",
 		});
-		const firstIdentity = {
-			proxyUrl: "http://first-egress.example:8080",
-			userAgent: "Cloudflare Browser/1.0",
+		const registry = RESOLVER_ADAPTER_REGISTRY as {
+			browser?: () => typeof adapter;
 		};
-		const secondIdentity = {
-			proxyUrl: "http://second-egress.example:8080",
-			userAgent: "Cloudflare Browser/1.0",
-		};
-		const firstResolver = createResolverClient({
-			adapters: [adapter],
-			cache,
-			identity: firstIdentity,
-			kinds: ["cloudflare_interstitial"],
-		});
-		const secondResolver = createResolverClient({
-			adapters: [adapter],
-			cache,
-			identity: secondIdentity,
-			kinds: ["cloudflare_interstitial"],
-		});
+		const original = registry.browser;
+		registry.browser = () => adapter;
+		let first: ChallengeSolution;
+		let second: ChallengeSolution;
+		let firstCached: ChallengeSolution;
+		let secondCached: ChallengeSolution;
+		try {
+			const config = {
+				vendors: ["browser"],
+				kinds: ["cloudflare_interstitial"],
+			} as const;
+			const env = { [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" };
+			const firstResolver = createResolverClientFromEnv(config, env, {
+				cache,
+				identityScope: "proxy-session-one",
+			});
+			const secondResolver = createResolverClientFromEnv(config, env, {
+				cache,
+				identityScope: "proxy-session-two",
+			});
 
-		const first = await firstResolver.solve(CLOUDFLARE_CHALLENGE);
-		const second = await secondResolver.solve(CLOUDFLARE_CHALLENGE);
-		const firstCached = await firstResolver.solve(CLOUDFLARE_CHALLENGE);
-		const secondCached = await secondResolver.solve(CLOUDFLARE_CHALLENGE);
+			first = await firstResolver.solve(CLOUDFLARE_CHALLENGE);
+			second = await secondResolver.solve(CLOUDFLARE_CHALLENGE);
+			firstCached = await firstResolver.solve(CLOUDFLARE_CHALLENGE);
+			secondCached = await secondResolver.solve(CLOUDFLARE_CHALLENGE);
+		} finally {
+			registry.browser = original;
+		}
 
 		expect(first).toMatchObject({ cookies: { cf_clearance: "identity-one-token" } });
 		expect(second).toMatchObject({ cookies: { cf_clearance: "identity-two-token" } });

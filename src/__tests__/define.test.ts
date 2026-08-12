@@ -42,6 +42,26 @@ const validConfig = {
 };
 
 describe("defineProvider", () => {
+	it("keeps resolver runtime allowlists complete against their public unions", async () => {
+		const defineModule = await import("../define.js");
+
+		expect(defineModule.VALID_PROVIDER_RESOLVER_VENDORS).toEqual([
+			"browser",
+			"capsolver",
+			"capmonster",
+			"2captcha",
+			"custom",
+		]);
+		expect(defineModule.VALID_PROVIDER_CHALLENGE_KINDS).toEqual([
+			"turnstile",
+			"recaptcha_v2",
+			"recaptcha_v3",
+			"hcaptcha",
+			"cloudflare_interstitial",
+			"aws_waf",
+		]);
+	});
+
 	it.each([
 		["a non-object resolver", null, "invalid resolver: must be an object"],
 		[

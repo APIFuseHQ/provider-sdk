@@ -592,6 +592,37 @@ describe("provider proxy affinity", () => {
 			"test-provider/detail",
 		);
 	});
+
+	it("derives resolver identity scope from the proxy policy and stable session affinity", async () => {
+		const { resolveProviderResolverIdentityScope } = await import("../server/serve.js");
+		const provider = {
+			...createTestProvider(),
+			proxy: {
+				mode: "required",
+				provider: "smartproxy",
+				geo: { country: "KR" },
+				session: { affinity: "connection" },
+			},
+		} satisfies ProviderDefinition;
+
+		const first = resolveProviderResolverIdentityScope(
+			provider,
+			"connection-one",
+			"context-one",
+		);
+		const second = resolveProviderResolverIdentityScope(
+			provider,
+			"connection-two",
+			"context-two",
+		);
+
+		expect(first).not.toBe(second);
+		expect(JSON.parse(first)).toEqual({
+			proxy: provider.proxy,
+			affinityKey: "connection-one",
+			contextId: "context-one",
+		});
+	});
 });
 
 describe("provider HTTP server", () => {

@@ -10,7 +10,9 @@ import {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	createResolverClientFromEnv,
+	RESOLVER_ADAPTER_REGISTRY,
 } from "../resolver.js";
+import type { ResolverVendorAdapter } from "../resolver-vendors/types.js";
 
 const turnstileChallenge = {
 	kind: "turnstile",
@@ -231,6 +233,88 @@ describe("resolver env availability", () => {
 });
 
 describe("resolver server wiring", () => {
+	it("passes a context-scoped production identity into the resolver factory", async () => {
+		let calls = 0;
+		const adapter: ResolverVendorAdapter = {
+			id: "browser",
+			supports: (kind) => kind === "cloudflare_interstitial",
+			getIssuingIdentity(solution) {
+				return solution.form === "cookies" ? { userAgent: solution.userAgent } : undefined;
+			},
+			async solve() {
+				calls += 1;
+				return {
+					form: "cookies",
+					cookies: { cf_clearance: `token-${calls}` },
+					userAgent: "Server wiring browser/1.0",
+					expires: (Date.now() + 60_000) / 1_000,
+				};
+			},
+		};
+		const registry = RESOLVER_ADAPTER_REGISTRY as { browser?: () => ResolverVendorAdapter };
+		const originalAdapter = registry.browser;
+		const originalCdpUrl = process.env[APIFUSE__CDP_POOL__URL];
+		registry.browser = () => adapter;
+		process.env[APIFUSE__CDP_POOL__URL] = "ws://cdp-pool.test";
+		try {
+			const provider = defineProvider({
+				id: "resolver-production-identity",
+				version: "1.0.0",
+				runtime: "standard",
+				proxy: { mode: "optional", session: { affinity: "connection" } },
+				resolver: { vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
+				meta: { displayName: "Resolver Production Identity", category: "test" },
+				operations: {
+					solve: {
+						input: z.object({}),
+						output: z.object({ first: z.string(), second: z.string() }),
+						async handler(ctx) {
+							const challenge = {
+								kind: "cloudflare_interstitial",
+								pageUrl: "https://example.com/challenge",
+							} as const;
+							const first = await ctx.resolver.solve(challenge);
+							const second = await ctx.resolver.solve(challenge);
+							if (first.form !== "cookies" || second.form !== "cookies") {
+								throw new Error("Expected cookie solutions");
+							}
+							return {
+								first: first.cookies.cf_clearance ?? "",
+								second: second.cookies.cf_clearance ?? "",
+							};
+						},
+						healthCheckUnsupported: { reason: "unit test" },
+					},
+				},
+			});
+			const app = createServerApp(provider, { logger: () => undefined });
+			const request = (requestId: string) =>
+				app.request("/v1/solve", {
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ requestId, connectionId: "connection-one", input: {} }),
+				});
+
+			const firstResponse = await request("req-resolver-identity-one");
+			const secondResponse = await request("req-resolver-identity-two");
+
+			expect(await firstResponse.json()).toMatchObject({
+				data: { first: "token-1", second: "token-1" },
+			});
+			expect(await secondResponse.json()).toMatchObject({
+				data: { first: "token-2", second: "token-2" },
+			});
+			expect(calls).toBe(2);
+		} finally {
+			registry.browser = originalAdapter;
+			if (originalCdpUrl === undefined) {
+				delete process.env[APIFUSE__CDP_POOL__URL];
+			} else {
+				process.env[APIFUSE__CDP_POOL__URL] = originalCdpUrl;
+			}
+		}
+	});
+
 	it("threads defineProvider resolver declarations into the server without an override", async () => {
 		const declaration = { vendors: ["custom"], kinds: ["turnstile"] } as const;
 		const provider = defineProvider({

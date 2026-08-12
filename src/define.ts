@@ -129,21 +129,30 @@ const VALID_PROVIDER_PROXY_AFFINITIES = [
 ] as const;
 const VALID_PROVIDER_OCR_MODES = ["optional", "required"] as const;
 const VALID_PROVIDER_STT_MODES = ["optional", "required"] as const;
-const VALID_PROVIDER_RESOLVER_VENDORS = [
+function exhaustiveLiteralArray<TUnion extends string>() {
+	return <const TValues extends readonly TUnion[]>(
+		values: TValues,
+		..._missing: Exclude<TUnion, TValues[number]> extends never
+			? []
+			: ["Missing runtime values", Exclude<TUnion, TValues[number]>]
+	): TValues => values;
+}
+
+export const VALID_PROVIDER_RESOLVER_VENDORS = exhaustiveLiteralArray<ProviderResolverVendor>()([
 	"browser",
 	"capsolver",
 	"capmonster",
 	"2captcha",
 	"custom",
-] as const satisfies readonly ProviderResolverVendor[];
-const VALID_PROVIDER_CHALLENGE_KINDS = [
+] as const);
+export const VALID_PROVIDER_CHALLENGE_KINDS = exhaustiveLiteralArray<ProviderChallengeKind>()([
 	"turnstile",
 	"recaptcha_v2",
 	"recaptcha_v3",
 	"hcaptcha",
 	"cloudflare_interstitial",
 	"aws_waf",
-] as const satisfies readonly ProviderChallengeKind[];
+] as const);
 const SMARTPROXY_APP_KEY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
 const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";

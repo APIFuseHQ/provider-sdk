@@ -8,6 +8,13 @@ export const RESOLVER_CHALLENGE_BINDINGS = {
 	Readonly<Record<ProviderChallengeKind, "identity_scoped" | "portable">>
 >;
 
+export function resolverChallengeIsIdentityScoped(challenge: ProviderChallenge): boolean {
+	return (
+		RESOLVER_CHALLENGE_BINDINGS[challenge.kind as keyof typeof RESOLVER_CHALLENGE_BINDINGS] ===
+		"identity_scoped"
+	);
+}
+
 export function resolverChallengeIssuingIdentity(
 	challenge: ProviderChallenge,
 	identity: ResolverIssuingIdentity,

@@ -10,7 +10,10 @@ import type {
 	ProviderResolverVendor,
 	ResolverContext,
 } from "../types.js";
-import { resolverChallengeIssuingIdentity } from "./resolver-vendors/bindings.js";
+import {
+	resolverChallengeIsIdentityScoped,
+	resolverChallengeIssuingIdentity,
+} from "./resolver-vendors/bindings.js";
 import { createBrowserResolverVendorAdapter } from "./resolver-vendors/browser.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
@@ -60,6 +63,8 @@ type ResolverChainClient = ResolverContext & {
 export interface ResolverRuntimeOptions {
 	readonly allowedHosts?: readonly string[];
 	readonly cache?: ProviderCache;
+	/** Server-owned context/proxy scope used only for identity-bound cache entries. */
+	readonly identityScope?: string;
 }
 
 type CachedResolverSolution = {
@@ -226,6 +231,10 @@ function resolverIdentityDigest(identity: ResolverIssuingIdentity): string {
 		.digest("hex");
 }
 
+function resolverIdentityScopeDigest(identityScope: string): string {
+	return createHash("sha256").update(JSON.stringify({ identityScope })).digest("hex");
+}
+
 function resolverSolutionCacheKey(
 	cache: ProviderCache,
 	challenge: ProviderChallenge,
@@ -319,8 +328,17 @@ async function findCachedSolution(
 	cache: ProviderCache,
 	challenge: ProviderChallenge,
 	identity: ResolverIssuingIdentity | undefined,
+	identityScope: string | undefined,
 ): Promise<ChallengeSolution | undefined> {
 	const now = Date.now();
+	if (identityScope !== undefined && resolverChallengeIsIdentityScoped(challenge)) {
+		return await readCachedSolution(
+			cache,
+			challenge,
+			resolverIdentityScopeDigest(identityScope),
+			now,
+		);
+	}
 	if (identity) {
 		const lookupIdentity = resolverChallengeIssuingIdentity(challenge, identity);
 		return await readCachedSolution(cache, challenge, resolverIdentityDigest(lookupIdentity), now);
@@ -361,6 +379,7 @@ async function cacheBrowserSolution(
 	challenge: ProviderChallenge,
 	solution: ChallengeSolution,
 	identity: ResolverIssuingIdentity,
+	identityScope: string | undefined,
 ): Promise<void> {
 	const expiresAtMs = solutionExpiryMs(solution);
 	const now = Date.now();
@@ -368,14 +387,18 @@ async function cacheBrowserSolution(
 	const ttlMs = Math.floor(expiresAtMs - now);
 	if (ttlMs <= MIN_RESOLVER_CACHE_TTL_MS) return;
 
-	const issuerDigest = resolverIdentityDigest(identity);
+	const scopedDigest =
+		identityScope !== undefined && resolverChallengeIsIdentityScoped(challenge)
+			? resolverIdentityScopeDigest(identityScope)
+			: undefined;
+	const issuerDigest = scopedDigest ?? resolverIdentityDigest(identity);
 	await cache.set(
 		resolverSolutionCacheKey(cache, challenge, issuerDigest),
 		{ expiresAtMs, issuerDigest, solution } satisfies CachedResolverSolution,
 		{ ttlMs },
 	);
 	rememberSolutionIssuer(solution, issuerDigest);
-	if (identity.proxyUrl !== undefined) return;
+	if (scopedDigest !== undefined || identity.proxyUrl !== undefined) return;
 
 	const indexKey = resolverSolutionIndexCacheKey(cache, challenge);
 	const current = await cache.get(indexKey);
@@ -450,6 +473,7 @@ function createResolverChainClient(options: {
 	readonly unavailableReason?: string;
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
+	readonly identityScope?: string;
 }): ResolverChainClient {
 	const client: ResolverChainClient = {
 		async solve(
@@ -469,7 +493,12 @@ function createResolverChainClient(options: {
 			if (supportingEntries.length === 0) throwUnsupportedKind(challenge.kind);
 			signal.throwIfAborted();
 			if (options.cache && supportingEntries.some((entry) => entry.id === "browser")) {
-				const cached = await findCachedSolution(options.cache, challenge, options.identity);
+				const cached = await findCachedSolution(
+					options.cache,
+					challenge,
+					options.identity,
+					options.identityScope,
+				);
 				if (cached) return cached;
 			}
 
@@ -499,7 +528,13 @@ function createResolverChainClient(options: {
 							challenge,
 						);
 						if (issuingIdentity) {
-							await cacheBrowserSolution(options.cache, challenge, solution, issuingIdentity);
+							await cacheBrowserSolution(
+								options.cache,
+								challenge,
+								solution,
+								issuingIdentity,
+								options.identityScope,
+							);
 						}
 					}
 					return solution;
@@ -628,5 +663,6 @@ export function createResolverClientFromEnv(
 			};
 		}),
 		cache: options.cache,
+		identityScope: options.identityScope,
 	});
 }

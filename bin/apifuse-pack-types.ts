@@ -105,6 +105,17 @@ const NEGATIVE_CONTROLS = [
 		].join("\n"),
 	},
 	{
+		filename: "negative-control-provider-challenge-kind.ts",
+		expectedCode: "TS2820",
+		description: "ProviderChallengeKind rejects an unknown challenge kind",
+		source: [
+			'import type { ProviderChallengeKind } from "@apifuse/provider-sdk";',
+			"",
+			'export const mustNotCompile: ProviderChallengeKind = "funcaptcha";',
+			"",
+		].join("\n"),
+	},
+	{
 		filename: "negative-control-cookie-solution-token-read.ts",
 		expectedCode: "TS2339",
 		description: "ChallengeSolution requires narrowing before reading token",

@@ -302,6 +302,18 @@ export function resolveProviderProxyAffinityKey(
 	return connectionKey ?? provider.id;
 }
 
+export function resolveProviderResolverIdentityScope(
+	provider: ProviderDefinition,
+	affinityKey: string,
+	contextId: string,
+): string {
+	return JSON.stringify({
+		proxy: provider.proxy ?? null,
+		affinityKey,
+		contextId,
+	});
+}
+
 function resolveOperationConnectionId(request: OperationRequest): string | undefined {
 	return request.connection?.id ?? request.connectionId;
 }
@@ -330,6 +342,11 @@ function createProviderContext(
 		affinityKey: resolveProviderProxyAffinityKey(provider, request, operationId),
 		telemetry: proxyTelemetry,
 	};
+	const resolverIdentityScope = resolveProviderResolverIdentityScope(
+		provider,
+		proxyClientOptions.affinityKey,
+		request.requestId,
+	);
 	let wrappedContext: ProviderContext | undefined;
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
@@ -403,6 +420,7 @@ function createProviderContext(
 				createResolverClientFromEnv(provider.resolver, undefined, {
 					allowedHosts: provider.allowedHosts,
 					cache,
+					identityScope: resolverIdentityScope,
 				}),
 			signal,
 		),
@@ -480,6 +498,11 @@ function createAuthFlowContext(
 			request.providerId ??
 			provider.id,
 	};
+	const resolverIdentityScope = resolveProviderResolverIdentityScope(
+		provider,
+		proxyClientOptions.affinityKey,
+		request.requestId,
+	);
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
@@ -536,6 +559,7 @@ function createAuthFlowContext(
 					createResolverClientFromEnv(provider.resolver, undefined, {
 						allowedHosts: provider.allowedHosts,
 						cache,
+						identityScope: resolverIdentityScope,
 					}),
 				signal,
 			),
