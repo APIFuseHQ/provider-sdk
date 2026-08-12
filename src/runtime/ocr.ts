@@ -26,13 +26,13 @@ const DEFAULT_MAX_TOKENS = 64;
 const KIMI_MIN_MAX_TOKENS = 3_000;
 const DEFAULT_MAX_CAPTCHA_CANDIDATES = 3;
 const MAX_HOMOGLYPH_SEARCH_NODES = 512;
-const HOMOGLYPH_CLASSES = [
+const HOMOGLYPH_CLASSES: readonly (readonly string[])[] = [
 	["I", "l", "1", "i"],
 	["O", "0", "o"],
 	["S", "5", "s"],
 	["Z", "2", "z"],
 	["B", "8"],
-] as const;
+];
 
 const HINT_PROMPTS = {
 	captcha:
@@ -395,7 +395,7 @@ function satisfiesCaptchaConstraints(text: string, options: OcrCaptchaOptions): 
 }
 
 function homoglyphAlternatives(character: string): readonly string[] {
-	const group = HOMOGLYPH_CLASSES.find((characters) => characters.includes(character as never));
+	const group = HOMOGLYPH_CLASSES.find((characters) => characters.includes(character));
 	return group?.filter((alternative) => alternative !== character) ?? [];
 }
 

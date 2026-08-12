@@ -383,6 +383,19 @@ describe("OCR CAPTCHA constraint handling", () => {
 		).toHaveLength(1);
 	});
 
+	it("keeps homoglyph membership type-safe in the OCR source", async () => {
+		const source = await Bun.file(new URL("../runtime/ocr.ts", import.meta.url)).text();
+
+		expect(source).not.toContain("as never");
+		expect(
+			extractCaptchaCandidates("I0", {
+				length: 2,
+				charset: "0123456789",
+				maxCandidates: 2,
+			})[1]?.text,
+		).toBe("10");
+	});
+
 	it("returns immediately when homoglyph substitutions cannot repair length", () => {
 		const start = performance.now();
 		const candidates = extractCaptchaCandidates("IlOoSsZzBIlOo", {
