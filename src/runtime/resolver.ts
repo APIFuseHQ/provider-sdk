@@ -71,16 +71,15 @@ type ResolverChainClient = ResolverContext & {
 export interface ResolverRuntimeOptions {
 	readonly allowedHosts?: readonly string[];
 	readonly cache?: ProviderCache;
-	/** Solving identity used to bind an SDK-created vendor transport. */
-	readonly identity?: ResolverIdentity;
 	/** Server-owned context/proxy scope used only for identity-bound cache entries. */
 	readonly identityScope?: string;
 	/** SDK-owned transport already bound to the resolved proxy lease and client profile. */
 	readonly transport?: ResolverVendorTransport;
-	/** Creates an SDK-owned transport bound to the declared profile and solving identity. */
+	/** Creates an SDK-owned transport bound to the declared profile and server-owned scope. */
 	readonly createTransport?: (input: {
 		readonly clientProfile?: string;
-		readonly identity?: ResolverIdentity;
+		/** Server-owned proxy/context scope; the SDK never accepts a caller-built identity. */
+		readonly identityScope?: string;
 	}) => ResolverVendorTransport;
 }
 
@@ -242,7 +241,7 @@ function assertClientProfileTransportContract(
 		`Resolver client profile "${clientProfile}" cannot be applied to a pre-bound transport`,
 		{
 			code: "RESOLVER_CLIENT_PROFILE_TRANSPORT_CONFLICT",
-			fix: "Remove the pre-bound transport and provide createTransport({ clientProfile, identity }) so the SDK can apply the provider-declared profile.",
+			fix: "Remove the pre-bound transport and provide createTransport({ clientProfile, identityScope }) so the SDK can apply the provider-declared profile.",
 		},
 	);
 }
@@ -630,7 +629,7 @@ function createResolverChainClient(options: {
 							(requiresTransport
 								? options.createTransport?.({
 										clientProfile: options.clientProfile,
-										identity: options.identity,
+										identityScope: options.identityScope,
 									})
 								: undefined);
 						if (requiresTransport && transport === undefined) {
@@ -806,7 +805,6 @@ export function createResolverClientFromEnv(
 			};
 		}),
 		cache: options.cache,
-		identity: options.identity,
 		identityScope: options.identityScope,
 		transport: options.transport,
 		createTransport: options.createTransport,

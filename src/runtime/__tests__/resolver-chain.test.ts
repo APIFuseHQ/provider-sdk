@@ -264,11 +264,8 @@ describe("resolver vendor chain", () => {
 		expect(solvedKinds).toEqual(["turnstile"]);
 	});
 
-	it("threads the declared profile and identity through the env transport factory", async () => {
-		const identity = {
-			proxyUrl: "http://resolver.test:8080",
-			userAgent: "Safari/17.0",
-		};
+	it("threads the declared profile and server identity scope through the env transport factory", async () => {
+		const identityScope = "proxy-session-one";
 		const transport = {
 			async fetch() {
 				return { status: 200, headers: {}, body: "", cookies: [] };
@@ -303,7 +300,7 @@ describe("resolver vendor chain", () => {
 						factoryInput = input;
 						return transport;
 					},
-					identity,
+					identityScope,
 				},
 			);
 
@@ -314,7 +311,8 @@ describe("resolver vendor chain", () => {
 					scriptUrl: "https://example.com/akamai/sensor.js",
 				}),
 			).resolves.toEqual({ form: "token", token: "solved" });
-			expect(factoryInput).toEqual({ clientProfile: "safari17_0", identity });
+			expect(factoryInput).toEqual({ clientProfile: "safari17_0", identityScope });
+			expect(factoryInput).not.toHaveProperty("identity");
 			expect(receivedTransport).toBe(transport);
 		} finally {
 			if (original === undefined) delete registry["2captcha"];
