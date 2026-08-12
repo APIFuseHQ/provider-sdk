@@ -2232,6 +2232,62 @@ const response = { updatedAt: "20260707222855" };
 		expect(check?.evidence?.join("\n")).not.toContain(key);
 	});
 
+	it("excludes nested node_modules directories from secret scanning", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+		const dir = makeProviderDir("submit-nested-node-modules-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const plantedPath = join(dir, "foo", "node_modules", "bar.ts");
+		mkdirSync(dirname(plantedPath), { recursive: true });
+		writeFileSync(plantedPath, `export const FALLBACK_SERVICE_KEY = "${key}";\n`);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("excludes task worktrees from secret scanning", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+		const dir = makeProviderDir("submit-task-worktree-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const plantedPath = join(dir, ".worktree", "anything", "upstream", "client.ts");
+		mkdirSync(dirname(plantedPath), { recursive: true });
+		writeFileSync(plantedPath, `export const FALLBACK_SERVICE_KEY = "${key}";\n`);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("keeps root node_modules excluded from secret scanning", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+		const dir = makeProviderDir("submit-root-node-modules-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(
+			join(dir, "node_modules", "planted.ts"),
+			`export const FALLBACK_SERVICE_KEY = "${key}";\n`,
+		);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("keeps regular nested source directories in secret-scan scope", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
+		const dir = makeProviderDir("submit-regular-nested-source-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const plantedPath = join(dir, "upstream", "deep", "creds.ts");
+		mkdirSync(dirname(plantedPath), { recursive: true });
+		writeFileSync(plantedPath, `export const FALLBACK_SERVICE_KEY = "${key}";\n`);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "secret-scan");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).toContain("upstream/deep/creds.ts:");
+		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
 	it("keeps secret-scan coverage for source files planted under .agents/", async () => {
 		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7jK4lM9nP6qR1tV5wY8z";
 		const dir = makeProviderDir("submit-agents-hidden-secret-", validProviderSource());
@@ -2239,7 +2295,7 @@ const response = { updatedAt: "20260707222855" };
 		// .agents must not be a scan-exempt sanctuary: a planted .ts there is
 		// runtime-reachable via a plain relative import from index.ts.
 		writeFileSync(
-			join(dir, ".agents", "net.ts"),
+			join(dir, ".agents", "planted.ts"),
 			`export const FALLBACK_SERVICE_KEY = "${key}";\n`,
 		);
 		const report = await buildSubmitCheckReport(dir);
@@ -2247,7 +2303,7 @@ const response = { updatedAt: "20260707222855" };
 
 		expect(check?.level).toBe("blocker");
 		expect(check?.status).toBe("fail");
-		expect(check?.evidence?.join("\n")).toContain(".agents/net.ts:");
+		expect(check?.evidence?.join("\n")).toContain(".agents/planted.ts:");
 		expect(check?.evidence?.join("\n")).not.toContain(key);
 	});
 
