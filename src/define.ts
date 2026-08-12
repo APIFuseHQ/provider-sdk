@@ -680,6 +680,18 @@ function validateProviderProxy(config: {
 	const deprecatedVendors = vendorChain.filter(
 		(vendor) => vendor === "decodo" || vendor === "custom",
 	);
+	if (
+		proxy.mode === "required" &&
+		vendorChain.length > 0 &&
+		deprecatedVendors.length === vendorChain.length
+	) {
+		throw new ValidationError(
+			`Provider "${config.id}" requires proxy egress but declares only deprecated proxy vendor(s): ${deprecatedVendors.join(", ")}.`,
+			{
+				fix: `Use proxy.provider or proxy.providers with "smartproxy" and/or "nodemaven".`,
+			},
+		);
+	}
 	if (deprecatedVendors.length > 0) {
 		console.warn(
 			`[provider-sdk] Provider "${config.id}" uses deprecated proxy vendor(s): ${deprecatedVendors.join(", ")}. Use "smartproxy"/"nodemaven".`,

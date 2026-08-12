@@ -474,7 +474,22 @@ export async function resolveProxyConfigAsync(
 
 	const chain = resolveVendorChain(policy);
 	if (chain.length === 0) {
-		// Deprecated decodo/custom providers have no SDK-managed adapter.
+		const declared = declaredVendorChain(policy);
+		const deprecated = declared.filter((vendor) => vendor === "decodo" || vendor === "custom");
+		if (policy.mode === "required") {
+			const providerIds =
+				declared.length > 0 ? declared.map((vendor) => `"${vendor}"`).join(", ") : "none";
+			const deprecatedDetail =
+				deprecated.length > 0
+					? ` Deprecated vendor(s): ${deprecated.map((vendor) => `"${vendor}"`).join(", ")}.`
+					: "";
+			throw new ProxyResolutionError(
+				"PROXY_REQUIRED",
+				`Required proxy policy has no SDK-managed adapter for provider id(s): ${providerIds}.${deprecatedDetail} Use "smartproxy" or "nodemaven".`,
+			);
+		}
+		// Deprecated decodo/custom providers have no SDK-managed adapter. Optional
+		// policies preserve the warning-only behavior and may continue directly.
 		return resolveProxyConfig({
 			...options,
 			upstream: { proxy: true },
@@ -753,6 +768,13 @@ function isRegistryVendor(name: string | undefined): name is ProxyVendorName {
 	return name === "smartproxy" || name === "nodemaven";
 }
 
+function declaredVendorChain(policy: ProviderProxyPolicy): ProviderProxyProvider[] {
+	const declared = policy.providers?.length
+		? policy.providers
+		: [policy.provider ?? envDefaultProvider()];
+	return declared.filter((vendor): vendor is ProviderProxyProvider => vendor !== undefined);
+}
+
 /**
  * Ordered list of SDK-native proxy vendors declared by the policy. `providers`
  * takes precedence over the legacy singular `provider`; the platform default
@@ -760,11 +782,8 @@ function isRegistryVendor(name: string | undefined): name is ProxyVendorName {
  * an all-deprecated chain has no managed adapter.
  */
 export function resolveVendorChain(policy: ProviderProxyPolicy): ProxyVendorName[] {
-	const declared: (ProviderProxyProvider | undefined)[] = policy.providers?.length
-		? policy.providers
-		: [policy.provider ?? envDefaultProvider()];
 	const chain: ProxyVendorName[] = [];
-	for (const name of declared) {
+	for (const name of declaredVendorChain(policy)) {
 		if (isRegistryVendor(name) && !chain.includes(name)) {
 			chain.push(name);
 		}

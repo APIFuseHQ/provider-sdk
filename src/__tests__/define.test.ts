@@ -898,6 +898,34 @@ describe("defineProvider", () => {
 			).not.toThrow();
 		});
 
+		it("rejects required proxy egress backed only by deprecated vendors", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					proxy: { mode: "required", providers: ["custom", "decodo"] },
+				}),
+			).toThrow(
+				/Provider "korea-air-quality" requires proxy egress but declares only deprecated proxy vendor\(s\): custom, decodo/,
+			);
+		});
+
+		it("keeps optional deprecated vendors warning-only", () => {
+			const warn = spyOn(console, "warn").mockImplementation(() => {});
+			try {
+				expect(() =>
+					defineProvider({
+						...validConfig,
+						proxy: { mode: "optional", provider: "custom" },
+					}),
+				).not.toThrow();
+				expect(warn).toHaveBeenCalledWith(
+					expect.stringContaining("deprecated proxy vendor(s): custom"),
+				);
+			} finally {
+				warn.mockRestore();
+			}
+		});
+
 		it("treats a declared-but-optional (required: false) vendor secret as missing", () => {
 			expect(() =>
 				defineProvider({
