@@ -48,10 +48,34 @@ describe("challenge resolver types", () => {
 		expect(tokenChallenges).toHaveLength(4);
 	});
 
+	it("accepts both Akamai Bot Manager challenge contracts", () => {
+		const challenges: readonly ProviderChallenge[] = [
+			{
+				kind: "akamai_sec_cpt",
+				pageUrl: "https://example.com/challenge",
+				challengeHtml: "<main>press and hold</main>",
+			},
+			{
+				kind: "akamai_sensor",
+				pageUrl: "https://example.com/challenge",
+				scriptUrl: "https://example.com/akamai/sensor.js",
+				abck: "current-abck",
+				bmsz: "current-bm-sz",
+				version: "3",
+			},
+		];
+
+		expect(challenges.map(({ kind }) => kind)).toEqual(["akamai_sec_cpt", "akamai_sensor"]);
+	});
+
 	it("allows provider definitions with or without resolver declarations", async () => {
 		const vendor: ProviderResolverVendor = "2captcha";
 		const kind: ProviderChallengeKind = "turnstile";
-		const resolverConfig: ProviderResolverConfig = { vendors: ["2captcha"], kinds: [kind] };
+		const resolverConfig: ProviderResolverConfig = {
+			vendors: ["2captcha"],
+			kinds: [kind],
+			clientProfile: "safari17_0",
+		};
 		const rejectingResolver: ResolverContext = {
 			solve: async () => Promise.reject(new Error("resolver is unavailable in type tests")),
 		};
@@ -72,6 +96,7 @@ describe("challenge resolver types", () => {
 		};
 
 		expect(withResolver.resolver).toEqual(resolverConfig);
+		expect(withResolver.resolver?.clientProfile).toBe("safari17_0");
 		expect(vendor).toBe("2captcha");
 		expect(withoutResolver.resolver).toBeUndefined();
 		await expect(

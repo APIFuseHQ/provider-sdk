@@ -8,6 +8,7 @@ import type {
 } from "../../types.js";
 import {
 	APIFUSE__CDP_POOL__URL,
+	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	createResolverClient,
 	createResolverClientFromEnv,
@@ -33,6 +34,8 @@ const ALL_CHALLENGE_KINDS = [
 	"hcaptcha",
 	"cloudflare_interstitial",
 	"aws_waf",
+	"akamai_sec_cpt",
+	"akamai_sensor",
 ] satisfies readonly ProviderChallengeKind[];
 
 type StubBehavior = (
@@ -147,6 +150,80 @@ describe("resolver vendor chain", () => {
 		});
 		expect(first.state.solveCalls).toBe(0);
 		expect(second.state.solveCalls).toBe(0);
+	});
+
+	it.each(["akamai_sec_cpt", "akamai_sensor"] as const)(
+		"reports %s as unsupported by a browser-only chain regardless of credentials",
+		async (kind) => {
+			const challenge =
+				kind === "akamai_sec_cpt"
+					? ({ kind, pageUrl: CHALLENGE.pageUrl } satisfies ProviderChallenge)
+					: ({
+							kind,
+							pageUrl: CHALLENGE.pageUrl,
+							scriptUrl: "https://example.com/akamai/sensor.js",
+						} satisfies ProviderChallenge);
+			const config = { vendors: ["browser"], kinds: [kind] } as const;
+			const withoutCredentials = await createResolverClientFromEnv(config, {})
+				.solve(challenge)
+				.catch((error: unknown) => error);
+			const withCredentials = await createResolverClientFromEnv(config, {
+				[APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test",
+			})
+				.solve(challenge)
+				.catch((error: unknown) => error);
+
+			expect(withoutCredentials).toMatchObject({
+				code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN",
+			});
+			expect(withCredentials).toMatchObject({
+				code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN",
+			});
+		},
+	);
+
+	it("reports missing 2captcha credentials for an Akamai sensor challenge", async () => {
+		const challenge = {
+			kind: "akamai_sensor",
+			pageUrl: CHALLENGE.pageUrl,
+			scriptUrl: "https://example.com/akamai/sensor.js",
+		} satisfies ProviderChallenge;
+
+		await expect(
+			createResolverClientFromEnv(
+				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
+				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: undefined },
+			).solve(challenge),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "2captcha", reason: "missing_credentials" }],
+		});
+	});
+
+	it("fails closed when an adapter requires an unavailable transport", async () => {
+		let solveCalls = 0;
+		const adapter: ResolverVendorAdapter = {
+			id: "custom",
+			requiresTransport: true,
+			supports: (kind) => kind === "akamai_sensor",
+			async solve() {
+				solveCalls += 1;
+				return { form: "token", token: "must-not-run" };
+			},
+		};
+		const challenge = {
+			kind: "akamai_sensor",
+			pageUrl: CHALLENGE.pageUrl,
+			scriptUrl: "https://example.com/akamai/sensor.js",
+		} satisfies ProviderChallenge;
+
+		await expect(
+			createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"] }).solve(challenge),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "custom", reason: "missing_transport" }],
+		});
+		expect(solveCalls).toBe(0);
 	});
 
 	it("reports every unavailable vendor and reason in attempt order", async () => {
@@ -272,6 +349,19 @@ describe("resolver vendor chain", () => {
 });
 
 describe("resolver vendor capabilities", () => {
+	it.each(["akamai_sec_cpt", "akamai_sensor"] as const)(
+		"declares only 2captcha and custom capable of %s",
+		(kind) => {
+			const capableVendors = (
+				Object.keys(RESOLVER_VENDOR_CAPABILITIES) as ProviderResolverVendor[]
+			).filter((vendor) =>
+				(RESOLVER_VENDOR_CAPABILITIES[vendor] as readonly ProviderChallengeKind[]).includes(kind),
+			);
+
+			expect(capableVendors).toEqual(["2captcha", "custom"]);
+		},
+	);
+
 	for (const vendor of Object.keys(RESOLVER_ADAPTER_REGISTRY) as ProviderResolverVendor[]) {
 		it(`${vendor} static capabilities agree with its registered adapter`, () => {
 			const factory = RESOLVER_ADAPTER_REGISTRY[vendor];

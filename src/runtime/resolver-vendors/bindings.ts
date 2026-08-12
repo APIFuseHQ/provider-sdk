@@ -4,6 +4,8 @@ import type { ResolverIssuingIdentity } from "./types.js";
 export const RESOLVER_CHALLENGE_BINDINGS = {
 	aws_waf: "portable",
 	cloudflare_interstitial: "identity_scoped",
+	akamai_sec_cpt: "identity_scoped",
+	akamai_sensor: "identity_scoped",
 } as const satisfies Partial<
 	Readonly<Record<ProviderChallengeKind, "identity_scoped" | "portable">>
 >;

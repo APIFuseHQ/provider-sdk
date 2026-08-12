@@ -14,7 +14,10 @@ import {
 	invalidateResolverSolution,
 	RESOLVER_ADAPTER_REGISTRY,
 } from "../resolver.js";
-import { resolverChallengeIssuingIdentity } from "../resolver-vendors/bindings.js";
+import {
+	resolverChallengeIsIdentityScoped,
+	resolverChallengeIssuingIdentity,
+} from "../resolver-vendors/bindings.js";
 import type { ResolverIdentity, ResolverVendorAdapter } from "../resolver-vendors/types.js";
 
 const CHALLENGE = {
@@ -25,6 +28,12 @@ const CHALLENGE = {
 const IDENTITY_SCOPED_CHALLENGE = {
 	kind: "cloudflare_interstitial",
 	pageUrl: CHALLENGE.pageUrl,
+} satisfies ProviderChallenge;
+
+const AKAMAI_SENSOR_CHALLENGE = {
+	kind: "akamai_sensor",
+	pageUrl: CHALLENGE.pageUrl,
+	scriptUrl: "https://example.com/akamai/sensor.js",
 } satisfies ProviderChallenge;
 
 type BrowserSolution = Extract<ChallengeSolution, { readonly form: "cookies" }> & {
@@ -75,7 +84,11 @@ function createBrowserAdapter(
 	return {
 		adapter: {
 			id: "browser",
-			supports: (kind) => kind === "aws_waf" || kind === "cloudflare_interstitial",
+			supports: (kind) =>
+				kind === "aws_waf" ||
+				kind === "cloudflare_interstitial" ||
+				kind === "akamai_sec_cpt" ||
+				kind === "akamai_sensor",
 			getIssuingIdentity(solution, requestedIdentity, challenge) {
 				if (solution.form !== "cookies") return undefined;
 				return resolverChallengeIssuingIdentity(challenge, {
@@ -125,6 +138,16 @@ beforeEach(() => {
 });
 
 describe("resolver solution caching", () => {
+	it("treats both Akamai challenge kinds as identity-scoped", () => {
+		expect(
+			resolverChallengeIsIdentityScoped({
+				kind: "akamai_sec_cpt",
+				pageUrl: "https://example.com/challenge",
+			}),
+		).toBe(true);
+		expect(resolverChallengeIsIdentityScoped(AKAMAI_SENSOR_CHALLENGE)).toBe(true);
+	});
+
 	it("hits the chain for every solve when no cache is supplied", async () => {
 		const stub = createBrowserAdapter(() => persistentSolution());
 		const noCacheAdapter: ResolverVendorAdapter = {
@@ -319,6 +342,39 @@ describe("resolver solution caching", () => {
 				"Secret-looking cache-key fields must preserve identity separation after their values are hashed.",
 			);
 		}
+	});
+
+	it("uses distinct non-secret cache keys for Akamai sensor identities", async () => {
+		const { cache, keyCalls } = createRecordingCache();
+		const stub = createBrowserAdapter((identity) => persistentSolution(identity?.userAgent));
+		const firstPassword = "akamai-first-password";
+		const secondPassword = "akamai-second-password";
+		const firstIdentity = {
+			proxyUrl: `http://first-user:${firstPassword}@proxy.test:8080`,
+			userAgent: "Safari/17.0 first",
+		};
+		const secondIdentity = {
+			proxyUrl: `http://second-user:${secondPassword}@proxy.test:8080`,
+			userAgent: "Safari/17.0 second",
+		};
+		const kinds = ["akamai_sensor"] as const;
+
+		await createClient(stub.adapter, { cache, identity: firstIdentity, kinds }).solve(
+			AKAMAI_SENSOR_CHALLENGE,
+		);
+		await createClient(stub.adapter, { cache, identity: secondIdentity, kinds }).solve(
+			AKAMAI_SENSOR_CHALLENGE,
+		);
+
+		const solutionKeys = [
+			...new Set(
+				keyCalls.filter((call) => call.namespace === "resolver-solution").map((call) => call.key),
+			),
+		];
+		expect(solutionKeys).toHaveLength(2);
+		expect(solutionKeys[0]).not.toBe(solutionKeys[1]);
+		expect(solutionKeys.every((key) => !key.includes(firstPassword))).toBe(true);
+		expect(solutionKeys.every((key) => !key.includes(secondPassword))).toBe(true);
 	});
 
 	it("ignores a cached cookie solution missing userAgent and solves fresh", async () => {

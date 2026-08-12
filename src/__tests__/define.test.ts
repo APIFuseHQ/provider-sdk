@@ -59,7 +59,22 @@ describe("defineProvider", () => {
 			"hcaptcha",
 			"cloudflare_interstitial",
 			"aws_waf",
+			"akamai_sec_cpt",
+			"akamai_sensor",
 		]);
+	});
+
+	it("accepts a transport-owned resolver client profile", () => {
+		const provider = defineProvider({
+			...validConfig,
+			resolver: {
+				vendors: ["2captcha"],
+				kinds: ["akamai_sensor"],
+				clientProfile: "safari17_0",
+			},
+		});
+
+		expect(provider.resolver?.clientProfile).toBe("safari17_0");
 	});
 
 	it.each([

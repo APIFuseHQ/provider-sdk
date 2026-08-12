@@ -20,6 +20,7 @@ import {
 	type ResolverIdentity,
 	type ResolverIssuingIdentity,
 	type ResolverVendorAdapter,
+	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 	type ResolverVendorUnavailableReason,
 	resolverVendorSupports,
@@ -65,6 +66,8 @@ export interface ResolverRuntimeOptions {
 	readonly cache?: ProviderCache;
 	/** Server-owned context/proxy scope used only for identity-bound cache entries. */
 	readonly identityScope?: string;
+	/** SDK-owned transport already bound to the resolved proxy lease and client profile. */
+	readonly transport?: ResolverVendorTransport;
 }
 
 type CachedResolverSolution = {
@@ -474,6 +477,7 @@ function createResolverChainClient(options: {
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
 	readonly identityScope?: string;
+	readonly transport?: ResolverVendorTransport;
 }): ResolverChainClient {
 	const client: ResolverChainClient = {
 		async solve(
@@ -506,8 +510,18 @@ function createResolverChainClient(options: {
 			for (const entry of supportingEntries) {
 				const adapter = entry.createAdapter();
 				try {
-					const solveAttempt = () =>
-						adapter.solve(challenge, options.identity, signal, traceRecorder);
+					const solveAttempt = () => {
+						if (adapter.requiresTransport === true && options.transport === undefined) {
+							throw new ResolverVendorUnavailableError(adapter.id, "missing_transport");
+						}
+						return adapter.solve(
+							challenge,
+							options.identity,
+							signal,
+							traceRecorder,
+							options.transport,
+						);
+					};
 					const solution = traceRecorder
 						? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
 								attributes: {
@@ -558,6 +572,7 @@ export function createResolverClient(options: {
 	readonly unavailableReason?: string;
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
+	readonly transport?: ResolverVendorTransport;
 }): ResolverChainClient {
 	return createResolverChainClient({
 		kinds: options.kinds,
@@ -569,6 +584,7 @@ export function createResolverClient(options: {
 		unavailableReason: options.unavailableReason,
 		cache: options.cache,
 		identity: options.identity,
+		transport: options.transport,
 	});
 }
 
@@ -664,5 +680,6 @@ export function createResolverClientFromEnv(
 		}),
 		cache: options.cache,
 		identityScope: options.identityScope,
+		transport: options.transport,
 	});
 }

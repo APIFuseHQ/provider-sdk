@@ -15,6 +15,8 @@ export const RESOLVER_VENDOR_CAPABILITIES = {
 		"hcaptcha",
 		"cloudflare_interstitial",
 		"aws_waf",
+		"akamai_sec_cpt",
+		"akamai_sensor",
 	],
 	capsolver: [
 		"turnstile",
@@ -32,6 +34,8 @@ export const RESOLVER_VENDOR_CAPABILITIES = {
 		"hcaptcha",
 		"cloudflare_interstitial",
 		"aws_waf",
+		"akamai_sec_cpt",
+		"akamai_sensor",
 	],
 } as const satisfies Readonly<Record<ProviderResolverVendor, readonly ProviderChallengeKind[]>>;
 
@@ -53,8 +57,28 @@ export interface ResolverIssuingIdentity {
 	readonly userAgent: string;
 }
 
+export interface ResolverVendorTransport {
+	/** Bound to the resolved proxy lease and client profile. */
+	fetch(
+		url: string,
+		init: {
+			method: "GET" | "POST";
+			headers?: Readonly<Record<string, string>>;
+			body?: string;
+			signal: AbortSignal;
+		},
+	): Promise<{
+		readonly status: number;
+		readonly headers: Readonly<Record<string, string>>;
+		readonly body: string;
+		/** Cookies observed on the response, name -> value. */
+		readonly cookies: Readonly<Record<string, string>>;
+	}>;
+}
+
 export interface ResolverVendorAdapter {
 	readonly id: ProviderResolverVendor;
+	readonly requiresTransport?: boolean;
 	supports(kind: ProviderChallengeKind): boolean;
 	/** Identity the adapter actually used, reported after a successful solve. */
 	getIssuingIdentity?(
@@ -67,6 +91,7 @@ export interface ResolverVendorAdapter {
 		identity: ResolverIdentity | undefined,
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
+		transport?: ResolverVendorTransport,
 	): Promise<ChallengeSolution>;
 }
 
