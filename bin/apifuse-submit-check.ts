@@ -1691,12 +1691,25 @@ function isScannableProviderSourceFile(relativePath: string): boolean {
 	);
 }
 
+const EXCLUDED_SOURCE_DIRECTORY_SEGMENTS = new Set([
+	".git",
+	".worktree",
+	"node_modules",
+	"dist",
+	"build",
+	"coverage",
+]);
+
 // `.agents`/`.apifuse` stay IN scope on purpose: managed content there is
 // markdown/JSON (never scannable), while a planted `.ts`/`.sh` under those
 // directories must not become a scan-exempt hiding place for secrets, raw
-// fetch, or vendor imports.
+// fetch, or vendor imports. Nested dependency/build output directories under
+// them use the same segment exclusions; `.worktree` is excluded because task
+// worktrees are duplicate repository checkouts, not provider source.
 function shouldScanSourceDirectory(relativePath: string): boolean {
-	return ![".git", "node_modules", "dist", "build", "coverage"].includes(relativePath);
+	return relativePath
+		.split("/")
+		.every((segment) => !EXCLUDED_SOURCE_DIRECTORY_SEGMENTS.has(segment));
 }
 
 function isExcludedTestSource(relativePath: string): boolean {
