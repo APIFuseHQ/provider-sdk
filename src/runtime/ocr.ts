@@ -10,6 +10,7 @@ import type {
 	ProviderOcrConfig,
 } from "../types.js";
 import { CLOUDFLARE_ACCOUNT_ID_ENV } from "./stt.js";
+import { createTimeoutController, isTimeoutLikeError } from "./timeout.js";
 
 export { CLOUDFLARE_ACCOUNT_ID_ENV } from "./stt.js";
 
@@ -22,7 +23,9 @@ export const CLOUDFLARE_WORKERS_AI_OCR_BACKEND = "cloudflare-workers-ai";
 export const OPENAI_COMPATIBLE_OCR_BACKEND = "openai-compatible";
 export const DEFAULT_CLOUDFLARE_WORKERS_AI_OCR_MODEL = "@cf/google/gemma-4-26b-a4b-it";
 
-const DEFAULT_MAX_TOKENS = 64;
+export const DEFAULT_OCR_TIMEOUT_MS = 30_000;
+const DEFAULT_CAPTCHA_MAX_TOKENS = 64;
+const DEFAULT_DOCUMENT_MAX_TOKENS = 4_096;
 const KIMI_MIN_MAX_TOKENS = 3_000;
 const DEFAULT_MAX_CAPTCHA_CANDIDATES = 3;
 const MAX_HOMOGLYPH_SEARCH_NODES = 512;
@@ -175,6 +178,17 @@ function isMoondreamModel(model: string): boolean {
 	return model.toLowerCase().includes("moondream");
 }
 
+function defaultMaxTokens(request: OcrRecognizeRequest): number {
+	return request.hint === "captcha" ? DEFAULT_CAPTCHA_MAX_TOKENS : DEFAULT_DOCUMENT_MAX_TOKENS;
+}
+
+function resolvedMaxTokens(request: OcrRecognizeRequest, model = ""): number {
+	const requestedMaxTokens = request.maxTokens ?? defaultMaxTokens(request);
+	return isKimiModel(model)
+		? Math.max(requestedMaxTokens, KIMI_MIN_MAX_TOKENS)
+		: requestedMaxTokens;
+}
+
 function messagesPayload(request: OcrRecognizeRequest, model?: string): Record<string, unknown> {
 	const payload: Record<string, unknown> = {
 		...(model ? { model } : {}),
@@ -187,9 +201,7 @@ function messagesPayload(request: OcrRecognizeRequest, model?: string): Record<s
 				],
 			},
 		],
-		max_tokens: isKimiModel(model ?? "")
-			? Math.max(request.maxTokens ?? KIMI_MIN_MAX_TOKENS, KIMI_MIN_MAX_TOKENS)
-			: (request.maxTokens ?? DEFAULT_MAX_TOKENS),
+		max_tokens: resolvedMaxTokens(request, model),
 		temperature: 0,
 	};
 	if (isGemmaModel(model ?? "")) {
@@ -215,22 +227,58 @@ function moondreamPayload(request: OcrRecognizeRequest): Record<string, unknown>
 		stream: true,
 		reasoning: false,
 		temperature: 0,
-		max_tokens: request.maxTokens ?? DEFAULT_MAX_TOKENS,
+		max_tokens: resolvedMaxTokens(request),
 	};
 }
 
-function responseContent(payload: unknown, cloudflare: boolean): string | undefined {
+function incompleteResponseError(model: string, finishReason: string): TransportError {
+	return new TransportError(
+		`OCR model "${model}" did not complete normally (finish_reason: ${finishReason})`,
+		{
+			code: "OCR_INCOMPLETE_RESPONSE",
+			status: 502,
+			details: { finishReason },
+		},
+	);
+}
+
+function responseContent(payload: unknown, cloudflare: boolean, model: string): string | undefined {
 	const envelope = unknownRecord(payload);
 	const root = cloudflare ? unknownRecord(envelope?.result) : envelope;
 	const choices = root?.choices;
 	if (!Array.isArray(choices)) return undefined;
 	const choice = unknownRecord(choices[0]);
+	if (typeof choice?.finish_reason === "string" && choice.finish_reason !== "stop") {
+		throw incompleteResponseError(model, choice.finish_reason);
+	}
 	const message = unknownRecord(choice?.message);
 	return typeof message?.content === "string" ? message.content.trim() || undefined : undefined;
 }
 
-function moondreamSseContent(body: string): string | undefined {
+function malformedResponseError(model: string, cause: Error): TransportError {
+	return new TransportError(`OCR model "${model}" returned a malformed response`, {
+		code: "OCR_UPSTREAM_FAILED",
+		status: 502,
+		cause,
+	});
+}
+
+async function responseJson(response: Response, model: string): Promise<unknown> {
+	try {
+		return await response.json();
+	} catch (error) {
+		if (isTimeoutLikeError(error)) throw toOcrTransportError(error);
+		throw malformedResponseError(
+			model,
+			error instanceof Error ? error : new Error("Failed to decode OCR response JSON"),
+		);
+	}
+}
+
+function moondreamSseContent(body: string, model: string): string | undefined {
 	let finalAnswer: string | undefined;
+	let firstDecodingFailure: Error | undefined;
+	let terminalFinishReason: string | undefined;
 	for (const line of body.split(/\r?\n/u)) {
 		const trimmed = line.trim();
 		if (!trimmed.startsWith("data:")) continue;
@@ -239,16 +287,26 @@ function moondreamSseContent(body: string): string | undefined {
 		let parsed: unknown;
 		try {
 			parsed = JSON.parse(data);
-		} catch {
+		} catch (error) {
+			firstDecodingFailure ??=
+				error instanceof Error ? error : new Error("Failed to decode OCR SSE event");
 			continue;
 		}
 		const event = unknownRecord(parsed);
 		const chunk = unknownRecord(event?.chunk) ?? unknownRecord(event?.result) ?? event;
-		if (chunk?.finish_reason !== "stop") continue;
-		if (typeof chunk.answer === "string" && chunk.answer.trim()) {
+		if (
+			chunk?.finish_reason === "stop" &&
+			typeof chunk.answer === "string" &&
+			chunk.answer.trim()
+		) {
 			finalAnswer = chunk.answer.trim();
+		} else if (typeof chunk?.finish_reason === "string") {
+			terminalFinishReason = chunk.finish_reason;
 		}
 	}
+	if (finalAnswer) return finalAnswer;
+	if (terminalFinishReason) throw incompleteResponseError(model, terminalFinishReason);
+	if (firstDecodingFailure) throw malformedResponseError(model, firstDecodingFailure);
 	return finalAnswer;
 }
 
@@ -262,6 +320,13 @@ function emptyResponseError(model: string): TransportError {
 
 function toOcrTransportError(error: unknown): TransportError {
 	if (error instanceof TransportError) return error;
+	if (isTimeoutLikeError(error)) {
+		return new TransportError("OCR upstream request timed out", {
+			code: "transport_timeout",
+			status: 0,
+			cause: error,
+		});
+	}
 	return new TransportError("OCR upstream network request failed", {
 		code: "transport_network_error",
 		status: 0,
@@ -296,38 +361,46 @@ export function createCloudflareWorkersAiOcrClient(
 	const model = options.model ?? DEFAULT_CLOUDFLARE_WORKERS_AI_OCR_MODEL;
 	const runFetch = options.fetch ?? fetch;
 	return createOcrClient(model, async (request) => {
-		let response: Response;
+		const timeout = createTimeoutController(request.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS);
 		try {
-			response = await runFetch(
-				`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(options.accountId)}/ai/run/${model}`,
-				{
-					method: "POST",
-					headers: {
-						Authorization: `Bearer ${options.apiToken}`,
-						"Content-Type": "application/json",
+			let response: Response;
+			try {
+				response = await runFetch(
+					`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(options.accountId)}/ai/run/${model}`,
+					{
+						method: "POST",
+						headers: {
+							Authorization: `Bearer ${options.apiToken}`,
+							"Content-Type": "application/json",
+						},
+						body: JSON.stringify(
+							isMoondreamModel(model)
+								? moondreamPayload(request)
+								: cloudflareMessagesPayload(request, model),
+						),
+						signal: timeout.controller.signal,
 					},
-					body: JSON.stringify(
-						isMoondreamModel(model)
-							? moondreamPayload(request)
-							: cloudflareMessagesPayload(request, model),
-					),
-				},
-			);
+				);
+			} catch (error) {
+				throw toOcrTransportError(error);
+			}
+			if (!response.ok) {
+				throw new TransportError("OCR upstream request failed", {
+					code: "OCR_UPSTREAM_FAILED",
+					status: response.status,
+					upstreamStatus: response.status,
+				});
+			}
+			const text = isMoondreamModel(model)
+				? moondreamSseContent(await response.text(), model)
+				: responseContent(await responseJson(response, model), true, model);
+			if (!text) throw emptyResponseError(model);
+			return { text, model };
 		} catch (error) {
 			throw toOcrTransportError(error);
+		} finally {
+			timeout.clear();
 		}
-		if (!response.ok) {
-			throw new TransportError("OCR upstream request failed", {
-				code: "OCR_UPSTREAM_FAILED",
-				status: response.status,
-				upstreamStatus: response.status,
-			});
-		}
-		const text = isMoondreamModel(model)
-			? moondreamSseContent(await response.text())
-			: responseContent(await response.json().catch(() => undefined), true);
-		if (!text) throw emptyResponseError(model);
-		return { text, model };
 	});
 }
 
@@ -339,26 +412,34 @@ export function createOpenAiCompatibleOcrClient(
 	return createOcrClient(model, async (request) => {
 		const headers: Record<string, string> = { "Content-Type": "application/json" };
 		if (options.apiKey) headers.Authorization = `Bearer ${options.apiKey}`;
-		let response: Response;
+		const timeout = createTimeoutController(request.timeoutMs ?? DEFAULT_OCR_TIMEOUT_MS);
 		try {
-			response = await runFetch(`${options.baseUrl.replace(/\/+$/u, "")}/chat/completions`, {
-				method: "POST",
-				headers,
-				body: JSON.stringify(messagesPayload(request, model)),
-			});
+			let response: Response;
+			try {
+				response = await runFetch(`${options.baseUrl.replace(/\/+$/u, "")}/chat/completions`, {
+					method: "POST",
+					headers,
+					body: JSON.stringify(messagesPayload(request, model)),
+					signal: timeout.controller.signal,
+				});
+			} catch (error) {
+				throw toOcrTransportError(error);
+			}
+			if (!response.ok) {
+				throw new TransportError("OCR upstream request failed", {
+					code: "OCR_UPSTREAM_FAILED",
+					status: response.status,
+					upstreamStatus: response.status,
+				});
+			}
+			const text = responseContent(await responseJson(response, model), false, model);
+			if (!text) throw emptyResponseError(model);
+			return { text, model };
 		} catch (error) {
 			throw toOcrTransportError(error);
+		} finally {
+			timeout.clear();
 		}
-		if (!response.ok) {
-			throw new TransportError("OCR upstream request failed", {
-				code: "OCR_UPSTREAM_FAILED",
-				status: response.status,
-				upstreamStatus: response.status,
-			});
-		}
-		const text = responseContent(await response.json().catch(() => undefined), false);
-		if (!text) throw emptyResponseError(model);
-		return { text, model };
 	});
 }
 

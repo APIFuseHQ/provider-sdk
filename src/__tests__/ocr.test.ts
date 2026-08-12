@@ -69,6 +69,17 @@ function cloudflareResponse(text: string): Response {
 	});
 }
 
+function rejectWhenAborted(signal?: AbortSignal | null): Promise<Response> {
+	return new Promise((_resolve, reject) => {
+		if (!signal) return;
+		if (signal.aborted) {
+			reject(signal.reason);
+			return;
+		}
+		signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+	});
+}
+
 describe("OCR runtime clients", () => {
 	it("selects the default Cloudflare backend and default measured model from env", async () => {
 		const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
@@ -209,6 +220,56 @@ describe("OCR runtime clients", () => {
 		expect(body?.max_tokens).toBe(64);
 	});
 
+	it("uses hint-aware token budgets and honors explicit overrides", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const ocr = createOpenAiCompatibleOcrClient({
+			baseUrl: "http://ocr.internal",
+			model: "vision-model",
+			fetch: (async (_input, init) => {
+				bodies.push(JSON.parse(String(init?.body)));
+				return Response.json({ choices: [{ message: { content: "visible text" } }] });
+			}) as typeof fetch,
+		});
+
+		await ocr.recognize({ image, hint: "document" });
+		await ocr.recognize({ image, hint: "captcha" });
+		await ocr.recognize({ image, hint: "document", maxTokens: 777 });
+
+		expect(bodies[0]?.max_tokens).toBeGreaterThan(64);
+		expect(bodies[1]?.max_tokens).toBe(64);
+		expect(bodies[2]?.max_tokens).toBe(777);
+	});
+
+	it("rejects messages responses that stopped before completion", async () => {
+		const response = () =>
+			Response.json({
+				choices: [{ finish_reason: "length", message: { content: "partial transcription" } }],
+			});
+		const openAi = createOpenAiCompatibleOcrClient({
+			baseUrl: "http://ocr.internal",
+			model: "vision-model",
+			fetch: (async () => response()) as typeof fetch,
+		});
+		const cloudflare = createCloudflareWorkersAiOcrClient({
+			accountId: "account",
+			apiToken: "token",
+			model: "@cf/google/gemma-4-26b-a4b-it",
+			fetch: (async () =>
+				Response.json({ success: true, result: await response().json() })) as typeof fetch,
+		});
+
+		for (const ocr of [openAi, cloudflare]) {
+			await expect(ocr.recognize({ image })).rejects.toMatchObject({
+				code: "OCR_INCOMPLETE_RESPONSE",
+				status: 502,
+				message: expect.stringContaining("finish_reason: length"),
+			});
+		}
+		await expect(openAi.extractCaptchaText(image)).rejects.toMatchObject({
+			code: "OCR_INCOMPLETE_RESPONSE",
+		});
+	});
+
 	it("streams moondream and returns the cumulative answer from the stop chunk", async () => {
 		let body: Record<string, unknown> | undefined;
 		const sse = [
@@ -272,6 +333,71 @@ describe("OCR runtime clients", () => {
 			expect(error).toBeInstanceOf(ProviderError);
 			expect(error).toMatchObject({ code: "OCR_UPSTREAM_FAILED" });
 		}
+	});
+
+	it("preserves malformed JSON and terminal SSE decoding causes", async () => {
+		const malformedJson = createOpenAiCompatibleOcrClient({
+			baseUrl: "http://ocr.internal",
+			model: "vision-model",
+			fetch: (async () =>
+				new Response('{"choices":', {
+					headers: { "Content-Type": "application/json" },
+				})) as typeof fetch,
+		});
+		const malformedSse = createCloudflareWorkersAiOcrClient({
+			accountId: "account",
+			apiToken: "token",
+			model: "@cf/moondream/moondream3.1-9B-A2B",
+			fetch: (async () =>
+				new Response('data: {"chunk":\ndata: [DONE]\n', {
+					headers: { "Content-Type": "text/event-stream" },
+				})) as typeof fetch,
+		});
+
+		for (const ocr of [malformedJson, malformedSse]) {
+			try {
+				await ocr.recognize({ image });
+				throw new Error("expected malformed OCR response to fail");
+			} catch (error) {
+				expect(error).toMatchObject({
+					code: "OCR_UPSTREAM_FAILED",
+					message: expect.stringContaining("malformed response"),
+				});
+				expect((error as Error).cause).toBeInstanceOf(SyntaxError);
+			}
+		}
+	});
+
+	it("times out stalled upstreams and clears timers after completed requests", async () => {
+		let timedOutSignal: AbortSignal | null | undefined;
+		const stalled = createCloudflareWorkersAiOcrClient({
+			accountId: "account",
+			apiToken: "token",
+			fetch: (async (_input, init) => {
+				timedOutSignal = init?.signal;
+				return rejectWhenAborted(init?.signal);
+			}) as typeof fetch,
+		});
+		const startedAt = performance.now();
+		await expect(stalled.recognize({ image, timeoutMs: 10 })).rejects.toMatchObject({
+			code: "transport_timeout",
+			status: 0,
+		});
+		expect(performance.now() - startedAt).toBeLessThan(250);
+		expect(timedOutSignal?.aborted).toBe(true);
+
+		let completedSignal: AbortSignal | null | undefined;
+		const completed = createOpenAiCompatibleOcrClient({
+			baseUrl: "http://ocr.internal",
+			model: "vision-model",
+			fetch: (async (_input, init) => {
+				completedSignal = init?.signal;
+				return Response.json({ choices: [{ message: { content: "done" } }] });
+			}) as typeof fetch,
+		});
+		await completed.recognize({ image, timeoutMs: 10 });
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		expect(completedSignal?.aborted).toBe(false);
 	});
 
 	it("extracts CAPTCHA text with one model call and reports primary constraints", async () => {

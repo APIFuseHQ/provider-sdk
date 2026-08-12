@@ -14,6 +14,7 @@ import type {
 	VerificationCodeCandidateSource,
 	VerificationCodeExtractionResult,
 } from "../types.js";
+import { createTimeoutController, isTimeoutLikeError } from "./timeout.js";
 
 export const APIFUSE__STT__BACKEND_ENV = "APIFUSE__STT__BACKEND";
 export const APIFUSE__STT__MODEL_ENV = "APIFUSE__STT__MODEL";
@@ -169,15 +170,6 @@ function normalizeCloudflareLanguage(language: Bcp47Locale | undefined): string 
 	return language?.split("-")[0]?.toLowerCase();
 }
 
-function isTimeoutLikeError(error: unknown): error is Error {
-	return (
-		error instanceof Error &&
-		(error.name === "AbortError" ||
-			error.name === "TimeoutError" ||
-			/\b(timed out|timeout|deadline exceeded)\b/i.test(error.message))
-	);
-}
-
 function toSttTransportError(error: unknown): TransportError {
 	if (error instanceof TransportError) return error;
 	if (isTimeoutLikeError(error)) {
@@ -192,16 +184,6 @@ function toSttTransportError(error: unknown): TransportError {
 		status: 0,
 		cause: error instanceof Error ? error : undefined,
 	});
-}
-
-function createTimeoutController(signalTimeoutMs: number): {
-	controller: AbortController;
-	clear: () => void;
-} {
-	const controller = new AbortController();
-	const timeout = setTimeout(() => controller.abort(), signalTimeoutMs);
-	timeout.unref?.();
-	return { controller, clear: () => clearTimeout(timeout) };
 }
 
 function toCloudflareInput(request: SttTranscribeRequest): Record<string, unknown> {

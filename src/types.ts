@@ -256,6 +256,7 @@ export interface OcrRecognizeRequest {
 	readonly hint?: "captcha" | "document" | "generic";
 	readonly prompt?: string;
 	readonly maxTokens?: number;
+	readonly timeoutMs?: number;
 }
 
 export interface OcrWarning {
