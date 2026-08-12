@@ -1,192 +1,33 @@
-import { createHash } from "node:crypto";
-import { describe, expect, test } from "bun:test";
+import { createHash, randomUUID } from "node:crypto";
+import { afterAll, describe, expect, test } from "bun:test";
+import { Redis } from "ioredis";
 import type { ProviderRedisClient } from "../runtime/redis.js";
 import { createRedisProviderRuntimeState } from "../runtime/state.js";
 import type { StateNamespaceOptions } from "../types.js";
 
-type StoredString = { value: string; expiresAt?: number };
+const redisUrl = process.env.APIFUSE__TEST__REDIS_URL?.trim() || "redis://127.0.0.1:6379";
+const integrationRedis = new Redis(redisUrl, {
+	connectTimeout: 250,
+	enableOfflineQueue: false,
+	lazyConnect: true,
+	maxRetriesPerRequest: 0,
+	retryStrategy: () => null,
+});
+integrationRedis.on("error", () => {});
 
-class FakeStateRedis {
-	readonly status = "ready";
-	readonly strings = new Map<string, StoredString>();
-	readonly sortedSets = new Map<string, Map<string, number>>();
-	private evalTail: Promise<void> = Promise.resolve();
-
-	on(): this {
-		return this;
-	}
-	off(): this {
-		return this;
-	}
-	once(): this {
-		return this;
-	}
-
-	private pruneString(key: string): void {
-		const row = this.strings.get(key);
-		if (row?.expiresAt !== undefined && row.expiresAt <= Date.now()) this.strings.delete(key);
-	}
-
-	async get(key: string): Promise<string | null> {
-		this.pruneString(key);
-		return this.strings.get(key)?.value ?? null;
-	}
-
-	async mget(...input: Array<string | string[]>): Promise<(string | null)[]> {
-		const keys = input.flat();
-		return await Promise.all(keys.map((key) => this.get(key)));
-	}
-
-	async set(key: string, value: string, mode?: string, duration?: number): Promise<"OK"> {
-		const expiresAt =
-			mode === "PXAT"
-				? duration
-				: mode === "PX" && duration !== undefined
-					? Date.now() + duration
-					: undefined;
-		this.strings.set(key, { value, expiresAt });
-		return "OK";
-	}
-
-	async scan(
-		_cursor: string,
-		_match: "MATCH",
-		pattern: string,
-		_count: "COUNT",
-		_countValue: number,
-	): Promise<[string, string[]]> {
-		const literalPrefix = pattern.slice(0, -1).replace(/\\(.)/g, "$1");
-		for (const key of this.strings.keys()) this.pruneString(key);
-		const keys = Array.from(this.strings.keys()).filter((key) => key.startsWith(literalPrefix));
-		return ["0", keys];
-	}
-
-	private sortedSet(key: string): Map<string, number> {
-		const existing = this.sortedSets.get(key);
-		if (existing) return existing;
-		const created = new Map<string, number>();
-		this.sortedSets.set(key, created);
-		return created;
-	}
-
-	async zremrangebyscore(key: string, min: number | string, max: number | string): Promise<number> {
-		const minimum = min === "-inf" ? Number.NEGATIVE_INFINITY : Number(min);
-		const maximum = max === "+inf" ? Number.POSITIVE_INFINITY : Number(max);
-		let removed = 0;
-		for (const [member, score] of this.sortedSet(key)) {
-			if (score >= minimum && score <= maximum) {
-				this.sortedSet(key).delete(member);
-				removed += 1;
-			}
-		}
-		return removed;
-	}
-
-	async zrangebyscore(
-		key: string,
-		min: number | string,
-		max: number | string,
-		_limit: "LIMIT",
-		offset: number,
-		limit: number,
-	): Promise<string[]> {
-		const minimum = Number(min);
-		const maximum = max === "+inf" ? Number.POSITIVE_INFINITY : Number(max);
-		return Array.from(this.sortedSet(key))
-			.filter(([, score]) => score >= minimum && score <= maximum)
-			.sort((left, right) => left[1] - right[1])
-			.slice(offset, offset + limit)
-			.map(([member]) => member);
-	}
-
-	async eval(script: string, keyCount: number, ...input: Array<string | number>): Promise<unknown> {
-		let release: (() => void) | undefined;
-		const previous = this.evalTail;
-		this.evalTail = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		await previous;
-		try {
-			return await this.evalAtomically(script, keyCount, input);
-		} finally {
-			release?.();
-		}
-	}
-
-	private async evalAtomically(
-		script: string,
-		keyCount: number,
-		input: Array<string | number>,
-	): Promise<unknown> {
-		const keys = input.slice(0, keyCount).map(String);
-		const args = input.slice(keyCount).map(String);
-		if (script.includes("local next_cursor")) return await this.evalBackfill(keys, args);
-		if (script.includes("local current_version")) return await this.evalCompareAndSet(keys, args);
-		if (script.includes('redis.call("SET", KEYS[1], ARGV[1], "PX"')) {
-			await this.set(keys[0] as string, args[0] as string, "PX", Number(args[1]));
-			this.sortedSet(keys[1] as string).delete(keys[0] as string);
-			this.sortedSet(keys[1] as string).delete(keys[2] as string);
-			return 1;
-		}
-		return await this.evalSet(keys, args);
-	}
-
-	private async evalSet(keys: string[], args: string[]): Promise<[number, string | null]> {
-		const [valueKey, indexKey, legacyKey] = keys;
-		const [now, maxEntries, expiresAt, , envelope] = args;
-		await this.zremrangebyscore(indexKey as string, "-inf", Number(now));
-		const index = this.sortedSet(indexKey as string);
-		index.delete(legacyKey as string);
-		if (!index.has(valueKey as string) && index.size >= Number(maxEntries)) return [0, null];
-		await this.set(valueKey as string, envelope as string, "PXAT", Number(expiresAt));
-		index.set(valueKey as string, Number(expiresAt));
-		return [1, envelope as string];
-	}
-
-	private async evalCompareAndSet(
-		keys: string[],
-		args: string[],
-	): Promise<[number, string | null]> {
-		const [valueKey, indexKey, legacyKey] = keys;
-		const [expectedVersion, now, maxEntries, expiresAt, , envelope] = args;
-		const scoped = await this.get(valueKey as string);
-		let current = scoped;
-		if (scoped !== null && (JSON.parse(scoped) as { deleted?: boolean }).deleted === true) {
-			current = null;
-		} else if (scoped === null) {
-			current = await this.get(legacyKey as string);
-		}
-		const currentVersion =
-			current === null ? 0 : Number((JSON.parse(current) as { version: number }).version);
-		if (currentVersion !== Number(expectedVersion)) return [-1, current];
-		await this.zremrangebyscore(indexKey as string, "-inf", Number(now));
-		const index = this.sortedSet(indexKey as string);
-		index.delete(legacyKey as string);
-		if (!index.has(valueKey as string) && index.size >= Number(maxEntries)) return [0, null];
-		await this.set(valueKey as string, envelope as string, "PXAT", Number(expiresAt));
-		index.set(valueKey as string, Number(expiresAt));
-		return [1, envelope as string];
-	}
-
-	private async evalBackfill(keys: string[], args: string[]): Promise<number> {
-		const [indexKey, cursorKey] = keys;
-		const [now, indexTtl, nextCursor, ...entries] = args;
-		await this.zremrangebyscore(indexKey as string, "-inf", Number(now));
-		const index = this.sortedSet(indexKey as string);
-		for (let offset = 0; offset < entries.length; offset += 4) {
-			const [legacyKey, expected, expiresAt, scopedKey] = entries.slice(offset, offset + 4);
-			if (
-				(await this.get(legacyKey as string)) === expected &&
-				(await this.get(scopedKey as string)) === null
-			) {
-				if (!index.has(legacyKey as string)) index.set(legacyKey as string, Number(expiresAt));
-			} else {
-				index.delete(legacyKey as string);
-			}
-		}
-		await this.set(cursorKey as string, nextCursor as string, "PX", Number(indexTtl));
-		return index.size;
-	}
+let redisUnavailableReason: string | undefined;
+try {
+	await integrationRedis.connect();
+	await integrationRedis.ping();
+} catch (error) {
+	redisUnavailableReason = error instanceof Error ? error.message : String(error);
+	integrationRedis.disconnect();
+}
+const redisAvailable = redisUnavailableReason === undefined;
+if (!redisAvailable) {
+	console.warn(
+		`[redis-state-scope] SKIP: real Redis is unavailable at ${redisUrl}; Lua integration tests were not run (${redisUnavailableReason}).`,
+	);
 }
 
 const namespaceOptions = {
@@ -196,16 +37,32 @@ const namespaceOptions = {
 	maxValueBytes: 1024,
 } satisfies StateNamespaceOptions;
 
+const runId = `state-scope-test-${randomUUID()}`;
 let nextRedisId = 0;
 function createRedisState() {
-	const redis = new FakeStateRedis();
 	nextRedisId += 1;
+	const providerId = `${runId}-${nextRedisId}`;
+	const backendId = `${redisUrl}#${providerId}`;
 	const state = createRedisProviderRuntimeState({
-		redisUrl: `redis://state-scope-test-${nextRedisId}`,
-		providerId: "test-provider",
-		__redisClient: redis as unknown as ProviderRedisClient,
+		redisUrl: backendId,
+		providerId,
+		__redisClient: integrationRedis as ProviderRedisClient,
 	});
-	return { redis, state };
+	return { providerId, redis: integrationRedis, state };
+}
+
+function legacyKey(providerId: string, namespace: string, key: string): string {
+	return `apifuse:provider-state:v1:${providerId}:${namespace}:${key}`;
+}
+
+function scopedKey(
+	providerId: string,
+	namespace: string,
+	connectionId: string,
+	key: string,
+): string {
+	const digest = createHash("sha256").update(connectionId).digest("hex");
+	return `apifuse:provider-state:v2:${providerId}:${namespace}:scope:connection:sha256:${digest}:${key}`;
 }
 
 function legacyEnvelope(value: unknown, version = 1): string {
@@ -219,7 +76,32 @@ function legacyEnvelope(value: unknown, version = 1): string {
 	});
 }
 
-describe("Redis provider runtime state scoping", () => {
+function isOwnedTestKey(key: string): boolean {
+	if (key.includes(runId)) return true;
+	const indexPrefix = "apifuse:provider-state:v2:index:";
+	if (!key.startsWith(indexPrefix)) return false;
+	const encoded = key.slice(indexPrefix.length).split(":", 1)[0];
+	if (!encoded) return false;
+	try {
+		return Buffer.from(encoded, "base64url").toString("utf8").includes(runId);
+	} catch {
+		return false;
+	}
+}
+
+afterAll(async () => {
+	if (!redisAvailable) return;
+	let cursor = "0";
+	do {
+		const [nextCursor, keys] = await integrationRedis.scan(cursor, "COUNT", 256);
+		const owned = keys.filter(isOwnedTestKey);
+		if (owned.length > 0) await integrationRedis.del(...owned);
+		cursor = nextCursor;
+	} while (cursor !== "0");
+	integrationRedis.disconnect();
+});
+
+describe.skipIf(!redisAvailable)("Redis provider runtime state scoping (real Redis Lua)", () => {
 	test("isolates values and quota between connection scopes", async () => {
 		const { state } = createRedisState();
 		const options = { ...namespaceOptions, maxEntries: 1 };
@@ -244,26 +126,37 @@ describe("Redis provider runtime state scoping", () => {
 		expect((await connectionB.get<string>("monitor"))?.value).toBe("healthy");
 	});
 
-	test("dual-reads v1 values and rewrites only the hashed v2 connection key", async () => {
-		const { redis, state } = createRedisState();
-		const legacyKey = "apifuse:provider-state:v1:test-provider:attempts.v1:consumed";
-		await redis.set(legacyKey, legacyEnvelope({ consumed: true }, 7));
-		const namespace = state
+	test("atomically adopts a legacy value into only one concrete connection scope", async () => {
+		const { providerId, redis, state } = createRedisState();
+		const oldKey = legacyKey(providerId, "attempts.v1", "consumed");
+		await redis.set(oldKey, legacyEnvelope({ consumed: true }, 7), "PX", 3_600_000);
+		const missingConnection = state.namespace("attempts.v1", namespaceOptions);
+		const connectionA = state
 			.forConnection("secret-connection-id")
 			.namespace("attempts.v1", namespaceOptions);
+		const connectionB = state
+			.forConnection("connection-b")
+			.namespace("attempts.v1", namespaceOptions);
 
-		expect((await namespace.get<{ consumed: boolean }>("consumed"))?.value).toEqual({
+		expect(await missingConnection.get("consumed")).toBeNull();
+		expect(JSON.parse((await redis.get(oldKey)) as string)).not.toHaveProperty("deleted");
+		expect((await connectionA.get<{ consumed: boolean }>("consumed"))?.value).toEqual({
 			consumed: true,
 		});
-		expect((await namespace.list()).map((row) => row.key)).toContain("consumed");
-		const rewritten = await namespace.set("consumed", { consumed: false });
-		expect(rewritten.version).toBe(8);
+		expect((await connectionA.list()).map((row) => row.key)).toContain("consumed");
+		expect(await connectionB.get("consumed")).toBeNull();
+		expect(JSON.parse((await redis.get(oldKey)) as string)).toEqual({ deleted: true });
 
-		const digest = createHash("sha256").update("secret-connection-id").digest("hex");
-		const scopedKey = `apifuse:provider-state:v2:test-provider:attempts.v1:scope:connection:sha256:${digest}:consumed`;
-		expect(await redis.get(scopedKey)).not.toBeNull();
-		expect(await redis.get(legacyKey)).not.toBeNull();
-		expect(scopedKey).not.toContain("secret-connection-id");
+		const currentScopedKey = scopedKey(
+			providerId,
+			"attempts.v1",
+			"secret-connection-id",
+			"consumed",
+		);
+		expect(await redis.get(currentScopedKey)).not.toBeNull();
+		expect(currentScopedKey).not.toContain("secret-connection-id");
+		await redis.del(currentScopedKey);
+		expect(await connectionA.get("consumed")).toBeNull();
 	});
 
 	test("keeps same-scope CAS atomic without cross-scope interference", async () => {
@@ -285,15 +178,53 @@ describe("Redis provider runtime state scoping", () => {
 		expect((await connectionB.compareAndSet("guard", 1, "winner-b")).ok).toBe(true);
 	});
 
-	test("CAS migrates a matching legacy value into the scoped key", async () => {
-		const { redis, state } = createRedisState();
-		const legacyKey = "apifuse:provider-state:v1:test-provider:guards.v1:guard";
-		await redis.set(legacyKey, legacyEnvelope("legacy", 4));
+	test("version-0 CAS cannot win while a live legacy value exists", async () => {
+		const { providerId, redis, state } = createRedisState();
+		const oldKey = legacyKey(providerId, "guards.v1", "guard");
+		// A key without Redis expiry is still live and must block version-0 CAS.
+		await redis.set(oldKey, legacyEnvelope("legacy", 1));
+		const namespace = state.forConnection("connection-a").namespace("guards.v1", namespaceOptions);
+
+		const result = await namespace.compareAndSet("guard", 0, "duplicate");
+		expect(result.ok).toBe(false);
+		expect(result.current?.value).toBe("legacy");
+		expect((await namespace.get<string>("guard"))?.value).toBe("legacy");
+		expect(JSON.parse((await redis.get(oldKey)) as string)).toEqual({ deleted: true });
+	});
+
+	test("missing-connection CAS is blocked by legacy state without adopting it", async () => {
+		const { providerId, redis, state } = createRedisState();
+		const oldKey = legacyKey(providerId, "guards.v1", "guard");
+		const oldEnvelope = legacyEnvelope("legacy", 1);
+		await redis.set(oldKey, oldEnvelope, "PX", 3_600_000);
+		const namespace = state.namespace("guards.v1", namespaceOptions);
+
+		expect((await namespace.compareAndSet("guard", 0, "duplicate")).ok).toBe(false);
+		expect(await redis.get(oldKey)).toBe(oldEnvelope);
+		expect(await namespace.get("guard")).toBeNull();
+	});
+
+	test("CAS migrates a matching legacy value in the same atomic script", async () => {
+		const { providerId, redis, state } = createRedisState();
+		const oldKey = legacyKey(providerId, "guards.v1", "guard");
+		await redis.set(oldKey, legacyEnvelope("legacy", 4), "PX", 3_600_000);
 		const namespace = state.forConnection("connection-a").namespace("guards.v1", namespaceOptions);
 
 		const result = await namespace.compareAndSet("guard", 4, "scoped");
 		expect(result.ok).toBe(true);
+		expect(result.value.version).toBe(5);
 		expect((await namespace.get<string>("guard"))?.value).toBe("scoped");
-		expect(await redis.get(legacyKey)).not.toBeNull();
+		expect(JSON.parse((await redis.get(oldKey)) as string)).toEqual({ deleted: true });
+	});
+
+	test("delete tombstones both a scoped key and its live legacy predecessor", async () => {
+		const { providerId, redis, state } = createRedisState();
+		const oldKey = legacyKey(providerId, "guards.v1", "guard");
+		await redis.set(oldKey, legacyEnvelope("legacy", 2), "PX", 3_600_000);
+		const namespace = state.forConnection("connection-a").namespace("guards.v1", namespaceOptions);
+
+		await namespace.delete("guard");
+		expect(await namespace.get("guard")).toBeNull();
+		expect(JSON.parse((await redis.get(oldKey)) as string)).toEqual({ deleted: true });
 	});
 });

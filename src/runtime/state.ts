@@ -21,8 +21,6 @@ const REDIS_STATE_PREFIX = "apifuse:provider-state:v2";
 const LEGACY_REDIS_STATE_PREFIX = "apifuse:provider-state:v1";
 const PROVIDER_SCOPE_DISCRIMINATOR = "scope:provider";
 const MISSING_CONNECTION_SCOPE_DISCRIMINATOR = "scope:connection:missing";
-const LEGACY_INDEX_SCAN_COUNT = 256;
-const LEGACY_INDEX_SCAN_MAX_PAGES = 8;
 const SET_WITH_QUOTA_SCRIPT = `
 local now = tonumber(ARGV[1])
 local max_entries = tonumber(ARGV[2])
@@ -40,29 +38,20 @@ end
 redis.call("SET", KEYS[1], envelope, "PXAT", expires_at)
 redis.call("ZADD", KEYS[2], expires_at, KEYS[1])
 redis.call("PEXPIRE", KEYS[2], index_ttl)
+if ARGV[6] == "1" then
+	redis.call("SET", KEYS[3], ARGV[7], "PX", index_ttl)
+end
 return {1, envelope}
 `;
 
 const COMPARE_AND_SET_WITH_QUOTA_SCRIPT = `
 local current = redis.call("GET", KEYS[1])
+local scoped_present = current and true or false
 if current then
 	local ok, decoded = pcall(cjson.decode, current)
 	if ok and type(decoded) == "table" and decoded.deleted == true then
 		current = false
 	end
-elseif redis.call("EXISTS", KEYS[1]) == 0 then
-	current = redis.call("GET", KEYS[3])
-end
-local current_version = 0
-if current then
-	local ok, decoded = pcall(cjson.decode, current)
-	if not ok or type(decoded) ~= "table" or type(decoded.version) ~= "number" then
-		return {-2, current}
-	end
-	current_version = decoded.version
-end
-if current_version ~= tonumber(ARGV[1]) then
-	return {-1, current or false}
 end
 
 local now = tonumber(ARGV[2])
@@ -70,6 +59,57 @@ local max_entries = tonumber(ARGV[3])
 local expires_at = tonumber(ARGV[4])
 local index_ttl = tonumber(ARGV[5])
 local envelope = ARGV[6]
+local allow_legacy_claim = ARGV[7] == "1"
+local legacy_tombstone = ARGV[8]
+
+if not scoped_present then
+	local legacy = redis.call("GET", KEYS[3])
+	if legacy then
+		local ok, decoded = pcall(cjson.decode, legacy)
+		if ok and type(decoded) == "table" and decoded.deleted == true then
+			legacy = false
+		end
+	end
+	if legacy and not allow_legacy_claim then
+		return {-1, false}
+	end
+	if legacy then
+		local legacy_ttl = redis.call("PTTL", KEYS[3])
+		if legacy_ttl == -1 then
+			legacy_ttl = index_ttl
+		elseif legacy_ttl < 1 then
+			legacy_ttl = 1
+		end
+		if legacy_ttl > 0 then
+			redis.call("ZREMRANGEBYSCORE", KEYS[2], "-inf", now)
+			redis.call("ZREM", KEYS[2], KEYS[3])
+			local indexed = redis.call("ZSCORE", KEYS[2], KEYS[1])
+			if not indexed and redis.call("ZCARD", KEYS[2]) >= max_entries then
+				return {0, false}
+			end
+			redis.call("SET", KEYS[1], legacy, "PX", legacy_ttl)
+			redis.call("ZADD", KEYS[2], now + legacy_ttl, KEYS[1])
+			redis.call("PEXPIRE", KEYS[2], index_ttl)
+			redis.call("SET", KEYS[3], legacy_tombstone, "PX", index_ttl)
+			current = legacy
+		end
+	end
+end
+
+local current_version = 0
+local current_decoded = false
+if current then
+	local ok, decoded = pcall(cjson.decode, current)
+	if not ok or type(decoded) ~= "table" or type(decoded.version) ~= "number" then
+		return {-2, current}
+	end
+	current_version = decoded.version
+	current_decoded = decoded
+end
+if current_version ~= tonumber(ARGV[1]) then
+	return {-1, current or false}
+end
+
 redis.call("ZREMRANGEBYSCORE", KEYS[2], "-inf", now)
 redis.call("ZREM", KEYS[2], KEYS[3])
 local indexed = redis.call("ZSCORE", KEYS[2], KEYS[1])
@@ -77,49 +117,69 @@ if not indexed and redis.call("ZCARD", KEYS[2]) >= max_entries then
 	return {0, false}
 end
 
+if current_decoded and type(current_decoded.createdAt) == "string" then
+	local next_decoded = cjson.decode(envelope)
+	next_decoded.createdAt = current_decoded.createdAt
+	envelope = cjson.encode(next_decoded)
+end
 redis.call("SET", KEYS[1], envelope, "PXAT", expires_at)
 redis.call("ZADD", KEYS[2], expires_at, KEYS[1])
 redis.call("PEXPIRE", KEYS[2], index_ttl)
+if allow_legacy_claim then
+	redis.call("SET", KEYS[3], legacy_tombstone, "PX", index_ttl)
+end
 return {1, envelope}
 `;
 
 const DELETE_WITH_INDEX_SCRIPT = `
 redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+if ARGV[3] == "1" then
+	redis.call("SET", KEYS[3], ARGV[1], "PX", ARGV[2])
+end
 redis.call("ZREM", KEYS[2], KEYS[1], KEYS[3])
 return 1
 `;
 
-// Legacy v1 keys have no scope discriminator. Every operation that depends on
-// the namespace index advances a bounded SCAN cursor and lazily imports active
-// v1 envelopes into the scoped v2 ZSET. The cursor is deliberately cyclic
-// rather than permanently "complete": an old pod may still write during a
-// rolling deploy. Each list/write call does a fixed amount of migration work;
-// Redis KEYS and unbounded scans remain forbidden.
-//
-// TODO(remove v1 state dual-read): delete this migration after all v1 writers
-// are gone and the longest StateNamespaceOptions.maxTtl has elapsed.
-const BACKFILL_LEGACY_INDEX_SCRIPT = `
-local now = tonumber(ARGV[1])
-local index_ttl = tonumber(ARGV[2])
-local next_cursor = ARGV[3]
+// A v1 key has no connection discriminator, so it cannot safely be exposed to
+// every v2 scope. The first concrete connection (or explicit provider scope) to
+// request a key atomically adopts that value and tombstones v1. The missing-
+// connection sentinel never claims legacy state.
+const CLAIM_LEGACY_SCRIPT = `
+local scoped = redis.call("GET", KEYS[1])
+if scoped then
+	return {1, scoped}
+end
 
-redis.call("ZREMRANGEBYSCORE", KEYS[1], "-inf", now)
-for i = 4, #ARGV, 4 do
-	local key = ARGV[i]
-	local expected = ARGV[i + 1]
-	local expires_at = tonumber(ARGV[i + 2])
-	local scoped_key = ARGV[i + 3]
-	if redis.call("GET", key) == expected and redis.call("EXISTS", scoped_key) == 0 then
-		redis.call("ZADD", KEYS[1], "NX", expires_at, key)
-	else
-		redis.call("ZREM", KEYS[1], key)
-	end
+local legacy = redis.call("GET", KEYS[3])
+if not legacy then
+	return {1, false}
 end
-if redis.call("EXISTS", KEYS[1]) == 1 then
-	redis.call("PEXPIRE", KEYS[1], index_ttl)
+local ok, decoded = pcall(cjson.decode, legacy)
+if ok and type(decoded) == "table" and decoded.deleted == true then
+	return {1, false}
 end
-redis.call("SET", KEYS[2], next_cursor, "PX", index_ttl)
-return redis.call("ZCARD", KEYS[1])
+local legacy_ttl = redis.call("PTTL", KEYS[3])
+if legacy_ttl == -1 then
+	legacy_ttl = tonumber(ARGV[3])
+elseif legacy_ttl < 1 then
+	legacy_ttl = 1
+end
+
+local now = tonumber(ARGV[1])
+local max_entries = tonumber(ARGV[2])
+local index_ttl = tonumber(ARGV[3])
+redis.call("ZREMRANGEBYSCORE", KEYS[2], "-inf", now)
+redis.call("ZREM", KEYS[2], KEYS[3])
+local indexed = redis.call("ZSCORE", KEYS[2], KEYS[1])
+if not indexed and redis.call("ZCARD", KEYS[2]) >= max_entries then
+	return {0, false}
+end
+
+redis.call("SET", KEYS[1], legacy, "PX", legacy_ttl)
+redis.call("ZADD", KEYS[2], now + legacy_ttl, KEYS[1])
+redis.call("PEXPIRE", KEYS[2], index_ttl)
+redis.call("SET", KEYS[3], ARGV[4], "PX", index_ttl)
+return {1, legacy}
 `;
 
 type RedisProviderRuntimeStateOptions = {
@@ -230,10 +290,6 @@ function publicStateKey(redisKey: string, prefixes: readonly string[]): string {
 	return redisKey;
 }
 
-function redisGlobLiteral(value: string): string {
-	return value.replace(/[\\*?\[\]]/g, "\\$&");
-}
-
 function parseStateDurationMs(ttl: StateWriteOptions["ttl"]): number {
 	const match = /^(\d+)(ms|s|m|h|d)$/.exec(ttl ?? "1h");
 	if (!match) return 3_600_000;
@@ -250,10 +306,6 @@ function parseStateDurationMs(ttl: StateWriteOptions["ttl"]): number {
 						? 3_600_000
 						: 86_400_000;
 	return Math.max(1, amount * multiplier);
-}
-
-function resolveExpiresAt(ttl: StateWriteOptions["ttl"]): string {
-	return new Date(Date.now() + parseStateDurationMs(ttl)).toISOString();
 }
 
 function envelopeFromJson(
@@ -343,15 +395,12 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		return legacyProviderStateKey(this.providerId, this.namespaceName, key);
 	}
 
-	private statePrefixes(): readonly [string, string] {
-		return [
-			providerStatePrefix(
-				this.providerId,
-				this.namespaceName,
-				this.scopeDiscriminator,
-			),
-			legacyProviderStatePrefix(this.providerId, this.namespaceName),
-		];
+	private statePrefix(): string {
+		return providerStatePrefix(
+			this.providerId,
+			this.namespaceName,
+			this.scopeDiscriminator,
+		);
 	}
 
 	private indexKey(): string {
@@ -369,67 +418,8 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		return `${REDIS_STATE_PREFIX}:index:${namespaceIdentity}`;
 	}
 
-	private legacyScanCursorKey(): string {
-		return `${this.indexKey()}:legacy-scan-cursor`;
-	}
-
-	private legacyPrefix(): string {
-		return `${legacyProviderStatePrefix(this.providerId, this.namespaceName)}:`;
-	}
-
-	private async backfillLegacyIndex(): Promise<void> {
-		await requireRedisReady(this.backend.redis);
-		const cursorKey = this.legacyScanCursorKey();
-		let cursor =
-			(await withRequiredRedis(() => this.backend.redis.get(cursorKey))) ?? "0";
-		const pattern = `${redisGlobLiteral(this.legacyPrefix())}*`;
-		const indexTtlMs = parseStateDurationMs(this.options.maxTtl);
-
-		for (let page = 0; page < LEGACY_INDEX_SCAN_MAX_PAGES; page += 1) {
-			const [nextCursor, keys] = await withRequiredRedis(() =>
-				this.backend.redis.scan(
-					cursor,
-					"MATCH",
-					pattern,
-					"COUNT",
-					LEGACY_INDEX_SCAN_COUNT,
-				),
-			);
-			const rawValues =
-				keys.length > 0
-					? await withRequiredRedis(() => this.backend.redis.mget(keys))
-					: [];
-			const now = Date.now();
-			const activeLegacyArgs: string[] = [];
-			for (const [index, raw] of rawValues.entries()) {
-				const key = keys[index];
-				if (!key || !raw) continue;
-				const publicKey = publicStateKey(key, this.statePrefixes());
-				const envelope = envelopeFromJson(publicKey, raw);
-				const expiresAtMs = envelope ? Date.parse(envelope.expiresAt) : Number.NaN;
-				if (!Number.isFinite(expiresAtMs) || expiresAtMs <= now) continue;
-				activeLegacyArgs.push(
-					key,
-					raw,
-					String(expiresAtMs),
-					this.redisKey(publicKey),
-				);
-			}
-			await withRequiredRedis(() =>
-				this.backend.redis.eval(
-					BACKFILL_LEGACY_INDEX_SCRIPT,
-					2,
-					this.indexKey(),
-					cursorKey,
-					String(now),
-					String(indexTtlMs),
-					nextCursor,
-					...activeLegacyArgs,
-				),
-			);
-			cursor = nextCursor;
-			if (cursor === "0") break;
-		}
+	private canClaimLegacy(): boolean {
+		return this.scopeDiscriminator !== MISSING_CONNECTION_SCOPE_DISCRIMINATOR;
 	}
 
 	private async indexedKeys(limit: number): Promise<string[]> {
@@ -450,11 +440,27 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 
 	private async readRaw(key: string): Promise<string | null> {
 		await requireRedisReady(this.backend.redis);
-		const [scopedRaw, legacyRaw] = await withRequiredRedis(() =>
-			this.backend.redis.mget(this.redisKey(key), this.legacyRedisKey(key)),
+		if (!this.canClaimLegacy()) {
+			return await withRequiredRedis(() => this.backend.redis.get(this.redisKey(key)));
+		}
+		const tombstone = JSON.stringify({ deleted: true } satisfies RedisStateTombstone);
+		const result = await withRequiredRedis(() =>
+			this.backend.redis.eval(
+				CLAIM_LEGACY_SCRIPT,
+				3,
+				this.redisKey(key),
+				this.indexKey(),
+				this.legacyRedisKey(key),
+				String(Date.now()),
+				String(this.options.maxEntries),
+				String(parseStateDurationMs(this.options.maxTtl)),
+				tombstone,
+			),
 		);
-		// A scoped tombstone intentionally suppresses legacy fallback after delete.
-		return scopedRaw ?? legacyRaw;
+		if (Array.isArray(result) && Number(result[0]) === 0) {
+			throw this.quotaExceeded();
+		}
+		return Array.isArray(result) && typeof result[1] === "string" ? result[1] : null;
 	}
 
 	private enforceValueSize(value: unknown): void {
@@ -495,24 +501,20 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 	async list<T>(options?: { limit?: number; prefix?: string }): Promise<StateValue<T>[]> {
 		const requestedLimit = Math.max(0, options?.limit ?? this.options.maxEntries);
 		if (requestedLimit === 0) return [];
-		await this.backfillLegacyIndex();
-		const keys = await this.indexedKeys(this.options.maxEntries * 2);
+		const keys = await this.indexedKeys(this.options.maxEntries);
 		if (keys.length === 0) return [];
 		const values = await withRequiredRedis(() => this.backend.redis.mget(keys));
-		const currentPrefix = `${this.statePrefixes()[0]}:`;
-		const rows = new Map<string, { value: StateValue<T>; scoped: boolean }>();
+		const rows: StateValue<T>[] = [];
 		for (const [index, raw] of values.entries()) {
 			const redisKey = keys[index];
 			if (!redisKey) continue;
-			const publicKey = publicStateKey(redisKey, this.statePrefixes());
+			const publicKey = publicStateKey(redisKey, [this.statePrefix()]);
 			if (options?.prefix && !publicKey.startsWith(options.prefix)) continue;
 			const value = envelopeFromJson(publicKey, raw);
 			if (!value) continue;
-			const scoped = redisKey.startsWith(currentPrefix);
-			const existing = rows.get(publicKey);
-			if (!existing || (scoped && !existing.scoped)) rows.set(publicKey, { value, scoped });
+			rows.push(value);
 		}
-		return Array.from(rows.values(), ({ value }) => value).slice(0, requestedLimit);
+		return rows.slice(0, requestedLimit);
 	}
 
 	async get<T>(key: string): Promise<StateValue<T> | null> {
@@ -523,7 +525,6 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 
 	async set<T>(key: string, value: T, options?: StateWriteOptions): Promise<StateValue<T>> {
 		this.enforceValueSize(value);
-		await this.backfillLegacyIndex();
 		const current = await this.get<T>(key);
 		const createdAt = current?.createdAt ?? new Date().toISOString();
 		const version = (current?.version ?? 0) + 1;
@@ -542,6 +543,8 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 				String(timing.expiresAtMs),
 				String(timing.indexTtlMs),
 				JSON.stringify(envelope),
+				this.canClaimLegacy() ? "1" : "0",
+				JSON.stringify({ deleted: true } satisfies RedisStateTombstone),
 			),
 		);
 		if (!Array.isArray(result) || Number(result[0]) !== 1) {
@@ -575,12 +578,7 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 		options?: StateWriteOptions,
 	): Promise<StateCasResult<T>> {
 		this.enforceValueSize(value);
-		await this.backfillLegacyIndex();
-		const current = await this.get<T>(key);
-		if ((current?.version ?? 0) !== expectedVersion) {
-			return { ok: false, current };
-		}
-		const createdAt = current?.createdAt ?? new Date().toISOString();
+		const createdAt = new Date().toISOString();
 		const timing = this.writeTiming(options?.ttl);
 		const envelope = redisEnvelope(
 			value,
@@ -602,6 +600,8 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 				String(timing.expiresAtMs),
 				String(timing.indexTtlMs),
 				JSON.stringify(envelope),
+				this.canClaimLegacy() ? "1" : "0",
+				JSON.stringify({ deleted: true } satisfies RedisStateTombstone),
 			),
 		);
 		if (Array.isArray(result) && Number(result[0]) === 0) {
@@ -611,17 +611,14 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 			const rawCurrent = Array.isArray(result) && typeof result[1] === "string" ? result[1] : null;
 			return { ok: false, current: envelopeFromJson(key, rawCurrent) };
 		}
-		return {
-			ok: true,
-			value: {
-				key,
-				value,
-				version: envelope.version,
-				expiresAt: timing.expiresAt,
-				createdAt,
-				updatedAt: envelope.updatedAt,
-			},
-		};
+		const rawWritten = typeof result[1] === "string" ? result[1] : null;
+		const written = envelopeFromJson(key, rawWritten) as StateValue<T> | null;
+		if (!written) {
+			throw new UnsupportedProviderStateError(
+				"Provider runtime state CAS returned an invalid value",
+			);
+		}
+		return { ok: true, value: written };
 	}
 
 	async delete(key: string): Promise<void> {
@@ -636,6 +633,7 @@ class RedisProviderStateNamespace implements ProviderStateNamespace {
 				this.legacyRedisKey(key),
 				tombstone,
 				String(parseStateDurationMs(this.options.maxTtl)),
+				this.canClaimLegacy() ? "1" : "0",
 			),
 		);
 	}
