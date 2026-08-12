@@ -174,7 +174,7 @@ describe("resolver vendor chain", () => {
 		});
 	});
 
-	it("reports missing 2captcha credentials for an Akamai sensor challenge", async () => {
+	it("keeps keyed 2captcha not implemented until its Akamai adapter lands", async () => {
 		const challenge = {
 			kind: "akamai_sensor",
 			pageUrl: CHALLENGE.pageUrl,
@@ -282,42 +282,83 @@ describe("resolver vendor chain", () => {
 				return { form: "token", token: "solved" };
 			},
 		};
-		const registry = RESOLVER_ADAPTER_REGISTRY as {
-			"2captcha"?: () => ResolverVendorAdapter;
-		};
-		const original = registry["2captcha"];
-		registry["2captcha"] = () => adapter;
-		try {
-			const resolver = createResolverClientFromEnv(
-				{
-					vendors: ["2captcha"],
-					kinds: ["akamai_sensor"],
-					clientProfile: "safari17_0",
+		const resolver = createResolverClientFromEnv(
+			{
+				vendors: ["2captcha"],
+				kinds: ["akamai_sensor"],
+				clientProfile: "safari17_0",
+			},
+			{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
+			{
+				allowedHosts: ["example.com"],
+				adapterFactories: { "2captcha": () => adapter },
+				createTransport(input) {
+					factoryInput = input;
+					return transport;
 				},
+				identityScope,
+			},
+		);
+
+		await expect(
+			resolver.solve({
+				kind: "akamai_sensor",
+				pageUrl: CHALLENGE.pageUrl,
+				scriptUrl: "https://example.com/akamai/sensor.js",
+			}),
+		).resolves.toEqual({ form: "token", token: "solved" });
+		expect(factoryInput).toEqual({ clientProfile: "safari17_0", identityScope });
+		expect(factoryInput).not.toHaveProperty("identity");
+		expect(receivedTransport).toBeDefined();
+	});
+
+	it("enforces allowedHosts on every adapter transport fetch", async () => {
+		const challenge = {
+			kind: "akamai_sensor",
+			pageUrl: "https://sensor.example.com/challenge",
+			scriptUrl: "https://sensor.example.com:8443/akamai/sensor.js",
+		} satisfies ProviderChallenge;
+		let fetchCalls = 0;
+		const underlyingTransport = {
+			async fetch() {
+				fetchCalls += 1;
+				return { status: 200, headers: {}, body: "sensor", cookies: [] };
+			},
+		};
+		const adapter: ResolverVendorAdapter = {
+			id: "2captcha",
+			requiresTransport: true,
+			supports: (kind) => kind === "akamai_sensor",
+			async solve(sensorChallenge, _identity, signal, _traceRecorder, transport) {
+				if (sensorChallenge.kind !== "akamai_sensor" || transport === undefined) {
+					throw new Error("Expected a transport-bound Akamai sensor challenge");
+				}
+				await transport.fetch(sensorChallenge.scriptUrl, { method: "GET", signal });
+				return { form: "token", token: "transport-complete" };
+			},
+		};
+		const createResolver = (allowedHosts: readonly string[]) =>
+			createResolverClientFromEnv(
+				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
 				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
 				{
-					createTransport(input) {
-						factoryInput = input;
-						return transport;
-					},
-					identityScope,
+					adapterFactories: { "2captcha": () => adapter },
+					allowedHosts,
+					createTransport: () => underlyingTransport,
 				},
 			);
 
-			await expect(
-				resolver.solve({
-					kind: "akamai_sensor",
-					pageUrl: CHALLENGE.pageUrl,
-					scriptUrl: "https://example.com/akamai/sensor.js",
-				}),
-			).resolves.toEqual({ form: "token", token: "solved" });
-			expect(factoryInput).toEqual({ clientProfile: "safari17_0", identityScope });
-			expect(factoryInput).not.toHaveProperty("identity");
-			expect(receivedTransport).toBe(transport);
-		} finally {
-			if (original === undefined) delete registry["2captcha"];
-			else registry["2captcha"] = original;
-		}
+		await expect(createResolver(["example.com"]).solve(challenge)).rejects.toMatchObject({
+			name: "ProviderError",
+			code: "RESOLVER_HOST_NOT_ALLOWED",
+		});
+		expect(fetchCalls).toBe(0);
+
+		await expect(createResolver(["SENSOR.EXAMPLE.COM."]).solve(challenge)).resolves.toEqual({
+			form: "token",
+			token: "transport-complete",
+		});
+		expect(fetchCalls).toBe(1);
 	});
 
 	it("rejects a declared client profile with a pre-bound transport", () => {
@@ -435,23 +476,15 @@ describe("resolver vendor chain", () => {
 	});
 
 	it("fails loudly when an implemented vendor loses its registered adapter", async () => {
-		const registry = RESOLVER_ADAPTER_REGISTRY as {
-			browser?: (configuration: string, timeoutMs: number) => ResolverVendorAdapter;
-		};
-		const original = registry.browser;
-		delete registry.browser;
-		try {
-			const resolver = createResolverClientFromEnv(
-				{ vendors: ["browser"], kinds: ["aws_waf"] },
-				{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
-			);
+		const resolver = createResolverClientFromEnv(
+			{ vendors: ["browser"], kinds: ["aws_waf"] },
+			{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
+			{ adapterFactories: {} },
+		);
 
-			await expect(resolver.solve(CHALLENGE)).rejects.toThrow(
-				'Resolver adapter factory is missing for implemented vendor "browser"',
-			);
-		} finally {
-			registry.browser = original;
-		}
+		await expect(resolver.solve(CHALLENGE)).rejects.toThrow(
+			'Resolver adapter factory is missing for implemented vendor "browser"',
+		);
 	});
 
 	it("fails loudly for a vendor id outside the known union", () => {
@@ -485,7 +518,7 @@ describe("resolver vendor capabilities", () => {
 		it(`${vendor} static capabilities agree with its registered adapter`, () => {
 			const factory = RESOLVER_ADAPTER_REGISTRY[vendor];
 			if (!factory) throw new Error(`Missing registered adapter factory for ${vendor}`);
-			const adapter = factory("ws://resolver.test", 100);
+			const adapter = factory("ws://resolver.test", 100, []);
 			const staticKinds = RESOLVER_VENDOR_CAPABILITIES[vendor] as readonly ProviderChallengeKind[];
 
 			for (const kind of ALL_CHALLENGE_KINDS) {

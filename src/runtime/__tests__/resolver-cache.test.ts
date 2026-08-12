@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 
 import type {
 	ChallengeSolution,
@@ -12,7 +13,6 @@ import {
 	createResolverClient,
 	createResolverClientFromEnv,
 	invalidateResolverSolution,
-	RESOLVER_ADAPTER_REGISTRY,
 } from "../resolver.js";
 import {
 	resolverChallengeIsIdentityScoped,
@@ -35,10 +35,6 @@ const AKAMAI_SENSOR_CHALLENGE = {
 	pageUrl: CHALLENGE.pageUrl,
 	scriptUrl: "https://example.com/akamai/sensor.js",
 } satisfies ProviderChallenge;
-
-type BrowserSolution = Extract<ChallengeSolution, { readonly form: "cookies" }> & {
-	readonly expires?: number;
-};
 
 type KeyCall = {
 	readonly key: string;
@@ -78,7 +74,10 @@ function createRecordingCache(now?: () => number): {
 }
 
 function createBrowserAdapter(
-	createSolution: (identity: ResolverIdentity | undefined, call: number) => BrowserSolution,
+	createSolution: (
+		identity: ResolverIdentity | undefined,
+		call: number,
+	) => Extract<ChallengeSolution, { readonly form: "cookies" }>,
 ): { readonly adapter: ResolverVendorAdapter; readonly calls: () => number } {
 	let calls = 0;
 	return {
@@ -102,7 +101,10 @@ function createBrowserAdapter(
 }
 
 function createAkamaiAdapter(
-	createSolution: (identity: ResolverIdentity | undefined, call: number) => BrowserSolution,
+	createSolution: (
+		identity: ResolverIdentity | undefined,
+		call: number,
+	) => Extract<ChallengeSolution, { readonly form: "cookies" }>,
 ): { readonly adapter: ResolverVendorAdapter; readonly calls: () => number } {
 	let calls = 0;
 	return {
@@ -121,7 +123,7 @@ function createAkamaiAdapter(
 function persistentSolution(
 	userAgent = "Browser/1.0",
 	expires = (Date.now() + 60_000) / 1_000,
-): BrowserSolution {
+): Extract<ChallengeSolution, { readonly form: "cookies" }> {
 	return {
 		form: "cookies",
 		cookies: { "aws-waf-token": `token-for-${userAgent}` },
@@ -133,13 +135,40 @@ function persistentSolution(
 function persistentAkamaiSolution(
 	userAgent = "Safari/17.0",
 	expires = (Date.now() + 60_000) / 1_000,
-): BrowserSolution {
+): Extract<ChallengeSolution, { readonly form: "cookies" }> {
 	return {
 		form: "cookies",
 		cookies: { _abck: `sensor-cookie-for-${userAgent}` },
 		userAgent,
 		expires,
 	};
+}
+
+function expectedSolutionCacheKey(
+	cache: ProviderCache,
+	challenge: ProviderChallenge,
+	identity: { readonly proxyUrl?: string; readonly userAgent: string },
+): string {
+	const issuerDigest = createHash("sha256")
+		.update(
+			JSON.stringify({
+				proxyUrl: identity.proxyUrl ?? null,
+				userAgent: identity.userAgent,
+			}),
+		)
+		.digest("hex");
+	return cache.key("resolver-solution", {
+		kind: challenge.kind,
+		origin: new URL(challenge.pageUrl).origin,
+		issuerDigest,
+	});
+}
+
+function expectedDirectIndexKey(cache: ProviderCache, challenge: ProviderChallenge): string {
+	return cache.key("resolver-solution-index", {
+		kind: challenge.kind,
+		origin: new URL(challenge.pageUrl).origin,
+	});
 }
 
 function createClient(
@@ -181,36 +210,86 @@ describe("resolver solution caching", () => {
 				throw new Error("no-cache solves must not inspect issuing identity");
 			},
 		};
-		const registry = RESOLVER_ADAPTER_REGISTRY as {
-			browser?: (configuration: string, timeoutMs: number) => ResolverVendorAdapter;
-		};
-		const original = registry.browser;
-		registry.browser = () => noCacheAdapter;
-		try {
-			const resolver = createResolverClientFromEnv(
-				{ vendors: ["browser"], kinds: ["aws_waf"] },
-				{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
-			);
-			await resolver.solve(CHALLENGE);
-			await resolver.solve(CHALLENGE);
-			await resolver.solve(CHALLENGE);
-		} finally {
-			registry.browser = original;
-		}
+		const resolver = createResolverClientFromEnv(
+			{ vendors: ["browser"], kinds: ["aws_waf"] },
+			{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
+			{ adapterFactories: { browser: () => noCacheAdapter } },
+		);
+		await resolver.solve(CHALLENGE);
+		await resolver.solve(CHALLENGE);
+		await resolver.solve(CHALLENGE);
 
 		expect(stub.calls()).toBe(3);
 	});
 
-	it("reuses a browser solution within its advertised lifetime", async () => {
-		const { cache } = createRecordingCache();
-		const stub = createBrowserAdapter(() => persistentSolution());
+	it("caches a portable direct solution through the shared index", async () => {
+		const { cache, inner } = createRecordingCache();
+		const userAgent = "Browser/direct-portable";
+		const stub = createBrowserAdapter(() => persistentSolution(userAgent));
 		const resolver = createClient(stub.adapter, { cache });
 
 		const first = await resolver.solve(CHALLENGE);
+		expect(
+			await inner.get(expectedSolutionCacheKey(cache, CHALLENGE, { userAgent })),
+		).not.toBeNull();
+		expect(await inner.get(expectedDirectIndexKey(cache, CHALLENGE))).not.toBeNull();
 		const second = await resolver.solve(CHALLENGE);
 
 		expect(second).toEqual(first);
 		expect(stub.calls()).toBe(1);
+	});
+
+	it("re-serves an identity-scoped solution bound to a proxy identity", async () => {
+		const { cache } = createRecordingCache();
+		const identity = {
+			proxyUrl: "http://user:password@proxy.test:8080",
+			userAgent: "Safari/17.0 proxied",
+		};
+		const stub = createAkamaiAdapter((requestedIdentity) =>
+			persistentAkamaiSolution(requestedIdentity?.userAgent),
+		);
+		const resolver = createClient(stub.adapter, {
+			cache,
+			identity,
+			kinds: ["akamai_sensor"],
+		});
+
+		const first = await resolver.solve(AKAMAI_SENSOR_CHALLENGE);
+		const second = await resolver.solve(AKAMAI_SENSOR_CHALLENGE);
+
+		expect(second).toEqual(first);
+		expect(stub.calls()).toBe(1);
+	});
+
+	it.each([
+		IDENTITY_SCOPED_CHALLENGE,
+		AKAMAI_SENSOR_CHALLENGE,
+	] as const)("does not cache unbound identity-scoped $kind solutions", async (challenge) => {
+		const { cache, inner } = createRecordingCache();
+		const stub =
+			challenge.kind === "cloudflare_interstitial"
+				? createBrowserAdapter((_identity, call) => persistentSolution(`Browser/unbound-${call}`))
+				: createAkamaiAdapter((_identity, call) =>
+						persistentAkamaiSolution(`Safari/unbound-${call}`),
+					);
+		const resolver = createClient(stub.adapter, {
+			cache,
+			kinds: [challenge.kind],
+		});
+		const firstUserAgent =
+			challenge.kind === "cloudflare_interstitial" ? "Browser/unbound-1" : "Safari/unbound-1";
+
+		const first = await resolver.solve(challenge);
+		expect(
+			await inner.get(expectedSolutionCacheKey(cache, challenge, { userAgent: firstUserAgent })),
+		).toBeNull();
+		expect(await inner.get(expectedDirectIndexKey(cache, challenge))).toBeNull();
+
+		const second = await resolver.solve(challenge);
+
+		expect(second).not.toEqual(first);
+		expect(stub.calls()).toBe(2);
+		expect(await inner.get(expectedDirectIndexKey(cache, challenge))).toBeNull();
 	});
 
 	it("enables caching through createResolverClientFromEnv's runtime options", async () => {
@@ -218,29 +297,22 @@ describe("resolver solution caching", () => {
 		const stub = createBrowserAdapter(() => persistentSolution());
 		const declaredHosts = ["example.com", "assets.example.com"];
 		let adapterHosts: readonly string[] | undefined;
-		const registry = RESOLVER_ADAPTER_REGISTRY as {
-			browser?: (
-				configuration: string,
-				timeoutMs: number,
-				allowedHosts: readonly string[],
-			) => ResolverVendorAdapter;
-		};
-		const original = registry.browser;
-		registry.browser = (_configuration, _timeoutMs, allowedHosts) => {
-			adapterHosts = allowedHosts;
-			return stub.adapter;
-		};
-		try {
-			const resolver = createResolverClientFromEnv(
-				{ vendors: ["browser"], kinds: ["aws_waf"] },
-				{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
-				{ allowedHosts: declaredHosts, cache },
-			);
-			await resolver.solve(CHALLENGE);
-			await resolver.solve(CHALLENGE);
-		} finally {
-			registry.browser = original;
-		}
+		const resolver = createResolverClientFromEnv(
+			{ vendors: ["browser"], kinds: ["aws_waf"] },
+			{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
+			{
+				allowedHosts: declaredHosts,
+				cache,
+				adapterFactories: {
+					browser(_configuration, _timeoutMs, allowedHosts) {
+						adapterHosts = allowedHosts;
+						return stub.adapter;
+					},
+				},
+			},
+		);
+		await resolver.solve(CHALLENGE);
+		await resolver.solve(CHALLENGE);
 
 		expect(stub.calls()).toBe(1);
 		expect(adapterHosts).toEqual(declaredHosts);
@@ -409,6 +481,10 @@ describe("resolver solution caching", () => {
 		);
 		const persistentResolver = createClient(persistent.adapter, {
 			cache,
+			identity: {
+				proxyUrl: "http://persistent-identity.proxy.test:8080",
+				userAgent: "Safari/17.0",
+			},
 			kinds: ["akamai_sensor"],
 		});
 

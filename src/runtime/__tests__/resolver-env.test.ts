@@ -10,7 +10,7 @@ import {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	createResolverClientFromEnv,
-	RESOLVER_ADAPTER_REGISTRY,
+	swapResolverAdapterFactoryForTests,
 } from "../resolver.js";
 import type { ResolverVendorAdapter } from "../resolver-vendors/types.js";
 
@@ -251,10 +251,8 @@ describe("resolver server wiring", () => {
 				};
 			},
 		};
-		const registry = RESOLVER_ADAPTER_REGISTRY as { browser?: () => ResolverVendorAdapter };
-		const originalAdapter = registry.browser;
 		const originalCdpUrl = process.env[APIFUSE__CDP_POOL__URL];
-		registry.browser = () => adapter;
+		const restoreAdapter = swapResolverAdapterFactoryForTests("browser", () => adapter);
 		process.env[APIFUSE__CDP_POOL__URL] = "ws://cdp-pool.test";
 		try {
 			const provider = defineProvider({
@@ -306,7 +304,7 @@ describe("resolver server wiring", () => {
 			});
 			expect(calls).toBe(2);
 		} finally {
-			registry.browser = originalAdapter;
+			restoreAdapter();
 			if (originalCdpUrl === undefined) {
 				delete process.env[APIFUSE__CDP_POOL__URL];
 			} else {

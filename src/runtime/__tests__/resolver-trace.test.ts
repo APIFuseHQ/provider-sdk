@@ -110,10 +110,16 @@ describe("resolver tracing", () => {
 	});
 
 	it("records sanitized transport failure context on spans and exhausted attempts", async () => {
-		const secretPassword = "proxy-password-must-not-leak";
-		const secretCookie = "cookie-value-must-not-leak";
+		const secrets = [
+			"ABCK_SECRET_VALUE",
+			"BMSZ_SECRET_VALUE",
+			"AWS_WAF_SECRET_VALUE",
+			"eyJhbGciOiJIUzI1NiJ9.bearer-secret-payload",
+			"proxy-user",
+			"proxy-password-must-not-leak",
+		];
 		const cause = new Error(
-			`TLS failure at https://user:${secretPassword}@sensor.example.com/round?api_key=hidden cookie=${secretCookie}`,
+			`connect ETIMEDOUT at https://${secrets[4]}:${secrets[5]}@proxy.example.com/private _abck=${secrets[0]} bm_sz=${secrets[1]} aws-waf-token=${secrets[2]} Bearer ${secrets[3]}`,
 		);
 		cause.name = "TlsError";
 		const resolver = createResolverClient({
@@ -154,7 +160,7 @@ describe("resolver tracing", () => {
 				client_profile: "safari17_0",
 				unavailability_reason: "transport_failure",
 				cause_name: "TlsError",
-				cause_message: "TLS failure at https://sensor.example.com [REDACTED]",
+				cause_message: "connect ETIMEDOUT at https://proxy.example.com [REDACTED]",
 				upstream_host: "sensor.example.com",
 				transport_phase: "post_sensor",
 				transport_round: 2,
@@ -168,7 +174,7 @@ describe("resolver tracing", () => {
 					reason: "transport_failure",
 					cause: {
 						name: "TlsError",
-						message: "TLS failure at https://sensor.example.com [REDACTED]",
+						message: "connect ETIMEDOUT at https://proxy.example.com [REDACTED]",
 					},
 					upstreamHost: "sensor.example.com",
 					phase: "post_sensor",
@@ -177,9 +183,8 @@ describe("resolver tracing", () => {
 			],
 		});
 		const diagnostics = JSON.stringify({ attempt, details: error.details });
-		expect(diagnostics).not.toContain(secretPassword);
-		expect(diagnostics).not.toContain(secretCookie);
-		expect(diagnostics).not.toContain("user:");
+		for (const secret of secrets) expect(diagnostics).not.toContain(secret);
+		expect(diagnostics).toContain("connect ETIMEDOUT");
 	});
 
 	it("invalidates a cached solution through an instrumented resolver wrapper", async () => {
@@ -209,7 +214,7 @@ describe("resolver tracing", () => {
 					cookies: { "aws-waf-token": `vendor-token-${vendorCalls}` },
 					expires: (Date.now() + 60_000) / 1_000,
 					userAgent: "Instrumented Browser/1.0",
-				} as ChallengeSolution & { readonly expires: number };
+				};
 			},
 		};
 		const rawResolver = createResolverClient({

@@ -286,3 +286,9 @@ With both kinds declared, an adapter-less `custom` chain now reaches its
 supporting attempt and reports `missing_transport` instead of
 `RESOLVER_KIND_UNSUPPORTED_BY_CHAIN`, preserving the capability/availability
 separation required by ADR 0006 Revision 3.
+
+The Verification claim for keyed `2captcha` is corrected: keyless `2captcha`
+reports `missing_credentials`, while keyed `2captcha` reports `not_implemented`
+until its adapter lands. `missing_transport` is asserted through a
+`requiresTransport` stub adapter, the only reachable transport-requirement path
+in this contract-only change.

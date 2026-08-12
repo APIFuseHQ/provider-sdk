@@ -404,6 +404,8 @@ export type ChallengeSolution =
 			readonly form: "cookies";
 			readonly cookies: Readonly<Record<string, string>>;
 			readonly userAgent: string;
+			/** Epoch seconds copied from the upstream cookie's own expiry attribute; never a constant. */
+			readonly expires?: number;
 		};
 
 export interface ProviderResolverConfig {
