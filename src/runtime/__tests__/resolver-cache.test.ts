@@ -84,11 +84,7 @@ function createBrowserAdapter(
 	return {
 		adapter: {
 			id: "browser",
-			supports: (kind) =>
-				kind === "aws_waf" ||
-				kind === "cloudflare_interstitial" ||
-				kind === "akamai_sec_cpt" ||
-				kind === "akamai_sensor",
+			supports: (kind) => kind === "aws_waf" || kind === "cloudflare_interstitial",
 			getIssuingIdentity(solution, requestedIdentity, challenge) {
 				if (solution.form !== "cookies") return undefined;
 				return resolverChallengeIssuingIdentity(challenge, {
@@ -105,6 +101,23 @@ function createBrowserAdapter(
 	};
 }
 
+function createAkamaiAdapter(
+	createSolution: (identity: ResolverIdentity | undefined, call: number) => BrowserSolution,
+): { readonly adapter: ResolverVendorAdapter; readonly calls: () => number } {
+	let calls = 0;
+	return {
+		adapter: {
+			id: "custom",
+			supports: (kind) => kind === "akamai_sec_cpt" || kind === "akamai_sensor",
+			async solve(_challenge, identity) {
+				calls += 1;
+				return createSolution(identity, calls);
+			},
+		},
+		calls: () => calls,
+	};
+}
+
 function persistentSolution(
 	userAgent = "Browser/1.0",
 	expires = (Date.now() + 60_000) / 1_000,
@@ -112,6 +125,18 @@ function persistentSolution(
 	return {
 		form: "cookies",
 		cookies: { "aws-waf-token": `token-for-${userAgent}` },
+		userAgent,
+		expires,
+	};
+}
+
+function persistentAkamaiSolution(
+	userAgent = "Safari/17.0",
+	expires = (Date.now() + 60_000) / 1_000,
+): BrowserSolution {
+	return {
+		form: "cookies",
+		cookies: { _abck: `sensor-cookie-for-${userAgent}` },
 		userAgent,
 		expires,
 	};
@@ -346,7 +371,7 @@ describe("resolver solution caching", () => {
 
 	it("uses distinct non-secret cache keys for Akamai sensor identities", async () => {
 		const { cache, keyCalls } = createRecordingCache();
-		const stub = createBrowserAdapter((identity) => persistentSolution(identity?.userAgent));
+		const stub = createAkamaiAdapter((identity) => persistentAkamaiSolution(identity?.userAgent));
 		const firstPassword = "akamai-first-password";
 		const secondPassword = "akamai-second-password";
 		const firstIdentity = {
@@ -375,6 +400,39 @@ describe("resolver solution caching", () => {
 		expect(solutionKeys[0]).not.toBe(solutionKeys[1]);
 		expect(solutionKeys.every((key) => !key.includes(firstPassword))).toBe(true);
 		expect(solutionKeys.every((key) => !key.includes(secondPassword))).toBe(true);
+	});
+
+	it("caches an expiring non-browser cookie solution but not a session solution", async () => {
+		const { cache } = createRecordingCache();
+		const persistent = createAkamaiAdapter(() =>
+			persistentAkamaiSolution("Safari/17.0", (Date.now() + 60_000) / 1_000),
+		);
+		const persistentResolver = createClient(persistent.adapter, {
+			cache,
+			kinds: ["akamai_sensor"],
+		});
+
+		await persistentResolver.solve(AKAMAI_SENSOR_CHALLENGE);
+		await persistentResolver.solve(AKAMAI_SENSOR_CHALLENGE);
+		expect(persistent.calls()).toBe(1);
+
+		const session = createAkamaiAdapter(() => ({
+			form: "cookies",
+			cookies: { _abck: "session-cookie" },
+			userAgent: "Safari/17.0 session",
+		}));
+		const sessionResolver = createClient(session.adapter, {
+			cache,
+			identity: {
+				proxyUrl: "http://session-identity.proxy.test:8080",
+				userAgent: "Safari/17.0 session",
+			},
+			kinds: ["akamai_sensor"],
+		});
+
+		await sessionResolver.solve(AKAMAI_SENSOR_CHALLENGE);
+		await sessionResolver.solve(AKAMAI_SENSOR_CHALLENGE);
+		expect(session.calls()).toBe(2);
 	});
 
 	it("ignores a cached cookie solution missing userAgent and solves fresh", async () => {

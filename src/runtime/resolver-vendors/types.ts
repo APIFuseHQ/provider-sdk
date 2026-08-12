@@ -71,14 +71,24 @@ export interface ResolverVendorTransport {
 		readonly status: number;
 		readonly headers: Readonly<Record<string, string>>;
 		readonly body: string;
-		/** Cookies observed on the response, name -> value. */
-		readonly cookies: Readonly<Record<string, string>>;
+		/** Cookies observed on the response, including cache-relevant attributes. */
+		readonly cookies: readonly {
+			readonly name: string;
+			readonly value: string;
+			/** Epoch seconds. A session cookie must be undefined, never CDP's -1 sentinel. */
+			readonly expires?: number;
+			readonly httpOnly: boolean;
+			readonly secure: boolean;
+			readonly domain?: string;
+			readonly path?: string;
+			readonly sameSite?: string;
+		}[];
 	}>;
 }
 
 export interface ResolverVendorAdapter {
 	readonly id: ProviderResolverVendor;
-	readonly requiresTransport?: boolean;
+	readonly requiresTransport?: boolean | ((kind: ProviderChallengeKind) => boolean);
 	supports(kind: ProviderChallengeKind): boolean;
 	/** Identity the adapter actually used, reported after a successful solve. */
 	getIssuingIdentity?(
@@ -106,10 +116,21 @@ export type ResolverVendorUnavailableReason =
 export type ResolverChallengeVerdictReason = "human_puzzle";
 
 type ResolverErrorOptions = {
+	/** Raw cause; adapters must not place bodies, cookies, headers, credentials, or proxy URLs here. */
 	readonly cause?: unknown;
+	/** Upstream hostname only; never a URL. */
+	readonly upstreamHost?: string;
+	/** Adapter-defined sensor-loop phase, such as fetch_script or post_sensor. */
+	readonly phase?: string;
+	/** One-based sensor-loop round when known. */
+	readonly round?: number;
 };
 
 export class ResolverVendorUnavailableError extends Error {
+	readonly upstreamHost?: string;
+	readonly phase?: string;
+	readonly round?: number;
+
 	constructor(
 		readonly vendor: ProviderResolverVendor,
 		readonly reason: ResolverVendorUnavailableReason,
@@ -120,6 +141,9 @@ export class ResolverVendorUnavailableError extends Error {
 		if (options.cause !== undefined) {
 			this.cause = options.cause;
 		}
+		this.upstreamHost = options.upstreamHost;
+		this.phase = options.phase;
+		this.round = options.round;
 	}
 }
 

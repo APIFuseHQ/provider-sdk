@@ -51,6 +51,13 @@ type ResolvedResolverVendor =
 type ResolverChainAttempt = {
 	readonly vendor: ProviderResolverVendor;
 	readonly reason: ResolverVendorUnavailableReason;
+	readonly cause?: {
+		readonly name: string;
+		readonly message: string;
+	};
+	readonly upstreamHost?: string;
+	readonly phase?: string;
+	readonly round?: number;
 };
 
 type ResolverChainClient = ResolverContext & {
@@ -64,10 +71,17 @@ type ResolverChainClient = ResolverContext & {
 export interface ResolverRuntimeOptions {
 	readonly allowedHosts?: readonly string[];
 	readonly cache?: ProviderCache;
+	/** Solving identity used to bind an SDK-created vendor transport. */
+	readonly identity?: ResolverIdentity;
 	/** Server-owned context/proxy scope used only for identity-bound cache entries. */
 	readonly identityScope?: string;
 	/** SDK-owned transport already bound to the resolved proxy lease and client profile. */
 	readonly transport?: ResolverVendorTransport;
+	/** Creates an SDK-owned transport bound to the declared profile and solving identity. */
+	readonly createTransport?: (input: {
+		readonly clientProfile?: string;
+		readonly identity?: ResolverIdentity;
+	}) => ResolverVendorTransport;
 }
 
 type CachedResolverSolution = {
@@ -217,6 +231,102 @@ function throwExhausted(attempts: readonly ResolverChainAttempt[]): never {
 		fix: "Configure another supporting resolver vendor or restore an unavailable vendor.",
 		details: attempts,
 	});
+}
+
+function assertClientProfileTransportContract(
+	clientProfile: string | undefined,
+	transport: ResolverVendorTransport | undefined,
+): void {
+	if (clientProfile === undefined || transport === undefined) return;
+	throw new ProviderError(
+		`Resolver client profile "${clientProfile}" cannot be applied to a pre-bound transport`,
+		{
+			code: "RESOLVER_CLIENT_PROFILE_TRANSPORT_CONFLICT",
+			fix: "Remove the pre-bound transport and provide createTransport({ clientProfile, identity }) so the SDK can apply the provider-declared profile.",
+		},
+	);
+}
+
+function adapterRequiresTransport(
+	adapter: ResolverVendorAdapter,
+	kind: ProviderChallengeKind,
+): boolean {
+	return typeof adapter.requiresTransport === "function"
+		? adapter.requiresTransport(kind)
+		: adapter.requiresTransport === true;
+}
+
+function sanitizeDiagnosticUrl(rawUrl: string): string {
+	try {
+		const parsed = new URL(rawUrl);
+		return `${parsed.protocol}//${parsed.host}`;
+	} catch {
+		return "[REDACTED_URL]";
+	}
+}
+
+function sanitizeCauseMessage(message: string): string {
+	const withoutUrls = message.replace(/\b[a-z][a-z\d+.-]*:\/\/[^\s"'<>]+/gi, sanitizeDiagnosticUrl);
+	const sensitiveStart = withoutUrls.search(
+		/\b(?:authorization|proxy-authorization|set-cookie|cookies?|headers?|request\s+body|response\s+body|body|api[-_ ]?key|password|secret|credential|token)\b/i,
+	);
+	return (sensitiveStart === -1 ? withoutUrls : `${withoutUrls.slice(0, sensitiveStart)}[REDACTED]`)
+		.replaceAll("\r", " ")
+		.replaceAll("\n", " ")
+		.slice(0, 512);
+}
+
+function safeCause(error: ResolverVendorUnavailableError): ResolverChainAttempt["cause"] {
+	if (error.cause === undefined) return undefined;
+	const cause = error.cause;
+	const rawName = cause instanceof Error ? cause.name : "Error";
+	return {
+		name: /^[a-z\d_.:-]{1,64}$/i.test(rawName) ? rawName : "Error",
+		message: sanitizeCauseMessage(cause instanceof Error ? cause.message : String(cause)),
+	};
+}
+
+function safeUpstreamHost(host: string | undefined): string | undefined {
+	if (host === undefined) return undefined;
+	const trimmed = host.trim();
+	if (/^[a-z\d.-]+$/i.test(trimmed)) return trimmed.toLowerCase();
+	try {
+		return new URL(trimmed).hostname.toLowerCase();
+	} catch {
+		return undefined;
+	}
+}
+
+function safePhase(phase: string | undefined): string | undefined {
+	return phase !== undefined && /^[a-z\d_.:-]{1,64}$/i.test(phase) ? phase : undefined;
+}
+
+function unavailableAttempt(error: ResolverVendorUnavailableError): ResolverChainAttempt {
+	const cause = safeCause(error);
+	const upstreamHost = safeUpstreamHost(error.upstreamHost);
+	const phase = safePhase(error.phase);
+	const round =
+		Number.isSafeInteger(error.round) && (error.round as number) > 0 ? error.round : undefined;
+	return {
+		vendor: error.vendor,
+		reason: error.reason,
+		...(cause ? { cause } : {}),
+		...(upstreamHost ? { upstreamHost } : {}),
+		...(phase ? { phase } : {}),
+		...(round !== undefined ? { round } : {}),
+	};
+}
+
+function unavailableSpanAttributes(error: ResolverVendorUnavailableError): Record<string, unknown> {
+	const attempt = unavailableAttempt(error);
+	return {
+		unavailability_reason: error.reason,
+		cause_name: attempt.cause?.name,
+		cause_message: attempt.cause?.message,
+		upstream_host: attempt.upstreamHost,
+		transport_phase: attempt.phase,
+		transport_round: attempt.round,
+	};
 }
 
 function challengeOrigin(challenge: ProviderChallenge): string {
@@ -377,7 +487,7 @@ async function writeResolverCacheIndex(
 	await cache.set(indexKey, { entries: liveEntries } satisfies ResolverCacheIndex, { ttlMs });
 }
 
-async function cacheBrowserSolution(
+async function cacheResolverSolution(
 	cache: ProviderCache,
 	challenge: ProviderChallenge,
 	solution: ChallengeSolution,
@@ -478,7 +588,10 @@ function createResolverChainClient(options: {
 	readonly identity?: ResolverIdentity;
 	readonly identityScope?: string;
 	readonly transport?: ResolverVendorTransport;
+	readonly createTransport?: ResolverRuntimeOptions["createTransport"];
+	readonly clientProfile?: string;
 }): ResolverChainClient {
+	assertClientProfileTransportContract(options.clientProfile, options.transport);
 	const client: ResolverChainClient = {
 		async solve(
 			challenge: ProviderChallenge,
@@ -496,7 +609,7 @@ function createResolverChainClient(options: {
 			const supportingEntries = options.entries.filter((entry) => entry.supports(challenge.kind));
 			if (supportingEntries.length === 0) throwUnsupportedKind(challenge.kind);
 			signal.throwIfAborted();
-			if (options.cache && supportingEntries.some((entry) => entry.id === "browser")) {
+			if (options.cache) {
 				const cached = await findCachedSolution(
 					options.cache,
 					challenge,
@@ -511,38 +624,47 @@ function createResolverChainClient(options: {
 				const adapter = entry.createAdapter();
 				try {
 					const solveAttempt = () => {
-						if (adapter.requiresTransport === true && options.transport === undefined) {
+						const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
+						const transport =
+							options.transport ??
+							(requiresTransport
+								? options.createTransport?.({
+										clientProfile: options.clientProfile,
+										identity: options.identity,
+									})
+								: undefined);
+						if (requiresTransport && transport === undefined) {
 							throw new ResolverVendorUnavailableError(adapter.id, "missing_transport");
 						}
-						return adapter.solve(
-							challenge,
-							options.identity,
-							signal,
-							traceRecorder,
-							options.transport,
-						);
+						return adapter.solve(challenge, options.identity, signal, traceRecorder, transport);
 					};
 					const solution = traceRecorder
 						? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
 								attributes: {
 									vendor: adapter.id,
 									challenge_kind: challenge.kind,
+									client_profile: options.clientProfile,
 								},
 								onError(error) {
 									return error instanceof ResolverVendorUnavailableError
-										? { unavailability_reason: error.reason }
+										? unavailableSpanAttributes(error)
 										: undefined;
 								},
 							})
 						: await solveAttempt();
-					if (options.cache && entry.id === "browser" && solution.form === "cookies") {
-						const issuingIdentity = adapter.getIssuingIdentity?.(
-							solution,
-							options.identity,
-							challenge,
-						);
+					if (
+						options.cache &&
+						solution.form === "cookies" &&
+						solutionExpiryMs(solution) !== undefined
+					) {
+						const issuingIdentity =
+							adapter.getIssuingIdentity?.(solution, options.identity, challenge) ??
+							resolverChallengeIssuingIdentity(challenge, {
+								...(options.identity ? { proxyUrl: options.identity.proxyUrl } : {}),
+								userAgent: solution.userAgent,
+							});
 						if (issuingIdentity) {
-							await cacheBrowserSolution(
+							await cacheResolverSolution(
 								options.cache,
 								challenge,
 								solution,
@@ -555,7 +677,7 @@ function createResolverChainClient(options: {
 				} catch (error) {
 					signal.throwIfAborted();
 					if (!(error instanceof ResolverVendorUnavailableError)) throw error;
-					attempts.push({ vendor: adapter.id, reason: error.reason });
+					attempts.push(unavailableAttempt(error));
 				}
 			}
 
@@ -573,6 +695,8 @@ export function createResolverClient(options: {
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
 	readonly transport?: ResolverVendorTransport;
+	readonly createTransport?: ResolverRuntimeOptions["createTransport"];
+	readonly clientProfile?: string;
 }): ResolverChainClient {
 	return createResolverChainClient({
 		kinds: options.kinds,
@@ -585,6 +709,8 @@ export function createResolverClient(options: {
 		cache: options.cache,
 		identity: options.identity,
 		transport: options.transport,
+		createTransport: options.createTransport,
+		clientProfile: options.clientProfile,
 	});
 }
 
@@ -650,6 +776,7 @@ export function createResolverClientFromEnv(
 	if (!config) {
 		return createUnsupportedResolverClient("Provider does not declare resolver capability");
 	}
+	assertClientProfileTransportContract(config.clientProfile, options.transport);
 
 	if (config.vendors.length === 0) {
 		return createResolverChainClient({
@@ -679,7 +806,10 @@ export function createResolverClientFromEnv(
 			};
 		}),
 		cache: options.cache,
+		identity: options.identity,
 		identityScope: options.identityScope,
 		transport: options.transport,
+		createTransport: options.createTransport,
+		clientProfile: config.clientProfile,
 	});
 }

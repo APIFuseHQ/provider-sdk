@@ -271,3 +271,18 @@ Kind-specific assertions that must hold:
 - `src/runtime/resolver-vendors/bindings.ts` — `RESOLVER_CHALLENGE_BINDINGS`
 - 2captcha press-and-hold documentation — the same-IP redemption constraint
   behind D2
+
+## Revision 1
+
+D4's transport response carries attributed cookies rather than a flat
+name/value record so an adapter can propagate the expiry required for resolver
+caching. Expiry uses epoch seconds; session cookies are represented by an
+absent value, never CDP's `-1` sentinel, which would appear already expired.
+
+D7 is amended from "2captcha capability only" to "2captcha and custom
+capability." `custom` represents an operator-supplied adapter, so filtering it
+out as incapable would prevent that adapter from declaring either Akamai kind.
+With both kinds declared, an adapter-less `custom` chain now reaches its
+supporting attempt and reports `missing_transport` instead of
+`RESOLVER_KIND_UNSUPPORTED_BY_CHAIN`, preserving the capability/availability
+separation required by ADR 0006 Revision 3.

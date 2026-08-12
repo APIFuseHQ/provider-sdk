@@ -109,6 +109,79 @@ describe("resolver tracing", () => {
 		await expect(instrumented.resolver.solve(CHALLENGE)).resolves.toBe(solution);
 	});
 
+	it("records sanitized transport failure context on spans and exhausted attempts", async () => {
+		const secretPassword = "proxy-password-must-not-leak";
+		const secretCookie = "cookie-value-must-not-leak";
+		const cause = new Error(
+			`TLS failure at https://user:${secretPassword}@sensor.example.com/round?api_key=hidden cookie=${secretCookie}`,
+		);
+		cause.name = "TlsError";
+		const resolver = createResolverClient({
+			clientProfile: "safari17_0",
+			kinds: ["akamai_sensor"],
+			adapters: [
+				{
+					id: "custom",
+					supports: (kind) => kind === "akamai_sensor",
+					async solve() {
+						throw new ResolverVendorUnavailableError("custom", "transport_failure", {
+							cause,
+							upstreamHost: "sensor.example.com",
+							phase: "post_sensor",
+							round: 2,
+						});
+					},
+				},
+			],
+		});
+		const instrumented = instrumentResolver(resolver);
+		const error = await instrumented.resolver
+			.solve({
+				kind: "akamai_sensor",
+				pageUrl: "https://sensor.example.com/challenge",
+				scriptUrl: "https://sensor.example.com/sensor.js",
+			})
+			.catch((error: unknown) => error);
+		const attempt = instrumented.trace
+			.getSpans()
+			.find((span) => span.name === "resolver.vendor.attempt");
+
+		expect(attempt).toMatchObject({
+			status: "error",
+			attributes: {
+				vendor: "custom",
+				challenge_kind: "akamai_sensor",
+				client_profile: "safari17_0",
+				unavailability_reason: "transport_failure",
+				cause_name: "TlsError",
+				cause_message: "TLS failure at https://sensor.example.com [REDACTED]",
+				upstream_host: "sensor.example.com",
+				transport_phase: "post_sensor",
+				transport_round: 2,
+			},
+		});
+		expect(error).toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{
+					vendor: "custom",
+					reason: "transport_failure",
+					cause: {
+						name: "TlsError",
+						message: "TLS failure at https://sensor.example.com [REDACTED]",
+					},
+					upstreamHost: "sensor.example.com",
+					phase: "post_sensor",
+					round: 2,
+				},
+			],
+		});
+		const diagnostics = JSON.stringify({ attempt, details: error.details });
+		expect(diagnostics).not.toContain(secretPassword);
+		expect(diagnostics).not.toContain(secretCookie);
+		expect(diagnostics).not.toContain("user:");
+	});
+
 	it("invalidates a cached solution through an instrumented resolver wrapper", async () => {
 		const innerCache = createProviderCache({
 			providerId: `resolver-trace-invalidation-${crypto.randomUUID()}`,
