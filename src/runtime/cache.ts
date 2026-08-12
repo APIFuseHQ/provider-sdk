@@ -114,12 +114,19 @@ function normalizeKeyPart(value: unknown, extra: Set<string>): unknown {
 	if (isRecord(value)) {
 		const normalized: Record<string, unknown> = {};
 		for (const key of Object.keys(value).sort()) {
-			if (shouldRedactField(key, extra)) continue;
-			normalized[key] = normalizeKeyPart(value[key], extra);
+			normalized[key] = shouldRedactField(key, extra)
+				? hashSecretValue(value[key], extra)
+				: normalizeKeyPart(value[key], extra);
 		}
 		return normalized;
 	}
 	return value;
+}
+
+function hashSecretValue(value: unknown, extra: Set<string>): string {
+	const canonical = JSON.stringify([normalizeKeyPart(value, extra)]);
+	const digest = createHash("sha256").update(canonical).digest("hex");
+	return `sha256:${digest}`;
 }
 
 function stableHash(value: unknown): string {

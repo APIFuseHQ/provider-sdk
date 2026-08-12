@@ -11,21 +11,87 @@ describe("provider cache", () => {
 		resetProviderCacheForTests();
 	});
 
-	it("builds stable secret-safe keys", () => {
+	it("hashes secret selectors without collapsing distinct values", () => {
 		const cache = createProviderCache({ providerId: "kma" });
 		const first = cache.key("forecast", {
 			nx: "60",
 			ny: "127",
 			serviceKey: "secret-1",
 		});
-		const second = cache.key("forecast", {
+		const same = cache.key("forecast", {
+			serviceKey: "secret-1",
+			ny: "127",
+			nx: "60",
+		});
+		const different = cache.key("forecast", {
 			serviceKey: "secret-2",
 			ny: "127",
 			nx: "60",
 		});
 
-		expect(first).toBe(second);
-		expect(first).not.toContain("secret");
+		expect(first).toBe(same);
+		expect(first).not.toBe(different);
+		expect(first).not.toContain("secret-1");
+		expect(different).not.toContain("secret-2");
+	});
+
+	it("hashes configured and nested non-string secret values canonically", () => {
+		const cache = createProviderCache({ providerId: "nested-api" });
+		const options = { redactFields: ["partition"] };
+		const first = cache.key(
+			"batch",
+			{
+				requests: [
+					{
+						authorization: { credential: "credential-a", level: 1 },
+						partition: 7,
+					},
+				],
+			},
+			options,
+		);
+		const reordered = cache.key(
+			"batch",
+			{
+				requests: [
+					{
+						partition: 7,
+						authorization: { level: 1, credential: "credential-a" },
+					},
+				],
+			},
+			options,
+		);
+		const differentAuthorization = cache.key(
+			"batch",
+			{
+				requests: [
+					{
+						authorization: { credential: "credential-b", level: 1 },
+						partition: 7,
+					},
+				],
+			},
+			options,
+		);
+		const differentPartition = cache.key(
+			"batch",
+			{
+				requests: [
+					{
+						authorization: { credential: "credential-a", level: 1 },
+						partition: 8,
+					},
+				],
+			},
+			options,
+		);
+
+		expect(first).toBe(reordered);
+		expect(first).not.toBe(differentAuthorization);
+		expect(first).not.toBe(differentPartition);
+		expect(first).not.toContain("credential-a");
+		expect(differentAuthorization).not.toContain("credential-b");
 	});
 
 	it("keeps non-secret token-shaped selectors in cache keys", () => {
@@ -45,6 +111,50 @@ describe("provider cache", () => {
 
 		expect(firstPage).not.toBe(secondPage);
 		expect(firstPage).not.toBe(nextPage);
+		expect(firstPage).toBe(
+			"apifuse:provider-cache:v1:paged-api:list:51e926bf708b4e4a6e6d6df175ee8e97",
+		);
+		expect(secondPage).toBe(
+			"apifuse:provider-cache:v1:paged-api:list:f43be8b3da6fa665e05258a16dfae7ed",
+		);
+		expect(nextPage).toBe(
+			"apifuse:provider-cache:v1:paged-api:list:cd09173fba2a3d62111fa180d22ea6a2",
+		);
+	});
+
+	it("returns cache hits for stable hashed secret selectors", async () => {
+		const cache = createProviderCache({ providerId: "tenant-api" });
+		const firstKey = cache.key("profile", {
+			accountId: "account-1",
+			authorization: "Bearer tenant-secret",
+		});
+		const sameKey = cache.key("profile", {
+			authorization: "Bearer tenant-secret",
+			accountId: "account-1",
+		});
+		let calls = 0;
+
+		await cache.getOrSet(
+			firstKey,
+			async () => {
+				calls += 1;
+				return { name: "Ada" };
+			},
+			{ ttlMs: 1_000 },
+		);
+		const hit = await cache.getOrSet(
+			sameKey,
+			async () => {
+				calls += 1;
+				return { name: "Grace" };
+			},
+			{ ttlMs: 1_000 },
+		);
+
+		expect(firstKey).toBe(sameKey);
+		expect(calls).toBe(1);
+		expect(hit.meta.hit).toBe(true);
+		expect(hit.value).toEqual({ name: "Ada" });
 	});
 
 	it("returns fresh hits without calling the loader", async () => {
