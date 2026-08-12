@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { ProviderError } from "../errors.js";
+import type { ProviderError } from "../errors.js";
 import {
 	APIFUSE__CACHE__KEY_PEPPER_ENV,
 	createBypassProviderCache,
@@ -152,22 +152,18 @@ describe("provider cache", () => {
 		expect(differentAuthorization).not.toContain("credential-b");
 	});
 
-	it("rejects undefined secret values without collapsing them with null or missing fields", () => {
+	it("distinguishes undefined secret values from null and missing fields", () => {
 		const cache = createProviderCache({ providerId: "typed-api" });
+		const withUndefined = cache.key("profile", {
+			accountId: "account-1",
+			password: undefined,
+		});
 		const withNull = cache.key("profile", { accountId: "account-1", password: null });
 		const missing = cache.key("profile", { accountId: "account-1" });
 
-		let error: unknown;
-		try {
-			cache.key("profile", { accountId: "account-1", password: undefined });
-		} catch (caught) {
-			error = caught;
-		}
-
+		expect(withUndefined).not.toBe(withNull);
+		expect(withUndefined).not.toBe(missing);
 		expect(withNull).not.toBe(missing);
-		expect(error).toBeInstanceOf(ProviderError);
-		expect((error as ProviderError).code).toBe("CACHE_KEY_SECRET_VALUE_UNSUPPORTED");
-		expect((error as Error).message).toContain("undefined values are unsupported");
 		expect(() => cache.key("profile", { password: () => "secret" })).toThrow(
 			"function values are unsupported",
 		);
@@ -192,6 +188,27 @@ describe("provider cache", () => {
 		for (const password of unsupported) {
 			expect(() => cache.key("profile", { password })).toThrow("non-plain objects are unsupported");
 		}
+	});
+
+	it("does not expose nested secret property names in JSON-safety errors", () => {
+		const cache = createProviderCache({ providerId: "typed-api" });
+		const readError = () => {
+			try {
+				cache.key("profile", {
+					serviceKey: { privateEnvelope: { hiddenCallback: () => "secret" } },
+				});
+			} catch (error) {
+				return error as ProviderError;
+			}
+			throw new Error("Expected cache.key to reject the secret value");
+		};
+
+		const error = readError();
+		expect(error.code).toBe("CACHE_KEY_SECRET_VALUE_UNSUPPORTED");
+		expect(error.message).toContain("function values are unsupported");
+		expect(error.message).toContain("serviceKey (inside secret value)");
+		expect(error.message).not.toContain("privateEnvelope");
+		expect(error.message).not.toContain("hiddenCallback");
 	});
 
 	it("keeps non-secret token-shaped selectors in cache keys", () => {
@@ -271,8 +288,20 @@ describe("provider cache", () => {
 		await cache.getOrSet(publicKey, async () => ({ public: true }), { ttlMs: 1_000 });
 
 		expect(secretResult.meta.key).toBe(secretKey);
-		expect(cache.responseMeta()?.keys).toEqual(["[secret-scoped]", publicKey]);
+		expect(cache.responseMeta()?.keys).toEqual(["[secret-scoped#1]", publicKey]);
 		expect(cache.responseMeta()?.keys).not.toContain(secretKey);
+	});
+
+	it("keeps distinct secret-scoped metadata entries while deduplicating real keys", async () => {
+		const cache = createProviderCache({ providerId: "metadata-api" });
+		const firstKey = cache.key("profile", { password: "first" });
+		const secondKey = cache.key("profile", { password: "second" });
+
+		await cache.getOrSet(firstKey, async () => ({ value: 1 }), { ttlMs: 1_000 });
+		await cache.getOrSet(secondKey, async () => ({ value: 2 }), { ttlMs: 1_000 });
+		await cache.getOrSet(firstKey, async () => ({ value: 3 }), { ttlMs: 1_000 });
+
+		expect(cache.responseMeta()?.keys).toEqual(["[secret-scoped#1]", "[secret-scoped#2]"]);
 	});
 
 	it("returns fresh hits without calling the loader", async () => {
@@ -408,5 +437,17 @@ describe("provider cache", () => {
 		expect(second.value).toEqual({ call: 2 });
 		expect(await cache.get(key)).toBeNull();
 		expect(cache.responseMeta()?.source).toBe("loader");
+	});
+
+	it("masks and deduplicates bypass-cache secret metadata by real key", async () => {
+		const cache = createBypassProviderCache({ providerId: "recording" });
+		const firstKey = cache.key("fixture", { token: "first" });
+		const secondKey = cache.key("fixture", { token: "second" });
+
+		await cache.getOrSet(firstKey, async () => ({ value: 1 }));
+		await cache.getOrSet(secondKey, async () => ({ value: 2 }));
+		await cache.getOrSet(firstKey, async () => ({ value: 3 }));
+
+		expect(cache.responseMeta()?.keys).toEqual(["[secret-scoped#1]", "[secret-scoped#2]"]);
 	});
 });

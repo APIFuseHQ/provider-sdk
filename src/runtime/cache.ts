@@ -49,7 +49,7 @@ export const APIFUSE__CACHE__KEY_PEPPER_ENV = "APIFUSE__CACHE__KEY_PEPPER";
 const DEFAULT_PREFIX = "apifuse:provider-cache:v1";
 const DEFAULT_MEMORY_MAX_ENTRIES = 1_000;
 const DEFAULT_REDIS_TIMEOUT_MS = 150;
-const SECRET_SCOPED_KEY_MARKER = "[secret-scoped]";
+const SECRET_SCOPED_KEY_MARKER = "[secret-scoped";
 const SECRET_FIELD_NAMES = new Set([
 	"authorization",
 	"cookie",
@@ -126,25 +126,29 @@ function unsupportedSecretValue(path: string, reason: string): never {
 
 function assertJsonSafeSecretValue(
 	value: unknown,
-	path = "$",
+	reportedPath: string,
 	ancestors = new Set<object>(),
 ): void {
+	if (value === undefined) return;
 	if (value === null || typeof value === "string" || typeof value === "boolean") return;
 	if (typeof value === "number") {
-		if (!Number.isFinite(value)) unsupportedSecretValue(path, "non-finite numbers are unsupported");
-		if (Object.is(value, -0)) unsupportedSecretValue(path, "negative zero is unsupported");
+		if (!Number.isFinite(value))
+			unsupportedSecretValue(reportedPath, "non-finite numbers are unsupported");
+		if (Object.is(value, -0))
+			unsupportedSecretValue(reportedPath, "negative zero is unsupported");
 		return;
 	}
 	if (typeof value !== "object") {
-		unsupportedSecretValue(path, `${typeof value} values are unsupported`);
+		unsupportedSecretValue(reportedPath, `${typeof value} values are unsupported`);
 	}
-	if (ancestors.has(value)) unsupportedSecretValue(path, "cyclic values are unsupported");
+	if (ancestors.has(value))
+		unsupportedSecretValue(reportedPath, "cyclic values are unsupported");
 
 	ancestors.add(value);
 	try {
 		if (Array.isArray(value)) {
 			if (Object.getOwnPropertySymbols(value).length > 0) {
-				unsupportedSecretValue(path, "symbol-keyed array properties are unsupported");
+				unsupportedSecretValue(reportedPath, "symbol-keyed array properties are unsupported");
 			}
 			const expectedNames = new Set(["length"]);
 			for (let index = 0; index < value.length; index += 1) {
@@ -152,38 +156,66 @@ function assertJsonSafeSecretValue(
 				expectedNames.add(key);
 				const descriptor = Object.getOwnPropertyDescriptor(value, key);
 				if (!descriptor)
-					unsupportedSecretValue(`${path}[${index}]`, "sparse arrays are unsupported");
+					unsupportedSecretValue(reportedPath, "sparse arrays are unsupported");
 				if (!descriptor.enumerable || !("value" in descriptor)) {
-					unsupportedSecretValue(`${path}[${index}]`, "array accessors are unsupported");
+					unsupportedSecretValue(reportedPath, "array accessors are unsupported");
 				}
-				assertJsonSafeSecretValue(descriptor.value, `${path}[${index}]`, ancestors);
+				assertJsonSafeSecretValue(descriptor.value, reportedPath, ancestors);
 			}
 			if (Object.getOwnPropertyNames(value).some((name) => !expectedNames.has(name))) {
-				unsupportedSecretValue(path, "custom array properties are unsupported");
+				unsupportedSecretValue(reportedPath, "custom array properties are unsupported");
 			}
 			return;
 		}
 
 		const prototype = Object.getPrototypeOf(value);
 		if (prototype !== Object.prototype && prototype !== null) {
-			unsupportedSecretValue(path, "non-plain objects are unsupported");
+			unsupportedSecretValue(reportedPath, "non-plain objects are unsupported");
 		}
 		if (Object.getOwnPropertySymbols(value).length > 0) {
-			unsupportedSecretValue(path, "symbol-keyed properties are unsupported");
+			unsupportedSecretValue(reportedPath, "symbol-keyed properties are unsupported");
 		}
 		for (const key of Object.getOwnPropertyNames(value)) {
 			const descriptor = Object.getOwnPropertyDescriptor(value, key);
 			if (!descriptor?.enumerable || !("value" in descriptor)) {
 				unsupportedSecretValue(
-					`${path}.${key}`,
+					reportedPath,
 					"non-enumerable properties and accessors are unsupported",
 				);
 			}
-			assertJsonSafeSecretValue(descriptor.value, `${path}.${key}`, ancestors);
+			assertJsonSafeSecretValue(descriptor.value, reportedPath, ancestors);
 		}
 	} finally {
 		ancestors.delete(value);
 	}
+}
+
+function containsUndefined(value: unknown): boolean {
+	if (value === undefined) return true;
+	if (Array.isArray(value)) return value.some(containsUndefined);
+	if (isRecord(value)) return Object.values(value).some(containsUndefined);
+	return false;
+}
+
+function tagSecretValue(value: unknown): unknown {
+	if (value === undefined) return ["undefined"];
+	if (value === null) return ["null"];
+	if (typeof value === "string") return ["string", value];
+	if (typeof value === "number") return ["number", value];
+	if (typeof value === "boolean") return ["boolean", value];
+	if (Array.isArray(value)) return ["array", value.map(tagSecretValue)];
+	return [
+		"object",
+		Object.entries(value as Record<string, unknown>).map(([key, entry]) => [
+			key,
+			tagSecretValue(entry),
+		]),
+	];
+}
+
+function serializeSecretValue(value: unknown): string {
+	if (!containsUndefined(value)) return JSON.stringify([value]);
+	return `undefined-v1:${JSON.stringify(tagSecretValue(value))}`;
 }
 
 function warnAboutUnpepperedSecretKey(): void {
@@ -215,7 +247,7 @@ function normalizeKeyPart(
 		let secretScoped = false;
 		for (const key of Object.keys(value).sort()) {
 			const part = shouldRedactField(key, extra)
-				? hashSecretValue(value[key], extra, pepper)
+				? hashSecretValue(value[key], key, extra, pepper)
 				: normalizeKeyPart(value[key], extra, pepper);
 			normalized[key] = part.value;
 			secretScoped ||= part.secretScoped;
@@ -227,11 +259,12 @@ function normalizeKeyPart(
 
 function hashSecretValue(
 	value: unknown,
+	fieldName: string,
 	extra: Set<string>,
 	pepper: string | undefined,
 ): NormalizedKeyPart {
-	assertJsonSafeSecretValue(value);
-	const canonical = JSON.stringify([normalizeKeyPart(value, extra, pepper).value]);
+	assertJsonSafeSecretValue(value, `${fieldName} (inside secret value)`);
+	const canonical = serializeSecretValue(normalizeKeyPart(value, extra, pepper).value);
 	if (pepper === undefined) {
 		warnAboutUnpepperedSecretKey();
 		const digest = createHash("sha256").update(canonical).digest("hex");
@@ -239,6 +272,18 @@ function hashSecretValue(
 	}
 	const digest = createHmac("sha256", pepper).update(canonical).digest("hex");
 	return { value: `hmac-sha256:${digest}`, secretScoped: true };
+}
+
+function metadataKeys(
+	events: ProviderCacheLookupMeta[],
+	secretScopedKeys: Set<string>,
+): string[] {
+	let secretScopedIndex = 0;
+	return Array.from(new Set(events.map((event) => event.key))).map((key) => {
+		if (!secretScopedKeys.has(key)) return key;
+		secretScopedIndex += 1;
+		return `${SECRET_SCOPED_KEY_MARKER}#${secretScopedIndex}]`;
+	});
 }
 
 function stableHash(value: unknown): string {
@@ -537,13 +582,7 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 			return {
 				hit: events.some((event) => event.hit),
 				stale: events.some((event) => event.stale),
-				keys: Array.from(
-					new Set(
-						events.map((event) =>
-							secretScopedKeys.has(event.key) ? SECRET_SCOPED_KEY_MARKER : event.key,
-						),
-					),
-				),
+				keys: metadataKeys(events, secretScopedKeys),
 				source: sourceSummary(events),
 			};
 		},
@@ -599,13 +638,7 @@ export function createBypassProviderCache(
 			return {
 				hit: false,
 				stale: false,
-				keys: Array.from(
-					new Set(
-						events.map((event) =>
-							secretScopedKeys.has(event.key) ? SECRET_SCOPED_KEY_MARKER : event.key,
-						),
-					),
-				),
+				keys: metadataKeys(events, secretScopedKeys),
 				source: sourceSummary(events),
 			};
 		},
