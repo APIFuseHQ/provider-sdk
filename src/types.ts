@@ -1615,9 +1615,9 @@ export interface NativeProviderConfig {
 
 export interface ProviderCacheKeyOptions {
 	/**
-	 * Additional field names to omit from stable key material. The SDK always
-	 * omits known secret-bearing names such as serviceKey, authorization,
-	 * cookie, token, password, and secret.
+	 * Additional field names whose values are hashed in stable key material. The
+	 * SDK always hashes values under known secret-bearing names such as serviceKey,
+	 * authorization, cookie, token, password, and secret.
 	 */
 	redactFields?: string[];
 }

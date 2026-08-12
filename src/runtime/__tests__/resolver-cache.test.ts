@@ -274,7 +274,7 @@ describe("resolver solution caching", () => {
 		expect(stub.calls()).toBe(3);
 		if (solutionKeys.length !== 3) {
 			throw new Error(
-				"Each issuerDigest must produce a distinct resolver key; ProviderCache redacts cookie-containing field names, so renaming this field to cookieDigest collapses identities into one cache entry.",
+				"Each issuerDigest must produce a distinct resolver key for each issuing identity.",
 			);
 		}
 		expect(solutionKeys[0]).not.toBe(solutionKeys[1]);
@@ -294,7 +294,7 @@ describe("resolver solution caching", () => {
 		];
 		if (issuerDigests.length !== 3 || !issuerDigests.every((value) => typeof value === "string")) {
 			throw new Error(
-				"Resolver cache identity material must remain under issuerDigest; ProviderCache redacts field names containing cookie and would collapse identities.",
+				"Resolver cache identity material must remain under issuerDigest.",
 			);
 		}
 		const firstIssuerKey = cache.key("resolver-identity-field-contrast", {
@@ -305,7 +305,7 @@ describe("resolver solution caching", () => {
 		});
 		if (firstIssuerKey === secondIssuerKey) {
 			throw new Error(
-				"issuerDigest must affect resolver cache keys; renaming it to a cookie-containing field would trigger ProviderCache redaction and cross-identity collisions.",
+				"issuerDigest must affect resolver cache keys.",
 			);
 		}
 		const firstCookieKey = cache.key("resolver-identity-field-contrast", {
@@ -314,9 +314,9 @@ describe("resolver solution caching", () => {
 		const secondCookieKey = cache.key("resolver-identity-field-contrast", {
 			cookieDigest: issuerDigests[1],
 		});
-		if (firstCookieKey !== secondCookieKey) {
+		if (firstCookieKey === secondCookieKey) {
 			throw new Error(
-				"The cache-key contrast no longer demonstrates the trap: ProviderCache must redact cookie-containing field names, making different cookieDigest values collide.",
+				"Secret-looking cache-key fields must preserve identity separation after their values are hashed.",
 			);
 		}
 	});
