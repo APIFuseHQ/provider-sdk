@@ -163,6 +163,21 @@ describe("fail-closed provider declaration validation", () => {
 		expect(() => validateFailClosedDeclaration(provider())).not.toThrow();
 	});
 
+	it("rejects transform-bearing SSE event schemas under the same rule", () => {
+		const sseOperation = {
+			...operation(),
+			transport: {
+				kind: "sse" as const,
+				events: { tick: z.string().transform((value) => value.trim()) },
+			},
+		};
+		expectRule(
+			provider({ operations: { ping: sseOperation } }),
+			DECLARATION_RULE_IDS.schemaSerializable,
+			"operations.ping.transport.events.tick",
+		);
+	});
+
 	it("rejects proxy: true and retains proxy: false", () => {
 		expectRule(
 			provider({ proxy: true }),

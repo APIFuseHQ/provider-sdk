@@ -2,7 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
 import { DECLARATION_INVALID_CODE, DECLARATION_RULE_IDS } from "../declaration-validation.js";
-import { type ProviderServerLogEvent, serve } from "../server/serve.js";
+import { createServerApp, type ProviderServerLogEvent, serve } from "../server/serve.js";
 import type { ProviderDefinition } from "../types.js";
 
 function provider(): ProviderDefinition {
@@ -42,6 +42,26 @@ describe("serve lifecycle", () => {
 		} finally {
 			listen.mockRestore();
 		}
+	});
+
+	it("rejects a cast-bypassed invalid declaration at createServerApp directly", () => {
+		let caught: unknown;
+		try {
+			createServerApp({ ...provider(), proxy: true } as ProviderDefinition);
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toMatchObject({
+			code: DECLARATION_INVALID_CODE,
+			details: {
+				violations: [
+					expect.objectContaining({
+						ruleId: DECLARATION_RULE_IDS.proxyExplicitPolicy,
+						path: "proxy",
+					}),
+				],
+			},
+		});
 	});
 
 	it("stops accepting requests, runs every hook in order, and closes idempotently", async () => {

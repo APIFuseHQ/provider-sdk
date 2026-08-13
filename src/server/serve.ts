@@ -2445,7 +2445,8 @@ export async function serve(
 	provider: ProviderDefinition,
 	options: ServeOptions = {},
 ): Promise<ProviderServerHandle> {
-	validateFailClosedDeclaration(provider);
+	// Declaration validation happens inside createServerApp (the shared app
+	// construction path), so serve() does not duplicate the call here.
 	const bunRuntime = getBunServeRuntime();
 
 	if (bunRuntime === undefined) {
