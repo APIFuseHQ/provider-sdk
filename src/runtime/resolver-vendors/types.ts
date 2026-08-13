@@ -58,7 +58,10 @@ export interface ResolverIssuingIdentity {
 }
 
 export interface ResolverVendorTransport {
-	/** Bound to the resolved proxy lease and client profile. */
+	/**
+	 * Bound to the resolved proxy lease and client profile.
+	 * Implementations MUST NOT follow redirects and MUST return the initial redirect response.
+	 */
 	fetch(
 		url: string,
 		init: {
@@ -66,6 +69,8 @@ export interface ResolverVendorTransport {
 			headers?: Readonly<Record<string, string>>;
 			body?: string;
 			signal: AbortSignal;
+			/** Implementations MUST honor manual redirect handling when the SDK guard sets it. */
+			redirect?: "manual";
 		},
 	): Promise<{
 		readonly status: number;

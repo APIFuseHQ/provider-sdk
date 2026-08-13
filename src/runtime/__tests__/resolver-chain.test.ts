@@ -20,6 +20,7 @@ import {
 	RESOLVER_VENDOR_CAPABILITIES,
 	ResolverChallengeVerdictError,
 	type ResolverVendorAdapter,
+	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 	type ResolverVendorUnavailableReason,
 } from "../resolver-vendors/types.js";
@@ -71,6 +72,33 @@ function unavailable(
 
 function createChain(adapters: readonly ResolverVendorAdapter[], kinds = ["aws_waf"] as const) {
 	return createResolverClient({ adapters, kinds });
+}
+
+function createTransportGuardResolver(
+	transport: ResolverVendorTransport,
+	allowedHosts: readonly string[] = ["sensor.example.com"],
+) {
+	const adapter: ResolverVendorAdapter = {
+		id: "2captcha",
+		requiresTransport: true,
+		supports: (kind) => kind === "akamai_sensor",
+		async solve(challenge, _identity, signal, _traceRecorder, guardedTransport) {
+			if (challenge.kind !== "akamai_sensor" || guardedTransport === undefined) {
+				throw new Error("Expected a transport-bound Akamai sensor challenge");
+			}
+			await guardedTransport.fetch(challenge.scriptUrl, { method: "GET", signal });
+			return { form: "token", token: "transport-complete" };
+		},
+	};
+	return createResolverClientFromEnvForTests(
+		{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
+		{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
+		{
+			allowedHosts,
+			createTransport: () => transport,
+		},
+		{ "2captcha": () => adapter },
+	);
 }
 
 describe("resolver vendor chain", () => {
@@ -360,6 +388,96 @@ describe("resolver vendor chain", () => {
 			token: "transport-complete",
 		});
 		expect(fetchCalls).toBe(1);
+	});
+
+	it("allows declared resolver hosts over both https and http", async () => {
+		const dialedUrls: string[] = [];
+		const resolver = createTransportGuardResolver({
+			async fetch(url) {
+				dialedUrls.push(url);
+				return { status: 200, headers: {}, body: "sensor", cookies: [] };
+			},
+		});
+		const scriptUrls = [
+			"https://sensor.example.com/akamai/sensor.js",
+			"http://sensor.example.com/akamai/sensor.js",
+		] as const;
+
+		for (const scriptUrl of scriptUrls) {
+			await expect(
+				resolver.solve({
+					kind: "akamai_sensor",
+					pageUrl: "https://sensor.example.com/challenge",
+					scriptUrl,
+				}),
+			).resolves.toEqual({ form: "token", token: "transport-complete" });
+		}
+		expect(dialedUrls).toEqual(scriptUrls);
+	});
+
+	it("rejects non-http resolver transport schemes before dialing", async () => {
+		let fetchCalls = 0;
+		const resolver = createTransportGuardResolver({
+			async fetch() {
+				fetchCalls += 1;
+				return { status: 200, headers: {}, body: "sensor", cookies: [] };
+			},
+		});
+		const disallowedUrls = [
+			"file://sensor.example.com/akamai/sensor.js",
+			"data:text/javascript,challenge",
+			"ftp://sensor.example.com/akamai/sensor.js",
+		] as const;
+
+		for (const scriptUrl of disallowedUrls) {
+			await expect(
+				resolver.solve({
+					kind: "akamai_sensor",
+					pageUrl: "https://sensor.example.com/challenge",
+					scriptUrl,
+				}),
+			).rejects.toMatchObject({
+				name: "ProviderError",
+				code: "RESOLVER_HOST_NOT_ALLOWED",
+				fix: "Use an http or https URL whose exact hostname appears in the provider's allowedHosts declaration.",
+			});
+		}
+		expect(fetchCalls).toBe(0);
+	});
+
+	it("refuses redirect responses without following their Location", async () => {
+		const scriptUrl = "https://sensor.example.com/akamai/sensor.js";
+		let fetchCalls = 0;
+		let dialedUrl: string | undefined;
+		let redirectMode: "manual" | undefined;
+		const resolver = createTransportGuardResolver({
+			async fetch(url, init) {
+				fetchCalls += 1;
+				dialedUrl = url;
+				redirectMode = init.redirect;
+				return {
+					status: 302,
+					headers: { LoCaTiOn: "http://169.254.169.254/latest/meta-data" },
+					body: "",
+					cookies: [],
+				};
+			},
+		});
+
+		await expect(
+			resolver.solve({
+				kind: "akamai_sensor",
+				pageUrl: "https://sensor.example.com/challenge",
+				scriptUrl,
+			}),
+		).rejects.toMatchObject({
+			name: "ProviderError",
+			code: "RESOLVER_HOST_NOT_ALLOWED",
+			message: "Resolver transport refused a redirect response",
+		});
+		expect(fetchCalls).toBe(1);
+		expect(dialedUrl).toBe(scriptUrl);
+		expect(redirectMode).toBe("manual");
 	});
 
 	it("rejects a declared client profile with a pre-bound transport", () => {

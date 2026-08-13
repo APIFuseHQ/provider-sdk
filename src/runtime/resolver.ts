@@ -348,10 +348,20 @@ function restrictResolverTransport(
 	allowedHosts: readonly string[],
 ): ResolverVendorTransport {
 	return {
-		fetch(url, init) {
+		async fetch(url, init) {
 			// Empty declarations remain deny-by-default, matching the adapter-factory/browser path.
 			assertResolverHostAllowed(url, allowedHosts);
-			return transport.fetch(url, init);
+			const response = await transport.fetch(url, { ...init, redirect: "manual" });
+			const hasLocationHeader = Object.keys(response.headers).some(
+				(name) => name.toLowerCase() === "location",
+			);
+			if (response.status >= 300 && response.status < 400 && hasLocationHeader) {
+				throw new ProviderError("Resolver transport refused a redirect response", {
+					code: "RESOLVER_HOST_NOT_ALLOWED",
+					fix: "Use a non-redirecting http or https URL on a host declared in allowedHosts.",
+				});
+			}
+			return response;
 		},
 	};
 }
