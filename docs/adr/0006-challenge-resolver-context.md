@@ -11,6 +11,22 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 5 (2026-08-13).** Implementing the `2captcha` adapter (#135) found
+this ADR internally inconsistent about `aws_waf`, and the inconsistency had
+already propagated into the shipped type. The vendor task table in Context
+records `AmazonTask` as requiring `websiteURL`, `websiteKey`, `captchaScript`,
+`context`, and `iv`, and the Revision 1 measurement notes that the page supplies
+`window.gokuProps` as (`key`, `iv`, `context`). The proposed `ProviderChallenge`
+in Decision 4 nevertheless declared the `aws_waf` variant as `pageUrl`,
+`captchaScript?`, `context?`, `iv?` — the site key was dropped between the
+measurement and the type. Because the `"browser"` vendor needs only `pageUrl`,
+nothing exercised the gap until a solver adapter tried to build the task, so
+`aws_waf` shipped as a kind no solver vendor can ever serve. Decision 4 now
+carries `siteKey?: string` on the variant, and Decision 8 (new) states how an
+absent site key must fail. Sections changed: Context (the table and the
+`gokuProps` note are reconciled), Decision 4 (variant gains the field),
+Decision 8 (new), and Verification.
+
 **Revision 4 (2026-08-11).** The `"browser"` leg was verified end to end
 through a proxy lease, which closes the Revision 3 gap: it reaches the
 challenge and solves it from a datacentre host. The same run refuted a claim
@@ -224,7 +240,9 @@ by measurement:
   first probe run reported success and then failed verification for exactly
   this reason.
 - The page supplies `window.gokuProps` (`key`, `iv`, `context`) plus the
-  `challenge.js` URL, so the full-context request shape is available.
+  `challenge.js` URL, so the full-context request shape is available. The
+  `key` element of that triple is the site key the `AmazonTask` family requires;
+  Revision 5 records that it was missing from the declared variant until #136.
 
 **A solver vendor is itself a browser.** Vendors solve a fingerprint challenge
 by running a real browser on their own infrastructure. Choosing a vendor for
@@ -586,7 +604,7 @@ export type ProviderChallenge =
 	| { kind: "recaptcha_v3"; siteKey: string; pageUrl: string; action: string; minScore?: number }
 	| { kind: "hcaptcha"; siteKey: string; pageUrl: string }
 	| { kind: "cloudflare_interstitial"; pageUrl: string; blockedHtml?: string }
-	| { kind: "aws_waf"; pageUrl: string; captchaScript?: string; context?: string; iv?: string };
+	| { kind: "aws_waf"; pageUrl: string; siteKey?: string; captchaScript?: string; context?: string; iv?: string };
 
 export type ChallengeSolution =
 	| { form: "token"; token: string }
@@ -688,6 +706,26 @@ stays honest.
 Migration preconditions: the SDK surface ships, a `2captcha` adapter exists,
 and a live reCAPTCHA v2 solve is verified through `ctx.resolver` producing a
 token tabelog's upstream accepts.
+
+### 8. An absent `aws_waf` site key fails as unavailability, not as a fabricated task
+
+`siteKey` is optional on the `aws_waf` variant rather than required, because the
+`"browser"` vendor solves the kind from `pageUrl` alone and has done so in
+production measurements. Making it required would break every existing
+`aws_waf` caller to serve a vendor family that is not yet implemented.
+
+The consequence is that a solver adapter can be handed a challenge it cannot
+turn into a task. When that happens the adapter MUST throw
+`ResolverVendorUnavailableError(vendor, "not_implemented")` before any network
+call, so the chain advances to a vendor that can serve the kind — typically
+`"browser"`, which needs no site key. Two failure modes are specifically
+forbidden: sending the vendor task with an empty or invented `websiteKey`, and
+reporting the absence as a generic transport or timeout failure, which would
+make a declaration error look like a vendor outage.
+
+Providers that intend to use a solver vendor for `aws_waf` must therefore read
+`window.gokuProps.key` from the challenge page and pass it as `siteKey`. A
+provider that only ever uses `"browser"` may continue to omit it.
 
 ## Consequences
 
@@ -791,6 +829,14 @@ Negative / accepted:
 
 These must hold before `Status: accepted`:
 
+- The `aws_waf` variant carries `siteKey?`, and a `pack:types` negative control
+  proves the field is accepted on `aws_waf` while still rejected on
+  `cloudflare_interstitial`, so the Decision 4 widening does not become a
+  blanket cookie-family relaxation. Existing `aws_waf` callers that omit it
+  still compile.
+- A solver adapter handed an `aws_waf` challenge without `siteKey` reports
+  `not_implemented` before any network call, and a mutation that instead sends
+  an empty or invented `websiteKey` fails the suite (Decision 8).
 - A live token-family solve against a real vendor account returns a token that
   the upstream accepts. A 2captcha credential does exist
   (`TABELOG_AUTH_CAPTCHA_API_KEY` in Doppler `apifuse/dev`), so reCAPTCHA v2 is

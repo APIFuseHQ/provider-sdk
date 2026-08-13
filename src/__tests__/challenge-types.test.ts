@@ -68,6 +68,25 @@ describe("challenge resolver types", () => {
 		expect(challenges.map(({ kind }) => kind)).toEqual(["akamai_sec_cpt", "akamai_sensor"]);
 	});
 
+	it("accepts aws_waf challenges with or without a site key", () => {
+		const withSiteKey: ProviderChallenge = {
+			kind: "aws_waf",
+			pageUrl: "https://example.com/challenge",
+			siteKey: "goku-key",
+		};
+		const withoutSiteKey: ProviderChallenge = {
+			kind: "aws_waf",
+			pageUrl: "https://example.com/challenge",
+		};
+		const readSiteKey = (challenge: ProviderChallenge): string | undefined => {
+			if (challenge.kind === "aws_waf") return challenge.siteKey;
+			return undefined;
+		};
+
+		expect(readSiteKey(withSiteKey)).toBe("goku-key");
+		expect(readSiteKey(withoutSiteKey)).toBeUndefined();
+	});
+
 	it("allows provider definitions with or without resolver declarations", async () => {
 		const vendor: ProviderResolverVendor = "2captcha";
 		const kind: ProviderChallengeKind = "turnstile";

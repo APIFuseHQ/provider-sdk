@@ -144,6 +144,21 @@ const NEGATIVE_CONTROLS = [
 		].join("\n"),
 	},
 	{
+		filename: "negative-control-aws-waf-site-key-type.ts",
+		expectedCode: "TS2322",
+		description: "aws_waf siteKey must be a string",
+		source: [
+			'import type { ProviderChallenge } from "@apifuse/provider-sdk";',
+			"",
+			"export const mustNotCompile: ProviderChallenge = {",
+			'\tkind: "aws_waf",',
+			'\tpageUrl: "https://example.com",',
+			"\tsiteKey: 123,",
+			"};",
+			"",
+		].join("\n"),
+	},
+	{
 		filename: "negative-control-recaptcha-v3-action.ts",
 		expectedCode: "TS2322",
 		description: "recaptcha_v3 challenges require action",
