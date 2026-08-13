@@ -169,6 +169,11 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
 							kind: "container-unsafe",
 						});
+						if (!projectedJsonSchemaAllowsObject(projectedSchema)) {
+							throw new TypeError(
+								"A type-mutating output schema cannot represent its possible text output in JSON Schema.",
+							);
+						}
 						classifyUnsafeObjectShape(
 							projectedSchema,
 							projectionMarkers,
@@ -224,12 +229,6 @@ function classifyUnsafeObjectShape(
 	expectedLeafMarkers: Map<string, string>,
 	path: readonly (string | number)[],
 ): void {
-	if (
-		projectedSchema.type !== "object" &&
-		!(Array.isArray(projectedSchema.type) && projectedSchema.type.includes("object"))
-	) {
-		return;
-	}
 	for (const keyword of ["additionalProperties", "propertyNames"] as const) {
 		const unknownTextCarrier: Record<string, unknown> = {};
 		const markerId = writeOutputTextTrustProjectionMarker(unknownTextCarrier, projectionMarkers, {
@@ -380,20 +379,27 @@ function finalizeProjectedTextTrust(
 		if (marker) markers.set(schema, marker);
 	}
 	for (const [expectedPath, expectedMarkerId] of expectedLeafMarkers) {
-		if (
-			nodes.some(
-				({ schema }) =>
-					schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] === expectedMarkerId &&
-					markers.get(schema)?.kind === "leaf",
-			)
-		)
-			continue;
-		throw new OutputTextTrustProjectionError(
-			expectedPath,
-			new TypeError("A projected output text leaf lost its authenticated trust marker."),
-			options.operationId,
-			options.eventName,
+		const authenticatedLeaves = nodes.filter(
+			({ schema }) =>
+				schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] === expectedMarkerId &&
+				markers.get(schema)?.kind === "leaf",
 		);
+		if (authenticatedLeaves.length === 0) {
+			throw new OutputTextTrustProjectionError(
+				expectedPath,
+				new TypeError("A projected output text leaf lost its authenticated trust marker."),
+				options.operationId,
+				options.eventName,
+			);
+		}
+		if (authenticatedLeaves.some(({ schema }) => !projectedJsonSchemaCanAllowString(schema))) {
+			throw new OutputTextTrustProjectionError(
+				expectedPath,
+				new TypeError("A projected output text leaf was mutated to a non-text type."),
+				options.operationId,
+				options.eventName,
+			);
+		}
 	}
 	for (const { schema } of nodes) {
 		if (!markers.has(schema) && projectedJsonSchemaAllowsString(schema)) {
@@ -464,6 +470,14 @@ function finalizeProjectedTextTrust(
 
 function projectedJsonSchemaAllowsString(schema: Record<string, unknown>): boolean {
 	return schema.type === "string" || (Array.isArray(schema.type) && schema.type.includes("string"));
+}
+
+function projectedJsonSchemaCanAllowString(schema: Record<string, unknown>): boolean {
+	return schema.type === undefined || projectedJsonSchemaAllowsString(schema);
+}
+
+function projectedJsonSchemaAllowsObject(schema: Record<string, unknown>): boolean {
+	return schema.type === "object" || (Array.isArray(schema.type) && schema.type.includes("object"));
 }
 
 function readOutputTextTrustProjectionMarker(

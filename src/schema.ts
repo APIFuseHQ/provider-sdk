@@ -98,11 +98,12 @@ export type OutputTextTrustMap = Readonly<Record<string, TextTrust>>;
 /**
  * Auto-trusted output leaves are string-valued `z.literal()` / `z.enum()`,
  * patterns whose every top-level alternative is anchored at both ends and
- * whose bodies use only finite quantifiers, positive whitespace-free character
- * classes, safe literals/escapes, and ordinary or non-capturing groups, plus
- * the formats listed here. A brand is trusted only when its underlying schema
- * meets one of those rules. Length-only strings and other formats (including
- * email, URL, base64, and JWT) are not trusted.
+ * whose bodies use only finite quantifiers, have a maximum match length of 32,
+ * allow uppercase or lowercase letters but not both, and contain only positive
+ * whitespace-free character classes, safe literals/escapes, and ordinary or
+ * non-capturing groups, plus the formats listed here. A brand is trusted only
+ * when its underlying schema meets one of those rules. Length-only strings and
+ * other formats (including email, URL, base64, and JWT) are not trusted.
  */
 export const AUTO_TRUSTED_ZOD_STRING_FORMATS = [
 	"cidrv4",
@@ -940,14 +941,19 @@ function hasSdkOwnedStringFormatValidator(schema: InternalZodSchema): boolean {
 function isRestrictiveAnchoredPattern(pattern: RegExp): boolean {
 	if (pattern.multiline) return false;
 	const alternatives = splitTopLevelRegexAlternatives(pattern.source);
+	if (alternatives.length === 0) return false;
+	let maximumLength = 0;
+	let letterCases = 0;
+	for (const alternative of alternatives) {
+		if (!alternative.startsWith("^") || !alternative.endsWith("$")) return false;
+		const analysis = analyzeProvablyRestrictedRegexBody(alternative.slice(1, -1));
+		if (!analysis) return false;
+		maximumLength = Math.max(maximumLength, analysis.maximumLength);
+		letterCases |= analysis.letterCases;
+	}
+	if (pattern.ignoreCase && letterCases !== 0) letterCases = REGEX_BOTH_LETTER_CASES;
 	return (
-		alternatives.length > 0 &&
-		alternatives.every(
-			(alternative) =>
-				alternative.startsWith("^") &&
-				alternative.endsWith("$") &&
-				isProvablyRestrictedRegexBody(alternative.slice(1, -1)),
-		)
+		maximumLength <= MAXIMUM_AUTO_TRUSTED_REGEX_LENGTH && letterCases !== REGEX_BOTH_LETTER_CASES
 	);
 }
 
@@ -993,73 +999,143 @@ function splitTopLevelRegexAlternatives(source: string): string[] {
 	return alternatives;
 }
 
-function isProvablyRestrictedRegexBody(source: string): boolean {
-	let groupDepth = 0;
-	for (let index = 0; index < source.length; index += 1) {
-		const character = source[index];
-		if (character === "\\") {
-			const escapedLength = safeRegexAtomLength(source.slice(index));
-			if (escapedLength === 0) return false;
-			index += escapedLength - 1;
-			continue;
-		}
-		if (character === "[") {
-			const classLength = safeRegexCharacterClassLength(source.slice(index));
-			if (classLength === 0) return false;
-			index += classLength - 1;
-			continue;
-		}
-		if (character === "(") {
-			if (source[index + 1] === "?") {
-				if (source.slice(index, index + 3) !== "(?:") return false;
-				index += 2;
-			}
-			groupDepth += 1;
-			continue;
-		}
-		if (character === ")") {
-			if (groupDepth === 0) return false;
-			groupDepth -= 1;
-			continue;
-		}
-		if (character === "{") {
-			const match = /^\{(\d+)(?:,(\d+))?\}/.exec(source.slice(index));
-			if (!match) return false;
-			const minimum = Number(match[1]);
-			const maximum = match[2] === undefined ? minimum : Number(match[2]);
-			if (!Number.isSafeInteger(maximum) || maximum < minimum) return false;
-			index += match[0].length - 1;
-			continue;
-		}
-		if (character === "|") {
-			if (groupDepth === 0) return false;
-			continue;
-		}
-		if (character === "?") continue;
-		if (safeRegexAtomLength(source.slice(index)) !== 1) return false;
-	}
-	return groupDepth === 0;
+interface RestrictedRegexAnalysis {
+	readonly letterCases: number;
+	readonly maximumLength: number;
 }
 
-function safeRegexCharacterClassLength(source: string): number {
-	if (!source.startsWith("[") || source[1] === "^") return 0;
+interface SafeRegexCharacterClassAnalysis extends RestrictedRegexAnalysis {
+	readonly consumedLength: number;
+}
+
+const MAXIMUM_AUTO_TRUSTED_REGEX_LENGTH = 32;
+const REGEX_UPPERCASE_LETTERS = 1;
+const REGEX_LOWERCASE_LETTERS = 2;
+const REGEX_BOTH_LETTER_CASES = REGEX_UPPERCASE_LETTERS | REGEX_LOWERCASE_LETTERS;
+
+function analyzeProvablyRestrictedRegexBody(source: string): RestrictedRegexAnalysis | undefined {
+	let index = 0;
+	const parseAlternatives = (): RestrictedRegexAnalysis | undefined => {
+		let maximumLength = 0;
+		let letterCases = 0;
+		while (true) {
+			const sequence = parseSequence();
+			if (!sequence) return undefined;
+			maximumLength = Math.max(maximumLength, sequence.maximumLength);
+			letterCases |= sequence.letterCases;
+			if (source[index] !== "|") break;
+			index += 1;
+		}
+		return { letterCases, maximumLength };
+	};
+	const parseSequence = (): RestrictedRegexAnalysis | undefined => {
+		let maximumLength = 0;
+		let letterCases = 0;
+		while (index < source.length && source[index] !== "|" && source[index] !== ")") {
+			const atom = parseAtom();
+			if (!atom) return undefined;
+			let maximumRepetitions = 1;
+			if (source[index] === "?") {
+				index += 1;
+			} else if (source[index] === "{") {
+				const match = /^\{(\d+)(?:,(\d+))?\}/.exec(source.slice(index));
+				if (!match) return undefined;
+				const minimum = Number(match[1]);
+				maximumRepetitions = match[2] === undefined ? minimum : Number(match[2]);
+				if (
+					!Number.isSafeInteger(minimum) ||
+					!Number.isSafeInteger(maximumRepetitions) ||
+					maximumRepetitions < minimum
+				)
+					return undefined;
+				index += match[0].length;
+			}
+			if (source[index] === "?") index += 1;
+			maximumLength = addRestrictedRegexLengths(
+				maximumLength,
+				multiplyRestrictedRegexLength(atom.maximumLength, maximumRepetitions),
+			);
+			if (maximumRepetitions > 0) letterCases |= atom.letterCases;
+		}
+		return { letterCases, maximumLength };
+	};
+	const parseAtom = (): RestrictedRegexAnalysis | undefined => {
+		if (source[index] === "(") {
+			index += 1;
+			if (source[index] === "?") {
+				if (source.slice(index, index + 2) !== "?:") return undefined;
+				index += 2;
+			}
+			const group = parseAlternatives();
+			if (!group || source[index] !== ")") return undefined;
+			index += 1;
+			return group;
+		}
+		if (source[index] === "[") {
+			const characterClass = analyzeSafeRegexCharacterClass(source.slice(index));
+			if (!characterClass) return undefined;
+			index += characterClass.consumedLength;
+			return characterClass;
+		}
+		const atomLength = safeRegexAtomLength(source.slice(index));
+		if (atomLength === 0) return undefined;
+		const letterCases = regexAtomLetterCases(source, index);
+		index += atomLength;
+		return { letterCases, maximumLength: 1 };
+	};
+
+	const analysis = parseAlternatives();
+	return analysis && index === source.length ? analysis : undefined;
+}
+
+function analyzeSafeRegexCharacterClass(
+	source: string,
+): SafeRegexCharacterClassAnalysis | undefined {
+	if (!source.startsWith("[") || source[1] === "^") return undefined;
+	let letterCases = 0;
 	for (let index = 1; index < source.length; index += 1) {
 		const character = source[index];
-		if (character === "]") return index + 1;
+		if (character === "]") {
+			return { consumedLength: index + 1, letterCases, maximumLength: 1 };
+		}
 
 		const atomLength = safeRegexAtomLength(source.slice(index));
-		if (atomLength === 0) return 0;
+		if (atomLength === 0) return undefined;
 		const rangeSeparator = index + atomLength;
 		if (source[rangeSeparator] === "-" && source[rangeSeparator + 1] !== "]") {
 			const endIndex = rangeSeparator + 1;
 			const endLength = safeRegexAtomLength(source.slice(endIndex));
-			if (endLength === 0 || !isSafeRegexCharacterRange(source, index, endIndex)) return 0;
+			if (endLength === 0 || !isSafeRegexCharacterRange(source, index, endIndex)) return undefined;
+			letterCases |= regexAtomLetterCases(source, index);
+			letterCases |= regexAtomLetterCases(source, endIndex);
 			index = endIndex + endLength - 1;
 			continue;
 		}
+		letterCases |= regexAtomLetterCases(source, index);
 		index += atomLength - 1;
 	}
+	return undefined;
+}
+
+function regexAtomLetterCases(source: string, index: number): number {
+	const codePoint = regexCharacterClassLiteralCodePoint(source, index);
+	if (codePoint === undefined) return 0;
+	if (codePoint >= 65 && codePoint <= 90) return REGEX_UPPERCASE_LETTERS;
+	if (codePoint >= 97 && codePoint <= 122) return REGEX_LOWERCASE_LETTERS;
 	return 0;
+}
+
+function addRestrictedRegexLengths(left: number, right: number): number {
+	return left > MAXIMUM_AUTO_TRUSTED_REGEX_LENGTH - right
+		? MAXIMUM_AUTO_TRUSTED_REGEX_LENGTH + 1
+		: left + right;
+}
+
+function multiplyRestrictedRegexLength(length: number, repetitions: number): number {
+	if (length === 0 || repetitions === 0) return 0;
+	return repetitions > Math.floor(MAXIMUM_AUTO_TRUSTED_REGEX_LENGTH / length)
+		? MAXIMUM_AUTO_TRUSTED_REGEX_LENGTH + 1
+		: length * repetitions;
 }
 
 function safeRegexAtomLength(source: string): number {
