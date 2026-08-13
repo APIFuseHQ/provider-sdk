@@ -54,7 +54,7 @@ function jsonResponse(payload: unknown, status = 200): Response {
 	});
 }
 
-function createFetchStub(responses: readonly Response[]) {
+function createFetchStub(responses: readonly (Response | Error)[]) {
 	const calls: FetchCall[] = [];
 	let responseIndex = 0;
 	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
@@ -63,6 +63,7 @@ function createFetchStub(responses: readonly Response[]) {
 		const response = responses[responseIndex];
 		responseIndex += 1;
 		if (!response) throw new Error("Unexpected fetch call");
+		if (response instanceof Error) throw response;
 		return response;
 	}) as typeof fetch;
 	return { calls, fetchImpl };
@@ -257,19 +258,65 @@ describe("2captcha resolver vendor", () => {
 	});
 
 	it("maps a vendor task error to transport failure", async () => {
-		const stub = createFetchStub([jsonResponse({ errorId: 1, errorCode: "ERROR_TASK_ABSENT" })]);
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 1, errorCode: "ERROR_TASK_ABSENT", taskId: 42 }),
+		]);
 
 		await expect(
 			createAdapter(stub).solve(RECAPTCHA_CHALLENGE, undefined, new AbortController().signal),
 		).rejects.toMatchObject({ vendor: "2captcha", reason: "transport_failure" });
+		expect(stub.calls).toHaveLength(1);
 	});
 
 	it("maps an HTTP failure to transport failure", async () => {
-		const stub = createFetchStub([jsonResponse({ errorId: 0 }, 503)]);
+		const stub = createFetchStub([jsonResponse({ errorId: 0, taskId: 42 }, 503)]);
 
 		await expect(
 			createAdapter(stub).solve(RECAPTCHA_CHALLENGE, undefined, new AbortController().signal),
 		).rejects.toMatchObject({ vendor: "2captcha", reason: "transport_failure" });
+		expect(stub.calls).toHaveLength(1);
+	});
+
+	it("refuses redirects for credential-bearing task requests", async () => {
+		const stub = createFetchStub([jsonResponse({ errorId: 0, taskId: 42 }, 307)]);
+
+		await expect(
+			createAdapter(stub).solve(RECAPTCHA_CHALLENGE, undefined, new AbortController().signal),
+		).rejects.toBeInstanceOf(ResolverVendorUnavailableError);
+		expect(stub.calls).toHaveLength(1);
+		expect(stub.calls[0]?.init?.redirect).toBe("error");
+	});
+
+	it("preserves the create-task network failure cause and phase", async () => {
+		const networkError = new Error("connection reset");
+		const stub = createFetchStub([networkError]);
+		const error = await capturedError(
+			createAdapter(stub).solve(RECAPTCHA_CHALLENGE, undefined, new AbortController().signal),
+		);
+
+		expect(error).toBeInstanceOf(ResolverVendorUnavailableError);
+		expect(error).toMatchObject({
+			vendor: "2captcha",
+			reason: "transport_failure",
+			phase: "create_task",
+		});
+		expect((error as Error).cause).toBe(networkError);
+	});
+
+	it("preserves the polling network failure cause and phase", async () => {
+		const networkError = new Error("TLS handshake failed");
+		const stub = createFetchStub([jsonResponse({ errorId: 0, taskId: 42 }), networkError]);
+		const error = await capturedError(
+			createAdapter(stub).solve(RECAPTCHA_CHALLENGE, undefined, new AbortController().signal),
+		);
+
+		expect(error).toBeInstanceOf(ResolverVendorUnavailableError);
+		expect(error).toMatchObject({
+			vendor: "2captcha",
+			reason: "transport_failure",
+			phase: "poll_result",
+		});
+		expect((error as Error).cause).toBe(networkError);
 	});
 
 	it("maps a zero-balance vendor response to allocation exhaustion", async () => {

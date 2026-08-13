@@ -13,6 +13,7 @@ const DEFAULT_POLL_INTERVAL_MS = 3_000;
 const DEFAULT_TIMEOUT_MS = 180_000;
 
 type Delay = (ms: number, signal: AbortSignal) => Promise<void>;
+type TwoCaptchaOperationPhase = "create_task" | "poll_result";
 
 export interface TwoCaptchaResolverVendorOptions {
 	readonly apiKey?: string;
@@ -61,7 +62,11 @@ function abortReason(signal: AbortSignal): unknown {
 	return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
 }
 
-function raceWithAbort<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
+function raceWithAbort<T>(
+	operation: () => Promise<T>,
+	signal: AbortSignal,
+	phase?: TwoCaptchaOperationPhase,
+): Promise<T> {
 	if (signal.aborted) return Promise.reject(abortReason(signal));
 
 	return new Promise<T>((resolve, reject) => {
@@ -76,9 +81,18 @@ function raceWithAbort<T>(operation: () => Promise<T>, signal: AbortSignal): Pro
 				cleanup();
 				resolve(value);
 			},
-			() => {
+			(error: unknown) => {
 				cleanup();
-				reject(new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure"));
+				if (phase === undefined) {
+					reject(error);
+					return;
+				}
+				reject(
+					new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+						cause: error,
+						phase,
+					}),
+				);
 			},
 		);
 	});
@@ -142,10 +156,14 @@ function isAllocationExhausted(payload: JsonRecord): boolean {
 	);
 }
 
-function unavailableForPayload(payload: JsonRecord): ResolverVendorUnavailableError {
+function unavailableForPayload(
+	payload: JsonRecord,
+	phase: TwoCaptchaOperationPhase,
+): ResolverVendorUnavailableError {
 	return new ResolverVendorUnavailableError(
 		TWOCAPTCHA_VENDOR_ID,
 		isAllocationExhausted(payload) ? "allocation_exhausted" : "transport_failure",
+		{ phase },
 	);
 }
 
@@ -154,6 +172,7 @@ async function postJson(
 	url: string,
 	body: JsonRecord,
 	signal: AbortSignal,
+	phase: TwoCaptchaOperationPhase,
 ): Promise<{ readonly ok: boolean; readonly payload: JsonRecord }> {
 	const response = await raceWithAbort(
 		() =>
@@ -162,18 +181,36 @@ async function postJson(
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify(body),
 				signal,
+				redirect: "error",
 			}),
 		signal,
+		phase,
 	);
+
+	let responseText: string;
+	try {
+		responseText = await raceWithAbort(() => response.text(), signal, phase);
+	} catch (error) {
+		if (error instanceof ResolverVendorUnavailableError) throw error;
+		throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+			cause: error,
+			phase,
+		});
+	}
 
 	let payload: unknown;
 	try {
-		payload = JSON.parse(await raceWithAbort(() => response.text(), signal));
+		payload = JSON.parse(responseText);
 	} catch {
-		throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure");
+		// JSON parse errors may contain response-body excerpts, so do not retain them as causes.
+		throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+			phase,
+		});
 	}
 	if (!isJsonRecord(payload)) {
-		throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure");
+		throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+			phase,
+		});
 	}
 	return { ok: response.ok, payload };
 }
@@ -214,14 +251,18 @@ export function createTwoCaptchaResolverVendorAdapter(
 		async solve(challenge, identity, callerSignal) {
 			const apiKey = options.apiKey?.trim();
 			if (!apiKey) {
-				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "missing_credentials");
+				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "missing_credentials", {
+					phase: "create_task",
+				});
 			}
 			if (!resolverVendorSupports(TWOCAPTCHA_VENDOR_ID, challenge.kind)) {
 				throw new TypeError(`2captcha resolver does not support ${challenge.kind}`);
 			}
 			if (challenge.kind !== "recaptcha_v2") {
 				// AWS WAF remains deferred because its challenge variant has no required site key.
-				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "not_implemented");
+				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "not_implemented", {
+					phase: "create_task",
+				});
 			}
 
 			assertResolverHostAllowed(challenge.pageUrl, options.allowedHosts);
@@ -229,7 +270,9 @@ export function createTwoCaptchaResolverVendorAdapter(
 
 			const proxy = identity ? parseProxyConfiguration(identity.proxyUrl) : undefined;
 			if (identity && !proxy) {
-				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure");
+				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+					phase: "create_task",
+				});
 			}
 
 			const solveController = new AbortController();
@@ -239,6 +282,7 @@ export function createTwoCaptchaResolverVendorAdapter(
 				? undefined
 				: setTimeout(() => solveController.abort(new TwoCaptchaSolveTimeoutError()), timeoutMs);
 			const startedAt = now();
+			let phase: TwoCaptchaOperationPhase = "create_task";
 
 			try {
 				const createResult = await postJson(
@@ -256,12 +300,14 @@ export function createTwoCaptchaResolverVendorAdapter(
 						},
 					},
 					solveController.signal,
+					phase,
 				);
 				const taskId = taskIdFrom(createResult.payload);
 				if (!createResult.ok || createResult.payload.errorId !== 0 || taskId === undefined) {
-					throw unavailableForPayload(createResult.payload);
+					throw unavailableForPayload(createResult.payload, phase);
 				}
 
+				phase = "poll_result";
 				while (true) {
 					callerSignal.throwIfAborted();
 					const remainingMs = timeoutMs - (now() - startedAt);
@@ -275,18 +321,23 @@ export function createTwoCaptchaResolverVendorAdapter(
 						endpoint(baseUrl, "getTaskResult"),
 						{ clientKey: apiKey, taskId },
 						solveController.signal,
+						phase,
 					);
 					if (!pollResult.ok || pollResult.payload.errorId !== 0) {
-						throw unavailableForPayload(pollResult.payload);
+						throw unavailableForPayload(pollResult.payload, phase);
 					}
 					if (pollResult.payload.status === "processing") continue;
 					if (pollResult.payload.status !== "ready") {
-						throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure");
+						throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+							phase,
+						});
 					}
 
 					const token = tokenFrom(pollResult.payload);
 					if (!token?.trim()) {
-						throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure");
+						throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+							phase,
+						});
 					}
 					return { form: "token", token };
 				}
@@ -296,10 +347,16 @@ export function createTwoCaptchaResolverVendorAdapter(
 					error instanceof TwoCaptchaSolveTimeoutError ||
 					solveController.signal.reason instanceof TwoCaptchaSolveTimeoutError
 				) {
-					throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "timeout");
+					throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "timeout", {
+						cause: error,
+						phase,
+					});
 				}
 				if (error instanceof ResolverVendorUnavailableError) throw error;
-				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure");
+				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+					cause: error,
+					phase,
+				});
 			} finally {
 				if (timeout !== undefined) clearTimeout(timeout);
 				callerSignal.removeEventListener("abort", onCallerAbort);
