@@ -151,6 +151,11 @@ type StealthRequestInit = WreqRequestInit & {
 	redirect?: NonNullable<StealthFetchOptions["redirect"]>;
 };
 
+type WreqSessionCacheEntry = {
+	session: Promise<WreqSession>;
+	tail: Promise<void>;
+};
+
 function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
 	return typeof value === "object" && value !== null;
 }
@@ -871,35 +876,58 @@ function createSessionFetcher(
 	defaultProfile: string,
 	clientOptions: StealthClientOptions,
 ): StealthSession {
-	const clients = new Map<string, Promise<WreqSession>>();
+	const clients = new Map<string, WreqSessionCacheEntry>();
 	let closed = false;
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
 	const cookieJar = new CookieJarImpl([], baseUrl);
 
-	async function getClient(
+	async function getClientEntry(
 		profileName: string,
 		proxyUrl: string | undefined,
 		ignoreTlsErrors: boolean,
-	): Promise<WreqSession> {
+	): Promise<WreqSessionCacheEntry> {
 		if (closed) {
 			throw new TransportError("Stealth session is closed", { status: 0 });
 		}
 		const wreq = await getWreqModule();
 		const { browser, os } = resolveWreqProfile(profileName, wreq.getProfiles());
 		const cacheKey = JSON.stringify({ browser, proxyUrl, ignoreTlsErrors });
-		let client = clients.get(cacheKey);
-		if (!client) {
-			client = wreq.createSession({
-				browser,
-				os,
-				...(proxyUrl ? { proxy: proxyUrl } : {}),
-				...(ignoreTlsErrors ? { insecure: true } : {}),
-				timeout: 30_000,
-			});
-			clients.set(cacheKey, client);
+		let entry = clients.get(cacheKey);
+		if (!entry) {
+			entry = {
+				session: wreq.createSession({
+					browser,
+					os,
+					...(proxyUrl ? { proxy: proxyUrl } : {}),
+					...(ignoreTlsErrors ? { insecure: true } : {}),
+					timeout: 30_000,
+				}),
+				tail: Promise.resolve(),
+			};
+			clients.set(cacheKey, entry);
 		}
-		return await client;
+		return entry;
+	}
+
+	async function withClient<T>(
+		profileName: string,
+		proxyUrl: string | undefined,
+		ignoreTlsErrors: boolean,
+		operation: (client: WreqSession) => Promise<T>,
+	): Promise<T> {
+		const entry = await getClientEntry(profileName, proxyUrl, ignoreTlsErrors);
+		const previous = entry.tail;
+		let release!: () => void;
+		entry.tail = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await previous;
+		try {
+			return await operation(await entry.session);
+		} finally {
+			release();
+	}
 	}
 
 	async function resolveRequestProxy(
@@ -1066,13 +1094,12 @@ function createSessionFetcher(
 							sensitiveParams,
 						);
 						const { requestUrl } = serializedUrl;
-						const transport = await getClient(profileName, proxy, ignoreTlsErrors);
-						const { normalized, response } = await fetchStealthRedirectChain(
-							transport,
-							cookieJar,
-							requestUrl,
-							method,
-							options,
+						const { normalized, response } = await withClient(
+							profileName,
+							proxy,
+							ignoreTlsErrors,
+							(transport) =>
+								fetchStealthRedirectChain(transport, cookieJar, requestUrl, method, options),
 						);
 
 						if (proxy && isProxyConnectFailureResponse(response, normalized.body)) {
@@ -1444,7 +1471,7 @@ function createSessionFetcher(
 		close() {
 			closed = true;
 			for (const client of clients.values()) {
-				void client
+				void client.session
 					.then((session) => session.close())
 					.catch((error: unknown) => {
 						const message = error instanceof Error ? error.message : String(error);
@@ -1461,14 +1488,15 @@ function createSessionFetcher(
 		proxy: string,
 	): Promise<"source_ip_denied" | "edge_auth_rejected" | undefined> {
 		try {
-			const client = await getClient(profileName, proxy, false);
-			await client.clearCookies();
-			const response = await client.fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
-				method: "GET",
-				timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
+			return await withClient(profileName, proxy, false, async (client) => {
+				await client.clearCookies();
+				const response = await client.fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
+					method: "GET",
+					timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
+				});
+				const normalized = await normalizeResponse(response);
+				return classifyProxyAuthDiagnosticMessage(normalized.body);
 			});
-			const normalized = await normalizeResponse(response);
-			return classifyProxyAuthDiagnosticMessage(normalized.body);
 		} catch (error) {
 			const message =
 				error instanceof Error

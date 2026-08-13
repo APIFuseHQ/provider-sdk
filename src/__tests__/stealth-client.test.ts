@@ -36,6 +36,7 @@ type MockWreqResponse = {
 	omitUrl?: boolean;
 	redirected?: boolean;
 	sessionCookies?: MockSessionCookie[];
+	beforeReturn?: () => Promise<void>;
 };
 
 type MockBodyState = {
@@ -148,6 +149,7 @@ class MockWreqSession {
 		const response = mockStealthState.queuedResponses.shift();
 		if (!response) throw new Error("No queued response");
 		this.state.cookies = response.sessionCookies ? [...response.sessionCookies] : [];
+		await response.beforeReturn?.();
 		return toWreqResponse(response);
 	}
 
@@ -650,6 +652,54 @@ describe("createStealthClient", () => {
 			Cookie: expect.stringContaining("host_b=two"),
 		});
 		expect(mockStealthState.clients[0]?.clearCookieCalls).toBe(3);
+	});
+
+	it("serializes concurrent fetches that share a native session", async () => {
+		let markFirstStarted!: () => void;
+		const firstStarted = new Promise<void>((resolve) => {
+			markFirstStarted = resolve;
+		});
+		let releaseFirst!: () => void;
+		const firstRelease = new Promise<void>((resolve) => {
+			releaseFirst = resolve;
+		});
+		mockStealthState.queuedResponses.push(
+			{
+				status: 200,
+				body: "first",
+				headers: {},
+				beforeReturn: async () => {
+					markFirstStarted();
+					await firstRelease;
+				},
+			},
+			{ status: 200, body: "second", headers: {} },
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com").createSession();
+		const first = session.fetch("/first", { headers: { Cookie: "request=first" } });
+		await firstStarted;
+		const second = session.fetch("/second", { headers: { Cookie: "request=second" } });
+		await Bun.sleep(0);
+		const callsWhileFirstPending = mockStealthState.clients[0]?.calls.length;
+		const clearsWhileFirstPending = mockStealthState.clients[0]?.clearCookieCalls;
+
+		releaseFirst();
+		await Promise.all([first, second]);
+
+		expect(callsWhileFirstPending).toBe(1);
+		expect(clearsWhileFirstPending).toBe(1);
+		expect(mockStealthState.clients[0]?.calls).toEqual([
+			expect.objectContaining({
+				url: "https://example.com/first",
+				init: expect.objectContaining({ headers: { Cookie: "request=first" } }),
+			}),
+			expect.objectContaining({
+				url: "https://example.com/second",
+				init: expect.objectContaining({ headers: { Cookie: "request=second" } }),
+			}),
+		]);
 	});
 
 	it("does not attach a host-only cookie to a request for another host", async () => {
