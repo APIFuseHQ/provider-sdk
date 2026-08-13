@@ -57,15 +57,16 @@ import {
 import {
 	evaluateRedirectHop,
 	isRedirectStatus,
+	nextRedirectMethod,
 	resolveRedirectUrl,
 } from "./redirects.js";
 import {
 	isSensitiveKey,
+	normalizeSensitiveParams,
 	redactSensitiveError,
 	redactSensitiveRequestError,
 	redactSensitiveText,
 	redactUrlQueryParams,
-	normalizeSensitiveParams,
 	serializeRequestUrl,
 } from "./request-options.js";
 
@@ -81,6 +82,13 @@ const PROXY_CONNECT_FAILURE_BODY_PATTERN =
 const PROXY_AUTH_DIAGNOSTIC_URL = "http://example.com/";
 const PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS = 5_000;
 const STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES = [PROXY_CONNECT_FAILURE_CODE] as const;
+const MAX_STEALTH_REDIRECT_HOPS = 10;
+const REDIRECT_BODY_HEADERS = new Set([
+	"content-encoding",
+	"content-language",
+	"content-location",
+	"content-type",
+]);
 
 function sensitiveQueryParamNames(url: string): string[] {
 	const queryStart = url.indexOf("?");
@@ -759,6 +767,105 @@ function locationHeader(headers: Record<string, string>): string | undefined {
 	return undefined;
 }
 
+function withoutRedirectBodyHeaders(headers: Record<string, string>): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(headers).filter(([name]) => !REDIRECT_BODY_HEADERS.has(name.toLowerCase())),
+	);
+}
+
+function assertStealthRedirectUrl(url: string): void {
+	const protocol = new URL(url).protocol;
+	if (protocol !== "http:" && protocol !== "https:") {
+		throw new TransportError(`Stealth redirect target scheme "${protocol}" is not allowed`, {
+			code: "transport_invalid_url",
+			status: 0,
+		});
+	}
+}
+
+function discardStealthRedirectBody(response: StealthTransportResponse): void {
+	try {
+		const cancellation = response.body?.cancel();
+		if (cancellation) void cancellation.catch(() => undefined);
+	} catch {
+		// Redirect handling is decided from status and headers. A cancellation
+		// failure must not replace or delay that decision.
+	}
+}
+
+async function fetchStealthRedirectChain(
+	transport: WreqSession,
+	cookieJar: CookieJarImpl,
+	requestUrl: string,
+	method: StealthMethod,
+	options: StealthFetchOptions,
+): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> {
+	let currentUrl = requestUrl;
+	let currentMethod = method;
+	let currentBody = options.body === undefined ? undefined : normalizeBody(options.body);
+	let currentHeaders = { ...(options.headers ?? {}) };
+	let followedHops = 0;
+	let response: StealthTransportResponse;
+
+	while (true) {
+		const headers = { ...currentHeaders };
+		if (!hasHeader(headers, "Cookie")) {
+			const cookieHeader = cookieJar.toHeader(currentUrl);
+			if (cookieHeader) headers.Cookie = cookieHeader;
+		}
+		const requestInit: StealthRequestInit = {
+			headers: normalizeHeaders(headers),
+			method: currentMethod,
+			redirect: "manual",
+			...(options.timeout ? { timeout: options.timeout } : {}),
+		};
+		if (currentBody !== undefined) requestInit.body = currentBody;
+
+		await transport.clearCookies();
+		response = await transport.fetch(currentUrl, requestInit);
+		cookieJar.setFromCookieStrings(
+			setCookieHeadersFromResponse(response.headers),
+			response.url ?? currentUrl,
+		);
+
+		if (!isRedirectStatus(response.status) || options.redirect === "manual") break;
+		if (options.redirect === "error") {
+			discardStealthRedirectBody(response);
+			throw new TransportError("Stealth request encountered a redirect", {
+				code: "transport_network_error",
+				status: 0,
+			});
+		}
+
+		const nextUrl = resolveRedirectUrl(
+			response.headers.get("location") ?? undefined,
+			response.url ?? currentUrl,
+		);
+		if (!nextUrl) break;
+		if (followedHops >= MAX_STEALTH_REDIRECT_HOPS) {
+			discardStealthRedirectBody(response);
+			throw new TransportError(
+				`Stealth request exceeded the ${MAX_STEALTH_REDIRECT_HOPS}-redirect limit`,
+				{ code: "transport_network_error", status: 0 },
+			);
+		}
+		assertStealthRedirectUrl(nextUrl);
+		discardStealthRedirectBody(response);
+		const nextMethod = nextRedirectMethod(response.status, currentMethod);
+		if (nextMethod !== currentMethod) {
+			currentBody = undefined;
+			currentHeaders = withoutRedirectBodyHeaders(currentHeaders);
+		}
+		currentMethod = nextMethod;
+		currentUrl = nextUrl;
+		followedHops += 1;
+	}
+
+	const normalized = await normalizeResponse(response, currentUrl, options.maxBodyBytes);
+	if (followedHops > 0) normalized.redirected = true;
+	return { normalized, response };
+}
+
 function createSessionFetcher(
 	baseUrl: string,
 	defaultProfile: string,
@@ -959,52 +1066,14 @@ function createSessionFetcher(
 							sensitiveParams,
 						);
 						const { requestUrl } = serializedUrl;
-						const headers = { ...(options.headers ?? {}) };
-						if (!hasHeader(headers, "Cookie")) {
-							const cookieHeader = cookieJar.toHeader(requestUrl);
-							if (cookieHeader) headers.Cookie = cookieHeader;
-						}
-						const requestInit: StealthRequestInit = {
-							headers: normalizeHeaders(headers),
-							method,
-							...(options.redirect ? { redirect: options.redirect } : {}),
-							...(options.timeout ? { timeout: options.timeout } : {}),
-						};
-						if (options.body !== undefined) {
-							requestInit.body = normalizeBody(options.body);
-						}
 						const transport = await getClient(profileName, proxy, ignoreTlsErrors);
-						await transport.clearCookies();
-						const response = await transport.fetch(
+						const { normalized, response } = await fetchStealthRedirectChain(
+							transport,
+							cookieJar,
 							requestUrl,
-							requestInit,
+							method,
+							options,
 						);
-						const normalized = await normalizeResponse(response, requestUrl, options.maxBodyBytes);
-						const responseCookieStrings = setCookieHeadersFromResponse(response.headers);
-						cookieJar.setFromCookieStrings(responseCookieStrings, response.url ?? requestUrl);
-						const responseCookieNames = new Set(
-							responseCookieStrings.flatMap((cookieString) => {
-								const parsed = Cookie.parse(cookieString);
-								return parsed ? [parsed.key] : [];
-							}),
-						);
-						for (const cookie of transport.getAllCookies()) {
-							// Response Set-Cookie headers are authoritative: wreq-js does not
-							// expose whether its effective domain came from Domain= or host-only
-							// storage, so replaying a covered cookie would lose that distinction.
-							if (responseCookieNames.has(cookie.name)) continue;
-							const attributes = [
-								cookie.path ? `Path=${cookie.path}` : undefined,
-								cookie.secure ? "Secure" : undefined,
-								cookie.httpOnly ? "HttpOnly" : undefined,
-								cookie.sameSite ? `SameSite=${cookie.sameSite}` : undefined,
-								cookie.expiresAtMs ? `Expires=${new Date(cookie.expiresAtMs).toUTCString()}` : undefined,
-							].filter((value): value is string => Boolean(value));
-							cookieJar.setFromCookieStrings(
-								[`${cookie.name}=${cookie.value}; ${attributes.join("; ")}`],
-								response.url ?? requestUrl,
-							);
-						}
 
 						if (proxy && isProxyConnectFailureResponse(response, normalized.body)) {
 							throw createProxyConnectFailureError(normalized.body);

@@ -609,37 +609,47 @@ describe("createStealthClient", () => {
 		]);
 	});
 
-	it("imports wreq session cookies from redirects for sequential requests", async () => {
+	it("scopes redirect-hop cookies to the origin that set them", async () => {
 		mockStealthState.queuedResponses.push(
 			{
-				status: 200,
-				body: "first",
-				headers: { "set-cookie": "sid=abc; Path=/" },
-				sessionCookies: [
-					{
-						name: "redirect_sid",
-						value: "xyz",
-						domain: "example.com",
-						path: "/",
-						secure: true,
-						httpOnly: false,
-					},
-				],
+				status: 302,
+				body: "",
+				headers: {
+					location: "https://host-b.example/landing",
+					"set-cookie": "host_a=one; Path=/",
+				},
+				url: "https://host-a.example/start",
 			},
-			{ status: 200, body: "second", headers: {} },
+			{
+				status: 200,
+				body: "landed",
+				headers: { "set-cookie": "host_b=two; Path=/" },
+				url: "https://host-b.example/landing",
+			},
+			{
+				status: 200,
+				body: "back",
+				headers: {},
+				url: "https://host-a.example/later",
+			},
 		);
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com");
-		const session = client.createSession();
+		const session = createStealthClient("https://host-a.example").createSession();
 
-		await session.fetch("/first");
-		await session.fetch("/second");
+		await session.fetch("/start");
+		await session.fetch("/later");
 
-		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).toMatchObject({
-			Cookie: "sid=abc; redirect_sid=xyz",
+		expect(session.cookies.toHeader("https://host-a.example/account")).toBe("host_a=one");
+		expect(session.cookies.toHeader("https://host-b.example/account")).toBe("host_b=two");
+		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
+		expect(mockStealthState.clients[0]?.calls[2]?.init?.headers).toMatchObject({
+			Cookie: "host_a=one",
 		});
-		expect(mockStealthState.clients[0]?.clearCookieCalls).toBe(2);
+		expect(mockStealthState.clients[0]?.calls[2]?.init?.headers).not.toMatchObject({
+			Cookie: expect.stringContaining("host_b=two"),
+		});
+		expect(mockStealthState.clients[0]?.clearCookieCalls).toBe(3);
 	});
 
 	it("does not attach a host-only cookie to a request for another host", async () => {
