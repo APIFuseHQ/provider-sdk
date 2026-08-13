@@ -139,6 +139,7 @@ function isZodSchema(schema: SchemaLike): schema is ZodType {
 
 function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonValue | undefined {
 	const projectionMarkers = new Map<string, OutputTextTrustProjectionMarker>();
+	const expectedLeafMarkers = new Map<string, string>();
 	try {
 		const jsonSchema = z.toJSONSchema(schema, {
 			unrepresentable: options.outputTextTrust ? "any" : "throw",
@@ -154,15 +155,26 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 					const resolved = resolveOutputTextTrustProjection(zodSchema);
 					delete projectedSchema[APIFUSE_TEXT_TRUST_META_KEY];
 					if (resolved !== undefined) {
-						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
-							inherited: resolved.inherited,
-							kind: "leaf",
-							local: resolved.local,
-						});
+						const markerId = writeOutputTextTrustProjectionMarker(
+							projectedSchema,
+							projectionMarkers,
+							{
+								inherited: resolved.inherited,
+								kind: "leaf",
+								local: resolved.local,
+							},
+						);
+						expectedLeafMarkers.set(projectedJsonSchemaPath(path), markerId);
 					} else if (invalidatesDescendantOutputTextAutoTrust(zodSchema)) {
 						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
 							kind: "container-unsafe",
 						});
+						classifyUnsafeObjectShape(
+							projectedSchema,
+							projectionMarkers,
+							expectedLeafMarkers,
+							path,
+						);
 					} else if (inheritsUntrustedOutputTextTrust(zodSchema)) {
 						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
 							kind: "container-untrusted",
@@ -170,12 +182,20 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 					}
 					if (hasOpenObjectCatchall(zodSchema)) {
 						const propertyNames: Record<string, unknown> = {};
-						writeOutputTextTrustProjectionMarker(propertyNames, projectionMarkers, {
-							inherited: "untrusted",
-							kind: "leaf",
-							local: "untrusted",
-						});
+						const markerId = writeOutputTextTrustProjectionMarker(
+							propertyNames,
+							projectionMarkers,
+							{
+								inherited: "untrusted",
+								kind: "leaf",
+								local: "untrusted",
+							},
+						);
 						projectedSchema.propertyNames = propertyNames;
+						expectedLeafMarkers.set(
+							appendJsonSchemaPath(projectedJsonSchemaPath(path), "propertyNames"),
+							markerId,
+						);
 					}
 				} catch (error) {
 					throw new OutputTextTrustProjectionError(
@@ -187,7 +207,9 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 				}
 			},
 		});
-		if (options.outputTextTrust) finalizeProjectedTextTrust(jsonSchema, projectionMarkers, options);
+		if (options.outputTextTrust) {
+			finalizeProjectedTextTrust(jsonSchema, projectionMarkers, expectedLeafMarkers, options);
+		}
 		return toJsonValue(jsonSchema);
 	} catch (error) {
 		if (error instanceof OutputTextTrustProjectionError) throw error;
@@ -196,22 +218,47 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 	}
 }
 
+function classifyUnsafeObjectShape(
+	projectedSchema: Record<string, unknown>,
+	projectionMarkers: Map<string, OutputTextTrustProjectionMarker>,
+	expectedLeafMarkers: Map<string, string>,
+	path: readonly (string | number)[],
+): void {
+	if (
+		projectedSchema.type !== "object" &&
+		!(Array.isArray(projectedSchema.type) && projectedSchema.type.includes("object"))
+	) {
+		return;
+	}
+	for (const keyword of ["additionalProperties", "propertyNames"] as const) {
+		const unknownTextCarrier: Record<string, unknown> = {};
+		const markerId = writeOutputTextTrustProjectionMarker(unknownTextCarrier, projectionMarkers, {
+			inherited: "untrusted",
+			kind: "leaf",
+			local: "untrusted",
+		});
+		projectedSchema[keyword] = unknownTextCarrier;
+		expectedLeafMarkers.set(appendJsonSchemaPath(projectedJsonSchemaPath(path), keyword), markerId);
+	}
+}
+
 function writeOutputTextTrustProjectionMarker(
 	schema: Record<string, unknown>,
 	markers: Map<string, OutputTextTrustProjectionMarker>,
 	marker: OutputTextTrustProjectionMarker,
-): void {
+): string {
 	const existingId = schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY];
 	if (typeof existingId === "string") {
 		const existingMarker = markers.get(existingId);
 		if (existingMarker) {
 			markers.set(existingId, mergeOutputTextTrustProjectionMarkers(existingMarker, marker));
-			return;
+			return existingId;
 		}
 	}
 	const id = randomUUID();
 	markers.set(id, marker);
 	schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] = id;
+	return id;
 }
 
 function mergeOutputTextTrustProjectionMarkers(
@@ -309,6 +356,7 @@ interface ProjectedJsonSchemaNode {
 function finalizeProjectedTextTrust(
 	value: unknown,
 	projectionMarkers: ReadonlyMap<string, OutputTextTrustProjectionMarker>,
+	expectedLeafMarkers: ReadonlyMap<string, string>,
 	options: DescribeSchemaOptions,
 ): void {
 	if (!isJsonSchemaNode(value)) {
@@ -329,9 +377,26 @@ function finalizeProjectedTextTrust(
 			path,
 			options,
 		);
-		if (marker) {
-			markers.set(schema, marker);
-		} else if (projectedJsonSchemaAllowsString(schema)) {
+		if (marker) markers.set(schema, marker);
+	}
+	for (const [expectedPath, expectedMarkerId] of expectedLeafMarkers) {
+		if (
+			nodes.some(
+				({ schema }) =>
+					schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] === expectedMarkerId &&
+					markers.get(schema)?.kind === "leaf",
+			)
+		)
+			continue;
+		throw new OutputTextTrustProjectionError(
+			expectedPath,
+			new TypeError("A projected output text leaf lost its authenticated trust marker."),
+			options.operationId,
+			options.eventName,
+		);
+	}
+	for (const { schema } of nodes) {
+		if (!markers.has(schema) && projectedJsonSchemaAllowsString(schema)) {
 			markers.set(schema, { inherited: "untrusted", kind: "leaf", local: "untrusted" });
 		}
 	}
@@ -555,6 +620,10 @@ function jsonSchemaPath(path: readonly (string | number)[]): string {
 	return `#/${path
 		.map((segment) => String(segment).replaceAll("~", "~0").replaceAll("/", "~1"))
 		.join("/")}`;
+}
+
+function projectedJsonSchemaPath(path: readonly (string | number)[]): string {
+	return path.length === 0 ? "#" : jsonSchemaPath(path);
 }
 
 function getSchemaTypeName(schema: SchemaLike): string | undefined {

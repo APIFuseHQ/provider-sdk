@@ -998,7 +998,7 @@ function isProvablyRestrictedRegexBody(source: string): boolean {
 	for (let index = 0; index < source.length; index += 1) {
 		const character = source[index];
 		if (character === "\\") {
-			const escapedLength = safeRegexEscapeLength(source.slice(index));
+			const escapedLength = safeRegexAtomLength(source.slice(index));
 			if (escapedLength === 0) return false;
 			index += escapedLength - 1;
 			continue;
@@ -1031,18 +1031,12 @@ function isProvablyRestrictedRegexBody(source: string): boolean {
 			index += match[0].length - 1;
 			continue;
 		}
-		if (
-			character === "." ||
-			character === "*" ||
-			character === "+" ||
-			character === "^" ||
-			character === "$" ||
-			character === "}" ||
-			/\s/u.test(character)
-		) {
-			return false;
+		if (character === "|") {
+			if (groupDepth === 0) return false;
+			continue;
 		}
-		if (character === "|" && groupDepth === 0) return false;
+		if (character === "?") continue;
+		if (safeRegexAtomLength(source.slice(index)) !== 1) return false;
 	}
 	return groupDepth === 0;
 }
@@ -1052,17 +1046,13 @@ function safeRegexCharacterClassLength(source: string): number {
 	for (let index = 1; index < source.length; index += 1) {
 		const character = source[index];
 		if (character === "]") return index + 1;
-		if (character === "-") {
-			if (index === 1 || source[index + 1] === "]") continue;
-			return 0;
-		}
 
-		const atomLength = regexCharacterClassAtomLength(source.slice(index));
+		const atomLength = safeRegexAtomLength(source.slice(index));
 		if (atomLength === 0) return 0;
 		const rangeSeparator = index + atomLength;
 		if (source[rangeSeparator] === "-" && source[rangeSeparator + 1] !== "]") {
 			const endIndex = rangeSeparator + 1;
-			const endLength = regexCharacterClassAtomLength(source.slice(endIndex));
+			const endLength = safeRegexAtomLength(source.slice(endIndex));
 			if (endLength === 0 || !isSafeRegexCharacterRange(source, index, endIndex)) return 0;
 			index = endIndex + endLength - 1;
 			continue;
@@ -1072,11 +1062,15 @@ function safeRegexCharacterClassLength(source: string): number {
 	return 0;
 }
 
-function regexCharacterClassAtomLength(source: string): number {
+function safeRegexAtomLength(source: string): number {
 	const character = source[0];
 	if (character === undefined) return 0;
 	if (/^[A-Za-z0-9]$/.test(character)) return 1;
-	return character === "\\" && SAFE_REGEX_ESCAPED_PUNCTUATION.includes(source[1] ?? "") ? 2 : 0;
+	if (character === "-") return 1;
+	if (character !== "\\") return 0;
+	const escaped = source[1];
+	if (escaped === "d") return 2;
+	return escaped !== undefined && SAFE_REGEX_ESCAPED_PUNCTUATION.includes(escaped) ? 2 : 0;
 }
 
 function isSafeRegexCharacterRange(source: string, startIndex: number, endIndex: number): boolean {
@@ -1101,13 +1095,7 @@ function regexCharacterClassLiteralCodePoint(source: string, index: number): num
 	return escaped.codePointAt(0);
 }
 
-function safeRegexEscapeLength(source: string): number {
-	const escaped = source[1];
-	if (escaped === "d" || escaped === "w") return 2;
-	return escaped !== undefined && SAFE_REGEX_ESCAPED_PUNCTUATION.includes(escaped) ? 2 : 0;
-}
-
-const SAFE_REGEX_ESCAPED_PUNCTUATION = "\\/.-^$*+?()[]{}|";
+const SAFE_REGEX_ESCAPED_PUNCTUATION = "\\.-^$*+?()[]{}|";
 
 function requireOutputTextTrustSchema(schema: unknown): InternalZodSchema {
 	if (!(schema instanceof z.ZodType)) throw new OutputTextTrustSchemaError(schema);
