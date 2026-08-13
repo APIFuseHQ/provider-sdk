@@ -1,5 +1,6 @@
 import ms from "ms";
 
+import { validateFailClosedDeclaration } from "./declaration-validation.js";
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
 import {
@@ -2529,7 +2530,7 @@ export function defineProvider<
 			`Provider "${config.id}" cannot define browser config unless runtime is "browser"`,
 			{ fix: 'Set runtime: "browser" or remove the browser config' },
 		);
-	return {
+	const provider: ProviderDefinition & { operations: OperationMapConfig<TOperations> } = {
 		id: config.id,
 		version: config.version,
 		runtime: config.runtime,
@@ -2558,4 +2559,6 @@ export function defineProvider<
 		healthProbe: config.healthProbe ?? config.healthMonitor,
 		healthJourneys: config.healthJourneys,
 	};
+	validateFailClosedDeclaration(provider);
+	return provider;
 }

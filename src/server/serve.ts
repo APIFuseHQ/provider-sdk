@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
+import { validateFailClosedDeclaration } from "../declaration-validation.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
@@ -1840,6 +1841,11 @@ export function createServerApp(
 	provider: ProviderDefinition,
 	options: ProviderServerOptions = {},
 ): Hono {
+	// Fail-closed validation runs here rather than only in serve(): createServerApp
+	// is a public export, so a cast-bypassed declaration would otherwise reach the
+	// request path unvalidated. serve() calls into this function, so validating
+	// here covers both entry points exactly once per app construction.
+	validateFailClosedDeclaration(provider);
 	validateStatefulServerConfig(options);
 	const app = new Hono();
 	const logger = options.logger ?? defaultProviderServerLogger;
@@ -2439,6 +2445,8 @@ export async function serve(
 	provider: ProviderDefinition,
 	options: ServeOptions = {},
 ): Promise<ProviderServerHandle> {
+	// Declaration validation happens inside createServerApp (the shared app
+	// construction path), so serve() does not duplicate the call here.
 	const bunRuntime = getBunServeRuntime();
 
 	if (bunRuntime === undefined) {

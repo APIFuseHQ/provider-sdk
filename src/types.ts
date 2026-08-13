@@ -657,9 +657,13 @@ export interface HealthJourneyDefinition {
 	requiredSecrets?: readonly string[];
 	manualTrigger?: HealthJourneyManualTriggerPolicy;
 	steps: readonly [HealthJourneyStep, ...HealthJourneyStep[]];
-	run?: (
-		ctx: HealthJourneyRunContext,
-	) => Promise<HealthJourneyRunResult | undefined>;
+	/**
+	 * Required: a journey always declares `coversOperations`, and the health
+	 * monitor reports a run-less journey as `journey_run_missing`. Declaration
+	 * validation rejects a missing `run` (`health-journey-executable`), so this
+	 * is typed required to fail at compile time rather than at boot.
+	 */
+	run: (ctx: HealthJourneyRunContext) => Promise<HealthJourneyRunResult | undefined>;
 }
 
 /**
