@@ -298,3 +298,16 @@ its identity binding. An IP-bound artifact minted without a recorded egress
 identity is unsafe to share, so both Akamai kinds reject direct cache writes;
 `cloudflare_interstitial` retains its pre-existing direct-index behavior pending
 measurement. Token-family kinds are declared non-cacheable and skip cache reads.
+
+Pitfall 6 above is superseded by #132, which landed on `main` while this branch
+was in review. `ProviderCache.key()` no longer drops secret-named selectors: it
+keeps them in the key material with their values replaced by an HMAC-SHA256
+digest (keyed by `APIFUSE__CACHE__KEY_PEPPER` when configured), so distinct
+values no longer collapse onto one entry. The original text is kept because the
+identity-separation tests in this change were written against that trap, and
+#132's own test update inverted the same assertion from
+`firstCookieKey !== secondCookieKey` to `===`. The naming guidance survives the
+change for a different reason: field names matching the secret patterns are
+still reported as `[secret-scoped#N]` markers in response metadata rather than
+raw keys, so identity material belongs under a neutral name such as
+`issuerDigest` to stay diagnosable.
