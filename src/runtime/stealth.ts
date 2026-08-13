@@ -6,7 +6,6 @@ import type {
 	RequestInit as WreqRequestInit,
 	Session as WreqSession,
 } from "wreq-js";
-import { createSession, getProfiles } from "wreq-js";
 
 import type { ProxyResolutionOptions, ProxyVendorName } from "../config/loader.js";
 import {
@@ -289,8 +288,27 @@ class CookieJarImpl implements CookieJar {
 	}
 }
 
-const WREQ_PROFILES = getProfiles();
 const DEFAULT_WREQ_PROFILE: BrowserProfile = "chrome_146";
+
+type WreqModule = typeof import("wreq-js");
+
+let wreqModulePromise: Promise<WreqModule> | undefined;
+
+function getWreqModule(): Promise<WreqModule> {
+	if (!wreqModulePromise) {
+		wreqModulePromise = import("wreq-js").catch((error: unknown) => {
+			throw new SDKError(
+				`Stealth transport is unavailable on ${process.platform}-${process.arch}: the wreq-js native binary could not be loaded.`,
+				{
+					code: "stealth_transport_unavailable",
+					cause: error instanceof Error ? error : undefined,
+				},
+			);
+		});
+	}
+
+	return wreqModulePromise;
+}
 
 function parseProfileIdentifier(identifier: string): {
 	family: string;
@@ -317,12 +335,15 @@ function compareVersionDistance(target: number[], left: number[], right: number[
 	return 0;
 }
 
-function closestWreqProfile(identifier: string): BrowserProfile | undefined {
+function closestWreqProfile(
+	identifier: string,
+	wreqProfiles: readonly BrowserProfile[],
+): BrowserProfile | undefined {
 	const requested = parseProfileIdentifier(identifier);
 	if (!requested) return undefined;
 
 	let closest: { name: BrowserProfile; version: number[] } | undefined;
-	for (const candidateName of WREQ_PROFILES) {
+	for (const candidateName of wreqProfiles) {
 		const candidate = parseProfileIdentifier(candidateName);
 		if (!candidate || candidate.family !== requested.family) continue;
 		if (
@@ -335,7 +356,7 @@ function closestWreqProfile(identifier: string): BrowserProfile | undefined {
 	return closest?.name;
 }
 
-function resolveWreqProfile(profileName: string): {
+function resolveWreqProfile(profileName: string, wreqProfiles: readonly BrowserProfile[]): {
 	browser: BrowserProfile;
 	os: EmulationOS;
 } {
@@ -355,7 +376,7 @@ function resolveWreqProfile(profileName: string): {
 	}
 
 	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
-	const browser = closestWreqProfile(identifier);
+	const browser = closestWreqProfile(identifier, wreqProfiles);
 	if (!browser) {
 		throw new SDKError(
 			`Stealth profile "${profileName}" cannot be mapped to a wreq-js browser profile.`,
@@ -757,11 +778,12 @@ function createSessionFetcher(
 		if (closed) {
 			throw new TransportError("Stealth session is closed", { status: 0 });
 		}
-		const { browser, os } = resolveWreqProfile(profileName);
+		const wreq = await getWreqModule();
+		const { browser, os } = resolveWreqProfile(profileName, wreq.getProfiles());
 		const cacheKey = JSON.stringify({ browser, proxyUrl, ignoreTlsErrors });
 		let client = clients.get(cacheKey);
 		if (!client) {
-			client = createSession({
+			client = wreq.createSession({
 				browser,
 				os,
 				...(proxyUrl ? { proxy: proxyUrl } : {}),
@@ -1353,7 +1375,12 @@ function createSessionFetcher(
 		close() {
 			closed = true;
 			for (const client of clients.values()) {
-				void client.then((session) => session.close()).catch(() => undefined);
+				void client
+					.then((session) => session.close())
+					.catch((error: unknown) => {
+						const message = error instanceof Error ? error.message : String(error);
+						warn(`[provider-sdk] Failed to close stealth transport session: ${message}`);
+					});
 			}
 			clients.clear();
 		},

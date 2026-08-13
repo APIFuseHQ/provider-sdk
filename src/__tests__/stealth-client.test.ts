@@ -61,6 +61,7 @@ const mockStealthState = {
 	clients: [] as MockStealthClientState[],
 	queuedResponses: [] as MockWreqResponse[],
 	queuedErrors: [] as (Error | (() => Error))[],
+	queuedCloseErrors: [] as Error[],
 };
 
 function toHeaders(headers: MockWreqResponse["headers"]): Headers {
@@ -181,6 +182,8 @@ class MockWreqSession {
 
 	async close() {
 		this.state.closed = true;
+		const error = mockStealthState.queuedCloseErrors.shift();
+		if (error) throw error;
 	}
 }
 
@@ -210,6 +213,7 @@ describe("createStealthClient", () => {
 		mockStealthState.clients.length = 0;
 		mockStealthState.queuedResponses.length = 0;
 		mockStealthState.queuedErrors.length = 0;
+		mockStealthState.queuedCloseErrors.length = 0;
 	});
 
 	it("returns fetch and createSession functions", async () => {
@@ -572,7 +576,10 @@ describe("createStealthClient", () => {
 		);
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com");
+		const warnings: string[] = [];
+		const client = createStealthClient("https://example.com", {
+			warn: (message) => warnings.push(message),
+		});
 		const session = client.createSession();
 
 		await session.fetch("/one");
@@ -590,12 +597,16 @@ describe("createStealthClient", () => {
 			}),
 		]);
 
+		mockStealthState.queuedCloseErrors.push(new Error("close exploded"));
 		session.close();
 		await expect(session.fetch("/closed")).rejects.toMatchObject({
 			message: "Stealth session is closed",
 		});
 		await Bun.sleep(0);
 		expect(mockStealthState.clients[0]?.closed).toBe(true);
+		expect(warnings).toEqual([
+			"[provider-sdk] Failed to close stealth transport session: close exploded",
+		]);
 	});
 
 	it("imports wreq session cookies from redirects for sequential requests", async () => {
