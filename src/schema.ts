@@ -328,6 +328,20 @@ export class OutputTextTrustSchemaError extends TypeError {
 	}
 }
 
+export class OutputTextTrustCollectionError extends Error {
+	readonly classification = "untrusted" as const;
+	readonly code = "output_text_trust_collection_failed";
+
+	constructor(
+		public readonly schemaPath: string,
+		cause: unknown,
+	) {
+		super(`Output text-trust collection failed at schema path ${schemaPath}.`);
+		this.name = "OutputTextTrustCollectionError";
+		this.cause = cause;
+	}
+}
+
 /**
  * Collect every textual leaf in a Zod output schema as a deterministic
  * schema-path-to-classification object. The path grammar is rooted at `$`:
@@ -383,6 +397,33 @@ function collectOutputTextLeaves(schema: InternalZodSchema): OutputTextTrustColl
 }
 
 function walkOutputSchema(
+	schema: InternalZodSchema,
+	path: string,
+	out: Array<OutputTextLeaf & { readonly path: string }>,
+	debtPaths: Set<string>,
+	emittedPaths: Set<string>,
+	activeSchemas: Set<InternalZodSchema>,
+	expandingCycle: boolean,
+	inheritedUntrusted: boolean,
+): void {
+	try {
+		walkOutputSchemaUnchecked(
+			schema,
+			path,
+			out,
+			debtPaths,
+			emittedPaths,
+			activeSchemas,
+			expandingCycle,
+			inheritedUntrusted,
+		);
+	} catch (error) {
+		if (error instanceof OutputTextTrustCollectionError) throw error;
+		throw new OutputTextTrustCollectionError(path, error);
+	}
+}
+
+function walkOutputSchemaUnchecked(
 	schema: InternalZodSchema,
 	path: string,
 	out: Array<OutputTextLeaf & { readonly path: string }>,
@@ -672,6 +713,8 @@ function flattenedOutputSchema(def: InternalZodDef): InternalZodSchema | undefin
 			return asInternalZodSchema(def.innerType);
 		case "pipe":
 			return asInternalZodSchema(def.out);
+		case "lazy":
+			return asInternalZodSchema(def.getter());
 		case "string":
 		case "template_literal":
 		case "literal":
@@ -696,7 +739,6 @@ function flattenedOutputSchema(def: InternalZodDef): InternalZodSchema | undefin
 		case "map":
 		case "set":
 		case "function":
-		case "lazy":
 		case "custom":
 		case "transform":
 		case "nan":
@@ -724,9 +766,9 @@ function isOutputTextLeafDef(def: InternalZodDef): boolean {
 
 function isAutoTrustedOutputTextLeaf(schema: InternalZodSchema): boolean {
 	const def = schema._zod.def;
+	if (hasOverwriteCheck(def)) return false;
 	if (def.type === "literal" || def.type === "enum") return isOutputTextLeafDef(def);
 	if (def.type !== "string" && def.type !== "template_literal") return false;
-	if (def.checks?.some((check) => check._zod.def.check === "overwrite")) return false;
 
 	const { bag, pattern } = schema._zod;
 	const format = bag.format;
@@ -742,6 +784,22 @@ function isAutoTrustedOutputTextLeaf(schema: InternalZodSchema): boolean {
 		[...patterns].every(
 			(candidate) => candidate instanceof RegExp && isRestrictiveAnchoredPattern(candidate),
 		)
+	);
+}
+
+function hasOverwriteCheck(def: InternalZodDef): boolean {
+	const checks = Reflect.get(def, "checks");
+	return (
+		Array.isArray(checks) &&
+		checks.some((check) => {
+			if (!check || typeof check !== "object") return false;
+			const internals = Reflect.get(check, "_zod");
+			if (!internals || typeof internals !== "object") return false;
+			const checkDef = Reflect.get(internals, "def");
+			return (
+				checkDef && typeof checkDef === "object" && Reflect.get(checkDef, "check") === "overwrite"
+			);
+		})
 	);
 }
 
@@ -860,15 +918,49 @@ function safeRegexCharacterClassLength(source: string): number {
 	for (let index = 1; index < source.length; index += 1) {
 		const character = source[index];
 		if (character === "]") return index + 1;
-		if (character === "\\") {
-			const escapedLength = safeRegexEscapeLength(source.slice(index));
-			if (escapedLength === 0) return 0;
-			index += escapedLength - 1;
+		if (character === "[" || /\s/u.test(character)) return 0;
+
+		const atomLength = regexCharacterClassAtomLength(source.slice(index));
+		if (atomLength === 0) return 0;
+		const rangeSeparator = index + atomLength;
+		if (source[rangeSeparator] === "-" && source[rangeSeparator + 1] !== "]") {
+			const endIndex = rangeSeparator + 1;
+			const endLength = regexCharacterClassAtomLength(source.slice(endIndex));
+			if (endLength === 0 || !isSafeRegexCharacterRange(source, index, endIndex)) return 0;
+			index = endIndex + endLength - 1;
 			continue;
 		}
-		if (character === "[" || /\s/u.test(character)) return 0;
+		if (character === "-" && index !== 1 && source[index + 1] !== "]") return 0;
+		index += atomLength - 1;
 	}
 	return 0;
+}
+
+function regexCharacterClassAtomLength(source: string): number {
+	if (source.length === 0 || source[0] === "]" || /\s/u.test(source[0] ?? "")) return 0;
+	return source[0] === "\\" ? safeRegexEscapeLength(source) : 1;
+}
+
+function isSafeRegexCharacterRange(source: string, startIndex: number, endIndex: number): boolean {
+	const start = regexCharacterClassLiteralCodePoint(source, startIndex);
+	const end = regexCharacterClassLiteralCodePoint(source, endIndex);
+	if (start === undefined || end === undefined || start > end) return false;
+	return [
+		["0".codePointAt(0), "9".codePointAt(0)],
+		["A".codePointAt(0), "Z".codePointAt(0)],
+		["a".codePointAt(0), "z".codePointAt(0)],
+	].some(
+		([minimum, maximum]) =>
+			minimum !== undefined && maximum !== undefined && start >= minimum && end <= maximum,
+	);
+}
+
+function regexCharacterClassLiteralCodePoint(source: string, index: number): number | undefined {
+	const character = source[index];
+	if (character !== "\\") return character?.codePointAt(0);
+	const escaped = source[index + 1];
+	if (escaped === undefined || escaped === "d" || escaped === "w") return undefined;
+	return escaped.codePointAt(0);
 }
 
 function safeRegexEscapeLength(source: string): number {

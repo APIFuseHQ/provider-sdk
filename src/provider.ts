@@ -71,6 +71,7 @@ export {
 	fields,
 	findUnclassifiedOutputTextPaths,
 	isSensitiveSchema,
+	OutputTextTrustCollectionError,
 	OutputTextTrustSchemaError,
 	redactPayload,
 	type OutputTextTrustMap,

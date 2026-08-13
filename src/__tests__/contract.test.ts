@@ -9,6 +9,7 @@ import {
 	digestProviderContract,
 	every,
 	extractProviderContract,
+	OutputTextTrustProjectionError,
 } from "../index.js";
 import type { ProviderContext, ProviderDefinition } from "../types.js";
 
@@ -195,6 +196,48 @@ describe("provider contract extraction", () => {
 
 		expect(inputSchema).not.toContain("x-apifuse-text-trust");
 		expect(outputSchema).toContain('"x-apifuse-text-trust":{"v":1,"trust":"untrusted"}');
+	});
+
+	it("0217664c4bf9: projects text trust into SSE event output schemas", () => {
+		const provider = buildProvider(["zeta-search", "alpha-search"]);
+		const operation = provider.operations["alpha-search"];
+		if (!operation) throw new Error("alpha-search operation missing");
+		operation.transport = {
+			kind: "sse",
+			events: {
+				message: z.object({ text: z.string().textTrust("untrusted") }),
+			},
+		};
+
+		const snapshot = extractProviderContract(provider);
+		const extracted = snapshot.operations.find((candidate) => candidate.id === "alpha-search");
+		expect(JSON.stringify(extracted?.transport)).toContain(
+			'"x-apifuse-text-trust":{"v":1,"trust":"untrusted"}',
+		);
+	});
+
+	it("15463cdd7a87/13d939706002/a1969c50965d: unrepresentable outputs fail closed with operation context", () => {
+		const provider = buildProvider(["zeta-search", "alpha-search"]);
+		const operation = provider.operations["alpha-search"];
+		if (!operation) throw new Error("alpha-search operation missing");
+		operation.output = z.string().transform((value) => value);
+
+		try {
+			extractProviderContract(provider);
+			expect.unreachable("unrepresentable operation output should fail extraction");
+		} catch (error) {
+			expect(error).toBeInstanceOf(OutputTextTrustProjectionError);
+			expect(error).toMatchObject({
+				classification: "untrusted",
+				code: "output_text_trust_projection_failed",
+				operationId: "alpha-search",
+				schemaPath: "$",
+			});
+			expect((error as Error).message).toContain('operation "alpha-search"');
+			expect((error as Error).cause).toEqual(
+				new Error("Transforms cannot be represented in JSON Schema"),
+			);
+		}
 	});
 
 	it("produces a stable digest for semantically identical provider definitions", () => {
