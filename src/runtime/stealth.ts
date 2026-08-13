@@ -958,13 +958,20 @@ function createSessionFetcher(
 							requestInit,
 						);
 						const normalized = await normalizeResponse(response, requestUrl, options.maxBodyBytes);
-						cookieJar.setFromCookieStrings(
-							setCookieHeadersFromResponse(response.headers),
-							response.url ?? requestUrl,
+						const responseCookieStrings = setCookieHeadersFromResponse(response.headers);
+						cookieJar.setFromCookieStrings(responseCookieStrings, response.url ?? requestUrl);
+						const responseCookieNames = new Set(
+							responseCookieStrings.flatMap((cookieString) => {
+								const parsed = Cookie.parse(cookieString);
+								return parsed ? [parsed.key] : [];
+							}),
 						);
 						for (const cookie of transport.getAllCookies()) {
+							// Response Set-Cookie headers are authoritative: wreq-js does not
+							// expose whether its effective domain came from Domain= or host-only
+							// storage, so replaying a covered cookie would lose that distinction.
+							if (responseCookieNames.has(cookie.name)) continue;
 							const attributes = [
-								cookie.domain ? `Domain=${cookie.domain}` : undefined,
 								cookie.path ? `Path=${cookie.path}` : undefined,
 								cookie.secure ? "Secure" : undefined,
 								cookie.httpOnly ? "HttpOnly" : undefined,

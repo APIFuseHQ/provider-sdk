@@ -637,21 +637,31 @@ describe("createStealthClient", () => {
 				status: 200,
 				body: "first",
 				headers: { "set-cookie": "sid=host-a; Path=/" },
-				url: "https://host-a.example/first",
+				url: "https://a.example.com/first",
+				sessionCookies: [
+					{
+						name: "sid",
+						value: "host-a",
+						domain: "a.example.com",
+						path: "/",
+						secure: true,
+						httpOnly: false,
+					},
+				],
 			},
 			{
 				status: 200,
 				body: "second",
 				headers: {},
-				url: "https://host-b.example/second",
+				url: "https://b.a.example.com/second",
 			},
 		);
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const session = createStealthClient("https://host-a.example").createSession();
+		const session = createStealthClient("https://a.example.com").createSession();
 
 		await session.fetch("/first");
-		await session.fetch("https://host-b.example/second");
+		await session.fetch("https://b.a.example.com/second");
 
 		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
 	});
