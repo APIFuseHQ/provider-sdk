@@ -152,6 +152,8 @@ export const VALID_PROVIDER_CHALLENGE_KINDS = exhaustiveLiteralArray<ProviderCha
 	"hcaptcha",
 	"cloudflare_interstitial",
 	"aws_waf",
+	"akamai_sec_cpt",
+	"akamai_sensor",
 ] as const);
 const SMARTPROXY_APP_KEY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
@@ -759,7 +761,12 @@ function validateProviderResolver(config: { id: string; resolver?: ProviderResol
 			fix: `Set resolver for provider "${config.id}" to { vendors: ["2captcha"], kinds: ["turnstile"] }.`,
 		});
 	}
-	rejectUnknownFields(resolver, new Set(["vendors", "kinds"]), "resolver", config.id);
+	rejectUnknownFields(
+		resolver,
+		new Set(["vendors", "kinds", "clientProfile"]),
+		"resolver",
+		config.id,
+	);
 	validateResolverLiteralArray(
 		resolver.vendors,
 		"resolver.vendors",
@@ -772,6 +779,17 @@ function validateProviderResolver(config: { id: string; resolver?: ProviderResol
 		VALID_PROVIDER_CHALLENGE_KINDS,
 		config.id,
 	);
+	if (
+		resolver.clientProfile !== undefined &&
+		(typeof resolver.clientProfile !== "string" || !resolver.clientProfile.trim())
+	) {
+		throw new ValidationError(
+			`Provider "${config.id}" has invalid resolver.clientProfile: must be a non-empty string.`,
+			{
+				fix: `Set resolver.clientProfile for provider "${config.id}" to a transport-owned profile name.`,
+			},
+		);
+	}
 }
 
 function validateResolverLiteralArray<TValue extends string>(

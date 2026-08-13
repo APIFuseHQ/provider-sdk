@@ -185,6 +185,19 @@ const NEGATIVE_CONTROLS = [
 		].join("\n"),
 	},
 	{
+		filename: "negative-control-resolver-runtime-adapter-factories.ts",
+		expectedCode: "TS2353",
+		description: "ResolverRuntimeOptions does not accept caller-supplied adapter factories",
+		source: [
+			'import type { ResolverRuntimeOptions } from "@apifuse/provider-sdk";',
+			"",
+			"export const mustNotCompile: ResolverRuntimeOptions = {",
+			"\tadapterFactories: {},",
+			"};",
+			"",
+		].join("\n"),
+	},
+	{
 		filename: "negative-control-resolver-runtime-allowed-hosts.ts",
 		expectedCode: "TS2322",
 		description: "ResolverRuntimeOptions.allowedHosts accepts only host strings",

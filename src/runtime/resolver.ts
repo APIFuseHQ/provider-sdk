@@ -11,15 +11,19 @@ import type {
 	ResolverContext,
 } from "../types.js";
 import {
+	resolverChallengeAllowsDirectCache,
+	resolverChallengeIsCacheable,
 	resolverChallengeIsIdentityScoped,
 	resolverChallengeIssuingIdentity,
 } from "./resolver-vendors/bindings.js";
 import { createBrowserResolverVendorAdapter } from "./resolver-vendors/browser.js";
+import { assertResolverHostAllowed } from "./resolver-vendors/hosts.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
 	type ResolverIdentity,
 	type ResolverIssuingIdentity,
 	type ResolverVendorAdapter,
+	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 	type ResolverVendorUnavailableReason,
 	resolverVendorSupports,
@@ -50,6 +54,13 @@ type ResolvedResolverVendor =
 type ResolverChainAttempt = {
 	readonly vendor: ProviderResolverVendor;
 	readonly reason: ResolverVendorUnavailableReason;
+	readonly cause?: {
+		readonly name: string;
+		readonly message: string;
+	};
+	readonly upstreamHost?: string;
+	readonly phase?: string;
+	readonly round?: number;
 };
 
 type ResolverChainClient = ResolverContext & {
@@ -65,6 +76,14 @@ export interface ResolverRuntimeOptions {
 	readonly cache?: ProviderCache;
 	/** Server-owned context/proxy scope used only for identity-bound cache entries. */
 	readonly identityScope?: string;
+	/** SDK-owned transport already bound to the resolved proxy lease and client profile. */
+	readonly transport?: ResolverVendorTransport;
+	/** Creates an SDK-owned transport bound to the declared profile and server-owned scope. */
+	readonly createTransport?: (input: {
+		readonly clientProfile?: string;
+		/** Server-owned proxy/context scope; the SDK never accepts a caller-built identity. */
+		readonly identityScope?: string;
+	}) => ResolverVendorTransport;
 }
 
 type CachedResolverSolution = {
@@ -86,6 +105,42 @@ const RESOLVER_SOLUTION_INDEX_CACHE_NAMESPACE = "resolver-solution-index";
 const MIN_RESOLVER_CACHE_TTL_MS = 1_000;
 const resolverCaches = new WeakMap<object, ProviderCache | null>();
 const solutionIssuerDigests = new WeakMap<object, string>();
+const SAFE_CAUSE_MESSAGE_WORDS: ReadonlySet<string> = new Set([
+	"abort",
+	"aborted",
+	"at",
+	"closed",
+	"connect",
+	"connection",
+	"dns",
+	"during",
+	"econnrefused",
+	"econnreset",
+	"error",
+	"etimedout",
+	"failed",
+	"failure",
+	"fetch",
+	"from",
+	"get",
+	"lookup",
+	"network",
+	"post",
+	"reading",
+	"refused",
+	"request",
+	"reset",
+	"response",
+	"socket",
+	"timed",
+	"timeout",
+	"tls",
+	"to",
+	"unavailable",
+	"upstream",
+	"while",
+	"writing",
+]);
 
 export const RESOLVER_INSTRUMENTATION_METADATA = Symbol.for(
 	"@apifuse/provider-sdk/runtime/resolver-instrumentation-metadata",
@@ -96,15 +151,13 @@ export type ResolverInstrumentationMetadata = {
 	readonly traceRecorder: TraceRecorder;
 };
 
-type ResolverAdapterFactory = (
+export type ResolverAdapterFactory = (
 	configuration: string,
 	timeoutMs: number,
 	allowedHosts: readonly string[],
 ) => ResolverVendorAdapter;
 
-export const RESOLVER_ADAPTER_REGISTRY: Partial<
-	Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>
-> = {
+const resolverAdapterRegistry: Partial<Record<ProviderResolverVendor, ResolverAdapterFactory>> = {
 	browser(configuration, timeoutMs, allowedHosts) {
 		return createBrowserResolverVendorAdapter({
 			allowedHosts,
@@ -113,6 +166,26 @@ export const RESOLVER_ADAPTER_REGISTRY: Partial<
 		});
 	},
 };
+
+export const RESOLVER_ADAPTER_REGISTRY: Partial<
+	Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>
+> = resolverAdapterRegistry;
+
+export function swapResolverAdapterFactoryForTests(
+	vendor: ProviderResolverVendor,
+	factory: ResolverAdapterFactory | undefined,
+): () => void {
+	const original = resolverAdapterRegistry[vendor];
+	if (factory === undefined) delete resolverAdapterRegistry[vendor];
+	else resolverAdapterRegistry[vendor] = factory;
+	let restored = false;
+	return () => {
+		if (restored) return;
+		restored = true;
+		if (original === undefined) delete resolverAdapterRegistry[vendor];
+		else resolverAdapterRegistry[vendor] = original;
+	};
+}
 
 // This is the sole allowlist for declared vendors whose registry entry may be absent.
 // Remove a vendor here when its adapter is registered.
@@ -178,8 +251,9 @@ function createAdapter(
 	vendor: ResolvedResolverVendor,
 	timeoutMs: number,
 	allowedHosts: readonly string[],
+	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
 ): ResolverVendorAdapter {
-	const factory = RESOLVER_ADAPTER_REGISTRY[vendor.vendor];
+	const factory = adapterFactories[vendor.vendor];
 	if (!factory && !KNOWN_UNIMPLEMENTED_RESOLVER_VENDORS.has(vendor.vendor)) {
 		throw new Error(
 			`Resolver adapter factory is missing for implemented vendor "${vendor.vendor}"`,
@@ -214,6 +288,135 @@ function throwExhausted(attempts: readonly ResolverChainAttempt[]): never {
 		fix: "Configure another supporting resolver vendor or restore an unavailable vendor.",
 		details: attempts,
 	});
+}
+
+function assertClientProfileTransportContract(
+	clientProfile: string | undefined,
+	transport: ResolverVendorTransport | undefined,
+): void {
+	if (clientProfile === undefined || transport === undefined) return;
+	throw new ProviderError(
+		`Resolver client profile "${clientProfile}" cannot be applied to a pre-bound transport`,
+		{
+			code: "RESOLVER_CLIENT_PROFILE_TRANSPORT_CONFLICT",
+			fix: "Remove the pre-bound transport and provide createTransport({ clientProfile, identityScope }) so the SDK can apply the provider-declared profile.",
+		},
+	);
+}
+
+function adapterRequiresTransport(
+	adapter: ResolverVendorAdapter,
+	kind: ProviderChallengeKind,
+): boolean {
+	return typeof adapter.requiresTransport === "function"
+		? adapter.requiresTransport(kind)
+		: adapter.requiresTransport === true;
+}
+
+function sanitizeDiagnosticUrl(rawUrl: string): string {
+	try {
+		const parsed = new URL(rawUrl);
+		return `${parsed.protocol}//${parsed.host}`;
+	} catch {
+		return "[REDACTED_URL]";
+	}
+}
+
+function sanitizeCauseMessage(message: string): string {
+	const withoutUrls = message.replace(/\b[a-z][a-z\d+.-]*:\/\/[^\s"'<>]+/gi, sanitizeDiagnosticUrl);
+	const withoutAssignments = withoutUrls.replace(/(?:^|\s)[^\s=]+=[^\s]*/g, " [REDACTED]");
+	const safeTokens = withoutAssignments
+		.replaceAll("\r", " ")
+		.replaceAll("\n", " ")
+		.split(/\s+/)
+		.filter(Boolean)
+		.map((token) => {
+			if (token === "[REDACTED]" || /^[a-z][a-z\d+.-]*:\/\/[^\s]+$/i.test(token)) return token;
+			const word = token.replace(/^[^a-z\d]+|[^a-z\d]+$/gi, "");
+			return word.length > 0 && word.length <= 32 && SAFE_CAUSE_MESSAGE_WORDS.has(word.toLowerCase())
+				? token
+				: "[REDACTED]";
+		});
+	return safeTokens
+		.filter((token, index) => token !== "[REDACTED]" || safeTokens[index - 1] !== token)
+		.join(" ")
+		.slice(0, 512);
+}
+
+function restrictResolverTransport(
+	transport: ResolverVendorTransport,
+	allowedHosts: readonly string[],
+): ResolverVendorTransport {
+	return {
+		async fetch(url, init) {
+			// Empty declarations remain deny-by-default, matching the adapter-factory/browser path.
+			assertResolverHostAllowed(url, allowedHosts);
+			const response = await transport.fetch(url, { ...init, redirect: "manual" });
+			const hasLocationHeader = Object.keys(response.headers).some(
+				(name) => name.toLowerCase() === "location",
+			);
+			if (response.status >= 300 && response.status < 400 && hasLocationHeader) {
+				throw new ProviderError("Resolver transport refused a redirect response", {
+					code: "RESOLVER_HOST_NOT_ALLOWED",
+					fix: "Use a non-redirecting http or https URL on a host declared in allowedHosts.",
+				});
+			}
+			return response;
+		},
+	};
+}
+
+function safeCause(error: ResolverVendorUnavailableError): ResolverChainAttempt["cause"] {
+	if (error.cause === undefined) return undefined;
+	const cause = error.cause;
+	const rawName = cause instanceof Error ? cause.name : "Error";
+	return {
+		name: /^[a-z\d_.:-]{1,64}$/i.test(rawName) ? rawName : "Error",
+		message: sanitizeCauseMessage(cause instanceof Error ? cause.message : String(cause)),
+	};
+}
+
+function safeUpstreamHost(host: string | undefined): string | undefined {
+	if (host === undefined) return undefined;
+	const trimmed = host.trim();
+	if (/^[a-z\d.-]+$/i.test(trimmed)) return trimmed.toLowerCase();
+	try {
+		return new URL(trimmed).hostname.toLowerCase();
+	} catch {
+		return undefined;
+	}
+}
+
+function safePhase(phase: string | undefined): string | undefined {
+	return phase !== undefined && /^[a-z\d_.:-]{1,64}$/i.test(phase) ? phase : undefined;
+}
+
+function unavailableAttempt(error: ResolverVendorUnavailableError): ResolverChainAttempt {
+	const cause = safeCause(error);
+	const upstreamHost = safeUpstreamHost(error.upstreamHost);
+	const phase = safePhase(error.phase);
+	const round =
+		Number.isSafeInteger(error.round) && (error.round as number) > 0 ? error.round : undefined;
+	return {
+		vendor: error.vendor,
+		reason: error.reason,
+		...(cause ? { cause } : {}),
+		...(upstreamHost ? { upstreamHost } : {}),
+		...(phase ? { phase } : {}),
+		...(round !== undefined ? { round } : {}),
+	};
+}
+
+function unavailableSpanAttributes(error: ResolverVendorUnavailableError): Record<string, unknown> {
+	const attempt = unavailableAttempt(error);
+	return {
+		unavailability_reason: error.reason,
+		cause_name: attempt.cause?.name,
+		cause_message: attempt.cause?.message,
+		upstream_host: attempt.upstreamHost,
+		transport_phase: attempt.phase,
+		transport_round: attempt.round,
+	};
 }
 
 function challengeOrigin(challenge: ProviderChallenge): string {
@@ -299,7 +502,7 @@ function isResolverCacheIndex(value: unknown): value is ResolverCacheIndex {
 
 function solutionExpiryMs(solution: ChallengeSolution): number | undefined {
 	if (solution.form !== "cookies") return undefined;
-	const expires = (solution as ChallengeSolution & { readonly expires?: unknown }).expires;
+	const expires = solution.expires;
 	if (typeof expires !== "number" || !Number.isFinite(expires)) return undefined;
 	return expires * 1_000;
 }
@@ -374,13 +577,14 @@ async function writeResolverCacheIndex(
 	await cache.set(indexKey, { entries: liveEntries } satisfies ResolverCacheIndex, { ttlMs });
 }
 
-async function cacheBrowserSolution(
+async function cacheResolverSolution(
 	cache: ProviderCache,
 	challenge: ProviderChallenge,
 	solution: ChallengeSolution,
 	identity: ResolverIssuingIdentity,
 	identityScope: string | undefined,
 ): Promise<void> {
+	if (!resolverChallengeIsCacheable(challenge)) return;
 	const expiresAtMs = solutionExpiryMs(solution);
 	const now = Date.now();
 	if (expiresAtMs === undefined) return;
@@ -391,6 +595,13 @@ async function cacheBrowserSolution(
 		identityScope !== undefined && resolverChallengeIsIdentityScoped(challenge)
 			? resolverIdentityScopeDigest(identityScope)
 			: undefined;
+	if (
+		!resolverChallengeAllowsDirectCache(challenge) &&
+		scopedDigest === undefined &&
+		identity.proxyUrl === undefined
+	) {
+		return;
+	}
 	const issuerDigest = scopedDigest ?? resolverIdentityDigest(identity);
 	await cache.set(
 		resolverSolutionCacheKey(cache, challenge, issuerDigest),
@@ -474,7 +685,12 @@ function createResolverChainClient(options: {
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
 	readonly identityScope?: string;
+	readonly transport?: ResolverVendorTransport;
+	readonly createTransport?: ResolverRuntimeOptions["createTransport"];
+	readonly clientProfile?: string;
+	readonly allowedHosts?: readonly string[];
 }): ResolverChainClient {
+	assertClientProfileTransportContract(options.clientProfile, options.transport);
 	const client: ResolverChainClient = {
 		async solve(
 			challenge: ProviderChallenge,
@@ -492,7 +708,7 @@ function createResolverChainClient(options: {
 			const supportingEntries = options.entries.filter((entry) => entry.supports(challenge.kind));
 			if (supportingEntries.length === 0) throwUnsupportedKind(challenge.kind);
 			signal.throwIfAborted();
-			if (options.cache && supportingEntries.some((entry) => entry.id === "browser")) {
+			if (options.cache && resolverChallengeIsCacheable(challenge)) {
 				const cached = await findCachedSolution(
 					options.cache,
 					challenge,
@@ -506,29 +722,52 @@ function createResolverChainClient(options: {
 			for (const entry of supportingEntries) {
 				const adapter = entry.createAdapter();
 				try {
-					const solveAttempt = () =>
-						adapter.solve(challenge, options.identity, signal, traceRecorder);
+					const solveAttempt = () => {
+						const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
+						const unrestrictedTransport =
+							options.transport ??
+							(requiresTransport
+								? options.createTransport?.({
+										clientProfile: options.clientProfile,
+										identityScope: options.identityScope,
+									})
+								: undefined);
+						if (requiresTransport && unrestrictedTransport === undefined) {
+							throw new ResolverVendorUnavailableError(adapter.id, "missing_transport");
+						}
+						const transport = unrestrictedTransport
+							? restrictResolverTransport(unrestrictedTransport, options.allowedHosts ?? [])
+							: undefined;
+						return adapter.solve(challenge, options.identity, signal, traceRecorder, transport);
+					};
 					const solution = traceRecorder
 						? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
 								attributes: {
 									vendor: adapter.id,
 									challenge_kind: challenge.kind,
+									client_profile: options.clientProfile,
 								},
 								onError(error) {
 									return error instanceof ResolverVendorUnavailableError
-										? { unavailability_reason: error.reason }
+										? unavailableSpanAttributes(error)
 										: undefined;
 								},
 							})
 						: await solveAttempt();
-					if (options.cache && entry.id === "browser" && solution.form === "cookies") {
-						const issuingIdentity = adapter.getIssuingIdentity?.(
-							solution,
-							options.identity,
-							challenge,
-						);
+					if (
+						options.cache &&
+						resolverChallengeIsCacheable(challenge) &&
+						solution.form === "cookies" &&
+						solutionExpiryMs(solution) !== undefined
+					) {
+						const issuingIdentity =
+							adapter.getIssuingIdentity?.(solution, options.identity, challenge) ??
+							resolverChallengeIssuingIdentity(challenge, {
+								...(options.identity ? { proxyUrl: options.identity.proxyUrl } : {}),
+								userAgent: solution.userAgent,
+							});
 						if (issuingIdentity) {
-							await cacheBrowserSolution(
+							await cacheResolverSolution(
 								options.cache,
 								challenge,
 								solution,
@@ -541,7 +780,7 @@ function createResolverChainClient(options: {
 				} catch (error) {
 					signal.throwIfAborted();
 					if (!(error instanceof ResolverVendorUnavailableError)) throw error;
-					attempts.push({ vendor: adapter.id, reason: error.reason });
+					attempts.push(unavailableAttempt(error));
 				}
 			}
 
@@ -558,6 +797,10 @@ export function createResolverClient(options: {
 	readonly unavailableReason?: string;
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
+	readonly transport?: ResolverVendorTransport;
+	readonly createTransport?: ResolverRuntimeOptions["createTransport"];
+	readonly clientProfile?: string;
+	readonly allowedHosts?: readonly string[];
 }): ResolverChainClient {
 	return createResolverChainClient({
 		kinds: options.kinds,
@@ -569,6 +812,10 @@ export function createResolverClient(options: {
 		unavailableReason: options.unavailableReason,
 		cache: options.cache,
 		identity: options.identity,
+		transport: options.transport,
+		createTransport: options.createTransport,
+		clientProfile: options.clientProfile,
+		allowedHosts: options.allowedHosts,
 	});
 }
 
@@ -626,14 +873,16 @@ export function bindResolverSignal(
 	return boundResolver;
 }
 
-export function createResolverClientFromEnv(
+function createResolverClientFromEnvInternal(
 	config: ProviderResolverConfig | undefined,
-	env: EnvLike = process.env,
-	options: ResolverRuntimeOptions = {},
+	env: EnvLike,
+	options: ResolverRuntimeOptions,
+	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
 ): ResolverContext {
 	if (!config) {
 		return createUnsupportedResolverClient("Provider does not declare resolver capability");
 	}
+	assertClientProfileTransportContract(config.clientProfile, options.transport);
 
 	if (config.vendors.length === 0) {
 		return createResolverChainClient({
@@ -645,6 +894,7 @@ export function createResolverClientFromEnv(
 
 	const timeoutValue = readPositiveIntegerEnv(env, APIFUSE__RESOLVER__TIMEOUT_MS);
 	const timeoutMs = timeoutValue === undefined ? DEFAULT_RESOLVER_TIMEOUT_MS : Number(timeoutValue);
+	const allowedHosts = [...(options.allowedHosts ?? [])];
 
 	return createResolverChainClient({
 		kinds: config.kinds,
@@ -658,11 +908,34 @@ export function createResolverClientFromEnv(
 					createAdapter(
 						resolveVendorAvailability(vendor, env),
 						timeoutMs,
-						options.allowedHosts ?? [],
+						allowedHosts,
+						adapterFactories,
 					),
 			};
 		}),
 		cache: options.cache,
 		identityScope: options.identityScope,
+		transport: options.transport,
+		createTransport: options.createTransport,
+		clientProfile: config.clientProfile,
+		allowedHosts,
 	});
+}
+
+export function createResolverClientFromEnv(
+	config: ProviderResolverConfig | undefined,
+	env: EnvLike = process.env,
+	options: ResolverRuntimeOptions = {},
+): ResolverContext {
+	return createResolverClientFromEnvInternal(config, env, options, RESOLVER_ADAPTER_REGISTRY);
+}
+
+/** Internal test seam; deliberately not re-exported from the package root. */
+export function createResolverClientFromEnvForTests(
+	config: ProviderResolverConfig | undefined,
+	env: EnvLike,
+	options: ResolverRuntimeOptions,
+	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
+): ResolverContext {
+	return createResolverClientFromEnvInternal(config, env, options, adapterFactories);
 }
