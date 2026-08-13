@@ -25,6 +25,19 @@ describe("defineCredentialsAuth", () => {
 				challenges: {
 					missingVerify: { fields: { otp: { type: "otp" } } },
 					missingFields: { verify: async () => ({ credential: { cookie: "ok" } }) },
+					empty: {},
+					fieldsPollNoVerify: {
+						fields: { otp: { type: "otp" } },
+						poll: async () => ({ credential: { cookie: "ok" } }),
+					},
+					verifyPollNoFields: {
+						verify: async () => ({ credential: { cookie: "ok" } }),
+						poll: async () => ({ credential: { cookie: "ok" } }),
+					},
+					emptyFieldsWithVerify: {
+						fields: {},
+						verify: async () => ({ credential: { cookie: "ok" } }),
+					},
 				} as never,
 			});
 		} catch (error) {
@@ -34,13 +47,22 @@ describe("defineCredentialsAuth", () => {
 		const violations = (caught as ProviderError).details as {
 			violations: Array<{ ruleId: string; path: string; fix: string }>;
 		};
-		expect(violations.violations).toHaveLength(2);
-		expect(violations.violations).toContainEqual(
-			expect.objectContaining({
-				ruleId: DECLARATION_RULE_IDS.challengeShape,
-				path: "challenges.missingVerify",
-			}),
-		);
+		expect(violations.violations).toHaveLength(6);
+		for (const path of [
+			"challenges.missingVerify",
+			"challenges.missingFields",
+			"challenges.empty",
+			"challenges.fieldsPollNoVerify",
+			"challenges.verifyPollNoFields",
+			"challenges.emptyFieldsWithVerify",
+		]) {
+			expect(violations.violations).toContainEqual(
+				expect.objectContaining({
+					ruleId: DECLARATION_RULE_IDS.challengeShape,
+					path,
+				}),
+			);
+		}
 
 		expect(() =>
 			defineCredentialsAuth({

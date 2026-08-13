@@ -16,6 +16,11 @@
 			"reason": "validateProviderProxy accepts the deprecated singular proxy.provider field and validates it for backwards compatibility."
 		},
 		{
+			"file": "src/declaration-validation.ts",
+			"symbol": "provider",
+			"reason": "declaredProxyVendors reads the deprecated singular proxy.provider field to enforce the proxy-vendor-fields-exclusive and proxy-no-mixed-vendors fail-closed rules against declarations that still use it."
+		},
+		{
 			"file": "src/runtime/stealth.ts",
 			"symbol": "snapshot",
 			"reason": "StealthRedirectRunResult.cookies remains populated from the deprecated complete flat snapshot for backwards compatibility; cookieStore is the lossless persistence path."
