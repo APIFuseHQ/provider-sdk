@@ -38,6 +38,10 @@ describe("defineCredentialsAuth", () => {
 						fields: {},
 						verify: async () => ({ credential: { cookie: "ok" } }),
 					},
+					emptyFieldsWithPoll: {
+						fields: {},
+						poll: async () => ({ credential: { cookie: "ok" } }),
+					},
 				} as never,
 			});
 		} catch (error) {
@@ -47,7 +51,7 @@ describe("defineCredentialsAuth", () => {
 		const violations = (caught as ProviderError).details as {
 			violations: Array<{ ruleId: string; path: string; fix: string }>;
 		};
-		expect(violations.violations).toHaveLength(6);
+		expect(violations.violations).toHaveLength(7);
 		for (const path of [
 			"challenges.missingVerify",
 			"challenges.missingFields",
@@ -55,6 +59,7 @@ describe("defineCredentialsAuth", () => {
 			"challenges.fieldsPollNoVerify",
 			"challenges.verifyPollNoFields",
 			"challenges.emptyFieldsWithVerify",
+			"challenges.emptyFieldsWithPoll",
 		]) {
 			expect(violations.violations).toContainEqual(
 				expect.objectContaining({

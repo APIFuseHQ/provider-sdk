@@ -745,13 +745,16 @@ function validateCredentialsAuthChallenges(
 			challenge.fields && typeof challenge.fields === "object"
 				? Object.keys(challenge.fields).length
 				: 0;
+		const fieldsDeclared =
+			challenge.fields !== undefined && challenge.fields !== null;
 		const hasFields = fieldCount > 0;
 		const hasVerify = typeof challenge.verify === "function";
 		const hasPoll = typeof challenge.poll === "function";
 		const isInteractive = hasFields && hasVerify && !hasPoll;
-		const isPolling = !hasFields && !hasVerify && hasPoll;
+		const isPolling = !fieldsDeclared && !hasVerify && hasPoll;
 		const isHybrid = hasFields && hasVerify && hasPoll;
-		if (isInteractive || isPolling || isHybrid) continue;
+		const emptyFieldsDeclared = fieldsDeclared && !hasFields;
+		if (!emptyFieldsDeclared && (isInteractive || isPolling || isHybrid)) continue;
 
 		const path = `challenges.${challengeId}`;
 		violations.push({
