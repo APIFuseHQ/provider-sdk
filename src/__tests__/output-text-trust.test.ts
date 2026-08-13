@@ -146,6 +146,105 @@ describe("output text-trust metadata", () => {
 		});
 	});
 
+	it("container-object untrusted propagates to an auto-trusted enum leaf", () => {
+		const schema = textTrust(z.object({ code: z.enum(["A", "B"]) }), "untrusted");
+
+		expect(collectOutputTextTrust(schema)).toEqual({
+			'$["code"]': "untrusted",
+		});
+		expect(findUnclassifiedOutputTextPaths(schema)).toEqual([]);
+		expect(projectedTextTrustMap(describeSchema(schema, { outputTextTrust: true }))).toEqual({
+			"#/properties/code": "untrusted",
+		});
+	});
+
+	it("container-array untrusted propagates to wildcard leaves", () => {
+		const schema = z.object({
+			xs: textTrust(z.array(z.enum(["A"])), "untrusted"),
+		});
+
+		expect(collectOutputTextTrust(schema)).toEqual({
+			'$["xs"][*]': "untrusted",
+		});
+		expect(findUnclassifiedOutputTextPaths(schema)).toEqual([]);
+		expect(projectedTextTrustMap(describeSchema(schema, { outputTextTrust: true }))).toEqual({
+			"#/properties/xs/items": "untrusted",
+		});
+	});
+
+	it("explicit descendant trusted declaration survives container untrusted", () => {
+		const schema = textTrust(
+			z.object({ code: z.enum(["A", "B"]).textTrust("trusted") }),
+			"untrusted",
+		);
+
+		expect(collectOutputTextTrust(schema)).toEqual({
+			'$["code"]': "trusted",
+		});
+		expect(findUnclassifiedOutputTextPaths(schema)).toEqual([]);
+		expect(projectedTextTrustMap(describeSchema(schema, { outputTextTrust: true }))).toEqual({
+			"#/properties/code": "trusted",
+		});
+	});
+
+	it("nested container untrusted uses the nearest declaration and preserves outer coverage", () => {
+		const schema = textTrust(
+			z.object({
+				inner: textTrust(
+					z.object({
+						innerOnly: z.enum(["inner"]),
+						overridden: z.enum(["explicit"]).textTrust("trusted"),
+					}),
+					"untrusted",
+				),
+				outerOnly: z.enum(["outer"]),
+			}),
+			"untrusted",
+		);
+
+		expect(collectOutputTextTrust(schema)).toEqual({
+			'$["inner"]["innerOnly"]': "untrusted",
+			'$["inner"]["overridden"]': "trusted",
+			'$["outerOnly"]': "untrusted",
+		});
+		expect(findUnclassifiedOutputTextPaths(schema)).toEqual([]);
+	});
+
+	it("container trusted is not honored and its path is reported as debt", () => {
+		const schema = z.object({
+			result: textTrust(
+				z.object({
+					code: z.enum(["A", "B"]),
+					message: z.string().textTrust("untrusted"),
+				}),
+				"trusted",
+			),
+		});
+
+		expect(collectOutputTextTrust(schema)).toEqual({
+			'$["result"]["code"]': "trusted",
+			'$["result"]["message"]': "untrusted",
+		});
+		expect(findUnclassifiedOutputTextPaths(schema)).toEqual(['$["result"]']);
+		expect(projectedTextTrustMap(describeSchema(schema, { outputTextTrust: true }))).toEqual({
+			"#/properties/result/properties/code": "trusted",
+			"#/properties/result/properties/message": "untrusted",
+		});
+	});
+
+	it("container-annotated projection is byte-identical across repetitions", () => {
+		const schema = textTrust(
+			z.object({
+				items: z.array(z.object({ code: z.enum(["A", "B"]) })),
+			}),
+			"untrusted",
+		);
+
+		const first = canonicalJson(describeSchema(schema, { outputTextTrust: true }));
+		const second = canonicalJson(describeSchema(schema, { outputTextTrust: true }));
+		expect(first).toBe(second);
+	});
+
 	it("keeps reusable shared sub-schema paths distinct", () => {
 		const shared = z.object({ id: z.uuid(), label: z.string().textTrust("untrusted") });
 		const schema = z.object({ left: shared, right: shared });

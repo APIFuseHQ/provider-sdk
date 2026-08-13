@@ -313,6 +313,11 @@ interface OutputTextLeaf {
 	readonly classified: boolean;
 }
 
+interface OutputTextTrustCollection {
+	readonly leaves: Array<OutputTextLeaf & { readonly path: string }>;
+	readonly debtPaths: Set<string>;
+}
+
 export class OutputTextTrustSchemaError extends TypeError {
 	readonly code = "invalid_output_text_trust_schema";
 
@@ -332,8 +337,9 @@ export class OutputTextTrustSchemaError extends TypeError {
  * `<recursive>`.
  */
 export function collectOutputTextTrust(schema: ZodType): OutputTextTrustMap {
+	const { leaves } = collectOutputTextLeaves(requireOutputTextTrustSchema(schema));
 	return Object.fromEntries(
-		collectOutputTextLeaves(requireOutputTextTrustSchema(schema))
+		leaves
 			.map(({ path, classification }) => [path, classification] as const)
 			.sort(([left], [right]) => left.localeCompare(right)),
 	);
@@ -341,43 +347,69 @@ export function collectOutputTextTrust(schema: ZodType): OutputTextTrustMap {
 
 /** Report textual output paths that lack a valid explicit or auto-derived classification. */
 export function findUnclassifiedOutputTextPaths(schema: ZodType): string[] {
-	return collectOutputTextLeaves(requireOutputTextTrustSchema(schema))
-		.filter(({ classified }) => !classified)
-		.map(({ path }) => path)
-		.sort((left, right) => left.localeCompare(right));
+	const { debtPaths, leaves } = collectOutputTextLeaves(requireOutputTextTrustSchema(schema));
+	for (const { classified, path } of leaves) {
+		if (!classified) debtPaths.add(path);
+	}
+	return [...debtPaths].sort((left, right) => left.localeCompare(right));
 }
 
 /** @internal Used by contract JSON Schema projection. */
-export function resolveOutputTextTrust(schema: z.core.$ZodType): TextTrust | undefined {
-	return resolveOutputTextLeaf(asInternalZodSchema(schema), [], true)?.classification;
+export function resolveOutputTextTrust(
+	schema: z.core.$ZodType,
+	inheritedUntrusted = false,
+): TextTrust | undefined {
+	return resolveOutputTextLeaf(asInternalZodSchema(schema), [], true, inheritedUntrusted)
+		?.classification;
 }
 
-function collectOutputTextLeaves(
-	schema: InternalZodSchema,
-): Array<OutputTextLeaf & { readonly path: string }> {
-	const out: Array<OutputTextLeaf & { readonly path: string }> = [];
+/** @internal Used by contract JSON Schema projection. */
+export function inheritsUntrustedOutputTextTrust(schema: z.core.$ZodType): boolean {
+	let current = asInternalZodSchema(schema);
+	while (true) {
+		if (readTextTrustDeclaration(current) === "untrusted") return true;
+		const inner = flattenedOutputSchema(current._zod.def);
+		if (!inner) return false;
+		current = inner;
+	}
+}
+
+function collectOutputTextLeaves(schema: InternalZodSchema): OutputTextTrustCollection {
+	const leaves: Array<OutputTextLeaf & { readonly path: string }> = [];
+	const debtPaths = new Set<string>();
 	const emittedPaths = new Set<string>();
-	walkOutputSchema(schema, "$", out, emittedPaths, new Set(), false);
-	return out;
+	walkOutputSchema(schema, "$", leaves, debtPaths, emittedPaths, new Set(), false, false);
+	return { leaves, debtPaths };
 }
 
 function walkOutputSchema(
 	schema: InternalZodSchema,
 	path: string,
 	out: Array<OutputTextLeaf & { readonly path: string }>,
+	debtPaths: Set<string>,
 	emittedPaths: Set<string>,
 	activeSchemas: Set<InternalZodSchema>,
 	expandingCycle: boolean,
+	inheritedUntrusted: boolean,
 ): void {
 	const alreadyActive = activeSchemas.has(schema);
 	if (alreadyActive) {
 		if (!expandingCycle) {
-			walkOutputSchema(schema, `${path}<recursive>`, out, emittedPaths, new Set(), true);
+			walkOutputSchema(
+				schema,
+				`${path}<recursive>`,
+				out,
+				debtPaths,
+				emittedPaths,
+				new Set(),
+				true,
+				inheritedUntrusted,
+			);
 		}
 		return;
 	}
 
-	const leaf = resolveOutputTextLeaf(schema, [], true);
+	const leaf = resolveOutputTextLeaf(schema, [], true, inheritedUntrusted);
 	if (leaf) {
 		if (!emittedPaths.has(path)) {
 			emittedPaths.add(path);
@@ -387,6 +419,9 @@ function walkOutputSchema(
 	}
 
 	const def = schema._zod.def;
+	const declaration = readTextTrustDeclaration(schema);
+	if (declaration === "trusted" || declaration === "invalid") debtPaths.add(path);
+	const descendantUntrusted = inheritedUntrusted || declaration === "untrusted";
 	if (!alreadyActive) activeSchemas.add(schema);
 	try {
 		switch (def.type) {
@@ -398,9 +433,11 @@ function walkOutputSchema(
 						asInternalZodSchema(child),
 						`${path}[${JSON.stringify(key)}]`,
 						out,
+						debtPaths,
 						emittedPaths,
 						activeSchemas,
 						expandingCycle,
+						descendantUntrusted,
 					);
 				}
 				if (def.catchall) {
@@ -408,9 +445,11 @@ function walkOutputSchema(
 						asInternalZodSchema(def.catchall),
 						`${path}[*]`,
 						out,
+						debtPaths,
 						emittedPaths,
 						activeSchemas,
 						expandingCycle,
+						descendantUntrusted,
 					);
 				}
 				break;
@@ -420,9 +459,11 @@ function walkOutputSchema(
 					asInternalZodSchema(def.element),
 					`${path}[*]`,
 					out,
+					debtPaths,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
+					descendantUntrusted,
 				);
 				break;
 			case "tuple": {
@@ -431,9 +472,11 @@ function walkOutputSchema(
 						asInternalZodSchema(child),
 						`${path}[${index}]`,
 						out,
+						debtPaths,
 						emittedPaths,
 						activeSchemas,
 						expandingCycle,
+						descendantUntrusted,
 					);
 				});
 				if (def.rest) {
@@ -441,9 +484,11 @@ function walkOutputSchema(
 						asInternalZodSchema(def.rest),
 						`${path}[*]`,
 						out,
+						debtPaths,
 						emittedPaths,
 						activeSchemas,
 						expandingCycle,
+						descendantUntrusted,
 					);
 				}
 				break;
@@ -453,17 +498,21 @@ function walkOutputSchema(
 					asInternalZodSchema(def.keyType),
 					`${path}<record-key>`,
 					out,
+					debtPaths,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
+					descendantUntrusted,
 				);
 				walkOutputSchema(
 					asInternalZodSchema(def.valueType),
 					`${path}[*]`,
 					out,
+					debtPaths,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
+					descendantUntrusted,
 				);
 				break;
 			case "union":
@@ -472,9 +521,11 @@ function walkOutputSchema(
 						asInternalZodSchema(child),
 						`${path}<union:${index}>`,
 						out,
+						debtPaths,
 						emittedPaths,
 						activeSchemas,
 						expandingCycle,
+						descendantUntrusted,
 					);
 				});
 				break;
@@ -484,9 +535,11 @@ function walkOutputSchema(
 						asInternalZodSchema(side),
 						`${path}<intersection:${index}>`,
 						out,
+						debtPaths,
 						emittedPaths,
 						activeSchemas,
 						expandingCycle,
+						descendantUntrusted,
 					);
 				}
 				break;
@@ -502,9 +555,11 @@ function walkOutputSchema(
 					asInternalZodSchema(def.innerType),
 					path,
 					out,
+					debtPaths,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
+					descendantUntrusted,
 				);
 				break;
 			case "pipe":
@@ -512,9 +567,11 @@ function walkOutputSchema(
 					asInternalZodSchema(def.out),
 					path,
 					out,
+					debtPaths,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
+					descendantUntrusted,
 				);
 				break;
 			case "lazy":
@@ -522,9 +579,11 @@ function walkOutputSchema(
 					asInternalZodSchema(def.getter()),
 					path,
 					out,
+					debtPaths,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
+					descendantUntrusted,
 				);
 				break;
 			case "string":
@@ -563,6 +622,7 @@ function resolveOutputTextLeaf(
 	schema: InternalZodSchema,
 	outerDeclarations: readonly TextTrustDeclaration[],
 	autoTrustAllowed: boolean,
+	inheritedUntrusted: boolean,
 ): OutputTextLeaf | undefined {
 	const declarations = [...outerDeclarations, readTextTrustDeclaration(schema)];
 	const def = schema._zod.def;
@@ -573,6 +633,7 @@ function resolveOutputTextLeaf(
 					inner,
 					declarations,
 					autoTrustAllowed && def.type !== "default" && def.type !== "catch",
+					inheritedUntrusted,
 				)
 			: undefined;
 	}
@@ -589,6 +650,9 @@ function resolveOutputTextLeaf(
 			classification: autoTrusted ? "trusted" : "untrusted",
 			classified: autoTrusted,
 		};
+	}
+	if (inheritedUntrusted) {
+		return { classification: "untrusted", classified: true };
 	}
 	return autoTrusted
 		? { classification: "trusted", classified: true }
