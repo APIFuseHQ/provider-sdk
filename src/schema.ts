@@ -97,10 +97,12 @@ export type OutputTextTrustMap = Readonly<Record<string, TextTrust>>;
 
 /**
  * Auto-trusted output leaves are string-valued `z.literal()` / `z.enum()`,
- * bounded anchored patterns that exclude whitespace, wildcard, and negated
- * character classes, and the formats listed here. A brand is trusted only
- * when its underlying schema meets one of those rules. Length-only strings
- * and other formats (including email, URL, base64, and JWT) are not trusted.
+ * patterns whose every top-level alternative is anchored at both ends and
+ * whose bodies use only finite quantifiers, positive whitespace-free character
+ * classes, safe literals/escapes, and ordinary or non-capturing groups, plus
+ * the formats listed here. A brand is trusted only when its underlying schema
+ * meets one of those rules. Length-only strings and other formats (including
+ * email, URL, base64, and JWT) are not trusted.
  */
 export const AUTO_TRUSTED_ZOD_STRING_FORMATS = [
 	"cidrv4",
@@ -303,9 +305,22 @@ export const fields = {
 
 type TextTrustDeclaration = TextTrust | "absent" | "invalid";
 
+type InternalZodSchema = z.core.$ZodTypes;
+type InternalZodDef = InternalZodSchema["_zod"]["def"];
+
 interface OutputTextLeaf {
 	readonly classification: TextTrust;
 	readonly classified: boolean;
+}
+
+export class OutputTextTrustSchemaError extends TypeError {
+	readonly code = "invalid_output_text_trust_schema";
+
+	constructor(value: unknown) {
+		const receivedType = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+		super(`Output text-trust collection requires a Zod schema; received ${receivedType}.`);
+		this.name = "OutputTextTrustSchemaError";
+	}
 }
 
 /**
@@ -316,87 +331,53 @@ interface OutputTextLeaf {
  * record keys are `<record-key>`, and one bounded cycle expansion is marked
  * `<recursive>`.
  */
-export function collectOutputTextTrust(schema: unknown): OutputTextTrustMap {
+export function collectOutputTextTrust(schema: ZodType): OutputTextTrustMap {
 	return Object.fromEntries(
-		collectOutputTextLeaves(schema)
+		collectOutputTextLeaves(requireOutputTextTrustSchema(schema))
 			.map(({ path, classification }) => [path, classification] as const)
 			.sort(([left], [right]) => left.localeCompare(right)),
 	);
 }
 
 /** Report textual output paths that lack a valid explicit or auto-derived classification. */
-export function findUnclassifiedOutputTextPaths(schema: unknown): string[] {
-	return collectOutputTextLeaves(schema)
+export function findUnclassifiedOutputTextPaths(schema: ZodType): string[] {
+	return collectOutputTextLeaves(requireOutputTextTrustSchema(schema))
 		.filter(({ classified }) => !classified)
 		.map(({ path }) => path)
 		.sort((left, right) => left.localeCompare(right));
 }
 
 /** @internal Used by contract JSON Schema projection. */
-export function resolveOutputTextTrust(schema: unknown): TextTrust | undefined {
-	return resolveOutputTextLeaf(schema)?.classification;
-}
-
-/** @internal Resolves a text leaf flattened into the same JSON Schema node by a Zod wrapper. */
-export function resolveFlattenedOutputTextTrust(schema: unknown): TextTrust | undefined {
-	const def = readZodDef(schema);
-	if (!def) return undefined;
-	switch (Reflect.get(def, "type")) {
-		case "optional":
-		case "default":
-		case "prefault":
-		case "catch":
-		case "readonly":
-		case "nonoptional":
-		case "promise":
-			return (
-				resolveOutputTextTrust(Reflect.get(def, "innerType")) ??
-				resolveFlattenedOutputTextTrust(Reflect.get(def, "innerType"))
-			);
-		case "pipe":
-			return (
-				resolveOutputTextTrust(Reflect.get(def, "out")) ??
-				resolveFlattenedOutputTextTrust(Reflect.get(def, "out"))
-			);
-		default:
-			return undefined;
-	}
-}
-
-/** @internal Distinguishes authored metadata from extension properties inherited through wrappers. */
-export function hasOutputTextTrustMetadata(schema: unknown): boolean {
-	const metadata = readZodMetadata(schema);
-	return metadata !== undefined && Reflect.has(metadata, APIFUSE_TEXT_TRUST_META_KEY);
+export function resolveOutputTextTrust(schema: z.core.$ZodType): TextTrust | undefined {
+	return resolveOutputTextLeaf(asInternalZodSchema(schema), [], true)?.classification;
 }
 
 function collectOutputTextLeaves(
-	schema: unknown,
+	schema: InternalZodSchema,
 ): Array<OutputTextLeaf & { readonly path: string }> {
 	const out: Array<OutputTextLeaf & { readonly path: string }> = [];
 	const emittedPaths = new Set<string>();
-	walkOutputSchema(schema, "$", out, emittedPaths, new Set(), false, false);
+	walkOutputSchema(schema, "$", out, emittedPaths, new Set(), false);
 	return out;
 }
 
 function walkOutputSchema(
-	schema: unknown,
+	schema: InternalZodSchema,
 	path: string,
 	out: Array<OutputTextLeaf & { readonly path: string }>,
 	emittedPaths: Set<string>,
-	activeSchemas: Set<unknown>,
+	activeSchemas: Set<InternalZodSchema>,
 	expandingCycle: boolean,
-	allowActiveSchema: boolean,
 ): void {
-	if (!schema || typeof schema !== "object") return;
 	const alreadyActive = activeSchemas.has(schema);
-	if (alreadyActive && !allowActiveSchema) {
+	if (alreadyActive) {
 		if (!expandingCycle) {
-			walkOutputSchema(schema, `${path}<recursive>`, out, emittedPaths, activeSchemas, true, true);
+			walkOutputSchema(schema, `${path}<recursive>`, out, emittedPaths, new Set(), true);
 		}
 		return;
 	}
 
-	const leaf = resolveOutputTextLeaf(schema);
+	const leaf = resolveOutputTextLeaf(schema, [], true);
 	if (leaf) {
 		if (!emittedPaths.has(path)) {
 			emittedPaths.add(path);
@@ -405,127 +386,107 @@ function walkOutputSchema(
 		return;
 	}
 
-	const def = readZodDef(schema);
-	if (!def) return;
+	const def = schema._zod.def;
 	if (!alreadyActive) activeSchemas.add(schema);
 	try {
-		switch (Reflect.get(def, "type")) {
+		switch (def.type) {
 			case "object": {
-				const shape = readObjectShape(def);
-				for (const [key, child] of Object.entries(shape).sort(([left], [right]) =>
+				for (const [key, child] of Object.entries(def.shape).sort(([left], [right]) =>
 					left.localeCompare(right),
 				)) {
 					walkOutputSchema(
-						child,
+						asInternalZodSchema(child),
 						`${path}[${JSON.stringify(key)}]`,
 						out,
 						emittedPaths,
 						activeSchemas,
 						expandingCycle,
-						false,
 					);
 				}
-				const catchall = Reflect.get(def, "catchall");
-				if (catchall) {
+				if (def.catchall) {
 					walkOutputSchema(
-						catchall,
+						asInternalZodSchema(def.catchall),
 						`${path}[*]`,
 						out,
 						emittedPaths,
 						activeSchemas,
 						expandingCycle,
-						false,
 					);
 				}
 				break;
 			}
 			case "array":
 				walkOutputSchema(
-					Reflect.get(def, "element"),
+					asInternalZodSchema(def.element),
 					`${path}[*]`,
 					out,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
-					false,
 				);
 				break;
 			case "tuple": {
-				const items = Reflect.get(def, "items");
-				if (Array.isArray(items)) {
-					items.forEach((child, index) => {
-						walkOutputSchema(
-							child,
-							`${path}[${index}]`,
-							out,
-							emittedPaths,
-							activeSchemas,
-							expandingCycle,
-							false,
-						);
-					});
-				}
-				const rest = Reflect.get(def, "rest");
-				if (rest) {
+				def.items.forEach((child, index) => {
 					walkOutputSchema(
-						rest,
+						asInternalZodSchema(child),
+						`${path}[${index}]`,
+						out,
+						emittedPaths,
+						activeSchemas,
+						expandingCycle,
+					);
+				});
+				if (def.rest) {
+					walkOutputSchema(
+						asInternalZodSchema(def.rest),
 						`${path}[*]`,
 						out,
 						emittedPaths,
 						activeSchemas,
 						expandingCycle,
-						false,
 					);
 				}
 				break;
 			}
 			case "record":
 				walkOutputSchema(
-					Reflect.get(def, "keyType"),
+					asInternalZodSchema(def.keyType),
 					`${path}<record-key>`,
 					out,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
-					false,
 				);
 				walkOutputSchema(
-					Reflect.get(def, "valueType"),
+					asInternalZodSchema(def.valueType),
 					`${path}[*]`,
 					out,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
-					false,
 				);
 				break;
-			case "union": {
-				const options = Reflect.get(def, "options");
-				if (Array.isArray(options)) {
-					options.forEach((child, index) => {
-						walkOutputSchema(
-							child,
-							`${path}<union:${index}>`,
-							out,
-							emittedPaths,
-							activeSchemas,
-							expandingCycle,
-							false,
-						);
-					});
-				}
-				break;
-			}
-			case "intersection":
-				for (const [index, side] of ["left", "right"].entries()) {
+			case "union":
+				def.options.forEach((child, index) => {
 					walkOutputSchema(
-						Reflect.get(def, side),
+						asInternalZodSchema(child),
+						`${path}<union:${index}>`,
+						out,
+						emittedPaths,
+						activeSchemas,
+						expandingCycle,
+					);
+				});
+				break;
+			case "intersection":
+				for (const [index, side] of [def.left, def.right].entries()) {
+					walkOutputSchema(
+						asInternalZodSchema(side),
 						`${path}<intersection:${index}>`,
 						out,
 						emittedPaths,
 						activeSchemas,
 						expandingCycle,
-						false,
 					);
 				}
 				break;
@@ -538,103 +499,179 @@ function walkOutputSchema(
 			case "nonoptional":
 			case "promise":
 				walkOutputSchema(
-					Reflect.get(def, "innerType"),
+					asInternalZodSchema(def.innerType),
 					path,
 					out,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
-					false,
 				);
 				break;
 			case "pipe":
 				walkOutputSchema(
-					Reflect.get(def, "out"),
+					asInternalZodSchema(def.out),
 					path,
 					out,
 					emittedPaths,
 					activeSchemas,
 					expandingCycle,
-					false,
 				);
 				break;
-			case "lazy": {
-				const getter = Reflect.get(def, "getter");
-				if (typeof getter === "function") {
-					walkOutputSchema(getter(), path, out, emittedPaths, activeSchemas, expandingCycle, false);
-				}
+			case "lazy":
+				walkOutputSchema(
+					asInternalZodSchema(def.getter()),
+					path,
+					out,
+					emittedPaths,
+					activeSchemas,
+					expandingCycle,
+				);
 				break;
-			}
+			case "string":
+			case "template_literal":
+			case "literal":
+			case "enum":
+			case "number":
+			case "bigint":
+			case "boolean":
+			case "date":
+			case "symbol":
+			case "undefined":
+			case "null":
+			case "any":
+			case "unknown":
+			case "never":
+			case "void":
+			case "map":
+			case "set":
+			case "function":
+			case "custom":
+			case "transform":
+			case "nan":
+			case "success":
+			case "file":
+				break;
+			default:
+				assertNeverZodDef(def);
 		}
 	} finally {
 		if (!alreadyActive) activeSchemas.delete(schema);
 	}
 }
 
-function resolveOutputTextLeaf(schema: unknown): OutputTextLeaf | undefined {
-	if (!isOutputTextLeafSchema(schema)) return undefined;
-	const declaration = readTextTrustDeclaration(schema);
-	const autoTrusted = isAutoTrustedOutputTextLeaf(schema);
-	if (declaration === "untrusted") {
+function resolveOutputTextLeaf(
+	schema: InternalZodSchema,
+	outerDeclarations: readonly TextTrustDeclaration[],
+	autoTrustAllowed: boolean,
+): OutputTextLeaf | undefined {
+	const declarations = [...outerDeclarations, readTextTrustDeclaration(schema)];
+	const def = schema._zod.def;
+	if (!isOutputTextLeafDef(def)) {
+		const inner = flattenedOutputSchema(def);
+		return inner
+			? resolveOutputTextLeaf(
+					inner,
+					declarations,
+					autoTrustAllowed && def.type !== "default" && def.type !== "catch",
+				)
+			: undefined;
+	}
+
+	const autoTrusted = autoTrustAllowed && isAutoTrustedOutputTextLeaf(schema);
+	if (declarations.includes("invalid")) {
+		return { classification: "untrusted", classified: false };
+	}
+	if (declarations.includes("untrusted")) {
 		return { classification: "untrusted", classified: true };
 	}
-	if (declaration === "trusted") {
+	if (declarations.includes("trusted")) {
 		return {
 			classification: autoTrusted ? "trusted" : "untrusted",
 			classified: autoTrusted,
 		};
-	}
-	if (declaration === "invalid") {
-		return { classification: "untrusted", classified: false };
 	}
 	return autoTrusted
 		? { classification: "trusted", classified: true }
 		: { classification: "untrusted", classified: false };
 }
 
-function isOutputTextLeafSchema(schema: unknown): boolean {
-	const def = readZodDef(schema);
-	if (!def) return false;
-	const type = Reflect.get(def, "type");
-	if (type === "string" || type === "template_literal") return true;
-	if (type === "literal") {
-		const values = Reflect.get(def, "values");
-		return Array.isArray(values) && values.some((value) => typeof value === "string");
+function flattenedOutputSchema(def: InternalZodDef): InternalZodSchema | undefined {
+	switch (def.type) {
+		case "optional":
+		case "nullable":
+		case "default":
+		case "prefault":
+		case "catch":
+		case "readonly":
+		case "nonoptional":
+		case "promise":
+			return asInternalZodSchema(def.innerType);
+		case "pipe":
+			return asInternalZodSchema(def.out);
+		case "string":
+		case "template_literal":
+		case "literal":
+		case "enum":
+		case "number":
+		case "bigint":
+		case "boolean":
+		case "date":
+		case "symbol":
+		case "undefined":
+		case "null":
+		case "any":
+		case "unknown":
+		case "never":
+		case "void":
+		case "object":
+		case "array":
+		case "tuple":
+		case "record":
+		case "union":
+		case "intersection":
+		case "map":
+		case "set":
+		case "function":
+		case "lazy":
+		case "custom":
+		case "transform":
+		case "nan":
+		case "success":
+		case "file":
+			return undefined;
+		default:
+			return assertNeverZodDef(def);
 	}
-	if (type === "enum") {
-		const entries = Reflect.get(def, "entries");
-		return (
-			entries !== null &&
-			typeof entries === "object" &&
-			Object.values(entries).some((value) => typeof value === "string")
-		);
-	}
-	return false;
 }
 
-function isAutoTrustedOutputTextLeaf(schema: unknown): boolean {
-	const def = readZodDef(schema);
-	if (!def) return false;
-	const type = Reflect.get(def, "type");
-	if (type === "literal" || type === "enum") return isOutputTextLeafSchema(schema);
-	if (type !== "string" && type !== "template_literal") return false;
+function isOutputTextLeafDef(def: InternalZodDef): boolean {
+	switch (def.type) {
+		case "string":
+		case "template_literal":
+			return true;
+		case "literal":
+			return def.values.some((value) => typeof value === "string");
+		case "enum":
+			return Object.values(def.entries).some((value) => typeof value === "string");
+		default:
+			return false;
+	}
+}
 
-	const internals = Reflect.get(schema as object, "_zod");
-	const bag =
-		internals && typeof internals === "object" ? Reflect.get(internals, "bag") : undefined;
-	const format =
-		typeof Reflect.get(def, "format") === "string"
-			? Reflect.get(def, "format")
-			: bag && typeof bag === "object"
-				? Reflect.get(bag, "format")
-				: undefined;
+function isAutoTrustedOutputTextLeaf(schema: InternalZodSchema): boolean {
+	const def = schema._zod.def;
+	if (def.type === "literal" || def.type === "enum") return isOutputTextLeafDef(def);
+	if (def.type !== "string" && def.type !== "template_literal") return false;
+	if (def.checks?.some((check) => check._zod.def.check === "overwrite")) return false;
+
+	const { bag, pattern } = schema._zod;
+	const format = bag.format;
 	if (typeof format === "string" && AUTO_TRUSTED_ZOD_STRING_FORMAT_SET.has(format)) {
 		return true;
 	}
 
-	const pattern = Reflect.get(internals, "pattern");
 	if (pattern instanceof RegExp && isRestrictiveAnchoredPattern(pattern)) return true;
-	const patterns = bag && typeof bag === "object" ? Reflect.get(bag, "patterns") : undefined;
+	const patterns = bag.patterns;
 	return (
 		patterns instanceof Set &&
 		patterns.size > 0 &&
@@ -646,18 +683,24 @@ function isAutoTrustedOutputTextLeaf(schema: unknown): boolean {
 
 function isRestrictiveAnchoredPattern(pattern: RegExp): boolean {
 	if (pattern.multiline) return false;
-	const source = pattern.source;
-	if (!source.startsWith("^") || !source.endsWith("$")) return false;
-	if (/\[\^/.test(source)) return false;
-	if (/\\[sS]|\\p\{(?:Z|Separator)/u.test(source)) return false;
-	if (/(^|[^\\])\./.test(source)) return false;
-	if (/[\t\n\r ]/.test(source)) return false;
-	return !hasUnboundedRegexQuantifier(source);
+	const alternatives = splitTopLevelRegexAlternatives(pattern.source);
+	return (
+		alternatives.length > 0 &&
+		alternatives.every(
+			(alternative) =>
+				alternative.startsWith("^") &&
+				alternative.endsWith("$") &&
+				isProvablyRestrictedRegexBody(alternative.slice(1, -1)),
+		)
+	);
 }
 
-function hasUnboundedRegexQuantifier(source: string): boolean {
+function splitTopLevelRegexAlternatives(source: string): string[] {
+	const alternatives: string[] = [];
+	let start = 0;
 	let escaped = false;
 	let inCharacterClass = false;
+	let groupDepth = 0;
 	for (let index = 0; index < source.length; index += 1) {
 		const character = source[index];
 		if (escaped) {
@@ -677,10 +720,113 @@ function hasUnboundedRegexQuantifier(source: string): boolean {
 			continue;
 		}
 		if (inCharacterClass) continue;
-		if (character === "+" || character === "*") return true;
-		if (character === "{" && /^\{\d+,\}/.test(source.slice(index))) return true;
+		if (character === "(") {
+			groupDepth += 1;
+			continue;
+		}
+		if (character === ")") {
+			groupDepth -= 1;
+			continue;
+		}
+		if (character === "|" && groupDepth === 0) {
+			alternatives.push(source.slice(start, index));
+			start = index + 1;
+		}
 	}
-	return false;
+	alternatives.push(source.slice(start));
+	return alternatives;
+}
+
+function isProvablyRestrictedRegexBody(source: string): boolean {
+	let groupDepth = 0;
+	for (let index = 0; index < source.length; index += 1) {
+		const character = source[index];
+		if (character === "\\") {
+			const escapedLength = safeRegexEscapeLength(source.slice(index));
+			if (escapedLength === 0) return false;
+			index += escapedLength - 1;
+			continue;
+		}
+		if (character === "[") {
+			const classLength = safeRegexCharacterClassLength(source.slice(index));
+			if (classLength === 0) return false;
+			index += classLength - 1;
+			continue;
+		}
+		if (character === "(") {
+			if (source[index + 1] === "?") {
+				if (source.slice(index, index + 3) !== "(?:") return false;
+				index += 2;
+			}
+			groupDepth += 1;
+			continue;
+		}
+		if (character === ")") {
+			if (groupDepth === 0) return false;
+			groupDepth -= 1;
+			continue;
+		}
+		if (character === "{") {
+			const match = /^\{(\d+)(?:,(\d+))?\}/.exec(source.slice(index));
+			if (!match) return false;
+			const minimum = Number(match[1]);
+			const maximum = match[2] === undefined ? minimum : Number(match[2]);
+			if (!Number.isSafeInteger(maximum) || maximum < minimum) return false;
+			index += match[0].length - 1;
+			continue;
+		}
+		if (
+			character === "." ||
+			character === "*" ||
+			character === "+" ||
+			character === "^" ||
+			character === "$" ||
+			character === "}" ||
+			/\s/u.test(character)
+		) {
+			return false;
+		}
+		if (character === "|" && groupDepth === 0) return false;
+	}
+	return groupDepth === 0;
+}
+
+function safeRegexCharacterClassLength(source: string): number {
+	if (!source.startsWith("[") || source[1] === "^") return 0;
+	for (let index = 1; index < source.length; index += 1) {
+		const character = source[index];
+		if (character === "]") return index + 1;
+		if (character === "\\") {
+			const escapedLength = safeRegexEscapeLength(source.slice(index));
+			if (escapedLength === 0) return 0;
+			index += escapedLength - 1;
+			continue;
+		}
+		if (character === "[" || /\s/u.test(character)) return 0;
+	}
+	return 0;
+}
+
+function safeRegexEscapeLength(source: string): number {
+	const escaped = source[1];
+	if (escaped === "d" || escaped === "w") return 2;
+	return escaped !== undefined && "\\/.-^$*+?()[]{}|".includes(escaped) ? 2 : 0;
+}
+
+function requireOutputTextTrustSchema(schema: unknown): InternalZodSchema {
+	if (!(schema instanceof z.ZodType)) throw new OutputTextTrustSchemaError(schema);
+	return asInternalZodSchema(schema);
+}
+
+function asInternalZodSchema(schema: z.core.$ZodType): InternalZodSchema {
+	// Zod's child-definition fields use the base type and erase the concrete
+	// union member. This is the only cast boundary; all callers immediately
+	// narrow the returned discriminated definition by `def.type`.
+	return schema as InternalZodSchema;
+}
+
+function assertNeverZodDef(def: never): never {
+	throw new Error(`Unsupported Zod definition: ${String((def as { type?: unknown }).type)}`);
 }
 
 function readTextTrustDeclaration(schema: unknown): TextTrustDeclaration {
