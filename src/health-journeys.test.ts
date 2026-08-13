@@ -318,6 +318,7 @@ describe("health journey authoring", () => {
 						{ id: "send", operationId: "send-otp", kind: "operation" },
 						{ id: "confirm", operationId: "confirm-otp", kind: "operation" },
 					],
+					run: async () => ({ status: "ok" }),
 				}),
 			],
 		});
@@ -352,6 +353,7 @@ describe("health journey authoring", () => {
 							"Replays a bounded SMS/payment URL health journey only after operator acknowledgement.",
 					},
 					steps: [{ id: "start", operationId: "start-payment", kind: "operation" }],
+					run: async () => ({ status: "ok" }),
 				}),
 			],
 		});

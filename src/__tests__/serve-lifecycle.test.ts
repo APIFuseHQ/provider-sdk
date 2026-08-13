@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
+import { DECLARATION_INVALID_CODE, DECLARATION_RULE_IDS } from "../declaration-validation.js";
 import { type ProviderServerLogEvent, serve } from "../server/serve.js";
 import type { ProviderDefinition } from "../types.js";
 
@@ -21,6 +22,28 @@ function provider(): ProviderDefinition {
 }
 
 describe("serve lifecycle", () => {
+	it("rejects a cast-bypassed invalid declaration before starting a listener", async () => {
+		const listen = spyOn(Bun, "serve");
+		try {
+			await expect(
+				serve({ ...provider(), proxy: true }, { port: 0, shutdown: { signals: false } }),
+			).rejects.toMatchObject({
+				code: DECLARATION_INVALID_CODE,
+				details: {
+					violations: [
+						expect.objectContaining({
+							ruleId: DECLARATION_RULE_IDS.proxyExplicitPolicy,
+							path: "proxy",
+						}),
+					],
+				},
+			});
+			expect(listen).not.toHaveBeenCalled();
+		} finally {
+			listen.mockRestore();
+		}
+	});
+
 	it("stops accepting requests, runs every hook in order, and closes idempotently", async () => {
 		const order: string[] = [];
 		const logs: ProviderServerLogEvent[] = [];

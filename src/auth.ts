@@ -1,4 +1,9 @@
 import { AuthError, ProviderError } from "./errors.js";
+import {
+	declarationInvalidError,
+	DECLARATION_RULE_IDS,
+	type DeclarationViolation,
+} from "./declaration-validation.js";
 import type {
 	AuthAbortData,
 	AuthConfig,
@@ -656,6 +661,7 @@ export function defineCredentialsAuth<
 		string,
 		CredentialsAuthChallengeDefinition<CredentialsAuthFields, TCredentialKeys, string>
 	>;
+	validateCredentialsAuthChallenges(challenges);
 
 	return {
 		auth: {
@@ -725,4 +731,35 @@ export function defineCredentialsAuth<
 			),
 		},
 	};
+}
+
+function validateCredentialsAuthChallenges(
+	challenges: Record<
+		string,
+		CredentialsAuthChallengeDefinition<CredentialsAuthFields, readonly string[], string>
+	>,
+): void {
+	const violations: DeclarationViolation[] = [];
+	for (const [challengeId, challenge] of Object.entries(challenges)) {
+		const fieldCount =
+			challenge.fields && typeof challenge.fields === "object"
+				? Object.keys(challenge.fields).length
+				: 0;
+		const hasFields = fieldCount > 0;
+		const hasVerify = typeof challenge.verify === "function";
+		const hasPoll = typeof challenge.poll === "function";
+		const isInteractive = hasFields && hasVerify && !hasPoll;
+		const isPolling = !hasFields && !hasVerify && hasPoll;
+		const isHybrid = hasFields && hasVerify && hasPoll;
+		if (isInteractive || isPolling || isHybrid) continue;
+
+		const path = `challenges.${challengeId}`;
+		violations.push({
+			ruleId: DECLARATION_RULE_IDS.challengeShape,
+			path,
+			message: "challenge must be interactive, polling, or an explicit hybrid.",
+			fix: `Give ${path} non-empty fields plus verify, poll alone, or all three for a hybrid.`,
+		});
+	}
+	if (violations.length > 0) throw declarationInvalidError(violations);
 }

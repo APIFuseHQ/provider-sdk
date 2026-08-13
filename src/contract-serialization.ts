@@ -64,14 +64,12 @@ function isZodSchema(schema: SchemaLike): schema is ZodType {
 	return schema instanceof z.ZodType;
 }
 
-function zodJsonSchema(schema: ZodType): JsonValue | undefined {
-	try {
-		const jsonSchema = z.toJSONSchema(schema);
-		return toJsonValue(jsonSchema);
-	} catch (error) {
-		if (error instanceof Error) return undefined;
-		throw error;
+function zodJsonSchema(schema: ZodType): JsonValue {
+	const jsonSchema = toJsonValue(z.toJSONSchema(schema));
+	if (jsonSchema === undefined) {
+		throw new TypeError("z.toJSONSchema() returned a non-JSON value");
 	}
+	return jsonSchema;
 }
 
 function getSchemaTypeName(schema: SchemaLike): string | undefined {

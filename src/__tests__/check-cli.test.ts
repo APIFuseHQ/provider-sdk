@@ -73,6 +73,78 @@ afterEach(() => {
 });
 
 describe("apifuse check", () => {
+	it("formats declaration failures thrown while importing defineProvider declarations", async () => {
+		const providerDir = makeProviderDir("apifuse-check-declaration-import-invalid-");
+		writeFileSync(
+			join(providerDir, "index.ts"),
+			`
+import { defineProvider, z } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "invalid-import-declaration-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  proxy: true,
+  meta: { displayName: "Invalid Import Declaration Provider", category: "other" },
+  operations: {
+    lookup: {
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      handler: async () => ({ ok: true }),
+      healthCheckUnsupported: { reason: "Not exercised by this CLI fixture." },
+    },
+  },
+});
+`,
+		);
+
+		const results = await runChecks(providerDir);
+		const declaration = results.find((result) =>
+			result.message.includes("fail-closed validation"),
+		);
+
+		expect(declaration?.passed).toBe(false);
+		expect(declaration?.details).toEqual([
+			expect.stringContaining("proxy [proxy-explicit-policy]"),
+		]);
+	});
+
+	it("rejects and formats a cast-bypassed invalid declaration", async () => {
+		const providerDir = makeProviderDir("apifuse-check-declaration-invalid-");
+		writeFileSync(
+			join(providerDir, "index.ts"),
+			`
+import { z } from "zod";
+
+export default {
+  id: "invalid-declaration-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  proxy: true,
+  meta: { displayName: "Invalid Declaration Provider", category: "other" },
+  operations: {
+    lookup: {
+      input: z.object({}),
+      output: z.object({ ok: z.boolean() }),
+      handler: async () => ({ ok: true }),
+    },
+  },
+};
+`,
+		);
+
+		const results = await runChecks(providerDir);
+		const declaration = results.find((result) =>
+			result.message.includes("fail-closed validation"),
+		);
+
+		expect(declaration?.passed).toBe(false);
+		expect(declaration?.details).toEqual([
+			expect.stringContaining("proxy [proxy-explicit-policy]"),
+		]);
+		expect(declaration?.details?.[0]).toContain("Fix:");
+	});
+
 	it("fails public authoring lint errors before maintainer import", async () => {
 		const providerDir = makeProviderDir("apifuse-check-lint-fail-");
 		writeFileSync(

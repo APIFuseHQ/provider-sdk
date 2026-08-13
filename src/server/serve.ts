@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
+import { validateFailClosedDeclaration } from "../declaration-validation.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
@@ -2439,6 +2440,7 @@ export async function serve(
 	provider: ProviderDefinition,
 	options: ServeOptions = {},
 ): Promise<ProviderServerHandle> {
+	validateFailClosedDeclaration(provider);
 	const bunRuntime = getBunServeRuntime();
 
 	if (bunRuntime === undefined) {
