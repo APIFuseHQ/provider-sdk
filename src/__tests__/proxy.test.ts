@@ -2255,7 +2255,7 @@ describe("proxy integration", () => {
 		await client.fetch("/health");
 
 		expect(stealthState.clients[0]?.calls[0]?.options.proxy).toBe("http://5.78.24.25:31001");
-		expect(stealthState.clients[0]?.calls[0]?.options.insecureSkipVerify).toBeUndefined();
+		expect(stealthState.clients[0]?.calls[0]?.options.insecure).toBeUndefined();
 	});
 
 });
