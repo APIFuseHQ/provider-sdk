@@ -201,9 +201,27 @@ function writeOutputTextTrustProjectionMarker(
 	markers: Map<string, OutputTextTrustProjectionMarker>,
 	marker: OutputTextTrustProjectionMarker,
 ): void {
+	const existingId = schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY];
+	if (typeof existingId === "string") {
+		const existingMarker = markers.get(existingId);
+		if (existingMarker) {
+			markers.set(existingId, mergeOutputTextTrustProjectionMarkers(existingMarker, marker));
+			return;
+		}
+	}
 	const id = randomUUID();
 	markers.set(id, marker);
 	schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] = id;
+}
+
+function mergeOutputTextTrustProjectionMarkers(
+	existing: OutputTextTrustProjectionMarker,
+	next: OutputTextTrustProjectionMarker,
+): OutputTextTrustProjectionMarker {
+	if (existing.kind === "container-unsafe" && next.kind === "container-untrusted") {
+		return existing;
+	}
+	return next;
 }
 
 function hasOpenObjectCatchall(schema: z.core.$ZodType): boolean {
@@ -311,7 +329,11 @@ function finalizeProjectedTextTrust(
 			path,
 			options,
 		);
-		if (marker) markers.set(schema, marker);
+		if (marker) {
+			markers.set(schema, marker);
+		} else if (projectedJsonSchemaAllowsString(schema)) {
+			markers.set(schema, { inherited: "untrusted", kind: "leaf", local: "untrusted" });
+		}
 	}
 
 	const desiredTrust = new WeakMap<Record<string, unknown>, TextTrust>();
@@ -373,6 +395,10 @@ function finalizeProjectedTextTrust(
 		const trust = desiredTrust.get(schema);
 		if (trust !== undefined) schema[APIFUSE_TEXT_TRUST_META_KEY] = { v: 1, trust };
 	}
+}
+
+function projectedJsonSchemaAllowsString(schema: Record<string, unknown>): boolean {
+	return schema.type === "string" || (Array.isArray(schema.type) && schema.type.includes("string"));
 }
 
 function readOutputTextTrustProjectionMarker(

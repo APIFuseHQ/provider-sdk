@@ -1052,7 +1052,10 @@ function safeRegexCharacterClassLength(source: string): number {
 	for (let index = 1; index < source.length; index += 1) {
 		const character = source[index];
 		if (character === "]") return index + 1;
-		if (character === "[" || /\s/u.test(character)) return 0;
+		if (character === "-") {
+			if (index === 1 || source[index + 1] === "]") continue;
+			return 0;
+		}
 
 		const atomLength = regexCharacterClassAtomLength(source.slice(index));
 		if (atomLength === 0) return 0;
@@ -1064,15 +1067,16 @@ function safeRegexCharacterClassLength(source: string): number {
 			index = endIndex + endLength - 1;
 			continue;
 		}
-		if (character === "-" && index !== 1 && source[index + 1] !== "]") return 0;
 		index += atomLength - 1;
 	}
 	return 0;
 }
 
 function regexCharacterClassAtomLength(source: string): number {
-	if (source.length === 0 || source[0] === "]" || /\s/u.test(source[0] ?? "")) return 0;
-	return source[0] === "\\" ? safeRegexEscapeLength(source) : 1;
+	const character = source[0];
+	if (character === undefined) return 0;
+	if (/^[A-Za-z0-9]$/.test(character)) return 1;
+	return character === "\\" && SAFE_REGEX_ESCAPED_PUNCTUATION.includes(source[1] ?? "") ? 2 : 0;
 }
 
 function isSafeRegexCharacterRange(source: string, startIndex: number, endIndex: number): boolean {
@@ -1100,8 +1104,10 @@ function regexCharacterClassLiteralCodePoint(source: string, index: number): num
 function safeRegexEscapeLength(source: string): number {
 	const escaped = source[1];
 	if (escaped === "d" || escaped === "w") return 2;
-	return escaped !== undefined && "\\/.-^$*+?()[]{}|".includes(escaped) ? 2 : 0;
+	return escaped !== undefined && SAFE_REGEX_ESCAPED_PUNCTUATION.includes(escaped) ? 2 : 0;
 }
+
+const SAFE_REGEX_ESCAPED_PUNCTUATION = "\\/.-^$*+?()[]{}|";
 
 function requireOutputTextTrustSchema(schema: unknown): InternalZodSchema {
 	if (!(schema instanceof z.ZodType)) throw new OutputTextTrustSchemaError(schema);
