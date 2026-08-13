@@ -1,7 +1,6 @@
 import { describeSchema } from "./contract-serialization.js";
 import { ProviderError } from "./errors.js";
 import type {
-	HealthCheckCase,
 	HealthJourneyDefinition,
 	ProviderDefinition,
 	ProviderProxyPolicy,
@@ -13,7 +12,6 @@ export const DECLARATION_INVALID_CODE = "DECLARATION_INVALID";
 export const DECLARATION_RULE_IDS = {
 	challengeShape: "credentials-challenge-shape",
 	journeyExecutable: "health-journey-executable",
-	healthCaseEnabled: "health-case-enabled",
 	schemaSerializable: "operation-schema-serializable",
 	proxyExplicitPolicy: "proxy-explicit-policy",
 	proxyVendorExclusive: "proxy-vendor-fields-exclusive",
@@ -75,18 +73,10 @@ function validateHealthDeclaration(
 		}
 	}
 
-	for (const [operationId, operation] of Object.entries(provider.operations ?? {})) {
-		for (const [index, healthCase] of (operation.healthCheck?.cases ?? []).entries()) {
-			if (typeof (healthCase as HealthCheckCase).enabled !== "function") continue;
-			const path = `operations.${operationId}.healthCheck.cases[${index}].enabled`;
-			violations.push({
-				ruleId: DECLARATION_RULE_IDS.healthCaseEnabled,
-				path,
-				message: "function-valued health gates can silently disable a declared check.",
-				fix: `Remove ${path} and make the declared case unconditionally runnable.`,
-			});
-		}
-	}
+	// NOTE: healthCheck.cases[].enabled is intentionally NOT validated here.
+	// self-test.ts reports a gated case as status "skipped" with skipReason
+	// "disabled", so the skip is visible in results rather than silent — it is a
+	// supported conditional-execution feature, not a class-1 silent no-op.
 }
 
 function healthJourneyPath(journey: HealthJourneyDefinition, index: number): string {
@@ -100,11 +90,25 @@ function validateSchemaDeclaration(
 	violations: DeclarationViolation[],
 ): void {
 	for (const [operationId, operation] of Object.entries(provider.operations ?? {})) {
-		for (const field of ["input", "output"] as const) {
-			const path = `operations.${operationId}.${field}`;
-			const schema = operation[field];
+		const schemaEntries: Array<[string, unknown]> = [
+			[`operations.${operationId}.input`, operation.input],
+			[`operations.${operationId}.output`, operation.output],
+		];
+		// SSE event schemas reach contract extraction the same way input/output do,
+		// so a transform-bearing event schema would abort extraction at runtime while
+		// passing declaration checks. Validate them under the same rule.
+		const transport = operation.transport;
+		if (transport?.kind === "sse") {
+			for (const [eventName, eventSchema] of Object.entries(transport.events ?? {})) {
+				schemaEntries.push([
+					`operations.${operationId}.transport.events.${eventName}`,
+					eventSchema,
+				]);
+			}
+		}
+		for (const [path, schema] of schemaEntries) {
 			try {
-				describeSchema(schema);
+				describeSchema(schema as Parameters<typeof describeSchema>[0]);
 			} catch (error) {
 				const reason = error instanceof Error ? error.message : String(error);
 				violations.push({

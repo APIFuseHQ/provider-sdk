@@ -1841,6 +1841,11 @@ export function createServerApp(
 	provider: ProviderDefinition,
 	options: ProviderServerOptions = {},
 ): Hono {
+	// Fail-closed validation runs here rather than only in serve(): createServerApp
+	// is a public export, so a cast-bypassed declaration would otherwise reach the
+	// request path unvalidated. serve() calls into this function, so validating
+	// here covers both entry points exactly once per app construction.
+	validateFailClosedDeclaration(provider);
 	validateStatefulServerConfig(options);
 	const app = new Hono();
 	const logger = options.logger ?? defaultProviderServerLogger;
