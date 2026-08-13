@@ -114,7 +114,7 @@ describe("fail-closed provider declaration validation", () => {
 		).not.toThrow();
 	});
 
-	it("rejects function-gated health cases", () => {
+	it("accepts function-gated health cases (skip is reported, not silent)", () => {
 		const healthCheck = {
 			interval: "1m" as const,
 			cases: [
@@ -126,11 +126,13 @@ describe("fail-closed provider declaration validation", () => {
 				},
 			] as const,
 		};
-		expectRule(
-			provider({ operations: { ping: { ...operation(), healthCheck } } }),
-			DECLARATION_RULE_IDS.healthCaseEnabled,
-			"operations.ping.healthCheck.cases[0].enabled",
-		);
+		expect(() =>
+			validateFailClosedDeclaration(
+				provider({
+					operations: { ping: { ...operation(), healthCheck: healthCheck as never } },
+				}),
+			),
+		).not.toThrow();
 		expect(() =>
 			validateFailClosedDeclaration(
 				provider({
