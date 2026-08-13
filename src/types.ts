@@ -366,6 +366,8 @@ export type ProviderChallenge =
 	| {
 			readonly kind: "aws_waf";
 			readonly pageUrl: string;
+			/** `window.gokuProps.key`; solver vendors require it, while `"browser"` does not. */
+			readonly siteKey?: string;
 			readonly captchaScript?: string;
 			readonly context?: string;
 			readonly iv?: string;
