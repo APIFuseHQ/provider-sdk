@@ -227,8 +227,11 @@ function assertGeneratedReadme(providerDir: string): void {
 	if (!readme.includes("bunx playwright install chromium")) {
 		throw new Error("Generated README is missing browser runtime troubleshooting guidance.");
 	}
-	if (!readme.includes("impit")) {
-		throw new Error("Generated README is missing impit stealth runtime guidance.");
+	if (!readme.includes("wreq-js")) {
+		throw new Error("Generated README is missing wreq-js stealth runtime guidance.");
+	}
+	if (!readme.includes("Chrome, Firefox, and Safari")) {
+		throw new Error("Generated README is missing supported stealth browser families.");
 	}
 	if (!readme.includes("bun run submit-check")) {
 		throw new Error("Generated README must document the submit-check pre-submission workflow.");

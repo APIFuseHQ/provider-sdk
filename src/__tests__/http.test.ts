@@ -8,7 +8,7 @@ import {
 	HttpRetryUnsafeMethodPolicy,
 } from "../types.js";
 
-type MockImpitResponse = {
+type MockHttpResponse = {
 	status: number;
 	body: string | Uint8Array;
 	headers?: Record<string, string | string[]>;
@@ -23,7 +23,7 @@ const mockNativeFetchState = {
 	calls: [] as MockNativeFetchCall[],
 	lastResponse: undefined as Response | undefined,
 	queuedNativeResponses: [] as Response[],
-	queuedResponses: [] as MockImpitResponse[],
+	queuedResponses: [] as MockHttpResponse[],
 	queuedErrors: [] as Error[],
 };
 

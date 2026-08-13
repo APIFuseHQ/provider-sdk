@@ -734,11 +734,12 @@ const credentialsAuth = defineCredentialsAuth({
   request's `context`.
 - Stealth/browser providers may require local runtime setup outside Provider code:
   keep access-sensitive operations on `ctx.stealth.fetch()` with an SDK stealth
-  `profile`; the TypeScript runtime uses `impit` behind that interface, so do
+  `profile`; the TypeScript runtime uses `wreq-js` behind that interface, so do
   not add per-operation JA3, HTTP/2 SETTINGS, or pseudo-header tuning. `ctx.stealth`
-  supports Chrome/Firefox-style profiles; use `browser.engine:
-  "playwright-stealth"` for Safari-specific or real browser Providers
-  (`nodriver` is Python-runtime only); install local browser assets with
+  supports Chrome, Firefox, and Safari profiles; use `ctx.browser` when a
+  Provider needs real browser execution. TypeScript browser Providers use
+  `browser.engine: "playwright-stealth"` (`nodriver` is Python-runtime only);
+  install local browser assets with
   `bunx playwright install chromium`, or set
   `APIFUSE__CDP_POOL__URL` for remote browser debugging.
 
@@ -786,7 +787,7 @@ its own diagnostics.
 
 Set `maxBodyBytes` on `ctx.stealth.fetch()` or `session.redirects.run()` when an
 upstream response has a known safe maximum. The limit is opt-in and counts
-decoded bytes as impit streams them. It applies to every redirect hop, uses a
+decoded bytes as `wreq-js` streams them. It applies to every redirect hop, uses a
 parseable `Content-Length` for an early rejection, and still enforces the limit
 incrementally when the header is absent or inaccurate. Exceeding the limit
 aborts the response and throws a non-retryable `TransportError` with code

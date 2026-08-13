@@ -19,7 +19,7 @@
  *   APIFUSE__PROXY__NODEMAVEN_USERNAME=... APIFUSE__PROXY__NODEMAVEN_PASSWORD=... \
  *   bun run scripts/verify-proxy-tls.ts [--country=kr] [--cf-origin=https://...]
  */
-import { Impit } from "impit";
+import { createSession } from "wreq-js";
 
 import { resolveProxyConfigAsync } from "../src/config/loader.js";
 import type { ProxyProtocol } from "../src/runtime/proxy-nodemaven.js";
@@ -95,10 +95,14 @@ async function stealthGet(
 	proxyUrl: string,
 	url: string,
 ): Promise<{ status: number; body: string; headers: Headers }> {
-	const client = new Impit({ browser: "chrome", proxyUrl, ignoreTlsErrors: false });
-	const response = await client.fetch(url);
-	const body = await response.text();
-	return { status: response.status, body, headers: response.headers as unknown as Headers };
+	const session = await createSession({ browser: "chrome_146", proxy: proxyUrl });
+	try {
+		const response = await session.fetch(url);
+		const body = await response.text();
+		return { status: response.status, body, headers: response.headers as unknown as Headers };
+	} finally {
+		await session.close();
+	}
 }
 
 async function nativeGet(
@@ -113,9 +117,13 @@ async function nativeGet(
 async function directFingerprint(transport: Transport): Promise<string | undefined> {
 	try {
 		if (transport === "stealth") {
-			const client = new Impit({ browser: "chrome" });
-			const body = await (await client.fetch(TLS_ECHO)).text();
-			return ja3FromEcho(body);
+			const session = await createSession({ browser: "chrome_146" });
+			try {
+				const body = await (await session.fetch(TLS_ECHO)).text();
+				return ja3FromEcho(body);
+			} finally {
+				await session.close();
+			}
 		}
 		return ja3FromEcho(await (await fetch(TLS_ECHO)).text());
 	} catch {

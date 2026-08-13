@@ -14,7 +14,18 @@ import {
 	type StealthRedirectHop,
 } from "../types.js";
 
-type MockImpitResponse = {
+type MockSessionCookie = {
+	name: string;
+	value: string;
+	domain?: string;
+	path?: string;
+	secure: boolean;
+	httpOnly: boolean;
+	sameSite?: "lax" | "strict" | "none";
+	expiresAtMs?: number;
+};
+
+type MockWreqResponse = {
 	status: number;
 	body: string;
 	headers?: Record<string, string | string[]>;
@@ -24,32 +35,35 @@ type MockImpitResponse = {
 	url?: string;
 	omitUrl?: boolean;
 	redirected?: boolean;
+	sessionCookies?: MockSessionCookie[];
 };
 
 type MockBodyState = {
 	arrayBufferCalls: number;
 	pulledChunks: number;
 	cancelled: boolean;
-	aborted: boolean;
 };
 
-type MockImpitCall = {
+type MockWreqCall = {
 	url: string;
 	init?: Record<string, unknown>;
 };
 
 type MockStealthClientState = {
-	calls: MockImpitCall[];
+	calls: MockWreqCall[];
 	options: Record<string, unknown> | undefined;
+	cookies: MockSessionCookie[];
+	clearCookieCalls: number;
+	closed: boolean;
 };
 
 const mockStealthState = {
 	clients: [] as MockStealthClientState[],
-	queuedResponses: [] as MockImpitResponse[],
+	queuedResponses: [] as MockWreqResponse[],
 	queuedErrors: [] as (Error | (() => Error))[],
 };
 
-function toHeaders(headers: MockImpitResponse["headers"]): Headers {
+function toHeaders(headers: MockWreqResponse["headers"]): Headers {
 	const result = new Headers();
 	for (const [name, value] of Object.entries(headers ?? {})) {
 		if (Array.isArray(value)) {
@@ -70,7 +84,6 @@ function createMockBodyState(): MockBodyState {
 		arrayBufferCalls: 0,
 		pulledChunks: 0,
 		cancelled: false,
-		aborted: false,
 	};
 }
 
@@ -78,7 +91,7 @@ function byteChunks(...chunks: string[]): Uint8Array[] {
 	return chunks.map((chunk) => new TextEncoder().encode(chunk));
 }
 
-function toImpitResponse(response: MockImpitResponse) {
+function toWreqResponse(response: MockWreqResponse) {
 	const headers = toHeaders(response.headers);
 	const responseBytes = response.arrayBufferBody ?? new TextEncoder().encode(response.body);
 	const streamChunks = response.streamChunks ?? [responseBytes];
@@ -116,17 +129,14 @@ function toImpitResponse(response: MockImpitResponse) {
 			});
 			return stream;
 		},
-		abort() {
-			streamState.aborted = true;
-		},
 	};
 }
 
-class MockImpit {
+class MockWreqSession {
 	private readonly state: MockStealthClientState;
 
 	constructor(options?: Record<string, unknown>) {
-		this.state = { calls: [], options };
+		this.state = { calls: [], options, cookies: [], clearCookieCalls: 0, closed: false };
 		mockStealthState.clients.push(this.state);
 	}
 
@@ -136,12 +146,63 @@ class MockImpit {
 		if (queuedError) throw typeof queuedError === "function" ? queuedError() : queuedError;
 		const response = mockStealthState.queuedResponses.shift();
 		if (!response) throw new Error("No queued response");
-		return toImpitResponse(response);
+		this.state.cookies = response.sessionCookies ? [...response.sessionCookies] : [];
+		return toWreqResponse(response);
+	}
+
+	async clearCookies() {
+		this.state.clearCookieCalls += 1;
+		this.state.cookies = [];
+	}
+
+	getCookies(url: string | URL) {
+		const hostname = new URL(url).hostname;
+		return Object.fromEntries(
+			this.state.cookies
+				.filter((cookie) => !cookie.domain || hostname.endsWith(cookie.domain.replace(/^\./, "")))
+				.map((cookie) => [cookie.name, cookie.value]),
+		);
+	}
+
+	getAllCookies() {
+		return [...this.state.cookies];
+	}
+
+	setCookie(name: string, value: string, url: string | URL) {
+		this.state.cookies.push({
+			name,
+			value,
+			domain: new URL(url).hostname,
+			path: "/",
+			secure: new URL(url).protocol === "https:",
+			httpOnly: false,
+		});
+	}
+
+	async close() {
+		this.state.closed = true;
 	}
 }
 
-mock.module("impit", () => ({
-	Impit: MockImpit,
+mock.module("wreq-js", () => ({
+	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
+	getProfiles: () => [
+		"chrome_145",
+		"chrome_146",
+		"firefox_128",
+		"firefox_133",
+		"firefox_135",
+		"firefox_147",
+		"safari_15.5",
+		"safari_15.6.1",
+		"safari_16",
+		"safari_16.5",
+		"safari_17.0",
+		"safari_17.2.1",
+		"safari_ios_17.2",
+		"safari_ios_18.1.1",
+		"safari_ios_26",
+	],
 }));
 
 describe("createStealthClient", () => {
@@ -195,7 +256,7 @@ describe("createStealthClient", () => {
 		});
 	});
 
-	it("keeps the uncapped response path on impit arrayBuffer", async () => {
+	it("keeps the uncapped response path on wreq arrayBuffer", async () => {
 		const streamState = createMockBodyState();
 		mockStealthState.queuedResponses.push({
 			status: 200,
@@ -213,7 +274,6 @@ describe("createStealthClient", () => {
 			arrayBufferCalls: 1,
 			pulledChunks: 0,
 			cancelled: false,
-			aborted: false,
 		});
 	});
 
@@ -266,7 +326,7 @@ describe("createStealthClient", () => {
 		expect(response.body).toBe("exact");
 	});
 
-	it("aborts a chunked response as soon as its streamed body exceeds maxBodyBytes", async () => {
+	it("cancels a chunked response as soon as its streamed body exceeds maxBodyBytes", async () => {
 		const streamState = createMockBodyState();
 		const streamChunks = byteChunks("abc", "def", "ghi", "jkl", "mno");
 		mockStealthState.queuedResponses.push({
@@ -292,7 +352,6 @@ describe("createStealthClient", () => {
 			},
 		});
 		expect(streamState.cancelled).toBe(true);
-		expect(streamState.aborted).toBe(true);
 		expect(streamState.pulledChunks).toBeLessThan(streamChunks.length);
 	});
 
@@ -317,7 +376,7 @@ describe("createStealthClient", () => {
 		});
 		expect(streamState.pulledChunks).toBe(0);
 		expect(streamState.arrayBufferCalls).toBe(0);
-		expect(streamState.aborted).toBe(true);
+		expect(streamState.cancelled).toBe(true);
 	});
 
 	it("enforces streamed bytes when Content-Length lies below the cap", async () => {
@@ -506,7 +565,7 @@ describe("createStealthClient", () => {
 		expect(response.url).toBe(`https://example.com/items?page=1&confmKey=${secret}`);
 	});
 
-	it("createSession reuses the same impit client for matching browser/proxy settings", async () => {
+	it("createSession reuses the same wreq session for matching browser/proxy settings", async () => {
 		mockStealthState.queuedResponses.push(
 			{ status: 200, body: "first", headers: { a: "1" } },
 			{ status: 200, body: "second", headers: { a: "2" } },
@@ -535,14 +594,26 @@ describe("createStealthClient", () => {
 		await expect(session.fetch("/closed")).rejects.toMatchObject({
 			message: "Stealth session is closed",
 		});
+		await Bun.sleep(0);
+		expect(mockStealthState.clients[0]?.closed).toBe(true);
 	});
 
-	it("passes the session cookie jar to impit for redirect and sequential cookies", async () => {
+	it("imports wreq session cookies from redirects for sequential requests", async () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 200,
 				body: "first",
 				headers: { "set-cookie": "sid=abc; Path=/" },
+				sessionCookies: [
+					{
+						name: "redirect_sid",
+						value: "xyz",
+						domain: "example.com",
+						path: "/",
+						secure: true,
+						httpOnly: false,
+					},
+				],
 			},
 			{ status: 200, body: "second", headers: {} },
 		);
@@ -552,20 +623,12 @@ describe("createStealthClient", () => {
 		const session = client.createSession();
 
 		await session.fetch("/first");
-		const impitCookieJar = mockStealthState.clients[0]?.options?.cookieJar as {
-			setCookie(cookie: string, url: string): void | Promise<void>;
-			getCookieString(url: string): string | Promise<string>;
-		};
-
-		expect(impitCookieJar).toBeDefined();
-		expect(await impitCookieJar.getCookieString("https://example.com/next")).toBe("sid=abc");
-		await impitCookieJar.setCookie("redirect_sid=xyz; Path=/", "https://example.com/redirect");
-
 		await session.fetch("/second");
 
 		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).toMatchObject({
 			Cookie: "sid=abc; redirect_sid=xyz",
 		});
+		expect(mockStealthState.clients[0]?.clearCookieCalls).toBe(2);
 	});
 
 	it("does not attach a host-only cookie to a request for another host", async () => {
@@ -593,23 +656,26 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
 	});
 
-	it("passes request URLs through the impit cookie bridge on set and get", async () => {
-		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+	it("uses request URLs when applying SDK cookies to wreq requests", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "host-a", headers: {} },
+			{ status: 200, body: "host-b", headers: {} },
+		);
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient("https://example.com").createSession();
-		await session.fetch("/");
-		const impitCookieJar = mockStealthState.clients[0]?.options?.cookieJar as {
-			setCookie(cookie: string, url: string): void | Promise<void>;
-			getCookieString(url: string): string | Promise<string>;
-		};
-
-		await impitCookieJar.setCookie("bridge=host-a; Path=/", "https://host-a.example/login");
-
-		expect(await impitCookieJar.getCookieString("https://host-a.example/next")).toBe(
-			"bridge=host-a",
+		session.cookies.setFromCookieStrings(
+			["bridge=host-a; Path=/"],
+			"https://host-a.example/login",
 		);
-		expect(await impitCookieJar.getCookieString("https://host-b.example/next")).toBe("");
+
+		await session.fetch("https://host-a.example/next");
+		await session.fetch("https://host-b.example/next");
+
+		expect(mockStealthState.clients[0]?.calls[0]?.init?.headers).toMatchObject({
+			Cookie: "bridge=host-a",
+		});
+		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
 	});
 
 	it("applies Domain suffix rules and rejects unrelated or public-suffix domains", async () => {
@@ -784,7 +850,7 @@ describe("createStealthClient", () => {
 		expect(cookies.toHeader("https://unrelated.test/next")).toBe("");
 	});
 
-	it("rejects removed Chrome profile names before starting impit", async () => {
+	it("rejects removed Chrome profile names before starting wreq", async () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
 
 		for (const profile of ["chrome-129", "chrome-130", "chrome-131"]) {
@@ -796,7 +862,7 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients).toHaveLength(0);
 	});
 
-	it("maps chrome-146 profile to an impit browser profile and preserves headers", async () => {
+	it("maps chrome-146 profile to a wreq browser profile and preserves headers", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 200,
 			body: "ok",
@@ -812,7 +878,8 @@ describe("createStealthClient", () => {
 		});
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "chrome142",
+			browser: "chrome_146",
+			os: "macos",
 		});
 		expect(mockStealthState.clients[0]?.calls[0]?.init).toMatchObject({
 			headers: { "User-Agent": "provider-ua" },
@@ -834,7 +901,8 @@ describe("createStealthClient", () => {
 		await session.fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "chrome142",
+			browser: "chrome_146",
+			os: "macos",
 		});
 	});
 
@@ -851,7 +919,8 @@ describe("createStealthClient", () => {
 		await client.fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "firefox133",
+			browser: "firefox_133",
+			os: "macos",
 		});
 	});
 
@@ -868,19 +937,31 @@ describe("createStealthClient", () => {
 		await client.fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "chrome142",
+			browser: "chrome_146",
+			os: "macos",
 		});
 	});
 
-	it("rejects Safari-only stealth profiles instead of silently impersonating Chrome", async () => {
+	it("maps Safari profiles to same-family wreq impersonation", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "desktop", headers: {} },
+			{ status: 200, body: "ios", headers: {} },
+		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", "ios-safari-26");
+		await createStealthClient("https://example.com", "safari-17").fetch("/profile");
+		await createStealthClient("https://example.com", "ios-safari-26").fetch("/profile");
 
-		await expect(client.fetch("/profile")).rejects.toThrow(/Safari stealth fingerprint/);
-		expect(mockStealthState.clients).toHaveLength(0);
+		expect(mockStealthState.clients[0]?.options).toMatchObject({
+			browser: "safari_17.0",
+			os: "macos",
+		});
+		expect(mockStealthState.clients[1]?.options).toMatchObject({
+			browser: "safari_ios_26",
+			os: "ios",
+		});
 	});
 
-	it("rejects low-level stealth fingerprint overrides that impit owns internally", async () => {
+	it("rejects low-level stealth fingerprint overrides that the transport owns internally", async () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 
@@ -942,7 +1023,7 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients).toHaveLength(0);
 	});
 
-	it("passes request method, body, timeout, and headers through impit fetch", async () => {
+	it("passes request method, body, timeout, and headers through wreq fetch", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 200,
 			body: "ok",
@@ -967,7 +1048,7 @@ describe("createStealthClient", () => {
 		});
 	});
 
-	it("passes manual redirect mode through impit fetch", async () => {
+	it("passes manual redirect mode through wreq fetch", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 302,
 			body: "",
@@ -1872,7 +1953,7 @@ describe("createStealthClient", () => {
 		expect(((thrown as TransportError).cause as Error).stack).not.toContain(sentSecret);
 	});
 
-	it("maps impit timeout failures to transport_timeout", async () => {
+	it("maps wreq timeout failures to transport_timeout", async () => {
 		const timeoutError = new Error("request timeout after 10ms");
 		timeoutError.name = "TimeoutError";
 		mockStealthState.queuedErrors.push(timeoutError);
@@ -1904,7 +1985,7 @@ describe("createStealthClient", () => {
 
 		expect(response.status).toBe(200);
 		expect(mockStealthState.clients[0]?.calls).toHaveLength(2);
-		expect(mockStealthState.clients[0]?.options?.proxyUrl).toBe("http://proxy.test");
+		expect(mockStealthState.clients[0]?.options?.proxy).toBe("http://proxy.test");
 	});
 
 	it("keeps proxy_connect_failed retryable when a sensitive value matches its prefix", async () => {
@@ -1946,7 +2027,7 @@ describe("createStealthClient", () => {
 
 		expect(response.status).toBe(200);
 		expect(mockStealthState.clients[0]?.calls).toHaveLength(2);
-		expect(mockStealthState.clients[0]?.options?.proxyUrl).toBe("http://proxy.test");
+		expect(mockStealthState.clients[0]?.options?.proxy).toBe("http://proxy.test");
 	});
 
 	it("does not default-retry when no stealth proxy was resolved", async () => {
@@ -1964,7 +2045,7 @@ describe("createStealthClient", () => {
 			code: "transport_network_error",
 		});
 		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
-		expect(mockStealthState.clients[0]?.options?.proxyUrl).toBeUndefined();
+		expect(mockStealthState.clients[0]?.options?.proxy).toBeUndefined();
 	});
 
 	it("does not default-retry proxy-routed GET when retry is false", async () => {

@@ -68,7 +68,7 @@ const FIREFOX_H2_SETTINGS = {
 };
 
 const SAFARI_H2_SETTINGS = {
-	HEADER_TABLE_SIZE: 4096,
+	// Safari 17 also sends a connection-level WINDOW_UPDATE increment of 10485760.
 	ENABLE_PUSH: 0,
 	INITIAL_WINDOW_SIZE: 4194304,
 	MAX_CONCURRENT_STREAMS: 100,
@@ -206,6 +206,16 @@ const STEALTH_PROFILES: Record<string, StealthProfile> = {
 		userAgent:
 			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
 		tlsClientIdentifier: "safari_16_0",
+		ja3: SAFARI_JA3,
+		h2Settings: SAFARI_H2_SETTINGS,
+		headerOrder: SAFARI_HEADER_ORDER,
+	}),
+	"safari-17": createProfile("safari-17", {
+		platform: "macos",
+		version: "17.0",
+		userAgent:
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+		tlsClientIdentifier: "safari_17_0",
 		ja3: SAFARI_JA3,
 		h2Settings: SAFARI_H2_SETTINGS,
 		headerOrder: SAFARI_HEADER_ORDER,
