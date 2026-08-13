@@ -159,7 +159,7 @@ function extractTransport(
 				.sort(([leftId], [rightId]) => leftId.localeCompare(rightId))
 				.map(([eventName, schema]) => [
 					eventName,
-					describeSchema(schema, { operationId, outputTextTrust: true }),
+					describeSchema(schema, { eventName, operationId, outputTextTrust: true }),
 				]),
 		),
 	});

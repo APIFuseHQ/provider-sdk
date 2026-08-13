@@ -308,11 +308,46 @@ describe("output text-trust metadata", () => {
 			.catchall(z.string().textTrust("untrusted"));
 
 		expect(collectOutputTextTrust(schema)).toEqual({
+			"$<catchall-key>": "untrusted",
 			'$["result"]<union:0>["kind"]': "trusted",
 			'$["result"]<union:0>["value"]': "untrusted",
 			'$["result"]<union:1>["kind"]': "trusted",
 			'$["result"]<union:1>["reason"]': "untrusted",
 			"$[*]": "untrusted",
+		});
+	});
+
+	it("eec81ee44bc6: classifies unconstrained any, unknown, and catchall-key carriers", () => {
+		const anySchema = z.object({ a: textTrust(z.any(), "untrusted") });
+		const unknownSchema = z.object({ b: textTrust(z.unknown(), "untrusted") });
+		const catchallSchema = z.object({}).catchall(z.unknown());
+
+		expect(collectOutputTextTrust(anySchema)).toEqual({
+			'$["a"]': "untrusted",
+		});
+		expect(collectOutputTextTrust(unknownSchema)).toEqual({
+			'$["b"]': "untrusted",
+		});
+		expect(collectOutputTextTrust(catchallSchema)).toEqual({
+			"$[*]": "untrusted",
+			"$<catchall-key>": "untrusted",
+		});
+		expect(findUnclassifiedOutputTextPaths(anySchema)).toEqual([]);
+		expect(findUnclassifiedOutputTextPaths(unknownSchema)).toEqual([]);
+		expect(projectedTextTrustMap(describeSchema(anySchema, { outputTextTrust: true }))).toEqual({
+			"#/properties/a": "untrusted",
+		});
+		expect(projectedTextTrustMap(describeSchema(unknownSchema, { outputTextTrust: true }))).toEqual(
+			{
+				"#/properties/b": "untrusted",
+			},
+		);
+		expect(findUnclassifiedOutputTextPaths(catchallSchema)).toEqual(["$[*]", "$<catchall-key>"]);
+		expect(
+			projectedTextTrustMap(describeSchema(catchallSchema, { outputTextTrust: true })),
+		).toEqual({
+			"#/additionalProperties": "untrusted",
+			"#/propertyNames": "untrusted",
 		});
 	});
 
@@ -340,6 +375,19 @@ describe("output text-trust metadata", () => {
 			'$["uuid"]': "trusted",
 		});
 		expect(findUnclassifiedOutputTextPaths(schema)).toEqual([]);
+	});
+
+	it("314fb478c67d: does not trust a caller validator that impersonates a built-in format", () => {
+		const schema = z.object({ c: z.stringFormat("uuid", () => true) });
+
+		expect(schema.parse({ c: "arbitrary prose" })).toEqual({ c: "arbitrary prose" });
+		expect(collectOutputTextTrust(schema)).toEqual({
+			'$["c"]': "untrusted",
+		});
+		expect(findUnclassifiedOutputTextPaths(schema)).toEqual(['$["c"]']);
+		expect(projectedTextTrustMap(describeSchema(schema, { outputTextTrust: true }))).toEqual({
+			"#/properties/c": "untrusted",
+		});
 	});
 
 	it("e9f768c4a6df/530e2daeee2e/719b6afce464/98343efaaa18: rejects unsafe regex ranges and overwrites", () => {
@@ -401,6 +449,35 @@ describe("output text-trust metadata", () => {
 			"#/properties/suffix": "untrusted",
 			"#/properties/suffixAlternative": "untrusted",
 		});
+	});
+
+	it("56e8aff06680: ancestor fallbacks and runtime mutations taint every descendant", () => {
+		const inner = z.object({ code: z.enum(["READY"]) });
+		const caught = inner.catch({ code: "arbitrary prose" as "READY" });
+		const defaulted = inner.default({ code: "arbitrary prose" as "READY" });
+		const overwritten = inner.overwrite(() => ({ code: "arbitrary prose" as "READY" }));
+		const customChecked = inner.check((payload) => {
+			payload.value.code = "arbitrary prose" as "READY";
+		});
+		const transformed = inner.transform(() => "arbitrary prose");
+
+		expect(caught.parse({ code: "invalid" })).toEqual({ code: "arbitrary prose" });
+		expect(defaulted.parse(undefined)).toEqual({ code: "arbitrary prose" });
+		expect(overwritten.parse({ code: "READY" })).toEqual({ code: "arbitrary prose" });
+		expect(customChecked.parse({ code: "READY" })).toEqual({ code: "arbitrary prose" });
+		expect(transformed.parse({ code: "READY" })).toBe("arbitrary prose");
+
+		for (const schema of [caught, defaulted, overwritten, customChecked]) {
+			expect(collectOutputTextTrust(schema)).toEqual({
+				'$["code"]': "untrusted",
+			});
+			expect(findUnclassifiedOutputTextPaths(schema)).toEqual(['$["code"]']);
+			expect(projectedTextTrustMap(describeSchema(schema, { outputTextTrust: true }))).toEqual({
+				"#/properties/code": "untrusted",
+			});
+		}
+		expect(collectOutputTextTrust(transformed)).toEqual({ $: "untrusted" });
+		expect(findUnclassifiedOutputTextPaths(transformed)).toEqual(["$"]);
 	});
 
 	it("auto-derives the documented restrictive format allowlist", () => {
@@ -493,6 +570,51 @@ describe("output text-trust metadata", () => {
 			});
 			expect((error as Error).cause).toBeInstanceOf(OutputTextTrustProjectionMarkerError);
 		}
+	});
+
+	it("8f4e94891168: rejects syntactically valid projection markers without SDK provenance", () => {
+		const schema = z.object({ message: z.string() }).meta({
+			properties: {
+				message: {
+					type: "string",
+					[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY]: {
+						inherited: "trusted",
+						kind: "leaf",
+						local: "trusted",
+					},
+				},
+			},
+		});
+
+		expect(schema.parse({ message: "arbitrary prose" })).toEqual({ message: "arbitrary prose" });
+		try {
+			describeSchema(schema, { outputTextTrust: true });
+			expect.unreachable("unprovenanced internal marker should fail closed");
+		} catch (error) {
+			expect(error).toBeInstanceOf(OutputTextTrustProjectionError);
+			expect(error).toMatchObject({
+				classification: "untrusted",
+				code: "output_text_trust_projection_failed",
+				schemaPath: "#/properties/message",
+			});
+			expect((error as Error).cause).toBeInstanceOf(OutputTextTrustProjectionMarkerError);
+		}
+	});
+
+	it("51e27ea8c950: resolves local and inherited classifications from one metadata read", () => {
+		const schema = z.enum(["READY"]);
+		const originalMeta = schema.meta.bind(schema);
+		let metadataReads = 0;
+		Object.defineProperty(schema, "meta", {
+			configurable: true,
+			value: (...args: Parameters<typeof schema.meta>) => {
+				metadataReads += 1;
+				return originalMeta(...args);
+			},
+		});
+
+		describeSchema(z.object({ code: schema }), { outputTextTrust: true });
+		expect(metadataReads).toBe(1);
 	});
 
 	it("4cddd60017a6: collection errors retain nested metadata and lazy paths", () => {
@@ -620,6 +742,29 @@ describe("output text-trust metadata", () => {
 				schemaPath: "#/properties/message",
 			});
 			expect((error as Error).cause).toEqual(new Error("metadata registry unavailable"));
+		}
+	});
+
+	it("4caf1863f84b: derives a nested path for conversion failures outside the override", () => {
+		const schema = z.object({
+			nested: z.object({
+				message: z.string().transform((value) => value),
+			}),
+		});
+
+		try {
+			describeSchema(schema, { outputTextTrust: true });
+			expect.unreachable("nested transform should fail closed");
+		} catch (error) {
+			expect(error).toBeInstanceOf(OutputTextTrustProjectionError);
+			expect(error).toMatchObject({
+				classification: "untrusted",
+				code: "output_text_trust_projection_failed",
+				schemaPath: "#/properties/nested/properties/message",
+			});
+			expect((error as Error).cause).toEqual(
+				new Error("Transforms cannot be represented in JSON Schema"),
+			);
 		}
 	});
 

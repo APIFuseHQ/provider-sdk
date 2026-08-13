@@ -124,8 +124,6 @@ export const AUTO_TRUSTED_ZOD_STRING_FORMATS = [
 	"xid",
 ] as const;
 
-const AUTO_TRUSTED_ZOD_STRING_FORMAT_SET = new Set<string>(AUTO_TRUSTED_ZOD_STRING_FORMATS);
-
 export type SensitivePathSegment = string | "*";
 export type SensitivePath = readonly SensitivePathSegment[];
 export type SensitiveFieldKind =
@@ -373,8 +371,26 @@ export function resolveOutputTextTrust(
 	schema: z.core.$ZodType,
 	inheritedUntrusted = false,
 ): TextTrust | undefined {
-	return resolveOutputTextLeaf(asInternalZodSchema(schema), [], true, inheritedUntrusted)
-		?.classification;
+	const resolved = resolveOutputTextTrustProjection(schema);
+	return resolved?.[inheritedUntrusted ? "inherited" : "local"];
+}
+
+/** @internal Resolve both projection states from one stable schema traversal. */
+export function resolveOutputTextTrustProjection(
+	schema: z.core.$ZodType,
+): { readonly inherited: TextTrust; readonly local: TextTrust } | undefined {
+	const resolved = resolveOutputTextLeafPair(asInternalZodSchema(schema), [], true);
+	return resolved
+		? {
+				inherited: resolved.inherited.classification,
+				local: resolved.local.classification,
+			}
+		: undefined;
+}
+
+/** @internal Whether this node can bypass or mutate descendant validation guarantees. */
+export function invalidatesDescendantOutputTextAutoTrust(schema: z.core.$ZodType): boolean {
+	return invalidatesOutputTextAutoTrust(asInternalZodSchema(schema)._zod.def);
 }
 
 /** @internal Used by contract JSON Schema projection. */
@@ -392,7 +408,7 @@ function collectOutputTextLeaves(schema: InternalZodSchema): OutputTextTrustColl
 	const leaves: Array<OutputTextLeaf & { readonly path: string }> = [];
 	const debtPaths = new Set<string>();
 	const emittedPaths = new Set<string>();
-	walkOutputSchema(schema, "$", leaves, debtPaths, emittedPaths, new Set(), false, false);
+	walkOutputSchema(schema, "$", leaves, debtPaths, emittedPaths, new Set(), false, false, true);
 	return { leaves, debtPaths };
 }
 
@@ -405,6 +421,7 @@ function walkOutputSchema(
 	activeSchemas: Set<InternalZodSchema>,
 	expandingCycle: boolean,
 	inheritedUntrusted: boolean,
+	autoTrustAllowed: boolean,
 ): void {
 	try {
 		walkOutputSchemaUnchecked(
@@ -416,6 +433,7 @@ function walkOutputSchema(
 			activeSchemas,
 			expandingCycle,
 			inheritedUntrusted,
+			autoTrustAllowed,
 		);
 	} catch (error) {
 		if (error instanceof OutputTextTrustCollectionError) throw error;
@@ -432,6 +450,7 @@ function walkOutputSchemaUnchecked(
 	activeSchemas: Set<InternalZodSchema>,
 	expandingCycle: boolean,
 	inheritedUntrusted: boolean,
+	autoTrustAllowed: boolean,
 ): void {
 	const alreadyActive = activeSchemas.has(schema);
 	if (alreadyActive) {
@@ -445,12 +464,13 @@ function walkOutputSchemaUnchecked(
 				new Set(),
 				true,
 				inheritedUntrusted,
+				autoTrustAllowed,
 			);
 		}
 		return;
 	}
 
-	const leaf = resolveOutputTextLeaf(schema, [], true, inheritedUntrusted);
+	const leaf = resolveOutputTextLeaf(schema, [], autoTrustAllowed, inheritedUntrusted);
 	if (leaf) {
 		if (!emittedPaths.has(path)) {
 			emittedPaths.add(path);
@@ -463,6 +483,7 @@ function walkOutputSchemaUnchecked(
 	const declaration = readTextTrustDeclaration(schema);
 	if (declaration === "trusted" || declaration === "invalid") debtPaths.add(path);
 	const descendantUntrusted = inheritedUntrusted || declaration === "untrusted";
+	const descendantAutoTrustAllowed = autoTrustAllowed && !invalidatesOutputTextAutoTrust(def);
 	if (!alreadyActive) activeSchemas.add(schema);
 	try {
 		switch (def.type) {
@@ -479,9 +500,21 @@ function walkOutputSchemaUnchecked(
 						activeSchemas,
 						expandingCycle,
 						descendantUntrusted,
+						descendantAutoTrustAllowed,
 					);
 				}
 				if (def.catchall) {
+					if (asInternalZodSchema(def.catchall)._zod.def.type !== "never") {
+						const catchallKeyPath = `${path}<catchall-key>`;
+						if (!emittedPaths.has(catchallKeyPath)) {
+							emittedPaths.add(catchallKeyPath);
+							out.push({
+								classification: "untrusted",
+								classified: descendantUntrusted,
+								path: catchallKeyPath,
+							});
+						}
+					}
 					walkOutputSchema(
 						asInternalZodSchema(def.catchall),
 						`${path}[*]`,
@@ -491,6 +524,7 @@ function walkOutputSchemaUnchecked(
 						activeSchemas,
 						expandingCycle,
 						descendantUntrusted,
+						descendantAutoTrustAllowed,
 					);
 				}
 				break;
@@ -505,6 +539,7 @@ function walkOutputSchemaUnchecked(
 					activeSchemas,
 					expandingCycle,
 					descendantUntrusted,
+					descendantAutoTrustAllowed,
 				);
 				break;
 			case "tuple": {
@@ -518,6 +553,7 @@ function walkOutputSchemaUnchecked(
 						activeSchemas,
 						expandingCycle,
 						descendantUntrusted,
+						descendantAutoTrustAllowed,
 					);
 				});
 				if (def.rest) {
@@ -530,6 +566,7 @@ function walkOutputSchemaUnchecked(
 						activeSchemas,
 						expandingCycle,
 						descendantUntrusted,
+						descendantAutoTrustAllowed,
 					);
 				}
 				break;
@@ -544,6 +581,7 @@ function walkOutputSchemaUnchecked(
 					activeSchemas,
 					expandingCycle,
 					descendantUntrusted,
+					descendantAutoTrustAllowed,
 				);
 				walkOutputSchema(
 					asInternalZodSchema(def.valueType),
@@ -554,6 +592,7 @@ function walkOutputSchemaUnchecked(
 					activeSchemas,
 					expandingCycle,
 					descendantUntrusted,
+					descendantAutoTrustAllowed,
 				);
 				break;
 			case "union":
@@ -567,6 +606,7 @@ function walkOutputSchemaUnchecked(
 						activeSchemas,
 						expandingCycle,
 						descendantUntrusted,
+						descendantAutoTrustAllowed,
 					);
 				});
 				break;
@@ -581,6 +621,7 @@ function walkOutputSchemaUnchecked(
 						activeSchemas,
 						expandingCycle,
 						descendantUntrusted,
+						descendantAutoTrustAllowed,
 					);
 				}
 				break;
@@ -601,6 +642,7 @@ function walkOutputSchemaUnchecked(
 					activeSchemas,
 					expandingCycle,
 					descendantUntrusted,
+					descendantAutoTrustAllowed,
 				);
 				break;
 			case "pipe":
@@ -613,6 +655,7 @@ function walkOutputSchemaUnchecked(
 					activeSchemas,
 					expandingCycle,
 					descendantUntrusted,
+					descendantAutoTrustAllowed,
 				);
 				break;
 			case "lazy":
@@ -625,6 +668,7 @@ function walkOutputSchemaUnchecked(
 					activeSchemas,
 					expandingCycle,
 					descendantUntrusted,
+					descendantAutoTrustAllowed,
 				);
 				break;
 			case "string":
@@ -665,21 +709,41 @@ function resolveOutputTextLeaf(
 	autoTrustAllowed: boolean,
 	inheritedUntrusted: boolean,
 ): OutputTextLeaf | undefined {
+	const resolved = resolveOutputTextLeafPair(schema, outerDeclarations, autoTrustAllowed);
+	return resolved?.[inheritedUntrusted ? "inherited" : "local"];
+}
+
+function resolveOutputTextLeafPair(
+	schema: InternalZodSchema,
+	outerDeclarations: readonly TextTrustDeclaration[],
+	autoTrustAllowed: boolean,
+): { readonly inherited: OutputTextLeaf; readonly local: OutputTextLeaf } | undefined {
 	const declarations = [...outerDeclarations, readTextTrustDeclaration(schema)];
 	const def = schema._zod.def;
 	if (!isOutputTextLeafDef(def)) {
 		const inner = flattenedOutputSchema(def);
 		return inner
-			? resolveOutputTextLeaf(
+			? resolveOutputTextLeafPair(
 					inner,
 					declarations,
-					autoTrustAllowed && def.type !== "default" && def.type !== "catch",
-					inheritedUntrusted,
+					autoTrustAllowed && !invalidatesOutputTextAutoTrust(def),
 				)
 			: undefined;
 	}
 
-	const autoTrusted = autoTrustAllowed && isAutoTrustedOutputTextLeaf(schema);
+	const autoTrusted =
+		autoTrustAllowed && !invalidatesOutputTextAutoTrust(def) && isAutoTrustedOutputTextLeaf(schema);
+	return {
+		inherited: classifyOutputTextLeaf(declarations, autoTrusted, true),
+		local: classifyOutputTextLeaf(declarations, autoTrusted, false),
+	};
+}
+
+function classifyOutputTextLeaf(
+	declarations: readonly TextTrustDeclaration[],
+	autoTrusted: boolean,
+	inheritedUntrusted: boolean,
+): OutputTextLeaf {
 	if (declarations.includes("invalid")) {
 		return { classification: "untrusted", classified: false };
 	}
@@ -759,6 +823,11 @@ function isOutputTextLeafDef(def: InternalZodDef): boolean {
 			return def.values.some((value) => typeof value === "string");
 		case "enum":
 			return Object.values(def.entries).some((value) => typeof value === "string");
+		case "any":
+		case "unknown":
+		case "custom":
+		case "transform":
+			return true;
 		default:
 			return false;
 	}
@@ -766,13 +835,12 @@ function isOutputTextLeafDef(def: InternalZodDef): boolean {
 
 function isAutoTrustedOutputTextLeaf(schema: InternalZodSchema): boolean {
 	const def = schema._zod.def;
-	if (hasOverwriteCheck(def)) return false;
+	if (hasUnsafeOutputCheck(def)) return false;
 	if (def.type === "literal" || def.type === "enum") return isOutputTextLeafDef(def);
 	if (def.type !== "string" && def.type !== "template_literal") return false;
 
 	const { bag, pattern } = schema._zod;
-	const format = bag.format;
-	if (typeof format === "string" && AUTO_TRUSTED_ZOD_STRING_FORMAT_SET.has(format)) {
+	if (hasSdkOwnedStringFormatValidator(schema)) {
 		return true;
 	}
 
@@ -787,7 +855,7 @@ function isAutoTrustedOutputTextLeaf(schema: InternalZodSchema): boolean {
 	);
 }
 
-function hasOverwriteCheck(def: InternalZodDef): boolean {
+function hasUnsafeOutputCheck(def: InternalZodDef): boolean {
 	const checks = Reflect.get(def, "checks");
 	return (
 		Array.isArray(checks) &&
@@ -796,11 +864,77 @@ function hasOverwriteCheck(def: InternalZodDef): boolean {
 			const internals = Reflect.get(check, "_zod");
 			if (!internals || typeof internals !== "object") return false;
 			const checkDef = Reflect.get(internals, "def");
-			return (
-				checkDef && typeof checkDef === "object" && Reflect.get(checkDef, "check") === "overwrite"
-			);
+			if (!checkDef || typeof checkDef !== "object") return false;
+			const kind = Reflect.get(checkDef, "check");
+			return kind === "overwrite" || kind === "custom";
 		})
 	);
+}
+
+function invalidatesOutputTextAutoTrust(def: InternalZodDef): boolean {
+	return (
+		def.type === "default" ||
+		def.type === "catch" ||
+		def.type === "transform" ||
+		hasUnsafeOutputCheck(def)
+	);
+}
+
+interface OwnedStringFormatValidator {
+	readonly constructor: unknown;
+	readonly patternFlags: string;
+	readonly patternSource: string;
+}
+
+const SDK_OWNED_STRING_FORMAT_VALIDATORS: readonly OwnedStringFormatValidator[] = [
+	z.cidrv4(),
+	z.cidrv6(),
+	z.cuid(),
+	z.cuid2(),
+	z.iso.date(),
+	z.iso.datetime(),
+	z.iso.duration(),
+	z.e164(),
+	z.guid(),
+	z.ipv4(),
+	z.ipv6(),
+	z.ksuid(),
+	z.nanoid(),
+	z.iso.time(),
+	z.ulid(),
+	z.uuid(),
+	z.xid(),
+].map((validator) => {
+	const pattern = Reflect.get(validator._zod.def, "pattern");
+	if (!(pattern instanceof RegExp)) {
+		throw new TypeError("SDK-owned Zod string format validator is missing its pattern.");
+	}
+	return {
+		constructor: validator.constructor,
+		patternFlags: pattern.flags,
+		patternSource: pattern.source,
+	};
+});
+
+function hasSdkOwnedStringFormatValidator(schema: InternalZodSchema): boolean {
+	const candidates: unknown[] = [schema];
+	const checks = Reflect.get(schema._zod.def, "checks");
+	if (Array.isArray(checks)) candidates.push(...checks);
+	return candidates.some((candidate) => {
+		if (!candidate || typeof candidate !== "object") return false;
+		const internals = Reflect.get(candidate, "_zod");
+		if (!internals || typeof internals !== "object") return false;
+		const def = Reflect.get(internals, "def");
+		if (!def || typeof def !== "object" || Reflect.has(def, "fn")) return false;
+		const pattern = Reflect.get(def, "pattern");
+		if (!(pattern instanceof RegExp)) return false;
+		return SDK_OWNED_STRING_FORMAT_VALIDATORS.some(
+			(owned) =>
+				Reflect.get(candidate, "constructor") === owned.constructor &&
+				pattern.source === owned.patternSource &&
+				pattern.flags === owned.patternFlags,
+		);
+	});
 }
 
 function isRestrictiveAnchoredPattern(pattern: RegExp): boolean {

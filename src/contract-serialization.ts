@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { type ZodType, z } from "zod";
 import {
 	canonicalJson,
@@ -10,7 +10,8 @@ import {
 import {
 	APIFUSE_TEXT_TRUST_META_KEY,
 	inheritsUntrustedOutputTextTrust,
-	resolveOutputTextTrust,
+	invalidatesDescendantOutputTextAutoTrust,
+	resolveOutputTextTrustProjection,
 	type TextTrust,
 } from "./schema.js";
 import type { SchemaLike } from "./types.js";
@@ -22,12 +23,16 @@ type OutputTextTrustProjectionMarker =
 			readonly kind: "container-untrusted";
 	  }
 	| {
+			readonly kind: "container-unsafe";
+	  }
+	| {
 			readonly inherited: TextTrust;
 			readonly kind: "leaf";
 			readonly local: TextTrust;
 	  };
 
 interface DescribeSchemaOptions {
+	readonly eventName?: string;
 	readonly operationId?: string;
 	readonly outputTextTrust?: boolean;
 }
@@ -40,11 +45,18 @@ export class OutputTextTrustProjectionError extends Error {
 		public readonly schemaPath: string,
 		cause: unknown,
 		public readonly operationId?: string,
+		public readonly eventName?: string,
 	) {
+		const context = [
+			operationId === undefined ? undefined : `operation "${operationId}"`,
+			eventName === undefined ? undefined : `event "${eventName}"`,
+		]
+			.filter((value): value is string => value !== undefined)
+			.join(", ");
 		super(
-			operationId === undefined
+			context.length === 0
 				? `Output text-trust projection failed at schema path ${schemaPath}.`
-				: `Output text-trust projection failed for operation "${operationId}" at schema path ${schemaPath}.`,
+				: `Output text-trust projection failed for ${context} at schema path ${schemaPath}.`,
 		);
 		this.name = "OutputTextTrustProjectionError";
 		this.cause = cause;
@@ -73,6 +85,16 @@ export function describeSchema(schema: SchemaLike, options: DescribeSchemaOption
 	}
 	const standard = isRecord(schema) ? schema["~standard"] : undefined;
 	if (isRecord(standard)) {
+		if (options.outputTextTrust) {
+			throw new OutputTextTrustProjectionError(
+				"$",
+				new TypeError(
+					"Standard Schema output cannot be projected to JSON Schema with text-trust classifications.",
+				),
+				options.operationId,
+				options.eventName,
+			);
+		}
 		return compactObject({
 			kind: "schema",
 			standard: "standard-schema-v1",
@@ -116,8 +138,10 @@ function isZodSchema(schema: SchemaLike): schema is ZodType {
 }
 
 function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonValue | undefined {
+	const projectionMarkers = new Map<string, OutputTextTrustProjectionMarker>();
 	try {
 		const jsonSchema = z.toJSONSchema(schema, {
+			unrepresentable: options.outputTextTrust ? "any" : "throw",
 			override: ({ zodSchema, jsonSchema: projectedSchema, path }) => {
 				if (!options.outputTextTrust) {
 					delete projectedSchema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY];
@@ -125,34 +149,114 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 					return;
 				}
 				try {
-					const local = resolveOutputTextTrust(zodSchema);
+					const unrepresentable = unrepresentableZodOutputCause(zodSchema);
+					if (unrepresentable) throw unrepresentable;
+					const resolved = resolveOutputTextTrustProjection(zodSchema);
 					delete projectedSchema[APIFUSE_TEXT_TRUST_META_KEY];
-					if (local !== undefined) {
-						projectedSchema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] = {
-							inherited: resolveOutputTextTrust(zodSchema, true) ?? local,
+					if (resolved !== undefined) {
+						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
+							inherited: resolved.inherited,
 							kind: "leaf",
-							local,
-						} satisfies OutputTextTrustProjectionMarker;
+							local: resolved.local,
+						});
+					} else if (invalidatesDescendantOutputTextAutoTrust(zodSchema)) {
+						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
+							kind: "container-unsafe",
+						});
 					} else if (inheritsUntrustedOutputTextTrust(zodSchema)) {
-						projectedSchema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] = {
+						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
 							kind: "container-untrusted",
-						} satisfies OutputTextTrustProjectionMarker;
+						});
+					}
+					if (hasOpenObjectCatchall(zodSchema)) {
+						const propertyNames: Record<string, unknown> = {};
+						writeOutputTextTrustProjectionMarker(propertyNames, projectionMarkers, {
+							inherited: "untrusted",
+							kind: "leaf",
+							local: "untrusted",
+						});
+						projectedSchema.propertyNames = propertyNames;
 					}
 				} catch (error) {
 					throw new OutputTextTrustProjectionError(
 						jsonSchemaPath(path),
 						error,
 						options.operationId,
+						options.eventName,
 					);
 				}
 			},
 		});
-		if (options.outputTextTrust) finalizeProjectedTextTrust(jsonSchema, options.operationId);
+		if (options.outputTextTrust) finalizeProjectedTextTrust(jsonSchema, projectionMarkers, options);
 		return toJsonValue(jsonSchema);
 	} catch (error) {
 		if (error instanceof OutputTextTrustProjectionError) throw error;
 		if (!options.outputTextTrust && error instanceof Error) return undefined;
-		throw new OutputTextTrustProjectionError("$", error, options.operationId);
+		throw new OutputTextTrustProjectionError("$", error, options.operationId, options.eventName);
+	}
+}
+
+function writeOutputTextTrustProjectionMarker(
+	schema: Record<string, unknown>,
+	markers: Map<string, OutputTextTrustProjectionMarker>,
+	marker: OutputTextTrustProjectionMarker,
+): void {
+	const id = randomUUID();
+	markers.set(id, marker);
+	schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] = id;
+}
+
+function hasOpenObjectCatchall(schema: z.core.$ZodType): boolean {
+	const def = schema._zod.def;
+	if (def.type !== "object") return false;
+	const catchall = Reflect.get(def, "catchall");
+	if (!catchall || typeof catchall !== "object") return false;
+	const internals = Reflect.get(catchall, "_zod");
+	if (!internals || typeof internals !== "object") return false;
+	const catchallDef = Reflect.get(internals, "def");
+	return (
+		!catchallDef || typeof catchallDef !== "object" || Reflect.get(catchallDef, "type") !== "never"
+	);
+}
+
+function unrepresentableZodOutputCause(schema: z.core.$ZodType): Error | undefined {
+	const def = schema._zod.def;
+	switch (def.type) {
+		case "bigint":
+			return new Error("BigInt cannot be represented in JSON Schema");
+		case "symbol":
+			return new Error("Symbols cannot be represented in JSON Schema");
+		case "undefined":
+			return new Error("Undefined cannot be represented in JSON Schema");
+		case "void":
+			return new Error("Void cannot be represented in JSON Schema");
+		case "date":
+			return new Error("Date cannot be represented in JSON Schema");
+		case "nan":
+			return new Error("NaN cannot be represented in JSON Schema");
+		case "custom":
+			return new Error("Custom types cannot be represented in JSON Schema");
+		case "function":
+			return new Error("Function types cannot be represented in JSON Schema");
+		case "transform":
+			return new Error("Transforms cannot be represented in JSON Schema");
+		case "map":
+			return new Error("Map cannot be represented in JSON Schema");
+		case "set":
+			return new Error("Set cannot be represented in JSON Schema");
+		case "literal": {
+			const values = Reflect.get(def, "values");
+			if (!Array.isArray(values)) return undefined;
+			if (values.some((value: unknown) => value === undefined)) {
+				return new Error("Literal `undefined` cannot be represented in JSON Schema");
+			}
+			if (values.some((value: unknown) => typeof value === "bigint")) {
+				return new Error("BigInt literals cannot be represented in JSON Schema");
+			}
+			return undefined;
+		}
+		default:
+			return undefined;
 	}
 }
 
@@ -184,12 +288,17 @@ interface ProjectedJsonSchemaNode {
 	readonly schema: Record<string, unknown>;
 }
 
-function finalizeProjectedTextTrust(value: unknown, operationId?: string): void {
+function finalizeProjectedTextTrust(
+	value: unknown,
+	projectionMarkers: ReadonlyMap<string, OutputTextTrustProjectionMarker>,
+	options: DescribeSchemaOptions,
+): void {
 	if (!isJsonSchemaNode(value)) {
 		throw new OutputTextTrustProjectionError(
 			"#",
 			new TypeError("Projected output schema is not a JSON Schema object."),
-			operationId,
+			options.operationId,
+			options.eventName,
 		);
 	}
 	const root = value;
@@ -198,46 +307,63 @@ function finalizeProjectedTextTrust(value: unknown, operationId?: string): void 
 	for (const { path, schema } of nodes) {
 		const marker = readOutputTextTrustProjectionMarker(
 			schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY],
+			projectionMarkers,
 			path,
-			operationId,
+			options,
 		);
 		if (marker) markers.set(schema, marker);
 	}
 
 	const desiredTrust = new WeakMap<Record<string, unknown>, TextTrust>();
 	const visitedStates = new WeakMap<Record<string, unknown>, number>();
-	const project = (schema: Record<string, unknown>, inheritedUntrusted: boolean): void => {
-		const state = inheritedUntrusted ? 2 : 1;
+	const project = (
+		schema: Record<string, unknown>,
+		inheritedUntrusted: boolean,
+		autoTrustAllowed: boolean,
+	): void => {
+		const state = 1 << ((inheritedUntrusted ? 1 : 0) + (autoTrustAllowed ? 0 : 2));
 		const visited = visitedStates.get(schema) ?? 0;
 		if ((visited & state) !== 0) return;
 		visitedStates.set(schema, visited | state);
 
 		const marker = markers.get(schema);
 		if (marker?.kind === "leaf") {
-			const trust = inheritedUntrusted ? marker.inherited : marker.local;
+			const trust = autoTrustAllowed
+				? inheritedUntrusted
+					? marker.inherited
+					: marker.local
+				: "untrusted";
 			if (desiredTrust.get(schema) !== "untrusted") desiredTrust.set(schema, trust);
 			return;
 		}
 		const descendantUntrusted = inheritedUntrusted || marker?.kind === "container-untrusted";
+		const descendantAutoTrustAllowed = autoTrustAllowed && marker?.kind !== "container-unsafe";
 		const reference = schema.$ref;
 		if (reference !== undefined) {
 			if (typeof reference !== "string") {
 				throw new OutputTextTrustProjectionError(
-					findNodePath(nodes, schema),
+					requireNodePath(nodes, schema, options),
 					new TypeError("Projected JSON Schema $ref must be a string."),
-					operationId,
+					options.operationId,
+					options.eventName,
 				);
 			}
 			project(
-				resolveLocalJsonSchemaReference(root, reference, findNodePath(nodes, schema), operationId),
+				resolveLocalJsonSchemaReference(
+					root,
+					reference,
+					requireNodePath(nodes, schema, options),
+					options,
+				),
 				descendantUntrusted,
+				descendantAutoTrustAllowed,
 			);
 		}
 		for (const child of projectedJsonSchemaChildren(schema, false)) {
-			project(child, descendantUntrusted);
+			project(child, descendantUntrusted, descendantAutoTrustAllowed);
 		}
 	};
-	project(root, false);
+	project(root, false, true);
 
 	for (const { schema } of nodes) {
 		delete schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY];
@@ -251,35 +377,26 @@ function finalizeProjectedTextTrust(value: unknown, operationId?: string): void 
 
 function readOutputTextTrustProjectionMarker(
 	value: unknown,
+	projectionMarkers: ReadonlyMap<string, OutputTextTrustProjectionMarker>,
 	schemaPath: string,
-	operationId?: string,
+	options: DescribeSchemaOptions,
 ): OutputTextTrustProjectionMarker | undefined {
 	if (value === undefined) return undefined;
-	if (!value || typeof value !== "object") {
-		throw invalidProjectionMarker(schemaPath, operationId);
-	}
-	const kind = Reflect.get(value, "kind");
-	if (kind === "container-untrusted") return { kind };
-	if (kind !== "leaf") throw invalidProjectionMarker(schemaPath, operationId);
-	const inherited = Reflect.get(value, "inherited");
-	const local = Reflect.get(value, "local");
-	if (
-		(inherited !== "trusted" && inherited !== "untrusted") ||
-		(local !== "trusted" && local !== "untrusted")
-	) {
-		throw invalidProjectionMarker(schemaPath, operationId);
-	}
-	return { inherited, kind, local };
+	if (typeof value !== "string") throw invalidProjectionMarker(schemaPath, options);
+	const marker = projectionMarkers.get(value);
+	if (!marker) throw invalidProjectionMarker(schemaPath, options);
+	return marker;
 }
 
 function invalidProjectionMarker(
 	schemaPath: string,
-	operationId: string | undefined,
+	options: DescribeSchemaOptions,
 ): OutputTextTrustProjectionError {
 	return new OutputTextTrustProjectionError(
 		schemaPath,
 		new OutputTextTrustProjectionMarkerError(schemaPath),
-		operationId,
+		options.operationId,
+		options.eventName,
 	);
 }
 
@@ -348,7 +465,7 @@ function resolveLocalJsonSchemaReference(
 	root: Record<string, unknown>,
 	reference: string,
 	schemaPath: string,
-	operationId: string | undefined,
+	options: DescribeSchemaOptions,
 ): Record<string, unknown> {
 	let target: unknown = root;
 	if (reference !== "#") {
@@ -356,7 +473,8 @@ function resolveLocalJsonSchemaReference(
 			throw new OutputTextTrustProjectionError(
 				schemaPath,
 				new TypeError(`Unsupported non-local JSON Schema reference: ${reference}`),
-				operationId,
+				options.operationId,
+				options.eventName,
 			);
 		}
 		for (const encodedSegment of reference.slice(2).split("/")) {
@@ -365,7 +483,8 @@ function resolveLocalJsonSchemaReference(
 				throw new OutputTextTrustProjectionError(
 					schemaPath,
 					new TypeError(`Unresolvable local JSON Schema reference: ${reference}`),
-					operationId,
+					options.operationId,
+					options.eventName,
 				);
 			}
 			target = Reflect.get(target, segment);
@@ -375,7 +494,8 @@ function resolveLocalJsonSchemaReference(
 		throw new OutputTextTrustProjectionError(
 			schemaPath,
 			new TypeError(`JSON Schema reference does not resolve to a schema object: ${reference}`),
-			operationId,
+			options.operationId,
+			options.eventName,
 		);
 	}
 	return target;
@@ -385,11 +505,19 @@ function isJsonSchemaNode(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-function findNodePath(
+function requireNodePath(
 	nodes: readonly ProjectedJsonSchemaNode[],
 	target: Record<string, unknown>,
+	options: DescribeSchemaOptions,
 ): string {
-	return nodes.find(({ schema }) => schema === target)?.path ?? "#";
+	const path = nodes.find(({ schema }) => schema === target)?.path;
+	if (path !== undefined) return path;
+	throw new OutputTextTrustProjectionError(
+		"#",
+		new TypeError("Projected JSON Schema node is missing from the collected node index."),
+		options.operationId,
+		options.eventName,
+	);
 }
 
 function appendJsonSchemaPath(path: string, segment: string | number): string {

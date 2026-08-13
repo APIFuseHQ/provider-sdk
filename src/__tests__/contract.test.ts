@@ -12,6 +12,7 @@ import {
 	OutputTextTrustProjectionError,
 } from "../index.js";
 import type { ProviderContext, ProviderDefinition } from "../types.js";
+import type { StandardSchemaV1 } from "../types.js";
 
 const InputSchema = z.object({ query: z.string() });
 const OutputSchema = z.object({ name: z.string(), score: z.number() });
@@ -237,6 +238,89 @@ describe("provider contract extraction", () => {
 			expect((error as Error).cause).toEqual(
 				new Error("Transforms cannot be represented in JSON Schema"),
 			);
+		}
+	});
+
+	it("d8e9345ddff6: Standard Schema outputs fail closed when text-trust projection is required", () => {
+		const provider = buildProvider(["zeta-search", "alpha-search"]);
+		const operation = provider.operations["alpha-search"];
+		if (!operation) throw new Error("alpha-search operation missing");
+		operation.output = {
+			"~standard": {
+				vendor: "dynamic-test-schema",
+				version: 1,
+				validate: (value) => ({ value }),
+			},
+		} satisfies StandardSchemaV1;
+
+		try {
+			extractProviderContract(provider);
+			expect.unreachable("unprojectable Standard Schema output should fail extraction");
+		} catch (error) {
+			expect(error).toBeInstanceOf(OutputTextTrustProjectionError);
+			expect(error).toMatchObject({
+				classification: "untrusted",
+				code: "output_text_trust_projection_failed",
+				operationId: "alpha-search",
+				schemaPath: "$",
+			});
+			expect((error as Error).cause).toBeInstanceOf(TypeError);
+		}
+	});
+
+	it("d8e9345ddff6: Standard Schema SSE event outputs also fail closed", () => {
+		const provider = buildProvider(["zeta-search", "alpha-search"]);
+		const operation = provider.operations["alpha-search"];
+		if (!operation) throw new Error("alpha-search operation missing");
+		operation.transport = {
+			kind: "sse",
+			events: {
+				message: {
+					"~standard": {
+						vendor: "dynamic-test-schema",
+						version: 1,
+						validate: (value) => ({ value }),
+					},
+				} satisfies StandardSchemaV1,
+			},
+		};
+
+		try {
+			extractProviderContract(provider);
+			expect.unreachable("unprojectable Standard Schema event should fail extraction");
+		} catch (error) {
+			expect(error).toBeInstanceOf(OutputTextTrustProjectionError);
+			expect(error).toMatchObject({
+				eventName: "message",
+				operationId: "alpha-search",
+				schemaPath: "$",
+			});
+		}
+	});
+
+	it("95b6d179bef6: SSE projection errors identify the failing event", () => {
+		const provider = buildProvider(["zeta-search", "alpha-search"]);
+		const operation = provider.operations["alpha-search"];
+		if (!operation) throw new Error("alpha-search operation missing");
+		operation.transport = {
+			kind: "sse",
+			events: {
+				zeta: z.string().transform((value) => value),
+				alpha: z.string().transform((value) => value),
+			},
+		};
+
+		try {
+			extractProviderContract(provider);
+			expect.unreachable("unprojectable SSE event should fail extraction");
+		} catch (error) {
+			expect(error).toBeInstanceOf(OutputTextTrustProjectionError);
+			expect(error).toMatchObject({
+				eventName: "alpha",
+				operationId: "alpha-search",
+				schemaPath: "$",
+			});
+			expect((error as Error).message).toContain('event "alpha"');
 		}
 	});
 
