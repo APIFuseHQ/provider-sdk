@@ -18,6 +18,7 @@ import {
 } from "./resolver-vendors/bindings.js";
 import { createBrowserResolverVendorAdapter } from "./resolver-vendors/browser.js";
 import { assertResolverHostAllowed } from "./resolver-vendors/hosts.js";
+import { createTwoCaptchaResolverVendorAdapter } from "./resolver-vendors/twocaptcha.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
 	type ResolverIdentity,
@@ -158,6 +159,13 @@ export type ResolverAdapterFactory = (
 ) => ResolverVendorAdapter;
 
 const resolverAdapterRegistry: Partial<Record<ProviderResolverVendor, ResolverAdapterFactory>> = {
+	"2captcha"(configuration, timeoutMs, allowedHosts) {
+		return createTwoCaptchaResolverVendorAdapter({
+			allowedHosts,
+			apiKey: configuration,
+			timeoutMs,
+		});
+	},
 	browser(configuration, timeoutMs, allowedHosts) {
 		return createBrowserResolverVendorAdapter({
 			allowedHosts,
@@ -190,7 +198,6 @@ export function swapResolverAdapterFactoryForTests(
 // This is the sole allowlist for declared vendors whose registry entry may be absent.
 // Remove a vendor here when its adapter is registered.
 const KNOWN_UNIMPLEMENTED_RESOLVER_VENDORS: ReadonlySet<ProviderResolverVendor> = new Set([
-	"2captcha",
 	"capsolver",
 	"capmonster",
 	"custom",
