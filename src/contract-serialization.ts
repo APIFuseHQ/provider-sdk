@@ -7,11 +7,21 @@ import {
 	type JsonValue,
 	toJsonValue,
 } from "./contract-json.js";
+import {
+	APIFUSE_TEXT_TRUST_META_KEY,
+	hasOutputTextTrustMetadata,
+	resolveFlattenedOutputTextTrust,
+	resolveOutputTextTrust,
+} from "./schema.js";
 import type { SchemaLike } from "./types.js";
 
-export function describeSchema(schema: SchemaLike): JsonValue {
+interface DescribeSchemaOptions {
+	readonly outputTextTrust?: boolean;
+}
+
+export function describeSchema(schema: SchemaLike, options: DescribeSchemaOptions = {}): JsonValue {
 	if (isZodSchema(schema)) {
-		const jsonSchema = zodJsonSchema(schema);
+		const jsonSchema = zodJsonSchema(schema, options);
 		return compactObject({
 			kind: "schema",
 			vendor: "zod",
@@ -64,9 +74,29 @@ function isZodSchema(schema: SchemaLike): schema is ZodType {
 	return schema instanceof z.ZodType;
 }
 
-function zodJsonSchema(schema: ZodType): JsonValue | undefined {
+function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonValue | undefined {
 	try {
-		const jsonSchema = z.toJSONSchema(schema);
+		const jsonSchema = z.toJSONSchema(schema, {
+			override: ({ zodSchema, jsonSchema: projectedSchema }) => {
+				if (!options.outputTextTrust) {
+					delete projectedSchema[APIFUSE_TEXT_TRUST_META_KEY];
+					return;
+				}
+				const trust = resolveOutputTextTrust(zodSchema);
+				if (trust === undefined) {
+					if (hasOutputTextTrustMetadata(zodSchema)) {
+						const inheritedTrust = resolveFlattenedOutputTextTrust(zodSchema);
+						if (inheritedTrust === undefined) {
+							delete projectedSchema[APIFUSE_TEXT_TRUST_META_KEY];
+						} else {
+							projectedSchema[APIFUSE_TEXT_TRUST_META_KEY] = { v: 1, trust: inheritedTrust };
+						}
+					}
+				} else {
+					projectedSchema[APIFUSE_TEXT_TRUST_META_KEY] = { v: 1, trust };
+				}
+			},
+		});
 		return toJsonValue(jsonSchema);
 	} catch (error) {
 		if (error instanceof Error) return undefined;

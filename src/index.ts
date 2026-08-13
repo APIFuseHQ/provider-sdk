@@ -155,20 +155,28 @@ export {
 	type TraceContext,
 } from "./runtime/trace.js";
 export {
+	APIFUSE_TEXT_TRUST_META_KEY,
 	APIFUSE_DESCRIPTION_KEY_META_KEY,
 	APIFUSE_REDACTION_MARKER,
 	APIFUSE_SENSITIVE_KIND_META_KEY,
 	APIFUSE_SENSITIVE_META_KEY,
+	AUTO_TRUSTED_ZOD_STRING_FORMATS,
+	collectOutputTextTrust,
 	collectSensitivePaths,
 	describeKey,
 	field,
 	fields,
+	findUnclassifiedOutputTextPaths,
 	isSensitiveSchema,
 	redactPayload,
+	type OutputTextTrustMap,
 	type SensitiveFieldKind,
 	type SensitiveFieldOptions,
 	type SensitivePath,
 	sensitive,
+	textTrust,
+	type TextTrust,
+	type TextTrustMetadata,
 	z,
 } from "./schema.js";
 export {

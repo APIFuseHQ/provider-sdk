@@ -83,7 +83,46 @@ export function safeParseSchemaSync(
 export const APIFUSE_SENSITIVE_META_KEY = "x-apifuse-sensitive";
 export const APIFUSE_SENSITIVE_KIND_META_KEY = "x-apifuse-sensitive-kind";
 export const APIFUSE_DESCRIPTION_KEY_META_KEY = "x-apifuse-description-key";
+export const APIFUSE_TEXT_TRUST_META_KEY = "x-apifuse-text-trust";
 export const APIFUSE_REDACTION_MARKER = "<redacted>";
+
+export type TextTrust = "trusted" | "untrusted";
+
+export interface TextTrustMetadata {
+	readonly v: 1;
+	readonly trust: TextTrust;
+}
+
+export type OutputTextTrustMap = Readonly<Record<string, TextTrust>>;
+
+/**
+ * Auto-trusted output leaves are string-valued `z.literal()` / `z.enum()`,
+ * bounded anchored patterns that exclude whitespace, wildcard, and negated
+ * character classes, and the formats listed here. A brand is trusted only
+ * when its underlying schema meets one of those rules. Length-only strings
+ * and other formats (including email, URL, base64, and JWT) are not trusted.
+ */
+export const AUTO_TRUSTED_ZOD_STRING_FORMATS = [
+	"cidrv4",
+	"cidrv6",
+	"cuid",
+	"cuid2",
+	"date",
+	"datetime",
+	"duration",
+	"e164",
+	"guid",
+	"ipv4",
+	"ipv6",
+	"ksuid",
+	"nanoid",
+	"time",
+	"ulid",
+	"uuid",
+	"xid",
+] as const;
+
+const AUTO_TRUSTED_ZOD_STRING_FORMAT_SET = new Set<string>(AUTO_TRUSTED_ZOD_STRING_FORMATS);
 
 export type SensitivePathSegment = string | "*";
 export type SensitivePath = readonly SensitivePathSegment[];
@@ -127,9 +166,19 @@ export function describeKey<TSchema extends ZodType>(
 	});
 }
 
+/** Attach output text-trust authoring metadata without changing validation. */
+export function textTrust<TSchema extends ZodType>(schema: TSchema, trust: TextTrust): TSchema {
+	const metadata = schema.meta() ?? {};
+	return schema.meta({
+		...metadata,
+		[APIFUSE_TEXT_TRUST_META_KEY]: { v: 1, trust } satisfies TextTrustMetadata,
+	});
+}
+
 declare module "zod" {
 	interface ZodType {
 		describeKey(key: ProviderLocaleKey | string): this;
+		textTrust(trust: TextTrust): this;
 	}
 }
 
@@ -140,16 +189,30 @@ const describeKeyMethod = function <TSchema extends ZodType>(
 	return describeKey(this, key);
 };
 
-function installDescribeKeyOnPrototype(prototype: unknown): void {
-	const target = prototype as (Record<string, unknown> & { describeKey?: unknown }) | null;
-	if (!target || typeof target.describeKey === "function") {
-		return;
+const textTrustMethod = function <TSchema extends ZodType>(
+	this: TSchema,
+	trust: TextTrust,
+): TSchema {
+	return textTrust(this, trust);
+};
+
+function installSchemaMetadataMethodsOnPrototype(prototype: unknown): void {
+	const target = prototype as Record<string, unknown> | null;
+	if (!target) return;
+	if (typeof target.describeKey !== "function") {
+		Object.defineProperty(target, "describeKey", {
+			configurable: true,
+			value: describeKeyMethod,
+			writable: true,
+		});
 	}
-	Object.defineProperty(target, "describeKey", {
-		configurable: true,
-		value: describeKeyMethod,
-		writable: true,
-	});
+	if (typeof target.textTrust !== "function") {
+		Object.defineProperty(target, "textTrust", {
+			configurable: true,
+			value: textTrustMethod,
+			writable: true,
+		});
+	}
 }
 
 for (const [name, value] of Object.entries(z)) {
@@ -159,7 +222,7 @@ for (const [name, value] of Object.entries(z)) {
 	if (typeof value !== "function") {
 		continue;
 	}
-	installDescribeKeyOnPrototype(value.prototype);
+	installSchemaMetadataMethodsOnPrototype(value.prototype);
 }
 
 const RESERVED_SENSITIVE_KEYS = new Set([
@@ -237,6 +300,398 @@ export const fields = {
 	token: (options?: { description?: string }) =>
 		sensitiveString("token", "Provider access or refresh token.", options),
 } as const;
+
+type TextTrustDeclaration = TextTrust | "absent" | "invalid";
+
+interface OutputTextLeaf {
+	readonly classification: TextTrust;
+	readonly classified: boolean;
+}
+
+/**
+ * Collect every textual leaf in a Zod output schema as a deterministic
+ * schema-path-to-classification object. The path grammar is rooted at `$`:
+ * object keys are `["key"]`, arrays and record values are `[*]`, tuple slots
+ * are `[n]`, union/intersection alternatives are `<union:n>` / `<intersection:n>`,
+ * record keys are `<record-key>`, and one bounded cycle expansion is marked
+ * `<recursive>`.
+ */
+export function collectOutputTextTrust(schema: unknown): OutputTextTrustMap {
+	return Object.fromEntries(
+		collectOutputTextLeaves(schema)
+			.map(({ path, classification }) => [path, classification] as const)
+			.sort(([left], [right]) => left.localeCompare(right)),
+	);
+}
+
+/** Report textual output paths that lack a valid explicit or auto-derived classification. */
+export function findUnclassifiedOutputTextPaths(schema: unknown): string[] {
+	return collectOutputTextLeaves(schema)
+		.filter(({ classified }) => !classified)
+		.map(({ path }) => path)
+		.sort((left, right) => left.localeCompare(right));
+}
+
+/** @internal Used by contract JSON Schema projection. */
+export function resolveOutputTextTrust(schema: unknown): TextTrust | undefined {
+	return resolveOutputTextLeaf(schema)?.classification;
+}
+
+/** @internal Resolves a text leaf flattened into the same JSON Schema node by a Zod wrapper. */
+export function resolveFlattenedOutputTextTrust(schema: unknown): TextTrust | undefined {
+	const def = readZodDef(schema);
+	if (!def) return undefined;
+	switch (Reflect.get(def, "type")) {
+		case "optional":
+		case "default":
+		case "prefault":
+		case "catch":
+		case "readonly":
+		case "nonoptional":
+		case "promise":
+			return (
+				resolveOutputTextTrust(Reflect.get(def, "innerType")) ??
+				resolveFlattenedOutputTextTrust(Reflect.get(def, "innerType"))
+			);
+		case "pipe":
+			return (
+				resolveOutputTextTrust(Reflect.get(def, "out")) ??
+				resolveFlattenedOutputTextTrust(Reflect.get(def, "out"))
+			);
+		default:
+			return undefined;
+	}
+}
+
+/** @internal Distinguishes authored metadata from extension properties inherited through wrappers. */
+export function hasOutputTextTrustMetadata(schema: unknown): boolean {
+	const metadata = readZodMetadata(schema);
+	return metadata !== undefined && Reflect.has(metadata, APIFUSE_TEXT_TRUST_META_KEY);
+}
+
+function collectOutputTextLeaves(
+	schema: unknown,
+): Array<OutputTextLeaf & { readonly path: string }> {
+	const out: Array<OutputTextLeaf & { readonly path: string }> = [];
+	const emittedPaths = new Set<string>();
+	walkOutputSchema(schema, "$", out, emittedPaths, new Set(), false, false);
+	return out;
+}
+
+function walkOutputSchema(
+	schema: unknown,
+	path: string,
+	out: Array<OutputTextLeaf & { readonly path: string }>,
+	emittedPaths: Set<string>,
+	activeSchemas: Set<unknown>,
+	expandingCycle: boolean,
+	allowActiveSchema: boolean,
+): void {
+	if (!schema || typeof schema !== "object") return;
+	const alreadyActive = activeSchemas.has(schema);
+	if (alreadyActive && !allowActiveSchema) {
+		if (!expandingCycle) {
+			walkOutputSchema(schema, `${path}<recursive>`, out, emittedPaths, activeSchemas, true, true);
+		}
+		return;
+	}
+
+	const leaf = resolveOutputTextLeaf(schema);
+	if (leaf) {
+		if (!emittedPaths.has(path)) {
+			emittedPaths.add(path);
+			out.push({ path, ...leaf });
+		}
+		return;
+	}
+
+	const def = readZodDef(schema);
+	if (!def) return;
+	if (!alreadyActive) activeSchemas.add(schema);
+	try {
+		switch (Reflect.get(def, "type")) {
+			case "object": {
+				const shape = readObjectShape(def);
+				for (const [key, child] of Object.entries(shape).sort(([left], [right]) =>
+					left.localeCompare(right),
+				)) {
+					walkOutputSchema(
+						child,
+						`${path}[${JSON.stringify(key)}]`,
+						out,
+						emittedPaths,
+						activeSchemas,
+						expandingCycle,
+						false,
+					);
+				}
+				const catchall = Reflect.get(def, "catchall");
+				if (catchall) {
+					walkOutputSchema(
+						catchall,
+						`${path}[*]`,
+						out,
+						emittedPaths,
+						activeSchemas,
+						expandingCycle,
+						false,
+					);
+				}
+				break;
+			}
+			case "array":
+				walkOutputSchema(
+					Reflect.get(def, "element"),
+					`${path}[*]`,
+					out,
+					emittedPaths,
+					activeSchemas,
+					expandingCycle,
+					false,
+				);
+				break;
+			case "tuple": {
+				const items = Reflect.get(def, "items");
+				if (Array.isArray(items)) {
+					items.forEach((child, index) => {
+						walkOutputSchema(
+							child,
+							`${path}[${index}]`,
+							out,
+							emittedPaths,
+							activeSchemas,
+							expandingCycle,
+							false,
+						);
+					});
+				}
+				const rest = Reflect.get(def, "rest");
+				if (rest) {
+					walkOutputSchema(
+						rest,
+						`${path}[*]`,
+						out,
+						emittedPaths,
+						activeSchemas,
+						expandingCycle,
+						false,
+					);
+				}
+				break;
+			}
+			case "record":
+				walkOutputSchema(
+					Reflect.get(def, "keyType"),
+					`${path}<record-key>`,
+					out,
+					emittedPaths,
+					activeSchemas,
+					expandingCycle,
+					false,
+				);
+				walkOutputSchema(
+					Reflect.get(def, "valueType"),
+					`${path}[*]`,
+					out,
+					emittedPaths,
+					activeSchemas,
+					expandingCycle,
+					false,
+				);
+				break;
+			case "union": {
+				const options = Reflect.get(def, "options");
+				if (Array.isArray(options)) {
+					options.forEach((child, index) => {
+						walkOutputSchema(
+							child,
+							`${path}<union:${index}>`,
+							out,
+							emittedPaths,
+							activeSchemas,
+							expandingCycle,
+							false,
+						);
+					});
+				}
+				break;
+			}
+			case "intersection":
+				for (const [index, side] of ["left", "right"].entries()) {
+					walkOutputSchema(
+						Reflect.get(def, side),
+						`${path}<intersection:${index}>`,
+						out,
+						emittedPaths,
+						activeSchemas,
+						expandingCycle,
+						false,
+					);
+				}
+				break;
+			case "optional":
+			case "nullable":
+			case "default":
+			case "prefault":
+			case "catch":
+			case "readonly":
+			case "nonoptional":
+			case "promise":
+				walkOutputSchema(
+					Reflect.get(def, "innerType"),
+					path,
+					out,
+					emittedPaths,
+					activeSchemas,
+					expandingCycle,
+					false,
+				);
+				break;
+			case "pipe":
+				walkOutputSchema(
+					Reflect.get(def, "out"),
+					path,
+					out,
+					emittedPaths,
+					activeSchemas,
+					expandingCycle,
+					false,
+				);
+				break;
+			case "lazy": {
+				const getter = Reflect.get(def, "getter");
+				if (typeof getter === "function") {
+					walkOutputSchema(getter(), path, out, emittedPaths, activeSchemas, expandingCycle, false);
+				}
+				break;
+			}
+		}
+	} finally {
+		if (!alreadyActive) activeSchemas.delete(schema);
+	}
+}
+
+function resolveOutputTextLeaf(schema: unknown): OutputTextLeaf | undefined {
+	if (!isOutputTextLeafSchema(schema)) return undefined;
+	const declaration = readTextTrustDeclaration(schema);
+	const autoTrusted = isAutoTrustedOutputTextLeaf(schema);
+	if (declaration === "untrusted") {
+		return { classification: "untrusted", classified: true };
+	}
+	if (declaration === "trusted") {
+		return {
+			classification: autoTrusted ? "trusted" : "untrusted",
+			classified: autoTrusted,
+		};
+	}
+	if (declaration === "invalid") {
+		return { classification: "untrusted", classified: false };
+	}
+	return autoTrusted
+		? { classification: "trusted", classified: true }
+		: { classification: "untrusted", classified: false };
+}
+
+function isOutputTextLeafSchema(schema: unknown): boolean {
+	const def = readZodDef(schema);
+	if (!def) return false;
+	const type = Reflect.get(def, "type");
+	if (type === "string" || type === "template_literal") return true;
+	if (type === "literal") {
+		const values = Reflect.get(def, "values");
+		return Array.isArray(values) && values.some((value) => typeof value === "string");
+	}
+	if (type === "enum") {
+		const entries = Reflect.get(def, "entries");
+		return (
+			entries !== null &&
+			typeof entries === "object" &&
+			Object.values(entries).some((value) => typeof value === "string")
+		);
+	}
+	return false;
+}
+
+function isAutoTrustedOutputTextLeaf(schema: unknown): boolean {
+	const def = readZodDef(schema);
+	if (!def) return false;
+	const type = Reflect.get(def, "type");
+	if (type === "literal" || type === "enum") return isOutputTextLeafSchema(schema);
+	if (type !== "string" && type !== "template_literal") return false;
+
+	const internals = Reflect.get(schema as object, "_zod");
+	const bag =
+		internals && typeof internals === "object" ? Reflect.get(internals, "bag") : undefined;
+	const format =
+		typeof Reflect.get(def, "format") === "string"
+			? Reflect.get(def, "format")
+			: bag && typeof bag === "object"
+				? Reflect.get(bag, "format")
+				: undefined;
+	if (typeof format === "string" && AUTO_TRUSTED_ZOD_STRING_FORMAT_SET.has(format)) {
+		return true;
+	}
+
+	const pattern = Reflect.get(internals, "pattern");
+	if (pattern instanceof RegExp && isRestrictiveAnchoredPattern(pattern)) return true;
+	const patterns = bag && typeof bag === "object" ? Reflect.get(bag, "patterns") : undefined;
+	return (
+		patterns instanceof Set &&
+		patterns.size > 0 &&
+		[...patterns].every(
+			(candidate) => candidate instanceof RegExp && isRestrictiveAnchoredPattern(candidate),
+		)
+	);
+}
+
+function isRestrictiveAnchoredPattern(pattern: RegExp): boolean {
+	if (pattern.multiline) return false;
+	const source = pattern.source;
+	if (!source.startsWith("^") || !source.endsWith("$")) return false;
+	if (/\[\^/.test(source)) return false;
+	if (/\\[sS]|\\p\{(?:Z|Separator)/u.test(source)) return false;
+	if (/(^|[^\\])\./.test(source)) return false;
+	if (/[\t\n\r ]/.test(source)) return false;
+	return !hasUnboundedRegexQuantifier(source);
+}
+
+function hasUnboundedRegexQuantifier(source: string): boolean {
+	let escaped = false;
+	let inCharacterClass = false;
+	for (let index = 0; index < source.length; index += 1) {
+		const character = source[index];
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (character === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (character === "[") {
+			inCharacterClass = true;
+			continue;
+		}
+		if (character === "]") {
+			inCharacterClass = false;
+			continue;
+		}
+		if (inCharacterClass) continue;
+		if (character === "+" || character === "*") return true;
+		if (character === "{" && /^\{\d+,\}/.test(source.slice(index))) return true;
+	}
+	return false;
+}
+
+function readTextTrustDeclaration(schema: unknown): TextTrustDeclaration {
+	const metadata = readZodMetadata(schema);
+	if (!metadata || !Reflect.has(metadata, APIFUSE_TEXT_TRUST_META_KEY)) return "absent";
+	const value = Reflect.get(metadata, APIFUSE_TEXT_TRUST_META_KEY);
+	if (!value || typeof value !== "object") return "invalid";
+	if (Reflect.get(value, "v") !== 1) return "invalid";
+	const trust = Reflect.get(value, "trust");
+	return trust === "trusted" || trust === "untrusted" ? trust : "invalid";
+}
 
 export function isSensitiveSchema(schema: unknown): boolean {
 	const metadata = readZodMetadata(schema);

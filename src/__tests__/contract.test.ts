@@ -187,6 +187,16 @@ describe("provider contract extraction", () => {
 		});
 	});
 
+	it("projects text-trust classifications only into operation output JSON Schema", () => {
+		const snapshot = extractProviderContract(buildProvider(["zeta-search", "alpha-search"]));
+		const operation = snapshot.operations.find((candidate) => candidate.id === "alpha-search");
+		const inputSchema = JSON.stringify(operation?.inputSchema);
+		const outputSchema = JSON.stringify(operation?.outputSchema);
+
+		expect(inputSchema).not.toContain("x-apifuse-text-trust");
+		expect(outputSchema).toContain('"x-apifuse-text-trust":{"v":1,"trust":"untrusted"}');
+	});
+
 	it("produces a stable digest for semantically identical provider definitions", () => {
 		// Given: equivalent providers with opposite operation insertion order.
 		const first = extractProviderContract(buildProvider(["zeta-search", "alpha-search"]));

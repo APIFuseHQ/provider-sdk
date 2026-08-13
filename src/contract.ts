@@ -104,7 +104,7 @@ function extractOperation(
 	return {
 		id: operationId,
 		inputSchema: describeSchema(operation.input),
-		outputSchema: describeSchema(operation.output),
+		outputSchema: describeSchema(operation.output, { outputTextTrust: true }),
 		...(descriptionKey === undefined ? {} : { descriptionKey }),
 		...(docs === undefined ? {} : { docs }),
 		...(whenToUseKeys === undefined ? {} : { whenToUseKeys }),
