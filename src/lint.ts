@@ -27,8 +27,96 @@ type ProviderAuthLike = {
 	exchange?: unknown;
 };
 
+// Operations that perform an auth-lifecycle action belong on the single
+// `auth.flow` interface, never on a provider operation:
+//   - entry (login / signin / authenticate) => auth.flow.start/continue
+//   - exit  (logout / signout / disconnect) => auth.flow.abort
+//
+// Matching works on `-`/`_` separated segments rather than a raw substring or a
+// leading anchor, so `shop-logout`, `shop_logout` and `user-sign-out-everywhere`
+// are all recognised: a domain prefix does not make the operation any less of an
+// auth-lifecycle action, and operation ids may use either separator.
+//
+// Vocabulary is split into two tiers because auth words collide with ordinary
+// domain verbs. Measured against the live fleet plus synthetic domain ids:
+//   - `authorize-payment`, `revoke-invitation`, `unlink-record`,
+//     `disconnect-device` are domain actions that never touch the connection
+//     credential, so these verbs are NOT matched as segments;
+//   - the same verbs as a complete operation id (`authorize`, `revoke`) do
+//     refer to the credential itself, so they are matched only in that form.
+// `exchange`, `callback`, `connect`, `session`, `token`, `credential`,
+// `password` and `otp` stay out entirely for the same reason.
+const AUTH_LIFECYCLE_SEGMENT_WORDS = new Set([
+	"login",
+	"logout",
+	"signin",
+	"signout",
+	"signup",
+	"authenticate",
+	"reauth",
+	"auth",
+]);
+
+// Ambiguous as a prefix, unambiguous when they are the whole operation id.
+const AUTH_LIFECYCLE_WHOLE_ID_WORDS = new Set([
+	"authorize",
+	"revoke",
+	"unlink",
+	"disconnect",
+]);
+
+// A verb stem followed by a direction word across two segments: `sign-out`,
+// `user_sign_up_flow`, and the spelled-out `log-in` / `shop-log-out` forms
+// (their fused equivalents `login`/`logout` live in the segment set above).
+// `sign` pairs match anywhere; `log` pairs match only at the END of the id,
+// because mid-id `log` is the noun in domain phrases measured against real
+// fleets (`audit-log-in-range`, `change-log-out-of-band` are reads of a log,
+// while `shop-log-out` is a logout).
+const AUTH_DIRECTION_PAIRS: ReadonlyMap<
+	string,
+	{ directions: ReadonlySet<string>; endOnly: boolean }
+> = new Map([
+	["sign", { directions: new Set(["in", "out", "up"]), endOnly: false }],
+	["log", { directions: new Set(["in", "out"]), endOnly: true }],
+]);
+
+// Legacy anchored form kept for token-plumbing words whose bare use is only
+// auth-related when it leads the operation id (`exchange-code`, `refresh`).
 const AUTH_OPERATION_ID_PATTERN =
 	/^(?:auth[-_])?(?:login|exchange|continue|refresh|callback)(?:[-_]|$)/i;
+
+function isAuthLifecycleOperationId(operationId: string, authMode: string): boolean {
+	const segments = operationId.toLowerCase().split(/[-_]+/).filter(Boolean);
+
+	if (segments.some((segment) => AUTH_LIFECYCLE_SEGMENT_WORDS.has(segment))) return true;
+
+	// A verb stem + direction spread across two segments (`sign-out`,
+	// `sign_up`, `shop-log-out`); see AUTH_DIRECTION_PAIRS for positioning.
+	if (
+		segments.some((segment, index) => {
+			const pair = AUTH_DIRECTION_PAIRS.get(segment);
+			if (pair === undefined || index + 1 >= segments.length) return false;
+			if (!pair.directions.has(segments[index + 1] as string)) return false;
+			return pair.endOnly ? index + 2 === segments.length : true;
+		})
+	) {
+		return true;
+	}
+
+	if (segments.length === 1 && AUTH_LIFECYCLE_WHOLE_ID_WORDS.has(segments[0] as string)) {
+		return true;
+	}
+
+	// The legacy anchored pattern keeps its original scope. It matches ordinary
+	// domain ids such as `exchange-rates` and `refresh-catalog`, so extending it
+	// to `oauth2_proxied` would spread that behavior to providers it never
+	// applied to; proxied providers are covered by the segment tiers above.
+	if (authMode === "credentials" || authMode === "oauth2") {
+		return AUTH_OPERATION_ID_PATTERN.test(operationId);
+	}
+
+	return false;
+}
 
 type ProviderContractMetaLike = {
 	publicSchemaFieldNames?: "normalized";
@@ -1265,14 +1353,21 @@ export function lintProvider(
 
 	if (provider.operations) {
 		const authMode = provider.auth?.mode;
-		if (authMode === "credentials" || authMode === "oauth2") {
+		// Every authenticated mode owns an auth.flow; `oauth2_proxied` was
+		// previously exempt, which let auth-lifecycle operations ship on
+		// proxied providers unchecked.
+		if (
+			authMode === "credentials" ||
+			authMode === "oauth2" ||
+			authMode === "oauth2_proxied"
+		) {
 			for (const operationKey of Object.keys(provider.operations)) {
-				if (AUTH_OPERATION_ID_PATTERN.test(operationKey)) {
+				if (isAuthLifecycleOperationId(operationKey, authMode)) {
 					diagnostics.push({
 						rule: "auth-operation-unsupported",
 						level: "error",
 						field: `operations.${operationKey}`,
-						message: `Provider "${provider.id ?? "unknown"}" operation "${operationKey}" looks like a login/token/session exchange endpoint. Authenticated providers must expose login through the single auth.flow interface because Gateway persists only auth.flow complete turn data.credential as the connection credential. Move this logic into auth.flow.continue instead of a provider operation.`,
+						message: `Provider "${provider.id ?? "unknown"}" operation "${operationKey}" performs an auth-lifecycle action (login, logout, token exchange or similar). Authenticated providers must expose the whole credential lifecycle through the single auth.flow interface because Gateway persists only auth.flow complete turn data.credential as the connection credential, and an operation that mutates the session outside that interface leaves the stored connection stale. Move sign-in logic into auth.flow.start/continue and sign-out/disconnect logic into auth.flow.abort (served by POST /auth/disconnect) instead of a provider operation.`,
 					});
 				}
 			}
