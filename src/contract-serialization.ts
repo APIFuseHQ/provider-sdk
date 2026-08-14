@@ -9,9 +9,13 @@ import {
 } from "./contract-json.js";
 import {
 	APIFUSE_TEXT_TRUST_META_KEY,
+	hasDynamicOutputFallback,
 	inheritsUntrustedOutputTextTrust,
 	invalidatesDescendantOutputTextAutoTrust,
+	mutatorReturnIsProvablyNonText,
+	mutatorUsesStaticArrayFallback,
 	resolveOutputTextTrustProjection,
+	suppressDynamicOutputFallbacksDuring,
 	type TextTrust,
 } from "./schema.js";
 import type { SchemaLike } from "./types.js";
@@ -142,7 +146,7 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 	const expectedLeafMarkers = new Map<string, string>();
 	const expectedUnsafeContainerMarkers = new Map<string, string>();
 	try {
-		const jsonSchema = z.toJSONSchema(schema, {
+		const jsonSchemaOptions: z.core.ToJSONSchemaParams = {
 			unrepresentable: options.outputTextTrust ? "any" : "throw",
 			override: ({ zodSchema, jsonSchema: projectedSchema, path }) => {
 				if (!options.outputTextTrust) {
@@ -155,6 +159,7 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 					if (unrepresentable) throw unrepresentable;
 					const resolved = resolveOutputTextTrustProjection(zodSchema);
 					delete projectedSchema[APIFUSE_TEXT_TRUST_META_KEY];
+					if (hasDynamicOutputFallback(zodSchema)) delete projectedSchema.default;
 					if (resolved !== undefined) {
 						const markerId = writeOutputTextTrustProjectionMarker(
 							projectedSchema,
@@ -169,7 +174,7 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 					} else if (invalidatesDescendantOutputTextAutoTrust(zodSchema)) {
 						if (
 							projectedJsonSchemaIsProvablyNonText(projectedSchema) &&
-							mutatorReturnIsProvablyNonText(zodSchema, projectedSchema)
+							mutatorReturnIsProvablyNonText(zodSchema)
 						) {
 							return;
 						}
@@ -220,7 +225,11 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 					);
 				}
 			},
-		});
+		};
+		const projectJsonSchema = () => z.toJSONSchema(schema, jsonSchemaOptions);
+		const jsonSchema = options.outputTextTrust
+			? suppressDynamicOutputFallbacksDuring(projectJsonSchema)
+			: projectJsonSchema();
 		if (options.outputTextTrust) {
 			finalizeProjectedTextTrust(
 				jsonSchema,
@@ -525,58 +534,15 @@ function projectedJsonSchemaCanAllowString(schema: Record<string, unknown>): boo
 
 const PROVABLY_NON_TEXT_JSON_SCHEMA_TYPES = new Set(["boolean", "integer", "null", "number"]);
 
-function mutatorReturnIsProvablyNonText(
-	zodSchema: z.core.$ZodType,
-	projectedSchema: Record<string, unknown>,
-): boolean {
-	const def = zodSchema._zod.def;
-	if (def.type === "default" || def.type === "catch") {
-		return (
-			Object.hasOwn(projectedSchema, "default") &&
-			projectedJsonValueIsProvablyNonText(projectedSchema.default)
-		);
-	}
-	if (def.type === "transform") return false;
-	return !hasUnsafeOutputCheck(def);
-}
-
 function mutatorCanUseProjectedTextItems(
 	zodSchema: z.core.$ZodType,
 	projectedSchema: Record<string, unknown>,
 ): boolean {
-	const type = zodSchema._zod.def.type;
 	return (
 		projectedJsonSchemaAllowsArray(projectedSchema) &&
-		(type === "default" || type === "catch") &&
-		Object.hasOwn(projectedSchema, "default") &&
-		Array.isArray(projectedSchema.default) &&
+		mutatorUsesStaticArrayFallback(zodSchema) &&
 		isJsonSchemaNode(projectedSchema.items) &&
 		projectedJsonSchemaCanAllowString(projectedSchema.items)
-	);
-}
-
-function projectedJsonValueIsProvablyNonText(value: unknown): boolean {
-	return (
-		value === null ||
-		typeof value === "boolean" ||
-		typeof value === "number" ||
-		(Array.isArray(value) && value.every(projectedJsonValueIsProvablyNonText))
-	);
-}
-
-function hasUnsafeOutputCheck(def: z.core.$ZodTypeDef): boolean {
-	const checks = Reflect.get(def, "checks");
-	return (
-		Array.isArray(checks) &&
-		checks.some((check) => {
-			if (!check || typeof check !== "object") return false;
-			const internals = Reflect.get(check, "_zod");
-			if (!internals || typeof internals !== "object") return false;
-			const checkDef = Reflect.get(internals, "def");
-			if (checkDef === null || typeof checkDef !== "object") return false;
-			const kind = Reflect.get(checkDef, "check");
-			return kind === "overwrite" || kind === "custom";
-		})
 	);
 }
 

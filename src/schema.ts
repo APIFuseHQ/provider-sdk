@@ -191,6 +191,77 @@ const textTrustMethod = function <TSchema extends ZodType>(
 	return textTrust(this, trust);
 };
 
+interface StaticOutputFallback {
+	readonly value: unknown;
+}
+
+const staticOutputFallbacks = new WeakMap<object, StaticOutputFallback>();
+let suppressDynamicOutputFallbacks = 0;
+
+function trackOutputFallback(schema: unknown, fallback: unknown): void {
+	if (!(schema instanceof z.ZodType)) return;
+	const def = schema._zod.def;
+	if (typeof fallback !== "function") {
+		staticOutputFallbacks.set(def, { value: fallback });
+		return;
+	}
+	if (def.type === "default") {
+		const descriptor = Object.getOwnPropertyDescriptor(def, "defaultValue");
+		if (!descriptor?.get) return;
+		const originalGetter = descriptor.get;
+		Object.defineProperty(def, "defaultValue", {
+			...descriptor,
+			get(this: object) {
+				if (suppressDynamicOutputFallbacks > 0) return null;
+				return Reflect.apply(originalGetter, this, []);
+			},
+		});
+		return;
+	}
+	if (def.type === "catch") {
+		const catchValue = Reflect.get(def, "catchValue");
+		if (typeof catchValue !== "function") return;
+		Reflect.set(def, "catchValue", function (this: unknown, ...args: unknown[]) {
+			if (suppressDynamicOutputFallbacks > 0) return null as never;
+			return Reflect.apply(catchValue, this, args) as never;
+		});
+	}
+}
+
+const trackedFallbackPrototypes = new WeakSet<object>();
+
+function installOutputFallbackTrackingOnPrototype(prototype: unknown): void {
+	if (!prototype || typeof prototype !== "object" || trackedFallbackPrototypes.has(prototype)) {
+		return;
+	}
+	trackedFallbackPrototypes.add(prototype);
+	Reflect.apply(z.ZodType.init, z.ZodType, [Object.create(prototype), { type: "custom" }]);
+	for (const methodName of ["default", "catch"] as const) {
+		const descriptor = Object.getOwnPropertyDescriptor(prototype, methodName);
+		if (!descriptor?.configurable || !descriptor.get) continue;
+		const originalGetter = descriptor.get;
+		Object.defineProperty(prototype, methodName, {
+			...descriptor,
+			get(this: object) {
+				const originalMethod = Reflect.apply(originalGetter, this, []);
+				if (typeof originalMethod !== "function") return originalMethod;
+				const trackedMethod = function (this: unknown, fallback: unknown) {
+					const result = Reflect.apply(originalMethod, this, [fallback]);
+					trackOutputFallback(result, fallback);
+					return result;
+				};
+				Object.defineProperty(this, methodName, {
+					configurable: true,
+					enumerable: true,
+					value: trackedMethod,
+					writable: true,
+				});
+				return trackedMethod;
+			},
+		});
+	}
+}
+
 function installSchemaMetadataMethodsOnPrototype(prototype: unknown): void {
 	const target = prototype as Record<string, unknown> | null;
 	if (!target) return;
@@ -218,6 +289,7 @@ for (const [name, value] of Object.entries(z)) {
 		continue;
 	}
 	installSchemaMetadataMethodsOnPrototype(value.prototype);
+	installOutputFallbackTrackingOnPrototype(value.prototype);
 }
 
 const RESERVED_SENSITIVE_KEYS = new Set([
@@ -388,6 +460,38 @@ export function invalidatesDescendantOutputTextAutoTrust(schema: z.core.$ZodType
 	return invalidatesOutputTextAutoTrust(asInternalZodSchema(schema)._zod.def);
 }
 
+/** @internal Run output projection without evaluating dynamic fallback callbacks. */
+export function suppressDynamicOutputFallbacksDuring<T>(project: () => T): T {
+	suppressDynamicOutputFallbacks += 1;
+	try {
+		return project();
+	} finally {
+		suppressDynamicOutputFallbacks -= 1;
+	}
+}
+
+/** @internal Whether this mutator has a static fallback that cannot contain text. */
+export function mutatorReturnIsProvablyNonText(schema: z.core.$ZodType): boolean {
+	const def = asInternalZodSchema(schema)._zod.def;
+	if (def.type !== "default" && def.type !== "catch") return false;
+	const fallback = staticOutputFallbacks.get(def);
+	return fallback !== undefined && outputFallbackValueIsProvablyNonText(fallback.value);
+}
+
+/** @internal Whether this mutator has a static array fallback. */
+export function mutatorUsesStaticArrayFallback(schema: z.core.$ZodType): boolean {
+	const def = asInternalZodSchema(schema)._zod.def;
+	if (def.type !== "default" && def.type !== "catch") return false;
+	const fallback = staticOutputFallbacks.get(def);
+	return fallback !== undefined && Array.isArray(fallback.value);
+}
+
+/** @internal Whether this default or catch was authored with a callback. */
+export function hasDynamicOutputFallback(schema: z.core.$ZodType): boolean {
+	const def = asInternalZodSchema(schema)._zod.def;
+	return (def.type === "default" || def.type === "catch") && !staticOutputFallbacks.has(def);
+}
+
 /** @internal Used by contract JSON Schema projection. */
 export function inheritsUntrustedOutputTextTrust(schema: z.core.$ZodType): boolean {
 	let current = asInternalZodSchema(schema);
@@ -397,6 +501,15 @@ export function inheritsUntrustedOutputTextTrust(schema: z.core.$ZodType): boole
 		if (!inner) return false;
 		current = inner;
 	}
+}
+
+function outputFallbackValueIsProvablyNonText(value: unknown): boolean {
+	return (
+		value === null ||
+		typeof value === "boolean" ||
+		typeof value === "number" ||
+		(Array.isArray(value) && value.every(outputFallbackValueIsProvablyNonText))
+	);
 }
 
 function collectOutputTextLeaves(schema: InternalZodSchema): OutputTextTrustCollection {
@@ -481,7 +594,8 @@ function walkOutputSchemaUnchecked(
 	const descendantAutoTrustAllowed = autoTrustAllowed && !invalidatesOutputTextAutoTrust(def);
 	if (
 		invalidatesOutputTextAutoTrust(def) &&
-		isObjectOutputContainer(def) &&
+		!mutatorReturnIsProvablyNonText(schema) &&
+		!mutatorCanUseCollectedTextItems(schema) &&
 		!emittedPaths.has(path)
 	) {
 		emittedPaths.add(path);
@@ -710,17 +824,11 @@ function walkOutputSchemaUnchecked(
 	}
 }
 
-function isObjectOutputContainer(def: InternalZodDef): boolean {
-	let current = def;
-	const visited = new Set<InternalZodDef>();
-	while (true) {
-		if (visited.has(current)) return false;
-		visited.add(current);
-		if (current.type === "object") return true;
-		const inner = flattenedOutputSchema(current);
-		if (!inner) return false;
-		current = inner._zod.def;
-	}
+function mutatorCanUseCollectedTextItems(schema: InternalZodSchema): boolean {
+	if (!mutatorUsesStaticArrayFallback(schema)) return false;
+	const inner = flattenedOutputSchema(schema._zod.def);
+	if (inner?._zod.def.type !== "array") return false;
+	return collectOutputTextLeaves(asInternalZodSchema(inner._zod.def.element)).leaves.length > 0;
 }
 
 function resolveOutputTextLeaf(
