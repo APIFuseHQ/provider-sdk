@@ -80,7 +80,6 @@ describe("auth lifecycle operation lint", () => {
 			"connection-disconnect",
 			"account-unlink",
 			"token-revoke",
-			"oauth-callback",
 			"auth-status",
 			"refresh-auth",
 		];
@@ -90,7 +89,7 @@ describe("auth lifecycle operation lint", () => {
 	});
 
 	it("keeps the legacy anchored token-plumbing vocabulary", () => {
-		const ids = ["exchange-code", "refresh", "continue-session", "auth-login-with-password"];
+		const ids = ["exchange-code", "callback", "refresh", "continue-session", "auth-login-with-password"];
 		expect(authViolations(lintWithOperations(ids)).sort()).toEqual(
 			ids.map((id) => `operations.${id}`).sort(),
 		);
@@ -108,6 +107,7 @@ describe("auth lifecycle operation lint", () => {
 			"password-reset-policy-info",
 			"otp-delivery-options",
 			"credential-requirements",
+			"register-webhook-callback",
 		];
 		expect(authViolations(lintWithOperations(ids))).toEqual([]);
 	});

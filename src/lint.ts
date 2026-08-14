@@ -41,9 +41,11 @@ type ProviderAuthLike = {
 // Words with a common non-auth domain meaning are deliberately excluded to
 // avoid false positives measured against the live fleet: `exchange` (returns
 // and exchanges), `connect`, `session`, `token`, `credential`, `password` and
-// `otp` all appear in legitimate domain operations. Entry/exit verbs above are
-// unambiguous; `exchange`/`callback` stay only in their anchored legacy form
-// below, which is what the original rule shipped with.
+// `otp` all appear in legitimate domain operations. `callback` is excluded for
+// the same reason (`register-webhook-callback` is a domain operation that does
+// not touch the connection credential). Entry/exit verbs above are unambiguous;
+// `exchange` and `callback` stay only in their anchored legacy form below,
+// which is what the original rule shipped with.
 const AUTH_LIFECYCLE_WORDS = [
 	"login",
 	"logout",
@@ -59,7 +61,6 @@ const AUTH_LIFECYCLE_WORDS = [
 	"disconnect",
 	"unlink",
 	"revoke",
-	"callback",
 ] as const;
 
 const AUTH_LIFECYCLE_OPERATION_PATTERN = new RegExp(
