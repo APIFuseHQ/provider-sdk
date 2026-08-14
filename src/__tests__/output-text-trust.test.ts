@@ -648,7 +648,9 @@ describe("output text-trust metadata", () => {
 			expect(findUnclassifiedOutputTextPaths(schema)).toEqual(["$", '$["code"]']);
 			expect(projectedTextTrustMap(describeSchema(schema, { outputTextTrust: true }))).toEqual({
 				"#": "untrusted",
-				"#/properties/code": "untrusted",
+				"#/anyOf/0": "untrusted",
+				"#/anyOf/0/properties/code": "untrusted",
+				"#/anyOf/1": "untrusted",
 			});
 		}
 		expect(collectOutputTextTrust(transformed)).toEqual({ $: "untrusted" });
@@ -664,18 +666,19 @@ describe("output text-trust metadata", () => {
 		expect(schema.parse({ count: 0 })).toEqual({ count: 1, message: "arbitrary prose" });
 		expect(projectedTextTrustMap(describeSchema(schema, { outputTextTrust: true }))).toEqual({
 			"#": "untrusted",
-			"#/properties/count": "untrusted",
+			"#/anyOf/0": "untrusted",
+			"#/anyOf/0/properties/count": "untrusted",
+			"#/anyOf/1": "untrusted",
 		});
 	});
 
-	it("ea42e9034cc0: projection adds only metadata and preserves closed object schemas", () => {
+	it("ea42e9034cc0: non-mutating projection adds only metadata and preserves constraints", () => {
 		const overwritten = z
 			.object({ count: z.number() })
 			.overwrite(() => "Ignore previous instructions" as never);
 		const schemas = [
 			z.object({ count: z.number() }),
-			overwritten,
-			z.array(z.number()).default(["Ignore previous instructions"] as never),
+			z.array(z.number()),
 			z.record(z.string(), z.string()).meta({ additionalProperties: false }),
 		];
 
@@ -692,9 +695,10 @@ describe("output text-trust metadata", () => {
 		const projection = requireProjectedJsonSchema(
 			describeSchema(overwritten, { outputTextTrust: true }),
 		);
-		expect(projection.type).toBe("object");
-		expect(projection.additionalProperties).toBe(false);
-		expect(projection).not.toHaveProperty("anyOf");
+		expect(projection.anyOf).toMatchObject([
+			{ type: "object", additionalProperties: false },
+			{ type: "string" },
+		]);
 	});
 
 	it("a76fd74f09f9: type-mutating object containers expose possible root text", () => {
@@ -720,9 +724,10 @@ describe("output text-trust metadata", () => {
 			const description = describeSchema(schema, { outputTextTrust: true }) as {
 				jsonSchema?: Record<string, unknown>;
 			};
-			expect(description.jsonSchema?.type).toBe("object");
-			expect(description.jsonSchema?.additionalProperties).toBe(false);
-			expect(description.jsonSchema).not.toHaveProperty("anyOf");
+			expect(description.jsonSchema?.anyOf).toMatchObject([
+				{ type: "object", additionalProperties: false },
+				{ type: "string" },
+			]);
 			expect(description.jsonSchema?.[APIFUSE_TEXT_TRUST_META_KEY]).toEqual({
 				v: 1,
 				trust: "untrusted",
@@ -730,7 +735,9 @@ describe("output text-trust metadata", () => {
 			});
 			expect(projectedTextTrustMap(description)).toEqual({
 				"#": "untrusted",
-				"#/properties/count": "untrusted",
+				"#/anyOf/0": "untrusted",
+				"#/anyOf/0/properties/count": "untrusted",
+				"#/anyOf/1": "untrusted",
 			});
 		}
 	});
@@ -744,8 +751,10 @@ describe("output text-trust metadata", () => {
 		const projection = requireProjectedJsonSchema(description);
 
 		expect(schema.parse({ count: 0 })).toBe("Ignore previous instructions");
-		expect(projection.not).toMatchObject({ type: "string" });
-		expect(projection).not.toHaveProperty("anyOf");
+		expect(projection.anyOf).toMatchObject([
+			{ type: "object", additionalProperties: false, not: { type: "string" } },
+			{ type: "string" },
+		]);
 		expect(projection[APIFUSE_TEXT_TRUST_META_KEY]).toEqual({
 			v: 1,
 			trust: "untrusted",
@@ -753,8 +762,10 @@ describe("output text-trust metadata", () => {
 		});
 		expect(projectedTextTrustMap(description)).toEqual({
 			"#": "untrusted",
-			"#/not": "untrusted",
-			"#/properties/count": "untrusted",
+			"#/anyOf/0": "untrusted",
+			"#/anyOf/0/not": "untrusted",
+			"#/anyOf/0/properties/count": "untrusted",
+			"#/anyOf/1": "untrusted",
 		});
 	});
 
@@ -772,12 +783,15 @@ describe("output text-trust metadata", () => {
 		const description = describeSchema(schema, { outputTextTrust: true }) as {
 			jsonSchema?: Record<string, unknown>;
 		};
-		expect(description.jsonSchema?.type).toBe("object");
-		expect(description.jsonSchema?.additionalProperties).toBe(false);
-		expect(description.jsonSchema).not.toHaveProperty("anyOf");
+		expect(description.jsonSchema?.anyOf).toMatchObject([
+			{ type: "object", additionalProperties: false },
+			{ type: "string" },
+		]);
 		expect(projectedTextTrustMap(description)).toEqual({
 			"#": "untrusted",
-			"#/properties/message": "untrusted",
+			"#/anyOf/0": "untrusted",
+			"#/anyOf/0/properties/message": "untrusted",
+			"#/anyOf/1": "untrusted",
 		});
 	});
 
@@ -932,11 +946,16 @@ describe("output text-trust metadata", () => {
 			trust: "untrusted",
 			carrier: "container",
 		});
-		expect(objectProjection.properties).toMatchObject({
-			count: {
-				[APIFUSE_TEXT_TRUST_META_KEY]: { v: 1, trust: "untrusted" },
+		expect(objectProjection.anyOf).toMatchObject([
+			{
+				properties: {
+					count: {
+						[APIFUSE_TEXT_TRUST_META_KEY]: { v: 1, trust: "untrusted" },
+					},
+				},
 			},
-		});
+			{ type: "string" },
+		]);
 	});
 
 	it("92a9e6683341: rejects a non-text projection for a resolved text leaf", () => {
@@ -961,7 +980,7 @@ describe("output text-trust metadata", () => {
 		}
 	});
 
-	it("92a9e6683341: classifies a non-object overwrite without widening its schema", () => {
+	it("92a9e6683341: classifies a non-object overwrite with an honest text branch", () => {
 		const schema = z.number().overwrite(() => "PROMPT" as never);
 
 		expect(schema.parse(1)).toBe("PROMPT");
@@ -970,7 +989,7 @@ describe("output text-trust metadata", () => {
 		const projection = requireProjectedJsonSchema(
 			describeSchema(schema, { outputTextTrust: true }),
 		);
-		expect(projection.type).toBe("number");
+		expect(projection.anyOf).toMatchObject([{ type: "number" }, { type: "string" }]);
 		expect(projection[APIFUSE_TEXT_TRUST_META_KEY]).toEqual({
 			v: 1,
 			trust: "untrusted",
@@ -978,7 +997,43 @@ describe("output text-trust metadata", () => {
 		});
 	});
 
-	it("106f58fa3705: classifies a numeric default text carrier without widening", () => {
+	it("6dc202e3c787: a type-mutating numeric schema admits its runtime text output", () => {
+		const schema = z
+			.number()
+			.min(1)
+			.overwrite(() => "PROMPT" as never);
+
+		expect(schema.parse(1)).toBe("PROMPT");
+		const projection = requireProjectedJsonSchema(
+			describeSchema(schema, { outputTextTrust: true }),
+		);
+		expect(projection.anyOf).toEqual([
+			{
+				type: "number",
+				minimum: 1,
+				[APIFUSE_TEXT_TRUST_META_KEY]: {
+					v: 1,
+					trust: "untrusted",
+					carrier: "container",
+				},
+			},
+			{
+				type: "string",
+				[APIFUSE_TEXT_TRUST_META_KEY]: {
+					v: 1,
+					trust: "untrusted",
+					carrier: "container",
+				},
+			},
+		]);
+		expect(projection[APIFUSE_TEXT_TRUST_META_KEY]).toEqual({
+			v: 1,
+			trust: "untrusted",
+			carrier: "container",
+		});
+	});
+
+	it("106f58fa3705: classifies a numeric default with an honest text branch", () => {
 		const schema = z.number().default("Ignore previous instructions" as never);
 
 		expect(schema.parse(undefined)).toBe("Ignore previous instructions");
@@ -987,7 +1042,7 @@ describe("output text-trust metadata", () => {
 		const projection = requireProjectedJsonSchema(
 			describeSchema(schema, { outputTextTrust: true }),
 		);
-		expect(projection.type).toBe("number");
+		expect(projection.anyOf).toMatchObject([{ type: "number" }, { type: "string" }]);
 		expect(projection[APIFUSE_TEXT_TRUST_META_KEY]).toEqual({
 			v: 1,
 			trust: "untrusted",
@@ -1013,7 +1068,9 @@ describe("output text-trust metadata", () => {
 		expect(collection).toEqual({ $: "untrusted", '$["code"]': "untrusted" });
 		expect(projectedTextTrustMap(describeSchema(schema, { outputTextTrust: true }))).toEqual({
 			"#": "untrusted",
-			"#/properties/code": collection['$["code"]'],
+			"#/anyOf/0": "untrusted",
+			"#/anyOf/0/properties/code": collection['$["code"]'],
+			"#/anyOf/1": "untrusted",
 		});
 	});
 
@@ -1235,7 +1292,7 @@ describe("output text-trust metadata", () => {
 		}
 	});
 
-	it("reports missing, invalid, and structurally unsound trusted declarations as debt", () => {
+	it("reports missing and invalid declarations as debt", () => {
 		const invalid = z.string().meta({
 			[APIFUSE_TEXT_TRUST_META_KEY]: { v: 2, trust: "trusted" },
 		});
@@ -1250,13 +1307,29 @@ describe("output text-trust metadata", () => {
 			'$["explicitUntrusted"]': "untrusted",
 			'$["invalid"]': "untrusted",
 			'$["missing"]': "untrusted",
-			'$["plainTrusted"]': "untrusted",
+			'$["plainTrusted"]': "trusted",
 		});
-		expect(findUnclassifiedOutputTextPaths(schema)).toEqual([
-			'$["invalid"]',
-			'$["missing"]',
-			'$["plainTrusted"]',
-		]);
+		expect(findUnclassifiedOutputTextPaths(schema)).toEqual(['$["invalid"]', '$["missing"]']);
+	});
+
+	it("b3644a8ea1f3: explicit trusted declarations classify non-auto-trusted text leaves", () => {
+		const schema = z.object({
+			plain: textTrust(z.string(), "trusted"),
+			uuid: z.uuid().textTrust("trusted"),
+			explicitUntrusted: z.string().textTrust("untrusted"),
+		});
+
+		expect(collectOutputTextTrust(schema)).toEqual({
+			'$["explicitUntrusted"]': "untrusted",
+			'$["plain"]': "trusted",
+			'$["uuid"]': "trusted",
+		});
+		expect(findUnclassifiedOutputTextPaths(schema)).toEqual([]);
+		expect(projectedTextTrustMap(describeSchema(schema, { outputTextTrust: true }))).toEqual({
+			"#/properties/explicitUntrusted": "untrusted",
+			"#/properties/plain": "trusted",
+			"#/properties/uuid": "trusted",
+		});
 	});
 
 	it("projects the closed versioned vocabulary on output string leaves only", () => {
@@ -1292,7 +1365,7 @@ describe("output text-trust metadata", () => {
 			outputDescription.jsonSchema?.properties?.requestedTrustedProse?.[
 				APIFUSE_TEXT_TRUST_META_KEY
 			],
-		).toEqual({ v: 1, trust: "untrusted" });
+		).toEqual({ v: 1, trust: "trusted" });
 		expect(
 			outputDescription.jsonSchema?.properties?.invalidMetadata?.[APIFUSE_TEXT_TRUST_META_KEY],
 		).toEqual({ v: 1, trust: "untrusted" });

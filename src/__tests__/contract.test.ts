@@ -252,11 +252,33 @@ describe("provider contract extraction", () => {
 		);
 	});
 
-	it("15463cdd7a87/13d939706002/a1969c50965d: unrepresentable outputs fail closed with operation context", () => {
+	it.each([
+		["bigint", z.bigint(), "BigInt cannot be represented in JSON Schema"],
+		["symbol", z.symbol(), "Symbols cannot be represented in JSON Schema"],
+		["undefined", z.undefined(), "Undefined cannot be represented in JSON Schema"],
+		["void", z.void(), "Void cannot be represented in JSON Schema"],
+		["date", z.date(), "Date cannot be represented in JSON Schema"],
+		["NaN", z.nan(), "NaN cannot be represented in JSON Schema"],
+		["custom", z.custom(), "Custom types cannot be represented in JSON Schema"],
+		["function", z.function(), "Function types cannot be represented in JSON Schema"],
+		[
+			"transform",
+			z.string().transform((value) => value),
+			"Transforms cannot be represented in JSON Schema",
+		],
+		["map", z.map(z.string(), z.string()), "Map cannot be represented in JSON Schema"],
+		["set", z.set(z.string()), "Set cannot be represented in JSON Schema"],
+		[
+			"undefined literal",
+			z.literal(undefined),
+			"Literal `undefined` cannot be represented in JSON Schema",
+		],
+		["bigint literal", z.literal(1n), "BigInt literals cannot be represented in JSON Schema"],
+	] as const)("97138b4b7a07: %s output fails closed with operation context", (_kind, output, causeMessage) => {
 		const provider = buildProvider(["zeta-search", "alpha-search"]);
 		const operation = provider.operations["alpha-search"];
 		if (!operation) throw new Error("alpha-search operation missing");
-		operation.output = z.string().transform((value) => value);
+		operation.output = output;
 
 		try {
 			extractProviderContract(provider);
@@ -270,9 +292,7 @@ describe("provider contract extraction", () => {
 				schemaPath: "$",
 			});
 			expect((error as Error).message).toContain('operation "alpha-search"');
-			expect((error as Error).cause).toEqual(
-				new Error("Transforms cannot be represented in JSON Schema"),
-			);
+			expect((error as Error).cause).toEqual(new Error(causeMessage));
 		}
 	});
 

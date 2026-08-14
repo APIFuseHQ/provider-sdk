@@ -861,15 +861,17 @@ function resolveOutputTextLeafPair(
 
 	const autoTrusted =
 		autoTrustAllowed && !invalidatesOutputTextAutoTrust(def) && isAutoTrustedOutputTextLeaf(schema);
+	const explicitTrustAllowed = autoTrustAllowed && !invalidatesOutputTextAutoTrust(def);
 	return {
-		inherited: classifyOutputTextLeaf(declarations, autoTrusted, true),
-		local: classifyOutputTextLeaf(declarations, autoTrusted, false),
+		inherited: classifyOutputTextLeaf(declarations, autoTrusted, explicitTrustAllowed, true),
+		local: classifyOutputTextLeaf(declarations, autoTrusted, explicitTrustAllowed, false),
 	};
 }
 
 function classifyOutputTextLeaf(
 	declarations: readonly TextTrustDeclaration[],
 	autoTrusted: boolean,
+	explicitTrustAllowed: boolean,
 	inheritedUntrusted: boolean,
 ): OutputTextLeaf {
 	if (declarations.includes("invalid")) {
@@ -880,8 +882,8 @@ function classifyOutputTextLeaf(
 	}
 	if (declarations.includes("trusted")) {
 		return {
-			classification: autoTrusted ? "trusted" : "untrusted",
-			classified: autoTrusted,
+			classification: explicitTrustAllowed ? "trusted" : "untrusted",
+			classified: explicitTrustAllowed,
 		};
 	}
 	if (inheritedUntrusted) {

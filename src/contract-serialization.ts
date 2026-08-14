@@ -145,6 +145,7 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 	const projectionMarkers = new Map<string, OutputTextTrustProjectionMarker>();
 	const expectedLeafMarkers = new Map<string, string>();
 	const expectedUnsafeContainerMarkers = new Map<string, string>();
+	const expectedHonestTextContainerMarkers = new Map<string, string>();
 	try {
 		const jsonSchemaOptions: z.core.ToJSONSchemaParams = {
 			unrepresentable: options.outputTextTrust ? "any" : "throw",
@@ -184,12 +185,24 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 							});
 							return;
 						}
+						admitPossibleRuntimeText(
+							projectedSchema,
+							projectionMarkers,
+							expectedLeafMarkers,
+							expectedUnsafeContainerMarkers,
+							expectedHonestTextContainerMarkers,
+							projectedJsonSchemaPath(path),
+						);
 						const containerMarkerId = writeOutputTextTrustProjectionMarker(
 							projectedSchema,
 							projectionMarkers,
 							{ kind: "container-unsafe" },
 						);
 						expectedUnsafeContainerMarkers.set(projectedJsonSchemaPath(path), containerMarkerId);
+						expectedHonestTextContainerMarkers.set(
+							projectedJsonSchemaPath(path),
+							containerMarkerId,
+						);
 					} else if (inheritsUntrustedOutputTextTrust(zodSchema)) {
 						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
 							kind: "container-untrusted",
@@ -236,6 +249,7 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 				projectionMarkers,
 				expectedLeafMarkers,
 				expectedUnsafeContainerMarkers,
+				expectedHonestTextContainerMarkers,
 				options,
 			);
 		}
@@ -367,6 +381,7 @@ function finalizeProjectedTextTrust(
 	projectionMarkers: ReadonlyMap<string, OutputTextTrustProjectionMarker>,
 	expectedLeafMarkers: ReadonlyMap<string, string>,
 	expectedUnsafeContainerMarkers: ReadonlyMap<string, string>,
+	expectedHonestTextContainerMarkers: ReadonlyMap<string, string>,
 	options: DescribeSchemaOptions,
 ): void {
 	if (!isJsonSchemaNode(value)) {
@@ -429,6 +444,34 @@ function finalizeProjectedTextTrust(
 			throw new OutputTextTrustProjectionError(
 				expectedPath,
 				new TypeError("A type-mutating output container lost its authenticated trust marker."),
+				options.operationId,
+				options.eventName,
+			);
+		}
+	}
+	for (const [expectedPath, expectedMarkerId] of expectedHonestTextContainerMarkers) {
+		const authenticatedContainer = resolveExpectedProjectedSchema(
+			root,
+			expectedPath,
+			expectedMarkerId,
+			markers,
+			options,
+		);
+		const branches = authenticatedContainer?.anyOf;
+		if (
+			!Array.isArray(branches) ||
+			branches.length !== 2 ||
+			!branches.every(
+				(branch) => isJsonSchemaNode(branch) && markers.get(branch)?.kind === "container-unsafe",
+			) ||
+			!isJsonSchemaNode(branches[1]) ||
+			!projectedJsonSchemaAllowsString(branches[1])
+		) {
+			throw new OutputTextTrustProjectionError(
+				expectedPath,
+				new TypeError(
+					"A type-mutating output container lost its authenticated runtime text shape.",
+				),
 				options.operationId,
 				options.eventName,
 			);
@@ -526,6 +569,52 @@ function finalizeProjectedTextTrust(
 
 function projectedJsonSchemaAllowsString(schema: Record<string, unknown>): boolean {
 	return schema.type === "string" || (Array.isArray(schema.type) && schema.type.includes("string"));
+}
+
+function admitPossibleRuntimeText(
+	schema: Record<string, unknown>,
+	projectionMarkers: Map<string, OutputTextTrustProjectionMarker>,
+	expectedLeafMarkers: Map<string, string>,
+	expectedUnsafeContainerMarkers: Map<string, string>,
+	expectedHonestTextContainerMarkers: Map<string, string>,
+	projectedPath: string,
+): void {
+	const existingMarkerId = schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY];
+	if (
+		typeof existingMarkerId === "string" &&
+		projectionMarkers.get(existingMarkerId)?.kind === "container-unsafe"
+	) {
+		return;
+	}
+	const originalShape = { ...schema };
+	for (const key of Object.keys(schema)) delete schema[key];
+	const textShape: Record<string, unknown> = { type: "string" };
+	schema.anyOf = [originalShape, textShape];
+
+	const originalPath = appendJsonSchemaPath(appendJsonSchemaPath(projectedPath, "anyOf"), 0);
+	rebaseExpectedProjectionPaths(expectedLeafMarkers, projectedPath, originalPath);
+	expectedUnsafeContainerMarkers.delete(projectedPath);
+	rebaseExpectedProjectionPaths(expectedUnsafeContainerMarkers, projectedPath, originalPath);
+	expectedHonestTextContainerMarkers.delete(projectedPath);
+	rebaseExpectedProjectionPaths(expectedHonestTextContainerMarkers, projectedPath, originalPath);
+	writeOutputTextTrustProjectionMarker(originalShape, projectionMarkers, {
+		kind: "container-unsafe",
+	});
+	writeOutputTextTrustProjectionMarker(textShape, projectionMarkers, {
+		kind: "container-unsafe",
+	});
+}
+
+function rebaseExpectedProjectionPaths(
+	expectedMarkers: Map<string, string>,
+	fromPath: string,
+	toPath: string,
+): void {
+	for (const [path, markerId] of [...expectedMarkers]) {
+		if (path !== fromPath && !path.startsWith(`${fromPath}/`)) continue;
+		expectedMarkers.delete(path);
+		expectedMarkers.set(`${toPath}${path.slice(fromPath.length)}`, markerId);
+	}
 }
 
 function projectedJsonSchemaCanAllowString(schema: Record<string, unknown>): boolean {
