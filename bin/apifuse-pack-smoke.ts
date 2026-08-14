@@ -73,6 +73,7 @@ try {
 		],
 		consumerDir,
 	);
+	smokePackedStealthNative(consumerDir);
 
 	const cliBin = join(consumerDir, "node_modules", ".bin", "apifuse");
 	if (!existsSync(cliBin)) {
@@ -216,6 +217,43 @@ function run(command: string, args: string[], cwd: string): void {
 	}
 }
 
+function smokePackedStealthNative(consumerDir: string): void {
+	run(
+		"bun",
+		[
+			"--eval",
+			[
+				'import { createServer } from "node:http";',
+				'import { createStealthClient } from "@apifuse/provider-sdk";',
+				"const server = createServer((_request, response) => {",
+				'  response.setHeader("set-cookie", "pack_native_cookie=landed; Path=/");',
+				'  response.end("packed native stealth ok");',
+				"});",
+				"await new Promise((resolve, reject) => {",
+				'  server.once("error", reject);',
+				'  server.listen(0, "127.0.0.1", resolve);',
+				"});",
+				"const address = server.address();",
+				'if (!address || typeof address === "string") throw new Error("Local server has no TCP address");',
+				'const baseUrl = "http://127.0.0.1:" + address.port;',
+				'const session = createStealthClient(baseUrl).createSession({ profile: "safari-17" });',
+				"try {",
+				'  const response = await session.fetch("/native");',
+				'  if (response.body !== "packed native stealth ok") throw new Error("Unexpected stealth body: " + response.body);',
+				'  if (session.cookies.get("pack_native_cookie", baseUrl + "/native") !== "landed") {',
+				'    throw new Error("Packed stealth Set-Cookie did not land in the SDK jar");',
+				"  }",
+				'  console.log("packed native Safari stealth request OK");',
+				"} finally {",
+				"  session.close();",
+				"  await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));",
+				"}",
+			].join("\n"),
+		],
+		consumerDir,
+	);
+}
+
 function assertGeneratedReadme(providerDir: string): void {
 	const readme = readFileSync(join(providerDir, "README.md"), "utf8");
 	if (!readme.includes('"requestId":"req_local_ping"')) {
@@ -227,8 +265,11 @@ function assertGeneratedReadme(providerDir: string): void {
 	if (!readme.includes("bunx playwright install chromium")) {
 		throw new Error("Generated README is missing browser runtime troubleshooting guidance.");
 	}
-	if (!readme.includes("impit")) {
-		throw new Error("Generated README is missing impit stealth runtime guidance.");
+	if (!readme.includes("wreq-js")) {
+		throw new Error("Generated README is missing wreq-js stealth runtime guidance.");
+	}
+	if (!readme.includes("Chrome, Firefox, and Safari")) {
+		throw new Error("Generated README is missing supported stealth browser families.");
 	}
 	if (!readme.includes("bun run submit-check")) {
 		throw new Error("Generated README must document the submit-check pre-submission workflow.");

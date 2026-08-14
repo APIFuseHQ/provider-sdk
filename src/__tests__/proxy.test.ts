@@ -14,28 +14,28 @@ import { TransportError } from "../errors.js";
 import { ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
 import { HttpRetryUnsafeMethodPolicy } from "../types.js";
 
-type MockImpitResponse = {
+type MockWreqResponse = {
 	status: number;
 	body: string;
 	headers?: Record<string, string | string[]>;
 };
 
-type MockImpitQueuedItem = MockImpitResponse | Error;
+type MockWreqQueuedItem = MockWreqResponse | Error;
 
-type MockImpitCall = {
+type MockWreqCall = {
 	url: string;
 	options: Record<string, unknown>;
 };
 
-type MockImpitClientState = {
-	calls: MockImpitCall[];
+type MockWreqSessionState = {
+	calls: MockWreqCall[];
 	options: Record<string, unknown> | undefined;
 	closed: boolean;
 };
 
 const stealthState = {
-	clients: [] as MockImpitClientState[],
-	queuedResponses: [] as MockImpitQueuedItem[],
+	clients: [] as MockWreqSessionState[],
+	queuedResponses: [] as MockWreqQueuedItem[],
 };
 
 class FakeRedis {
@@ -120,7 +120,7 @@ function nativeProxyCalls(): Array<string | undefined> {
 	return nativeFetchCalls.map((call) => call.init?.proxy);
 }
 
-function queueNativeFetchResponses(...responses: MockImpitResponse[]): void {
+function queueNativeFetchResponses(...responses: MockWreqResponse[]): void {
 	const queue = [...responses];
 	global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
 		nativeFetchCalls.push({
@@ -138,7 +138,7 @@ function queueNativeFetchResponses(...responses: MockImpitResponse[]): void {
 
 function queueAllocatorAndNativeResponses(
 	allocatorBody: string,
-	...responses: MockImpitResponse[]
+	...responses: MockWreqResponse[]
 ): void {
 	const queue = [...responses];
 	global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
@@ -159,7 +159,7 @@ function queueAllocatorAndNativeResponses(
 	}) as unknown as typeof fetch;
 }
 
-function toHeaders(headers: MockImpitResponse["headers"]): Headers {
+function toHeaders(headers: MockWreqResponse["headers"]): Headers {
 	const result = new Headers();
 	for (const [name, value] of Object.entries(headers ?? {})) {
 		if (Array.isArray(value)) {
@@ -171,7 +171,8 @@ function toHeaders(headers: MockImpitResponse["headers"]): Headers {
 	return result;
 }
 
-function toImpitResponse(response: MockImpitResponse) {
+function toWreqResponse(response: MockWreqResponse) {
+	const bytes = new TextEncoder().encode(response.body);
 	return {
 		status: response.status,
 		ok: response.status >= 200 && response.status < 300,
@@ -179,12 +180,13 @@ function toImpitResponse(response: MockImpitResponse) {
 		url: "https://example.com/final",
 		json: async () => JSON.parse(response.body),
 		text: async () => response.body,
-		arrayBuffer: async () => Buffer.from(response.body).buffer,
+		arrayBuffer: async () =>
+			bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer,
 	};
 }
 
-class MockImpit {
-	private readonly state: MockImpitClientState;
+class MockWreqSession {
+	private readonly state: MockWreqSessionState;
 
 	constructor(options?: Record<string, unknown>) {
 		this.state = { calls: [], options, closed: false };
@@ -197,19 +199,44 @@ class MockImpit {
 			options: {
 				...(this.state.options ?? {}),
 				...(init ?? {}),
-				proxy: this.state.options?.proxyUrl,
-				insecureSkipVerify: this.state.options?.ignoreTlsErrors,
 			},
 		});
 		const response = stealthState.queuedResponses.shift();
 		if (!response) throw new Error("No queued response");
 		if (response instanceof Error) throw response;
-		return toImpitResponse(response);
+		return toWreqResponse(response);
+	}
+
+	async clearCookies() {}
+
+	getAllCookies() {
+		return [];
+	}
+
+	async close() {
+		this.state.closed = true;
 	}
 }
 
-mock.module("impit", () => ({
-	Impit: MockImpit,
+mock.module("wreq-js", () => ({
+	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
+	getProfiles: () => [
+		"chrome_145",
+		"chrome_146",
+		"firefox_128",
+		"firefox_133",
+		"firefox_135",
+		"firefox_147",
+		"safari_15.5",
+		"safari_15.6.1",
+		"safari_16",
+		"safari_16.5",
+		"safari_17.0",
+		"safari_17.2.1",
+		"safari_ios_17.2",
+		"safari_ios_18.1.1",
+		"safari_ios_26",
+	],
 }));
 
 describe("proxy integration", () => {
@@ -2228,7 +2255,7 @@ describe("proxy integration", () => {
 		await client.fetch("/health");
 
 		expect(stealthState.clients[0]?.calls[0]?.options.proxy).toBe("http://5.78.24.25:31001");
-		expect(stealthState.clients[0]?.calls[0]?.options.insecureSkipVerify).toBeUndefined();
+		expect(stealthState.clients[0]?.calls[0]?.options.insecure).toBeUndefined();
 	});
 
 });

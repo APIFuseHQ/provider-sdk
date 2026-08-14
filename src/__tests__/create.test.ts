@@ -348,7 +348,7 @@ describe("provider create planning", () => {
 			"apifuse record` is not expected to work with the generated local-only `ping`",
 		);
 		expect(readme?.content).toContain("bun run record -- --operation <operation>");
-		expect(readme?.content).toContain("impit");
+		expect(readme?.content).toContain("wreq-js");
 		expect(readme?.content).toContain("bunx playwright install chromium");
 		expect(readme?.content).toContain("bun run submit-check");
 	});

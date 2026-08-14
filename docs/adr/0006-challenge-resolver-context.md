@@ -93,7 +93,7 @@ The trigger is NOL (야놀자). Its login API was measured to be reachable witho
 a browser and without a proxy from an ordinary data-centre host:
 
 ```
-POST https://accounts.yanolja.com/api/login/email   (impit, chrome TLS profile)
+POST https://accounts.yanolja.com/api/login/email   (browser-like Chrome TLS profile)
 → 400 {"error":{"code":"TURNSTILE_TOKEN_FAIL", ...}}   application/json
 ```
 
@@ -664,21 +664,21 @@ minted from the caller's egress identity. The provider never chooses between
 these modes; the SDK selects from the vendor's capabilities and the provider's
 proxy policy.
 
-`ctx.stealth` currently has no user-agent concept; its impit clients derive one
+`ctx.stealth` currently has no user-agent concept; its transport clients derive one
 from a browser profile. Cookie-family binding requires the SDK to expose and
 pin that value so the vendor is told the same user agent the session will send.
 This is new work introduced by this decision, not an existing capability.
 
 **The `"browser"` vendor reaches this from the other side.** A CDP page knows
 its own user agent (`navigator.userAgent` is readable, and CDP can set it), so
-for that vendor the binding value is available at mint time without impit
+for that vendor the binding value is available at mint time without the stealth transport
 having to expose anything. The cookie half comes from the Decision 3c accessor,
 which also supplies the `expires` value Decision 3b caches against; neither is
-obtainable from `document.cookie`. This does not remove the impit work — a
+obtainable from `document.cookie`. This does not remove the stealth transport work — a
 `"capsolver"` leg in the same chain still needs the session's UA — but it does
 mean the risk is no longer all-or-nothing: the browser leg of cookie-family
-binding can be implemented and verified before the impit question is settled.
-If impit turns out not to expose or override its UA, cookie-family support
+binding can be implemented and verified before the transport question is settled.
+If the transport turns out not to expose or override its UA, cookie-family support
 ships browser-only rather than not at all.
 
 ### 6. Fail closed, never silently degrade

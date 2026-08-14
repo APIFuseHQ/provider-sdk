@@ -205,7 +205,7 @@
 
 ## 2.1.0-beta.3
 
-- Replace the legacy TypeScript request transport with `ctx.stealth`, backed by `impit` browser-grade TLS/HTTP2 impersonation without Python runtime dependencies.
+- Replace the legacy TypeScript request transport with `ctx.stealth`, backed by browser-grade TLS/HTTP2 impersonation without Python runtime dependencies.
 - Add the public `apifuse submit-check` / `apifuse bounty-check` CLI for score-based pre-submission provider quality checks.
 - Ship `SUBMISSION.md` in the npm package so bounty contributors can follow the checklist without access to the private monorepo.
 - Include submit-check in generated provider validation scripts and packed-artifact smoke coverage.

@@ -19,7 +19,7 @@
  *   APIFUSE__PROXY__NODEMAVEN_USERNAME=... APIFUSE__PROXY__NODEMAVEN_PASSWORD=... \
  *   bun run scripts/verify-proxy-tls.ts [--country=kr] [--cf-origin=https://...]
  */
-import { Impit } from "impit";
+import { createSession } from "wreq-js";
 
 import { resolveProxyConfigAsync } from "../src/config/loader.js";
 import type { ProxyProtocol } from "../src/runtime/proxy-nodemaven.js";
@@ -27,6 +27,7 @@ import type { ProviderProxyProvider } from "../src/types.js";
 
 type Transport = "stealth" | "native-fetch";
 type Vendor = Extract<ProviderProxyProvider, "smartproxy" | "nodemaven">;
+type HeaderReader = Pick<Headers, "get">;
 
 type CellResult = {
 	vendor: Vendor;
@@ -86,7 +87,7 @@ function ja3FromEcho(body: string): string | undefined {
 }
 
 /** True if the body/headers look like a Cloudflare interstitial challenge. */
-function looksLikeChallenge(status: number, headers: Headers, body: string): boolean {
+function looksLikeChallenge(status: number, headers: HeaderReader, body: string): boolean {
 	if (headers.get("cf-mitigated") === "challenge") return true;
 	return /just a moment|challenge-platform|cf-chl/i.test(body) || status === 403;
 }
@@ -94,11 +95,15 @@ function looksLikeChallenge(status: number, headers: Headers, body: string): boo
 async function stealthGet(
 	proxyUrl: string,
 	url: string,
-): Promise<{ status: number; body: string; headers: Headers }> {
-	const client = new Impit({ browser: "chrome", proxyUrl, ignoreTlsErrors: false });
-	const response = await client.fetch(url);
-	const body = await response.text();
-	return { status: response.status, body, headers: response.headers as unknown as Headers };
+): Promise<{ status: number; body: string; headers: HeaderReader }> {
+	const session = await createSession({ browser: "chrome_146", proxy: proxyUrl });
+	try {
+		const response = await session.fetch(url);
+		const body = await response.text();
+		return { status: response.status, body, headers: response.headers };
+	} finally {
+		await session.close();
+	}
 }
 
 async function nativeGet(
@@ -113,9 +118,13 @@ async function nativeGet(
 async function directFingerprint(transport: Transport): Promise<string | undefined> {
 	try {
 		if (transport === "stealth") {
-			const client = new Impit({ browser: "chrome" });
-			const body = await (await client.fetch(TLS_ECHO)).text();
-			return ja3FromEcho(body);
+			const session = await createSession({ browser: "chrome_146" });
+			try {
+				const body = await (await session.fetch(TLS_ECHO)).text();
+				return ja3FromEcho(body);
+			} finally {
+				await session.close();
+			}
 		}
 		return ja3FromEcho(await (await fetch(TLS_ECHO)).text());
 	} catch {

@@ -156,15 +156,21 @@ function assertPublicSmokeDocs(label: string, content: string): void {
 		);
 	}
 
-	if (!content.includes("impit")) {
+	if (!content.includes("wreq-js")) {
 		throw new Error(
-			`${label} must include impit stealth runtime guidance for TLS/browser bounties.`,
+			`${label} must include wreq-js stealth runtime guidance for TLS/browser bounties.`,
 		);
 	}
 
 	if (!content.includes("submit-check")) {
 		throw new Error(
 			`${label} must document the submit-check pre-submission workflow.`,
+		);
+	}
+
+	if (!content.includes("Chrome, Firefox, and Safari")) {
+		throw new Error(
+			`${label} must document the browser families supported by the TypeScript stealth runtime.`,
 		);
 	}
 

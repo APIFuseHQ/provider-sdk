@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
-import type { Browser, ImpitOptions, ImpitResponse, RequestInit } from "impit";
-import { Impit } from "impit";
 import { Cookie, CookieJar as ToughCookieJar } from "tough-cookie";
+import type {
+	BrowserProfile,
+	EmulationOS,
+	RequestInit as WreqRequestInit,
+	Session as WreqSession,
+} from "wreq-js";
 
 import type { ProxyResolutionOptions, ProxyVendorName } from "../config/loader.js";
 import {
@@ -53,15 +57,16 @@ import {
 import {
 	evaluateRedirectHop,
 	isRedirectStatus,
+	nextRedirectMethod,
 	resolveRedirectUrl,
 } from "./redirects.js";
 import {
 	isSensitiveKey,
+	normalizeSensitiveParams,
 	redactSensitiveError,
 	redactSensitiveRequestError,
 	redactSensitiveText,
 	redactUrlQueryParams,
-	normalizeSensitiveParams,
 	serializeRequestUrl,
 } from "./request-options.js";
 
@@ -77,6 +82,13 @@ const PROXY_CONNECT_FAILURE_BODY_PATTERN =
 const PROXY_AUTH_DIAGNOSTIC_URL = "http://example.com/";
 const PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS = 5_000;
 const STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES = [PROXY_CONNECT_FAILURE_CODE] as const;
+const MAX_STEALTH_REDIRECT_HOPS = 10;
+const REDIRECT_BODY_HEADERS = new Set([
+	"content-encoding",
+	"content-language",
+	"content-location",
+	"content-type",
+]);
 
 function sensitiveQueryParamNames(url: string): string[] {
 	const queryStart = url.indexOf("?");
@@ -110,43 +122,38 @@ const REMOVED_CHROME_PROFILE_NAMES = new Set([
 	"edge-131",
 ]);
 
-type ImpitBrowser = Browser;
-type ImpitRequestInit = RequestInit;
-
-const CHROME_IMPIT_BY_MAJOR: Record<number, ImpitBrowser> = {
-	100: "chrome100",
-	101: "chrome101",
-	104: "chrome104",
-	107: "chrome107",
-	110: "chrome110",
-	116: "chrome116",
-	124: "chrome124",
-	125: "chrome125",
-	131: "chrome131",
-	136: "chrome136",
-	142: "chrome142",
+type StealthTransportHeaders = {
+	entries(): IterableIterator<[string, string]>;
+	get(name: string): string | null;
+	getSetCookie?: () => string[];
 };
 
-const FIREFOX_IMPIT_BY_MAJOR: Record<number, ImpitBrowser> = {
-	128: "firefox128",
-	133: "firefox133",
-	135: "firefox135",
-	144: "firefox144",
+type StealthTransportBody = {
+	cancel(): Promise<void>;
+	getReader(): {
+		read(): Promise<{ done: boolean; value?: Uint8Array }>;
+		cancel(): Promise<void>;
+		releaseLock(): void;
+	};
 };
 
-type StealthTransportResponse = Pick<
-	ImpitResponse,
-	"arrayBuffer" | "headers" | "json" | "ok" | "status" | "text"
-> & {
-	body?: ReadableStream<Uint8Array>;
-	abort?: () => void;
+type StealthTransportResponse = {
+	arrayBuffer(): Promise<ArrayBuffer>;
+	headers: StealthTransportHeaders;
+	status: number;
+	body?: StealthTransportBody | null;
 	url?: string;
 	redirected?: boolean;
 };
 
-type StealthMethod = NonNullable<ImpitRequestInit["method"]>;
-type StealthRequestInit = ImpitRequestInit & {
+type StealthMethod = HttpMethod | "TRACE";
+type StealthRequestInit = WreqRequestInit & {
 	redirect?: NonNullable<StealthFetchOptions["redirect"]>;
+};
+
+type WreqSessionCacheEntry = {
+	session: Promise<WreqSession>;
+	tail: Promise<void>;
 };
 
 function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
@@ -294,65 +301,134 @@ class CookieJarImpl implements CookieJar {
 	}
 }
 
-function closestImpitBrowser(
-	major: number,
-	candidates: Record<number, ImpitBrowser>,
-): ImpitBrowser {
-	let closestMajor: number | undefined;
-	let closestBrowser: ImpitBrowser | undefined;
-	for (const [candidateMajorText, browser] of Object.entries(candidates)) {
-		const candidateMajor = Number(candidateMajorText);
-		if (
-			closestMajor === undefined ||
-			Math.abs(candidateMajor - major) < Math.abs(closestMajor - major)
-		) {
-			closestMajor = candidateMajor;
-			closestBrowser = browser;
-		}
+type WreqModule = typeof import("wreq-js");
+
+let wreqModulePromise: Promise<WreqModule> | undefined;
+
+function getWreqModule(): Promise<WreqModule> {
+	if (!wreqModulePromise) {
+		wreqModulePromise = import("wreq-js").catch((error: unknown) => {
+			throw new SDKError(
+				`Stealth transport is unavailable on ${process.platform}-${process.arch}: the wreq-js native binary could not be loaded.`,
+				{
+					code: "stealth_transport_unavailable",
+					cause: error instanceof Error ? error : undefined,
+				},
+			);
+		});
 	}
-	return closestBrowser ?? "chrome142";
+
+	return wreqModulePromise;
 }
 
-function resolveImpitBrowser(profileName: string): ImpitBrowser {
+function parseProfileIdentifier(identifier: string): {
+	family: string;
+	version: number[];
+} | null {
+	const match = /^(safari_ios|safari_ipad|firefox_android|firefox_private|chrome|edge|firefox|opera|safari|okhttp)_(\d+(?:[._]\d+)*)$/.exec(
+		identifier.toLowerCase(),
+	);
+	if (!match?.[1] || !match[2]) return null;
+	return {
+		family: match[1],
+		version: match[2].split(/[._]/).map(Number),
+	};
+}
+
+function compareVersionDistance(target: number[], left: number[], right: number[]): number {
+	const width = Math.max(target.length, left.length, right.length);
+	for (let index = 0; index < width; index += 1) {
+		const targetPart = target[index] ?? 0;
+		const leftDistance = Math.abs((left[index] ?? 0) - targetPart);
+		const rightDistance = Math.abs((right[index] ?? 0) - targetPart);
+		if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+	}
+	return 0;
+}
+
+function closestWreqProfile(
+	identifier: string,
+	wreqProfiles: readonly BrowserProfile[],
+): BrowserProfile | undefined {
+	const requested = parseProfileIdentifier(identifier);
+	if (!requested) return undefined;
+
+	let closest: { name: BrowserProfile; version: number[] } | undefined;
+	for (const candidateName of wreqProfiles) {
+		const candidate = parseProfileIdentifier(candidateName);
+		if (!candidate || candidate.family !== requested.family) continue;
+		if (
+			!closest ||
+			compareVersionDistance(requested.version, candidate.version, closest.version) < 0
+		) {
+			closest = { name: candidateName, version: candidate.version };
+		}
+	}
+	return closest?.name;
+}
+
+function resolveDefaultWreqProfileMapping(): { identifier: string; os: EmulationOS } {
+	let profile: ReturnType<typeof getStealthProfile>;
+	try {
+		profile = getStealthProfile(DEFAULT_PROFILE);
+	} catch (error) {
+		throw new SDKError(
+			`Default stealth profile "${DEFAULT_PROFILE}" cannot be mapped to a wreq-js browser profile.`,
+			{ cause: error instanceof Error ? error : undefined },
+		);
+	}
+
+	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
+	if (!parseProfileIdentifier(identifier)) {
+		throw new SDKError(
+			`Default stealth profile "${DEFAULT_PROFILE}" cannot be mapped to a wreq-js browser profile.`,
+		);
+	}
+	return { identifier, os: profile.platform };
+}
+
+const DEFAULT_WREQ_PROFILE_MAPPING = resolveDefaultWreqProfileMapping();
+
+export function resolveWreqProfile(
+	profileName: string,
+	wreqProfiles: readonly BrowserProfile[],
+): {
+	browser: BrowserProfile;
+	os: EmulationOS;
+} {
 	if (REMOVED_CHROME_PROFILE_NAMES.has(profileName)) {
 		throw new SDKError(`Unknown stealth profile: ${profileName}`);
 	}
 
-	let profile: ReturnType<typeof getStealthProfile>;
+	let identifier: string;
+	let os: EmulationOS;
 	try {
-		profile = getStealthProfile(profileName);
+		const profile = getStealthProfile(profileName);
+		identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
+		os = profile.platform;
 	} catch {
 		// Preserve the previous ctx.stealth.fetch() compatibility behavior: unknown
 		// profile strings still run with the transport default instead of failing
 		// before the request starts. Removed built-in profile aliases above remain
 		// explicit errors so callers do not accidentally pin retired fingerprints.
-		return "chrome142";
+		identifier = DEFAULT_WREQ_PROFILE_MAPPING.identifier;
+		os = DEFAULT_WREQ_PROFILE_MAPPING.os;
 	}
 
-	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
-	const chromeMatch = /^(?:chrome|edge)_(\d+)/.exec(identifier);
-	if (chromeMatch?.[1]) {
-		return closestImpitBrowser(Number(chromeMatch[1]), CHROME_IMPIT_BY_MAJOR);
-	}
-	const firefoxMatch = /^firefox_(\d+)/.exec(identifier);
-	if (firefoxMatch?.[1]) {
-		return closestImpitBrowser(Number(firefoxMatch[1]), FIREFOX_IMPIT_BY_MAJOR);
-	}
-	if (identifier.startsWith("safari_")) {
+	const browser = closestWreqProfile(identifier, wreqProfiles);
+	if (!browser) {
 		throw new SDKError(
-			`Stealth profile "${profileName}" uses a Safari stealth fingerprint, but TypeScript ctx.stealth uses impit which currently supports Chrome, Firefox, and OkHttp profiles only. Use a Chrome/Firefox stealth profile for ctx.stealth or ctx.browser for Safari-specific behavior.`,
+			`Stealth profile "${profileName}" cannot be mapped to a wreq-js browser profile.`,
 		);
 	}
-	throw new SDKError(
-		`Stealth profile "${profileName}" cannot be mapped to an impit browser profile.`,
-	);
+	return { browser, os };
 }
 
 function resolveUrl(baseUrl: string, url: string): string {
 	return new URL(url, baseUrl).toString();
 }
 
-function headerEntriesFromHeaders(headers: Headers): [string, string][] {
+function headerEntriesFromHeaders(headers: StealthTransportHeaders): [string, string][] {
 	return Array.from(headers.entries());
 }
 
@@ -370,17 +446,6 @@ function normalizeHeaders(
 function hasOwn(object: object, key: string): boolean {
 	return Object.hasOwn(object, key);
 }
-function toImpitCookieJar(cookieJar: CookieJarImpl): NonNullable<ImpitOptions["cookieJar"]> {
-	return {
-		setCookie(cookie: string, url: string, cb?: (error?: unknown) => void) {
-			cookieJar.setFromCookieStrings([cookie], url);
-			if (typeof cb === "function") cb();
-		},
-		getCookieString(url: string) {
-			return cookieJar.toHeader(url);
-		},
-	};
-}
 
 function assertNoUnsupportedFingerprintOverrides(options: unknown): void {
 	if (!isRecord(options)) return;
@@ -392,17 +457,19 @@ function assertNoUnsupportedFingerprintOverrides(options: unknown): void {
 	if (unsupported.length === 0) return;
 
 	throw new SDKError(
-		`ctx.stealth.fetch uses impit-managed browser fingerprints and no longer accepts low-level stealth overrides: ${unsupported.join(", ")}. Use the profile option instead.`,
+		`ctx.stealth.fetch uses transport-managed browser fingerprints and no longer accepts low-level stealth overrides: ${unsupported.join(", ")}. Use the profile option instead.`,
 	);
 }
 
-function responseHeadersToRecord(headers: Headers): Record<string, string | string[] | undefined> {
+function responseHeadersToRecord(
+	headers: StealthTransportHeaders,
+): Record<string, string | string[] | undefined> {
 	const record: Record<string, string> = {};
 	for (const [name, value] of headers.entries()) record[name] = value;
 	return record;
 }
 
-function setCookieHeadersFromResponse(headers: Headers): string[] {
+function setCookieHeadersFromResponse(headers: StealthTransportHeaders): string[] {
 	const getSetCookie = headers.getSetCookie;
 	if (typeof getSetCookie === "function") return getSetCookie.call(headers);
 	const setCookie = headers.get("set-cookie");
@@ -479,21 +546,11 @@ function responseTooLargeError(maxBodyBytes: number, observedBytes: number): Tra
 	);
 }
 
-function declaredContentLength(headers: Headers): number | undefined {
+function declaredContentLength(headers: StealthTransportHeaders): number | undefined {
 	const contentLength = headers.get("content-length")?.trim();
 	if (!contentLength || !/^\d+$/.test(contentLength)) return undefined;
 	const parsed = Number(contentLength);
 	return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function abortTransportResponse(response: StealthTransportResponse): boolean {
-	if (!response.abort) return false;
-	try {
-		response.abort();
-	} catch {
-		// The size error remains the primary failure if impit has already closed the response.
-	}
-	return true;
 }
 
 async function readResponseBodyWithLimit(
@@ -502,9 +559,7 @@ async function readResponseBodyWithLimit(
 ): Promise<ArrayBuffer> {
 	const contentLength = declaredContentLength(response.headers);
 	if (contentLength !== undefined && contentLength > maxBodyBytes) {
-		if (!abortTransportResponse(response)) {
-			await response.body?.cancel().catch(() => undefined);
-		}
+		await response.body?.cancel().catch(() => undefined);
 		throw responseTooLargeError(maxBodyBytes, contentLength);
 	}
 
@@ -523,10 +578,10 @@ async function readResponseBodyWithLimit(
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
+			if (!value) continue;
 			receivedBytes += value.byteLength;
 			if (receivedBytes > maxBodyBytes) {
 				await reader.cancel().catch(() => undefined);
-				abortTransportResponse(response);
 				throw responseTooLargeError(maxBodyBytes, receivedBytes);
 			}
 			chunks.push(value);
@@ -743,40 +798,171 @@ function locationHeader(headers: Record<string, string>): string | undefined {
 	return undefined;
 }
 
+function withoutRedirectBodyHeaders(headers: Record<string, string>): Record<string, string> {
+	return Object.fromEntries(
+		Object.entries(headers).filter(([name]) => !REDIRECT_BODY_HEADERS.has(name.toLowerCase())),
+	);
+}
+
+function assertStealthRedirectUrl(url: string): void {
+	const protocol = new URL(url).protocol;
+	if (protocol !== "http:" && protocol !== "https:") {
+		throw new TransportError(`Stealth redirect target scheme "${protocol}" is not allowed`, {
+			code: "transport_invalid_url",
+			status: 0,
+		});
+	}
+}
+
+function discardStealthRedirectBody(response: StealthTransportResponse): void {
+	try {
+		const cancellation = response.body?.cancel();
+		if (cancellation) void cancellation.catch(() => undefined);
+	} catch {
+		// Redirect handling is decided from status and headers. A cancellation
+		// failure must not replace or delay that decision.
+	}
+}
+
+async function fetchStealthRedirectChain(
+	transport: WreqSession,
+	cookieJar: CookieJarImpl,
+	requestUrl: string,
+	method: StealthMethod,
+	options: StealthFetchOptions,
+): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> {
+	let currentUrl = requestUrl;
+	let currentMethod = method;
+	let currentBody = options.body === undefined ? undefined : normalizeBody(options.body);
+	let currentHeaders = { ...(options.headers ?? {}) };
+	let followedHops = 0;
+	let response: StealthTransportResponse;
+	const deadline = options.timeout ? performance.now() + options.timeout : undefined;
+
+	while (true) {
+		const headers = { ...currentHeaders };
+		if (!hasHeader(headers, "Cookie")) {
+			const cookieHeader = cookieJar.toHeader(currentUrl);
+			if (cookieHeader) headers.Cookie = cookieHeader;
+		}
+		const requestInit: StealthRequestInit = {
+			headers: normalizeHeaders(headers),
+			method: currentMethod,
+			redirect: "manual",
+		};
+		if (currentBody !== undefined) requestInit.body = currentBody;
+
+		await transport.clearCookies();
+		const remainingTimeout =
+			deadline === undefined ? undefined : Math.ceil(deadline - performance.now());
+		if (remainingTimeout !== undefined && remainingTimeout <= 0) {
+			throw new TransportError("Request timed out", {
+				code: "transport_timeout",
+				status: 0,
+			});
+		}
+		if (remainingTimeout !== undefined) requestInit.timeout = remainingTimeout;
+		response = await transport.fetch(currentUrl, requestInit);
+		cookieJar.setFromCookieStrings(
+			setCookieHeadersFromResponse(response.headers),
+			response.url ?? currentUrl,
+		);
+
+		if (!isRedirectStatus(response.status) || options.redirect === "manual") break;
+		if (options.redirect === "error") {
+			discardStealthRedirectBody(response);
+			throw new TransportError("Stealth request encountered a redirect", {
+				code: "transport_network_error",
+				status: 0,
+			});
+		}
+
+		const nextUrl = resolveRedirectUrl(
+			response.headers.get("location") ?? undefined,
+			response.url ?? currentUrl,
+		);
+		if (!nextUrl) break;
+		if (followedHops >= MAX_STEALTH_REDIRECT_HOPS) {
+			discardStealthRedirectBody(response);
+			throw new TransportError(
+				`Stealth request exceeded the ${MAX_STEALTH_REDIRECT_HOPS}-redirect limit`,
+				{ code: "transport_network_error", status: 0 },
+			);
+		}
+		assertStealthRedirectUrl(nextUrl);
+		discardStealthRedirectBody(response);
+		const nextMethod = nextRedirectMethod(response.status, currentMethod);
+		if (nextMethod !== currentMethod) {
+			currentBody = undefined;
+			currentHeaders = withoutRedirectBodyHeaders(currentHeaders);
+		}
+		currentMethod = nextMethod;
+		currentUrl = nextUrl;
+		followedHops += 1;
+	}
+
+	const normalized = await normalizeResponse(response, currentUrl, options.maxBodyBytes);
+	if (followedHops > 0) normalized.redirected = true;
+	return { normalized, response };
+}
+
 function createSessionFetcher(
 	baseUrl: string,
 	defaultProfile: string,
 	clientOptions: StealthClientOptions,
 ): StealthSession {
-	const clients = new Map<string, Impit>();
+	const clients = new Map<string, WreqSessionCacheEntry>();
 	let closed = false;
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
 	const cookieJar = new CookieJarImpl([], baseUrl);
-	const impitCookieJar = toImpitCookieJar(cookieJar);
 
-	function getClient(
+	async function getClientEntry(
 		profileName: string,
 		proxyUrl: string | undefined,
 		ignoreTlsErrors: boolean,
-	): Impit {
+	): Promise<WreqSessionCacheEntry> {
 		if (closed) {
 			throw new TransportError("Stealth session is closed", { status: 0 });
 		}
-		const browser = resolveImpitBrowser(profileName);
+		const wreq = await getWreqModule();
+		const { browser, os } = resolveWreqProfile(profileName, wreq.getProfiles());
 		const cacheKey = JSON.stringify({ browser, proxyUrl, ignoreTlsErrors });
-		let client = clients.get(cacheKey);
-		if (!client) {
-			client = new Impit({
-				browser,
-				cookieJar: impitCookieJar,
-				...(proxyUrl ? { proxyUrl } : {}),
-				...(ignoreTlsErrors ? { ignoreTlsErrors: true } : {}),
-				timeout: 30_000,
-			});
-			clients.set(cacheKey, client);
+		let entry = clients.get(cacheKey);
+		if (!entry) {
+			entry = {
+				session: wreq.createSession({
+					browser,
+					os,
+					...(proxyUrl ? { proxy: proxyUrl } : {}),
+					...(ignoreTlsErrors ? { insecure: true } : {}),
+					timeout: 30_000,
+				}),
+				tail: Promise.resolve(),
+			};
+			clients.set(cacheKey, entry);
 		}
-		return client;
+		return entry;
+	}
+
+	async function withClient<T>(
+		profileName: string,
+		proxyUrl: string | undefined,
+		ignoreTlsErrors: boolean,
+		operation: (client: WreqSession) => Promise<T>,
+	): Promise<T> {
+		const entry = await getClientEntry(profileName, proxyUrl, ignoreTlsErrors);
+		const previous = entry.tail;
+		let release!: () => void;
+		entry.tail = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		await previous;
+		try {
+			return await operation(await entry.session);
+		} finally {
+			release();
+	}
 	}
 
 	async function resolveRequestProxy(
@@ -793,7 +979,7 @@ function createSessionFetcher(
 				proxyAttemptOffset: options?.proxyAttemptOffset,
 				retryAttemptOffset: proxyAttempt,
 			}),
-			// The impit stealth transport tunnels both HTTP CONNECT and SOCKS5,
+			// The stealth transport tunnels both HTTP CONNECT and SOCKS5,
 			// preserving the client TLS fingerprint end-to-end.
 			transportProtocols: ["http", "socks5"],
 			...(refreshEpoch === undefined ? {} : { proxyRefreshEpoch: refreshEpoch }),
@@ -943,28 +1129,12 @@ function createSessionFetcher(
 							sensitiveParams,
 						);
 						const { requestUrl } = serializedUrl;
-						const headers = { ...(options.headers ?? {}) };
-						if (!hasHeader(headers, "Cookie")) {
-							const cookieHeader = cookieJar.toHeader(requestUrl);
-							if (cookieHeader) headers.Cookie = cookieHeader;
-						}
-						const requestInit: StealthRequestInit = {
-							headers: normalizeHeaders(headers),
-							method,
-							...(options.redirect ? { redirect: options.redirect } : {}),
-							...(options.timeout ? { timeout: options.timeout } : {}),
-						};
-						if (options.body !== undefined) {
-							requestInit.body = normalizeBody(options.body);
-						}
-						const response = await getClient(profileName, proxy, ignoreTlsErrors).fetch(
-							requestUrl,
-							requestInit,
-						);
-						const normalized = await normalizeResponse(response, requestUrl, options.maxBodyBytes);
-						cookieJar.setFromCookieStrings(
-							setCookieHeadersFromResponse(response.headers),
-							response.url ?? requestUrl,
+						const { normalized, response } = await withClient(
+							profileName,
+							proxy,
+							ignoreTlsErrors,
+							(transport) =>
+								fetchStealthRedirectChain(transport, cookieJar, requestUrl, method, options),
 						);
 
 						if (proxy && isProxyConnectFailureResponse(response, normalized.body)) {
@@ -1335,6 +1505,14 @@ function createSessionFetcher(
 		},
 		close() {
 			closed = true;
+			for (const client of clients.values()) {
+				void client.session
+					.then((session) => session.close())
+					.catch((error: unknown) => {
+						const message = error instanceof Error ? error.message : String(error);
+						warn(`[provider-sdk] Failed to close stealth transport session: ${message}`);
+					});
+			}
 			clients.clear();
 		},
 	};
@@ -1345,12 +1523,15 @@ function createSessionFetcher(
 		proxy: string,
 	): Promise<"source_ip_denied" | "edge_auth_rejected" | undefined> {
 		try {
-			const response = await getClient(profileName, proxy, false).fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
-				method: "GET",
-				timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
+			return await withClient(profileName, proxy, false, async (client) => {
+				await client.clearCookies();
+				const response = await client.fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
+					method: "GET",
+					timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
+				});
+				const normalized = await normalizeResponse(response);
+				return classifyProxyAuthDiagnosticMessage(normalized.body);
 			});
-			const normalized = await normalizeResponse(response);
-			return classifyProxyAuthDiagnosticMessage(normalized.body);
 		} catch (error) {
 			const message =
 				error instanceof Error

@@ -137,7 +137,7 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   `context` object.
 - **Stealth-sensitive providers**: use `ctx.http` for normal JSON/REST calls and
   `ctx.stealth.fetch()` when you need browser-like session or cookie control.
-  `ctx.stealth.fetch()` uses the impit-backed browser stealth transport and
+  `ctx.stealth.fetch()` uses the `wreq-js`-backed browser stealth transport and
   accepts request controls for `params`, `sensitiveParams`, `proxy`, `timeout`, `profile`,
   `maxBodyBytes`, `redirect`, `throwOnHttpError`, and
   `stealth.insecureSkipVerify`. For login
@@ -145,8 +145,8 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   a session with `ctx.stealth.createSession()` and use `session.redirects.run()`;
   inspect accumulated cookies through `session.cookies`. Select an SDK stealth
   `profile` such as `chrome-146`; do not tune JA3, HTTP/2 SETTINGS, or
-  pseudo-header order in provider code. Chrome/Firefox-style profiles are
-  supported; use `ctx.browser` when Safari-specific behavior is required.
+  pseudo-header order in provider code. Chrome, Firefox, and Safari profiles
+  are supported; use `ctx.browser` when the provider needs browser execution.
 - **Query-parameter credentials**: when an upstream requires a credential in
   its URL query, pass it through `sensitiveParams`, not `params` and never a
   hand-built URL. It is sent as a normal query parameter while the SDK redacts
