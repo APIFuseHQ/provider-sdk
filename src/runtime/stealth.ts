@@ -814,6 +814,7 @@ async function fetchStealthRedirectChain(
 	let currentHeaders = { ...(options.headers ?? {}) };
 	let followedHops = 0;
 	let response: StealthTransportResponse;
+	const deadline = options.timeout ? performance.now() + options.timeout : undefined;
 
 	while (true) {
 		const headers = { ...currentHeaders };
@@ -825,11 +826,19 @@ async function fetchStealthRedirectChain(
 			headers: normalizeHeaders(headers),
 			method: currentMethod,
 			redirect: "manual",
-			...(options.timeout ? { timeout: options.timeout } : {}),
 		};
 		if (currentBody !== undefined) requestInit.body = currentBody;
 
 		await transport.clearCookies();
+		const remainingTimeout =
+			deadline === undefined ? undefined : Math.ceil(deadline - performance.now());
+		if (remainingTimeout !== undefined && remainingTimeout <= 0) {
+			throw new TransportError("Request timed out", {
+				code: "transport_timeout",
+				status: 0,
+			});
+		}
+		if (remainingTimeout !== undefined) requestInit.timeout = remainingTimeout;
 		response = await transport.fetch(currentUrl, requestInit);
 		cookieJar.setFromCookieStrings(
 			setCookieHeadersFromResponse(response.headers),

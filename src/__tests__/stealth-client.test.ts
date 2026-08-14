@@ -36,7 +36,7 @@ type MockWreqResponse = {
 	omitUrl?: boolean;
 	redirected?: boolean;
 	sessionCookies?: MockSessionCookie[];
-	beforeReturn?: () => Promise<void>;
+	beforeReturn?: (init?: Record<string, unknown>) => Promise<void>;
 };
 
 type MockBodyState = {
@@ -149,7 +149,7 @@ class MockWreqSession {
 		const response = mockStealthState.queuedResponses.shift();
 		if (!response) throw new Error("No queued response");
 		this.state.cookies = response.sessionCookies ? [...response.sessionCookies] : [];
-		await response.beforeReturn?.();
+		await response.beforeReturn?.(init);
 		return toWreqResponse(response);
 	}
 
@@ -1121,12 +1121,14 @@ describe("createStealthClient", () => {
 			timeout: 12_000,
 		});
 
-		expect(mockStealthState.clients[0]?.calls[0]?.init).toMatchObject({
+		const requestInit = mockStealthState.clients[0]?.calls[0]?.init;
+		expect(requestInit).toMatchObject({
 			body: '{"ok":true}',
 			headers: { accept: "text/plain" },
 			method: "POST",
-			timeout: 12_000,
 		});
+		expect(requestInit?.timeout).toBeGreaterThan(0);
+		expect(requestInit?.timeout).toBeLessThanOrEqual(12_000);
 	});
 
 	it("passes manual redirect mode through wreq fetch", async () => {
@@ -1151,6 +1153,61 @@ describe("createStealthClient", () => {
 		});
 		expect(response.headers.location).toBe("/next");
 		expect(response.cookies.get("hop")).toBe("one");
+	});
+
+	it("bounds one timeout budget across the full redirect chain", async () => {
+		const timeout = 110;
+		const hopDelay = 40;
+		const beforeReturn = async (init?: Record<string, unknown>) => {
+			const hopTimeout = init?.timeout;
+			if (typeof hopTimeout !== "number") throw new Error("missing hop timeout");
+			await Bun.sleep(Math.min(hopDelay, hopTimeout));
+			if (hopTimeout < hopDelay) {
+				const timeoutError = new Error(`request timeout after ${hopTimeout}ms`);
+				timeoutError.name = "TimeoutError";
+				throw timeoutError;
+			}
+		};
+		for (let hop = 0; hop < 7; hop += 1) {
+			mockStealthState.queuedResponses.push({
+				status: 302,
+				body: "",
+				headers: { location: `/hop-${hop + 1}` },
+				url: hop === 0 ? "https://example.com/start" : `https://example.com/hop-${hop}`,
+				beforeReturn,
+			});
+		}
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "too late",
+			headers: {},
+			url: "https://example.com/hop-7",
+			beforeReturn,
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const startedAt = performance.now();
+		let thrown: unknown;
+		try {
+			await createStealthClient("https://example.com").fetch("/start", { timeout });
+		} catch (error) {
+			thrown = error;
+		}
+		const elapsed = performance.now() - startedAt;
+
+		expect(thrown).toMatchObject({
+			code: "transport_timeout",
+			status: 0,
+			message: "Request timed out",
+		});
+		expect(elapsed).toBeLessThan(timeout + 100);
+		const hopTimeouts = mockStealthState.clients[0]?.calls.map((call) => call.init?.timeout) ?? [];
+		expect(hopTimeouts.length).toBeGreaterThan(1);
+		expect(hopTimeouts.length).toBeLessThan(8);
+		expect(hopTimeouts?.every((value) => typeof value === "number")).toBe(true);
+		for (let index = 1; index < hopTimeouts.length; index += 1) {
+			expect(hopTimeouts[index]).toBeLessThan(hopTimeouts[index - 1] as number);
+		}
 	});
 
 	it("exposes session cookies accumulated across sequential requests", async () => {
