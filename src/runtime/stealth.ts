@@ -369,7 +369,10 @@ function closestWreqProfile(
 	return closest?.name;
 }
 
-function resolveWreqProfile(profileName: string, wreqProfiles: readonly BrowserProfile[]): {
+export function resolveWreqProfile(
+	profileName: string,
+	wreqProfiles: readonly BrowserProfile[],
+): {
 	browser: BrowserProfile;
 	os: EmulationOS;
 } {

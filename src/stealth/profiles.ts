@@ -192,9 +192,9 @@ const STEALTH_PROFILES: Record<string, StealthProfile> = {
 	}),
 	"firefox-132": createProfile("firefox-132", {
 		platform: "macos",
-		version: "132.0",
+		version: "133.0",
 		userAgent:
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:132.0) Gecko/20100101 Firefox/132.0",
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
 		tlsClientIdentifier: "firefox_132",
 		ja3: FIREFOX_JA3,
 		h2Settings: FIREFOX_H2_SETTINGS,
@@ -242,9 +242,9 @@ const STEALTH_PROFILES: Record<string, StealthProfile> = {
 	}),
 	"ios-safari-18": createProfile("ios-safari-18", {
 		platform: "ios",
-		version: "18.0",
+		version: "18.1.1",
 		userAgent:
-			"Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+			"Mozilla/5.0 (iPhone; CPU iPhone OS 18_1_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1.1 Mobile/15E148 Safari/604.1",
 		tlsClientIdentifier: "safari_ios_18_0",
 		ja3: SAFARI_JA3,
 		h2Settings: SAFARI_H2_SETTINGS,
@@ -252,9 +252,9 @@ const STEALTH_PROFILES: Record<string, StealthProfile> = {
 	}),
 	"ios-safari-17": createProfile("ios-safari-17", {
 		platform: "ios",
-		version: "17.0",
+		version: "17.2",
 		userAgent:
-			"Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+			"Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
 		tlsClientIdentifier: "safari_ios_17_0",
 		ja3: SAFARI_JA3,
 		h2Settings: SAFARI_H2_SETTINGS,
