@@ -6,6 +6,7 @@ import type {
 	ProviderCache,
 	ProviderChallenge,
 	ProviderChallengeKind,
+	ProviderProxyMode,
 	ProviderResolverConfig,
 	ProviderResolverVendor,
 	ResolverContext,
@@ -75,6 +76,8 @@ type ResolverChainClient = ResolverContext & {
 export interface ResolverRuntimeOptions {
 	readonly allowedHosts?: readonly string[];
 	readonly cache?: ProviderCache;
+	/** Provider-declared proxy intent. The SDK never accepts a caller-built identity. */
+	readonly proxyMode?: ProviderProxyMode;
 	/** Server-owned context/proxy scope used only for identity-bound cache entries. */
 	readonly identityScope?: string;
 	/** SDK-owned transport already bound to the resolved proxy lease and client profile. */
@@ -691,6 +694,7 @@ function createResolverChainClient(options: {
 	readonly unavailableReason?: string;
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
+	readonly proxyMode?: ProviderProxyMode;
 	readonly identityScope?: string;
 	readonly transport?: ResolverVendorTransport;
 	readonly createTransport?: ResolverRuntimeOptions["createTransport"];
@@ -730,6 +734,9 @@ function createResolverChainClient(options: {
 				const adapter = entry.createAdapter();
 				try {
 					const solveAttempt = () => {
+						if (options.proxyMode === "required" && options.identity === undefined) {
+							throw new ResolverVendorUnavailableError(adapter.id, "missing_proxy_identity");
+						}
 						const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
 						const unrestrictedTransport =
 							options.transport ??
@@ -804,6 +811,7 @@ export function createResolverClient(options: {
 	readonly unavailableReason?: string;
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
+	readonly proxyMode?: ProviderProxyMode;
 	readonly transport?: ResolverVendorTransport;
 	readonly createTransport?: ResolverRuntimeOptions["createTransport"];
 	readonly clientProfile?: string;
@@ -819,6 +827,7 @@ export function createResolverClient(options: {
 		unavailableReason: options.unavailableReason,
 		cache: options.cache,
 		identity: options.identity,
+		proxyMode: options.proxyMode,
 		transport: options.transport,
 		createTransport: options.createTransport,
 		clientProfile: options.clientProfile,
@@ -921,6 +930,7 @@ function createResolverClientFromEnvInternal(
 			};
 		}),
 		cache: options.cache,
+		proxyMode: options.proxyMode,
 		identityScope: options.identityScope,
 		transport: options.transport,
 		createTransport: options.createTransport,

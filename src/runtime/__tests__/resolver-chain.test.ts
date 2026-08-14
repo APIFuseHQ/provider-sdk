@@ -257,6 +257,60 @@ describe("resolver vendor chain", () => {
 		expect(solveCalls).toBe(0);
 	});
 
+	it("fails closed when required proxy identity is unavailable", async () => {
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+			proxyMode: "required",
+		});
+
+		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "browser", reason: "missing_proxy_identity" }],
+		});
+		expect(adapter.state.solveCalls).toBe(0);
+	});
+
+	it("allows an optional proxy policy without an identity", async () => {
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+			proxyMode: "optional",
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({ form: "token", token: "browser" });
+		expect(adapter.state.solveCalls).toBe(1);
+	});
+
+	it("allows a required proxy policy with an internally supplied identity", async () => {
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+			identity: {
+				proxyUrl: "http://proxy.test:8080",
+				userAgent: "resolver-test-agent",
+			},
+			proxyMode: "required",
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({ form: "token", token: "browser" });
+		expect(adapter.state.solveCalls).toBe(1);
+	});
+
+	it("preserves resolver behavior when proxy mode is absent", async () => {
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({ form: "token", token: "browser" });
+		expect(adapter.state.solveCalls).toBe(1);
+	});
+
 	it("evaluates predicate transport requirements for each challenge kind", async () => {
 		const solvedKinds: ProviderChallengeKind[] = [];
 		const adapter: ResolverVendorAdapter = {
