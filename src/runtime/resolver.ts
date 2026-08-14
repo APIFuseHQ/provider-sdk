@@ -719,6 +719,19 @@ function createResolverChainClient(options: {
 			const supportingEntries = options.entries.filter((entry) => entry.supports(challenge.kind));
 			if (supportingEntries.length === 0) throwUnsupportedKind(challenge.kind);
 			signal.throwIfAborted();
+			// A required proxy policy is checked before the cache. Solutions minted under a
+			// previous release are shared and long-lived, so consulting the cache first would
+			// keep reporting success without a proxy identity until every old entry expired.
+			const requiredProxyIdentityMissing =
+				options.proxyMode === "required" && options.identity === undefined;
+			if (requiredProxyIdentityMissing) {
+				throwExhausted(
+					supportingEntries.map((entry) => ({
+						vendor: entry.id,
+						reason: "missing_proxy_identity" as const,
+					})),
+				);
+			}
 			if (options.cache && resolverChallengeIsCacheable(challenge)) {
 				const cached = await findCachedSolution(
 					options.cache,
@@ -734,9 +747,6 @@ function createResolverChainClient(options: {
 				const adapter = entry.createAdapter();
 				try {
 					const solveAttempt = () => {
-						if (options.proxyMode === "required" && options.identity === undefined) {
-							throw new ResolverVendorUnavailableError(adapter.id, "missing_proxy_identity");
-						}
 						const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
 						const unrestrictedTransport =
 							options.transport ??
