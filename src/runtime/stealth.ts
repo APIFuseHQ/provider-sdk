@@ -301,8 +301,6 @@ class CookieJarImpl implements CookieJar {
 	}
 }
 
-const DEFAULT_WREQ_PROFILE: BrowserProfile = "chrome_146";
-
 type WreqModule = typeof import("wreq-js");
 
 let wreqModulePromise: Promise<WreqModule> | undefined;
@@ -369,6 +367,28 @@ function closestWreqProfile(
 	return closest?.name;
 }
 
+function resolveDefaultWreqProfileMapping(): { identifier: string; os: EmulationOS } {
+	let profile: ReturnType<typeof getStealthProfile>;
+	try {
+		profile = getStealthProfile(DEFAULT_PROFILE);
+	} catch (error) {
+		throw new SDKError(
+			`Default stealth profile "${DEFAULT_PROFILE}" cannot be mapped to a wreq-js browser profile.`,
+			{ cause: error instanceof Error ? error : undefined },
+		);
+	}
+
+	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
+	if (!parseProfileIdentifier(identifier)) {
+		throw new SDKError(
+			`Default stealth profile "${DEFAULT_PROFILE}" cannot be mapped to a wreq-js browser profile.`,
+		);
+	}
+	return { identifier, os: profile.platform };
+}
+
+const DEFAULT_WREQ_PROFILE_MAPPING = resolveDefaultWreqProfileMapping();
+
 export function resolveWreqProfile(
 	profileName: string,
 	wreqProfiles: readonly BrowserProfile[],
@@ -380,25 +400,28 @@ export function resolveWreqProfile(
 		throw new SDKError(`Unknown stealth profile: ${profileName}`);
 	}
 
-	let profile: ReturnType<typeof getStealthProfile>;
+	let identifier: string;
+	let os: EmulationOS;
 	try {
-		profile = getStealthProfile(profileName);
+		const profile = getStealthProfile(profileName);
+		identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
+		os = profile.platform;
 	} catch {
 		// Preserve the previous ctx.stealth.fetch() compatibility behavior: unknown
 		// profile strings still run with the transport default instead of failing
 		// before the request starts. Removed built-in profile aliases above remain
 		// explicit errors so callers do not accidentally pin retired fingerprints.
-		return { browser: DEFAULT_WREQ_PROFILE, os: "macos" };
+		identifier = DEFAULT_WREQ_PROFILE_MAPPING.identifier;
+		os = DEFAULT_WREQ_PROFILE_MAPPING.os;
 	}
 
-	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
 	const browser = closestWreqProfile(identifier, wreqProfiles);
 	if (!browser) {
 		throw new SDKError(
 			`Stealth profile "${profileName}" cannot be mapped to a wreq-js browser profile.`,
 		);
 	}
-	return { browser, os: profile.platform };
+	return { browser, os };
 }
 
 function resolveUrl(baseUrl: string, url: string): string {

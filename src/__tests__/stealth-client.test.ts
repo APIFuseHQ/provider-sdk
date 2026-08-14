@@ -1023,6 +1023,15 @@ describe("createStealthClient", () => {
 		});
 	});
 
+	it("maps unknown profile names through the derived default profile", async () => {
+		const { resolveWreqProfile } = await import("../runtime/stealth.js");
+
+		expect(resolveWreqProfile("custom-profile", ["chrome_145", "firefox_147"])).toEqual({
+			browser: "chrome_145",
+			os: "macos",
+		});
+	});
+
 	it("maps Safari profiles to same-family wreq impersonation", async () => {
 		mockStealthState.queuedResponses.push(
 			{ status: 200, body: "desktop", headers: {} },
