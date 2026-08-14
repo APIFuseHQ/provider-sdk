@@ -137,7 +137,7 @@ function isZodSchema(schema: SchemaLike): schema is ZodType {
 	return schema instanceof z.ZodType;
 }
 
-function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonValue | undefined {
+function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonValue {
 	const projectionMarkers = new Map<string, OutputTextTrustProjectionMarker>();
 	const expectedLeafMarkers = new Map<string, string>();
 	try {
@@ -215,10 +215,14 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 		if (options.outputTextTrust) {
 			finalizeProjectedTextTrust(jsonSchema, projectionMarkers, expectedLeafMarkers, options);
 		}
-		return toJsonValue(jsonSchema);
+		const projected = toJsonValue(jsonSchema);
+		if (projected === undefined) {
+			throw new TypeError("z.toJSONSchema() returned a non-JSON value");
+		}
+		return projected;
 	} catch (error) {
 		if (error instanceof OutputTextTrustProjectionError) throw error;
-		if (!options.outputTextTrust && error instanceof Error) return undefined;
+		if (!options.outputTextTrust) throw error;
 		throw new OutputTextTrustProjectionError("$", error, options.operationId, options.eventName);
 	}
 }

@@ -366,9 +366,29 @@ export type ProviderChallenge =
 	| {
 			readonly kind: "aws_waf";
 			readonly pageUrl: string;
+			/** `window.gokuProps.key`; solver vendors require it, while `"browser"` does not. */
+			readonly siteKey?: string;
 			readonly captchaScript?: string;
 			readonly context?: string;
 			readonly iv?: string;
+		}
+	| {
+			readonly kind: "akamai_sec_cpt";
+			readonly pageUrl: string;
+			/** The admitted challenge document, needed for tile/context extraction. */
+			readonly challengeHtml?: string;
+		}
+	| {
+			readonly kind: "akamai_sensor";
+			readonly pageUrl: string;
+			/** Upstream sensor script URL the payload must be POSTed to. */
+			readonly scriptUrl: string;
+			/** Current `_abck` cookie value, rotates each round. */
+			readonly abck?: string;
+			/** Current `bm_sz` / `ak_bmsc` value when the upstream set one. */
+			readonly bmsz?: string;
+			/** Bot Manager major version when known ("3" measured on zozo.jp). */
+			readonly version?: string;
 		};
 
 export type ProviderChallengeKind = ProviderChallenge["kind"];
@@ -386,6 +406,8 @@ export type ChallengeSolution =
 			readonly form: "cookies";
 			readonly cookies: Readonly<Record<string, string>>;
 			readonly userAgent: string;
+			/** Epoch seconds copied from the upstream cookie's own expiry attribute; never a constant. */
+			readonly expires?: number;
 		};
 
 export interface ProviderResolverConfig {
@@ -393,6 +415,13 @@ export interface ProviderResolverConfig {
 	readonly vendors: readonly ProviderResolverVendor[];
 	/** Challenge kinds this provider is permitted to request. */
 	readonly kinds: readonly ProviderChallengeKind[];
+	/**
+	 * Client fingerprint profile the SDK must use when reaching this upstream.
+	 * Measured on zozo.jp: Chrome/Firefox profiles are refused 403 before any
+	 * challenge is served, while a Safari profile is admitted. Provider-declared
+	 * because only the provider knows its upstream's admission rule.
+	 */
+	readonly clientProfile?: string;
 }
 
 export type SttAudioInput = {
@@ -628,9 +657,13 @@ export interface HealthJourneyDefinition {
 	requiredSecrets?: readonly string[];
 	manualTrigger?: HealthJourneyManualTriggerPolicy;
 	steps: readonly [HealthJourneyStep, ...HealthJourneyStep[]];
-	run?: (
-		ctx: HealthJourneyRunContext,
-	) => Promise<HealthJourneyRunResult | undefined>;
+	/**
+	 * Required: a journey always declares `coversOperations`, and the health
+	 * monitor reports a run-less journey as `journey_run_missing`. Declaration
+	 * validation rejects a missing `run` (`health-journey-executable`), so this
+	 * is typed required to fail at compile time rather than at boot.
+	 */
+	run: (ctx: HealthJourneyRunContext) => Promise<HealthJourneyRunResult | undefined>;
 }
 
 /**

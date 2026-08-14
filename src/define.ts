@@ -1,5 +1,6 @@
 import ms from "ms";
 
+import { validateFailClosedDeclaration } from "./declaration-validation.js";
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
 import {
@@ -152,6 +153,8 @@ export const VALID_PROVIDER_CHALLENGE_KINDS = exhaustiveLiteralArray<ProviderCha
 	"hcaptcha",
 	"cloudflare_interstitial",
 	"aws_waf",
+	"akamai_sec_cpt",
+	"akamai_sensor",
 ] as const);
 const SMARTPROXY_APP_KEY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
@@ -759,7 +762,12 @@ function validateProviderResolver(config: { id: string; resolver?: ProviderResol
 			fix: `Set resolver for provider "${config.id}" to { vendors: ["2captcha"], kinds: ["turnstile"] }.`,
 		});
 	}
-	rejectUnknownFields(resolver, new Set(["vendors", "kinds"]), "resolver", config.id);
+	rejectUnknownFields(
+		resolver,
+		new Set(["vendors", "kinds", "clientProfile"]),
+		"resolver",
+		config.id,
+	);
 	validateResolverLiteralArray(
 		resolver.vendors,
 		"resolver.vendors",
@@ -772,6 +780,17 @@ function validateProviderResolver(config: { id: string; resolver?: ProviderResol
 		VALID_PROVIDER_CHALLENGE_KINDS,
 		config.id,
 	);
+	if (
+		resolver.clientProfile !== undefined &&
+		(typeof resolver.clientProfile !== "string" || !resolver.clientProfile.trim())
+	) {
+		throw new ValidationError(
+			`Provider "${config.id}" has invalid resolver.clientProfile: must be a non-empty string.`,
+			{
+				fix: `Set resolver.clientProfile for provider "${config.id}" to a transport-owned profile name.`,
+			},
+		);
+	}
 }
 
 function validateResolverLiteralArray<TValue extends string>(
@@ -2511,7 +2530,7 @@ export function defineProvider<
 			`Provider "${config.id}" cannot define browser config unless runtime is "browser"`,
 			{ fix: 'Set runtime: "browser" or remove the browser config' },
 		);
-	return {
+	const provider: ProviderDefinition & { operations: OperationMapConfig<TOperations> } = {
 		id: config.id,
 		version: config.version,
 		runtime: config.runtime,
@@ -2540,4 +2559,6 @@ export function defineProvider<
 		healthProbe: config.healthProbe ?? config.healthMonitor,
 		healthJourneys: config.healthJourneys,
 	};
+	validateFailClosedDeclaration(provider);
+	return provider;
 }

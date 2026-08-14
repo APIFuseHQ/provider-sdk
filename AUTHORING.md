@@ -365,7 +365,7 @@ export default defineProvider({
 ```
 <!-- @magic-end:sample -->
 
-The journey runner supplies `ctx.gateway`, `ctx.sms.waitForOtp()`, `ctx.journal.sideEffect()`, `ctx.state`, and `ctx.event.operation()` to the optional journey `run` function. Provider authors should keep `run` small: call the covered operations in step order, stop at the declared safe boundary, and let the generated health metadata carry schedule, timeout, required secret, and SMS matcher information to the health monitor.
+The journey runner supplies `ctx.gateway`, `ctx.sms.waitForOtp()`, `ctx.journal.sideEffect()`, `ctx.state`, and `ctx.event.operation()` to the required journey `run` function. Provider authors should keep `run` small: call the covered operations in step order, stop at the declared safe boundary, and let the generated health metadata carry schedule, timeout, required secret, and SMS matcher information to the health monitor.
 
 For authenticated journeys, open a fresh connection inside `run` with `ctx.gateway.connect({ input: { ... } })`, execute covered operations with the returned `connectionId`, and disconnect in a `finally` block. Do not require or store long-lived `HEALTH_MONITOR_*_CONNECTION_ID` secrets; those stale connection IDs can hide broken login ceremonies.
 

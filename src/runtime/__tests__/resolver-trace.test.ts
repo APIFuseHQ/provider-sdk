@@ -109,6 +109,84 @@ describe("resolver tracing", () => {
 		await expect(instrumented.resolver.solve(CHALLENGE)).resolves.toBe(solution);
 	});
 
+	it("records sanitized transport failure context on spans and exhausted attempts", async () => {
+		const secrets = [
+			"ABCK_SECRET_VALUE",
+			"BMSZ_SECRET_VALUE",
+			"AWS_WAF_SECRET_VALUE",
+			"eyJhbGciOiJIUzI1NiJ9.bearer-secret-payload",
+			"proxy-user",
+			"proxy-password-must-not-leak",
+		];
+		const cause = new Error(
+			`connect ETIMEDOUT at https://${secrets[4]}:${secrets[5]}@proxy.example.com/private _abck=${secrets[0]} bm_sz=${secrets[1]} aws-waf-token=${secrets[2]} Bearer ${secrets[3]}`,
+		);
+		cause.name = "TlsError";
+		const resolver = createResolverClient({
+			clientProfile: "safari17_0",
+			kinds: ["akamai_sensor"],
+			adapters: [
+				{
+					id: "custom",
+					supports: (kind) => kind === "akamai_sensor",
+					async solve() {
+						throw new ResolverVendorUnavailableError("custom", "transport_failure", {
+							cause,
+							upstreamHost: "sensor.example.com",
+							phase: "post_sensor",
+							round: 2,
+						});
+					},
+				},
+			],
+		});
+		const instrumented = instrumentResolver(resolver);
+		const error = await instrumented.resolver
+			.solve({
+				kind: "akamai_sensor",
+				pageUrl: "https://sensor.example.com/challenge",
+				scriptUrl: "https://sensor.example.com/sensor.js",
+			})
+			.catch((error: unknown) => error);
+		const attempt = instrumented.trace
+			.getSpans()
+			.find((span) => span.name === "resolver.vendor.attempt");
+
+		expect(attempt).toMatchObject({
+			status: "error",
+			attributes: {
+				vendor: "custom",
+				challenge_kind: "akamai_sensor",
+				client_profile: "safari17_0",
+				unavailability_reason: "transport_failure",
+				cause_name: "TlsError",
+				cause_message: "connect ETIMEDOUT at https://proxy.example.com [REDACTED]",
+				upstream_host: "sensor.example.com",
+				transport_phase: "post_sensor",
+				transport_round: 2,
+			},
+		});
+		expect(error).toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{
+					vendor: "custom",
+					reason: "transport_failure",
+					cause: {
+						name: "TlsError",
+						message: "connect ETIMEDOUT at https://proxy.example.com [REDACTED]",
+					},
+					upstreamHost: "sensor.example.com",
+					phase: "post_sensor",
+					round: 2,
+				},
+			],
+		});
+		const diagnostics = JSON.stringify({ attempt, details: error.details });
+		for (const secret of secrets) expect(diagnostics).not.toContain(secret);
+		expect(diagnostics).toContain("connect ETIMEDOUT");
+	});
+
 	it("invalidates a cached solution through an instrumented resolver wrapper", async () => {
 		const innerCache = createProviderCache({
 			providerId: `resolver-trace-invalidation-${crypto.randomUUID()}`,
@@ -136,7 +214,7 @@ describe("resolver tracing", () => {
 					cookies: { "aws-waf-token": `vendor-token-${vendorCalls}` },
 					expires: (Date.now() + 60_000) / 1_000,
 					userAgent: "Instrumented Browser/1.0",
-				} as ChallengeSolution & { readonly expires: number };
+				};
 			},
 		};
 		const rawResolver = createResolverClient({

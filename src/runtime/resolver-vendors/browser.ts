@@ -1,4 +1,4 @@
-import { isProviderError, ProviderError } from "../../errors.js";
+import { isProviderError } from "../../errors.js";
 import type {
 	BrowserClient,
 	BrowserCookie,
@@ -9,6 +9,7 @@ import type {
 import { type BrowserClientOptions, createBrowserClient } from "../browser.js";
 import type { TraceRecorder } from "../trace.js";
 import { resolverChallengeIssuingIdentity } from "./bindings.js";
+import { assertResolverHostAllowed, normalizedResolverHostname } from "./hosts.js";
 import {
 	type ResolverIdentity,
 	type ResolverVendorAdapter,
@@ -35,11 +36,6 @@ export interface BrowserResolverVendorOptions {
 	readonly createClient?: BrowserClientFactory;
 }
 
-export type BrowserResolverSolution = Extract<ChallengeSolution, { readonly form: "cookies" }> & {
-	/** Unix seconds from the cookie that proved the challenge cleared. */
-	readonly expires?: number;
-};
-
 export interface BrowserResolverVendorAdapter extends ResolverVendorAdapter {
 	readonly id: "browser";
 	solve(
@@ -47,7 +43,7 @@ export interface BrowserResolverVendorAdapter extends ResolverVendorAdapter {
 		identity: ResolverIdentity | undefined,
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
-	): Promise<BrowserResolverSolution>;
+	): Promise<Extract<ChallengeSolution, { readonly form: "cookies" }>>;
 }
 
 class BrowserSolveTimeoutError extends Error {
@@ -155,38 +151,20 @@ function isSupportedKind(kind: string): kind is SupportedBrowserChallengeKind {
 	return Object.hasOwn(SUCCESS_COOKIE_NAMES, kind);
 }
 
-function normalizedHostname(hostname: string): string {
-	return hostname.trim().toLowerCase().replace(/\.$/, "");
-}
-
-function assertChallengeHostAllowed(pageUrl: string, allowedHosts: readonly string[]): void {
-	const challengeHost = normalizedHostname(new URL(pageUrl).hostname);
-	const isAllowed = allowedHosts.some((host) => {
-		const declaredHost = normalizedHostname(host);
-		return declaredHost.length > 0 && !declaredHost.includes("*") && declaredHost === challengeHost;
-	});
-	if (isAllowed) return;
-
-	throw new ProviderError(`Resolver challenge host "${challengeHost}" is not declared`, {
-		code: "RESOLVER_HOST_NOT_ALLOWED",
-		fix: "Add the exact challenge hostname to the provider's allowedHosts declaration.",
-	});
-}
-
 function cookieDomainSpecificity(cookie: BrowserCookie): number {
-	return normalizedHostname(cookie.domain.replace(/^\./, "")).length;
+	return normalizedResolverHostname(cookie.domain.replace(/^\./, "")).length;
 }
 
 function isHostOnlyCookieFor(cookie: BrowserCookie, hostname: string): boolean {
 	return (
 		!cookie.domain.startsWith(".") &&
-		normalizedHostname(cookie.domain) === normalizedHostname(hostname)
+		normalizedResolverHostname(cookie.domain) === normalizedResolverHostname(hostname)
 	);
 }
 
 function cookieAppliesToUrl(cookie: BrowserCookie, url: URL): boolean {
-	const cookieDomain = normalizedHostname(cookie.domain.replace(/^\./, ""));
-	const requestHostname = normalizedHostname(url.hostname);
+	const cookieDomain = normalizedResolverHostname(cookie.domain.replace(/^\./, ""));
+	const requestHostname = normalizedResolverHostname(url.hostname);
 	const domainMatches =
 		cookieDomain.length > 0 &&
 		(requestHostname === cookieDomain ||
@@ -226,7 +204,7 @@ async function solveInPage(
 	successCookieName: string,
 	pollIntervalMs: number,
 	signal: AbortSignal,
-): Promise<BrowserResolverSolution> {
+): Promise<Extract<ChallengeSolution, { readonly form: "cookies" }>> {
 	await raceWithAbort(() => page.goto(pageUrl), signal);
 
 	while (true) {
@@ -345,7 +323,7 @@ export function createBrowserResolverVendorAdapter(
 			if (!isSupportedKind(challenge.kind)) {
 				throw new TypeError(`Browser resolver does not support ${challenge.kind}`);
 			}
-			assertChallengeHostAllowed(challenge.pageUrl, options.allowedHosts);
+			assertResolverHostAllowed(challenge.pageUrl, options.allowedHosts);
 			const challengeKind = challenge.kind;
 			callerSignal.throwIfAborted();
 

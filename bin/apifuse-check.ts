@@ -11,6 +11,11 @@ import {
 	PROMPT_ASSET_SYNC_REMEDIATION,
 	verifyPromptAssets,
 } from "../src/cli/prompt-assets.js";
+import {
+	DECLARATION_INVALID_CODE,
+	validateFailClosedDeclaration,
+} from "../src/declaration-validation.js";
+import { isProviderError } from "../src/errors.js";
 import type { ProviderDefinition } from "../src/index.js";
 import { lintProvider, type ProviderLintMode } from "../src/lint.js";
 import { safeParseSchemaSync } from "../src/schema.js";
@@ -119,14 +124,25 @@ export async function runChecks(
 	const dockerfilePath = resolve(providerRoot, "Dockerfile");
 	const packageJsonPath = resolve(providerRoot, "package.json");
 
-	const providerModule = existsSync(indexPath)
-		? await import(pathToFileURL(indexPath).href)
-		: undefined;
+	let providerModule: Record<string, unknown> | undefined;
+	let providerImportError: unknown;
+	if (existsSync(indexPath)) {
+		try {
+			providerModule = (await import(pathToFileURL(indexPath).href)) as Record<string, unknown>;
+		} catch (error) {
+			if (isProviderError(error) && error.code === DECLARATION_INVALID_CODE) {
+				providerImportError = error;
+			} else {
+				throw error;
+			}
+		}
+	}
 	const provider = assertProviderDefinition(providerModule?.default);
 	const providerSourceFiles = collectProviderSourceFiles(providerRoot);
 
 	return [
 		checkIndex(indexPath, provider),
+		checkDeclaration(provider, providerImportError),
 		checkOperations(provider),
 		checkFixtures(provider),
 		checkSchemas(provider),
@@ -136,6 +152,49 @@ export async function runChecks(
 		checkPackageJson(packageJsonPath),
 		checkPromptAssets(providerRoot),
 	];
+}
+
+const DECLARATION_CHECK_MESSAGE = "Provider declaration passes fail-closed validation";
+
+function checkDeclaration(
+	provider: ProviderDefinition | undefined,
+	importError: unknown,
+): CheckResult {
+	if (importError !== undefined) {
+		return {
+			message: DECLARATION_CHECK_MESSAGE,
+			passed: false,
+			details: formatDeclarationError(importError),
+		};
+	}
+	if (!provider) return { message: DECLARATION_CHECK_MESSAGE, passed: false };
+	try {
+		validateFailClosedDeclaration(provider);
+		return { message: DECLARATION_CHECK_MESSAGE, passed: true };
+	} catch (error) {
+		return {
+			message: DECLARATION_CHECK_MESSAGE,
+			passed: false,
+			details: formatDeclarationError(error),
+		};
+	}
+}
+
+function formatDeclarationError(error: unknown): string[] {
+	if (isProviderError(error) && error.code === DECLARATION_INVALID_CODE) {
+		const details = error.details;
+		if (isRecord(details) && Array.isArray(details.violations)) {
+			return details.violations.map((violation) => {
+				if (!isRecord(violation)) return String(violation);
+				const ruleId = typeof violation.ruleId === "string" ? violation.ruleId : "unknown-rule";
+				const path = typeof violation.path === "string" ? violation.path : "unknown-path";
+				const message = typeof violation.message === "string" ? `: ${violation.message}` : "";
+				const fix = typeof violation.fix === "string" ? ` Fix: ${violation.fix}` : "";
+				return `${path} [${ruleId}]${message}${fix}`;
+			});
+		}
+	}
+	return [error instanceof Error ? error.message : String(error)];
 }
 
 export const PROMPT_ASSETS_CHECK_MESSAGE =

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 
 import type {
 	ChallengeSolution,
@@ -6,15 +7,20 @@ import type {
 	ProviderCacheGetOrSetOptions,
 	ProviderChallenge,
 } from "../../types.js";
+import { VALID_PROVIDER_CHALLENGE_KINDS } from "../../define.js";
 import { createProviderCache, resetProviderCacheForTests } from "../cache.js";
 import {
 	APIFUSE__CDP_POOL__URL,
 	createResolverClient,
-	createResolverClientFromEnv,
+	createResolverClientFromEnvForTests,
 	invalidateResolverSolution,
-	RESOLVER_ADAPTER_REGISTRY,
 } from "../resolver.js";
-import { resolverChallengeIssuingIdentity } from "../resolver-vendors/bindings.js";
+import {
+	RESOLVER_CHALLENGE_BINDINGS,
+	resolverChallengeIsCacheable,
+	resolverChallengeIsIdentityScoped,
+	resolverChallengeIssuingIdentity,
+} from "../resolver-vendors/bindings.js";
 import type { ResolverIdentity, ResolverVendorAdapter } from "../resolver-vendors/types.js";
 
 const CHALLENGE = {
@@ -27,9 +33,16 @@ const IDENTITY_SCOPED_CHALLENGE = {
 	pageUrl: CHALLENGE.pageUrl,
 } satisfies ProviderChallenge;
 
-type BrowserSolution = Extract<ChallengeSolution, { readonly form: "cookies" }> & {
-	readonly expires?: number;
-};
+const AKAMAI_SENSOR_CHALLENGE = {
+	kind: "akamai_sensor",
+	pageUrl: CHALLENGE.pageUrl,
+	scriptUrl: "https://example.com/akamai/sensor.js",
+} satisfies ProviderChallenge;
+
+const AKAMAI_SEC_CPT_CHALLENGE = {
+	kind: "akamai_sec_cpt",
+	pageUrl: CHALLENGE.pageUrl,
+} satisfies ProviderChallenge;
 
 type KeyCall = {
 	readonly key: string;
@@ -41,6 +54,7 @@ function createRecordingCache(now?: () => number): {
 	readonly cache: ProviderCache;
 	readonly inner: ProviderCache;
 	readonly keyCalls: KeyCall[];
+	readonly getCalls: string[];
 	readonly setCalls: { readonly key: string; readonly options: ProviderCacheGetOrSetOptions }[];
 } {
 	const inner = createProviderCache({
@@ -49,6 +63,7 @@ function createRecordingCache(now?: () => number): {
 		...(now ? { now } : {}),
 	});
 	const keyCalls: KeyCall[] = [];
+	const getCalls: string[] = [];
 	const setCalls: { key: string; options: ProviderCacheGetOrSetOptions }[] = [];
 	const cache: ProviderCache = {
 		key(namespace, parts, options) {
@@ -56,7 +71,10 @@ function createRecordingCache(now?: () => number): {
 			keyCalls.push({ key, namespace, parts });
 			return key;
 		},
-		get: (key) => inner.get(key),
+		get(key) {
+			getCalls.push(key);
+			return inner.get(key);
+		},
 		async set(key, value, options) {
 			setCalls.push({ key, options });
 			await inner.set(key, value, options);
@@ -65,11 +83,14 @@ function createRecordingCache(now?: () => number): {
 		getOrSet: (key, loader, options) => inner.getOrSet(key, loader, options),
 		responseMeta: () => inner.responseMeta(),
 	};
-	return { cache, inner, keyCalls, setCalls };
+	return { cache, inner, keyCalls, getCalls, setCalls };
 }
 
 function createBrowserAdapter(
-	createSolution: (identity: ResolverIdentity | undefined, call: number) => BrowserSolution,
+	createSolution: (
+		identity: ResolverIdentity | undefined,
+		call: number,
+	) => Extract<ChallengeSolution, { readonly form: "cookies" }>,
 ): { readonly adapter: ResolverVendorAdapter; readonly calls: () => number } {
 	let calls = 0;
 	return {
@@ -92,16 +113,88 @@ function createBrowserAdapter(
 	};
 }
 
+function createAkamaiAdapter(
+	createSolution: (
+		identity: ResolverIdentity | undefined,
+		call: number,
+	) => Extract<ChallengeSolution, { readonly form: "cookies" }>,
+): { readonly adapter: ResolverVendorAdapter; readonly calls: () => number } {
+	let calls = 0;
+	return {
+		adapter: {
+			id: "custom",
+			supports: (kind) => kind === "akamai_sec_cpt" || kind === "akamai_sensor",
+			async solve(_challenge, identity) {
+				calls += 1;
+				return createSolution(identity, calls);
+			},
+		},
+		calls: () => calls,
+	};
+}
+
 function persistentSolution(
 	userAgent = "Browser/1.0",
 	expires = (Date.now() + 60_000) / 1_000,
-): BrowserSolution {
+): Extract<ChallengeSolution, { readonly form: "cookies" }> {
 	return {
 		form: "cookies",
 		cookies: { "aws-waf-token": `token-for-${userAgent}` },
 		userAgent,
 		expires,
 	};
+}
+
+function persistentAkamaiSolution(
+	userAgent = "Safari/17.0",
+	expires = (Date.now() + 60_000) / 1_000,
+): Extract<ChallengeSolution, { readonly form: "cookies" }> {
+	return {
+		form: "cookies",
+		cookies: { _abck: `sensor-cookie-for-${userAgent}` },
+		userAgent,
+		expires,
+	};
+}
+
+function expectedSolutionCacheKey(
+	cache: ProviderCache,
+	challenge: ProviderChallenge,
+	identity: { readonly proxyUrl?: string; readonly userAgent: string },
+): string {
+	const issuerDigest = createHash("sha256")
+		.update(
+			JSON.stringify({
+				proxyUrl: identity.proxyUrl ?? null,
+				userAgent: identity.userAgent,
+			}),
+		)
+		.digest("hex");
+	return cache.key("resolver-solution", {
+		kind: challenge.kind,
+		origin: new URL(challenge.pageUrl).origin,
+		issuerDigest,
+	});
+}
+
+function expectedDirectIndexKey(cache: ProviderCache, challenge: ProviderChallenge): string {
+	return cache.key("resolver-solution-index", {
+		kind: challenge.kind,
+		origin: new URL(challenge.pageUrl).origin,
+	});
+}
+
+function expectedScopedSolutionCacheKey(
+	cache: ProviderCache,
+	challenge: ProviderChallenge,
+	identityScope: string,
+): string {
+	const issuerDigest = createHash("sha256").update(JSON.stringify({ identityScope })).digest("hex");
+	return cache.key("resolver-solution", {
+		kind: challenge.kind,
+		origin: new URL(challenge.pageUrl).origin,
+		issuerDigest,
+	});
 }
 
 function createClient(
@@ -125,6 +218,72 @@ beforeEach(() => {
 });
 
 describe("resolver solution caching", () => {
+	it("declares cache behavior for every challenge kind", () => {
+		expect(Object.keys(RESOLVER_CHALLENGE_BINDINGS)).toEqual([...VALID_PROVIDER_CHALLENGE_KINDS]);
+		expect(
+			Object.fromEntries(
+				Object.entries(RESOLVER_CHALLENGE_BINDINGS).map(([kind, binding]) => [
+					kind,
+					{ cacheable: binding.cacheable, directCacheable: binding.directCacheable },
+				]),
+			),
+		).toEqual({
+			turnstile: { cacheable: false, directCacheable: false },
+			recaptcha_v2: { cacheable: false, directCacheable: false },
+			recaptcha_v3: { cacheable: false, directCacheable: false },
+			hcaptcha: { cacheable: false, directCacheable: false },
+			cloudflare_interstitial: { cacheable: true, directCacheable: true },
+			aws_waf: { cacheable: true, directCacheable: true },
+			akamai_sec_cpt: { cacheable: true, directCacheable: false },
+			akamai_sensor: { cacheable: true, directCacheable: false },
+		});
+	});
+
+	it("treats both Akamai challenge kinds as identity-scoped", () => {
+		expect(
+			resolverChallengeIsIdentityScoped({
+				kind: "akamai_sec_cpt",
+				pageUrl: "https://example.com/challenge",
+			}),
+		).toBe(true);
+		expect(resolverChallengeIsIdentityScoped(AKAMAI_SENSOR_CHALLENGE)).toBe(true);
+	});
+
+	it("does not consult the cache for token kinds and does consult it for cookie kinds", async () => {
+		const tokenRecording = createRecordingCache();
+		const tokenAdapter: ResolverVendorAdapter = {
+			id: "custom",
+			supports: (kind) => kind === "turnstile",
+			async solve() {
+				return { form: "token", token: "solved" };
+			},
+		};
+		await createClient(tokenAdapter, {
+			cache: tokenRecording.cache,
+			kinds: ["turnstile"],
+		}).solve({ kind: "turnstile", siteKey: "site-key", pageUrl: CHALLENGE.pageUrl });
+
+		expect(
+			resolverChallengeIsCacheable({
+				kind: "turnstile",
+				siteKey: "site-key",
+				pageUrl: CHALLENGE.pageUrl,
+			}),
+		).toBe(false);
+		expect(tokenRecording.getCalls).toHaveLength(0);
+
+		const cookieRecording = createRecordingCache();
+		const cookieStub = createBrowserAdapter(() => ({
+			form: "cookies",
+			cookies: { "aws-waf-token": "session-token" },
+			userAgent: "Browser/session",
+		}));
+		await createClient(cookieStub.adapter, { cache: cookieRecording.cache }).solve(CHALLENGE);
+
+		expect(resolverChallengeIsCacheable(CHALLENGE)).toBe(true);
+		expect(cookieRecording.getCalls).toHaveLength(1);
+	});
+
 	it("hits the chain for every solve when no cache is supplied", async () => {
 		const stub = createBrowserAdapter(() => persistentSolution());
 		const noCacheAdapter: ResolverVendorAdapter = {
@@ -133,36 +292,131 @@ describe("resolver solution caching", () => {
 				throw new Error("no-cache solves must not inspect issuing identity");
 			},
 		};
-		const registry = RESOLVER_ADAPTER_REGISTRY as {
-			browser?: (configuration: string, timeoutMs: number) => ResolverVendorAdapter;
-		};
-		const original = registry.browser;
-		registry.browser = () => noCacheAdapter;
-		try {
-			const resolver = createResolverClientFromEnv(
-				{ vendors: ["browser"], kinds: ["aws_waf"] },
-				{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
-			);
-			await resolver.solve(CHALLENGE);
-			await resolver.solve(CHALLENGE);
-			await resolver.solve(CHALLENGE);
-		} finally {
-			registry.browser = original;
-		}
+		const resolver = createResolverClientFromEnvForTests(
+			{ vendors: ["browser"], kinds: ["aws_waf"] },
+			{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
+			{},
+			{ browser: () => noCacheAdapter },
+		);
+		await resolver.solve(CHALLENGE);
+		await resolver.solve(CHALLENGE);
+		await resolver.solve(CHALLENGE);
 
 		expect(stub.calls()).toBe(3);
 	});
 
-	it("reuses a browser solution within its advertised lifetime", async () => {
-		const { cache } = createRecordingCache();
-		const stub = createBrowserAdapter(() => persistentSolution());
+	it("caches a portable direct solution through the shared index", async () => {
+		const { cache, inner } = createRecordingCache();
+		const userAgent = "Browser/direct-portable";
+		const stub = createBrowserAdapter(() => persistentSolution(userAgent));
 		const resolver = createClient(stub.adapter, { cache });
 
 		const first = await resolver.solve(CHALLENGE);
+		expect(
+			await inner.get(expectedSolutionCacheKey(cache, CHALLENGE, { userAgent })),
+		).not.toBeNull();
+		expect(await inner.get(expectedDirectIndexKey(cache, CHALLENGE))).not.toBeNull();
 		const second = await resolver.solve(CHALLENGE);
 
 		expect(second).toEqual(first);
 		expect(stub.calls()).toBe(1);
+	});
+
+	it("caches a direct Cloudflare solution and retrieves it through the direct index", async () => {
+		const { cache, inner } = createRecordingCache();
+		const userAgent = "Browser/cloudflare-direct";
+		const stub = createBrowserAdapter(() => persistentSolution(userAgent));
+		const resolver = createClient(stub.adapter, {
+			cache,
+			kinds: ["cloudflare_interstitial"],
+		});
+
+		const first = await resolver.solve(IDENTITY_SCOPED_CHALLENGE);
+		expect(
+			await inner.get(expectedSolutionCacheKey(cache, IDENTITY_SCOPED_CHALLENGE, { userAgent })),
+		).not.toBeNull();
+		expect(
+			await inner.get(expectedDirectIndexKey(cache, IDENTITY_SCOPED_CHALLENGE)),
+		).not.toBeNull();
+
+		const second = await resolver.solve(IDENTITY_SCOPED_CHALLENGE);
+
+		expect(second).toEqual(first);
+		expect(stub.calls()).toBe(1);
+	});
+
+	it("keeps a scoped Cloudflare solution on its identity-scope key", async () => {
+		const { cache, inner } = createRecordingCache();
+		const identityScope = "proxy-session-cloudflare";
+		const stub = createBrowserAdapter(() => persistentSolution("Browser/cloudflare-scoped"));
+		const resolver = createResolverClientFromEnvForTests(
+			{ vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
+			{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
+			{ cache, identityScope },
+			{ browser: () => stub.adapter },
+		);
+
+		const first = await resolver.solve(IDENTITY_SCOPED_CHALLENGE);
+		expect(
+			await inner.get(
+				expectedScopedSolutionCacheKey(cache, IDENTITY_SCOPED_CHALLENGE, identityScope),
+			),
+		).not.toBeNull();
+		expect(await inner.get(expectedDirectIndexKey(cache, IDENTITY_SCOPED_CHALLENGE))).toBeNull();
+
+		const second = await resolver.solve(IDENTITY_SCOPED_CHALLENGE);
+
+		expect(second).toEqual(first);
+		expect(stub.calls()).toBe(1);
+	});
+
+	it("re-serves an identity-scoped solution bound to a proxy identity", async () => {
+		const { cache } = createRecordingCache();
+		const identity = {
+			proxyUrl: "http://user:password@proxy.test:8080",
+			userAgent: "Safari/17.0 proxied",
+		};
+		const stub = createAkamaiAdapter((requestedIdentity) =>
+			persistentAkamaiSolution(requestedIdentity?.userAgent),
+		);
+		const resolver = createClient(stub.adapter, {
+			cache,
+			identity,
+			kinds: ["akamai_sensor"],
+		});
+
+		const first = await resolver.solve(AKAMAI_SENSOR_CHALLENGE);
+		const second = await resolver.solve(AKAMAI_SENSOR_CHALLENGE);
+
+		expect(second).toEqual(first);
+		expect(stub.calls()).toBe(1);
+	});
+
+	it.each([
+		AKAMAI_SEC_CPT_CHALLENGE,
+		AKAMAI_SENSOR_CHALLENGE,
+	] as const)("does not cache unbound direct $kind solutions", async (challenge) => {
+		const { cache, inner } = createRecordingCache();
+		const stub = createAkamaiAdapter((_identity, call) =>
+			persistentAkamaiSolution(`Safari/unbound-${call}`),
+		);
+		const resolver = createClient(stub.adapter, {
+			cache,
+			kinds: [challenge.kind],
+		});
+		const firstUserAgent = "Safari/unbound-1";
+
+		const first = await resolver.solve(challenge);
+		expect(
+			await inner.get(expectedSolutionCacheKey(cache, challenge, { userAgent: firstUserAgent })),
+		).toBeNull();
+		expect(await inner.get(expectedDirectIndexKey(cache, challenge))).toBeNull();
+
+		const second = await resolver.solve(challenge);
+
+		expect(second).not.toEqual(first);
+		expect(stub.calls()).toBe(2);
+		expect(await inner.get(expectedDirectIndexKey(cache, challenge))).toBeNull();
 	});
 
 	it("enables caching through createResolverClientFromEnv's runtime options", async () => {
@@ -170,29 +424,22 @@ describe("resolver solution caching", () => {
 		const stub = createBrowserAdapter(() => persistentSolution());
 		const declaredHosts = ["example.com", "assets.example.com"];
 		let adapterHosts: readonly string[] | undefined;
-		const registry = RESOLVER_ADAPTER_REGISTRY as {
-			browser?: (
-				configuration: string,
-				timeoutMs: number,
-				allowedHosts: readonly string[],
-			) => ResolverVendorAdapter;
-		};
-		const original = registry.browser;
-		registry.browser = (_configuration, _timeoutMs, allowedHosts) => {
-			adapterHosts = allowedHosts;
-			return stub.adapter;
-		};
-		try {
-			const resolver = createResolverClientFromEnv(
-				{ vendors: ["browser"], kinds: ["aws_waf"] },
-				{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
-				{ allowedHosts: declaredHosts, cache },
-			);
-			await resolver.solve(CHALLENGE);
-			await resolver.solve(CHALLENGE);
-		} finally {
-			registry.browser = original;
-		}
+		const resolver = createResolverClientFromEnvForTests(
+			{ vendors: ["browser"], kinds: ["aws_waf"] },
+			{ [APIFUSE__CDP_POOL__URL]: "ws://cdp-pool.test" },
+			{
+				allowedHosts: declaredHosts,
+				cache,
+			},
+			{
+				browser(_configuration, _timeoutMs, allowedHosts) {
+					adapterHosts = allowedHosts;
+					return stub.adapter;
+				},
+			},
+		);
+		await resolver.solve(CHALLENGE);
+		await resolver.solve(CHALLENGE);
 
 		expect(stub.calls()).toBe(1);
 		expect(adapterHosts).toEqual(declaredHosts);
@@ -319,6 +566,76 @@ describe("resolver solution caching", () => {
 				"Secret-looking cache-key fields must preserve identity separation after their values are hashed.",
 			);
 		}
+	});
+
+	it("uses distinct non-secret cache keys for Akamai sensor identities", async () => {
+		const { cache, keyCalls } = createRecordingCache();
+		const stub = createAkamaiAdapter((identity) => persistentAkamaiSolution(identity?.userAgent));
+		const firstPassword = "akamai-first-password";
+		const secondPassword = "akamai-second-password";
+		const firstIdentity = {
+			proxyUrl: `http://first-user:${firstPassword}@proxy.test:8080`,
+			userAgent: "Safari/17.0 first",
+		};
+		const secondIdentity = {
+			proxyUrl: `http://second-user:${secondPassword}@proxy.test:8080`,
+			userAgent: "Safari/17.0 second",
+		};
+		const kinds = ["akamai_sensor"] as const;
+
+		await createClient(stub.adapter, { cache, identity: firstIdentity, kinds }).solve(
+			AKAMAI_SENSOR_CHALLENGE,
+		);
+		await createClient(stub.adapter, { cache, identity: secondIdentity, kinds }).solve(
+			AKAMAI_SENSOR_CHALLENGE,
+		);
+
+		const solutionKeys = [
+			...new Set(
+				keyCalls.filter((call) => call.namespace === "resolver-solution").map((call) => call.key),
+			),
+		];
+		expect(solutionKeys).toHaveLength(2);
+		expect(solutionKeys[0]).not.toBe(solutionKeys[1]);
+		expect(solutionKeys.every((key) => !key.includes(firstPassword))).toBe(true);
+		expect(solutionKeys.every((key) => !key.includes(secondPassword))).toBe(true);
+	});
+
+	it("caches an expiring non-browser cookie solution but not a session solution", async () => {
+		const { cache } = createRecordingCache();
+		const persistent = createAkamaiAdapter(() =>
+			persistentAkamaiSolution("Safari/17.0", (Date.now() + 60_000) / 1_000),
+		);
+		const persistentResolver = createClient(persistent.adapter, {
+			cache,
+			identity: {
+				proxyUrl: "http://persistent-identity.proxy.test:8080",
+				userAgent: "Safari/17.0",
+			},
+			kinds: ["akamai_sensor"],
+		});
+
+		await persistentResolver.solve(AKAMAI_SENSOR_CHALLENGE);
+		await persistentResolver.solve(AKAMAI_SENSOR_CHALLENGE);
+		expect(persistent.calls()).toBe(1);
+
+		const session = createAkamaiAdapter(() => ({
+			form: "cookies",
+			cookies: { _abck: "session-cookie" },
+			userAgent: "Safari/17.0 session",
+		}));
+		const sessionResolver = createClient(session.adapter, {
+			cache,
+			identity: {
+				proxyUrl: "http://session-identity.proxy.test:8080",
+				userAgent: "Safari/17.0 session",
+			},
+			kinds: ["akamai_sensor"],
+		});
+
+		await sessionResolver.solve(AKAMAI_SENSOR_CHALLENGE);
+		await sessionResolver.solve(AKAMAI_SENSOR_CHALLENGE);
+		expect(session.calls()).toBe(2);
 	});
 
 	it("ignores a cached cookie solution missing userAgent and solves fresh", async () => {

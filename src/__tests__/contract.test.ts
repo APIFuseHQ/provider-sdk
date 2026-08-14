@@ -110,7 +110,6 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 								expectedStatus: "ok",
 								timeoutMs: 1500,
 								degradedThresholdMs: 700,
-								enabled: () => true,
 								assertions: ({ data }) => {
 									const output = data as z.infer<typeof OutputSchema>;
 									if (output.score < 1) {
@@ -146,6 +145,42 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 	});
 }
 
+function buildHostileContractProvider(): ProviderDefinition {
+	return {
+		id: "hostile-contract-provider",
+		version: "1.0.0",
+		runtime: "standard",
+		meta: { displayName: "Hostile Contract Provider", category: "test" },
+		operations: {
+			lookup: {
+				input: InputSchema,
+				output: OutputSchema,
+				handler,
+				healthCheck: {
+					interval: "5m",
+					cases: [
+						{
+							name: "hostile executable fields",
+							input: { query: "hostile" },
+							enabled: () => true,
+							assertions: () => {},
+						},
+					],
+				},
+			},
+		},
+		healthJourneys: [
+			{
+				id: "hostile-journey",
+				schedule: every("8h"),
+				coversOperations: ["lookup"],
+				steps: [{ id: "lookup", operationId: "lookup", kind: "operation" }],
+				run: async () => ({ status: "ok" }),
+			},
+		],
+	};
+}
+
 describe("provider contract extraction", () => {
 	const smsOtpPattern = /인증번호는\s*\[([0-9]{4})\]/giu;
 
@@ -165,7 +200,7 @@ describe("provider contract extraction", () => {
 
 	it("omits handler and health executable functions from the snapshot", () => {
 		// Given: a provider with operation handlers, health assertions, and journey run logic.
-		const provider = buildProvider(["zeta-search", "alpha-search"]);
+		const provider = buildHostileContractProvider();
 
 		// When: extracting and serializing the provider contract.
 		const snapshot = extractProviderContract(provider);

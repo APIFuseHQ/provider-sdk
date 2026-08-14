@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { ProviderError } from "../errors.js";
+import { DECLARATION_RULE_IDS } from "../declaration-validation.js";
 import { credentialsAuthChallenge, defineCredentialsAuth } from "../provider.js";
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type { FlowContext } from "../types.js";
@@ -14,6 +15,81 @@ function createFlowContext(initialContext: Record<string, unknown> = {}): FlowCo
 }
 
 describe("defineCredentialsAuth", () => {
+	it("rejects every half-declared challenge and accepts interactive, polling, and hybrid shapes", () => {
+		let caught: unknown;
+		try {
+			defineCredentialsAuth({
+				fields: { email: { type: "email" } },
+				credentialKeys: ["cookie"] as const,
+				login: async () => ({ credential: { cookie: "ok" } }),
+				challenges: {
+					missingVerify: { fields: { otp: { type: "otp" } } },
+					missingFields: { verify: async () => ({ credential: { cookie: "ok" } }) },
+					empty: {},
+					fieldsPollNoVerify: {
+						fields: { otp: { type: "otp" } },
+						poll: async () => ({ credential: { cookie: "ok" } }),
+					},
+					verifyPollNoFields: {
+						verify: async () => ({ credential: { cookie: "ok" } }),
+						poll: async () => ({ credential: { cookie: "ok" } }),
+					},
+					emptyFieldsWithVerify: {
+						fields: {},
+						verify: async () => ({ credential: { cookie: "ok" } }),
+					},
+					emptyFieldsWithPoll: {
+						fields: {},
+						poll: async () => ({ credential: { cookie: "ok" } }),
+					},
+				} as never,
+			});
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toBeInstanceOf(ProviderError);
+		const violations = (caught as ProviderError).details as {
+			violations: Array<{ ruleId: string; path: string; fix: string }>;
+		};
+		expect(violations.violations).toHaveLength(7);
+		for (const path of [
+			"challenges.missingVerify",
+			"challenges.missingFields",
+			"challenges.empty",
+			"challenges.fieldsPollNoVerify",
+			"challenges.verifyPollNoFields",
+			"challenges.emptyFieldsWithVerify",
+			"challenges.emptyFieldsWithPoll",
+		]) {
+			expect(violations.violations).toContainEqual(
+				expect.objectContaining({
+					ruleId: DECLARATION_RULE_IDS.challengeShape,
+					path,
+				}),
+			);
+		}
+
+		expect(() =>
+			defineCredentialsAuth({
+				fields: { email: { type: "email" } },
+				credentialKeys: ["cookie"] as const,
+				login: async () => ({ credential: { cookie: "ok" } }),
+				challenges: {
+					interactive: {
+						fields: { otp: { type: "otp" } },
+						verify: async () => ({ credential: { cookie: "ok" } }),
+					},
+					polling: { poll: async () => ({ credential: { cookie: "ok" } }) },
+					hybrid: {
+						fields: { otp: { type: "otp" } },
+						verify: async () => ({ credential: { cookie: "ok" } }),
+						poll: async () => ({ credential: { cookie: "ok" } }),
+					},
+				},
+			}),
+		).not.toThrow();
+	});
+
 	it("creates the start form and complete credential turn from one login callback", async () => {
 		const credentialsAuth = defineCredentialsAuth({
 			fields: {
