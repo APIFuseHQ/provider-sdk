@@ -7,11 +7,7 @@ import {
 	type JsonValue,
 	toJsonValue,
 } from "./contract-json.js";
-import {
-	describeSchema,
-	OutputTextTrustProjectionError,
-	serializeSmsMatcher,
-} from "./contract-serialization.js";
+import { describeSchema, serializeSmsMatcher } from "./contract-serialization.js";
 import {
 	PROVIDER_CONTRACT_SCHEMA_VERSION,
 	type ProviderContractOperation,
@@ -34,7 +30,6 @@ export {
 	type ProviderContractOperation,
 	type ProviderContractSnapshot,
 };
-export { OutputTextTrustProjectionError };
 
 export function extractProviderContract(provider: ProviderDefinition): ProviderContractSnapshot {
 	const auth = extractAuth(provider.auth);
@@ -99,7 +94,7 @@ function extractOperation(
 	const relatedOperations = toJsonValue(operation.relatedOperations);
 	const toolRouter = toJsonValue(operation.toolRouter);
 	const observability = toJsonValue(operation.observability);
-	const transport = extractTransport(operation.transport, operationId);
+	const transport = extractTransport(operation.transport);
 	const fixtures = toJsonValue(operation.fixtures);
 	const upstream = toJsonValue(operation.upstream);
 	const hints = toJsonValue(operation.hints);
@@ -109,7 +104,7 @@ function extractOperation(
 	return {
 		id: operationId,
 		inputSchema: describeSchema(operation.input),
-		outputSchema: describeSchema(operation.output, { operationId, outputTextTrust: true }),
+		outputSchema: describeSchema(operation.output),
 		...(descriptionKey === undefined ? {} : { descriptionKey }),
 		...(docs === undefined ? {} : { docs }),
 		...(whenToUseKeys === undefined ? {} : { whenToUseKeys }),
@@ -146,10 +141,7 @@ function extractAuth(value: ProviderDefinition["auth"]): JsonValue | undefined {
 	});
 }
 
-function extractTransport(
-	value: OperationTransport | undefined,
-	operationId: string,
-): JsonValue | undefined {
+function extractTransport(value: OperationTransport | undefined): JsonValue | undefined {
 	if (!value) return undefined;
 	if (value.kind !== "sse") return toJsonValue(value);
 	return compactObject({
@@ -157,10 +149,7 @@ function extractTransport(
 		events: Object.fromEntries(
 			Object.entries(value.events)
 				.sort(([leftId], [rightId]) => leftId.localeCompare(rightId))
-				.map(([eventName, schema]) => [
-					eventName,
-					describeSchema(schema, { eventName, operationId, outputTextTrust: true }),
-				]),
+				.map(([eventName, schema]) => [eventName, describeSchema(schema)]),
 		),
 	});
 }
