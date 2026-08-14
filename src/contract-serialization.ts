@@ -37,11 +37,6 @@ interface DescribeSchemaOptions {
 	readonly outputTextTrust?: boolean;
 }
 
-interface ExpectedUnsafeContainerMarkers {
-	readonly containerMarkerId: string;
-	readonly rootTextCarrierMarkerId: string;
-}
-
 export class OutputTextTrustProjectionError extends Error {
 	readonly classification = "untrusted" as const;
 	readonly code = "output_text_trust_projection_failed";
@@ -145,7 +140,7 @@ function isZodSchema(schema: SchemaLike): schema is ZodType {
 function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonValue {
 	const projectionMarkers = new Map<string, OutputTextTrustProjectionMarker>();
 	const expectedLeafMarkers = new Map<string, string>();
-	const expectedUnsafeContainerMarkers = new Map<string, ExpectedUnsafeContainerMarkers>();
+	const expectedUnsafeContainerMarkers = new Map<string, string>();
 	try {
 		const jsonSchema = z.toJSONSchema(schema, {
 			unrepresentable: options.outputTextTrust ? "any" : "throw",
@@ -178,62 +173,43 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 						) {
 							return;
 						}
-						if (
-							projectedJsonSchemaAllowsArray(projectedSchema) &&
-							mutatorUsesProjectedArrayCarrier(zodSchema, projectedSchema)
-						) {
+						if (mutatorCanUseProjectedTextItems(zodSchema, projectedSchema)) {
 							writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
 								kind: "container-untrusted",
 							});
 							return;
 						}
-						if (!projectedJsonSchemaAllowsObject(projectedSchema)) {
-							throw new TypeError(
-								"A type-mutating output schema cannot represent its possible text output in JSON Schema.",
-							);
-						}
-						const { objectOutputSchema, rootTextCarrierMarkerId } = wrapUnsafeObjectTextOutput(
-							projectedSchema,
-							projectionMarkers,
-							expectedLeafMarkers,
-							path,
-						);
 						const containerMarkerId = writeOutputTextTrustProjectionMarker(
 							projectedSchema,
 							projectionMarkers,
 							{ kind: "container-unsafe" },
 						);
-						expectedUnsafeContainerMarkers.set(projectedJsonSchemaPath(path), {
-							containerMarkerId,
-							rootTextCarrierMarkerId,
-						});
-						classifyUnsafeObjectShape(
-							objectOutputSchema,
-							projectionMarkers,
-							expectedLeafMarkers,
-							appendJsonSchemaPath(appendJsonSchemaPath(projectedJsonSchemaPath(path), "anyOf"), 0),
-						);
+						expectedUnsafeContainerMarkers.set(projectedJsonSchemaPath(path), containerMarkerId);
 					} else if (inheritsUntrustedOutputTextTrust(zodSchema)) {
 						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
 							kind: "container-untrusted",
 						});
 					}
 					if (hasOpenObjectCatchall(zodSchema)) {
-						const propertyNames: Record<string, unknown> = {};
-						const markerId = writeOutputTextTrustProjectionMarker(
-							propertyNames,
+						const containerMarkerId = writeOutputTextTrustProjectionMarker(
+							projectedSchema,
 							projectionMarkers,
-							{
-								inherited: "untrusted",
-								kind: "leaf",
-								local: "untrusted",
-							},
+							{ kind: "container-unsafe" },
 						);
-						projectedSchema.propertyNames = propertyNames;
-						expectedLeafMarkers.set(
-							appendJsonSchemaPath(projectedJsonSchemaPath(path), "propertyNames"),
-							markerId,
+						expectedUnsafeContainerMarkers.set(projectedJsonSchemaPath(path), containerMarkerId);
+					}
+					if (
+						zodSchema._zod.def.type === "record" &&
+						projectedSchema.additionalProperties === false
+					) {
+						const projectedPath = projectedJsonSchemaPath(path);
+						expectedLeafMarkers.delete(appendJsonSchemaPath(projectedPath, "additionalProperties"));
+						const containerMarkerId = writeOutputTextTrustProjectionMarker(
+							projectedSchema,
+							projectionMarkers,
+							{ kind: "container-unsafe" },
 						);
+						expectedUnsafeContainerMarkers.set(projectedPath, containerMarkerId);
 					}
 				} catch (error) {
 					throw new OutputTextTrustProjectionError(
@@ -263,53 +239,6 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 		if (error instanceof OutputTextTrustProjectionError) throw error;
 		if (!options.outputTextTrust) throw error;
 		throw new OutputTextTrustProjectionError("$", error, options.operationId, options.eventName);
-	}
-}
-
-function wrapUnsafeObjectTextOutput(
-	projectedSchema: Record<string, unknown>,
-	projectionMarkers: Map<string, OutputTextTrustProjectionMarker>,
-	expectedLeafMarkers: Map<string, string>,
-	path: readonly (string | number)[],
-): {
-	readonly objectOutputSchema: Record<string, unknown>;
-	readonly rootTextCarrierMarkerId: string;
-} {
-	const objectOutputSchema = { ...projectedSchema };
-	for (const key of Object.keys(projectedSchema)) delete projectedSchema[key];
-	const rootTextCarrier: Record<string, unknown> = { type: "string" };
-	const rootTextCarrierMarkerId = writeOutputTextTrustProjectionMarker(
-		rootTextCarrier,
-		projectionMarkers,
-		{
-			inherited: "untrusted",
-			kind: "leaf",
-			local: "untrusted",
-		},
-	);
-	projectedSchema.anyOf = [objectOutputSchema, rootTextCarrier];
-	expectedLeafMarkers.set(
-		appendJsonSchemaPath(appendJsonSchemaPath(projectedJsonSchemaPath(path), "anyOf"), 1),
-		rootTextCarrierMarkerId,
-	);
-	return { objectOutputSchema, rootTextCarrierMarkerId };
-}
-
-function classifyUnsafeObjectShape(
-	projectedSchema: Record<string, unknown>,
-	projectionMarkers: Map<string, OutputTextTrustProjectionMarker>,
-	expectedLeafMarkers: Map<string, string>,
-	path: string,
-): void {
-	for (const keyword of ["additionalProperties", "propertyNames"] as const) {
-		const unknownTextCarrier: Record<string, unknown> = {};
-		const markerId = writeOutputTextTrustProjectionMarker(unknownTextCarrier, projectionMarkers, {
-			inherited: "untrusted",
-			kind: "leaf",
-			local: "untrusted",
-		});
-		projectedSchema[keyword] = unknownTextCarrier;
-		expectedLeafMarkers.set(appendJsonSchemaPath(path, keyword), markerId);
 	}
 }
 
@@ -424,48 +353,11 @@ interface ProjectedJsonSchemaNode {
 	readonly schema: Record<string, unknown>;
 }
 
-const UNSAFE_CONTAINER_ROOT_KEYWORDS = new Set([
-	"$comment",
-	"$id",
-	"$schema",
-	OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY,
-	"anyOf",
-	"default",
-	"deprecated",
-	"description",
-	"examples",
-	"readOnly",
-	"title",
-	"writeOnly",
-]);
-
-function isVerifiedUnsafeContainerUnion(schema: Record<string, unknown>): boolean {
-	if (Object.keys(schema).some((key) => !UNSAFE_CONTAINER_ROOT_KEYWORDS.has(key))) return false;
-	const branches = schema.anyOf;
-	return (
-		Array.isArray(branches) &&
-		branches.length === 2 &&
-		branches.some(
-			(branch) => isJsonSchemaNode(branch) && projectedJsonSchemaAllowsObject(branch),
-		) &&
-		branches.some((branch) => isJsonSchemaNode(branch) && isUnconstrainedStringCarrier(branch))
-	);
-}
-
-function isUnconstrainedStringCarrier(schema: Record<string, unknown>): boolean {
-	return (
-		schema.type === "string" &&
-		Object.keys(schema).every(
-			(key) => key === "type" || key === OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY,
-		)
-	);
-}
-
 function finalizeProjectedTextTrust(
 	value: unknown,
 	projectionMarkers: ReadonlyMap<string, OutputTextTrustProjectionMarker>,
 	expectedLeafMarkers: ReadonlyMap<string, string>,
-	expectedUnsafeContainerMarkers: ReadonlyMap<string, ExpectedUnsafeContainerMarkers>,
+	expectedUnsafeContainerMarkers: ReadonlyMap<string, string>,
 	options: DescribeSchemaOptions,
 ): void {
 	if (!isJsonSchemaNode(value)) {
@@ -489,12 +381,14 @@ function finalizeProjectedTextTrust(
 		if (marker) markers.set(schema, marker);
 	}
 	for (const [expectedPath, expectedMarkerId] of expectedLeafMarkers) {
-		const authenticatedLeaves = nodes.filter(
-			({ schema }) =>
-				schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] === expectedMarkerId &&
-				markers.get(schema)?.kind === "leaf",
+		const authenticatedLeaf = resolveExpectedProjectedSchema(
+			root,
+			expectedPath,
+			expectedMarkerId,
+			markers,
+			options,
 		);
-		if (authenticatedLeaves.length === 0) {
+		if (authenticatedLeaf === undefined || markers.get(authenticatedLeaf)?.kind !== "leaf") {
 			throw new OutputTextTrustProjectionError(
 				expectedPath,
 				new TypeError("A projected output text leaf lost its authenticated trust marker."),
@@ -502,7 +396,7 @@ function finalizeProjectedTextTrust(
 				options.eventName,
 			);
 		}
-		if (authenticatedLeaves.some(({ schema }) => !projectedJsonSchemaCanAllowString(schema))) {
+		if (!projectedJsonSchemaCanAllowString(authenticatedLeaf)) {
 			throw new OutputTextTrustProjectionError(
 				expectedPath,
 				new TypeError("A projected output text leaf was mutated to a non-text type."),
@@ -511,46 +405,21 @@ function finalizeProjectedTextTrust(
 			);
 		}
 	}
-	for (const [expectedPath, expectedMarkers] of expectedUnsafeContainerMarkers) {
-		const authenticatedContainers = nodes.filter(
-			({ schema }) =>
-				schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] === expectedMarkers.containerMarkerId &&
-				markers.get(schema)?.kind === "container-unsafe",
+	for (const [expectedPath, expectedMarkerId] of expectedUnsafeContainerMarkers) {
+		const authenticatedContainer = resolveExpectedProjectedSchema(
+			root,
+			expectedPath,
+			expectedMarkerId,
+			markers,
+			options,
 		);
-		if (authenticatedContainers.length === 0) {
-			throw new OutputTextTrustProjectionError(
-				expectedPath,
-				new TypeError("A type-mutating output container lost its authenticated trust marker."),
-				options.operationId,
-				options.eventName,
-			);
-		}
-		if (authenticatedContainers.some(({ schema }) => !isVerifiedUnsafeContainerUnion(schema))) {
-			throw new OutputTextTrustProjectionError(
-				expectedPath,
-				new TypeError(
-					"A type-mutating output container no longer represents an isolated object-or-text union.",
-				),
-				options.operationId,
-				options.eventName,
-			);
-		}
 		if (
-			authenticatedContainers.some(
-				({ schema }) =>
-					!(schema.anyOf as unknown[]).some(
-						(branch) =>
-							isJsonSchemaNode(branch) &&
-							branch[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] ===
-								expectedMarkers.rootTextCarrierMarkerId &&
-							markers.get(branch)?.kind === "leaf" &&
-							isUnconstrainedStringCarrier(branch),
-					),
-			)
+			authenticatedContainer === undefined ||
+			markers.get(authenticatedContainer)?.kind !== "container-unsafe"
 		) {
 			throw new OutputTextTrustProjectionError(
 				expectedPath,
-				new TypeError("A type-mutating output container lost its authenticated root text carrier."),
+				new TypeError("A type-mutating output container lost its authenticated trust marker."),
 				options.operationId,
 				options.eventName,
 			);
@@ -563,13 +432,19 @@ function finalizeProjectedTextTrust(
 	}
 
 	const desiredTrust = new WeakMap<Record<string, unknown>, TextTrust>();
+	const desiredContainerCarriers = new WeakSet<Record<string, unknown>>();
 	const visitedStates = new WeakMap<Record<string, unknown>, number>();
 	const project = (
 		schema: Record<string, unknown>,
 		inheritedUntrusted: boolean,
 		autoTrustAllowed: boolean,
+		runtimeMutationUntrusted: boolean,
 	): void => {
-		const state = 1 << ((inheritedUntrusted ? 1 : 0) + (autoTrustAllowed ? 0 : 2));
+		const state =
+			1 <<
+			((inheritedUntrusted ? 1 : 0) +
+				(autoTrustAllowed ? 0 : 2) +
+				(runtimeMutationUntrusted ? 4 : 0));
 		const visited = visitedStates.get(schema) ?? 0;
 		if ((visited & state) !== 0) return;
 		visitedStates.set(schema, visited | state);
@@ -584,9 +459,15 @@ function finalizeProjectedTextTrust(
 			if (desiredTrust.get(schema) !== "untrusted") desiredTrust.set(schema, trust);
 			return;
 		}
-		if (marker?.kind === "container-unsafe") desiredTrust.set(schema, "untrusted");
+		if (runtimeMutationUntrusted) desiredTrust.set(schema, "untrusted");
+		if (marker?.kind === "container-unsafe") {
+			desiredTrust.set(schema, "untrusted");
+			desiredContainerCarriers.add(schema);
+		}
 		const descendantUntrusted = inheritedUntrusted || marker?.kind === "container-untrusted";
 		const descendantAutoTrustAllowed = autoTrustAllowed && marker?.kind !== "container-unsafe";
+		const descendantRuntimeMutationUntrusted =
+			runtimeMutationUntrusted || marker?.kind === "container-unsafe";
 		const reference = schema.$ref;
 		if (reference !== undefined) {
 			if (typeof reference !== "string") {
@@ -606,13 +487,19 @@ function finalizeProjectedTextTrust(
 				),
 				descendantUntrusted,
 				descendantAutoTrustAllowed,
+				descendantRuntimeMutationUntrusted,
 			);
 		}
 		for (const child of projectedJsonSchemaChildren(schema, false)) {
-			project(child, descendantUntrusted, descendantAutoTrustAllowed);
+			project(
+				child,
+				descendantUntrusted,
+				descendantAutoTrustAllowed,
+				descendantRuntimeMutationUntrusted,
+			);
 		}
 	};
-	project(root, false, true);
+	project(root, false, true, false);
 
 	for (const { schema } of nodes) {
 		delete schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY];
@@ -620,7 +507,11 @@ function finalizeProjectedTextTrust(
 	}
 	for (const { schema } of nodes) {
 		const trust = desiredTrust.get(schema);
-		if (trust !== undefined) schema[APIFUSE_TEXT_TRUST_META_KEY] = { v: 1, trust };
+		if (trust !== undefined) {
+			schema[APIFUSE_TEXT_TRUST_META_KEY] = desiredContainerCarriers.has(schema)
+				? { v: 1, trust, carrier: "container" }
+				: { v: 1, trust };
+		}
 	}
 }
 
@@ -630,10 +521,6 @@ function projectedJsonSchemaAllowsString(schema: Record<string, unknown>): boole
 
 function projectedJsonSchemaCanAllowString(schema: Record<string, unknown>): boolean {
 	return schema.type === undefined || projectedJsonSchemaAllowsString(schema);
-}
-
-function projectedJsonSchemaAllowsObject(schema: Record<string, unknown>): boolean {
-	return schema.type === "object" || (Array.isArray(schema.type) && schema.type.includes("object"));
 }
 
 const PROVABLY_NON_TEXT_JSON_SCHEMA_TYPES = new Set(["boolean", "integer", "null", "number"]);
@@ -650,18 +537,21 @@ function mutatorReturnIsProvablyNonText(
 		);
 	}
 	if (def.type === "transform") return false;
-	return !hasOutputOverwrite(def);
+	return !hasUnsafeOutputCheck(def);
 }
 
-function mutatorUsesProjectedArrayCarrier(
+function mutatorCanUseProjectedTextItems(
 	zodSchema: z.core.$ZodType,
 	projectedSchema: Record<string, unknown>,
 ): boolean {
 	const type = zodSchema._zod.def.type;
 	return (
+		projectedJsonSchemaAllowsArray(projectedSchema) &&
 		(type === "default" || type === "catch") &&
 		Object.hasOwn(projectedSchema, "default") &&
-		Array.isArray(projectedSchema.default)
+		Array.isArray(projectedSchema.default) &&
+		isJsonSchemaNode(projectedSchema.items) &&
+		projectedJsonSchemaCanAllowString(projectedSchema.items)
 	);
 }
 
@@ -674,7 +564,7 @@ function projectedJsonValueIsProvablyNonText(value: unknown): boolean {
 	);
 }
 
-function hasOutputOverwrite(def: z.core.$ZodTypeDef): boolean {
+function hasUnsafeOutputCheck(def: z.core.$ZodTypeDef): boolean {
 	const checks = Reflect.get(def, "checks");
 	return (
 		Array.isArray(checks) &&
@@ -683,11 +573,9 @@ function hasOutputOverwrite(def: z.core.$ZodTypeDef): boolean {
 			const internals = Reflect.get(check, "_zod");
 			if (!internals || typeof internals !== "object") return false;
 			const checkDef = Reflect.get(internals, "def");
-			return (
-				checkDef !== null &&
-				typeof checkDef === "object" &&
-				Reflect.get(checkDef, "check") === "overwrite"
-			);
+			if (checkDef === null || typeof checkDef !== "object") return false;
+			const kind = Reflect.get(checkDef, "check");
+			return kind === "overwrite" || kind === "custom";
 		})
 	);
 }
@@ -751,6 +639,98 @@ function invalidProjectionMarker(
 		options.operationId,
 		options.eventName,
 	);
+}
+
+function resolveExpectedProjectedSchema(
+	root: Record<string, unknown>,
+	expectedPath: string,
+	expectedMarkerId: string,
+	markers: WeakMap<Record<string, unknown>, OutputTextTrustProjectionMarker>,
+	options: DescribeSchemaOptions,
+): Record<string, unknown> | undefined {
+	let target: unknown = root;
+	let finalContainer: unknown;
+	let finalSegment: string | undefined;
+	let finalArrayKeyword: string | undefined;
+	if (expectedPath !== "#") {
+		if (!expectedPath.startsWith("#/")) {
+			throw new OutputTextTrustProjectionError(
+				expectedPath,
+				new TypeError("Expected projection path is not a local JSON Pointer."),
+				options.operationId,
+				options.eventName,
+			);
+		}
+		const encodedSegments = expectedPath.slice(2).split("/");
+		const decodedSegments = encodedSegments.map((segment) =>
+			segment.replaceAll("~1", "/").replaceAll("~0", "~"),
+		);
+		finalArrayKeyword = decodedSegments.at(-2);
+		for (const segment of decodedSegments) {
+			const visitedReferences = new WeakSet<Record<string, unknown>>();
+			while (isJsonSchemaNode(target) && !Object.hasOwn(target, segment)) {
+				if (visitedReferences.has(target) || typeof target.$ref !== "string") return undefined;
+				visitedReferences.add(target);
+				target = resolveLocalJsonSchemaReference(root, target.$ref, expectedPath, options);
+			}
+			if (!target || typeof target !== "object" || !Object.hasOwn(target, segment))
+				return undefined;
+			finalContainer = target;
+			finalSegment = segment;
+			target = Reflect.get(target, segment);
+		}
+	}
+	if (!isJsonSchemaNode(target)) return undefined;
+
+	const visited = new WeakSet<Record<string, unknown>>();
+	const findMarker = (candidate: Record<string, unknown>): Record<string, unknown> | undefined => {
+		if (visited.has(candidate)) return undefined;
+		visited.add(candidate);
+		const markerId = candidate[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY];
+		if (markerId === expectedMarkerId && markers.has(candidate)) return candidate;
+		if (typeof candidate.$ref === "string") {
+			const referenced = findMarker(
+				resolveLocalJsonSchemaReference(root, candidate.$ref, expectedPath, options),
+			);
+			if (referenced) return referenced;
+		}
+		return undefined;
+	};
+	const exact = findMarker(target);
+	if (exact) return exact;
+	if (
+		finalSegment !== undefined &&
+		/^[0-9]+$/.test(finalSegment) &&
+		finalArrayKeyword !== undefined &&
+		Array.isArray(finalContainer)
+	) {
+		const index = Number(finalSegment);
+		const findNestedProjectedIndex = (
+			candidate: Record<string, unknown>,
+		): Record<string, unknown> | undefined => {
+			const nestedBranches = candidate[finalArrayKeyword];
+			if (Array.isArray(nestedBranches) && isJsonSchemaNode(nestedBranches[index])) {
+				const nested = findMarker(nestedBranches[index]);
+				if (nested) return nested;
+			}
+			for (const keyword of ARRAY_SCHEMA_KEYWORDS) {
+				const wrappers = candidate[keyword];
+				if (!Array.isArray(wrappers)) continue;
+				for (const wrapper of wrappers) {
+					if (!isJsonSchemaNode(wrapper)) continue;
+					const nested = findNestedProjectedIndex(wrapper);
+					if (nested) return nested;
+				}
+			}
+			return undefined;
+		};
+		for (const wrapper of finalContainer) {
+			if (!isJsonSchemaNode(wrapper)) continue;
+			const nested = findNestedProjectedIndex(wrapper);
+			if (nested) return nested;
+		}
+	}
+	return undefined;
 }
 
 function collectProjectedJsonSchemaNodes(root: Record<string, unknown>): ProjectedJsonSchemaNode[] {

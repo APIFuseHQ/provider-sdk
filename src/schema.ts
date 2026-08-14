@@ -91,6 +91,7 @@ export type TextTrust = "trusted" | "untrusted";
 export interface TextTrustMetadata {
 	readonly v: 1;
 	readonly trust: TextTrust;
+	readonly carrier?: "container";
 }
 
 export type OutputTextTrustMap = Readonly<Record<string, TextTrust>>;
