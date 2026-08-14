@@ -736,6 +736,38 @@ describe("output text-trust metadata", () => {
 		});
 	});
 
+	it("9f11595d55cc: permits safe non-text mutators and taints array text items", () => {
+		const numberDefault = z.number().default(0);
+		const booleanCatch = z.boolean().catch(false);
+		const stringArrayDefault = z.array(z.string()).default([]);
+
+		expect(numberDefault.parse(undefined)).toBe(0);
+		expect(booleanCatch.parse("invalid")).toBe(false);
+		expect(stringArrayDefault.parse(undefined)).toEqual([]);
+
+		for (const schema of [numberDefault, booleanCatch]) {
+			const description = describeSchema(schema, { outputTextTrust: true }) as {
+				jsonSchema?: Record<string, unknown>;
+			};
+			expect(description.jsonSchema?.type).toBe(schema === numberDefault ? "number" : "boolean");
+			expect(projectedTextTrustMap(description)).toEqual({});
+		}
+
+		const arrayDescription = describeSchema(stringArrayDefault, {
+			outputTextTrust: true,
+		}) as {
+			jsonSchema?: { items?: Record<string, unknown>; type?: unknown };
+		};
+		expect(arrayDescription.jsonSchema?.type).toBe("array");
+		expect(arrayDescription.jsonSchema?.items).toMatchObject({
+			type: "string",
+			[APIFUSE_TEXT_TRUST_META_KEY]: { v: 1, trust: "untrusted" },
+		});
+		expect(projectedTextTrustMap(arrayDescription)).toEqual({
+			"#/items": "untrusted",
+		});
+	});
+
 	it("92a9e6683341: rejects a non-text projection for a resolved text leaf", () => {
 		const schema = z.object({
 			code: z

@@ -172,6 +172,21 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 						);
 						expectedLeafMarkers.set(projectedJsonSchemaPath(path), markerId);
 					} else if (invalidatesDescendantOutputTextAutoTrust(zodSchema)) {
+						if (
+							projectedJsonSchemaIsProvablyNonText(projectedSchema) &&
+							mutatorReturnIsProvablyNonText(zodSchema, projectedSchema)
+						) {
+							return;
+						}
+						if (
+							projectedJsonSchemaAllowsArray(projectedSchema) &&
+							mutatorUsesProjectedArrayCarrier(zodSchema, projectedSchema)
+						) {
+							writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
+								kind: "container-untrusted",
+							});
+							return;
+						}
 						if (!projectedJsonSchemaAllowsObject(projectedSchema)) {
 							throw new TypeError(
 								"A type-mutating output schema cannot represent its possible text output in JSON Schema.",
@@ -619,6 +634,98 @@ function projectedJsonSchemaCanAllowString(schema: Record<string, unknown>): boo
 
 function projectedJsonSchemaAllowsObject(schema: Record<string, unknown>): boolean {
 	return schema.type === "object" || (Array.isArray(schema.type) && schema.type.includes("object"));
+}
+
+const PROVABLY_NON_TEXT_JSON_SCHEMA_TYPES = new Set(["boolean", "integer", "null", "number"]);
+
+function mutatorReturnIsProvablyNonText(
+	zodSchema: z.core.$ZodType,
+	projectedSchema: Record<string, unknown>,
+): boolean {
+	const def = zodSchema._zod.def;
+	if (def.type === "default" || def.type === "catch") {
+		return (
+			Object.hasOwn(projectedSchema, "default") &&
+			projectedJsonValueIsProvablyNonText(projectedSchema.default)
+		);
+	}
+	if (def.type === "transform") return false;
+	return !hasOutputOverwrite(def);
+}
+
+function mutatorUsesProjectedArrayCarrier(
+	zodSchema: z.core.$ZodType,
+	projectedSchema: Record<string, unknown>,
+): boolean {
+	const type = zodSchema._zod.def.type;
+	return (
+		(type === "default" || type === "catch") &&
+		Object.hasOwn(projectedSchema, "default") &&
+		Array.isArray(projectedSchema.default)
+	);
+}
+
+function projectedJsonValueIsProvablyNonText(value: unknown): boolean {
+	return (
+		value === null ||
+		typeof value === "boolean" ||
+		typeof value === "number" ||
+		(Array.isArray(value) && value.every(projectedJsonValueIsProvablyNonText))
+	);
+}
+
+function hasOutputOverwrite(def: z.core.$ZodTypeDef): boolean {
+	const checks = Reflect.get(def, "checks");
+	return (
+		Array.isArray(checks) &&
+		checks.some((check) => {
+			if (!check || typeof check !== "object") return false;
+			const internals = Reflect.get(check, "_zod");
+			if (!internals || typeof internals !== "object") return false;
+			const checkDef = Reflect.get(internals, "def");
+			return (
+				checkDef !== null &&
+				typeof checkDef === "object" &&
+				Reflect.get(checkDef, "check") === "overwrite"
+			);
+		})
+	);
+}
+
+function projectedJsonSchemaIsProvablyNonText(
+	schema: Record<string, unknown>,
+	visited = new WeakSet<Record<string, unknown>>(),
+): boolean {
+	if (visited.has(schema)) return false;
+	visited.add(schema);
+	try {
+		const types = typeof schema.type === "string" ? [schema.type] : schema.type;
+		if (Array.isArray(types) && types.length > 0) {
+			return types.every(
+				(type) =>
+					typeof type === "string" &&
+					(PROVABLY_NON_TEXT_JSON_SCHEMA_TYPES.has(type) ||
+						(type === "array" &&
+							isJsonSchemaNode(schema.items) &&
+							projectedJsonSchemaIsProvablyNonText(schema.items, visited))),
+			);
+		}
+		for (const keyword of ["anyOf", "oneOf"] as const) {
+			const branches = schema[keyword];
+			if (!Array.isArray(branches) || branches.length === 0) continue;
+			return branches.every(
+				(branch) =>
+					isJsonSchemaNode(branch) && projectedJsonSchemaIsProvablyNonText(branch, visited),
+			);
+		}
+		return false;
+	} finally {
+		visited.delete(schema);
+	}
+}
+
+function projectedJsonSchemaAllowsArray(schema: Record<string, unknown>): boolean {
+	return schema.type === "array" || (Array.isArray(schema.type) && schema.type.includes("array"));
 }
 
 function readOutputTextTrustProjectionMarker(
