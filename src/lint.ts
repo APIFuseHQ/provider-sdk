@@ -27,61 +27,82 @@ type ProviderAuthLike = {
 	exchange?: unknown;
 };
 
-// Operations that perform an auth-lifecycle action. These belong on the
-// single `auth.flow` interface, never on a provider operation:
-//   - entry (login/signin/authenticate/authorize) => auth.flow.start/continue
-//   - exit  (logout/signout/disconnect/unlink/revoke) => auth.flow.abort
-//   - token plumbing (exchange/callback/refresh/continue) => auth.flow.*
+// Operations that perform an auth-lifecycle action belong on the single
+// `auth.flow` interface, never on a provider operation:
+//   - entry (login / signin / authenticate) => auth.flow.start/continue
+//   - exit  (logout / signout / disconnect) => auth.flow.abort
 //
-// The vocabulary is matched on `-`/`_` word boundaries rather than anchored at
-// the start, because a domain prefix (`shop-logout`, `account-login`) does not
-// make the operation any less of an auth-lifecycle action. Any segment that is
-// literally `auth` is caught as well (`auth-status`, `refresh-auth`).
+// Matching works on `-`/`_` separated segments rather than a raw substring or a
+// leading anchor, so `shop-logout`, `shop_logout` and `user-sign-out-everywhere`
+// are all recognised: a domain prefix does not make the operation any less of an
+// auth-lifecycle action, and operation ids may use either separator.
 //
-// Words with a common non-auth domain meaning are deliberately excluded to
-// avoid false positives measured against the live fleet: `exchange` (returns
-// and exchanges), `connect`, `session`, `token`, `credential`, `password` and
-// `otp` all appear in legitimate domain operations. `callback` is excluded for
-// the same reason (`register-webhook-callback` is a domain operation that does
-// not touch the connection credential). Entry/exit verbs above are unambiguous;
-// `exchange` and `callback` stay only in their anchored legacy form below,
-// which is what the original rule shipped with.
-const AUTH_LIFECYCLE_WORDS = [
+// Vocabulary is split into two tiers because auth words collide with ordinary
+// domain verbs. Measured against the live fleet plus synthetic domain ids:
+//   - `authorize-payment`, `revoke-invitation`, `unlink-record`,
+//     `disconnect-device` are domain actions that never touch the connection
+//     credential, so these verbs are NOT matched as segments;
+//   - the same verbs as a complete operation id (`authorize`, `revoke`) do
+//     refer to the credential itself, so they are matched only in that form.
+// `exchange`, `callback`, `connect`, `session`, `token`, `credential`,
+// `password` and `otp` stay out entirely for the same reason.
+const AUTH_LIFECYCLE_SEGMENT_WORDS = new Set([
 	"login",
 	"logout",
 	"signin",
 	"signout",
-	"sign-in",
-	"sign-out",
-	"sign-up",
 	"signup",
 	"authenticate",
-	"authorize",
 	"reauth",
-	"disconnect",
-	"unlink",
+	"auth",
+]);
+
+// Ambiguous as a prefix, unambiguous when they are the whole operation id.
+const AUTH_LIFECYCLE_WHOLE_ID_WORDS = new Set([
+	"authorize",
 	"revoke",
-] as const;
+	"unlink",
+	"disconnect",
+]);
 
-const AUTH_LIFECYCLE_OPERATION_PATTERN = new RegExp(
-	`(^|[-_])(${AUTH_LIFECYCLE_WORDS.join("|")})([-_]|$)`,
-	"i",
-);
-
-// Any segment that is literally `auth`, e.g. `auth-status`, `refresh-auth`.
-const AUTH_SEGMENT_PATTERN = /(^|[-_])auth([-_]|$)/i;
+// `sign` followed by a direction word, i.e. `sign-out`, `user_sign_up_flow`.
+const AUTH_SIGN_DIRECTIONS = new Set(["in", "out", "up"]);
 
 // Legacy anchored form kept for token-plumbing words whose bare use is only
 // auth-related when it leads the operation id (`exchange-code`, `refresh`).
 const AUTH_OPERATION_ID_PATTERN =
 	/^(?:auth[-_])?(?:login|exchange|continue|refresh|callback)(?:[-_]|$)/i;
 
-function isAuthLifecycleOperationId(operationId: string): boolean {
-	return (
-		AUTH_LIFECYCLE_OPERATION_PATTERN.test(operationId) ||
-		AUTH_SEGMENT_PATTERN.test(operationId) ||
-		AUTH_OPERATION_ID_PATTERN.test(operationId)
-	);
+function isAuthLifecycleOperationId(operationId: string, authMode: string): boolean {
+	const segments = operationId.toLowerCase().split(/[-_]+/).filter(Boolean);
+
+	if (segments.some((segment) => AUTH_LIFECYCLE_SEGMENT_WORDS.has(segment))) return true;
+
+	// `sign` + direction spread across two segments (`sign-out`, `sign_up`).
+	if (
+		segments.some(
+			(segment, index) =>
+				segment === "sign" &&
+				index + 1 < segments.length &&
+				AUTH_SIGN_DIRECTIONS.has(segments[index + 1] as string),
+		)
+	) {
+		return true;
+	}
+
+	if (segments.length === 1 && AUTH_LIFECYCLE_WHOLE_ID_WORDS.has(segments[0] as string)) {
+		return true;
+	}
+
+	// The legacy anchored pattern keeps its original scope. It matches ordinary
+	// domain ids such as `exchange-rates` and `refresh-catalog`, so extending it
+	// to `oauth2_proxied` would spread that behavior to providers it never
+	// applied to; proxied providers are covered by the segment tiers above.
+	if (authMode === "credentials" || authMode === "oauth2") {
+		return AUTH_OPERATION_ID_PATTERN.test(operationId);
+	}
+
+	return false;
 }
 
 type ProviderContractMetaLike = {
@@ -1328,7 +1349,7 @@ export function lintProvider(
 			authMode === "oauth2_proxied"
 		) {
 			for (const operationKey of Object.keys(provider.operations)) {
-				if (isAuthLifecycleOperationId(operationKey)) {
+				if (isAuthLifecycleOperationId(operationKey, authMode)) {
 					diagnostics.push({
 						rule: "auth-operation-unsupported",
 						level: "error",

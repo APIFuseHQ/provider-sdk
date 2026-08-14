@@ -6,66 +6,55 @@ function withDescriptionKey<T extends z.ZodType>(schema: T, key: string): T {
 	return schema.describe(key) as T;
 }
 
-function operationStub(nameKey: string) {
-	return {
-		descriptionKey: `operations.${nameKey}.description`,
-		input: withDescriptionKey(z.object({}), `operations.${nameKey}.input.description`),
-		output: withDescriptionKey(
-			z.object({
-				ok: withDescriptionKey(z.boolean(), `operations.${nameKey}.fields.ok.description`),
-			}),
-			`operations.${nameKey}.output.description`,
-		),
-		fixtures: { request: {}, response: { ok: true } },
-	};
-}
-
 function lintWithOperations(
 	operationIds: readonly string[],
 	authMode: "credentials" | "oauth2" | "oauth2_proxied" | "none" = "credentials",
 ) {
-	const operations: Record<string, ReturnType<typeof operationStub>> = {};
-	for (const id of operationIds) {
-		operations[id] = operationStub(id.replace(/[-_]/g, ""));
-	}
 	return lintProvider({
 		id: "demo-provider",
 		allowedHosts: ["api.example.com"],
 		reviewed: "first-party",
-		...(authMode === "none"
-			? {}
-			: {
-					auth: {
-						mode: authMode,
-						flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
-					},
-					credential: {
-						keys: ["session_cookie"],
-						storesReusableSecret: true,
-						justification: "Session cookie is required for private operations.",
-					},
-				}),
-		operations,
-	} as never);
+		auth: {
+			mode: authMode,
+			flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
+		},
+		credential: {
+			keys: ["session_cookie"],
+			justification: "Session cookie is required for private operations.",
+		},
+		operations: Object.fromEntries(
+			operationIds.map((operationId) => [
+				operationId,
+				{
+					descriptionKey: `operations.${operationId}.description`,
+					input: withDescriptionKey(
+						z.object({}),
+						`operations.${operationId}.input.description`,
+					),
+					output: withDescriptionKey(
+						z.object({
+							ok: withDescriptionKey(
+								z.boolean(),
+								`operations.${operationId}.fields.ok.description`,
+							),
+						}),
+						`operations.${operationId}.output.description`,
+					),
+					fixtures: { request: {}, response: { ok: true } },
+				},
+			]),
+		),
+	});
 }
 
 function authViolations(diagnostics: ReturnType<typeof lintProvider>): string[] {
 	return diagnostics
-		.filter((d) => d.rule === "auth-operation-unsupported")
-		.map((d) => d.field ?? "");
+		.filter((diagnostic) => diagnostic.rule === "auth-operation-unsupported")
+		.map((diagnostic) => diagnostic.field ?? "");
 }
 
 describe("auth lifecycle operation lint", () => {
-	it("rejects sign-out operations even behind a domain prefix", () => {
-		// The regression that motivated this rule: `shop-logout` shipped on a
-		// live credentials provider because the old pattern was anchored at the
-		// start of the operation id.
-		expect(authViolations(lintWithOperations(["shop-logout"]))).toEqual([
-			"operations.shop-logout",
-		]);
-	});
-
-	it("rejects the full entry and exit vocabulary regardless of position", () => {
+	it("rejects entry and exit operations regardless of the domain prefix", () => {
 		const ids = [
 			"logout",
 			"shop-logout",
@@ -75,11 +64,7 @@ describe("auth lifecycle operation lint", () => {
 			"account-login",
 			"partner-signin",
 			"session-authenticate",
-			"oauth-authorize",
 			"device-reauth",
-			"connection-disconnect",
-			"account-unlink",
-			"token-revoke",
 			"auth-status",
 			"refresh-auth",
 		];
@@ -88,18 +73,29 @@ describe("auth lifecycle operation lint", () => {
 		);
 	});
 
-	it("keeps the legacy anchored token-plumbing vocabulary", () => {
-		const ids = ["exchange-code", "callback", "refresh", "continue-session", "auth-login-with-password"];
+	it("recognises underscore-separated ids, which are valid operation ids", () => {
+		const ids = ["shop_logout", "shop_sign_out", "account_sign_in", "user_sign_up"];
 		expect(authViolations(lintWithOperations(ids)).sort()).toEqual(
 			ids.map((id) => `operations.${id}`).sort(),
 		);
 	});
 
-	it("does not flag domain operations that merely contain an auth-adjacent word", () => {
-		// Measured against the live fleet (267 operations): these are real
-		// operation ids whose vocabulary overlaps auth wording but which are
-		// ordinary domain reads. Flagging them would be a false positive.
+	it("treats credential verbs as auth only when they are the whole operation id", () => {
+		const bare = ["authorize", "revoke", "unlink", "disconnect"];
+		expect(authViolations(lintWithOperations(bare)).sort()).toEqual(
+			bare.map((id) => `operations.${id}`).sort(),
+		);
+	});
+
+	it("does not flag domain operations that reuse a credential verb", () => {
 		const ids = [
+			"authorize-payment",
+			"authorize-hold",
+			"revoke-invitation",
+			"revoke-coupon",
+			"unlink-record",
+			"disconnect-device",
+			"register-webhook-callback",
 			"shop-return-exchange-info",
 			"get-session-times",
 			"list-connected-venues",
@@ -107,9 +103,26 @@ describe("auth lifecycle operation lint", () => {
 			"password-reset-policy-info",
 			"otp-delivery-options",
 			"credential-requirements",
-			"register-webhook-callback",
 		];
 		expect(authViolations(lintWithOperations(ids))).toEqual([]);
+	});
+
+	it("keeps the legacy anchored token-plumbing vocabulary on its original modes", () => {
+		const ids = ["exchange-code", "callback", "refresh", "continue-session"];
+		expect(authViolations(lintWithOperations(ids, "credentials")).sort()).toEqual(
+			ids.map((id) => `operations.${id}`).sort(),
+		);
+		expect(authViolations(lintWithOperations(ids, "oauth2")).sort()).toEqual(
+			ids.map((id) => `operations.${id}`).sort(),
+		);
+	});
+
+	it("does not widen the legacy anchored pattern to proxied oauth providers", () => {
+		// These domain ids matched the legacy pattern only because it is anchored
+		// and broad. Proxied providers were never subject to it, so adding them to
+		// the rule must not start flagging ordinary domain operations.
+		const ids = ["exchange-rates", "refresh-catalog", "continue-watching"];
+		expect(authViolations(lintWithOperations(ids, "oauth2_proxied"))).toEqual([]);
 	});
 
 	it("covers oauth2_proxied providers, which were previously exempt", () => {
@@ -125,12 +138,12 @@ describe("auth lifecycle operation lint", () => {
 	});
 
 	it("stays silent for providers without an authenticated mode", () => {
-		expect(authViolations(lintWithOperations(["shop-logout"], "none"))).toEqual([]);
+		expect(authViolations(lintWithOperations(["shop-logout", "login"], "none"))).toEqual([]);
 	});
 
 	it("explains where the behavior belongs instead of only rejecting it", () => {
-		const [diagnostic] = lintWithOperations(["shop-logout"]).filter(
-			(d) => d.rule === "auth-operation-unsupported",
+		const diagnostic = lintWithOperations(["shop-logout"]).find(
+			(entry) => entry.rule === "auth-operation-unsupported",
 		);
 		expect(diagnostic?.level).toBe("error");
 		expect(diagnostic?.message).toContain("auth.flow.abort");
