@@ -27,8 +27,61 @@ type ProviderAuthLike = {
 	exchange?: unknown;
 };
 
+// Operations that perform an auth-lifecycle action. These belong on the
+// single `auth.flow` interface, never on a provider operation:
+//   - entry (login/signin/authenticate/authorize) => auth.flow.start/continue
+//   - exit  (logout/signout/disconnect/unlink/revoke) => auth.flow.abort
+//   - token plumbing (exchange/callback/refresh/continue) => auth.flow.*
+//
+// The vocabulary is matched on `-`/`_` word boundaries rather than anchored at
+// the start, because a domain prefix (`shop-logout`, `account-login`) does not
+// make the operation any less of an auth-lifecycle action. Any segment that is
+// literally `auth` is caught as well (`auth-status`, `refresh-auth`).
+//
+// Words with a common non-auth domain meaning are deliberately excluded to
+// avoid false positives measured against the live fleet: `exchange` (returns
+// and exchanges), `connect`, `session`, `token`, `credential`, `password` and
+// `otp` all appear in legitimate domain operations. Entry/exit verbs above are
+// unambiguous; `exchange`/`callback` stay only in their anchored legacy form
+// below, which is what the original rule shipped with.
+const AUTH_LIFECYCLE_WORDS = [
+	"login",
+	"logout",
+	"signin",
+	"signout",
+	"sign-in",
+	"sign-out",
+	"sign-up",
+	"signup",
+	"authenticate",
+	"authorize",
+	"reauth",
+	"disconnect",
+	"unlink",
+	"revoke",
+	"callback",
+] as const;
+
+const AUTH_LIFECYCLE_OPERATION_PATTERN = new RegExp(
+	`(^|[-_])(${AUTH_LIFECYCLE_WORDS.join("|")})([-_]|$)`,
+	"i",
+);
+
+// Any segment that is literally `auth`, e.g. `auth-status`, `refresh-auth`.
+const AUTH_SEGMENT_PATTERN = /(^|[-_])auth([-_]|$)/i;
+
+// Legacy anchored form kept for token-plumbing words whose bare use is only
+// auth-related when it leads the operation id (`exchange-code`, `refresh`).
 const AUTH_OPERATION_ID_PATTERN =
 	/^(?:auth[-_])?(?:login|exchange|continue|refresh|callback)(?:[-_]|$)/i;
+
+function isAuthLifecycleOperationId(operationId: string): boolean {
+	return (
+		AUTH_LIFECYCLE_OPERATION_PATTERN.test(operationId) ||
+		AUTH_SEGMENT_PATTERN.test(operationId) ||
+		AUTH_OPERATION_ID_PATTERN.test(operationId)
+	);
+}
 
 type ProviderContractMetaLike = {
 	publicSchemaFieldNames?: "normalized";
@@ -1265,14 +1318,21 @@ export function lintProvider(
 
 	if (provider.operations) {
 		const authMode = provider.auth?.mode;
-		if (authMode === "credentials" || authMode === "oauth2") {
+		// Every authenticated mode owns an auth.flow; `oauth2_proxied` was
+		// previously exempt, which let auth-lifecycle operations ship on
+		// proxied providers unchecked.
+		if (
+			authMode === "credentials" ||
+			authMode === "oauth2" ||
+			authMode === "oauth2_proxied"
+		) {
 			for (const operationKey of Object.keys(provider.operations)) {
-				if (AUTH_OPERATION_ID_PATTERN.test(operationKey)) {
+				if (isAuthLifecycleOperationId(operationKey)) {
 					diagnostics.push({
 						rule: "auth-operation-unsupported",
 						level: "error",
 						field: `operations.${operationKey}`,
-						message: `Provider "${provider.id ?? "unknown"}" operation "${operationKey}" looks like a login/token/session exchange endpoint. Authenticated providers must expose login through the single auth.flow interface because Gateway persists only auth.flow complete turn data.credential as the connection credential. Move this logic into auth.flow.continue instead of a provider operation.`,
+						message: `Provider "${provider.id ?? "unknown"}" operation "${operationKey}" performs an auth-lifecycle action (login, logout, token exchange or similar). Authenticated providers must expose the whole credential lifecycle through the single auth.flow interface because Gateway persists only auth.flow complete turn data.credential as the connection credential, and an operation that mutates the session outside that interface leaves the stored connection stale. Move sign-in logic into auth.flow.start/continue and sign-out/disconnect logic into auth.flow.abort (served by POST /auth/disconnect) instead of a provider operation.`,
 					});
 				}
 			}
