@@ -37,6 +37,11 @@ interface DescribeSchemaOptions {
 	readonly outputTextTrust?: boolean;
 }
 
+interface ExpectedUnsafeContainerMarkers {
+	readonly containerMarkerId: string;
+	readonly rootTextCarrierMarkerId: string;
+}
+
 export class OutputTextTrustProjectionError extends Error {
 	readonly classification = "untrusted" as const;
 	readonly code = "output_text_trust_projection_failed";
@@ -140,6 +145,7 @@ function isZodSchema(schema: SchemaLike): schema is ZodType {
 function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonValue {
 	const projectionMarkers = new Map<string, OutputTextTrustProjectionMarker>();
 	const expectedLeafMarkers = new Map<string, string>();
+	const expectedUnsafeContainerMarkers = new Map<string, ExpectedUnsafeContainerMarkers>();
 	try {
 		const jsonSchema = z.toJSONSchema(schema, {
 			unrepresentable: options.outputTextTrust ? "any" : "throw",
@@ -166,19 +172,31 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 						);
 						expectedLeafMarkers.set(projectedJsonSchemaPath(path), markerId);
 					} else if (invalidatesDescendantOutputTextAutoTrust(zodSchema)) {
-						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
-							kind: "container-unsafe",
-						});
 						if (!projectedJsonSchemaAllowsObject(projectedSchema)) {
 							throw new TypeError(
 								"A type-mutating output schema cannot represent its possible text output in JSON Schema.",
 							);
 						}
-						classifyUnsafeObjectShape(
+						const { objectOutputSchema, rootTextCarrierMarkerId } = wrapUnsafeObjectTextOutput(
 							projectedSchema,
 							projectionMarkers,
 							expectedLeafMarkers,
 							path,
+						);
+						const containerMarkerId = writeOutputTextTrustProjectionMarker(
+							projectedSchema,
+							projectionMarkers,
+							{ kind: "container-unsafe" },
+						);
+						expectedUnsafeContainerMarkers.set(projectedJsonSchemaPath(path), {
+							containerMarkerId,
+							rootTextCarrierMarkerId,
+						});
+						classifyUnsafeObjectShape(
+							objectOutputSchema,
+							projectionMarkers,
+							expectedLeafMarkers,
+							appendJsonSchemaPath(appendJsonSchemaPath(projectedJsonSchemaPath(path), "anyOf"), 0),
 						);
 					} else if (inheritsUntrustedOutputTextTrust(zodSchema)) {
 						writeOutputTextTrustProjectionMarker(projectedSchema, projectionMarkers, {
@@ -213,7 +231,13 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 			},
 		});
 		if (options.outputTextTrust) {
-			finalizeProjectedTextTrust(jsonSchema, projectionMarkers, expectedLeafMarkers, options);
+			finalizeProjectedTextTrust(
+				jsonSchema,
+				projectionMarkers,
+				expectedLeafMarkers,
+				expectedUnsafeContainerMarkers,
+				options,
+			);
 		}
 		const projected = toJsonValue(jsonSchema);
 		if (projected === undefined) {
@@ -227,11 +251,40 @@ function zodJsonSchema(schema: ZodType, options: DescribeSchemaOptions): JsonVal
 	}
 }
 
-function classifyUnsafeObjectShape(
+function wrapUnsafeObjectTextOutput(
 	projectedSchema: Record<string, unknown>,
 	projectionMarkers: Map<string, OutputTextTrustProjectionMarker>,
 	expectedLeafMarkers: Map<string, string>,
 	path: readonly (string | number)[],
+): {
+	readonly objectOutputSchema: Record<string, unknown>;
+	readonly rootTextCarrierMarkerId: string;
+} {
+	const objectOutputSchema = { ...projectedSchema };
+	for (const key of Object.keys(projectedSchema)) delete projectedSchema[key];
+	const rootTextCarrier: Record<string, unknown> = { type: "string" };
+	const rootTextCarrierMarkerId = writeOutputTextTrustProjectionMarker(
+		rootTextCarrier,
+		projectionMarkers,
+		{
+			inherited: "untrusted",
+			kind: "leaf",
+			local: "untrusted",
+		},
+	);
+	projectedSchema.anyOf = [objectOutputSchema, rootTextCarrier];
+	expectedLeafMarkers.set(
+		appendJsonSchemaPath(appendJsonSchemaPath(projectedJsonSchemaPath(path), "anyOf"), 1),
+		rootTextCarrierMarkerId,
+	);
+	return { objectOutputSchema, rootTextCarrierMarkerId };
+}
+
+function classifyUnsafeObjectShape(
+	projectedSchema: Record<string, unknown>,
+	projectionMarkers: Map<string, OutputTextTrustProjectionMarker>,
+	expectedLeafMarkers: Map<string, string>,
+	path: string,
 ): void {
 	for (const keyword of ["additionalProperties", "propertyNames"] as const) {
 		const unknownTextCarrier: Record<string, unknown> = {};
@@ -241,7 +294,7 @@ function classifyUnsafeObjectShape(
 			local: "untrusted",
 		});
 		projectedSchema[keyword] = unknownTextCarrier;
-		expectedLeafMarkers.set(appendJsonSchemaPath(projectedJsonSchemaPath(path), keyword), markerId);
+		expectedLeafMarkers.set(appendJsonSchemaPath(path, keyword), markerId);
 	}
 }
 
@@ -356,10 +409,48 @@ interface ProjectedJsonSchemaNode {
 	readonly schema: Record<string, unknown>;
 }
 
+const UNSAFE_CONTAINER_ROOT_KEYWORDS = new Set([
+	"$comment",
+	"$id",
+	"$schema",
+	OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY,
+	"anyOf",
+	"default",
+	"deprecated",
+	"description",
+	"examples",
+	"readOnly",
+	"title",
+	"writeOnly",
+]);
+
+function isVerifiedUnsafeContainerUnion(schema: Record<string, unknown>): boolean {
+	if (Object.keys(schema).some((key) => !UNSAFE_CONTAINER_ROOT_KEYWORDS.has(key))) return false;
+	const branches = schema.anyOf;
+	return (
+		Array.isArray(branches) &&
+		branches.length === 2 &&
+		branches.some(
+			(branch) => isJsonSchemaNode(branch) && projectedJsonSchemaAllowsObject(branch),
+		) &&
+		branches.some((branch) => isJsonSchemaNode(branch) && isUnconstrainedStringCarrier(branch))
+	);
+}
+
+function isUnconstrainedStringCarrier(schema: Record<string, unknown>): boolean {
+	return (
+		schema.type === "string" &&
+		Object.keys(schema).every(
+			(key) => key === "type" || key === OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY,
+		)
+	);
+}
+
 function finalizeProjectedTextTrust(
 	value: unknown,
 	projectionMarkers: ReadonlyMap<string, OutputTextTrustProjectionMarker>,
 	expectedLeafMarkers: ReadonlyMap<string, string>,
+	expectedUnsafeContainerMarkers: ReadonlyMap<string, ExpectedUnsafeContainerMarkers>,
 	options: DescribeSchemaOptions,
 ): void {
 	if (!isJsonSchemaNode(value)) {
@@ -405,6 +496,51 @@ function finalizeProjectedTextTrust(
 			);
 		}
 	}
+	for (const [expectedPath, expectedMarkers] of expectedUnsafeContainerMarkers) {
+		const authenticatedContainers = nodes.filter(
+			({ schema }) =>
+				schema[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] === expectedMarkers.containerMarkerId &&
+				markers.get(schema)?.kind === "container-unsafe",
+		);
+		if (authenticatedContainers.length === 0) {
+			throw new OutputTextTrustProjectionError(
+				expectedPath,
+				new TypeError("A type-mutating output container lost its authenticated trust marker."),
+				options.operationId,
+				options.eventName,
+			);
+		}
+		if (authenticatedContainers.some(({ schema }) => !isVerifiedUnsafeContainerUnion(schema))) {
+			throw new OutputTextTrustProjectionError(
+				expectedPath,
+				new TypeError(
+					"A type-mutating output container no longer represents an isolated object-or-text union.",
+				),
+				options.operationId,
+				options.eventName,
+			);
+		}
+		if (
+			authenticatedContainers.some(
+				({ schema }) =>
+					!(schema.anyOf as unknown[]).some(
+						(branch) =>
+							isJsonSchemaNode(branch) &&
+							branch[OUTPUT_TEXT_TRUST_PROJECTION_MARKER_KEY] ===
+								expectedMarkers.rootTextCarrierMarkerId &&
+							markers.get(branch)?.kind === "leaf" &&
+							isUnconstrainedStringCarrier(branch),
+					),
+			)
+		) {
+			throw new OutputTextTrustProjectionError(
+				expectedPath,
+				new TypeError("A type-mutating output container lost its authenticated root text carrier."),
+				options.operationId,
+				options.eventName,
+			);
+		}
+	}
 	for (const { schema } of nodes) {
 		if (!markers.has(schema) && projectedJsonSchemaAllowsString(schema)) {
 			markers.set(schema, { inherited: "untrusted", kind: "leaf", local: "untrusted" });
@@ -433,6 +569,7 @@ function finalizeProjectedTextTrust(
 			if (desiredTrust.get(schema) !== "untrusted") desiredTrust.set(schema, trust);
 			return;
 		}
+		if (marker?.kind === "container-unsafe") desiredTrust.set(schema, "untrusted");
 		const descendantUntrusted = inheritedUntrusted || marker?.kind === "container-untrusted";
 		const descendantAutoTrustAllowed = autoTrustAllowed && marker?.kind !== "container-unsafe";
 		const reference = schema.$ref;

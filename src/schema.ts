@@ -478,6 +478,18 @@ function walkOutputSchemaUnchecked(
 	if (declaration === "trusted" || declaration === "invalid") debtPaths.add(path);
 	const descendantUntrusted = inheritedUntrusted || declaration === "untrusted";
 	const descendantAutoTrustAllowed = autoTrustAllowed && !invalidatesOutputTextAutoTrust(def);
+	if (
+		invalidatesOutputTextAutoTrust(def) &&
+		isObjectOutputContainer(def) &&
+		!emittedPaths.has(path)
+	) {
+		emittedPaths.add(path);
+		out.push({
+			classification: "untrusted",
+			classified: descendantUntrusted,
+			path,
+		});
+	}
 	if (!alreadyActive) activeSchemas.add(schema);
 	try {
 		switch (def.type) {
@@ -694,6 +706,19 @@ function walkOutputSchemaUnchecked(
 		}
 	} finally {
 		if (!alreadyActive) activeSchemas.delete(schema);
+	}
+}
+
+function isObjectOutputContainer(def: InternalZodDef): boolean {
+	let current = def;
+	const visited = new Set<InternalZodDef>();
+	while (true) {
+		if (visited.has(current)) return false;
+		visited.add(current);
+		if (current.type === "object") return true;
+		const inner = flattenedOutputSchema(current);
+		if (!inner) return false;
+		current = inner._zod.def;
 	}
 }
 
