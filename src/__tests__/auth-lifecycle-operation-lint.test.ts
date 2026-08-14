@@ -74,7 +74,7 @@ describe("auth lifecycle operation lint", () => {
 	});
 
 	it("recognises underscore-separated ids, which are valid operation ids", () => {
-		const ids = ["shop_logout", "shop_sign_out", "account_sign_in", "user_sign_up"];
+		const ids = ["shop_logout", "shop_sign_out", "account_sign_in", "user_sign_up", "shop-log-out", "member_log_in"];
 		expect(authViolations(lintWithOperations(ids)).sort()).toEqual(
 			ids.map((id) => `operations.${id}`).sort(),
 		);
@@ -96,6 +96,9 @@ describe("auth lifecycle operation lint", () => {
 			"unlink-record",
 			"disconnect-device",
 			"register-webhook-callback",
+			"activity-log-export",
+			"audit-log-in-range",
+			"change-log-out-of-band",
 			"shop-return-exchange-info",
 			"get-session-times",
 			"list-connected-venues",

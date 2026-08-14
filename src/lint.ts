@@ -65,8 +65,20 @@ const AUTH_LIFECYCLE_WHOLE_ID_WORDS = new Set([
 	"disconnect",
 ]);
 
-// `sign` followed by a direction word, i.e. `sign-out`, `user_sign_up_flow`.
-const AUTH_SIGN_DIRECTIONS = new Set(["in", "out", "up"]);
+// A verb stem followed by a direction word across two segments: `sign-out`,
+// `user_sign_up_flow`, and the spelled-out `log-in` / `shop-log-out` forms
+// (their fused equivalents `login`/`logout` live in the segment set above).
+// `sign` pairs match anywhere; `log` pairs match only at the END of the id,
+// because mid-id `log` is the noun in domain phrases measured against real
+// fleets (`audit-log-in-range`, `change-log-out-of-band` are reads of a log,
+// while `shop-log-out` is a logout).
+const AUTH_DIRECTION_PAIRS: ReadonlyMap<
+	string,
+	{ directions: ReadonlySet<string>; endOnly: boolean }
+> = new Map([
+	["sign", { directions: new Set(["in", "out", "up"]), endOnly: false }],
+	["log", { directions: new Set(["in", "out"]), endOnly: true }],
+]);
 
 // Legacy anchored form kept for token-plumbing words whose bare use is only
 // auth-related when it leads the operation id (`exchange-code`, `refresh`).
@@ -78,14 +90,15 @@ function isAuthLifecycleOperationId(operationId: string, authMode: string): bool
 
 	if (segments.some((segment) => AUTH_LIFECYCLE_SEGMENT_WORDS.has(segment))) return true;
 
-	// `sign` + direction spread across two segments (`sign-out`, `sign_up`).
+	// A verb stem + direction spread across two segments (`sign-out`,
+	// `sign_up`, `shop-log-out`); see AUTH_DIRECTION_PAIRS for positioning.
 	if (
-		segments.some(
-			(segment, index) =>
-				segment === "sign" &&
-				index + 1 < segments.length &&
-				AUTH_SIGN_DIRECTIONS.has(segments[index + 1] as string),
-		)
+		segments.some((segment, index) => {
+			const pair = AUTH_DIRECTION_PAIRS.get(segment);
+			if (pair === undefined || index + 1 >= segments.length) return false;
+			if (!pair.directions.has(segments[index + 1] as string)) return false;
+			return pair.endOnly ? index + 2 === segments.length : true;
+		})
 	) {
 		return true;
 	}
