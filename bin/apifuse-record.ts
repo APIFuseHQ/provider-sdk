@@ -19,6 +19,7 @@ import {
 	type ProviderContext,
 	type ProviderDefinition,
 	ProviderError,
+	type ProviderProxyPolicy,
 	type RequestOptions,
 	type StealthClient,
 	TransportError,
@@ -31,13 +32,12 @@ import {
 	sanitizeDiagnosticText,
 	sanitizeFixtureString,
 } from "../src/fixture-sanitization.js";
-import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
-import { createStealthClient } from "../src/runtime/stealth.js";
+import { createResolverClientFromEnv } from "../src/runtime/resolver.js";
 import {
-	REDACTED_QUERY_VALUE,
 	isSensitiveKey,
 	normalizeSensitiveParams,
 	parseHttpRequestInvocation,
+	REDACTED_QUERY_VALUE,
 	redactSensitiveError,
 	redactSensitiveText,
 	redactUrlQueryParams,
@@ -45,6 +45,8 @@ import {
 	requestOptionsFromHttpInvocation,
 	serializeRequestUrl,
 } from "../src/runtime/request-options.js";
+import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { createStealthClient } from "../src/runtime/stealth.js";
 import { parseSchema } from "../src/schema.js";
 import {
 	captureStreamEvidence,
@@ -422,7 +424,18 @@ function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: strin
 	return baseUrl;
 }
 
-function createCaptureContext(provider: ProviderRuntime, baseUrl: string, sanitize: boolean) {
+function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPolicy | undefined {
+	if (typeof provider.proxy === "object") return provider.proxy;
+	if (provider.proxy === true) return { mode: "optional" };
+	if (provider.proxy === false) return { mode: "disabled" };
+	return undefined;
+}
+
+export function createCaptureContext(
+	provider: ProviderRuntime,
+	baseUrl: string,
+	sanitize: boolean,
+) {
 	let nextCaptureOrder = 0;
 	let nextStreamOrdinal = 0;
 	let capturedRaw: JsonValue | undefined;
@@ -506,12 +519,13 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 		getScopes: () => [],
 	};
 	const state = createMemoryProviderRuntimeState();
+	const cache = createBypassProviderCache({ providerId: provider.id });
 	const ctx: ProviderContext = {
 		env,
 		credential,
 		request: { headers: {} },
 		http,
-		cache: createBypassProviderCache({ providerId: provider.id }),
+		cache,
 		state,
 		stealth,
 		browser: {
@@ -540,7 +554,13 @@ function createCaptureContext(provider: ProviderRuntime, baseUrl: string, saniti
 		},
 		ocr: createOcrClientFromEnv(provider.ocr),
 		stt: createSttClientFromEnv(provider.stt),
-		resolver: createUnsupportedResolverClient("Resolver is not available in apifuse record"),
+		resolver: provider.resolver
+			? createResolverClientFromEnv(provider.resolver, undefined, {
+					allowedHosts: provider.allowedHosts,
+					cache,
+					proxyMode: resolveNativeProxyPolicy(provider)?.mode,
+				})
+			: createUnsupportedResolverClient("Provider does not declare resolver capability"),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
 			env,
