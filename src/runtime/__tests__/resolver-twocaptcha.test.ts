@@ -12,6 +12,15 @@ const RECAPTCHA_CHALLENGE = {
 	pageUrl: "https://example.com/protected",
 } satisfies ProviderChallenge;
 
+const AWS_WAF_CHALLENGE = {
+	kind: "aws_waf",
+	pageUrl: "https://example.com/protected",
+	siteKey: "goku-key",
+	captchaScript: "https://waf.example/challenge.js",
+	context: "goku-context",
+	iv: "goku-iv",
+} satisfies ProviderChallenge;
+
 const ALL_DECLARED_KINDS = [
 	"turnstile",
 	"recaptcha_v2",
@@ -33,7 +42,6 @@ const UNIMPLEMENTED_CHALLENGES = [
 	},
 	{ kind: "hcaptcha", siteKey: "site-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl },
 	{ kind: "cloudflare_interstitial", pageUrl: RECAPTCHA_CHALLENGE.pageUrl },
-	{ kind: "aws_waf", pageUrl: RECAPTCHA_CHALLENGE.pageUrl },
 	{ kind: "akamai_sec_cpt", pageUrl: RECAPTCHA_CHALLENGE.pageUrl },
 	{
 		kind: "akamai_sensor",
@@ -280,6 +288,102 @@ describe("2captcha resolver vendor", () => {
 		});
 	});
 
+	it("creates a proxyless AWS WAF task from gokuProps and returns existing_token", async () => {
+		const stub = successfulFetch({ existing_token: "aws-waf-token-value" });
+		const adapter = createAdapter(stub);
+
+		const result = await adapter.solve(
+			AWS_WAF_CHALLENGE,
+			undefined,
+			new AbortController().signal,
+		);
+
+		expect(result).toEqual({ form: "token", token: "aws-waf-token-value" });
+		expect(stub.calls.map((call) => call.url)).toEqual([
+			"https://solver.test/api/createTask",
+			"https://solver.test/api/getTaskResult",
+		]);
+		expect(stub.calls[0]?.body).toEqual({
+			clientKey: "test-api-key",
+			task: {
+				type: "AmazonTaskProxyless",
+				websiteURL: AWS_WAF_CHALLENGE.pageUrl,
+				websiteKey: AWS_WAF_CHALLENGE.siteKey,
+				captchaScript: AWS_WAF_CHALLENGE.captchaScript,
+				context: AWS_WAF_CHALLENGE.context,
+				iv: AWS_WAF_CHALLENGE.iv,
+			},
+		});
+		expect(stub.calls[1]?.body).toEqual({ clientKey: "test-api-key", taskId: 42 });
+	});
+
+	it("creates a proxied AmazonTask from the supplied resolver identity", async () => {
+		const stub = successfulFetch({ existing_token: "proxied-aws-waf-token" });
+		const adapter = createAdapter(stub);
+
+		await adapter.solve(
+			AWS_WAF_CHALLENGE,
+			{
+				proxyUrl: "socks5://proxy-user:proxy-password@proxy.example:1080",
+				userAgent: "Measured Browser/1.0",
+			},
+			new AbortController().signal,
+		);
+
+		expect(stub.calls[0]?.body).toMatchObject({
+			task: {
+				type: "AmazonTask",
+				websiteURL: AWS_WAF_CHALLENGE.pageUrl,
+				websiteKey: AWS_WAF_CHALLENGE.siteKey,
+				captchaScript: AWS_WAF_CHALLENGE.captchaScript,
+				context: AWS_WAF_CHALLENGE.context,
+				iv: AWS_WAF_CHALLENGE.iv,
+				proxyType: "socks5",
+				proxyAddress: "proxy.example",
+				proxyPort: 1080,
+				proxyLogin: "proxy-user",
+				proxyPassword: "proxy-password",
+				userAgent: "Measured Browser/1.0",
+			},
+		});
+	});
+
+	it.each([
+		{ cookie: "wrong-cookie-field" },
+		{ token: "wrong-token-field" },
+	])("rejects an AWS WAF result without existing_token: %o", async (solution) => {
+		await expect(
+			createAdapter(successfulFetch(solution)).solve(
+				AWS_WAF_CHALLENGE,
+				undefined,
+				new AbortController().signal,
+			),
+		).rejects.toMatchObject({
+			vendor: "2captcha",
+			reason: "transport_failure",
+			phase: "poll_result",
+		});
+	});
+
+	it.each([
+		{ ...AWS_WAF_CHALLENGE, siteKey: undefined },
+		{ ...AWS_WAF_CHALLENGE, captchaScript: undefined },
+		{ ...AWS_WAF_CHALLENGE, context: undefined },
+		{ ...AWS_WAF_CHALLENGE, iv: undefined },
+	])("rejects AWS WAF without every required page artifact: %o", async (challenge) => {
+		const stub = createFetchStub([]);
+		const error = await capturedError(
+			createAdapter(stub).solve(challenge, undefined, new AbortController().signal),
+		);
+
+		expect(error).toMatchObject({
+			vendor: "2captcha",
+			reason: "not_implemented",
+			phase: "create_task",
+		});
+		expect(stub.calls).toHaveLength(0);
+	});
+
 	it("falls back to solution.token when gRecaptchaResponse is absent", async () => {
 		const stub = successfulFetch({ token: "fallback-token" });
 
@@ -433,6 +537,61 @@ describe("2captcha resolver vendor", () => {
 		expect(stub.calls).toHaveLength(1);
 	});
 
+	it("maps AWS WAF vendor errors without exposing the API key", async () => {
+		const apiKey = "aws-waf-api-key-secret";
+		const stub = createFetchStub([
+			jsonResponse({
+				errorId: 1,
+				errorCode: "ERROR_TASK_ABSENT",
+				errorDescription: `rejected ${apiKey}`,
+			}),
+		]);
+
+		const error = await capturedError(
+			createAdapter(stub, { apiKey }).solve(
+				AWS_WAF_CHALLENGE,
+				undefined,
+				new AbortController().signal,
+			),
+		);
+
+		expect(error).toMatchObject({
+			vendor: "2captcha",
+			reason: "transport_failure",
+			phase: "create_task",
+		});
+		expect((error as Error).message).not.toContain(apiKey);
+		expect(String((error as Error).cause ?? "")).not.toContain(apiKey);
+	});
+
+	it("maps AWS WAF polling allocation errors without exposing the API key", async () => {
+		const apiKey = "aws-waf-poll-api-key-secret";
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: 42 }),
+			jsonResponse({
+				errorId: 10,
+				errorCode: "ERROR_ZERO_BALANCE",
+				errorDescription: `zero balance for ${apiKey}`,
+			}),
+		]);
+
+		const error = await capturedError(
+			createAdapter(stub, { apiKey }).solve(
+				AWS_WAF_CHALLENGE,
+				undefined,
+				new AbortController().signal,
+			),
+		);
+
+		expect(error).toMatchObject({
+			vendor: "2captcha",
+			reason: "allocation_exhausted",
+			phase: "poll_result",
+		});
+		expect((error as Error).message).not.toContain(apiKey);
+		expect(String((error as Error).cause ?? "")).not.toContain(apiKey);
+	});
+
 	it("maps an HTTP failure to transport failure", async () => {
 		const stub = createFetchStub([jsonResponse({ errorId: 0, taskId: 42 }, 503)]);
 
@@ -466,6 +625,26 @@ describe("2captcha resolver vendor", () => {
 			phase: "create_task",
 		});
 		expect((error as Error).cause).toBe(networkError);
+	});
+
+	it("does not retain a create-task network cause containing the API key", async () => {
+		const apiKey = "network-error-api-key-secret";
+		const stub = createFetchStub([new Error(`request failed for ${apiKey}`)]);
+		const error = await capturedError(
+			createAdapter(stub, { apiKey }).solve(
+				AWS_WAF_CHALLENGE,
+				undefined,
+				new AbortController().signal,
+			),
+		);
+
+		expect(error).toMatchObject({
+			vendor: "2captcha",
+			reason: "transport_failure",
+			phase: "create_task",
+		});
+		expect((error as Error).message).not.toContain(apiKey);
+		expect((error as Error).cause).toBeUndefined();
 	});
 
 	it("preserves the polling network failure cause and phase", async () => {
