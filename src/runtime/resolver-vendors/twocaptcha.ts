@@ -233,12 +233,26 @@ function endpoint(baseUrl: string, path: string): string {
 	return `${baseUrl.replace(/\/+$/u, "")}/${path}`;
 }
 
-function spanErrorAttributes(error: unknown): Record<string, unknown> | undefined {
-	if (!(error instanceof ResolverVendorUnavailableError)) return undefined;
-	return {
-		unavailability_reason: error.reason,
-		transport_phase: error.phase,
-	};
+function spanErrorAttributes(
+	error: unknown,
+	phase: TwoCaptchaOperationPhase,
+): Record<string, unknown> | undefined {
+	if (error instanceof ResolverVendorUnavailableError) {
+		return {
+			unavailability_reason: error.reason,
+			transport_phase: error.phase,
+		};
+	}
+	// The solve budget raises TwoCaptchaSolveTimeoutError inside the spanned closure and
+	// the outer catch converts it only after the span has been finalized, so the span has
+	// to recognize it here or slow solves lose exactly the attribution these spans add.
+	if (error instanceof TwoCaptchaSolveTimeoutError) {
+		return {
+			unavailability_reason: "timeout",
+			transport_phase: phase,
+		};
+	}
+	return undefined;
 }
 
 export function createTwoCaptchaResolverVendorAdapter(
@@ -325,7 +339,7 @@ export function createTwoCaptchaResolverVendorAdapter(
 								vendor: TWOCAPTCHA_VENDOR_ID,
 								challenge_kind: challenge.kind,
 							},
-							onError: spanErrorAttributes,
+							onError: (error) => spanErrorAttributes(error, "create_task"),
 						})
 					: await createTask();
 
@@ -375,7 +389,7 @@ export function createTwoCaptchaResolverVendorAdapter(
 								vendor: TWOCAPTCHA_VENDOR_ID,
 								challenge_kind: challenge.kind,
 							},
-							onError: spanErrorAttributes,
+							onError: (error) => spanErrorAttributes(error, "poll_result"),
 						})
 					: await pollResult();
 			} catch (error) {

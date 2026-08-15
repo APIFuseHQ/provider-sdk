@@ -385,6 +385,43 @@ describe("2captcha resolver vendor", () => {
 		expect(stub.calls).toHaveLength(2);
 	});
 
+	it("attributes a polling timeout on the poll span", async () => {
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: "task-1" }),
+			jsonResponse({ errorId: 0, status: "processing" }),
+		]);
+		let now = 0;
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+
+		const error = await capturedError(
+			createAdapter(stub, {
+				delay: async (ms) => {
+					now += ms;
+				},
+				now: () => now,
+				pollIntervalMs: 3,
+				timeoutMs: 5,
+			}).solve(RECAPTCHA_CHALLENGE, undefined, new AbortController().signal, recorder),
+		);
+
+		expect(error).toMatchObject({ vendor: "2captcha", reason: "timeout" });
+
+		const spans = trace.getSpans();
+		expect(spans).toHaveLength(2);
+		expect(spans[0]).toMatchObject({ name: "resolver.vendor.create_task", status: "ok" });
+		expect(spans[1]).toEqual(
+			expect.objectContaining({
+				name: "resolver.vendor.poll_result",
+				attributes: expect.objectContaining({
+					unavailability_reason: "timeout",
+					transport_phase: "poll_result",
+				}),
+			}),
+		);
+	});
+
 	it("maps a vendor task error to transport failure", async () => {
 		const stub = createFetchStub([
 			jsonResponse({ errorId: 1, errorCode: "ERROR_TASK_ABSENT", taskId: 42 }),
