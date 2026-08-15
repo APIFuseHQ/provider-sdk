@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { VALID_PROVIDER_CHALLENGE_KINDS } from "../../define.js";
+import { createProviderCache } from "../cache.js";
 import type {
 	ChallengeSolution,
 	ProviderChallenge,
@@ -255,6 +256,101 @@ describe("resolver vendor chain", () => {
 			details: [{ vendor: "custom", reason: "missing_transport" }],
 		});
 		expect(solveCalls).toBe(0);
+	});
+
+	it("fails closed when required proxy identity is unavailable", async () => {
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+			proxyMode: "required",
+		});
+
+		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "browser", reason: "missing_proxy_identity" }],
+		});
+		expect(adapter.state.solveCalls).toBe(0);
+	});
+
+	it("fails closed under a required proxy policy even when a cached solution exists", async () => {
+		const cache = createProviderCache({ providerId: "resolver-required-proxy", redisUrl: "" });
+let seedCalls = 0;
+		const seededAdapter: ResolverVendorAdapter = {
+			id: "browser",
+			supports: () => true,
+			getIssuingIdentity: () => ({ userAgent: "seed-agent" }),
+			async solve() {
+				seedCalls += 1;
+				return {
+					form: "cookies",
+					cookies: { aws_waf_token: "seeded" },
+					userAgent: "seed-agent",
+					expires: (Date.now() + 3_600_000) / 1_000,
+				};
+			},
+		};
+		const seeder = createResolverClient({
+			adapters: [seededAdapter],
+			kinds: ["aws_waf"],
+			cache,
+			proxyMode: "optional",
+		});
+		await expect(seeder.solve(CHALLENGE)).resolves.toBeDefined();
+		expect(seedCalls).toBe(1);
+
+		const guarded = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [guarded.adapter],
+			kinds: ["aws_waf"],
+			cache,
+			proxyMode: "required",
+		});
+
+		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "browser", reason: "missing_proxy_identity" }],
+		});
+		expect(guarded.state.solveCalls).toBe(0);
+	});
+
+	it("allows an optional proxy policy without an identity", async () => {
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+			proxyMode: "optional",
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({ form: "token", token: "browser" });
+		expect(adapter.state.solveCalls).toBe(1);
+	});
+
+	it("allows a required proxy policy with an internally supplied identity", async () => {
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+			identity: {
+				proxyUrl: "http://proxy.test:8080",
+				userAgent: "resolver-test-agent",
+			},
+			proxyMode: "required",
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({ form: "token", token: "browser" });
+		expect(adapter.state.solveCalls).toBe(1);
+	});
+
+	it("preserves resolver behavior when proxy mode is absent", async () => {
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({ form: "token", token: "browser" });
+		expect(adapter.state.solveCalls).toBe(1);
 	});
 
 	it("evaluates predicate transport requirements for each challenge kind", async () => {

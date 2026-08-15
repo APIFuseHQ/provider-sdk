@@ -6,6 +6,7 @@ import type {
 	ProviderCache,
 	ProviderChallenge,
 	ProviderChallengeKind,
+	ProviderProxyMode,
 	ProviderResolverConfig,
 	ProviderResolverVendor,
 	ResolverContext,
@@ -75,6 +76,8 @@ type ResolverChainClient = ResolverContext & {
 export interface ResolverRuntimeOptions {
 	readonly allowedHosts?: readonly string[];
 	readonly cache?: ProviderCache;
+	/** Provider-declared proxy intent. The SDK never accepts a caller-built identity. */
+	readonly proxyMode?: ProviderProxyMode;
 	/** Server-owned context/proxy scope used only for identity-bound cache entries. */
 	readonly identityScope?: string;
 	/** SDK-owned transport already bound to the resolved proxy lease and client profile. */
@@ -691,6 +694,7 @@ function createResolverChainClient(options: {
 	readonly unavailableReason?: string;
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
+	readonly proxyMode?: ProviderProxyMode;
 	readonly identityScope?: string;
 	readonly transport?: ResolverVendorTransport;
 	readonly createTransport?: ResolverRuntimeOptions["createTransport"];
@@ -715,6 +719,19 @@ function createResolverChainClient(options: {
 			const supportingEntries = options.entries.filter((entry) => entry.supports(challenge.kind));
 			if (supportingEntries.length === 0) throwUnsupportedKind(challenge.kind);
 			signal.throwIfAborted();
+			// A required proxy policy is checked before the cache. Solutions minted under a
+			// previous release are shared and long-lived, so consulting the cache first would
+			// keep reporting success without a proxy identity until every old entry expired.
+			const requiredProxyIdentityMissing =
+				options.proxyMode === "required" && options.identity === undefined;
+			if (requiredProxyIdentityMissing) {
+				throwExhausted(
+					supportingEntries.map((entry) => ({
+						vendor: entry.id,
+						reason: "missing_proxy_identity" as const,
+					})),
+				);
+			}
 			if (options.cache && resolverChallengeIsCacheable(challenge)) {
 				const cached = await findCachedSolution(
 					options.cache,
@@ -804,6 +821,7 @@ export function createResolverClient(options: {
 	readonly unavailableReason?: string;
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
+	readonly proxyMode?: ProviderProxyMode;
 	readonly transport?: ResolverVendorTransport;
 	readonly createTransport?: ResolverRuntimeOptions["createTransport"];
 	readonly clientProfile?: string;
@@ -819,6 +837,7 @@ export function createResolverClient(options: {
 		unavailableReason: options.unavailableReason,
 		cache: options.cache,
 		identity: options.identity,
+		proxyMode: options.proxyMode,
 		transport: options.transport,
 		createTransport: options.createTransport,
 		clientProfile: options.clientProfile,
@@ -921,6 +940,7 @@ function createResolverClientFromEnvInternal(
 			};
 		}),
 		cache: options.cache,
+		proxyMode: options.proxyMode,
 		identityScope: options.identityScope,
 		transport: options.transport,
 		createTransport: options.createTransport,

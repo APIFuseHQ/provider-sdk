@@ -313,6 +313,72 @@ describe("resolver server wiring", () => {
 		}
 	});
 
+	it("fails closed at the server boundary when a required proxy policy has no identity", async () => {
+		let calls = 0;
+		const adapter: ResolverVendorAdapter = {
+			id: "browser",
+			supports: (kind) => kind === "cloudflare_interstitial",
+			async solve() {
+				calls += 1;
+				return {
+					form: "cookies",
+					cookies: { cf_clearance: "must-not-be-reached" },
+					userAgent: "Server wiring browser/1.0",
+					expires: (Date.now() + 60_000) / 1_000,
+				};
+			},
+		};
+		const originalCdpUrl = process.env[APIFUSE__CDP_POOL__URL];
+		const restoreAdapter = swapResolverAdapterFactoryForTests("browser", () => adapter);
+		process.env[APIFUSE__CDP_POOL__URL] = "ws://cdp-pool.test";
+		try {
+			const provider = defineProvider({
+				id: "resolver-required-proxy-policy",
+				version: "1.0.0",
+				runtime: "standard",
+				proxy: { mode: "required" },
+				resolver: { vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
+				meta: { displayName: "Resolver Required Proxy Policy", category: "test" },
+				operations: {
+					solve: {
+						input: z.object({}),
+						output: z.object({ token: z.string() }),
+						async handler(ctx) {
+							const solution = await ctx.resolver.solve({
+								kind: "cloudflare_interstitial",
+								pageUrl: "https://example.com/challenge",
+							});
+							return { token: solution.form === "cookies" ? "solved" : "other" };
+						},
+						healthCheckUnsupported: { reason: "unit test" },
+					},
+				},
+			});
+			const app = createServerApp(provider, { logger: () => undefined });
+			const response = await app.request("/v1/solve", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-required-proxy-policy",
+					connectionId: "connection-one",
+					input: {},
+				}),
+			});
+
+			expect(await response.json()).toMatchObject({
+				error: { code: "RESOLVER_CHAIN_EXHAUSTED" },
+			});
+			expect(calls).toBe(0);
+		} finally {
+			restoreAdapter();
+			if (originalCdpUrl === undefined) {
+				delete process.env[APIFUSE__CDP_POOL__URL];
+			} else {
+				process.env[APIFUSE__CDP_POOL__URL] = originalCdpUrl;
+			}
+		}
+	});
+
 	it("threads defineProvider resolver declarations into the server without an override", async () => {
 		const declaration = { vendors: ["custom"], kinds: ["turnstile"] } as const;
 		const provider = defineProvider({

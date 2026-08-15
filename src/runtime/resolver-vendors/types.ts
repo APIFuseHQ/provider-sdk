@@ -112,6 +112,7 @@ export interface ResolverVendorAdapter {
 
 export type ResolverVendorUnavailableReason =
 	| "missing_credentials"
+	| "missing_proxy_identity"
 	| "missing_transport"
 	| "allocation_exhausted"
 	| "transport_failure"
