@@ -4,6 +4,7 @@ import { ProviderError } from "../../errors.js";
 import type { ProviderChallenge, ProviderChallengeKind } from "../../types.js";
 import { createTwoCaptchaResolverVendorAdapter } from "../resolver-vendors/twocaptcha.js";
 import { ResolverVendorUnavailableError } from "../resolver-vendors/types.js";
+import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const RECAPTCHA_CHALLENGE = {
 	kind: "recaptcha_v2",
@@ -97,6 +98,133 @@ async function capturedError(operation: Promise<unknown>): Promise<unknown> {
 }
 
 describe("2captcha resolver vendor", () => {
+	it("records one create-task span and one whole-loop poll span in order", async () => {
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: 42 }),
+			jsonResponse({ errorId: 0, status: "processing" }),
+			jsonResponse({
+				errorId: 0,
+				status: "ready",
+				solution: { gRecaptchaResponse: "traced-token" },
+			}),
+		]);
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+
+		await expect(
+			createAdapter(stub).solve(
+				RECAPTCHA_CHALLENGE,
+				undefined,
+				new AbortController().signal,
+				recorder,
+			),
+		).resolves.toEqual({ form: "token", token: "traced-token" });
+
+		expect(trace.getSpans()).toHaveLength(2);
+		expect(trace.getSpans()).toEqual([
+			expect.objectContaining({
+				name: "resolver.vendor.create_task",
+				status: "ok",
+				attributes: expect.objectContaining({
+					vendor: "2captcha",
+					challenge_kind: "recaptcha_v2",
+				}),
+			}),
+			expect.objectContaining({
+				name: "resolver.vendor.poll_result",
+				status: "ok",
+				attributes: expect.objectContaining({
+					vendor: "2captcha",
+					challenge_kind: "recaptcha_v2",
+				}),
+			}),
+		]);
+		expect(stub.calls).toHaveLength(3);
+	});
+
+	it("records a failed create-task span without starting a poll span", async () => {
+		const networkError = new Error("connection reset");
+		const stub = createFetchStub([networkError]);
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+
+		const error = await capturedError(
+			createAdapter(stub).solve(
+				RECAPTCHA_CHALLENGE,
+				undefined,
+				new AbortController().signal,
+				recorder,
+			),
+		);
+		expect(error).toBeInstanceOf(ResolverVendorUnavailableError);
+		expect(error).toMatchObject({
+			vendor: "2captcha",
+			reason: "transport_failure",
+			phase: "create_task",
+		});
+		expect((error as Error).cause).toBe(networkError);
+		expect(trace.getSpans()).toHaveLength(1);
+		expect(trace.getSpans()[0]).toMatchObject({
+			name: "resolver.vendor.create_task",
+			status: "error",
+			attributes: {
+				vendor: "2captcha",
+				challenge_kind: "recaptcha_v2",
+				unavailability_reason: "transport_failure",
+				transport_phase: "create_task",
+			},
+		});
+	});
+
+	it("solves through multiple poll iterations without a trace recorder", async () => {
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: 42 }),
+			jsonResponse({ errorId: 0, status: "processing" }),
+			jsonResponse({
+				errorId: 0,
+				status: "ready",
+				solution: { gRecaptchaResponse: "untraced-token" },
+			}),
+		]);
+
+		await expect(
+			createAdapter(stub).solve(RECAPTCHA_CHALLENGE, undefined, new AbortController().signal),
+		).resolves.toEqual({ form: "token", token: "untraced-token" });
+		expect(stub.calls).toHaveLength(3);
+	});
+
+	it("keeps secret material out of recorded span attributes", async () => {
+		const apiKey = "span-api-key-secret";
+		const proxyUrl = "http://span-user:span-password@proxy.example:8080";
+		const stub = createFetchStub([
+			jsonResponse({
+				errorId: 1,
+				errorCode: "ERROR_TASK_ABSENT",
+				errorDescription: `${apiKey} ${proxyUrl}`,
+			}),
+		]);
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+
+		await capturedError(
+			createAdapter(stub, { apiKey }).solve(
+				RECAPTCHA_CHALLENGE,
+				{ proxyUrl, userAgent: "Browser/1.0" },
+				new AbortController().signal,
+				recorder,
+			),
+		);
+
+		expect(trace.getSpans()).toHaveLength(1);
+		const recordedAttributes = JSON.stringify(trace.getSpans().map((span) => span.attributes));
+		for (const secret of [apiKey, proxyUrl, "span-user", "span-password"]) {
+			expect(recordedAttributes).not.toContain(secret);
+		}
+	});
+
 	it("creates a proxyless reCAPTCHA v2 task and returns its response token", async () => {
 		const stub = successfulFetch({ gRecaptchaResponse: "recaptcha-token" });
 		const adapter = createAdapter(stub);
