@@ -21,7 +21,7 @@ async function runImportGuard(mode: string): Promise<{ exitCode: number; stderr:
 }
 
 describe("provider capability imports", () => {
-	it("boots a standard provider with unchanged stubs and no heavy runtime imports", async () => {
+	it("boots a fleet-representative standard provider without loading capability modules", async () => {
 		const result = await runImportGuard("standard");
 		expect(result.stderr).toBe("");
 		expect(result.exitCode).toBe(0);
@@ -34,6 +34,36 @@ describe("provider capability imports", () => {
 			expect(result.exitCode).toBe(0);
 		});
 	}
+
+	it("loads tier-2 stealth on first use and delegates to the real client arguments", async () => {
+		const result = await runImportGuard("tier2-stealth");
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+	});
+
+	it("keeps tier-2 stealth sessions and cookies synchronous before lazy transport use", async () => {
+		const result = await runImportGuard("tier2-stealth-session");
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+	});
+
+	it("preloads a declared stealth capability before listening", async () => {
+		const result = await runImportGuard("tier1-stealth");
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+	});
+
+	it("reports every declared capability load failure before listening", async () => {
+		const result = await runImportGuard("aggregate");
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+	});
+
+	it("preserves non-Error capability load failures with provider identity", async () => {
+		const result = await runImportGuard("primitive");
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+	});
 
 	it("loads a declared resolver during startup and serves it through synchronous contexts", async () => {
 		const provider: ProviderDefinition = {

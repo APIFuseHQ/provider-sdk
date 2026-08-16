@@ -65,6 +65,7 @@ import {
 	createProviderRuntimeStateFromEnv,
 	createUnsupportedProviderRuntimeState,
 } from "../runtime/state.js";
+import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import { createTraceContext } from "../runtime/trace.js";
@@ -103,6 +104,8 @@ import type {
 	ProviderStreamEvent,
 	ResolverContext,
 	StealthClient,
+	StealthSession,
+	StealthSessionCookies,
 	SttContext,
 } from "../types.js";
 import { VALID_OPERATION_ERROR_STATUSES } from "../types.js";
@@ -216,27 +219,55 @@ type ProviderServerRuntimeOptions = ProviderServerOptions & {
 
 const require = createRequire(import.meta.url);
 
-function capabilityLoadError(capability: string, error: unknown): ProviderError {
-	return new ProviderError(`Failed to load declared provider capability: ${capability}`, {
-		code: "PROVIDER_CAPABILITY_LOAD_FAILED",
-		details: { capability },
-		...(error instanceof Error ? { cause: error } : {}),
-	});
+type CapabilityLoadFailure = {
+	readonly capability: string;
+	readonly error: unknown;
+};
+
+function normalizedCapabilityCause(error: unknown): Error {
+	if (error instanceof Error) return error;
+	return new Error(String(error));
 }
 
-async function importCapabilityModule<T>(capability: string, load: () => Promise<T>): Promise<T> {
-	try {
-		return await load();
-	} catch (error) {
-		throw capabilityLoadError(capability, error);
-	}
+function capabilityLoadError(
+	provider: ProviderDefinition,
+	failures: readonly CapabilityLoadFailure[],
+): ProviderError {
+	const normalizedFailures = failures.map(({ capability, error }) => ({
+		capability,
+		cause: normalizedCapabilityCause(error),
+	}));
+	const summary = normalizedFailures
+		.map(({ capability, cause }) => `${capability} (${cause.message})`)
+		.join(", ");
+	return new ProviderError(
+		`Failed to load declared capabilities for provider "${provider.id}": ${summary}`,
+		{
+			code: "PROVIDER_CAPABILITY_LOAD_FAILED",
+			details: {
+				providerId: provider.id,
+				failures: normalizedFailures.map(({ capability, cause }) => ({
+					capability,
+					reason: cause.message,
+				})),
+			},
+			cause: new AggregateError(
+				normalizedFailures.map(({ cause }) => cause),
+				`Provider capability loading failed for ${provider.id}`,
+			),
+		},
+	);
 }
 
-function requireCapabilityModule<T>(capability: string, specifier: string): T {
+function requireCapabilityModule<T>(
+	provider: ProviderDefinition,
+	capability: string,
+	specifier: string,
+): T {
 	try {
 		return require(specifier) as T;
 	} catch (error) {
-		throw capabilityLoadError(capability, error);
+		throw capabilityLoadError(provider, [{ capability, error }]);
 	}
 }
 
@@ -295,6 +326,97 @@ function createStealthStub(): StealthClient {
 	};
 }
 
+let stealthRuntimeModulePromise: Promise<typeof StealthRuntimeModule> | undefined;
+
+function importStealthRuntime(): Promise<typeof StealthRuntimeModule> {
+	stealthRuntimeModulePromise ??= import("../runtime/stealth.js");
+	return stealthRuntimeModulePromise;
+}
+
+function createForwardingStealthCookies(
+	initialTarget: StealthSessionCookies,
+): StealthSessionCookies & { setTarget(target: StealthSessionCookies): void } {
+	let target = initialTarget;
+	return {
+		setTarget(nextTarget) {
+			target = nextTarget;
+		},
+		get: (...args) => target.get(...args),
+		getAll: (...args) => target.getAll(...args),
+		has: (...args) => target.has(...args),
+		setFromCookieStrings: (...args) => target.setFromCookieStrings(...args),
+		toString: (url?: string) => target.toString(url),
+		toHeader: (...args) => target.toHeader(...args),
+		snapshot: () => target.snapshot(),
+		restore: (...args) => target.restore(...args),
+		serialize: () => target.serialize(),
+		deserialize: (...args) => target.deserialize(...args),
+		clear: () => target.clear(),
+		find: (...args) => target.find?.(...args),
+	};
+}
+
+function createLazyStealthClient(
+	...createArgs: Parameters<typeof StealthRuntimeModule.createStealthClient>
+): StealthClient {
+	let client: StealthClient | undefined;
+	let clientPromise: Promise<StealthClient> | undefined;
+
+	function getClient(): Promise<StealthClient> {
+		clientPromise ??= importStealthRuntime().then((runtime) => {
+			client ??= runtime.createStealthClient(...createArgs);
+			return client;
+		});
+		return clientPromise;
+	}
+
+	return {
+		async fetch(...args) {
+			return (await getClient()).fetch(...args);
+		},
+		createSession(options) {
+			const localCookies = new StealthCookieJar([], createArgs[0]);
+			const cookies = createForwardingStealthCookies(localCookies);
+			let closed = false;
+			let session: StealthSession | undefined;
+			let sessionPromise: Promise<StealthSession> | undefined;
+
+			function getSession(): Promise<StealthSession> {
+				sessionPromise ??= getClient().then((realClient) => {
+					session = realClient.createSession(options);
+					session.cookies.deserialize(localCookies.serialize());
+					cookies.setTarget(session.cookies);
+					if (closed) session.close();
+					return session;
+				});
+				return sessionPromise;
+			}
+
+			return {
+				cookies,
+				async fetch(...args) {
+					return (await getSession()).fetch(...args);
+				},
+				redirects: {
+					async run(...args) {
+						return (await getSession()).redirects.run(...args);
+					},
+				},
+				close() {
+					closed = true;
+					session?.close();
+				},
+			};
+		},
+		close() {
+			client?.close?.();
+			if (!client && clientPromise) {
+				void clientPromise.then((loadedClient) => loadedClient.close?.());
+			}
+		},
+	};
+}
+
 function bindResolverSignalWithoutRuntime(
 	resolver: ResolverContext,
 	defaultSignal: AbortSignal | undefined,
@@ -332,28 +454,33 @@ function isProductionProviderBrowserMode(provider: ProviderDefinition, env = pro
 	return env.NODE_ENV === "production" && env.APIFUSE__PROVIDER__ID === provider.id;
 }
 
-function needsStealthRuntime(provider: ProviderDefinition): boolean {
-	return getProviderStealthBaseUrl(provider) !== undefined;
+function declaresStealthRuntime(provider: ProviderDefinition): boolean {
+	return provider.stealth !== undefined;
 }
 
 async function loadProviderCapabilityModules(
 	provider: ProviderDefinition,
 ): Promise<ProviderCapabilityModules> {
-	const [browser, nativeNetwork, resolver, stealth] = await Promise.all([
-		provider.runtime === "browser"
-			? importCapabilityModule("browser", () => import("../runtime/browser.js"))
-			: undefined,
-		provider.native
-			? importCapabilityModule("native", () => import("../runtime/native-network.js"))
-			: undefined,
-		provider.resolver
-			? importCapabilityModule("resolver", () => import("../runtime/resolver.js"))
-			: undefined,
-		needsStealthRuntime(provider)
-			? importCapabilityModule("stealth", () => import("../runtime/stealth.js"))
-			: undefined,
+	const results = await Promise.allSettled([
+		provider.runtime === "browser" ? import("../runtime/browser.js") : Promise.resolve(undefined),
+		provider.native ? import("../runtime/native-network.js") : Promise.resolve(undefined),
+		provider.resolver ? import("../runtime/resolver.js") : Promise.resolve(undefined),
+		declaresStealthRuntime(provider) ? import("../runtime/stealth.js") : Promise.resolve(undefined),
 	]);
-	return { browser, nativeNetwork, resolver, stealth };
+	const capabilityNames = ["browser", "native", "resolver", "stealth"] as const;
+	const failures: CapabilityLoadFailure[] = [];
+	for (const [index, result] of results.entries()) {
+		if (result.status === "rejected") {
+			failures.push({ capability: capabilityNames[index]!, error: result.reason });
+		}
+	}
+	if (failures.length > 0) throw capabilityLoadError(provider, failures);
+	return {
+		browser: results[0].status === "fulfilled" ? results[0].value : undefined,
+		nativeNetwork: results[1].status === "fulfilled" ? results[1].value : undefined,
+		resolver: results[2].status === "fulfilled" ? results[2].value : undefined,
+		stealth: results[3].status === "fulfilled" ? results[3].value : undefined,
+	};
 }
 
 function loadProviderCapabilityModulesSync(
@@ -362,19 +489,32 @@ function loadProviderCapabilityModulesSync(
 	return {
 		browser:
 			provider.runtime === "browser"
-				? requireCapabilityModule<typeof BrowserRuntimeModule>("browser", "../runtime/browser.js")
+				? requireCapabilityModule<typeof BrowserRuntimeModule>(
+						provider,
+						"browser",
+						"../runtime/browser.js",
+					)
 				: undefined,
 		nativeNetwork: provider.native
 			? requireCapabilityModule<typeof NativeNetworkRuntimeModule>(
+					provider,
 					"native",
 					"../runtime/native-network.js",
 				)
 			: undefined,
 		resolver: provider.resolver
-			? requireCapabilityModule<typeof ResolverRuntimeModule>("resolver", "../runtime/resolver.js")
+			? requireCapabilityModule<typeof ResolverRuntimeModule>(
+					provider,
+					"resolver",
+					"../runtime/resolver.js",
+				)
 			: undefined,
-		stealth: needsStealthRuntime(provider)
-			? requireCapabilityModule<typeof StealthRuntimeModule>("stealth", "../runtime/stealth.js")
+		stealth: declaresStealthRuntime(provider)
+			? requireCapabilityModule<typeof StealthRuntimeModule>(
+					provider,
+					"stealth",
+					"../runtime/stealth.js",
+				)
 			: undefined,
 	};
 }
@@ -477,13 +617,17 @@ function createProviderContext(
 		cache,
 		state: requestState,
 		stealth: stealthBaseUrl
-			? stealthProfile
-				? capabilityModules.stealth!.createStealthClient(
-						stealthBaseUrl,
-						stealthProfile.name,
-						stealthClientOptions,
-					)
-				: capabilityModules.stealth!.createStealthClient(stealthBaseUrl, stealthClientOptions)
+			? capabilityModules.stealth
+				? stealthProfile
+					? capabilityModules.stealth.createStealthClient(
+							stealthBaseUrl,
+							stealthProfile.name,
+							stealthClientOptions,
+						)
+					: capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
+				: stealthProfile
+					? createLazyStealthClient(stealthBaseUrl, stealthProfile.name, stealthClientOptions)
+					: createLazyStealthClient(stealthBaseUrl, stealthClientOptions)
 			: createStealthStub(),
 		browser:
 			provider.runtime === "browser"
@@ -634,13 +778,17 @@ function createAuthFlowContext(
 				...(signal ? { signal } : {}),
 			}),
 			stealth: stealthBaseUrl
-				? stealthProfile
-					? capabilityModules.stealth!.createStealthClient(
-							stealthBaseUrl,
-							stealthProfile.name,
-							stealthClientOptions,
-						)
-					: capabilityModules.stealth!.createStealthClient(stealthBaseUrl, stealthClientOptions)
+				? capabilityModules.stealth
+					? stealthProfile
+						? capabilityModules.stealth.createStealthClient(
+								stealthBaseUrl,
+								stealthProfile.name,
+								stealthClientOptions,
+							)
+						: capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
+					: stealthProfile
+						? createLazyStealthClient(stealthBaseUrl, stealthProfile.name, stealthClientOptions)
+						: createLazyStealthClient(stealthBaseUrl, stealthClientOptions)
 				: createStealthStub(),
 			...(provider.native
 				? {
