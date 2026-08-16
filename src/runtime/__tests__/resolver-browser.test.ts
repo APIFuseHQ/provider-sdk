@@ -159,6 +159,15 @@ function createAdapter(
 }
 
 describe("browser resolver vendor", () => {
+	it("does not claim to apply the resolved proxy identity", () => {
+		// solve() builds its client from cdpUrl alone and discards the identity, so egress is
+		// the CDP pool's rather than the resolved proxy's. Declaring appliesProxyIdentity here
+		// would let a required proxy policy pass while the solve runs unproxied, and the cookie
+		// would still be recorded as issued under the resolved proxy URL.
+		const adapter = createAdapter(createBrowserStub());
+		expect(adapter.appliesProxyIdentity).not.toBe(true);
+	});
+
 	it("supports exactly the two cookie-family challenge kinds", () => {
 		const adapter = createAdapter(createBrowserStub());
 		const support = Object.fromEntries(

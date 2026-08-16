@@ -303,6 +303,11 @@ export function createBrowserResolverVendorAdapter(
 	return {
 		id: BROWSER_VENDOR_ID,
 
+		// Intentionally NOT declaring appliesProxyIdentity: solve() builds its client from
+		// cdpUrl alone and discards the identity, so egress is the CDP pool's rather than the
+		// resolved proxy's. Declaring it here without passing the proxy into createBrowserClient
+		// would let a required policy pass while the solve runs unproxied.
+
 		supports(kind) {
 			return isSupportedKind(kind);
 		},

@@ -4,6 +4,11 @@ import { join } from "node:path";
 import { Hono } from "hono";
 import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
+import {
+	type ProxyResolutionOptions,
+	type ResolvedProxyConfig,
+	resolveProxyConfigAsync,
+} from "../config/loader.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
@@ -56,7 +61,8 @@ import {
 	PROXY_POOL_EXHAUSTED_CODE,
 } from "../runtime/proxy-errors.js";
 import { PROVIDER_TELEMETRY_HEADER, ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
-import { bindResolverSignal, createResolverClientFromEnv } from "../runtime/resolver.js";
+import { bindResolverSignal, createResolverClientFromEnvInternal } from "../runtime/resolver.js";
+import type { ResolverIdentity } from "../runtime/resolver-vendors/types.js";
 import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
@@ -277,6 +283,36 @@ function getProviderStealthProfile(provider: ProviderDefinition) {
 	return provider.stealth?.profile ? getStealthProfile(provider.stealth.profile) : undefined;
 }
 
+type ResolverProxyConfigResolver = (
+	options: ProxyResolutionOptions,
+) => Promise<ResolvedProxyConfig>;
+
+let resolverProxyConfigResolver: ResolverProxyConfigResolver = resolveProxyConfigAsync;
+
+/** Internal test seam; deliberately not re-exported from the package root. */
+export function swapResolverProxyConfigResolverForTests(
+	resolver: ResolverProxyConfigResolver,
+): () => void {
+	const original = resolverProxyConfigResolver;
+	resolverProxyConfigResolver = resolver;
+	let restored = false;
+	return () => {
+		if (restored) return;
+		restored = true;
+		resolverProxyConfigResolver = original;
+	};
+}
+
+async function resolveProviderResolverIdentity(
+	proxyOptions: ProxyResolutionOptions,
+	userAgent: string | undefined,
+): Promise<ResolverIdentity | undefined> {
+	if (!userAgent) return undefined;
+	const resolvedProxy = await resolverProxyConfigResolver(proxyOptions);
+	if (!resolvedProxy.url) return undefined;
+	return { proxyUrl: resolvedProxy.url, userAgent };
+}
+
 function isProductionProviderBrowserMode(provider: ProviderDefinition, env = process.env): boolean {
 	if (provider.runtime !== "browser") {
 		return false;
@@ -418,11 +454,13 @@ function createProviderContext(
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
 		resolver: bindResolverSignal(
 			options.resolver ??
-				createResolverClientFromEnv(provider.resolver, undefined, {
+				createResolverClientFromEnvInternal(provider.resolver, process.env, {
 					allowedHosts: provider.allowedHosts,
 					cache,
 					identityScope: resolverIdentityScope,
 					proxyMode: resolveNativeProxyPolicy(provider)?.mode,
+					resolveIdentity: () =>
+						resolveProviderResolverIdentity(proxyClientOptions, stealthProfile?.userAgent),
 				}),
 			signal,
 		),
@@ -558,11 +596,13 @@ function createAuthFlowContext(
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
 			resolver: bindResolverSignal(
 				options.resolver ??
-					createResolverClientFromEnv(provider.resolver, undefined, {
+					createResolverClientFromEnvInternal(provider.resolver, process.env, {
 						allowedHosts: provider.allowedHosts,
 						cache,
 						identityScope: resolverIdentityScope,
 						proxyMode: resolveNativeProxyPolicy(provider)?.mode,
+						resolveIdentity: () =>
+							resolveProviderResolverIdentity(proxyClientOptions, stealthProfile?.userAgent),
 					}),
 				signal,
 			),

@@ -90,6 +90,11 @@ export interface ResolverRuntimeOptions {
 	}) => ResolverVendorTransport;
 }
 
+type ResolverInternalRuntimeOptions = ResolverRuntimeOptions & {
+	/** Resolves SDK-owned proxy/client identity only when a challenge is actually solved. */
+	readonly resolveIdentity?: () => Promise<ResolverIdentity | undefined>;
+};
+
 type CachedResolverSolution = {
 	readonly expiresAtMs: number;
 	readonly issuerDigest: string;
@@ -321,6 +326,19 @@ function adapterRequiresTransport(
 	return typeof adapter.requiresTransport === "function"
 		? adapter.requiresTransport(kind)
 		: adapter.requiresTransport === true;
+}
+
+/**
+ * Whether a vendor routes its solve through the resolved proxy identity. Constructing the
+ * adapter is the only way to read the declaration, and construction is cheap and side-effect
+ * free for every registered vendor.
+ */
+function adapterAppliesProxyIdentity(
+	entries: readonly ResolverChainEntry[],
+	adapterId: ProviderResolverVendor,
+): boolean {
+	const entry = entries.find((candidate) => candidate.id === adapterId);
+	return entry?.createAdapter().appliesProxyIdentity === true;
 }
 
 function sanitizeDiagnosticUrl(rawUrl: string): string {
@@ -694,6 +712,7 @@ function createResolverChainClient(options: {
 	readonly unavailableReason?: string;
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
+	readonly resolveIdentity?: () => Promise<ResolverIdentity | undefined>;
 	readonly proxyMode?: ProviderProxyMode;
 	readonly identityScope?: string;
 	readonly transport?: ResolverVendorTransport;
@@ -719,12 +738,17 @@ function createResolverChainClient(options: {
 			const supportingEntries = options.entries.filter((entry) => entry.supports(challenge.kind));
 			if (supportingEntries.length === 0) throwUnsupportedKind(challenge.kind);
 			signal.throwIfAborted();
+			const identity = options.resolveIdentity ? await options.resolveIdentity() : options.identity;
+			signal.throwIfAborted();
 			// A required proxy policy is checked before the cache. Solutions minted under a
 			// previous release are shared and long-lived, so consulting the cache first would
 			// keep reporting success without a proxy identity until every old entry expired.
-			const requiredProxyIdentityMissing =
-				options.proxyMode === "required" && options.identity === undefined;
-			if (requiredProxyIdentityMissing) {
+			// A vendor that never applies the identity cannot satisfy the policy either, so an
+			// unsatisfiable chain is rejected here rather than after a cache hit.
+			const proxyRequired = options.proxyMode === "required";
+			const satisfiesRequiredProxy = (adapterId: ProviderResolverVendor): boolean =>
+				identity !== undefined && adapterAppliesProxyIdentity(options.entries, adapterId);
+			if (proxyRequired && !supportingEntries.some((entry) => satisfiesRequiredProxy(entry.id))) {
 				throwExhausted(
 					supportingEntries.map((entry) => ({
 						vendor: entry.id,
@@ -736,7 +760,7 @@ function createResolverChainClient(options: {
 				const cached = await findCachedSolution(
 					options.cache,
 					challenge,
-					options.identity,
+					identity,
 					options.identityScope,
 				);
 				if (cached) return cached;
@@ -747,6 +771,9 @@ function createResolverChainClient(options: {
 				const adapter = entry.createAdapter();
 				try {
 					const solveAttempt = () => {
+						if (proxyRequired && !satisfiesRequiredProxy(adapter.id)) {
+							throw new ResolverVendorUnavailableError(adapter.id, "missing_proxy_identity");
+						}
 						const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
 						const unrestrictedTransport =
 							options.transport ??
@@ -762,7 +789,7 @@ function createResolverChainClient(options: {
 						const transport = unrestrictedTransport
 							? restrictResolverTransport(unrestrictedTransport, options.allowedHosts ?? [])
 							: undefined;
-						return adapter.solve(challenge, options.identity, signal, traceRecorder, transport);
+						return adapter.solve(challenge, identity, signal, traceRecorder, transport);
 					};
 					const solution = traceRecorder
 						? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
@@ -785,9 +812,9 @@ function createResolverChainClient(options: {
 						solutionExpiryMs(solution) !== undefined
 					) {
 						const issuingIdentity =
-							adapter.getIssuingIdentity?.(solution, options.identity, challenge) ??
+							adapter.getIssuingIdentity?.(solution, identity, challenge) ??
 							resolverChallengeIssuingIdentity(challenge, {
-								...(options.identity ? { proxyUrl: options.identity.proxyUrl } : {}),
+								...(identity ? { proxyUrl: identity.proxyUrl } : {}),
 								userAgent: solution.userAgent,
 							});
 						if (issuingIdentity) {
@@ -899,11 +926,14 @@ export function bindResolverSignal(
 	return boundResolver;
 }
 
-function createResolverClientFromEnvInternal(
+/** Internal server seam; deliberately not re-exported from the package root. */
+export function createResolverClientFromEnvInternal(
 	config: ProviderResolverConfig | undefined,
 	env: EnvLike,
-	options: ResolverRuntimeOptions,
-	adapterFactories: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>,
+	options: ResolverInternalRuntimeOptions,
+	adapterFactories: Partial<
+		Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>
+	> = RESOLVER_ADAPTER_REGISTRY,
 ): ResolverContext {
 	if (!config) {
 		return createUnsupportedResolverClient("Provider does not declare resolver capability");
@@ -940,6 +970,7 @@ function createResolverClientFromEnvInternal(
 			};
 		}),
 		cache: options.cache,
+		resolveIdentity: options.resolveIdentity,
 		proxyMode: options.proxyMode,
 		identityScope: options.identityScope,
 		transport: options.transport,

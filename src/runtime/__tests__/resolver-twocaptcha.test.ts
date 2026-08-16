@@ -98,6 +98,14 @@ async function capturedError(operation: Promise<unknown>): Promise<unknown> {
 }
 
 describe("2captcha resolver vendor", () => {
+	it("declares that it applies the resolved proxy identity", () => {
+		// The identity is sent as literal proxy fields on the task, so the vendor's worker
+		// dials the proxy. Losing this declaration would make every required-proxy provider
+		// fail closed even though this adapter can genuinely satisfy the policy.
+		const adapter = createAdapter(createFetchStub([]));
+		expect(adapter.appliesProxyIdentity).toBe(true);
+	});
+
 	it("records one create-task span and one whole-loop poll span in order", async () => {
 		const stub = createFetchStub([
 			jsonResponse({ errorId: 0, taskId: 42 }),

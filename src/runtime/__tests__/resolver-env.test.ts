@@ -2,7 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
 import { defineProvider } from "../../define.js";
-import { createServerApp } from "../../server/serve.js";
+import {
+	createServerApp,
+	swapResolverProxyConfigResolverForTests,
+} from "../../server/serve.js";
 import type { ProviderChallenge, ResolverContext } from "../../types.js";
 import {
 	APIFUSE__CDP_POOL__URL,
@@ -12,7 +15,7 @@ import {
 	createResolverClientFromEnv,
 	swapResolverAdapterFactoryForTests,
 } from "../resolver.js";
-import type { ResolverVendorAdapter } from "../resolver-vendors/types.js";
+import type { ResolverIdentity, ResolverVendorAdapter } from "../resolver-vendors/types.js";
 
 const turnstileChallenge = {
 	kind: "turnstile",
@@ -310,6 +313,352 @@ describe("resolver server wiring", () => {
 			} else {
 				process.env[APIFUSE__CDP_POOL__URL] = originalCdpUrl;
 			}
+		}
+	});
+
+	it("resolves the server-owned proxy identity lazily for required operation and auth solves", async () => {
+		const proxyUrl = "http://proxy-user:proxy-pass@proxy.test:8443";
+		const userAgent =
+			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36";
+		const identities: Array<ResolverIdentity | undefined> = [];
+		const proxyResolutionInputs: Array<{
+			readonly upstream?: unknown;
+			readonly affinityKey?: string;
+		}> = [];
+		const adapter: ResolverVendorAdapter = {
+			id: "2captcha",
+			// Mirrors the production 2captcha adapter, which sends the identity as literal
+			// proxy fields on the task and therefore satisfies a required policy.
+			appliesProxyIdentity: true,
+			supports: (kind) => kind === "turnstile",
+			async solve(_challenge, identity) {
+				identities.push(identity);
+				return { form: "token", token: `solved-${identities.length}` };
+			},
+		};
+		const originalApiKey = process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY];
+		const restoreAdapter = swapResolverAdapterFactoryForTests("2captcha", () => adapter);
+		const restoreProxyResolver = swapResolverProxyConfigResolverForTests(async (options) => {
+			proxyResolutionInputs.push(options);
+			return { shouldWarn: false, url: proxyUrl };
+		});
+		process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY] = "sk-test";
+		try {
+			const proxy = { mode: "required" } as const;
+			const provider = defineProvider({
+				id: "resolver-required-server-identity",
+				version: "1.0.0",
+				runtime: "standard",
+				allowedHosts: ["example.com"],
+				proxy,
+				stealth: { profile: "chrome-146", platform: "macos" },
+				resolver: { vendors: ["2captcha"], kinds: ["turnstile"] },
+				meta: { displayName: "Resolver Required Server Identity", category: "test" },
+				auth: {
+					mode: "credentials",
+					flow: {
+						async start(ctx) {
+							await ctx.resolver.solve(turnstileChallenge);
+							return { kind: "message", turnId: "turn-1", data: { solved: true } };
+						},
+						async continue() {
+							return { kind: "complete", turnId: "turn-2" };
+						},
+					},
+				},
+				operations: {
+					solve: {
+						input: z.object({}),
+						output: z.object({ token: z.string() }),
+						async handler(ctx) {
+							const solution = await ctx.resolver.solve(turnstileChallenge);
+							return { token: solution.form === "token" ? solution.token : "" };
+						},
+						healthCheckUnsupported: { reason: "unit test" },
+					},
+				},
+			});
+			const app = createServerApp(provider, { logger: () => undefined });
+
+			const operationResponse = await app.request("/v1/solve", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-required-server-identity",
+					connectionId: "operation-connection",
+					input: {},
+				}),
+			});
+			const authResponse = await app.request("/auth/start", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					requestId: "auth-required-server-identity",
+					flowId: "flow-required-server-identity",
+					connectionId: "auth-connection",
+					tenantId: "tenant-required-server-identity",
+					providerId: provider.id,
+				}),
+			});
+
+			expect(operationResponse.status).toBe(200);
+			expect(await operationResponse.json()).toMatchObject({ data: { token: "solved-1" } });
+			expect(authResponse.status).toBe(200);
+			expect(identities).toEqual([
+				{ proxyUrl, userAgent },
+				{ proxyUrl, userAgent },
+			]);
+			expect(proxyResolutionInputs).toEqual([
+				{ upstream: { proxy }, affinityKey: "operation-connection", telemetry: expect.anything() },
+				{ upstream: { proxy }, affinityKey: "auth-connection" },
+			]);
+		} finally {
+			restoreProxyResolver();
+			restoreAdapter();
+			if (originalApiKey === undefined) {
+				delete process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY];
+			} else {
+				process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY] = originalApiKey;
+			}
+		}
+	});
+
+	it("keeps a required provider without a stealth profile fail-closed", async () => {
+		let adapterCalls = 0;
+		let proxyResolutionCalls = 0;
+		const adapter: ResolverVendorAdapter = {
+			id: "2captcha",
+			supports: (kind) => kind === "turnstile",
+			async solve() {
+				adapterCalls += 1;
+				return { form: "token", token: "must-not-be-reached" };
+			},
+		};
+		const originalApiKey = process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY];
+		const restoreAdapter = swapResolverAdapterFactoryForTests("2captcha", () => adapter);
+		const restoreProxyResolver = swapResolverProxyConfigResolverForTests(async () => {
+			proxyResolutionCalls += 1;
+			return { shouldWarn: false, url: "http://proxy.test:8080" };
+		});
+		process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY] = "sk-test";
+		try {
+			const provider = defineProvider({
+				id: "resolver-required-without-stealth",
+				version: "1.0.0",
+				runtime: "standard",
+				proxy: { mode: "required" },
+				resolver: { vendors: ["2captcha"], kinds: ["turnstile"] },
+				meta: { displayName: "Resolver Required Without Stealth", category: "test" },
+				operations: {
+					solve: {
+						input: z.object({}),
+						output: z.object({ token: z.string() }),
+						async handler(ctx) {
+							const solution = await ctx.resolver.solve(turnstileChallenge);
+							return { token: solution.form === "token" ? solution.token : "" };
+						},
+						healthCheckUnsupported: { reason: "unit test" },
+					},
+				},
+			});
+			const response = await createServerApp(provider, { logger: () => undefined }).request(
+				"/v1/solve",
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ requestId: "req-no-stealth", input: {} }),
+				},
+			);
+
+			expect(await response.json()).toMatchObject({
+				error: {
+					code: "RESOLVER_CHAIN_EXHAUSTED",
+					details: [{ vendor: "2captcha", reason: "missing_proxy_identity" }],
+				},
+			});
+			expect(adapterCalls).toBe(0);
+			expect(proxyResolutionCalls).toBe(0);
+		} finally {
+			restoreProxyResolver();
+			restoreAdapter();
+			if (originalApiKey === undefined) {
+				delete process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY];
+			} else {
+				process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY] = originalApiKey;
+			}
+		}
+	});
+
+	it("keeps a required provider fail-closed when proxy resolution yields no URL", async () => {
+		let adapterCalls = 0;
+		let proxyResolutionCalls = 0;
+		const adapter: ResolverVendorAdapter = {
+			id: "2captcha",
+			supports: (kind) => kind === "turnstile",
+			async solve() {
+				adapterCalls += 1;
+				return { form: "token", token: "must-not-be-reached" };
+			},
+		};
+		const originalApiKey = process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY];
+		const restoreAdapter = swapResolverAdapterFactoryForTests("2captcha", () => adapter);
+		const restoreProxyResolver = swapResolverProxyConfigResolverForTests(async () => {
+			proxyResolutionCalls += 1;
+			return { shouldWarn: false };
+		});
+		process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY] = "sk-test";
+		try {
+			const provider = defineProvider({
+				id: "resolver-required-without-proxy-url",
+				version: "1.0.0",
+				runtime: "standard",
+				proxy: { mode: "required" },
+				stealth: { profile: "chrome-146", platform: "macos" },
+				resolver: { vendors: ["2captcha"], kinds: ["turnstile"] },
+				meta: { displayName: "Resolver Required Without Proxy URL", category: "test" },
+				operations: {
+					solve: {
+						input: z.object({}),
+						output: z.object({ token: z.string() }),
+						async handler(ctx) {
+							const solution = await ctx.resolver.solve(turnstileChallenge);
+							return { token: solution.form === "token" ? solution.token : "" };
+						},
+						healthCheckUnsupported: { reason: "unit test" },
+					},
+				},
+			});
+			const response = await createServerApp(provider, { logger: () => undefined }).request(
+				"/v1/solve",
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ requestId: "req-no-proxy-url", input: {} }),
+				},
+			);
+
+			expect(await response.json()).toMatchObject({
+				error: {
+					code: "RESOLVER_CHAIN_EXHAUSTED",
+					details: [{ vendor: "2captcha", reason: "missing_proxy_identity" }],
+				},
+			});
+			expect(adapterCalls).toBe(0);
+			expect(proxyResolutionCalls).toBe(1);
+		} finally {
+			restoreProxyResolver();
+			restoreAdapter();
+			if (originalApiKey === undefined) {
+				delete process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY];
+			} else {
+				process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY] = originalApiKey;
+			}
+		}
+	});
+
+	it("leaves an optional-policy provider unaffected when proxy resolution yields no URL", async () => {
+		const identities: Array<ResolverIdentity | undefined> = [];
+		let proxyResolutionCalls = 0;
+		const adapter: ResolverVendorAdapter = {
+			id: "2captcha",
+			supports: (kind) => kind === "turnstile",
+			async solve(_challenge, identity) {
+				identities.push(identity);
+				return { form: "token", token: "optional-solved" };
+			},
+		};
+		const originalApiKey = process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY];
+		const restoreAdapter = swapResolverAdapterFactoryForTests("2captcha", () => adapter);
+		const restoreProxyResolver = swapResolverProxyConfigResolverForTests(async () => {
+			proxyResolutionCalls += 1;
+			return { shouldWarn: false };
+		});
+		process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY] = "sk-test";
+		try {
+			const provider = defineProvider({
+				id: "resolver-optional-without-proxy-url",
+				version: "1.0.0",
+				runtime: "standard",
+				proxy: { mode: "optional" },
+				stealth: { profile: "chrome-146", platform: "macos" },
+				resolver: { vendors: ["2captcha"], kinds: ["turnstile"] },
+				meta: { displayName: "Resolver Optional Without Proxy URL", category: "test" },
+				operations: {
+					solve: {
+						input: z.object({}),
+						output: z.object({ token: z.string() }),
+						async handler(ctx) {
+							const solution = await ctx.resolver.solve(turnstileChallenge);
+							return { token: solution.form === "token" ? solution.token : "" };
+						},
+						healthCheckUnsupported: { reason: "unit test" },
+					},
+				},
+			});
+			const response = await createServerApp(provider, { logger: () => undefined }).request(
+				"/v1/solve",
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ requestId: "req-optional-no-proxy-url", input: {} }),
+				},
+			);
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).toMatchObject({ data: { token: "optional-solved" } });
+			expect(identities).toEqual([undefined]);
+			expect(proxyResolutionCalls).toBe(1);
+		} finally {
+			restoreProxyResolver();
+			restoreAdapter();
+			if (originalApiKey === undefined) {
+				delete process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY];
+			} else {
+				process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY] = originalApiKey;
+			}
+		}
+	});
+
+	it("does not resolve the identity during plain provider context construction", async () => {
+		let proxyResolutionCalls = 0;
+		const restoreProxyResolver = swapResolverProxyConfigResolverForTests(async () => {
+			proxyResolutionCalls += 1;
+			return { shouldWarn: false, url: "http://proxy.test:8080" };
+		});
+		try {
+			const provider = defineProvider({
+				id: "resolver-identity-lazy-context",
+				version: "1.0.0",
+				runtime: "standard",
+				proxy: { mode: "required" },
+				stealth: { profile: "chrome-146", platform: "macos" },
+				resolver: { vendors: ["2captcha"], kinds: ["turnstile"] },
+				meta: { displayName: "Resolver Identity Lazy Context", category: "test" },
+				operations: {
+					plain: {
+						input: z.object({}),
+						output: z.object({ ok: z.boolean() }),
+						async handler() {
+							return { ok: true };
+						},
+						healthCheckUnsupported: { reason: "unit test" },
+					},
+				},
+			});
+			const response = await createServerApp(provider, { logger: () => undefined }).request(
+				"/v1/plain",
+				{
+					method: "POST",
+					headers: { "Content-Type": "application/json" },
+					body: JSON.stringify({ requestId: "req-plain-context", input: {} }),
+				},
+			);
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).toMatchObject({ data: { ok: true } });
+			expect(proxyResolutionCalls).toBe(0);
+		} finally {
+			restoreProxyResolver();
 		}
 	});
 

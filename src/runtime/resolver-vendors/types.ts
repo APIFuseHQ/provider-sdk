@@ -94,6 +94,13 @@ export interface ResolverVendorTransport {
 export interface ResolverVendorAdapter {
 	readonly id: ProviderResolverVendor;
 	readonly requiresTransport?: boolean | ((kind: ProviderChallengeKind) => boolean);
+	/**
+	 * Whether the adapter actually routes its solve through the resolved proxy identity.
+	 * A required proxy policy is only satisfied by an adapter that applies it: receiving an
+	 * identity and discarding it would let the solve use unproxied egress while the cookie is
+	 * recorded as issued under the resolved proxy. Defaults to false — an adapter must opt in.
+	 */
+	readonly appliesProxyIdentity?: boolean;
 	supports(kind: ProviderChallengeKind): boolean;
 	/** Identity the adapter actually used, reported after a successful solve. */
 	getIssuingIdentity?(
