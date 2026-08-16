@@ -1,9 +1,18 @@
 import { describe, expect, it } from "bun:test";
 
 import { ProviderError } from "../../errors.js";
-import type { ProviderChallenge, ProviderChallengeKind } from "../../types.js";
+import type {
+	ChallengeSolution,
+	ProviderChallenge,
+	ProviderChallengeKind,
+} from "../../types.js";
+import { createResolverClient } from "../resolver.js";
 import { createTwoCaptchaResolverVendorAdapter } from "../resolver-vendors/twocaptcha.js";
-import { ResolverVendorUnavailableError } from "../resolver-vendors/types.js";
+import {
+	ResolverChallengeVerdictError,
+	type ResolverVendorAdapter,
+	ResolverVendorUnavailableError,
+} from "../resolver-vendors/types.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const RECAPTCHA_CHALLENGE = {
@@ -103,6 +112,28 @@ function successfulFetch(solution: Record<string, unknown>) {
 
 async function capturedError(operation: Promise<unknown>): Promise<unknown> {
 	return await operation.catch((error: unknown) => error);
+}
+
+function createTwoVendorChain(
+	first: ResolverVendorAdapter,
+	secondBehavior: () => Promise<ChallengeSolution> = async () => ({
+		form: "token",
+		token: "second-vendor-token",
+	}),
+) {
+	let secondCalls = 0;
+	const second: ResolverVendorAdapter = {
+		id: "custom",
+		supports: (kind) => kind === "aws_waf",
+		async solve() {
+			secondCalls += 1;
+			return await secondBehavior();
+		},
+	};
+	return {
+		client: createResolverClient({ adapters: [first, second], kinds: ["aws_waf"] }),
+		secondCalls: () => secondCalls,
+	};
 }
 
 describe("2captcha resolver vendor", () => {
@@ -524,6 +555,84 @@ describe("2captcha resolver vendor", () => {
 				}),
 			}),
 		);
+	});
+
+	it("classifies ERROR_CAPTCHA_UNSOLVABLE as a failed solve verdict", async () => {
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: 42 }),
+			jsonResponse({
+				errorId: 12,
+				errorCode: "ERROR_CAPTCHA_UNSOLVABLE",
+				errorDescription: "Workers could not solve the Captcha",
+			}),
+		]);
+
+		const error = await capturedError(
+			createAdapter(stub).solve(AWS_WAF_CHALLENGE, undefined, new AbortController().signal),
+		);
+
+		expect(error).toBeInstanceOf(ResolverChallengeVerdictError);
+		expect(error).not.toBeInstanceOf(ResolverVendorUnavailableError);
+		expect(error).toMatchObject({ vendor: "2captcha", reason: "solve_failed" });
+		expect((error as Error).message).toBe(
+			"Resolver vendor 2captcha attempted the challenge but did not solve it",
+		);
+	});
+
+	it("does not advance the chain after ERROR_CAPTCHA_UNSOLVABLE", async () => {
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: 42 }),
+			jsonResponse({
+				errorId: 12,
+				errorCode: "ERROR_CAPTCHA_UNSOLVABLE",
+				errorDescription: "Workers could not solve the Captcha",
+			}),
+		]);
+		const chain = createTwoVendorChain(createAdapter(stub));
+
+		await expect(chain.client.solve(AWS_WAF_CHALLENGE)).rejects.toMatchObject({
+			name: "ResolverChallengeVerdictError",
+			reason: "solve_failed",
+		});
+		expect(chain.secondCalls()).toBe(0);
+	});
+
+	it("advances the chain after a non-JSON transport failure", async () => {
+		const stub = createFetchStub([new Response("upstream failure", { status: 502 })]);
+		const chain = createTwoVendorChain(createAdapter(stub), async () => {
+			throw new ResolverVendorUnavailableError("custom", "not_implemented");
+		});
+
+		await expect(chain.client.solve(AWS_WAF_CHALLENGE)).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{ vendor: "2captcha", reason: "transport_failure", phase: "create_task" },
+				{ vendor: "custom", reason: "not_implemented" },
+			],
+		});
+		expect(chain.secondCalls()).toBe(1);
+	});
+
+	it("advances the chain after ERROR_ZERO_BALANCE", async () => {
+		const stub = createFetchStub([
+			jsonResponse({
+				errorId: 10,
+				errorCode: "ERROR_ZERO_BALANCE",
+				errorDescription: "Account has zero funds",
+			}),
+		]);
+		const chain = createTwoVendorChain(createAdapter(stub), async () => {
+			throw new ResolverVendorUnavailableError("custom", "not_implemented");
+		});
+
+		await expect(chain.client.solve(AWS_WAF_CHALLENGE)).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{ vendor: "2captcha", reason: "allocation_exhausted", phase: "create_task" },
+				{ vendor: "custom", reason: "not_implemented" },
+			],
+		});
+		expect(chain.secondCalls()).toBe(1);
 	});
 
 	it("maps a vendor task error to transport failure", async () => {

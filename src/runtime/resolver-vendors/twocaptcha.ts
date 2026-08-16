@@ -4,6 +4,7 @@ import { assertResolverHostAllowed } from "./hosts.js";
 import {
 	type ResolverIdentity,
 	type ResolverVendorAdapter,
+	ResolverChallengeVerdictError,
 	ResolverVendorUnavailableError,
 	resolverVendorSupports,
 } from "./types.js";
@@ -201,10 +202,17 @@ function isAllocationExhausted(payload: JsonRecord): boolean {
 	);
 }
 
+function isNegativeVerdict(payload: JsonRecord): boolean {
+	return errorText(payload, "errorCode").toLowerCase() === "error_captcha_unsolvable";
+}
+
 function unavailableForPayload(
 	payload: JsonRecord,
 	phase: TwoCaptchaOperationPhase,
-): ResolverVendorUnavailableError {
+): ResolverVendorUnavailableError | ResolverChallengeVerdictError {
+	if (isNegativeVerdict(payload)) {
+		return new ResolverChallengeVerdictError(TWOCAPTCHA_VENDOR_ID, "solve_failed");
+	}
 	return new ResolverVendorUnavailableError(
 		TWOCAPTCHA_VENDOR_ID,
 		isAllocationExhausted(payload) ? "allocation_exhausted" : "transport_failure",
@@ -473,7 +481,12 @@ export function createTwoCaptchaResolverVendorAdapter(
 						phase,
 					});
 				}
-				if (error instanceof ResolverVendorUnavailableError) throw error;
+				if (
+					error instanceof ResolverVendorUnavailableError ||
+					error instanceof ResolverChallengeVerdictError
+				) {
+					throw error;
+				}
 				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
 					...safeCauseOptions(error, [apiKey]),
 					phase,

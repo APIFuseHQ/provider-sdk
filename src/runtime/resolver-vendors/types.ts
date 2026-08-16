@@ -119,7 +119,7 @@ export type ResolverVendorUnavailableReason =
 	| "timeout"
 	| "not_implemented";
 
-export type ResolverChallengeVerdictReason = "human_puzzle";
+export type ResolverChallengeVerdictReason = "human_puzzle" | "solve_failed";
 
 type ResolverErrorOptions = {
 	/** Raw cause; adapters must not place bodies, cookies, headers, credentials, or proxy URLs here. */
@@ -159,7 +159,11 @@ export class ResolverChallengeVerdictError extends Error {
 		readonly reason: ResolverChallengeVerdictReason,
 		options: ResolverErrorOptions = {},
 	) {
-		super(`Resolver vendor ${vendor} returned a challenge verdict: ${reason}`);
+		super(
+			reason === "solve_failed"
+				? `Resolver vendor ${vendor} attempted the challenge but did not solve it`
+				: `Resolver vendor ${vendor} returned a challenge verdict: ${reason}`,
+		);
 		this.name = "ResolverChallengeVerdictError";
 		if (options.cause !== undefined) {
 			this.cause = options.cause;
