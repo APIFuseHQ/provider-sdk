@@ -422,18 +422,22 @@ function createLazyStealthClient(
 		close() {
 			client?.close?.();
 			if (!client && clientPromise) {
-				void clientPromise
-					.then((loadedClient) => loadedClient.close?.())
-					.catch((error: unknown) => {
-						// The request path already reports a failed lazy import. Cleanup must
-						// consume that rejection (or a pending close failure) without creating
-						// a second unhandled rejection that can terminate Bun.
+				void clientPromise.then(
+					(loadedClient) => {
 						try {
-							onCleanupError(error);
-						} catch {
-							// A user logger must not turn handled cleanup into a process-level rejection.
+							loadedClient.close?.();
+						} catch (error) {
+							try {
+								onCleanupError(error);
+							} catch {
+								// A user logger must not turn handled cleanup into a process-level rejection.
+							}
 						}
-					});
+					},
+					() => {
+						// The request path owns reporting for a failed lazy import.
+					},
+				);
 			}
 		},
 	};

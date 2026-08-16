@@ -57,17 +57,19 @@ function validateSchemaNode(
 		}
 		const properties = schema.properties ?? {};
 		for (const required of schema.required ?? []) {
-			if (!(required in value) || value[required] === undefined) {
+			if (!Object.hasOwn(value, required) || value[required] === undefined) {
 				errors.push(`${path} must have required property '${required}'`);
 			}
 		}
 		if (schema.additionalProperties === false) {
 			for (const key of Object.keys(value)) {
-				if (!(key in properties)) errors.push(`${path} must NOT have additional property '${key}'`);
+				if (!Object.hasOwn(properties, key)) {
+					errors.push(`${path} must NOT have additional property '${key}'`);
+				}
 			}
 		}
 		for (const [key, childSchema] of Object.entries(properties)) {
-			if (key in value && value[key] !== undefined) {
+			if (Object.hasOwn(value, key) && value[key] !== undefined) {
 				validateSchemaNode(value[key], childSchema, `${path}/${key}`, errors);
 			}
 		}
@@ -214,7 +216,7 @@ export function validateCeremonyOutput(turn: unknown): AuthTurn {
 	// parity tests compare this focused evaluator with AJV over all fixtures and
 	// edge probes, so the runtime and shipped document remain locked together.
 	const errors: string[] = [];
-	validateSchemaNode(turn, AUTH_TURN_SCHEMA, "$", errors);
+	validateSchemaNode(turn, AUTH_TURN_SCHEMA, "", errors);
 	if (errors.length > 0) {
 		throw new TurnValidationError(errors.join("; "));
 	}

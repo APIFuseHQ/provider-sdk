@@ -12,6 +12,38 @@ const state: CapabilityImportGuardState = {
 };
 Reflect.set(globalThis, "__capabilityImportGuardState", state);
 
+function createMockStealthRuntime() {
+	return {
+		createStealthClient(...args: StealthCreateArgs) {
+			state.stealthCreateArgs.push(args);
+			return {
+				async fetch() {
+					return { status: 204 };
+				},
+				createSession() {
+					return {
+						cookies: { deserialize() {} },
+						async fetch() {
+							return { status: 204 };
+						},
+						redirects: {
+							async run() {
+								throw new Error("unused fake stealth redirects");
+							},
+						},
+						close() {},
+					};
+				},
+				close() {
+					if (mode === "tier2-stealth-close-throw") {
+						throw new Error("stealth close failed");
+					}
+				},
+			};
+		},
+	};
+}
+
 for (const modulePath of [
 	"../../runtime/browser.js",
 	"../../runtime/native-network.js",
@@ -29,34 +61,18 @@ for (const modulePath of [
 		state.heavyLoads.push(modulePath);
 		if (
 			modulePath === "../../runtime/stealth.js" &&
-			(mode === "tier1-stealth" || mode === "tier2-stealth" || mode === "tier2-stealth-session")
+			(mode === "tier1-stealth" ||
+				mode === "tier2-stealth" ||
+				mode === "tier2-stealth-session" ||
+				mode === "tier2-stealth-close-throw")
 		) {
 			state.stealthLoads += 1;
-			return {
-				createStealthClient(...args: StealthCreateArgs) {
-					state.stealthCreateArgs.push(args);
-					return {
-						async fetch() {
-							return { status: 204 };
-						},
-						createSession() {
-							return {
-								cookies: { deserialize() {} },
-								async fetch() {
-									return { status: 204 };
-								},
-								redirects: {
-									async run() {
-										throw new Error("unused fake stealth redirects");
-									},
-								},
-								close() {},
-							};
-						},
-						close() {},
-					};
-				},
-			};
+			if (mode === "tier2-stealth-close-throw") {
+				return new Promise((resolve) => {
+					state.releaseStealthLoad = () => resolve(createMockStealthRuntime());
+				});
+			}
+			return createMockStealthRuntime();
 		}
 		if (modulePath === "../../runtime/stealth.js" && mode === "primitive") {
 			throw "primitive stealth failure";

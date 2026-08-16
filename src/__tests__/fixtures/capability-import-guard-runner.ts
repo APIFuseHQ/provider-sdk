@@ -15,6 +15,10 @@ const operations: ProviderDefinition["operations"] = {
 		output: z.object({}),
 		upstream: { baseUrl: "https://api.example.com" },
 		async handler(ctx) {
+			if (mode === "tier2-stealth-close-throw") {
+				void ctx.stealth.fetch("/pending");
+				return {};
+			}
 			await Promise.all([ctx.stealth.fetch("/first"), ctx.stealth.fetch("/second")]);
 			return {};
 		},
@@ -183,12 +187,22 @@ try {
 		assert(state.stealthLoads === 1, "Declared stealth was not preloaded before listening");
 		assert(state.stealthCreateArgs.length === 0, "Stealth client was created before a context");
 		process.exitCode = 0;
-	} else if (mode === "tier2-stealth" || mode === "tier2-stealth-session") {
+	} else if (
+		mode === "tier2-stealth" ||
+		mode === "tier2-stealth-session" ||
+		mode === "tier2-stealth-close-throw"
+	) {
 		assert(state.stealthLoads === 0, "Tier-2 stealth loaded during boot");
-		const operation = mode === "tier2-stealth" ? "stealth" : "stealthSession";
+		const operation = mode === "tier2-stealth-session" ? "stealthSession" : "stealth";
 		const response = await request(operation, `req-${mode}`);
 		assert(response.status === 200, `Unexpected tier-2 stealth status: ${response.status}`);
 		assert(state.stealthLoads === 1, "Tier-2 stealth did not load on first use");
+		if (mode === "tier2-stealth-close-throw") {
+			assert(state.stealthCreateArgs.length === 0, "Stealth client loaded before request cleanup");
+			assert(state.releaseStealthLoad !== undefined, "Stealth import was not pending at cleanup");
+			state.releaseStealthLoad();
+			await Bun.sleep(50);
+		}
 		assert(state.stealthCreateArgs.length === 1, "Tier-2 stealth client was not single-flight");
 		const [stealthBaseUrl, stealthOptions] = state.stealthCreateArgs[0] ?? [];
 		assert(stealthBaseUrl === "https://api.example.com", "Unexpected tier-2 stealth base URL");
@@ -207,28 +221,18 @@ try {
 				"Tier-2 stealth session did not preserve synchronous cookies",
 			);
 		}
+		if (mode === "tier2-stealth-close-throw") {
+			const cleanupLogs = logs.filter((event) => event.event === "provider_cleanup_failed");
+			assert(cleanupLogs.length === 1, `Unexpected cleanup logs: ${JSON.stringify(cleanupLogs)}`);
+			assert(cleanupLogs[0]?.message === "stealth close failed", "Unexpected cleanup failure");
+		}
 	} else if (mode === "tier2-stealth-rejection") {
 		const response = await request("stealth", "req-tier2-stealth-rejection");
 		assert(response.status === 500, `Unexpected rejected stealth status: ${response.status}`);
 		await Bun.sleep(50);
 		assert(unhandledRejections.length === 0, "Lazy stealth cleanup emitted an unhandled rejection");
 		const cleanupLogs = logs.filter((event) => event.event === "provider_cleanup_failed");
-		assert(cleanupLogs.length === 1, `Unexpected cleanup logs: ${JSON.stringify(cleanupLogs)}`);
-		assert(
-			JSON.stringify(cleanupLogs[0]) ===
-				JSON.stringify({
-					level: "warn",
-					event: "provider_cleanup_failed",
-					providerId: provider.id,
-					kind: "operation",
-					route: "stealth",
-					requestId: "req-tier2-stealth-rejection",
-					resource: "stealth",
-					errorClass: "Error",
-					message: "unexpected heavy module load: ../../runtime/stealth.js",
-				}),
-			`Cleanup failure lost correlation: ${JSON.stringify(cleanupLogs[0])}`,
-		);
+		assert(cleanupLogs.length === 0, `Unexpected cleanup logs: ${JSON.stringify(cleanupLogs)}`);
 		assert(
 			logs.filter((event) => event.event === "provider_request_failed").length === 1,
 			"Rejected stealth request was reported more than once as a request failure",

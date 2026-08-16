@@ -47,8 +47,14 @@ describe("provider capability imports", () => {
 		expect(result.exitCode).toBe(0);
 	});
 
-	it("survives a rejected tier-2 stealth import without an unhandled rejection", async () => {
+	it("returns 500 without a cleanup event when a tier-2 stealth import rejects", async () => {
 		const result = await runImportGuard("tier2-stealth-rejection");
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+	});
+
+	it("reports exactly one cleanup event when a tier-2 stealth client close throws", async () => {
+		const result = await runImportGuard("tier2-stealth-close-throw");
 		expect(result.stderr).toBe("");
 		expect(result.exitCode).toBe(0);
 	});
