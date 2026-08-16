@@ -357,7 +357,8 @@ function setUpFixtureConsumer(consumerDir: string, tarballPath: string): void {
 	writeFileSync(
 		join(consumerDir, "consumer.ts"),
 		[
-			'import { defineProvider, invalidateResolverSolution, ProviderError, resolveProxy, SessionExpiredError, z } from "@apifuse/provider-sdk";',
+			'import { defineProvider, ProviderError, resolveProxy, SessionExpiredError, z } from "@apifuse/provider-sdk";',
+			'import { invalidateResolverSolution } from "@apifuse/provider-sdk/runtime/resolver";',
 			'import type { BrowserCookie, ChallengeSolution, NativeNetworkClient, NativeNetworkConnection, NativeProviderConfig, NativeProviderContext, NativeTcpEgressGrant, ProviderChallenge, ProviderContext, ProviderFileRef, ProviderFilesContext, ProviderResolvedFile, ProviderResolverConfig, ResolverContext, ResolverRuntimeOptions } from "@apifuse/provider-sdk";',
 			'import type { ProxyProtocol, ProxyResolutionOptions, ProxyResolutionSource, ProxyVendorName, RequestOptions, ResolvedProxyConfig } from "@apifuse/provider-sdk";',
 			'import { defineCredentialsAuth } from "@apifuse/provider-sdk/provider";',
