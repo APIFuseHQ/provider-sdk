@@ -453,22 +453,21 @@ describe("self-test internal listener", () => {
 		expect(textCallCount).toBe(0);
 	});
 
-	it("logs one structured event when the requester disconnects mid-case", async () => {
+	it("settles promptly and redacts the cancellation event when the requester disconnects", async () => {
 		const provider = createProvider();
 		let markInvokeStarted: (() => void) | undefined;
 		const invokeStarted = new Promise<void>((resolve) => {
 			markInvokeStarted = resolve;
 		});
 		const events: unknown[] = [];
+		let invokeCount = 0;
 		const selfTestApp = createSelfTestApp(provider, {
 			secrets: { current: MASTER_SECRET },
-			invoke: ({ signal }) => {
+			invoke: () => {
+				invokeCount += 1;
 				markInvokeStarted?.();
-				return new Promise((_resolve, reject) => {
-					const onAbort = () => reject(signal?.reason);
-					signal?.addEventListener("abort", onAbort, { once: true });
-					if (signal?.aborted) onAbort();
-				});
+				if (invokeCount === 1) return new Promise(() => {});
+				return Promise.resolve({ status: 200, data: { echoed: "ok" } });
 			},
 			logger: (event) => events.push(event),
 		});
@@ -485,14 +484,22 @@ describe("self-test internal listener", () => {
 				requestId: "req-disconnected",
 				operationId: "echo",
 				caseName: "pass case",
+				timeoutMs: 100,
 			}),
 			signal: controller.signal,
 		});
 		await invokeStarted;
-		controller.abort(new Error("requester disconnected"));
+		controller.abort(new Error(`requester disconnected: ${UPSTREAM_SECRET_VALUE}`));
 		const response = await responsePromise;
+		const body = (await response.json()) as SelfTestResponse;
 
 		expect(response.status).toBe(200);
+		expect(body.result?.error?.code).toBe("self_test_execution_error");
+		const nextResponse = await postSelfTest(selfTestApp, {
+			operationId: "echo",
+			caseName: "pass case",
+		});
+		expect(nextResponse.status).toBe(200);
 		expect(events).toEqual([
 			{
 				level: "info",
@@ -501,9 +508,10 @@ describe("self-test internal listener", () => {
 				requestId: "req-disconnected",
 				operationId: "echo",
 				caseName: "pass case",
-				reason: "requester disconnected",
+				reason: "requester disconnected: [REDACTED]",
 			},
 		]);
+		expect(JSON.stringify(events)).not.toContain(UPSTREAM_SECRET_VALUE);
 	});
 
 	it("honors the request-level timeoutMs override", async () => {

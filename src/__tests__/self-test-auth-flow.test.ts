@@ -131,7 +131,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 		auth: {
 			mode: "credentials",
 			flow: {
-				start: async (ctx: { http: { get(url: string): Promise<unknown> } }) => {
+				start: async (ctx) => {
 					state.startCount += 1;
 					if (state.authHttpUrl) await ctx.http.get(state.authHttpUrl);
 					if (state.startDelayMs > 0) {

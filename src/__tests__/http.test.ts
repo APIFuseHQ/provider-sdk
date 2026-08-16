@@ -771,16 +771,19 @@ describe("createHttpClient", () => {
 		}
 	});
 
-	it("does not start a fetch for an already-aborted ambient request", async () => {
+	it("preserves a string reason for an already-aborted ambient request", async () => {
 		const ambientController = new AbortController();
-		ambientController.abort(new DOMException("request disconnected", "AbortError"));
+		ambientController.abort("request disconnected");
 		const { createHttpClient } = await import("../runtime/http.js");
 
 		await expect(
 			createHttpClient(undefined, { signal: ambientController.signal }).get(
 				"https://example.com/not-started",
 			),
-		).rejects.toMatchObject({ code: "transport_cancelled" });
+		).rejects.toMatchObject({
+			code: "transport_cancelled",
+			cause: { message: "request disconnected" },
+		});
 		expect(mockNativeFetchState.calls).toHaveLength(0);
 	});
 

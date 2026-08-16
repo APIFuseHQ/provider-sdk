@@ -304,10 +304,14 @@ async function cancelSelfTestResponse(response: Response): Promise<void> {
 	await response.body?.cancel().catch(() => undefined);
 }
 
-function selfTestAbortReason(reason: unknown): string {
-	if (reason instanceof Error) return reason.message || reason.name;
-	if (typeof reason === "string") return reason;
-	return reason === undefined ? "aborted" : String(reason);
+function selfTestAbortReason(reason: unknown, sensitiveValues: readonly string[]): string {
+	const text =
+		reason instanceof Error
+			? reason.message || reason.name
+			: reason === undefined
+				? "aborted"
+				: String(reason);
+	return redactSelfTestText(text, sensitiveValues);
 }
 
 function logSelfTestCancellation(
@@ -316,6 +320,7 @@ function logSelfTestCancellation(
 	requestId: string,
 	selected: SelectedCase,
 	signal: AbortSignal,
+	sensitiveValues: readonly string[],
 ): void {
 	const event: SelfTestCancellationLogEvent = {
 		level: "info",
@@ -324,7 +329,7 @@ function logSelfTestCancellation(
 		requestId,
 		operationId: selected.operationId,
 		caseName: selected.healthCase.name,
-		reason: selfTestAbortReason(signal.reason),
+		reason: selfTestAbortReason(signal.reason, sensitiveValues),
 	};
 	if (options.logger) {
 		options.logger(event);
@@ -384,6 +389,7 @@ async function withCaseTimeout<T>(
 	controller: AbortController,
 ): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let onAbort: (() => void) | undefined;
 	try {
 		return await Promise.race([
 			run(),
@@ -394,9 +400,15 @@ async function withCaseTimeout<T>(
 					reject(error);
 				}, timeoutMs);
 			}),
+			new Promise<never>((_, reject) => {
+				onAbort = () => reject(controller.signal.reason);
+				controller.signal.addEventListener("abort", onAbort, { once: true });
+				if (controller.signal.aborted) onAbort();
+			}),
 		]);
 	} finally {
 		if (timer !== undefined) clearTimeout(timer);
+		if (onAbort) controller.signal.removeEventListener("abort", onAbort);
 	}
 }
 
@@ -1530,7 +1542,14 @@ export function createSelfTestApp(provider: ProviderDefinition, options: SelfTes
 				}
 			}
 			if (interruptedCase) {
-				logSelfTestCancellation(provider, options, request.requestId, interruptedCase, runSignal);
+				logSelfTestCancellation(
+					provider,
+					options,
+					request.requestId,
+					interruptedCase,
+					runSignal,
+					execution.sensitiveValues,
+				);
 			}
 			const singleCase = request.operationId !== undefined && request.caseName !== undefined;
 			const response: SelfTestResponse = {

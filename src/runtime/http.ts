@@ -88,7 +88,9 @@ function toAmbientCancellationError(
 		code: "transport_cancelled",
 		status: 0,
 		retryable: false,
-		...(error instanceof Error ? { cause: error } : {}),
+		...(error !== undefined
+			? { cause: error instanceof Error ? error : new Error(String(error)) }
+			: {}),
 	});
 }
 
