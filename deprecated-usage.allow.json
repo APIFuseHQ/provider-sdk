@@ -24,6 +24,16 @@
 			"file": "src/runtime/stealth.ts",
 			"symbol": "snapshot",
 			"reason": "StealthRedirectRunResult.cookies remains populated from the deprecated complete flat snapshot for backwards compatibility; cookieStore is the lossless persistence path."
+		},
+		{
+			"file": "src/server/serve-implementation.ts",
+			"symbol": "snapshot",
+			"reason": "The lazy-stealth swappable cookie-jar wrapper must delegate the full StealthCookieJar interface, including deprecated members, so tier-2 providers keep byte-identical behavior."
+		},
+		{
+			"file": "src/server/serve-implementation.ts",
+			"symbol": "restore",
+			"reason": "The lazy-stealth swappable cookie-jar wrapper must delegate the full StealthCookieJar interface, including deprecated members, so tier-2 providers keep byte-identical behavior."
 		}
 	]
 }

@@ -79,8 +79,13 @@ function relativePath(fileName: string): string {
 
 function isProjectSource(fileName: string): boolean {
 	if (fileName.includes("node_modules")) return false;
-	if (fileName.includes(`${path.sep}dist${path.sep}`)) return false;
-	if (fileName.includes(`${path.sep}.worktree${path.sep}`)) return false;
+	const rel = relativePath(fileName);
+	// Exclude nested checkouts/build output relative to THIS project root, so
+	// the gate scans identically whether run from the root or from inside a
+	// .worktree checkout (an absolute-path check excluded everything when the
+	// checkout itself lived under .worktree/).
+	const segments = rel.split(path.sep);
+	if (segments.includes("dist") || segments.includes(".worktree")) return false;
 	return fileName.endsWith(".ts");
 }
 
