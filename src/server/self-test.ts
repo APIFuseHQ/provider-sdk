@@ -77,6 +77,16 @@ export interface SelfTestResponse {
 	results: SelfTestCaseResult[];
 }
 
+export interface SelfTestCancellationLogEvent {
+	level: "info";
+	event: "self_test_run_cancelled";
+	providerId: string;
+	requestId: string;
+	operationId: string;
+	caseName: string;
+	reason: string;
+}
+
 export type SelfTestOperationInvoke = (args: {
 	operationId: string;
 	input: unknown;
@@ -167,6 +177,8 @@ export interface SelfTestAppOptions {
 	requestBudgetMs?: number;
 	/** Env override for secret collection + budget resolution (tests). */
 	env?: Readonly<Record<string, string | undefined>>;
+	/** Structured server logger; defaults to the same JSON console shape as the provider server. */
+	logger?: (event: SelfTestCancellationLogEvent) => void;
 }
 
 function resolveSdkVersion(): string {
@@ -263,56 +275,62 @@ export function createSelfTestInvoke(app: {
 				...(signal ? { signal } : {}),
 			}),
 		);
-		const discardLateResponse = () => {
-			void responsePromise.then(cancelOrDrainSelfTestResponse, () => undefined);
-		};
+		const response = await responsePromise;
 		if (signal?.aborted) {
-			discardLateResponse();
-		} else {
-			signal?.addEventListener("abort", discardLateResponse, { once: true });
+			await cancelSelfTestResponse(response);
+			signal.throwIfAborted();
 		}
+		// An abort after body consumption starts may let response.text() finish.
+		const text = await response.text();
+		let body: unknown = text;
 		try {
-			const response = await responsePromise;
-			const text = await response.text();
-			let body: unknown = text;
-			try {
-				body = text.length > 0 ? JSON.parse(text) : undefined;
-			} catch {
-				// non-JSON transports keep the raw text as data
-			}
-			if (
-				response.ok &&
-				body &&
-				typeof body === "object" &&
-				!Array.isArray(body) &&
-				"data" in body
-			) {
-				const envelope = body as { data: unknown; meta?: Record<string, unknown> };
-				return {
-					status: response.status,
-					data: envelope.data,
-					...(envelope.meta ? { meta: envelope.meta } : {}),
-				};
-			}
-			return { status: response.status, data: body };
-		} finally {
-			signal?.removeEventListener("abort", discardLateResponse);
+			body = text.length > 0 ? JSON.parse(text) : undefined;
+		} catch {
+			// non-JSON transports keep the raw text as data
 		}
+		if (response.ok && body && typeof body === "object" && !Array.isArray(body) && "data" in body) {
+			const envelope = body as { data: unknown; meta?: Record<string, unknown> };
+			return {
+				status: response.status,
+				data: envelope.data,
+				...(envelope.meta ? { meta: envelope.meta } : {}),
+			};
+		}
+		return { status: response.status, data: body };
 	};
 }
 
-async function cancelOrDrainSelfTestResponse(response: Response): Promise<void> {
-	try {
-		await response.body?.cancel();
+async function cancelSelfTestResponse(response: Response): Promise<void> {
+	await response.body?.cancel().catch(() => undefined);
+}
+
+function selfTestAbortReason(reason: unknown): string {
+	if (reason instanceof Error) return reason.message || reason.name;
+	if (typeof reason === "string") return reason;
+	return reason === undefined ? "aborted" : String(reason);
+}
+
+function logSelfTestCancellation(
+	provider: ProviderDefinition,
+	options: SelfTestAppOptions,
+	requestId: string,
+	selected: SelectedCase,
+	signal: AbortSignal,
+): void {
+	const event: SelfTestCancellationLogEvent = {
+		level: "info",
+		event: "self_test_run_cancelled",
+		providerId: provider.id,
+		requestId,
+		operationId: selected.operationId,
+		caseName: selected.healthCase.name,
+		reason: selfTestAbortReason(signal.reason),
+	};
+	if (options.logger) {
+		options.logger(event);
 		return;
-	} catch {
-		// A body already locked by response.text() cannot be cancelled directly.
 	}
-	try {
-		await response.arrayBuffer();
-	} catch {
-		// Cancellation and draining are both best-effort for abandoned work.
-	}
+	console.log(JSON.stringify(event));
 }
 
 /** Binds the self-test auth-flow driver to a tenant app's /auth pipeline in-process. */
@@ -1448,16 +1466,20 @@ export function createSelfTestApp(provider: ProviderDefinition, options: SelfTes
 			};
 			const deadline = performance.now() + requestBudgetMs;
 			const results: SelfTestCaseResult[] = [];
+			const runSignal = c.req.raw.signal;
+			let interruptedCase: SelectedCase | undefined;
 			// Sequential execution (parallelism 1): self-tests run on serving pods
 			// and must never compete with themselves for upstream quota.
 			for (const selected of selection.cases) {
 				const caseController = new AbortController();
-				const runSignal = c.req.raw.signal;
 				const abortFromRun = () => caseController.abort(runSignal.reason);
 				runSignal.addEventListener("abort", abortFromRun, { once: true });
 				if (runSignal.aborted) abortFromRun();
 				try {
-					if (runSignal.aborted) break;
+					if (runSignal.aborted) {
+						interruptedCase = selected;
+						break;
+					}
 					if (performance.now() >= deadline) {
 						const now = new Date().toISOString();
 						results.push({
@@ -1498,10 +1520,17 @@ export function createSelfTestApp(provider: ProviderDefinition, options: SelfTes
 							caseController,
 						),
 					);
+					if (runSignal.aborted) {
+						interruptedCase = selected;
+						break;
+					}
 				} finally {
 					runSignal.removeEventListener("abort", abortFromRun);
 					caseController.abort();
 				}
+			}
+			if (interruptedCase) {
+				logSelfTestCancellation(provider, options, request.requestId, interruptedCase, runSignal);
 			}
 			const singleCase = request.operationId !== undefined && request.caseName !== undefined;
 			const response: SelfTestResponse = {

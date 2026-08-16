@@ -77,9 +77,43 @@ function isDedupeSkipOutcome(outcome: NativeHttpAttemptOutcome): outcome is Nati
 	return "kind" in outcome && outcome.kind === "dedupe-skip";
 }
 
-async function sleep(ms: number): Promise<void> {
+function toAmbientCancellationError(
+	signal: AbortSignal,
+	error: unknown = signal.reason,
+): TransportError {
+	if (error instanceof TransportError && error.code === "transport_cancelled") {
+		return error;
+	}
+	return new TransportError("Request cancelled", {
+		code: "transport_cancelled",
+		status: 0,
+		retryable: false,
+		...(error instanceof Error ? { cause: error } : {}),
+	});
+}
+
+function throwIfAmbientAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) throw toAmbientCancellationError(signal);
+}
+
+async function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	throwIfAmbientAborted(signal);
 	if (ms <= 0) return;
-	await new Promise((resolve) => setTimeout(resolve, ms));
+	if (!signal) {
+		await new Promise((resolve) => setTimeout(resolve, ms));
+		return;
+	}
+	await new Promise<void>((resolve, reject) => {
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(toAmbientCancellationError(signal));
+		};
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 function toUpstreamHttpError(status: number): TransportError {
@@ -133,7 +167,21 @@ function isTimeoutMessage(message: string): boolean {
 	return /\b(timed out|timeout|deadline exceeded)\b/i.test(message);
 }
 
-function toHttpTransportError(error: unknown): TransportError {
+function toHttpTransportError(
+	error: unknown,
+	ambientSignal?: AbortSignal,
+	timeoutSignal?: AbortSignal,
+): TransportError {
+	if (ambientSignal?.aborted) {
+		return toAmbientCancellationError(ambientSignal, error);
+	}
+	if (timeoutSignal?.aborted) {
+		return new TransportError("Request timed out", {
+			code: "transport_timeout",
+			status: 0,
+			...(error instanceof Error ? { cause: error } : {}),
+		});
+	}
 	if (error instanceof TransportError) {
 		if (error.code) {
 			return error;
@@ -240,7 +288,7 @@ function cancelStreamOnAbort(
 		if (finished) return;
 		finished = true;
 		cleanup();
-		const reason = signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+		const reason = toAmbientCancellationError(signal);
 		streamController?.error(reason);
 		const cancellation = reader ? reader.cancel(reason) : body.cancel(reason);
 		void cancellation.catch(() => undefined).finally(() => reader?.releaseLock());
@@ -669,10 +717,12 @@ async function fetchNativeHttp(
 
 	let proxy: string | undefined;
 	try {
+		throwIfAmbientAborted(clientOptions.signal);
 		// Resolve inside the try (and after the timeout is armed) so allocator
 		// failures are branded as TransportErrors and count against the request
 		// deadline, exactly as an inline resolve would.
 		proxy = await resolveNativeProxy(options, clientOptions, warn, proxyAttemptOffset);
+		throwIfAmbientAborted(clientOptions.signal);
 		// For a registry allocator chain, skip an endpoint a prior attempt already
 		// tried rather than re-issuing the same request. Returning the sentinel
 		// (instead of breaking) lets the loop keep advancing the flat offset until
@@ -729,7 +779,7 @@ async function fetchNativeHttp(
 			);
 		}
 		const transportError: NativeHttpAttemptError = redactSensitiveError(
-			toHttpTransportError(error),
+			toHttpTransportError(error, clientOptions.signal, controller?.signal),
 			serializedUrl.sensitiveValues,
 			serializedUrl.requestUrl,
 			serializedUrl.redactedUrl,
@@ -758,7 +808,9 @@ async function fetchNativeHttpStream(
 		: undefined;
 
 	try {
+		throwIfAmbientAborted(clientOptions.signal);
 		const proxy = await resolveNativeProxy(options, clientOptions, warn);
+		throwIfAmbientAborted(clientOptions.signal);
 		const requestInit: NativeFetchInit = {
 			headers: options.headers,
 			method,
@@ -795,7 +847,7 @@ async function fetchNativeHttpStream(
 			);
 		}
 		throw redactSensitiveError(
-			toHttpTransportError(error),
+			toHttpTransportError(error, clientOptions.signal, controller?.signal),
 			serializedUrl.sensitiveValues,
 			serializedUrl.requestUrl,
 			serializedUrl.redactedUrl,
@@ -931,6 +983,7 @@ export function createHttpClient(
 			);
 
 		if (!retryEnabled || !retryOptions) {
+			throwIfAmbientAborted(clientOptions.signal);
 			const outcome = await executeOnce();
 			if (isDedupeSkipOutcome(outcome)) {
 				// Single-shot path never de-duplicates (dedupeContext is undefined),
@@ -955,6 +1008,7 @@ export function createHttpClient(
 		// allocations skip offsets.
 		let issued = 0;
 		for (let attempt = 1; attempt <= transportAttemptCap; attempt += 1) {
+			throwIfAmbientAborted(clientOptions.signal);
 			// Whether this offset actually issued a request (vs. a skipped duplicate),
 			// so the catch counts a thrown *transport* failure once without
 			// double-counting a status outcome that already incremented before it
@@ -973,7 +1027,10 @@ export function createHttpClient(
 				if (isHttpStatusOutcome(outcome)) {
 					lastStatus = outcome.status;
 					if (outcome.retryable && issued < retryOptions.attempts) {
-						await sleep(computeProxyTransportRetryDelayMs(retryOptions, attempt, outcome.headers));
+						await sleep(
+							computeProxyTransportRetryDelayMs(retryOptions, attempt, outcome.headers),
+							clientOptions.signal,
+						);
 						continue;
 					}
 					throw toUpstreamHttpError(outcome.status);
@@ -997,6 +1054,7 @@ export function createHttpClient(
 				}
 				return response;
 			} catch (error) {
+				throwIfAmbientAborted(clientOptions.signal);
 				if (!issuedThisAttempt) issued += 1;
 				lastError = error;
 				lastErrorCode = proxyTransportRetryErrorCode(error);
@@ -1012,7 +1070,10 @@ export function createHttpClient(
 						proxyUsed,
 					})
 				) {
-					await sleep(computeProxyTransportRetryDelayMs(retryOptions, attempt));
+					await sleep(
+						computeProxyTransportRetryDelayMs(retryOptions, attempt),
+						clientOptions.signal,
+					);
 					continue;
 				}
 				throw error;

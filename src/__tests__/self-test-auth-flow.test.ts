@@ -70,6 +70,8 @@ interface FlowProviderState {
 	operationAffinity: boolean;
 	/** Optional per-case timeout override applied to the session case. */
 	caseTimeoutMs?: number;
+	/** Optional URL fetched by flow.start through its FlowContext HTTP client. */
+	authHttpUrl?: string;
 }
 
 function createFlowProviderState(): FlowProviderState {
@@ -129,8 +131,9 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 		auth: {
 			mode: "credentials",
 			flow: {
-				start: async () => {
+				start: async (ctx: { http: { get(url: string): Promise<unknown> } }) => {
 					state.startCount += 1;
+					if (state.authHttpUrl) await ctx.http.get(state.authHttpUrl);
 					if (state.startDelayMs > 0) {
 						await new Promise((resolve) => setTimeout(resolve, state.startDelayMs));
 					}
@@ -597,6 +600,40 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		const body = await runCase(selfTestApp, "session", "session case");
 		expect(body.result?.status).toBe("error");
 		expect(body.result?.error?.code).toBe("self_test_timeout");
+	});
+
+	it("aborts auth-flow ctx.http work when the self-test case times out", async () => {
+		const state = createFlowProviderState();
+		state.authHttpUrl = "https://example.com/slow-auth-flow";
+		state.caseTimeoutMs = 25;
+		const originalFetch = globalThis.fetch;
+		let observedSignal: AbortSignal | null | undefined;
+		let resolveAbortObserved: ((aborted: boolean) => void) | undefined;
+		const abortObserved = new Promise<boolean>((resolve) => {
+			resolveAbortObserved = resolve;
+		});
+		globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) => {
+			observedSignal = init?.signal;
+			return new Promise<Response>((_resolve, reject) => {
+				const onAbort = () => {
+					resolveAbortObserved?.(observedSignal?.aborted === true);
+					reject(observedSignal?.reason);
+				};
+				observedSignal?.addEventListener("abort", onAbort, { once: true });
+				if (observedSignal?.aborted) onAbort();
+			});
+		}) as typeof fetch;
+
+		try {
+			const { selfTestApp } = createApps(createFlowProvider(state));
+			const body = await runCase(selfTestApp, "session", "session case");
+
+			expect(body.result?.error?.code).toBe("self_test_timeout");
+			expect(await abortObserved).toBe(true);
+			expect(observedSignal?.aborted).toBe(true);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
 	});
 
 	it("reports a post-submission retry turn as auth_flow_rejected and memoizes it", async () => {

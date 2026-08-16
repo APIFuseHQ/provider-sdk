@@ -112,6 +112,7 @@ import {
 	createSelfTestAuthFlowInvoke,
 	createSelfTestInvoke,
 	resolveSelfTestPort,
+	type SelfTestCancellationLogEvent,
 } from "./self-test.js";
 import { resolveSelfTestMasterSecrets } from "./self-test-token.js";
 import {
@@ -527,7 +528,10 @@ function createAuthFlowContext(
 			externalRef: request.externalRef,
 			tenantId: request.tenantId ?? "",
 			providerId: request.providerId ?? provider.id,
-			http: createHttpClient(baseUrl, proxyClientOptions),
+			http: createHttpClient(baseUrl, {
+				...proxyClientOptions,
+				...(signal ? { signal } : {}),
+			}),
 			stealth: stealthBaseUrl
 				? stealthProfile
 					? createStealthClient(stealthBaseUrl, stealthProfile.name, stealthClientOptions)
@@ -631,7 +635,8 @@ export type ProviderServerLogEvent =
 			hookIndex: number;
 			errorClass: string;
 			message: string;
-		};
+		}
+	| SelfTestCancellationLogEvent;
 
 export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
 
@@ -2494,6 +2499,7 @@ export async function serve(
 				secrets: selfTestSecrets,
 				invoke: createSelfTestInvoke(app),
 				authFlow: createSelfTestAuthFlowInvoke(app),
+				logger,
 			});
 			servers.push(
 				bunRuntime.serve({
