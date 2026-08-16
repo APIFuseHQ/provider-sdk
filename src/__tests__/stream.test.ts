@@ -7,6 +7,7 @@ import {
 	error,
 	event,
 	parseSseStream,
+	readableBytes,
 } from "../stream.js";
 
 function streamFromText(value: string): ReadableStream<Uint8Array> {
@@ -61,5 +62,21 @@ describe("stream helpers", () => {
 		expect(messages[0]?.id).toBe("evt_1");
 		expect(messages[0]?.retry).toBe(1500);
 		expect(messages[0]?.json<{ ok: boolean }>()).toEqual({ ok: true });
+	});
+
+	it("cancels the source stream when byte iteration ends early", async () => {
+		let cancelCalled = false;
+		const source = new ReadableStream<Uint8Array>({
+			start(controller) {
+				controller.enqueue(new Uint8Array([1]));
+			},
+			cancel() {
+				cancelCalled = true;
+			},
+		});
+
+		for await (const _chunk of readableBytes(source)) break;
+
+		expect(cancelCalled).toBe(true);
 	});
 });

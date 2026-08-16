@@ -366,6 +366,55 @@ describe("self-test internal listener", () => {
 		expect(elapsed).toBeLessThan(200);
 	});
 
+	it("aborts an in-flight ctx.http fetch when a self-test case times out", async () => {
+		const provider = createProvider();
+		provider.operations.abortableHttp = {
+			annotations: { readOnly: true },
+			input: z.object({}),
+			output: z.object({ ok: z.boolean() }),
+			handler: async (ctx) => {
+				const response = await ctx.http.get("https://example.com/slow-self-test");
+				return { ok: response.ok };
+			},
+			healthCheck: {
+				interval: "5m",
+				cases: [{ name: "abortable http case", input: {}, timeoutMs: 25, assertions: () => {} }],
+			},
+		};
+		const originalFetch = globalThis.fetch;
+		let observedSignal: AbortSignal | null | undefined;
+		let resolveAbortObserved: ((aborted: boolean) => void) | undefined;
+		const abortObserved = new Promise<boolean>((resolve) => {
+			resolveAbortObserved = resolve;
+		});
+		globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) => {
+			observedSignal = init?.signal;
+			return new Promise<Response>((_resolve, reject) => {
+				const onAbort = () => {
+					resolveAbortObserved?.(observedSignal?.aborted === true);
+					reject(observedSignal?.reason);
+				};
+				observedSignal?.addEventListener("abort", onAbort, { once: true });
+				if (observedSignal?.aborted) onAbort();
+			});
+		}) as typeof fetch;
+
+		try {
+			const { selfTestApp } = createApps(provider);
+			const response = await postSelfTest(selfTestApp, {
+				operationId: "abortableHttp",
+				caseName: "abortable http case",
+			});
+			const body = (await response.json()) as SelfTestResponse;
+
+			expect(body.result?.error?.code).toBe("self_test_timeout");
+			expect(await abortObserved).toBe(true);
+			expect(observedSignal?.aborted).toBe(true);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
 	it("honors the request-level timeoutMs override", async () => {
 		const { selfTestApp } = createApps();
 		const response = await postSelfTest(selfTestApp, {

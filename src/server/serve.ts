@@ -377,6 +377,7 @@ function createProviderContext(
 		request: requestContext,
 		http: createHttpClient(baseUrl, {
 			...proxyClientOptions,
+			...(signal ? { signal } : {}),
 			onRetrySummary: (summary) => {
 				if (summary.attempts <= 1 || !wrappedContext) return;
 				retryResponseMeta.set(wrappedContext, summary);

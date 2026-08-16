@@ -44,6 +44,7 @@ export type HttpClientOptions = ProxyResolutionOptions & {
 	warn?: (message: string) => void;
 	userAgent?: string;
 	onRetrySummary?: (summary: HttpRetrySummary) => void;
+	signal?: AbortSignal;
 };
 
 type HttpStatusOutcome = {
@@ -216,6 +217,78 @@ function requireNativeResponseBody(response: Response): ReadableStream<Uint8Arra
 	return response.body;
 }
 
+function mergeAbortSignals(
+	...signals: Array<AbortSignal | null | undefined>
+): AbortSignal | undefined {
+	const activeSignals = signals.filter((signal): signal is AbortSignal => signal != null);
+	if (activeSignals.length === 0) return undefined;
+	if (activeSignals.length === 1) return activeSignals[0];
+	return AbortSignal.any(activeSignals);
+}
+
+function cancelStreamOnAbort(
+	body: ReadableStream<Uint8Array>,
+	signal: AbortSignal | undefined,
+): ReadableStream<Uint8Array> {
+	if (!signal) return body;
+
+	let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+	let finished = false;
+	let streamController: ReadableStreamDefaultController<Uint8Array> | undefined;
+	const cleanup = () => signal.removeEventListener("abort", onAbort);
+	const onAbort = () => {
+		if (finished) return;
+		finished = true;
+		cleanup();
+		const reason = signal.reason ?? new DOMException("The operation was aborted", "AbortError");
+		streamController?.error(reason);
+		const cancellation = reader ? reader.cancel(reason) : body.cancel(reason);
+		void cancellation.catch(() => undefined).finally(() => reader?.releaseLock());
+	};
+
+	return new ReadableStream<Uint8Array>(
+		{
+			start(controller) {
+				streamController = controller;
+				signal.addEventListener("abort", onAbort, { once: true });
+				if (signal.aborted) onAbort();
+			},
+			async pull(controller) {
+				try {
+					reader ??= body.getReader();
+					const chunk = await reader.read();
+					if (finished) return;
+					if (chunk.done) {
+						finished = true;
+						cleanup();
+						controller.close();
+						reader.releaseLock();
+						return;
+					}
+					controller.enqueue(chunk.value);
+				} catch (error) {
+					if (finished) return;
+					finished = true;
+					cleanup();
+					controller.error(error);
+					reader?.releaseLock();
+				}
+			},
+			async cancel(reason) {
+				if (finished) return;
+				finished = true;
+				cleanup();
+				try {
+					await (reader ? reader.cancel(reason) : body.cancel(reason));
+				} finally {
+					reader?.releaseLock();
+				}
+			},
+		},
+		{ highWaterMark: 0 },
+	);
+}
+
 function sanitizeStreamErrors(
 	body: ReadableStream<Uint8Array>,
 	serializedUrl: SerializedRequestUrl,
@@ -265,9 +338,13 @@ function sanitizeStreamErrors(
 function toNativeHttpStreamResponse(
 	response: Response,
 	serializedUrl: SerializedRequestUrl,
+	signal?: AbortSignal,
 ): HttpStreamResponse {
 	const headers = Object.fromEntries(response.headers.entries());
-	const body = sanitizeStreamErrors(requireNativeResponseBody(response), serializedUrl);
+	const body = sanitizeStreamErrors(
+		cancelStreamOnAbort(requireNativeResponseBody(response), signal),
+		serializedUrl,
+	);
 	return {
 		body,
 		headers,
@@ -585,6 +662,7 @@ async function fetchNativeHttp(
 	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
 	const { requestUrl } = serializedUrl;
 	const controller = options.timeout ? new AbortController() : undefined;
+	const signal = mergeAbortSignals(clientOptions.signal, controller?.signal);
 	const timeoutHandle = options.timeout
 		? setTimeout(() => controller?.abort(), options.timeout)
 		: undefined;
@@ -609,7 +687,7 @@ async function fetchNativeHttp(
 			headers: options.headers,
 			method,
 			...(proxy ? { proxy } : {}),
-			signal: controller?.signal,
+			...(signal ? { signal } : {}),
 		};
 		if (options.body !== undefined) {
 			requestInit.body = normalizeNativeFetchBody(options.body);
@@ -674,6 +752,7 @@ async function fetchNativeHttpStream(
 	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
 	const { requestUrl } = serializedUrl;
 	const controller = options.timeout ? new AbortController() : undefined;
+	const signal = mergeAbortSignals(clientOptions.signal, controller?.signal);
 	const timeoutHandle = options.timeout
 		? setTimeout(() => controller?.abort(), options.timeout)
 		: undefined;
@@ -684,7 +763,7 @@ async function fetchNativeHttpStream(
 			headers: options.headers,
 			method,
 			...(proxy ? { proxy } : {}),
-			signal: controller?.signal,
+			...(signal ? { signal } : {}),
 		};
 		if (options.body !== undefined) {
 			requestInit.body = normalizeNativeFetchBody(options.body);
@@ -703,7 +782,9 @@ async function fetchNativeHttpStream(
 			});
 		}
 
-		return toNativeHttpStreamResponse(response, serializedUrl);
+		// Per-call timeout remains header-scoped, while the ambient request signal
+		// stays attached to the response body for its full consumption lifetime.
+		return toNativeHttpStreamResponse(response, serializedUrl, clientOptions.signal);
 	} catch (error) {
 		if (error instanceof SyntaxError) {
 			throw redactSensitiveError(
