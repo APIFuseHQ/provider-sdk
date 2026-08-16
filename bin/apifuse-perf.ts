@@ -11,7 +11,6 @@ import {
 	createBypassProviderCache,
 	createHttpClient,
 	createProviderChoiceContext,
-	createStealthClient,
 	createSttClientFromEnv,
 	executeOperation,
 	getProviderBaseUrl,
@@ -28,6 +27,7 @@ import {
 } from "../src/index.js";
 import { computeStats, groupSpansByName, type PerfStats } from "../src/runtime/perf.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { createStealthClient } from "../src/runtime/stealth.js";
 import { createTraceContext, resolveTraceContextOptions } from "../src/runtime/trace.js";
 import { renderWaterfall } from "../src/runtime/waterfall.js";
 import type { BrowserClient } from "../src/types.js";
@@ -458,9 +458,7 @@ async function loadFixtureReplay(providerDirectory: string): Promise<FixtureRepl
 async function assertProxyConfigured(provider: ProviderDefinition): Promise<void> {
 	const policy = provider.proxy;
 	if (!policy || typeof policy !== "object" || policy.mode === "disabled") {
-		throw new Error(
-			"--compare-proxy requires an enabled ProviderProxyPolicy on the provider.",
-		);
+		throw new Error("--compare-proxy requires an enabled ProviderProxyPolicy on the provider.");
 	}
 
 	const resolved = await resolveProxy({ proxyPolicy: policy });

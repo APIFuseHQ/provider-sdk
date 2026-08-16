@@ -4,7 +4,6 @@ import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import type { ProviderDefinition } from "../src/index.js";
 import {
-	createBrowserClient,
 	createCredentialContext,
 	createEnvContext,
 	createHttpClient,
@@ -12,12 +11,13 @@ import {
 	createProviderCache,
 	createProviderChoiceContext,
 	createUnsupportedResolverClient,
-	createStealthClient,
 	createSttClientFromEnv,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
 	ProviderError,
 } from "../src/index.js";
+import { createBrowserClient } from "../src/runtime/browser.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { createStealthClient } from "../src/runtime/stealth.js";
 import { createTraceContext } from "../src/runtime/trace.js";
 import type { BrowserClient, ProviderContext } from "../src/types.js";
 

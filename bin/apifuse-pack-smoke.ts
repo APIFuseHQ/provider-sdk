@@ -224,7 +224,7 @@ function smokePackedStealthNative(consumerDir: string): void {
 			"--eval",
 			[
 				'import { createServer } from "node:http";',
-				'import { createStealthClient } from "@apifuse/provider-sdk";',
+				'import { createStealthClient } from "@apifuse/provider-sdk/runtime/stealth";',
 				"const server = createServer((_request, response) => {",
 				'  response.setHeader("set-cookie", "pack_native_cookie=landed; Path=/");',
 				'  response.end("packed native stealth ok");',

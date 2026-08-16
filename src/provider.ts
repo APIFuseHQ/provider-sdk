@@ -167,25 +167,23 @@ export type {
 	StateWriteOptions,
 } from "./types.js";
 export {
-	createNativeNetworkClient,
-	createEnvVendorCredentialResolver,
-	deriveNativeCredentialAffinityKey,
 	NativeEgressGrantExpiredError,
 	NativeEgressNotDeclaredError,
 	NativeIdleTimeoutError,
 	NativeNetworkError,
 	NativeProxyExpiredError,
-	resolveNativeGatewayProxy,
-	type NativeGatewayProxy,
-	type NativeGatewayProxyResolutionInput,
-	type NativeGatewayProxySkipReason,
-	type NativeGatewayProxySynthesizer,
-	type NativeGatewayProxySynthesisResult,
-	type NativeGatewayProxySynthesisInput,
-	type NativeNetworkClientOptions,
-	type NativeNetworkErrorCode,
-	type VendorCredentialLookup,
-	type VendorCredentialResolver,
+} from "./runtime/native-network-errors.js";
+export type {
+	NativeGatewayProxy,
+	NativeGatewayProxyResolutionInput,
+	NativeGatewayProxySkipReason,
+	NativeGatewayProxySynthesizer,
+	NativeGatewayProxySynthesisResult,
+	NativeGatewayProxySynthesisInput,
+	NativeNetworkClientOptions,
+	NativeNetworkErrorCode,
+	VendorCredentialLookup,
+	VendorCredentialResolver,
 } from "./runtime/native-network.js";
 export {
 	HttpRetryAfterPolicy,

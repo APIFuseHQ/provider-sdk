@@ -1,14 +1,13 @@
 import { spyOn } from "bun:test";
 import { z } from "zod";
 
-import { serve } from "../../server/serve.js";
-import type { ProviderDefinition } from "../../types.js";
+import { createServerApp, serve } from "../../index.js";
+import type { ProviderDefinition } from "../../index.js";
+import type { ProviderServerLogEvent } from "../../server/serve.js";
+import type { CapabilityImportGuardState } from "./capability-import-guard-state.js";
 
 const mode = process.argv[2] ?? "standard";
-const state = Reflect.get(globalThis, "__capabilityImportGuardState") as {
-	stealthCreateArgs: unknown[][];
-	stealthLoads: number;
-};
+const state = Reflect.get(globalThis, "__capabilityImportGuardState") as CapabilityImportGuardState;
 
 const operations: ProviderDefinition["operations"] = {
 	stealth: {
@@ -70,7 +69,7 @@ const provider: ProviderDefinition = {
 	...(mode === "resolver" || mode === "aggregate"
 		? { resolver: { vendors: ["2captcha"], kinds: ["turnstile"] } }
 		: {}),
-	...(["stealth", "tier1-stealth", "primitive", "aggregate"].includes(mode)
+	...(["stealth", "tier1-stealth", "primitive", "aggregate", "sync-esm"].includes(mode)
 		? { stealth: { profile: "chrome-146", platform: "linux" as const } }
 		: {}),
 	meta: { displayName: "Capability import guard", category: "test" },
@@ -79,6 +78,23 @@ const provider: ProviderDefinition = {
 
 function assert(condition: unknown, message: string): asserts condition {
 	if (!condition) throw new Error(message);
+}
+
+if (mode === "sync-esm") {
+	try {
+		createServerApp(provider);
+		throw new Error("Expected synchronous capability loading to fail");
+	} catch (error) {
+		assert(error && typeof error === "object", "Expected a structured synchronous load error");
+		assert("code" in error, "Synchronous load error is missing its code");
+		assert(
+			error.code === "PROVIDER_CAPABILITY_SYNC_LOAD_UNSUPPORTED",
+			`Unexpected synchronous load error code: ${error.code}`,
+		);
+		assert("message" in error && typeof error.message === "string", "Missing error message");
+		assert(error.message.includes("createServerAppAsync"), "Async API guidance is missing");
+	}
+	process.exit(0);
 }
 
 if (["browser", "native", "resolver", "stealth", "aggregate", "primitive"].includes(mode)) {
@@ -134,9 +150,15 @@ if (["browser", "native", "resolver", "stealth", "aggregate", "primitive"].inclu
 	process.exit(0);
 }
 
+const logs: ProviderServerLogEvent[] = [];
+const unhandledRejections: unknown[] = [];
+if (mode === "tier2-stealth-rejection") {
+	process.on("unhandledRejection", (error) => unhandledRejections.push(error));
+}
+
 const handle = await serve(provider, {
 	port: 0,
-	logger: () => {},
+	logger: (event) => logs.push(event),
 	shutdown: { signals: false },
 });
 
@@ -151,6 +173,12 @@ try {
 
 	const health = await fetch(`${baseUrl}/health`);
 	assert(health.status === 200, `Unexpected health status: ${health.status}`);
+	if (mode === "standard") {
+		assert(
+			state.heavyLoads.length === 0,
+			`Root boot loaded heavy modules: ${JSON.stringify(state.heavyLoads)}`,
+		);
+	}
 	if (mode === "tier1-stealth") {
 		assert(state.stealthLoads === 1, "Declared stealth was not preloaded before listening");
 		assert(state.stealthCreateArgs.length === 0, "Stealth client was created before a context");
@@ -179,6 +207,32 @@ try {
 				"Tier-2 stealth session did not preserve synchronous cookies",
 			);
 		}
+	} else if (mode === "tier2-stealth-rejection") {
+		const response = await request("stealth", "req-tier2-stealth-rejection");
+		assert(response.status === 500, `Unexpected rejected stealth status: ${response.status}`);
+		await Bun.sleep(50);
+		assert(unhandledRejections.length === 0, "Lazy stealth cleanup emitted an unhandled rejection");
+		const cleanupLogs = logs.filter((event) => event.event === "provider_cleanup_failed");
+		assert(cleanupLogs.length === 1, `Unexpected cleanup logs: ${JSON.stringify(cleanupLogs)}`);
+		assert(
+			JSON.stringify(cleanupLogs[0]) ===
+				JSON.stringify({
+					level: "warn",
+					event: "provider_cleanup_failed",
+					providerId: provider.id,
+					kind: "operation",
+					route: "stealth",
+					requestId: "req-tier2-stealth-rejection",
+					resource: "stealth",
+					errorClass: "Error",
+					message: "unexpected heavy module load: ../../runtime/stealth.js",
+				}),
+			`Cleanup failure lost correlation: ${JSON.stringify(cleanupLogs[0])}`,
+		);
+		assert(
+			logs.filter((event) => event.event === "provider_request_failed").length === 1,
+			"Rejected stealth request was reported more than once as a request failure",
+		);
 	} else {
 		assert(state.stealthLoads === 0, "Standard provider loaded stealth during boot");
 

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { serve } from "../server/serve.js";
+import { createServerAppAsync } from "../server/serve.js";
 import type { ProviderDefinition, ResolverContext } from "../types.js";
 
 const preload = new URL("./fixtures/capability-import-guard-preload.ts", import.meta.url).pathname;
@@ -47,6 +47,12 @@ describe("provider capability imports", () => {
 		expect(result.exitCode).toBe(0);
 	});
 
+	it("survives a rejected tier-2 stealth import without an unhandled rejection", async () => {
+		const result = await runImportGuard("tier2-stealth-rejection");
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+	});
+
 	it("preloads a declared stealth capability before listening", async () => {
 		const result = await runImportGuard("tier1-stealth");
 		expect(result.stderr).toBe("");
@@ -65,7 +71,13 @@ describe("provider capability imports", () => {
 		expect(result.exitCode).toBe(0);
 	});
 
-	it("loads a declared resolver during startup and serves it through synchronous contexts", async () => {
+	it("directs unsupported synchronous ESM capability loading to the async API", async () => {
+		const result = await runImportGuard("sync-esm");
+		expect(result.stderr).toBe("");
+		expect(result.exitCode).toBe(0);
+	});
+
+	it("creates an app asynchronously with declared capabilities preloaded", async () => {
 		const provider: ProviderDefinition = {
 			id: "declared-resolver-startup",
 			version: "1.0.0",
@@ -91,22 +103,16 @@ describe("provider capability imports", () => {
 				return { form: "token", token: "loaded-at-startup" };
 			},
 		};
-		const handle = await serve(provider, {
-			port: 0,
+		const app = await createServerAppAsync(provider, {
 			resolver,
 			logger: () => {},
-			shutdown: { signals: false },
 		});
-		try {
-			const response = await fetch(`http://127.0.0.1:${handle.port}/v1/solve`, {
-				method: "POST",
-				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ requestId: "req-resolver-loaded", input: {} }),
-			});
-			expect(response.status).toBe(200);
-			expect(await response.json()).toEqual({ data: { token: "loaded-at-startup" } });
-		} finally {
-			await handle.close();
-		}
+		const response = await app.request("/v1/solve", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req-resolver-loaded", input: {} }),
+		});
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ data: { token: "loaded-at-startup" } });
 	});
 });

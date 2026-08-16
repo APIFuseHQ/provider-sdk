@@ -267,6 +267,16 @@ function requireCapabilityModule<T>(
 	try {
 		return require(specifier) as T;
 	} catch (error) {
+		if (error && typeof error === "object" && "code" in error && error.code === "ERR_REQUIRE_ESM") {
+			throw new ProviderError(
+				`Synchronous capability loading is unavailable for provider "${provider.id}" on this runtime. Use createServerAppAsync() instead of createServerApp().`,
+				{
+					code: "PROVIDER_CAPABILITY_SYNC_LOAD_UNSUPPORTED",
+					details: { providerId: provider.id, capability },
+					cause: normalizedCapabilityCause(error),
+				},
+			);
+		}
 		throw capabilityLoadError(provider, [{ capability, error }]);
 	}
 }
@@ -357,6 +367,7 @@ function createForwardingStealthCookies(
 }
 
 function createLazyStealthClient(
+	onCleanupError: (error: unknown) => void,
 	...createArgs: Parameters<typeof StealthRuntimeModule.createStealthClient>
 ): StealthClient {
 	let client: StealthClient | undefined;
@@ -411,7 +422,18 @@ function createLazyStealthClient(
 		close() {
 			client?.close?.();
 			if (!client && clientPromise) {
-				void clientPromise.then((loadedClient) => loadedClient.close?.());
+				void clientPromise
+					.then((loadedClient) => loadedClient.close?.())
+					.catch((error: unknown) => {
+						// The request path already reports a failed lazy import. Cleanup must
+						// consume that rejection (or a pending close failure) without creating
+						// a second unhandled rejection that can terminate Bun.
+						try {
+							onCleanupError(error);
+						} catch {
+							// A user logger must not turn handled cleanup into a process-level rejection.
+						}
+					});
 			}
 		},
 	};
@@ -585,6 +607,16 @@ function createProviderContext(
 		telemetry: proxyTelemetry,
 	};
 	const { capabilityModules } = options;
+	const logStealthCleanupError = (error: unknown) =>
+		logProviderCleanupError(
+			options.logger,
+			provider,
+			"operation",
+			operationId,
+			request.requestId,
+			"stealth",
+			error,
+		);
 
 	const env = createEnvContext([
 		...(provider.secrets?.map((secret) => secret.name) ?? []),
@@ -626,8 +658,13 @@ function createProviderContext(
 						)
 					: capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
 				: stealthProfile
-					? createLazyStealthClient(stealthBaseUrl, stealthProfile.name, stealthClientOptions)
-					: createLazyStealthClient(stealthBaseUrl, stealthClientOptions)
+					? createLazyStealthClient(
+							logStealthCleanupError,
+							stealthBaseUrl,
+							stealthProfile.name,
+							stealthClientOptions,
+						)
+					: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
 			: createStealthStub(),
 		browser:
 			provider.runtime === "browser"
@@ -756,6 +793,16 @@ function createAuthFlowContext(
 		affinityKey: proxyClientOptions.affinityKey,
 	};
 	const { capabilityModules } = options;
+	const logStealthCleanupError = (error: unknown) =>
+		logProviderCleanupError(
+			options.logger,
+			provider,
+			"auth",
+			"flow",
+			request.requestId,
+			"stealth",
+			error,
+		);
 	const credential = request.connection
 		? createCredentialContext({
 				allowedKeys: provider.credential?.keys,
@@ -787,8 +834,13 @@ function createAuthFlowContext(
 							)
 						: capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
 					: stealthProfile
-						? createLazyStealthClient(stealthBaseUrl, stealthProfile.name, stealthClientOptions)
-						: createLazyStealthClient(stealthBaseUrl, stealthClientOptions)
+						? createLazyStealthClient(
+								logStealthCleanupError,
+								stealthBaseUrl,
+								stealthProfile.name,
+								stealthClientOptions,
+							)
+						: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
 				: createStealthStub(),
 			...(provider.native
 				? {
@@ -878,7 +930,7 @@ export type ProviderServerLogEvent =
 			level: "warn";
 			event: "provider_cleanup_failed";
 			providerId: string;
-			kind: "operation";
+			kind: "operation" | "auth";
 			route: string;
 			requestId?: string;
 			resource: "browser" | "stealth";
@@ -1385,6 +1437,7 @@ function logProviderError(
 function logProviderCleanupError(
 	logger: ProviderServerLogger | unknown,
 	provider: ProviderDefinition,
+	kind: "operation" | "auth",
 	operationId: string,
 	requestId: string | undefined,
 	resource: "browser" | "stealth",
@@ -1397,7 +1450,7 @@ function logProviderCleanupError(
 		level: "warn",
 		event: "provider_cleanup_failed",
 		providerId: provider.id,
-		kind: "operation",
+		kind,
 		route: operationId,
 		...(requestId ? { requestId } : {}),
 		resource,
@@ -1847,6 +1900,7 @@ async function handleOperation(
 			logProviderCleanupError(
 				options.logger,
 				provider,
+				"operation",
 				operationId,
 				request.requestId,
 				"stealth",
@@ -1859,6 +1913,7 @@ async function handleOperation(
 			logProviderCleanupError(
 				options.logger,
 				provider,
+				"operation",
 				operationId,
 				request.requestId,
 				"browser",
@@ -1966,7 +2021,19 @@ async function handleAuthFlow(
 		}
 		throw error;
 	} finally {
-		context.stealth.close?.();
+		try {
+			context.stealth.close?.();
+		} catch (error) {
+			logProviderCleanupError(
+				options.logger,
+				provider,
+				"auth",
+				route,
+				request.requestId,
+				"stealth",
+				error,
+			);
+		}
 	}
 }
 
@@ -2095,6 +2162,29 @@ function parseStatefulForwardingEnvelope(rawBody: unknown): ProviderServerStatef
 	});
 }
 
+/**
+ * Primary, cross-runtime app factory. Declared capability ESM is preloaded
+ * asynchronously, so this path works on Bun and every supported Node release.
+ */
+export async function createServerAppAsync(
+	provider: ProviderDefinition,
+	options: ProviderServerOptions = {},
+): Promise<Hono> {
+	validateFailClosedDeclaration(provider);
+	validateStatefulServerConfig(options);
+	return createServerAppWithCapabilityModules(
+		provider,
+		options,
+		await loadProviderCapabilityModules(provider),
+	);
+}
+
+/**
+ * Synchronous compatibility factory. Standard providers remain synchronous on
+ * every runtime because they load no capability modules. Providers declaring a
+ * capability require Bun or Node >=22.12; older Node releases receive an
+ * actionable error directing them to createServerAppAsync().
+ */
 export function createServerApp(
 	provider: ProviderDefinition,
 	options: ProviderServerOptions = {},
@@ -2724,29 +2814,22 @@ export async function serve(
 		options.shutdown?.timeoutMs ?? DEFAULT_SHUTDOWN_TIMEOUT_MS,
 	);
 	const configuredSignals = resolveShutdownSignals(options.shutdown?.signals ?? true);
-	validateFailClosedDeclaration(provider);
-	validateStatefulServerConfig(options);
 	const selfTestSecrets = resolveSelfTestMasterSecrets();
-	const [capabilityModules, selfTestModule] = await Promise.all([
-		loadProviderCapabilityModules(provider),
+	const serverAppOptions: ProviderServerOptions = {
+		logger: options.logger,
+		ocr: options.ocr,
+		stt: options.stt,
+		resolver: options.resolver,
+		state: options.state,
+		allowMemoryStateFallback: options.allowMemoryStateFallback,
+		operationExecutor: options.operationExecutor,
+		internalOperationExecutor: options.internalOperationExecutor,
+		statefulForwarding: options.statefulForwarding,
+	};
+	const [app, selfTestModule] = await Promise.all([
+		createServerAppAsync(provider, serverAppOptions),
 		selfTestSecrets ? import("./self-test.js") : undefined,
 	]);
-
-	const app = createServerAppWithCapabilityModules(
-		provider,
-		{
-			logger: options.logger,
-			ocr: options.ocr,
-			stt: options.stt,
-			resolver: options.resolver,
-			state: options.state,
-			allowMemoryStateFallback: options.allowMemoryStateFallback,
-			operationExecutor: options.operationExecutor,
-			internalOperationExecutor: options.internalOperationExecutor,
-			statefulForwarding: options.statefulForwarding,
-		},
-		capabilityModules,
-	);
 
 	const servers: BunServerHandle[] = [];
 	try {

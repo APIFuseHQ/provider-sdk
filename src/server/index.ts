@@ -1,5 +1,6 @@
 export {
 	createServerApp,
+	createServerAppAsync,
 	ERROR_OBSERVABILITY_HEADER,
 	type ErrorObservabilityDetails,
 	type ProviderServerCloseOptions,

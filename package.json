@@ -61,6 +61,31 @@
 			"import": "./dist/server/index.js",
 			"default": "./dist/server/index.js"
 		},
+		"./runtime/browser": {
+			"types": "./dist/runtime/browser.d.ts",
+			"import": "./dist/runtime/browser.js",
+			"default": "./dist/runtime/browser.js"
+		},
+		"./runtime/native-network": {
+			"types": "./dist/runtime/native-network.d.ts",
+			"import": "./dist/runtime/native-network.js",
+			"default": "./dist/runtime/native-network.js"
+		},
+		"./runtime/prevalidate": {
+			"types": "./dist/runtime/prevalidate.d.ts",
+			"import": "./dist/runtime/prevalidate.js",
+			"default": "./dist/runtime/prevalidate.js"
+		},
+		"./runtime/resolver": {
+			"types": "./dist/runtime/resolver.d.ts",
+			"import": "./dist/runtime/resolver.js",
+			"default": "./dist/runtime/resolver.js"
+		},
+		"./runtime/stealth": {
+			"types": "./dist/runtime/stealth.d.ts",
+			"import": "./dist/runtime/stealth.js",
+			"default": "./dist/runtime/stealth.js"
+		},
 		"./stateful": {
 			"types": "./dist/stateful/index.d.ts",
 			"import": "./dist/stateful/index.js",
