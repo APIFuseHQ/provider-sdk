@@ -268,6 +268,10 @@ export function createTwoCaptchaResolverVendorAdapter(
 	return {
 		id: TWOCAPTCHA_VENDOR_ID,
 
+		// The resolved identity is sent as literal proxy fields on the task, so the vendor's
+		// worker dials the proxy and a required policy is genuinely satisfied.
+		appliesProxyIdentity: true,
+
 		supports(kind) {
 			return resolverVendorSupports(TWOCAPTCHA_VENDOR_ID, kind);
 		},

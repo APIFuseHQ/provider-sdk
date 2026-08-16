@@ -328,6 +328,19 @@ function adapterRequiresTransport(
 		: adapter.requiresTransport === true;
 }
 
+/**
+ * Whether a vendor routes its solve through the resolved proxy identity. Constructing the
+ * adapter is the only way to read the declaration, and construction is cheap and side-effect
+ * free for every registered vendor.
+ */
+function adapterAppliesProxyIdentity(
+	entries: readonly ResolverChainEntry[],
+	adapterId: ProviderResolverVendor,
+): boolean {
+	const entry = entries.find((candidate) => candidate.id === adapterId);
+	return entry?.createAdapter().appliesProxyIdentity === true;
+}
+
 function sanitizeDiagnosticUrl(rawUrl: string): string {
 	try {
 		const parsed = new URL(rawUrl);
@@ -730,9 +743,12 @@ function createResolverChainClient(options: {
 			// A required proxy policy is checked before the cache. Solutions minted under a
 			// previous release are shared and long-lived, so consulting the cache first would
 			// keep reporting success without a proxy identity until every old entry expired.
-			const requiredProxyIdentityMissing =
-				options.proxyMode === "required" && identity === undefined;
-			if (requiredProxyIdentityMissing) {
+			// A vendor that never applies the identity cannot satisfy the policy either, so an
+			// unsatisfiable chain is rejected here rather than after a cache hit.
+			const proxyRequired = options.proxyMode === "required";
+			const satisfiesRequiredProxy = (adapterId: ProviderResolverVendor): boolean =>
+				identity !== undefined && adapterAppliesProxyIdentity(options.entries, adapterId);
+			if (proxyRequired && !supportingEntries.some((entry) => satisfiesRequiredProxy(entry.id))) {
 				throwExhausted(
 					supportingEntries.map((entry) => ({
 						vendor: entry.id,
@@ -755,6 +771,9 @@ function createResolverChainClient(options: {
 				const adapter = entry.createAdapter();
 				try {
 					const solveAttempt = () => {
+						if (proxyRequired && !satisfiesRequiredProxy(adapter.id)) {
+							throw new ResolverVendorUnavailableError(adapter.id, "missing_proxy_identity");
+						}
 						const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
 						const unrestrictedTransport =
 							options.transport ??

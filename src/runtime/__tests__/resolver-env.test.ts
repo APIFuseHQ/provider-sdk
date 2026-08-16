@@ -327,6 +327,9 @@ describe("resolver server wiring", () => {
 		}> = [];
 		const adapter: ResolverVendorAdapter = {
 			id: "2captcha",
+			// Mirrors the production 2captcha adapter, which sends the identity as literal
+			// proxy fields on the task and therefore satisfies a required policy.
+			appliesProxyIdentity: true,
 			supports: (kind) => kind === "turnstile",
 			async solve(_challenge, identity) {
 				identities.push(identity);

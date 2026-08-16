@@ -314,6 +314,60 @@ let seedCalls = 0;
 		expect(guarded.state.solveCalls).toBe(0);
 	});
 
+	it("rejects a required proxy policy for a vendor that does not apply the identity", async () => {
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+			identity: { proxyUrl: "http://proxy.test:8080", userAgent: "resolver-test-agent" },
+			proxyMode: "required",
+		});
+
+		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "browser", reason: "missing_proxy_identity" }],
+		});
+		expect(adapter.state.solveCalls).toBe(0);
+	});
+
+	it("accepts a required proxy policy for a vendor that applies the identity", async () => {
+		const adapter = createStubAdapter({ id: "2captcha" });
+		const applying: ResolverVendorAdapter = {
+			...adapter.adapter,
+			appliesProxyIdentity: true,
+		};
+		const resolver = createResolverClient({
+			adapters: [applying],
+			kinds: ["aws_waf"],
+			identity: { proxyUrl: "http://proxy.test:8080", userAgent: "resolver-test-agent" },
+			proxyMode: "required",
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({
+			form: "token",
+			token: "2captcha",
+		});
+		expect(adapter.state.solveCalls).toBe(1);
+	});
+
+	it("skips a non-applying vendor and falls through to one that applies the identity", async () => {
+		const browser = createStubAdapter({ id: "browser" });
+		const solver = createStubAdapter({ id: "2captcha" });
+		const resolver = createResolverClient({
+			adapters: [browser.adapter, { ...solver.adapter, appliesProxyIdentity: true }],
+			kinds: ["aws_waf"],
+			identity: { proxyUrl: "http://proxy.test:8080", userAgent: "resolver-test-agent" },
+			proxyMode: "required",
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({
+			form: "token",
+			token: "2captcha",
+		});
+		expect(browser.state.solveCalls).toBe(0);
+		expect(solver.state.solveCalls).toBe(1);
+	});
+
 	it("allows an optional proxy policy without an identity", async () => {
 		const adapter = createStubAdapter({ id: "browser" });
 		const resolver = createResolverClient({
@@ -329,7 +383,9 @@ let seedCalls = 0;
 	it("allows a required proxy policy with an internally supplied identity", async () => {
 		const adapter = createStubAdapter({ id: "browser" });
 		const resolver = createResolverClient({
-			adapters: [adapter.adapter],
+			// A required policy is only satisfied by a vendor that applies the identity, so
+			// this fixture opts in the way the 2captcha adapter does in production.
+			adapters: [{ ...adapter.adapter, appliesProxyIdentity: true }],
 			kinds: ["aws_waf"],
 			identity: {
 				proxyUrl: "http://proxy.test:8080",
