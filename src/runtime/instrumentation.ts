@@ -23,7 +23,7 @@ import {
 	getTraceRecorder,
 	type TraceContext,
 } from "./trace.js";
-import { RESOLVER_INSTRUMENTATION_METADATA } from "./resolver.js";
+import { RESOLVER_INSTRUMENTATION_METADATA } from "./resolver-shared.js";
 
 export interface InstrumentationOptions extends CreateTraceContextOptions {}
 

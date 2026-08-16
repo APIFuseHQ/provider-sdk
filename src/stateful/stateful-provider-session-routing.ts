@@ -1,4 +1,5 @@
 import type { SessionKey } from "./session-key.js";
+import { StatefulRoutingDeadlineError } from "./errors.js";
 import {
 	NOOP_STATEFUL_PROVIDER_METRIC_EMITTER,
 	type StatefulProviderMetricEmitter,
@@ -82,17 +83,7 @@ type DeadlineSignal = {
 	readonly cleanup: () => void;
 };
 
-export class StatefulRoutingDeadlineError extends Error {
-	readonly requestId: string;
-	readonly deadlineAt: string;
-
-	constructor(requestId: string, deadlineAt: string) {
-		super(`Stateful operation request ${requestId} deadline has expired.`);
-		this.name = "StatefulRoutingDeadlineError";
-		this.requestId = requestId;
-		this.deadlineAt = deadlineAt;
-	}
-}
+export { StatefulRoutingDeadlineError } from "./errors.js";
 
 export class StatefulRoutingOwnershipError extends Error {
 	readonly requestId: string;

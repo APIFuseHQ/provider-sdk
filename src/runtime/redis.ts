@@ -1,4 +1,8 @@
-import { Redis } from "ioredis";
+import { createRequire } from "node:module";
+
+import type { Redis } from "ioredis";
+
+const require = createRequire(import.meta.url);
 
 export type ProviderRedisClient = Redis;
 
@@ -17,7 +21,8 @@ type RedisTimeoutOptions<T> = {
 export function createProviderRedisClient(
 	options: ProviderRedisClientOptions,
 ): ProviderRedisClient {
-	const redis = new Redis(options.redisUrl, {
+	const { Redis: RedisClient } = require("ioredis") as typeof import("ioredis");
+	const redis = new RedisClient(options.redisUrl, {
 		connectTimeout: options.timeoutMs,
 		enableOfflineQueue: false,
 		lazyConnect: true,

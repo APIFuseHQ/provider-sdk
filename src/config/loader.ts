@@ -1,8 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 
-import { Redis } from "ioredis";
+import type { Redis } from "ioredis";
 
 import type { ProviderProxyPolicy, ProviderProxyProvider, TraceConfig } from "../types.js";
 import {
@@ -217,6 +218,7 @@ type ProxyRedisClient = Pick<
 >;
 
 const proxyCache = new Map<string, CachedProxyPool>();
+const require = createRequire(import.meta.url);
 const proxyInflight = new Map<string, Promise<SmartproxyAllocationResult>>();
 const invalidatedProxyKeys = new Map<string, number>();
 const redisClients = new Map<string, ProxyRedisClient>();
@@ -276,7 +278,8 @@ function getProxyRedis(): ProxyRedisClient | undefined {
 	const existing = redisClients.get(redisUrl);
 	if (existing) return existing;
 
-	const redis = new Redis(redisUrl, {
+	const { Redis: RedisClient } = require("ioredis") as typeof import("ioredis");
+	const redis = new RedisClient(redisUrl, {
 		connectTimeout: REDIS_TIMEOUT_MS,
 		enableOfflineQueue: false,
 		lazyConnect: true,
