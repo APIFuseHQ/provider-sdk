@@ -85,13 +85,20 @@ function sseFieldValue(value: string, field: "event" | "id"): string {
 
 export async function* readableBytes(body: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
 	const reader = body.getReader();
+	let completed = false;
 	try {
 		for (;;) {
 			const { value, done } = await reader.read();
-			if (done) return;
+			if (done) {
+				completed = true;
+				return;
+			}
 			if (value) yield value;
 		}
 	} finally {
+		if (!completed) {
+			await reader.cancel().catch(() => undefined);
+		}
 		reader.releaseLock();
 	}
 }

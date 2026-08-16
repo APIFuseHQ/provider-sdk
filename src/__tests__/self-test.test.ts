@@ -366,6 +366,154 @@ describe("self-test internal listener", () => {
 		expect(elapsed).toBeLessThan(200);
 	});
 
+	it("aborts an in-flight ctx.http fetch when a self-test case times out", async () => {
+		const provider = createProvider();
+		provider.operations.abortableHttp = {
+			annotations: { readOnly: true },
+			input: z.object({}),
+			output: z.object({ ok: z.boolean() }),
+			handler: async (ctx) => {
+				const response = await ctx.http.get("https://example.com/slow-self-test");
+				return { ok: response.ok };
+			},
+			healthCheck: {
+				interval: "5m",
+				cases: [{ name: "abortable http case", input: {}, timeoutMs: 25, assertions: () => {} }],
+			},
+		};
+		const originalFetch = globalThis.fetch;
+		let observedSignal: AbortSignal | null | undefined;
+		let resolveAbortObserved: ((aborted: boolean) => void) | undefined;
+		const abortObserved = new Promise<boolean>((resolve) => {
+			resolveAbortObserved = resolve;
+		});
+		globalThis.fetch = ((_input: string | URL | Request, init?: RequestInit) => {
+			observedSignal = init?.signal;
+			return new Promise<Response>((_resolve, reject) => {
+				const onAbort = () => {
+					resolveAbortObserved?.(observedSignal?.aborted === true);
+					reject(observedSignal?.reason);
+				};
+				observedSignal?.addEventListener("abort", onAbort, { once: true });
+				if (observedSignal?.aborted) onAbort();
+			});
+		}) as typeof fetch;
+
+		try {
+			const { selfTestApp } = createApps(provider);
+			const response = await postSelfTest(selfTestApp, {
+				operationId: "abortableHttp",
+				caseName: "abortable http case",
+			});
+			const body = (await response.json()) as SelfTestResponse;
+
+			expect(body.result?.error?.code).toBe("self_test_timeout");
+			expect(await abortObserved).toBe(true);
+			expect(observedSignal?.aborted).toBe(true);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("cancels a late operation response without starting body consumption", async () => {
+		let resolveResponse: ((response: Response) => void) | undefined;
+		const responsePromise = new Promise<Response>((resolve) => {
+			resolveResponse = resolve;
+		});
+		let sourceCancelCount = 0;
+		let textCallCount = 0;
+		const response = new Response(
+			new ReadableStream<Uint8Array>({
+				cancel() {
+					sourceCancelCount += 1;
+				},
+			}),
+		);
+		Object.defineProperty(response, "text", {
+			value: async () => {
+				textCallCount += 1;
+				return "never consumed";
+			},
+		});
+		const invoke = createSelfTestInvoke({ request: () => responsePromise });
+		const controller = new AbortController();
+		const reason = new DOMException("case timed out", "AbortError");
+		const pending = invoke({
+			operationId: "echo",
+			input: {},
+			requestId: "req-late-response",
+			signal: controller.signal,
+		});
+
+		controller.abort(reason);
+		resolveResponse?.(response);
+
+		await expect(pending).rejects.toBe(reason);
+		expect(sourceCancelCount).toBe(1);
+		expect(textCallCount).toBe(0);
+	});
+
+	it("settles promptly and redacts the cancellation event when the requester disconnects", async () => {
+		const provider = createProvider();
+		let markInvokeStarted: (() => void) | undefined;
+		const invokeStarted = new Promise<void>((resolve) => {
+			markInvokeStarted = resolve;
+		});
+		const events: unknown[] = [];
+		let invokeCount = 0;
+		const selfTestApp = createSelfTestApp(provider, {
+			secrets: { current: MASTER_SECRET },
+			invoke: () => {
+				invokeCount += 1;
+				markInvokeStarted?.();
+				if (invokeCount === 1) return new Promise(() => {});
+				return Promise.resolve({ status: 200, data: { echoed: "ok" } });
+			},
+			logger: (event) => events.push(event),
+		});
+		const controller = new AbortController();
+
+		const responsePromise = selfTestApp.request(SELF_TEST_PATH, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				authorization: `Bearer ${validToken}`,
+			},
+			body: JSON.stringify({
+				schemaVersion: 1,
+				requestId: "req-disconnected",
+				operationId: "echo",
+				caseName: "pass case",
+				timeoutMs: 100,
+			}),
+			signal: controller.signal,
+		});
+		await invokeStarted;
+		controller.abort(new Error(`requester disconnected: ${UPSTREAM_SECRET_VALUE}`));
+		const response = await responsePromise;
+		const body = (await response.json()) as SelfTestResponse;
+
+		expect(response.status).toBe(200);
+		expect(body.result?.error?.code).toBe("self_test_execution_error");
+		const nextResponse = await postSelfTest(selfTestApp, {
+			operationId: "echo",
+			caseName: "pass case",
+		});
+		expect(nextResponse.status).toBe(200);
+		expect(events).toEqual([
+			{
+				level: "info",
+				event: "self_test_run_cancelled",
+				providerId: "self-test-provider",
+				requestId: "req-disconnected",
+				operationId: "echo",
+				caseName: "pass case",
+				reason: "requester disconnected: [REDACTED]",
+			},
+		]);
+		expect(JSON.stringify(events)).not.toContain(UPSTREAM_SECRET_VALUE);
+	});
+
 	it("honors the request-level timeoutMs override", async () => {
 		const { selfTestApp } = createApps();
 		const response = await postSelfTest(selfTestApp, {

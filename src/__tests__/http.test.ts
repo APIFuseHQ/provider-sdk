@@ -555,6 +555,261 @@ describe("createHttpClient", () => {
 		expect(lines).toEqual(["first", "second"]);
 	});
 
+	it("aborts an in-flight buffered request from the ambient request signal", async () => {
+		const ambientController = new AbortController();
+		let fetchSignal: AbortSignal | null | undefined;
+		let markFetchStarted: (() => void) | undefined;
+		const fetchStarted = new Promise<void>((resolve) => {
+			markFetchStarted = resolve;
+		});
+		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+			fetchSignal = init?.signal;
+			markFetchStarted?.();
+			return new Promise<Response>((_resolve, reject) => {
+				const onAbort = () => reject(fetchSignal?.reason);
+				fetchSignal?.addEventListener("abort", onAbort, { once: true });
+				if (fetchSignal?.aborted) onAbort();
+			});
+		}) as typeof fetch;
+		const { createHttpClient } = await import("../runtime/http.js");
+		const pending = createHttpClient(undefined, { signal: ambientController.signal }).get(
+			"https://example.com/slow",
+		);
+
+		await fetchStarted;
+		ambientController.abort();
+
+		await expect(pending).rejects.toMatchObject({
+			code: "transport_cancelled",
+			cause: { name: "AbortError" },
+		});
+		expect(fetchSignal?.aborted).toBe(true);
+	});
+
+	it("aborts an in-flight streamed request from the ambient request signal", async () => {
+		const ambientController = new AbortController();
+		let fetchSignal: AbortSignal | null | undefined;
+		let markFetchStarted: (() => void) | undefined;
+		const fetchStarted = new Promise<void>((resolve) => {
+			markFetchStarted = resolve;
+		});
+		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+			fetchSignal = init?.signal;
+			markFetchStarted?.();
+			return new Promise<Response>((_resolve, reject) => {
+				const onAbort = () => reject(fetchSignal?.reason);
+				fetchSignal?.addEventListener("abort", onAbort, { once: true });
+				if (fetchSignal?.aborted) onAbort();
+			});
+		}) as typeof fetch;
+		const { createHttpClient } = await import("../runtime/http.js");
+		const pending = createHttpClient(undefined, { signal: ambientController.signal }).stream(
+			"https://example.com/slow-stream",
+		);
+
+		await fetchStarted;
+		ambientController.abort();
+
+		await expect(pending).rejects.toMatchObject({
+			code: "transport_cancelled",
+			cause: { name: "AbortError" },
+		});
+		expect(fetchSignal?.aborted).toBe(true);
+	});
+
+	it("keeps the ambient signal active while a streamed body is consumed", async () => {
+		const ambientController = new AbortController();
+		let sourceCancelled = false;
+		mockNativeFetchState.queuedNativeResponses.push(
+			new Response(
+				new ReadableStream<Uint8Array>({
+					cancel() {
+						sourceCancelled = true;
+					},
+				}),
+			),
+		);
+		const { createHttpClient } = await import("../runtime/http.js");
+		const response = await createHttpClient(undefined, {
+			signal: ambientController.signal,
+		}).stream("https://example.com/body-stream");
+		const nextChunk = response.bytes()[Symbol.asyncIterator]().next();
+
+		ambientController.abort();
+
+		await expect(nextChunk).rejects.toMatchObject({
+			name: "TransportError",
+			code: "transport_cancelled",
+		});
+		expect(sourceCancelled).toBe(true);
+	});
+
+	it("preserves per-call timeout cancellation without an ambient signal", async () => {
+		let fetchSignal: AbortSignal | null | undefined;
+		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+			fetchSignal = init?.signal;
+			return new Promise<Response>((_resolve, reject) => {
+				const onAbort = () => reject(fetchSignal?.reason);
+				fetchSignal?.addEventListener("abort", onAbort, { once: true });
+				if (fetchSignal?.aborted) onAbort();
+			});
+		}) as typeof fetch;
+		const { createHttpClient } = await import("../runtime/http.js");
+
+		await expect(
+			createHttpClient().get("https://example.com/timeout", { timeout: 1 }),
+		).rejects.toMatchObject({ code: "transport_timeout" });
+		expect(fetchSignal?.aborted).toBe(true);
+	});
+
+	it("retries a per-call timeout when the proxy retry policy allows it", async () => {
+		let attempt = 0;
+		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+			mockNativeFetchState.calls.push({ url: String(_input), init });
+			attempt += 1;
+			if (attempt > 1) {
+				return Promise.resolve(
+					new Response('{"ok":true}', {
+						headers: { "content-type": "application/json" },
+					}),
+				);
+			}
+			const fetchSignal = init?.signal;
+			return new Promise<Response>((_resolve, reject) => {
+				const onAbort = () => reject(fetchSignal?.reason);
+				fetchSignal?.addEventListener("abort", onAbort, { once: true });
+				if (fetchSignal?.aborted) onAbort();
+			});
+		}) as typeof fetch;
+		const { createHttpClient } = await import("../runtime/http.js");
+
+		const response = await createHttpClient(undefined, {
+			proxy: "http://proxy.test",
+		}).get("https://example.com/retry-timeout", {
+			timeout: 1,
+			retry: {
+				preset: HttpRetryPreset.TransportTransient,
+				attempts: 2,
+				baseDelayMs: 0,
+			},
+		});
+
+		expect(response.data).toEqual({ ok: true });
+		expect(mockNativeFetchState.calls).toHaveLength(2);
+	});
+
+	it("merges ambient and per-call timeout signals with the first abort reason", async () => {
+		const ambientController = new AbortController();
+		const ambientReason = new DOMException("request abandoned", "AbortError");
+		let fetchSignal: AbortSignal | null | undefined;
+		let markFetchStarted: (() => void) | undefined;
+		const fetchStarted = new Promise<void>((resolve) => {
+			markFetchStarted = resolve;
+		});
+		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+			fetchSignal = init?.signal;
+			markFetchStarted?.();
+			return new Promise<Response>((_resolve, reject) => {
+				const onAbort = () => reject(fetchSignal?.reason);
+				fetchSignal?.addEventListener("abort", onAbort, { once: true });
+				if (fetchSignal?.aborted) onAbort();
+			});
+		}) as typeof fetch;
+		const { createHttpClient } = await import("../runtime/http.js");
+		const pending = createHttpClient(undefined, { signal: ambientController.signal }).get(
+			"https://example.com/merged",
+			{ timeout: 60_000 },
+		);
+
+		await fetchStarted;
+		ambientController.abort(ambientReason);
+
+		await expect(pending).rejects.toMatchObject({ code: "transport_cancelled" });
+		expect(fetchSignal?.reason).toBe(ambientReason);
+	});
+
+	it("interrupts retry backoff when the ambient request is aborted", async () => {
+		const ambientController = new AbortController();
+		const originalSetTimeout = globalThis.setTimeout;
+		let markBackoffStarted: (() => void) | undefined;
+		const backoffStarted = new Promise<void>((resolve) => {
+			markBackoffStarted = resolve;
+		});
+		globalThis.setTimeout = ((handler: Parameters<typeof setTimeout>[0], timeout?: number) => {
+			if (timeout === 1_000) markBackoffStarted?.();
+			return originalSetTimeout(handler, timeout);
+		}) as typeof setTimeout;
+		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+			mockNativeFetchState.calls.push({ url: String(input), init });
+			throw new Error("Network error");
+		}) as typeof fetch;
+
+		try {
+			const { createHttpClient } = await import("../runtime/http.js");
+			const pending = createHttpClient(undefined, {
+				signal: ambientController.signal,
+			}).get("https://example.com/retry", {
+				retry: {
+					preset: HttpRetryPreset.TransportTransient,
+					attempts: 3,
+					baseDelayMs: 1_000,
+					maxDelayMs: 1_000,
+					jitter: HttpRetryJitter.None,
+				},
+			});
+
+			await backoffStarted;
+			ambientController.abort(new DOMException("request disconnected", "AbortError"));
+
+			await expect(pending).rejects.toMatchObject({
+				code: "transport_cancelled",
+				options: { retryable: false },
+			});
+			expect(mockNativeFetchState.calls).toHaveLength(1);
+		} finally {
+			globalThis.setTimeout = originalSetTimeout;
+		}
+	});
+
+	it("preserves a string reason for an already-aborted ambient request", async () => {
+		const ambientController = new AbortController();
+		ambientController.abort("request disconnected");
+		const { createHttpClient } = await import("../runtime/http.js");
+
+		await expect(
+			createHttpClient(undefined, { signal: ambientController.signal }).get(
+				"https://example.com/not-started",
+			),
+		).rejects.toMatchObject({
+			code: "transport_cancelled",
+			cause: { message: "request disconnected" },
+		});
+		expect(mockNativeFetchState.calls).toHaveLength(0);
+	});
+
+	it("lets the per-call timeout win while a merged ambient signal stays active", async () => {
+		const ambientController = new AbortController();
+		let fetchSignal: AbortSignal | null | undefined;
+		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+			fetchSignal = init?.signal;
+			return new Promise<Response>((_resolve, reject) => {
+				const onAbort = () => reject(fetchSignal?.reason);
+				fetchSignal?.addEventListener("abort", onAbort, { once: true });
+				if (fetchSignal?.aborted) onAbort();
+			});
+		}) as typeof fetch;
+		const { createHttpClient } = await import("../runtime/http.js");
+
+		await expect(
+			createHttpClient(undefined, { signal: ambientController.signal }).get(
+				"https://example.com/merged-timeout",
+				{ timeout: 1 },
+			),
+		).rejects.toMatchObject({ code: "transport_timeout" });
+		expect(fetchSignal?.aborted).toBe(true);
+		expect(ambientController.signal.aborted).toBe(false);
+	});
+
 	it("redacts sensitiveParams from mid-stream transport errors", async () => {
 		const secret = "mid-stream-test-secret";
 		mockNativeFetchState.queuedNativeResponses.push(

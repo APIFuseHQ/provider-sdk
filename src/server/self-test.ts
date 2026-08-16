@@ -77,11 +77,22 @@ export interface SelfTestResponse {
 	results: SelfTestCaseResult[];
 }
 
+export interface SelfTestCancellationLogEvent {
+	level: "info";
+	event: "self_test_run_cancelled";
+	providerId: string;
+	requestId: string;
+	operationId: string;
+	caseName: string;
+	reason: string;
+}
+
 export type SelfTestOperationInvoke = (args: {
 	operationId: string;
 	input: unknown;
 	connection?: OperationConnection;
 	requestId: string;
+	signal?: AbortSignal;
 }) => Promise<{
 	status: number;
 	data: unknown;
@@ -106,6 +117,7 @@ export type SelfTestAuthFlowInvoke = (args: {
 	externalRef?: string;
 	input?: Record<string, unknown>;
 	context?: Record<string, unknown>;
+	signal?: AbortSignal;
 }) => Promise<{
 	status: number;
 	body: unknown;
@@ -165,6 +177,8 @@ export interface SelfTestAppOptions {
 	requestBudgetMs?: number;
 	/** Env override for secret collection + budget resolution (tests). */
 	env?: Readonly<Record<string, string | undefined>>;
+	/** Structured server logger; defaults to the same JSON console shape as the provider server. */
+	logger?: (event: SelfTestCancellationLogEvent) => void;
 }
 
 function resolveSdkVersion(): string {
@@ -248,16 +262,25 @@ export function isSelfTestReadOnlyOperation(operation: OperationDefinition): boo
 export function createSelfTestInvoke(app: {
 	request: (input: string, requestInit?: RequestInit) => Response | Promise<Response>;
 }): SelfTestOperationInvoke {
-	return async ({ operationId, input, connection, requestId }) => {
-		const response = await app.request(`/v1/${encodeURIComponent(operationId)}`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				requestId,
-				input: input ?? {},
-				...(connection ? { connection } : {}),
+	return async ({ operationId, input, connection, requestId, signal }) => {
+		const responsePromise = Promise.resolve(
+			app.request(`/v1/${encodeURIComponent(operationId)}`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId,
+					input: input ?? {},
+					...(connection ? { connection } : {}),
+				}),
+				...(signal ? { signal } : {}),
 			}),
-		});
+		);
+		const response = await responsePromise;
+		if (signal?.aborted) {
+			await cancelSelfTestResponse(response);
+			signal.throwIfAborted();
+		}
+		// An abort after body consumption starts may let response.text() finish.
 		const text = await response.text();
 		let body: unknown = text;
 		try {
@@ -277,11 +300,58 @@ export function createSelfTestInvoke(app: {
 	};
 }
 
+async function cancelSelfTestResponse(response: Response): Promise<void> {
+	await response.body?.cancel().catch(() => undefined);
+}
+
+function selfTestAbortReason(reason: unknown, sensitiveValues: readonly string[]): string {
+	const text =
+		reason instanceof Error
+			? reason.message || reason.name
+			: reason === undefined
+				? "aborted"
+				: String(reason);
+	return redactSelfTestText(text, sensitiveValues);
+}
+
+function logSelfTestCancellation(
+	provider: ProviderDefinition,
+	options: SelfTestAppOptions,
+	requestId: string,
+	selected: SelectedCase,
+	signal: AbortSignal,
+	sensitiveValues: readonly string[],
+): void {
+	const event: SelfTestCancellationLogEvent = {
+		level: "info",
+		event: "self_test_run_cancelled",
+		providerId: provider.id,
+		requestId,
+		operationId: selected.operationId,
+		caseName: selected.healthCase.name,
+		reason: selfTestAbortReason(signal.reason, sensitiveValues),
+	};
+	if (options.logger) {
+		options.logger(event);
+		return;
+	}
+	console.log(JSON.stringify(event));
+}
+
 /** Binds the self-test auth-flow driver to a tenant app's /auth pipeline in-process. */
 export function createSelfTestAuthFlowInvoke(app: {
 	request: (input: string, requestInit?: RequestInit) => Response | Promise<Response>;
 }): SelfTestAuthFlowInvoke {
-	return async ({ route, requestId, flowId, connectionId, externalRef, input, context }) => {
+	return async ({
+		route,
+		requestId,
+		flowId,
+		connectionId,
+		externalRef,
+		input,
+		context,
+		signal,
+	}) => {
 		const response = await app.request(`/auth/${route}`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -293,6 +363,7 @@ export function createSelfTestAuthFlowInvoke(app: {
 				...(input ? { input } : {}),
 				...(context ? { context } : {}),
 			}),
+			...(signal ? { signal } : {}),
 		});
 		const text = await response.text();
 		let body: unknown = text;
@@ -312,17 +383,32 @@ class SelfTestCaseTimeoutError extends Error {
 	}
 }
 
-async function withCaseTimeout<T>(run: () => Promise<T>, timeoutMs: number): Promise<T> {
+async function withCaseTimeout<T>(
+	run: () => Promise<T>,
+	timeoutMs: number,
+	controller: AbortController,
+): Promise<T> {
 	let timer: ReturnType<typeof setTimeout> | undefined;
+	let onAbort: (() => void) | undefined;
 	try {
 		return await Promise.race([
 			run(),
 			new Promise<never>((_, reject) => {
-				timer = setTimeout(() => reject(new SelfTestCaseTimeoutError(timeoutMs)), timeoutMs);
+				timer = setTimeout(() => {
+					const error = new SelfTestCaseTimeoutError(timeoutMs);
+					controller.abort(error);
+					reject(error);
+				}, timeoutMs);
+			}),
+			new Promise<never>((_, reject) => {
+				onAbort = () => reject(controller.signal.reason);
+				controller.signal.addEventListener("abort", onAbort, { once: true });
+				if (controller.signal.aborted) onAbort();
 			}),
 		]);
 	} finally {
 		if (timer !== undefined) clearTimeout(timer);
+		if (onAbort) controller.signal.removeEventListener("abort", onAbort);
 	}
 }
 
@@ -595,6 +681,7 @@ async function materializeFlowCredential(
 		isAbandoned?: () => boolean;
 		connectionId?: string;
 		externalRef?: string;
+		signal?: AbortSignal;
 	} = {},
 ): Promise<
 	| { credential: Record<string, string> }
@@ -621,6 +708,7 @@ async function materializeFlowCredential(
 			flowId,
 			...(options.connectionId ? { connectionId: options.connectionId } : {}),
 			...(options.externalRef ? { externalRef: options.externalRef } : {}),
+			...(options.signal ? { signal: options.signal } : {}),
 		}),
 	);
 	if (!started.ok) {
@@ -696,6 +784,7 @@ async function materializeFlowCredential(
 				...(options.externalRef ? { externalRef: options.externalRef } : {}),
 				input: submitInputs,
 				...(Object.keys(flowContext).length > 0 ? { context: flowContext } : {}),
+				...(options.signal ? { signal: options.signal } : {}),
 			}),
 		);
 		if (!continued.ok) {
@@ -756,7 +845,7 @@ async function resolveSelfTestConnection(
 	execution: SelfTestExecutionContext,
 	operationId: string,
 	suite: AnyHealthCheckSuite,
-	options: { forceLogin?: boolean; isAbandoned?: () => boolean } = {},
+	options: { forceLogin?: boolean; isAbandoned?: () => boolean; signal?: AbortSignal } = {},
 ): Promise<SelfTestConnectionResolution> {
 	if (!suite.requiresConnection) return { kind: "connection" };
 	const inputs = execution.credentials ?? {};
@@ -861,6 +950,7 @@ async function resolveSelfTestConnection(
 		...(options.isAbandoned !== undefined ? { isAbandoned: options.isAbandoned } : {}),
 		connectionId,
 		externalRef: `${execution.provider.id}-${operationId}-self-test`,
+		...(options.signal ? { signal: options.signal } : {}),
 	});
 	if (!("credential" in materialized)) {
 		// Only the multi-turn SKIP is negative-cached. Flow ERRORS
@@ -879,10 +969,9 @@ async function resolveSelfTestConnection(
 		}
 		return materialized;
 	}
-	// A flow that outlived the case deadline still completes here (the timeout
-	// only races the promise, it cannot cancel it). The case already reported
-	// self_test_timeout — caching this credential would let the next probe
-	// reuse a login whose latency just failed the case, hiding the failure.
+	// Abort is cooperative: a flow may still complete after the case deadline
+	// if provider code ignores the signal. Never cache that late credential or
+	// let the next probe hide the timed-out login.
 	if (options.isAbandoned?.() === true) {
 		return {
 			kind: "flow_error",
@@ -913,6 +1002,7 @@ async function executeSelfTestCase(
 	operationId: string,
 	suite: AnyHealthCheckSuite,
 	healthCase: AnyHealthCheckCase,
+	caseController: AbortController,
 ): Promise<SelfTestCaseResult> {
 	const { provider, invoke } = execution;
 	// execution.sensitiveValues may grow while the case runs (flow-issued
@@ -926,6 +1016,8 @@ async function executeSelfTestCase(
 	const caseDeadlineAtMs = performance.now() + timeoutMs;
 	const remainingCaseTimeoutMs = () =>
 		Math.max(1, Math.ceil(caseDeadlineAtMs - performance.now()));
+	const runWithCaseTimeout = <T>(run: () => Promise<T>, remainingMs: number) =>
+		withCaseTimeout(run, remainingMs, caseController);
 
 	const beginCase = () => {
 		const startedAt = new Date().toISOString();
@@ -959,16 +1051,17 @@ async function executeSelfTestCase(
 	}
 
 	const resolveConnection = async (forceLogin: boolean): Promise<SelfTestConnectionResolution> => {
-		// The timeout only races the flow promise — it cannot cancel it. Once
-		// the deadline fires, the still-running resolution is marked abandoned
-		// so its late completion cannot write the session cache.
+		// The deadline aborts the in-process flow request. Keep the abandonment
+		// guard as a backstop for provider code that ignores cancellation so a
+		// late completion still cannot write the session cache.
 		let abandoned = false;
 		try {
-			return await withCaseTimeout(
+			return await runWithCaseTimeout(
 				() =>
 					resolveSelfTestConnection(execution, operationId, suite, {
 						forceLogin,
 						isAbandoned: () => abandoned,
+						signal: caseController.signal,
 					}),
 				remainingCaseTimeoutMs(),
 			);
@@ -1012,7 +1105,7 @@ async function executeSelfTestCase(
 		// operation attempt, or a slow login reads as a fast healthy case.
 		const { startedAtMs, finish } = caseScope;
 		try {
-			return await withCaseTimeout(async () => {
+			return await runWithCaseTimeout(async () => {
 				const resolvedInput = resolveHealthCheckInputDateTokens(healthCase.input);
 				const preparedInput = healthCase.prepareInput
 					? await healthCase.prepareInput({
@@ -1033,6 +1126,7 @@ async function executeSelfTestCase(
 										input: gatewayInput,
 										connection,
 										requestId: `${execution.requestId}-prepare-${randomUUID()}`,
+										signal: caseController.signal,
 									});
 									if (executed.status === 401 || executed.status === 403) {
 										prepareAuthStatus = executed.status;
@@ -1053,6 +1147,7 @@ async function executeSelfTestCase(
 					input: preparedInput,
 					connection,
 					requestId: `${execution.requestId}-${randomUUID()}`,
+					signal: caseController.signal,
 				});
 				const durationMs = performance.now() - startedAtMs;
 
@@ -1383,47 +1478,77 @@ export function createSelfTestApp(provider: ProviderDefinition, options: SelfTes
 			};
 			const deadline = performance.now() + requestBudgetMs;
 			const results: SelfTestCaseResult[] = [];
+			const runSignal = c.req.raw.signal;
+			let interruptedCase: SelectedCase | undefined;
 			// Sequential execution (parallelism 1): self-tests run on serving pods
 			// and must never compete with themselves for upstream quota.
 			for (const selected of selection.cases) {
-				if (performance.now() >= deadline) {
-					const now = new Date().toISOString();
-					results.push({
-						operationId: selected.operationId,
-						caseName: selected.healthCase.name,
-						status: "skipped",
-						label: selected.healthCase.name,
-						responseTimeMs: 0,
-						skipReason: "budget_exhausted",
-						startedAt: now,
-						finishedAt: now,
-					});
-					continue;
+				const caseController = new AbortController();
+				const abortFromRun = () => caseController.abort(runSignal.reason);
+				runSignal.addEventListener("abort", abortFromRun, { once: true });
+				if (runSignal.aborted) abortFromRun();
+				try {
+					if (runSignal.aborted) {
+						interruptedCase = selected;
+						break;
+					}
+					if (performance.now() >= deadline) {
+						const now = new Date().toISOString();
+						results.push({
+							operationId: selected.operationId,
+							caseName: selected.healthCase.name,
+							status: "skipped",
+							label: selected.healthCase.name,
+							responseTimeMs: 0,
+							skipReason: "budget_exhausted",
+							startedAt: now,
+							finishedAt: now,
+						});
+						continue;
+					}
+					if (!isSelfTestReadOnlyOperation(selected.operation)) {
+						const now = new Date().toISOString();
+						results.push({
+							operationId: selected.operationId,
+							caseName: selected.healthCase.name,
+							status: "error",
+							label: selected.healthCase.name,
+							responseTimeMs: 0,
+							error: {
+								code: "operation_not_read_only",
+								message: `Operation "${selected.operationId}" is not classified read-only; self-test refuses to execute it.`,
+							},
+							startedAt: now,
+							finishedAt: now,
+						});
+						continue;
+					}
+					results.push(
+						await executeSelfTestCase(
+							execution,
+							selected.operationId,
+							selected.suite,
+							selected.healthCase,
+							caseController,
+						),
+					);
+					if (runSignal.aborted) {
+						interruptedCase = selected;
+						break;
+					}
+				} finally {
+					runSignal.removeEventListener("abort", abortFromRun);
+					caseController.abort();
 				}
-				if (!isSelfTestReadOnlyOperation(selected.operation)) {
-					const now = new Date().toISOString();
-					results.push({
-						operationId: selected.operationId,
-						caseName: selected.healthCase.name,
-						status: "error",
-						label: selected.healthCase.name,
-						responseTimeMs: 0,
-						error: {
-							code: "operation_not_read_only",
-							message: `Operation "${selected.operationId}" is not classified read-only; self-test refuses to execute it.`,
-						},
-						startedAt: now,
-						finishedAt: now,
-					});
-					continue;
-				}
-				results.push(
-					await executeSelfTestCase(
-						execution,
-						selected.operationId,
-						selected.suite,
-						selected.healthCase,
-					),
+			}
+			if (interruptedCase) {
+				logSelfTestCancellation(
+					provider,
+					options,
+					request.requestId,
+					interruptedCase,
+					runSignal,
+					execution.sensitiveValues,
 				);
 			}
 			const singleCase = request.operationId !== undefined && request.caseName !== undefined;
