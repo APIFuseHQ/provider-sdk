@@ -379,6 +379,88 @@ describe("resolver server wiring", () => {
 		}
 	});
 
+	it("fails closed in an auth flow when a required proxy policy has no identity", async () => {
+		let calls = 0;
+		const adapter: ResolverVendorAdapter = {
+			id: "browser",
+			supports: (kind) => kind === "cloudflare_interstitial",
+			async solve() {
+				calls += 1;
+				return {
+					form: "cookies",
+					cookies: { cf_clearance: "must-not-be-reached" },
+					userAgent: "Auth flow browser/1.0",
+					expires: (Date.now() + 60_000) / 1_000,
+				};
+			},
+		};
+		const originalCdpUrl = process.env[APIFUSE__CDP_POOL__URL];
+		const restoreAdapter = swapResolverAdapterFactoryForTests("browser", () => adapter);
+		process.env[APIFUSE__CDP_POOL__URL] = "ws://cdp-pool.test";
+		try {
+			const provider = defineProvider({
+				id: "resolver-required-proxy-auth-flow",
+				version: "1.0.0",
+				runtime: "standard",
+				proxy: { mode: "required" },
+				resolver: { vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
+				meta: { displayName: "Resolver Required Proxy Auth Flow", category: "test" },
+				auth: {
+					mode: "credentials",
+					flow: {
+						async start(ctx) {
+							await ctx.resolver.solve({
+								kind: "cloudflare_interstitial",
+								pageUrl: "https://example.com/challenge",
+							});
+							return { kind: "message", turnId: "turn-1", data: { solved: true } };
+						},
+						async continue() {
+							return { kind: "complete", turnId: "turn-2" };
+						},
+					},
+				},
+				operations: {
+					unused: {
+						input: z.object({}),
+						output: z.object({ ok: z.boolean() }),
+						async handler() {
+							return { ok: true };
+						},
+						healthCheckUnsupported: { reason: "unit test" },
+					},
+				},
+			});
+			const app = createServerApp(provider, { logger: () => undefined });
+			const response = await app.request("/auth/start", {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					requestId: "auth-required-proxy-policy",
+					flowId: "flow-required-proxy-policy",
+					tenantId: "tenant-required-proxy-policy",
+					providerId: "resolver-required-proxy-auth-flow",
+				}),
+			});
+
+			expect(response.status).toBe(500);
+			expect(await response.json()).toMatchObject({
+				error: {
+					code: "RESOLVER_CHAIN_EXHAUSTED",
+					details: [{ vendor: "browser", reason: "missing_proxy_identity" }],
+				},
+			});
+			expect(calls).toBe(0);
+		} finally {
+			restoreAdapter();
+			if (originalCdpUrl === undefined) {
+				delete process.env[APIFUSE__CDP_POOL__URL];
+			} else {
+				process.env[APIFUSE__CDP_POOL__URL] = originalCdpUrl;
+			}
+		}
+	});
+
 	it("threads defineProvider resolver declarations into the server without an override", async () => {
 		const declaration = { vendors: ["custom"], kinds: ["turnstile"] } as const;
 		const provider = defineProvider({

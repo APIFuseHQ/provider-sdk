@@ -1,4 +1,5 @@
 import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
+import type { TraceRecorder } from "../trace.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
 	type ResolverIdentity,
@@ -34,6 +35,7 @@ export interface TwoCaptchaResolverVendorAdapter extends ResolverVendorAdapter {
 		challenge: ProviderChallenge,
 		identity: ResolverIdentity | undefined,
 		signal: AbortSignal,
+		traceRecorder?: TraceRecorder,
 	): Promise<Extract<ChallengeSolution, { readonly form: "token" }>>;
 }
 
@@ -231,6 +233,28 @@ function endpoint(baseUrl: string, path: string): string {
 	return `${baseUrl.replace(/\/+$/u, "")}/${path}`;
 }
 
+function spanErrorAttributes(
+	error: unknown,
+	phase: TwoCaptchaOperationPhase,
+): Record<string, unknown> | undefined {
+	if (error instanceof ResolverVendorUnavailableError) {
+		return {
+			unavailability_reason: error.reason,
+			transport_phase: error.phase,
+		};
+	}
+	// The solve budget raises TwoCaptchaSolveTimeoutError inside the spanned closure and
+	// the outer catch converts it only after the span has been finalized, so the span has
+	// to recognize it here or slow solves lose exactly the attribution these spans add.
+	if (error instanceof TwoCaptchaSolveTimeoutError) {
+		return {
+			unavailability_reason: "timeout",
+			transport_phase: phase,
+		};
+	}
+	return undefined;
+}
+
 export function createTwoCaptchaResolverVendorAdapter(
 	options: TwoCaptchaResolverVendorOptions,
 ): TwoCaptchaResolverVendorAdapter {
@@ -248,7 +272,7 @@ export function createTwoCaptchaResolverVendorAdapter(
 			return resolverVendorSupports(TWOCAPTCHA_VENDOR_ID, kind);
 		},
 
-		async solve(challenge, identity, callerSignal) {
+		async solve(challenge, identity, callerSignal, traceRecorder) {
 			const apiKey = options.apiKey?.trim();
 			if (!apiKey) {
 				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "missing_credentials", {
@@ -285,62 +309,89 @@ export function createTwoCaptchaResolverVendorAdapter(
 			let phase: TwoCaptchaOperationPhase = "create_task";
 
 			try {
-				const createResult = await postJson(
-					fetchImpl,
-					endpoint(baseUrl, "createTask"),
-					{
-						clientKey: apiKey,
-						task: {
-							type: proxy ? "RecaptchaV2Task" : "RecaptchaV2TaskProxyless",
-							websiteURL: challenge.pageUrl,
-							websiteKey: challenge.siteKey,
-							isInvisible: false,
-							...(identity ? { userAgent: identity.userAgent } : {}),
-							...(proxy ?? {}),
-						},
-					},
-					solveController.signal,
-					phase,
-				);
-				const taskId = taskIdFrom(createResult.payload);
-				if (!createResult.ok || createResult.payload.errorId !== 0 || taskId === undefined) {
-					throw unavailableForPayload(createResult.payload, phase);
-				}
-
-				phase = "poll_result";
-				while (true) {
-					callerSignal.throwIfAborted();
-					const remainingMs = timeoutMs - (now() - startedAt);
-					if (remainingMs <= 0) throw new TwoCaptchaSolveTimeoutError();
-					await delay(Math.min(pollIntervalMs, remainingMs), solveController.signal);
-					callerSignal.throwIfAborted();
-					if (now() - startedAt >= timeoutMs) throw new TwoCaptchaSolveTimeoutError();
-
-					const pollResult = await postJson(
+				const createTask = async () => {
+					const createResult = await postJson(
 						fetchImpl,
-						endpoint(baseUrl, "getTaskResult"),
-						{ clientKey: apiKey, taskId },
+						endpoint(baseUrl, "createTask"),
+						{
+							clientKey: apiKey,
+							task: {
+								type: proxy ? "RecaptchaV2Task" : "RecaptchaV2TaskProxyless",
+								websiteURL: challenge.pageUrl,
+								websiteKey: challenge.siteKey,
+								isInvisible: false,
+								...(identity ? { userAgent: identity.userAgent } : {}),
+								...(proxy ?? {}),
+							},
+						},
 						solveController.signal,
 						phase,
 					);
-					if (!pollResult.ok || pollResult.payload.errorId !== 0) {
-						throw unavailableForPayload(pollResult.payload, phase);
+					const taskId = taskIdFrom(createResult.payload);
+					if (!createResult.ok || createResult.payload.errorId !== 0 || taskId === undefined) {
+						throw unavailableForPayload(createResult.payload, phase);
 					}
-					if (pollResult.payload.status === "processing") continue;
-					if (pollResult.payload.status !== "ready") {
-						throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
-							phase,
-						});
-					}
+					return taskId;
+				};
+				const taskId = traceRecorder
+					? await traceRecorder.runSpan("resolver.vendor.create_task", createTask, {
+							attributes: {
+								vendor: TWOCAPTCHA_VENDOR_ID,
+								challenge_kind: challenge.kind,
+							},
+							onError: (error) => spanErrorAttributes(error, "create_task"),
+						})
+					: await createTask();
 
-					const token = tokenFrom(pollResult.payload);
-					if (!token?.trim()) {
-						throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+				phase = "poll_result";
+				const pollResult = async () => {
+					while (true) {
+						callerSignal.throwIfAborted();
+						const remainingMs = timeoutMs - (now() - startedAt);
+						if (remainingMs <= 0) throw new TwoCaptchaSolveTimeoutError();
+						await delay(Math.min(pollIntervalMs, remainingMs), solveController.signal);
+						callerSignal.throwIfAborted();
+						if (now() - startedAt >= timeoutMs) throw new TwoCaptchaSolveTimeoutError();
+
+						const pollResult = await postJson(
+							fetchImpl,
+							endpoint(baseUrl, "getTaskResult"),
+							{ clientKey: apiKey, taskId },
+							solveController.signal,
 							phase,
-						});
+						);
+						if (!pollResult.ok || pollResult.payload.errorId !== 0) {
+							throw unavailableForPayload(pollResult.payload, phase);
+						}
+						if (pollResult.payload.status === "processing") continue;
+						if (pollResult.payload.status !== "ready") {
+							throw new ResolverVendorUnavailableError(
+								TWOCAPTCHA_VENDOR_ID,
+								"transport_failure",
+								{ phase },
+							);
+						}
+
+						const token = tokenFrom(pollResult.payload);
+						if (!token?.trim()) {
+							throw new ResolverVendorUnavailableError(
+								TWOCAPTCHA_VENDOR_ID,
+								"transport_failure",
+								{ phase },
+							);
+						}
+						return { form: "token" as const, token };
 					}
-					return { form: "token", token };
-				}
+				};
+				return traceRecorder
+					? await traceRecorder.runSpan("resolver.vendor.poll_result", pollResult, {
+							attributes: {
+								vendor: TWOCAPTCHA_VENDOR_ID,
+								challenge_kind: challenge.kind,
+							},
+							onError: (error) => spanErrorAttributes(error, "poll_result"),
+						})
+					: await pollResult();
 			} catch (error) {
 				if (callerSignal.aborted) throw abortReason(callerSignal);
 				if (
