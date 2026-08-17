@@ -11,6 +11,20 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 6 (2026-08-16).** The first provider to declare
+`proxy: { mode: "required" }` (`buyee`) exposed that Decision 5 named the SDK as
+the identity binder without naming the seam, so no identity ever reached the
+chain and every vendor failed closed with `missing_proxy_identity` (#138 Gap 1).
+This revision withdraws the `createTransport` seam this ADR itself had proposed —
+it carries neither `proxyUrl` nor `userAgent`, and it is not even invoked for the
+`browser` or `2captcha` adapters — and records four decisions in its place: lazy
+resolution, lease-before-cache ordering, SDK-internal lease resolution driven by
+caller-supplied intent, and a grouped `proxyIntent` option. It also extends the
+CLI harnesses to resolve a lease, on the grounds that a fixture's validity is
+egress-dependent. Revision 4's portability finding was independently
+re-confirmed across a different vendor pair while settling the last of these.
+Sections changed: Decision 5 (new subsection 5a).
+
 **Revision 5 (2026-08-13).** Implementing the `2captcha` adapter (#135) found
 this ADR internally inconsistent about `aws_waf`, and the inconsistency had
 already propagated into the shipped type. The vendor task table in Context
@@ -680,6 +694,74 @@ mean the risk is no longer all-or-nothing: the browser leg of cookie-family
 binding can be implemented and verified before the transport question is settled.
 If the transport turns out not to expose or override its UA, cookie-family support
 ships browser-only rather than not at all.
+
+#### 5a. How the identity actually reaches the chain (2026-08-16)
+
+The decision above says the SDK binds identity. It did not say through which
+seam, and the gap stayed invisible until a provider declared
+`proxy: { mode: "required" }`: `serve.ts` builds the resolver client without an
+identity, so `options.identity` is `undefined` at the chain and every vendor
+reports `missing_proxy_identity` (#138 Gap 1). The fail-closed behaviour is
+correct; what was missing is the plumbing it demands.
+
+**`createTransport` is not that seam, for two independent reasons.** It returns a
+`ResolverVendorTransport`, an opaque `fetch` wrapper carrying neither `proxyUrl`
+nor `userAgent`, and the opacity is deliberate — a provider must not learn which
+lease it was assigned. A proxied solver task needs literal values
+(`proxyAddress`, `proxyPort`, `proxyLogin`, `proxyPassword`), which cannot be
+recovered from a wrapper. Separately, `createTransport` is only invoked for
+adapters that require an upstream transport, and neither `browser` nor
+`2captcha` does — so on an `aws_waf` path it never runs at all. The guard also
+precedes transport construction, so wiring it would not be reached regardless.
+This ADR proposed that seam in an earlier draft; the proposal is withdrawn here
+rather than in the issue thread alone, because two attempts have now followed it.
+
+The four decisions below close the axis.
+
+**Resolution is lazy, not eager.** `ResolverChainClient.solve` is already async,
+so the guard can await a lease without changing `createProviderContext`'s
+signature. Eager resolution would make every request pay for a lease even when
+no challenge is encountered.
+
+**Ordering is unchanged: the lease attempt precedes the cache.** Revision 4
+established that `aws_waf` tokens are portable, so a cache hit could in
+principle be served without a lease. It must not be. `required` means the
+upstream refuses this egress outright — measured, in-cluster requests get
+`403 Forbidden` with 49 bytes and no challenge at all. A token proves a
+challenge was passed; it does not exempt the request from admission. Serving a
+cached token over unproxied egress would produce a confident 403. This also
+preserves the ordering the first fail-open fix established.
+
+**The SDK resolves the lease itself; the caller supplies intent only.**
+`serve.ts` already holds every input needed — the declared policy, an affinity
+key derived from the request, telemetry, and the stealth profile that owns the
+user agent — and `resolveProxyConfigAsync` (`src/config/loader.ts`) is already
+the single proxy source of truth for `ctx.http` and `ctx.stealth`. The resolver
+calls the same function rather than growing a second path. A
+`resolveIdentity?: () => Promise<ResolverIdentity>` callback was rejected: it is
+the caller-supplied-factory shape a sibling negative control already forbids,
+and it would let a caller decide which identity the resolver binds.
+
+**Proxy inputs are grouped, not added one by one.** `proxyMode` becomes one
+field of a single `proxyIntent` object alongside the affinity key and telemetry.
+Widening this option type is this repo's recurring defect — three separate
+widenings, one of which leaked the platform's solver API key to any caller
+registering a factory — so the surface grows by one field instead of three, and
+a reader finds every proxy input in one place instead of inferring which loose
+fields interact.
+
+**The CLI harnesses resolve a lease too.** Unlike `identityScope`, which
+`serve.ts` derives from a request id a CLI does not have, `affinityKey` is
+optional in `ProxyResolutionOptions`, so omitting it is legitimate rather than a
+synthesized identity. `apifuse record` must proxy because a fixture is evidence
+of what the upstream returns, and that is egress-dependent: the same path
+answers `202` with a challenge from a residential or vendor exit and `403` from
+the cluster. A fixture recorded over unproxied local egress would assert a
+response production never sees. Omitting the affinity key is safe for this kind
+specifically because Revision 4's portability finding was re-confirmed on a
+different vendor pair (a token minted through one vendor's exit was accepted
+verbatim through another's, with the same-exit control passing); for a kind that
+does bind, a CLI without an affinity key would need its own decision.
 
 ### 6. Fail closed, never silently degrade
 
