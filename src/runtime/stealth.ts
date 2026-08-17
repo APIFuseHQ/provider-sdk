@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { Cookie, CookieJar as ToughCookieJar } from "tough-cookie";
 import type {
 	BrowserProfile,
 	EmulationOS,
@@ -18,19 +17,17 @@ import {
 	resolveProxyConfigAsync,
 	vendorFromResolvedSource,
 } from "../config/loader.js";
-import { SDKError, StealthCookieStoreVersionError, TransportError } from "../errors.js";
+import { SDKError, TransportError } from "../errors.js";
 import { getStealthProfile } from "../stealth/profiles.js";
 import type {
-	CookieJar,
 	HttpMethod,
 	StealthClient,
-	StealthCookieStore,
-	StealthCookieStoreV1,
 	StealthFetchOptions,
 	StealthRedirectHop,
 	StealthResponse,
 	StealthSession,
 } from "../types.js";
+import { StealthCookieJar } from "./stealth-cookies.js";
 import {
 	createProxyAuthIpDeniedError,
 	createProxyEdgeAuthRejectedError,
@@ -89,6 +86,10 @@ const REDIRECT_BODY_HEADERS = new Set([
 	"content-location",
 	"content-type",
 ]);
+
+function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
+	return typeof value === "object" && value !== null;
+}
 
 function sensitiveQueryParamNames(url: string): string[] {
 	const queryStart = url.indexOf("?");
@@ -156,151 +157,6 @@ type WreqSessionCacheEntry = {
 	tail: Promise<void>;
 };
 
-function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
-	return typeof value === "object" && value !== null;
-}
-
-const LEGACY_COOKIE_ORIGIN = "https://legacy-cookie.invalid/";
-
-class CookieJarImpl implements CookieJar {
-	private cookies: ToughCookieJar;
-	private readonly defaultUrl: string;
-
-	constructor(cookieStrings: readonly string[], defaultUrl = LEGACY_COOKIE_ORIGIN) {
-		this.cookies = new ToughCookieJar(undefined, {
-			allowSecureOnLocal: false,
-			rejectPublicSuffixes: true,
-		});
-		this.defaultUrl = this.normalizeUrl(defaultUrl) ?? LEGACY_COOKIE_ORIGIN;
-		this.setFromCookieStrings(cookieStrings);
-	}
-
-	/**
-	 * URL-less legacy operations are scoped to this jar's default URL. Session
-	 * jars use the client's base URL and response jars use the response URL. A
-	 * flat restore has no attributes to recover, so it creates host-only Path=/
-	 * cookies for that default URL instead of making them visible to every host.
-	 */
-	setFromCookieStrings(cookieStrings: readonly string[], url = this.defaultUrl): void {
-		const cookieUrl = this.normalizeUrl(url);
-		if (!cookieUrl) return;
-
-		for (const cookieString of cookieStrings) {
-			this.cookies.setCookieSync(cookieString, cookieUrl, { ignoreError: true });
-		}
-	}
-
-	get(name: string, url?: string): string | undefined {
-		return this.getAll(url)[name];
-	}
-
-	getAll(url?: string): Record<string, string> {
-		return Object.fromEntries(
-			this.getUniqueCookies(url ?? this.defaultUrl).map((cookie) => [cookie.key, cookie.value]),
-		);
-	}
-
-	has(name: string, url?: string): boolean {
-		return Object.hasOwn(this.getAll(url), name);
-	}
-
-	toString(url?: string): string {
-		return this.getUniqueCookies(url ?? this.defaultUrl)
-			.map((cookie) => cookie.cookieString())
-			.join("; ");
-	}
-
-	toHeader(url?: string): string {
-		return this.toString(url);
-	}
-
-	snapshot(): Record<string, string> {
-		// This compatibility view deliberately enumerates the serialized store,
-		// not getAll(defaultUrl): persistence must include sibling hosts and paths.
-		// Duplicate names still collapse because a flat map cannot represent them.
-		const entries: [string, string][] = [];
-		for (const cookie of this.serialize().jar.cookies) {
-			if (typeof cookie.key === "string" && typeof cookie.value === "string" && cookie.key) {
-				entries.push([cookie.key, cookie.value]);
-			}
-		}
-		return Object.fromEntries(entries);
-	}
-
-	restore(cookies: Record<string, string>): void {
-		this.clear();
-		for (const [name, value] of Object.entries(cookies)) {
-			if (!name) continue;
-			this.cookies.setCookieSync(new Cookie({ key: name, path: "/", value }), this.defaultUrl, {
-				ignoreError: true,
-			});
-		}
-	}
-
-	serialize(): StealthCookieStoreV1 {
-		const jar = this.cookies.serializeSync();
-		if (!jar) {
-			throw new SDKError("Stealth cookie store could not be serialized", {
-				code: "stealth_cookie_store_serialize_failed",
-			});
-		}
-		return { version: 1, jar };
-	}
-
-	deserialize(state: StealthCookieStore): void {
-		const version = isRecord(state) ? state.version : undefined;
-		if (version !== 1) {
-			throw new StealthCookieStoreVersionError(version);
-		}
-
-		// Deserialize into a new jar first so invalid state cannot partially clear
-		// or replace a live session. tough-cookie restores the cookie attributes and
-		// matching semantics represented in its own serialized format.
-		const restored = ToughCookieJar.deserializeSync(state.jar);
-		// tough-cookie 6 does not include this option in serializeSync(). Preserve
-		// the SDK's stricter setting across restoration.
-		Reflect.set(restored, "allowSecureOnLocal", false);
-		this.cookies = restored;
-	}
-
-	clear(): void {
-		this.cookies.removeAllCookiesSync();
-	}
-
-	find(predicate: (cookie: string) => boolean, url?: string): string | undefined {
-		for (const cookie of this.getUniqueCookies(url ?? this.defaultUrl)) {
-			const cookieString = cookie.cookieString();
-			if (predicate(cookieString)) {
-				return cookieString;
-			}
-		}
-
-		return undefined;
-	}
-
-	private normalizeUrl(url: string): string | undefined {
-		try {
-			return new URL(url).toString();
-		} catch {
-			return undefined;
-		}
-	}
-
-	private getUniqueCookies(url: string): Cookie[] {
-		const cookieUrl = this.normalizeUrl(url);
-		if (!cookieUrl) return [];
-
-		// tough-cookie returns longer (more-specific) paths first. Keeping the
-		// first cookie for each name prevents ambiguous duplicate-name headers.
-		const names = new Set<string>();
-		return this.cookies.getCookiesSync(cookieUrl).filter((cookie) => {
-			if (names.has(cookie.key)) return false;
-			names.add(cookie.key);
-			return true;
-		});
-	}
-}
-
 type WreqModule = typeof import("wreq-js");
 
 let wreqModulePromise: Promise<WreqModule> | undefined;
@@ -325,9 +181,10 @@ function parseProfileIdentifier(identifier: string): {
 	family: string;
 	version: number[];
 } | null {
-	const match = /^(safari_ios|safari_ipad|firefox_android|firefox_private|chrome|edge|firefox|opera|safari|okhttp)_(\d+(?:[._]\d+)*)$/.exec(
-		identifier.toLowerCase(),
-	);
+	const match =
+		/^(safari_ios|safari_ipad|firefox_android|firefox_private|chrome|edge|firefox|opera|safari|okhttp)_(\d+(?:[._]\d+)*)$/.exec(
+			identifier.toLowerCase(),
+		);
 	if (!match?.[1] || !match[2]) return null;
 	return {
 		family: match[1],
@@ -499,7 +356,7 @@ export async function normalizeResponse(
 	maxBodyBytes?: number,
 ): Promise<StealthResponse> {
 	const headers = Object.fromEntries(response.headers.entries());
-	const cookies = new CookieJarImpl(
+	const cookies = new StealthCookieJar(
 		setCookieHeadersFromResponse(response.headers),
 		response.url ?? requestUrl,
 	);
@@ -826,7 +683,7 @@ function discardStealthRedirectBody(response: StealthTransportResponse): void {
 
 async function fetchStealthRedirectChain(
 	transport: WreqSession,
-	cookieJar: CookieJarImpl,
+	cookieJar: StealthCookieJar,
 	requestUrl: string,
 	method: StealthMethod,
 	options: StealthFetchOptions,
@@ -915,7 +772,7 @@ function createSessionFetcher(
 	let closed = false;
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
-	const cookieJar = new CookieJarImpl([], baseUrl);
+	const cookieJar = new StealthCookieJar([], baseUrl);
 
 	async function getClientEntry(
 		profileName: string,
@@ -962,7 +819,7 @@ function createSessionFetcher(
 			return await operation(await entry.session);
 		} finally {
 			release();
-	}
+		}
 	}
 
 	async function resolveRequestProxy(

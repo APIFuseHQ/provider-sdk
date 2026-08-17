@@ -1,13 +1,15 @@
 import { describe, expect, it } from "bun:test";
+import type {
+	NativeNetworkConnection,
+	NativeProxyEgressInfo,
+	NativeProxyExpiringEvent,
+	NativeTlsConnectOptions,
+} from "../index.js";
 import {
 	createEnvVendorCredentialResolver,
 	type NativeGatewayProxySynthesizer,
-	type NativeNetworkConnection,
-	type NativeProxyEgressInfo,
-	type NativeProxyExpiringEvent,
-	type NativeTlsConnectOptions,
 	type VendorCredentialLookup,
-} from "../index.js";
+} from "../runtime/native-network.js";
 
 describe("native proxy contracts", () => {
 	it("exposes proxy egress metadata on a connection", () => {
@@ -43,7 +45,7 @@ describe("native proxy contracts", () => {
 		expect(connection.proxy).toBeUndefined();
 	});
 
-	it("exports injected credential and async synthesizer contracts from the package root", async () => {
+	it("exports injected credential and async synthesizer contracts from the runtime subpath", async () => {
 		const credentials = createEnvVendorCredentialResolver({
 			get: (name) => (name.endsWith("USERNAME") ? "injected-user" : undefined),
 		});

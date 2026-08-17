@@ -61,6 +61,31 @@
 			"import": "./dist/server/index.js",
 			"default": "./dist/server/index.js"
 		},
+		"./runtime/browser": {
+			"types": "./dist/runtime/browser.d.ts",
+			"import": "./dist/runtime/browser.js",
+			"default": "./dist/runtime/browser.js"
+		},
+		"./runtime/native-network": {
+			"types": "./dist/runtime/native-network.d.ts",
+			"import": "./dist/runtime/native-network.js",
+			"default": "./dist/runtime/native-network.js"
+		},
+		"./runtime/prevalidate": {
+			"types": "./dist/runtime/prevalidate.d.ts",
+			"import": "./dist/runtime/prevalidate.js",
+			"default": "./dist/runtime/prevalidate.js"
+		},
+		"./runtime/resolver": {
+			"types": "./dist/runtime/resolver.d.ts",
+			"import": "./dist/runtime/resolver.js",
+			"default": "./dist/runtime/resolver.js"
+		},
+		"./runtime/stealth": {
+			"types": "./dist/runtime/stealth.d.ts",
+			"import": "./dist/runtime/stealth.js",
+			"default": "./dist/runtime/stealth.js"
+		},
 		"./stateful": {
 			"types": "./dist/stateful/index.d.ts",
 			"import": "./dist/stateful/index.js",
@@ -97,6 +122,7 @@
 		"@biomejs/biome": "^2.5.0",
 		"@types/bun": "latest",
 		"@types/node": "^25.9.3",
+		"ajv": "^8.17",
 		"typescript": "6.0.3"
 	},
 	"dependencies": {
@@ -104,7 +130,6 @@
 		"@rgrove/parse-xml": "4.2.2",
 		"@types/ms": "^2.1.0",
 		"acorn": "^8.17.0",
-		"ajv": "^8.17",
 		"hono": "^4.12.25",
 		"ioredis": "^5.11.1",
 		"ms": "^2.1.3",

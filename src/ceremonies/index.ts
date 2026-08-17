@@ -1,7 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 
-import Ajv2020 from "ajv/dist/2020.js";
-
 import { AUTH_TURN_SCHEMA, type KnownAuthTurnKind } from "../auth-turn/index.js";
 import {
 	FlowExpiredError,
@@ -16,13 +14,14 @@ type TurnKind = KnownAuthTurnKind;
 type CeremonyHandler = AuthFlowInputHandler;
 
 type JsonObject = Record<string, unknown>;
-
-const ajv = new Ajv2020({ allErrors: true, strict: true, strictSchema: true });
-
-// Runtime ceremony-output validation derives from the exported versioned
-// contract: it compiles the exact AUTH_TURN_SCHEMA document shipped at
-// dist/auth-turn/auth-turn.v1.schema.json, so the two cannot drift.
-const validateAuthTurn = ajv.compile(AUTH_TURN_SCHEMA);
+type JsonSchemaNode = {
+	readonly additionalProperties?: boolean;
+	readonly minimum?: number;
+	readonly minLength?: number;
+	readonly properties?: Readonly<Record<string, JsonSchemaNode>>;
+	readonly required?: readonly string[];
+	readonly type?: "number" | "object" | "string";
+};
 
 const OAUTH2_STATE_KEY = "__oauth2_state";
 const OAUTH2_PKCE_VERIFIER_KEY = "__oauth2_pkce_verifier";
@@ -43,6 +42,56 @@ const FORM_FIELD_ORDER_EXTENSION = "x-apifuse-field-order";
 
 function isRecord(value: unknown): value is JsonObject {
 	return !!value && typeof value === "object" && !Array.isArray(value);
+}
+
+function validateSchemaNode(
+	value: unknown,
+	schema: JsonSchemaNode,
+	path: string,
+	errors: string[],
+): void {
+	if (schema.type === "object") {
+		if (!isRecord(value)) {
+			errors.push(`${path} must be object`);
+			return;
+		}
+		const properties = schema.properties ?? {};
+		for (const required of schema.required ?? []) {
+			if (!Object.hasOwn(value, required) || value[required] === undefined) {
+				errors.push(`${path} must have required property '${required}'`);
+			}
+		}
+		if (schema.additionalProperties === false) {
+			for (const key of Object.keys(value)) {
+				if (!Object.hasOwn(properties, key)) {
+					errors.push(`${path} must NOT have additional property '${key}'`);
+				}
+			}
+		}
+		for (const [key, childSchema] of Object.entries(properties)) {
+			if (Object.hasOwn(value, key) && value[key] !== undefined) {
+				validateSchemaNode(value[key], childSchema, `${path}/${key}`, errors);
+			}
+		}
+		return;
+	}
+
+	if (schema.type === "string") {
+		if (typeof value !== "string") {
+			errors.push(`${path} must be string`);
+		} else if (schema.minLength !== undefined && value.length < schema.minLength) {
+			errors.push(`${path} must NOT have fewer than ${schema.minLength} characters`);
+		}
+		return;
+	}
+
+	if (schema.type === "number") {
+		if (typeof value !== "number" || !Number.isFinite(value)) {
+			errors.push(`${path} must be number`);
+		} else if (schema.minimum !== undefined && value < schema.minimum) {
+			errors.push(`${path} must be >= ${schema.minimum}`);
+		}
+	}
 }
 
 function ensureRecord(value: unknown): JsonObject {
@@ -162,14 +211,17 @@ function withDeclaredFormFieldOrder(expectedInput: JsonObject): JsonObject {
 }
 
 export function validateCeremonyOutput(turn: unknown): AuthTurn {
-	if (!validateAuthTurn(turn)) {
-		const detail = validateAuthTurn.errors
-			?.map((error) => `${error.instancePath || "$"} ${error.message ?? "invalid"}`)
-			.join("; ");
-		throw new TurnValidationError(detail || "Invalid AuthTurn output");
+	// Evaluate the exact exported versioned schema without eagerly initializing
+	// a general-purpose JSON Schema compiler in every provider process. Contract
+	// parity tests compare this focused evaluator with AJV over all fixtures and
+	// edge probes, so the runtime and shipped document remain locked together.
+	const errors: string[] = [];
+	validateSchemaNode(turn, AUTH_TURN_SCHEMA, "", errors);
+	if (errors.length > 0) {
+		throw new TurnValidationError(errors.join("; "));
 	}
 
-	return turn;
+	return turn as AuthTurn;
 }
 
 export function createOAuth2Ceremony(options: {
@@ -285,9 +337,7 @@ export function createOAuth2ProxiedStart(
 				}
 				const clientId = getRequiredEnv(ctx, options.clientIdEnvKey);
 				if (!ctx.flowId) {
-					throw new ValidationError(
-						"OAuth2 proxied start requires the gateway flow id.",
-					);
+					throw new ValidationError("OAuth2 proxied start requires the gateway flow id.");
 				}
 
 				const authorizePath = new URL(options.authorizeUrl).pathname;

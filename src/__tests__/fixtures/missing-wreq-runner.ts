@@ -1,5 +1,6 @@
 const sdk = await import("../../index.js");
-const client = sdk.createStealthClient("https://example.com");
+const { createStealthClient } = await import("../../runtime/stealth.js");
+const client = createStealthClient("https://example.com");
 
 try {
 	await client.fetch("/health");

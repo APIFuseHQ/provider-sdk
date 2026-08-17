@@ -50,7 +50,6 @@ export * from "./recipes/gov-api.js";
 export * from "./recipes/rest-api.js";
 export { createFlowContext, createScratchpad } from "./runtime/auth-flow.js";
 export type { BrowserClientOptions } from "./runtime/browser.js";
-export { BrowserClient, createBrowserClient } from "./runtime/browser.js";
 export {
 	APIFUSE__CACHE__KEY_PEPPER_ENV,
 	createBypassProviderCache,
@@ -72,25 +71,23 @@ export { createEnvContext } from "./runtime/env.js";
 export { executeOperation } from "./runtime/executor.js";
 export { createHttpClient } from "./runtime/http.js";
 export {
-	createNativeNetworkClient,
-	createEnvVendorCredentialResolver,
-	deriveNativeCredentialAffinityKey,
 	NativeEgressGrantExpiredError,
 	NativeEgressNotDeclaredError,
 	NativeIdleTimeoutError,
 	NativeNetworkError,
 	NativeProxyExpiredError,
-	resolveNativeGatewayProxy,
-	type NativeGatewayProxy,
-	type NativeGatewayProxyResolutionInput,
-	type NativeGatewayProxySkipReason,
-	type NativeGatewayProxySynthesizer,
-	type NativeGatewayProxySynthesisResult,
-	type NativeGatewayProxySynthesisInput,
-	type NativeNetworkClientOptions,
-	type NativeNetworkErrorCode,
-	type VendorCredentialLookup,
-	type VendorCredentialResolver,
+} from "./runtime/native-network-errors.js";
+export type {
+	NativeGatewayProxy,
+	NativeGatewayProxyResolutionInput,
+	NativeGatewayProxySkipReason,
+	NativeGatewayProxySynthesizer,
+	NativeGatewayProxySynthesisResult,
+	NativeGatewayProxySynthesisInput,
+	NativeNetworkClientOptions,
+	NativeNetworkErrorCode,
+	VendorCredentialLookup,
+	VendorCredentialResolver,
 } from "./runtime/native-network.js";
 export type { Insight, InsightSeverity } from "./runtime/insights.js";
 export { generateInsights } from "./runtime/insights.js";
@@ -99,7 +96,7 @@ export {
 	type InstrumentedProviderContext,
 	wrapWithInstrumentation,
 } from "./runtime/instrumentation.js";
-export { type PrevalidateResult, prevalidate } from "./runtime/prevalidate.js";
+export type { PrevalidateResult } from "./runtime/prevalidate.js";
 export { getProviderBaseUrl } from "./runtime/provider.js";
 export {
 	APIFUSE__CDP_POOL__URL,
@@ -107,12 +104,10 @@ export {
 	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
-	createResolverClientFromEnv,
-	createUnsupportedResolverClient,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
-	invalidateResolverSolution,
-	type ResolverRuntimeOptions,
-} from "./runtime/resolver.js";
+} from "./runtime/resolver-config.js";
+export { createUnsupportedResolverClient } from "./runtime/resolver-shared.js";
+export type { ResolverRuntimeOptions } from "./runtime/resolver.js";
 export type { ResolverVendorTransport } from "./runtime/resolver-vendors/types.js";
 export {
 	assertRequiredSecretsPresent,
@@ -123,7 +118,6 @@ export {
 	createUnsupportedProviderRuntimeState,
 	UnsupportedProviderStateError,
 } from "./runtime/state.js";
-export { createStealthClient } from "./runtime/stealth.js";
 export {
 	APIFUSE__OCR__API_KEY_ENV,
 	APIFUSE__OCR__BACKEND_ENV,
@@ -174,10 +168,11 @@ export {
 } from "./schema.js";
 export {
 	createServerApp,
+	createServerAppAsync,
 	ERROR_OBSERVABILITY_HEADER,
 	type ServeOptions,
 	serve,
-} from "./server/index.js";
+} from "./server/serve.js";
 export { getStealthProfile, listStealthProfiles } from "./stealth/profiles.js";
 export * from "./stream.js";
 export type {

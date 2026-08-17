@@ -10,7 +10,7 @@ import type {
 	SttContext,
 } from "../types.js";
 import { createUnsupportedOcrClient } from "./ocr.js";
-import { createUnsupportedResolverClient } from "./resolver.js";
+import { createUnsupportedResolverClient } from "./resolver-shared.js";
 import { createUnsupportedSttClient } from "./stt.js";
 
 function normalizeAllowedKeys(allowedKeys: string[]): Set<string> {

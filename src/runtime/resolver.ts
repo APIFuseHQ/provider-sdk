@@ -30,14 +30,32 @@ import {
 	type ResolverVendorUnavailableReason,
 	resolverVendorSupports,
 } from "./resolver-vendors/types.js";
+import {
+	createUnsupportedResolverClient,
+	RESOLVER_INSTRUMENTATION_METADATA,
+} from "./resolver-shared.js";
+import {
+	APIFUSE__CDP_POOL__URL,
+	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
+	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
+	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+	APIFUSE__RESOLVER__TIMEOUT_MS,
+	DEFAULT_RESOLVER_TIMEOUT_MS,
+} from "./resolver-config.js";
 import type { TraceRecorder } from "./trace.js";
 
-export const APIFUSE__RESOLVER__2CAPTCHA__API_KEY = "APIFUSE__RESOLVER__2CAPTCHA__API_KEY";
-export const APIFUSE__RESOLVER__CAPSOLVER__API_KEY = "APIFUSE__RESOLVER__CAPSOLVER__API_KEY";
-export const APIFUSE__RESOLVER__CAPMONSTER__API_KEY = "APIFUSE__RESOLVER__CAPMONSTER__API_KEY";
-export const APIFUSE__RESOLVER__TIMEOUT_MS = "APIFUSE__RESOLVER__TIMEOUT_MS";
-export const APIFUSE__CDP_POOL__URL = "APIFUSE__CDP_POOL__URL";
-export const DEFAULT_RESOLVER_TIMEOUT_MS = 180_000;
+export {
+	createUnsupportedResolverClient,
+	RESOLVER_INSTRUMENTATION_METADATA,
+} from "./resolver-shared.js";
+export {
+	APIFUSE__CDP_POOL__URL,
+	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
+	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
+	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+	APIFUSE__RESOLVER__TIMEOUT_MS,
+	DEFAULT_RESOLVER_TIMEOUT_MS,
+} from "./resolver-config.js";
 
 type EnvLike = Record<string, string | undefined>;
 
@@ -145,10 +163,6 @@ const SAFE_CAUSE_MESSAGE_WORDS: ReadonlySet<string> = new Set([
 	"while",
 	"writing",
 ]);
-
-export const RESOLVER_INSTRUMENTATION_METADATA = Symbol.for(
-	"@apifuse/provider-sdk/runtime/resolver-instrumentation-metadata",
-);
 
 export type ResolverInstrumentationMetadata = {
 	readonly target: ResolverContext;
@@ -343,7 +357,9 @@ function sanitizeCauseMessage(message: string): string {
 		.map((token) => {
 			if (token === "[REDACTED]" || /^[a-z][a-z\d+.-]*:\/\/[^\s]+$/i.test(token)) return token;
 			const word = token.replace(/^[^a-z\d]+|[^a-z\d]+$/gi, "");
-			return word.length > 0 && word.length <= 32 && SAFE_CAUSE_MESSAGE_WORDS.has(word.toLowerCase())
+			return word.length > 0 &&
+				word.length <= 32 &&
+				SAFE_CAUSE_MESSAGE_WORDS.has(word.toLowerCase())
 				? token
 				: "[REDACTED]";
 		});
@@ -870,17 +886,6 @@ function resolveVendorAvailability(
 	return configuration
 		? { vendor, available: true, configuration }
 		: { vendor, available: false, reason: "missing_credentials" };
-}
-
-export function createUnsupportedResolverClient(reason?: string): ResolverContext {
-	return {
-		async solve() {
-			throw new ProviderError(reason ?? "Resolver runtime is not configured", {
-				code: "RESOLVER_UNAVAILABLE",
-				fix: "Declare resolver on the provider definition and configure vendor credentials.",
-			});
-		},
-	};
 }
 
 export function bindResolverSignal(

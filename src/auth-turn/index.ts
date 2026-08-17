@@ -24,7 +24,7 @@ export const AUTH_TURN_SCHEMA_ARTIFACT_PATH = "dist/auth-turn/auth-turn.v1.schem
  *
  * This is the exact codification of the runtime validation the SDK applies to
  * ceremony outputs (see `validateCeremonyOutput` in `src/ceremonies`), which
- * compiles this same document. `kind` is an OPEN string on the wire: the known
+ * evaluates this same document. `kind` is an OPEN string on the wire: the known
  * kinds in {@link TURN_KINDS} are tooling metadata, never a wire constraint.
  *
  * The committed artifact at `src/auth-turn/auth-turn.v1.schema.json` (shipped

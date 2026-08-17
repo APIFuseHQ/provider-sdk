@@ -10,7 +10,6 @@ import {
 	createHttpClient,
 	createOcrClientFromEnv,
 	createProviderChoiceContext,
-	createStealthClient,
 	createSttClientFromEnv,
 	createUnsupportedResolverClient,
 	executeOperation,
@@ -33,6 +32,7 @@ import {
 	sanitizeFixtureString,
 } from "../src/fixture-sanitization.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
+import { createStealthClient } from "../src/runtime/stealth.js";
 import {
 	REDACTED_QUERY_VALUE,
 	isSensitiveKey,

@@ -46,6 +46,29 @@ function runtimeAccepts(turn: unknown): boolean {
 	}
 }
 
+function runtimeDiagnostics(turn: unknown): string {
+	try {
+		validateCeremonyOutput(turn);
+		return "";
+	} catch (error) {
+		expect(error).toBeInstanceOf(TurnValidationError);
+		return (error as TurnValidationError).message;
+	}
+}
+
+function oracleDiagnostics(turn: unknown): string {
+	if (contractAccepts(turn)) return "";
+	return (contractAccepts.errors ?? [])
+		.map((error) => {
+			const message =
+				error.keyword === "additionalProperties"
+					? `must NOT have additional property '${String(error.params.additionalProperty)}'`
+					: (error.message ?? "invalid");
+			return `${error.instancePath} ${message}`;
+		})
+		.join("; ");
+}
+
 describe("ceremonies runtime validation derives from the auth-turn contract", () => {
 	it("accepts every golden fixture through both validators", () => {
 		expect(validFixtures.length).toBeGreaterThan(0);
@@ -63,28 +86,75 @@ describe("ceremonies runtime validation derives from the auth-turn contract", ()
 		}
 	});
 
-	it("agrees with the contract on edge probes beyond the fixture set", () => {
-		const probes: unknown[] = [
-			{ kind: "form", turnId: "probe.minimal" },
-			{ kind: "totally_custom", turnId: "probe.unknown-kind" },
-			{ kind: "poll", turnId: "probe.timing", timing: {} },
+	it("matches AJV verdicts across every known kind and malformed edge cases", () => {
+		const corpus: NamedFixture[] = [
+			...validFixtures,
+			{ name: "unknown-kind", turn: { kind: "totally_custom", turnId: "probe.unknown-kind" } },
 			{
-				kind: "poll",
-				turnId: "probe.timing-zero",
-				timing: { suggestedPollIntervalMs: 0 },
+				name: "nested-type",
+				turn: {
+					kind: "poll",
+					turnId: "probe.nested-type",
+					timing: { suggestedPollIntervalMs: "fast" },
+				},
 			},
-			{ kind: "form", turnId: "probe.hint-non-string", hint: 42 },
-			{ kind: "form", turnId: "probe.data-array", data: [] },
-			{ kind: "form", turnId: "" },
-			{ kind: "form", turnId: "probe.extra", extra: true },
-			"not-an-object",
-			null,
-			{},
+			{ name: "missing-required", turn: { kind: "form" } },
+			{ name: "additional-property", turn: { kind: "form", turnId: "probe.extra", extra: true } },
+			{
+				name: "nested-additional-property",
+				turn: { kind: "poll", turnId: "probe.nested-extra", timing: { extra: true } },
+			},
+			{
+				name: "constructor-property",
+				turn: { kind: "form", turnId: "probe.constructor", constructor: "unexpected" },
+			},
+			{
+				name: "toString-property",
+				turn: { kind: "form", turnId: "probe.toString", toString: "unexpected" },
+			},
+			{
+				name: "json-proto-property",
+				turn: JSON.parse(
+					'{"kind":"form","turnId":"probe.__proto__","__proto__":"unexpected"}',
+				),
+			},
 		];
-		for (const probe of probes) {
-			expect(`${JSON.stringify(probe)}: ${runtimeAccepts(probe)}`).toBe(
-				`${JSON.stringify(probe)}: ${contractAccepts(probe)}`,
-			);
+
+		for (const { name, turn } of corpus) {
+			const oracleAccepts = contractAccepts(turn);
+			expect(`${name}: ${runtimeAccepts(turn)}`).toBe(`${name}: ${oracleAccepts}`);
 		}
+	});
+
+	it("matches AJV instance paths and joined diagnostics for representative failures", () => {
+		const nestedType = {
+			kind: "poll",
+			turnId: "diagnostic.nested-type",
+			timing: { suggestedPollIntervalMs: "fast" },
+		};
+		const nestedAdditional = {
+			kind: "poll",
+			turnId: "diagnostic.nested-additional",
+			timing: { unexpected: true },
+		};
+		const joinedFailures = {
+			kind: "",
+			turnId: "diagnostic.joined",
+			hint: 42,
+			unexpected: true,
+		};
+
+		expect(runtimeDiagnostics(nestedType)).toBe(oracleDiagnostics(nestedType));
+		expect(runtimeDiagnostics(nestedType)).toBe(
+			"/timing/suggestedPollIntervalMs must be number",
+		);
+		expect(runtimeDiagnostics(nestedAdditional)).toBe(oracleDiagnostics(nestedAdditional));
+		expect(runtimeDiagnostics(nestedAdditional)).toBe(
+			"/timing must NOT have additional property 'unexpected'",
+		);
+		expect(runtimeDiagnostics(joinedFailures)).toBe(oracleDiagnostics(joinedFailures));
+		expect(runtimeDiagnostics(joinedFailures)).toBe(
+			" must NOT have additional property 'unexpected'; /kind must NOT have fewer than 1 characters; /hint must be string",
+		);
 	});
 });
