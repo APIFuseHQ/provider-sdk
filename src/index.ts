@@ -55,7 +55,6 @@ export {
 	createBypassProviderCache,
 	createProviderCache,
 	type ProviderCacheOptions,
-	resetProviderCacheForTests,
 } from "./runtime/cache.js";
 export {
 	type CreateProviderChoiceContextOptions,
