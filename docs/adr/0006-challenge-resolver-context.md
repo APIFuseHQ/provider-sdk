@@ -11,6 +11,35 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 7 (2026-08-18).** The first lazy resolver wiring passed a user agent
+only when a provider declared `stealth.profile`. `danawa` and `naver-map` both
+declare `proxy: { mode: "required" }` without a stealth profile, so their leases
+resolved while the chain still failed closed with `missing_proxy_identity`.
+This revision settles the omitted source in subsection 5a: the resolver derives
+the user agent from `DEFAULT_PROFILE` (`chrome-146`) through the shared stealth
+profile registry when the caller supplies no declared user agent, and records
+whether the identity was `declared` or `defaulted` in proxy telemetry and the
+resolver trace. A resolved lease with no derivable user agent is classified as
+`missing_client_profile`; an absent or unresolvable lease remains
+`missing_proxy_identity`. Both are vendor-availability failures and therefore
+follow the existing failover rule; optional and absent proxy policies retain
+their prior direct/optional behaviour. Sections changed: Decision 5a,
+Verification, and the resolver vendor-unavailable reason vocabulary.
+
+**Revision 6 (2026-08-16).** The first provider to declare
+`proxy: { mode: "required" }` (`buyee`) exposed that Decision 5 named the SDK as
+the identity binder without naming the seam, so no identity ever reached the
+chain and every vendor failed closed with `missing_proxy_identity` (#138 Gap 1).
+This revision withdraws the `createTransport` seam this ADR itself had proposed —
+it carries neither `proxyUrl` nor `userAgent`, and it is not even invoked for the
+`browser` or `2captcha` adapters — and records four decisions in its place: lazy
+resolution, lease-before-cache ordering, SDK-internal lease resolution driven by
+caller-supplied intent, and a grouped `proxyIntent` option. It also extends the
+CLI harnesses to resolve a lease, on the grounds that a fixture's validity is
+egress-dependent. Revision 4's portability finding was independently
+re-confirmed across a different vendor pair while settling the last of these.
+Sections changed: Decision 5 (new subsection 5a).
+
 **Revision 5 (2026-08-13).** Implementing the `2captcha` adapter (#135) found
 this ADR internally inconsistent about `aws_waf`, and the inconsistency had
 already propagated into the shipped type. The vendor task table in Context
@@ -681,6 +710,93 @@ binding can be implemented and verified before the transport question is settled
 If the transport turns out not to expose or override its UA, cookie-family support
 ships browser-only rather than not at all.
 
+#### 5a. How the identity actually reaches the chain (2026-08-16)
+
+The decision above says the SDK binds identity. It did not say through which
+seam, and the gap stayed invisible until a provider declared
+`proxy: { mode: "required" }`: `serve.ts` builds the resolver client without an
+identity, so `options.identity` is `undefined` at the chain and every vendor
+reports `missing_proxy_identity` (#138 Gap 1). The fail-closed behaviour is
+correct; what was missing is the plumbing it demands.
+
+**`createTransport` is not that seam, for two independent reasons.** It returns a
+`ResolverVendorTransport`, an opaque `fetch` wrapper carrying neither `proxyUrl`
+nor `userAgent`, and the opacity is deliberate — a provider must not learn which
+lease it was assigned. A proxied solver task needs literal values
+(`proxyAddress`, `proxyPort`, `proxyLogin`, `proxyPassword`), which cannot be
+recovered from a wrapper. Separately, `createTransport` is only invoked for
+adapters that require an upstream transport, and neither `browser` nor
+`2captcha` does — so on an `aws_waf` path it never runs at all. The guard also
+precedes transport construction, so wiring it would not be reached regardless.
+This ADR proposed that seam in an earlier draft; the proposal is withdrawn here
+rather than in the issue thread alone, because two attempts have now followed it.
+
+The four decisions below close the axis.
+
+**Resolution is lazy, not eager.** `ResolverChainClient.solve` is already async,
+so the guard can await a lease without changing `createProviderContext`'s
+signature. Eager resolution would make every request pay for a lease even when
+no challenge is encountered.
+
+**Ordering is unchanged: the lease attempt precedes the cache.** Revision 4
+established that `aws_waf` tokens are portable, so a cache hit could in
+principle be served without a lease. It must not be. `required` means the
+upstream refuses this egress outright — measured, in-cluster requests get
+`403 Forbidden` with 49 bytes and no challenge at all. A token proves a
+challenge was passed; it does not exempt the request from admission. Serving a
+cached token over unproxied egress would produce a confident 403. This also
+preserves the ordering the first fail-open fix established.
+
+**The SDK resolves the lease itself; the caller supplies intent only.**
+`serve.ts` already holds every input needed — the declared policy, an affinity
+key derived from the request, telemetry, and the stealth profile that owns the
+user agent — and `resolveProxyConfigAsync` (`src/config/loader.ts`) is already
+the single proxy source of truth for `ctx.http` and `ctx.stealth`. The resolver
+calls the same function rather than growing a second path. A
+`resolveIdentity?: () => Promise<ResolverIdentity>` callback was rejected: it is
+the caller-supplied-factory shape a sibling negative control already forbids,
+and it would let a caller decide which identity the resolver binds.
+
+**Proxy inputs are grouped, not added one by one.** `proxyMode` becomes one
+field of a single `proxyIntent` object alongside the affinity key and telemetry.
+Widening this option type is this repo's recurring defect — three separate
+widenings, one of which leaked the platform's solver API key to any caller
+registering a factory — so the surface grows by one field instead of three, and
+a reader finds every proxy input in one place instead of inferring which loose
+fields interact.
+
+**The CLI harnesses resolve a lease too.** Unlike `identityScope`, which
+`serve.ts` derives from a request id a CLI does not have, `affinityKey` is
+optional in `ProxyResolutionOptions`, so omitting it is legitimate rather than a
+synthesized identity. `apifuse record` must proxy because a fixture is evidence
+of what the upstream returns, and that is egress-dependent: the same path
+answers `202` with a challenge from a residential or vendor exit and `403` from
+the cluster. A fixture recorded over unproxied local egress would assert a
+response production never sees. Omitting the affinity key is safe for this kind
+specifically because Revision 4's portability finding was re-confirmed on a
+different vendor pair (a token minted through one vendor's exit was accepted
+verbatim through another's, with the same-exit control passing); for a kind that
+does bind, a CLI without an affinity key would need its own decision.
+
+**The resolver owns the user-agent fallback.** A provider-declared
+`stealth.profile` remains authoritative: its profile's user agent is passed in
+the grouped `proxyIntent` and is marked `declared`. When the provider declares
+no profile, the resolver looks up `DEFAULT_PROFILE` from `src/runtime/stealth.ts`
+through `src/stealth/profiles.ts` and binds that profile's user agent to the
+lease. This keeps one source of truth for user-agent strings and avoids making
+server, record, and dev callers duplicate the default lookup. The selected
+source is recorded in the existing proxy-resolution telemetry and resolver
+vendor-attempt trace; no proxy URL is added to either diagnostic surface.
+
+If the lease resolves but the selected profile cannot produce a user agent, the
+resolver reports `missing_client_profile`, distinct from
+`missing_proxy_identity`, which is reserved for a missing or unresolvable
+lease. Both reasons are vendor-availability failures, so a chain may advance
+past them under the same failover rule as the other unavailable-vendor reasons;
+the required-policy precondition still fails closed before cache lookup. The
+fallback is not applied to optional or absent policies in a way that changes
+their existing direct-connection behavior.
+
 ### 6. Fail closed, never silently degrade
 
 Missing configuration, an unknown kind, an exhausted vendor chain, and a
@@ -829,6 +945,15 @@ Negative / accepted:
 
 These must hold before `Status: accepted`:
 
+- A required-proxy provider without `stealth.profile` reaches its resolver
+  adapter with the user agent from `DEFAULT_PROFILE`, while a provider with a
+  declared profile reaches it with that profile's user agent. Existing proxy
+  telemetry and resolver traces identify the source as `defaulted` or
+  `declared` without carrying a proxy URL.
+- A required lease that resolves while profile lookup produces no user agent
+  reports `missing_client_profile`; a lease that cannot be resolved continues
+  to report `missing_proxy_identity`. Both remain vendor-availability reasons
+  and preserve the chain's existing failover classification.
 - The `aws_waf` variant carries `siteKey?`, and a `pack:types` negative control
   proves the field is accepted on `aws_waf` while still rejected on
   `cloudflare_interstitial`, so the Decision 4 widening does not become a

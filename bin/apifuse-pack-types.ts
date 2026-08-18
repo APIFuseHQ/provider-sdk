@@ -243,6 +243,17 @@ const NEGATIVE_CONTROLS = [
 		].join("\n"),
 	},
 	{
+		filename: "negative-control-resolver-default-user-agent-test-seam.ts",
+		expectedCode: "TS2305",
+		description: "the resolver subpath does not expose its default user-agent test seam",
+		source: [
+			'import { swapResolverDefaultUserAgentForTests } from "@apifuse/provider-sdk/runtime/resolver";',
+			"",
+			"export const mustNotCompile = swapResolverDefaultUserAgentForTests;",
+			"",
+		].join("\n"),
+	},
+	{
 		filename: "negative-control-resolver-runtime-allowed-hosts.ts",
 		expectedCode: "TS2322",
 		description: "ResolverRuntimeOptions.allowedHosts accepts only host strings",

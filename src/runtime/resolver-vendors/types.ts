@@ -113,13 +113,14 @@ export interface ResolverVendorAdapter {
 export type ResolverVendorUnavailableReason =
 	| "missing_credentials"
 	| "missing_proxy_identity"
+	| "missing_client_profile"
 	| "missing_transport"
 	| "allocation_exhausted"
 	| "transport_failure"
 	| "timeout"
 	| "not_implemented";
 
-export type ResolverChallengeVerdictReason = "human_puzzle";
+export type ResolverChallengeVerdictReason = "human_puzzle" | "solve_failed";
 
 type ResolverErrorOptions = {
 	/** Raw cause; adapters must not place bodies, cookies, headers, credentials, or proxy URLs here. */
@@ -159,7 +160,11 @@ export class ResolverChallengeVerdictError extends Error {
 		readonly reason: ResolverChallengeVerdictReason,
 		options: ResolverErrorOptions = {},
 	) {
-		super(`Resolver vendor ${vendor} returned a challenge verdict: ${reason}`);
+		super(
+			reason === "solve_failed"
+				? `Resolver vendor ${vendor} attempted the challenge but did not solve it`
+				: `Resolver vendor ${vendor} returned a challenge verdict: ${reason}`,
+		);
 		this.name = "ResolverChallengeVerdictError";
 		if (options.cause !== undefined) {
 			this.cause = options.cause;

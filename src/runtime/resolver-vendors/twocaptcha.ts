@@ -4,6 +4,7 @@ import { assertResolverHostAllowed } from "./hosts.js";
 import {
 	type ResolverIdentity,
 	type ResolverVendorAdapter,
+	ResolverChallengeVerdictError,
 	ResolverVendorUnavailableError,
 	resolverVendorSupports,
 } from "./types.js";
@@ -64,10 +65,53 @@ function abortReason(signal: AbortSignal): unknown {
 	return signal.reason ?? new DOMException("The operation was aborted", "AbortError");
 }
 
+function containsSensitiveValue(value: unknown, sensitiveValues: readonly string[]): boolean {
+	const secrets = sensitiveValues.filter((secret) => secret.length > 0);
+	if (secrets.length === 0) return false;
+	const seen = new Set<object>();
+
+	const inspect = (candidate: unknown): boolean => {
+		if (typeof candidate === "string") {
+			return secrets.some((secret) => candidate.includes(secret));
+		}
+		if (
+			candidate === null ||
+			(typeof candidate !== "object" && typeof candidate !== "function")
+		) {
+			return false;
+		}
+		if (seen.has(candidate)) return false;
+		seen.add(candidate);
+
+		try {
+			for (const property of Reflect.ownKeys(candidate)) {
+				if (typeof property === "string" && inspect(property)) return true;
+				const descriptor = Object.getOwnPropertyDescriptor(candidate, property);
+				if (!descriptor) return true;
+				if ("value" in descriptor && inspect(descriptor.value)) return true;
+				if (descriptor.get !== undefined || descriptor.set !== undefined) return true;
+			}
+		} catch {
+			return true;
+		}
+		return false;
+	};
+
+	return inspect(value);
+}
+
+function safeCauseOptions(
+	error: unknown,
+	sensitiveValues: readonly string[],
+): { readonly cause?: unknown } {
+	return containsSensitiveValue(error, sensitiveValues) ? {} : { cause: error };
+}
+
 function raceWithAbort<T>(
 	operation: () => Promise<T>,
 	signal: AbortSignal,
 	phase?: TwoCaptchaOperationPhase,
+	sensitiveValues: readonly string[] = [],
 ): Promise<T> {
 	if (signal.aborted) return Promise.reject(abortReason(signal));
 
@@ -91,7 +135,7 @@ function raceWithAbort<T>(
 				}
 				reject(
 					new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
-						cause: error,
+						...safeCauseOptions(error, sensitiveValues),
 						phase,
 					}),
 				);
@@ -158,10 +202,17 @@ function isAllocationExhausted(payload: JsonRecord): boolean {
 	);
 }
 
+function isNegativeVerdict(payload: JsonRecord): boolean {
+	return errorText(payload, "errorCode").toLowerCase() === "error_captcha_unsolvable";
+}
+
 function unavailableForPayload(
 	payload: JsonRecord,
 	phase: TwoCaptchaOperationPhase,
-): ResolverVendorUnavailableError {
+): ResolverVendorUnavailableError | ResolverChallengeVerdictError {
+	if (isNegativeVerdict(payload)) {
+		return new ResolverChallengeVerdictError(TWOCAPTCHA_VENDOR_ID, "solve_failed");
+	}
 	return new ResolverVendorUnavailableError(
 		TWOCAPTCHA_VENDOR_ID,
 		isAllocationExhausted(payload) ? "allocation_exhausted" : "transport_failure",
@@ -175,6 +226,7 @@ async function postJson(
 	body: JsonRecord,
 	signal: AbortSignal,
 	phase: TwoCaptchaOperationPhase,
+	sensitiveValues: readonly string[],
 ): Promise<{ readonly ok: boolean; readonly payload: JsonRecord }> {
 	const response = await raceWithAbort(
 		() =>
@@ -187,6 +239,7 @@ async function postJson(
 			}),
 		signal,
 		phase,
+		sensitiveValues,
 	);
 
 	let responseText: string;
@@ -222,9 +275,12 @@ function taskIdFrom(payload: JsonRecord): string | number | undefined {
 	return typeof taskId === "string" || typeof taskId === "number" ? taskId : undefined;
 }
 
-function tokenFrom(payload: JsonRecord): string | undefined {
+function tokenFrom(payload: JsonRecord, challenge: ProviderChallenge): string | undefined {
 	const solution = payload.solution;
 	if (!isJsonRecord(solution)) return undefined;
+	if (challenge.kind === "aws_waf") {
+		return typeof solution.existing_token === "string" ? solution.existing_token : undefined;
+	}
 	if (typeof solution.gRecaptchaResponse === "string") return solution.gRecaptchaResponse;
 	return typeof solution.token === "string" ? solution.token : undefined;
 }
@@ -282,8 +338,18 @@ export function createTwoCaptchaResolverVendorAdapter(
 			if (!resolverVendorSupports(TWOCAPTCHA_VENDOR_ID, challenge.kind)) {
 				throw new TypeError(`2captcha resolver does not support ${challenge.kind}`);
 			}
-			if (challenge.kind !== "recaptcha_v2") {
-				// AWS WAF remains deferred because its challenge variant has no required site key.
+			if (challenge.kind !== "recaptcha_v2" && challenge.kind !== "aws_waf") {
+				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "not_implemented", {
+					phase: "create_task",
+				});
+			}
+			if (
+				challenge.kind === "aws_waf" &&
+				(!challenge.siteKey?.trim() ||
+					!challenge.captchaScript?.trim() ||
+					!challenge.context?.trim() ||
+					!challenge.iv?.trim())
+			) {
 				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "not_implemented", {
 					phase: "create_task",
 				});
@@ -310,22 +376,33 @@ export function createTwoCaptchaResolverVendorAdapter(
 
 			try {
 				const createTask = async () => {
+					const task =
+						challenge.kind === "aws_waf"
+							? {
+									type: proxy ? "AmazonTask" : "AmazonTaskProxyless",
+									websiteURL: challenge.pageUrl,
+									websiteKey: challenge.siteKey,
+									captchaScript: challenge.captchaScript,
+									context: challenge.context,
+									iv: challenge.iv,
+									...(identity ? { userAgent: identity.userAgent } : {}),
+									...(proxy ?? {}),
+								}
+							: {
+									type: proxy ? "RecaptchaV2Task" : "RecaptchaV2TaskProxyless",
+									websiteURL: challenge.pageUrl,
+									websiteKey: challenge.siteKey,
+									isInvisible: false,
+									...(identity ? { userAgent: identity.userAgent } : {}),
+									...(proxy ?? {}),
+								};
 					const createResult = await postJson(
 						fetchImpl,
 						endpoint(baseUrl, "createTask"),
-						{
-							clientKey: apiKey,
-							task: {
-								type: proxy ? "RecaptchaV2Task" : "RecaptchaV2TaskProxyless",
-								websiteURL: challenge.pageUrl,
-								websiteKey: challenge.siteKey,
-								isInvisible: false,
-								...(identity ? { userAgent: identity.userAgent } : {}),
-								...(proxy ?? {}),
-							},
-						},
+						{ clientKey: apiKey, task },
 						solveController.signal,
 						phase,
+						[apiKey],
 					);
 					const taskId = taskIdFrom(createResult.payload);
 					if (!createResult.ok || createResult.payload.errorId !== 0 || taskId === undefined) {
@@ -359,6 +436,7 @@ export function createTwoCaptchaResolverVendorAdapter(
 							{ clientKey: apiKey, taskId },
 							solveController.signal,
 							phase,
+							[apiKey],
 						);
 						if (!pollResult.ok || pollResult.payload.errorId !== 0) {
 							throw unavailableForPayload(pollResult.payload, phase);
@@ -372,7 +450,7 @@ export function createTwoCaptchaResolverVendorAdapter(
 							);
 						}
 
-						const token = tokenFrom(pollResult.payload);
+						const token = tokenFrom(pollResult.payload, challenge);
 						if (!token?.trim()) {
 							throw new ResolverVendorUnavailableError(
 								TWOCAPTCHA_VENDOR_ID,
@@ -403,9 +481,14 @@ export function createTwoCaptchaResolverVendorAdapter(
 						phase,
 					});
 				}
-				if (error instanceof ResolverVendorUnavailableError) throw error;
+				if (
+					error instanceof ResolverVendorUnavailableError ||
+					error instanceof ResolverChallengeVerdictError
+				) {
+					throw error;
+				}
 				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
-					cause: error,
+					...safeCauseOptions(error, [apiKey]),
 					phase,
 				});
 			} finally {
