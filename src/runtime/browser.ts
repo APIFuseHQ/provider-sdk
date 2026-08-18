@@ -290,7 +290,13 @@ function formatExpression<T>(fn: string | (() => T)): string {
 
 function toLaunchOptions(options: BrowserClientOptions): LaunchOptions {
 	return {
-		args: options.extraArgs,
+		// `extraArgs` is optional, but playwright-extra's stealth evasions mutate
+		// `options.args` unguarded (navigator.webdriver does
+		// `options.args.findIndex(...)` in beforeLaunch). Forwarding `undefined`
+		// therefore crashes every stealth launch that omits extraArgs with
+		// "TypeError: undefined is not an object (evaluating 'options.args.findIndex')".
+		// Always hand the launcher a concrete array.
+		args: options.extraArgs ?? [],
 		executablePath: options.executablePath,
 		headless: options.headless ?? true,
 		proxy: options.proxy ? { server: options.proxy } : undefined,
