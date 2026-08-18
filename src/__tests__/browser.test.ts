@@ -235,12 +235,15 @@ const cdpState = {
 	fetchEnableParams: [] as Array<Record<string, unknown>>,
 	fetchFailures: [] as MockCdpFetchFailure[],
 	fetchFulfillments: [] as MockCdpFetchFulfillRequest[],
+	frameEvaluationErrors: new Map<number, string[]>(),
 	networkCookies: [] as MockBrowserCookie[],
 	networkCookiesByPageId: new Map<string, MockBrowserCookie[]>(),
 	networkGetCookiesCalls: [] as string[],
 	networkGetCookiesError: null as Error | null,
 	navigateUrls: [] as string[],
 	pageSockets: [] as MockWebSocket[],
+	isolatedWorldContextIds: new Map<string, number>(),
+	isolatedWorldFrameIds: [] as string[],
 	poolReleaseCalls: [] as string[],
 	poolReleaseRequests: [] as Array<Record<string, unknown>>,
 	runtimeEnabled: 0,
@@ -370,6 +373,9 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 
 			if (fn === "document.title") {
 				return "local-title" as T;
+			}
+			if (fn === "navigator.userAgent") {
+				return "LocalBrowser/1.0" as T;
 			}
 
 			throw new Error(`Unexpected local evaluate expression: ${fn}`);
@@ -661,6 +667,10 @@ class MockWebSocket {
 		return requestId;
 	}
 
+	dispatchPageEvent(method: string, params: Record<string, unknown> = {}) {
+		this.emitPageEvent(method, params);
+	}
+
 	private emit(event: string, payload?: { data?: string }) {
 		for (const listener of this.listeners.get(event) ?? []) {
 			listener(payload);
@@ -758,11 +768,14 @@ class MockWebSocket {
 					},
 				});
 				break;
-			case "Page.createIsolatedWorld":
+			case "Page.createIsolatedWorld": {
+				const frameId = String(message.params?.frameId ?? "");
+				cdpState.isolatedWorldFrameIds.push(frameId);
 				this.replyToPage(message.id, {
-					executionContextId: message.params?.frameId === "recaptcha-frame" ? 42 : 7,
+					executionContextId: cdpState.isolatedWorldContextIds.get(frameId),
 				});
 				break;
+			}
 			case "Page.navigate":
 				cdpState.navigateUrls.push(String(message.params?.url ?? ""));
 				this.replyToPage(message.id, {});
@@ -775,6 +788,17 @@ class MockWebSocket {
 				const selector = parseSelector(expression);
 				if (contextId !== undefined) {
 					cdpState.frameContextIds.push(contextId);
+					const errors = cdpState.frameEvaluationErrors.get(contextId);
+					const errorMessage = errors?.shift();
+					if (errorMessage) {
+						this.emit("message", {
+							data: JSON.stringify({
+								error: { code: -32_000, message: errorMessage },
+								id: message.id,
+							}),
+						});
+						break;
+					}
 				}
 
 				if (expression.includes('window.navigator, "webdriver"')) {
@@ -948,6 +972,11 @@ describe("createBrowserClient", () => {
 		cdpState.fetchEnableParams.length = 0;
 		cdpState.fetchFailures.length = 0;
 		cdpState.fetchFulfillments.length = 0;
+		cdpState.frameEvaluationErrors.clear();
+		cdpState.isolatedWorldContextIds.clear();
+		cdpState.isolatedWorldContextIds.set("main-frame", 7);
+		cdpState.isolatedWorldContextIds.set("recaptcha-frame", 42);
+		cdpState.isolatedWorldFrameIds.length = 0;
 		cdpState.networkCookies.length = 0;
 		cdpState.networkCookiesByPageId.clear();
 		cdpState.networkGetCookiesCalls.length = 0;
@@ -1457,6 +1486,45 @@ describe("createBrowserClient", () => {
 		expect(stealthState.callCount).toBe(0);
 	});
 
+	it("binds a browser resolver proxy identity to a local Playwright launch", async () => {
+		const proxyUrl = "http://proxy-user:proxy-password@proxy.test:8080";
+		browserState.isolatedContextCookies.push([
+			{
+				name: "aws-waf-token",
+				value: "local-proxy-token",
+				domain: "example.com",
+				path: "/",
+				expires: 1_900_000_000,
+				httpOnly: true,
+				secure: true,
+				sameSite: "None",
+			},
+		]);
+		const { createBrowserResolverVendorAdapter } = await import(
+			"../runtime/resolver-vendors/browser.js"
+		);
+		const adapter = createBrowserResolverVendorAdapter({
+			allowedHosts: ["example.com"],
+			timeoutMs: 100,
+		});
+
+		const result = await adapter.solve(
+			{ kind: "aws_waf", pageUrl: "https://example.com/protected" },
+			{ proxyUrl, userAgent: "BoundBrowser/1.0" },
+			new AbortController().signal,
+		);
+
+		expect(result).toMatchObject({ cookies: { "aws-waf-token": "local-proxy-token" } });
+		expect(browserState.launchCalls).toEqual([
+			{
+				args: undefined,
+				executablePath: undefined,
+				headless: true,
+				proxy: { server: proxyUrl },
+			},
+		]);
+	});
+
 	it("uses CDP Pool when APIFUSE__CDP_POOL__URL is configured", async () => {
 		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "http://pool.test";
@@ -1534,6 +1602,166 @@ describe("createBrowserClient", () => {
 		expect(screenshot.toString()).toBe("remote-shot");
 		expect(cdpState.closedEndpoints).toContain("ws://page.test/devtools/page/pool-page-1");
 		expect(cdpState.closedEndpoints).toContain("ws://pool.test/");
+	});
+
+	it("drops a destroyed frame context and evaluates with a fresh context id", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const frame = (await page.frames())[1];
+		if (!frame) {
+			throw new Error("Expected the mock child frame");
+		}
+
+		await frame.title();
+		cdpState.isolatedWorldContextIds.set("recaptcha-frame", 84);
+		cdpState.pageSockets[0]?.dispatchPageEvent("Runtime.executionContextDestroyed", {
+			executionContextId: 42,
+		});
+		await frame.title();
+		await page.close();
+		await client.close();
+
+		expect(cdpState.frameContextIds).toEqual([42, 84]);
+		expect(cdpState.isolatedWorldFrameIds).toEqual(["recaptcha-frame", "recaptcha-frame"]);
+	});
+
+	it("drops every cached frame context when execution contexts are cleared", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const [mainFrame, childFrame] = await page.frames();
+		if (!mainFrame || !childFrame) {
+			throw new Error("Expected both mock frames");
+		}
+
+		await mainFrame.title();
+		await childFrame.title();
+		cdpState.isolatedWorldContextIds.set("main-frame", 8);
+		cdpState.isolatedWorldContextIds.set("recaptcha-frame", 84);
+		cdpState.pageSockets[0]?.dispatchPageEvent("Runtime.executionContextsCleared");
+		await mainFrame.title();
+		await childFrame.title();
+		await page.close();
+		await client.close();
+
+		expect(cdpState.frameContextIds).toEqual([7, 42, 8, 84]);
+	});
+
+	it("keeps another frame's context when one execution context is destroyed", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const [mainFrame, childFrame] = await page.frames();
+		if (!mainFrame || !childFrame) {
+			throw new Error("Expected both mock frames");
+		}
+
+		await mainFrame.title();
+		await childFrame.title();
+		cdpState.isolatedWorldContextIds.set("main-frame", 8);
+		cdpState.isolatedWorldContextIds.set("recaptcha-frame", 84);
+		cdpState.pageSockets[0]?.dispatchPageEvent("Runtime.executionContextDestroyed", {
+			executionContextId: 42,
+		});
+		await mainFrame.title();
+		await childFrame.title();
+		await page.close();
+		await client.close();
+
+		expect(cdpState.frameContextIds).toEqual([7, 42, 7, 84]);
+	});
+
+	it("uses the new frame context after a reload destroys the cached context", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const frame = (await page.frames())[1];
+		const pageSocket = cdpState.pageSockets[0];
+		if (!frame || !pageSocket) {
+			throw new Error("Expected the mock child frame and page socket");
+		}
+
+		pageSocket.dispatchPageEvent("Runtime.executionContextCreated", {
+			context: { auxData: { frameId: "recaptcha-frame" }, id: 81 },
+		});
+		await frame.title();
+		pageSocket.dispatchPageEvent("Runtime.executionContextDestroyed", {
+			executionContextId: 81,
+		});
+		pageSocket.dispatchPageEvent("Page.frameNavigated", {
+			frame: {
+				id: "recaptcha-frame",
+				loaderId: "reload-loader",
+				url: "https://www.google.com/recaptcha/api2/anchor?k=site-key",
+			},
+		});
+		cdpState.isolatedWorldContextIds.set("recaptcha-frame", 82);
+		await frame.title();
+		await page.close();
+		await client.close();
+
+		expect(cdpState.frameContextIds).toEqual([81, 82]);
+	});
+
+	it("re-resolves a missing frame context exactly once", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const frame = (await page.frames())[1];
+		const pageSocket = cdpState.pageSockets[0];
+		if (!frame || !pageSocket) {
+			throw new Error("Expected the mock child frame and page socket");
+		}
+
+		pageSocket.dispatchPageEvent("Runtime.executionContextCreated", {
+			context: { auxData: { frameId: "recaptcha-frame" }, id: 101 },
+		});
+		cdpState.frameEvaluationErrors.set(101, ["Failed to find context with id 101"]);
+		cdpState.isolatedWorldContextIds.set("recaptcha-frame", 102);
+		await frame.title();
+		await page.close();
+		await client.close();
+
+		expect(cdpState.frameContextIds).toEqual([101, 102]);
+		expect(cdpState.isolatedWorldFrameIds).toEqual(["recaptcha-frame"]);
+	});
+
+	it("fails loudly when the one-shot frame context recovery also fails", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+		const frame = (await page.frames())[1];
+		const pageSocket = cdpState.pageSockets[0];
+		if (!frame || !pageSocket) {
+			throw new Error("Expected the mock child frame and page socket");
+		}
+
+		pageSocket.dispatchPageEvent("Runtime.executionContextCreated", {
+			context: { auxData: { frameId: "recaptcha-frame" }, id: 201 },
+		});
+		cdpState.frameEvaluationErrors.set(201, ["Cannot find context with specified id"]);
+		cdpState.frameEvaluationErrors.set(202, ["Browser evaluation genuinely failed"]);
+		cdpState.isolatedWorldContextIds.set("recaptcha-frame", 202);
+
+		await expect(frame.title()).rejects.toThrow("Browser evaluation genuinely failed");
+		await page.close();
+		await client.close();
+
+		expect(cdpState.frameContextIds).toEqual([201, 202]);
+		expect(cdpState.isolatedWorldFrameIds).toEqual(["recaptcha-frame"]);
 	});
 
 	it("serializes CDP page commands with only CDP top-level keys", async () => {

@@ -975,6 +975,20 @@ function getCdpExecutionContext(params: unknown): {
 	};
 }
 
+function getCdpDestroyedExecutionContextId(params: unknown): number | undefined {
+	if (!isRecord(params)) {
+		return undefined;
+	}
+
+	return typeof params.executionContextId === "number"
+		? params.executionContextId
+		: undefined;
+}
+
+function isMissingExecutionContextError(error: unknown): boolean {
+	return error instanceof Error && /\b(?:cannot|failed to) find context\b/i.test(error.message);
+}
+
 class CdpBrowserLocator implements BrowserLocator {
 	constructor(
 		private readonly frame: {
@@ -1120,7 +1134,20 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 	async evaluateInFrame<T>(frameId: string, fn: string | (() => T)): Promise<T> {
 		await this.initialize();
 		const contextId = await this.getFrameExecutionContextId(frameId);
-		return await this.evaluateWithContext<T>(fn, contextId);
+		try {
+			return await this.evaluateWithContext<T>(fn, contextId);
+		} catch (error) {
+			if (!isMissingExecutionContextError(error)) {
+				throw error;
+			}
+
+			if (this.frameExecutionContexts.get(frameId) === contextId) {
+				this.frameExecutionContexts.delete(frameId);
+			}
+
+			const refreshedContextId = await this.getFrameExecutionContextId(frameId);
+			return await this.evaluateWithContext<T>(fn, refreshedContextId);
+		}
 	}
 
 	async waitForSelectorInFrame(
@@ -1383,6 +1410,21 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 			if (context.frameId && context.id !== undefined) {
 				this.frameExecutionContexts.set(context.frameId, context.id);
 			}
+		});
+		this.pageClient.on("Runtime.executionContextDestroyed", (params) => {
+			const destroyedContextId = getCdpDestroyedExecutionContextId(params);
+			if (destroyedContextId === undefined) {
+				return;
+			}
+
+			for (const [frameId, contextId] of this.frameExecutionContexts) {
+				if (contextId === destroyedContextId) {
+					this.frameExecutionContexts.delete(frameId);
+				}
+			}
+		});
+		this.pageClient.on("Runtime.executionContextsCleared", () => {
+			this.frameExecutionContexts.clear();
 		});
 		await this.pageClient.send("Page.enable");
 		await this.pageClient.send("Runtime.enable");

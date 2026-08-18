@@ -316,8 +316,9 @@ export function createBrowserResolverVendorAdapter(
 		},
 
 		async solve(challenge, identity, callerSignal, traceRecorder) {
-			void identity;
-			if (!options.cdpUrl?.trim()) {
+			const cdpUrl = options.cdpUrl?.trim();
+			const proxyUrl = identity?.proxyUrl;
+			if (!cdpUrl && proxyUrl === undefined) {
 				throw new ResolverVendorUnavailableError(BROWSER_VENDOR_ID, "missing_credentials");
 			}
 			if (!isSupportedKind(challenge.kind)) {
@@ -326,6 +327,14 @@ export function createBrowserResolverVendorAdapter(
 			assertResolverHostAllowed(challenge.pageUrl, options.allowedHosts);
 			const challengeKind = challenge.kind;
 			callerSignal.throwIfAborted();
+			if (proxyUrl !== undefined && proxyUrl.length === 0) {
+				throw new ResolverVendorUnavailableError(BROWSER_VENDOR_ID, "missing_proxy_identity");
+			}
+			if (cdpUrl && proxyUrl !== undefined) {
+				// The current pool acquire protocol cannot bind a proxy to its browser context.
+				// Refuse so the chain can choose a vendor that can honor the resolved identity.
+				throw new ResolverVendorUnavailableError(BROWSER_VENDOR_ID, "not_implemented");
+			}
 
 			const solveController = new AbortController();
 			const onCallerAbort = () => solveController.abort(abortReason(callerSignal));
@@ -340,8 +349,9 @@ export function createBrowserResolverVendorAdapter(
 			try {
 				client = createClient({
 					allowedHosts: [...options.allowedHosts],
-					cdpUrl: options.cdpUrl.trim(),
-					requireCdpPool: true,
+					cdpUrl: cdpUrl ?? "",
+					...(proxyUrl === undefined ? {} : { proxy: proxyUrl }),
+					requireCdpPool: cdpUrl !== undefined,
 				});
 				const contextOperation = client.withIsolatedContext(async (page) => {
 					handlerEntered = true;
