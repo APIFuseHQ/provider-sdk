@@ -6,6 +6,10 @@ import ts from "typescript";
 
 type ExportTarget = string | Readonly<Record<string, ExportTarget>>;
 
+// ./testing is the designated test-only entry point. Keep this allowance exact so no
+// other test/internal seam can escape through it or any other package subpath.
+const ALLOWED_TEST_ONLY_EXPORTS = new Set(["./testing: resetProviderCacheForTests"]);
+
 function resolveExportCondition(
 	target: ExportTarget,
 	condition: "types" | "import",
@@ -18,7 +22,7 @@ function resolveExportCondition(
 }
 
 describe("package public surface", () => {
-	it("does not expose test or internal seams from any package subpath", async () => {
+	it("exposes test or internal seams only through exact designated allowances", async () => {
 		const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as {
 			exports?: Record<string, ExportTarget>;
 		};
@@ -49,8 +53,9 @@ describe("package public surface", () => {
 			const moduleSymbol = sourceFile && checker.getSymbolAtLocation(sourceFile);
 			if (!moduleSymbol) continue;
 			for (const exportedSymbol of checker.getExportsOfModule(moduleSymbol)) {
-				if (seamName.test(exportedSymbol.name)) {
-					leakedExports.add(`${subpath}: ${exportedSymbol.name}`);
+				const exportedSeam = `${subpath}: ${exportedSymbol.name}`;
+				if (seamName.test(exportedSymbol.name) && !ALLOWED_TEST_ONLY_EXPORTS.has(exportedSeam)) {
+					leakedExports.add(exportedSeam);
 				}
 			}
 		}
@@ -64,8 +69,9 @@ describe("package public surface", () => {
 				? await import(targetUrl, { with: { type: "json" } })
 				: await import(targetUrl);
 			for (const exportName of Object.keys(module)) {
-				if (seamName.test(exportName)) {
-					leakedExports.add(`${subpath}: ${exportName}`);
+				const exportedSeam = `${subpath}: ${exportName}`;
+				if (seamName.test(exportName) && !ALLOWED_TEST_ONLY_EXPORTS.has(exportedSeam)) {
+					leakedExports.add(exportedSeam);
 				}
 			}
 		}
@@ -74,5 +80,18 @@ describe("package public surface", () => {
 			exportMappings.map(([subpath]) => subpath).sort(),
 		);
 		expect([...leakedExports].sort()).toEqual([]);
+	});
+
+	it("exports the provider-cache reset from the built testing entry point", async () => {
+		const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as {
+			exports?: Record<string, ExportTarget>;
+		};
+		const testingMapping = packageJson.exports?.["./testing"];
+		const target = testingMapping && resolveExportCondition(testingMapping, "import");
+		expect(target).toBeDefined();
+
+		const testing = await import(pathToFileURL(resolve(target as string)).href);
+		expect(testing.resetProviderCacheForTests).toBeFunction();
+		expect(() => testing.resetProviderCacheForTests()).not.toThrow();
 	});
 });
