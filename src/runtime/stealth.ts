@@ -67,7 +67,8 @@ import {
 	serializeRequestUrl,
 } from "./request-options.js";
 
-export const DEFAULT_PROFILE = "chrome-146";
+export const DEFAULT_PROFILE = "chrome-latest";
+const UNKNOWN_PROFILE_FALLBACK = "chrome-latest";
 
 const MISSING_PROXY_WARNING =
 	"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.";
@@ -194,11 +195,21 @@ function parseProfileIdentifier(identifier: string): {
 
 function compareVersionDistance(target: number[], left: number[], right: number[]): number {
 	const width = Math.max(target.length, left.length, right.length);
+	const leftDistance: number[] = [];
+	const rightDistance: number[] = [];
 	for (let index = 0; index < width; index += 1) {
 		const targetPart = target[index] ?? 0;
-		const leftDistance = Math.abs((left[index] ?? 0) - targetPart);
-		const rightDistance = Math.abs((right[index] ?? 0) - targetPart);
-		if (leftDistance !== rightDistance) return leftDistance - rightDistance;
+		leftDistance.push(Math.abs((left[index] ?? 0) - targetPart));
+		rightDistance.push(Math.abs((right[index] ?? 0) - targetPart));
+	}
+	return compareVersions(leftDistance, rightDistance);
+}
+
+function compareVersions(left: number[], right: number[]): number {
+	const width = Math.max(left.length, right.length);
+	for (let index = 0; index < width; index += 1) {
+		const difference = (left[index] ?? 0) - (right[index] ?? 0);
+		if (difference !== 0) return difference;
 	}
 	return 0;
 }
@@ -224,27 +235,52 @@ function closestWreqProfile(
 	return closest?.name;
 }
 
-function resolveDefaultWreqProfileMapping(): { identifier: string; os: EmulationOS } {
+function latestWreqProfile(
+	family: string,
+	wreqProfiles: readonly BrowserProfile[],
+): BrowserProfile | undefined {
+	let latest: { name: BrowserProfile; version: number[] } | undefined;
+	for (const candidateName of wreqProfiles) {
+		const candidate = parseProfileIdentifier(candidateName);
+		if (!candidate || candidate.family !== family) continue;
+		if (!latest || compareVersions(candidate.version, latest.version) > 0) {
+			latest = { name: candidateName, version: candidate.version };
+		}
+	}
+	return latest?.name;
+}
+
+type UnknownProfileFallback =
+	| { kind: "pinned"; identifier: string; os: EmulationOS }
+	| { kind: "latest"; family: string; os: EmulationOS };
+
+function resolveUnknownProfileFallback(): UnknownProfileFallback {
 	let profile: ReturnType<typeof getStealthProfile>;
 	try {
-		profile = getStealthProfile(DEFAULT_PROFILE);
+		profile = getStealthProfile(UNKNOWN_PROFILE_FALLBACK);
 	} catch (error) {
 		throw new SDKError(
-			`Default stealth profile "${DEFAULT_PROFILE}" cannot be mapped to a wreq-js browser profile.`,
+			`Fallback stealth profile "${UNKNOWN_PROFILE_FALLBACK}" cannot be mapped to a wreq-js browser profile.`,
 			{ cause: error instanceof Error ? error : undefined },
 		);
 	}
 
+	// An intent fallback ("latest") resolves per call against the installed
+	// transport, so unknown profile names inherit the same recency guarantee as
+	// the default profile instead of pinning a version that ages out.
+	if ("resolution" in profile) {
+		return { kind: "latest", family: profile.browserFamily, os: profile.platform };
+	}
 	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
 	if (!parseProfileIdentifier(identifier)) {
 		throw new SDKError(
-			`Default stealth profile "${DEFAULT_PROFILE}" cannot be mapped to a wreq-js browser profile.`,
+			`Fallback stealth profile "${UNKNOWN_PROFILE_FALLBACK}" cannot be mapped to a wreq-js browser profile.`,
 		);
 	}
-	return { identifier, os: profile.platform };
+	return { kind: "pinned", identifier, os: profile.platform };
 }
 
-const DEFAULT_WREQ_PROFILE_MAPPING = resolveDefaultWreqProfileMapping();
+const UNKNOWN_PROFILE_WREQ_FALLBACK = resolveUnknownProfileFallback();
 
 export function resolveWreqProfile(
 	profileName: string,
@@ -259,20 +295,33 @@ export function resolveWreqProfile(
 
 	let identifier: string;
 	let os: EmulationOS;
+	let latestFamily: string | undefined;
 	try {
 		const profile = getStealthProfile(profileName);
-		identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
 		os = profile.platform;
+		if ("resolution" in profile) {
+			identifier = "";
+			latestFamily = profile.browserFamily;
+		} else {
+			identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
+		}
 	} catch {
 		// Preserve the previous ctx.stealth.fetch() compatibility behavior: unknown
-		// profile strings still run with the transport default instead of failing
+		// profile strings still run with the legacy fallback instead of failing
 		// before the request starts. Removed built-in profile aliases above remain
 		// explicit errors so callers do not accidentally pin retired fingerprints.
-		identifier = DEFAULT_WREQ_PROFILE_MAPPING.identifier;
-		os = DEFAULT_WREQ_PROFILE_MAPPING.os;
+		os = UNKNOWN_PROFILE_WREQ_FALLBACK.os;
+		if (UNKNOWN_PROFILE_WREQ_FALLBACK.kind === "latest") {
+			identifier = "";
+			latestFamily = UNKNOWN_PROFILE_WREQ_FALLBACK.family;
+		} else {
+			identifier = UNKNOWN_PROFILE_WREQ_FALLBACK.identifier;
+		}
 	}
 
-	const browser = closestWreqProfile(identifier, wreqProfiles);
+	const browser = latestFamily
+		? latestWreqProfile(latestFamily, wreqProfiles)
+		: closestWreqProfile(identifier, wreqProfiles);
 	if (!browser) {
 		throw new SDKError(
 			`Stealth profile "${profileName}" cannot be mapped to a wreq-js browser profile.`,
