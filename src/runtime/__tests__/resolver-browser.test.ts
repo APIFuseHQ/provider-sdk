@@ -99,6 +99,23 @@ type BrowserStubOptions = {
 	readonly userAgent?: string;
 };
 
+function collectNestedStrings(value: unknown, seen = new Set<object>()): string[] {
+	if (typeof value === "string") return [value];
+	if (typeof value !== "object" || value === null || seen.has(value)) return [];
+	seen.add(value);
+
+	const strings = value instanceof Error ? [value.message] : [];
+	if (value instanceof Error && value.cause !== undefined) {
+		strings.push(...collectNestedStrings(value.cause, seen));
+	}
+	for (const [key, nestedValue] of Object.entries(value)) {
+		if (key !== "message" && key !== "cause") {
+			strings.push(...collectNestedStrings(nestedValue, seen));
+		}
+	}
+	return strings;
+}
+
 function createBrowserStub(options: BrowserStubOptions = {}) {
 	let cookieRead = 0;
 	const state = {
@@ -333,8 +350,86 @@ describe("browser resolver vendor", () => {
 
 		await adapter.solve(AWS_CHALLENGE, undefined, new AbortController().signal);
 
-		expect(clientOptions?.allowedHosts).toEqual(declaredHosts);
+		expect(clientOptions).toMatchObject({
+			allowedHosts: declaredHosts,
+			cdpUrl: "ws://cdp-pool.test",
+			requireCdpPool: true,
+		});
+		expect(clientOptions?.proxy).toBeUndefined();
 		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
+	});
+
+	it("declines a pooled solve with a proxy identity before acquiring a session", async () => {
+		const proxyUrl = "http://proxy-user:proxy-password@proxy.test:8080";
+		const stub = createBrowserStub();
+		let createCalls = 0;
+		const adapter = createBrowserResolverVendorAdapter({
+			allowedHosts: ["example.com"],
+			cdpUrl: "ws://cdp-pool.test",
+			createClient() {
+				createCalls += 1;
+				return stub.client;
+			},
+			timeoutMs: 100,
+		});
+
+		const error = await adapter
+			.solve(
+				AWS_CHALLENGE,
+				{ proxyUrl, userAgent: "BoundBrowser/1.0" },
+				new AbortController().signal,
+			)
+			.catch((cause: unknown) => cause);
+
+		expect(error).toBeInstanceOf(ResolverVendorUnavailableError);
+		expect(error).toMatchObject({ vendor: "browser", reason: "not_implemented" });
+		expect(createCalls).toBe(0);
+		expect(stub.state.gotoUrls).toEqual([]);
+		expect(stub.state.contextCloseStarted).toBe(0);
+		expect(collectNestedStrings(error).join("\n")).not.toContain(proxyUrl);
+	});
+
+	it("advances to the next vendor when the pool cannot bind the proxy identity", async () => {
+		const proxyUrl = "http://proxy-user:proxy-password@proxy.test:8080";
+		const browserStub = createBrowserStub();
+		let browserCreateCalls = 0;
+		let secondVendorCalls = 0;
+		const browser = createBrowserResolverVendorAdapter({
+			allowedHosts: ["example.com"],
+			cdpUrl: "ws://cdp-pool.test",
+			createClient() {
+				browserCreateCalls += 1;
+				return browserStub.client;
+			},
+			timeoutMs: 100,
+		});
+		const secondVendor = {
+			id: "2captcha",
+			supports: (kind: ProviderChallengeKind) => kind === "aws_waf",
+			async solve() {
+				secondVendorCalls += 1;
+				return { form: "token", token: "second-vendor-solution" } as const;
+			},
+		} satisfies import("../resolver-vendors/types.js").ResolverVendorAdapter;
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+		const resolver = createResolverClient({
+			adapters: [browser, secondVendor],
+			identity: { proxyUrl, userAgent: "BoundBrowser/1.0" },
+			kinds: ["aws_waf"],
+			proxyMode: "required",
+		});
+
+		const result = await resolver.solve(AWS_CHALLENGE, undefined, recorder);
+
+		expect(result).toEqual({ form: "token", token: "second-vendor-solution" });
+		expect(browserCreateCalls).toBe(0);
+		expect(browserStub.state.contextCloseStarted).toBe(0);
+		expect(secondVendorCalls).toBe(1);
+		expect(
+			collectNestedStrings(trace.getSpans().map((span) => span.attributes)).join("\n"),
+		).not.toContain(proxyUrl);
 	});
 
 	it("refuses an undeclared challenge host before creating a client or navigating", async () => {

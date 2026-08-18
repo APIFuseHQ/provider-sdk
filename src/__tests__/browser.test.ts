@@ -374,6 +374,9 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 			if (fn === "document.title") {
 				return "local-title" as T;
 			}
+			if (fn === "navigator.userAgent") {
+				return "LocalBrowser/1.0" as T;
+			}
 
 			throw new Error(`Unexpected local evaluate expression: ${fn}`);
 		},
@@ -1481,6 +1484,45 @@ describe("createBrowserClient", () => {
 			},
 		]);
 		expect(stealthState.callCount).toBe(0);
+	});
+
+	it("binds a browser resolver proxy identity to a local Playwright launch", async () => {
+		const proxyUrl = "http://proxy-user:proxy-password@proxy.test:8080";
+		browserState.isolatedContextCookies.push([
+			{
+				name: "aws-waf-token",
+				value: "local-proxy-token",
+				domain: "example.com",
+				path: "/",
+				expires: 1_900_000_000,
+				httpOnly: true,
+				secure: true,
+				sameSite: "None",
+			},
+		]);
+		const { createBrowserResolverVendorAdapter } = await import(
+			"../runtime/resolver-vendors/browser.js"
+		);
+		const adapter = createBrowserResolverVendorAdapter({
+			allowedHosts: ["example.com"],
+			timeoutMs: 100,
+		});
+
+		const result = await adapter.solve(
+			{ kind: "aws_waf", pageUrl: "https://example.com/protected" },
+			{ proxyUrl, userAgent: "BoundBrowser/1.0" },
+			new AbortController().signal,
+		);
+
+		expect(result).toMatchObject({ cookies: { "aws-waf-token": "local-proxy-token" } });
+		expect(browserState.launchCalls).toEqual([
+			{
+				args: undefined,
+				executablePath: undefined,
+				headless: true,
+				proxy: { server: proxyUrl },
+			},
+		]);
 	});
 
 	it("uses CDP Pool when APIFUSE__CDP_POOL__URL is configured", async () => {
