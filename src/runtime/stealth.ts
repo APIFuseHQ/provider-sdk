@@ -67,7 +67,7 @@ import {
 	serializeRequestUrl,
 } from "./request-options.js";
 
-const DEFAULT_PROFILE = "chrome-146";
+export const DEFAULT_PROFILE = "chrome-146";
 
 const MISSING_PROXY_WARNING =
 	"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.";

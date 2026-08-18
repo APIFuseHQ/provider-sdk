@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 import { resolveProxyConfigAsync, type ProxyResolutionOptions } from "../config/loader.js";
 import { ProviderError } from "../errors.js";
+import { getStealthProfile } from "../stealth/profiles.js";
 import type {
 	ChallengeSolution,
 	ProviderCache,
@@ -43,6 +44,7 @@ import {
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
 } from "./resolver-config.js";
+import { DEFAULT_PROFILE } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
 
 export {
@@ -216,6 +218,26 @@ export function swapResolverAdapterFactoryForTests(
 		restored = true;
 		if (original === undefined) delete resolverAdapterRegistry[vendor];
 		else resolverAdapterRegistry[vendor] = original;
+	};
+}
+
+type ResolverIdentitySource = "declared" | "defaulted";
+
+let resolveDefaultResolverUserAgent: () => string | undefined = () =>
+	getStealthProfile(DEFAULT_PROFILE).userAgent;
+
+/** Internal test seam; deliberately not re-exported from the package root. */
+export function swapResolverDefaultUserAgentForTests(
+	resolver: (() => string | undefined) | undefined,
+): () => void {
+	const original = resolveDefaultResolverUserAgent;
+	resolveDefaultResolverUserAgent =
+		resolver ?? (() => getStealthProfile(DEFAULT_PROFILE).userAgent);
+	let restored = false;
+	return () => {
+		if (restored) return;
+		restored = true;
+		resolveDefaultResolverUserAgent = original;
 	};
 }
 
@@ -719,19 +741,46 @@ export async function invalidateResolverSolution(
 
 async function resolveResolverIdentity(
 	proxyIntent: NonNullable<ResolverRuntimeOptions["proxyIntent"]>,
-): Promise<ResolverIdentity | undefined> {
+): Promise<{
+	readonly identity?: ResolverIdentity;
+	readonly unavailableReason?: ResolverVendorUnavailableReason;
+	readonly userAgentSource?: ResolverIdentitySource;
+}> {
+	const userAgentSource: ResolverIdentitySource = proxyIntent.userAgent ? "declared" : "defaulted";
+	let proxyUrl: string | undefined;
 	try {
 		const resolved = await resolveProxyConfigAsync({
 			upstream: proxyIntent.upstream,
 			affinityKey: proxyIntent.affinityKey,
-			telemetry: proxyIntent.telemetry,
+			telemetry: proxyIntent.telemetry
+				? {
+						...proxyIntent.telemetry,
+						recordProxyResolution(event) {
+							proxyIntent.telemetry?.recordProxyResolution({
+								...event,
+								userAgentSource,
+							});
+						},
+					}
+				: undefined,
 		});
-		if (!resolved.url || !proxyIntent.userAgent) return undefined;
-		return { proxyUrl: resolved.url, userAgent: proxyIntent.userAgent };
+		proxyUrl = resolved.url;
+		if (!proxyUrl) return { unavailableReason: "missing_proxy_identity", userAgentSource };
 	} catch {
 		// Lease failures contain infrastructure detail that must not cross the resolver
 		// boundary. A required policy is classified by the existing fail-closed guard.
-		return undefined;
+		return { unavailableReason: "missing_proxy_identity", userAgentSource };
+	}
+
+	try {
+		const userAgent = proxyIntent.userAgent || resolveDefaultResolverUserAgent();
+		if (!userAgent) return { unavailableReason: "missing_client_profile", userAgentSource };
+		return {
+			identity: { proxyUrl, userAgent },
+			userAgentSource,
+		};
+	} catch {
+		return { unavailableReason: "missing_client_profile", userAgentSource };
 	}
 }
 
@@ -766,9 +815,10 @@ function createResolverChainClient(options: {
 			const supportingEntries = options.entries.filter((entry) => entry.supports(challenge.kind));
 			if (supportingEntries.length === 0) throwUnsupportedKind(challenge.kind);
 			signal.throwIfAborted();
-			const identity = options.proxyIntent
+			const identityResolution = options.proxyIntent
 				? await resolveResolverIdentity(options.proxyIntent)
-				: options.identity;
+				: { identity: options.identity };
+			const identity = identityResolution.identity;
 			signal.throwIfAborted();
 			// Resolve a required proxy lease before consulting the cache. Solutions minted
 			// under a previous release are shared and long-lived, but a portable cached token
@@ -779,7 +829,7 @@ function createResolverChainClient(options: {
 				throwExhausted(
 					supportingEntries.map((entry) => ({
 						vendor: entry.id,
-						reason: "missing_proxy_identity" as const,
+						reason: identityResolution.unavailableReason ?? "missing_proxy_identity",
 					})),
 				);
 			}
@@ -820,6 +870,7 @@ function createResolverChainClient(options: {
 									vendor: adapter.id,
 									challenge_kind: challenge.kind,
 									client_profile: options.clientProfile,
+									resolver_identity_source: identityResolution.userAgentSource,
 								},
 								onError(error) {
 									return error instanceof ResolverVendorUnavailableError

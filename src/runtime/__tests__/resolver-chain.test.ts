@@ -16,6 +16,7 @@ import {
 	createResolverClientFromEnv,
 	createResolverClientFromEnvForTests,
 	RESOLVER_ADAPTER_REGISTRY,
+	swapResolverDefaultUserAgentForTests,
 } from "../resolver.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
@@ -28,6 +29,9 @@ import {
 } from "../resolver-vendors/types.js";
 import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
+import { DEFAULT_PROFILE } from "../stealth.js";
+import { getStealthProfile } from "../../stealth/profiles.js";
+import { ProxyTelemetryCollector } from "../proxy-telemetry.js";
 
 const CHALLENGE = {
 	kind: "aws_waf",
@@ -380,6 +384,93 @@ describe("resolver vendor chain", () => {
 				userAgent: REQUIRED_PROXY_INTENT.userAgent,
 			},
 		]);
+	});
+
+	it("defaults a required proxy identity to the SDK stealth profile", async () => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-default-profile-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-default-profile-password";
+		const telemetry = new ProxyTelemetryCollector();
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+			proxyIntent: {
+				...REQUIRED_PROXY_INTENT,
+				userAgent: undefined,
+				telemetry,
+			},
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({ form: "token", token: "browser" });
+		expect(adapter.state.identities).toEqual([
+			{
+				proxyUrl: expect.stringMatching(/^http:\/\/resolver-default-profile-account-/),
+				userAgent: getStealthProfile(DEFAULT_PROFILE).userAgent,
+			},
+		]);
+		const telemetryHeader = telemetry.toHeaderValue();
+		expect(telemetryHeader).toBeTruthy();
+		expect(
+			JSON.parse(Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8")),
+		).toMatchObject({
+			proxy: { userAgentSource: "defaulted" },
+		});
+	});
+
+	it("keeps a declared resolver profile ahead of the SDK default", async () => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-declared-profile-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-declared-profile-password";
+		const declaredUserAgent = getStealthProfile("firefox-147").userAgent;
+		const telemetryEvents: unknown[] = [];
+		const adapter = createStubAdapter({ id: "browser" });
+		const resolver = createResolverClient({
+			adapters: [adapter.adapter],
+			kinds: ["aws_waf"],
+			proxyIntent: {
+				...REQUIRED_PROXY_INTENT,
+				userAgent: declaredUserAgent,
+				telemetry: {
+					recordProxyResolution: (event) => telemetryEvents.push(event),
+				},
+			},
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({ form: "token", token: "browser" });
+		expect(adapter.state.identities).toEqual([
+			{
+				proxyUrl: expect.stringMatching(/^http:\/\/resolver-declared-profile-account-/),
+				userAgent: declaredUserAgent,
+			},
+		]);
+		expect(declaredUserAgent).not.toBe(getStealthProfile(DEFAULT_PROFILE).userAgent);
+		expect(telemetryEvents).toContainEqual(
+			expect.objectContaining({ userAgentSource: "declared" }),
+		);
+	});
+
+	it("classifies a resolved lease without a usable client profile separately", async () => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-missing-profile-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-missing-profile-password";
+		const restoreDefaultUserAgent = swapResolverDefaultUserAgentForTests(() => undefined);
+		try {
+			const adapter = createStubAdapter({ id: "browser" });
+			const resolver = createResolverClient({
+				adapters: [adapter.adapter],
+				kinds: ["aws_waf"],
+				proxyIntent: {
+					...REQUIRED_PROXY_INTENT,
+					userAgent: undefined,
+				},
+			});
+
+			await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
+				code: "RESOLVER_CHAIN_EXHAUSTED",
+				details: [{ vendor: "browser", reason: "missing_client_profile" }],
+			});
+			expect(adapter.state.solveCalls).toBe(0);
+		} finally {
+			restoreDefaultUserAgent();
+		}
 	});
 
 	it("does not expose a resolved proxy URL, credentials, or lease in errors or traces", async () => {

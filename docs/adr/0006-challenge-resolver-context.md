@@ -11,6 +11,21 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 7 (2026-08-18).** The first lazy resolver wiring passed a user agent
+only when a provider declared `stealth.profile`. `danawa` and `naver-map` both
+declare `proxy: { mode: "required" }` without a stealth profile, so their leases
+resolved while the chain still failed closed with `missing_proxy_identity`.
+This revision settles the omitted source in subsection 5a: the resolver derives
+the user agent from `DEFAULT_PROFILE` (`chrome-146`) through the shared stealth
+profile registry when the caller supplies no declared user agent, and records
+whether the identity was `declared` or `defaulted` in proxy telemetry and the
+resolver trace. A resolved lease with no derivable user agent is classified as
+`missing_client_profile`; an absent or unresolvable lease remains
+`missing_proxy_identity`. Both are vendor-availability failures and therefore
+follow the existing failover rule; optional and absent proxy policies retain
+their prior direct/optional behaviour. Sections changed: Decision 5a,
+Verification, and the resolver vendor-unavailable reason vocabulary.
+
 **Revision 6 (2026-08-16).** The first provider to declare
 `proxy: { mode: "required" }` (`buyee`) exposed that Decision 5 named the SDK as
 the identity binder without naming the seam, so no identity ever reached the
@@ -763,6 +778,25 @@ different vendor pair (a token minted through one vendor's exit was accepted
 verbatim through another's, with the same-exit control passing); for a kind that
 does bind, a CLI without an affinity key would need its own decision.
 
+**The resolver owns the user-agent fallback.** A provider-declared
+`stealth.profile` remains authoritative: its profile's user agent is passed in
+the grouped `proxyIntent` and is marked `declared`. When the provider declares
+no profile, the resolver looks up `DEFAULT_PROFILE` from `src/runtime/stealth.ts`
+through `src/stealth/profiles.ts` and binds that profile's user agent to the
+lease. This keeps one source of truth for user-agent strings and avoids making
+server, record, and dev callers duplicate the default lookup. The selected
+source is recorded in the existing proxy-resolution telemetry and resolver
+vendor-attempt trace; no proxy URL is added to either diagnostic surface.
+
+If the lease resolves but the selected profile cannot produce a user agent, the
+resolver reports `missing_client_profile`, distinct from
+`missing_proxy_identity`, which is reserved for a missing or unresolvable
+lease. Both reasons are vendor-availability failures, so a chain may advance
+past them under the same failover rule as the other unavailable-vendor reasons;
+the required-policy precondition still fails closed before cache lookup. The
+fallback is not applied to optional or absent policies in a way that changes
+their existing direct-connection behavior.
+
 ### 6. Fail closed, never silently degrade
 
 Missing configuration, an unknown kind, an exhausted vendor chain, and a
@@ -911,6 +945,15 @@ Negative / accepted:
 
 These must hold before `Status: accepted`:
 
+- A required-proxy provider without `stealth.profile` reaches its resolver
+  adapter with the user agent from `DEFAULT_PROFILE`, while a provider with a
+  declared profile reaches it with that profile's user agent. Existing proxy
+  telemetry and resolver traces identify the source as `defaulted` or
+  `declared` without carrying a proxy URL.
+- A required lease that resolves while profile lookup produces no user agent
+  reports `missing_client_profile`; a lease that cannot be resolved continues
+  to report `missing_proxy_identity`. Both remain vendor-availability reasons
+  and preserve the chain's existing failover classification.
 - The `aws_waf` variant carries `siteKey?`, and a `pack:types` negative control
   proves the field is accepted on `aws_waf` while still rejected on
   `cloudflare_interstitial`, so the Decision 4 widening does not become a

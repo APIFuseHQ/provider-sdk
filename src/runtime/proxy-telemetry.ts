@@ -4,6 +4,7 @@ import type {
 	ProxyProtocol,
 	ProxyResolutionTelemetryEvent,
 	ProxyTelemetrySink,
+	ProxyUserAgentSource,
 	ProxyVendorFailoverTelemetryEvent,
 	ProxyVendorName,
 	SmartproxyAllocatorBodyClass,
@@ -15,6 +16,7 @@ type ProviderTelemetryHeader = {
 	v: 1;
 	proxy?: {
 		provider: ProxyVendorName;
+		userAgentSource?: ProxyUserAgentSource;
 		protocol?: ProxyProtocol;
 		cacheStatus: ProxyCacheStatus;
 		cacheHit: boolean;
@@ -98,6 +100,7 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 	recordProxyResolution(event: ProxyResolutionTelemetryEvent): void {
 		this.#events.push({
 			provider: event.provider,
+			...(event.userAgentSource ? { userAgentSource: event.userAgentSource } : {}),
 			...(event.protocol ? { protocol: event.protocol } : {}),
 			cacheStatus: event.cacheStatus,
 			cacheHit: event.cacheHit,
@@ -175,6 +178,7 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 		const aggregate = rest.reduce<ProxyResolutionTelemetryEvent>(
 			(acc, event) => ({
 				provider: event.provider,
+				userAgentSource: event.userAgentSource ?? acc.userAgentSource,
 				cacheStatus: worseStatus(acc.cacheStatus, event.cacheStatus),
 				cacheHit: acc.cacheHit && event.cacheHit,
 				resolutionMs: acc.resolutionMs + event.resolutionMs,
@@ -196,6 +200,7 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 			v: 1,
 			proxy: {
 				provider: serving.provider,
+				...(aggregate.userAgentSource ? { userAgentSource: aggregate.userAgentSource } : {}),
 				...(serving.protocol ? { protocol: serving.protocol } : {}),
 				cacheStatus: aggregate.cacheStatus,
 				cacheHit: aggregate.cacheHit,

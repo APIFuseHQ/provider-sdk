@@ -103,8 +103,11 @@ export type SmartproxyAllocatorBodyClass =
 	| "text_without_proxies"
 	| "usable_proxy_endpoints";
 
+export type ProxyUserAgentSource = "declared" | "defaulted";
+
 export type ProxyResolutionTelemetryEvent = {
 	provider: ProxyVendorName;
+	userAgentSource?: ProxyUserAgentSource;
 	protocol?: ProxyProtocol;
 	cacheStatus: ProxyCacheStatus;
 	cacheHit: boolean;
