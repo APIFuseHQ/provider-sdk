@@ -310,4 +310,92 @@ describe("defineCredentialsAuth", () => {
 			data: { credential: { cookie: "approved:approve-123" } },
 		});
 	});
+
+	it("omits the refresh hook when the provider cannot re-mint a session", () => {
+		// The hook's presence is the protocol signal for "this connection can be
+		// re-established without the user", so it must not appear by default.
+		const credentialsAuth = defineCredentialsAuth({
+			fields: { email: { type: "email" } },
+			credentialKeys: ["cookie"] as const,
+			login: async () => ({ credential: { cookie: "session" } }),
+		});
+
+		expect(credentialsAuth.auth.flow?.refresh).toBeUndefined();
+	});
+
+	it("re-mints an expired session through refresh without user input", async () => {
+		// Credential-auth upstreams routinely drop a session before the
+		// advertised expiry; without this hook every operation stays broken
+		// until a human repeats the interactive login.
+		let loginCalls = 0;
+		let refreshCalls = 0;
+		const credentialsAuth = defineCredentialsAuth({
+			fields: {
+				email: { type: "email" },
+				password: { type: "password" },
+			},
+			credentialKeys: ["cookie"] as const,
+			login: async () => {
+				loginCalls += 1;
+				return { credential: { cookie: "session-1" } };
+			},
+			refresh: async (_ctx, input) => {
+				refreshCalls += 1;
+				// Absent fields are omitted rather than coerced to "", so a
+				// refresh can tell "not supplied" from "supplied empty".
+				expect(input).toEqual({});
+				return { credential: { cookie: "session-2" } };
+			},
+		});
+
+		expect(await credentialsAuth.auth.flow?.refresh?.(createFlowContext(), {})).toEqual({
+			kind: "complete",
+			turnId: "credentials.complete",
+			data: { credential: { cookie: "session-2" } },
+		});
+		expect(refreshCalls).toBe(1);
+		expect(loginCalls).toBe(0);
+	});
+
+	it("validates the refreshed credential like a login result", async () => {
+		const credentialsAuth = defineCredentialsAuth({
+			fields: { email: { type: "email" } },
+			credentialKeys: ["cookie", "sessionId"] as const,
+			login: async () => ({ credential: { cookie: "c", sessionId: "s" } }),
+			refresh: async () => ({ credential: { cookie: "c" } }) as never,
+		});
+
+		await expect(
+			credentialsAuth.auth.flow?.refresh?.(createFlowContext(), {}),
+		).rejects.toThrow(/sessionId/);
+	});
+
+	it("lets refresh raise a challenge when the upstream demands one", async () => {
+		const ctx = createFlowContext();
+		const credentialsAuth = defineCredentialsAuth({
+			fields: { email: { type: "email" } },
+			credentialKeys: ["cookie"] as const,
+			login: async () => ({ credential: { cookie: "session" } }),
+			refresh: async () => credentialsAuthChallenge("otp"),
+			challenges: {
+				otp: {
+					fields: { otp: { type: "otp" } },
+					verify: async (_ctx, input) => ({
+						credential: { cookie: `refreshed:${input.otp}` },
+					}),
+				},
+			},
+		});
+
+		expect(await credentialsAuth.auth.flow?.refresh?.(ctx, {})).toMatchObject({
+			kind: "form",
+			data: { challengeId: "otp" },
+		});
+		// The challenge raised by refresh is finishable on the same hook.
+		expect(await credentialsAuth.auth.flow?.refresh?.(ctx, { otp: "123456" })).toEqual({
+			kind: "complete",
+			turnId: "credentials.complete",
+			data: { credential: { cookie: "refreshed:123456" } },
+		});
+	});
 });

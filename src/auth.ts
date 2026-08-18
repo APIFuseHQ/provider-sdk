@@ -296,6 +296,25 @@ export interface DefineCredentialsAuthOptions<
 	):
 		| CredentialsAuthLoginResult<TCredentialKeys, keyof TChallenges & string>
 		| Promise<CredentialsAuthLoginResult<TCredentialKeys, keyof TChallenges & string>>;
+	/**
+	 * Optional re-mint of an expired session from the stored credential, wired
+	 * to `auth.flow.refresh`.
+	 *
+	 * Credential-auth upstreams routinely invalidate a session well before the
+	 * `expiresAt` the provider advertised, which leaves every operation failing
+	 * with a reauth error until a human repeats the whole interactive login.
+	 * Implement this to re-establish the session from what is already stored on
+	 * the connection; the result is resolved exactly like `login`, so it may
+	 * also raise a challenge when the upstream demands one. Omit it when the
+	 * upstream has no non-interactive path and re-authentication genuinely
+	 * requires the user.
+	 */
+	refresh?(
+		ctx: FlowContext,
+		input: Partial<CredentialsAuthInput<TFields>>,
+	):
+		| CredentialsAuthLoginResult<TCredentialKeys, keyof TChallenges & string>
+		| Promise<CredentialsAuthLoginResult<TCredentialKeys, keyof TChallenges & string>>;
 }
 
 export interface DefinedCredentialsAuth {
@@ -374,6 +393,27 @@ function normalizeInput<TFields extends CredentialsAuthFields>(
 		result[name] = typeof value === "string" ? value : "";
 	}
 	return result as CredentialsAuthInput<TFields>;
+}
+
+/**
+ * Refresh variant of {@link normalizeInput}. `login` coerces every declared
+ * field to a string because the interactive turn has already enforced that they
+ * are present; refresh runs with no user present, so an absent field is omitted
+ * rather than turned into an empty string. That keeps "the user did not supply
+ * this" distinguishable from "the user supplied an empty value".
+ */
+function normalizePartialInput<TFields extends CredentialsAuthFields>(
+	fields: TFields,
+	input: Record<string, unknown> | undefined,
+): Partial<CredentialsAuthInput<TFields>> {
+	const result: Record<string, string> = {};
+	for (const name of Object.keys(fields)) {
+		const value = input?.[name];
+		if (typeof value === "string") {
+			result[name] = value;
+		}
+	}
+	return result as Partial<CredentialsAuthInput<TFields>>;
 }
 
 function assertCredentialKeys<TCredentialKeys extends readonly string[]>(
@@ -716,6 +756,44 @@ export function defineCredentialsAuth<
 						completeTurnId,
 					);
 				},
+				// Only advertise refresh when the provider implements it: the
+				// protocol treats the hook's presence as "this connection can be
+				// re-established without the user", and exposing a stub that
+				// cannot actually re-mint would turn a recoverable expiry into a
+				// silent failure.
+				...(options.refresh
+					? {
+							refresh: async (ctx: FlowContext, rawInput?: Record<string, unknown>) => {
+								// A pending challenge belongs to the interactive flow that
+								// raised it; finish it there rather than restarting.
+								const pending = getPendingChallenge(ctx);
+								if (pending) {
+									return await continuePendingChallenge(
+										ctx,
+										options.credentialKeys,
+										challenges,
+										pending,
+										rawInput,
+										completeTurnId,
+									);
+								}
+
+								// Refresh runs without user input, so fields are optional
+								// here — unlike `continue`, missing ones are not a retry.
+								const result = await options.refresh!(
+									ctx,
+									normalizePartialInput(options.fields, rawInput),
+								);
+								return await resolveAuthResult(
+									ctx,
+									options.credentialKeys,
+									challenges,
+									result,
+									completeTurnId,
+								);
+							},
+						}
+					: {}),
 			},
 		},
 		credential: {
