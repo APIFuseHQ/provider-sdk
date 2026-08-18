@@ -77,9 +77,9 @@
 			"default": "./dist/runtime/prevalidate.js"
 		},
 		"./runtime/resolver": {
-			"types": "./dist/runtime/resolver.d.ts",
-			"import": "./dist/runtime/resolver.js",
-			"default": "./dist/runtime/resolver.js"
+			"types": "./dist/runtime/resolver-public.d.ts",
+			"import": "./dist/runtime/resolver-public.js",
+			"default": "./dist/runtime/resolver-public.js"
 		},
 		"./runtime/stealth": {
 			"types": "./dist/runtime/stealth.d.ts",

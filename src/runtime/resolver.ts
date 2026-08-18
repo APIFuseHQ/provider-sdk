@@ -1,6 +1,10 @@
 import { createHash } from "node:crypto";
 
-import { resolveProxyConfigAsync, type ProxyResolutionOptions } from "../config/loader.js";
+import {
+	resolveProxyConfigAsync,
+	type ProxyResolutionOptions,
+	type ProxyUserAgentSource,
+} from "../config/loader.js";
 import { ProviderError } from "../errors.js";
 import { getStealthProfile } from "../stealth/profiles.js";
 import type {
@@ -220,8 +224,6 @@ export function swapResolverAdapterFactoryForTests(
 		else resolverAdapterRegistry[vendor] = original;
 	};
 }
-
-type ResolverIdentitySource = "declared" | "defaulted";
 
 let resolveDefaultResolverUserAgent: () => string | undefined = () =>
 	getStealthProfile(DEFAULT_PROFILE).userAgent;
@@ -744,9 +746,9 @@ async function resolveResolverIdentity(
 ): Promise<{
 	readonly identity?: ResolverIdentity;
 	readonly unavailableReason?: ResolverVendorUnavailableReason;
-	readonly userAgentSource?: ResolverIdentitySource;
+	readonly userAgentSource?: ProxyUserAgentSource;
 }> {
-	const userAgentSource: ResolverIdentitySource = proxyIntent.userAgent ? "declared" : "defaulted";
+	const userAgentSource: ProxyUserAgentSource = proxyIntent.userAgent ? "declared" : "defaulted";
 	let proxyUrl: string | undefined;
 	try {
 		const resolved = await resolveProxyConfigAsync({
