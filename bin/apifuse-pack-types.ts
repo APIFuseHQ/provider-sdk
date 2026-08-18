@@ -254,6 +254,17 @@ const NEGATIVE_CONTROLS = [
 		].join("\n"),
 	},
 	{
+		filename: "negative-control-cache-reset-test-seam.ts",
+		expectedCode: "TS2305",
+		description: "the package root does not expose its cache-reset test seam",
+		source: [
+			'import { resetProviderCacheForTests } from "@apifuse/provider-sdk";',
+			"",
+			"export const mustNotCompile = resetProviderCacheForTests;",
+			"",
+		].join("\n"),
+	},
+	{
 		filename: "negative-control-resolver-runtime-allowed-hosts.ts",
 		expectedCode: "TS2322",
 		description: "ResolverRuntimeOptions.allowedHosts accepts only host strings",
