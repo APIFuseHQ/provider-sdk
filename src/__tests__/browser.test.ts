@@ -1092,7 +1092,10 @@ describe("createBrowserClient", () => {
 
 		expect(browserState.launchCalls).toEqual([
 			{
-				args: undefined,
+				// Not `undefined`: playwright-extra's stealth evasions mutate
+				// options.args during beforeLaunch, so the launcher must always
+				// receive a concrete array.
+				args: [],
 				executablePath: undefined,
 				headless: true,
 				proxy: undefined,
@@ -1517,12 +1520,30 @@ describe("createBrowserClient", () => {
 		expect(result).toMatchObject({ cookies: { "aws-waf-token": "local-proxy-token" } });
 		expect(browserState.launchCalls).toEqual([
 			{
-				args: undefined,
+				// The launcher contract now guarantees a concrete array (see the
+				// always-passes-args test below); undefined can no longer reach it.
+				args: [],
 				executablePath: undefined,
 				headless: true,
 				proxy: { server: proxyUrl },
 			},
 		]);
+	});
+
+	it("always passes a concrete args array when extraArgs is omitted", async () => {
+		// Regression: toLaunchOptions() used to forward `args: options.extraArgs`
+		// verbatim. With extraArgs omitted that sent `args: undefined` into
+		// playwright-extra, and the stealth navigator.webdriver evasion crashed in
+		// beforeLaunch with "undefined is not an object (evaluating
+		// 'options.args.findIndex')" — every stealth launch that did not pass
+		// extraArgs failed. Assert the launcher always receives an array.
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient({ headless: true });
+
+		await client.newPage();
+
+		expect(browserState.launchCalls).toHaveLength(1);
+		expect(browserState.launchCalls[0]?.args).toEqual([]);
 	});
 
 	it("uses CDP Pool when APIFUSE__CDP_POOL__URL is configured", async () => {
