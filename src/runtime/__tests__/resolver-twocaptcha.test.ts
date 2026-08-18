@@ -1,11 +1,8 @@
 import { describe, expect, it } from "bun:test";
 
 import { ProviderError } from "../../errors.js";
-import type {
-	ChallengeSolution,
-	ProviderChallenge,
-	ProviderChallengeKind,
-} from "../../types.js";
+import type { ChallengeSolution, ProviderChallenge, ProviderChallengeKind } from "../../types.js";
+import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
 import { createResolverClient } from "../resolver.js";
 import { createTwoCaptchaResolverVendorAdapter } from "../resolver-vendors/twocaptcha.js";
 import {
@@ -323,11 +320,7 @@ describe("2captcha resolver vendor", () => {
 		const stub = successfulFetch({ existing_token: "aws-waf-token-value" });
 		const adapter = createAdapter(stub);
 
-		const result = await adapter.solve(
-			AWS_WAF_CHALLENGE,
-			undefined,
-			new AbortController().signal,
-		);
+		const result = await adapter.solve(AWS_WAF_CHALLENGE, undefined, new AbortController().signal);
 
 		expect(result).toEqual({ form: "token", token: "aws-waf-token-value" });
 		expect(stub.calls.map((call) => call.url)).toEqual([
@@ -377,6 +370,47 @@ describe("2captcha resolver vendor", () => {
 				userAgent: "Measured Browser/1.0",
 			},
 		});
+	});
+
+	it("reaches AmazonTask through an SDK-resolved proxy lease", async () => {
+		const originalUsername = process.env[NODEMAVEN_USERNAME_ENV];
+		const originalPassword = process.env[NODEMAVEN_PASSWORD_ENV];
+		process.env[NODEMAVEN_USERNAME_ENV] = "twocaptcha-runtime-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "twocaptcha-runtime-password";
+		try {
+			const stub = successfulFetch({ existing_token: "runtime-proxied-aws-waf-token" });
+			const resolver = createResolverClient({
+				adapters: [createAdapter(stub)],
+				kinds: ["aws_waf"],
+				proxyIntent: {
+					mode: "required",
+					upstream: {
+						proxy: { mode: "required", providers: ["nodemaven"] },
+					},
+					userAgent: "Measured Browser/1.0",
+				},
+			});
+
+			await expect(resolver.solve(AWS_WAF_CHALLENGE)).resolves.toEqual({
+				form: "token",
+				token: "runtime-proxied-aws-waf-token",
+			});
+			expect(stub.calls[0]?.body).toMatchObject({
+				task: {
+					type: "AmazonTask",
+					proxyType: "http",
+					proxyAddress: "gate.nodemaven.com",
+					proxyLogin: expect.stringContaining("twocaptcha-runtime-account"),
+					proxyPassword: "twocaptcha-runtime-password",
+					userAgent: "Measured Browser/1.0",
+				},
+			});
+		} finally {
+			if (originalUsername === undefined) delete process.env[NODEMAVEN_USERNAME_ENV];
+			else process.env[NODEMAVEN_USERNAME_ENV] = originalUsername;
+			if (originalPassword === undefined) delete process.env[NODEMAVEN_PASSWORD_ENV];
+			else process.env[NODEMAVEN_PASSWORD_ENV] = originalPassword;
+		}
 	});
 
 	it.each([

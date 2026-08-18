@@ -48,6 +48,7 @@ import {
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import { createStealthClient } from "../src/runtime/stealth.js";
 import { parseSchema } from "../src/schema.js";
+import { getStealthProfile } from "../src/stealth/profiles.js";
 import {
 	captureStreamEvidence,
 	createStreamCaptureEnvelope,
@@ -520,6 +521,10 @@ export function createCaptureContext(
 	};
 	const state = createMemoryProviderRuntimeState();
 	const cache = createBypassProviderCache({ providerId: provider.id });
+	const proxyPolicy = resolveNativeProxyPolicy(provider);
+	const stealthProfile = provider.stealth?.profile
+		? getStealthProfile(provider.stealth.profile)
+		: undefined;
 	const ctx: ProviderContext = {
 		env,
 		credential,
@@ -558,7 +563,15 @@ export function createCaptureContext(
 			? createResolverClientFromEnv(provider.resolver, undefined, {
 					allowedHosts: provider.allowedHosts,
 					cache,
-					proxyMode: resolveNativeProxyPolicy(provider)?.mode,
+					...(proxyPolicy
+						? {
+								proxyIntent: {
+									mode: proxyPolicy.mode,
+									upstream: { proxy: provider.proxy },
+									...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+								},
+							}
+						: {}),
 				})
 			: createUnsupportedResolverClient("Provider does not declare resolver capability"),
 		choice: createProviderChoiceContext({

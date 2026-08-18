@@ -160,7 +160,7 @@ describe("resolver tracing", () => {
 				client_profile: "safari17_0",
 				unavailability_reason: "transport_failure",
 				cause_name: "TlsError",
-				cause_message: "connect ETIMEDOUT at https://proxy.example.com [REDACTED]",
+				cause_message: "connect ETIMEDOUT at [REDACTED_PROXY_URL] [REDACTED]",
 				upstream_host: "sensor.example.com",
 				transport_phase: "post_sensor",
 				transport_round: 2,
@@ -174,7 +174,7 @@ describe("resolver tracing", () => {
 					reason: "transport_failure",
 					cause: {
 						name: "TlsError",
-						message: "connect ETIMEDOUT at https://proxy.example.com [REDACTED]",
+						message: "connect ETIMEDOUT at [REDACTED_PROXY_URL] [REDACTED]",
 					},
 					upstreamHost: "sensor.example.com",
 					phase: "post_sensor",

@@ -594,6 +594,7 @@ function createProviderContext(
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
+	const proxyPolicy = resolveNativeProxyPolicy(provider);
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveProviderProxyAffinityKey(provider, request, operationId),
@@ -704,7 +705,15 @@ function createProviderContext(
 							allowedHosts: provider.allowedHosts,
 							cache,
 							identityScope: resolverIdentityScope,
-							proxyMode: resolveNativeProxyPolicy(provider)?.mode,
+							...(proxyPolicy
+								? {
+										proxyIntent: {
+											mode: proxyPolicy.mode,
+											...proxyClientOptions,
+											...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+										},
+									}
+								: {}),
 						}),
 					signal,
 				)
@@ -773,6 +782,7 @@ function createAuthFlowContext(
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
+	const proxyPolicy = resolveNativeProxyPolicy(provider);
 	const contextData = request.context ?? {};
 	const flowContextStore = createFlowContextStore(
 		provider.context?.keys ?? Object.keys(contextData),
@@ -875,7 +885,15 @@ function createAuthFlowContext(
 								allowedHosts: provider.allowedHosts,
 								cache,
 								identityScope: resolverIdentityScope,
-								proxyMode: resolveNativeProxyPolicy(provider)?.mode,
+								...(proxyPolicy
+									? {
+											proxyIntent: {
+												mode: proxyPolicy.mode,
+												...proxyClientOptions,
+												...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+											},
+										}
+									: {}),
 							}),
 						signal,
 					)

@@ -21,6 +21,7 @@ import { createResolverClientFromEnv } from "../src/runtime/resolver.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import { createStealthClient } from "../src/runtime/stealth.js";
 import { createTraceContext } from "../src/runtime/trace.js";
+import { getStealthProfile } from "../src/stealth/profiles.js";
 import type { BrowserClient, ProviderContext } from "../src/types.js";
 
 const HELP_TEXT = `Usage: apifuse dev [path]
@@ -85,6 +86,10 @@ export function createProviderContext(provider: ProviderDefinition): {
 	const credential = createCredentialContext();
 	const state = createMemoryProviderRuntimeState();
 	const cache = createProviderCache({ providerId: provider.id });
+	const proxyPolicy = resolveNativeProxyPolicy(provider);
+	const stealthProfile = provider.stealth?.profile
+		? getStealthProfile(provider.stealth.profile)
+		: undefined;
 	const ctx: ProviderContext = {
 		env,
 		credential,
@@ -107,7 +112,15 @@ export function createProviderContext(provider: ProviderDefinition): {
 			? createResolverClientFromEnv(provider.resolver, undefined, {
 					allowedHosts: provider.allowedHosts,
 					cache,
-					proxyMode: resolveNativeProxyPolicy(provider)?.mode,
+					...(proxyPolicy
+						? {
+								proxyIntent: {
+									mode: proxyPolicy.mode,
+									upstream: { proxy: provider.proxy },
+									...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+								},
+							}
+						: {}),
 				})
 			: createUnsupportedResolverClient("Provider does not declare resolver capability"),
 		choice: createProviderChoiceContext({

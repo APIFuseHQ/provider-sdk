@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import { VALID_PROVIDER_CHALLENGE_KINDS } from "../../define.js";
 import { createProviderCache } from "../cache.js";
@@ -20,11 +20,14 @@ import {
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
 	ResolverChallengeVerdictError,
+	type ResolverIdentity,
 	type ResolverVendorAdapter,
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 	type ResolverVendorUnavailableReason,
 } from "../resolver-vendors/types.js";
+import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
+import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const CHALLENGE = {
 	kind: "aws_waf",
@@ -32,6 +35,32 @@ const CHALLENGE = {
 } satisfies ProviderChallenge;
 
 const ALL_CHALLENGE_KINDS: readonly ProviderChallengeKind[] = VALID_PROVIDER_CHALLENGE_KINDS;
+const REQUIRED_PROXY_POLICY = {
+	mode: "required",
+	providers: ["nodemaven"],
+} as const;
+const REQUIRED_PROXY_INTENT = {
+	mode: REQUIRED_PROXY_POLICY.mode,
+	upstream: { proxy: REQUIRED_PROXY_POLICY },
+	userAgent: "Resolver chain test agent/1.0",
+} as const;
+
+let originalNodemavenUsername: string | undefined;
+let originalNodemavenPassword: string | undefined;
+
+beforeEach(() => {
+	originalNodemavenUsername = process.env[NODEMAVEN_USERNAME_ENV];
+	originalNodemavenPassword = process.env[NODEMAVEN_PASSWORD_ENV];
+	delete process.env[NODEMAVEN_USERNAME_ENV];
+	delete process.env[NODEMAVEN_PASSWORD_ENV];
+});
+
+afterEach(() => {
+	if (originalNodemavenUsername === undefined) delete process.env[NODEMAVEN_USERNAME_ENV];
+	else process.env[NODEMAVEN_USERNAME_ENV] = originalNodemavenUsername;
+	if (originalNodemavenPassword === undefined) delete process.env[NODEMAVEN_PASSWORD_ENV];
+	else process.env[NODEMAVEN_PASSWORD_ENV] = originalNodemavenPassword;
+});
 
 type StubBehavior = (
 	challenge: ProviderChallenge,
@@ -43,7 +72,11 @@ function createStubAdapter(options: {
 	readonly supports?: boolean;
 	readonly behavior?: StubBehavior;
 }) {
-	const state = { solveCalls: 0, supportsCalls: 0 };
+	const state: {
+		solveCalls: number;
+		supportsCalls: number;
+		identities: Array<ResolverIdentity | undefined>;
+	} = { solveCalls: 0, supportsCalls: 0, identities: [] };
 	const adapter: ResolverVendorAdapter = {
 		id: options.id,
 		supports() {
@@ -51,8 +84,8 @@ function createStubAdapter(options: {
 			return options.supports ?? true;
 		},
 		async solve(challenge, identity, signal) {
-			void identity;
 			state.solveCalls += 1;
+			state.identities.push(identity);
 			return await (options.behavior ?? (async () => ({ form: "token", token: options.id })))(
 				challenge,
 				signal,
@@ -263,7 +296,7 @@ describe("resolver vendor chain", () => {
 		const resolver = createResolverClient({
 			adapters: [adapter.adapter],
 			kinds: ["aws_waf"],
-			proxyMode: "required",
+			proxyIntent: REQUIRED_PROXY_INTENT,
 		});
 
 		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
@@ -275,7 +308,7 @@ describe("resolver vendor chain", () => {
 
 	it("fails closed under a required proxy policy even when a cached solution exists", async () => {
 		const cache = createProviderCache({ providerId: "resolver-required-proxy", redisUrl: "" });
-let seedCalls = 0;
+		let seedCalls = 0;
 		const seededAdapter: ResolverVendorAdapter = {
 			id: "browser",
 			supports: () => true,
@@ -294,7 +327,6 @@ let seedCalls = 0;
 			adapters: [seededAdapter],
 			kinds: ["aws_waf"],
 			cache,
-			proxyMode: "optional",
 		});
 		await expect(seeder.solve(CHALLENGE)).resolves.toBeDefined();
 		expect(seedCalls).toBe(1);
@@ -304,7 +336,7 @@ let seedCalls = 0;
 			adapters: [guarded.adapter],
 			kinds: ["aws_waf"],
 			cache,
-			proxyMode: "required",
+			proxyIntent: REQUIRED_PROXY_INTENT,
 		});
 
 		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
@@ -319,30 +351,102 @@ let seedCalls = 0;
 		const resolver = createResolverClient({
 			adapters: [adapter.adapter],
 			kinds: ["aws_waf"],
-			proxyMode: "optional",
+			proxyIntent: {
+				...REQUIRED_PROXY_INTENT,
+				mode: "optional",
+				upstream: { proxy: { ...REQUIRED_PROXY_POLICY, mode: "optional" } },
+			},
 		});
 
 		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({ form: "token", token: "browser" });
 		expect(adapter.state.solveCalls).toBe(1);
 	});
 
-	it("allows a required proxy policy with an internally supplied identity", async () => {
+	it("resolves a required proxy identity lazily before calling the adapter", async () => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-chain-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-chain-password";
 		const adapter = createStubAdapter({ id: "browser" });
 		const resolver = createResolverClient({
 			adapters: [adapter.adapter],
 			kinds: ["aws_waf"],
-			identity: {
-				proxyUrl: "http://proxy.test:8080",
-				userAgent: "resolver-test-agent",
-			},
-			proxyMode: "required",
+			proxyIntent: REQUIRED_PROXY_INTENT,
 		});
 
 		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({ form: "token", token: "browser" });
 		expect(adapter.state.solveCalls).toBe(1);
+		expect(adapter.state.identities).toEqual([
+			{
+				proxyUrl: expect.stringMatching(/^http:\/\/resolver-chain-account-/),
+				userAgent: REQUIRED_PROXY_INTENT.userAgent,
+			},
+		]);
 	});
 
-	it("preserves resolver behavior when proxy mode is absent", async () => {
+	it("does not expose a resolved proxy URL, credentials, or lease in errors or traces", async () => {
+		const username = "resolver-secret-account";
+		const password = "resolver-secret-password";
+		process.env[NODEMAVEN_USERNAME_ENV] = username;
+		process.env[NODEMAVEN_PASSWORD_ENV] = password;
+		let receivedIdentity: ResolverIdentity | undefined;
+		const telemetryEvents: unknown[] = [];
+		const adapter: ResolverVendorAdapter = {
+			id: "browser",
+			supports: () => true,
+			async solve(_challenge, identity) {
+				receivedIdentity = identity;
+				throw new ResolverVendorUnavailableError("browser", "transport_failure", {
+					cause: new Error(`proxy connection failed at ${identity?.proxyUrl}`),
+				});
+			},
+		};
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+		const resolver = createResolverClient({
+			adapters: [adapter],
+			kinds: ["aws_waf"],
+			proxyIntent: {
+				...REQUIRED_PROXY_INTENT,
+				affinityKey: "resolver-secret-affinity",
+				telemetry: {
+					recordProxyResolution: (event) => telemetryEvents.push(event),
+					recordProxyVendorFailover: (event) => telemetryEvents.push(event),
+				},
+			},
+		});
+
+		const error = await resolver
+			.solve(CHALLENGE, new AbortController().signal, recorder)
+			.catch((cause: unknown) => cause);
+		if (!receivedIdentity) throw new Error("Adapter did not receive a resolver identity");
+		const proxyUrl = receivedIdentity.proxyUrl;
+		const parsedProxyUrl = new URL(proxyUrl);
+		const proxyUsername = parsedProxyUrl.username;
+		const lease = proxyUsername.match(/-sid-([a-z\d]+)-/)?.[1];
+		if (!lease) throw new Error("Resolved proxy did not contain the expected opaque lease");
+		const exposed = JSON.stringify({
+			name: error instanceof Error ? error.name : undefined,
+			message: error instanceof Error ? error.message : String(error),
+			cause: error instanceof Error ? error.cause : undefined,
+			details: (error as { details?: unknown }).details,
+			spans: trace.getSpans(),
+			telemetryEvents,
+		});
+
+		for (const secret of [
+			proxyUrl,
+			parsedProxyUrl.origin,
+			parsedProxyUrl.host,
+			proxyUsername,
+			username,
+			password,
+			lease,
+		]) {
+			expect(exposed).not.toContain(secret);
+		}
+	});
+
+	it("preserves resolver behavior when proxy intent is absent", async () => {
 		const adapter = createStubAdapter({ id: "browser" });
 		const resolver = createResolverClient({
 			adapters: [adapter.adapter],

@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { createProviderContext as createDevProviderContext } from "../../bin/apifuse-dev.js";
 import { createCaptureContext } from "../../bin/apifuse-record.js";
 import { defineProvider, z } from "../index.js";
+import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../runtime/proxy-nodemaven.js";
 import { APIFUSE__CDP_POOL__URL, swapResolverAdapterFactoryForTests } from "../runtime/resolver.js";
-import type { ResolverVendorAdapter } from "../runtime/resolver-vendors/types.js";
+import type { ResolverIdentity, ResolverVendorAdapter } from "../runtime/resolver-vendors/types.js";
+import { getStealthProfile } from "../stealth/profiles.js";
 import type {
 	ProviderChallenge,
 	ProviderContext,
@@ -43,12 +45,18 @@ const harnesses = [
 ] as const;
 
 let originalCdpUrl: string | undefined;
+let originalNodemavenUsername: string | undefined;
+let originalNodemavenPassword: string | undefined;
 let providerOrdinal = 0;
 let restoreAdapter: (() => void) | undefined;
 
 beforeEach(() => {
 	originalCdpUrl = process.env[APIFUSE__CDP_POOL__URL];
+	originalNodemavenUsername = process.env[NODEMAVEN_USERNAME_ENV];
+	originalNodemavenPassword = process.env[NODEMAVEN_PASSWORD_ENV];
 	delete process.env[APIFUSE__CDP_POOL__URL];
+	delete process.env[NODEMAVEN_USERNAME_ENV];
+	delete process.env[NODEMAVEN_PASSWORD_ENV];
 });
 
 afterEach(() => {
@@ -56,6 +64,10 @@ afterEach(() => {
 	restoreAdapter = undefined;
 	if (originalCdpUrl === undefined) delete process.env[APIFUSE__CDP_POOL__URL];
 	else process.env[APIFUSE__CDP_POOL__URL] = originalCdpUrl;
+	if (originalNodemavenUsername === undefined) delete process.env[NODEMAVEN_USERNAME_ENV];
+	else process.env[NODEMAVEN_USERNAME_ENV] = originalNodemavenUsername;
+	if (originalNodemavenPassword === undefined) delete process.env[NODEMAVEN_PASSWORD_ENV];
+	else process.env[NODEMAVEN_PASSWORD_ENV] = originalNodemavenPassword;
 });
 
 function createProvider(options: {
@@ -68,6 +80,11 @@ function createProvider(options: {
 		version: "1.0.0",
 		runtime: "standard",
 		allowedHosts: ["example.com"],
+		stealth: { profile: "chrome-146", platform: "macos" },
+		secrets: [
+			{ name: NODEMAVEN_USERNAME_ENV, required: true },
+			{ name: NODEMAVEN_PASSWORD_ENV, required: true },
+		],
 		...(options.proxy ? { proxy: options.proxy } : {}),
 		...(options.resolver ? { resolver: options.resolver } : {}),
 		meta: { displayName: "Resolver CLI Wiring", category: "test" },
@@ -172,12 +189,50 @@ describe("resolver CLI wiring", () => {
 
 		await expect(
 			harness
-				.createContext(createProvider({ resolver: DECLARED_RESOLVER, proxy: { mode: "required" } }))
+				.createContext(
+					createProvider({
+						resolver: DECLARED_RESOLVER,
+						proxy: { mode: "required", providers: ["nodemaven"] },
+					}),
+				)
 				.resolver.solve(AWS_WAF_CHALLENGE),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
 			details: [{ vendor: "browser", reason: "missing_proxy_identity" }],
 		});
 		expect(solveCalls).toBe(0);
+	});
+
+	it.each(harnesses)("resolves a proxy lease inside $name", async (harness) => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-cli-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-cli-password";
+		const identities: Array<ResolverIdentity | undefined> = [];
+		const adapter: ResolverVendorAdapter = {
+			id: "browser",
+			supports: (kind) => kind === "aws_waf",
+			async solve(_challenge, identity) {
+				identities.push(identity);
+				return { form: "token", token: "cli-proxied-solution" };
+			},
+		};
+		restoreAdapter = swapResolverAdapterFactoryForTests("browser", () => adapter);
+		process.env[APIFUSE__CDP_POOL__URL] = "ws://cdp-pool.test";
+		const context = harness.createContext(
+			createProvider({
+				resolver: DECLARED_RESOLVER,
+				proxy: { mode: "required", providers: ["nodemaven"] },
+			}),
+		);
+
+		await expect(context.resolver.solve(AWS_WAF_CHALLENGE)).resolves.toEqual({
+			form: "token",
+			token: "cli-proxied-solution",
+		});
+		expect(identities).toEqual([
+			{
+				proxyUrl: expect.stringMatching(/^http:\/\/resolver-cli-account-/),
+				userAgent: getStealthProfile("chrome-146").userAgent,
+			},
+		]);
 	});
 });
