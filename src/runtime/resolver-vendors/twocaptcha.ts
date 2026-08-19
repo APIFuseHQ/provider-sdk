@@ -339,15 +339,6 @@ export function createTwoCaptchaResolverVendorAdapter(
 				throw new TypeError(`2captcha resolver does not support ${challenge.kind}`);
 			}
 			if (
-				challenge.kind !== "turnstile" &&
-				challenge.kind !== "recaptcha_v2" &&
-				challenge.kind !== "recaptcha_v3" &&
-				challenge.kind !== "hcaptcha" &&
-				challenge.kind !== "aws_waf"
-			) {
-				throw new TypeError(`2captcha resolver does not support ${challenge.kind}`);
-			}
-			if (
 				challenge.kind === "aws_waf" &&
 				(!challenge.siteKey?.trim() ||
 					!challenge.captchaScript?.trim() ||
@@ -423,15 +414,23 @@ export function createTwoCaptchaResolverVendorAdapter(
 									...(identity ? { userAgent: identity.userAgent } : {}),
 									...(proxy ?? {}),
 								}
-						: {
-								type: proxy ? "TurnstileTask" : "TurnstileTaskProxyless",
-								websiteURL: challenge.pageUrl,
-								websiteKey: challenge.siteKey,
-								...(challenge.action !== undefined ? { action: challenge.action } : {}),
-								...(challenge.cdata !== undefined ? { data: challenge.cdata } : {}),
-								...(identity ? { userAgent: identity.userAgent } : {}),
-								...(proxy ?? {}),
-							};
+						: challenge.kind === "turnstile"
+							? {
+									type: proxy ? "TurnstileTask" : "TurnstileTaskProxyless",
+									websiteURL: challenge.pageUrl,
+									websiteKey: challenge.siteKey,
+									...(challenge.action !== undefined ? { action: challenge.action } : {}),
+									...(challenge.cdata !== undefined ? { data: challenge.cdata } : {}),
+									...(identity ? { userAgent: identity.userAgent } : {}),
+									...(proxy ?? {}),
+								}
+							: // `resolverVendorSupports` above already rejected every kind this
+								// adapter does not build a task for, so this branch is unreachable.
+								(() => {
+									throw new TypeError(
+										`2captcha resolver does not support ${challenge.kind}`,
+									);
+								})();
 					const createResult = await postJson(
 						fetchImpl,
 						endpoint(baseUrl, "createTask"),
