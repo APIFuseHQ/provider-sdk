@@ -39,6 +39,8 @@ import type {
 
 export const PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV =
 	"APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET";
+export const PROVIDER_RUNTIME_CHOICE_WORD_ISSUANCE_ENV =
+	"APIFUSE__PROVIDER_RUNTIME__CHOICE_WORD_ISSUANCE";
 
 const PRIMARY_CHOICE_TOKEN_KID = "v1";
 const MANAGED_CHOICE_TOKEN_VERSION = 1;
@@ -131,28 +133,54 @@ export function createProviderChoiceContext(
 		const issuedAtMs = issueOptions.nowMs ?? Date.now();
 		const resolvedStorage = resolveIssueStorage(issueOptions.storage, issueOptions.payload);
 		if (resolvedStorage.mode === "server") {
+			const issuance = resolveChoiceWordIssuance(options.env);
+			const keys = hasRequestedChoiceBinding(issueOptions.bind)
+				? deriveManagedChoiceKeys({
+						masterSecret: resolveMasterSecret(),
+						providerId: options.providerId,
+						purpose: issueOptions.purpose,
+						kid,
+					})
+				: undefined;
 			const binding = hasRequestedChoiceBinding(issueOptions.bind)
 				? createChoiceBinding({
-						keys: deriveManagedChoiceKeys({
-							masterSecret: resolveMasterSecret(),
-							providerId: options.providerId,
-							purpose: issueOptions.purpose,
-							kid,
-						}),
+						keys: keys!,
 						options: issueOptions.bind,
 						request: options.request,
 						credential: options.credential,
 						required: true,
 					})
 				: undefined;
-			return issueServerStoredChoice({
+			const baseEnvelope = {
+				v: MANAGED_CHOICE_TOKEN_VERSION,
+				provider_id: options.providerId,
+				purpose: issueOptions.purpose,
+				issued_at_ms: issuedAtMs,
+				ttl_ms: issueOptions.ttlMs,
+				binding,
+			} satisfies Omit<ManagedChoiceEnvelope, "payload">;
+			if (issuance === "legacy") {
+				const legacyKeys =
+					keys ??
+					deriveManagedChoiceKeys({
+						masterSecret: resolveMasterSecret(),
+						providerId: options.providerId,
+						purpose: issueOptions.purpose,
+						kid,
+					});
+				return issueLegacyServerStoredChoice({
+					baseEnvelope,
+					issueOptions,
+					storage: resolvedStorage.storage,
+					contextState: options.state,
+					kid,
+					keys: legacyKeys,
+					issuedAtMs,
+				});
+			}
+			return issueWordServerStoredChoice({
 				baseEnvelope: {
-					v: MANAGED_CHOICE_TOKEN_VERSION,
-					provider_id: options.providerId,
-					purpose: issueOptions.purpose,
-					issued_at_ms: issuedAtMs,
-					ttl_ms: issueOptions.ttlMs,
-					binding,
+					...baseEnvelope,
 				},
 				issueOptions,
 				storage: resolvedStorage.storage,
@@ -233,8 +261,8 @@ export function createProviderChoiceContext(
 						masterSecret: resolveMasterSecret(),
 						providerId: options.providerId,
 						purpose: parseOptions.purpose,
-							kid,
-						}),
+						kid,
+					}),
 				onConsume: (result) =>
 					emitChoiceTelemetry(options.onTelemetry, {
 						providerId: options.providerId,
@@ -247,15 +275,16 @@ export function createProviderChoiceContext(
 						replay: result.status === "already-consumed",
 					}),
 			});
-			return observeChoiceParse<
-				ProviderChoiceTokenPayload | ProviderChoiceExplicitParseResult
-			>(parsed, {
-				onTelemetry: options.onTelemetry,
-				providerId: options.providerId,
-				purpose: parseOptions.purpose,
-				format: "word",
-				consumeMode,
-			});
+			return observeChoiceParse<ProviderChoiceTokenPayload | ProviderChoiceExplicitParseResult>(
+				parsed,
+				{
+					onTelemetry: options.onTelemetry,
+					providerId: options.providerId,
+					purpose: parseOptions.purpose,
+					format: "word",
+					consumeMode,
+				},
+			);
 		}
 
 		// Legacy encrypted-envelope compatibility fallback. Removal is gated on
@@ -285,13 +314,9 @@ export function createProviderChoiceContext(
 				purpose: parseOptions.purpose,
 				kid: tokenKid,
 			});
-			const signedBody = [
-				parseOptions.prefix,
-				tokenKid,
-				encodedIv,
-				encryptedPayload,
-				authTag,
-			].join(".");
+			const signedBody = [parseOptions.prefix, tokenKid, encodedIv, encryptedPayload, authTag].join(
+				".",
+			);
 			assertManagedChoiceSignature({
 				signedBody,
 				signature,
@@ -347,15 +372,16 @@ export function createProviderChoiceContext(
 							}),
 						)
 					: payload;
-			return observeChoiceParse<
-				ProviderChoiceTokenPayload | ProviderChoiceExplicitParseResult
-			>(parsed, {
-				onTelemetry: options.onTelemetry,
-				providerId: options.providerId,
-				purpose: parseOptions.purpose,
-				format: "legacy",
-				consumeMode,
-			});
+			return observeChoiceParse<ProviderChoiceTokenPayload | ProviderChoiceExplicitParseResult>(
+				parsed,
+				{
+					onTelemetry: options.onTelemetry,
+					providerId: options.providerId,
+					purpose: parseOptions.purpose,
+					format: "legacy",
+					consumeMode,
+				},
+			);
 		} catch (error) {
 			emitChoiceParseFailure(options.onTelemetry, error, {
 				providerId: options.providerId,
@@ -485,6 +511,22 @@ function createLegacyExplicitParseResult(options: {
 	};
 }
 
+function resolveChoiceWordIssuance(env?: EnvContext): "legacy" | "word" {
+	const configured = env?.get(PROVIDER_RUNTIME_CHOICE_WORD_ISSUANCE_ENV);
+	const value = configured?.trim() ?? "";
+	if (value === "" || value === "legacy") return "legacy";
+	if (value === "word") return "word";
+	throw new ProviderError(
+		`Unsupported provider choice word issuance mode "${value}". Expected "legacy" or "word".`,
+		{
+			code: "CHOICE_WORD_ISSUANCE_INVALID",
+			category: "input_validation",
+			retryable: false,
+			details: { env: PROVIDER_RUNTIME_CHOICE_WORD_ISSUANCE_ENV },
+		},
+	);
+}
+
 function resolveChoiceMasterSecret(options: CreateProviderChoiceContextOptions): string {
 	const configured =
 		options.masterSecret ?? options.env?.get(PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV);
@@ -559,7 +601,7 @@ function encryptManagedChoiceToken(options: {
 	return `${signedBody}.${signature}`;
 }
 
-async function issueServerStoredChoice<TPayload extends ProviderChoiceTokenPayload>(options: {
+async function issueWordServerStoredChoice<TPayload extends ProviderChoiceTokenPayload>(options: {
 	readonly baseEnvelope: Omit<ManagedChoiceEnvelope, "payload">;
 	readonly issueOptions: ProviderChoiceIssueOptions<TPayload>;
 	readonly storage: ServerProviderChoiceStorageOptions;
@@ -612,6 +654,56 @@ async function issueServerStoredChoice<TPayload extends ProviderChoiceTokenPaylo
 		code: "CHOICE_STATE_UNAVAILABLE",
 		category: "internal_error",
 		retryable: false,
+	});
+}
+
+/**
+ * Beta.28-compatible server handle issuance. The state stores the payload and
+ * the client receives the existing six-part encrypted envelope whose payload
+ * is a server-state handle.
+ */
+async function issueLegacyServerStoredChoice<TPayload extends ProviderChoiceTokenPayload>(options: {
+	readonly baseEnvelope: Omit<ManagedChoiceEnvelope, "payload">;
+	readonly issueOptions: ProviderChoiceIssueOptions<TPayload>;
+	readonly storage: ServerProviderChoiceStorageOptions;
+	readonly contextState?: ProviderRuntimeState;
+	readonly kid: string;
+	readonly keys: ManagedChoiceKeys;
+	readonly issuedAtMs: number;
+}): Promise<string> {
+	const serializedPayload = serializeChoicePayload(options.issueOptions.payload);
+	const payloadBytes = Buffer.byteLength(serializedPayload, "utf8");
+	if (payloadBytes > options.storage.maxValueBytes) {
+		throw new ProviderError("Provider choice payload exceeds state storage policy.", {
+			code: "CHOICE_STATE_PAYLOAD_TOO_LARGE",
+			category: "input_validation",
+			retryable: false,
+			details: { maxValueBytes: options.storage.maxValueBytes, payloadBytes },
+		});
+	}
+	const stateId = `choice_${randomBytes(16).toString("base64url")}`;
+	const namespace = resolveChoiceStateNamespace({
+		storage: options.storage,
+		contextState: options.contextState,
+		ttlMs: options.issueOptions.ttlMs,
+	});
+	await namespace.set(optionsStateKey(stateId), options.issueOptions.payload, {
+		ttl: stateTtl(options.storage, options.issueOptions.ttlMs),
+	});
+	const envelope: ManagedChoiceEnvelope = {
+		...options.baseEnvelope,
+		payload: {
+			storage: "server",
+			state_id: stateId,
+			payload_digest: digestChoicePayload(serializedPayload),
+			created_at_ms: options.issuedAtMs,
+		},
+	};
+	return encryptManagedChoiceToken({
+		prefix: options.issueOptions.prefix,
+		kid: options.kid,
+		envelope,
+		keys: options.keys,
 	});
 }
 

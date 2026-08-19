@@ -72,6 +72,31 @@ The legacy parser cannot be removed on a calendar date chosen independently of i
 
 The stored record is validated against prefix, provider id, purpose, TTL clamp, payload digest, replay key, and current connection or credential binding using the same key derivation and hash functions as the encrypted format. Missing state, expiry, invalid status for the requested consume mode, and binding mismatch fail closed with the same externally visible choice-not-found error class, code, and message. Internal observability may retain a safe reason.
 
+### Rollout gate and rollback
+
+Word issuance is runtime-gated by `APIFUSE__PROVIDER_RUNTIME__CHOICE_WORD_ISSUANCE`.
+An unset value or `legacy` keeps server-stored issuance on the beta.28-compatible
+six-part encrypted envelope; `word` enables the ADR word format. Parsing is
+always dual-read, regardless of this setting. Any other value fails closed at
+issuance rather than silently selecting legacy.
+
+Deploy this in two phases:
+
+1. **Phase 1 — reader fleet:** deploy beta.31 to the entire fleet while leaving
+   the gate unset (or explicitly `legacy`). Every pod can read both formats,
+   but every pod continues to mint legacy server-stored handles.
+2. **Phase 2 — word issuance:** after the fleet is confirmed to be beta.31 or
+   newer, flip `APIFUSE__PROVIDER_RUNTIME__CHOICE_WORD_ISSUANCE=word` and roll
+   the configuration through the fleet.
+
+After phase 2, do not roll back to beta.28: tokens minted as words (including
+NOL booking tokens with a 180-day TTL) would remain unreadable for their full
+issuer lifetime. The safe rollback is to set the gate back to `legacy` while
+keeping the dual-read beta.31 reader deployed. Legacy explicit claims retain
+the existing `unsupported` result and stable replay key; providers using
+`consume: "explicit"` must handle that compatibility branch until the legacy
+horizon closes.
+
 ### 5. Parsing has provider-controlled consume semantics
 
 `ctx.choice.parse` accepts `consume: "never" | "on-parse" | "explicit"`. The default is `never`.

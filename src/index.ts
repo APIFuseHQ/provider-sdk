@@ -61,6 +61,7 @@ export {
 	createProviderChoiceContext,
 	createTestProviderChoiceContext,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
+	PROVIDER_RUNTIME_CHOICE_WORD_ISSUANCE_ENV,
 } from "./runtime/choice.js";
 export {
 	type CreateCredentialContextOptions,
