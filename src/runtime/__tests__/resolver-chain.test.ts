@@ -14,7 +14,7 @@ import { type BrowserClientOptions, createBrowserClient } from "../browser.js";
 import {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
-	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
 	createResolverClient,
 	createResolverClientFromEnv,
 	createResolverClientFromEnvForTests,
@@ -1052,16 +1052,21 @@ describe("resolver vendor chain", () => {
 	});
 
 	it("treats a declared vendor with no adapter as not implemented", async () => {
+		const challenge = {
+			kind: "recaptcha_v2",
+			pageUrl: CHALLENGE.pageUrl,
+			siteKey: "recaptcha-site-key",
+		} satisfies ProviderChallenge;
 		const error = await createResolverClientFromEnv(
-			{ vendors: ["capsolver"], kinds: ["aws_waf"] },
-			{ [APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-test" },
+			{ vendors: ["capmonster"], kinds: ["recaptcha_v2"] },
+			{ [APIFUSE__RESOLVER__CAPMONSTER__API_KEY]: "sk-test" },
 		)
-			.solve(CHALLENGE)
+			.solve(challenge)
 			.catch((error: unknown) => error);
 
 		expect(error).toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "capsolver", reason: "not_implemented" }],
+			details: [{ vendor: "capmonster", reason: "not_implemented" }],
 		});
 	});
 

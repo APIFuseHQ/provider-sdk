@@ -1,5 +1,7 @@
+import { getStealthProfile } from "../../stealth/profiles.js";
 import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
 import { redactSensitiveText } from "../request-options.js";
+import { DEFAULT_PROFILE } from "../stealth.js";
 import type { TraceRecorder } from "../trace.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
@@ -39,7 +41,7 @@ export interface CapsolverResolverVendorAdapter extends ResolverVendorAdapter {
 		identity: ResolverIdentity | undefined,
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
-	): Promise<Extract<ChallengeSolution, { readonly form: "token" }>>;
+	): Promise<ChallengeSolution>;
 }
 
 class CapsolverSolveTimeoutError extends Error {
@@ -91,7 +93,9 @@ interface CapsolverCreateTaskResponse extends CapsolverResponseErrorFields {
 
 interface CapsolverPollResultResponse extends CapsolverResponseErrorFields {
 	readonly status: string | undefined;
-	readonly solution: { readonly token: string | undefined } | undefined;
+	readonly solution:
+		| { readonly token: string | undefined; readonly cookie: string | undefined }
+		| undefined;
 }
 
 class CapsolverVerdictError extends ResolverChallengeVerdictError {
@@ -237,9 +241,33 @@ function parsePollResultResponse(payload: JsonRecord): CapsolverPollResultRespon
 		...responseErrorFields(payload),
 		status: typeof payload.status === "string" ? payload.status : undefined,
 		solution: solution
-			? { token: typeof solution.token === "string" ? solution.token : undefined }
+			? {
+					token: typeof solution.token === "string" ? solution.token : undefined,
+					cookie: typeof solution.cookie === "string" ? solution.cookie : undefined,
+				}
 			: undefined,
 	};
+}
+
+function proxyForCapsolver(
+	proxyUrl: string,
+): { readonly value: string; readonly sensitive: readonly string[] } | undefined {
+	try {
+		const url = new URL(proxyUrl);
+		const protocol = url.protocol.slice(0, -1).toLowerCase();
+		const scheme = protocol === "http" || protocol === "socks5" ? protocol : undefined;
+		const port = Number(url.port || (scheme === "socks5" ? 1080 : 80));
+		if (!scheme || !url.hostname || !Number.isInteger(port) || port <= 0 || port > 65_535) {
+			return undefined;
+		}
+		const username = url.username ? decodeURIComponent(url.username) : "";
+		const password = url.password ? decodeURIComponent(url.password) : "";
+		if (username.includes(":") || password.includes(":")) return undefined;
+		const value = `${scheme}:${url.hostname}:${port}${username || password ? `:${username}:${password}` : ""}`;
+		return { value, sensitive: [proxyUrl, value, username, password].filter(Boolean) };
+	} catch {
+		return undefined;
+	}
 }
 
 function isAllocationExhausted(payload: CapsolverResponseErrorFields): boolean {
@@ -403,7 +431,7 @@ export function createCapsolverResolverVendorAdapter(
 			return resolverVendorSupports(CAPSOLVER_VENDOR_ID, kind);
 		},
 
-		async solve(challenge, _identity, callerSignal, traceRecorder) {
+		async solve(challenge, identity, callerSignal, traceRecorder) {
 			const apiKey = options.apiKey?.trim();
 			if (!apiKey) {
 				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "missing_credentials", {
@@ -413,17 +441,34 @@ export function createCapsolverResolverVendorAdapter(
 			if (!resolverVendorSupports(CAPSOLVER_VENDOR_ID, challenge.kind)) {
 				throw new TypeError(`Capsolver resolver does not support ${challenge.kind}`);
 			}
-			if (challenge.kind !== "turnstile") {
+			if (challenge.kind !== "turnstile" && challenge.kind !== "aws_waf") {
 				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "not_implemented", {
+					phase: "create_task",
+				});
+			}
+			const proxy =
+				challenge.kind === "aws_waf" && identity ? proxyForCapsolver(identity.proxyUrl) : undefined;
+			if (challenge.kind === "aws_waf" && identity && !proxy) {
+				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "transport_failure", {
 					phase: "create_task",
 				});
 			}
 			const sensitiveValues = [
 				apiKey,
 				challenge.pageUrl,
-				challenge.siteKey,
-				...(challenge.action !== undefined ? [challenge.action] : []),
-				...(challenge.cdata !== undefined ? [challenge.cdata] : []),
+				...(challenge.kind === "turnstile"
+					? [
+							challenge.siteKey,
+							...(challenge.action !== undefined ? [challenge.action] : []),
+							...(challenge.cdata !== undefined ? [challenge.cdata] : []),
+						]
+					: [
+							...(challenge.siteKey !== undefined ? [challenge.siteKey] : []),
+							...(challenge.captchaScript !== undefined ? [challenge.captchaScript] : []),
+							...(challenge.context !== undefined ? [challenge.context] : []),
+							...(challenge.iv !== undefined ? [challenge.iv] : []),
+						]),
+				...(proxy?.sensitive ?? []),
 			];
 
 			assertResolverHostAllowed(challenge.pageUrl, options.allowedHosts);
@@ -440,24 +485,36 @@ export function createCapsolverResolverVendorAdapter(
 
 			try {
 				const createTask = async () => {
-					const metadata = {
-						...(challenge.action !== undefined ? { action: challenge.action } : {}),
-						...(challenge.cdata !== undefined ? { cdata: challenge.cdata } : {}),
-					};
+					const task =
+						challenge.kind === "aws_waf"
+							? {
+									type: proxy ? "AntiAwsWafTask" : "AntiAwsWafTaskProxyLess",
+									websiteURL: challenge.pageUrl,
+									...(challenge.siteKey !== undefined ? { awsKey: challenge.siteKey } : {}),
+									...(challenge.iv !== undefined ? { awsIv: challenge.iv } : {}),
+									...(challenge.context !== undefined ? { awsContext: challenge.context } : {}),
+									...(challenge.captchaScript !== undefined
+										? { awsChallengeJS: challenge.captchaScript }
+										: {}),
+									...(proxy ? { proxy: proxy.value } : {}),
+								}
+							: {
+									type: "AntiTurnstileTaskProxyLess",
+									websiteURL: challenge.pageUrl,
+									websiteKey: challenge.siteKey,
+									...(challenge.action !== undefined || challenge.cdata !== undefined
+										? {
+												metadata: {
+													...(challenge.action !== undefined ? { action: challenge.action } : {}),
+													...(challenge.cdata !== undefined ? { cdata: challenge.cdata } : {}),
+												},
+											}
+										: {}),
+								};
 					const createResult = await postJson(
 						fetchImpl,
 						endpoint(baseUrl, "createTask"),
-						{
-							clientKey: apiKey,
-							task: {
-								type: "AntiTurnstileTaskProxyLess",
-								websiteURL: challenge.pageUrl,
-								websiteKey: challenge.siteKey,
-								...(challenge.action !== undefined || challenge.cdata !== undefined
-									? { metadata }
-									: {}),
-							},
-						},
+						{ clientKey: apiKey, task },
 						solveController.signal,
 						phase,
 						sensitiveValues,
@@ -508,20 +565,27 @@ export function createCapsolverResolverVendorAdapter(
 							case "ready":
 								break;
 							default:
-								throw new ResolverVendorUnavailableError(
-									CAPSOLVER_VENDOR_ID,
-									"transport_failure",
-									{ phase },
-								);
+								throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "transport_failure", {
+									phase,
+								});
 						}
 
-						const token = result.payload.solution?.token;
-						if (!token?.trim()) {
+						const solutionValue =
+							challenge.kind === "aws_waf"
+								? result.payload.solution?.cookie
+								: result.payload.solution?.token;
+						if (!solutionValue?.trim()) {
 							throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "transport_failure", {
 								phase,
 							});
 						}
-						return { form: "token" as const, token };
+						return challenge.kind === "aws_waf"
+							? {
+									form: "cookies" as const,
+									cookies: { "aws-waf-token": solutionValue },
+									userAgent: identity?.userAgent ?? getStealthProfile(DEFAULT_PROFILE).userAgent,
+								}
+							: { form: "token" as const, token: solutionValue };
 					}
 				};
 				return traceRecorder

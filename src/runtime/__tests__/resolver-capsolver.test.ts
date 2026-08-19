@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
 import { ProviderError } from "../../errors.js";
+import { getStealthProfile } from "../../stealth/profiles.js";
 import type { ProviderChallenge } from "../../types.js";
 import {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
@@ -14,6 +15,7 @@ import {
 	type ResolverVendorAdapter,
 	ResolverVendorUnavailableError,
 } from "../resolver-vendors/types.js";
+import { DEFAULT_PROFILE } from "../stealth.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const TURNSTILE_CHALLENGE = {
@@ -26,6 +28,15 @@ const RECAPTCHA_CHALLENGE = {
 	kind: "recaptcha_v2",
 	siteKey: "recaptcha-site-key",
 	pageUrl: TURNSTILE_CHALLENGE.pageUrl,
+} satisfies ProviderChallenge;
+
+const AWS_WAF_CHALLENGE = {
+	kind: "aws_waf",
+	pageUrl: "https://example.com/protected",
+	siteKey: "aws-key",
+	iv: "aws-iv",
+	context: "aws-context",
+	captchaScript: "https://captcha.awswaf.com/challenge.js",
 } satisfies ProviderChallenge;
 
 type FetchCall = {
@@ -98,6 +109,165 @@ function collectNestedStrings(value: unknown, seen = new Set<object>()): string[
 }
 
 describe("Capsolver resolver vendor", () => {
+	it("routes AWS WAF through the capability table, creates a proxyless task, and maps its cookie", async () => {
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: "aws-task-proxyless" }),
+			jsonResponse({ errorId: 0, status: "processing" }),
+			jsonResponse({
+				errorId: 0,
+				status: "ready",
+				solution: { cookie: "aws-cookie-value" },
+			}),
+		]);
+		const resolver = createResolverClient({ adapters: [createAdapter(stub)], kinds: ["aws_waf"] });
+
+		await expect(resolver.solve(AWS_WAF_CHALLENGE)).resolves.toEqual({
+			form: "cookies",
+			cookies: { "aws-waf-token": "aws-cookie-value" },
+			userAgent: getStealthProfile(DEFAULT_PROFILE).userAgent,
+		});
+		expect(stub.calls[0]?.body).toEqual({
+			clientKey: "test-api-key",
+			task: {
+				type: "AntiAwsWafTaskProxyLess",
+				websiteURL: AWS_WAF_CHALLENGE.pageUrl,
+				awsKey: AWS_WAF_CHALLENGE.siteKey,
+				awsIv: AWS_WAF_CHALLENGE.iv,
+				awsContext: AWS_WAF_CHALLENGE.context,
+				awsChallengeJS: AWS_WAF_CHALLENGE.captchaScript,
+			},
+		});
+		expect(stub.calls.slice(1).map((call) => call.body)).toEqual([
+			{ clientKey: "test-api-key", taskId: "aws-task-proxyless" },
+			{ clientKey: "test-api-key", taskId: "aws-task-proxyless" },
+		]);
+	});
+
+	it.each([
+		{
+			label: "HTTP with its default port",
+			proxyUrl: "http://proxy-user:proxy-password@proxy.example",
+			expected: "http:proxy.example:80:proxy-user:proxy-password",
+		},
+		{
+			label: "SOCKS5 with its default port and URL-encoded credentials",
+			proxyUrl: "socks5://proxy%40user:p%40ssword@proxy.example",
+			expected: "socks5:proxy.example:1080:proxy@user:p@ssword",
+		},
+	])("creates a proxied AWS WAF task from $label", async ({ proxyUrl, expected }) => {
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: "aws-task-proxied" }),
+			jsonResponse({ errorId: 0, status: "ready", solution: { cookie: "proxied-cookie" } }),
+		]);
+		const identity = { proxyUrl, userAgent: "resolver-identity-user-agent" };
+
+		await expect(
+			createAdapter(stub).solve(AWS_WAF_CHALLENGE, identity, new AbortController().signal),
+		).resolves.toEqual({
+			form: "cookies",
+			cookies: { "aws-waf-token": "proxied-cookie" },
+			userAgent: identity.userAgent,
+		});
+		expect(stub.calls[0]?.body).toEqual({
+			clientKey: "test-api-key",
+			task: {
+				type: "AntiAwsWafTask",
+				websiteURL: AWS_WAF_CHALLENGE.pageUrl,
+				awsKey: AWS_WAF_CHALLENGE.siteKey,
+				awsIv: AWS_WAF_CHALLENGE.iv,
+				awsContext: AWS_WAF_CHALLENGE.context,
+				awsChallengeJS: AWS_WAF_CHALLENGE.captchaScript,
+				proxy: expected,
+			},
+		});
+	});
+
+	it("classifies an AWS WAF allocation error during task creation", async () => {
+		const stub = createFetchStub([
+			jsonResponse({
+				errorId: 1,
+				errorCode: "ERROR_ZERO_BALANCE",
+				errorDescription: "Account has zero funds",
+			}),
+		]);
+
+		const error = await capturedError(
+			createAdapter(stub).solve(AWS_WAF_CHALLENGE, undefined, new AbortController().signal),
+		);
+
+		expect(error).toMatchObject({
+			vendor: "capsolver",
+			reason: "allocation_exhausted",
+			phase: "create_task",
+		});
+	});
+
+	it("classifies an elapsed AWS WAF polling budget as a timeout", async () => {
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: "aws-timeout-task" }),
+			jsonResponse({ errorId: 0, status: "processing" }),
+		]);
+		let now = 0;
+
+		const error = await capturedError(
+			createAdapter(stub, {
+				delay: async (ms) => {
+					now += ms;
+				},
+				now: () => now,
+				pollIntervalMs: 3,
+				timeoutMs: 5,
+			}).solve(AWS_WAF_CHALLENGE, undefined, new AbortController().signal),
+		);
+
+		expect(error).toMatchObject({
+			vendor: "capsolver",
+			reason: "timeout",
+			phase: "poll_result",
+		});
+		expect(stub.calls).toHaveLength(2);
+	});
+
+	it("redacts AWS WAF API and proxy credentials from thrown diagnostics", async () => {
+		const apiKey = "aws-capsolver-api-secret";
+		const proxyUrl = "socks5://aws-proxy-user:aws-proxy-password@proxy.example:1443";
+		const convertedProxy = "socks5:proxy.example:1443:aws-proxy-user:aws-proxy-password";
+		const stub = createFetchStub([
+			jsonResponse({
+				errorId: 1,
+				errorCode: `ERROR_${apiKey}`,
+				errorDescription: `Rejected ${convertedProxy}`,
+			}),
+		]);
+
+		const error = await capturedError(
+			createAdapter(stub, { apiKey }).solve(
+				AWS_WAF_CHALLENGE,
+				{ proxyUrl, userAgent: "resolver-identity-user-agent" },
+				new AbortController().signal,
+			),
+		);
+
+		expect(error).toMatchObject({
+			errorCode: "ERROR_[REDACTED]",
+			errorDescription: "Rejected [REDACTED]",
+		});
+		const serialized = [
+			(error as Error).message,
+			JSON.stringify(error),
+			...collectNestedStrings(error),
+		].join("\n");
+		for (const secret of [
+			apiKey,
+			proxyUrl,
+			convertedProxy,
+			"aws-proxy-user",
+			"aws-proxy-password",
+		]) {
+			expect(serialized).not.toContain(secret);
+		}
+	});
+
 	it("creates a proxyless Turnstile task without metadata when challenge metadata is absent", async () => {
 		const stub = createFetchStub([
 			jsonResponse({ errorId: 0, taskId: "task-42" }),
