@@ -94,6 +94,21 @@ type CdpFetchFulfillParams = {
 	readonly body?: string;
 };
 
+type CdpPausedDocumentResponse = {
+	readonly hasBody: boolean;
+	readonly requestId: string;
+	readonly responseCode: number;
+	readonly responseHeaders: readonly {
+		readonly name: string;
+		readonly value: string;
+	}[];
+};
+
+type CdpResponseBody = {
+	readonly base64Encoded?: boolean;
+	readonly body?: string;
+};
+
 type BrowserPageContract = BrowserPage;
 
 function toResourceBody(body: BrowserResourceBody | undefined): Buffer | string | undefined {
@@ -162,6 +177,85 @@ function getCdpPausedRequestId(params: unknown): string | null {
 	}
 
 	return params.requestId;
+}
+
+function isCdpResponseStage(params: unknown): boolean {
+	return (
+		isRecord(params) &&
+		(typeof params.responseStatusCode === "number" ||
+			typeof params.responseErrorReason === "string")
+	);
+}
+
+function toCdpPausedDocumentResponse(params: unknown): CdpPausedDocumentResponse | null {
+	if (
+		!isRecord(params) ||
+		typeof params.requestId !== "string" ||
+		typeof params.responseStatusCode !== "number" ||
+		params.resourceType !== "Document" ||
+		!isRecord(params.request)
+	) {
+		return null;
+	}
+
+	const responseCode = params.responseStatusCode;
+	const responseHeaders = Array.isArray(params.responseHeaders)
+		? params.responseHeaders.flatMap((header) => {
+				if (
+					!isRecord(header) ||
+					typeof header.name !== "string" ||
+					typeof header.value !== "string"
+				) {
+					return [];
+				}
+				return [{ name: header.name, value: header.value }];
+			})
+		: [];
+
+	return {
+		hasBody:
+			String(params.request.method ?? "").toUpperCase() !== "HEAD" &&
+			responseCode >= 200 &&
+			(responseCode < 300 || responseCode >= 400) &&
+			responseCode !== 204 &&
+			responseCode !== 205 &&
+			responseCode !== 304,
+		requestId: params.requestId,
+		responseCode,
+		responseHeaders,
+	};
+}
+
+function toCdpDocumentFulfillParams(
+	response: CdpPausedDocumentResponse,
+	body: CdpResponseBody,
+	contentSecurityPolicy: string,
+): CdpFetchFulfillParams {
+	const responseBody = typeof body.body === "string" ? body.body : "";
+	return {
+		body: body.base64Encoded ? responseBody : Buffer.from(responseBody).toString("base64"),
+		requestId: response.requestId,
+		responseCode: response.responseCode,
+		responseHeaders: [
+			...response.responseHeaders,
+			{ name: "Content-Security-Policy", value: contentSecurityPolicy },
+		],
+	};
+}
+
+function resourcePolicyFetchPatterns(policy: BrowserResourcePolicy) {
+	return [
+		{ requestStage: "Request" as const, urlPattern: "*" },
+		...(policy.documentContentSecurityPolicy
+			? [
+					{
+						requestStage: "Response" as const,
+						resourceType: "Document" as const,
+						urlPattern: "*",
+					},
+				]
+			: []),
+	];
 }
 
 function toCdpResourceHeaders(value: unknown): Record<string, string> {
@@ -270,6 +364,40 @@ async function handleCdpResourceRequest(
 				await session.send("Fetch.failRequest", { errorReason: "BlockedByClient", requestId });
 				return;
 		}
+	} catch {
+		await session
+			.send("Fetch.failRequest", { errorReason: "BlockedByClient", requestId })
+			.catch(() => undefined);
+	}
+}
+
+async function handleCdpDocumentResponse(
+	session: CDPSession,
+	contentSecurityPolicy: string,
+	params: unknown,
+): Promise<void> {
+	const requestId = getCdpPausedRequestId(params);
+	if (!requestId) return;
+
+	try {
+		const response = toCdpPausedDocumentResponse(params);
+		if (!response) throw new Error("CDP document response metadata is unavailable");
+		if (!response.hasBody) {
+			await session.send("Fetch.continueResponse", {
+				requestId,
+				responseCode: response.responseCode,
+				responseHeaders: [...response.responseHeaders],
+			});
+			return;
+		}
+
+		const body = await session.send("Fetch.getResponseBody", {
+			requestId: response.requestId,
+		});
+		await session.send(
+			"Fetch.fulfillRequest",
+			toCdpDocumentFulfillParams(response, body, contentSecurityPolicy),
+		);
 	} catch {
 		await session
 			.send("Fetch.failRequest", { errorReason: "BlockedByClient", requestId })
@@ -769,6 +897,10 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 			}
 
 			const onRequestPaused = (params: unknown) => {
+				if (isCdpResponseStage(params) && policy.documentContentSecurityPolicy) {
+					void handleCdpDocumentResponse(session, policy.documentContentSecurityPolicy, params);
+					return;
+				}
 				void handleCdpResourceRequest(session, policy, allowedMethods, params);
 			};
 			const authAttempts = new Set<string>();
@@ -783,7 +915,7 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 			try {
 				await session.send("Fetch.enable", {
 					...(proxy ? { handleAuthRequests: true } : {}),
-					patterns: [{ requestStage: "Request", urlPattern: "*" }],
+					patterns: resourcePolicyFetchPatterns(policy),
 				});
 				sessions.add(session);
 			} catch (error) {
@@ -1569,7 +1701,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 
 		try {
 			await this.pageClient.send("Fetch.enable", {
-				patterns: [{ requestStage: "Request", urlPattern: "*" }],
+				patterns: resourcePolicyFetchPatterns(policy),
 			});
 		} catch (error) {
 			unsubscribe();
@@ -1602,6 +1734,28 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		}
 
 		try {
+			if (isCdpResponseStage(params) && policy.documentContentSecurityPolicy) {
+				const response = toCdpPausedDocumentResponse(params);
+				if (!response) throw new Error("CDP document response metadata is unavailable");
+				if (!response.hasBody) {
+					await this.pageClient.send("Fetch.continueResponse", {
+						requestId,
+						responseCode: response.responseCode,
+						responseHeaders: [...response.responseHeaders],
+					});
+					return;
+				}
+
+				const body = await this.pageClient.send("Fetch.getResponseBody", {
+					requestId: response.requestId,
+				});
+				await this.pageClient.send(
+					"Fetch.fulfillRequest",
+					toCdpDocumentFulfillParams(response, body, policy.documentContentSecurityPolicy),
+				);
+				return;
+			}
+
 			const parsed = toCdpResourceRequest(params);
 			if (!parsed || !allowedMethods.has(parsed.request.method)) {
 				await this.failCdpResourceRequest(requestId);

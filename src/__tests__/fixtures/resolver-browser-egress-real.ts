@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it, setDefaultTimeout } from "bun:test";
+import { createHash } from "node:crypto";
 import { createServer, type Server } from "node:http";
 
 import type { BrowserClient } from "../../types.js";
@@ -12,6 +13,7 @@ let evilOrigin = "";
 let evilServer: Server;
 let server: Server;
 let sharedClient: ReturnType<typeof createBrowserClient>;
+let webSocketHandshakeCount = 0;
 
 setDefaultTimeout(20_000);
 
@@ -98,10 +100,59 @@ beforeAll(async () => {
 				response.writeHead(200, { "content-type": "application/javascript" });
 				response.end("self.addEventListener('fetch', () => undefined)");
 				return;
+			case "/websocket-page": {
+				const webSocketTarget = `${origin.replace("http://127.0.0.1", "ws://localhost")}/websocket-exfil`;
+				response.writeHead(200, { "content-type": "text/html" });
+				response.end(`<!doctype html><script>
+					const ordinaryRequest = fetch("/websocket-http");
+					const webSocketOutcome = new Promise((resolve) => {
+						const socket = new WebSocket(${JSON.stringify(webSocketTarget)});
+						const finish = (outcome) => resolve(outcome);
+						socket.onerror = () => finish("error");
+						socket.onopen = () => {
+							socket.close();
+							finish("open");
+						};
+						setTimeout(() => finish("timeout"), 1000);
+					});
+					Promise.all([ordinaryRequest, webSocketOutcome]).then(async ([, outcome]) => {
+						await fetch("/websocket-" + outcome);
+						document.cookie = "aws-waf-token=websocket-finished; Path=/";
+					});
+				</script>`);
+				return;
+			}
+			case "/websocket-http":
+			case "/websocket-error":
+			case "/websocket-open":
+			case "/websocket-timeout":
+				response.writeHead(204);
+				response.end();
+				return;
 			default:
 				response.writeHead(404);
 				response.end("not found");
 		}
+	});
+	server.on("upgrade", (request, socket) => {
+		const requestUrl = new URL(request.url ?? "/", origin);
+		if (requestUrl.pathname !== "/websocket-exfil") {
+			socket.destroy();
+			return;
+		}
+
+		webSocketHandshakeCount += 1;
+		const key = request.headers["sec-websocket-key"];
+		if (typeof key !== "string") {
+			socket.destroy();
+			return;
+		}
+		const accept = createHash("sha1")
+			.update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+			.digest("base64");
+		socket.end(
+			`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`,
+		);
 	});
 
 	await new Promise<void>((resolve, reject) => {
@@ -239,5 +290,22 @@ describe.skipIf(!realBrowserAvailable)("real resolver browser egress policy", ()
 
 		expect(result.cookies).toEqual({ "aws-waf-token": "service-worker-finished" });
 		expect(requestCount("/sw.js")).toBe(0);
+	});
+
+	it("refuses WebSocket egress without blocking ordinary allowed HTTP", async () => {
+		webSocketHandshakeCount = 0;
+		requestCounts.delete("/websocket-http");
+		requestCounts.delete("/websocket-error");
+		requestCounts.delete("/websocket-open");
+		requestCounts.delete("/websocket-timeout");
+
+		const result = await solve("/websocket-page");
+
+		expect(result.cookies).toEqual({ "aws-waf-token": "websocket-finished" });
+		expect(webSocketHandshakeCount).toBe(0);
+		expect(requestCount("/websocket-http")).toBe(1);
+		expect(requestCount("/websocket-error")).toBe(1);
+		expect(requestCount("/websocket-open")).toBe(0);
+		expect(requestCount("/websocket-timeout")).toBe(0);
 	});
 });

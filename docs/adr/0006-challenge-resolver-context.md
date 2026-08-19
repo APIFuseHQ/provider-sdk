@@ -11,6 +11,26 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 13 (2026-08-19).** Resolver documents now refuse all WebSocket
+connections instead of leaving their handshakes outside the HTTP host policy.
+A local Chromium reproduction reached an undeclared `node:http` upgrade server
+once because request-stage CDP `Fetch` did not pause the handshake.
+`Network.setBlockedURLs` with `ws://*` and `wss://*` still produced one server
+handshake, so observation and URL-blocking commands were not treated as refusal
+controls. An enforcing CSP did refuse the connection, but adding its header with
+`Fetch.continueResponse` was too late for Chromium's CSP parser. The selected
+response-stage path reads each document body and fulfills the same response with
+its status, headers, and body plus `connect-src http: https:; worker-src 'none'`.
+The measured handshake count fell from one to zero, same-page HTTP fetch still
+completed once, and the page received `WebSocket.onerror`. The worker directive
+prevents a remote worker script from becoming an ungoverned WebSocket context.
+Fourteen captured Buyee responses, including post-challenge HTML, contained no
+WebSocket references, so the refusal does not remove observed AWS WAF traffic.
+Real Chromium regression coverage also re-proves redirect authorization, popup
+and subresource denial, service-worker blocking, and intermediate cookies through
+the response rewrite. Sections changed: Decision 3a, Verification, and When this
+might break.
+
 **Revision 12 (2026-08-19).** Resource-policy interception and authenticated
 proxy handling are coupled at the CDP `Fetch` boundary. On local Playwright
 pages, when the already-parsed proxy configuration contains credentials,
@@ -24,10 +44,10 @@ credential-bearing configuration is threaded from the client launch options
 into every local Playwright page that installs the policy; it is not reparsed
 and is never logged. CDP-pool pages have no local proxy credential authority,
 so their existing `Fetch.enable` call remains unchanged and does not enable an
-auth path it cannot answer. This solves HTTP proxy authentication only; it does
-not expand policy coverage to WebSocket handshakes or provide credentials for
-non-proxy authentication schemes. Sections changed: Decision 3a, Verification,
-and When this might break.
+auth path it cannot answer. This solves HTTP proxy authentication only and does
+not provide credentials for non-proxy authentication schemes. At that revision,
+WebSocket refusal had not yet been added. Sections changed: Decision 3a,
+Verification, and When this might break.
 
 **Revision 11 (2026-08-19).** Revision 10's page route did not enforce its
 redirect claim: Playwright routing receives the initial navigation but not its
@@ -42,8 +62,8 @@ intermediate `Set-Cookie` failure (`ERR_INVALID_URL` on the relative request
 path), which would break AWS WAF cookie minting. Real local-server Chromium
 tests now cover allowed and refused redirect chains, refused subresource
 redirects, popup first requests, service-worker blocking, and intermediate
-cookies. WebSocket handshakes remain outside this HTTP policy. Sections
-changed: Decision 3a, Verification, and When this might break.
+cookies. At that revision, WebSocket handshakes remained outside the HTTP
+policy. Sections changed: Decision 3a, Verification, and When this might break.
 
 **Revision 10 (2026-08-19).** Opening the local Playwright path exposed two
 pre-existing assumptions that made it unsafe and non-functional. Authenticated
@@ -586,9 +606,23 @@ installed for defense in depth; it blocks an unauthorized
 popup first request before the popup's CDP session can attach, and subsequent
 popup traffic uses that session. Resolver-created local contexts set
 `serviceWorkers: "block"`, removing service-worker-controlled requests from
-the resolver surface. WebSocket handshakes are not HTTP `Fetch` pauses and
-remain outside this policy; providers must not treat this decision as WebSocket
-egress authorization.
+the resolver surface.
+
+Request-stage `Fetch` still does not pause WebSocket handshakes, and
+`Network.setBlockedURLs` was measured to observe no effective `ws://` or
+`wss://` refusal. Resolver execution therefore denies WebSockets at the
+document policy layer. A response-stage `Fetch` pause reads the body of each
+renderable document response and fulfills it unchanged except for an additional
+enforcing `Content-Security-Policy` header:
+`connect-src http: https:; worker-src 'none'`. HTTP and HTTPS connections remain
+eligible for the request-stage host authorizer, while both WebSocket schemes are
+absent. Multiple CSP headers combine restrictively, so an upstream policy is
+retained rather than replaced. Disabling workers closes the separate worker
+execution context that otherwise could receive its own CSP. If body retrieval
+or fulfillment fails, the document is failed with `BlockedByClient`; the policy
+never continues a document without the refusal header. Redirect responses are
+continued without body rewriting so Chromium retains redirect and cookie
+processing.
 
 The initially preferred public-API implementation manually followed
 `route.fetch({ maxRedirects: 0 })` responses. A real Bun/Playwright 1.55 probe
@@ -1164,7 +1198,11 @@ These must hold before `Status: accepted`:
   intermediate cookie, but does not dial an undeclared navigation redirect or
   subresource redirect target. The same test proves context routing blocks a
   popup's first request and that the resolver context does not fetch a service
-  worker script. Reverting redirect-hop authorization makes this test fail.
+  worker script. It also loads ordinary allowed HTTP from a page that attempts a
+  WebSocket connection, observes the page's `WebSocket.onerror`, and proves the
+  upgrade server receives zero handshakes. Reverting WebSocket refusal changes
+  that count from zero to one and fails the test. Reverting redirect-hop
+  authorization makes the redirect assertions fail.
 - The real Buyee AWS WAF challenge needs cross-host infrastructure: the measured
   SDK 307 and token GET/POST requests use HTTPS `*.awswaf.com`. With only the
   provider host and the explicit AWS infrastructure exception admitted, local
@@ -1175,8 +1213,16 @@ These must hold before `Status: accepted`:
 
 ## When this might break
 
-- A challenge moves required traffic to WebSockets. Resolver HTTP resource
-  policy does not currently authorize or block WebSocket handshakes.
+- A challenge moves required traffic to WebSockets. The resolver deliberately
+  refuses every WebSocket rather than authorizing individual handshake URLs, so
+  such a challenge fails visibly instead of gaining new egress.
+- Chromium changes response-stage `Fetch.getResponseBody` /
+  `Fetch.fulfillRequest` behavior or stops applying an added enforcing CSP
+  before document scripts execute.
+- This is not a claim of a total Chromium network sandbox. HTTP(S) requests are
+  authorized at request-stage `Fetch` pauses and WebSockets are refused by CSP;
+  transports outside both mechanisms, such as WebRTC, remain outside the
+  measured resolver policy.
 - Chromium changes the CDP `Fetch` request-stage contract or stops exposing an
   absolute redirect destination before it is dialed.
 - A vendor moves a kind from proxyless to proxy-required, which would move that

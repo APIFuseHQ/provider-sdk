@@ -49,6 +49,14 @@ type MockCdpFetchFailure = {
 	requestId: string;
 };
 
+type MockCdpFetchResponseDispatch = {
+	body: string;
+	headers?: Array<{ name: string; value: string }>;
+	method?: string;
+	status?: number;
+	url: string;
+};
+
 type MockCommandFrame = {
 	id: number;
 	method: string;
@@ -259,6 +267,7 @@ const cdpState = {
 	fetchFailures: [] as MockCdpFetchFailure[],
 	fetchFulfillments: [] as MockCdpFetchFulfillRequest[],
 	fetchContinues: [] as string[],
+	fetchResponseBodies: new Map<string, string>(),
 	frameEvaluationErrors: new Map<number, string[]>(),
 	networkCookies: [] as MockBrowserCookie[],
 	networkCookiesByPageId: new Map<string, MockBrowserCookie[]>(),
@@ -749,6 +758,23 @@ class MockWebSocket {
 		return requestId;
 	}
 
+	dispatchFetchResponse(dispatch: MockCdpFetchResponseDispatch): string {
+		const requestId = `fetch-response-${cdpState.fetchResponseBodies.size + 1}`;
+		cdpState.fetchResponseBodies.set(requestId, dispatch.body);
+		this.emitPageEvent("Fetch.requestPaused", {
+			request: {
+				headers: {},
+				method: dispatch.method ?? "GET",
+				url: dispatch.url,
+			},
+			requestId,
+			resourceType: "Document",
+			responseHeaders: dispatch.headers ?? [],
+			responseStatusCode: dispatch.status ?? 200,
+		});
+		return requestId;
+	}
+
 	dispatchPageEvent(method: string, params: Record<string, unknown> = {}) {
 		this.emitPageEvent(method, params);
 	}
@@ -1013,6 +1039,14 @@ class MockWebSocket {
 				});
 				this.replyToPage(message.id, {});
 				break;
+			case "Fetch.getResponseBody": {
+				const requestId = String(message.params?.requestId ?? "");
+				this.replyToPage(message.id, {
+					base64Encoded: false,
+					body: cdpState.fetchResponseBodies.get(requestId) ?? "",
+				});
+				break;
+			}
 			case "Fetch.continueRequest":
 				cdpState.fetchContinues.push(String(message.params?.requestId ?? ""));
 				this.replyToPage(message.id, {});
@@ -1062,6 +1096,7 @@ describe("createBrowserClient", () => {
 		cdpState.fetchFailures.length = 0;
 		cdpState.fetchFulfillments.length = 0;
 		cdpState.fetchContinues.length = 0;
+		cdpState.fetchResponseBodies.clear();
 		cdpState.frameEvaluationErrors.clear();
 		cdpState.isolatedWorldContextIds.clear();
 		cdpState.isolatedWorldContextIds.set("main-frame", 7);
@@ -2104,6 +2139,60 @@ describe("createBrowserClient", () => {
 				requestId: "fetch-request-1",
 				responseCode: 202,
 				responseHeaders: [{ name: "content-type", value: "text/html" }],
+			},
+		]);
+	});
+
+	it("appends CSP to CDP document responses without changing their body", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		await page.withResourcePolicy(
+			{
+				documentContentSecurityPolicy: "connect-src http: https:",
+				routes: [],
+			},
+			async () => {
+				const socket = cdpState.pageSockets[0];
+				if (!socket) throw new Error("CDP page socket was not opened");
+				socket.dispatchFetchResponse({
+					body: "<!doctype html><title>preserved</title>",
+					headers: [
+						{ name: "Content-Type", value: "text/html" },
+						{ name: "Content-Security-Policy", value: "script-src 'self'" },
+					],
+					url: "https://example.test/document",
+				});
+				await waitForCondition(
+					() => cdpState.fetchFulfillments.length === 1,
+					"CDP document response was not fulfilled",
+				);
+			},
+		);
+		await page.close();
+		await client.close();
+
+		expect(cdpState.fetchEnableParams).toEqual([
+			{
+				patterns: [
+					{ requestStage: "Request", urlPattern: "*" },
+					{ requestStage: "Response", resourceType: "Document", urlPattern: "*" },
+				],
+			},
+		]);
+		expect(cdpState.fetchFulfillments).toEqual([
+			{
+				body: Buffer.from("<!doctype html><title>preserved</title>").toString("base64"),
+				requestId: "fetch-response-1",
+				responseCode: 200,
+				responseHeaders: [
+					{ name: "Content-Type", value: "text/html" },
+					{ name: "Content-Security-Policy", value: "script-src 'self'" },
+					{ name: "Content-Security-Policy", value: "connect-src http: https:" },
+				],
 			},
 		]);
 	});

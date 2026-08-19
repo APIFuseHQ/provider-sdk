@@ -19,6 +19,7 @@ import {
 const BROWSER_VENDOR_ID = "browser" as const;
 const DEFAULT_COOKIE_POLL_INTERVAL_MS = 100;
 const AWS_WAF_CHALLENGE_INFRASTRUCTURE_HOST_SUFFIX = ".awswaf.com";
+const RESOLVER_DOCUMENT_CONTENT_SECURITY_POLICY = "connect-src http: https:; worker-src 'none'";
 
 const SUCCESS_COOKIE_NAMES = {
 	aws_waf: "aws-waf-token",
@@ -227,6 +228,7 @@ async function solveInPage(
 	return await page.withResourcePolicy(
 		{
 			allowedMethods: ["GET", "HEAD", "POST"],
+			documentContentSecurityPolicy: RESOLVER_DOCUMENT_CONTENT_SECURITY_POLICY,
 			routes: [
 				{
 					match: () => true,

@@ -1796,6 +1796,12 @@ export type BrowserResourceRoute = {
 export type BrowserResourcePolicy = {
 	readonly defaultAction?: "block";
 	readonly allowedMethods?: readonly BrowserResourceMethod[];
+	/**
+	 * Appends an enforcing CSP header to every renderable document response
+	 * while the policy is active. Existing CSP headers are retained, so this
+	 * can only further restrict the document.
+	 */
+	readonly documentContentSecurityPolicy?: string;
 	readonly routes: readonly BrowserResourceRoute[];
 };
 

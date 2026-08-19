@@ -14,7 +14,7 @@ const realBrowserTest = fileURLToPath(
 describe.skipIf(!realBrowserAvailable && !realBrowserRequired)(
 	"real resolver browser egress policy",
 	() => {
-		it("enforces redirect, subresource, popup, and service-worker boundaries in Chromium", async () => {
+		it("enforces redirect, subresource, popup, service-worker, and WebSocket boundaries in Chromium", async () => {
 			const child = Bun.spawn(
 				[process.execPath, "test", `./${relative(process.cwd(), realBrowserTest)}`],
 				{
@@ -38,6 +38,7 @@ describe.skipIf(!realBrowserAvailable && !realBrowserRequired)(
 				"blocks an undeclared subresource redirect target before it is dialed",
 				"blocks an allowed popup before dialing its undeclared redirect target",
 				"blocks service workers in the resolver context",
+				"refuses WebSocket egress without blocking ordinary allowed HTTP",
 			]) {
 				expect(output).toContain(`(pass) real resolver browser egress policy > ${testName}`);
 			}

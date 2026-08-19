@@ -381,6 +381,9 @@ describe("browser resolver vendor", () => {
 		const policy = stub.state.resourcePolicies[0];
 		const route = policy?.routes[0];
 		if (!route) throw new Error("Browser resolver did not install its resource policy");
+		expect(policy.documentContentSecurityPolicy).toBe(
+			"connect-src http: https:; worker-src 'none'",
+		);
 		const request = (url: string) => ({ headers: {}, method: "GET", url }) as const;
 		expect(await route.handle(request("https://example.com/asset.js"))).toEqual({
 			action: "continue",
