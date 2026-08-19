@@ -728,6 +728,12 @@ function createProviderContext(
 			request: requestContext,
 			credential,
 			state: requestState,
+			onTelemetry: (event) =>
+				(options.logger ?? defaultProviderServerLogger)({
+					level: "info",
+					event: "provider_choice_token",
+					...event,
+				}),
 		}),
 	});
 	wrappedContext = context;
@@ -947,6 +953,18 @@ export type ProviderServerLogEvent =
 			event: "provider_secrets_missing";
 			providerId: string;
 			missingSecrets: string[];
+	  }
+	| {
+			level: "info";
+			event: "provider_choice_token";
+			providerId: string;
+			purpose: string;
+			operation: "parse" | "consume";
+			format: "word" | "legacy";
+			outcome: "success" | "not-found" | "invalid" | "unsupported" | "error";
+			consumeMode: "never" | "on-parse" | "explicit";
+			consumed: boolean;
+			replay: boolean;
 	  }
 	| {
 			level: "warn";

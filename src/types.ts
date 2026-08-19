@@ -1892,6 +1892,22 @@ export interface ProviderChoiceBindingOptions {
 	credentialKeys?: readonly string[];
 }
 
+export type ProviderChoiceConsumeMode = "never" | "on-parse" | "explicit";
+
+export type ProviderChoiceConsumeResult =
+	| { readonly status: "consumed" }
+	| { readonly status: "already-consumed" }
+	| { readonly status: "unsupported" };
+
+export interface ProviderChoiceExplicitParseResult {
+	readonly status: "active";
+	readonly payload: Record<string, unknown>;
+	/** Stable, opaque key for provider-owned idempotency records. */
+	readonly replayKey: string;
+	/** Atomically claims a word token. Legacy managed tokens report unsupported. */
+	consume(): Promise<ProviderChoiceConsumeResult>;
+}
+
 export type ProviderChoiceStorageOptions =
 	| {
 			readonly mode: "inline";
@@ -1939,6 +1955,8 @@ export interface ProviderChoiceParseOptions {
 	futureToleranceMs?: number;
 	bind?: ProviderChoiceBindingOptions;
 	storage?: ProviderChoiceStorageOptions;
+	/** Defaults to never, matching legacy managed-token parse semantics. */
+	consume?: ProviderChoiceConsumeMode;
 }
 
 export interface ProviderChoiceContext {
@@ -1967,6 +1985,9 @@ export interface ProviderChoiceContext {
 		options: ProviderChoiceIssueOptions<TPayload>,
 	): string | Promise<string>;
 	parse(
+		options: ProviderChoiceParseOptions & { readonly consume: "explicit" },
+	): Promise<ProviderChoiceExplicitParseResult>;
+	parse(
 		options: ProviderChoiceParseOptions & {
 			readonly storage?: { readonly mode: "inline" };
 		},
@@ -1987,7 +2008,11 @@ export interface ProviderChoiceContext {
 			>;
 		},
 	): Record<string, unknown> | Promise<Record<string, unknown>>;
-	parse(options: ProviderChoiceParseOptions): Record<string, unknown>;
+	parse(
+		options: ProviderChoiceParseOptions,
+	):
+		| Record<string, unknown>
+		| Promise<Record<string, unknown> | ProviderChoiceExplicitParseResult>;
 }
 
 export interface ContextScratchpad {

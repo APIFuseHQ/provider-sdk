@@ -24,7 +24,10 @@ import type {
 	CredentialContext,
 	EnvContext,
 	ProviderChoiceBindingOptions,
+	ProviderChoiceConsumeMode,
+	ProviderChoiceConsumeResult,
 	ProviderChoiceContext,
+	ProviderChoiceExplicitParseResult,
 	ProviderChoiceIssueOptions,
 	ProviderChoiceParseOptions,
 	ProviderChoiceStorageOptions,
@@ -72,8 +75,21 @@ type ServerStoredChoiceRecord = {
 	readonly issued_at_ms: number;
 	readonly ttl_ms: number;
 	readonly binding?: ManagedChoiceEnvelope["binding"];
+	readonly prefix: string;
 	readonly payload: ProviderChoiceTokenPayload;
 	readonly payload_digest: string;
+	readonly replay_key: string;
+};
+
+export type ProviderChoiceTelemetryEvent = {
+	readonly providerId: string;
+	readonly purpose: string;
+	readonly operation: "parse" | "consume";
+	readonly format: "word" | "legacy";
+	readonly outcome: "success" | "not-found" | "invalid" | "unsupported" | "error";
+	readonly consumeMode: ProviderChoiceConsumeMode;
+	readonly consumed: boolean;
+	readonly replay: boolean;
 };
 
 export type CreateProviderChoiceContextOptions = {
@@ -84,6 +100,8 @@ export type CreateProviderChoiceContextOptions = {
 	readonly state?: ProviderRuntimeState;
 	readonly masterSecret?: string;
 	readonly kid?: string;
+	/** Receives allowlisted metadata only; token and payload values are never included. */
+	readonly onTelemetry?: (event: ProviderChoiceTelemetryEvent) => void;
 };
 
 export function createProviderChoiceContext(
@@ -174,6 +192,9 @@ export function createProviderChoiceContext(
 	}
 
 	function parse(
+		parseOptions: ProviderChoiceParseOptions & { readonly consume: "explicit" },
+	): Promise<ProviderChoiceExplicitParseResult>;
+	function parse(
 		parseOptions: ProviderChoiceParseOptions & {
 			readonly storage?: { readonly mode: "inline" };
 		},
@@ -190,13 +211,17 @@ export function createProviderChoiceContext(
 	): ProviderChoiceTokenPayload | Promise<ProviderChoiceTokenPayload>;
 	function parse(
 		parseOptions: ProviderChoiceParseOptions,
-	): ProviderChoiceTokenPayload | Promise<ProviderChoiceTokenPayload> {
+	):
+		| ProviderChoiceTokenPayload
+		| ProviderChoiceExplicitParseResult
+		| Promise<ProviderChoiceTokenPayload | ProviderChoiceExplicitParseResult> {
+		const consumeMode = parseOptions.consume ?? "never";
 		const wordStateKey = parseWordChoiceStateKey({
 			token: parseOptions.token,
 			prefix: parseOptions.prefix,
 		});
 		if (wordStateKey) {
-			return parseWordServerStoredChoice({
+			const parsed = parseWordServerStoredChoice({
 				stateKey: wordStateKey,
 				parseOptions,
 				contextState: options.state,
@@ -208,75 +233,138 @@ export function createProviderChoiceContext(
 						masterSecret: resolveMasterSecret(),
 						providerId: options.providerId,
 						purpose: parseOptions.purpose,
-						kid,
+							kid,
+						}),
+				onConsume: (result) =>
+					emitChoiceTelemetry(options.onTelemetry, {
+						providerId: options.providerId,
+						purpose: parseOptions.purpose,
+						operation: "consume",
+						format: "word",
+						outcome: "success",
+						consumeMode,
+						consumed: result.status === "consumed",
+						replay: result.status === "already-consumed",
 					}),
 			});
-		}
-
-		// Legacy encrypted-envelope compatibility fallback. Remove after 2026-09-15.
-		// A structurally valid word token returns above, so lookup, expiry,
-		// consumption, and binding failures can never enter this branch.
-		const [actualPrefix, tokenKid, encodedIv, encryptedPayload, authTag, signature] =
-			parseManagedChoiceTokenParts(parseOptions.token);
-		if (
-			actualPrefix !== parseOptions.prefix ||
-			tokenKid !== kid ||
-			!encodedIv ||
-			!encryptedPayload ||
-			!authTag ||
-			!signature
-		) {
-			throw new ProviderChoiceTokenError(
-				"invalid_shape",
-				"Provider choice token shape is invalid.",
-			);
-		}
-
-		const keys = deriveManagedChoiceKeys({
-			masterSecret: resolveMasterSecret(),
-			providerId: options.providerId,
-			purpose: parseOptions.purpose,
-			kid: tokenKid,
-		});
-		const signedBody = [parseOptions.prefix, tokenKid, encodedIv, encryptedPayload, authTag].join(
-			".",
-		);
-		assertManagedChoiceSignature({
-			signedBody,
-			signature,
-			signingKey: keys.signing,
-		});
-		const envelope = decryptManagedChoiceToken({
-			encodedIv,
-			encryptedPayload,
-			authTag,
-			encryptionKey: keys.encryption,
-		});
-		assertManagedChoiceEnvelope(envelope, {
-			providerId: options.providerId,
-			purpose: parseOptions.purpose,
-			ttlMs: parseOptions.ttlMs,
-			nowMs: parseOptions.nowMs,
-			futureToleranceMs: parseOptions.futureToleranceMs,
-		});
-		assertChoiceBindingMatches({
-			actual: envelope.binding,
-			expected: createChoiceBinding({
-				keys,
-				options: parseOptions.bind,
-				request: options.request,
-				credential: options.credential,
-				required: true,
-			}),
-		});
-		if (isServerChoiceHandlePayload(envelope.payload)) {
-			return parseLegacyServerStoredChoice({
-				handle: envelope.payload,
-				storage: parseOptions.storage,
-				contextState: options.state,
+			return observeChoiceParse<
+				ProviderChoiceTokenPayload | ProviderChoiceExplicitParseResult
+			>(parsed, {
+				onTelemetry: options.onTelemetry,
+				providerId: options.providerId,
+				purpose: parseOptions.purpose,
+				format: "word",
+				consumeMode,
 			});
 		}
-		return envelope.payload;
+
+		// Legacy encrypted-envelope compatibility fallback. Removal is gated on
+		// the last legacy mint plus the maximum issued TTL; see ADR 0006.
+		// A structurally valid word token returns above, so lookup, expiry,
+		// consumption, and binding failures can never enter this branch.
+		try {
+			const [actualPrefix, tokenKid, encodedIv, encryptedPayload, authTag, signature] =
+				parseManagedChoiceTokenParts(parseOptions.token);
+			if (
+				actualPrefix !== parseOptions.prefix ||
+				tokenKid !== kid ||
+				!encodedIv ||
+				!encryptedPayload ||
+				!authTag ||
+				!signature
+			) {
+				throw new ProviderChoiceTokenError(
+					"invalid_shape",
+					"Provider choice token shape is invalid.",
+				);
+			}
+
+			const keys = deriveManagedChoiceKeys({
+				masterSecret: resolveMasterSecret(),
+				providerId: options.providerId,
+				purpose: parseOptions.purpose,
+				kid: tokenKid,
+			});
+			const signedBody = [
+				parseOptions.prefix,
+				tokenKid,
+				encodedIv,
+				encryptedPayload,
+				authTag,
+			].join(".");
+			assertManagedChoiceSignature({
+				signedBody,
+				signature,
+				signingKey: keys.signing,
+			});
+			const envelope = decryptManagedChoiceToken({
+				encodedIv,
+				encryptedPayload,
+				authTag,
+				encryptionKey: keys.encryption,
+			});
+			assertManagedChoiceEnvelope(envelope, {
+				providerId: options.providerId,
+				purpose: parseOptions.purpose,
+				ttlMs: parseOptions.ttlMs,
+				nowMs: parseOptions.nowMs,
+				futureToleranceMs: parseOptions.futureToleranceMs,
+			});
+			assertChoiceBindingMatches({
+				actual: envelope.binding,
+				expected: createChoiceBinding({
+					keys,
+					options: parseOptions.bind,
+					request: options.request,
+					credential: options.credential,
+					required: true,
+				}),
+			});
+			const payload = isServerChoiceHandlePayload(envelope.payload)
+				? parseLegacyServerStoredChoice({
+						handle: envelope.payload,
+						storage: parseOptions.storage,
+						contextState: options.state,
+					})
+				: envelope.payload;
+			const parsed =
+				consumeMode === "explicit"
+					? Promise.resolve(payload).then((resolvedPayload) =>
+							createLegacyExplicitParseResult({
+								payload: resolvedPayload,
+								replayKey: digestChoiceReplayKey(parseOptions.token),
+								onConsume: () =>
+									emitChoiceTelemetry(options.onTelemetry, {
+										providerId: options.providerId,
+										purpose: parseOptions.purpose,
+										operation: "consume",
+										format: "legacy",
+										outcome: "unsupported",
+										consumeMode,
+										consumed: false,
+										replay: false,
+									}),
+							}),
+						)
+					: payload;
+			return observeChoiceParse<
+				ProviderChoiceTokenPayload | ProviderChoiceExplicitParseResult
+			>(parsed, {
+				onTelemetry: options.onTelemetry,
+				providerId: options.providerId,
+				purpose: parseOptions.purpose,
+				format: "legacy",
+				consumeMode,
+			});
+		} catch (error) {
+			emitChoiceParseFailure(options.onTelemetry, error, {
+				providerId: options.providerId,
+				purpose: parseOptions.purpose,
+				format: "legacy",
+				consumeMode,
+			});
+			throw error;
+		}
 	}
 
 	return { issue, parse };
@@ -292,6 +380,94 @@ export function createTestProviderChoiceContext(
 		masterSecret:
 			options.masterSecret ?? "apifuse-test-provider-runtime-choice-token-master-secret",
 	});
+}
+
+type ChoiceParseTelemetryBase = {
+	readonly onTelemetry?: (event: ProviderChoiceTelemetryEvent) => void;
+	readonly providerId: string;
+	readonly purpose: string;
+	readonly format: "word" | "legacy";
+	readonly consumeMode: ProviderChoiceConsumeMode;
+};
+
+function observeChoiceParse<T>(result: T | Promise<T>, base: ChoiceParseTelemetryBase): T | Promise<T> {
+	if (result instanceof Promise) {
+		return result.then(
+			(value) => {
+				emitChoiceParseSuccess(base);
+				return value;
+			},
+			(error: unknown) => {
+				emitChoiceParseFailure(base.onTelemetry, error, base);
+				throw error;
+			},
+		);
+	}
+	emitChoiceParseSuccess(base);
+	return result;
+}
+
+function emitChoiceParseSuccess(base: ChoiceParseTelemetryBase): void {
+	emitChoiceTelemetry(base.onTelemetry, {
+		providerId: base.providerId,
+		purpose: base.purpose,
+		operation: "parse",
+		format: base.format,
+		outcome: "success",
+		consumeMode: base.consumeMode,
+		consumed: base.format === "word" && base.consumeMode === "on-parse",
+		replay: false,
+	});
+}
+
+function emitChoiceParseFailure(
+	onTelemetry: CreateProviderChoiceContextOptions["onTelemetry"],
+	error: unknown,
+	base: Omit<ChoiceParseTelemetryBase, "onTelemetry">,
+): void {
+	const outcome =
+		error instanceof ProviderChoiceTokenError
+			? base.format === "word" && error.message === WORD_CHOICE_NOT_FOUND_MESSAGE
+				? "not-found"
+				: "invalid"
+			: "error";
+	emitChoiceTelemetry(onTelemetry, {
+		providerId: base.providerId,
+		purpose: base.purpose,
+		operation: "parse",
+		format: base.format,
+		outcome,
+		consumeMode: base.consumeMode,
+		consumed: false,
+		replay: false,
+	});
+}
+
+function emitChoiceTelemetry(
+	onTelemetry: CreateProviderChoiceContextOptions["onTelemetry"],
+	event: ProviderChoiceTelemetryEvent,
+): void {
+	try {
+		onTelemetry?.(event);
+	} catch {
+		// Observability must never change provider token semantics.
+	}
+}
+
+function createLegacyExplicitParseResult(options: {
+	readonly payload: ProviderChoiceTokenPayload;
+	readonly replayKey: string;
+	readonly onConsume: () => void;
+}): ProviderChoiceExplicitParseResult {
+	return {
+		status: "active",
+		payload: options.payload,
+		replayKey: options.replayKey,
+		consume: async () => {
+			options.onConsume();
+			return { status: "unsupported" };
+		},
+	};
 }
 
 function resolveChoiceMasterSecret(options: CreateProviderChoiceContextOptions): string {
@@ -375,30 +551,7 @@ async function issueServerStoredChoice<TPayload extends ProviderChoiceTokenPaylo
 	readonly contextState?: ProviderRuntimeState;
 }): Promise<string> {
 	const serializedPayload = serializeChoicePayload(options.issueOptions.payload);
-	const record: ServerStoredChoiceRecord = {
-		v: SERVER_STORED_CHOICE_RECORD_VERSION,
-		storage: "server",
-		status: "active",
-		provider_id: options.baseEnvelope.provider_id,
-		purpose: options.baseEnvelope.purpose,
-		issued_at_ms: options.baseEnvelope.issued_at_ms,
-		ttl_ms: options.baseEnvelope.ttl_ms,
-		binding: options.baseEnvelope.binding,
-		payload: options.issueOptions.payload,
-		payload_digest: digestChoicePayload(serializedPayload),
-	};
-	const valueBytes = Buffer.byteLength(JSON.stringify(record), "utf8");
-	if (valueBytes > options.storage.maxValueBytes) {
-		throw new ProviderError("Provider choice payload exceeds state storage policy.", {
-			code: "CHOICE_STATE_PAYLOAD_TOO_LARGE",
-			category: "input_validation",
-			retryable: false,
-			details: {
-				maxValueBytes: options.storage.maxValueBytes,
-				valueBytes,
-			},
-		});
-	}
+	const payloadDigest = digestChoicePayload(serializedPayload);
 	const namespace = resolveChoiceStateNamespace({
 		storage: options.storage,
 		contextState: options.contextState,
@@ -408,10 +561,37 @@ async function issueServerStoredChoice<TPayload extends ProviderChoiceTokenPaylo
 		options.issueOptions.strength === "high" ? HIGH_CHOICE_WORD_COUNT : STANDARD_CHOICE_WORD_COUNT;
 	for (let attempt = 0; attempt < SERVER_STORED_CHOICE_ISSUE_ATTEMPTS; attempt += 1) {
 		const stateKey = generateChoiceWordSequence(wordCount);
+		const token = `${options.issueOptions.prefix}${stateKey}`;
+		const record: ServerStoredChoiceRecord = {
+			v: SERVER_STORED_CHOICE_RECORD_VERSION,
+			storage: "server",
+			status: "active",
+			provider_id: options.baseEnvelope.provider_id,
+			purpose: options.baseEnvelope.purpose,
+			issued_at_ms: options.baseEnvelope.issued_at_ms,
+			ttl_ms: options.baseEnvelope.ttl_ms,
+			binding: options.baseEnvelope.binding,
+			prefix: options.issueOptions.prefix,
+			payload: options.issueOptions.payload,
+			payload_digest: payloadDigest,
+			replay_key: digestChoiceReplayKey(token),
+		};
+		const valueBytes = Buffer.byteLength(JSON.stringify(record), "utf8");
+		if (valueBytes > options.storage.maxValueBytes) {
+			throw new ProviderError("Provider choice payload exceeds state storage policy.", {
+				code: "CHOICE_STATE_PAYLOAD_TOO_LARGE",
+				category: "input_validation",
+				retryable: false,
+				details: {
+					maxValueBytes: options.storage.maxValueBytes,
+					valueBytes,
+				},
+			});
+		}
 		const result = await namespace.compareAndSet(optionsStateKey(stateKey), 0, record, {
 			ttl: stateTtl(options.storage, options.issueOptions.ttlMs),
 		});
-		if (result.ok) return `${options.issueOptions.prefix}${stateKey}`;
+		if (result.ok) return token;
 	}
 	throw new ProviderError("Provider choice state storage is not available.", {
 		code: "CHOICE_STATE_UNAVAILABLE",
@@ -428,7 +608,8 @@ async function parseWordServerStoredChoice(options: {
 	readonly request?: ProviderRequestContext;
 	readonly credential?: CredentialContext;
 	readonly resolveBindingKeys: () => ManagedChoiceKeys;
-}): Promise<ProviderChoiceTokenPayload> {
+	readonly onConsume: (result: ProviderChoiceConsumeResult) => void;
+}): Promise<ProviderChoiceTokenPayload | ProviderChoiceExplicitParseResult> {
 	const storage = resolveParseStorage(options.parseOptions.storage);
 	const namespace = resolveChoiceStateNamespace({
 		storage,
@@ -442,15 +623,19 @@ async function parseWordServerStoredChoice(options: {
 		if (isProviderError(error)) throw error;
 		throw wordChoiceNotFoundError();
 	}
-	if (!stored || !isServerStoredChoiceRecord(stored.value) || stored.value.status !== "active") {
+	if (!stored || !isServerStoredChoiceRecord(stored.value)) {
 		throw wordChoiceNotFoundError();
 	}
 
 	const record = stored.value;
+	const expectedReplayKey = digestChoiceReplayKey(
+		`${options.parseOptions.prefix}${options.stateKey}`,
+	);
 	try {
 		if (
 			record.provider_id !== options.providerId ||
-			record.purpose !== options.parseOptions.purpose
+			record.purpose !== options.parseOptions.purpose ||
+			record.prefix !== options.parseOptions.prefix
 		) {
 			throw wordChoiceNotFoundError();
 		}
@@ -466,6 +651,7 @@ async function parseWordServerStoredChoice(options: {
 			actual: digestChoicePayload(serializeChoicePayload(record.payload)),
 			expected: record.payload_digest,
 		});
+		assertPayloadDigestMatches({ actual: expectedReplayKey, expected: record.replay_key });
 		assertWordChoiceBindingMatches({
 			actual: record.binding,
 			requested: options.parseOptions.bind,
@@ -483,24 +669,72 @@ async function parseWordServerStoredChoice(options: {
 		throw error;
 	}
 
-	const consumeNamespace = resolveChoiceStateNamespace({
+	if (record.status !== "active") throw wordChoiceNotFoundError();
+	const consumeMode = options.parseOptions.consume ?? "never";
+	if (consumeMode === "never") return record.payload;
+	if (consumeMode === "explicit") {
+		return {
+			status: "active",
+			payload: record.payload,
+			replayKey: record.replay_key,
+			consume: async () => {
+				const result = await consumeWordServerStoredChoice({
+					stateKey: options.stateKey,
+					stored,
+					record,
+					storage,
+					contextState: options.contextState,
+				});
+				options.onConsume(result);
+				return result;
+			},
+		};
+	}
+	const consumed = await consumeWordServerStoredChoice({
+		stateKey: options.stateKey,
+		stored,
+		record,
 		storage,
 		contextState: options.contextState,
-		ttlMs: record.ttl_ms,
+	});
+	if (consumed.status !== "consumed") throw wordChoiceNotFoundError();
+	return record.payload;
+}
+
+async function consumeWordServerStoredChoice(options: {
+	readonly stateKey: string;
+	readonly stored: StateValue<ServerStoredChoiceRecord>;
+	readonly record: ServerStoredChoiceRecord;
+	readonly storage: ServerProviderChoiceStorageOptions;
+	readonly contextState?: ProviderRuntimeState;
+}): Promise<ProviderChoiceConsumeResult> {
+	const namespace = resolveChoiceStateNamespace({
+		storage: options.storage,
+		contextState: options.contextState,
+		ttlMs: options.record.ttl_ms,
 	});
 	try {
-		const consumed = await consumeNamespace.compareAndSet(
+		const consumed = await namespace.compareAndSet(
 			optionsStateKey(options.stateKey),
-			stored.version,
-			{ ...record, status: "consumed" } satisfies ServerStoredChoiceRecord,
-			{ ttl: remainingStateTtl(stored.expiresAt) },
+			options.stored.version,
+			{ ...options.record, status: "consumed" } satisfies ServerStoredChoiceRecord,
+			{ ttl: remainingStateTtl(options.stored.expiresAt) },
 		);
-		if (!consumed.ok) throw wordChoiceNotFoundError();
+		if (consumed.ok) return { status: "consumed" };
+		if (
+			consumed.current &&
+			isServerStoredChoiceRecord(consumed.current.value) &&
+			consumed.current.value.status === "consumed" &&
+			consumed.current.value.replay_key === options.record.replay_key
+		) {
+			return { status: "already-consumed" };
+		}
+		throw wordChoiceNotFoundError();
 	} catch (error) {
 		if (isProviderError(error)) throw error;
+		if (error instanceof ProviderChoiceTokenError) throw error;
 		throw wordChoiceNotFoundError();
 	}
-	return record.payload;
 }
 
 async function parseLegacyServerStoredChoice(options: {
@@ -612,10 +846,14 @@ function isServerStoredChoiceRecord(value: unknown): value is ServerStoredChoice
 		"ttl_ms" in value &&
 		typeof value.ttl_ms === "number" &&
 		(!("binding" in value) || value.binding === undefined || isChoiceBinding(value.binding)) &&
+		"prefix" in value &&
+		typeof value.prefix === "string" &&
 		"payload" in value &&
 		isChoicePayload(value.payload) &&
 		"payload_digest" in value &&
-		typeof value.payload_digest === "string"
+		typeof value.payload_digest === "string" &&
+		"replay_key" in value &&
+		typeof value.replay_key === "string"
 	);
 }
 
@@ -699,6 +937,10 @@ function serializeChoicePayload(payload: ProviderChoiceTokenPayload): string {
 
 function digestChoicePayload(serializedPayload: string): string {
 	return createHash("sha256").update(serializedPayload).digest("base64url");
+}
+
+function digestChoiceReplayKey(token: string): string {
+	return createHash("sha256").update(token).digest("hex");
 }
 
 function isServerChoiceHandlePayload(

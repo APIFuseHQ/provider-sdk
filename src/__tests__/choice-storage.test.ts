@@ -4,6 +4,7 @@ import { ProviderError } from "../errors.js";
 import {
 	createProviderChoiceContext,
 	createTestProviderChoiceContext,
+	type ProviderChoiceTelemetryEvent,
 } from "../runtime/choice.js";
 import { createUnsupportedProviderRuntimeState } from "../runtime/state.js";
 import type { CredentialContext, ProviderRuntimeState } from "../types.js";
@@ -43,6 +44,7 @@ function createManagedChoiceFixture(options?: {
 	readonly connectionId?: string;
 	readonly credentialValues?: Record<string, string>;
 	readonly state?: ProviderRuntimeState;
+	readonly onTelemetry?: (event: ProviderChoiceTelemetryEvent) => void;
 }) {
 	const credentialValues = options?.credentialValues ?? { userId: "u1" };
 	const credential = {
@@ -61,6 +63,7 @@ function createManagedChoiceFixture(options?: {
 		request,
 		credential,
 		state: options?.state,
+		onTelemetry: options?.onTelemetry,
 	});
 }
 
@@ -133,31 +136,35 @@ describe("managed choice storage", () => {
 			nowMs: 1_000,
 			storage: STORAGE_OPTIONS,
 		});
-		const parsed = await choice.parse({
+		const parseOptions = {
 			token: serverToken,
 			prefix: "provider_choice_v2",
 			purpose: "reservation",
 			ttlMs: 60_000,
 			nowMs: 2_000,
 			storage: STORAGE_OPTIONS,
-		});
+		} as const;
+		const parsed = await choice.parse(parseOptions);
+		const parsedAgain = await choice.parse(parseOptions);
 
 		expect(serverToken.length).toBeLessThan(inlineToken.length / 2);
 		expect(serverToken).toStartWith("provider_choice_v2");
 		expect(tokenWordCount(serverToken, "provider_choice_v2")).toBe(4);
 		expect(parsed).toEqual(payload);
+		expect(parsedAgain).toEqual(payload);
 		const stored = await state.firstNamespace().list({ limit: 1 });
 		expect(stored[0]?.key).toBe(serverToken.slice("provider_choice_v2".length));
 		expect(stored[0]?.value).toMatchObject({
 			v: 1,
 			storage: "server",
-			status: "consumed",
+			status: "active",
 			provider_id: "provider-a",
 			purpose: "reservation",
 			issued_at_ms: 1_000,
 			ttl_ms: 60_000,
 			payload,
 			payload_digest: expect.any(String),
+			replay_key: expect.any(String),
 		});
 	});
 
@@ -427,6 +434,7 @@ describe("managed choice storage", () => {
 			ttlMs: 60_000,
 			nowMs: 2_000,
 			storage: STORAGE_OPTIONS,
+			consume: "on-parse",
 		} as const;
 
 		const results = await Promise.allSettled([
@@ -442,6 +450,86 @@ describe("managed choice storage", () => {
 		await expectWordChoiceNotFound(choice.parse(parseOptions));
 		const stored = await state.firstNamespace().list<{ status: string }>({ limit: 1 });
 		expect(stored[0]?.value.status).toBe("consumed");
+	});
+
+	it("keeps an explicit choice active when upstream work fails so parsing can retry", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({ state });
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "reservation",
+			payload: { choice_id: "retryable" },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+		const parseOptions = {
+			token,
+			prefix: WORD_PREFIX,
+			purpose: "reservation",
+			ttlMs: 60_000,
+			nowMs: 2_000,
+			storage: STORAGE_OPTIONS,
+			consume: "explicit",
+		} as const;
+
+		const beforeFailure = await choice.parse(parseOptions);
+		expect(beforeFailure.status).toBe("active");
+		expect(beforeFailure.payload).toEqual({ choice_id: "retryable" });
+		expect(typeof beforeFailure.replayKey).toBe("string");
+		const initialReplayKey = beforeFailure.replayKey;
+		// The provider does not call consume() when its upstream round fails.
+		const retry = await choice.parse(parseOptions);
+		expect(retry.status).toBe("active");
+		if (retry.status !== "active") throw new Error("Expected an active choice claim.");
+		expect(retry.replayKey).toBe(initialReplayKey);
+
+		const results = await Promise.all([beforeFailure.consume(), retry.consume()]);
+		expect(results.map((result) => result.status).sort()).toEqual([
+			"already-consumed",
+			"consumed",
+		]);
+	});
+
+	it("emits allowlisted choice telemetry without token, payload, or credential values", async () => {
+		const events: ProviderChoiceTelemetryEvent[] = [];
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({
+			state,
+			credentialValues: { userId: "credential-value-marker" },
+			onTelemetry: (event) => events.push(event),
+		});
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "telemetry-check",
+			payload: { cursor: "payload-value-marker" },
+			ttlMs: 60_000,
+			storage: STORAGE_OPTIONS,
+		});
+
+		await choice.parse({
+			token,
+			prefix: WORD_PREFIX,
+			purpose: "telemetry-check",
+			storage: STORAGE_OPTIONS,
+		});
+
+		expect(events).toEqual([
+			{
+				providerId: "provider-a",
+				purpose: "telemetry-check",
+				operation: "parse",
+				format: "word",
+				outcome: "success",
+				consumeMode: "never",
+				consumed: false,
+				replay: false,
+			},
+		]);
+		const serialized = JSON.stringify(events);
+		expect(serialized).not.toContain(token);
+		expect(serialized).not.toContain("payload-value-marker");
+		expect(serialized).not.toContain("credential-value-marker");
 	});
 
 	it("rejects a corrupt/undecodable server choice as a branded token error, not a raw SyntaxError", async () => {
