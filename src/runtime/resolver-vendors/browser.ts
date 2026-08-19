@@ -414,6 +414,7 @@ export function createBrowserResolverVendorAdapter(
 					cdpUrl: cdpUrl ?? "",
 					...(proxyUrl === undefined ? {} : { proxy: proxyUrl }),
 					requireCdpPool: cdpUrl !== undefined,
+					serviceWorkers: "block",
 				});
 				const contextOperation = client.withIsolatedContext(async (page) => {
 					handlerEntered = true;

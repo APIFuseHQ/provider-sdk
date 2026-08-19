@@ -177,34 +177,49 @@ type MockBrowserState = {
 	browser: {
 		close: () => Promise<void>;
 		isConnected: () => boolean;
-		newContext: () => Promise<MockBrowserContext>;
+		newContext: (options?: { serviceWorkers?: "allow" | "block" }) => Promise<MockBrowserContext>;
 		newPage: () => Promise<MockPlaywrightPage>;
 	};
 	closeCalls: number;
 	connected: boolean;
 	contexts: MockBrowserContext[];
+	defaultContext: MockBrowserContext;
 	newPageCalls: number;
 	pages: MockPlaywrightPage[];
 	launchOptions?: LaunchCall;
+	newContextOptions: Array<{ serviceWorkers?: "allow" | "block" }>;
 };
 
 type MockBrowserContext = {
 	close: () => Promise<void>;
 	cookies: () => Promise<MockBrowserCookie[]>;
 	newPage: () => Promise<MockPlaywrightPage>;
+	newCDPSession: () => Promise<MockPlaywrightCdpSession>;
+	off: (event: "page", listener: (page: MockPlaywrightPage) => void) => void;
+	on: (event: "page", listener: (page: MockPlaywrightPage) => void) => void;
+	route: (pattern: string, handler: MockRouteHandler) => Promise<void>;
+	unroute: (pattern: string, handler: MockRouteHandler) => Promise<void>;
 	state: {
 		closeCalls: number;
 		cookies: MockBrowserCookie[];
 		newPageCalls: number;
 		pages: MockPlaywrightPage[];
+		routes: MockRouteRegistration[];
+		unrouteCalls: string[];
 	};
+};
+
+type MockPlaywrightCdpSession = {
+	detach: () => Promise<void>;
+	off: (event: string, listener: (params: unknown) => void) => void;
+	on: (event: string, listener: (params: unknown) => void) => void;
+	send: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>;
 };
 
 const browserState = {
 	browsers: [] as MockBrowserState[],
 	defaultContextCookies: [] as MockBrowserCookie[],
 	isolatedContextCookies: [] as MockBrowserCookie[][],
-	gotoFollowingRequests: [] as MockResourceDispatch[],
 	launchCalls: [] as LaunchCall[],
 	requireError: null as Error | null,
 };
@@ -333,7 +348,7 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 		},
 		async dispatchResourceRequest(dispatch) {
 			state.resourceRequests.push(dispatch);
-			const registration = state.routes.at(-1);
+			const registration = state.routes.at(-1) ?? context.state.routes.at(-1);
 			if (!registration) {
 				state.unhandledResourceRequests.push(dispatch);
 				return "unhandled";
@@ -401,9 +416,6 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 				resourceType: "document",
 				url,
 			});
-			for (const request of browserState.gotoFollowingRequests) {
-				await this.dispatchResourceRequest(request);
-			}
 		},
 		locator(selector) {
 			return {
@@ -458,7 +470,10 @@ function createMockBrowserContext(
 		cookies: cookies.map((cookie) => ({ ...cookie })),
 		newPageCalls: 0,
 		pages: [] as MockPlaywrightPage[],
+		routes: [] as MockRouteRegistration[],
+		unrouteCalls: [] as string[],
 	};
+	const pageListeners = new Set<(page: MockPlaywrightPage) => void>();
 	const context: MockBrowserContext = {
 		state: contextState,
 		close: async () => {
@@ -475,6 +490,38 @@ function createMockBrowserContext(
 			}
 			return page;
 		},
+		newCDPSession: async () => {
+			const listeners = new Map<string, Set<(params: unknown) => void>>();
+			return {
+				async detach() {},
+				off(event, listener) {
+					listeners.get(event)?.delete(listener);
+				},
+				on(event, listener) {
+					const eventListeners = listeners.get(event) ?? new Set();
+					eventListeners.add(listener);
+					listeners.set(event, eventListeners);
+				},
+				async send() {
+					return {};
+				},
+			};
+		},
+		off: (_event, listener) => {
+			pageListeners.delete(listener);
+		},
+		on: (_event, listener) => {
+			pageListeners.add(listener);
+		},
+		route: async (pattern, handler) => {
+			contextState.routes.push({ handler, pattern });
+		},
+		unroute: async (pattern, handler) => {
+			contextState.unrouteCalls.push(pattern);
+			contextState.routes = contextState.routes.filter(
+				(registration) => registration.pattern !== pattern || registration.handler !== handler,
+			);
+		},
 	};
 	return context;
 }
@@ -489,7 +536,9 @@ function createMockBrowserLauncher(options: { applyStealthOnPage?: () => boolean
 				connected: true,
 				closeCalls: 0,
 				contexts: [],
+				defaultContext,
 				newPageCalls: 0,
+				newContextOptions: [],
 				pages: [],
 				launchOptions,
 				browser: {
@@ -498,7 +547,8 @@ function createMockBrowserLauncher(options: { applyStealthOnPage?: () => boolean
 						state.connected = false;
 					},
 					isConnected: () => state.connected,
-					newContext: async () => {
+					newContext: async (contextOptions = {}) => {
+						state.newContextOptions.push(contextOptions);
 						const context = createMockBrowserContext(
 							browserState.isolatedContextCookies[state.contexts.length] ?? [],
 							options,
@@ -969,7 +1019,6 @@ describe("createBrowserClient", () => {
 		browserState.browsers.length = 0;
 		browserState.defaultContextCookies.length = 0;
 		browserState.isolatedContextCookies.length = 0;
-		browserState.gotoFollowingRequests.length = 0;
 		browserState.launchCalls.length = 0;
 		browserState.requireError = null;
 		stealthState.callCount = 0;
@@ -1233,7 +1282,8 @@ describe("createBrowserClient", () => {
 			},
 		]);
 		expect(rawPage?.state.resourceAborts).toEqual([]);
-		expect(rawPage?.state.unrouteCalls).toEqual(["**/*"]);
+		expect(rawPage?.state.unrouteCalls).toEqual([]);
+		expect(browserState.browsers[0]?.defaultContext.state.unrouteCalls).toEqual(["**/*"]);
 		expect(rawPage?.state.routes).toEqual([]);
 	});
 
@@ -1319,7 +1369,8 @@ describe("createBrowserClient", () => {
 				url: "https://example.test/after-error",
 			},
 		]);
-		expect(rawPage?.state.unrouteCalls).toEqual(["**/*"]);
+		expect(rawPage?.state.unrouteCalls).toEqual([]);
+		expect(browserState.browsers[0]?.defaultContext.state.unrouteCalls).toEqual(["**/*"]);
 		expect(rawPage?.state.routes).toEqual([]);
 	});
 
@@ -1573,60 +1624,6 @@ describe("createBrowserClient", () => {
 				},
 			},
 		]);
-	});
-
-	it("allows declared and AWS WAF requests while blocking redirect and subresource SSRF", async () => {
-		const pageUrl = "https://example.com/protected";
-		const allowedSubresource = "https://example.com/challenge-frame.js";
-		const awsWafEndpoint = "https://challenge-id.region.token.awswaf.com/challenge-response";
-		const blockedRedirect = "http://169.254.169.254/latest/meta-data/";
-		const blockedSubresource = "https://attacker.example/collect";
-		browserState.gotoFollowingRequests.push(
-			{ method: "GET", resourceType: "script", url: allowedSubresource },
-			{ method: "POST", resourceType: "fetch", url: awsWafEndpoint },
-			{ method: "GET", resourceType: "document", url: blockedRedirect },
-			{ method: "GET", resourceType: "image", url: blockedSubresource },
-		);
-		browserState.isolatedContextCookies.push([
-			{
-				name: "aws-waf-token",
-				value: "local-token",
-				domain: "example.com",
-				path: "/",
-				expires: 1_900_000_000,
-				httpOnly: true,
-				secure: true,
-				sameSite: "None",
-			},
-		]);
-		const { createBrowserResolverVendorAdapter } = await import(
-			"../runtime/resolver-vendors/browser.js"
-		);
-		const adapter = createBrowserResolverVendorAdapter({
-			allowedHosts: ["example.com"],
-			timeoutMs: 100,
-		});
-
-		await adapter.solve(
-			{ kind: "aws_waf", pageUrl },
-			{ proxyUrl: "http://proxy.test:8080", userAgent: "BoundBrowser/1.0" },
-			new AbortController().signal,
-		);
-
-		const rawPage = browserState.browsers[0]?.contexts[0]?.state.pages[0];
-		expect(rawPage?.state.resourceRequests).toEqual([
-			{ method: "GET", resourceType: "document", url: pageUrl },
-			{ method: "GET", resourceType: "script", url: allowedSubresource },
-			{ method: "POST", resourceType: "fetch", url: awsWafEndpoint },
-			{ method: "GET", resourceType: "document", url: blockedRedirect },
-			{ method: "GET", resourceType: "image", url: blockedSubresource },
-		]);
-		expect(rawPage?.state.resourceContinues).toEqual([pageUrl, allowedSubresource, awsWafEndpoint]);
-		expect(rawPage?.state.resourceAborts).toEqual([
-			{ errorCode: "blockedbyclient", url: blockedRedirect },
-			{ errorCode: "blockedbyclient", url: blockedSubresource },
-		]);
-		expect(rawPage?.state.unrouteCalls).toEqual(["**/*"]);
 	});
 
 	it("always passes a concrete args array when extraArgs is omitted", async () => {

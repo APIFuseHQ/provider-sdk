@@ -11,6 +11,22 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 11 (2026-08-19).** Revision 10's page route did not enforce its
+redirect claim: Playwright routing receives the initial navigation but not its
+redirect destinations. Local `withResourcePolicy` now authorizes every HTTP
+request-stage pause through a per-page CDP `Fetch` session, where Chromium has
+already resolved redirect `Location` values to the exact absolute URL it will
+dial. A context route remains as overlapping fail-closed enforcement,
+including for a popup's first request, and resolver contexts are created with
+service workers blocked. The preferred manual `route.fetch({ maxRedirects: 0 })`
+walker was rejected only after a real Bun/Playwright 1.55 run measured an
+intermediate `Set-Cookie` failure (`ERR_INVALID_URL` on the relative request
+path), which would break AWS WAF cookie minting. Real local-server Chromium
+tests now cover allowed and refused redirect chains, refused subresource
+redirects, popup first requests, service-worker blocking, and intermediate
+cookies. WebSocket handshakes remain outside this HTTP policy. Sections
+changed: Decision 3a, Verification, and When this might break.
+
 **Revision 10 (2026-08-19).** Opening the local Playwright path exposed two
 pre-existing assumptions that made it unsafe and non-functional. Authenticated
 proxy URL userinfo is now percent-decoded and passed to Playwright as separate
@@ -535,12 +551,35 @@ the credential-free server string is the only URL passed as `proxy.server`.
 Unauthenticated proxy URLs retain their existing pass-through behavior, and
 parse failures never include the supplied URL or userinfo in diagnostics.
 
-The local resolver page applies the provider host declaration to every network
-request through `BrowserPage.withResourcePolicy`, not only to the initial
-`pageUrl`. The route authorizes the exact `request.url` that Playwright is about
-to dial with `assertResolverHostAllowed`; allowed GET, HEAD, and POST requests
-continue, while unmatched methods or hosts use the policy's fail-closed block.
-This covers top-level navigation, each redirect hop, and subresources.
+The local resolver page applies the provider host declaration through
+`BrowserPage.withResourcePolicy`, not only to the initial `pageUrl`. A
+request-stage CDP `Fetch.requestPaused` handler authorizes the exact absolute
+`request.url` Chromium is about to dial with `assertResolverHostAllowed`;
+Chromium resolves every redirect `Location` against its response URL before
+that pause, so relative and absolute redirect targets are checked without an
+authorization/dial-string split. Allowed GET, HEAD, and POST requests continue,
+while unmatched methods or hosts use `Fetch.failRequest` with
+`BlockedByClient`. This covers top-level navigation, each redirect hop, and
+subresources while leaving native response status, headers, bodies, redirect
+semantics, and cookie processing intact.
+
+Each page receives its own CDP enforcement session. A context route is also
+installed for defense in depth; it blocks an unauthorized
+popup first request before the popup's CDP session can attach, and subsequent
+popup traffic uses that session. Resolver-created local contexts set
+`serviceWorkers: "block"`, removing service-worker-controlled requests from
+the resolver surface. WebSocket handshakes are not HTTP `Fetch` pauses and
+remain outside this policy; providers must not treat this decision as WebSocket
+egress authorization.
+
+The initially preferred public-API implementation manually followed
+`route.fetch({ maxRedirects: 0 })` responses. A real Bun/Playwright 1.55 probe
+failed when an intermediate redirect set a cookie: Playwright attempted to
+parse the relative request path (`/allowed-hop`) as an absolute response URL
+and threw `ERR_INVALID_URL`. Because AWS WAF depends on response cookies, this
+was a concrete correctness failure rather than a speculative concern. The CDP
+request-stage implementation was selected to retain Chromium's native response
+and cookie pipeline.
 
 One challenge-specific exception is required. A live Buyee run observed the
 initial challenge script on a tenant `token.awswaf.com` host, an exact
@@ -1095,10 +1134,12 @@ These must hold before `Status: accepted`:
   separately decoded username and password fields to Playwright; reverting the
   split makes the launch-layer regression test fail. Unauthenticated URLs remain
   unchanged and malformed userinfo is not exposed by the error.
-- Resolver browser interception continues the declared host and required AWS
-  WAF challenge infrastructure, but blocks both a redirect from an allowed first
-  hop to link-local metadata and an undeclared subresource. Reverting the scoped
-  resource policy makes this regression test fail.
+- A real Chromium test uses a `node:http` server bound to `127.0.0.1` on an
+  ephemeral port. It completes an allowed multi-hop chain and preserves an
+  intermediate cookie, but does not dial an undeclared navigation redirect or
+  subresource redirect target. The same test proves context routing blocks a
+  popup's first request and that the resolver context does not fetch a service
+  worker script. Reverting redirect-hop authorization makes this test fail.
 - The real Buyee AWS WAF challenge needs cross-host infrastructure: the measured
   SDK 307 and token GET/POST requests use HTTPS `*.awswaf.com`. With only the
   provider host and the explicit AWS infrastructure exception admitted, local
@@ -1109,6 +1150,10 @@ These must hold before `Status: accepted`:
 
 ## When this might break
 
+- A challenge moves required traffic to WebSockets. Resolver HTTP resource
+  policy does not currently authorize or block WebSocket handshakes.
+- Chromium changes the CDP `Fetch` request-stage contract or stops exposing an
+  absolute redirect destination before it is dialed.
 - A vendor moves a kind from proxyless to proxy-required, which would move that
   kind from the token family to the cookie family.
 - Cloudflare or AWS binds a token-family solution to network identity, which

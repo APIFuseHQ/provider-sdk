@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import type { Frame, LaunchOptions, Locator, Page, Request, Route } from "playwright";
+import type { CDPSession, Frame, LaunchOptions, Locator, Page, Request, Route } from "playwright";
 
 import { ProviderError } from "../errors.js";
 import type {
@@ -87,7 +87,7 @@ type CdpFrameTreeNode = {
 type CdpFetchFulfillParams = {
 	readonly requestId: string;
 	readonly responseCode: number;
-	readonly responseHeaders?: readonly {
+	readonly responseHeaders?: {
 		readonly name: string;
 		readonly value: string;
 	}[];
@@ -225,11 +225,89 @@ async function fulfillResourceRoute(
 	});
 }
 
+async function decideResourceRequest(
+	policy: BrowserResourcePolicy,
+	request: BrowserResourceRequest,
+): Promise<BrowserResourceDecision> {
+	for (const resourceRoute of policy.routes) {
+		if (matchesResourceRoute(resourceRoute.match, request)) {
+			return await resourceRoute.handle(request);
+		}
+	}
+
+	return { action: "block" };
+}
+
+async function abortResourceRoute(route: Route): Promise<void> {
+	await route.abort("blockedbyclient");
+}
+
+async function handleCdpResourceRequest(
+	session: CDPSession,
+	policy: BrowserResourcePolicy,
+	allowedMethods: ReadonlySet<BrowserResourceMethod>,
+	params: unknown,
+): Promise<void> {
+	const paused = toCdpResourceRequest(params);
+	const requestId = paused?.requestId ?? getCdpPausedRequestId(params);
+	if (!requestId) return;
+
+	try {
+		if (!paused || !allowedMethods.has(paused.request.method)) {
+			await session.send("Fetch.failRequest", { errorReason: "BlockedByClient", requestId });
+			return;
+		}
+
+		const decision = await decideResourceRequest(policy, paused.request);
+		switch (decision.action) {
+			case "continue":
+				await session.send("Fetch.continueRequest", { requestId });
+				return;
+			case "fulfill":
+				await session.send("Fetch.fulfillRequest", toCdpFulfillParams(requestId, decision));
+				return;
+			case "block":
+				await session.send("Fetch.failRequest", { errorReason: "BlockedByClient", requestId });
+				return;
+		}
+	} catch {
+		await session
+			.send("Fetch.failRequest", { errorReason: "BlockedByClient", requestId })
+			.catch(() => undefined);
+	}
+}
+
+function createResourcePolicyHandler(
+	policy: BrowserResourcePolicy,
+	allowedMethods: ReadonlySet<BrowserResourceMethod>,
+): (route: Route) => Promise<void> {
+	return async (route: Route): Promise<void> => {
+		const request = await toResourceRequest(route.request());
+		if (!request || !allowedMethods.has(request.method)) {
+			await abortResourceRoute(route);
+			return;
+		}
+
+		const decision = await decideResourceRequest(policy, request);
+		switch (decision.action) {
+			case "continue":
+				await route.continue();
+				return;
+			case "fulfill":
+				await fulfillResourceRoute(route, decision);
+				return;
+			case "block":
+				await abortResourceRoute(route);
+		}
+	};
+}
+
 export type BrowserClientOptions = BrowserOptions & {
 	allowedHosts?: string[];
 	cdpUrl?: string;
 	executablePath?: string;
 	extraArgs?: string[];
+	serviceWorkers?: "allow" | "block";
 };
 
 type SupportedBrowserClient = {
@@ -599,40 +677,61 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 
 	async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
 		const allowedMethods = new Set(policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS);
-		const handler = async (route: Route): Promise<void> => {
-			const request = await toResourceRequest(route.request());
-			if (!request || !allowedMethods.has(request.method)) {
-				await route.abort("blockedbyclient");
+		const handler = createResourcePolicyHandler(policy, allowedMethods);
+		const context = this.page.context();
+		const sessions = new Set<CDPSession>();
+		const pendingAttachments = new Set<Promise<void>>();
+		let active = true;
+		const attachPage = async (page: Page): Promise<void> => {
+			const session = await context.newCDPSession(page);
+			if (!active) {
+				await session.detach();
 				return;
 			}
 
-			for (const resourceRoute of policy.routes) {
-				if (!matchesResourceRoute(resourceRoute.match, request)) {
-					continue;
-				}
-
-				const decision = await resourceRoute.handle(request);
-				switch (decision.action) {
-					case "continue":
-						await route.continue();
-						return;
-					case "fulfill":
-						await fulfillResourceRoute(route, decision);
-						return;
-					case "block":
-						await route.abort("blockedbyclient");
-						return;
-				}
+			const onRequestPaused = (params: unknown) => {
+				void handleCdpResourceRequest(session, policy, allowedMethods, params);
+			};
+			session.on("Fetch.requestPaused", onRequestPaused);
+			try {
+				await session.send("Fetch.enable", {
+					patterns: [{ requestStage: "Request", urlPattern: "*" }],
+				});
+				sessions.add(session);
+			} catch (error) {
+				session.off("Fetch.requestPaused", onRequestPaused);
+				await session.detach().catch(() => undefined);
+				throw error;
 			}
-
-			await route.abort("blockedbyclient");
+		};
+		const onPage = (page: Page) => {
+			const attachment = attachPage(page)
+				.catch(async () => {
+					await page.close().catch(() => undefined);
+				})
+				.finally(() => pendingAttachments.delete(attachment));
+			pendingAttachments.add(attachment);
 		};
 
-		await this.page.route(RESOURCE_POLICY_ROUTE_PATTERN, handler);
+		await context.route(RESOURCE_POLICY_ROUTE_PATTERN, handler);
 		try {
-			return await run();
+			context.on("page", onPage);
+			try {
+				await attachPage(this.page);
+				return await run();
+			} finally {
+				context.off("page", onPage);
+			}
 		} finally {
-			await this.page.unroute(RESOURCE_POLICY_ROUTE_PATTERN, handler);
+			active = false;
+			await context.unroute(RESOURCE_POLICY_ROUTE_PATTERN, handler);
+			await Promise.allSettled(pendingAttachments);
+			await Promise.all(
+				[...sessions].map(async (session) => {
+					await session.send("Fetch.disable").catch(() => undefined);
+					await session.detach().catch(() => undefined);
+				}),
+			);
 		}
 	}
 }
@@ -669,7 +768,7 @@ class PlaywrightBrowserClient implements SupportedBrowserClient {
 
 	async withIsolatedContext<T>(handler: (page: BrowserPageContract) => Promise<T>): Promise<T> {
 		const browser = await this.ensureBrowser();
-		const context = await browser.newContext();
+		const context = await browser.newContext({ serviceWorkers: this.options.serviceWorkers });
 		const page = await context.newPage();
 		const browserPage = new PlaywrightBrowserPage(page);
 

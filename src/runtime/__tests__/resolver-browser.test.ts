@@ -5,6 +5,7 @@ import type {
 	BrowserClient,
 	BrowserCookie,
 	BrowserPage,
+	BrowserResourcePolicy,
 	ChallengeSolution,
 	ProviderCache,
 	ProviderChallengeKind,
@@ -124,6 +125,7 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 		contextCloseStarted: 0,
 		gotoUrls: [] as string[],
 		pageOperations: [] as string[],
+		resourcePolicies: [] as BrowserResourcePolicy[],
 	};
 	const page = {
 		async cookies() {
@@ -142,7 +144,8 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 			state.gotoUrls.push(url);
 			if (options.gotoError) throw options.gotoError;
 		},
-		async withResourcePolicy<T>(_policy: unknown, run: () => Promise<T>): Promise<T> {
+		async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
+			state.resourcePolicies.push(policy);
 			return await run();
 		},
 	} as unknown as BrowserPage;
@@ -361,9 +364,36 @@ describe("browser resolver vendor", () => {
 			allowedHosts: declaredHosts,
 			cdpUrl: "ws://cdp-pool.test",
 			requireCdpPool: true,
+			serviceWorkers: "block",
 		});
 		expect(clientOptions?.proxy).toBeUndefined();
 		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
+	});
+
+	it("admits only HTTPS AWS WAF infrastructure outside declared hosts", async () => {
+		const stub = createBrowserStub({
+			cookieJars: [[{ ...COOKIE_BASE, name: "aws-waf-token", value: "waf-token" }]],
+		});
+		const adapter = createAdapter(stub);
+
+		await adapter.solve(AWS_CHALLENGE, undefined, new AbortController().signal);
+
+		const policy = stub.state.resourcePolicies[0];
+		const route = policy?.routes[0];
+		if (!route) throw new Error("Browser resolver did not install its resource policy");
+		const request = (url: string) => ({ headers: {}, method: "GET", url }) as const;
+		expect(await route.handle(request("https://example.com/asset.js"))).toEqual({
+			action: "continue",
+		});
+		expect(await route.handle(request("https://tenant.token.awswaf.com/challenge"))).toEqual({
+			action: "continue",
+		});
+		expect(await route.handle(request("http://tenant.token.awswaf.com/challenge"))).toEqual({
+			action: "block",
+		});
+		expect(await route.handle(request("https://attacker.example/collect"))).toEqual({
+			action: "block",
+		});
 	});
 
 	it("declines a pooled solve with a proxy identity before acquiring a session", async () => {
