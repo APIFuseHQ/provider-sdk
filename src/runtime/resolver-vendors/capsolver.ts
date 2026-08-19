@@ -94,7 +94,13 @@ interface CapsolverCreateTaskResponse extends CapsolverResponseErrorFields {
 interface CapsolverPollResultResponse extends CapsolverResponseErrorFields {
 	readonly status: string | undefined;
 	readonly solution:
-		| { readonly token: string | undefined; readonly cookie: string | undefined }
+		| {
+					readonly token: string | undefined;
+					readonly cookie: string | undefined;
+					readonly gRecaptchaResponse: string | undefined;
+					readonly cookies: Readonly<Record<string, string>> | undefined;
+					readonly userAgent: string | undefined;
+				}
 		| undefined;
 }
 
@@ -237,14 +243,27 @@ function parseCreateTaskResponse(payload: JsonRecord): CapsolverCreateTaskRespon
 
 function parsePollResultResponse(payload: JsonRecord): CapsolverPollResultResponse {
 	const solution = isJsonRecord(payload.solution) ? payload.solution : undefined;
+	const cookies = solution && isJsonRecord(solution.cookies)
+		? Object.fromEntries(
+				Object.entries(solution.cookies).filter(
+					(entry): entry is [string, string] => typeof entry[1] === "string",
+				),
+			)
+		: undefined;
 	return {
 		...responseErrorFields(payload),
 		status: typeof payload.status === "string" ? payload.status : undefined,
-		solution: solution
+			solution: solution
 			? {
 					token: typeof solution.token === "string" ? solution.token : undefined,
 					cookie: typeof solution.cookie === "string" ? solution.cookie : undefined,
-				}
+					gRecaptchaResponse:
+						typeof solution.gRecaptchaResponse === "string"
+							? solution.gRecaptchaResponse
+							: undefined,
+					cookies,
+					userAgent: typeof solution.userAgent === "string" ? solution.userAgent : undefined,
+				  }
 			: undefined,
 	};
 }
@@ -441,33 +460,33 @@ export function createCapsolverResolverVendorAdapter(
 			if (!resolverVendorSupports(CAPSOLVER_VENDOR_ID, challenge.kind)) {
 				throw new TypeError(`Capsolver resolver does not support ${challenge.kind}`);
 			}
-			if (challenge.kind !== "turnstile" && challenge.kind !== "aws_waf") {
-				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "not_implemented", {
-					phase: "create_task",
-				});
-			}
-			const proxy =
-				challenge.kind === "aws_waf" && identity ? proxyForCapsolver(identity.proxyUrl) : undefined;
+			const proxy = identity ? proxyForCapsolver(identity.proxyUrl) : undefined;
 			if (challenge.kind === "aws_waf" && identity && !proxy) {
 				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "transport_failure", {
 					phase: "create_task",
 				});
 			}
+			if (challenge.kind === "cloudflare_interstitial" && !identity) {
+				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "missing_proxy_identity", {
+					phase: "create_task",
+				});
+			}
+			if (identity && !proxy) {
+				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "transport_failure", {
+					phase: "create_task",
+				});
+			}
+			const challengeFields = challenge as unknown as Record<string, unknown>;
 			const sensitiveValues = [
 				apiKey,
 				challenge.pageUrl,
-				...(challenge.kind === "turnstile"
-					? [
-							challenge.siteKey,
-							...(challenge.action !== undefined ? [challenge.action] : []),
-							...(challenge.cdata !== undefined ? [challenge.cdata] : []),
-						]
-					: [
-							...(challenge.siteKey !== undefined ? [challenge.siteKey] : []),
-							...(challenge.captchaScript !== undefined ? [challenge.captchaScript] : []),
-							...(challenge.context !== undefined ? [challenge.context] : []),
-							...(challenge.iv !== undefined ? [challenge.iv] : []),
-						]),
+				...(typeof challengeFields.siteKey === "string" ? [challengeFields.siteKey] : []),
+				...(typeof challengeFields.action === "string" ? [challengeFields.action] : []),
+				...(typeof challengeFields.cdata === "string" ? [challengeFields.cdata] : []),
+				...(typeof challengeFields.blockedHtml === "string" ? [challengeFields.blockedHtml] : []),
+				...(typeof challengeFields.captchaScript === "string" ? [challengeFields.captchaScript] : []),
+				...(typeof challengeFields.context === "string" ? [challengeFields.context] : []),
+				...(typeof challengeFields.iv === "string" ? [challengeFields.iv] : []),
 				...(proxy?.sensitive ?? []),
 			];
 
@@ -498,19 +517,56 @@ export function createCapsolverResolverVendorAdapter(
 										: {}),
 									...(proxy ? { proxy: proxy.value } : {}),
 								}
-							: {
-									type: "AntiTurnstileTaskProxyLess",
-									websiteURL: challenge.pageUrl,
-									websiteKey: challenge.siteKey,
-									...(challenge.action !== undefined || challenge.cdata !== undefined
-										? {
-												metadata: {
-													...(challenge.action !== undefined ? { action: challenge.action } : {}),
-													...(challenge.cdata !== undefined ? { cdata: challenge.cdata } : {}),
-												},
-											}
-										: {}),
-								};
+							: challenge.kind === "turnstile"
+								? {
+										type: "AntiTurnstileTaskProxyLess",
+										websiteURL: challenge.pageUrl,
+										websiteKey: challenge.siteKey,
+										...(challenge.action !== undefined || challenge.cdata !== undefined
+											? {
+													metadata: {
+														...(challenge.action !== undefined ? { action: challenge.action } : {}),
+														...(challenge.cdata !== undefined ? { cdata: challenge.cdata } : {}),
+													},
+												}
+											: {}),
+									}
+							: challenge.kind === "recaptcha_v2"
+								? {
+										type: proxy ? "ReCaptchaV2Task" : "ReCaptchaV2TaskProxyLess",
+										websiteURL: challenge.pageUrl,
+										websiteKey: challenge.siteKey,
+										...(proxy ? { proxy: proxy.value } : {}),
+									}
+							: challenge.kind === "recaptcha_v3"
+								? {
+										type: proxy ? "ReCaptchaV3Task" : "ReCaptchaV3TaskProxyLess",
+										websiteURL: challenge.pageUrl,
+										websiteKey: challenge.siteKey,
+										pageAction: challenge.action,
+										...(challenge.minScore !== undefined ? { minScore: challenge.minScore } : {}),
+										...(proxy ? { proxy: proxy.value } : {}),
+									}
+							: challenge.kind === "hcaptcha"
+								? {
+										type: proxy ? "HCaptchaTask" : "HCaptchaTaskProxyLess",
+										websiteURL: challenge.pageUrl,
+										websiteKey: challenge.siteKey,
+										...(proxy ? { proxy: proxy.value } : {}),
+									}
+							: challenge.kind === "cloudflare_interstitial"
+								? {
+										type: "AntiCloudflareTask",
+										websiteURL: challenge.pageUrl,
+										proxy: proxy?.value,
+										...(identity?.userAgent ? { userAgent: identity.userAgent } : {}),
+										...(challenge.kind === "cloudflare_interstitial" && challenge.blockedHtml !== undefined
+											? { html: challenge.blockedHtml }
+											: {}),
+									}
+								: (() => {
+										throw new TypeError(`Capsolver resolver does not support ${challenge.kind}`);
+									})();
 					const createResult = await postJson(
 						fetchImpl,
 						endpoint(baseUrl, "createTask"),
@@ -573,7 +629,24 @@ export function createCapsolverResolverVendorAdapter(
 						const solutionValue =
 							challenge.kind === "aws_waf"
 								? result.payload.solution?.cookie
-								: result.payload.solution?.token;
+								: result.payload.solution?.token ?? result.payload.solution?.gRecaptchaResponse;
+						if (challenge.kind === "cloudflare_interstitial") {
+							const cookies = result.payload.solution?.cookies;
+							const clearance = cookies?.cf_clearance ?? solutionValue;
+							if (!clearance?.trim()) {
+								throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "transport_failure", {
+									phase,
+								});
+							}
+							return {
+								form: "cookies" as const,
+								cookies: cookies && Object.keys(cookies).length > 0 ? cookies : { cf_clearance: clearance },
+								userAgent:
+									result.payload.solution?.userAgent ??
+									identity?.userAgent ??
+									getStealthProfile(DEFAULT_PROFILE).userAgent,
+							};
+						}
 						if (!solutionValue?.trim()) {
 							throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "transport_failure", {
 								phase,

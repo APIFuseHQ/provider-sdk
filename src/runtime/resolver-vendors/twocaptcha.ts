@@ -338,10 +338,14 @@ export function createTwoCaptchaResolverVendorAdapter(
 			if (!resolverVendorSupports(TWOCAPTCHA_VENDOR_ID, challenge.kind)) {
 				throw new TypeError(`2captcha resolver does not support ${challenge.kind}`);
 			}
-			if (challenge.kind !== "recaptcha_v2" && challenge.kind !== "aws_waf") {
-				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "not_implemented", {
-					phase: "create_task",
-				});
+			if (
+				challenge.kind !== "turnstile" &&
+				challenge.kind !== "recaptcha_v2" &&
+				challenge.kind !== "recaptcha_v3" &&
+				challenge.kind !== "hcaptcha" &&
+				challenge.kind !== "aws_waf"
+			) {
+				throw new TypeError(`2captcha resolver does not support ${challenge.kind}`);
 			}
 			if (
 				challenge.kind === "aws_waf" &&
@@ -351,6 +355,11 @@ export function createTwoCaptchaResolverVendorAdapter(
 					!challenge.iv?.trim())
 			) {
 				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "not_implemented", {
+					phase: "create_task",
+				});
+			}
+			if (challenge.kind === "recaptcha_v3" && challenge.minScore === undefined) {
+				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
 					phase: "create_task",
 				});
 			}
@@ -388,14 +397,41 @@ export function createTwoCaptchaResolverVendorAdapter(
 									...(identity ? { userAgent: identity.userAgent } : {}),
 									...(proxy ?? {}),
 								}
-							: {
-									type: proxy ? "RecaptchaV2Task" : "RecaptchaV2TaskProxyless",
+						: challenge.kind === "recaptcha_v2"
+							? {
+								type: proxy ? "RecaptchaV2Task" : "RecaptchaV2TaskProxyless",
 									websiteURL: challenge.pageUrl,
 									websiteKey: challenge.siteKey,
 									isInvisible: false,
 									...(identity ? { userAgent: identity.userAgent } : {}),
+								...(proxy ?? {}),
+							}
+						: challenge.kind === "recaptcha_v3"
+							? {
+									type: "RecaptchaV3TaskProxyless",
+									websiteURL: challenge.pageUrl,
+									websiteKey: challenge.siteKey,
+									minScore: challenge.minScore,
+									pageAction: challenge.action,
+									...(identity ? { userAgent: identity.userAgent } : {}),
+								}
+						: challenge.kind === "hcaptcha"
+							? {
+									type: proxy ? "HCaptchaTask" : "HCaptchaTaskProxyless",
+									websiteURL: challenge.pageUrl,
+									websiteKey: challenge.siteKey,
+									...(identity ? { userAgent: identity.userAgent } : {}),
 									...(proxy ?? {}),
-								};
+								}
+						: {
+								type: proxy ? "TurnstileTask" : "TurnstileTaskProxyless",
+								websiteURL: challenge.pageUrl,
+								websiteKey: challenge.siteKey,
+								...(challenge.action !== undefined ? { action: challenge.action } : {}),
+								...(challenge.cdata !== undefined ? { data: challenge.cdata } : {}),
+								...(identity ? { userAgent: identity.userAgent } : {}),
+								...(proxy ?? {}),
+							};
 					const createResult = await postJson(
 						fetchImpl,
 						endpoint(baseUrl, "createTask"),

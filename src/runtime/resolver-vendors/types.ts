@@ -8,15 +8,18 @@ import type { TraceRecorder } from "../trace.js";
 
 export const RESOLVER_VENDOR_CAPABILITIES = {
 	browser: ["aws_waf", "cloudflare_interstitial"],
+	// Every kind listed per vendor is implemented by that vendor's adapter; the
+	// per-adapter "agrees with every declared capability" tests iterate this
+	// table, so adding a kind here without an implementation fails the suite.
+	// 2captcha omits `cloudflare_interstitial`, `akamai_sec_cpt`, and
+	// `akamai_sensor`: their API offers no task type for them, so declaring them
+	// would route challenges to a vendor that can only refuse.
 	"2captcha": [
 		"turnstile",
 		"recaptcha_v2",
 		"recaptcha_v3",
 		"hcaptcha",
-		"cloudflare_interstitial",
 		"aws_waf",
-		"akamai_sec_cpt",
-		"akamai_sensor",
 	],
 	capsolver: [
 		"turnstile",

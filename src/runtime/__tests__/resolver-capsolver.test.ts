@@ -15,6 +15,7 @@ import {
 	type ResolverVendorAdapter,
 	ResolverVendorUnavailableError,
 } from "../resolver-vendors/types.js";
+import { RESOLVER_VENDOR_CAPABILITIES } from "../resolver-vendors/types.js";
 import { DEFAULT_PROFILE } from "../stealth.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
 
@@ -752,19 +753,82 @@ describe("Capsolver resolver vendor", () => {
 		expect(stub.calls).toHaveLength(0);
 	});
 
-	it("reports a declared non-Turnstile kind as not implemented", async () => {
-		const stub = createFetchStub([]);
-		const error = await capturedError(
-			createAdapter(stub).solve(RECAPTCHA_CHALLENGE, undefined, new AbortController().signal),
-		);
-
-		expect(error).toBeInstanceOf(ResolverVendorUnavailableError);
-		expect(error).toMatchObject({
-			vendor: "capsolver",
-			reason: "not_implemented",
-			phase: "create_task",
+	it.each([
+		{
+			challenge: RECAPTCHA_CHALLENGE,
+			task: { type: "ReCaptchaV2TaskProxyLess", websiteURL: RECAPTCHA_CHALLENGE.pageUrl, websiteKey: RECAPTCHA_CHALLENGE.siteKey },
+			solution: { token: "v2-token" },
+		},
+		{
+			challenge: { kind: "recaptcha_v3", siteKey: "v3-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "login", minScore: 0.7 } satisfies ProviderChallenge,
+			task: { type: "ReCaptchaV3TaskProxyLess", websiteURL: RECAPTCHA_CHALLENGE.pageUrl, websiteKey: "v3-key", pageAction: "login", minScore: 0.7 },
+			solution: { gRecaptchaResponse: "v3-token" },
+		},
+		{
+			challenge: { kind: "hcaptcha", siteKey: "h-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl } satisfies ProviderChallenge,
+			task: { type: "HCaptchaTaskProxyLess", websiteURL: RECAPTCHA_CHALLENGE.pageUrl, websiteKey: "h-key" },
+			solution: { token: "h-token" },
+		},
+	])("creates and maps $challenge.kind", async ({ challenge, task, solution }) => {
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: "task" }),
+			jsonResponse({ errorId: 0, status: "ready", solution }),
+		]);
+		await expect(createAdapter(stub).solve(challenge, undefined, new AbortController().signal)).resolves.toEqual({
+			form: "token",
+			token: Object.values(solution)[0],
 		});
+		expect((stub.calls[0]?.body.task as Record<string, unknown>)).toEqual(task);
+	});
+
+	it("uses CapSolver proxy task variants for reCAPTCHA and hCaptcha", async () => {
+		const cases = [
+			{ challenge: RECAPTCHA_CHALLENGE, type: "ReCaptchaV2Task" },
+			{ challenge: { kind: "recaptcha_v3", siteKey: "v3", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "a" } satisfies ProviderChallenge, type: "ReCaptchaV3Task" },
+			{ challenge: { kind: "hcaptcha", siteKey: "h", pageUrl: RECAPTCHA_CHALLENGE.pageUrl } satisfies ProviderChallenge, type: "HCaptchaTask" },
+		] as const;
+		for (const { challenge, type } of cases) {
+			const stub = createFetchStub([jsonResponse({ errorId: 0, taskId: "task" }), jsonResponse({ errorId: 0, status: "ready", solution: { token: "token" } })]);
+			await createAdapter(stub).solve(challenge, { proxyUrl: "http://u:p@proxy.example:8080", userAgent: "UA" }, new AbortController().signal);
+			expect(stub.calls[0]?.body.task).toMatchObject({ type, proxy: "http:proxy.example:8080:u:p" });
+		}
+	});
+
+	it("creates AntiCloudflareTask with required proxy and maps clearance cookies", async () => {
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: "cf-task" }),
+			jsonResponse({ errorId: 0, status: "ready", solution: { cookies: { cf_clearance: "clearance" }, userAgent: "solver-ua" } }),
+		]);
+		const challenge = { kind: "cloudflare_interstitial", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, blockedHtml: "<html>blocked</html>" } satisfies ProviderChallenge;
+		await expect(createAdapter(stub).solve(challenge, { proxyUrl: "http://u:p@proxy.example:8080", userAgent: "client-ua" }, new AbortController().signal)).resolves.toEqual({
+			form: "cookies", cookies: { cf_clearance: "clearance" }, userAgent: "solver-ua",
+		});
+		expect(stub.calls[0]?.body.task).toEqual({ type: "AntiCloudflareTask", websiteURL: challenge.pageUrl, proxy: "http:proxy.example:8080:u:p", userAgent: "client-ua", html: challenge.blockedHtml });
+	});
+
+	it("rejects Cloudflare interstitial without a proxy identity", async () => {
+		const stub = createFetchStub([]);
+		await expect(createAdapter(stub).solve({ kind: "cloudflare_interstitial", pageUrl: RECAPTCHA_CHALLENGE.pageUrl }, undefined, new AbortController().signal)).rejects.toMatchObject({ vendor: "capsolver", reason: "missing_proxy_identity", phase: "create_task" });
 		expect(stub.calls).toHaveLength(0);
+	});
+
+	it("agrees with every declared capability without a not_implemented result", async () => {
+		for (const kind of RESOLVER_VENDOR_CAPABILITIES.capsolver) {
+			const challenge =
+				kind === "cloudflare_interstitial"
+					? ({ kind, pageUrl: RECAPTCHA_CHALLENGE.pageUrl } satisfies ProviderChallenge)
+					: kind === "recaptcha_v3"
+						? ({ kind, siteKey: "key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "action" } satisfies ProviderChallenge)
+						: kind === "aws_waf"
+							? AWS_WAF_CHALLENGE
+							: ({ kind, siteKey: "key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl } satisfies ProviderChallenge);
+			const stub = createFetchStub([
+				jsonResponse({ errorId: 0, taskId: "agreement" }),
+				jsonResponse({ errorId: 0, status: "ready", solution: kind === "aws_waf" ? { cookie: "cookie" } : kind === "cloudflare_interstitial" ? { cookies: { cf_clearance: "cookie" } } : { token: "token" } }),
+			]);
+			const identity = kind === "cloudflare_interstitial" ? { proxyUrl: "http://u:p@proxy.example:8080", userAgent: "ua" } : undefined;
+			await expect(createAdapter(stub).solve(challenge, identity, new AbortController().signal)).resolves.toBeDefined();
+		}
 	});
 
 	it("reaches the registered Capsolver adapter when its env key is configured", async () => {

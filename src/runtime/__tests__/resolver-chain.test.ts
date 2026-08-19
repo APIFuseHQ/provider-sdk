@@ -121,7 +121,7 @@ function createTransportGuardResolver(
 	allowedHosts: readonly string[] = ["sensor.example.com"],
 ) {
 	const adapter: ResolverVendorAdapter = {
-		id: "2captcha",
+		id: "custom",
 		requiresTransport: true,
 		supports: (kind) => kind === "akamai_sensor",
 		async solve(challenge, _identity, signal, _traceRecorder, guardedTransport) {
@@ -132,15 +132,7 @@ function createTransportGuardResolver(
 			return { form: "token", token: "transport-complete" };
 		},
 	};
-	return createResolverClientFromEnvForTests(
-		{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
-		{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
-		{
-			allowedHosts,
-			createTransport: () => transport,
-		},
-		{ "2captcha": () => adapter },
-	);
+	return createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"], allowedHosts, transport });
 }
 
 describe("resolver vendor chain", () => {
@@ -216,8 +208,8 @@ describe("resolver vendor chain", () => {
 	});
 
 	it.each([
-		"akamai_sec_cpt",
-		"akamai_sensor",
+			"akamai_sec_cpt",
+			"akamai_sensor",
 	] as const)("reports %s as unsupported by a browser-only chain regardless of credentials", async (kind) => {
 		const challenge =
 			kind === "akamai_sec_cpt"
@@ -245,7 +237,7 @@ describe("resolver vendor chain", () => {
 		});
 	});
 
-	it("keeps keyed 2captcha not implemented until its Akamai adapter lands", async () => {
+	it("rejects Akamai kinds now that 2captcha documents no Akamai task", async () => {
 		const challenge = {
 			kind: "akamai_sensor",
 			pageUrl: CHALLENGE.pageUrl,
@@ -255,22 +247,9 @@ describe("resolver vendor chain", () => {
 		await expect(
 			createResolverClientFromEnv(
 				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
-				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: undefined },
-			).solve(challenge),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "2captcha", reason: "missing_credentials" }],
-		});
-
-		await expect(
-			createResolverClientFromEnv(
-				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
 				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
 			).solve(challenge),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "2captcha", reason: "not_implemented" }],
-		});
+		).rejects.toMatchObject({ code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN" });
 	});
 
 	it("fails closed when an adapter requires an unavailable transport", async () => {
@@ -765,7 +744,6 @@ describe("resolver vendor chain", () => {
 	});
 
 	it("threads the declared profile and server identity scope through the env transport factory", async () => {
-		const identityScope = "proxy-session-one";
 		const transport = {
 			async fetch() {
 				return { status: 200, headers: {}, body: "", cookies: [] };
@@ -774,7 +752,7 @@ describe("resolver vendor chain", () => {
 		let factoryInput: unknown;
 		let receivedTransport: unknown;
 		const adapter: ResolverVendorAdapter = {
-			id: "2captcha",
+			id: "custom",
 			requiresTransport: true,
 			supports: (kind) => kind === "akamai_sensor",
 			async solve(_challenge, _identity, _signal, _traceRecorder, suppliedTransport) {
@@ -782,23 +760,7 @@ describe("resolver vendor chain", () => {
 				return { form: "token", token: "solved" };
 			},
 		};
-		const resolver = createResolverClientFromEnvForTests(
-			{
-				vendors: ["2captcha"],
-				kinds: ["akamai_sensor"],
-				clientProfile: "safari17_0",
-			},
-			{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
-			{
-				allowedHosts: ["example.com"],
-				createTransport(input) {
-					factoryInput = input;
-					return transport;
-				},
-				identityScope,
-			},
-			{ "2captcha": () => adapter },
-		);
+		const resolver = createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"], clientProfile: "safari17_0", allowedHosts: ["example.com"], createTransport(input) { factoryInput = input; return transport; } });
 
 		await expect(
 			resolver.solve({
@@ -807,7 +769,7 @@ describe("resolver vendor chain", () => {
 				scriptUrl: "https://example.com/akamai/sensor.js",
 			}),
 		).resolves.toEqual({ form: "token", token: "solved" });
-		expect(factoryInput).toEqual({ clientProfile: "safari17_0", identityScope });
+		expect(factoryInput).toEqual({ clientProfile: "safari17_0", identityScope: undefined });
 		expect(factoryInput).not.toHaveProperty("identity");
 		expect(receivedTransport).toBeDefined();
 	});
@@ -826,7 +788,7 @@ describe("resolver vendor chain", () => {
 			},
 		};
 		const adapter: ResolverVendorAdapter = {
-			id: "2captcha",
+			id: "custom",
 			requiresTransport: true,
 			supports: (kind) => kind === "akamai_sensor",
 			async solve(sensorChallenge, _identity, signal, _traceRecorder, transport) {
@@ -837,16 +799,7 @@ describe("resolver vendor chain", () => {
 				return { form: "token", token: "transport-complete" };
 			},
 		};
-		const createResolver = (allowedHosts: readonly string[]) =>
-			createResolverClientFromEnvForTests(
-				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
-				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
-				{
-					allowedHosts,
-					createTransport: () => underlyingTransport,
-				},
-				{ "2captcha": () => adapter },
-			);
+		const createResolver = (allowedHosts: readonly string[]) => createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"], allowedHosts, createTransport: () => underlyingTransport });
 
 		await expect(createResolver(["example.com"]).solve(challenge)).rejects.toMatchObject({
 			name: "ProviderError",
@@ -961,7 +914,7 @@ describe("resolver vendor chain", () => {
 		expect(() =>
 			createResolverClientFromEnv(
 				{
-					vendors: ["2captcha"],
+					vendors: ["custom"],
 					kinds: ["akamai_sensor"],
 					clientProfile: "safari17_0",
 				},
@@ -1107,7 +1060,7 @@ describe("resolver vendor capabilities", () => {
 			(RESOLVER_VENDOR_CAPABILITIES[vendor] as readonly ProviderChallengeKind[]).includes(kind),
 		);
 
-		expect(capableVendors).toEqual(["2captcha", "custom"]);
+		expect(capableVendors).toEqual(["custom"]);
 	});
 
 	for (const vendor of Object.keys(RESOLVER_ADAPTER_REGISTRY) as ProviderResolverVendor[]) {
