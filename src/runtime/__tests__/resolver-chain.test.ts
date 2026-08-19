@@ -21,7 +21,11 @@ import {
 	RESOLVER_ADAPTER_REGISTRY,
 	swapResolverDefaultUserAgentForTests,
 } from "../resolver.js";
-import { swapBrowserResolverClientFactoryForTests } from "../resolver-vendors/browser.js";
+import {
+	createBrowserResolverVendorAdapter,
+	swapBrowserResolverClientFactoryForTests,
+} from "../resolver-vendors/browser.js";
+import { createTwoCaptchaResolverVendorAdapter } from "../resolver-vendors/twocaptcha.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
 	ResolverChallengeVerdictError,
@@ -470,6 +474,69 @@ describe("resolver vendor chain", () => {
 		} finally {
 			restoreClientFactory();
 		}
+	});
+
+	it("falls through missing 2captcha AWS WAF input to the real browser adapter", async () => {
+		let twoCaptchaFetchCalls = 0;
+		let browserGotoCalls = 0;
+		const twoCaptcha = createTwoCaptchaResolverVendorAdapter({
+			allowedHosts: ["example.com"],
+			apiKey: "chain-test-api-key",
+			fetchImpl: (async () => {
+				twoCaptchaFetchCalls += 1;
+				throw new Error("2captcha network must not be reached");
+			}) as typeof fetch,
+		});
+		const page = {
+			async cookies() {
+				return [
+					{
+						domain: ".example.com",
+						httpOnly: true,
+						name: "aws-waf-token",
+						path: "/",
+						sameSite: "None",
+						secure: true,
+						value: "browser-fallback-token",
+					},
+				];
+			},
+			async evaluate<T>() {
+				return "BrowserFallback/1.0" as T;
+			},
+			async goto() {
+				browserGotoCalls += 1;
+			},
+			async withResourcePolicy<T>(_policy: unknown, run: () => Promise<T>) {
+				return await run();
+			},
+		} as unknown as BrowserPage;
+		const browser = createBrowserResolverVendorAdapter({
+			allowedHosts: ["example.com"],
+			cdpUrl: "ws://cdp-pool.test",
+			createClient: () =>
+				({
+					engine: "playwright-stealth",
+					async close() {},
+					async withIsolatedContext<T>(handler: (isolatedPage: BrowserPage) => Promise<T>) {
+						return await handler(page);
+					},
+				}) as unknown as BrowserClient,
+			pollIntervalMs: 1,
+			timeoutMs: 100,
+		});
+		const resolver = createResolverClient({
+			adapters: [twoCaptcha, browser],
+			kinds: ["aws_waf"],
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({
+			form: "cookies",
+			cookies: { "aws-waf-token": "browser-fallback-token" },
+			userAgent: "BrowserFallback/1.0",
+		});
+		expect(twoCaptchaFetchCalls).toBe(0);
+		expect(browserGotoCalls).toBe(1);
 	});
 
 	it("keeps the CDP pool URL as browser adapter configuration", async () => {

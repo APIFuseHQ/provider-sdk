@@ -338,19 +338,23 @@ export function createTwoCaptchaResolverVendorAdapter(
 			if (!resolverVendorSupports(TWOCAPTCHA_VENDOR_ID, challenge.kind)) {
 				throw new TypeError(`2captcha resolver does not support ${challenge.kind}`);
 			}
-			if (
-				challenge.kind === "aws_waf" &&
-				(!challenge.siteKey?.trim() ||
-					!challenge.captchaScript?.trim() ||
-					!challenge.context?.trim() ||
-					!challenge.iv?.trim())
-			) {
-				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "not_implemented", {
-					phase: "create_task",
-				});
+			if (challenge.kind === "aws_waf") {
+				const missingFields = [
+					...(challenge.siteKey?.trim() ? [] : ["siteKey"]),
+					...(challenge.captchaScript?.trim() ? [] : ["captchaScript"]),
+					...(challenge.context?.trim() ? [] : ["context"]),
+					...(challenge.iv?.trim() ? [] : ["iv"]),
+				];
+				if (missingFields.length > 0) {
+					throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "missing_challenge_input", {
+						missingFields,
+						phase: "create_task",
+					});
+				}
 			}
 			if (challenge.kind === "recaptcha_v3" && challenge.minScore === undefined) {
-				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "missing_challenge_input", {
+					missingFields: ["minScore"],
 					phase: "create_task",
 				});
 			}
