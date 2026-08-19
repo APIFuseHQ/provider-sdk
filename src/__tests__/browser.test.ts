@@ -30,6 +30,7 @@ type MockRouteRegistration = {
 
 type MockResourceRequest = {
 	allHeaders: () => Promise<Record<string, string>>;
+	frame: () => { page: () => MockPlaywrightPage };
 	method: () => string;
 	postData: () => string | undefined;
 	resourceType: () => string;
@@ -336,7 +337,7 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 		waits: [] as Array<{ selector: string; timeout?: number }>,
 	};
 
-	return {
+	const page: MockPlaywrightPage = {
 		state,
 		async click(selector) {
 			state.clicks.push(selector);
@@ -361,6 +362,9 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 			const request = {
 				async allHeaders() {
 					return dispatch.headers ?? {};
+				},
+				frame() {
+					return { page: () => page };
 				},
 				method() {
 					return dispatch.method ?? "GET";
@@ -463,6 +467,7 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 			state.waits.push({ selector, timeout: options?.timeout });
 		},
 	};
+	return page;
 }
 
 function createMockBrowserContext(

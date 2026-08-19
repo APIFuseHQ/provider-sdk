@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
 	realBrowserAvailable,
 	realBrowserRequired,
-} from "../../__tests__/fixtures/real-browser-availability.js";
+} from "../../__tests__/fixtures/real-browser-wrapper-availability.js";
 
 const realBrowserTest = fileURLToPath(
 	new URL("../../__tests__/fixtures/resolver-browser-egress-real.ts", import.meta.url),
