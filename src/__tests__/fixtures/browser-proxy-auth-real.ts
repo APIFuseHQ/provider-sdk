@@ -4,6 +4,10 @@ import { connect, type Socket } from "node:net";
 import { describe, expect, it } from "bun:test";
 
 import { createBrowserClient } from "../../runtime/browser.js";
+import {
+	realBrowserAvailable,
+	realBrowserExecutablePath,
+} from "./real-browser-availability.js";
 
 const PROXY_USER = "test-user";
 const PROXY_PASSWORD = "test-pass";
@@ -110,12 +114,12 @@ async function startProxy(): Promise<{ close(): Promise<void>; url: string }> {
 	}
 }
 
-describe("authenticated proxy resource-policy interception", () => {
+describe.skipIf(!realBrowserAvailable)("authenticated proxy resource-policy interception", () => {
 	it("completes navigation through a local authenticating proxy", async () => {
 		const origin = await startOrigin();
 		const proxy = await startProxy();
 		const client = createBrowserClient({
-			executablePath: "/usr/local/bin/chromium",
+			executablePath: realBrowserExecutablePath,
 			extraArgs: ["--no-sandbox"],
 			headless: true,
 			proxy: proxy.url,
@@ -142,7 +146,7 @@ describe("authenticated proxy resource-policy interception", () => {
 		const origin = await startOrigin();
 		const proxy = await startProxy();
 		const client = createBrowserClient({
-			executablePath: "/usr/local/bin/chromium",
+			executablePath: realBrowserExecutablePath,
 			extraArgs: ["--no-sandbox"],
 			headless: true,
 			proxy: proxy.url.replace(PROXY_PASSWORD, "wrong-pass"),

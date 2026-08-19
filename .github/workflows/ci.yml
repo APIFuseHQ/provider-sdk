@@ -37,10 +37,39 @@ jobs:
           cache: "npm"
           cache-dependency-path: bun.lock
       - run: bun install --frozen-lockfile
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-chromium-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-playwright-chromium-
+      - name: Install Playwright Chromium
+        run: bunx playwright install chromium
       - run: bun run build
-      - run: bun test
+      - name: Run tests
+        run: |
+          set -o pipefail
+          bun test 2>&1 | tee "$RUNNER_TEMP/bun-test.log"
         env:
           APIFUSE__TEST__REDIS_URL: redis://127.0.0.1:6379
+      - name: Verify real browser tests ran
+        if: always()
+        run: |
+          set -euo pipefail
+          browser_path="$(bun -e 'import { chromium } from "playwright"; process.stdout.write(chromium.executablePath())')"
+          if [[ ! -x "$browser_path" ]]; then
+            echo "Playwright Chromium is missing at $browser_path"
+            exit 1
+          fi
+          for test_name in \
+            "completes navigation through a local authenticating proxy" \
+            "blocks an allowed navigation before dialing its undeclared redirect target"; do
+            if ! grep -F "(pass)" "$RUNNER_TEMP/bun-test.log" | grep -F "$test_name" >/dev/null; then
+              echo "Real-browser test did not execute: $test_name"
+              exit 1
+            fi
+          done
       - run: bun run check
       - run: bun run pack:check
       - run: bun run pack:smoke

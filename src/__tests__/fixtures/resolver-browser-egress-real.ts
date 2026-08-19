@@ -4,6 +4,10 @@ import { createServer, type Server } from "node:http";
 import type { BrowserClient } from "../../types.js";
 import { createBrowserClient } from "../../runtime/browser.js";
 import { createBrowserResolverVendorAdapter } from "../../runtime/resolver-vendors/browser.js";
+import {
+	realBrowserAvailable,
+	realBrowserExecutablePath,
+} from "./real-browser-availability.js";
 
 const requestCounts = new Map<string, number>();
 let origin = "";
@@ -111,7 +115,12 @@ beforeAll(async () => {
 	const address = server.address();
 	if (!address || typeof address === "string") throw new Error("Local redirect server has no port");
 	origin = `http://127.0.0.1:${address.port}`;
-	sharedClient = createBrowserClient({ headless: true, serviceWorkers: "block", stealth: false });
+	sharedClient = createBrowserClient({
+		executablePath: realBrowserExecutablePath,
+		headless: true,
+		serviceWorkers: "block",
+		stealth: false,
+	});
 });
 
 afterAll(async () => {
@@ -145,7 +154,7 @@ async function solve(pathname: string, timeoutMs = 10_000) {
 	);
 }
 
-describe("real resolver browser egress policy", () => {
+describe.skipIf(!realBrowserAvailable)("real resolver browser egress policy", () => {
 	it("blocks an allowed navigation before dialing its undeclared redirect target", async () => {
 		let error: unknown;
 		for (let attempt = 0; attempt < 3; attempt += 1) {
