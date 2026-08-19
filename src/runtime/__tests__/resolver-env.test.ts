@@ -9,7 +9,6 @@ import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemav
 import {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
-	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	createResolverClientFromEnv,
 	swapResolverAdapterFactoryForTests,
@@ -133,17 +132,17 @@ describe("resolver env availability", () => {
 		});
 	});
 
-	it("reports mixed-chain availability reasons in attempt order", async () => {
+	it("reports mixed-chain missing credentials in attempt order", async () => {
 		await expect(
 			createResolverClientFromEnv(
 				{ vendors: ["2captcha", "capsolver"], kinds: ["turnstile"] },
-				{ [APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-test" },
+				{},
 			).solve(turnstileChallenge),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
 			details: [
 				{ vendor: "2captcha", reason: "missing_credentials" },
-				{ vendor: "capsolver", reason: "not_implemented" },
+				{ vendor: "capsolver", reason: "missing_credentials" },
 			],
 		});
 	});
