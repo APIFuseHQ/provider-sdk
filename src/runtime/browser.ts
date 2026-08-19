@@ -109,7 +109,7 @@ function toResourceBody(body: BrowserResourceBody | undefined): Buffer | string 
 }
 
 function isResourceMethod(method: string): method is BrowserResourceMethod {
-	return method === "GET" || method === "HEAD";
+	return method === "GET" || method === "HEAD" || method === "POST";
 }
 
 async function toResourceRequest(request: Request): Promise<BrowserResourceRequest | null> {
@@ -299,7 +299,48 @@ function toLaunchOptions(options: BrowserClientOptions): LaunchOptions {
 		args: options.extraArgs ?? [],
 		executablePath: options.executablePath,
 		headless: options.headless ?? true,
-		proxy: options.proxy ? { server: options.proxy } : undefined,
+		proxy: toPlaywrightProxy(options.proxy),
+	};
+}
+
+function toPlaywrightProxy(proxy: string | undefined): LaunchOptions["proxy"] {
+	if (!proxy) return undefined;
+
+	const schemeEnd = proxy.indexOf("://");
+	const authorityStart = schemeEnd >= 0 ? schemeEnd + 3 : 0;
+	const remainder = proxy.slice(authorityStart);
+	const authorityEnd = remainder.search(/[/?#]/);
+	const authority = remainder.slice(0, authorityEnd >= 0 ? authorityEnd : undefined);
+	if (!authority.includes("@")) {
+		return { server: proxy };
+	}
+
+	let parsed: URL;
+	try {
+		parsed = new URL(proxy);
+	} catch {
+		throw new ProviderError("Browser proxy URL is invalid", {
+			code: "BROWSER_PROXY_INVALID",
+			fix: "Use a valid proxy URL.",
+		});
+	}
+
+	let username: string;
+	let password: string;
+	try {
+		username = decodeURIComponent(parsed.username);
+		password = decodeURIComponent(parsed.password);
+	} catch {
+		throw new ProviderError("Browser proxy credentials use invalid percent-encoding", {
+			code: "BROWSER_PROXY_INVALID",
+			fix: "Percent-encode the proxy username and password as URL userinfo.",
+		});
+	}
+
+	return {
+		server: `${parsed.protocol}//${parsed.host}`,
+		username,
+		password,
 	};
 }
 
@@ -572,6 +613,9 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 
 				const decision = await resourceRoute.handle(request);
 				switch (decision.action) {
+					case "continue":
+						await route.continue();
+						return;
 					case "fulfill":
 						await fulfillResourceRoute(route, decision);
 						return;
@@ -1375,6 +1419,11 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 
 				const decision = await resourceRoute.handle(parsed.request);
 				switch (decision.action) {
+					case "continue":
+						await this.pageClient.send("Fetch.continueRequest", {
+							requestId: parsed.requestId,
+						});
+						return;
 					case "fulfill":
 						await this.pageClient.send(
 							"Fetch.fulfillRequest",

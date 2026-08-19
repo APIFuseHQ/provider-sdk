@@ -18,6 +18,7 @@ import {
 
 const BROWSER_VENDOR_ID = "browser" as const;
 const DEFAULT_COOKIE_POLL_INTERVAL_MS = 100;
+const AWS_WAF_CHALLENGE_INFRASTRUCTURE_HOST_SUFFIX = ".awswaf.com";
 
 const SUCCESS_COOKIE_NAMES = {
 	aws_waf: "aws-waf-token",
@@ -216,31 +217,76 @@ function selectSuccessCookie(
 
 async function solveInPage(
 	page: BrowserPage,
+	challengeKind: SupportedBrowserChallengeKind,
 	pageUrl: string,
+	allowedHosts: readonly string[],
 	successCookieName: string,
 	pollIntervalMs: number,
 	signal: AbortSignal,
 ): Promise<Extract<ChallengeSolution, { readonly form: "cookies" }>> {
-	await raceWithAbort(() => page.goto(pageUrl), signal);
-
-	while (true) {
-		const cookies = await raceWithAbort(() => page.cookies(), signal);
-		const successCookie = selectSuccessCookie(cookies, successCookieName, pageUrl);
-		if (successCookie) {
+	return await page.withResourcePolicy(
+		{
+			allowedMethods: ["GET", "HEAD", "POST"],
+			routes: [
+				{
+					match: () => true,
+					handle: (request) => ({
+						action: isResolverBrowserRequestAllowed(request.url, challengeKind, allowedHosts)
+							? "continue"
+							: "block",
+					}),
+				},
+			],
+		},
+		async () => {
 			const userAgent = await raceWithAbort(
 				() => page.evaluate<string>("navigator.userAgent"),
 				signal,
 			);
-			return {
-				form: "cookies",
-				cookies: { [successCookieName]: successCookie.value },
-				userAgent,
-				...(successCookie.expires === undefined ? {} : { expires: successCookie.expires }),
-			};
-		}
+			await raceWithAbort(() => page.goto(pageUrl), signal);
 
-		await abortableDelay(pollIntervalMs, signal);
+			while (true) {
+				const cookies = await raceWithAbort(() => page.cookies(), signal);
+				const successCookie = selectSuccessCookie(cookies, successCookieName, pageUrl);
+				if (successCookie) {
+					return {
+						form: "cookies",
+						cookies: { [successCookieName]: successCookie.value },
+						userAgent,
+						...(successCookie.expires === undefined ? {} : { expires: successCookie.expires }),
+					};
+				}
+
+				await abortableDelay(pollIntervalMs, signal);
+			}
+		},
+	);
+}
+
+function isResolverBrowserRequestAllowed(
+	targetUrl: string,
+	challengeKind: SupportedBrowserChallengeKind,
+	allowedHosts: readonly string[],
+): boolean {
+	try {
+		assertResolverHostAllowed(targetUrl, allowedHosts);
+		return true;
+	} catch {
+		if (challengeKind !== "aws_waf") return false;
 	}
+
+	let target: URL;
+	try {
+		target = new URL(targetUrl);
+	} catch {
+		return false;
+	}
+	const hostname = normalizedResolverHostname(target.hostname);
+	return (
+		target.protocol === "https:" &&
+		hostname.length > AWS_WAF_CHALLENGE_INFRASTRUCTURE_HOST_SUFFIX.length &&
+		hostname.endsWith(AWS_WAF_CHALLENGE_INFRASTRUCTURE_HOST_SUFFIX)
+	);
 }
 
 const POOL_ALLOCATION_EXHAUSTED_CODES = new Set([
@@ -373,7 +419,9 @@ export function createBrowserResolverVendorAdapter(
 					handlerEntered = true;
 					return await solveInPage(
 						page,
+						challengeKind,
 						challenge.pageUrl,
+						options.allowedHosts,
 						SUCCESS_COOKIE_NAMES[challengeKind],
 						pollIntervalMs,
 						solveController.signal,

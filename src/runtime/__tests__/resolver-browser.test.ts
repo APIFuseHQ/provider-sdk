@@ -123,6 +123,7 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 		contextCloseCalls: 0,
 		contextCloseStarted: 0,
 		gotoUrls: [] as string[],
+		pageOperations: [] as string[],
 	};
 	const page = {
 		async cookies() {
@@ -133,11 +134,16 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 		},
 		async evaluate<T>(expression: string | (() => T)): Promise<T> {
 			void expression;
+			state.pageOperations.push("evaluate-user-agent");
 			return (options.userAgent ?? "StubBrowser/1.0") as T;
 		},
 		async goto(url: string) {
+			state.pageOperations.push("goto");
 			state.gotoUrls.push(url);
 			if (options.gotoError) throw options.gotoError;
+		},
+		async withResourcePolicy<T>(_policy: unknown, run: () => Promise<T>): Promise<T> {
+			return await run();
 		},
 	} as unknown as BrowserPage;
 	const client = {
@@ -239,6 +245,7 @@ describe("browser resolver vendor", () => {
 			),
 		).toEqual({ userAgent: "Measured Chromium" });
 		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
+		expect(stub.state.pageOperations).toEqual(["evaluate-user-agent", "goto"]);
 		expect(stub.state.contextCloseCalls).toBe(1);
 	});
 

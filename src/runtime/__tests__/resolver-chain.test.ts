@@ -444,6 +444,9 @@ describe("resolver vendor chain", () => {
 				return REQUIRED_PROXY_INTENT.userAgent as T;
 			},
 			async goto() {},
+			async withResourcePolicy<T>(_policy: unknown, run: () => Promise<T>) {
+				return await run();
+			},
 		} as unknown as BrowserPage;
 		const client = {
 			engine: "playwright-stealth",

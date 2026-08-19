@@ -1757,7 +1757,7 @@ export interface BrowserCookie {
 	readonly sameSite?: "Strict" | "Lax" | "None";
 }
 
-export type BrowserResourceMethod = "GET" | "HEAD";
+export type BrowserResourceMethod = "GET" | "HEAD" | "POST";
 
 export type BrowserResourceRequest = {
 	readonly url: string;
@@ -1769,6 +1769,9 @@ export type BrowserResourceRequest = {
 export type BrowserResourceBody = Buffer | Uint8Array | ArrayBuffer | string;
 
 export type BrowserResourceDecision =
+	| {
+			readonly action: "continue";
+		}
 	| {
 			readonly action: "fulfill";
 			readonly status?: number;

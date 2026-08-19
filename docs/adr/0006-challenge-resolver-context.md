@@ -11,6 +11,20 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 10 (2026-08-19).** Opening the local Playwright path exposed two
+pre-existing assumptions that made it unsafe and non-functional. Authenticated
+proxy URL userinfo is now percent-decoded and passed to Playwright as separate
+`username` and `password` fields; the `server` contains only scheme, host, and
+port. Resolver pages now run inside the existing fail-closed
+`withResourcePolicy` interception scope: each exact request URL, including
+redirect hops and subresources, is checked against provider `allowedHosts`
+before the request is continued. Live Buyee measurement also proved that AWS
+WAF challenge infrastructure is required outside the provider host, so
+HTTPS subdomains of the explicit internal `.awswaf.com` infrastructure suffix
+are admitted for `aws_waf` only; arbitrary third-party hosts remain blocked.
+The live policy-constrained solve minted `aws-waf-token` in 4.6 s. Sections
+changed: Decision 3a and Verification.
+
 **Revision 9 (2026-08-19).** Revision 8 admitted the browser adapter without a
 pool URL but represented the absent optional value as `""`. Because the adapter
 uses presence (`cdpUrl !== undefined`) to derive `BrowserClient.requireCdpPool`,
@@ -514,6 +528,36 @@ An omitted pool URL remains `undefined` through browser adapter construction.
 It must not be represented by an empty-string sentinel: the adapter derives
 `requireCdpPool` from whether the optional value is present, while independently
 using its truthiness in the solve-time identity gate.
+
+For a local launch, authenticated proxy URLs are split at the Playwright launch
+boundary. URL userinfo is percent-decoded into Playwright's credential fields;
+the credential-free server string is the only URL passed as `proxy.server`.
+Unauthenticated proxy URLs retain their existing pass-through behavior, and
+parse failures never include the supplied URL or userinfo in diagnostics.
+
+The local resolver page applies the provider host declaration to every network
+request through `BrowserPage.withResourcePolicy`, not only to the initial
+`pageUrl`. The route authorizes the exact `request.url` that Playwright is about
+to dial with `assertResolverHostAllowed`; allowed GET, HEAD, and POST requests
+continue, while unmatched methods or hosts use the policy's fail-closed block.
+This covers top-level navigation, each redirect hop, and subresources.
+
+One challenge-specific exception is required. A live Buyee run observed the
+initial challenge script on a tenant `token.awswaf.com` host, an exact
+`sdk.awswaf.com` request that returned a 307 to a second tenant token host, and
+GET/POST token traffic before the cookie appeared. A policy-constrained run
+that admitted only `buyee.jp` plus HTTPS subdomains of `.awswaf.com` solved in
+4.6 s while unrelated analytics, advertising, CDN, and translation hosts were
+blocked. The AWS suffix is therefore an explicit internal challenge-
+infrastructure constant applied only to `aws_waf`; it is not added to provider
+`allowedHosts` and is not a general wildcard facility.
+
+This change deliberately does not harden the spelling semantics of
+`normalizedResolverHostname`. That matcher still only trims, lowercases, and
+strips one trailing dot; legacy-numeric IP forms, IDNA equivalence, and
+delimiter-truncation spellings remain a known follow-up. Revision 10 only
+applies the existing matcher to every provider-host request and must not be read
+as resolving those representation limits.
 
 That last row is the important one and it is load-bearing: if AWS promotes a
 lane from `challenge` to `captcha` — a human puzzle — the browser cannot solve
@@ -1047,6 +1091,18 @@ These must hold before `Status: accepted`:
   the omitted URL remains `undefined` and produces `requireCdpPool: false`, while
   the adapter still reports `missing_credentials` when neither input is present.
   Solver-vendor API keys retain their existing availability gate.
+- An authenticated local proxy launch passes a credential-free server plus
+  separately decoded username and password fields to Playwright; reverting the
+  split makes the launch-layer regression test fail. Unauthenticated URLs remain
+  unchanged and malformed userinfo is not exposed by the error.
+- Resolver browser interception continues the declared host and required AWS
+  WAF challenge infrastructure, but blocks both a redirect from an allowed first
+  hop to link-local metadata and an undeclared subresource. Reverting the scoped
+  resource policy makes this regression test fail.
+- The real Buyee AWS WAF challenge needs cross-host infrastructure: the measured
+  SDK 307 and token GET/POST requests use HTTPS `*.awswaf.com`. With only the
+  provider host and the explicit AWS infrastructure exception admitted, local
+  Chromium still minted the cookie in 4.6 s.
 - A token-family provider never triggers proxy or user-agent binding.
 - Exhausting every vendor raises a typed error naming the attempted vendors and
   never returns a partial solution.
