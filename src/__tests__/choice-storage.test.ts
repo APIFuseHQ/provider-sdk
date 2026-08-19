@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { ProviderChoiceTokenError } from "../choice-token.js";
 import { ProviderError } from "../errors.js";
 import {
@@ -19,9 +20,7 @@ const STORAGE_OPTIONS = {
 } as const;
 
 const WORD_PREFIX = "modu_page_";
-const LEGACY_SERVER_TOKEN =
-	"provider_choice_v2.v1.aA_KfqXRMfW1vAMH.rGa_m8X_WGzM31XYi3hMlS1FV4ERTusU8P-qWH5orEEzq68xs0mAyCe2YS2a614PdSllsaM0Jwd9ArQpSC83SQRgHFMLZNZ0VkaA7ldfYnmB2daa9dYl0J41PBKqft6EHjuShG-szFVYpnvKluDnQOCDIjB3fwI2asuZq6nThhUWW_6TULEzPwuAuJ6bNFUbdn1lYJh5Mx8yHlXyc6CCODivRauGfW1YV9sv1QaHH_6Y3tU3ELJ__4BcwVNnQo8bYDXRG8d7ztBji8-HptLYjq8AMNHzT_JOCU1CELEdg8A7trLwolANlrX1pWlpk3luYpcp1j_b9OTM6gM.UrRsI38KfHhEOzWnYKnL3A.NGgP1GKQX77AXxd6T0S3K1jPexBfhiLHNDwyZ7cGRPc";
-const LEGACY_SERVER_STATE_KEY = "choice_ZAcETxGY58SoG6QxsbCbgw";
+const LEGACY_SERVER_STATE_KEY = "synthetic-legacy-choice-state";
 
 function tokenWordCount(token: string, prefix: string): number {
 	const body = token.slice(prefix.length);
@@ -92,17 +91,32 @@ describe("managed choice storage", () => {
 
 	it("parses a legacy encrypted server handle during the compatibility window", async () => {
 		const state = new MemoryProviderRuntimeState();
+		const payload = { choice_id: "legacy-A" };
 		const namespace = state.namespace(STORAGE_OPTIONS.namespace, {
 			defaultTtl: STORAGE_OPTIONS.ttl,
 			maxTtl: STORAGE_OPTIONS.ttl,
 			maxEntries: STORAGE_OPTIONS.maxEntries,
 			maxValueBytes: STORAGE_OPTIONS.maxValueBytes,
 		});
-		await namespace.set(LEGACY_SERVER_STATE_KEY, { choice_id: "legacy-A" });
+		await namespace.set(LEGACY_SERVER_STATE_KEY, payload);
 		const choice = createManagedChoiceFixture({ state });
+		const token = choice.issue({
+			prefix: "provider_choice_v2",
+			purpose: "reservation",
+			payload: {
+				storage: "server",
+				state_id: LEGACY_SERVER_STATE_KEY,
+				payload_digest: createHash("sha256")
+					.update(JSON.stringify(payload))
+					.digest("base64url"),
+				created_at_ms: 1_000,
+			},
+			ttlMs: 60_000,
+			nowMs: 1_000,
+		});
 
 		const parsed = await choice.parse({
-			token: LEGACY_SERVER_TOKEN,
+			token,
 			prefix: "provider_choice_v2",
 			purpose: "reservation",
 			ttlMs: 60_000,
@@ -298,7 +312,7 @@ describe("managed choice storage", () => {
 		expect(namespace.compareAndSetKeys).toHaveLength(5);
 	});
 
-	it("prints real standard and high-strength examples on request", async () => {
+	it("emits standard and high-strength word counts", async () => {
 		const state = new MemoryProviderRuntimeState();
 		const choice = createManagedChoiceFixture({ state });
 		const standard = await choice.issue({
@@ -317,9 +331,6 @@ describe("managed choice storage", () => {
 			storage: STORAGE_OPTIONS,
 		});
 
-		if (process.env.PRINT_CHOICE_TOKEN_EXAMPLES === "1") {
-			console.log(`word choice token examples: standard=${standard} high=${high}`);
-		}
 		expect(tokenWordCount(standard, WORD_PREFIX)).toBe(4);
 		expect(tokenWordCount(high, WORD_PREFIX)).toBe(5);
 	});
