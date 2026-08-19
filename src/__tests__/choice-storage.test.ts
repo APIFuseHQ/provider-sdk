@@ -43,6 +43,7 @@ function createManagedChoiceFixture(options?: {
 	readonly connectionId?: string;
 	readonly credentialValues?: Record<string, string>;
 	readonly state?: ProviderRuntimeState;
+	readonly wordIssuance?: string;
 	readonly onTelemetry?: (event: ProviderChoiceTelemetryEvent) => void;
 }) {
 	const credentialValues = options?.credentialValues ?? { userId: "u1" };
@@ -62,6 +63,12 @@ function createManagedChoiceFixture(options?: {
 		request,
 		credential,
 		state: options?.state,
+		env: {
+			get: (key: string) =>
+				key === "APIFUSE__PROVIDER_RUNTIME__CHOICE_WORD_ISSUANCE"
+					? (options?.wordIssuance ?? "word")
+					: undefined,
+		},
 		onTelemetry: options?.onTelemetry,
 	});
 }
@@ -106,9 +113,7 @@ describe("managed choice storage", () => {
 			payload: {
 				storage: "server",
 				state_id: LEGACY_SERVER_STATE_KEY,
-				payload_digest: createHash("sha256")
-					.update(JSON.stringify(payload))
-					.digest("base64url"),
+				payload_digest: createHash("sha256").update(JSON.stringify(payload)).digest("base64url"),
 				created_at_ms: 1_000,
 			},
 			ttlMs: 60_000,
@@ -125,6 +130,140 @@ describe("managed choice storage", () => {
 		});
 
 		expect(parsed).toEqual({ choice_id: "legacy-A" });
+	});
+
+	it("keeps server issuance in the beta.28 six-part legacy envelope when the gate is unset", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createTestProviderChoiceContext({
+			providerId: "provider-a",
+			state,
+			env: { get: () => undefined },
+		});
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "rollout-gate",
+			payload: { choice_id: "legacy-issued" },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+
+		expect(token.split(".")).toHaveLength(6);
+		expect(
+			await choice.parse({
+				token,
+				prefix: WORD_PREFIX,
+				purpose: "rollout-gate",
+				ttlMs: 60_000,
+				nowMs: 2_000,
+				storage: STORAGE_OPTIONS,
+			}),
+		).toEqual({ choice_id: "legacy-issued" });
+	});
+
+	it("uses word issuance only after the runtime gate is flipped", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({ state, wordIssuance: "word" });
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "rollout-gate-word",
+			payload: { choice_id: "word-issued" },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+
+		expect(token.split(".")).not.toHaveLength(6);
+		expect(tokenWordCount(token, WORD_PREFIX)).toBe(4);
+	});
+
+	it("keeps dual-read independent from the issuance gate", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const legacyChoice = createManagedChoiceFixture({ state, wordIssuance: "legacy" });
+		const wordChoice = createManagedChoiceFixture({ state, wordIssuance: "word" });
+		const legacyToken = await legacyChoice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "dual-read",
+			payload: { kind: "legacy" },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+		const wordToken = await wordChoice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "dual-read",
+			payload: { kind: "word" },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+
+		expect(
+			await wordChoice.parse({
+				token: legacyToken,
+				prefix: WORD_PREFIX,
+				purpose: "dual-read",
+				ttlMs: 60_000,
+				nowMs: 2_000,
+				storage: STORAGE_OPTIONS,
+			}),
+		).toEqual({ kind: "legacy" });
+		expect(
+			await legacyChoice.parse({
+				token: wordToken,
+				prefix: WORD_PREFIX,
+				purpose: "dual-read",
+				ttlMs: 60_000,
+				nowMs: 2_000,
+				storage: STORAGE_OPTIONS,
+			}),
+		).toEqual({ kind: "word" });
+	});
+
+	it("retains the documented unsupported explicit claim for newly issued legacy handles", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({ state, wordIssuance: "legacy" });
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "legacy-explicit",
+			payload: { kind: "legacy" },
+			ttlMs: 60_000,
+			storage: STORAGE_OPTIONS,
+		});
+		const claim = await choice.parse({
+			token,
+			prefix: WORD_PREFIX,
+			purpose: "legacy-explicit",
+			storage: STORAGE_OPTIONS,
+			consume: "explicit",
+		});
+
+		expect(claim.status).toBe("active");
+		if (claim.status !== "active") throw new Error("Expected an active legacy claim.");
+		expect(claim.payload).toEqual({ kind: "legacy" });
+		expect(await claim.consume()).toEqual({ status: "unsupported" });
+	});
+
+	it("fails closed for an unknown issuance gate value", async () => {
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({
+			state,
+			wordIssuance: "invalid",
+		});
+
+		try {
+			await choice.issue({
+				prefix: WORD_PREFIX,
+				purpose: "rollout-gate-invalid",
+				payload: { choice_id: "invalid" },
+				ttlMs: 60_000,
+				storage: STORAGE_OPTIONS,
+			});
+			throw new Error("Expected invalid issuance mode to reject.");
+		} catch (error) {
+			expect(error).toBeInstanceOf(ProviderError);
+			expect((error as ProviderError).code).toBe("CHOICE_WORD_ISSUANCE_INVALID");
+		}
 	});
 
 	it("round-trips a four-word server-stored choice", async () => {
@@ -234,7 +373,14 @@ describe("managed choice storage", () => {
 
 	it("does not require the envelope master secret for unbound word choices", async () => {
 		const state = new MemoryProviderRuntimeState();
-		const choice = createProviderChoiceContext({ providerId: "provider-a", state });
+		const choice = createProviderChoiceContext({
+			providerId: "provider-a",
+			state,
+			env: {
+				get: (key) =>
+					key === "APIFUSE__PROVIDER_RUNTIME__CHOICE_WORD_ISSUANCE" ? "word" : undefined,
+			},
+		});
 		const payload = { cursor: "no-envelope-secret" };
 
 		const token = await choice.issue({
@@ -497,10 +643,7 @@ describe("managed choice storage", () => {
 		expect(retry.replayKey).toBe(initialReplayKey);
 
 		const results = await Promise.all([beforeFailure.consume(), retry.consume()]);
-		expect(results.map((result) => result.status).sort()).toEqual([
-			"already-consumed",
-			"consumed",
-		]);
+		expect(results.map((result) => result.status).sort()).toEqual(["already-consumed", "consumed"]);
 	});
 
 	it("preserves the replay key after consume so provider results remain reachable", async () => {
