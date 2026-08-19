@@ -277,6 +277,54 @@ async function handleCdpResourceRequest(
 	}
 }
 
+function getCdpAuthRequiredRequestId(params: unknown): string | null {
+	if (!isRecord(params) || typeof params.requestId !== "string") {
+		return null;
+	}
+
+	return params.requestId;
+}
+
+function isCdpProxyAuthChallenge(params: unknown): boolean {
+	return (
+		isRecord(params) &&
+		isRecord(params.authChallenge) &&
+		params.authChallenge.source === "Proxy"
+	);
+}
+
+async function handleCdpAuthRequired(
+	session: CDPSession,
+	proxy: PlaywrightProxy & { username: string; password: string },
+	authAttempts: Set<string>,
+	params: unknown,
+): Promise<void> {
+	const requestId = getCdpAuthRequiredRequestId(params);
+	if (!requestId) return;
+
+	// Chromium can emit another challenge after rejected credentials. Cancel a
+	// retry so incorrect credentials fail promptly instead of looping forever.
+	const response =
+		isCdpProxyAuthChallenge(params) && !authAttempts.has(requestId)
+			? (() => {
+				authAttempts.add(requestId);
+				return {
+					authChallengeResponse: {
+						password: proxy.password,
+						response: "ProvideCredentials" as const,
+						username: proxy.username,
+					},
+					requestId,
+				};
+			})()
+			: {
+				authChallengeResponse: { response: "CancelAuth" as const },
+				requestId,
+			};
+
+	await session.send("Fetch.continueWithAuth", response).catch(() => undefined);
+}
+
 function createResourcePolicyHandler(
 	policy: BrowserResourcePolicy,
 	allowedMethods: ReadonlySet<BrowserResourceMethod>,
@@ -366,7 +414,10 @@ function formatExpression<T>(fn: string | (() => T)): string {
 	return `(${fn.toString()})()`;
 }
 
-function toLaunchOptions(options: BrowserClientOptions): LaunchOptions {
+function toLaunchOptions(
+	options: BrowserClientOptions,
+	proxy: LaunchOptions["proxy"],
+): LaunchOptions {
 	return {
 		// `extraArgs` is optional, but playwright-extra's stealth evasions mutate
 		// `options.args` unguarded (navigator.webdriver does
@@ -377,8 +428,16 @@ function toLaunchOptions(options: BrowserClientOptions): LaunchOptions {
 		args: options.extraArgs ?? [],
 		executablePath: options.executablePath,
 		headless: options.headless ?? true,
-		proxy: toPlaywrightProxy(options.proxy),
+		proxy,
 	};
+}
+
+type PlaywrightProxy = NonNullable<LaunchOptions["proxy"]>;
+
+function hasProxyCredentials(
+	proxy: LaunchOptions["proxy"] | undefined,
+): proxy is PlaywrightProxy & { username: string; password: string } {
+	return proxy?.username !== undefined && proxy.password !== undefined;
 }
 
 function toPlaywrightProxy(proxy: string | undefined): LaunchOptions["proxy"] {
@@ -612,7 +671,10 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 	readonly id = "main";
 	readonly pageId?: string;
 
-	constructor(private readonly page: Page) {}
+	constructor(
+		private readonly page: Page,
+		private readonly proxy: LaunchOptions["proxy"] = undefined,
+	) {}
 
 	async goto(url: string): Promise<void> {
 		await this.page.goto(url);
@@ -681,6 +743,7 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 		const context = this.page.context();
 		const sessions = new Set<CDPSession>();
 		const pendingAttachments = new Set<Promise<void>>();
+		const proxy = hasProxyCredentials(this.proxy) ? this.proxy : undefined;
 		let active = true;
 		const attachPage = async (page: Page): Promise<void> => {
 			const session = await context.newCDPSession(page);
@@ -692,14 +755,26 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 			const onRequestPaused = (params: unknown) => {
 				void handleCdpResourceRequest(session, policy, allowedMethods, params);
 			};
+			const authAttempts = new Set<string>();
+			const onAuthRequired = (params: unknown) => {
+				if (!proxy) return;
+				void handleCdpAuthRequired(session, proxy, authAttempts, params);
+			};
 			session.on("Fetch.requestPaused", onRequestPaused);
+			if (proxy) {
+				session.on("Fetch.authRequired", onAuthRequired);
+			}
 			try {
 				await session.send("Fetch.enable", {
+					...(proxy ? { handleAuthRequests: true } : {}),
 					patterns: [{ requestStage: "Request", urlPattern: "*" }],
 				});
 				sessions.add(session);
 			} catch (error) {
 				session.off("Fetch.requestPaused", onRequestPaused);
+				if (proxy) {
+					session.off("Fetch.authRequired", onAuthRequired);
+				}
 				await session.detach().catch(() => undefined);
 				throw error;
 			}
@@ -738,6 +813,8 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 
 class PlaywrightBrowserClient implements SupportedBrowserClient {
 	private browser: import("playwright").Browser | null = null;
+	private parsedProxy: LaunchOptions["proxy"] | undefined;
+	private proxyParsed = false;
 	readonly engine = "playwright-stealth" satisfies BrowserEngine;
 
 	constructor(private readonly options: BrowserClientOptions = {}) {}
@@ -748,7 +825,11 @@ class PlaywrightBrowserClient implements SupportedBrowserClient {
 		}
 
 		const chromium = await loadChromiumLauncher(this.options);
-		this.browser = await chromium.launch(toLaunchOptions(this.options));
+		if (!this.proxyParsed) {
+			this.parsedProxy = toPlaywrightProxy(this.options.proxy);
+			this.proxyParsed = true;
+		}
+		this.browser = await chromium.launch(toLaunchOptions(this.options, this.parsedProxy));
 		return this.browser;
 	}
 
@@ -756,7 +837,7 @@ class PlaywrightBrowserClient implements SupportedBrowserClient {
 		const browser = await this.ensureBrowser();
 		const page = await browser.newPage();
 
-		return new PlaywrightBrowserPage(page);
+		return new PlaywrightBrowserPage(page, this.parsedProxy);
 	}
 
 	async rawPage(): Promise<BrowserPageContract> {
@@ -770,7 +851,7 @@ class PlaywrightBrowserClient implements SupportedBrowserClient {
 		const browser = await this.ensureBrowser();
 		const context = await browser.newContext({ serviceWorkers: this.options.serviceWorkers });
 		const page = await context.newPage();
-		const browserPage = new PlaywrightBrowserPage(page);
+		const browserPage = new PlaywrightBrowserPage(page, this.parsedProxy);
 
 		try {
 			return await handler(browserPage);

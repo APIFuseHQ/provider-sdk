@@ -11,6 +11,24 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 12 (2026-08-19).** Resource-policy interception and authenticated
+proxy handling are coupled at the CDP `Fetch` boundary. On local Playwright
+pages, when the already-parsed proxy configuration contains credentials,
+`Fetch.enable` sets `handleAuthRequests: true` and the session answers a
+`Fetch.authRequired` event with `ProvideCredentials` only when Chromium marks
+the challenge source as `Proxy`. Origin/server challenges receive `CancelAuth`,
+so proxy credentials are never disclosed to an origin and an unanswered
+challenge cannot stall the page. A repeated proxy challenge is also canceled;
+this bounds retries and makes incorrect credentials fail promptly. The
+credential-bearing configuration is threaded from the client launch options
+into every local Playwright page that installs the policy; it is not reparsed
+and is never logged. CDP-pool pages have no local proxy credential authority,
+so their existing `Fetch.enable` call remains unchanged and does not enable an
+auth path it cannot answer. This solves HTTP proxy authentication only; it does
+not expand policy coverage to WebSocket handshakes or provide credentials for
+non-proxy authentication schemes. Sections changed: Decision 3a, Verification,
+and When this might break.
+
 **Revision 11 (2026-08-19).** Revision 10's page route did not enforce its
 redirect claim: Playwright routing receives the initial navigation but not its
 redirect destinations. Local `withResourcePolicy` now authorizes every HTTP
@@ -1134,6 +1152,13 @@ These must hold before `Status: accepted`:
   separately decoded username and password fields to Playwright; reverting the
   split makes the launch-layer regression test fail. Unauthenticated URLs remain
   unchanged and malformed userinfo is not exposed by the error.
+- When that authenticated local launch also installs the CDP resource policy,
+  `Fetch.enable` handles proxy challenges and supplies the parsed credentials;
+  a server/origin challenge is canceled without receiving them, and repeated
+  proxy challenges are canceled to bound wrong-credential retries. A local
+  `node:http` proxy test covers successful navigation and prompt failure for
+  wrong credentials. The CDP-pool policy path deliberately keeps
+  `handleAuthRequests` disabled because it has no local proxy credentials.
 - A real Chromium test uses a `node:http` server bound to `127.0.0.1` on an
   ephemeral port. It completes an allowed multi-hop chain and preserves an
   intermediate cookie, but does not dial an undeclared navigation redirect or
@@ -1162,6 +1187,11 @@ These must hold before `Status: accepted`:
   conditional to mandatory.
 - A challenge kind appears whose solution is neither a form token nor cookies,
   for example a required header or a signed request body.
+- A proxy uses an authentication mechanism Chromium does not expose as a
+  `Fetch.authRequired` proxy challenge, or requires an authentication flow
+  beyond one credential attempt. The resolver cancels non-proxy challenges and
+  repeated attempts by design; it does not forward proxy credentials to origin
+  servers or retry indefinitely.
 
 ## References
 

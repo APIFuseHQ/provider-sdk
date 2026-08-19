@@ -210,6 +210,7 @@ type MockBrowserContext = {
 };
 
 type MockPlaywrightCdpSession = {
+	dispatchAuthRequired: (params: unknown) => void;
 	detach: () => Promise<void>;
 	off: (event: string, listener: (params: unknown) => void) => void;
 	on: (event: string, listener: (params: unknown) => void) => void;
@@ -221,6 +222,9 @@ const browserState = {
 	defaultContextCookies: [] as MockBrowserCookie[],
 	isolatedContextCookies: [] as MockBrowserCookie[][],
 	launchCalls: [] as LaunchCall[],
+	localCdpAuthResponses: [] as Array<Record<string, unknown>>,
+	localCdpSessions: [] as MockPlaywrightCdpSession[],
+	localFetchEnableParams: [] as Array<Record<string, unknown>>,
 	requireError: null as Error | null,
 };
 
@@ -492,7 +496,10 @@ function createMockBrowserContext(
 		},
 		newCDPSession: async () => {
 			const listeners = new Map<string, Set<(params: unknown) => void>>();
-			return {
+			const session: MockPlaywrightCdpSession = {
+				dispatchAuthRequired(params) {
+					for (const listener of listeners.get("Fetch.authRequired") ?? []) listener(params);
+				},
 				async detach() {},
 				off(event, listener) {
 					listeners.get(event)?.delete(listener);
@@ -502,10 +509,14 @@ function createMockBrowserContext(
 					eventListeners.add(listener);
 					listeners.set(event, eventListeners);
 				},
-				async send() {
+				async send(method, params = {}) {
+					if (method === "Fetch.enable") browserState.localFetchEnableParams.push(params);
+					if (method === "Fetch.continueWithAuth") browserState.localCdpAuthResponses.push(params);
 					return {};
 				},
 			};
+			browserState.localCdpSessions.push(session);
+			return session;
 		},
 		off: (_event, listener) => {
 			pageListeners.delete(listener);
@@ -1020,6 +1031,9 @@ describe("createBrowserClient", () => {
 		browserState.defaultContextCookies.length = 0;
 		browserState.isolatedContextCookies.length = 0;
 		browserState.launchCalls.length = 0;
+		browserState.localCdpAuthResponses.length = 0;
+		browserState.localCdpSessions.length = 0;
+		browserState.localFetchEnableParams.length = 0;
 		browserState.requireError = null;
 		stealthState.callCount = 0;
 		stealthState.pluginFactoryCalls = 0;
@@ -1282,9 +1296,66 @@ describe("createBrowserClient", () => {
 			},
 		]);
 		expect(rawPage?.state.resourceAborts).toEqual([]);
+		expect(browserState.localFetchEnableParams).toEqual([
+			{ patterns: [{ requestStage: "Request", urlPattern: "*" }] },
+		]);
 		expect(rawPage?.state.unrouteCalls).toEqual([]);
 		expect(browserState.browsers[0]?.defaultContext.state.unrouteCalls).toEqual(["**/*"]);
 		expect(rawPage?.state.routes).toEqual([]);
+	});
+
+	it("answers proxy Fetch auth challenges without leaking credentials to origin challenges", async () => {
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient({
+			proxy: "http://proxy-user:proxy-pass@proxy.test:8080",
+			stealth: false,
+		});
+		const page = await client.newPage();
+
+		await page.withResourcePolicy({ routes: [] }, async () => {
+			expect(browserState.localFetchEnableParams).toEqual([
+				{
+					handleAuthRequests: true,
+					patterns: [{ requestStage: "Request", urlPattern: "*" }],
+				},
+			]);
+			const session = browserState.localCdpSessions[0];
+			if (!session) throw new Error("local CDP session was not created");
+			session.dispatchAuthRequired({
+				authChallenge: { source: "Proxy" },
+				requestId: "proxy-request",
+			});
+			session.dispatchAuthRequired({
+				authChallenge: { source: "Server" },
+				requestId: "origin-request",
+			});
+			session.dispatchAuthRequired({
+				authChallenge: { source: "Proxy" },
+				requestId: "proxy-request",
+			});
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+
+		await page.close();
+		await client.close();
+		expect(browserState.localCdpAuthResponses).toEqual([
+			{
+				authChallengeResponse: {
+					password: "proxy-pass",
+					response: "ProvideCredentials",
+					username: "proxy-user",
+				},
+				requestId: "proxy-request",
+			},
+			{
+				authChallengeResponse: { response: "CancelAuth" },
+				requestId: "origin-request",
+			},
+			{
+				authChallengeResponse: { response: "CancelAuth" },
+				requestId: "proxy-request",
+			},
+		]);
 	});
 
 	it("blocks unhandled resource requests by default", async () => {
