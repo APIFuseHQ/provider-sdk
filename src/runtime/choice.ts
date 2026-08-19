@@ -390,11 +390,14 @@ type ChoiceParseTelemetryBase = {
 	readonly consumeMode: ProviderChoiceConsumeMode;
 };
 
-function observeChoiceParse<T>(result: T | Promise<T>, base: ChoiceParseTelemetryBase): T | Promise<T> {
+function observeChoiceParse<T>(
+	result: T | Promise<T>,
+	base: ChoiceParseTelemetryBase,
+): T | Promise<T> {
 	if (result instanceof Promise) {
 		return result.then(
 			(value) => {
-				emitChoiceParseSuccess(base);
+				emitChoiceParseSuccess(base, value);
 				return value;
 			},
 			(error: unknown) => {
@@ -403,11 +406,12 @@ function observeChoiceParse<T>(result: T | Promise<T>, base: ChoiceParseTelemetr
 			},
 		);
 	}
-	emitChoiceParseSuccess(base);
+	emitChoiceParseSuccess(base, result);
 	return result;
 }
 
-function emitChoiceParseSuccess(base: ChoiceParseTelemetryBase): void {
+function emitChoiceParseSuccess(base: ChoiceParseTelemetryBase, result: unknown): void {
+	const replay = isConsumedChoiceReplay(result);
 	emitChoiceTelemetry(base.onTelemetry, {
 		providerId: base.providerId,
 		purpose: base.purpose,
@@ -415,9 +419,20 @@ function emitChoiceParseSuccess(base: ChoiceParseTelemetryBase): void {
 		format: base.format,
 		outcome: "success",
 		consumeMode: base.consumeMode,
-		consumed: base.format === "word" && base.consumeMode === "on-parse",
-		replay: false,
+		consumed: replay || (base.format === "word" && base.consumeMode === "on-parse"),
+		replay,
 	});
+}
+
+function isConsumedChoiceReplay(value: unknown): boolean {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		"status" in value &&
+		value.status === "consumed" &&
+		"replayKey" in value &&
+		typeof value.replayKey === "string"
+	);
 }
 
 function emitChoiceParseFailure(
@@ -669,8 +684,13 @@ async function parseWordServerStoredChoice(options: {
 		throw error;
 	}
 
-	if (record.status !== "active") throw wordChoiceNotFoundError();
 	const consumeMode = options.parseOptions.consume ?? "never";
+	if (record.status === "consumed") {
+		if (consumeMode === "explicit") {
+			return { status: "consumed", replayKey: record.replay_key };
+		}
+		throw wordChoiceNotFoundError();
+	}
 	if (consumeMode === "never") return record.payload;
 	if (consumeMode === "explicit") {
 		return {

@@ -475,6 +475,7 @@ describe("managed choice storage", () => {
 
 		const beforeFailure = await choice.parse(parseOptions);
 		expect(beforeFailure.status).toBe("active");
+		if (beforeFailure.status !== "active") throw new Error("Expected an active choice claim.");
 		expect(beforeFailure.payload).toEqual({ choice_id: "retryable" });
 		expect(typeof beforeFailure.replayKey).toBe("string");
 		const initialReplayKey = beforeFailure.replayKey;
@@ -489,6 +490,54 @@ describe("managed choice storage", () => {
 			"already-consumed",
 			"consumed",
 		]);
+	});
+
+	it("preserves the replay key after consume so provider results remain reachable", async () => {
+		const events: ProviderChoiceTelemetryEvent[] = [];
+		const state = new MemoryProviderRuntimeState();
+		const choice = createManagedChoiceFixture({
+			state,
+			onTelemetry: (event) => events.push(event),
+		});
+		const token = await choice.issue({
+			prefix: WORD_PREFIX,
+			purpose: "reservation-confirm",
+			payload: { choice_id: "confirmable" },
+			ttlMs: 60_000,
+			nowMs: 1_000,
+			storage: STORAGE_OPTIONS,
+		});
+		const parseOptions = {
+			token,
+			prefix: WORD_PREFIX,
+			purpose: "reservation-confirm",
+			ttlMs: 60_000,
+			nowMs: 2_000,
+			storage: STORAGE_OPTIONS,
+			consume: "explicit",
+		} as const;
+		const providerResults = new Map<string, { readonly reservationId: string }>();
+
+		const initial = await choice.parse(parseOptions);
+		if (initial.status !== "active") throw new Error("Expected an active choice claim.");
+		providerResults.set(initial.replayKey, { reservationId: "created-record" });
+		expect(await initial.consume()).toEqual({ status: "consumed" });
+
+		const replay = await choice.parse(parseOptions);
+		expect(replay.status).toBe("consumed");
+		if (replay.status !== "consumed") throw new Error("Expected a consumed choice replay.");
+		expect(replay.replayKey).toBe(initial.replayKey);
+		expect("payload" in replay).toBe(false);
+		expect(providerResults.get(replay.replayKey)).toEqual({
+			reservationId: "created-record",
+		});
+		expect(events.at(-1)).toMatchObject({
+			operation: "parse",
+			format: "word",
+			outcome: "success",
+			consumed: true,
+			replay: true,
+		});
 	});
 
 	it("emits allowlisted choice telemetry without token, payload, or credential values", async () => {

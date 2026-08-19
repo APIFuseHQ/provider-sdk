@@ -1899,14 +1899,20 @@ export type ProviderChoiceConsumeResult =
 	| { readonly status: "already-consumed" }
 	| { readonly status: "unsupported" };
 
-export interface ProviderChoiceExplicitParseResult {
-	readonly status: "active";
-	readonly payload: Record<string, unknown>;
-	/** Stable, opaque key for provider-owned idempotency records. */
-	readonly replayKey: string;
-	/** Atomically claims a word token. Legacy managed tokens report unsupported. */
-	consume(): Promise<ProviderChoiceConsumeResult>;
-}
+export type ProviderChoiceExplicitParseResult =
+	| {
+			readonly status: "active";
+			readonly payload: Record<string, unknown>;
+			/** Stable, opaque key for provider-owned idempotency records. */
+			readonly replayKey: string;
+			/** Atomically claims a word token. Legacy managed tokens report unsupported. */
+			consume(): Promise<ProviderChoiceConsumeResult>;
+	  }
+	| {
+			readonly status: "consumed";
+			/** Use this key to read the provider-owned result before returning an error. */
+			readonly replayKey: string;
+	  };
 
 export type ProviderChoiceStorageOptions =
 	| {
