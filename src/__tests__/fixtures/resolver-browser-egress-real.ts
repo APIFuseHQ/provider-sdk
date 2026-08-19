@@ -4,13 +4,12 @@ import { createServer, type Server } from "node:http";
 import type { BrowserClient } from "../../types.js";
 import { createBrowserClient } from "../../runtime/browser.js";
 import { createBrowserResolverVendorAdapter } from "../../runtime/resolver-vendors/browser.js";
-import {
-	realBrowserAvailable,
-	realBrowserExecutablePath,
-} from "./real-browser-availability.js";
+import { realBrowserAvailable, realBrowserExecutablePath } from "./real-browser-availability.js";
 
 const requestCounts = new Map<string, number>();
 let origin = "";
+let evilOrigin = "";
+let evilServer: Server;
 let server: Server;
 let sharedClient: ReturnType<typeof createBrowserClient>;
 
@@ -50,12 +49,6 @@ beforeAll(async () => {
 				response.writeHead(302, { location: `${targetOrigin}/metadata` });
 				response.end();
 				return;
-			case "/metadata":
-				response.writeHead(200, { "content-type": "text/html" });
-				response.end(
-					"<script>document.cookie='aws-waf-token=unauthorized-navigation; Path=/'</script>",
-				);
-				return;
 			case "/subresource-page":
 				response.writeHead(200, { "content-type": "text/html" });
 				response.end(`<!doctype html><script>
@@ -77,15 +70,21 @@ beforeAll(async () => {
 			case "/popup-page":
 				response.writeHead(200, { "content-type": "text/html" });
 				response.end(`<!doctype html><script>
-					window.open("${targetOrigin}/popup-target");
+					const popup = window.open("/popup-start");
+					fetch("/popup-opened?opened=" + Boolean(popup));
 					setTimeout(() => {
 						document.cookie = "aws-waf-token=popup-finished; Path=/";
-					}, 100);
+					}, 300);
 				</script>`);
 				return;
-			case "/popup-target":
-				response.writeHead(200, { "content-type": "text/html" });
-				response.end("<!doctype html><title>unauthorized popup</title>");
+			case "/popup-start":
+				response.writeHead(302, { location: `${evilOrigin}/metadata` });
+				response.end();
+				return;
+			case "/popup-opened":
+			case "/sensitive-rendered":
+				response.writeHead(204);
+				response.end();
 				return;
 			case "/service-worker-page":
 				response.writeHead(200, { "content-type": "text/html" });
@@ -115,6 +114,32 @@ beforeAll(async () => {
 	const address = server.address();
 	if (!address || typeof address === "string") throw new Error("Local redirect server has no port");
 	origin = `http://127.0.0.1:${address.port}`;
+	evilServer = createServer((request, response) => {
+		const requestUrl = new URL(request.url ?? "/", evilOrigin);
+		countRequest(requestUrl.pathname);
+		if (requestUrl.pathname !== "/metadata") {
+			response.writeHead(404);
+			response.end("not found");
+			return;
+		}
+
+		response.writeHead(200, { "content-type": "text/html" });
+		response.end(`<!doctype html><title>SENSITIVE</title><script>
+			fetch("${origin}/sensitive-rendered");
+		</script>`);
+	});
+	await new Promise<void>((resolve, reject) => {
+		evilServer.once("error", reject);
+		evilServer.listen(0, "127.0.0.1", () => {
+			evilServer.off("error", reject);
+			resolve();
+		});
+	});
+	const evilAddress = evilServer.address();
+	if (!evilAddress || typeof evilAddress === "string") {
+		throw new Error("Local evil server has no port");
+	}
+	evilOrigin = `http://localhost:${evilAddress.port}`;
 	sharedClient = createBrowserClient({
 		executablePath: realBrowserExecutablePath,
 		headless: true,
@@ -127,6 +152,9 @@ afterAll(async () => {
 	await sharedClient.close();
 	await new Promise<void>((resolve, reject) => {
 		server.close((error) => (error ? reject(error) : resolve()));
+	});
+	await new Promise<void>((resolve, reject) => {
+		evilServer.close((error) => (error ? reject(error) : resolve()));
 	});
 });
 
@@ -186,11 +214,24 @@ describe.skipIf(!realBrowserAvailable)("real resolver browser egress policy", ()
 		expect(requestCount("/metadata-image")).toBe(0);
 	});
 
-	it("applies the context policy to a popup's first request", async () => {
+	it("blocks an allowed popup before dialing its undeclared redirect target", async () => {
+		requestCounts.delete("/popup-start");
+		requestCounts.delete("/metadata");
+		requestCounts.delete("/popup-opened");
+		requestCounts.delete("/sensitive-rendered");
 		const result = await solve("/popup-page");
+		const popupOpened = requestCount("/popup-opened") === 1;
+		const evilDialed = requestCount("/metadata") > 0;
+		const sensitiveRendered = requestCount("/sensitive-rendered") > 0;
+		console.log(`popup pages open   : ${popupOpened ? 2 : 1}`);
+		console.log(`evil server dialed : ${evilDialed} ["/metadata"]`);
+		console.log(`SENSITIVE rendered : ${sensitiveRendered}`);
 
 		expect(result.cookies).toEqual({ "aws-waf-token": "popup-finished" });
-		expect(requestCount("/popup-target")).toBe(0);
+		expect(popupOpened).toBe(true);
+		expect(requestCount("/popup-start")).toBe(0);
+		expect(requestCount("/metadata")).toBe(0);
+		expect(requestCount("/sensitive-rendered")).toBe(0);
 	});
 
 	it("blocks service workers in the resolver context", async () => {

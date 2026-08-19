@@ -739,8 +739,24 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 
 	async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
 		const allowedMethods = new Set(policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS);
-		const handler = createResourcePolicyHandler(policy, allowedMethods);
+		const policyHandler = createResourcePolicyHandler(policy, allowedMethods);
 		const context = this.page.context();
+		const handler = async (route: Route): Promise<void> => {
+			try {
+				// Context routing sees a popup's first request before the late `page`
+				// event. Fail every secondary page closed so no redirect can escape
+				// the per-page CDP interception while that session is being attached.
+				if (route.request().frame().page() !== this.page) {
+					await abortResourceRoute(route);
+					return;
+				}
+			} catch {
+				await abortResourceRoute(route);
+				return;
+			}
+
+			await policyHandler(route);
+		};
 		const sessions = new Set<CDPSession>();
 		const pendingAttachments = new Set<Promise<void>>();
 		const proxy = hasProxyCredentials(this.proxy) ? this.proxy : undefined;
