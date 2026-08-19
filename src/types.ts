@@ -1757,7 +1757,7 @@ export interface BrowserCookie {
 	readonly sameSite?: "Strict" | "Lax" | "None";
 }
 
-export type BrowserResourceMethod = "GET" | "HEAD";
+export type BrowserResourceMethod = "GET" | "HEAD" | "POST";
 
 export type BrowserResourceRequest = {
 	readonly url: string;
@@ -1769,6 +1769,9 @@ export type BrowserResourceRequest = {
 export type BrowserResourceBody = Buffer | Uint8Array | ArrayBuffer | string;
 
 export type BrowserResourceDecision =
+	| {
+			readonly action: "continue";
+		}
 	| {
 			readonly action: "fulfill";
 			readonly status?: number;
@@ -1793,6 +1796,12 @@ export type BrowserResourceRoute = {
 export type BrowserResourcePolicy = {
 	readonly defaultAction?: "block";
 	readonly allowedMethods?: readonly BrowserResourceMethod[];
+	/**
+	 * Appends an enforcing CSP header to every renderable document response
+	 * while the policy is active. Existing CSP headers are retained, so this
+	 * can only further restrict the document.
+	 */
+	readonly documentContentSecurityPolicy?: string;
 	readonly routes: readonly BrowserResourceRoute[];
 };
 

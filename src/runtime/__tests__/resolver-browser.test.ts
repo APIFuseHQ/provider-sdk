@@ -5,6 +5,7 @@ import type {
 	BrowserClient,
 	BrowserCookie,
 	BrowserPage,
+	BrowserResourcePolicy,
 	ChallengeSolution,
 	ProviderCache,
 	ProviderChallengeKind,
@@ -123,6 +124,8 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 		contextCloseCalls: 0,
 		contextCloseStarted: 0,
 		gotoUrls: [] as string[],
+		pageOperations: [] as string[],
+		resourcePolicies: [] as BrowserResourcePolicy[],
 	};
 	const page = {
 		async cookies() {
@@ -133,11 +136,17 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 		},
 		async evaluate<T>(expression: string | (() => T)): Promise<T> {
 			void expression;
+			state.pageOperations.push("evaluate-user-agent");
 			return (options.userAgent ?? "StubBrowser/1.0") as T;
 		},
 		async goto(url: string) {
+			state.pageOperations.push("goto");
 			state.gotoUrls.push(url);
 			if (options.gotoError) throw options.gotoError;
+		},
+		async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
+			state.resourcePolicies.push(policy);
+			return await run();
 		},
 	} as unknown as BrowserPage;
 	const client = {
@@ -239,6 +248,7 @@ describe("browser resolver vendor", () => {
 			),
 		).toEqual({ userAgent: "Measured Chromium" });
 		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
+		expect(stub.state.pageOperations).toEqual(["evaluate-user-agent", "goto"]);
 		expect(stub.state.contextCloseCalls).toBe(1);
 	});
 
@@ -354,9 +364,39 @@ describe("browser resolver vendor", () => {
 			allowedHosts: declaredHosts,
 			cdpUrl: "ws://cdp-pool.test",
 			requireCdpPool: true,
+			serviceWorkers: "block",
 		});
 		expect(clientOptions?.proxy).toBeUndefined();
 		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
+	});
+
+	it("admits only HTTPS AWS WAF infrastructure outside declared hosts", async () => {
+		const stub = createBrowserStub({
+			cookieJars: [[{ ...COOKIE_BASE, name: "aws-waf-token", value: "waf-token" }]],
+		});
+		const adapter = createAdapter(stub);
+
+		await adapter.solve(AWS_CHALLENGE, undefined, new AbortController().signal);
+
+		const policy = stub.state.resourcePolicies[0];
+		const route = policy?.routes[0];
+		if (!route) throw new Error("Browser resolver did not install its resource policy");
+		expect(policy.documentContentSecurityPolicy).toBe(
+			"connect-src http: https:; worker-src 'none'",
+		);
+		const request = (url: string) => ({ headers: {}, method: "GET", url }) as const;
+		expect(await route.handle(request("https://example.com/asset.js"))).toEqual({
+			action: "continue",
+		});
+		expect(await route.handle(request("https://tenant.token.awswaf.com/challenge"))).toEqual({
+			action: "continue",
+		});
+		expect(await route.handle(request("http://tenant.token.awswaf.com/challenge"))).toEqual({
+			action: "block",
+		});
+		expect(await route.handle(request("https://attacker.example/collect"))).toEqual({
+			action: "block",
+		});
 	});
 
 	it("declines a pooled solve with a proxy identity before acquiring a session", async () => {

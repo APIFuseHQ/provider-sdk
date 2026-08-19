@@ -71,7 +71,7 @@ type ResolvedResolverVendor =
 	| {
 			readonly vendor: Exclude<ProviderResolverVendor, "custom">;
 			readonly available: true;
-			readonly configuration: string;
+			readonly configuration: string | undefined;
 	  }
 	| {
 			readonly vendor: ProviderResolverVendor;
@@ -184,13 +184,16 @@ export type ResolverInstrumentationMetadata = {
 };
 
 export type ResolverAdapterFactory = (
-	configuration: string,
+	configuration: string | undefined,
 	timeoutMs: number,
 	allowedHosts: readonly string[],
 ) => ResolverVendorAdapter;
 
 const resolverAdapterRegistry: Partial<Record<ProviderResolverVendor, ResolverAdapterFactory>> = {
 	"2captcha"(configuration, timeoutMs, allowedHosts) {
+		if (configuration === undefined) {
+			throw new Error("2captcha resolver adapter factory requires an API key");
+		}
 		return createTwoCaptchaResolverVendorAdapter({
 			allowedHosts,
 			apiKey: configuration,
@@ -966,15 +969,20 @@ function resolveVendorAvailability(
 			reason: "missing_transport",
 		};
 	}
+	if (vendor === "browser") {
+		return {
+			vendor,
+			available: true,
+			configuration: normalizedEnvValue(env, APIFUSE__CDP_POOL__URL),
+		};
+	}
 
 	const envKey =
 		vendor === "2captcha"
 			? APIFUSE__RESOLVER__2CAPTCHA__API_KEY
 			: vendor === "capsolver"
 				? APIFUSE__RESOLVER__CAPSOLVER__API_KEY
-				: vendor === "capmonster"
-					? APIFUSE__RESOLVER__CAPMONSTER__API_KEY
-					: APIFUSE__CDP_POOL__URL;
+				: APIFUSE__RESOLVER__CAPMONSTER__API_KEY;
 
 	const configuration = normalizedEnvValue(env, envKey);
 	return configuration

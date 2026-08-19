@@ -3,21 +3,25 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { VALID_PROVIDER_CHALLENGE_KINDS } from "../../define.js";
 import { createProviderCache } from "../cache.js";
 import type {
+	BrowserClient,
+	BrowserPage,
 	ChallengeSolution,
 	ProviderChallenge,
 	ProviderChallengeKind,
 	ProviderResolverVendor,
 } from "../../types.js";
+import { type BrowserClientOptions, createBrowserClient } from "../browser.js";
 import {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
-	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
 	createResolverClient,
 	createResolverClientFromEnv,
 	createResolverClientFromEnvForTests,
 	RESOLVER_ADAPTER_REGISTRY,
 	swapResolverDefaultUserAgentForTests,
 } from "../resolver.js";
+import { swapBrowserResolverClientFactoryForTests } from "../resolver-vendors/browser.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
 	ResolverChallengeVerdictError,
@@ -117,7 +121,7 @@ function createTransportGuardResolver(
 	allowedHosts: readonly string[] = ["sensor.example.com"],
 ) {
 	const adapter: ResolverVendorAdapter = {
-		id: "2captcha",
+		id: "custom",
 		requiresTransport: true,
 		supports: (kind) => kind === "akamai_sensor",
 		async solve(challenge, _identity, signal, _traceRecorder, guardedTransport) {
@@ -128,15 +132,7 @@ function createTransportGuardResolver(
 			return { form: "token", token: "transport-complete" };
 		},
 	};
-	return createResolverClientFromEnvForTests(
-		{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
-		{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
-		{
-			allowedHosts,
-			createTransport: () => transport,
-		},
-		{ "2captcha": () => adapter },
-	);
+	return createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"], allowedHosts, transport });
 }
 
 describe("resolver vendor chain", () => {
@@ -212,8 +208,8 @@ describe("resolver vendor chain", () => {
 	});
 
 	it.each([
-		"akamai_sec_cpt",
-		"akamai_sensor",
+			"akamai_sec_cpt",
+			"akamai_sensor",
 	] as const)("reports %s as unsupported by a browser-only chain regardless of credentials", async (kind) => {
 		const challenge =
 			kind === "akamai_sec_cpt"
@@ -241,7 +237,7 @@ describe("resolver vendor chain", () => {
 		});
 	});
 
-	it("keeps keyed 2captcha not implemented until its Akamai adapter lands", async () => {
+	it("rejects Akamai kinds now that 2captcha documents no Akamai task", async () => {
 		const challenge = {
 			kind: "akamai_sensor",
 			pageUrl: CHALLENGE.pageUrl,
@@ -251,22 +247,9 @@ describe("resolver vendor chain", () => {
 		await expect(
 			createResolverClientFromEnv(
 				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
-				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: undefined },
-			).solve(challenge),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "2captcha", reason: "missing_credentials" }],
-		});
-
-		await expect(
-			createResolverClientFromEnv(
-				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
 				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
 			).solve(challenge),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "2captcha", reason: "not_implemented" }],
-		});
+		).rejects.toMatchObject({ code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN" });
 	});
 
 	it("fails closed when an adapter requires an unavailable transport", async () => {
@@ -384,6 +367,182 @@ describe("resolver vendor chain", () => {
 				userAgent: REQUIRED_PROXY_INTENT.userAgent,
 			},
 		]);
+	});
+
+	it("reaches the browser adapter through a proxy identity without a CDP pool URL", async () => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-local-browser-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-local-browser-password";
+		const browser = createStubAdapter({ id: "browser" });
+		let configuration: string | undefined;
+		const resolver = createResolverClientFromEnvForTests(
+			{ vendors: ["browser"], kinds: ["aws_waf"] },
+			{},
+			{ proxyIntent: REQUIRED_PROXY_INTENT },
+			{
+				browser(resolvedConfiguration) {
+					configuration = resolvedConfiguration;
+					return browser.adapter;
+				},
+			},
+		);
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({
+			form: "token",
+			token: "browser",
+		});
+		expect(configuration).toBeUndefined();
+		expect(browser.state.solveCalls).toBe(1);
+		expect(browser.state.identities).toEqual([
+			{
+				proxyUrl: expect.stringMatching(/^http:\/\/resolver-local-browser-account-/),
+				userAgent: REQUIRED_PROXY_INTENT.userAgent,
+			},
+		]);
+	});
+
+	it("runs the real browser adapter locally when CDP pool configuration is absent", async () => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-real-browser-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-real-browser-password";
+		let clientOptions: BrowserClientOptions | undefined;
+		let browserClientConfigurationError: unknown;
+		const page = {
+			async cookies() {
+				return [
+					{
+						domain: ".example.com",
+						httpOnly: true,
+						name: "aws-waf-token",
+						path: "/",
+						sameSite: "None",
+						secure: true,
+						value: "local-browser-token",
+					},
+				];
+			},
+			async evaluate<T>() {
+				return REQUIRED_PROXY_INTENT.userAgent as T;
+			},
+			async goto() {},
+			async withResourcePolicy<T>(_policy: unknown, run: () => Promise<T>) {
+				return await run();
+			},
+		} as unknown as BrowserPage;
+		const client = {
+			engine: "playwright-stealth",
+			async close() {},
+			async withIsolatedContext<T>(handler: (isolatedPage: BrowserPage) => Promise<T>) {
+				return await handler(page);
+			},
+		} as unknown as BrowserClient;
+		const restoreClientFactory = swapBrowserResolverClientFactoryForTests((options) => {
+			clientOptions = options;
+			try {
+				createBrowserClient(options);
+			} catch (error) {
+				browserClientConfigurationError = error;
+			}
+			return client;
+		});
+
+		try {
+			const resolver = createResolverClientFromEnv(
+				{ vendors: ["browser"], kinds: ["aws_waf"] },
+				{},
+				{
+					allowedHosts: ["example.com"],
+					proxyIntent: REQUIRED_PROXY_INTENT,
+				},
+			);
+
+			await expect(resolver.solve(CHALLENGE)).resolves.toEqual({
+				form: "cookies",
+				cookies: { "aws-waf-token": "local-browser-token" },
+				userAgent: REQUIRED_PROXY_INTENT.userAgent,
+			});
+			if (browserClientConfigurationError !== undefined) {
+				throw browserClientConfigurationError;
+			}
+			expect(clientOptions).toMatchObject({
+				cdpUrl: "",
+				proxy: expect.stringMatching(/^http:\/\/resolver-real-browser-account-/),
+				requireCdpPool: false,
+			});
+		} finally {
+			restoreClientFactory();
+		}
+	});
+
+	it("keeps the CDP pool URL as browser adapter configuration", async () => {
+		const browser = createStubAdapter({ id: "browser" });
+		let configuration: string | undefined;
+		const resolver = createResolverClientFromEnvForTests(
+			{ vendors: ["browser"], kinds: ["aws_waf"] },
+			{ [APIFUSE__CDP_POOL__URL]: "  ws://cdp-pool.test  " },
+			{},
+			{
+				browser(resolvedConfiguration) {
+					configuration = resolvedConfiguration;
+					return browser.adapter;
+				},
+			},
+		);
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({
+			form: "token",
+			token: "browser",
+		});
+		expect(configuration).toBe("ws://cdp-pool.test");
+		expect(browser.state.solveCalls).toBe(1);
+	});
+
+	it.each(["2captcha", "capsolver", "capmonster"] as const)(
+		"keeps %s unavailable without its API key",
+		async (vendor) => {
+			await expect(
+				createResolverClientFromEnv({ vendors: [vendor], kinds: ["turnstile"] }, {}).solve({
+					kind: "turnstile",
+					siteKey: "site-key",
+					pageUrl: CHALLENGE.pageUrl,
+				}),
+			).rejects.toMatchObject({
+				code: "RESOLVER_CHAIN_EXHAUSTED",
+				details: [{ vendor, reason: "missing_credentials" }],
+			});
+		},
+	);
+
+	it("attempts browser first in a proxy-backed chain without resolver credentials", async () => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-local-chain-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-local-chain-password";
+		const browser = createStubAdapter({
+			id: "browser",
+			behavior: unavailable("browser", "allocation_exhausted"),
+		});
+		const twoCaptcha = createStubAdapter({ id: "2captcha" });
+		let twoCaptchaFactoryCalls = 0;
+		const resolver = createResolverClientFromEnvForTests(
+			{ vendors: ["browser", "2captcha"], kinds: ["aws_waf"] },
+			{},
+			{ proxyIntent: REQUIRED_PROXY_INTENT },
+			{
+				browser: () => browser.adapter,
+				"2captcha": () => {
+					twoCaptchaFactoryCalls += 1;
+					return twoCaptcha.adapter;
+				},
+			},
+		);
+
+		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{ vendor: "browser", reason: "allocation_exhausted" },
+				{ vendor: "2captcha", reason: "missing_credentials" },
+			],
+		});
+		expect(browser.state.solveCalls).toBe(1);
+		expect(twoCaptchaFactoryCalls).toBe(0);
+		expect(twoCaptcha.state.solveCalls).toBe(0);
 	});
 
 	it("defaults a required proxy identity to the SDK stealth profile", async () => {
@@ -585,7 +744,6 @@ describe("resolver vendor chain", () => {
 	});
 
 	it("threads the declared profile and server identity scope through the env transport factory", async () => {
-		const identityScope = "proxy-session-one";
 		const transport = {
 			async fetch() {
 				return { status: 200, headers: {}, body: "", cookies: [] };
@@ -594,7 +752,7 @@ describe("resolver vendor chain", () => {
 		let factoryInput: unknown;
 		let receivedTransport: unknown;
 		const adapter: ResolverVendorAdapter = {
-			id: "2captcha",
+			id: "custom",
 			requiresTransport: true,
 			supports: (kind) => kind === "akamai_sensor",
 			async solve(_challenge, _identity, _signal, _traceRecorder, suppliedTransport) {
@@ -602,23 +760,7 @@ describe("resolver vendor chain", () => {
 				return { form: "token", token: "solved" };
 			},
 		};
-		const resolver = createResolverClientFromEnvForTests(
-			{
-				vendors: ["2captcha"],
-				kinds: ["akamai_sensor"],
-				clientProfile: "safari17_0",
-			},
-			{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
-			{
-				allowedHosts: ["example.com"],
-				createTransport(input) {
-					factoryInput = input;
-					return transport;
-				},
-				identityScope,
-			},
-			{ "2captcha": () => adapter },
-		);
+		const resolver = createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"], clientProfile: "safari17_0", allowedHosts: ["example.com"], createTransport(input) { factoryInput = input; return transport; } });
 
 		await expect(
 			resolver.solve({
@@ -627,7 +769,7 @@ describe("resolver vendor chain", () => {
 				scriptUrl: "https://example.com/akamai/sensor.js",
 			}),
 		).resolves.toEqual({ form: "token", token: "solved" });
-		expect(factoryInput).toEqual({ clientProfile: "safari17_0", identityScope });
+		expect(factoryInput).toEqual({ clientProfile: "safari17_0", identityScope: undefined });
 		expect(factoryInput).not.toHaveProperty("identity");
 		expect(receivedTransport).toBeDefined();
 	});
@@ -646,7 +788,7 @@ describe("resolver vendor chain", () => {
 			},
 		};
 		const adapter: ResolverVendorAdapter = {
-			id: "2captcha",
+			id: "custom",
 			requiresTransport: true,
 			supports: (kind) => kind === "akamai_sensor",
 			async solve(sensorChallenge, _identity, signal, _traceRecorder, transport) {
@@ -657,16 +799,7 @@ describe("resolver vendor chain", () => {
 				return { form: "token", token: "transport-complete" };
 			},
 		};
-		const createResolver = (allowedHosts: readonly string[]) =>
-			createResolverClientFromEnvForTests(
-				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
-				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
-				{
-					allowedHosts,
-					createTransport: () => underlyingTransport,
-				},
-				{ "2captcha": () => adapter },
-			);
+		const createResolver = (allowedHosts: readonly string[]) => createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"], allowedHosts, createTransport: () => underlyingTransport });
 
 		await expect(createResolver(["example.com"]).solve(challenge)).rejects.toMatchObject({
 			name: "ProviderError",
@@ -781,7 +914,7 @@ describe("resolver vendor chain", () => {
 		expect(() =>
 			createResolverClientFromEnv(
 				{
-					vendors: ["2captcha"],
+					vendors: ["custom"],
 					kinds: ["akamai_sensor"],
 					clientProfile: "safari17_0",
 				},
@@ -872,16 +1005,21 @@ describe("resolver vendor chain", () => {
 	});
 
 	it("treats a declared vendor with no adapter as not implemented", async () => {
+		const challenge = {
+			kind: "recaptcha_v2",
+			pageUrl: CHALLENGE.pageUrl,
+			siteKey: "recaptcha-site-key",
+		} satisfies ProviderChallenge;
 		const error = await createResolverClientFromEnv(
-			{ vendors: ["capsolver"], kinds: ["aws_waf"] },
-			{ [APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-test" },
+			{ vendors: ["capmonster"], kinds: ["recaptcha_v2"] },
+			{ [APIFUSE__RESOLVER__CAPMONSTER__API_KEY]: "sk-test" },
 		)
-			.solve(CHALLENGE)
+			.solve(challenge)
 			.catch((error: unknown) => error);
 
 		expect(error).toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "capsolver", reason: "not_implemented" }],
+			details: [{ vendor: "capmonster", reason: "not_implemented" }],
 		});
 	});
 
@@ -922,7 +1060,7 @@ describe("resolver vendor capabilities", () => {
 			(RESOLVER_VENDOR_CAPABILITIES[vendor] as readonly ProviderChallengeKind[]).includes(kind),
 		);
 
-		expect(capableVendors).toEqual(["2captcha", "custom"]);
+		expect(capableVendors).toEqual(["custom"]);
 	});
 
 	for (const vendor of Object.keys(RESOLVER_ADAPTER_REGISTRY) as ProviderResolverVendor[]) {

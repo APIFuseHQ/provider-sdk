@@ -80,15 +80,16 @@ describe("resolver env availability", () => {
 		});
 	});
 
-	it("reports the same vendor with its credential as not implemented", async () => {
+	it("reaches the configured vendor once its credential is present", async () => {
 		await expect(
 			createResolverClientFromEnv(
 				{ vendors: ["2captcha"], kinds: ["turnstile"] },
 				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
+				{ allowedHosts: ["example.com"] },
 			).solve(turnstileChallenge),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "2captcha", reason: "not_implemented" }],
+			details: [{ vendor: "2captcha", reason: "transport_failure" }],
 		});
 	});
 

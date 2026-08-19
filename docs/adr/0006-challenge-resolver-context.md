@@ -11,6 +11,93 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 13 (2026-08-19).** Resolver documents now refuse all WebSocket
+connections instead of leaving their handshakes outside the HTTP host policy.
+A local Chromium reproduction reached an undeclared `node:http` upgrade server
+once because request-stage CDP `Fetch` did not pause the handshake.
+`Network.setBlockedURLs` with `ws://*` and `wss://*` still produced one server
+handshake, so observation and URL-blocking commands were not treated as refusal
+controls. An enforcing CSP did refuse the connection, but adding its header with
+`Fetch.continueResponse` was too late for Chromium's CSP parser. The selected
+response-stage path reads each document body and fulfills the same response with
+its status, headers, and body plus `connect-src http: https:; worker-src 'none'`.
+The measured handshake count fell from one to zero, same-page HTTP fetch still
+completed once, and the page received `WebSocket.onerror`. The worker directive
+prevents a remote worker script from becoming an ungoverned WebSocket context.
+Fourteen captured Buyee responses, including post-challenge HTML, contained no
+WebSocket references, so the refusal does not remove observed AWS WAF traffic.
+Real Chromium regression coverage also re-proves redirect authorization, popup
+and subresource denial, service-worker blocking, and intermediate cookies through
+the response rewrite. Sections changed: Decision 3a, Verification, and When this
+might break.
+
+**Revision 12 (2026-08-19).** Resource-policy interception and authenticated
+proxy handling are coupled at the CDP `Fetch` boundary. On local Playwright
+pages, when the already-parsed proxy configuration contains credentials,
+`Fetch.enable` sets `handleAuthRequests: true` and the session answers a
+`Fetch.authRequired` event with `ProvideCredentials` only when Chromium marks
+the challenge source as `Proxy`. Origin/server challenges receive `CancelAuth`,
+so proxy credentials are never disclosed to an origin and an unanswered
+challenge cannot stall the page. A repeated proxy challenge is also canceled;
+this bounds retries and makes incorrect credentials fail promptly. The
+credential-bearing configuration is threaded from the client launch options
+into every local Playwright page that installs the policy; it is not reparsed
+and is never logged. CDP-pool pages have no local proxy credential authority,
+so their existing `Fetch.enable` call remains unchanged and does not enable an
+auth path it cannot answer. This solves HTTP proxy authentication only and does
+not provide credentials for non-proxy authentication schemes. At that revision,
+WebSocket refusal had not yet been added. Sections changed: Decision 3a,
+Verification, and When this might break.
+
+**Revision 11 (2026-08-19).** Revision 10's page route did not enforce its
+redirect claim: Playwright routing receives the initial navigation but not its
+redirect destinations. Local `withResourcePolicy` now authorizes every HTTP
+request-stage pause through a per-page CDP `Fetch` session, where Chromium has
+already resolved redirect `Location` values to the exact absolute URL it will
+dial. A context route remains as overlapping fail-closed enforcement,
+including for a popup's first request, and resolver contexts are created with
+service workers blocked. The preferred manual `route.fetch({ maxRedirects: 0 })`
+walker was rejected only after a real Bun/Playwright 1.55 run measured an
+intermediate `Set-Cookie` failure (`ERR_INVALID_URL` on the relative request
+path), which would break AWS WAF cookie minting. Real local-server Chromium
+tests now cover allowed and refused redirect chains, refused subresource
+redirects, popup first requests, service-worker blocking, and intermediate
+cookies. At that revision, WebSocket handshakes remained outside the HTTP
+policy. Sections changed: Decision 3a, Verification, and When this might break.
+
+**Revision 10 (2026-08-19).** Opening the local Playwright path exposed two
+pre-existing assumptions that made it unsafe and non-functional. Authenticated
+proxy URL userinfo is now percent-decoded and passed to Playwright as separate
+`username` and `password` fields; the `server` contains only scheme, host, and
+port. Resolver pages now run inside the existing fail-closed
+`withResourcePolicy` interception scope: each exact request URL, including
+redirect hops and subresources, is checked against provider `allowedHosts`
+before the request is continued. Live Buyee measurement also proved that AWS
+WAF challenge infrastructure is required outside the provider host, so
+HTTPS subdomains of the explicit internal `.awswaf.com` infrastructure suffix
+are admitted for `aws_waf` only; arbitrary third-party hosts remain blocked.
+The live policy-constrained solve minted `aws-waf-token` in 4.6 s. Sections
+changed: Decision 3a and Verification.
+
+**Revision 9 (2026-08-19).** Revision 8 admitted the browser adapter without a
+pool URL but represented the absent optional value as `""`. Because the adapter
+uses presence (`cdpUrl !== undefined`) to derive `BrowserClient.requireCdpPool`,
+that sentinel incorrectly re-enabled the production pool requirement and kept
+the local Playwright path unreachable. Absence now remains `undefined` through
+the adapter-factory boundary; the solve-time identity gate and existing
+`requireCdpPool` semantics are unchanged. Sections changed: Decision 3a and
+Verification.
+
+**Revision 8 (2026-08-19).** The local Playwright path added with Revision 6
+could not run through the env-configured resolver: vendor availability treated
+an absent `APIFUSE__CDP_POOL__URL` as a missing credential and replaced the
+browser adapter before its solve-time proxy-identity gate could run. The CDP
+pool URL is optional browser configuration, not a credential. The `"browser"`
+vendor is therefore always admitted to its adapter, which fails closed when
+neither a pool URL nor a resolved proxy identity exists. Solver-vendor API keys
+remain availability credentials. Sections changed: Decision 3a and
+Verification.
+
 **Revision 7 (2026-08-18).** The first lazy resolver wiring passed a user agent
 only when a provider declared `stealth.profile`. `danawa` and `naver-map` both
 declare `proxy: { mode: "required" }` without a stealth profile, so their leases
@@ -484,12 +571,84 @@ failover triggers map cleanly onto the existing four:
 
 | Chain rule | `"browser"` instance |
 | --- | --- |
-| missing credentials | no `cdpUrl` configured |
+| missing credentials | neither `cdpUrl` nor a resolved proxy identity is available at solve time |
 | allocation exhausted | pool queue depth exceeded, no endpoint available |
 | outage / transport failure | CDP connect failure, endpoint quarantined |
 | per-vendor timeout | navigation or solve budget elapsed |
 | **egress refused before challenge** | upstream returns a block page instead of a challenge (Revision 3) |
 | *not* a failover cause | the challenge itself proving unsolvable in a browser |
+
+An omitted pool URL remains `undefined` through browser adapter construction.
+It must not be represented by an empty-string sentinel: the adapter derives
+`requireCdpPool` from whether the optional value is present, while independently
+using its truthiness in the solve-time identity gate.
+
+For a local launch, authenticated proxy URLs are split at the Playwright launch
+boundary. URL userinfo is percent-decoded into Playwright's credential fields;
+the credential-free server string is the only URL passed as `proxy.server`.
+Unauthenticated proxy URLs retain their existing pass-through behavior, and
+parse failures never include the supplied URL or userinfo in diagnostics.
+
+The local resolver page applies the provider host declaration through
+`BrowserPage.withResourcePolicy`, not only to the initial `pageUrl`. A
+request-stage CDP `Fetch.requestPaused` handler authorizes the exact absolute
+`request.url` Chromium is about to dial with `assertResolverHostAllowed`;
+Chromium resolves every redirect `Location` against its response URL before
+that pause, so relative and absolute redirect targets are checked without an
+authorization/dial-string split. Allowed GET, HEAD, and POST requests continue,
+while unmatched methods or hosts use `Fetch.failRequest` with
+`BlockedByClient`. This covers top-level navigation, each redirect hop, and
+subresources while leaving native response status, headers, bodies, redirect
+semantics, and cookie processing intact.
+
+Each page receives its own CDP enforcement session. A context route is also
+installed for defense in depth; it blocks an unauthorized
+popup first request before the popup's CDP session can attach, and subsequent
+popup traffic uses that session. Resolver-created local contexts set
+`serviceWorkers: "block"`, removing service-worker-controlled requests from
+the resolver surface.
+
+Request-stage `Fetch` still does not pause WebSocket handshakes, and
+`Network.setBlockedURLs` was measured to observe no effective `ws://` or
+`wss://` refusal. Resolver execution therefore denies WebSockets at the
+document policy layer. A response-stage `Fetch` pause reads the body of each
+renderable document response and fulfills it unchanged except for an additional
+enforcing `Content-Security-Policy` header:
+`connect-src http: https:; worker-src 'none'`. HTTP and HTTPS connections remain
+eligible for the request-stage host authorizer, while both WebSocket schemes are
+absent. Multiple CSP headers combine restrictively, so an upstream policy is
+retained rather than replaced. Disabling workers closes the separate worker
+execution context that otherwise could receive its own CSP. If body retrieval
+or fulfillment fails, the document is failed with `BlockedByClient`; the policy
+never continues a document without the refusal header. Redirect responses are
+continued without body rewriting so Chromium retains redirect and cookie
+processing.
+
+The initially preferred public-API implementation manually followed
+`route.fetch({ maxRedirects: 0 })` responses. A real Bun/Playwright 1.55 probe
+failed when an intermediate redirect set a cookie: Playwright attempted to
+parse the relative request path (`/allowed-hop`) as an absolute response URL
+and threw `ERR_INVALID_URL`. Because AWS WAF depends on response cookies, this
+was a concrete correctness failure rather than a speculative concern. The CDP
+request-stage implementation was selected to retain Chromium's native response
+and cookie pipeline.
+
+One challenge-specific exception is required. A live Buyee run observed the
+initial challenge script on a tenant `token.awswaf.com` host, an exact
+`sdk.awswaf.com` request that returned a 307 to a second tenant token host, and
+GET/POST token traffic before the cookie appeared. A policy-constrained run
+that admitted only `buyee.jp` plus HTTPS subdomains of `.awswaf.com` solved in
+4.6 s while unrelated analytics, advertising, CDN, and translation hosts were
+blocked. The AWS suffix is therefore an explicit internal challenge-
+infrastructure constant applied only to `aws_waf`; it is not added to provider
+`allowedHosts` and is not a general wildcard facility.
+
+This change deliberately does not harden the spelling semantics of
+`normalizedResolverHostname`. That matcher still only trims, lowercases, and
+strips one trailing dot; legacy-numeric IP forms, IDNA equivalence, and
+delimiter-truncation spellings remain a known follow-up. Revision 10 only
+applies the existing matcher to every provider-host request and must not be read
+as resolving those representation limits.
 
 That last row is the important one and it is load-bearing: if AWS promotes a
 lane from `challenge` to `captcha` — a human puzzle — the browser cannot solve
@@ -1018,12 +1177,54 @@ These must hold before `Status: accepted`:
   cannot see, which is the property that makes it a contract addition rather
   than a convenience wrapper.
 - Requesting an undeclared kind throws before any vendor call.
+- Browser vendor availability does not depend on `APIFUSE__CDP_POOL__URL`:
+  a resolved proxy identity reaches the local Playwright adapter without it,
+  the omitted URL remains `undefined` and produces `requireCdpPool: false`, while
+  the adapter still reports `missing_credentials` when neither input is present.
+  Solver-vendor API keys retain their existing availability gate.
+- An authenticated local proxy launch passes a credential-free server plus
+  separately decoded username and password fields to Playwright; reverting the
+  split makes the launch-layer regression test fail. Unauthenticated URLs remain
+  unchanged and malformed userinfo is not exposed by the error.
+- When that authenticated local launch also installs the CDP resource policy,
+  `Fetch.enable` handles proxy challenges and supplies the parsed credentials;
+  a server/origin challenge is canceled without receiving them, and repeated
+  proxy challenges are canceled to bound wrong-credential retries. A local
+  `node:http` proxy test covers successful navigation and prompt failure for
+  wrong credentials. The CDP-pool policy path deliberately keeps
+  `handleAuthRequests` disabled because it has no local proxy credentials.
+- A real Chromium test uses a `node:http` server bound to `127.0.0.1` on an
+  ephemeral port. It completes an allowed multi-hop chain and preserves an
+  intermediate cookie, but does not dial an undeclared navigation redirect or
+  subresource redirect target. The same test proves context routing blocks a
+  popup's first request and that the resolver context does not fetch a service
+  worker script. It also loads ordinary allowed HTTP from a page that attempts a
+  WebSocket connection, observes the page's `WebSocket.onerror`, and proves the
+  upgrade server receives zero handshakes. Reverting WebSocket refusal changes
+  that count from zero to one and fails the test. Reverting redirect-hop
+  authorization makes the redirect assertions fail.
+- The real Buyee AWS WAF challenge needs cross-host infrastructure: the measured
+  SDK 307 and token GET/POST requests use HTTPS `*.awswaf.com`. With only the
+  provider host and the explicit AWS infrastructure exception admitted, local
+  Chromium still minted the cookie in 4.6 s.
 - A token-family provider never triggers proxy or user-agent binding.
 - Exhausting every vendor raises a typed error naming the attempted vendors and
   never returns a partial solution.
 
 ## When this might break
 
+- A challenge moves required traffic to WebSockets. The resolver deliberately
+  refuses every WebSocket rather than authorizing individual handshake URLs, so
+  such a challenge fails visibly instead of gaining new egress.
+- Chromium changes response-stage `Fetch.getResponseBody` /
+  `Fetch.fulfillRequest` behavior or stops applying an added enforcing CSP
+  before document scripts execute.
+- This is not a claim of a total Chromium network sandbox. HTTP(S) requests are
+  authorized at request-stage `Fetch` pauses and WebSockets are refused by CSP;
+  transports outside both mechanisms, such as WebRTC, remain outside the
+  measured resolver policy.
+- Chromium changes the CDP `Fetch` request-stage contract or stops exposing an
+  absolute redirect destination before it is dialed.
 - A vendor moves a kind from proxyless to proxy-required, which would move that
   kind from the token family to the cookie family.
 - Cloudflare or AWS binds a token-family solution to network identity, which
@@ -1032,6 +1233,11 @@ These must hold before `Status: accepted`:
   conditional to mandatory.
 - A challenge kind appears whose solution is neither a form token nor cookies,
   for example a required header or a signed request body.
+- A proxy uses an authentication mechanism Chromium does not expose as a
+  `Fetch.authRequired` proxy challenge, or requires an authentication flow
+  beyond one credential attempt. The resolver cancels non-proxy challenges and
+  repeated attempts by design; it does not forward proxy credentials to origin
+  servers or retry indefinitely.
 
 ## References
 

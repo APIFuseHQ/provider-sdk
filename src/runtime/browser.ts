@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import type { Frame, LaunchOptions, Locator, Page, Request, Route } from "playwright";
+import type { CDPSession, Frame, LaunchOptions, Locator, Page, Request, Route } from "playwright";
 
 import { ProviderError } from "../errors.js";
 import type {
@@ -87,10 +87,25 @@ type CdpFrameTreeNode = {
 type CdpFetchFulfillParams = {
 	readonly requestId: string;
 	readonly responseCode: number;
-	readonly responseHeaders?: readonly {
+	readonly responseHeaders?: {
 		readonly name: string;
 		readonly value: string;
 	}[];
+	readonly body?: string;
+};
+
+type CdpPausedDocumentResponse = {
+	readonly hasBody: boolean;
+	readonly requestId: string;
+	readonly responseCode: number;
+	readonly responseHeaders: readonly {
+		readonly name: string;
+		readonly value: string;
+	}[];
+};
+
+type CdpResponseBody = {
+	readonly base64Encoded?: boolean;
 	readonly body?: string;
 };
 
@@ -109,7 +124,7 @@ function toResourceBody(body: BrowserResourceBody | undefined): Buffer | string 
 }
 
 function isResourceMethod(method: string): method is BrowserResourceMethod {
-	return method === "GET" || method === "HEAD";
+	return method === "GET" || method === "HEAD" || method === "POST";
 }
 
 async function toResourceRequest(request: Request): Promise<BrowserResourceRequest | null> {
@@ -162,6 +177,85 @@ function getCdpPausedRequestId(params: unknown): string | null {
 	}
 
 	return params.requestId;
+}
+
+function isCdpResponseStage(params: unknown): boolean {
+	return (
+		isRecord(params) &&
+		(typeof params.responseStatusCode === "number" ||
+			typeof params.responseErrorReason === "string")
+	);
+}
+
+function toCdpPausedDocumentResponse(params: unknown): CdpPausedDocumentResponse | null {
+	if (
+		!isRecord(params) ||
+		typeof params.requestId !== "string" ||
+		typeof params.responseStatusCode !== "number" ||
+		params.resourceType !== "Document" ||
+		!isRecord(params.request)
+	) {
+		return null;
+	}
+
+	const responseCode = params.responseStatusCode;
+	const responseHeaders = Array.isArray(params.responseHeaders)
+		? params.responseHeaders.flatMap((header) => {
+				if (
+					!isRecord(header) ||
+					typeof header.name !== "string" ||
+					typeof header.value !== "string"
+				) {
+					return [];
+				}
+				return [{ name: header.name, value: header.value }];
+			})
+		: [];
+
+	return {
+		hasBody:
+			String(params.request.method ?? "").toUpperCase() !== "HEAD" &&
+			responseCode >= 200 &&
+			(responseCode < 300 || responseCode >= 400) &&
+			responseCode !== 204 &&
+			responseCode !== 205 &&
+			responseCode !== 304,
+		requestId: params.requestId,
+		responseCode,
+		responseHeaders,
+	};
+}
+
+function toCdpDocumentFulfillParams(
+	response: CdpPausedDocumentResponse,
+	body: CdpResponseBody,
+	contentSecurityPolicy: string,
+): CdpFetchFulfillParams {
+	const responseBody = typeof body.body === "string" ? body.body : "";
+	return {
+		body: body.base64Encoded ? responseBody : Buffer.from(responseBody).toString("base64"),
+		requestId: response.requestId,
+		responseCode: response.responseCode,
+		responseHeaders: [
+			...response.responseHeaders,
+			{ name: "Content-Security-Policy", value: contentSecurityPolicy },
+		],
+	};
+}
+
+function resourcePolicyFetchPatterns(policy: BrowserResourcePolicy) {
+	return [
+		{ requestStage: "Request" as const, urlPattern: "*" },
+		...(policy.documentContentSecurityPolicy
+			? [
+					{
+						requestStage: "Response" as const,
+						resourceType: "Document" as const,
+						urlPattern: "*",
+					},
+				]
+			: []),
+	];
 }
 
 function toCdpResourceHeaders(value: unknown): Record<string, string> {
@@ -225,11 +319,171 @@ async function fulfillResourceRoute(
 	});
 }
 
+async function decideResourceRequest(
+	policy: BrowserResourcePolicy,
+	request: BrowserResourceRequest,
+): Promise<BrowserResourceDecision> {
+	for (const resourceRoute of policy.routes) {
+		if (matchesResourceRoute(resourceRoute.match, request)) {
+			return await resourceRoute.handle(request);
+		}
+	}
+
+	return { action: "block" };
+}
+
+async function abortResourceRoute(route: Route): Promise<void> {
+	await route.abort("blockedbyclient");
+}
+
+async function handleCdpResourceRequest(
+	session: CDPSession,
+	policy: BrowserResourcePolicy,
+	allowedMethods: ReadonlySet<BrowserResourceMethod>,
+	params: unknown,
+): Promise<void> {
+	const paused = toCdpResourceRequest(params);
+	const requestId = paused?.requestId ?? getCdpPausedRequestId(params);
+	if (!requestId) return;
+
+	try {
+		if (!paused || !allowedMethods.has(paused.request.method)) {
+			await session.send("Fetch.failRequest", { errorReason: "BlockedByClient", requestId });
+			return;
+		}
+
+		const decision = await decideResourceRequest(policy, paused.request);
+		switch (decision.action) {
+			case "continue":
+				await session.send("Fetch.continueRequest", { requestId });
+				return;
+			case "fulfill":
+				await session.send("Fetch.fulfillRequest", toCdpFulfillParams(requestId, decision));
+				return;
+			case "block":
+				await session.send("Fetch.failRequest", { errorReason: "BlockedByClient", requestId });
+				return;
+		}
+	} catch {
+		await session
+			.send("Fetch.failRequest", { errorReason: "BlockedByClient", requestId })
+			.catch(() => undefined);
+	}
+}
+
+async function handleCdpDocumentResponse(
+	session: CDPSession,
+	contentSecurityPolicy: string,
+	params: unknown,
+): Promise<void> {
+	const requestId = getCdpPausedRequestId(params);
+	if (!requestId) return;
+
+	try {
+		const response = toCdpPausedDocumentResponse(params);
+		if (!response) throw new Error("CDP document response metadata is unavailable");
+		if (!response.hasBody) {
+			await session.send("Fetch.continueResponse", {
+				requestId,
+				responseCode: response.responseCode,
+				responseHeaders: [...response.responseHeaders],
+			});
+			return;
+		}
+
+		const body = await session.send("Fetch.getResponseBody", {
+			requestId: response.requestId,
+		});
+		await session.send(
+			"Fetch.fulfillRequest",
+			toCdpDocumentFulfillParams(response, body, contentSecurityPolicy),
+		);
+	} catch {
+		await session
+			.send("Fetch.failRequest", { errorReason: "BlockedByClient", requestId })
+			.catch(() => undefined);
+	}
+}
+
+function getCdpAuthRequiredRequestId(params: unknown): string | null {
+	if (!isRecord(params) || typeof params.requestId !== "string") {
+		return null;
+	}
+
+	return params.requestId;
+}
+
+function isCdpProxyAuthChallenge(params: unknown): boolean {
+	return (
+		isRecord(params) &&
+		isRecord(params.authChallenge) &&
+		params.authChallenge.source === "Proxy"
+	);
+}
+
+async function handleCdpAuthRequired(
+	session: CDPSession,
+	proxy: PlaywrightProxy & { username: string; password: string },
+	authAttempts: Set<string>,
+	params: unknown,
+): Promise<void> {
+	const requestId = getCdpAuthRequiredRequestId(params);
+	if (!requestId) return;
+
+	// Chromium can emit another challenge after rejected credentials. Cancel a
+	// retry so incorrect credentials fail promptly instead of looping forever.
+	const response =
+		isCdpProxyAuthChallenge(params) && !authAttempts.has(requestId)
+			? (() => {
+				authAttempts.add(requestId);
+				return {
+					authChallengeResponse: {
+						password: proxy.password,
+						response: "ProvideCredentials" as const,
+						username: proxy.username,
+					},
+					requestId,
+				};
+			})()
+			: {
+				authChallengeResponse: { response: "CancelAuth" as const },
+				requestId,
+			};
+
+	await session.send("Fetch.continueWithAuth", response).catch(() => undefined);
+}
+
+function createResourcePolicyHandler(
+	policy: BrowserResourcePolicy,
+	allowedMethods: ReadonlySet<BrowserResourceMethod>,
+): (route: Route) => Promise<void> {
+	return async (route: Route): Promise<void> => {
+		const request = await toResourceRequest(route.request());
+		if (!request || !allowedMethods.has(request.method)) {
+			await abortResourceRoute(route);
+			return;
+		}
+
+		const decision = await decideResourceRequest(policy, request);
+		switch (decision.action) {
+			case "continue":
+				await route.continue();
+				return;
+			case "fulfill":
+				await fulfillResourceRoute(route, decision);
+				return;
+			case "block":
+				await abortResourceRoute(route);
+		}
+	};
+}
+
 export type BrowserClientOptions = BrowserOptions & {
 	allowedHosts?: string[];
 	cdpUrl?: string;
 	executablePath?: string;
 	extraArgs?: string[];
+	serviceWorkers?: "allow" | "block";
 };
 
 type SupportedBrowserClient = {
@@ -288,7 +542,10 @@ function formatExpression<T>(fn: string | (() => T)): string {
 	return `(${fn.toString()})()`;
 }
 
-function toLaunchOptions(options: BrowserClientOptions): LaunchOptions {
+function toLaunchOptions(
+	options: BrowserClientOptions,
+	proxy: LaunchOptions["proxy"],
+): LaunchOptions {
 	return {
 		// `extraArgs` is optional, but playwright-extra's stealth evasions mutate
 		// `options.args` unguarded (navigator.webdriver does
@@ -299,7 +556,56 @@ function toLaunchOptions(options: BrowserClientOptions): LaunchOptions {
 		args: options.extraArgs ?? [],
 		executablePath: options.executablePath,
 		headless: options.headless ?? true,
-		proxy: options.proxy ? { server: options.proxy } : undefined,
+		proxy,
+	};
+}
+
+type PlaywrightProxy = NonNullable<LaunchOptions["proxy"]>;
+
+function hasProxyCredentials(
+	proxy: LaunchOptions["proxy"] | undefined,
+): proxy is PlaywrightProxy & { username: string; password: string } {
+	return proxy?.username !== undefined && proxy.password !== undefined;
+}
+
+function toPlaywrightProxy(proxy: string | undefined): LaunchOptions["proxy"] {
+	if (!proxy) return undefined;
+
+	const schemeEnd = proxy.indexOf("://");
+	const authorityStart = schemeEnd >= 0 ? schemeEnd + 3 : 0;
+	const remainder = proxy.slice(authorityStart);
+	const authorityEnd = remainder.search(/[/?#]/);
+	const authority = remainder.slice(0, authorityEnd >= 0 ? authorityEnd : undefined);
+	if (!authority.includes("@")) {
+		return { server: proxy };
+	}
+
+	let parsed: URL;
+	try {
+		parsed = new URL(proxy);
+	} catch {
+		throw new ProviderError("Browser proxy URL is invalid", {
+			code: "BROWSER_PROXY_INVALID",
+			fix: "Use a valid proxy URL.",
+		});
+	}
+
+	let username: string;
+	let password: string;
+	try {
+		username = decodeURIComponent(parsed.username);
+		password = decodeURIComponent(parsed.password);
+	} catch {
+		throw new ProviderError("Browser proxy credentials use invalid percent-encoding", {
+			code: "BROWSER_PROXY_INVALID",
+			fix: "Percent-encode the proxy username and password as URL userinfo.",
+		});
+	}
+
+	return {
+		server: `${parsed.protocol}//${parsed.host}`,
+		username,
+		password,
 	};
 }
 
@@ -493,7 +799,10 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 	readonly id = "main";
 	readonly pageId?: string;
 
-	constructor(private readonly page: Page) {}
+	constructor(
+		private readonly page: Page,
+		private readonly proxy: LaunchOptions["proxy"] = undefined,
+	) {}
 
 	async goto(url: string): Promise<void> {
 		await this.page.goto(url);
@@ -558,43 +867,102 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 
 	async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
 		const allowedMethods = new Set(policy.allowedMethods ?? DEFAULT_RESOURCE_METHODS);
+		const policyHandler = createResourcePolicyHandler(policy, allowedMethods);
+		const context = this.page.context();
 		const handler = async (route: Route): Promise<void> => {
-			const request = await toResourceRequest(route.request());
-			if (!request || !allowedMethods.has(request.method)) {
-				await route.abort("blockedbyclient");
+			try {
+				// Context routing sees a popup's first request before the late `page`
+				// event. Fail every secondary page closed so no redirect can escape
+				// the per-page CDP interception while that session is being attached.
+				if (route.request().frame().page() !== this.page) {
+					await abortResourceRoute(route);
+					return;
+				}
+			} catch {
+				await abortResourceRoute(route);
 				return;
 			}
 
-			for (const resourceRoute of policy.routes) {
-				if (!matchesResourceRoute(resourceRoute.match, request)) {
-					continue;
-				}
-
-				const decision = await resourceRoute.handle(request);
-				switch (decision.action) {
-					case "fulfill":
-						await fulfillResourceRoute(route, decision);
-						return;
-					case "block":
-						await route.abort("blockedbyclient");
-						return;
-				}
+			await policyHandler(route);
+		};
+		const sessions = new Set<CDPSession>();
+		const pendingAttachments = new Set<Promise<void>>();
+		const proxy = hasProxyCredentials(this.proxy) ? this.proxy : undefined;
+		let active = true;
+		const attachPage = async (page: Page): Promise<void> => {
+			const session = await context.newCDPSession(page);
+			if (!active) {
+				await session.detach();
+				return;
 			}
 
-			await route.abort("blockedbyclient");
+			const onRequestPaused = (params: unknown) => {
+				if (isCdpResponseStage(params) && policy.documentContentSecurityPolicy) {
+					void handleCdpDocumentResponse(session, policy.documentContentSecurityPolicy, params);
+					return;
+				}
+				void handleCdpResourceRequest(session, policy, allowedMethods, params);
+			};
+			const authAttempts = new Set<string>();
+			const onAuthRequired = (params: unknown) => {
+				if (!proxy) return;
+				void handleCdpAuthRequired(session, proxy, authAttempts, params);
+			};
+			session.on("Fetch.requestPaused", onRequestPaused);
+			if (proxy) {
+				session.on("Fetch.authRequired", onAuthRequired);
+			}
+			try {
+				await session.send("Fetch.enable", {
+					...(proxy ? { handleAuthRequests: true } : {}),
+					patterns: resourcePolicyFetchPatterns(policy),
+				});
+				sessions.add(session);
+			} catch (error) {
+				session.off("Fetch.requestPaused", onRequestPaused);
+				if (proxy) {
+					session.off("Fetch.authRequired", onAuthRequired);
+				}
+				await session.detach().catch(() => undefined);
+				throw error;
+			}
+		};
+		const onPage = (page: Page) => {
+			const attachment = attachPage(page)
+				.catch(async () => {
+					await page.close().catch(() => undefined);
+				})
+				.finally(() => pendingAttachments.delete(attachment));
+			pendingAttachments.add(attachment);
 		};
 
-		await this.page.route(RESOURCE_POLICY_ROUTE_PATTERN, handler);
+		await context.route(RESOURCE_POLICY_ROUTE_PATTERN, handler);
 		try {
-			return await run();
+			context.on("page", onPage);
+			try {
+				await attachPage(this.page);
+				return await run();
+			} finally {
+				context.off("page", onPage);
+			}
 		} finally {
-			await this.page.unroute(RESOURCE_POLICY_ROUTE_PATTERN, handler);
+			active = false;
+			await context.unroute(RESOURCE_POLICY_ROUTE_PATTERN, handler);
+			await Promise.allSettled(pendingAttachments);
+			await Promise.all(
+				[...sessions].map(async (session) => {
+					await session.send("Fetch.disable").catch(() => undefined);
+					await session.detach().catch(() => undefined);
+				}),
+			);
 		}
 	}
 }
 
 class PlaywrightBrowserClient implements SupportedBrowserClient {
 	private browser: import("playwright").Browser | null = null;
+	private parsedProxy: LaunchOptions["proxy"] | undefined;
+	private proxyParsed = false;
 	readonly engine = "playwright-stealth" satisfies BrowserEngine;
 
 	constructor(private readonly options: BrowserClientOptions = {}) {}
@@ -605,7 +973,11 @@ class PlaywrightBrowserClient implements SupportedBrowserClient {
 		}
 
 		const chromium = await loadChromiumLauncher(this.options);
-		this.browser = await chromium.launch(toLaunchOptions(this.options));
+		if (!this.proxyParsed) {
+			this.parsedProxy = toPlaywrightProxy(this.options.proxy);
+			this.proxyParsed = true;
+		}
+		this.browser = await chromium.launch(toLaunchOptions(this.options, this.parsedProxy));
 		return this.browser;
 	}
 
@@ -613,7 +985,7 @@ class PlaywrightBrowserClient implements SupportedBrowserClient {
 		const browser = await this.ensureBrowser();
 		const page = await browser.newPage();
 
-		return new PlaywrightBrowserPage(page);
+		return new PlaywrightBrowserPage(page, this.parsedProxy);
 	}
 
 	async rawPage(): Promise<BrowserPageContract> {
@@ -625,9 +997,9 @@ class PlaywrightBrowserClient implements SupportedBrowserClient {
 
 	async withIsolatedContext<T>(handler: (page: BrowserPageContract) => Promise<T>): Promise<T> {
 		const browser = await this.ensureBrowser();
-		const context = await browser.newContext();
+		const context = await browser.newContext({ serviceWorkers: this.options.serviceWorkers });
 		const page = await context.newPage();
-		const browserPage = new PlaywrightBrowserPage(page);
+		const browserPage = new PlaywrightBrowserPage(page, this.parsedProxy);
 
 		try {
 			return await handler(browserPage);
@@ -1329,7 +1701,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 
 		try {
 			await this.pageClient.send("Fetch.enable", {
-				patterns: [{ requestStage: "Request", urlPattern: "*" }],
+				patterns: resourcePolicyFetchPatterns(policy),
 			});
 		} catch (error) {
 			unsubscribe();
@@ -1362,6 +1734,28 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		}
 
 		try {
+			if (isCdpResponseStage(params) && policy.documentContentSecurityPolicy) {
+				const response = toCdpPausedDocumentResponse(params);
+				if (!response) throw new Error("CDP document response metadata is unavailable");
+				if (!response.hasBody) {
+					await this.pageClient.send("Fetch.continueResponse", {
+						requestId,
+						responseCode: response.responseCode,
+						responseHeaders: [...response.responseHeaders],
+					});
+					return;
+				}
+
+				const body = await this.pageClient.send("Fetch.getResponseBody", {
+					requestId: response.requestId,
+				});
+				await this.pageClient.send(
+					"Fetch.fulfillRequest",
+					toCdpDocumentFulfillParams(response, body, policy.documentContentSecurityPolicy),
+				);
+				return;
+			}
+
 			const parsed = toCdpResourceRequest(params);
 			if (!parsed || !allowedMethods.has(parsed.request.method)) {
 				await this.failCdpResourceRequest(requestId);
@@ -1375,6 +1769,11 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 
 				const decision = await resourceRoute.handle(parsed.request);
 				switch (decision.action) {
+					case "continue":
+						await this.pageClient.send("Fetch.continueRequest", {
+							requestId: parsed.requestId,
+						});
+						return;
 					case "fulfill":
 						await this.pageClient.send(
 							"Fetch.fulfillRequest",

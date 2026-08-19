@@ -10,6 +10,7 @@ import {
 	type ResolverVendorAdapter,
 	ResolverVendorUnavailableError,
 } from "../resolver-vendors/types.js";
+import { RESOLVER_VENDOR_CAPABILITIES } from "../resolver-vendors/types.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const RECAPTCHA_CHALLENGE = {
@@ -27,33 +28,10 @@ const AWS_WAF_CHALLENGE = {
 	iv: "goku-iv",
 } satisfies ProviderChallenge;
 
-const ALL_DECLARED_KINDS = [
-	"turnstile",
-	"recaptcha_v2",
-	"recaptcha_v3",
-	"hcaptcha",
-	"cloudflare_interstitial",
-	"aws_waf",
-	"akamai_sec_cpt",
-	"akamai_sensor",
-] as const satisfies readonly ProviderChallengeKind[];
-
-const UNIMPLEMENTED_CHALLENGES = [
-	{ kind: "turnstile", siteKey: "site-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl },
-	{
-		kind: "recaptcha_v3",
-		siteKey: "site-key",
-		pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
-		action: "submit",
-	},
-	{ kind: "hcaptcha", siteKey: "site-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl },
+const UNSUPPORTED_CHALLENGES = [
 	{ kind: "cloudflare_interstitial", pageUrl: RECAPTCHA_CHALLENGE.pageUrl },
 	{ kind: "akamai_sec_cpt", pageUrl: RECAPTCHA_CHALLENGE.pageUrl },
-	{
-		kind: "akamai_sensor",
-		pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
-		scriptUrl: "https://example.com/akamai/sensor.js",
-	},
+	{ kind: "akamai_sensor", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, scriptUrl: "https://example.com/akamai/sensor.js" },
 ] as const satisfies readonly ProviderChallenge[];
 
 type FetchCall = {
@@ -316,6 +294,42 @@ describe("2captcha resolver vendor", () => {
 		});
 	});
 
+	it.each([
+		{
+			challenge: { kind: "turnstile", siteKey: "ts-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "managed", cdata: "data" } satisfies ProviderChallenge,
+			task: { type: "TurnstileTaskProxyless", websiteURL: RECAPTCHA_CHALLENGE.pageUrl, websiteKey: "ts-key", action: "managed", data: "data" },
+		},
+		{
+			challenge: { kind: "recaptcha_v3", siteKey: "v3-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "login", minScore: 0.7 } satisfies ProviderChallenge,
+			task: { type: "RecaptchaV3TaskProxyless", websiteURL: RECAPTCHA_CHALLENGE.pageUrl, websiteKey: "v3-key", minScore: 0.7, pageAction: "login" },
+		},
+		{
+			challenge: { kind: "hcaptcha", siteKey: "h-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl } satisfies ProviderChallenge,
+			task: { type: "HCaptchaTaskProxyless", websiteURL: RECAPTCHA_CHALLENGE.pageUrl, websiteKey: "h-key" },
+		},
+	])("creates and maps $challenge.kind", async ({ challenge, task }) => {
+		const stub = successfulFetch({ token: `${challenge.kind}-token` });
+		await expect(createAdapter(stub).solve(challenge, undefined, new AbortController().signal)).resolves.toEqual({ form: "token", token: `${challenge.kind}-token` });
+		expect(stub.calls[0]?.body.task).toEqual(task);
+	});
+
+	it("rejects reCAPTCHA v3 without the upstream-required minScore", async () => {
+		const stub = createFetchStub([]);
+		await expect(createAdapter(stub).solve({ kind: "recaptcha_v3", siteKey: "key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "login" }, undefined, new AbortController().signal)).rejects.toMatchObject({ vendor: "2captcha", reason: "transport_failure", phase: "create_task" });
+		expect(stub.calls).toHaveLength(0);
+	});
+
+	it("creates proxied Turnstile and hCaptcha tasks", async () => {
+		for (const challenge of [
+			{ kind: "turnstile", siteKey: "ts-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl } satisfies ProviderChallenge,
+			{ kind: "hcaptcha", siteKey: "h-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl } satisfies ProviderChallenge,
+		]) {
+			const stub = successfulFetch({ token: "proxied-token" });
+			await createAdapter(stub).solve(challenge, { proxyUrl: "socks5://u:p@proxy.example:1080", userAgent: "UA" }, new AbortController().signal);
+			expect(stub.calls[0]?.body.task).toMatchObject({ type: challenge.kind === "turnstile" ? "TurnstileTask" : "HCaptchaTask", proxyType: "socks5", proxyAddress: "proxy.example", proxyPort: 1080, proxyLogin: "u", proxyPassword: "p", userAgent: "UA" });
+		}
+	});
+
 	it("creates a proxyless AWS WAF task from gokuProps and returns existing_token", async () => {
 		const stub = successfulFetch({ existing_token: "aws-waf-token-value" });
 		const adapter = createAdapter(stub);
@@ -487,24 +501,32 @@ describe("2captcha resolver vendor", () => {
 		expect(stub.calls).toHaveLength(0);
 	});
 
-	it.each(
-		UNIMPLEMENTED_CHALLENGES,
-	)("reports $kind as not implemented without attempting a request", async (challenge) => {
+	it.each(UNSUPPORTED_CHALLENGES)("rejects unsupported $kind without attempting a request", async (challenge) => {
 		const stub = createFetchStub([]);
 		const error = await capturedError(
 			createAdapter(stub).solve(challenge, undefined, new AbortController().signal),
 		);
 
-		expect(error).toMatchObject({ vendor: "2captcha", reason: "not_implemented" });
+		expect(error).toBeInstanceOf(TypeError);
 		expect(stub.calls).toHaveLength(0);
 	});
 
-	it("reads support for all eight kinds from the declared capability table", () => {
+	it("reads support for every kind from the declared capability table", () => {
 		const adapter = createAdapter(createFetchStub([]));
+		const declared = RESOLVER_VENDOR_CAPABILITIES["2captcha"] as readonly ProviderChallengeKind[];
 
 		expect(
-			Object.fromEntries(ALL_DECLARED_KINDS.map((kind) => [kind, adapter.supports(kind)])),
-		).toEqual(Object.fromEntries(ALL_DECLARED_KINDS.map((kind) => [kind, true])));
+			Object.fromEntries(declared.map((kind) => [kind, adapter.supports(kind)])),
+		).toEqual(Object.fromEntries(declared.map((kind) => [kind, true])));
+	});
+
+	it("agrees with every declared capability without a not_implemented result", async () => {
+		const declared = RESOLVER_VENDOR_CAPABILITIES["2captcha"] as readonly ProviderChallengeKind[];
+		for (const kind of declared) {
+			const challenge = kind === "aws_waf" ? AWS_WAF_CHALLENGE : kind === "recaptcha_v3" ? { kind, siteKey: "key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "action", minScore: 0.3 } : { kind, siteKey: "key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl };
+			const stub = successfulFetch(kind === "aws_waf" ? { existing_token: "token" } : { token: "token" });
+			await expect(createAdapter(stub).solve(challenge, undefined, new AbortController().signal)).resolves.toBeDefined();
+		}
 	});
 
 	it("throws TypeError for a kind outside the declared capability table", async () => {

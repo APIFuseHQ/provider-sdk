@@ -4,7 +4,7 @@ type LaunchCall = {
 	args?: string[];
 	executablePath?: string;
 	headless?: boolean;
-	proxy?: { server: string };
+	proxy?: { password?: string; server: string; username?: string };
 };
 
 type MockRouteFulfillOptions = {
@@ -30,6 +30,7 @@ type MockRouteRegistration = {
 
 type MockResourceRequest = {
 	allHeaders: () => Promise<Record<string, string>>;
+	frame: () => { page: () => MockPlaywrightPage };
 	method: () => string;
 	postData: () => string | undefined;
 	resourceType: () => string;
@@ -48,6 +49,14 @@ type MockCdpFetchFailure = {
 	requestId: string;
 };
 
+type MockCdpFetchResponseDispatch = {
+	body: string;
+	headers?: Array<{ name: string; value: string }>;
+	method?: string;
+	status?: number;
+	url: string;
+};
+
 type MockCommandFrame = {
 	id: number;
 	method: string;
@@ -57,6 +66,7 @@ type MockCommandFrame = {
 
 type MockRoute = {
 	abort: (errorCode?: string) => Promise<void>;
+	continue: () => Promise<void>;
 	fulfill: (options: MockRouteFulfillOptions) => Promise<void>;
 	request: () => MockResourceRequest;
 };
@@ -140,6 +150,7 @@ type MockPlaywrightPage = {
 		fills: Array<{ selector: string; text: string }>;
 		gotoUrls: string[];
 		resourceAborts: Array<{ errorCode?: string; url: string }>;
+		resourceContinues: string[];
 		resourceFulfillments: Array<MockRouteFulfillOptions & { url: string }>;
 		resourceRequests: MockResourceDispatch[];
 		routes: MockRouteRegistration[];
@@ -175,27 +186,44 @@ type MockBrowserState = {
 	browser: {
 		close: () => Promise<void>;
 		isConnected: () => boolean;
-		newContext: () => Promise<MockBrowserContext>;
+		newContext: (options?: { serviceWorkers?: "allow" | "block" }) => Promise<MockBrowserContext>;
 		newPage: () => Promise<MockPlaywrightPage>;
 	};
 	closeCalls: number;
 	connected: boolean;
 	contexts: MockBrowserContext[];
+	defaultContext: MockBrowserContext;
 	newPageCalls: number;
 	pages: MockPlaywrightPage[];
 	launchOptions?: LaunchCall;
+	newContextOptions: Array<{ serviceWorkers?: "allow" | "block" }>;
 };
 
 type MockBrowserContext = {
 	close: () => Promise<void>;
 	cookies: () => Promise<MockBrowserCookie[]>;
 	newPage: () => Promise<MockPlaywrightPage>;
+	newCDPSession: () => Promise<MockPlaywrightCdpSession>;
+	off: (event: "page", listener: (page: MockPlaywrightPage) => void) => void;
+	on: (event: "page", listener: (page: MockPlaywrightPage) => void) => void;
+	route: (pattern: string, handler: MockRouteHandler) => Promise<void>;
+	unroute: (pattern: string, handler: MockRouteHandler) => Promise<void>;
 	state: {
 		closeCalls: number;
 		cookies: MockBrowserCookie[];
 		newPageCalls: number;
 		pages: MockPlaywrightPage[];
+		routes: MockRouteRegistration[];
+		unrouteCalls: string[];
 	};
+};
+
+type MockPlaywrightCdpSession = {
+	dispatchAuthRequired: (params: unknown) => void;
+	detach: () => Promise<void>;
+	off: (event: string, listener: (params: unknown) => void) => void;
+	on: (event: string, listener: (params: unknown) => void) => void;
+	send: (method: string, params?: Record<string, unknown>) => Promise<Record<string, unknown>>;
 };
 
 const browserState = {
@@ -203,6 +231,9 @@ const browserState = {
 	defaultContextCookies: [] as MockBrowserCookie[],
 	isolatedContextCookies: [] as MockBrowserCookie[][],
 	launchCalls: [] as LaunchCall[],
+	localCdpAuthResponses: [] as Array<Record<string, unknown>>,
+	localCdpSessions: [] as MockPlaywrightCdpSession[],
+	localFetchEnableParams: [] as Array<Record<string, unknown>>,
 	requireError: null as Error | null,
 };
 
@@ -235,6 +266,8 @@ const cdpState = {
 	fetchEnableParams: [] as Array<Record<string, unknown>>,
 	fetchFailures: [] as MockCdpFetchFailure[],
 	fetchFulfillments: [] as MockCdpFetchFulfillRequest[],
+	fetchContinues: [] as string[],
+	fetchResponseBodies: new Map<string, string>(),
 	frameEvaluationErrors: new Map<number, string[]>(),
 	networkCookies: [] as MockBrowserCookie[],
 	networkCookiesByPageId: new Map<string, MockBrowserCookie[]>(),
@@ -302,6 +335,7 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 		fills: [] as Array<{ selector: string; text: string }>,
 		gotoUrls: [] as string[],
 		resourceAborts: [] as Array<{ errorCode?: string; url: string }>,
+		resourceContinues: [] as string[],
 		resourceFulfillments: [] as Array<MockRouteFulfillOptions & { url: string }>,
 		resourceRequests: [] as MockResourceDispatch[],
 		routes: [] as MockRouteRegistration[],
@@ -312,7 +346,7 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 		waits: [] as Array<{ selector: string; timeout?: number }>,
 	};
 
-	return {
+	const page: MockPlaywrightPage = {
 		state,
 		async click(selector) {
 			state.clicks.push(selector);
@@ -328,7 +362,7 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 		},
 		async dispatchResourceRequest(dispatch) {
 			state.resourceRequests.push(dispatch);
-			const registration = state.routes.at(-1);
+			const registration = state.routes.at(-1) ?? context.state.routes.at(-1);
 			if (!registration) {
 				state.unhandledResourceRequests.push(dispatch);
 				return "unhandled";
@@ -337,6 +371,9 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 			const request = {
 				async allHeaders() {
 					return dispatch.headers ?? {};
+				},
+				frame() {
+					return { page: () => page };
 				},
 				method() {
 					return dispatch.method ?? "GET";
@@ -354,6 +391,9 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 			const route = {
 				async abort(errorCode?: string) {
 					state.resourceAborts.push({ errorCode, url: dispatch.url });
+				},
+				async continue() {
+					state.resourceContinues.push(dispatch.url);
 				},
 				async fulfill(options: MockRouteFulfillOptions) {
 					state.resourceFulfillments.push({ ...options, url: dispatch.url });
@@ -436,6 +476,7 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 			state.waits.push({ selector, timeout: options?.timeout });
 		},
 	};
+	return page;
 }
 
 function createMockBrowserContext(
@@ -447,7 +488,10 @@ function createMockBrowserContext(
 		cookies: cookies.map((cookie) => ({ ...cookie })),
 		newPageCalls: 0,
 		pages: [] as MockPlaywrightPage[],
+		routes: [] as MockRouteRegistration[],
+		unrouteCalls: [] as string[],
 	};
+	const pageListeners = new Set<(page: MockPlaywrightPage) => void>();
 	const context: MockBrowserContext = {
 		state: contextState,
 		close: async () => {
@@ -464,6 +508,45 @@ function createMockBrowserContext(
 			}
 			return page;
 		},
+		newCDPSession: async () => {
+			const listeners = new Map<string, Set<(params: unknown) => void>>();
+			const session: MockPlaywrightCdpSession = {
+				dispatchAuthRequired(params) {
+					for (const listener of listeners.get("Fetch.authRequired") ?? []) listener(params);
+				},
+				async detach() {},
+				off(event, listener) {
+					listeners.get(event)?.delete(listener);
+				},
+				on(event, listener) {
+					const eventListeners = listeners.get(event) ?? new Set();
+					eventListeners.add(listener);
+					listeners.set(event, eventListeners);
+				},
+				async send(method, params = {}) {
+					if (method === "Fetch.enable") browserState.localFetchEnableParams.push(params);
+					if (method === "Fetch.continueWithAuth") browserState.localCdpAuthResponses.push(params);
+					return {};
+				},
+			};
+			browserState.localCdpSessions.push(session);
+			return session;
+		},
+		off: (_event, listener) => {
+			pageListeners.delete(listener);
+		},
+		on: (_event, listener) => {
+			pageListeners.add(listener);
+		},
+		route: async (pattern, handler) => {
+			contextState.routes.push({ handler, pattern });
+		},
+		unroute: async (pattern, handler) => {
+			contextState.unrouteCalls.push(pattern);
+			contextState.routes = contextState.routes.filter(
+				(registration) => registration.pattern !== pattern || registration.handler !== handler,
+			);
+		},
 	};
 	return context;
 }
@@ -478,7 +561,9 @@ function createMockBrowserLauncher(options: { applyStealthOnPage?: () => boolean
 				connected: true,
 				closeCalls: 0,
 				contexts: [],
+				defaultContext,
 				newPageCalls: 0,
+				newContextOptions: [],
 				pages: [],
 				launchOptions,
 				browser: {
@@ -487,7 +572,8 @@ function createMockBrowserLauncher(options: { applyStealthOnPage?: () => boolean
 						state.connected = false;
 					},
 					isConnected: () => state.connected,
-					newContext: async () => {
+					newContext: async (contextOptions = {}) => {
+						state.newContextOptions.push(contextOptions);
 						const context = createMockBrowserContext(
 							browserState.isolatedContextCookies[state.contexts.length] ?? [],
 							options,
@@ -653,7 +739,12 @@ class MockWebSocket {
 	}
 
 	dispatchFetchRequest(dispatch: MockResourceDispatch): string {
-		const requestId = `fetch-request-${cdpState.fetchFailures.length + cdpState.fetchFulfillments.length + 1}`;
+		const requestId = `fetch-request-${
+			cdpState.fetchFailures.length +
+			cdpState.fetchFulfillments.length +
+			cdpState.fetchContinues.length +
+			1
+		}`;
 		this.emitPageEvent("Fetch.requestPaused", {
 			request: {
 				headers: dispatch.headers ?? {},
@@ -663,6 +754,23 @@ class MockWebSocket {
 			},
 			requestId,
 			resourceType: dispatch.resourceType ?? "Document",
+		});
+		return requestId;
+	}
+
+	dispatchFetchResponse(dispatch: MockCdpFetchResponseDispatch): string {
+		const requestId = `fetch-response-${cdpState.fetchResponseBodies.size + 1}`;
+		cdpState.fetchResponseBodies.set(requestId, dispatch.body);
+		this.emitPageEvent("Fetch.requestPaused", {
+			request: {
+				headers: {},
+				method: dispatch.method ?? "GET",
+				url: dispatch.url,
+			},
+			requestId,
+			resourceType: "Document",
+			responseHeaders: dispatch.headers ?? [],
+			responseStatusCode: dispatch.status ?? 200,
 		});
 		return requestId;
 	}
@@ -931,6 +1039,18 @@ class MockWebSocket {
 				});
 				this.replyToPage(message.id, {});
 				break;
+			case "Fetch.getResponseBody": {
+				const requestId = String(message.params?.requestId ?? "");
+				this.replyToPage(message.id, {
+					base64Encoded: false,
+					body: cdpState.fetchResponseBodies.get(requestId) ?? "",
+				});
+				break;
+			}
+			case "Fetch.continueRequest":
+				cdpState.fetchContinues.push(String(message.params?.requestId ?? ""));
+				this.replyToPage(message.id, {});
+				break;
 			case "Fetch.failRequest":
 				cdpState.fetchFailures.push({
 					errorReason: String(message.params?.errorReason ?? ""),
@@ -950,6 +1070,9 @@ describe("createBrowserClient", () => {
 		browserState.defaultContextCookies.length = 0;
 		browserState.isolatedContextCookies.length = 0;
 		browserState.launchCalls.length = 0;
+		browserState.localCdpAuthResponses.length = 0;
+		browserState.localCdpSessions.length = 0;
+		browserState.localFetchEnableParams.length = 0;
 		browserState.requireError = null;
 		stealthState.callCount = 0;
 		stealthState.pluginFactoryCalls = 0;
@@ -972,6 +1095,8 @@ describe("createBrowserClient", () => {
 		cdpState.fetchEnableParams.length = 0;
 		cdpState.fetchFailures.length = 0;
 		cdpState.fetchFulfillments.length = 0;
+		cdpState.fetchContinues.length = 0;
+		cdpState.fetchResponseBodies.clear();
 		cdpState.frameEvaluationErrors.clear();
 		cdpState.isolatedWorldContextIds.clear();
 		cdpState.isolatedWorldContextIds.set("main-frame", 7);
@@ -1211,8 +1336,66 @@ describe("createBrowserClient", () => {
 			},
 		]);
 		expect(rawPage?.state.resourceAborts).toEqual([]);
-		expect(rawPage?.state.unrouteCalls).toEqual(["**/*"]);
+		expect(browserState.localFetchEnableParams).toEqual([
+			{ patterns: [{ requestStage: "Request", urlPattern: "*" }] },
+		]);
+		expect(rawPage?.state.unrouteCalls).toEqual([]);
+		expect(browserState.browsers[0]?.defaultContext.state.unrouteCalls).toEqual(["**/*"]);
 		expect(rawPage?.state.routes).toEqual([]);
+	});
+
+	it("answers proxy Fetch auth challenges without leaking credentials to origin challenges", async () => {
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient({
+			proxy: "http://proxy-user:proxy-pass@proxy.test:8080",
+			stealth: false,
+		});
+		const page = await client.newPage();
+
+		await page.withResourcePolicy({ routes: [] }, async () => {
+			expect(browserState.localFetchEnableParams).toEqual([
+				{
+					handleAuthRequests: true,
+					patterns: [{ requestStage: "Request", urlPattern: "*" }],
+				},
+			]);
+			const session = browserState.localCdpSessions[0];
+			if (!session) throw new Error("local CDP session was not created");
+			session.dispatchAuthRequired({
+				authChallenge: { source: "Proxy" },
+				requestId: "proxy-request",
+			});
+			session.dispatchAuthRequired({
+				authChallenge: { source: "Server" },
+				requestId: "origin-request",
+			});
+			session.dispatchAuthRequired({
+				authChallenge: { source: "Proxy" },
+				requestId: "proxy-request",
+			});
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		});
+
+		await page.close();
+		await client.close();
+		expect(browserState.localCdpAuthResponses).toEqual([
+			{
+				authChallengeResponse: {
+					password: "proxy-pass",
+					response: "ProvideCredentials",
+					username: "proxy-user",
+				},
+				requestId: "proxy-request",
+			},
+			{
+				authChallengeResponse: { response: "CancelAuth" },
+				requestId: "origin-request",
+			},
+			{
+				authChallengeResponse: { response: "CancelAuth" },
+				requestId: "proxy-request",
+			},
+		]);
 	});
 
 	it("blocks unhandled resource requests by default", async () => {
@@ -1297,7 +1480,8 @@ describe("createBrowserClient", () => {
 				url: "https://example.test/after-error",
 			},
 		]);
-		expect(rawPage?.state.unrouteCalls).toEqual(["**/*"]);
+		expect(rawPage?.state.unrouteCalls).toEqual([]);
+		expect(browserState.browsers[0]?.defaultContext.state.unrouteCalls).toEqual(["**/*"]);
 		expect(rawPage?.state.routes).toEqual([]);
 	});
 
@@ -1489,8 +1673,27 @@ describe("createBrowserClient", () => {
 		expect(stealthState.callCount).toBe(0);
 	});
 
+	it("does not expose malformed authenticated proxy userinfo in errors", async () => {
+		const credentialMarker = "credential-material";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient({
+			proxy: `http://proxy-user:${credentialMarker}%E0%A4%A@proxy.test:8080`,
+		});
+
+		const error = await client.newPage().catch((cause: unknown) => cause);
+
+		expect(error).toMatchObject({
+			code: "BROWSER_PROXY_INVALID",
+			message: "Browser proxy credentials use invalid percent-encoding",
+		});
+		expect(String(error)).not.toContain(credentialMarker);
+		expect(browserState.launchCalls).toEqual([]);
+	});
+
 	it("binds a browser resolver proxy identity to a local Playwright launch", async () => {
-		const proxyUrl = "http://proxy-user:proxy-password@proxy.test:8080";
+		const proxyUsername = "proxy-user";
+		const proxyPassword = "proxy:password@value";
+		const proxyUrl = `http://${proxyUsername}:${encodeURIComponent(proxyPassword)}@proxy.test:8080`;
 		browserState.isolatedContextCookies.push([
 			{
 				name: "aws-waf-token",
@@ -1525,7 +1728,11 @@ describe("createBrowserClient", () => {
 				args: [],
 				executablePath: undefined,
 				headless: true,
-				proxy: { server: proxyUrl },
+				proxy: {
+					server: "http://proxy.test:8080",
+					username: proxyUsername,
+					password: proxyPassword,
+				},
 			},
 		]);
 	});
@@ -1934,6 +2141,98 @@ describe("createBrowserClient", () => {
 				responseHeaders: [{ name: "content-type", value: "text/html" }],
 			},
 		]);
+	});
+
+	it("appends CSP to CDP document responses without changing their body", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		await page.withResourcePolicy(
+			{
+				documentContentSecurityPolicy: "connect-src http: https:",
+				routes: [],
+			},
+			async () => {
+				const socket = cdpState.pageSockets[0];
+				if (!socket) throw new Error("CDP page socket was not opened");
+				socket.dispatchFetchResponse({
+					body: "<!doctype html><title>preserved</title>",
+					headers: [
+						{ name: "Content-Type", value: "text/html" },
+						{ name: "Content-Security-Policy", value: "script-src 'self'" },
+					],
+					url: "https://example.test/document",
+				});
+				await waitForCondition(
+					() => cdpState.fetchFulfillments.length === 1,
+					"CDP document response was not fulfilled",
+				);
+			},
+		);
+		await page.close();
+		await client.close();
+
+		expect(cdpState.fetchEnableParams).toEqual([
+			{
+				patterns: [
+					{ requestStage: "Request", urlPattern: "*" },
+					{ requestStage: "Response", resourceType: "Document", urlPattern: "*" },
+				],
+			},
+		]);
+		expect(cdpState.fetchFulfillments).toEqual([
+			{
+				body: Buffer.from("<!doctype html><title>preserved</title>").toString("base64"),
+				requestId: "fetch-response-1",
+				responseCode: 200,
+				responseHeaders: [
+					{ name: "Content-Type", value: "text/html" },
+					{ name: "Content-Security-Policy", value: "script-src 'self'" },
+					{ name: "Content-Security-Policy", value: "connect-src http: https:" },
+				],
+			},
+		]);
+	});
+
+	it("continues an authorized CDP Fetch request under a resource policy", async () => {
+		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const client = createBrowserClient();
+		const page = await client.newPage();
+
+		await page.withResourcePolicy(
+			{
+				routes: [
+					{
+						match: "https://example.test/authorized",
+						handle: () => ({ action: "continue" }),
+					},
+				],
+			},
+			async () => {
+				const socket = cdpState.pageSockets[0];
+				if (!socket) throw new Error("CDP page socket was not opened");
+				socket.dispatchFetchRequest({
+					method: "GET",
+					resourceType: "Script",
+					url: "https://example.test/authorized",
+				});
+				await waitForCondition(
+					() => cdpState.fetchContinues.length === 1,
+					"CDP Fetch request was not continued",
+				);
+			},
+		);
+		await page.close();
+		await client.close();
+
+		expect(cdpState.fetchContinues).toEqual(["fetch-request-1"]);
+		expect(cdpState.fetchFailures).toEqual([]);
+		expect(cdpState.fetchFulfillments).toEqual([]);
 	});
 
 	it("blocks unmatched CDP Fetch requests by default", async () => {
