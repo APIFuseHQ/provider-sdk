@@ -386,6 +386,110 @@ describe("resolver vendor chain", () => {
 		]);
 	});
 
+	it("reaches the browser adapter through a proxy identity without a CDP pool URL", async () => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-local-browser-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-local-browser-password";
+		const browser = createStubAdapter({ id: "browser" });
+		let configuration: string | undefined;
+		const resolver = createResolverClientFromEnvForTests(
+			{ vendors: ["browser"], kinds: ["aws_waf"] },
+			{},
+			{ proxyIntent: REQUIRED_PROXY_INTENT },
+			{
+				browser(resolvedConfiguration) {
+					configuration = resolvedConfiguration;
+					return browser.adapter;
+				},
+			},
+		);
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({
+			form: "token",
+			token: "browser",
+		});
+		expect(configuration).toBe("");
+		expect(browser.state.solveCalls).toBe(1);
+		expect(browser.state.identities).toEqual([
+			{
+				proxyUrl: expect.stringMatching(/^http:\/\/resolver-local-browser-account-/),
+				userAgent: REQUIRED_PROXY_INTENT.userAgent,
+			},
+		]);
+	});
+
+	it("keeps the CDP pool URL as browser adapter configuration", async () => {
+		const browser = createStubAdapter({ id: "browser" });
+		let configuration: string | undefined;
+		const resolver = createResolverClientFromEnvForTests(
+			{ vendors: ["browser"], kinds: ["aws_waf"] },
+			{ [APIFUSE__CDP_POOL__URL]: "  ws://cdp-pool.test  " },
+			{},
+			{
+				browser(resolvedConfiguration) {
+					configuration = resolvedConfiguration;
+					return browser.adapter;
+				},
+			},
+		);
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({
+			form: "token",
+			token: "browser",
+		});
+		expect(configuration).toBe("ws://cdp-pool.test");
+		expect(browser.state.solveCalls).toBe(1);
+	});
+
+	it.each(["2captcha", "capsolver", "capmonster"] as const)(
+		"keeps %s unavailable without its API key",
+		async (vendor) => {
+			await expect(
+				createResolverClientFromEnv({ vendors: [vendor], kinds: ["turnstile"] }, {}).solve({
+					kind: "turnstile",
+					siteKey: "site-key",
+					pageUrl: CHALLENGE.pageUrl,
+				}),
+			).rejects.toMatchObject({
+				code: "RESOLVER_CHAIN_EXHAUSTED",
+				details: [{ vendor, reason: "missing_credentials" }],
+			});
+		},
+	);
+
+	it("attempts browser first in a proxy-backed chain without resolver credentials", async () => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-local-chain-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-local-chain-password";
+		const browser = createStubAdapter({
+			id: "browser",
+			behavior: unavailable("browser", "allocation_exhausted"),
+		});
+		const twoCaptcha = createStubAdapter({ id: "2captcha" });
+		let twoCaptchaFactoryCalls = 0;
+		const resolver = createResolverClientFromEnvForTests(
+			{ vendors: ["browser", "2captcha"], kinds: ["aws_waf"] },
+			{},
+			{ proxyIntent: REQUIRED_PROXY_INTENT },
+			{
+				browser: () => browser.adapter,
+				"2captcha": () => {
+					twoCaptchaFactoryCalls += 1;
+					return twoCaptcha.adapter;
+				},
+			},
+		);
+
+		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{ vendor: "browser", reason: "allocation_exhausted" },
+				{ vendor: "2captcha", reason: "missing_credentials" },
+			],
+		});
+		expect(browser.state.solveCalls).toBe(1);
+		expect(twoCaptchaFactoryCalls).toBe(0);
+		expect(twoCaptcha.state.solveCalls).toBe(0);
+	});
+
 	it("defaults a required proxy identity to the SDK stealth profile", async () => {
 		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-default-profile-account";
 		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-default-profile-password";

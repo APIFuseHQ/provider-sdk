@@ -11,6 +11,16 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 8 (2026-08-19).** The local Playwright path added with Revision 6
+could not run through the env-configured resolver: vendor availability treated
+an absent `APIFUSE__CDP_POOL__URL` as a missing credential and replaced the
+browser adapter before its solve-time proxy-identity gate could run. The CDP
+pool URL is optional browser configuration, not a credential. The `"browser"`
+vendor is therefore always admitted to its adapter, which fails closed when
+neither a pool URL nor a resolved proxy identity exists. Solver-vendor API keys
+remain availability credentials. Sections changed: Decision 3a and
+Verification.
+
 **Revision 7 (2026-08-18).** The first lazy resolver wiring passed a user agent
 only when a provider declared `stealth.profile`. `danawa` and `naver-map` both
 declare `proxy: { mode: "required" }` without a stealth profile, so their leases
@@ -484,7 +494,7 @@ failover triggers map cleanly onto the existing four:
 
 | Chain rule | `"browser"` instance |
 | --- | --- |
-| missing credentials | no `cdpUrl` configured |
+| missing credentials | neither `cdpUrl` nor a resolved proxy identity is available at solve time |
 | allocation exhausted | pool queue depth exceeded, no endpoint available |
 | outage / transport failure | CDP connect failure, endpoint quarantined |
 | per-vendor timeout | navigation or solve budget elapsed |
@@ -1018,6 +1028,10 @@ These must hold before `Status: accepted`:
   cannot see, which is the property that makes it a contract addition rather
   than a convenience wrapper.
 - Requesting an undeclared kind throws before any vendor call.
+- Browser vendor availability does not depend on `APIFUSE__CDP_POOL__URL`:
+  a resolved proxy identity reaches the local Playwright adapter without it,
+  while the adapter still reports `missing_credentials` when neither input is
+  present. Solver-vendor API keys retain their existing availability gate.
 - A token-family provider never triggers proxy or user-agent binding.
 - Exhausting every vendor raises a typed error naming the attempted vendors and
   never returns a partial solution.

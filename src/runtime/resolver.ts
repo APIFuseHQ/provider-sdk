@@ -966,15 +966,20 @@ function resolveVendorAvailability(
 			reason: "missing_transport",
 		};
 	}
+	if (vendor === "browser") {
+		return {
+			vendor,
+			available: true,
+			configuration: normalizedEnvValue(env, APIFUSE__CDP_POOL__URL) ?? "",
+		};
+	}
 
 	const envKey =
 		vendor === "2captcha"
 			? APIFUSE__RESOLVER__2CAPTCHA__API_KEY
 			: vendor === "capsolver"
 				? APIFUSE__RESOLVER__CAPSOLVER__API_KEY
-				: vendor === "capmonster"
-					? APIFUSE__RESOLVER__CAPMONSTER__API_KEY
-					: APIFUSE__CDP_POOL__URL;
+				: APIFUSE__RESOLVER__CAPMONSTER__API_KEY;
 
 	const configuration = normalizedEnvValue(env, envKey);
 	return configuration
