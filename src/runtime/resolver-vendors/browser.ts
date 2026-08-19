@@ -28,6 +28,22 @@ type SupportedBrowserChallengeKind = keyof typeof SUCCESS_COOKIE_NAMES;
 
 type BrowserClientFactory = (options: BrowserClientOptions) => BrowserClient;
 
+let createResolverBrowserClient: BrowserClientFactory = createBrowserClient;
+
+/** Internal test seam; deliberately not re-exported from the package root. */
+export function swapBrowserResolverClientFactoryForTests(
+	factory: BrowserClientFactory | undefined,
+): () => void {
+	const original = createResolverBrowserClient;
+	createResolverBrowserClient = factory ?? createBrowserClient;
+	let restored = false;
+	return () => {
+		if (restored) return;
+		restored = true;
+		createResolverBrowserClient = original;
+	};
+}
+
 export interface BrowserResolverVendorOptions {
 	readonly cdpUrl?: string;
 	readonly timeoutMs: number;
@@ -297,7 +313,7 @@ async function closeBrowserClient(
 export function createBrowserResolverVendorAdapter(
 	options: BrowserResolverVendorOptions,
 ): BrowserResolverVendorAdapter {
-	const createClient = options.createClient ?? createBrowserClient;
+	const createClient = options.createClient ?? createResolverBrowserClient;
 	const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_COOKIE_POLL_INTERVAL_MS;
 
 	return {

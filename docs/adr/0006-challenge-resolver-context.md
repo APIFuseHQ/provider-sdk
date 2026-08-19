@@ -11,6 +11,15 @@
 This ADR is still `proposed`; the record below is amended in place rather than
 superseded, because the decision did not reverse — an axis was added to it.
 
+**Revision 9 (2026-08-19).** Revision 8 admitted the browser adapter without a
+pool URL but represented the absent optional value as `""`. Because the adapter
+uses presence (`cdpUrl !== undefined`) to derive `BrowserClient.requireCdpPool`,
+that sentinel incorrectly re-enabled the production pool requirement and kept
+the local Playwright path unreachable. Absence now remains `undefined` through
+the adapter-factory boundary; the solve-time identity gate and existing
+`requireCdpPool` semantics are unchanged. Sections changed: Decision 3a and
+Verification.
+
 **Revision 8 (2026-08-19).** The local Playwright path added with Revision 6
 could not run through the env-configured resolver: vendor availability treated
 an absent `APIFUSE__CDP_POOL__URL` as a missing credential and replaced the
@@ -500,6 +509,11 @@ failover triggers map cleanly onto the existing four:
 | per-vendor timeout | navigation or solve budget elapsed |
 | **egress refused before challenge** | upstream returns a block page instead of a challenge (Revision 3) |
 | *not* a failover cause | the challenge itself proving unsolvable in a browser |
+
+An omitted pool URL remains `undefined` through browser adapter construction.
+It must not be represented by an empty-string sentinel: the adapter derives
+`requireCdpPool` from whether the optional value is present, while independently
+using its truthiness in the solve-time identity gate.
 
 That last row is the important one and it is load-bearing: if AWS promotes a
 lane from `challenge` to `captcha` — a human puzzle — the browser cannot solve
@@ -1030,8 +1044,9 @@ These must hold before `Status: accepted`:
 - Requesting an undeclared kind throws before any vendor call.
 - Browser vendor availability does not depend on `APIFUSE__CDP_POOL__URL`:
   a resolved proxy identity reaches the local Playwright adapter without it,
-  while the adapter still reports `missing_credentials` when neither input is
-  present. Solver-vendor API keys retain their existing availability gate.
+  the omitted URL remains `undefined` and produces `requireCdpPool: false`, while
+  the adapter still reports `missing_credentials` when neither input is present.
+  Solver-vendor API keys retain their existing availability gate.
 - A token-family provider never triggers proxy or user-agent binding.
 - Exhausting every vendor raises a typed error naming the attempted vendors and
   never returns a partial solution.

@@ -3,11 +3,14 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { VALID_PROVIDER_CHALLENGE_KINDS } from "../../define.js";
 import { createProviderCache } from "../cache.js";
 import type {
+	BrowserClient,
+	BrowserPage,
 	ChallengeSolution,
 	ProviderChallenge,
 	ProviderChallengeKind,
 	ProviderResolverVendor,
 } from "../../types.js";
+import { type BrowserClientOptions, createBrowserClient } from "../browser.js";
 import {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
@@ -18,6 +21,7 @@ import {
 	RESOLVER_ADAPTER_REGISTRY,
 	swapResolverDefaultUserAgentForTests,
 } from "../resolver.js";
+import { swapBrowserResolverClientFactoryForTests } from "../resolver-vendors/browser.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
 	ResolverChallengeVerdictError,
@@ -407,7 +411,7 @@ describe("resolver vendor chain", () => {
 			form: "token",
 			token: "browser",
 		});
-		expect(configuration).toBe("");
+		expect(configuration).toBeUndefined();
 		expect(browser.state.solveCalls).toBe(1);
 		expect(browser.state.identities).toEqual([
 			{
@@ -415,6 +419,75 @@ describe("resolver vendor chain", () => {
 				userAgent: REQUIRED_PROXY_INTENT.userAgent,
 			},
 		]);
+	});
+
+	it("runs the real browser adapter locally when CDP pool configuration is absent", async () => {
+		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-real-browser-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-real-browser-password";
+		let clientOptions: BrowserClientOptions | undefined;
+		let browserClientConfigurationError: unknown;
+		const page = {
+			async cookies() {
+				return [
+					{
+						domain: ".example.com",
+						httpOnly: true,
+						name: "aws-waf-token",
+						path: "/",
+						sameSite: "None",
+						secure: true,
+						value: "local-browser-token",
+					},
+				];
+			},
+			async evaluate<T>() {
+				return REQUIRED_PROXY_INTENT.userAgent as T;
+			},
+			async goto() {},
+		} as unknown as BrowserPage;
+		const client = {
+			engine: "playwright-stealth",
+			async close() {},
+			async withIsolatedContext<T>(handler: (isolatedPage: BrowserPage) => Promise<T>) {
+				return await handler(page);
+			},
+		} as unknown as BrowserClient;
+		const restoreClientFactory = swapBrowserResolverClientFactoryForTests((options) => {
+			clientOptions = options;
+			try {
+				createBrowserClient(options);
+			} catch (error) {
+				browserClientConfigurationError = error;
+			}
+			return client;
+		});
+
+		try {
+			const resolver = createResolverClientFromEnv(
+				{ vendors: ["browser"], kinds: ["aws_waf"] },
+				{},
+				{
+					allowedHosts: ["example.com"],
+					proxyIntent: REQUIRED_PROXY_INTENT,
+				},
+			);
+
+			await expect(resolver.solve(CHALLENGE)).resolves.toEqual({
+				form: "cookies",
+				cookies: { "aws-waf-token": "local-browser-token" },
+				userAgent: REQUIRED_PROXY_INTENT.userAgent,
+			});
+			if (browserClientConfigurationError !== undefined) {
+				throw browserClientConfigurationError;
+			}
+			expect(clientOptions).toMatchObject({
+				cdpUrl: "",
+				proxy: expect.stringMatching(/^http:\/\/resolver-real-browser-account-/),
+				requireCdpPool: false,
+			});
+		} finally {
+			restoreClientFactory();
+		}
 	});
 
 	it("keeps the CDP pool URL as browser adapter configuration", async () => {
