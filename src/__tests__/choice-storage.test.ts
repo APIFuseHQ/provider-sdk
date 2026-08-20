@@ -42,6 +42,18 @@ async function expectWordChoiceNotFound(promise: Promise<unknown>): Promise<void
 	}
 }
 
+async function expectUniformChoiceNotFound(run: () => unknown | Promise<unknown>): Promise<void> {
+	try {
+		await run();
+		throw new Error("Expected choice parsing to reject.");
+	} catch (error) {
+		expect(error).toBeInstanceOf(ProviderChoiceTokenError);
+		expect((error as ProviderChoiceTokenError).reason).toBe("invalid_payload");
+		assertIsError(error);
+		expect(error.message).toBe("Provider choice token was not found.");
+	}
+}
+
 function createManagedChoiceFixture(options?: {
 	readonly connectionId?: string;
 	readonly credentialValues?: Record<string, string>;
@@ -125,7 +137,7 @@ describe("managed choice storage", () => {
 		expect(parsed).toEqual({ choice_id: "A" });
 	});
 
-	it("parses a legacy encrypted server handle during the compatibility window", async () => {
+	it("rejects an encrypted legacy server handle with the uniform not-found error", async () => {
 		const state = new MemoryProviderRuntimeState();
 		const payload = { choice_id: "legacy-A" };
 		const choice = createManagedChoiceFixture({ state });
@@ -137,16 +149,35 @@ describe("managed choice storage", () => {
 			payload,
 		});
 
-		const parsed = await choice.parse({
-			token,
-			prefix: "provider_choice_v2",
-			purpose: "reservation",
-			ttlMs: 60_000,
-			nowMs: 2_000,
-			storage: STORAGE_OPTIONS,
-		});
+		const namespace = state.firstNamespace();
+		let stateReads = 0;
+		namespace.get = async () => {
+			stateReads += 1;
+			throw new Error("Legacy server state must not be read.");
+		};
 
-		expect(parsed).toEqual({ choice_id: "legacy-A" });
+		await expectUniformChoiceNotFound(() =>
+			choice.parse({
+				token,
+				prefix: "provider_choice_v2",
+				purpose: "reservation",
+				ttlMs: 60_000,
+				nowMs: 2_000,
+				storage: STORAGE_OPTIONS,
+			}),
+		);
+		await expectUniformChoiceNotFound(() =>
+			choice.parse({
+				token,
+				prefix: "provider_choice_v2",
+				purpose: "reservation",
+				ttlMs: 60_000,
+				nowMs: 2_000,
+				storage: STORAGE_OPTIONS,
+				consume: "explicit",
+			}),
+		);
+		expect(stateReads).toBe(0);
 	});
 
 	it("issues server-stored choices as words without runtime opt-in", async () => {
@@ -166,72 +197,6 @@ describe("managed choice storage", () => {
 
 		expect(token.split(".")).not.toHaveLength(6);
 		expect(tokenWordCount(token, WORD_PREFIX)).toBe(4);
-	});
-
-	it("keeps dual-read while issuing only word tokens", async () => {
-		const state = new MemoryProviderRuntimeState();
-		const choice = createManagedChoiceFixture({ state });
-		const legacyToken = await issueLegacyServerChoiceFixture({
-			choice,
-			state,
-			prefix: WORD_PREFIX,
-			purpose: "dual-read",
-			payload: { kind: "legacy" },
-		});
-		const wordToken = await choice.issue({
-			prefix: WORD_PREFIX,
-			purpose: "dual-read",
-			payload: { kind: "word" },
-			ttlMs: 60_000,
-			nowMs: 1_000,
-			storage: STORAGE_OPTIONS,
-		});
-
-		expect(
-			await choice.parse({
-				token: legacyToken,
-				prefix: WORD_PREFIX,
-				purpose: "dual-read",
-				ttlMs: 60_000,
-				nowMs: 2_000,
-				storage: STORAGE_OPTIONS,
-			}),
-		).toEqual({ kind: "legacy" });
-		expect(
-			await choice.parse({
-				token: wordToken,
-				prefix: WORD_PREFIX,
-				purpose: "dual-read",
-				ttlMs: 60_000,
-				nowMs: 2_000,
-				storage: STORAGE_OPTIONS,
-			}),
-		).toEqual({ kind: "word" });
-	});
-
-	it("retains the documented unsupported explicit claim for legacy handles", async () => {
-		const state = new MemoryProviderRuntimeState();
-		const choice = createManagedChoiceFixture({ state });
-		const token = await issueLegacyServerChoiceFixture({
-			choice,
-			state,
-			prefix: WORD_PREFIX,
-			purpose: "legacy-explicit",
-			payload: { kind: "legacy" },
-		});
-		const claim = await choice.parse({
-			token,
-			prefix: WORD_PREFIX,
-			purpose: "legacy-explicit",
-			nowMs: 2_000,
-			storage: STORAGE_OPTIONS,
-			consume: "explicit",
-		});
-
-		expect(claim.status).toBe("active");
-		if (claim.status !== "active") throw new Error("Expected an active legacy claim.");
-		expect(claim.payload).toEqual({ kind: "legacy" });
-		expect(await claim.consume()).toEqual({ status: "unsupported" });
 	});
 
 	it("round-trips a four-word server-stored choice", async () => {

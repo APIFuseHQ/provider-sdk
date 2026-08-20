@@ -1,7 +1,7 @@
 # ADR: Word-based server-stored choice tokens
 
 - Status: accepted
-- Date: 2026-08-10; amended 2026-08-19
+- Date: 2026-08-10; amended 2026-08-19 and 2026-08-20
 - Deciders: Taehoon (owner), Soju (agent)
 - Scope: `@apifuse/provider-sdk` managed provider choice tokens stored in runtime state
 
@@ -60,23 +60,29 @@ The canonical hyphen-joined word sequence is the state key. Storage continues th
 
 Issuance selects every word with cryptographic randomness and creates the record with compare-and-set-if-absent semantics. A collision regenerates the whole sequence. Five failed attempts produce a `CHOICE_STATE_UNAVAILABLE`-class provider error instead of overwriting a live choice.
 
-### 4. Parsing is dual-read during a bounded compatibility window
+### 4. Server-stored parsing is word-only after a bounded compatibility window
 
 Parse first tests the literal provider prefix followed by a body that dictionary-segments into four or five hyphen-separated words. Dictionary-aware segmentation preserves the official `yo-yo` entry without confusing its internal hyphen for an extra word. A structurally valid word token is handled only as a word token: missing state, expiry, consumption, corrupt state, digest failure, or binding failure is terminal and never falls through to the encrypted parser.
 
-Only a structural mismatch enters the legacy AES-256-GCM envelope path. This permits already-issued server handles and all inline tokens to continue parsing during rollout. A failed validation of a structurally valid word token never falls through to the legacy parser.
+Only a structural mismatch enters the AES-256-GCM envelope path, which remains the current inline format. After decryption, a payload shaped as the retired server handle (`storage: "server"` with a state id) fails closed with the same externally visible choice-not-found error class, code, and message as a missing word record; its referenced state is not read. A failed validation of a structurally valid word token never falls through to the envelope parser.
 
-Provider code MUST pass the unmodified token and its declared literal prefix to `ctx.choice.parse`. It MUST NOT preclassify with checks such as `token.startsWith(prefix + ".")`: the dot is part of the legacy envelope syntax and is absent from word tokens. The SDK parser is the single format discriminator. This contract lets provider-side prefix prechecks be deleted without weakening validation: the word path validates the literal prefix against both the input and stored record, while the legacy path validates the signed envelope prefix.
+Provider code MUST pass the unmodified token and its declared literal prefix to `ctx.choice.parse`. It MUST NOT preclassify with checks such as `token.startsWith(prefix + ".")`: the dot is part of the inline envelope syntax and is absent from word tokens. The SDK parser is the single format discriminator. This contract lets provider-side prefix prechecks be deleted without weakening validation: the word path validates the literal prefix against both the input and stored record, while the inline path validates the signed envelope prefix.
 
-The legacy parser cannot be removed on a calendar date chosen independently of issued TTLs. Rollout records the last time any deployment pinned to an older SDK can mint a legacy managed token, `T_last_legacy_mint`, and the parser removal milestone MUST be later than `T_last_legacy_mint + TTL_max`, where `TTL_max` is the largest issuer-supplied TTL actually minted, not an assumed constant: the issuance API accepts an unconstrained `ttlMs`, so removal MUST be gated on verifying the outstanding legacy-token horizon (from mint records or the shared state store) at removal time. As a reference point the live-provider inventory currently caps managed-token TTLs at 30 days, but that inventory is an observation, not an enforced bound. A token is accepted according to its issuer TTL measured from issuance; this horizon describes only when parser code may be removed and is not a promise that every legacy token remains valid until a named date.
+The legacy server-handle parser could not be removed on a calendar date chosen independently of issued TTLs. Rollout recorded the last time any deployment pinned to an older SDK could mint a legacy managed token, `T_last_legacy_mint`, and required the removal milestone to follow the outstanding legacy-token horizon measured from mint records or the shared state store. The issuance API accepts an unconstrained `ttlMs`, so an assumed maximum was not sufficient.
+
+#### 2026-08-20 sunset execution record
+
+The owner-approved production Redis measurement against `fusepie-backend` found 959 provider-state keys in total. Legacy-candidate namespaces contained 29 `daangn.realty_search_pages` entries with approximately 29.99 days of TTL remaining, all read-only pagination cursors. NOL, kakaot, and catchtable contained zero legacy candidates; their 10–15 minute TTLs had already elapsed. Outstanding mutation-attempt tokens, the incident-sensitive class, were zero.
+
+The owner accepted invalidating the 29 daangn cursors because continuing a several-days-old pagination cursor had no observed practical use and rejection produces the uniform invalid result followed by a first-page search, not a false success. The server-stored state therefore transitioned from dual-read to word-only on 2026-08-20. The encrypted inline envelope remains a current format and is outside this sunset.
 
 The stored record is validated against prefix, provider id, purpose, TTL clamp, payload digest, replay key, and current connection or credential binding using the same key derivation and hash functions as the encrypted format. Missing state, expiry, invalid status for the requested consume mode, and binding mismatch fail closed with the same externally visible choice-not-found error class, code, and message. Internal observability may retain a safe reason.
 
 ### Unconditional issuance and rollback
 
-Server-stored issuance always produces the ADR word format. There is no runtime
-format setting: deployments are version-pinned, so the pinned SDK version is
-the rollout phase. Parsing remains dual-read while legacy tokens are in flight.
+Server-stored issuance and parsing always use the ADR word format. There is no
+runtime format setting: deployments are version-pinned, so the pinned SDK
+version is the rollout phase.
 
 Unconditional issuance carries a deployment prerequisite: every instance that
 can receive a token minted by this version MUST already run a dual-read parser
@@ -88,31 +94,29 @@ dual-read version fleet-wide first, then land unconditional issuance. Within a
 single rolling deploy of the issuance version this holds automatically, because
 the preceding pinned version is already dual-read.
 
-Rollback repins the immediately preceding beta, which already parses both word
-and legacy formats. Word tokens minted before the repin therefore remain
-readable, while the older version resumes its own issuance behavior. Legacy
-explicit claims retain the existing `unsupported` result and stable replay key;
-providers using `consume: "explicit"` must handle that compatibility branch
-until the legacy horizon closes. Removing the legacy parser is a separate wave
-after `T_last_legacy_mint + TTL_max`.
+Before sunset, rollback could repin the preceding dual-read beta while
+preserving already-minted word tokens. After the 2026-08-20 transition, a
+rollback MUST NOT restore legacy server-handle issuance: a word-only parser
+would reject the newly minted handles. Rollback targets must retain word
+issuance and parsing. Inline envelope issuance and parsing are unchanged.
 
 ### 5. Parsing has provider-controlled consume semantics
 
 `ctx.choice.parse` accepts `consume: "never" | "on-parse" | "explicit"`. The default is `never`.
 
-- `never` validates and returns an active payload without changing state. Repeated parse is valid until TTL expiry. This is the compatibility default because legacy managed tokens have never been consumed merely by parsing, and the live inventory includes reusable pagination cursors, NOL booking handles, and TableCheck cart handles.
+- `never` validates and returns an active payload without changing state. Repeated parse is valid until TTL expiry. This remains the compatibility default because the live inventory includes reusable pagination cursors, NOL booking handles, and TableCheck cart handles.
 - `on-parse` validates and atomically changes active to consumed before returning the payload. Concurrent reads admit one caller. Providers use it only when losing retry-after-parse behavior is intentional.
 - `explicit` validates without consuming and returns an active claim containing `payload`, `replayKey`, and `consume()`. The provider calls `consume()` at its chosen commit point. If upstream work fails before that point, the provider omits `consume()` and the same input can be parsed again. Competing claims use the captured state version, so only one claim changes the record and later claim attempts report already consumed.
 
 After explicit consumption, parsing the same input with `explicit` returns a consumed replay branch containing only the same `replayKey`; it does not return the payload or another consume function. Providers that maintain created/result records query those records by `replayKey` before deciding that a consumed replay is an error. The replay key is lowercase SHA-256 of the exact client-visible token, matching existing provider digest keys, and remains in the consumed record. This is the selected alternative to an atomic transaction across the SDK choice namespace and a provider-owned result namespace: the provider writes or claims its dedup/result record at the appropriate commit boundary, and the durable alias lets every later replay reach it.
 
-Consumption is a word-record capability. Legacy managed tokens retain their historical non-consuming behavior during dual-read; an explicit legacy claim therefore reports `unsupported`, while still providing the stable token replay key. Providers that opt into explicit consume MUST handle this compatibility branch until the legacy horizon closes.
+Consumption of server-stored choices is a word-record capability. Retired server handles are rejected before a claim is created, so server-stored explicit parsing no longer returns the legacy `unsupported` compatibility result. Inline envelopes have no atomic server record and retain their existing `unsupported` result when explicit consumption is requested.
 
 High-impact reservation, payment, and equivalent uses MUST request connection or credential binding and select either `on-parse` or `explicit` with provider-owned result deduplication. Reusable cursors and lookup handles use `never`.
 
 ### 6. Choice telemetry is allowlisted and redacted
 
-The runtime records `format=word|legacy`, operation (`parse` or `consume`), parse outcome, consume mode, consumed/replay booleans, provider id, and purpose. These fields distinguish word rollout, legacy fallback, invalid input, state failure, consumption, and idempotent replay without exposing capability material. Token text, payloads, replay keys, digests, credential values, and arbitrary error messages MUST NOT be placed in logs or telemetry. A telemetry sink failure does not change parse or consume behavior.
+The runtime records `format=word|legacy`, operation (`parse` or `consume`), parse outcome, consume mode, consumed/replay booleans, provider id, and purpose. The `legacy` telemetry label is retained for compatibility and now identifies the encrypted inline-envelope parser (including rejected retired server-handle payloads), not a supported server format. These fields distinguish parser paths, invalid input, state failure, consumption, and idempotent replay without exposing capability material. Token text, payloads, replay keys, digests, credential values, and arbitrary error messages MUST NOT be placed in logs or telemetry. A telemetry sink failure does not change parse or consume behavior.
 
 ### 7. Inline mode is unchanged
 
@@ -135,14 +139,14 @@ Positive:
 - Server-stored tokens shrink from hundreds of opaque characters to a provider prefix plus four or five LLM-copyable words.
 - Single-character mistakes cannot silently become another dictionary-valid word, and valid-word tampering cannot produce state without guessing a live key.
 - The state record is one auditable source of truth for payload, expiry, prefix, purpose, provider, digest, replay alias, consume status, and binding.
-- Inline tokens and already-issued encrypted server handles remain compatible during rollout.
-- Reusable cursors and handles preserve legacy parse behavior, while high-impact providers can select atomic claim semantics and retain idempotent result replay.
+- Inline tokens remain compatible because their encrypted envelope is unchanged.
+- Word-backed reusable cursors and handles retain repeated-parse behavior, while high-impact providers can select atomic claim semantics and retain idempotent result replay.
 
 Negative / accepted:
 
 - Server-stored tokens require available state for both issuance and parsing; they are intentionally not self-contained.
 - Four-word lookup keys provide 41.4 bits, so TTLs, binding where applicable, uniform invalid-input errors, and operation rate limiting remain part of the security boundary. Sensitive unbound use sites select the 51.7-bit five-word form.
-- Dual-read retains two parse paths until the last legacy mint plus the maximum issued TTL. Structural discrimination and the measured removal boundary prevent a failed word-token validation from being reinterpreted by the legacy path.
+- The sunset intentionally invalidates 29 measured daangn pagination cursors with up to approximately 29.99 days of TTL remaining; callers receive uniform invalid and restart from the first page.
 - Explicit consumption adds a provider-visible active/consumed branch. Providers must check their result record by replay key before treating a consumed replay as failure.
 
 ## Rejected alternatives
