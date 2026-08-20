@@ -1,7 +1,7 @@
 # ADR: Word-based server-stored choice tokens
 
 - Status: accepted
-- Date: 2026-08-10; amended 2026-08-19 and 2026-08-20
+- Date: 2026-08-10; amended 2026-08-19 and 2026-08-20 (legacy sunset; bound-verified stale disclosure)
 - Deciders: Taehoon (owner), Soju (agent)
 - Scope: `@apifuse/provider-sdk` managed provider choice tokens stored in runtime state
 
@@ -43,6 +43,8 @@ Binding changes the threat model. A **bound** token whose connection or credenti
 The analysis depends on these requirements:
 
 1. Parse returns one uniform `CHOICE_NOT_FOUND`-class error for a missing, expired, corrupt, or binding-mismatched word token. A consumed token also returns that error in `never` and `on-parse` modes. An `explicit` caller that already possesses the exact token may receive only its consumed status and replay key; it receives no payload. Invalid callers cannot distinguish the failure cases from the code or message, while internal metrics may distinguish them.
+
+   **Amended 2026-08-20 (bound-verified stale disclosure).** The uniform-error requirement is narrowed for bound records: a caller that passes binding verification on a BOUND word token may observe the canonical `stale` reason for a found-but-expired record, with the same error class and shape as the inline envelope's stale error. This creates no existence oracle for a guesser: guessing matters for unbound tokens only — as stated above, a bound hit is useless to a guesser — and a guesser holding a live bound word sequence fails binding verification before freshness is ever classified, so it keeps receiving the collapsed not-found error. The precedent is already inside this requirement: an `explicit` caller that proves possession of the exact token receives its consumed status and replay key, so possession or binding proof already grants information beyond the uniform error. Unbound tokens keep the fully collapsed behavior, which leaves the online-guessing analysis in this section and its numbers valid without recalculation. Freshness is classified only after the identity, payload-digest, replay-key, and binding checks have all passed, and every non-stale failure keeps the byte-identical collapsed error, so the check order is not observable from the error surface. The residual timing side channel — a failing integrity check returns without evaluating the remaining checks — was considered and accepted: the integrity comparisons are constant-ish digest comparisons, and the collapsed error already fires at indistinguishable points for missing versus corrupt records. Motivation (measured 2026-08-20): connection-bound booking and payment flows (tablecheck, catchtable, goodchoice) lost expiry classification, making an expired checkout that needs reconciliation indistinguishable from a retryable invalid token.
 2. Providers should declare `annotations.rateLimit` on operations that parse choices. The platform already supports this: for example, daangn `search-regions` declares `calls: 10` per minute, throttling per-tenant guessing to approximately 0.17 requests per second.
 3. Unbound handles minimize TTL. When an existing contract requires a long-lived unbound handle, it uses five-word `high` strength and an operation rate limit rather than relying on consumption.
 
@@ -77,6 +79,8 @@ The owner-approved production Redis measurement against `fusepie-backend` found 
 The owner accepted invalidating the 29 daangn cursors because continuing a several-days-old pagination cursor had no observed practical use and rejection produces the uniform invalid result followed by a first-page search, not a false success. The server-stored state therefore transitioned from dual-read to word-only on 2026-08-20. The encrypted inline envelope remains a current format and is outside this sunset.
 
 The stored record is validated against prefix, provider id, purpose, TTL clamp, payload digest, replay key, and current connection or credential binding using the same key derivation and hash functions as the encrypted format. Missing state, expiry, invalid status for the requested consume mode, and binding mismatch fail closed with the same externally visible choice-not-found error class, code, and message. Internal observability may retain a safe reason.
+
+**Amended 2026-08-20 (bound-verified stale disclosure).** Validation runs identity (provider id, purpose, prefix), then payload digest, then replay key, then binding, then freshness last; freshness classification is reachable only after every integrity and binding check has passed. When the stored record carries a connection or credential binding and that binding verified, an expired record surfaces the canonical `stale` reason — the same error class and shape as the inline envelope's stale error — instead of the collapsed not-found error. Every other failure, including expiry of an unbound record, keeps the exact collapsed error above, so the check order remains unobservable from the error surface. See the requirement 1 amendment in the guessing analysis for the security rationale and the accepted timing side channel.
 
 ### Unconditional issuance and rollback
 
