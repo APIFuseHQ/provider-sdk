@@ -11,7 +11,9 @@ import type {
 	ChallengeSolution,
 	ProviderChallenge,
 	ProviderChallengeKind,
+	ProviderProxyPolicy,
 	ProviderResolverVendor,
+	ResolverContext,
 } from "../../types.js";
 import { type BrowserClientOptions, createBrowserClient } from "../browser.js";
 import {
@@ -50,15 +52,15 @@ const CHALLENGE = {
 } satisfies ProviderChallenge;
 
 const ALL_CHALLENGE_KINDS: readonly ProviderChallengeKind[] = VALID_PROVIDER_CHALLENGE_KINDS;
-const REQUIRED_PROXY_POLICY = {
+const REQUIRED_PROXY_POLICY: ProviderProxyPolicy = {
 	mode: "required",
 	providers: ["nodemaven"],
-} as const;
+};
 const REQUIRED_PROXY_INTENT = {
 	mode: REQUIRED_PROXY_POLICY.mode,
 	upstream: { proxy: REQUIRED_PROXY_POLICY },
 	userAgent: "Resolver chain test agent/1.0",
-} as const;
+} satisfies NonNullable<Parameters<typeof createResolverClient>[0]["proxyIntent"]>;
 
 let originalNodemavenUsername: string | undefined;
 let originalNodemavenPassword: string | undefined;
@@ -81,6 +83,20 @@ type StubBehavior = (
 	challenge: ProviderChallenge,
 	signal: AbortSignal,
 ) => Promise<ChallengeSolution>;
+
+function createFetchDouble(
+	implementation: (
+		input: string | URL | Request,
+		init?: RequestInit,
+	) => Promise<Response>,
+): typeof fetch {
+	return Object.assign(implementation, {
+		preconnect(
+			_url: string | URL,
+			_options?: Parameters<typeof fetch.preconnect>[1],
+		): void {},
+	});
+}
 
 function createStubAdapter(options: {
 	readonly id: ProviderResolverVendor;
@@ -485,10 +501,10 @@ describe("resolver vendor chain", () => {
 		const twoCaptcha = createTwoCaptchaResolverVendorAdapter({
 			allowedHosts: ["example.com"],
 			apiKey: "chain-test-api-key",
-			fetchImpl: (async () => {
+			fetchImpl: createFetchDouble(async () => {
 				twoCaptchaFetchCalls += 1;
 				throw new Error("2captcha network must not be reached");
-			}) as typeof fetch,
+			}),
 		});
 		const page = createBrowserPageDouble({
 			async cookies() {
@@ -887,10 +903,10 @@ describe("resolver vendor chain", () => {
 				return { status: 200, headers: {}, body: "sensor", cookies: [] };
 			},
 		});
-		const scriptUrls = [
+		const scriptUrls: [string, string] = [
 			"https://sensor.example.com/akamai/sensor.js",
 			"http://sensor.example.com/akamai/sensor.js",
-		] as const;
+		];
 
 		for (const scriptUrl of scriptUrls) {
 			await expect(
