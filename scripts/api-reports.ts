@@ -16,6 +16,18 @@ type ApiExtractorConfig = {
 	apiReport: { reportFileName: string };
 };
 
+type NonTypedExportExemption = {
+	reason: string;
+	targets: string[];
+};
+
+const nonTypedExportExemptions: Record<string, NonTypedExportExemption> = {
+	"./auth-turn/auth-turn.v1.schema.json": {
+		reason: "JSON Schema asset; API Extractor only reports TypeScript declaration entry points.",
+		targets: ["./dist/auth-turn/auth-turn.v1.schema.json"],
+	},
+};
+
 if (mode !== "update" && mode !== "check") {
 	console.error("Usage: bun scripts/api-reports.ts <update|check>");
 	process.exit(2);
@@ -44,12 +56,52 @@ function collectTypesTargets(target: unknown): string[] {
 }
 
 const packageJson = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as PackageJson;
-const typedExports = Object.entries(packageJson.exports ?? {}).flatMap(([exportName, value]) =>
-	[...new Set(collectTypesTargets(value))].map((types) => ({
+const packageExports = Object.entries(packageJson.exports ?? {});
+const typedExports = packageExports.flatMap(([exportName, value]) => {
+	const typesTargets = [...new Set(collectTypesTargets(value))];
+	return typesTargets.map((types) => ({
 		exportName,
 		types: types.replace(/^\.\//, ""),
-	})),
+	}));
+});
+const exemptExports = packageExports.flatMap(([exportName, value]) => {
+	if (collectTypesTargets(value).length > 0) return [];
+	const exemption = nonTypedExportExemptions[exportName];
+	if (!exemption) return [];
+	const actualTargets = [...new Set(collectStringTargets(value))].sort();
+	const expectedTargets = [...exemption.targets].sort();
+	if (JSON.stringify(actualTargets) !== JSON.stringify(expectedTargets)) return [];
+	return [{ exportName, ...exemption }];
+});
+const unclassifiedExports = packageExports.filter(([exportName, value]) => {
+	if (collectTypesTargets(value).length > 0) return false;
+	return !exemptExports.some((entry) => entry.exportName === exportName);
+});
+const staleExemptions = Object.entries(nonTypedExportExemptions).filter(
+	([exportName]) => !exemptExports.some((entry) => entry.exportName === exportName),
 );
+
+console.log("Public export classification:");
+for (const { exportName, types } of typedExports) {
+	console.log(`  typed: ${exportName} (${types})`);
+}
+for (const { exportName, reason, targets } of exemptExports) {
+	console.log(`  exempt asset: ${exportName} (${targets.join(", ")}) — ${reason}`);
+}
+
+if (unclassifiedExports.length > 0 || staleExemptions.length > 0) {
+	console.error("Public export classification is incomplete or stale.");
+	if (unclassifiedExports.length > 0) {
+		console.error("Exports without a types condition or an exact non-typed asset exemption:");
+		for (const [exportName] of unclassifiedExports) console.error(`  ${exportName}`);
+	}
+	if (staleExemptions.length > 0) {
+		console.error("Non-typed asset exemptions that are absent, typed, or have different targets:");
+		for (const [exportName] of staleExemptions) console.error(`  ${exportName}`);
+	}
+	process.exit(1);
+}
+
 const parsedConfigs = configs.map((configName) => {
 	const configPath = join(configDir, configName);
 	const config = JSON.parse(readFileSync(configPath, "utf8")) as ApiExtractorConfig;

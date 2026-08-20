@@ -29,3 +29,5 @@ Choose the Changeset level from the committed API report evidence:
 - `major`: any removed or modified existing line in `api-reports/`, including narrowing the type of an existing field.
 
 Run `bun run api:update` when an exported declaration changes and commit the resulting `api-reports/*.api.md` diff. Reviewers use that committed report diff as the evidence for the semver level. CI runs `bun run api:check` to ensure the report is regenerated from the current declarations and has not been omitted from the pull request.
+
+Every public entry in `package.json`'s `exports` map must be classified by the API report gate. Entries with a `types` condition are typed entry points and require a matching API Extractor config and committed report. Non-typed assets that API Extractor cannot model must have an exact target and rationale in `scripts/api-reports.ts`; any unclassified export fails the gate.
