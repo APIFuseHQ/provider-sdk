@@ -652,14 +652,6 @@ async function parseWordServerStoredChoice(options: {
 		) {
 			throw wordChoiceNotFoundError();
 		}
-		assertFreshProviderChoiceIssuedAt(record.issued_at_ms, {
-			ttlMs:
-				options.parseOptions.ttlMs != null
-					? Math.min(options.parseOptions.ttlMs, record.ttl_ms)
-					: record.ttl_ms,
-			nowMs: options.parseOptions.nowMs,
-			futureToleranceMs: options.parseOptions.futureToleranceMs,
-		});
 		assertPayloadDigestMatches({
 			actual: digestChoicePayload(serializeChoicePayload(record.payload)),
 			expected: record.payload_digest,
@@ -679,6 +671,31 @@ async function parseWordServerStoredChoice(options: {
 		) {
 			throw wordChoiceNotFoundError();
 		}
+		throw error;
+	}
+	// Freshness is classified last, reachable only after every identity,
+	// integrity, and binding check above has passed (ADR 0006, amended
+	// 2026-08-20): a caller that proved the record's binding may observe the
+	// canonical stale error, while an unbound record keeps the collapsed
+	// not-found error so expiry never becomes an existence signal for
+	// guessable tokens.
+	try {
+		assertFreshProviderChoiceIssuedAt(record.issued_at_ms, {
+			ttlMs:
+				options.parseOptions.ttlMs != null
+					? Math.min(options.parseOptions.ttlMs, record.ttl_ms)
+					: record.ttl_ms,
+			nowMs: options.parseOptions.nowMs,
+			futureToleranceMs: options.parseOptions.futureToleranceMs,
+		});
+	} catch (error) {
+		const recordIsBound = Boolean(
+			record.binding?.connection_hash || record.binding?.credential_hash,
+		);
+		if (recordIsBound && error instanceof ProviderChoiceTokenError && error.reason === "stale") {
+			throw error;
+		}
+		if (error instanceof ProviderChoiceTokenError) throw wordChoiceNotFoundError();
 		throw error;
 	}
 
