@@ -19,8 +19,14 @@ type PackageJson = {
 };
 
 type ApiExtractorConfig = {
+	projectFolder?: string;
 	mainEntryPointFilePath: string;
-	apiReport: { includeForgottenExports?: boolean; reportFileName: string };
+	apiReport: {
+		enabled?: boolean;
+		includeForgottenExports?: boolean;
+		reportFolder?: string;
+		reportFileName: string;
+	};
 	docModel?: { includeForgottenExports?: boolean };
 };
 
@@ -327,6 +333,44 @@ const parsedConfigs = configs.map((configName) => {
 		types: config.mainEntryPointFilePath.replace(/^<projectFolder>\//, "").replace(/^\.\//, ""),
 	};
 });
+
+function resolveConfiguredPath(
+	configPath: string,
+	config: ApiExtractorConfig,
+	configuredPath: string,
+): string {
+	const configFolder = resolve(configPath, "..");
+	const projectFolder = resolve(configFolder, config.projectFolder ?? ".");
+	return resolve(configFolder, configuredPath.replaceAll("<projectFolder>", projectFolder));
+}
+
+const invalidApiReportConfigs = parsedConfigs.filter(({ config, configPath }) => {
+	if (config.apiReport.enabled !== true) return true;
+	if (typeof config.apiReport.reportFolder !== "string") return true;
+	return resolveConfiguredPath(configPath, config, config.apiReport.reportFolder) !== reportDir;
+});
+if (invalidApiReportConfigs.length > 0) {
+	console.error(
+		`API Extractor configs must enable apiReport and resolve apiReport.reportFolder to ${reportDir}.`,
+	);
+	for (const { config, configPath } of invalidApiReportConfigs) {
+		if (config.apiReport.enabled !== true) {
+			console.error(`  ${configPath}: apiReport.enabled must be true.`);
+		}
+		const reportFolder = config.apiReport.reportFolder;
+		if (typeof reportFolder !== "string") {
+			console.error(`  ${configPath}: apiReport.reportFolder must be a string.`);
+		} else {
+			const resolvedReportFolder = resolveConfiguredPath(configPath, config, reportFolder);
+			if (resolvedReportFolder !== reportDir) {
+				console.error(
+					`  ${configPath}: apiReport.reportFolder resolves to ${resolvedReportFolder}.`,
+				);
+			}
+		}
+	}
+	process.exit(1);
+}
 
 const unsafeForgottenExportConfigs = parsedConfigs.filter(
 	({ config }) =>
