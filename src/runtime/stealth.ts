@@ -566,6 +566,36 @@ function isTimeoutError(error: unknown, message: string): boolean {
 	return /\b(timed out|timeout|deadline exceeded)\b/i.test(message);
 }
 
+function findErrorWithCode(error: unknown, code: string): Error | undefined {
+	const seen = new Set<Error>();
+	let current: unknown = error;
+	while (current instanceof Error && !seen.has(current)) {
+		seen.add(current);
+		if (isRecord(current) && current.code === code) return current;
+		current = current.cause;
+	}
+	return undefined;
+}
+
+function findInvalidUrlError(error: unknown): Error | undefined {
+	const codedError = findErrorWithCode(error, "ERR_INVALID_URL");
+	if (codedError) return codedError;
+
+	const seen = new Set<Error>();
+	let current: unknown = error;
+	while (current instanceof Error && !seen.has(current)) {
+		seen.add(current);
+		if (
+			current.name === "TypeError" &&
+			/\b(?:invalid url|cannot be parsed as a URL)\b/i.test(current.message)
+		) {
+			return current;
+		}
+		current = current.cause;
+	}
+	return undefined;
+}
+
 function normalizeStealthTransportError(error: unknown): TransportError {
 	if (error instanceof ProxyResolutionError) {
 		return new TransportError(error.message, {
@@ -612,6 +642,15 @@ function normalizeStealthTransportError(error: unknown): TransportError {
 
 	if (PROXY_CONNECT_FAILURE_BODY_PATTERN.test(message)) {
 		return createProxyConnectFailureError(message, error instanceof Error ? error : undefined);
+	}
+
+	const invalidUrlError = findInvalidUrlError(error);
+	if (invalidUrlError) {
+		return new TransportError(invalidUrlError.message, {
+			code: "transport_invalid_url",
+			status: 0,
+			cause: error instanceof Error ? error : undefined,
+		});
 	}
 
 	return new TransportError("Network error", {
