@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { createRequire } from "node:module";
 import type {
 	BrowserProfile,
 	EmulationOS,
@@ -26,6 +27,7 @@ import type {
 	StealthRedirectHop,
 	StealthResponse,
 	StealthSession,
+	StealthProfile,
 } from "../types.js";
 import { StealthCookieJar } from "./stealth-cookies.js";
 import {
@@ -161,6 +163,7 @@ type WreqSessionCacheEntry = {
 type WreqModule = typeof import("wreq-js");
 
 let wreqModulePromise: Promise<WreqModule> | undefined;
+const require = createRequire(import.meta.url);
 
 function getWreqModule(): Promise<WreqModule> {
 	if (!wreqModulePromise) {
@@ -328,6 +331,77 @@ export function resolveWreqProfile(
 		);
 	}
 	return { browser, os };
+}
+
+/**
+ * Resolve a catalogue selection to the concrete fingerprint provided by the
+ * installed wreq-js transport. Intent selections are deliberately resolved at
+ * call time so upgrades follow the newest profile shipped by wreq-js.
+ */
+export async function resolveStealthProfile(profileName: string): Promise<StealthProfile> {
+	const wreq = await getWreqModule();
+	const selection = getStealthProfile(profileName);
+	const defaultWreq =
+		(wreq.default as
+			| {
+					getProfiles?: WreqModule["getProfiles"];
+					getEmulationHeaders?: WreqModule["getEmulationHeaders"];
+			  }
+			| undefined) ?? {};
+	const namedWreq = wreq as {
+		getProfiles?: WreqModule["getProfiles"];
+		getEmulationHeaders?: WreqModule["getEmulationHeaders"];
+	};
+	const requiredWreq =
+		namedWreq.getProfiles && namedWreq.getEmulationHeaders
+			? undefined
+			: (require("wreq-js") as {
+					getProfiles?: WreqModule["getProfiles"];
+					getEmulationHeaders?: WreqModule["getEmulationHeaders"];
+					default?: {
+						getProfiles?: WreqModule["getProfiles"];
+						getEmulationHeaders?: WreqModule["getEmulationHeaders"];
+					};
+				});
+	const getProfiles =
+		namedWreq.getProfiles ??
+		defaultWreq.getProfiles ??
+		requiredWreq?.getProfiles ??
+		requiredWreq?.default?.getProfiles;
+	const getEmulationHeaders =
+		namedWreq.getEmulationHeaders ??
+		defaultWreq.getEmulationHeaders ??
+		requiredWreq?.getEmulationHeaders ??
+		requiredWreq?.default?.getEmulationHeaders;
+	if (!getProfiles || !getEmulationHeaders) {
+		throw new SDKError("wreq-js does not expose its browser profile resolution helpers.");
+	}
+	const { browser, os } = resolveWreqProfile(profileName, getProfiles());
+	if (!("resolution" in selection)) return { ...selection };
+	const userAgent = getEmulationHeaders(browser, os).get("user-agent");
+	if (!userAgent) {
+		throw new SDKError(
+			`Stealth profile "${profileName}" resolved to ${browser}, but wreq-js did not provide a user-agent.`,
+		);
+	}
+
+	const parsed = parseProfileIdentifier(browser);
+	if (!parsed) {
+		throw new SDKError(
+			`Stealth profile "${profileName}" resolved to an invalid wreq-js browser profile: ${browser}.`,
+		);
+	}
+	return {
+		name: browser.replaceAll("_", "-"),
+		platform: os,
+		version: parsed.version.join("."),
+		userAgent,
+		tlsClientIdentifier: browser,
+	};
+}
+
+export async function resolveStealthProfileUserAgent(profileName: string): Promise<string> {
+	return (await resolveStealthProfile(profileName)).userAgent;
 }
 
 function resolveUrl(baseUrl: string, url: string): string {

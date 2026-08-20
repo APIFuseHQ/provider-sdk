@@ -468,6 +468,16 @@ function getProviderStealthProfile(provider: ProviderDefinition) {
 	return provider.stealth?.profile ? getStealthProfile(provider.stealth.profile) : undefined;
 }
 
+async function resolveProviderStealthUserAgent(
+	provider: ProviderDefinition,
+	options: ProviderServerRuntimeOptions,
+	proxyPolicy: ProviderProxyPolicy | undefined,
+): Promise<string | undefined> {
+	if (!proxyPolicy || !provider.stealth?.profile) return undefined;
+	const runtime = options.capabilityModules.stealth ?? (await importStealthRuntime());
+	return runtime.resolveStealthProfileUserAgent(provider.stealth.profile);
+}
+
 function isProductionProviderBrowserMode(provider: ProviderDefinition, env = process.env): boolean {
 	if (provider.runtime !== "browser") {
 		return false;
@@ -582,7 +592,7 @@ function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPo
 	return undefined;
 }
 
-function createProviderContext(
+async function createProviderContext(
 	provider: ProviderDefinition,
 	request: OperationRequest,
 	operationId: string,
@@ -590,11 +600,12 @@ function createProviderContext(
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
 	proxyTelemetry?: ProxyTelemetryCollector,
 	signal?: AbortSignal,
-): ProviderContext {
+): Promise<ProviderContext> {
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
 	const proxyPolicy = resolveNativeProxyPolicy(provider);
+	const stealthUserAgent = await resolveProviderStealthUserAgent(provider, options, proxyPolicy);
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveProviderProxyAffinityKey(provider, request, operationId),
@@ -710,7 +721,7 @@ function createProviderContext(
 										proxyIntent: {
 											mode: proxyPolicy.mode,
 											...proxyClientOptions,
-											...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+											...(stealthUserAgent ? { userAgent: stealthUserAgent } : {}),
 										},
 									}
 								: {}),
@@ -776,19 +787,20 @@ function createFlowContextStore(
 	};
 }
 
-function createAuthFlowContext(
+async function createAuthFlowContext(
 	provider: ProviderDefinition,
 	request: AuthFlowRequest,
 	options: ProviderServerRuntimeOptions,
 	signal?: AbortSignal,
-): {
+): Promise<{
 	context: FlowContext;
 	getPatch: () => Record<string, unknown | null> | undefined;
-} {
+}> {
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
 	const proxyPolicy = resolveNativeProxyPolicy(provider);
+	const stealthUserAgent = await resolveProviderStealthUserAgent(provider, options, proxyPolicy);
 	const contextData = request.context ?? {};
 	const flowContextStore = createFlowContextStore(
 		provider.context?.keys ?? Object.keys(contextData),
@@ -896,7 +908,7 @@ function createAuthFlowContext(
 											proxyIntent: {
 												mode: proxyPolicy.mode,
 												...proxyClientOptions,
-												...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+												...(stealthUserAgent ? { userAgent: stealthUserAgent } : {}),
 											},
 										}
 									: {}),
@@ -1919,7 +1931,7 @@ async function handleOperation(
 	proxyTelemetry?: ProxyTelemetryCollector,
 	signal?: AbortSignal,
 ): Promise<Response | OperationResponse> {
-	const ctx = createProviderContext(
+	const ctx = await createProviderContext(
 		provider,
 		request,
 		operationId,
@@ -2019,7 +2031,7 @@ async function handleAuthFlow(
 	// any flow code runs instead of at whatever point the ceremony first reads
 	// the env. `abort` stays exempt: a user must always be able to cancel a
 	// stranded flow even when provisioning is broken.
-	const { context, getPatch } = createAuthFlowContext(provider, request, options, signal);
+	const { context, getPatch } = await createAuthFlowContext(provider, request, options, signal);
 	try {
 		if (route !== "abort") {
 			assertRequiredSecretsPresent(provider, context.env);
@@ -2404,7 +2416,7 @@ function createServerAppWithCapabilityModules(
 			}
 			const request = operationRequestFromForwardingEnvelope(envelope);
 			operationId = envelope.operationId;
-			const ctx = createProviderContext(
+			const ctx = await createProviderContext(
 				provider,
 				request,
 				operationId,

@@ -1,7 +1,6 @@
-import { getStealthProfile } from "../../stealth/profiles.js";
 import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
 import { redactSensitiveText } from "../request-options.js";
-import { DEFAULT_PROFILE } from "../stealth.js";
+import { DEFAULT_PROFILE, resolveStealthProfileUserAgent } from "../stealth.js";
 import type { TraceRecorder } from "../trace.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
@@ -644,7 +643,7 @@ export function createCapsolverResolverVendorAdapter(
 								userAgent:
 									result.payload.solution?.userAgent ??
 									identity?.userAgent ??
-									getStealthProfile(DEFAULT_PROFILE).userAgent,
+									(await resolveStealthProfileUserAgent(DEFAULT_PROFILE)),
 							};
 						}
 						if (!solutionValue?.trim()) {
@@ -656,7 +655,8 @@ export function createCapsolverResolverVendorAdapter(
 							? {
 									form: "cookies" as const,
 									cookies: { "aws-waf-token": solutionValue },
-									userAgent: identity?.userAgent ?? getStealthProfile(DEFAULT_PROFILE).userAgent,
+									userAgent:
+										identity?.userAgent ?? (await resolveStealthProfileUserAgent(DEFAULT_PROFILE)),
 								}
 							: { form: "token" as const, token: solutionValue };
 					}

@@ -237,6 +237,7 @@ mock.module("wreq-js", () => ({
 		"safari_ios_18.1.1",
 		"safari_ios_26",
 	],
+	getEmulationHeaders: () => new Headers({ "user-agent": "Mock wreq user-agent" }),
 }));
 
 describe("proxy integration", () => {
