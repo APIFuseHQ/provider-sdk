@@ -67,6 +67,9 @@ export function createBrowserPageDouble(overrides: Partial<BrowserPage> = {}): B
 		async title() {
 			return "";
 		},
+		async userAgent() {
+			return "TestBrowser/1.0";
+		},
 		async type() {},
 		async url() {
 			return "about:blank";

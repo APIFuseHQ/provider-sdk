@@ -377,6 +377,7 @@ function createUpstreamContext(
 			id: `standard-test-${operationName}`,
 			url: async () => currentUrl,
 			title: async () => currentResponse?.text.match(/<title[^>]*>([^<]*)<\/title>/i)?.[1] ?? "",
+			userAgent: async () => String((await browserAction("userAgent")).data),
 			content: async () => currentResponse?.text ?? "",
 			evaluate: async <T>(fn: string | (() => T)) =>
 				(await browserAction("evaluate", typeof fn === "string" ? fn : String(fn))).data as T,

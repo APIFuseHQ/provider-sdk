@@ -423,8 +423,8 @@ describe("resolver vendor chain", () => {
 					},
 				];
 			},
-			async evaluate<T>() {
-				return REQUIRED_PROXY_INTENT.userAgent as T;
+			async userAgent() {
+				return REQUIRED_PROXY_INTENT.userAgent;
 			},
 			async goto() {},
 			async withResourcePolicy<T>(_policy: unknown, run: () => Promise<T>) {

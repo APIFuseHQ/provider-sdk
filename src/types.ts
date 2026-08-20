@@ -1807,6 +1807,8 @@ export type BrowserResourcePolicy = {
 
 export interface BrowserPage extends BrowserFrame {
 	close(): Promise<void>;
+	/** Returns the user agent used by this page's browser context. */
+	userAgent(): Promise<string>;
 	/**
 	 * Reads the browser context's cookie jar, including httpOnly cookies.
 	 * Cookie expiry values are Unix seconds and are absent for session cookies.

@@ -134,10 +134,9 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 			cookieRead += 1;
 			return jar;
 		},
-		async evaluate<T>(expression: string | (() => T)): Promise<T> {
-			void expression;
+		async userAgent(): Promise<string> {
 			state.pageOperations.push("evaluate-user-agent");
-			return (options.userAgent ?? "StubBrowser/1.0") as T;
+			return options.userAgent ?? "StubBrowser/1.0";
 		},
 		async goto(url: string) {
 			state.pageOperations.push("goto");
