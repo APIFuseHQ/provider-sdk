@@ -2,8 +2,14 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
+import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import { createServerApp } from "../server/serve.js";
-import type { AuthTurn, ProviderDefinition } from "../types.js";
+import type {
+	AuthTurn,
+	ProviderDefinition,
+	ProviderRuntimeState,
+	StateNamespaceOptions,
+} from "../types.js";
 
 const JsonRecordSchema = z.record(z.string(), z.unknown());
 const IsoDateTimeSchema = z.iso.datetime();
@@ -38,6 +44,13 @@ const DocumentedAuthTurnShapeSchema = AuthTurnShapeSchema.extend({
 });
 
 const expiresAt = "2027-01-01T00:00:00.000Z";
+
+const attemptNamespaceOptions = {
+	defaultTtl: "5m",
+	maxTtl: "15m",
+	maxEntries: 10,
+	maxValueBytes: 1_024,
+} satisfies StateNamespaceOptions;
 
 const turns = {
 	webauthn: {
@@ -448,6 +461,146 @@ describe("auth-flow AuthTurn provider contract", () => {
 				},
 			},
 		});
+	});
+
+	it("provides auth flows with runtime state scoped to the request connection", async () => {
+		const backingState = createMemoryProviderRuntimeState();
+		const scopedConnectionIds: Array<string | undefined> = [];
+		const state: ProviderRuntimeState = {
+			forConnection(connectionId) {
+				scopedConnectionIds.push(connectionId);
+				return backingState.forConnection(connectionId);
+			},
+			namespace(name, options) {
+				return backingState.namespace(name, options);
+			},
+		};
+		const app = createServerApp(
+			{
+				id: "auth-state-provider",
+				version: "1.0.0",
+				runtime: "standard",
+				meta: { displayName: "Auth State Provider", category: "test" },
+				auth: {
+					mode: "credentials",
+					flow: {
+						start: async (ctx) => {
+							const attempts = ctx.state?.namespace("login-attempts", attemptNamespaceOptions);
+							if (!attempts) throw new Error("Runtime state is required");
+							await attempts.set("email:user@example.test", { count: 1 });
+							const stored = await attempts.get<{ count: number }>("email:user@example.test");
+							return ctx.auth.nextPoll({ data: { count: stored?.value.count } });
+						},
+						continue: async (ctx) => ctx.auth.nextPoll(),
+					},
+				},
+				operations: {},
+			},
+			{ logger: () => {}, state },
+		);
+
+		const request = authRequest();
+		const response = await app.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(request),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			data: { kind: "poll", turnId: "auth.poll", data: { count: 1 } },
+		});
+		expect(scopedConnectionIds).toEqual([request.connectionId]);
+		const stored = await backingState
+			.forConnection(request.connectionId)
+			.namespace("login-attempts", attemptNamespaceOptions)
+			.get<{ count: number }>("email:user@example.test");
+		expect(stored?.value).toEqual({ count: 1 });
+	});
+
+	it("scopes auth runtime state even when the request connection id is absent", async () => {
+		const backingState = createMemoryProviderRuntimeState();
+		const scopedConnectionIds: Array<string | undefined> = [];
+		const state: ProviderRuntimeState = {
+			forConnection(connectionId) {
+				scopedConnectionIds.push(connectionId);
+				return backingState.forConnection(connectionId);
+			},
+			namespace(name, options) {
+				return backingState.namespace(name, options);
+			},
+		};
+		const app = createServerApp(createProvider(), { logger: () => {}, state });
+		const request = authRequest();
+		const { connectionId: _connectionId, ...requestWithoutConnection } = request;
+
+		const response = await app.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(requestWithoutConnection),
+		});
+
+		expect(response.status).toBe(200);
+		expect(scopedConnectionIds).toEqual([undefined]);
+	});
+
+	it("scopes auth runtime state by connection.id when only the connection object carries it", async () => {
+		const backingState = createMemoryProviderRuntimeState();
+		const scopedConnectionIds: Array<string | undefined> = [];
+		const observedContextConnectionIds: Array<string | undefined> = [];
+		const state: ProviderRuntimeState = {
+			forConnection(connectionId) {
+				scopedConnectionIds.push(connectionId);
+				return backingState.forConnection(connectionId);
+			},
+			namespace(name, options) {
+				return backingState.namespace(name, options);
+			},
+		};
+		const app = createServerApp(
+			{
+				...createProvider(),
+				auth: {
+					mode: "credentials",
+					flow: {
+						start: async (ctx) => {
+							observedContextConnectionIds.push(ctx.connectionId);
+							return turns.webauthn;
+						},
+						continue: async () => turns.error,
+					},
+				},
+			},
+			{ logger: () => {}, state },
+		);
+		const request = authRequest();
+		const { connectionId: _connectionId, ...requestWithoutConnectionId } = request;
+		// Parity with resolveOperationConnectionId: a credential-bearing
+		// connection object identifies the connection even when the top-level
+		// connectionId field is absent.
+		const body = {
+			...requestWithoutConnectionId,
+			connection: {
+				id: "af_con_9876543210987654321098",
+				mode: "credentials",
+				secrets: {},
+				metadata: {},
+				externalRef: "external-1",
+			},
+		};
+
+		const response = await app.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify(body),
+		});
+
+		expect(response.status).toBe(200);
+		expect(scopedConnectionIds).toEqual(["af_con_9876543210987654321098"]);
+		// The context-visible connectionId must match the state scope: a split
+		// (state under connection.id, ctx.connectionId undefined) would let a
+		// flow key state under an id it cannot observe.
+		expect(observedContextConnectionIds).toEqual(["af_con_9876543210987654321098"]);
 	});
 
 	it("normalizes thrown auth abort errors into safe abort turns", async () => {

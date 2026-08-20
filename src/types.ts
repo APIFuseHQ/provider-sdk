@@ -2124,6 +2124,18 @@ export interface FlowContext {
 	tenantId: string;
 	providerId: string;
 	http: HttpClient;
+	/** Durable connection-scoped runtime state. Present when the host runtime
+	 * supplies one; auth ceremonies must fail closed when absent rather than
+	 * fall back to bypassable in-process storage.
+	 *
+	 * Scoped via `ProviderRuntimeState.forConnection`: requests that resolve no
+	 * connection id (pre-connection ceremonies such as first-time logins) share
+	 * the documented isolated missing-connection scope. That sharing is the
+	 * intended semantic — it lets counters keyed by caller identity (e.g. a
+	 * login email) persist across separate ceremonies for the same caller.
+	 * Flows storing entries in that scope MUST key them by caller identity;
+	 * un-keyed entries would be shared across all connectionless ceremonies. */
+	readonly state?: ProviderRuntimeState;
 	/** Present when the selected runtime supplies native network capabilities. */
 	readonly native?: NativeProviderContext;
 	stealth: StealthClient;

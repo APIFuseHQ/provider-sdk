@@ -17,6 +17,7 @@ import {
 	ERROR_OBSERVABILITY_HEADER,
 	type ErrorObservabilityDetails,
 	type ProviderServerLogEvent,
+	resolveAuthFlowProxyAffinityKey,
 	resolveProviderProxyAffinityKey,
 } from "../server/serve.js";
 import { event } from "../stream.js";
@@ -569,6 +570,55 @@ describe("provider proxy affinity", () => {
 		expect(resolveProviderProxyAffinityKey(provider, credentialRequest, "search")).toBe(
 			"af_con_credential",
 		);
+	});
+
+	it("keys auth-flow proxy affinity by connection.id when only the connection object carries it", () => {
+		const provider = createTestProvider() satisfies ProviderDefinition;
+		// Parity with resolveProviderProxyAffinityKey: the auth chain must not
+		// fall through to externalRef/tenant/provider when a nested
+		// connection.id identifies the connection.
+		expect(
+			resolveAuthFlowProxyAffinityKey(provider, {
+				connection: {
+					id: "af_con_credential",
+					mode: "credentials",
+					secrets: {},
+					metadata: {},
+					externalRef: "ext_credential",
+				},
+				externalRef: "ext_fallback",
+			}),
+		).toBe("af_con_credential");
+		expect(
+			resolveAuthFlowProxyAffinityKey(provider, {
+				connectionId: "af_con_top_level",
+				externalRef: "ext_fallback",
+			}),
+		).toBe("af_con_top_level");
+		expect(resolveAuthFlowProxyAffinityKey(provider, { externalRef: "ext_fallback" })).toBe(
+			"ext_fallback",
+		);
+		// An empty connection.id is malformed, not an identity: it must not
+		// shadow a valid top-level id, and all-empty ids must fall through to
+		// the fallback chain rather than keying everything under "".
+		expect(
+			resolveAuthFlowProxyAffinityKey(provider, {
+				connection: {
+					id: "",
+					mode: "credentials",
+					secrets: {},
+					metadata: {},
+					externalRef: "ext_credential",
+				},
+				connectionId: "af_con_top_level",
+			}),
+		).toBe("af_con_top_level");
+		expect(
+			resolveAuthFlowProxyAffinityKey(provider, {
+				connectionId: "",
+				externalRef: "ext_fallback",
+			}),
+		).toBe("ext_fallback");
 	});
 
 	it("scopes operation affinity by provider and operation instead of provider-wide fallback", () => {
