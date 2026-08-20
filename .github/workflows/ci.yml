@@ -72,6 +72,14 @@ jobs:
             fi
           done
       - run: bun run check
+      - name: Verify committed API surface reports
+        run: bun run api:check
+      - name: Fetch changeset comparison branch
+        if: github.event_name == 'pull_request'
+        run: git fetch origin main --depth=1
+      - name: Require changeset for source changes
+        if: github.event_name == 'pull_request'
+        run: bun run changeset:check
       - run: bun run pack:check
       - run: bun run pack:smoke
       - run: bun run pack:types

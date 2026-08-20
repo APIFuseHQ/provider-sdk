@@ -111,6 +111,9 @@
 		"type-check": "tsc --noEmit",
 		"test": "bun test",
 		"check": "bun run lint && bun run type-check && bun run lint:deprecated && bun run lint:test-typesafety && bun run build",
+		"api:update": "bun run build && bun scripts/api-reports.ts update",
+		"api:check": "bun run build && bun scripts/api-reports.ts check",
+		"changeset:check": "bun scripts/check-changeset.ts",
 		"pack:check": "bun run build && bun bin/apifuse-pack-check.ts",
 		"pack:smoke": "bun run build && bun bin/apifuse-pack-smoke.ts",
 		"pack:types": "bun run build && bun bin/apifuse-pack-types.ts",
@@ -121,6 +124,8 @@
 	"devDependencies": {
 		"@arethetypeswrong/cli": "^0.18.5",
 		"@biomejs/biome": "^2.5.0",
+		"@changesets/cli": "^3.0.1",
+		"@microsoft/api-extractor": "^7.58.13",
 		"@types/bun": "latest",
 		"@types/node": "^25.9.3",
 		"ajv": "^8.17",
