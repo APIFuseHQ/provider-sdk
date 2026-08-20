@@ -20,7 +20,7 @@ bun run pack:smoke
 
 ## API reports and changesets
 
-Every pull request that changes files under `src/` or `bin/` must include a Changeset file. Use `bunx changeset` to describe the release intent. For a genuinely no-release change, use `bunx changeset --empty`; an empty changeset is the sanctioned escape hatch and passes the CI gate.
+Every pull request that changes files under `src/` or `bin/` must add a new Changeset file. Editing or deleting an existing Changeset does not satisfy the gate. Use `bunx changeset` to describe the release intent. For a genuinely no-release change, use `bunx changeset --empty`; an empty changeset is the sanctioned escape hatch and passes the CI gate.
 
 Choose the Changeset level from the committed API report evidence:
 

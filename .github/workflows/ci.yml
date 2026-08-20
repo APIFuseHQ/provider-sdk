@@ -76,7 +76,12 @@ jobs:
         run: bun run api:check
       - name: Fetch changeset comparison branch
         if: github.event_name == 'pull_request'
-        run: git fetch origin main --depth=1
+        run: |
+          # This branch comes from .changeset/config.json so it stays the changeset gate's source of truth.
+          base_branch="$(bun -e 'const config = await Bun.file(".changeset/config.json").json(); process.stdout.write(config.baseBranch)')"
+          git fetch --unshallow origin \
+            "$GITHUB_REF" \
+            "$base_branch:refs/remotes/origin/$base_branch"
       - name: Require changeset for source changes
         if: github.event_name == 'pull_request'
         run: bun run changeset:check
