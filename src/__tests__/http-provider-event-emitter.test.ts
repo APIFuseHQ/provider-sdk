@@ -6,7 +6,7 @@ import {
 	RecordingProviderEventDeliveryFailureRecorder,
 	type ProviderEvent,
 	type ProviderEventMetricEmitter,
-} from "../../dist/stateful/index.js";
+} from "../stateful/index.js";
 
 const SECRET = "event-emitter-test-secret";
 const OWNER_FENCE = {

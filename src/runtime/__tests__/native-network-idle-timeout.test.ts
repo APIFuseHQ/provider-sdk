@@ -78,8 +78,12 @@ describe("native network idle read timeout", () => {
 		);
 		const connection = await connect(fixture, 60);
 
-		expect(new TextDecoder().decode(await connection.read())).toBe("one");
-		expect(new TextDecoder().decode(await connection.read())).toBe("two");
+		const first = await connection.read();
+		if (first === null) throw new Error("Peer ended before the first expected read");
+		expect(new TextDecoder().decode(first)).toBe("one");
+		const second = await connection.read();
+		if (second === null) throw new Error("Peer ended before the second expected read");
+		expect(new TextDecoder().decode(second)).toBe("two");
 		await connection.close();
 	});
 
