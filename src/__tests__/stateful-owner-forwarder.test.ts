@@ -1,11 +1,13 @@
 import { describe, expect, it } from "bun:test";
+import { createRequire } from "node:module";
 
-import {
+const require = createRequire(import.meta.url);
+const {
 	buildSessionKey,
 	HttpStatefulOwnerForwarder,
 	StatefulOwnerForwardingError,
-} from "../../dist/stateful/index.js";
-import { OperationErrorResponseSchema } from "../../dist/server/index.js";
+} = require("../../dist/stateful/index.js");
+const { OperationErrorResponseSchema } = require("../../dist/server/index.js");
 
 const sessionKey = buildSessionKey({
 	providerId: "test-provider",
@@ -50,6 +52,24 @@ const request = {
 	},
 };
 
+type ForwardingErrorLike = Error & { code: string; status?: number; cause?: unknown };
+
+function isForwardingError(value: unknown): value is ForwardingErrorLike {
+	return value instanceof StatefulOwnerForwardingError;
+}
+
+async function capturedForwardingError(
+	operation: Promise<unknown>,
+): Promise<ForwardingErrorLike> {
+	try {
+		await operation;
+		throw new Error("Expected forwarding to fail");
+	} catch (cause: unknown) {
+		if (isForwardingError(cause)) return cause;
+		throw cause;
+	}
+}
+
 describe("HttpStatefulOwnerForwarder transport failures", () => {
 	it("accepts an older owner error without loosening the emitted response schema", async () => {
 		const olderOwnerError = {
@@ -65,9 +85,9 @@ describe("HttpStatefulOwnerForwarder transport failures", () => {
 			secret: "secret",
 			fetch: async () => Response.json(olderOwnerError, { status: 401 }),
 		});
-		const error = await forwarder
-			.forward(owner("http://pod-owner"), request, new AbortController().signal)
-			.catch((cause) => cause);
+		const error = await capturedForwardingError(
+			forwarder.forward(owner("http://pod-owner"), request, new AbortController().signal),
+		);
 
 		expect(error).toBeInstanceOf(StatefulOwnerForwardingError);
 		expect(error).toMatchObject({
@@ -82,9 +102,9 @@ describe("HttpStatefulOwnerForwarder transport failures", () => {
 			currentPodId: "pod-source",
 			secret: "secret",
 		});
-		const error = await forwarder
-			.forward(owner("not a URL"), request, new AbortController().signal)
-			.catch((cause) => cause);
+		const error = await capturedForwardingError(
+			forwarder.forward(owner("not a URL"), request, new AbortController().signal),
+		);
 
 		expect(error).toBeInstanceOf(StatefulOwnerForwardingError);
 		expect(error.code).toBe("STATEFUL_FORWARDING_REQUEST_FAILED");
@@ -98,9 +118,9 @@ describe("HttpStatefulOwnerForwarder transport failures", () => {
 				throw new TypeError("network down");
 			},
 		});
-		const error = await forwarder
-			.forward(owner("http://pod-owner"), request, new AbortController().signal)
-			.catch((cause) => cause);
+		const error = await capturedForwardingError(
+			forwarder.forward(owner("http://pod-owner"), request, new AbortController().signal),
+		);
 
 		expect(error).toBeInstanceOf(StatefulOwnerForwardingError);
 		expect(error.code).toBe("STATEFUL_FORWARDING_REQUEST_FAILED");
@@ -113,7 +133,7 @@ describe("HttpStatefulOwnerForwarder transport failures", () => {
 		const forwarder = new HttpStatefulOwnerForwarder({
 			currentPodId: "pod-source",
 			secret: "secret",
-			fetch: async (_url, init) => {
+			fetch: async (_url: string, init?: RequestInit) => {
 				envelope = JSON.parse(String(init?.body));
 				return Response.json({ data: { forwarded: true } });
 			},

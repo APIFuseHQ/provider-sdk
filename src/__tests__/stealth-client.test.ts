@@ -457,6 +457,7 @@ describe("createStealthClient", () => {
 				headers: toHeaders({ "content-type": "text/plain" }),
 				url: "https://example.com/final",
 				redirected: true,
+				// @ts-expect-error test-invalid: legacy text field is ignored in favor of arrayBuffer
 				text: async () => "text-first-corruption",
 				arrayBuffer: async () => toArrayBuffer(new TextEncoder().encode("ok")),
 			},
@@ -1062,6 +1063,7 @@ describe("createStealthClient", () => {
 			client.fetch("/profile", {
 				headerOrder: ["host", "user-agent"],
 				stealth: {
+					// @ts-expect-error test-invalid: low-level fingerprint overrides must be rejected
 					ja3: "771,4865-4866",
 					h2: { HEADER_TABLE_SIZE: 65536 },
 				},
@@ -1081,9 +1083,10 @@ describe("createStealthClient", () => {
 		const client = createStealthClient("https://example.com");
 
 		await client.fetch("/trace", { method: "TRACE" });
-		expect(mockStealthState.clients[0]?.calls[0]?.init.method).toBe("TRACE");
+		expect(mockStealthState.clients[0]?.calls[0]?.init?.method).toBe("TRACE");
 
-		await expect(client.fetch("/tunnel", { method: "CONNECT" as never })).rejects.toThrow(
+		// @ts-expect-error test-invalid: CONNECT is intentionally unsupported by stealth transport
+		await expect(client.fetch("/tunnel", { method: "CONNECT" })).rejects.toThrow(
 			/Unsupported stealth method: CONNECT/,
 		);
 		expect(mockStealthState.clients).toHaveLength(1);
@@ -1925,7 +1928,7 @@ describe("createStealthClient", () => {
 	it("redirects.run redacts malformed initial URLs before resolution", async () => {
 		const secret = "initial-url-secret";
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const session = createStealthClient().createSession();
+		const session = createStealthClient("https://example.com").createSession();
 		let thrown: unknown;
 		try {
 			await session.redirects.run({
@@ -1963,6 +1966,7 @@ describe("createStealthClient", () => {
 				stopWhen: (hop) => {
 					throw new ProviderError(`Unexpected redirect to ${hop.nextUrl}`, {
 						code: hop.nextUrl,
+						// @ts-expect-error test-invalid: preserves a legacy category value for redaction coverage
 						category: "upstream",
 						retryable: false,
 					});
@@ -2034,7 +2038,7 @@ describe("createStealthClient", () => {
 		const oldSecret = "caller-url-secret";
 		const newSecret = "replacement-secret";
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient();
+		const client = createStealthClient("https://example.com");
 		let thrown: unknown;
 		try {
 			await client.fetch(`http://[bad]/?serviceKey=${oldSecret}`, {

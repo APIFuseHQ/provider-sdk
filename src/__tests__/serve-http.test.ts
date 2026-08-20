@@ -40,13 +40,30 @@ function errorObservability(response: Response): ErrorObservabilityDetails {
 		.parse(JSON.parse(value));
 }
 
-function createTestProvider(state: { streamCancelled?: boolean } = {}) {
+function parseValueInput(input: unknown): { value: string } {
+	return z.object({ value: z.string() }).parse(input);
+}
+
+function parseTokenInput(input: unknown): { token: string } {
+	return z.object({ token: z.string() }).parse(input);
+}
+
+function createLocalFetchDouble(
+	implementation: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+	return Object.assign(implementation, {
+		preconnect: (_url: string | URL, _options?: { dns?: boolean; tcp?: boolean; http?: boolean }) => {},
+	});
+}
+
+function createTestProvider(state: { streamCancelled?: boolean } = {}): ProviderDefinition {
 	return {
 		id: "test-provider",
 		version: "1.0.0",
 		runtime: "standard",
 		meta: {
 			displayName: "Test Provider",
+			descriptionKey: "test-provider.description",
 			category: "test",
 		},
 		auth: {
@@ -133,7 +150,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 					const token = await ctx.choice.issue({
 						prefix: "test_choice_v1",
 						purpose: "server-state-http-test",
-						payload: { value: input.value },
+						payload: { value: parseValueInput(input).value },
 						ttlMs: 60_000,
 						storage: {
 							mode: "server",
@@ -151,7 +168,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 				output: z.object({ value: z.string() }),
 				handler: async (ctx, input) => {
 					const parsed = await ctx.choice.parse({
-						token: input.token,
+						token: parseTokenInput(input).token,
 						prefix: "test_choice_v1",
 						purpose: "server-state-http-test",
 						ttlMs: 60_000,
@@ -221,7 +238,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 					},
 				},
 				async *handler(_ctx, input) {
-					yield event("delta", { value: input.value }, { id: "evt_1" });
+					yield event("delta", { value: parseValueInput(input).value }, { id: "evt_1" });
 				},
 			},
 			invalidEvents: {
@@ -234,7 +251,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 					},
 				},
 				async *handler(_ctx, input) {
-					yield event("delta", { value: input.value });
+					yield event("delta", { value: parseValueInput(input).value });
 				},
 			},
 			undeclaredEvents: {
@@ -247,7 +264,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 					},
 				},
 				async *handler(_ctx, input) {
-					yield event("other", { value: input.value });
+					yield event("other", { value: parseValueInput(input).value });
 				},
 			},
 			rawSseResponse: {
@@ -260,7 +277,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 					},
 				},
 				handler: async (_ctx, input) =>
-					new Response(`event: delta\ndata: {"value":"${input.value}"}\n\n`, {
+					new Response(`event: delta\ndata: {"value":"${parseValueInput(input).value}"}\n\n`, {
 						headers: { "Content-Type": "text/event-stream" },
 					}),
 			},
@@ -268,7 +285,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (_ctx, input) =>
-					new Response(JSON.stringify({ ok: input.value === "hello" }), {
+					new Response(JSON.stringify({ ok: parseValueInput(input).value === "hello" }), {
 						headers: {
 							"Content-Type": "application/json",
 							[PROVIDER_TELEMETRY_HEADER]:
@@ -288,7 +305,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 					},
 				},
 				async *handler(_ctx, input) {
-					yield event("delta", { value: input.value });
+					yield event("delta", { value: parseValueInput(input).value });
 				},
 			},
 			abortableEvents: {
@@ -302,7 +319,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 				},
 				async *handler(_ctx, input) {
 					try {
-						yield event("delta", { value: input.value });
+						yield event("delta", { value: parseValueInput(input).value });
 						await new Promise(() => undefined);
 					} finally {
 						state.streamCancelled = true;
@@ -316,7 +333,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 				handler: async (_ctx, input) =>
 					new ReadableStream<Uint8Array>({
 						start(controller) {
-							controller.enqueue(new TextEncoder().encode(input.value));
+							controller.enqueue(new TextEncoder().encode(parseValueInput(input).value));
 							controller.close();
 						},
 					}),
@@ -332,7 +349,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 				handler: async (_ctx, input) =>
 					new ReadableStream<Uint8Array>({
 						start(controller) {
-							controller.enqueue(new TextEncoder().encode(input.value));
+							controller.enqueue(new TextEncoder().encode(parseValueInput(input).value));
 							controller.close();
 						},
 					}),
@@ -541,7 +558,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}) {
 				},
 			},
 		},
-	} satisfies ProviderDefinition;
+	};
 }
 
 describe("provider proxy affinity", () => {
@@ -1002,7 +1019,7 @@ describe("provider HTTP server", () => {
 	it("adds redacted retry metadata to successful retry-assisted responses", async () => {
 		const originalFetch = globalThis.fetch;
 		let attempts = 0;
-		globalThis.fetch = (async () => {
+		globalThis.fetch = createLocalFetchDouble(async () => {
 			attempts += 1;
 			if (attempts === 1) {
 				throw new Error("Network error");
@@ -1011,7 +1028,7 @@ describe("provider HTTP server", () => {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		}) as typeof fetch;
+		});
 		try {
 			const response = await app.request("/v1/retryThenEcho", {
 				method: "POST",
@@ -1043,7 +1060,7 @@ describe("provider HTTP server", () => {
 	it("merges cache and retry metadata on successful responses", async () => {
 		const originalFetch = globalThis.fetch;
 		let attempts = 0;
-		globalThis.fetch = (async () => {
+		globalThis.fetch = createLocalFetchDouble(async () => {
 			attempts += 1;
 			if (attempts === 1) {
 				throw new Error("Network error");
@@ -1052,7 +1069,7 @@ describe("provider HTTP server", () => {
 				status: 200,
 				headers: { "content-type": "application/json" },
 			});
-		}) as typeof fetch;
+		});
 		try {
 			const response = await app.request("/v1/cachedRetryThenEcho", {
 				method: "POST",
@@ -1393,7 +1410,7 @@ describe("provider HTTP server", () => {
 	});
 
 	it("maps missing auth refresh handler to refresh_not_supported", async () => {
-		const provider = createTestProvider() as ProviderDefinition;
+		const provider = createTestProvider();
 		if (provider.auth?.flow) {
 			delete provider.auth.flow.refresh;
 		}
@@ -1603,7 +1620,7 @@ describe("provider HTTP server", () => {
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					docs: {
-						description: "order",
+						descriptionKey: "order",
 						errorCodes: [
 							{
 								code: "SOLD_OUT",
@@ -1932,7 +1949,7 @@ describe("provider HTTP server", () => {
 		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		clearProxyResolutionCache();
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () => new Response("allocator denied", { status: 503 })) as typeof fetch;
+		global.fetch = createLocalFetchDouble(async () => new Response("allocator denied", { status: 503 }));
 		const baseProvider = createTestProvider();
 		const provider = {
 			...baseProvider,
@@ -2229,7 +2246,7 @@ describe("operation-declared error resolution", () => {
 		createError: () => ProviderError;
 		logger?: (event: ProviderServerLogEvent) => void;
 	}) {
-		const base = createTestProvider() as ProviderDefinition;
+		const base = createTestProvider();
 		const provider = {
 			...base,
 			operations: {
@@ -2502,7 +2519,7 @@ describe("operation-declared error resolution", () => {
 	});
 
 	it("ignores a structurally supplied non-emittable declared status", async () => {
-		const base = createTestProvider() as ProviderDefinition;
+		const base = createTestProvider();
 		const provider = createProviderDefinitionDouble({
 			...base,
 			operations: {
@@ -2513,6 +2530,7 @@ describe("operation-declared error resolution", () => {
 						errorCodes: [
 							{
 								code: "STRUCTURAL_INVALID_STATUS",
+								// @ts-expect-error test-invalid: structural validation must reject non-emittable status
 								status: 600,
 								description: "Invalid structural status",
 							},
@@ -2556,9 +2574,10 @@ describe("provider HTTP server cross-module error identity", () => {
 	async function createDuplicateInstanceApp() {
 		// Genuine second module identity for the SDK errors, modelling the packaged
 		// src/* server importing errors whose provider throws dist/* errors.
-		// biome-ignore lint/correctness/useImportExtensions: specifier already carries .ts; the ?query (invisible to the rule) mints a second module identity under bun test
-		const Dup = (await import("../errors.ts?duplicate-sdk-instance")) as typeof import("../errors");
-		const base = createTestProvider() as ProviderDefinition;
+		// @ts-expect-error test-invalid: Bun query import intentionally creates a duplicate module identity
+		// biome-ignore lint/correctness/useImportExtensions: the query mints a second module identity under bun test
+		const Dup = await import("../errors.ts?duplicate-sdk-instance");
+		const base = createTestProvider();
 		const provider = {
 			...base,
 			operations: {
@@ -2757,7 +2776,7 @@ describe("SDK-owned secret enforcement over HTTP", () => {
 	const API_KEY_ENV = "APIFUSE__PROVIDER__TEST_PROVIDER__HTTP_TEST_API_KEY";
 
 	function createSecretProvider(): ProviderDefinition {
-		const base = createTestProvider() as ProviderDefinition;
+		const base = createTestProvider();
 		return {
 			...base,
 			secrets: [{ name: API_KEY_ENV, required: true, description: "Test upstream key" }],

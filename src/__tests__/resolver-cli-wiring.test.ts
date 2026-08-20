@@ -43,6 +43,7 @@ const harnesses = [
 		expectedSecondToken: "token-1",
 	},
 ] as const;
+const harnessTable = harnesses.map((harness) => [harness] as const);
 
 let originalCdpUrl: string | undefined;
 let originalNodemavenUsername: string | undefined;
@@ -87,7 +88,11 @@ function createProvider(options: {
 		],
 		...(options.proxy ? { proxy: options.proxy } : {}),
 		...(options.resolver ? { resolver: options.resolver } : {}),
-		meta: { displayName: "Resolver CLI Wiring", category: "test" },
+		meta: {
+			displayName: "Resolver CLI Wiring",
+			descriptionKey: "resolver-cli-wiring.description",
+			category: "test",
+		},
 		operations: {
 			lookup: {
 				input: z.object({}),
@@ -100,7 +105,7 @@ function createProvider(options: {
 }
 
 describe("resolver CLI wiring", () => {
-	it.each(harnesses)("wires a declared resolver into $name", async (harness) => {
+	it.each(harnessTable)("wires a declared resolver into $name", async (harness) => {
 		let factoryAllowedHosts: readonly string[] | undefined;
 		let solveCalls = 0;
 		const adapter: ResolverVendorAdapter = {
@@ -146,7 +151,7 @@ describe("resolver CLI wiring", () => {
 		}
 	});
 
-	it.each(harnesses)("keeps an undeclared resolver unsupported in $name", async (harness) => {
+	it.each(harnessTable)("keeps an undeclared resolver unsupported in $name", async (harness) => {
 		const error = await harness
 			.createContext(createProvider({}))
 			.resolver.solve(AWS_WAF_CHALLENGE)
@@ -159,7 +164,7 @@ describe("resolver CLI wiring", () => {
 		});
 	});
 
-	it.each(harnesses)("reports missing resolver credentials in $name", async (harness) => {
+	it.each(harnessTable)("reports missing resolver credentials in $name", async (harness) => {
 		await expect(
 			harness
 				.createContext(createProvider({ resolver: DECLARED_RESOLVER }))
@@ -170,7 +175,7 @@ describe("resolver CLI wiring", () => {
 		});
 	});
 
-	it.each(harnesses)("preserves required-proxy fail-closed behavior in $name", async (harness) => {
+	it.each(harnessTable)("preserves required-proxy fail-closed behavior in $name", async (harness) => {
 		let solveCalls = 0;
 		const adapter: ResolverVendorAdapter = {
 			id: "browser",
@@ -203,7 +208,7 @@ describe("resolver CLI wiring", () => {
 		expect(solveCalls).toBe(0);
 	});
 
-	it.each(harnesses)("resolves a proxy lease inside $name", async (harness) => {
+	it.each(harnessTable)("resolves a proxy lease inside $name", async (harness) => {
 		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-cli-account";
 		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-cli-password";
 		const identities: Array<ResolverIdentity | undefined> = [];

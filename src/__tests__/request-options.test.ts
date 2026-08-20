@@ -125,7 +125,7 @@ describe("sensitive request diagnostics", () => {
 		expect(first.request.url).toBe(redactedUrl);
 		expect(first.cause).toBe(aggregate);
 		expect(second.message).not.toContain(secret);
-		expect(second.details.received).toBe(REDACTED_QUERY_VALUE);
+		expect(String(second.details.received)).toBe(REDACTED_QUERY_VALUE);
 	});
 
 	it("clones before traversing readonly cycles and scrubs custom non-enumerable fields", () => {
@@ -156,6 +156,7 @@ describe("sensitive request diagnostics", () => {
 		});
 		const providerError = new ProviderError("redirect failed", {
 			code: requestUrl,
+			// @ts-expect-error test-invalid: preserves a legacy category value for redaction coverage
 			category: "upstream",
 			retryable: false,
 		});
