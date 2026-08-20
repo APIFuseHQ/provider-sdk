@@ -25,6 +25,12 @@ import type { HttpClient, OcrContext, StealthClient } from "../types.js";
 
 const image = { kind: "base64", data: "aW1hZ2U=", mediaType: "image/png" } as const;
 
+function createFetchDouble(
+	implementation: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+	return Object.assign(implementation, { preconnect: global.fetch.preconnect });
+}
+
 function minimalHttp(): HttpClient {
 	const bodyBytes = new Uint8Array();
 	const response = async () => ({
@@ -85,10 +91,10 @@ describe("OCR runtime clients", () => {
 	it("selects the default Cloudflare backend and default measured model from env", async () => {
 		const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
 		const originalFetch = global.fetch;
-		global.fetch = (async (input, init) => {
+		global.fetch = createFetchDouble(async (input, init) => {
 			calls.push({ url: String(input), body: JSON.parse(String(init?.body)) });
 			return cloudflareResponse("visible text");
-		}) as typeof fetch;
+		});
 		try {
 			const ocr = createOcrClientFromEnv(
 				{ mode: "required" },
@@ -113,10 +119,10 @@ describe("OCR runtime clients", () => {
 	it("selects the openai-compatible backend without appending /v1", async () => {
 		const calls: Array<{ url: string; headers: HeadersInit | undefined }> = [];
 		const originalFetch = global.fetch;
-		global.fetch = (async (input, init) => {
+		global.fetch = createFetchDouble(async (input, init) => {
 			calls.push({ url: String(input), headers: init?.headers });
 			return Response.json({ choices: [{ message: { content: "self hosted" } }] });
-		}) as typeof fetch;
+		});
 		try {
 			const ocr = createOcrClientFromEnv(
 				{ mode: "optional" },
@@ -153,8 +159,9 @@ describe("OCR runtime clients", () => {
 				code: "OCR_UNAVAILABLE",
 				message: `OCR backend ${OPENAI_COMPATIBLE_OCR_BACKEND} requires ${APIFUSE__OCR__MODEL_ENV}`,
 			});
-			expect((error as ProviderError).fix).toContain(APIFUSE__OCR__MODEL_ENV);
-			expect((error as ProviderError).fix).toContain("zai-org/GLM-OCR");
+			if (!(error instanceof ProviderError)) throw error;
+			expect(error.fix).toContain(APIFUSE__OCR__MODEL_ENV);
+			expect(error.fix).toContain("zai-org/GLM-OCR");
 		}
 	});
 
@@ -164,10 +171,10 @@ describe("OCR runtime clients", () => {
 		const ocr = createOpenAiCompatibleOcrClient({
 			baseUrl: "http://ocr.internal/v1",
 			model,
-			fetch: (async (_input, init) => {
+			fetch: createFetchDouble(async (_input, init) => {
 				body = JSON.parse(String(init?.body));
 				return Response.json({ choices: [{ message: { content: "abc123" } }] });
-			}) as typeof fetch,
+			}),
 		});
 
 		await ocr.recognize({ image });
@@ -210,10 +217,10 @@ describe("OCR runtime clients", () => {
 			accountId: "account",
 			apiToken: "token",
 			model: "@cf/google/gemma-4-26b-a4b-it",
-			fetch: (async (_input, init) => {
+			fetch: createFetchDouble(async (_input, init) => {
 				body = JSON.parse(String(init?.body));
 				return cloudflareResponse("abc123");
-			}) as typeof fetch,
+			}),
 		});
 
 		await ocr.recognize({ image, hint: "captcha" });
@@ -226,10 +233,10 @@ describe("OCR runtime clients", () => {
 		const ocr = createOpenAiCompatibleOcrClient({
 			baseUrl: "http://ocr.internal",
 			model: "vision-model",
-			fetch: (async (_input, init) => {
+			fetch: createFetchDouble(async (_input, init) => {
 				bodies.push(JSON.parse(String(init?.body)));
 				return Response.json({ choices: [{ message: { content: "visible text" } }] });
-			}) as typeof fetch,
+			}),
 		});
 
 		await ocr.recognize({ image, hint: "document" });
@@ -249,14 +256,15 @@ describe("OCR runtime clients", () => {
 		const openAi = createOpenAiCompatibleOcrClient({
 			baseUrl: "http://ocr.internal",
 			model: "vision-model",
-			fetch: (async () => response()) as typeof fetch,
+			fetch: createFetchDouble(async () => response()),
 		});
 		const cloudflare = createCloudflareWorkersAiOcrClient({
 			accountId: "account",
 			apiToken: "token",
 			model: "@cf/google/gemma-4-26b-a4b-it",
-			fetch: (async () =>
-				Response.json({ success: true, result: await response().json() })) as typeof fetch,
+			fetch: createFetchDouble(async () =>
+				Response.json({ success: true, result: await response().json() }),
+			),
 		});
 
 		for (const ocr of [openAi, cloudflare]) {
@@ -284,10 +292,10 @@ describe("OCR runtime clients", () => {
 			accountId: "account",
 			apiToken: "token",
 			model: "@cf/moondream/moondream3.1-9B-A2B",
-			fetch: (async (_input, init) => {
+			fetch: createFetchDouble(async (_input, init) => {
 				body = JSON.parse(String(init?.body));
 				return new Response(sse, { headers: { "Content-Type": "text/event-stream" } });
-			}) as typeof fetch,
+			}),
 		});
 
 		expect((await ocr.recognize({ image, hint: "captcha" })).text).toBe("aB3dEf78");
@@ -308,10 +316,10 @@ describe("OCR runtime clients", () => {
 			accountId: "account",
 			apiToken: "token",
 			model: "@cf/moonshotai/kimi-k2.7-code",
-			fetch: (async (_input, init) => {
+			fetch: createFetchDouble(async (_input, init) => {
 				body = JSON.parse(String(init?.body));
 				return cloudflareResponse("abc123");
-			}) as typeof fetch,
+			}),
 		});
 
 		await ocr.recognize({ image, maxTokens: 100 });
@@ -323,8 +331,9 @@ describe("OCR runtime clients", () => {
 		const ocr = createOpenAiCompatibleOcrClient({
 			baseUrl: "http://ocr.internal",
 			model: "unknown-vision-model",
-			fetch: (async () =>
-				Response.json({ choices: [{ message: { content: "" } }] })) as typeof fetch,
+			fetch: createFetchDouble(async () =>
+				Response.json({ choices: [{ message: { content: "" } }] }),
+			),
 		});
 
 		try {
@@ -340,19 +349,21 @@ describe("OCR runtime clients", () => {
 		const malformedJson = createOpenAiCompatibleOcrClient({
 			baseUrl: "http://ocr.internal",
 			model: "vision-model",
-			fetch: (async () =>
+			fetch: createFetchDouble(async () =>
 				new Response('{"choices":', {
 					headers: { "Content-Type": "application/json" },
-				})) as typeof fetch,
+				}),
+			),
 		});
 		const malformedSse = createCloudflareWorkersAiOcrClient({
 			accountId: "account",
 			apiToken: "token",
 			model: "@cf/moondream/moondream3.1-9B-A2B",
-			fetch: (async () =>
+			fetch: createFetchDouble(async () =>
 				new Response('data: {"chunk":\ndata: [DONE]\n', {
 					headers: { "Content-Type": "text/event-stream" },
-				})) as typeof fetch,
+				}),
+			),
 		});
 
 		for (const ocr of [malformedJson, malformedSse]) {
@@ -375,10 +386,10 @@ describe("OCR runtime clients", () => {
 		const stalled = createCloudflareWorkersAiOcrClient({
 			accountId: "account",
 			apiToken: "token",
-			fetch: (async (_input, init) => {
+			fetch: createFetchDouble(async (_input, init) => {
 				timedOutSignal = init?.signal;
 				return rejectWhenAborted(init?.signal);
-			}) as typeof fetch,
+			}),
 		});
 		const startedAt = performance.now();
 		await expect(stalled.recognize({ image, timeoutMs: 10 })).rejects.toMatchObject({
@@ -392,10 +403,10 @@ describe("OCR runtime clients", () => {
 		const completed = createOpenAiCompatibleOcrClient({
 			baseUrl: "http://ocr.internal",
 			model: "vision-model",
-			fetch: (async (_input, init) => {
+			fetch: createFetchDouble(async (_input, init) => {
 				completedSignal = init?.signal;
 				return Response.json({ choices: [{ message: { content: "done" } }] });
-			}) as typeof fetch,
+			}),
 		});
 		await completed.recognize({ image, timeoutMs: 10 });
 		await new Promise((resolve) => setTimeout(resolve, 20));
@@ -407,12 +418,12 @@ describe("OCR runtime clients", () => {
 		const ocr = createOpenAiCompatibleOcrClient({
 			baseUrl: "http://ocr.internal",
 			model: "vision-model",
-			fetch: (async () => {
+			fetch: createFetchDouble(async () => {
 				calls += 1;
 				return Response.json({
 					choices: [{ message: { content: "The characters are: aB3dEf78." } }],
 				});
-			}) as typeof fetch,
+			}),
 		});
 
 		const result = await ocr.extractCaptchaText(image, {
@@ -559,7 +570,11 @@ describe("OCR Provider SDK context integration", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			ocr: { mode: "required" },
-			meta: { displayName: "OCR Demo", category: "test" },
+			meta: {
+				displayName: "OCR Demo",
+				descriptionKey: "ocr-demo.description",
+				category: "test",
+			},
 			operations: {
 				recognize: {
 					input: z.object({}),
@@ -589,12 +604,14 @@ describe("OCR Provider SDK context integration", () => {
 			},
 		} as const;
 
-		expect(() => defineProvider({ ...base, ocr: true } as never)).toThrow(
-			/invalid ocr: must be an object/,
-		);
-		expect(() => defineProvider({ ...base, ocr: { mode: "sometimes" } } as never)).toThrow(
-			/ocr.mode/,
-		);
+		expect(() =>
+			// @ts-expect-error test-invalid: OCR declaration must be an object
+			defineProvider({ ...base, ocr: true }),
+		).toThrow(/invalid ocr: must be an object/);
+		expect(() =>
+			// @ts-expect-error test-invalid: OCR mode must be required or optional
+			defineProvider({ ...base, ocr: { mode: "sometimes" } }),
+		).toThrow(/ocr.mode/);
 	});
 
 	it("createFlowContext exposes an unsupported OCR stub by default", async () => {
@@ -631,7 +648,11 @@ describe("OCR Provider SDK context integration", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			ocr: { mode: "required" },
-			meta: { displayName: "OCR Server Demo", category: "test" },
+			meta: {
+				displayName: "OCR Server Demo",
+				descriptionKey: "ocr-server-demo.description",
+				category: "test",
+			},
 			context: { keys: [] },
 			auth: {
 				mode: "credentials",
@@ -690,7 +711,11 @@ describe("OCR Provider SDK context integration", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			ocr: { mode: "required" },
-			meta: { displayName: "OCR Unavailable Demo", category: "test" },
+			meta: {
+				displayName: "OCR Unavailable Demo",
+				descriptionKey: "ocr-unavailable-demo.description",
+				category: "test",
+			},
 			operations: {
 				recognize: {
 					input: z.object({}),
