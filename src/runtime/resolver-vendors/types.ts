@@ -117,6 +117,7 @@ export type ResolverVendorUnavailableReason =
 	| "missing_credentials"
 	| "missing_proxy_identity"
 	| "missing_client_profile"
+	| "missing_challenge_input"
 	| "missing_transport"
 	| "allocation_exhausted"
 	| "transport_failure"
@@ -128,6 +129,8 @@ export type ResolverChallengeVerdictReason = "human_puzzle" | "solve_failed";
 type ResolverErrorOptions = {
 	/** Raw cause; adapters must not place bodies, cookies, headers, credentials, or proxy URLs here. */
 	readonly cause?: unknown;
+	/** Names of challenge fields required by this adapter but absent from this call's input. */
+	readonly missingFields?: readonly string[];
 	/** Upstream hostname only; never a URL. */
 	readonly upstreamHost?: string;
 	/** Adapter-defined sensor-loop phase, such as fetch_script or post_sensor. */
@@ -137,6 +140,7 @@ type ResolverErrorOptions = {
 };
 
 export class ResolverVendorUnavailableError extends Error {
+	readonly missingFields?: readonly string[];
 	readonly upstreamHost?: string;
 	readonly phase?: string;
 	readonly round?: number;
@@ -146,8 +150,19 @@ export class ResolverVendorUnavailableError extends Error {
 		readonly reason: ResolverVendorUnavailableReason,
 		options: ResolverErrorOptions = {},
 	) {
-		super(`Resolver vendor ${vendor} is unavailable: ${reason}`);
+		const missingFields =
+			reason === "missing_challenge_input"
+				? options.missingFields?.filter((field) => /^[A-Za-z][A-Za-z0-9_]*$/u.test(field))
+				: undefined;
+		super(
+			reason === "missing_challenge_input" && missingFields !== undefined && missingFields.length > 0
+				? `Resolver vendor ${vendor} cannot use incomplete challenge input; missing fields: ${missingFields.join(", ")}`
+				: `Resolver vendor ${vendor} is unavailable: ${reason}`,
+		);
 		this.name = "ResolverVendorUnavailableError";
+		if (missingFields !== undefined && missingFields.length > 0) {
+			this.missingFields = Object.freeze([...missingFields]);
+		}
 		if (options.cause !== undefined) {
 			this.cause = options.cause;
 		}

@@ -82,6 +82,7 @@ type ResolvedResolverVendor =
 type ResolverChainAttempt = {
 	readonly vendor: ProviderResolverVendor;
 	readonly reason: ResolverVendorUnavailableReason;
+	readonly missingFields?: readonly string[];
 	readonly cause?: {
 		readonly name: string;
 		readonly message: string;
@@ -347,10 +348,21 @@ function throwUnsupportedKind(kind: ProviderChallengeKind): never {
 }
 
 function throwExhausted(attempts: readonly ResolverChainAttempt[]): never {
-	const summary = attempts.map(({ vendor, reason }) => `${vendor}: ${reason}`).join(", ");
+	const hasMissingChallengeInput = attempts.some(
+		(attempt) => attempt.reason === "missing_challenge_input",
+	);
+	const summary = attempts
+		.map(({ vendor, reason, missingFields }) =>
+			missingFields === undefined || missingFields.length === 0
+				? `${vendor}: ${reason}`
+				: `${vendor}: ${reason} (missing fields: ${missingFields.join(", ")})`,
+		)
+		.join(", ");
 	throw new ProviderError(`Resolver vendor chain exhausted: ${summary}`, {
 		code: "RESOLVER_CHAIN_EXHAUSTED",
-		fix: "Configure another supporting resolver vendor or restore an unavailable vendor.",
+		fix: hasMissingChallengeInput
+			? "Capture the named challenge fields or configure another supporting resolver vendor."
+			: "Configure another supporting resolver vendor or restore an unavailable vendor.",
 		details: attempts,
 	});
 }
@@ -473,6 +485,7 @@ function unavailableAttempt(error: ResolverVendorUnavailableError): ResolverChai
 	return {
 		vendor: error.vendor,
 		reason: error.reason,
+		...(error.missingFields ? { missingFields: [...error.missingFields] } : {}),
 		...(cause ? { cause } : {}),
 		...(upstreamHost ? { upstreamHost } : {}),
 		...(phase ? { phase } : {}),
@@ -484,6 +497,7 @@ function unavailableSpanAttributes(error: ResolverVendorUnavailableError): Recor
 	const attempt = unavailableAttempt(error);
 	return {
 		unavailability_reason: error.reason,
+		missing_fields: error.missingFields,
 		cause_name: attempt.cause?.name,
 		cause_message: attempt.cause?.message,
 		upstream_host: attempt.upstreamHost,
@@ -917,6 +931,8 @@ function createResolverChainClient(options: {
 				} catch (error) {
 					signal.throwIfAborted();
 					if (!(error instanceof ResolverVendorUnavailableError)) throw error;
+					// Every vendor-unavailable result, including missing_challenge_input, falls
+					// through so another adapter can solve with a different input contract.
 					attempts.push(unavailableAttempt(error));
 				}
 			}

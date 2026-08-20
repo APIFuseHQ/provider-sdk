@@ -315,7 +315,25 @@ describe("2captcha resolver vendor", () => {
 
 	it("rejects reCAPTCHA v3 without the upstream-required minScore", async () => {
 		const stub = createFetchStub([]);
-		await expect(createAdapter(stub).solve({ kind: "recaptcha_v3", siteKey: "key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "login" }, undefined, new AbortController().signal)).rejects.toMatchObject({ vendor: "2captcha", reason: "transport_failure", phase: "create_task" });
+		const error = await capturedError(
+			createAdapter(stub).solve(
+				{
+					kind: "recaptcha_v3",
+					siteKey: "key",
+					pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
+					action: "login",
+				},
+				undefined,
+				new AbortController().signal,
+			),
+		);
+		expect(error).toMatchObject({
+			vendor: "2captcha",
+			reason: "missing_challenge_input",
+			missingFields: ["minScore"],
+			phase: "create_task",
+		});
+		expect((error as Error).message).toContain("minScore");
 		expect(stub.calls).toHaveLength(0);
 	});
 
@@ -451,14 +469,87 @@ describe("2captcha resolver vendor", () => {
 		{ ...AWS_WAF_CHALLENGE, iv: undefined },
 	])("rejects AWS WAF without every required page artifact: %o", async (challenge) => {
 		const stub = createFetchStub([]);
+		const apiKey = "input-gap-api-key-secret";
+		const proxyUrl = "http://input-gap-user:input-gap-password@proxy.example:8080";
 		const error = await capturedError(
-			createAdapter(stub).solve(challenge, undefined, new AbortController().signal),
+			createAdapter(stub, { apiKey }).solve(
+				challenge,
+				{ proxyUrl, userAgent: "InputGapBrowser/1.0" },
+				new AbortController().signal,
+			),
 		);
+		const missingField =
+			challenge.siteKey === undefined
+				? "siteKey"
+				: challenge.captchaScript === undefined
+					? "captchaScript"
+					: challenge.context === undefined
+						? "context"
+						: "iv";
 
 		expect(error).toMatchObject({
 			vendor: "2captcha",
-			reason: "not_implemented",
+			reason: "missing_challenge_input",
+			missingFields: [missingField],
 			phase: "create_task",
+		});
+		expect((error as Error).message).toContain(missingField);
+		const serialized = JSON.stringify(error);
+		for (const secret of [
+			apiKey,
+			proxyUrl,
+			AWS_WAF_CHALLENGE.siteKey,
+			AWS_WAF_CHALLENGE.captchaScript,
+			AWS_WAF_CHALLENGE.context,
+			AWS_WAF_CHALLENGE.iv,
+		]) {
+			expect((error as Error).message).not.toContain(secret);
+			expect(serialized).not.toContain(secret);
+		}
+		expect(stub.calls).toHaveLength(0);
+	});
+
+	it("falls through incomplete AWS WAF input to a vendor with a different input contract", async () => {
+		const stub = createFetchStub([]);
+		const chain = createTwoVendorChain(createAdapter(stub));
+		const challenge = {
+			kind: "aws_waf",
+			pageUrl: AWS_WAF_CHALLENGE.pageUrl,
+		} satisfies ProviderChallenge;
+
+		await expect(chain.client.solve(challenge)).resolves.toEqual({
+			form: "token",
+			token: "second-vendor-token",
+		});
+		expect(stub.calls).toHaveLength(0);
+		expect(chain.secondCalls()).toBe(1);
+	});
+
+	it("surfaces missing challenge fields in exhausted chain details", async () => {
+		const stub = createFetchStub([]);
+		const chain = createTwoVendorChain(createAdapter(stub), async () => {
+			throw new ResolverVendorUnavailableError("custom", "not_implemented");
+		});
+		const challenge = {
+			kind: "aws_waf",
+			pageUrl: AWS_WAF_CHALLENGE.pageUrl,
+		} satisfies ProviderChallenge;
+
+		await expect(chain.client.solve(challenge)).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			message: expect.stringContaining(
+				"missing fields: siteKey, captchaScript, context, iv",
+			),
+			fix: "Capture the named challenge fields or configure another supporting resolver vendor.",
+			details: [
+				{
+					vendor: "2captcha",
+					reason: "missing_challenge_input",
+					missingFields: ["siteKey", "captchaScript", "context", "iv"],
+					phase: "create_task",
+				},
+				{ vendor: "custom", reason: "not_implemented" },
+			],
 		});
 		expect(stub.calls).toHaveLength(0);
 	});
