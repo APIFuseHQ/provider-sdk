@@ -20,6 +20,7 @@ type PackageJson = {
 };
 
 type ApiExtractorConfig = {
+	extends?: unknown;
 	projectFolder?: string;
 	mainEntryPointFilePath: string;
 	apiReport: {
@@ -259,6 +260,14 @@ if (mode !== "update" && mode !== "check") {
 mkdirSync(tempDir, { recursive: true });
 mkdirSync(reportDir, { recursive: true });
 
+// The containment check below resolves both sides through reportDir, so a
+// symlinked api-reports directory would satisfy it while every write lands
+// outside the repository. Require the directory itself to be real.
+if (lstatSync(reportDir).isSymbolicLink()) {
+	console.error("api-reports must be a real directory, not a symbolic link.");
+	process.exit(1);
+}
+
 const configs = readdirSync(configDir)
 	.filter((name) => name.endsWith(".json"))
 	.sort();
@@ -352,6 +361,11 @@ function resolveConfiguredPath(
 }
 
 const invalidApiReportConfigs = parsedConfigs.filter(({ config, configPath }) => {
+	// The gate validates the raw JSON while API Extractor merges `extends` before
+	// running, so an inherited base could smuggle in settings this gate rejects
+	// (reportVariants, a redirected reportFolder). No config uses inheritance;
+	// reject it outright rather than re-implementing API Extractor's merge.
+	if (config.extends !== undefined) return true;
 	if (config.apiReport.enabled !== true) return true;
 	if (config.apiReport.reportVariants !== undefined) return true;
 	if (typeof config.apiReport.reportFolder !== "string") return true;
@@ -362,6 +376,11 @@ if (invalidApiReportConfigs.length > 0) {
 		`API Extractor configs must enable apiReport and resolve apiReport.reportFolder to ${reportDir}.`,
 	);
 	for (const { config, configPath } of invalidApiReportConfigs) {
+		if (config.extends !== undefined) {
+			console.error(
+				`  ${configPath}: extends is not supported; inherited settings are invisible to this gate.`,
+			);
+		}
 		if (config.apiReport.enabled !== true) {
 			console.error(`  ${configPath}: apiReport.enabled must be true.`);
 		}
@@ -537,8 +556,14 @@ for (const { config, configPath } of parsedConfigs) {
 	const stats = (() => {
 		try {
 			return lstatSync(committed);
-		} catch {
-			return undefined;
+		} catch (error) {
+			// Only genuine absence may proceed (and only in update mode); any other
+			// stat failure (EACCES, EIO) must not masquerade as a missing report and
+			// bypass the safety checks above the writer.
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+			console.error(`Failed to stat committed API report api-reports/${reportName}:`);
+			console.error(`  ${String(error)}`);
+			process.exit(1);
 		}
 	})();
 	if (stats !== undefined && !stats.isFile()) {
