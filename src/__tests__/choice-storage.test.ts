@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+
+import { assertIsError } from "./test-utils.js";
 import { createHash } from "node:crypto";
 import { ProviderChoiceTokenError } from "../choice-token.js";
 import { ProviderError } from "../errors.js";
@@ -35,7 +37,8 @@ async function expectWordChoiceNotFound(promise: Promise<unknown>): Promise<void
 	} catch (error) {
 		expect(error).toBeInstanceOf(ProviderChoiceTokenError);
 		expect((error as ProviderChoiceTokenError).reason).toBe("invalid_payload");
-		expect((error as Error).message).toBe("Provider choice token was not found.");
+		assertIsError(error);
+		expect(error.message).toBe("Provider choice token was not found.");
 	}
 }
 

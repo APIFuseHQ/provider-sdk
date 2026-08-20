@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { createServer, type Server, type Socket } from "node:net";
 
+import { assertIsError } from "../../__tests__/test-utils.js";
 import {
 	canonicalizeEgressHost,
 	classifyEgressHost,
@@ -661,7 +662,8 @@ describe("native egress enforcement", () => {
 				.catch((error: unknown) => error);
 			expect(connectError).toBeInstanceOf(NativeNetworkError);
 			expect(connectError).toMatchObject({ code: "native_egress_input_invalid" });
-			expect((connectError as Error).message).not.toContain(rawHost);
+			assertIsError(connectError);
+			expect(connectError.message).not.toContain(rawHost);
 
 			const policyError = captureNativeError(() =>
 				createNativeNetworkClient({
@@ -701,7 +703,8 @@ describe("native egress enforcement", () => {
 				throw new Error(`Expected ${host} to be denied`);
 			} catch (error) {
 				expect(error).toMatchObject({ code: "native_egress_not_declared" });
-				expect((error as Error).message).toMatch(/target kind: (?:ipv4|numeric-ambiguous)/);
+				assertIsError(error);
+				expect(error.message).toMatch(/target kind: (?:ipv4|numeric-ambiguous)/);
 			}
 		}
 
@@ -979,7 +982,8 @@ describe("native egress enforcement", () => {
 			} catch (error) {
 				expect(error).toBeInstanceOf(NativeNetworkError);
 				expect(error).toMatchObject({ code: "native_egress_policy_invalid" });
-				expect((error as Error).message).toContain("must be an IPv4 CIDR in a.b.c.d/nn form");
+				assertIsError(error);
+				expect(error.message).toContain("must be an IPv4 CIDR in a.b.c.d/nn form");
 			}
 		}
 		for (const [targetIpv4Cidrs, message] of [
@@ -996,7 +1000,8 @@ describe("native egress enforcement", () => {
 			} catch (error) {
 				expect(error).toBeInstanceOf(NativeNetworkError);
 				expect(error).toMatchObject({ code: "native_egress_policy_invalid" });
-				expect((error as Error).message).toContain(message);
+				assertIsError(error);
+				expect(error.message).toContain(message);
 			}
 		}
 		expectNativeCode(
@@ -1056,7 +1061,8 @@ describe("native egress enforcement", () => {
 				throw new Error("Expected missing target selectors to be rejected");
 			} catch (error) {
 				expect(error).toMatchObject({ code: "native_egress_policy_invalid" });
-				expect((error as Error).message).toContain(
+				assertIsError(error);
+				expect(error.message).toContain(
 					"native.network.dynamicTcp[0] must declare a non-empty targetHostSuffixes, targetIpv4Cidrs, or targetIpv6Cidrs list",
 				);
 			}
@@ -1262,7 +1268,8 @@ describe("native egress enforcement", () => {
 					throw new Error(`Expected ${field} ${cidr} to be rejected`);
 				} catch (error) {
 					expect(error).toMatchObject({ code: "native_egress_policy_invalid" });
-					expect((error as Error).message).toContain(`overlaps ${overlap} address space`);
+					assertIsError(error);
+					expect(error.message).toContain(`overlaps ${overlap} address space`);
 				}
 			}
 		}
@@ -1539,9 +1546,10 @@ describe("native egress enforcement", () => {
 			} catch (error) {
 				expect(error).toBeInstanceOf(NativeNetworkError);
 				expect(error).toMatchObject({ code: "native_egress_not_declared" });
-				const message = (error as Error).message;
+				assertIsError(error);
+				const message = error.message;
 				expect(message).toContain(`source ${sourceHost}:${sourcePort}`);
-				for (const detail of details) expect((error as Error).message).toContain(detail);
+				for (const detail of details) expect(error.message).toContain(detail);
 				expect(message).not.toContain(`rule 0: ${absentDimension}`);
 			}
 		}
@@ -1554,8 +1562,9 @@ describe("native egress enforcement", () => {
 			.connectTcp({ host: rawHost, port: 443 })
 			.catch((error: unknown) => error);
 		expect(error).toBeInstanceOf(NativeEgressNotDeclaredError);
-		expect((error as Error).message).not.toContain(rawHost);
-		expect((error as Error).message).toContain("xn--6j1bv29b.example:443");
+		assertIsError(error);
+		expect(error.message).not.toContain(rawHost);
+		expect(error.message).toContain("xn--6j1bv29b.example:443");
 	});
 
 	it("reports target selector failures along each source-matching rule path", () => {
@@ -1583,7 +1592,8 @@ describe("native egress enforcement", () => {
 			throw new Error("Expected overlapping rules to deny the grant");
 		} catch (error) {
 			expect(error).toMatchObject({ code: "native_egress_not_declared" });
-			const message = (error as Error).message;
+			assertIsError(error);
+			const message = error.message;
 			expect(message).toContain("source-matching rule indices: [0, 1]");
 			expect(message).toContain(
 				"failed selector dimensions by rule: rule 0: target-port; rule 1: tls",

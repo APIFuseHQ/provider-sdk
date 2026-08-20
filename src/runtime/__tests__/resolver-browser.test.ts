@@ -1,8 +1,11 @@
 import { describe, expect, it } from "bun:test";
 
+import {
+	createBrowserClientDouble,
+	createBrowserPageDouble,
+} from "../../__tests__/test-utils.js";
 import { ProviderError } from "../../errors.js";
 import type {
-	BrowserClient,
 	BrowserCookie,
 	BrowserPage,
 	BrowserResourcePolicy,
@@ -127,17 +130,16 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 		pageOperations: [] as string[],
 		resourcePolicies: [] as BrowserResourcePolicy[],
 	};
-	const page = {
+	const page = createBrowserPageDouble({
 		async cookies() {
 			const jars = options.cookieJars ?? [[]];
 			const jar = jars[Math.min(cookieRead, jars.length - 1)] ?? [];
 			cookieRead += 1;
 			return jar;
 		},
-		async evaluate<T>(expression: string | (() => T)): Promise<T> {
-			void expression;
+		async userAgent(): Promise<string> {
 			state.pageOperations.push("evaluate-user-agent");
-			return (options.userAgent ?? "StubBrowser/1.0") as T;
+			return options.userAgent ?? "StubBrowser/1.0";
 		},
 		async goto(url: string) {
 			state.pageOperations.push("goto");
@@ -148,8 +150,8 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 			state.resourcePolicies.push(policy);
 			return await run();
 		},
-	} as unknown as BrowserPage;
-	const client = {
+	});
+	const client = createBrowserClientDouble({
 		engine: "playwright-stealth",
 		async close() {
 			state.clientCloseCalls += 1;
@@ -165,7 +167,7 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 				state.contextCloseCalls += 1;
 			}
 		},
-	} as unknown as BrowserClient;
+	});
 
 	return { client, state };
 }

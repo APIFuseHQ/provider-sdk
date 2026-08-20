@@ -1349,7 +1349,8 @@ export default { id: "record-invalid", version: "1.0.0", runtime: "standard",
  operations: { lookup: { input: z.object({}), output: z.unknown(),
  upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
  handler: async (ctx) => (await ctx.http.get("/", {
-   sensitiveParams: { pin: 123456 } as any,
+   // @ts-expect-error test-invalid: runtime sensitiveParams validation must reject numbers.
+   sensitiveParams: { pin: 123456 },
  })).data,
  } } };
 `,

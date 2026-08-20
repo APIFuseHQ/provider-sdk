@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 import { createServer, type Server, Socket } from "node:net";
 
+import { assertIsError } from "../../__tests__/test-utils.js";
 import {
 	createNativeNetworkClient,
 	type NativeGatewayProxySynthesizer,
@@ -307,8 +308,10 @@ for (const protocol of ["socks5", "http"] as const) {
 			}
 
 			expect(thrown).toMatchObject({ code: "native_connection_failed" });
+			assertIsError(thrown);
 			if (protocol === "http") {
-				const cause = (thrown as Error).cause as Error & { connectStatusLine: string };
+				const cause = thrown.cause;
+				assertIsError(cause);
 				expect(cause).toMatchObject({
 					connectStatusCode: 614,
 					connectStatusLine: expect.stringContaining("HTTP/1.1 614"),
@@ -319,7 +322,7 @@ for (const protocol of ["socks5", "http"] as const) {
 				expect(causeText).not.toContain(password);
 				expect(causeText).not.toContain(basic);
 			} else {
-				expect((thrown as Error).cause).toMatchObject({ socks5ReplyCode: 2 });
+				expect(thrown.cause).toMatchObject({ socks5ReplyCode: 2 });
 			}
 			const serialized = JSON.stringify(thrown);
 			expect(serialized).not.toContain(username);

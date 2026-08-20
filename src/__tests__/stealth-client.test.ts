@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 
+import { assertIsError, emptyArray } from "./test-utils.js";
 import {
 	ProviderError,
 	SDKError,
@@ -62,7 +63,7 @@ const mockStealthState = {
 	clients: [] as MockStealthClientState[],
 	queuedResponses: [] as MockWreqResponse[],
 	queuedErrors: [] as (Error | (() => Error))[],
-	queuedCloseErrors: [] as Error[],
+	queuedCloseErrors: emptyArray<Error>(),
 };
 
 function toHeaders(headers: MockWreqResponse["headers"]): Headers {
@@ -912,9 +913,11 @@ describe("createStealthClient", () => {
 		const futureState = {
 			version: 2,
 			jar: cookies.serialize().jar,
-		} as unknown as StealthCookieStoreV1;
+		};
 
+		// @ts-expect-error test-invalid: deserialization must reject unsupported store versions.
 		expect(() => cookies.deserialize(futureState)).toThrow(StealthCookieStoreVersionError);
+		// @ts-expect-error test-invalid: the message assertion repeats the malformed call deliberately.
 		expect(() => cookies.deserialize(futureState)).toThrow(
 			"Unsupported stealth cookie store version: 2",
 		);
@@ -1108,7 +1111,8 @@ describe("createStealthClient", () => {
 			retryError = error;
 		}
 		expect(retryError).toBeInstanceOf(Error);
-		expect((retryError as Error).message).not.toContain(retrySecret);
+		assertIsError(retryError);
+		expect(retryError.message).not.toContain(retrySecret);
 		expect(JSON.stringify(retryError)).not.toContain(retrySecret);
 		expect(mockStealthState.clients).toHaveLength(0);
 	});
@@ -1913,7 +1917,8 @@ describe("createStealthClient", () => {
 
 		expect(thrown).toBeInstanceOf(Error);
 		expect(String(thrown)).not.toContain(secret);
-		expect((thrown as Error).stack).not.toContain(secret);
+		assertIsError(thrown);
+		expect(thrown.stack).not.toContain(secret);
 		expect(String(thrown)).toContain("[REDACTED]");
 	});
 
@@ -1934,7 +1939,8 @@ describe("createStealthClient", () => {
 		expect(thrown).toBeInstanceOf(Error);
 		const serialized = JSON.stringify(thrown);
 		expect(String(thrown)).not.toContain(secret);
-		expect((thrown as Error).stack).not.toContain(secret);
+		assertIsError(thrown);
+		expect(thrown.stack).not.toContain(secret);
 		expect(serialized).not.toContain(secret);
 		expect(String(thrown)).toContain("[REDACTED]");
 	});
@@ -1968,7 +1974,8 @@ describe("createStealthClient", () => {
 
 		expect(String(thrown)).toContain("serviceKey=[REDACTED]");
 		expect(String(thrown)).not.toContain(secret);
-		expect((thrown as Error).stack).not.toContain(secret);
+		assertIsError(thrown);
+		expect(thrown.stack).not.toContain(secret);
 		expect(thrown).toBeInstanceOf(ProviderError);
 		expect((thrown as ProviderError).code).toBe("https://example.com/next?serviceKey=[REDACTED]");
 		expect((thrown as ProviderError).options).toMatchObject({
@@ -2018,7 +2025,8 @@ describe("createStealthClient", () => {
 		const transportError = thrown as TransportError;
 		expect(transportError.message).toBe("Network error");
 		expect(String(transportError.cause)).not.toContain(secret);
-		expect((transportError.cause as Error).stack).not.toContain(secret);
+		assertIsError(transportError.cause);
+		expect(transportError.cause.stack).not.toContain(secret);
 		expect(JSON.stringify(transportError.cause)).not.toContain(secret);
 	});
 
@@ -2039,7 +2047,8 @@ describe("createStealthClient", () => {
 		expect(thrown).toBeInstanceOf(TransportError);
 		const serialized = JSON.stringify(thrown);
 		expect(String(thrown)).not.toContain(oldSecret);
-		expect((thrown as Error).stack).not.toContain(oldSecret);
+		assertIsError(thrown);
+		expect(thrown.stack).not.toContain(oldSecret);
 		expect(serialized).not.toContain(oldSecret);
 		expect(String((thrown as TransportError).cause)).not.toContain(oldSecret);
 	});
@@ -2071,8 +2080,10 @@ describe("createStealthClient", () => {
 			status: 0,
 			message: "Request timed out",
 		});
-		expect(String((thrown as TransportError).cause)).not.toContain(secret);
-		expect(((thrown as TransportError).cause as Error).stack).not.toContain(secret);
+		const transportError = thrown as TransportError;
+		expect(String(transportError.cause)).not.toContain(secret);
+		assertIsError(transportError.cause);
+		expect(transportError.cause.stack).not.toContain(secret);
 	});
 
 	it("redacts against the serialized request snapshot when options mutate in flight", async () => {
@@ -2096,8 +2107,10 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients[0]?.calls[0]?.url).toBe(
 			`https://example.com/network?serviceKey=${sentSecret}`,
 		);
-		expect(String((thrown as TransportError).cause)).not.toContain(sentSecret);
-		expect(((thrown as TransportError).cause as Error).stack).not.toContain(sentSecret);
+		const transportError = thrown as TransportError;
+		expect(String(transportError.cause)).not.toContain(sentSecret);
+		assertIsError(transportError.cause);
+		expect(transportError.cause.stack).not.toContain(sentSecret);
 	});
 
 	it("maps wreq timeout failures to transport_timeout", async () => {

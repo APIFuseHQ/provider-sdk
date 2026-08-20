@@ -242,7 +242,7 @@ async function solveInPage(
 		},
 		async () => {
 			const userAgent = await raceWithAbort(
-				() => page.evaluate<string>("navigator.userAgent"),
+				() => page.userAgent(),
 				signal,
 			);
 			await raceWithAbort(() => page.goto(pageUrl), signal);

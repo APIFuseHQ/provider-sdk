@@ -97,8 +97,9 @@ describe("healthProbe alias for healthMonitor", () => {
 			defineProvider(
 				baseConfig({
 					healthProbe: {
+						// @ts-expect-error test-invalid: runtime config validation must reject unknown fields.
 						bogusField: true,
-					} as unknown as ProviderHealthMonitorConfig,
+					},
 				}),
 			),
 		).toThrow(/healthProbe/);
@@ -116,8 +117,9 @@ describe("healthProbe alias for healthMonitor", () => {
 			defineProvider(
 				baseConfig({
 					healthMonitor: {
+						// @ts-expect-error test-invalid: runtime config validation must reject unknown fields.
 						bogusField: true,
-					} as unknown as ProviderHealthMonitorConfig,
+					},
 				}),
 			),
 		).toThrow(/healthMonitor/);

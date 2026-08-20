@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createServer as createTlsServer } from "node:tls";
 
+import { assertIsError } from "../../__tests__/test-utils.js";
 import { ProxyResolutionError } from "../../config/loader.js";
 import { formatIpv6 } from "../../native-address.js";
 import {
@@ -531,7 +532,8 @@ describe("native network runtime", () => {
 		}
 
 		expect(thrown).toMatchObject({ code: "native_connection_failed" });
-		expect((thrown as Error).cause).toMatchObject({ code: "ECONNREFUSED" });
+		assertIsError(thrown);
+		expect(thrown.cause).toMatchObject({ code: "ECONNREFUSED" });
 	});
 
 	it("preserves a proxy rejection reply and redacts proxy credentials", async () => {
@@ -557,7 +559,8 @@ describe("native network runtime", () => {
 		}
 
 		expect(thrown).toMatchObject({ code: "native_connection_failed" });
-		expect((thrown as Error).cause).toMatchObject({
+		assertIsError(thrown);
+		expect(thrown.cause).toMatchObject({
 			message: "Socks5 proxy rejected connection - NotAllowed",
 			socks5ReplyCode: 0x02,
 		});

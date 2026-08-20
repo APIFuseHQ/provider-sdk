@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
 
+import { createProviderContextDouble } from "../../__tests__/test-utils.js";
 import type {
 	ChallengeSolution,
 	ProviderCache,
 	ProviderChallenge,
-	ProviderContext,
 	ProviderResolverVendor,
 	ResolverContext,
 } from "../../types.js";
@@ -36,7 +36,7 @@ function adapter(
 
 function instrumentResolver(resolver: ResolverContext) {
 	const trace = createTraceContext();
-	return wrapWithInstrumentation({ trace, resolver } as unknown as ProviderContext);
+	return wrapWithInstrumentation(createProviderContextDouble({ trace, resolver }));
 }
 
 describe("resolver tracing", () => {
@@ -102,7 +102,11 @@ describe("resolver tracing", () => {
 			kinds: ["aws_waf"],
 			adapters: [adapter("browser", async () => solution)],
 		});
-		const context = { trace: {}, resolver } as unknown as ProviderContext;
+		const context = createProviderContextDouble({
+			resolver,
+			// @ts-expect-error test-invalid: instrumentation must tolerate an uninstrumented trace.
+			trace: {},
+		});
 		expect(getTraceRecorder(context.trace)).toBeNull();
 		const instrumented = wrapWithInstrumentation(context);
 

@@ -3,6 +3,7 @@ import { type Socket, createServer } from "node:net";
 import { z } from "zod";
 
 import { clearProxyResolutionCache } from "../config/loader.js";
+import { PROVIDER_ERROR_CATEGORIES } from "../observability.js";
 import {
 	AuthError,
 	ProviderError,
@@ -22,12 +23,21 @@ import {
 import { event } from "../stream.js";
 import type { OperationErrorCode, ProviderContext, ProviderDefinition } from "../types.js";
 import { HttpRetryPreset } from "../types.js";
+import { createProviderDefinitionDouble } from "./test-utils.js";
 
 function errorObservability(response: Response): ErrorObservabilityDetails {
 	const value = response.headers.get(ERROR_OBSERVABILITY_HEADER);
 	expect(value).toBeTruthy();
 	expect(value).not.toMatch(/[\r\n]/);
-	return JSON.parse(value as string) as ErrorObservabilityDetails;
+	if (value === null) throw new Error("Expected error observability header");
+	return z
+		.object({
+			category: z.enum(PROVIDER_ERROR_CATEGORIES),
+			taxonomyVersion: z.string(),
+			retryable: z.boolean(),
+			upstreamStatus: z.number().optional(),
+		})
+		.parse(JSON.parse(value));
 }
 
 function createTestProvider(state: { streamCancelled?: boolean } = {}) {
@@ -1550,7 +1560,7 @@ describe("provider HTTP server", () => {
 
 	it("serves UPSTREAM_REJECTED as a non-retryable 409 upstream rule refusal", async () => {
 		const base = createTestProvider();
-		const provider = {
+		const provider = createProviderDefinitionDouble({
 			...base,
 			operations: {
 				reserve: {
@@ -1564,7 +1574,7 @@ describe("provider HTTP server", () => {
 					},
 				},
 			},
-		} satisfies ProviderDefinition;
+		});
 		const app = createServerApp(provider, { logger: () => undefined });
 		const response = await app.request("/v1/reserve", {
 			method: "POST",
@@ -2493,7 +2503,7 @@ describe("operation-declared error resolution", () => {
 
 	it("ignores a structurally supplied non-emittable declared status", async () => {
 		const base = createTestProvider() as ProviderDefinition;
-		const provider = {
+		const provider = createProviderDefinitionDouble({
 			...base,
 			operations: {
 				structuralError: {
@@ -2515,7 +2525,7 @@ describe("operation-declared error resolution", () => {
 					},
 				},
 			},
-		} as unknown as ProviderDefinition;
+		});
 		const app = createServerApp(provider, { logger: () => undefined });
 
 		const response = await app.request("/v1/structuralError", {
@@ -2622,13 +2632,11 @@ describe("provider HTTP server cross-module error identity", () => {
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
-						const err = new Error("Missing provider service key") as Error & {
-							code?: string;
-							options?: unknown;
-						};
+						const err = Object.assign(new Error("Missing provider service key"), {
+							code: "CONFIGURATION_ERROR",
+							options: { code: "CONFIGURATION_ERROR" },
+						});
 						err.name = "ProviderError";
-						err.code = "CONFIGURATION_ERROR";
-						err.options = { code: "CONFIGURATION_ERROR" };
 						throw err;
 					},
 				},

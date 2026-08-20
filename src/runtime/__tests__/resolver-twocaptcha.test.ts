@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
+import { assertIsError, capturedError } from "../../__tests__/test-utils.js";
+
 import { ProviderError } from "../../errors.js";
 import type { ChallengeSolution, ProviderChallenge, ProviderChallengeKind } from "../../types.js";
 import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
@@ -85,9 +87,6 @@ function successfulFetch(solution: Record<string, unknown>) {
 	]);
 }
 
-async function capturedError(operation: Promise<unknown>): Promise<unknown> {
-	return await operation.catch((error: unknown) => error);
-}
 
 function createTwoVendorChain(
 	first: ResolverVendorAdapter,
@@ -178,7 +177,7 @@ describe("2captcha resolver vendor", () => {
 			reason: "transport_failure",
 			phase: "create_task",
 		});
-		expect((error as Error).cause).toBe(networkError);
+		expect(error.cause).toBe(networkError);
 		expect(trace.getSpans()).toHaveLength(1);
 		expect(trace.getSpans()[0]).toMatchObject({
 			name: "resolver.vendor.create_task",
@@ -333,7 +332,8 @@ describe("2captcha resolver vendor", () => {
 			missingFields: ["minScore"],
 			phase: "create_task",
 		});
-		expect((error as Error).message).toContain("minScore");
+		assertIsError(error);
+		expect(error.message).toContain("minScore");
 		expect(stub.calls).toHaveLength(0);
 	});
 
@@ -493,7 +493,8 @@ describe("2captcha resolver vendor", () => {
 			missingFields: [missingField],
 			phase: "create_task",
 		});
-		expect((error as Error).message).toContain(missingField);
+		assertIsError(error);
+		expect(error.message).toContain(missingField);
 		const serialized = JSON.stringify(error);
 		for (const secret of [
 			apiKey,
@@ -503,7 +504,7 @@ describe("2captcha resolver vendor", () => {
 			AWS_WAF_CHALLENGE.context,
 			AWS_WAF_CHALLENGE.iv,
 		]) {
-			expect((error as Error).message).not.toContain(secret);
+			expect(error.message).not.toContain(secret);
 			expect(serialized).not.toContain(secret);
 		}
 		expect(stub.calls).toHaveLength(0);
@@ -621,10 +622,11 @@ describe("2captcha resolver vendor", () => {
 	});
 
 	it("throws TypeError for a kind outside the declared capability table", async () => {
-		const challenge = {
+		// @ts-expect-error test-invalid: runtime capability validation must reject unknown kinds.
+		const challenge: ProviderChallenge = {
 			kind: "future_challenge",
 			pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
-		} as unknown as ProviderChallenge;
+		};
 
 		await expect(
 			createAdapter(createFetchStub([])).solve(challenge, undefined, new AbortController().signal),
@@ -721,7 +723,7 @@ describe("2captcha resolver vendor", () => {
 		expect(error).toBeInstanceOf(ResolverChallengeVerdictError);
 		expect(error).not.toBeInstanceOf(ResolverVendorUnavailableError);
 		expect(error).toMatchObject({ vendor: "2captcha", reason: "solve_failed" });
-		expect((error as Error).message).toBe(
+		expect(error.message).toBe(
 			"Resolver vendor 2captcha attempted the challenge but did not solve it",
 		);
 	});
@@ -816,8 +818,8 @@ describe("2captcha resolver vendor", () => {
 			reason: "transport_failure",
 			phase: "create_task",
 		});
-		expect((error as Error).message).not.toContain(apiKey);
-		expect(String((error as Error).cause ?? "")).not.toContain(apiKey);
+		expect(error.message).not.toContain(apiKey);
+		expect(String(error.cause ?? "")).not.toContain(apiKey);
 	});
 
 	it("maps AWS WAF polling allocation errors without exposing the API key", async () => {
@@ -844,8 +846,8 @@ describe("2captcha resolver vendor", () => {
 			reason: "allocation_exhausted",
 			phase: "poll_result",
 		});
-		expect((error as Error).message).not.toContain(apiKey);
-		expect(String((error as Error).cause ?? "")).not.toContain(apiKey);
+		expect(error.message).not.toContain(apiKey);
+		expect(String(error.cause ?? "")).not.toContain(apiKey);
 	});
 
 	it("maps an HTTP failure to transport failure", async () => {
@@ -880,7 +882,7 @@ describe("2captcha resolver vendor", () => {
 			reason: "transport_failure",
 			phase: "create_task",
 		});
-		expect((error as Error).cause).toBe(networkError);
+		expect(error.cause).toBe(networkError);
 	});
 
 	it("does not retain a create-task network cause containing the API key", async () => {
@@ -899,8 +901,8 @@ describe("2captcha resolver vendor", () => {
 			reason: "transport_failure",
 			phase: "create_task",
 		});
-		expect((error as Error).message).not.toContain(apiKey);
-		expect((error as Error).cause).toBeUndefined();
+		expect(error.message).not.toContain(apiKey);
+		expect(error.cause).toBeUndefined();
 	});
 
 	it("preserves the polling network failure cause and phase", async () => {
@@ -916,7 +918,7 @@ describe("2captcha resolver vendor", () => {
 			reason: "transport_failure",
 			phase: "poll_result",
 		});
-		expect((error as Error).cause).toBe(networkError);
+		expect(error.cause).toBe(networkError);
 	});
 
 	it("maps a zero-balance vendor response to allocation exhaustion", async () => {
@@ -969,9 +971,9 @@ describe("2captcha resolver vendor", () => {
 
 		expect(error).toBeInstanceOf(ResolverVendorUnavailableError);
 		for (const secret of [apiKey, proxyUrl, "proxy-password"]) {
-			expect((error as Error).message).not.toContain(secret);
+			expect(error.message).not.toContain(secret);
 			expect(String(error)).not.toContain(secret);
-			expect(String((error as Error).cause ?? "")).not.toContain(secret);
+			expect(String(error.cause ?? "")).not.toContain(secret);
 		}
 	});
 });

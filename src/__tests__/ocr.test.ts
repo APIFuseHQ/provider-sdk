@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
+import { assertIsError } from "./test-utils.js";
 import { defineProvider } from "../define.js";
 import { ProviderError } from "../errors.js";
 import { createFlowContext } from "../runtime/auth-flow.js";
@@ -363,7 +364,8 @@ describe("OCR runtime clients", () => {
 					code: "OCR_UPSTREAM_FAILED",
 					message: expect.stringContaining("malformed response"),
 				});
-				expect((error as Error).cause).toBeInstanceOf(SyntaxError);
+				assertIsError(error);
+				expect(error.cause).toBeInstanceOf(SyntaxError);
 			}
 		}
 	});

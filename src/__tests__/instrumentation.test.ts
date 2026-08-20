@@ -7,6 +7,10 @@ import { isProviderError } from "../errors.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import { createTraceContext } from "../runtime/trace.js";
+import {
+	createBrowserClientDouble,
+	createBrowserPageDouble,
+} from "./test-utils.js";
 import type {
 	AuthContext,
 	BrowserClient,
@@ -35,14 +39,18 @@ function createMockHttpResponse(requestId: string, duration: number) {
 }
 
 function createMockContext(): ProviderContext {
-	const mockPage = {
+	const mockPage = createBrowserPageDouble({
 		pageId: "page-1",
-		goto: mock(async (url: string) => ({ url })),
+		goto: mock(async () => undefined),
 		fill: mock(async () => undefined),
 		click: mock(async () => undefined),
 		type: mock(async () => undefined),
 		waitForSelector: mock(async () => undefined),
-	};
+	});
+	const browser = Object.assign(
+		createBrowserClientDouble({ newPage: mock(async () => mockPage) }),
+		{ goto: mock(async (url: string) => ({ url })) },
+	);
 
 	const stealth: StealthClient = {
 		fetch: mock(async () => ({
@@ -94,11 +102,7 @@ function createMockContext(): ProviderContext {
 		} as HttpClient,
 		cache: createProviderCache({ providerId: "instrumented-provider" }),
 		stealth,
-		browser: {
-			engine: "playwright-stealth",
-			newPage: mock(async () => mockPage),
-			goto: mock(async (url: string) => ({ url })),
-		} as unknown as BrowserClient,
+		browser,
 		trace: createTraceContext(),
 		auth: {} as AuthContext,
 		choice: createTestProviderChoiceContext({
@@ -256,8 +260,7 @@ describe("wrapWithInstrumentation", () => {
 	it("records error spans when instrumented methods throw", async () => {
 		const ctx = createMockContext();
 		ctx.stealth.fetch = mock(async () => {
-			const error = new Error("boom") as Error & { status: number };
-			error.status = 503;
+			const error = Object.assign(new Error("boom"), { status: 503 });
 			throw error;
 		});
 

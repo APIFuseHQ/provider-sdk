@@ -289,7 +289,7 @@ describe("health journey authoring", () => {
 				code: { pattern: /([0-9]{4})/ },
 				maxAge: "PT5M",
 				waitTimeout: "PT2M30S",
-				// @ts-expect-error verify runtime validation for object-shaped provider JS.
+				// @ts-expect-error test-invalid: verify runtime validation for object-shaped provider JS.
 				senders: ["1661-5270"],
 			}),
 		).toThrow(/senders|origins/);
@@ -390,7 +390,7 @@ describe("health journey authoring", () => {
 						manualTrigger: {
 							enabled: true,
 							requiresAcknowledgement: true,
-							// @ts-expect-error runtime validation covers JS provider declarations.
+							// @ts-expect-error test-invalid: runtime validation covers JS provider declarations.
 							risk: "dangerous",
 							minManualInterval: "PT8H",
 							publicRationale: "manual run",
@@ -424,7 +424,7 @@ describe("health journey authoring", () => {
 						manualTrigger: {
 							enabled: false,
 							reason: "manual replay disabled",
-							// @ts-expect-error runtime validation covers JS provider declarations.
+							// @ts-expect-error test-invalid: runtime validation covers JS provider declarations.
 							requiresAcknowledgement: true,
 						},
 						steps: [{ id: "start", operationId: "start-payment", kind: "operation" }],
@@ -459,7 +459,7 @@ describe("health journey authoring", () => {
 							risk: "sms_or_payment",
 							minManualInterval: "PT8H",
 							publicRationale: "operator-acknowledged payment journey",
-							// @ts-expect-error runtime validation covers JS provider declarations.
+							// @ts-expect-error test-invalid: runtime validation covers JS provider declarations.
 							reason: "disabled-only field",
 						},
 						steps: [{ id: "start", operationId: "start-payment", kind: "operation" }],

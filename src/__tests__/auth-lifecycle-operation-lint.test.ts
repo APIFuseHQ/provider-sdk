@@ -2,8 +2,9 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { lintProvider } from "../lint.js";
 
+
 function withDescriptionKey<T extends z.ZodType>(schema: T, key: string): T {
-	return schema.describe(key) as T;
+	return schema.meta({ description: key });
 }
 
 function lintWithOperations(

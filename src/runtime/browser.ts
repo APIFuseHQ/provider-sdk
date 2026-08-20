@@ -816,6 +816,10 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 		return await this.page.evaluate(fn);
 	}
 
+	async userAgent(): Promise<string> {
+		return await this.evaluate<string>("navigator.userAgent");
+	}
+
 	async waitForSelector(selector: string, options?: { timeout?: number }): Promise<void> {
 		await this.page.waitForSelector(selector, options);
 	}
@@ -1507,6 +1511,10 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 	async evaluate<T>(fn: string | (() => T)): Promise<T> {
 		await this.initialize();
 		return await this.evaluateWithContext<T>(fn);
+	}
+
+	async userAgent(): Promise<string> {
+		return await this.evaluate<string>("navigator.userAgent");
 	}
 
 	async evaluateInFrame<T>(frameId: string, fn: string | (() => T)): Promise<T> {

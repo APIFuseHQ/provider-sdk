@@ -283,7 +283,7 @@ const brokenHandlerProvider = defineProvider({
 					`https://example.test/items/${input.id}?date=${input.date}`,
 				);
 				const body = await response.json<{ label: string }>();
-				return { wrong: body.label } as unknown as { result: string };
+				return { wrong: body.label };
 			},
 		},
 	},

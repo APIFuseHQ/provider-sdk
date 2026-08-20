@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 
+import { assertIsError } from "./test-utils.js";
 import { readableBytes, readableLines, readableTextChunks } from "../stream.js";
 import { sanitizeFixture } from "../fixture-sanitization.js";
 import {
@@ -396,8 +397,9 @@ describe("stream evidence capture", () => {
 		}
 
 		expect(thrown).toBeInstanceOf(Error);
-		expect((thrown as Error).message).toMatch(/read failed.*status=200.*bytes_read=2/);
-		expect((thrown as Error).cause).toBe(originalError);
+		assertIsError(thrown);
+		expect(thrown.message).toMatch(/read failed.*status=200.*bytes_read=2/);
+		expect(thrown.cause).toBe(originalError);
 		await expect(capture.getEvidence()).rejects.toBe(thrown);
 	});
 
@@ -427,10 +429,11 @@ describe("stream evidence capture", () => {
 			thrown = error;
 		}
 		expect(thrown).toBeInstanceOf(Error);
-		expect((thrown as Error).message).toMatch(
+		assertIsError(thrown);
+		expect(thrown.message).toMatch(
 			/read failed.*url=https:\/\/example\.test\/drain-fails.*status=200.*bytes_read=2/,
 		);
-		expect((thrown as Error).cause).toBe(originalError);
+		expect(thrown.cause).toBe(originalError);
 	});
 
 	it("redacts URL credentials in mid-stream errors", async () => {
@@ -452,11 +455,12 @@ describe("stream evidence capture", () => {
 			thrown = error;
 		}
 		expect(thrown).toBeInstanceOf(Error);
-		expect((thrown as Error).message).toContain(
+		assertIsError(thrown);
+		expect(thrown.message).toContain(
 			"https://example.test/[REDACTED]/download?[REDACTED]",
 		);
-		expect((thrown as Error).message).not.toContain("password");
-		expect((thrown as Error).message).not.toContain("live-secret");
+		expect(thrown.message).not.toContain("password");
+		expect(thrown.message).not.toContain("live-secret");
 	});
 
 	it("bounds finalization and cancels a stalled upstream reader", async () => {

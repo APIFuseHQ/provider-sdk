@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
+import { assertIsError, capturedError } from "../../__tests__/test-utils.js";
 import { ProviderError } from "../../errors.js";
 import { getStealthProfile } from "../../stealth/profiles.js";
 import type { ProviderChallenge } from "../../types.js";
@@ -82,10 +83,6 @@ function createAdapter(
 		timeoutMs: 180_000,
 		...overrides,
 	});
-}
-
-async function capturedError(operation: Promise<unknown>): Promise<unknown> {
-	return await operation.catch((error: unknown) => error);
 }
 
 function collectNestedStrings(value: unknown, seen = new Set<object>()): string[] {
@@ -254,7 +251,7 @@ describe("Capsolver resolver vendor", () => {
 			errorDescription: "Rejected [REDACTED]",
 		});
 		const serialized = [
-			(error as Error).message,
+			error.message,
 			JSON.stringify(error),
 			...collectNestedStrings(error),
 		].join("\n");
@@ -557,9 +554,10 @@ describe("Capsolver resolver vendor", () => {
 			responseContentType: "text/html; charset=utf-8",
 			responseLength: responseText.length,
 		});
-		const parseCause = (error as Error).cause;
+		const parseCause = error.cause;
 		expect(parseCause).toBeInstanceOf(SyntaxError);
-		expect((parseCause as Error).message.startsWith("Upstream response failed")).toBe(true);
+		assertIsError(parseCause);
+		expect(parseCause.message.startsWith("Upstream response failed")).toBe(true);
 
 		const resolver = createResolverClient({ adapters: [adapter], kinds: ["turnstile"] });
 		const publicError = await capturedError(resolver.solve(TURNSTILE_CHALLENGE));
