@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 
-import { buildProviderEvent, redactProviderEventPayload } from "../../dist/stateful/index.js";
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const { buildProviderEvent, redactProviderEventPayload } = await builtStateful;
 
 describe("provider event protocol-neutral envelope", () => {
 	it("preserves legitimate device and UUID data while redacting credentials", () => {

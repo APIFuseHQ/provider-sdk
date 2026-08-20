@@ -30,6 +30,14 @@ const mockNativeFetchState = {
 
 const originalFetch = globalThis.fetch;
 
+function createLocalFetchDouble(
+	implementation: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+	return Object.assign(implementation, {
+		preconnect: (_url: string | URL, _options?: { dns?: boolean; tcp?: boolean; http?: boolean }) => {},
+	});
+}
+
 function stringifyDiagnosticGraph(value: unknown): string {
 	const seen = new WeakSet<object>();
 	const snapshot = (current: unknown): unknown => {
@@ -55,7 +63,7 @@ describe("createHttpClient", () => {
 		mockNativeFetchState.queuedNativeResponses.length = 0;
 		mockNativeFetchState.queuedResponses.length = 0;
 		mockNativeFetchState.queuedErrors.length = 0;
-		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 			mockNativeFetchState.calls.push({ url: String(input), init });
 			const error = mockNativeFetchState.queuedErrors.shift();
 			if (error) throw error;
@@ -76,7 +84,7 @@ describe("createHttpClient", () => {
 			});
 			mockNativeFetchState.lastResponse = nativeResponse;
 			return nativeResponse;
-		}) as typeof fetch;
+		}));
 	});
 
 	afterAll(() => {
@@ -255,7 +263,7 @@ describe("createHttpClient", () => {
 		const calls: MockNativeFetchCall[] = [];
 		const diagnosticSecret = "cross-origin-diagnostic-secret";
 		const redirectTarget = `https://alice:${diagnosticSecret}@attacker.example/collect?token=${diagnosticSecret}#${diagnosticSecret}`;
-		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
 			calls.push({ url, init });
 			if (url === "https://api.example.com/login") {
@@ -270,7 +278,7 @@ describe("createHttpClient", () => {
 				return globalThis.fetch(redirectTarget, init);
 			}
 			return new Response("stolen", { status: 200 });
-		}) as typeof fetch;
+		}));
 
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient();
@@ -306,7 +314,7 @@ describe("createHttpClient", () => {
 	it("cancels an unbounded redirect body and still refuses the target promptly", async () => {
 		let cancelled = false;
 		const calls: MockNativeFetchCall[] = [];
-		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 			calls.push({ url: String(input), init });
 			return new Response(
 				new ReadableStream<Uint8Array>({
@@ -321,7 +329,7 @@ describe("createHttpClient", () => {
 					status: 307,
 				},
 			);
-		}) as typeof fetch;
+		}));
 
 		const { createHttpClient } = await import("../runtime/http.js");
 		const outcome = await Promise.race([
@@ -565,7 +573,7 @@ describe("createHttpClient", () => {
 		const fetchStarted = new Promise<void>((resolve) => {
 			markFetchStarted = resolve;
 		});
-		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock((_input: string | URL | Request, init?: RequestInit) => {
 			fetchSignal = init?.signal;
 			markFetchStarted?.();
 			return new Promise<Response>((_resolve, reject) => {
@@ -573,7 +581,7 @@ describe("createHttpClient", () => {
 				fetchSignal?.addEventListener("abort", onAbort, { once: true });
 				if (fetchSignal?.aborted) onAbort();
 			});
-		}) as typeof fetch;
+		}));
 		const { createHttpClient } = await import("../runtime/http.js");
 		const pending = createHttpClient(undefined, { signal: ambientController.signal }).get(
 			"https://example.com/slow",
@@ -596,7 +604,7 @@ describe("createHttpClient", () => {
 		const fetchStarted = new Promise<void>((resolve) => {
 			markFetchStarted = resolve;
 		});
-		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock((_input: string | URL | Request, init?: RequestInit) => {
 			fetchSignal = init?.signal;
 			markFetchStarted?.();
 			return new Promise<Response>((_resolve, reject) => {
@@ -604,7 +612,7 @@ describe("createHttpClient", () => {
 				fetchSignal?.addEventListener("abort", onAbort, { once: true });
 				if (fetchSignal?.aborted) onAbort();
 			});
-		}) as typeof fetch;
+		}));
 		const { createHttpClient } = await import("../runtime/http.js");
 		const pending = createHttpClient(undefined, { signal: ambientController.signal }).stream(
 			"https://example.com/slow-stream",
@@ -649,14 +657,14 @@ describe("createHttpClient", () => {
 
 	it("preserves per-call timeout cancellation without an ambient signal", async () => {
 		let fetchSignal: AbortSignal | null | undefined;
-		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock((_input: string | URL | Request, init?: RequestInit) => {
 			fetchSignal = init?.signal;
 			return new Promise<Response>((_resolve, reject) => {
 				const onAbort = () => reject(fetchSignal?.reason);
 				fetchSignal?.addEventListener("abort", onAbort, { once: true });
 				if (fetchSignal?.aborted) onAbort();
 			});
-		}) as typeof fetch;
+		}));
 		const { createHttpClient } = await import("../runtime/http.js");
 
 		await expect(
@@ -667,7 +675,7 @@ describe("createHttpClient", () => {
 
 	it("retries a per-call timeout when the proxy retry policy allows it", async () => {
 		let attempt = 0;
-		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock((_input: string | URL | Request, init?: RequestInit) => {
 			mockNativeFetchState.calls.push({ url: String(_input), init });
 			attempt += 1;
 			if (attempt > 1) {
@@ -683,7 +691,7 @@ describe("createHttpClient", () => {
 				fetchSignal?.addEventListener("abort", onAbort, { once: true });
 				if (fetchSignal?.aborted) onAbort();
 			});
-		}) as typeof fetch;
+		}));
 		const { createHttpClient } = await import("../runtime/http.js");
 
 		const response = await createHttpClient(undefined, {
@@ -709,7 +717,7 @@ describe("createHttpClient", () => {
 		const fetchStarted = new Promise<void>((resolve) => {
 			markFetchStarted = resolve;
 		});
-		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock((_input: string | URL | Request, init?: RequestInit) => {
 			fetchSignal = init?.signal;
 			markFetchStarted?.();
 			return new Promise<Response>((_resolve, reject) => {
@@ -717,7 +725,7 @@ describe("createHttpClient", () => {
 				fetchSignal?.addEventListener("abort", onAbort, { once: true });
 				if (fetchSignal?.aborted) onAbort();
 			});
-		}) as typeof fetch;
+		}));
 		const { createHttpClient } = await import("../runtime/http.js");
 		const pending = createHttpClient(undefined, { signal: ambientController.signal }).get(
 			"https://example.com/merged",
@@ -742,10 +750,10 @@ describe("createHttpClient", () => {
 			if (timeout === 1_000) markBackoffStarted?.();
 			return originalSetTimeout(handler, timeout);
 		}) as typeof setTimeout;
-		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 			mockNativeFetchState.calls.push({ url: String(input), init });
 			throw new Error("Network error");
-		}) as typeof fetch;
+		}));
 
 		try {
 			const { createHttpClient } = await import("../runtime/http.js");
@@ -793,14 +801,14 @@ describe("createHttpClient", () => {
 	it("lets the per-call timeout win while a merged ambient signal stays active", async () => {
 		const ambientController = new AbortController();
 		let fetchSignal: AbortSignal | null | undefined;
-		globalThis.fetch = mock((_input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock((_input: string | URL | Request, init?: RequestInit) => {
 			fetchSignal = init?.signal;
 			return new Promise<Response>((_resolve, reject) => {
 				const onAbort = () => reject(fetchSignal?.reason);
 				fetchSignal?.addEventListener("abort", onAbort, { once: true });
 				if (fetchSignal?.aborted) onAbort();
 			});
-		}) as typeof fetch;
+		}));
 		const { createHttpClient } = await import("../runtime/http.js");
 
 		await expect(
@@ -927,7 +935,7 @@ describe("createHttpClient", () => {
 		expect(first.done).toBe(false);
 		expect(first.value?.event).toBe("delta");
 		expect(first.value?.id).toBe("evt_1");
-		expect(first.value?.json<{ value: number }>()).toEqual({ value: 1 });
+		expect(first.value?.json()).toEqual({ value: 1 });
 	});
 
 	it("stream() uses native HTTP through configured proxy", async () => {
@@ -1354,7 +1362,7 @@ describe("createHttpClient", () => {
 		const originalFetch = globalThis.fetch;
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const upstreamCalls: MockNativeFetchCall[] = [];
-		globalThis.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		globalThis.fetch = createLocalFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
 			if (url.includes("smartproxy.org/web_v1/ip/get-ip-v3")) {
 				return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
@@ -1367,7 +1375,7 @@ describe("createHttpClient", () => {
 				headers: { "content-type": "application/json" },
 				status: 200,
 			});
-		}) as typeof fetch;
+		}));
 
 		const { clearProxyResolutionCache } = await import("../config/loader.js");
 		clearProxyResolutionCache();

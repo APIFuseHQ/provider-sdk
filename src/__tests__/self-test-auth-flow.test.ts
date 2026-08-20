@@ -112,7 +112,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 			// Canonical shape carries the schema DIRECTLY on expectedInput; the
 			// nested { schema } variant is provider-authored (e.g. catchtable).
 			expectedInput: state.directExpectedInputShape ? schema : { schema },
-		} as AuthTurn;
+		};
 	};
 
 	return createProviderDefinitionDouble({
@@ -124,7 +124,9 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 			descriptionKey: "flow-provider.description",
 			category: "test",
 		},
-		...(state.operationAffinity ? { proxy: { session: { affinity: "operation" } } } : {}),
+		...(state.operationAffinity
+			? { proxy: { mode: "optional", session: { affinity: "operation" } } }
+			: {}),
 		credential: { keys: ["sessionCookie", "userId"] },
 		healthProbe: {
 			credentialInputs: {
@@ -143,14 +145,12 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 						await new Promise((resolve) => setTimeout(resolve, state.startDelayMs));
 					}
 					if (state.abortAtStart) {
-						return { kind: "abort", turnId: "turn-abort-start" } as AuthTurn;
+						return { kind: "abort", turnId: "turn-abort-start" };
 					}
 					if (state.unknownTurnAtStart) {
-						// @ts-expect-error test-invalid: the self-test route must reject unknown turn kinds.
 						return { kind: "mystery_kind", turnId: "turn-mystery-start" };
 					}
 					if (state.nonInputTurnAtStart !== undefined) {
-						// @ts-expect-error test-invalid: these terminal/poll turns intentionally omit required data.
 						return {
 							kind: state.nonInputTurnAtStart,
 							turnId: "turn-noninput-start",
@@ -161,9 +161,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 				continue: async (_ctx, input = {}) => {
 					state.continueCount += 1;
 					state.lastContinueInputKeys = Object.keys(input).sort();
-					state.lastFlowExternalRef = (
-						_ctx as { externalRef?: string } | undefined
-					)?.externalRef;
+					state.lastFlowExternalRef = _ctx.externalRef;
 					if (state.continueDelayMs > 0) {
 						await new Promise((resolve) => setTimeout(resolve, state.continueDelayMs));
 					}
@@ -178,10 +176,9 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 						});
 					}
 					if (state.abortAtContinue) {
-						return { kind: "abort", turnId: "turn-abort-continue" } as AuthTurn;
+						return { kind: "abort", turnId: "turn-abort-continue" };
 					}
 					if (state.unknownTurnAtContinue) {
-						// @ts-expect-error test-invalid: the self-test route must reject unknown turn kinds.
 						return { kind: "mystery_kind", turnId: "turn-mystery" };
 					}
 					if (state.multiTurn) {
@@ -193,7 +190,6 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 					) {
 						// Mirrors real providers (e.g. catchtable): invalid credentials
 						// come back as a retry-kind turn, not a fresh form.
-						// @ts-expect-error test-invalid: retry turns without form data exercise route validation.
 						return { kind: "retry", turnId: "turn-retry" };
 					}
 					state.loginCount += 1;
@@ -398,7 +394,7 @@ function createApps(provider: ProviderDefinition, options: { withAuthFlow?: bool
 const validToken = deriveSelfTestToken(MASTER_SECRET, PROVIDER_ID);
 
 async function runCase(
-	selfTestApp: { request: (path: string, init?: RequestInit) => Promise<Response> },
+	selfTestApp: { request: (path: string, init?: RequestInit) => Response | Promise<Response> },
 	operationId: string,
 	caseName: string,
 	requestId = "req-flow-test",

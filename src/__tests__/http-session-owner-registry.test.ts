@@ -1,12 +1,18 @@
 import { describe, expect, it } from "bun:test";
 import { createHmac } from "node:crypto";
 
-import {
+import { capturedError } from "./test-utils.js";
+
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const {
 	AmbiguousRegistryOperationError,
 	buildSessionKey,
 	HttpSessionOwnerRegistry,
 	StatefulControlPlaneError,
-} from "../../dist/stateful/index.js";
+} = await builtStateful;
 
 const SECRET = "control-plane-test-secret";
 const NOW = new Date("2026-01-01T00:00:00.000Z");
@@ -115,8 +121,9 @@ describe("HttpSessionOwnerRegistry", () => {
 					baseUrl: server.url.origin,
 					secret: SECRET,
 				});
-				const error = await registry.resolve(SESSION_KEY).catch((caught) => caught);
+				const error = await capturedError(registry.resolve(SESSION_KEY));
 				expect(error).toBeInstanceOf(StatefulControlPlaneError);
+				if (!(error instanceof StatefulControlPlaneError)) throw error;
 				expect(error.code).toMatch(/STATEFUL_CONTROL_PLANE_(?:HTTP_ERROR|INVALID_RESPONSE)/);
 			} finally {
 				server.stop(true);
@@ -134,8 +141,9 @@ describe("HttpSessionOwnerRegistry", () => {
 				secret: SECRET,
 				fetch: async () => Response.json(record),
 			});
-			const error = await registry.resolve(SESSION_KEY).catch((caught) => caught);
+			const error = await capturedError(registry.resolve(SESSION_KEY));
 			expect(error).toBeInstanceOf(StatefulControlPlaneError);
+			if (!(error instanceof StatefulControlPlaneError)) throw error;
 			expect(error.code).toBe("STATEFUL_CONTROL_PLANE_INVALID_RESPONSE");
 		}
 	});
@@ -154,9 +162,10 @@ describe("HttpSessionOwnerRegistry", () => {
 		const resolving = registry.resolve(SESSION_KEY, undefined, controller.signal);
 		controller.abort(new Error("caller cancelled"));
 
-		const error = await resolving.catch((caught) => caught);
+		const error = await capturedError(resolving);
 		expect(fetchSignal?.aborted).toBe(true);
 		expect(error).toBeInstanceOf(StatefulControlPlaneError);
+		if (!(error instanceof StatefulControlPlaneError)) throw error;
 		expect(error.message).toContain("resolve request failed");
 	});
 
@@ -168,8 +177,9 @@ describe("HttpSessionOwnerRegistry", () => {
 			fetch: async (_url, init) => await rejectWhenAborted(init?.signal ?? undefined),
 		});
 
-		const error = await registry.resolve(SESSION_KEY).catch((caught) => caught);
+		const error = await capturedError(registry.resolve(SESSION_KEY));
 		expect(error).toBeInstanceOf(StatefulControlPlaneError);
+		if (!(error instanceof StatefulControlPlaneError)) throw error;
 		expect(error.code).toBe("STATEFUL_CONTROL_PLANE_REQUEST_FAILED");
 		expect(error.message).toContain("timed out after 5ms");
 		expect(error.message).toContain("retry resolve");
@@ -191,15 +201,16 @@ describe("HttpSessionOwnerRegistry", () => {
 				fetch: async (_url, init) => await rejectWhenAborted(init?.signal ?? undefined),
 			}),
 		]) {
-			const error = await registry
-				.acquire({
+			const error = await capturedError(
+				registry.acquire({
 					sessionKey: SESSION_KEY,
 					ownerPodId: "pod-a",
 					ownerEndpoint: "http://pod-a",
 					leaseDurationMs: 60_000,
-				})
-				.catch((caught) => caught);
+				}),
+			);
 			expect(error).toBeInstanceOf(AmbiguousRegistryOperationError);
+			if (!(error instanceof AmbiguousRegistryOperationError)) throw error;
 			expect(error.code).toBe("STATEFUL_CONTROL_PLANE_OPERATION_AMBIGUOUS");
 			expect(error.ambiguous).toBe(true);
 			expect(error.message).toContain("resolve the session owner and reconcile");
@@ -226,9 +237,9 @@ describe("HttpSessionOwnerRegistry", () => {
 		const preDispatch = new AbortController();
 		const preDispatchReason = new Error("cancelled before dispatch");
 		preDispatch.abort(preDispatchReason);
-		const preDispatchError = await registry
-			.acquire(acquireInput, preDispatch.signal)
-			.catch((caught) => caught);
+		const preDispatchError = await capturedError(
+			registry.acquire(acquireInput, preDispatch.signal),
+		);
 		expect(preDispatchError).toBe(preDispatchReason);
 		expect(preDispatchError).not.toBeInstanceOf(AmbiguousRegistryOperationError);
 		expect(fetchCalls).toBe(0);

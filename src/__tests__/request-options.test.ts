@@ -104,8 +104,9 @@ describe("sensitive request diagnostics", () => {
 			url: requestUrl,
 			request: { url: requestUrl },
 		});
+		const secondDetails: { received: number | string } = { received: 123456 };
 		const second = Object.assign(new Error(`second leaked ${secret}`), {
-			details: { received: 123456 },
+			details: secondDetails,
 		});
 		const aggregate = new AggregateError([first, second], `both failed for ${secret}`);
 		first.cause = aggregate;
@@ -156,6 +157,7 @@ describe("sensitive request diagnostics", () => {
 		});
 		const providerError = new ProviderError("redirect failed", {
 			code: requestUrl,
+			// @ts-expect-error test-invalid: preserves a legacy category value for redaction coverage
 			category: "upstream",
 			retryable: false,
 		});

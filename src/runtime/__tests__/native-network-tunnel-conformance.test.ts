@@ -58,12 +58,12 @@ async function startSocksProxy(options: { stall?: boolean; replyCode?: number } 
 	return await listen(
 		createServer((client) => {
 			if (options.stall) return;
-			let buffered = Buffer.alloc(0);
+			let buffered: Buffer = Buffer.alloc(0);
 			let state: "greeting" | "auth" | "request" | "tunnel" = "greeting";
 			client.on("data", (chunk: Buffer) => {
 				if (state === "tunnel") return;
 				buffered = Buffer.concat([buffered, chunk]);
-				while (state !== "tunnel") {
+				while (true) {
 					if (state === "greeting") {
 						if (buffered.length < 2) return;
 						const packet = take(buffered, 2 + (buffered[1] ?? 0));
@@ -133,7 +133,7 @@ async function startHttpProxy(options: { stall?: boolean; statusLine?: string } 
 	return await listen(
 		createServer((client) => {
 			if (options.stall) return;
-			let buffered = Buffer.alloc(0);
+			let buffered: Buffer = Buffer.alloc(0);
 			client.on("data", function onData(chunk: Buffer) {
 				buffered = Buffer.concat([buffered, chunk]);
 				const headerEnd = buffered.indexOf("\r\n\r\n");
@@ -209,7 +209,9 @@ for (const protocol of ["socks5", "http"] as const) {
 			});
 			connections.push(connection);
 			await connection.write(new TextEncoder().encode("conform"));
-			expect(new TextDecoder().decode(await connection.read())).toBe("conform");
+			const echoed = await connection.read();
+			if (echoed === null) throw new Error("Tunnel closed before echoing fixture data");
+			expect(new TextDecoder().decode(echoed)).toBe("conform");
 		});
 
 		it("applies one establishment deadline to negotiation", async () => {

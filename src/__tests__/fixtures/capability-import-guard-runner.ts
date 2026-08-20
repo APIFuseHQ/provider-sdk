@@ -48,7 +48,11 @@ const operations: ProviderDefinition["operations"] = {
 		input: z.object({}),
 		output: z.object({}),
 		async handler(ctx) {
-			await ctx.resolver.solve({ kind: "turnstile", pageUrl: "https://example.test" });
+			await ctx.resolver.solve({
+				kind: "turnstile",
+				siteKey: "capability-import-guard-site-key",
+				pageUrl: "https://example.test",
+			});
 			return {};
 		},
 	},
@@ -76,12 +80,33 @@ const provider: ProviderDefinition = {
 	...(["stealth", "tier1-stealth", "primitive", "aggregate", "sync-esm"].includes(mode)
 		? { stealth: { profile: "chrome-146", platform: "linux" as const } }
 		: {}),
-	meta: { displayName: "Capability import guard", category: "test" },
+	meta: {
+		displayName: "Capability import guard",
+		descriptionKey: "capability-import-guard.description",
+		category: "test",
+	},
 	operations,
 };
 
 function assert(condition: unknown, message: string): asserts condition {
 	if (!condition) throw new Error(message);
+}
+
+function isCapabilityFailure(
+	value: unknown,
+): value is { capability: string; reason: string } {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		"capability" in value &&
+		typeof value.capability === "string" &&
+		"reason" in value &&
+		typeof value.reason === "string"
+	);
+}
+
+function assertEqual(actual: unknown, expected: unknown, message: string): void {
+	assert(actual === expected, message);
 }
 
 if (mode === "sync-esm") {
@@ -113,6 +138,7 @@ if (["browser", "native", "resolver", "stealth", "aggregate", "primitive"].inclu
 			error.code === "PROVIDER_CAPABILITY_LOAD_FAILED",
 			`Unexpected error code: ${error.code}`,
 		);
+		assert("message" in error && typeof error.message === "string", "Missing error message");
 		assert(error.message.includes(provider.id), "Capability load error is missing provider id");
 		assert("details" in error, "Capability load error is missing details");
 		assert(
@@ -122,7 +148,11 @@ if (["browser", "native", "resolver", "stealth", "aggregate", "primitive"].inclu
 		assert("providerId" in error.details, "Capability load details are missing provider id");
 		assert(error.details.providerId === provider.id, "Unexpected capability load provider id");
 		assert(Array.isArray(error.details.failures), "Capability failures are not an array");
-		const failures = error.details.failures as Array<{ capability: string; reason: string }>;
+		assert(
+			error.details.failures.every(isCapabilityFailure),
+			"Capability failures contain an invalid entry",
+		);
+		const failures = error.details.failures;
 		const expectedCapabilities =
 			mode === "aggregate"
 				? ["browser", "native", "resolver", "stealth"]
@@ -140,6 +170,7 @@ if (["browser", "native", "resolver", "stealth", "aggregate", "primitive"].inclu
 				failures[0]?.reason === "primitive stealth failure",
 				"Primitive failure reason was discarded",
 			);
+			assert("cause" in error, "Capability error is missing its cause");
 			assert(error.cause instanceof AggregateError, "Capability error cause is not aggregate");
 			assert(
 				error.cause.errors[0] instanceof Error &&
@@ -196,7 +227,7 @@ try {
 		const operation = mode === "tier2-stealth-session" ? "stealthSession" : "stealth";
 		const response = await request(operation, `req-${mode}`);
 		assert(response.status === 200, `Unexpected tier-2 stealth status: ${response.status}`);
-		assert(state.stealthLoads === 1, "Tier-2 stealth did not load on first use");
+		assertEqual(state.stealthLoads, 1, "Tier-2 stealth did not load on first use");
 		if (mode === "tier2-stealth-close-throw") {
 			assert(state.stealthCreateArgs.length === 0, "Stealth client loaded before request cleanup");
 			assert(state.releaseStealthLoad !== undefined, "Stealth import was not pending at cleanup");

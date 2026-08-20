@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import type { Callback, Redis, RedisKey, RedisValue } from "ioredis";
 
-import { assertIsError, createFetchDouble } from "./test-utils.js";
+import { assertIsError } from "./test-utils.js";
 import {
 	__setProxyRedisForTests,
 	__setSmartproxyAllocatorDeadlineMsForTests,
@@ -28,6 +29,20 @@ type MockWreqCall = {
 	options: Record<string, unknown>;
 };
 
+type FetchDoubleImplementation = (
+	input: string | URL | Request,
+	init?: RequestInit,
+) => Promise<Response>;
+
+function createFetchDouble(implementation: FetchDoubleImplementation): typeof fetch {
+	return Object.assign(implementation, {
+		preconnect(
+			_url: string | URL,
+			_options?: Parameters<typeof fetch.preconnect>[1],
+		): void {},
+	});
+}
+
 type MockWreqSessionState = {
 	calls: MockWreqCall[];
 	options: Record<string, unknown> | undefined;
@@ -39,8 +54,16 @@ const stealthState = {
 	queuedResponses: [] as MockWreqQueuedItem[],
 };
 
-class FakeRedis {
-	status = "ready";
+type ProxyRedisSurface = Pick<
+	Redis,
+	"connect" | "del" | "eval" | "get" | "on" | "pttl" | "set" | "status"
+>;
+
+type RedisExpiryMode = "EX" | "EXAT" | "PX" | "PXAT";
+type RedisSetCondition = "NX" | "XX";
+
+class FakeRedis implements ProxyRedisSurface {
+	status: Redis["status"] = "ready";
 	readonly setCalls: Array<{
 		key: string;
 		mode?: string;
@@ -54,49 +77,167 @@ class FakeRedis {
 		this.status = "ready";
 	}
 
-	on(): this {
-		return this;
+	on(..._args: unknown[]): never {
+		throw new Error("Injected ready Redis fake does not register event listeners");
 	}
 
-	async get(key: string): Promise<string | null> {
-		this.deleteIfExpired(key);
-		return this.values.get(key) ?? null;
+	async get(key: RedisKey, callback?: Callback<string | null>): Promise<string | null> {
+		const normalizedKey = String(key);
+		this.deleteIfExpired(normalizedKey);
+		const result = this.values.get(normalizedKey) ?? null;
+		callback?.(null, result);
+		return result;
 	}
 
+	set(key: RedisKey, value: RedisValue, callback?: Callback<"OK">): Promise<"OK">;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		condition: RedisSetCondition,
+		callback?: Callback<"OK" | null>,
+	): Promise<"OK" | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		condition: RedisSetCondition,
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		expiryMode: RedisExpiryMode,
+		expiry: number | string,
+		callback?: Callback<"OK">,
+	): Promise<"OK">;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		expiryMode: RedisExpiryMode,
+		expiry: number | string,
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		expiryMode: RedisExpiryMode,
+		expiry: number | string,
+		condition: RedisSetCondition,
+		callback?: Callback<"OK" | null>,
+	): Promise<"OK" | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		expiryMode: RedisExpiryMode,
+		expiry: number | string,
+		condition: RedisSetCondition,
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		keepTtl: "KEEPTTL",
+		callback?: Callback<"OK">,
+	): Promise<"OK">;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		keepTtl: "KEEPTTL",
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		keepTtl: "KEEPTTL",
+		condition: RedisSetCondition,
+		callback?: Callback<"OK" | null>,
+	): Promise<"OK" | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		keepTtl: "KEEPTTL",
+		condition: RedisSetCondition,
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
 	async set(
-		key: string,
-		value: string,
-		mode?: string,
-		ttlMs?: number,
-		condition?: string,
-	): Promise<"OK" | null> {
-		this.deleteIfExpired(key);
-		this.setCalls.push({ key, mode, ttlMs, condition });
-		if (condition === "NX" && this.values.has(key)) return null;
-		this.values.set(key, value);
+		key: RedisKey,
+		value: RedisValue,
+		...args: readonly unknown[]
+	): Promise<"OK" | string | null> {
+		const normalizedKey = String(key);
+		const mode = typeof args[0] === "string" ? args[0] : undefined;
+		const ttlMs = typeof args[1] === "number" ? args[1] : undefined;
+		const condition = typeof args[2] === "string" ? args[2] : undefined;
+		this.deleteIfExpired(normalizedKey);
+		this.setCalls.push({ key: normalizedKey, mode, ttlMs, condition });
+		if (condition === "NX" && this.values.has(normalizedKey)) return null;
+		this.values.set(normalizedKey, String(value));
 		if (mode === "PX" && typeof ttlMs === "number") {
-			this.expiresAt.set(key, Date.now() + ttlMs);
+			this.expiresAt.set(normalizedKey, Date.now() + ttlMs);
 		}
 		return "OK";
 	}
 
-	async del(key: string): Promise<number> {
+	async del(
+		...args: Array<RedisKey | RedisKey[] | Callback<number>>
+	): Promise<number> {
+		const keys = args.flatMap((arg) =>
+			typeof arg === "function" ? [] : Array.isArray(arg) ? arg : [arg],
+		);
+		const result = keys.reduce((count, key) => count + this.deleteValue(String(key)), 0);
+		const callback = args.find(
+			(argument): argument is Callback<number> => typeof argument === "function",
+		);
+		callback?.(null, result);
+		return result;
+	}
+
+	async pttl(key: RedisKey, callback?: Callback<number>): Promise<number> {
+		const normalizedKey = String(key);
+		this.deleteIfExpired(normalizedKey);
+		const expiresAt = this.expiresAt.get(normalizedKey);
+		const result = !this.values.has(normalizedKey)
+			? -2
+			: expiresAt === undefined
+				? -1
+				: Math.max(0, expiresAt - Date.now());
+		callback?.(null, result);
+		return result;
+	}
+
+	async eval(
+		_script: RedisKey,
+		_keyCount: number | string,
+		...args: Array<RedisValue | RedisKey[] | Callback<unknown> | undefined>
+	): Promise<unknown> {
+		const values = args.flatMap((arg) =>
+			typeof arg === "function" || arg === undefined ? [] : Array.isArray(arg) ? arg : [arg],
+		);
+		const key = String(values[0]);
+		const token = String(values[1]);
+		this.deleteIfExpired(key);
+		const result = this.values.get(key) === token ? this.deleteValue(key) : 0;
+		const callback = args.find(
+			(argument): argument is Callback<unknown> => typeof argument === "function",
+		);
+		callback?.(null, result);
+		return result;
+	}
+
+	private deleteValue(key: string): number {
 		const existed = this.values.delete(key);
 		this.expiresAt.delete(key);
 		return existed ? 1 : 0;
-	}
-
-	async pttl(key: string): Promise<number> {
-		this.deleteIfExpired(key);
-		const expiresAt = this.expiresAt.get(key);
-		if (!this.values.has(key)) return -2;
-		if (!expiresAt) return -1;
-		return Math.max(0, expiresAt - Date.now());
-	}
-
-	async eval(_script: string, _keyCount: number, key: string, token: string): Promise<number> {
-		if ((await this.get(key)) !== token) return 0;
-		return this.del(key);
 	}
 
 	private deleteIfExpired(key: string): void {
@@ -420,7 +561,7 @@ describe("proxy integration", () => {
 	it("allocates Smartproxy raw CONNECT endpoints from provider proxy policy", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		let requestedUrl = "";
-		global.fetch = (async (url) => {
+		global.fetch = createFetchDouble(async (url) => {
 			requestedUrl = String(url);
 			return new Response(
 				JSON.stringify({
@@ -429,7 +570,7 @@ describe("proxy integration", () => {
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } },
 			);
-		}) as typeof fetch;
+		});
 
 		const resolved = await resolveProxyConfigAsync({
 			affinityKey: "af_con_123",
@@ -468,16 +609,16 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		__setProxyRedisForTests(new FakeRedis());
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			return new Response("5.78.24.25:31001", { status: 200 });
-		}) as typeof fetch;
+		});
 
-		const policy = {
-			mode: "required" as const,
-			provider: "smartproxy" as const,
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
 			geo: { country: "KR" },
-			session: { affinity: "connection" as const, poolSize: 1 },
+			session: { affinity: "connection", poolSize: 1 },
 		};
 
 		const first = await resolveProxyConfigAsync({
@@ -501,19 +642,19 @@ describe("proxy integration", () => {
 		let now = 1_700_000_000_000;
 		Date.now = () => now;
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			return new Response(`5.78.24.${20 + allocatorCalls}:31001`, {
 				status: 200,
 			});
-		}) as typeof fetch;
+		});
 
-		const policy = {
-			mode: "required" as const,
-			provider: "smartproxy" as const,
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
 			geo: { country: "KR" },
 			session: {
-				affinity: "connection" as const,
+				affinity: "connection",
 				lifetimeMinutes: 120,
 				poolSize: 1,
 			},
@@ -547,18 +688,18 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		__setProxyRedisForTests(new FakeRedis());
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			return new Response(`5.78.24.${30 + allocatorCalls}:31001`, {
 				status: 200,
 			});
-		}) as typeof fetch;
+		});
 
-		const policy = {
-			mode: "required" as const,
-			provider: "smartproxy" as const,
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
 			geo: { country: "KR" },
-			session: { affinity: "connection" as const, poolSize: 1 },
+			session: { affinity: "connection", poolSize: 1 },
 		};
 		const options = {
 			affinityKey: "af_con_purge",
@@ -577,16 +718,16 @@ describe("proxy integration", () => {
 
 	it("clamps non-finite Smartproxy proxy attempts to the first pool endpoint", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 
-		const policy = {
-			mode: "required" as const,
-			provider: "smartproxy" as const,
-			geo: { country: "KR" as const },
-			session: { affinity: "connection" as const, poolSize: 2 },
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 2 },
 		};
 
 		const nanAttempt = await resolveProxyConfigAsync({
@@ -615,17 +756,17 @@ describe("proxy integration", () => {
 		__setProxyRedisForTests(new FakeRedis());
 		let allocatorCalls = 0;
 		const events: unknown[] = [];
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			await new Promise((resolve) => setTimeout(resolve, 25));
 			return new Response("5.78.24.25:31001", { status: 200 });
-		}) as typeof fetch;
+		});
 
-		const policy = {
-			mode: "required" as const,
-			provider: "smartproxy" as const,
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
 			geo: { country: "KR" },
-			session: { affinity: "connection" as const, poolSize: 1 },
+			session: { affinity: "connection", poolSize: 1 },
 		};
 
 		const [first, second] = await Promise.all([
@@ -804,7 +945,7 @@ describe("proxy integration", () => {
 	it("reports redacted Smartproxy allocator failure telemetry before throwing", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const events: unknown[] = [];
-		global.fetch = (async () => new Response("allocator denied", { status: 503 })) as typeof fetch;
+		global.fetch = createFetchDouble(async () => new Response("allocator denied", { status: 503 }));
 
 		await expect(
 			resolveProxyConfigAsync({
@@ -844,13 +985,13 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const events: unknown[] = [];
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			if (allocatorCalls === 1) {
 				throw new Error("transient allocator network failure");
 			}
 			return new Response("5.78.24.25:31001", { status: 200 });
-		}) as typeof fetch;
+		});
 
 		const resolved = await resolveProxyConfigAsync({
 			affinityKey: "af_con_retry_network",
@@ -880,7 +1021,7 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const events: unknown[] = [];
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			if (allocatorCalls === 1) {
 				return new Response("allocator denied with private body", {
@@ -894,7 +1035,7 @@ describe("proxy integration", () => {
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } },
 			);
-		}) as typeof fetch;
+		});
 
 		const resolved = await resolveProxyConfigAsync({
 			affinityKey: "af_con_retry_http",
@@ -925,13 +1066,13 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const events: unknown[] = [];
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			if (allocatorCalls === 1) {
 				return new Response("", { status: 200 });
 			}
 			return new Response("5.78.24.27:31003", { status: 200 });
-		}) as typeof fetch;
+		});
 
 		const resolved = await resolveProxyConfigAsync({
 			affinityKey: "af_con_retry_empty",
@@ -960,13 +1101,13 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const events: unknown[] = [];
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			return new Response(JSON.stringify({ code: 0, data: { list: [{ ip: "", port: "" }] } }), {
 				status: 200,
 				headers: { "Content-Type": "application/json" },
 			});
-		}) as typeof fetch;
+		});
 
 		await expect(
 			resolveProxyConfigAsync({
@@ -1303,12 +1444,12 @@ describe("proxy integration", () => {
 	it("retries Smartproxy stealth requests with the next raw CONNECT endpoint on proxy failure", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
 			});
-		}) as typeof fetch;
+		});
 		stealthState.queuedResponses.push(new Error("Proxy responded with non 200 code: 512 OK"), {
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -1349,7 +1490,7 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			return new Response(
 				["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join(
@@ -1357,7 +1498,7 @@ describe("proxy integration", () => {
 				),
 				{ status: 200 },
 			);
-		}) as typeof fetch;
+		});
 		// Four Smartproxy endpoints fail with a plain network error
 		// (transport_network_error — retryable, not pool-refreshable), then the
 		// NodeMaven leg answers 200.
@@ -1405,10 +1546,10 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 		// Pool span 2 (Smartproxy) + 2 (NodeMaven) = 4 attempts, all failing.
 		stealthState.queuedResponses.push(
 			new Error("socket hang up"),
@@ -1455,10 +1596,10 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 		// Only the two distinct Smartproxy endpoints issue a request (offsets 0/1);
 		// the duplicate offsets 2/3 are skipped without consuming a response, then
 		// the NodeMaven leg answers 200.
@@ -1504,11 +1645,11 @@ describe("proxy integration", () => {
 			["5.78.24.27:31003", "5.78.24.28:31004"],
 		];
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			const pool = pools[allocatorCalls] ?? pools[pools.length - 1];
 			allocatorCalls += 1;
 			return new Response(pool.join("\n"), { status: 200 });
-		}) as typeof fetch;
+		});
 		stealthState.queuedResponses.push(
 			{
 				status: 512,
@@ -1558,11 +1699,11 @@ describe("proxy integration", () => {
 			["5.78.24.27:31003", "5.78.24.28:31004"],
 		];
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			const pool = pools[allocatorCalls] ?? pools[pools.length - 1];
 			allocatorCalls += 1;
 			return new Response(pool.join("\n"), { status: 200 });
-		}) as typeof fetch;
+		});
 		stealthState.queuedResponses.push(
 			{
 				status: 509,
@@ -1608,12 +1749,12 @@ describe("proxy integration", () => {
 	it("does not refresh Smartproxy stealth pools for origin 509 responses without proxy markers", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
 			});
-		}) as typeof fetch;
+		});
 		stealthState.queuedResponses.push({
 			status: 509,
 			body: "origin quota exceeded",
@@ -1655,11 +1796,11 @@ describe("proxy integration", () => {
 			["5.78.24.27:31003", "5.78.24.28:31004"],
 		];
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			const pool = pools[allocatorCalls] ?? pools[pools.length - 1];
 			allocatorCalls += 1;
 			return new Response(pool.join("\n"), { status: 200 });
-		}) as typeof fetch;
+		});
 		stealthState.queuedResponses.push(
 			{
 				status: 495,
@@ -1705,12 +1846,12 @@ describe("proxy integration", () => {
 	it("does not refresh Smartproxy stealth pools for origin 495 responses without proxy markers", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
 			});
-		}) as typeof fetch;
+		});
 		stealthState.queuedResponses.push({
 			status: 495,
 			body: "origin SSL certificate error",
@@ -1796,10 +1937,10 @@ describe("proxy integration", () => {
 
 	it("retries Smartproxy stealth requests when impit returns a status-zero proxy CONNECT response", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 		stealthState.queuedResponses.push(
 			{
 				status: 0,
@@ -1834,10 +1975,10 @@ describe("proxy integration", () => {
 
 	it("retries Smartproxy stealth requests when impit throws a proxy CONNECT error", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 		stealthState.queuedResponses.push(
 			new Error("failed to do request: proxy CONNECT tunnel failed with non 200 code: 509 OK"),
 			{
@@ -1868,10 +2009,10 @@ describe("proxy integration", () => {
 
 	it("retries safe Smartproxy stealth reads when impit throws a generic network error", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 		stealthState.queuedResponses.push(new Error("socket hang up"), {
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -1899,10 +2040,10 @@ describe("proxy integration", () => {
 
 	it("retries safe Smartproxy stealth reads when impit throws a timeout error", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 		const timeoutError = new Error("request timeout after 10ms");
 		timeoutError.name = "TimeoutError";
 		stealthState.queuedResponses.push(timeoutError, {
@@ -1932,10 +2073,10 @@ describe("proxy integration", () => {
 
 	it("does not retry generic Smartproxy stealth network errors for unsafe methods", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 		stealthState.queuedResponses.push(new Error("socket hang up"));
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
@@ -1967,10 +2108,10 @@ describe("proxy integration", () => {
 
 	it("rejects explicit Smartproxy stealth POST retry without unsafe acknowledgement", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
@@ -1997,10 +2138,10 @@ describe("proxy integration", () => {
 
 	it("retries explicit read-like Smartproxy stealth POST network errors with proxy rotation", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 		stealthState.queuedResponses.push(new Error("socket hang up"), {
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -2037,10 +2178,10 @@ describe("proxy integration", () => {
 
 	it("retries Smartproxy stealth requests when impit exposes structured proxy tunnel status", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 		const proxyTunnelError = Object.assign(new Error("proxy tunnel failed"), {
 			status: 509,
 		});
@@ -2071,10 +2212,10 @@ describe("proxy integration", () => {
 
 	it("classifies Smartproxy stealth auth-ip edge rejection without source-IP allowlist messaging", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () =>
+		global.fetch = createFetchDouble(async () =>
 			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
 				status: 200,
-			})) as typeof fetch;
+			}));
 		stealthState.queuedResponses.push(
 			{
 				status: 0,
@@ -2138,11 +2279,11 @@ describe("proxy integration", () => {
 			["5.78.24.27:31003", "5.78.24.28:31004"],
 		];
 		let allocatorCalls = 0;
-		global.fetch = (async () => {
+		global.fetch = createFetchDouble(async () => {
 			const pool = pools[allocatorCalls] ?? pools[pools.length - 1];
 			allocatorCalls += 1;
 			return new Response(pool.join("\n"), { status: 200 });
-		}) as typeof fetch;
+		});
 		stealthState.queuedResponses.push(
 			new Error("Proxy responded with non 200 code: 512 OK"),
 			new Error("Proxy responded with non 200 code: 512 OK"),
@@ -2238,7 +2379,9 @@ describe("proxy integration", () => {
 
 	it("keeps Smartproxy policy stealth clients on origin certificate verification", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = (async () => new Response("5.78.24.25:31001", { status: 200 })) as typeof fetch;
+		global.fetch = createFetchDouble(async () =>
+			new Response("5.78.24.25:31001", { status: 200 }),
+		);
 		stealthState.queuedResponses.push({
 			status: 200,
 			body: JSON.stringify({ ok: true }),

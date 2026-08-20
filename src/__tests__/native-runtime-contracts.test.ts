@@ -11,15 +11,15 @@ import type {
 	ProviderFileRef,
 	ProviderFilesContext,
 	ProviderResolvedFile,
-} from "@apifuse/provider-sdk";
+} from "../index.js";
 import type {
 	NativeNetworkClient as ProviderEntryNativeNetworkClient,
 	ProviderFilesContext as ProviderEntryFilesContext,
-} from "@apifuse/provider-sdk/provider";
+} from "../provider.js";
 
 // Consumer contract fixture copied from apifuse-provider-kakaotalk@174df59.
 // Keep these declarations independent from the SDK types: the assignments
-// below prove the bridge can be replaced by public package imports.
+// below prove the bridge can be replaced by imports from both public SDK entrypoints.
 type KakaoProviderFileRef = {
 	readonly type: "request_file";
 	readonly id: string;

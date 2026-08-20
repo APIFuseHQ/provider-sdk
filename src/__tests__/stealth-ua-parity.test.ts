@@ -36,6 +36,9 @@ describe("stealth user-agent parity", () => {
 			const profile = getStealthProfile(profileName);
 			const { browser } = resolveWreqProfile(profileName, wreq.profiles);
 			const transportUserAgent = wreq.userAgents[browser];
+			if (transportUserAgent === null || transportUserAgent === undefined) {
+				throw new Error(`Missing wreq user-agent for ${browser}`);
+			}
 
 			expect(profile.userAgent).toBe(transportUserAgent);
 		});

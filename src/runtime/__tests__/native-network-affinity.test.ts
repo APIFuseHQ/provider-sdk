@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 
 import { clearProxyResolutionCache, SMARTPROXY_APP_KEY_ENV } from "../../config/loader.js";
+import type { ProviderProxyPolicy } from "../../types.js";
 import {
 	createEnvVendorCredentialResolver,
 	createNativeNetworkClient,
@@ -10,11 +11,17 @@ import {
 	type NativeGatewayProxySynthesizer,
 } from "../native-network.js";
 
-const POLICY = {
+const POLICY: ProviderProxyPolicy = {
 	mode: "required",
 	providers: ["nodemaven"],
 	session: { affinity: "connection", lifetimeMinutes: 60 },
-} as const;
+};
+
+function createFetchDouble(implementation: () => Promise<Response>): typeof fetch {
+	return Object.assign(implementation, {
+		preconnect(_url: string | URL): void {},
+	});
+}
 
 let usernameBefore: string | undefined;
 let passwordBefore: string | undefined;
@@ -119,19 +126,19 @@ describe("native credential affinity", () => {
 	it("keeps Smartproxy allocation sticky per affinity and separates different affinities", async () => {
 		const originalFetch = globalThis.fetch;
 		let allocations = 0;
-		globalThis.fetch = (async () => {
+		globalThis.fetch = createFetchDouble(async () => {
 			allocations += 1;
 			return new Response(`127.0.0.${allocations}:8080`, { status: 200 });
-		}) as typeof fetch;
+		});
 		const credentials = () => ({
 			kind: "present" as const,
 			values: { [SMARTPROXY_APP_KEY_ENV]: "injected-smartproxy-key" },
 		});
-		const policy = {
+		const policy: ProviderProxyPolicy = {
 			mode: "required",
 			providers: ["smartproxy"],
 			session: { affinity: "connection", lifetimeMinutes: 60, poolSize: 1 },
-		} as const;
+		};
 		try {
 			const first = await resolveNativeGatewayProxy({
 				policy,

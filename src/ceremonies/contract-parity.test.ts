@@ -74,7 +74,7 @@ describe("ceremonies runtime validation derives from the auth-turn contract", ()
 		expect(validFixtures.length).toBeGreaterThan(0);
 		for (const { name, turn } of validFixtures) {
 			expect(`${name}: ${contractAccepts(turn)}`).toBe(`${name}: true`);
-			expect(validateCeremonyOutput(turn)).toBe(turn);
+			expect(Object.is(validateCeremonyOutput(turn), turn)).toBe(true);
 		}
 	});
 

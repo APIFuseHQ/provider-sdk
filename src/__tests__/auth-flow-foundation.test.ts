@@ -14,7 +14,12 @@ import { TurnValidationError } from "../errors.js";
 import { createFlowContext } from "../runtime/auth-flow.js";
 import { createEnvContext } from "../runtime/env.js";
 import { prevalidate } from "../runtime/prevalidate.js";
-import type { HttpClient, HttpResponse, ProviderRuntimeState } from "../types.js";
+import type {
+	HttpClient,
+	HttpResponse,
+	ProviderRuntimeState,
+	StealthClient,
+} from "../types.js";
 
 type RouteHandler = (body?: unknown) => Promise<unknown> | unknown;
 
@@ -59,12 +64,24 @@ function createMockHttpClient(routes: Record<string, RouteHandler>): HttpClient 
 	};
 }
 
+function createUnusedStealthClient(): StealthClient {
+	return {
+		async fetch() {
+			throw new Error("stealth unsupported in auth flow foundation tests");
+		},
+		createSession() {
+			throw new Error("stealth sessions unsupported in auth flow foundation tests");
+		},
+	};
+}
+
 function createTestContext(routes: Record<string, RouteHandler> = {}, allowedKeys: string[] = []) {
 	process.env.TEST_OAUTH_CLIENT_ID = "client-id";
 	process.env.TEST_OAUTH_CLIENT_SECRET = "client-secret";
 
 	return createFlowContext({
 		http: createMockHttpClient(routes),
+		stealth: createUnusedStealthClient(),
 		env: createEnvContext(["TEST_OAUTH_CLIENT_ID", "TEST_OAUTH_CLIENT_SECRET"]),
 		tenantId: "tenant-1",
 		providerId: "demo-provider",
@@ -88,6 +105,7 @@ describe("createFlowContext", () => {
 		};
 		const ctx = createFlowContext({
 			http: createMockHttpClient({}),
+			stealth: createUnusedStealthClient(),
 			env: createEnvContext([]),
 			tenantId: "tenant-1",
 			providerId: "demo-provider",
@@ -322,6 +340,7 @@ describe("createMagicLinkCeremony", () => {
 			verifyUrl: "https://magic.example.com/verify",
 		});
 
+		// @ts-expect-error test-invalid: magic-link start still consumes input at runtime; production contract gap tracked in PR #176 follow-up
 		expect((await ceremony.start(ctx, { email: "demo@example.com" })).kind).toBe("message");
 		expect((await ceremony.poll?.(ctx))?.kind).toBe("complete");
 	});
@@ -332,6 +351,7 @@ describe("createMagicLinkCeremony", () => {
 			verifyUrl: "https://magic.example.com/verify",
 		});
 
+		// @ts-expect-error test-invalid: magic-link start still consumes input at runtime; production contract gap tracked in PR #176 follow-up
 		expect((await ceremony.start(createTestContext(), {})).kind).toBe("form");
 	});
 
@@ -346,6 +366,7 @@ describe("createMagicLinkCeremony", () => {
 			expiresInMs: -1,
 		});
 
+		// @ts-expect-error test-invalid: magic-link start still consumes input at runtime; production contract gap tracked in PR #176 follow-up
 		await ceremony.start(ctx, { email: "demo@example.com" });
 		expect((await ceremony.poll?.(ctx))?.kind).toBe("abort");
 	});

@@ -1,7 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
-import { statefulSignedHeaders } from "../../dist/stateful/index.js";
 import { ProviderError } from "../errors.js";
 import {
 	createServerApp,
@@ -9,6 +8,12 @@ import {
 	type ProviderServerOperationExecutorInput,
 } from "../server/serve.js";
 import type { ProviderDefinition } from "../types.js";
+
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const { statefulSignedHeaders } = await builtStateful;
 
 const STATEFUL_ROUTE = "/__apifuse/stateful/operations";
 const SIGNATURE_HEADER = "x-apifuse-stateful-signature";
@@ -22,13 +27,14 @@ function createTestProvider(state: { defaultExecutions: number }): ProviderDefin
 		runtime: "standard",
 		meta: {
 			displayName: "Stateful Test Provider",
+			descriptionKey: "stateful-test-provider.description",
 			category: "test",
 		},
 		operations: {
 			echo: {
 				input: z.object({ value: z.string() }),
 				output: z.object({ source: z.string(), value: z.string() }),
-				handler: async (_ctx, input) => {
+				handler: async (_ctx, input: { value: string }) => {
 					state.defaultExecutions += 1;
 					return { source: "default", value: input.value };
 				},
@@ -263,7 +269,7 @@ describe("signed stateful operation forwarding", () => {
 		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
 			logger: () => {},
 			statefulForwarding: forwardingConfig({
-				validateOwnerFence: async (_fence, signal) => {
+				validateOwnerFence: async (_fence: unknown, signal: AbortSignal) => {
 					validationSignal = signal;
 					await Bun.sleep(100);
 					return true;

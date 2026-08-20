@@ -8,10 +8,8 @@ import * as SDK from "../errors.js";
 // producing a genuinely separate module identity (distinct constructors) that
 // models the packaged src/* vs dist/* entrypoint split proven in
 // /tmp/provider-sdk-surgical-error-identity-research.md.
-// biome-ignore lint/correctness/useImportExtensions: specifier already carries .ts; the ?query (invisible to the rule) mints a second module identity under bun test
-const duplicateSdk = import("../errors.ts?duplicate-sdk-instance") as Promise<
-	typeof import("../errors")
->;
+const duplicateSdkSpecifier: string = "../errors.ts?duplicate-sdk-instance";
+const duplicateSdk: Promise<typeof import("../errors.js")> = import(duplicateSdkSpecifier);
 
 // Must match the versioned brand key defined in src/errors.ts.
 const PROVIDER_ERROR_BRAND_KEY = "@apifuse/provider-sdk/error-brand@1";

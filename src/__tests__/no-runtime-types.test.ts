@@ -96,6 +96,7 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 			"bunx",
 			[
 				"tsc",
+				"--ignoreConfig",
 				"--noEmit",
 				"--strict",
 				"--moduleResolution",
@@ -130,6 +131,7 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 			"bunx",
 			[
 				"tsc",
+				"--ignoreConfig",
 				"--noEmit",
 				"--strict",
 				"--moduleResolution",

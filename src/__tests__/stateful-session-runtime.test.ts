@@ -1,13 +1,27 @@
 import { describe, expect, it } from "bun:test";
 
-import { InMemorySessionOwnerRegistry, PodLocalSessionPool } from "../../dist/stateful/index.js";
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const { buildSessionKey, InMemorySessionOwnerRegistry, PodLocalSessionPool } =
+	await builtStateful;
+
+function testSessionKey(connectionId: string) {
+	return buildSessionKey({
+		providerId: "test-provider",
+		serviceAccountId: "test-service-account",
+		connectionId,
+	});
+}
 
 describe("InMemorySessionOwnerRegistry", () => {
 	it("preserves lease generations and rejects stale renewals and releases", async () => {
 		const registry = new InMemorySessionOwnerRegistry();
+		const sessionKey = testSessionKey("session-1");
 		const startedAt = new Date("2026-01-01T00:00:00.000Z");
 		const first = await registry.acquire({
-			sessionKey: "session-1",
+			sessionKey,
 			ownerPodId: "pod-a",
 			ownerEndpoint: "http://pod-a",
 			leaseDurationMs: 1_000,
@@ -17,12 +31,12 @@ describe("InMemorySessionOwnerRegistry", () => {
 
 		expect(first.acquired).toBe(true);
 		expect(first.record.generation).toBe(1);
-		expect(await registry.resolve("session-1", new Date(startedAt.getTime() + 500))).toEqual(
+		expect(await registry.resolve(sessionKey, new Date(startedAt.getTime() + 500))).toEqual(
 			first.record,
 		);
 
 		const conflict = await registry.acquire({
-			sessionKey: "session-1",
+			sessionKey,
 			ownerPodId: "pod-b",
 			ownerEndpoint: "http://pod-b",
 			leaseDurationMs: 1_000,
@@ -31,7 +45,7 @@ describe("InMemorySessionOwnerRegistry", () => {
 		expect(conflict).toEqual({ record: first.record, acquired: false });
 
 		const renewed = await registry.renew({
-			sessionKey: "session-1",
+			sessionKey,
 			ownerPodId: "pod-a",
 			generation: 1,
 			leaseDurationMs: 2_000,
@@ -42,7 +56,7 @@ describe("InMemorySessionOwnerRegistry", () => {
 
 		expect(
 			await registry.renew({
-				sessionKey: "session-1",
+				sessionKey,
 				ownerPodId: "pod-a",
 				generation: 2,
 				leaseDurationMs: 1_000,
@@ -51,26 +65,27 @@ describe("InMemorySessionOwnerRegistry", () => {
 		).toBeNull();
 		expect(
 			await registry.release({
-				sessionKey: "session-1",
+				sessionKey,
 				ownerPodId: "pod-a",
 				generation: 2,
 			}),
 		).toBe(false);
 		expect(
 			await registry.release({
-				sessionKey: "session-1",
+				sessionKey,
 				ownerPodId: "pod-a",
 				generation: 1,
 			}),
 		).toBe(true);
-		expect(await registry.resolve("session-1")).toBeNull();
+		expect(await registry.resolve(sessionKey)).toBeNull();
 	});
 
 	it("increments generation after an expired owner is replaced", async () => {
 		const registry = new InMemorySessionOwnerRegistry();
+		const sessionKey = testSessionKey("session-1");
 		const startedAt = new Date("2026-01-01T00:00:00.000Z");
 		await registry.acquire({
-			sessionKey: "session-1",
+			sessionKey,
 			ownerPodId: "pod-a",
 			ownerEndpoint: "http://pod-a",
 			leaseDurationMs: 100,
@@ -78,7 +93,7 @@ describe("InMemorySessionOwnerRegistry", () => {
 		});
 
 		const replacement = await registry.acquire({
-			sessionKey: "session-1",
+			sessionKey,
 			ownerPodId: "pod-b",
 			ownerEndpoint: "http://pod-b",
 			leaseDurationMs: 1_000,
@@ -89,7 +104,7 @@ describe("InMemorySessionOwnerRegistry", () => {
 		expect(replacement.record.generation).toBe(2);
 		expect(
 			await registry.renew({
-				sessionKey: "session-1",
+				sessionKey,
 				ownerPodId: "pod-a",
 				generation: 1,
 				leaseDurationMs: 1_000,
@@ -97,7 +112,7 @@ describe("InMemorySessionOwnerRegistry", () => {
 		).toBeNull();
 		expect(
 			await registry.release({
-				sessionKey: "session-1",
+				sessionKey,
 				ownerPodId: "pod-a",
 				generation: 1,
 			}),
@@ -106,8 +121,9 @@ describe("InMemorySessionOwnerRegistry", () => {
 
 	it("increments generation after release and rejects the released generation", async () => {
 		const registry = new InMemorySessionOwnerRegistry();
+		const sessionKey = testSessionKey("released-session");
 		const first = await registry.acquire({
-			sessionKey: "released-session",
+			sessionKey,
 			ownerPodId: "pod-a",
 			ownerEndpoint: "http://pod-a",
 			leaseDurationMs: 60_000,
@@ -115,14 +131,14 @@ describe("InMemorySessionOwnerRegistry", () => {
 		expect(first.record.generation).toBe(1);
 		expect(
 			await registry.release({
-				sessionKey: "released-session",
+				sessionKey,
 				ownerPodId: "pod-a",
 				generation: 1,
 			}),
 		).toBe(true);
 
 		const second = await registry.acquire({
-			sessionKey: "released-session",
+			sessionKey,
 			ownerPodId: "pod-a",
 			ownerEndpoint: "http://pod-a",
 			leaseDurationMs: 60_000,
@@ -130,7 +146,7 @@ describe("InMemorySessionOwnerRegistry", () => {
 		expect(second.record.generation).toBe(2);
 		expect(
 			await registry.renew({
-				sessionKey: "released-session",
+				sessionKey,
 				ownerPodId: "pod-a",
 				generation: 1,
 				leaseDurationMs: 60_000,
@@ -138,7 +154,7 @@ describe("InMemorySessionOwnerRegistry", () => {
 		).toBeNull();
 		expect(
 			await registry.release({
-				sessionKey: "released-session",
+				sessionKey,
 				ownerPodId: "pod-a",
 				generation: 1,
 			}),
@@ -147,9 +163,10 @@ describe("InMemorySessionOwnerRegistry", () => {
 
 	it("rejects generation zero at runtime boundaries", async () => {
 		const registry = new InMemorySessionOwnerRegistry();
+		const sessionKey = testSessionKey("invalid-generation");
 		await expect(
 			registry.renew({
-				sessionKey: "invalid-generation",
+				sessionKey,
 				ownerPodId: "pod-a",
 				generation: 0,
 				leaseDurationMs: 60_000,
@@ -157,7 +174,7 @@ describe("InMemorySessionOwnerRegistry", () => {
 		).rejects.toThrow("positive integer");
 		await expect(
 			registry.release({
-				sessionKey: "invalid-generation",
+				sessionKey,
 				ownerPodId: "pod-a",
 				generation: 0,
 			}),
@@ -178,7 +195,9 @@ describe("PodLocalSessionPool", () => {
 		});
 		const pool = new PodLocalSessionPool<string>(
 			{ maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
-			(session, reason) => closed.push({ key: session.sessionKey, reason }),
+			(session, reason) => {
+				closed.push({ key: session.sessionKey, reason });
+			},
 		);
 		const creating = pool.getOrCreate("slow", 1, async () => {
 			markFactoryStarted?.();
@@ -209,7 +228,9 @@ describe("PodLocalSessionPool", () => {
 		const closed: Array<{ key: string; reason: string }> = [];
 		const pool = new PodLocalSessionPool<string>(
 			{ maxSessions: 2, idleTimeoutMs: 60_000, maxLifetimeMs: 60_000 },
-			(session, reason) => closed.push({ key: session.sessionKey, reason }),
+			(session, reason) => {
+				closed.push({ key: session.sessionKey, reason });
+			},
 		);
 		const startedAt = new Date("2026-01-01T00:00:00.000Z");
 		await pool.getOrCreate("a", 1, () => "a", startedAt);

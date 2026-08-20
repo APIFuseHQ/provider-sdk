@@ -10,7 +10,12 @@ import {
 	every,
 	extractProviderContract,
 } from "../index.js";
-import type { ProviderContext, ProviderDefinition } from "../types.js";
+import type {
+	AuthTurn,
+	FlowContext,
+	ProviderContext,
+	ProviderDefinition,
+} from "../types.js";
 
 const InputSchema = z.object({ query: z.string() });
 const OutputSchema = z.object({ name: z.string(), score: z.number() });
@@ -29,8 +34,11 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 		auth: {
 			mode: "oauth2",
 			flow: {
-				start: async () => ({ kind: "form", turnId: "start" }),
-				continue: async () => ({ kind: "complete", turnId: "complete" }),
+				start: async (_ctx: FlowContext): Promise<AuthTurn> => ({
+					kind: "form",
+					turnId: "start",
+				}),
+				continue: async (): Promise<AuthTurn> => ({ kind: "complete", turnId: "complete" }),
 			},
 		},
 		access: { visibility: "early_access" },
@@ -148,7 +156,11 @@ function buildHostileContractProvider(): ProviderDefinition {
 		id: "hostile-contract-provider",
 		version: "1.0.0",
 		runtime: "standard",
-		meta: { displayName: "Hostile Contract Provider", category: "test" },
+		meta: {
+			displayName: "Hostile Contract Provider",
+			descriptionKey: "hostile-contract-provider.description",
+			category: "test",
+		},
 		operations: {
 			lookup: {
 				input: InputSchema,
@@ -331,6 +343,7 @@ describe("provider contract extraction", () => {
 					}),
 				],
 				steps: [{ id: "search", operationId: "alpha-search", kind: "operation" }],
+				run: async () => ({ status: "ok" }),
 			}),
 		];
 

@@ -1,14 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { createFetchDouble } from "./test-utils.js";
-import { resolveProxy } from "@apifuse/provider-sdk";
 import type {
 	ProxyProtocol,
 	ProxyResolutionOptions,
 	ProxyResolutionSource,
 	ProxyVendorName,
 	ResolvedProxyConfig,
-} from "@apifuse/provider-sdk";
+} from "../index.js";
+import { createFetchDouble } from "./test-utils.js";
+
+const builtSpecifier: string = "@apifuse/provider-sdk";
+const built: Promise<typeof import("../index.js")> = import(builtSpecifier);
+const { resolveProxy } = await built;
 
 const PROXY_ENV_KEYS = [
 	"APIFUSE__PROXY__SMARTPROXY_APP_KEY",
@@ -69,8 +72,11 @@ describe("public proxy resolver", () => {
 	});
 
 	it("returns no proxy for a disabled policy", async () => {
-		const allocator = mock(async () => new Response("192.0.2.1:8080", { status: 200 }));
-		global.fetch = createFetchDouble(allocator);
+		const allocator = mock(
+			async (_input: RequestInfo | URL, _init?: RequestInit) =>
+				new Response("192.0.2.1:8080", { status: 200 }),
+		);
+		global.fetch = createAllocatorFetch(allocator);
 
 		await expect(resolveProxy({ proxyPolicy: { mode: "disabled" } })).resolves.toEqual({
 			shouldWarn: false,
@@ -80,8 +86,11 @@ describe("public proxy resolver", () => {
 
 	it("allocates a vendor-chain proxy and reports its vendor and source", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		const allocator = mock(async () => new Response("192.0.2.10:31001", { status: 200 }));
-		global.fetch = createFetchDouble(allocator);
+		const allocator = mock(
+			async (_input: RequestInfo | URL, _init?: RequestInit) =>
+				new Response("192.0.2.10:31001", { status: 200 }),
+		);
+		global.fetch = createAllocatorFetch(allocator);
 
 		const resolved = await resolveProxy({
 			proxyPolicy: {
@@ -105,3 +114,13 @@ describe("public proxy resolver", () => {
 		);
 	});
 });
+
+function createAllocatorFetch(
+	implementation: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+	return createFetchDouble(
+		Object.assign(implementation, {
+			preconnect(_url: string | URL): void {},
+		}),
+	);
+}

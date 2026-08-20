@@ -1,8 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { createFetchDouble } from "./test-utils.js";
 import { exportSpansOTLP, spansToOTLP } from "../runtime/otlp.js";
 import type { TraceSpan } from "../types.js";
+
+function createFetchMock(
+	implementation: (url: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+	return Object.assign(implementation, { preconnect: global.fetch.preconnect });
+}
 
 function makeSpan(overrides: Partial<TraceSpan> = {}): TraceSpan {
 	return {
@@ -96,7 +101,7 @@ describe("otlp export", () => {
 		let requestUrl: string | undefined;
 		let requestInit: RequestInit | undefined;
 
-		global.fetch = createFetchDouble(mock(async (url: string | URL | Request, init?: RequestInit) => {
+		global.fetch = createFetchMock(mock(async (url: string | URL | Request, init?: RequestInit) => {
 			requestUrl = typeof url === "string" ? url : url.toString();
 			requestInit = init;
 			return new Response(null, { status: 200 });
@@ -120,7 +125,7 @@ describe("otlp export", () => {
 	it("exportSpansOTLP() swallows fetch errors and warns", async () => {
 		const warn = mock(() => {});
 		console.warn = warn;
-		global.fetch = createFetchDouble(mock(async () => {
+		global.fetch = createFetchMock(mock(async () => {
 			throw new Error("network down");
 		}));
 

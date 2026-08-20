@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 
-import { createProviderContextDouble } from "../../__tests__/test-utils.js";
+import { capturedError, createProviderContextDouble } from "../../__tests__/test-utils.js";
+import { ProviderError } from "../../errors.js";
 import type {
 	ChallengeSolution,
 	ProviderCache,
@@ -145,13 +146,16 @@ describe("resolver tracing", () => {
 			],
 		});
 		const instrumented = instrumentResolver(resolver);
-		const error = await instrumented.resolver
-			.solve({
+		const error = await capturedError(
+			instrumented.resolver.solve({
 				kind: "akamai_sensor",
 				pageUrl: "https://sensor.example.com/challenge",
 				scriptUrl: "https://sensor.example.com/sensor.js",
-			})
-			.catch((error: unknown) => error);
+			}),
+		);
+		if (!(error instanceof ProviderError)) {
+			throw new Error(`Expected ProviderError, received ${error.name}`);
+		}
 		const attempt = instrumented.trace
 			.getSpans()
 			.find((span) => span.name === "resolver.vendor.attempt");

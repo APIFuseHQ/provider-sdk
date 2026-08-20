@@ -89,7 +89,11 @@ describe("provider capability imports", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			resolver: { vendors: ["2captcha"], kinds: ["turnstile"] },
-			meta: { displayName: "Declared resolver startup", category: "test" },
+			meta: {
+				displayName: "Declared resolver startup",
+				descriptionKey: "providers.declaredResolverStartup.description",
+				category: "test",
+			},
 			operations: {
 				solve: {
 					input: z.object({}),
@@ -97,6 +101,7 @@ describe("provider capability imports", () => {
 					async handler(ctx) {
 						const solution = await ctx.resolver.solve({
 							kind: "turnstile",
+							siteKey: "test-site-key",
 							pageUrl: "https://example.test",
 						});
 						return { token: solution.form === "token" ? solution.token : "unexpected" };

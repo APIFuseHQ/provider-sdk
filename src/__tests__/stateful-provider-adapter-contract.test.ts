@@ -1,12 +1,42 @@
 import { describe, expect, it } from "bun:test";
 
-import {
+import type {
+	ProviderEventOwnerFence,
+	SessionOwnerRecord,
+	SessionPoolPolicy,
+	StatefulOperationRequest,
+	StatefulProviderAdapter,
+	StatefulProviderEventPublish,
+	StatefulProviderSessionContext,
+} from "../stateful/index.js";
+import { assertIsError, capturedError } from "./test-utils.js";
+
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const {
+	buildSessionKey,
 	RecordingStatefulProviderMetricEmitter,
 	StatefulProviderSessionManager,
 	StatefulSessionInvalidatedError,
-} from "../../dist/stateful/index.js";
+} = await builtStateful;
 
-function owner(sessionKey = "session-a", generation = 1) {
+type TestSession = { connected: boolean };
+type TestState = Record<string, unknown>;
+type TestEvent = { eventId: string };
+type TestSessionKey = ReturnType<typeof buildSessionKey>;
+
+function testSessionKey(testSessionKey = "session-a", requestId = "request-a"): TestSessionKey {
+	return buildSessionKey({
+		providerId: "test-provider",
+		serviceAccountId: "account-a",
+		connectionId: `connection-${requestId}`,
+		dimensions: { testSessionKey },
+	});
+}
+
+function owner(sessionKey: TestSessionKey, generation = 1): SessionOwnerRecord {
 	return {
 		sessionKey,
 		ownerPodId: "pod-a",
@@ -18,19 +48,22 @@ function owner(sessionKey = "session-a", generation = 1) {
 	};
 }
 
-function request(sessionKey = "session-a", requestId = "request-a") {
+function request(sessionKey: TestSessionKey, requestId = "request-a"): StatefulOperationRequest {
+	const connectionId = `connection-${requestId}`;
 	return {
 		requestId,
 		sessionKey,
 		providerId: "test-provider",
 		operationId: "read",
-		connectionId: `connection-${requestId}`,
+		connectionId,
 		serviceAccountId: "account-a",
 		input: {},
 	};
 }
 
-function adapter(overrides = {}) {
+function adapter(
+	overrides: Partial<StatefulProviderAdapter<TestSession, TestState, TestEvent>> = {},
+): StatefulProviderAdapter<TestSession, TestState, TestEvent> {
 	return {
 		providerId: "test-provider",
 		policy: { concurrency: { mode: "serialize" }, reconnect: "resume" },
@@ -45,23 +78,26 @@ const poolPolicy = {
 	maxSessions: 2,
 	idleTimeoutMs: "unlimited",
 	maxLifetimeMs: "unlimited",
-};
+} satisfies SessionPoolPolicy;
 
 describe("StatefulProviderSessionManager adapter contract", () => {
 	it("writes returned snapshot state to the checkpoint sink with durable identity", async () => {
-		const checkpoints = [];
+		const sessionKey = testSessionKey();
+		const checkpoints: Array<{ ctx: StatefulProviderSessionContext; state: TestState }> = [];
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({ snapshot: async () => ({ cursor: 42 }) }),
 			poolPolicy,
-			checkpointStore: async (ctx, state) => checkpoints.push({ ctx, state }),
+			checkpointStore: async (ctx, state) => {
+				checkpoints.push({ ctx, state });
+			},
 		});
-		await manager.invoke(owner(), request(), new AbortController().signal);
+		await manager.invoke(owner(sessionKey), request(sessionKey), new AbortController().signal);
 		await manager.closeAll("test");
 
 		expect(checkpoints).toHaveLength(1);
 		expect(checkpoints[0].state).toEqual({ cursor: 42 });
 		expect(checkpoints[0].ctx).toMatchObject({
-			sessionKey: "session-a",
+			sessionKey,
 			connectionId: "connection-request-a",
 			serviceAccountId: "account-a",
 			ownerPodId: "pod-a",
@@ -71,6 +107,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 	});
 
 	it("exposes write reconciliation as an explicit callable runner", async () => {
+		const sessionKey = testSessionKey();
 		let received: unknown;
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({
@@ -83,8 +120,8 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 			poolPolicy,
 		});
 		const result = await manager.reconcileWrite(
-			owner(),
-			request(),
+			owner(sessionKey),
+			request(sessionKey),
 			{ writeId: "write-1" },
 			new AbortController().signal,
 		);
@@ -100,22 +137,27 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 	});
 
 	it("runs an event-source disposer when capacity eviction closes the session", async () => {
-		const disposed = [];
+		const sessionAKey = testSessionKey("session-a");
+		const sessionBKey = testSessionKey("session-b");
+		const disposed: string[] = [];
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({
-				subscribe: async (ctx) => () => disposed.push(ctx.sessionKey),
+				subscribe: async (ctx) => () => {
+					disposed.push(ctx.sessionKey);
+				},
 			}),
 			poolPolicy: { ...poolPolicy, maxSessions: 1 },
 			eventPublisher: { publish: () => {} },
 		});
-		await manager.invoke(owner("session-a"), request("session-a"), new AbortController().signal);
-		await manager.invoke(owner("session-b"), request("session-b"), new AbortController().signal);
+		await manager.invoke(owner(sessionAKey), request(sessionAKey), new AbortController().signal);
+		await manager.invoke(owner(sessionBKey), request(sessionBKey), new AbortController().signal);
 
-		expect(disposed).toEqual(["session-a"]);
+		expect(disposed).toEqual([sessionAKey]);
 		await manager.closeAll("test");
 	});
 
 	it('does not retry an invalidated session when reconnect is "unsupported"', async () => {
+		const sessionKey = testSessionKey();
 		let connects = 0;
 		let invokes = 0;
 		const manager = new StatefulProviderSessionManager({
@@ -123,7 +165,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 				policy: { concurrency: { mode: "serialize" }, reconnect: "unsupported" },
 				connect: async () => {
 					connects += 1;
-					return {};
+					return { connected: true };
 				},
 				invoke: async () => {
 					invokes += 1;
@@ -137,7 +179,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 		});
 
 		await expect(
-			manager.invoke(owner(), request(), new AbortController().signal),
+			manager.invoke(owner(sessionKey), request(sessionKey), new AbortController().signal),
 		).rejects.toBeInstanceOf(StatefulSessionInvalidatedError);
 		expect(connects).toBe(1);
 		expect(invokes).toBe(1);
@@ -161,6 +203,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 				new StatefulProviderSessionManager({
 					adapter: adapter({
 						policy: {
+							// @ts-expect-error test-invalid: runtime validation must reject maxInFlight for serialized adapters.
 							concurrency: { mode: "serialize", maxInFlight: 2 },
 							reconnect: "resume",
 						},
@@ -185,6 +228,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 	});
 
 	it("records invalidations separately from LRU evictions", async () => {
+		const sessionKey = testSessionKey();
 		const metricEmitter = new RecordingStatefulProviderMetricEmitter();
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({
@@ -198,7 +242,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 			metricEmitter,
 		});
 		await expect(
-			manager.invoke(owner(), request(), new AbortController().signal),
+			manager.invoke(owner(sessionKey), request(sessionKey), new AbortController().signal),
 		).rejects.toBeInstanceOf(StatefulSessionInvalidatedError);
 
 		expect(metricEmitter.metrics.map((metric) => metric.name)).toContain(
@@ -210,6 +254,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 	});
 
 	it("always closes the connection when snapshot throws", async () => {
+		const sessionKey = testSessionKey();
 		let closed = false;
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({
@@ -223,32 +268,38 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 			poolPolicy,
 			checkpointStore: async () => {},
 		});
-		await manager.invoke(owner(), request(), new AbortController().signal);
-		const closeError = await manager.closeAll("test").catch((error) => error);
+		await manager.invoke(owner(sessionKey), request(sessionKey), new AbortController().signal);
+		const closeError = await capturedError(manager.closeAll("test"));
 		expect(closeError).toBeInstanceOf(AggregateError);
-		expect(closeError.errors[0].message).toBe("snapshot failed");
+		if (!(closeError instanceof AggregateError)) throw closeError;
+		const snapshotError = closeError.errors[0];
+		assertIsError(snapshotError);
+		expect(snapshotError.message).toBe("snapshot failed");
 		expect(closed).toBe(true);
 	});
 
 	it("continues closeAll after one session close fails and aggregates failures", async () => {
-		const closed = [];
+		const sessionAKey = testSessionKey("session-a");
+		const sessionBKey = testSessionKey("session-b");
+		const closed: string[] = [];
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({
 				close: async (ctx) => {
 					closed.push(ctx.sessionKey);
-					if (ctx.sessionKey === "session-a") throw new Error("first close failed");
+					if (ctx.sessionKey === sessionAKey) throw new Error("first close failed");
 				},
 			}),
 			poolPolicy,
 		});
-		await manager.invoke(owner("session-a"), request("session-a"), new AbortController().signal);
-		await manager.invoke(owner("session-b"), request("session-b"), new AbortController().signal);
+		await manager.invoke(owner(sessionAKey), request(sessionAKey), new AbortController().signal);
+		await manager.invoke(owner(sessionBKey), request(sessionBKey), new AbortController().signal);
 
 		await expect(manager.closeAll("test")).rejects.toBeInstanceOf(AggregateError);
-		expect(closed).toEqual(["session-a", "session-b"]);
+		expect(closed).toEqual([sessionAKey, sessionBKey]);
 	});
 
 	it("waits for a slow subscription, disposes it, and suppresses events after closeAll", async () => {
+		const sessionKey = testSessionKey();
 		let releaseSubscribe: (() => void) | undefined;
 		let markSubscribeStarted: (() => void) | undefined;
 		const subscribeStarted = new Promise<void>((resolve) => {
@@ -257,7 +308,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 		const subscribeGate = new Promise<void>((resolve) => {
 			releaseSubscribe = resolve;
 		});
-		let publishFromSubscription: ((event: unknown) => void | Promise<void>) | undefined;
+		let publishFromSubscription: StatefulProviderEventPublish<TestEvent> | undefined;
 		let publishes = 0;
 		let publishesAfterClose = 0;
 		let closeResolved = false;
@@ -286,7 +337,11 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 				},
 			},
 		});
-		const invoking = manager.invoke(owner(), request(), new AbortController().signal);
+		const invoking = manager.invoke(
+			owner(sessionKey),
+			request(sessionKey),
+			new AbortController().signal,
+		);
 		await subscribeStarted;
 		const closing = manager.closeAll("shutdown").then(() => {
 			closeResolved = true;
@@ -306,12 +361,13 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 			publishesAfterClose: 0,
 		});
 		await expect(
-			manager.invoke(owner(), request(), new AbortController().signal),
+			manager.invoke(owner(sessionKey), request(sessionKey), new AbortController().signal),
 		).rejects.toThrow("pool is closed; cannot get or create session");
 	});
 
 	it("binds the authoritative owner fence to adapter events for each generation", async () => {
-		const fences = [];
+		const sessionKey = testSessionKey();
+		const fences: ProviderEventOwnerFence[] = [];
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({
 				subscribe: async (ctx, _session, publish) => {
@@ -325,18 +381,18 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 			},
 		});
 
-		await manager.invoke(owner("session-a", 1), request(), new AbortController().signal);
-		await manager.invoke(owner("session-a", 2), request(), new AbortController().signal);
+		await manager.invoke(owner(sessionKey, 1), request(sessionKey), new AbortController().signal);
+		await manager.invoke(owner(sessionKey, 2), request(sessionKey), new AbortController().signal);
 
 		expect(fences).toEqual([
 			{
-				sessionKey: "session-a",
+				sessionKey,
 				generation: 1,
 				ownerPodId: "pod-a",
 				ownerEndpoint: "http://pod-a",
 			},
 			{
-				sessionKey: "session-a",
+				sessionKey,
 				generation: 2,
 				ownerPodId: "pod-a",
 				ownerEndpoint: "http://pod-a",
@@ -346,6 +402,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 	});
 
 	it("serializes health checks behind invokes and applies ownership validation", async () => {
+		const sessionKey = testSessionKey();
 		let releaseInvoke: (() => void) | undefined;
 		let markInvokeStarted: (() => void) | undefined;
 		const invokeStarted = new Promise<void>((resolve) => {
@@ -370,11 +427,15 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 			}),
 			poolPolicy,
 		});
-		const invoking = manager.invoke(owner(), request(), new AbortController().signal);
+		const invoking = manager.invoke(
+			owner(sessionKey),
+			request(sessionKey),
+			new AbortController().signal,
+		);
 		await invokeStarted;
 		const checking = manager.health(
-			owner(),
-			request(),
+			owner(sessionKey),
+			request(sessionKey),
 			new AbortController().signal,
 			async (expected) => {
 				validations += 1;
