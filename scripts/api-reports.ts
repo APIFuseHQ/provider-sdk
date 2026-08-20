@@ -8,7 +8,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const configDir = join(root, "config", "api-extractor");
@@ -333,10 +333,12 @@ const parsedConfigs = configs.map((configName) => {
 		config,
 		configName,
 		configPath,
-		// Resolved against projectFolder (like API Extractor itself) and re-relativized
-		// to the repository root, so a projectFolder redirect cannot keep the compared
-		// text stable while pointing extraction at a different declaration file.
-		types: relative(root, resolveConfiguredPath(configPath, config, config.mainEntryPointFilePath)),
+		// Resolved against projectFolder (like API Extractor itself), re-relativized
+		// to the repository root, and normalized to POSIX separators so the value
+		// compares against package.json export targets on every platform.
+		types: relative(root, resolveConfiguredPath(configPath, config, config.mainEntryPointFilePath))
+			.split(sep)
+			.join("/"),
 	};
 });
 
