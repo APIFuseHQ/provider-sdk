@@ -72,7 +72,7 @@ describe("ProviderDefinition types", () => {
 		});
 
 		expect(() =>
-			defineProvider({
+			Reflect.apply(defineProvider, undefined, [{
 				id: "bad-auth-start",
 				version: "1.0.0",
 				runtime: "standard",
@@ -84,15 +84,15 @@ describe("ProviderDefinition types", () => {
 				auth: {
 					mode: "credentials",
 					flow: {
-						start: (async (_ctx: FlowContext, _input?: Record<string, unknown>) => ({
+						start: async (_ctx: FlowContext, _input?: Record<string, unknown>) => ({
 							kind: "form",
 							turnId: "start",
-						})) as never,
+						}),
 						continue: async () => ({ kind: "complete", turnId: "complete" }),
 					},
 				},
 				operations: { noop },
-			}),
+			}]),
 		).toThrow(/auth\.flow\.start must not declare an input parameter/);
 	});
 
@@ -105,7 +105,7 @@ describe("ProviderDefinition types", () => {
 		});
 
 		expect(() =>
-			defineProvider({
+			Reflect.apply(defineProvider, undefined, [{
 				id: "bad-auth-exchange",
 				version: "1.0.0",
 				runtime: "standard",
@@ -120,10 +120,10 @@ describe("ProviderDefinition types", () => {
 						start: async () => ({ kind: "form", turnId: "start" }),
 						continue: async () => ({ kind: "complete", turnId: "complete" }),
 					},
-					exchange: async () => ({ session: "cookie" }),
-				} as never,
+						exchange: async () => ({ session: "cookie" }),
+					},
 				operations: { noop },
-			}),
+			}]),
 		).toThrow(/auth\.exchange is not part of the Provider SDK auth contract/);
 	});
 

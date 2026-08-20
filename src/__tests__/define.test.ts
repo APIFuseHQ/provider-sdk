@@ -3,10 +3,17 @@ import { z } from "zod";
 
 import { defineProvider } from "../define.js";
 import { ProviderError, ValidationError } from "../errors.js";
-import type { ProviderContext } from "../types.js";
+import type { OperationAnnotations, ProviderContext, SchemaLike } from "../types.js";
 
 const InputSchema = z.object({ id: z.string() });
 const OutputSchema = z.object({ name: z.string(), price: z.number() });
+
+function requireZodSchema(schema: SchemaLike): z.ZodType {
+	if (!("safeParse" in schema) || typeof schema.safeParse !== "function") {
+		throw new Error("Expected the operation schema to retain its Zod implementation");
+	}
+	return schema;
+}
 
 const validConfig = {
 	id: "korea-air-quality",
@@ -126,9 +133,10 @@ describe("defineProvider", () => {
 						...validConfig.operations.prices,
 						docs: {
 							errorCodes: [
-								{
-									code: "UPSTREAM_TEAPOT",
-									status: 418,
+							{
+								code: "UPSTREAM_TEAPOT",
+								// @ts-expect-error test-invalid: runtime validation must reject unsupported HTTP statuses.
+								status: 418,
 									description: "Unsupported upstream response",
 								},
 							],
@@ -576,7 +584,9 @@ describe("defineProvider", () => {
 			},
 		});
 
-		expect(provider.operations.prices.input.safeParse({ date: "+45d" }).success).toBe(false);
+		expect(requireZodSchema(provider.operations.prices.input).safeParse({ date: "+45d" }).success).toBe(
+			false,
+		);
 		expect(provider.operations.prices.fixtures?.request).toEqual({
 			date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
 		});
@@ -723,25 +733,25 @@ describe("defineProvider", () => {
 
 	it("keeps operation schema inference usable for input parsing", () => {
 		const provider = defineProvider(validConfig);
-		const parsed = provider.operations.prices.input?.safeParse({
+		const parsed = requireZodSchema(provider.operations.prices.input).safeParse({
 			id: "bitcoin",
 		});
 
-		expect(parsed?.success).toBe(true);
+		expect(parsed.success).toBe(true);
 	});
 
 	it("keeps operation schema inference usable for output parsing", () => {
 		const provider = defineProvider(validConfig);
-		const parsed = provider.operations.prices.output?.safeParse({
+		const parsed = requireZodSchema(provider.operations.prices.output).safeParse({
 			name: "Bitcoin",
 			price: 50_000,
 		});
 
-		expect(parsed?.success).toBe(true);
+		expect(parsed.success).toBe(true);
 	});
 
 	describe("annotations.timeoutMs validation", () => {
-		const withAnnotations = (annotations: unknown) => ({
+		const withAnnotations = (annotations: OperationAnnotations) => ({
 			...validConfig,
 			operations: {
 				prices: {
@@ -784,6 +794,7 @@ describe("defineProvider", () => {
 			expect(() =>
 				defineProvider(
 					withAnnotations({
+						// @ts-expect-error test-invalid: runtime validation must reject non-number timeouts.
 						timeoutMs: "30000",
 					}),
 				),
@@ -835,7 +846,7 @@ describe("defineProvider", () => {
 			// @ts-expect-error test-invalid: deployment is intentionally outside the declared registry shape.
 			const provider = defineProvider({ ...validConfig, deployment });
 
-			expect(provider.deployment).toBe(deployment);
+			expect(Object.is(provider.deployment, deployment)).toBe(true);
 		});
 
 		it("leaves deployment undefined when not declared", () => {

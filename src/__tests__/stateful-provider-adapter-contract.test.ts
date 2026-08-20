@@ -1,12 +1,26 @@
 import { describe, expect, it } from "bun:test";
 
 import {
+	buildSessionKey,
+	parseSessionKey,
+	type ProviderEventOwnerFence,
 	RecordingStatefulProviderMetricEmitter,
+	type SessionOwnerRecord,
+	type SessionPoolPolicy,
+	type StatefulOperationRequest,
+	type StatefulProviderAdapter,
+	type StatefulProviderEventPublish,
+	type StatefulProviderSessionContext,
 	StatefulProviderSessionManager,
 	StatefulSessionInvalidatedError,
 } from "../../dist/stateful/index.js";
+import { assertIsError, capturedError } from "./test-utils.js";
 
-function owner(sessionKey = "session-a", generation = 1) {
+type TestSession = { connected: boolean };
+type TestState = Record<string, unknown>;
+type TestEvent = { eventId: string };
+
+function owner(sessionKey = "session-a", generation = 1): SessionOwnerRecord {
 	return {
 		sessionKey,
 		ownerPodId: "pod-a",
@@ -18,19 +32,27 @@ function owner(sessionKey = "session-a", generation = 1) {
 	};
 }
 
-function request(sessionKey = "session-a", requestId = "request-a") {
+function request(sessionKey = "session-a", requestId = "request-a"): StatefulOperationRequest {
+	const connectionId = `connection-${requestId}`;
 	return {
 		requestId,
-		sessionKey,
+		sessionKey: buildSessionKey({
+			providerId: "test-provider",
+			serviceAccountId: "account-a",
+			connectionId,
+			dimensions: { testSessionKey: sessionKey },
+		}),
 		providerId: "test-provider",
 		operationId: "read",
-		connectionId: `connection-${requestId}`,
+		connectionId,
 		serviceAccountId: "account-a",
 		input: {},
 	};
 }
 
-function adapter(overrides = {}) {
+function adapter(
+	overrides: Partial<StatefulProviderAdapter<TestSession, TestState, TestEvent>> = {},
+): StatefulProviderAdapter<TestSession, TestState, TestEvent> {
 	return {
 		providerId: "test-provider",
 		policy: { concurrency: { mode: "serialize" }, reconnect: "resume" },
@@ -45,15 +67,17 @@ const poolPolicy = {
 	maxSessions: 2,
 	idleTimeoutMs: "unlimited",
 	maxLifetimeMs: "unlimited",
-};
+} satisfies SessionPoolPolicy;
 
 describe("StatefulProviderSessionManager adapter contract", () => {
 	it("writes returned snapshot state to the checkpoint sink with durable identity", async () => {
-		const checkpoints = [];
+		const checkpoints: Array<{ ctx: StatefulProviderSessionContext; state: TestState }> = [];
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({ snapshot: async () => ({ cursor: 42 }) }),
 			poolPolicy,
-			checkpointStore: async (ctx, state) => checkpoints.push({ ctx, state }),
+			checkpointStore: async (ctx, state) => {
+				checkpoints.push({ ctx, state });
+			},
 		});
 		await manager.invoke(owner(), request(), new AbortController().signal);
 		await manager.closeAll("test");
@@ -100,10 +124,12 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 	});
 
 	it("runs an event-source disposer when capacity eviction closes the session", async () => {
-		const disposed = [];
+		const disposed: string[] = [];
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({
-				subscribe: async (ctx) => () => disposed.push(ctx.sessionKey),
+				subscribe: async (ctx) => () => {
+					disposed.push(ctx.sessionKey);
+				},
 			}),
 			poolPolicy: { ...poolPolicy, maxSessions: 1 },
 			eventPublisher: { publish: () => {} },
@@ -123,7 +149,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 				policy: { concurrency: { mode: "serialize" }, reconnect: "unsupported" },
 				connect: async () => {
 					connects += 1;
-					return {};
+					return { connected: true };
 				},
 				invoke: async () => {
 					invokes += 1;
@@ -161,6 +187,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 				new StatefulProviderSessionManager({
 					adapter: adapter({
 						policy: {
+							// @ts-expect-error test-invalid: runtime validation must reject maxInFlight for serialized adapters.
 							concurrency: { mode: "serialize", maxInFlight: 2 },
 							reconnect: "resume",
 						},
@@ -224,14 +251,17 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 			checkpointStore: async () => {},
 		});
 		await manager.invoke(owner(), request(), new AbortController().signal);
-		const closeError = await manager.closeAll("test").catch((error) => error);
+		const closeError = await capturedError(manager.closeAll("test"));
 		expect(closeError).toBeInstanceOf(AggregateError);
-		expect(closeError.errors[0].message).toBe("snapshot failed");
+		if (!(closeError instanceof AggregateError)) throw closeError;
+		const snapshotError = closeError.errors[0];
+		assertIsError(snapshotError);
+		expect(snapshotError.message).toBe("snapshot failed");
 		expect(closed).toBe(true);
 	});
 
 	it("continues closeAll after one session close fails and aggregates failures", async () => {
-		const closed = [];
+		const closed: string[] = [];
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({
 				close: async (ctx) => {
@@ -257,7 +287,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 		const subscribeGate = new Promise<void>((resolve) => {
 			releaseSubscribe = resolve;
 		});
-		let publishFromSubscription: ((event: unknown) => void | Promise<void>) | undefined;
+		let publishFromSubscription: StatefulProviderEventPublish<TestEvent> | undefined;
 		let publishes = 0;
 		let publishesAfterClose = 0;
 		let closeResolved = false;
@@ -311,7 +341,7 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 	});
 
 	it("binds the authoritative owner fence to adapter events for each generation", async () => {
-		const fences = [];
+		const fences: ProviderEventOwnerFence[] = [];
 		const manager = new StatefulProviderSessionManager({
 			adapter: adapter({
 				subscribe: async (ctx, _session, publish) => {
@@ -328,7 +358,12 @@ describe("StatefulProviderSessionManager adapter contract", () => {
 		await manager.invoke(owner("session-a", 1), request(), new AbortController().signal);
 		await manager.invoke(owner("session-a", 2), request(), new AbortController().signal);
 
-		expect(fences).toEqual([
+		expect(
+			fences.map((fence) => ({
+				...fence,
+				sessionKey: parseSessionKey(fence.sessionKey).dimensions?.testSessionKey,
+			})),
+		).toEqual([
 			{
 				sessionKey: "session-a",
 				generation: 1,

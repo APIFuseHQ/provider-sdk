@@ -10,6 +10,12 @@ import {
 	resolveVendorChain,
 } from "../config/loader.js";
 
+function createFetchDouble(implementation: () => Promise<Response>): typeof fetch {
+	return Object.assign(implementation, {
+		preconnect(_url: string | URL): void {},
+	});
+}
+
 const PROXY_ENV_KEYS = [
 	"APIFUSE__PROXY__SMARTPROXY_APP_KEY",
 	"APIFUSE__PROXY__NODEMAVEN_USERNAME",
@@ -299,8 +305,9 @@ describe("proxy vendor fallback", () => {
 		it("resolves identically whether declared as provider or single-element providers", async () => {
 			process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 			const originalFetch = global.fetch;
-			global.fetch = (async () =>
-				new Response("5.78.24.25:31001", { status: 200 })) as typeof fetch;
+			global.fetch = createFetchDouble(async () =>
+				new Response("5.78.24.25:31001", { status: 200 }),
+			);
 			try {
 				const viaProviders = await resolveProxyConfigAsync({
 					proxyPolicy: { mode: "required", providers: ["smartproxy"], geo: { country: "KR" } },
