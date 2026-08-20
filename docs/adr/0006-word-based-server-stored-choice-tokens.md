@@ -68,7 +68,7 @@ Only a structural mismatch enters the legacy AES-256-GCM envelope path. This per
 
 Provider code MUST pass the unmodified token and its declared literal prefix to `ctx.choice.parse`. It MUST NOT preclassify with checks such as `token.startsWith(prefix + ".")`: the dot is part of the legacy envelope syntax and is absent from word tokens. The SDK parser is the single format discriminator. This contract lets provider-side prefix prechecks be deleted without weakening validation: the word path validates the literal prefix against both the input and stored record, while the legacy path validates the signed envelope prefix.
 
-The legacy parser cannot be removed on a calendar date chosen independently of issued TTLs. Rollout records the last time any deployment pinned to an older SDK can mint a legacy managed token, `T_last_legacy_mint`, and the parser removal milestone MUST be later than `T_last_legacy_mint + TTL_max`. The live-provider inventory has a maximum managed-token TTL of 30 days, so the compatibility window is at least 30 days after the last legacy mint unless those tokens are explicitly invalidated or rehydrated. A token is accepted according to its issuer TTL measured from issuance; this horizon describes only when parser code may be removed and is not a promise that every legacy token remains valid until a named date.
+The legacy parser cannot be removed on a calendar date chosen independently of issued TTLs. Rollout records the last time any deployment pinned to an older SDK can mint a legacy managed token, `T_last_legacy_mint`, and the parser removal milestone MUST be later than `T_last_legacy_mint + TTL_max`, where `TTL_max` is the largest issuer-supplied TTL actually minted, not an assumed constant: the issuance API accepts an unconstrained `ttlMs`, so removal MUST be gated on verifying the outstanding legacy-token horizon (from mint records or the shared state store) at removal time. As a reference point the live-provider inventory currently caps managed-token TTLs at 30 days, but that inventory is an observation, not an enforced bound. A token is accepted according to its issuer TTL measured from issuance; this horizon describes only when parser code may be removed and is not a promise that every legacy token remains valid until a named date.
 
 The stored record is validated against prefix, provider id, purpose, TTL clamp, payload digest, replay key, and current connection or credential binding using the same key derivation and hash functions as the encrypted format. Missing state, expiry, invalid status for the requested consume mode, and binding mismatch fail closed with the same externally visible choice-not-found error class, code, and message. Internal observability may retain a safe reason.
 
@@ -77,6 +77,16 @@ The stored record is validated against prefix, provider id, purpose, TTL clamp, 
 Server-stored issuance always produces the ADR word format. There is no runtime
 format setting: deployments are version-pinned, so the pinned SDK version is
 the rollout phase. Parsing remains dual-read while legacy tokens are in flight.
+
+Unconditional issuance carries a deployment prerequisite: every instance that
+can receive a token minted by this version MUST already run a dual-read parser
+(the version that introduced word parsing, or later). A parser older than the
+dual-read introduction rejects word tokens as structurally invalid, so a mixed
+fleet that still contains such instances re-creates the orphaned-token failure
+this ADR exists to prevent. Upgrades MUST therefore be ordered: land the
+dual-read version fleet-wide first, then land unconditional issuance. Within a
+single rolling deploy of the issuance version this holds automatically, because
+the preceding pinned version is already dual-read.
 
 Rollback repins the immediately preceding beta, which already parses both word
 and legacy formats. Word tokens minted before the repin therefore remain
