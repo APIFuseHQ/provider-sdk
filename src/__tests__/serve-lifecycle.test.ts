@@ -10,7 +10,11 @@ function provider(): ProviderDefinition {
 		id: "lifecycle-test-provider",
 		version: "1.0.0",
 		runtime: "standard",
-		meta: { displayName: "Lifecycle Test Provider", category: "test" },
+		meta: {
+			displayName: "Lifecycle Test Provider",
+			descriptionKey: "providers.lifecycleTest.description",
+			category: "test",
+		},
 		operations: {
 			ping: {
 				input: z.object({}),
@@ -175,7 +179,9 @@ describe("serve lifecycle", () => {
 			shutdown: {
 				signals: ["SIGTERM"],
 				timeoutMs: 1_000,
-				hooks: [async () => order.push("a-hook-end")],
+					hooks: [async () => {
+						order.push("a-hook-end");
+					}],
 			},
 		});
 		const second = await serve(provider(), {

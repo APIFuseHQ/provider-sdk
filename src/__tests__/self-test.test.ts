@@ -186,12 +186,12 @@ function createApps(
 const validToken = deriveSelfTestToken(MASTER_SECRET, "self-test-provider");
 
 function postSelfTest(
-	app: { request: (path: string, init?: RequestInit) => Promise<Response> },
+	app: { request: (path: string, init?: RequestInit) => Response | Promise<Response> },
 	body: Record<string, unknown>,
 	token: string | "no-token" = validToken,
 	path: string = SELF_TEST_PATH,
 ): Promise<Response> {
-	return app.request(path, {
+	return Promise.resolve(app.request(path, {
 		method: "POST",
 		headers: {
 			"content-type": "application/json",
@@ -202,7 +202,7 @@ function postSelfTest(
 			requestId: "req-test",
 			...body,
 		}),
-	});
+	}));
 }
 
 describe("self-test internal listener", () => {

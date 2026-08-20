@@ -24,7 +24,11 @@ function provider(overrides: Partial<ProviderDefinition> = {}): ProviderDefiniti
 		id: "declaration-test-provider",
 		version: "1.0.0",
 		runtime: "standard",
-		meta: { displayName: "Declaration Test", category: "test" },
+		meta: {
+			displayName: "Declaration Test",
+			descriptionKey: "providers.declarationTest.description",
+			category: "test",
+		},
 		operations: { ping: operation() },
 		...overrides,
 	};
@@ -84,8 +88,9 @@ describe("fail-closed provider declaration validation", () => {
 
 	it("requires executable health journeys", () => {
 		expectRule(
-			provider({
+		provider({
 			healthJourneys: [
+				// @ts-expect-error test-invalid: validation must reject a journey without an executable run handler.
 				{
 					id: "ping-journey",
 					schedule: { kind: "interval", interval: "PT1H" },

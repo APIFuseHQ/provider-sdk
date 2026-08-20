@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 
 import { assertIsError } from "../../__tests__/test-utils.js";
 import { clearProxyResolutionCache, SMARTPROXY_APP_KEY_ENV } from "../../config/loader.js";
+import type { ProviderProxyPolicy } from "../../types.js";
 import {
 	createNativeNetworkClient,
 	resolveNativeGatewayProxy,
@@ -11,6 +12,12 @@ import {
 import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
 
 const originalFetch = globalThis.fetch;
+
+function createFetchDouble(implementation: () => Promise<Response>): typeof fetch {
+	return Object.assign(implementation, {
+		preconnect(_url: string | URL): void {},
+	});
+}
 
 afterEach(() => {
 	globalThis.fetch = originalFetch;
@@ -23,26 +30,26 @@ function injectedCredentials(options: {
 }): VendorCredentialResolver {
 	return (vendor) => {
 		if (vendor === "smartproxy") {
-			return options.smartproxy
-				? {
-						kind: "present",
-						values: { [SMARTPROXY_APP_KEY_ENV]: options.smartproxy },
-					}
-				: { kind: "absent", missing: [SMARTPROXY_APP_KEY_ENV] };
+			if (!options.smartproxy) {
+				return { kind: "absent", missing: [SMARTPROXY_APP_KEY_ENV] };
+			}
+			const values: Record<string, string> = {
+				[SMARTPROXY_APP_KEY_ENV]: options.smartproxy,
+			};
+			return { kind: "present", values };
 		}
 		if (vendor === "nodemaven") {
-			return options.nodemaven
-				? {
-						kind: "present",
-						values: {
-							[NODEMAVEN_USERNAME_ENV]: options.nodemaven.username,
-							[NODEMAVEN_PASSWORD_ENV]: options.nodemaven.password,
-						},
-					}
-				: {
-						kind: "absent",
-						missing: [NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV],
-					};
+			if (!options.nodemaven) {
+				return {
+					kind: "absent",
+					missing: [NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV],
+				};
+			}
+			const values: Record<string, string> = {
+				[NODEMAVEN_USERNAME_ENV]: options.nodemaven.username,
+				[NODEMAVEN_PASSWORD_ENV]: options.nodemaven.password,
+			};
+			return { kind: "present", values };
 		}
 		return { kind: "absent", missing: [] };
 	};
@@ -51,10 +58,10 @@ function injectedCredentials(options: {
 describe("native vendor chain", () => {
 	it("honors declared order and resolves smartproxy before nodemaven", async () => {
 		let allocations = 0;
-		globalThis.fetch = (async () => {
+		globalThis.fetch = createFetchDouble(async () => {
 			allocations += 1;
 			return new Response("127.0.0.1:18080", { status: 200 });
-		}) as typeof fetch;
+		});
 		const resolved = await resolveNativeGatewayProxy({
 			policy: {
 				mode: "required",
@@ -77,7 +84,9 @@ describe("native vendor chain", () => {
 	});
 
 	it("falls through an allocation failure to nodemaven", async () => {
-		globalThis.fetch = (async () => new Response("unavailable", { status: 503 })) as typeof fetch;
+		globalThis.fetch = createFetchDouble(async () =>
+			new Response("unavailable", { status: 503 }),
+		);
 		const resolved = await resolveNativeGatewayProxy({
 			policy: {
 				mode: "required",
@@ -97,9 +106,9 @@ describe("native vendor chain", () => {
 
 	it("reports every exhausted vendor reason and redacts allocation credentials", async () => {
 		const appKey = `smart-key-${randomUUID()}`;
-		globalThis.fetch = (async () => {
+		globalThis.fetch = createFetchDouble(async () => {
 			throw new Error(`allocator rejected ${appKey}`);
-		}) as typeof fetch;
+		});
 		const client = createNativeNetworkClient({
 			proxyPolicy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
 			credentials: injectedCredentials({ smartproxy: appKey }),
@@ -168,15 +177,15 @@ describe("native vendor chain", () => {
 
 	it("separates Smartproxy allocation caches by injected credential", async () => {
 		let allocations = 0;
-		globalThis.fetch = (async () => {
+		globalThis.fetch = createFetchDouble(async () => {
 			allocations += 1;
 			return new Response(`127.0.0.${allocations}:8080`, { status: 200 });
-		}) as typeof fetch;
-		const policy = {
+		});
+		const policy: ProviderProxyPolicy = {
 			mode: "required",
 			providers: ["smartproxy"],
 			session: { affinity: "connection", poolSize: 1 },
-		} as const;
+		};
 		const first = await resolveNativeGatewayProxy({
 			policy,
 			affinityKey: "same-account",

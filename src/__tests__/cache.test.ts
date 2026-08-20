@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import type { ProviderError } from "../errors.js";
+import { isProviderError } from "../errors.js";
 import {
 	APIFUSE__CACHE__KEY_PEPPER_ENV,
 	createBypassProviderCache,
@@ -48,7 +48,7 @@ describe("provider cache", () => {
 
 	it("preserves legacy SHA-256 keys and warns once when the pepper is unset", () => {
 		delete process.env[APIFUSE__CACHE__KEY_PEPPER_ENV];
-		const warn = mock(() => {});
+		const warn = mock((message: unknown) => void message);
 		console.warn = warn;
 		const cache = createProviderCache({ providerId: "kma" });
 
@@ -198,7 +198,8 @@ describe("provider cache", () => {
 					serviceKey: { privateEnvelope: { hiddenCallback: () => "secret" } },
 				});
 			} catch (error) {
-				return error as ProviderError;
+				if (!isProviderError(error)) throw error;
+				return error;
 			}
 			throw new Error("Expected cache.key to reject the secret value");
 		};
@@ -353,7 +354,7 @@ describe("provider cache", () => {
 		});
 		now += 500;
 
-		const stale = await cache.getOrSet(
+		const stale = await cache.getOrSet<{ temperature: number }>(
 			key,
 			async () => {
 				throw new Error("upstream 429");
@@ -426,11 +427,11 @@ describe("provider cache", () => {
 		const first = await cache.getOrSet(key, async () => {
 			calls += 1;
 			return { call: calls };
-		});
+		}, { ttlMs: 1 });
 		const second = await cache.getOrSet(key, async () => {
 			calls += 1;
 			return { call: calls };
-		});
+		}, { ttlMs: 1 });
 
 		expect(calls).toBe(2);
 		expect(first.value).toEqual({ call: 1 });
@@ -444,9 +445,9 @@ describe("provider cache", () => {
 		const firstKey = cache.key("fixture", { token: "first" });
 		const secondKey = cache.key("fixture", { token: "second" });
 
-		await cache.getOrSet(firstKey, async () => ({ value: 1 }));
-		await cache.getOrSet(secondKey, async () => ({ value: 2 }));
-		await cache.getOrSet(firstKey, async () => ({ value: 3 }));
+		await cache.getOrSet(firstKey, async () => ({ value: 1 }), { ttlMs: 1 });
+		await cache.getOrSet(secondKey, async () => ({ value: 2 }), { ttlMs: 1 });
+		await cache.getOrSet(firstKey, async () => ({ value: 3 }), { ttlMs: 1 });
 
 		expect(cache.responseMeta()?.keys).toEqual(["[secret-scoped#1]", "[secret-scoped#2]"]);
 	});
