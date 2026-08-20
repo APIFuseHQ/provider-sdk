@@ -23,6 +23,7 @@
 		"bin/**/*"
 	],
 	"exclude": [
-		"node_modules"
+		"node_modules",
+		"src/__tests__/fixtures/auth-start-accepts-input.ts"
 	]
 }

@@ -1,13 +1,20 @@
 import { describe, expect, it } from "bun:test";
-import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
+import type { SessionOwnerRecord } from "../stateful/index.js";
+
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
 const {
 	buildSessionKey,
 	HttpStatefulOwnerForwarder,
 	StatefulOwnerForwardingError,
-} = require("../../dist/stateful/index.js");
-const { OperationErrorResponseSchema } = require("../../dist/server/index.js");
+} = await builtStateful;
+
+const builtServerSpecifier: string = "../../dist/server/index.js";
+const builtServer: Promise<typeof import("../server/index.js")> = import(builtServerSpecifier);
+const { OperationErrorResponseSchema } = await builtServer;
 
 const sessionKey = buildSessionKey({
 	providerId: "test-provider",
@@ -16,7 +23,7 @@ const sessionKey = buildSessionKey({
 	dimensions: {},
 });
 
-function owner(ownerEndpoint: string) {
+function owner(ownerEndpoint: string): SessionOwnerRecord {
 	return {
 		sessionKey,
 		ownerPodId: "pod-owner",
@@ -133,7 +140,7 @@ describe("HttpStatefulOwnerForwarder transport failures", () => {
 		const forwarder = new HttpStatefulOwnerForwarder({
 			currentPodId: "pod-source",
 			secret: "secret",
-			fetch: async (_url: string, init?: RequestInit) => {
+			fetch: async (_url, init) => {
 				envelope = JSON.parse(String(init?.body));
 				return Response.json({ data: { forwarded: true } });
 			},

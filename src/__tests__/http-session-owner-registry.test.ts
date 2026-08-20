@@ -1,13 +1,18 @@
 import { describe, expect, it } from "bun:test";
 import { createHmac } from "node:crypto";
 
-import {
+import { capturedError } from "./test-utils.js";
+
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const {
 	AmbiguousRegistryOperationError,
 	buildSessionKey,
 	HttpSessionOwnerRegistry,
 	StatefulControlPlaneError,
-} from "../stateful/index.js";
-import { capturedError } from "./test-utils.js";
+} = await builtStateful;
 
 const SECRET = "control-plane-test-secret";
 const NOW = new Date("2026-01-01T00:00:00.000Z");

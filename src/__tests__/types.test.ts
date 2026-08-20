@@ -72,7 +72,8 @@ describe("ProviderDefinition types", () => {
 		});
 
 		expect(() =>
-			Reflect.apply(defineProvider, undefined, [{
+			// @ts-expect-error test-invalid: runtime validation must reject auth start handlers that declare input.
+			defineProvider({
 				id: "bad-auth-start",
 				version: "1.0.0",
 				runtime: "standard",
@@ -92,7 +93,7 @@ describe("ProviderDefinition types", () => {
 					},
 				},
 				operations: { noop },
-			}]),
+			}),
 		).toThrow(/auth\.flow\.start must not declare an input parameter/);
 	});
 
@@ -105,7 +106,8 @@ describe("ProviderDefinition types", () => {
 		});
 
 		expect(() =>
-			Reflect.apply(defineProvider, undefined, [{
+			// @ts-expect-error test-invalid: runtime validation must reject legacy auth exchange handlers.
+			defineProvider({
 				id: "bad-auth-exchange",
 				version: "1.0.0",
 				runtime: "standard",
@@ -120,10 +122,10 @@ describe("ProviderDefinition types", () => {
 						start: async () => ({ kind: "form", turnId: "start" }),
 						continue: async () => ({ kind: "complete", turnId: "complete" }),
 					},
-						exchange: async () => ({ session: "cookie" }),
-					},
+					exchange: async () => ({ session: "cookie" }),
+				},
 				operations: { noop },
-			}]),
+			}),
 		).toThrow(/auth\.exchange is not part of the Provider SDK auth contract/);
 	});
 

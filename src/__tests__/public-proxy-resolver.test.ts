@@ -1,6 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
-import { resolveProxy } from "../index.js";
 import type {
 	ProxyProtocol,
 	ProxyResolutionOptions,
@@ -9,6 +8,10 @@ import type {
 	ResolvedProxyConfig,
 } from "../index.js";
 import { createFetchDouble } from "./test-utils.js";
+
+const builtSpecifier: string = "@apifuse/provider-sdk";
+const built: Promise<typeof import("../index.js")> = import(builtSpecifier);
+const { resolveProxy } = await built;
 
 const PROXY_ENV_KEYS = [
 	"APIFUSE__PROXY__SMARTPROXY_APP_KEY",

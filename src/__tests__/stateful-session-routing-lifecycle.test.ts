@@ -1,18 +1,25 @@
 import { describe, expect, it } from "bun:test";
 
-import {
+import type {
+	SessionOwnerRegistry,
+	StatefulOperationRequest,
+	StatefulOwnerForwarder,
+	StatefulProviderAdapter,
+} from "../stateful/index.js";
+import { capturedError } from "./test-utils.js";
+
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const {
 	buildSessionKey,
 	InMemorySessionOwnerRegistry,
-	type SessionOwnerRegistry,
-	type StatefulOperationRequest,
-	type StatefulOwnerForwarder,
-	type StatefulProviderAdapter,
 	StatefulProviderSessionManager,
 	StatefulRoutingOwnershipError,
 	StatefulSessionInvalidatedError,
 	StatefulSessionRouter,
-} from "../stateful/index.js";
-import { capturedError } from "./test-utils.js";
+} = await builtStateful;
 
 const sessionKey = buildSessionKey({
 	providerId: "test-provider",

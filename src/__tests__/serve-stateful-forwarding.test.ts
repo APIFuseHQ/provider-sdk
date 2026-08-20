@@ -1,5 +1,4 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { createRequire } from "node:module";
 import { z } from "zod";
 
 import { ProviderError } from "../errors.js";
@@ -10,8 +9,11 @@ import {
 } from "../server/serve.js";
 import type { ProviderDefinition } from "../types.js";
 
-const require = createRequire(import.meta.url);
-const { statefulSignedHeaders } = require("../../dist/stateful/index.js");
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const { statefulSignedHeaders } = await builtStateful;
 
 const STATEFUL_ROUTE = "/__apifuse/stateful/operations";
 const SIGNATURE_HEADER = "x-apifuse-stateful-signature";

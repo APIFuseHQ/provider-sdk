@@ -15,9 +15,6 @@ import { createFlowContext } from "../runtime/auth-flow.js";
 import { createEnvContext } from "../runtime/env.js";
 import { prevalidate } from "../runtime/prevalidate.js";
 import type {
-	AuthFlowDefinition,
-	AuthTurn,
-	FlowContext,
 	HttpClient,
 	HttpResponse,
 	ProviderRuntimeState,
@@ -76,14 +73,6 @@ function createUnusedStealthClient(): StealthClient {
 			throw new Error("stealth sessions unsupported in auth flow foundation tests");
 		},
 	};
-}
-
-function startWithLegacyInput(
-	ceremony: AuthFlowDefinition,
-	ctx: FlowContext,
-	input: Record<string, unknown>,
-): Promise<AuthTurn> {
-	return Reflect.apply(ceremony.start, undefined, [ctx, input]);
 }
 
 function createTestContext(routes: Record<string, RouteHandler> = {}, allowedKeys: string[] = []) {
@@ -351,9 +340,8 @@ describe("createMagicLinkCeremony", () => {
 			verifyUrl: "https://magic.example.com/verify",
 		});
 
-		expect((await startWithLegacyInput(ceremony, ctx, { email: "demo@example.com" })).kind).toBe(
-			"message",
-		);
+		// @ts-expect-error test-invalid: magic-link start still consumes input at runtime; production contract gap tracked in PR #176 follow-up
+		expect((await ceremony.start(ctx, { email: "demo@example.com" })).kind).toBe("message");
 		expect((await ceremony.poll?.(ctx))?.kind).toBe("complete");
 	});
 
@@ -363,7 +351,8 @@ describe("createMagicLinkCeremony", () => {
 			verifyUrl: "https://magic.example.com/verify",
 		});
 
-		expect((await startWithLegacyInput(ceremony, createTestContext(), {})).kind).toBe("form");
+		// @ts-expect-error test-invalid: magic-link start still consumes input at runtime; production contract gap tracked in PR #176 follow-up
+		expect((await ceremony.start(createTestContext(), {})).kind).toBe("form");
 	});
 
 	it("returns abort when state expires", async () => {
@@ -377,7 +366,8 @@ describe("createMagicLinkCeremony", () => {
 			expiresInMs: -1,
 		});
 
-		await startWithLegacyInput(ceremony, ctx, { email: "demo@example.com" });
+		// @ts-expect-error test-invalid: magic-link start still consumes input at runtime; production contract gap tracked in PR #176 follow-up
+		await ceremony.start(ctx, { email: "demo@example.com" });
 		expect((await ceremony.poll?.(ctx))?.kind).toBe("abort");
 	});
 });

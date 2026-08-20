@@ -7,7 +7,6 @@ const noop = defineOperation({
 	handler: async () => ({ ok: true }),
 });
 
-// @ts-expect-error test-invalid: auth start deliberately declares a forbidden input parameter.
 defineProvider({
 	id: "bad-auth-start",
 	version: "1.0.0",

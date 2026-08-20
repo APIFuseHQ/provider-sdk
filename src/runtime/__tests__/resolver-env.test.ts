@@ -21,6 +21,11 @@ const turnstileChallenge = {
 	pageUrl: "https://example.com/challenge",
 } satisfies ProviderChallenge;
 
+const resolverAuthoringInputSchema = z.object({
+	kind: z.enum(["turnstile", "aws_waf"]),
+});
+type ResolverAuthoringInput = z.infer<typeof resolverAuthoringInputSchema>;
+
 function installNodemavenTestCredentials(): () => void {
 	const originalUsername = process.env[NODEMAVEN_USERNAME_ENV];
 	const originalPassword = process.env[NODEMAVEN_PASSWORD_ENV];
@@ -524,12 +529,10 @@ describe("resolver server wiring", () => {
 			},
 			operations: {
 				solve: {
-					input: z.object({ kind: z.enum(["turnstile", "aws_waf"]) }),
+					input: resolverAuthoringInputSchema,
 					output: z.object({ ok: z.boolean() }),
-					async handler(ctx, input: unknown) {
-						const { kind } = z
-							.object({ kind: z.enum(["turnstile", "aws_waf"]) })
-							.parse(input);
+					async handler(ctx, input: ResolverAuthoringInput) {
+						const { kind } = input;
 						const challenge: ProviderChallenge =
 							kind === "turnstile"
 								? turnstileChallenge

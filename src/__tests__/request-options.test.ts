@@ -104,8 +104,9 @@ describe("sensitive request diagnostics", () => {
 			url: requestUrl,
 			request: { url: requestUrl },
 		});
+		const secondDetails: { received: number | string } = { received: 123456 };
 		const second = Object.assign(new Error(`second leaked ${secret}`), {
-			details: { received: 123456 },
+			details: secondDetails,
 		});
 		const aggregate = new AggregateError([first, second], `both failed for ${secret}`);
 		first.cause = aggregate;
@@ -125,7 +126,7 @@ describe("sensitive request diagnostics", () => {
 		expect(first.request.url).toBe(redactedUrl);
 		expect(first.cause).toBe(aggregate);
 		expect(second.message).not.toContain(secret);
-		expect(String(second.details.received)).toBe(REDACTED_QUERY_VALUE);
+		expect(second.details.received).toBe(REDACTED_QUERY_VALUE);
 	});
 
 	it("clones before traversing readonly cycles and scrubs custom non-enumerable fields", () => {

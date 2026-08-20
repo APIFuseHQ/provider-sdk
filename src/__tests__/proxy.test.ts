@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import Redis from "ioredis";
+import type { Callback, Redis, RedisKey, RedisValue } from "ioredis";
 
 import { assertIsError } from "./test-utils.js";
 import {
@@ -54,7 +54,16 @@ const stealthState = {
 	queuedResponses: [] as MockWreqQueuedItem[],
 };
 
-class FakeRedis extends Redis {
+type ProxyRedisSurface = Pick<
+	Redis,
+	"connect" | "del" | "eval" | "get" | "on" | "pttl" | "set" | "status"
+>;
+
+type RedisExpiryMode = "EX" | "EXAT" | "PX" | "PXAT";
+type RedisSetCondition = "NX" | "XX";
+
+class FakeRedis implements ProxyRedisSurface {
+	status: Redis["status"] = "ready";
 	readonly setCalls: Array<{
 		key: string;
 		mode?: string;
@@ -64,61 +73,165 @@ class FakeRedis extends Redis {
 	private readonly values = new Map<string, string>();
 	private readonly expiresAt = new Map<string, number>();
 
-	constructor() {
-		super({ lazyConnect: true });
-		Object.defineProperties(this, {
-			status: { configurable: true, value: "ready", writable: true },
-			connect: { configurable: true, value: async () => {} },
-			on: { configurable: true, value: () => this },
-			get: {
-				configurable: true,
-				value: async (key: string) => {
-					this.deleteIfExpired(key);
-					return this.values.get(key) ?? null;
-				},
-			},
-			set: {
-				configurable: true,
-				value: async (
-					key: string,
-					value: string,
-					mode?: string,
-					ttlMs?: number,
-					condition?: string,
-				) => {
-					this.deleteIfExpired(key);
-					this.setCalls.push({ key, mode, ttlMs, condition });
-					if (condition === "NX" && this.values.has(key)) return null;
-					this.values.set(key, value);
-					if (mode === "PX" && typeof ttlMs === "number") {
-						this.expiresAt.set(key, Date.now() + ttlMs);
-					}
-					return "OK";
-				},
-			},
-			del: {
-				configurable: true,
-				value: async (key: string) => this.deleteValue(key),
-			},
-			pttl: {
-				configurable: true,
-				value: async (key: string) => {
-					this.deleteIfExpired(key);
-					const expiresAt = this.expiresAt.get(key);
-					if (!this.values.has(key)) return -2;
-					if (!expiresAt) return -1;
-					return Math.max(0, expiresAt - Date.now());
-				},
-			},
-			eval: {
-				configurable: true,
-				value: async (_script: string, _keyCount: number, key: string, token: string) => {
-					this.deleteIfExpired(key);
-					if (this.values.get(key) !== token) return 0;
-					return this.deleteValue(key);
-				},
-			},
-		});
+	async connect(): Promise<void> {
+		this.status = "ready";
+	}
+
+	on(..._args: unknown[]): never {
+		throw new Error("Injected ready Redis fake does not register event listeners");
+	}
+
+	async get(key: RedisKey, callback?: Callback<string | null>): Promise<string | null> {
+		const normalizedKey = String(key);
+		this.deleteIfExpired(normalizedKey);
+		const result = this.values.get(normalizedKey) ?? null;
+		callback?.(null, result);
+		return result;
+	}
+
+	set(key: RedisKey, value: RedisValue, callback?: Callback<"OK">): Promise<"OK">;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		condition: RedisSetCondition,
+		callback?: Callback<"OK" | null>,
+	): Promise<"OK" | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		condition: RedisSetCondition,
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		expiryMode: RedisExpiryMode,
+		expiry: number | string,
+		callback?: Callback<"OK">,
+	): Promise<"OK">;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		expiryMode: RedisExpiryMode,
+		expiry: number | string,
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		expiryMode: RedisExpiryMode,
+		expiry: number | string,
+		condition: RedisSetCondition,
+		callback?: Callback<"OK" | null>,
+	): Promise<"OK" | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		expiryMode: RedisExpiryMode,
+		expiry: number | string,
+		condition: RedisSetCondition,
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		keepTtl: "KEEPTTL",
+		callback?: Callback<"OK">,
+	): Promise<"OK">;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		keepTtl: "KEEPTTL",
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		keepTtl: "KEEPTTL",
+		condition: RedisSetCondition,
+		callback?: Callback<"OK" | null>,
+	): Promise<"OK" | null>;
+	set(
+		key: RedisKey,
+		value: RedisValue,
+		keepTtl: "KEEPTTL",
+		condition: RedisSetCondition,
+		get: "GET",
+		callback?: Callback<string | null>,
+	): Promise<string | null>;
+	async set(
+		key: RedisKey,
+		value: RedisValue,
+		...args: readonly unknown[]
+	): Promise<"OK" | string | null> {
+		const normalizedKey = String(key);
+		const mode = typeof args[0] === "string" ? args[0] : undefined;
+		const ttlMs = typeof args[1] === "number" ? args[1] : undefined;
+		const condition = typeof args[2] === "string" ? args[2] : undefined;
+		this.deleteIfExpired(normalizedKey);
+		this.setCalls.push({ key: normalizedKey, mode, ttlMs, condition });
+		if (condition === "NX" && this.values.has(normalizedKey)) return null;
+		this.values.set(normalizedKey, String(value));
+		if (mode === "PX" && typeof ttlMs === "number") {
+			this.expiresAt.set(normalizedKey, Date.now() + ttlMs);
+		}
+		return "OK";
+	}
+
+	async del(
+		...args: Array<RedisKey | RedisKey[] | Callback<number>>
+	): Promise<number> {
+		const keys = args.flatMap((arg) =>
+			typeof arg === "function" ? [] : Array.isArray(arg) ? arg : [arg],
+		);
+		const result = keys.reduce((count, key) => count + this.deleteValue(String(key)), 0);
+		const callback = args.find(
+			(argument): argument is Callback<number> => typeof argument === "function",
+		);
+		callback?.(null, result);
+		return result;
+	}
+
+	async pttl(key: RedisKey, callback?: Callback<number>): Promise<number> {
+		const normalizedKey = String(key);
+		this.deleteIfExpired(normalizedKey);
+		const expiresAt = this.expiresAt.get(normalizedKey);
+		const result = !this.values.has(normalizedKey)
+			? -2
+			: expiresAt === undefined
+				? -1
+				: Math.max(0, expiresAt - Date.now());
+		callback?.(null, result);
+		return result;
+	}
+
+	async eval(
+		_script: RedisKey,
+		_keyCount: number | string,
+		...args: Array<RedisValue | RedisKey[] | Callback<unknown> | undefined>
+	): Promise<unknown> {
+		const values = args.flatMap((arg) =>
+			typeof arg === "function" || arg === undefined ? [] : Array.isArray(arg) ? arg : [arg],
+		);
+		const key = String(values[0]);
+		const token = String(values[1]);
+		this.deleteIfExpired(key);
+		const result = this.values.get(key) === token ? this.deleteValue(key) : 0;
+		const callback = args.find(
+			(argument): argument is Callback<unknown> => typeof argument === "function",
+		);
+		callback?.(null, result);
+		return result;
 	}
 
 	private deleteValue(key: string): number {

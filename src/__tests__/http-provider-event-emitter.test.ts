@@ -1,12 +1,16 @@
 import { describe, expect, it, spyOn } from "bun:test";
 
-import {
+import type { ProviderEvent, ProviderEventMetricEmitter } from "../stateful/index.js";
+
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const {
 	buildSessionKey,
 	HttpProviderEventEmitter,
 	RecordingProviderEventDeliveryFailureRecorder,
-	type ProviderEvent,
-	type ProviderEventMetricEmitter,
-} from "../stateful/index.js";
+} = await builtStateful;
 
 const SECRET = "event-emitter-test-secret";
 const OWNER_FENCE = {

@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { createRequire } from "node:module";
 
-const require = createRequire(import.meta.url);
-const { buildSessionKey, parseSessionKey } = require("../../dist/stateful/index.js");
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const { buildSessionKey, parseSessionKey } = await builtStateful;
 
 describe("stateful session keys", () => {
 	it("round-trips required and open dimensions with reserved characters", () => {

@@ -170,7 +170,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	});
 
 	it("characterizes positive ms-style healthCheck interval validation", () => {
-		const cases: Array<[string, boolean]> = [
+		const cases: [string, boolean][] = [
 			["1", true],
 			[" 1 ", true],
 			["1ms", true],
@@ -198,11 +198,9 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 
 		for (const [interval, accepted] of cases) {
 			if (accepted) {
-				expect(
-					String(
-						providerWithHealthCheckInterval(interval).operations.ping.healthCheck?.interval,
-					),
-				).toBe(interval);
+				const actualInterval: string | undefined =
+					providerWithHealthCheckInterval(interval).operations.ping.healthCheck?.interval;
+				expect(actualInterval).toBe(interval);
 			} else {
 				expect(() => providerWithHealthCheckInterval(interval)).toThrow(
 					/positive ms-style duration string/,
