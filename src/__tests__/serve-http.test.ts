@@ -23,6 +23,7 @@ import {
 import { event } from "../stream.js";
 import type { OperationErrorCode, ProviderContext, ProviderDefinition } from "../types.js";
 import { HttpRetryPreset } from "../types.js";
+import { createProviderDefinitionDouble } from "./test-utils.js";
 
 function errorObservability(response: Response): ErrorObservabilityDetails {
 	const value = response.headers.get(ERROR_OBSERVABILITY_HEADER);
@@ -1559,7 +1560,7 @@ describe("provider HTTP server", () => {
 
 	it("serves UPSTREAM_REJECTED as a non-retryable 409 upstream rule refusal", async () => {
 		const base = createTestProvider();
-		const provider = {
+		const provider = createProviderDefinitionDouble({
 			...base,
 			operations: {
 				reserve: {
@@ -1573,7 +1574,7 @@ describe("provider HTTP server", () => {
 					},
 				},
 			},
-		} satisfies ProviderDefinition;
+		});
 		const app = createServerApp(provider, { logger: () => undefined });
 		const response = await app.request("/v1/reserve", {
 			method: "POST",
@@ -2502,7 +2503,7 @@ describe("operation-declared error resolution", () => {
 
 	it("ignores a structurally supplied non-emittable declared status", async () => {
 		const base = createTestProvider() as ProviderDefinition;
-		const provider = {
+		const provider = createProviderDefinitionDouble({
 			...base,
 			operations: {
 				structuralError: {
@@ -2524,7 +2525,7 @@ describe("operation-declared error resolution", () => {
 					},
 				},
 			},
-		} as unknown as ProviderDefinition;
+		});
 		const app = createServerApp(provider, { logger: () => undefined });
 
 		const response = await app.request("/v1/structuralError", {

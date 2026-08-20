@@ -3,7 +3,19 @@ import type {
 	BrowserLocator,
 	BrowserPage,
 	BrowserResourcePolicy,
+	ProviderContext,
+	ProviderDefinition,
 } from "../types.js";
+import { createProviderCache } from "../runtime/cache.js";
+import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import { createCredentialContext } from "../runtime/credential.js";
+import { createEnvContext } from "../runtime/env.js";
+import { createHttpClient } from "../runtime/http.js";
+import { createUnsupportedOcrClient } from "../runtime/ocr.js";
+import { createUnsupportedResolverClient } from "../runtime/resolver-shared.js";
+import { createMemoryProviderRuntimeState } from "../runtime/state.js";
+import { createUnsupportedSttClient } from "../runtime/stt.js";
+import { createTraceContext } from "../runtime/trace.js";
 
 export function assertIsError(value: unknown): asserts value is Error {
 	if (!(value instanceof Error)) {
@@ -14,6 +26,8 @@ export function assertIsError(value: unknown): asserts value is Error {
 export function emptyArray<T>(): T[] {
 	return [];
 }
+
+
 
 export async function capturedError(operation: Promise<unknown>): Promise<Error> {
 	return await operation.then(
@@ -104,6 +118,55 @@ export function createBrowserClientDouble(
 		async withIsolatedContext<T>(handler: (isolatedPage: BrowserPage) => Promise<T>) {
 			return await handler(page);
 		},
+		...overrides,
+	};
+}
+
+export function createProviderContextDouble(
+	overrides: Partial<ProviderContext> = {},
+): ProviderContext {
+	return {
+		auth: {
+			async requestField() {
+				throw new Error("No auth field configured for this test context");
+			},
+		},
+		browser: createBrowserClientDouble(),
+		cache: createProviderCache({ providerId: "test-provider" }),
+		choice: createTestProviderChoiceContext({ providerId: "test-provider" }),
+		credential: createCredentialContext(),
+		env: createEnvContext(),
+		http: createHttpClient(),
+		ocr: createUnsupportedOcrClient(),
+		resolver: createUnsupportedResolverClient(),
+		state: createMemoryProviderRuntimeState(),
+		stealth: {
+			async fetch() {
+				throw new Error("No stealth response configured for this test context");
+			},
+			createSession() {
+				throw new Error("No stealth session configured for this test context");
+			},
+		},
+		stt: createUnsupportedSttClient(),
+		trace: createTraceContext(),
+		...overrides,
+	};
+}
+
+export function createProviderDefinitionDouble(
+	overrides: Partial<ProviderDefinition> = {},
+): ProviderDefinition {
+	return {
+		id: "test-provider",
+		version: "1.0.0",
+		runtime: "standard",
+		meta: {
+			displayName: "Test Provider",
+			descriptionKey: "test-provider.description",
+			category: "test",
+		},
+		operations: {},
 		...overrides,
 	};
 }

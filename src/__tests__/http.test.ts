@@ -1615,13 +1615,15 @@ describe("createHttpClient", () => {
 
 		await expect(
 			http.get("https://example.com", {
-				retry: [] as unknown as HttpRetryPreset,
+				// @ts-expect-error test-invalid: runtime retry validation must reject arrays.
+				retry: [],
 			}),
 		).rejects.toMatchObject({ code: "retry_invalid_policy" });
 		await expect(
 			http.get("https://example.com", {
 				retry: {
-					methods: ["CONNECT" as unknown as "GET"],
+					// @ts-expect-error test-invalid: runtime retry validation must reject CONNECT.
+					methods: ["CONNECT"],
 				},
 			}),
 		).rejects.toMatchObject({ code: "retry_invalid_policy" });
@@ -1700,7 +1702,7 @@ describe("createHttpClient", () => {
 			if (typeof handler === "function") {
 				queueMicrotask(handler as () => void);
 			}
-			return 0 as unknown as ReturnType<typeof setTimeout>;
+			return originalSetTimeout(() => undefined, 0);
 		}) as typeof setTimeout;
 		try {
 			mockNativeFetchState.queuedResponses.push(
@@ -1745,7 +1747,7 @@ describe("createHttpClient", () => {
 			if (typeof handler === "function") {
 				queueMicrotask(handler as () => void);
 			}
-			return 0 as unknown as ReturnType<typeof setTimeout>;
+			return originalSetTimeout(() => undefined, 0);
 		}) as typeof setTimeout;
 		try {
 			mockNativeFetchState.queuedResponses.push(

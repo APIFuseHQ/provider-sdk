@@ -1,10 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
+import {
+	createBrowserClientDouble,
+	createBrowserPageDouble,
+} from "../../__tests__/test-utils.js";
 import { VALID_PROVIDER_CHALLENGE_KINDS } from "../../define.js";
 import { createProviderCache } from "../cache.js";
 import type {
-	BrowserClient,
-	BrowserPage,
 	ChallengeSolution,
 	ProviderChallenge,
 	ProviderChallengeKind,
@@ -409,7 +411,7 @@ describe("resolver vendor chain", () => {
 		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-real-browser-password";
 		let clientOptions: BrowserClientOptions | undefined;
 		let browserClientConfigurationError: unknown;
-		const page = {
+		const page = createBrowserPageDouble({
 			async cookies() {
 				return [
 					{
@@ -430,14 +432,14 @@ describe("resolver vendor chain", () => {
 			async withResourcePolicy<T>(_policy: unknown, run: () => Promise<T>) {
 				return await run();
 			},
-		} as unknown as BrowserPage;
-		const client = {
+		});
+		const client = createBrowserClientDouble({
 			engine: "playwright-stealth",
 			async close() {},
 			async withIsolatedContext<T>(handler: (isolatedPage: BrowserPage) => Promise<T>) {
 				return await handler(page);
 			},
-		} as unknown as BrowserClient;
+		});
 		const restoreClientFactory = swapBrowserResolverClientFactoryForTests((options) => {
 			clientOptions = options;
 			try {

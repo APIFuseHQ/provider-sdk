@@ -135,7 +135,7 @@ type MockPlaywrightPage = {
 	content: () => Promise<string>;
 	context: () => MockBrowserContext;
 	dispatchResourceRequest: (dispatch: MockResourceDispatch) => Promise<"handled" | "unhandled">;
-	evaluate: <T>(fn: string | (() => T)) => Promise<T>;
+	evaluate: (fn: string | (() => unknown)) => Promise<unknown>;
 	fill: (selector: string, text: string) => Promise<void>;
 	frames: () => MockPlaywrightFrame[];
 	goto: (url: string) => Promise<void>;
@@ -175,7 +175,7 @@ type MockPlaywrightLocator = {
 
 type MockPlaywrightFrame = {
 	content: () => Promise<string>;
-	evaluate: <T>(fn: string | (() => T)) => Promise<T>;
+	evaluate: (fn: string | (() => unknown)) => Promise<unknown>;
 	locator: (selector: string) => MockPlaywrightLocator;
 	name: () => string;
 	parentFrame: () => MockPlaywrightFrame | null;
@@ -304,15 +304,15 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 		async content() {
 			return '<html><body><span id="recaptcha-anchor"></span></body></html>';
 		},
-		async evaluate<T>(fn: string | (() => T)) {
+		async evaluate(fn: string | (() => unknown)) {
 			if (typeof fn === "function") {
 				return fn();
 			}
 			if (fn === "document.title") {
-				return "recaptcha-title" as T;
+				return "recaptcha-title";
 			}
 			if (fn === "window.location.href") {
-				return recaptchaFrame.state.url as T;
+				return recaptchaFrame.state.url;
 			}
 			throw new Error(`Unexpected frame evaluate expression: ${fn}`);
 		},
@@ -410,16 +410,16 @@ function createMockPlaywrightPage(context: MockBrowserContext): MockPlaywrightPa
 			await registration.handler(route);
 			return "handled";
 		},
-		async evaluate<T>(fn: string | (() => T)) {
+		async evaluate(fn: string | (() => unknown)) {
 			if (typeof fn === "function") {
 				return fn();
 			}
 
 			if (fn === "document.title") {
-				return "local-title" as T;
+				return "local-title";
 			}
 			if (fn === "navigator.userAgent") {
-				return "LocalBrowser/1.0" as T;
+				return "LocalBrowser/1.0";
 			}
 
 			throw new Error(`Unexpected local evaluate expression: ${fn}`);
@@ -683,17 +683,33 @@ async function waitForCondition(condition: () => boolean, message: string): Prom
 	throw new Error(message);
 }
 
-class MockWebSocket {
-	static CONNECTING = 0;
-	static OPEN = 1;
-	static CLOSING = 2;
-	static CLOSED = 3;
+class MockWebSocket extends EventTarget implements WebSocket {
+	static readonly CONNECTING = 0;
+	static readonly OPEN = 1;
+	static readonly CLOSING = 2;
+	static readonly CLOSED = 3;
 
-	readyState = MockWebSocket.CONNECTING;
-	private listeners = new Map<string, Set<(event?: { data?: string }) => void>>();
+	readonly CONNECTING = MockWebSocket.CONNECTING;
+	readonly OPEN = MockWebSocket.OPEN;
+	readonly CLOSING = MockWebSocket.CLOSING;
+	readonly CLOSED = MockWebSocket.CLOSED;
+	binaryType: BinaryType = "blob";
+	readonly bufferedAmount = 0;
+	readonly extensions = "";
+	onclose: ((this: WebSocket, event: CloseEvent) => unknown) | null = null;
+	onerror: ((this: WebSocket, event: Event) => unknown) | null = null;
+	onmessage: ((this: WebSocket, event: MessageEvent) => unknown) | null = null;
+	onopen: ((this: WebSocket, event: Event) => unknown) | null = null;
+	readonly protocol = "";
+	readyState: WebSocket["readyState"] = MockWebSocket.CONNECTING;
+	readonly url: string;
+	private readonly endpoint: string;
 
-	constructor(private readonly endpoint: string) {
-		if (endpoint.startsWith("ws://page.test/")) {
+	constructor(endpoint: string | URL, _protocols?: string | string[]) {
+		super();
+		this.endpoint = String(endpoint);
+		this.url = this.endpoint;
+		if (this.endpoint.startsWith("ws://page.test/")) {
 			cdpState.pageSockets.push(this);
 		}
 
@@ -703,20 +719,14 @@ class MockWebSocket {
 		});
 	}
 
-	addEventListener(event: string, listener: (event?: { data?: string }) => void) {
-		const listeners = this.listeners.get(event) ?? new Set();
-		listeners.add(listener);
-		this.listeners.set(event, listeners);
-	}
-
-	close() {
+	close(_code?: number, _reason?: string) {
 		this.readyState = MockWebSocket.CLOSED;
 		cdpState.closedEndpoints.push(this.endpoint);
 		this.emit("close");
 	}
 
-	send(raw: string) {
-		const message = JSON.parse(raw) as MockCommandFrame;
+	send(raw: string | ArrayBufferLike | Blob | ArrayBufferView) {
+		const message = JSON.parse(String(raw)) as MockCommandFrame;
 
 		if (this.endpoint === "ws://pool.test" || this.endpoint === "ws://pool.test/") {
 			cdpState.poolFrames.push(message);
@@ -784,9 +794,10 @@ class MockWebSocket {
 	}
 
 	private emit(event: string, payload?: { data?: string }) {
-		for (const listener of this.listeners.get(event) ?? []) {
-			listener(payload);
-		}
+		const emitted = event === "message" ? new MessageEvent(event, payload) : new Event(event);
+		this.dispatchEvent(emitted);
+		const handler = this[`on${event}` as "onclose" | "onerror" | "onmessage" | "onopen"];
+		if (handler) handler.call(this, emitted as CloseEvent & MessageEvent);
 	}
 
 	private replyToPool(id: number, result: Record<string, unknown>) {
@@ -1274,7 +1285,7 @@ describe("createBrowserClient", () => {
 		await playwrightPage.close();
 		await playwrightClient.close();
 
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		cdpState.networkCookies.push(...RAW_BROWSER_COOKIES.map((cookie) => ({ ...cookie })));
 		const cdpClient = createBrowserClient();
@@ -1291,7 +1302,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("rejects when the CDP Network.getCookies transport call fails", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		cdpState.networkGetCookiesError = new Error("cookie transport failed");
 		const { createBrowserClient } = await import("../runtime/browser.js");
@@ -1758,7 +1769,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("uses CDP Pool when APIFUSE__CDP_POOL__URL is configured", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "http://pool.test";
 
 		const { createBrowserClient } = await import("../runtime/browser.js");
@@ -1837,7 +1848,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("drops a destroyed frame context and evaluates with a fresh context id", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -1861,7 +1872,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("drops every cached frame context when execution contexts are cleared", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -1885,7 +1896,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("keeps another frame's context when one execution context is destroyed", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -1911,7 +1922,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("uses the new frame context after a reload destroys the cached context", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -1945,7 +1956,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("re-resolves a missing frame context exactly once", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -1970,7 +1981,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("fails loudly when the one-shot frame context recovery also fails", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -1997,7 +2008,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("serializes CDP page commands with only CDP top-level keys", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2016,7 +2027,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("serializes pool-manager commands as JSON-RPC 2.0", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2032,7 +2043,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("preserves a pool JSON-RPC error message and exposes its numeric code", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		cdpState.poolAcquireError = { code: -32001, message: "CDP queue is full" };
 		const { createBrowserClient } = await import("../runtime/browser.js");
@@ -2059,7 +2070,7 @@ describe("createBrowserClient", () => {
 		});
 		expect(browserState.launchCalls).toHaveLength(0);
 
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const cdpClient = createBrowserClient();
 		const page = await cdpClient.rawPage();
@@ -2072,7 +2083,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("enables and disables CDP Fetch around resource policy callbacks", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2095,7 +2106,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("fulfills a matching CDP Fetch request under a resource policy", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2148,7 +2159,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("appends CSP to CDP document responses without changing their body", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2202,7 +2213,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("continues an authorized CDP Fetch request under a resource policy", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2240,7 +2251,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("blocks unmatched CDP Fetch requests by default", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2272,7 +2283,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("blocks non-GET CDP Fetch requests before provider handlers run", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2321,7 +2332,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("disables CDP Fetch when a resource policy callback throws", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2340,7 +2351,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("passes only safe CDP Fetch request metadata to provider handlers", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2395,7 +2406,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("releases a pool lease exactly once when page.close() is repeated", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2410,7 +2421,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("releases a pool lease exactly once when browser.close() owns the active page", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2424,7 +2435,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("releases every tracked pool lease when browser.close() owns multiple pages", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2441,7 +2452,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("uses isolated browser context pool acquire and disposes it after success", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2461,7 +2472,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("cleans up isolated browser context pool leases when the handler fails", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		const { createBrowserClient } = await import("../runtime/browser.js");
 		const client = createBrowserClient();
@@ -2482,7 +2493,7 @@ describe("createBrowserClient", () => {
 	});
 
 	it("releases isolated pool leases when page initialization fails", async () => {
-		globalThis.WebSocket = MockWebSocket as unknown as typeof WebSocket;
+		globalThis.WebSocket = MockWebSocket;
 		process.env.APIFUSE__CDP_POOL__URL = "ws://pool.test";
 		cdpState.failWebdriverPatch = true;
 		const { createBrowserClient } = await import("../runtime/browser.js");

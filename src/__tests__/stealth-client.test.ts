@@ -913,9 +913,11 @@ describe("createStealthClient", () => {
 		const futureState = {
 			version: 2,
 			jar: cookies.serialize().jar,
-		} as unknown as StealthCookieStoreV1;
+		};
 
+		// @ts-expect-error test-invalid: deserialization must reject unsupported store versions.
 		expect(() => cookies.deserialize(futureState)).toThrow(StealthCookieStoreVersionError);
+		// @ts-expect-error test-invalid: the message assertion repeats the malformed call deliberately.
 		expect(() => cookies.deserialize(futureState)).toThrow(
 			"Unsupported stealth cookie store version: 2",
 		);

@@ -18,6 +18,7 @@ import {
 } from "../server/self-test-token.js";
 import { createServerApp } from "../server/serve.js";
 import type { ProviderDefinition } from "../types.js";
+import { createProviderDefinitionDouble } from "./test-utils.js";
 
 const MASTER_SECRET = "self-test-master-secret";
 const PREVIOUS_MASTER_SECRET = "self-test-previous-master-secret";
@@ -33,7 +34,7 @@ afterAll(() => {
 });
 
 function createProvider(overrides: { caseName?: string } = {}): ProviderDefinition {
-	return {
+	return createProviderDefinitionDouble({
 		id: "self-test-provider",
 		version: "1.0.0",
 		runtime: "standard",
@@ -41,6 +42,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 		credential: { keys: ["phone"] },
 		meta: {
 			displayName: "Self Test Provider",
+			descriptionKey: "self-test-provider.description",
 			category: "test",
 		},
 		healthProbe: {
@@ -160,7 +162,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 				},
 			},
 		},
-	} as unknown as ProviderDefinition;
+	});
 }
 
 function createApps(

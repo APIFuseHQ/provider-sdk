@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { defineProvider } from "../define.js";
 import { ProviderError, ValidationError } from "../errors.js";
-import type { ProviderContext, ProviderDeploymentOverrides } from "../types.js";
+import type { ProviderContext } from "../types.js";
 
 const InputSchema = z.object({ id: z.string() });
 const OutputSchema = z.object({ name: z.string(), price: z.number() });
@@ -492,7 +492,7 @@ describe("defineProvider", () => {
 				prices: {
 					...validConfig.operations.prices,
 					fixtures: {
-						request: { wrong_field: "x" } as unknown as z.infer<typeof InputSchema>,
+						request: { wrong_field: "x" },
 						response: validConfig.operations.prices.fixtures.response,
 					},
 				},
@@ -511,7 +511,7 @@ describe("defineProvider", () => {
 					...validConfig.operations.prices,
 					fixtures: {
 						request: validConfig.operations.prices.fixtures.request,
-						response: { wrong: true } as unknown as z.infer<typeof OutputSchema>,
+						response: { wrong: true },
 					},
 				},
 			},
@@ -657,7 +657,7 @@ describe("defineProvider", () => {
 				prices: {
 					...validConfig.operations.prices,
 					fixtures: {
-						request: { wrong_field: "x" } as unknown as z.infer<typeof InputSchema>,
+						request: { wrong_field: "x" },
 						response: validConfig.operations.prices.fixtures.response,
 					},
 				},
@@ -784,7 +784,7 @@ describe("defineProvider", () => {
 			expect(() =>
 				defineProvider(
 					withAnnotations({
-						timeoutMs: "30000" as unknown as number,
+						timeoutMs: "30000",
 					}),
 				),
 			).toThrow(ValidationError);
@@ -831,7 +831,8 @@ describe("defineProvider", () => {
 				runtime: "not-a-runtime",
 				replicas: -3,
 				surprise: { nested: true },
-			} as unknown as ProviderDeploymentOverrides;
+			};
+			// @ts-expect-error test-invalid: deployment is intentionally outside the declared registry shape.
 			const provider = defineProvider({ ...validConfig, deployment });
 
 			expect(provider.deployment).toBe(deployment);
@@ -847,13 +848,15 @@ describe("defineProvider", () => {
 			expect(() =>
 				defineProvider({
 					...validConfig,
-					deployment: "shared" as unknown as Record<string, never>,
+					// @ts-expect-error test-invalid: runtime validation must reject scalar deployment values.
+					deployment: "shared",
 				}),
 			).toThrow(ProviderError);
 			expect(() =>
 				defineProvider({
 					...validConfig,
-					deployment: [{ runtime: "shared" }] as unknown as Record<string, never>,
+					// @ts-expect-error test-invalid: runtime validation must reject array deployment values.
+					deployment: [{ runtime: "shared" }],
 				}),
 			).toThrow(ProviderError);
 		});

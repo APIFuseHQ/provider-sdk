@@ -15,6 +15,7 @@ import {
 import { deriveSelfTestToken } from "../server/self-test-token.js";
 import { createServerApp } from "../server/serve.js";
 import type { AuthTurn, ProviderDefinition } from "../types.js";
+import { createProviderDefinitionDouble } from "./test-utils.js";
 
 const MASTER_SECRET = "self-test-master-secret";
 const PROVIDER_ID = "flow-provider";
@@ -114,11 +115,15 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 		} as AuthTurn;
 	};
 
-	return {
+	return createProviderDefinitionDouble({
 		id: PROVIDER_ID,
 		version: "1.0.0",
 		runtime: "standard",
-		meta: { displayName: "Flow Provider", category: "test" },
+		meta: {
+			displayName: "Flow Provider",
+			descriptionKey: "flow-provider.description",
+			category: "test",
+		},
 		...(state.operationAffinity ? { proxy: { session: { affinity: "operation" } } } : {}),
 		credential: { keys: ["sessionCookie", "userId"] },
 		healthProbe: {
@@ -141,13 +146,15 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 						return { kind: "abort", turnId: "turn-abort-start" } as AuthTurn;
 					}
 					if (state.unknownTurnAtStart) {
-						return { kind: "mystery_kind", turnId: "turn-mystery-start" } as unknown as AuthTurn;
+						// @ts-expect-error test-invalid: the self-test route must reject unknown turn kinds.
+						return { kind: "mystery_kind", turnId: "turn-mystery-start" };
 					}
 					if (state.nonInputTurnAtStart !== undefined) {
+						// @ts-expect-error test-invalid: these terminal/poll turns intentionally omit required data.
 						return {
 							kind: state.nonInputTurnAtStart,
 							turnId: "turn-noninput-start",
-						} as unknown as AuthTurn;
+						};
 					}
 					return formTurn("turn-start", state.startFormFields ?? ["phone", "password"]);
 				},
@@ -174,7 +181,8 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 						return { kind: "abort", turnId: "turn-abort-continue" } as AuthTurn;
 					}
 					if (state.unknownTurnAtContinue) {
-						return { kind: "mystery_kind", turnId: "turn-mystery" } as unknown as AuthTurn;
+						// @ts-expect-error test-invalid: the self-test route must reject unknown turn kinds.
+						return { kind: "mystery_kind", turnId: "turn-mystery" };
 					}
 					if (state.multiTurn) {
 						return formTurn("turn-otp");
@@ -185,7 +193,8 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 					) {
 						// Mirrors real providers (e.g. catchtable): invalid credentials
 						// come back as a retry-kind turn, not a fresh form.
-						return { kind: "retry", turnId: "turn-retry" } as unknown as AuthTurn;
+						// @ts-expect-error test-invalid: retry turns without form data exercise route validation.
+						return { kind: "retry", turnId: "turn-retry" };
 					}
 					state.loginCount += 1;
 					return {
@@ -310,15 +319,19 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 				},
 			},
 		},
-	} as unknown as ProviderDefinition;
+	});
 }
 
 function createFlowlessProvider(seenIds: string[] = []): ProviderDefinition {
-	return {
+	return createProviderDefinitionDouble({
 		id: PROVIDER_ID,
 		version: "1.0.0",
 		runtime: "standard",
-		meta: { displayName: "Flowless Provider", category: "test" },
+		meta: {
+			displayName: "Flowless Provider",
+			descriptionKey: "flowless-provider.description",
+			category: "test",
+		},
 		credential: { keys: ["phone", "password"] },
 		healthProbe: {
 			credentialInputs: {
@@ -364,7 +377,7 @@ function createFlowlessProvider(seenIds: string[] = []): ProviderDefinition {
 				},
 			},
 		},
-	} as unknown as ProviderDefinition;
+	});
 }
 
 function createApps(provider: ProviderDefinition, options: { withAuthFlow?: boolean } = {}) {
