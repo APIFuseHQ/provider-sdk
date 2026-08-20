@@ -1,20 +1,27 @@
 import { describe, expect, it } from "bun:test";
 
-import {
+import type {
+	ProviderEventOwnerFence,
+	SessionOwnerRecord,
+	SessionPoolPolicy,
+	StatefulOperationRequest,
+	StatefulProviderAdapter,
+	StatefulProviderEventPublish,
+	StatefulProviderSessionContext,
+} from "../stateful/index.js";
+import { assertIsError, capturedError } from "./test-utils.js";
+
+const builtStatefulSpecifier: string = "../../dist/stateful/index.js";
+const builtStateful: Promise<typeof import("../stateful/index.js")> = import(
+	builtStatefulSpecifier
+);
+const {
 	buildSessionKey,
 	parseSessionKey,
-	type ProviderEventOwnerFence,
 	RecordingStatefulProviderMetricEmitter,
-	type SessionOwnerRecord,
-	type SessionPoolPolicy,
-	type StatefulOperationRequest,
-	type StatefulProviderAdapter,
-	type StatefulProviderEventPublish,
-	type StatefulProviderSessionContext,
 	StatefulProviderSessionManager,
 	StatefulSessionInvalidatedError,
-} from "../../dist/stateful/index.js";
-import { assertIsError, capturedError } from "./test-utils.js";
+} = await builtStateful;
 
 type TestSession = { connected: boolean };
 type TestState = Record<string, unknown>;
