@@ -1916,7 +1916,7 @@ export type ProviderChoiceExplicitParseResult =
 			readonly payload: Record<string, unknown>;
 			/** Stable, opaque key for provider-owned idempotency records. */
 			readonly replayKey: string;
-			/** Atomically claims a word token. Legacy managed tokens report unsupported. */
+			/** Atomically claims a word token. Inline tokens report unsupported. */
 			consume(): Promise<ProviderChoiceConsumeResult>;
 	  }
 	| {
@@ -1972,7 +1972,7 @@ export interface ProviderChoiceParseOptions {
 	futureToleranceMs?: number;
 	bind?: ProviderChoiceBindingOptions;
 	storage?: ProviderChoiceStorageOptions;
-	/** Defaults to never, matching legacy managed-token parse semantics. */
+	/** Defaults to never, preserving reusable choice-token parse semantics. */
 	consume?: ProviderChoiceConsumeMode;
 }
 
