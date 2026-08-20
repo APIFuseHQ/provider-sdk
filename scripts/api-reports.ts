@@ -98,7 +98,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 	"index.api.md": forgottenExports(
 		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
 		`
-			AuthAbortRetry AuthFlowTerminalContext AuthModeLike AuthSafeData AuthSafeJson AuthStartNoInputGuard BrowserChallengeRequest BrowserChallengeResult
+			AuthAbortRetry AuthFlowTerminalContext AuthModeLike AuthSafeData AuthSafeJson AuthStartHandlerNoInputGuard BrowserChallengeRequest BrowserChallengeResult
 			BrowserClient BrowserFrame BrowserLocator BrowserPage CloudflareWorkersAiOcrClientOptions DeclarativeStealthResponse EnvLike EnvLike_2
 			HealthCheckInputPreparationContext HealthMonitorProbeOverride HttpClientOptions HttpStreamOperationConfig JsonObject OTLPExportOptions OpenAiCompatibleOcrClientOptions OperationConfig
 			OperationHttpStreamTransport OperationJsonTransport OperationMapConfig OperationRequest OperationRequestSchema OperationSseTransport OperationWebSocketTransport ProviderAuthLike
@@ -113,7 +113,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 	"provider.api.md": forgottenExports(
 		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
 		`
-			AuthConfig AuthContext AuthFlowDefinition AuthFlowInputHandler AuthFlowStartHandler AuthStartNoInputGuard AuthTurn Bcp47Locale
+			AuthConfig AuthContext AuthFlowDefinition AuthFlowInputHandler AuthFlowStartHandler AuthStartHandlerNoInputGuard AuthStartNoInputGuard AuthTurn Bcp47Locale
 			BrowserChallengeRequest BrowserChallengeResult BrowserClient BrowserCookie BrowserEngine BrowserFrame BrowserLocator BrowserPage
 			BrowserResourceBody BrowserResourceDecision BrowserResourceMethod BrowserResourcePolicy BrowserResourceRequest BrowserResourceRoute ChallengeSolution ContextDeclaration
 			ContextScratchpad CookieJar CreateProviderChoiceTokenOptions CredentialContext CredentialDeclaration DeclarativeStealthResponse E164PhoneNumber EnvContext

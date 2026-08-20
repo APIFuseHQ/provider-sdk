@@ -173,15 +173,22 @@ export type AuthSafeJson = string | number | boolean | null | readonly AuthSafeJ
 };
 
 // @public (undocumented)
+type AuthStartHandlerNoInputGuard<TStart> = TStart extends (...args: infer TArgs) => unknown ? TArgs["length"] extends 0 | 1 ? unknown : {
+    "auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
+} : unknown;
+
+// Warning: (ae-forgotten-export) The symbol "AuthStartHandlerNoInputGuard" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
 type AuthStartNoInputGuard<TConfig> = TConfig extends {
     auth?: {
         flow?: {
             start: infer TStart;
         };
     };
-} ? TStart extends (...args: infer TArgs) => unknown ? TArgs extends [unknown] ? unknown : {
-    "auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
-} : unknown : unknown;
+} ? AuthStartHandlerNoInputGuard<TStart> : TConfig extends {
+    start: infer TStart;
+} ? AuthStartHandlerNoInputGuard<TStart> : unknown;
 
 // @public (undocumented)
 interface AuthTurn {
@@ -3418,11 +3425,11 @@ export { z }
 
 // Warnings were encountered during analysis:
 //
-// dist/ceremonies/index.d.ts:40:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point provider.d.ts
+// dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:15:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:57:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:88:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:112:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:60:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:91:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:115:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
 // dist/errors.d.ts:8:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:15:5 - (ae-forgotten-export) The symbol "EnvContext" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point provider.d.ts

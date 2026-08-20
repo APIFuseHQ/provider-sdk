@@ -232,15 +232,22 @@ type AuthSafeJson = string | number | boolean | null | readonly AuthSafeJson[] |
 };
 
 // @public (undocumented)
-type AuthStartNoInputGuard<TConfig> = TConfig extends {
+type AuthStartHandlerNoInputGuard<TStart> = TStart extends (...args: infer TArgs) => unknown ? TArgs["length"] extends 0 | 1 ? unknown : {
+    "auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
+} : unknown;
+
+// Warning: (ae-forgotten-export) The symbol "AuthStartHandlerNoInputGuard" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+export type AuthStartNoInputGuard<TConfig> = TConfig extends {
     auth?: {
         flow?: {
             start: infer TStart;
         };
     };
-} ? TStart extends (...args: infer TArgs) => unknown ? TArgs extends [unknown] ? unknown : {
-    "auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
-} : unknown : unknown;
+} ? AuthStartHandlerNoInputGuard<TStart> : TConfig extends {
+    start: infer TStart;
+} ? AuthStartHandlerNoInputGuard<TStart> : unknown;
 
 // @public (undocumented)
 export interface AuthTurn {
@@ -910,6 +917,9 @@ export const DEFAULT_OPERATION_TRANSPORT: OperationJsonTransport;
 // @public (undocumented)
 export const DEFAULT_RESOLVER_TIMEOUT_MS = 180000;
 
+// @public
+export function defineAuthFlow<const TFlow extends AuthFlowDefinition>(flow: TFlow & AuthStartNoInputGuard<TFlow>): TFlow;
+
 // @public (undocumented)
 export function defineConfig(config: ApiFuseConfig): ApiFuseConfig;
 
@@ -961,7 +971,6 @@ export function defineHealthJourney(config: HealthJourneyDefinition): HealthJour
 export function defineOperation<TInput extends SchemaLike, TOutput extends SchemaLike>(operation: OperationConfig<TInput, TOutput>): OperationDefinition<TInput, TOutput>;
 
 // Warning: (ae-forgotten-export) The symbol "ProviderOperation" needs to be exported by the entry point index.d.ts
-// Warning: (ae-forgotten-export) The symbol "AuthStartNoInputGuard" needs to be exported by the entry point index.d.ts
 //
 // @public (undocumented)
 export function defineProvider<TOperations extends Record<string, ProviderOperation>, TConfig extends ProviderConfig<TOperations>>(config: TConfig & AuthStartNoInputGuard<TConfig>): ProviderDefinition & {
@@ -4739,7 +4748,7 @@ export { z }
 
 // Warnings were encountered during analysis:
 //
-// dist/ceremonies/index.d.ts:40:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point index.d.ts
+// dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point index.d.ts
 // dist/config/loader.d.ts:60:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/config/loader.d.ts:67:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point index.d.ts
 // dist/config/loader.d.ts:69:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point index.d.ts
@@ -4748,8 +4757,8 @@ export { z }
 // dist/config/loader.d.ts:105:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/config/loader.d.ts:106:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:26:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:88:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:112:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:91:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:115:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:3:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:24:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:43:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
