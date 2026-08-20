@@ -6,6 +6,7 @@ import type {
 	FlowContext,
 	HttpClient,
 	OcrContext,
+	ProviderRuntimeState,
 	StealthClient,
 	SttContext,
 } from "../types.js";
@@ -59,6 +60,8 @@ export function createFlowContext(options: {
 	providerId: string;
 	connectionId?: string;
 	externalRef?: string;
+	/** Host-agnostic: callers pass an already-scoped runtime state, which this helper forwards verbatim. */
+	state?: ProviderRuntimeState;
 	allowedKeys: string[];
 	initialContext?: Record<string, unknown>;
 	ocr?: OcrContext;
@@ -71,6 +74,7 @@ export function createFlowContext(options: {
 		tenantId: options.tenantId,
 		providerId: options.providerId,
 		http: options.http,
+		state: options.state,
 		stealth: options.stealth,
 		env: options.env,
 		context: createScratchpad(options.allowedKeys, options.initialContext),

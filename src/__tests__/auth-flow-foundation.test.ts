@@ -14,7 +14,7 @@ import { TurnValidationError } from "../errors.js";
 import { createFlowContext } from "../runtime/auth-flow.js";
 import { createEnvContext } from "../runtime/env.js";
 import { prevalidate } from "../runtime/prevalidate.js";
-import type { HttpClient, HttpResponse } from "../types.js";
+import type { HttpClient, HttpResponse, ProviderRuntimeState } from "../types.js";
 
 type RouteHandler = (body?: unknown) => Promise<unknown> | unknown;
 
@@ -71,6 +71,34 @@ function createTestContext(routes: Record<string, RouteHandler> = {}, allowedKey
 		allowedKeys,
 	});
 }
+
+describe("createFlowContext", () => {
+	it("keeps runtime state absent when the host does not supply it", () => {
+		expect(createTestContext().state).toBeUndefined();
+	});
+
+	it("forwards a supplied runtime state verbatim", () => {
+		const suppliedState: ProviderRuntimeState = {
+			forConnection() {
+				return suppliedState;
+			},
+			namespace() {
+				throw new Error("namespace is not under test");
+			},
+		};
+		const ctx = createFlowContext({
+			http: createMockHttpClient({}),
+			env: createEnvContext([]),
+			tenantId: "tenant-1",
+			providerId: "demo-provider",
+			state: suppliedState,
+			allowedKeys: [],
+		});
+		// Identity, not shape: the helper must forward the exact host-scoped
+		// view without wrapping, re-scoping, or substituting a default.
+		expect(ctx.state).toBe(suppliedState);
+	});
+});
 
 describe("prevalidate", () => {
 	it("accepts valid payloads", () => {

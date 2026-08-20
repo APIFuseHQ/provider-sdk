@@ -571,8 +571,18 @@ export function resolveProviderResolverIdentityScope(
 	});
 }
 
-function resolveOperationConnectionId(request: OperationRequest): string | undefined {
-	return request.connection?.id ?? request.connectionId;
+function resolveOperationConnectionId(
+	request: Pick<OperationRequest, "connection" | "connectionId">,
+): string | undefined {
+	// An empty string is a malformed identifier, not an identity: treat it as
+	// absent so it can never override a valid id or key a real scope. Requests
+	// without any usable id fall back to the documented missing-connection
+	// sentinel scope instead of scoping context/affinity/state under "".
+	return normalizeConnectionId(request.connection?.id) ?? normalizeConnectionId(request.connectionId);
+}
+
+function normalizeConnectionId(id: string | undefined): string | undefined {
+	return id === "" ? undefined : id;
 }
 
 function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPolicy | undefined {
@@ -776,10 +786,27 @@ function createFlowContextStore(
 	};
 }
 
+export function resolveAuthFlowProxyAffinityKey(
+	provider: ProviderDefinition,
+	request: Pick<
+		AuthFlowRequest,
+		"connection" | "connectionId" | "externalRef" | "tenantId" | "providerId"
+	>,
+): string {
+	return (
+		resolveOperationConnectionId(request) ??
+		request.externalRef ??
+		request.tenantId ??
+		request.providerId ??
+		provider.id
+	);
+}
+
 function createAuthFlowContext(
 	provider: ProviderDefinition,
 	request: AuthFlowRequest,
 	options: ProviderServerRuntimeOptions,
+	state: ProviderRuntimeState,
 	signal?: AbortSignal,
 ): {
 	context: FlowContext;
@@ -796,12 +823,7 @@ function createAuthFlowContext(
 	);
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
-		affinityKey:
-			request.connectionId ??
-			request.externalRef ??
-			request.tenantId ??
-			request.providerId ??
-			provider.id,
+		affinityKey: resolveAuthFlowProxyAffinityKey(provider, request),
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
 		provider,
@@ -836,7 +858,7 @@ function createAuthFlowContext(
 	return {
 		context: {
 			flowId: request.flowId,
-			connectionId: request.connectionId,
+			connectionId: resolveOperationConnectionId(request),
 			externalRef: request.externalRef,
 			tenantId: request.tenantId ?? "",
 			providerId: request.providerId ?? provider.id,
@@ -844,6 +866,7 @@ function createAuthFlowContext(
 				...proxyClientOptions,
 				...(signal ? { signal } : {}),
 			}),
+			state: state.forConnection(resolveOperationConnectionId(request)),
 			stealth: stealthBaseUrl
 				? capabilityModules.stealth
 					? stealthProfile
@@ -2005,6 +2028,7 @@ async function handleAuthFlow(
 	request: AuthFlowRequest,
 	route: AuthRoute,
 	options: ProviderServerRuntimeOptions,
+	state: ProviderRuntimeState,
 	signal?: AbortSignal,
 ): Promise<Response | AuthFlowResponse> {
 	const flow = provider.auth?.flow;
@@ -2019,7 +2043,7 @@ async function handleAuthFlow(
 	// any flow code runs instead of at whatever point the ceremony first reads
 	// the env. `abort` stays exempt: a user must always be able to cancel a
 	// stranded flow even when provisioning is broken.
-	const { context, getPatch } = createAuthFlowContext(provider, request, options, signal);
+	const { context, getPatch } = createAuthFlowContext(provider, request, options, state, signal);
 	try {
 		if (route !== "abort") {
 			assertRequiredSecretsPresent(provider, context.env);
@@ -2540,7 +2564,14 @@ function createServerAppWithCapabilityModules(
 				.json()
 				.catch(() => undefined);
 			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(provider, body, "start", options, c.req.raw.signal);
+			const response = await handleAuthFlow(
+				provider,
+				body,
+				"start",
+				options,
+				state,
+				c.req.raw.signal,
+			);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -2580,7 +2611,14 @@ function createServerAppWithCapabilityModules(
 				.json()
 				.catch(() => undefined);
 			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(provider, body, "continue", options, c.req.raw.signal);
+			const response = await handleAuthFlow(
+				provider,
+				body,
+				"continue",
+				options,
+				state,
+				c.req.raw.signal,
+			);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -2620,7 +2658,14 @@ function createServerAppWithCapabilityModules(
 				.json()
 				.catch(() => undefined);
 			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(provider, body, "poll", options, c.req.raw.signal);
+			const response = await handleAuthFlow(
+				provider,
+				body,
+				"poll",
+				options,
+				state,
+				c.req.raw.signal,
+			);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -2660,7 +2705,14 @@ function createServerAppWithCapabilityModules(
 				.json()
 				.catch(() => undefined);
 			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(provider, body, "refresh", options, c.req.raw.signal);
+			const response = await handleAuthFlow(
+				provider,
+				body,
+				"refresh",
+				options,
+				state,
+				c.req.raw.signal,
+			);
 			logProviderSuccess(
 				logger,
 				provider,
@@ -2700,7 +2752,14 @@ function createServerAppWithCapabilityModules(
 				.json()
 				.catch(() => undefined);
 			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(provider, body, "abort", options, c.req.raw.signal);
+			const response = await handleAuthFlow(
+				provider,
+				body,
+				"abort",
+				options,
+				state,
+				c.req.raw.signal,
+			);
 			logProviderSuccess(
 				logger,
 				provider,
