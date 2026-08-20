@@ -10,10 +10,11 @@ import { createTraceContext } from "../runtime/trace.js";
 import {
 	createBrowserClientDouble,
 	createBrowserPageDouble,
+	createProviderContextDouble,
 } from "./test-utils.js";
 import type {
-	AuthContext,
 	BrowserClient,
+	DeclarativeStealthResponse,
 	HttpClient,
 	ProviderContext,
 	StealthClient,
@@ -52,8 +53,7 @@ function createMockContext(): ProviderContext {
 		{ goto: mock(async (url: string) => ({ url })) },
 	);
 
-	const stealth: StealthClient = {
-		fetch: mock(async () => ({
+	const response = (): DeclarativeStealthResponse => ({
 			status: 201,
 			ok: true,
 			headers: {},
@@ -65,26 +65,33 @@ function createMockContext(): ProviderContext {
 				toString: () => "",
 			},
 			json: async <T>() => ({}) as T,
-		})),
-		createSession: mock(() => ({
-			fetch: async () => ({
-				status: 200,
-				ok: true,
-				headers: {},
-				rawHeaders: [] as [string, string][],
-				body: "ok",
-				cookies: {
-					get: () => undefined,
-					getAll: () => ({}),
-					toString: () => "",
-				},
-				json: async <T>() => ({}) as T,
-			}),
-			close: () => {},
-		})),
+			arrayBuffer: async () => new ArrayBuffer(0),
+			bytes: async () => new Uint8Array(),
+		});
+	const session: StealthSession = {
+		fetch: async () => response(),
+		cookies: {
+			get: () => undefined,
+			getAll: () => ({}),
+			toString: () => "",
+			has: () => false,
+			setFromCookieStrings: () => {},
+			toHeader: () => "",
+			snapshot: () => ({}),
+			restore: () => {},
+			serialize: () => ({ version: 1, jar: { version: "1", storeType: "MemoryCookieStore", rejectPublicSuffixes: true, cookies: [] } }),
+			deserialize: () => {},
+			clear: () => {},
+		},
+		redirects: { run: async () => ({ final: response(), hops: [], reason: "completed", cookies: {}, cookieStore: { version: 1, jar: { version: "1", storeType: "MemoryCookieStore", rejectPublicSuffixes: true, cookies: [] } } }) },
+		close: () => {},
+	};
+	const stealth: StealthClient = {
+		fetch: mock(async () => response()),
+		createSession: mock(() => session),
 	};
 
-	return {
+	return createProviderContextDouble({
 		env: createEnvContext(),
 		credential: createCredentialContext(),
 		http: {
@@ -104,11 +111,10 @@ function createMockContext(): ProviderContext {
 		stealth,
 		browser,
 		trace: createTraceContext(),
-		auth: {} as AuthContext,
 		choice: createTestProviderChoiceContext({
 			providerId: "instrumented-provider",
 		}),
-	};
+	});
 }
 
 describe("createTraceContext", () => {
@@ -207,13 +213,7 @@ describe("wrapWithInstrumentation", () => {
 		const ctx = createMockContext();
 		const instrumented = wrapWithInstrumentation(ctx);
 
-		const page = (await instrumented.browser.newPage()) as {
-			goto(url: string): Promise<{ url: string }>;
-			fill(selector: string, value: string): Promise<void>;
-			click(selector: string): Promise<void>;
-			type(selector: string, text: string): Promise<void>;
-			waitForSelector(selector: string): Promise<void>;
-		};
+		const page = await instrumented.browser.newPage();
 
 		await page.goto("https://app.example.com/login");
 		await page.fill("#username", "demo");

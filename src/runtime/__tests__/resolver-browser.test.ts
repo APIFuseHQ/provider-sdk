@@ -460,6 +460,7 @@ describe("browser resolver vendor", () => {
 			adapters: [browser, secondVendor],
 			identity: { proxyUrl, userAgent: "BoundBrowser/1.0" },
 			kinds: ["aws_waf"],
+			// @ts-expect-error test-invalid: legacy proxy mode is intentionally ignored by resolver config
 			proxyMode: "required",
 		});
 

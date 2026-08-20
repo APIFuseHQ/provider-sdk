@@ -1,5 +1,6 @@
 import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from "node:http";
-import { connect, type Socket } from "node:net";
+import { connect } from "node:net";
+import type { Duplex } from "node:stream";
 
 import { describe, expect, it } from "bun:test";
 
@@ -95,7 +96,7 @@ async function startProxy(): Promise<{ close(): Promise<void>; url: string }> {
 
 	async function forwardConnect(
 		request: IncomingMessage,
-		clientSocket: Socket,
+		clientSocket: Duplex,
 		head: Buffer,
 	): Promise<void> {
 		if (!hasCorrectCredentials(request)) {
