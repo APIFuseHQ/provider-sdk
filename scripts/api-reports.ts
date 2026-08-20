@@ -6,7 +6,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const configDir = join(root, "config", "api-extractor");
@@ -382,6 +382,16 @@ if (unsafeForgottenExportConfigs.length > 0) {
 		"API Extractor configs must include forgotten exports in all supported output models.",
 	);
 	for (const { configName } of unsafeForgottenExportConfigs) console.error(`  ${configName}`);
+	process.exit(1);
+}
+
+const unsafeReportNameConfigs = parsedConfigs.filter(
+	({ config }) => basename(config.apiReport.reportFileName) !== config.apiReport.reportFileName,
+);
+if (unsafeReportNameConfigs.length > 0) {
+	console.error("apiReport.reportFileName must be a plain file name inside the report folder.");
+	for (const { configName, config } of unsafeReportNameConfigs)
+		console.error(`  ${configName}: ${config.apiReport.reportFileName}`);
 	process.exit(1);
 }
 
