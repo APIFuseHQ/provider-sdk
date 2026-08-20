@@ -39,7 +39,6 @@ import { createProviderCache } from "../runtime/cache.js";
 import {
 	createProviderChoiceContext,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-	PROVIDER_RUNTIME_CHOICE_WORD_ISSUANCE_ENV,
 } from "../runtime/choice.js";
 import { createCredentialContext } from "../runtime/credential.js";
 import { createEnvContext } from "../runtime/env.js";
@@ -627,7 +626,6 @@ function createProviderContext(
 	const env = createEnvContext([
 		...(provider.secrets?.map((secret) => secret.name) ?? []),
 		PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-		PROVIDER_RUNTIME_CHOICE_WORD_ISSUANCE_ENV,
 	]);
 	const credential = createCredentialContext({
 		allowedKeys: provider.credential?.keys,

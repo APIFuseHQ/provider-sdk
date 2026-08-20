@@ -39,8 +39,6 @@ import type {
 
 export const PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV =
 	"APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET";
-export const PROVIDER_RUNTIME_CHOICE_WORD_ISSUANCE_ENV =
-	"APIFUSE__PROVIDER_RUNTIME__CHOICE_WORD_ISSUANCE";
 
 const PRIMARY_CHOICE_TOKEN_KID = "v1";
 const MANAGED_CHOICE_TOKEN_VERSION = 1;
@@ -133,7 +131,7 @@ export function createProviderChoiceContext(
 		const issuedAtMs = issueOptions.nowMs ?? Date.now();
 		const resolvedStorage = resolveIssueStorage(issueOptions.storage, issueOptions.payload);
 		if (resolvedStorage.mode === "server") {
-			const issuance = resolveChoiceWordIssuance(options.env);
+			const issuance = resolveChoiceWordIssuance();
 			const keys = hasRequestedChoiceBinding(issueOptions.bind)
 				? deriveManagedChoiceKeys({
 						masterSecret: resolveMasterSecret(),
@@ -511,20 +509,8 @@ function createLegacyExplicitParseResult(options: {
 	};
 }
 
-function resolveChoiceWordIssuance(env?: EnvContext): "legacy" | "word" {
-	const configured = env?.get(PROVIDER_RUNTIME_CHOICE_WORD_ISSUANCE_ENV);
-	const value = configured?.trim() ?? "";
-	if (value === "" || value === "legacy") return "legacy";
-	if (value === "word") return "word";
-	throw new ProviderError(
-		`Unsupported provider choice word issuance mode "${value}". Expected "legacy" or "word".`,
-		{
-			code: "CHOICE_WORD_ISSUANCE_INVALID",
-			category: "input_validation",
-			retryable: false,
-			details: { env: PROVIDER_RUNTIME_CHOICE_WORD_ISSUANCE_ENV },
-		},
-	);
+function resolveChoiceWordIssuance(): "legacy" | "word" {
+	return "word";
 }
 
 function resolveChoiceMasterSecret(options: CreateProviderChoiceContextOptions): string {
