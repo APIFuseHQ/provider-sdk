@@ -1,12 +1,14 @@
 import {
 	existsSync,
+	lstatSync,
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const configDir = join(root, "config", "api-extractor");
@@ -396,10 +398,14 @@ if (unsafeForgottenExportConfigs.length > 0) {
 }
 
 const unsafeReportNameConfigs = parsedConfigs.filter(
-	({ config }) => basename(config.apiReport.reportFileName) !== config.apiReport.reportFileName,
+	// A plain, non-boundary file name: basename equality alone still admits "", "."
+	// and "..", which join() would resolve to a directory rather than a report.
+	({ config }) => !/^[A-Za-z0-9][A-Za-z0-9._-]*\.api\.md$/.test(config.apiReport.reportFileName),
 );
 if (unsafeReportNameConfigs.length > 0) {
-	console.error("apiReport.reportFileName must be a plain file name inside the report folder.");
+	console.error(
+		"apiReport.reportFileName must be a plain <name>.api.md file name inside the report folder.",
+	);
 	for (const { configName, config } of unsafeReportNameConfigs)
 		console.error(`  ${configName}: ${config.apiReport.reportFileName}`);
 	process.exit(1);
@@ -524,6 +530,27 @@ for (const { config, configPath } of parsedConfigs) {
 	if (mode === "check" && !existsSync(committed)) {
 		console.error(`Missing committed API report: api-reports/${reportName}`);
 		process.exit(1);
+	}
+	// Reject anything that is not a real file living directly in reportDir. readFileSync
+	// and API Extractor's --local write both follow symlinks, so a tracked report symlink
+	// (say, to /dev/null) would make an empty read compare equal to an empty write and
+	// let a stale or missing report pass the gate.
+	if (existsSync(committed)) {
+		const stats = lstatSync(committed);
+		if (!stats.isFile()) {
+			console.error(
+				`Committed API report must be a regular file: api-reports/${reportName} (${
+					stats.isSymbolicLink() ? "symbolic link" : "not a regular file"
+				}).`,
+			);
+			process.exit(1);
+		}
+		if (realpathSync(committed) !== join(realpathSync(reportDir), reportName)) {
+			console.error(
+				`Committed API report must resolve inside the report folder: api-reports/${reportName}.`,
+			);
+			process.exit(1);
+		}
 	}
 	const committedBefore = mode === "check" ? readFileSync(committed, "utf8") : undefined;
 	const result = Bun.spawnSync(
