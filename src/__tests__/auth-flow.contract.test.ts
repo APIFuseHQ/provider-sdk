@@ -491,7 +491,11 @@ describe("auth-flow AuthTurn provider contract", () => {
 				id: "auth-state-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "Auth State Provider", category: "test" },
+				meta: {
+					displayName: "Auth State Provider",
+					category: "test",
+					descriptionKey: "auth-state-provider.description",
+				},
 				auth: {
 					mode: "credentials",
 					flow: {
@@ -500,7 +504,8 @@ describe("auth-flow AuthTurn provider contract", () => {
 							if (!attempts) throw new Error("Runtime state is required");
 							await attempts.set("email:user@example.test", { count: 1 });
 							const stored = await attempts.get<{ count: number }>("email:user@example.test");
-							return ctx.auth.nextPoll({ data: { count: stored?.value.count } });
+							if (!stored) throw new Error("Stored attempt count is required");
+							return ctx.auth.nextPoll({ data: { count: stored.value.count } });
 						},
 						continue: async (ctx) => ctx.auth.nextPoll(),
 					},

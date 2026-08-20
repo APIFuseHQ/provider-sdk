@@ -116,6 +116,7 @@ describe("createFlowContext", () => {
 		};
 		const ctx = createFlowContext({
 			http: createMockHttpClient({}),
+			stealth: createUnusedStealthClient(),
 			env: createEnvContext([]),
 			tenantId: "tenant-1",
 			providerId: "demo-provider",
