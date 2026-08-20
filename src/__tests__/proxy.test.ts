@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
+import { assertIsError, createFetchDouble } from "./test-utils.js";
 import {
 	__setProxyRedisForTests,
 	__setSmartproxyAllocatorDeadlineMsForTests,
@@ -122,7 +123,7 @@ function nativeProxyCalls(): Array<string | undefined> {
 
 function queueNativeFetchResponses(...responses: MockWreqResponse[]): void {
 	const queue = [...responses];
-	global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+	global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 		nativeFetchCalls.push({
 			url: String(input),
 			init: init as RequestInit & { proxy?: string },
@@ -133,7 +134,7 @@ function queueNativeFetchResponses(...responses: MockWreqResponse[]): void {
 			headers: response.headers as HeadersInit,
 			status: response.status,
 		});
-	}) as unknown as typeof fetch;
+	}));
 }
 
 function queueAllocatorAndNativeResponses(
@@ -141,7 +142,7 @@ function queueAllocatorAndNativeResponses(
 	...responses: MockWreqResponse[]
 ): void {
 	const queue = [...responses];
-	global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+	global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 		const url = String(input);
 		if (url.includes("get-ip-v3")) {
 			return new Response(allocatorBody, { status: 200 });
@@ -156,7 +157,7 @@ function queueAllocatorAndNativeResponses(
 			headers: response.headers as HeadersInit,
 			status: response.status,
 		});
-	}) as unknown as typeof fetch;
+	}));
 }
 
 function toHeaders(headers: MockWreqResponse["headers"]): Headers {
@@ -655,7 +656,7 @@ describe("proxy integration", () => {
 		const events: unknown[] = [];
 		let allocatorCalls = 0;
 		let allocatorSignal: AbortSignal | undefined;
-		global.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+		global.fetch = createFetchDouble(mock(async (_input: string | URL | Request, init?: RequestInit) => {
 			allocatorCalls += 1;
 			allocatorSignal = init?.signal ?? undefined;
 			return await new Promise<Response>((_resolve, reject) => {
@@ -663,7 +664,7 @@ describe("proxy integration", () => {
 					once: true,
 				});
 			});
-		}) as unknown as typeof fetch;
+		}));
 
 		const startedAt = Date.now();
 		await expect(
@@ -705,7 +706,7 @@ describe("proxy integration", () => {
 		let allocatorCalls = 0;
 		let allocatorSignal: AbortSignal | undefined;
 		let bodyReadStarted = false;
-		global.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+		global.fetch = createFetchDouble(mock(async (_input: string | URL | Request, init?: RequestInit) => {
 			allocatorCalls += 1;
 			allocatorSignal = init?.signal ?? undefined;
 			return {
@@ -716,7 +717,7 @@ describe("proxy integration", () => {
 					return new Promise<string>(() => undefined);
 				},
 			} as Response;
-		}) as unknown as typeof fetch;
+		}));
 
 		const startedAt = Date.now();
 		await expect(
@@ -767,14 +768,14 @@ describe("proxy integration", () => {
 		const redis = new FakeRedis();
 		__setProxyRedisForTests(redis);
 		let allocatorSignal: AbortSignal | undefined;
-		global.fetch = mock(async (_input: string | URL | Request, init?: RequestInit) => {
+		global.fetch = createFetchDouble(mock(async (_input: string | URL | Request, init?: RequestInit) => {
 			allocatorSignal = init?.signal ?? undefined;
 			return await new Promise<Response>((_resolve, reject) => {
 				allocatorSignal?.addEventListener("abort", () => reject(new Error("allocator aborted")), {
 					once: true,
 				});
 			});
-		}) as unknown as typeof fetch;
+		}));
 
 		const startedAt = Date.now();
 		await expect(
@@ -1075,7 +1076,7 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
 			if (url.includes("get-ip-v3")) {
 				return new Response(
@@ -1095,7 +1096,7 @@ describe("proxy integration", () => {
 				});
 			}
 			throw new Error("socket hang up");
-		}) as unknown as typeof fetch;
+		}));
 
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
@@ -1130,14 +1131,14 @@ describe("proxy integration", () => {
 		// to the whole widened span. Duplicate offsets are skipped, so only the two
 		// distinct allocated endpoints are ever issued a request.
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
 			if (url.includes("get-ip-v3")) {
 				return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
 			}
 			nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
 			throw new Error("socket hang up");
-		}) as unknown as typeof fetch;
+		}));
 
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
@@ -1170,7 +1171,7 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
 			if (url.includes("get-ip-v3")) {
 				return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
@@ -1184,7 +1185,7 @@ describe("proxy integration", () => {
 				});
 			}
 			throw new Error("socket hang up");
-		}) as unknown as typeof fetch;
+		}));
 
 		let retrySummary: HttpRetrySummary | undefined;
 		const { createHttpClient } = await import("../runtime/http.js");
@@ -1233,7 +1234,7 @@ describe("proxy integration", () => {
 		// and mask the 503 behind a synthetic retry_exhausted error.
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		let targetCalls = 0;
-		global.fetch = mock(async (input: string | URL | Request, init?: RequestInit) => {
+		global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
 			const url = String(input);
 			if (url.includes("get-ip-v3")) {
 				return new Response("5.78.24.25:31001", { status: 200 });
@@ -1241,7 +1242,7 @@ describe("proxy integration", () => {
 			targetCalls += 1;
 			nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
 			return new Response("upstream busy", { status: 503 });
-		}) as unknown as typeof fetch;
+		}));
 
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
@@ -1281,9 +1282,9 @@ describe("proxy integration", () => {
 	it("rejects malformed default Smartproxy lifetime before optional allocator fallback", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES = "abc";
-		global.fetch = mock(async () => {
+		global.fetch = createFetchDouble(mock(async () => {
 			throw new Error("allocator should not be called");
-		}) as typeof fetch;
+		}));
 
 		await expect(
 			resolveProxyConfigAsync({
@@ -1959,7 +1960,8 @@ describe("proxy integration", () => {
 
 		expect(error).toBeInstanceOf(TransportError);
 		expect((error as TransportError).code).toBe("transport_network_error");
-		expect((error as Error).message).toBe("Network error");
+		assertIsError(error);
+		expect(error.message).toBe("Network error");
 		expect(stealthProxyCalls()).toEqual(["http://5.78.24.25:31001"]);
 	});
 
@@ -2118,8 +2120,9 @@ describe("proxy integration", () => {
 
 		expect(error).toBeInstanceOf(TransportError);
 		expect((error as TransportError).code).toBe("PROXY_EDGE_AUTH_REJECTED");
-		expect((error as Error).message).toContain("candidate endpoint");
-		expect((error as Error).message).not.toContain("userid=123");
+		assertIsError(error);
+		expect(error.message).toContain("candidate endpoint");
+		expect(error.message).not.toContain("userid=123");
 		expect(stealthProxyCalls()).toEqual([
 			"http://5.78.24.25:31001",
 			"http://5.78.24.25:31001",
@@ -2177,8 +2180,9 @@ describe("proxy integration", () => {
 
 		expect(error).toBeInstanceOf(TransportError);
 		expect((error as TransportError).code).toBe("PROXY_EDGE_AUTH_REJECTED");
-		expect((error as Error).message).toContain("candidate endpoint");
-		expect((error as Error).message).not.toContain("userid=123");
+		assertIsError(error);
+		expect(error.message).toContain("candidate endpoint");
+		expect(error.message).not.toContain("userid=123");
 		expect(allocatorCalls).toBe(2);
 		expect(stealthProxyCalls()).toEqual([
 			"http://5.78.24.25:31001",

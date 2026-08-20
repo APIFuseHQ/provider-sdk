@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { randomUUID } from "node:crypto";
 
+import { assertIsError } from "../../__tests__/test-utils.js";
 import { clearProxyResolutionCache, SMARTPROXY_APP_KEY_ENV } from "../../config/loader.js";
 import {
 	createNativeNetworkClient,
@@ -110,7 +111,8 @@ describe("native vendor chain", () => {
 		} catch (error) {
 			thrown = error;
 		}
-		const message = (thrown as Error).message;
+		assertIsError(thrown);
+		const message = thrown.message;
 		expect(thrown).toMatchObject({ code: "PROXY_REQUIRED" });
 		expect(message).toContain("smartproxy: allocation failed");
 		expect(message).toContain(

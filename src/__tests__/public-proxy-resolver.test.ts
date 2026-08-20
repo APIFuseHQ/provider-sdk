@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 
+import { createFetchDouble } from "./test-utils.js";
 import { resolveProxy } from "@apifuse/provider-sdk";
 import type {
 	ProxyProtocol,
@@ -69,7 +70,7 @@ describe("public proxy resolver", () => {
 
 	it("returns no proxy for a disabled policy", async () => {
 		const allocator = mock(async () => new Response("192.0.2.1:8080", { status: 200 }));
-		global.fetch = allocator as unknown as typeof fetch;
+		global.fetch = createFetchDouble(allocator);
 
 		await expect(resolveProxy({ proxyPolicy: { mode: "disabled" } })).resolves.toEqual({
 			shouldWarn: false,
@@ -80,7 +81,7 @@ describe("public proxy resolver", () => {
 	it("allocates a vendor-chain proxy and reports its vendor and source", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		const allocator = mock(async () => new Response("192.0.2.10:31001", { status: 200 }));
-		global.fetch = allocator as unknown as typeof fetch;
+		global.fetch = createFetchDouble(allocator);
 
 		const resolved = await resolveProxy({
 			proxyPolicy: {

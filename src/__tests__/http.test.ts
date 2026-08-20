@@ -1,5 +1,6 @@
 import { afterAll, beforeEach, describe, expect, it, mock } from "bun:test";
 
+import { assertIsError, emptyArray } from "./test-utils.js";
 import { HttpRedirectError, TransportError } from "../errors.js";
 import {
 	HttpRetryAfterPolicy,
@@ -24,7 +25,7 @@ const mockNativeFetchState = {
 	lastResponse: undefined as Response | undefined,
 	queuedNativeResponses: [] as Response[],
 	queuedResponses: [] as MockHttpResponse[],
-	queuedErrors: [] as Error[],
+	queuedErrors: emptyArray<Error>(),
 };
 
 const originalFetch = globalThis.fetch;
@@ -292,7 +293,8 @@ describe("createHttpClient", () => {
 			reason: "stopped",
 			target: "https://attacker.example/collect?[REDACTED]",
 		});
-		expect(String((caught as Error).message)).toContain("https://attacker.example/collect");
+		assertIsError(caught);
+		expect(String(caught.message)).toContain("https://attacker.example/collect");
 		expect(stringifyDiagnosticGraph(caught)).not.toContain(diagnosticSecret);
 		expect(calls[0]?.init).toMatchObject({
 			body: JSON.stringify({ username: "alice", password: "credential" }),
@@ -446,7 +448,8 @@ describe("createHttpClient", () => {
 			reason: "missing_location",
 		});
 		expect((malformedError as HttpRedirectError).target).toBe("[malformed redirect target]");
-		expect((malformedError as Error & { cause?: unknown }).cause).toBeUndefined();
+		assertIsError(malformedError);
+		expect(malformedError.cause).toBeUndefined();
 		expect(stringifyDiagnosticGraph(malformedError)).not.toContain(malformedSecret);
 		expect(malformedRedirect.bodyUsed).toBeTrue();
 
@@ -842,8 +845,9 @@ describe("createHttpClient", () => {
 		}
 
 		expect(caught).toBeInstanceOf(TransportError);
-		expect((caught as Error).message).toContain("crtfc_key=[REDACTED]");
-		expect((caught as Error).message).not.toContain(secret);
+		assertIsError(caught);
+		expect(caught.message).toContain("crtfc_key=[REDACTED]");
+		expect(caught.message).not.toContain(secret);
 	});
 
 	it("preserves mid-stream error semantics while redacting sensitiveParams", async () => {
@@ -1079,7 +1083,8 @@ describe("createHttpClient", () => {
 		}
 
 		expect(caught).toBeInstanceOf(TransportError);
-		expect((caught as Error).message).toBe(
+		assertIsError(caught);
+		expect(caught.message).toBe(
 			"Failed to fetch https://example.com/data?serviceKey=[REDACTED]",
 		);
 		expect(JSON.stringify(caught)).not.toContain(secret);
@@ -1598,7 +1603,8 @@ describe("createHttpClient", () => {
 			retryError = error;
 		}
 		expect(retryError).toBeInstanceOf(Error);
-		expect((retryError as Error).message).not.toContain(retrySecret);
+		assertIsError(retryError);
+		expect(retryError.message).not.toContain(retrySecret);
 		expect(JSON.stringify(retryError)).not.toContain(retrySecret);
 		expect(mockNativeFetchState.calls).toHaveLength(0);
 	});

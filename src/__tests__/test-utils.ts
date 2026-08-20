@@ -11,6 +11,10 @@ export function assertIsError(value: unknown): asserts value is Error {
 	}
 }
 
+export function emptyArray<T>(): T[] {
+	return [];
+}
+
 export async function capturedError(operation: Promise<unknown>): Promise<Error> {
 	return await operation.then(
 		() => {

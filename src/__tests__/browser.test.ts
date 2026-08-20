@@ -125,6 +125,10 @@ const EXPECTED_BROWSER_COOKIES = [
 	},
 ] as const;
 
+function noError(): Error | null {
+	return null;
+}
+
 type MockPlaywrightPage = {
 	click: (selector: string) => Promise<void>;
 	close: () => Promise<void>;
@@ -234,7 +238,7 @@ const browserState = {
 	localCdpAuthResponses: [] as Array<Record<string, unknown>>,
 	localCdpSessions: [] as MockPlaywrightCdpSession[],
 	localFetchEnableParams: [] as Array<Record<string, unknown>>,
-	requireError: null as Error | null,
+	requireError: noError(),
 };
 
 const stealthState = {
@@ -245,9 +249,9 @@ const stealthState = {
 };
 
 const optionalModuleState = {
-	nodriverError: null as Error | null,
+	nodriverError: noError(),
 	nodriverImports: 0,
-	seleniumBaseError: null as Error | null,
+	seleniumBaseError: noError(),
 	seleniumBaseImports: 0,
 };
 
@@ -272,7 +276,7 @@ const cdpState = {
 	networkCookies: [] as MockBrowserCookie[],
 	networkCookiesByPageId: new Map<string, MockBrowserCookie[]>(),
 	networkGetCookiesCalls: [] as string[],
-	networkGetCookiesError: null as Error | null,
+	networkGetCookiesError: noError(),
 	navigateUrls: [] as string[],
 	pageSockets: [] as MockWebSocket[],
 	isolatedWorldContextIds: new Map<string, number>(),

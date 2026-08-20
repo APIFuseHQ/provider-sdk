@@ -256,8 +256,7 @@ describe("wrapWithInstrumentation", () => {
 	it("records error spans when instrumented methods throw", async () => {
 		const ctx = createMockContext();
 		ctx.stealth.fetch = mock(async () => {
-			const error = new Error("boom") as Error & { status: number };
-			error.status = 503;
+			const error = Object.assign(new Error("boom"), { status: 503 });
 			throw error;
 		});
 
