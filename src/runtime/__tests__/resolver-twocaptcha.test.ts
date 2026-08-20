@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { capturedError } from "../../__tests__/test-utils.js";
+import { assertIsError, capturedError } from "../../__tests__/test-utils.js";
 
 import { ProviderError } from "../../errors.js";
 import type { ChallengeSolution, ProviderChallenge, ProviderChallengeKind } from "../../types.js";
@@ -332,7 +332,8 @@ describe("2captcha resolver vendor", () => {
 			missingFields: ["minScore"],
 			phase: "create_task",
 		});
-		expect((error as Error).message).toContain("minScore");
+		assertIsError(error);
+		expect(error.message).toContain("minScore");
 		expect(stub.calls).toHaveLength(0);
 	});
 
@@ -492,7 +493,8 @@ describe("2captcha resolver vendor", () => {
 			missingFields: [missingField],
 			phase: "create_task",
 		});
-		expect((error as Error).message).toContain(missingField);
+		assertIsError(error);
+		expect(error.message).toContain(missingField);
 		const serialized = JSON.stringify(error);
 		for (const secret of [
 			apiKey,
@@ -502,7 +504,7 @@ describe("2captcha resolver vendor", () => {
 			AWS_WAF_CHALLENGE.context,
 			AWS_WAF_CHALLENGE.iv,
 		]) {
-			expect((error as Error).message).not.toContain(secret);
+			expect(error.message).not.toContain(secret);
 			expect(serialized).not.toContain(secret);
 		}
 		expect(stub.calls).toHaveLength(0);

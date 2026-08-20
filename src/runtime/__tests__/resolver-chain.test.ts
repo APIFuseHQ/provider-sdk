@@ -7,6 +7,7 @@ import {
 import { VALID_PROVIDER_CHALLENGE_KINDS } from "../../define.js";
 import { createProviderCache } from "../cache.js";
 import type {
+	BrowserPage,
 	ChallengeSolution,
 	ProviderChallenge,
 	ProviderChallengeKind,
@@ -489,7 +490,7 @@ describe("resolver vendor chain", () => {
 				throw new Error("2captcha network must not be reached");
 			}) as typeof fetch,
 		});
-		const page = {
+		const page = createBrowserPageDouble({
 			async cookies() {
 				return [
 					{
@@ -503,27 +504,22 @@ describe("resolver vendor chain", () => {
 					},
 				];
 			},
-			async evaluate<T>() {
-				return "BrowserFallback/1.0" as T;
-			},
 			async goto() {
 				browserGotoCalls += 1;
 			},
-			async withResourcePolicy<T>(_policy: unknown, run: () => Promise<T>) {
-				return await run();
+			async userAgent() {
+				return "BrowserFallback/1.0";
 			},
-		} as unknown as BrowserPage;
+		});
 		const browser = createBrowserResolverVendorAdapter({
 			allowedHosts: ["example.com"],
 			cdpUrl: "ws://cdp-pool.test",
 			createClient: () =>
-				({
-					engine: "playwright-stealth",
-					async close() {},
+				createBrowserClientDouble({
 					async withIsolatedContext<T>(handler: (isolatedPage: BrowserPage) => Promise<T>) {
 						return await handler(page);
 					},
-				}) as unknown as BrowserClient,
+				}),
 			pollIntervalMs: 1,
 			timeoutMs: 100,
 		});
