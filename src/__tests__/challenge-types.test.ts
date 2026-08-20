@@ -103,14 +103,22 @@ describe("challenge resolver types", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			resolver: resolverConfig,
-			meta: { displayName: "With Resolver", category: "test" },
+			meta: {
+				displayName: "With Resolver",
+				descriptionKey: "with-resolver.description",
+				category: "test",
+			},
 			operations: {},
 		};
 		const withoutResolver: ProviderDefinition = {
 			id: "without-resolver",
 			version: "1.0.0",
 			runtime: "standard",
-			meta: { displayName: "Without Resolver", category: "test" },
+			meta: {
+				displayName: "Without Resolver",
+				descriptionKey: "without-resolver.description",
+				category: "test",
+			},
 			operations: {},
 		};
 

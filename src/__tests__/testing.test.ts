@@ -23,6 +23,7 @@ const testProvider = defineProvider({
 	runtime: "standard",
 	meta: {
 		displayName: "Test Provider",
+		descriptionKey: "test-provider.description",
 		category: "test",
 	},
 	operations: {
@@ -98,12 +99,19 @@ const fixtureHarnessProvider = defineProvider({
 	id: "fixture-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
-	meta: { displayName: "Fixture Harness Provider", category: "test" },
+	meta: {
+		displayName: "Fixture Harness Provider",
+		descriptionKey: "fixture-harness-provider.description",
+		category: "test",
+	},
 	operations: {
 		lookup: {
 			input: z.object({ q: z.string() }),
 			output: z.object({ result: z.string() }),
-			handler: async (_ctx, input) => ({ result: input.q }),
+			handler: async (_ctx, input: unknown) => {
+				const { q } = z.object({ q: z.string() }).parse(input);
+				return { result: q };
+			},
 			fixtures: {
 				request: { q: "fixture" },
 				response: { result: "fixture" },
@@ -117,16 +125,21 @@ const snapshotHarnessProvider = defineProvider({
 	id: "snapshot-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
-	meta: { displayName: "Snapshot Harness Provider", category: "test" },
+	meta: {
+		displayName: "Snapshot Harness Provider",
+		descriptionKey: "snapshot-harness-provider.description",
+		category: "test",
+	},
 	operations: {
 		normalize: {
 			input: z.object({ id: z.string() }),
 			output: z.object({ id: z.string(), label: z.string() }),
-			handler: async (ctx, input) => {
+			handler: async (ctx, input: unknown) => {
+				const { id } = z.object({ id: z.string() }).parse(input);
 				const raw = await ctx.http.get("https://example.test/raw");
 				const body = await raw.json<{ label: string }>();
 
-				return { id: input.id, label: body.label };
+				return { id, label: body.label };
 			},
 			fixtures: {
 				request: { id: "snap" },
@@ -141,7 +154,11 @@ const streamSnapshotHarnessProvider = defineProvider({
 	id: "stream-snapshot-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
-	meta: { displayName: "Stream Snapshot Harness Provider", category: "test" },
+	meta: {
+		displayName: "Stream Snapshot Harness Provider",
+		descriptionKey: "stream-snapshot-harness-provider.description",
+		category: "test",
+	},
 	operations: {
 		download: {
 			input: z.object({}),
@@ -197,7 +214,11 @@ const multiStreamSnapshotHarnessProvider = defineProvider({
 	id: "multi-stream-snapshot-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
-	meta: { displayName: "Multi Stream Snapshot Harness Provider", category: "test" },
+	meta: {
+		displayName: "Multi Stream Snapshot Harness Provider",
+		descriptionKey: "multi-stream-snapshot-harness-provider.description",
+		category: "test",
+	},
 	operations: {
 		download: {
 			input: z.object({}),
@@ -227,12 +248,16 @@ const authHarnessProvider = defineProvider({
 	auth: {
 		mode: "credentials",
 		flow: {
-			start: async () => ({ kind: "complete", turnId: "turn_done" }),
+			start: async (_ctx) => ({ kind: "complete", turnId: "turn_done" }),
 			continue: async () => ({ kind: "complete", turnId: "turn_done" }),
 		},
 	},
 	credential: { keys: ["apiKey"] },
-	meta: { displayName: "Auth Harness Provider", category: "test" },
+	meta: {
+		displayName: "Auth Harness Provider",
+		descriptionKey: "auth-harness-provider.description",
+		category: "test",
+	},
 	operations: {
 		me: {
 			input: z.object({}),
@@ -248,7 +273,11 @@ const handlerE2eProvider = defineProvider({
 	id: "handler-e2e-provider",
 	version: "1.0.0",
 	runtime: "standard",
-	meta: { displayName: "Handler E2E Provider", category: "test" },
+	meta: {
+		displayName: "Handler E2E Provider",
+		descriptionKey: "handler-e2e-provider.description",
+		category: "test",
+	},
 	operations: {
 		lookup: {
 			input: z.object({
@@ -256,9 +285,14 @@ const handlerE2eProvider = defineProvider({
 				date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 			}),
 			output: z.object({ result: z.string() }),
-			handler: async (ctx, input) => {
+			handler: async (ctx, input: unknown) => {
+				const inputSchema = z.object({
+					id: z.string(),
+					date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+				});
+				const { id, date } = inputSchema.parse(input);
 				const response = await ctx.http.get(
-					`https://example.test/items/${input.id}?date=${input.date}`,
+					`https://example.test/items/${id}?date=${date}`,
 				);
 				const body = await response.json<{ label: string }>();
 				return { result: body.label };
@@ -278,9 +312,14 @@ const brokenHandlerProvider = defineProvider({
 	operations: {
 		lookup: {
 			...handlerE2eProvider.operations.lookup,
-			handler: async (ctx, input) => {
+			handler: async (ctx, input: unknown) => {
+				const inputSchema = z.object({
+					id: z.string(),
+					date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+				});
+				const { id, date } = inputSchema.parse(input);
 				const response = await ctx.http.get(
-					`https://example.test/items/${input.id}?date=${input.date}`,
+					`https://example.test/items/${id}?date=${date}`,
 				);
 				const body = await response.json<{ label: string }>();
 				return { wrong: body.label };

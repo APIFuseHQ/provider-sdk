@@ -3,7 +3,7 @@ import { describe, expect, it } from "bun:test";
 import { assertIsError, capturedError } from "../../__tests__/test-utils.js";
 
 import { ProviderError } from "../../errors.js";
-import type { ChallengeSolution, ProviderChallenge, ProviderChallengeKind } from "../../types.js";
+import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
 import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
 import { createResolverClient } from "../resolver.js";
 import { createTwoCaptchaResolverVendorAdapter } from "../resolver-vendors/twocaptcha.js";
@@ -33,8 +33,33 @@ const AWS_WAF_CHALLENGE = {
 const UNSUPPORTED_CHALLENGES = [
 	{ kind: "cloudflare_interstitial", pageUrl: RECAPTCHA_CHALLENGE.pageUrl },
 	{ kind: "akamai_sec_cpt", pageUrl: RECAPTCHA_CHALLENGE.pageUrl },
-	{ kind: "akamai_sensor", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, scriptUrl: "https://example.com/akamai/sensor.js" },
-] as const satisfies readonly ProviderChallenge[];
+	{
+		kind: "akamai_sensor",
+		pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
+		scriptUrl: "https://example.com/akamai/sensor.js",
+	},
+] satisfies ProviderChallenge[];
+
+function challengeForTwoCaptchaKind(
+	kind: (typeof RESOLVER_VENDOR_CAPABILITIES)["2captcha"][number],
+): ProviderChallenge {
+	switch (kind) {
+		case "aws_waf":
+			return AWS_WAF_CHALLENGE;
+		case "recaptcha_v3":
+			return {
+				kind,
+				siteKey: "key",
+				pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
+				action: "action",
+				minScore: 0.3,
+			};
+		case "turnstile":
+		case "recaptcha_v2":
+		case "hcaptcha":
+			return { kind, siteKey: "key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl };
+	}
+}
 
 type FetchCall = {
 	readonly url: string;
@@ -605,7 +630,7 @@ describe("2captcha resolver vendor", () => {
 
 	it("reads support for every kind from the declared capability table", () => {
 		const adapter = createAdapter(createFetchStub([]));
-		const declared = RESOLVER_VENDOR_CAPABILITIES["2captcha"] as readonly ProviderChallengeKind[];
+		const declared = RESOLVER_VENDOR_CAPABILITIES["2captcha"];
 
 		expect(
 			Object.fromEntries(declared.map((kind) => [kind, adapter.supports(kind)])),
@@ -613,17 +638,21 @@ describe("2captcha resolver vendor", () => {
 	});
 
 	it("agrees with every declared capability without a not_implemented result", async () => {
-		const declared = RESOLVER_VENDOR_CAPABILITIES["2captcha"] as readonly ProviderChallengeKind[];
+		const declared = RESOLVER_VENDOR_CAPABILITIES["2captcha"];
 		for (const kind of declared) {
-			const challenge = kind === "aws_waf" ? AWS_WAF_CHALLENGE : kind === "recaptcha_v3" ? { kind, siteKey: "key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "action", minScore: 0.3 } : { kind, siteKey: "key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl };
-			const stub = successfulFetch(kind === "aws_waf" ? { existing_token: "token" } : { token: "token" });
-			await expect(createAdapter(stub).solve(challenge, undefined, new AbortController().signal)).resolves.toBeDefined();
+			const challenge = challengeForTwoCaptchaKind(kind);
+			const stub = successfulFetch(
+				kind === "aws_waf" ? { existing_token: "token" } : { token: "token" },
+			);
+			await expect(
+				createAdapter(stub).solve(challenge, undefined, new AbortController().signal),
+			).resolves.toBeDefined();
 		}
 	});
 
 	it("throws TypeError for a kind outside the declared capability table", async () => {
-		// @ts-expect-error test-invalid: runtime capability validation must reject unknown kinds.
 		const challenge: ProviderChallenge = {
+			// @ts-expect-error test-invalid: runtime capability validation must reject unknown kinds.
 			kind: "future_challenge",
 			pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
 		};

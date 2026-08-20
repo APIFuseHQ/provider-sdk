@@ -276,7 +276,11 @@ describe("resolver server wiring", () => {
 				runtime: "standard",
 				proxy: { mode: "optional", session: { affinity: "connection" } },
 				resolver: { vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
-				meta: { displayName: "Resolver Production Identity", category: "test" },
+				meta: {
+					displayName: "Resolver Production Identity",
+					descriptionKey: "resolver-production-identity.description",
+					category: "test",
+				},
 				operations: {
 					solve: {
 						input: z.object({}),
@@ -359,7 +363,11 @@ describe("resolver server wiring", () => {
 					{ name: NODEMAVEN_PASSWORD_ENV, required: true },
 				],
 				resolver: { vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
-				meta: { displayName: "Resolver Required Proxy Policy", category: "test" },
+				meta: {
+					displayName: "Resolver Required Proxy Policy",
+					descriptionKey: "resolver-required-proxy-policy.description",
+					category: "test",
+				},
 				operations: {
 					solve: {
 						input: z.object({}),
@@ -438,7 +446,11 @@ describe("resolver server wiring", () => {
 					{ name: NODEMAVEN_PASSWORD_ENV, required: true },
 				],
 				resolver: { vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
-				meta: { displayName: "Resolver Required Proxy Auth Flow", category: "test" },
+				meta: {
+					displayName: "Resolver Required Proxy Auth Flow",
+					descriptionKey: "resolver-required-proxy-auth-flow.description",
+					category: "test",
+				},
 				auth: {
 					mode: "credentials",
 					flow: {
@@ -505,14 +517,21 @@ describe("resolver server wiring", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			resolver: declaration,
-			meta: { displayName: "Resolver Authoring Path", category: "test" },
+			meta: {
+				displayName: "Resolver Authoring Path",
+				descriptionKey: "resolver-authoring-path.description",
+				category: "test",
+			},
 			operations: {
 				solve: {
 					input: z.object({ kind: z.enum(["turnstile", "aws_waf"]) }),
 					output: z.object({ ok: z.boolean() }),
-					async handler(ctx, input) {
+					async handler(ctx, input: unknown) {
+						const { kind } = z
+							.object({ kind: z.enum(["turnstile", "aws_waf"]) })
+							.parse(input);
 						const challenge: ProviderChallenge =
-							input.kind === "turnstile"
+							kind === "turnstile"
 								? turnstileChallenge
 								: { kind: "aws_waf", pageUrl: "https://example.com/challenge" };
 						await ctx.resolver.solve(challenge);
@@ -558,7 +577,11 @@ describe("resolver server wiring", () => {
 			id: "resolver-undeclared",
 			version: "1.0.0",
 			runtime: "standard",
-			meta: { displayName: "Resolver Undeclared", category: "test" },
+			meta: {
+				displayName: "Resolver Undeclared",
+				descriptionKey: "resolver-undeclared.description",
+				category: "test",
+			},
 			operations: {
 				solve: {
 					input: z.object({}),
@@ -601,7 +624,11 @@ describe("resolver server wiring", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			resolver: { vendors: ["browser"], kinds: ["turnstile"] },
-			meta: { displayName: "Resolver Server Demo", category: "test" },
+			meta: {
+				displayName: "Resolver Server Demo",
+				descriptionKey: "resolver-server-demo.description",
+				category: "test",
+			},
 			context: { keys: [] },
 			auth: {
 				mode: "credentials",

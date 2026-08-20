@@ -5,6 +5,7 @@ import { createFlowContext, createScratchpad } from "../runtime/auth-flow.js";
 import { createCredentialContext } from "../runtime/credential.js";
 import { createEnvContext } from "../runtime/env.js";
 import type { HttpClient } from "../types.js";
+import { createProviderContextDouble } from "./test-utils.js";
 
 describe("runtime contexts", () => {
 	it("createEnvContext respects the allowlist", () => {
@@ -88,6 +89,7 @@ describe("runtime contexts", () => {
 
 		const context = createFlowContext({
 			http,
+			stealth: createProviderContextDouble().stealth,
 			env: createEnvContext(),
 			tenantId: "tenant-1",
 			providerId: "demo-provider",

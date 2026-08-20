@@ -171,7 +171,11 @@ function createProvider(): ProviderDefinition {
 		id: "auth-contract-provider",
 		version: "1.0.0",
 		runtime: "standard",
-		meta: { displayName: "Auth Contract Provider", category: "test" },
+		meta: {
+			displayName: "Auth Contract Provider",
+			descriptionKey: "auth-contract-provider.description",
+			category: "test",
+		},
 		auth: {
 			mode: "credentials",
 			flow: {
@@ -354,12 +358,14 @@ describe("auth-flow AuthTurn provider contract", () => {
 		expect(() =>
 			helpers.abort({
 				code: "unsafe",
+				// @ts-expect-error test-invalid: Date instances are not safe JSON values.
 				actionHint: { expiresAt: new Date("2027-01-01T00:00:00.000Z") },
 			}),
 		).toThrow("must be a plain JSON object");
 		expect(() =>
 			helpers.abort({
 				code: "unsafe",
+				// @ts-expect-error test-invalid: Map instances are not safe JSON values.
 				actionHint: { values: new Map([["token", "secret-token"]]) },
 			}),
 		).toThrow("must be a plain JSON object");
@@ -371,7 +377,8 @@ describe("auth-flow AuthTurn provider contract", () => {
 		expect(() =>
 			helpers.abort({
 				code: "unsafe",
-				actionHint: { box: new SecretBox() } as never,
+				// @ts-expect-error test-invalid: class instances are not safe JSON values.
+				actionHint: { box: new SecretBox() },
 			}),
 		).toThrow("must be a plain JSON object");
 		expect(() =>
@@ -390,7 +397,11 @@ describe("auth-flow AuthTurn provider contract", () => {
 				id: "auth-helper-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "Auth Helper Provider", category: "test" },
+				meta: {
+					displayName: "Auth Helper Provider",
+					descriptionKey: "auth-helper-provider.description",
+					category: "test",
+				},
 				auth: {
 					mode: "credentials",
 					flow: {
@@ -456,7 +467,11 @@ describe("auth-flow AuthTurn provider contract", () => {
 				id: "auth-abort-error-provider",
 				version: "1.0.0",
 				runtime: "standard",
-				meta: { displayName: "Auth Abort Error Provider", category: "test" },
+				meta: {
+					displayName: "Auth Abort Error Provider",
+					descriptionKey: "auth-abort-error-provider.description",
+					category: "test",
+				},
 				auth: {
 					mode: "credentials",
 					flow: {
@@ -530,9 +545,10 @@ describe("auth-flow AuthTurn provider contract", () => {
 			expect(turns[kind].expiresAt).toBe(expiresAt);
 		}
 
-		expect(turns.complete.expiresAt).toBeUndefined();
-		expect(turns.abort.expiresAt).toBeUndefined();
-		expect(turns.error.expiresAt).toBeUndefined();
+		const turnExpiresAt = (turn: AuthTurn) => turn.expiresAt;
+		expect(turnExpiresAt(turns.complete)).toBeUndefined();
+		expect(turnExpiresAt(turns.abort)).toBeUndefined();
+		expect(turnExpiresAt(turns.error)).toBeUndefined();
 	});
 
 	it("routes poll and disconnect to retry and abort AuthTurn shapes", async () => {
