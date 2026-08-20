@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
+import { createMagicLinkCeremony } from "../ceremonies/index.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import { createServerApp } from "../server/serve.js";
 import type {
@@ -239,6 +240,67 @@ function assertAuthTurnContract(turn: AuthTurn): void {
 }
 
 describe("auth-flow AuthTurn provider contract", () => {
+	it("drives the magic-link ceremony through start and continue HTTP routes", async () => {
+		const sentBodies: unknown[] = [];
+		const upstream = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				if (new URL(request.url).pathname !== "/send" || request.method !== "POST") {
+					return new Response(null, { status: 404 });
+				}
+				sentBodies.push(await request.json());
+				return Response.json({ queued: true });
+			},
+		});
+
+		try {
+			const flow = createMagicLinkCeremony({
+				sendUrl: new URL("/send", upstream.url).toString(),
+				verifyUrl: new URL("/verify", upstream.url).toString(),
+			});
+			const app = createServerApp(
+				{
+					id: "auth-contract-provider",
+					version: "1.0.0",
+					runtime: "standard",
+					meta: {
+						displayName: "Magic Link Contract Provider",
+						descriptionKey: "magic-link-contract-provider.description",
+						category: "test",
+					},
+					auth: { mode: "credentials", flow },
+					context: { keys: ["__magic_link"] },
+					operations: {},
+				},
+				{ logger: () => {} },
+			);
+
+			const startResponse = await app.request("/auth/start", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(authRequest()),
+			});
+			const startBody = (await startResponse.json()) as { data: AuthTurn };
+
+			expect(startResponse.status).toBe(200);
+			expect(startBody.data.kind).toBe("form");
+			expect(sentBodies).toHaveLength(0);
+
+			const continueResponse = await app.request("/auth/continue", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(authRequest({ email: "demo@example.com" })),
+			});
+			const continueBody = (await continueResponse.json()) as { data: AuthTurn };
+
+			expect(continueResponse.status).toBe(200);
+			expect(continueBody.data.kind).toBe("message");
+			expect(sentBodies).toEqual([{ email: "demo@example.com" }]);
+		} finally {
+			upstream.stop(true);
+		}
+	});
+
 	it("exports auth terminal helpers from the provider authoring subpath", async () => {
 		const providerExports = await import("../provider.js");
 

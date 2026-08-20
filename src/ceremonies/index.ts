@@ -7,6 +7,7 @@ import {
 	TurnValidationError,
 	ValidationError,
 } from "../errors.js";
+import type { AuthStartNoInputGuard } from "../define.js";
 import type { AuthFlowDefinition, AuthFlowInputHandler, AuthTurn, FlowContext } from "../types.js";
 
 type TurnKind = KnownAuthTurnKind;
@@ -224,6 +225,18 @@ export function validateCeremonyOutput(turn: unknown): AuthTurn {
 	return turn as AuthTurn;
 }
 
+/**
+ * Defines an auth flow while preserving its concrete type for downstream checks.
+ * The compile-time guard validates the inferred literal; annotating or widening
+ * a flow to `AuthFlowDefinition` before passing it defeats the check. Full
+ * enforcement requires branding, which is deferred to a future major.
+ */
+export function defineAuthFlow<const TFlow extends AuthFlowDefinition>(
+	flow: TFlow & AuthStartNoInputGuard<TFlow>,
+): TFlow {
+	return flow;
+}
+
 export function createOAuth2Ceremony(options: {
 	authorizeUrl: string;
 	tokenUrl: string;
@@ -232,7 +245,7 @@ export function createOAuth2Ceremony(options: {
 	scopes: string[];
 	usePKCE?: boolean;
 }): AuthFlowDefinition {
-	return {
+	return defineAuthFlow({
 		start: (ctx) =>
 			runCeremonyHandler(
 				async () => {
@@ -306,7 +319,7 @@ export function createOAuth2Ceremony(options: {
 				input,
 			),
 		abort: async () => validateCeremonyOutput(createTurn("abort", { hint: "OAuth flow aborted." })),
-	};
+	});
 }
 
 /**
@@ -384,7 +397,7 @@ export function createDeviceFlowCeremony(options: {
 	clientSecretEnvKey?: string;
 	scopes: string[];
 }): AuthFlowDefinition {
-	return {
+	return defineAuthFlow({
 		start: (ctx) =>
 			runCeremonyHandler(
 				async () => {
@@ -461,7 +474,7 @@ export function createDeviceFlowCeremony(options: {
 			),
 		abort: async () =>
 			validateCeremonyOutput(createTurn("abort", { hint: "Device flow aborted." })),
-	};
+	});
 }
 
 export function createWebAuthnCeremony(options: {
@@ -470,7 +483,7 @@ export function createWebAuthnCeremony(options: {
 	verifyUrl?: string;
 	timeoutMs?: number;
 }): AuthFlowDefinition {
-	return {
+	return defineAuthFlow({
 		start: (ctx) =>
 			runCeremonyHandler(
 				async () => {
@@ -529,7 +542,7 @@ export function createWebAuthnCeremony(options: {
 			),
 		abort: async () =>
 			validateCeremonyOutput(createTurn("abort", { hint: "WebAuthn ceremony aborted." })),
-	};
+	});
 }
 
 export function createMagicLinkCeremony(options: {
@@ -539,23 +552,31 @@ export function createMagicLinkCeremony(options: {
 	expiresInMs?: number;
 }): AuthFlowDefinition {
 	const emailField = options.emailField ?? "email";
+	const buildEmailForm = () =>
+		buildJsonSchemaForm(
+			{
+				type: "object",
+				required: [emailField],
+				properties: {
+					[emailField]: { type: "string", format: "email" },
+				},
+			},
+			"Provide the email address to receive a magic link.",
+		);
 
-	return {
-		start: (ctx, input = {}) =>
+	return defineAuthFlow({
+		start: (ctx) =>
+			runCeremonyHandler(
+				async () => buildEmailForm(),
+				"Magic link start failed",
+				ctx,
+			),
+		continue: (ctx, input = {}) =>
 			runCeremonyHandler(
 				async () => {
 					const email = getString(input, emailField);
 					if (!email) {
-						return buildJsonSchemaForm(
-							{
-								type: "object",
-								required: [emailField],
-								properties: {
-									[emailField]: { type: "string", format: "email" },
-								},
-							},
-							"Provide the email address to receive a magic link.",
-						);
+						return buildEmailForm();
 					}
 
 					await ctx.http.post(options.sendUrl, { email });
@@ -570,16 +591,9 @@ export function createMagicLinkCeremony(options: {
 						timing: { suggestedPollIntervalMs: 5_000, maxWaitMs: 300_000 },
 					});
 				},
-				"Magic link start failed",
+				"Magic link continuation failed",
 				ctx,
 				input,
-			),
-		continue: async () =>
-			validateCeremonyOutput(
-				createTurn("poll", {
-					hint: "Continue polling for magic link completion.",
-					timing: { suggestedPollIntervalMs: 5_000, maxWaitMs: 300_000 },
-				}),
 			),
 		poll: (ctx) =>
 			runCeremonyHandler(
@@ -616,7 +630,7 @@ export function createMagicLinkCeremony(options: {
 			),
 		abort: async () =>
 			validateCeremonyOutput(createTurn("abort", { hint: "Magic link flow aborted." })),
-	};
+	});
 }
 
 export function createFormCeremony(options: {
@@ -624,7 +638,7 @@ export function createFormCeremony(options: {
 	hint?: string;
 	mapCredential?: (input: Record<string, unknown>) => JsonObject;
 }): AuthFlowDefinition {
-	return {
+	return defineAuthFlow({
 		start: async () =>
 			validateCeremonyOutput(
 				buildJsonSchemaForm(
@@ -656,7 +670,7 @@ export function createFormCeremony(options: {
 			),
 		abort: async () =>
 			validateCeremonyOutput(createTurn("abort", { hint: "Form ceremony aborted." })),
-	};
+	});
 }
 
 export function combineCeremonies(...ceremonies: AuthFlowDefinition[]): AuthFlowDefinition {
@@ -739,7 +753,7 @@ export function createSwitchCeremony(options: {
 }): AuthFlowDefinition {
 	const choiceKeys = Object.keys(options.choices);
 
-	return {
+	return defineAuthFlow({
 		start: async () =>
 			validateCeremonyOutput(
 				createTurn("multi_choice", {
@@ -811,5 +825,5 @@ export function createSwitchCeremony(options: {
 				"Switch ceremony abort failed",
 				ctx,
 			),
-	};
+	});
 }

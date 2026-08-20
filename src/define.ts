@@ -249,17 +249,318 @@ type WebSocketOperationConfig<TInput extends SchemaLike, TOutput extends SchemaL
 	): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
 };
 
-type AuthStartNoInputGuard<TConfig> = TConfig extends {
+type AuthStartHandlerNoInputGuard<TStart> = TStart extends (...args: infer TArgs) => unknown
+	? TArgs["length"] extends 0 | 1
+		? unknown
+		: {
+				"auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
+			}
+	: unknown;
+
+export type AuthStartNoInputGuard<TConfig> = TConfig extends {
 	auth?: { flow?: { start: infer TStart } };
 }
-	? TStart extends (...args: infer TArgs) => unknown
-		? TArgs extends [unknown]
-			? unknown
-			: {
-					"auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
+	? AuthStartHandlerNoInputGuard<TStart>
+	: TConfig extends { start: infer TStart }
+		? AuthStartHandlerNoInputGuard<TStart>
+		: unknown;
+
+function splitAuthStartParameters(parameters: string): string[] | undefined {
+	const parts: string[] = [];
+	let start = 0;
+	let round = 0;
+	let square = 0;
+	let curly = 0;
+	let quote: "'" | '"' | "`" | undefined;
+	let escaped = false;
+	let lineComment = false;
+	let blockComment = false;
+	const templateDepths = [0];
+	templateDepths.length = 0;
+
+	for (let index = 0; index < parameters.length; index++) {
+		const character = parameters[index];
+		const nextCharacter = parameters[index + 1];
+		if (lineComment) {
+			if (character === "\n" || character === "\r") lineComment = false;
+			else continue;
+		}
+		if (blockComment) {
+			if (character === "*" && nextCharacter === "/") {
+				blockComment = false;
+				index++;
+			}
+			continue;
+		}
+		if (quote) {
+			if (escaped) {
+				escaped = false;
+			} else if (character === "\\") {
+				escaped = true;
+			} else if (quote === "`" && character === "$" && nextCharacter === "{") {
+				curly++;
+				templateDepths.push(curly);
+				quote = undefined;
+				index++;
+			} else if (character === quote) {
+				quote = undefined;
+			}
+			continue;
+		}
+		if (character === "'" || character === '"' || character === "`") {
+			quote = character;
+			continue;
+		}
+		if (character === "/" && nextCharacter === "/") {
+			lineComment = true;
+			index++;
+			continue;
+		}
+		if (character === "/" && nextCharacter === "*") {
+			blockComment = true;
+			index++;
+			continue;
+		}
+		if (character === "/") return undefined;
+		// Annex B HTML-like comments are not lexed here; give up rather than
+		// risk misreading the parameter list.
+		if (character === "<" && parameters.startsWith("!--", index + 1)) return undefined;
+		if (character === "-" && parameters.startsWith("->", index + 1)) return undefined;
+		if (character === "(") round++;
+		else if (character === ")") round--;
+		else if (character === "[") square++;
+		else if (character === "]") square--;
+		else if (character === "{") curly++;
+		else if (character === "}") {
+			if (templateDepths.at(-1) === curly) {
+				templateDepths.pop();
+				curly--;
+				quote = "`";
+			} else curly--;
+		} else if (character === "," && round === 0 && square === 0 && curly === 0) {
+			parts.push(parameters.slice(start, index));
+			start = index + 1;
+		}
+		if (round < 0 || square < 0 || curly < 0) return undefined;
+	}
+
+	if (
+		quote ||
+		blockComment ||
+		templateDepths.length > 0 ||
+		round !== 0 ||
+		square !== 0 ||
+		curly !== 0
+	)
+		return undefined;
+	parts.push(parameters.slice(start));
+	return parts;
+}
+
+function authStartParameterList(source: string): string | undefined {
+	let index = 0;
+	while (index < source.length && /\s/.test(source[index] ?? "")) index++;
+	if (index >= source.length) return undefined;
+
+	let openIndex = -1;
+	let parenthesizedArrow = false;
+	let asyncMethodOrArrow = false;
+	const skipTrivia = () => {
+		while (index < source.length) {
+			if (/\s/.test(source[index] ?? "")) {
+				index++;
+				continue;
+			}
+			if (source[index] === "/" && source[index + 1] === "/") {
+				index += 2;
+				while (index < source.length && source[index] !== "\n" && source[index] !== "\r") index++;
+				continue;
+			}
+			if (source[index] === "/" && source[index + 1] === "*") {
+				const end = source.indexOf("*/", index + 2);
+				if (end < 0) {
+					index = source.length;
+					return;
 				}
-		: unknown
-	: unknown;
+				index = end + 2;
+				continue;
+			}
+			return;
+		}
+	};
+
+	const initial = source.slice(index);
+	const isAsync = initial.startsWith("async") && !/[\w$]/.test(initial[5] ?? "");
+	if (isAsync) {
+		index += 5;
+		skipTrivia();
+	}
+
+	const afterAsync = source.slice(index);
+	const isFunction = afterAsync.startsWith("function") && !/[\w$]/.test(afterAsync[8] ?? "");
+	if (isFunction) {
+		index += 8;
+		skipTrivia();
+		if (source[index] === "*") {
+			index++;
+			skipTrivia();
+		}
+	} else if (source[index] === "*") {
+		index++;
+		skipTrivia();
+	}
+
+	if (source[index] === "(") {
+		openIndex = index;
+		parenthesizedArrow = !isFunction;
+		asyncMethodOrArrow = isAsync && !isFunction;
+	} else if (isFunction) {
+		if (!/[A-Za-z_$]/.test(source[index] ?? "")) return undefined;
+		index++;
+		while (index < source.length && /[A-Za-z0-9_$]/.test(source[index] ?? "")) index++;
+		skipTrivia();
+		if (source[index] !== "(") return undefined;
+		openIndex = index;
+	} else {
+		const identifierStart = index;
+		if (!/[A-Za-z_$]/.test(source[index] ?? "")) return undefined;
+		index++;
+		while (index < source.length && /[A-Za-z0-9_$]/.test(source[index] ?? "")) index++;
+		const firstIdentifier = source.slice(identifierStart, index);
+		skipTrivia();
+		if (source[index] === "=" && source[index + 1] === ">") return undefined;
+		if (source[index] !== "(") {
+			if (firstIdentifier !== "get" && firstIdentifier !== "set") return undefined;
+			if (!/[A-Za-z_$]/.test(source[index] ?? "")) return undefined;
+			index++;
+			while (index < source.length && /[A-Za-z0-9_$]/.test(source[index] ?? "")) index++;
+			skipTrivia();
+		}
+		if (source[index] !== "(") return undefined;
+		openIndex = index;
+	}
+	if (openIndex < 0) return undefined;
+
+	let depth = 1;
+	let square = 0;
+	let curly = 0;
+	let quote: "'" | '"' | "`" | undefined;
+	let escaped = false;
+	let lineComment = false;
+	let blockComment = false;
+	const templateDepths = [0];
+	templateDepths.length = 0;
+	for (index = openIndex + 1; index < source.length; index++) {
+		const character = source[index];
+		const nextCharacter = source[index + 1];
+		if (lineComment) {
+			if (character === "\n" || character === "\r") lineComment = false;
+			else continue;
+		}
+		if (blockComment) {
+			if (character === "*" && nextCharacter === "/") {
+				blockComment = false;
+				index++;
+			}
+			continue;
+		}
+		if (quote) {
+			if (escaped) escaped = false;
+			else if (character === "\\") escaped = true;
+			else if (quote === "`" && character === "$" && nextCharacter === "{") {
+				curly++;
+				templateDepths.push(curly);
+				quote = undefined;
+				index++;
+			} else if (character === quote) quote = undefined;
+			continue;
+		}
+		if (character === "'" || character === '"' || character === "`") {
+			quote = character;
+			continue;
+		}
+		if (character === "/" && nextCharacter === "/") {
+			lineComment = true;
+			index++;
+			continue;
+		}
+		if (character === "/" && nextCharacter === "*") {
+			blockComment = true;
+			index++;
+			continue;
+		}
+		if (character === "/") return undefined;
+		// Annex B HTML-like comments are not lexed here; give up rather than
+		// risk misreading the parameter list.
+		if (character === "<" && source.startsWith("!--", index + 1)) return undefined;
+		if (character === "-" && source.startsWith("->", index + 1)) return undefined;
+		if (character === "(") depth++;
+		else if (character === ")") {
+			depth--;
+			if (depth === 0 && square === 0 && curly === 0) {
+				const closeIndex = index;
+				if (parenthesizedArrow) {
+					index++;
+					skipTrivia();
+					const hasArrow = source[index] === "=" && source[index + 1] === ">";
+					if (!hasArrow && (!asyncMethodOrArrow || source[index] !== "{")) return undefined;
+				}
+				return source.slice(openIndex + 1, closeIndex);
+			}
+			if (depth < 0) return undefined;
+		} else if (character === "[") square++;
+		else if (character === "]") {
+			square--;
+			if (square < 0) return undefined;
+		} else if (character === "{") curly++;
+		else if (character === "}") {
+			if (templateDepths.at(-1) === curly) {
+				templateDepths.pop();
+				curly--;
+				quote = "`";
+			} else curly--;
+			if (curly < 0) return undefined;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Conservative defense in depth for defaulted second parameters, which
+ * JavaScript intentionally omits from Function.length. Ambiguous source is
+ * ignored so this check can never reject a valid provider on weak evidence.
+ */
+function authStartHasHiddenInput(start: unknown): boolean {
+	let source: string;
+	try {
+		source = Function.prototype.toString.call(start);
+	} catch {
+		return false;
+	}
+	if (
+		!source ||
+		source.includes("[native code]") ||
+		/^\s*(?:async\s+)?function\s+bound\b/.test(source)
+	)
+		return false;
+
+	const parameters = authStartParameterList(source);
+	if (!parameters) return false;
+	const parts = splitAuthStartParameters(parameters);
+	if (!parts || parts.length < 2) return false;
+
+	// Require ordinary, readable source formatting. This intentionally fails
+	// open for minified output and for transpilers that rewrite defaults.
+	const commaIndex = parameters.indexOf(",");
+	if (commaIndex < 0 || !/\s/.test(parameters[commaIndex + 1] ?? "")) return false;
+	const first = parts[0].trim();
+	const second = parts[1].trim();
+	const identifier = /^[_$A-Za-z][_$A-Za-z0-9]*/;
+	const firstName = first.match(identifier)?.[0];
+	const secondName = second.match(identifier)?.[0];
+	if (!firstName || !secondName || firstName.length < 3 || secondName.length < 3) return false;
+	return /\s=\s/.test(second);
+}
 
 export interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> {
 	id: string;
@@ -502,6 +803,24 @@ function validateProviderShape(config: unknown): void {
 		"start" in auth.flow &&
 		typeof auth.flow.start === "function" &&
 		auth.flow.start.length > 1
+	) {
+		throw new ProviderError(
+			`Provider "${String(config.id)}" auth.flow.start must not declare an input parameter`,
+			{
+				fix: "Return a form turn from start(ctx), then receive user input in continue(ctx, input).",
+			},
+		);
+	}
+	if (
+		auth &&
+		typeof auth === "object" &&
+		"flow" in auth &&
+		auth.flow &&
+		typeof auth.flow === "object" &&
+		"start" in auth.flow &&
+		typeof auth.flow.start === "function" &&
+		auth.flow.start.length <= 1 &&
+		authStartHasHiddenInput(auth.flow.start)
 	) {
 		throw new ProviderError(
 			`Provider "${String(config.id)}" auth.flow.start must not declare an input parameter`,
