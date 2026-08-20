@@ -8,7 +8,7 @@ import {
 	type ProviderChoiceTelemetryEvent,
 } from "../runtime/choice.js";
 import { createUnsupportedProviderRuntimeState } from "../runtime/state.js";
-import type { CredentialContext, ProviderRuntimeState } from "../types.js";
+import type { CredentialContext, ProviderChoiceContext, ProviderRuntimeState } from "../types.js";
 import { MemoryProviderRuntimeState } from "./memory-state.js";
 
 const STORAGE_OPTIONS = {
@@ -43,7 +43,6 @@ function createManagedChoiceFixture(options?: {
 	readonly connectionId?: string;
 	readonly credentialValues?: Record<string, string>;
 	readonly state?: ProviderRuntimeState;
-	readonly wordIssuance?: string;
 	readonly onTelemetry?: (event: ProviderChoiceTelemetryEvent) => void;
 }) {
 	const credentialValues = options?.credentialValues ?? { userId: "u1" };
@@ -63,13 +62,40 @@ function createManagedChoiceFixture(options?: {
 		request,
 		credential,
 		state: options?.state,
-		env: {
-			get: (key: string) =>
-				key === "APIFUSE__PROVIDER_RUNTIME__CHOICE_WORD_ISSUANCE"
-					? (options?.wordIssuance ?? "word")
-					: undefined,
-		},
 		onTelemetry: options?.onTelemetry,
+	});
+}
+
+async function issueLegacyServerChoiceFixture(options: {
+	readonly choice: ProviderChoiceContext;
+	readonly state: MemoryProviderRuntimeState;
+	readonly prefix: string;
+	readonly purpose: string;
+	readonly payload: Record<string, unknown>;
+	readonly nowMs?: number;
+}): Promise<string> {
+	const nowMs = options.nowMs ?? 1_000;
+	const stateId = `${LEGACY_SERVER_STATE_KEY}-${options.purpose}`;
+	const namespace = options.state.namespace(STORAGE_OPTIONS.namespace, {
+		defaultTtl: STORAGE_OPTIONS.ttl,
+		maxTtl: STORAGE_OPTIONS.ttl,
+		maxEntries: STORAGE_OPTIONS.maxEntries,
+		maxValueBytes: STORAGE_OPTIONS.maxValueBytes,
+	});
+	await namespace.set(stateId, options.payload);
+	return options.choice.issue({
+		prefix: options.prefix,
+		purpose: options.purpose,
+		payload: {
+			storage: "server",
+			state_id: stateId,
+			payload_digest: createHash("sha256")
+				.update(JSON.stringify(options.payload))
+				.digest("base64url"),
+			created_at_ms: nowMs,
+		},
+		ttlMs: 60_000,
+		nowMs,
 	});
 }
 
@@ -99,25 +125,13 @@ describe("managed choice storage", () => {
 	it("parses a legacy encrypted server handle during the compatibility window", async () => {
 		const state = new MemoryProviderRuntimeState();
 		const payload = { choice_id: "legacy-A" };
-		const namespace = state.namespace(STORAGE_OPTIONS.namespace, {
-			defaultTtl: STORAGE_OPTIONS.ttl,
-			maxTtl: STORAGE_OPTIONS.ttl,
-			maxEntries: STORAGE_OPTIONS.maxEntries,
-			maxValueBytes: STORAGE_OPTIONS.maxValueBytes,
-		});
-		await namespace.set(LEGACY_SERVER_STATE_KEY, payload);
 		const choice = createManagedChoiceFixture({ state });
-		const token = choice.issue({
+		const token = await issueLegacyServerChoiceFixture({
+			choice,
+			state,
 			prefix: "provider_choice_v2",
 			purpose: "reservation",
-			payload: {
-				storage: "server",
-				state_id: LEGACY_SERVER_STATE_KEY,
-				payload_digest: createHash("sha256").update(JSON.stringify(payload)).digest("base64url"),
-				created_at_ms: 1_000,
-			},
-			ttlMs: 60_000,
-			nowMs: 1_000,
+			payload,
 		});
 
 		const parsed = await choice.parse({
@@ -132,41 +146,15 @@ describe("managed choice storage", () => {
 		expect(parsed).toEqual({ choice_id: "legacy-A" });
 	});
 
-	it("keeps server issuance in the beta.28 six-part legacy envelope when the gate is unset", async () => {
+	it("issues server-stored choices as words without runtime opt-in", async () => {
 		const state = new MemoryProviderRuntimeState();
 		const choice = createTestProviderChoiceContext({
 			providerId: "provider-a",
 			state,
-			env: { get: () => undefined },
 		});
 		const token = await choice.issue({
 			prefix: WORD_PREFIX,
-			purpose: "rollout-gate",
-			payload: { choice_id: "legacy-issued" },
-			ttlMs: 60_000,
-			nowMs: 1_000,
-			storage: STORAGE_OPTIONS,
-		});
-
-		expect(token.split(".")).toHaveLength(6);
-		expect(
-			await choice.parse({
-				token,
-				prefix: WORD_PREFIX,
-				purpose: "rollout-gate",
-				ttlMs: 60_000,
-				nowMs: 2_000,
-				storage: STORAGE_OPTIONS,
-			}),
-		).toEqual({ choice_id: "legacy-issued" });
-	});
-
-	it("uses word issuance only after the runtime gate is flipped", async () => {
-		const state = new MemoryProviderRuntimeState();
-		const choice = createManagedChoiceFixture({ state, wordIssuance: "word" });
-		const token = await choice.issue({
-			prefix: WORD_PREFIX,
-			purpose: "rollout-gate-word",
+			purpose: "unconditional-word",
 			payload: { choice_id: "word-issued" },
 			ttlMs: 60_000,
 			nowMs: 1_000,
@@ -177,19 +165,17 @@ describe("managed choice storage", () => {
 		expect(tokenWordCount(token, WORD_PREFIX)).toBe(4);
 	});
 
-	it("keeps dual-read independent from the issuance gate", async () => {
+	it("keeps dual-read while issuing only word tokens", async () => {
 		const state = new MemoryProviderRuntimeState();
-		const legacyChoice = createManagedChoiceFixture({ state, wordIssuance: "legacy" });
-		const wordChoice = createManagedChoiceFixture({ state, wordIssuance: "word" });
-		const legacyToken = await legacyChoice.issue({
+		const choice = createManagedChoiceFixture({ state });
+		const legacyToken = await issueLegacyServerChoiceFixture({
+			choice,
+			state,
 			prefix: WORD_PREFIX,
 			purpose: "dual-read",
 			payload: { kind: "legacy" },
-			ttlMs: 60_000,
-			nowMs: 1_000,
-			storage: STORAGE_OPTIONS,
 		});
-		const wordToken = await wordChoice.issue({
+		const wordToken = await choice.issue({
 			prefix: WORD_PREFIX,
 			purpose: "dual-read",
 			payload: { kind: "word" },
@@ -199,7 +185,7 @@ describe("managed choice storage", () => {
 		});
 
 		expect(
-			await wordChoice.parse({
+			await choice.parse({
 				token: legacyToken,
 				prefix: WORD_PREFIX,
 				purpose: "dual-read",
@@ -209,7 +195,7 @@ describe("managed choice storage", () => {
 			}),
 		).toEqual({ kind: "legacy" });
 		expect(
-			await legacyChoice.parse({
+			await choice.parse({
 				token: wordToken,
 				prefix: WORD_PREFIX,
 				purpose: "dual-read",
@@ -220,20 +206,21 @@ describe("managed choice storage", () => {
 		).toEqual({ kind: "word" });
 	});
 
-	it("retains the documented unsupported explicit claim for newly issued legacy handles", async () => {
+	it("retains the documented unsupported explicit claim for legacy handles", async () => {
 		const state = new MemoryProviderRuntimeState();
-		const choice = createManagedChoiceFixture({ state, wordIssuance: "legacy" });
-		const token = await choice.issue({
+		const choice = createManagedChoiceFixture({ state });
+		const token = await issueLegacyServerChoiceFixture({
+			choice,
+			state,
 			prefix: WORD_PREFIX,
 			purpose: "legacy-explicit",
 			payload: { kind: "legacy" },
-			ttlMs: 60_000,
-			storage: STORAGE_OPTIONS,
 		});
 		const claim = await choice.parse({
 			token,
 			prefix: WORD_PREFIX,
 			purpose: "legacy-explicit",
+			nowMs: 2_000,
 			storage: STORAGE_OPTIONS,
 			consume: "explicit",
 		});
@@ -242,28 +229,6 @@ describe("managed choice storage", () => {
 		if (claim.status !== "active") throw new Error("Expected an active legacy claim.");
 		expect(claim.payload).toEqual({ kind: "legacy" });
 		expect(await claim.consume()).toEqual({ status: "unsupported" });
-	});
-
-	it("fails closed for an unknown issuance gate value", async () => {
-		const state = new MemoryProviderRuntimeState();
-		const choice = createManagedChoiceFixture({
-			state,
-			wordIssuance: "invalid",
-		});
-
-		try {
-			await choice.issue({
-				prefix: WORD_PREFIX,
-				purpose: "rollout-gate-invalid",
-				payload: { choice_id: "invalid" },
-				ttlMs: 60_000,
-				storage: STORAGE_OPTIONS,
-			});
-			throw new Error("Expected invalid issuance mode to reject.");
-		} catch (error) {
-			expect(error).toBeInstanceOf(ProviderError);
-			expect((error as ProviderError).code).toBe("CHOICE_WORD_ISSUANCE_INVALID");
-		}
 	});
 
 	it("round-trips a four-word server-stored choice", async () => {
@@ -376,10 +341,6 @@ describe("managed choice storage", () => {
 		const choice = createProviderChoiceContext({
 			providerId: "provider-a",
 			state,
-			env: {
-				get: (key) =>
-					key === "APIFUSE__PROVIDER_RUNTIME__CHOICE_WORD_ISSUANCE" ? "word" : undefined,
-			},
 		});
 		const payload = { cursor: "no-envelope-secret" };
 
