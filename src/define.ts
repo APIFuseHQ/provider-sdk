@@ -249,17 +249,21 @@ type WebSocketOperationConfig<TInput extends SchemaLike, TOutput extends SchemaL
 	): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
 };
 
-type AuthStartNoInputGuard<TConfig> = TConfig extends {
+type AuthStartHandlerNoInputGuard<TStart> = TStart extends (...args: infer TArgs) => unknown
+	? TArgs["length"] extends 0 | 1
+		? unknown
+		: {
+				"auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
+			}
+	: unknown;
+
+export type AuthStartNoInputGuard<TConfig> = TConfig extends {
 	auth?: { flow?: { start: infer TStart } };
 }
-	? TStart extends (...args: infer TArgs) => unknown
-		? TArgs extends [unknown]
-			? unknown
-			: {
-					"auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
-				}
-		: unknown
-	: unknown;
+	? AuthStartHandlerNoInputGuard<TStart>
+	: TConfig extends { start: infer TStart }
+		? AuthStartHandlerNoInputGuard<TStart>
+		: unknown;
 
 export interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> {
 	id: string;

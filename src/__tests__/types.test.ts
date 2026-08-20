@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
+import { defineAuthFlow } from "../ceremonies/index.js";
 import { defineOperation, defineProvider, z as providerZ } from "../provider.js";
 import type {
 	AuthMode,
@@ -97,6 +98,19 @@ describe("ProviderDefinition types", () => {
 		).toThrow(/auth\.flow\.start must not declare an input parameter/);
 	});
 
+	it("rejects defaulted auth start input at the flow definition boundary", () => {
+		// @ts-expect-error test-invalid: auth start handlers must receive user input through continue, including when the second parameter is defaulted.
+		const flow = defineAuthFlow({
+			start: async (_ctx: FlowContext, _input: Record<string, unknown> = {}) => ({
+				kind: "form",
+				turnId: "start",
+			}),
+			continue: async () => ({ kind: "complete", turnId: "complete" }),
+		});
+
+		expect(flow.start.length).toBe(1);
+	});
+
 	it("rejects legacy auth exchange handlers at runtime", () => {
 		const noop = defineOperation({
 			descriptionKey: "operations.noop.description",
@@ -106,7 +120,6 @@ describe("ProviderDefinition types", () => {
 		});
 
 		expect(() =>
-			// @ts-expect-error test-invalid: runtime validation must reject legacy auth exchange handlers.
 			defineProvider({
 				id: "bad-auth-exchange",
 				version: "1.0.0",

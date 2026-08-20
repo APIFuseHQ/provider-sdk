@@ -325,9 +325,13 @@ describe("createWebAuthnCeremony", () => {
 
 describe("createMagicLinkCeremony", () => {
 	it("handles happy path", async () => {
+		let sendCalls = 0;
 		const ctx = createTestContext(
 			{
-				"POST https://magic.example.com/send": () => ({ queued: true }),
+				"POST https://magic.example.com/send": () => {
+					sendCalls += 1;
+					return { queued: true };
+				},
 				"POST https://magic.example.com/verify": () => ({
 					completed: true,
 					credential: { token: "magic-token" },
@@ -340,8 +344,9 @@ describe("createMagicLinkCeremony", () => {
 			verifyUrl: "https://magic.example.com/verify",
 		});
 
-		// @ts-expect-error test-invalid: magic-link start still consumes input at runtime; production contract gap tracked in PR #176 follow-up
-		expect((await ceremony.start(ctx, { email: "demo@example.com" })).kind).toBe("message");
+		expect((await ceremony.start(ctx)).kind).toBe("form");
+		expect((await ceremony.continue(ctx, { email: "demo@example.com" })).kind).toBe("message");
+		expect(sendCalls).toBe(1);
 		expect((await ceremony.poll?.(ctx))?.kind).toBe("complete");
 	});
 
@@ -351,8 +356,9 @@ describe("createMagicLinkCeremony", () => {
 			verifyUrl: "https://magic.example.com/verify",
 		});
 
-		// @ts-expect-error test-invalid: magic-link start still consumes input at runtime; production contract gap tracked in PR #176 follow-up
-		expect((await ceremony.start(createTestContext(), {})).kind).toBe("form");
+		const ctx = createTestContext();
+		expect((await ceremony.start(ctx)).kind).toBe("form");
+		expect((await ceremony.continue(ctx, {})).kind).toBe("form");
 	});
 
 	it("returns abort when state expires", async () => {
@@ -366,8 +372,8 @@ describe("createMagicLinkCeremony", () => {
 			expiresInMs: -1,
 		});
 
-		// @ts-expect-error test-invalid: magic-link start still consumes input at runtime; production contract gap tracked in PR #176 follow-up
-		await ceremony.start(ctx, { email: "demo@example.com" });
+		expect((await ceremony.start(ctx)).kind).toBe("form");
+		await ceremony.continue(ctx, { email: "demo@example.com" });
 		expect((await ceremony.poll?.(ctx))?.kind).toBe("abort");
 	});
 });
