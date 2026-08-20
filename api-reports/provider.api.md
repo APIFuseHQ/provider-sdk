@@ -53,10 +53,53 @@ export class AuthAbortError extends AuthError {
 export type AuthAbortRetry = "never" | "retry" | "after_user_action";
 
 // @public (undocumented)
+interface AuthConfig {
+    // Warning: (ae-forgotten-export) The symbol "AuthFlowDefinition" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    flow?: AuthFlowDefinition;
+    // (undocumented)
+    mode: AuthMode;
+    proxied?: ProxiedOAuthConfig;
+}
+
+// @public (undocumented)
+interface AuthContext {
+    // (undocumented)
+    requestField(name: string, options?: {
+        type?: "otp" | "text";
+    }): Promise<string>;
+}
+
+// @public (undocumented)
 export class AuthError extends ProviderError {
     // Warning: (ae-forgotten-export) The symbol "ProviderErrorOptions" needs to be exported by the entry point provider.d.ts
     constructor(message: string, options?: ProviderErrorOptions);
 }
+
+// @public (undocumented)
+interface AuthFlowDefinition {
+    // (undocumented)
+    abort?: AuthFlowStartHandler;
+    // Warning: (ae-forgotten-export) The symbol "AuthFlowInputHandler" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    continue: AuthFlowInputHandler;
+    // (undocumented)
+    poll?: AuthFlowStartHandler;
+    // (undocumented)
+    refresh?: AuthFlowInputHandler;
+    // Warning: (ae-forgotten-export) The symbol "AuthFlowStartHandler" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    start: AuthFlowStartHandler;
+}
+
+// @public (undocumented)
+type AuthFlowInputHandler = (ctx: FlowContext, input?: Record<string, unknown>) => Promise<AuthTurn>;
+
+// @public (undocumented)
+type AuthFlowStartHandler = (ctx: FlowContext) => Promise<AuthTurn>;
 
 // @public (undocumented)
 export interface AuthFlowTerminalContext {
@@ -130,10 +173,254 @@ export type AuthSafeJson = string | number | boolean | null | readonly AuthSafeJ
 };
 
 // @public (undocumented)
+type AuthStartNoInputGuard<TConfig> = TConfig extends {
+    auth?: {
+        flow?: {
+            start: infer TStart;
+        };
+    };
+} ? TStart extends (...args: infer TArgs) => unknown ? TArgs extends [unknown] ? unknown : {
+    "auth start handlers must not declare input parameters; return a form turn from start and receive user input in continue": never;
+} : unknown : unknown;
+
+// @public (undocumented)
+interface AuthTurn {
+    // (undocumented)
+    data?: Record<string, unknown>;
+    // (undocumented)
+    expectedInput?: Record<string, unknown>;
+    // (undocumented)
+    expiresAt?: string;
+    // @deprecated (undocumented)
+    hint?: string;
+    hintKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    kind: string;
+    // (undocumented)
+    timing?: {
+        suggestedPollIntervalMs?: number;
+        maxWaitMs?: number;
+    };
+    // (undocumented)
+    turnId: string;
+}
+
+// @public (undocumented)
+type Bcp47Locale = string;
+
+// @public (undocumented)
+type BrowserChallengeRequest = {
+    type: "recaptcha";
+    siteKey?: string;
+    timeout?: number;
+};
+
+// @public (undocumented)
+type BrowserChallengeResult = {
+    type: BrowserChallengeRequest["type"];
+    solved: boolean;
+    frameUrl?: string;
+};
+
+// @public (undocumented)
+interface BrowserClient {
+    // (undocumented)
+    close?(): Promise<void>;
+    // Warning: (ae-forgotten-export) The symbol "BrowserEngine" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    readonly engine: BrowserEngine;
+    // Warning: (ae-forgotten-export) The symbol "BrowserPage" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    newPage(): Promise<BrowserPage>;
+    // (undocumented)
+    rawPage(): Promise<BrowserPage>;
+    // Warning: (ae-forgotten-export) The symbol "BrowserChallengeResult" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    solveChallenge(request: BrowserChallengeRequest): Promise<BrowserChallengeResult>;
+    // (undocumented)
+    withIsolatedContext<T>(handler: (page: BrowserPage) => Promise<T>): Promise<T>;
+}
+
+// @public (undocumented)
+interface BrowserCookie {
+    // (undocumented)
+    readonly domain: string;
+    readonly expires?: number;
+    // (undocumented)
+    readonly httpOnly: boolean;
+    // (undocumented)
+    readonly name: string;
+    // (undocumented)
+    readonly path: string;
+    // (undocumented)
+    readonly sameSite?: "Strict" | "Lax" | "None";
+    // (undocumented)
+    readonly secure: boolean;
+    // (undocumented)
+    readonly value: string;
+}
+
+// @public (undocumented)
+type BrowserEngine = "playwright-stealth" | "nodriver" | "selenium-uc";
+
+// @public (undocumented)
+interface BrowserFrame {
+    // (undocumented)
+    content(): Promise<string>;
+    // (undocumented)
+    evaluate<T>(fn: string | (() => T)): Promise<T>;
+    // (undocumented)
+    id: string;
+    // Warning: (ae-forgotten-export) The symbol "BrowserLocator" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    locator(selector: string): BrowserLocator;
+    // (undocumented)
+    name?: string;
+    // (undocumented)
+    parentId?: string;
+    // (undocumented)
+    title(): Promise<string>;
+    // (undocumented)
+    url(): Promise<string>;
+}
+
+// @public (undocumented)
+interface BrowserLocator {
+    // (undocumented)
+    click(): Promise<void>;
+    // (undocumented)
+    fill(text: string): Promise<void>;
+    // (undocumented)
+    textContent(): Promise<string | null>;
+    // (undocumented)
+    waitFor(options?: {
+        timeout?: number;
+    }): Promise<void>;
+}
+
+// Warning: (ae-forgotten-export) The symbol "BrowserFrame" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+interface BrowserPage extends BrowserFrame {
+    // (undocumented)
+    click(selector: string): Promise<void>;
+    // (undocumented)
+    close(): Promise<void>;
+    // Warning: (ae-forgotten-export) The symbol "BrowserCookie" needs to be exported by the entry point provider.d.ts
+    cookies(): Promise<readonly BrowserCookie[]>;
+    // (undocumented)
+    fill(selector: string, text: string): Promise<void>;
+    // (undocumented)
+    frames(): Promise<BrowserFrame[]>;
+    // (undocumented)
+    goto(url: string): Promise<void>;
+    // (undocumented)
+    pageId?: string;
+    // (undocumented)
+    screenshot(options?: {
+        fullPage?: boolean;
+    }): Promise<Buffer>;
+    // (undocumented)
+    type(selector: string, text: string): Promise<void>;
+    userAgent(): Promise<string>;
+    // (undocumented)
+    waitForSelector(selector: string, options?: {
+        timeout?: number;
+    }): Promise<void>;
+    // Warning: (ae-forgotten-export) The symbol "BrowserResourcePolicy" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T>;
+}
+
+// @public (undocumented)
+type BrowserResourceBody = Buffer | Uint8Array | ArrayBuffer | string;
+
+// @public (undocumented)
+type BrowserResourceDecision = {
+    readonly action: "continue";
+} | {
+    readonly action: "fulfill";
+    readonly status?: number;
+    readonly headers?: Readonly<Record<string, string>>;
+    readonly body?: BrowserResourceBody;
+} | {
+    readonly action: "block";
+    readonly reason?: string;
+};
+
+// @public (undocumented)
+type BrowserResourceMethod = "GET" | "HEAD" | "POST";
+
+// @public (undocumented)
+type BrowserResourcePolicy = {
+    readonly defaultAction?: "block";
+    readonly allowedMethods?: readonly BrowserResourceMethod[];
+    readonly documentContentSecurityPolicy?: string;
+    readonly routes: readonly BrowserResourceRoute[];
+};
+
+// @public (undocumented)
+type BrowserResourceRequest = {
+    readonly url: string;
+    readonly method: BrowserResourceMethod;
+    readonly resourceType?: string;
+    readonly headers: Readonly<Record<string, string>>;
+};
+
+// @public (undocumented)
+type BrowserResourceRoute = {
+    readonly match: string | RegExp | ((request: BrowserResourceRequest) => boolean);
+    readonly handle: (request: BrowserResourceRequest) => Promise<BrowserResourceDecision> | BrowserResourceDecision;
+};
+
+// @public (undocumented)
 export function centered(maxOffset: string): HealthScheduleRandomization;
+
+// @public
+type ChallengeSolution = {
+    readonly form: "token";
+    readonly token: string;
+} | {
+    readonly form: "cookies";
+    readonly cookies: Readonly<Record<string, string>>;
+    readonly userAgent: string;
+    readonly expires?: number;
+};
 
 // @public (undocumented)
 export function collectSensitivePaths(schema: unknown): SensitivePath[];
+
+// @public (undocumented)
+interface ContextDeclaration {
+    // (undocumented)
+    keys: string[];
+}
+
+// @public (undocumented)
+interface ContextScratchpad {
+    // (undocumented)
+    get(key: string): unknown;
+    // (undocumented)
+    set(key: string, value: unknown): void;
+    // (undocumented)
+    toJSON(): Record<string, unknown>;
+}
+
+// @public (undocumented)
+interface CookieJar {
+    // (undocumented)
+    find?(predicate: (cookie: string) => boolean, url?: string): string | undefined;
+    get(name: string, url?: string): string | undefined;
+    // (undocumented)
+    getAll(url?: string): Record<string, string>;
+    // (undocumented)
+    toString(url?: string): string;
+}
 
 // @public (undocumented)
 export function createAuthFlowHelpers(options?: {
@@ -141,8 +428,6 @@ export function createAuthFlowHelpers(options?: {
     readonly deadline?: string;
 }): AuthFlowTerminalContext;
 
-// Warning: (ae-forgotten-export) The symbol "AuthFlowDefinition" needs to be exported by the entry point provider.d.ts
-//
 // @public (undocumented)
 export function createFormCeremony(options: {
     schema: JsonObject;
@@ -171,9 +456,43 @@ export type CreateProviderChoiceContextOptions = {
 export function createProviderChoiceToken<TPayload extends ProviderChoiceTokenPayload>(options: CreateProviderChoiceTokenOptions<TPayload>): string;
 
 // @public (undocumented)
+interface CreateProviderChoiceTokenOptions<TPayload extends ProviderChoiceTokenPayload> {
+    // (undocumented)
+    payload: TPayload;
+    // (undocumented)
+    prefix: string;
+    // (undocumented)
+    secret: string;
+}
+
+// @public (undocumented)
 export function createTestProviderChoiceContext(options: Omit<CreateProviderChoiceContextOptions, "masterSecret"> & {
     readonly masterSecret?: string;
 }): ProviderChoiceContext;
+
+// @public (undocumented)
+interface CredentialContext {
+    // (undocumented)
+    get(key: string): string | undefined;
+    // (undocumented)
+    getAccessToken(): string | undefined;
+    // (undocumented)
+    getAll(): Record<string, string>;
+    // (undocumented)
+    getScopes(): string[];
+    // (undocumented)
+    mode: AuthMode;
+}
+
+// @public (undocumented)
+interface CredentialDeclaration {
+    // (undocumented)
+    justification?: string;
+    // (undocumented)
+    keys: string[];
+    // (undocumented)
+    storesReusableSecret?: boolean;
+}
 
 // @public (undocumented)
 export function credentialsAuthChallenge<TChallengeId extends string>(challengeId: TChallengeId, options?: Omit<CredentialsAuthChallengeRequest<TChallengeId>, "kind" | "challengeId">): CredentialsAuthChallengeRequest<TChallengeId>;
@@ -264,6 +583,42 @@ export type CredentialsAuthInput<TFields extends CredentialsAuthFields> = {
 export type CredentialsAuthLoginResult<TCredentialKeys extends readonly string[], TChallengeId extends string = string> = CredentialsAuthCompleteResult<TCredentialKeys> | CredentialsAuthChallengeRequest<TChallengeId>;
 
 // @public (undocumented)
+interface DeclarativeStealthResponse {
+    // (undocumented)
+    arrayBuffer(): Promise<ArrayBuffer>;
+    // (undocumented)
+    body: string;
+    // (undocumented)
+    bytes(): Promise<Uint8Array>;
+    // Warning: (ae-forgotten-export) The symbol "CookieJar" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    cookies: CookieJar;
+    // (undocumented)
+    headers: Record<string, string>;
+    // (undocumented)
+    httpVersion?: string;
+    // (undocumented)
+    json<T>(): Promise<T>;
+    // (undocumented)
+    ok: boolean;
+    // (undocumented)
+    rawHeaders: [string, string][];
+    // (undocumented)
+    redirected?: boolean;
+    // (undocumented)
+    status: number;
+    // (undocumented)
+    tlsInfo?: {
+        protocol?: string;
+        cipher?: string;
+        [key: string]: unknown;
+    };
+    // (undocumented)
+    url?: string;
+}
+
+// @public (undocumented)
 export function defineCredentialsAuth<TFields extends CredentialsAuthFields, TCredentialKeys extends readonly [string, ...string[]], TChallenges extends Record<string, CredentialsAuthChallengeDefinition<CredentialsAuthFields, TCredentialKeys, keyof TChallenges & string>> = Record<string, CredentialsAuthChallengeDefinition<CredentialsAuthFields, TCredentialKeys, string>>>(options: DefineCredentialsAuthOptions<TFields, TCredentialKeys, TChallenges>): DefinedCredentialsAuth;
 
 // @public (undocumented)
@@ -333,6 +688,15 @@ export function delayed(maxDelay: string): HealthScheduleRandomization;
 
 // @public (undocumented)
 export function describeKey<TSchema extends ZodType>(schema: TSchema, key: ProviderLocaleKey | string): TSchema;
+
+// @public (undocumented)
+type E164PhoneNumber = `+${string}`;
+
+// @public (undocumented)
+interface EnvContext {
+    // (undocumented)
+    get(key: string): string | undefined;
+}
 
 // Warning: (ae-forgotten-export) The symbol "HealthJourneySchedule" needs to be exported by the entry point provider.d.ts
 //
@@ -422,6 +786,16 @@ export interface FlowContext {
     tenantId: string;
 }
 
+// @public (undocumented)
+interface FreshProviderChoiceIssuedAtOptions {
+    // (undocumented)
+    futureToleranceMs?: number;
+    // (undocumented)
+    nowMs?: number;
+    // (undocumented)
+    ttlMs: number;
+}
+
 // Warning: (ae-forgotten-export) The symbol "ProviderLocaleCatalog" needs to be exported by the entry point provider.d.ts
 // Warning: (ae-forgotten-export) The symbol "ProviderLocaleValue" needs to be exported by the entry point provider.d.ts
 //
@@ -449,6 +823,35 @@ export interface HealthCheckCase<TInput = unknown, TOutput = unknown> {
     // Warning: (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
     prepareInput?: (ctx: HealthCheckInputPreparationContext<TInput>) => TInput | Promise<TInput>;
     timeoutMs?: number;
+}
+
+// @public
+interface HealthCheckCaseResult {
+    label?: string;
+    status?: "ok" | "degraded";
+}
+
+// @public (undocumented)
+interface HealthCheckInputPreparationContext<TInput = unknown> {
+    // (undocumented)
+    readonly connectionId?: string;
+    // (undocumented)
+    readonly gateway: {
+        execute: (providerId: string, operationId: string, input: unknown, options?: {
+            connectionId?: string;
+        }) => Promise<{
+            status: number;
+            duration: number;
+            data: unknown;
+            meta?: Record<string, unknown>;
+        }>;
+    };
+    // (undocumented)
+    readonly input: TInput;
+    // (undocumented)
+    readonly operationId: string;
+    // (undocumented)
+    readonly providerId: string;
 }
 
 // @public
@@ -520,6 +923,48 @@ export interface HealthJourneyEventContext {
 }
 
 // @public (undocumented)
+interface HealthJourneyGatewayContext {
+    // (undocumented)
+    connect?(options?: {
+        providerId?: string;
+        externalRef?: string;
+        authMode?: "credentials" | "oauth2";
+        input?: Record<string, unknown>;
+        metadata?: Record<string, unknown>;
+    }): Promise<{
+        connectionId: string;
+        rowVersion: number;
+    }>;
+    // (undocumented)
+    disconnect?(connection: {
+        connectionId: string;
+        rowVersion: number;
+    }): Promise<void>;
+    // (undocumented)
+    execute(providerId: string, operationId: string, input: unknown, options?: {
+        connectionId?: string;
+        requestId?: string;
+        recordOperationEvent?: boolean;
+    }): Promise<{
+        data: unknown;
+        status: number;
+        duration: number;
+        meta?: Record<string, unknown>;
+    }>;
+}
+
+// @public (undocumented)
+interface HealthJourneyJournalContext {
+    // (undocumented)
+    sideEffect<T>(params: {
+        stepId: string;
+        kind: string;
+        idempotencyKey: string;
+        run: () => Promise<T>;
+    }): Promise<T>;
+}
+
+// @public (undocumented)
 export type HealthJourneyManualTriggerPolicy = {
     enabled: false;
     reason?: string;
@@ -572,6 +1017,64 @@ export interface HealthJourneyRunResult {
 }
 
 // @public (undocumented)
+interface HealthJourneySchedule {
+    interval: Iso8601Duration;
+    // (undocumented)
+    jitter?: Iso8601Duration;
+    // (undocumented)
+    kind: "interval";
+    // (undocumented)
+    randomize?: HealthScheduleRandomization;
+}
+
+// @public (undocumented)
+interface HealthJourneySmsContext {
+    // Warning: (ae-forgotten-export) The symbol "SmsPhoneIdentity" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    resolvePhone(params?: {
+        matcherId?: string;
+    }): Promise<SmsPhoneIdentity>;
+    // (undocumented)
+    waitForOtp(params: {
+        matcherId: string;
+        attemptId: string;
+        phoneId?: string;
+        phoneNumber?: string;
+        signal?: AbortSignal;
+    }): Promise<{
+        code: string;
+        messageId: string;
+        receivedAt: string;
+    }>;
+}
+
+// @public (undocumented)
+interface HealthJourneyStep {
+    // (undocumented)
+    coversOperations?: readonly string[];
+    // (undocumented)
+    description?: string;
+    // (undocumented)
+    id: string;
+    // (undocumented)
+    kind?: "operation" | "smsOtp" | "assertion" | "journal";
+    // (undocumented)
+    operationId?: string;
+    // (undocumented)
+    safeBoundary?: "paymentWebviewUrl" | "paymentUrl" | "none";
+    // (undocumented)
+    usesSmsMatcher?: string;
+}
+
+// @public (undocumented)
+interface HealthMonitorProbeOverride {
+    degradedThresholdMs?: number;
+    interval?: ProbeInterval;
+    timeoutMs?: number;
+}
+
+// @public (undocumented)
 export type HealthScheduleRandomization = {
     mode: "centered";
     maxOffset: Iso8601Duration;
@@ -579,6 +1082,36 @@ export type HealthScheduleRandomization = {
     mode: "delayed";
     maxDelay: Iso8601Duration;
 };
+
+// @public (undocumented)
+interface HttpClient {
+    // (undocumented)
+    delete(url: string, options?: RequestOptions): Promise<HttpResponse>;
+    // Warning: (ae-forgotten-export) The symbol "RequestOptions" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    get(url: string, options?: RequestOptions): Promise<HttpResponse>;
+    // (undocumented)
+    post(url: string, body: unknown, options?: RequestOptions): Promise<HttpResponse>;
+    // (undocumented)
+    put(url: string, body: unknown, options?: RequestOptions): Promise<HttpResponse>;
+    // Warning: (ae-forgotten-export) The symbol "RequestWithMethodOptions" needs to be exported by the entry point provider.d.ts
+    // Warning: (ae-forgotten-export) The symbol "HttpResponse" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    request(url: string, opts?: RequestWithMethodOptions): Promise<HttpResponse>;
+    // Warning: (ae-forgotten-export) The symbol "SseMessage" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    sse(url: string, options?: RequestWithMethodOptions): Promise<AsyncIterable<SseMessage>>;
+    // Warning: (ae-forgotten-export) The symbol "HttpStreamResponse" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    stream(url: string, options?: RequestWithMethodOptions): Promise<HttpStreamResponse>;
+}
+
+// @public (undocumented)
+type HttpMethod = "HEAD" | "head" | "GET" | "get" | "POST" | "post" | "PUT" | "put" | "DELETE" | "delete" | "OPTIONS" | "options" | "TRACE" | "trace" | "PATCH" | "patch";
 
 // @public
 export class HttpRedirectError extends TransportError {
@@ -589,6 +1122,14 @@ export class HttpRedirectError extends TransportError {
     // (undocumented)
     readonly target?: string;
 }
+
+// Warning: (ae-forgotten-export) The symbol "TransportErrorOptions" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type HttpRedirectErrorOptions = TransportErrorOptions & {
+    reason: HttpRedirectFailureReason;
+    target?: string;
+};
 
 // @public (undocumented)
 export type HttpRedirectFailureReason = Exclude<RedirectRunReason, "completed">;
@@ -601,6 +1142,26 @@ export interface HttpRedirectPolicy {
 
 // @public (undocumented)
 export type HttpRedirectPolicyMode = "same-origin";
+
+// @public (undocumented)
+interface HttpResponse<T = unknown> {
+    // (undocumented)
+    arrayBuffer(): Promise<ArrayBuffer>;
+    // (undocumented)
+    bytes(): Promise<Uint8Array>;
+    // (undocumented)
+    data: T;
+    // (undocumented)
+    headers: Record<string, string>;
+    // (undocumented)
+    json<U = T>(): Promise<U>;
+    // (undocumented)
+    ok: boolean;
+    // (undocumented)
+    status: number;
+    // (undocumented)
+    text(): Promise<string>;
+}
 
 // @public (undocumented)
 export const HttpRetryAfterPolicy: {
@@ -695,8 +1256,32 @@ export const HttpRetryUnsafeMethodPolicy: {
 // @public (undocumented)
 export type HttpRetryUnsafeMethodPolicy = (typeof HttpRetryUnsafeMethodPolicy)[keyof typeof HttpRetryUnsafeMethodPolicy];
 
+// @public (undocumented)
+interface HttpStreamResponse {
+    // (undocumented)
+    body: ReadableStream<Uint8Array>;
+    // (undocumented)
+    bytes(): AsyncIterable<Uint8Array>;
+    // (undocumented)
+    headers: Record<string, string>;
+    // (undocumented)
+    lines(): AsyncIterable<string>;
+    // (undocumented)
+    ok: boolean;
+    // (undocumented)
+    status: number;
+    // (undocumented)
+    textChunks(): AsyncIterable<string>;
+}
+
 // @public
 export type InferSchemaOutput<TSchema extends SchemaLike> = TSchema extends ZodType ? infer<TSchema> : TSchema extends StandardSchemaV1<unknown, infer Output> ? Output : unknown;
+
+// @public (undocumented)
+type Iso3166Alpha2CountryCode = Uppercase<string>;
+
+// @public (undocumented)
+type Iso8601Duration = string;
 
 // @public (undocumented)
 export function isProviderError(value: unknown): value is ProviderError;
@@ -709,6 +1294,9 @@ export function isSessionExpiredError(value: unknown): value is SessionExpiredEr
 
 // @public (undocumented)
 export function isTransportError(value: unknown): value is TransportError;
+
+// @public (undocumented)
+type JsonObject = Record<string, unknown>;
 
 // @public (undocumented)
 export interface NativeContext {
@@ -995,7 +1583,122 @@ export type NativeTcpTlsMode = "required" | "allowed" | "disabled";
 export type NativeTlsConnectOptions = NativeNetworkConnectInput;
 
 // @public (undocumented)
+interface OcrCaptchaCandidate {
+    // (undocumented)
+    readonly satisfiesConstraints: boolean;
+    // (undocumented)
+    readonly text: string;
+}
+
+// @public (undocumented)
+interface OcrCaptchaOptions {
+    // (undocumented)
+    readonly caseSensitive?: boolean;
+    readonly charset?: string | RegExp;
+    // (undocumented)
+    readonly length?: number;
+    // (undocumented)
+    readonly maxCandidates?: number;
+}
+
+// @public (undocumented)
+interface OcrCaptchaResult {
+    // Warning: (ae-forgotten-export) The symbol "OcrCaptchaCandidate" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    readonly candidates: readonly OcrCaptchaCandidate[];
+    // (undocumented)
+    readonly model: string;
+    // (undocumented)
+    readonly satisfiesConstraints: boolean;
+    // (undocumented)
+    readonly text: string;
+}
+
+// @public (undocumented)
+interface OcrContext {
+    // Warning: (ae-forgotten-export) The symbol "OcrImageInput" needs to be exported by the entry point provider.d.ts
+    // Warning: (ae-forgotten-export) The symbol "OcrCaptchaOptions" needs to be exported by the entry point provider.d.ts
+    // Warning: (ae-forgotten-export) The symbol "OcrCaptchaResult" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    extractCaptchaText(image: OcrImageInput, options?: OcrCaptchaOptions): Promise<OcrCaptchaResult>;
+    // Warning: (ae-forgotten-export) The symbol "OcrRecognizeRequest" needs to be exported by the entry point provider.d.ts
+    // Warning: (ae-forgotten-export) The symbol "OcrResult" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    recognize(request: OcrRecognizeRequest): Promise<OcrResult>;
+}
+
+// @public (undocumented)
+type OcrImageInput = {
+    readonly kind: "base64";
+    readonly data: string;
+    readonly mediaType?: string;
+} | {
+    readonly kind: "url";
+    readonly url: string;
+};
+
+// @public (undocumented)
+interface OcrRecognizeRequest {
+    // (undocumented)
+    readonly hint?: "captcha" | "document" | "generic";
+    // (undocumented)
+    readonly image: OcrImageInput;
+    // (undocumented)
+    readonly maxTokens?: number;
+    // (undocumented)
+    readonly prompt?: string;
+    // (undocumented)
+    readonly timeoutMs?: number;
+}
+
+// @public (undocumented)
+interface OcrResult {
+    // (undocumented)
+    readonly model: string;
+    // (undocumented)
+    readonly text: string;
+    // Warning: (ae-forgotten-export) The symbol "OcrWarning" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    readonly warnings?: readonly OcrWarning[];
+}
+
+// @public (undocumented)
+interface OcrWarning {
+    // (undocumented)
+    readonly code: string;
+    // (undocumented)
+    readonly message: string;
+}
+
+// @public (undocumented)
+interface OperationAnnotations {
+    // (undocumented)
+    destructive?: boolean;
+    // (undocumented)
+    idempotent?: boolean;
+    openWorld?: boolean;
+    // (undocumented)
+    rateLimit?: {
+        calls: number;
+        window: "minute" | "hour" | "day";
+    };
+    // (undocumented)
+    readOnly?: boolean;
+    // (undocumented)
+    timeoutMs?: number;
+}
+
+// @public (undocumented)
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
+
+// @public (undocumented)
+type OperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<OperationDefinition<TInput, TOutput>, "handler"> & {
+    handler(ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0], input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
+};
 
 // @public (undocumented)
 export interface OperationContractMetadata {
@@ -1029,8 +1732,6 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
         response: InferSchemaOutput<TOutput>;
         recordedAt?: string;
     };
-    // Warning: (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     handler(ctx: ProviderContext, input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
     // (undocumented)
@@ -1070,6 +1771,18 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
 }
 
 // @public (undocumented)
+interface OperationDeprecationMetadata {
+    // (undocumented)
+    announcedAt: string;
+    // (undocumented)
+    migrationGuide: string;
+    // (undocumented)
+    removalAfter: string;
+    // (undocumented)
+    replacement?: string;
+}
+
+// @public (undocumented)
 export interface OperationDocMeta {
     // (undocumented)
     descriptionKey?: ProviderLocaleKeyInput;
@@ -1101,6 +1814,25 @@ export interface OperationErrorCode {
     status?: ProviderErrorStatus;
 }
 
+// Warning: (ae-forgotten-export) The symbol "ProviderStreamEvent" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type OperationHandlerResult<TOutput> = TOutput | Response | ReadableStream<Uint8Array> | AsyncIterable<ProviderStreamEvent>;
+
+// @public (undocumented)
+interface OperationHttpStreamTransport {
+    // (undocumented)
+    contentType?: string;
+    // (undocumented)
+    idleTimeoutMs?: number;
+    // (undocumented)
+    kind: "http-stream";
+    // (undocumented)
+    maxChunkBytes?: number;
+    // (undocumented)
+    maxDurationMs?: number;
+}
+
 // @public (undocumented)
 export interface OperationInputExample {
     // (undocumented)
@@ -1112,7 +1844,18 @@ export interface OperationInputExample {
 }
 
 // @public (undocumented)
+interface OperationJsonTransport {
+    // (undocumented)
+    kind: "json";
+}
+
+// @public (undocumented)
 export type OperationLifecycle = "stable" | "beta" | "deprecated" | "removed";
+
+// @public (undocumented)
+type OperationMapConfig<TOperations extends Record<string, ProviderOperation>> = {
+    [K in keyof TOperations]: TOperations[K] extends OperationDefinition<infer TInput, infer TOutput> ? OperationConfig<TInput, TOutput> | OperationDefinition<TInput, TOutput> : never;
+};
 
 // @public (undocumented)
 export interface OperationObservabilityConfig {
@@ -1138,6 +1881,24 @@ export type OperationRiskClass = "read" | "write" | "destructive" | "external-se
 export type OperationSensitivePath = string;
 
 // @public (undocumented)
+interface OperationSseTransport {
+    // (undocumented)
+    events: Record<string, SchemaLike>;
+    // (undocumented)
+    heartbeatMs?: number;
+    // (undocumented)
+    idleTimeoutMs?: number;
+    // (undocumented)
+    kind: "sse";
+    // (undocumented)
+    maxDurationMs?: number;
+    // (undocumented)
+    maxEventBytes?: number;
+    // (undocumented)
+    resumable?: false | "last-event-id";
+}
+
+// @public (undocumented)
 export interface OperationToolRouterMetadata {
     approval?: OperationApprovalPolicy;
     connectionExternalRefParam?: string;
@@ -1155,16 +1916,174 @@ export interface OperationToolRouterMetadata {
 // @public (undocumented)
 export type OperationTransport = OperationJsonTransport | OperationSseTransport | OperationHttpStreamTransport | OperationWebSocketTransport;
 
+// @public (undocumented)
+interface OperationWebSocketTransport {
+    dispatch: "unsupported";
+    // (undocumented)
+    idleTimeoutMs?: number;
+    // (undocumented)
+    kind: "websocket";
+    // (undocumented)
+    maxDurationMs?: number;
+    // (undocumented)
+    maxFrameBytes?: number;
+    // (undocumented)
+    subprotocols?: readonly string[];
+}
+
 // Warning: (ae-forgotten-export) The symbol "ParseProviderChoiceTokenOptions" needs to be exported by the entry point provider.d.ts
 //
 // @public (undocumented)
 export function parseProviderChoiceToken(options: ParseProviderChoiceTokenOptions): ProviderChoiceTokenPayload;
 
 // @public (undocumented)
+interface ParseProviderChoiceTokenOptions {
+    // (undocumented)
+    prefix: string;
+    // (undocumented)
+    secret: string;
+    // (undocumented)
+    token: string;
+}
+
+// @public
+type ProbeInterval = ms.StringValue;
+
+// @public (undocumented)
+const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+
+// @public (undocumented)
 export const PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV = "APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET";
 
 // @public (undocumented)
+interface ProviderAccessConfig {
+    visibility?: ProviderAccessVisibility;
+}
+
+// @public (undocumented)
 export type ProviderAccessVisibility = "public" | "early_access";
+
+// @public (undocumented)
+interface ProviderCache {
+    // (undocumented)
+    delete(key: string): Promise<void>;
+    // Warning: (ae-forgotten-export) The symbol "ProviderCacheResult" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    get<T = unknown>(key: string): Promise<ProviderCacheResult<T> | null>;
+    // (undocumented)
+    getOrSet<T = unknown>(key: string, loader: () => Promise<T>, options: ProviderCacheGetOrSetOptions): Promise<ProviderCacheResult<T>>;
+    // Warning: (ae-forgotten-export) The symbol "ProviderCacheKeyOptions" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    key(namespace: string, parts: unknown, options?: ProviderCacheKeyOptions): string;
+    // Warning: (ae-forgotten-export) The symbol "ProviderCacheResponseMeta" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    responseMeta(): ProviderCacheResponseMeta | undefined;
+    // Warning: (ae-forgotten-export) The symbol "ProviderCacheGetOrSetOptions" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    set<T = unknown>(key: string, value: T, options: ProviderCacheGetOrSetOptions): Promise<void>;
+}
+
+// @public (undocumented)
+interface ProviderCacheGetOrSetOptions {
+    jitterPct?: number;
+    staleIfErrorMs?: number;
+    ttlMs: number;
+}
+
+// @public (undocumented)
+interface ProviderCacheKeyOptions {
+    redactFields?: string[];
+}
+
+// @public (undocumented)
+interface ProviderCacheLookupMeta {
+    // (undocumented)
+    ageMs?: number;
+    // (undocumented)
+    hit: boolean;
+    // (undocumented)
+    key: string;
+    // (undocumented)
+    source: "redis" | "memory" | "loader";
+    // (undocumented)
+    stale: boolean;
+}
+
+// @public (undocumented)
+interface ProviderCacheResponseMeta {
+    // (undocumented)
+    hit: boolean;
+    // (undocumented)
+    keys: string[];
+    // (undocumented)
+    source?: "redis" | "memory" | "loader" | "mixed";
+    // (undocumented)
+    stale: boolean;
+}
+
+// @public (undocumented)
+interface ProviderCacheResult<T> {
+    // Warning: (ae-forgotten-export) The symbol "ProviderCacheLookupMeta" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    meta: ProviderCacheLookupMeta;
+    // (undocumented)
+    value: T;
+}
+
+// @public
+type ProviderChallenge = {
+    readonly kind: "turnstile";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+    readonly action?: string;
+    readonly cdata?: string;
+} | {
+    readonly kind: "recaptcha_v2";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+} | {
+    readonly kind: "recaptcha_v3";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+    readonly action: string;
+    readonly minScore?: number;
+} | {
+    readonly kind: "hcaptcha";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+} | {
+    readonly kind: "cloudflare_interstitial";
+    readonly pageUrl: string;
+    readonly blockedHtml?: string;
+} | {
+    readonly kind: "aws_waf";
+    readonly pageUrl: string;
+    readonly siteKey?: string;
+    readonly captchaScript?: string;
+    readonly context?: string;
+    readonly iv?: string;
+} | {
+    readonly kind: "akamai_sec_cpt";
+    readonly pageUrl: string;
+    readonly challengeHtml?: string;
+} | {
+    readonly kind: "akamai_sensor";
+    readonly pageUrl: string;
+    readonly scriptUrl: string;
+    readonly abck?: string;
+    readonly bmsz?: string;
+    readonly version?: string;
+};
+
+// Warning: (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type ProviderChallengeKind = ProviderChallenge["kind"];
 
 // @public (undocumented)
 export interface ProviderChoiceBindingOptions {
@@ -1286,6 +2205,40 @@ export interface ProviderChoiceParseOptions {
 }
 
 // @public (undocumented)
+type ProviderChoiceStorageOptions = {
+    readonly mode: "inline";
+} | {
+    readonly mode: "server";
+    readonly namespace: string;
+    readonly state?: ProviderRuntimeState;
+    readonly ttl?: ProviderStateDurationString;
+    readonly maxEntries: number;
+    readonly maxValueBytes: number;
+    readonly unavailable?: "reject";
+} | {
+    readonly mode: "auto";
+    readonly namespace: string;
+    readonly state?: ProviderRuntimeState;
+    readonly ttl?: ProviderStateDurationString;
+    readonly maxInlineBytes: number;
+    readonly maxEntries: number;
+    readonly maxValueBytes: number;
+    readonly unavailable?: "reject";
+};
+
+// @public (undocumented)
+type ProviderChoiceTelemetryEvent = {
+    readonly providerId: string;
+    readonly purpose: string;
+    readonly operation: "parse" | "consume";
+    readonly format: "word" | "legacy";
+    readonly outcome: "success" | "not-found" | "invalid" | "unsupported" | "error";
+    readonly consumeMode: ProviderChoiceConsumeMode;
+    readonly consumed: boolean;
+    readonly replay: boolean;
+};
+
+// @public (undocumented)
 export class ProviderChoiceTokenError extends Error {
     constructor(reason: ProviderChoiceTokenErrorReason, message: string);
     // (undocumented)
@@ -1297,6 +2250,95 @@ export type ProviderChoiceTokenErrorReason = "invalid_shape" | "invalid_signatur
 
 // @public (undocumented)
 export type ProviderChoiceTokenPayload = Record<string, unknown>;
+
+// @public (undocumented)
+interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> {
+    // Warning: (ae-forgotten-export) The symbol "ProviderAccessConfig" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    access?: ProviderAccessConfig;
+    // (undocumented)
+    allowedHosts?: string[];
+    // (undocumented)
+    auth?: AuthConfig;
+    // (undocumented)
+    browser?: {
+        engine: BrowserEngine;
+    };
+    // (undocumented)
+    context?: ContextDeclaration;
+    // (undocumented)
+    credential?: CredentialDeclaration;
+    deployment?: ProviderDeploymentOverrides;
+    // (undocumented)
+    healthJourneys?: readonly HealthJourneyDefinition[];
+    // Warning: (ae-forgotten-export) The symbol "ProviderHealthMonitorConfig" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    healthMonitor?: ProviderHealthMonitorConfig;
+    healthProbe?: ProviderHealthMonitorConfig;
+    // (undocumented)
+    id: string;
+    // (undocumented)
+    meta: {
+        displayName: string;
+        displayNameKey?: string;
+        descriptionKey: string;
+        category: string;
+        tags?: readonly string[];
+        icon?: string;
+        docTitleKey?: string;
+        docDescriptionKey?: string;
+        docSummaryKey?: string;
+        docMarkdownKey?: string;
+        normalizationNotesKeys?: readonly string[];
+        environment?: "staging";
+        purpose?: string;
+        purposeKey?: string;
+        publicProfile?: ProviderPublicProfile;
+        implementationProfile?: ProviderImplementationProfile;
+        contract?: {
+            publicSchemaFieldNames?: "normalized";
+        };
+    };
+    // (undocumented)
+    native?: NativeProviderConfig;
+    // Warning: (ae-forgotten-export) The symbol "ProviderOcrConfig" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    ocr?: ProviderOcrConfig;
+    // (undocumented)
+    operations: OperationMapConfig<TOperations>;
+    // Warning: (ae-forgotten-export) The symbol "ProviderProxyConfig" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    proxy?: ProviderProxyConfig;
+    // Warning: (ae-forgotten-export) The symbol "ProviderResolverConfig" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    resolver?: ProviderResolverConfig;
+    // Warning: (ae-forgotten-export) The symbol "ProviderReviewed" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    reviewed?: ProviderReviewed;
+    // (undocumented)
+    runtime: "standard" | "shared" | "browser";
+    // Warning: (ae-forgotten-export) The symbol "ProviderSecretDeclaration" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    secrets?: ProviderSecretDeclaration[];
+    // (undocumented)
+    stealth?: {
+        profile: string;
+        platform: StealthPlatform;
+    };
+    // Warning: (ae-forgotten-export) The symbol "ProviderSttConfig" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    stt?: ProviderSttConfig;
+    // (undocumented)
+    version: string;
+}
 
 // @public (undocumented)
 export interface ProviderContext {
@@ -1342,8 +2384,6 @@ export interface ProviderContext {
 
 // @public (undocumented)
 export interface ProviderDefinition {
-    // Warning: (ae-forgotten-export) The symbol "ProviderAccessConfig" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     access?: ProviderAccessConfig;
     // (undocumented)
@@ -1361,8 +2401,6 @@ export interface ProviderDefinition {
     deployment?: ProviderDeploymentOverrides;
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
-    // Warning: (ae-forgotten-export) The symbol "ProviderHealthMonitorConfig" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     healthMonitor?: ProviderHealthMonitorConfig;
     // Warning: (ae-forgotten-export) The symbol "ProviderHealthProbeConfig" needs to be exported by the entry point provider.d.ts
@@ -1375,28 +2413,18 @@ export interface ProviderDefinition {
     meta: ProviderMeta;
     // (undocumented)
     native?: NativeProviderConfig;
-    // Warning: (ae-forgotten-export) The symbol "ProviderOcrConfig" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     ocr?: ProviderOcrConfig;
     // (undocumented)
     operations: Record<string, OperationDefinition<SchemaLike, SchemaLike>>;
-    // Warning: (ae-forgotten-export) The symbol "ProviderProxyConfig" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     proxy?: ProviderProxyConfig;
-    // Warning: (ae-forgotten-export) The symbol "ProviderResolverConfig" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     resolver?: ProviderResolverConfig;
-    // Warning: (ae-forgotten-export) The symbol "ProviderReviewed" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     reviewed?: ProviderReviewed;
     // (undocumented)
     runtime: "standard" | "shared" | "browser";
-    // Warning: (ae-forgotten-export) The symbol "ProviderSecretDeclaration" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     secrets?: ProviderSecretDeclaration[];
     // (undocumented)
@@ -1404,8 +2432,6 @@ export interface ProviderDefinition {
         profile: string;
         platform: StealthPlatform;
     };
-    // Warning: (ae-forgotten-export) The symbol "ProviderSttConfig" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     stt?: ProviderSttConfig;
     // (undocumented)
@@ -1460,6 +2486,21 @@ export class ProviderError extends Error {
     readonly options?: ProviderErrorOptions | undefined;
 }
 
+// Warning: (ae-forgotten-export) The symbol "PROVIDER_ERROR_CATEGORIES" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
+
+// @public (undocumented)
+type ProviderErrorOptions = {
+    fix?: string;
+    code?: string;
+    details?: unknown;
+    cause?: Error;
+    category?: ProviderErrorCategory;
+    retryable?: boolean;
+};
+
 // Warning: (ae-forgotten-export) The symbol "VALID_OPERATION_ERROR_STATUSES" needs to be exported by the entry point provider.d.ts
 //
 // @public (undocumented)
@@ -1489,10 +2530,51 @@ export interface ProviderFilesContext {
     resolve(input: string | ProviderFileRef): Promise<ProviderResolvedFile>;
 }
 
+// @public
+interface ProviderHealthMonitorConfig {
+    credentialInputs?: Record<string, string>;
+    defaultDegradedThresholdMs?: number;
+    defaultProbeTimeoutMs?: number;
+    // Warning: (ae-forgotten-export) The symbol "HealthMonitorProbeOverride" needs to be exported by the entry point provider.d.ts
+    probeOverrides?: Record<string, HealthMonitorProbeOverride>;
+    requiredSecrets?: string[];
+    serviceAccount?: string;
+}
+
+// @public
+type ProviderHealthProbeConfig = ProviderHealthMonitorConfig;
+
+// @public (undocumented)
+type ProviderImplementationCredentialStrategy = "apifuse_managed" | "workspace_secret" | "user_oauth" | "user_session" | "none";
+
+// @public (undocumented)
+interface ProviderImplementationProfile {
+    // Warning: (ae-forgotten-export) The symbol "ProviderImplementationCredentialStrategy" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    credentialStrategy: ProviderImplementationCredentialStrategy;
+    // (undocumented)
+    officialDocsUrl?: string;
+    // (undocumented)
+    operatorNotes?: string;
+    // Warning: (ae-forgotten-export) The symbol "ProviderImplementationSourceAccess" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    sourceAccess: ProviderImplementationSourceAccess;
+    // (undocumented)
+    visibility: "internal" | "operator";
+}
+
+// @public (undocumented)
+type ProviderImplementationSourceAccess = "official_api" | "private_api" | "browser_flow" | "hybrid";
+
 // Warning: (ae-forgotten-export) The symbol "Bcp47Locale" needs to be exported by the entry point provider.d.ts
 //
 // @public (undocumented)
 export type ProviderLocale = Bcp47Locale;
+
+// @public (undocumented)
+type ProviderLocaleCatalog = Record<string, unknown>;
 
 // @public (undocumented)
 export type ProviderLocaleKey = string & {
@@ -1506,6 +2588,9 @@ export function providerLocaleKey(key: string): ProviderLocaleKey;
 export type ProviderLocaleKeyInput = ProviderLocaleKey | string;
 
 // @public (undocumented)
+type ProviderLocaleValue = string | readonly string[];
+
+// @public (undocumented)
 export type ProviderLogoProfile = {
     source: "asset";
     path: string;
@@ -1516,6 +2601,59 @@ export type ProviderLogoProfile = {
     background?: string;
     fallbackReason: string;
 };
+
+// @public (undocumented)
+interface ProviderMeta {
+    // (undocumented)
+    category: string;
+    // (undocumented)
+    contract?: {
+        publicSchemaFieldNames?: "normalized";
+    };
+    // (undocumented)
+    descriptionKey: ProviderLocaleKeyInput;
+    // (undocumented)
+    displayName: string;
+    // (undocumented)
+    displayNameKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    docDescriptionKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    docMarkdownKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    docSummaryKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    docTitleKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    environment?: "staging";
+    // (undocumented)
+    icon?: string;
+    // (undocumented)
+    normalizationNotesKeys?: readonly ProviderLocaleKeyInput[];
+    // (undocumented)
+    publicProfile?: ProviderPublicProfile;
+    // (undocumented)
+    purpose?: string;
+    // (undocumented)
+    purposeKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    tags?: readonly string[];
+}
+
+// @public (undocumented)
+interface ProviderOcrConfig {
+    // (undocumented)
+    readonly mode: "required" | "optional";
+}
+
+// @public (undocumented)
+type ProviderOperation = OperationDefinition<SchemaLike, SchemaLike>;
+
+// @public (undocumented)
+type ProviderProxyConfig = boolean | ProviderProxyPolicy;
+
+// @public (undocumented)
+type ProviderProxyMode = "disabled" | "optional" | "required";
 
 // @public (undocumented)
 export interface ProviderProxyPolicy {
@@ -1538,6 +2676,12 @@ export interface ProviderProxyPolicy {
         drainLeadSeconds?: number;
     };
 }
+
+// @public
+type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
+
+// @public (undocumented)
+type ProviderProxySessionAffinity = "request" | "operation" | "auth-flow" | "connection";
 
 // @public (undocumented)
 export type ProviderPublicConnectionMode = "apifuse_managed" | "workspace_enabled" | "user_connected" | "no_connection_required";
@@ -1576,6 +2720,14 @@ export interface ProviderPublicProfile {
     tags?: readonly string[];
 }
 
+// @public (undocumented)
+interface ProviderRequestContext {
+    // (undocumented)
+    connectionId?: string;
+    // (undocumented)
+    headers: Record<string, string>;
+}
+
 // @public
 export type ProviderResolvedFile = Omit<ProviderFileRef, "mime_type"> & {
     readonly mimeType?: string;
@@ -1585,10 +2737,35 @@ export type ProviderResolvedFile = Omit<ProviderFileRef, "mime_type"> & {
 };
 
 // @public (undocumented)
+interface ProviderResolverConfig {
+    readonly clientProfile?: string;
+    // Warning: (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point provider.d.ts
+    readonly kinds: readonly ProviderChallengeKind[];
+    // Warning: (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point provider.d.ts
+    readonly vendors: readonly ProviderResolverVendor[];
+}
+
+// @public
+type ProviderResolverVendor = "browser" | "capsolver" | "capmonster" | "2captcha" | "custom";
+
+// @public (undocumented)
+type ProviderReviewed = "first-party" | "community" | "staging";
+
+// @public (undocumented)
 export interface ProviderRuntimeState {
     forConnection(connectionId: string | undefined): ProviderRuntimeState;
     // (undocumented)
     namespace(name: string, options: StateNamespaceOptions): ProviderStateNamespace;
+}
+
+// @public (undocumented)
+interface ProviderSecretDeclaration {
+    // (undocumented)
+    description?: string;
+    // (undocumented)
+    name: string;
+    // (undocumented)
+    required?: boolean;
 }
 
 // @public (undocumented)
@@ -1616,6 +2793,29 @@ export interface ProviderStateNamespace {
 }
 
 // @public (undocumented)
+interface ProviderStreamEvent<TData = unknown> {
+    // (undocumented)
+    data: TData;
+    // (undocumented)
+    event: string;
+    // (undocumented)
+    id?: string;
+    // (undocumented)
+    retry?: number;
+}
+
+// @public (undocumented)
+interface ProviderSttConfig {
+    // Warning: (ae-forgotten-export) The symbol "ProviderSttMode" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    mode: ProviderSttMode;
+}
+
+// @public (undocumented)
+type ProviderSttMode = "optional" | "required";
+
+// @public (undocumented)
 export type ProviderSupportLevel = "stable" | "beta" | "experimental";
 
 // @public (undocumented)
@@ -1638,6 +2838,9 @@ export interface ProxiedOAuthConfig {
     tokenUrl: string;
 }
 
+// @public
+type ProxyProtocol = "http" | "socks5";
+
 // @public (undocumented)
 export function qualifyProviderLocaleKey(providerId: string, key: ProviderLocaleKey | string): string;
 
@@ -1646,6 +2849,52 @@ export function redactPayload(value: unknown, paths?: readonly SensitivePath[]):
 
 // @public (undocumented)
 export type RedirectRunReason = "completed" | "stopped" | "max_hops" | "missing_location" | "loop";
+
+// @public (undocumented)
+interface RequestOptions {
+    // (undocumented)
+    headers?: Record<string, string>;
+    // Warning: (ae-forgotten-export) The symbol "RequestParams" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    params?: RequestParams;
+    // (undocumented)
+    proxy?: string;
+    redirectPolicy?: HttpRedirectPolicy;
+    // (undocumented)
+    retry?: boolean | HttpRetryPreset | HttpRetryOptions;
+    sensitiveParams?: Record<string, string>;
+    throwOnHttpError?: boolean;
+    // (undocumented)
+    timeout?: number;
+}
+
+// @public (undocumented)
+type RequestParamPrimitive = string | number | boolean | null | undefined;
+
+// Warning: (ae-forgotten-export) The symbol "RequestParamValue" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type RequestParams = Record<string, RequestParamValue>;
+
+// Warning: (ae-forgotten-export) The symbol "RequestParamPrimitive" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type RequestParamValue = RequestParamPrimitive | readonly RequestParamPrimitive[];
+
+// @public (undocumented)
+type RequestWithMethodOptions = RequestOptions & {
+    method?: string;
+    body?: unknown;
+};
+
+// @public (undocumented)
+interface ResolverContext {
+    // Warning: (ae-forgotten-export) The symbol "ChallengeSolution" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
+}
 
 // @public
 export type SchemaLike = ZodType | StandardSchemaV1;
@@ -1669,8 +2918,29 @@ export interface SensitiveFieldOptions {
 export type SensitivePath = readonly SensitivePathSegment[];
 
 // @public (undocumented)
+type SensitivePathSegment = string | "*";
+
+// @public (undocumented)
 export class SessionExpiredError extends AuthError {
     constructor(message?: string, options?: ProviderErrorOptions);
+}
+
+// @public (undocumented)
+type SmsOrigin = {
+    kind: "e164";
+    value: E164PhoneNumber;
+    display?: string;
+} | {
+    kind: "nationalServiceCode";
+    country: Iso3166Alpha2CountryCode;
+    value: string;
+    display?: string;
+};
+
+// @public (undocumented)
+interface SmsOtpExtractionPattern {
+    capture?: string | number;
+    pattern: RegExp | string;
 }
 
 // @public (undocumented)
@@ -1694,12 +2964,38 @@ export interface SmsOtpMatcherDefinition {
     //
     // (undocumented)
     origins: readonly [SmsOrigin, ...SmsOrigin[]];
-    // Warning: (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point provider.d.ts
-    //
     // (undocumented)
     phoneNumber?: E164PhoneNumber;
     // (undocumented)
     waitTimeout: Iso8601Duration;
+}
+
+// @public (undocumented)
+interface SmsPhoneIdentity {
+    // (undocumented)
+    country: Iso3166Alpha2CountryCode | string;
+    // (undocumented)
+    displayName?: string;
+    // (undocumented)
+    e164: E164PhoneNumber | string;
+    // (undocumented)
+    id: string;
+    // (undocumented)
+    nationalNumber: string;
+}
+
+// @public (undocumented)
+interface SseMessage {
+    // (undocumented)
+    data: string;
+    // (undocumented)
+    event: string;
+    // (undocumented)
+    id?: string;
+    // (undocumented)
+    json<T = unknown>(): T;
+    // (undocumented)
+    retry?: number;
 }
 
 // @public
@@ -1788,8 +3084,266 @@ export interface StateWriteOptions {
 }
 
 // @public (undocumented)
+interface StealthClient {
+    // (undocumented)
+    close?(): void;
+    // Warning: (ae-forgotten-export) The symbol "StealthSession" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    createSession(opts?: {
+        profile?: string;
+    }): StealthSession;
+    // Warning: (ae-forgotten-export) The symbol "StealthFetchOptions" needs to be exported by the entry point provider.d.ts
+    // Warning: (ae-forgotten-export) The symbol "StealthResponse" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    fetch(url: string, options?: StealthFetchOptions): Promise<StealthResponse>;
+}
+
+// Warning: (ae-forgotten-export) The symbol "StealthCookieStoreV1" needs to be exported by the entry point provider.d.ts
+//
+// @public
+type StealthCookieStore = StealthCookieStoreV1;
+
+// @public
+interface StealthCookieStoreV1 {
+    // (undocumented)
+    readonly jar: SerializedCookieJar;
+    // (undocumented)
+    readonly version: 1;
+}
+
+// @public (undocumented)
+interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy"> {
+    // (undocumented)
+    body?: string | Buffer;
+    maxBodyBytes?: number;
+    // (undocumented)
+    method?: HttpMethod;
+    profile?: string;
+    proxyAttemptOffset?: number;
+    // (undocumented)
+    redirect?: "follow" | "manual" | "error";
+    stealth?: {
+        insecureSkipVerify?: boolean;
+    };
+}
+
+// @public (undocumented)
+type StealthPlatform = "macos" | "windows" | "linux" | "android" | "ios";
+
+// @public (undocumented)
+interface StealthRedirectHop {
+    // (undocumented)
+    location?: string;
+    // (undocumented)
+    method: string;
+    // (undocumented)
+    nextUrl?: string;
+    // (undocumented)
+    status: number;
+    // (undocumented)
+    url: string;
+}
+
+// @public (undocumented)
+interface StealthRedirectRunOptions extends Omit<StealthFetchOptions, "redirect"> {
+    // (undocumented)
+    maxHops?: number;
+    // Warning: (ae-forgotten-export) The symbol "StealthRedirectHop" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    stopWhen?: (hop: StealthRedirectHop) => boolean | Promise<boolean>;
+    // (undocumented)
+    url: string;
+}
+
+// @public (undocumented)
+interface StealthRedirectRunResult {
+    // @deprecated
+    cookies: Record<string, string>;
+    cookieStore: StealthCookieStoreV1;
+    // (undocumented)
+    final: StealthResponse;
+    // (undocumented)
+    hops: StealthRedirectHop[];
+    // (undocumented)
+    reason: RedirectRunReason;
+}
+
+// Warning: (ae-forgotten-export) The symbol "DeclarativeStealthResponse" needs to be exported by the entry point provider.d.ts
+//
+// @public (undocumented)
+type StealthResponse = DeclarativeStealthResponse;
+
+// @public (undocumented)
+interface StealthSession {
+    // (undocumented)
+    close(): void;
+    // Warning: (ae-forgotten-export) The symbol "StealthSessionCookies" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    cookies: StealthSessionCookies;
+    // (undocumented)
+    fetch(url: string, options?: StealthFetchOptions): Promise<StealthResponse>;
+    // (undocumented)
+    redirects: {
+        run(options: StealthRedirectRunOptions): Promise<StealthRedirectRunResult>;
+    };
+}
+
+// @public (undocumented)
+interface StealthSessionCookies extends CookieJar {
+    // (undocumented)
+    clear(): void;
+    // Warning: (ae-forgotten-export) The symbol "StealthCookieStore" needs to be exported by the entry point provider.d.ts
+    deserialize(state: StealthCookieStore): void;
+    // (undocumented)
+    has(name: string, url?: string): boolean;
+    // @deprecated
+    restore(cookies: Record<string, string>): void;
+    serialize(): StealthCookieStoreV1;
+    setFromCookieStrings(cookieStrings: readonly string[], url?: string): void;
+    // @deprecated
+    snapshot(): Record<string, string>;
+    // (undocumented)
+    toHeader(url?: string): string;
+}
+
+// @public (undocumented)
+type SttAudioInput = {
+    kind: "base64";
+    data: string;
+    mediaType?: string;
+    durationMs?: number;
+};
+
+// @public (undocumented)
+interface SttContext {
+    // Warning: (ae-forgotten-export) The symbol "SttVerificationCodeOptions" needs to be exported by the entry point provider.d.ts
+    // Warning: (ae-forgotten-export) The symbol "VerificationCodeExtractionResult" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    extractVerificationCode(text: string, options?: SttVerificationCodeOptions): VerificationCodeExtractionResult;
+    // Warning: (ae-forgotten-export) The symbol "SttTranscribeRequest" needs to be exported by the entry point provider.d.ts
+    // Warning: (ae-forgotten-export) The symbol "SttTranscript" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    transcribe(request: SttTranscribeRequest): Promise<SttTranscript>;
+}
+
+// @public (undocumented)
+type SttPromptPolicy = "none" | "default-hint" | "custom-hint";
+
+// @public (undocumented)
+interface SttSegment {
+    // (undocumented)
+    confidence?: number;
+    // (undocumented)
+    endMs?: number;
+    // (undocumented)
+    startMs?: number;
+    // (undocumented)
+    text: string;
+}
+
+// @public (undocumented)
+type SttTranscribeMode = "general" | "otp";
+
+// @public (undocumented)
+interface SttTranscribeRequest {
+    // Warning: (ae-forgotten-export) The symbol "SttAudioInput" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    audio: SttAudioInput;
+    // (undocumented)
+    initialPrompt?: string;
+    // (undocumented)
+    language?: Bcp47Locale;
+    // (undocumented)
+    maxAudioBytes?: number;
+    // Warning: (ae-forgotten-export) The symbol "SttTranscribeMode" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    mode?: SttTranscribeMode;
+    // Warning: (ae-forgotten-export) The symbol "SttPromptPolicy" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    promptPolicy?: SttPromptPolicy;
+    // (undocumented)
+    timeoutMs?: number;
+    // Warning: (ae-forgotten-export) The symbol "SttUnsupportedOptionPolicy" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    unsupportedOptionPolicy?: SttUnsupportedOptionPolicy;
+    // (undocumented)
+    verificationCode?: SttVerificationCodeOptions;
+}
+
+// @public (undocumented)
+interface SttTranscript {
+    // (undocumented)
+    durationMs?: number;
+    // (undocumented)
+    language?: Bcp47Locale;
+    // Warning: (ae-forgotten-export) The symbol "SttSegment" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    segments?: readonly SttSegment[];
+    // (undocumented)
+    text: string;
+    // Warning: (ae-forgotten-export) The symbol "SttUsage" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    usage?: SttUsage;
+    // (undocumented)
+    verificationCode?: VerificationCodeExtractionResult;
+    // Warning: (ae-forgotten-export) The symbol "SttWarning" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    warnings?: readonly SttWarning[];
+}
+
+// @public (undocumented)
+type SttUnsupportedOptionPolicy = "warn" | "error";
+
+// @public (undocumented)
+interface SttUsage {
+    // (undocumented)
+    audioBytes?: number;
+    // (undocumented)
+    audioDurationMs?: number;
+    // (undocumented)
+    billableUnits?: number;
+}
+
+// @public (undocumented)
+interface SttVerificationCodeOptions {
+    // (undocumented)
+    codeLengths?: number | readonly number[] | {
+        min: number;
+        max: number;
+    };
+    // (undocumented)
+    locale?: Bcp47Locale;
+}
+
+// @public (undocumented)
+interface SttWarning {
+    // (undocumented)
+    code: "UNSUPPORTED_STT_OPTION" | "PROMPT_IGNORED" | "LOCALE_PARTIAL";
+    // (undocumented)
+    message: string;
+}
+
+// @public (undocumented)
+interface TraceContext {
+    // (undocumented)
+    span<T>(name: string, fn: () => Promise<T>): Promise<T>;
+}
+
+// @public (undocumented)
 export class TransportError extends ProviderError {
-    // Warning: (ae-forgotten-export) The symbol "TransportErrorOptions" needs to be exported by the entry point provider.d.ts
     constructor(message: string, options?: TransportErrorOptions);
     // (undocumented)
     readonly status?: number;
@@ -1798,12 +3352,26 @@ export class TransportError extends ProviderError {
 }
 
 // @public (undocumented)
+type TransportErrorOptions = ProviderErrorOptions & {
+    status?: number;
+    upstreamStatus?: number;
+};
+
+// @public (undocumented)
+const VALID_OPERATION_ERROR_STATUSES: readonly [400, 401, 404, 409, 410, 422, 429, 500, 502, 503, 504];
+
+// @public (undocumented)
 export class ValidationError extends ProviderError {
     // Warning: (ae-forgotten-export) The symbol "ValidationErrorOptions" needs to be exported by the entry point provider.d.ts
     constructor(message: string, options?: ValidationErrorOptions);
     // (undocumented)
     readonly zodError?: unknown;
 }
+
+// @public (undocumented)
+type ValidationErrorOptions = ProviderErrorOptions & {
+    zodError?: unknown;
+};
 
 // @public (undocumented)
 export type VendorCredentialLookup = {
@@ -1817,23 +3385,63 @@ export type VendorCredentialLookup = {
 // @public (undocumented)
 export type VendorCredentialResolver = (vendor: ProviderProxyProvider) => VendorCredentialLookup;
 
+// @public (undocumented)
+interface VerificationCodeCandidate {
+    // (undocumented)
+    code: string;
+    // (undocumented)
+    endIndex?: number;
+    // Warning: (ae-forgotten-export) The symbol "VerificationCodeCandidateSource" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    source: VerificationCodeCandidateSource;
+    // (undocumented)
+    startIndex?: number;
+}
+
+// @public (undocumented)
+type VerificationCodeCandidateSource = "digits" | "spoken_words" | "mixed";
+
+// @public (undocumented)
+interface VerificationCodeExtractionResult {
+    // Warning: (ae-forgotten-export) The symbol "VerificationCodeCandidate" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    candidates: readonly VerificationCodeCandidate[];
+    // (undocumented)
+    code: string;
+    // (undocumented)
+    normalizedText: string;
+}
+
 export { z }
 
 // Warnings were encountered during analysis:
 //
 // dist/ceremonies/index.d.ts:40:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:15:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:57:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:88:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:112:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/errors.d.ts:8:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:15:5 - (ae-forgotten-export) The symbol "EnvContext" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:17:5 - (ae-forgotten-export) The symbol "CredentialContext" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:22:5 - (ae-forgotten-export) The symbol "ProviderChoiceTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:12:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:50:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:171:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:857:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:862:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1161:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1161:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1468:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1474:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1475:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1479:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1486:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1517:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:1641:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2024:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:2031:9 - (ae-forgotten-export) The symbol "BrowserEngine" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

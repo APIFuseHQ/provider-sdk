@@ -140,6 +140,16 @@ export type CustomRenderedTurnKind = Extract<(typeof TURN_KINDS)[number], {
 // @public
 export type KnownAuthTurnKind = (typeof TURN_KINDS)[number]["kind"];
 
+// @public (undocumented)
+type ProviderLocaleKey = string & {
+    readonly __brand: "ProviderLocaleKey";
+};
+
+// Warning: (ae-forgotten-export) The symbol "ProviderLocaleKey" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type ProviderLocaleKeyInput = ProviderLocaleKey | string;
+
 // @public
 export type TerminalTurnKind = Extract<(typeof TURN_KINDS)[number], {
     rendering: "terminal";

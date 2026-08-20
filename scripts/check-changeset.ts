@@ -46,6 +46,42 @@ if (verifyBase.exitCode !== 0) {
 	process.exit(2);
 }
 
+function gitOutput(args: string[]): string {
+	const result = Bun.spawnSync(["git", ...args], {
+		cwd: root,
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	if (result.exitCode !== 0) {
+		process.stderr.write(new TextDecoder().decode(result.stderr));
+		process.exit(result.exitCode ?? 1);
+	}
+	return new TextDecoder().decode(result.stdout).trim();
+}
+
+const mergeBase = gitOutput(["merge-base", baseRef, "HEAD"]);
+
+function packageExportsAt(ref: string): unknown {
+	const contents = gitOutput(["show", `${ref}:package.json`]);
+	try {
+		return (JSON.parse(contents) as { exports?: unknown }).exports;
+	} catch (error) {
+		const message = error instanceof Error ? error.message : String(error);
+		console.error(`Could not parse package.json at '${ref}': ${message}`);
+		process.exit(2);
+	}
+}
+
+function canonicalize(value: unknown): unknown {
+	if (Array.isArray(value)) return value.map(canonicalize);
+	if (typeof value !== "object" || value === null) return value;
+	return Object.fromEntries(
+		Object.entries(value)
+			.sort(([left], [right]) => left.localeCompare(right))
+			.map(([key, child]) => [key, canonicalize(child)]),
+	);
+}
+
 function changedPaths(options: string[], paths: string[]): string[] {
 	const diff = Bun.spawnSync(
 		["git", "diff", "--name-only", ...options, `${baseRef}...HEAD`, "--", ...paths],
@@ -75,6 +111,16 @@ function changedPaths(options: string[], paths: string[]): string[] {
 }
 
 const sourceChanged = changedPaths([], ["src/", "bin/"]).length > 0;
+const apiExtractorConfigChanged = changedPaths([], ["config/api-extractor/"]).length > 0;
+const exportsChanged =
+	JSON.stringify(canonicalize(packageExportsAt(mergeBase))) !==
+	JSON.stringify(canonicalize(packageExportsAt("HEAD")));
+const releaseRelevantChanged = sourceChanged || apiExtractorConfigChanged || exportsChanged;
+const releaseRelevantReasons = [
+	sourceChanged ? "source/bin files" : undefined,
+	apiExtractorConfigChanged ? "API Extractor configs" : undefined,
+	exportsChanged ? "package.json exports" : undefined,
+].filter((reason): reason is string => reason !== undefined);
 const ignoredChangesetNames = new Set(["AGENTS.md", "CLAUDE.md", "GEMINI.md"]);
 const addedChangesets = changedPaths(["--diff-filter=A"], [".changeset/"]).filter((path) => {
 	const name = path.startsWith(".changeset/") ? path.slice(".changeset/".length) : path;
@@ -117,8 +163,10 @@ if (invalidChangeset) {
 	process.exit(1);
 }
 
-if (sourceChanged && addedChangesets.length === 0) {
-	console.error("Source or bin files changed without a newly added changeset.");
+if (releaseRelevantChanged && addedChangesets.length === 0) {
+	console.error(
+		`Release-relevant changes (${releaseRelevantReasons.join(", ")}) have no newly added changeset.`,
+	);
 	console.error(
 		"Add a .changeset/*.md file, or use `bunx changeset --empty` for a no-release change.",
 	);
@@ -126,7 +174,7 @@ if (sourceChanged && addedChangesets.length === 0) {
 }
 
 console.log(
-	sourceChanged
-		? "Valid new changeset present for source/bin changes."
-		: "No source/bin changes require a changeset.",
+	releaseRelevantChanged
+		? `Valid new changeset present for release-relevant changes: ${releaseRelevantReasons.join(", ")}.`
+		: "No release-relevant changes require a changeset.",
 );

@@ -31,6 +31,33 @@ export function createNativeNetworkConnection(socket: Socket | TLSSocket, proxy:
 // @public
 export function deriveNativeCredentialAffinityKey(credentialIdentity: string): string;
 
+// @public (undocumented)
+type DynamicEgressRuleSnapshot = {
+    readonly sourceHost?: string;
+    readonly sourceHostSuffixes: readonly string[];
+    readonly sourceIpv4Cidrs: readonly string[];
+    readonly sourceIpv6Cidrs: readonly string[];
+    readonly sourcePorts: readonly number[];
+    readonly sourcePortRanges: readonly NativeTcpPortRange[];
+    readonly targetHostSuffixes: readonly string[];
+    readonly targetIpv4Cidrs: readonly string[];
+    readonly targetIpv6Cidrs: readonly string[];
+    readonly targetPorts: readonly number[];
+    readonly targetPortRanges: readonly NativeTcpPortRange[];
+    readonly tls: NativeTcpTlsMode;
+    readonly ttlMs?: number;
+    readonly maxGrants?: number;
+};
+
+// @public (undocumented)
+interface EnvContext {
+    // (undocumented)
+    get(key: string): string | undefined;
+}
+
+// @public (undocumented)
+type Iso3166Alpha2CountryCode = Uppercase<string>;
+
 // Warning: (ae-forgotten-export) The symbol "DynamicEgressRuleSnapshot" needs to be exported by the entry point native-network.d.ts
 //
 // @public
@@ -38,6 +65,9 @@ export function matchesSourceHost(rule: DynamicEgressRuleSnapshot, host: string)
 
 // @public (undocumented)
 export const NATIVE_EGRESS_EXPIRED_EVIDENCE_LIMIT = 256;
+
+// @public (undocumented)
+type NativeConnectTls = "required" | "disabled";
 
 // @public
 export class NativeEgressGrantExpiredError extends NativeNetworkError {
@@ -120,6 +150,20 @@ export class NativeIdleTimeoutError extends NativeNetworkError {
 }
 
 // @public (undocumented)
+interface NativeNetworkClient {
+    // Warning: (ae-forgotten-export) The symbol "NativeNetworkConnectOptions" needs to be exported by the entry point native-network.d.ts
+    //
+    // (undocumented)
+    connectTcp(input: NativeNetworkConnectOptions): Promise<NativeNetworkConnection>;
+    // Warning: (ae-forgotten-export) The symbol "NativeTlsConnectOptions" needs to be exported by the entry point native-network.d.ts
+    //
+    // (undocumented)
+    connectTls(input: NativeTlsConnectOptions): Promise<NativeNetworkConnection>;
+    // (undocumented)
+    grantTcpEgress(input: NativeNetworkDynamicGrantOptions): NativeNetworkEgressGrant;
+}
+
+// @public (undocumented)
 export type NativeNetworkClientOptions = {
     readonly proxyPolicy?: ProviderProxyPolicy;
     readonly affinityKey?: string;
@@ -131,6 +175,71 @@ export type NativeNetworkClientOptions = {
     readonly egress?: NonNullable<NativeProviderConfig["network"]>;
     readonly grantTcpEgress?: (input: NativeNetworkDynamicGrantOptions) => NativeNetworkEgressGrant;
 };
+
+// @public
+interface NativeNetworkCloseReason {
+    // (undocumented)
+    readonly code: string;
+    // (undocumented)
+    readonly message: string;
+}
+
+// @public
+interface NativeNetworkConnectInput {
+    readonly affinityKey?: string;
+    // (undocumented)
+    readonly host: string;
+    readonly idleTimeoutMs?: number;
+    // (undocumented)
+    readonly port: number;
+    // (undocumented)
+    readonly rejectUnauthorized?: boolean;
+    // (undocumented)
+    readonly serverName?: string;
+    // (undocumented)
+    readonly signal?: AbortSignal;
+    readonly timeoutMs?: number;
+}
+
+// @public
+interface NativeNetworkConnection {
+    // (undocumented)
+    close(): Promise<void>;
+    // Warning: (ae-forgotten-export) The symbol "NativeNetworkCloseReason" needs to be exported by the entry point native-network.d.ts
+    readonly closeReason?: NativeNetworkCloseReason;
+    // Warning: (ae-forgotten-export) The symbol "NativeProxyDrainHandler" needs to be exported by the entry point native-network.d.ts
+    onExpiring?(handler: NativeProxyDrainHandler): void;
+    readonly proxy?: NativeProxyEgressInfo;
+    // (undocumented)
+    read(): Promise<Uint8Array | null>;
+    // (undocumented)
+    write(data: Uint8Array): Promise<void>;
+}
+
+// @public (undocumented)
+type NativeNetworkConnectOptions = Omit<NativeNetworkConnectInput, "serverName" | "rejectUnauthorized">;
+
+// @public (undocumented)
+interface NativeNetworkDynamicGrantOptions {
+    // (undocumented)
+    readonly host: string;
+    // (undocumented)
+    readonly port: number;
+    // (undocumented)
+    readonly sourceHost: string;
+    // (undocumented)
+    readonly sourcePort: number;
+    // (undocumented)
+    readonly tls: NativeTcpTlsMode;
+    // (undocumented)
+    readonly ttlMs?: number;
+}
+
+// @public (undocumented)
+interface NativeNetworkEgressGrant {
+    // (undocumented)
+    revoke(): void;
+}
 
 // Warning: (ae-forgotten-export) The symbol "TransportError" needs to be exported by the entry point native-network.d.ts
 //
@@ -145,11 +254,173 @@ export class NativeNetworkError extends TransportError {
 export type NativeNetworkErrorCode = "native_connection_aborted" | "native_connection_closed" | "native_connection_failed" | "native_connection_idle_timeout" | "native_connection_timeout" | "native_egress_authorization_failed" | "native_egress_grant_expired" | "native_egress_grant_invalid" | "native_egress_grant_limit_exceeded" | "native_egress_input_invalid" | "native_egress_not_declared" | "native_egress_policy_invalid" | "native_dynamic_egress_unsupported" | "native_proxy_expired" | "native_proxy_invalid";
 
 // @public (undocumented)
+interface NativeProviderConfig {
+    // (undocumented)
+    readonly network?: {
+        readonly tcp?: readonly NativeTcpEgressRule[];
+        readonly dynamicTcp?: readonly NativeTcpDynamicEgressRule[];
+    };
+}
+
+// Warning: (ae-forgotten-export) The symbol "NativeProxyExpiringEvent" needs to be exported by the entry point native-network.d.ts
+//
+// @public
+type NativeProxyDrainHandler = (event: NativeProxyExpiringEvent) => void | Promise<void>;
+
+// @public
+interface NativeProxyEgressInfo {
+    readonly expiresAt?: string;
+    readonly sessionId?: string;
+    // (undocumented)
+    readonly sticky: boolean;
+    // (undocumented)
+    readonly vendor: ProviderProxyProvider;
+}
+
+// @public (undocumented)
 export class NativeProxyExpiredError extends NativeNetworkError {
     constructor(expiresAt: string);
     // (undocumented)
     readonly expiresAt: string;
 }
+
+// @public (undocumented)
+interface NativeProxyExpiringEvent {
+    // (undocumented)
+    readonly expiresAt: string;
+    // (undocumented)
+    readonly leadSeconds: number;
+    // Warning: (ae-forgotten-export) The symbol "NativeProxyExpiringReason" needs to be exported by the entry point native-network.d.ts
+    //
+    // (undocumented)
+    readonly reason: NativeProxyExpiringReason;
+}
+
+// @public (undocumented)
+type NativeProxyExpiringReason = "sticky_expiry";
+
+// @public
+interface NativeTcpDynamicEgressRule {
+    // (undocumented)
+    readonly maxGrants?: number;
+    // (undocumented)
+    readonly sourceHost?: string;
+    // (undocumented)
+    readonly sourceHostSuffixes?: readonly string[];
+    // (undocumented)
+    readonly sourceIpv4Cidrs?: readonly string[];
+    // (undocumented)
+    readonly sourceIpv6Cidrs?: readonly string[];
+    // (undocumented)
+    readonly sourcePortRanges?: readonly NativeTcpPortRange[];
+    // (undocumented)
+    readonly sourcePorts?: readonly number[];
+    // (undocumented)
+    readonly targetHostSuffixes?: readonly string[];
+    // (undocumented)
+    readonly targetIpv4Cidrs?: readonly string[];
+    // (undocumented)
+    readonly targetIpv6Cidrs?: readonly string[];
+    // (undocumented)
+    readonly targetPortRanges?: readonly NativeTcpPortRange[];
+    // (undocumented)
+    readonly targetPorts?: readonly number[];
+    // (undocumented)
+    readonly tls: NativeTcpTlsMode;
+    // (undocumented)
+    readonly ttlMs?: number;
+}
+
+// @public
+interface NativeTcpEgressRule {
+    // (undocumented)
+    readonly host: string;
+    // (undocumented)
+    readonly ports: readonly number[];
+    // (undocumented)
+    readonly tls: NativeTcpTlsMode;
+}
+
+// @public (undocumented)
+interface NativeTcpPortRange {
+    // (undocumented)
+    readonly end: number;
+    // (undocumented)
+    readonly start: number;
+}
+
+// @public (undocumented)
+type NativeTcpTlsMode = "required" | "allowed" | "disabled";
+
+// @public (undocumented)
+type NativeTlsConnectOptions = NativeNetworkConnectInput;
+
+// @public (undocumented)
+const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
+
+// @public (undocumented)
+class ProviderError extends Error {
+    constructor(message: string, options?: ProviderErrorOptions | undefined);
+    // (undocumented)
+    get code(): string | undefined;
+    // (undocumented)
+    get details(): unknown;
+    // (undocumented)
+    get fix(): string | undefined;
+    // Warning: (ae-forgotten-export) The symbol "ProviderErrorOptions" needs to be exported by the entry point native-network.d.ts
+    //
+    // (undocumented)
+    readonly options?: ProviderErrorOptions | undefined;
+}
+
+// Warning: (ae-forgotten-export) The symbol "PROVIDER_ERROR_CATEGORIES" needs to be exported by the entry point native-network.d.ts
+//
+// @public (undocumented)
+type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
+
+// @public (undocumented)
+type ProviderErrorOptions = {
+    fix?: string;
+    code?: string;
+    details?: unknown;
+    cause?: Error;
+    category?: ProviderErrorCategory;
+    retryable?: boolean;
+};
+
+// @public (undocumented)
+type ProviderProxyMode = "disabled" | "optional" | "required";
+
+// @public (undocumented)
+interface ProviderProxyPolicy {
+    // (undocumented)
+    geo?: {
+        country?: Iso3166Alpha2CountryCode;
+        subdivision?: string;
+        city?: string;
+    };
+    // Warning: (ae-forgotten-export) The symbol "ProviderProxyMode" needs to be exported by the entry point native-network.d.ts
+    mode: ProviderProxyMode;
+    // @deprecated (undocumented)
+    provider?: ProviderProxyProvider;
+    providers?: ProviderProxyProvider[];
+    // (undocumented)
+    session?: {
+        affinity?: ProviderProxySessionAffinity;
+        lifetimeMinutes?: number;
+        poolSize?: number;
+        drainLeadSeconds?: number;
+    };
+}
+
+// @public
+type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
+
+// @public (undocumented)
+type ProviderProxySessionAffinity = "request" | "operation" | "auth-flow" | "connection";
+
+// @public
+type ProxyProtocol = "http" | "socks5";
 
 // @public
 export function resolveNativeGatewayProxy(input: NativeGatewayProxyResolutionInput): Promise<NativeGatewayProxy | undefined>;
@@ -159,6 +430,24 @@ export function snapshotNativeConnectInput(input: NativeNetworkConnectInput): Na
 
 // @public
 export function snapshotNativeGrantInput(input: NativeNetworkDynamicGrantOptions): NativeNetworkDynamicGrantOptions;
+
+// Warning: (ae-forgotten-export) The symbol "ProviderError" needs to be exported by the entry point native-network.d.ts
+//
+// @public (undocumented)
+class TransportError extends ProviderError {
+    // Warning: (ae-forgotten-export) The symbol "TransportErrorOptions" needs to be exported by the entry point native-network.d.ts
+    constructor(message: string, options?: TransportErrorOptions);
+    // (undocumented)
+    readonly status?: number;
+    // (undocumented)
+    readonly upstreamStatus?: number;
+}
+
+// @public (undocumented)
+type TransportErrorOptions = ProviderErrorOptions & {
+    status?: number;
+    upstreamStatus?: number;
+};
 
 // @public (undocumented)
 export type VendorCredentialLookup = {
@@ -174,6 +463,9 @@ export type VendorCredentialResolver = (vendor: ProviderProxyProvider) => Vendor
 
 // Warnings were encountered during analysis:
 //
+// dist/errors.d.ts:8:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point native-network.d.ts
+// dist/native-egress-policy.d.ts:13:5 - (ae-forgotten-export) The symbol "NativeTcpPortRange" needs to be exported by the entry point native-network.d.ts
+// dist/native-egress-policy.d.ts:19:5 - (ae-forgotten-export) The symbol "NativeTcpTlsMode" needs to be exported by the entry point native-network.d.ts
 // dist/runtime/native-network.d.ts:12:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point native-network.d.ts
 // dist/runtime/native-network.d.ts:47:5 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point native-network.d.ts
 // dist/runtime/native-network.d.ts:50:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point native-network.d.ts
@@ -182,6 +474,10 @@ export type VendorCredentialResolver = (vendor: ProviderProxyProvider) => Vendor
 // dist/runtime/native-network.d.ts:92:5 - (ae-forgotten-export) The symbol "NativeConnectTls" needs to be exported by the entry point native-network.d.ts
 // dist/runtime/native-network.d.ts:93:5 - (ae-forgotten-export) The symbol "NativeNetworkDynamicGrantOptions" needs to be exported by the entry point native-network.d.ts
 // dist/runtime/native-network.d.ts:93:5 - (ae-forgotten-export) The symbol "NativeNetworkEgressGrant" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:857:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:862:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:1362:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:1363:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point native-network.d.ts
 
 // (No @packageDocumentation comment for this package)
 

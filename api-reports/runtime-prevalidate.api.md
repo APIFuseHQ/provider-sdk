@@ -4,6 +4,9 @@
 
 ```ts
 
+// @public (undocumented)
+type JsonSchema = Record<string, unknown>;
+
 // Warning: (ae-forgotten-export) The symbol "JsonSchema" needs to be exported by the entry point prevalidate.d.ts
 //
 // @public (undocumented)

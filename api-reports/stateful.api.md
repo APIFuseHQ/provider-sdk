@@ -108,6 +108,15 @@ export function failureForStatus(statusCode: number): {
 };
 
 // @public (undocumented)
+type FetchTransport = (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+// @public (undocumented)
+type FetchTransport_2 = (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+// @public (undocumented)
+type FetchTransport_3 = (url: string | URL | Request, init?: RequestInit) => Promise<Response>;
+
+// @public (undocumented)
 export function forwardingContextFromStatefulRuntimeContext(value: unknown): StatefulForwardingRuntimeContext | undefined;
 
 // @public (undocumented)
@@ -497,6 +506,48 @@ export class ProviderEventValidationError extends Error {
     constructor(message: string);
 }
 
+// Warning: (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelopeSchema" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type ProviderServerStatefulForwardEnvelope = Readonly<z.infer<typeof ProviderServerStatefulForwardEnvelopeSchema>>;
+
+// @public (undocumented)
+const ProviderServerStatefulForwardEnvelopeSchema: z.ZodObject<{
+    requestId: z.ZodString;
+    providerId: z.ZodString;
+    operationId: z.ZodString;
+    sessionKey: z.ZodString;
+    connectionId: z.ZodString;
+    serviceAccountId: z.ZodString;
+    ownerPodId: z.ZodString;
+    generation: z.ZodNumber;
+    sourcePodId: z.ZodString;
+    forwardedAt: z.ZodString;
+    deadlineAt: z.ZodOptional<z.ZodString>;
+    idempotencyKey: z.ZodOptional<z.ZodString>;
+    operationRequest: z.ZodObject<{
+        requestId: z.ZodString;
+        input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+        connectionId: z.ZodOptional<z.ZodString>;
+        headers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+        trace: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+        connection: z.ZodOptional<z.ZodObject<{
+            id: z.ZodString;
+            mode: z.ZodEnum<{
+                none: "none";
+                credentials: "credentials";
+                oauth2: "oauth2";
+                "platform-managed": "platform-managed";
+                oauth2_proxied: "oauth2_proxied";
+            }>;
+            secrets: z.ZodRecord<z.ZodString, z.ZodString>;
+            scopes: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            metadata: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+            externalRef: z.ZodString;
+        }, z.core.$strict>>;
+    }, z.core.$strict>;
+}, z.core.$strict>;
+
 // @public (undocumented)
 export function providerWebhookDeliveryLatencyMs(delivery: {
     readonly lastAttemptAt?: string;
@@ -577,6 +628,15 @@ export interface RenewSessionOwnerInput {
 
 // @public (undocumented)
 export function sanitizeSessionKeyForLog(sessionKey: string): string;
+
+// @public (undocumented)
+const SESSION_KEY_BRAND: unique symbol;
+
+// @public (undocumented)
+type SessionCloseHook<T> = (session: ManagedSession<T>, reason: string) => void | Promise<void>;
+
+// @public (undocumented)
+type SessionFactory<T> = () => T | Promise<T>;
 
 // @public
 export type SessionKey = string & {

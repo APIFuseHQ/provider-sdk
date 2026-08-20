@@ -1,4 +1,11 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { join, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
@@ -13,7 +20,8 @@ type PackageJson = {
 
 type ApiExtractorConfig = {
 	mainEntryPointFilePath: string;
-	apiReport: { reportFileName: string };
+	apiReport: { includeForgottenExports?: boolean; reportFileName: string };
+	docModel?: { includeForgottenExports?: boolean };
 };
 
 type NonTypedExportExemption = {
@@ -21,11 +29,218 @@ type NonTypedExportExemption = {
 	targets: string[];
 };
 
+type ForgottenExportAllowance = {
+	reason: string;
+	symbols: Set<string>;
+};
+
 const nonTypedExportExemptions: Record<string, NonTypedExportExemption> = {
 	"./auth-turn/auth-turn.v1.schema.json": {
 		reason: "JSON Schema asset; API Extractor only reports TypeScript declaration entry points.",
 		targets: ["./dist/auth-turn/auth-turn.v1.schema.json"],
 	},
+};
+
+function forgottenExports(reason: string, symbols: string): ForgottenExportAllowance {
+	return { reason, symbols: new Set(symbols.trim().split(/\s+/).filter(Boolean)) };
+}
+
+const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
+	// Filled with exact per-report symbol names below. Every allowance shares an explicit rationale,
+	// while includeForgottenExports ensures the full declarations remain reviewable semver evidence.
+	"auth-turn.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			ProviderLocaleKey ProviderLocaleKeyInput
+		`,
+	),
+	"contract.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			AuthAbortRetry AuthConfig AuthContext AuthFlowDefinition AuthFlowInputHandler AuthFlowStartHandler AuthFlowTerminalContext AuthMode
+			AuthSafeData AuthSafeJson AuthTurn Bcp47Locale BrowserChallengeRequest BrowserChallengeResult BrowserClient BrowserCookie
+			BrowserEngine BrowserFrame BrowserLocator BrowserPage BrowserResourceBody BrowserResourceDecision BrowserResourceMethod BrowserResourcePolicy
+			BrowserResourceRequest BrowserResourceRoute ChallengeSolution ContextDeclaration ContextScratchpad CookieJar CredentialContext CredentialDeclaration
+			DeclarativeStealthResponse E164PhoneNumber EnvContext FlowContext HealthCheckAssertionContext HealthCheckCase HealthCheckCaseResult HealthCheckInputPreparationContext
+			HealthCheckSuite HealthCheckUnsupported HealthJourneyDefinition HealthJourneyEventContext HealthJourneyGatewayContext HealthJourneyJournalContext HealthJourneyManualTriggerPolicy HealthJourneyRunContext
+			HealthJourneyRunResult HealthJourneySchedule HealthJourneySmsContext HealthJourneyStep HealthMonitorProbeOverride HealthScheduleRandomization HttpClient HttpMethod
+			HttpRedirectPolicy HttpRedirectPolicyMode HttpResponse HttpRetryAfterPolicy HttpRetryDelayStrategy HttpRetryJitter HttpRetryOptions HttpRetryPreset
+			HttpRetryUnsafeMethodPolicy HttpStreamResponse InferSchemaOutput Iso3166Alpha2CountryCode Iso8601Duration NativeContext NativeNetworkClient NativeNetworkCloseReason
+			NativeNetworkConnectInput NativeNetworkConnectOptions NativeNetworkConnection NativeNetworkDynamicGrantOptions NativeNetworkEgressGrant NativeProviderConfig NativeProviderContext NativeProxyDrainHandler
+			NativeProxyEgressInfo NativeProxyExpiringEvent NativeProxyExpiringReason NativeTcpDynamicEgressRule NativeTcpEgressRule NativeTcpPortRange NativeTcpTlsMode NativeTlsConnectOptions
+			OcrCaptchaCandidate OcrCaptchaOptions OcrCaptchaResult OcrContext OcrImageInput OcrRecognizeRequest OcrResult OcrWarning
+			OperationAnnotations OperationApprovalPolicy OperationContractMetadata OperationDefinition OperationDeprecationMetadata OperationDocMeta OperationErrorCode OperationHandlerResult
+			OperationHttpStreamTransport OperationInputExample OperationJsonTransport OperationLifecycle OperationObservabilityConfig OperationObservabilitySensitiveConfig OperationRelationships OperationRiskClass
+			OperationSensitivePath OperationSseTransport OperationToolRouterMetadata OperationTransport OperationWebSocketTransport ProbeInterval ProviderAccessConfig ProviderAccessVisibility
+			ProviderCache ProviderCacheGetOrSetOptions ProviderCacheKeyOptions ProviderCacheLookupMeta ProviderCacheResponseMeta ProviderCacheResult ProviderChallenge ProviderChallengeKind
+			ProviderChoiceBindingOptions ProviderChoiceConsumeMode ProviderChoiceConsumeResult ProviderChoiceContext ProviderChoiceExplicitParseResult ProviderChoiceIssueOptions ProviderChoiceParseOptions ProviderChoiceStorageOptions
+			ProviderContext ProviderDefinition ProviderDeploymentOverrides ProviderErrorStatus ProviderFileRef ProviderFilesContext ProviderHealthMonitorConfig ProviderHealthProbeConfig
+			ProviderLocaleKey ProviderLocaleKeyInput ProviderLogoProfile ProviderMeta ProviderOcrConfig ProviderProxyConfig ProviderProxyMode ProviderProxyPolicy
+			ProviderProxyProvider ProviderProxySessionAffinity ProviderPublicConnectionMode ProviderPublicProfile ProviderRequestContext ProviderResolvedFile ProviderResolverConfig ProviderResolverVendor
+			ProviderReviewed ProviderRuntimeState ProviderSecretDeclaration ProviderStateDurationString ProviderStateNamespace ProviderStreamEvent ProviderSttConfig ProviderSttMode
+			ProviderSupportLevel ProxiedOAuthConfig RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams RequestWithMethodOptions
+			ResolverContext SchemaLike SmsOrigin SmsOtpExtractionPattern SmsOtpMatcherDefinition SmsPhoneIdentity SseMessage StandardSchemaV1
+			StateCasResult StateNamespaceOptions StateNamespaceScope StateValue StateWriteOptions StealthClient StealthCookieStore StealthCookieStoreV1
+			StealthFetchOptions StealthPlatform StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession StealthSessionCookies
+			SttAudioInput SttContext SttPromptPolicy SttSegment SttTranscribeMode SttTranscribeRequest SttTranscript SttUnsupportedOptionPolicy
+			SttUsage SttVerificationCodeOptions SttWarning TraceContext VALID_OPERATION_ERROR_STATUSES VerificationCodeCandidate VerificationCodeCandidateSource VerificationCodeExtractionResult
+		`,
+	),
+	"index.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			AuthAbortRetry AuthFlowTerminalContext AuthModeLike AuthSafeData AuthSafeJson AuthStartNoInputGuard BrowserChallengeRequest BrowserChallengeResult
+			BrowserClient BrowserFrame BrowserLocator BrowserPage CloudflareWorkersAiOcrClientOptions DeclarativeStealthResponse EnvLike EnvLike_2
+			HealthCheckInputPreparationContext HealthMonitorProbeOverride HttpClientOptions HttpStreamOperationConfig JsonObject OTLPExportOptions OpenAiCompatibleOcrClientOptions OperationConfig
+			OperationHttpStreamTransport OperationJsonTransport OperationMapConfig OperationRequest OperationRequestSchema OperationSseTransport OperationWebSocketTransport ProviderAuthLike
+			ProviderChoiceStorageOptions ProviderChoiceTelemetryEvent ProviderContractMetaLike ProviderImplementationCredentialStrategy ProviderImplementationProfile ProviderImplementationSourceAccess ProviderLintMode ProviderLintOptions
+			ProviderOperation ProviderRequestContext ProviderRequestCost ProviderServerCloseOptions ProviderServerHandle ProviderServerLogEvent ProviderServerLogEventBase ProviderServerLogger
+			ProviderServerOperationExecutor ProviderServerOperationExecutorInput ProviderServerOptions ProviderServerStatefulForwardEnvelope ProviderServerStatefulForwardEnvelopeSchema ProviderServerStatefulOwnerFence ProviderServerStatefulOwnerFenceValidator ProxyAttemptTelemetryEvent
+			ProxyCacheStatus ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource ProxyVendorFailoverTelemetryEvent RequestParamPrimitive RequestParamValue RequestParams
+			RequestWithMethodOptions SelfTestCancellationLogEvent SensitivePathSegment SmartproxyAllocatorBodyClass SmsPhoneIdentity SseOperationConfig StreamOperationConfig TraceAttributeValue
+			TraceContext_2 VALID_OPERATION_ERROR_STATUSES WebSocketOperationConfig
+		`,
+	),
+	"provider.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			AuthConfig AuthContext AuthFlowDefinition AuthFlowInputHandler AuthFlowStartHandler AuthStartNoInputGuard AuthTurn Bcp47Locale
+			BrowserChallengeRequest BrowserChallengeResult BrowserClient BrowserCookie BrowserEngine BrowserFrame BrowserLocator BrowserPage
+			BrowserResourceBody BrowserResourceDecision BrowserResourceMethod BrowserResourcePolicy BrowserResourceRequest BrowserResourceRoute ChallengeSolution ContextDeclaration
+			ContextScratchpad CookieJar CreateProviderChoiceTokenOptions CredentialContext CredentialDeclaration DeclarativeStealthResponse E164PhoneNumber EnvContext
+			FreshProviderChoiceIssuedAtOptions HealthCheckCaseResult HealthCheckInputPreparationContext HealthJourneyGatewayContext HealthJourneyJournalContext HealthJourneySchedule HealthJourneySmsContext HealthJourneyStep
+			HealthMonitorProbeOverride HttpClient HttpMethod HttpRedirectErrorOptions HttpResponse HttpStreamResponse Iso3166Alpha2CountryCode Iso8601Duration
+			JsonObject OcrCaptchaCandidate OcrCaptchaOptions OcrCaptchaResult OcrContext OcrImageInput OcrRecognizeRequest OcrResult
+			OcrWarning OperationAnnotations OperationConfig OperationDeprecationMetadata OperationHandlerResult OperationHttpStreamTransport OperationJsonTransport OperationMapConfig
+			OperationSseTransport OperationWebSocketTransport PROVIDER_ERROR_CATEGORIES ParseProviderChoiceTokenOptions ProbeInterval ProviderAccessConfig ProviderCache ProviderCacheGetOrSetOptions
+			ProviderCacheKeyOptions ProviderCacheLookupMeta ProviderCacheResponseMeta ProviderCacheResult ProviderChallenge ProviderChallengeKind ProviderChoiceStorageOptions ProviderChoiceTelemetryEvent
+			ProviderConfig ProviderErrorCategory ProviderErrorOptions ProviderHealthMonitorConfig ProviderHealthProbeConfig ProviderImplementationCredentialStrategy ProviderImplementationProfile ProviderImplementationSourceAccess
+			ProviderLocaleCatalog ProviderLocaleValue ProviderMeta ProviderOcrConfig ProviderOperation ProviderProxyConfig ProviderProxyMode ProviderProxyProvider
+			ProviderProxySessionAffinity ProviderRequestContext ProviderResolverConfig ProviderResolverVendor ProviderReviewed ProviderSecretDeclaration ProviderStreamEvent ProviderSttConfig
+			ProviderSttMode ProxyProtocol RequestOptions RequestParamPrimitive RequestParamValue RequestParams RequestWithMethodOptions ResolverContext
+			SensitivePathSegment SmsOrigin SmsOtpExtractionPattern SmsPhoneIdentity SseMessage StealthClient StealthCookieStore StealthCookieStoreV1
+			StealthFetchOptions StealthPlatform StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession StealthSessionCookies
+			SttAudioInput SttContext SttPromptPolicy SttSegment SttTranscribeMode SttTranscribeRequest SttTranscript SttUnsupportedOptionPolicy
+			SttUsage SttVerificationCodeOptions SttWarning TraceContext TransportErrorOptions VALID_OPERATION_ERROR_STATUSES ValidationErrorOptions VerificationCodeCandidate
+			VerificationCodeCandidateSource VerificationCodeExtractionResult
+		`,
+	),
+	"runtime-browser.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			BrowserChallengeRequest BrowserChallengeResult BrowserClient_2 BrowserCookie BrowserEngine BrowserFrame BrowserLocator BrowserOptions
+			BrowserPage BrowserPageContract BrowserResourceBody BrowserResourceDecision BrowserResourceMethod BrowserResourcePolicy BrowserResourceRequest BrowserResourceRoute
+		`,
+	),
+	"runtime-native-network.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			DynamicEgressRuleSnapshot EnvContext Iso3166Alpha2CountryCode NativeConnectTls NativeNetworkClient NativeNetworkCloseReason NativeNetworkConnectInput NativeNetworkConnectOptions
+			NativeNetworkConnection NativeNetworkDynamicGrantOptions NativeNetworkEgressGrant NativeProviderConfig NativeProxyDrainHandler NativeProxyEgressInfo NativeProxyExpiringEvent NativeProxyExpiringReason
+			NativeTcpDynamicEgressRule NativeTcpEgressRule NativeTcpPortRange NativeTcpTlsMode NativeTlsConnectOptions PROVIDER_ERROR_CATEGORIES ProviderError ProviderErrorCategory
+			ProviderErrorOptions ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity ProxyProtocol TransportError TransportErrorOptions
+		`,
+	),
+	"runtime-prevalidate.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			JsonSchema
+		`,
+	),
+	"runtime-resolver.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			ChallengeSolution EnvLike Iso3166Alpha2CountryCode ProviderCache ProviderCacheGetOrSetOptions ProviderCacheKeyOptions ProviderCacheLookupMeta ProviderCacheResponseMeta
+			ProviderCacheResult ProviderChallenge ProviderChallengeKind ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity ProviderResolverConfig
+			ProviderResolverVendor ProxyAttemptTelemetryEvent ProxyCacheStatus ProxyProtocol ProxyResolutionOptions ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource
+			ProxyVendorFailoverTelemetryEvent ProxyVendorName ResolverChainClient ResolverContext ResolverIdentity ResolverIssuingIdentity ResolverVendorAdapter ResolverVendorTransport
+			SmartproxyAllocatorBodyClass SpanHookOptions TraceRecorder
+		`,
+	),
+	"runtime-stealth.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			CookieJar DeclarativeStealthResponse HttpMethod HttpRedirectPolicy HttpRedirectPolicyMode HttpRetryAfterPolicy HttpRetryDelayStrategy HttpRetryJitter
+			HttpRetryOptions HttpRetryPreset HttpRetryUnsafeMethodPolicy Iso3166Alpha2CountryCode ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity
+			ProxyAttemptTelemetryEvent ProxyCacheStatus ProxyProtocol ProxyResolutionOptions ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource ProxyVendorFailoverTelemetryEvent
+			ProxyVendorName RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams SmartproxyAllocatorBodyClass StealthClient
+			StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession
+			StealthSessionCookies StealthTransportBody StealthTransportHeaders StealthTransportResponse
+		`,
+	),
+	"server.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			AuthAbortRetry AuthConfig AuthContext AuthFlowDefinition AuthFlowErrorResponse AuthFlowErrorResponseSchema AuthFlowInputHandler AuthFlowStartHandler
+			AuthFlowTerminalContext AuthMode AuthSafeData AuthSafeJson AuthTurn Bcp47Locale BrowserChallengeRequest BrowserChallengeResult
+			BrowserClient BrowserCookie BrowserEngine BrowserFrame BrowserLocator BrowserPage BrowserResourceBody BrowserResourceDecision
+			BrowserResourceMethod BrowserResourcePolicy BrowserResourceRequest BrowserResourceRoute ChallengeSolution ContextDeclaration ContextScratchpad CookieJar
+			CredentialContext CredentialDeclaration DeclarativeStealthResponse E164PhoneNumber EnvContext FlowContext HealthCheckAssertionContext HealthCheckCase
+			HealthCheckCaseResult HealthCheckInputPreparationContext HealthCheckSuite HealthCheckUnsupported HealthJourneyDefinition HealthJourneyEventContext HealthJourneyGatewayContext HealthJourneyJournalContext
+			HealthJourneyManualTriggerPolicy HealthJourneyRunContext HealthJourneyRunResult HealthJourneySchedule HealthJourneySmsContext HealthJourneyStep HealthMonitorProbeOverride HealthScheduleRandomization
+			HttpClient HttpMethod HttpRedirectPolicy HttpRedirectPolicyMode HttpResponse HttpRetryAfterPolicy HttpRetryDelayStrategy HttpRetryJitter
+			HttpRetryOptions HttpRetryPreset HttpRetryUnsafeMethodPolicy HttpStreamResponse InferSchemaOutput Iso3166Alpha2CountryCode Iso8601Duration NativeContext
+			NativeNetworkClient NativeNetworkCloseReason NativeNetworkConnectInput NativeNetworkConnectOptions NativeNetworkConnection NativeNetworkDynamicGrantOptions NativeNetworkEgressGrant NativeProviderConfig
+			NativeProviderContext NativeProxyDrainHandler NativeProxyEgressInfo NativeProxyExpiringEvent NativeProxyExpiringReason NativeTcpDynamicEgressRule NativeTcpEgressRule NativeTcpPortRange
+			NativeTcpTlsMode NativeTlsConnectOptions OcrCaptchaCandidate OcrCaptchaOptions OcrCaptchaResult OcrContext OcrImageInput OcrRecognizeRequest
+			OcrResult OcrWarning OperationAnnotations OperationApprovalPolicy OperationContractMetadata OperationDefinition OperationDeprecationMetadata OperationDocMeta
+			OperationErrorCode OperationHandlerResult OperationHttpStreamTransport OperationInputExample OperationJsonTransport OperationLifecycle OperationObservabilityConfig OperationObservabilitySensitiveConfig
+			OperationRelationships OperationRiskClass OperationSensitivePath OperationSseTransport OperationToolRouterMetadata OperationTransport OperationWebSocketTransport PROVIDER_ERROR_CATEGORIES
+			ProbeInterval ProviderAccessConfig ProviderAccessVisibility ProviderCache ProviderCacheGetOrSetOptions ProviderCacheKeyOptions ProviderCacheLookupMeta ProviderCacheResponseMeta
+			ProviderCacheResult ProviderChallenge ProviderChallengeKind ProviderChoiceBindingOptions ProviderChoiceConsumeMode ProviderChoiceConsumeResult ProviderChoiceContext ProviderChoiceExplicitParseResult
+			ProviderChoiceIssueOptions ProviderChoiceParseOptions ProviderChoiceStorageOptions ProviderContext ProviderDefinition ProviderDeploymentOverrides ProviderErrorCategory ProviderErrorStatus
+			ProviderFileRef ProviderFilesContext ProviderHealthMonitorConfig ProviderHealthProbeConfig ProviderLocaleKey ProviderLocaleKeyInput ProviderLogoProfile ProviderMeta
+			ProviderOcrConfig ProviderProxyConfig ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity ProviderPublicConnectionMode ProviderPublicProfile
+			ProviderRequestContext ProviderRequestCost ProviderResolvedFile ProviderResolverConfig ProviderResolverVendor ProviderReviewed ProviderRuntimeState ProviderSecretDeclaration
+			ProviderServerLogEventBase ProviderServerStatefulForwardEnvelopeSchema ProviderServerStatefulOwnerFence ProviderServerStatefulOwnerFenceValidator ProviderStateDurationString ProviderStateNamespace ProviderStreamEvent ProviderSttConfig
+			ProviderSttMode ProviderSupportLevel ProxiedOAuthConfig RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams
+			RequestWithMethodOptions ResolverContext SchemaLike SelfTestCancellationLogEvent SmsOrigin SmsOtpExtractionPattern SmsOtpMatcherDefinition SmsPhoneIdentity
+			SseMessage StandardSchemaV1 StateCasResult StateNamespaceOptions StateNamespaceScope StateValue StateWriteOptions StealthClient
+			StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthPlatform StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse
+			StealthSession StealthSessionCookies SttAudioInput SttContext SttPromptPolicy SttSegment SttTranscribeMode SttTranscribeRequest
+			SttTranscript SttUnsupportedOptionPolicy SttUsage SttVerificationCodeOptions SttWarning TraceContext VALID_OPERATION_ERROR_STATUSES VerificationCodeCandidate
+			VerificationCodeCandidateSource VerificationCodeExtractionResult
+		`,
+	),
+	"stateful.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			FetchTransport FetchTransport_2 FetchTransport_3 ProviderServerStatefulForwardEnvelope ProviderServerStatefulForwardEnvelopeSchema SessionCloseHook SessionFactory
+		`,
+	),
+	"testing.api.md": forgottenExports(
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		`
+			AuthAbortRetry AuthConfig AuthContext AuthFlowDefinition AuthFlowInputHandler AuthFlowStartHandler AuthFlowTerminalContext AuthMode
+			AuthSafeData AuthSafeJson AuthTurn Bcp47Locale BrowserChallengeRequest BrowserChallengeResult BrowserClient BrowserCookie
+			BrowserEngine BrowserFrame BrowserLocator BrowserPage BrowserResourceBody BrowserResourceDecision BrowserResourceMethod BrowserResourcePolicy
+			BrowserResourceRequest BrowserResourceRoute ChallengeSolution ContextDeclaration ContextScratchpad CookieJar CredentialContext CredentialDeclaration
+			DeclarativeStealthResponse E164PhoneNumber EnvContext FlowContext HealthCheckAssertionContext HealthCheckCase HealthCheckCaseResult HealthCheckInputPreparationContext
+			HealthCheckSuite HealthCheckUnsupported HealthJourneyDefinition HealthJourneyEventContext HealthJourneyGatewayContext HealthJourneyJournalContext HealthJourneyManualTriggerPolicy HealthJourneyRunContext
+			HealthJourneyRunResult HealthJourneySchedule HealthJourneySmsContext HealthJourneyStep HealthMonitorProbeOverride HealthScheduleRandomization HttpClient HttpMethod
+			HttpRedirectPolicy HttpRedirectPolicyMode HttpResponse HttpRetryAfterPolicy HttpRetryDelayStrategy HttpRetryJitter HttpRetryOptions HttpRetryPreset
+			HttpRetryUnsafeMethodPolicy HttpStreamResponse InferSchemaOutput Iso3166Alpha2CountryCode Iso8601Duration NativeContext NativeNetworkClient NativeNetworkCloseReason
+			NativeNetworkConnectInput NativeNetworkConnectOptions NativeNetworkConnection NativeNetworkDynamicGrantOptions NativeNetworkEgressGrant NativeProviderConfig NativeProviderContext NativeProxyDrainHandler
+			NativeProxyEgressInfo NativeProxyExpiringEvent NativeProxyExpiringReason NativeTcpDynamicEgressRule NativeTcpEgressRule NativeTcpPortRange NativeTcpTlsMode NativeTlsConnectOptions
+			OcrCaptchaCandidate OcrCaptchaOptions OcrCaptchaResult OcrContext OcrImageInput OcrRecognizeRequest OcrResult OcrWarning
+			OperationAnnotations OperationApprovalPolicy OperationContractMetadata OperationDefinition OperationDeprecationMetadata OperationDocMeta OperationErrorCode OperationHandlerResult
+			OperationHttpStreamTransport OperationInputExample OperationJsonTransport OperationLifecycle OperationObservabilityConfig OperationObservabilitySensitiveConfig OperationRelationships OperationRiskClass
+			OperationSensitivePath OperationSseTransport OperationToolRouterMetadata OperationTransport OperationWebSocketTransport ProbeInterval ProviderAccessConfig ProviderAccessVisibility
+			ProviderCache ProviderCacheGetOrSetOptions ProviderCacheKeyOptions ProviderCacheLookupMeta ProviderCacheResponseMeta ProviderCacheResult ProviderChallenge ProviderChallengeKind
+			ProviderChoiceBindingOptions ProviderChoiceConsumeMode ProviderChoiceConsumeResult ProviderChoiceContext ProviderChoiceExplicitParseResult ProviderChoiceIssueOptions ProviderChoiceParseOptions ProviderChoiceStorageOptions
+			ProviderContext ProviderDefinition ProviderDeploymentOverrides ProviderErrorStatus ProviderFileRef ProviderFilesContext ProviderHealthMonitorConfig ProviderHealthProbeConfig
+			ProviderLocaleKey ProviderLocaleKeyInput ProviderLogoProfile ProviderMeta ProviderOcrConfig ProviderProxyConfig ProviderProxyMode ProviderProxyPolicy
+			ProviderProxyProvider ProviderProxySessionAffinity ProviderPublicConnectionMode ProviderPublicProfile ProviderRequestContext ProviderResolvedFile ProviderResolverConfig ProviderResolverVendor
+			ProviderReviewed ProviderRuntimeState ProviderSecretDeclaration ProviderStateDurationString ProviderStateNamespace ProviderStreamEvent ProviderSttConfig ProviderSttMode
+			ProviderSupportLevel ProxiedOAuthConfig RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams RequestWithMethodOptions
+			ResolverContext SchemaLike ShapeArray ShapeMatcher ShapeObject ShapeValue SmsOrigin SmsOtpExtractionPattern
+			SmsOtpMatcherDefinition SmsPhoneIdentity SseMessage StandardSchemaV1 StateCasResult StateNamespaceOptions StateNamespaceScope StateValue
+			StateWriteOptions StealthClient StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthPlatform StealthRedirectHop StealthRedirectRunOptions
+			StealthRedirectRunResult StealthResponse StealthSession StealthSessionCookies SttAudioInput SttContext SttPromptPolicy SttSegment
+			SttTranscribeMode SttTranscribeRequest SttTranscript SttUnsupportedOptionPolicy SttUsage SttVerificationCodeOptions SttWarning TraceContext
+			VALID_OPERATION_ERROR_STATUSES VerificationCodeCandidate VerificationCodeCandidateSource VerificationCodeExtractionResult
+		`,
+	),
 };
 
 if (mode !== "update" && mode !== "check") {
@@ -113,6 +328,48 @@ const parsedConfigs = configs.map((configName) => {
 	};
 });
 
+const unsafeForgottenExportConfigs = parsedConfigs.filter(
+	({ config }) =>
+		config.apiReport.includeForgottenExports !== true ||
+		config.docModel?.includeForgottenExports !== true,
+);
+if (unsafeForgottenExportConfigs.length > 0) {
+	console.error(
+		"API Extractor configs must include forgotten exports in all supported output models.",
+	);
+	for (const { configName } of unsafeForgottenExportConfigs) console.error(`  ${configName}`);
+	process.exit(1);
+}
+
+const configuredReportNames = new Set(
+	parsedConfigs.map(({ config }) => config.apiReport.reportFileName),
+);
+const duplicateReportNames = [...configuredReportNames].filter(
+	(reportName) =>
+		parsedConfigs.filter(({ config }) => config.apiReport.reportFileName === reportName).length > 1,
+);
+if (duplicateReportNames.length > 0) {
+	console.error("API report files must be owned by exactly one API Extractor config.");
+	for (const reportName of duplicateReportNames) console.error(`  ${reportName}`);
+	process.exit(1);
+}
+
+const orphanedReports = readdirSync(reportDir)
+	.filter((name) => name.endsWith(".api.md") && !configuredReportNames.has(name))
+	.sort();
+if (orphanedReports.length > 0) {
+	if (mode === "check") {
+		console.error("Orphaned API reports are not owned by any API Extractor config:");
+		for (const reportName of orphanedReports) console.error(`  api-reports/${reportName}`);
+		console.error("Run `bun run api:update` to delete orphaned reports.");
+		process.exit(1);
+	}
+	for (const reportName of orphanedReports) {
+		unlinkSync(join(reportDir, reportName));
+		console.log(`deleted orphaned ${reportName}`);
+	}
+}
+
 const missingConfigs = typedExports.filter(
 	({ types }) => !parsedConfigs.some((config) => config.types === types),
 );
@@ -172,9 +429,38 @@ if (
 	process.exit(1);
 }
 
+function validateForgottenExports(reportName: string, report: string): boolean {
+	const actual = new Set(
+		[...report.matchAll(/\(ae-forgotten-export\).*?symbol "([^"]+)"/g)].map(([, symbol]) => symbol),
+	);
+	const allowance = forgottenExportAllowlist[reportName];
+	const expected = allowance?.symbols ?? new Set<string>();
+	const unlisted = [...actual].filter((symbol) => !expected.has(symbol)).sort();
+	const stale = [...expected].filter((symbol) => !actual.has(symbol)).sort();
+
+	if (unlisted.length === 0 && stale.length === 0) return true;
+
+	console.error(`Forgotten-export allowlist differs: ${reportName}`);
+	if (unlisted.length > 0) {
+		console.error("Unlisted ae-forgotten-export symbols:");
+		for (const symbol of unlisted) console.error(`  ${symbol}`);
+	}
+	if (stale.length > 0) {
+		console.error("Stale ae-forgotten-export allowances:");
+		for (const symbol of stale) console.error(`  ${symbol}`);
+	}
+	if (allowance) console.error(`Current allowance rationale: ${allowance.reason}`);
+	console.error("Add or remove exact symbol allowances with an explicit rationale.");
+	return false;
+}
+
 for (const { config, configPath } of parsedConfigs) {
 	const reportName = config.apiReport.reportFileName;
 	const committed = join(reportDir, reportName);
+	if (mode === "check" && !existsSync(committed)) {
+		console.error(`Missing committed API report: api-reports/${reportName}`);
+		process.exit(1);
+	}
 	const committedBefore = mode === "check" ? readFileSync(committed, "utf8") : undefined;
 	const result = Bun.spawnSync(
 		["bunx", "api-extractor", "run", "--local", "--config", configPath],
@@ -188,6 +474,7 @@ for (const { config, configPath } of parsedConfigs) {
 	}
 
 	const generated = readFileSync(committed, "utf8");
+	const forgottenExportsValid = validateForgottenExports(reportName, generated);
 	if (mode === "update") {
 		console.log(`updated ${reportName}`);
 	} else {
@@ -200,6 +487,7 @@ for (const { config, configPath } of parsedConfigs) {
 			console.log(`verified ${reportName}`);
 		}
 	}
+	if (!forgottenExportsValid) process.exitCode = 1;
 }
 
 if (mode === "check" && process.exitCode) {
