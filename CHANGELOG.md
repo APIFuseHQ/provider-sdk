@@ -46,6 +46,7 @@
 
 ## Unreleased
 
+- Server-stored provider choices now issue word-format tokens unconditionally. The runtime issuance setting and legacy issuance path were removed; parsing remains dual-read until the legacy-token TTL horizon closes.
 - Added the `thrown-error-code-undeclared` authoring lint (warning level): `apifuse check` now statically flags literal `ProviderError`/`ValidationError` codes that are neither SDK-registered nor declared in any operation's `docs.errorCodes`, surfacing the runtime `unregistered_provider_error_code` signal at check time. The canonical SDK code→status mapping moved to `SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES` in `error-resolution.ts`, shared by the runtime status resolver and the lint.
 
 ## 2.2.0-beta.21
