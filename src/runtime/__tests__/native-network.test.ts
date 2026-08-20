@@ -84,9 +84,20 @@ async function listen(server: Server): Promise<ListeningFixture> {
 	return fixture;
 }
 
-function take(buffer: Buffer, count: number): [Buffer, Buffer] | undefined {
+function take(
+	buffer: Buffer<ArrayBufferLike>,
+	count: number,
+): [Buffer<ArrayBufferLike>, Buffer<ArrayBufferLike>] | undefined {
 	if (buffer.length < count) return undefined;
 	return [buffer.subarray(0, count), buffer.subarray(count)];
+}
+
+async function readPayload(connection: {
+	read(): Promise<Uint8Array<ArrayBufferLike> | null>;
+}): Promise<Uint8Array<ArrayBufferLike>> {
+	const payload = await connection.read();
+	if (payload === null) throw new Error("Expected connection payload before EOF");
+	return payload;
 }
 
 async function startSocks5Server(
@@ -101,13 +112,13 @@ async function startSocks5Server(
 	const server = createServer((client) => {
 		options.onConnection?.();
 		if (options.stall) return;
-		let buffered = Buffer.alloc(0);
+		let buffered: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 		let state: "greeting" | "auth" | "request" | "tunnel" = "greeting";
 
 		client.on("data", (chunk: Buffer) => {
 			if (state === "tunnel") return;
 			buffered = Buffer.concat([buffered, chunk]);
-			while (state !== "tunnel") {
+			while (true) {
 				if (state === "greeting") {
 					if (buffered.length < 2) return;
 					const methods = buffered[1] ?? 0;
@@ -192,7 +203,7 @@ async function startHttpConnectServer(options: { upstreamHost?: string } = {}): 
 	const destinations: Array<{ host: string; port: number }> = [];
 	const requests: string[] = [];
 	const server = createServer((client) => {
-		let buffered = Buffer.alloc(0);
+		let buffered: Buffer<ArrayBufferLike> = Buffer.alloc(0);
 		client.on("data", function onData(chunk: Buffer) {
 			buffered = Buffer.concat([buffered, chunk]);
 			const headerEnd = buffered.indexOf("\r\n\r\n");
@@ -259,7 +270,7 @@ describe("native network runtime", () => {
 			timeoutMs: 1_000,
 		});
 		await connection.write(new TextEncoder().encode("hello"));
-		expect(new TextDecoder().decode(await connection.read())).toBe("hello");
+		expect(new TextDecoder().decode(await readPayload(connection))).toBe("hello");
 		expect(proxy.destinations).toEqual([{ host: destination.host, port: destination.port }]);
 		expect(connection.proxy).toMatchObject({ vendor: "nodemaven", sticky: false });
 		await connection.close();
@@ -285,7 +296,7 @@ describe("native network runtime", () => {
 			timeoutMs: 1_000,
 		});
 		await connection.write(new TextEncoder().encode("secure"));
-		expect(new TextDecoder().decode(await connection.read())).toBe("secure");
+		expect(new TextDecoder().decode(await readPayload(connection))).toBe("secure");
 		expect(proxy.destinations[0]).toEqual({ host: destination.host, port: destination.port });
 		await connection.close();
 	});
@@ -310,7 +321,7 @@ describe("native network runtime", () => {
 			timeoutMs: 1_000,
 		});
 		await connection.write(new TextEncoder().encode("connect-secure"));
-		expect(new TextDecoder().decode(await connection.read())).toBe("connect-secure");
+		expect(new TextDecoder().decode(await readPayload(connection))).toBe("connect-secure");
 		expect(proxy.destinations).toEqual([{ host: destination.host, port: destination.port }]);
 		await connection.close();
 	});
@@ -337,7 +348,7 @@ describe("native network runtime", () => {
 			timeoutMs: 1_000,
 		});
 		await connection.write(new TextEncoder().encode("direct"));
-		expect(new TextDecoder().decode(await connection.read())).toBe("direct");
+		expect(new TextDecoder().decode(await readPayload(connection))).toBe("direct");
 		expect(connection.proxy).toBeUndefined();
 		await connection.close();
 	});
@@ -508,7 +519,7 @@ describe("native network runtime", () => {
 				timeoutMs: 1_000,
 			});
 			await connection.write(new TextEncoder().encode("idn"));
-			expect(new TextDecoder().decode(await connection.read())).toBe("idn");
+			expect(new TextDecoder().decode(await readPayload(connection))).toBe("idn");
 			await connection.close();
 		}
 		expect(proxy.destinations).toEqual([
@@ -581,7 +592,7 @@ describe("native network runtime", () => {
 			port: destination.port,
 			timeoutMs: 1_000,
 		});
-		expect(new TextDecoder().decode(await connection.read())).toBe("optional-direct");
+		expect(new TextDecoder().decode(await readPayload(connection))).toBe("optional-direct");
 		expect(connection.proxy).toBeUndefined();
 		await connection.close();
 	});

@@ -8,23 +8,54 @@ import {
 	SessionExpiredError,
 	TransportError,
 } from "../errors.js";
+import { createProviderContextDouble } from "./test-utils.js";
 
 // A query-qualified specifier forces Bun to evaluate errors.ts a second time,
 // producing a genuinely separate module identity (distinct constructors) that
 // models the packaged src/* vs a provider's dist/* SDK entrypoint split. Mirrors
 // the pattern proven in error-identity.test.ts.
-// biome-ignore lint/correctness/useImportExtensions: specifier already carries .ts; the ?query (invisible to the rule) mints a second module identity under bun test
-const duplicateSdk = import("../errors.ts?duplicate-sdk-instance") as Promise<
-	typeof import("../errors")
->;
+const duplicateSdkSpecifier: string = "../errors.ts?duplicate-sdk-instance";
+const duplicateSdk: Promise<typeof import("../errors.js")> = import(duplicateSdkSpecifier);
 import { createProviderCache } from "../runtime/cache.js";
 import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { executeOperation } from "../runtime/executor.js";
 import { createUnsupportedProviderRuntimeState } from "../runtime/state.js";
-import type { ProviderContext, ProviderDefinition } from "../types.js";
+import type {
+	DeclarativeStealthResponse,
+	ProviderContext,
+	ProviderDefinition,
+} from "../types.js";
+
+function createStealthResponse(
+	value: unknown,
+	status: number,
+): DeclarativeStealthResponse {
+	const body = JSON.stringify(value);
+	return {
+		status,
+		ok: status >= 200 && status < 300,
+		headers: {},
+		rawHeaders: [],
+		body,
+		cookies: {
+			get: () => undefined,
+			getAll: () => ({}),
+			toString: () => "",
+		},
+		async json<T>(): Promise<T> {
+			return JSON.parse(body);
+		},
+		async arrayBuffer() {
+			return await new Blob([body]).arrayBuffer();
+		},
+		async bytes() {
+			return new TextEncoder().encode(body);
+		},
+	};
+}
 
 function createMockCtx(fetchResponse: unknown, status = 200): ProviderContext {
-	return {
+	return createProviderContextDouble({
 		env: {
 			get: mock(() => undefined),
 		},
@@ -36,40 +67,11 @@ function createMockCtx(fetchResponse: unknown, status = 200): ProviderContext {
 			getScopes: mock(() => []),
 		},
 		stealth: {
-			fetch: mock(async (_url: string, _opts?: unknown) => ({
-				status,
-				ok: status >= 200 && status < 300,
-				headers: {},
-				rawHeaders: [],
-				body: "",
-				cookies: {
-					get: () => undefined,
-					getAll: () => ({}),
-					toString: () => "",
-				},
-				json: async <T>() => fetchResponse as T,
-			})),
-			createSession: mock(() => ({
-				fetch: async () => ({
-					status,
-					ok: status >= 200 && status < 300,
-					headers: {},
-					rawHeaders: [] as [string, string][],
-					body: "",
-					cookies: {
-						get: () => undefined,
-						getAll: () => ({}),
-						toString: () => "",
-					},
-					json: async <T>() => ({}) as T,
-				}),
-				close: () => {},
-			})),
+			...createProviderContextDouble().stealth,
+			fetch: mock(async () => createStealthResponse(fetchResponse, status)),
 		},
-		http: {} as ProviderContext["http"],
 		cache: createProviderCache({ providerId: "test-provider" }),
 		state: createUnsupportedProviderRuntimeState(),
-		browser: {} as ProviderContext["browser"],
 		trace: {
 			span: async <T>(_name: string, fn: () => Promise<T>) => fn(),
 		},
@@ -77,7 +79,7 @@ function createMockCtx(fetchResponse: unknown, status = 200): ProviderContext {
 			requestField: mock(async () => ""),
 		},
 		choice: createTestProviderChoiceContext({ providerId: "test-provider" }),
-	};
+	});
 }
 
 function createMockProvider(options?: {
@@ -92,6 +94,7 @@ function createMockProvider(options?: {
 		auth: options?.auth,
 		meta: {
 			displayName: "Test Provider",
+			descriptionKey: "test-provider.description",
 			category: "test",
 		},
 		operations: {
@@ -198,7 +201,8 @@ describe("executeOperation", () => {
 					description: "No upstream",
 					input: z.object({ query: z.string() }),
 					output: z.object({ results: z.array(z.string()) }),
-					handler: undefined as never,
+					// @ts-expect-error test-invalid: operation deliberately omits its runtime handler
+					handler: undefined,
 				},
 			},
 		};
@@ -210,42 +214,16 @@ describe("executeOperation", () => {
 
 	it("propagates 401 errors without legacy auto-refresh", async () => {
 		let callCount = 0;
+		const baseCtx = createMockCtx({});
 		const ctx: ProviderContext = {
-			...createMockCtx({}),
+			...baseCtx,
 			stealth: {
+				...baseCtx.stealth,
 				fetch: mock(async () => {
 					callCount++;
 					const responseStatus = callCount === 1 ? 401 : 200;
-					return {
-						status: responseStatus,
-						ok: responseStatus >= 200 && responseStatus < 300,
-						headers: {},
-						rawHeaders: [],
-						body: "",
-						cookies: {
-							get: () => undefined,
-							getAll: () => ({}),
-							toString: () => "",
-						},
-						json: async <T>() => ({ items: [] }) as T,
-					};
+					return createStealthResponse({ items: [] }, responseStatus);
 				}),
-				createSession: mock(() => ({
-					fetch: async () => ({
-						status: 200,
-						ok: true,
-						headers: {},
-						rawHeaders: [] as [string, string][],
-						body: "",
-						cookies: {
-							get: () => undefined,
-							getAll: () => ({}),
-							toString: () => "",
-						},
-						json: async <T>() => ({}) as T,
-					}),
-					close: () => {},
-				})),
 			},
 		};
 
@@ -253,8 +231,8 @@ describe("executeOperation", () => {
 			auth: {
 				mode: "credentials",
 				flow: {
-					start: async () => ({ kind: "message" }),
-					continue: async () => ({ kind: "complete" }),
+					start: async () => ({ kind: "message", turnId: "message" }),
+					continue: async () => ({ kind: "complete", turnId: "complete" }),
 				},
 			},
 			handler: async () => {

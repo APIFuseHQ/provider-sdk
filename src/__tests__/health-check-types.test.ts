@@ -199,7 +199,9 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 		for (const [interval, accepted] of cases) {
 			if (accepted) {
 				expect(
-					providerWithHealthCheckInterval(interval).operations.ping.healthCheck?.interval,
+					String(
+						providerWithHealthCheckInterval(interval).operations.ping.healthCheck?.interval,
+					),
 				).toBe(interval);
 			} else {
 				expect(() => providerWithHealthCheckInterval(interval)).toThrow(

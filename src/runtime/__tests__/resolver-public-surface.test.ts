@@ -4,7 +4,11 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import ts from "typescript";
 
-type ExportTarget = string | Readonly<Record<string, ExportTarget>>;
+type ExportTarget = string | ExportConditions;
+
+interface ExportConditions {
+	readonly [condition: string]: ExportTarget;
+}
 
 // ./testing is the designated test-only entry point. Keep this allowance exact so no
 // other test/internal seam can escape through it or any other package subpath.
@@ -89,8 +93,9 @@ describe("package public surface", () => {
 		const testingMapping = packageJson.exports?.["./testing"];
 		const target = testingMapping && resolveExportCondition(testingMapping, "import");
 		expect(target).toBeDefined();
+		if (!target) throw new Error("Missing ./testing import target");
 
-		const testing = await import(pathToFileURL(resolve(target as string)).href);
+		const testing = await import(pathToFileURL(resolve(target)).href);
 		expect(testing.resetProviderCacheForTests).toBeFunction();
 		expect(() => testing.resetProviderCacheForTests()).not.toThrow();
 	});
