@@ -265,6 +265,116 @@ export type AuthStartNoInputGuard<TConfig> = TConfig extends {
 		? AuthStartHandlerNoInputGuard<TStart>
 		: unknown;
 
+function splitAuthStartParameters(parameters: string): string[] | undefined {
+	const parts: string[] = [];
+	let start = 0;
+	let round = 0;
+	let square = 0;
+	let curly = 0;
+	let quote: "'" | '"' | "`" | undefined;
+	let escaped = false;
+
+	for (let index = 0; index < parameters.length; index++) {
+		const character = parameters[index];
+		if (quote) {
+			if (escaped) {
+				escaped = false;
+			} else if (character === "\\") {
+				escaped = true;
+			} else if (character === quote) {
+				quote = undefined;
+			}
+			continue;
+		}
+		if (character === "'" || character === '"' || character === "`") {
+			quote = character;
+			continue;
+		}
+		if (character === "(") round++;
+		else if (character === ")") round--;
+		else if (character === "[") square++;
+		else if (character === "]") square--;
+		else if (character === "{") curly++;
+		else if (character === "}") curly--;
+		else if (character === "," && round === 0 && square === 0 && curly === 0) {
+			parts.push(parameters.slice(start, index));
+			start = index + 1;
+		}
+		if (round < 0 || square < 0 || curly < 0) return undefined;
+	}
+
+	if (quote || round !== 0 || square !== 0 || curly !== 0) return undefined;
+	parts.push(parameters.slice(start));
+	return parts;
+}
+
+function authStartParameterList(source: string): string | undefined {
+	const arrowIndex = source.indexOf("=>");
+	const openIndex = arrowIndex >= 0 ? source.lastIndexOf("(", arrowIndex) : source.indexOf("(");
+	if (openIndex < 0) return undefined;
+
+	let depth = 0;
+	let quote: "'" | '"' | "`" | undefined;
+	let escaped = false;
+	for (let index = openIndex; index < source.length; index++) {
+		const character = source[index];
+		if (quote) {
+			if (escaped) escaped = false;
+			else if (character === "\\") escaped = true;
+			else if (character === quote) quote = undefined;
+			continue;
+		}
+		if (character === "'" || character === '"' || character === "`") {
+			quote = character;
+			continue;
+		}
+		if (character === "(") depth++;
+		else if (character === ")") {
+			depth--;
+			if (depth === 0) return source.slice(openIndex + 1, index);
+			if (depth < 0) return undefined;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Conservative defense in depth for defaulted second parameters, which
+ * JavaScript intentionally omits from Function.length. Ambiguous source is
+ * ignored so this check can never reject a valid provider on weak evidence.
+ */
+function authStartHasHiddenInput(start: unknown): boolean {
+	let source: string;
+	try {
+		source = Function.prototype.toString.call(start);
+	} catch {
+		return false;
+	}
+	if (
+		!source ||
+		source.includes("[native code]") ||
+		/^\s*(?:async\s+)?function\s+bound\b/.test(source)
+	)
+		return false;
+
+	const parameters = authStartParameterList(source);
+	if (!parameters) return false;
+	const parts = splitAuthStartParameters(parameters);
+	if (!parts || parts.length < 2) return false;
+
+	// Require ordinary, readable source formatting. This intentionally fails
+	// open for minified output and for transpilers that rewrite defaults.
+	const commaIndex = parameters.indexOf(",");
+	if (commaIndex < 0 || !/\s/.test(parameters[commaIndex + 1] ?? "")) return false;
+	const first = parts[0].trim();
+	const second = parts[1].trim();
+	const identifier = /^[_$A-Za-z][_$A-Za-z0-9]*/;
+	const firstName = first.match(identifier)?.[0];
+	const secondName = second.match(identifier)?.[0];
+	if (!firstName || !secondName || firstName.length < 3 || secondName.length < 3) return false;
+	return /\s=\s/.test(second);
+}
+
 export interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> {
 	id: string;
 	version: string;
@@ -506,6 +616,24 @@ function validateProviderShape(config: unknown): void {
 		"start" in auth.flow &&
 		typeof auth.flow.start === "function" &&
 		auth.flow.start.length > 1
+	) {
+		throw new ProviderError(
+			`Provider "${String(config.id)}" auth.flow.start must not declare an input parameter`,
+			{
+				fix: "Return a form turn from start(ctx), then receive user input in continue(ctx, input).",
+			},
+		);
+	}
+	if (
+		auth &&
+		typeof auth === "object" &&
+		"flow" in auth &&
+		auth.flow &&
+		typeof auth.flow === "object" &&
+		"start" in auth.flow &&
+		typeof auth.flow.start === "function" &&
+		auth.flow.start.length <= 1 &&
+		authStartHasHiddenInput(auth.flow.start)
 	) {
 		throw new ProviderError(
 			`Provider "${String(config.id)}" auth.flow.start must not declare an input parameter`,

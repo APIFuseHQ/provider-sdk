@@ -225,9 +225,15 @@ export function validateCeremonyOutput(turn: unknown): AuthTurn {
 	return turn as AuthTurn;
 }
 
+/**
+ * Defines an auth flow while preserving its concrete type for downstream checks.
+ * The compile-time guard validates the inferred literal; annotating or widening
+ * a flow to `AuthFlowDefinition` before passing it defeats the check. Full
+ * enforcement requires branding, which is deferred to a future major.
+ */
 export function defineAuthFlow<const TFlow extends AuthFlowDefinition>(
 	flow: TFlow & AuthStartNoInputGuard<TFlow>,
-): AuthFlowDefinition {
+): TFlow {
 	return flow;
 }
 

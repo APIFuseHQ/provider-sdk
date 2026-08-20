@@ -1,8 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { defineAuthFlow } from "../ceremonies/index.js";
-import { defineOperation, defineProvider, z as providerZ } from "../provider.js";
+import {
+	defineOperation,
+	defineProvider,
+	ProviderError,
+	z as providerZ,
+} from "../provider.js";
 import type {
+	AuthFlowDefinition,
 	AuthMode,
 	BrowserEngine,
 	CookieJar,
@@ -98,6 +104,140 @@ describe("ProviderDefinition types", () => {
 		).toThrow(/auth\.flow\.start must not declare an input parameter/);
 	});
 
+	it("rejects defaulted auth start input without rejecting no-input handlers", () => {
+		const noop = defineOperation({
+			descriptionKey: "operations.noop.description",
+			input: providerZ.object({}),
+			output: providerZ.object({ ok: providerZ.boolean() }),
+			handler: async () => ({ ok: true }),
+			healthCheckUnsupported: { reason: "test fixture" },
+		});
+		const defaultedInputStart = async (
+			_ctx: FlowContext,
+			_input: Record<string, unknown> = {},
+		) => ({
+			kind: "form" as const,
+			turnId: "start",
+		});
+		const defineInvalidProvider = () =>
+			// @ts-expect-error test-invalid: runtime validation must reject defaulted auth start input hidden from Function.length.
+			defineProvider({
+				id: "defaulted-auth-start",
+				version: "1.0.0",
+				runtime: "standard",
+				meta: {
+					displayName: "Defaulted Auth Start",
+					descriptionKey: "providers.defaultedAuthStart.description",
+					category: "test",
+				},
+				auth: {
+					mode: "credentials",
+					flow: {
+						start: defaultedInputStart,
+						continue: async () => ({ kind: "complete", turnId: "complete" }),
+					},
+				},
+				operations: { noop },
+			});
+
+		expect(defaultedInputStart.length).toBe(1);
+		expect(defineInvalidProvider).toThrow(ProviderError);
+		expect(defineInvalidProvider).toThrow(
+			/auth\.flow\.start must not declare an input parameter/,
+		);
+
+		const contextOnlyProvider = defineProvider({
+			id: "context-only-auth-start",
+			version: "1.0.0",
+			runtime: "standard",
+			meta: {
+				displayName: "Context Only Auth Start",
+				descriptionKey: "providers.contextOnlyAuthStart.description",
+				category: "test",
+			},
+			auth: {
+				mode: "credentials",
+				flow: {
+					start: async (_ctx: FlowContext) => ({ kind: "form", turnId: "start" }),
+					continue: async () => ({ kind: "complete", turnId: "complete" }),
+				},
+			},
+			operations: { noop },
+		});
+		const noParameterProvider = defineProvider({
+			id: "no-parameter-auth-start",
+			version: "1.0.0",
+			runtime: "standard",
+			meta: {
+				displayName: "No Parameter Auth Start",
+				descriptionKey: "providers.noParameterAuthStart.description",
+				category: "test",
+			},
+			auth: {
+				mode: "credentials",
+				flow: {
+					start: async () => ({ kind: "form", turnId: "start" }),
+					continue: async () => ({ kind: "complete", turnId: "complete" }),
+				},
+			},
+			operations: { noop },
+		});
+
+		expect(contextOnlyProvider.id).toBe("context-only-auth-start");
+		expect(noParameterProvider.id).toBe("no-parameter-auth-start");
+	});
+
+	it("does not reject ambiguous auth start handler source shapes", () => {
+		const noop = defineOperation({
+			descriptionKey: "operations.noop.description",
+			input: providerZ.object({}),
+			output: providerZ.object({ ok: providerZ.boolean() }),
+			handler: async () => ({ ok: true }),
+			healthCheckUnsupported: { reason: "test fixture" },
+		});
+		const minifiedStart: unknown = Function(
+			"return async (c,i={}) => ({ kind: 'form', turnId: 'start' })",
+		)();
+		const boundStart = (
+			async (_ctx: FlowContext) => ({ kind: "form", turnId: "start" })
+		).bind(undefined);
+		const destructuredDefaultStart = async (
+			{ context: _context } = { context: undefined },
+		) => ({
+			kind: "form",
+			turnId: "start",
+		});
+		const defineUncheckedProvider = (id: string, start: unknown): unknown =>
+			Reflect.apply(defineProvider, undefined, [
+				{
+					id,
+					version: "1.0.0",
+					runtime: "standard",
+					meta: {
+						displayName: "Ambiguous Auth Start",
+						descriptionKey: "providers.ambiguousAuthStart.description",
+						category: "test",
+					},
+					auth: {
+						mode: "credentials",
+						flow: {
+							start,
+							continue: async () => ({ kind: "complete", turnId: "complete" }),
+						},
+					},
+					operations: { noop },
+				},
+			]);
+
+		for (const [id, start] of [
+			["minified-auth-start", minifiedStart],
+			["bound-auth-start", boundStart],
+			["destructured-auth-start", destructuredDefaultStart],
+		] as const) {
+			expect(() => defineUncheckedProvider(id, start)).not.toThrow();
+		}
+	});
+
 	it("rejects defaulted auth start input at the flow definition boundary", () => {
 		// @ts-expect-error test-invalid: auth start handlers must receive user input through continue, including when the second parameter is defaulted.
 		const flow = defineAuthFlow({
@@ -109,6 +249,68 @@ describe("ProviderDefinition types", () => {
 		});
 
 		expect(flow.start.length).toBe(1);
+	});
+
+	it("documents the known compile-time limitation for widened auth flows", () => {
+		const noop = defineOperation({
+			descriptionKey: "operations.noop.description",
+			input: providerZ.object({}),
+			output: providerZ.object({ ok: providerZ.boolean() }),
+			handler: async () => ({ ok: true }),
+			healthCheckUnsupported: { reason: "test fixture" },
+		});
+		const widenedFlow: AuthFlowDefinition = {
+			start: async (_ctx: FlowContext, _input: Record<string, unknown> = {}) => ({
+				kind: "form",
+				turnId: "start",
+			}),
+			continue: async () => ({ kind: "complete", turnId: "complete" }),
+		};
+		const makeWidenedFlow = (): AuthFlowDefinition => ({
+			start: async (_ctx: FlowContext, _input: Record<string, unknown> = {}) => ({
+				kind: "form",
+				turnId: "start",
+			}),
+			continue: async () => ({ kind: "complete", turnId: "complete" }),
+		});
+
+		// Known limitation: annotation, declared factory returns, and spreading a widened
+		// flow defeat the compile-time guard. Branding closes this in a future major;
+		// defineProvider runtime validation catches these shapes in practice.
+		const fromAnnotatedVariable = defineAuthFlow(widenedFlow);
+		const fromDeclaredFactory = defineAuthFlow(makeWidenedFlow());
+		const fromWidenedSpread = defineAuthFlow({ ...widenedFlow });
+
+		expect([
+			fromAnnotatedVariable.start.length,
+			fromDeclaredFactory.start.length,
+			fromWidenedSpread.start.length,
+		]).toEqual([1, 1, 1]);
+
+		for (const [id, flow] of [
+			["annotated-widened-auth", fromAnnotatedVariable],
+			["factory-widened-auth", fromDeclaredFactory],
+			["spread-widened-auth", fromWidenedSpread],
+		] as const) {
+			const defineWidenedProvider = () =>
+				defineProvider({
+					id,
+					version: "1.0.0",
+					runtime: "standard",
+					meta: {
+						displayName: "Widened Auth Flow",
+						descriptionKey: "providers.widenedAuthFlow.description",
+						category: "test",
+					},
+					auth: { mode: "credentials", flow },
+					operations: { noop },
+				});
+
+			expect(defineWidenedProvider).toThrow(ProviderError);
+			expect(defineWidenedProvider).toThrow(
+				/auth\.flow\.start must not declare an input parameter/,
+			);
+		}
 	});
 
 	it("rejects legacy auth exchange handlers at runtime", () => {

@@ -33,6 +33,7 @@ export {
 	defineSmsOtpMatcher,
 	defineStreamOperation,
 	every,
+	type AuthStartNoInputGuard,
 	type ProviderConfig,
 } from "./define.js";
 export type { DevServerOptions } from "./dev.js";
