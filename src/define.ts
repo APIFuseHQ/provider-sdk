@@ -273,14 +273,35 @@ function splitAuthStartParameters(parameters: string): string[] | undefined {
 	let curly = 0;
 	let quote: "'" | '"' | "`" | undefined;
 	let escaped = false;
+	let lineComment = false;
+	let blockComment = false;
+	const templateDepths = [0];
+	templateDepths.length = 0;
 
 	for (let index = 0; index < parameters.length; index++) {
 		const character = parameters[index];
+		const nextCharacter = parameters[index + 1];
+		if (lineComment) {
+			if (character === "\n" || character === "\r") lineComment = false;
+			else continue;
+		}
+		if (blockComment) {
+			if (character === "*" && nextCharacter === "/") {
+				blockComment = false;
+				index++;
+			}
+			continue;
+		}
 		if (quote) {
 			if (escaped) {
 				escaped = false;
 			} else if (character === "\\") {
 				escaped = true;
+			} else if (quote === "`" && character === "$" && nextCharacter === "{") {
+				curly++;
+				templateDepths.push(curly);
+				quote = undefined;
+				index++;
 			} else if (character === quote) {
 				quote = undefined;
 			}
@@ -290,49 +311,207 @@ function splitAuthStartParameters(parameters: string): string[] | undefined {
 			quote = character;
 			continue;
 		}
+		if (character === "/" && nextCharacter === "/") {
+			lineComment = true;
+			index++;
+			continue;
+		}
+		if (character === "/" && nextCharacter === "*") {
+			blockComment = true;
+			index++;
+			continue;
+		}
+		if (character === "/") return undefined;
 		if (character === "(") round++;
 		else if (character === ")") round--;
 		else if (character === "[") square++;
 		else if (character === "]") square--;
 		else if (character === "{") curly++;
-		else if (character === "}") curly--;
-		else if (character === "," && round === 0 && square === 0 && curly === 0) {
+		else if (character === "}") {
+			if (templateDepths.at(-1) === curly) {
+				templateDepths.pop();
+				curly--;
+				quote = "`";
+			} else curly--;
+		} else if (character === "," && round === 0 && square === 0 && curly === 0) {
 			parts.push(parameters.slice(start, index));
 			start = index + 1;
 		}
 		if (round < 0 || square < 0 || curly < 0) return undefined;
 	}
 
-	if (quote || round !== 0 || square !== 0 || curly !== 0) return undefined;
+	if (
+		quote ||
+		blockComment ||
+		templateDepths.length > 0 ||
+		round !== 0 ||
+		square !== 0 ||
+		curly !== 0
+	)
+		return undefined;
 	parts.push(parameters.slice(start));
 	return parts;
 }
 
 function authStartParameterList(source: string): string | undefined {
-	const arrowIndex = source.indexOf("=>");
-	const openIndex = arrowIndex >= 0 ? source.lastIndexOf("(", arrowIndex) : source.indexOf("(");
+	let index = 0;
+	while (index < source.length && /\s/.test(source[index] ?? "")) index++;
+	if (index >= source.length) return undefined;
+
+	let openIndex = -1;
+	let parenthesizedArrow = false;
+	let asyncMethodOrArrow = false;
+	const skipTrivia = () => {
+		while (index < source.length) {
+			if (/\s/.test(source[index] ?? "")) {
+				index++;
+				continue;
+			}
+			if (source[index] === "/" && source[index + 1] === "/") {
+				index += 2;
+				while (index < source.length && source[index] !== "\n" && source[index] !== "\r") index++;
+				continue;
+			}
+			if (source[index] === "/" && source[index + 1] === "*") {
+				const end = source.indexOf("*/", index + 2);
+				if (end < 0) {
+					index = source.length;
+					return;
+				}
+				index = end + 2;
+				continue;
+			}
+			return;
+		}
+	};
+
+	const initial = source.slice(index);
+	const isAsync = initial.startsWith("async") && !/[\w$]/.test(initial[5] ?? "");
+	if (isAsync) {
+		index += 5;
+		skipTrivia();
+	}
+
+	const afterAsync = source.slice(index);
+	const isFunction = afterAsync.startsWith("function") && !/[\w$]/.test(afterAsync[8] ?? "");
+	if (isFunction) {
+		index += 8;
+		skipTrivia();
+		if (source[index] === "*") {
+			index++;
+			skipTrivia();
+		}
+	} else if (source[index] === "*") {
+		index++;
+		skipTrivia();
+	}
+
+	if (source[index] === "(") {
+		openIndex = index;
+		parenthesizedArrow = !isFunction;
+		asyncMethodOrArrow = isAsync && !isFunction;
+	} else if (isFunction) {
+		if (!/[A-Za-z_$]/.test(source[index] ?? "")) return undefined;
+		index++;
+		while (index < source.length && /[A-Za-z0-9_$]/.test(source[index] ?? "")) index++;
+		skipTrivia();
+		if (source[index] !== "(") return undefined;
+		openIndex = index;
+	} else {
+		const identifierStart = index;
+		if (!/[A-Za-z_$]/.test(source[index] ?? "")) return undefined;
+		index++;
+		while (index < source.length && /[A-Za-z0-9_$]/.test(source[index] ?? "")) index++;
+		const firstIdentifier = source.slice(identifierStart, index);
+		skipTrivia();
+		if (source[index] === "=" && source[index + 1] === ">") return undefined;
+		if (source[index] !== "(") {
+			if (firstIdentifier !== "get" && firstIdentifier !== "set") return undefined;
+			if (!/[A-Za-z_$]/.test(source[index] ?? "")) return undefined;
+			index++;
+			while (index < source.length && /[A-Za-z0-9_$]/.test(source[index] ?? "")) index++;
+			skipTrivia();
+		}
+		if (source[index] !== "(") return undefined;
+		openIndex = index;
+	}
 	if (openIndex < 0) return undefined;
 
-	let depth = 0;
+	let depth = 1;
+	let square = 0;
+	let curly = 0;
 	let quote: "'" | '"' | "`" | undefined;
 	let escaped = false;
-	for (let index = openIndex; index < source.length; index++) {
+	let lineComment = false;
+	let blockComment = false;
+	const templateDepths = [0];
+	templateDepths.length = 0;
+	for (index = openIndex + 1; index < source.length; index++) {
 		const character = source[index];
+		const nextCharacter = source[index + 1];
+		if (lineComment) {
+			if (character === "\n" || character === "\r") lineComment = false;
+			else continue;
+		}
+		if (blockComment) {
+			if (character === "*" && nextCharacter === "/") {
+				blockComment = false;
+				index++;
+			}
+			continue;
+		}
 		if (quote) {
 			if (escaped) escaped = false;
 			else if (character === "\\") escaped = true;
-			else if (character === quote) quote = undefined;
+			else if (quote === "`" && character === "$" && nextCharacter === "{") {
+				curly++;
+				templateDepths.push(curly);
+				quote = undefined;
+				index++;
+			} else if (character === quote) quote = undefined;
 			continue;
 		}
 		if (character === "'" || character === '"' || character === "`") {
 			quote = character;
 			continue;
 		}
+		if (character === "/" && nextCharacter === "/") {
+			lineComment = true;
+			index++;
+			continue;
+		}
+		if (character === "/" && nextCharacter === "*") {
+			blockComment = true;
+			index++;
+			continue;
+		}
+		if (character === "/") return undefined;
 		if (character === "(") depth++;
 		else if (character === ")") {
 			depth--;
-			if (depth === 0) return source.slice(openIndex + 1, index);
+			if (depth === 0 && square === 0 && curly === 0) {
+				const closeIndex = index;
+				if (parenthesizedArrow) {
+					index++;
+					skipTrivia();
+					const hasArrow = source[index] === "=" && source[index + 1] === ">";
+					if (!hasArrow && (!asyncMethodOrArrow || source[index] !== "{")) return undefined;
+				}
+				return source.slice(openIndex + 1, closeIndex);
+			}
 			if (depth < 0) return undefined;
+		} else if (character === "[") square++;
+		else if (character === "]") {
+			square--;
+			if (square < 0) return undefined;
+		} else if (character === "{") curly++;
+		else if (character === "}") {
+			if (templateDepths.at(-1) === curly) {
+				templateDepths.pop();
+				curly--;
+				quote = "`";
+			} else curly--;
+			if (curly < 0) return undefined;
 		}
 	}
 	return undefined;

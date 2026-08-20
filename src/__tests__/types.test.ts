@@ -187,6 +187,78 @@ describe("ProviderDefinition types", () => {
 		expect(noParameterProvider.id).toBe("no-parameter-auth-start");
 	});
 
+	it("does not reject one-parameter function handlers with misleading body or comments", () => {
+		const noop = defineOperation({
+			descriptionKey: "operations.noop.description",
+			input: providerZ.object({}),
+			output: providerZ.object({ ok: providerZ.boolean() }),
+			handler: async () => ({ ok: true }),
+			healthCheckUnsupported: { reason: "test fixture" },
+		});
+		const nestedArrow: unknown = Function(
+			"return function start(ctx) { const h = (context, input = {}) => input; return h(ctx, {}); }",
+		)();
+		const blockComment: unknown = Function(
+			"return function start(ctx /*, input = {} */) { return ctx; }",
+		)();
+		const lineComment: unknown = Function(
+			"return function start(ctx // , input = {}\n) { return ctx; }",
+		)();
+		const makeProvider = (id: string, start: unknown): unknown =>
+			Reflect.apply(defineProvider, undefined, [
+				{
+					id,
+					version: "1.0.0",
+					runtime: "standard",
+					meta: {
+						displayName: "One Parameter Auth Start",
+						descriptionKey: "providers.oneParameterAuthStart.description",
+						category: "test",
+					},
+					auth: {
+						mode: "credentials",
+						flow: {
+							start,
+							continue: async () => ({ kind: "complete", turnId: "complete" }),
+						},
+					},
+					operations: { noop },
+				},
+			]);
+
+		expect(() => makeProvider("nested-arrow-auth-start", nestedArrow)).not.toThrow();
+		expect(() => makeProvider("block-comment-auth-start", blockComment)).not.toThrow();
+		expect(() => makeProvider("line-comment-auth-start", lineComment)).not.toThrow();
+
+		const functionDefaulted = async function start(
+			_ctx: FlowContext,
+			_input: Record<string, unknown> = {},
+		) {
+			return { kind: "form" as const, turnId: "start" };
+		};
+		expect(() =>
+			// @ts-expect-error test-invalid: runtime validation must reject defaulted auth start input in function declarations.
+			defineProvider({
+				id: "function-defaulted-auth-start",
+				version: "1.0.0",
+				runtime: "standard",
+				meta: {
+					displayName: "Function Defaulted Auth Start",
+					descriptionKey: "providers.functionDefaultedAuthStart.description",
+					category: "test",
+				},
+				auth: {
+					mode: "credentials",
+					flow: {
+						start: functionDefaulted,
+						continue: async () => ({ kind: "complete", turnId: "complete" }),
+					},
+				},
+				operations: { noop },
+			}),
+		).toThrow(/auth\.flow\.start must not declare an input parameter/);
+	});
+
 	it("does not reject ambiguous auth start handler source shapes", () => {
 		const noop = defineOperation({
 			descriptionKey: "operations.noop.description",
