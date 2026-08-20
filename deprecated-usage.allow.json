@@ -34,6 +34,31 @@
 			"file": "src/server/serve-implementation.ts",
 			"symbol": "restore",
 			"reason": "The lazy-stealth swappable cookie-jar wrapper must delegate the full StealthCookieJar interface, including deprecated members, so tier-2 providers keep byte-identical behavior."
+		},
+		{
+			"file": "src/__tests__/stealth-client.test.ts",
+			"symbol": "snapshot",
+			"reason": "Tests the deprecated snapshot() backcompat surface itself: round-trip against serialize() and legacy flat-map behavior."
+		},
+		{
+			"file": "src/__tests__/stealth-client.test.ts",
+			"symbol": "restore",
+			"reason": "Tests the deprecated restore() backcompat surface itself against deserialize()."
+		},
+		{
+			"file": "src/__tests__/stealth-client.test.ts",
+			"symbol": "cookies",
+			"reason": "Tests the deprecated result.cookies flat map stays populated for legacy consumers alongside cookieStore."
+		},
+		{
+			"file": "src/__tests__/fixtures/capability-import-guard-runner.ts",
+			"symbol": "restore",
+			"reason": "Fixture proves lazy stealth sessions expose the legacy synchronous restore() without loading stealth eagerly."
+		},
+		{
+			"file": "src/i18n/catalog.test.ts",
+			"symbol": "hint",
+			"reason": "Tests the compatibility-only materialized hint field that server boundaries emit for legacy clients."
 		}
 	]
 }
