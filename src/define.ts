@@ -322,6 +322,10 @@ function splitAuthStartParameters(parameters: string): string[] | undefined {
 			continue;
 		}
 		if (character === "/") return undefined;
+		// Annex B HTML-like comments are not lexed here; give up rather than
+		// risk misreading the parameter list.
+		if (character === "<" && parameters.startsWith("!--", index + 1)) return undefined;
+		if (character === "-" && parameters.startsWith("->", index + 1)) return undefined;
 		if (character === "(") round++;
 		else if (character === ")") round--;
 		else if (character === "[") square++;
@@ -486,6 +490,10 @@ function authStartParameterList(source: string): string | undefined {
 			continue;
 		}
 		if (character === "/") return undefined;
+		// Annex B HTML-like comments are not lexed here; give up rather than
+		// risk misreading the parameter list.
+		if (character === "<" && source.startsWith("!--", index + 1)) return undefined;
+		if (character === "-" && source.startsWith("->", index + 1)) return undefined;
 		if (character === "(") depth++;
 		else if (character === ")") {
 			depth--;

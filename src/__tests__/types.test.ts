@@ -279,6 +279,12 @@ describe("ProviderDefinition types", () => {
 			kind: "form",
 			turnId: "start",
 		});
+		const htmlCommentStart: unknown = Function(
+			"return function start(context <!-- , input = {}\n) { return { kind: 'form', turnId: 'start' }; }",
+		)();
+		const htmlCommentCloseStart: unknown = Function(
+			"return function start(context\n--> , input = {}\n) { return { kind: 'form', turnId: 'start' }; }",
+		)();
 		const defineUncheckedProvider = (id: string, start: unknown): unknown =>
 			Reflect.apply(defineProvider, undefined, [
 				{
@@ -305,6 +311,8 @@ describe("ProviderDefinition types", () => {
 			["minified-auth-start", minifiedStart],
 			["bound-auth-start", boundStart],
 			["destructured-auth-start", destructuredDefaultStart],
+			["html-comment-auth-start", htmlCommentStart],
+			["html-comment-close-auth-start", htmlCommentCloseStart],
 		] as const) {
 			expect(() => defineUncheckedProvider(id, start)).not.toThrow();
 		}
