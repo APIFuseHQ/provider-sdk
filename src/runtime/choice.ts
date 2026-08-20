@@ -263,10 +263,9 @@ export function createProviderChoiceContext(
 			);
 		}
 
-		// Legacy encrypted-envelope compatibility fallback. Removal is gated on
-		// the last legacy mint plus the maximum issued TTL; see ADR 0006.
-		// A structurally valid word token returns above, so lookup, expiry,
-		// consumption, and binding failures can never enter this branch.
+		// Inline choices continue to use the encrypted envelope. A structurally
+		// valid word token returns above, so lookup, expiry, consumption, and
+		// binding failures can never enter this branch.
 		try {
 			const [actualPrefix, tokenKid, encodedIv, encryptedPayload, authTag, signature] =
 				parseManagedChoiceTokenParts(parseOptions.token);
@@ -321,17 +320,14 @@ export function createProviderChoiceContext(
 					required: true,
 				}),
 			});
-			const payload = isServerChoiceHandlePayload(envelope.payload)
-				? parseLegacyServerStoredChoice({
-						handle: envelope.payload,
-						storage: parseOptions.storage,
-						contextState: options.state,
-					})
-				: envelope.payload;
+			if (isServerChoiceHandlePayload(envelope.payload)) {
+				throw wordChoiceNotFoundError();
+			}
+			const payload = envelope.payload;
 			const parsed =
 				consumeMode === "explicit"
 					? Promise.resolve(payload).then((resolvedPayload) =>
-							createLegacyExplicitParseResult({
+							createInlineExplicitParseResult({
 								payload: resolvedPayload,
 								replayKey: digestChoiceReplayKey(parseOptions.token),
 								onConsume: () =>
@@ -471,7 +467,7 @@ function emitChoiceTelemetry(
 	}
 }
 
-function createLegacyExplicitParseResult(options: {
+function createInlineExplicitParseResult(options: {
 	readonly payload: ProviderChoiceTokenPayload;
 	readonly replayKey: string;
 	readonly onConsume: () => void;
@@ -757,53 +753,6 @@ async function consumeWordServerStoredChoice(options: {
 		if (error instanceof ProviderChoiceTokenError) throw error;
 		throw wordChoiceNotFoundError();
 	}
-}
-
-async function parseLegacyServerStoredChoice(options: {
-	readonly handle: ServerChoiceHandlePayload;
-	readonly storage?: ProviderChoiceStorageOptions;
-	readonly contextState?: ProviderRuntimeState;
-}): Promise<ProviderChoiceTokenPayload> {
-	const storage = resolveParseStorage(options.storage);
-	const namespace = resolveChoiceStateNamespace({
-		storage,
-		contextState: options.contextState,
-	});
-	// Reading a server-stored choice back deserializes a persisted value. A
-	// corrupt/undecodable value would otherwise surface as a raw JSON.parse
-	// SyntaxError (or another unexpected throwable) that escapes the choice error
-	// taxonomy, gets masked as internal_error 500, and is treated as retryable by
-	// the hub -> reservation restart loop (2026-07-22 catchtable RCA, candidate A).
-	// Convert any non-branded throwable into a branded invalid_payload so it maps
-	// to a clean, non-retryable 400. Branded ProviderChoiceTokenError and genuine
-	// ProviderError (e.g. Redis-unavailable / state-unavailable) pass through so
-	// their category/retryable semantics are preserved.
-	let record: StateValue<ProviderChoiceTokenPayload> | null;
-	try {
-		record = await namespace.get<ProviderChoiceTokenPayload>(
-			optionsStateKey(options.handle.state_id),
-		);
-	} catch (error) {
-		if (error instanceof ProviderChoiceTokenError || isProviderError(error)) {
-			throw error;
-		}
-		throw new ProviderChoiceTokenError(
-			"invalid_payload",
-			"Provider choice token state payload could not be decoded.",
-		);
-	}
-	if (!record) {
-		throw new ProviderChoiceTokenError(
-			"invalid_payload",
-			"Provider choice token state payload is missing.",
-		);
-	}
-	const serializedPayload = serializeChoicePayload(record.value);
-	assertPayloadDigestMatches({
-		actual: digestChoicePayload(serializedPayload),
-		expected: options.handle.payload_digest,
-	});
-	return record.value;
 }
 
 function generateChoiceWordSequence(wordCount: number): string {
