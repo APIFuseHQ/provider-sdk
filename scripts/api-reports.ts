@@ -6,7 +6,7 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
-import { basename, join, resolve } from "node:path";
+import { basename, join, relative, resolve } from "node:path";
 
 const root = resolve(import.meta.dir, "..");
 const configDir = join(root, "config", "api-extractor");
@@ -26,6 +26,7 @@ type ApiExtractorConfig = {
 		includeForgottenExports?: boolean;
 		reportFolder?: string;
 		reportFileName: string;
+		reportVariants?: unknown;
 	};
 	docModel?: { includeForgottenExports?: boolean };
 };
@@ -330,7 +331,10 @@ const parsedConfigs = configs.map((configName) => {
 		config,
 		configName,
 		configPath,
-		types: config.mainEntryPointFilePath.replace(/^<projectFolder>\//, "").replace(/^\.\//, ""),
+		// Resolved against projectFolder (like API Extractor itself) and re-relativized
+		// to the repository root, so a projectFolder redirect cannot keep the compared
+		// text stable while pointing extraction at a different declaration file.
+		types: relative(root, resolveConfiguredPath(configPath, config, config.mainEntryPointFilePath)),
 	};
 });
 
@@ -346,6 +350,7 @@ function resolveConfiguredPath(
 
 const invalidApiReportConfigs = parsedConfigs.filter(({ config, configPath }) => {
 	if (config.apiReport.enabled !== true) return true;
+	if (config.apiReport.reportVariants !== undefined) return true;
 	if (typeof config.apiReport.reportFolder !== "string") return true;
 	return resolveConfiguredPath(configPath, config, config.apiReport.reportFolder) !== reportDir;
 });
@@ -356,6 +361,11 @@ if (invalidApiReportConfigs.length > 0) {
 	for (const { config, configPath } of invalidApiReportConfigs) {
 		if (config.apiReport.enabled !== true) {
 			console.error(`  ${configPath}: apiReport.enabled must be true.`);
+		}
+		if (config.apiReport.reportVariants !== undefined) {
+			console.error(
+				`  ${configPath}: apiReport.reportVariants is not supported; a variant would be written to a suffixed file while this gate verifies ${config.apiReport.reportFileName}.`,
+			);
 		}
 		const reportFolder = config.apiReport.reportFolder;
 		if (typeof reportFolder !== "string") {
