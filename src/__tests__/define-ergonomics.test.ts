@@ -13,9 +13,13 @@ const makeProviderConfig = () => ({
 	id: "ergonomic-provider",
 	version: "1.0.0",
 	runtime: "standard" as const,
-	meta: { displayName: "Ergonomic Provider", category: "test" },
+	meta: {
+		displayName: "Ergonomic Provider",
+		descriptionKey: "meta.description",
+		category: "test",
+	},
 	operations: {
-		lookup: {
+		lookup: defineOperation({
 			input: z.object({ id: z.string() }),
 			output: z.object({ result: z.string() }),
 			async handler(_ctx, input) {
@@ -27,7 +31,7 @@ const makeProviderConfig = () => ({
 				response: { result: "COIN" },
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
-		},
+		}),
 	},
 });
 
@@ -48,16 +52,12 @@ describe("defineProvider ergonomics", () => {
 				const q: string = input.q;
 				return { count: q.length };
 			},
+			healthCheckUnsupported: { reason: "test fixture" },
 		});
 
 		const provider = defineProvider({
 			...makeProviderConfig(),
-			operations: {
-				search: {
-					...search,
-					healthCheckUnsupported: { reason: "test fixture" },
-				},
-			},
+			operations: { search },
 		});
 
 		await expect(
@@ -109,23 +109,19 @@ describe("defineProvider ergonomics", () => {
 				const topic: string = input.topic;
 				yield event("delta", { value: topic.length });
 			},
+			healthCheckUnsupported: { reason: "test fixture" },
 		});
 
 		const provider = defineProvider({
 			...makeProviderConfig(),
-			operations: {
-				events: {
-					...events,
-					healthCheckUnsupported: { reason: "test fixture" },
-				},
-			},
+			operations: { events },
 		});
 
 		expect(provider.operations.events.transport?.kind).toBe("sse");
 	});
 
 	it("accepts Standard Schema operations and validates fixtures", () => {
-		const InputSchema = {
+		const InputSchema: StandardSchemaV1<unknown, { slug: string }> = {
 			"~standard": {
 				version: 1,
 				vendor: "test",
@@ -141,9 +137,9 @@ describe("defineProvider ergonomics", () => {
 					return { issues: [{ message: "slug must be a string" }] };
 				},
 			},
-		} satisfies StandardSchemaV1<unknown, { slug: string }>;
+		};
 
-		const OutputSchema = {
+		const OutputSchema: StandardSchemaV1<unknown, { ok: boolean }> = {
 			"~standard": {
 				version: 1,
 				vendor: "test",
@@ -159,22 +155,22 @@ describe("defineProvider ergonomics", () => {
 					return { issues: [{ message: "ok must be a boolean" }] };
 				},
 			},
-		} satisfies StandardSchemaV1<unknown, { ok: boolean }>;
+		};
+
+		const standard = defineOperation({
+			input: InputSchema,
+			output: OutputSchema,
+			async handler(_ctx, input) {
+				const slug: string = input.slug;
+				return { ok: slug.length > 0 };
+			},
+			fixtures: { request: { slug: "abc" }, response: { ok: true } },
+			healthCheckUnsupported: { reason: "test fixture" },
+		});
 
 		const provider = defineProvider({
 			...makeProviderConfig(),
-			operations: {
-				standard: {
-					input: InputSchema,
-					output: OutputSchema,
-					async handler(_ctx, input) {
-						const slug: string = input.slug;
-						return { ok: slug.length > 0 };
-					},
-					fixtures: { request: { slug: "abc" }, response: { ok: true } },
-					healthCheckUnsupported: { reason: "test fixture" },
-				},
-			},
+			operations: { standard },
 		});
 
 		expect(provider.operations.standard.fixtures?.request).toEqual({

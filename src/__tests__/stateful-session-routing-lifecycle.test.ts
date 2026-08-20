@@ -3,11 +3,16 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildSessionKey,
 	InMemorySessionOwnerRegistry,
+	type SessionOwnerRegistry,
+	type StatefulOperationRequest,
+	type StatefulOwnerForwarder,
+	type StatefulProviderAdapter,
 	StatefulProviderSessionManager,
 	StatefulRoutingOwnershipError,
 	StatefulSessionInvalidatedError,
 	StatefulSessionRouter,
-} from "../../dist/stateful/index.js";
+} from "../stateful/index.js";
+import { capturedError } from "./test-utils.js";
 
 const sessionKey = buildSessionKey({
 	providerId: "test-provider",
@@ -16,7 +21,7 @@ const sessionKey = buildSessionKey({
 	dimensions: {},
 });
 
-function request(overrides = {}) {
+function request(overrides: Partial<StatefulOperationRequest> = {}): StatefulOperationRequest {
 	return {
 		requestId: "request-1",
 		sessionKey,
@@ -30,7 +35,7 @@ function request(overrides = {}) {
 }
 
 const currentPod = { podId: "pod-a", endpoint: "http://pod-a" };
-const unusedForwarder = {
+const unusedForwarder: StatefulOwnerForwarder = {
 	forward: async () => {
 		throw new Error("unexpected forward");
 	},
@@ -61,9 +66,9 @@ describe("StatefulSessionRouter deadlines", () => {
 
 	it("cleans up a fast operation deadline and passes its signal to registry calls", async () => {
 		const backing = new InMemorySessionOwnerRegistry();
-		const signals = [];
+		const signals: Array<AbortSignal | undefined> = [];
 		let operationSignal: AbortSignal | undefined;
-		const registry = {
+		const registry: SessionOwnerRegistry = {
 			resolve: (key, now, signal) => {
 				signals.push(signal);
 				return backing.resolve(key, now, signal);
@@ -103,7 +108,7 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 	it("skips a failed-establishment release after a newer local attempt succeeds", async () => {
 		const backing = new InMemorySessionOwnerRegistry();
 		let releaseCalls = 0;
-		const registry = {
+		const registry: SessionOwnerRegistry = {
 			resolve: (...args) => backing.resolve(...args),
 			acquire: (...args) => backing.acquire(...args),
 			renew: (...args) => backing.renew(...args),
@@ -144,7 +149,7 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 			leaseDurationMs: 1_000,
 		});
 
-		const firstRoute = router.route(request({ requestId: "request-a" })).catch((error) => error);
+		const firstRoute = capturedError(router.route(request({ requestId: "request-a" })));
 		await firstAttemptStarted;
 		await expect(router.route(request({ requestId: "request-b" }))).resolves.toEqual({
 			output: "connected",
@@ -172,7 +177,7 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 		const releaseGate = new Promise<void>((resolve) => {
 			resumeRelease = resolve;
 		});
-		const registry = {
+		const registry: SessionOwnerRegistry = {
 			resolve: (...args) => {
 				resolveCalls += 1;
 				return backing.resolve(...args);
@@ -217,7 +222,7 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 			leaseDurationMs: 1_000,
 		});
 
-		const firstRoute = router.route(request({ requestId: "request-a" })).catch((error) => error);
+		const firstRoute = capturedError(router.route(request({ requestId: "request-a" })));
 		await firstAttemptStarted;
 		releaseFirstAttempt?.();
 		await releaseStarted;
@@ -243,7 +248,7 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 		const backing = new InMemorySessionOwnerRegistry();
 		let renewCalls = 0;
 		let releaseCalls = 0;
-		const registry = {
+		const registry: SessionOwnerRegistry = {
 			resolve: (...args) => backing.resolve(...args),
 			acquire: (...args) => backing.acquire(...args),
 			renew: (...args) => {
@@ -319,7 +324,7 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 	it("renews held sessions, connects before marking connected, and stops on release", async () => {
 		const backing = new InMemorySessionOwnerRegistry();
 		let renewCalls = 0;
-		const registry = {
+		const registry: SessionOwnerRegistry = {
 			resolve: (...args) => backing.resolve(...args),
 			acquire: (...args) => backing.acquire(...args),
 			renew: (...args) => {
@@ -450,7 +455,11 @@ describe("StatefulSessionRouter lease lifecycle", () => {
 	});
 });
 
-function makeAdapter(overrides = {}) {
+type TestProviderEvent = { readonly eventId: string };
+
+function makeAdapter(
+	overrides: Partial<StatefulProviderAdapter<unknown, unknown, TestProviderEvent>> = {},
+): StatefulProviderAdapter<unknown, unknown, TestProviderEvent> {
 	return {
 		providerId: "test-provider",
 		policy: { concurrency: { mode: "serialize" }, reconnect: "resume" },
@@ -461,7 +470,7 @@ function makeAdapter(overrides = {}) {
 	};
 }
 
-async function replaceOwner(registry, generation) {
+async function replaceOwner(registry: SessionOwnerRegistry, generation: number): Promise<void> {
 	expect(
 		await registry.release({
 			sessionKey,

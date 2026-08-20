@@ -49,7 +49,11 @@ function evidenceFor(preview: Uint8Array, bodyBytes = preview.byteLength) {
 describe("stream evidence capture", () => {
 	it("sanitizes sniffed JSON without trusting a missing or binary content type", async () => {
 		const body = Buffer.from('{"access_token":"live-secret","public":"retained"}');
-		for (const headers of [{}, { "content-type": "application/octet-stream" }]) {
+		const headerSets: Record<string, string>[] = [
+			{},
+			{ "content-type": "application/octet-stream" },
+		];
+		for (const headers of headerSets) {
 			const source = new ReadableStream<Uint8Array>({
 				start(controller) {
 					controller.enqueue(body);

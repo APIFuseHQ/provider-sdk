@@ -14,7 +14,14 @@ import { TurnValidationError } from "../errors.js";
 import { createFlowContext } from "../runtime/auth-flow.js";
 import { createEnvContext } from "../runtime/env.js";
 import { prevalidate } from "../runtime/prevalidate.js";
-import type { HttpClient, HttpResponse } from "../types.js";
+import type {
+	AuthFlowDefinition,
+	AuthTurn,
+	FlowContext,
+	HttpClient,
+	HttpResponse,
+	StealthClient,
+} from "../types.js";
 
 type RouteHandler = (body?: unknown) => Promise<unknown> | unknown;
 
@@ -59,12 +66,32 @@ function createMockHttpClient(routes: Record<string, RouteHandler>): HttpClient 
 	};
 }
 
+function createUnusedStealthClient(): StealthClient {
+	return {
+		async fetch() {
+			throw new Error("stealth unsupported in auth flow foundation tests");
+		},
+		createSession() {
+			throw new Error("stealth sessions unsupported in auth flow foundation tests");
+		},
+	};
+}
+
+function startWithLegacyInput(
+	ceremony: AuthFlowDefinition,
+	ctx: FlowContext,
+	input: Record<string, unknown>,
+): Promise<AuthTurn> {
+	return Reflect.apply(ceremony.start, undefined, [ctx, input]);
+}
+
 function createTestContext(routes: Record<string, RouteHandler> = {}, allowedKeys: string[] = []) {
 	process.env.TEST_OAUTH_CLIENT_ID = "client-id";
 	process.env.TEST_OAUTH_CLIENT_SECRET = "client-secret";
 
 	return createFlowContext({
 		http: createMockHttpClient(routes),
+		stealth: createUnusedStealthClient(),
 		env: createEnvContext(["TEST_OAUTH_CLIENT_ID", "TEST_OAUTH_CLIENT_SECRET"]),
 		tenantId: "tenant-1",
 		providerId: "demo-provider",
@@ -294,7 +321,9 @@ describe("createMagicLinkCeremony", () => {
 			verifyUrl: "https://magic.example.com/verify",
 		});
 
-		expect((await ceremony.start(ctx, { email: "demo@example.com" })).kind).toBe("message");
+		expect((await startWithLegacyInput(ceremony, ctx, { email: "demo@example.com" })).kind).toBe(
+			"message",
+		);
 		expect((await ceremony.poll?.(ctx))?.kind).toBe("complete");
 	});
 
@@ -304,7 +333,7 @@ describe("createMagicLinkCeremony", () => {
 			verifyUrl: "https://magic.example.com/verify",
 		});
 
-		expect((await ceremony.start(createTestContext(), {})).kind).toBe("form");
+		expect((await startWithLegacyInput(ceremony, createTestContext(), {})).kind).toBe("form");
 	});
 
 	it("returns abort when state expires", async () => {
@@ -318,7 +347,7 @@ describe("createMagicLinkCeremony", () => {
 			expiresInMs: -1,
 		});
 
-		await ceremony.start(ctx, { email: "demo@example.com" });
+		await startWithLegacyInput(ceremony, ctx, { email: "demo@example.com" });
 		expect((await ceremony.poll?.(ctx))?.kind).toBe("abort");
 	});
 });

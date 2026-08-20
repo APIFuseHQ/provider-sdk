@@ -26,6 +26,12 @@ const previousEnv = {
 	apiToken: process.env[APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV],
 };
 
+function createFetchDouble(
+	implementation: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+	return Object.assign(implementation, { preconnect: global.fetch.preconnect });
+}
+
 afterEach(() => {
 	restoreEnv();
 });
@@ -185,10 +191,10 @@ describe("STT prompt and runtime clients", () => {
 		const stt = createCloudflareWorkersAiSttClient({
 			accountId: "acct",
 			apiToken: "token",
-			fetch: (async () => {
+			fetch: createFetchDouble(async () => {
 				called = true;
 				return new Response("{}");
-			}) as typeof fetch,
+			}),
 		});
 
 		await expect(
@@ -204,7 +210,7 @@ describe("STT prompt and runtime clients", () => {
 		process.env[APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV] = "token-123";
 		const originalFetch = global.fetch;
 		const calls: Array<{ url: string; body: Record<string, unknown> }> = [];
-		global.fetch = (async (input, init) => {
+		global.fetch = createFetchDouble(async (input, init) => {
 			calls.push({
 				url: String(input),
 				body: JSON.parse(String(init?.body)),
@@ -213,7 +219,7 @@ describe("STT prompt and runtime clients", () => {
 				success: true,
 				result: { text: "공 일 이 삼", language: "ko", segments: [] },
 			});
-		}) as typeof fetch;
+		});
 		try {
 			const stt = createSttClientFromEnv({ mode: "required" });
 			const result = await stt.transcribe({
@@ -243,11 +249,12 @@ describe("STT prompt and runtime clients", () => {
 		const stt = createCloudflareWorkersAiSttClient({
 			accountId: "acct",
 			apiToken: "token",
-			fetch: (async () =>
+			fetch: createFetchDouble(async () =>
 				Response.json({
 					success: true,
 					result: { text: "hello" },
-				})) as typeof fetch,
+				}),
+			),
 		});
 
 		const transcript = await stt.transcribe({
@@ -266,9 +273,9 @@ describe("STT prompt and runtime clients", () => {
 		const timeoutStt = createCloudflareWorkersAiSttClient({
 			accountId: "acct",
 			apiToken: "token",
-			fetch: (async () => {
+			fetch: createFetchDouble(async () => {
 				throw timeoutError;
-			}) as typeof fetch,
+			}),
 		});
 		await expect(
 			timeoutStt.transcribe({ audio: { kind: "base64", data: "AAAA" } }),
@@ -277,9 +284,9 @@ describe("STT prompt and runtime clients", () => {
 		const networkStt = createCloudflareWorkersAiSttClient({
 			accountId: "acct",
 			apiToken: "token",
-			fetch: (async () => {
+			fetch: createFetchDouble(async () => {
 				throw new Error("socket closed");
-			}) as typeof fetch,
+			}),
 		});
 		await expect(
 			networkStt.transcribe({ audio: { kind: "base64", data: "AAAA" } }),
@@ -314,7 +321,11 @@ describe("STT Provider SDK context integration", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			stt: { mode: "required" },
-			meta: { displayName: "STT Demo", category: "test" },
+			meta: {
+				displayName: "STT Demo",
+				descriptionKey: "stt-demo.description",
+				category: "test",
+			},
 			operations: {
 				transcribe: {
 					input: z.object({}),
@@ -355,7 +366,11 @@ describe("STT Provider SDK context integration", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			stt: { mode: "required" },
-			meta: { displayName: "STT Server Demo", category: "test" },
+			meta: {
+				displayName: "STT Server Demo",
+				descriptionKey: "stt-server-demo.description",
+				category: "test",
+			},
 			context: { keys: [] },
 			auth: {
 				mode: "credentials",
@@ -419,7 +434,11 @@ describe("STT Provider SDK context integration", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			stt: { mode: "required" },
-			meta: { displayName: "STT Unavailable Demo", category: "test" },
+			meta: {
+				displayName: "STT Unavailable Demo",
+				descriptionKey: "stt-unavailable-demo.description",
+				category: "test",
+			},
 			operations: {
 				transcribe: {
 					input: z.object({}),

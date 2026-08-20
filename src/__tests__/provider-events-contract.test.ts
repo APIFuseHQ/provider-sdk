@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import { buildProviderEvent, redactProviderEventPayload } from "../../dist/stateful/index.js";
+import { buildProviderEvent, redactProviderEventPayload } from "../stateful/index.js";
 
 describe("provider event protocol-neutral envelope", () => {
 	it("preserves legitimate device and UUID data while redacting credentials", () => {
