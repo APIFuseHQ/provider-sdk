@@ -2,7 +2,6 @@ import { describe, expect, it } from "bun:test";
 
 import { assertIsError, capturedError } from "../../__tests__/test-utils.js";
 import { ProviderError } from "../../errors.js";
-import { getStealthProfile } from "../../stealth/profiles.js";
 import type { ProviderChallenge } from "../../types.js";
 import {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
@@ -17,7 +16,7 @@ import {
 	ResolverVendorUnavailableError,
 } from "../resolver-vendors/types.js";
 import { RESOLVER_VENDOR_CAPABILITIES } from "../resolver-vendors/types.js";
-import { DEFAULT_PROFILE } from "../stealth.js";
+import { DEFAULT_PROFILE, resolveStealthProfileUserAgent } from "../stealth.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const TURNSTILE_CHALLENGE = {
@@ -122,7 +121,7 @@ describe("Capsolver resolver vendor", () => {
 		await expect(resolver.solve(AWS_WAF_CHALLENGE)).resolves.toEqual({
 			form: "cookies",
 			cookies: { "aws-waf-token": "aws-cookie-value" },
-			userAgent: getStealthProfile(DEFAULT_PROFILE).userAgent,
+			userAgent: await resolveStealthProfileUserAgent(DEFAULT_PROFILE),
 		});
 		expect(stub.calls[0]?.body).toEqual({
 			clientKey: "test-api-key",

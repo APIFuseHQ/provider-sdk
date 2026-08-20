@@ -946,6 +946,15 @@ export interface StealthProfile {
 	headerOrder?: string[];
 }
 
+export interface LatestStealthProfileIntent {
+	name: string;
+	platform: StealthPlatform;
+	resolution: "latest";
+	browserFamily: "chrome";
+}
+
+export type StealthProfileSelection = StealthProfile | LatestStealthProfileIntent;
+
 export type AuthMode =
 	| "none"
 	| "platform-managed"

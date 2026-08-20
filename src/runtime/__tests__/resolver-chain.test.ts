@@ -40,7 +40,7 @@ import {
 } from "../resolver-vendors/types.js";
 import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
-import { DEFAULT_PROFILE } from "../stealth.js";
+import { DEFAULT_PROFILE, resolveStealthProfileUserAgent } from "../stealth.js";
 import { getStealthProfile } from "../../stealth/profiles.js";
 import { ProxyTelemetryCollector } from "../proxy-telemetry.js";
 
@@ -629,7 +629,7 @@ describe("resolver vendor chain", () => {
 		expect(adapter.state.identities).toEqual([
 			{
 				proxyUrl: expect.stringMatching(/^http:\/\/resolver-default-profile-account-/),
-				userAgent: getStealthProfile(DEFAULT_PROFILE).userAgent,
+				userAgent: await resolveStealthProfileUserAgent(DEFAULT_PROFILE),
 			},
 		]);
 		const telemetryHeader = telemetry.toHeaderValue();

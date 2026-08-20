@@ -12,6 +12,17 @@ describe("stealth profiles", () => {
 		expect(profile.ja4).toBeUndefined();
 	});
 
+	it("returns the latest Chrome on Windows intent without a pinned fingerprint", () => {
+		const profile = getStealthProfile("chrome-latest");
+
+		expect(profile).toEqual({
+			name: "chrome-latest",
+			platform: "windows",
+			resolution: "latest",
+			browserFamily: "chrome",
+		});
+	});
+
 	it("maps chrome-desktop to the canonical chrome-146 profile", () => {
 		const profile = getStealthProfile("chrome-desktop");
 

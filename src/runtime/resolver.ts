@@ -6,7 +6,6 @@ import {
 	type ProxyUserAgentSource,
 } from "../config/loader.js";
 import { ProviderError } from "../errors.js";
-import { getStealthProfile } from "../stealth/profiles.js";
 import type {
 	ChallengeSolution,
 	ProviderCache,
@@ -49,7 +48,7 @@ import {
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
 } from "./resolver-config.js";
-import { DEFAULT_PROFILE } from "./stealth.js";
+import { DEFAULT_PROFILE, resolveStealthProfileUserAgent } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
 
 export {
@@ -237,16 +236,16 @@ export function swapResolverAdapterFactoryForTests(
 	};
 }
 
-let resolveDefaultResolverUserAgent: () => string | undefined = () =>
-	getStealthProfile(DEFAULT_PROFILE).userAgent;
+let resolveDefaultResolverUserAgent: () => string | undefined | Promise<string | undefined> = () =>
+	resolveStealthProfileUserAgent(DEFAULT_PROFILE);
 
 /** Internal test seam; deliberately not re-exported from the package root. */
 export function swapResolverDefaultUserAgentForTests(
-	resolver: (() => string | undefined) | undefined,
+	resolver: (() => string | undefined | Promise<string | undefined>) | undefined,
 ): () => void {
 	const original = resolveDefaultResolverUserAgent;
 	resolveDefaultResolverUserAgent =
-		resolver ?? (() => getStealthProfile(DEFAULT_PROFILE).userAgent);
+		resolver ?? (() => resolveStealthProfileUserAgent(DEFAULT_PROFILE));
 	let restored = false;
 	return () => {
 		if (restored) return;
@@ -799,7 +798,7 @@ async function resolveResolverIdentity(
 	}
 
 	try {
-		const userAgent = proxyIntent.userAgent || resolveDefaultResolverUserAgent();
+		const userAgent = proxyIntent.userAgent || (await resolveDefaultResolverUserAgent());
 		if (!userAgent) return { unavailableReason: "missing_client_profile", userAgentSource };
 		return {
 			identity: { proxyUrl, userAgent },

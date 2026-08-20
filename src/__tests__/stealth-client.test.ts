@@ -195,6 +195,7 @@ mock.module("wreq-js", () => ({
 	getProfiles: () => [
 		"chrome_145",
 		"chrome_146",
+		"chrome_149",
 		"firefox_128",
 		"firefox_133",
 		"firefox_135",
@@ -209,6 +210,7 @@ mock.module("wreq-js", () => ({
 		"safari_ios_18.1.1",
 		"safari_ios_26",
 	],
+	getEmulationHeaders: () => new Headers({ "user-agent": "Mock wreq user-agent" }),
 }));
 
 describe("createStealthClient", () => {
@@ -971,6 +973,61 @@ describe("createStealthClient", () => {
 		});
 	});
 
+	it("resolves latest Chrome intent to the highest installed family profile", async () => {
+		const { resolveWreqProfile } = await import("../runtime/stealth.js");
+
+		expect(
+			resolveWreqProfile("chrome-latest", [
+				"firefox_147",
+				"chrome_149",
+				"chrome_145",
+				"chrome_148",
+			]),
+		).toEqual({ browser: "chrome_149", os: "windows" });
+	});
+
+	it("keeps an explicit Chrome version pinned when newer profiles are installed", async () => {
+		const { resolveWreqProfile } = await import("../runtime/stealth.js");
+
+		expect(resolveWreqProfile("chrome-146", ["chrome_145", "chrome_146", "chrome_149"])).toEqual({
+			browser: "chrome_146",
+			os: "macos",
+		});
+	});
+
+	it("falls back to the latest Chrome on Windows for unknown profile names", async () => {
+		const { resolveWreqProfile } = await import("../runtime/stealth.js");
+
+		// Regression guard: an unrecognised profile string must inherit the same
+		// recency guarantee as the default profile. Pinning this fallback to a
+		// fixed version silently ages every caller that mistypes a profile name
+		// or references a profile removed from the catalogue.
+		expect(
+			resolveWreqProfile("not-a-real-profile", [
+				"firefox_147",
+				"chrome_146",
+				"chrome_149",
+				"chrome_145",
+			]),
+		).toEqual({ browser: "chrome_149", os: "windows" });
+	});
+
+	it("defaults to the latest installed Chrome profile on Windows", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "ok",
+			headers: { "content-type": "text/plain" },
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/profile");
+
+		expect(mockStealthState.clients[0]?.options).toMatchObject({
+			browser: "chrome_149",
+			os: "windows",
+		});
+	});
+
 	it("createSession accepts a canonical profile override", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 200,
@@ -1021,8 +1078,8 @@ describe("createStealthClient", () => {
 		await client.fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "chrome_146",
-			os: "macos",
+			browser: "chrome_149",
+			os: "windows",
 		});
 	});
 
@@ -1031,7 +1088,7 @@ describe("createStealthClient", () => {
 
 		expect(resolveWreqProfile("custom-profile", ["chrome_145", "firefox_147"])).toEqual({
 			browser: "chrome_145",
-			os: "macos",
+			os: "windows",
 		});
 	});
 

@@ -47,8 +47,8 @@ import {
 } from "../src/runtime/request-options.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import { createStealthClient } from "../src/runtime/stealth.js";
+import { resolveStealthProfileUserAgentSync } from "../src/runtime/stealth-sync.js";
 import { parseSchema } from "../src/schema.js";
-import { getStealthProfile } from "../src/stealth/profiles.js";
 import {
 	captureStreamEvidence,
 	createStreamCaptureEnvelope,
@@ -523,7 +523,7 @@ export function createCaptureContext(
 	const cache = createBypassProviderCache({ providerId: provider.id });
 	const proxyPolicy = resolveNativeProxyPolicy(provider);
 	const stealthProfile = provider.stealth?.profile
-		? getStealthProfile(provider.stealth.profile)
+		? resolveStealthProfileUserAgentSync(provider.stealth.profile)
 		: undefined;
 	const ctx: ProviderContext = {
 		env,
@@ -568,7 +568,7 @@ export function createCaptureContext(
 								proxyIntent: {
 									mode: proxyPolicy.mode,
 									upstream: { proxy: provider.proxy },
-									...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+									...(stealthProfile ? { userAgent: stealthProfile } : {}),
 								},
 							}
 						: {}),

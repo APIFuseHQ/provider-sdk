@@ -1,5 +1,10 @@
 import { SDKError } from "../errors.js";
-import type { StealthPlatform, StealthProfile } from "../types.js";
+import type {
+	LatestStealthProfileIntent,
+	StealthPlatform,
+	StealthProfile,
+	StealthProfileSelection,
+} from "../types.js";
 
 type StealthProfileDefinition = Omit<StealthProfile, "name" | "platform"> & {
 	platform: StealthPlatform;
@@ -149,6 +154,15 @@ const STEALTH_PROFILE_ALIASES: Record<string, string> = {
 	"chrome-desktop": "chrome-146",
 };
 
+const STEALTH_PROFILE_INTENTS: Record<string, LatestStealthProfileIntent> = {
+	"chrome-latest": {
+		name: "chrome-latest",
+		platform: "windows",
+		resolution: "latest",
+		browserFamily: "chrome",
+	},
+};
+
 const STEALTH_PROFILES: Record<string, StealthProfile> = {
 	"chrome-146": createProfile("chrome-146", {
 		platform: "macos",
@@ -282,8 +296,11 @@ const STEALTH_PROFILES: Record<string, StealthProfile> = {
 	}),
 };
 
-export function getStealthProfile(name: string): StealthProfile {
+export function getStealthProfile(name: string): StealthProfileSelection {
 	const canonicalName = STEALTH_PROFILE_ALIASES[name] ?? name;
+	const intent = STEALTH_PROFILE_INTENTS[canonicalName];
+	if (intent) return { ...intent };
+
 	const profile = STEALTH_PROFILES[canonicalName];
 
 	if (!profile) {
