@@ -654,6 +654,31 @@ describe("browser resolver vendor", () => {
 		expect(stub.state.contextCloseCalls).toBe(1);
 	});
 
+	it("maps a Playwright launch failure to transport unavailability and preserves its cause", async () => {
+		const launchError = new Error(
+			"launch: Executable doesn't exist at /root/.cache/ms-playwright/chromium_headless_shell-1234",
+		);
+		const adapter = createBrowserResolverVendorAdapter({
+			allowedHosts: ["example.com"],
+			createClient() {
+				throw launchError;
+			},
+			timeoutMs: 100,
+		});
+
+		await expect(
+			adapter.solve(
+				AWS_CHALLENGE,
+				{ proxyUrl: "http://proxy.test:8080", userAgent: "LaunchTest/1.0" },
+				new AbortController().signal,
+			),
+		).rejects.toMatchObject({
+			vendor: "browser",
+			reason: "transport_failure",
+			cause: launchError,
+		});
+	});
+
 	for (const fixture of BROWSER_TRANSPORT_ERROR_FIXTURES) {
 		it(`maps the transport error from ${fixture.origin}: ${fixture.message}`, async () => {
 			const stub = createBrowserStub({ connectError: new Error(fixture.message) });
@@ -705,13 +730,17 @@ describe("browser resolver vendor", () => {
 		});
 	}
 
-	it("propagates an unrecognised connection error unchanged", async () => {
+	it("maps an unrecognised pre-page connection error to transport unavailability", async () => {
 		const originalError = new Error("CDP connect failed");
 		const stub = createBrowserStub({ connectError: originalError });
 
 		await expect(
 			createAdapter(stub).solve(AWS_CHALLENGE, undefined, new AbortController().signal),
-		).rejects.toBe(originalError);
+		).rejects.toMatchObject({
+			vendor: "browser",
+			reason: "transport_failure",
+			cause: originalError,
+		});
 	});
 
 	it("stops promptly when aborted and exits the isolated context", async () => {

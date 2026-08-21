@@ -190,6 +190,58 @@ describe("resolver vendor chain", () => {
 		expect(second.state.solveCalls).toBe(1);
 	});
 
+	it("falls back to 2captcha when the browser cannot launch", async () => {
+		const launchError = new Error(
+			"launch: Executable doesn't exist at /root/.cache/ms-playwright/chromium_headless_shell-1234",
+		);
+		const browser = createBrowserResolverVendorAdapter({
+			allowedHosts: ["example.com"],
+			createClient() {
+				throw launchError;
+			},
+			timeoutMs: 100,
+		});
+		const twoCaptchaSolution = { form: "token", token: "2captcha-solution" } as const;
+		const twoCaptcha = createStubAdapter({
+			id: "2captcha",
+			behavior: async () => twoCaptchaSolution,
+		});
+		const resolver = createResolverClient({
+			adapters: [browser, twoCaptcha.adapter],
+			identity: { proxyUrl: "http://proxy.test:8080", userAgent: "ChainTest/1.0" },
+			kinds: ["aws_waf"],
+		});
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toBe(twoCaptchaSolution);
+		expect(twoCaptcha.state.solveCalls).toBe(1);
+	});
+
+	it("still propagates browser challenge logic bugs without trying 2captcha", async () => {
+		const logicError = new TypeError("browser challenge logic bug");
+		const page = createBrowserPageDouble({
+			async userAgent() {
+				throw logicError;
+			},
+		});
+		const browser = createBrowserResolverVendorAdapter({
+			allowedHosts: ["example.com"],
+			cdpUrl: "ws://cdp-pool.test",
+			createClient: () =>
+				createBrowserClientDouble({
+					async withIsolatedContext<T>(handler: (isolatedPage: BrowserPage) => Promise<T>) {
+						return await handler(page);
+					},
+				}),
+			timeoutMs: 100,
+		});
+		const twoCaptcha = createStubAdapter({ id: "2captcha" });
+
+		await expect(createChain([browser, twoCaptcha.adapter]).solve(CHALLENGE)).rejects.toBe(
+			logicError,
+		);
+		expect(twoCaptcha.state.solveCalls).toBe(0);
+	});
+
 	it("propagates a verdict without calling the next vendor", async () => {
 		const verdict = new ResolverChallengeVerdictError("browser", "human_puzzle");
 		const first = createStubAdapter({
