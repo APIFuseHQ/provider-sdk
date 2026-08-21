@@ -268,6 +268,11 @@ interface BrowserPage extends BrowserFrame {
     // (undocumented)
     goto(url: string): Promise<void>;
     // (undocumented)
+    goto(url: string, options?: {
+        readonly timeout?: number;
+        readonly waitUntil?: "load" | "domcontentloaded";
+    }): Promise<void>;
+    // (undocumented)
     pageId?: string;
     // (undocumented)
     screenshot(options?: {
@@ -2939,16 +2944,16 @@ interface VerificationCodeExtractionResult {
 // dist/types.d.ts:1475:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point contract.d.ts
 // dist/types.d.ts:1479:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point contract.d.ts
 // dist/types.d.ts:1486:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1517:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1585:5 - (ae-forgotten-export) The symbol "ProviderChoiceConsumeResult" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1597:5 - (ae-forgotten-export) The symbol "ProviderStateDurationString" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1641:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1699:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1707:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1708:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1717:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1966:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:2024:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1521:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1589:5 - (ae-forgotten-export) The symbol "ProviderChoiceConsumeResult" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1601:5 - (ae-forgotten-export) The symbol "ProviderStateDurationString" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1645:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1703:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1711:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1712:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1721:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1970:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:2028:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point contract.d.ts
 
 // (No @packageDocumentation comment for this package)
 

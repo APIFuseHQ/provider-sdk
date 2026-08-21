@@ -95,6 +95,7 @@ const BROWSER_TRANSPORT_ERROR_FIXTURES = [
 ] as const;
 
 type BrowserStubOptions = {
+	readonly blockedRequestUrl?: string;
 	readonly closeError?: Error;
 	readonly connectError?: Error;
 	readonly contextCloseGate?: Promise<void>;
@@ -126,6 +127,7 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 		clientCloseCalls: 0,
 		contextCloseCalls: 0,
 		contextCloseStarted: 0,
+		gotoOptions: [] as Array<Parameters<BrowserPage["goto"]>[1]>,
 		gotoUrls: [] as string[],
 		pageOperations: [] as string[],
 		resourcePolicies: [] as BrowserResourcePolicy[],
@@ -141,9 +143,17 @@ function createBrowserStub(options: BrowserStubOptions = {}) {
 			state.pageOperations.push("evaluate-user-agent");
 			return options.userAgent ?? "StubBrowser/1.0";
 		},
-		async goto(url: string) {
+		async goto(url: string, gotoOptions?: Parameters<BrowserPage["goto"]>[1]) {
 			state.pageOperations.push("goto");
 			state.gotoUrls.push(url);
+			state.gotoOptions.push(gotoOptions);
+			if (options.blockedRequestUrl) {
+				await state.resourcePolicies.at(-1)?.routes[0]?.handle({
+					headers: {},
+					method: "GET",
+					url: options.blockedRequestUrl,
+				});
+			}
 			if (options.gotoError) throw options.gotoError;
 		},
 		async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
@@ -250,6 +260,9 @@ describe("browser resolver vendor", () => {
 			),
 		).toEqual({ userAgent: "Measured Chromium" });
 		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
+		expect(stub.state.gotoOptions).toEqual([
+			{ timeout: 100, waitUntil: "domcontentloaded" },
+		]);
 		expect(stub.state.pageOperations).toEqual(["evaluate-user-agent", "goto"]);
 		expect(stub.state.contextCloseCalls).toBe(1);
 	});
@@ -802,6 +815,36 @@ describe("browser resolver vendor", () => {
 		await expect(
 			createAdapter(stub).solve(AWS_CHALLENGE, undefined, new AbortController().signal),
 		).rejects.toThrow("navigation crashed");
+		expect(stub.state.contextCloseCalls).toBe(1);
+	});
+
+	it("classifies blocked navigation with the navigation and blocked request URLs", async () => {
+		const redirectedUrl = "https://www.example.com/protected";
+		const stub = createBrowserStub({
+			blockedRequestUrl: redirectedUrl,
+			gotoError: new Error(
+				`page.goto: net::ERR_BLOCKED_BY_CLIENT at ${AWS_CHALLENGE.pageUrl}`,
+			),
+		});
+
+		const error = await createAdapter(stub)
+			.solve(AWS_CHALLENGE, undefined, new AbortController().signal)
+			.catch((cause: unknown) => cause);
+
+		expect(error).toBeInstanceOf(ResolverVendorUnavailableError);
+		expect(error).toMatchObject({
+			vendor: "browser",
+			reason: "transport_failure",
+			cause: {
+				name: "BrowserNavigationBlockedError",
+				code: "RESOLVER_BROWSER_NAVIGATION_BLOCKED",
+				navigationUrl: AWS_CHALLENGE.pageUrl,
+				blockedUrls: [redirectedUrl],
+			},
+		});
+		expect(collectNestedStrings(error).join("\n")).toContain(
+			`blocked 1 requests: [${redirectedUrl}]`,
+		);
 		expect(stub.state.contextCloseCalls).toBe(1);
 	});
 

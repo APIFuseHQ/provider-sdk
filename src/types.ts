@@ -1816,6 +1816,10 @@ export interface BrowserPage extends BrowserFrame {
 	cookies(): Promise<readonly BrowserCookie[]>;
 	fill(selector: string, text: string): Promise<void>;
 	goto(url: string): Promise<void>;
+	goto(
+		url: string,
+		options?: { readonly timeout?: number; readonly waitUntil?: "load" | "domcontentloaded" },
+	): Promise<void>;
 	pageId?: string;
 	screenshot(options?: { fullPage?: boolean }): Promise<Buffer>;
 	click(selector: string): Promise<void>;

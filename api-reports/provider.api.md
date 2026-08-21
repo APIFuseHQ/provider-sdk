@@ -326,6 +326,11 @@ interface BrowserPage extends BrowserFrame {
     // (undocumented)
     goto(url: string): Promise<void>;
     // (undocumented)
+    goto(url: string, options?: {
+        readonly timeout?: number;
+        readonly waitUntil?: "load" | "domcontentloaded";
+    }): Promise<void>;
+    // (undocumented)
     pageId?: string;
     // (undocumented)
     screenshot(options?: {
@@ -3447,8 +3452,8 @@ export { z }
 // dist/types.d.ts:1475:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:1479:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:1486:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1517:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1641:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1521:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1645:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 
