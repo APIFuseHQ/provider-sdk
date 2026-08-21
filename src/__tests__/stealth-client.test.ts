@@ -1989,18 +1989,74 @@ describe("createStealthClient", () => {
 	});
 
 	it("wraps network failures in TransportError", async () => {
-		mockStealthState.queuedErrors.push(new Error("socket hang up"));
+		const connectionError = new Error("connect ECONNREFUSED 127.0.0.1:443");
+		Object.assign(connectionError, { code: "ECONNREFUSED" });
+		mockStealthState.queuedErrors.push(connectionError);
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
+		let thrown: unknown;
+		try {
+			await client.fetch("/network");
+		} catch (error) {
+			thrown = error;
+		}
 
-		await expect(client.fetch("/network")).rejects.toBeInstanceOf(TransportError);
-		mockStealthState.queuedErrors.push(new Error("socket hang up"));
-		await expect(client.fetch("/network")).rejects.toMatchObject({
+		assertIsError(thrown);
+		expect(thrown).toBeInstanceOf(TransportError);
+		expect(thrown).toMatchObject({
 			code: "transport_network_error",
 			status: 0,
 			message: "Network error",
 		});
+		expect(thrown.cause).toBe(connectionError);
+	});
+
+	it("classifies invalid base URL errors as caller faults", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = Reflect.apply(createStealthClient, undefined, [{}]);
+		const session = client.createSession({ profile: "chrome-latest" });
+		let thrown: unknown;
+		try {
+			await session.fetch("https://api.ipify.org", { throwOnHttpError: false });
+		} catch (error) {
+			thrown = error;
+		}
+
+		assertIsError(thrown);
+		expect(thrown).toBeInstanceOf(TransportError);
+		expect(thrown).toMatchObject({
+			code: "transport_invalid_url",
+			status: 0,
+		});
+		assertIsError(thrown.cause);
+		expect(thrown.cause).toBeInstanceOf(TypeError);
+		expect((thrown.cause as TypeError & { code?: string }).code).toBe("ERR_INVALID_URL");
+	});
+
+	it("finds invalid URL codes through wrapped wreq causes", async () => {
+		const invalidUrl = new TypeError("Invalid URL");
+		Object.assign(invalidUrl, { code: "ERR_INVALID_URL" });
+		const wrapper = new Error("wreq wrapper", { cause: invalidUrl });
+		mockStealthState.queuedErrors.push(wrapper);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		let thrown: unknown;
+		try {
+			await client.fetch("/invalid");
+		} catch (error) {
+			thrown = error;
+		}
+
+		assertIsError(thrown);
+		expect(thrown).toMatchObject({
+			code: "transport_invalid_url",
+			message: invalidUrl.message,
+		});
+		expect(thrown.cause).toBe(wrapper);
+		assertIsError(thrown.cause);
+		expect(thrown.cause.cause).toBe(invalidUrl);
 	});
 
 	it("redacts sensitive request URLs from stealth transport errors and their metadata", async () => {
@@ -2124,12 +2180,20 @@ describe("createStealthClient", () => {
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
+		let thrown: unknown;
+		try {
+			await client.fetch("/slow", { timeout: 10 });
+		} catch (error) {
+			thrown = error;
+		}
 
-		await expect(client.fetch("/slow", { timeout: 10 })).rejects.toMatchObject({
+		assertIsError(thrown);
+		expect(thrown).toMatchObject({
 			code: "transport_timeout",
 			status: 0,
 			message: "Request timed out",
 		});
+		expect(thrown.cause).toBe(timeoutError);
 	});
 
 	it("defaults proxy-routed GET network failures to transient transport retry", async () => {
