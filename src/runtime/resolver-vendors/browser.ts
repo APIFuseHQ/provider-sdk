@@ -350,6 +350,7 @@ function poolErrorCode(error: Error): number | undefined {
 
 function knownUnavailableReason(
 	error: unknown,
+	beforePageSolve = false,
 ): "allocation_exhausted" | "missing_credentials" | "transport_failure" | undefined {
 	// Source-grounded mappings:
 	// - apps/cdp-pool/src/index.ts: the JSON-RPC codes and messages below.
@@ -384,7 +385,10 @@ function knownUnavailableReason(
 		return "transport_failure";
 	}
 
-	return undefined;
+	// Browser creation, Playwright launch, and CDP connection all happen before the
+	// isolated-page handler is entered. Errors after that boundary belong to the
+	// challenge solve and must retain their existing classification.
+	return beforePageSolve ? "transport_failure" : undefined;
 }
 
 async function closeBrowserClient(
@@ -514,7 +518,7 @@ export function createBrowserResolverVendorAdapter(
 				if (error instanceof ResolverVendorUnavailableError) {
 					throw error;
 				}
-				const reason = knownUnavailableReason(error);
+				const reason = knownUnavailableReason(error, !handlerEntered);
 				if (reason) {
 					throw new ResolverVendorUnavailableError(BROWSER_VENDOR_ID, reason, { cause: error });
 				}
