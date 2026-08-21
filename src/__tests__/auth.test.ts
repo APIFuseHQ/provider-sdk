@@ -42,6 +42,7 @@ describe("defineCredentialsAuth", () => {
 						fields: {},
 						poll: async () => ({ credential: { cookie: "ok" } }),
 					},
+					// test-invalid: runtime validation must report every malformed challenge declaration.
 				} as never,
 			});
 		} catch (error) {
@@ -174,6 +175,7 @@ describe("defineCredentialsAuth", () => {
 		const credentialsAuth = defineCredentialsAuth({
 			fields: { email: { type: "email" } },
 			credentialKeys: ["cookie", "sessionId"] as const,
+			// test-invalid: runtime credential validation must reject a missing declared key.
 			login: async () => ({ credential: { cookie: "session" } as never }),
 		});
 
@@ -193,6 +195,7 @@ describe("defineCredentialsAuth", () => {
 		const credentialsAuth = defineCredentialsAuth({
 			fields: { email: { type: "email" } },
 			credentialKeys: ["cookie"] as const,
+			// test-invalid: runtime credential validation must reject a missing credential object.
 			login: async () => ({}) as never,
 		});
 
@@ -362,12 +365,13 @@ describe("defineCredentialsAuth", () => {
 			fields: { email: { type: "email" } },
 			credentialKeys: ["cookie", "sessionId"] as const,
 			login: async () => ({ credential: { cookie: "c", sessionId: "s" } }),
+			// test-invalid: runtime refresh validation must reject a missing declared key.
 			refresh: async () => ({ credential: { cookie: "c" } }) as never,
 		});
 
-		await expect(
-			credentialsAuth.auth.flow?.refresh?.(createFlowContext(), {}),
-		).rejects.toThrow(/sessionId/);
+		await expect(credentialsAuth.auth.flow?.refresh?.(createFlowContext(), {})).rejects.toThrow(
+			/sessionId/,
+		);
 	});
 
 	it("lets refresh raise a challenge when the upstream demands one", async () => {

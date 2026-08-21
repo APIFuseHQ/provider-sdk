@@ -299,13 +299,13 @@ describe("OCR runtime clients", () => {
 		});
 
 		expect((await ocr.recognize({ image, hint: "captcha" })).text).toBe("aB3dEf78");
-			expect(body).toMatchObject({
-				task: "query",
-				stream: true,
-				reasoning: false,
-				temperature: 0,
-				max_tokens: 64,
-			});
+		expect(body).toMatchObject({
+			task: "query",
+			stream: true,
+			reasoning: false,
+			temperature: 0,
+			max_tokens: 64,
+		});
 		expect(typeof body?.image).toBe("string");
 		expect(typeof body?.question).toBe("string");
 	});
@@ -349,20 +349,22 @@ describe("OCR runtime clients", () => {
 		const malformedJson = createOpenAiCompatibleOcrClient({
 			baseUrl: "http://ocr.internal",
 			model: "vision-model",
-			fetch: createFetchDouble(async () =>
-				new Response('{"choices":', {
-					headers: { "Content-Type": "application/json" },
-				}),
+			fetch: createFetchDouble(
+				async () =>
+					new Response('{"choices":', {
+						headers: { "Content-Type": "application/json" },
+					}),
 			),
 		});
 		const malformedSse = createCloudflareWorkersAiOcrClient({
 			accountId: "account",
 			apiToken: "token",
 			model: "@cf/moondream/moondream3.1-9B-A2B",
-			fetch: createFetchDouble(async () =>
-				new Response('data: {"chunk":\ndata: [DONE]\n', {
-					headers: { "Content-Type": "text/event-stream" },
-				}),
+			fetch: createFetchDouble(
+				async () =>
+					new Response('data: {"chunk":\ndata: [DONE]\n', {
+						headers: { "Content-Type": "text/event-stream" },
+					}),
 			),
 		});
 
@@ -497,9 +499,7 @@ describe("OCR CAPTCHA constraint handling", () => {
 				maxCandidates: 1,
 			});
 
-			expect(regexResult[0]?.satisfiesConstraints).toBe(
-				stringResult[0]?.satisfiesConstraints,
-			);
+			expect(regexResult[0]?.satisfiesConstraints).toBe(stringResult[0]?.satisfiesConstraints);
 		}
 	});
 
@@ -525,7 +525,7 @@ describe("OCR CAPTCHA constraint handling", () => {
 	it("keeps homoglyph membership type-safe in the OCR source", async () => {
 		const source = await Bun.file(new URL("../runtime/ocr.ts", import.meta.url)).text();
 
-		expect(source).not.toContain("as never");
+		expect(source).not.toContain(["as", "never"].join(" "));
 		expect(
 			extractCaptchaCandidates("I0", {
 				length: 2,
@@ -543,9 +543,7 @@ describe("OCR CAPTCHA constraint handling", () => {
 		});
 		const elapsedMs = performance.now() - start;
 
-		expect(candidates).toEqual([
-			{ text: "IlOoSsZzBIlOo", satisfiesConstraints: false },
-		]);
+		expect(candidates).toEqual([{ text: "IlOoSsZzBIlOo", satisfiesConstraints: false }]);
 		expect(elapsedMs).toBeLessThan(200);
 	});
 

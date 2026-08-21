@@ -4,6 +4,7 @@ import { z } from "zod";
 import { defineProvider } from "../define.js";
 import { ProviderError, ValidationError } from "../errors.js";
 import type { OperationAnnotations, ProviderContext, SchemaLike } from "../types.js";
+import { createProviderContextDouble } from "./test-utils.js";
 
 const InputSchema = z.object({ id: z.string() });
 const OutputSchema = z.object({ name: z.string(), price: z.number() });
@@ -114,7 +115,8 @@ describe("defineProvider", () => {
 	] as const)("rejects %s at definition time", (_label, resolver, message) => {
 		let caught: unknown;
 		try {
-			Reflect.apply(defineProvider, undefined, [{ ...validConfig, resolver }]);
+			// @ts-expect-error test-invalid: runtime validation must reject resolver shapes excluded by the declaration type.
+			defineProvider({ ...validConfig, resolver });
 		} catch (error) {
 			caught = error;
 		}
@@ -133,10 +135,10 @@ describe("defineProvider", () => {
 						...validConfig.operations.prices,
 						docs: {
 							errorCodes: [
-							{
-								code: "UPSTREAM_TEAPOT",
-								// @ts-expect-error test-invalid: runtime validation must reject unsupported HTTP statuses.
-								status: 418,
+								{
+									code: "UPSTREAM_TEAPOT",
+									// @ts-expect-error test-invalid: runtime validation must reject unsupported HTTP statuses.
+									status: 418,
 									description: "Unsupported upstream response",
 								},
 							],
@@ -339,6 +341,7 @@ describe("defineProvider", () => {
 						transport: {
 							kind: "sse",
 							heartbeatMs: 0,
+							// test-invalid: runtime validation must reject an invalid SSE heartbeat and missing events.
 						} as never,
 					},
 				},
@@ -355,6 +358,7 @@ describe("defineProvider", () => {
 						...validConfig.operations.prices,
 						transport: {
 							kind: "sse",
+							// test-invalid: runtime validation must reject SSE transport without event schemas.
 						} as never,
 					},
 				},
@@ -388,6 +392,7 @@ describe("defineProvider", () => {
 						...validConfig.operations.prices,
 						transport: {
 							kind: "websocket",
+							// test-invalid: runtime validation must reject websocket transport without dispatch metadata.
 						} as never,
 					},
 				},
@@ -405,6 +410,7 @@ describe("defineProvider", () => {
 						transport: {
 							kind: "websocket",
 							dispatch: "raw-tunnel",
+							// test-invalid: runtime validation must reject websocket dispatch before session support exists.
 						} as never,
 					},
 				},
@@ -457,7 +463,7 @@ describe("defineProvider", () => {
 		const provider = defineProvider(validConfig);
 		expect(provider.operations).toBe(validConfig.operations);
 		await expect(
-			provider.operations.prices.handler?.({} as never, { id: "bitcoin" }),
+			provider.operations.prices.handler?.(createProviderContextDouble(), { id: "bitcoin" }),
 		).resolves.toEqual({ name: "bitcoin", price: 50_000 });
 	});
 
@@ -584,9 +590,9 @@ describe("defineProvider", () => {
 			},
 		});
 
-		expect(requireZodSchema(provider.operations.prices.input).safeParse({ date: "+45d" }).success).toBe(
-			false,
-		);
+		expect(
+			requireZodSchema(provider.operations.prices.input).safeParse({ date: "+45d" }).success,
+		).toBe(false);
 		expect(provider.operations.prices.fixtures?.request).toEqual({
 			date: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
 		});

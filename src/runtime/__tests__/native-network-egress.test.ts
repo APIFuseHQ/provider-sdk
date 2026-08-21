@@ -1009,6 +1009,7 @@ describe("native egress enforcement", () => {
 				createNativeNetworkClient({
 					egress: {
 						dynamicTcp: [{ ...rule, targetIpv4Cidrs: [211_183_208_000] }],
+						// test-invalid: runtime CIDR validation must reject a numeric network declaration.
 					} as never,
 				}),
 			"native_egress_policy_invalid",
@@ -1936,6 +1937,7 @@ describe("native egress enforcement", () => {
 			() => {
 				throw new Error("delegate failed");
 			},
+			// test-invalid: runtime authorization must fail closed when a delegate returns no grant.
 			() => ({}) as never,
 		]) {
 			const client = createNativeNetworkClient({ egress: declaration, grantTcpEgress });
@@ -1950,6 +1952,7 @@ describe("native egress enforcement", () => {
 
 	it("rejects unsafe inputs and policies with typed errors", async () => {
 		expectNativeCode(
+			// test-invalid: runtime policy validation must reject unknown egress fields.
 			() => createNativeNetworkClient({ egress: { surprise: true } as never }),
 			"native_egress_policy_invalid",
 		);
@@ -1958,6 +1961,7 @@ describe("native egress enforcement", () => {
 				createNativeNetworkClient({
 					egress: Object.defineProperty({}, "tcp", {
 						get: () => [],
+						// test-invalid: runtime policy inspection must reject an accessor-backed declaration.
 					}) as never,
 				}),
 			"native_egress_policy_invalid",
@@ -1972,6 +1976,7 @@ describe("native egress enforcement", () => {
 					get: () => {
 						throw new Error("boom");
 					},
+					// test-invalid: runtime input inspection must reject a throwing host accessor.
 				}) as never,
 			),
 		).rejects.toMatchObject({ code: "native_egress_input_invalid" });
@@ -1982,6 +1987,7 @@ describe("native egress enforcement", () => {
 						get: () => {
 							throw new Error("boom");
 						},
+						// test-invalid: runtime grant inspection must reject a throwing sourceHost accessor.
 					}) as never,
 				),
 			"native_egress_input_invalid",
@@ -2008,6 +2014,7 @@ describe("native egress enforcement", () => {
 				get: () => {
 					throw new Error("raw getter failure");
 				},
+				// test-invalid: runtime snapshots must reject throwing accessors on otherwise valid input.
 			}) as never;
 			const error = captureNativeError(() => snapshotNativeConnectInput(input));
 			expect(error.code).toBe("native_egress_input_invalid");

@@ -1,12 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { defineAuthFlow } from "../ceremonies/index.js";
-import {
-	defineOperation,
-	defineProvider,
-	ProviderError,
-	z as providerZ,
-} from "../provider.js";
+import { defineOperation, defineProvider, ProviderError, z as providerZ } from "../provider.js";
 import type {
 	AuthFlowDefinition,
 	AuthMode,
@@ -142,9 +137,7 @@ describe("ProviderDefinition types", () => {
 
 		expect(defaultedInputStart.length).toBe(1);
 		expect(defineInvalidProvider).toThrow(ProviderError);
-		expect(defineInvalidProvider).toThrow(
-			/auth\.flow\.start must not declare an input parameter/,
-		);
+		expect(defineInvalidProvider).toThrow(/auth\.flow\.start must not declare an input parameter/);
 
 		const contextOnlyProvider = defineProvider({
 			id: "context-only-auth-start",
@@ -195,36 +188,38 @@ describe("ProviderDefinition types", () => {
 			handler: async () => ({ ok: true }),
 			healthCheckUnsupported: { reason: "test fixture" },
 		});
+		// test-invalid: dynamically constructs nested-arrow source for auth handler inspection.
 		const nestedArrow: unknown = Function(
 			"return function start(ctx) { const h = (context, input = {}) => input; return h(ctx, {}); }",
 		)();
+		// test-invalid: dynamically constructs a block comment inside an auth parameter list.
 		const blockComment: unknown = Function(
 			"return function start(ctx /*, input = {} */) { return ctx; }",
 		)();
+		// test-invalid: dynamically constructs a line comment inside an auth parameter list.
 		const lineComment: unknown = Function(
 			"return function start(ctx // , input = {}\n) { return ctx; }",
 		)();
 		const makeProvider = (id: string, start: unknown): unknown =>
-			Reflect.apply(defineProvider, undefined, [
-				{
-					id,
-					version: "1.0.0",
-					runtime: "standard",
-					meta: {
-						displayName: "One Parameter Auth Start",
-						descriptionKey: "providers.oneParameterAuthStart.description",
-						category: "test",
-					},
-					auth: {
-						mode: "credentials",
-						flow: {
-							start,
-							continue: async () => ({ kind: "complete", turnId: "complete" }),
-						},
-					},
-					operations: { noop },
+			defineProvider({
+				id,
+				version: "1.0.0",
+				runtime: "standard",
+				meta: {
+					displayName: "One Parameter Auth Start",
+					descriptionKey: "providers.oneParameterAuthStart.description",
+					category: "test",
 				},
-			]);
+				auth: {
+					mode: "credentials",
+					flow: {
+						// @ts-expect-error test-invalid: runtime validation must inspect a dynamically constructed auth handler.
+						start,
+						continue: async () => ({ kind: "complete", turnId: "complete" }),
+					},
+				},
+				operations: { noop },
+			});
 
 		expect(() => makeProvider("nested-arrow-auth-start", nestedArrow)).not.toThrow();
 		expect(() => makeProvider("block-comment-auth-start", blockComment)).not.toThrow();
@@ -267,45 +262,45 @@ describe("ProviderDefinition types", () => {
 			handler: async () => ({ ok: true }),
 			healthCheckUnsupported: { reason: "test fixture" },
 		});
+		// test-invalid: dynamically constructs minified auth handler source for ambiguity validation.
 		const minifiedStart: unknown = Function(
 			"return async (c,i={}) => ({ kind: 'form', turnId: 'start' })",
 		)();
-		const boundStart = (
-			async (_ctx: FlowContext) => ({ kind: "form", turnId: "start" })
-		).bind(undefined);
-		const destructuredDefaultStart = async (
-			{ context: _context } = { context: undefined },
-		) => ({
+		const boundStart = (async (_ctx: FlowContext) => ({ kind: "form", turnId: "start" })).bind(
+			undefined,
+		);
+		const destructuredDefaultStart = async ({ context: _context } = { context: undefined }) => ({
 			kind: "form",
 			turnId: "start",
 		});
+		// test-invalid: dynamically constructs legacy HTML-comment auth handler source.
 		const htmlCommentStart: unknown = Function(
 			"return function start(context <!-- , input = {}\n) { return { kind: 'form', turnId: 'start' }; }",
 		)();
+		// test-invalid: dynamically constructs legacy HTML-comment-close auth handler source.
 		const htmlCommentCloseStart: unknown = Function(
 			"return function start(context\n--> , input = {}\n) { return { kind: 'form', turnId: 'start' }; }",
 		)();
 		const defineUncheckedProvider = (id: string, start: unknown): unknown =>
-			Reflect.apply(defineProvider, undefined, [
-				{
-					id,
-					version: "1.0.0",
-					runtime: "standard",
-					meta: {
-						displayName: "Ambiguous Auth Start",
-						descriptionKey: "providers.ambiguousAuthStart.description",
-						category: "test",
-					},
-					auth: {
-						mode: "credentials",
-						flow: {
-							start,
-							continue: async () => ({ kind: "complete", turnId: "complete" }),
-						},
-					},
-					operations: { noop },
+			defineProvider({
+				id,
+				version: "1.0.0",
+				runtime: "standard",
+				meta: {
+					displayName: "Ambiguous Auth Start",
+					descriptionKey: "providers.ambiguousAuthStart.description",
+					category: "test",
 				},
-			]);
+				auth: {
+					mode: "credentials",
+					flow: {
+						// @ts-expect-error test-invalid: runtime validation must inspect a dynamically constructed auth handler.
+						start,
+						continue: async () => ({ kind: "complete", turnId: "complete" }),
+					},
+				},
+				operations: { noop },
+			});
 
 		for (const [id, start] of [
 			["minified-auth-start", minifiedStart],

@@ -291,9 +291,7 @@ const handlerE2eProvider = defineProvider({
 					date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 				});
 				const { id, date } = inputSchema.parse(input);
-				const response = await ctx.http.get(
-					`https://example.test/items/${id}?date=${date}`,
-				);
+				const response = await ctx.http.get(`https://example.test/items/${id}?date=${date}`);
 				const body = await response.json<{ label: string }>();
 				return { result: body.label };
 			},
@@ -318,9 +316,7 @@ const brokenHandlerProvider = defineProvider({
 					date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
 				});
 				const { id, date } = inputSchema.parse(input);
-				const response = await ctx.http.get(
-					`https://example.test/items/${id}?date=${date}`,
-				);
+				const response = await ctx.http.get(`https://example.test/items/${id}?date=${date}`);
 				const body = await response.json<{ label: string }>();
 				return { wrong: body.label };
 			},
@@ -332,7 +328,11 @@ const nativeEgressHarnessProvider = defineProvider({
 	id: "native-egress-harness",
 	version: "1.0.0",
 	runtime: "standard",
-	meta: { displayName: "Native Egress Harness", descriptionKey: "meta.description", category: "test" },
+	meta: {
+		displayName: "Native Egress Harness",
+		descriptionKey: "meta.description",
+		category: "test",
+	},
 	native: {
 		network: {
 			tcp: [{ host: "allowed.example", ports: [443], tls: "disabled" }],
@@ -571,7 +571,7 @@ const provider = {
   meta: { displayName: "Missing Snapshot Harness", category: "test" },
   operations: { check: { input: {}, output: {}, handler: async () => ({ ok: true }) } },
 };
-runStandardTests(provider as never, {}, undefined, {
+runStandardTests(provider, {}, undefined, {
   snapshot: true,
   fixtureDir: ${JSON.stringify(fixtureDir)},
   requireSnapshot: true,
@@ -595,7 +595,7 @@ const provider = {
     handler: async (ctx) => { await ctx.http.stream("https://example.test/download"); return { ok: true }; },
   } },
 };
-runStandardTests(provider as never, {
+runStandardTests(provider, {
   __apifuse_capture__: true,
   items: [
     { kind: "stream", evidence: {

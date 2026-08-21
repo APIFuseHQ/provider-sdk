@@ -23,6 +23,7 @@ function providerWithHealthCheckInterval(interval: string) {
 					return { ok: true };
 				},
 				healthCheck: {
+					// test-invalid: runtime duration parsing deliberately receives raw strings outside ProbeInterval.
 					interval: interval as never,
 					cases: [
 						{
@@ -94,6 +95,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 									assertions: () => {},
 								},
 							],
+							// test-invalid: runtime validation must reject the misspelled health-check field.
 						} as never,
 					},
 				},
@@ -121,6 +123,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						},
 						healthCheck: {
 							interval: "1m",
+							// test-invalid: runtime validation must reject an empty health-check case tuple.
 							cases: [] as never,
 						},
 					},
@@ -311,6 +314,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 									assertions: () => {},
 								},
 							],
+							// test-invalid: runtime validation must reject legacy schedule jitter metadata.
 						} as never,
 					},
 				},
@@ -495,6 +499,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 							return { ok: true };
 						},
 						healthCheck: {
+							// test-invalid: runtime validation must reject a malformed interval string.
 							interval: "tomorrow" as never,
 							cases: [
 								{
@@ -656,6 +661,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 						healthCheckUnsupported: { reason: "skip" },
 					},
 				},
+				// test-invalid: runtime validation must reject the legacy provider health interval field.
 				healthMonitor: { interval: "1m" } as never,
 			}),
 		).toThrow(/Unknown field "interval"/);
@@ -686,6 +692,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 					probeOverrides: {
 						"test-provider/auth-flow": { interval: "later" },
 					},
+					// test-invalid: runtime validation must reject malformed probe override intervals.
 				} as never,
 			}),
 		).toThrow(/invalid healthMonitor\.probeOverrides/);
