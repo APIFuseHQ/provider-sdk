@@ -121,6 +121,7 @@ describe("health journey authoring", () => {
 								maxOffset: "PT6H",
 								extra: true,
 							},
+							// test-invalid: runtime validation must reject unknown randomization fields.
 						} as never,
 						coversOperations: ["ping"],
 						steps: [{ id: "ping", operationId: "ping", kind: "operation" }],
@@ -139,6 +140,7 @@ describe("health journey authoring", () => {
 						schedule: {
 							...every("24h"),
 							randomize: { mode: "spread", maxDelay: "PT6H" },
+							// test-invalid: runtime validation must reject unsupported randomization modes.
 						} as never,
 						coversOperations: ["ping"],
 						steps: [{ id: "ping", operationId: "ping", kind: "operation" }],
@@ -157,6 +159,7 @@ describe("health journey authoring", () => {
 						schedule: {
 							...every("24h"),
 							randomize: { mode: "delayed", maxDelay: "PT0S" },
+							// test-invalid: runtime validation must reject nonpositive randomization durations.
 						} as never,
 						coversOperations: ["ping"],
 						steps: [{ id: "ping", operationId: "ping", kind: "operation" }],

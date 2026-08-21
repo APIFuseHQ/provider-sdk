@@ -9,7 +9,7 @@ import {
 } from "../declaration-validation.js";
 import { defineProvider } from "../define.js";
 import { isProviderError } from "../errors.js";
-import type { ProviderDefinition } from "../types.js";
+import type { HealthCheckSuite, ProviderDefinition } from "../types.js";
 
 function operation() {
 	return {
@@ -88,17 +88,17 @@ describe("fail-closed provider declaration validation", () => {
 
 	it("requires executable health journeys", () => {
 		expectRule(
-		provider({
-			healthJourneys: [
-				// @ts-expect-error test-invalid: validation must reject a journey without an executable run handler.
-				{
-					id: "ping-journey",
-					schedule: { kind: "interval", interval: "PT1H" },
-					coversOperations: ["ping"],
-					steps: [{ id: "ping", kind: "operation", operationId: "ping" }],
-				},
-			],
-		}),
+			provider({
+				healthJourneys: [
+					// @ts-expect-error test-invalid: validation must reject a journey without an executable run handler.
+					{
+						id: "ping-journey",
+						schedule: { kind: "interval", interval: "PT1H" },
+						coversOperations: ["ping"],
+						steps: [{ id: "ping", kind: "operation", operationId: "ping" }],
+					},
+				],
+			}),
 			DECLARATION_RULE_IDS.journeyExecutable,
 			"healthJourneys.ping-journey.run",
 		);
@@ -129,13 +129,11 @@ describe("fail-closed provider declaration validation", () => {
 					assertions: () => {},
 					enabled: () => true,
 				},
-			] as const,
-		};
+			],
+		} satisfies HealthCheckSuite;
 		expect(() =>
 			validateFailClosedDeclaration(
-				provider({
-					operations: { ping: { ...operation(), healthCheck: healthCheck as never } },
-				}),
+				provider({ operations: { ping: { ...operation(), healthCheck } } }),
 			),
 		).not.toThrow();
 		expect(() =>
@@ -184,11 +182,7 @@ describe("fail-closed provider declaration validation", () => {
 	});
 
 	it("rejects proxy: true and retains proxy: false", () => {
-		expectRule(
-			provider({ proxy: true }),
-			DECLARATION_RULE_IDS.proxyExplicitPolicy,
-			"proxy",
-		);
+		expectRule(provider({ proxy: true }), DECLARATION_RULE_IDS.proxyExplicitPolicy, "proxy");
 		expect(() => validateFailClosedDeclaration(provider({ proxy: false }))).not.toThrow();
 	});
 

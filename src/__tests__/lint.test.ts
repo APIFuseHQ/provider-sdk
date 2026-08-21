@@ -347,7 +347,9 @@ describe("lintProvider", () => {
 			auth: {
 				mode: "credentials",
 				flow: { continue: async () => ({ kind: "complete", turnId: "1" }) },
+				// test-invalid: lint must reject the removed legacy auth exchange field.
 				exchange: async () => ({ session: "cookie" }),
+				// test-invalid: the legacy auth object deliberately bypasses the current declaration shape.
 			} as never,
 			credential: {
 				keys: ["session"],
@@ -370,6 +372,7 @@ describe("lintProvider", () => {
 				id: "demo-provider",
 				allowedHosts: ["api.example.com"],
 				reviewed: "first-party",
+				// test-invalid: lint crash resistance deliberately receives primitive auth metadata.
 				auth: "credentials" as never,
 			}),
 		).not.toThrow();
@@ -893,7 +896,8 @@ describe("lintProvider thrown-error-code-undeclared", () => {
 			providerWithSources({
 				"index.ts": [
 					`throw new ProviderError("dyn", { code: upstreamCode });`,
-					"throw new ProviderError(\"tpl\", { code: `UPSTREAM_${kind}` });",
+					// biome-ignore lint/suspicious/noTemplateCurlyInString: fixture intentionally embeds a template expression as source text.
+					'throw new ProviderError("tpl", { code: `UPSTREAM_${kind}` });',
 					`throw new ProviderError("ternary", { code: soldOut ? "A_CODE" : "B_CODE" });`,
 					`throw new ProviderError("concat", { code: "PREFIX_" + suffix });`,
 				].join("\n"),

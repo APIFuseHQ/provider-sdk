@@ -432,9 +432,10 @@ describe("createStealthClient", () => {
 				"set-cookie": "sid=xyz; Path=/",
 				"x-test": "1",
 			}),
+			// @ts-expect-error test-invalid: the legacy text field is ignored in favor of arrayBuffer.
 			text: async () => "text-first-corruption",
 			arrayBuffer: async () => toArrayBuffer(new TextEncoder().encode('{"error":true}')),
-		} as never)) as DeclarativeStealthResponse;
+		})) as DeclarativeStealthResponse;
 
 		expect(response.ok).toBe(false);
 		expect(response.rawHeaders).toEqual(
@@ -477,9 +478,10 @@ describe("createStealthClient", () => {
 		const response = (await normalizeResponse({
 			status: 200,
 			headers,
+			// @ts-expect-error test-invalid: the legacy text field is ignored in favor of arrayBuffer.
 			text: async () => "text-first-corruption",
 			arrayBuffer: async () => toArrayBuffer(new TextEncoder().encode("ok")),
-		} as never)) as DeclarativeStealthResponse;
+		})) as DeclarativeStealthResponse;
 
 		expect(response.cookies.getAll()).toEqual({ sid: "abc", csrf: "def" });
 		expect(response.rawHeaders).toEqual([
@@ -747,10 +749,7 @@ describe("createStealthClient", () => {
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient("https://example.com").createSession();
-		session.cookies.setFromCookieStrings(
-			["bridge=host-a; Path=/"],
-			"https://host-a.example/login",
-		);
+		session.cookies.setFromCookieStrings(["bridge=host-a; Path=/"], "https://host-a.example/login");
 
 		await session.fetch("https://host-a.example/next");
 		await session.fetch("https://host-b.example/next");
@@ -1100,14 +1099,16 @@ describe("createStealthClient", () => {
 
 		await expect(
 			client.fetch("/method", {
-				method: methodSecret as never,
+				// @ts-expect-error test-invalid: runtime method validation must reject and redact a secret value.
+				method: methodSecret,
 				sensitiveParams: { token: methodSecret },
 			}),
 		).rejects.toMatchObject({ message: "Unsupported stealth method: [REDACTED]" });
 		let retryError: unknown;
 		try {
 			await client.fetch("/retry", {
-				retry: retrySecret as never,
+				// @ts-expect-error test-invalid: runtime retry validation must reject and redact a secret value.
+				retry: retrySecret,
 				sensitiveParams: { token: retrySecret },
 			});
 		} catch (error) {
@@ -1877,8 +1878,7 @@ describe("createStealthClient", () => {
 			stopWhen: (hop) => {
 				callbackHop = hop;
 				return (
-					hop.nextUrl?.includes(rotatedSecret) === true &&
-					hop.nextUrl.includes(responseCodeSecret)
+					hop.nextUrl?.includes(rotatedSecret) === true && hop.nextUrl.includes(responseCodeSecret)
 				);
 			},
 		});
@@ -1889,9 +1889,7 @@ describe("createStealthClient", () => {
 		expect(JSON.stringify(result.hops)).not.toContain("initial-secret");
 		expect(JSON.stringify(result.hops)).not.toContain(rotatedSecret);
 		expect(JSON.stringify(result.hops)).not.toContain(responseCodeSecret);
-		expect(result.hops[0]?.location).toBe(
-			"/next?serviceKey=[REDACTED]&code=[REDACTED]",
-		);
+		expect(result.hops[0]?.location).toBe("/next?serviceKey=[REDACTED]&code=[REDACTED]");
 		expect(result.hops[0]?.nextUrl).toBe(
 			"https://example.com/next?serviceKey=[REDACTED]&code=[REDACTED]",
 		);

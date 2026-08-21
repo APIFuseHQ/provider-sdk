@@ -5,9 +5,11 @@ import { defineOperation, defineProvider, defineStreamOperation } from "../defin
 import { ProviderError } from "../errors.js";
 import { event } from "../stream.js";
 import type { StandardSchemaV1 } from "../types.js";
+import { createProviderContextDouble } from "./test-utils.js";
 
 const callDefineProvider = (config: unknown): unknown =>
-	Reflect.apply(defineProvider, undefined, [config]);
+	// @ts-expect-error test-invalid: runtime definition validation must accept unknown JavaScript input.
+	defineProvider(config);
 
 const makeProviderConfig = () => ({
 	id: "ergonomic-provider",
@@ -40,7 +42,7 @@ describe("defineProvider ergonomics", () => {
 		const provider = defineProvider(makeProviderConfig());
 
 		await expect(
-			Reflect.apply(provider.operations.lookup.handler, undefined, [undefined, { id: "coin" }]),
+			provider.operations.lookup.handler(createProviderContextDouble(), { id: "coin" }),
 		).resolves.toEqual({ result: "COIN" });
 	});
 
@@ -61,7 +63,7 @@ describe("defineProvider ergonomics", () => {
 		});
 
 		await expect(
-			Reflect.apply(provider.operations.search.handler, undefined, [undefined, { q: "abc" }]),
+			provider.operations.search.handler(createProviderContextDouble(), { q: "abc" }),
 		).resolves.toEqual({ count: 3 });
 	});
 
@@ -90,7 +92,7 @@ describe("defineProvider ergonomics", () => {
 		});
 
 		await expect(
-			Reflect.apply(provider.operations.search.handler, undefined, [undefined, { q: "abcd" }]),
+			provider.operations.search.handler(createProviderContextDouble(), { q: "abcd" }),
 		).resolves.toEqual({ count: 4 });
 		expect(provider.operations.search.upstream?.baseUrl).toBe("https://example.com");
 	});

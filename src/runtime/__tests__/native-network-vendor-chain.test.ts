@@ -84,9 +84,7 @@ describe("native vendor chain", () => {
 	});
 
 	it("falls through an allocation failure to nodemaven", async () => {
-		globalThis.fetch = createFetchDouble(async () =>
-			new Response("unavailable", { status: 503 }),
-		);
+		globalThis.fetch = createFetchDouble(async () => new Response("unavailable", { status: 503 }));
 		const resolved = await resolveNativeGatewayProxy({
 			policy: {
 				mode: "required",
@@ -135,6 +133,7 @@ describe("native vendor chain", () => {
 		let called = 0;
 		const client = createNativeNetworkClient({
 			proxyPolicy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
+			// test-invalid: runtime proxy validation must reject an unsupported protocol.
 			proxyProtocol: "https" as never,
 			gatewaySynthesizers: [
 				() => {

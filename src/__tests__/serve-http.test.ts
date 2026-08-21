@@ -53,7 +53,10 @@ function createLocalFetchDouble(
 	implementation: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
 ): typeof fetch {
 	return Object.assign(implementation, {
-		preconnect: (_url: string | URL, _options?: { dns?: boolean; tcp?: boolean; http?: boolean }) => {},
+		preconnect: (
+			_url: string | URL,
+			_options?: { dns?: boolean; tcp?: boolean; http?: boolean },
+		) => {},
 	});
 }
 
@@ -383,6 +386,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 			invalidOutput: {
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
+				// test-invalid: runtime output validation must reject a string in a boolean field.
 				handler: async () => ({ ok: "not-a-boolean" }) as never,
 			},
 			providerActionRequired: {
@@ -682,16 +686,8 @@ describe("provider proxy affinity", () => {
 			},
 		} satisfies ProviderDefinition;
 
-		const first = resolveProviderResolverIdentityScope(
-			provider,
-			"connection-one",
-			"context-one",
-		);
-		const second = resolveProviderResolverIdentityScope(
-			provider,
-			"connection-two",
-			"context-two",
-		);
+		const first = resolveProviderResolverIdentityScope(provider, "connection-one", "context-one");
+		const second = resolveProviderResolverIdentityScope(provider, "connection-two", "context-two");
 
 		expect(first).not.toBe(second);
 		expect(JSON.parse(first)).toEqual({
@@ -1654,9 +1650,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.code).toBe("UPSTREAM_REJECTED");
 		expect(body.error.retryable).toBe(false);
 		expect(body.error.source).toBe("upstream_rule");
-		const observability = JSON.parse(
-			response.headers.get("X-ApiFuse-Error-Observability") ?? "{}",
-		);
+		const observability = JSON.parse(response.headers.get("X-ApiFuse-Error-Observability") ?? "{}");
 		expect(observability.category).toBe("upstream_rejected");
 		expect(observability.taxonomyVersion).toBe("2026-08-07");
 	});
@@ -1698,9 +1692,7 @@ describe("provider HTTP server", () => {
 		expect(body.error.code).toBe("SOLD_OUT");
 		expect(body.error.retryable).toBe(false);
 		expect(body.error.source).toBe("upstream_rule");
-		const observability = JSON.parse(
-			response.headers.get("X-ApiFuse-Error-Observability") ?? "{}",
-		);
+		const observability = JSON.parse(response.headers.get("X-ApiFuse-Error-Observability") ?? "{}");
 		expect(observability.category).toBe("upstream_rejected");
 	});
 
@@ -1999,7 +1991,9 @@ describe("provider HTTP server", () => {
 		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		clearProxyResolutionCache();
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createLocalFetchDouble(async () => new Response("allocator denied", { status: 503 }));
+		global.fetch = createLocalFetchDouble(
+			async () => new Response("allocator denied", { status: 503 }),
+		);
 		const baseProvider = createTestProvider();
 		const provider = {
 			...baseProvider,
