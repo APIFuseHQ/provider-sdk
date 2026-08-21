@@ -804,8 +804,11 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 		private readonly proxy: LaunchOptions["proxy"] = undefined,
 	) {}
 
-	async goto(url: string): Promise<void> {
-		await this.page.goto(url);
+	async goto(
+		url: string,
+		options?: { readonly timeout?: number; readonly waitUntil?: "load" | "domcontentloaded" },
+	): Promise<void> {
+		await this.page.goto(url, options);
 	}
 
 	async evaluate<T>(fn: string | (() => T)): Promise<T> {
@@ -1492,17 +1495,33 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		return this.pageId;
 	}
 
-	async goto(url: string): Promise<void> {
+	async goto(
+		url: string,
+		options?: { readonly timeout?: number; readonly waitUntil?: "load" | "domcontentloaded" },
+	): Promise<void> {
 		await this.initialize();
 		const startedAt = Date.now();
-		let loadEventSeen = false;
-		const unsubscribe = this.pageClient.on("Page.loadEventFired", () => {
-			loadEventSeen = true;
+		const timeout = options?.timeout ?? DEFAULT_WAIT_TIMEOUT_MS;
+		const waitUntil = options?.waitUntil ?? "load";
+		let expectedEventSeen = false;
+		const eventName =
+			waitUntil === "domcontentloaded" ? "Page.domContentEventFired" : "Page.loadEventFired";
+		const unsubscribe = this.pageClient.on(eventName, () => {
+			expectedEventSeen = true;
 		});
 
 		try {
-			await this.pageClient.send("Page.navigate", { url });
-			await this.waitForDocumentReady(startedAt + DEFAULT_WAIT_TIMEOUT_MS, () => loadEventSeen);
+			const navigation = (await this.pageClient.send("Page.navigate", { url })) as {
+				readonly errorText?: unknown;
+			};
+			if (typeof navigation.errorText === "string" && navigation.errorText.length > 0) {
+				throw new Error(`Page.navigate failed: ${navigation.errorText} at ${url}`);
+			}
+			await this.waitForDocumentReady(
+				startedAt + timeout,
+				() => expectedEventSeen,
+				waitUntil,
+			);
 		} finally {
 			unsubscribe();
 		}
@@ -1866,12 +1885,16 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 
 	private async waitForDocumentReady(
 		deadline: number,
-		isLoadEventSeen: () => boolean,
+		isExpectedEventSeen: () => boolean,
+		waitUntil: "load" | "domcontentloaded",
 	): Promise<void> {
 		while (Date.now() < deadline) {
 			const readyState = await this.evaluate<string>("document.readyState");
-			if (readyState === "complete" || readyState === "interactive") {
-				if (isLoadEventSeen() || readyState === "complete") {
+			const documentReady =
+				readyState === "complete" ||
+				(waitUntil === "domcontentloaded" && readyState === "interactive");
+			if (documentReady) {
+				if (isExpectedEventSeen() || readyState === "complete") {
 					return;
 				}
 			}

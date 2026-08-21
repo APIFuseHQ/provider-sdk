@@ -18,6 +18,7 @@ import {
 
 const BROWSER_VENDOR_ID = "browser" as const;
 const DEFAULT_COOKIE_POLL_INTERVAL_MS = 100;
+const NAVIGATION_BLOCKED_ERROR_TEXT = "net::ERR_BLOCKED_BY_CLIENT";
 const AWS_WAF_CHALLENGE_INFRASTRUCTURE_HOST_SUFFIX = ".awswaf.com";
 const RESOLVER_DOCUMENT_CONTENT_SECURITY_POLICY = "connect-src http: https:; worker-src 'none'";
 
@@ -65,10 +66,39 @@ export interface BrowserResolverVendorAdapter extends ResolverVendorAdapter {
 }
 
 class BrowserSolveTimeoutError extends Error {
-	constructor() {
-		super("Browser resolver solve budget elapsed");
+	constructor(blockedRequests: readonly string[]) {
+		super(
+			`Browser resolver solve budget elapsed${formatBlockedRequests(blockedRequests)}`,
+		);
 		this.name = "BrowserSolveTimeoutError";
 	}
+}
+
+class BrowserNavigationBlockedError extends Error {
+	readonly code = "RESOLVER_BROWSER_NAVIGATION_BLOCKED";
+
+	constructor(
+		readonly navigationUrl: string,
+		readonly blockedUrls: readonly string[],
+		options: ErrorOptions,
+	) {
+		super(
+			`Browser resolver navigation was blocked for ${navigationUrl}${formatBlockedRequests(blockedUrls)}`,
+			options,
+		);
+		this.name = "BrowserNavigationBlockedError";
+	}
+}
+
+function formatBlockedRequests(blockedRequests: readonly string[]): string {
+	if (blockedRequests.length === 0) return "";
+	const displayed = blockedRequests.slice(0, 5);
+	const remainder = blockedRequests.length - displayed.length;
+	return `; blocked ${blockedRequests.length} requests: [${displayed.join(", ")}]${remainder > 0 ? ` (+${remainder} more)` : ""}`;
+}
+
+function isNavigationBlockedError(error: unknown): error is Error {
+	return error instanceof Error && error.message.includes(NAVIGATION_BLOCKED_ERROR_TEXT);
 }
 
 class BrowserCleanupTimeoutError extends Error {
@@ -223,6 +253,8 @@ async function solveInPage(
 	allowedHosts: readonly string[],
 	successCookieName: string,
 	pollIntervalMs: number,
+	gotoTimeoutMs: number,
+	blockedRequests: Set<string>,
 	signal: AbortSignal,
 ): Promise<Extract<ChallengeSolution, { readonly form: "cookies" }>> {
 	return await page.withResourcePolicy(
@@ -232,11 +264,13 @@ async function solveInPage(
 			routes: [
 				{
 					match: () => true,
-					handle: (request) => ({
-						action: isResolverBrowserRequestAllowed(request.url, challengeKind, allowedHosts)
-							? "continue"
-							: "block",
-					}),
+					handle: (request) => {
+						if (isResolverBrowserRequestAllowed(request.url, challengeKind, allowedHosts)) {
+							return { action: "continue" };
+						}
+						blockedRequests.add(request.url);
+						return { action: "block" };
+					},
 				},
 			],
 		},
@@ -245,7 +279,19 @@ async function solveInPage(
 				() => page.userAgent(),
 				signal,
 			);
-			await raceWithAbort(() => page.goto(pageUrl), signal);
+			try {
+				await raceWithAbort(
+					() =>
+						page.goto(pageUrl, {
+							timeout: gotoTimeoutMs,
+							waitUntil: "domcontentloaded",
+						}),
+					signal,
+				);
+			} catch (error) {
+				if (!isNavigationBlockedError(error)) throw error;
+				throw new BrowserNavigationBlockedError(pageUrl, [...blockedRequests], { cause: error });
+			}
 
 			while (true) {
 				const cookies = await raceWithAbort(() => page.cookies(), signal);
@@ -400,11 +446,12 @@ export function createBrowserResolverVendorAdapter(
 				throw new ResolverVendorUnavailableError(BROWSER_VENDOR_ID, "not_implemented");
 			}
 
+			const blockedRequests = new Set<string>();
 			const solveController = new AbortController();
 			const onCallerAbort = () => solveController.abort(abortReason(callerSignal));
 			callerSignal.addEventListener("abort", onCallerAbort, { once: true });
 			const timeout = setTimeout(
-				() => solveController.abort(new BrowserSolveTimeoutError()),
+				() => solveController.abort(new BrowserSolveTimeoutError([...blockedRequests])),
 				options.timeoutMs,
 			);
 
@@ -427,6 +474,8 @@ export function createBrowserResolverVendorAdapter(
 						options.allowedHosts,
 						SUCCESS_COOKIE_NAMES[challengeKind],
 						pollIntervalMs,
+						options.timeoutMs,
+						blockedRequests,
 						solveController.signal,
 					);
 				});
@@ -454,6 +503,11 @@ export function createBrowserResolverVendorAdapter(
 				if (callerSignal.aborted) throw abortReason(callerSignal);
 				if (error instanceof BrowserSolveTimeoutError) {
 					throw new ResolverVendorUnavailableError(BROWSER_VENDOR_ID, "timeout", {
+						cause: error,
+					});
+				}
+				if (error instanceof BrowserNavigationBlockedError) {
+					throw new ResolverVendorUnavailableError(BROWSER_VENDOR_ID, "transport_failure", {
 						cause: error,
 					});
 				}
