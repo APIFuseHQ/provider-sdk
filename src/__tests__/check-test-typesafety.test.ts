@@ -28,6 +28,21 @@ const genericTypeArgumentFixtures = [
 	joined("Record<string, ", "never>"),
 	joined("Array<", "unknown>"),
 	joined("Map<string, ", "any>"),
+	joined("Set<", "unknown>"),
+	joined("Record<string, ", "unknown>"),
+	joined("Array<Map<string, ", "unknown>>"),
+];
+
+const genericCallFixtures = [
+	joined("const g = factory()<", "any>(1);"),
+	joined("const g = handlers[0]<", "Error>(x);"),
+	joined("const g = maybe?.<", "never>(x);"),
+];
+
+const doubleAssertionFixtures = [
+	joined("const b = <", "unknown>(a) as", " string;"),
+	joined("const b = <", "unknown>items[0] as", " Foo;"),
+	joined("const b = <Mocked<Foo>><", "unknown>value;"),
 ];
 
 describe("test typesafety gate", () => {
@@ -63,6 +78,100 @@ describe("test typesafety gate", () => {
 		expect(scanTestTypesafety([source])).toEqual([]);
 	});
 
+	it.each(genericCallFixtures)("accepts generic call with gated angle type %#", (source) => {
+		expect(scanTestTypesafety([source])).toEqual([]);
+	});
+
+	it.each(doubleAssertionFixtures)("rejects unknown double assertion %#", (source) => {
+		expect(scanTestTypesafety([source])).toHaveLength(1);
+	});
+
+	it("accepts the factory generic-call controller reproduction", () => {
+		expect(scanTestTypesafety([joined("const g = factory()<", "any>(1);")])).toEqual([]);
+	});
+
+	it("ignores a TypeScript error directive assembled from string contents", () => {
+		expect(
+			scanTestTypesafety([
+				joined('const src = ["// @ts-expect', '-error", " input"].join("");'),
+			]),
+		).toEqual([]);
+	});
+
+	it("ignores a TypeScript error directive and marker inside a string", () => {
+		expect(
+			scanTestTypesafety([
+				joined('const raw = "// @ts-expect', '-error test-invalid: input";'),
+			]),
+		).toEqual([]);
+	});
+
+	it("recognizes a marker in a block comment opened on an earlier line", () => {
+		expect(
+			scanTestTypesafety([
+				"/* runtime guard annotation",
+				joined("test-", "invalid: input */"),
+				joined("const cast = value as", " never;"),
+			]),
+		).toEqual([]);
+	});
+
+	it("rejects an angle assertion containing comment trivia", () => {
+		expect(
+			scanTestTypesafety([
+				joined("const a = < /* why */ ", 'any>JSON.parse("1");'),
+			]),
+		).toHaveLength(1);
+	});
+
+	it("rejects the parenthesized unknown double-assertion reproduction", () => {
+		expect(
+			scanTestTypesafety([joined("const b = <", "unknown>(a) as", " string;")]),
+		).toHaveLength(1);
+	});
+
+	it("checks code inside template holes after masking template content", () => {
+		expect(
+			scanTestTypesafety([joined("const source = `${value as", " any}`;")]),
+		).toHaveLength(1);
+	});
+
+	it("does not let comment lookalikes in a template hole fire or justify", () => {
+		const template = joined(
+			"const source = `value ${\"// @ts-expect",
+			'-error test-invalid: input"}`;',
+		);
+		expect(scanTestTypesafety([template])).toEqual([]);
+		expect(scanTestTypesafety([template, joined("const cast = value as", " never;")])).toHaveLength(
+			1,
+		);
+	});
+
+	it("does not let line-comment lookalikes in a nested template fire or justify", () => {
+		const template = joined(
+			"const source = `outer ${`// @ts-expect",
+			"-error test-invalid: input`} end`;",
+		);
+		expect(scanTestTypesafety([template])).toEqual([]);
+		expect(scanTestTypesafety([template, joined("const cast = value as", " never;")])).toHaveLength(
+			1,
+		);
+	});
+
+	it("normalizes CRLF before masking across lines", () => {
+		expect(
+			scanTestTypesafety(
+				joined(
+					"/* runtime guard\r\n",
+					"test-",
+					"invalid: input */\r\n",
+					"const cast = value as",
+					" never;\r\n",
+				),
+			),
+		).toEqual([]);
+	});
+
 	it("does not accept a same-line justification marker inside a string", () => {
 		expect(
 			scanTestTypesafety([
@@ -96,6 +205,26 @@ describe("test typesafety gate", () => {
 				joined("const cast = 1 as", " never;"),
 			]),
 		).toEqual([]);
+	});
+
+	it("accepts a multi-line block-comment justification ending on the preceding line", () => {
+		expect(
+			scanTestTypesafety([
+				joined("/* test-", "invalid: multi-line annotation"),
+				"   for the escape below */",
+				joined("const cast = 1 as", " never;"),
+			]),
+		).toEqual([]);
+	});
+
+	it("does not let a code line inside the annotation walk carry the blessing", () => {
+		expect(
+			scanTestTypesafety([
+				joined("// test-", "invalid: far away"),
+				"const code = 1;",
+				joined("const cast = 2 as", " never;"),
+			]),
+		).toHaveLength(1);
 	});
 
 	it("rejects the angle assertion and comment-split cast controller reproduction", () => {
