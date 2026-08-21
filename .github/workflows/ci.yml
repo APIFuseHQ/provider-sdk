@@ -72,6 +72,20 @@ jobs:
             fi
           done
       - run: bun run check
+      - name: Verify committed API surface reports
+        run: bun run api:check
+      - name: Fetch changeset comparison branch
+        if: github.event_name == 'pull_request'
+        run: |
+          # In pull_request runs the gate compares against the PR target branch
+          # (GITHUB_BASE_REF), which check-changeset.ts prefers over the
+          # .changeset/config.json baseBranch fallback; fetch that exact ref.
+          git fetch --unshallow origin \
+            "$GITHUB_REF" \
+            "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+      - name: Require changeset for source changes
+        if: github.event_name == 'pull_request'
+        run: bun run changeset:check
       - run: bun run pack:check
       - run: bun run pack:smoke
       - run: bun run pack:types
