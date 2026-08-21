@@ -2,6 +2,7 @@ import type {
 	ChallengeSolution,
 	ProviderChallenge,
 	ProviderChallengeKind,
+	ProviderResolverConfig,
 	ProviderResolverVendor,
 } from "../../types.js";
 import type { TraceRecorder } from "../trace.js";
@@ -42,11 +43,31 @@ export const RESOLVER_VENDOR_CAPABILITIES = {
 	],
 } as const satisfies Readonly<Record<ProviderResolverVendor, readonly ProviderChallengeKind[]>>;
 
+/**
+ * SDK-owned fallback policy for hosted resolver vendors. Capability support is
+ * applied separately, so each provider receives only vendors that support one
+ * or more of its declared challenge kinds.
+ */
+export const DEFAULT_RESOLVER_VENDOR_PREFERENCE = [
+	"capsolver",
+	"2captcha",
+] as const satisfies readonly ProviderResolverVendor[];
+
 export function resolverVendorSupports(
 	vendor: ProviderResolverVendor,
 	kind: ProviderChallengeKind,
 ): boolean {
 	return (RESOLVER_VENDOR_CAPABILITIES[vendor] as readonly ProviderChallengeKind[]).includes(kind);
+}
+
+/** Resolves an explicit provider override or the SDK-owned default vendor chain. */
+export function resolveProviderResolverVendors(
+	config: ProviderResolverConfig,
+): readonly ProviderResolverVendor[] {
+	if (config.vendors !== undefined) return config.vendors;
+	return DEFAULT_RESOLVER_VENDOR_PREFERENCE.filter((vendor) =>
+		config.kinds.some((kind) => resolverVendorSupports(vendor, kind)),
+	);
 }
 
 export interface ResolverIdentity {

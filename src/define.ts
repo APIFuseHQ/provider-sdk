@@ -1087,12 +1087,14 @@ function validateProviderResolver(config: { id: string; resolver?: ProviderResol
 		"resolver",
 		config.id,
 	);
-	validateResolverLiteralArray(
-		resolver.vendors,
-		"resolver.vendors",
-		VALID_PROVIDER_RESOLVER_VENDORS,
-		config.id,
-	);
+	if (resolver.vendors !== undefined) {
+		validateResolverLiteralArray(
+			resolver.vendors,
+			"resolver.vendors",
+			VALID_PROVIDER_RESOLVER_VENDORS,
+			config.id,
+		);
+	}
 	validateResolverLiteralArray(
 		resolver.kinds,
 		"resolver.kinds",
