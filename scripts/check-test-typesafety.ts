@@ -56,13 +56,74 @@ function unwrapTypeNode(type: ts.TypeNode): ts.TypeNode {
 	return current;
 }
 
+function shadowsGlobalThis(sourceFile: ts.SourceFile): boolean {
+	// A file-local binding named globalThis makes globalThis.X a user type;
+	// give up on qualifier collapsing rather than misread it (fail-open).
+	let shadowed = false;
+	const inspect = (node: ts.Node): void => {
+		if (shadowed) return;
+		if (ts.isImportDeclaration(node) && node.importClause) {
+			const { name, namedBindings } = node.importClause;
+			if (name?.text === "globalThis") shadowed = true;
+			if (
+				namedBindings &&
+				ts.isNamespaceImport(namedBindings) &&
+				namedBindings.name.text === "globalThis"
+			) {
+				shadowed = true;
+			}
+			if (namedBindings && ts.isNamedImports(namedBindings)) {
+				for (const element of namedBindings.elements) {
+					if (element.name.text === "globalThis") shadowed = true;
+				}
+			}
+			return;
+		}
+		if (ts.isImportEqualsDeclaration(node) && node.name.text === "globalThis") {
+			shadowed = true;
+			return;
+		}
+		if (
+			(ts.isTypeAliasDeclaration(node) ||
+				ts.isInterfaceDeclaration(node) ||
+				ts.isModuleDeclaration(node)) &&
+			node.name &&
+			ts.isIdentifier(node.name) &&
+			node.name.text === "globalThis"
+		) {
+			shadowed = true;
+		}
+	};
+	for (const statement of sourceFile.statements) inspect(statement);
+	return shadowed;
+}
+
+function collapseGlobalThisQualifier(name: ts.EntityName): string | undefined {
+	// globalThis.Error and globalThis.globalThis.Error name the same built-in;
+	// collapse when every segment left of the final identifier is globalThis.
+	if (!ts.isQualifiedName(name)) return undefined;
+	const { left, right } = name;
+	if (ts.isIdentifier(left)) {
+		return left.text === "globalThis" ? right.text : undefined;
+	}
+	let spine: ts.EntityName = left;
+	while (ts.isQualifiedName(spine)) {
+		if (spine.right.text !== "globalThis") return undefined;
+		spine = spine.left;
+	}
+	if (!ts.isIdentifier(spine) || spine.text !== "globalThis") return undefined;
+	return right.text;
+}
+
 function typeText(node: ts.AsExpression | ts.TypeAssertion, sourceFile: ts.SourceFile): string {
 	const type = unwrapTypeNode(node.type);
-	// globalThis.Error names the same built-in as Error; collapse the qualifier
-	// so the hard rule cannot be sidestepped by qualification.
-	if (ts.isTypeReferenceNode(type) && ts.isQualifiedName(type.typeName)) {
-		const { left, right } = type.typeName;
-		if (ts.isIdentifier(left) && left.text === "globalThis") return right.text;
+	if (
+		ts.isTypeReferenceNode(type) &&
+		ts.isQualifiedName(type.typeName) &&
+		!shadowsGlobalThis(sourceFile)
+	) {
+		const collapsed = collapseGlobalThisQualifier(type.typeName);
+		if (collapsed !== undefined) return collapsed;
 	}
 	return type.getText(sourceFile);
 }

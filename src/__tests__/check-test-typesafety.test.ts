@@ -145,15 +145,41 @@ describe("test typesafety gate", () => {
 	});
 
 	it("collapses the globalThis qualifier when matching built-in escape types", () => {
+		expect(scanTestTypesafety([joined("const d = value as", " globalThis.Error;")])).toHaveLength(
+			1,
+		);
 		expect(
-			scanTestTypesafety([joined("const d = value as", " globalThis.Error;")]),
+			scanTestTypesafety([joined("const d = value as", " globalThis.globalThis.Error;")]),
 		).toHaveLength(1);
 		expect(scanTestTypesafety(["declare function g(): globalThis.Error;"])).toEqual([]);
 	});
 
+	it("leaves qualified names alone when globalThis is shadowed in the file", () => {
+		expect(
+			scanTestTypesafety([
+				'import type * as globalThis from "node:util";',
+				joined("const d = value as", " globalThis.Error;"),
+			]),
+		).toEqual([]);
+		expect(
+			scanTestTypesafety([
+				"namespace globalThis { export interface Error { x: string } }",
+				joined("const d = value as", " globalThis.Error;"),
+			]),
+		).toEqual([]);
+	});
+
+	it("does not collapse qualifiers that are not rooted at globalThis", () => {
+		expect(scanTestTypesafety([joined("const d = value as", " other.globalThis.Error;")])).toEqual(
+			[],
+		);
+	});
+
 	it("sees through satisfies wrappers when locating a double assertion", () => {
 		expect(
-			scanTestTypesafety([joined("const e = ((value as", " unknown) satisfies unknown) as string;")]),
+			scanTestTypesafety([
+				joined("const e = ((value as", " unknown) satisfies unknown) as string;"),
+			]),
 		).toHaveLength(1);
 		expect(
 			scanTestTypesafety(["const legit = ({ v: 1 } satisfies { v: number }) as { v: number };"]),
