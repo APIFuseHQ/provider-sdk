@@ -50,15 +50,30 @@ function assertionAnchor(node: ts.AsExpression | ts.TypeAssertion): ts.Node {
 	return asToken ?? node.type;
 }
 
+function unwrapTypeNode(type: ts.TypeNode): ts.TypeNode {
+	let current = type;
+	while (ts.isParenthesizedTypeNode(current)) current = current.type;
+	return current;
+}
+
 function typeText(node: ts.AsExpression | ts.TypeAssertion, sourceFile: ts.SourceFile): string {
-	return node.type.getText(sourceFile);
+	const type = unwrapTypeNode(node.type);
+	// globalThis.Error names the same built-in as Error; collapse the qualifier
+	// so the hard rule cannot be sidestepped by qualification.
+	if (ts.isTypeReferenceNode(type) && ts.isQualifiedName(type.typeName)) {
+		const { left, right } = type.typeName;
+		if (ts.isIdentifier(left) && left.text === "globalThis") return right.text;
+	}
+	return type.getText(sourceFile);
 }
 
 function assertionOperand(
 	expression: ts.Expression,
 ): ts.AsExpression | ts.TypeAssertion | undefined {
 	let operand = expression;
-	while (ts.isParenthesizedExpression(operand)) operand = operand.expression;
+	while (ts.isParenthesizedExpression(operand) || ts.isSatisfiesExpression(operand)) {
+		operand = operand.expression;
+	}
 	return ts.isAsExpression(operand) || ts.isTypeAssertionExpression(operand) ? operand : undefined;
 }
 

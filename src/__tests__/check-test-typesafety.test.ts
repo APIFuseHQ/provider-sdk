@@ -136,6 +136,30 @@ describe("test typesafety gate", () => {
 		expect(scanTestTypesafety([joined("return <", "any>value;")])).toHaveLength(1);
 	});
 
+	it("unwraps parenthesized types when classifying assertions", () => {
+		expect(scanTestTypesafety([joined("const a = value as", " (any);")])).toHaveLength(1);
+		expect(scanTestTypesafety([joined("const b = value as", " (never);")])).toHaveLength(1);
+		expect(
+			scanTestTypesafety([joined("const c = (value as", " (unknown)) as string;")]),
+		).toHaveLength(1);
+	});
+
+	it("collapses the globalThis qualifier when matching built-in escape types", () => {
+		expect(
+			scanTestTypesafety([joined("const d = value as", " globalThis.Error;")]),
+		).toHaveLength(1);
+		expect(scanTestTypesafety(["declare function g(): globalThis.Error;"])).toEqual([]);
+	});
+
+	it("sees through satisfies wrappers when locating a double assertion", () => {
+		expect(
+			scanTestTypesafety([joined("const e = ((value as", " unknown) satisfies unknown) as string;")]),
+		).toHaveLength(1);
+		expect(
+			scanTestTypesafety(["const legit = ({ v: 1 } satisfies { v: number }) as { v: number };"]),
+		).toEqual([]);
+	});
+
 	it("ignores a TypeScript error directive assembled from string contents", () => {
 		expect(
 			scanTestTypesafety([joined('const src = ["// @ts-expect', '-error", " input"].join("");')]),
