@@ -34,15 +34,19 @@ const genericTypeArgumentFixtures = [
 ];
 
 const genericCallFixtures = [
+	joined("const g = f<", "never>(x);"),
 	joined("const g = factory()<", "any>(1);"),
+	joined("const g = factory!<", "any>(1);"),
 	joined("const g = handlers[0]<", "Error>(x);"),
 	joined("const g = maybe?.<", "never>(x);"),
+	joined("const g = maybe?.<", "Error>(x);"),
 ];
 
 const doubleAssertionFixtures = [
 	joined("const b = <", "unknown>(a) as", " string;"),
 	joined("const b = <", "unknown>items[0] as", " Foo;"),
 	joined("const b = <Mocked<Foo>><", "unknown>value;"),
+	joined("const b = <(() => void)><", "unknown>value;"),
 ];
 
 describe("test typesafety gate", () => {
@@ -90,19 +94,57 @@ describe("test typesafety gate", () => {
 		expect(scanTestTypesafety([joined("const g = factory()<", "any>(1);")])).toEqual([]);
 	});
 
-	it("ignores a TypeScript error directive assembled from string contents", () => {
+	it("accepts the non-null factory generic-call controller reproduction", () => {
+		expect(scanTestTypesafety([joined("const g = factory!<", "any>(1);")])).toEqual([]);
+	});
+
+	it("accepts unknown assertions separated from an outer assertion by a container or call", () => {
 		expect(
 			scanTestTypesafety([
-				joined('const src = ["// @ts-expect', '-error", " input"].join("");'),
+				"const object = { value } as const;",
+				joined("const unknownValue = value as", " unknown;"),
+				joined("const array = [<", "unknown>value] as const;"),
+				joined("const result = identity(<", "unknown>value) as Foo;"),
 			]),
+		).toEqual([]);
+	});
+
+	it("applies the legacy as-T rule only when the assertion ends the statement", () => {
+		expect(scanTestTypesafety([joined("const value = input as", " T;")])).toHaveLength(1);
+		expect(scanTestTypesafety([joined("consume(input as", " T);")])).toEqual([]);
+	});
+
+	it("accepts an arrow generic with a trailing type-parameter comma", () => {
+		expect(scanTestTypesafety(["const h = <T,>(x: T): T => x;"])).toEqual([]);
+	});
+
+	it("ignores regex literals containing forbidden-looking text", () => {
+		expect(scanTestTypesafety(["const pattern = /as any/;"])).toEqual([]);
+	});
+
+	it("keeps scanning after a regex containing quote and template delimiters", () => {
+		expect(
+			scanTestTypesafety(['const pattern = /["`]/u;', joined("const cast = value as", " never;")]),
+		).toHaveLength(1);
+	});
+
+	it("ignores directive-looking text in a regex literal", () => {
+		expect(scanTestTypesafety(["const pattern = /@ts-expect-error test-invalid:/;"])).toEqual([]);
+	});
+
+	it("rejects an angle assertion in a return statement", () => {
+		expect(scanTestTypesafety([joined("return <", "any>value;")])).toHaveLength(1);
+	});
+
+	it("ignores a TypeScript error directive assembled from string contents", () => {
+		expect(
+			scanTestTypesafety([joined('const src = ["// @ts-expect', '-error", " input"].join("");')]),
 		).toEqual([]);
 	});
 
 	it("ignores a TypeScript error directive and marker inside a string", () => {
 		expect(
-			scanTestTypesafety([
-				joined('const raw = "// @ts-expect', '-error test-invalid: input";'),
-			]),
+			scanTestTypesafety([joined('const raw = "// @ts-expect', '-error test-invalid: input";')]),
 		).toEqual([]);
 	});
 
@@ -118,27 +160,23 @@ describe("test typesafety gate", () => {
 
 	it("rejects an angle assertion containing comment trivia", () => {
 		expect(
-			scanTestTypesafety([
-				joined("const a = < /* why */ ", 'any>JSON.parse("1");'),
-			]),
+			scanTestTypesafety([joined("const a = < /* why */ ", 'any>JSON.parse("1");')]),
 		).toHaveLength(1);
 	});
 
 	it("rejects the parenthesized unknown double-assertion reproduction", () => {
-		expect(
-			scanTestTypesafety([joined("const b = <", "unknown>(a) as", " string;")]),
-		).toHaveLength(1);
+		expect(scanTestTypesafety([joined("const b = <", "unknown>(a) as", " string;")])).toHaveLength(
+			1,
+		);
 	});
 
-	it("checks code inside template holes after masking template content", () => {
-		expect(
-			scanTestTypesafety([joined("const source = `${value as", " any}`;")]),
-		).toHaveLength(1);
+	it("checks assertion nodes inside template holes", () => {
+		expect(scanTestTypesafety([joined("const source = `${value as", " any}`;")])).toHaveLength(1);
 	});
 
 	it("does not let comment lookalikes in a template hole fire or justify", () => {
 		const template = joined(
-			"const source = `value ${\"// @ts-expect",
+			'const source = `value ${"// @ts-expect',
 			'-error test-invalid: input"}`;',
 		);
 		expect(scanTestTypesafety([template])).toEqual([]);
@@ -158,7 +196,7 @@ describe("test typesafety gate", () => {
 		);
 	});
 
-	it("normalizes CRLF before masking across lines", () => {
+	it("preserves comment attachment across CRLF lines", () => {
 		expect(
 			scanTestTypesafety(
 				joined(
@@ -193,6 +231,16 @@ describe("test typesafety gate", () => {
 		expect(
 			scanTestTypesafety([
 				joined("const value = 1; // test-", "invalid: applies only to this line"),
+				joined("const cast = 1 as", " never;"),
+			]),
+		).toHaveLength(1);
+	});
+
+	it("does not attach a stale justification across a blank line", () => {
+		expect(
+			scanTestTypesafety([
+				joined("// test-", "invalid: stale runtime guard input"),
+				"",
 				joined("const cast = 1 as", " never;"),
 			]),
 		).toHaveLength(1);
@@ -267,6 +315,14 @@ describe("test typesafety gate", () => {
 	it("accepts clean input and similarly named functions", () => {
 		expect(
 			scanTestTypesafety(["const value = 1;", "myFunction();", "Function.prototype;"]),
+		).toEqual([]);
+	});
+
+	it("recognizes bare and globalThis Function constructors but not member lookalikes", () => {
+		expect(scanTestTypesafety(["new globalThis.Function('return 1')"])).toHaveLength(1);
+		expect(scanTestTypesafety(["globalThis.Function('return 1')"])).toHaveLength(1);
+		expect(
+			scanTestTypesafety(["object.Function('return 1')", "Function.prototype.call(null)"]),
 		).toEqual([]);
 	});
 });
