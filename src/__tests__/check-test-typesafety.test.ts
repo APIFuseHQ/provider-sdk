@@ -9,12 +9,25 @@ const hardForbiddenFixtures = [
 	joined("value as", " any"),
 	joined("value as", " Error"),
 	joined("value as", " T;"),
+	joined("<", "any>value"),
+	joined("<", "Error>value"),
+	joined("<Widget><", "unknown>value"),
+	joined("<", "unknown>value as", " Widget"),
 ];
 
 const justifiedFixtures = [
 	joined("Reflect", ".apply(fn, undefined, [])"),
 	joined("value as", " never"),
+	joined("<", "never>value"),
 	joined("Func", "tion('return 1')()"),
+];
+
+const genericTypeArgumentFixtures = [
+	joined("Set<", "any>"),
+	joined("Promise<", "Error>"),
+	joined("Record<string, ", "never>"),
+	joined("Array<", "unknown>"),
+	joined("Map<string, ", "any>"),
 ];
 
 describe("test typesafety gate", () => {
@@ -39,6 +52,68 @@ describe("test typesafety gate", () => {
 		expect(scanTestTypesafety([joined("new Func", "tion('return 1')()")])).toHaveLength(1);
 		expect(scanTestTypesafety([joined("Reflect", ".apply (fn, undefined, [])")])).toHaveLength(1);
 		expect(scanTestTypesafety([joined("value as", "\tnever")])).toHaveLength(1);
+	});
+
+	it("rejects block-comment-split casts", () => {
+		expect(scanTestTypesafety([joined("value as", " /* intentional */ never")])).toHaveLength(1);
+		expect(scanTestTypesafety([joined("value as", " /* intentional */ any")])).toHaveLength(1);
+	});
+
+	it.each(genericTypeArgumentFixtures)("accepts generic type argument %#", (source) => {
+		expect(scanTestTypesafety([source])).toEqual([]);
+	});
+
+	it("does not accept a same-line justification marker inside a string", () => {
+		expect(
+			scanTestTypesafety([
+				joined('const value = "test-', 'invalid:"; const cast = 1 as', " never;"),
+			]),
+		).toHaveLength(1);
+	});
+
+	it("does not accept a preceding-line justification marker inside a string", () => {
+		expect(
+			scanTestTypesafety([
+				joined('const marker = "test-', 'invalid: not a comment";'),
+				joined("const cast = 1 as", " never;"),
+			]),
+		).toHaveLength(1);
+	});
+
+	it("does not apply a trailing-comment justification to the next line", () => {
+		expect(
+			scanTestTypesafety([
+				joined("const value = 1; // test-", "invalid: applies only to this line"),
+				joined("const cast = 1 as", " never;"),
+			]),
+		).toHaveLength(1);
+	});
+
+	it("accepts a standalone block-comment justification on the preceding line", () => {
+		expect(
+			scanTestTypesafety([
+				joined("/* test-", "invalid: runtime guard input */"),
+				joined("const cast = 1 as", " never;"),
+			]),
+		).toEqual([]);
+	});
+
+	it("rejects the angle assertion and comment-split cast controller reproduction", () => {
+		expect(
+			scanTestTypesafety([
+				joined("const a = <", 'any>JSON.parse("1");'),
+				joined("const b = a as", " /* intentional */ never;"),
+			]),
+		).toHaveLength(2);
+	});
+
+	it("rejects the string-marker controller reproduction", () => {
+		expect(
+			scanTestTypesafety([
+				joined('const s = "test-', 'invalid: not a comment";'),
+				joined("const t = 1 as", " never;   // passed unannotated"),
+			]),
+		).toHaveLength(1);
 	});
 
 	it("rejects a TypeScript error directive without a justification", () => {
