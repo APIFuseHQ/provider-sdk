@@ -2754,7 +2754,7 @@ interface ProviderResolverConfig {
     // Warning: (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point provider.d.ts
     readonly kinds: readonly ProviderChallengeKind[];
     // Warning: (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point provider.d.ts
-    readonly vendors: readonly ProviderResolverVendor[];
+    readonly vendors?: readonly ProviderResolverVendor[];
 }
 
 // @public

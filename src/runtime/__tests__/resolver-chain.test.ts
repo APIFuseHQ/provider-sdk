@@ -20,10 +20,13 @@ import {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
 	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
+	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	createResolverClient,
 	createResolverClientFromEnv,
 	createResolverClientFromEnvForTests,
+	DEFAULT_RESOLVER_VENDOR_PREFERENCE,
 	RESOLVER_ADAPTER_REGISTRY,
+	resolveProviderResolverVendors,
 	swapResolverDefaultUserAgentForTests,
 } from "../resolver.js";
 import {
@@ -157,6 +160,92 @@ function createTransportGuardResolver(
 	};
 	return createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"], allowedHosts, transport });
 }
+
+describe("resolver default vendor policy", () => {
+	it("derives the hosted vendor chain for every challenge kind", () => {
+		const chains = Object.fromEntries(
+			ALL_CHALLENGE_KINDS.map((kind) => [
+				kind,
+				resolveProviderResolverVendors({ kinds: [kind] }),
+			]),
+		);
+
+		expect(chains).toEqual({
+			turnstile: ["capsolver", "2captcha"],
+			recaptcha_v2: ["capsolver", "2captcha"],
+			recaptcha_v3: ["capsolver", "2captcha"],
+			hcaptcha: ["capsolver", "2captcha"],
+			cloudflare_interstitial: ["capsolver"],
+			aws_waf: ["capsolver", "2captcha"],
+			akamai_sec_cpt: [],
+			akamai_sensor: [],
+		});
+	});
+
+	it("keeps browser and custom out of every SDK default chain", () => {
+		expect(DEFAULT_RESOLVER_VENDOR_PREFERENCE).not.toContain("browser");
+		expect(DEFAULT_RESOLVER_VENDOR_PREFERENCE).not.toContain("custom");
+		for (const kind of ALL_CHALLENGE_KINDS) {
+			expect(resolveProviderResolverVendors({ kinds: [kind] })).not.toContain("browser");
+			expect(resolveProviderResolverVendors({ kinds: [kind] })).not.toContain("custom");
+		}
+	});
+
+	it("preserves explicit vendor overrides, including an intentionally empty chain", () => {
+		const override = ["browser", "capsolver"] as const;
+		const emptyOverride = [] as const;
+
+		expect(resolveProviderResolverVendors({ kinds: ["aws_waf"], vendors: override })).toBe(
+			override,
+		);
+		expect(resolveProviderResolverVendors({ kinds: ["aws_waf"], vendors: emptyOverride })).toBe(
+			emptyOverride,
+		);
+	});
+
+	it("uses the SDK default order when vendors are omitted", async () => {
+		const capsolver = createStubAdapter({
+			id: "capsolver",
+			behavior: unavailable("capsolver", "allocation_exhausted"),
+		});
+		const twoCaptcha = createStubAdapter({ id: "2captcha" });
+		const resolver = createResolverClientFromEnvForTests(
+			{ kinds: ["aws_waf"] },
+			{
+				[APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-capsolver-test",
+				[APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-2captcha-test",
+			},
+			{},
+			{
+				capsolver: () => capsolver.adapter,
+				"2captcha": () => twoCaptcha.adapter,
+			},
+		);
+
+		await expect(resolver.solve(CHALLENGE)).resolves.toEqual({
+			form: "token",
+			token: "2captcha",
+		});
+		expect(capsolver.state.solveCalls).toBe(1);
+		expect(twoCaptcha.state.solveCalls).toBe(1);
+	});
+
+	it("diagnoses a kind with no SDK default vendor", async () => {
+		const error = await createResolverClientFromEnv({ kinds: ["akamai_sensor"] }, {})
+			.solve({
+				kind: "akamai_sensor",
+				pageUrl: CHALLENGE.pageUrl,
+				scriptUrl: "https://example.com/akamai/sensor.js",
+			})
+			.catch((cause: unknown) => cause);
+
+		expect(error).toMatchObject({
+			code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN",
+			message: 'Resolver vendor chain does not support kind "akamai_sensor"',
+			fix: expect.stringContaining("No SDK default resolver vendor supports"),
+		});
+	});
+});
 
 describe("resolver vendor chain", () => {
 	it("returns a single available vendor's solution unchanged", async () => {

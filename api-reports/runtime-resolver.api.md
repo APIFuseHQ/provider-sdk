@@ -63,6 +63,9 @@ export function createUnsupportedResolverClient(reason?: string): ResolverContex
 // @public (undocumented)
 export const DEFAULT_RESOLVER_TIMEOUT_MS = 180000;
 
+// @public
+export const DEFAULT_RESOLVER_VENDOR_PREFERENCE: readonly ["capsolver", "2captcha"];
+
 // @public (undocumented)
 type EnvLike = Record<string, string | undefined>;
 
@@ -233,7 +236,7 @@ interface ProviderResolverConfig {
     readonly clientProfile?: string;
     readonly kinds: readonly ProviderChallengeKind[];
     // Warning: (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
-    readonly vendors: readonly ProviderResolverVendor[];
+    readonly vendors?: readonly ProviderResolverVendor[];
 }
 
 // @public
@@ -314,6 +317,9 @@ type ProxyVendorFailoverTelemetryEvent = {
 
 // @public
 type ProxyVendorName = "smartproxy" | "nodemaven";
+
+// @public
+export function resolveProviderResolverVendors(config: ProviderResolverConfig): readonly ProviderResolverVendor[];
 
 // @public (undocumented)
 export const RESOLVER_ADAPTER_REGISTRY: Partial<Readonly<Record<ProviderResolverVendor, ResolverAdapterFactory>>>;
@@ -446,13 +452,13 @@ interface TraceRecorder {
 // dist/config/loader.d.ts:104:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
 // dist/config/loader.d.ts:105:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
 // dist/config/loader.d.ts:106:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:9:5 - (ae-forgotten-export) The symbol "TraceRecorder" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:17:9 - (ae-forgotten-export) The symbol "ProxyResolutionOptions" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:45:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:46:5 - (ae-forgotten-export) The symbol "ResolverVendorAdapter" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:48:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:49:5 - (ae-forgotten-export) The symbol "ResolverIdentity" needs to be exported by the entry point resolver-public.d.ts
-// dist/runtime/resolver.d.ts:51:5 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:10:5 - (ae-forgotten-export) The symbol "TraceRecorder" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:18:9 - (ae-forgotten-export) The symbol "ProxyResolutionOptions" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:46:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:47:5 - (ae-forgotten-export) The symbol "ResolverVendorAdapter" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:49:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:50:5 - (ae-forgotten-export) The symbol "ResolverIdentity" needs to be exported by the entry point resolver-public.d.ts
+// dist/runtime/resolver.d.ts:52:5 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point resolver-public.d.ts
 // dist/types.d.ts:857:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
 // dist/types.d.ts:862:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
 

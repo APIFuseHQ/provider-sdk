@@ -308,16 +308,16 @@ export interface ProviderSttConfig {
 }
 
 /**
- * `browser` is the in-house CDP pool (`apps/cdp-pool`, reached through
- * `createBrowserClient`) and is a first-class vendor rather than an escape hatch:
- * for fingerprint-family kinds, it was measured faster than a paid vendor
- * (4.5 s vs 17.5 s) at zero marginal cost.
+ * Union order is documentation only.
  *
- * `2captcha` is the vendor already carrying production traffic in
- * `apifuse-provider-tabelog`.
+ * The SDK owns the default hosted-vendor fallback policy and derives the chain
+ * from each provider's declared challenge kinds. Hosted solvers are preferred
+ * with `capsolver` ahead of `2captcha` in that policy.
  *
- * Union order is documentation only; the effective fallback order is whatever
- * `ProviderResolverConfig.vendors` declares.
+ * `browser` is the in-house CDP pool and remains opt-in; it is excluded from the
+ * default chain. `custom` is likewise reserved for provider-specific configuration.
+ *
+ * `ProviderResolverConfig.vendors` overrides the SDK policy when declared.
  */
 export type ProviderResolverVendor =
 	| "browser"
@@ -411,8 +411,8 @@ export type ChallengeSolution =
 		};
 
 export interface ProviderResolverConfig {
-	/** Ordered vendor fallback chain, tried first to last. */
-	readonly vendors: readonly ProviderResolverVendor[];
+	/** Optional ordered override for the SDK-owned vendor fallback chain. */
+	readonly vendors?: readonly ProviderResolverVendor[];
 	/** Challenge kinds this provider is permitted to request. */
 	readonly kinds: readonly ProviderChallengeKind[];
 	/**

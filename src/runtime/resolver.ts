@@ -35,6 +35,7 @@ import {
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 	type ResolverVendorUnavailableReason,
+	resolveProviderResolverVendors,
 	resolverVendorSupports,
 } from "./resolver-vendors/types.js";
 import {
@@ -64,6 +65,10 @@ export {
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
 } from "./resolver-config.js";
+export {
+	DEFAULT_RESOLVER_VENDOR_PREFERENCE,
+	resolveProviderResolverVendors,
+} from "./resolver-vendors/types.js";
 
 type EnvLike = Record<string, string | undefined>;
 
@@ -340,10 +345,12 @@ function assertKnownResolverVendor(vendor: string): asserts vendor is ProviderRe
 	throw new Error(`Unknown resolver vendor "${vendor}" in resolver configuration`);
 }
 
-function throwUnsupportedKind(kind: ProviderChallengeKind): never {
+function throwUnsupportedKind(kind: ProviderChallengeKind, usingDefaultVendors: boolean): never {
 	throw new ProviderError(`Resolver vendor chain does not support kind "${kind}"`, {
 		code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN",
-		fix: `Add a resolver vendor that supports "${kind}" to the provider's resolver.vendors declaration.`,
+		fix: usingDefaultVendors
+			? `No SDK default resolver vendor supports "${kind}". Declare an explicit resolver.vendors override with a supporting vendor.`
+			: `Add a resolver vendor that supports "${kind}" to the provider's resolver.vendors declaration.`,
 	});
 }
 
@@ -814,6 +821,7 @@ function createResolverChainClient(options: {
 	readonly kinds: readonly ProviderChallengeKind[];
 	readonly entries: readonly ResolverChainEntry[];
 	readonly unavailableReason?: string;
+	readonly usingDefaultVendors?: boolean;
 	readonly cache?: ProviderCache;
 	readonly identity?: ResolverIdentity;
 	readonly proxyIntent?: ResolverRuntimeOptions["proxyIntent"];
@@ -839,7 +847,9 @@ function createResolverChainClient(options: {
 			}
 
 			const supportingEntries = options.entries.filter((entry) => entry.supports(challenge.kind));
-			if (supportingEntries.length === 0) throwUnsupportedKind(challenge.kind);
+			if (supportingEntries.length === 0) {
+				throwUnsupportedKind(challenge.kind, options.usingDefaultVendors ?? false);
+			}
 			signal.throwIfAborted();
 			const identityResolution = options.proxyIntent
 				? await resolveResolverIdentity(options.proxyIntent)
@@ -1033,7 +1043,8 @@ function createResolverClientFromEnvInternal(
 	}
 	assertClientProfileTransportContract(config.clientProfile, options.transport);
 
-	if (config.vendors.length === 0) {
+	const vendors = resolveProviderResolverVendors(config);
+	if (config.vendors !== undefined && config.vendors.length === 0) {
 		return createResolverChainClient({
 			kinds: config.kinds,
 			entries: [],
@@ -1047,7 +1058,7 @@ function createResolverClientFromEnvInternal(
 
 	return createResolverChainClient({
 		kinds: config.kinds,
-		entries: config.vendors.map((configuredVendor) => {
+		entries: vendors.map((configuredVendor) => {
 			assertKnownResolverVendor(configuredVendor);
 			const vendor = configuredVendor;
 			return {
@@ -1062,6 +1073,7 @@ function createResolverClientFromEnvInternal(
 					),
 			};
 		}),
+		usingDefaultVendors: config.vendors === undefined,
 		cache: options.cache,
 		proxyIntent: options.proxyIntent,
 		identityScope: options.identityScope,

@@ -3497,7 +3497,7 @@ export type ProviderResolvedFile = Omit<ProviderFileRef, "mime_type"> & {
 export interface ProviderResolverConfig {
     readonly clientProfile?: string;
     readonly kinds: readonly ProviderChallengeKind[];
-    readonly vendors: readonly ProviderResolverVendor[];
+    readonly vendors?: readonly ProviderResolverVendor[];
 }
 
 // @public
