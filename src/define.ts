@@ -573,6 +573,8 @@ export interface ProviderConfig<TOperations extends Record<string, ProviderOpera
 	 * resolves omitted fields against the runtime deployment profiles.
 	 */
 	deployment?: ProviderDeploymentOverrides;
+	/** Declares that provider operations use the SDK HTTP client. */
+	http?: true;
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
 	stealth?: {
@@ -585,11 +587,21 @@ export interface ProviderConfig<TOperations extends Record<string, ProviderOpera
 	resolver?: ProviderResolverConfig;
 	browser?: { engine: BrowserEngine };
 	auth?: AuthConfig;
+	/** Declares that provider operations issue and consume SDK choice tokens. */
+	choice?: true;
 	reviewed?: ProviderReviewed;
 	access?: ProviderAccessConfig;
 	secrets?: ProviderSecretDeclaration[];
+	/** Declares that provider operations read SDK-managed environment values. */
+	env?: true;
 	credential?: CredentialDeclaration;
 	context?: ContextDeclaration;
+	/** Declares that provider operations use SDK-managed persistent state. */
+	state?: true;
+	/** Declares that provider operations use the SDK provider cache. */
+	cache?: true;
+	/** Declares that provider operations access runtime-resolvable files. */
+	files?: true;
 	meta: {
 		displayName: string;
 		displayNameKey?: string;
