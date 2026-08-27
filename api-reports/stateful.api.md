@@ -534,8 +534,8 @@ const ProviderServerStatefulForwardEnvelopeSchema: z.ZodObject<{
         connection: z.ZodOptional<z.ZodObject<{
             id: z.ZodString;
             mode: z.ZodEnum<{
-                none: "none";
                 credentials: "credentials";
+                none: "none";
                 oauth2: "oauth2";
                 "platform-managed": "platform-managed";
                 oauth2_proxied: "oauth2_proxied";

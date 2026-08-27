@@ -1,10 +1,5 @@
 import { z } from "zod";
-
-export type JsonPrimitive = null | boolean | number | string;
-export type JsonValue =
-	| JsonPrimitive
-	| readonly JsonValue[]
-	| { readonly [key: string]: JsonValue };
+import type { JsonPrimitive, JsonValue } from "./contract-json.js";
 export type NonEmpty<T> = readonly [T, ...T[]];
 
 const finiteInt = (min: number, max?: number) => {

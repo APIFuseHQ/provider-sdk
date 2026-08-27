@@ -40,6 +40,7 @@ export type {
 	ProviderContextOf,
 	ProviderDeclaration,
 } from "./define.js";
+export type { JsonPrimitive, JsonValue } from "./contract-json.js";
 export {
 	AssertionExpressionSchema,
 	AssertionPredicateSchema,
@@ -89,6 +90,7 @@ export type {
 	GuardAttribution,
 	GuardReasonCode,
 	GuardResult,
+	GuardStep,
 	HealthScenario,
 	HealthStep,
 	JsonTemplate,

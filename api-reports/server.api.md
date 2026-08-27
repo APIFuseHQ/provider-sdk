@@ -11,6 +11,50 @@ import type { SerializedCookieJar } from 'tough-cookie';
 import { z } from 'zod';
 import type { ZodType } from 'zod';
 
+// Warning: (ae-forgotten-export) The symbol "AssertionPredicate" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "Quantifier" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type AssertionExpression = {
+    kind: "all" | "any";
+    clauses: NonEmpty<AssertionExpression>;
+} | {
+    kind: "not";
+    clause: AssertionExpression;
+} | AssertionPredicate | Quantifier;
+
+// Warning: (ae-forgotten-export) The symbol "predicateSchema" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type AssertionPredicate = z.infer<typeof predicateSchema>;
+
+// Warning: (ae-forgotten-export) The symbol "StepBase" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type AssertStep = StepBase & {
+    kind: "assert";
+    coversOperations: NonEmpty<string>;
+    expression: AssertionExpression;
+};
+
+// Warning: (ae-forgotten-export) The symbol "attemptReferenceSchema" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type AttemptReference = z.infer<typeof attemptReferenceSchema>;
+
+// @public (undocumented)
+const attemptReferenceSchema: z.ZodObject<{
+    namespace: z.ZodLiteral<"attempt">;
+    field: z.ZodEnum<{
+        id: "id";
+        external_ref: "external_ref";
+        provider_id: "provider_id";
+        scenario_id: "scenario_id";
+        started_at: "started_at";
+        deadline_at: "deadline_at";
+    }>;
+}, z.core.$strict>;
+
 // @public (undocumented)
 type AuthAbortRetry = "never" | "retry" | "after_user_action";
 
@@ -100,8 +144,8 @@ export const AuthFlowRequestSchema: z.ZodObject<{
     connection: z.ZodOptional<z.ZodObject<{
         id: z.ZodString;
         mode: z.ZodEnum<{
-            none: "none";
             credentials: "credentials";
+            none: "none";
             oauth2: "oauth2";
             "platform-managed": "platform-managed";
             oauth2_proxied: "oauth2_proxied";
@@ -225,6 +269,23 @@ interface AuthTurn {
 
 // @public (undocumented)
 type Bcp47Locale = string;
+
+// Warning: (ae-forgotten-export) The symbol "BoundedJsonPathSchema" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type BoundedJsonPath = z.infer<typeof BoundedJsonPathSchema>;
+
+// @public (undocumented)
+const BoundedJsonPathSchema: z.ZodObject<{
+    root: z.ZodLiteral<"$">;
+    segments: z.ZodArray<z.ZodUnion<readonly [z.ZodObject<{
+        kind: z.ZodLiteral<"property">;
+        name: z.ZodString;
+    }, z.core.$strict>, z.ZodObject<{
+        kind: z.ZodLiteral<"index">;
+        index: z.ZodNumber;
+    }, z.core.$strict>]>>;
+}, z.core.$strict>;
 
 // @public (undocumented)
 type BrowserChallengeRequest = {
@@ -401,6 +462,38 @@ type BrowserResourceRoute = {
     readonly handle: (request: BrowserResourceRequest) => Promise<BrowserResourceDecision> | BrowserResourceDecision;
 };
 
+// @public (undocumented)
+type CandidateBlock = {
+    scope: "step_block";
+    items: StepReference;
+    itemBinding: string;
+    itemType: "string" | "number" | "object";
+    members: readonly [string, string, ...string[]];
+    maxAttempts: number;
+    accept: AssertionExpression;
+};
+
+// @public (undocumented)
+type CandidatePolicy = {
+    items: StepReference;
+    itemBinding: string;
+    itemType: "string" | "number" | "object";
+    maxAttempts: number;
+    accept: AssertionExpression;
+};
+
+// Warning: (ae-forgotten-export) The symbol "candidateReferenceSchema" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type CandidateReference = z.infer<typeof candidateReferenceSchema>;
+
+// @public (undocumented)
+const candidateReferenceSchema: z.ZodObject<{
+    namespace: z.ZodLiteral<"candidate">;
+    binding: z.ZodString;
+    path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+}, z.core.$strict>;
+
 // @public
 type ChallengeSolution = {
     readonly form: "token";
@@ -428,8 +521,8 @@ export type ConnectionMode = z.infer<typeof ConnectionModeSchema>;
 
 // @public (undocumented)
 export const ConnectionModeSchema: z.ZodEnum<{
-    none: "none";
     credentials: "credentials";
+    none: "none";
     oauth2: "oauth2";
     "platform-managed": "platform-managed";
     oauth2_proxied: "oauth2_proxied";
@@ -504,6 +597,24 @@ interface CredentialDeclaration {
     // (undocumented)
     storesReusableSecret?: boolean;
 }
+
+// @public (undocumented)
+type CredentialRefDeclaration = {
+    alias: string;
+    kind: "connection";
+};
+
+// Warning: (ae-forgotten-export) The symbol "credentialReferenceSchema" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type CredentialReference = z.infer<typeof credentialReferenceSchema>;
+
+// @public (undocumented)
+const credentialReferenceSchema: z.ZodObject<{
+    namespace: z.ZodLiteral<"credentials">;
+    alias: z.ZodString;
+    field: z.ZodLiteral<"connection">;
+}, z.core.$strict>;
 
 // @public (undocumented)
 interface DeclarativeStealthResponse {
@@ -587,6 +698,23 @@ export type ErrorObservabilityDetails = {
 };
 
 // @public (undocumented)
+type ExtractStep = StepBase & {
+    kind: "extract";
+    from: StepReference;
+    selector: BoundedJsonPath | FindFirst;
+    valueType: ValueType;
+    required: boolean;
+};
+
+// @public (undocumented)
+type FindFirst = {
+    kind: "find_first";
+    itemBinding: string;
+    predicate: ScopedAssertionExpression;
+    maxScan: number;
+};
+
+// @public (undocumented)
 interface FlowContext {
     // Warning: (ae-forgotten-export) The symbol "AuthFlowTerminalContext" needs to be exported by the entry point index.d.ts
     //
@@ -638,6 +766,27 @@ interface FlowContext {
     // (undocumented)
     tenantId: string;
 }
+
+// @public (undocumented)
+type GuardAttribution = {
+    operationId: string;
+    status: "degraded";
+    reasonCode: GuardReasonCode;
+    reasonKey: string;
+};
+
+// @public (undocumented)
+type GuardReasonCode = "expected_absence";
+
+// @public (undocumented)
+type GuardStep = StepBase & {
+    kind: "guard";
+    condition: AssertionExpression;
+    onFail: {
+        attribute: NonEmpty<GuardAttribution>;
+        stop: "scenario";
+    };
+};
 
 // @public
 interface HealthCheckAssertionContext<TOutput = unknown> {
@@ -716,8 +865,19 @@ interface HealthCheckUnsupported {
     trackedIn?: string;
 }
 
+// Warning: (ae-forgotten-export) The symbol "HealthJourneyDefinitionBase" needs to be exported by the entry point index.d.ts
+//
 // @public (undocumented)
-interface HealthJourneyDefinition {
+type HealthJourneyDefinition = HealthJourneyDefinitionBase & ({
+    run: (ctx: HealthJourneyRunContext) => Promise<HealthJourneyRunResult | undefined>;
+    scenario?: never;
+} | {
+    scenario: HealthScenario;
+    run?: never;
+});
+
+// @public (undocumented)
+interface HealthJourneyDefinitionBase {
     // (undocumented)
     cooldown?: Iso8601Duration;
     // (undocumented)
@@ -732,9 +892,6 @@ interface HealthJourneyDefinition {
     manualTrigger?: HealthJourneyManualTriggerPolicy;
     // (undocumented)
     requiredSecrets?: readonly string[];
-    // Warning: (ae-forgotten-export) The symbol "HealthJourneyRunContext" needs to be exported by the entry point index.d.ts
-    // Warning: (ae-forgotten-export) The symbol "HealthJourneyRunResult" needs to be exported by the entry point index.d.ts
-    run: (ctx: HealthJourneyRunContext) => Promise<HealthJourneyRunResult | undefined>;
     // Warning: (ae-forgotten-export) The symbol "HealthJourneySchedule" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -924,6 +1081,27 @@ interface HealthMonitorProbeOverride {
 }
 
 // @public (undocumented)
+type HealthScenario = {
+    scenarioVersion: 2;
+    id: string;
+    display: {
+        titleKey: string;
+        descriptionKey?: string;
+    };
+    schedule: {
+        kind: "interval";
+        intervalMs: number;
+        jitterMs: number;
+    };
+    timeoutMs: number;
+    cooldownMs?: number;
+    manualTrigger?: ManualTriggerPolicy;
+    coversOperations: NonEmpty<string>;
+    credentialRefs: CredentialRefDeclaration[];
+    steps: NonEmpty<HealthStep>;
+};
+
+// @public (undocumented)
 type HealthScheduleRandomization = {
     mode: "centered";
     maxOffset: Iso8601Duration;
@@ -931,6 +1109,14 @@ type HealthScheduleRandomization = {
     mode: "delayed";
     maxDelay: Iso8601Duration;
 };
+
+// Warning: (ae-forgotten-export) The symbol "OperationStep" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "ExtractStep" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "AssertStep" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "GuardStep" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type HealthStep = OperationStep | ExtractStep | AssertStep | GuardStep;
 
 // @public (undocumented)
 interface HttpClient {
@@ -1116,6 +1302,45 @@ type Iso8601Duration = string;
 //
 // @public
 export function isSelfTestReadOnlyOperation(operation: OperationDefinition): boolean;
+
+// @public (undocumented)
+type JournalPolicy = {
+    kind: "side_effect_barrier";
+    version: 1;
+    key: Reference;
+    before: "required";
+    after: "required";
+    replay: "deny_after_started";
+};
+
+// @public (undocumented)
+type JsonPrimitive = string | number | boolean | null;
+
+// Warning: (ae-forgotten-export) The symbol "JsonPrimitive" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "ReferenceNode" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "RelativeDateNode" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type JsonTemplate = JsonPrimitive | ReferenceNode | RelativeDateNode | JsonTemplate[] | {
+    [key: string]: JsonTemplate;
+};
+
+// @public (undocumented)
+type JsonValue = JsonPrimitive | readonly JsonValue[] | {
+    readonly [key: string]: JsonValue;
+};
+
+// @public (undocumented)
+type ManualTriggerPolicy = {
+    enabled: false;
+    reasonKey: string;
+} | {
+    enabled: true;
+    requiresAcknowledgement: boolean;
+    risk: "read_only" | "writes_external_state";
+    minManualIntervalMs: number;
+    publicRationaleKey: string;
+};
 
 // @public (undocumented)
 interface NativeContext {
@@ -1313,6 +1538,9 @@ type NativeTcpTlsMode = "required" | "allowed" | "disabled";
 type NativeTlsConnectOptions = NativeNetworkConnectInput;
 
 // @public (undocumented)
+type NonEmpty<T> = readonly [T, ...T[]];
+
+// @public (undocumented)
 interface OcrCaptchaCandidate {
     // (undocumented)
     readonly satisfiesConstraints: boolean;
@@ -1432,8 +1660,8 @@ export type OperationConnection = z.infer<typeof OperationConnectionSchema>;
 export const OperationConnectionSchema: z.ZodObject<{
     id: z.ZodString;
     mode: z.ZodEnum<{
-        none: "none";
         credentials: "credentials";
+        none: "none";
         oauth2: "oauth2";
         "platform-managed": "platform-managed";
         oauth2_proxied: "oauth2_proxied";
@@ -1676,8 +1904,8 @@ export const OperationRequestSchema: z.ZodObject<{
     connection: z.ZodOptional<z.ZodObject<{
         id: z.ZodString;
         mode: z.ZodEnum<{
-            none: "none";
             credentials: "credentials";
+            none: "none";
             oauth2: "oauth2";
             "platform-managed": "platform-managed";
             oauth2_proxied: "oauth2_proxied";
@@ -1717,6 +1945,17 @@ interface OperationSseTransport {
     // (undocumented)
     resumable?: false | "last-event-id";
 }
+
+// @public (undocumented)
+type OperationStep = StepBase & {
+    kind: "operation";
+    operationId: string;
+    inputTemplate: JsonTemplate;
+    connection?: CredentialReference;
+    retry?: RetryPolicy;
+    candidate?: CandidatePolicy | CandidateBlock;
+    journal?: JournalPolicy;
+};
 
 // @public (undocumented)
 export type OperationSuccessResponse = z.infer<typeof OperationSuccessResponseSchema>;
@@ -1791,6 +2030,290 @@ interface OperationWebSocketTransport {
     // (undocumented)
     subprotocols?: readonly string[];
 }
+
+// @public (undocumented)
+const predicateSchema: z.ZodUnion<readonly [z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodEnum<{
+        exists: "exists";
+        not_exists: "not_exists";
+        non_empty: "non_empty";
+        is_true: "is_true";
+    }>;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodEnum<{
+        equals: "equals";
+        not_equals: "not_equals";
+        contains: "contains";
+    }>;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+    expected: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodLiteral<"matches">;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+    pattern: z.ZodObject<{
+        engine: z.ZodLiteral<"re2">;
+        pattern: z.ZodString;
+        flags: z.ZodEnum<{
+            "": "";
+            i: "i";
+        }>;
+    }, z.core.$strict>;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodEnum<{
+        number_gt: "number_gt";
+        number_gte: "number_gte";
+        number_lt: "number_lt";
+        number_lte: "number_lte";
+    }>;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+    expected: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodEnum<{
+        array_length_eq: "array_length_eq";
+        array_length_gte: "array_length_gte";
+        array_length_lte: "array_length_lte";
+    }>;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+    expected: z.ZodNumber;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodLiteral<"status_2xx">;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodLiteral<"type_is">;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+    expected: z.ZodEnum<{
+        string: "string";
+        number: "number";
+        boolean: "boolean";
+        object: "object";
+        null: "null";
+        array: "array";
+    }>;
+}, z.core.$strict>]>;
 
 // @public
 type ProbeInterval = ms.StringValue;
@@ -2659,8 +3182,8 @@ const ProviderServerStatefulForwardEnvelopeSchema: z.ZodObject<{
         connection: z.ZodOptional<z.ZodObject<{
             id: z.ZodString;
             mode: z.ZodEnum<{
-                none: "none";
                 credentials: "credentials";
+                none: "none";
                 oauth2: "oauth2";
                 "platform-managed": "platform-managed";
                 oauth2_proxied: "oauth2_proxied";
@@ -2757,11 +3280,51 @@ interface ProxiedOAuthConfig {
     tokenUrl: string;
 }
 
+// @public (undocumented)
+type Quantifier = {
+    kind: "quantifier";
+    quantifier: "every" | "any";
+    items: {
+        ref: StepReference | CandidateReference;
+    };
+    itemBinding: string;
+    maxItems: number;
+    clause: ScopedAssertionExpression;
+};
+
 // @public
 export function redactSelfTestText(text: string, sensitiveValues: readonly string[], maxLength?: number): string;
 
 // @public (undocumented)
 type RedirectRunReason = "completed" | "stopped" | "max_hops" | "missing_location" | "loop";
+
+// Warning: (ae-forgotten-export) The symbol "AttemptReference" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type Reference = StepReference | CredentialReference | AttemptReference | CandidateReference;
+
+// @public (undocumented)
+type ReferenceNode = {
+    ref: Reference;
+};
+
+// Warning: (ae-forgotten-export) The symbol "relativeDateNodeSchema" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type RelativeDateNode = z.infer<typeof relativeDateNodeSchema>;
+
+// @public (undocumented)
+const relativeDateNodeSchema: z.ZodObject<{
+    relativeDate: z.ZodObject<{
+        anchor: z.ZodLiteral<"operation_started_at">;
+        offsetDays: z.ZodNumber;
+        timeZone: z.ZodLiteral<"Asia/Seoul">;
+        format: z.ZodEnum<{
+            "YYYY-MM-DD": "YYYY-MM-DD";
+            YYYYMMDD: "YYYYMMDD";
+        }>;
+    }, z.core.$strict>;
+}, z.core.$strict>;
 
 // @public (undocumented)
 interface RequestOptions {
@@ -2821,8 +3384,377 @@ export function resolveSelfTestMasterSecrets(env?: Readonly<Record<string, strin
 // @public (undocumented)
 export function resolveSelfTestPort(env?: Readonly<Record<string, string | undefined>>): number;
 
+// @public (undocumented)
+type RetryPolicy = {
+    maxAttempts: number;
+    retryOn: NonEmpty<"transport_error" | "timeout" | "http_429" | "http_5xx">;
+    backoff: {
+        kind: "fixed";
+        delayMs: number;
+    } | {
+        kind: "exponential";
+        initialDelayMs: number;
+        maxDelayMs: number;
+    };
+    attemptTimeoutMs?: number;
+};
+
 // @public
 type SchemaLike = ZodType | StandardSchemaV1;
+
+// Warning: (ae-forgotten-export) The symbol "ScopedAssertionPredicate" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type ScopedAssertionExpression = {
+    kind: "all" | "any";
+    clauses: NonEmpty<ScopedAssertionExpression>;
+} | {
+    kind: "not";
+    clause: ScopedAssertionExpression;
+} | ScopedAssertionPredicate;
+
+// Warning: (ae-forgotten-export) The symbol "scopedPredicateSchema" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type ScopedAssertionPredicate = z.infer<typeof scopedPredicateSchema>;
+
+// @public (undocumented)
+const scopedPredicateSchema: z.ZodUnion<readonly [z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodEnum<{
+        exists: "exists";
+        not_exists: "not_exists";
+        non_empty: "non_empty";
+        is_true: "is_true";
+    }>;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodObject<{
+            namespace: z.ZodLiteral<"item">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodEnum<{
+        equals: "equals";
+        not_equals: "not_equals";
+        contains: "contains";
+    }>;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodObject<{
+            namespace: z.ZodLiteral<"item">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+    expected: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodObject<{
+            namespace: z.ZodLiteral<"item">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodLiteral<"matches">;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodObject<{
+            namespace: z.ZodLiteral<"item">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+    pattern: z.ZodObject<{
+        engine: z.ZodLiteral<"re2">;
+        pattern: z.ZodString;
+        flags: z.ZodEnum<{
+            "": "";
+            i: "i";
+        }>;
+    }, z.core.$strict>;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodEnum<{
+        number_gt: "number_gt";
+        number_gte: "number_gte";
+        number_lt: "number_lt";
+        number_lte: "number_lte";
+    }>;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodObject<{
+            namespace: z.ZodLiteral<"item">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+    expected: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodObject<{
+            namespace: z.ZodLiteral<"item">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodEnum<{
+        array_length_eq: "array_length_eq";
+        array_length_gte: "array_length_gte";
+        array_length_lte: "array_length_lte";
+    }>;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodObject<{
+            namespace: z.ZodLiteral<"item">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+    expected: z.ZodNumber;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodLiteral<"status_2xx">;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodObject<{
+            namespace: z.ZodLiteral<"item">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+}, z.core.$strict>, z.ZodObject<{
+    kind: z.ZodLiteral<"predicate">;
+    operator: z.ZodLiteral<"type_is">;
+    actual: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z.core.$ZodTypeInternals<JsonValue, unknown>>, z.ZodObject<{
+        ref: z.ZodObject<{
+            namespace: z.ZodLiteral<"item">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>;
+    }, z.core.$strict>, z.ZodObject<{
+        ref: z.ZodDiscriminatedUnion<[z.ZodObject<{
+            namespace: z.ZodLiteral<"steps">;
+            binding: z.ZodString;
+            path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"credentials">;
+            alias: z.ZodString;
+            field: z.ZodLiteral<"connection">;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"attempt">;
+            field: z.ZodEnum<{
+                id: "id";
+                external_ref: "external_ref";
+                provider_id: "provider_id";
+                scenario_id: "scenario_id";
+                started_at: "started_at";
+                deadline_at: "deadline_at";
+            }>;
+        }, z.core.$strict>, z.ZodObject<{
+            namespace: z.ZodLiteral<"candidate">;
+            binding: z.ZodString;
+            path: z.ZodUnion<readonly [z.ZodTuple<[z.ZodLiteral<"item">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>, z.ZodTuple<[z.ZodLiteral<"result">], z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>]>;
+        }, z.core.$strict>], "namespace">;
+    }, z.core.$strict>]>;
+    expected: z.ZodEnum<{
+        string: "string";
+        number: "number";
+        boolean: "boolean";
+        object: "object";
+        null: "null";
+        array: "array";
+    }>;
+}, z.core.$strict>]>;
 
 // @public
 export const SELF_TEST_AUTH_FLOW_MULTI_TURN_SKIP_REASON = "auth_flow_multi_turn";
@@ -3289,6 +4221,25 @@ interface StealthSessionCookies extends CookieJar {
 }
 
 // @public (undocumented)
+type StepBase = {
+    id: string;
+    result: string;
+    timeoutMs?: number;
+};
+
+// Warning: (ae-forgotten-export) The symbol "stepReferenceSchema" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type StepReference = z.infer<typeof stepReferenceSchema>;
+
+// @public (undocumented)
+const stepReferenceSchema: z.ZodObject<{
+    namespace: z.ZodLiteral<"steps">;
+    binding: z.ZodString;
+    path: z.ZodArray<z.ZodUnion<readonly [z.ZodString, z.ZodNumber]>>;
+}, z.core.$strict>;
+
+// @public (undocumented)
 type SttAudioInput = {
     kind: "base64";
     data: string;
@@ -3423,6 +4374,23 @@ interface TraceContext {
 // @public (undocumented)
 const VALID_OPERATION_ERROR_STATUSES: readonly [400, 401, 404, 409, 410, 422, 429, 500, 502, 503, 504];
 
+// Warning: (ae-forgotten-export) The symbol "valueTypeSchema" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type ValueType = z.infer<typeof valueTypeSchema>;
+
+// @public (undocumented)
+const valueTypeSchema: z.ZodEnum<{
+    string: "string";
+    number: "number";
+    boolean: "boolean";
+    object: "object";
+    null: "null";
+    array: "array";
+    json: "json";
+    established_connection: "established_connection";
+}>;
+
 // @public (undocumented)
 interface VerificationCodeCandidate {
     // (undocumented)
@@ -3457,32 +4425,56 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 
 // Warnings were encountered during analysis:
 //
+// dist/health-scenario.d.ts:175:5 - (ae-forgotten-export) The symbol "JsonValue" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1491:9 - (ae-forgotten-export) The symbol "CandidateReference" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1500:5 - (ae-forgotten-export) The symbol "NonEmpty" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1530:5 - (ae-forgotten-export) The symbol "StepReference" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1541:5 - (ae-forgotten-export) The symbol "Reference" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1556:5 - (ae-forgotten-export) The symbol "GuardReasonCode" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1587:5 - (ae-forgotten-export) The symbol "ScopedAssertionExpression" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1594:5 - (ae-forgotten-export) The symbol "JsonTemplate" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1595:5 - (ae-forgotten-export) The symbol "CredentialReference" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1596:5 - (ae-forgotten-export) The symbol "RetryPolicy" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1597:5 - (ae-forgotten-export) The symbol "CandidatePolicy" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1597:5 - (ae-forgotten-export) The symbol "CandidateBlock" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1598:5 - (ae-forgotten-export) The symbol "JournalPolicy" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1603:5 - (ae-forgotten-export) The symbol "BoundedJsonPath" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1603:5 - (ae-forgotten-export) The symbol "FindFirst" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1604:5 - (ae-forgotten-export) The symbol "ValueType" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1610:5 - (ae-forgotten-export) The symbol "AssertionExpression" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1616:9 - (ae-forgotten-export) The symbol "GuardAttribution" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1835:5 - (ae-forgotten-export) The symbol "ManualTriggerPolicy" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1837:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point index.d.ts
+// dist/health-scenario.d.ts:1838:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:10:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:146:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:171:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:683:9 - (ae-forgotten-export) The symbol "HealthScheduleRandomization" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:857:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:862:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:922:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1161:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1161:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1360:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1361:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1466:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1472:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1473:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1477:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1484:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1519:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1587:5 - (ae-forgotten-export) The symbol "ProviderChoiceConsumeResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1599:5 - (ae-forgotten-export) The symbol "ProviderStateDurationString" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1643:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1701:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1709:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1710:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1719:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1974:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2032:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:172:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:567:5 - (ae-forgotten-export) The symbol "HealthJourneyRunContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:567:5 - (ae-forgotten-export) The symbol "HealthJourneyRunResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:570:5 - (ae-forgotten-export) The symbol "HealthScenario" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:684:9 - (ae-forgotten-export) The symbol "HealthScheduleRandomization" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:858:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:863:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:923:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1162:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1162:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1361:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1362:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1467:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1473:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1474:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1478:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1485:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1520:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1588:5 - (ae-forgotten-export) The symbol "ProviderChoiceConsumeResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1600:5 - (ae-forgotten-export) The symbol "ProviderStateDurationString" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1644:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1702:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1710:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1711:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1720:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1975:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2033:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

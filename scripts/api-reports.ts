@@ -93,6 +93,11 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			StealthFetchOptions StealthPlatform StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession StealthSessionCookies
 			SttAudioInput SttContext SttPromptPolicy SttSegment SttTranscribeMode SttTranscribeRequest SttTranscript SttUnsupportedOptionPolicy
 			SttUsage SttVerificationCodeOptions SttWarning TraceContext VALID_OPERATION_ERROR_STATUSES VerificationCodeCandidate VerificationCodeCandidateSource VerificationCodeExtractionResult
+			AssertStep AssertionExpression AssertionPredicate AttemptReference BoundedJsonPath BoundedJsonPathSchema CandidateBlock CandidatePolicy CandidateReference
+			CredentialRefDeclaration CredentialReference ExtractStep FindFirst GuardAttribution GuardReasonCode GuardStep HealthJourneyDefinitionBase HealthScenario HealthStep
+			JournalPolicy JsonTemplate ManualTriggerPolicy NonEmpty OperationStep Quantifier Reference ReferenceNode RelativeDateNode RetryPolicy ScopedAssertionExpression
+			ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema
+			relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 		`,
 	),
 	"index.api.md": forgottenExports(
@@ -108,6 +113,8 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProxyCacheStatus ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource ProxyVendorFailoverTelemetryEvent RequestParamPrimitive RequestParamValue RequestParams
 			RequestWithMethodOptions SelfTestCancellationLogEvent SensitivePathSegment SmartproxyAllocatorBodyClass SmsPhoneIdentity SseOperationConfig StreamOperationConfig TraceAttributeValue
 			TraceContext_2 VALID_OPERATION_ERROR_STATUSES WebSocketOperationConfig
+			HealthJourneyDefinitionBase attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema relativeDateNodeSchema
+			scopedItemReferenceSchema scopedOperandSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 		`,
 	),
 	"provider.api.md": forgottenExports(
@@ -132,6 +139,8 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			SttAudioInput SttContext SttPromptPolicy SttSegment SttTranscribeMode SttTranscribeRequest SttTranscript SttUnsupportedOptionPolicy
 			SttUsage SttVerificationCodeOptions SttWarning TraceContext TransportErrorOptions VALID_OPERATION_ERROR_STATUSES ValidationErrorOptions VerificationCodeCandidate
 			VerificationCodeCandidateSource VerificationCodeExtractionResult
+			HealthJourneyDefinitionBase attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema relativeDateNodeSchema
+			scopedItemReferenceSchema scopedOperandSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 		`,
 	),
 	"runtime-browser.api.md": forgottenExports(
@@ -209,6 +218,11 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			StealthSession StealthSessionCookies SttAudioInput SttContext SttPromptPolicy SttSegment SttTranscribeMode SttTranscribeRequest
 			SttTranscript SttUnsupportedOptionPolicy SttUsage SttVerificationCodeOptions SttWarning TraceContext VALID_OPERATION_ERROR_STATUSES VerificationCodeCandidate
 			VerificationCodeCandidateSource VerificationCodeExtractionResult
+			AssertStep AssertionExpression AssertionPredicate AttemptReference BoundedJsonPath BoundedJsonPathSchema CandidateBlock CandidatePolicy CandidateReference
+			CredentialRefDeclaration CredentialReference ExtractStep FindFirst GuardAttribution GuardReasonCode GuardStep HealthJourneyDefinitionBase HealthScenario HealthStep
+			JournalPolicy JsonPrimitive JsonTemplate JsonValue ManualTriggerPolicy NonEmpty OperationStep Quantifier Reference ReferenceNode RelativeDateNode RetryPolicy
+			ScopedAssertionExpression ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
+			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 		`,
 	),
 	"stateful.api.md": forgottenExports(
@@ -248,6 +262,11 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			StealthRedirectRunResult StealthResponse StealthSession StealthSessionCookies SttAudioInput SttContext SttPromptPolicy SttSegment
 			SttTranscribeMode SttTranscribeRequest SttTranscript SttUnsupportedOptionPolicy SttUsage SttVerificationCodeOptions SttWarning TraceContext
 			VALID_OPERATION_ERROR_STATUSES VerificationCodeCandidate VerificationCodeCandidateSource VerificationCodeExtractionResult
+			AssertStep AssertionExpression AssertionPredicate AttemptReference BoundedJsonPath BoundedJsonPathSchema CandidateBlock CandidatePolicy CandidateReference
+			CredentialRefDeclaration CredentialReference ExtractStep FindFirst GuardAttribution GuardReasonCode GuardStep HealthJourneyDefinitionBase HealthScenario HealthStep
+			JournalPolicy JsonPrimitive JsonTemplate JsonValue ManualTriggerPolicy NonEmpty OperationStep Quantifier Reference ReferenceNode RelativeDateNode RetryPolicy
+			ScopedAssertionExpression ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
+			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 		`,
 	),
 };

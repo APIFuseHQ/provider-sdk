@@ -87,6 +87,7 @@ export type {
 	GuardAttribution,
 	GuardReasonCode,
 	GuardResult,
+	GuardStep,
 	HealthScenario,
 	HealthStep,
 	JsonTemplate,

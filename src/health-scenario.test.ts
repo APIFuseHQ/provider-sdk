@@ -3,10 +3,11 @@ import { z } from "zod";
 import {
 	defineHealthJourney,
 	defineHealthScenario,
-	defineProvider,
 	every,
+	type HealthJourneyDefinition,
 	type HealthScenario,
 } from "./index.js";
+import { defineTestProvider as defineProvider } from "./__tests__/test-utils.js";
 
 function validScenario(): HealthScenario {
 	return {
@@ -60,7 +61,7 @@ function providerWithJourney(journey: unknown) {
 				handler: async () => ({}),
 			},
 		},
-		healthJourneys: [journey] as never,
+		healthJourneys: [journey] as HealthJourneyDefinition[],
 	});
 }
 
