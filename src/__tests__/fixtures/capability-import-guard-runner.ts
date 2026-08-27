@@ -60,7 +60,8 @@ const operations: ProviderDefinition["operations"] = {
 		input: z.object({}),
 		output: z.object({ available: z.boolean() }),
 		async handler(ctx) {
-			return { available: ctx.native !== undefined };
+			void ctx.native.network;
+			return { available: true };
 		},
 	},
 };
@@ -310,14 +311,6 @@ try {
 				`Unexpected ${operation} error: ${JSON.stringify(body)}`,
 			);
 		}
-
-		const nativeResponse = await request("native", "req-native");
-		assert(nativeResponse.status === 200, `Unexpected native status: ${nativeResponse.status}`);
-		assert(
-			JSON.stringify(await nativeResponse.json()) ===
-				JSON.stringify({ data: { available: false } }),
-			"Undeclared native capability was unexpectedly present",
-		);
 	}
 } finally {
 	await handle.close();

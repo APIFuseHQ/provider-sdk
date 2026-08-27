@@ -1121,7 +1121,7 @@ export interface FlowContext {
     flowId?: string;
     // (undocumented)
     http: HttpClient;
-    readonly native?: NativeProviderContext;
+    readonly native?: NativeContext;
     // (undocumented)
     ocr: OcrContext;
     // (undocumented)
@@ -1994,9 +1994,6 @@ export interface NativeProviderConfig {
         readonly dynamicTcp?: readonly NativeTcpDynamicEgressRule[];
     };
 }
-
-// @public
-export type NativeProviderContext = NativeContext;
 
 // @public
 export type NativeProxyDrainHandler = (event: NativeProxyExpiringEvent) => void | Promise<void>;
@@ -2893,7 +2890,7 @@ export interface ProviderContext {
     readonly files?: ProviderFilesContext;
     // (undocumented)
     http: HttpClient;
-    readonly native?: NativeProviderContext;
+    readonly native: NativeContext;
     // (undocumented)
     ocr: OcrContext;
     // (undocumented)
@@ -2913,7 +2910,7 @@ export interface ProviderContext {
 }
 
 // @public
-export type ProviderContextFor<TConfig> = Pick<ProviderContext, "trace" | "request" | "native"> & ("env" extends keyof TConfig ? Pick<ProviderContext, "env"> : Record<never, never>) & ("credential" extends keyof TConfig ? Pick<ProviderContext, "credential"> : Record<never, never>) & ("http" extends keyof TConfig ? Pick<ProviderContext, "http"> : Record<never, never>) & ("files" extends keyof TConfig ? Pick<ProviderContext, "files"> : Record<never, never>) & ("cache" extends keyof TConfig ? Pick<ProviderContext, "cache"> : Record<never, never>) & ("state" extends keyof TConfig ? Pick<ProviderContext, "state"> : Record<never, never>) & ("stealth" extends keyof TConfig ? Pick<ProviderContext, "stealth"> : Record<never, never>) & ("browser" extends keyof TConfig ? Pick<ProviderContext, "browser"> : Record<never, never>) & ("auth" extends keyof TConfig ? Pick<ProviderContext, "auth"> : Record<never, never>) & ("ocr" extends keyof TConfig ? Pick<ProviderContext, "ocr"> : Record<never, never>) & ("stt" extends keyof TConfig ? Pick<ProviderContext, "stt"> : Record<never, never>) & ("resolver" extends keyof TConfig ? Pick<ProviderContext, "resolver"> : Record<never, never>) & ("choice" extends keyof TConfig ? Pick<ProviderContext, "choice"> : Record<never, never>);
+export type ProviderContextFor<TConfig> = Pick<ProviderContext, "trace" | "request"> & ("env" extends keyof TConfig ? Pick<ProviderContext, "env"> : Record<never, never>) & ("credential" extends keyof TConfig ? Pick<ProviderContext, "credential"> : Record<never, never>) & ("http" extends keyof TConfig ? Pick<ProviderContext, "http"> : Record<never, never>) & ("files" extends keyof TConfig ? Pick<ProviderContext, "files"> : Record<never, never>) & ("native" extends keyof TConfig ? Pick<ProviderContext, "native"> : Record<never, never>) & ("cache" extends keyof TConfig ? Pick<ProviderContext, "cache"> : Record<never, never>) & ("state" extends keyof TConfig ? Pick<ProviderContext, "state"> : Record<never, never>) & ("stealth" extends keyof TConfig ? Pick<ProviderContext, "stealth"> : Record<never, never>) & ("browser" extends keyof TConfig ? Pick<ProviderContext, "browser"> : Record<never, never>) & ("auth" extends keyof TConfig ? Pick<ProviderContext, "auth"> : Record<never, never>) & ("ocr" extends keyof TConfig ? Pick<ProviderContext, "ocr"> : Record<never, never>) & ("stt" extends keyof TConfig ? Pick<ProviderContext, "stt"> : Record<never, never>) & ("resolver" extends keyof TConfig ? Pick<ProviderContext, "resolver"> : Record<never, never>) & ("choice" extends keyof TConfig ? Pick<ProviderContext, "choice"> : Record<never, never>);
 
 // @public
 export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TDeclaration> ? ProviderContextFor<TDeclaration> : never;
@@ -4791,11 +4788,11 @@ export { z }
 // dist/server/serve-implementation.d.ts:138:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:146:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:198:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1521:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1645:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1703:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1711:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1712:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1519:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1643:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1701:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1709:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1710:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

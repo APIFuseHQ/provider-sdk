@@ -581,7 +581,7 @@ export function createCaptureContext(
 			credential,
 			state,
 		}),
-	};
+	} satisfies Omit<ProviderContext, "native"> as unknown as ProviderContext;
 
 	return {
 		ctx,

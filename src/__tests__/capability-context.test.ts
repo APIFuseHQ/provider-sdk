@@ -41,7 +41,7 @@ describe("declaration-derived provider contexts", () => {
 		expect(provider.id).toBe("capability-inline");
 	});
 
-	it("keeps ambient members for a provider declaring no capabilities", () => {
+	it("keeps only ambient members for a provider declaring no capabilities", () => {
 		const provider = defineProvider({
 			id: "capability-ambient",
 			version: "1.0.0",
@@ -54,6 +54,7 @@ describe("declaration-derived provider contexts", () => {
 					async handler(ctx) {
 						void ctx.trace;
 						void ctx.request?.headers;
+						// @ts-expect-error test-invalid: native is not declared.
 						void ctx.native;
 						return { ok: true };
 					},
@@ -62,6 +63,28 @@ describe("declaration-derived provider contexts", () => {
 		});
 
 		expect(provider.id).toBe("capability-ambient");
+	});
+
+	it("exposes native directly when declared on a capable runtime", () => {
+		const provider = defineProvider({
+			id: "capability-native",
+			version: "1.0.0",
+			runtime: "standard",
+			native: {},
+			meta,
+		})({
+			operations: {
+				probe: {
+					...operationSchemas,
+					async handler(ctx) {
+						void ctx.native.network;
+						return { ok: true };
+					},
+				},
+			},
+		});
+
+		expect(provider.native).toEqual({});
 	});
 
 	it("composes a separately authored context-bound operation", () => {

@@ -259,6 +259,25 @@ describe("defineProvider", () => {
 		expect(provider.native).toEqual(native);
 	});
 
+	it("accepts native on standard and shared runtimes", () => {
+		expect(() => defineProvider({ ...validConfig, native: {} })).not.toThrow();
+		expect(() =>
+			defineProvider({ ...validConfig, runtime: "shared", native: {} }),
+		).not.toThrow();
+	});
+
+	it("rejects native on the browser runtime", () => {
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				runtime: "browser",
+				native: {},
+			}),
+		).toThrow(
+			'Provider "korea-air-quality" cannot declare capability "native" with runtime "browser"',
+		);
+	});
+
 	it("rejects unknown and invalid native egress fields through defineProvider", () => {
 		const dynamic = {
 			sourceHostSuffixes: ["bootstrap.example"],

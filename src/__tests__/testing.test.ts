@@ -354,8 +354,7 @@ const nativeEgressHarnessProvider = defineProvider({
 			fixtures: { request: {}, response: { reads: 1 } },
 			healthCheckUnsupported: { reason: "native transport harness" },
 			handler: async (ctx) => {
-				const network = ctx.native?.network;
-				if (!network) throw new Error("native test context missing");
+				const network = ctx.native.network;
 				let reads = 0;
 				const target = {
 					get host() {
@@ -374,7 +373,7 @@ const nativeEgressHarnessProvider = defineProvider({
 			fixtures: { request: {}, response: { ok: true } },
 			healthCheckUnsupported: { reason: "native transport harness" },
 			handler: async (ctx) => {
-				await ctx.native?.network.connectTcp({ host: "undeclared.example", port: 5228 });
+				await ctx.native.network.connectTcp({ host: "undeclared.example", port: 5228 });
 				return { ok: true };
 			},
 		},
@@ -387,8 +386,7 @@ const nativeEgressHarnessProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "native transport harness" },
 			handler: async (ctx) => {
-				const network = ctx.native?.network;
-				if (!network) throw new Error("native test context missing");
+				const network = ctx.native.network;
 				const target = { host: "session.example", port: 5228 };
 				const grant = network.grantTcpEgress({
 					sourceHost: "bootstrap.example",

@@ -168,7 +168,7 @@ export function createProviderContextDouble(
 		stt: createUnsupportedSttClient(),
 		trace: createTraceContext(),
 		...overrides,
-	};
+	} as ProviderContext;
 }
 
 export function createProviderDefinitionDouble(

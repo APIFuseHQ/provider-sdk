@@ -815,6 +815,14 @@ function validateProviderShape(config: unknown): void {
 	assertRequiredField(config, "operations", String(config.id));
 	if (typeof config.runtime === "string")
 		assertLiteralField(config.runtime, "runtime", VALID_RUNTIMES, String(config.id));
+	if (config.native !== undefined && config.runtime === "browser") {
+		throw new ValidationError(
+			`Provider "${String(config.id)}" cannot declare capability "native" with runtime "browser"`,
+			{
+				fix: 'Use runtime: "standard" or runtime: "shared", or remove the native declaration.',
+			},
+		);
+	}
 	const auth = config.auth;
 	if (auth && typeof auth === "object" && "mode" in auth && typeof auth.mode === "string")
 		assertLiteralField(auth.mode, "auth.mode", VALID_AUTH_MODES, String(config.id));

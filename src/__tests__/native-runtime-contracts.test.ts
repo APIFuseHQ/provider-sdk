@@ -5,7 +5,7 @@ import type {
 	NativeNetworkConnection,
 	NativeNetworkConnectInput,
 	NativeProviderConfig,
-	NativeProviderContext,
+	NativeContext,
 	NativeTcpEgressGrant,
 	ProviderContext,
 	ProviderFileRef,
@@ -66,7 +66,7 @@ interface KakaoNativeNetworkClient {
 	grantTcpEgress(input: unknown): KakaoNativeTcpEgressGrant;
 }
 
-type KakaoNativeProviderContext = {
+type KakaoNativeContext = {
 	readonly network: KakaoNativeNetworkClient;
 };
 
@@ -114,7 +114,7 @@ const bridgeNetwork: KakaoNativeNetworkClient = {
 	grantTcpEgress: () => ({ revoke() {} }),
 };
 
-const bridgeNative: KakaoNativeProviderContext = {
+const bridgeNative: KakaoNativeContext = {
 	network: bridgeNetwork,
 };
 
@@ -133,7 +133,7 @@ const publicConnectInput: NativeNetworkConnectInput = {
 const publicGrant: NativeTcpEgressGrant = bridgeNetwork.grantTcpEgress({});
 const publicNetwork: NativeNetworkClient = bridgeNetwork;
 const providerEntryNetwork: ProviderEntryNativeNetworkClient = bridgeNetwork;
-const publicNative: NativeProviderContext = bridgeNative;
+const publicNative: NativeContext = bridgeNative;
 
 const kakaoNativeDeclaration = {
 	network: {
@@ -155,7 +155,7 @@ const publicNativeDeclaration: NativeProviderConfig = kakaoNativeDeclaration;
 
 function contextCapabilities(ctx: ProviderContext): {
 	readonly files: ProviderFilesContext | undefined;
-	readonly native: NativeProviderContext | undefined;
+	readonly native: NativeContext;
 } {
 	return { files: ctx.files, native: ctx.native };
 }
@@ -173,11 +173,11 @@ describe("public native runtime contracts", () => {
 		expect(publicNative.network).toBe(bridgeNetwork);
 	});
 
-	it("types the native declaration and optional runtime capabilities", () => {
+	it("types the native declaration and provider context capability", () => {
 		expect(publicNativeDeclaration.network?.tcp?.[0]?.host).toBe("booking-loco.kakao.com");
-		expect(contextCapabilities({} as ProviderContext)).toEqual({
+		expect(contextCapabilities({ native: bridgeNative } as ProviderContext)).toEqual({
 			files: undefined,
-			native: undefined,
+			native: bridgeNative,
 		});
 	});
 });
