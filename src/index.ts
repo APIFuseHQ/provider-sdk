@@ -34,7 +34,9 @@ export {
 	defineStreamOperation,
 	every,
 	type AuthStartNoInputGuard,
-	type ProviderConfig,
+	type ProviderBuilder,
+	type ProviderContextOf,
+	type ProviderDeclaration,
 } from "./define.js";
 export type { DevServerOptions } from "./dev.js";
 export { createDevServer, startDevServer } from "./dev.js";
@@ -301,6 +303,7 @@ export type {
 	ProviderChallenge,
 	ProviderChallengeKind,
 	ProviderContext,
+	ProviderContextFor,
 	ProviderDefinition,
 	ProviderDeploymentOverrides,
 	ProviderFileRef,

@@ -6,6 +6,7 @@ import type {
 	ProviderContext,
 	ProviderDefinition,
 } from "../types.js";
+import { defineProvider, type ProviderDeclaration } from "../define.js";
 import { createProviderCache } from "../runtime/cache.js";
 import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { createCredentialContext } from "../runtime/credential.js";
@@ -27,7 +28,23 @@ export function emptyArray<T>(): T[] {
 	return [];
 }
 
-
+/** Runtime-validation adapter for fixtures that intentionally construct invalid configs. */
+export function defineTestProvider<
+	TConfig extends { operations: Record<string, unknown> },
+>(config: TConfig): Omit<ProviderDefinition, "operations"> &
+	Omit<TConfig, "operations"> & {
+		operations: ProviderDefinition["operations"] & TConfig["operations"];
+	} {
+	const { operations, ...declaration } = config;
+	const buildProvider = defineProvider(declaration as unknown as ProviderDeclaration);
+	return buildProvider({ operations: operations as never }) as Omit<
+		ProviderDefinition,
+		"operations"
+	> &
+		Omit<TConfig, "operations"> & {
+			operations: ProviderDefinition["operations"] & TConfig["operations"];
+		};
+}
 
 export async function capturedError(operation: Promise<unknown>): Promise<Error> {
 	return await operation.then(

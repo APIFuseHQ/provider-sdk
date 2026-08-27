@@ -104,7 +104,14 @@ description:
 
 ### Factored operations
 
-Use `defineOperation()` when an operation is large enough to live beside helper functions or in a separate module. It preserves the same type inference as inline `defineProvider()` operations and can be placed directly in the provider `operations` map. `defineProvider()` accepts Zod and Standard Schema v1-compatible schemas. If config validation fails, the SDK names the field to fix, for example `runtime`, `auth.mode`, `operations.<id>.handler`, or `operations.<id>.fixtures.response`.
+`defineProvider(declaration)` returns the builder that accepts `operations`, so
+inline handlers are typed only after capability declarations are fixed. Export
+`ProviderContextOf<typeof buildProvider>` once from the provider entry point.
+Separate operation files import that provider context and call
+`defineOperation<ProviderContext>()({...})`; helpers should accept the one SDK
+client they use rather than the provider context. Zod and Standard Schema v1
+schemas retain input/output inference. Invalid configs name the offending field,
+such as `auth.mode` or `operations.<id>.fixtures.response`.
 
 ### Replay-safe fixtures
 
@@ -236,8 +243,9 @@ level, then call `ctx.stt` from operation handlers or auth-flow handlers.
 ```ts
 export default defineProvider({
   id: "example-provider",
-  // ...metadata, auth, operations, allowedHosts
+  // ...metadata, auth, allowedHosts
   stt: { mode: "required" },
+})({
   operations: {
     verifyAudioOtp: {
       input: z.object({
@@ -357,11 +365,13 @@ const paymentWebviewJourney = defineHealthJourney({
 	],
 });
 
-export default defineProvider({
+const buildProvider = defineProvider({
 	id: "example-provider",
-	// ...metadata, auth, operations, allowedHosts
+	// ...metadata, auth, allowedHosts
 	healthJourneys: [paymentWebviewJourney],
 });
+
+export default buildProvider({ operations });
 ```
 <!-- @magic-end:sample -->
 
@@ -604,7 +614,7 @@ failures are sanitized before propagation.
   HTML, or upstream `Error` objects.
 
 ```ts
-export default defineProvider({
+const buildProvider = defineProvider({
   id: "example-provider",
   version: "1.0.0",
   runtime: "standard",
@@ -638,8 +648,10 @@ export default defineProvider({
     },
   },
   credential: { keys: ["cookie"] },
-  // ...metadata and operations
+  // ...metadata
 });
+
+export default buildProvider({ operations });
 ```
 
 - Credentials auth providers should use `defineCredentialsAuth()` instead of
@@ -666,15 +678,17 @@ const credentialsAuth = defineCredentialsAuth({
   },
 });
 
-export default defineProvider({
+const buildProvider = defineProvider({
   id: "example-provider",
   version: "1.0.0",
   runtime: "standard",
   auth: credentialsAuth.auth,
   credential: credentialsAuth.credential,
   context: credentialsAuth.context,
-  // ...metadata and operations
+	// ...metadata
 });
+
+export default buildProvider({ operations });
 ```
 
 For OTP, MFA, CAPTCHA handoff, or user-approved login, return a challenge from

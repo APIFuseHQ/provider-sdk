@@ -1,8 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { assertIsError } from "./test-utils.js";
-import { defineProvider } from "../define.js";
+import { assertIsError, defineTestProvider as defineProvider } from "./test-utils.js";
 import { ProviderError } from "../errors.js";
 import { createFlowContext } from "../runtime/auth-flow.js";
 import {
@@ -603,11 +602,9 @@ describe("OCR Provider SDK context integration", () => {
 		} as const;
 
 		expect(() =>
-			// @ts-expect-error test-invalid: OCR declaration must be an object
 			defineProvider({ ...base, ocr: true }),
 		).toThrow(/invalid ocr: must be an object/);
 		expect(() =>
-			// @ts-expect-error test-invalid: OCR mode must be required or optional
 			defineProvider({ ...base, ocr: { mode: "sometimes" } }),
 		).toThrow(/ocr.mode/);
 	});
@@ -655,7 +652,7 @@ describe("OCR Provider SDK context integration", () => {
 			auth: {
 				mode: "credentials",
 				flow: {
-					async start(ctx) {
+					async start(ctx: { ocr: OcrContext }) {
 						const result = await ctx.ocr.recognize({ image });
 						return {
 							kind: "message",
@@ -672,7 +669,7 @@ describe("OCR Provider SDK context integration", () => {
 				recognize: {
 					input: z.object({}),
 					output: z.object({ text: z.string() }),
-					async handler(ctx) {
+					async handler(ctx: { ocr: OcrContext }) {
 						return { text: (await ctx.ocr.recognize({ image })).text };
 					},
 					healthCheckUnsupported: { reason: "unit test" },
@@ -718,7 +715,7 @@ describe("OCR Provider SDK context integration", () => {
 				recognize: {
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
-					async handler(ctx) {
+					async handler(ctx: { ocr: OcrContext }) {
 						await ctx.ocr.recognize({ image });
 						return { ok: true };
 					},

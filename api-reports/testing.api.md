@@ -1291,8 +1291,10 @@ interface OperationContractMetadata {
     version?: string;
 }
 
+// Warning: (ae-forgotten-export) The symbol "ProviderContext" needs to be exported by the entry point index.d.ts
+//
 // @public (undocumented)
-interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike> {
+interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike, TContext = ProviderContext> {
     // Warning: (ae-forgotten-export) The symbol "OperationAnnotations" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -1316,12 +1318,11 @@ interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput ex
         response: InferSchemaOutput<TOutput>;
         recordedAt?: string;
     };
-    // Warning: (ae-forgotten-export) The symbol "ProviderContext" needs to be exported by the entry point index.d.ts
     // Warning: (ae-forgotten-export) The symbol "InferSchemaOutput" needs to be exported by the entry point index.d.ts
     // Warning: (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
-    handler(ctx: ProviderContext, input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
+    handler(ctx: TContext, input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
     // Warning: (ae-forgotten-export) The symbol "HealthCheckSuite" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -2951,8 +2952,8 @@ interface VerificationCodeExtractionResult {
 // dist/types.d.ts:1711:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1712:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1721:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1970:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:2028:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1976:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2034:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

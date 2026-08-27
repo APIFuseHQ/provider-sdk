@@ -86,6 +86,7 @@ export default defineProvider({
   runtime: "standard",
   proxy: true,
   meta: { displayName: "Invalid Import Declaration Provider", category: "other" },
+})({
   operations: {
     lookup: {
       input: z.object({}),
@@ -339,6 +340,7 @@ export default defineProvider({
     justification: "Session cookie is required for upstream calls.",
   },
   meta: { displayName: "Credential Write Provider", category: "other" },
+})({
   operations: {
     lookup: {
       descriptionKey: "operations.lookup.description",

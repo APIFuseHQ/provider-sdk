@@ -4,10 +4,10 @@ import {
 	centered,
 	delayed,
 	defineHealthJourney,
-	defineProvider,
 	defineSmsOtpMatcher,
 	every,
 } from "./index.js";
+import { defineTestProvider as defineProvider } from "./__tests__/test-utils.js";
 
 const noopHandler = async () => ({});
 

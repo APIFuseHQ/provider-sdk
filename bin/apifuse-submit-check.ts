@@ -1196,18 +1196,31 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		);
 	}
 
-	// Scope the scan to the argument of the EXPORTED `defineProvider(...)` call.
+	// Scope the scan to the exported provider builder's implementation argument,
+	// or to the legacy-looking declaration call used by structural test fixtures.
 	// A provider can contain helper/non-exported defineProvider calls before the
 	// real default export (e.g. test scaffolds), so resolve the default export
 	// rather than blindly taking the first regex match. Resolution order:
-	//   1. `export default defineProvider(` — inline default export
-	//   2. `export default <ident>` then `const <ident> = defineProvider(`
-	//   3. fallback: first `defineProvider(` in the file
+	//   1. `export default <builder>(` — phase-separated provider
+	//   2. `export default defineProvider(` — structural fixture
+	//   3. `export default <ident>` then `const <ident> = defineProvider(`
+	//   4. fallback: first `defineProvider(` in the file
 	let defineParenIndex = -1;
+	const builderDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*\(/.exec(source);
+	if (builderDefault?.[1] !== undefined && builderDefault[1] !== "defineProvider") {
+		defineParenIndex = builderDefault.index + builderDefault[0].length - 1;
+	}
 	const inlineDefault = /\bexport\s+default\s+defineProvider\s*\(/.exec(source);
-	if (inlineDefault) {
-		defineParenIndex = inlineDefault.index + inlineDefault[0].length - 1; // points at `(`
-	} else {
+	if (defineParenIndex === -1 && inlineDefault) {
+		const declarationParen = inlineDefault.index + inlineDefault[0].length - 1;
+		const declarationStart = declarationParen + 1;
+		const declaration = balancedValueExpression(source, declarationStart);
+		let cursor = declarationStart + declaration.length;
+		while (/\s/.test(source[cursor] ?? "")) cursor++;
+		if (source[cursor] === ")") cursor++;
+		while (/\s/.test(source[cursor] ?? "")) cursor++;
+		defineParenIndex = source[cursor] === "(" ? cursor : declarationParen;
+	} else if (defineParenIndex === -1) {
 		const namedDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/.exec(source);
 		const exportedName = namedDefault?.[1];
 		if (exportedName !== undefined) {
@@ -1236,7 +1249,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	const argStart = defineParenIndex + 1;
 	const argText = balancedValueExpression(source, argStart);
 
-	// Resolve the value passed as `operations:` inside the defineProvider call,
+	// Resolve the value passed as `operations:` inside the implementation call,
 	// following one alias hop. The value is classified as a static object
 	// literal (pass) or a factory/call expression (block). The regex index is
 	// offset back into the full source so line numbers stay accurate.
@@ -1249,7 +1262,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		opsLine = offsetToLine(source, valueStart);
 	}
 
-	// Property shorthand: `defineProvider({ ..., operations })` — resolve the
+	// Property shorthand: `buildProvider({ operations })` — resolve the
 	// local `operations` const initializer.
 	let aliasName: string | undefined;
 	if (opsValue === undefined) {
@@ -1395,7 +1408,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			blockerMessage:
 				"defineProvider operations are composed by a factory call instead of a static object literal.",
 			remediation:
-				"Declare operations as a static literal: defineProvider({ operations: { 'op-id': defineOperation({...}) } }). The provider-registry AST gate requires static runtime/operations; factory composition fails the registry build. If composition is unavoidable, add `// @apifuse-allow flat-operation-composition: <reason>`.",
+				"Declare operations as a static literal in the provider builder call. The provider-registry AST gate requires static runtime/operations; factory composition fails the registry build. If composition is unavoidable, add `// @apifuse-allow flat-operation-composition: <reason>`.",
 			passMessage: "defineProvider declares operations as a static object literal.",
 		});
 	}

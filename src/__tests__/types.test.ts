@@ -66,7 +66,7 @@ describe("ProviderDefinition types", () => {
 	});
 
 	it("rejects auth start handlers that declare input at runtime", () => {
-		const noop = defineOperation({
+		const noop = defineOperation<unknown>()({
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -94,13 +94,12 @@ describe("ProviderDefinition types", () => {
 						continue: async () => ({ kind: "complete", turnId: "complete" }),
 					},
 				},
-				operations: { noop },
-			}),
+			})({ operations: { noop } }),
 		).toThrow(/auth\.flow\.start must not declare an input parameter/);
 	});
 
 	it("rejects defaulted auth start input without rejecting no-input handlers", () => {
-		const noop = defineOperation({
+		const noop = defineOperation<unknown>()({
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -132,8 +131,7 @@ describe("ProviderDefinition types", () => {
 						continue: async () => ({ kind: "complete", turnId: "complete" }),
 					},
 				},
-				operations: { noop },
-			});
+			})({ operations: { noop } });
 
 		expect(defaultedInputStart.length).toBe(1);
 		expect(defineInvalidProvider).toThrow(ProviderError);
@@ -155,8 +153,7 @@ describe("ProviderDefinition types", () => {
 					continue: async () => ({ kind: "complete", turnId: "complete" }),
 				},
 			},
-			operations: { noop },
-		});
+		})({ operations: { noop } });
 		const noParameterProvider = defineProvider({
 			id: "no-parameter-auth-start",
 			version: "1.0.0",
@@ -173,15 +170,14 @@ describe("ProviderDefinition types", () => {
 					continue: async () => ({ kind: "complete", turnId: "complete" }),
 				},
 			},
-			operations: { noop },
-		});
+		})({ operations: { noop } });
 
 		expect(contextOnlyProvider.id).toBe("context-only-auth-start");
 		expect(noParameterProvider.id).toBe("no-parameter-auth-start");
 	});
 
 	it("does not reject one-parameter function handlers with misleading body or comments", () => {
-		const noop = defineOperation({
+		const noop = defineOperation<unknown>()({
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -218,8 +214,7 @@ describe("ProviderDefinition types", () => {
 						continue: async () => ({ kind: "complete", turnId: "complete" }),
 					},
 				},
-				operations: { noop },
-			});
+			})({ operations: { noop } });
 
 		expect(() => makeProvider("nested-arrow-auth-start", nestedArrow)).not.toThrow();
 		expect(() => makeProvider("block-comment-auth-start", blockComment)).not.toThrow();
@@ -249,13 +244,12 @@ describe("ProviderDefinition types", () => {
 						continue: async () => ({ kind: "complete", turnId: "complete" }),
 					},
 				},
-				operations: { noop },
-			}),
+			})({ operations: { noop } }),
 		).toThrow(/auth\.flow\.start must not declare an input parameter/);
 	});
 
 	it("does not reject ambiguous auth start handler source shapes", () => {
-		const noop = defineOperation({
+		const noop = defineOperation<unknown>()({
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -299,8 +293,7 @@ describe("ProviderDefinition types", () => {
 						continue: async () => ({ kind: "complete", turnId: "complete" }),
 					},
 				},
-				operations: { noop },
-			});
+			})({ operations: { noop } });
 
 		for (const [id, start] of [
 			["minified-auth-start", minifiedStart],
@@ -327,7 +320,7 @@ describe("ProviderDefinition types", () => {
 	});
 
 	it("documents the known compile-time limitation for widened auth flows", () => {
-		const noop = defineOperation({
+		const noop = defineOperation<unknown>()({
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -378,8 +371,7 @@ describe("ProviderDefinition types", () => {
 						category: "test",
 					},
 					auth: { mode: "credentials", flow },
-					operations: { noop },
-				});
+				})({ operations: { noop } });
 
 			expect(defineWidenedProvider).toThrow(ProviderError);
 			expect(defineWidenedProvider).toThrow(
@@ -389,7 +381,7 @@ describe("ProviderDefinition types", () => {
 	});
 
 	it("rejects legacy auth exchange handlers at runtime", () => {
-		const noop = defineOperation({
+		const noop = defineOperation<unknown>()({
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -414,8 +406,7 @@ describe("ProviderDefinition types", () => {
 					},
 					exchange: async () => ({ session: "cookie" }),
 				},
-				operations: { noop },
-			}),
+			})({ operations: { noop } }),
 		).toThrow(/auth\.exchange is not part of the Provider SDK auth contract/);
 	});
 

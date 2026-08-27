@@ -2293,6 +2293,27 @@ export interface ProviderContext {
 	choice: ProviderChoiceContext;
 }
 
+/**
+ * The operation context exposed for one provider declaration. Capability
+ * bindings are present only when their corresponding declaration is present;
+ * trace, request, and native remain ambient runtime bindings.
+ */
+export type ProviderContextFor<TConfig> =
+	Pick<ProviderContext, "trace" | "request" | "native">
+	& ("env" extends keyof TConfig ? Pick<ProviderContext, "env"> : Record<never, never>)
+	& ("credential" extends keyof TConfig ? Pick<ProviderContext, "credential"> : Record<never, never>)
+	& ("http" extends keyof TConfig ? Pick<ProviderContext, "http"> : Record<never, never>)
+	& ("files" extends keyof TConfig ? Pick<ProviderContext, "files"> : Record<never, never>)
+	& ("cache" extends keyof TConfig ? Pick<ProviderContext, "cache"> : Record<never, never>)
+	& ("state" extends keyof TConfig ? Pick<ProviderContext, "state"> : Record<never, never>)
+	& ("stealth" extends keyof TConfig ? Pick<ProviderContext, "stealth"> : Record<never, never>)
+	& ("browser" extends keyof TConfig ? Pick<ProviderContext, "browser"> : Record<never, never>)
+	& ("auth" extends keyof TConfig ? Pick<ProviderContext, "auth"> : Record<never, never>)
+	& ("ocr" extends keyof TConfig ? Pick<ProviderContext, "ocr"> : Record<never, never>)
+	& ("stt" extends keyof TConfig ? Pick<ProviderContext, "stt"> : Record<never, never>)
+	& ("resolver" extends keyof TConfig ? Pick<ProviderContext, "resolver"> : Record<never, never>)
+	& ("choice" extends keyof TConfig ? Pick<ProviderContext, "choice"> : Record<never, never>);
+
 export interface ProxiedOAuthConfig {
 	authorizeUrl: string;
 	tokenUrl: string;
@@ -2349,6 +2370,7 @@ export interface OperationContractMetadata {
 export interface OperationDefinition<
 	TInput extends SchemaLike = SchemaLike,
 	TOutput extends SchemaLike = SchemaLike,
+	TContext = ProviderContext,
 > {
 	/**
 	 * Short English display title for the operation. The SDK passes it through
@@ -2380,7 +2402,7 @@ export interface OperationDefinition<
 	input: TInput;
 	output: TOutput;
 	handler(
-		ctx: ProviderContext,
+		ctx: TContext,
 		input: InferSchemaOutput<TInput>,
 	):
 		| OperationHandlerResult<InferSchemaOutput<TOutput>>

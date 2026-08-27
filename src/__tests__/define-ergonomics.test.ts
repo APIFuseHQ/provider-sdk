@@ -1,11 +1,14 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { defineOperation, defineProvider, defineStreamOperation } from "../define.js";
+import { defineOperation, defineStreamOperation } from "../define.js";
 import { ProviderError } from "../errors.js";
 import { event } from "../stream.js";
-import type { StandardSchemaV1 } from "../types.js";
-import { createProviderContextDouble } from "./test-utils.js";
+import type { ProviderContext, StandardSchemaV1 } from "../types.js";
+import {
+	createProviderContextDouble,
+	defineTestProvider as defineProvider,
+} from "./test-utils.js";
 
 const callDefineProvider = (config: unknown): unknown =>
 	// @ts-expect-error test-invalid: runtime definition validation must accept unknown JavaScript input.
@@ -21,7 +24,7 @@ const makeProviderConfig = () => ({
 		category: "test",
 	},
 	operations: {
-		lookup: defineOperation({
+		lookup: defineOperation<ProviderContext>()({
 			input: z.object({ id: z.string() }),
 			output: z.object({ result: z.string() }),
 			async handler(_ctx, input) {
@@ -47,7 +50,7 @@ describe("defineProvider ergonomics", () => {
 	});
 
 	it("defineOperation composes factored operations with inferred input", async () => {
-		const search = defineOperation({
+		const search = defineOperation<ProviderContext>()({
 			input: z.object({ q: z.string() }),
 			output: z.object({ count: z.number() }),
 			async handler(_ctx, input) {
@@ -68,7 +71,7 @@ describe("defineProvider ergonomics", () => {
 	});
 
 	it("defineProvider accepts generated readonly metadata and factored operation maps", async () => {
-		const search = defineOperation({
+		const search = defineOperation<ProviderContext>()({
 			input: z.object({ q: z.string() }),
 			output: z.object({ count: z.number() }),
 			async handler(_ctx, input) {
@@ -98,7 +101,7 @@ describe("defineProvider ergonomics", () => {
 	});
 
 	it("defineStreamOperation composes operations with explicit non-JSON transport", () => {
-		const events = defineStreamOperation({
+		const events = defineStreamOperation<ProviderContext>()({
 			input: z.object({ topic: z.string() }),
 			output: z.object({ accepted: z.boolean() }),
 			transport: {
@@ -159,7 +162,7 @@ describe("defineProvider ergonomics", () => {
 			},
 		};
 
-		const standard = defineOperation({
+		const standard = defineOperation<ProviderContext>()({
 			input: InputSchema,
 			output: OutputSchema,
 			async handler(_ctx, input) {

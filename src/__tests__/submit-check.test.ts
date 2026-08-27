@@ -226,6 +226,7 @@ export default defineProvider({
       limitationKeys: ["provider.meta.publicProfile.limitations"],
     },
   },
+})({
   operations: {
     lookup: {
       descriptionKey: "operations.lookup.description",
@@ -3439,7 +3440,7 @@ const VERIFIED = new Set<string>(["ping"]);
 const operations: Record<string, OperationDefinition> = Object.fromEntries(
   Object.entries(allOperations).filter(([opId]) => VERIFIED.has(opId)),
 );
-export default defineProvider({ id: "reshape", version: "1.0.0", runtime: "standard", operations });
+export default defineProvider({ id: "reshape", version: "1.0.0", runtime: "standard" })({ operations });
 `;
 		const dir = makeProviderDir("submit-transparent-reshape-ops-", source);
 		writeValidLocaleCatalogs(dir);
@@ -3516,7 +3517,7 @@ export default defineProvider({ id: "launder", version: "1.0.0", runtime: "stand
 import { defineProvider } from "@apifuse/provider-sdk";
 
 const base = { ping: { handler: async () => ({ ok: true }) } };
-export default defineProvider({ id: "static-spread", version: "1.0.0", runtime: "standard", operations: { ...base } });
+export default defineProvider({ id: "static-spread", version: "1.0.0", runtime: "standard" })({ operations: { ...base } });
 `;
 		const dir = makeProviderDir("submit-static-var-spread-", source);
 		writeValidLocaleCatalogs(dir);
