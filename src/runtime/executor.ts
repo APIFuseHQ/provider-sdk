@@ -7,7 +7,7 @@ import {
 } from "../errors.js";
 import { z } from "zod";
 import { parseSchema } from "../schema.js";
-import type { ProviderContext, ProviderDefinition } from "../types.js";
+import type { ProviderDefinition } from "../types.js";
 import { assertRequiredSecretsPresent } from "./secrets.js";
 
 export function isStreamingOperation(provider: ProviderDefinition, operationId: string): boolean {
@@ -26,10 +26,13 @@ export function isStreamingOperation(provider: ProviderDefinition, operationId: 
  *
  * @see openspec/provider-sdk/03-sdk-core.md §3.6
  */
-export async function executeOperation(
-	provider: ProviderDefinition,
-	operationId: string,
-	ctx: ProviderContext,
+export async function executeOperation<
+	const TProvider extends ProviderDefinition,
+	const TOperationId extends keyof TProvider["operations"] & string,
+>(
+	provider: TProvider,
+	operationId: TOperationId,
+	ctx: NoInfer<Parameters<TProvider["operations"][TOperationId]["handler"]>[0]>,
 	input: unknown,
 	_options?: { skipAuth?: boolean },
 ): Promise<unknown> {
@@ -47,7 +50,9 @@ export async function executeOperation(
 	// handler, so every invocation path (serve /v1, self-test probes, perf,
 	// record) fails with the same structured MISSING_SECRET error instead of a
 	// handler-specific crash. Providers must not re-check presence locally.
-	assertRequiredSecretsPresent(provider, ctx.env);
+	if (provider.secrets?.some((secret) => secret.required === true)) {
+		assertRequiredSecretsPresent(provider, "env" in ctx ? ctx.env : { get: () => undefined });
+	}
 
 	const validatedInput = await parseSchema(
 		operation.input,

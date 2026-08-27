@@ -2844,7 +2844,7 @@ export type ProviderBuilder<TDeclaration extends ProviderDeclaration> = <
 	implementation: {
 		operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
 	},
-) => ProviderDefinition & {
+) => Omit<ProviderDefinition, "operations"> & {
 	operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
 };
 
@@ -2876,7 +2876,7 @@ function finalizeProvider<
 	TContext,
 >(
 	config: ProviderConfig<TOperations, TContext>,
-): ProviderDefinition & {
+): Omit<ProviderDefinition, "operations"> & {
 	operations: OperationMapConfig<TOperations, TContext>;
 } {
 	validateProviderShape(config);
@@ -2939,7 +2939,7 @@ function finalizeProvider<
 			`Provider "${config.id}" cannot define browser config unless runtime is "browser"`,
 			{ fix: 'Set runtime: "browser" or remove the browser config' },
 		);
-	const provider: ProviderDefinition & {
+	const provider: Omit<ProviderDefinition, "operations"> & {
 		operations: OperationMapConfig<TOperations, TContext>;
 	} = {
 		id: config.id,
@@ -2963,14 +2963,15 @@ function finalizeProvider<
 		credential: config.credential,
 		context: config.context,
 		meta: config.meta,
-		operations: operations as ProviderDefinition["operations"] &
-			OperationMapConfig<TOperations, TContext>,
+		operations,
 		// Transitional healthMonitor → healthProbe alias: mirror whichever field
 		// was declared onto both so old and new consumers keep working.
 		healthMonitor: config.healthMonitor ?? config.healthProbe,
 		healthProbe: config.healthProbe ?? config.healthMonitor,
 		healthJourneys: config.healthJourneys,
 	};
-	validateFailClosedDeclaration(provider);
+	// Declaration validation never invokes handlers, so their declaration-bound
+	// context parameter is irrelevant to the runtime ProviderDefinition shape.
+	validateFailClosedDeclaration(provider as ProviderDefinition);
 	return provider;
 }
