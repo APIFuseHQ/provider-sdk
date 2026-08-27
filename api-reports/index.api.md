@@ -973,14 +973,10 @@ export function defineHealthJourney(config: HealthJourneyDefinition): HealthJour
 // Warning: (ae-forgotten-export) The symbol "OperationConfig" needs to be exported by the entry point index.d.ts
 //
 // @public
-export function defineOperation<TInput extends SchemaLike, TOutput extends SchemaLike>(operation: OperationConfig<TInput, TOutput>): OperationDefinition<TInput, TOutput>;
+export function defineOperation<TContext>(): <TInput extends SchemaLike, TOutput extends SchemaLike>(config: OperationConfig<TInput, TOutput, TContext>) => OperationDefinition<TInput, TOutput, TContext>;
 
-// Warning: (ae-forgotten-export) The symbol "ProviderOperation" needs to be exported by the entry point index.d.ts
-//
-// @public (undocumented)
-export function defineProvider<TOperations extends Record<string, ProviderOperation>, TConfig extends ProviderConfig<TOperations>>(config: TConfig & AuthStartNoInputGuard<TConfig>): ProviderDefinition & {
-    operations: OperationMapConfig<TOperations>;
-};
+// @public
+export function defineProvider<const TDeclaration extends ProviderDeclaration>(declaration: TDeclaration & Record<Exclude<keyof TDeclaration, keyof ProviderDeclaration>, never> & AuthStartNoInputGuard<TDeclaration>): ProviderBuilder<TDeclaration>;
 
 // @public (undocumented)
 export function defineSmsOtpMatcher(config: Omit<SmsOtpMatcherDefinition, "extractOtp">): SmsOtpMatcherDefinition;
@@ -988,7 +984,7 @@ export function defineSmsOtpMatcher(config: Omit<SmsOtpMatcherDefinition, "extra
 // Warning: (ae-forgotten-export) The symbol "StreamOperationConfig" needs to be exported by the entry point index.d.ts
 //
 // @public
-export function defineStreamOperation<TInput extends SchemaLike, TOutput extends SchemaLike>(operation: StreamOperationConfig<TInput, TOutput>): OperationDefinition<TInput, TOutput>;
+export function defineStreamOperation<TContext>(): <TInput extends SchemaLike, TOutput extends SchemaLike>(config: StreamOperationConfig<TInput, TOutput, TContext>) => OperationDefinition<TInput, TOutput, TContext>;
 
 // @public (undocumented)
 export function delayed(maxDelay: string): HealthScheduleRandomization;
@@ -1610,9 +1606,9 @@ export const HttpRetryUnsafeMethodPolicy: {
 export type HttpRetryUnsafeMethodPolicy = (typeof HttpRetryUnsafeMethodPolicy)[keyof typeof HttpRetryUnsafeMethodPolicy];
 
 // @public (undocumented)
-type HttpStreamOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<OperationConfig<TInput, TOutput>, "handler" | "transport"> & {
+type HttpStreamOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike, TContext = ProviderContext> = Omit<OperationConfig<TInput, TOutput, TContext>, "handler" | "transport"> & {
     transport: OperationHttpStreamTransport;
-    handler(ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0], input: InferSchemaOutput<TInput>): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
+    handler(ctx: TContext, input: InferSchemaOutput<TInput>): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
 };
 
 // @public (undocumented)
@@ -2226,8 +2222,8 @@ export interface OperationAnnotations {
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
 
 // @public (undocumented)
-type OperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<OperationDefinition<TInput, TOutput>, "handler"> & {
-    handler(ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0], input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
+type OperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike, TContext = ProviderContext> = Omit<OperationDefinition<TInput, TOutput, TContext>, "handler"> & {
+    handler(ctx: TContext, input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
 };
 
 // @public (undocumented)
@@ -2240,7 +2236,7 @@ export interface OperationContractMetadata {
 }
 
 // @public (undocumented)
-export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike> {
+export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike, TContext = ProviderContext> {
     // (undocumented)
     annotations?: OperationAnnotations;
     // (undocumented)
@@ -2259,7 +2255,7 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
         recordedAt?: string;
     };
     // (undocumented)
-    handler(ctx: ProviderContext, input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
+    handler(ctx: TContext, input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
     // (undocumented)
     healthCheck?: HealthCheckSuite<InferSchemaOutput<TInput>, InferSchemaOutput<TOutput>>;
     // (undocumented)
@@ -2376,9 +2372,11 @@ interface OperationJsonTransport {
 // @public (undocumented)
 export type OperationLifecycle = "stable" | "beta" | "deprecated" | "removed";
 
+// Warning: (ae-forgotten-export) The symbol "ProviderOperation" needs to be exported by the entry point index.d.ts
+//
 // @public (undocumented)
-type OperationMapConfig<TOperations extends Record<string, ProviderOperation>> = {
-    [K in keyof TOperations]: TOperations[K] extends OperationDefinition<infer TInput, infer TOutput> ? OperationConfig<TInput, TOutput> | OperationDefinition<TInput, TOutput> : never;
+type OperationMapConfig<TOperations extends Record<string, ProviderOperation>, TContext = ProviderContext> = {
+    [K in keyof TOperations]: TOperations[K] extends OperationDefinition<infer TInput, infer TOutput> ? OperationConfig<TInput, TOutput, TContext> | OperationDefinition<TInput, TOutput, TContext> : never;
 };
 
 // @public (undocumented)
@@ -2583,6 +2581,13 @@ type ProviderAuthLike = {
         refresh?: unknown;
     };
     exchange?: unknown;
+};
+
+// @public
+export type ProviderBuilder<TDeclaration extends ProviderDeclaration> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
+    operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+}) => ProviderDefinition & {
+    operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
 };
 
 // @public (undocumented)
@@ -2870,85 +2875,6 @@ export type ProviderChoiceTokenErrorReason = "invalid_shape" | "invalid_signatur
 export type ProviderChoiceTokenPayload = Record<string, unknown>;
 
 // @public (undocumented)
-export interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> {
-    // (undocumented)
-    access?: ProviderAccessConfig;
-    // (undocumented)
-    allowedHosts?: string[];
-    // (undocumented)
-    auth?: AuthConfig;
-    // (undocumented)
-    browser?: {
-        engine: BrowserEngine;
-    };
-    cache?: true;
-    choice?: true;
-    // (undocumented)
-    context?: ContextDeclaration;
-    // (undocumented)
-    credential?: CredentialDeclaration;
-    deployment?: ProviderDeploymentOverrides;
-    env?: true;
-    files?: true;
-    // (undocumented)
-    healthJourneys?: readonly HealthJourneyDefinition[];
-    // (undocumented)
-    healthMonitor?: ProviderHealthMonitorConfig;
-    healthProbe?: ProviderHealthMonitorConfig;
-    http?: true;
-    // (undocumented)
-    id: string;
-    // (undocumented)
-    meta: {
-        displayName: string;
-        displayNameKey?: string;
-        descriptionKey: string;
-        category: string;
-        tags?: readonly string[];
-        icon?: string;
-        docTitleKey?: string;
-        docDescriptionKey?: string;
-        docSummaryKey?: string;
-        docMarkdownKey?: string;
-        normalizationNotesKeys?: readonly string[];
-        environment?: "staging";
-        purpose?: string;
-        purposeKey?: string;
-        publicProfile?: ProviderPublicProfile;
-        implementationProfile?: ProviderImplementationProfile;
-        contract?: {
-            publicSchemaFieldNames?: "normalized";
-        };
-    };
-    // (undocumented)
-    native?: NativeProviderConfig;
-    // (undocumented)
-    ocr?: ProviderOcrConfig;
-    // (undocumented)
-    operations: OperationMapConfig<TOperations>;
-    // (undocumented)
-    proxy?: ProviderProxyConfig;
-    // (undocumented)
-    resolver?: ProviderResolverConfig;
-    // (undocumented)
-    reviewed?: ProviderReviewed;
-    // (undocumented)
-    runtime: "standard" | "shared" | "browser";
-    // (undocumented)
-    secrets?: ProviderSecretDeclaration[];
-    state?: true;
-    // (undocumented)
-    stealth?: {
-        profile: string;
-        platform: StealthPlatform;
-    };
-    // (undocumented)
-    stt?: ProviderSttConfig;
-    // (undocumented)
-    version: string;
-}
-
-// @public (undocumented)
 export interface ProviderContext {
     // (undocumented)
     auth: AuthContext;
@@ -2985,6 +2911,12 @@ export interface ProviderContext {
     // (undocumented)
     trace: TraceContext_2;
 }
+
+// @public
+export type ProviderContextFor<TConfig> = Pick<ProviderContext, "trace" | "request" | "native"> & ("env" extends keyof TConfig ? Pick<ProviderContext, "env"> : Record<never, never>) & ("credential" extends keyof TConfig ? Pick<ProviderContext, "credential"> : Record<never, never>) & ("http" extends keyof TConfig ? Pick<ProviderContext, "http"> : Record<never, never>) & ("files" extends keyof TConfig ? Pick<ProviderContext, "files"> : Record<never, never>) & ("cache" extends keyof TConfig ? Pick<ProviderContext, "cache"> : Record<never, never>) & ("state" extends keyof TConfig ? Pick<ProviderContext, "state"> : Record<never, never>) & ("stealth" extends keyof TConfig ? Pick<ProviderContext, "stealth"> : Record<never, never>) & ("browser" extends keyof TConfig ? Pick<ProviderContext, "browser"> : Record<never, never>) & ("auth" extends keyof TConfig ? Pick<ProviderContext, "auth"> : Record<never, never>) & ("ocr" extends keyof TConfig ? Pick<ProviderContext, "ocr"> : Record<never, never>) & ("stt" extends keyof TConfig ? Pick<ProviderContext, "stt"> : Record<never, never>) & ("resolver" extends keyof TConfig ? Pick<ProviderContext, "resolver"> : Record<never, never>) & ("choice" extends keyof TConfig ? Pick<ProviderContext, "choice"> : Record<never, never>);
+
+// @public
+export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TDeclaration> ? ProviderContextFor<TDeclaration> : never;
 
 // @public (undocumented)
 type ProviderContractMetaLike = {
@@ -3079,6 +3011,83 @@ export interface ProviderContractSnapshot {
     readonly stealth?: JsonValue;
     // (undocumented)
     readonly stt?: JsonValue;
+}
+
+// @public (undocumented)
+export interface ProviderDeclaration {
+    // (undocumented)
+    access?: ProviderAccessConfig;
+    // (undocumented)
+    allowedHosts?: string[];
+    // (undocumented)
+    auth?: AuthConfig;
+    // (undocumented)
+    browser?: {
+        engine: BrowserEngine;
+    };
+    cache?: true;
+    choice?: true;
+    // (undocumented)
+    context?: ContextDeclaration;
+    // (undocumented)
+    credential?: CredentialDeclaration;
+    deployment?: ProviderDeploymentOverrides;
+    env?: true;
+    files?: true;
+    // (undocumented)
+    healthJourneys?: readonly HealthJourneyDefinition[];
+    // (undocumented)
+    healthMonitor?: ProviderHealthMonitorConfig;
+    healthProbe?: ProviderHealthMonitorConfig;
+    http?: true;
+    // (undocumented)
+    id: string;
+    // (undocumented)
+    meta: {
+        displayName: string;
+        displayNameKey?: string;
+        descriptionKey: string;
+        category: string;
+        tags?: readonly string[];
+        icon?: string;
+        docTitleKey?: string;
+        docDescriptionKey?: string;
+        docSummaryKey?: string;
+        docMarkdownKey?: string;
+        normalizationNotesKeys?: readonly string[];
+        environment?: "staging";
+        purpose?: string;
+        purposeKey?: string;
+        publicProfile?: ProviderPublicProfile;
+        implementationProfile?: ProviderImplementationProfile;
+        contract?: {
+            publicSchemaFieldNames?: "normalized";
+        };
+    };
+    // (undocumented)
+    native?: NativeProviderConfig;
+    // (undocumented)
+    ocr?: ProviderOcrConfig;
+    // (undocumented)
+    proxy?: ProviderProxyConfig;
+    // (undocumented)
+    resolver?: ProviderResolverConfig;
+    // (undocumented)
+    reviewed?: ProviderReviewed;
+    // (undocumented)
+    runtime: "standard" | "shared" | "browser";
+    // (undocumented)
+    secrets?: ProviderSecretDeclaration[];
+    state?: true;
+    // (undocumented)
+    stealth?: {
+        profile: string;
+        platform: StealthPlatform;
+    };
+    // (undocumented)
+    stt?: ProviderSttConfig;
+    // (undocumented)
+    version: string;
 }
 
 // @public (undocumented)
@@ -3387,7 +3396,7 @@ export interface ProviderOcrConfig {
 }
 
 // @public (undocumented)
-type ProviderOperation = OperationDefinition<SchemaLike, SchemaLike>;
+type ProviderOperation = OperationDefinition<any, any, any>;
 
 // @public (undocumented)
 export type ProviderProxyConfig = boolean | ProviderProxyPolicy;
@@ -4184,9 +4193,9 @@ export interface SseMessage {
 }
 
 // @public (undocumented)
-type SseOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<OperationConfig<TInput, TOutput>, "handler" | "transport"> & {
+type SseOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike, TContext = ProviderContext> = Omit<OperationConfig<TInput, TOutput, TContext>, "handler" | "transport"> & {
     transport: OperationSseTransport;
-    handler(ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0], input: InferSchemaOutput<TInput>): AsyncIterable<ProviderStreamEvent> | Promise<AsyncIterable<ProviderStreamEvent>>;
+    handler(ctx: TContext, input: InferSchemaOutput<TInput>): AsyncIterable<ProviderStreamEvent> | Promise<AsyncIterable<ProviderStreamEvent>>;
 };
 
 // @public
@@ -4462,7 +4471,7 @@ export const STREAM_MAX_DURATION_MS_MIN = 1000;
 // Warning: (ae-forgotten-export) The symbol "WebSocketOperationConfig" needs to be exported by the entry point index.d.ts
 //
 // @public (undocumented)
-type StreamOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = SseOperationConfig<TInput, TOutput> | HttpStreamOperationConfig<TInput, TOutput> | WebSocketOperationConfig<TInput, TOutput>;
+type StreamOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike, TContext = ProviderContext> = SseOperationConfig<TInput, TOutput, TContext> | HttpStreamOperationConfig<TInput, TOutput, TContext> | WebSocketOperationConfig<TInput, TOutput, TContext>;
 
 // @public
 export function stripHtml(html: string): string;
@@ -4747,9 +4756,9 @@ export interface VerificationCodeExtractionResult {
 }
 
 // @public (undocumented)
-type WebSocketOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<OperationConfig<TInput, TOutput>, "handler" | "transport"> & {
+type WebSocketOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike, TContext = ProviderContext> = Omit<OperationConfig<TInput, TOutput, TContext>, "handler" | "transport"> & {
     transport: OperationWebSocketTransport;
-    handler(ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0], input: InferSchemaOutput<TInput>): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
+    handler(ctx: TContext, input: InferSchemaOutput<TInput>): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
 };
 
 // @public (undocumented)

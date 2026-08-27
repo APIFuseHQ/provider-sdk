@@ -196,12 +196,28 @@ the bad request path; provider/runtime failures include `code`, `message`, and
 
 ## Authoring ergonomics
 
-`defineProvider()` infers each operation handler input from the operation `input` schema. For larger providers, factor operations with `defineOperation()` and compose them later:
+`defineProvider()` establishes the capability declaration before its returned
+builder contextually types operations. For larger providers, export the derived
+context once and use it with `defineOperation()` in separate files:
 
 ```ts
-import { defineOperation, defineProvider, z } from "@apifuse/provider-sdk/provider"
+import {
+  defineOperation,
+  defineProvider,
+  type ProviderContextOf,
+  z,
+} from "@apifuse/provider-sdk/provider"
 
-const search = defineOperation({
+const buildProvider = defineProvider({
+  id: "factored-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  meta: { displayName: "Factored", category: "demo" },
+})
+
+export type ProviderContext = ProviderContextOf<typeof buildProvider>
+
+const search = defineOperation<ProviderContext>()({
   input: z.object({ q: z.string().describe("Search query") }),
   output: z.object({ count: z.number().describe("Result count") }),
   async handler(ctx, input) {
@@ -212,11 +228,7 @@ const search = defineOperation({
   },
 })
 
-export default defineProvider({
-  id: "factored-provider",
-  version: "1.0.0",
-  runtime: "standard",
-  meta: { displayName: "Factored", category: "demo" },
+export default buildProvider({
   operations: { search },
 })
 ```

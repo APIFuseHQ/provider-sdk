@@ -3,7 +3,7 @@ import { z } from "zod";
 
 import { defineProvider } from "../../define.js";
 import { createServerApp } from "../../server/serve.js";
-import type { ProviderChallenge, ResolverContext } from "../../types.js";
+import type { ProviderChallenge, ProviderContext, ResolverContext } from "../../types.js";
 import { getStealthProfile } from "../../stealth/profiles.js";
 import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
 import {
@@ -286,7 +286,7 @@ describe("resolver server wiring", () => {
 					descriptionKey: "resolver-production-identity.description",
 					category: "test",
 				},
-				operations: {
+			})({ operations: {
 					solve: {
 						input: z.object({}),
 						output: z.object({ first: z.string(), second: z.string() }),
@@ -307,8 +307,7 @@ describe("resolver server wiring", () => {
 						},
 						healthCheckUnsupported: { reason: "unit test" },
 					},
-				},
-			});
+				} });
 			const app = createServerApp(provider, { logger: () => undefined });
 			const request = (requestId: string) =>
 				app.request("/v1/solve", {
@@ -373,7 +372,7 @@ describe("resolver server wiring", () => {
 					descriptionKey: "resolver-required-proxy-policy.description",
 					category: "test",
 				},
-				operations: {
+			})({ operations: {
 					solve: {
 						input: z.object({}),
 						output: z.object({ token: z.string() }),
@@ -386,8 +385,7 @@ describe("resolver server wiring", () => {
 						},
 						healthCheckUnsupported: { reason: "unit test" },
 					},
-				},
-			});
+				} });
 			const app = createServerApp(provider, { logger: () => undefined });
 			const response = await app.request("/v1/solve", {
 				method: "POST",
@@ -471,7 +469,7 @@ describe("resolver server wiring", () => {
 						},
 					},
 				},
-				operations: {
+			})({ operations: {
 					unused: {
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
@@ -480,8 +478,7 @@ describe("resolver server wiring", () => {
 						},
 						healthCheckUnsupported: { reason: "unit test" },
 					},
-				},
-			});
+				} });
 			const app = createServerApp(provider, { logger: () => undefined });
 			const response = await app.request("/auth/start", {
 				method: "POST",
@@ -527,7 +524,7 @@ describe("resolver server wiring", () => {
 				descriptionKey: "resolver-authoring-path.description",
 				category: "test",
 			},
-			operations: {
+		})({ operations: {
 				solve: {
 					input: resolverAuthoringInputSchema,
 					output: z.object({ ok: z.boolean() }),
@@ -542,8 +539,7 @@ describe("resolver server wiring", () => {
 					},
 					healthCheckUnsupported: { reason: "unit test" },
 				},
-			},
-		});
+			} });
 		const app = createServerApp(provider, { logger: () => undefined });
 
 		const vendorResponse = await app.request("/v1/solve", {
@@ -585,18 +581,17 @@ describe("resolver server wiring", () => {
 				descriptionKey: "resolver-undeclared.description",
 				category: "test",
 			},
-			operations: {
+		})({ operations: {
 				solve: {
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler(ctx) {
-						await ctx.resolver.solve(turnstileChallenge);
+						await (ctx as ProviderContext).resolver.solve(turnstileChallenge);
 						return { ok: true };
 					},
 					healthCheckUnsupported: { reason: "unit test" },
 				},
-			},
-		});
+			} });
 		const app = createServerApp(provider, { logger: () => undefined });
 
 		expect(provider.resolver).toBeUndefined();
@@ -649,7 +644,7 @@ describe("resolver server wiring", () => {
 					},
 				},
 			},
-			operations: {
+		})({ operations: {
 				solve: {
 					input: z.object({}),
 					output: z.object({ token: z.string() }),
@@ -659,8 +654,7 @@ describe("resolver server wiring", () => {
 					},
 					healthCheckUnsupported: { reason: "unit test" },
 				},
-			},
-		});
+			} });
 		const app = createServerApp(provider, { resolver });
 		const operationController = new AbortController();
 

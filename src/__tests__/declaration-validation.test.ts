@@ -7,9 +7,9 @@ import {
 	type DeclarationViolation,
 	validateFailClosedDeclaration,
 } from "../declaration-validation.js";
-import { defineProvider } from "../define.js";
 import { isProviderError } from "../errors.js";
 import type { HealthCheckSuite, ProviderDefinition } from "../types.js";
+import { defineTestProvider as defineProvider } from "./test-utils.js";
 
 function operation() {
 	return {

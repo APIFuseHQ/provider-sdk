@@ -1,6 +1,6 @@
 import { defineOperation, defineProvider, z } from "../../provider.js";
 
-const noop = defineOperation({
+const noop = defineOperation<unknown>()({
 	descriptionKey: "operations.noop.description",
 	input: z.object({}),
 	output: z.object({ ok: z.boolean() }),
@@ -26,5 +26,4 @@ defineProvider({
 			continue: async () => ({ kind: "complete", turnId: "complete" }),
 		},
 	},
-	operations: { noop },
-});
+})({ operations: { noop } });

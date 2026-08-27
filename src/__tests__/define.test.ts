@@ -1,10 +1,17 @@
 import { describe, expect, it, setSystemTime, spyOn } from "bun:test";
 import { z } from "zod";
 
-import { defineProvider } from "../define.js";
 import { ProviderError, ValidationError } from "../errors.js";
-import type { OperationAnnotations, ProviderContext, SchemaLike } from "../types.js";
-import { createProviderContextDouble } from "./test-utils.js";
+import type {
+	OperationAnnotations,
+	ProviderContext,
+	ProviderDefinition,
+	SchemaLike,
+} from "../types.js";
+import {
+	createProviderContextDouble,
+	defineTestProvider as defineProvider,
+} from "./test-utils.js";
 
 const InputSchema = z.object({ id: z.string() });
 const OutputSchema = z.object({ name: z.string(), price: z.number() });
@@ -115,7 +122,6 @@ describe("defineProvider", () => {
 	] as const)("rejects %s at definition time", (_label, resolver, message) => {
 		let caught: unknown;
 		try {
-			// @ts-expect-error test-invalid: runtime validation must reject resolver shapes excluded by the declaration type.
 			defineProvider({ ...validConfig, resolver });
 		} catch (error) {
 			caught = error;
@@ -137,7 +143,6 @@ describe("defineProvider", () => {
 							errorCodes: [
 								{
 									code: "UPSTREAM_TEAPOT",
-									// @ts-expect-error test-invalid: runtime validation must reject unsupported HTTP statuses.
 									status: 418,
 									description: "Unsupported upstream response",
 								},
@@ -219,7 +224,7 @@ describe("defineProvider", () => {
 	it("keeps transport optional for existing JSON operations", () => {
 		const provider = defineProvider(validConfig);
 
-		expect(provider.operations.prices.transport).toBeUndefined();
+		expect((provider.operations.prices as ProviderDefinition["operations"][string]).transport).toBeUndefined();
 	});
 
 	it("preserves typed native network declarations", () => {
@@ -849,7 +854,6 @@ describe("defineProvider", () => {
 				replicas: -3,
 				surprise: { nested: true },
 			};
-			// @ts-expect-error test-invalid: deployment is intentionally outside the declared registry shape.
 			const provider = defineProvider({ ...validConfig, deployment });
 
 			expect(Object.is(provider.deployment, deployment)).toBe(true);
@@ -865,14 +869,12 @@ describe("defineProvider", () => {
 			expect(() =>
 				defineProvider({
 					...validConfig,
-					// @ts-expect-error test-invalid: runtime validation must reject scalar deployment values.
 					deployment: "shared",
 				}),
 			).toThrow(ProviderError);
 			expect(() =>
 				defineProvider({
 					...validConfig,
-					// @ts-expect-error test-invalid: runtime validation must reject array deployment values.
 					deployment: [{ runtime: "shared" }],
 				}),
 			).toThrow(ProviderError);
@@ -911,8 +913,9 @@ describe("defineProvider", () => {
 		it("keeps title and description undefined when not declared", () => {
 			const provider = defineProvider(validConfig);
 
-			expect(provider.operations.prices.title).toBeUndefined();
-			expect(provider.operations.prices.description).toBeUndefined();
+			const prices = provider.operations.prices as ProviderDefinition["operations"][string];
+			expect(prices.title).toBeUndefined();
+			expect(prices.description).toBeUndefined();
 		});
 	});
 

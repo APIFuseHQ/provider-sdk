@@ -278,11 +278,6 @@ export type AuthStartNoInputGuard<TConfig> = TConfig extends {
 		? AuthStartHandlerNoInputGuard<TStart>
 		: unknown;
 
-type NoExtraProviderProperties<
-	TAllowed,
-	TActual,
-> = TActual & Record<Exclude<keyof TActual, keyof TAllowed>, never>;
-
 function splitAuthStartParameters(parameters: string): string[] | undefined {
 	const parts: string[] = [];
 	let start = 0;
@@ -580,10 +575,7 @@ function authStartHasHiddenInput(start: unknown): boolean {
 	return /\s=\s/.test(second);
 }
 
-export interface ProviderConfig<
-	TOperations extends Record<string, ProviderOperation>,
-	TContext = ProviderContext,
-> {
+export interface ProviderDeclaration {
 	id: string;
 	version: string;
 	runtime: "standard" | "shared" | "browser";
@@ -644,25 +636,35 @@ export interface ProviderConfig<
 			publicSchemaFieldNames?: "normalized";
 		};
 	};
-	operations: OperationMapConfig<TOperations, TContext>;
 	healthMonitor?: ProviderHealthMonitorConfig;
 	/** New name for `healthMonitor` (transitional alias); declaring both is a ValidationError. */
 	healthProbe?: ProviderHealthMonitorConfig;
 	healthJourneys?: readonly HealthJourneyDefinition[];
 }
 
-/** Define one provider operation with schema-driven handler inference. */
-export function defineOperation<TInput extends SchemaLike, TOutput extends SchemaLike>(
-	operation: OperationConfig<TInput, TOutput>,
-): OperationDefinition<TInput, TOutput> {
-	return operation;
+interface ProviderConfig<
+	TOperations extends Record<string, ProviderOperation>,
+	TContext = ProviderContext,
+> extends ProviderDeclaration {
+	operations: OperationMapConfig<TOperations, TContext>;
 }
 
-/** Define a non-JSON provider operation with explicit transport metadata. */
-export function defineStreamOperation<TInput extends SchemaLike, TOutput extends SchemaLike>(
-	operation: StreamOperationConfig<TInput, TOutput>,
-): OperationDefinition<TInput, TOutput> {
-	return operation;
+/** Define one factored provider operation with schema-driven handler inference. */
+export function defineOperation<TContext>() {
+	return function operation<TInput extends SchemaLike, TOutput extends SchemaLike>(
+		config: OperationConfig<TInput, TOutput, TContext>,
+	): OperationDefinition<TInput, TOutput, TContext> {
+		return config;
+	};
+}
+
+/** Define a factored non-JSON operation with explicit transport metadata. */
+export function defineStreamOperation<TContext>() {
+	return function streamOperation<TInput extends SchemaLike, TOutput extends SchemaLike>(
+		config: StreamOperationConfig<TInput, TOutput, TContext>,
+	): OperationDefinition<TInput, TOutput, TContext> {
+		return config;
+	};
 }
 
 function assertObjectConfig(value: unknown): asserts value is Record<string, unknown> {
@@ -2818,16 +2820,47 @@ function validateProviderDeployment(providerId: string, deployment: unknown): vo
 		});
 }
 
-export function defineProvider<
+/** The second authoring phase for a declaration established by defineProvider. */
+export type ProviderBuilder<TDeclaration extends ProviderDeclaration> = <
 	TOperations extends Record<string, ProviderOperation>,
-	TConfig extends ProviderConfig<TOperations>,
 >(
-	config: TConfig &
-		NoExtraProviderProperties<ProviderConfig<TOperations>, TConfig> &
-		{ operations: OperationMapConfig<TOperations, ProviderContextFor<TConfig>> } &
-		AuthStartNoInputGuard<TConfig>,
+	implementation: {
+		operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+	},
+) => ProviderDefinition & {
+	operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+};
+
+/** Extract the declaration-derived operation context from a provider builder. */
+export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TDeclaration>
+	? ProviderContextFor<TDeclaration>
+	: never;
+
+/** Establish a provider declaration before its operations are contextually typed. */
+export function defineProvider<const TDeclaration extends ProviderDeclaration>(
+	declaration: TDeclaration &
+		Record<Exclude<keyof TDeclaration, keyof ProviderDeclaration>, never> &
+		AuthStartNoInputGuard<TDeclaration>,
+): ProviderBuilder<TDeclaration> {
+	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(
+		implementation: {
+			operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+		},
+	) =>
+		finalizeProvider({
+			...declaration,
+			...implementation,
+		} as ProviderConfig<TOperations, ProviderContextFor<TDeclaration>>);
+	return buildProvider as ProviderBuilder<TDeclaration>;
+}
+
+function finalizeProvider<
+	TOperations extends Record<string, ProviderOperation>,
+	TContext,
+>(
+	config: ProviderConfig<TOperations, TContext>,
 ): ProviderDefinition & {
-	operations: OperationMapConfig<TOperations, ProviderContextFor<TConfig>>;
+	operations: OperationMapConfig<TOperations, TContext>;
 } {
 	validateProviderShape(config);
 	const operations = resolveOperationFixtureRequests(config.operations);
@@ -2890,7 +2923,7 @@ export function defineProvider<
 			{ fix: 'Set runtime: "browser" or remove the browser config' },
 		);
 	const provider: ProviderDefinition & {
-		operations: OperationMapConfig<TOperations, ProviderContextFor<TConfig>>;
+		operations: OperationMapConfig<TOperations, TContext>;
 	} = {
 		id: config.id,
 		version: config.version,
@@ -2913,7 +2946,8 @@ export function defineProvider<
 		credential: config.credential,
 		context: config.context,
 		meta: config.meta,
-		operations,
+		operations: operations as ProviderDefinition["operations"] &
+			OperationMapConfig<TOperations, TContext>,
 		// Transitional healthMonitor → healthProbe alias: mirror whichever field
 		// was declared onto both so old and new consumers keep working.
 		healthMonitor: config.healthMonitor ?? config.healthProbe,

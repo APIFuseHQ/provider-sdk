@@ -26,7 +26,7 @@ const testProvider = defineProvider({
 		descriptionKey: "test-provider.description",
 		category: "test",
 	},
-	operations: {
+})({ operations: {
 		search: {
 			input: z.object({ q: z.string() }),
 			output: z.object({ result: z.string() }),
@@ -41,8 +41,7 @@ const testProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	},
-});
+	} });
 
 const snapshotFixtureDir = `/tmp/apifuse-standard-tests-${Date.now()}/__fixtures__`;
 mkdirSync(snapshotFixtureDir, { recursive: true });
@@ -104,7 +103,7 @@ const fixtureHarnessProvider = defineProvider({
 		descriptionKey: "fixture-harness-provider.description",
 		category: "test",
 	},
-	operations: {
+})({ operations: {
 		lookup: {
 			input: z.object({ q: z.string() }),
 			output: z.object({ result: z.string() }),
@@ -118,19 +117,19 @@ const fixtureHarnessProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	},
-});
+	} });
 
 const snapshotHarnessProvider = defineProvider({
 	id: "snapshot-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
+	http: true,
 	meta: {
 		displayName: "Snapshot Harness Provider",
 		descriptionKey: "snapshot-harness-provider.description",
 		category: "test",
 	},
-	operations: {
+})({ operations: {
 		normalize: {
 			input: z.object({ id: z.string() }),
 			output: z.object({ id: z.string(), label: z.string() }),
@@ -147,19 +146,19 @@ const snapshotHarnessProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	},
-});
+	} });
 
 const streamSnapshotHarnessProvider = defineProvider({
 	id: "stream-snapshot-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
+	http: true,
 	meta: {
 		displayName: "Stream Snapshot Harness Provider",
 		descriptionKey: "stream-snapshot-harness-provider.description",
 		category: "test",
 	},
-	operations: {
+})({ operations: {
 		download: {
 			input: z.object({}),
 			output: z.object({
@@ -207,19 +206,19 @@ const streamSnapshotHarnessProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	},
-});
+	} });
 
 const multiStreamSnapshotHarnessProvider = defineProvider({
 	id: "multi-stream-snapshot-harness-provider",
 	version: "1.0.0",
 	runtime: "standard",
+	http: true,
 	meta: {
 		displayName: "Multi Stream Snapshot Harness Provider",
 		descriptionKey: "multi-stream-snapshot-harness-provider.description",
 		category: "test",
 	},
-	operations: {
+})({ operations: {
 		download: {
 			input: z.object({}),
 			output: z.object({ first: z.string(), second: z.string() }),
@@ -238,8 +237,7 @@ const multiStreamSnapshotHarnessProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	},
-});
+	} });
 
 const authHarnessProvider = defineProvider({
 	id: "auth-harness-provider",
@@ -258,7 +256,7 @@ const authHarnessProvider = defineProvider({
 		descriptionKey: "auth-harness-provider.description",
 		category: "test",
 	},
-	operations: {
+})({ operations: {
 		me: {
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
@@ -266,19 +264,19 @@ const authHarnessProvider = defineProvider({
 			fixtures: { request: {}, response: { ok: true } },
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	},
-});
+	} });
 
 const handlerE2eProvider = defineProvider({
 	id: "handler-e2e-provider",
 	version: "1.0.0",
 	runtime: "standard",
+	http: true,
 	meta: {
 		displayName: "Handler E2E Provider",
 		descriptionKey: "handler-e2e-provider.description",
 		category: "test",
 	},
-	operations: {
+})({ operations: {
 		lookup: {
 			input: z.object({
 				id: z.string(),
@@ -301,13 +299,14 @@ const handlerE2eProvider = defineProvider({
 			},
 			healthCheckUnsupported: { reason: "test fixture" },
 		},
-	},
-});
+	} });
 
+const { operations: _handlerOperations, ...handlerE2eDeclaration } = handlerE2eProvider;
 const brokenHandlerProvider = defineProvider({
-	...handlerE2eProvider,
+	...handlerE2eDeclaration,
 	id: "broken-handler-provider",
-	operations: {
+	http: true,
+})({ operations: {
 		lookup: {
 			...handlerE2eProvider.operations.lookup,
 			handler: async (ctx, input: unknown) => {
@@ -321,8 +320,7 @@ const brokenHandlerProvider = defineProvider({
 				return { wrong: body.label };
 			},
 		},
-	},
-});
+	} });
 
 const nativeEgressHarnessProvider = defineProvider({
 	id: "native-egress-harness",
@@ -349,7 +347,7 @@ const nativeEgressHarnessProvider = defineProvider({
 			],
 		},
 	},
-	operations: {
+})({ operations: {
 		"snapshot-connect": {
 			input: z.object({}),
 			output: z.object({ reads: z.number() }),
@@ -408,8 +406,7 @@ const nativeEgressHarnessProvider = defineProvider({
 				return { revokedCode: "missing_denial" };
 			},
 		},
-	},
-});
+	} });
 
 const handlerE2eStub = ({ url }: { url?: string }) =>
 	/^https:\/\/example\.test\/items\/fixture-id\?date=\d{4}-\d{2}-\d{2}$/.test(url ?? "")

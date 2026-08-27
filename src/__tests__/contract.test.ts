@@ -61,7 +61,27 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 			},
 			contract: { publicSchemaFieldNames: "normalized" },
 		},
-		operations: Object.fromEntries(
+		healthMonitor: {
+			defaultProbeTimeoutMs: 3000,
+			defaultDegradedThresholdMs: 1200,
+			requiredSecrets: ["EXAMPLE_API_KEY"],
+			credentialInputs: { accessToken: "EXAMPLE_API_KEY" },
+		},
+		healthJourneys: [
+			defineHealthJourney({
+				id: "search-journey",
+				title: "Search Journey",
+				description: "Runs a representative search journey.",
+				schedule: every("8h", { jitter: "PT20M" }),
+				coversOperations: ["zeta-search"],
+				timeout: "PT1M",
+				cooldown: "PT10M",
+				requiredSecrets: ["EXAMPLE_API_KEY"],
+				steps: [{ id: "search", operationId: "zeta-search", kind: "operation" }],
+				run: async () => ({ status: "ok" }),
+			}),
+		],
+	})({ operations: Object.fromEntries(
 			operationIds.map((operationId) => [
 				operationId,
 				{
@@ -127,28 +147,7 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 					},
 				},
 			]),
-		),
-		healthMonitor: {
-			defaultProbeTimeoutMs: 3000,
-			defaultDegradedThresholdMs: 1200,
-			requiredSecrets: ["EXAMPLE_API_KEY"],
-			credentialInputs: { accessToken: "EXAMPLE_API_KEY" },
-		},
-		healthJourneys: [
-			defineHealthJourney({
-				id: "search-journey",
-				title: "Search Journey",
-				description: "Runs a representative search journey.",
-				schedule: every("8h", { jitter: "PT20M" }),
-				coversOperations: ["zeta-search"],
-				timeout: "PT1M",
-				cooldown: "PT10M",
-				requiredSecrets: ["EXAMPLE_API_KEY"],
-				steps: [{ id: "search", operationId: "zeta-search", kind: "operation" }],
-				run: async () => ({ status: "ok" }),
-			}),
-		],
-	});
+		) });
 }
 
 function buildHostileContractProvider(): ProviderDefinition {

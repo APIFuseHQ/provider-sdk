@@ -93,15 +93,14 @@ function createProvider(options: {
 			descriptionKey: "resolver-cli-wiring.description",
 			category: "test",
 		},
-		operations: {
+	})({ operations: {
 			lookup: {
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),
 				healthCheckUnsupported: { reason: "CLI context unit test" },
 			},
-		},
-	});
+		} });
 }
 
 describe("resolver CLI wiring", () => {

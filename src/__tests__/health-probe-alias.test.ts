@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { defineProvider } from "../define.js";
 import { ValidationError } from "../errors.js";
 import type { ProviderHealthMonitorConfig } from "../types.js";
+import { defineTestProvider as defineProvider } from "./test-utils.js";
 
 function baseConfig(
 	health: {

@@ -35,6 +35,11 @@ export {
 	defineSmsOtpMatcher,
 	every,
 } from "./define.js";
+export type {
+	ProviderBuilder,
+	ProviderContextOf,
+	ProviderDeclaration,
+} from "./define.js";
 export {
 	AuthError,
 	HttpRedirectError,
@@ -142,6 +147,7 @@ export type {
 	ProviderChoiceIssueOptions,
 	ProviderChoiceParseOptions,
 	ProviderContext,
+	ProviderContextFor,
 	ProviderDefinition,
 	ProviderDeploymentOverrides,
 	ProviderFileRef,

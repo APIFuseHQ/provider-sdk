@@ -376,18 +376,20 @@ describe("provider create planning", () => {
 		expect(generatedPaths).toContain(join("domain", "README.md"));
 		expect(index?.content).toContain('import { providerMeta } from "./meta";');
 		expect(index?.content).toContain(
-			'import { defineProvider } from "@apifuse/provider-sdk/provider";',
+			'import { defineProvider, type ProviderContextOf } from "@apifuse/provider-sdk/provider";',
 		);
 		expect(index?.content).toContain('import { operations } from "./operations";');
 		expect(index?.content).toContain("defineProvider({");
 		expect(index?.content).toContain("meta: providerMeta");
-		expect(index?.content).toContain("operations: operations");
+		expect(index?.content).toContain("buildProvider({ operations })");
+		expect(index?.content).toContain("export type ProviderContext");
 		expect(index?.content).not.toContain("pingInputSchema");
 		expect(index?.content).not.toContain("handler: async");
 		expect(operation?.content).toContain(
 			'import { defineOperation } from "@apifuse/provider-sdk/provider";',
 		);
-		expect(operation?.content).toContain("defineOperation({");
+		expect(operation?.content).toContain("defineOperation<ProviderContext>()({");
+		expect(operation?.content).toContain('import type { ProviderContext } from "../index";');
 		expect(operation?.content).toContain(
 			'import { pingInputSchema, pingOutputSchema } from "../schemas/ping";',
 		);

@@ -2298,7 +2298,7 @@ export interface ProviderContext {
  * bindings are present only when their corresponding declaration is present;
  * trace, request, and native remain ambient runtime bindings.
  */
-type ProviderContextDeclared<TConfig> =
+export type ProviderContextFor<TConfig> =
 	Pick<ProviderContext, "trace" | "request" | "native">
 	& ("env" extends keyof TConfig ? Pick<ProviderContext, "env"> : Record<never, never>)
 	& ("credential" extends keyof TConfig ? Pick<ProviderContext, "credential"> : Record<never, never>)
@@ -2313,22 +2313,6 @@ type ProviderContextDeclared<TConfig> =
 	& ("stt" extends keyof TConfig ? Pick<ProviderContext, "stt"> : Record<never, never>)
 	& ("resolver" extends keyof TConfig ? Pick<ProviderContext, "resolver"> : Record<never, never>)
 	& ("choice" extends keyof TConfig ? Pick<ProviderContext, "choice"> : Record<never, never>);
-
-/** Derive a handler context from the capability keys in one provider declaration. */
-export type ProviderContextFor<TConfig> = ProviderContextDeclared<TConfig>;
-
-type ProviderOperationContext<T> = T extends {
-	handler: (ctx: infer TContext, ...args: any[]) => any;
-}
-	? TContext
-	: never;
-
-/** Extract the derived operation context from a provider returned by defineProvider. */
-export type ProviderContextOf<TProvider> = TProvider extends { operations: infer TOperations }
-	? TOperations extends object
-		? ProviderOperationContext<TOperations[keyof TOperations]>
-		: never
-	: never;
 
 export interface ProxiedOAuthConfig {
 	authorizeUrl: string;

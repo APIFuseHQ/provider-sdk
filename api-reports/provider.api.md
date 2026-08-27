@@ -681,16 +681,12 @@ export function defineHealthJourney(config: HealthJourneyDefinition): HealthJour
 // Warning: (ae-forgotten-export) The symbol "OperationConfig" needs to be exported by the entry point provider.d.ts
 //
 // @public
-export function defineOperation<TInput extends SchemaLike, TOutput extends SchemaLike>(operation: OperationConfig<TInput, TOutput>): OperationDefinition<TInput, TOutput>;
+export function defineOperation<TContext>(): <TInput extends SchemaLike, TOutput extends SchemaLike>(config: OperationConfig<TInput, TOutput, TContext>) => OperationDefinition<TInput, TOutput, TContext>;
 
-// Warning: (ae-forgotten-export) The symbol "ProviderOperation" needs to be exported by the entry point provider.d.ts
-// Warning: (ae-forgotten-export) The symbol "ProviderConfig" needs to be exported by the entry point provider.d.ts
 // Warning: (ae-forgotten-export) The symbol "AuthStartNoInputGuard" needs to be exported by the entry point provider.d.ts
 //
-// @public (undocumented)
-export function defineProvider<TOperations extends Record<string, ProviderOperation>, TConfig extends ProviderConfig<TOperations>>(config: TConfig & AuthStartNoInputGuard<TConfig>): ProviderDefinition & {
-    operations: OperationMapConfig<TOperations>;
-};
+// @public
+export function defineProvider<const TDeclaration extends ProviderDeclaration>(declaration: TDeclaration & Record<Exclude<keyof TDeclaration, keyof ProviderDeclaration>, never> & AuthStartNoInputGuard<TDeclaration>): ProviderBuilder<TDeclaration>;
 
 // @public (undocumented)
 export function defineSmsOtpMatcher(config: Omit<SmsOtpMatcherDefinition, "extractOtp">): SmsOtpMatcherDefinition;
@@ -1708,8 +1704,8 @@ interface OperationAnnotations {
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
 
 // @public (undocumented)
-type OperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<OperationDefinition<TInput, TOutput>, "handler"> & {
-    handler(ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0], input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
+type OperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike, TContext = ProviderContext> = Omit<OperationDefinition<TInput, TOutput, TContext>, "handler"> & {
+    handler(ctx: TContext, input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
 };
 
 // @public (undocumented)
@@ -1724,7 +1720,7 @@ export interface OperationContractMetadata {
 }
 
 // @public (undocumented)
-export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike> {
+export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike, TContext = ProviderContext> {
     // Warning: (ae-forgotten-export) The symbol "OperationAnnotations" needs to be exported by the entry point provider.d.ts
     //
     // (undocumented)
@@ -1745,7 +1741,7 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
         recordedAt?: string;
     };
     // (undocumented)
-    handler(ctx: ProviderContext, input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
+    handler(ctx: TContext, input: InferSchemaOutput<TInput>): OperationHandlerResult<InferSchemaOutput<TOutput>> | Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
     // (undocumented)
     healthCheck?: HealthCheckSuite<InferSchemaOutput<TInput>, InferSchemaOutput<TOutput>>;
     // (undocumented)
@@ -1864,9 +1860,11 @@ interface OperationJsonTransport {
 // @public (undocumented)
 export type OperationLifecycle = "stable" | "beta" | "deprecated" | "removed";
 
+// Warning: (ae-forgotten-export) The symbol "ProviderOperation" needs to be exported by the entry point provider.d.ts
+//
 // @public (undocumented)
-type OperationMapConfig<TOperations extends Record<string, ProviderOperation>> = {
-    [K in keyof TOperations]: TOperations[K] extends OperationDefinition<infer TInput, infer TOutput> ? OperationConfig<TInput, TOutput> | OperationDefinition<TInput, TOutput> : never;
+type OperationMapConfig<TOperations extends Record<string, ProviderOperation>, TContext = ProviderContext> = {
+    [K in keyof TOperations]: TOperations[K] extends OperationDefinition<infer TInput, infer TOutput> ? OperationConfig<TInput, TOutput, TContext> | OperationDefinition<TInput, TOutput, TContext> : never;
 };
 
 // @public (undocumented)
@@ -1974,6 +1972,13 @@ interface ProviderAccessConfig {
 
 // @public (undocumented)
 export type ProviderAccessVisibility = "public" | "early_access";
+
+// @public
+export type ProviderBuilder<TDeclaration extends ProviderDeclaration> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
+    operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+}) => ProviderDefinition & {
+    operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+};
 
 // @public (undocumented)
 interface ProviderCache {
@@ -2264,7 +2269,55 @@ export type ProviderChoiceTokenErrorReason = "invalid_shape" | "invalid_signatur
 export type ProviderChoiceTokenPayload = Record<string, unknown>;
 
 // @public (undocumented)
-interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> {
+export interface ProviderContext {
+    // Warning: (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    auth: AuthContext;
+    // Warning: (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    browser: BrowserClient;
+    // Warning: (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    cache: ProviderCache;
+    // (undocumented)
+    choice: ProviderChoiceContext;
+    // (undocumented)
+    credential: CredentialContext;
+    // (undocumented)
+    env: EnvContext;
+    readonly files?: ProviderFilesContext;
+    // (undocumented)
+    http: HttpClient;
+    readonly native?: NativeProviderContext;
+    // (undocumented)
+    ocr: OcrContext;
+    // (undocumented)
+    request?: ProviderRequestContext;
+    // (undocumented)
+    resolver: ResolverContext;
+    // (undocumented)
+    state: ProviderRuntimeState;
+    // (undocumented)
+    stealth: StealthClient;
+    // (undocumented)
+    stt: SttContext;
+    // Warning: (ae-forgotten-export) The symbol "TraceContext" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    trace: TraceContext;
+}
+
+// @public
+export type ProviderContextFor<TConfig> = Pick<ProviderContext, "trace" | "request" | "native"> & ("env" extends keyof TConfig ? Pick<ProviderContext, "env"> : Record<never, never>) & ("credential" extends keyof TConfig ? Pick<ProviderContext, "credential"> : Record<never, never>) & ("http" extends keyof TConfig ? Pick<ProviderContext, "http"> : Record<never, never>) & ("files" extends keyof TConfig ? Pick<ProviderContext, "files"> : Record<never, never>) & ("cache" extends keyof TConfig ? Pick<ProviderContext, "cache"> : Record<never, never>) & ("state" extends keyof TConfig ? Pick<ProviderContext, "state"> : Record<never, never>) & ("stealth" extends keyof TConfig ? Pick<ProviderContext, "stealth"> : Record<never, never>) & ("browser" extends keyof TConfig ? Pick<ProviderContext, "browser"> : Record<never, never>) & ("auth" extends keyof TConfig ? Pick<ProviderContext, "auth"> : Record<never, never>) & ("ocr" extends keyof TConfig ? Pick<ProviderContext, "ocr"> : Record<never, never>) & ("stt" extends keyof TConfig ? Pick<ProviderContext, "stt"> : Record<never, never>) & ("resolver" extends keyof TConfig ? Pick<ProviderContext, "resolver"> : Record<never, never>) & ("choice" extends keyof TConfig ? Pick<ProviderContext, "choice"> : Record<never, never>);
+
+// @public
+export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TDeclaration> ? ProviderContextFor<TDeclaration> : never;
+
+// @public (undocumented)
+export interface ProviderDeclaration {
     // Warning: (ae-forgotten-export) The symbol "ProviderAccessConfig" needs to be exported by the entry point provider.d.ts
     //
     // (undocumented)
@@ -2324,8 +2377,6 @@ interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> 
     //
     // (undocumented)
     ocr?: ProviderOcrConfig;
-    // (undocumented)
-    operations: OperationMapConfig<TOperations>;
     // Warning: (ae-forgotten-export) The symbol "ProviderProxyConfig" needs to be exported by the entry point provider.d.ts
     //
     // (undocumented)
@@ -2356,48 +2407,6 @@ interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> 
     stt?: ProviderSttConfig;
     // (undocumented)
     version: string;
-}
-
-// @public (undocumented)
-export interface ProviderContext {
-    // Warning: (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
-    auth: AuthContext;
-    // Warning: (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
-    browser: BrowserClient;
-    // Warning: (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
-    cache: ProviderCache;
-    // (undocumented)
-    choice: ProviderChoiceContext;
-    // (undocumented)
-    credential: CredentialContext;
-    // (undocumented)
-    env: EnvContext;
-    readonly files?: ProviderFilesContext;
-    // (undocumented)
-    http: HttpClient;
-    readonly native?: NativeProviderContext;
-    // (undocumented)
-    ocr: OcrContext;
-    // (undocumented)
-    request?: ProviderRequestContext;
-    // (undocumented)
-    resolver: ResolverContext;
-    // (undocumented)
-    state: ProviderRuntimeState;
-    // (undocumented)
-    stealth: StealthClient;
-    // (undocumented)
-    stt: SttContext;
-    // Warning: (ae-forgotten-export) The symbol "TraceContext" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
-    trace: TraceContext;
 }
 
 // @public (undocumented)
@@ -2665,7 +2674,7 @@ interface ProviderOcrConfig {
 }
 
 // @public (undocumented)
-type ProviderOperation = OperationDefinition<SchemaLike, SchemaLike>;
+type ProviderOperation = OperationDefinition<any, any, any>;
 
 // @public (undocumented)
 type ProviderProxyConfig = boolean | ProviderProxyPolicy;
