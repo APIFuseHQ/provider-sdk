@@ -31,6 +31,8 @@ import type {
 	ProviderAccessConfig,
 	ProviderChallengeKind,
 	ProviderDefinition,
+	ProviderContext,
+	ProviderContextFor,
 	ProviderOcrConfig,
 	ProviderDeploymentOverrides,
 	ProviderHealthMonitorConfig,
@@ -197,54 +199,65 @@ function parsePositiveMsDuration(value: string): number | undefined {
 	return parsed;
 }
 
-type ProviderOperation = OperationDefinition<SchemaLike, SchemaLike>;
-type OperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<
-	OperationDefinition<TInput, TOutput>,
-	"handler"
-> & {
+type ProviderOperation = OperationDefinition<any, any, any>;
+type OperationConfig<
+	TInput extends SchemaLike,
+	TOutput extends SchemaLike,
+	TContext = ProviderContext,
+> = Omit<OperationDefinition<TInput, TOutput, TContext>, "handler"> & {
 	handler(
-		ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0],
+		ctx: TContext,
 		input: InferSchemaOutput<TInput>,
 	):
 		| OperationHandlerResult<InferSchemaOutput<TOutput>>
 		| Promise<OperationHandlerResult<InferSchemaOutput<TOutput>>>;
 };
-type OperationMapConfig<TOperations extends Record<string, ProviderOperation>> = {
+type OperationMapConfig<
+	TOperations extends Record<string, ProviderOperation>,
+	TContext = ProviderContext,
+> = {
 	[K in keyof TOperations]: TOperations[K] extends OperationDefinition<infer TInput, infer TOutput>
-		? OperationConfig<TInput, TOutput> | OperationDefinition<TInput, TOutput>
+		? OperationConfig<TInput, TOutput, TContext> | OperationDefinition<TInput, TOutput, TContext>
 		: never;
 };
-type StreamOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> =
-	| SseOperationConfig<TInput, TOutput>
-	| HttpStreamOperationConfig<TInput, TOutput>
-	| WebSocketOperationConfig<TInput, TOutput>;
-type SseOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<
-	OperationConfig<TInput, TOutput>,
-	"handler" | "transport"
-> & {
+type StreamOperationConfig<
+	TInput extends SchemaLike,
+	TOutput extends SchemaLike,
+	TContext = ProviderContext,
+> =
+	| SseOperationConfig<TInput, TOutput, TContext>
+	| HttpStreamOperationConfig<TInput, TOutput, TContext>
+	| WebSocketOperationConfig<TInput, TOutput, TContext>;
+type SseOperationConfig<
+	TInput extends SchemaLike,
+	TOutput extends SchemaLike,
+	TContext = ProviderContext,
+> = Omit<OperationConfig<TInput, TOutput, TContext>, "handler" | "transport"> & {
 	transport: OperationSseTransport;
 	handler(
-		ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0],
+		ctx: TContext,
 		input: InferSchemaOutput<TInput>,
 	): AsyncIterable<ProviderStreamEvent> | Promise<AsyncIterable<ProviderStreamEvent>>;
 };
-type HttpStreamOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<
-	OperationConfig<TInput, TOutput>,
-	"handler" | "transport"
-> & {
+type HttpStreamOperationConfig<
+	TInput extends SchemaLike,
+	TOutput extends SchemaLike,
+	TContext = ProviderContext,
+> = Omit<OperationConfig<TInput, TOutput, TContext>, "handler" | "transport"> & {
 	transport: OperationHttpStreamTransport;
 	handler(
-		ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0],
+		ctx: TContext,
 		input: InferSchemaOutput<TInput>,
 	): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
 };
-type WebSocketOperationConfig<TInput extends SchemaLike, TOutput extends SchemaLike> = Omit<
-	OperationConfig<TInput, TOutput>,
-	"handler" | "transport"
-> & {
+type WebSocketOperationConfig<
+	TInput extends SchemaLike,
+	TOutput extends SchemaLike,
+	TContext = ProviderContext,
+> = Omit<OperationConfig<TInput, TOutput, TContext>, "handler" | "transport"> & {
 	transport: OperationWebSocketTransport;
 	handler(
-		ctx: Parameters<OperationDefinition<TInput, TOutput>["handler"]>[0],
+		ctx: TContext,
 		input: InferSchemaOutput<TInput>,
 	): Response | ReadableStream<Uint8Array> | Promise<Response | ReadableStream<Uint8Array>>;
 };
@@ -264,6 +277,11 @@ export type AuthStartNoInputGuard<TConfig> = TConfig extends {
 	: TConfig extends { start: infer TStart }
 		? AuthStartHandlerNoInputGuard<TStart>
 		: unknown;
+
+type NoExtraProviderProperties<
+	TAllowed,
+	TActual,
+> = TActual & Record<Exclude<keyof TActual, keyof TAllowed>, never>;
 
 function splitAuthStartParameters(parameters: string): string[] | undefined {
 	const parts: string[] = [];
@@ -562,7 +580,10 @@ function authStartHasHiddenInput(start: unknown): boolean {
 	return /\s=\s/.test(second);
 }
 
-export interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> {
+export interface ProviderConfig<
+	TOperations extends Record<string, ProviderOperation>,
+	TContext = ProviderContext,
+> {
 	id: string;
 	version: string;
 	runtime: "standard" | "shared" | "browser";
@@ -623,7 +644,7 @@ export interface ProviderConfig<TOperations extends Record<string, ProviderOpera
 			publicSchemaFieldNames?: "normalized";
 		};
 	};
-	operations: OperationMapConfig<TOperations>;
+	operations: OperationMapConfig<TOperations, TContext>;
 	healthMonitor?: ProviderHealthMonitorConfig;
 	/** New name for `healthMonitor` (transitional alias); declaring both is a ValidationError. */
 	healthProbe?: ProviderHealthMonitorConfig;
@@ -2801,8 +2822,13 @@ export function defineProvider<
 	TOperations extends Record<string, ProviderOperation>,
 	TConfig extends ProviderConfig<TOperations>,
 >(
-	config: TConfig & AuthStartNoInputGuard<TConfig>,
-): ProviderDefinition & { operations: OperationMapConfig<TOperations> } {
+	config: TConfig &
+		NoExtraProviderProperties<ProviderConfig<TOperations>, TConfig> &
+		{ operations: OperationMapConfig<TOperations, ProviderContextFor<TConfig>> } &
+		AuthStartNoInputGuard<TConfig>,
+): ProviderDefinition & {
+	operations: OperationMapConfig<TOperations, ProviderContextFor<TConfig>>;
+} {
 	validateProviderShape(config);
 	const operations = resolveOperationFixtureRequests(config.operations);
 	if (!CONNECTOR_ID_REGEX.test(config.id))
@@ -2863,7 +2889,9 @@ export function defineProvider<
 			`Provider "${config.id}" cannot define browser config unless runtime is "browser"`,
 			{ fix: 'Set runtime: "browser" or remove the browser config' },
 		);
-	const provider: ProviderDefinition & { operations: OperationMapConfig<TOperations> } = {
+	const provider: ProviderDefinition & {
+		operations: OperationMapConfig<TOperations, ProviderContextFor<TConfig>>;
+	} = {
 		id: config.id,
 		version: config.version,
 		runtime: config.runtime,

@@ -301,6 +301,8 @@ export type {
 	ProviderChallenge,
 	ProviderChallengeKind,
 	ProviderContext,
+	ProviderContextFor,
+	ProviderContextOf,
 	ProviderDefinition,
 	ProviderDeploymentOverrides,
 	ProviderFileRef,
