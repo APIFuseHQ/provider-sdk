@@ -2132,6 +2132,7 @@ const HEALTH_JOURNEY_FIELDS = new Set([
 	"manualTrigger",
 	"steps",
 	"run",
+	"scenario",
 ]);
 const HEALTH_JOURNEY_SCHEDULE_FIELDS = new Set(["kind", "interval", "jitter", "randomize"]);
 const HEALTH_JOURNEY_STEP_FIELDS = new Set([
@@ -2667,6 +2668,14 @@ function validateHealthJourneys(
 		}
 		if (journey.manualTrigger !== undefined)
 			validateHealthJourneyManualTrigger(providerId, journey.id, journey.manualTrigger);
+		if (journey.scenario !== undefined && journey.smsMatchers !== undefined)
+			throw new ValidationError(
+				`Provider "${providerId}" healthJourneys.${journey.id}.smsMatchers is not allowed on declarative scenarios.`,
+			);
+		if (journey.scenario !== undefined && journey.requiredSecrets !== undefined)
+			throw new ValidationError(
+				`Provider "${providerId}" healthJourneys.${journey.id}.requiredSecrets is not allowed on declarative scenarios.`,
+			);
 		if (journey.timeout !== undefined)
 			assertIsoDuration(
 				journey.timeout,

@@ -1,4 +1,5 @@
 import type ms from "ms";
+import type { HealthScenarioV1 } from "./health-scenario.js";
 import type { SerializedCookieJar } from "tough-cookie";
 
 import type { infer as ZodInfer, ZodType } from "zod";
@@ -645,7 +646,7 @@ export interface HealthJourneyRunResult {
 	metadata?: Record<string, unknown>;
 }
 
-export interface HealthJourneyDefinition {
+interface HealthJourneyDefinitionBase {
 	id: string;
 	title?: string;
 	description?: string;
@@ -657,14 +658,16 @@ export interface HealthJourneyDefinition {
 	requiredSecrets?: readonly string[];
 	manualTrigger?: HealthJourneyManualTriggerPolicy;
 	steps: readonly [HealthJourneyStep, ...HealthJourneyStep[]];
-	/**
-	 * Required: a journey always declares `coversOperations`, and the health
-	 * monitor reports a run-less journey as `journey_run_missing`. Declaration
-	 * validation rejects a missing `run` (`health-journey-executable`), so this
-	 * is typed required to fail at compile time rather than at boot.
-	 */
-	run: (ctx: HealthJourneyRunContext) => Promise<HealthJourneyRunResult | undefined>;
 }
+
+export type HealthJourneyDefinition = HealthJourneyDefinitionBase &
+	(
+		| {
+				run: (ctx: HealthJourneyRunContext) => Promise<HealthJourneyRunResult | undefined>;
+			scenario?: never;
+		}
+		| { scenario: HealthScenarioV1; run?: never }
+	);
 
 /**
  * Health-check authoring surface owned by `@apifuse/provider-sdk`.
