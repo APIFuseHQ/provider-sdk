@@ -142,9 +142,12 @@ describe("declarative health scenarios", () => {
 	});
 
 	it("keeps health-journey-executable for a journey with neither run nor scenario", () => {
-		expect(() => providerWithJourney(defineHealthJourney(journeyBase() as never))).toThrow(
-			/health-journey-executable/,
-		);
+		expect(() =>
+			providerWithJourney(
+				// test-invalid: runtime validation must reject a journey missing both run and scenario.
+				defineHealthJourney(journeyBase() as never),
+			),
+		).toThrow(/health-journey-executable/);
 	});
 
 	it("rejects a journey with both run and scenario", () => {
@@ -154,6 +157,7 @@ describe("declarative health scenarios", () => {
 					...journeyBase(),
 					scenario: defineHealthScenario(validScenario()),
 					run: async () => ({ status: "ok" as const }),
+					// test-invalid: runtime validation must reject a journey that declares both run and scenario.
 				} as never),
 			),
 		).toThrow(/health-journey-run-scenario-exclusive/);
@@ -212,6 +216,7 @@ describe("declarative health scenarios", () => {
 		const index = structuredClone(selector);
 		const indexStep = index.steps[0];
 		if (indexStep?.kind !== "extract") throw new Error("expected extract step");
+		// test-invalid: runtime validation must reject an index selector above 10000.
 		indexStep.selector.segments = [{ kind: "index", index: 10_001 }] as never;
 		expect(() => defineHealthScenario(index)).toThrow();
 	});
@@ -224,6 +229,7 @@ describe("declarative health scenarios", () => {
 			kind: "operation" as const,
 			operationId: "ping",
 			inputTemplate: {},
+			// test-invalid: runtime validation must reject more than 64 steps.
 		})) as never;
 		expect(() => defineHealthScenario(tooManySteps)).toThrow();
 
@@ -269,6 +275,7 @@ describe("declarative health scenarios", () => {
 		const executable = validScenario();
 		const operation = executable.steps[0];
 		if (operation?.kind !== "operation") throw new Error("expected operation step");
+		// test-invalid: runtime validation must reject a function value at any depth.
 		operation.inputTemplate = { nested: { callback: () => "forbidden" } } as never;
 		expect(() => defineHealthScenario(executable)).toThrow();
 	});
@@ -296,6 +303,7 @@ describe("declarative health scenarios", () => {
 				valueType: "object",
 				required: true,
 			},
+			// test-invalid: the extra extract step is assembled as a closed union member outside the helper.
 		] as never;
 		expect(defineHealthScenario(scenario).steps.at(-1)).toEqual(scenario.steps.at(-1));
 	});
@@ -322,6 +330,7 @@ describe("declarative health scenarios", () => {
 		nestedAssertion.expression = {
 			...quantifier("every", "outer"),
 			clause: quantifier("any", "inner"),
+			// test-invalid: runtime validation must reject a nested quantifier.
 		} as never;
 		expect(() => defineHealthScenario(nested)).toThrow();
 
@@ -331,6 +340,7 @@ describe("declarative health scenarios", () => {
 		shadowedAssertion.expression = {
 			...quantifier("every", "entry"),
 			clause: quantifier("any", "entry"),
+			// test-invalid: runtime validation must reject an itemBinding that shadows its enclosing binding.
 		} as never;
 		expect(() => defineHealthScenario(shadowed)).toThrow();
 	});
@@ -368,6 +378,7 @@ describe("declarative health scenarios", () => {
 					valueType: "object",
 					required: true,
 				},
+				// test-invalid: runtime validation must reject find_first maxScan outside [1,100].
 			] as never;
 			expect(() => defineHealthScenario(scenario)).toThrow();
 		}
@@ -393,6 +404,7 @@ describe("declarative health scenarios", () => {
 			actual: true,
 		};
 		for (let depth = 0; depth < 9; depth += 1) expression = { kind: "not", clause: expression };
+		// test-invalid: runtime validation must reject expression depth above 8.
 		assertion.expression = expression as never;
 		expect(() => defineHealthScenario(scenario)).toThrow(/expression depth exceeds 8/);
 	});
