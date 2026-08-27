@@ -129,7 +129,7 @@ export function createProviderContext(provider: ProviderDefinition): {
 			credential,
 			state,
 		}),
-	};
+	} satisfies Omit<ProviderContext, "native"> as unknown as ProviderContext;
 
 	return { ctx };
 }

@@ -746,7 +746,7 @@ function createProviderContext(
 					...event,
 				}),
 		}),
-	});
+	} as ProviderContext);
 	wrappedContext = context;
 	return context;
 }

@@ -798,8 +798,7 @@ describe("provider HTTP server", () => {
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async (ctx: ProviderContext) => {
-				const connection = await ctx.native?.network.connectTcp(target);
-				if (!connection) throw new Error("native context missing");
+				const connection = await ctx.native.network.connectTcp(target);
 				await connection.close();
 				return { ok: true };
 			},
@@ -827,7 +826,7 @@ describe("provider HTTP server", () => {
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						handler: async (ctx: ProviderContext) => {
-							ctx.native?.network.grantTcpEgress({
+							ctx.native.network.grantTcpEgress({
 								sourceHost: "bootstrap.example",
 								sourcePort: 443,
 								host: "session.example",

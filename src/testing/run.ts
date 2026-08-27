@@ -525,7 +525,7 @@ function createUpstreamContext(
 		...(provider.native
 			? {
 					native: {
-					network: {
+						network: {
 							connectTcp: async (options) => {
 								const request = snapshotNativeConnectInput(options);
 								requireNativeEgress().assertConnect(request, "disabled");
@@ -578,7 +578,7 @@ function createUpstreamContext(
 			credential,
 			state,
 		}),
-	};
+	} as ProviderContext;
 }
 
 function createNativeConnection(
@@ -709,7 +709,7 @@ export function createSnapshotContext(rawFixture: unknown): ProviderContext {
 			credential,
 			state,
 		}),
-	};
+	} satisfies Omit<ProviderContext, "native"> as unknown as ProviderContext;
 	snapshotCaptureStates.set(context, {
 		assertConsumed() {
 			if (streamCaptureGroup && nextCaptureItem !== streamCaptureGroup.items.length) {

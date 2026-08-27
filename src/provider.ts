@@ -112,7 +112,6 @@ export type {
 	NativeNetworkDynamicGrantOptions,
 	NativeNetworkEgressGrant,
 	NativeProviderConfig,
-	NativeProviderContext,
 	NativeProxyDrainHandler,
 	NativeProxyEgressInfo,
 	NativeProxyExpiringEvent,

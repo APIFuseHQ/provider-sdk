@@ -1636,9 +1636,6 @@ export interface NativeContext {
 	readonly network: NativeNetworkClient;
 }
 
-/** Consumer-facing alias for the native capability on provider contexts. */
-export type NativeProviderContext = NativeContext;
-
 export interface NativeProviderConfig {
 	readonly network?: {
 		readonly tcp?: readonly NativeTcpEgressRule[];
@@ -2143,7 +2140,7 @@ export interface FlowContext {
 	 * un-keyed entries would be shared across all connectionless ceremonies. */
 	readonly state?: ProviderRuntimeState;
 	/** Present when the selected runtime supplies native network capabilities. */
-	readonly native?: NativeProviderContext;
+	readonly native?: NativeContext;
 	stealth: StealthClient;
 	env: EnvContext;
 	credential?: CredentialContext;
@@ -2279,8 +2276,8 @@ export interface ProviderContext {
 	http: HttpClient;
 	/** Present for requests carrying runtime-resolvable file references. */
 	readonly files?: ProviderFilesContext;
-	/** Present when the selected runtime supplies native network capabilities. */
-	readonly native?: NativeProviderContext;
+	/** Native network capability selected by declaration-derived contexts. */
+	readonly native: NativeContext;
 	cache: ProviderCache;
 	state: ProviderRuntimeState;
 	stealth: StealthClient;
@@ -2296,14 +2293,15 @@ export interface ProviderContext {
 /**
  * The operation context exposed for one provider declaration. Capability
  * bindings are present only when their corresponding declaration is present;
- * trace, request, and native remain ambient runtime bindings.
+ * trace and request remain ambient runtime bindings.
  */
 export type ProviderContextFor<TConfig> =
-	Pick<ProviderContext, "trace" | "request" | "native">
+	Pick<ProviderContext, "trace" | "request">
 	& ("env" extends keyof TConfig ? Pick<ProviderContext, "env"> : Record<never, never>)
 	& ("credential" extends keyof TConfig ? Pick<ProviderContext, "credential"> : Record<never, never>)
 	& ("http" extends keyof TConfig ? Pick<ProviderContext, "http"> : Record<never, never>)
 	& ("files" extends keyof TConfig ? Pick<ProviderContext, "files"> : Record<never, never>)
+	& ("native" extends keyof TConfig ? Pick<ProviderContext, "native"> : Record<never, never>)
 	& ("cache" extends keyof TConfig ? Pick<ProviderContext, "cache"> : Record<never, never>)
 	& ("state" extends keyof TConfig ? Pick<ProviderContext, "state"> : Record<never, never>)
 	& ("stealth" extends keyof TConfig ? Pick<ProviderContext, "stealth"> : Record<never, never>)
