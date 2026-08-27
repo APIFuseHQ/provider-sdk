@@ -1,5 +1,6 @@
 import { describeSchema } from "./contract-serialization.js";
 import { ProviderError } from "./errors.js";
+import { HealthScenarioSchema } from "./health-scenario.js";
 import type {
 	HealthJourneyDefinition,
 	ProviderDefinition,
@@ -12,6 +13,8 @@ export const DECLARATION_INVALID_CODE = "DECLARATION_INVALID";
 export const DECLARATION_RULE_IDS = {
 	challengeShape: "credentials-challenge-shape",
 	journeyExecutable: "health-journey-executable",
+	journeyRunScenarioExclusive: "health-journey-run-scenario-exclusive",
+	journeyScenarioValid: "health-journey-scenario-valid",
 	schemaSerializable: "operation-schema-serializable",
 	proxyExplicitPolicy: "proxy-explicit-policy",
 	proxyVendorExclusive: "proxy-vendor-fields-exclusive",
@@ -62,14 +65,38 @@ function validateHealthDeclaration(
 ): void {
 	for (const [index, journey] of (provider.healthJourneys ?? []).entries()) {
 		if (!journey || typeof journey !== "object") continue;
-		if (typeof journey.run !== "function") {
+		const hasRun = journey.run !== undefined;
+		const hasScenario = journey.scenario !== undefined;
+		if (hasRun && hasScenario) {
+			const journeyPath = healthJourneyPath(journey, index);
+			violations.push({
+				ruleId: DECLARATION_RULE_IDS.journeyRunScenarioExclusive,
+				path: journeyPath,
+				message: "A health journey must declare exactly one of run or scenario, not both.",
+				fix: `Remove either ${journeyPath}.run or ${journeyPath}.scenario.`,
+			});
+		}
+		if (!hasRun && !hasScenario) {
 			const journeyPath = healthJourneyPath(journey, index);
 			violations.push({
 				ruleId: DECLARATION_RULE_IDS.journeyExecutable,
 				path: `${journeyPath}.run`,
-				message: "coversOperations cannot provide health coverage without executable run logic.",
-				fix: `Add an async run(ctx) implementation to ${journeyPath}.`,
+				message:
+					"coversOperations cannot provide health coverage without run or a declarative scenario.",
+				fix: `Add an async run(ctx) implementation or a valid scenario to ${journeyPath}.`,
 			});
+		}
+		if (hasScenario) {
+			const parsed = HealthScenarioSchema.safeParse(journey.scenario);
+			if (!parsed.success) {
+				const journeyPath = healthJourneyPath(journey, index);
+				violations.push({
+					ruleId: DECLARATION_RULE_IDS.journeyScenarioValid,
+					path: `${journeyPath}.scenario`,
+					message: "scenario must conform to HealthScenario.",
+					fix: "Build the scenario with defineHealthScenario().",
+				});
+			}
 		}
 	}
 
