@@ -322,6 +322,133 @@ const expressionSchema: z.ZodType<AssertionExpressionV1> = z.lazy(() =>
 );
 export const AssertionExpressionV1Schema = expressionSchema;
 
+const scopedItemReferenceSchema = z
+	.object({
+		namespace: z.literal("item"),
+		binding: z.string().min(1),
+		path: z.array(pathPartSchema).max(12),
+	})
+	.strict();
+export const ScopedItemReferenceV2Schema = scopedItemReferenceSchema;
+export type ScopedItemReferenceV2 = z.infer<typeof scopedItemReferenceSchema>;
+
+const scopedOperandSchema = z.union([
+	operandLiteralSchema,
+	z.object({ ref: scopedItemReferenceSchema }).strict(),
+	referenceNodeSchema,
+]);
+export const ScopedOperandV2Schema = scopedOperandSchema;
+export type ScopedOperandV2 = z.infer<typeof scopedOperandSchema>;
+
+const scopedPredicateSchema = z.union([
+	z
+		.object({
+			kind: z.literal("predicate"),
+			operator: z.enum(["exists", "not_exists", "non_empty", "is_true"]),
+			actual: scopedOperandSchema,
+		})
+		.strict(),
+	z
+		.object({
+			kind: z.literal("predicate"),
+			operator: z.enum(["equals", "not_equals", "contains"]),
+			actual: scopedOperandSchema,
+			expected: scopedOperandSchema,
+		})
+		.strict(),
+	z
+		.object({
+			kind: z.literal("predicate"),
+			operator: z.literal("matches"),
+			actual: scopedOperandSchema,
+			pattern: SafeRegexV1Schema,
+		})
+		.strict(),
+	z
+		.object({
+			kind: z.literal("predicate"),
+			operator: z.enum(["number_gt", "number_gte", "number_lt", "number_lte"]),
+			actual: scopedOperandSchema,
+			expected: scopedOperandSchema,
+		})
+		.strict(),
+	z
+		.object({
+			kind: z.literal("predicate"),
+			operator: z.enum(["array_length_eq", "array_length_gte", "array_length_lte"]),
+			actual: scopedOperandSchema,
+			expected: z.number().finite().int().nonnegative(),
+		})
+		.strict(),
+	z
+		.object({
+			kind: z.literal("predicate"),
+			operator: z.literal("status_2xx"),
+			actual: scopedOperandSchema,
+		})
+		.strict(),
+	z
+		.object({
+			kind: z.literal("predicate"),
+			operator: z.literal("type_is"),
+			actual: scopedOperandSchema,
+			expected: z.enum(["null", "boolean", "number", "string", "object", "array"]),
+		})
+		.strict(),
+]);
+export const ScopedAssertionPredicateV2Schema = scopedPredicateSchema;
+export type ScopedAssertionPredicateV2 = z.infer<typeof scopedPredicateSchema>;
+
+export type ScopedAssertionExpressionV2 =
+	| { kind: "all" | "any"; clauses: NonEmpty<ScopedAssertionExpressionV2> }
+	| { kind: "not"; clause: ScopedAssertionExpressionV2 }
+	| ScopedAssertionPredicateV2;
+const scopedExpressionSchema: z.ZodType<ScopedAssertionExpressionV2> = z.lazy(() =>
+	z.union([
+		z.object({ kind: z.literal("all"), clauses: nonEmptyArray(scopedExpressionSchema) }).strict(),
+		z.object({ kind: z.literal("any"), clauses: nonEmptyArray(scopedExpressionSchema) }).strict(),
+		z.object({ kind: z.literal("not"), clause: scopedExpressionSchema }).strict(),
+		scopedPredicateSchema,
+	]),
+);
+export const ScopedAssertionExpressionV2Schema = scopedExpressionSchema;
+
+export type QuantifierV2 = {
+	kind: "quantifier";
+	quantifier: "every" | "any";
+	items: { ref: StepReferenceV1 | CandidateReferenceV1 };
+	itemBinding: string;
+	maxItems: number;
+	clause: ScopedAssertionExpressionV2;
+};
+const quantifierSchema: z.ZodType<QuantifierV2> = z
+	.object({
+		kind: z.literal("quantifier"),
+		quantifier: z.enum(["every", "any"]),
+		items: z.object({ ref: z.union([stepReferenceSchema, candidateReferenceSchema]) }).strict(),
+		itemBinding: z.string().min(1),
+		maxItems: finiteInt(1, 100),
+		clause: scopedExpressionSchema,
+	})
+	.strict();
+export const QuantifierV2Schema = quantifierSchema;
+
+export type AssertionExpressionV2 =
+	| { kind: "all" | "any"; clauses: NonEmpty<AssertionExpressionV2> }
+	| { kind: "not"; clause: AssertionExpressionV2 }
+	| AssertionPredicateV1
+	| QuantifierV2;
+const expressionV2Schema: z.ZodType<AssertionExpressionV2> = z.lazy(() =>
+	z.union([
+		z.object({ kind: z.literal("all"), clauses: nonEmptyArray(expressionV2Schema) }).strict(),
+		z.object({ kind: z.literal("any"), clauses: nonEmptyArray(expressionV2Schema) }).strict(),
+		z.object({ kind: z.literal("not"), clause: expressionV2Schema }).strict(),
+		predicateSchema,
+		quantifierSchema,
+	]),
+);
+export const AssertionExpressionV2Schema = expressionV2Schema;
+
 export type RetryPolicyV1 = {
 	maxAttempts: number;
 	retryOn: NonEmpty<"transport_error" | "timeout" | "http_429" | "http_5xx">;
@@ -349,6 +476,28 @@ const retryPolicySchema: z.ZodType<RetryPolicyV1> = z
 	.strict();
 export const RetryPolicyV1Schema = retryPolicySchema;
 
+export type RetryPolicyV2 = RetryPolicyV1 & { attemptTimeoutMs?: number };
+const retryPolicyV2Schema: z.ZodType<RetryPolicyV2> = z
+	.object({
+		maxAttempts: finiteInt(1, 3),
+		retryOn: nonEmptyArray(z.enum(["transport_error", "timeout", "http_429", "http_5xx"])),
+		backoff: z.union([
+			z
+				.object({ kind: z.literal("fixed"), delayMs: z.number().finite().int().nonnegative() })
+				.strict(),
+			z
+				.object({
+					kind: z.literal("exponential"),
+					initialDelayMs: z.number().finite().int().nonnegative(),
+					maxDelayMs: z.number().finite().int().nonnegative(),
+				})
+				.strict(),
+		]),
+		attemptTimeoutMs: finiteInt(1, 600_000).optional(),
+	})
+	.strict();
+export const RetryPolicyV2Schema = retryPolicyV2Schema;
+
 export type CandidatePolicyV1 = {
 	items: StepReferenceV1;
 	itemBinding: string;
@@ -366,6 +515,46 @@ const candidatePolicySchema: z.ZodType<CandidatePolicyV1> = z
 	})
 	.strict();
 export const CandidatePolicyV1Schema = candidatePolicySchema;
+
+export type CandidatePolicyV2 = Omit<CandidatePolicyV1, "accept"> & {
+	accept: AssertionExpressionV2;
+};
+const candidatePolicyV2Schema: z.ZodType<CandidatePolicyV2> = z
+	.object({
+		items: stepReferenceSchema,
+		itemBinding: z.string().min(1),
+		itemType: z.enum(["string", "number", "object"]),
+		maxAttempts: finiteInt(1, 10),
+		accept: expressionV2Schema,
+	})
+	.strict();
+export const CandidatePolicyV2Schema = candidatePolicyV2Schema;
+
+export type CandidateBlockV2 = {
+	scope: "step_block";
+	items: StepReferenceV1;
+	itemBinding: string;
+	itemType: "string" | "number" | "object";
+	members: readonly [string, string, ...string[]];
+	maxAttempts: number;
+	accept: AssertionExpressionV2;
+};
+const candidateBlockSchema: z.ZodType<CandidateBlockV2> = z
+	.object({
+		scope: z.literal("step_block"),
+		items: stepReferenceSchema,
+		itemBinding: z.string().min(1),
+		itemType: z.enum(["string", "number", "object"]),
+		members: z
+			.array(z.string().min(1))
+			.min(2)
+			.max(16)
+			.transform((value) => value as [string, string, ...string[]]),
+		maxAttempts: finiteInt(1, 10),
+		accept: expressionV2Schema,
+	})
+	.strict();
+export const CandidateBlockV2Schema = candidateBlockSchema;
 
 export type JournalPolicyV1 = {
 	kind: "side_effect_barrier";
@@ -505,6 +694,97 @@ export const ExtractStepV1Schema = extractStepSchema;
 export const AssertStepV1Schema = assertStepSchema;
 export const GuardStepV1Schema = guardStepSchema;
 
+export type FindFirstV2 = {
+	kind: "find_first";
+	itemBinding: string;
+	predicate: ScopedAssertionExpressionV2;
+	maxScan: number;
+};
+const findFirstSchema: z.ZodType<FindFirstV2> = z
+	.object({
+		kind: z.literal("find_first"),
+		itemBinding: z.string().min(1),
+		predicate: scopedExpressionSchema,
+		maxScan: finiteInt(1, 100),
+	})
+	.strict();
+export const FindFirstV2Schema = findFirstSchema;
+
+export type OperationStepV2 = StepBaseV1 & {
+	kind: "operation";
+	operationId: string;
+	inputTemplate: JsonTemplateV1;
+	connection?: CredentialReferenceV1;
+	retry?: RetryPolicyV2;
+	candidate?: CandidatePolicyV2 | CandidateBlockV2;
+	journal?: JournalPolicyV1;
+};
+export type ExtractStepV2 = StepBaseV1 & {
+	kind: "extract";
+	from: StepReferenceV1;
+	selector: BoundedJsonPathV1 | FindFirstV2;
+	valueType: ValueTypeV1;
+	required: boolean;
+};
+export type AssertStepV2 = StepBaseV1 & {
+	kind: "assert";
+	coversOperations: NonEmpty<string>;
+	expression: AssertionExpressionV2;
+};
+export type GuardStepV2 = StepBaseV1 & {
+	kind: "guard";
+	condition: AssertionExpressionV2;
+	onFail: { attribute: NonEmpty<GuardAttributionV1>; stop: "scenario" };
+};
+export type HealthStepV2 = OperationStepV2 | ExtractStepV2 | AssertStepV2 | GuardStepV2;
+
+const operationStepV2Schema = stepBaseSchema
+	.extend({
+		kind: z.literal("operation"),
+		operationId: z.string().min(1),
+		inputTemplate: jsonTemplateSchema,
+		connection: credentialReferenceSchema.optional(),
+		retry: retryPolicyV2Schema.optional(),
+		candidate: z.union([candidatePolicyV2Schema, candidateBlockSchema]).optional(),
+		journal: journalPolicySchema.optional(),
+	})
+	.strict();
+const extractStepV2Schema = stepBaseSchema
+	.extend({
+		kind: z.literal("extract"),
+		from: stepReferenceSchema,
+		selector: z.union([BoundedJsonPathV1Schema, findFirstSchema]),
+		valueType: valueTypeSchema,
+		required: z.boolean(),
+	})
+	.strict();
+const assertStepV2Schema = stepBaseSchema
+	.extend({
+		kind: z.literal("assert"),
+		coversOperations: nonEmptyArray(z.string().min(1)),
+		expression: expressionV2Schema,
+	})
+	.strict();
+const guardStepV2Schema = stepBaseSchema
+	.extend({
+		kind: z.literal("guard"),
+		condition: expressionV2Schema,
+		onFail: z
+			.object({ attribute: nonEmptyArray(attributionSchema), stop: z.literal("scenario") })
+			.strict(),
+	})
+	.strict();
+export const HealthStepV2Schema = z.discriminatedUnion("kind", [
+	operationStepV2Schema,
+	extractStepV2Schema,
+	assertStepV2Schema,
+	guardStepV2Schema,
+]);
+export const OperationStepV2Schema = operationStepV2Schema;
+export const ExtractStepV2Schema = extractStepV2Schema;
+export const AssertStepV2Schema = assertStepV2Schema;
+export const GuardStepV2Schema = guardStepV2Schema;
+
 export type ManualTriggerPolicyV1 =
 	| { enabled: false; reasonKey: string }
 	| {
@@ -534,8 +814,8 @@ const credentialRefDeclarationSchema = z
 	.strict();
 export const CredentialRefDeclarationV1Schema = credentialRefDeclarationSchema;
 
-export type HealthScenarioV1 = {
-	scenarioVersion: 1;
+export type HealthScenarioV2 = {
+	scenarioVersion: 2;
 	id: string;
 	display: { titleKey: string; descriptionKey?: string };
 	schedule: { kind: "interval"; intervalMs: number; jitterMs: number };
@@ -544,12 +824,12 @@ export type HealthScenarioV1 = {
 	manualTrigger?: ManualTriggerPolicyV1;
 	coversOperations: NonEmpty<string>;
 	credentialRefs: CredentialRefDeclarationV1[];
-	steps: NonEmpty<HealthStepV1>;
+	steps: NonEmpty<HealthStepV2>;
 };
 
-export const HealthScenarioV1Schema: z.ZodType<HealthScenarioV1> = z
+export const HealthScenarioV2Schema: z.ZodType<HealthScenarioV2> = z
 	.object({
-		scenarioVersion: z.literal(1),
+		scenarioVersion: z.literal(2),
 		id: z.string().min(1),
 		display: z
 			.object({ titleKey: z.string().min(1), descriptionKey: z.string().min(1).optional() })
@@ -567,10 +847,10 @@ export const HealthScenarioV1Schema: z.ZodType<HealthScenarioV1> = z
 		coversOperations: nonEmptyArray(z.string().min(1)),
 		credentialRefs: z.array(credentialRefDeclarationSchema),
 		steps: z
-			.array(HealthStepV1Schema)
+			.array(HealthStepV2Schema)
 			.min(1)
 			.max(64)
-			.transform((value) => value as [HealthStepV1, ...HealthStepV1[]]),
+			.transform((value) => value as [HealthStepV2, ...HealthStepV2[]]),
 	})
 	.strict()
 	.superRefine((value, ctx) => {
@@ -586,26 +866,59 @@ export const HealthScenarioV1Schema: z.ZodType<HealthScenarioV1> = z
 				path: ["timeoutMs"],
 				message: "timeoutMs must not exceed intervalMs",
 			});
-		for (const step of value.steps) {
-			const expressions: AssertionExpressionV1[] = [];
-			if (step.kind === "assert") expressions.push(step.expression);
-			if (step.kind === "guard") expressions.push(step.condition);
-			if (step.kind === "operation" && step.candidate) expressions.push(step.candidate.accept);
-			for (const expression of expressions) {
-				const stats = expressionStats(expression);
-				if (stats.depth > 8)
-					ctx.addIssue({
-						code: "custom",
-						path: ["steps"],
-						message: "assertion expression exceeds depth 8",
-					});
-				if (stats.leaves > 64)
-					ctx.addIssue({
-						code: "custom",
-						path: ["steps"],
-						message: "assertion expression exceeds 64 leaves",
-					});
-			}
+		const ids = new Set<string>();
+		const bindings = new Set<string>();
+		for (const [index, step] of value.steps.entries()) {
+			if (ids.has(step.id))
+				ctx.addIssue({
+					code: "custom",
+					path: ["steps", index, "id"],
+					message: `duplicate step ${step.id}`,
+				});
+			ids.add(step.id);
+			if (bindings.has(step.result))
+				ctx.addIssue({
+					code: "custom",
+					path: ["steps", index, "result"],
+					message: `duplicate result binding ${step.result}`,
+				});
+			bindings.add(step.result);
+			if (step.timeoutMs !== undefined && step.timeoutMs > value.timeoutMs)
+				ctx.addIssue({
+					code: "custom",
+					path: ["steps", index, "timeoutMs"],
+					message: "step timeout must not exceed the scenario timeout",
+				});
+			if (
+				step.kind === "operation" &&
+				step.retry?.retryOn.includes("timeout") &&
+				step.retry.attemptTimeoutMs === undefined
+			)
+				ctx.addIssue({
+					code: "custom",
+					path: ["steps", index, "retry", "attemptTimeoutMs"],
+					message: "timeout retry requires attemptTimeoutMs",
+				});
+
+			const expression =
+				step.kind === "assert"
+					? step.expression
+					: step.kind === "guard"
+						? step.condition
+						: step.kind === "operation" && step.candidate
+							? step.candidate.accept
+							: undefined;
+			if (expression) walkExpression(expression, ctx, ["steps", index], 0, { count: 0 }, true);
+			if (step.kind === "extract" && "kind" in step.selector && step.selector.kind === "find_first")
+				walkExpression(
+					step.selector.predicate,
+					ctx,
+					["steps", index, "selector", "predicate"],
+					0,
+					{ count: 0 },
+					false,
+					step.selector.itemBinding,
+				);
 		}
 		try {
 			const serialized = JSON.stringify(value);
@@ -616,21 +929,73 @@ export const HealthScenarioV1Schema: z.ZodType<HealthScenarioV1> = z
 		}
 	});
 
-function expressionStats(
-	expression: AssertionExpressionV1,
-	depth = 0,
-): { depth: number; leaves: number } {
-	if (expression.kind === "predicate") return { depth, leaves: 1 };
-	if (expression.kind === "not") return expressionStats(expression.clause, depth + 1);
-	return expression.clauses.reduce(
-		(total, clause) => {
-			const stats = expressionStats(clause, depth + 1);
-			return { depth: Math.max(total.depth, stats.depth), leaves: total.leaves + stats.leaves };
-		},
-		{ depth, leaves: 0 },
-	);
+function walkExpression(
+	expression: AssertionExpressionV2 | ScopedAssertionExpressionV2,
+	ctx: z.RefinementCtx,
+	path: PropertyKey[],
+	depth: number,
+	leaves: { count: number },
+	allowQuantifier: boolean,
+	scopedBinding?: string,
+): void {
+	if (depth > 8) {
+		ctx.addIssue({ code: "custom", path, message: "expression depth exceeds 8" });
+		return;
+	}
+	if (expression.kind === "quantifier") {
+		if (!allowQuantifier) {
+			ctx.addIssue({ code: "custom", path, message: "quantifiers may not be nested" });
+			return;
+		}
+		if (expression.itemBinding === scopedBinding) {
+			ctx.addIssue({
+				code: "custom",
+				path: [...path, "itemBinding"],
+				message: "item binding is invalid or shadows an enclosing binding",
+			});
+			return;
+		}
+		walkExpression(
+			expression.clause,
+			ctx,
+			[...path, "clause"],
+			depth + 1,
+			leaves,
+			false,
+			expression.itemBinding,
+		);
+		return;
+	}
+	if (expression.kind === "all" || expression.kind === "any") {
+		for (const [index, clause] of expression.clauses.entries())
+			walkExpression(
+				clause,
+				ctx,
+				[...path, "clauses", index],
+				depth + 1,
+				leaves,
+				allowQuantifier,
+				scopedBinding,
+			);
+		return;
+	}
+	if (expression.kind === "not") {
+		walkExpression(
+			expression.clause,
+			ctx,
+			[...path, "clause"],
+			depth + 1,
+			leaves,
+			allowQuantifier,
+			scopedBinding,
+		);
+		return;
+	}
+	leaves.count += 1;
+	if (leaves.count > 64)
+		ctx.addIssue({ code: "custom", path, message: "expression contains more than 64 leaves" });
 }
 
-export function defineHealthScenario(input: unknown): HealthScenarioV1 {
-	return HealthScenarioV1Schema.parse(input);
+export function defineHealthScenario(input: unknown): HealthScenarioV2 {
+	return HealthScenarioV2Schema.parse(input);
 }

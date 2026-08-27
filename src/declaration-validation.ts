@@ -1,6 +1,6 @@
 import { describeSchema } from "./contract-serialization.js";
 import { ProviderError } from "./errors.js";
-import { HealthScenarioV1Schema } from "./health-scenario.js";
+import { HealthScenarioV2Schema } from "./health-scenario.js";
 import type {
 	HealthJourneyDefinition,
 	ProviderDefinition,
@@ -87,13 +87,13 @@ function validateHealthDeclaration(
 			});
 		}
 		if (hasScenario) {
-			const parsed = HealthScenarioV1Schema.safeParse(journey.scenario);
+			const parsed = HealthScenarioV2Schema.safeParse(journey.scenario);
 			if (!parsed.success) {
 				const journeyPath = healthJourneyPath(journey, index);
 				violations.push({
 					ruleId: DECLARATION_RULE_IDS.journeyScenarioValid,
 					path: `${journeyPath}.scenario`,
-					message: "scenario must conform to HealthScenarioV1.",
+					message: "scenario must conform to HealthScenarioV2.",
 					fix: "Build the scenario with defineHealthScenario().",
 				});
 			}
