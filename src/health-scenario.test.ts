@@ -5,10 +5,10 @@ import {
 	defineHealthScenario,
 	defineProvider,
 	every,
-	type HealthScenarioV2,
+	type HealthScenario,
 } from "./index.js";
 
-function validScenario(): HealthScenarioV2 {
+function validScenario(): HealthScenario {
 	return {
 		scenarioVersion: 2,
 		id: "ping-health",

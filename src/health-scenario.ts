@@ -44,10 +44,10 @@ const pathSegmentSchema = z.union([
 	z.object({ kind: z.literal("index"), index: finiteInt(0, 10_000) }).strict(),
 ]);
 
-export const BoundedJsonPathV1Schema = z
+export const BoundedJsonPathSchema = z
 	.object({ root: z.literal("$"), segments: z.array(pathSegmentSchema).max(12) })
 	.strict();
-export type BoundedJsonPathV1 = z.infer<typeof BoundedJsonPathV1Schema>;
+export type BoundedJsonPath = z.infer<typeof BoundedJsonPathSchema>;
 
 const valueTypeSchema = z.enum([
 	"null",
@@ -59,8 +59,8 @@ const valueTypeSchema = z.enum([
 	"json",
 	"established_connection",
 ]);
-export const ValueTypeV1Schema = valueTypeSchema;
-export type ValueTypeV1 = z.infer<typeof valueTypeSchema>;
+export const ValueTypeSchema = valueTypeSchema;
+export type ValueType = z.infer<typeof valueTypeSchema>;
 
 const stepReferenceSchema = z
 	.object({
@@ -69,8 +69,8 @@ const stepReferenceSchema = z
 		path: z.array(pathPartSchema).min(1).max(12),
 	})
 	.strict();
-export const StepReferenceV1Schema = stepReferenceSchema;
-export type StepReferenceV1 = z.infer<typeof stepReferenceSchema>;
+export const StepReferenceSchema = stepReferenceSchema;
+export type StepReference = z.infer<typeof stepReferenceSchema>;
 
 const credentialReferenceSchema = z
 	.object({
@@ -103,22 +103,22 @@ const candidateReferenceSchema = z
 	})
 	.strict();
 
-export type CredentialReferenceV1 = z.infer<typeof credentialReferenceSchema>;
-export type EstablishedConnectionReferenceV1 = CredentialReferenceV1 & { field: "connection" };
-export type AttemptReferenceV1 = z.infer<typeof attemptReferenceSchema>;
-export type CandidateReferenceV1 = z.infer<typeof candidateReferenceSchema>;
-export type ReferenceV1 =
-	| StepReferenceV1
-	| CredentialReferenceV1
-	| AttemptReferenceV1
-	| CandidateReferenceV1;
+export type CredentialReference = z.infer<typeof credentialReferenceSchema>;
+export type EstablishedConnectionReference = CredentialReference & { field: "connection" };
+export type AttemptReference = z.infer<typeof attemptReferenceSchema>;
+export type CandidateReference = z.infer<typeof candidateReferenceSchema>;
+export type Reference =
+	| StepReference
+	| CredentialReference
+	| AttemptReference
+	| CandidateReference;
 const referenceSchema = z.discriminatedUnion("namespace", [
 	stepReferenceSchema,
 	credentialReferenceSchema,
 	attemptReferenceSchema,
 	candidateReferenceSchema,
 ]);
-export const ReferenceV1Schema = referenceSchema;
+export const ReferenceSchema = referenceSchema;
 
 const relativeDateNodeSchema = z
 	.object({
@@ -132,17 +132,17 @@ const relativeDateNodeSchema = z
 			.strict(),
 	})
 	.strict();
-export type RelativeDateNodeV1 = z.infer<typeof relativeDateNodeSchema>;
-export const RelativeDateNodeV1Schema = relativeDateNodeSchema;
+export type RelativeDateNode = z.infer<typeof relativeDateNodeSchema>;
+export const RelativeDateNodeSchema = relativeDateNodeSchema;
 const referenceNodeSchema = z.object({ ref: referenceSchema }).strict();
 
-export type ReferenceNodeV1 = { ref: ReferenceV1 };
-export type JsonTemplateV1 =
+export type ReferenceNode = { ref: Reference };
+export type JsonTemplate =
 	| JsonPrimitive
-	| ReferenceNodeV1
-	| RelativeDateNodeV1
-	| JsonTemplateV1[]
-	| { [key: string]: JsonTemplateV1 };
+	| ReferenceNode
+	| RelativeDateNode
+	| JsonTemplate[]
+	| { [key: string]: JsonTemplate };
 // Reserved template keys may only occur in their exact, single-key node forms.
 const templateRecordSchema = z
 	.record(
@@ -153,7 +153,7 @@ const templateRecordSchema = z
 		if (Object.hasOwn(value, "ref") || Object.hasOwn(value, "relativeDate"))
 			ctx.addIssue({ code: "custom", message: "reserved template keys require a sole-key node" });
 	});
-const jsonTemplateSchema: z.ZodType<JsonTemplateV1> = z.lazy(() =>
+const jsonTemplateSchema: z.ZodType<JsonTemplate> = z.lazy(() =>
 	z.union([
 		z.null(),
 		z.boolean(),
@@ -165,9 +165,9 @@ const jsonTemplateSchema: z.ZodType<JsonTemplateV1> = z.lazy(() =>
 		templateRecordSchema,
 	]),
 );
-export const JsonTemplateV1Schema = jsonTemplateSchema;
+export const JsonTemplateSchema = jsonTemplateSchema;
 
-export type SafeRegexV1 = {
+export type SafeRegex = {
 	readonly engine: "re2";
 	readonly pattern: string;
 	readonly flags: "" | "i";
@@ -217,7 +217,7 @@ function containsNestedRegexQuantifier(pattern: string): boolean {
 	}
 	return false;
 }
-export const SafeRegexV1Schema = z
+export const SafeRegexSchema = z
 	.object({ engine: z.literal("re2"), pattern: z.string().max(256), flags: z.enum(["", "i"]) })
 	.strict()
 	.superRefine((value, ctx) => {
@@ -247,8 +247,8 @@ const operandLiteralSchema = jsonValueSchema.superRefine((value, ctx) => {
 		});
 });
 const operandSchema = z.union([operandLiteralSchema, referenceNodeSchema]);
-export const OperandV1Schema = operandSchema;
-export type OperandV1 = JsonValue | ReferenceNodeV1;
+export const OperandSchema = operandSchema;
+export type Operand = JsonValue | ReferenceNode;
 
 const predicateSchema = z.union([
 	z
@@ -271,7 +271,7 @@ const predicateSchema = z.union([
 			kind: z.literal("predicate"),
 			operator: z.literal("matches"),
 			actual: operandSchema,
-			pattern: SafeRegexV1Schema,
+			pattern: SafeRegexSchema,
 		})
 		.strict(),
 	z
@@ -306,21 +306,8 @@ const predicateSchema = z.union([
 		})
 		.strict(),
 ]);
-export const AssertionPredicateV1Schema = predicateSchema;
-export type AssertionPredicateV1 = z.infer<typeof predicateSchema>;
-export type AssertionExpressionV1 =
-	| { kind: "all" | "any"; clauses: NonEmpty<AssertionExpressionV1> }
-	| { kind: "not"; clause: AssertionExpressionV1 }
-	| AssertionPredicateV1;
-const expressionSchema: z.ZodType<AssertionExpressionV1> = z.lazy(() =>
-	z.union([
-		z.object({ kind: z.literal("all"), clauses: nonEmptyArray(expressionSchema) }).strict(),
-		z.object({ kind: z.literal("any"), clauses: nonEmptyArray(expressionSchema) }).strict(),
-		z.object({ kind: z.literal("not"), clause: expressionSchema }).strict(),
-		predicateSchema,
-	]),
-);
-export const AssertionExpressionV1Schema = expressionSchema;
+export const AssertionPredicateSchema = predicateSchema;
+export type AssertionPredicate = z.infer<typeof predicateSchema>;
 
 const scopedItemReferenceSchema = z
 	.object({
@@ -329,16 +316,16 @@ const scopedItemReferenceSchema = z
 		path: z.array(pathPartSchema).max(12),
 	})
 	.strict();
-export const ScopedItemReferenceV2Schema = scopedItemReferenceSchema;
-export type ScopedItemReferenceV2 = z.infer<typeof scopedItemReferenceSchema>;
+export const ScopedItemReferenceSchema = scopedItemReferenceSchema;
+export type ScopedItemReference = z.infer<typeof scopedItemReferenceSchema>;
 
 const scopedOperandSchema = z.union([
 	operandLiteralSchema,
 	z.object({ ref: scopedItemReferenceSchema }).strict(),
 	referenceNodeSchema,
 ]);
-export const ScopedOperandV2Schema = scopedOperandSchema;
-export type ScopedOperandV2 = z.infer<typeof scopedOperandSchema>;
+export const ScopedOperandSchema = scopedOperandSchema;
+export type ScopedOperand = z.infer<typeof scopedOperandSchema>;
 
 const scopedPredicateSchema = z.union([
 	z
@@ -361,7 +348,7 @@ const scopedPredicateSchema = z.union([
 			kind: z.literal("predicate"),
 			operator: z.literal("matches"),
 			actual: scopedOperandSchema,
-			pattern: SafeRegexV1Schema,
+			pattern: SafeRegexSchema,
 		})
 		.strict(),
 	z
@@ -396,14 +383,14 @@ const scopedPredicateSchema = z.union([
 		})
 		.strict(),
 ]);
-export const ScopedAssertionPredicateV2Schema = scopedPredicateSchema;
-export type ScopedAssertionPredicateV2 = z.infer<typeof scopedPredicateSchema>;
+export const ScopedAssertionPredicateSchema = scopedPredicateSchema;
+export type ScopedAssertionPredicate = z.infer<typeof scopedPredicateSchema>;
 
-export type ScopedAssertionExpressionV2 =
-	| { kind: "all" | "any"; clauses: NonEmpty<ScopedAssertionExpressionV2> }
-	| { kind: "not"; clause: ScopedAssertionExpressionV2 }
-	| ScopedAssertionPredicateV2;
-const scopedExpressionSchema: z.ZodType<ScopedAssertionExpressionV2> = z.lazy(() =>
+export type ScopedAssertionExpression =
+	| { kind: "all" | "any"; clauses: NonEmpty<ScopedAssertionExpression> }
+	| { kind: "not"; clause: ScopedAssertionExpression }
+	| ScopedAssertionPredicate;
+const scopedExpressionSchema: z.ZodType<ScopedAssertionExpression> = z.lazy(() =>
 	z.union([
 		z.object({ kind: z.literal("all"), clauses: nonEmptyArray(scopedExpressionSchema) }).strict(),
 		z.object({ kind: z.literal("any"), clauses: nonEmptyArray(scopedExpressionSchema) }).strict(),
@@ -411,17 +398,17 @@ const scopedExpressionSchema: z.ZodType<ScopedAssertionExpressionV2> = z.lazy(()
 		scopedPredicateSchema,
 	]),
 );
-export const ScopedAssertionExpressionV2Schema = scopedExpressionSchema;
+export const ScopedAssertionExpressionSchema = scopedExpressionSchema;
 
-export type QuantifierV2 = {
+export type Quantifier = {
 	kind: "quantifier";
 	quantifier: "every" | "any";
-	items: { ref: StepReferenceV1 | CandidateReferenceV1 };
+	items: { ref: StepReference | CandidateReference };
 	itemBinding: string;
 	maxItems: number;
-	clause: ScopedAssertionExpressionV2;
+	clause: ScopedAssertionExpression;
 };
-const quantifierSchema: z.ZodType<QuantifierV2> = z
+const quantifierSchema: z.ZodType<Quantifier> = z
 	.object({
 		kind: z.literal("quantifier"),
 		quantifier: z.enum(["every", "any"]),
@@ -431,53 +418,33 @@ const quantifierSchema: z.ZodType<QuantifierV2> = z
 		clause: scopedExpressionSchema,
 	})
 	.strict();
-export const QuantifierV2Schema = quantifierSchema;
+export const QuantifierSchema = quantifierSchema;
 
-export type AssertionExpressionV2 =
-	| { kind: "all" | "any"; clauses: NonEmpty<AssertionExpressionV2> }
-	| { kind: "not"; clause: AssertionExpressionV2 }
-	| AssertionPredicateV1
-	| QuantifierV2;
-const expressionV2Schema: z.ZodType<AssertionExpressionV2> = z.lazy(() =>
+export type AssertionExpression =
+	| { kind: "all" | "any"; clauses: NonEmpty<AssertionExpression> }
+	| { kind: "not"; clause: AssertionExpression }
+	| AssertionPredicate
+	| Quantifier;
+const expressionSchema: z.ZodType<AssertionExpression> = z.lazy(() =>
 	z.union([
-		z.object({ kind: z.literal("all"), clauses: nonEmptyArray(expressionV2Schema) }).strict(),
-		z.object({ kind: z.literal("any"), clauses: nonEmptyArray(expressionV2Schema) }).strict(),
-		z.object({ kind: z.literal("not"), clause: expressionV2Schema }).strict(),
+		z.object({ kind: z.literal("all"), clauses: nonEmptyArray(expressionSchema) }).strict(),
+		z.object({ kind: z.literal("any"), clauses: nonEmptyArray(expressionSchema) }).strict(),
+		z.object({ kind: z.literal("not"), clause: expressionSchema }).strict(),
 		predicateSchema,
 		quantifierSchema,
 	]),
 );
-export const AssertionExpressionV2Schema = expressionV2Schema;
+export const AssertionExpressionSchema = expressionSchema;
 
-export type RetryPolicyV1 = {
+export type RetryPolicy = {
 	maxAttempts: number;
 	retryOn: NonEmpty<"transport_error" | "timeout" | "http_429" | "http_5xx">;
 	backoff:
 		| { kind: "fixed"; delayMs: number }
 		| { kind: "exponential"; initialDelayMs: number; maxDelayMs: number };
+	attemptTimeoutMs?: number;
 };
-const retryPolicySchema: z.ZodType<RetryPolicyV1> = z
-	.object({
-		maxAttempts: finiteInt(1, 3),
-		retryOn: nonEmptyArray(z.enum(["transport_error", "timeout", "http_429", "http_5xx"])),
-		backoff: z.union([
-			z
-				.object({ kind: z.literal("fixed"), delayMs: z.number().finite().int().nonnegative() })
-				.strict(),
-			z
-				.object({
-					kind: z.literal("exponential"),
-					initialDelayMs: z.number().finite().int().nonnegative(),
-					maxDelayMs: z.number().finite().int().nonnegative(),
-				})
-				.strict(),
-		]),
-	})
-	.strict();
-export const RetryPolicyV1Schema = retryPolicySchema;
-
-export type RetryPolicyV2 = RetryPolicyV1 & { attemptTimeoutMs?: number };
-const retryPolicyV2Schema: z.ZodType<RetryPolicyV2> = z
+const retryPolicySchema: z.ZodType<RetryPolicy> = z
 	.object({
 		maxAttempts: finiteInt(1, 3),
 		retryOn: nonEmptyArray(z.enum(["transport_error", "timeout", "http_429", "http_5xx"])),
@@ -496,16 +463,16 @@ const retryPolicyV2Schema: z.ZodType<RetryPolicyV2> = z
 		attemptTimeoutMs: finiteInt(1, 600_000).optional(),
 	})
 	.strict();
-export const RetryPolicyV2Schema = retryPolicyV2Schema;
+export const RetryPolicySchema = retryPolicySchema;
 
-export type CandidatePolicyV1 = {
-	items: StepReferenceV1;
+export type CandidatePolicy = {
+	items: StepReference;
 	itemBinding: string;
 	itemType: "string" | "number" | "object";
 	maxAttempts: number;
-	accept: AssertionExpressionV1;
+	accept: AssertionExpression;
 };
-const candidatePolicySchema: z.ZodType<CandidatePolicyV1> = z
+const candidatePolicySchema: z.ZodType<CandidatePolicy> = z
 	.object({
 		items: stepReferenceSchema,
 		itemBinding: z.string().min(1),
@@ -514,32 +481,18 @@ const candidatePolicySchema: z.ZodType<CandidatePolicyV1> = z
 		accept: expressionSchema,
 	})
 	.strict();
-export const CandidatePolicyV1Schema = candidatePolicySchema;
+export const CandidatePolicySchema = candidatePolicySchema;
 
-export type CandidatePolicyV2 = Omit<CandidatePolicyV1, "accept"> & {
-	accept: AssertionExpressionV2;
-};
-const candidatePolicyV2Schema: z.ZodType<CandidatePolicyV2> = z
-	.object({
-		items: stepReferenceSchema,
-		itemBinding: z.string().min(1),
-		itemType: z.enum(["string", "number", "object"]),
-		maxAttempts: finiteInt(1, 10),
-		accept: expressionV2Schema,
-	})
-	.strict();
-export const CandidatePolicyV2Schema = candidatePolicyV2Schema;
-
-export type CandidateBlockV2 = {
+export type CandidateBlock = {
 	scope: "step_block";
-	items: StepReferenceV1;
+	items: StepReference;
 	itemBinding: string;
 	itemType: "string" | "number" | "object";
 	members: readonly [string, string, ...string[]];
 	maxAttempts: number;
-	accept: AssertionExpressionV2;
+	accept: AssertionExpression;
 };
-const candidateBlockSchema: z.ZodType<CandidateBlockV2> = z
+const candidateBlockSchema: z.ZodType<CandidateBlock> = z
 	.object({
 		scope: z.literal("step_block"),
 		items: stepReferenceSchema,
@@ -551,20 +504,20 @@ const candidateBlockSchema: z.ZodType<CandidateBlockV2> = z
 			.max(16)
 			.transform((value) => value as [string, string, ...string[]]),
 		maxAttempts: finiteInt(1, 10),
-		accept: expressionV2Schema,
+		accept: expressionSchema,
 	})
 	.strict();
-export const CandidateBlockV2Schema = candidateBlockSchema;
+export const CandidateBlockSchema = candidateBlockSchema;
 
-export type JournalPolicyV1 = {
+export type JournalPolicy = {
 	kind: "side_effect_barrier";
 	version: 1;
-	key: ReferenceV1;
+	key: Reference;
 	before: "required";
 	after: "required";
 	replay: "deny_after_started";
 };
-const journalPolicySchema: z.ZodType<JournalPolicyV1> = z
+const journalPolicySchema: z.ZodType<JournalPolicy> = z
 	.object({
 		kind: z.literal("side_effect_barrier"),
 		version: z.literal(1),
@@ -574,9 +527,9 @@ const journalPolicySchema: z.ZodType<JournalPolicyV1> = z
 		replay: z.literal("deny_after_started"),
 	})
 	.strict();
-export const JournalPolicyV1Schema = journalPolicySchema;
+export const JournalPolicySchema = journalPolicySchema;
 
-export type StepBaseV1 = { id: string; result: string; timeoutMs?: number };
+export type StepBase = { id: string; result: string; timeoutMs?: number };
 const stepBaseSchema = z
 	.object({
 		id: z.string().min(1),
@@ -584,42 +537,14 @@ const stepBaseSchema = z
 		timeoutMs: finiteInt(1, 600_000).optional(),
 	})
 	.strict();
-export type OperationStepV1 = StepBaseV1 & {
-	kind: "operation";
-	operationId: string;
-	inputTemplate: JsonTemplateV1;
-	connection?: CredentialReferenceV1;
-	retry?: RetryPolicyV1;
-	candidate?: CandidatePolicyV1;
-	journal?: JournalPolicyV1;
-};
-export type ExtractStepV1 = StepBaseV1 & {
-	kind: "extract";
-	from: StepReferenceV1;
-	selector: BoundedJsonPathV1;
-	valueType: ValueTypeV1;
-	required: boolean;
-};
-export type GuardReasonCodeV1 = "expected_absence";
-export type GuardAttributionV1 = {
+export type GuardReasonCode = "expected_absence";
+export type GuardAttribution = {
 	operationId: string;
 	status: "degraded";
-	reasonCode: GuardReasonCodeV1;
+	reasonCode: GuardReasonCode;
 	reasonKey: string;
 };
-export type AssertStepV1 = StepBaseV1 & {
-	kind: "assert";
-	coversOperations: NonEmpty<string>;
-	expression: AssertionExpressionV1;
-};
-export type GuardStepV1 = StepBaseV1 & {
-	kind: "guard";
-	condition: AssertionExpressionV1;
-	onFail: { attribute: NonEmpty<GuardAttributionV1>; stop: "scenario" };
-};
-export type HealthStepV1 = OperationStepV1 | ExtractStepV1 | AssertStepV1 | GuardStepV1;
-
-export type OperationResultV1 = {
+export type OperationResult = {
 	kind: "operation_result";
 	status_code: number;
 	data: JsonValue;
@@ -627,17 +552,70 @@ export type OperationResultV1 = {
 	duration_ms: number;
 	candidate?: { attempts: number; selected_index: number | null };
 };
-export type ExtractResultV1<T extends JsonValue = JsonValue> = {
+export type ExtractResult<T extends JsonValue = JsonValue> = {
 	kind: "extract_result";
 	found: boolean;
 	value: T | null;
 };
-export type AssertResultV1 = {
+export type AssertResult = {
 	kind: "assert_result";
 	passed: boolean;
 	failed_clause_paths: string[];
 };
-export type GuardResultV1 = { kind: "guard_result"; passed: true };
+export type GuardResult = { kind: "guard_result"; passed: true };
+
+const attributionSchema = z
+	.object({
+		operationId: z.string().min(1),
+		status: z.literal("degraded"),
+		reasonCode: z.literal("expected_absence"),
+		reasonKey: z.string().min(1),
+	})
+	.strict();
+
+export type FindFirst = {
+	kind: "find_first";
+	itemBinding: string;
+	predicate: ScopedAssertionExpression;
+	maxScan: number;
+};
+const findFirstSchema: z.ZodType<FindFirst> = z
+	.object({
+		kind: z.literal("find_first"),
+		itemBinding: z.string().min(1),
+		predicate: scopedExpressionSchema,
+		maxScan: finiteInt(1, 100),
+	})
+	.strict();
+export const FindFirstSchema = findFirstSchema;
+
+export type OperationStep = StepBase & {
+	kind: "operation";
+	operationId: string;
+	inputTemplate: JsonTemplate;
+	connection?: CredentialReference;
+	retry?: RetryPolicy;
+	candidate?: CandidatePolicy | CandidateBlock;
+	journal?: JournalPolicy;
+};
+export type ExtractStep = StepBase & {
+	kind: "extract";
+	from: StepReference;
+	selector: BoundedJsonPath | FindFirst;
+	valueType: ValueType;
+	required: boolean;
+};
+export type AssertStep = StepBase & {
+	kind: "assert";
+	coversOperations: NonEmpty<string>;
+	expression: AssertionExpression;
+};
+export type GuardStep = StepBase & {
+	kind: "guard";
+	condition: AssertionExpression;
+	onFail: { attribute: NonEmpty<GuardAttribution>; stop: "scenario" };
+};
+export type HealthStep = OperationStep | ExtractStep | AssertStep | GuardStep;
 
 const operationStepSchema = stepBaseSchema
 	.extend({
@@ -646,7 +624,7 @@ const operationStepSchema = stepBaseSchema
 		inputTemplate: jsonTemplateSchema,
 		connection: credentialReferenceSchema.optional(),
 		retry: retryPolicySchema.optional(),
-		candidate: candidatePolicySchema.optional(),
+		candidate: z.union([candidatePolicySchema, candidateBlockSchema]).optional(),
 		journal: journalPolicySchema.optional(),
 	})
 	.strict();
@@ -654,17 +632,9 @@ const extractStepSchema = stepBaseSchema
 	.extend({
 		kind: z.literal("extract"),
 		from: stepReferenceSchema,
-		selector: BoundedJsonPathV1Schema,
+		selector: z.union([BoundedJsonPathSchema, findFirstSchema]),
 		valueType: valueTypeSchema,
 		required: z.boolean(),
-	})
-	.strict();
-const attributionSchema = z
-	.object({
-		operationId: z.string().min(1),
-		status: z.literal("degraded"),
-		reasonCode: z.literal("expected_absence"),
-		reasonKey: z.string().min(1),
 	})
 	.strict();
 const assertStepSchema = stepBaseSchema
@@ -683,109 +653,18 @@ const guardStepSchema = stepBaseSchema
 			.strict(),
 	})
 	.strict();
-export const HealthStepV1Schema = z.discriminatedUnion("kind", [
+export const HealthStepSchema = z.discriminatedUnion("kind", [
 	operationStepSchema,
 	extractStepSchema,
 	assertStepSchema,
 	guardStepSchema,
 ]);
-export const OperationStepV1Schema = operationStepSchema;
-export const ExtractStepV1Schema = extractStepSchema;
-export const AssertStepV1Schema = assertStepSchema;
-export const GuardStepV1Schema = guardStepSchema;
+export const OperationStepSchema = operationStepSchema;
+export const ExtractStepSchema = extractStepSchema;
+export const AssertStepSchema = assertStepSchema;
+export const GuardStepSchema = guardStepSchema;
 
-export type FindFirstV2 = {
-	kind: "find_first";
-	itemBinding: string;
-	predicate: ScopedAssertionExpressionV2;
-	maxScan: number;
-};
-const findFirstSchema: z.ZodType<FindFirstV2> = z
-	.object({
-		kind: z.literal("find_first"),
-		itemBinding: z.string().min(1),
-		predicate: scopedExpressionSchema,
-		maxScan: finiteInt(1, 100),
-	})
-	.strict();
-export const FindFirstV2Schema = findFirstSchema;
-
-export type OperationStepV2 = StepBaseV1 & {
-	kind: "operation";
-	operationId: string;
-	inputTemplate: JsonTemplateV1;
-	connection?: CredentialReferenceV1;
-	retry?: RetryPolicyV2;
-	candidate?: CandidatePolicyV2 | CandidateBlockV2;
-	journal?: JournalPolicyV1;
-};
-export type ExtractStepV2 = StepBaseV1 & {
-	kind: "extract";
-	from: StepReferenceV1;
-	selector: BoundedJsonPathV1 | FindFirstV2;
-	valueType: ValueTypeV1;
-	required: boolean;
-};
-export type AssertStepV2 = StepBaseV1 & {
-	kind: "assert";
-	coversOperations: NonEmpty<string>;
-	expression: AssertionExpressionV2;
-};
-export type GuardStepV2 = StepBaseV1 & {
-	kind: "guard";
-	condition: AssertionExpressionV2;
-	onFail: { attribute: NonEmpty<GuardAttributionV1>; stop: "scenario" };
-};
-export type HealthStepV2 = OperationStepV2 | ExtractStepV2 | AssertStepV2 | GuardStepV2;
-
-const operationStepV2Schema = stepBaseSchema
-	.extend({
-		kind: z.literal("operation"),
-		operationId: z.string().min(1),
-		inputTemplate: jsonTemplateSchema,
-		connection: credentialReferenceSchema.optional(),
-		retry: retryPolicyV2Schema.optional(),
-		candidate: z.union([candidatePolicyV2Schema, candidateBlockSchema]).optional(),
-		journal: journalPolicySchema.optional(),
-	})
-	.strict();
-const extractStepV2Schema = stepBaseSchema
-	.extend({
-		kind: z.literal("extract"),
-		from: stepReferenceSchema,
-		selector: z.union([BoundedJsonPathV1Schema, findFirstSchema]),
-		valueType: valueTypeSchema,
-		required: z.boolean(),
-	})
-	.strict();
-const assertStepV2Schema = stepBaseSchema
-	.extend({
-		kind: z.literal("assert"),
-		coversOperations: nonEmptyArray(z.string().min(1)),
-		expression: expressionV2Schema,
-	})
-	.strict();
-const guardStepV2Schema = stepBaseSchema
-	.extend({
-		kind: z.literal("guard"),
-		condition: expressionV2Schema,
-		onFail: z
-			.object({ attribute: nonEmptyArray(attributionSchema), stop: z.literal("scenario") })
-			.strict(),
-	})
-	.strict();
-export const HealthStepV2Schema = z.discriminatedUnion("kind", [
-	operationStepV2Schema,
-	extractStepV2Schema,
-	assertStepV2Schema,
-	guardStepV2Schema,
-]);
-export const OperationStepV2Schema = operationStepV2Schema;
-export const ExtractStepV2Schema = extractStepV2Schema;
-export const AssertStepV2Schema = assertStepV2Schema;
-export const GuardStepV2Schema = guardStepV2Schema;
-
-export type ManualTriggerPolicyV1 =
+export type ManualTriggerPolicy =
 	| { enabled: false; reasonKey: string }
 	| {
 			enabled: true;
@@ -794,7 +673,7 @@ export type ManualTriggerPolicyV1 =
 			minManualIntervalMs: number;
 			publicRationaleKey: string;
 	  };
-const manualTriggerSchema: z.ZodType<ManualTriggerPolicyV1> = z.union([
+const manualTriggerSchema: z.ZodType<ManualTriggerPolicy> = z.union([
 	z.object({ enabled: z.literal(false), reasonKey: z.string().min(1) }).strict(),
 	z
 		.object({
@@ -806,28 +685,28 @@ const manualTriggerSchema: z.ZodType<ManualTriggerPolicyV1> = z.union([
 		})
 		.strict(),
 ]);
-export const ManualTriggerPolicyV1Schema = manualTriggerSchema;
+export const ManualTriggerPolicySchema = manualTriggerSchema;
 
-export type CredentialRefDeclarationV1 = { alias: string; kind: "connection" };
+export type CredentialRefDeclaration = { alias: string; kind: "connection" };
 const credentialRefDeclarationSchema = z
 	.object({ alias: z.string().min(1), kind: z.literal("connection") })
 	.strict();
-export const CredentialRefDeclarationV1Schema = credentialRefDeclarationSchema;
+export const CredentialRefDeclarationSchema = credentialRefDeclarationSchema;
 
-export type HealthScenarioV2 = {
+export type HealthScenario = {
 	scenarioVersion: 2;
 	id: string;
 	display: { titleKey: string; descriptionKey?: string };
 	schedule: { kind: "interval"; intervalMs: number; jitterMs: number };
 	timeoutMs: number;
 	cooldownMs?: number;
-	manualTrigger?: ManualTriggerPolicyV1;
+	manualTrigger?: ManualTriggerPolicy;
 	coversOperations: NonEmpty<string>;
-	credentialRefs: CredentialRefDeclarationV1[];
-	steps: NonEmpty<HealthStepV2>;
+	credentialRefs: CredentialRefDeclaration[];
+	steps: NonEmpty<HealthStep>;
 };
 
-export const HealthScenarioV2Schema: z.ZodType<HealthScenarioV2> = z
+export const HealthScenarioSchema: z.ZodType<HealthScenario> = z
 	.object({
 		scenarioVersion: z.literal(2),
 		id: z.string().min(1),
@@ -847,10 +726,10 @@ export const HealthScenarioV2Schema: z.ZodType<HealthScenarioV2> = z
 		coversOperations: nonEmptyArray(z.string().min(1)),
 		credentialRefs: z.array(credentialRefDeclarationSchema),
 		steps: z
-			.array(HealthStepV2Schema)
+			.array(HealthStepSchema)
 			.min(1)
 			.max(64)
-			.transform((value) => value as [HealthStepV2, ...HealthStepV2[]]),
+			.transform((value) => value as [HealthStep, ...HealthStep[]]),
 	})
 	.strict()
 	.superRefine((value, ctx) => {
@@ -930,7 +809,7 @@ export const HealthScenarioV2Schema: z.ZodType<HealthScenarioV2> = z
 	});
 
 function walkExpression(
-	expression: AssertionExpressionV2 | ScopedAssertionExpressionV2,
+	expression: AssertionExpression | ScopedAssertionExpression,
 	ctx: z.RefinementCtx,
 	path: PropertyKey[],
 	depth: number,
@@ -996,6 +875,6 @@ function walkExpression(
 		ctx.addIssue({ code: "custom", path, message: "expression contains more than 64 leaves" });
 }
 
-export function defineHealthScenario(input: unknown): HealthScenarioV2 {
-	return HealthScenarioV2Schema.parse(input);
+export function defineHealthScenario(input: unknown): HealthScenario {
+	return HealthScenarioSchema.parse(input);
 }

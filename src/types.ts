@@ -1,5 +1,5 @@
 import type ms from "ms";
-import type { HealthScenarioV2 } from "./health-scenario.js";
+import type { HealthScenario } from "./health-scenario.js";
 import type { SerializedCookieJar } from "tough-cookie";
 
 import type { infer as ZodInfer, ZodType } from "zod";
@@ -666,7 +666,7 @@ export type HealthJourneyDefinition = HealthJourneyDefinitionBase &
 				run: (ctx: HealthJourneyRunContext) => Promise<HealthJourneyRunResult | undefined>;
 			scenario?: never;
 		}
-		| { scenario: HealthScenarioV2; run?: never }
+		| { scenario: HealthScenario; run?: never }
 	);
 
 /**
