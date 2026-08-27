@@ -2277,11 +2277,15 @@ interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> 
     browser?: {
         engine: BrowserEngine;
     };
+    cache?: true;
+    choice?: true;
     // (undocumented)
     context?: ContextDeclaration;
     // (undocumented)
     credential?: CredentialDeclaration;
     deployment?: ProviderDeploymentOverrides;
+    env?: true;
+    files?: true;
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // Warning: (ae-forgotten-export) The symbol "ProviderHealthMonitorConfig" needs to be exported by the entry point provider.d.ts
@@ -2289,6 +2293,7 @@ interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> 
     // (undocumented)
     healthMonitor?: ProviderHealthMonitorConfig;
     healthProbe?: ProviderHealthMonitorConfig;
+    http?: true;
     // (undocumented)
     id: string;
     // (undocumented)
@@ -2339,6 +2344,7 @@ interface ProviderConfig<TOperations extends Record<string, ProviderOperation>> 
     //
     // (undocumented)
     secrets?: ProviderSecretDeclaration[];
+    state?: true;
     // (undocumented)
     stealth?: {
         profile: string;
@@ -3432,9 +3438,9 @@ export { z }
 //
 // dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:15:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:60:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:91:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:115:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:62:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:103:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:127:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
 // dist/errors.d.ts:8:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:15:5 - (ae-forgotten-export) The symbol "EnvContext" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point provider.d.ts
