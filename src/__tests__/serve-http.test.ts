@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { type Socket, createServer } from "node:net";
 import { z } from "zod";
 
@@ -2166,6 +2167,147 @@ describe("provider HTTP server", () => {
 				retryable: header.retryable,
 			}),
 		]);
+	});
+
+	function createCauseErrorApp(createError: () => ProviderError, events: ProviderServerLogEvent[]) {
+		const base = createTestProvider();
+		const provider = {
+			...base,
+			operations: {
+				causeError: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					handler: async () => {
+						throw createError();
+					},
+				},
+			},
+		} satisfies ProviderDefinition;
+		return createServerApp(provider, { logger: (event) => events.push(event) });
+	}
+
+	function requestCauseError(app: ReturnType<typeof createServerApp>) {
+		return app.request("/v1/causeError", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_cause", input: { value: "hello" } }),
+		});
+	}
+
+	function causeFingerprint(message: string): string {
+		return createHash("sha256").update(message).digest("hex").slice(0, 12);
+	}
+
+	it("logs only length and sha256 fingerprints for a 3-deep cause chain", async () => {
+		const rawCauseMessages = [
+			"vendor token secret-123",
+			"upstream payload for person@example.com",
+			"choice parser rejected credential abcdef",
+		];
+		const innermost = new ProviderError(rawCauseMessages[2], { code: "INNER_CODE" });
+		const middle = new Error(rawCauseMessages[1], { cause: innermost });
+		middle.name = "ProviderChoiceTokenError";
+		Object.defineProperty(middle, "code", { value: "UNBRANDED_CODE" });
+		const outermost = new ProviderError(rawCauseMessages[0], {
+			code: "OUTER_CAUSE_CODE",
+			cause: middle,
+		});
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(
+			createCauseErrorApp(
+				() =>
+					new ProviderError("Pagination is temporarily unavailable.", {
+						code: "CHOICE_STATE_UNAVAILABLE",
+						cause: outermost,
+					}),
+				events,
+			),
+		);
+
+		expect(response.status).toBe(500);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({ event: "provider_request_failed" });
+		expect(Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value).toEqual([
+			{
+				errorClass: "ProviderError",
+				code: "OUTER_CAUSE_CODE",
+				messageLength: rawCauseMessages[0].length,
+				messageFingerprint: causeFingerprint(rawCauseMessages[0]),
+			},
+			{
+				errorClass: "ProviderChoiceTokenError",
+				messageLength: rawCauseMessages[1].length,
+				messageFingerprint: causeFingerprint(rawCauseMessages[1]),
+			},
+			{
+				errorClass: "ProviderError",
+				code: "INNER_CODE",
+				messageLength: rawCauseMessages[2].length,
+				messageFingerprint: causeFingerprint(rawCauseMessages[2]),
+			},
+		]);
+		for (const rawCauseMessage of rawCauseMessages) {
+			expect(JSON.stringify(events[0])).not.toContain(rawCauseMessage);
+		}
+		expect(await response.json()).toEqual({
+			error: {
+				code: "CHOICE_STATE_UNAVAILABLE",
+				message: "Pagination is temporarily unavailable.",
+				requestId: "req_cause",
+				retryable: false,
+				source: "apifuse",
+			},
+		});
+	});
+
+	it("truncates cause chains deeper than five frames", async () => {
+		let cause: Error = new Error("666666");
+		for (let index = 5; index >= 1; index -= 1) {
+			cause = new Error(String(index).repeat(index), { cause });
+		}
+		const events: ProviderServerLogEvent[] = [];
+		await requestCauseError(
+			createCauseErrorApp(
+				() => new ProviderError("Public message", { code: "DEEP_CAUSE", cause }),
+				events,
+			),
+		);
+
+		expect(Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value).toEqual([
+			expect.objectContaining({ errorClass: "Error", messageLength: 1 }),
+			expect.objectContaining({ errorClass: "Error", messageLength: 2 }),
+			expect.objectContaining({ errorClass: "Error", messageLength: 3 }),
+			expect.objectContaining({ errorClass: "Error", messageLength: 4 }),
+			expect.objectContaining({ errorClass: "Error", messageLength: 5 }),
+		]);
+	});
+
+	it("terminates cyclic cause chains without repeating a frame", async () => {
+		const first = new Error("cycle first");
+		const second = new Error("cycle second", { cause: first });
+		first.cause = second;
+		const events: ProviderServerLogEvent[] = [];
+		await requestCauseError(
+			createCauseErrorApp(
+				() => new ProviderError("Public message", { code: "CYCLIC_CAUSE", cause: first }),
+				events,
+			),
+		);
+
+		expect(Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value).toEqual([
+			expect.objectContaining({ errorClass: "Error", messageLength: "cycle first".length }),
+			expect.objectContaining({ errorClass: "Error", messageLength: "cycle second".length }),
+		]);
+	});
+
+	it("omits causeChain when the provider error has no cause", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		await requestCauseError(
+			createCauseErrorApp(() => new ProviderError("Public message", { code: "NO_CAUSE" }), events),
+		);
+
+		expect(events).toHaveLength(1);
+		expect(events[0]).not.toHaveProperty("causeChain");
 	});
 
 	it("emits a greppable signal for an unregistered code and preserves ValidationError as 400", async () => {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -1441,6 +1442,41 @@ function extractRequestId(raw: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
+type ProviderErrorCauseFrame = {
+	errorClass: string;
+	code?: string;
+	messageLength: number;
+	messageFingerprint: string;
+};
+
+const MAX_PROVIDER_ERROR_CAUSE_FRAMES = 5;
+
+function providerErrorCauseChain(error: unknown): ProviderErrorCauseFrame[] | undefined {
+	if (!(error instanceof Error) && !isProviderError(error)) return undefined;
+
+	const seen = new Set<object>([error]);
+	const frames: ProviderErrorCauseFrame[] = [];
+	let cause = error.cause;
+
+	while (
+		frames.length < MAX_PROVIDER_ERROR_CAUSE_FRAMES &&
+		(cause instanceof Error || isProviderError(cause)) &&
+		!seen.has(cause)
+	) {
+		seen.add(cause);
+		const message = cause.message;
+		frames.push({
+			errorClass: cause.name,
+			...(isProviderError(cause) && typeof cause.code === "string" ? { code: cause.code } : {}),
+			messageLength: message.length,
+			messageFingerprint: createHash("sha256").update(message).digest("hex").slice(0, 12),
+		});
+		cause = cause.cause;
+	}
+
+	return frames.length > 0 ? frames : undefined;
+}
+
 function logProviderError(
 	logger: ProviderServerLogger | unknown,
 	provider: ProviderDefinition,
@@ -1461,6 +1497,7 @@ function logProviderError(
 				: "internal_error";
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
+	const causeChain = providerErrorCauseChain(error);
 	const details = errorObservabilityDetails(error, declaredErrorCode);
 	const isUnregisteredProviderErrorCode =
 		status === 500 &&
@@ -1482,6 +1519,7 @@ function logProviderError(
 		code,
 		errorClass,
 		message,
+		...(causeChain ? { causeChain } : {}),
 		...(details.upstreamStatus ? { upstreamStatus: details.upstreamStatus } : {}),
 		errorCategory: details.category,
 		taxonomyVersion: details.taxonomyVersion,
