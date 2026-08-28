@@ -586,6 +586,42 @@ describe("proxy integration", () => {
 		});
 	});
 
+	it("keeps the serving vendor when a later resolution fails", () => {
+		// Transport-phase failover ordering: a vendor resolves OK first, the
+		// transport then fails, and the NEXT vendor's allocation fails — the
+		// failure event is recorded LAST. The serving vendor must stay the
+		// successful one, never the trailing failure.
+		const telemetry = new ProxyTelemetryCollector();
+		telemetry.recordProxyResolution({
+			provider: "smartproxy",
+			protocol: "http",
+			cacheStatus: "memory_hit",
+			cacheHit: true,
+			resolutionMs: 3,
+			attempts: 1,
+		});
+		telemetry.recordProxyVendorFailover({
+			vendor: "smartproxy",
+			nextVendor: "nodemaven",
+			phase: "transport",
+			reason: "pool_exhausted",
+			attempt: 2,
+		});
+		telemetry.recordProxyResolution({
+			provider: "nodemaven",
+			outcome: "error",
+			cacheStatus: "allocator",
+			cacheHit: false,
+			resolutionMs: 9,
+			attempts: 1,
+		});
+
+		const payload = telemetry.toLogPayload();
+		expect(payload?.kind).toBe("resolved");
+		expect(payload?.kind === "resolved" ? payload.provider : undefined).toBe("smartproxy");
+		expect(payload?.kind === "resolved" ? payload.protocol : undefined).toBe("http");
+	});
+
 	it("omits telemetry for an empty collector", () => {
 		const telemetry = new ProxyTelemetryCollector();
 
