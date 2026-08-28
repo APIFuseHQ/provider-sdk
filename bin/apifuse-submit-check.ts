@@ -2945,6 +2945,7 @@ function sanitizeDiagnosticFileName(fileName: string): string {
 		if (codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f)) {
 			sanitized += `\\x${codePoint.toString(16).padStart(2, "0")}`;
 		} else if (
+			codePoint === 0x061c ||
 			codePoint === 0x200e ||
 			codePoint === 0x200f ||
 			(codePoint >= 0x202a && codePoint <= 0x202e) ||
