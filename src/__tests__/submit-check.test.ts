@@ -596,6 +596,20 @@ void useStealth;
 		expect(fetchCheck?.status).toBe("pass");
 	});
 
+	it("blocks globalThis element-access eval dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-globalthis-element-eval-",
+			`${validProviderSource()}\nexport function risky(u: string) { return globalThis["eval"]("fetch(u)"); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.evidence).toEqual(["index.ts:61"]);
+	});
+
 	it("blocks window.eval dynamic code evaluation", async () => {
 		const dir = makeProviderDir(
 			"submit-no-dynamic-code-window-eval-",
@@ -620,6 +634,33 @@ void useStealth;
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks window element-access Function dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-window-element-function-",
+			`${validProviderSource()}\nconst generated = window["Function"]("return 1");\nvoid generated;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks a local const alias of eval", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-const-alias-",
+			`${validProviderSource()}\nconst run = eval;\nvoid run("fetch(u)");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.evidence).toEqual(["index.ts:62"]);
 	});
 
 	it("blocks comma-indirect eval dynamic code evaluation", async () => {
@@ -672,6 +713,19 @@ void useStealth;
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
+	});
+
+	it("allows a locally shadowed Function identifier", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-shadowed-function-",
+			`${validProviderSource()}\nconst compileSchema = (schema: string) => schema;\nconst Function = compileSchema;\nvoid Function("schema");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
 	});
 
 	it("ignores dynamic-code words inside comments and strings", async () => {
@@ -4245,6 +4299,60 @@ export default defineProvider({ id: "real", version: "1.0.0", runtime: "standard
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
+	});
+
+	it("unwraps satisfies on a default-exported separated builder call", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+const meta = { id: "factory", version: "1.0.0", runtime: "standard" };
+const buildProvider = defineProvider(meta);
+export default buildProvider({ operations: makeOperations() }) satisfies Record<string, unknown>;
+`;
+		const dir = makeProviderDir("submit-separated-builder-satisfies-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("unwraps an as assertion on the default-exported provider call", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+const helper = defineProvider({ id: "helper", version: "1.0.0", runtime: "standard", operations: {} });
+export default defineProvider({ id: "factory", version: "1.0.0", runtime: "standard" })({
+  operations: makeOperations(),
+}) as Record<string, unknown>;
+`;
+		const dir = makeProviderDir("submit-default-export-as-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks an operations getter whose value is not statically enumerable", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "factory", version: "1.0.0", runtime: "standard" })({
+  get operations() { return makeOperations(); },
+});
+`;
+		const dir = makeProviderDir("submit-operations-getter-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.message).toContain("accessor/method");
+		expect(check?.message).toContain("not statically enumerable");
 	});
 
 	it("passes a static default export even when an earlier helper is factory-composed", async () => {

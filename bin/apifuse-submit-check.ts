@@ -518,16 +518,144 @@ function unwrapDynamicCodeCallee(expression: ts.Expression): ts.Expression {
 	return current;
 }
 
-function isDynamicCodeSinkCallee(expression: ts.Expression): boolean {
+type DynamicCodeBinding = {
+	constInitializer?: ts.Expression;
+};
+
+function collectDynamicCodeBindings(sourceFile: ts.SourceFile): Map<string, DynamicCodeBinding[]> {
+	const bindings = new Map<string, DynamicCodeBinding[]>();
+	const addBinding = (name: string, binding: DynamicCodeBinding = {}): void => {
+		const existing = bindings.get(name);
+		if (existing === undefined) {
+			bindings.set(name, [binding]);
+		} else {
+			existing.push(binding);
+		}
+	};
+	const addBindingName = (bindingName: ts.BindingName, binding: DynamicCodeBinding = {}): void => {
+		if (ts.isIdentifier(bindingName)) {
+			addBinding(bindingName.text, binding);
+			return;
+		}
+		for (const element of bindingName.elements) {
+			if (!ts.isOmittedExpression(element)) {
+				addBindingName(element.name);
+			}
+		}
+	};
+	const visit = (node: ts.Node): void => {
+		if (ts.isVariableDeclaration(node)) {
+			const isDirectConstBinding =
+				ts.isIdentifier(node.name) &&
+				ts.isVariableDeclarationList(node.parent) &&
+				(node.parent.flags & ts.NodeFlags.Const) !== 0;
+			addBindingName(node.name, {
+				constInitializer: isDirectConstBinding ? node.initializer : undefined,
+			});
+		} else if (
+			(ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) &&
+			node.name !== undefined
+		) {
+			addBinding(node.name.text);
+		} else if (ts.isParameter(node)) {
+			addBindingName(node.name);
+		} else if (ts.isImportClause(node) && node.name !== undefined) {
+			addBinding(node.name.text);
+		} else if (ts.isNamespaceImport(node) || ts.isImportSpecifier(node)) {
+			addBinding(node.name.text);
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return bindings;
+}
+
+function isDynamicCodeGlobalMemberSink(expression: ts.Expression): boolean {
 	const callee = unwrapDynamicCodeCallee(expression);
-	if (ts.isIdentifier(callee)) {
-		return DYNAMIC_CODE_SINKS.has(callee.text);
+	let sinkName: string | undefined;
+	let receiver: ts.Expression | undefined;
+	if (ts.isPropertyAccessExpression(callee)) {
+		sinkName = callee.name.text;
+		receiver = callee.expression;
+	} else if (ts.isElementAccessExpression(callee)) {
+		const argument = callee.argumentExpression;
+		if (
+			argument !== undefined &&
+			(ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
+		) {
+			sinkName = argument.text;
+			receiver = callee.expression;
+		}
 	}
-	if (!ts.isPropertyAccessExpression(callee) || !DYNAMIC_CODE_SINKS.has(callee.name.text)) {
+	if (sinkName === undefined || receiver === undefined || !DYNAMIC_CODE_SINKS.has(sinkName)) {
 		return false;
 	}
-	const receiver = unwrapDynamicCodeCallee(callee.expression);
-	return ts.isIdentifier(receiver) && DYNAMIC_CODE_GLOBAL_OBJECTS.has(receiver.text);
+	const unwrappedReceiver = unwrapDynamicCodeCallee(receiver);
+	return (
+		ts.isIdentifier(unwrappedReceiver) && DYNAMIC_CODE_GLOBAL_OBJECTS.has(unwrappedReceiver.text)
+	);
+}
+
+function isDirectDynamicCodeSinkReference(
+	expression: ts.Expression,
+	bindings: ReadonlyMap<string, readonly DynamicCodeBinding[]>,
+	resolving: ReadonlySet<string>,
+): boolean {
+	const reference = unwrapDynamicCodeCallee(expression);
+	if (isDynamicCodeGlobalMemberSink(reference)) {
+		return true;
+	}
+	if (!ts.isIdentifier(reference) || !DYNAMIC_CODE_SINKS.has(reference.text)) {
+		return false;
+	}
+	return isBareDynamicCodeSinkIdentifier(reference.text, bindings, resolving);
+}
+
+function isBareDynamicCodeSinkIdentifier(
+	name: string,
+	bindings: ReadonlyMap<string, readonly DynamicCodeBinding[]>,
+	resolving: ReadonlySet<string>,
+): boolean {
+	const localBindings = bindings.get(name);
+	if (localBindings === undefined || localBindings.length === 0) {
+		return DYNAMIC_CODE_SINKS.has(name);
+	}
+	if (resolving.has(name)) {
+		return false;
+	}
+	const nextResolving = new Set(resolving);
+	nextResolving.add(name);
+	return localBindings.every(
+		(binding) =>
+			binding.constInitializer !== undefined &&
+			isDirectDynamicCodeSinkReference(binding.constInitializer, bindings, nextResolving),
+	);
+}
+
+function isDynamicCodeSinkCallee(
+	expression: ts.Expression,
+	bindings: ReadonlyMap<string, readonly DynamicCodeBinding[]>,
+): boolean {
+	const callee = unwrapDynamicCodeCallee(expression);
+	if (isDynamicCodeGlobalMemberSink(callee)) {
+		return true;
+	}
+	if (!ts.isIdentifier(callee)) {
+		return false;
+	}
+	if (DYNAMIC_CODE_SINKS.has(callee.text)) {
+		return isBareDynamicCodeSinkIdentifier(callee.text, bindings, new Set());
+	}
+	const localBindings = bindings.get(callee.text);
+	return (
+		localBindings !== undefined &&
+		localBindings.length > 0 &&
+		localBindings.every(
+			(binding) =>
+				binding.constInitializer !== undefined &&
+				isDirectDynamicCodeSinkReference(binding.constInitializer, bindings, new Set()),
+		)
+	);
 }
 
 function findDynamicCodeCalls(providerRoot: string): SourceFinding[] {
@@ -543,13 +671,14 @@ function findDynamicCodeCalls(providerRoot: string): SourceFinding[] {
 			true,
 			ts.ScriptKind.TS,
 		);
+		const bindings = collectDynamicCodeBindings(sourceFile);
 		const visit = (node: ts.Node): void => {
 			if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
 				return;
 			}
 			if (
 				(ts.isCallExpression(node) || ts.isNewExpression(node)) &&
-				isDynamicCodeSinkCallee(node.expression)
+				isDynamicCodeSinkCallee(node.expression, bindings)
 			) {
 				const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 				const key = `${relPath}:${line}`;
@@ -1366,7 +1495,7 @@ function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpre
 	// the previous locator's preference for that call over every defineProvider
 	// declaration that may also appear in the file.
 	for (const assignment of defaultExports) {
-		const expression = assignment.expression;
+		const expression = unwrapImplementationExpression(assignment.expression);
 		if (!ts.isCallExpression(expression)) {
 			continue;
 		}
@@ -1382,7 +1511,7 @@ function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpre
 	// argument is the implementation. A plain `defineProvider(implementation)`
 	// selects the single call itself.
 	for (const assignment of defaultExports) {
-		const defaultExpression = assignment.expression;
+		const defaultExpression = unwrapImplementationExpression(assignment.expression);
 		if (!ts.isCallExpression(defaultExpression)) {
 			continue;
 		}
@@ -1470,6 +1599,22 @@ function isOperationsProperty(
 	);
 }
 
+function isOperationsAccessorOrMethod(
+	property: ts.ObjectLiteralElementLike,
+): property is ts.GetAccessorDeclaration | ts.SetAccessorDeclaration | ts.MethodDeclaration {
+	if (
+		!ts.isGetAccessorDeclaration(property) &&
+		!ts.isSetAccessorDeclaration(property) &&
+		!ts.isMethodDeclaration(property)
+	) {
+		return false;
+	}
+	return (
+		(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) &&
+		property.name.text === "operations"
+	);
+}
+
 function isSourceEnumerableStaticObjectLiteral(expression: ts.Expression): boolean {
 	const unwrapped = unwrapImplementationExpression(expression);
 	if (!ts.isObjectLiteralExpression(unwrapped)) {
@@ -1508,10 +1653,22 @@ function findComputedImplementationProperty(
 
 function findEffectiveOperationsProperty(
 	objectLiteral: ts.ObjectLiteralExpression,
-): ts.PropertyAssignment | ts.ShorthandPropertyAssignment | undefined {
-	let effective: ts.PropertyAssignment | ts.ShorthandPropertyAssignment | undefined;
+):
+	| ts.PropertyAssignment
+	| ts.ShorthandPropertyAssignment
+	| ts.GetAccessorDeclaration
+	| ts.SetAccessorDeclaration
+	| ts.MethodDeclaration
+	| undefined {
+	let effective:
+		| ts.PropertyAssignment
+		| ts.ShorthandPropertyAssignment
+		| ts.GetAccessorDeclaration
+		| ts.SetAccessorDeclaration
+		| ts.MethodDeclaration
+		| undefined;
 	for (const property of objectLiteral.properties) {
-		if (isOperationsProperty(property)) {
+		if (isOperationsProperty(property) || isOperationsAccessorOrMethod(property)) {
 			effective = property;
 			continue;
 		}
@@ -1600,6 +1757,18 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			"Declare operations with the literal property name `operations` and a static object literal value so the provider-registry AST gate can enumerate it.",
 			0,
 			[`${indexRelPath}:${computedLine} (computed property name)`],
+		);
+	}
+
+	if (opsProp !== undefined && isOperationsAccessorOrMethod(opsProp)) {
+		const memberLine = offsetToLine(source, opsProp.getStart(sourceFile));
+		return blocker(
+			ruleId,
+			SDK_NATIVE_CATEGORY,
+			"The defineProvider operations member is an accessor/method whose value is not statically enumerable.",
+			"Declare operations as a property assignment with a static object literal value so the provider-registry AST gate can enumerate it.",
+			0,
+			[`${indexRelPath}:${memberLine} (operations accessor/method)`],
 		);
 	}
 

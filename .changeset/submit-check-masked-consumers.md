@@ -41,3 +41,5 @@ Computed keys and non-enumerable spreads in the implementation object now fail
 closed even when a literal `operations` property is present, and
 `no-dynamic-code` now resolves sinks on the TypeScript AST so member and
 indirect `eval`/`Function` calls are rejected.
+
+Default-export type assertions are unwrapped before the builder call is resolved; accessor/method `operations` members and element-access `eval`/`Function` sinks fail closed; locally shadowed `eval`/`Function` identifiers are not flagged.
