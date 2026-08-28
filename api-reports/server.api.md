@@ -3282,6 +3282,18 @@ interface ProxiedOAuthConfig {
 }
 
 // @public (undocumented)
+type ProxyAttemptTelemetryEvent = {
+    provider: ProxyVendorName;
+    attempt: number;
+    poolIndex?: number;
+    proxyHash?: string;
+    outcome: "ok" | "error";
+    errorCode?: string;
+    status?: number;
+    durationMs?: number;
+};
+
+// @public (undocumented)
 export type ProxyCacheStatus = "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
 
 // @public
@@ -3311,7 +3323,7 @@ export type ProxyTelemetryLogPayload = {
         a: number;
         i?: number;
         h?: string;
-        o: "ok" | "error";
+        o: ProxyAttemptTelemetryEvent["outcome"];
         c?: string;
         s?: number;
         d?: number;
@@ -3320,14 +3332,23 @@ export type ProxyTelemetryLogPayload = {
     failovers?: {
         v: ProxyVendorName;
         nx?: ProxyVendorName;
-        p: "resolution" | "transport";
-        r: "no_credentials" | "allocation_failed" | "pool_exhausted" | "protocol_unsupported";
+        p: ProxyVendorFailoverTelemetryEvent["phase"];
+        r: ProxyVendorFailoverTelemetryEvent["reason"];
         a?: number;
     }[];
 };
 
 // @public (undocumented)
 export type ProxyUserAgentSource = "declared" | "defaulted";
+
+// @public (undocumented)
+type ProxyVendorFailoverTelemetryEvent = {
+    vendor: ProxyVendorName;
+    nextVendor?: ProxyVendorName;
+    phase: "resolution" | "transport";
+    reason: "no_credentials" | "allocation_failed" | "pool_exhausted" | "protocol_unsupported";
+    attempt?: number;
+};
 
 // @public
 export type ProxyVendorName = "smartproxy" | "nodemaven";
@@ -4501,6 +4522,8 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/health-scenario.d.ts:1835:5 - (ae-forgotten-export) The symbol "ManualTriggerPolicy" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1837:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1838:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:26:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:37:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:11:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:148:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:172:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts

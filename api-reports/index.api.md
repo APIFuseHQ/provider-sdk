@@ -4895,7 +4895,7 @@ type ProxyAttemptTelemetryEvent = {
 };
 
 // @public (undocumented)
-type ProxyCacheStatus = "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
+export type ProxyCacheStatus = "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
 
 // @public
 export type ProxyProtocol = "http" | "socks5";
@@ -4963,7 +4963,7 @@ export type ProxyTelemetryLogPayload = {
         a: number;
         i?: number;
         h?: string;
-        o: "ok" | "error";
+        o: ProxyAttemptTelemetryEvent["outcome"];
         c?: string;
         s?: number;
         d?: number;
@@ -4972,8 +4972,8 @@ export type ProxyTelemetryLogPayload = {
     failovers?: {
         v: ProxyVendorName;
         nx?: ProxyVendorName;
-        p: "resolution" | "transport";
-        r: "no_credentials" | "allocation_failed" | "pool_exhausted" | "protocol_unsupported";
+        p: ProxyVendorFailoverTelemetryEvent["phase"];
+        r: ProxyVendorFailoverTelemetryEvent["reason"];
         a?: number;
     }[];
 };
@@ -4986,7 +4986,7 @@ type ProxyTelemetrySink = {
 };
 
 // @public (undocumented)
-type ProxyUserAgentSource = "declared" | "defaulted";
+export type ProxyUserAgentSource = "declared" | "defaulted";
 
 // @public (undocumented)
 type ProxyVendorFailoverTelemetryEvent = {
@@ -6100,7 +6100,7 @@ export class SessionExpiredError extends AuthError {
 }
 
 // @public (undocumented)
-type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
+export type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
 
 // @public (undocumented)
 export type SmsOrigin = {
@@ -6836,12 +6836,7 @@ export { z }
 //
 // dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point index.d.ts
 // dist/config/loader.d.ts:60:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
-// dist/config/loader.d.ts:67:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point index.d.ts
-// dist/config/loader.d.ts:69:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point index.d.ts
-// dist/config/loader.d.ts:74:5 - (ae-forgotten-export) The symbol "SmartproxyAllocatorBodyClass" needs to be exported by the entry point index.d.ts
 // dist/config/loader.d.ts:104:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/config/loader.d.ts:105:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/config/loader.d.ts:106:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:26:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:103:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:127:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
@@ -6851,6 +6846,8 @@ export { z }
 // dist/lint.d.ts:75:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
 // dist/runtime/choice.d.ts:22:5 - (ae-forgotten-export) The symbol "ProviderChoiceTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:26:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:37:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:58:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:62:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:138:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts

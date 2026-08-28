@@ -6,12 +6,15 @@ export * from "./choice-token.js";
 export type {
 	ApiFuseConfig,
 	BrowserConfig,
+	ProxyCacheStatus,
 	ProxyProtocol,
 	ProxyResolutionOptions,
 	ProxyResolutionSource,
+	ProxyUserAgentSource,
 	ProxyVendorName,
 	ResolvedProxyConfig,
 	SessionConfig,
+	SmartproxyAllocatorBodyClass,
 } from "./config/loader.js";
 export { defineConfig, loadApiFuseConfig, resolveProxy } from "./config/loader.js";
 export {

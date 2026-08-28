@@ -35,7 +35,7 @@ export type ProxyTelemetryLogPayload = {
 		a: number;
 		i?: number;
 		h?: string;
-		o: "ok" | "error";
+		o: ProxyAttemptTelemetryEvent["outcome"];
 		c?: string;
 		s?: number;
 		d?: number;
@@ -46,8 +46,8 @@ export type ProxyTelemetryLogPayload = {
 	failovers?: {
 		v: ProxyVendorName;
 		nx?: ProxyVendorName;
-		p: "resolution" | "transport";
-		r: "no_credentials" | "allocation_failed" | "pool_exhausted" | "protocol_unsupported";
+		p: ProxyVendorFailoverTelemetryEvent["phase"];
+		r: ProxyVendorFailoverTelemetryEvent["reason"];
 		a?: number;
 	}[];
 };
