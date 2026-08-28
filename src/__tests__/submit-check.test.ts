@@ -530,13 +530,16 @@ void useStealth;
 		expect(report.summary.blockers).toBe(0);
 	});
 
-	it("blocks when provider source uses raw fetch", async () => {
+	it("blocks global fetch despite an unrelated shadowing parameter", async () => {
 		const dir = makeProviderDir(
 			"submit-no-raw-fetch-fail-",
-			sourceWithHandler(`handler: async () => {
+			`${sourceWithHandler(`handler: async () => {
         await fetch("https://api.example.com/lookup");
         return { ok: true };
-      },`),
+			      },`)}
+function helper(fetch: unknown) { void fetch; }
+void helper;
+`,
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
@@ -588,10 +591,23 @@ void useStealth;
 		expect(check?.level).toBe("blocker");
 	});
 
-	it("keeps mutable let aliases unresolved for raw fetch", async () => {
+	it("blocks an unreassigned mutable alias of global fetch", async () => {
 		const dir = makeProviderDir(
 			"submit-no-raw-fetch-let-alias-",
 			`${validProviderSource()}\nexport async function request(url: string) { let rawFetch = fetch; return rawFetch(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("leaves a reassigned mutable fetch alias unresolved", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-reassigned-let-alias-",
+			`${validProviderSource()}\nexport async function request(ctx: any, url: string) { let rawFetch = fetch; const result = rawFetch(url); rawFetch = ctx.stealth.fetch; return result; }\n`,
 		);
 		writeValidLocaleCatalogs(dir);
 		const check = (await buildSubmitCheckReport(dir)).checks.find(
@@ -679,6 +695,19 @@ void useStealth;
 		expect(check?.status).toBe("pass");
 	});
 
+	it("allows fetch on a lexically shadowed globalThis object", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-shadowed-globalthis-",
+			`${validProviderSource()}\nexport async function request(url: string) { const globalThis = { fetch: async (_url: string) => ({ ok: true }) }; return globalThis.fetch(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
 	it("keeps fetch text in comments and strings inert", async () => {
 		const dir = makeProviderDir(
 			"submit-no-raw-fetch-inert-text-regression-",
@@ -705,10 +734,10 @@ void useStealth;
 		expect(check?.status).toBe("pass");
 	});
 
-	it("blocks eval-based dynamic code evaluation", async () => {
+	it("blocks global eval despite an unrelated shadowing parameter", async () => {
 		const dir = makeProviderDir(
 			"submit-no-dynamic-code-eval-",
-			`${validProviderSource()}\nvoid eval("fetch(x)");\n`,
+			`${validProviderSource()}\nfunction helper(eval: unknown) { void eval; }\nvoid eval("fetch(x)");\nvoid helper;\n`,
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
@@ -803,10 +832,23 @@ void useStealth;
 		expect(check?.evidence).toEqual(["index.ts:62"]);
 	});
 
-	it("keeps mutable let aliases unresolved for dynamic code", async () => {
+	it("blocks an unreassigned mutable alias of eval", async () => {
 		const dir = makeProviderDir(
 			"submit-no-dynamic-code-let-alias-",
 			`${validProviderSource()}\nlet runner = eval;\nvoid runner("1+1");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-dynamic-code",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("leaves a reassigned mutable eval alias unresolved", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-reassigned-var-alias-",
+			`${validProviderSource()}\nvar runner = eval;\nvoid runner("1+1");\nrunner = (_source: string) => undefined;\n`,
 		);
 		writeValidLocaleCatalogs(dir);
 		const check = (await buildSubmitCheckReport(dir)).checks.find(
@@ -2086,6 +2128,60 @@ const vendorKey = makeVendorKey();`,
 		expect(check?.evidence).toBeUndefined();
 	});
 
+	it("does not fabricate vendor keys from interpolated computed templates", async () => {
+		const source = validProviderSource()
+			.replace(
+				'import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";',
+				'import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";\nconst suffix = "Ty";',
+			)
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`[\`MKiosk\${suffix}\`]: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-computed-vendor-key-template-expression-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
+	it("resolves a no-substitution computed template key", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`[\`MKioskTy\`]: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-computed-vendor-key-template-literal-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).toContain("MKioskTy");
+	});
+
 	it("does not flag an unused internal diagnostic result schema", async () => {
 		const source = `${validProviderSource()}
 const diagnosticResult = z.object({ HTTPStatus: z.string() });
@@ -2112,6 +2208,102 @@ export const maybePublic = z.object({ MKioskTy: z.string() });
 
 		expect(check?.status).toBe("fail");
 		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
+	});
+
+	it("blocks a schema exported through a const alias", async () => {
+		const source = `${validProviderSource()}
+const schema = z.object({ MKioskTy: z.string() });
+const exposed = schema;
+export { exposed };
+`;
+		const dir = makeProviderDir("submit-exported-schema-const-alias-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("blocks a schema exported directly through a renamed specifier", async () => {
+		const source = `${validProviderSource()}
+const schema = z.object({ MKioskTy: z.string() });
+export { schema as renamed };
+`;
+		const dir = makeProviderDir("submit-exported-schema-renamed-specifier-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("allows a non-exported inert schema alias chain", async () => {
+		const source = `${validProviderSource()}
+const a = z.object({ MKioskTy: z.string() });
+const b = a;
+void b;
+`;
+		const dir = makeProviderDir("submit-inert-schema-alias-chain-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("allows an internal schema used only through parse-like methods", async () => {
+		const source = `${validProviderSource()}
+const wire = z.object({ HTTPStatus: z.string() });
+void wire.parse({ HTTPStatus: "200" });
+void wire.safeParse({ HTTPStatus: "200" });
+void wire.parseAsync({ HTTPStatus: "200" });
+void wire.safeParseAsync({ HTTPStatus: "200" });
+`;
+		const dir = makeProviderDir("submit-internal-schema-parse-only-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks a parsed schema that also reaches an operation output", async () => {
+		const source = validProviderSource()
+			.replace(
+				"const input = describeKey(",
+				'const wire = z.object({ HTTPStatus: z.string() });\nvoid wire.parse({ HTTPStatus: "200" });\n\nconst input = describeKey(',
+			)
+			.replace("      output,", "      output: wire,")
+			.replace("handler: async () => ({ ok: true }),", 'handler: async () => ({ HTTPStatus: "200" }),')
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { HTTPStatus: "200" } },',
+			);
+		const dir = makeProviderDir("submit-parsed-public-output-schema-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("blocks an exported schema that is also parsed internally", async () => {
+		const source = `${validProviderSource()}
+export const wire = z.object({ HTTPStatus: z.string() });
+void wire.parse({ HTTPStatus: "200" });
+`;
+		const dir = makeProviderDir("submit-exported-parsed-schema-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
 	});
 
 	it("keeps sibling-file schemas fail-closed", async () => {
