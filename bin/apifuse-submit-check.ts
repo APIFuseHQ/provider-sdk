@@ -2873,8 +2873,17 @@ function computeMaskedSource(source: string, fileName: string): string {
 	const chars = source.split("");
 	const maskRange = (start: number, end: number): void => {
 		for (let index = start; index < end; index += 1) {
-			if (source[index] === "\\" && source[index + 1] === "\n") continue;
-			if (chars[index] !== "\n") chars[index] = " ";
+			// Preserve the backslash of a string line continuation (\ followed
+			// by LF, CRLF, or lone CR) and every line terminator, so masked
+			// string bodies remain syntactically valid and the mask output can
+			// be re-parsed (mask(mask(x)) === mask(x)).
+			if (
+				source[index] === "\\" &&
+				(source[index + 1] === "\n" || source[index + 1] === "\r")
+			) {
+				continue;
+			}
+			if (chars[index] !== "\n" && chars[index] !== "\r") chars[index] = " ";
 		}
 	};
 	const commentRanges = new Map<string, ts.CommentRange>();

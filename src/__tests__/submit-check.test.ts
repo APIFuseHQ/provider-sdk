@@ -1668,6 +1668,15 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		await expect(buildSubmitCheckReport(dir)).resolves.toBeDefined();
 	});
 
+	it("keeps CRLF line-continuation strings parseable and mask-idempotent", () => {
+		const source = 'const doc = "first\\\r\ncontinued"; const codeIdentifier = 1;';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked.length).toBe(source.length);
+		expect(masked.indexOf("codeIdentifier")).toBe(source.indexOf("codeIdentifier"));
+		expect(maskCommentsAndStrings(masked)).toBe(masked);
+	});
+
 	it("preserves quoted property keys while masking quoted values", () => {
 		const source = 'const value = { "response" : "hidden" };';
 		const masked = maskCommentsAndStrings(source);
