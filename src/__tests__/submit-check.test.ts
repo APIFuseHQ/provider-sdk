@@ -55,6 +55,15 @@ function makeProviderDir(
 				: {}),
 		}),
 	);
+	writeFileSync(
+		join(dir, "provider.json"),
+		JSON.stringify({
+			schemaVersion: 1,
+			providerId: "good-provider",
+			owner: "provider-team",
+			lifecycle: "draft",
+		}),
+	);
 	if (includeRepositoryDx) {
 		writeFileSync(join(dir, ".gitignore"), "node_modules/\n.env\n");
 		// Generated-scaffold prompt assets (AGENTS.md, .agents/skills, symlinks,

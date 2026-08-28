@@ -70,6 +70,7 @@ describe("provider create planning", () => {
 		const cwd = makeTempDir("apifuse-create-standalone-");
 		const plan = await buildProviderCreatePlan(createOptions(), cwd);
 		const packageJson = plan.files.find((file) => file.path.endsWith("package.json"));
+		const providerJson = findGeneratedFile(plan, "provider.json");
 
 		expect(plan.preset).toBe("standalone");
 		expect(plan.providerRoot).toBe(join(cwd, "weather-provider"));
@@ -86,6 +87,12 @@ describe("provider create planning", () => {
 		).toBeTrue();
 		expect(packageJson?.content).not.toContain("record:sample");
 		expect(packageJson?.content).not.toContain(["perf", "sample"].join(":"));
+		expect(JSON.parse(providerJson?.content ?? "{}")).toEqual({
+			schemaVersion: 1,
+			providerId: "weather-provider",
+			owner: "bounty",
+			lifecycle: "draft",
+		});
 		expect(packageJson?.content).toContain('"typescript": "');
 		expect(packageJson?.content).toContain('"@types/bun": "');
 		expect(plan.validationCommands).toContain("bun run submit-check -- --smoke");

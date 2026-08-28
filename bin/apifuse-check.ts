@@ -123,6 +123,7 @@ export async function runChecks(
 	const indexPath = resolve(providerRoot, "index.ts");
 	const dockerfilePath = resolve(providerRoot, "Dockerfile");
 	const packageJsonPath = resolve(providerRoot, "package.json");
+	const providerJsonPath = resolve(providerRoot, "provider.json");
 
 	let providerModule: Record<string, unknown> | undefined;
 	let providerImportError: unknown;
@@ -150,6 +151,7 @@ export async function runChecks(
 		checkProviderMetadata(provider),
 		checkDockerfile(dockerfilePath),
 		checkPackageJson(packageJsonPath),
+		checkProviderJson(providerJsonPath, packageJsonPath),
 		checkPromptAssets(providerRoot),
 	];
 }
@@ -475,6 +477,65 @@ function checkPackageJson(packageJsonPath: string): CheckResult {
 			passed: false,
 			details: [error instanceof Error ? error.message : String(error)],
 		};
+	}
+}
+
+export const PROVIDER_JSON_CHECK_MESSAGE = "provider.json exists with a valid declaration";
+
+const providerDeclarationSchema = z
+	.object({
+		schemaVersion: z.literal(1),
+		providerId: z.string(),
+		owner: z.string(),
+		lifecycle: z.enum(["draft", "ready", "live", "retired"]),
+	})
+	.strict();
+
+function checkProviderJson(providerJsonPath: string, packageJsonPath: string): CheckResult {
+	if (!existsSync(providerJsonPath)) {
+		return {
+			message: PROVIDER_JSON_CHECK_MESSAGE,
+			passed: false,
+			details: ["Missing provider.json at the provider root"],
+		};
+	}
+
+	try {
+		const declaration = providerDeclarationSchema.parse(
+			JSON.parse(readFileSync(providerJsonPath, "utf-8")) as unknown,
+		);
+		const expectedProviderId = readProviderIdFromPackageName(packageJsonPath);
+		if (expectedProviderId !== undefined && declaration.providerId !== expectedProviderId) {
+			return {
+				message: PROVIDER_JSON_CHECK_MESSAGE,
+				passed: false,
+				details: [
+					`provider.json providerId "${declaration.providerId}" does not match package.json name (expected "${expectedProviderId}")`,
+				],
+			};
+		}
+
+		return {
+			message: PROVIDER_JSON_CHECK_MESSAGE,
+			passed: true,
+			details: [`providerId: ${declaration.providerId}`, `lifecycle: ${declaration.lifecycle}`],
+		};
+	} catch (error) {
+		return {
+			message: PROVIDER_JSON_CHECK_MESSAGE,
+			passed: false,
+			details: [error instanceof Error ? error.message : String(error)],
+		};
+	}
+}
+
+function readProviderIdFromPackageName(packageJsonPath: string): string | undefined {
+	try {
+		const packageJson = JSON.parse(readFileSync(packageJsonPath, "utf-8")) as unknown;
+		if (!isRecord(packageJson) || typeof packageJson.name !== "string") return undefined;
+		return /^(?:apifuse-provider-|@apifuse\/provider-)(.+)$/.exec(packageJson.name)?.[1];
+	} catch {
+		return undefined;
 	}
 }
 

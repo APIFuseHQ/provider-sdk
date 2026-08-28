@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { PROMPT_ASSETS_CHECK_MESSAGE, runChecks } from "../../bin/apifuse-check.js";
+import {
+	PROMPT_ASSETS_CHECK_MESSAGE,
+	PROVIDER_JSON_CHECK_MESSAGE,
+	runChecks,
+} from "../../bin/apifuse-check.js";
 import { PROMPT_ASSET_MANIFEST_PATH, syncPromptAssets } from "../cli/prompt-assets.js";
 
 const tempDirs: string[] = [];
@@ -18,9 +22,23 @@ function makeProviderDir(prefix: string): string {
 			dependencies: { "@apifuse/provider-sdk": "workspace:*" },
 		}),
 	);
+	writeProviderJson(dir);
 	writeFileSync(join(dir, "Dockerfile"), "FROM oven/bun:1.2-alpine\n");
 	linkLocalSdkDependency(dir);
 	return dir;
+}
+
+function writeProviderJson(providerDir: string, overrides: Record<string, unknown> = {}): void {
+	writeFileSync(
+		join(providerDir, "provider.json"),
+		JSON.stringify({
+			schemaVersion: 1,
+			providerId: "test-provider",
+			owner: "provider-team",
+			lifecycle: "draft",
+			...overrides,
+		}),
+	);
 }
 
 function linkLocalSdkDependency(providerDir: string): void {
@@ -73,6 +91,68 @@ afterEach(() => {
 });
 
 describe("apifuse check", () => {
+	it("passes the provider.json check for a valid declaration", async () => {
+		const providerDir = makeProviderDir("apifuse-check-provider-json-valid-");
+
+		const results = await runChecks(providerDir);
+		const providerJson = results.find((result) => result.message === PROVIDER_JSON_CHECK_MESSAGE);
+
+		expect(providerJson?.passed).toBe(true);
+		expect(providerJson?.details).toContain("providerId: test-provider");
+	});
+
+	it("fails the provider.json check when the file is missing", async () => {
+		const providerDir = makeProviderDir("apifuse-check-provider-json-missing-");
+		rmSync(join(providerDir, "provider.json"));
+
+		const results = await runChecks(providerDir);
+		const providerJson = results.find((result) => result.message === PROVIDER_JSON_CHECK_MESSAGE);
+
+		expect(providerJson?.passed).toBe(false);
+		expect(providerJson?.details).toContain("Missing provider.json at the provider root");
+	});
+
+	it("rejects unknown provider.json fields", async () => {
+		const providerDir = makeProviderDir("apifuse-check-provider-json-unknown-field-");
+		writeProviderJson(providerDir, { unexpected: true });
+
+		const results = await runChecks(providerDir);
+		const providerJson = results.find((result) => result.message === PROVIDER_JSON_CHECK_MESSAGE);
+
+		expect(providerJson?.passed).toBe(false);
+		expect(providerJson?.details?.join("\n")).toContain("unexpected");
+	});
+
+	it("rejects an invalid provider.json lifecycle", async () => {
+		const providerDir = makeProviderDir("apifuse-check-provider-json-lifecycle-");
+		writeProviderJson(providerDir, { lifecycle: "deprecated" });
+
+		const results = await runChecks(providerDir);
+		const providerJson = results.find((result) => result.message === PROVIDER_JSON_CHECK_MESSAGE);
+
+		expect(providerJson?.passed).toBe(false);
+		expect(providerJson?.details?.join("\n")).toContain("lifecycle");
+	});
+
+	it("rejects provider.json providerId mismatched with the package name", async () => {
+		const providerDir = makeProviderDir("apifuse-check-provider-json-id-mismatch-");
+		writeFileSync(
+			join(providerDir, "package.json"),
+			JSON.stringify({
+				name: "apifuse-provider-korea-holiday",
+				dependencies: { "@apifuse/provider-sdk": "workspace:*" },
+			}),
+		);
+
+		const results = await runChecks(providerDir);
+		const providerJson = results.find((result) => result.message === PROVIDER_JSON_CHECK_MESSAGE);
+
+		expect(providerJson?.passed).toBe(false);
+		expect(providerJson?.details).toEqual([
+			'provider.json providerId "test-provider" does not match package.json name (expected "korea-holiday")',
+		]);
+	});
+
 	it("formats declaration failures thrown while importing defineProvider declarations", async () => {
 		const providerDir = makeProviderDir("apifuse-check-declaration-import-invalid-");
 		writeFileSync(
