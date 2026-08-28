@@ -1563,6 +1563,27 @@ const example = " output: z.object({ MKioskTy: z.string() })";
 		);
 	});
 
+	it("masks schema-looking text in a ternary consequent string", () => {
+		const source =
+			'const example = ok ? "output: z.object({ MKioskTy: z.string() })" : "";';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).not.toContain("MKioskTy");
+	});
+
+	it("ignores vendor-key documentation text in a ternary consequent string", async () => {
+		const source = `${validProviderSource()}
+const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
+`;
+		const dir = makeProviderDir("submit-ternary-documentation-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
+			"pass",
+		);
+	});
+
 	it("preserves template interpolation code while masking its literal text", () => {
 		const source =
 			'const rendered = `ignore "} ${({ "}": codeIdentifier })} output: z.object({ MKioskTy: z.string() })`;';
@@ -1618,6 +1639,13 @@ const example = " output: z.object({ MKioskTy: z.string() })";
 		expect(masked).not.toContain("hidden");
 	});
 
+	it("masks a string used as a case value", () => {
+		const source = 'switch (value) { case "20260709": break; }';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).not.toContain("20260709");
+	});
+
 	it("fails closed when a provider source file has a syntax error", async () => {
 		const dir = makeProviderDir("submit-mask-syntax-error-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
@@ -1634,6 +1662,27 @@ const example = " output: z.object({ MKioskTy: z.string() })";
 		writeFileSync(join(dir, "util-broken.ts"), 'const broken = "unterminated;\n');
 
 		await expect(buildSubmitCheckReport(dir)).rejects.toThrow("util-broken.ts");
+	});
+
+	it("escapes control characters in fail-closed parse error file names", async () => {
+		const dir = makeProviderDir("submit-mask-control-filename-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const rawFileName = "bad\u001b[31mname.ts";
+		writeFileSync(join(dir, rawFileName), 'const broken = "unterminated;\n');
+
+		let thrown: unknown;
+		try {
+			await buildSubmitCheckReport(dir);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(Error);
+		if (!(thrown instanceof Error)) {
+			throw new Error("Expected submit-check to reject a syntactically broken source file.");
+		}
+		expect(thrown.message).toContain("bad\\x1b[31mname.ts");
+		expect(thrown.message).not.toContain("\u001b");
 	});
 
 	it("blocks compact vendor timestamps in normalized response fixtures", async () => {

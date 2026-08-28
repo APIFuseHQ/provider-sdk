@@ -2836,7 +2836,7 @@ function computeMaskedSource(source: string, fileName: string): string {
 		const position = parseDiagnostic.start ?? 0;
 		const { line, character } = sourceFile.getLineAndCharacterOfPosition(position);
 		throw new Error(
-			`Cannot safely scan TypeScript source ${fileName} at ${line + 1}:${character + 1}: ${ts.flattenDiagnosticMessageText(parseDiagnostic.messageText, "\n")}`,
+			`Cannot safely scan TypeScript source ${sanitizeDiagnosticFileName(fileName)} at ${line + 1}:${character + 1}: ${ts.flattenDiagnosticMessageText(parseDiagnostic.messageText, "\n")}`,
 		);
 	}
 
@@ -2859,11 +2859,11 @@ function computeMaskedSource(source: string, fileName: string): string {
 
 		const start = node.getStart(sourceFile);
 		if (ts.isStringLiteral(node)) {
-			const siblings = node.parent.getChildren(sourceFile);
-			const nextToken = siblings[siblings.indexOf(node) + 1];
 			// Preserve quoted property keys ("response": ...) so range/key scanners
 			// can still match them; only string VALUES are blanked.
-			if (nextToken?.kind !== ts.SyntaxKind.ColonToken) {
+			const isQuotedPropertyKey =
+				ts.isPropertyAssignment(node.parent) && node.parent.name === node;
+			if (!isQuotedPropertyKey) {
 				maskRange(start + 1, node.end - 1);
 			}
 		} else if (ts.isRegularExpressionLiteral(node)) {
@@ -2895,6 +2895,18 @@ function computeMaskedSource(source: string, fileName: string): string {
 		maskRange(comment.pos + markerLength, bodyEnd);
 	}
 	return chars.join("");
+}
+
+function sanitizeDiagnosticFileName(fileName: string): string {
+	let sanitized = "";
+	for (const character of fileName) {
+		const codePoint = character.codePointAt(0);
+		sanitized +=
+			codePoint !== undefined && (codePoint < 0x20 || codePoint === 0x7f)
+				? `\\x${codePoint.toString(16).padStart(2, "0")}`
+				: character;
+	}
+	return sanitized;
 }
 
 function skipWhitespaceAndComments(source: string, start: number, end: number): number {
