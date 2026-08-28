@@ -656,6 +656,9 @@ function isGlobalSinkIdentifier(
 	const nextResolving = new Set(resolving);
 	nextResolving.add(name);
 	return localBindings.every((binding) => {
+		// Mutable let/var bindings are intentionally unresolved. A later
+		// reassignment can change the callee, so resolving them without dataflow
+		// would risk false positives; this matches the no-dynamic-code precedent.
 		if (binding.constInitializer === undefined) {
 			return false;
 		}
@@ -3233,13 +3236,63 @@ function zObjectAppearsPublicOutput(
 	if (reachability === "unknown") {
 		return true;
 	}
-	// A sibling module can be wired into index.ts through imports, which is out
-	// of scope without a Program/type checker. Keep that unresolved cross-file
-	// case fail-closed; entry-file bindings with only inert local uses are safe.
-	return relPath !== "index.ts";
+	// Sibling modules are scanned independently and therefore remain
+	// fail-closed. An exported binding in index.ts is likewise consumable by
+	// another module, so local inertness does not prove it is private.
+	if (relPath !== "index.ts") {
+		return true;
+	}
+	return isExportedVariableBinding(sourceFile, declaration);
 }
 
 type SchemaReachability = "public" | "internal" | "unknown";
+
+function isExportedVariableBinding(
+	sourceFile: ts.SourceFile,
+	declaration: ts.VariableDeclaration,
+): boolean {
+	const declarationStatement = declaration.parent.parent;
+	if (
+		ts.isVariableStatement(declarationStatement) &&
+		declarationStatement.modifiers?.some(
+			(modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword,
+		) === true
+	) {
+		return true;
+	}
+	if (!ts.isIdentifier(declaration.name)) {
+		return false;
+	}
+	const name = declaration.name.text;
+	let exported = false;
+	const visit = (node: ts.Node): void => {
+		if (exported) {
+			return;
+		}
+		if (ts.isExportSpecifier(node)) {
+			const localName = node.propertyName ?? node.name;
+			if (ts.isIdentifier(localName) && localName.text === name) {
+				exported = true;
+				return;
+			}
+		}
+		if (ts.isExportAssignment(node)) {
+			const expression = unwrapLocalExpression(node.expression);
+			if (ts.isIdentifier(expression) && expression.text === name) {
+				exported = true;
+				return;
+			}
+		}
+		ts.forEachChild(node, visit);
+	};
+	for (const statement of sourceFile.statements) {
+		visit(statement);
+		if (exported) {
+			break;
+		}
+	}
+	return exported;
+}
 
 function isPublicOutputPropertyName(name: ts.PropertyName): boolean {
 	const text = propertyNameText(name);

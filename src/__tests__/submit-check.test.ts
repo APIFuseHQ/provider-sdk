@@ -588,6 +588,19 @@ void useStealth;
 		expect(check?.level).toBe("blocker");
 	});
 
+	it("keeps mutable let aliases unresolved for raw fetch", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-let-alias-",
+			`${validProviderSource()}\nexport async function request(url: string) { let rawFetch = fetch; return rawFetch(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
 	it("blocks fetch destructured from globalThis", async () => {
 		const dir = makeProviderDir(
 			"submit-no-raw-fetch-destructured-",
@@ -788,6 +801,19 @@ void useStealth;
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
 		expect(check?.evidence).toEqual(["index.ts:62"]);
+	});
+
+	it("keeps mutable let aliases unresolved for dynamic code", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-let-alias-",
+			`${validProviderSource()}\nlet runner = eval;\nvoid runner("1+1");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-dynamic-code",
+		);
+
+		expect(check?.status).toBe("pass");
 	});
 
 	it("blocks comma-indirect eval dynamic code evaluation", async () => {
@@ -2072,6 +2098,36 @@ void diagnosticResult;
 		);
 
 		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks an unused exported schema binding in index.ts", async () => {
+		const source = `${validProviderSource()}
+export const maybePublic = z.object({ MKioskTy: z.string() });
+`;
+		const dir = makeProviderDir("submit-exported-schema-binding-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
+	});
+
+	it("keeps sibling-file schemas fail-closed", async () => {
+		const source = validProviderSource();
+		const dir = makeProviderDir("submit-sibling-schema-binding-", source);
+		writeFileSync(
+			join(dir, "schema.ts"),
+			'import { z } from "@apifuse/provider-sdk";\nexport const schema = z.object({ MKioskTy: z.string() });\n',
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.some((line) => line.includes("schema.ts"))).toBe(true);
 	});
 
 	it("blocks a locally resolved schema used as an operation output", async () => {

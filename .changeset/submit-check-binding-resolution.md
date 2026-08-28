@@ -11,4 +11,7 @@ persistence recognizes destructured and computed context access, public schema
 computed keys and fixture timestamps resolve literal consts, and public-output
 schema classification follows local output/response reachability. Secret-scan
 remediation also derives environment names from assigned properties instead of
-nearby type annotations.
+nearby type annotations. Exported schema bindings in `index.ts` remain public
+candidates even when locally inert, while non-exported internal const schemas can
+be proven private. Binding resolution intentionally remains const-only: mutable
+`let`/`var` aliases are unresolved, matching the `no-dynamic-code` precedent.
