@@ -73,10 +73,23 @@ function buildOTLPExportOptions(config?: TraceConfig): OTLPExportOptions | undef
 }
 
 export function resolveTraceContextOptions(config?: TraceConfig): CreateTraceContextOptions {
+	const outputEnabled = config?.enabled !== false && config?.exporter !== "none";
+	const exporterHook =
+		outputEnabled && (config?.exporter === "console" || config?.exporter === "json")
+			? (span: Span) => console.log(JSON.stringify(span))
+			: undefined;
+	const onSpan =
+		exporterHook && config?.onSpan
+			? (span: Span) => {
+				exporterHook(span);
+				config.onSpan?.(span);
+			}
+			: (exporterHook ?? config?.onSpan);
+
 	return {
-		maxSpans: config?.maxSpans,
-		onSpan: config?.onSpan,
-		exportOptions: buildOTLPExportOptions(config),
+		...(config?.maxSpans !== undefined ? { maxSpans: config.maxSpans } : {}),
+		...(onSpan ? { onSpan } : {}),
+		...(outputEnabled ? { exportOptions: buildOTLPExportOptions(config) } : {}),
 	};
 }
 

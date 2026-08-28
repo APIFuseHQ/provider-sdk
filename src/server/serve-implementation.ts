@@ -73,7 +73,8 @@ import {
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
-import { createTraceContext } from "../runtime/trace.js";
+import { createTraceContext, resolveTraceContextOptions } from "../runtime/trace.js";
+import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
 import {
 	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
@@ -608,6 +609,7 @@ function createProviderContext(
 	proxyTelemetry?: ProxyTelemetryCollector,
 	signal?: AbortSignal,
 ): ProviderContext {
+	const traceConfig = resolveTraceConfigFromEnv();
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
@@ -711,7 +713,9 @@ function createProviderContext(
 					},
 				}
 			: {}),
-		trace: createTraceContext(),
+		trace: traceConfig
+			? createTraceContext(resolveTraceContextOptions(traceConfig))
+			: createTraceContext(),
 		auth: createAuthStub(),
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
