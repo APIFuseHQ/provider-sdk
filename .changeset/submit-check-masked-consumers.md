@@ -36,3 +36,8 @@ The AST locator unwraps `satisfies`/`as` wrappers and resolves the curried
 `defineProvider(meta)(impl)` form to the implementation call. A new
 `no-dynamic-code` blocker rejects `eval`/`Function` in provider source,
 replacing the incidental coverage the masked text scan removed.
+
+Computed keys and non-enumerable spreads in the implementation object now fail
+closed even when a literal `operations` property is present, and
+`no-dynamic-code` now resolves sinks on the TypeScript AST so member and
+indirect `eval`/`Function` calls are rejected.

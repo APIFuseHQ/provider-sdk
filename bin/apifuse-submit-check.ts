@@ -491,12 +491,85 @@ function scoreNoRawFetch(providerRoot: string): SubmitCheck {
 	return pass("no-raw-fetch", SDK_NATIVE_CATEGORY, "Provider source avoids raw fetch().", 0);
 }
 
+const DYNAMIC_CODE_SINKS: ReadonlySet<string> = new Set(["eval", "Function"]);
+const DYNAMIC_CODE_GLOBAL_OBJECTS: ReadonlySet<string> = new Set([
+	"globalThis",
+	"window",
+	"self",
+	"global",
+]);
+
+function unwrapDynamicCodeCallee(expression: ts.Expression): ts.Expression {
+	let current = expression;
+	while (
+		ts.isParenthesizedExpression(current) ||
+		ts.isAsExpression(current) ||
+		ts.isSatisfiesExpression(current) ||
+		ts.isNonNullExpression(current)
+	) {
+		current = current.expression;
+	}
+	if (
+		ts.isBinaryExpression(current) &&
+		current.operatorToken.kind === ts.SyntaxKind.CommaToken
+	) {
+		return unwrapDynamicCodeCallee(current.right);
+	}
+	return current;
+}
+
+function isDynamicCodeSinkCallee(expression: ts.Expression): boolean {
+	const callee = unwrapDynamicCodeCallee(expression);
+	if (ts.isIdentifier(callee)) {
+		return DYNAMIC_CODE_SINKS.has(callee.text);
+	}
+	if (!ts.isPropertyAccessExpression(callee) || !DYNAMIC_CODE_SINKS.has(callee.name.text)) {
+		return false;
+	}
+	const receiver = unwrapDynamicCodeCallee(callee.expression);
+	return ts.isIdentifier(receiver) && DYNAMIC_CODE_GLOBAL_OBJECTS.has(receiver.text);
+}
+
+function findDynamicCodeCalls(providerRoot: string): SourceFinding[] {
+	const findings: SourceFinding[] = [];
+	const seen = new Set<string>();
+	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
+		const source = readFileSync(filePath, "utf8");
+		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		const sourceFile = ts.createSourceFile(
+			relPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			ts.ScriptKind.TS,
+		);
+		const visit = (node: ts.Node): void => {
+			if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
+				return;
+			}
+			if (
+				(ts.isCallExpression(node) || ts.isNewExpression(node)) &&
+				isDynamicCodeSinkCallee(node.expression)
+			) {
+				const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+				const key = `${relPath}:${line}`;
+				if (!seen.has(key)) {
+					seen.add(key);
+					findings.push({ file: relPath, line });
+				}
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(sourceFile);
+		if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
+			break;
+		}
+	}
+	return findings;
+}
+
 function scoreNoDynamicCode(providerRoot: string): SubmitCheck {
-	const findings = findSourceLineMatches(
-		providerRoot,
-		/(?<![.\w$])(?:eval|Function)\s*\(|\bnew\s+Function\s*\(/,
-		true,
-	);
+	const findings = findDynamicCodeCalls(providerRoot);
 	if (findings.length > 0) {
 		return blocker(
 			"no-dynamic-code",
@@ -1397,6 +1470,64 @@ function isOperationsProperty(
 	);
 }
 
+function isSourceEnumerableStaticObjectLiteral(expression: ts.Expression): boolean {
+	const unwrapped = unwrapImplementationExpression(expression);
+	if (!ts.isObjectLiteralExpression(unwrapped)) {
+		return false;
+	}
+	return unwrapped.properties.every((property) => {
+		if (ts.isSpreadAssignment(property)) {
+			return isSourceEnumerableStaticObjectLiteral(property.expression);
+		}
+		if (property.name === undefined || ts.isComputedPropertyName(property.name)) {
+			return property.name === undefined;
+		}
+		return property.name.text !== "operations" || isOperationsProperty(property);
+	});
+}
+
+function findComputedImplementationProperty(
+	objectLiteral: ts.ObjectLiteralExpression,
+): ts.ObjectLiteralElementLike | undefined {
+	for (const property of objectLiteral.properties) {
+		if (property.name !== undefined && ts.isComputedPropertyName(property.name)) {
+			return property;
+		}
+		if (ts.isSpreadAssignment(property)) {
+			const spreadExpression = unwrapImplementationExpression(property.expression);
+			if (ts.isObjectLiteralExpression(spreadExpression)) {
+				const nested = findComputedImplementationProperty(spreadExpression);
+				if (nested !== undefined) {
+					return nested;
+				}
+			}
+		}
+	}
+	return undefined;
+}
+
+function findEffectiveOperationsProperty(
+	objectLiteral: ts.ObjectLiteralExpression,
+): ts.PropertyAssignment | ts.ShorthandPropertyAssignment | undefined {
+	let effective: ts.PropertyAssignment | ts.ShorthandPropertyAssignment | undefined;
+	for (const property of objectLiteral.properties) {
+		if (isOperationsProperty(property)) {
+			effective = property;
+			continue;
+		}
+		if (ts.isSpreadAssignment(property)) {
+			const spreadExpression = unwrapImplementationExpression(property.expression);
+			if (ts.isObjectLiteralExpression(spreadExpression)) {
+				const nested = findEffectiveOperationsProperty(spreadExpression);
+				if (nested !== undefined) {
+					effective = nested;
+				}
+			}
+		}
+	}
+	return effective;
+}
+
 function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	const indexPath = resolve(providerRoot, "index.ts");
 	const ruleId = "flat-operation-composition";
@@ -1438,7 +1569,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	// Resolve the top-level operations property from the AST, then feed its raw
 	// initializer offset into the existing expression classifier and alias
 	// resolver unchanged.
-	const opsProp = implementationArg.properties.find(isOperationsProperty);
+	const opsProp = findEffectiveOperationsProperty(implementationArg);
 	let opsValue: ExpressionSlice | undefined;
 	let opsLine = 1;
 	if (opsProp !== undefined && ts.isPropertyAssignment(opsProp)) {
@@ -1459,12 +1590,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 
 	// A computed property might resolve to `operations`, but its composition is
 	// not source-enumerable here. Fail closed, like an unresolved imported alias.
-	const computed =
-		opsProp === undefined
-			? implementationArg.properties.find(
-					(property) => property.name !== undefined && ts.isComputedPropertyName(property.name),
-				)
-			: undefined;
+	const computed = findComputedImplementationProperty(implementationArg);
 	if (computed !== undefined) {
 		const computedLine = offsetToLine(source, computed.getStart(sourceFile));
 		return blocker(
@@ -1474,6 +1600,31 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			"Declare operations with the literal property name `operations` and a static object literal value so the provider-registry AST gate can enumerate it.",
 			0,
 			[`${indexRelPath}:${computedLine} (computed property name)`],
+		);
+	}
+
+	// A spread can override a preceding literal `operations` property. Only an
+	// inline static object literal (including recursively inline static spreads)
+	// exposes all of its property names to this source-only gate. Identifiers,
+	// calls, and other expressions are opaque and therefore fail closed.
+	const opaqueSpread = implementationArg.properties.find(
+		(property): property is ts.SpreadAssignment =>
+			ts.isSpreadAssignment(property) &&
+			!isSourceEnumerableStaticObjectLiteral(property.expression),
+	);
+	if (opaqueSpread !== undefined) {
+		const spreadLine = offsetToLine(source, opaqueSpread.getStart(sourceFile));
+		return escapeHatchResult(
+			providerRoot,
+			ruleId,
+			[{ file: indexRelPath, line: spreadLine }],
+			{
+				blockerMessage:
+					"The defineProvider implementation uses a non-enumerable spread that could override operations.",
+				remediation:
+					"Declare operations directly with a static object literal. Implementation spreads must be inline static object literals so the provider-registry AST gate can enumerate every property name.",
+				passMessage: "defineProvider declares operations as a static object literal.",
+			},
 		);
 	}
 
