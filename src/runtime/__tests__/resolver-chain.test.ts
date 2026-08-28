@@ -1,9 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
-import {
-	createBrowserClientDouble,
-	createBrowserPageDouble,
-} from "../../__tests__/test-utils.js";
+import { createBrowserClientDouble, createBrowserPageDouble } from "../../__tests__/test-utils.js";
 import { VALID_PROVIDER_CHALLENGE_KINDS } from "../../define.js";
 import { createProviderCache } from "../cache.js";
 import type {
@@ -88,16 +85,10 @@ type StubBehavior = (
 ) => Promise<ChallengeSolution>;
 
 function createFetchDouble(
-	implementation: (
-		input: string | URL | Request,
-		init?: RequestInit,
-	) => Promise<Response>,
+	implementation: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
 ): typeof fetch {
 	return Object.assign(implementation, {
-		preconnect(
-			_url: string | URL,
-			_options?: Parameters<typeof fetch.preconnect>[1],
-		): void {},
+		preconnect(_url: string | URL, _options?: Parameters<typeof fetch.preconnect>[1]): void {},
 	});
 }
 
@@ -158,16 +149,18 @@ function createTransportGuardResolver(
 			return { form: "token", token: "transport-complete" };
 		},
 	};
-	return createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"], allowedHosts, transport });
+	return createResolverClient({
+		adapters: [adapter],
+		kinds: ["akamai_sensor"],
+		allowedHosts,
+		transport,
+	});
 }
 
 describe("resolver default vendor policy", () => {
 	it("derives the hosted vendor chain for every challenge kind", () => {
 		const chains = Object.fromEntries(
-			ALL_CHALLENGE_KINDS.map((kind) => [
-				kind,
-				resolveProviderResolverVendors({ kinds: [kind] }),
-			]),
+			ALL_CHALLENGE_KINDS.map((kind) => [kind, resolveProviderResolverVendors({ kinds: [kind] })]),
 		);
 
 		expect(chains).toEqual({
@@ -372,8 +365,8 @@ describe("resolver vendor chain", () => {
 	});
 
 	it.each([
-			"akamai_sec_cpt",
-			"akamai_sensor",
+		"akamai_sec_cpt",
+		"akamai_sensor",
 	] as const)("reports %s as unsupported by a browser-only chain regardless of credentials", async (kind) => {
 		const challenge =
 			kind === "akamai_sec_cpt"
@@ -717,21 +710,22 @@ describe("resolver vendor chain", () => {
 		expect(browser.state.solveCalls).toBe(1);
 	});
 
-	it.each(["2captcha", "capsolver", "capmonster"] as const)(
-		"keeps %s unavailable without its API key",
-		async (vendor) => {
-			await expect(
-				createResolverClientFromEnv({ vendors: [vendor], kinds: ["turnstile"] }, {}).solve({
-					kind: "turnstile",
-					siteKey: "site-key",
-					pageUrl: CHALLENGE.pageUrl,
-				}),
-			).rejects.toMatchObject({
-				code: "RESOLVER_CHAIN_EXHAUSTED",
-				details: [{ vendor, reason: "missing_credentials" }],
-			});
-		},
-	);
+	it.each([
+		"2captcha",
+		"capsolver",
+		"capmonster",
+	] as const)("keeps %s unavailable without its API key", async (vendor) => {
+		await expect(
+			createResolverClientFromEnv({ vendors: [vendor], kinds: ["turnstile"] }, {}).solve({
+				kind: "turnstile",
+				siteKey: "site-key",
+				pageUrl: CHALLENGE.pageUrl,
+			}),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor, reason: "missing_credentials" }],
+		});
+	});
 
 	it("attempts browser first in a proxy-backed chain without resolver credentials", async () => {
 		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-local-chain-account";
@@ -795,7 +789,7 @@ describe("resolver vendor chain", () => {
 			Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8"),
 		);
 		expect(decodedTelemetry).toMatchObject({
-			proxy: { userAgentSource: "defaulted" },
+			proxy: { kind: "resolved", userAgentSource: "defaulted" },
 		});
 		expect(telemetry.toLogPayload()).toEqual(decodedTelemetry.proxy);
 	});
@@ -984,7 +978,16 @@ describe("resolver vendor chain", () => {
 				return { form: "token", token: "solved" };
 			},
 		};
-		const resolver = createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"], clientProfile: "safari17_0", allowedHosts: ["example.com"], createTransport(input) { factoryInput = input; return transport; } });
+		const resolver = createResolverClient({
+			adapters: [adapter],
+			kinds: ["akamai_sensor"],
+			clientProfile: "safari17_0",
+			allowedHosts: ["example.com"],
+			createTransport(input) {
+				factoryInput = input;
+				return transport;
+			},
+		});
 
 		await expect(
 			resolver.solve({
@@ -1023,7 +1026,13 @@ describe("resolver vendor chain", () => {
 				return { form: "token", token: "transport-complete" };
 			},
 		};
-		const createResolver = (allowedHosts: readonly string[]) => createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"], allowedHosts, createTransport: () => underlyingTransport });
+		const createResolver = (allowedHosts: readonly string[]) =>
+			createResolverClient({
+				adapters: [adapter],
+				kinds: ["akamai_sensor"],
+				allowedHosts,
+				createTransport: () => underlyingTransport,
+			});
 
 		await expect(createResolver(["example.com"]).solve(challenge)).rejects.toMatchObject({
 			name: "ProviderError",

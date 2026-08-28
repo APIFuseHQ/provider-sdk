@@ -36,10 +36,7 @@ type FetchDoubleImplementation = (
 
 function createFetchDouble(implementation: FetchDoubleImplementation): typeof fetch {
 	return Object.assign(implementation, {
-		preconnect(
-			_url: string | URL,
-			_options?: Parameters<typeof fetch.preconnect>[1],
-		): void {},
+		preconnect(_url: string | URL, _options?: Parameters<typeof fetch.preconnect>[1]): void {},
 	});
 }
 
@@ -188,9 +185,7 @@ class FakeRedis implements ProxyRedisSurface {
 		return "OK";
 	}
 
-	async del(
-		...args: Array<RedisKey | RedisKey[] | Callback<number>>
-	): Promise<number> {
+	async del(...args: Array<RedisKey | RedisKey[] | Callback<number>>): Promise<number> {
 		const keys = args.flatMap((arg) =>
 			typeof arg === "function" ? [] : Array.isArray(arg) ? arg : [arg],
 		);
@@ -264,18 +259,20 @@ function nativeProxyCalls(): Array<string | undefined> {
 
 function queueNativeFetchResponses(...responses: MockWreqResponse[]): void {
 	const queue = [...responses];
-	global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
-		nativeFetchCalls.push({
-			url: String(input),
-			init: init as RequestInit & { proxy?: string },
-		});
-		const response = queue.shift();
-		if (!response) throw new Error("No queued native response");
-		return new Response(response.body, {
-			headers: response.headers as HeadersInit,
-			status: response.status,
-		});
-	}));
+	global.fetch = createFetchDouble(
+		mock(async (input: string | URL | Request, init?: RequestInit) => {
+			nativeFetchCalls.push({
+				url: String(input),
+				init: init as RequestInit & { proxy?: string },
+			});
+			const response = queue.shift();
+			if (!response) throw new Error("No queued native response");
+			return new Response(response.body, {
+				headers: response.headers as HeadersInit,
+				status: response.status,
+			});
+		}),
+	);
 }
 
 function queueAllocatorAndNativeResponses(
@@ -283,22 +280,24 @@ function queueAllocatorAndNativeResponses(
 	...responses: MockWreqResponse[]
 ): void {
 	const queue = [...responses];
-	global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
-		const url = String(input);
-		if (url.includes("get-ip-v3")) {
-			return new Response(allocatorBody, { status: 200 });
-		}
-		nativeFetchCalls.push({
-			url,
-			init: init as RequestInit & { proxy?: string },
-		});
-		const response = queue.shift();
-		if (!response) throw new Error("No queued native response");
-		return new Response(response.body, {
-			headers: response.headers as HeadersInit,
-			status: response.status,
-		});
-	}));
+	global.fetch = createFetchDouble(
+		mock(async (input: string | URL | Request, init?: RequestInit) => {
+			const url = String(input);
+			if (url.includes("get-ip-v3")) {
+				return new Response(allocatorBody, { status: 200 });
+			}
+			nativeFetchCalls.push({
+				url,
+				init: init as RequestInit & { proxy?: string },
+			});
+			const response = queue.shift();
+			if (!response) throw new Error("No queued native response");
+			return new Response(response.body, {
+				headers: response.headers as HeadersInit,
+				status: response.status,
+			});
+		}),
+	);
 }
 
 function toHeaders(headers: MockWreqResponse["headers"]): Headers {
@@ -470,6 +469,7 @@ describe("proxy integration", () => {
 		const decoded = JSON.parse(Buffer.from(header ?? "", "base64url").toString("utf8"));
 
 		expect(decoded.proxy).toMatchObject({
+			kind: "resolved",
 			allocatorStatus: 500,
 			allocatorBodyClass: "http_error",
 			allocatorAttempts: 2,
@@ -488,6 +488,56 @@ describe("proxy integration", () => {
 			{ n: 2, a: 2, i: 1, h: "123456abcdef", o: "ok", s: 200, d: 42 },
 		]);
 		expect(JSON.stringify(decoded)).not.toContain("5.78.24.25");
+	});
+
+	it("emits failover-only telemetry with distinct vendors and header parity", () => {
+		const telemetry = new ProxyTelemetryCollector();
+		telemetry.recordProxyVendorFailover({
+			vendor: "smartproxy",
+			nextVendor: "nodemaven",
+			phase: "resolution",
+			reason: "no_credentials",
+		});
+		telemetry.recordProxyVendorFailover({
+			vendor: "nodemaven",
+			phase: "resolution",
+			reason: "protocol_unsupported",
+		});
+		telemetry.recordProxyVendorFailover({
+			vendor: "smartproxy",
+			phase: "transport",
+			reason: "pool_exhausted",
+			attempt: 2,
+		});
+		telemetry.recordProxyAttempt({
+			provider: "smartproxy",
+			attempt: 2,
+			outcome: "error",
+			errorCode: "PROXY_EDGE_AUTH_REJECTED",
+		});
+
+		const payload = telemetry.toLogPayload();
+		expect(payload).toEqual({
+			kind: "failover_only",
+			vendors: ["smartproxy", "nodemaven"],
+			failovers: [
+				{ v: "smartproxy", nx: "nodemaven", p: "resolution", r: "no_credentials" },
+				{ v: "nodemaven", p: "resolution", r: "protocol_unsupported" },
+				{ v: "smartproxy", p: "transport", r: "pool_exhausted", a: 2 },
+			],
+			attemptSamples: [{ n: 1, a: 2, o: "error", c: "PROXY_EDGE_AUTH_REJECTED" }],
+		});
+		const header = telemetry.toHeaderValue();
+		expect(header).toBeTruthy();
+		const decoded = JSON.parse(Buffer.from(header ?? "", "base64url").toString("utf8"));
+		expect(decoded).toEqual({ v: 1, proxy: payload });
+	});
+
+	it("omits telemetry for an empty collector", () => {
+		const telemetry = new ProxyTelemetryCollector();
+
+		expect(telemetry.toLogPayload()).toBeUndefined();
+		expect(telemetry.toHeaderValue()).toBeUndefined();
 	});
 
 	it("passes request-level proxy through ctx.http", async () => {
@@ -718,10 +768,12 @@ describe("proxy integration", () => {
 
 	it("clamps non-finite Smartproxy proxy attempts to the first pool endpoint", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 
 		const policy: ProviderProxyPolicy = {
 			mode: "required",
@@ -797,15 +849,17 @@ describe("proxy integration", () => {
 		const events: unknown[] = [];
 		let allocatorCalls = 0;
 		let allocatorSignal: AbortSignal | undefined;
-		global.fetch = createFetchDouble(mock(async (_input: string | URL | Request, init?: RequestInit) => {
-			allocatorCalls += 1;
-			allocatorSignal = init?.signal ?? undefined;
-			return await new Promise<Response>((_resolve, reject) => {
-				allocatorSignal?.addEventListener("abort", () => reject(new Error("allocator aborted")), {
-					once: true,
+		global.fetch = createFetchDouble(
+			mock(async (_input: string | URL | Request, init?: RequestInit) => {
+				allocatorCalls += 1;
+				allocatorSignal = init?.signal ?? undefined;
+				return await new Promise<Response>((_resolve, reject) => {
+					allocatorSignal?.addEventListener("abort", () => reject(new Error("allocator aborted")), {
+						once: true,
+					});
 				});
-			});
-		}));
+			}),
+		);
 
 		const startedAt = Date.now();
 		await expect(
@@ -847,18 +901,20 @@ describe("proxy integration", () => {
 		let allocatorCalls = 0;
 		let allocatorSignal: AbortSignal | undefined;
 		let bodyReadStarted = false;
-		global.fetch = createFetchDouble(mock(async (_input: string | URL | Request, init?: RequestInit) => {
-			allocatorCalls += 1;
-			allocatorSignal = init?.signal ?? undefined;
-			return {
-				ok: true,
-				status: 200,
-				text: () => {
-					bodyReadStarted = true;
-					return new Promise<string>(() => undefined);
-				},
-			} as Response;
-		}));
+		global.fetch = createFetchDouble(
+			mock(async (_input: string | URL | Request, init?: RequestInit) => {
+				allocatorCalls += 1;
+				allocatorSignal = init?.signal ?? undefined;
+				return {
+					ok: true,
+					status: 200,
+					text: () => {
+						bodyReadStarted = true;
+						return new Promise<string>(() => undefined);
+					},
+				} as Response;
+			}),
+		);
 
 		const startedAt = Date.now();
 		await expect(
@@ -909,14 +965,16 @@ describe("proxy integration", () => {
 		const redis = new FakeRedis();
 		__setProxyRedisForTests(redis);
 		let allocatorSignal: AbortSignal | undefined;
-		global.fetch = createFetchDouble(mock(async (_input: string | URL | Request, init?: RequestInit) => {
-			allocatorSignal = init?.signal ?? undefined;
-			return await new Promise<Response>((_resolve, reject) => {
-				allocatorSignal?.addEventListener("abort", () => reject(new Error("allocator aborted")), {
-					once: true,
+		global.fetch = createFetchDouble(
+			mock(async (_input: string | URL | Request, init?: RequestInit) => {
+				allocatorSignal = init?.signal ?? undefined;
+				return await new Promise<Response>((_resolve, reject) => {
+					allocatorSignal?.addEventListener("abort", () => reject(new Error("allocator aborted")), {
+						once: true,
+					});
 				});
-			});
-		}));
+			}),
+		);
 
 		const startedAt = Date.now();
 		await expect(
@@ -1217,27 +1275,29 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
-			const url = String(input);
-			if (url.includes("get-ip-v3")) {
-				return new Response(
-					["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join(
-						"\n",
-					),
-					{ status: 200 },
-				);
-			}
-			nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
-			const proxy = (init as { proxy?: string } | undefined)?.proxy;
-			// The NodeMaven leg answers; every Smartproxy endpoint fails transport.
-			if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
-				return new Response(JSON.stringify({ ok: true }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
-			}
-			throw new Error("socket hang up");
-		}));
+		global.fetch = createFetchDouble(
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("get-ip-v3")) {
+					return new Response(
+						["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join(
+							"\n",
+						),
+						{ status: 200 },
+					);
+				}
+				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				const proxy = (init as { proxy?: string } | undefined)?.proxy;
+				// The NodeMaven leg answers; every Smartproxy endpoint fails transport.
+				if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
+					return new Response(JSON.stringify({ ok: true }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				throw new Error("socket hang up");
+			}),
+		);
 
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
@@ -1272,14 +1332,16 @@ describe("proxy integration", () => {
 		// to the whole widened span. Duplicate offsets are skipped, so only the two
 		// distinct allocated endpoints are ever issued a request.
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
-			const url = String(input);
-			if (url.includes("get-ip-v3")) {
-				return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
-			}
-			nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
-			throw new Error("socket hang up");
-		}));
+		global.fetch = createFetchDouble(
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("get-ip-v3")) {
+					return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
+				}
+				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				throw new Error("socket hang up");
+			}),
+		);
 
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
@@ -1312,21 +1374,23 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
-			const url = String(input);
-			if (url.includes("get-ip-v3")) {
-				return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
-			}
-			nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
-			const proxy = (init as { proxy?: string } | undefined)?.proxy;
-			if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
-				return new Response(JSON.stringify({ ok: true }), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
-			}
-			throw new Error("socket hang up");
-		}));
+		global.fetch = createFetchDouble(
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("get-ip-v3")) {
+					return new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), { status: 200 });
+				}
+				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				const proxy = (init as { proxy?: string } | undefined)?.proxy;
+				if (typeof proxy === "string" && proxy.includes("gate.nodemaven.com")) {
+					return new Response(JSON.stringify({ ok: true }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				throw new Error("socket hang up");
+			}),
+		);
 
 		let retrySummary: HttpRetrySummary | undefined;
 		const { createHttpClient } = await import("../runtime/http.js");
@@ -1375,15 +1439,17 @@ describe("proxy integration", () => {
 		// and mask the 503 behind a synthetic retry_exhausted error.
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		let targetCalls = 0;
-		global.fetch = createFetchDouble(mock(async (input: string | URL | Request, init?: RequestInit) => {
-			const url = String(input);
-			if (url.includes("get-ip-v3")) {
-				return new Response("5.78.24.25:31001", { status: 200 });
-			}
-			targetCalls += 1;
-			nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
-			return new Response("upstream busy", { status: 503 });
-		}));
+		global.fetch = createFetchDouble(
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("get-ip-v3")) {
+					return new Response("5.78.24.25:31001", { status: 200 });
+				}
+				targetCalls += 1;
+				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				return new Response("upstream busy", { status: 503 });
+			}),
+		);
 
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
@@ -1423,9 +1489,11 @@ describe("proxy integration", () => {
 	it("rejects malformed default Smartproxy lifetime before optional allocator fallback", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__DEFAULT_LIFETIME_MINUTES = "abc";
-		global.fetch = createFetchDouble(mock(async () => {
-			throw new Error("allocator should not be called");
-		}));
+		global.fetch = createFetchDouble(
+			mock(async () => {
+				throw new Error("allocator should not be called");
+			}),
+		);
 
 		await expect(
 			resolveProxyConfigAsync({
@@ -1493,9 +1561,7 @@ describe("proxy integration", () => {
 		global.fetch = createFetchDouble(async () => {
 			allocatorCalls += 1;
 			return new Response(
-				["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join(
-					"\n",
-				),
+				["5.78.24.25:31001", "5.78.24.26:31002", "5.78.24.27:31003", "5.78.24.28:31004"].join("\n"),
 				{ status: 200 },
 			);
 		});
@@ -1546,10 +1612,12 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 		// Pool span 2 (Smartproxy) + 2 (NodeMaven) = 4 attempts, all failing.
 		stealthState.queuedResponses.push(
 			new Error("socket hang up"),
@@ -1596,22 +1664,20 @@ describe("proxy integration", () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
 		process.env.APIFUSE__PROXY__NODEMAVEN_USERNAME = "acct123";
 		process.env.APIFUSE__PROXY__NODEMAVEN_PASSWORD = "s3cret";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 		// Only the two distinct Smartproxy endpoints issue a request (offsets 0/1);
 		// the duplicate offsets 2/3 are skipped without consuming a response, then
 		// the NodeMaven leg answers 200.
-		stealthState.queuedResponses.push(
-			new Error("socket hang up"),
-			new Error("socket hang up"),
-			{
-				status: 200,
-				body: JSON.stringify({ ok: true }),
-				headers: { "Content-Type": "application/json" },
-			},
-		);
+		stealthState.queuedResponses.push(new Error("socket hang up"), new Error("socket hang up"), {
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "Content-Type": "application/json" },
+		});
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
@@ -1937,10 +2003,12 @@ describe("proxy integration", () => {
 
 	it("retries Smartproxy stealth requests when impit returns a status-zero proxy CONNECT response", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 		stealthState.queuedResponses.push(
 			{
 				status: 0,
@@ -1975,10 +2043,12 @@ describe("proxy integration", () => {
 
 	it("retries Smartproxy stealth requests when impit throws a proxy CONNECT error", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 		stealthState.queuedResponses.push(
 			new Error("failed to do request: proxy CONNECT tunnel failed with non 200 code: 509 OK"),
 			{
@@ -2009,10 +2079,12 @@ describe("proxy integration", () => {
 
 	it("retries safe Smartproxy stealth reads when impit throws a generic network error", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 		stealthState.queuedResponses.push(new Error("socket hang up"), {
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -2040,10 +2112,12 @@ describe("proxy integration", () => {
 
 	it("retries safe Smartproxy stealth reads when impit throws a timeout error", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 		const timeoutError = new Error("request timeout after 10ms");
 		timeoutError.name = "TimeoutError";
 		stealthState.queuedResponses.push(timeoutError, {
@@ -2073,10 +2147,12 @@ describe("proxy integration", () => {
 
 	it("does not retry generic Smartproxy stealth network errors for unsafe methods", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 		stealthState.queuedResponses.push(new Error("socket hang up"));
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
@@ -2108,10 +2184,12 @@ describe("proxy integration", () => {
 
 	it("rejects explicit Smartproxy stealth POST retry without unsafe acknowledgement", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
@@ -2138,10 +2216,12 @@ describe("proxy integration", () => {
 
 	it("retries explicit read-like Smartproxy stealth POST network errors with proxy rotation", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 		stealthState.queuedResponses.push(new Error("socket hang up"), {
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -2178,10 +2258,12 @@ describe("proxy integration", () => {
 
 	it("retries Smartproxy stealth requests when impit exposes structured proxy tunnel status", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 		const proxyTunnelError = Object.assign(new Error("proxy tunnel failed"), {
 			status: 509,
 		});
@@ -2212,10 +2294,12 @@ describe("proxy integration", () => {
 
 	it("classifies Smartproxy stealth auth-ip edge rejection without source-IP allowlist messaging", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
-				status: 200,
-			}));
+		global.fetch = createFetchDouble(
+			async () =>
+				new Response(["5.78.24.25:31001", "5.78.24.26:31002"].join("\n"), {
+					status: 200,
+				}),
+		);
 		stealthState.queuedResponses.push(
 			{
 				status: 0,
@@ -2379,9 +2463,7 @@ describe("proxy integration", () => {
 
 	it("keeps Smartproxy policy stealth clients on origin certificate verification", async () => {
 		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
-		global.fetch = createFetchDouble(async () =>
-			new Response("5.78.24.25:31001", { status: 200 }),
-		);
+		global.fetch = createFetchDouble(async () => new Response("5.78.24.25:31001", { status: 200 }));
 		stealthState.queuedResponses.push({
 			status: 200,
 			body: JSON.stringify({ ok: true }),
@@ -2404,7 +2486,6 @@ describe("proxy integration", () => {
 		expect(stealthState.clients[0]?.calls[0]?.options.proxy).toBe("http://5.78.24.25:31001");
 		expect(stealthState.clients[0]?.calls[0]?.options.insecure).toBeUndefined();
 	});
-
 });
 
 describe("resolvePolicyTransportAttemptCap", () => {
