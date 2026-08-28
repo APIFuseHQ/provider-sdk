@@ -273,6 +273,18 @@ export async function buildSubmitCheckReport(
 	const checks: SubmitCheck[] = [];
 	const baseChecks = await safeRunChecks(providerRoot);
 	const provider = await safeLoadProvider(providerRoot);
+	let indexParseError: string | undefined;
+	if (!provider) {
+		const indexPath = resolve(providerRoot, "index.ts");
+		if (existsSync(indexPath)) {
+			const relPath = toRelativeProviderPath(providerRoot, indexPath);
+			try {
+				maskCommentsAndStrings(readFileSync(indexPath, "utf8"), relPath);
+			} catch (error) {
+				indexParseError = error instanceof Error ? error.message : String(error);
+			}
+		}
+	}
 
 	// Prompt-asset freshness is reported by its own dedicated zero-point
 	// blocker below; filter the base-check duplicate so it is not double
@@ -283,17 +295,19 @@ export async function buildSubmitCheckReport(
 		),
 	);
 	checks.push(scorePromptAssetFreshness(providerRoot));
-	checks.push(scoreProviderIdSlug(providerRoot, provider));
-	checks.push(scoreNoVendorShim(providerRoot));
-	checks.push(scoreNoVendorImport(providerRoot));
-	checks.push(scoreDescribeKey(providerRoot));
-	checks.push(scoreNoRawFetch(providerRoot));
-	checks.push(scoreNoRedundantRuntimeGuards(providerRoot));
-	checks.push(scoreManagedBrowserRuntime(providerRoot));
-	checks.push(scoreAsAssertionCount(providerRoot));
-	checks.push(scoreUnsafeInputPassthrough(providerRoot));
-	checks.push(scoreUnjustifiedLooseSchema(providerRoot));
-	checks.push(scoreFlatOperationComposition(providerRoot));
+	if (!indexParseError) {
+		checks.push(scoreProviderIdSlug(providerRoot, provider));
+		checks.push(scoreNoVendorShim(providerRoot));
+		checks.push(scoreNoVendorImport(providerRoot));
+		checks.push(scoreDescribeKey(providerRoot));
+		checks.push(scoreNoRawFetch(providerRoot));
+		checks.push(scoreNoRedundantRuntimeGuards(providerRoot));
+		checks.push(scoreManagedBrowserRuntime(providerRoot));
+		checks.push(scoreAsAssertionCount(providerRoot));
+		checks.push(scoreUnsafeInputPassthrough(providerRoot));
+		checks.push(scoreUnjustifiedLooseSchema(providerRoot));
+		checks.push(scoreFlatOperationComposition(providerRoot));
+	}
 
 	if (provider) {
 		const smokeResult = args.smoke ? await runSubmitCheckSmoke(providerRoot, provider) : undefined;
@@ -321,6 +335,18 @@ export async function buildSubmitCheckReport(
 				CATEGORY_MAX_POINTS.definition,
 			),
 		);
+		if (indexParseError) {
+			checks.push(
+				blocker(
+					"provider-load-parse",
+					"definition",
+					"Provider index.ts could not be parsed safely.",
+					"Fix the syntax error in index.ts before submitting.",
+					0,
+					[indexParseError],
+				),
+			);
+		}
 	}
 
 	const total = clamp(Math.round(checks.reduce((sum, check) => sum + check.points, 0)), 0, 100);
@@ -2820,7 +2846,11 @@ export function maskCommentsAndStrings(source: string, fileName = "provider.ts")
 
 function computeMaskedSource(source: string, fileName: string): string {
 	const transpiled = ts.transpileModule(source, {
-		fileName,
+		// Declaration files trigger an internal TypeScript Debug Failure when
+		// passed to transpileModule. Parsing is all we need here, so always use a
+		// synthetic implementation filename while retaining the real filename
+		// for source mapping and sanitized diagnostics below.
+		fileName: "provider.ts",
 		reportDiagnostics: true,
 		compilerOptions: { target: ts.ScriptTarget.Latest },
 	});
@@ -2843,6 +2873,7 @@ function computeMaskedSource(source: string, fileName: string): string {
 	const chars = source.split("");
 	const maskRange = (start: number, end: number): void => {
 		for (let index = start; index < end; index += 1) {
+			if (source[index] === "\\" && source[index + 1] === "\n") continue;
 			if (chars[index] !== "\n") chars[index] = " ";
 		}
 	};
@@ -2901,10 +2932,19 @@ function sanitizeDiagnosticFileName(fileName: string): string {
 	let sanitized = "";
 	for (const character of fileName) {
 		const codePoint = character.codePointAt(0);
-		sanitized +=
-			codePoint !== undefined && (codePoint < 0x20 || codePoint === 0x7f)
-				? `\\x${codePoint.toString(16).padStart(2, "0")}`
-				: character;
+		if (codePoint === undefined) continue;
+		if (codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f)) {
+			sanitized += `\\x${codePoint.toString(16).padStart(2, "0")}`;
+		} else if (
+			codePoint === 0x200e ||
+			codePoint === 0x200f ||
+			(codePoint >= 0x202a && codePoint <= 0x202e) ||
+			(codePoint >= 0x2066 && codePoint <= 0x2069)
+		) {
+			sanitized += `\\u{${codePoint.toString(16)}}`;
+		} else {
+			sanitized += character;
+		}
 	}
 	return sanitized;
 }

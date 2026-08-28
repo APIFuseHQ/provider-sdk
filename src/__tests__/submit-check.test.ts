@@ -379,6 +379,22 @@ describe("apifuse submit-check", () => {
 		expect(report.summary.blockers).toBeGreaterThanOrEqual(1);
 	});
 
+	it("returns a structured blocked report for a syntactically broken index", async () => {
+		const dir = makeProviderDir(
+			"submit-index-parse-blocked-",
+			'const x = { input: z.object({}) };\nconst broken = "unterminated;\n',
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const report = await buildSubmitCheckReport(dir);
+		const providerLoad = report.checks.find((item) => item.id === "provider-load");
+		const parse = report.checks.find((item) => item.id === "provider-load-parse");
+		expect(providerLoad?.status).toBe("fail");
+		expect(parse?.status).toBe("fail");
+		expect(parse?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
+		expect(report.score.verdict).toBe("blocked");
+	});
+
 	it("passes when provider root has no vendor SDK shim directory", async () => {
 		const dir = makeProviderDir("submit-no-vendor-shim-pass-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
@@ -1631,6 +1647,27 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		);
 	});
 
+	it("keeps line-continuation strings parseable and mask-idempotent", async () => {
+		const source = [
+			'const doc = "first\\\ncontinued";',
+			"const pattern = /quoted\\/value/;",
+			"const rendered = `text ${value} tail`;",
+			"// comment with braces",
+			"void doc;",
+		].join("\n");
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked.length).toBe(source.length);
+		const codeOffset = source.indexOf("void doc");
+		expect(masked.indexOf("void doc")).toBe(codeOffset);
+		expect(maskCommentsAndStrings(masked)).toBe(masked);
+
+		const dir = makeProviderDir("submit-mask-line-continuation-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "extra.ts"), source);
+		await expect(buildSubmitCheckReport(dir)).resolves.toBeDefined();
+	});
+
 	it("preserves quoted property keys while masking quoted values", () => {
 		const source = 'const value = { "response" : "hidden" };';
 		const masked = maskCommentsAndStrings(source);
@@ -1653,6 +1690,30 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 
 		await expect(buildSubmitCheckReport(dir)).rejects.toThrow(
 			"Cannot safely scan TypeScript source broken.ts",
+		);
+	});
+
+	it("scans valid declaration files without crashing", async () => {
+		const dir = makeProviderDir("submit-mask-valid-declaration-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "types.d.ts"), "export type Foo = string;\n");
+		writeFileSync(
+			join(dir, "vendor-output.ts"),
+			'import { z } from "zod";\nconst output = z.object({ MKioskTy: z.string() });\n',
+		);
+
+		const report = await buildSubmitCheckReport(dir);
+		expect(report).toBeDefined();
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe("fail");
+	});
+
+	it("fails closed and names a broken declaration file", async () => {
+		const dir = makeProviderDir("submit-mask-broken-declaration-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "broken.d.ts"), 'export type Broken = "unterminated;\n');
+
+		await expect(buildSubmitCheckReport(dir)).rejects.toThrow(
+			"Cannot safely scan TypeScript source broken.d.ts",
 		);
 	});
 
@@ -1683,6 +1744,35 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		}
 		expect(thrown.message).toContain("bad\\x1b[31mname.ts");
 		expect(thrown.message).not.toContain("\u001b");
+	});
+
+	it("escapes C1 and bidi controls while preserving ordinary Unicode filenames", async () => {
+		const c1Dir = makeProviderDir("submit-mask-c1-filename-", validProviderSource());
+		writeValidLocaleCatalogs(c1Dir);
+		const c1Name = "bad\u009bname.ts";
+		writeFileSync(join(c1Dir, c1Name), 'const broken = "unterminated;\n');
+		await expect(buildSubmitCheckReport(c1Dir)).rejects.toThrow("bad\\x9bname.ts");
+
+		const bidiDir = makeProviderDir("submit-mask-bidi-filename-", validProviderSource());
+		writeValidLocaleCatalogs(bidiDir);
+		const bidiName = "bad\u202ename.ts";
+		writeFileSync(join(bidiDir, bidiName), 'const broken = "unterminated;\n');
+		let bidiThrown: unknown;
+		try {
+			await buildSubmitCheckReport(bidiDir);
+		} catch (error) {
+			bidiThrown = error;
+		}
+		expect(bidiThrown).toBeInstanceOf(Error);
+		if (!(bidiThrown instanceof Error)) throw new Error("Expected a parse failure.");
+		expect(bidiThrown.message).toContain("bad\\u{202e}name.ts");
+		expect(bidiThrown.message).not.toContain("\u202e");
+
+		const koreanDir = makeProviderDir("submit-mask-korean-filename-", validProviderSource());
+		writeValidLocaleCatalogs(koreanDir);
+		const koreanName = "깨진.ts";
+		writeFileSync(join(koreanDir, koreanName), 'const broken = "unterminated;\n');
+		await expect(buildSubmitCheckReport(koreanDir)).rejects.toThrow(koreanName);
 	});
 
 	it("blocks compact vendor timestamps in normalized response fixtures", async () => {
