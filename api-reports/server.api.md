@@ -2791,6 +2791,7 @@ type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
 export type ProviderErrorCauseFrame = {
     errorClass: string;
     code?: string;
+    message: string;
     messageLength: number;
     messageFingerprint: string;
     providerObservability?: ProviderErrorObservability;

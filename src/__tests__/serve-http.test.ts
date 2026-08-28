@@ -2728,6 +2728,7 @@ describe("provider HTTP server", () => {
 			{
 				errorClass: "ProviderError",
 				code: "INNER_DIAGNOSTIC",
+				message: "Private provider diagnostic",
 				messageLength: "Private provider diagnostic".length,
 				messageFingerprint: causeFingerprint("Private provider diagnostic"),
 				providerObservability,
