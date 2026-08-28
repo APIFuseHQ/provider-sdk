@@ -4716,6 +4716,43 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
     route: string;
     requestId?: string;
     status: number;
+    proxy?: {
+        provider: "smartproxy" | "nodemaven";
+        userAgentSource?: "declared" | "defaulted";
+        protocol?: "http" | "socks5";
+        cacheStatus: "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
+        cacheHit: boolean;
+        resolutionMs: number;
+        allocatorMs?: number;
+        allocatorStatus?: number;
+        allocatorBodyClass?: "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
+        allocatorAttempts?: number;
+        lockWaitMs?: number;
+        redisReadMs?: number;
+        redisWriteMs?: number;
+        poolAgeMs?: number;
+        poolExpiresInMs?: number;
+        attempts: number;
+        refreshes?: number;
+        attemptSamples?: {
+            n: number;
+            a: number;
+            i?: number;
+            h?: string;
+            o: "ok" | "error";
+            c?: string;
+            s?: number;
+            d?: number;
+        }[];
+        vendors?: ("smartproxy" | "nodemaven")[];
+        failovers?: {
+            v: "smartproxy" | "nodemaven";
+            nx?: "smartproxy" | "nodemaven";
+            p: "resolution" | "transport";
+            r: "no_credentials" | "allocation_failed" | "pool_exhausted" | "protocol_unsupported";
+            a?: number;
+        }[];
+    };
 };
 
 // Warning: (ae-forgotten-export) The symbol "ProviderServerLogEvent" needs to be exported by the entry point index.d.ts
@@ -6813,10 +6850,10 @@ export { z }
 // dist/runtime/choice.d.ts:22:5 - (ae-forgotten-export) The symbol "ProviderChoiceTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:57:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:61:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:136:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:138:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:146:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:198:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:175:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:177:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:185:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:237:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1520:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1644:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1702:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts

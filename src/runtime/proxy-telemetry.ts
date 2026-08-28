@@ -12,54 +12,50 @@ import type {
 
 export const PROVIDER_TELEMETRY_HEADER = "X-ApiFuse-Provider-Telemetry";
 
+export type ProxyTelemetryLogPayload = {
+	provider: ProxyVendorName;
+	userAgentSource?: ProxyUserAgentSource;
+	protocol?: ProxyProtocol;
+	cacheStatus: ProxyCacheStatus;
+	cacheHit: boolean;
+	resolutionMs: number;
+	allocatorMs?: number;
+	allocatorStatus?: number;
+	allocatorBodyClass?: SmartproxyAllocatorBodyClass;
+	allocatorAttempts?: number;
+	lockWaitMs?: number;
+	redisReadMs?: number;
+	redisWriteMs?: number;
+	poolAgeMs?: number;
+	poolExpiresInMs?: number;
+	attempts: number;
+	refreshes?: number;
+	attemptSamples?: {
+		n: number;
+		a: number;
+		i?: number;
+		h?: string;
+		o: "ok" | "error";
+		c?: string;
+		s?: number;
+		d?: number;
+	}[];
+	/** Distinct vendors attempted across the resolution chain, in order seen. */
+	vendors?: ProxyVendorName[];
+	/** Cross-vendor failover events (bounded). */
+	failovers?: {
+		v: ProxyVendorName;
+		nx?: ProxyVendorName;
+		p: "resolution" | "transport";
+		r: "no_credentials" | "allocation_failed" | "pool_exhausted" | "protocol_unsupported";
+		a?: number;
+	}[];
+};
+
 type ProviderTelemetryHeader = {
 	v: 1;
-	proxy?: {
-		provider: ProxyVendorName;
-		userAgentSource?: ProxyUserAgentSource;
-		protocol?: ProxyProtocol;
-		cacheStatus: ProxyCacheStatus;
-		cacheHit: boolean;
-		resolutionMs: number;
-		allocatorMs?: number;
-		allocatorStatus?: number;
-		allocatorBodyClass?: SmartproxyAllocatorBodyClass;
-		allocatorAttempts?: number;
-		lockWaitMs?: number;
-		redisReadMs?: number;
-		redisWriteMs?: number;
-		poolAgeMs?: number;
-		poolExpiresInMs?: number;
-		attempts: number;
-		refreshes?: number;
-		attemptSamples?: CompactProxyAttemptSample[];
-		/** Distinct vendors attempted across the resolution chain, in order seen. */
-		vendors?: ProxyVendorName[];
-		/** Cross-vendor failover events (bounded). */
-		failovers?: CompactVendorFailoverSample[];
-	};
+	proxy?: ProxyTelemetryLogPayload;
 };
-
-type CompactProxyAttemptSample = {
-	n: number;
-	a: number;
-	i?: number;
-	h?: string;
-	o: "ok" | "error";
-	c?: string;
-	s?: number;
-	d?: number;
-};
-
-type CompactVendorFailoverSample = {
-	v: ProxyVendorName;
-	nx?: ProxyVendorName;
-	p: "resolution" | "transport";
-	r: ProxyVendorFailoverTelemetryEvent["reason"];
-	a?: number;
-};
-
-export type ProxyTelemetryLogPayload = NonNullable<ProviderTelemetryHeader["proxy"]>;
 
 const MAX_HEADER_BYTES = 4_096;
 const MAX_PROXY_ATTEMPT_SAMPLES = 24;
