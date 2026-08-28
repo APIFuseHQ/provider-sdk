@@ -6,6 +6,11 @@ const OPAQUE_TOKEN = /^[A-Za-z0-9_+/=.:~-]+$/;
 const OPAQUE_TOKEN_RUN = /[A-Za-z0-9_+/=.:~-]{24,}/g;
 const URL_RUN = /https?:\/\/[^\s"'<>]+/gi;
 const EMAIL_ADDRESS_RUN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
+const DIAGNOSTIC_URL_SENTINEL_DELIMITER = String.fromCodePoint(0);
+const DIAGNOSTIC_URL_SENTINEL_RUN = new RegExp(
+	`${DIAGNOSTIC_URL_SENTINEL_DELIMITER}APIFUSE_URL(\\d+)${DIAGNOSTIC_URL_SENTINEL_DELIMITER}`,
+	"g",
+);
 const PEM_PRIVATE_KEY =
 	/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g;
 
@@ -151,10 +156,11 @@ export function requestPathForFixture(value: string): string {
 /** Scrubs secrets and terminal/log control characters before diagnostic text is emitted. */
 export function sanitizeDiagnosticText(value: string): string {
 	const retainedUrls: string[] = [];
-	let sanitized = value
+	// Remove attacker-controlled NUL delimiters before introducing internal URL sentinels.
+	let sanitized = encodeDiagnosticControls(value)
 		.replace(URL_RUN, (url) => {
 			const index = retainedUrls.push(sanitizeUrlForLogs(url)) - 1;
-			return `APIFUSEURL${index}X`;
+			return `${DIAGNOSTIC_URL_SENTINEL_DELIMITER}APIFUSE_URL${index}${DIAGNOSTIC_URL_SENTINEL_DELIMITER}`;
 		})
 		.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED_FIXTURE_VALUE}`)
 		.replace(EMAIL_ADDRESS_RUN, REDACTED_FIXTURE_VALUE);
@@ -166,7 +172,7 @@ export function sanitizeDiagnosticText(value: string): string {
 		return isSensitiveFixtureValue(candidate) ? REDACTED_FIXTURE_VALUE : candidate;
 	});
 	sanitized = sanitized.replace(
-		/APIFUSEURL(\d+)X/g,
+		DIAGNOSTIC_URL_SENTINEL_RUN,
 		(_match, index: string) => retainedUrls[Number(index)] ?? REDACTED_FIXTURE_VALUE,
 	);
 	return encodeDiagnosticControls(sanitized);
