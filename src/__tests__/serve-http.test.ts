@@ -2605,6 +2605,68 @@ describe("provider HTTP server", () => {
 		]);
 	});
 
+	it("emits only allowlisted observability fields from mixed metadata", async () => {
+		const providerObservability = {
+			reason: "LOGIN_COMPLETE_FAILED",
+			fingerprint: "038ed7ef11d8",
+			email: "mixed-operator@example.com",
+			password: "mixed-password-secret",
+			cookie: "mixed_session=cookie-secret; Path=/",
+			token: "mixed.jwt.token-secret",
+		};
+		const unsafeObservability: ProviderErrorObservability = providerObservability;
+		const allowlistedObservability = {
+			reason: providerObservability.reason,
+			fingerprint: providerObservability.fingerprint,
+		};
+		const inner = new ProviderError("Private diagnostic placeholder", {
+			code: "INNER_MIXED_METADATA",
+			observability: unsafeObservability,
+		});
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(
+			createCauseErrorApp(
+				() =>
+					new TransportError("NOL login completion failed upstream.", {
+						code: "UPSTREAM_ERROR",
+						cause: inner,
+						observability: unsafeObservability,
+					}),
+				events,
+			),
+		);
+
+		const body = await response.json();
+		const rawHeader = response.headers.get(ERROR_OBSERVABILITY_HEADER);
+		expect(rawHeader).toBeTruthy();
+		if (rawHeader === null) throw new Error("Expected error observability header");
+		const decodedHeader: unknown = JSON.parse(rawHeader);
+		const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
+		expect(events[0]).toHaveProperty("providerObservability", allowlistedObservability);
+		expect(decodedHeader).toHaveProperty(
+			"providerObservability",
+			allowlistedObservability,
+		);
+		expect(frame).toHaveProperty("providerObservability", allowlistedObservability);
+
+		const channels = [
+			JSON.stringify(events[0]),
+			rawHeader,
+			JSON.stringify(frame),
+			JSON.stringify(body),
+		];
+		for (const forbidden of [
+			providerObservability.email,
+			providerObservability.password,
+			providerObservability.cookie,
+			providerObservability.token,
+		]) {
+			for (const channel of channels) {
+				expect(channel).not.toContain(forbidden);
+			}
+		}
+	});
+
 	it("drops invalid and non-allowlisted observability from every output channel", async () => {
 		const invalidReasons = [
 			"LOGIN COMPLETE FAILED",
@@ -2651,12 +2713,15 @@ describe("provider HTTP server", () => {
 			);
 
 			const body = await response.json();
-			const header = errorObservability(response);
+			const rawHeader = response.headers.get(ERROR_OBSERVABILITY_HEADER);
+			expect(rawHeader).toBeTruthy();
+			if (rawHeader === null) throw new Error("Expected error observability header");
+			const decodedHeader: unknown = JSON.parse(rawHeader);
 			const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
 			expect(events[0]).not.toHaveProperty("providerObservability");
-			expect(header).not.toHaveProperty("providerObservability");
+			expect(decodedHeader).not.toHaveProperty("providerObservability");
 			expect(frame).not.toHaveProperty("providerObservability");
-			const serialized = JSON.stringify({ event: events[0], header, body });
+			const serialized = JSON.stringify({ event: events[0], decodedHeader, frame, body });
 			for (const forbidden of [
 				reason,
 				"not-a-12hex-fingerprint",
