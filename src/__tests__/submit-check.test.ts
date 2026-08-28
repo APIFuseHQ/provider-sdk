@@ -417,6 +417,61 @@ describe("apifuse submit-check", () => {
 		expect(report.score.verdict).toBe("blocked");
 	});
 
+	it("preserves a module initialization failure as provider-load evidence", async () => {
+		const dir = makeProviderDir("submit-index-init-blocked-", 'throw new Error("boom at init");\n');
+		writeValidLocaleCatalogs(dir);
+
+		const report = await buildSubmitCheckReport(dir);
+		const providerLoad = report.checks.find((item) => item.id === "provider-load");
+		expect(providerLoad?.status).toBe("fail");
+		expect(providerLoad?.evidence?.some((line) => line.includes("boom at init"))).toBe(true);
+		expect(providerLoad?.remediation).toContain("import/initialization failure");
+		expect(report.checks.find((item) => item.id === "provider-load-parse")).toBeUndefined();
+		expect(report.score.verdict).toBe("blocked");
+	});
+
+	it("preserves a missing import as provider-load evidence", async () => {
+		const dir = makeProviderDir(
+			"submit-index-import-blocked-",
+			'import "./does-not-exist";\nexport const provider = undefined;\n',
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const report = await buildSubmitCheckReport(dir);
+		const providerLoad = report.checks.find((item) => item.id === "provider-load");
+		expect(
+			providerLoad?.evidence?.some((line) =>
+				/cannot find module|module not found|could not resolve/i.test(line),
+			),
+		).toBe(true);
+		expect(report.checks.find((item) => item.id === "provider-load-parse")).toBeUndefined();
+		expect(report.score.verdict).toBe("blocked");
+	});
+
+	it("sanitizes provider paths in initialization error evidence", async () => {
+		const dir = makeProviderDir("submit-index-init-path-", "export const provider = undefined;\n");
+		writeFileSync(
+			join(dir, "index.ts"),
+			`throw new Error("failed while loading ${dir}/index.ts");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const report = await buildSubmitCheckReport(dir);
+		const providerLoad = report.checks.find((item) => item.id === "provider-load");
+		const evidence = providerLoad?.evidence?.join("\n") ?? "";
+		expect(evidence).toContain("index.ts");
+		expect(evidence).not.toContain(tempRoot);
+	});
+
+	it("keeps the default-export remediation when the module loads without one", async () => {
+		const dir = makeProviderDir("submit-index-no-default-", "export const provider = undefined;\n");
+		writeValidLocaleCatalogs(dir);
+
+		const report = await buildSubmitCheckReport(dir);
+		const providerLoad = report.checks.find((item) => item.id === "provider-load");
+		expect(providerLoad?.remediation).toContain("default-exports defineProvider(...)");
+	});
+
 	it("passes when provider root has no vendor SDK shim directory", async () => {
 		const dir = makeProviderDir("submit-no-vendor-shim-pass-", validProviderSource());
 		writeValidLocaleCatalogs(dir);

@@ -4,7 +4,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import * as acorn from "acorn";
@@ -118,6 +118,8 @@ type SourceFinding = {
 const SDK_NATIVE_CATEGORY = "sdk-native";
 const VENDOR_SHIM_PROVIDER_ID_PREFIX = "apifuse-provider-";
 const MAX_SOURCE_FINDING_EVIDENCE = 5;
+const MAX_LOAD_ERROR_EVIDENCE = 5;
+const MAX_LOAD_ERROR_MESSAGE_LENGTH = 500;
 
 const CATEGORY_MAX_POINTS = {
 	definition: 15,
@@ -272,7 +274,8 @@ export async function buildSubmitCheckReport(
 ): Promise<SubmitCheckReport> {
 	const checks: SubmitCheck[] = [];
 	const baseChecks = await safeRunChecks(providerRoot);
-	const provider = await safeLoadProvider(providerRoot);
+	const loadResult = await safeLoadProvider(providerRoot);
+	const provider = loadResult.provider;
 	let indexParseError: string | undefined;
 	if (!provider) {
 		const indexPath = resolve(providerRoot, "index.ts");
@@ -327,13 +330,21 @@ export async function buildSubmitCheckReport(
 		checks.push(scoreRepositoryDx(providerRoot));
 		checks.push(scoreSecrets(providerRoot, provider));
 	} else {
+		const loadEvidence = indexParseError
+			? undefined
+			: formatLoadErrorEvidence(loadResult.error, providerRoot);
+		const loadRemediation =
+			loadResult.error && !indexParseError
+				? "Fix the import/initialization failure shown in evidence so apifuse check can load the provider."
+				: "Fix index.ts so it default-exports defineProvider(...).";
 		checks.push(
 			blocker(
 				"provider-load",
 				"definition",
 				"Provider could not be loaded.",
-				"Fix index.ts so it default-exports defineProvider(...).",
+				loadRemediation,
 				CATEGORY_MAX_POINTS.definition,
+				loadEvidence,
 			),
 		);
 		if (indexParseError) {
@@ -4954,12 +4965,82 @@ const SECRET_PATTERNS: Array<[string, RegExp]> = [
 	],
 ];
 
-async function safeLoadProvider(providerRoot: string): Promise<ProviderDefinition | undefined> {
+type SafeLoadProviderResult = {
+	provider?: ProviderDefinition;
+	error?: unknown;
+};
+
+async function safeLoadProvider(providerRoot: string): Promise<SafeLoadProviderResult> {
 	try {
-		return await loadProvider(providerRoot);
-	} catch {
+		return { provider: await loadProvider(providerRoot) };
+	} catch (error) {
+		return { error };
+	}
+}
+
+function formatLoadErrorEvidence(error: unknown, providerRoot: string): string[] | undefined {
+	if (error === undefined) {
 		return undefined;
 	}
+
+	const evidence: string[] = [];
+	const seen = new Set<object>();
+	let current: unknown = error;
+	let frame = 0;
+	while (current !== undefined && current !== null && frame < MAX_LOAD_ERROR_EVIDENCE) {
+		if (typeof current === "object" || typeof current === "function") {
+			if (seen.has(current)) {
+				break;
+			}
+			seen.add(current);
+		}
+		let message: string;
+		if (current instanceof Error) {
+			message = current.message;
+		} else if (typeof current === "object" && current !== null && "message" in current) {
+			message = String((current as { message?: unknown }).message);
+		} else {
+			message = String(current);
+		}
+		evidence.push(
+			`${frame === 0 ? "Load error" : "Cause"}: ${sanitizeLoadErrorText(message, providerRoot)}`,
+		);
+		frame += 1;
+		if (typeof current !== "object" || current === null || !("cause" in current)) {
+			break;
+		}
+		current = (current as { cause?: unknown }).cause;
+	}
+	return evidence;
+}
+
+function sanitizeLoadErrorText(value: string, providerRoot: string): string {
+	let output = value.replace(
+		/(^|[^A-Za-z0-9_.])((?:\/[^\s"'`]+)+)/g,
+		(_match, prefix: string, rawPath: string) => {
+			const pathCandidate = rawPath.replace(/[),.;:!?]+$/u, "");
+			const relativePath = relative(providerRoot, resolve(pathCandidate));
+			const insideProvider =
+				relativePath === "" ||
+				(relativePath !== ".." && !relativePath.startsWith(`..${sep}`));
+			return `${prefix}${insideProvider ? relativePath || "." : "[REDACTED_PATH]"}`;
+		},
+	);
+	output = output.replace(/[A-Za-z]:[\\/][^\s"'`]+/g, "[REDACTED_PATH]");
+	output = output.replace(
+		/((?:password|token|secret|api[_-]?key|credential|authorization)\s*[:=]\s*)(["']?)[^\s,"']+/gi,
+		"$1[REDACTED]",
+	);
+	const envValues = Object.values(process.env)
+		.filter((item): item is string => typeof item === "string" && item.length >= 4)
+		.sort((a, b) => b.length - a.length);
+	for (const envValue of envValues) {
+		output = output.replaceAll(envValue, "[REDACTED]");
+	}
+	output = redact(output).replace(/\s+/g, " ");
+	return output.length > MAX_LOAD_ERROR_MESSAGE_LENGTH
+		? `${output.slice(0, MAX_LOAD_ERROR_MESSAGE_LENGTH - 1)}…`
+		: output;
 }
 
 async function loadProvider(providerRoot: string): Promise<ProviderDefinition | undefined> {
