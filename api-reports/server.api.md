@@ -3111,43 +3111,7 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
     route: string;
     requestId?: string;
     status: number;
-    proxy?: {
-        provider: "smartproxy" | "nodemaven";
-        userAgentSource?: "declared" | "defaulted";
-        protocol?: "http" | "socks5";
-        cacheStatus: "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
-        cacheHit: boolean;
-        resolutionMs: number;
-        allocatorMs?: number;
-        allocatorStatus?: number;
-        allocatorBodyClass?: "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
-        allocatorAttempts?: number;
-        lockWaitMs?: number;
-        redisReadMs?: number;
-        redisWriteMs?: number;
-        poolAgeMs?: number;
-        poolExpiresInMs?: number;
-        attempts: number;
-        refreshes?: number;
-        attemptSamples?: {
-            n: number;
-            a: number;
-            i?: number;
-            h?: string;
-            o: "ok" | "error";
-            c?: string;
-            s?: number;
-            d?: number;
-        }[];
-        vendors?: ("smartproxy" | "nodemaven")[];
-        failovers?: {
-            v: "smartproxy" | "nodemaven";
-            nx?: "smartproxy" | "nodemaven";
-            p: "resolution" | "transport";
-            r: "no_credentials" | "allocation_failed" | "pool_exhausted" | "protocol_unsupported";
-            a?: number;
-        }[];
-    };
+    proxy?: ProxyTelemetryLogPayload;
 };
 
 // @public (undocumented)
@@ -3316,6 +3280,57 @@ interface ProxiedOAuthConfig {
     // (undocumented)
     tokenUrl: string;
 }
+
+// @public (undocumented)
+export type ProxyCacheStatus = "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
+
+// @public
+export type ProxyProtocol = "http" | "socks5";
+
+// @public (undocumented)
+export type ProxyTelemetryLogPayload = {
+    provider: ProxyVendorName;
+    userAgentSource?: ProxyUserAgentSource;
+    protocol?: ProxyProtocol;
+    cacheStatus: ProxyCacheStatus;
+    cacheHit: boolean;
+    resolutionMs: number;
+    allocatorMs?: number;
+    allocatorStatus?: number;
+    allocatorBodyClass?: SmartproxyAllocatorBodyClass;
+    allocatorAttempts?: number;
+    lockWaitMs?: number;
+    redisReadMs?: number;
+    redisWriteMs?: number;
+    poolAgeMs?: number;
+    poolExpiresInMs?: number;
+    attempts: number;
+    refreshes?: number;
+    attemptSamples?: {
+        n: number;
+        a: number;
+        i?: number;
+        h?: string;
+        o: "ok" | "error";
+        c?: string;
+        s?: number;
+        d?: number;
+    }[];
+    vendors?: ProxyVendorName[];
+    failovers?: {
+        v: ProxyVendorName;
+        nx?: ProxyVendorName;
+        p: "resolution" | "transport";
+        r: "no_credentials" | "allocation_failed" | "pool_exhausted" | "protocol_unsupported";
+        a?: number;
+    }[];
+};
+
+// @public (undocumented)
+export type ProxyUserAgentSource = "declared" | "defaulted";
+
+// @public
+export type ProxyVendorName = "smartproxy" | "nodemaven";
 
 // @public (undocumented)
 type Quantifier = {
@@ -3961,6 +3976,9 @@ export interface ServeOptions extends ProviderServerOptions {
 }
 
 // @public (undocumented)
+export type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
+
+// @public (undocumented)
 type SmsOrigin = {
     kind: "e164";
     value: E164PhoneNumber;
@@ -4483,8 +4501,8 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/health-scenario.d.ts:1835:5 - (ae-forgotten-export) The symbol "ManualTriggerPolicy" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1837:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1838:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:10:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:185:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:11:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:148:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:172:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:567:5 - (ae-forgotten-export) The symbol "HealthJourneyRunContext" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:567:5 - (ae-forgotten-export) The symbol "HealthJourneyRunResult" needs to be exported by the entry point index.d.ts

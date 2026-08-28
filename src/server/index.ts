@@ -1,3 +1,11 @@
+export type {
+	ProxyCacheStatus,
+	ProxyProtocol,
+	ProxyUserAgentSource,
+	ProxyVendorName,
+	SmartproxyAllocatorBodyClass,
+} from "../config/loader.js";
+export type { ProxyTelemetryLogPayload } from "../runtime/proxy-telemetry.js";
 export {
 	createServerApp,
 	createServerAppAsync,

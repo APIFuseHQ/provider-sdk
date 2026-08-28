@@ -54,7 +54,11 @@ import {
 	PROXY_EDGE_AUTH_REJECTED_CODE,
 	PROXY_POOL_EXHAUSTED_CODE,
 } from "../runtime/proxy-errors.js";
-import { PROVIDER_TELEMETRY_HEADER, ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
+import {
+	PROVIDER_TELEMETRY_HEADER,
+	ProxyTelemetryCollector,
+	type ProxyTelemetryLogPayload,
+} from "../runtime/proxy-telemetry.js";
 import type * as ResolverRuntimeModule from "../runtime/resolver.js";
 import { createUnsupportedResolverClient } from "../runtime/resolver-shared.js";
 import {
@@ -956,59 +960,7 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
 	route: string;
 	requestId?: string;
 	status: number;
-	proxy?: {
-		provider: "smartproxy" | "nodemaven";
-		userAgentSource?: "declared" | "defaulted";
-		protocol?: "http" | "socks5";
-		cacheStatus:
-			| "memory_hit"
-			| "redis_hit"
-			| "allocator"
-			| "soft_stale_refresh"
-			| "lock_wait"
-			| "redis_error"
-			| "redis_corrupt"
-			| "disabled";
-		cacheHit: boolean;
-		resolutionMs: number;
-		allocatorMs?: number;
-		allocatorStatus?: number;
-		allocatorBodyClass?:
-			| "network_error"
-			| "http_error"
-			| "empty"
-			| "json_without_proxies"
-			| "text_without_proxies"
-			| "usable_proxy_endpoints";
-		allocatorAttempts?: number;
-		lockWaitMs?: number;
-		redisReadMs?: number;
-		redisWriteMs?: number;
-		poolAgeMs?: number;
-		poolExpiresInMs?: number;
-		attempts: number;
-		refreshes?: number;
-		attemptSamples?: {
-			n: number;
-			a: number;
-			i?: number;
-			h?: string;
-			o: "ok" | "error";
-			c?: string;
-			s?: number;
-			d?: number;
-		}[];
-		/** Distinct vendors attempted across the resolution chain, in order seen. */
-		vendors?: ("smartproxy" | "nodemaven")[];
-		/** Cross-vendor failover events (bounded). */
-		failovers?: {
-			v: "smartproxy" | "nodemaven";
-			nx?: "smartproxy" | "nodemaven";
-			p: "resolution" | "transport";
-			r: "no_credentials" | "allocation_failed" | "pool_exhausted" | "protocol_unsupported";
-			a?: number;
-		}[];
-	};
+	proxy?: ProxyTelemetryLogPayload;
 };
 
 export type ProviderServerLogEvent =
