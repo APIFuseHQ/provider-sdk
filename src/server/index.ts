@@ -5,7 +5,11 @@ export type {
 	ProxyVendorName,
 	SmartproxyAllocatorBodyClass,
 } from "../config/loader.js";
-export type { ProxyTelemetryLogPayload } from "../runtime/proxy-telemetry.js";
+export type {
+	ProxyTelemetryLogPayload,
+	ProxyTelemetryResolvedPayload,
+	ProxyTelemetryUnresolvedPayload,
+} from "../runtime/proxy-telemetry.js";
 export {
 	createServerApp,
 	createServerAppAsync,

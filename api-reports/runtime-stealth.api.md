@@ -241,6 +241,7 @@ type ProxyResolutionOptions = {
 // @public (undocumented)
 type ProxyResolutionTelemetryEvent = {
     provider: ProxyVendorName;
+    outcome?: "ok" | "error";
     userAgentSource?: ProxyUserAgentSource;
     protocol?: ProxyProtocol;
     cacheStatus: ProxyCacheStatus;
@@ -500,13 +501,13 @@ type StealthTransportResponse = {
 // dist/config/loader.d.ts:34:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:46:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:60:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:67:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:69:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:74:5 - (ae-forgotten-export) The symbol "SmartproxyAllocatorBodyClass" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:85:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:104:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:105:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/config/loader.d.ts:106:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:69:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:71:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:76:5 - (ae-forgotten-export) The symbol "SmartproxyAllocatorBodyClass" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:87:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:106:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:107:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
+// dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:34:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:36:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:858:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts

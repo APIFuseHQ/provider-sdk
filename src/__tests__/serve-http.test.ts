@@ -758,6 +758,118 @@ describe("provider HTTP server", () => {
 			}),
 		]);
 		expect("proxy" in (events[0] ?? {})).toBe(false);
+		expect(response.headers.get(PROVIDER_TELEMETRY_HEADER)).toBeNull();
+	});
+
+	it("logs optional proxy credential failover and emits the same payload in the header", async () => {
+		const originalFetch = global.fetch;
+		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		clearProxyResolutionCache();
+		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		global.fetch = createLocalFetchDouble(
+			async () =>
+				new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+		);
+		const baseProvider = createTestProvider();
+		const provider = {
+			...baseProvider,
+			allowedHosts: ["example.com"],
+			proxy: { mode: "optional", providers: ["smartproxy"] },
+			operations: {
+				...baseProvider.operations,
+				proxyOptionalFallback: {
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					handler: async (ctx) => {
+						const response = await ctx.http.get("https://example.com/direct");
+						return response.data;
+					},
+				},
+			},
+		} satisfies ProviderDefinition;
+		const events: ProviderServerLogEvent[] = [];
+		const proxyApp = createServerApp(provider, { logger: (event) => events.push(event) });
+
+		try {
+			const response = await proxyApp.request("/v1/proxyOptionalFallback", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_proxy_optional_fallback", input: {} }),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({ data: { ok: true } });
+			const completedEvent = events.find((event) => event.event === "provider_request_completed");
+			const proxy = completedEvent && "proxy" in completedEvent ? completedEvent.proxy : undefined;
+			expect(proxy).toEqual({
+				kind: "unresolved",
+				vendors: ["smartproxy"],
+				failovers: [{ v: "smartproxy", p: "resolution", r: "no_credentials" }],
+			});
+			const telemetryHeader = response.headers.get(PROVIDER_TELEMETRY_HEADER);
+			expect(telemetryHeader).toBeTruthy();
+			const decoded = JSON.parse(Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8"));
+			expect(decoded).toEqual({ v: 1, proxy });
+		} finally {
+			global.fetch = originalFetch;
+			if (originalSmartproxyKey === undefined) {
+				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+			} else {
+				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
+			}
+			clearProxyResolutionCache();
+		}
+	});
+
+	it("logs the proxy failover trail when required egress has no credentials", async () => {
+		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		clearProxyResolutionCache();
+		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		const baseProvider = createTestProvider();
+		const provider = {
+			...baseProvider,
+			allowedHosts: ["example.com"],
+			proxy: { mode: "required", providers: ["smartproxy"] },
+			operations: {
+				...baseProvider.operations,
+				proxyRequiredFailure: {
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					handler: async (ctx) => {
+						const response = await ctx.http.get("https://example.com/unreachable");
+						return response.data;
+					},
+				},
+			},
+		} satisfies ProviderDefinition;
+		const events: ProviderServerLogEvent[] = [];
+		const proxyApp = createServerApp(provider, { logger: (event) => events.push(event) });
+
+		try {
+			const response = await proxyApp.request("/v1/proxyRequiredFailure", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req_proxy_required_failure", input: {} }),
+			});
+
+			expect(response.status).toBe(502);
+			const failedEvent = events.find((event) => event.event === "provider_request_failed");
+			expect(failedEvent && "proxy" in failedEvent ? failedEvent.proxy : undefined).toEqual({
+				kind: "unresolved",
+				vendors: ["smartproxy"],
+				failovers: [{ v: "smartproxy", p: "resolution", r: "no_credentials" }],
+			});
+		} finally {
+			if (originalSmartproxyKey === undefined) {
+				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+			} else {
+				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
+			}
+			clearProxyResolutionCache();
+		}
 	});
 
 	it("preserves optional connection identity without credential material", async () => {
@@ -2044,15 +2156,26 @@ describe("provider HTTP server", () => {
 			expect(decoded).toMatchObject({
 				v: 1,
 				proxy: {
-					provider: "smartproxy",
+					kind: "unresolved",
+					vendors: ["smartproxy"],
 					cacheStatus: "allocator",
 					cacheHit: false,
 					attempts: 3,
 					allocatorAttempts: 3,
 					allocatorStatus: 503,
 					allocatorBodyClass: "http_error",
+					failovers: [
+						{
+							v: "smartproxy",
+							p: "resolution",
+							r: "allocation_failed",
+						},
+					],
 				},
 			});
+			expect(decoded.proxy).not.toHaveProperty("provider");
+			expect(decoded.proxy).not.toHaveProperty("protocol");
+			expect(decoded.proxy).not.toHaveProperty("userAgentSource");
 			const failedEvent = events.find((event) => event.event === "provider_request_failed");
 			expect(failedEvent).toBeDefined();
 			expect(failedEvent && "proxy" in failedEvent ? failedEvent.proxy : undefined).toEqual(
