@@ -6,6 +6,7 @@ on:
     branches: [main]
 
 permissions:
+  actions: read
   contents: write
   id-token: write
 
@@ -31,16 +32,27 @@ jobs:
           registry-url: https://registry.npmjs.org
           cache: "npm"
           cache-dependency-path: bun.lock
-      - name: Write release PR body
+      - name: Download candidate release evidence
         env:
-          RELEASE_PR_BODY: ${{ github.event.pull_request.body }}
-        run: printf '%s' "$RELEASE_PR_BODY" > /tmp/release-pr-body.md
-      - name: Guard release evidence
+          CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          runs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/release-guard.yml/runs?head_sha=${CANDIDATE_SHA}&event=pull_request&status=success&per_page=100")
+          run_id=$(jq -er --arg sha "${CANDIDATE_SHA}" \
+            '[.workflow_runs[] | select(.head_sha == $sha and .conclusion == "success")] | sort_by(.id) | last | .id' <<<"${runs}")
+          artifacts=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/artifacts")
+          artifact_id=$(jq -er --arg name "release-evidence-${CANDIDATE_SHA}" \
+            '[.artifacts[] | select(.name == $name and .expired == false)] | sort_by(.id) | last | .id' <<<"${artifacts}")
+          mkdir -p "${RUNNER_TEMP}/release-evidence"
+          gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "${RUNNER_TEMP}/release-evidence.zip"
+          unzip -q "${RUNNER_TEMP}/release-evidence.zip" -d "${RUNNER_TEMP}/release-evidence"
+      - name: Guard machine-verified release evidence
         env:
           RELEASE_BRANCH: ${{ github.event.pull_request.head.ref }}
           RELEASE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
-          RELEASE_PR_BODY_PATH: /tmp/release-pr-body.md
-        run: bun scripts/guard-release-pr.ts "$RELEASE_PR_BODY_PATH"
+          RELEASE_EVIDENCE_PATH: ${{ runner.temp }}/release-evidence/release-evidence.json
+        run: bun scripts/guard-release-pr.ts "$RELEASE_EVIDENCE_PATH"
       - run: bun install --frozen-lockfile
       - run: bun run build
       - run: bun test

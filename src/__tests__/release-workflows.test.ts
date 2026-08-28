@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	buildReleasePrBody,
@@ -30,7 +30,7 @@ describe("release workflows", () => {
 		expect(RELEASE_WORKFLOW).toContain("npm publish --tag beta --provenance");
 	});
 
-	it("creates an evidence-blocked beta release PR after release-relevant main changes", () => {
+	it("creates a machine-evidence-blocked beta release PR after release-relevant main changes", () => {
 		expect(RELEASE_AUTOMATION_WORKFLOW).toContain("branches: [main]");
 		expect(RELEASE_AUTOMATION_WORKFLOW).toContain(
 			"!contains(github.event.head_commit.message, 'release/beta-')",
@@ -39,6 +39,13 @@ describe("release workflows", () => {
 		expect(RELEASE_AUTOMATION_WORKFLOW).toContain("pull-requests: write");
 		expect(RELEASE_AUTOMATION_WORKFLOW).toContain("bun scripts/prepare-beta-release-pr.ts");
 		expect(RELEASE_GUARD_WORKFLOW).toContain("types: [opened, synchronize, reopened, edited]");
+		expect(RELEASE_GUARD_WORKFLOW).toContain("path: candidate");
+		expect(RELEASE_GUARD_WORKFLOW).toContain("path: release-control");
+		expect(RELEASE_GUARD_WORKFLOW).toContain(
+			"bun release-control/scripts/run-release-validation.ts",
+		);
+		expect(RELEASE_GUARD_WORKFLOW).toContain("actions/upload-artifact@v4");
+		expect(RELEASE_GUARD_WORKFLOW).toContain("bun release-control/scripts/guard-release-pr.ts");
 
 		const body = buildReleasePrBody({
 			branch: "release/beta-2.1.0-beta.11",
@@ -49,30 +56,30 @@ describe("release workflows", () => {
 
 		expect(body).toContain("Release-candidate validation");
 		expect(body).toContain(`Candidate SHA: ${GUARDED_SHA}`);
-		expect(body).toContain("- [ ] SDK unit/integration gates");
-		expect(body).not.toContain("- [x]");
+		expect(body).toContain("The PR body is informational and cannot satisfy the gate");
+		expect(body).toContain("`bun run pack:smoke`");
+		expect(body).not.toMatch(/- \[[ x]\]/i);
 	});
 
-	it("uses release branch names accepted by the guard", async () => {
+	it("uses release branch names accepted by the guard", () => {
 		const branch = releaseBranchForVersion(nextBetaVersion(["2.1.0-beta.9", "2.1.0-beta.10"]));
-		const body = requiredEvidenceBody(GUARDED_SHA);
-		const result = await runGuard(branch, GUARDED_SHA, body);
 
 		expect(branch).toBe("release/beta-2.1.0-beta.11");
-		expect(result.exitCode).toBe(0);
 	});
 
-	it("rejects release PR evidence placeholders before evidence is checked", async () => {
-		const body = buildReleasePrBody({
-			branch: "release/beta-2.1.0-beta.11",
-			version: "2.1.0-beta.11",
-			candidateSha: GUARDED_SHA,
-			sourceSha: GUARDED_SHA,
-		});
-		const result = await runGuard("release/beta-2.1.0-beta.11", GUARDED_SHA, body);
-
-		expect(result.exitCode).toBe(1);
-		expect(result.stderr).toContain("missing checked validation item");
+	it("makes publish consume the successful candidate artifact before existing checks", () => {
+		expect(RELEASE_WORKFLOW).toContain("actions: read");
+		expect(RELEASE_WORKFLOW).toContain("actions/workflows/release-guard.yml/runs");
+		expect(RELEASE_WORKFLOW).toContain("release-evidence-$" + "{CANDIDATE_SHA}");
+		expect(RELEASE_WORKFLOW).toContain("bun scripts/guard-release-pr.ts");
+		for (const command of [
+			"bun test",
+			"bun run check",
+			"bun run pack:check",
+			"bun run pack:smoke",
+		]) {
+			expect(RELEASE_WORKFLOW).toContain(command);
+		}
 	});
 
 	it("keeps dynamic GitHub expressions out of workflow run scripts", () => {
@@ -84,43 +91,6 @@ describe("release workflows", () => {
 
 function workflow(name: string): string {
 	return readFileSync(join(WORKFLOW_DIR, name), "utf8");
-}
-
-function requiredEvidenceBody(sha: string): string {
-	return `## Release-candidate validation
-
-Candidate SHA: ${sha}
-
-- [x] SDK unit/integration gates
-- [x] generated provider scaffold check/test/submit-check
-- [x] pack/package validation
-- [x] clean consumer install smoke
-- [x] dev-server HTTP smoke
-- [x] monorepo compatibility smoke
-`;
-}
-
-async function runGuard(
-	branch: string,
-	candidateSha: string,
-	body: string,
-): Promise<{ readonly exitCode: number; readonly stderr: string }> {
-	const tempDir = mkdtempSync(join(process.cwd(), ".tmp-release-workflow-"));
-	const bodyPath = join(tempDir, "body.md");
-	writeFileSync(bodyPath, body);
-	const proc = Bun.spawn(["bun", "scripts/guard-release-pr.ts", bodyPath], {
-		env: {
-			...process.env,
-			RELEASE_BRANCH: branch,
-			RELEASE_CANDIDATE_SHA: candidateSha,
-			RELEASE_PR_BODY_PATH: bodyPath,
-		},
-		stderr: "pipe",
-	});
-	const stderr = await new Response(proc.stderr).text();
-	const exitCode = await proc.exited;
-	rmSync(tempDir, { recursive: true, force: true });
-	return { exitCode, stderr };
 }
 
 function runBlocks(source: string): readonly string[] {
