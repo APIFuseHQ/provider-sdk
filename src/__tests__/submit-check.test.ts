@@ -15,6 +15,7 @@ import {
 	extractStringLiteralCandidates,
 	hasNonEmptyRecordedFixture,
 	isAutoPromotionEligible,
+	maskCommentsAndStrings,
 	renderMarkdown,
 	type SubmitCheckReport,
 } from "../../bin/apifuse-submit-check.js";
@@ -1493,6 +1494,138 @@ const upstreamOutput = z.object({ MKioskTy: z.string() });
 		const check = report.checks.find((item) => item.id === "vendor-key-leak");
 
 		expect(check?.status).toBe("pass");
+	});
+
+	it("detects vendor keys after a URL regex literal", async () => {
+		const source = validProviderSource()
+			.replace(
+				"const output =",
+				`${String.raw`const urlPattern = /https?:\/\//;`}\n\nconst output =`,
+			)
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`MKioskTy: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-url-regex-vendor-key-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
+			"fail",
+		);
+	});
+
+	it("detects vendor keys after a quote-matching regex literal", async () => {
+		const source = validProviderSource()
+			.replace("const output =", `const quotePattern = /["']/;\n\nconst output =`)
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`MKioskTy: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-quote-regex-vendor-key-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
+			"fail",
+		);
+	});
+
+	it("ignores vendor-key documentation text after a quote-matching regex", async () => {
+		const source = `${validProviderSource()}
+const quotePattern = /["']/;
+const example = " output: z.object({ MKioskTy: z.string() })";
+`;
+		const dir = makeProviderDir("submit-quote-regex-documentation-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
+			"pass",
+		);
+	});
+
+	it("preserves template interpolation code while masking its literal text", () => {
+		const source =
+			'const rendered = `ignore "} ${({ "}": codeIdentifier })} output: z.object({ MKioskTy: z.string() })`;';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).toContain('${({ "}": codeIdentifier })}');
+		expect(masked).not.toContain("ignore");
+		expect(masked).not.toContain("MKioskTy");
+	});
+
+	it("masks a regex containing a block-comment marker without hiding later code", () => {
+		const source = "const pattern = /[/*]/; const codeIdentifier = 1;";
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).not.toContain("/*");
+		expect(masked).toContain("const codeIdentifier = 1;");
+	});
+
+	it("masks a string containing a block-comment terminator without shifting later code", () => {
+		const source = 'const example = "*/ hidden"; const codeIdentifier = 1;';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).not.toContain("*/ hidden");
+		expect(masked).toContain("const codeIdentifier = 1;");
+	});
+
+	it("masks escaped quotes inside strings and regex literals", () => {
+		const source = String.raw`const text = "a\"b"; const pattern = /a\"b/; const codeIdentifier = 1;`;
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).not.toContain(String.raw`a\"b`);
+		expect(masked).toContain("const codeIdentifier = 1;");
+	});
+
+	it("preserves mask offsets for code following literals", () => {
+		const source =
+			'const text = "hidden"; const pattern = /["\']/; const codeIdentifier = 1;';
+		const masked = maskCommentsAndStrings(source);
+		const identifierOffset = source.indexOf("codeIdentifier");
+
+		expect(masked.length).toBe(source.length);
+		expect(masked.indexOf("codeIdentifier")).toBe(identifierOffset);
+		expect(masked.slice(identifierOffset, identifierOffset + "codeIdentifier".length)).toBe(
+			"codeIdentifier",
+		);
+	});
+
+	it("preserves quoted property keys while masking quoted values", () => {
+		const source = 'const value = { "response" : "hidden" };';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).toContain('"response" :');
+		expect(masked).not.toContain("hidden");
+	});
+
+	it("fails closed when a provider source file has a syntax error", async () => {
+		const dir = makeProviderDir("submit-mask-syntax-error-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "broken.ts"), 'const broken = "unterminated;\n');
+
+		await expect(buildSubmitCheckReport(dir)).rejects.toThrow(
+			"Cannot safely scan TypeScript source",
+		);
 	});
 
 	it("blocks compact vendor timestamps in normalized response fixtures", async () => {

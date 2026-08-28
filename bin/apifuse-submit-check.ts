@@ -8,6 +8,7 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import * as acorn from "acorn";
+import ts from "typescript";
 import { z } from "zod";
 
 import packageJson from "../package.json";
@@ -2784,53 +2785,107 @@ function findStringEnd(source: string, start: number): number {
 	return -1;
 }
 
-function maskCommentsAndStrings(source: string): string {
+// Masking now parses with TypeScript, which is orders of magnitude more
+// expensive than the character walk it replaced, and six scanners call this
+// helper once per candidate match — the same file is masked thousands of
+// times in one run (measured: 1,872 calls for a 3.4k-line provider). Without
+// memoization that run regresses from ~8s to minutes and can exceed the CI
+// validation timeout. Successful results are cached by exact source text;
+// the cache stays small because a run only ever reads a handful of files.
+// Parse failures are NOT cached: they throw and abort the check (fail-closed).
+const MASK_CACHE_LIMIT = 64;
+const maskCache = new Map<string, string>();
+
+export function maskCommentsAndStrings(source: string): string {
+	const cached = maskCache.get(source);
+	if (cached !== undefined) {
+		return cached;
+	}
+	const masked = computeMaskedSource(source);
+	if (maskCache.size >= MASK_CACHE_LIMIT) {
+		const oldest = maskCache.keys().next();
+		if (!oldest.done) {
+			maskCache.delete(oldest.value);
+		}
+	}
+	maskCache.set(source, masked);
+	return masked;
+}
+
+function computeMaskedSource(source: string): string {
+	const sourceFile = ts.createSourceFile(
+		"provider.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const parseDiagnostic = (
+		sourceFile as ts.SourceFile & {
+			readonly parseDiagnostics: readonly ts.DiagnosticWithLocation[];
+		}
+	).parseDiagnostics[0];
+	if (parseDiagnostic) {
+		const position = parseDiagnostic.start ?? 0;
+		const { line, character } = sourceFile.getLineAndCharacterOfPosition(position);
+		throw new Error(
+			`Cannot safely scan TypeScript source at ${line + 1}:${character + 1}: ${ts.flattenDiagnosticMessageText(parseDiagnostic.messageText, "\n")}`,
+		);
+	}
+
 	const chars = source.split("");
-	for (let index = 0; index < source.length; index += 1) {
-		if (source.startsWith("//", index)) {
-			const bodyStart = index + 2;
-			const newline = source.indexOf("\n", bodyStart);
-			const end = newline === -1 ? source.length : newline;
-			for (let bodyIndex = bodyStart; bodyIndex < end; bodyIndex += 1) {
-				chars[bodyIndex] = " ";
+	const maskRange = (start: number, end: number): void => {
+		for (let index = start; index < end; index += 1) {
+			if (chars[index] !== "\n") chars[index] = " ";
+		}
+	};
+	const commentRanges = new Map<string, ts.CommentRange>();
+	const addCommentRanges = (ranges: readonly ts.CommentRange[] | undefined): void => {
+		for (const range of ranges ?? []) {
+			commentRanges.set(`${range.pos}:${range.end}`, range);
+		}
+	};
+
+	const visit = (node: ts.Node): void => {
+		addCommentRanges(ts.getLeadingCommentRanges(source, node.getFullStart()));
+		addCommentRanges(ts.getTrailingCommentRanges(source, node.getEnd()));
+
+		const start = node.getStart(sourceFile);
+		if (ts.isStringLiteral(node)) {
+			const siblings = node.parent.getChildren(sourceFile);
+			const nextToken = siblings[siblings.indexOf(node) + 1];
+			// Preserve quoted property keys ("response": ...) so range/key scanners
+			// can still match them; only string VALUES are blanked.
+			if (nextToken?.kind !== ts.SyntaxKind.ColonToken) {
+				maskRange(start + 1, node.end - 1);
 			}
-			index = end;
-			continue;
-		}
-		if (source.startsWith("/*", index)) {
-			const bodyStart = index + 2;
-			const close = source.indexOf("*/", bodyStart);
-			const end = close === -1 ? source.length : close;
-			for (let bodyIndex = bodyStart; bodyIndex < end; bodyIndex += 1) {
-				if (chars[bodyIndex] !== "\n") {
-					chars[bodyIndex] = " ";
-				}
+		} else if (ts.isRegularExpressionLiteral(node)) {
+			let closeDelimiter = node.end - 1;
+			while (closeDelimiter > start && /[A-Za-z]/.test(source[closeDelimiter] ?? "")) {
+				closeDelimiter -= 1;
 			}
-			index = close === -1 ? source.length : close + 1;
-			continue;
+			maskRange(start + 1, closeDelimiter);
+		} else if (ts.isNoSubstitutionTemplateLiteral(node)) {
+			maskRange(start + 1, node.end - 1);
+		} else if (node.kind === ts.SyntaxKind.TemplateHead) {
+			maskRange(start + 1, node.end - 2);
+		} else if (node.kind === ts.SyntaxKind.TemplateMiddle) {
+			maskRange(start + 1, node.end - 2);
+		} else if (node.kind === ts.SyntaxKind.TemplateTail) {
+			maskRange(start + 1, node.end - 1);
 		}
-		const quote = source[index];
-		if (quote !== '"' && quote !== "'" && quote !== "`") {
-			continue;
-		}
-		const end = findStringEnd(source, index);
-		if (end === -1) {
-			break;
-		}
-		// Preserve quoted property keys ("response": ...) so range/key scanners
-		// can still match them; only string VALUES are blanked.
-		let probe = end + 1;
-		while (probe < source.length && /\s/.test(source[probe] ?? "")) {
-			probe += 1;
-		}
-		if (source[probe] !== ":") {
-			for (let bodyIndex = index + 1; bodyIndex < end; bodyIndex += 1) {
-				if (chars[bodyIndex] !== "\n") {
-					chars[bodyIndex] = " ";
-				}
-			}
-		}
-		index = end;
+
+		for (const child of node.getChildren(sourceFile)) visit(child);
+	};
+
+	visit(sourceFile);
+	for (const comment of commentRanges.values()) {
+		const markerLength = 2;
+		const bodyEnd =
+			comment.kind === ts.SyntaxKind.MultiLineCommentTrivia
+				? comment.end - markerLength
+				: comment.end;
+		maskRange(comment.pos + markerLength, bodyEnd);
 	}
 	return chars.join("");
 }
