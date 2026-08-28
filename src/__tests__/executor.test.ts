@@ -288,22 +288,32 @@ describe("executeOperation", () => {
 			retryOnAuthRefresh: true,
 			handler: async () => {
 				throw new SessionExpiredError("Session expired", {
+					code: "UPSTREAM_ERROR",
+					category: "upstream_http",
+					fix: "do not expose this",
 					observability: providerObservability,
 					details,
 				});
 			},
 		});
 
-		await expect(
-			executeOperation(provider, "search", ctx, { query: "test" }),
-		).rejects.toMatchObject({
+		let caught: unknown;
+		try {
+			await executeOperation(provider, "search", ctx, { query: "test" });
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toMatchObject({
 			name: "SessionExpiredError",
 			options: {
 				retryable: true,
 				observability: providerObservability,
-				details,
+				code: "reauth_required",
+				category: "credential_expired",
 			},
 		});
+		expect((caught as SessionExpiredError).options?.fix).toBeUndefined();
+		expect((caught as SessionExpiredError).options?.details).toBeUndefined();
 	});
 
 	it("upgrades a duplicate-module SessionExpiredError to retryable for opt-in operations", async () => {

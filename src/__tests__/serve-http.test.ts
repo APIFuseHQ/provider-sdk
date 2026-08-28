@@ -563,7 +563,12 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				output: z.object({ ok: z.boolean() }),
 				retryOnAuthRefresh: true,
 				handler: async () => {
-					throw new SessionExpiredError("Provider session expired");
+					throw new SessionExpiredError("Provider session expired", {
+						code: "UPSTREAM_ERROR",
+						category: "upstream_http",
+						fix: "must not reach the tenant body",
+						details: { mustNotReachTenant: true },
+					});
 				},
 			},
 			sessionExpiredUnmarked: {

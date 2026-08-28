@@ -3,6 +3,7 @@ import {
 	isSessionExpiredError,
 	isValidationError,
 	ProviderError,
+	type ProviderErrorObservability,
 	type ProviderErrorOptions,
 	SessionExpiredError,
 	ValidationError,
@@ -30,16 +31,41 @@ function preservedSessionExpiredOptions(error: unknown): ProviderErrorOptions {
 		return { retryable: true };
 	}
 	const options = optionsDescriptor.value as object;
-	const ownValue = (key: keyof ProviderErrorOptions): unknown => {
+	const ownValue = (key: string): unknown => {
 		const descriptor = Object.getOwnPropertyDescriptor(options, key);
 		return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
 	};
-	const preserved: ProviderErrorOptions = {};
-	for (const key of ["code", "category", "fix", "details", "observability"] as const) {
-		const value = ownValue(key);
-		if (value !== undefined) preserved[key] = value as never;
+	const observabilityCandidate = ownValue("observability");
+	if (
+		observabilityCandidate === null ||
+		typeof observabilityCandidate !== "object" ||
+		Array.isArray(observabilityCandidate)
+	) {
+		return { retryable: true };
 	}
-	return { ...preserved, retryable: true };
+	const observabilityObject = observabilityCandidate as object;
+	const observabilityValue = (key: keyof ProviderErrorObservability): unknown => {
+		const descriptor = Object.getOwnPropertyDescriptor(observabilityObject, key);
+		return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
+	};
+	const reason = observabilityValue("reason");
+	const fingerprint = observabilityValue("fingerprint");
+	const messageLength = observabilityValue("messageLength");
+	const observability: ProviderErrorObservability = {
+		...(typeof reason === "string" && /^[A-Za-z0-9_.-]{1,64}$/.test(reason) ? { reason } : {}),
+		...(typeof fingerprint === "string" && /^[A-Fa-f0-9]{12}$/.test(fingerprint)
+			? { fingerprint }
+			: {}),
+		...(typeof messageLength === "number" &&
+		Number.isInteger(messageLength) &&
+		messageLength >= 0 &&
+		messageLength <= 10_000_000
+			? { messageLength }
+			: {}),
+	};
+	return Object.keys(observability).length > 0
+		? { observability, retryable: true }
+		: { retryable: true };
 }
 
 /**

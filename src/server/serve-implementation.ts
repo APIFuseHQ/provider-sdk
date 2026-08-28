@@ -1469,11 +1469,9 @@ function sdkOwnsErrorResolution(error: unknown): boolean {
 	if (isTransportError(error)) return true;
 	if (error instanceof z.ZodError) return true;
 	if (error instanceof StatefulRoutingDeadlineError) return true;
-	return (
-		isProviderError(error) &&
-		typeof providerErrorCode(error) === "string" &&
-		SDK_RUNTIME_OWNED_ERROR_CODES.has(providerErrorCode(error) as string)
-	);
+	if (!isProviderError(error)) return false;
+	const code = providerErrorCode(error);
+	return typeof code === "string" && SDK_RUNTIME_OWNED_ERROR_CODES.has(code);
 }
 
 type OperationErrorCodeLookup = ReadonlyMap<string, ReadonlyMap<string, OperationErrorCode>>;
@@ -1542,9 +1540,10 @@ function providerErrorCauseChain(error: unknown): ProviderErrorCauseFrame[] | un
 		seen.add(cause);
 		const message = cause.message;
 		const providerObservability = safeProviderErrorObservability(cause);
+		const causeCode = providerErrorCode(cause);
 		frames.push({
 			errorClass: cause.name,
-			...(isProviderError(cause) && typeof cause.code === "string" ? { code: cause.code } : {}),
+			...(causeCode !== undefined ? { code: causeCode } : {}),
 			message: providerErrorCauseMessage(message),
 			messageLength: message.length,
 			messageFingerprint: createHash("sha256").update(message).digest("hex").slice(0, 12),
@@ -1569,8 +1568,9 @@ function logProviderError(
 	proxyTelemetry: ProxyTelemetryCollector | undefined,
 	observabilityDetails: ErrorObservabilityDetails,
 ): void {
+	const providerCode = isProviderError(error) ? providerErrorCode(error) : undefined;
 	const code = isProviderError(error)
-		? (providerErrorCode(error) ?? "provider_error")
+		? (providerCode ?? "provider_error")
 		: error instanceof z.ZodError
 			? "invalid_request"
 			: error instanceof StatefulRoutingDeadlineError
@@ -1584,8 +1584,8 @@ function logProviderError(
 		status === 500 &&
 		isProviderError(error) &&
 		!isValidationError(error) &&
-		typeof providerErrorCode(error) === "string" &&
-		!SDK_OWNED_PROVIDER_ERROR_CODES.has(providerErrorCode(error) as string) &&
+		typeof providerCode === "string" &&
+		!SDK_OWNED_PROVIDER_ERROR_CODES.has(providerCode) &&
 		declaredErrorCode === undefined;
 	const proxy = proxyTelemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
