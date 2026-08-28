@@ -548,6 +548,7 @@ function countAsAssertions(providerRoot: string): {
 		const lines = maskCommentsAndStrings(
 			content,
 			toRelativeProviderPath(providerRoot, filePath),
+			{ blankPropertyKeys: true },
 		).split(/\r?\n/);
 		for (let index = 0; index < lines.length; index += 1) {
 			const line = lines[index];
@@ -1211,8 +1212,9 @@ function spreadIdentifierResolvesToFactory(
 		}
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
 		const fileSource = filePath === indexPath ? indexSource : readFileSync(filePath, "utf8");
+		const maskedFileSource = maskCommentsAndStrings(fileSource, relPath);
 		const re = new RegExp(declRe.source, "g");
-		for (let m = re.exec(fileSource); m !== null; m = re.exec(fileSource)) {
+		for (let m = re.exec(maskedFileSource); m !== null; m = re.exec(maskedFileSource)) {
 			sawDeclaration = true;
 			const expr = unwrapParens(
 				balancedExpressionSlice(fileSource, m.index + m[0].length, relPath),
@@ -1227,7 +1229,7 @@ function spreadIdentifierResolvesToFactory(
 	}
 	// No local declaration anywhere but imported into index.ts => constructed
 	// out of view; treat as factory (conservative, false-negative-safe).
-	if (!sawDeclaration && fileImportsBinding(indexSource, name)) {
+	if (!sawDeclaration && fileImportsBinding(maskCommentsAndStrings(indexSource, "index.ts"), name)) {
 		return true;
 	}
 	return false;
@@ -1247,10 +1249,11 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 
 	const source = readFileSync(indexPath, "utf8");
 	const indexRelPath = toRelativeProviderPath(providerRoot, indexPath);
+	const maskedSource = maskCommentsAndStrings(source, indexRelPath);
 	// Use the same whitespace-tolerant detection as the resolver below, so a
 	// `defineProvider (` / `defineProvider\n(` formatting cannot pass the early
 	// exit before the real classification runs.
-	if (!/\bdefineProvider\s*\(/.test(source)) {
+	if (!/\bdefineProvider\s*\(/.test(maskedSource)) {
 		return pass(
 			ruleId,
 			SDK_NATIVE_CATEGORY,
@@ -1269,11 +1272,11 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	//   3. `export default <ident>` then `const <ident> = defineProvider(`
 	//   4. fallback: first `defineProvider(` in the file
 	let defineParenIndex = -1;
-	const builderDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*\(/.exec(source);
+	const builderDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*\(/.exec(maskedSource);
 	if (builderDefault?.[1] !== undefined && builderDefault[1] !== "defineProvider") {
 		defineParenIndex = builderDefault.index + builderDefault[0].length - 1;
 	}
-	const inlineDefault = /\bexport\s+default\s+defineProvider\s*\(/.exec(source);
+	const inlineDefault = /\bexport\s+default\s+defineProvider\s*\(/.exec(maskedSource);
 	if (defineParenIndex === -1 && inlineDefault) {
 		const declarationParen = inlineDefault.index + inlineDefault[0].length - 1;
 		const declarationStart = declarationParen + 1;
@@ -1284,18 +1287,18 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		while (/\s/.test(source[cursor] ?? "")) cursor++;
 		defineParenIndex = source[cursor] === "(" ? cursor : declarationParen;
 	} else if (defineParenIndex === -1) {
-		const namedDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/.exec(source);
+		const namedDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/.exec(maskedSource);
 		const exportedName = namedDefault?.[1];
 		if (exportedName !== undefined) {
 			const namedDecl = new RegExp(
 				`(?:^|\\n)[ \t]*(?:export\\s+)?(?:const|let|var)\\s+${exportedName}\\s*(?::[^=\\n]+)?\\s*=\\s*defineProvider\\s*\\(`,
-			).exec(source);
+			).exec(maskedSource);
 			if (namedDecl) {
 				defineParenIndex = namedDecl.index + namedDecl[0].length - 1;
 			}
 		}
 		if (defineParenIndex === -1) {
-			const firstCall = /\bdefineProvider\s*\(/.exec(source);
+			const firstCall = /\bdefineProvider\s*\(/.exec(maskedSource);
 			if (firstCall) {
 				defineParenIndex = firstCall.index + firstCall[0].length - 1;
 			}
@@ -1311,12 +1314,13 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	}
 	const argStart = defineParenIndex + 1;
 	const argText = balancedValueExpression(source, argStart, indexRelPath);
+	const maskedArgText = maskedSource.slice(argStart, argStart + argText.length);
 
 	// Resolve the value passed as `operations:` inside the implementation call,
 	// following one alias hop. The value is classified as a static object
 	// literal (pass) or a factory/call expression (block). The regex index is
 	// offset back into the full source so line numbers stay accurate.
-	const opsProp = /\boperations\s*:\s*/.exec(argText);
+	const opsProp = /\boperations\s*:\s*/.exec(maskedArgText);
 	let opsValue: ExpressionSlice | undefined;
 	let opsLine = 1;
 	if (opsProp) {
@@ -1329,7 +1333,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	// local `operations` const initializer.
 	let aliasName: string | undefined;
 	if (opsValue === undefined) {
-		if (/\boperations\s*[,}]/.test(argText)) {
+		if (/\boperations\s*[,}]/.test(maskedArgText)) {
 			aliasName = "operations";
 		}
 	} else if (/^[A-Za-z_$][\w$]*$/.test(opsValue.masked)) {
@@ -1380,9 +1384,14 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			}
 			const relPath = toRelativeProviderPath(providerRoot, filePath);
 			const fileSource = filePath === indexPath ? source : readFileSync(filePath, "utf8");
+			const maskedFileSource = maskCommentsAndStrings(fileSource, relPath);
 
 			const declRe = new RegExp(aliasDecl.source, "g");
-			for (let m = declRe.exec(fileSource); m !== null; m = declRe.exec(fileSource)) {
+			for (
+				let m = declRe.exec(maskedFileSource);
+				m !== null;
+				m = declRe.exec(maskedFileSource)
+			) {
 				const valueStart = m.index + m[0].length;
 				const expr = unwrapParens(balancedExpressionSlice(fileSource, valueStart, relPath));
 				const isFactory =
@@ -1396,7 +1405,11 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 				});
 			}
 			const destructRe = new RegExp(destructured.source, "g");
-			for (let m = destructRe.exec(fileSource); m !== null; m = destructRe.exec(fileSource)) {
+			for (
+				let m = destructRe.exec(maskedFileSource);
+				m !== null;
+				m = destructRe.exec(maskedFileSource)
+			) {
 				const raw = `${m[1]}(`;
 				candidates.push({
 					expr: { raw, masked: raw },
@@ -1425,9 +1438,9 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		// the unresolved import as a factory-composed (non-static) shape rather
 		// than silently passing.
 		if (!resolved) {
-			const importMatch = new RegExp(`\\bimport\\b[^;]*\\b${aliasName}\\b[^;]*\\bfrom\\b`).exec(
-				source,
-			);
+			const importMatch = new RegExp(
+				`\\bimport\\b[^;]*\\b${aliasName}\\b[^;]*\\bfrom\\b`,
+			).exec(maskedSource);
 			if (importMatch) {
 				const raw = `${aliasName}(`;
 				effective = { raw, masked: raw };
@@ -1693,9 +1706,11 @@ function findSourceFindings(
 	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
 		const content = readFileSync(filePath, "utf8");
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
-		const lines = (useMaskedSource ? maskCommentsAndStrings(content, relPath) : content).split(
-			/\r?\n/,
-		);
+		const lines = (
+			useMaskedSource
+				? maskCommentsAndStrings(content, relPath, { blankPropertyKeys: true })
+				: content
+		).split(/\r?\n/);
 		for (let index = 0; index < lines.length; index += 1) {
 			const line = lines[index];
 			if (line !== undefined && matchesLine(line, lines.slice(index + 1))) {
@@ -2868,29 +2883,44 @@ function findStringEnd(source: string, start: number): number {
 // helper once per candidate match — the same file is masked thousands of
 // times in one run (measured: 1,872 calls for a 3.4k-line provider). Without
 // memoization that run regresses from ~8s to minutes and can exceed the CI
-// validation timeout. Successful results are cached by exact source text;
-// the cache stays small because a run only ever reads a handful of files.
+// validation timeout. Successful results are cached by exact source text and
+// property-key mode; the cache stays small because a run only ever reads a
+// handful of files.
 // Parse failures are NOT cached: they throw and abort the check (fail-closed).
 const MASK_CACHE_LIMIT = 64;
 const maskCache = new Map<string, string>();
 
-export function maskCommentsAndStrings(source: string, fileName = "provider.ts"): string {
-	const cached = maskCache.get(source);
+type MaskCommentsAndStringsOptions = {
+	blankPropertyKeys?: boolean;
+};
+
+export function maskCommentsAndStrings(
+	source: string,
+	fileName = "provider.ts",
+	options: MaskCommentsAndStringsOptions = {},
+): string {
+	const blankPropertyKeys = options.blankPropertyKeys === true;
+	const cacheKey = `${blankPropertyKeys ? "blank-keys" : "preserve-keys"}\0${source}`;
+	const cached = maskCache.get(cacheKey);
 	if (cached !== undefined) {
 		return cached;
 	}
-	const masked = computeMaskedSource(source, fileName);
+	const masked = computeMaskedSource(source, fileName, blankPropertyKeys);
 	if (maskCache.size >= MASK_CACHE_LIMIT) {
 		const oldest = maskCache.keys().next();
 		if (!oldest.done) {
 			maskCache.delete(oldest.value);
 		}
 	}
-	maskCache.set(source, masked);
+	maskCache.set(cacheKey, masked);
 	return masked;
 }
 
-function computeMaskedSource(source: string, fileName: string): string {
+function computeMaskedSource(
+	source: string,
+	fileName: string,
+	blankPropertyKeys: boolean,
+): string {
 	const transpiled = ts.transpileModule(source, {
 		// Declaration files trigger an internal TypeScript Debug Failure when
 		// passed to transpileModule. Parsing is all we need here, so always use a
@@ -2945,11 +2975,12 @@ function computeMaskedSource(source: string, fileName: string): string {
 
 		const start = node.getStart(sourceFile);
 		if (ts.isStringLiteral(node)) {
-			// Preserve quoted property keys ("response": ...) so range/key scanners
-			// can still match them; only string VALUES are blanked.
+			// Preserve quoted property keys ("response": ...) by default so range/key
+			// scanners can still match them. Line scanners opt into blanking key bodies
+			// as well, preventing key text from looking like executable source.
 			const isQuotedPropertyKey =
 				ts.isPropertyAssignment(node.parent) && node.parent.name === node;
-			if (!isQuotedPropertyKey) {
+			if (blankPropertyKeys || !isQuotedPropertyKey) {
 				maskRange(start + 1, node.end - 1);
 			}
 		} else if (ts.isRegularExpressionLiteral(node)) {

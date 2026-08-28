@@ -565,6 +565,19 @@ void useStealth;
 		expect(check?.evidence).toBeUndefined();
 	});
 
+	it("ignores raw fetch syntax in a quoted property key", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-property-key-",
+			`${validProviderSource()}\nconst examples = { "fetch(": "use ctx.http instead" };\nvoid examples;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-raw-fetch");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
 	it("warns standalone bounty submissions for self-hosted browser runtime patterns", async () => {
 		const dir = makeProviderDir(
 			"submit-managed-browser-warning-",
@@ -708,6 +721,23 @@ ${assertionLines(5)}
 		expect(check?.message).toBe("Type assertions are within the recommended limit.");
 	});
 
+	it("does not count type assertion syntax in a quoted property key", async () => {
+		const dir = makeProviderDir(
+			"submit-as-assertion-property-key-",
+			sourceWithHandler(`handler: async (_ctx, input) => {
+${assertionLines(5)}
+        const examples = { "value as unknown": true };
+        return { ok: Boolean(value0 && value1 && value2 && value3 && value4 && examples) };
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "as-assertion-count");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("Type assertions are within the recommended limit.");
+	});
+
 	it("warns for moderate type assertion counts without changing score", async () => {
 		const dir = makeProviderDir(
 			"submit-as-assertion-warn-",
@@ -818,6 +848,30 @@ const credentialDocumentation = "ctx.credential.get";
 void credentialDocumentation;
 `;
 		const dir = makeProviderDir("submit-credential-string-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "credential-usage");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+	});
+
+	it("warns when the only credential reference is a quoted property key", async () => {
+		const source = `${sourceWithAuth(`auth: {
+    mode: "credentials",
+    flow: {
+      continue: async () => ({
+        kind: "complete",
+        turnId: crypto.randomUUID(),
+        data: { credential: { userId: "user_123" } },
+      }),
+    },
+  },
+  credential: { keys: ["userId"] },`)}
+const examples = { "ctx.credential": "persist through the SDK" };
+void examples;
+`;
+		const dir = makeProviderDir("submit-credential-property-key-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "credential-usage");
@@ -1803,6 +1857,22 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 
 		expect(masked).toContain('"response" :');
 		expect(masked).not.toContain("hidden");
+	});
+
+	it("keeps property-key mask modes isolated in the memo cache", () => {
+		const source = 'const value = { "fetch(": "hidden" };';
+		const keyPreserving = maskCommentsAndStrings(source);
+		const keyBlanked = maskCommentsAndStrings(source, "provider.ts", {
+			blankPropertyKeys: true,
+		});
+
+		expect(keyPreserving).toContain('"fetch(":');
+		expect(keyBlanked).not.toContain("fetch(");
+		expect(maskCommentsAndStrings(source)).toBe(keyPreserving);
+		expect(
+			maskCommentsAndStrings(source, "provider.ts", { blankPropertyKeys: true }),
+		).toBe(keyBlanked);
+		expect(keyBlanked).not.toBe(keyPreserving);
 	});
 
 	it("masks a string used as a case value", () => {
@@ -3463,6 +3533,48 @@ import { defineProvider } from "@apifuse/provider-sdk";
 export default defineProvider({ id: "factory", version: "1.0.0", runtime: "standard", operations: makeOperations(handlers) });
 `;
 		const dir = makeProviderDir("submit-inline-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations shadowed by an operations comment", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "factory",
+  version: "1.0.0",
+  runtime: "standard",
+  // operations: makeOperations()
+  operations: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-comment-shadowed-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations after an operations string literal", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "factory",
+  version: "1.0.0",
+  runtime: "standard",
+  description: "operations: x",
+  operations: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-string-shadowed-factory-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "flat-operation-composition");
