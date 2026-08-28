@@ -1851,6 +1851,25 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		expect(maskCommentsAndStrings(masked)).toBe(masked);
 	});
 
+	it("keeps line continuations in preserved quoted keys parseable and mask-idempotent", async () => {
+		const source = 'const value = { "long\\\nkey": 1 };';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked.length).toBe(source.length);
+
+		const providerSource = validProviderSource().replace(
+			"\nexport default defineProvider",
+			`\n${source}\nvoid value;\n\nexport default defineProvider`,
+		);
+		const dir = makeProviderDir("submit-mask-key-line-continuation-", providerSource);
+		writeValidLocaleCatalogs(dir);
+
+		const report = await buildSubmitCheckReport(dir);
+		expect(report.schemaVersion).toBe(1);
+		expect(report.checks.find((item) => item.id === "flat-operation-composition")).toBeDefined();
+		expect(maskCommentsAndStrings(masked)).toBe(masked);
+	});
+
 	it("preserves quoted property keys while masking quoted values", () => {
 		const source = 'const value = { "response" : "hidden" };';
 		const masked = maskCommentsAndStrings(source);
@@ -3559,6 +3578,47 @@ import { defineProvider } from "@apifuse/provider-sdk";
 export default defineProvider({ id: "factory", version: "1.0.0", runtime: "standard", operations: makeOperations(handlers) });
 `;
 		const dir = makeProviderDir("submit-inline-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory-composed operations under a quoted property name", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "factory", version: "1.0.0", runtime: "standard", "operations": makeOperations() });
+`;
+		const dir = makeProviderDir("submit-quoted-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("passes static-literal operations under a quoted property name", async () => {
+		const source = validProviderSource().replace("  operations: {", '  "operations": {');
+		const dir = makeProviderDir("submit-quoted-static-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks an unresolved computed operations property name", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+const opsKey = "operations";
+export default defineProvider({ id: "computed", version: "1.0.0", runtime: "standard", [opsKey]: makeOperations() });
+`;
+		const dir = makeProviderDir("submit-computed-factory-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "flat-operation-composition");

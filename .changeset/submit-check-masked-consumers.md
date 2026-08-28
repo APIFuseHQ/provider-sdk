@@ -27,3 +27,7 @@ The default key-preserving mask now neutralizes structural and delimiter
 characters inside quoted property keys so key text cannot alter depth or
 delimiter scanning. Key text remains matchable for range scanners, while the
 fully blanked `blankPropertyKeys` variant is available to line scanners.
+
+The flat-operation `operations` property is now located via the TypeScript
+AST, so quoted keys, decoy key text, comments, and strings can no longer shadow
+or hide it.

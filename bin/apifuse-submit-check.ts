@@ -1243,6 +1243,117 @@ function spreadIdentifierResolvesToFactory(
 	return false;
 }
 
+function isDefineProviderCall(node: ts.CallExpression): boolean {
+	return ts.isIdentifier(node.expression) && node.expression.text === "defineProvider";
+}
+
+function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpression | undefined {
+	const defaultExports = sourceFile.statements.filter(
+		(statement): statement is ts.ExportAssignment =>
+			ts.isExportAssignment(statement) && !statement.isExportEquals,
+	);
+
+	// Phase-separated providers export a builder invocation directly. Preserve
+	// the previous locator's preference for that call over every defineProvider
+	// declaration that may also appear in the file.
+	for (const assignment of defaultExports) {
+		const expression = assignment.expression;
+		if (
+			ts.isCallExpression(expression) &&
+			ts.isIdentifier(expression.expression) &&
+			expression.expression.text !== "defineProvider"
+		) {
+			return expression;
+		}
+	}
+
+	// For `defineProvider(metadata)(implementation)`, select the immediate call
+	// after defineProvider, matching the former balanced-text selection. A plain
+	// `export default defineProvider(implementation)` selects the declaration
+	// call itself.
+	for (const assignment of defaultExports) {
+		const defaultExpression = assignment.expression;
+		if (!ts.isCallExpression(defaultExpression)) {
+			continue;
+		}
+		let expression: ts.CallExpression = defaultExpression;
+		while (ts.isCallExpression(expression.expression)) {
+			if (isDefineProviderCall(expression.expression)) {
+				return expression;
+			}
+			expression = expression.expression;
+		}
+		if (isDefineProviderCall(expression)) {
+			return expression;
+		}
+	}
+
+	// Resolve `export default provider` to a top-level variable initialized by
+	// defineProvider. The old locator selected the defineProvider declaration
+	// call itself, even if another call was chained after it.
+	for (const assignment of defaultExports) {
+		if (!ts.isIdentifier(assignment.expression)) {
+			continue;
+		}
+		const exportedName = assignment.expression.text;
+		for (const statement of sourceFile.statements) {
+			if (!ts.isVariableStatement(statement)) {
+				continue;
+			}
+			for (const declaration of statement.declarationList.declarations) {
+				if (
+					!ts.isIdentifier(declaration.name) ||
+					declaration.name.text !== exportedName ||
+					declaration.initializer === undefined
+				) {
+					continue;
+				}
+				if (!ts.isCallExpression(declaration.initializer)) {
+					continue;
+				}
+				let initializer: ts.CallExpression = declaration.initializer;
+				while (ts.isCallExpression(initializer.expression)) {
+					initializer = initializer.expression;
+				}
+				if (isDefineProviderCall(initializer)) {
+					return initializer;
+				}
+			}
+		}
+	}
+
+	// Structural fixtures without a recognizable default export retain the
+	// previous fallback to the first defineProvider call in source order.
+	let firstCall: ts.CallExpression | undefined;
+	const visit = (node: ts.Node): void => {
+		if (firstCall !== undefined) {
+			return;
+		}
+		if (ts.isCallExpression(node) && isDefineProviderCall(node)) {
+			firstCall = node;
+			return;
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return firstCall;
+}
+
+function isOperationsProperty(
+	property: ts.ObjectLiteralElementLike,
+): property is ts.PropertyAssignment | ts.ShorthandPropertyAssignment {
+	if (ts.isShorthandPropertyAssignment(property)) {
+		return property.name.text === "operations";
+	}
+	if (!ts.isPropertyAssignment(property)) {
+		return false;
+	}
+	return (
+		(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) &&
+		property.name.text === "operations"
+	);
+}
+
 function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	const indexPath = resolve(providerRoot, "index.ts");
 	const ruleId = "flat-operation-composition";
@@ -1257,13 +1368,18 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 
 	const source = readFileSync(indexPath, "utf8");
 	const indexRelPath = toRelativeProviderPath(providerRoot, indexPath);
-	const maskedSource = maskCommentsAndStrings(source, indexRelPath, {
-		blankPropertyKeys: true,
-	});
-	// Use the same whitespace-tolerant detection as the resolver below, so a
-	// `defineProvider (` / `defineProvider\n(` formatting cannot pass the early
-	// exit before the real classification runs.
-	if (!/\bdefineProvider\s*\(/.test(maskedSource)) {
+	// The report preflight already rejects unparseable index.ts sources before
+	// this rule runs, so this local AST parse only replaces property location.
+	const sourceFile = ts.createSourceFile(
+		indexRelPath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const implementationCall = findProviderImplementationCall(sourceFile);
+	const implementationArg = implementationCall?.arguments[0];
+	if (implementationArg === undefined || !ts.isObjectLiteralExpression(implementationArg)) {
 		return pass(
 			ruleId,
 			SDK_NATIVE_CATEGORY,
@@ -1272,69 +1388,14 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		);
 	}
 
-	// Scope the scan to the exported provider builder's implementation argument,
-	// or to the legacy-looking declaration call used by structural test fixtures.
-	// A provider can contain helper/non-exported defineProvider calls before the
-	// real default export (e.g. test scaffolds), so resolve the default export
-	// rather than blindly taking the first regex match. Resolution order:
-	//   1. `export default <builder>(` — phase-separated provider
-	//   2. `export default defineProvider(` — structural fixture
-	//   3. `export default <ident>` then `const <ident> = defineProvider(`
-	//   4. fallback: first `defineProvider(` in the file
-	let defineParenIndex = -1;
-	const builderDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*\(/.exec(maskedSource);
-	if (builderDefault?.[1] !== undefined && builderDefault[1] !== "defineProvider") {
-		defineParenIndex = builderDefault.index + builderDefault[0].length - 1;
-	}
-	const inlineDefault = /\bexport\s+default\s+defineProvider\s*\(/.exec(maskedSource);
-	if (defineParenIndex === -1 && inlineDefault) {
-		const declarationParen = inlineDefault.index + inlineDefault[0].length - 1;
-		const declarationStart = declarationParen + 1;
-		const declaration = balancedValueExpression(source, declarationStart, indexRelPath);
-		let cursor = declarationStart + declaration.length;
-		while (/\s/.test(source[cursor] ?? "")) cursor++;
-		if (source[cursor] === ")") cursor++;
-		while (/\s/.test(source[cursor] ?? "")) cursor++;
-		defineParenIndex = source[cursor] === "(" ? cursor : declarationParen;
-	} else if (defineParenIndex === -1) {
-		const namedDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/.exec(maskedSource);
-		const exportedName = namedDefault?.[1];
-		if (exportedName !== undefined) {
-			const namedDecl = new RegExp(
-				`(?:^|\\n)[ \t]*(?:export\\s+)?(?:const|let|var)\\s+${exportedName}\\s*(?::[^=\\n]+)?\\s*=\\s*defineProvider\\s*\\(`,
-			).exec(maskedSource);
-			if (namedDecl) {
-				defineParenIndex = namedDecl.index + namedDecl[0].length - 1;
-			}
-		}
-		if (defineParenIndex === -1) {
-			const firstCall = /\bdefineProvider\s*\(/.exec(maskedSource);
-			if (firstCall) {
-				defineParenIndex = firstCall.index + firstCall[0].length - 1;
-			}
-		}
-	}
-	if (defineParenIndex === -1) {
-		return pass(
-			ruleId,
-			SDK_NATIVE_CATEGORY,
-			"No defineProvider call to evaluate for operation composition.",
-			0,
-		);
-	}
-	const argStart = defineParenIndex + 1;
-	const argText = balancedValueExpression(source, argStart, indexRelPath);
-	const maskedArgText = maskedSource.slice(argStart, argStart + argText.length);
-
-	// Resolve the value passed as `operations:` inside the implementation call,
-	// following one alias hop. The value is classified as a static object
-	// literal (pass) or a factory/call expression (block). The regex index is
-	// offset back into the full source so line numbers stay accurate.
-	const opsProp = /\boperations\s*:\s*/.exec(maskedArgText);
+	// Resolve the top-level operations property from the AST, then feed its raw
+	// initializer offset into the existing expression classifier and alias
+	// resolver unchanged.
+	const opsProp = implementationArg.properties.find(isOperationsProperty);
 	let opsValue: ExpressionSlice | undefined;
 	let opsLine = 1;
-	if (opsProp) {
-		const valueStart = argStart + opsProp.index + opsProp[0].length;
+	if (opsProp !== undefined && ts.isPropertyAssignment(opsProp)) {
+		const valueStart = opsProp.initializer.getStart(sourceFile);
 		opsValue = unwrapParens(balancedExpressionSlice(source, valueStart, indexRelPath));
 		opsLine = offsetToLine(source, valueStart);
 	}
@@ -1342,13 +1403,25 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	// Property shorthand: `buildProvider({ operations })` — resolve the
 	// local `operations` const initializer.
 	let aliasName: string | undefined;
-	if (opsValue === undefined) {
-		if (/\boperations\s*[,}]/.test(maskedArgText)) {
-			aliasName = "operations";
-		}
-	} else if (/^[A-Za-z_$][\w$]*$/.test(opsValue.masked)) {
+	if (opsProp !== undefined && ts.isShorthandPropertyAssignment(opsProp)) {
+		aliasName = "operations";
+	} else if (opsValue !== undefined && /^[A-Za-z_$][\w$]*$/.test(opsValue.masked)) {
 		// `operations: ops` — a bare identifier alias to resolve.
 		aliasName = opsValue.raw;
+	}
+
+	// A computed property might resolve to `operations`, but its composition is
+	// not source-enumerable here. Fail closed, like an unresolved imported alias.
+	const computed =
+		opsProp === undefined
+			? implementationArg.properties.find(
+					(property) => property.name !== undefined && ts.isComputedPropertyName(property.name),
+				)
+			: undefined;
+	if (computed !== undefined) {
+		const raw = "computedOperations()";
+		opsValue = { raw, masked: raw };
+		opsLine = offsetToLine(source, computed.getStart(sourceFile));
 	}
 
 	// Determine the effective initializer expression to classify. The alias may
@@ -1450,9 +1523,12 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		// the unresolved import as a factory-composed (non-static) shape rather
 		// than silently passing.
 		if (!resolved) {
+			const maskedIndexSource = maskCommentsAndStrings(source, indexRelPath, {
+				blankPropertyKeys: true,
+			});
 			const importMatch = new RegExp(
 				`\\bimport\\b[^;]*\\b${aliasName}\\b[^;]*\\bfrom\\b`,
-			).exec(maskedSource);
+			).exec(maskedIndexSource);
 			if (importMatch) {
 				const raw = `${aliasName}(`;
 				effective = { raw, masked: raw };
@@ -3015,6 +3091,12 @@ function computeMaskedSource(
 				maskRange(start + 1, node.end - 1);
 			} else {
 				for (let index = start + 1; index < node.end - 1; index += 1) {
+					if (
+						source[index] === "\\" &&
+						(source[index + 1] === "\n" || source[index + 1] === "\r")
+					) {
+						continue;
+					}
 					if (PRESERVED_PROPERTY_KEY_STRUCTURAL_CHARS.has(source[index] ?? "")) {
 						chars[index] = " ";
 					}
