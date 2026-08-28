@@ -2890,6 +2890,24 @@ function findStringEnd(source: string, start: number): number {
 const MASK_CACHE_LIMIT = 64;
 const maskCache = new Map<string, string>();
 
+// Neutralize { } ( ) [ ], backtick, quotes, slash, backslash, comma, and semicolon
+// because scanners treat these as depth, string/regex delimiters, or top-level stops.
+const PRESERVED_PROPERTY_KEY_STRUCTURAL_CHARS = new Set([
+	"{",
+	"}",
+	"(",
+	")",
+	"[",
+	"]",
+	"`",
+	'"',
+	"'",
+	"/",
+	"\\",
+	",",
+	";",
+]);
+
 type MaskCommentsAndStringsOptions = {
 	blankPropertyKeys?: boolean;
 };
@@ -2982,6 +3000,12 @@ function computeMaskedSource(
 				ts.isPropertyAssignment(node.parent) && node.parent.name === node;
 			if (blankPropertyKeys || !isQuotedPropertyKey) {
 				maskRange(start + 1, node.end - 1);
+			} else {
+				for (let index = start + 1; index < node.end - 1; index += 1) {
+					if (PRESERVED_PROPERTY_KEY_STRUCTURAL_CHARS.has(source[index] ?? "")) {
+						chars[index] = " ";
+					}
+				}
 			}
 		} else if (ts.isRegularExpressionLiteral(node)) {
 			let closeDelimiter = node.end - 1;

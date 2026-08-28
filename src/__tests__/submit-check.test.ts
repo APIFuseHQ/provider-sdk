@@ -1779,7 +1779,7 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 			'const rendered = `ignore "} ${({ "}": codeIdentifier })} output: z.object({ MKioskTy: z.string() })`;';
 		const masked = maskCommentsAndStrings(source);
 
-		expect(masked).toContain('${({ "}": codeIdentifier })}');
+		expect(masked).toContain('${({ " ": codeIdentifier })}');
 		expect(masked).not.toContain("ignore");
 		expect(masked).not.toContain("MKioskTy");
 	});
@@ -1854,9 +1854,35 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 	it("preserves quoted property keys while masking quoted values", () => {
 		const source = 'const value = { "response" : "hidden" };';
 		const masked = maskCommentsAndStrings(source);
+		const responseOffset = source.indexOf('"response"');
 
-		expect(masked).toContain('"response" :');
+		expect(masked.slice(responseOffset, responseOffset + '"response" :'.length)).toBe(
+			'"response" :',
+		);
 		expect(masked).not.toContain("hidden");
+	});
+
+	it("neutralizes structural delimiters inside preserved quoted property keys", () => {
+		const source = 'const value = { "{ } ( ) [ ] ` \\" \' / \\\\, ;": hidden };';
+		const masked = maskCommentsAndStrings(source);
+		const keyStart = source.indexOf('"{');
+		const keyEnd = source.indexOf('": hidden', keyStart);
+		const keyBody = source.slice(keyStart + 1, keyEnd);
+		const maskedKeyBody = masked.slice(keyStart + 1, keyEnd);
+		const structural = new Set(["{", "}", "(", ")", "[", "]", "`", '"', "'", "/", "\\", ",", ";"]);
+
+		expect(masked.length).toBe(source.length);
+		expect(maskedKeyBody).toBe(
+			[...keyBody].map((character) => (structural.has(character) ? " " : character)).join(""),
+		);
+	});
+
+	it("leaves ordinary quoted property-key text byte-for-byte intact", () => {
+		const source = 'const value = { "some-key": hidden };';
+		const masked = maskCommentsAndStrings(source);
+		const keyStart = source.indexOf('"some-key"');
+
+		expect(masked.slice(keyStart, keyStart + '"some-key"'.length)).toBe('"some-key"');
 	});
 
 	it("keeps property-key mask modes isolated in the memo cache", () => {
@@ -1866,7 +1892,7 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 			blankPropertyKeys: true,
 		});
 
-		expect(keyPreserving).toContain('"fetch(":');
+		expect(keyPreserving).toContain('"fetch ":');
 		expect(keyBlanked).not.toContain("fetch(");
 		expect(maskCommentsAndStrings(source)).toBe(keyPreserving);
 		expect(
@@ -3879,6 +3905,38 @@ export default defineProvider({ id: "spread", version: "1.0.0", runtime: "standa
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks a factory spread after a quoted opening-brace operation key", async () => {
+		const source = sourceWithFactorySpreadDepthNoise("").replace(
+			"operations: {\n    lookup:",
+			"operations: {\n    \"{\": undefined as never,\n    lookup:",
+		);
+		const dir = makeProviderDir("submit-factory-spread-quoted-open-key-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("ignores a nested spread after a quoted closing-brace operation key", async () => {
+		const source = validProviderSource()
+			.replace(
+				"\nexport default defineProvider",
+				"\nfunction makeFields() { return {}; }\n\nexport default defineProvider",
+			)
+			.replace(
+				'descriptionKey: "operations.lookup.description",',
+				'descriptionKey: "operations.lookup.description",\n      "}": undefined as never,\n      ...makeFields(),',
+			);
+		const dir = makeProviderDir("submit-factory-spread-quoted-close-key-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
 	});
 
 	it("blocks an operations-level factory spread after an opening brace in a string", async () => {
