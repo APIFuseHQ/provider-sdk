@@ -52,7 +52,8 @@ export type ProviderErrorOptions = {
 
 /**
  * Provider-authored error diagnostics whose runtime values are validated before emission.
- * Raw messages, credentials, upstream bodies, and arbitrary keys do not belong here.
+ * Classification tokens such as `reason` are source literals, not runtime user input or
+ * credentials. The gateway removes the observability header from tenant responses.
  */
 export type ProviderErrorObservability = {
 	/** A 1-64 character `[A-Za-z0-9_.-]` classification token, for example `LOGIN_COMPLETE_FAILED`. */

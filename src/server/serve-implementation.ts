@@ -1152,8 +1152,12 @@ function toErrorResponse(
 	error: unknown,
 	requestId?: string,
 	declaredErrorCode?: OperationErrorCode,
+	observabilityDetails: ErrorObservabilityDetails = errorObservabilityDetails(
+		error,
+		declaredErrorCode,
+	),
 ): OperationErrorResponse {
-	const observability = errorObservabilityDetails(error, declaredErrorCode);
+	const observability = observabilityDetails;
 	const source = publicErrorSource(error, observability.category);
 	if (error instanceof StatefulRoutingDeadlineError) {
 		return {
@@ -1357,7 +1361,19 @@ function safeProviderErrorObservability(error: unknown): ProviderErrorObservabil
 	let fingerprint: unknown;
 	let messageLength: unknown;
 	try {
-		candidate = error.options?.observability;
+		const optionsDescriptor = Object.getOwnPropertyDescriptor(error, "options");
+		if (optionsDescriptor === undefined || !Object.hasOwn(optionsDescriptor, "value")) {
+			return undefined;
+		}
+		const options = optionsDescriptor.value;
+		if (options === null || typeof options !== "object" || Array.isArray(options)) {
+			return undefined;
+		}
+		const observabilityDescriptor = Object.getOwnPropertyDescriptor(options, "observability");
+		if (observabilityDescriptor === undefined || !Object.hasOwn(observabilityDescriptor, "value")) {
+			return undefined;
+		}
+		candidate = observabilityDescriptor.value;
 		if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
 			return undefined;
 		}
@@ -1406,12 +1422,13 @@ function responseWithErrorObservability(
 	response: Response,
 	error: unknown,
 	declaredErrorCode?: OperationErrorCode,
+	observabilityDetails: ErrorObservabilityDetails = errorObservabilityDetails(
+		error,
+		declaredErrorCode,
+	),
 ): Response {
 	const headers = new Headers(response.headers);
-	headers.set(
-		ERROR_OBSERVABILITY_HEADER,
-		JSON.stringify(errorObservabilityDetails(error, declaredErrorCode)),
-	);
+	headers.set(ERROR_OBSERVABILITY_HEADER, JSON.stringify(observabilityDetails));
 	return new Response(response.body, {
 		status: response.status,
 		statusText: response.statusText,
@@ -1583,6 +1600,10 @@ function logProviderError(
 	cost: ProviderRequestCost,
 	declaredErrorCode?: OperationErrorCode,
 	proxyTelemetry?: ProxyTelemetryCollector,
+	observabilityDetails: ErrorObservabilityDetails = errorObservabilityDetails(
+		error,
+		declaredErrorCode,
+	),
 ): void {
 	const code = isProviderError(error)
 		? (error.code ?? "provider_error")
@@ -1594,7 +1615,7 @@ function logProviderError(
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
 	const causeChain = providerErrorCauseChain(error);
-	const details = errorObservabilityDetails(error, declaredErrorCode);
+	const details = observabilityDetails;
 	const isUnregisteredProviderErrorCode =
 		status === 500 &&
 		isProviderError(error) &&
@@ -2452,7 +2473,13 @@ function createServerAppWithCapabilityModules(
 
 	app.notFound((c) => {
 		const error = new ProviderError("Not found", { code: "not_found", retryable: false });
-		return responseWithErrorObservability(c.json(toErrorResponse(error), 404), error);
+		const observabilityDetails = errorObservabilityDetails(error);
+		return responseWithErrorObservability(
+			c.json(toErrorResponse(error, undefined, undefined, observabilityDetails), 404),
+			error,
+			undefined,
+			observabilityDetails,
+		);
 	});
 
 	app.get("/health", (c) =>
@@ -2615,6 +2642,7 @@ function createServerAppWithCapabilityModules(
 				c.header("Retry-After", String(STATEFUL_FORWARDING_REPLAY_RETRY_AFTER_SECONDS));
 			}
 			const requestId = extractRequestId(rawBody);
+			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
 			logProviderError(
 				logger,
 				provider,
@@ -2625,11 +2653,14 @@ function createServerAppWithCapabilityModules(
 				status,
 				finishRequestCost(requestCost),
 				declaredErrorCode,
+				undefined,
+				observabilityDetails,
 			);
 			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, declaredErrorCode), status),
+				c.json(toErrorResponse(error, requestId, declaredErrorCode, observabilityDetails), status),
 				error,
 				declaredErrorCode,
+				observabilityDetails,
 			);
 		}
 	});
@@ -2686,6 +2717,7 @@ function createServerAppWithCapabilityModules(
 			const declaredErrorCode = declaredErrorCodeFor(error, operation, operationErrorCodes);
 			const status = toStatusCode(error, declaredErrorCode);
 			const requestId = extractRequestId(rawBody);
+			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
 			logProviderError(
 				logger,
 				provider,
@@ -2697,13 +2729,15 @@ function createServerAppWithCapabilityModules(
 				finishRequestCost(requestCost),
 				declaredErrorCode,
 				proxyTelemetry,
+				observabilityDetails,
 			);
 			const telemetryHeader = proxyTelemetry.toHeaderValue();
 			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, declaredErrorCode), status),
+				c.json(toErrorResponse(error, requestId, declaredErrorCode, observabilityDetails), status),
 				error,
 				declaredErrorCode,
+				observabilityDetails,
 			);
 		}
 	});
@@ -2745,6 +2779,7 @@ function createServerAppWithCapabilityModules(
 		} catch (error) {
 			const status = toStatusCode(error);
 			const requestId = extractRequestId(rawBody);
+			const observabilityDetails = errorObservabilityDetails(error);
 			logProviderError(
 				logger,
 				provider,
@@ -2756,12 +2791,15 @@ function createServerAppWithCapabilityModules(
 				finishRequestCost(requestCost),
 				undefined,
 				proxyTelemetry,
+				observabilityDetails,
 			);
 			const telemetryHeader = proxyTelemetry.toHeaderValue();
 			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId), status),
+				c.json(toErrorResponse(error, requestId, undefined, observabilityDetails), status),
 				error,
+				undefined,
+				observabilityDetails,
 			);
 		}
 	});
@@ -2803,6 +2841,7 @@ function createServerAppWithCapabilityModules(
 		} catch (error) {
 			const status = toStatusCode(error);
 			const requestId = extractRequestId(rawBody);
+			const observabilityDetails = errorObservabilityDetails(error);
 			logProviderError(
 				logger,
 				provider,
@@ -2814,12 +2853,15 @@ function createServerAppWithCapabilityModules(
 				finishRequestCost(requestCost),
 				undefined,
 				proxyTelemetry,
+				observabilityDetails,
 			);
 			const telemetryHeader = proxyTelemetry.toHeaderValue();
 			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId), status),
+				c.json(toErrorResponse(error, requestId, undefined, observabilityDetails), status),
 				error,
+				undefined,
+				observabilityDetails,
 			);
 		}
 	});
@@ -2861,6 +2903,7 @@ function createServerAppWithCapabilityModules(
 		} catch (error) {
 			const status = toStatusCode(error);
 			const requestId = extractRequestId(rawBody);
+			const observabilityDetails = errorObservabilityDetails(error);
 			logProviderError(
 				logger,
 				provider,
@@ -2872,12 +2915,15 @@ function createServerAppWithCapabilityModules(
 				finishRequestCost(requestCost),
 				undefined,
 				proxyTelemetry,
+				observabilityDetails,
 			);
 			const telemetryHeader = proxyTelemetry.toHeaderValue();
 			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId), status),
+				c.json(toErrorResponse(error, requestId, undefined, observabilityDetails), status),
 				error,
+				undefined,
+				observabilityDetails,
 			);
 		}
 	});
@@ -2919,6 +2965,7 @@ function createServerAppWithCapabilityModules(
 		} catch (error) {
 			const status = toStatusCode(error);
 			const requestId = extractRequestId(rawBody);
+			const observabilityDetails = errorObservabilityDetails(error);
 			logProviderError(
 				logger,
 				provider,
@@ -2930,12 +2977,15 @@ function createServerAppWithCapabilityModules(
 				finishRequestCost(requestCost),
 				undefined,
 				proxyTelemetry,
+				observabilityDetails,
 			);
 			const telemetryHeader = proxyTelemetry.toHeaderValue();
 			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId), status),
+				c.json(toErrorResponse(error, requestId, undefined, observabilityDetails), status),
 				error,
+				undefined,
+				observabilityDetails,
 			);
 		}
 	});
@@ -2977,6 +3027,7 @@ function createServerAppWithCapabilityModules(
 		} catch (error) {
 			const status = toStatusCode(error);
 			const requestId = extractRequestId(rawBody);
+			const observabilityDetails = errorObservabilityDetails(error);
 			logProviderError(
 				logger,
 				provider,
@@ -2988,12 +3039,15 @@ function createServerAppWithCapabilityModules(
 				finishRequestCost(requestCost),
 				undefined,
 				proxyTelemetry,
+				observabilityDetails,
 			);
 			const telemetryHeader = proxyTelemetry.toHeaderValue();
 			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId), status),
+				c.json(toErrorResponse(error, requestId, undefined, observabilityDetails), status),
 				error,
+				undefined,
+				observabilityDetails,
 			);
 		}
 	});

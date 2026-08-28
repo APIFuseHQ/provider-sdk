@@ -9,6 +9,7 @@ import {
 	AuthError,
 	ProviderError,
 	type ProviderErrorObservability,
+	type ProviderErrorOptions,
 	SessionExpiredError,
 	TransportError,
 	ValidationError,
@@ -2549,7 +2550,11 @@ describe("provider HTTP server", () => {
 			event: "provider_request_failed",
 			providerObservability,
 		});
-		expect(errorObservability(response).providerObservability).toEqual(providerObservability);
+		const headerObservability = errorObservability(response).providerObservability;
+		expect(headerObservability).toEqual(providerObservability);
+		expect(Object.getOwnPropertyDescriptor(events[0], "providerObservability")?.value).toEqual(
+			headerObservability,
+		);
 		expect(Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value).toEqual([
 			expect.objectContaining({
 				errorClass: "Error",
@@ -2568,6 +2573,131 @@ describe("provider HTTP server", () => {
 				source: "upstream_failure",
 			},
 		});
+	});
+
+	it("rejects inherited observability from the log, header, cause frame, and body", async () => {
+		const inheritedObservability = {
+			reason: "INHERITED_LEAK",
+			fingerprint: "038ed7ef11d8",
+		};
+		const innerOptions = Object.assign(Object.create({ observability: inheritedObservability }), {
+			code: "INNER_INHERITED_OBSERVABILITY",
+		}) as ProviderErrorOptions;
+		const inner = new ProviderError("Private diagnostic placeholder", innerOptions);
+		const outerOptions = Object.assign(Object.create({ observability: inheritedObservability }), {
+			code: "UPSTREAM_ERROR",
+			cause: inner,
+		}) as ProviderErrorOptions;
+		const outer = new TransportError("NOL login completion failed upstream.", outerOptions);
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(createCauseErrorApp(() => outer, events));
+
+		const header = errorObservability(response);
+		const body = await response.json();
+		const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
+		expect(Object.getOwnPropertyDescriptor(outerOptions, "observability")).toBeUndefined();
+		expect(events[0]).not.toHaveProperty("providerObservability");
+		expect(header).not.toHaveProperty("providerObservability");
+		expect(frame).not.toHaveProperty("providerObservability");
+		for (const channel of [
+			JSON.stringify(events[0]),
+			JSON.stringify(header),
+			JSON.stringify(frame),
+			JSON.stringify(body),
+		]) {
+			expect(channel).not.toContain(inheritedObservability.reason);
+			expect(channel).not.toContain(inheritedObservability.fingerprint);
+		}
+	});
+
+	it("rejects observability accessors without invoking their getters", async () => {
+		const accessorObservability = {
+			reason: "ACCESSOR_LEAK",
+			fingerprint: "038ed7ef11d8",
+		};
+		let getterCalls = 0;
+		const innerOptions: ProviderErrorOptions = { code: "INNER_ACCESSOR_OBSERVABILITY" };
+		Object.defineProperty(innerOptions, "observability", {
+			get() {
+				getterCalls += 1;
+				return accessorObservability;
+			},
+		});
+		const inner = new ProviderError("Private diagnostic placeholder", innerOptions);
+		const outerOptions: ProviderErrorOptions = { code: "UPSTREAM_ERROR", cause: inner };
+		Object.defineProperty(outerOptions, "observability", {
+			get() {
+				getterCalls += 1;
+				return accessorObservability;
+			},
+		});
+		const outer = new TransportError("NOL login completion failed upstream.", outerOptions);
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(createCauseErrorApp(() => outer, events));
+
+		const header = errorObservability(response);
+		const body = await response.json();
+		const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
+		expect(getterCalls).toBe(0);
+		expect(events[0]).not.toHaveProperty("providerObservability");
+		expect(header).not.toHaveProperty("providerObservability");
+		expect(frame).not.toHaveProperty("providerObservability");
+		for (const channel of [
+			JSON.stringify(events[0]),
+			JSON.stringify(header),
+			JSON.stringify(frame),
+			JSON.stringify(body),
+		]) {
+			expect(channel).not.toContain(accessorObservability.reason);
+			expect(channel).not.toContain(accessorObservability.fingerprint);
+		}
+	});
+
+	it("rejects an options accessor without invoking it for cause observability", async () => {
+		const accessorObservability = {
+			reason: "OPTIONS_ACCESSOR_LEAK",
+			fingerprint: "038ed7ef11d8",
+		};
+		const inner = new ProviderError("Private diagnostic placeholder", {
+			code: "INNER_OPTIONS_ACCESSOR",
+		});
+		Object.defineProperty(inner, "code", { value: "INNER_OPTIONS_ACCESSOR" });
+		let getterCalls = 0;
+		Object.defineProperty(inner, "options", {
+			get() {
+				getterCalls += 1;
+				return {
+					code: "INNER_OPTIONS_ACCESSOR",
+					observability: accessorObservability,
+				};
+			},
+		});
+		const outer = new TransportError("NOL login completion failed upstream.", {
+			code: "UPSTREAM_ERROR",
+			cause: inner,
+		});
+		Object.defineProperty(outer, "options", {
+			get() {
+				return { code: "UPSTREAM_ERROR", cause: inner, observability: accessorObservability };
+			},
+		});
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(createCauseErrorApp(() => outer, events));
+
+		const header = errorObservability(response);
+		const body = await response.json();
+		const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
+		expect(getterCalls).toBe(0);
+		expect(frame).not.toHaveProperty("providerObservability");
+		for (const channel of [
+			JSON.stringify(events[0]),
+			JSON.stringify(header),
+			JSON.stringify(frame),
+			JSON.stringify(body),
+		]) {
+			expect(channel).not.toContain(accessorObservability.reason);
+			expect(channel).not.toContain(accessorObservability.fingerprint);
+		}
 	});
 
 	it("adds validated observability from a branded inner cause to its frame", async () => {
@@ -2643,10 +2773,7 @@ describe("provider HTTP server", () => {
 		const decodedHeader: unknown = JSON.parse(rawHeader);
 		const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
 		expect(events[0]).toHaveProperty("providerObservability", allowlistedObservability);
-		expect(decodedHeader).toHaveProperty(
-			"providerObservability",
-			allowlistedObservability,
-		);
+		expect(decodedHeader).toHaveProperty("providerObservability", allowlistedObservability);
 		expect(frame).toHaveProperty("providerObservability", allowlistedObservability);
 
 		const channels = [
