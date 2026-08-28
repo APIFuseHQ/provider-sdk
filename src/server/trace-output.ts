@@ -28,6 +28,5 @@ export function resolveServerTraceContextOptions(
 	return {
 		maxSpans: resolved.maxSpans,
 		onSpan,
-		resourceAttributes: { ...resourceAttributes },
 	};
 }

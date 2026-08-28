@@ -137,6 +137,44 @@ describe("server trace output wiring", () => {
 		expect(output).toEqual([]);
 	});
 
+	it("keeps server trace output silent when disabled with the console exporter", async () => {
+		const output: string[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		try {
+			await withTraceEnv(
+				{ [APIFUSE__TRACE__ENABLED]: "false", [APIFUSE__TRACE__EXPORTER]: "console" },
+				async () => {
+					const response = await invokeEcho();
+					expect(response.status).toBe(200);
+				},
+			);
+		} finally {
+			console.log = originalLog;
+		}
+		expect(output).toEqual([]);
+	});
+
+	it("emits JSON spans for the json exporter", async () => {
+		const output: string[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		try {
+			await withTraceEnv(
+				{ [APIFUSE__TRACE__ENABLED]: "true", [APIFUSE__TRACE__EXPORTER]: "json" },
+				async () => {
+					const response = await invokeEcho();
+					expect(response.status).toBe(200);
+				},
+			);
+		} finally {
+			console.log = originalLog;
+		}
+
+		const names = output.map((line) => (JSON.parse(line) as { name: string }).name);
+		expect(names).toContain("handler:echo");
+	});
+
 	it("emits JSON spans with names and durations for the console exporter", async () => {
 		const output: string[] = [];
 		const originalLog = console.log;
