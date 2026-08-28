@@ -2937,21 +2937,26 @@ function computeMaskedSource(source: string, fileName: string): string {
 	return chars.join("");
 }
 
+// Escapes every non-printable or formatting character before a submitter-
+// controlled filename is interpolated into a diagnostic that the CLI prints.
+// Category-based on purpose: enumerated code-point lists kept missing members
+// of the same class (C1 controls, U+061C, U+2028/U+2029 were each found
+// individually in review), so this escapes the whole Unicode categories —
+// Cc (controls), Cf (formatting, includes all Bidi_Control), Zl/Zp
+// (line/paragraph separators). Ordinary letters, digits, spaces, and CJK
+// filenames pass through unchanged.
+const DIAGNOSTIC_UNSAFE_CHARACTER = /\p{Cc}|\p{Cf}|\p{Zl}|\p{Zp}/u;
+
 function sanitizeDiagnosticFileName(fileName: string): string {
 	let sanitized = "";
 	for (const character of fileName) {
 		const codePoint = character.codePointAt(0);
 		if (codePoint === undefined) continue;
-		if (codePoint < 0x20 || (codePoint >= 0x7f && codePoint <= 0x9f)) {
-			sanitized += `\\x${codePoint.toString(16).padStart(2, "0")}`;
-		} else if (
-			codePoint === 0x061c ||
-			codePoint === 0x200e ||
-			codePoint === 0x200f ||
-			(codePoint >= 0x202a && codePoint <= 0x202e) ||
-			(codePoint >= 0x2066 && codePoint <= 0x2069)
-		) {
-			sanitized += `\\u{${codePoint.toString(16)}}`;
+		if (DIAGNOSTIC_UNSAFE_CHARACTER.test(character)) {
+			sanitized +=
+				codePoint <= 0xff
+					? `\\x${codePoint.toString(16).padStart(2, "0")}`
+					: `\\u{${codePoint.toString(16)}}`;
 		} else {
 			sanitized += character;
 		}

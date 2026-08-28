@@ -1792,6 +1792,21 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		expect(almThrown.message).toContain("bad\\u{61c}name.ts");
 		expect(almThrown.message).not.toContain("\u061c");
 
+		const lsDir = makeProviderDir("submit-mask-ls-filename-", validProviderSource());
+		writeValidLocaleCatalogs(lsDir);
+		const lsName = "bad\u2028name.ts";
+		writeFileSync(join(lsDir, lsName), 'const broken = "unterminated;\n');
+		let lsThrown: unknown;
+		try {
+			await buildSubmitCheckReport(lsDir);
+		} catch (error) {
+			lsThrown = error;
+		}
+		expect(lsThrown).toBeInstanceOf(Error);
+		if (!(lsThrown instanceof Error)) throw new Error("Expected a parse failure.");
+		expect(lsThrown.message).toContain("bad\\u{2028}name.ts");
+		expect(lsThrown.message).not.toContain("\u2028");
+
 		const koreanDir = makeProviderDir("submit-mask-korean-filename-", validProviderSource());
 		writeValidLocaleCatalogs(koreanDir);
 		const koreanName = "깨진.ts";
