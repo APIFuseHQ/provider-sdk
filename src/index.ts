@@ -254,6 +254,7 @@ export {
 	createServerApp,
 	createServerAppAsync,
 	ERROR_OBSERVABILITY_HEADER,
+	type ProviderErrorCauseFrame,
 	type ServeOptions,
 	serve,
 } from "./server/serve.js";

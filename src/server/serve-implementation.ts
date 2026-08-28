@@ -19,6 +19,7 @@ import {
 	isTransportError,
 	isValidationError,
 	ProviderError,
+	type ProviderErrorObservability,
 } from "../errors.js";
 import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import {
@@ -141,6 +142,7 @@ export type ErrorObservabilityDetails = {
 	taxonomyVersion: string;
 	retryable: boolean;
 	upstreamStatus?: number;
+	providerObservability?: ProviderErrorObservability;
 };
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
@@ -990,6 +992,8 @@ export type ProviderServerLogEvent =
 			errorCategory?: ProviderErrorCategory;
 			taxonomyVersion?: string;
 			retryable?: boolean;
+			providerObservability?: ProviderErrorObservability;
+			causeChain?: ProviderErrorCauseFrame[];
 			signal?: "unregistered_provider_error_code";
 			signalFix?: string;
 			issues?: Array<{ path: string; code: string; message: string }>;
@@ -1281,7 +1285,7 @@ function providerObservabilityDetails(
 	};
 }
 
-function errorObservabilityDetails(
+function classifiedErrorObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: OperationErrorCode,
 ): ErrorObservabilityDetails {
@@ -1339,6 +1343,62 @@ function errorObservabilityDetails(
 		category: "internal_error",
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 		retryable: false,
+	};
+}
+
+const PROVIDER_OBSERVABILITY_TOKEN_PATTERN = /^[A-Za-z0-9_.-]{1,64}$/;
+const PROVIDER_OBSERVABILITY_FINGERPRINT_PATTERN = /^[A-Fa-f0-9]{12}$/;
+const MAX_PROVIDER_OBSERVABILITY_MESSAGE_LENGTH = 10_000_000;
+
+function safeProviderErrorObservability(error: unknown): ProviderErrorObservability | undefined {
+	if (!isProviderError(error)) return undefined;
+	let candidate: unknown;
+	let reason: unknown;
+	let fingerprint: unknown;
+	let messageLength: unknown;
+	try {
+		candidate = error.options?.observability;
+		if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) {
+			return undefined;
+		}
+		const ownValue = (key: keyof ProviderErrorObservability): unknown => {
+			const descriptor = Object.getOwnPropertyDescriptor(candidate as object, key);
+			return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
+		};
+		reason = ownValue("reason");
+		fingerprint = ownValue("fingerprint");
+		messageLength = ownValue("messageLength");
+	} catch {
+		return undefined;
+	}
+	const safe: ProviderErrorObservability = {
+		...(typeof reason === "string" && PROVIDER_OBSERVABILITY_TOKEN_PATTERN.test(reason)
+			? { reason }
+			: {}),
+		...(typeof fingerprint === "string" &&
+		PROVIDER_OBSERVABILITY_FINGERPRINT_PATTERN.test(fingerprint)
+			? { fingerprint }
+			: {}),
+		...(typeof messageLength === "number" &&
+		Number.isInteger(messageLength) &&
+		messageLength >= 0 &&
+		messageLength <= MAX_PROVIDER_OBSERVABILITY_MESSAGE_LENGTH
+			? { messageLength }
+			: {}),
+	};
+
+	return Object.keys(safe).length > 0 ? safe : undefined;
+}
+
+function errorObservabilityDetails(
+	error: unknown,
+	declaredErrorCode?: OperationErrorCode,
+): ErrorObservabilityDetails {
+	const details = classifiedErrorObservabilityDetails(error, declaredErrorCode);
+	const providerObservability = safeProviderErrorObservability(error);
+	return {
+		...details,
+		...(providerObservability ? { providerObservability } : {}),
 	};
 }
 
@@ -1464,12 +1524,13 @@ function extractRequestId(raw: unknown): string | undefined {
 	return typeof value === "string" ? value : undefined;
 }
 
-type ProviderErrorCauseFrame = {
+export type ProviderErrorCauseFrame = {
 	errorClass: string;
 	code?: string;
 	message: string;
 	messageLength: number;
 	messageFingerprint: string;
+	providerObservability?: ProviderErrorObservability;
 };
 
 const MAX_PROVIDER_ERROR_CAUSE_FRAMES = 5;
@@ -1496,12 +1557,14 @@ function providerErrorCauseChain(error: unknown): ProviderErrorCauseFrame[] | un
 	) {
 		seen.add(cause);
 		const message = cause.message;
+		const providerObservability = safeProviderErrorObservability(cause);
 		frames.push({
 			errorClass: cause.name,
 			...(isProviderError(cause) && typeof cause.code === "string" ? { code: cause.code } : {}),
 			message: providerErrorCauseMessage(message),
 			messageLength: message.length,
 			messageFingerprint: createHash("sha256").update(message).digest("hex").slice(0, 12),
+			...(providerObservability ? { providerObservability } : {}),
 		});
 		cause = cause.cause;
 	}
@@ -1555,6 +1618,9 @@ function logProviderError(
 		errorClass,
 		message,
 		...(causeChain ? { causeChain } : {}),
+		...(details.providerObservability
+			? { providerObservability: details.providerObservability }
+			: {}),
 		...(details.upstreamStatus ? { upstreamStatus: details.upstreamStatus } : {}),
 		errorCategory: details.category,
 		taxonomyVersion: details.taxonomyVersion,

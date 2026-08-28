@@ -151,12 +151,12 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"runtime-native-network.api.md": forgottenExports(
-		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		"These indirect declarations are intentionally not direct native-network exports; ProviderErrorObservability is authored through the root or provider entry point, and all full definitions remain included here for semver review.",
 		`
 			DynamicEgressRuleSnapshot EnvContext Iso3166Alpha2CountryCode NativeConnectTls NativeNetworkClient NativeNetworkCloseReason NativeNetworkConnectInput NativeNetworkConnectOptions
 			NativeNetworkConnection NativeNetworkDynamicGrantOptions NativeNetworkEgressGrant NativeProviderConfig NativeProxyDrainHandler NativeProxyEgressInfo NativeProxyExpiringEvent NativeProxyExpiringReason
 			NativeTcpDynamicEgressRule NativeTcpEgressRule NativeTcpPortRange NativeTcpTlsMode NativeTlsConnectOptions PROVIDER_ERROR_CATEGORIES ProviderError ProviderErrorCategory
-			ProviderErrorOptions ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity ProxyProtocol TransportError TransportErrorOptions
+			ProviderErrorObservability ProviderErrorOptions ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity ProxyProtocol TransportError TransportErrorOptions
 		`,
 	),
 	"runtime-prevalidate.api.md": forgottenExports(
