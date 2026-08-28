@@ -59,8 +59,45 @@ export function validateFailClosedDeclaration(provider: ProviderDefinition): voi
 	if (violations.length > 0) throw declarationInvalidError(violations);
 }
 
+type ProviderDeclarationRulesInput = Pick<ProviderDefinition, "healthJourneys" | "proxy">;
+type OperationDeclarationRulesInput = Pick<ProviderDefinition, "operations">;
+
+/** Enforces fail-closed rules that only depend on the provider declaration. */
+export function validateFailClosedProviderDeclaration(
+	provider: ProviderDeclarationRulesInput,
+): void {
+	const violations: DeclarationViolation[] = [];
+	collectProviderDeclarationViolations(provider, violations);
+	if (violations.length > 0) throw declarationInvalidError(violations);
+}
+
+/** Enforces fail-closed rules that depend on the operation implementation. */
+export function validateFailClosedOperationDeclaration(
+	provider: OperationDeclarationRulesInput,
+): void {
+	const violations: DeclarationViolation[] = [];
+	collectOperationDeclarationViolations(provider, violations);
+	if (violations.length > 0) throw declarationInvalidError(violations);
+}
+
+function collectProviderDeclarationViolations(
+	provider: ProviderDeclarationRulesInput,
+	violations: DeclarationViolation[],
+): void {
+	validateHealthDeclaration(provider, violations);
+	validateProxyDeclaration(provider, violations);
+}
+
+function collectOperationDeclarationViolations(
+	provider: OperationDeclarationRulesInput,
+	violations: DeclarationViolation[],
+): void {
+	validateSchemaDeclaration(provider, violations);
+	validateOperationDeclaration(provider, violations);
+}
+
 function validateHealthDeclaration(
-	provider: ProviderDefinition,
+	provider: ProviderDeclarationRulesInput,
 	violations: DeclarationViolation[],
 ): void {
 	for (const [index, journey] of (provider.healthJourneys ?? []).entries()) {
@@ -113,7 +150,7 @@ function healthJourneyPath(journey: HealthJourneyDefinition, index: number): str
 }
 
 function validateSchemaDeclaration(
-	provider: ProviderDefinition,
+	provider: OperationDeclarationRulesInput,
 	violations: DeclarationViolation[],
 ): void {
 	for (const [operationId, operation] of Object.entries(provider.operations ?? {})) {
@@ -153,7 +190,7 @@ const MANAGED_PROXY_VENDORS = new Set<ProviderProxyProvider>(["smartproxy", "nod
 const STATIC_PROXY_VENDORS = new Set<ProviderProxyProvider>(["custom", "decodo"]);
 
 function validateProxyDeclaration(
-	provider: ProviderDefinition,
+	provider: ProviderDeclarationRulesInput,
 	violations: DeclarationViolation[],
 ): void {
 	if (provider.proxy === true) {
@@ -213,7 +250,7 @@ function declaredProxyVendors(policy: ProviderProxyPolicy): ProviderProxyProvide
 }
 
 function validateOperationDeclaration(
-	provider: ProviderDefinition,
+	provider: OperationDeclarationRulesInput,
 	violations: DeclarationViolation[],
 ): void {
 	for (const [operationId, operation] of Object.entries(provider.operations ?? {})) {
