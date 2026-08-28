@@ -520,6 +520,12 @@ export async function buildProviderCreatePlan(
 			}),
 		},
 		{
+			path: resolve(providerRoot, "provider.json"),
+			content: await renderTemplate("provider.json.tpl", {
+				PROVIDER_ID: options.name,
+			}),
+		},
+		{
 			path: resolve(providerRoot, "Dockerfile"),
 			content: await renderTemplate("Dockerfile.tpl", {}),
 		},
