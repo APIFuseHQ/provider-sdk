@@ -276,6 +276,36 @@ describe("executeOperation", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("preserves SessionExpiredError observability when retryOnAuthRefresh upgrades it", async () => {
+		const ctx = createMockCtx({});
+		const providerObservability = {
+			reason: "SESSION_REFRESH_FAILED",
+			fingerprint: "038ed7ef11d8",
+			messageLength: 42,
+		};
+		const details = { providerCode: "session_refresh_failed" };
+		const provider = createMockProvider({
+			retryOnAuthRefresh: true,
+			handler: async () => {
+				throw new SessionExpiredError("Session expired", {
+					observability: providerObservability,
+					details,
+				});
+			},
+		});
+
+		await expect(
+			executeOperation(provider, "search", ctx, { query: "test" }),
+		).rejects.toMatchObject({
+			name: "SessionExpiredError",
+			options: {
+				retryable: true,
+				observability: providerObservability,
+				details,
+			},
+		});
+	});
+
 	it("upgrades a duplicate-module SessionExpiredError to retryable for opt-in operations", async () => {
 		const Dup = await duplicateSdk;
 		expect(Dup.SessionExpiredError).not.toBe(SessionExpiredError);

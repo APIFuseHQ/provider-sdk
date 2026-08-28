@@ -20,6 +20,7 @@ import {
 	isValidationError,
 	ProviderError,
 	type ProviderErrorObservability,
+	type ProviderErrorOptions,
 } from "../errors.js";
 import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import {
@@ -145,6 +146,32 @@ export type ErrorObservabilityDetails = {
 	upstreamStatus?: number;
 	providerObservability?: ProviderErrorObservability;
 };
+
+// Provider errors normally expose `options` through an own data property, but
+// providers can replace that property with a throwing accessor. Keep the
+// existing classification semantics for normal accessors while making the
+// server's error boundary fail closed when an accessor throws.
+function providerErrorOption<K extends keyof ProviderErrorOptions>(
+	error: unknown,
+	key: K,
+): ProviderErrorOptions[K] | undefined {
+	if (!isProviderError(error)) return undefined;
+	try {
+		return (error as ProviderError).options?.[key] as ProviderErrorOptions[K] | undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function providerErrorCode(error: unknown): string | undefined {
+	if (!isProviderError(error)) return undefined;
+	try {
+		return (error as ProviderError).code;
+	} catch {
+		return undefined;
+	}
+}
+
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
@@ -1141,8 +1168,9 @@ function zodDetails(error: z.ZodError): Array<{
 function publicErrorSource(error: unknown, category: ProviderErrorCategory): ProviderErrorSource {
 	if (error instanceof StatefulRoutingDeadlineError) return "apifuse";
 	if (isProviderError(error)) {
-		if (error.code === MISSING_SECRET_CODE) return "apifuse";
-		if (error.code === "UPSTREAM_ERROR" || error.code === "BLOCKED") {
+		const code = providerErrorCode(error);
+		if (code === MISSING_SECRET_CODE) return "apifuse";
+		if (code === "UPSTREAM_ERROR" || code === "BLOCKED") {
 			return "upstream_failure";
 		}
 	}
@@ -1169,15 +1197,15 @@ function toErrorResponse(
 	}
 
 	if (isProviderError(error)) {
-		const details = error.details;
+		const details = providerErrorOption(error, "details");
 		return {
 			error: {
-				code: error.code ?? "provider_error",
+				code: providerErrorCode(error) ?? "provider_error",
 				message: publicProviderErrorMessage(error),
 				...(requestId ? { requestId } : {}),
 				retryable: observability.retryable,
 				source,
-				...(error.fix ? { fix: error.fix } : {}),
+				...(providerErrorOption(error, "fix") ? { fix: providerErrorOption(error, "fix") } : {}),
 				...(details !== undefined ? { details } : {}),
 			},
 		};
@@ -1237,9 +1265,9 @@ function providerObservabilityDetails(
 	// signal for exactly the retryOnAuthRefresh operations it is meant to enable.
 	if (isSessionExpiredError(error)) {
 		return {
-			category: error.options?.category ?? "credential_expired",
+			category: providerErrorOption(error, "category") ?? "credential_expired",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: error.options?.retryable ?? declaredRetryable ?? false,
+			retryable: providerErrorOption(error, "retryable") ?? declaredRetryable ?? false,
 		};
 	}
 	// Missing-secret errors carry the canonical credential_unavailable category
@@ -1247,29 +1275,29 @@ function providerObservabilityDetails(
 	// the upstream. Matched by code (not constructor) so both the SDK-owned
 	// runtime gate and any not-yet-migrated provider-thrown MISSING_SECRET
 	// serialize identically, including across duplicate SDK module instances.
-	if (isProviderError(error) && error.code === MISSING_SECRET_CODE) {
+	if (isProviderError(error) && providerErrorCode(error) === MISSING_SECRET_CODE) {
 		return {
-			category: error.options?.category ?? "credential_unavailable",
+			category: providerErrorOption(error, "category") ?? "credential_unavailable",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: error.options?.retryable ?? declaredRetryable ?? false,
+			retryable: providerErrorOption(error, "retryable") ?? declaredRetryable ?? false,
 		};
 	}
 	if (!isTransportError(error)) {
 		return undefined;
 	}
 	const isProxyPoolCode =
-		error.code === PROXY_POOL_EXHAUSTED_CODE ||
-		error.code === PROXY_EDGE_AUTH_REJECTED_CODE ||
-		error.code === "PROXY_ALLOCATION_FAILED";
+		providerErrorCode(error) === PROXY_POOL_EXHAUSTED_CODE ||
+		providerErrorCode(error) === PROXY_EDGE_AUTH_REJECTED_CODE ||
+		providerErrorCode(error) === "PROXY_ALLOCATION_FAILED";
 	const category =
-		error.options?.category ??
+		providerErrorOption(error, "category") ??
 		(isProxyPoolCode
 			? "proxy_pool"
-			: error.code === PROXY_AUTH_IP_DENIED_CODE
+			: providerErrorCode(error) === PROXY_AUTH_IP_DENIED_CODE
 				? "anti_bot_blocked"
-				: error.code === "transport_timeout"
+				: providerErrorCode(error) === "transport_timeout"
 					? "timeout"
-					: error.code === "transport_network_error"
+					: providerErrorCode(error) === "transport_network_error"
 						? "network"
 						: error.upstreamStatus
 							? categoryForStatus(error.upstreamStatus)
@@ -1278,7 +1306,7 @@ function providerObservabilityDetails(
 		category,
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 		retryable:
-			error.options?.retryable ??
+			providerErrorOption(error, "retryable") ??
 			(category === "upstream_http" && error.upstreamStatus
 				? error.upstreamStatus >= 500
 				: isRetryableCategory(category)),
@@ -1296,19 +1324,19 @@ function classifiedErrorObservabilityDetails(
 
 	if (error instanceof z.ZodError || isValidationError(error)) {
 		const declaredStatus = effectiveDeclaration?.status;
+		const providerCategory = providerErrorOption(error, "category");
 		return {
-			category:
-				isProviderError(error) && error.options?.category
-					? error.options.category
-					: isEmittableErrorStatus(declaredStatus) &&
-							categoryForStatus(declaredStatus) === "upstream_rejected"
-						? "upstream_rejected"
-						: isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
-							? "provider_error"
-							: "input_validation",
+			category: providerCategory
+				? providerCategory
+				: isEmittableErrorStatus(declaredStatus) &&
+						categoryForStatus(declaredStatus) === "upstream_rejected"
+					? "upstream_rejected"
+					: isEmittableErrorStatus(declaredStatus) && declaredStatus >= 500
+						? "provider_error"
+						: "input_validation",
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 			retryable: isProviderError(error)
-				? (error.options?.retryable ?? effectiveDeclaration?.retryable ?? false)
+				? (providerErrorOption(error, "retryable") ?? effectiveDeclaration?.retryable ?? false)
 				: false,
 		};
 	}
@@ -1328,15 +1356,16 @@ function classifiedErrorObservabilityDetails(
 		// author set an explicit category.
 		const declaredStatus = effectiveDeclaration?.status;
 		const rejectionDefault =
-			error.code === "UPSTREAM_REJECTED" ||
+			providerErrorCode(error) === "UPSTREAM_REJECTED" ||
 			(isEmittableErrorStatus(declaredStatus) &&
 				categoryForStatus(declaredStatus) === "upstream_rejected")
 				? ("upstream_rejected" as const)
 				: ("provider_error" as const);
 		return {
-			category: error.options?.category ?? rejectionDefault,
+			category: providerErrorOption(error, "category") ?? rejectionDefault,
 			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
-			retryable: error.options?.retryable ?? effectiveDeclaration?.retryable ?? false,
+			retryable:
+				providerErrorOption(error, "retryable") ?? effectiveDeclaration?.retryable ?? false,
 		};
 	}
 
@@ -1374,18 +1403,18 @@ function responseWithErrorObservability(
 
 function publicProviderErrorMessage(error: ProviderError): string {
 	if (isTransportError(error)) {
-		if (error.code === PROXY_AUTH_IP_DENIED_CODE) {
+		if (providerErrorCode(error) === PROXY_AUTH_IP_DENIED_CODE) {
 			return error.message;
 		}
-		if (error.code === PROXY_EDGE_AUTH_REJECTED_CODE) {
+		if (providerErrorCode(error) === PROXY_EDGE_AUTH_REJECTED_CODE) {
 			return error.message;
 		}
-		if (error.code === PROXY_POOL_EXHAUSTED_CODE) {
+		if (providerErrorCode(error) === PROXY_POOL_EXHAUSTED_CODE) {
 			return error.message;
 		}
-		if (error.code === "transport_timeout") return "Request timed out";
-		if (error.code === "transport_network_error") return "Network error";
-		if (error.code === "upstream_http_error" && error.status) {
+		if (providerErrorCode(error) === "transport_timeout") return "Request timed out";
+		if (providerErrorCode(error) === "transport_network_error") return "Network error";
+		if (providerErrorCode(error) === "upstream_http_error" && error.status) {
 			return `Upstream request failed with status ${error.status}`;
 		}
 		if (error.status) {
@@ -1415,17 +1444,18 @@ function toStatusCode(error: unknown, declaredErrorCode?: OperationErrorCode): P
 		}
 		// Canonical SDK code → status mapping lives in error-resolution.ts so
 		// the authoring lint and this runtime path share one source of truth.
-		if (typeof error.code === "string") {
-			const mappedStatus = SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(error.code);
+		const code = providerErrorCode(error);
+		if (typeof code === "string") {
+			const mappedStatus = SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.get(code);
 			if (mappedStatus !== undefined) {
 				return mappedStatus;
 			}
 		}
 		if (isTransportError(error)) {
-			return error.code === "transport_timeout" ? 504 : 502;
+			return providerErrorCode(error) === "transport_timeout" ? 504 : 502;
 		}
 		if (isValidationError(error)) {
-			return error.options?.category === "output_validation" ? 500 : 400;
+			return providerErrorOption(error, "category") === "output_validation" ? 500 : 400;
 		}
 
 		return 500;
@@ -1441,8 +1471,8 @@ function sdkOwnsErrorResolution(error: unknown): boolean {
 	if (error instanceof StatefulRoutingDeadlineError) return true;
 	return (
 		isProviderError(error) &&
-		typeof error.code === "string" &&
-		SDK_RUNTIME_OWNED_ERROR_CODES.has(error.code)
+		typeof providerErrorCode(error) === "string" &&
+		SDK_RUNTIME_OWNED_ERROR_CODES.has(providerErrorCode(error) as string)
 	);
 }
 
@@ -1464,8 +1494,9 @@ function declaredErrorCodeFor(
 	operationId: string | undefined,
 	lookup: OperationErrorCodeLookup,
 ): OperationErrorCode | undefined {
-	if (!operationId || !isProviderError(error) || typeof error.code !== "string") return undefined;
-	return lookup.get(operationId)?.get(error.code);
+	const code = providerErrorCode(error);
+	if (!operationId || !code) return undefined;
+	return lookup.get(operationId)?.get(code);
 }
 
 function extractRequestId(raw: unknown): string | undefined {
@@ -1539,7 +1570,7 @@ function logProviderError(
 	observabilityDetails: ErrorObservabilityDetails,
 ): void {
 	const code = isProviderError(error)
-		? (error.code ?? "provider_error")
+		? (providerErrorCode(error) ?? "provider_error")
 		: error instanceof z.ZodError
 			? "invalid_request"
 			: error instanceof StatefulRoutingDeadlineError
@@ -1553,8 +1584,8 @@ function logProviderError(
 		status === 500 &&
 		isProviderError(error) &&
 		!isValidationError(error) &&
-		typeof error.code === "string" &&
-		!SDK_OWNED_PROVIDER_ERROR_CODES.has(error.code) &&
+		typeof providerErrorCode(error) === "string" &&
+		!SDK_OWNED_PROVIDER_ERROR_CODES.has(providerErrorCode(error) as string) &&
 		declaredErrorCode === undefined;
 	const proxy = proxyTelemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
@@ -2573,7 +2604,10 @@ function createServerAppWithCapabilityModules(
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operationId, operationErrorCodes);
 			const status = toStatusCode(error, declaredErrorCode);
-			if (isProviderError(error) && error.code === "STATEFUL_FORWARDING_REPLAY_CACHE_FULL") {
+			if (
+				isProviderError(error) &&
+				providerErrorCode(error) === "STATEFUL_FORWARDING_REPLAY_CACHE_FULL"
+			) {
 				c.header("Retry-After", String(STATEFUL_FORWARDING_REPLAY_RETRY_AFTER_SECONDS));
 			}
 			const requestId = extractRequestId(rawBody);

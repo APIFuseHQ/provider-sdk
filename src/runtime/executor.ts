@@ -1,7 +1,9 @@
 import {
+	isProviderError,
 	isSessionExpiredError,
 	isValidationError,
 	ProviderError,
+	type ProviderErrorOptions,
 	SessionExpiredError,
 	ValidationError,
 } from "../errors.js";
@@ -13,6 +15,31 @@ import { assertRequiredSecretsPresent } from "./secrets.js";
 export function isStreamingOperation(provider: ProviderDefinition, operationId: string): boolean {
 	const kind = provider.operations[operationId]?.transport?.kind ?? "json";
 	return kind !== "json";
+}
+
+function preservedSessionExpiredOptions(error: unknown): ProviderErrorOptions {
+	if (!isProviderError(error)) return { retryable: true };
+	const optionsDescriptor = Object.getOwnPropertyDescriptor(error, "options");
+	if (
+		optionsDescriptor === undefined ||
+		!Object.hasOwn(optionsDescriptor, "value") ||
+		optionsDescriptor.value === null ||
+		typeof optionsDescriptor.value !== "object" ||
+		Array.isArray(optionsDescriptor.value)
+	) {
+		return { retryable: true };
+	}
+	const options = optionsDescriptor.value as object;
+	const ownValue = (key: keyof ProviderErrorOptions): unknown => {
+		const descriptor = Object.getOwnPropertyDescriptor(options, key);
+		return descriptor && Object.hasOwn(descriptor, "value") ? descriptor.value : undefined;
+	};
+	const preserved: ProviderErrorOptions = {};
+	for (const key of ["code", "category", "fix", "details", "observability"] as const) {
+		const value = ownValue(key);
+		if (value !== undefined) preserved[key] = value as never;
+	}
+	return { ...preserved, retryable: true };
 }
 
 /**
@@ -84,7 +111,10 @@ export async function executeOperation<
 		// executor's, which `instanceof` would miss — dropping the retryable
 		// upgrade and stranding an operation that opted into auth refresh.
 		if (isSessionExpiredError(error) && operation.retryOnAuthRefresh) {
-			throw new SessionExpiredError(error.message, { retryable: true });
+			// Preserve provider-authored safe metadata while forcing the retry signal.
+			// `cause` intentionally remains dropped, matching the pre-existing
+			// reconstruction semantics.
+			throw new SessionExpiredError(error.message, preservedSessionExpiredOptions(error));
 		}
 		throw error;
 	}

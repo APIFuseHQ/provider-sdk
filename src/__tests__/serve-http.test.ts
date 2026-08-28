@@ -1998,6 +1998,50 @@ describe("provider HTTP server", () => {
 		});
 	});
 
+	it("preserves SessionExpiredError observability through retryOnAuthRefresh", async () => {
+		const providerObservability = {
+			reason: "SESSION_REFRESH_FAILED",
+			fingerprint: "038ed7ef11d8",
+			messageLength: 42,
+		} satisfies ProviderErrorObservability;
+		const events: ProviderServerLogEvent[] = [];
+		const baseProvider = createTestProvider();
+		const provider = {
+			...baseProvider,
+			operations: {
+				...baseProvider.operations,
+				sessionExpiredObservable: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					retryOnAuthRefresh: true,
+					handler: async () => {
+						throw new SessionExpiredError("Provider session expired", {
+							observability: providerObservability,
+						});
+					},
+				},
+			},
+		} satisfies ProviderDefinition;
+		const appWithLogger = createServerApp(provider, { logger: (event) => events.push(event) });
+
+		const response = await appWithLogger.request("/v1/sessionExpiredObservable", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_session_observable", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(401);
+		expect(errorObservability(response)).toEqual({
+			category: "credential_expired",
+			taxonomyVersion: "2026-08-07",
+			retryable: true,
+			providerObservability,
+		});
+		expect(events).toContainEqual(
+			expect.objectContaining({ event: "provider_request_failed", providerObservability }),
+		);
+	});
+
 	it("surfaces credential_expired + retryable:false for unmarked operations", async () => {
 		const response = await app.request("/v1/sessionExpiredUnmarked", {
 			method: "POST",
@@ -2699,7 +2743,9 @@ describe("provider HTTP server", () => {
 		}
 	});
 
-	it("rejects observability from options accessors at the HTTP boundary", async () => {
+	it("keeps observability from options accessors out of every HTTP channel", async () => {
+		// Safe extraction trusts own data properties only. Classification's
+		// `options` access remains existing SDK behavior and is tested separately.
 		const accessorObservability = {
 			reason: "OPTIONS_ACCESSOR_LEAK",
 			fingerprint: "038ed7ef11d8",
@@ -2740,6 +2786,34 @@ describe("provider HTTP server", () => {
 			expect(channel).not.toContain(accessorObservability.reason);
 			expect(channel).not.toContain(accessorObservability.fingerprint);
 		}
+	});
+
+	it("survives a throwing options getter with a structured 5xx response", async () => {
+		const error = new ProviderError("Provider operation failed", {
+			code: "THROWING_OPTIONS",
+		});
+		Object.defineProperty(error, "options", {
+			configurable: true,
+			get() {
+				throw new Error("options accessor exploded");
+			},
+		});
+		const events: ProviderServerLogEvent[] = [];
+
+		const response = await requestCauseError(createCauseErrorApp(() => error, events));
+
+		expect(response.status).toBe(500);
+		expect(errorObservability(response)).toMatchObject({
+			category: "provider_error",
+			retryable: false,
+		});
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_failed",
+				status: 500,
+				code: "provider_error",
+			}),
+		);
 	});
 
 	it("rejects an options accessor without invoking it in safe observability extraction", () => {
