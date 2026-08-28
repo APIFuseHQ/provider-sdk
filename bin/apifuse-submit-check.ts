@@ -301,6 +301,7 @@ export async function buildSubmitCheckReport(
 		checks.push(scoreNoVendorImport(providerRoot));
 		checks.push(scoreDescribeKey(providerRoot));
 		checks.push(scoreNoRawFetch(providerRoot));
+		checks.push(scoreNoDynamicCode(providerRoot));
 		checks.push(scoreNoRedundantRuntimeGuards(providerRoot));
 		checks.push(scoreManagedBrowserRuntime(providerRoot));
 		checks.push(scoreAsAssertionCount(providerRoot));
@@ -474,7 +475,7 @@ function scoreDescribeKey(providerRoot: string): SubmitCheck {
 }
 
 function scoreNoRawFetch(providerRoot: string): SubmitCheck {
-	const findings = findSourceLineMatches(providerRoot, /(?<![.\w])fetch\s*\(/);
+	const findings = findSourceLineMatches(providerRoot, /(?<![.\w])fetch\s*\(/, true);
 	if (findings.length > 0) {
 		const evidence = formatSourceFindings(findings);
 		return blocker(
@@ -488,6 +489,233 @@ function scoreNoRawFetch(providerRoot: string): SubmitCheck {
 	}
 
 	return pass("no-raw-fetch", SDK_NATIVE_CATEGORY, "Provider source avoids raw fetch().", 0);
+}
+
+const DYNAMIC_CODE_SINKS: ReadonlySet<string> = new Set(["eval", "Function"]);
+const DYNAMIC_CODE_GLOBAL_OBJECTS: ReadonlySet<string> = new Set([
+	"globalThis",
+	"window",
+	"self",
+	"global",
+]);
+
+function unwrapDynamicCodeCallee(expression: ts.Expression): ts.Expression {
+	let current = expression;
+	while (
+		ts.isParenthesizedExpression(current) ||
+		ts.isAsExpression(current) ||
+		ts.isSatisfiesExpression(current) ||
+		ts.isNonNullExpression(current)
+	) {
+		current = current.expression;
+	}
+	if (
+		ts.isBinaryExpression(current) &&
+		current.operatorToken.kind === ts.SyntaxKind.CommaToken
+	) {
+		return unwrapDynamicCodeCallee(current.right);
+	}
+	return current;
+}
+
+type DynamicCodeBinding = {
+	constInitializer?: ts.Expression;
+};
+
+function collectDynamicCodeBindings(sourceFile: ts.SourceFile): Map<string, DynamicCodeBinding[]> {
+	const bindings = new Map<string, DynamicCodeBinding[]>();
+	const addBinding = (name: string, binding: DynamicCodeBinding = {}): void => {
+		const existing = bindings.get(name);
+		if (existing === undefined) {
+			bindings.set(name, [binding]);
+		} else {
+			existing.push(binding);
+		}
+	};
+	const addBindingName = (bindingName: ts.BindingName, binding: DynamicCodeBinding = {}): void => {
+		if (ts.isIdentifier(bindingName)) {
+			addBinding(bindingName.text, binding);
+			return;
+		}
+		for (const element of bindingName.elements) {
+			if (!ts.isOmittedExpression(element)) {
+				addBindingName(element.name);
+			}
+		}
+	};
+	const visit = (node: ts.Node): void => {
+		if (ts.isVariableDeclaration(node)) {
+			const isDirectConstBinding =
+				ts.isIdentifier(node.name) &&
+				ts.isVariableDeclarationList(node.parent) &&
+				(node.parent.flags & ts.NodeFlags.Const) !== 0;
+			addBindingName(node.name, {
+				constInitializer: isDirectConstBinding ? node.initializer : undefined,
+			});
+		} else if (
+			(ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) &&
+			node.name !== undefined
+		) {
+			addBinding(node.name.text);
+		} else if (ts.isParameter(node)) {
+			addBindingName(node.name);
+		} else if (ts.isImportClause(node) && node.name !== undefined) {
+			addBinding(node.name.text);
+		} else if (ts.isNamespaceImport(node) || ts.isImportSpecifier(node)) {
+			addBinding(node.name.text);
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return bindings;
+}
+
+function isDynamicCodeGlobalMemberSink(expression: ts.Expression): boolean {
+	const callee = unwrapDynamicCodeCallee(expression);
+	let sinkName: string | undefined;
+	let receiver: ts.Expression | undefined;
+	if (ts.isPropertyAccessExpression(callee)) {
+		sinkName = callee.name.text;
+		receiver = callee.expression;
+	} else if (ts.isElementAccessExpression(callee)) {
+		const argument = callee.argumentExpression;
+		if (
+			argument !== undefined &&
+			(ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
+		) {
+			sinkName = argument.text;
+			receiver = callee.expression;
+		}
+	}
+	if (sinkName === undefined || receiver === undefined || !DYNAMIC_CODE_SINKS.has(sinkName)) {
+		return false;
+	}
+	const unwrappedReceiver = unwrapDynamicCodeCallee(receiver);
+	return (
+		ts.isIdentifier(unwrappedReceiver) && DYNAMIC_CODE_GLOBAL_OBJECTS.has(unwrappedReceiver.text)
+	);
+}
+
+function isDirectDynamicCodeSinkReference(
+	expression: ts.Expression,
+	bindings: ReadonlyMap<string, readonly DynamicCodeBinding[]>,
+	resolving: ReadonlySet<string>,
+): boolean {
+	const reference = unwrapDynamicCodeCallee(expression);
+	if (isDynamicCodeGlobalMemberSink(reference)) {
+		return true;
+	}
+	if (!ts.isIdentifier(reference) || !DYNAMIC_CODE_SINKS.has(reference.text)) {
+		return false;
+	}
+	return isBareDynamicCodeSinkIdentifier(reference.text, bindings, resolving);
+}
+
+function isBareDynamicCodeSinkIdentifier(
+	name: string,
+	bindings: ReadonlyMap<string, readonly DynamicCodeBinding[]>,
+	resolving: ReadonlySet<string>,
+): boolean {
+	const localBindings = bindings.get(name);
+	if (localBindings === undefined || localBindings.length === 0) {
+		return DYNAMIC_CODE_SINKS.has(name);
+	}
+	if (resolving.has(name)) {
+		return false;
+	}
+	const nextResolving = new Set(resolving);
+	nextResolving.add(name);
+	return localBindings.every(
+		(binding) =>
+			binding.constInitializer !== undefined &&
+			isDirectDynamicCodeSinkReference(binding.constInitializer, bindings, nextResolving),
+	);
+}
+
+function isDynamicCodeSinkCallee(
+	expression: ts.Expression,
+	bindings: ReadonlyMap<string, readonly DynamicCodeBinding[]>,
+): boolean {
+	const callee = unwrapDynamicCodeCallee(expression);
+	if (isDynamicCodeGlobalMemberSink(callee)) {
+		return true;
+	}
+	if (!ts.isIdentifier(callee)) {
+		return false;
+	}
+	if (DYNAMIC_CODE_SINKS.has(callee.text)) {
+		return isBareDynamicCodeSinkIdentifier(callee.text, bindings, new Set());
+	}
+	const localBindings = bindings.get(callee.text);
+	return (
+		localBindings !== undefined &&
+		localBindings.length > 0 &&
+		localBindings.every(
+			(binding) =>
+				binding.constInitializer !== undefined &&
+				isDirectDynamicCodeSinkReference(binding.constInitializer, bindings, new Set()),
+		)
+	);
+}
+
+function findDynamicCodeCalls(providerRoot: string): SourceFinding[] {
+	const findings: SourceFinding[] = [];
+	const seen = new Set<string>();
+	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
+		const source = readFileSync(filePath, "utf8");
+		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		const sourceFile = ts.createSourceFile(
+			relPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			ts.ScriptKind.TS,
+		);
+		const bindings = collectDynamicCodeBindings(sourceFile);
+		const visit = (node: ts.Node): void => {
+			if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
+				return;
+			}
+			if (
+				(ts.isCallExpression(node) || ts.isNewExpression(node)) &&
+				isDynamicCodeSinkCallee(node.expression, bindings)
+			) {
+				const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+				const key = `${relPath}:${line}`;
+				if (!seen.has(key)) {
+					seen.add(key);
+					findings.push({ file: relPath, line });
+				}
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(sourceFile);
+		if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
+			break;
+		}
+	}
+	return findings;
+}
+
+function scoreNoDynamicCode(providerRoot: string): SubmitCheck {
+	const findings = findDynamicCodeCalls(providerRoot);
+	if (findings.length > 0) {
+		return blocker(
+			"no-dynamic-code",
+			SDK_NATIVE_CATEGORY,
+			"Dynamic code evaluation is not permitted in provider source.",
+			"Remove eval() and Function constructor calls. Provider HTTP access must go through ctx.http.",
+			0,
+			formatSourceFindings(findings),
+		);
+	}
+
+	return pass(
+		"no-dynamic-code",
+		SDK_NATIVE_CATEGORY,
+		"Provider source avoids dynamic code evaluation.",
+		0,
+	);
 }
 
 const REDUNDANT_RUNTIME_GUARD_PATTERNS: readonly RegExp[] = [
@@ -545,7 +773,11 @@ function countAsAssertions(providerRoot: string): {
 
 	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
 		const content = readFileSync(filePath, "utf8");
-		const lines = content.split(/\r?\n/);
+		const lines = maskCommentsAndStrings(
+			content,
+			toRelativeProviderPath(providerRoot, filePath),
+			{ blankPropertyKeys: true },
+		).split(/\r?\n/);
 		for (let index = 0; index < lines.length; index += 1) {
 			const line = lines[index];
 			if (
@@ -736,18 +968,44 @@ function offsetToLine(source: string, offset: number): number {
 // between them, so `.passthrough ()` / `.passthrough\n()` are still detected.
 const PASSTHROUGH_CALL = /\.passthrough\s*\(\s*\)/;
 
+type ExpressionSlice = {
+	raw: string;
+	masked: string;
+};
+
+function trimExpressionSlice(expr: ExpressionSlice): ExpressionSlice {
+	const start = expr.raw.length - expr.raw.trimStart().length;
+	const end = expr.raw.trimEnd().length;
+	return {
+		raw: expr.raw.slice(start, end),
+		masked: expr.masked.slice(start, end),
+	};
+}
+
+function balancedExpressionSlice(
+	source: string,
+	valueStart: number,
+	fileName?: string,
+): ExpressionSlice {
+	const raw = balancedValueExpression(source, valueStart, fileName);
+	return trimExpressionSlice({
+		raw,
+		masked: maskCommentsAndStrings(source, fileName).slice(valueStart, valueStart + raw.length),
+	});
+}
+
 // Strips redundant wrapping parentheses from an expression so that a value like
 // `(makeOperations())` or `((x))` classifies the same as `makeOperations()`.
 // Only unwraps when the leading `(` matches the trailing `)` at depth 0 (i.e.
 // the whole expression is parenthesized), preserving call expressions such as
 // `makeOperations()` whose first `(` is not a wrapper.
-function unwrapParens(expr: string): string {
-	let value = expr.trim();
-	while (value.startsWith("(")) {
+function unwrapParens(expr: ExpressionSlice): ExpressionSlice {
+	let value = trimExpressionSlice(expr);
+	while (value.raw.startsWith("(")) {
 		let depth = 0;
 		let matchIndex = -1;
-		for (let i = 0; i < value.length; i += 1) {
-			const ch = value[i];
+		for (let i = 0; i < value.raw.length; i += 1) {
+			const ch = value.masked[i];
 			if (ch === "(") {
 				depth += 1;
 			} else if (ch === ")") {
@@ -760,8 +1018,11 @@ function unwrapParens(expr: string): string {
 		}
 		// Only a true wrapper spans the entire expression (closing paren is the
 		// last char). Otherwise the leading `(` belongs to a sub-expression.
-		if (matchIndex === value.length - 1) {
-			value = value.slice(1, -1).trim();
+		if (matchIndex === value.raw.length - 1) {
+			value = trimExpressionSlice({
+				raw: value.raw.slice(1, -1),
+				masked: value.masked.slice(1, -1),
+			});
 		} else {
 			break;
 		}
@@ -798,14 +1059,14 @@ function balancedValueExpression(source: string, valueStart: number, fileName?: 
 // nested deeper than the outer object (inside handler bodies, nested objects,
 // or arrays) are ignored, so only a factory composition of the object itself
 // is detected. Input is expected to start at the outer `{`.
-function hasTopLevelFactorySpread(expr: string): boolean {
-	const open = expr.indexOf("{");
+function hasTopLevelFactorySpread(expr: ExpressionSlice): boolean {
+	const open = expr.masked.indexOf("{");
 	if (open === -1) {
 		return false;
 	}
 	let depth = 0;
-	for (let i = open; i < expr.length; i += 1) {
-		const ch = expr[i];
+	for (let i = open; i < expr.raw.length; i += 1) {
+		const ch = expr.masked[i];
 		if (ch === "{" || ch === "(" || ch === "[") {
 			depth += 1;
 		} else if (ch === "}" || ch === ")" || ch === "]") {
@@ -813,11 +1074,11 @@ function hasTopLevelFactorySpread(expr: string): boolean {
 			if (depth === 0) {
 				break;
 			}
-		} else if (ch === "." && depth === 1 && expr.startsWith("...", i)) {
+		} else if (ch === "." && depth === 1 && expr.masked.startsWith("...", i)) {
 			// A spread at the object's own level. Check whether the spread
 			// argument is a call expression (factory) rather than a plain
 			// identifier/member spread of an already-built object.
-			const rest = expr.slice(i + 3);
+			const rest = expr.raw.slice(i + 3);
 			if (/^\s*[A-Za-z_$][\w$.]*\s*\(/.test(rest)) {
 				return true;
 			}
@@ -832,15 +1093,15 @@ function hasTopLevelFactorySpread(expr: string): boolean {
 // hasTopLevelFactorySpread, so it is excluded here. These identifiers must be
 // resolved to their declarations: `const hidden = makeOperations()` spread as
 // `{ ...hidden }` is still a factory-composed map and must block.
-function topLevelSpreadIdentifiers(expr: string): string[] {
-	const open = expr.indexOf("{");
+function topLevelSpreadIdentifiers(expr: ExpressionSlice): string[] {
+	const open = expr.masked.indexOf("{");
 	if (open === -1) {
 		return [];
 	}
 	const names: string[] = [];
 	let depth = 0;
-	for (let i = open; i < expr.length; i += 1) {
-		const ch = expr[i];
+	for (let i = open; i < expr.raw.length; i += 1) {
+		const ch = expr.masked[i];
 		if (ch === "{" || ch === "(" || ch === "[") {
 			depth += 1;
 		} else if (ch === "}" || ch === ")" || ch === "]") {
@@ -848,8 +1109,8 @@ function topLevelSpreadIdentifiers(expr: string): string[] {
 			if (depth === 0) {
 				break;
 			}
-		} else if (ch === "." && depth === 1 && expr.startsWith("...", i)) {
-			const rest = expr.slice(i + 3);
+		} else if (ch === "." && depth === 1 && expr.masked.startsWith("...", i)) {
+			const rest = expr.raw.slice(i + 3);
 			// Bare identifier spread (no call parens) -> needs declaration
 			// resolution. `...obj.prop` member spreads are treated as already
 			// built and ignored (the leading identifier is captured).
@@ -882,8 +1143,8 @@ function topLevelSpreadIdentifiers(expr: string): string[] {
 // `makeOperations()` — stays classified as factory composition.
 const TRANSPARENT_RESHAPE_HEAD = /^Object\s*\.\s*fromEntries\s*\(/;
 const OBJECT_ENTRIES_HEAD = /^Object\s*\.\s*entries\s*\(/;
-function isTransparentObjectReshape(expr: string): boolean {
-	const head = TRANSPARENT_RESHAPE_HEAD.exec(expr);
+function isTransparentObjectReshape(expr: ExpressionSlice): boolean {
+	const head = TRANSPARENT_RESHAPE_HEAD.exec(expr.masked);
 	if (!head) {
 		return false;
 	}
@@ -891,7 +1152,7 @@ function isTransparentObjectReshape(expr: string): boolean {
 	// transparent only when that argument's root callee is `Object.entries(`
 	// (optionally chained: `Object.entries(obj).filter(...)`), so the source
 	// object is enumerable from source rather than produced by an opaque call.
-	const firstArg = expr.slice(head[0].length).trimStart();
+	const firstArg = expr.masked.slice(head[0].length).trimStart();
 	return OBJECT_ENTRIES_HEAD.test(firstArg);
 }
 
@@ -1179,14 +1440,17 @@ function spreadIdentifierResolvesToFactory(
 		}
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
 		const fileSource = filePath === indexPath ? indexSource : readFileSync(filePath, "utf8");
+		const maskedFileSource = maskCommentsAndStrings(fileSource, relPath, {
+			blankPropertyKeys: true,
+		});
 		const re = new RegExp(declRe.source, "g");
-		for (let m = re.exec(fileSource); m !== null; m = re.exec(fileSource)) {
+		for (let m = re.exec(maskedFileSource); m !== null; m = re.exec(maskedFileSource)) {
 			sawDeclaration = true;
 			const expr = unwrapParens(
-				balancedValueExpression(fileSource, m.index + m[0].length, relPath).trim(),
+				balancedExpressionSlice(fileSource, m.index + m[0].length, relPath),
 			);
 			const isFactory =
-				(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr) || hasTopLevelFactorySpread(expr)) &&
+				(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr.masked) || hasTopLevelFactorySpread(expr)) &&
 				!isTransparentObjectReshape(expr);
 			if (isFactory) {
 				return true;
@@ -1195,10 +1459,230 @@ function spreadIdentifierResolvesToFactory(
 	}
 	// No local declaration anywhere but imported into index.ts => constructed
 	// out of view; treat as factory (conservative, false-negative-safe).
-	if (!sawDeclaration && fileImportsBinding(indexSource, name)) {
+	if (
+		!sawDeclaration &&
+		fileImportsBinding(
+			maskCommentsAndStrings(indexSource, "index.ts", { blankPropertyKeys: true }),
+			name,
+		)
+	) {
 		return true;
 	}
 	return false;
+}
+
+function isDefineProviderCall(node: ts.CallExpression): boolean {
+	return ts.isIdentifier(node.expression) && node.expression.text === "defineProvider";
+}
+
+function resolveDefineProviderImplementationCall(
+	candidate: ts.CallExpression,
+): ts.CallExpression | undefined {
+	let root = candidate;
+	while (ts.isCallExpression(root.expression)) {
+		root = root.expression;
+	}
+	return isDefineProviderCall(root) ? candidate : undefined;
+}
+
+function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpression | undefined {
+	const defaultExports = sourceFile.statements.filter(
+		(statement): statement is ts.ExportAssignment =>
+			ts.isExportAssignment(statement) && !statement.isExportEquals,
+	);
+
+	// Phase-separated providers export a builder invocation directly. Preserve
+	// the previous locator's preference for that call over every defineProvider
+	// declaration that may also appear in the file.
+	for (const assignment of defaultExports) {
+		const expression = unwrapImplementationExpression(assignment.expression);
+		if (!ts.isCallExpression(expression)) {
+			continue;
+		}
+		if (resolveDefineProviderImplementationCall(expression) !== undefined) {
+			continue;
+		}
+		if (ts.isIdentifier(expression.expression)) {
+			return expression;
+		}
+	}
+
+	// For `defineProvider(metadata)(implementation)`, select the outer call whose
+	// argument is the implementation. A plain `defineProvider(implementation)`
+	// selects the single call itself.
+	for (const assignment of defaultExports) {
+		const defaultExpression = unwrapImplementationExpression(assignment.expression);
+		if (!ts.isCallExpression(defaultExpression)) {
+			continue;
+		}
+		const implementationCall = resolveDefineProviderImplementationCall(defaultExpression);
+		if (implementationCall !== undefined) {
+			return implementationCall;
+		}
+	}
+
+	// Resolve `export default provider` to a top-level variable initialized by
+	// defineProvider, including its curried implementation call when present.
+	for (const assignment of defaultExports) {
+		if (!ts.isIdentifier(assignment.expression)) {
+			continue;
+		}
+		const exportedName = assignment.expression.text;
+		for (const statement of sourceFile.statements) {
+			if (!ts.isVariableStatement(statement)) {
+				continue;
+			}
+			for (const declaration of statement.declarationList.declarations) {
+				if (
+					!ts.isIdentifier(declaration.name) ||
+					declaration.name.text !== exportedName ||
+					declaration.initializer === undefined
+				) {
+					continue;
+				}
+				if (!ts.isCallExpression(declaration.initializer)) {
+					continue;
+				}
+				const implementationCall = resolveDefineProviderImplementationCall(declaration.initializer);
+				if (implementationCall !== undefined) {
+					return implementationCall;
+				}
+			}
+		}
+	}
+
+	// Structural fixtures without a recognizable default export retain the
+	// previous fallback to the first defineProvider call in source order.
+	let firstCall: ts.CallExpression | undefined;
+	const visit = (node: ts.Node): void => {
+		if (firstCall !== undefined) {
+			return;
+		}
+		if (ts.isCallExpression(node)) {
+			const implementationCall = resolveDefineProviderImplementationCall(node);
+			if (implementationCall !== undefined) {
+				firstCall = implementationCall;
+				return;
+			}
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return firstCall;
+}
+
+function unwrapImplementationExpression(expression: ts.Expression): ts.Expression {
+	let current = expression;
+	while (
+		ts.isSatisfiesExpression(current) ||
+		ts.isAsExpression(current) ||
+		ts.isParenthesizedExpression(current) ||
+		ts.isNonNullExpression(current)
+	) {
+		current = current.expression;
+	}
+	return current;
+}
+
+function isOperationsProperty(
+	property: ts.ObjectLiteralElementLike,
+): property is ts.PropertyAssignment | ts.ShorthandPropertyAssignment {
+	if (ts.isShorthandPropertyAssignment(property)) {
+		return property.name.text === "operations";
+	}
+	if (!ts.isPropertyAssignment(property)) {
+		return false;
+	}
+	return (
+		(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) &&
+		property.name.text === "operations"
+	);
+}
+
+function isOperationsAccessorOrMethod(
+	property: ts.ObjectLiteralElementLike,
+): property is ts.GetAccessorDeclaration | ts.SetAccessorDeclaration | ts.MethodDeclaration {
+	if (
+		!ts.isGetAccessorDeclaration(property) &&
+		!ts.isSetAccessorDeclaration(property) &&
+		!ts.isMethodDeclaration(property)
+	) {
+		return false;
+	}
+	return (
+		(ts.isIdentifier(property.name) || ts.isStringLiteral(property.name)) &&
+		property.name.text === "operations"
+	);
+}
+
+function isSourceEnumerableStaticObjectLiteral(expression: ts.Expression): boolean {
+	const unwrapped = unwrapImplementationExpression(expression);
+	if (!ts.isObjectLiteralExpression(unwrapped)) {
+		return false;
+	}
+	return unwrapped.properties.every((property) => {
+		if (ts.isSpreadAssignment(property)) {
+			return isSourceEnumerableStaticObjectLiteral(property.expression);
+		}
+		if (property.name === undefined || ts.isComputedPropertyName(property.name)) {
+			return property.name === undefined;
+		}
+		return property.name.text !== "operations" || isOperationsProperty(property);
+	});
+}
+
+function findComputedImplementationProperty(
+	objectLiteral: ts.ObjectLiteralExpression,
+): ts.ObjectLiteralElementLike | undefined {
+	for (const property of objectLiteral.properties) {
+		if (property.name !== undefined && ts.isComputedPropertyName(property.name)) {
+			return property;
+		}
+		if (ts.isSpreadAssignment(property)) {
+			const spreadExpression = unwrapImplementationExpression(property.expression);
+			if (ts.isObjectLiteralExpression(spreadExpression)) {
+				const nested = findComputedImplementationProperty(spreadExpression);
+				if (nested !== undefined) {
+					return nested;
+				}
+			}
+		}
+	}
+	return undefined;
+}
+
+function findEffectiveOperationsProperty(
+	objectLiteral: ts.ObjectLiteralExpression,
+):
+	| ts.PropertyAssignment
+	| ts.ShorthandPropertyAssignment
+	| ts.GetAccessorDeclaration
+	| ts.SetAccessorDeclaration
+	| ts.MethodDeclaration
+	| undefined {
+	let effective:
+		| ts.PropertyAssignment
+		| ts.ShorthandPropertyAssignment
+		| ts.GetAccessorDeclaration
+		| ts.SetAccessorDeclaration
+		| ts.MethodDeclaration
+		| undefined;
+	for (const property of objectLiteral.properties) {
+		if (isOperationsProperty(property) || isOperationsAccessorOrMethod(property)) {
+			effective = property;
+			continue;
+		}
+		if (ts.isSpreadAssignment(property)) {
+			const spreadExpression = unwrapImplementationExpression(property.expression);
+			if (ts.isObjectLiteralExpression(spreadExpression)) {
+				const nested = findEffectiveOperationsProperty(spreadExpression);
+				if (nested !== undefined) {
+					effective = nested;
+				}
+			}
+		}
+	}
+	return effective;
 }
 
 function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
@@ -1215,10 +1699,22 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 
 	const source = readFileSync(indexPath, "utf8");
 	const indexRelPath = toRelativeProviderPath(providerRoot, indexPath);
-	// Use the same whitespace-tolerant detection as the resolver below, so a
-	// `defineProvider (` / `defineProvider\n(` formatting cannot pass the early
-	// exit before the real classification runs.
-	if (!/\bdefineProvider\s*\(/.test(source)) {
+	// The report preflight already rejects unparseable index.ts sources before
+	// this rule runs, so this local AST parse only replaces property location.
+	const sourceFile = ts.createSourceFile(
+		indexRelPath,
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TS,
+	);
+	const implementationCall = findProviderImplementationCall(sourceFile);
+	const rawImplementationArg = implementationCall?.arguments[0];
+	const implementationArg =
+		rawImplementationArg === undefined
+			? undefined
+			: unwrapImplementationExpression(rawImplementationArg);
+	if (implementationArg === undefined || !ts.isObjectLiteralExpression(implementationArg)) {
 		return pass(
 			ruleId,
 			SDK_NATIVE_CATEGORY,
@@ -1227,82 +1723,78 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		);
 	}
 
-	// Scope the scan to the exported provider builder's implementation argument,
-	// or to the legacy-looking declaration call used by structural test fixtures.
-	// A provider can contain helper/non-exported defineProvider calls before the
-	// real default export (e.g. test scaffolds), so resolve the default export
-	// rather than blindly taking the first regex match. Resolution order:
-	//   1. `export default <builder>(` — phase-separated provider
-	//   2. `export default defineProvider(` — structural fixture
-	//   3. `export default <ident>` then `const <ident> = defineProvider(`
-	//   4. fallback: first `defineProvider(` in the file
-	let defineParenIndex = -1;
-	const builderDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*\(/.exec(source);
-	if (builderDefault?.[1] !== undefined && builderDefault[1] !== "defineProvider") {
-		defineParenIndex = builderDefault.index + builderDefault[0].length - 1;
-	}
-	const inlineDefault = /\bexport\s+default\s+defineProvider\s*\(/.exec(source);
-	if (defineParenIndex === -1 && inlineDefault) {
-		const declarationParen = inlineDefault.index + inlineDefault[0].length - 1;
-		const declarationStart = declarationParen + 1;
-		const declaration = balancedValueExpression(source, declarationStart, indexRelPath);
-		let cursor = declarationStart + declaration.length;
-		while (/\s/.test(source[cursor] ?? "")) cursor++;
-		if (source[cursor] === ")") cursor++;
-		while (/\s/.test(source[cursor] ?? "")) cursor++;
-		defineParenIndex = source[cursor] === "(" ? cursor : declarationParen;
-	} else if (defineParenIndex === -1) {
-		const namedDefault = /\bexport\s+default\s+([A-Za-z_$][\w$]*)\s*;?/.exec(source);
-		const exportedName = namedDefault?.[1];
-		if (exportedName !== undefined) {
-			const namedDecl = new RegExp(
-				`(?:^|\\n)[ \t]*(?:export\\s+)?(?:const|let|var)\\s+${exportedName}\\s*(?::[^=\\n]+)?\\s*=\\s*defineProvider\\s*\\(`,
-			).exec(source);
-			if (namedDecl) {
-				defineParenIndex = namedDecl.index + namedDecl[0].length - 1;
-			}
-		}
-		if (defineParenIndex === -1) {
-			const firstCall = /\bdefineProvider\s*\(/.exec(source);
-			if (firstCall) {
-				defineParenIndex = firstCall.index + firstCall[0].length - 1;
-			}
-		}
-	}
-	if (defineParenIndex === -1) {
-		return pass(
-			ruleId,
-			SDK_NATIVE_CATEGORY,
-			"No defineProvider call to evaluate for operation composition.",
-			0,
-		);
-	}
-	const argStart = defineParenIndex + 1;
-	const argText = balancedValueExpression(source, argStart, indexRelPath);
-
-	// Resolve the value passed as `operations:` inside the implementation call,
-	// following one alias hop. The value is classified as a static object
-	// literal (pass) or a factory/call expression (block). The regex index is
-	// offset back into the full source so line numbers stay accurate.
-	const opsProp = /\boperations\s*:\s*/.exec(argText);
-	let opsValue: string | undefined;
+	// Resolve the top-level operations property from the AST, then feed its raw
+	// initializer offset into the existing expression classifier and alias
+	// resolver unchanged.
+	const opsProp = findEffectiveOperationsProperty(implementationArg);
+	let opsValue: ExpressionSlice | undefined;
 	let opsLine = 1;
-	if (opsProp) {
-		const valueStart = argStart + opsProp.index + opsProp[0].length;
-		opsValue = unwrapParens(balancedValueExpression(source, valueStart, indexRelPath).trim());
+	if (opsProp !== undefined && ts.isPropertyAssignment(opsProp)) {
+		const valueStart = opsProp.initializer.getStart(sourceFile);
+		opsValue = unwrapParens(balancedExpressionSlice(source, valueStart, indexRelPath));
 		opsLine = offsetToLine(source, valueStart);
 	}
 
 	// Property shorthand: `buildProvider({ operations })` — resolve the
 	// local `operations` const initializer.
 	let aliasName: string | undefined;
-	if (opsValue === undefined) {
-		if (/\boperations\s*[,}]/.test(argText)) {
-			aliasName = "operations";
-		}
-	} else if (/^[A-Za-z_$][\w$]*$/.test(opsValue)) {
+	if (opsProp !== undefined && ts.isShorthandPropertyAssignment(opsProp)) {
+		aliasName = "operations";
+	} else if (opsValue !== undefined && /^[A-Za-z_$][\w$]*$/.test(opsValue.masked)) {
 		// `operations: ops` — a bare identifier alias to resolve.
-		aliasName = opsValue;
+		aliasName = opsValue.raw;
+	}
+
+	// A computed property might resolve to `operations`, but its composition is
+	// not source-enumerable here. Fail closed, like an unresolved imported alias.
+	const computed = findComputedImplementationProperty(implementationArg);
+	if (computed !== undefined) {
+		const computedLine = offsetToLine(source, computed.getStart(sourceFile));
+		return blocker(
+			ruleId,
+			SDK_NATIVE_CATEGORY,
+			"The defineProvider operations property uses a computed property name that cannot be statically resolved.",
+			"Declare operations with the literal property name `operations` and a static object literal value so the provider-registry AST gate can enumerate it.",
+			0,
+			[`${indexRelPath}:${computedLine} (computed property name)`],
+		);
+	}
+
+	if (opsProp !== undefined && isOperationsAccessorOrMethod(opsProp)) {
+		const memberLine = offsetToLine(source, opsProp.getStart(sourceFile));
+		return blocker(
+			ruleId,
+			SDK_NATIVE_CATEGORY,
+			"The defineProvider operations member is an accessor/method whose value is not statically enumerable.",
+			"Declare operations as a property assignment with a static object literal value so the provider-registry AST gate can enumerate it.",
+			0,
+			[`${indexRelPath}:${memberLine} (operations accessor/method)`],
+		);
+	}
+
+	// A spread can override a preceding literal `operations` property. Only an
+	// inline static object literal (including recursively inline static spreads)
+	// exposes all of its property names to this source-only gate. Identifiers,
+	// calls, and other expressions are opaque and therefore fail closed.
+	const opaqueSpread = implementationArg.properties.find(
+		(property): property is ts.SpreadAssignment =>
+			ts.isSpreadAssignment(property) &&
+			!isSourceEnumerableStaticObjectLiteral(property.expression),
+	);
+	if (opaqueSpread !== undefined) {
+		const spreadLine = offsetToLine(source, opaqueSpread.getStart(sourceFile));
+		return escapeHatchResult(
+			providerRoot,
+			ruleId,
+			[{ file: indexRelPath, line: spreadLine }],
+			{
+				blockerMessage:
+					"The defineProvider implementation uses a non-enumerable spread that could override operations.",
+				remediation:
+					"Declare operations directly with a static object literal. Implementation spreads must be inline static object literals so the provider-registry AST gate can enumerate every property name.",
+				passMessage: "defineProvider declares operations as a static object literal.",
+			},
+		);
 	}
 
 	// Determine the effective initializer expression to classify. The alias may
@@ -1336,7 +1828,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		// do not resolve the exact import target path; "any same-named factory
 		// blocks" is the conservative, false-negative-avoiding choice for a gate.)
 		type Candidate = {
-			expr: string;
+			expr: ExpressionSlice;
 			line: number;
 			file: string;
 			isFactory: boolean;
@@ -1348,13 +1840,20 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			}
 			const relPath = toRelativeProviderPath(providerRoot, filePath);
 			const fileSource = filePath === indexPath ? source : readFileSync(filePath, "utf8");
+			const maskedFileSource = maskCommentsAndStrings(fileSource, relPath, {
+				blankPropertyKeys: true,
+			});
 
 			const declRe = new RegExp(aliasDecl.source, "g");
-			for (let m = declRe.exec(fileSource); m !== null; m = declRe.exec(fileSource)) {
+			for (
+				let m = declRe.exec(maskedFileSource);
+				m !== null;
+				m = declRe.exec(maskedFileSource)
+			) {
 				const valueStart = m.index + m[0].length;
-				const expr = unwrapParens(balancedValueExpression(fileSource, valueStart, relPath).trim());
+				const expr = unwrapParens(balancedExpressionSlice(fileSource, valueStart, relPath));
 				const isFactory =
-					(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr) || hasTopLevelFactorySpread(expr)) &&
+					(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr.masked) || hasTopLevelFactorySpread(expr)) &&
 					!isTransparentObjectReshape(expr);
 				candidates.push({
 					expr,
@@ -1364,9 +1863,14 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 				});
 			}
 			const destructRe = new RegExp(destructured.source, "g");
-			for (let m = destructRe.exec(fileSource); m !== null; m = destructRe.exec(fileSource)) {
+			for (
+				let m = destructRe.exec(maskedFileSource);
+				m !== null;
+				m = destructRe.exec(maskedFileSource)
+			) {
+				const raw = `${m[1]}(`;
 				candidates.push({
-					expr: `${m[1]}(`,
+					expr: { raw, masked: raw },
 					line: offsetToLine(fileSource, m.index),
 					file: relPath,
 					isFactory: true,
@@ -1392,11 +1896,15 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		// the unresolved import as a factory-composed (non-static) shape rather
 		// than silently passing.
 		if (!resolved) {
-			const importMatch = new RegExp(`\\bimport\\b[^;]*\\b${aliasName}\\b[^;]*\\bfrom\\b`).exec(
-				source,
-			);
+			const maskedIndexSource = maskCommentsAndStrings(source, indexRelPath, {
+				blankPropertyKeys: true,
+			});
+			const importMatch = new RegExp(
+				`\\bimport\\b[^;]*\\b${aliasName}\\b[^;]*\\bfrom\\b`,
+			).exec(maskedIndexSource);
 			if (importMatch) {
-				effective = `${aliasName}(`;
+				const raw = `${aliasName}(`;
+				effective = { raw, masked: raw };
 				effectiveLine = offsetToLine(source, importMatch.index);
 				effectiveFile = "index.ts";
 			}
@@ -1420,14 +1928,16 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			spreadIdentifierResolvesToFactory(providerRoot, indexPath, source, name),
 		);
 	const isStaticLiteral =
-		effective?.startsWith("{") === true && !hasFactorySpread && !hasFactorySpreadIdentifier;
+		effective?.masked.startsWith("{") === true && !hasFactorySpread && !hasFactorySpreadIdentifier;
 	// A call expression `ident(...)` (factory) or a factory-spread literal is
 	// the rejected, non-static shape — UNLESS it is the stdlib
 	// `Object.fromEntries(Object.entries(<source-visible obj>)...)` reshape,
 	// whose op set is still enumerable from source (verified golden pattern).
 	const isFactoryCall =
 		effective !== undefined &&
-		(/^[A-Za-z_$][\w$.]*\s*\(/.test(effective) || hasFactorySpread || hasFactorySpreadIdentifier) &&
+		(/^[A-Za-z_$][\w$.]*\s*\(/.test(effective.masked) ||
+			hasFactorySpread ||
+			hasFactorySpreadIdentifier) &&
 		!isTransparentObjectReshape(effective);
 
 	if (isFactoryCall && !isStaticLiteral) {
@@ -1453,7 +1963,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 }
 
 function scoreCredentialUsage(providerRoot: string, provider: ProviderDefinition): SubmitCheck {
-	const credentialReferences = findSourceLineMatches(providerRoot, /ctx\.credential/);
+	const credentialReferences = findSourceLineMatches(providerRoot, /ctx\.credential/, true);
 	const authMode = provider.auth?.mode ?? "none";
 	const credentialKeys = provider.credential?.keys ?? [];
 	const storesProviderCredential = authMode !== "none" || credentialKeys.length > 0;
@@ -1639,23 +2149,34 @@ function scoreSdkOwnedSecretPresence(
 function findSourceLineMatches(
 	providerRoot: string,
 	pattern: RegExp | ((line: string) => boolean),
+	useMaskedSource = false,
 ): SourceFinding[] {
-	return findSourceFindings(providerRoot, (line) => matchesLinePattern(line, pattern));
+	return findSourceFindings(
+		providerRoot,
+		(line) => matchesLinePattern(line, pattern),
+		useMaskedSource,
+	);
 }
 
 function findSourceFindings(
 	providerRoot: string,
 	matchesLine: (line: string, remainingLines: readonly string[]) => boolean,
+	useMaskedSource = false,
 ): SourceFinding[] {
 	const findings: SourceFinding[] = [];
 	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
 		const content = readFileSync(filePath, "utf8");
-		const lines = content.split(/\r?\n/);
+		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		const lines = (
+			useMaskedSource
+				? maskCommentsAndStrings(content, relPath, { blankPropertyKeys: true })
+				: content
+		).split(/\r?\n/);
 		for (let index = 0; index < lines.length; index += 1) {
 			const line = lines[index];
 			if (line !== undefined && matchesLine(line, lines.slice(index + 1))) {
 				findings.push({
-					file: toRelativeProviderPath(providerRoot, filePath),
+					file: relPath,
 					line: index + 1,
 				});
 				if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
@@ -2621,7 +3142,7 @@ function findVendorTimestampLeakFindings(providerRoot: string): SourceFinding[] 
 		].filter((range) => rangeContainedInRanges(fixtureRanges, range));
 
 		for (const range of fixtureResponseRanges) {
-			for (const literal of findStringLiteralsInRange(source, range)) {
+			for (const literal of findStringLiteralsInRange(source, range, relPath)) {
 				if (
 					rangeContainsOffset(zObjectRanges, literal.offset) ||
 					rangeContainsOffset(upstreamRanges, literal.offset) ||
@@ -2703,11 +3224,13 @@ function findConstValueRangeContaining(
 function findStringLiteralsInRange(
 	source: string,
 	range: ObjectRange,
+	fileName: string,
 ): Array<{ value: string; offset: number }> {
 	const literals: Array<{ value: string; offset: number }> = [];
+	const masked = maskCommentsAndStrings(source, fileName);
 	let index = range.start;
 	while (index <= range.end) {
-		const quote = source[index];
+		const quote = masked[index];
 		if (quote !== '"' && quote !== "'" && quote !== "`") {
 			index += 1;
 			continue;
@@ -2822,29 +3345,62 @@ function findStringEnd(source: string, start: number): number {
 // helper once per candidate match — the same file is masked thousands of
 // times in one run (measured: 1,872 calls for a 3.4k-line provider). Without
 // memoization that run regresses from ~8s to minutes and can exceed the CI
-// validation timeout. Successful results are cached by exact source text;
-// the cache stays small because a run only ever reads a handful of files.
+// validation timeout. Successful results are cached by exact source text and
+// property-key mode; the cache stays small because a run only ever reads a
+// handful of files.
 // Parse failures are NOT cached: they throw and abort the check (fail-closed).
 const MASK_CACHE_LIMIT = 64;
 const maskCache = new Map<string, string>();
 
-export function maskCommentsAndStrings(source: string, fileName = "provider.ts"): string {
-	const cached = maskCache.get(source);
+// Neutralize { } ( ) [ ], backtick, quotes, slash, backslash, comma, and semicolon
+// because scanners treat these as depth, string/regex delimiters, or top-level stops.
+const PRESERVED_PROPERTY_KEY_STRUCTURAL_CHARS = new Set([
+	"{",
+	"}",
+	"(",
+	")",
+	"[",
+	"]",
+	"`",
+	'"',
+	"'",
+	"/",
+	"\\",
+	",",
+	";",
+]);
+
+type MaskCommentsAndStringsOptions = {
+	blankPropertyKeys?: boolean;
+};
+
+export function maskCommentsAndStrings(
+	source: string,
+	fileName = "provider.ts",
+	options: MaskCommentsAndStringsOptions = {},
+): string {
+	const blankPropertyKeys = options.blankPropertyKeys === true;
+	const cacheKey = `${blankPropertyKeys ? "blank-keys" : "preserve-keys"}\0${source}`;
+	const cached = maskCache.get(cacheKey);
 	if (cached !== undefined) {
 		return cached;
 	}
-	const masked = computeMaskedSource(source, fileName);
+	const masked = computeMaskedSource(source, fileName, blankPropertyKeys);
 	if (maskCache.size >= MASK_CACHE_LIMIT) {
 		const oldest = maskCache.keys().next();
 		if (!oldest.done) {
 			maskCache.delete(oldest.value);
 		}
 	}
-	maskCache.set(source, masked);
+	maskCache.set(cacheKey, masked);
 	return masked;
 }
 
-function computeMaskedSource(source: string, fileName: string): string {
+function computeMaskedSource(
+	source: string,
+	fileName: string,
+	blankPropertyKeys: boolean,
+): string {
 	const transpiled = ts.transpileModule(source, {
 		// Declaration files trigger an internal TypeScript Debug Failure when
 		// passed to transpileModule. Parsing is all we need here, so always use a
@@ -2899,12 +3455,25 @@ function computeMaskedSource(source: string, fileName: string): string {
 
 		const start = node.getStart(sourceFile);
 		if (ts.isStringLiteral(node)) {
-			// Preserve quoted property keys ("response": ...) so range/key scanners
-			// can still match them; only string VALUES are blanked.
+			// Preserve quoted property keys ("response": ...) by default so range/key
+			// scanners can still match them. Line scanners opt into blanking key bodies
+			// as well, preventing key text from looking like executable source.
 			const isQuotedPropertyKey =
 				ts.isPropertyAssignment(node.parent) && node.parent.name === node;
-			if (!isQuotedPropertyKey) {
+			if (blankPropertyKeys || !isQuotedPropertyKey) {
 				maskRange(start + 1, node.end - 1);
+			} else {
+				for (let index = start + 1; index < node.end - 1; index += 1) {
+					if (
+						source[index] === "\\" &&
+						(source[index + 1] === "\n" || source[index + 1] === "\r")
+					) {
+						continue;
+					}
+					if (PRESERVED_PROPERTY_KEY_STRUCTURAL_CHARS.has(source[index] ?? "")) {
+						chars[index] = " ";
+					}
+				}
 			}
 		} else if (ts.isRegularExpressionLiteral(node)) {
 			let closeDelimiter = node.end - 1;

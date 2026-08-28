@@ -273,6 +273,19 @@ function assertionLines(count: number): string {
 	).join("\n");
 }
 
+function sourceWithFactorySpreadDepthNoise(noise: string): string {
+	return validProviderSource()
+		.replace(
+			"\nexport default defineProvider",
+			"\nfunction makeOperations() { return {}; }\nconst hidden = makeOperations();\n\nexport default defineProvider",
+		)
+		.replace(
+			'descriptionKey: "operations.lookup.description",',
+			`descriptionKey: "operations.lookup.description",\n      ${noise}`,
+		)
+		.replace("\n    },\n  },\n});", "\n    },\n    ...hidden,\n  },\n});");
+}
+
 afterEach(() => {
 	while (tempDirs.length > 0) {
 		const dir = tempDirs.pop();
@@ -535,6 +548,244 @@ void useStealth;
 		expect(report.score.verdict).toBe("blocked");
 	});
 
+	it("ignores raw fetch syntax inside comments", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-comment-",
+			`${validProviderSource()}\n// Example only: fetch("https://api.example.com/lookup")\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-raw-fetch");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
+	it("ignores raw fetch syntax inside string literals", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-string-",
+			`${validProviderSource()}\nconst documentation = "Call fetch( through the SDK client";\nvoid documentation;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-raw-fetch");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
+	it("blocks eval-based dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-eval-",
+			`${validProviderSource()}\nvoid eval("fetch(x)");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.maxPoints).toBe(0);
+		expect(check?.evidence?.some((line) => line.includes("index.ts:"))).toBe(true);
+	});
+
+	it("blocks globalThis.eval dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-globalthis-eval-",
+			`${validProviderSource()}\nexport function risky(u: string) { return globalThis.eval("fetch(u)"); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const dynamicCheck = report.checks.find((item) => item.id === "no-dynamic-code");
+		const fetchCheck = report.checks.find((item) => item.id === "no-raw-fetch");
+
+		expect(dynamicCheck?.status).toBe("fail");
+		expect(dynamicCheck?.level).toBe("blocker");
+		expect(dynamicCheck?.evidence).toEqual(["index.ts:61"]);
+		expect(fetchCheck?.status).toBe("pass");
+	});
+
+	it("blocks globalThis element-access eval dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-globalthis-element-eval-",
+			`${validProviderSource()}\nexport function risky(u: string) { return globalThis["eval"]("fetch(u)"); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.evidence).toEqual(["index.ts:61"]);
+	});
+
+	it("blocks window.eval dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-window-eval-",
+			`${validProviderSource()}\nvoid window.eval("1");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks globalThis.Function dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-globalthis-function-",
+			`${validProviderSource()}\nconst generated = globalThis.Function("return 1");\nvoid generated;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks window element-access Function dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-window-element-function-",
+			`${validProviderSource()}\nconst generated = window["Function"]("return 1");\nvoid generated;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks a local const alias of eval", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-const-alias-",
+			`${validProviderSource()}\nconst run = eval;\nvoid run("fetch(u)");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.evidence).toEqual(["index.ts:62"]);
+	});
+
+	it("blocks comma-indirect eval dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-indirect-eval-",
+			`${validProviderSource()}\nvoid (0, eval)("1");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks optional eval dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-optional-eval-",
+			`${validProviderSource()}\nvoid eval?.("1");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks new Function dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-new-function-",
+			`${validProviderSource()}\nconst generated = new Function("return 1");\nvoid generated;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks bare Function dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-function-",
+			`${validProviderSource()}\nconst generated = Function("return 1");\nvoid generated;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("allows a locally shadowed Function identifier", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-shadowed-function-",
+			`${validProviderSource()}\nconst compileSchema = (schema: string) => schema;\nconst Function = compileSchema;\nvoid Function("schema");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
+	it("ignores dynamic-code words inside comments and strings", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-inert-text-",
+			`${validProviderSource()}\n// Example only: eval("fetch(x)")\nconst documentation = "Use Function( only in a sandbox";\nvoid documentation;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
+	it("does not match identifiers that merely contain eval", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-identifier-boundary-",
+			`${validProviderSource()}\nfunction evaluateTotal(value: number) { return value; }\nconst helper = { evaluate: evaluateTotal };\nvoid evaluateTotal(1);\nvoid helper.evaluate(1);\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("passes the dynamic-code rule for a clean provider", async () => {
+		const dir = makeProviderDir("submit-no-dynamic-code-clean-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.maxPoints).toBe(0);
+		expect(check?.points).toBe(0);
+	});
+
+	it("ignores raw fetch syntax in a quoted property key", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-property-key-",
+			`${validProviderSource()}\nconst examples = { "fetch(": "use ctx.http instead" };\nvoid examples;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-raw-fetch");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
 	it("warns standalone bounty submissions for self-hosted browser runtime patterns", async () => {
 		const dir = makeProviderDir(
 			"submit-managed-browser-warning-",
@@ -644,6 +895,57 @@ ${assertionLines(5)}
 		expect(report.score.verdict).toBe("reviewable_with_warnings");
 	});
 
+	it("does not count type assertion examples inside comments", async () => {
+		const examples = Array.from(
+			{ length: 6 },
+			(_, index) => `// example ${index}: value as unknown`,
+		).join("\n");
+		const dir = makeProviderDir(
+			"submit-as-assertion-comment-",
+			`${validProviderSource()}\n${examples}\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "as-assertion-count");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("Type assertions are within the recommended limit.");
+	});
+
+	it("does not count type assertion examples inside string literals", async () => {
+		const examples = Array.from(
+			{ length: 6 },
+			(_, index) => `const assertionExample${index} = "value as unknown";`,
+		).join("\n");
+		const dir = makeProviderDir(
+			"submit-as-assertion-string-",
+			`${validProviderSource()}\n${examples}\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "as-assertion-count");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("Type assertions are within the recommended limit.");
+	});
+
+	it("does not count type assertion syntax in a quoted property key", async () => {
+		const dir = makeProviderDir(
+			"submit-as-assertion-property-key-",
+			sourceWithHandler(`handler: async (_ctx, input) => {
+${assertionLines(5)}
+        const examples = { "value as unknown": true };
+        return { ok: Boolean(value0 && value1 && value2 && value3 && value4 && examples) };
+      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "as-assertion-count");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("Type assertions are within the recommended limit.");
+	});
+
 	it("warns for moderate type assertion counts without changing score", async () => {
 		const dir = makeProviderDir(
 			"submit-as-assertion-warn-",
@@ -713,6 +1015,77 @@ ${assertionLines(21)}
 		expect(check?.maxPoints).toBe(0);
 		expect(check?.points).toBe(0);
 		expect(report.score.verdict).toBe("reviewable_with_warnings");
+	});
+
+	it("warns when the only credential reference is inside a comment", async () => {
+		const source = `${sourceWithAuth(`auth: {
+    mode: "credentials",
+    flow: {
+      continue: async () => ({
+        kind: "complete",
+        turnId: crypto.randomUUID(),
+        data: { credential: { userId: "user_123" } },
+      }),
+    },
+  },
+  credential: { keys: ["userId"] },`)}
+// ctx.credential would be used here
+`;
+		const dir = makeProviderDir("submit-credential-comment-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "credential-usage");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+	});
+
+	it("warns when the only credential reference is inside a string literal", async () => {
+		const source = `${sourceWithAuth(`auth: {
+    mode: "credentials",
+    flow: {
+      continue: async () => ({
+        kind: "complete",
+        turnId: crypto.randomUUID(),
+        data: { credential: { userId: "user_123" } },
+      }),
+    },
+  },
+  credential: { keys: ["userId"] },`)}
+const credentialDocumentation = "ctx.credential.get";
+void credentialDocumentation;
+`;
+		const dir = makeProviderDir("submit-credential-string-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "credential-usage");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+	});
+
+	it("warns when the only credential reference is a quoted property key", async () => {
+		const source = `${sourceWithAuth(`auth: {
+    mode: "credentials",
+    flow: {
+      continue: async () => ({
+        kind: "complete",
+        turnId: crypto.randomUUID(),
+        data: { credential: { userId: "user_123" } },
+      }),
+    },
+  },
+  credential: { keys: ["userId"] },`)}
+const examples = { "ctx.credential": "persist through the SDK" };
+void examples;
+`;
+		const dir = makeProviderDir("submit-credential-property-key-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "credential-usage");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
 	});
 
 	it("passes credential usage for no-auth providers", async () => {
@@ -1614,7 +1987,7 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 			'const rendered = `ignore "} ${({ "}": codeIdentifier })} output: z.object({ MKioskTy: z.string() })`;';
 		const masked = maskCommentsAndStrings(source);
 
-		expect(masked).toContain('${({ "}": codeIdentifier })}');
+		expect(masked).toContain('${({ " ": codeIdentifier })}');
 		expect(masked).not.toContain("ignore");
 		expect(masked).not.toContain("MKioskTy");
 	});
@@ -1686,12 +2059,73 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		expect(maskCommentsAndStrings(masked)).toBe(masked);
 	});
 
+	it("keeps line continuations in preserved quoted keys parseable and mask-idempotent", async () => {
+		const source = 'const value = { "long\\\nkey": 1 };';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked.length).toBe(source.length);
+
+		const providerSource = validProviderSource().replace(
+			"\nexport default defineProvider",
+			`\n${source}\nvoid value;\n\nexport default defineProvider`,
+		);
+		const dir = makeProviderDir("submit-mask-key-line-continuation-", providerSource);
+		writeValidLocaleCatalogs(dir);
+
+		const report = await buildSubmitCheckReport(dir);
+		expect(report.schemaVersion).toBe(1);
+		expect(report.checks.find((item) => item.id === "flat-operation-composition")).toBeDefined();
+		expect(maskCommentsAndStrings(masked)).toBe(masked);
+	});
+
 	it("preserves quoted property keys while masking quoted values", () => {
 		const source = 'const value = { "response" : "hidden" };';
 		const masked = maskCommentsAndStrings(source);
+		const responseOffset = source.indexOf('"response"');
 
-		expect(masked).toContain('"response" :');
+		expect(masked.slice(responseOffset, responseOffset + '"response" :'.length)).toBe(
+			'"response" :',
+		);
 		expect(masked).not.toContain("hidden");
+	});
+
+	it("neutralizes structural delimiters inside preserved quoted property keys", () => {
+		const source = 'const value = { "{ } ( ) [ ] ` \\" \' / \\\\, ;": hidden };';
+		const masked = maskCommentsAndStrings(source);
+		const keyStart = source.indexOf('"{');
+		const keyEnd = source.indexOf('": hidden', keyStart);
+		const keyBody = source.slice(keyStart + 1, keyEnd);
+		const maskedKeyBody = masked.slice(keyStart + 1, keyEnd);
+		const structural = new Set(["{", "}", "(", ")", "[", "]", "`", '"', "'", "/", "\\", ",", ";"]);
+
+		expect(masked.length).toBe(source.length);
+		expect(maskedKeyBody).toBe(
+			[...keyBody].map((character) => (structural.has(character) ? " " : character)).join(""),
+		);
+	});
+
+	it("leaves ordinary quoted property-key text byte-for-byte intact", () => {
+		const source = 'const value = { "some-key": hidden };';
+		const masked = maskCommentsAndStrings(source);
+		const keyStart = source.indexOf('"some-key"');
+
+		expect(masked.slice(keyStart, keyStart + '"some-key"'.length)).toBe('"some-key"');
+	});
+
+	it("keeps property-key mask modes isolated in the memo cache", () => {
+		const source = 'const value = { "fetch(": "hidden" };';
+		const keyPreserving = maskCommentsAndStrings(source);
+		const keyBlanked = maskCommentsAndStrings(source, "provider.ts", {
+			blankPropertyKeys: true,
+		});
+
+		expect(keyPreserving).toContain('"fetch ":');
+		expect(keyBlanked).not.toContain("fetch(");
+		expect(maskCommentsAndStrings(source)).toBe(keyPreserving);
+		expect(
+			maskCommentsAndStrings(source, "provider.ts", { blankPropertyKeys: true }),
+		).toBe(keyBlanked);
+		expect(keyBlanked).not.toBe(keyPreserving);
 	});
 
 	it("masks a string used as a case value", () => {
@@ -1839,6 +2273,20 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
 		expect(check?.evidence?.[0]).toMatch(/index\.ts:\d+/);
+	});
+
+	it("ignores compact vendor timestamp examples in fixture comments", async () => {
+		const source = validProviderSource().replace(
+			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+			'fixtures: { request: { q: "btc" }, response: { /* date: "20260709" */ ok: true } },',
+		);
+		const dir = makeProviderDir("submit-vendor-timestamp-comment-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
 	});
 
 	it("does not flag HHmm-like status values in normalized response fixtures", async () => {
@@ -3301,6 +3749,113 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		expect(check?.status).toBe("pass");
 	});
 
+	it("blocks factory operations when the implementation argument uses satisfies", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "satisfies", operations: makeOperations() } satisfies Record<string, unknown>);
+`;
+		const dir = makeProviderDir("submit-satisfies-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations when the implementation argument uses as", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "asserted", operations: makeOperations() } as Record<string, unknown>);
+`;
+		const dir = makeProviderDir("submit-asserted-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("inspects static operations when the implementation argument uses satisfies", async () => {
+		const source = validProviderSource().replace(
+			/\}\);\s*$/,
+			"} satisfies Record<string, unknown>);",
+		);
+		const dir = makeProviderDir("submit-satisfies-static-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("defineProvider declares operations as a static object literal.");
+	});
+
+	it("blocks named curried defineProvider factory operations", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+function makeOperations() { return {}; }
+const providerImpl = defineProvider({ id: "probe" })({ operations: makeOperations() });
+export default providerImpl;
+`;
+		const dir = makeProviderDir("submit-named-curried-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks inline curried defineProvider factory operations", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "inline-curried" })({ operations: makeOperations() });
+`;
+		const dir = makeProviderDir("submit-inline-curried-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("passes named curried defineProvider static operations", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+const providerImpl = defineProvider({ id: "named-static", operations: makeMetadataOperations() })({ operations: { ping: {} } });
+export default providerImpl;
+`;
+		const dir = makeProviderDir("submit-named-curried-static-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("defineProvider declares operations as a static object literal.");
+	});
+
+	it("passes inline curried defineProvider static operations", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "inline-static" })({ operations: { ping: {} } });
+`;
+		const dir = makeProviderDir("submit-inline-curried-static-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("defineProvider declares operations as a static object literal.");
+	});
+
 	it("blocks input passthrough bound via a non-input-named schema", async () => {
 		const source = validProviderSource()
 			.replace(
@@ -3338,6 +3893,229 @@ import { defineProvider } from "@apifuse/provider-sdk";
 export default defineProvider({ id: "factory", version: "1.0.0", runtime: "standard", operations: makeOperations(handlers) });
 `;
 		const dir = makeProviderDir("submit-inline-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory-composed operations under a quoted property name", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "factory", version: "1.0.0", runtime: "standard", "operations": makeOperations() });
+`;
+		const dir = makeProviderDir("submit-quoted-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("passes static-literal operations under a quoted property name", async () => {
+		const source = validProviderSource().replace("  operations: {", '  "operations": {');
+		const dir = makeProviderDir("submit-quoted-static-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks an unresolved computed operations property name", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+const opsKey = "operations";
+export default defineProvider({ id: "computed", version: "1.0.0", runtime: "standard", [opsKey]: makeOperations() });
+`;
+		const dir = makeProviderDir("submit-computed-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.message).toContain("computed property name");
+		expect(check?.message).not.toContain("factory call");
+		expect(check?.evidence).toContain("index.ts:5 (computed property name)");
+	});
+
+	it("blocks a computed operations override after a static literal", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+const opsKey = "operations";
+export default defineProvider({ id: "computed-override" })({
+  operations: { lookup: {} },
+  [opsKey]: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-computed-operations-override-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.message).toContain("computed property name");
+		expect(check?.evidence).toContain("index.ts:7 (computed property name)");
+	});
+
+	it("blocks an opaque implementation spread after static operations", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "spread-override" })({
+  operations: { lookup: {} },
+  ...makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-opaque-implementation-spread-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("passes an inline static object spread in the implementation", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "inline-static-spread" })({
+  operations: { lookup: {} },
+  ...{ operations: { ping: {} } },
+});
+`;
+		const dir = makeProviderDir("submit-inline-static-implementation-spread-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("classifies operations from an inline implementation spread", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "inline-factory-spread" })({
+  operations: { lookup: {} },
+  ...{ operations: makeOperations() },
+});
+`;
+		const dir = makeProviderDir("submit-inline-factory-implementation-spread-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations shadowed by an operations comment", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "factory",
+  version: "1.0.0",
+  runtime: "standard",
+  // operations: makeOperations()
+  operations: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-comment-shadowed-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations after an operations-like quoted key", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "factory",
+  version: "1.0.0",
+  runtime: "standard",
+  meta: { "operations: decoy": true },
+  operations: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-quoted-key-shadowed-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations after an operations decoy in a template literal", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "factory",
+  version: "1.0.0",
+  runtime: "standard",
+  meta: { note: \`operations: decoy\` },
+  operations: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-template-shadowed-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations after an operations decoy in a comment", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "factory",
+  version: "1.0.0",
+  runtime: "standard",
+  // operations: decoy
+  operations: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-comment-decoy-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations after an operations string literal", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "factory",
+  version: "1.0.0",
+  runtime: "standard",
+  description: "operations: x",
+  operations: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-string-shadowed-factory-ops-", source);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "flat-operation-composition");
@@ -3532,6 +4310,60 @@ export default defineProvider({ id: "real", version: "1.0.0", runtime: "standard
 		expect(check?.level).toBe("blocker");
 	});
 
+	it("unwraps satisfies on a default-exported separated builder call", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+const meta = { id: "factory", version: "1.0.0", runtime: "standard" };
+const buildProvider = defineProvider(meta);
+export default buildProvider({ operations: makeOperations() }) satisfies Record<string, unknown>;
+`;
+		const dir = makeProviderDir("submit-separated-builder-satisfies-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("unwraps an as assertion on the default-exported provider call", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+const helper = defineProvider({ id: "helper", version: "1.0.0", runtime: "standard", operations: {} });
+export default defineProvider({ id: "factory", version: "1.0.0", runtime: "standard" })({
+  operations: makeOperations(),
+}) as Record<string, unknown>;
+`;
+		const dir = makeProviderDir("submit-default-export-as-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks an operations getter whose value is not statically enumerable", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "factory", version: "1.0.0", runtime: "standard" })({
+  get operations() { return makeOperations(); },
+});
+`;
+		const dir = makeProviderDir("submit-operations-getter-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.message).toContain("accessor/method");
+		expect(check?.message).toContain("not statically enumerable");
+	});
+
 	it("passes a static default export even when an earlier helper is factory-composed", async () => {
 		// A factory helper appears first; the real default export is static and
 		// must pass (the first regex match would have wrongly blocked it).
@@ -3642,6 +4474,108 @@ export default defineProvider({ id: "spread", version: "1.0.0", runtime: "standa
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks a factory spread after a quoted opening-brace operation key", async () => {
+		const source = sourceWithFactorySpreadDepthNoise("").replace(
+			"operations: {\n    lookup:",
+			"operations: {\n    \"{\": undefined as never,\n    lookup:",
+		);
+		const dir = makeProviderDir("submit-factory-spread-quoted-open-key-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("ignores a nested spread after a quoted closing-brace operation key", async () => {
+		const source = validProviderSource()
+			.replace(
+				"\nexport default defineProvider",
+				"\nfunction makeFields() { return {}; }\n\nexport default defineProvider",
+			)
+			.replace(
+				'descriptionKey: "operations.lookup.description",',
+				'descriptionKey: "operations.lookup.description",\n      "}": undefined as never,\n      ...makeFields(),',
+			);
+		const dir = makeProviderDir("submit-factory-spread-quoted-close-key-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks an operations-level factory spread after an opening brace in a string", async () => {
+		const dir = makeProviderDir(
+			"submit-factory-spread-string-open-",
+			sourceWithFactorySpreadDepthNoise('documentation: "{",'),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks an operations-level factory spread after an opening brace in a template", async () => {
+		const dir = makeProviderDir(
+			"submit-factory-spread-template-open-",
+			sourceWithFactorySpreadDepthNoise("documentation: `{`,"),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks an operations-level factory spread after an opening brace in a comment", async () => {
+		const dir = makeProviderDir(
+			"submit-factory-spread-comment-open-",
+			sourceWithFactorySpreadDepthNoise("// {"),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks an operations-level factory spread after an opening brace in a regex", async () => {
+		const dir = makeProviderDir(
+			"submit-factory-spread-regex-open-",
+			sourceWithFactorySpreadDepthNoise("pattern: /\\{/,"),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("ignores a nested factory spread promoted by a closing brace in a string", async () => {
+		const source = validProviderSource()
+			.replace(
+				"\nexport default defineProvider",
+				"\nfunction makeFields() { return {}; }\nconst fields = makeFields();\n\nexport default defineProvider",
+			)
+			.replace(
+				'descriptionKey: "operations.lookup.description",',
+				'descriptionKey: "operations.lookup.description",\n      documentation: "}",\n      ...fields,',
+			);
+		const dir = makeProviderDir("submit-nested-spread-string-close-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
 	});
 
 	it("blocks a factory provider formatted as `defineProvider (` with whitespace", async () => {
