@@ -31,3 +31,8 @@ fully blanked `blankPropertyKeys` variant is available to line scanners.
 The flat-operation `operations` property is now located via the TypeScript
 AST, so quoted keys, decoy key text, comments, and strings can no longer shadow
 or hide it.
+
+The AST locator unwraps `satisfies`/`as` wrappers and resolves the curried
+`defineProvider(meta)(impl)` form to the implementation call. A new
+`no-dynamic-code` blocker rejects `eval`/`Function` in provider source,
+replacing the incidental coverage the masked text scan removed.

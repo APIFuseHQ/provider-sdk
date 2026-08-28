@@ -301,6 +301,7 @@ export async function buildSubmitCheckReport(
 		checks.push(scoreNoVendorImport(providerRoot));
 		checks.push(scoreDescribeKey(providerRoot));
 		checks.push(scoreNoRawFetch(providerRoot));
+		checks.push(scoreNoDynamicCode(providerRoot));
 		checks.push(scoreNoRedundantRuntimeGuards(providerRoot));
 		checks.push(scoreManagedBrowserRuntime(providerRoot));
 		checks.push(scoreAsAssertionCount(providerRoot));
@@ -488,6 +489,31 @@ function scoreNoRawFetch(providerRoot: string): SubmitCheck {
 	}
 
 	return pass("no-raw-fetch", SDK_NATIVE_CATEGORY, "Provider source avoids raw fetch().", 0);
+}
+
+function scoreNoDynamicCode(providerRoot: string): SubmitCheck {
+	const findings = findSourceLineMatches(
+		providerRoot,
+		/(?<![.\w$])(?:eval|Function)\s*\(|\bnew\s+Function\s*\(/,
+		true,
+	);
+	if (findings.length > 0) {
+		return blocker(
+			"no-dynamic-code",
+			SDK_NATIVE_CATEGORY,
+			"Dynamic code evaluation is not permitted in provider source.",
+			"Remove eval() and Function constructor calls. Provider HTTP access must go through ctx.http.",
+			0,
+			formatSourceFindings(findings),
+		);
+	}
+
+	return pass(
+		"no-dynamic-code",
+		SDK_NATIVE_CATEGORY,
+		"Provider source avoids dynamic code evaluation.",
+		0,
+	);
 }
 
 const REDUNDANT_RUNTIME_GUARD_PATTERNS: readonly RegExp[] = [
@@ -1247,6 +1273,16 @@ function isDefineProviderCall(node: ts.CallExpression): boolean {
 	return ts.isIdentifier(node.expression) && node.expression.text === "defineProvider";
 }
 
+function resolveDefineProviderImplementationCall(
+	candidate: ts.CallExpression,
+): ts.CallExpression | undefined {
+	let root = candidate;
+	while (ts.isCallExpression(root.expression)) {
+		root = root.expression;
+	}
+	return isDefineProviderCall(root) ? candidate : undefined;
+}
+
 function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpression | undefined {
 	const defaultExports = sourceFile.statements.filter(
 		(statement): statement is ts.ExportAssignment =>
@@ -1258,39 +1294,33 @@ function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpre
 	// declaration that may also appear in the file.
 	for (const assignment of defaultExports) {
 		const expression = assignment.expression;
-		if (
-			ts.isCallExpression(expression) &&
-			ts.isIdentifier(expression.expression) &&
-			expression.expression.text !== "defineProvider"
-		) {
+		if (!ts.isCallExpression(expression)) {
+			continue;
+		}
+		if (resolveDefineProviderImplementationCall(expression) !== undefined) {
+			continue;
+		}
+		if (ts.isIdentifier(expression.expression)) {
 			return expression;
 		}
 	}
 
-	// For `defineProvider(metadata)(implementation)`, select the immediate call
-	// after defineProvider, matching the former balanced-text selection. A plain
-	// `export default defineProvider(implementation)` selects the declaration
-	// call itself.
+	// For `defineProvider(metadata)(implementation)`, select the outer call whose
+	// argument is the implementation. A plain `defineProvider(implementation)`
+	// selects the single call itself.
 	for (const assignment of defaultExports) {
 		const defaultExpression = assignment.expression;
 		if (!ts.isCallExpression(defaultExpression)) {
 			continue;
 		}
-		let expression: ts.CallExpression = defaultExpression;
-		while (ts.isCallExpression(expression.expression)) {
-			if (isDefineProviderCall(expression.expression)) {
-				return expression;
-			}
-			expression = expression.expression;
-		}
-		if (isDefineProviderCall(expression)) {
-			return expression;
+		const implementationCall = resolveDefineProviderImplementationCall(defaultExpression);
+		if (implementationCall !== undefined) {
+			return implementationCall;
 		}
 	}
 
 	// Resolve `export default provider` to a top-level variable initialized by
-	// defineProvider. The old locator selected the defineProvider declaration
-	// call itself, even if another call was chained after it.
+	// defineProvider, including its curried implementation call when present.
 	for (const assignment of defaultExports) {
 		if (!ts.isIdentifier(assignment.expression)) {
 			continue;
@@ -1311,12 +1341,9 @@ function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpre
 				if (!ts.isCallExpression(declaration.initializer)) {
 					continue;
 				}
-				let initializer: ts.CallExpression = declaration.initializer;
-				while (ts.isCallExpression(initializer.expression)) {
-					initializer = initializer.expression;
-				}
-				if (isDefineProviderCall(initializer)) {
-					return initializer;
+				const implementationCall = resolveDefineProviderImplementationCall(declaration.initializer);
+				if (implementationCall !== undefined) {
+					return implementationCall;
 				}
 			}
 		}
@@ -1329,14 +1356,30 @@ function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpre
 		if (firstCall !== undefined) {
 			return;
 		}
-		if (ts.isCallExpression(node) && isDefineProviderCall(node)) {
-			firstCall = node;
-			return;
+		if (ts.isCallExpression(node)) {
+			const implementationCall = resolveDefineProviderImplementationCall(node);
+			if (implementationCall !== undefined) {
+				firstCall = implementationCall;
+				return;
+			}
 		}
 		ts.forEachChild(node, visit);
 	};
 	visit(sourceFile);
 	return firstCall;
+}
+
+function unwrapImplementationExpression(expression: ts.Expression): ts.Expression {
+	let current = expression;
+	while (
+		ts.isSatisfiesExpression(current) ||
+		ts.isAsExpression(current) ||
+		ts.isParenthesizedExpression(current) ||
+		ts.isNonNullExpression(current)
+	) {
+		current = current.expression;
+	}
+	return current;
 }
 
 function isOperationsProperty(
@@ -1378,7 +1421,11 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		ts.ScriptKind.TS,
 	);
 	const implementationCall = findProviderImplementationCall(sourceFile);
-	const implementationArg = implementationCall?.arguments[0];
+	const rawImplementationArg = implementationCall?.arguments[0];
+	const implementationArg =
+		rawImplementationArg === undefined
+			? undefined
+			: unwrapImplementationExpression(rawImplementationArg);
 	if (implementationArg === undefined || !ts.isObjectLiteralExpression(implementationArg)) {
 		return pass(
 			ruleId,
@@ -1419,9 +1466,15 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 				)
 			: undefined;
 	if (computed !== undefined) {
-		const raw = "computedOperations()";
-		opsValue = { raw, masked: raw };
-		opsLine = offsetToLine(source, computed.getStart(sourceFile));
+		const computedLine = offsetToLine(source, computed.getStart(sourceFile));
+		return blocker(
+			ruleId,
+			SDK_NATIVE_CATEGORY,
+			"The defineProvider operations property uses a computed property name that cannot be statically resolved.",
+			"Declare operations with the literal property name `operations` and a static object literal value so the provider-registry AST gate can enumerate it.",
+			0,
+			[`${indexRelPath}:${computedLine} (computed property name)`],
+		);
 	}
 
 	// Determine the effective initializer expression to classify. The alias may

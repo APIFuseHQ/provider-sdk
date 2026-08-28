@@ -565,6 +565,83 @@ void useStealth;
 		expect(check?.evidence).toBeUndefined();
 	});
 
+	it("blocks eval-based dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-eval-",
+			`${validProviderSource()}\nvoid eval("fetch(x)");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+		expect(check?.maxPoints).toBe(0);
+		expect(check?.evidence?.some((line) => line.includes("index.ts:"))).toBe(true);
+	});
+
+	it("blocks new Function dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-new-function-",
+			`${validProviderSource()}\nconst generated = new Function("return 1");\nvoid generated;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks bare Function dynamic code evaluation", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-function-",
+			`${validProviderSource()}\nconst generated = Function("return 1");\nvoid generated;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("ignores dynamic-code words inside comments and strings", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-inert-text-",
+			`${validProviderSource()}\n// Example only: eval("fetch(x)")\nconst documentation = "Use Function( only in a sandbox";\nvoid documentation;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
+	it("does not match identifiers that merely contain eval", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-identifier-boundary-",
+			`${validProviderSource()}\nfunction evaluateTotal(value: number) { return value; }\nvoid evaluateTotal(1);\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("passes the dynamic-code rule for a clean provider", async () => {
+		const dir = makeProviderDir("submit-no-dynamic-code-clean-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-dynamic-code");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.maxPoints).toBe(0);
+		expect(check?.points).toBe(0);
+	});
+
 	it("ignores raw fetch syntax in a quoted property key", async () => {
 		const dir = makeProviderDir(
 			"submit-no-raw-fetch-property-key-",
@@ -3541,6 +3618,113 @@ export default defineProvider({ id: "factory", version: "1.0.0", runtime: "stand
 		expect(check?.status).toBe("pass");
 	});
 
+	it("blocks factory operations when the implementation argument uses satisfies", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "satisfies", operations: makeOperations() } satisfies Record<string, unknown>);
+`;
+		const dir = makeProviderDir("submit-satisfies-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations when the implementation argument uses as", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "asserted", operations: makeOperations() } as Record<string, unknown>);
+`;
+		const dir = makeProviderDir("submit-asserted-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("inspects static operations when the implementation argument uses satisfies", async () => {
+		const source = validProviderSource().replace(
+			/\}\);\s*$/,
+			"} satisfies Record<string, unknown>);",
+		);
+		const dir = makeProviderDir("submit-satisfies-static-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("defineProvider declares operations as a static object literal.");
+	});
+
+	it("blocks named curried defineProvider factory operations", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+function makeOperations() { return {}; }
+const providerImpl = defineProvider({ id: "probe" })({ operations: makeOperations() });
+export default providerImpl;
+`;
+		const dir = makeProviderDir("submit-named-curried-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks inline curried defineProvider factory operations", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "inline-curried" })({ operations: makeOperations() });
+`;
+		const dir = makeProviderDir("submit-inline-curried-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("passes named curried defineProvider static operations", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+const providerImpl = defineProvider({ id: "named-static", operations: makeMetadataOperations() })({ operations: { ping: {} } });
+export default providerImpl;
+`;
+		const dir = makeProviderDir("submit-named-curried-static-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("defineProvider declares operations as a static object literal.");
+	});
+
+	it("passes inline curried defineProvider static operations", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({ id: "inline-static" })({ operations: { ping: {} } });
+`;
+		const dir = makeProviderDir("submit-inline-curried-static-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("defineProvider declares operations as a static object literal.");
+	});
+
 	it("blocks input passthrough bound via a non-input-named schema", async () => {
 		const source = validProviderSource()
 			.replace(
@@ -3625,6 +3809,9 @@ export default defineProvider({ id: "computed", version: "1.0.0", runtime: "stan
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
+		expect(check?.message).toContain("computed property name");
+		expect(check?.message).not.toContain("factory call");
+		expect(check?.evidence).toContain("index.ts:5 (computed property name)");
 	});
 
 	it("blocks factory operations shadowed by an operations comment", async () => {
