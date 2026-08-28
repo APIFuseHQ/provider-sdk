@@ -113,6 +113,7 @@ export type SmokeResult = {
 type SourceFinding = {
 	file: string;
 	line: number;
+	detail?: string;
 };
 
 const SDK_NATIVE_CATEGORY = "sdk-native";
@@ -475,7 +476,7 @@ function scoreDescribeKey(providerRoot: string): SubmitCheck {
 }
 
 function scoreNoRawFetch(providerRoot: string): SubmitCheck {
-	const findings = findSourceLineMatches(providerRoot, /(?<![.\w])fetch\s*\(/, true);
+	const findings = findGlobalSinkCalls(providerRoot, FETCH_SINKS);
 	if (findings.length > 0) {
 		const evidence = formatSourceFindings(findings);
 		return blocker(
@@ -492,6 +493,7 @@ function scoreNoRawFetch(providerRoot: string): SubmitCheck {
 }
 
 const DYNAMIC_CODE_SINKS: ReadonlySet<string> = new Set(["eval", "Function"]);
+const FETCH_SINKS: ReadonlySet<string> = new Set(["fetch"]);
 const DYNAMIC_CODE_GLOBAL_OBJECTS: ReadonlySet<string> = new Set([
 	"globalThis",
 	"window",
@@ -499,7 +501,7 @@ const DYNAMIC_CODE_GLOBAL_OBJECTS: ReadonlySet<string> = new Set([
 	"global",
 ]);
 
-function unwrapDynamicCodeCallee(expression: ts.Expression): ts.Expression {
+function unwrapLocalExpression(expression: ts.Expression): ts.Expression {
 	let current = expression;
 	while (
 		ts.isParenthesizedExpression(current) ||
@@ -509,22 +511,20 @@ function unwrapDynamicCodeCallee(expression: ts.Expression): ts.Expression {
 	) {
 		current = current.expression;
 	}
-	if (
-		ts.isBinaryExpression(current) &&
-		current.operatorToken.kind === ts.SyntaxKind.CommaToken
-	) {
-		return unwrapDynamicCodeCallee(current.right);
+	if (ts.isBinaryExpression(current) && current.operatorToken.kind === ts.SyntaxKind.CommaToken) {
+		return unwrapLocalExpression(current.right);
 	}
 	return current;
 }
 
-type DynamicCodeBinding = {
+type LocalBinding = {
 	constInitializer?: ts.Expression;
+	destructuredProperty?: string;
 };
 
-function collectDynamicCodeBindings(sourceFile: ts.SourceFile): Map<string, DynamicCodeBinding[]> {
-	const bindings = new Map<string, DynamicCodeBinding[]>();
-	const addBinding = (name: string, binding: DynamicCodeBinding = {}): void => {
+function collectLocalBindings(sourceFile: ts.SourceFile): Map<string, LocalBinding[]> {
+	const bindings = new Map<string, LocalBinding[]>();
+	const addBinding = (name: string, binding: LocalBinding = {}): void => {
 		const existing = bindings.get(name);
 		if (existing === undefined) {
 			bindings.set(name, [binding]);
@@ -532,25 +532,35 @@ function collectDynamicCodeBindings(sourceFile: ts.SourceFile): Map<string, Dyna
 			existing.push(binding);
 		}
 	};
-	const addBindingName = (bindingName: ts.BindingName, binding: DynamicCodeBinding = {}): void => {
+	const addBindingName = (bindingName: ts.BindingName, binding: LocalBinding = {}): void => {
 		if (ts.isIdentifier(bindingName)) {
 			addBinding(bindingName.text, binding);
 			return;
 		}
 		for (const element of bindingName.elements) {
-			if (!ts.isOmittedExpression(element)) {
-				addBindingName(element.name);
+			if (ts.isOmittedExpression(element)) {
+				continue;
 			}
+			if (ts.isObjectBindingPattern(bindingName) && !element.dotDotDotToken) {
+				const property = element.propertyName ?? element.name;
+				const propertyName = propertyNameText(property);
+				if (propertyName !== undefined && ts.isIdentifier(element.name)) {
+					addBinding(element.name.text, {
+						constInitializer: binding.constInitializer,
+						destructuredProperty: propertyName,
+					});
+					continue;
+				}
+			}
+			addBindingName(element.name);
 		}
 	};
 	const visit = (node: ts.Node): void => {
 		if (ts.isVariableDeclaration(node)) {
-			const isDirectConstBinding =
-				ts.isIdentifier(node.name) &&
-				ts.isVariableDeclarationList(node.parent) &&
-				(node.parent.flags & ts.NodeFlags.Const) !== 0;
+			const isConstBinding =
+				ts.isVariableDeclarationList(node.parent) && (node.parent.flags & ts.NodeFlags.Const) !== 0;
 			addBindingName(node.name, {
-				constInitializer: isDirectConstBinding ? node.initializer : undefined,
+				constInitializer: isConstBinding ? node.initializer : undefined,
 			});
 		} else if (
 			(ts.isFunctionDeclaration(node) || ts.isFunctionExpression(node)) &&
@@ -570,8 +580,26 @@ function collectDynamicCodeBindings(sourceFile: ts.SourceFile): Map<string, Dyna
 	return bindings;
 }
 
-function isDynamicCodeGlobalMemberSink(expression: ts.Expression): boolean {
-	const callee = unwrapDynamicCodeCallee(expression);
+function propertyNameText(name: ts.PropertyName | ts.BindingName): string | undefined {
+	if (
+		ts.isIdentifier(name) ||
+		ts.isStringLiteral(name) ||
+		ts.isNumericLiteral(name) ||
+		ts.isNoSubstitutionTemplateLiteral(name)
+	) {
+		return name.text;
+	}
+	if (ts.isComputedPropertyName(name)) {
+		const expression = unwrapLocalExpression(name.expression);
+		if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+			return expression.text;
+		}
+	}
+	return undefined;
+}
+
+function isGlobalMemberSink(expression: ts.Expression, sinkNames: ReadonlySet<string>): boolean {
+	const callee = unwrapLocalExpression(expression);
 	let sinkName: string | undefined;
 	let receiver: ts.Expression | undefined;
 	if (ts.isPropertyAccessExpression(callee)) {
@@ -587,78 +615,113 @@ function isDynamicCodeGlobalMemberSink(expression: ts.Expression): boolean {
 			receiver = callee.expression;
 		}
 	}
-	if (sinkName === undefined || receiver === undefined || !DYNAMIC_CODE_SINKS.has(sinkName)) {
+	if (sinkName === undefined || receiver === undefined || !sinkNames.has(sinkName)) {
 		return false;
 	}
-	const unwrappedReceiver = unwrapDynamicCodeCallee(receiver);
+	const unwrappedReceiver = unwrapLocalExpression(receiver);
 	return (
 		ts.isIdentifier(unwrappedReceiver) && DYNAMIC_CODE_GLOBAL_OBJECTS.has(unwrappedReceiver.text)
 	);
 }
 
-function isDirectDynamicCodeSinkReference(
+function isGlobalSinkReference(
 	expression: ts.Expression,
-	bindings: ReadonlyMap<string, readonly DynamicCodeBinding[]>,
+	sinkNames: ReadonlySet<string>,
+	bindings: ReadonlyMap<string, readonly LocalBinding[]>,
 	resolving: ReadonlySet<string>,
 ): boolean {
-	const reference = unwrapDynamicCodeCallee(expression);
-	if (isDynamicCodeGlobalMemberSink(reference)) {
+	const reference = unwrapLocalExpression(expression);
+	if (isGlobalMemberSink(reference, sinkNames)) {
 		return true;
 	}
-	if (!ts.isIdentifier(reference) || !DYNAMIC_CODE_SINKS.has(reference.text)) {
+	if (!ts.isIdentifier(reference)) {
 		return false;
 	}
-	return isBareDynamicCodeSinkIdentifier(reference.text, bindings, resolving);
+	return isGlobalSinkIdentifier(reference.text, sinkNames, bindings, resolving);
 }
 
-function isBareDynamicCodeSinkIdentifier(
+function isGlobalSinkIdentifier(
 	name: string,
-	bindings: ReadonlyMap<string, readonly DynamicCodeBinding[]>,
+	sinkNames: ReadonlySet<string>,
+	bindings: ReadonlyMap<string, readonly LocalBinding[]>,
 	resolving: ReadonlySet<string>,
 ): boolean {
 	const localBindings = bindings.get(name);
 	if (localBindings === undefined || localBindings.length === 0) {
-		return DYNAMIC_CODE_SINKS.has(name);
+		return sinkNames.has(name);
 	}
 	if (resolving.has(name)) {
 		return false;
 	}
 	const nextResolving = new Set(resolving);
 	nextResolving.add(name);
-	return localBindings.every(
-		(binding) =>
-			binding.constInitializer !== undefined &&
-			isDirectDynamicCodeSinkReference(binding.constInitializer, bindings, nextResolving),
-	);
+	return localBindings.every((binding) => {
+		if (binding.constInitializer === undefined) {
+			return false;
+		}
+		if (binding.destructuredProperty !== undefined) {
+			const source = unwrapLocalExpression(binding.constInitializer);
+			return (
+				sinkNames.has(binding.destructuredProperty) &&
+				ts.isIdentifier(source) &&
+				DYNAMIC_CODE_GLOBAL_OBJECTS.has(source.text)
+			);
+		}
+		return isGlobalSinkReference(binding.constInitializer, sinkNames, bindings, nextResolving);
+	});
 }
 
-function isDynamicCodeSinkCallee(
+function isGlobalSinkCallee(
 	expression: ts.Expression,
-	bindings: ReadonlyMap<string, readonly DynamicCodeBinding[]>,
+	sinkNames: ReadonlySet<string>,
+	bindings: ReadonlyMap<string, readonly LocalBinding[]>,
 ): boolean {
-	const callee = unwrapDynamicCodeCallee(expression);
-	if (isDynamicCodeGlobalMemberSink(callee)) {
+	const callee = unwrapLocalExpression(expression);
+	if (isGlobalMemberSink(callee, sinkNames)) {
 		return true;
 	}
 	if (!ts.isIdentifier(callee)) {
 		return false;
 	}
-	if (DYNAMIC_CODE_SINKS.has(callee.text)) {
-		return isBareDynamicCodeSinkIdentifier(callee.text, bindings, new Set());
-	}
-	const localBindings = bindings.get(callee.text);
-	return (
-		localBindings !== undefined &&
-		localBindings.length > 0 &&
-		localBindings.every(
-			(binding) =>
-				binding.constInitializer !== undefined &&
-				isDirectDynamicCodeSinkReference(binding.constInitializer, bindings, new Set()),
-		)
-	);
+	return isGlobalSinkIdentifier(callee.text, sinkNames, bindings, new Set());
 }
 
-function findDynamicCodeCalls(providerRoot: string): SourceFinding[] {
+function resolveConstStringIdentifier(
+	name: string,
+	bindings: ReadonlyMap<string, readonly LocalBinding[]>,
+	resolving: ReadonlySet<string> = new Set(),
+): string | undefined {
+	const localBindings = bindings.get(name);
+	if (localBindings === undefined || localBindings.length === 0 || resolving.has(name)) {
+		return undefined;
+	}
+	const nextResolving = new Set(resolving);
+	nextResolving.add(name);
+	let resolved: string | undefined;
+	for (const binding of localBindings) {
+		if (binding.constInitializer === undefined || binding.destructuredProperty !== undefined) {
+			return undefined;
+		}
+		const initializer = unwrapLocalExpression(binding.constInitializer);
+		let value: string | undefined;
+		if (ts.isStringLiteral(initializer) || ts.isNoSubstitutionTemplateLiteral(initializer)) {
+			value = initializer.text;
+		} else if (ts.isIdentifier(initializer)) {
+			value = resolveConstStringIdentifier(initializer.text, bindings, nextResolving);
+		}
+		if (value === undefined || (resolved !== undefined && resolved !== value)) {
+			return undefined;
+		}
+		resolved = value;
+	}
+	return resolved;
+}
+
+function findGlobalSinkCalls(
+	providerRoot: string,
+	sinkNames: ReadonlySet<string>,
+	includeConstructors = false,
+): SourceFinding[] {
 	const findings: SourceFinding[] = [];
 	const seen = new Set<string>();
 	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
@@ -671,14 +734,14 @@ function findDynamicCodeCalls(providerRoot: string): SourceFinding[] {
 			true,
 			ts.ScriptKind.TS,
 		);
-		const bindings = collectDynamicCodeBindings(sourceFile);
+		const bindings = collectLocalBindings(sourceFile);
 		const visit = (node: ts.Node): void => {
 			if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
 				return;
 			}
 			if (
-				(ts.isCallExpression(node) || ts.isNewExpression(node)) &&
-				isDynamicCodeSinkCallee(node.expression, bindings)
+				(ts.isCallExpression(node) || (includeConstructors && ts.isNewExpression(node))) &&
+				isGlobalSinkCallee(node.expression, sinkNames, bindings)
 			) {
 				const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
 				const key = `${relPath}:${line}`;
@@ -698,7 +761,7 @@ function findDynamicCodeCalls(providerRoot: string): SourceFinding[] {
 }
 
 function scoreNoDynamicCode(providerRoot: string): SubmitCheck {
-	const findings = findDynamicCodeCalls(providerRoot);
+	const findings = findGlobalSinkCalls(providerRoot, DYNAMIC_CODE_SINKS, true);
 	if (findings.length > 0) {
 		return blocker(
 			"no-dynamic-code",
@@ -1963,7 +2026,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 }
 
 function scoreCredentialUsage(providerRoot: string, provider: ProviderDefinition): SubmitCheck {
-	const credentialReferences = findSourceLineMatches(providerRoot, /ctx\.credential/, true);
+	const credentialReferences = findCredentialReferences(providerRoot);
 	const authMode = provider.auth?.mode ?? "none";
 	const credentialKeys = provider.credential?.keys ?? [];
 	const storesProviderCredential = authMode !== "none" || credentialKeys.length > 0;
@@ -1991,6 +2054,107 @@ function scoreCredentialUsage(providerRoot: string, provider: ProviderDefinition
 		0,
 		credentialReferences.length > 0 ? formatSourceFindings(credentialReferences) : undefined,
 	);
+}
+
+function isDirectCredentialReference(expression: ts.Expression): boolean {
+	const reference = unwrapLocalExpression(expression);
+	let receiver: ts.Expression | undefined;
+	let memberName: string | undefined;
+	if (ts.isPropertyAccessExpression(reference)) {
+		receiver = reference.expression;
+		memberName = reference.name.text;
+	} else if (ts.isElementAccessExpression(reference)) {
+		receiver = reference.expression;
+		const argument = reference.argumentExpression;
+		if (
+			argument !== undefined &&
+			(ts.isStringLiteral(argument) || ts.isNoSubstitutionTemplateLiteral(argument))
+		) {
+			memberName = argument.text;
+		}
+	}
+	const unwrappedReceiver = receiver === undefined ? undefined : unwrapLocalExpression(receiver);
+	return (
+		memberName === "credential" &&
+		unwrappedReceiver !== undefined &&
+		ts.isIdentifier(unwrappedReceiver) &&
+		unwrappedReceiver.text === "ctx"
+	);
+}
+
+function isCredentialReference(
+	expression: ts.Expression,
+	bindings: ReadonlyMap<string, readonly LocalBinding[]>,
+	resolving: ReadonlySet<string> = new Set(),
+): boolean {
+	const reference = unwrapLocalExpression(expression);
+	if (isDirectCredentialReference(reference)) {
+		return true;
+	}
+	if (!ts.isIdentifier(reference) || resolving.has(reference.text)) {
+		return false;
+	}
+	const localBindings = bindings.get(reference.text);
+	if (localBindings === undefined || localBindings.length === 0) {
+		return false;
+	}
+	const nextResolving = new Set(resolving);
+	nextResolving.add(reference.text);
+	return localBindings.every((binding) => {
+		if (binding.constInitializer === undefined) {
+			return false;
+		}
+		if (binding.destructuredProperty !== undefined) {
+			const source = unwrapLocalExpression(binding.constInitializer);
+			return (
+				binding.destructuredProperty === "credential" &&
+				ts.isIdentifier(source) &&
+				source.text === "ctx"
+			);
+		}
+		return isCredentialReference(binding.constInitializer, bindings, nextResolving);
+	});
+}
+
+function findCredentialReferences(providerRoot: string): SourceFinding[] {
+	const findings: SourceFinding[] = [];
+	const seen = new Set<string>();
+	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
+		const source = readFileSync(filePath, "utf8");
+		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		const sourceFile = ts.createSourceFile(
+			relPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			ts.ScriptKind.TS,
+		);
+		const bindings = collectLocalBindings(sourceFile);
+		const visit = (node: ts.Node): void => {
+			if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
+				return;
+			}
+			if (
+				ts.isExpression(node) &&
+				(isDirectCredentialReference(node) ||
+					((ts.isPropertyAccessExpression(node) || ts.isElementAccessExpression(node)) &&
+						isCredentialReference(node.expression, bindings)))
+			) {
+				const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+				const key = `${relPath}:${line}`;
+				if (!seen.has(key)) {
+					seen.add(key);
+					findings.push({ file: relPath, line });
+				}
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(sourceFile);
+		if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
+			break;
+		}
+	}
+	return findings;
 }
 
 // ---------------------------------------------------------------------------
@@ -2292,7 +2456,10 @@ function toRelativeProviderPath(providerRoot: string, filePath: string): string 
 }
 
 function formatSourceFindings(findings: readonly SourceFinding[]): string[] {
-	return findings.map((finding) => `${finding.file}:${finding.line}`);
+	return findings.map(
+		(finding) =>
+			`${finding.file}:${finding.line}${finding.detail === undefined ? "" : `: ${finding.detail}`}`,
+	);
 }
 
 function scorePromptAssetFreshness(providerRoot: string): SubmitCheck {
@@ -2945,19 +3112,31 @@ function findVendorKeyLeakFindings(providerRoot: string): SourceFinding[] {
 		const source = readFileSync(filePath, "utf8");
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
 		maskCommentsAndStrings(source, relPath);
+		const sourceFile = ts.createSourceFile(
+			relPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			ts.ScriptKind.TS,
+		);
+		const bindings = collectLocalBindings(sourceFile);
 		const upstreamRanges = findUpstreamMarkedConstRanges(source);
 		for (const zObject of findZObjectLiterals(source)) {
 			if (rangeContainsOffset(upstreamRanges, zObject.callStart)) {
 				continue;
 			}
-			if (!zObjectAppearsPublicOutput(source, zObject)) {
+			if (!zObjectAppearsPublicOutput(sourceFile, zObject, relPath)) {
 				continue;
 			}
-			for (const keyFinding of vendorKeyFindingsForObject(source, zObject)) {
+			for (const keyFinding of vendorKeyFindingsForObject(source, zObject, bindings)) {
 				const key = `${relPath}:${keyFinding.line}:${keyFinding.key}`;
 				if (!seen.has(key)) {
 					seen.add(key);
-					findings.push({ file: relPath, line: keyFinding.line });
+					findings.push({
+						file: relPath,
+						line: keyFinding.line,
+						detail: keyFinding.key,
+					});
 					if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
 						return findings;
 					}
@@ -2993,20 +3172,165 @@ function findZObjectLiterals(source: string): ZObjectLiteral[] {
 	return literals;
 }
 
-function zObjectAppearsPublicOutput(source: string, zObject: ZObjectLiteral): boolean {
-	const enclosingConst = findConstValueRangeContaining(source, zObject.callStart);
-	if (enclosingConst && /output|response|result/i.test(enclosingConst.name)) {
+function zObjectAppearsPublicOutput(
+	sourceFile: ts.SourceFile,
+	zObject: ZObjectLiteral,
+	relPath: string,
+): boolean {
+	let zObjectCall: ts.CallExpression | undefined;
+	const findCall = (node: ts.Node): void => {
+		if (
+			zObjectCall === undefined &&
+			ts.isCallExpression(node) &&
+			node.getStart(sourceFile) === zObject.callStart
+		) {
+			zObjectCall = node;
+			return;
+		}
+		ts.forEachChild(node, findCall);
+	};
+	findCall(sourceFile);
+	if (zObjectCall === undefined) {
 		return true;
 	}
-	const before = source.slice(Math.max(0, zObject.callStart - 160), zObject.callStart);
-	return /(?:^|[\s,{])(?:output|response)\s*:\s*$/.test(before);
+
+	let expression: ts.Expression = zObjectCall;
+	while (
+		ts.isParenthesizedExpression(expression.parent) ||
+		ts.isAsExpression(expression.parent) ||
+		ts.isSatisfiesExpression(expression.parent) ||
+		ts.isNonNullExpression(expression.parent)
+	) {
+		expression = expression.parent;
+	}
+	if (
+		ts.isPropertyAssignment(expression.parent) &&
+		isPublicOutputPropertyName(expression.parent.name)
+	) {
+		return true;
+	}
+
+	const declaration = findEnclosingVariableDeclaration(expression);
+	if (
+		declaration === undefined ||
+		!ts.isIdentifier(declaration.name) ||
+		declaration.initializer === undefined ||
+		!ts.isVariableDeclarationList(declaration.parent) ||
+		(declaration.parent.flags & ts.NodeFlags.Const) === 0
+	) {
+		return true;
+	}
+
+	const reachability = localSchemaBindingReachability(
+		sourceFile,
+		declaration.name.text,
+		declaration,
+		new Set(),
+	);
+	if (reachability === "public") {
+		return true;
+	}
+	if (reachability === "unknown") {
+		return true;
+	}
+	// A sibling module can be wired into index.ts through imports, which is out
+	// of scope without a Program/type checker. Keep that unresolved cross-file
+	// case fail-closed; entry-file bindings with only inert local uses are safe.
+	return relPath !== "index.ts";
+}
+
+type SchemaReachability = "public" | "internal" | "unknown";
+
+function isPublicOutputPropertyName(name: ts.PropertyName): boolean {
+	const text = propertyNameText(name);
+	return text === "output" || text === "response";
+}
+
+function findEnclosingVariableDeclaration(node: ts.Node): ts.VariableDeclaration | undefined {
+	let current: ts.Node | undefined = node;
+	while (current !== undefined && !ts.isSourceFile(current)) {
+		if (ts.isVariableDeclaration(current)) {
+			return current;
+		}
+		current = current.parent;
+	}
+	return undefined;
+}
+
+function localSchemaBindingReachability(
+	sourceFile: ts.SourceFile,
+	name: string,
+	declaration: ts.VariableDeclaration,
+	resolving: ReadonlySet<string>,
+): SchemaReachability {
+	if (resolving.has(name)) {
+		return "unknown";
+	}
+	const nextResolving = new Set(resolving);
+	nextResolving.add(name);
+	let result: SchemaReachability = "internal";
+	const visit = (node: ts.Node): void => {
+		if (result === "public") {
+			return;
+		}
+		if (ts.isIdentifier(node) && node.text === name && node !== declaration.name) {
+			const parent = node.parent;
+			if (
+				ts.isPropertyAssignment(parent) &&
+				parent.initializer === node &&
+				isPublicOutputPropertyName(parent.name)
+			) {
+				result = "public";
+				return;
+			}
+			if (ts.isShorthandPropertyAssignment(parent)) {
+				result = isPublicOutputPropertyName(parent.name) ? "public" : "unknown";
+				return;
+			}
+			if (
+				ts.isVariableDeclaration(parent) &&
+				parent.initializer === node &&
+				ts.isIdentifier(parent.name) &&
+				ts.isVariableDeclarationList(parent.parent) &&
+				(parent.parent.flags & ts.NodeFlags.Const) !== 0
+			) {
+				const aliasReachability = localSchemaBindingReachability(
+					sourceFile,
+					parent.name.text,
+					parent,
+					nextResolving,
+				);
+				if (aliasReachability === "public" || result === "internal") {
+					result = aliasReachability;
+				}
+				return;
+			}
+			if (ts.isVoidExpression(parent) || ts.isTypeOfExpression(parent)) {
+				return;
+			}
+			if (
+				(ts.isPropertyAccessExpression(parent) && parent.name === node) ||
+				(ts.isPropertyAssignment(parent) && parent.name === node) ||
+				ts.isBindingElement(parent) ||
+				ts.isImportSpecifier(parent) ||
+				ts.isExportSpecifier(parent)
+			) {
+				return;
+			}
+			result = "unknown";
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(sourceFile);
+	return result;
 }
 
 function vendorKeyFindingsForObject(
 	source: string,
 	zObject: ZObjectLiteral,
+	bindings: ReadonlyMap<string, readonly LocalBinding[]>,
 ): Array<{ key: string; line: number }> {
-	const keys = collectTopLevelObjectKeys(source, zObject.objectStart, zObject.objectEnd);
+	const keys = collectTopLevelObjectKeys(source, zObject.objectStart, zObject.objectEnd, bindings);
 	const digitFamilies = new Map<string, Set<string>>();
 	for (const key of keys) {
 		const member = numberedFamilyMember(key.name);
@@ -3064,6 +3388,7 @@ function collectTopLevelObjectKeys(
 	source: string,
 	objectStart: number,
 	objectEnd: number,
+	bindings: ReadonlyMap<string, readonly LocalBinding[]>,
 ): Array<{ name: string; offset: number }> {
 	const keys: Array<{ name: string; offset: number }> = [];
 	const masked = maskCommentsAndStrings(source);
@@ -3090,12 +3415,22 @@ function collectTopLevelObjectKeys(
 				break;
 			}
 			const computedQuote = source[literalStart];
-			if (computedQuote === '"' || computedQuote === "'") {
+			if (computedQuote === '"' || computedQuote === "'" || computedQuote === "`") {
 				const literalEnd = findStringEnd(source, literalStart);
 				const afterLiteral =
 					literalEnd === -1 ? -1 : skipWhitespaceAndComments(masked, literalEnd + 1, computedEnd);
 				if (literalEnd !== -1 && afterLiteral === computedEnd) {
 					key = source.slice(literalStart + 1, literalEnd);
+				}
+			} else {
+				const identifierMatch = /^[A-Za-z_$][\w$]*/.exec(masked.slice(literalStart));
+				const identifier = identifierMatch?.[0];
+				const afterIdentifier =
+					identifier === undefined
+						? -1
+						: skipWhitespaceAndComments(masked, literalStart + identifier.length, computedEnd);
+				if (identifier !== undefined && afterIdentifier === computedEnd) {
+					key = resolveConstStringIdentifier(identifier, bindings);
 				}
 			}
 			index = computedEnd + 1;
@@ -3130,6 +3465,14 @@ function findVendorTimestampLeakFindings(providerRoot: string): SourceFinding[] 
 		const source = readFileSync(filePath, "utf8");
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
 		maskCommentsAndStrings(source, relPath);
+		const sourceFile = ts.createSourceFile(
+			relPath,
+			source,
+			ts.ScriptTarget.Latest,
+			true,
+			ts.ScriptKind.TS,
+		);
+		const bindings = collectLocalBindings(sourceFile);
 		const zObjectRanges = findZObjectLiterals(source).map((zObject) => ({
 			start: zObject.callStart,
 			end: zObject.objectEnd,
@@ -3163,10 +3506,84 @@ function findVendorTimestampLeakFindings(providerRoot: string): SourceFinding[] 
 					}
 				}
 			}
+
+			const visitAliases = (node: ts.Node): void => {
+				if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
+					return;
+				}
+				const offset = node.getStart(sourceFile);
+				if (
+					ts.isIdentifier(node) &&
+					isIdentifierValueUse(node) &&
+					offset >= range.start &&
+					offset <= range.end &&
+					!rangeContainsOffset(zObjectRanges, offset) &&
+					!rangeContainsOffset(upstreamRanges, offset)
+				) {
+					const value = resolveConstStringIdentifier(node.text, bindings);
+					if (
+						value !== undefined &&
+						isVendorTimestampCandidate(value, propertyNameForValueExpression(node))
+					) {
+						const line = offsetToLine(source, offset);
+						const key = `${relPath}:${line}:${value}`;
+						if (!seen.has(key)) {
+							seen.add(key);
+							findings.push({ file: relPath, line });
+						}
+					}
+				}
+				ts.forEachChild(node, visitAliases);
+			};
+			visitAliases(sourceFile);
+			if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
+				return findings;
+			}
 		}
 	}
 
 	return findings;
+}
+
+function isIdentifierValueUse(identifier: ts.Identifier): boolean {
+	const parent = identifier.parent;
+	return !(
+		(ts.isPropertyAssignment(parent) && parent.name === identifier) ||
+		(ts.isPropertyAccessExpression(parent) && parent.name === identifier) ||
+		ts.isBindingElement(parent) ||
+		ts.isVariableDeclaration(parent) ||
+		ts.isParameter(parent) ||
+		ts.isImportClause(parent) ||
+		ts.isImportSpecifier(parent) ||
+		ts.isNamespaceImport(parent) ||
+		ts.isFunctionDeclaration(parent) ||
+		ts.isFunctionExpression(parent) ||
+		ts.isClassDeclaration(parent) ||
+		ts.isClassExpression(parent) ||
+		ts.isPropertyDeclaration(parent) ||
+		ts.isPropertySignature(parent) ||
+		ts.isMethodDeclaration(parent) ||
+		ts.isMethodSignature(parent)
+	);
+}
+
+function propertyNameForValueExpression(expression: ts.Expression): string | undefined {
+	let current: ts.Expression = expression;
+	while (
+		ts.isParenthesizedExpression(current.parent) ||
+		ts.isAsExpression(current.parent) ||
+		ts.isSatisfiesExpression(current.parent) ||
+		ts.isNonNullExpression(current.parent)
+	) {
+		current = current.parent;
+	}
+	if (ts.isPropertyAssignment(current.parent) && current.parent.initializer === current) {
+		return propertyNameText(current.parent.name);
+	}
+	if (ts.isShorthandPropertyAssignment(current.parent)) {
+		return current.parent.name.text;
+	}
+	return undefined;
 }
 
 function findPropertyObjectRanges(source: string, propertyName: string): ObjectRange[] {
@@ -3210,15 +3627,6 @@ function findNamedConstValueRanges(source: string): NamedObjectRange[] {
 		ranges.push({ name, start, end: start + expression.length });
 	}
 	return ranges;
-}
-
-function findConstValueRangeContaining(
-	source: string,
-	offset: number,
-): NamedObjectRange | undefined {
-	return findNamedConstValueRanges(source).find(
-		(range) => offset >= range.start && offset <= range.end,
-	);
 }
 
 function findStringLiteralsInRange(
@@ -4927,8 +5335,9 @@ function shannonEntropy(value: string): number {
 
 function guessSecretName(line: string): string {
 	const match =
-		/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(line) ??
-		/["']?([A-Za-z_$][\w$-]*)["']?\s*:/.exec(line);
+		/\b[A-Za-z_$][\w$]*(?:\s*\.\s*([A-Za-z_$][\w$]*))+\s*=/.exec(line) ??
+		/["']?([A-Za-z_$][\w$-]*)["']?\s*:\s*["'`]/.exec(line) ??
+		/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)/.exec(line);
 	const raw = match?.[1] ?? "SECRET";
 	return raw
 		.replace(/([a-z0-9])([A-Z])/g, "$1_$2")
