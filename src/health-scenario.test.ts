@@ -5,7 +5,9 @@ import {
 	defineHealthScenario,
 	every,
 	type HealthJourneyDefinition,
+	type HealthCheckCase,
 	type HealthScenario,
+	type ProviderDefinition,
 } from "./index.js";
 import { defineTestProvider as defineProvider } from "./__tests__/test-utils.js";
 
@@ -62,6 +64,39 @@ function providerWithJourney(journey: unknown) {
 			},
 		},
 		healthJourneys: [journey] as HealthJourneyDefinition[],
+	});
+}
+
+function providerWithCase(caseValue: unknown): ProviderDefinition {
+	return defineProvider({
+		id: "declarative-case-test",
+		version: "1.0.0",
+		runtime: "shared",
+		meta: {
+			displayName: "Declarative case test",
+			descriptionKey: "provider.description",
+			category: "test",
+		},
+		operations: {
+			ping: {
+				description: "Ping",
+				input: z.object({}),
+				output: z.object({}),
+				handler: async () => ({}),
+				healthCheck: {
+					interval: "1m",
+					// test-invalid: the helper must pass mutually exclusive case fields to runtime validation.
+					cases: [caseValue] as never,
+				},
+			},
+			pong: {
+				description: "Pong",
+				input: z.object({}),
+				output: z.object({}),
+				handler: async () => ({}),
+				healthCheckUnsupported: { reason: "Only used as unrelated coverage in tests." },
+			},
+		},
 	});
 }
 
@@ -131,6 +166,85 @@ function scenarioWithCandidateBlock(memberCount: number) {
 }
 
 describe("declarative health scenarios", () => {
+	it("accepts a typed operation case scenario parsed like defineHealthScenario", () => {
+		const input = validScenario();
+		const expected = defineHealthScenario(input);
+		const healthCase: HealthCheckCase<Record<string, never>, Record<string, never>> = {
+			name: "ping probe",
+			input: {},
+			scenario: expected,
+		};
+
+		const provider = providerWithCase(healthCase);
+
+		expect(provider.operations.ping.healthCheck?.cases[0]?.scenario).toEqual(expected);
+	});
+
+	it("rejects a case scenario combined with prepareInput", () => {
+		expect(() =>
+			providerWithCase({
+				name: "ping probe",
+				input: {},
+				scenario: validScenario(),
+				prepareInput: () => ({}),
+			}),
+		).toThrow(
+			'Provider "declarative-case-test" operation "ping" health-check case "ping probe" cannot declare scenario with prepareInput.',
+		);
+	});
+
+	it("rejects a case scenario combined with assertions", () => {
+		expect(() =>
+			providerWithCase({
+				name: "ping probe",
+				input: {},
+				scenario: validScenario(),
+				assertions: () => {},
+			}),
+		).toThrow(
+			'Provider "declarative-case-test" operation "ping" health-check case "ping probe" cannot declare scenario with assertions.',
+		);
+	});
+
+	it("validates case scenarios with HealthScenarioSchema", () => {
+		expect(() =>
+			providerWithCase({
+				name: "ping probe",
+				input: {},
+				scenario: { ...validScenario(), scenarioVersion: 1 },
+			}),
+		).toThrow(
+			'Provider "declarative-case-test" operation "ping" health-check case "ping probe" has an invalid scenario: it must conform to HealthScenario.',
+		);
+	});
+
+	it("rejects case scenario coverage of an unrelated operation", () => {
+		expect(() =>
+			providerWithCase({
+				name: "ping probe",
+				input: {},
+				scenario: { ...validScenario(), coversOperations: ["pong"] },
+			}),
+		).toThrow(
+			'Provider "declarative-case-test" operation "ping" health-check case "ping probe" scenario.coversOperations cannot claim unrelated operation "pong".',
+		);
+	});
+
+	it("keeps imperative operation cases unchanged", () => {
+		const assertions = () => {};
+		const prepareInput = () => ({});
+		const provider = providerWithCase({
+			name: "legacy ping probe",
+			input: {},
+			prepareInput,
+			assertions,
+		});
+		const healthCase = provider.operations.ping.healthCheck?.cases[0];
+
+		expect(healthCase?.prepareInput).toBe(prepareInput);
+		expect(healthCase?.assertions).toBe(assertions);
+	});
+
 	it("accepts a journey with a valid scenario and no run", () => {
 		const scenario = defineHealthScenario(validScenario());
 		const provider = providerWithJourney(defineHealthJourney({ ...journeyBase(), scenario }));

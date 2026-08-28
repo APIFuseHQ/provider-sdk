@@ -1106,6 +1106,11 @@ async function executeSelfTestCase(
 		const { startedAtMs, finish } = caseScope;
 		try {
 			return await runWithCaseTimeout(async () => {
+				if (healthCase.assertions === undefined) {
+					throw new Error(
+						`Self-test cannot execute declarative health-check case "${healthCase.name}"; run its scenario through the health monitor.`,
+					);
+				}
 				const resolvedInput = resolveHealthCheckInputDateTokens(healthCase.input);
 				const preparedInput = healthCase.prepareInput
 					? await healthCase.prepareInput({
