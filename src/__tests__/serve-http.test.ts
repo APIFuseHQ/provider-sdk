@@ -757,6 +757,7 @@ describe("provider HTTP server", () => {
 				cpuTotalMicros: expect.any(Number),
 			}),
 		]);
+		expect("proxy" in (events[0] ?? {})).toBe(false);
 	});
 
 	it("preserves optional connection identity without credential material", async () => {
@@ -2016,7 +2017,8 @@ describe("provider HTTP server", () => {
 				},
 			},
 		} satisfies ProviderDefinition;
-		const proxyApp = createServerApp(provider, { logger: () => undefined });
+		const events: ProviderServerLogEvent[] = [];
+		const proxyApp = createServerApp(provider, { logger: (event) => events.push(event) });
 
 		try {
 			const response = await proxyApp.request("/v1/proxyAllocationFailure", {
@@ -2051,6 +2053,11 @@ describe("provider HTTP server", () => {
 					allocatorBodyClass: "http_error",
 				},
 			});
+			const failedEvent = events.find((event) => event.event === "provider_request_failed");
+			expect(failedEvent).toBeDefined();
+			expect(failedEvent && "proxy" in failedEvent ? failedEvent.proxy : undefined).toEqual(
+				decoded.proxy,
+			);
 			const body = await response.json();
 			expect(body.error.code).toBe("PROXY_ALLOCATION_FAILED");
 			expect(body.error.retryable).toBe(true);

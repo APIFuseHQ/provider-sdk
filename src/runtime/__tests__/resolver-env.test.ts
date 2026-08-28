@@ -5,6 +5,7 @@ import { defineProvider } from "../../define.js";
 import { createServerApp } from "../../server/serve.js";
 import type { ProviderChallenge, ProviderContext, ResolverContext } from "../../types.js";
 import { getStealthProfile } from "../../stealth/profiles.js";
+import { PROVIDER_TELEMETRY_HEADER } from "../proxy-telemetry.js";
 import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
 import {
 	APIFUSE__CDP_POOL__URL,
@@ -479,7 +480,8 @@ describe("resolver server wiring", () => {
 						healthCheckUnsupported: { reason: "unit test" },
 					},
 				} });
-			const app = createServerApp(provider, { logger: () => undefined });
+			const events: import("../../server/serve.js").ProviderServerLogEvent[] = [];
+			const app = createServerApp(provider, { logger: (event) => events.push(event) });
 			const response = await app.request("/auth/start", {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
@@ -492,6 +494,17 @@ describe("resolver server wiring", () => {
 			});
 
 			expect(response.status).toBe(200);
+			const telemetryHeader = response.headers.get(PROVIDER_TELEMETRY_HEADER);
+			expect(telemetryHeader).toBeTruthy();
+			const decodedTelemetry = JSON.parse(
+				Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8"),
+			);
+			const authLog = events.find(
+				(event) => event.event === "provider_request_completed" && event.kind === "auth",
+			);
+			expect(authLog && "proxy" in authLog ? authLog.proxy : undefined).toEqual(
+				decodedTelemetry.proxy,
+			);
 			expect(await response.json()).toMatchObject({
 				data: { data: { solved: true } },
 			});
