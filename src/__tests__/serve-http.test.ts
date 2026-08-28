@@ -4,6 +4,7 @@ import { type Socket, createServer } from "node:net";
 import { z } from "zod";
 
 import { clearProxyResolutionCache } from "../config/loader.js";
+import { safeProviderErrorObservability } from "../error-observability.js";
 import { PROVIDER_ERROR_CATEGORIES } from "../observability.js";
 import {
 	AuthError,
@@ -24,7 +25,6 @@ import {
 	resolveAuthFlowProxyAffinityKey,
 	resolveProviderProxyAffinityKey,
 } from "../server/serve.js";
-import { safeProviderErrorObservability } from "../server/error-observability.js";
 import { event } from "../stream.js";
 import type { OperationErrorCode, ProviderContext, ProviderDefinition } from "../types.js";
 import { HttpRetryPreset } from "../types.js";
@@ -2488,6 +2488,39 @@ describe("provider HTTP server", () => {
 			expect(serializedResponse).not.toContain(diagnostic);
 		}
 		expect(serializedResponse).not.toContain("[REDACTED]");
+	});
+
+	it("omits non-string provider codes from cause frames and keeps events serializable", async () => {
+		const circularCode: Record<string, unknown> = {};
+		circularCode.self = circularCode;
+		const cases = [
+			{ name: "number code", code: 17 },
+			{ name: "circular object code", code: circularCode },
+		] as const;
+
+		for (const testCase of cases) {
+			const events: ProviderServerLogEvent[] = [];
+			const innerOptions: ProviderErrorOptions = {};
+			Object.defineProperty(innerOptions, "code", {
+				value: testCase.code,
+				enumerable: true,
+			});
+			const inner = new ProviderError("Private provider diagnostic", innerOptions);
+			const response = await requestCauseError(
+				createCauseErrorApp(
+					() =>
+						new TransportError("Upstream request failed", {
+							code: "UPSTREAM_ERROR",
+							cause: inner,
+						}),
+					events,
+				),
+			);
+
+			expect(response.status, testCase.name).toBe(502);
+			expect(loggedCauseChain(events[0])?.[0], testCase.name).not.toHaveProperty("code");
+			expect(() => JSON.stringify(events[0]), testCase.name).not.toThrow();
+		}
 	});
 
 	it("redacts adversarial cause messages without dropping useful context", async () => {

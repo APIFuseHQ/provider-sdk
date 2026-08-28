@@ -7,6 +7,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
+import { safeProviderErrorObservability } from "../error-observability.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
@@ -121,7 +122,6 @@ import { VALID_OPERATION_ERROR_STATUSES } from "../types.js";
 import type { SelfTestCancellationLogEvent } from "./self-test.js";
 import { resolveSelfTestMasterSecrets } from "./self-test-token.js";
 import { resolveServerTraceContextOptions } from "./trace-output.js";
-import { safeProviderErrorObservability } from "./error-observability.js";
 import {
 	type AuthFlowRequest,
 	AuthFlowRequestSchema,
@@ -148,9 +148,10 @@ export type ErrorObservabilityDetails = {
 };
 
 // Provider errors normally expose `options` through an own data property, but
-// providers can replace that property with a throwing accessor. Keep the
-// existing classification semantics for normal accessors while making the
-// server's error boundary fail closed when an accessor throws.
+// providers can replace that property with a throwing accessor. Provider-controlled
+// accessor failures are absorbed into canonical classification rather than
+// propagated. By contract, read `options` directly instead of the public
+// `fix`/`details` convenience getters; provider-controlled accessors are not trusted.
 function providerErrorOption<K extends keyof ProviderErrorOptions>(
 	error: unknown,
 	key: K,
@@ -166,7 +167,8 @@ function providerErrorOption<K extends keyof ProviderErrorOptions>(
 function providerErrorCode(error: unknown): string | undefined {
 	if (!isProviderError(error)) return undefined;
 	try {
-		return (error as ProviderError).code;
+		const code: unknown = (error as ProviderError).code;
+		return typeof code === "string" ? code : undefined;
 	} catch {
 		return undefined;
 	}
