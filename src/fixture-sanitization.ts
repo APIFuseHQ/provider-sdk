@@ -200,7 +200,8 @@ function isCredentialBearingUrl(value: string): boolean {
 	}
 }
 
-function encodeDiagnosticControls(value: string): string {
+/** Encodes terminal/log control characters without applying value-level secret heuristics. */
+export function encodeDiagnosticControls(value: string): string {
 	let result = "";
 	for (const character of value) {
 		const code = character.codePointAt(0) ?? 0;

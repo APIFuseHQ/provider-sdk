@@ -74,6 +74,7 @@ import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import { createTraceContext } from "../runtime/trace.js";
+import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
 import {
 	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
@@ -116,6 +117,7 @@ import type {
 import { VALID_OPERATION_ERROR_STATUSES } from "../types.js";
 import type { SelfTestCancellationLogEvent } from "./self-test.js";
 import { resolveSelfTestMasterSecrets } from "./self-test-token.js";
+import { resolveServerTraceContextOptions } from "./trace-output.js";
 import {
 	type AuthFlowRequest,
 	AuthFlowRequestSchema,
@@ -608,6 +610,7 @@ function createProviderContext(
 	proxyTelemetry?: ProxyTelemetryCollector,
 	signal?: AbortSignal,
 ): ProviderContext {
+	const traceConfig = resolveTraceConfigFromEnv();
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
@@ -711,7 +714,15 @@ function createProviderContext(
 					},
 				}
 			: {}),
-		trace: createTraceContext(),
+		trace: traceConfig
+			? createTraceContext(
+					resolveServerTraceContextOptions(traceConfig, {
+						request_id: request.requestId,
+						provider_id: provider.id,
+						operation_id: operationId,
+					}),
+				)
+			: createTraceContext(),
 		auth: createAuthStub(),
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
