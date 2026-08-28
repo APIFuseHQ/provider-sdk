@@ -484,6 +484,141 @@ describe("apifuse submit-check", () => {
 		}
 	});
 
+	it("redacts short values from secret-like environment variables in load evidence", async () => {
+		const envName = "PROBE_SHORT_API_TOKEN";
+		const envValue = "sk_live_9f2a";
+		const previousValue = process.env[envName];
+		process.env[envName] = envValue;
+		try {
+			const dir = makeProviderDir(
+				"submit-index-env-short-secret-",
+				`throw new Error("upstream auth rejected token ${envValue}");\n`,
+			);
+			writeValidLocaleCatalogs(dir);
+
+			const report = await buildSubmitCheckReport(dir);
+			const evidence =
+				report.checks.find((item) => item.id === "provider-load")?.evidence?.join("\n") ?? "";
+			expect(evidence).toContain("[REDACTED]");
+			expect(evidence).not.toContain(envValue);
+		} finally {
+			if (previousValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = previousValue;
+			}
+		}
+	});
+
+	it("does not replace degenerate values from secret-like environment variables", async () => {
+		const envName = "SUBMIT_CHECK_TEST_PASSWORD";
+		const previousValue = process.env[envName];
+		try {
+			for (const [index, envValue] of ["", "a", "ab", "abc"].entries()) {
+				process.env[envName] = envValue;
+				const dir = makeProviderDir(
+					`submit-index-env-degenerate-${index}-`,
+					'throw new Error("a ab abc evidence remains intact");\n',
+				);
+				writeValidLocaleCatalogs(dir);
+
+				const report = await buildSubmitCheckReport(dir);
+				expect(
+					report.checks.find((item) => item.id === "provider-load")?.evidence,
+				).toEqual(["Load error: a ab abc evidence remains intact"]);
+			}
+		} finally {
+			if (previousValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = previousValue;
+			}
+		}
+	});
+
+	for (const { label, source } of [
+		{
+			label: "double-quoted",
+			source: `throw new Error('config invalid: password: "correct horse battery staple"');\n`,
+		},
+		{
+			label: "single-quoted",
+			source: `throw new Error("config invalid: password: 'correct horse battery staple'");\n`,
+		},
+		{
+			label: "backtick-quoted",
+			source: 'throw new Error("config invalid: password: `correct horse battery staple`");\n',
+		},
+		{
+			label: "unquoted",
+			source: 'throw new Error("config invalid: password: single-token-value");\n',
+		},
+	]) {
+		it(`fully redacts a ${label} credential field in load evidence`, async () => {
+			const dir = makeProviderDir(`submit-index-credential-${label}-`, source);
+			writeValidLocaleCatalogs(dir);
+			const report = await buildSubmitCheckReport(dir);
+
+			expect(report.checks.find((item) => item.id === "provider-load")?.evidence).toEqual([
+				"Load error: config invalid: password: [REDACTED]",
+			]);
+		});
+	}
+
+	it("returns safe evidence when a null-prototype object is thrown", async () => {
+		const dir = makeProviderDir("submit-index-null-prototype-", "throw Object.create(null);\n");
+		writeValidLocaleCatalogs(dir);
+
+		const report = await buildSubmitCheckReport(dir);
+		const providerLoad = report.checks.find((item) => item.id === "provider-load");
+		expect(providerLoad?.level).toBe("blocker");
+		expect(providerLoad?.status).toBe("fail");
+		expect(providerLoad?.evidence).toEqual([
+			"Load error: <thrown value could not be rendered>",
+		]);
+		expect(report.score.verdict).toBe("blocked");
+	});
+
+	it("returns safe evidence when a thrown object's message getter throws", async () => {
+		const dir = makeProviderDir(
+			"submit-index-hostile-message-",
+			`const thrown = Object.defineProperty({}, "message", {
+				get() { throw new Error("message getter failed"); },
+			});
+			throw thrown;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const report = await buildSubmitCheckReport(dir);
+		const providerLoad = report.checks.find((item) => item.id === "provider-load");
+		expect(providerLoad?.status).toBe("fail");
+		expect(providerLoad?.evidence).toEqual([
+			"Load error: <thrown value could not be rendered>",
+		]);
+		expect(report.score.verdict).toBe("blocked");
+	});
+
+	for (const [label, source, expectedEvidence] of [
+		["undefined", "throw undefined;\n", "Load error: <non-Error value thrown: undefined>"],
+		["null", "throw null;\n", "Load error: <non-Error value thrown: null>"],
+		["false", "throw false;\n", "Load error: <non-Error value thrown: false>"],
+		["zero", "throw 0;\n", "Load error: <non-Error value thrown: 0>"],
+		["empty string", 'throw "";\n', "Load error: <non-Error value thrown: >"],
+		["NaN", "throw NaN;\n", "Load error: <non-Error value thrown: NaN>"],
+	] as const) {
+		it(`classifies thrown ${label} as an import or initialization failure`, async () => {
+			const dir = makeProviderDir(`submit-index-falsy-${label}-`, source);
+			writeValidLocaleCatalogs(dir);
+			const report = await buildSubmitCheckReport(dir);
+			const providerLoad = report.checks.find((item) => item.id === "provider-load");
+
+			expect(providerLoad?.status).toBe("fail");
+			expect(providerLoad?.remediation).toContain("import/initialization failure");
+			expect(providerLoad?.evidence).toEqual([expectedEvidence]);
+			expect(report.score.verdict).toBe("blocked");
+		});
+	}
+
 	it("preserves a missing import as provider-load evidence", async () => {
 		const dir = makeProviderDir(
 			"submit-index-import-blocked-",
@@ -524,6 +659,7 @@ describe("apifuse submit-check", () => {
 		const report = await buildSubmitCheckReport(dir);
 		const providerLoad = report.checks.find((item) => item.id === "provider-load");
 		expect(providerLoad?.remediation).toContain("default-exports defineProvider(...)");
+		expect(providerLoad?.evidence).toBeUndefined();
 	});
 
 	it("passes when provider root has no vendor SDK shim directory", async () => {

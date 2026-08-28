@@ -275,7 +275,7 @@ export async function buildSubmitCheckReport(
 	const checks: SubmitCheck[] = [];
 	const baseChecks = await safeRunChecks(providerRoot);
 	const loadResult = await safeLoadProvider(providerRoot);
-	const provider = loadResult.provider;
+	const provider = loadResult.ok ? loadResult.provider : undefined;
 	let indexParseError: string | undefined;
 	if (!provider) {
 		const indexPath = resolve(providerRoot, "index.ts");
@@ -332,10 +332,12 @@ export async function buildSubmitCheckReport(
 	} else {
 		const loadEvidence = indexParseError
 			? undefined
-			: formatLoadErrorEvidence(loadResult.error, providerRoot);
+			: loadResult.ok
+				? undefined
+				: formatLoadErrorEvidence(loadResult.error, providerRoot);
 		const loadRemediation = indexParseError
 			? "Fix the syntax error reported by the provider-load-parse blocker before apifuse check can load the provider."
-			: loadResult.error
+			: !loadResult.ok
 				? "Fix the import/initialization failure shown in evidence so apifuse check can load the provider."
 				: "Fix index.ts so it default-exports defineProvider(...).";
 		checks.push(
@@ -2400,7 +2402,7 @@ async function safeRunChecks(providerRoot: string): Promise<CheckResult[]> {
 			{
 				message: "Base provider checks can run",
 				passed: false,
-				details: [error instanceof Error ? error.message : String(error)],
+				details: [formatThrownValue(error)],
 			},
 		];
 	}
@@ -4955,6 +4957,10 @@ const SECRETISH_IDENTIFIER_PATTERN = /key|token|secret|password|credential|auth/
 // the three stay coherent.
 const ENTROPY_CANDIDATE_MIN_LENGTH = 20;
 
+// Secret-named values are stronger signals than entropy alone, but replacing
+// shorter fragments globally would mangle ordinary evidence text.
+const SECRET_NAMED_ENV_VALUE_MIN_LENGTH = 4;
+
 const SECRET_PATTERNS: Array<[string, RegExp]> = [
 	["JWT-like token", /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/],
 	["GitHub token", /gh[pousr]_[A-Za-z0-9_]{30,}/],
@@ -4966,53 +4972,79 @@ const SECRET_PATTERNS: Array<[string, RegExp]> = [
 	],
 ];
 
-type SafeLoadProviderResult = {
-	provider?: ProviderDefinition;
-	error?: unknown;
-};
+type SafeLoadProviderResult =
+	| { ok: true; provider: ProviderDefinition | undefined }
+	| { ok: false; error: unknown };
 
 async function safeLoadProvider(providerRoot: string): Promise<SafeLoadProviderResult> {
 	try {
-		return { provider: await loadProvider(providerRoot) };
+		return { ok: true, provider: await loadProvider(providerRoot) };
 	} catch (error) {
-		return { error };
+		return { ok: false, error };
 	}
 }
 
-function formatLoadErrorEvidence(error: unknown, providerRoot: string): string[] | undefined {
-	if (error === undefined) {
-		return undefined;
-	}
+const UNRENDERABLE_LOAD_ERROR = "<thrown value could not be rendered>";
 
+function formatLoadErrorEvidence(error: unknown, providerRoot: string): string[] {
 	const evidence: string[] = [];
 	const seen = new Set<object>();
 	let current: unknown = error;
 	let frame = 0;
-	while (current !== undefined && current !== null && frame < MAX_LOAD_ERROR_EVIDENCE) {
+	while (frame < MAX_LOAD_ERROR_EVIDENCE) {
 		if (typeof current === "object" || typeof current === "function") {
-			if (seen.has(current)) {
+			if (current !== null && seen.has(current)) {
 				break;
 			}
-			seen.add(current);
-		}
-		let message: string;
-		if (current instanceof Error) {
-			message = current.message;
-		} else if (typeof current === "object" && current !== null && "message" in current) {
-			message = String((current as { message?: unknown }).message);
-		} else {
-			message = String(current);
+			if (current !== null) seen.add(current);
 		}
 		evidence.push(
-			`${frame === 0 ? "Load error" : "Cause"}: ${sanitizeLoadErrorText(message, providerRoot)}`,
+			`${frame === 0 ? "Load error" : "Cause"}: ${sanitizeLoadErrorText(
+				formatThrownValue(current),
+				providerRoot,
+			)}`,
 		);
 		frame += 1;
-		if (typeof current !== "object" || current === null || !("cause" in current)) {
+		const cause = readThrownValueCause(current);
+		if (!cause.found || cause.value === undefined || cause.value === null) {
 			break;
 		}
-		current = (current as { cause?: unknown }).cause;
+		current = cause.value;
 	}
 	return evidence;
+}
+
+function formatThrownValue(value: unknown): string {
+	try {
+		if (value instanceof Error) {
+			return String(value.message);
+		}
+		if (
+			value !== null &&
+			(typeof value === "object" || typeof value === "function") &&
+			"message" in value
+		) {
+			return String((value as { message?: unknown }).message);
+		}
+		return `<non-Error value thrown: ${String(value)}>`;
+	} catch {
+		return UNRENDERABLE_LOAD_ERROR;
+	}
+}
+
+function readThrownValueCause(value: unknown): { found: boolean; value?: unknown } {
+	try {
+		if (
+			value === null ||
+			(typeof value !== "object" && typeof value !== "function") ||
+			!("cause" in value)
+		) {
+			return { found: false };
+		}
+		return { found: true, value: (value as { cause?: unknown }).cause };
+	} catch {
+		return { found: false };
+	}
 }
 
 function sanitizeLoadErrorText(value: string, providerRoot: string): string {
@@ -5029,14 +5061,16 @@ function sanitizeLoadErrorText(value: string, providerRoot: string): string {
 	);
 	output = output.replace(/[A-Za-z]:[\\/][^\s"'`]+/g, "[REDACTED_PATH]");
 	output = output.replace(
-		/((?:password|token|secret|api[_-]?key|credential|authorization)\s*[:=]\s*)(["']?)[^\s,"']+/gi,
+		/((?:password|token|secret|api[_-]?key|credential|authorization)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|["'`]?[^\s,;"'`]+)/gi,
 		"$1[REDACTED]",
 	);
 	const envValues: string[] = [];
 	for (const [name, item] of Object.entries(process.env)) {
-		if (typeof item !== "string" || item.length < ENTROPY_CANDIDATE_MIN_LENGTH) continue;
+		if (typeof item !== "string") continue;
 		let shouldRedact = SECRETISH_IDENTIFIER_PATTERN.test(name);
-		if (!shouldRedact && shouldConsiderEntropyValue(item)) {
+		if (shouldRedact) {
+			shouldRedact = item.length >= SECRET_NAMED_ENV_VALUE_MIN_LENGTH;
+		} else if (item.length >= ENTROPY_CANDIDATE_MIN_LENGTH && shouldConsiderEntropyValue(item)) {
 			const charset = classifyEntropyCharset(item);
 			const threshold = charset === "hex" ? 3.0 : 4.5;
 			shouldRedact = charset !== undefined && shannonEntropy(item) >= threshold;
