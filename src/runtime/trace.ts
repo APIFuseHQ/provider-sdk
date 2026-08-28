@@ -6,7 +6,7 @@ import type {
 	TraceConfig,
 	TraceSpan,
 } from "../types.js";
-import { exportSpansOTLP, type OTLPExportOptions } from "./otlp.js";
+import { createTraceScopedId, exportSpansOTLP, type OTLPExportOptions } from "./otlp.js";
 
 export type SpanAttributeValue = TraceAttributeValue;
 
@@ -42,7 +42,10 @@ type CompletedSpanEntry = {
 	sequence: number;
 	span: Span;
 	exportScheduled: boolean;
+	exportAttempts: number;
 };
+
+const MAX_OTLP_EXPORT_ATTEMPTS = 2;
 
 export interface TraceRecorder {
 	runSpan<T>(name: string, fn: () => Promise<T> | T, options?: SpanHookOptions<T>): Promise<T>;
@@ -54,6 +57,7 @@ type InternalTraceContext = TraceContext & {
 	[TRACE_RECORDER]: TraceRecorder;
 	_exportOptions?: OTLPExportOptions;
 	_resourceAttributes?: Record<string, string>;
+	_traceId?: string;
 };
 
 function buildOTLPExportOptions(config?: TraceConfig): OTLPExportOptions | undefined {
@@ -141,13 +145,16 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 			return;
 		}
 
-		const pendingEntries = completed.filter((entry) => !entry.exportScheduled);
+		const pendingEntries = completed.filter(
+			(entry) => !entry.exportScheduled && entry.exportAttempts < MAX_OTLP_EXPORT_ATTEMPTS,
+		);
 		if (pendingEntries.length === 0) {
 			return;
 		}
 
 		for (const entry of pendingEntries) {
 			entry.exportScheduled = true;
+			entry.exportAttempts += 1;
 		}
 		const spans = pendingEntries.map((entry) => ({ ...entry.span }));
 		setImmediate(() => {
@@ -155,6 +162,15 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 				spans,
 				traceContext._exportOptions as OTLPExportOptions,
 				traceContext._resourceAttributes,
+				{
+					batchId: traceContext._traceId,
+					onFailure: () => {
+						for (const entry of pendingEntries) entry.exportScheduled = false;
+						if (pendingEntries.some((entry) => entry.exportAttempts < MAX_OTLP_EXPORT_ATTEMPTS)) {
+							setImmediate(scheduleExport);
+						}
+					},
+				},
 			);
 		});
 	};
@@ -200,7 +216,7 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 
 				insertCompletedSpan(
 					completed,
-					{ sequence: pendingSpan.sequence, span, exportScheduled: false },
+					{ sequence: pendingSpan.sequence, span, exportScheduled: false, exportAttempts: 0 },
 					maxSpans,
 				);
 				options.onSpan?.(span);
@@ -234,6 +250,7 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 			return completed.map((entry) => ({ ...entry.span }));
 		},
 		...(options.exportOptions ? { _exportOptions: options.exportOptions } : {}),
+		...(options.exportOptions ? { _traceId: createTraceScopedId() } : {}),
 		...(options.resourceAttributes
 			? { _resourceAttributes: { ...options.resourceAttributes } }
 			: {}),

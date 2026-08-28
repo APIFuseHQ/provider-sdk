@@ -1,3 +1,5 @@
+import { sanitizeResourceAttributes, sanitizeSpanForOutput } from "../trace-sanitization.js";
+import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import type { TraceSpan } from "../types.js";
 
 export interface OTLPExportOptions {
@@ -8,6 +10,11 @@ export interface OTLPExportOptions {
 
 let nextTraceId = 1n;
 let replayableTraceId: { signature: string; traceId: string } | null = null;
+
+export interface OTLPExportHooks {
+	onFailure?: (error: unknown) => void;
+	batchId?: string;
+}
 
 function createBatchSignature(
 	spans: TraceSpan[],
@@ -29,6 +36,13 @@ function createTraceId(signature: string): string {
 	const traceId = nextTraceId.toString(16).padStart(32, "0");
 	nextTraceId += 1n;
 	replayableTraceId = { signature, traceId };
+	return traceId;
+}
+
+/** A trace-scoped identity used by a recorder across multiple export batches. */
+export function createTraceScopedId(): string {
+	const traceId = nextTraceId.toString(16).padStart(32, "0");
+	nextTraceId += 1n;
 	return traceId;
 }
 
@@ -60,6 +74,7 @@ function toAttributeValue(value: unknown): Record<string, string | number | bool
 export function spansToOTLP(
 	spans: TraceSpan[],
 	resourceAttributes?: Record<string, string>,
+	traceIdOverride?: string,
 ): {
 	resourceSpans: Array<{
 		resource: {
@@ -83,17 +98,29 @@ export function spansToOTLP(
 				startTimeUnixNano: string;
 				status: { code: number };
 				traceId: string;
+				events?: Array<{
+					name: string;
+					timeUnixNano: string;
+					attributes: Array<{
+						key: string;
+						value: Record<string, string | number | boolean>;
+					}>;
+				}>;
 			}>;
 		}>;
 	}>;
 } {
-	const traceId = createTraceId(createBatchSignature(spans, resourceAttributes));
+	const sanitizedResourceAttributes = sanitizeResourceAttributes(resourceAttributes);
+	const sanitizedSpans = spans.map((span) => sanitizeSpanForOutput(span));
+	const traceId =
+		traceIdOverride ??
+		createTraceId(createBatchSignature(sanitizedSpans, sanitizedResourceAttributes));
 
 	return {
 		resourceSpans: [
 			{
 				resource: {
-					attributes: Object.entries(resourceAttributes ?? {}).map(([key, value]) => ({
+					attributes: Object.entries(sanitizedResourceAttributes).map(([key, value]) => ({
 						key,
 						value: { stringValue: value },
 					})),
@@ -104,7 +131,7 @@ export function spansToOTLP(
 							name: "apifuse-provider-sdk",
 							version: "0.1.0",
 						},
-						spans: spans.map((span) => ({
+						spans: sanitizedSpans.map((span) => ({
 							traceId,
 							spanId: normalizeHexId(span.id, 16) ?? "0000000000000001",
 							parentSpanId: normalizeHexId(span.parentId, 16),
@@ -117,6 +144,22 @@ export function spansToOTLP(
 								key,
 								value: toAttributeValue(value),
 							})),
+							...(span.error !== undefined
+								? {
+										events: [
+											{
+												name: "exception",
+												timeUnixNano: String(span.endedAt * 1_000_000),
+												attributes: [
+													{
+														key: "exception.message",
+														value: { stringValue: span.error },
+													},
+												],
+											},
+										],
+									}
+								: {}),
 						})),
 					},
 				],
@@ -129,6 +172,7 @@ export async function exportSpansOTLP(
 	spans: TraceSpan[],
 	options: OTLPExportOptions,
 	resourceAttributes?: Record<string, string>,
+	hooks?: OTLPExportHooks,
 ): Promise<void> {
 	if (spans.length === 0) {
 		return;
@@ -144,7 +188,7 @@ export async function exportSpansOTLP(
 				"Content-Type": "application/json",
 				...options.headers,
 			},
-			body: JSON.stringify(spansToOTLP(spans, resourceAttributes)),
+			body: JSON.stringify(spansToOTLP(spans, resourceAttributes, hooks?.batchId)),
 			signal: controller.signal,
 		});
 
@@ -152,8 +196,16 @@ export async function exportSpansOTLP(
 			throw new Error(`HTTP ${response.status}`);
 		}
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		console.warn("[apifuse] OTLP export failed:", message);
+		const message = sanitizeDiagnosticText(error instanceof Error ? error.message : String(error));
+		hooks?.onFailure?.(error);
+		const context = Object.entries(sanitizeResourceAttributes(resourceAttributes))
+			.filter(([key]) => ["request_id", "provider_id", "operation_id"].includes(key))
+			.map(([key, value]) => `${key}=${value}`)
+			.join(" ");
+		console.warn(
+			`[apifuse] OTLP export failed (${context || "request_id=unknown provider_id=unknown operation_id=unknown"} batch=${hooks?.batchId ?? "unknown"}):`,
+			message,
+		);
 	} finally {
 		clearTimeout(timer);
 	}

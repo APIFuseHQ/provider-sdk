@@ -1,55 +1,10 @@
 import {
-	encodeDiagnosticControls,
-	isSensitiveFixtureKey,
-	REDACTED_FIXTURE_VALUE,
-	sanitizeDiagnosticText,
-} from "../fixture-sanitization.js";
-import {
 	resolveTraceContextOptions,
 	type CreateTraceContextOptions,
 	type Span,
 } from "../runtime/trace.js";
+import { sanitizeSpanForOutput } from "../trace-sanitization.js";
 import type { TraceConfig } from "../types.js";
-import { redactSelfTestText, SELF_TEST_MAX_TEXT_LENGTH } from "./self-test-redaction.js";
-
-function sanitizeTraceText(value: string): string {
-	return redactSelfTestText(sanitizeDiagnosticText(value), []);
-}
-
-/** Span names are SDK-authored identifiers; retain them while preventing log injection. */
-function sanitizeSpanNameForOutput(value: string): string {
-	const encoded = encodeDiagnosticControls(value);
-	return encoded.length > SELF_TEST_MAX_TEXT_LENGTH
-		? `${encoded.slice(0, SELF_TEST_MAX_TEXT_LENGTH)}… [truncated]`
-		: encoded;
-}
-
-function sanitizeSpanForOutput(span: Span): Span {
-	const attributes = Object.fromEntries(
-		Object.entries(span.attributes).map(([key, value]) => [
-			sanitizeTraceText(key),
-			isSensitiveFixtureKey(key)
-				? REDACTED_FIXTURE_VALUE
-				: typeof value === "string"
-					? sanitizeTraceText(value)
-					: value,
-		]),
-	);
-
-	// Keep this schema explicit so future fields are not silently added to a
-	// process output path before their trust boundary has been reviewed.
-	return {
-		id: span.id,
-		name: sanitizeSpanNameForOutput(span.name),
-		startedAt: span.startedAt,
-		endedAt: span.endedAt,
-		duration_ms: span.duration_ms,
-		status: span.status,
-		attributes,
-		...(span.error !== undefined ? { error: sanitizeTraceText(span.error) } : {}),
-		...(span.parentId !== undefined ? { parentId: span.parentId } : {}),
-	};
-}
 
 /** Server-only trace output policy. Shared programmatic trace callers stay in-memory. */
 export function resolveServerTraceContextOptions(
@@ -60,7 +15,7 @@ export function resolveServerTraceContextOptions(
 	const outputEnabled = config.enabled !== false && config.exporter !== "none";
 	const consoleHook =
 		outputEnabled && (config.exporter === "console" || config.exporter === "json")
-			? (span: Span) => console.log(JSON.stringify(sanitizeSpanForOutput(span)))
+			? (span: Span) => console.log(JSON.stringify(sanitizeSpanForOutput(span, resourceAttributes)))
 			: undefined;
 	const onSpan =
 		consoleHook && resolved.onSpan

@@ -7,12 +7,13 @@ export const APIFUSE__TRACE__OTLP__ENDPOINT = "APIFUSE__TRACE__OTLP__ENDPOINT";
 
 type EnvLike = Record<string, string | undefined>;
 
-const TRACE_EXPORTERS = new Set<NonNullable<TraceConfig["exporter"]>>([
-	"console",
-	"json",
-	"otlp",
-	"none",
-]);
+const TRACE_EXPORTER_LOOKUP: Record<NonNullable<TraceConfig["exporter"]>, true> = {
+	console: true,
+	json: true,
+	otlp: true,
+	none: true,
+};
+const TRACE_EXPORTERS = new Set(Object.keys(TRACE_EXPORTER_LOOKUP));
 
 const emittedWarnings = new Set<string>();
 

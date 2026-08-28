@@ -157,10 +157,22 @@ describe("server trace output wiring", () => {
 			console.log = originalLog;
 		}
 
-		const spans = output.map((line) => JSON.parse(line) as { name: string; duration_ms: number });
+		const spans = output.map(
+			(line) =>
+				JSON.parse(line) as {
+					name: string;
+					duration_ms: number;
+					attributes: Record<string, string | number | boolean>;
+				},
+		);
 		const span = spans.find((candidate) => candidate.name === "handler:echo");
 		expect(span).toBeDefined();
 		expect(span?.duration_ms).toBeGreaterThanOrEqual(0);
+		expect(span?.attributes).toMatchObject({
+			request_id: "trace-output-test",
+			provider_id: "test-provider",
+			operation_id: "echo",
+		});
 	});
 
 	it("retains SDK-authored span names and neutralizes name controls", async () => {
@@ -288,6 +300,56 @@ describe("server trace output wiring", () => {
 			provider_id: "test-provider",
 			operation_id: "echo",
 		});
+	});
+
+	it("sanitizes failed-operation spans and exports their errors through OTLP", async () => {
+		const originalFetch = globalThis.fetch;
+		const payloads: unknown[] = [];
+		globalThis.fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				payloads.push(JSON.parse(String(init?.body)));
+				return new Response(null, { status: 200 });
+			},
+			{ preconnect: originalFetch.preconnect },
+		);
+
+		try {
+			await withTraceEnv(
+				{
+					[APIFUSE__TRACE__ENABLED]: "true",
+					[APIFUSE__TRACE__EXPORTER]: "otlp",
+					[APIFUSE__TRACE__OTLP__ENDPOINT]: "http://collector.test/v1/traces",
+				},
+				async () => {
+					const response = await invokeFailure();
+					expect(response.status).toBe(500);
+					await new Promise<void>((resolve) => setImmediate(resolve));
+				},
+			);
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+
+		const serialized = JSON.stringify(payloads);
+		expect(serialized.includes(TRACE_CREDENTIAL)).toBe(false);
+		const firstPayload = payloads[0] as
+			| {
+					resourceSpans?: Array<{
+						scopeSpans?: Array<{
+							spans?: Array<{
+								name: string;
+								events?: Array<{
+									attributes: Array<{ value: { stringValue?: string } }>;
+								}>;
+							}>;
+						}>;
+					}>;
+			  }
+			| undefined;
+		const exportedSpan = firstPayload?.resourceSpans?.[0]?.scopeSpans?.[0]?.spans?.find(
+			(span) => span.name === "provider.failure",
+		);
+		expect(exportedSpan?.events?.[0]?.attributes[0]?.value.stringValue).toContain("[REDACTED]");
 	});
 
 	it("warns once and fails closed to none for an invalid exporter value", () => {
