@@ -27,7 +27,10 @@ import { RESOLVER_INSTRUMENTATION_METADATA } from "./resolver-shared.js";
 
 export interface InstrumentationOptions extends CreateTraceContextOptions {}
 
-export type InstrumentedProviderContext<T extends ProviderContext> = Omit<T, "trace"> & {
+export type InstrumentedProviderContext<T extends Pick<ProviderContext, "trace">> = Omit<
+	T,
+	"trace"
+> & {
 	trace: TraceContext;
 };
 
@@ -850,7 +853,7 @@ function hasTraceOverrides(options: InstrumentationOptions): boolean {
 	return options.maxSpans !== undefined || options.onSpan !== undefined;
 }
 
-export function wrapWithInstrumentation<T extends ProviderContext>(
+export function wrapWithInstrumentation<T extends Pick<ProviderContext, "trace">>(
 	ctx: T,
 	options: InstrumentationOptions = {},
 ): InstrumentedProviderContext<T> {

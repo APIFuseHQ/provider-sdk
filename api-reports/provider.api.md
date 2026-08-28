@@ -3058,7 +3058,7 @@ export type ProviderAccessVisibility = "public" | "early_access";
 // @public
 export type ProviderBuilder<TDeclaration extends ProviderDeclaration> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
     operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
-}) => ProviderDefinition & {
+}) => Omit<ProviderDefinition, "operations"> & {
     operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
 };
 

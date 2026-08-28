@@ -1481,7 +1481,7 @@ export function every(interval: string, options?: {
 }): HealthJourneySchedule;
 
 // @public
-export function executeOperation(provider: ProviderDefinition, operationId: string, ctx: ProviderContext, input: unknown, _options?: {
+export function executeOperation<const TProvider extends ProviderDefinition, const TOperationId extends keyof TProvider["operations"] & string>(provider: TProvider, operationId: TOperationId, ctx: NoInfer<Parameters<TProvider["operations"][TOperationId]["handler"]>[0]>, input: unknown, _options?: {
     skipAuth?: boolean;
 }): Promise<unknown>;
 
@@ -2333,7 +2333,7 @@ export interface InstrumentationOptions extends CreateTraceContextOptions {
 }
 
 // @public (undocumented)
-export type InstrumentedProviderContext<T extends ProviderContext> = Omit<T, "trace"> & {
+export type InstrumentedProviderContext<T extends Pick<ProviderContext, "trace">> = Omit<T, "trace"> & {
     trace: TraceContext;
 };
 
@@ -3660,7 +3660,7 @@ type ProviderAuthLike = {
 // @public
 export type ProviderBuilder<TDeclaration extends ProviderDeclaration> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
     operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
-}) => ProviderDefinition & {
+}) => Omit<ProviderDefinition, "operations"> & {
     operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
 };
 
@@ -6788,7 +6788,7 @@ type WebSocketOperationConfig<TInput extends SchemaLike, TOutput extends SchemaL
 };
 
 // @public (undocumented)
-export function wrapWithInstrumentation<T extends ProviderContext>(ctx: T, options?: InstrumentationOptions): InstrumentedProviderContext<T>;
+export function wrapWithInstrumentation<T extends Pick<ProviderContext, "trace">>(ctx: T, options?: InstrumentationOptions): InstrumentedProviderContext<T>;
 
 export { z }
 
