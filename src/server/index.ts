@@ -6,9 +6,9 @@ export type {
 	SmartproxyAllocatorBodyClass,
 } from "../config/loader.js";
 export type {
-	ProxyTelemetryFailoverOnlyPayload,
 	ProxyTelemetryLogPayload,
 	ProxyTelemetryResolvedPayload,
+	ProxyTelemetryUnresolvedPayload,
 } from "../runtime/proxy-telemetry.js";
 export {
 	createServerApp,

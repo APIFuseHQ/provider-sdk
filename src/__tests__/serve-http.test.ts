@@ -805,7 +805,7 @@ describe("provider HTTP server", () => {
 			const completedEvent = events.find((event) => event.event === "provider_request_completed");
 			const proxy = completedEvent && "proxy" in completedEvent ? completedEvent.proxy : undefined;
 			expect(proxy).toEqual({
-				kind: "failover_only",
+				kind: "unresolved",
 				vendors: ["smartproxy"],
 				failovers: [{ v: "smartproxy", p: "resolution", r: "no_credentials" }],
 			});
@@ -858,7 +858,7 @@ describe("provider HTTP server", () => {
 			expect(response.status).toBe(502);
 			const failedEvent = events.find((event) => event.event === "provider_request_failed");
 			expect(failedEvent && "proxy" in failedEvent ? failedEvent.proxy : undefined).toEqual({
-				kind: "failover_only",
+				kind: "unresolved",
 				vendors: ["smartproxy"],
 				failovers: [{ v: "smartproxy", p: "resolution", r: "no_credentials" }],
 			});
@@ -2156,15 +2156,26 @@ describe("provider HTTP server", () => {
 			expect(decoded).toMatchObject({
 				v: 1,
 				proxy: {
-					provider: "smartproxy",
+					kind: "unresolved",
+					vendors: ["smartproxy"],
 					cacheStatus: "allocator",
 					cacheHit: false,
 					attempts: 3,
 					allocatorAttempts: 3,
 					allocatorStatus: 503,
 					allocatorBodyClass: "http_error",
+					failovers: [
+						{
+							v: "smartproxy",
+							p: "resolution",
+							r: "allocation_failed",
+						},
+					],
 				},
 			});
+			expect(decoded.proxy).not.toHaveProperty("provider");
+			expect(decoded.proxy).not.toHaveProperty("protocol");
+			expect(decoded.proxy).not.toHaveProperty("userAgentSource");
 			const failedEvent = events.find((event) => event.event === "provider_request_failed");
 			expect(failedEvent).toBeDefined();
 			expect(failedEvent && "proxy" in failedEvent ? failedEvent.proxy : undefined).toEqual(

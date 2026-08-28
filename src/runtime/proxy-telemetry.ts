@@ -53,11 +53,25 @@ export type ProxyTelemetryResolvedPayload = {
 	}[];
 };
 
-export type ProxyTelemetryFailoverOnlyPayload = {
-	kind: "failover_only";
-	/** Distinct vendors that recorded a failover, in order seen. */
+export type ProxyTelemetryUnresolvedPayload = {
+	kind: "unresolved";
+	/** Distinct vendors that failed resolution or recorded a failover, in order seen. */
 	vendors: ProxyVendorName[];
-	failovers: {
+	cacheStatus?: ProxyCacheStatus;
+	cacheHit?: boolean;
+	resolutionMs?: number;
+	allocatorMs?: number;
+	allocatorStatus?: number;
+	allocatorBodyClass?: SmartproxyAllocatorBodyClass;
+	allocatorAttempts?: number;
+	lockWaitMs?: number;
+	redisReadMs?: number;
+	redisWriteMs?: number;
+	poolAgeMs?: number;
+	poolExpiresInMs?: number;
+	attempts?: number;
+	refreshes?: number;
+	failovers?: {
 		v: ProxyVendorName;
 		nx?: ProxyVendorName;
 		p: ProxyVendorFailoverTelemetryEvent["phase"];
@@ -78,7 +92,7 @@ export type ProxyTelemetryFailoverOnlyPayload = {
 
 export type ProxyTelemetryLogPayload =
 	| ProxyTelemetryResolvedPayload
-	| ProxyTelemetryFailoverOnlyPayload;
+	| ProxyTelemetryUnresolvedPayload;
 
 type ProviderTelemetryHeader = {
 	v: 1;
@@ -122,10 +136,13 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 	#events: ProxyResolutionTelemetryEvent[] = [];
 	#attempts: ProxyAttemptTelemetryEvent[] = [];
 	#failovers: ProxyVendorFailoverTelemetryEvent[] = [];
+	#unresolvedVendors: ProxyVendorName[] = [];
 
 	recordProxyResolution(event: ProxyResolutionTelemetryEvent): void {
+		const outcome = event.outcome === "error" ? "error" : "ok";
 		this.#events.push({
 			provider: event.provider,
+			outcome,
 			...(event.userAgentSource ? { userAgentSource: event.userAgentSource } : {}),
 			...(event.protocol ? { protocol: event.protocol } : {}),
 			cacheStatus: event.cacheStatus,
@@ -158,6 +175,9 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 			refreshes:
 				event.refreshes === undefined ? undefined : Math.max(0, Math.floor(event.refreshes)),
 		});
+		if (outcome === "error" && !this.#unresolvedVendors.includes(event.provider)) {
+			this.#unresolvedVendors.push(event.provider);
+		}
 	}
 
 	recordProxyVendorFailover(event: ProxyVendorFailoverTelemetryEvent): void {
@@ -169,6 +189,9 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 			reason: event.reason,
 			...(event.attempt === undefined ? {} : { attempt: Math.max(0, Math.floor(event.attempt)) }),
 		});
+		if (!this.#unresolvedVendors.includes(event.vendor)) {
+			this.#unresolvedVendors.push(event.vendor);
+		}
 	}
 
 	recordProxyAttempt(event: ProxyAttemptTelemetryEvent): void {
@@ -191,6 +214,7 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 
 	toLogPayload(): ProxyTelemetryLogPayload | undefined {
 		const [first, ...rest] = this.#events;
+		const okEvents = this.#events.filter((event) => event.outcome !== "error");
 		const attemptSamples = this.#attempts.map((attempt, index) => ({
 			n: index + 1,
 			a: attempt.attempt,
@@ -209,23 +233,75 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 			...(failover.attempt === undefined ? {} : { a: failover.attempt }),
 		}));
 
-		if (!first) {
-			if (failovers.length === 0) return undefined;
-			const vendors: ProxyVendorName[] = [];
-			for (const failover of this.#failovers) {
-				if (!vendors.includes(failover.vendor)) vendors.push(failover.vendor);
-			}
+		if (okEvents.length === 0) {
+			if (!first && failovers.length === 0) return undefined;
+			const failureEvents = this.#events.filter((event) => event.outcome === "error");
+			const [firstFailure, ...remainingFailures] = failureEvents;
+			const aggregate = firstFailure
+				? remainingFailures.reduce<ProxyResolutionTelemetryEvent>(
+						(acc, event) => ({
+							provider: event.provider,
+							outcome: "error",
+							cacheStatus: worseStatus(acc.cacheStatus, event.cacheStatus),
+							cacheHit: acc.cacheHit && event.cacheHit,
+							resolutionMs: acc.resolutionMs + event.resolutionMs,
+							allocatorMs: sumOptional(acc.allocatorMs, event.allocatorMs),
+							allocatorStatus: event.allocatorStatus ?? acc.allocatorStatus,
+							allocatorBodyClass: event.allocatorBodyClass ?? acc.allocatorBodyClass,
+							allocatorAttempts: sumOptional(acc.allocatorAttempts, event.allocatorAttempts),
+							lockWaitMs: sumOptional(acc.lockWaitMs, event.lockWaitMs),
+							redisReadMs: sumOptional(acc.redisReadMs, event.redisReadMs),
+							redisWriteMs: sumOptional(acc.redisWriteMs, event.redisWriteMs),
+							poolAgeMs: maxOptional(acc.poolAgeMs, event.poolAgeMs),
+							poolExpiresInMs: maxOptional(acc.poolExpiresInMs, event.poolExpiresInMs),
+							attempts: acc.attempts + event.attempts,
+							refreshes: sumOptional(acc.refreshes, event.refreshes),
+						}),
+						firstFailure,
+					)
+				: undefined;
 			return {
-				kind: "failover_only",
-				vendors,
-				failovers,
+				kind: "unresolved",
+				vendors: [...this.#unresolvedVendors],
+				...(aggregate
+					? {
+							cacheStatus: aggregate.cacheStatus,
+							cacheHit: aggregate.cacheHit,
+							resolutionMs: aggregate.resolutionMs,
+							...(aggregate.allocatorMs !== undefined
+								? { allocatorMs: aggregate.allocatorMs }
+								: {}),
+							...(aggregate.allocatorStatus !== undefined
+								? { allocatorStatus: aggregate.allocatorStatus }
+								: {}),
+							...(aggregate.allocatorBodyClass !== undefined
+								? { allocatorBodyClass: aggregate.allocatorBodyClass }
+								: {}),
+							...(aggregate.allocatorAttempts !== undefined
+								? { allocatorAttempts: aggregate.allocatorAttempts }
+								: {}),
+							...(aggregate.lockWaitMs !== undefined ? { lockWaitMs: aggregate.lockWaitMs } : {}),
+							...(aggregate.redisReadMs !== undefined
+								? { redisReadMs: aggregate.redisReadMs }
+								: {}),
+							...(aggregate.redisWriteMs !== undefined
+								? { redisWriteMs: aggregate.redisWriteMs }
+								: {}),
+							...(aggregate.poolAgeMs !== undefined ? { poolAgeMs: aggregate.poolAgeMs } : {}),
+							...(aggregate.poolExpiresInMs !== undefined
+								? { poolExpiresInMs: aggregate.poolExpiresInMs }
+								: {}),
+							attempts: aggregate.attempts,
+							...(aggregate.refreshes !== undefined ? { refreshes: aggregate.refreshes } : {}),
+						}
+					: {}),
+				...(failovers.length > 0 ? { failovers } : {}),
 				...(attemptSamples.length > 0 ? { attemptSamples } : {}),
 			};
 		}
 
-		// The serving vendor/protocol is the last recorded resolution (a failed
-		// vendor records first, the vendor that served records last).
-		const serving = this.#events[this.#events.length - 1] ?? first;
+		// The serving vendor/protocol is the last successful resolution.
+		const serving = okEvents[okEvents.length - 1] ?? first;
 		const vendors: ProxyVendorName[] = [];
 		for (const event of this.#events) {
 			if (!vendors.includes(event.provider)) vendors.push(event.provider);

@@ -178,9 +178,9 @@ export {
 export type { PrevalidateResult } from "./runtime/prevalidate.js";
 export { getProviderBaseUrl } from "./runtime/provider.js";
 export type {
-	ProxyTelemetryFailoverOnlyPayload,
 	ProxyTelemetryLogPayload,
 	ProxyTelemetryResolvedPayload,
+	ProxyTelemetryUnresolvedPayload,
 } from "./runtime/proxy-telemetry.js";
 export {
 	APIFUSE__CDP_POOL__URL,

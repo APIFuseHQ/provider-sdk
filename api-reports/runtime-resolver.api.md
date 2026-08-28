@@ -278,6 +278,7 @@ type ProxyResolutionOptions = {
 // @public (undocumented)
 type ProxyResolutionTelemetryEvent = {
     provider: ProxyVendorName;
+    outcome?: "ok" | "error";
     userAgentSource?: ProxyUserAgentSource;
     protocol?: ProxyProtocol;
     cacheStatus: ProxyCacheStatus;
@@ -445,13 +446,13 @@ interface TraceRecorder {
 // dist/config/loader.d.ts:34:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point resolver-public.d.ts
 // dist/config/loader.d.ts:46:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point resolver-public.d.ts
 // dist/config/loader.d.ts:60:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:67:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:69:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:74:5 - (ae-forgotten-export) The symbol "SmartproxyAllocatorBodyClass" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:85:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:104:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:105:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
-// dist/config/loader.d.ts:106:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:69:5 - (ae-forgotten-export) The symbol "ProxyUserAgentSource" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:71:5 - (ae-forgotten-export) The symbol "ProxyCacheStatus" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:76:5 - (ae-forgotten-export) The symbol "SmartproxyAllocatorBodyClass" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:87:5 - (ae-forgotten-export) The symbol "ProxyVendorName" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:106:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:107:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
+// dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:10:5 - (ae-forgotten-export) The symbol "TraceRecorder" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:18:9 - (ae-forgotten-export) The symbol "ProxyResolutionOptions" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:46:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point resolver-public.d.ts

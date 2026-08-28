@@ -490,7 +490,7 @@ describe("proxy integration", () => {
 		expect(JSON.stringify(decoded)).not.toContain("5.78.24.25");
 	});
 
-	it("emits failover-only telemetry with distinct vendors and header parity", () => {
+	it("emits unresolved telemetry with distinct vendors and header parity", () => {
 		const telemetry = new ProxyTelemetryCollector();
 		telemetry.recordProxyVendorFailover({
 			vendor: "smartproxy",
@@ -518,7 +518,7 @@ describe("proxy integration", () => {
 
 		const payload = telemetry.toLogPayload();
 		expect(payload).toEqual({
-			kind: "failover_only",
+			kind: "unresolved",
 			vendors: ["smartproxy", "nodemaven"],
 			failovers: [
 				{ v: "smartproxy", nx: "nodemaven", p: "resolution", r: "no_credentials" },
@@ -531,6 +531,59 @@ describe("proxy integration", () => {
 		expect(header).toBeTruthy();
 		const decoded = JSON.parse(Buffer.from(header ?? "", "base64url").toString("utf8"));
 		expect(decoded).toEqual({ v: 1, proxy: payload });
+	});
+
+	it("uses the last successful resolution as the serving vendor while aggregating failures", () => {
+		const telemetry = new ProxyTelemetryCollector();
+		telemetry.recordProxyResolution({
+			provider: "smartproxy",
+			outcome: "error",
+			cacheStatus: "allocator",
+			cacheHit: false,
+			resolutionMs: 12,
+			allocatorMs: 10,
+			allocatorStatus: 503,
+			allocatorBodyClass: "http_error",
+			allocatorAttempts: 2,
+			attempts: 2,
+		});
+		telemetry.recordProxyVendorFailover({
+			vendor: "smartproxy",
+			nextVendor: "nodemaven",
+			phase: "resolution",
+			reason: "allocation_failed",
+		});
+		telemetry.recordProxyResolution({
+			provider: "nodemaven",
+			protocol: "http",
+			cacheStatus: "disabled",
+			cacheHit: false,
+			resolutionMs: 8,
+			attempts: 1,
+		});
+
+		expect(telemetry.toLogPayload()).toEqual({
+			kind: "resolved",
+			provider: "nodemaven",
+			protocol: "http",
+			cacheStatus: "allocator",
+			cacheHit: false,
+			resolutionMs: 20,
+			allocatorMs: 10,
+			allocatorStatus: 503,
+			allocatorBodyClass: "http_error",
+			allocatorAttempts: 2,
+			attempts: 3,
+			vendors: ["smartproxy", "nodemaven"],
+			failovers: [
+				{
+					v: "smartproxy",
+					nx: "nodemaven",
+					p: "resolution",
+					r: "allocation_failed",
+				},
+			],
+		});
 	});
 
 	it("omits telemetry for an empty collector", () => {

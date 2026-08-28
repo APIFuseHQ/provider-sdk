@@ -107,6 +107,8 @@ export type ProxyUserAgentSource = "declared" | "defaulted";
 
 export type ProxyResolutionTelemetryEvent = {
 	provider: ProxyVendorName;
+	/** Defaults to `"ok"` when omitted. */
+	outcome?: "ok" | "error";
 	userAgentSource?: ProxyUserAgentSource;
 	protocol?: ProxyProtocol;
 	cacheStatus: ProxyCacheStatus;
@@ -370,6 +372,7 @@ function telemetryForFailure(
 ): ProxyResolutionTelemetryEvent {
 	return {
 		provider: "smartproxy",
+		outcome: "error",
 		cacheStatus,
 		cacheHit: false,
 		resolutionMs: Math.max(0, Date.now() - startedAt),
@@ -916,7 +919,10 @@ export function resolvePolicyTransportAttemptCap(input: {
 	) {
 		return budget;
 	}
-	const span = Math.min(maxPolicyProxyPoolSpan(input.policy as ProviderProxyPolicy), resolvePolicyProxyPoolSpan(input.policy as ProviderProxyPolicy));
+	const span = Math.min(
+		maxPolicyProxyPoolSpan(input.policy as ProviderProxyPolicy),
+		resolvePolicyProxyPoolSpan(input.policy as ProviderProxyPolicy),
+	);
 	return Math.max(budget, span);
 }
 
