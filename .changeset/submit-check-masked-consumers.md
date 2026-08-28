@@ -22,3 +22,8 @@ and evidence extraction still reads raw source at the same offsets
 counting, and credential usage consume masked lines. Rules that
 intentionally inspect string literals (vendor shims, describe keys) keep
 reading raw source.
+
+The default key-preserving mask now neutralizes structural and delimiter
+characters inside quoted property keys so key text cannot alter depth or
+delimiter scanning. Key text remains matchable for range scanners, while the
+fully blanked `blankPropertyKeys` variant is available to line scanners.

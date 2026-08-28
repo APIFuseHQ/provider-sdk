@@ -1212,7 +1212,9 @@ function spreadIdentifierResolvesToFactory(
 		}
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
 		const fileSource = filePath === indexPath ? indexSource : readFileSync(filePath, "utf8");
-		const maskedFileSource = maskCommentsAndStrings(fileSource, relPath);
+		const maskedFileSource = maskCommentsAndStrings(fileSource, relPath, {
+			blankPropertyKeys: true,
+		});
 		const re = new RegExp(declRe.source, "g");
 		for (let m = re.exec(maskedFileSource); m !== null; m = re.exec(maskedFileSource)) {
 			sawDeclaration = true;
@@ -1229,7 +1231,13 @@ function spreadIdentifierResolvesToFactory(
 	}
 	// No local declaration anywhere but imported into index.ts => constructed
 	// out of view; treat as factory (conservative, false-negative-safe).
-	if (!sawDeclaration && fileImportsBinding(maskCommentsAndStrings(indexSource, "index.ts"), name)) {
+	if (
+		!sawDeclaration &&
+		fileImportsBinding(
+			maskCommentsAndStrings(indexSource, "index.ts", { blankPropertyKeys: true }),
+			name,
+		)
+	) {
 		return true;
 	}
 	return false;
@@ -1249,7 +1257,9 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 
 	const source = readFileSync(indexPath, "utf8");
 	const indexRelPath = toRelativeProviderPath(providerRoot, indexPath);
-	const maskedSource = maskCommentsAndStrings(source, indexRelPath);
+	const maskedSource = maskCommentsAndStrings(source, indexRelPath, {
+		blankPropertyKeys: true,
+	});
 	// Use the same whitespace-tolerant detection as the resolver below, so a
 	// `defineProvider (` / `defineProvider\n(` formatting cannot pass the early
 	// exit before the real classification runs.
@@ -1384,7 +1394,9 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			}
 			const relPath = toRelativeProviderPath(providerRoot, filePath);
 			const fileSource = filePath === indexPath ? source : readFileSync(filePath, "utf8");
-			const maskedFileSource = maskCommentsAndStrings(fileSource, relPath);
+			const maskedFileSource = maskCommentsAndStrings(fileSource, relPath, {
+				blankPropertyKeys: true,
+			});
 
 			const declRe = new RegExp(aliasDecl.source, "g");
 			for (
@@ -2681,7 +2693,7 @@ function findVendorTimestampLeakFindings(providerRoot: string): SourceFinding[] 
 		].filter((range) => rangeContainedInRanges(fixtureRanges, range));
 
 		for (const range of fixtureResponseRanges) {
-			for (const literal of findStringLiteralsInRange(source, range)) {
+			for (const literal of findStringLiteralsInRange(source, range, relPath)) {
 				if (
 					rangeContainsOffset(zObjectRanges, literal.offset) ||
 					rangeContainsOffset(upstreamRanges, literal.offset) ||
@@ -2763,9 +2775,10 @@ function findConstValueRangeContaining(
 function findStringLiteralsInRange(
 	source: string,
 	range: ObjectRange,
+	fileName: string,
 ): Array<{ value: string; offset: number }> {
 	const literals: Array<{ value: string; offset: number }> = [];
-	const masked = maskCommentsAndStrings(source);
+	const masked = maskCommentsAndStrings(source, fileName);
 	let index = range.start;
 	while (index <= range.end) {
 		const quote = masked[index];

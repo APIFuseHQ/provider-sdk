@@ -3588,6 +3588,69 @@ export default defineProvider({
 		expect(check?.level).toBe("blocker");
 	});
 
+	it("blocks factory operations after an operations-like quoted key", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "factory",
+  version: "1.0.0",
+  runtime: "standard",
+  meta: { "operations: decoy": true },
+  operations: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-quoted-key-shadowed-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations after an operations decoy in a template literal", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "factory",
+  version: "1.0.0",
+  runtime: "standard",
+  meta: { note: \`operations: decoy\` },
+  operations: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-template-shadowed-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks factory operations after an operations decoy in a comment", async () => {
+		const source = `
+import { defineProvider } from "@apifuse/provider-sdk";
+
+export default defineProvider({
+  id: "factory",
+  version: "1.0.0",
+  runtime: "standard",
+  // operations: decoy
+  operations: makeOperations(),
+});
+`;
+		const dir = makeProviderDir("submit-comment-decoy-factory-ops-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
 	it("blocks factory operations after an operations string literal", async () => {
 		const source = `
 import { defineProvider } from "@apifuse/provider-sdk";
