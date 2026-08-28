@@ -73,7 +73,7 @@ import {
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
-import { createTraceContext, resolveTraceContextOptions } from "../runtime/trace.js";
+import { createTraceContext } from "../runtime/trace.js";
 import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
 import {
@@ -117,6 +117,7 @@ import type {
 import { VALID_OPERATION_ERROR_STATUSES } from "../types.js";
 import type { SelfTestCancellationLogEvent } from "./self-test.js";
 import { resolveSelfTestMasterSecrets } from "./self-test-token.js";
+import { resolveServerTraceContextOptions } from "./trace-output.js";
 import {
 	type AuthFlowRequest,
 	AuthFlowRequestSchema,
@@ -714,7 +715,13 @@ function createProviderContext(
 				}
 			: {}),
 		trace: traceConfig
-			? createTraceContext(resolveTraceContextOptions(traceConfig))
+			? createTraceContext(
+					resolveServerTraceContextOptions(traceConfig, {
+						request_id: request.requestId,
+						provider_id: provider.id,
+						operation_id: operationId,
+					}),
+				)
 			: createTraceContext(),
 		auth: createAuthStub(),
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),

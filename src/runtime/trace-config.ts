@@ -14,6 +14,14 @@ const TRACE_EXPORTERS = new Set<NonNullable<TraceConfig["exporter"]>>([
 	"none",
 ]);
 
+const emittedWarnings = new Set<string>();
+
+function warnOnce(key: string, message: string): void {
+	if (emittedWarnings.has(key)) return;
+	emittedWarnings.add(key);
+	console.warn(message);
+}
+
 function parseEnabled(raw: string | undefined): boolean | undefined {
 	if (raw === undefined) return undefined;
 	switch (raw.trim().toLowerCase()) {
@@ -28,6 +36,10 @@ function parseEnabled(raw: string | undefined): boolean | undefined {
 		case "off":
 			return false;
 		default:
+			warnOnce(
+				APIFUSE__TRACE__ENABLED,
+				"[apifuse] Invalid APIFUSE__TRACE__ENABLED; falling back to disabled tracing.",
+			);
 			return false;
 	}
 }
@@ -53,6 +65,18 @@ export function resolveTraceConfigFromEnv(env: EnvLike = process.env): TraceConf
 		: exporterRaw === undefined
 			? undefined
 			: "none";
+	if (exporterRaw !== undefined && exporter === "none" && normalizedExporter !== "none") {
+		warnOnce(
+			APIFUSE__TRACE__EXPORTER,
+			'[apifuse] Invalid APIFUSE__TRACE__EXPORTER; falling back to exporter "none".',
+		);
+	}
+	if (exporter === "otlp" && enabled !== false && endpoint === undefined) {
+		warnOnce(
+			`${APIFUSE__TRACE__EXPORTER}:missing-endpoint`,
+			"[apifuse] APIFUSE__TRACE__EXPORTER selects OTLP but APIFUSE__TRACE__OTLP__ENDPOINT is unset; no spans will be exported.",
+		);
+	}
 
 	return {
 		...(enabled !== undefined ? { enabled } : {}),

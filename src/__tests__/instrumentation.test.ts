@@ -145,6 +145,43 @@ describe("createTraceContext", () => {
 
 		expect(trace.getSpans().map((span) => span.name)).toEqual(["second", "third"]);
 	});
+
+	it("exports only spans that were not included in an earlier OTLP batch", async () => {
+		const originalFetch = globalThis.fetch;
+		const exportedSpanNames: string[][] = [];
+		globalThis.fetch = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const payload = JSON.parse(String(init?.body)) as {
+					resourceSpans: Array<{
+						scopeSpans: Array<{ spans: Array<{ name: string }> }>;
+					}>;
+				};
+				exportedSpanNames.push(
+					payload.resourceSpans[0]?.scopeSpans[0]?.spans.map((span) => span.name) ?? [],
+				);
+				return new Response(null, { status: 200 });
+			},
+			{ preconnect: originalFetch.preconnect },
+		);
+
+		try {
+			const trace = createTraceContext({
+				exportOptions: { endpoint: "http://collector.test/v1/traces" },
+			});
+			await trace.span("handler", () => trace.span("http.stream", async () => undefined));
+			await new Promise<void>((resolve) => setImmediate(resolve));
+
+			await trace.span("http.stream.consume", async () => undefined);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+
+		expect(exportedSpanNames).toEqual([
+			["handler", "http.stream"],
+			["http.stream.consume"],
+		]);
+	});
 });
 
 describe("wrapWithInstrumentation", () => {

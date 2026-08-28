@@ -41,6 +41,7 @@ type PendingSpan = {
 type CompletedSpanEntry = {
 	sequence: number;
 	span: Span;
+	exportScheduled: boolean;
 };
 
 export interface TraceRecorder {
@@ -73,23 +74,10 @@ function buildOTLPExportOptions(config?: TraceConfig): OTLPExportOptions | undef
 }
 
 export function resolveTraceContextOptions(config?: TraceConfig): CreateTraceContextOptions {
-	const outputEnabled = config?.enabled !== false && config?.exporter !== "none";
-	const exporterHook =
-		outputEnabled && (config?.exporter === "console" || config?.exporter === "json")
-			? (span: Span) => console.log(JSON.stringify(span))
-			: undefined;
-	const onSpan =
-		exporterHook && config?.onSpan
-			? (span: Span) => {
-				exporterHook(span);
-				config.onSpan?.(span);
-			}
-			: (exporterHook ?? config?.onSpan);
-
 	return {
-		...(config?.maxSpans !== undefined ? { maxSpans: config.maxSpans } : {}),
-		...(onSpan ? { onSpan } : {}),
-		...(outputEnabled ? { exportOptions: buildOTLPExportOptions(config) } : {}),
+		maxSpans: config?.maxSpans,
+		onSpan: config?.onSpan,
+		exportOptions: buildOTLPExportOptions(config),
 	};
 }
 
@@ -153,7 +141,15 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 			return;
 		}
 
-		const spans = completed.map((entry) => ({ ...entry.span }));
+		const pendingEntries = completed.filter((entry) => !entry.exportScheduled);
+		if (pendingEntries.length === 0) {
+			return;
+		}
+
+		for (const entry of pendingEntries) {
+			entry.exportScheduled = true;
+		}
+		const spans = pendingEntries.map((entry) => ({ ...entry.span }));
 		setImmediate(() => {
 			void exportSpansOTLP(
 				spans,
@@ -202,7 +198,11 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 					...(pendingSpan.parentId ? { parentId: pendingSpan.parentId } : {}),
 				};
 
-				insertCompletedSpan(completed, { sequence: pendingSpan.sequence, span }, maxSpans);
+				insertCompletedSpan(
+					completed,
+					{ sequence: pendingSpan.sequence, span, exportScheduled: false },
+					maxSpans,
+				);
 				options.onSpan?.(span);
 
 				if (!pendingSpan.parentId) {
