@@ -8,6 +8,10 @@ import {
 	sanitizeUrlForLogs,
 } from "../fixture-sanitization.js";
 
+function diagnosticUrls(value: string): string[] {
+	return value.match(/https?:\/\/[^\s"'<>]+/gi) ?? [];
+}
+
 describe("fixture sanitization", () => {
 	it("redacts credential keys beyond authorization and API tokens", () => {
 		expect(
@@ -50,7 +54,9 @@ describe("fixture sanitization", () => {
 		const url = `https://user:password@example.test/${token}/download?access_token=live`;
 		expect(requestPathForFixture(url)).toBe("/[REDACTED]/download");
 		expect(sanitizeUrlForLogs(url)).toBe("https://example.test/[REDACTED]/download?[REDACTED]");
-		expect(sanitizeDiagnosticText(`request failed at ${url}`)).not.toContain(token);
+		expect(sanitizeDiagnosticText(`request failed at ${url}`)).toBe(
+			"request failed at https://example.test/[REDACTED]/download?[REDACTED]",
+		);
 	});
 
 	it("redacts values following a credential-like path key", () => {
@@ -107,5 +113,59 @@ describe("fixture sanitization", () => {
 		expect(diagnostic).not.toContain("\u061c");
 		expect(diagnostic).not.toContain("\u200e");
 		expect(diagnostic).not.toContain("\u200f");
+	});
+
+	it("redacts email addresses while preserving surrounding diagnostic text", () => {
+		expect(sanitizeDiagnosticText("lookup for person@example.com failed upstream")).toBe(
+			"lookup for [REDACTED] failed upstream",
+		);
+	});
+
+	it("does not restore a URL from the old plain-text placeholder", () => {
+		const url = "https://api.example.com/v1/x?token=secret123456";
+		const sanitizedUrl = "https://api.example.com/v1/x?[REDACTED]";
+		const diagnostic = sanitizeDiagnosticText(`upstream said APIFUSEURL0X and ${url}`);
+
+		expect(diagnostic).toBe(`upstream said APIFUSEURL0X and ${sanitizedUrl}`);
+		expect(diagnosticUrls(diagnostic)).toEqual([sanitizedUrl]);
+	});
+
+	it("preserves genuine URL order without restoring fake plain-text placeholders", () => {
+		const firstUrl = "https://a.test/p?k=aaa111bbb222";
+		const secondUrl = "https://b.test/q?k=ccc333ddd444";
+		const firstSanitizedUrl = "https://a.test/p?[REDACTED]";
+		const secondSanitizedUrl = "https://b.test/q?[REDACTED]";
+		const diagnostic = sanitizeDiagnosticText(
+			`APIFUSEURL1X ${firstUrl} ${secondUrl} APIFUSEURL0X`,
+		);
+
+		expect(diagnostic).toBe(
+			`APIFUSEURL1X ${firstSanitizedUrl} ${secondSanitizedUrl} APIFUSEURL0X`,
+		);
+		expect(diagnosticUrls(diagnostic)).toEqual([firstSanitizedUrl, secondSanitizedUrl]);
+	});
+
+	it("does not interpret an input containing the control-delimited URL sentinel", () => {
+		const forgedSentinel = "\u0000APIFUSE_URL0\u0000";
+		const url = "https://real.test/path?secret=hidden123456";
+		const sanitizedUrl = "https://real.test/path?[REDACTED]";
+		const diagnostic = sanitizeDiagnosticText(`upstream said ${forgedSentinel} and ${url}`);
+
+		expect(diagnostic).toBe(
+			`upstream said \\u0000APIFUSE_URL0\\u0000 and ${sanitizedUrl}`,
+		);
+		expect(diagnosticUrls(diagnostic)).toEqual([sanitizedUrl]);
+	});
+
+	it("preserves origin and path while redacting and ordering multiple genuine URLs", () => {
+		const firstUrl = "https://first.test/v1/items?token=aaa111bbb222";
+		const secondUrl = "http://second.test/v2/status?key=ccc333ddd444";
+		const expectedUrls = [
+			"https://first.test/v1/items?[REDACTED]",
+			"http://second.test/v2/status?[REDACTED]",
+		];
+		const diagnostic = sanitizeDiagnosticText(`first ${firstUrl}; then ${secondUrl}`);
+
+		expect(diagnosticUrls(diagnostic)).toEqual(expectedUrls);
 	});
 });

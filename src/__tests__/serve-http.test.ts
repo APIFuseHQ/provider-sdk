@@ -2327,11 +2327,34 @@ describe("provider HTTP server", () => {
 		return createHash("sha256").update(message).digest("hex").slice(0, 12);
 	}
 
-	it("logs only length and sha256 fingerprints for a 3-deep cause chain", async () => {
+	type LoggedCauseFrame = {
+		errorClass: string;
+		code?: string;
+		message: string;
+		messageLength: number;
+		messageFingerprint: string;
+	};
+
+	function loggedCauseChain(
+		event: ProviderServerLogEvent | undefined,
+	): LoggedCauseFrame[] | undefined {
+		return Object.getOwnPropertyDescriptor(event ?? {}, "causeChain")?.value;
+	}
+
+	it("logs readable redacted messages for every frame in a nested cause chain", async () => {
+		const bearerToken = "fake.header.signature";
+		const email = "person@example.com";
+		const password = "hunter2";
+		const apiKey = "sdk-test-key";
 		const rawCauseMessages = [
-			"vendor token secret-123",
-			"upstream payload for person@example.com",
-			"choice parser rejected credential abcdef",
+			`vendor rejected Bearer ${bearerToken} during login`,
+			`upstream rejected ${email} during lookup`,
+			`choice parser rejected password=${password} and apiKey: ${apiKey}`,
+		];
+		const redactedCauseMessages = [
+			"vendor rejected Bearer [REDACTED] during login",
+			"upstream rejected [REDACTED] during lookup",
+			"choice parser rejected password=[REDACTED] and apiKey: [REDACTED]",
 		];
 		const innermost = new ProviderError(rawCauseMessages[2], { code: "INNER_CODE" });
 		const middle = new Error(rawCauseMessages[1], { cause: innermost });
@@ -2356,29 +2379,34 @@ describe("provider HTTP server", () => {
 		expect(response.status).toBe(500);
 		expect(events).toHaveLength(1);
 		expect(events[0]).toMatchObject({ event: "provider_request_failed" });
-		expect(Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value).toEqual([
+		expect(loggedCauseChain(events[0])).toEqual([
 			{
 				errorClass: "ProviderError",
 				code: "OUTER_CAUSE_CODE",
+				message: redactedCauseMessages[0],
 				messageLength: rawCauseMessages[0].length,
 				messageFingerprint: causeFingerprint(rawCauseMessages[0]),
 			},
 			{
 				errorClass: "ProviderChoiceTokenError",
+				message: redactedCauseMessages[1],
 				messageLength: rawCauseMessages[1].length,
 				messageFingerprint: causeFingerprint(rawCauseMessages[1]),
 			},
 			{
 				errorClass: "ProviderError",
 				code: "INNER_CODE",
+				message: redactedCauseMessages[2],
 				messageLength: rawCauseMessages[2].length,
 				messageFingerprint: causeFingerprint(rawCauseMessages[2]),
 			},
 		]);
-		for (const rawCauseMessage of rawCauseMessages) {
-			expect(JSON.stringify(events[0])).not.toContain(rawCauseMessage);
+		const serializedEvent = JSON.stringify(events[0]);
+		for (const secret of [bearerToken, email, password, apiKey]) {
+			expect(serializedEvent).not.toContain(secret);
 		}
-		expect(await response.json()).toEqual({
+		const responseBody = await response.json();
+		expect(responseBody).toEqual({
 			error: {
 				code: "CHOICE_STATE_UNAVAILABLE",
 				message: "Pagination is temporarily unavailable.",
@@ -2387,6 +2415,101 @@ describe("provider HTTP server", () => {
 				source: "apifuse",
 			},
 		});
+		const serializedResponse = JSON.stringify(responseBody);
+		for (const diagnostic of redactedCauseMessages) {
+			expect(serializedResponse).not.toContain(diagnostic);
+		}
+		expect(serializedResponse).not.toContain("[REDACTED]");
+	});
+
+	it("redacts adversarial cause messages without dropping useful context", async () => {
+		const opaqueToken = "tok_fake_Qj8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS";
+		const traceId = "0123456789abcdef0123456789abcdef";
+		const cases = [
+			{
+				name: "opaque token",
+				raw: `decoder rejected ${opaqueToken} before retry`,
+				logged: "decoder rejected [REDACTED] before retry",
+				removed: [opaqueToken],
+				survives: ["decoder rejected", "before retry"],
+			},
+			{
+				name: "URL query string",
+				raw: "GET https://api.example.test/login?session=secret&redirect=/home returned 401",
+				logged: "GET https://api.example.test/login?[REDACTED] returned 401",
+				removed: ["session=secret", "redirect=/home"],
+				survives: ["GET https://api.example.test/login", "returned 401"],
+			},
+			{
+				name: "control characters and newline",
+				raw: "worker line one\nline two\u0000\u001b[31m failed",
+				logged: "worker line one line two\\u0000\\u001b[31m failed",
+				removed: ["\n", "\u0000", "\u001b"],
+				survives: ["worker line one", "line two", "failed"],
+			},
+			{
+				name: "trace id",
+				raw: `lookup trace_id=${traceId} password=secret-value failed`,
+				logged: `lookup trace_id=${traceId} password=[REDACTED] failed`,
+				removed: ["secret-value"],
+				survives: ["lookup", `trace_id=${traceId}`, "failed"],
+			},
+		];
+
+		for (const testCase of cases) {
+			const events: ProviderServerLogEvent[] = [];
+			await requestCauseError(
+				createCauseErrorApp(
+					() =>
+						new ProviderError("Public message", {
+							code: "ADVERSARIAL_CAUSE",
+							cause: new Error(testCase.raw),
+						}),
+					events,
+				),
+			);
+
+			const frames = loggedCauseChain(events[0]);
+			expect(frames, testCase.name).toHaveLength(1);
+			expect(frames?.[0], testCase.name).toEqual({
+				errorClass: "Error",
+				message: testCase.logged,
+				messageLength: testCase.raw.length,
+				messageFingerprint: causeFingerprint(testCase.raw),
+			});
+			for (const sensitivePart of testCase.removed) {
+				expect(frames?.[0]?.message, testCase.name).not.toContain(sensitivePart);
+			}
+			for (const diagnosticPart of testCase.survives) {
+				expect(frames?.[0]?.message, testCase.name).toContain(diagnosticPart);
+			}
+		}
+	});
+
+	it("visibly truncates sanitized cause messages after 300 characters", async () => {
+		const rawMessage = `upstream diagnostic: ${"ordinary detail ".repeat(30)}final detail`;
+		const events: ProviderServerLogEvent[] = [];
+		await requestCauseError(
+			createCauseErrorApp(
+				() =>
+					new ProviderError("Public message", {
+						code: "LONG_CAUSE",
+						cause: new Error(rawMessage),
+					}),
+				events,
+			),
+		);
+
+		const frame = loggedCauseChain(events[0])?.[0];
+		expect(frame).toEqual({
+			errorClass: "Error",
+			message: `${rawMessage.slice(0, 300)}… [truncated]`,
+			messageLength: rawMessage.length,
+			messageFingerprint: causeFingerprint(rawMessage),
+		});
+		expect(frame?.message).toStartWith("upstream diagnostic: ordinary detail");
+		expect(frame?.message).not.toContain("final detail");
+		expect(frame?.message).toEndWith("… [truncated]");
 	});
 
 	it("truncates cause chains deeper than five frames", async () => {
