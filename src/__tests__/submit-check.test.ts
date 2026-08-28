@@ -1624,8 +1624,16 @@ const example = " output: z.object({ MKioskTy: z.string() })";
 		writeFileSync(join(dir, "broken.ts"), 'const broken = "unterminated;\n');
 
 		await expect(buildSubmitCheckReport(dir)).rejects.toThrow(
-			"Cannot safely scan TypeScript source",
+			"Cannot safely scan TypeScript source broken.ts",
 		);
+	});
+
+	it("names a broken sibling module in the fail-closed parse error", async () => {
+		const dir = makeProviderDir("submit-mask-broken-sibling-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "util-broken.ts"), 'const broken = "unterminated;\n');
+
+		await expect(buildSubmitCheckReport(dir)).rejects.toThrow("util-broken.ts");
 	});
 
 	it("blocks compact vendor timestamps in normalized response fixtures", async () => {

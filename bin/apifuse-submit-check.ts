@@ -747,8 +747,8 @@ function unwrapParens(expr: string): string {
 // across (){}[] and stopping at the first top-level `,`/`;` or unmatched
 // closing bracket. This lets a property value be read across newlines, so a
 // multi-line `input: z.object({...})\n.passthrough()` is captured whole.
-function balancedValueExpression(source: string, valueStart: number): string {
-	const masked = maskCommentsAndStrings(source);
+function balancedValueExpression(source: string, valueStart: number, fileName?: string): string {
+	const masked = maskCommentsAndStrings(source, fileName);
 	let depth = 0;
 	let index = valueStart;
 	for (; index < source.length; index += 1) {
@@ -999,7 +999,7 @@ function scoreUnsafeInputPassthrough(providerRoot: string): SubmitCheck {
 				continue;
 			}
 			const valueStart = match.index + match[0].length;
-			const value = balancedValueExpression(source, valueStart);
+			const value = balancedValueExpression(source, valueStart, relPath);
 			if (PASSTHROUGH_CALL.test(value)) {
 				const site: ConstSite = {
 					file: relPath,
@@ -1028,8 +1028,8 @@ function scoreUnsafeInputPassthrough(providerRoot: string): SubmitCheck {
 	// that is itself a passthrough expression, or that references a passthrough
 	// const by name (resolved against the provider-wide map), is a violation.
 	for (const filePath of files) {
-		const source = fileSources.get(filePath) ?? readFileSync(filePath, "utf8");
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		const source = fileSources.get(filePath) ?? readFileSync(filePath, "utf8");
 
 		const inputProp = /\binput\s*:\s*/g;
 		for (let match = inputProp.exec(source); match !== null; match = inputProp.exec(source)) {
@@ -1040,7 +1040,7 @@ function scoreUnsafeInputPassthrough(providerRoot: string): SubmitCheck {
 				continue;
 			}
 			const valueStart = match.index + match[0].length;
-			const value = balancedValueExpression(source, valueStart);
+			const value = balancedValueExpression(source, valueStart, relPath);
 			if (PASSTHROUGH_CALL.test(value)) {
 				push({ file: relPath, line: offsetToLine(source, valueStart) });
 				continue;
@@ -1151,11 +1151,14 @@ function spreadIdentifierResolvesToFactory(
 		if (!existsSync(filePath)) {
 			continue;
 		}
+		const relPath = toRelativeProviderPath(providerRoot, filePath);
 		const fileSource = filePath === indexPath ? indexSource : readFileSync(filePath, "utf8");
 		const re = new RegExp(declRe.source, "g");
 		for (let m = re.exec(fileSource); m !== null; m = re.exec(fileSource)) {
 			sawDeclaration = true;
-			const expr = unwrapParens(balancedValueExpression(fileSource, m.index + m[0].length).trim());
+			const expr = unwrapParens(
+				balancedValueExpression(fileSource, m.index + m[0].length, relPath).trim(),
+			);
 			const isFactory =
 				(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr) || hasTopLevelFactorySpread(expr)) &&
 				!isTransparentObjectReshape(expr);
@@ -1185,6 +1188,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	}
 
 	const source = readFileSync(indexPath, "utf8");
+	const indexRelPath = toRelativeProviderPath(providerRoot, indexPath);
 	// Use the same whitespace-tolerant detection as the resolver below, so a
 	// `defineProvider (` / `defineProvider\n(` formatting cannot pass the early
 	// exit before the real classification runs.
@@ -1215,7 +1219,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	if (defineParenIndex === -1 && inlineDefault) {
 		const declarationParen = inlineDefault.index + inlineDefault[0].length - 1;
 		const declarationStart = declarationParen + 1;
-		const declaration = balancedValueExpression(source, declarationStart);
+		const declaration = balancedValueExpression(source, declarationStart, indexRelPath);
 		let cursor = declarationStart + declaration.length;
 		while (/\s/.test(source[cursor] ?? "")) cursor++;
 		if (source[cursor] === ")") cursor++;
@@ -1248,7 +1252,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		);
 	}
 	const argStart = defineParenIndex + 1;
-	const argText = balancedValueExpression(source, argStart);
+	const argText = balancedValueExpression(source, argStart, indexRelPath);
 
 	// Resolve the value passed as `operations:` inside the implementation call,
 	// following one alias hop. The value is classified as a static object
@@ -1259,7 +1263,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	let opsLine = 1;
 	if (opsProp) {
 		const valueStart = argStart + opsProp.index + opsProp[0].length;
-		opsValue = unwrapParens(balancedValueExpression(source, valueStart).trim());
+		opsValue = unwrapParens(balancedValueExpression(source, valueStart, indexRelPath).trim());
 		opsLine = offsetToLine(source, valueStart);
 	}
 
@@ -1316,13 +1320,13 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			if (!existsSync(filePath)) {
 				continue;
 			}
-			const fileSource = filePath === indexPath ? source : readFileSync(filePath, "utf8");
 			const relPath = toRelativeProviderPath(providerRoot, filePath);
+			const fileSource = filePath === indexPath ? source : readFileSync(filePath, "utf8");
 
 			const declRe = new RegExp(aliasDecl.source, "g");
 			for (let m = declRe.exec(fileSource); m !== null; m = declRe.exec(fileSource)) {
 				const valueStart = m.index + m[0].length;
-				const expr = unwrapParens(balancedValueExpression(fileSource, valueStart).trim());
+				const expr = unwrapParens(balancedValueExpression(fileSource, valueStart, relPath).trim());
 				const isFactory =
 					(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr) || hasTopLevelFactorySpread(expr)) &&
 					!isTransparentObjectReshape(expr);
@@ -2393,6 +2397,7 @@ function findVendorKeyLeakFindings(providerRoot: string): SourceFinding[] {
 	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
 		const source = readFileSync(filePath, "utf8");
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		maskCommentsAndStrings(source, relPath);
 		const upstreamRanges = findUpstreamMarkedConstRanges(source);
 		for (const zObject of findZObjectLiterals(source)) {
 			if (rangeContainsOffset(upstreamRanges, zObject.callStart)) {
@@ -2577,6 +2582,7 @@ function findVendorTimestampLeakFindings(providerRoot: string): SourceFinding[] 
 	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
 		const source = readFileSync(filePath, "utf8");
 		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		maskCommentsAndStrings(source, relPath);
 		const zObjectRanges = findZObjectLiterals(source).map((zObject) => ({
 			start: zObject.callStart,
 			end: zObject.objectEnd,
@@ -2796,12 +2802,12 @@ function findStringEnd(source: string, start: number): number {
 const MASK_CACHE_LIMIT = 64;
 const maskCache = new Map<string, string>();
 
-export function maskCommentsAndStrings(source: string): string {
+export function maskCommentsAndStrings(source: string, fileName = "provider.ts"): string {
 	const cached = maskCache.get(source);
 	if (cached !== undefined) {
 		return cached;
 	}
-	const masked = computeMaskedSource(source);
+	const masked = computeMaskedSource(source, fileName);
 	if (maskCache.size >= MASK_CACHE_LIMIT) {
 		const oldest = maskCache.keys().next();
 		if (!oldest.done) {
@@ -2812,24 +2818,25 @@ export function maskCommentsAndStrings(source: string): string {
 	return masked;
 }
 
-function computeMaskedSource(source: string): string {
+function computeMaskedSource(source: string, fileName: string): string {
+	const transpiled = ts.transpileModule(source, {
+		fileName,
+		reportDiagnostics: true,
+		compilerOptions: { target: ts.ScriptTarget.Latest },
+	});
 	const sourceFile = ts.createSourceFile(
-		"provider.ts",
+		fileName,
 		source,
 		ts.ScriptTarget.Latest,
 		true,
 		ts.ScriptKind.TS,
 	);
-	const parseDiagnostic = (
-		sourceFile as ts.SourceFile & {
-			readonly parseDiagnostics: readonly ts.DiagnosticWithLocation[];
-		}
-	).parseDiagnostics[0];
+	const parseDiagnostic = transpiled.diagnostics?.[0];
 	if (parseDiagnostic) {
 		const position = parseDiagnostic.start ?? 0;
 		const { line, character } = sourceFile.getLineAndCharacterOfPosition(position);
 		throw new Error(
-			`Cannot safely scan TypeScript source at ${line + 1}:${character + 1}: ${ts.flattenDiagnosticMessageText(parseDiagnostic.messageText, "\n")}`,
+			`Cannot safely scan TypeScript source ${fileName} at ${line + 1}:${character + 1}: ${ts.flattenDiagnosticMessageText(parseDiagnostic.messageText, "\n")}`,
 		);
 	}
 
