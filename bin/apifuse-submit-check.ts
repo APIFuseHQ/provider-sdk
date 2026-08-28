@@ -474,7 +474,7 @@ function scoreDescribeKey(providerRoot: string): SubmitCheck {
 }
 
 function scoreNoRawFetch(providerRoot: string): SubmitCheck {
-	const findings = findSourceLineMatches(providerRoot, /(?<![.\w])fetch\s*\(/);
+	const findings = findSourceLineMatches(providerRoot, /(?<![.\w])fetch\s*\(/, true);
 	if (findings.length > 0) {
 		const evidence = formatSourceFindings(findings);
 		return blocker(
@@ -545,7 +545,10 @@ function countAsAssertions(providerRoot: string): {
 
 	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
 		const content = readFileSync(filePath, "utf8");
-		const lines = content.split(/\r?\n/);
+		const lines = maskCommentsAndStrings(
+			content,
+			toRelativeProviderPath(providerRoot, filePath),
+		).split(/\r?\n/);
 		for (let index = 0; index < lines.length; index += 1) {
 			const line = lines[index];
 			if (
@@ -736,18 +739,44 @@ function offsetToLine(source: string, offset: number): number {
 // between them, so `.passthrough ()` / `.passthrough\n()` are still detected.
 const PASSTHROUGH_CALL = /\.passthrough\s*\(\s*\)/;
 
+type ExpressionSlice = {
+	raw: string;
+	masked: string;
+};
+
+function trimExpressionSlice(expr: ExpressionSlice): ExpressionSlice {
+	const start = expr.raw.length - expr.raw.trimStart().length;
+	const end = expr.raw.trimEnd().length;
+	return {
+		raw: expr.raw.slice(start, end),
+		masked: expr.masked.slice(start, end),
+	};
+}
+
+function balancedExpressionSlice(
+	source: string,
+	valueStart: number,
+	fileName?: string,
+): ExpressionSlice {
+	const raw = balancedValueExpression(source, valueStart, fileName);
+	return trimExpressionSlice({
+		raw,
+		masked: maskCommentsAndStrings(source, fileName).slice(valueStart, valueStart + raw.length),
+	});
+}
+
 // Strips redundant wrapping parentheses from an expression so that a value like
 // `(makeOperations())` or `((x))` classifies the same as `makeOperations()`.
 // Only unwraps when the leading `(` matches the trailing `)` at depth 0 (i.e.
 // the whole expression is parenthesized), preserving call expressions such as
 // `makeOperations()` whose first `(` is not a wrapper.
-function unwrapParens(expr: string): string {
-	let value = expr.trim();
-	while (value.startsWith("(")) {
+function unwrapParens(expr: ExpressionSlice): ExpressionSlice {
+	let value = trimExpressionSlice(expr);
+	while (value.raw.startsWith("(")) {
 		let depth = 0;
 		let matchIndex = -1;
-		for (let i = 0; i < value.length; i += 1) {
-			const ch = value[i];
+		for (let i = 0; i < value.raw.length; i += 1) {
+			const ch = value.masked[i];
 			if (ch === "(") {
 				depth += 1;
 			} else if (ch === ")") {
@@ -760,8 +789,11 @@ function unwrapParens(expr: string): string {
 		}
 		// Only a true wrapper spans the entire expression (closing paren is the
 		// last char). Otherwise the leading `(` belongs to a sub-expression.
-		if (matchIndex === value.length - 1) {
-			value = value.slice(1, -1).trim();
+		if (matchIndex === value.raw.length - 1) {
+			value = trimExpressionSlice({
+				raw: value.raw.slice(1, -1),
+				masked: value.masked.slice(1, -1),
+			});
 		} else {
 			break;
 		}
@@ -798,14 +830,14 @@ function balancedValueExpression(source: string, valueStart: number, fileName?: 
 // nested deeper than the outer object (inside handler bodies, nested objects,
 // or arrays) are ignored, so only a factory composition of the object itself
 // is detected. Input is expected to start at the outer `{`.
-function hasTopLevelFactorySpread(expr: string): boolean {
-	const open = expr.indexOf("{");
+function hasTopLevelFactorySpread(expr: ExpressionSlice): boolean {
+	const open = expr.masked.indexOf("{");
 	if (open === -1) {
 		return false;
 	}
 	let depth = 0;
-	for (let i = open; i < expr.length; i += 1) {
-		const ch = expr[i];
+	for (let i = open; i < expr.raw.length; i += 1) {
+		const ch = expr.masked[i];
 		if (ch === "{" || ch === "(" || ch === "[") {
 			depth += 1;
 		} else if (ch === "}" || ch === ")" || ch === "]") {
@@ -813,11 +845,11 @@ function hasTopLevelFactorySpread(expr: string): boolean {
 			if (depth === 0) {
 				break;
 			}
-		} else if (ch === "." && depth === 1 && expr.startsWith("...", i)) {
+		} else if (ch === "." && depth === 1 && expr.masked.startsWith("...", i)) {
 			// A spread at the object's own level. Check whether the spread
 			// argument is a call expression (factory) rather than a plain
 			// identifier/member spread of an already-built object.
-			const rest = expr.slice(i + 3);
+			const rest = expr.raw.slice(i + 3);
 			if (/^\s*[A-Za-z_$][\w$.]*\s*\(/.test(rest)) {
 				return true;
 			}
@@ -832,15 +864,15 @@ function hasTopLevelFactorySpread(expr: string): boolean {
 // hasTopLevelFactorySpread, so it is excluded here. These identifiers must be
 // resolved to their declarations: `const hidden = makeOperations()` spread as
 // `{ ...hidden }` is still a factory-composed map and must block.
-function topLevelSpreadIdentifiers(expr: string): string[] {
-	const open = expr.indexOf("{");
+function topLevelSpreadIdentifiers(expr: ExpressionSlice): string[] {
+	const open = expr.masked.indexOf("{");
 	if (open === -1) {
 		return [];
 	}
 	const names: string[] = [];
 	let depth = 0;
-	for (let i = open; i < expr.length; i += 1) {
-		const ch = expr[i];
+	for (let i = open; i < expr.raw.length; i += 1) {
+		const ch = expr.masked[i];
 		if (ch === "{" || ch === "(" || ch === "[") {
 			depth += 1;
 		} else if (ch === "}" || ch === ")" || ch === "]") {
@@ -848,8 +880,8 @@ function topLevelSpreadIdentifiers(expr: string): string[] {
 			if (depth === 0) {
 				break;
 			}
-		} else if (ch === "." && depth === 1 && expr.startsWith("...", i)) {
-			const rest = expr.slice(i + 3);
+		} else if (ch === "." && depth === 1 && expr.masked.startsWith("...", i)) {
+			const rest = expr.raw.slice(i + 3);
 			// Bare identifier spread (no call parens) -> needs declaration
 			// resolution. `...obj.prop` member spreads are treated as already
 			// built and ignored (the leading identifier is captured).
@@ -882,8 +914,8 @@ function topLevelSpreadIdentifiers(expr: string): string[] {
 // `makeOperations()` — stays classified as factory composition.
 const TRANSPARENT_RESHAPE_HEAD = /^Object\s*\.\s*fromEntries\s*\(/;
 const OBJECT_ENTRIES_HEAD = /^Object\s*\.\s*entries\s*\(/;
-function isTransparentObjectReshape(expr: string): boolean {
-	const head = TRANSPARENT_RESHAPE_HEAD.exec(expr);
+function isTransparentObjectReshape(expr: ExpressionSlice): boolean {
+	const head = TRANSPARENT_RESHAPE_HEAD.exec(expr.masked);
 	if (!head) {
 		return false;
 	}
@@ -891,7 +923,7 @@ function isTransparentObjectReshape(expr: string): boolean {
 	// transparent only when that argument's root callee is `Object.entries(`
 	// (optionally chained: `Object.entries(obj).filter(...)`), so the source
 	// object is enumerable from source rather than produced by an opaque call.
-	const firstArg = expr.slice(head[0].length).trimStart();
+	const firstArg = expr.masked.slice(head[0].length).trimStart();
 	return OBJECT_ENTRIES_HEAD.test(firstArg);
 }
 
@@ -1183,10 +1215,10 @@ function spreadIdentifierResolvesToFactory(
 		for (let m = re.exec(fileSource); m !== null; m = re.exec(fileSource)) {
 			sawDeclaration = true;
 			const expr = unwrapParens(
-				balancedValueExpression(fileSource, m.index + m[0].length, relPath).trim(),
+				balancedExpressionSlice(fileSource, m.index + m[0].length, relPath),
 			);
 			const isFactory =
-				(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr) || hasTopLevelFactorySpread(expr)) &&
+				(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr.masked) || hasTopLevelFactorySpread(expr)) &&
 				!isTransparentObjectReshape(expr);
 			if (isFactory) {
 				return true;
@@ -1285,11 +1317,11 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	// literal (pass) or a factory/call expression (block). The regex index is
 	// offset back into the full source so line numbers stay accurate.
 	const opsProp = /\boperations\s*:\s*/.exec(argText);
-	let opsValue: string | undefined;
+	let opsValue: ExpressionSlice | undefined;
 	let opsLine = 1;
 	if (opsProp) {
 		const valueStart = argStart + opsProp.index + opsProp[0].length;
-		opsValue = unwrapParens(balancedValueExpression(source, valueStart, indexRelPath).trim());
+		opsValue = unwrapParens(balancedExpressionSlice(source, valueStart, indexRelPath));
 		opsLine = offsetToLine(source, valueStart);
 	}
 
@@ -1300,9 +1332,9 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		if (/\boperations\s*[,}]/.test(argText)) {
 			aliasName = "operations";
 		}
-	} else if (/^[A-Za-z_$][\w$]*$/.test(opsValue)) {
+	} else if (/^[A-Za-z_$][\w$]*$/.test(opsValue.masked)) {
 		// `operations: ops` — a bare identifier alias to resolve.
-		aliasName = opsValue;
+		aliasName = opsValue.raw;
 	}
 
 	// Determine the effective initializer expression to classify. The alias may
@@ -1336,7 +1368,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 		// do not resolve the exact import target path; "any same-named factory
 		// blocks" is the conservative, false-negative-avoiding choice for a gate.)
 		type Candidate = {
-			expr: string;
+			expr: ExpressionSlice;
 			line: number;
 			file: string;
 			isFactory: boolean;
@@ -1352,9 +1384,9 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			const declRe = new RegExp(aliasDecl.source, "g");
 			for (let m = declRe.exec(fileSource); m !== null; m = declRe.exec(fileSource)) {
 				const valueStart = m.index + m[0].length;
-				const expr = unwrapParens(balancedValueExpression(fileSource, valueStart, relPath).trim());
+				const expr = unwrapParens(balancedExpressionSlice(fileSource, valueStart, relPath));
 				const isFactory =
-					(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr) || hasTopLevelFactorySpread(expr)) &&
+					(/^[A-Za-z_$][\w$.]*\s*\(/.test(expr.masked) || hasTopLevelFactorySpread(expr)) &&
 					!isTransparentObjectReshape(expr);
 				candidates.push({
 					expr,
@@ -1365,8 +1397,9 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			}
 			const destructRe = new RegExp(destructured.source, "g");
 			for (let m = destructRe.exec(fileSource); m !== null; m = destructRe.exec(fileSource)) {
+				const raw = `${m[1]}(`;
 				candidates.push({
-					expr: `${m[1]}(`,
+					expr: { raw, masked: raw },
 					line: offsetToLine(fileSource, m.index),
 					file: relPath,
 					isFactory: true,
@@ -1396,7 +1429,8 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 				source,
 			);
 			if (importMatch) {
-				effective = `${aliasName}(`;
+				const raw = `${aliasName}(`;
+				effective = { raw, masked: raw };
 				effectiveLine = offsetToLine(source, importMatch.index);
 				effectiveFile = "index.ts";
 			}
@@ -1420,14 +1454,16 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 			spreadIdentifierResolvesToFactory(providerRoot, indexPath, source, name),
 		);
 	const isStaticLiteral =
-		effective?.startsWith("{") === true && !hasFactorySpread && !hasFactorySpreadIdentifier;
+		effective?.masked.startsWith("{") === true && !hasFactorySpread && !hasFactorySpreadIdentifier;
 	// A call expression `ident(...)` (factory) or a factory-spread literal is
 	// the rejected, non-static shape — UNLESS it is the stdlib
 	// `Object.fromEntries(Object.entries(<source-visible obj>)...)` reshape,
 	// whose op set is still enumerable from source (verified golden pattern).
 	const isFactoryCall =
 		effective !== undefined &&
-		(/^[A-Za-z_$][\w$.]*\s*\(/.test(effective) || hasFactorySpread || hasFactorySpreadIdentifier) &&
+		(/^[A-Za-z_$][\w$.]*\s*\(/.test(effective.masked) ||
+			hasFactorySpread ||
+			hasFactorySpreadIdentifier) &&
 		!isTransparentObjectReshape(effective);
 
 	if (isFactoryCall && !isStaticLiteral) {
@@ -1453,7 +1489,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 }
 
 function scoreCredentialUsage(providerRoot: string, provider: ProviderDefinition): SubmitCheck {
-	const credentialReferences = findSourceLineMatches(providerRoot, /ctx\.credential/);
+	const credentialReferences = findSourceLineMatches(providerRoot, /ctx\.credential/, true);
 	const authMode = provider.auth?.mode ?? "none";
 	const credentialKeys = provider.credential?.keys ?? [];
 	const storesProviderCredential = authMode !== "none" || credentialKeys.length > 0;
@@ -1639,23 +1675,32 @@ function scoreSdkOwnedSecretPresence(
 function findSourceLineMatches(
 	providerRoot: string,
 	pattern: RegExp | ((line: string) => boolean),
+	useMaskedSource = false,
 ): SourceFinding[] {
-	return findSourceFindings(providerRoot, (line) => matchesLinePattern(line, pattern));
+	return findSourceFindings(
+		providerRoot,
+		(line) => matchesLinePattern(line, pattern),
+		useMaskedSource,
+	);
 }
 
 function findSourceFindings(
 	providerRoot: string,
 	matchesLine: (line: string, remainingLines: readonly string[]) => boolean,
+	useMaskedSource = false,
 ): SourceFinding[] {
 	const findings: SourceFinding[] = [];
 	for (const filePath of listNonTestTypeScriptFiles(providerRoot)) {
 		const content = readFileSync(filePath, "utf8");
-		const lines = content.split(/\r?\n/);
+		const relPath = toRelativeProviderPath(providerRoot, filePath);
+		const lines = (useMaskedSource ? maskCommentsAndStrings(content, relPath) : content).split(
+			/\r?\n/,
+		);
 		for (let index = 0; index < lines.length; index += 1) {
 			const line = lines[index];
 			if (line !== undefined && matchesLine(line, lines.slice(index + 1))) {
 				findings.push({
-					file: toRelativeProviderPath(providerRoot, filePath),
+					file: relPath,
 					line: index + 1,
 				});
 				if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
@@ -2705,9 +2750,10 @@ function findStringLiteralsInRange(
 	range: ObjectRange,
 ): Array<{ value: string; offset: number }> {
 	const literals: Array<{ value: string; offset: number }> = [];
+	const masked = maskCommentsAndStrings(source);
 	let index = range.start;
 	while (index <= range.end) {
-		const quote = source[index];
+		const quote = masked[index];
 		if (quote !== '"' && quote !== "'" && quote !== "`") {
 			index += 1;
 			continue;

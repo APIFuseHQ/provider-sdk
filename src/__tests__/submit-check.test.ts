@@ -264,6 +264,19 @@ function assertionLines(count: number): string {
 	).join("\n");
 }
 
+function sourceWithFactorySpreadDepthNoise(noise: string): string {
+	return validProviderSource()
+		.replace(
+			"\nexport default defineProvider",
+			"\nfunction makeOperations() { return {}; }\nconst hidden = makeOperations();\n\nexport default defineProvider",
+		)
+		.replace(
+			'descriptionKey: "operations.lookup.description",',
+			`descriptionKey: "operations.lookup.description",\n      ${noise}`,
+		)
+		.replace("\n    },\n  },\n});", "\n    },\n    ...hidden,\n  },\n});");
+}
+
 afterEach(() => {
 	while (tempDirs.length > 0) {
 		const dir = tempDirs.pop();
@@ -526,6 +539,32 @@ void useStealth;
 		expect(report.score.verdict).toBe("blocked");
 	});
 
+	it("ignores raw fetch syntax inside comments", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-comment-",
+			`${validProviderSource()}\n// Example only: fetch("https://api.example.com/lookup")\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-raw-fetch");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
+	it("ignores raw fetch syntax inside string literals", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-string-",
+			`${validProviderSource()}\nconst documentation = "Call fetch( through the SDK client";\nvoid documentation;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "no-raw-fetch");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
 	it("warns standalone bounty submissions for self-hosted browser runtime patterns", async () => {
 		const dir = makeProviderDir(
 			"submit-managed-browser-warning-",
@@ -635,6 +674,40 @@ ${assertionLines(5)}
 		expect(report.score.verdict).toBe("reviewable_with_warnings");
 	});
 
+	it("does not count type assertion examples inside comments", async () => {
+		const examples = Array.from(
+			{ length: 6 },
+			(_, index) => `// example ${index}: value as unknown`,
+		).join("\n");
+		const dir = makeProviderDir(
+			"submit-as-assertion-comment-",
+			`${validProviderSource()}\n${examples}\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "as-assertion-count");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("Type assertions are within the recommended limit.");
+	});
+
+	it("does not count type assertion examples inside string literals", async () => {
+		const examples = Array.from(
+			{ length: 6 },
+			(_, index) => `const assertionExample${index} = "value as unknown";`,
+		).join("\n");
+		const dir = makeProviderDir(
+			"submit-as-assertion-string-",
+			`${validProviderSource()}\n${examples}\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "as-assertion-count");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.message).toBe("Type assertions are within the recommended limit.");
+	});
+
 	it("warns for moderate type assertion counts without changing score", async () => {
 		const dir = makeProviderDir(
 			"submit-as-assertion-warn-",
@@ -704,6 +777,53 @@ ${assertionLines(21)}
 		expect(check?.maxPoints).toBe(0);
 		expect(check?.points).toBe(0);
 		expect(report.score.verdict).toBe("reviewable_with_warnings");
+	});
+
+	it("warns when the only credential reference is inside a comment", async () => {
+		const source = `${sourceWithAuth(`auth: {
+    mode: "credentials",
+    flow: {
+      continue: async () => ({
+        kind: "complete",
+        turnId: crypto.randomUUID(),
+        data: { credential: { userId: "user_123" } },
+      }),
+    },
+  },
+  credential: { keys: ["userId"] },`)}
+// ctx.credential would be used here
+`;
+		const dir = makeProviderDir("submit-credential-comment-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "credential-usage");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
+	});
+
+	it("warns when the only credential reference is inside a string literal", async () => {
+		const source = `${sourceWithAuth(`auth: {
+    mode: "credentials",
+    flow: {
+      continue: async () => ({
+        kind: "complete",
+        turnId: crypto.randomUUID(),
+        data: { credential: { userId: "user_123" } },
+      }),
+    },
+  },
+  credential: { keys: ["userId"] },`)}
+const credentialDocumentation = "ctx.credential.get";
+void credentialDocumentation;
+`;
+		const dir = makeProviderDir("submit-credential-string-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "credential-usage");
+
+		expect(check?.level).toBe("warn");
+		expect(check?.status).toBe("warn");
 	});
 
 	it("passes credential usage for no-auth providers", async () => {
@@ -1830,6 +1950,20 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
 		expect(check?.evidence?.[0]).toMatch(/index\.ts:\d+/);
+	});
+
+	it("ignores compact vendor timestamp examples in fixture comments", async () => {
+		const source = validProviderSource().replace(
+			'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+			'fixtures: { request: { q: "btc" }, response: { /* date: "20260709" */ ok: true } },',
+		);
+		const dir = makeProviderDir("submit-vendor-timestamp-comment-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "vendor-timestamp-leak");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
 	});
 
 	it("does not flag HHmm-like status values in normalized response fixtures", async () => {
@@ -3633,6 +3767,76 @@ export default defineProvider({ id: "spread", version: "1.0.0", runtime: "standa
 
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks an operations-level factory spread after an opening brace in a string", async () => {
+		const dir = makeProviderDir(
+			"submit-factory-spread-string-open-",
+			sourceWithFactorySpreadDepthNoise('documentation: "{",'),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks an operations-level factory spread after an opening brace in a template", async () => {
+		const dir = makeProviderDir(
+			"submit-factory-spread-template-open-",
+			sourceWithFactorySpreadDepthNoise("documentation: `{`,"),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks an operations-level factory spread after an opening brace in a comment", async () => {
+		const dir = makeProviderDir(
+			"submit-factory-spread-comment-open-",
+			sourceWithFactorySpreadDepthNoise("// {"),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks an operations-level factory spread after an opening brace in a regex", async () => {
+		const dir = makeProviderDir(
+			"submit-factory-spread-regex-open-",
+			sourceWithFactorySpreadDepthNoise("pattern: /\\{/,"),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("ignores a nested factory spread promoted by a closing brace in a string", async () => {
+		const source = validProviderSource()
+			.replace(
+				"\nexport default defineProvider",
+				"\nfunction makeFields() { return {}; }\nconst fields = makeFields();\n\nexport default defineProvider",
+			)
+			.replace(
+				'descriptionKey: "operations.lookup.description",',
+				'descriptionKey: "operations.lookup.description",\n      documentation: "}",\n      ...fields,',
+			);
+		const dir = makeProviderDir("submit-nested-spread-string-close-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "flat-operation-composition");
+
+		expect(check?.status).toBe("pass");
 	});
 
 	it("blocks a factory provider formatted as `defineProvider (` with whitespace", async () => {
