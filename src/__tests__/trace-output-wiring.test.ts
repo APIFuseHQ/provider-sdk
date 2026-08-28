@@ -48,6 +48,25 @@ const provider = createProviderDefinitionDouble({
 				);
 			},
 		},
+		get_flea_market_item: {
+			input: z.object({}),
+			output: z.object({ ok: z.boolean() }),
+			handler: async (ctx) => {
+				const recorder = getTraceRecorder(ctx.trace);
+				if (!recorder) throw new Error("trace recorder missing");
+				for (const name of [
+					"http.get",
+					"resolver.solve",
+					"resolver.vendor.attempt",
+					"stealth.redirects.run",
+					"browser.close",
+				]) {
+					await recorder.runSpan(name, async () => undefined);
+				}
+				await recorder.runSpan("name:\u0000\u001bline\n", async () => undefined);
+				return { ok: true };
+			},
+		},
 	},
 });
 
@@ -94,6 +113,17 @@ async function invokeFailure(): Promise<Response> {
 	});
 }
 
+async function invokeSpanNames(): Promise<Response> {
+	return createServerApp(provider, {
+		allowMemoryStateFallback: true,
+		logger: () => {},
+	}).request("/v1/get_flea_market_item", {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ requestId: "trace-name-test", input: {} }),
+	});
+}
+
 describe("server trace output wiring", () => {
 	it("keeps the default in-memory trace behavior silent", async () => {
 		const output: string[] = [];
@@ -131,6 +161,36 @@ describe("server trace output wiring", () => {
 		const span = spans.find((candidate) => candidate.name === "handler:echo");
 		expect(span).toBeDefined();
 		expect(span?.duration_ms).toBeGreaterThanOrEqual(0);
+	});
+
+	it("retains SDK-authored span names and neutralizes name controls", async () => {
+		const output: string[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		try {
+			await withTraceEnv(
+				{ [APIFUSE__TRACE__ENABLED]: "true", [APIFUSE__TRACE__EXPORTER]: "console" },
+				async () => {
+					const response = await invokeSpanNames();
+					expect(response.status).toBe(200);
+				},
+			);
+		} finally {
+			console.log = originalLog;
+		}
+
+		const names = output.map((line) => (JSON.parse(line) as { name: string }).name);
+		expect(names).toContain("handler:get_flea_market_item");
+		for (const name of [
+			"http.get",
+			"resolver.solve",
+			"resolver.vendor.attempt",
+			"stealth.redirects.run",
+			"browser.close",
+		]) {
+			expect(names).toContain(name);
+		}
+		expect(names).toContain("name:\\u0000\\u001bline ");
 	});
 
 	it("redacts and bounds untrusted error and attribute strings before console output", async () => {

@@ -1,4 +1,5 @@
 import {
+	encodeDiagnosticControls,
 	isSensitiveFixtureKey,
 	REDACTED_FIXTURE_VALUE,
 	sanitizeDiagnosticText,
@@ -9,10 +10,18 @@ import {
 	type Span,
 } from "../runtime/trace.js";
 import type { TraceConfig } from "../types.js";
-import { redactSelfTestText } from "./self-test-redaction.js";
+import { redactSelfTestText, SELF_TEST_MAX_TEXT_LENGTH } from "./self-test-redaction.js";
 
 function sanitizeTraceText(value: string): string {
 	return redactSelfTestText(sanitizeDiagnosticText(value), []);
+}
+
+/** Span names are SDK-authored identifiers; retain them while preventing log injection. */
+function sanitizeSpanNameForOutput(value: string): string {
+	const encoded = encodeDiagnosticControls(value);
+	return encoded.length > SELF_TEST_MAX_TEXT_LENGTH
+		? `${encoded.slice(0, SELF_TEST_MAX_TEXT_LENGTH)}… [truncated]`
+		: encoded;
 }
 
 function sanitizeSpanForOutput(span: Span): Span {
@@ -31,7 +40,7 @@ function sanitizeSpanForOutput(span: Span): Span {
 	// process output path before their trust boundary has been reviewed.
 	return {
 		id: span.id,
-		name: sanitizeTraceText(span.name),
+		name: sanitizeSpanNameForOutput(span.name),
 		startedAt: span.startedAt,
 		endedAt: span.endedAt,
 		duration_ms: span.duration_ms,
