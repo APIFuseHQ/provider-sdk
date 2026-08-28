@@ -7,3 +7,5 @@ Allow provider authors to attach bounded, typed `observability` metadata to `Pro
 Only own data properties are read at every level, including `ProviderError.options` and `options.observability`; inherited values and accessors are rejected without invoking getters.
 
 The SDK validates this closed schema at the emission boundary and drops invalid values and arbitrary keys. Public error response bodies remain unchanged.
+
+Failure logs receive an independent metadata snapshot, so mutations by an injected logger cannot alter the observability header serialized in the response.

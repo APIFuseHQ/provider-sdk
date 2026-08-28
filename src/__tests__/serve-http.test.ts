@@ -24,6 +24,7 @@ import {
 	resolveAuthFlowProxyAffinityKey,
 	resolveProviderProxyAffinityKey,
 } from "../server/serve.js";
+import { safeProviderErrorObservability } from "../server/error-observability.js";
 import { event } from "../stream.js";
 import type { OperationErrorCode, ProviderContext, ProviderDefinition } from "../types.js";
 import { HttpRetryPreset } from "../types.js";
@@ -2307,7 +2308,11 @@ describe("provider HTTP server", () => {
 		]);
 	});
 
-	function createCauseErrorApp(createError: () => ProviderError, events: ProviderServerLogEvent[]) {
+	function createCauseErrorApp(
+		createError: () => ProviderError,
+		events: ProviderServerLogEvent[],
+		mutateLog?: (event: ProviderServerLogEvent) => void,
+	) {
 		const base = createTestProvider();
 		const provider = {
 			...base,
@@ -2321,7 +2326,12 @@ describe("provider HTTP server", () => {
 				},
 			},
 		} satisfies ProviderDefinition;
-		return createServerApp(provider, { logger: (event) => events.push(event) });
+		return createServerApp(provider, {
+			logger: (event) => {
+				mutateLog?.(event);
+				events.push(event);
+			},
+		});
 	}
 
 	function requestCauseError(app: ReturnType<typeof createServerApp>) {
@@ -2575,6 +2585,42 @@ describe("provider HTTP server", () => {
 		});
 	});
 
+	it("isolates the observability header from logger mutations", async () => {
+		const providerObservability = {
+			reason: "LOGGER_SNAPSHOT",
+			fingerprint: "038ed7ef11d8",
+			messageLength: 73,
+		} satisfies ProviderErrorObservability;
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(
+			createCauseErrorApp(
+				() =>
+					new TransportError("NOL login completion failed upstream.", {
+						code: "UPSTREAM_ERROR",
+						observability: providerObservability,
+					}),
+				events,
+				(event) => {
+					if (event.event !== "provider_request_failed" || !event.providerObservability) return;
+					event.providerObservability.reason = "LOGGER_MUTATED";
+					event.providerObservability.fingerprint = "000000000000";
+					Object.defineProperty(event.providerObservability, "circular", {
+						value: event.providerObservability,
+					});
+				},
+			),
+		);
+
+		expect(response.status).toBe(502);
+		expect(events[0]).toMatchObject({
+			providerObservability: {
+				reason: "LOGGER_MUTATED",
+				fingerprint: "000000000000",
+			},
+		});
+		expect(errorObservability(response).providerObservability).toEqual(providerObservability);
+	});
+
 	it("rejects inherited observability from the log, header, cause frame, and body", async () => {
 		const inheritedObservability = {
 			reason: "INHERITED_LEAK",
@@ -2653,7 +2699,7 @@ describe("provider HTTP server", () => {
 		}
 	});
 
-	it("rejects an options accessor without invoking it for cause observability", async () => {
+	it("rejects observability from options accessors at the HTTP boundary", async () => {
 		const accessorObservability = {
 			reason: "OPTIONS_ACCESSOR_LEAK",
 			fingerprint: "038ed7ef11d8",
@@ -2661,11 +2707,8 @@ describe("provider HTTP server", () => {
 		const inner = new ProviderError("Private diagnostic placeholder", {
 			code: "INNER_OPTIONS_ACCESSOR",
 		});
-		Object.defineProperty(inner, "code", { value: "INNER_OPTIONS_ACCESSOR" });
-		let getterCalls = 0;
 		Object.defineProperty(inner, "options", {
 			get() {
-				getterCalls += 1;
 				return {
 					code: "INNER_OPTIONS_ACCESSOR",
 					observability: accessorObservability,
@@ -2687,7 +2730,6 @@ describe("provider HTTP server", () => {
 		const header = errorObservability(response);
 		const body = await response.json();
 		const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
-		expect(getterCalls).toBe(0);
 		expect(frame).not.toHaveProperty("providerObservability");
 		for (const channel of [
 			JSON.stringify(events[0]),
@@ -2698,6 +2740,26 @@ describe("provider HTTP server", () => {
 			expect(channel).not.toContain(accessorObservability.reason);
 			expect(channel).not.toContain(accessorObservability.fingerprint);
 		}
+	});
+
+	it("rejects an options accessor without invoking it in safe observability extraction", () => {
+		const accessorObservability = {
+			reason: "OPTIONS_ACCESSOR_LEAK",
+			fingerprint: "038ed7ef11d8",
+		};
+		const error = new ProviderError("Private diagnostic placeholder", {
+			code: "OPTIONS_ACCESSOR",
+		});
+		let getterCalls = 0;
+		Object.defineProperty(error, "options", {
+			get() {
+				getterCalls += 1;
+				return { code: "OPTIONS_ACCESSOR", observability: accessorObservability };
+			},
+		});
+
+		expect(safeProviderErrorObservability(error)).toBeUndefined();
+		expect(getterCalls).toBe(0);
 	});
 
 	it("adds validated observability from a branded inner cause to its frame", async () => {
