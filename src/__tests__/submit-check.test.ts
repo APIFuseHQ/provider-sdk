@@ -458,6 +458,58 @@ describe("apifuse submit-check", () => {
 		}
 	});
 
+	it("preserves a common boolean from a secret-named environment variable", async () => {
+		const envName = "SUBMIT_CHECK_TEST_SECRET_FLAG";
+		const previousValue = process.env[envName];
+		process.env[envName] = "false";
+		try {
+			const dir = makeProviderDir(
+				"submit-index-env-secret-boolean-",
+				'throw new Error("Expected true, received false for local auto thread mode");\n',
+			);
+			writeValidLocaleCatalogs(dir);
+
+			const evidence =
+				(await buildSubmitCheckReport(dir)).checks
+					.find((item) => item.id === "provider-load")
+					?.evidence?.join("\n") ?? "";
+			expect(evidence).toContain("Expected true, received false for local auto thread mode");
+			expect(evidence).not.toContain("[REDACTED]");
+		} finally {
+			if (previousValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = previousValue;
+			}
+		}
+	});
+
+	it("preserves a numeric value from a secret-named environment variable", async () => {
+		const envName = "SUBMIT_CHECK_TEST_TOKEN_TTL";
+		const previousValue = process.env[envName];
+		process.env[envName] = "3600";
+		try {
+			const dir = makeProviderDir(
+				"submit-index-env-secret-numeric-",
+				'throw new Error("Token TTL 3600 seconds is invalid");\n',
+			);
+			writeValidLocaleCatalogs(dir);
+
+			const evidence =
+				(await buildSubmitCheckReport(dir)).checks
+					.find((item) => item.id === "provider-load")
+					?.evidence?.join("\n") ?? "";
+			expect(evidence).toContain("Token TTL 3600 seconds is invalid");
+			expect(evidence).not.toContain("[REDACTED]");
+		} finally {
+			if (previousValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = previousValue;
+			}
+		}
+	});
+
 	it("redacts long values from secret-like environment variables in load evidence", async () => {
 		const envName = "SUBMIT_CHECK_TEST_TOKEN";
 		const envValue = "qJ8nV2xP7mK4rT9wB6cD3fG5hL0sY1uA8eZ2iN7o";
@@ -501,6 +553,87 @@ describe("apifuse submit-check", () => {
 				report.checks.find((item) => item.id === "provider-load")?.evidence?.join("\n") ?? "";
 			expect(evidence).toContain("[REDACTED]");
 			expect(evidence).not.toContain(envValue);
+		} finally {
+			if (previousValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = previousValue;
+			}
+		}
+	});
+
+	it("redacts a short API token from a secret-named environment variable", async () => {
+		const envName = "SUBMIT_CHECK_TEST_API_TOKEN";
+		const envValue = "sk_live_9f2a";
+		const previousValue = process.env[envName];
+		process.env[envName] = envValue;
+		try {
+			const dir = makeProviderDir(
+				"submit-index-env-api-token-",
+				`throw new Error("upstream auth rejected ${envValue}");\n`,
+			);
+			writeValidLocaleCatalogs(dir);
+
+			const evidence =
+				(await buildSubmitCheckReport(dir)).checks
+					.find((item) => item.id === "provider-load")
+					?.evidence?.join("\n") ?? "";
+			expect(evidence).toContain("[REDACTED]");
+			expect(evidence).not.toContain(envValue);
+		} finally {
+			if (previousValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = previousValue;
+			}
+		}
+	});
+
+	it("redacts a short password from a secret-named environment variable", async () => {
+		const envName = "SUBMIT_CHECK_TEST_PASSWORD";
+		const envValue = "hunter2!";
+		const previousValue = process.env[envName];
+		process.env[envName] = envValue;
+		try {
+			const dir = makeProviderDir(
+				"submit-index-env-password-",
+				`throw new Error("upstream auth rejected ${envValue}");\n`,
+			);
+			writeValidLocaleCatalogs(dir);
+
+			const evidence =
+				(await buildSubmitCheckReport(dir)).checks
+					.find((item) => item.id === "provider-load")
+					?.evidence?.join("\n") ?? "";
+			expect(evidence).toContain("[REDACTED]");
+			expect(evidence).not.toContain(envValue);
+		} finally {
+			if (previousValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = previousValue;
+			}
+		}
+	});
+
+	it("does not replace a short secret-like value inside a longer identifier", async () => {
+		const envName = "SUBMIT_CHECK_TEST_PASSWORD";
+		const envValue = "aB1!";
+		const previousValue = process.env[envName];
+		process.env[envName] = envValue;
+		try {
+			const dir = makeProviderDir(
+				"submit-index-env-secret-boundary-",
+				`throw new Error("standalone ${envValue}; unrelated prefix${envValue}suffix");\n`,
+			);
+			writeValidLocaleCatalogs(dir);
+
+			const evidence =
+				(await buildSubmitCheckReport(dir)).checks
+					.find((item) => item.id === "provider-load")
+					?.evidence?.join("\n") ?? "";
+			expect(evidence).toContain("standalone [REDACTED]");
+			expect(evidence).toContain(`unrelated prefix${envValue}suffix`);
 		} finally {
 			if (previousValue === undefined) {
 				delete process.env[envName];
@@ -618,6 +751,28 @@ describe("apifuse submit-check", () => {
 			expect(report.score.verdict).toBe("blocked");
 		});
 	}
+
+	it("preserves literal false when a secret-named boolean is present", async () => {
+		const envName = "SUBMIT_CHECK_TEST_SECRET_FLAG";
+		const previousValue = process.env[envName];
+		process.env[envName] = "false";
+		try {
+			const dir = makeProviderDir("submit-index-false-secret-flag-", "throw false;\n");
+			writeValidLocaleCatalogs(dir);
+
+			const evidence = (await buildSubmitCheckReport(dir)).checks.find(
+				(item) => item.id === "provider-load",
+			)?.evidence;
+			expect(evidence).toEqual(["Load error: <non-Error value thrown: false>"]);
+			expect(evidence?.join("\n")).not.toContain("[REDACTED]");
+		} finally {
+			if (previousValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = previousValue;
+			}
+		}
+	});
 
 	it("preserves a missing import as provider-load evidence", async () => {
 		const dir = makeProviderDir(

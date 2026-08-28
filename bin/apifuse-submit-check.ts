@@ -4957,9 +4957,34 @@ const SECRETISH_IDENTIFIER_PATTERN = /key|token|secret|password|credential|auth/
 // the three stay coherent.
 const ENTROPY_CANDIDATE_MIN_LENGTH = 20;
 
-// Secret-named values are stronger signals than entropy alone, but replacing
-// shorter fragments globally would mangle ordinary evidence text.
+// A secret-ish name is only supporting evidence. Shorter values must also look
+// credential-like, and known config tokens/numeric values are never candidates.
 const SECRET_NAMED_ENV_VALUE_MIN_LENGTH = 4;
+const SECRET_NAMED_ENV_UNSTRUCTURED_MIN_LENGTH = 8;
+const NON_SECRET_ENV_VALUE_TOKENS = new Set([
+	"true",
+	"false",
+	"yes",
+	"no",
+	"on",
+	"off",
+	"none",
+	"null",
+	"nil",
+	"auto",
+	"default",
+	"local",
+	"debug",
+	"info",
+	"warn",
+	"error",
+	"always",
+	"never",
+	"enabled",
+	"disabled",
+	"0",
+	"1",
+]);
 
 const SECRET_PATTERNS: Array<[string, RegExp]> = [
 	["JWT-like token", /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/],
@@ -5047,6 +5072,31 @@ function readThrownValueCause(value: unknown): { found: boolean; value?: unknown
 	}
 }
 
+function isPlausibleSecretNamedEnvValue(value: string): boolean {
+	const normalized = value.trim();
+	if (normalized.length < SECRET_NAMED_ENV_VALUE_MIN_LENGTH) return false;
+	if (NON_SECRET_ENV_VALUE_TOKENS.has(normalized.toLowerCase())) return false;
+	if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(normalized)) return false;
+	if (normalized.length >= SECRET_NAMED_ENV_UNSTRUCTURED_MIN_LENGTH) return true;
+
+	const hasLetter = /[A-Za-z]/.test(normalized);
+	const hasDigitOrSymbol = /[^A-Za-z\s]/.test(normalized);
+	return hasLetter && hasDigitOrSymbol;
+}
+
+function replaceEnvValue(
+	input: string,
+	value: string,
+	requireIdentifierBoundaries: boolean,
+): string {
+	if (!requireIdentifierBoundaries) return input.replaceAll(value, "[REDACTED]");
+	const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return input.replace(
+		new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, "g"),
+		"[REDACTED]",
+	);
+}
+
 function sanitizeLoadErrorText(value: string, providerRoot: string): string {
 	let output = value.replace(
 		/(^|[^A-Za-z0-9_.])((?:\/[^\s"'`]+)+)/g,
@@ -5064,22 +5114,29 @@ function sanitizeLoadErrorText(value: string, providerRoot: string): string {
 		/((?:password|token|secret|api[_-]?key|credential|authorization)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|["'`]?[^\s,;"'`]+)/gi,
 		"$1[REDACTED]",
 	);
-	const envValues: string[] = [];
+	const envValues: Array<{ value: string; requireIdentifierBoundaries: boolean }> = [];
 	for (const [name, item] of Object.entries(process.env)) {
 		if (typeof item !== "string") continue;
-		let shouldRedact = SECRETISH_IDENTIFIER_PATTERN.test(name);
-		if (shouldRedact) {
-			shouldRedact = item.length >= SECRET_NAMED_ENV_VALUE_MIN_LENGTH;
+		const secretNamed = SECRETISH_IDENTIFIER_PATTERN.test(name);
+		let shouldRedact = secretNamed;
+		if (secretNamed) {
+			shouldRedact = isPlausibleSecretNamedEnvValue(item);
 		} else if (item.length >= ENTROPY_CANDIDATE_MIN_LENGTH && shouldConsiderEntropyValue(item)) {
 			const charset = classifyEntropyCharset(item);
 			const threshold = charset === "hex" ? 3.0 : 4.5;
 			shouldRedact = charset !== undefined && shannonEntropy(item) >= threshold;
 		}
-		if (shouldRedact) envValues.push(item);
+		if (shouldRedact) {
+			envValues.push({
+				value: item,
+				requireIdentifierBoundaries:
+					secretNamed && item.trim().length < ENTROPY_CANDIDATE_MIN_LENGTH,
+			});
+		}
 	}
-	envValues.sort((a, b) => b.length - a.length);
+	envValues.sort((a, b) => b.value.length - a.value.length);
 	for (const envValue of envValues) {
-		output = output.replaceAll(envValue, "[REDACTED]");
+		output = replaceEnvValue(output, envValue.value, envValue.requireIdentifierBoundaries);
 	}
 	output = redact(output).replace(/\s+/g, " ");
 	return output.length > MAX_LOAD_ERROR_MESSAGE_LENGTH
