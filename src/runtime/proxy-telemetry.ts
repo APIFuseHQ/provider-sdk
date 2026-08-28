@@ -59,6 +59,8 @@ type CompactVendorFailoverSample = {
 	a?: number;
 };
 
+export type ProxyTelemetryLogPayload = NonNullable<ProviderTelemetryHeader["proxy"]>;
+
 const MAX_HEADER_BYTES = 4_096;
 const MAX_PROXY_ATTEMPT_SAMPLES = 24;
 const MAX_PROXY_FAILOVER_SAMPLES = 12;
@@ -163,7 +165,7 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 		});
 	}
 
-	toHeaderValue(): string | undefined {
+	toLogPayload(): ProxyTelemetryLogPayload | undefined {
 		const [first, ...rest] = this.#events;
 		if (!first) return undefined;
 
@@ -196,62 +198,65 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 			}),
 			first,
 		);
-		const payload: ProviderTelemetryHeader = {
-			v: 1,
-			proxy: {
-				provider: serving.provider,
-				...(aggregate.userAgentSource ? { userAgentSource: aggregate.userAgentSource } : {}),
-				...(serving.protocol ? { protocol: serving.protocol } : {}),
-				cacheStatus: aggregate.cacheStatus,
-				cacheHit: aggregate.cacheHit,
-				resolutionMs: aggregate.resolutionMs,
-				...(aggregate.allocatorMs !== undefined ? { allocatorMs: aggregate.allocatorMs } : {}),
-				...(aggregate.allocatorStatus !== undefined
-					? { allocatorStatus: aggregate.allocatorStatus }
-					: {}),
-				...(aggregate.allocatorBodyClass !== undefined
-					? { allocatorBodyClass: aggregate.allocatorBodyClass }
-					: {}),
-				...(aggregate.allocatorAttempts !== undefined
-					? { allocatorAttempts: aggregate.allocatorAttempts }
-					: {}),
-				...(aggregate.lockWaitMs !== undefined ? { lockWaitMs: aggregate.lockWaitMs } : {}),
-				...(aggregate.redisReadMs !== undefined ? { redisReadMs: aggregate.redisReadMs } : {}),
-				...(aggregate.redisWriteMs !== undefined ? { redisWriteMs: aggregate.redisWriteMs } : {}),
-				...(aggregate.poolAgeMs !== undefined ? { poolAgeMs: aggregate.poolAgeMs } : {}),
-				...(aggregate.poolExpiresInMs !== undefined
-					? { poolExpiresInMs: aggregate.poolExpiresInMs }
-					: {}),
-				attempts: aggregate.attempts,
-				...(aggregate.refreshes !== undefined ? { refreshes: aggregate.refreshes } : {}),
-				...(this.#attempts.length > 0
-					? {
-							attemptSamples: this.#attempts.map((attempt, index) => ({
-								n: index + 1,
-								a: attempt.attempt,
-								...(attempt.poolIndex === undefined ? {} : { i: attempt.poolIndex }),
-								...(attempt.proxyHash ? { h: attempt.proxyHash } : {}),
-								o: attempt.outcome,
-								...(attempt.errorCode ? { c: attempt.errorCode } : {}),
-								...(attempt.status === undefined ? {} : { s: attempt.status }),
-								...(attempt.durationMs === undefined ? {} : { d: attempt.durationMs }),
-							})),
-						}
-					: {}),
-				...(vendors.length > 1 ? { vendors } : {}),
-				...(this.#failovers.length > 0
-					? {
-							failovers: this.#failovers.map((failover) => ({
-								v: failover.vendor,
-								...(failover.nextVendor ? { nx: failover.nextVendor } : {}),
-								p: failover.phase,
-								r: failover.reason,
-								...(failover.attempt === undefined ? {} : { a: failover.attempt }),
-							})),
-						}
-					: {}),
-			},
+		return {
+			provider: serving.provider,
+			...(aggregate.userAgentSource ? { userAgentSource: aggregate.userAgentSource } : {}),
+			...(serving.protocol ? { protocol: serving.protocol } : {}),
+			cacheStatus: aggregate.cacheStatus,
+			cacheHit: aggregate.cacheHit,
+			resolutionMs: aggregate.resolutionMs,
+			...(aggregate.allocatorMs !== undefined ? { allocatorMs: aggregate.allocatorMs } : {}),
+			...(aggregate.allocatorStatus !== undefined
+				? { allocatorStatus: aggregate.allocatorStatus }
+				: {}),
+			...(aggregate.allocatorBodyClass !== undefined
+				? { allocatorBodyClass: aggregate.allocatorBodyClass }
+				: {}),
+			...(aggregate.allocatorAttempts !== undefined
+				? { allocatorAttempts: aggregate.allocatorAttempts }
+				: {}),
+			...(aggregate.lockWaitMs !== undefined ? { lockWaitMs: aggregate.lockWaitMs } : {}),
+			...(aggregate.redisReadMs !== undefined ? { redisReadMs: aggregate.redisReadMs } : {}),
+			...(aggregate.redisWriteMs !== undefined ? { redisWriteMs: aggregate.redisWriteMs } : {}),
+			...(aggregate.poolAgeMs !== undefined ? { poolAgeMs: aggregate.poolAgeMs } : {}),
+			...(aggregate.poolExpiresInMs !== undefined
+				? { poolExpiresInMs: aggregate.poolExpiresInMs }
+				: {}),
+			attempts: aggregate.attempts,
+			...(aggregate.refreshes !== undefined ? { refreshes: aggregate.refreshes } : {}),
+			...(this.#attempts.length > 0
+				? {
+						attemptSamples: this.#attempts.map((attempt, index) => ({
+							n: index + 1,
+							a: attempt.attempt,
+							...(attempt.poolIndex === undefined ? {} : { i: attempt.poolIndex }),
+							...(attempt.proxyHash ? { h: attempt.proxyHash } : {}),
+							o: attempt.outcome,
+							...(attempt.errorCode ? { c: attempt.errorCode } : {}),
+							...(attempt.status === undefined ? {} : { s: attempt.status }),
+							...(attempt.durationMs === undefined ? {} : { d: attempt.durationMs }),
+						})),
+					}
+				: {}),
+			...(vendors.length > 1 ? { vendors } : {}),
+			...(this.#failovers.length > 0
+				? {
+						failovers: this.#failovers.map((failover) => ({
+							v: failover.vendor,
+							...(failover.nextVendor ? { nx: failover.nextVendor } : {}),
+							p: failover.phase,
+							r: failover.reason,
+							...(failover.attempt === undefined ? {} : { a: failover.attempt }),
+						})),
+					}
+				: {}),
 		};
+	}
+
+	toHeaderValue(): string | undefined {
+		const proxy = this.toLogPayload();
+		if (!proxy) return undefined;
+		const payload: ProviderTelemetryHeader = { v: 1, proxy };
 
 		const encoded = encodeBase64Url(JSON.stringify(payload));
 		if (encoded.length > MAX_HEADER_BYTES) return undefined;

@@ -54,7 +54,11 @@ import {
 	PROXY_EDGE_AUTH_REJECTED_CODE,
 	PROXY_POOL_EXHAUSTED_CODE,
 } from "../runtime/proxy-errors.js";
-import { PROVIDER_TELEMETRY_HEADER, ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
+import {
+	PROVIDER_TELEMETRY_HEADER,
+	ProxyTelemetryCollector,
+	type ProxyTelemetryLogPayload,
+} from "../runtime/proxy-telemetry.js";
 import type * as ResolverRuntimeModule from "../runtime/resolver.js";
 import { createUnsupportedResolverClient } from "../runtime/resolver-shared.js";
 import {
@@ -808,6 +812,7 @@ function createAuthFlowContext(
 	request: AuthFlowRequest,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState,
+	proxyTelemetry?: ProxyTelemetryCollector,
 	signal?: AbortSignal,
 ): {
 	context: FlowContext;
@@ -825,6 +830,7 @@ function createAuthFlowContext(
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveAuthFlowProxyAffinityKey(provider, request),
+		telemetry: proxyTelemetry,
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
 		provider,
@@ -834,6 +840,7 @@ function createAuthFlowContext(
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
+		telemetry: proxyTelemetry,
 	};
 	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>
@@ -951,6 +958,7 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
 	route: string;
 	requestId?: string;
 	status: number;
+	proxy?: ProxyTelemetryLogPayload;
 };
 
 export type ProviderServerLogEvent =
@@ -1487,6 +1495,7 @@ function logProviderError(
 	status: number,
 	cost: ProviderRequestCost,
 	declaredErrorCode?: OperationErrorCode,
+	proxyTelemetry?: ProxyTelemetryCollector,
 ): void {
 	const code = isProviderError(error)
 		? (error.code ?? "provider_error")
@@ -1506,6 +1515,7 @@ function logProviderError(
 		typeof error.code === "string" &&
 		!SDK_OWNED_PROVIDER_ERROR_CODES.has(error.code) &&
 		declaredErrorCode === undefined;
+	const proxy = proxyTelemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	emit({
 		level: status >= 500 ? "error" : "warn",
@@ -1516,6 +1526,7 @@ function logProviderError(
 		...(requestId ? { requestId } : {}),
 		status,
 		...cost,
+		...(proxy ? { proxy } : {}),
 		code,
 		errorClass,
 		message,
@@ -1568,7 +1579,9 @@ function logProviderSuccess(
 	requestId: string | undefined,
 	status: number,
 	cost: ProviderRequestCost,
+	proxyTelemetry?: ProxyTelemetryCollector,
 ): void {
+	const proxy = proxyTelemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	emit({
 		level: "info",
@@ -1579,6 +1592,7 @@ function logProviderSuccess(
 		...(requestId ? { requestId } : {}),
 		status,
 		...cost,
+		...(proxy ? { proxy } : {}),
 	});
 }
 
@@ -2067,6 +2081,7 @@ async function handleAuthFlow(
 	route: AuthRoute,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState,
+	proxyTelemetry?: ProxyTelemetryCollector,
 	signal?: AbortSignal,
 ): Promise<Response | AuthFlowResponse> {
 	const flow = provider.auth?.flow;
@@ -2081,7 +2096,14 @@ async function handleAuthFlow(
 	// any flow code runs instead of at whatever point the ceremony first reads
 	// the env. `abort` stays exempt: a user must always be able to cancel a
 	// stranded flow even when provisioning is broken.
-	const { context, getPatch } = createAuthFlowContext(provider, request, options, state, signal);
+	const { context, getPatch } = createAuthFlowContext(
+		provider,
+		request,
+		options,
+		state,
+		proxyTelemetry,
+		signal,
+	);
 	try {
 		if (route !== "abort") {
 			assertRequiredSecretsPresent(provider, context.env);
@@ -2553,6 +2575,7 @@ function createServerAppWithCapabilityModules(
 					body.requestId,
 					response.status,
 					finishRequestCost(requestCost),
+					proxyTelemetry,
 				);
 				return responseWithProviderTelemetry(response, proxyTelemetry);
 			}
@@ -2566,6 +2589,7 @@ function createServerAppWithCapabilityModules(
 				body.requestId,
 				200,
 				finishRequestCost(requestCost),
+				proxyTelemetry,
 			);
 			return c.json(response);
 		} catch (error) {
@@ -2582,6 +2606,7 @@ function createServerAppWithCapabilityModules(
 				status,
 				finishRequestCost(requestCost),
 				declaredErrorCode,
+				proxyTelemetry,
 			);
 			const telemetryHeader = proxyTelemetry.toHeaderValue();
 			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
@@ -2595,6 +2620,7 @@ function createServerAppWithCapabilityModules(
 
 	app.post("/auth/start", async (c) => {
 		let rawBody: unknown;
+		const proxyTelemetry = new ProxyTelemetryCollector();
 		const requestCost = startRequestCost();
 		try {
 			rawBody = await c.req.raw
@@ -2608,6 +2634,7 @@ function createServerAppWithCapabilityModules(
 				"start",
 				options,
 				state,
+				proxyTelemetry,
 				c.req.raw.signal,
 			);
 			logProviderSuccess(
@@ -2618,8 +2645,13 @@ function createServerAppWithCapabilityModules(
 				body.requestId,
 				response instanceof Response ? response.status : 200,
 				finishRequestCost(requestCost),
+				proxyTelemetry,
 			);
-			return response instanceof Response ? response : c.json(response);
+			if (response instanceof Response)
+				return responseWithProviderTelemetry(response, proxyTelemetry);
+			const telemetryHeader = proxyTelemetry.toHeaderValue();
+			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
+			return c.json(response);
 		} catch (error) {
 			const status = toStatusCode(error);
 			const requestId = extractRequestId(rawBody);
@@ -2632,7 +2664,11 @@ function createServerAppWithCapabilityModules(
 				error,
 				status,
 				finishRequestCost(requestCost),
+				undefined,
+				proxyTelemetry,
 			);
+			const telemetryHeader = proxyTelemetry.toHeaderValue();
+			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
 				c.json(toErrorResponse(error, requestId), status),
 				error,
@@ -2642,6 +2678,7 @@ function createServerAppWithCapabilityModules(
 
 	app.post("/auth/continue", async (c) => {
 		let rawBody: unknown;
+		const proxyTelemetry = new ProxyTelemetryCollector();
 		const requestCost = startRequestCost();
 		try {
 			rawBody = await c.req.raw
@@ -2655,6 +2692,7 @@ function createServerAppWithCapabilityModules(
 				"continue",
 				options,
 				state,
+				proxyTelemetry,
 				c.req.raw.signal,
 			);
 			logProviderSuccess(
@@ -2665,8 +2703,13 @@ function createServerAppWithCapabilityModules(
 				body.requestId,
 				response instanceof Response ? response.status : 200,
 				finishRequestCost(requestCost),
+				proxyTelemetry,
 			);
-			return response instanceof Response ? response : c.json(response);
+			if (response instanceof Response)
+				return responseWithProviderTelemetry(response, proxyTelemetry);
+			const telemetryHeader = proxyTelemetry.toHeaderValue();
+			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
+			return c.json(response);
 		} catch (error) {
 			const status = toStatusCode(error);
 			const requestId = extractRequestId(rawBody);
@@ -2679,7 +2722,11 @@ function createServerAppWithCapabilityModules(
 				error,
 				status,
 				finishRequestCost(requestCost),
+				undefined,
+				proxyTelemetry,
 			);
+			const telemetryHeader = proxyTelemetry.toHeaderValue();
+			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
 				c.json(toErrorResponse(error, requestId), status),
 				error,
@@ -2689,6 +2736,7 @@ function createServerAppWithCapabilityModules(
 
 	app.post("/auth/poll", async (c) => {
 		let rawBody: unknown;
+		const proxyTelemetry = new ProxyTelemetryCollector();
 		const requestCost = startRequestCost();
 		try {
 			rawBody = await c.req.raw
@@ -2702,6 +2750,7 @@ function createServerAppWithCapabilityModules(
 				"poll",
 				options,
 				state,
+				proxyTelemetry,
 				c.req.raw.signal,
 			);
 			logProviderSuccess(
@@ -2712,8 +2761,13 @@ function createServerAppWithCapabilityModules(
 				body.requestId,
 				response instanceof Response ? response.status : 200,
 				finishRequestCost(requestCost),
+				proxyTelemetry,
 			);
-			return response instanceof Response ? response : c.json(response);
+			if (response instanceof Response)
+				return responseWithProviderTelemetry(response, proxyTelemetry);
+			const telemetryHeader = proxyTelemetry.toHeaderValue();
+			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
+			return c.json(response);
 		} catch (error) {
 			const status = toStatusCode(error);
 			const requestId = extractRequestId(rawBody);
@@ -2726,7 +2780,11 @@ function createServerAppWithCapabilityModules(
 				error,
 				status,
 				finishRequestCost(requestCost),
+				undefined,
+				proxyTelemetry,
 			);
+			const telemetryHeader = proxyTelemetry.toHeaderValue();
+			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
 				c.json(toErrorResponse(error, requestId), status),
 				error,
@@ -2736,6 +2794,7 @@ function createServerAppWithCapabilityModules(
 
 	app.post("/auth/refresh", async (c) => {
 		let rawBody: unknown;
+		const proxyTelemetry = new ProxyTelemetryCollector();
 		const requestCost = startRequestCost();
 		try {
 			rawBody = await c.req.raw
@@ -2749,6 +2808,7 @@ function createServerAppWithCapabilityModules(
 				"refresh",
 				options,
 				state,
+				proxyTelemetry,
 				c.req.raw.signal,
 			);
 			logProviderSuccess(
@@ -2759,8 +2819,13 @@ function createServerAppWithCapabilityModules(
 				body.requestId,
 				response instanceof Response ? response.status : 200,
 				finishRequestCost(requestCost),
+				proxyTelemetry,
 			);
-			return response instanceof Response ? response : c.json(response);
+			if (response instanceof Response)
+				return responseWithProviderTelemetry(response, proxyTelemetry);
+			const telemetryHeader = proxyTelemetry.toHeaderValue();
+			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
+			return c.json(response);
 		} catch (error) {
 			const status = toStatusCode(error);
 			const requestId = extractRequestId(rawBody);
@@ -2773,7 +2838,11 @@ function createServerAppWithCapabilityModules(
 				error,
 				status,
 				finishRequestCost(requestCost),
+				undefined,
+				proxyTelemetry,
 			);
+			const telemetryHeader = proxyTelemetry.toHeaderValue();
+			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
 				c.json(toErrorResponse(error, requestId), status),
 				error,
@@ -2783,6 +2852,7 @@ function createServerAppWithCapabilityModules(
 
 	app.post("/auth/disconnect", async (c) => {
 		let rawBody: unknown;
+		const proxyTelemetry = new ProxyTelemetryCollector();
 		const requestCost = startRequestCost();
 		try {
 			rawBody = await c.req.raw
@@ -2796,6 +2866,7 @@ function createServerAppWithCapabilityModules(
 				"abort",
 				options,
 				state,
+				proxyTelemetry,
 				c.req.raw.signal,
 			);
 			logProviderSuccess(
@@ -2806,8 +2877,13 @@ function createServerAppWithCapabilityModules(
 				body.requestId,
 				response instanceof Response ? response.status : 200,
 				finishRequestCost(requestCost),
+				proxyTelemetry,
 			);
-			return response instanceof Response ? response : c.json(response);
+			if (response instanceof Response)
+				return responseWithProviderTelemetry(response, proxyTelemetry);
+			const telemetryHeader = proxyTelemetry.toHeaderValue();
+			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
+			return c.json(response);
 		} catch (error) {
 			const status = toStatusCode(error);
 			const requestId = extractRequestId(rawBody);
@@ -2820,7 +2896,11 @@ function createServerAppWithCapabilityModules(
 				error,
 				status,
 				finishRequestCost(requestCost),
+				undefined,
+				proxyTelemetry,
 			);
+			const telemetryHeader = proxyTelemetry.toHeaderValue();
+			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
 			return responseWithErrorObservability(
 				c.json(toErrorResponse(error, requestId), status),
 				error,
