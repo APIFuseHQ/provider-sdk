@@ -15,6 +15,7 @@ import {
 	extractStringLiteralCandidates,
 	hasNonEmptyRecordedFixture,
 	isAutoPromotionEligible,
+	maskCommentsAndStrings,
 	renderMarkdown,
 	type SubmitCheckReport,
 } from "../../bin/apifuse-submit-check.js";
@@ -376,6 +377,22 @@ describe("apifuse submit-check", () => {
 		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
 		expect(report.score.verdict).toBe("blocked");
 		expect(report.summary.blockers).toBeGreaterThanOrEqual(1);
+	});
+
+	it("returns a structured blocked report for a syntactically broken index", async () => {
+		const dir = makeProviderDir(
+			"submit-index-parse-blocked-",
+			'const x = { input: z.object({}) };\nconst broken = "unterminated;\n',
+		);
+		writeValidLocaleCatalogs(dir);
+
+		const report = await buildSubmitCheckReport(dir);
+		const providerLoad = report.checks.find((item) => item.id === "provider-load");
+		const parse = report.checks.find((item) => item.id === "provider-load-parse");
+		expect(providerLoad?.status).toBe("fail");
+		expect(parse?.status).toBe("fail");
+		expect(parse?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
+		expect(report.score.verdict).toBe("blocked");
 	});
 
 	it("passes when provider root has no vendor SDK shim directory", async () => {
@@ -1493,6 +1510,308 @@ const upstreamOutput = z.object({ MKioskTy: z.string() });
 		const check = report.checks.find((item) => item.id === "vendor-key-leak");
 
 		expect(check?.status).toBe("pass");
+	});
+
+	it("detects vendor keys after a URL regex literal", async () => {
+		const source = validProviderSource()
+			.replace(
+				"const output =",
+				`${String.raw`const urlPattern = /https?:\/\//;`}\n\nconst output =`,
+			)
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`MKioskTy: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-url-regex-vendor-key-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
+			"fail",
+		);
+	});
+
+	it("detects vendor keys after a quote-matching regex literal", async () => {
+		const source = validProviderSource()
+			.replace("const output =", `const quotePattern = /["']/;\n\nconst output =`)
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`MKioskTy: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-quote-regex-vendor-key-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
+			"fail",
+		);
+	});
+
+	it("ignores vendor-key documentation text after a quote-matching regex", async () => {
+		const source = `${validProviderSource()}
+const quotePattern = /["']/;
+const example = " output: z.object({ MKioskTy: z.string() })";
+`;
+		const dir = makeProviderDir("submit-quote-regex-documentation-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
+			"pass",
+		);
+	});
+
+	it("masks schema-looking text in a ternary consequent string", () => {
+		const source =
+			'const example = ok ? "output: z.object({ MKioskTy: z.string() })" : "";';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).not.toContain("MKioskTy");
+	});
+
+	it("ignores vendor-key documentation text in a ternary consequent string", async () => {
+		const source = `${validProviderSource()}
+const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
+`;
+		const dir = makeProviderDir("submit-ternary-documentation-", source);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
+			"pass",
+		);
+	});
+
+	it("preserves template interpolation code while masking its literal text", () => {
+		const source =
+			'const rendered = `ignore "} ${({ "}": codeIdentifier })} output: z.object({ MKioskTy: z.string() })`;';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).toContain('${({ "}": codeIdentifier })}');
+		expect(masked).not.toContain("ignore");
+		expect(masked).not.toContain("MKioskTy");
+	});
+
+	it("masks a regex containing a block-comment marker without hiding later code", () => {
+		const source = "const pattern = /[/*]/; const codeIdentifier = 1;";
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).not.toContain("/*");
+		expect(masked).toContain("const codeIdentifier = 1;");
+	});
+
+	it("masks a string containing a block-comment terminator without shifting later code", () => {
+		const source = 'const example = "*/ hidden"; const codeIdentifier = 1;';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).not.toContain("*/ hidden");
+		expect(masked).toContain("const codeIdentifier = 1;");
+	});
+
+	it("masks escaped quotes inside strings and regex literals", () => {
+		const source = String.raw`const text = "a\"b"; const pattern = /a\"b/; const codeIdentifier = 1;`;
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).not.toContain(String.raw`a\"b`);
+		expect(masked).toContain("const codeIdentifier = 1;");
+	});
+
+	it("preserves mask offsets for code following literals", () => {
+		const source =
+			'const text = "hidden"; const pattern = /["\']/; const codeIdentifier = 1;';
+		const masked = maskCommentsAndStrings(source);
+		const identifierOffset = source.indexOf("codeIdentifier");
+
+		expect(masked.length).toBe(source.length);
+		expect(masked.indexOf("codeIdentifier")).toBe(identifierOffset);
+		expect(masked.slice(identifierOffset, identifierOffset + "codeIdentifier".length)).toBe(
+			"codeIdentifier",
+		);
+	});
+
+	it("keeps line-continuation strings parseable and mask-idempotent", async () => {
+		const source = [
+			'const doc = "first\\\ncontinued";',
+			"const pattern = /quoted\\/value/;",
+			"const rendered = `text ${value} tail`;",
+			"// comment with braces",
+			"void doc;",
+		].join("\n");
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked.length).toBe(source.length);
+		const codeOffset = source.indexOf("void doc");
+		expect(masked.indexOf("void doc")).toBe(codeOffset);
+		expect(maskCommentsAndStrings(masked)).toBe(masked);
+
+		const dir = makeProviderDir("submit-mask-line-continuation-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "extra.ts"), source);
+		await expect(buildSubmitCheckReport(dir)).resolves.toBeDefined();
+	});
+
+	it("keeps CRLF line-continuation strings parseable and mask-idempotent", () => {
+		const source = 'const doc = "first\\\r\ncontinued"; const codeIdentifier = 1;';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked.length).toBe(source.length);
+		expect(masked.indexOf("codeIdentifier")).toBe(source.indexOf("codeIdentifier"));
+		expect(maskCommentsAndStrings(masked)).toBe(masked);
+	});
+
+	it("preserves quoted property keys while masking quoted values", () => {
+		const source = 'const value = { "response" : "hidden" };';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).toContain('"response" :');
+		expect(masked).not.toContain("hidden");
+	});
+
+	it("masks a string used as a case value", () => {
+		const source = 'switch (value) { case "20260709": break; }';
+		const masked = maskCommentsAndStrings(source);
+
+		expect(masked).not.toContain("20260709");
+	});
+
+	it("fails closed when a provider source file has a syntax error", async () => {
+		const dir = makeProviderDir("submit-mask-syntax-error-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "broken.ts"), 'const broken = "unterminated;\n');
+
+		await expect(buildSubmitCheckReport(dir)).rejects.toThrow(
+			"Cannot safely scan TypeScript source broken.ts",
+		);
+	});
+
+	it("scans valid declaration files without crashing", async () => {
+		const dir = makeProviderDir("submit-mask-valid-declaration-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "types.d.ts"), "export type Foo = string;\n");
+		writeFileSync(
+			join(dir, "vendor-output.ts"),
+			'import { z } from "zod";\nconst output = z.object({ MKioskTy: z.string() });\n',
+		);
+
+		const report = await buildSubmitCheckReport(dir);
+		expect(report).toBeDefined();
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe("fail");
+	});
+
+	it("fails closed and names a broken declaration file", async () => {
+		const dir = makeProviderDir("submit-mask-broken-declaration-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "broken.d.ts"), 'export type Broken = "unterminated;\n');
+
+		await expect(buildSubmitCheckReport(dir)).rejects.toThrow(
+			"Cannot safely scan TypeScript source broken.d.ts",
+		);
+	});
+
+	it("names a broken sibling module in the fail-closed parse error", async () => {
+		const dir = makeProviderDir("submit-mask-broken-sibling-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		writeFileSync(join(dir, "util-broken.ts"), 'const broken = "unterminated;\n');
+
+		await expect(buildSubmitCheckReport(dir)).rejects.toThrow("util-broken.ts");
+	});
+
+	it("escapes control characters in fail-closed parse error file names", async () => {
+		const dir = makeProviderDir("submit-mask-control-filename-", validProviderSource());
+		writeValidLocaleCatalogs(dir);
+		const rawFileName = "bad\u001b[31mname.ts";
+		writeFileSync(join(dir, rawFileName), 'const broken = "unterminated;\n');
+
+		let thrown: unknown;
+		try {
+			await buildSubmitCheckReport(dir);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(Error);
+		if (!(thrown instanceof Error)) {
+			throw new Error("Expected submit-check to reject a syntactically broken source file.");
+		}
+		expect(thrown.message).toContain("bad\\x1b[31mname.ts");
+		expect(thrown.message).not.toContain("\u001b");
+	});
+
+	it("escapes C1 and bidi controls while preserving ordinary Unicode filenames", async () => {
+		const c1Dir = makeProviderDir("submit-mask-c1-filename-", validProviderSource());
+		writeValidLocaleCatalogs(c1Dir);
+		const c1Name = "bad\u009bname.ts";
+		writeFileSync(join(c1Dir, c1Name), 'const broken = "unterminated;\n');
+		await expect(buildSubmitCheckReport(c1Dir)).rejects.toThrow("bad\\x9bname.ts");
+
+		const bidiDir = makeProviderDir("submit-mask-bidi-filename-", validProviderSource());
+		writeValidLocaleCatalogs(bidiDir);
+		const bidiName = "bad\u202ename.ts";
+		writeFileSync(join(bidiDir, bidiName), 'const broken = "unterminated;\n');
+		let bidiThrown: unknown;
+		try {
+			await buildSubmitCheckReport(bidiDir);
+		} catch (error) {
+			bidiThrown = error;
+		}
+		expect(bidiThrown).toBeInstanceOf(Error);
+		if (!(bidiThrown instanceof Error)) throw new Error("Expected a parse failure.");
+		expect(bidiThrown.message).toContain("bad\\u{202e}name.ts");
+		expect(bidiThrown.message).not.toContain("\u202e");
+
+		const almDir = makeProviderDir("submit-mask-alm-filename-", validProviderSource());
+		writeValidLocaleCatalogs(almDir);
+		const almName = "bad\u061cname.ts";
+		writeFileSync(join(almDir, almName), 'const broken = "unterminated;\n');
+		let almThrown: unknown;
+		try {
+			await buildSubmitCheckReport(almDir);
+		} catch (error) {
+			almThrown = error;
+		}
+		expect(almThrown).toBeInstanceOf(Error);
+		if (!(almThrown instanceof Error)) throw new Error("Expected a parse failure.");
+		expect(almThrown.message).toContain("bad\\u{61c}name.ts");
+		expect(almThrown.message).not.toContain("\u061c");
+
+		const lsDir = makeProviderDir("submit-mask-ls-filename-", validProviderSource());
+		writeValidLocaleCatalogs(lsDir);
+		const lsName = "bad\u2028name.ts";
+		writeFileSync(join(lsDir, lsName), 'const broken = "unterminated;\n');
+		let lsThrown: unknown;
+		try {
+			await buildSubmitCheckReport(lsDir);
+		} catch (error) {
+			lsThrown = error;
+		}
+		expect(lsThrown).toBeInstanceOf(Error);
+		if (!(lsThrown instanceof Error)) throw new Error("Expected a parse failure.");
+		expect(lsThrown.message).toContain("bad\\u{2028}name.ts");
+		expect(lsThrown.message).not.toContain("\u2028");
+
+		const koreanDir = makeProviderDir("submit-mask-korean-filename-", validProviderSource());
+		writeValidLocaleCatalogs(koreanDir);
+		const koreanName = "깨진.ts";
+		writeFileSync(join(koreanDir, koreanName), 'const broken = "unterminated;\n');
+		await expect(buildSubmitCheckReport(koreanDir)).rejects.toThrow(koreanName);
 	});
 
 	it("blocks compact vendor timestamps in normalized response fixtures", async () => {
