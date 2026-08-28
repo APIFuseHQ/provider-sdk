@@ -135,9 +135,6 @@ describe("otlp export", () => {
 			}),
 		).resolves.toBeUndefined();
 
-		expect(warn).toHaveBeenCalledWith(
-			"[apifuse] OTLP export failed (request_id=unknown provider_id=unknown operation_id=unknown batch=unknown):",
-			"network down",
-		);
+		expect(warn).toHaveBeenCalledWith("[apifuse] OTLP export failed:", "network down");
 	});
 });

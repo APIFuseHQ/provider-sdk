@@ -5,7 +5,6 @@ import { createServerApp } from "../server/serve.js";
 import {
 	APIFUSE__TRACE__ENABLED,
 	APIFUSE__TRACE__EXPORTER,
-	APIFUSE__TRACE__OTLP__ENDPOINT,
 	resolveTraceConfigFromEnv,
 } from "../runtime/trace-config.js";
 import {
@@ -13,6 +12,7 @@ import {
 	getTraceRecorder,
 	resolveTraceContextOptions,
 } from "../runtime/trace.js";
+import { resolveServerTraceContextOptions } from "../server/trace-output.js";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 
 const TRACE_CREDENTIAL = "tok_fake_Qj8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS";
@@ -72,11 +72,7 @@ const provider = createProviderDefinitionDouble({
 
 function withTraceEnv(values: Record<string, string | undefined>, run: () => Promise<void>) {
 	const previous = new Map<string, string | undefined>();
-	for (const name of [
-		APIFUSE__TRACE__ENABLED,
-		APIFUSE__TRACE__EXPORTER,
-		APIFUSE__TRACE__OTLP__ENDPOINT,
-	]) {
+	for (const name of [APIFUSE__TRACE__ENABLED, APIFUSE__TRACE__EXPORTER]) {
 		previous.set(name, process.env[name]);
 		const value = values[name];
 		if (value === undefined) delete process.env[name];
@@ -255,101 +251,20 @@ describe("server trace output wiring", () => {
 		expect(output).toEqual([]);
 	});
 
-	it("adds request, provider, and operation correlation resource attributes to OTLP", async () => {
-		const originalFetch = globalThis.fetch;
-		const payloads: Array<{
-			resourceSpans: Array<{
-				resource: {
-					attributes: Array<{ key: string; value: { stringValue: string } }>;
-				};
-			}>;
-		}> = [];
-		globalThis.fetch = Object.assign(
-			async (_input: string | URL | Request, init?: RequestInit) => {
-				payloads.push(JSON.parse(String(init?.body)));
-				return new Response(null, { status: 200 });
-			},
-			{ preconnect: originalFetch.preconnect },
-		);
-
+	it("keeps long SDK-authored span names verbatim within the output bound", async () => {
+		const output: string[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		const authoredName = `handler:${"long_operation_id_".repeat(10)}`;
 		try {
-			await withTraceEnv(
-				{
-					[APIFUSE__TRACE__ENABLED]: "true",
-					[APIFUSE__TRACE__EXPORTER]: "otlp",
-					[APIFUSE__TRACE__OTLP__ENDPOINT]: "http://collector.test/v1/traces",
-				},
-				async () => {
-					const response = await invokeEcho();
-					expect(response.status).toBe(200);
-					await new Promise<void>((resolve) => setImmediate(resolve));
-				},
+			const trace = createTraceContext(
+				resolveServerTraceContextOptions({ enabled: true, exporter: "console" }, {}),
 			);
+			await trace.span(authoredName, async () => undefined);
 		} finally {
-			globalThis.fetch = originalFetch;
+			console.log = originalLog;
 		}
-
-		const attributes = Object.fromEntries(
-			payloads[0]?.resourceSpans[0]?.resource.attributes.map((entry) => [
-				entry.key,
-				entry.value.stringValue,
-			]) ?? [],
-		);
-		expect(attributes).toEqual({
-			request_id: "trace-output-test",
-			provider_id: "test-provider",
-			operation_id: "echo",
-		});
-	});
-
-	it("sanitizes failed-operation spans and exports their errors through OTLP", async () => {
-		const originalFetch = globalThis.fetch;
-		const payloads: unknown[] = [];
-		globalThis.fetch = Object.assign(
-			async (_input: string | URL | Request, init?: RequestInit) => {
-				payloads.push(JSON.parse(String(init?.body)));
-				return new Response(null, { status: 200 });
-			},
-			{ preconnect: originalFetch.preconnect },
-		);
-
-		try {
-			await withTraceEnv(
-				{
-					[APIFUSE__TRACE__ENABLED]: "true",
-					[APIFUSE__TRACE__EXPORTER]: "otlp",
-					[APIFUSE__TRACE__OTLP__ENDPOINT]: "http://collector.test/v1/traces",
-				},
-				async () => {
-					const response = await invokeFailure();
-					expect(response.status).toBe(500);
-					await new Promise<void>((resolve) => setImmediate(resolve));
-				},
-			);
-		} finally {
-			globalThis.fetch = originalFetch;
-		}
-
-		const serialized = JSON.stringify(payloads);
-		expect(serialized.includes(TRACE_CREDENTIAL)).toBe(false);
-		const firstPayload = payloads[0] as
-			| {
-					resourceSpans?: Array<{
-						scopeSpans?: Array<{
-							spans?: Array<{
-								name: string;
-								events?: Array<{
-									attributes: Array<{ value: { stringValue?: string } }>;
-								}>;
-							}>;
-						}>;
-					}>;
-			  }
-			| undefined;
-		const exportedSpan = firstPayload?.resourceSpans?.[0]?.scopeSpans?.[0]?.spans?.find(
-			(span) => span.name === "provider.failure",
-		);
-		expect(exportedSpan?.events?.[0]?.attributes[0]?.value.stringValue).toContain("[REDACTED]");
+		expect((JSON.parse(output[0] ?? "{}") as { name?: string }).name).toBe(authoredName);
 	});
 
 	it("warns once and fails closed to none for an invalid exporter value", () => {
@@ -359,7 +274,7 @@ describe("server trace output wiring", () => {
 		try {
 			const env = {
 				[APIFUSE__TRACE__ENABLED]: "true",
-				[APIFUSE__TRACE__EXPORTER]: "not-a-real-exporter",
+				[APIFUSE__TRACE__EXPORTER]: "otlp",
 			};
 			expect(resolveTraceConfigFromEnv(env)).toEqual({ enabled: true, exporter: "none" });
 			expect(resolveTraceConfigFromEnv(env)).toEqual({ enabled: true, exporter: "none" });
@@ -368,7 +283,7 @@ describe("server trace output wiring", () => {
 		}
 		expect(warn).toHaveBeenCalledTimes(1);
 		expect(warn).toHaveBeenCalledWith(
-			'[apifuse] Invalid APIFUSE__TRACE__EXPORTER; falling back to exporter "none".',
+			'[apifuse] Invalid APIFUSE__TRACE__EXPORTER value "otlp" (OTLP is unsupported for server output); supported exporters are "console", "json", and "none"; falling back to exporter "none".',
 		);
 	});
 
@@ -386,26 +301,6 @@ describe("server trace output wiring", () => {
 		expect(warn).toHaveBeenCalledTimes(1);
 		expect(warn).toHaveBeenCalledWith(
 			"[apifuse] Invalid APIFUSE__TRACE__ENABLED; falling back to disabled tracing.",
-		);
-	});
-
-	it("warns once when OTLP is enabled without an endpoint", () => {
-		const warn = mock(() => {});
-		const originalWarn = console.warn;
-		console.warn = warn;
-		try {
-			const env = {
-				[APIFUSE__TRACE__ENABLED]: "true",
-				[APIFUSE__TRACE__EXPORTER]: "otlp",
-			};
-			expect(resolveTraceConfigFromEnv(env)).toEqual({ enabled: true, exporter: "otlp" });
-			expect(resolveTraceConfigFromEnv(env)).toEqual({ enabled: true, exporter: "otlp" });
-		} finally {
-			console.warn = originalWarn;
-		}
-		expect(warn).toHaveBeenCalledTimes(1);
-		expect(warn).toHaveBeenCalledWith(
-			"[apifuse] APIFUSE__TRACE__EXPORTER selects OTLP but APIFUSE__TRACE__OTLP__ENDPOINT is unset; no spans will be exported.",
 		);
 	});
 });

@@ -3,14 +3,12 @@ import type { TraceConfig } from "../types.js";
 /** SDK-owned environment variable names for server trace output. */
 export const APIFUSE__TRACE__ENABLED = "APIFUSE__TRACE__ENABLED";
 export const APIFUSE__TRACE__EXPORTER = "APIFUSE__TRACE__EXPORTER";
-export const APIFUSE__TRACE__OTLP__ENDPOINT = "APIFUSE__TRACE__OTLP__ENDPOINT";
 
 type EnvLike = Record<string, string | undefined>;
 
-const TRACE_EXPORTER_LOOKUP: Record<NonNullable<TraceConfig["exporter"]>, true> = {
+const TRACE_EXPORTER_LOOKUP: Record<Exclude<NonNullable<TraceConfig["exporter"]>, "otlp">, true> = {
 	console: true,
 	json: true,
-	otlp: true,
 	none: true,
 };
 const TRACE_EXPORTERS = new Set(Object.keys(TRACE_EXPORTER_LOOKUP));
@@ -53,9 +51,8 @@ function parseEnabled(raw: string | undefined): boolean | undefined {
 export function resolveTraceConfigFromEnv(env: EnvLike = process.env): TraceConfig | undefined {
 	const enabledRaw = env[APIFUSE__TRACE__ENABLED];
 	const exporterRaw = env[APIFUSE__TRACE__EXPORTER];
-	const endpoint = env[APIFUSE__TRACE__OTLP__ENDPOINT]?.trim() || undefined;
 
-	if (enabledRaw === undefined && exporterRaw === undefined && endpoint === undefined) {
+	if (enabledRaw === undefined && exporterRaw === undefined) {
 		return undefined;
 	}
 
@@ -69,19 +66,12 @@ export function resolveTraceConfigFromEnv(env: EnvLike = process.env): TraceConf
 	if (exporterRaw !== undefined && exporter === "none" && normalizedExporter !== "none") {
 		warnOnce(
 			APIFUSE__TRACE__EXPORTER,
-			'[apifuse] Invalid APIFUSE__TRACE__EXPORTER; falling back to exporter "none".',
-		);
-	}
-	if (exporter === "otlp" && enabled !== false && endpoint === undefined) {
-		warnOnce(
-			`${APIFUSE__TRACE__EXPORTER}:missing-endpoint`,
-			"[apifuse] APIFUSE__TRACE__EXPORTER selects OTLP but APIFUSE__TRACE__OTLP__ENDPOINT is unset; no spans will be exported.",
+			`[apifuse] Invalid APIFUSE__TRACE__EXPORTER value "${normalizedExporter ?? exporterRaw}" (OTLP is unsupported for server output); supported exporters are "console", "json", and "none"; falling back to exporter "none".`,
 		);
 	}
 
 	return {
 		...(enabled !== undefined ? { enabled } : {}),
 		...(exporter !== undefined ? { exporter } : {}),
-		...(endpoint ? { otlp: { endpoint } } : {}),
 	};
 }

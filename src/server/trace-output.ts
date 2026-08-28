@@ -28,7 +28,6 @@ export function resolveServerTraceContextOptions(
 	return {
 		maxSpans: resolved.maxSpans,
 		onSpan,
-		exportOptions: outputEnabled && config.exporter === "otlp" ? resolved.exportOptions : undefined,
 		resourceAttributes: { ...resourceAttributes },
 	};
 }

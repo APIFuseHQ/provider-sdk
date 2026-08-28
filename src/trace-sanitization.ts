@@ -35,7 +35,7 @@ export function sanitizeTraceAttributes(
 					? sanitizeTraceText(value)
 					: typeof value === "number" || typeof value === "boolean"
 						? value
-						: String(value),
+						: sanitizeTraceText(String(value)),
 		]),
 	);
 }
@@ -60,15 +60,4 @@ export function sanitizeSpanForOutput(
 		...(span.error !== undefined ? { error: sanitizeTraceText(span.error) } : {}),
 		...(span.parentId !== undefined ? { parentId: span.parentId } : {}),
 	};
-}
-
-export function sanitizeResourceAttributes(
-	attributes?: Record<string, string>,
-): Record<string, string> {
-	return Object.fromEntries(
-		Object.entries(attributes ?? {}).map(([key, value]) => [
-			sanitizeTraceText(key),
-			sanitizeTraceText(value),
-		]),
-	);
 }
