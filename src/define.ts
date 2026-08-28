@@ -1,6 +1,9 @@
 import ms from "ms";
 
-import { validateFailClosedDeclaration } from "./declaration-validation.js";
+import {
+	validateFailClosedOperationDeclaration,
+	validateFailClosedProviderDeclaration,
+} from "./declaration-validation.js";
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
 import {
@@ -30,12 +33,12 @@ import type {
 	OperationWebSocketTransport,
 	ProviderAccessConfig,
 	ProviderChallengeKind,
-	ProviderDefinition,
 	ProviderContext,
 	ProviderContextFor,
-	ProviderOcrConfig,
+	ProviderDefinition,
 	ProviderDeploymentOverrides,
 	ProviderHealthMonitorConfig,
+	ProviderOcrConfig,
 	ProviderProxyConfig,
 	ProviderProxyProvider,
 	ProviderPublicProfile,
@@ -806,13 +809,12 @@ function validateProxiedOAuthAuth(auth: Record<string, unknown>, providerId: str
 	validateProxiedOAuthParams(config.tokenParams, "tokenParams", providerId);
 }
 
-function validateProviderShape(config: unknown): void {
+function validateProviderDeclarationShape(config: unknown): void {
 	assertObjectConfig(config);
 	assertRequiredField(config, "id");
 	assertRequiredField(config, "version", String(config.id));
 	assertRequiredField(config, "runtime", String(config.id));
 	assertRequiredField(config, "meta", String(config.id));
-	assertRequiredField(config, "operations", String(config.id));
 	if (typeof config.runtime === "string")
 		assertLiteralField(config.runtime, "runtime", VALID_RUNTIMES, String(config.id));
 	if (config.native !== undefined && config.runtime === "browser") {
@@ -908,6 +910,11 @@ function validateProviderShape(config: unknown): void {
 			);
 		}
 	}
+}
+
+function validateProviderImplementationShape(config: { id: string }): void {
+	const configRecord = config as unknown as Record<string, unknown>;
+	assertRequiredField(configRecord, "operations", String(config.id));
 }
 
 function validateProviderProxy(config: {
@@ -2859,6 +2866,7 @@ export function defineProvider<const TDeclaration extends ProviderDeclaration>(
 		Record<Exclude<keyof TDeclaration, keyof ProviderDeclaration>, never> &
 		AuthStartNoInputGuard<TDeclaration>,
 ): ProviderBuilder<TDeclaration> {
+	validateProviderDeclaration(declaration);
 	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(
 		implementation: {
 			operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
@@ -2871,37 +2879,12 @@ export function defineProvider<const TDeclaration extends ProviderDeclaration>(
 	return buildProvider as ProviderBuilder<TDeclaration>;
 }
 
-function finalizeProvider<
-	TOperations extends Record<string, ProviderOperation>,
-	TContext,
->(
-	config: ProviderConfig<TOperations, TContext>,
-): Omit<ProviderDefinition, "operations"> & {
-	operations: OperationMapConfig<TOperations, TContext>;
-} {
-	validateProviderShape(config);
-	const operations = resolveOperationFixtureRequests(config.operations);
+function validateProviderDeclaration(config: ProviderDeclaration): void {
+	validateProviderDeclarationShape(config);
 	if (!CONNECTOR_ID_REGEX.test(config.id))
 		throw new ProviderError(`Invalid provider id: "${config.id}"`, {
 			fix: 'Use lowercase alphanumeric with dashes, e.g., "korea-air-quality"',
 		});
-	if (Object.keys(config.operations).length === 0)
-		throw new ProviderError(`Provider "${config.id}" must define at least one operation`, {
-			fix: "Add at least one operation to the operations object",
-		});
-	validateOperationIds(config.id, config.operations);
-	validateOperationAnnotations(config.id, config.operations);
-	validateOperationObservability(config.id, config.operations);
-	validateOperationErrorCodes(config.id, config.operations);
-	validateOperationTransports(config.id, config.operations);
-	validateOperationContracts(config.id, config.operations);
-	validateToolRouterMetadata(config.id, config.operations);
-	const journeyCoveredOperations = validateHealthJourneys(
-		config.id,
-		config.operations,
-		config.healthJourneys,
-	);
-	validateOperationHealthChecks(config.id, config.operations, journeyCoveredOperations);
 	if (config.healthMonitor !== undefined && config.healthProbe !== undefined)
 		throw new ValidationError(
 			`Provider "${config.id}" declares both healthMonitor and healthProbe. They are aliases; declare exactly one.`,
@@ -2914,7 +2897,6 @@ function finalizeProvider<
 		config.healthProbe ?? config.healthMonitor,
 		config.healthProbe !== undefined ? "healthProbe" : "healthMonitor",
 	);
-	validateOperationFixtures(config.id, operations);
 	validateProviderDeployment(config.id, config.deployment);
 	try {
 		validateNativeProviderConfig(config.native);
@@ -2939,6 +2921,37 @@ function finalizeProvider<
 			`Provider "${config.id}" cannot define browser config unless runtime is "browser"`,
 			{ fix: 'Set runtime: "browser" or remove the browser config' },
 		);
+	validateFailClosedProviderDeclaration(config);
+}
+
+function finalizeProvider<
+	TOperations extends Record<string, ProviderOperation>,
+	TContext,
+>(
+	config: ProviderConfig<TOperations, TContext>,
+): Omit<ProviderDefinition, "operations"> & {
+	operations: OperationMapConfig<TOperations, TContext>;
+} {
+	validateProviderImplementationShape(config);
+	const operations = resolveOperationFixtureRequests(config.operations);
+	if (Object.keys(config.operations).length === 0)
+		throw new ProviderError(`Provider "${config.id}" must define at least one operation`, {
+			fix: "Add at least one operation to the operations object",
+		});
+	validateOperationIds(config.id, config.operations);
+	validateOperationAnnotations(config.id, config.operations);
+	validateOperationObservability(config.id, config.operations);
+	validateOperationErrorCodes(config.id, config.operations);
+	validateOperationTransports(config.id, config.operations);
+	validateOperationContracts(config.id, config.operations);
+	validateToolRouterMetadata(config.id, config.operations);
+	const journeyCoveredOperations = validateHealthJourneys(
+		config.id,
+		config.operations,
+		config.healthJourneys,
+	);
+	validateOperationHealthChecks(config.id, config.operations, journeyCoveredOperations);
+	validateOperationFixtures(config.id, operations);
 	const provider: Omit<ProviderDefinition, "operations"> & {
 		operations: OperationMapConfig<TOperations, TContext>;
 	} = {
@@ -2972,6 +2985,6 @@ function finalizeProvider<
 	};
 	// Declaration validation never invokes handlers, so their declaration-bound
 	// context parameter is irrelevant to the runtime ProviderDefinition shape.
-	validateFailClosedDeclaration(provider as ProviderDefinition);
+	validateFailClosedOperationDeclaration(provider as unknown as ProviderDefinition);
 	return provider;
 }
