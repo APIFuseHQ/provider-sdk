@@ -333,8 +333,9 @@ export async function buildSubmitCheckReport(
 		const loadEvidence = indexParseError
 			? undefined
 			: formatLoadErrorEvidence(loadResult.error, providerRoot);
-		const loadRemediation =
-			loadResult.error && !indexParseError
+		const loadRemediation = indexParseError
+			? "Fix the syntax error reported by the provider-load-parse blocker before apifuse check can load the provider."
+			: loadResult.error
 				? "Fix the import/initialization failure shown in evidence so apifuse check can load the provider."
 				: "Fix index.ts so it default-exports defineProvider(...).";
 		checks.push(
@@ -5031,9 +5032,18 @@ function sanitizeLoadErrorText(value: string, providerRoot: string): string {
 		/((?:password|token|secret|api[_-]?key|credential|authorization)\s*[:=]\s*)(["']?)[^\s,"']+/gi,
 		"$1[REDACTED]",
 	);
-	const envValues = Object.values(process.env)
-		.filter((item): item is string => typeof item === "string" && item.length >= 4)
-		.sort((a, b) => b.length - a.length);
+	const envValues: string[] = [];
+	for (const [name, item] of Object.entries(process.env)) {
+		if (typeof item !== "string" || item.length < ENTROPY_CANDIDATE_MIN_LENGTH) continue;
+		let shouldRedact = SECRETISH_IDENTIFIER_PATTERN.test(name);
+		if (!shouldRedact && shouldConsiderEntropyValue(item)) {
+			const charset = classifyEntropyCharset(item);
+			const threshold = charset === "hex" ? 3.0 : 4.5;
+			shouldRedact = charset !== undefined && shannonEntropy(item) >= threshold;
+		}
+		if (shouldRedact) envValues.push(item);
+	}
+	envValues.sort((a, b) => b.length - a.length);
 	for (const envValue of envValues) {
 		output = output.replaceAll(envValue, "[REDACTED]");
 	}

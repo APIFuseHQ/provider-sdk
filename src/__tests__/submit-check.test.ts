@@ -412,6 +412,8 @@ describe("apifuse submit-check", () => {
 		const providerLoad = report.checks.find((item) => item.id === "provider-load");
 		const parse = report.checks.find((item) => item.id === "provider-load-parse");
 		expect(providerLoad?.status).toBe("fail");
+		expect(providerLoad?.remediation).not.toContain("default-exports defineProvider");
+		expect(parse?.level).toBe("blocker");
 		expect(parse?.status).toBe("fail");
 		expect(parse?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
 		expect(report.score.verdict).toBe("blocked");
@@ -428,6 +430,58 @@ describe("apifuse submit-check", () => {
 		expect(providerLoad?.remediation).toContain("import/initialization failure");
 		expect(report.checks.find((item) => item.id === "provider-load-parse")).toBeUndefined();
 		expect(report.score.verdict).toBe("blocked");
+	});
+
+	it("preserves ordinary words that match short environment values in load evidence", async () => {
+		const envName = "SUBMIT_CHECK_TEST_MODE";
+		const previousValue = process.env[envName];
+		process.env[envName] = "true";
+		try {
+			const dir = makeProviderDir(
+				"submit-index-env-word-",
+				'throw new Error("Expected true, received false");\n',
+			);
+			writeValidLocaleCatalogs(dir);
+
+			const report = await buildSubmitCheckReport(dir);
+			const evidence = report.checks
+				.find((item) => item.id === "provider-load")
+				?.evidence?.join("\n");
+			expect(evidence).toContain("Expected true, received false");
+			expect(evidence).not.toContain("Expected [REDACTED]");
+		} finally {
+			if (previousValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = previousValue;
+			}
+		}
+	});
+
+	it("redacts long values from secret-like environment variables in load evidence", async () => {
+		const envName = "SUBMIT_CHECK_TEST_TOKEN";
+		const envValue = "qJ8nV2xP7mK4rT9wB6cD3fG5hL0sY1uA8eZ2iN7o";
+		const previousValue = process.env[envName];
+		process.env[envName] = envValue;
+		try {
+			const dir = makeProviderDir(
+				"submit-index-env-secret-",
+				`throw new Error("load failed with ${envValue}");\n`,
+			);
+			writeValidLocaleCatalogs(dir);
+
+			const report = await buildSubmitCheckReport(dir);
+			const evidence =
+				report.checks.find((item) => item.id === "provider-load")?.evidence?.join("\n") ?? "";
+			expect(evidence).toContain("[REDACTED]");
+			expect(evidence).not.toContain(envValue);
+		} finally {
+			if (previousValue === undefined) {
+				delete process.env[envName];
+			} else {
+				process.env[envName] = previousValue;
+			}
+		}
 	});
 
 	it("preserves a missing import as provider-load evidence", async () => {
