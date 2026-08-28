@@ -20,6 +20,7 @@ import {
 	isValidationError,
 	ProviderError,
 } from "../errors.js";
+import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import {
 	loadProviderLocaleCatalogs,
 	localizeAuthTurn,
@@ -1466,11 +1467,20 @@ function extractRequestId(raw: unknown): string | undefined {
 type ProviderErrorCauseFrame = {
 	errorClass: string;
 	code?: string;
+	message: string;
 	messageLength: number;
 	messageFingerprint: string;
 };
 
 const MAX_PROVIDER_ERROR_CAUSE_FRAMES = 5;
+const MAX_PROVIDER_ERROR_CAUSE_MESSAGE_LENGTH = 300;
+
+function providerErrorCauseMessage(message: string): string {
+	const sanitized = sanitizeDiagnosticText(message);
+	return sanitized.length > MAX_PROVIDER_ERROR_CAUSE_MESSAGE_LENGTH
+		? `${sanitized.slice(0, MAX_PROVIDER_ERROR_CAUSE_MESSAGE_LENGTH)}… [truncated]`
+		: sanitized;
+}
 
 function providerErrorCauseChain(error: unknown): ProviderErrorCauseFrame[] | undefined {
 	if (!(error instanceof Error) && !isProviderError(error)) return undefined;
@@ -1489,6 +1499,7 @@ function providerErrorCauseChain(error: unknown): ProviderErrorCauseFrame[] | un
 		frames.push({
 			errorClass: cause.name,
 			...(isProviderError(cause) && typeof cause.code === "string" ? { code: cause.code } : {}),
+			message: providerErrorCauseMessage(message),
 			messageLength: message.length,
 			messageFingerprint: createHash("sha256").update(message).digest("hex").slice(0, 12),
 		});

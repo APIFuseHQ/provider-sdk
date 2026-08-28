@@ -5,6 +5,7 @@ export const REDACTED_FIXTURE_VALUE = "[REDACTED]";
 const OPAQUE_TOKEN = /^[A-Za-z0-9_+/=.:~-]+$/;
 const OPAQUE_TOKEN_RUN = /[A-Za-z0-9_+/=.:~-]{24,}/g;
 const URL_RUN = /https?:\/\/[^\s"'<>]+/gi;
+const EMAIL_ADDRESS_RUN = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const PEM_PRIVATE_KEY =
 	/-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----[\s\S]*?-----END (?:[A-Z0-9 ]+ )?PRIVATE KEY-----/g;
 
@@ -149,9 +150,14 @@ export function requestPathForFixture(value: string): string {
 
 /** Scrubs secrets and terminal/log control characters before diagnostic text is emitted. */
 export function sanitizeDiagnosticText(value: string): string {
+	const retainedUrls: string[] = [];
 	let sanitized = value
-		.replace(URL_RUN, (url) => sanitizeUrlForLogs(url))
-		.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED_FIXTURE_VALUE}`);
+		.replace(URL_RUN, (url) => {
+			const index = retainedUrls.push(sanitizeUrlForLogs(url)) - 1;
+			return `APIFUSEURL${index}X`;
+		})
+		.replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, `Bearer ${REDACTED_FIXTURE_VALUE}`)
+		.replace(EMAIL_ADDRESS_RUN, REDACTED_FIXTURE_VALUE);
 	sanitized = redactSensitiveAssignments(sanitized);
 	sanitized = sanitized.replace(OPAQUE_TOKEN_RUN, (candidate, offset: number, source: string) => {
 		if (/^(?:request|trace|correlation)[-_]?id[:=]/i.test(candidate)) return candidate;
@@ -159,6 +165,10 @@ export function sanitizeDiagnosticText(value: string): string {
 		if (/(?:request|trace|correlation)[-_]?id\s*[:=]\s*$/i.test(prefix)) return candidate;
 		return isSensitiveFixtureValue(candidate) ? REDACTED_FIXTURE_VALUE : candidate;
 	});
+	sanitized = sanitized.replace(
+		/APIFUSEURL(\d+)X/g,
+		(_match, index: string) => retainedUrls[Number(index)] ?? REDACTED_FIXTURE_VALUE,
+	);
 	return encodeDiagnosticControls(sanitized);
 }
 

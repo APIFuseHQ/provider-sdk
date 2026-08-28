@@ -50,7 +50,9 @@ describe("fixture sanitization", () => {
 		const url = `https://user:password@example.test/${token}/download?access_token=live`;
 		expect(requestPathForFixture(url)).toBe("/[REDACTED]/download");
 		expect(sanitizeUrlForLogs(url)).toBe("https://example.test/[REDACTED]/download?[REDACTED]");
-		expect(sanitizeDiagnosticText(`request failed at ${url}`)).not.toContain(token);
+		expect(sanitizeDiagnosticText(`request failed at ${url}`)).toBe(
+			"request failed at https://example.test/[REDACTED]/download?[REDACTED]",
+		);
 	});
 
 	it("redacts values following a credential-like path key", () => {
@@ -107,5 +109,11 @@ describe("fixture sanitization", () => {
 		expect(diagnostic).not.toContain("\u061c");
 		expect(diagnostic).not.toContain("\u200e");
 		expect(diagnostic).not.toContain("\u200f");
+	});
+
+	it("redacts email addresses while preserving surrounding diagnostic text", () => {
+		expect(sanitizeDiagnosticText("lookup for person@example.com failed upstream")).toBe(
+			"lookup for [REDACTED] failed upstream",
+		);
 	});
 });
