@@ -6,12 +6,15 @@ export * from "./choice-token.js";
 export type {
 	ApiFuseConfig,
 	BrowserConfig,
+	ProxyCacheStatus,
 	ProxyProtocol,
 	ProxyResolutionOptions,
 	ProxyResolutionSource,
+	ProxyUserAgentSource,
 	ProxyVendorName,
 	ResolvedProxyConfig,
 	SessionConfig,
+	SmartproxyAllocatorBodyClass,
 } from "./config/loader.js";
 export { defineConfig, loadApiFuseConfig, resolveProxy } from "./config/loader.js";
 export {
@@ -174,6 +177,7 @@ export {
 } from "./runtime/instrumentation.js";
 export type { PrevalidateResult } from "./runtime/prevalidate.js";
 export { getProviderBaseUrl } from "./runtime/provider.js";
+export type { ProxyTelemetryLogPayload } from "./runtime/proxy-telemetry.js";
 export {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,

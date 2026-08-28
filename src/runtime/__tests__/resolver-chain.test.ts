@@ -791,11 +791,13 @@ describe("resolver vendor chain", () => {
 		]);
 		const telemetryHeader = telemetry.toHeaderValue();
 		expect(telemetryHeader).toBeTruthy();
-		expect(
-			JSON.parse(Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8")),
-		).toMatchObject({
+		const decodedTelemetry = JSON.parse(
+			Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8"),
+		);
+		expect(decodedTelemetry).toMatchObject({
 			proxy: { userAgentSource: "defaulted" },
 		});
+		expect(telemetry.toLogPayload()).toEqual(decodedTelemetry.proxy);
 	});
 
 	it("keeps a declared resolver profile ahead of the SDK default", async () => {
