@@ -5,14 +5,6 @@ import { z } from "zod";
 
 const PACKAGE_NAME = "@apifuse/provider-sdk";
 const PackageJsonSchema = z.object({ version: z.string() }).catchall(z.unknown());
-const REQUIRED_EVIDENCE = [
-	"SDK unit/integration gates",
-	"generated provider scaffold check/test/submit-check",
-	"pack/package validation",
-	"clean consumer install smoke",
-	"dev-server HTTP smoke",
-	"monorepo compatibility smoke",
-] as const;
 
 type BetaVersion = {
 	readonly major: number;
@@ -63,7 +55,6 @@ export function releaseBranchForVersion(version: string): string {
 }
 
 export function buildReleasePrBody(context: ReleasePrContext): string {
-	const checklist = REQUIRED_EVIDENCE.map((label) => `- [ ] ${label}`).join("\n");
 	return `## Release-candidate validation
 
 Candidate SHA: ${context.candidateSha}
@@ -71,9 +62,14 @@ Source main SHA: ${context.sourceSha}
 Release branch: ${context.branch}
 Version: ${context.version}
 
-This PR was prepared automatically after release-relevant changes landed on main. It is not deployed until this release PR is updated with evidence, the guard passes, the protected npm-publish environment approves, and the PR is merged.
+This PR was prepared automatically after release-relevant changes landed on main. Publishing remains blocked until the Release PR Guard produces and verifies structured evidence for the exact candidate SHA, the protected npm-publish environment approves, and the PR is merged.
 
-${checklist}
+The PR body is informational and cannot satisfy the gate. The workflow artifact records exit codes for:
+
+- \`bun run check\`
+- \`bun test\`
+- \`bun run pack:check\`
+- \`bun run pack:smoke\` (clean packed-SDK install, generated-provider check/test/submit-check, and dev-server HTTP smoke)
 `;
 }
 

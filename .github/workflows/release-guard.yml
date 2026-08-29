@@ -14,19 +14,50 @@ jobs:
     if: startsWith(github.head_ref, 'release/beta-') || startsWith(github.head_ref, 'release/v')
     runs-on: ubuntu-latest
     steps:
+      # Keep the validation and guard implementation on the trusted base ref.
+      # The candidate is a sibling checkout and is only the subject under test.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          path: candidate
+          fetch-depth: 0
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: release-control
           fetch-depth: 0
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
-      - name: Write release PR body
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          cache: "npm"
+          cache-dependency-path: candidate/bun.lock
+      - name: Install candidate dependencies
+        working-directory: candidate
+        run: bun install --frozen-lockfile
+      - name: Run release validation and write structured evidence
+        id: validation
+        continue-on-error: true
         env:
-          RELEASE_PR_BODY: ${{ github.event.pull_request.body }}
-        run: printf '%s' "$RELEASE_PR_BODY" > /tmp/release-pr-body.md
-      - name: Validate release evidence
+          RELEASE_CANDIDATE_DIRECTORY: ${{ github.workspace }}/candidate
+          RELEASE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          RELEASE_EVIDENCE_PATH: ${{ runner.temp }}/release-evidence.json
+        run: bun release-control/scripts/run-release-validation.ts
+      - name: Upload release evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-evidence-${{ github.event.pull_request.head.sha }}
+          path: ${{ runner.temp }}/release-evidence.json
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Validate structured release evidence
+        if: always()
         env:
           RELEASE_BRANCH: ${{ github.head_ref }}
           RELEASE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
-          RELEASE_PR_BODY_PATH: /tmp/release-pr-body.md
-        run: bun scripts/guard-release-pr.ts "$RELEASE_PR_BODY_PATH"
+          RELEASE_EVIDENCE_PATH: ${{ runner.temp }}/release-evidence.json
+        run: bun release-control/scripts/guard-release-pr.ts "$RELEASE_EVIDENCE_PATH"
