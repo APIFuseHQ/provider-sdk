@@ -3,6 +3,7 @@ export type ApifuseCommandName =
 	| "dev"
 	| "check"
 	| "sync-assets"
+	| "migrate-shape"
 	| "submit-check"
 	| "bounty-check"
 	| "record"
@@ -54,6 +55,14 @@ export const COMMAND_MANIFEST: Record<
 		usage: "apifuse sync-assets [path] [--check]",
 		examples: ["apifuse sync-assets .", "apifuse sync-assets . --check"],
 		modulePath: "./apifuse-sync-assets",
+	},
+	"migrate-shape": {
+		name: "migrate-shape",
+		summary:
+			"Migrate a provider index.ts from the single-phase defineProvider shape to the two-phase declaration builder.",
+		usage: "apifuse migrate-shape [path] [--check] [--json]",
+		examples: ["apifuse migrate-shape .", "apifuse migrate-shape . --check"],
+		modulePath: "./apifuse-migrate-shape",
 	},
 	"submit-check": {
 		name: "submit-check",
@@ -113,6 +122,7 @@ export const COMMAND_ORDER: ApifuseCommandName[] = [
 	"dev",
 	"check",
 	"sync-assets",
+	"migrate-shape",
 	"submit-check",
 	"record",
 	"test",
