@@ -6,6 +6,7 @@ import {
 } from "./declaration-validation.js";
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
+import { HealthScenarioSchema } from "./health-scenario.js";
 import {
 	NativeEgressPolicyValidationError,
 	validateNativeProviderConfig,
@@ -1730,6 +1731,7 @@ const HEALTH_CHECK_CASE_FIELDS = new Set([
 	"input",
 	"prepareInput",
 	"assertions",
+	"scenario",
 	"degradedThresholdMs",
 	"timeoutMs",
 	"expectedStatus",
@@ -1979,7 +1981,19 @@ function validateHealthCheckCase(
 		throw new ValidationError(
 			`Provider "${providerId}" ${fieldPath}.name must be a non-empty string.`,
 		);
-	if (typeof c.assertions !== "function")
+	const hasScenario = c.scenario !== undefined;
+	const imperativeFields = [
+		...(c.prepareInput === undefined ? [] : ["prepareInput"]),
+		...(c.assertions === undefined ? [] : ["assertions"]),
+	];
+	if (hasScenario && imperativeFields.length > 0)
+		throw new ValidationError(
+			`Provider "${providerId}" operation "${operationName}" health-check case "${c.name}" cannot declare scenario with ${imperativeFields.join(" and ")}.`,
+			{
+				fix: `Remove ${imperativeFields.map((field) => `${fieldPath}.${field}`).join(" and ")} and keep ${fieldPath}.scenario, or remove ${fieldPath}.scenario to keep the imperative hooks.`,
+			},
+		);
+	if (!hasScenario && typeof c.assertions !== "function")
 		throw new ValidationError(
 			`Provider "${providerId}" ${fieldPath}.assertions must be a function.`,
 			{
@@ -1990,6 +2004,24 @@ function validateHealthCheckCase(
 		throw new ValidationError(
 			`Provider "${providerId}" ${fieldPath}.prepareInput must be a function.`,
 		);
+	if (hasScenario) {
+		const parsedScenario = HealthScenarioSchema.safeParse(c.scenario);
+		if (!parsedScenario.success)
+			throw new ValidationError(
+				`Provider "${providerId}" operation "${operationName}" health-check case "${c.name}" has an invalid scenario: it must conform to HealthScenario.`,
+				{ fix: `Build ${fieldPath}.scenario with defineHealthScenario().` },
+			);
+		const unrelatedOperation = parsedScenario.data.coversOperations.find(
+			(operationId) => operationId !== operationName,
+		);
+		if (unrelatedOperation !== undefined)
+			throw new ValidationError(
+				`Provider "${providerId}" operation "${operationName}" health-check case "${c.name}" scenario.coversOperations cannot claim unrelated operation "${unrelatedOperation}".`,
+				{
+					fix: `Set ${fieldPath}.scenario.coversOperations to ["${operationName}"].`,
+				},
+			);
+	}
 	if (
 		c.degradedThresholdMs !== undefined &&
 		(typeof c.degradedThresholdMs !== "number" ||

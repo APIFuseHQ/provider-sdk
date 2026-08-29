@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
 	centered,
 	defineHealthJourney,
+	defineHealthScenario,
 	defineProvider,
 	defineSmsOtpMatcher,
 	digestProviderContract,
@@ -315,6 +316,57 @@ describe("provider contract extraction", () => {
 				steps: [{ id: "search", operationId: "zeta-search", kind: "operation" }],
 			},
 		]);
+	});
+
+	it("preserves declarative operation-case scenarios in the contract", () => {
+		const scenario = defineHealthScenario({
+			scenarioVersion: 2,
+			id: "lookup-probe",
+			display: { titleKey: "health.lookup.title" },
+			schedule: { kind: "interval", intervalMs: 60_000, jitterMs: 0 },
+			timeoutMs: 10_000,
+			coversOperations: ["lookup"],
+			credentialRefs: [],
+			steps: [
+				{
+					id: "lookup",
+					result: "lookup-result",
+					kind: "operation",
+					operationId: "lookup",
+					inputTemplate: { query: "contract" },
+				},
+			],
+		});
+		const provider = defineProvider({
+			id: "scenario-contract-provider",
+			version: "1.0.0",
+			runtime: "standard",
+			meta: {
+				displayName: "Scenario contract provider",
+				descriptionKey: "scenario-contract-provider.description",
+				category: "test",
+			},
+		})({
+			operations: {
+				lookup: {
+					input: InputSchema,
+					output: OutputSchema,
+					handler,
+					healthCheck: {
+						interval: "1m",
+						cases: [{ name: "lookup probe", input: { query: "contract" }, scenario }],
+					},
+				},
+			},
+		});
+
+		const snapshot = extractProviderContract(provider);
+		const operation = snapshot.operations.find((candidate) => candidate.id === "lookup");
+
+		expect(operation?.healthCheck).toEqual({
+			interval: "1m",
+			cases: [{ name: "lookup probe", input: { query: "contract" }, scenario }],
+		});
 	});
 
 	it("serializes health journey SMS matcher regex source and flags", () => {

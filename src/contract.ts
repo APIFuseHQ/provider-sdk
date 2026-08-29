@@ -167,6 +167,7 @@ function extractHealthCheck(value: HealthCheckSuite | undefined): JsonValue | un
 				name: item.name,
 				description: item.description,
 				input: toJsonValue(item.input),
+				scenario: toJsonValue(item.scenario),
 				degradedThresholdMs: item.degradedThresholdMs,
 				timeoutMs: item.timeoutMs,
 				expectedStatus: item.expectedStatus,

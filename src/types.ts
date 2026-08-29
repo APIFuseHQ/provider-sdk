@@ -760,38 +760,13 @@ export interface HealthCheckCaseResult {
  * so authors get IntelliSense and compile-time errors when accessing fields
  * that do not exist on the operation's declared output schema.
  */
-export interface HealthCheckCase<TInput = unknown, TOutput = unknown> {
+export type HealthCheckCase<TInput = unknown, TOutput = unknown> = {
 	/** Human-readable case name; unique within the suite. */
 	name: string;
 	/** Optional longer description shown on ops dashboards. */
 	description?: string;
 	/** Input passed to the operation handler for this case. */
 	input: TInput;
-	/**
-	 * Optional runtime input preparation hook for volatile probes. Use this when
-	 * the durable probe input must be derived from a live read-only operation
-	 * immediately before the checked operation executes.
-	 */
-	prepareInput?: (
-		ctx: HealthCheckInputPreparationContext<TInput>,
-	) => TInput | Promise<TInput>;
-	/**
-	 * Assertion executed against the operation's response and timing.
-	 *
-	 * - Throw to fail the case (recorded as `down`).
-	 * - Return `{ status: "degraded", label }` to flag without failing.
-	 * - Return `void` (implicit) for `ok`.
-	 *
-	 * MUST NOT access scheduler, recorder, or any runtime type — pure data
-	 * + lambda only.
-	 */
-	assertions: (
-		ctx: HealthCheckAssertionContext<TOutput>,
-	) =>
-		| void
-		| Promise<void>
-		| HealthCheckCaseResult
-		| Promise<HealthCheckCaseResult>;
 	/** Override per-case degradation threshold (ms); falls back to the suite default. */
 	degradedThresholdMs?: number;
 	/** Override per-case timeout in milliseconds; falls back to the suite/provider/runtime default. */
@@ -800,7 +775,43 @@ export interface HealthCheckCase<TInput = unknown, TOutput = unknown> {
 	expectedStatus?: "ok" | "degraded";
 	/** Runtime gate (env-driven); if returns false the case is skipped & logged. */
 	enabled?: () => boolean;
-}
+} & (
+	| {
+			/**
+			 * Optional runtime input preparation hook for volatile probes. Use this when
+			 * the durable probe input must be derived from a live read-only operation
+			 * immediately before the checked operation executes.
+			 */
+			prepareInput?: (
+				ctx: HealthCheckInputPreparationContext<TInput>,
+			) => TInput | Promise<TInput>;
+			/**
+			 * Assertion executed against the operation's response and timing.
+			 *
+			 * - Throw to fail the case (recorded as `down`).
+			 * - Return `{ status: "degraded", label }` to flag without failing.
+			 * - Return `void` (implicit) for `ok`.
+			 *
+			 * MUST NOT access scheduler, recorder, or any runtime type — pure data
+			 * + lambda only.
+			 */
+			assertions: (
+				ctx: HealthCheckAssertionContext<TOutput>,
+			) =>
+				| void
+				| Promise<void>
+				| HealthCheckCaseResult
+				| Promise<HealthCheckCaseResult>;
+			/** Declarative scenarios replace the imperative preparation and assertion hooks. */
+			scenario?: never;
+	  }
+	| {
+			/** Declarative scenario executed by the health-monitor runtime. */
+			scenario: HealthScenario;
+			prepareInput?: never;
+			assertions?: never;
+	  }
+);
 
 /**
  * Operation-level health-check suite. At least one case is required when
