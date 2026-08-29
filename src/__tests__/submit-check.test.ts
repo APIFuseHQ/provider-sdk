@@ -930,13 +930,16 @@ void useStealth;
 		expect(report.summary.blockers).toBe(0);
 	});
 
-	it("blocks when provider source uses raw fetch", async () => {
+	it("blocks global fetch despite an unrelated shadowing parameter", async () => {
 		const dir = makeProviderDir(
 			"submit-no-raw-fetch-fail-",
-			sourceWithHandler(`handler: async () => {
+			`${sourceWithHandler(`handler: async () => {
         await fetch("https://api.example.com/lookup");
         return { ok: true };
-      },`),
+			      },`)}
+function helper(fetch: unknown) { void fetch; }
+void helper;
+`,
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
@@ -974,10 +977,167 @@ void useStealth;
 		expect(check?.evidence).toBeUndefined();
 	});
 
-	it("blocks eval-based dynamic code evaluation", async () => {
+	it("blocks a const alias of global fetch", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-const-alias-",
+			`${validProviderSource()}\nexport async function request(url: string) { const rawFetch = fetch; return rawFetch(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("blocks an unreassigned mutable alias of global fetch", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-let-alias-",
+			`${validProviderSource()}\nexport async function request(url: string) { let rawFetch = fetch; return rawFetch(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("leaves a reassigned mutable fetch alias unresolved", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-reassigned-let-alias-",
+			`${validProviderSource()}\nexport async function request(ctx: any, url: string) { let rawFetch = fetch; const result = rawFetch(url); rawFetch = ctx.stealth.fetch; return result; }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks fetch destructured from globalThis", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-destructured-",
+			`${validProviderSource()}\nexport async function request(url: string) { const { fetch: rawFetch } = globalThis; return rawFetch(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("blocks computed globalThis fetch calls", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-global-element-",
+			`${validProviderSource()}\nexport async function request(url: string) { return globalThis["fetch"](url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("blocks comma-indirect fetch calls", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-comma-indirect-",
+			`${validProviderSource()}\nexport async function request(url: string) { return (0, fetch)(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("blocks globalThis.fetch and window.fetch calls", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-global-properties-",
+			`${validProviderSource()}\nexport async function request(url: string) { await globalThis.fetch(url); return window.fetch(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("allows SDK HTTP and stealth fetch paths", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-sdk-paths-",
+			`${validProviderSource()}\nexport async function request(ctx: any, url: string) { await ctx.http.get(url); return ctx.stealth.fetch(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("allows a locally shadowed fetch bound to the SDK path", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-shadowed-",
+			`${validProviderSource()}\nexport async function request(ctx: any, url: string) { const fetch = ctx.stealth.fetch; return fetch(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("allows fetch on a lexically shadowed globalThis object", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-shadowed-globalthis-",
+			`${validProviderSource()}\nexport async function request(url: string) { const globalThis = { fetch: async (_url: string) => ({ ok: true }) }; return globalThis.fetch(url); }\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("keeps fetch text in comments and strings inert", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-inert-text-regression-",
+			`${validProviderSource()}\n// fetch("https://api.example.com")\nconst fetchDocs = "fetch(";\nvoid fetchDocs;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("keeps fetch property keys and describe text inert", async () => {
+		const dir = makeProviderDir(
+			"submit-no-raw-fetch-property-text-regression-",
+			`${validProviderSource()}\nconst fetchExample = { fetch: "documented" };\nconst described = z.string().describe("fetch(");\nvoid fetchExample;\nvoid described;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-raw-fetch",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks global eval despite an unrelated shadowing parameter", async () => {
 		const dir = makeProviderDir(
 			"submit-no-dynamic-code-eval-",
-			`${validProviderSource()}\nvoid eval("fetch(x)");\n`,
+			`${validProviderSource()}\nfunction helper(eval: unknown) { void eval; }\nvoid eval("fetch(x)");\nvoid helper;\n`,
 		);
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
@@ -1070,6 +1230,32 @@ void useStealth;
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
 		expect(check?.evidence).toEqual(["index.ts:62"]);
+	});
+
+	it("blocks an unreassigned mutable alias of eval", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-let-alias-",
+			`${validProviderSource()}\nlet runner = eval;\nvoid runner("1+1");\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-dynamic-code",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("leaves a reassigned mutable eval alias unresolved", async () => {
+		const dir = makeProviderDir(
+			"submit-no-dynamic-code-reassigned-var-alias-",
+			`${validProviderSource()}\nvar runner = eval;\nvoid runner("1+1");\nrunner = (_source: string) => undefined;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "no-dynamic-code",
+		);
+
+		expect(check?.status).toBe("pass");
 	});
 
 	it("blocks comma-indirect eval dynamic code evaluation", async () => {
@@ -1520,6 +1706,59 @@ void examples;
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "credential-usage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
+	});
+
+	it("recognizes a destructured ctx credential reference", async () => {
+		const source = sourceWithAuth(`auth: {
+    mode: "credentials",
+    flow: {
+      continue: async () => ({
+        kind: "complete",
+        turnId: crypto.randomUUID(),
+        data: { credential: { userId: "user_123" } },
+      }),
+    },
+  },
+  credential: { keys: ["userId"] },`).replace(
+			"handler: async () => ({ ok: true }),",
+			`handler: async (ctx) => {
+        const { credential } = ctx;
+        return { ok: Boolean(credential.get("userId")) };
+      },`,
+		);
+		const dir = makeProviderDir("submit-credential-destructured-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "credential-usage",
+		);
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
+	});
+
+	it("recognizes computed ctx credential access", async () => {
+		const source = sourceWithAuth(`auth: {
+    mode: "credentials",
+    flow: {
+      continue: async () => ({
+        kind: "complete",
+        turnId: crypto.randomUUID(),
+        data: { credential: { userId: "user_123" } },
+      }),
+    },
+  },
+  credential: { keys: ["userId"] },`).replace(
+			"handler: async () => ({ ok: true }),",
+			'handler: async (ctx) => ({ ok: Boolean(ctx["credential"].get("userId")) }),',
+		);
+		const dir = makeProviderDir("submit-credential-computed-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "credential-usage",
+		);
 
 		expect(check?.status).toBe("pass");
 		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
@@ -2236,6 +2475,274 @@ const upstreamRow = z.object({ MKioskTy: z.string() });
 		expect(check?.status).toBe("fail");
 	});
 
+	it("blocks computed vendor keys resolved from string consts", async () => {
+		const source = validProviderSource()
+			.replace(
+				'import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";',
+				`import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";
+const vendorKey = "MKioskTy";`,
+			)
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`[vendorKey]: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-computed-vendor-key-const-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).toContain("MKioskTy");
+	});
+
+	it("does not fabricate computed vendor keys from non-literal consts", async () => {
+		const source = validProviderSource()
+			.replace(
+				'import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";',
+				`import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";
+const makeVendorKey = () => "MKioskTy";
+const vendorKey = makeVendorKey();`,
+			)
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`[vendorKey]: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-computed-vendor-key-dynamic-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
+	it("does not fabricate vendor keys from interpolated computed templates", async () => {
+		const source = validProviderSource()
+			.replace(
+				'import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";',
+				'import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";\nconst suffix = "Ty";',
+			)
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`[\`MKiosk\${suffix}\`]: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-computed-vendor-key-template-expression-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("pass");
+		expect(check?.evidence).toBeUndefined();
+	});
+
+	it("resolves a no-substitution computed template key", async () => {
+		const source = validProviderSource()
+			.replace(
+				`ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+				`[\`MKioskTy\`]: z.string(),
+    ok: describeKey(z.boolean(), "operations.lookup.fields.ok.description"),`,
+			)
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ ok: true, MKioskTy: "K" }),',
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-computed-vendor-key-template-literal-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.join("\n")).toContain("MKioskTy");
+	});
+
+	it("does not flag an unused internal diagnostic result schema", async () => {
+		const source = `${validProviderSource()}
+const diagnosticResult = z.object({ HTTPStatus: z.string() });
+void diagnosticResult;
+`;
+		const dir = makeProviderDir("submit-diagnostic-result-internal-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks an unused exported schema binding in index.ts", async () => {
+		const source = `${validProviderSource()}
+export const maybePublic = z.object({ MKioskTy: z.string() });
+`;
+		const dir = makeProviderDir("submit-exported-schema-binding-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.some((line) => line.includes("index.ts"))).toBe(true);
+	});
+
+	it("blocks a schema exported through a const alias", async () => {
+		const source = `${validProviderSource()}
+const schema = z.object({ MKioskTy: z.string() });
+const exposed = schema;
+export { exposed };
+`;
+		const dir = makeProviderDir("submit-exported-schema-const-alias-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("blocks a schema exported directly through a renamed specifier", async () => {
+		const source = `${validProviderSource()}
+const schema = z.object({ MKioskTy: z.string() });
+export { schema as renamed };
+`;
+		const dir = makeProviderDir("submit-exported-schema-renamed-specifier-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("allows a non-exported inert schema alias chain", async () => {
+		const source = `${validProviderSource()}
+const a = z.object({ MKioskTy: z.string() });
+const b = a;
+void b;
+`;
+		const dir = makeProviderDir("submit-inert-schema-alias-chain-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("allows an internal schema used only through parse-like methods", async () => {
+		const source = `${validProviderSource()}
+const wire = z.object({ HTTPStatus: z.string() });
+void wire.parse({ HTTPStatus: "200" });
+void wire.safeParse({ HTTPStatus: "200" });
+void wire.parseAsync({ HTTPStatus: "200" });
+void wire.safeParseAsync({ HTTPStatus: "200" });
+`;
+		const dir = makeProviderDir("submit-internal-schema-parse-only-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("blocks a parsed schema that also reaches an operation output", async () => {
+		const source = validProviderSource()
+			.replace(
+				"const input = describeKey(",
+				'const wire = z.object({ HTTPStatus: z.string() });\nvoid wire.parse({ HTTPStatus: "200" });\n\nconst input = describeKey(',
+			)
+			.replace("      output,", "      output: wire,")
+			.replace("handler: async () => ({ ok: true }),", 'handler: async () => ({ HTTPStatus: "200" }),')
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { HTTPStatus: "200" } },',
+			);
+		const dir = makeProviderDir("submit-parsed-public-output-schema-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("blocks an exported schema that is also parsed internally", async () => {
+		const source = `${validProviderSource()}
+export const wire = z.object({ HTTPStatus: z.string() });
+void wire.parse({ HTTPStatus: "200" });
+`;
+		const dir = makeProviderDir("submit-exported-parsed-schema-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
+	it("keeps sibling-file schemas fail-closed", async () => {
+		const source = validProviderSource();
+		const dir = makeProviderDir("submit-sibling-schema-binding-", source);
+		writeFileSync(
+			join(dir, "schema.ts"),
+			'import { z } from "@apifuse/provider-sdk";\nexport const schema = z.object({ MKioskTy: z.string() });\n',
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence?.some((line) => line.includes("schema.ts"))).toBe(true);
+	});
+
+	it("blocks a locally resolved schema used as an operation output", async () => {
+		const source = validProviderSource()
+			.replace(
+				"const input = describeKey(",
+				"const publicSchema = z.object({ MKioskTy: z.string() });\n\nconst input = describeKey(",
+			)
+			.replace("      output,", "      output: publicSchema,")
+			.replace("handler: async () => ({ ok: true }),", 'handler: async () => ({ MKioskTy: "K" }),')
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { MKioskTy: "K" } },',
+			);
+		const dir = makeProviderDir("submit-public-output-schema-binding-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+	});
+
 	it("does not let unrelated upstream-named consts exempt public schemas", async () => {
 		const source = validProviderSource()
 			.replace(
@@ -2266,6 +2773,20 @@ const upstreamOutput = z.object({ MKioskTy: z.string() });
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 		const check = report.checks.find((item) => item.id === "vendor-key-leak");
+
+		expect(check?.status).toBe("pass");
+	});
+
+	it("allows an upstream response schema used only for parsing", async () => {
+		const source = `${validProviderSource()}
+const upstreamResponse = z.object({ MKioskTy: z.string() });
+export function parseUpstream(value: unknown) { return upstreamResponse.parse(value); }
+`;
+		const dir = makeProviderDir("submit-upstream-response-parser-pass-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-key-leak",
+		);
 
 		expect(check?.status).toBe("pass");
 	});
@@ -2673,6 +3194,47 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		expect(check?.status).toBe("fail");
 		expect(check?.level).toBe("blocker");
 		expect(check?.evidence?.[0]).toMatch(/index\.ts:\d+/);
+	});
+
+	it("blocks compact fixture timestamps resolved from string consts", async () => {
+		const source = validProviderSource()
+			.replace(
+				'import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";',
+				`import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";
+const compactDate = "20260709";`,
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, date: compactDate } },',
+			);
+		const dir = makeProviderDir("submit-vendor-timestamp-const-alias-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-timestamp-leak",
+		);
+
+		expect(check?.status).toBe("fail");
+		expect(check?.level).toBe("blocker");
+	});
+
+	it("allows fixture const aliases that are not compact timestamps", async () => {
+		const source = validProviderSource()
+			.replace(
+				'import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";',
+				`import { defineProvider, describeKey, z } from "@apifuse/provider-sdk";
+const normalizedDate = "2026-07-09";`,
+			)
+			.replace(
+				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
+				'fixtures: { request: { q: "btc" }, response: { ok: true, date: normalizedDate } },',
+			);
+		const dir = makeProviderDir("submit-vendor-timestamp-safe-const-", source);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "vendor-timestamp-leak",
+		);
+
+		expect(check?.status).toBe("pass");
 	});
 
 	it("ignores compact vendor timestamp examples in fixture comments", async () => {
@@ -3407,6 +3969,64 @@ const response = { updatedAt: "20260707222855" };
 		expect(check?.evidence?.join("\n")).toContain("index.ts:");
 		expect(check?.evidence?.join("\n")).toContain("qJ8n...[REDACTED length=58]");
 		expect(check?.evidence?.join("\n")).not.toContain(key);
+	});
+
+	it("keeps const secret remediation names based on the variable", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-secret-name-const-",
+			`${validProviderSource()}\nconst apiToken = "${key}";\nvoid apiToken;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "secret-scan",
+		);
+
+		expect(check?.remediation).toContain("__API_TOKEN");
+	});
+
+	it("uses the assigned member name in secret remediation", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-secret-name-member-",
+			`${validProviderSource()}\nconst settings: Record<string, string> = {};\nsettings.apiKey = "${key}";\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "secret-scan",
+		);
+
+		expect(check?.remediation).toContain("__API_KEY");
+		expect(check?.remediation).not.toContain("__SETTINGS");
+	});
+
+	it("uses an object property name in secret remediation", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-secret-name-property-",
+			`${validProviderSource()}\nconst config = { apiKey: "${key}" };\nvoid config;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "secret-scan",
+		);
+
+		expect(check?.remediation).toContain("__API_KEY");
+	});
+
+	it("does not use a type annotation as the secret remediation name", async () => {
+		const key = "qJ8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS8dF2gH7j";
+		const dir = makeProviderDir(
+			"submit-secret-name-type-annotation-",
+			`${validProviderSource()}\ntype Settings = { apiKey: string };\nconst cfg: Settings = { apiKey: "${key}" };\nvoid cfg;\n`,
+		);
+		writeValidLocaleCatalogs(dir);
+		const check = (await buildSubmitCheckReport(dir)).checks.find(
+			(item) => item.id === "secret-scan",
+		);
+
+		expect(check?.remediation).toContain("__API_KEY");
+		expect(check?.remediation).not.toContain("__SETTINGS");
 	});
 
 	it("excludes nested node_modules directories from secret scanning", async () => {
