@@ -46,6 +46,22 @@ export type ProviderErrorOptions = {
 	cause?: Error;
 	category?: ProviderErrorCategory;
 	retryable?: boolean;
+	/** Provider-authored, bounded metadata safe for operational logs and error headers. */
+	observability?: ProviderErrorObservability;
+};
+
+/**
+ * Provider-authored error diagnostics whose runtime values are validated before emission.
+ * Classification tokens such as `reason` are source literals, not runtime user input or
+ * credentials. The gateway removes the observability header from tenant responses.
+ */
+export type ProviderErrorObservability = {
+	/** A 1-64 character `[A-Za-z0-9_.-]` classification token, for example `LOGIN_COMPLETE_FAILED`. */
+	reason?: string;
+	/** A provider-computed 12-hex-character fingerprint of private diagnostic input. */
+	fingerprint?: string;
+	/** The non-negative length of the private diagnostic input, capped at 10,000,000. */
+	messageLength?: number;
 };
 
 export class ProviderError extends Error {

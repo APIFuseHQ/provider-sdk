@@ -276,6 +276,83 @@ describe("executeOperation", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("preserves SessionExpiredError observability when retryOnAuthRefresh upgrades it", async () => {
+		const ctx = createMockCtx({});
+		const providerObservability = {
+			reason: "SESSION_REFRESH_FAILED",
+			fingerprint: "038ed7ef11d8",
+			messageLength: 42,
+		};
+		const details = { providerCode: "session_refresh_failed" };
+		const provider = createMockProvider({
+			retryOnAuthRefresh: true,
+			handler: async () => {
+				throw new SessionExpiredError("Session expired", {
+					code: "UPSTREAM_ERROR",
+					category: "upstream_http",
+					fix: "do not expose this",
+					observability: providerObservability,
+					details,
+				});
+			},
+		});
+
+		let caught: unknown;
+		try {
+			await executeOperation(provider, "search", ctx, { query: "test" });
+		} catch (error) {
+			caught = error;
+		}
+		expect(caught).toMatchObject({
+			name: "SessionExpiredError",
+			options: {
+				retryable: true,
+				observability: providerObservability,
+				code: "reauth_required",
+				category: "credential_expired",
+			},
+		});
+		expect((caught as SessionExpiredError).options?.fix).toBeUndefined();
+		expect((caught as SessionExpiredError).options?.details).toBeUndefined();
+	});
+
+	it("keeps the canonical retryable session error when observability descriptor inspection throws", async () => {
+		const ctx = createMockCtx({});
+		const observability = new Proxy(
+			{},
+			{
+				getOwnPropertyDescriptor() {
+					throw new Error("observability descriptor trap exploded");
+				},
+			},
+		);
+		const provider = createMockProvider({
+			retryOnAuthRefresh: true,
+			handler: async () => {
+				throw new SessionExpiredError("Session expired", { observability });
+			},
+		});
+
+		let caught: unknown;
+		try {
+			await executeOperation(provider, "search", ctx, { query: "test" });
+		} catch (error) {
+			caught = error;
+		}
+
+		expect(isSessionExpiredError(caught)).toBe(true);
+		expect(caught).toMatchObject({
+			name: "SessionExpiredError",
+			message: "Session expired",
+			options: {
+				code: "reauth_required",
+				category: "credential_expired",
+				retryable: true,
+			},
+		});
+		expect((caught as SessionExpiredError).options).not.toHaveProperty("observability");
+	});
+
 	it("upgrades a duplicate-module SessionExpiredError to retryable for opt-in operations", async () => {
 		const Dup = await duplicateSdk;
 		expect(Dup.SessionExpiredError).not.toBe(SessionExpiredError);

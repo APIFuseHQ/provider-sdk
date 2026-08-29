@@ -695,6 +695,7 @@ export type ErrorObservabilityDetails = {
     taxonomyVersion: string;
     retryable: boolean;
     upstreamStatus?: number;
+    providerObservability?: ProviderErrorObservability;
 };
 
 // @public (undocumented)
@@ -2786,6 +2787,23 @@ interface ProviderDeploymentOverrides {
 // @public (undocumented)
 type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
 
+// @public (undocumented)
+export type ProviderErrorCauseFrame = {
+    errorClass: string;
+    code?: string;
+    message: string;
+    messageLength: number;
+    messageFingerprint: string;
+    providerObservability?: ProviderErrorObservability;
+};
+
+// @public
+export type ProviderErrorObservability = {
+    reason?: string;
+    fingerprint?: string;
+    messageLength?: number;
+};
+
 // Warning: (ae-forgotten-export) The symbol "VALID_OPERATION_ERROR_STATUSES" needs to be exported by the entry point index.d.ts
 //
 // @public (undocumented)
@@ -3063,6 +3081,8 @@ export type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     errorCategory?: ProviderErrorCategory;
     taxonomyVersion?: string;
     retryable?: boolean;
+    providerObservability?: ProviderErrorObservability;
+    causeChain?: ProviderErrorCauseFrame[];
     signal?: "unregistered_provider_error_code";
     signalFix?: string;
     issues?: Array<{
@@ -4568,8 +4588,8 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/health-scenario.d.ts:1838:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:27:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:38:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:11:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:148:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:12:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:152:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:172:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:567:5 - (ae-forgotten-export) The symbol "HealthJourneyRunContext" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:567:5 - (ae-forgotten-export) The symbol "HealthJourneyRunResult" needs to be exported by the entry point index.d.ts

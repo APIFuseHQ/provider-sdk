@@ -122,6 +122,7 @@ export {
 	isSessionExpiredError,
 	isTransportError,
 	ProviderError,
+	type ProviderErrorObservability,
 	SessionExpiredError,
 	TransportError,
 	ValidationError,

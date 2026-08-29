@@ -17,6 +17,7 @@ export {
 	type ErrorObservabilityDetails,
 	type ProviderServerCloseOptions,
 	type ProviderServerHandle,
+	type ProviderErrorCauseFrame,
 	type ProviderServerLogEvent,
 	type ProviderServerLogger,
 	type ProviderServerOperationExecutor,
@@ -26,6 +27,7 @@ export {
 	type ServeOptions,
 	serve,
 } from "./serve.js";
+export type { ProviderErrorObservability } from "../errors.js";
 export {
 	computeSelfTestPlanDigest,
 	createSelfTestApp,

@@ -378,6 +378,13 @@ class ProviderError extends Error {
 // @public (undocumented)
 type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
 
+// @public
+type ProviderErrorObservability = {
+    reason?: string;
+    fingerprint?: string;
+    messageLength?: number;
+};
+
 // @public (undocumented)
 type ProviderErrorOptions = {
     fix?: string;
@@ -386,6 +393,7 @@ type ProviderErrorOptions = {
     cause?: Error;
     category?: ProviderErrorCategory;
     retryable?: boolean;
+    observability?: ProviderErrorObservability;
 };
 
 // @public (undocumented)
@@ -464,6 +472,7 @@ export type VendorCredentialResolver = (vendor: ProviderProxyProvider) => Vendor
 // Warnings were encountered during analysis:
 //
 // dist/errors.d.ts:8:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point native-network.d.ts
+// dist/errors.d.ts:11:5 - (ae-forgotten-export) The symbol "ProviderErrorObservability" needs to be exported by the entry point native-network.d.ts
 // dist/native-egress-policy.d.ts:13:5 - (ae-forgotten-export) The symbol "NativeTcpPortRange" needs to be exported by the entry point native-network.d.ts
 // dist/native-egress-policy.d.ts:19:5 - (ae-forgotten-export) The symbol "NativeTcpTlsMode" needs to be exported by the entry point native-network.d.ts
 // dist/runtime/native-network.d.ts:12:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point native-network.d.ts

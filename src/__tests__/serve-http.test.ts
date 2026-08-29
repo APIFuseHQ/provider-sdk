@@ -4,10 +4,13 @@ import { type Socket, createServer } from "node:net";
 import { z } from "zod";
 
 import { clearProxyResolutionCache } from "../config/loader.js";
+import { safeProviderErrorObservability } from "../error-observability.js";
 import { PROVIDER_ERROR_CATEGORIES } from "../observability.js";
 import {
 	AuthError,
 	ProviderError,
+	type ProviderErrorObservability,
+	type ProviderErrorOptions,
 	SessionExpiredError,
 	TransportError,
 	ValidationError,
@@ -38,6 +41,13 @@ function errorObservability(response: Response): ErrorObservabilityDetails {
 			taxonomyVersion: z.string(),
 			retryable: z.boolean(),
 			upstreamStatus: z.number().optional(),
+			providerObservability: z
+				.object({
+					reason: z.string().optional(),
+					fingerprint: z.string().optional(),
+					messageLength: z.number().optional(),
+				})
+				.optional(),
 		})
 		.parse(JSON.parse(value));
 }
@@ -553,7 +563,12 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				output: z.object({ ok: z.boolean() }),
 				retryOnAuthRefresh: true,
 				handler: async () => {
-					throw new SessionExpiredError("Provider session expired");
+					throw new SessionExpiredError("Provider session expired", {
+						code: "UPSTREAM_ERROR",
+						category: "upstream_http",
+						fix: "must not reach the tenant body",
+						details: { mustNotReachTenant: true },
+					});
 				},
 			},
 			sessionExpiredUnmarked: {
@@ -1988,6 +2003,50 @@ describe("provider HTTP server", () => {
 		});
 	});
 
+	it("preserves SessionExpiredError observability through retryOnAuthRefresh", async () => {
+		const providerObservability = {
+			reason: "SESSION_REFRESH_FAILED",
+			fingerprint: "038ed7ef11d8",
+			messageLength: 42,
+		} satisfies ProviderErrorObservability;
+		const events: ProviderServerLogEvent[] = [];
+		const baseProvider = createTestProvider();
+		const provider = {
+			...baseProvider,
+			operations: {
+				...baseProvider.operations,
+				sessionExpiredObservable: {
+					input: z.object({ value: z.string() }),
+					output: z.object({ ok: z.boolean() }),
+					retryOnAuthRefresh: true,
+					handler: async () => {
+						throw new SessionExpiredError("Provider session expired", {
+							observability: providerObservability,
+						});
+					},
+				},
+			},
+		} satisfies ProviderDefinition;
+		const appWithLogger = createServerApp(provider, { logger: (event) => events.push(event) });
+
+		const response = await appWithLogger.request("/v1/sessionExpiredObservable", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_session_observable", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(401);
+		expect(errorObservability(response)).toEqual({
+			category: "credential_expired",
+			taxonomyVersion: "2026-08-07",
+			retryable: true,
+			providerObservability,
+		});
+		expect(events).toContainEqual(
+			expect.objectContaining({ event: "provider_request_failed", providerObservability }),
+		);
+	});
+
 	it("surfaces credential_expired + retryable:false for unmarked operations", async () => {
 		const response = await app.request("/v1/sessionExpiredUnmarked", {
 			method: "POST",
@@ -2298,7 +2357,11 @@ describe("provider HTTP server", () => {
 		]);
 	});
 
-	function createCauseErrorApp(createError: () => ProviderError, events: ProviderServerLogEvent[]) {
+	function createCauseErrorApp(
+		createError: () => ProviderError,
+		events: ProviderServerLogEvent[],
+		mutateLog?: (event: ProviderServerLogEvent) => void,
+	) {
 		const base = createTestProvider();
 		const provider = {
 			...base,
@@ -2312,7 +2375,12 @@ describe("provider HTTP server", () => {
 				},
 			},
 		} satisfies ProviderDefinition;
-		return createServerApp(provider, { logger: (event) => events.push(event) });
+		return createServerApp(provider, {
+			logger: (event) => {
+				mutateLog?.(event);
+				events.push(event);
+			},
+		});
 	}
 
 	function requestCauseError(app: ReturnType<typeof createServerApp>) {
@@ -2422,6 +2490,39 @@ describe("provider HTTP server", () => {
 		expect(serializedResponse).not.toContain("[REDACTED]");
 	});
 
+	it("omits non-string provider codes from cause frames and keeps events serializable", async () => {
+		const circularCode: Record<string, unknown> = {};
+		circularCode.self = circularCode;
+		const cases = [
+			{ name: "number code", code: 17 },
+			{ name: "circular object code", code: circularCode },
+		] as const;
+
+		for (const testCase of cases) {
+			const events: ProviderServerLogEvent[] = [];
+			const innerOptions: ProviderErrorOptions = {};
+			Object.defineProperty(innerOptions, "code", {
+				value: testCase.code,
+				enumerable: true,
+			});
+			const inner = new ProviderError("Private provider diagnostic", innerOptions);
+			const response = await requestCauseError(
+				createCauseErrorApp(
+					() =>
+						new TransportError("Upstream request failed", {
+							code: "UPSTREAM_ERROR",
+							cause: inner,
+						}),
+					events,
+				),
+			);
+
+			expect(response.status, testCase.name).toBe(502);
+			expect(loggedCauseChain(events[0])?.[0], testCase.name).not.toHaveProperty("code");
+			expect(() => JSON.stringify(events[0]), testCase.name).not.toThrow();
+		}
+	});
+
 	it("redacts adversarial cause messages without dropping useful context", async () => {
 		const opaqueToken = "tok_fake_Qj8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS";
 		const traceId = "0123456789abcdef0123456789abcdef";
@@ -2512,6 +2613,429 @@ describe("provider HTTP server", () => {
 		expect(frame?.message).toEndWith("… [truncated]");
 	});
 
+	it("emits validated outer provider observability in the log and header", async () => {
+		const diagnostic =
+			"NOL login completion errorType=LOGIN_COMPLETE_FAILED messageLength=73 messageFingerprint=038ed7ef11d8";
+		const providerObservability = {
+			reason: "LOGIN_COMPLETE_FAILED",
+			fingerprint: "038ed7ef11d8",
+			messageLength: 73,
+		} satisfies ProviderErrorObservability;
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(
+			createCauseErrorApp(
+				() =>
+					new TransportError("NOL login completion failed upstream.", {
+						code: "UPSTREAM_ERROR",
+						category: "upstream_auth",
+						retryable: true,
+						cause: new Error(diagnostic),
+						observability: providerObservability,
+					}),
+				events,
+			),
+		);
+
+		expect(response.status).toBe(502);
+		expect(events).toHaveLength(1);
+		expect(events[0]).toMatchObject({
+			event: "provider_request_failed",
+			providerObservability,
+		});
+		const headerObservability = errorObservability(response).providerObservability;
+		expect(headerObservability).toEqual(providerObservability);
+		expect(Object.getOwnPropertyDescriptor(events[0], "providerObservability")?.value).toEqual(
+			headerObservability,
+		);
+		expect(Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value).toEqual([
+			expect.objectContaining({
+				errorClass: "Error",
+				messageLength: diagnostic.length,
+				messageFingerprint: causeFingerprint(diagnostic),
+			}),
+		]);
+		expect(JSON.stringify(events[0])).toContain("LOGIN_COMPLETE_FAILED");
+		expect(JSON.stringify(events[0])).toContain("038ed7ef11d8");
+		expect(await response.json()).toEqual({
+			error: {
+				code: "UPSTREAM_ERROR",
+				message: "Upstream request failed",
+				requestId: "req_cause",
+				retryable: true,
+				source: "upstream_failure",
+			},
+		});
+	});
+
+	it("isolates the observability header from logger mutations", async () => {
+		const providerObservability = {
+			reason: "LOGGER_SNAPSHOT",
+			fingerprint: "038ed7ef11d8",
+			messageLength: 73,
+		} satisfies ProviderErrorObservability;
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(
+			createCauseErrorApp(
+				() =>
+					new TransportError("NOL login completion failed upstream.", {
+						code: "UPSTREAM_ERROR",
+						observability: providerObservability,
+					}),
+				events,
+				(event) => {
+					if (event.event !== "provider_request_failed" || !event.providerObservability) return;
+					event.providerObservability.reason = "LOGGER_MUTATED";
+					event.providerObservability.fingerprint = "000000000000";
+					Object.defineProperty(event.providerObservability, "circular", {
+						value: event.providerObservability,
+					});
+				},
+			),
+		);
+
+		expect(response.status).toBe(502);
+		expect(events[0]).toMatchObject({
+			providerObservability: {
+				reason: "LOGGER_MUTATED",
+				fingerprint: "000000000000",
+			},
+		});
+		expect(errorObservability(response).providerObservability).toEqual(providerObservability);
+	});
+
+	it("rejects inherited observability from the log, header, cause frame, and body", async () => {
+		const inheritedObservability = {
+			reason: "INHERITED_LEAK",
+			fingerprint: "038ed7ef11d8",
+		};
+		const innerOptions = Object.assign(Object.create({ observability: inheritedObservability }), {
+			code: "INNER_INHERITED_OBSERVABILITY",
+		}) as ProviderErrorOptions;
+		const inner = new ProviderError("Private diagnostic placeholder", innerOptions);
+		const outerOptions = Object.assign(Object.create({ observability: inheritedObservability }), {
+			code: "UPSTREAM_ERROR",
+			cause: inner,
+		}) as ProviderErrorOptions;
+		const outer = new TransportError("NOL login completion failed upstream.", outerOptions);
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(createCauseErrorApp(() => outer, events));
+
+		const header = errorObservability(response);
+		const body = await response.json();
+		const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
+		expect(Object.getOwnPropertyDescriptor(outerOptions, "observability")).toBeUndefined();
+		expect(events[0]).not.toHaveProperty("providerObservability");
+		expect(header).not.toHaveProperty("providerObservability");
+		expect(frame).not.toHaveProperty("providerObservability");
+		for (const channel of [
+			JSON.stringify(events[0]),
+			JSON.stringify(header),
+			JSON.stringify(frame),
+			JSON.stringify(body),
+		]) {
+			expect(channel).not.toContain(inheritedObservability.reason);
+			expect(channel).not.toContain(inheritedObservability.fingerprint);
+		}
+	});
+
+	it("rejects observability accessors without invoking their getters", async () => {
+		const accessorObservability = {
+			reason: "ACCESSOR_LEAK",
+			fingerprint: "038ed7ef11d8",
+		};
+		let getterCalls = 0;
+		const innerOptions: ProviderErrorOptions = { code: "INNER_ACCESSOR_OBSERVABILITY" };
+		Object.defineProperty(innerOptions, "observability", {
+			get() {
+				getterCalls += 1;
+				return accessorObservability;
+			},
+		});
+		const inner = new ProviderError("Private diagnostic placeholder", innerOptions);
+		const outerOptions: ProviderErrorOptions = { code: "UPSTREAM_ERROR", cause: inner };
+		Object.defineProperty(outerOptions, "observability", {
+			get() {
+				getterCalls += 1;
+				return accessorObservability;
+			},
+		});
+		const outer = new TransportError("NOL login completion failed upstream.", outerOptions);
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(createCauseErrorApp(() => outer, events));
+
+		const header = errorObservability(response);
+		const body = await response.json();
+		const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
+		expect(getterCalls).toBe(0);
+		expect(events[0]).not.toHaveProperty("providerObservability");
+		expect(header).not.toHaveProperty("providerObservability");
+		expect(frame).not.toHaveProperty("providerObservability");
+		for (const channel of [
+			JSON.stringify(events[0]),
+			JSON.stringify(header),
+			JSON.stringify(frame),
+			JSON.stringify(body),
+		]) {
+			expect(channel).not.toContain(accessorObservability.reason);
+			expect(channel).not.toContain(accessorObservability.fingerprint);
+		}
+	});
+
+	it("keeps observability from options accessors out of every HTTP channel", async () => {
+		// Safe extraction trusts own data properties only. Classification's
+		// `options` access remains existing SDK behavior and is tested separately.
+		const accessorObservability = {
+			reason: "OPTIONS_ACCESSOR_LEAK",
+			fingerprint: "038ed7ef11d8",
+		};
+		const inner = new ProviderError("Private diagnostic placeholder", {
+			code: "INNER_OPTIONS_ACCESSOR",
+		});
+		Object.defineProperty(inner, "options", {
+			get() {
+				return {
+					code: "INNER_OPTIONS_ACCESSOR",
+					observability: accessorObservability,
+				};
+			},
+		});
+		const outer = new TransportError("NOL login completion failed upstream.", {
+			code: "UPSTREAM_ERROR",
+			cause: inner,
+		});
+		Object.defineProperty(outer, "options", {
+			get() {
+				return { code: "UPSTREAM_ERROR", cause: inner, observability: accessorObservability };
+			},
+		});
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(createCauseErrorApp(() => outer, events));
+
+		const header = errorObservability(response);
+		const body = await response.json();
+		const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
+		expect(frame).not.toHaveProperty("providerObservability");
+		for (const channel of [
+			JSON.stringify(events[0]),
+			JSON.stringify(header),
+			JSON.stringify(frame),
+			JSON.stringify(body),
+		]) {
+			expect(channel).not.toContain(accessorObservability.reason);
+			expect(channel).not.toContain(accessorObservability.fingerprint);
+		}
+	});
+
+	it("survives a throwing options getter with a structured 5xx response", async () => {
+		const error = new ProviderError("Provider operation failed", {
+			code: "THROWING_OPTIONS",
+		});
+		Object.defineProperty(error, "options", {
+			configurable: true,
+			get() {
+				throw new Error("options accessor exploded");
+			},
+		});
+		const events: ProviderServerLogEvent[] = [];
+
+		const response = await requestCauseError(createCauseErrorApp(() => error, events));
+
+		expect(response.status).toBe(500);
+		expect(errorObservability(response)).toMatchObject({
+			category: "provider_error",
+			retryable: false,
+		});
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_failed",
+				status: 500,
+				code: "provider_error",
+			}),
+		);
+	});
+
+	it("rejects an options accessor without invoking it in safe observability extraction", () => {
+		const accessorObservability = {
+			reason: "OPTIONS_ACCESSOR_LEAK",
+			fingerprint: "038ed7ef11d8",
+		};
+		const error = new ProviderError("Private diagnostic placeholder", {
+			code: "OPTIONS_ACCESSOR",
+		});
+		let getterCalls = 0;
+		Object.defineProperty(error, "options", {
+			get() {
+				getterCalls += 1;
+				return { code: "OPTIONS_ACCESSOR", observability: accessorObservability };
+			},
+		});
+
+		expect(safeProviderErrorObservability(error)).toBeUndefined();
+		expect(getterCalls).toBe(0);
+	});
+
+	it("adds validated observability from a branded inner cause to its frame", async () => {
+		const providerObservability = {
+			reason: "LOGIN_COMPLETE_FAILED",
+			fingerprint: "038ed7ef11d8",
+			messageLength: 73,
+		} satisfies ProviderErrorObservability;
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(
+			createCauseErrorApp(
+				() =>
+					new TransportError("NOL login completion failed upstream.", {
+						code: "UPSTREAM_ERROR",
+						cause: new ProviderError("Private provider diagnostic", {
+							code: "INNER_DIAGNOSTIC",
+							observability: providerObservability,
+						}),
+					}),
+				events,
+			),
+		);
+
+		expect(response.status).toBe(502);
+		expect(events[0]).not.toHaveProperty("providerObservability");
+		expect(errorObservability(response)).not.toHaveProperty("providerObservability");
+		expect(Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value).toEqual([
+			{
+				errorClass: "ProviderError",
+				code: "INNER_DIAGNOSTIC",
+				message: "Private provider diagnostic",
+				messageLength: "Private provider diagnostic".length,
+				messageFingerprint: causeFingerprint("Private provider diagnostic"),
+				providerObservability,
+			},
+		]);
+	});
+
+	it("emits only allowlisted observability fields from mixed metadata", async () => {
+		const providerObservability = {
+			reason: "LOGIN_COMPLETE_FAILED",
+			fingerprint: "038ed7ef11d8",
+			email: "mixed-operator@example.com",
+			password: "mixed-password-secret",
+			cookie: "mixed_session=cookie-secret; Path=/",
+			token: "mixed.jwt.token-secret",
+		};
+		const unsafeObservability: ProviderErrorObservability = providerObservability;
+		const allowlistedObservability = {
+			reason: providerObservability.reason,
+			fingerprint: providerObservability.fingerprint,
+		};
+		const inner = new ProviderError("Private diagnostic placeholder", {
+			code: "INNER_MIXED_METADATA",
+			observability: unsafeObservability,
+		});
+		const events: ProviderServerLogEvent[] = [];
+		const response = await requestCauseError(
+			createCauseErrorApp(
+				() =>
+					new TransportError("NOL login completion failed upstream.", {
+						code: "UPSTREAM_ERROR",
+						cause: inner,
+						observability: unsafeObservability,
+					}),
+				events,
+			),
+		);
+
+		const body = await response.json();
+		const rawHeader = response.headers.get(ERROR_OBSERVABILITY_HEADER);
+		expect(rawHeader).toBeTruthy();
+		if (rawHeader === null) throw new Error("Expected error observability header");
+		const decodedHeader: unknown = JSON.parse(rawHeader);
+		const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
+		expect(events[0]).toHaveProperty("providerObservability", allowlistedObservability);
+		expect(decodedHeader).toHaveProperty("providerObservability", allowlistedObservability);
+		expect(frame).toHaveProperty("providerObservability", allowlistedObservability);
+
+		const channels = [
+			JSON.stringify(events[0]),
+			rawHeader,
+			JSON.stringify(frame),
+			JSON.stringify(body),
+		];
+		for (const forbidden of [
+			providerObservability.email,
+			providerObservability.password,
+			providerObservability.cookie,
+			providerObservability.token,
+		]) {
+			for (const channel of channels) {
+				expect(channel).not.toContain(forbidden);
+			}
+		}
+	});
+
+	it("drops invalid and non-allowlisted observability from every output channel", async () => {
+		const invalidReasons = [
+			"LOGIN COMPLETE FAILED",
+			"LOGIN/COMPLETE/FAILED",
+			"NOL login completion failed with an upstream body",
+			"R".repeat(65),
+		];
+		const sensitiveValues = [
+			"operator@example.com",
+			"p@ssword with spaces",
+			"session_id=cookie-secret; Path=/",
+			"eyJhbGciOiJIUzI1NiJ9.test-token.signature",
+		];
+		const oversizedKey = `private_${"k".repeat(80)}`;
+		const oversizedValue = `private_${"v".repeat(100)}`;
+
+		for (const reason of invalidReasons) {
+			const unsafeObservabilityInput = {
+				reason,
+				fingerprint: "not-a-12hex-fingerprint",
+				messageLength: 10_000_001,
+				email: sensitiveValues[0],
+				password: sensitiveValues[1],
+				cookie: sensitiveValues[2],
+				token: sensitiveValues[3],
+				[oversizedKey]: oversizedValue,
+			};
+			const unsafeObservability: ProviderErrorObservability = unsafeObservabilityInput;
+			const inner = new ProviderError("Private diagnostic placeholder", {
+				code: "INNER_INVALID_METADATA",
+				observability: unsafeObservability,
+			});
+			const events: ProviderServerLogEvent[] = [];
+			const response = await requestCauseError(
+				createCauseErrorApp(
+					() =>
+						new TransportError("NOL login completion failed upstream.", {
+							code: "UPSTREAM_ERROR",
+							cause: inner,
+							observability: unsafeObservability,
+						}),
+					events,
+				),
+			);
+
+			const body = await response.json();
+			const rawHeader = response.headers.get(ERROR_OBSERVABILITY_HEADER);
+			expect(rawHeader).toBeTruthy();
+			if (rawHeader === null) throw new Error("Expected error observability header");
+			const decodedHeader: unknown = JSON.parse(rawHeader);
+			const frame = Object.getOwnPropertyDescriptor(events[0], "causeChain")?.value?.[0];
+			expect(events[0]).not.toHaveProperty("providerObservability");
+			expect(decodedHeader).not.toHaveProperty("providerObservability");
+			expect(frame).not.toHaveProperty("providerObservability");
+			const serialized = JSON.stringify({ event: events[0], decodedHeader, frame, body });
+			for (const forbidden of [
+				reason,
+				"not-a-12hex-fingerprint",
+				oversizedKey,
+				oversizedValue,
+				...sensitiveValues,
+			]) {
+				expect(serialized).not.toContain(forbidden);
+			}
+		}
+	});
+
 	it("truncates cause chains deeper than five frames", async () => {
 		let cause: Error = new Error("666666");
 		for (let index = 5; index >= 1; index -= 1) {
@@ -2560,6 +3084,7 @@ describe("provider HTTP server", () => {
 
 		expect(events).toHaveLength(1);
 		expect(events[0]).not.toHaveProperty("causeChain");
+		expect(events[0]).not.toHaveProperty("providerObservability");
 	});
 
 	it("emits a greppable signal for an unregistered code and preserves ValidationError as 400", async () => {

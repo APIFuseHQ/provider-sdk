@@ -3604,6 +3604,13 @@ export class ProviderError extends Error {
 // @public (undocumented)
 type ProviderErrorCategory = (typeof PROVIDER_ERROR_CATEGORIES)[number];
 
+// @public
+export type ProviderErrorObservability = {
+    reason?: string;
+    fingerprint?: string;
+    messageLength?: number;
+};
+
 // @public (undocumented)
 type ProviderErrorOptions = {
     fix?: string;
@@ -3612,6 +3619,7 @@ type ProviderErrorOptions = {
     cause?: Error;
     category?: ProviderErrorCategory;
     retryable?: boolean;
+    observability?: ProviderErrorObservability;
 };
 
 // Warning: (ae-forgotten-export) The symbol "VALID_OPERATION_ERROR_STATUSES" needs to be exported by the entry point provider.d.ts
