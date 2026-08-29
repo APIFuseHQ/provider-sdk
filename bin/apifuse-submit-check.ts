@@ -4,7 +4,7 @@ import { type ChildProcess, spawn } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { createServer } from "node:net";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import * as acorn from "acorn";
@@ -118,6 +118,8 @@ type SourceFinding = {
 const SDK_NATIVE_CATEGORY = "sdk-native";
 const VENDOR_SHIM_PROVIDER_ID_PREFIX = "apifuse-provider-";
 const MAX_SOURCE_FINDING_EVIDENCE = 5;
+const MAX_LOAD_ERROR_EVIDENCE = 5;
+const MAX_LOAD_ERROR_MESSAGE_LENGTH = 500;
 
 const CATEGORY_MAX_POINTS = {
 	definition: 15,
@@ -272,7 +274,8 @@ export async function buildSubmitCheckReport(
 ): Promise<SubmitCheckReport> {
 	const checks: SubmitCheck[] = [];
 	const baseChecks = await safeRunChecks(providerRoot);
-	const provider = await safeLoadProvider(providerRoot);
+	const loadResult = await safeLoadProvider(providerRoot);
+	const provider = loadResult.ok ? loadResult.provider : undefined;
 	let indexParseError: string | undefined;
 	if (!provider) {
 		const indexPath = resolve(providerRoot, "index.ts");
@@ -327,13 +330,24 @@ export async function buildSubmitCheckReport(
 		checks.push(scoreRepositoryDx(providerRoot));
 		checks.push(scoreSecrets(providerRoot, provider));
 	} else {
+		const loadEvidence = indexParseError
+			? undefined
+			: loadResult.ok
+				? undefined
+				: formatLoadErrorEvidence(loadResult.error, providerRoot);
+		const loadRemediation = indexParseError
+			? "Fix the syntax error reported by the provider-load-parse blocker before apifuse check can load the provider."
+			: !loadResult.ok
+				? "Fix the import/initialization failure shown in evidence so apifuse check can load the provider."
+				: "Fix index.ts so it default-exports defineProvider(...).";
 		checks.push(
 			blocker(
 				"provider-load",
 				"definition",
 				"Provider could not be loaded.",
-				"Fix index.ts so it default-exports defineProvider(...).",
+				loadRemediation,
 				CATEGORY_MAX_POINTS.definition,
+				loadEvidence,
 			),
 		);
 		if (indexParseError) {
@@ -2388,7 +2402,7 @@ async function safeRunChecks(providerRoot: string): Promise<CheckResult[]> {
 			{
 				message: "Base provider checks can run",
 				passed: false,
-				details: [error instanceof Error ? error.message : String(error)],
+				details: [formatThrownValue(error)],
 			},
 		];
 	}
@@ -4943,6 +4957,35 @@ const SECRETISH_IDENTIFIER_PATTERN = /key|token|secret|password|credential|auth/
 // the three stay coherent.
 const ENTROPY_CANDIDATE_MIN_LENGTH = 20;
 
+// A secret-ish name is only supporting evidence. Shorter values must also look
+// credential-like, and known config tokens/numeric values are never candidates.
+const SECRET_NAMED_ENV_VALUE_MIN_LENGTH = 4;
+const SECRET_NAMED_ENV_UNSTRUCTURED_MIN_LENGTH = 8;
+const NON_SECRET_ENV_VALUE_TOKENS = new Set([
+	"true",
+	"false",
+	"yes",
+	"no",
+	"on",
+	"off",
+	"none",
+	"null",
+	"nil",
+	"auto",
+	"default",
+	"local",
+	"debug",
+	"info",
+	"warn",
+	"error",
+	"always",
+	"never",
+	"enabled",
+	"disabled",
+	"0",
+	"1",
+]);
+
 const SECRET_PATTERNS: Array<[string, RegExp]> = [
 	["JWT-like token", /eyJ[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{10,}/],
 	["GitHub token", /gh[pousr]_[A-Za-z0-9_]{30,}/],
@@ -4954,12 +4997,151 @@ const SECRET_PATTERNS: Array<[string, RegExp]> = [
 	],
 ];
 
-async function safeLoadProvider(providerRoot: string): Promise<ProviderDefinition | undefined> {
+type SafeLoadProviderResult =
+	| { ok: true; provider: ProviderDefinition | undefined }
+	| { ok: false; error: unknown };
+
+async function safeLoadProvider(providerRoot: string): Promise<SafeLoadProviderResult> {
 	try {
-		return await loadProvider(providerRoot);
-	} catch {
-		return undefined;
+		return { ok: true, provider: await loadProvider(providerRoot) };
+	} catch (error) {
+		return { ok: false, error };
 	}
+}
+
+const UNRENDERABLE_LOAD_ERROR = "<thrown value could not be rendered>";
+
+function formatLoadErrorEvidence(error: unknown, providerRoot: string): string[] {
+	const evidence: string[] = [];
+	const seen = new Set<object>();
+	let current: unknown = error;
+	let frame = 0;
+	while (frame < MAX_LOAD_ERROR_EVIDENCE) {
+		if (typeof current === "object" || typeof current === "function") {
+			if (current !== null && seen.has(current)) {
+				break;
+			}
+			if (current !== null) seen.add(current);
+		}
+		evidence.push(
+			`${frame === 0 ? "Load error" : "Cause"}: ${sanitizeLoadErrorText(
+				formatThrownValue(current),
+				providerRoot,
+			)}`,
+		);
+		frame += 1;
+		const cause = readThrownValueCause(current);
+		if (!cause.found || cause.value === undefined || cause.value === null) {
+			break;
+		}
+		current = cause.value;
+	}
+	return evidence;
+}
+
+function formatThrownValue(value: unknown): string {
+	try {
+		if (value instanceof Error) {
+			return String(value.message);
+		}
+		if (
+			value !== null &&
+			(typeof value === "object" || typeof value === "function") &&
+			"message" in value
+		) {
+			return String((value as { message?: unknown }).message);
+		}
+		return `<non-Error value thrown: ${String(value)}>`;
+	} catch {
+		return UNRENDERABLE_LOAD_ERROR;
+	}
+}
+
+function readThrownValueCause(value: unknown): { found: boolean; value?: unknown } {
+	try {
+		if (
+			value === null ||
+			(typeof value !== "object" && typeof value !== "function") ||
+			!("cause" in value)
+		) {
+			return { found: false };
+		}
+		return { found: true, value: (value as { cause?: unknown }).cause };
+	} catch {
+		return { found: false };
+	}
+}
+
+function isPlausibleSecretNamedEnvValue(value: string): boolean {
+	const normalized = value.trim();
+	if (normalized.length < SECRET_NAMED_ENV_VALUE_MIN_LENGTH) return false;
+	if (NON_SECRET_ENV_VALUE_TOKENS.has(normalized.toLowerCase())) return false;
+	if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(normalized)) return false;
+	if (normalized.length >= SECRET_NAMED_ENV_UNSTRUCTURED_MIN_LENGTH) return true;
+
+	const hasLetter = /[A-Za-z]/.test(normalized);
+	const hasDigitOrSymbol = /[^A-Za-z\s]/.test(normalized);
+	return hasLetter && hasDigitOrSymbol;
+}
+
+function replaceEnvValue(
+	input: string,
+	value: string,
+	requireIdentifierBoundaries: boolean,
+): string {
+	if (!requireIdentifierBoundaries) return input.replaceAll(value, "[REDACTED]");
+	const escaped = value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return input.replace(
+		new RegExp(`(?<![A-Za-z0-9_])${escaped}(?![A-Za-z0-9_])`, "g"),
+		"[REDACTED]",
+	);
+}
+
+function sanitizeLoadErrorText(value: string, providerRoot: string): string {
+	let output = value.replace(
+		/(^|[^A-Za-z0-9_.])((?:\/[^\s"'`]+)+)/g,
+		(_match, prefix: string, rawPath: string) => {
+			const pathCandidate = rawPath.replace(/[),.;:!?]+$/u, "");
+			const relativePath = relative(providerRoot, resolve(pathCandidate));
+			const insideProvider =
+				relativePath === "" ||
+				(relativePath !== ".." && !relativePath.startsWith(`..${sep}`));
+			return `${prefix}${insideProvider ? relativePath || "." : "[REDACTED_PATH]"}`;
+		},
+	);
+	output = output.replace(/[A-Za-z]:[\\/][^\s"'`]+/g, "[REDACTED_PATH]");
+	output = output.replace(
+		/((?:password|token|secret|api[_-]?key|credential|authorization)\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|["'`]?[^\s,;"'`]+)/gi,
+		"$1[REDACTED]",
+	);
+	const envValues: Array<{ value: string; requireIdentifierBoundaries: boolean }> = [];
+	for (const [name, item] of Object.entries(process.env)) {
+		if (typeof item !== "string") continue;
+		const secretNamed = SECRETISH_IDENTIFIER_PATTERN.test(name);
+		let shouldRedact = secretNamed;
+		if (secretNamed) {
+			shouldRedact = isPlausibleSecretNamedEnvValue(item);
+		} else if (item.length >= ENTROPY_CANDIDATE_MIN_LENGTH && shouldConsiderEntropyValue(item)) {
+			const charset = classifyEntropyCharset(item);
+			const threshold = charset === "hex" ? 3.0 : 4.5;
+			shouldRedact = charset !== undefined && shannonEntropy(item) >= threshold;
+		}
+		if (shouldRedact) {
+			envValues.push({
+				value: item,
+				requireIdentifierBoundaries:
+					secretNamed && item.trim().length < ENTROPY_CANDIDATE_MIN_LENGTH,
+			});
+		}
+	}
+	envValues.sort((a, b) => b.value.length - a.value.length);
+	for (const envValue of envValues) {
+		output = replaceEnvValue(output, envValue.value, envValue.requireIdentifierBoundaries);
+	}
+	output = redact(output).replace(/\s+/g, " ");
+	return output.length > MAX_LOAD_ERROR_MESSAGE_LENGTH
+		? `${output.slice(0, MAX_LOAD_ERROR_MESSAGE_LENGTH - 1)}…`
+		: output;
 }
 
 async function loadProvider(providerRoot: string): Promise<ProviderDefinition | undefined> {
