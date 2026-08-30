@@ -1,4 +1,17 @@
-import ts from "typescript";
+import type TS from "typescript";
+
+const ts: typeof import("typescript") = await loadTypeScript();
+
+async function loadTypeScript(): Promise<typeof import("typescript")> {
+	try {
+		return await import("typescript");
+	} catch {
+		console.error(
+			"apifuse migrate-shape requires typescript; install it in the workspace running the CLI (bun add -d typescript)",
+		);
+		process.exit(1);
+	}
+}
 
 /**
  * Provider authoring shape migration.
@@ -207,16 +220,16 @@ type ShapeClassification =
 			readonly kind: Exclude<ProviderShapeKind, "two-phase">;
 			/** Variable the declaration is currently bound to, when it is bound. */
 			readonly variableName?: string;
-			readonly variableStatement?: ts.VariableStatement;
+			readonly variableStatement?: TS.VariableStatement;
 			/** Extra properties on a `{ ...provider, deployment }` default export. */
 			readonly spreadExportExtras?: string;
 	  }
 	| { readonly status: "skipped"; readonly reason: string };
 
 function classifyShape(
-	source: ts.SourceFile,
-	call: ts.CallExpression,
-	exportAssignment: ts.ExportAssignment,
+	source: TS.SourceFile,
+	call: TS.CallExpression,
+	exportAssignment: TS.ExportAssignment,
 ): ShapeClassification {
 	const variableStatement = enclosingVariableStatement(call);
 
@@ -307,9 +320,9 @@ function classifyShape(
 	};
 }
 
-function collectDefineProviderCalls(source: ts.SourceFile): ts.CallExpression[] {
-	const calls: ts.CallExpression[] = [];
-	const visit = (node: ts.Node): void => {
+function collectDefineProviderCalls(source: TS.SourceFile): TS.CallExpression[] {
+	const calls: TS.CallExpression[] = [];
+	const visit = (node: TS.Node): void => {
 		if (
 			ts.isCallExpression(node) &&
 			ts.isIdentifier(node.expression) &&
@@ -323,7 +336,7 @@ function collectDefineProviderCalls(source: ts.SourceFile): ts.CallExpression[] 
 	return calls;
 }
 
-function findDefaultExport(source: ts.SourceFile): ts.ExportAssignment | undefined {
+function findDefaultExport(source: TS.SourceFile): TS.ExportAssignment | undefined {
 	for (const statement of source.statements) {
 		if (ts.isExportAssignment(statement) && statement.isExportEquals !== true) {
 			return statement;
@@ -333,8 +346,8 @@ function findDefaultExport(source: ts.SourceFile): ts.ExportAssignment | undefin
 }
 
 function defaultExportCallsBuilder(
-	exportAssignment: ts.ExportAssignment,
-	declarationCall: ts.CallExpression,
+	exportAssignment: TS.ExportAssignment,
+	declarationCall: TS.CallExpression,
 ): boolean {
 	const expression = exportAssignment.expression;
 	if (!ts.isCallExpression(expression)) return false;
@@ -353,9 +366,9 @@ function defaultExportCallsBuilder(
  * breaks idempotency for repeated fan-out runs.
  */
 function isAlreadyTwoPhase(
-	source: ts.SourceFile,
-	exportAssignment: ts.ExportAssignment,
-	declarationCall: ts.CallExpression,
+	source: TS.SourceFile,
+	exportAssignment: TS.ExportAssignment,
+	declarationCall: TS.CallExpression,
 ): boolean {
 	if (defaultExportCallsBuilder(exportAssignment, declarationCall)) return true;
 
@@ -375,7 +388,7 @@ function isAlreadyTwoPhase(
 	// Does any spread/exported identifier bind a call to an identifier other
 	// than defineProvider — i.e. a builder call?
 	let found = false;
-	const visit = (node: ts.Node): void => {
+	const visit = (node: TS.Node): void => {
 		if (found) return;
 		if (
 			ts.isVariableDeclaration(node) &&
@@ -397,8 +410,8 @@ function isAlreadyTwoPhase(
 }
 
 function findOperationsProperty(
-	declaration: ts.ObjectLiteralExpression,
-): ts.ObjectLiteralElementLike | undefined {
+	declaration: TS.ObjectLiteralExpression,
+): TS.ObjectLiteralElementLike | undefined {
 	for (const property of declaration.properties) {
 		if (ts.isSpreadAssignment(property)) continue;
 		const name = property.name;
@@ -419,8 +432,8 @@ function findOperationsProperty(
  * its initializer verbatim, including a multi-line inline map.
  */
 function operationsPropertyValueText(
-	property: ts.ObjectLiteralElementLike,
-	source: ts.SourceFile,
+	property: TS.ObjectLiteralElementLike,
+	source: TS.SourceFile,
 ): string | undefined {
 	if (ts.isShorthandPropertyAssignment(property)) {
 		return property.name.text;
@@ -432,9 +445,9 @@ function operationsPropertyValueText(
 }
 
 function removeOperationsProperty(
-	property: ts.ObjectLiteralElementLike,
-	declaration: ts.ObjectLiteralExpression,
-	source: ts.SourceFile,
+	property: TS.ObjectLiteralElementLike,
+	declaration: TS.ObjectLiteralExpression,
+	source: TS.SourceFile,
 ): TextEdit[] {
 	const properties = declaration.properties;
 	const index = properties.indexOf(property);
@@ -464,8 +477,8 @@ function removeOperationsProperty(
 }
 
 function introduceBuilder(
-	source: ts.SourceFile,
-	call: ts.CallExpression,
+	source: TS.SourceFile,
+	call: TS.CallExpression,
 	shape: Extract<ShapeClassification, { status: "ok" }>,
 	builderName: string,
 ): TextEdit[] {
@@ -501,8 +514,8 @@ function introduceBuilder(
 }
 
 function rewriteDefaultExport(
-	source: ts.SourceFile,
-	exportAssignment: ts.ExportAssignment,
+	source: TS.SourceFile,
+	exportAssignment: TS.ExportAssignment,
 	shape: Extract<ShapeClassification, { status: "ok" }>,
 	builderName: string,
 	operationsText: string,
@@ -564,8 +577,8 @@ function rewriteDefaultExport(
  * type the two-phase shape exists to provide.
  */
 function ensureProviderContextType(
-	source: ts.SourceFile,
-	call: ts.CallExpression,
+	source: TS.SourceFile,
+	call: TS.CallExpression,
 	shape: Extract<ShapeClassification, { status: "ok" }>,
 	builderName: string,
 ): TextEdit[] {
@@ -634,8 +647,8 @@ function ensureProviderContextType(
 }
 
 function findProviderSdkImport(
-	source: ts.SourceFile,
-): ts.ImportDeclaration | undefined {
+	source: TS.SourceFile,
+): TS.ImportDeclaration | undefined {
 	for (const statement of source.statements) {
 		if (!ts.isImportDeclaration(statement)) continue;
 		const moduleSpecifier = statement.moduleSpecifier;
@@ -702,9 +715,9 @@ function removeImportSpecifier(
  * `buildProvider` unless the module already binds that name, in which case a
  * numbered suffix keeps the transform from shadowing an existing binding.
  */
-function pickBuilderName(source: ts.SourceFile): string {
+function pickBuilderName(source: TS.SourceFile): string {
 	const taken = new Set<string>();
-	const visit = (node: ts.Node): void => {
+	const visit = (node: TS.Node): void => {
 		if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
 			taken.add(node.name.text);
 		}
@@ -726,8 +739,8 @@ function pickBuilderName(source: ts.SourceFile): string {
 	return `${DECLARATION_BUILDER_NAME}Migrated`;
 }
 
-function enclosingVariableStatement(node: ts.Node): ts.VariableStatement | undefined {
-	let current: ts.Node | undefined = node.parent;
+function enclosingVariableStatement(node: TS.Node): TS.VariableStatement | undefined {
+	let current: TS.Node | undefined = node.parent;
 	while (current !== undefined) {
 		if (ts.isVariableStatement(current)) return current;
 		if (ts.isSourceFile(current)) return undefined;
@@ -736,9 +749,9 @@ function enclosingVariableStatement(node: ts.Node): ts.VariableStatement | undef
 	return undefined;
 }
 
-function firstSyntaxError(source: ts.SourceFile): string | undefined {
+function firstSyntaxError(source: TS.SourceFile): string | undefined {
 	const diagnostics = (
-		source as ts.SourceFile & { parseDiagnostics?: ts.DiagnosticWithLocation[] }
+		source as TS.SourceFile & { parseDiagnostics?: TS.DiagnosticWithLocation[] }
 	).parseDiagnostics;
 	if (diagnostics === undefined || diagnostics.length === 0) return undefined;
 	const first = diagnostics[0];

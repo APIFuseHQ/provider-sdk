@@ -8,7 +8,7 @@ import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import * as acorn from "acorn";
-import ts from "typescript";
+import type TS from "typescript";
 import { z } from "zod";
 
 import packageJson from "../package.json";
@@ -28,6 +28,19 @@ import {
 import { type CheckResult, PROMPT_ASSETS_CHECK_MESSAGE, runChecks } from "./apifuse-check.js";
 import { hasSubstantiveDelimitedTextStructure } from "./submit-check-delimited-text.js";
 import { hasSubstantiveXmlStructure } from "./submit-check-xml.js";
+
+const ts: typeof import("typescript") = await loadTypeScript();
+
+async function loadTypeScript(): Promise<typeof import("typescript")> {
+	try {
+		return await import("typescript");
+	} catch {
+		console.error(
+			"apifuse submit-check requires typescript; install it in the workspace running the CLI (bun add -d typescript)",
+		);
+		process.exit(1);
+	}
+}
 
 const TIERS = ["bronze", "silver", "gold", "diamond"] as const;
 const TIER_VALUES: ReadonlySet<string> = new Set(TIERS);
@@ -515,7 +528,7 @@ const DYNAMIC_CODE_GLOBAL_OBJECTS: ReadonlySet<string> = new Set([
 	"global",
 ]);
 
-function unwrapLocalExpression(expression: ts.Expression): ts.Expression {
+function unwrapLocalExpression(expression: TS.Expression): TS.Expression {
 	let current = expression;
 	while (
 		ts.isParenthesizedExpression(current) ||
@@ -532,18 +545,18 @@ function unwrapLocalExpression(expression: ts.Expression): ts.Expression {
 }
 
 type LocalBinding = {
-	declaration: ts.Identifier;
-	initializer?: ts.Expression;
+	declaration: TS.Identifier;
+	initializer?: TS.Expression;
 	destructuredProperty?: string;
 	mutable: boolean;
 	reassigned: boolean;
 };
 
 type LocalBindings = {
-	scopes: Map<ts.Node, Map<string, LocalBinding[]>>;
+	scopes: Map<TS.Node, Map<string, LocalBinding[]>>;
 };
 
-function isLexicalScope(node: ts.Node): boolean {
+function isLexicalScope(node: TS.Node): boolean {
 	return (
 		ts.isSourceFile(node) ||
 		ts.isFunctionLike(node) ||
@@ -557,8 +570,8 @@ function isLexicalScope(node: ts.Node): boolean {
 	);
 }
 
-function enclosingScope(node: ts.Node, functionScoped: boolean): ts.Node {
-	let current: ts.Node | undefined = node.parent;
+function enclosingScope(node: TS.Node, functionScoped: boolean): TS.Node {
+	let current: TS.Node | undefined = node.parent;
 	while (current !== undefined) {
 		if (
 			ts.isSourceFile(current) ||
@@ -571,11 +584,11 @@ function enclosingScope(node: ts.Node, functionScoped: boolean): ts.Node {
 	return node.getSourceFile();
 }
 
-function collectLocalBindings(sourceFile: ts.SourceFile): LocalBindings {
+function collectLocalBindings(sourceFile: TS.SourceFile): LocalBindings {
 	const bindings: LocalBindings = { scopes: new Map() };
 	const addBinding = (
-		scope: ts.Node,
-		name: ts.Identifier,
+		scope: TS.Node,
+		name: TS.Identifier,
 		binding: Omit<LocalBinding, "declaration" | "reassigned">,
 	): void => {
 		let scopeBindings = bindings.scopes.get(scope);
@@ -592,8 +605,8 @@ function collectLocalBindings(sourceFile: ts.SourceFile): LocalBindings {
 		}
 	};
 	const addBindingName = (
-		bindingName: ts.BindingName,
-		scope: ts.Node,
+		bindingName: TS.BindingName,
+		scope: TS.Node,
 		binding: Omit<LocalBinding, "declaration" | "reassigned">,
 	): void => {
 		if (ts.isIdentifier(bindingName)) {
@@ -619,7 +632,7 @@ function collectLocalBindings(sourceFile: ts.SourceFile): LocalBindings {
 			addBindingName(element.name, scope, { mutable: binding.mutable });
 		}
 	};
-	const visit = (node: ts.Node): void => {
+	const visit = (node: TS.Node): void => {
 		if (ts.isVariableDeclaration(node)) {
 			const declarationList = ts.isVariableDeclarationList(node.parent) ? node.parent : undefined;
 			const isConstBinding =
@@ -649,12 +662,12 @@ function collectLocalBindings(sourceFile: ts.SourceFile): LocalBindings {
 	};
 	visit(sourceFile);
 
-	const markReassigned = (identifier: ts.Identifier): void => {
+	const markReassigned = (identifier: TS.Identifier): void => {
 		for (const binding of lookupLocalBindings(identifier, bindings) ?? []) {
 			binding.reassigned = true;
 		}
 	};
-	const markAssignmentTarget = (node: ts.Node): void => {
+	const markAssignmentTarget = (node: TS.Node): void => {
 		const target = ts.isExpression(node) ? unwrapLocalExpression(node) : node;
 		if (ts.isIdentifier(target)) {
 			markReassigned(target);
@@ -678,7 +691,7 @@ function collectLocalBindings(sourceFile: ts.SourceFile): LocalBindings {
 			}
 		}
 	};
-	const visitAssignments = (node: ts.Node): void => {
+	const visitAssignments = (node: TS.Node): void => {
 		if (
 			ts.isBinaryExpression(node) &&
 			node.operatorToken.kind >= ts.SyntaxKind.FirstAssignment &&
@@ -704,10 +717,10 @@ function collectLocalBindings(sourceFile: ts.SourceFile): LocalBindings {
 }
 
 function lookupLocalBindings(
-	reference: ts.Identifier,
+	reference: TS.Identifier,
 	bindings: LocalBindings,
 ): readonly LocalBinding[] | undefined {
-	let current: ts.Node | undefined = reference;
+	let current: TS.Node | undefined = reference;
 	while (current !== undefined) {
 		const localBindings = bindings.scopes.get(current)?.get(reference.text);
 		if (localBindings !== undefined && localBindings.length > 0) {
@@ -718,7 +731,7 @@ function lookupLocalBindings(
 	return undefined;
 }
 
-function propertyNameText(name: ts.PropertyName | ts.BindingName): string | undefined {
+function propertyNameText(name: TS.PropertyName | TS.BindingName): string | undefined {
 	if (
 		ts.isIdentifier(name) ||
 		ts.isStringLiteral(name) ||
@@ -736,7 +749,7 @@ function propertyNameText(name: ts.PropertyName | ts.BindingName): string | unde
 	return undefined;
 }
 
-function isUnshadowedGlobalObject(reference: ts.Expression, bindings: LocalBindings): boolean {
+function isUnshadowedGlobalObject(reference: TS.Expression, bindings: LocalBindings): boolean {
 	const receiver = unwrapLocalExpression(reference);
 	return (
 		ts.isIdentifier(receiver) &&
@@ -746,13 +759,13 @@ function isUnshadowedGlobalObject(reference: ts.Expression, bindings: LocalBindi
 }
 
 function isGlobalMemberSink(
-	expression: ts.Expression,
+	expression: TS.Expression,
 	sinkNames: ReadonlySet<string>,
 	bindings: LocalBindings,
 ): boolean {
 	const callee = unwrapLocalExpression(expression);
 	let sinkName: string | undefined;
-	let receiver: ts.Expression | undefined;
+	let receiver: TS.Expression | undefined;
 	if (ts.isPropertyAccessExpression(callee)) {
 		sinkName = callee.name.text;
 		receiver = callee.expression;
@@ -773,7 +786,7 @@ function isGlobalMemberSink(
 }
 
 function isGlobalSinkReference(
-	expression: ts.Expression,
+	expression: TS.Expression,
 	sinkNames: ReadonlySet<string>,
 	bindings: LocalBindings,
 	resolving: ReadonlySet<LocalBinding>,
@@ -789,7 +802,7 @@ function isGlobalSinkReference(
 }
 
 function isGlobalSinkIdentifier(
-	reference: ts.Identifier,
+	reference: TS.Identifier,
 	sinkNames: ReadonlySet<string>,
 	bindings: LocalBindings,
 	resolving: ReadonlySet<LocalBinding>,
@@ -821,7 +834,7 @@ function isGlobalSinkIdentifier(
 }
 
 function isGlobalSinkCallee(
-	expression: ts.Expression,
+	expression: TS.Expression,
 	sinkNames: ReadonlySet<string>,
 	bindings: LocalBindings,
 ): boolean {
@@ -836,7 +849,7 @@ function isGlobalSinkCallee(
 }
 
 function resolveConstStringIdentifier(
-	reference: ts.Identifier,
+	reference: TS.Identifier,
 	bindings: LocalBindings,
 	resolving: ReadonlySet<LocalBinding> = new Set(),
 ): string | undefined {
@@ -889,7 +902,7 @@ function findGlobalSinkCalls(
 			ts.ScriptKind.TS,
 		);
 		const bindings = collectLocalBindings(sourceFile);
-		const visit = (node: ts.Node): void => {
+		const visit = (node: TS.Node): void => {
 			if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
 				return;
 			}
@@ -1688,13 +1701,13 @@ function spreadIdentifierResolvesToFactory(
 	return false;
 }
 
-function isDefineProviderCall(node: ts.CallExpression): boolean {
+function isDefineProviderCall(node: TS.CallExpression): boolean {
 	return ts.isIdentifier(node.expression) && node.expression.text === "defineProvider";
 }
 
 function resolveDefineProviderImplementationCall(
-	candidate: ts.CallExpression,
-): ts.CallExpression | undefined {
+	candidate: TS.CallExpression,
+): TS.CallExpression | undefined {
 	let root = candidate;
 	while (ts.isCallExpression(root.expression)) {
 		root = root.expression;
@@ -1702,9 +1715,9 @@ function resolveDefineProviderImplementationCall(
 	return isDefineProviderCall(root) ? candidate : undefined;
 }
 
-function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpression | undefined {
+function findProviderImplementationCall(sourceFile: TS.SourceFile): TS.CallExpression | undefined {
 	const defaultExports = sourceFile.statements.filter(
-		(statement): statement is ts.ExportAssignment =>
+		(statement): statement is TS.ExportAssignment =>
 			ts.isExportAssignment(statement) && !statement.isExportEquals,
 	);
 
@@ -1770,8 +1783,8 @@ function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpre
 
 	// Structural fixtures without a recognizable default export retain the
 	// previous fallback to the first defineProvider call in source order.
-	let firstCall: ts.CallExpression | undefined;
-	const visit = (node: ts.Node): void => {
+	let firstCall: TS.CallExpression | undefined;
+	const visit = (node: TS.Node): void => {
 		if (firstCall !== undefined) {
 			return;
 		}
@@ -1788,7 +1801,7 @@ function findProviderImplementationCall(sourceFile: ts.SourceFile): ts.CallExpre
 	return firstCall;
 }
 
-function unwrapImplementationExpression(expression: ts.Expression): ts.Expression {
+function unwrapImplementationExpression(expression: TS.Expression): TS.Expression {
 	let current = expression;
 	while (
 		ts.isSatisfiesExpression(current) ||
@@ -1802,8 +1815,8 @@ function unwrapImplementationExpression(expression: ts.Expression): ts.Expressio
 }
 
 function isOperationsProperty(
-	property: ts.ObjectLiteralElementLike,
-): property is ts.PropertyAssignment | ts.ShorthandPropertyAssignment {
+	property: TS.ObjectLiteralElementLike,
+): property is TS.PropertyAssignment | TS.ShorthandPropertyAssignment {
 	if (ts.isShorthandPropertyAssignment(property)) {
 		return property.name.text === "operations";
 	}
@@ -1817,8 +1830,8 @@ function isOperationsProperty(
 }
 
 function isOperationsAccessorOrMethod(
-	property: ts.ObjectLiteralElementLike,
-): property is ts.GetAccessorDeclaration | ts.SetAccessorDeclaration | ts.MethodDeclaration {
+	property: TS.ObjectLiteralElementLike,
+): property is TS.GetAccessorDeclaration | TS.SetAccessorDeclaration | TS.MethodDeclaration {
 	if (
 		!ts.isGetAccessorDeclaration(property) &&
 		!ts.isSetAccessorDeclaration(property) &&
@@ -1832,7 +1845,7 @@ function isOperationsAccessorOrMethod(
 	);
 }
 
-function isSourceEnumerableStaticObjectLiteral(expression: ts.Expression): boolean {
+function isSourceEnumerableStaticObjectLiteral(expression: TS.Expression): boolean {
 	const unwrapped = unwrapImplementationExpression(expression);
 	if (!ts.isObjectLiteralExpression(unwrapped)) {
 		return false;
@@ -1849,8 +1862,8 @@ function isSourceEnumerableStaticObjectLiteral(expression: ts.Expression): boole
 }
 
 function findComputedImplementationProperty(
-	objectLiteral: ts.ObjectLiteralExpression,
-): ts.ObjectLiteralElementLike | undefined {
+	objectLiteral: TS.ObjectLiteralExpression,
+): TS.ObjectLiteralElementLike | undefined {
 	for (const property of objectLiteral.properties) {
 		if (property.name !== undefined && ts.isComputedPropertyName(property.name)) {
 			return property;
@@ -1869,20 +1882,20 @@ function findComputedImplementationProperty(
 }
 
 function findEffectiveOperationsProperty(
-	objectLiteral: ts.ObjectLiteralExpression,
+	objectLiteral: TS.ObjectLiteralExpression,
 ):
-	| ts.PropertyAssignment
-	| ts.ShorthandPropertyAssignment
-	| ts.GetAccessorDeclaration
-	| ts.SetAccessorDeclaration
-	| ts.MethodDeclaration
+	| TS.PropertyAssignment
+	| TS.ShorthandPropertyAssignment
+	| TS.GetAccessorDeclaration
+	| TS.SetAccessorDeclaration
+	| TS.MethodDeclaration
 	| undefined {
 	let effective:
-		| ts.PropertyAssignment
-		| ts.ShorthandPropertyAssignment
-		| ts.GetAccessorDeclaration
-		| ts.SetAccessorDeclaration
-		| ts.MethodDeclaration
+		| TS.PropertyAssignment
+		| TS.ShorthandPropertyAssignment
+		| TS.GetAccessorDeclaration
+		| TS.SetAccessorDeclaration
+		| TS.MethodDeclaration
 		| undefined;
 	for (const property of objectLiteral.properties) {
 		if (isOperationsProperty(property) || isOperationsAccessorOrMethod(property)) {
@@ -1994,7 +2007,7 @@ function scoreFlatOperationComposition(providerRoot: string): SubmitCheck {
 	// exposes all of its property names to this source-only gate. Identifiers,
 	// calls, and other expressions are opaque and therefore fail closed.
 	const opaqueSpread = implementationArg.properties.find(
-		(property): property is ts.SpreadAssignment =>
+		(property): property is TS.SpreadAssignment =>
 			ts.isSpreadAssignment(property) &&
 			!isSourceEnumerableStaticObjectLiteral(property.expression),
 	);
@@ -2210,9 +2223,9 @@ function scoreCredentialUsage(providerRoot: string, provider: ProviderDefinition
 	);
 }
 
-function isDirectCredentialReference(expression: ts.Expression): boolean {
+function isDirectCredentialReference(expression: TS.Expression): boolean {
 	const reference = unwrapLocalExpression(expression);
-	let receiver: ts.Expression | undefined;
+	let receiver: TS.Expression | undefined;
 	let memberName: string | undefined;
 	if (ts.isPropertyAccessExpression(reference)) {
 		receiver = reference.expression;
@@ -2237,7 +2250,7 @@ function isDirectCredentialReference(expression: ts.Expression): boolean {
 }
 
 function isCredentialReference(
-	expression: ts.Expression,
+	expression: TS.Expression,
 	bindings: LocalBindings,
 	resolving: ReadonlySet<LocalBinding> = new Set(),
 ): boolean {
@@ -2284,7 +2297,7 @@ function findCredentialReferences(providerRoot: string): SourceFinding[] {
 			ts.ScriptKind.TS,
 		);
 		const bindings = collectLocalBindings(sourceFile);
-		const visit = (node: ts.Node): void => {
+		const visit = (node: TS.Node): void => {
 			if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
 				return;
 			}
@@ -3332,12 +3345,12 @@ function findZObjectLiterals(source: string): ZObjectLiteral[] {
 }
 
 function zObjectAppearsPublicOutput(
-	sourceFile: ts.SourceFile,
+	sourceFile: TS.SourceFile,
 	zObject: ZObjectLiteral,
 	relPath: string,
 ): boolean {
-	let zObjectCall: ts.CallExpression | undefined;
-	const findCall = (node: ts.Node): void => {
+	let zObjectCall: TS.CallExpression | undefined;
+	const findCall = (node: TS.Node): void => {
 		if (
 			zObjectCall === undefined &&
 			ts.isCallExpression(node) &&
@@ -3353,7 +3366,7 @@ function zObjectAppearsPublicOutput(
 		return true;
 	}
 
-	let expression: ts.Expression = zObjectCall;
+	let expression: TS.Expression = zObjectCall;
 	while (
 		ts.isParenthesizedExpression(expression.parent) ||
 		ts.isAsExpression(expression.parent) ||
@@ -3411,8 +3424,8 @@ const PARSE_LIKE_SCHEMA_METHODS: ReadonlySet<string> = new Set([
 ]);
 
 function isExportedVariableBinding(
-	sourceFile: ts.SourceFile,
-	declaration: ts.VariableDeclaration,
+	sourceFile: TS.SourceFile,
+	declaration: TS.VariableDeclaration,
 ): boolean {
 	const declarationStatement = declaration.parent.parent;
 	if (
@@ -3428,7 +3441,7 @@ function isExportedVariableBinding(
 	}
 	const name = declaration.name.text;
 	let exported = false;
-	const visit = (node: ts.Node): void => {
+	const visit = (node: TS.Node): void => {
 		if (exported) {
 			return;
 		}
@@ -3457,13 +3470,13 @@ function isExportedVariableBinding(
 	return exported;
 }
 
-function isPublicOutputPropertyName(name: ts.PropertyName): boolean {
+function isPublicOutputPropertyName(name: TS.PropertyName): boolean {
 	const text = propertyNameText(name);
 	return text === "output" || text === "response";
 }
 
-function findEnclosingVariableDeclaration(node: ts.Node): ts.VariableDeclaration | undefined {
-	let current: ts.Node | undefined = node;
+function findEnclosingVariableDeclaration(node: TS.Node): TS.VariableDeclaration | undefined {
+	let current: TS.Node | undefined = node;
 	while (current !== undefined && !ts.isSourceFile(current)) {
 		if (ts.isVariableDeclaration(current)) {
 			return current;
@@ -3474,9 +3487,9 @@ function findEnclosingVariableDeclaration(node: ts.Node): ts.VariableDeclaration
 }
 
 function localSchemaBindingReachability(
-	sourceFile: ts.SourceFile,
+	sourceFile: TS.SourceFile,
 	name: string,
-	declaration: ts.VariableDeclaration,
+	declaration: TS.VariableDeclaration,
 	resolving: ReadonlySet<string>,
 ): SchemaReachability {
 	if (resolving.has(name)) {
@@ -3485,7 +3498,7 @@ function localSchemaBindingReachability(
 	const nextResolving = new Set(resolving);
 	nextResolving.add(name);
 	let result: SchemaReachability = "internal";
-	const visit = (node: ts.Node): void => {
+	const visit = (node: TS.Node): void => {
 		if (result === "public") {
 			return;
 		}
@@ -3550,7 +3563,7 @@ function localSchemaBindingReachability(
 	return result;
 }
 
-function isParseLikeSchemaReceiver(identifier: ts.Identifier): boolean {
+function isParseLikeSchemaReceiver(identifier: TS.Identifier): boolean {
 	const access = identifier.parent;
 	let methodName: string | undefined;
 	if (ts.isPropertyAccessExpression(access) && access.expression === identifier) {
@@ -3574,7 +3587,7 @@ function isParseLikeSchemaReceiver(identifier: ts.Identifier): boolean {
 
 function vendorKeyFindingsForObject(
 	source: string,
-	sourceFile: ts.SourceFile,
+	sourceFile: TS.SourceFile,
 	zObject: ZObjectLiteral,
 	bindings: LocalBindings,
 ): Array<{ key: string; line: number }> {
@@ -3640,7 +3653,7 @@ function isAllowedPublicOutputKeyName(name: string): boolean {
 
 function collectTopLevelObjectKeys(
 	source: string,
-	sourceFile: ts.SourceFile,
+	sourceFile: TS.SourceFile,
 	objectStart: number,
 	objectEnd: number,
 	bindings: LocalBindings,
@@ -3702,11 +3715,11 @@ function collectTopLevelObjectKeys(
 }
 
 function computedPropertyExpressionAtOffset(
-	sourceFile: ts.SourceFile,
+	sourceFile: TS.SourceFile,
 	offset: number,
-): ts.Expression | undefined {
-	let expression: ts.Expression | undefined;
-	const visit = (node: ts.Node): void => {
+): TS.Expression | undefined {
+	let expression: TS.Expression | undefined;
+	const visit = (node: TS.Node): void => {
 		if (expression !== undefined || offset < node.getFullStart() || offset >= node.getEnd()) {
 			return;
 		}
@@ -3770,7 +3783,7 @@ function findVendorTimestampLeakFindings(providerRoot: string): SourceFinding[] 
 				}
 			}
 
-			const visitAliases = (node: ts.Node): void => {
+			const visitAliases = (node: TS.Node): void => {
 				if (findings.length >= MAX_SOURCE_FINDING_EVIDENCE) {
 					return;
 				}
@@ -3808,7 +3821,7 @@ function findVendorTimestampLeakFindings(providerRoot: string): SourceFinding[] 
 	return findings;
 }
 
-function isIdentifierValueUse(identifier: ts.Identifier): boolean {
+function isIdentifierValueUse(identifier: TS.Identifier): boolean {
 	const parent = identifier.parent;
 	return !(
 		(ts.isPropertyAssignment(parent) && parent.name === identifier) ||
@@ -3830,8 +3843,8 @@ function isIdentifierValueUse(identifier: ts.Identifier): boolean {
 	);
 }
 
-function propertyNameForValueExpression(expression: ts.Expression): string | undefined {
-	let current: ts.Expression = expression;
+function propertyNameForValueExpression(expression: TS.Expression): string | undefined {
+	let current: TS.Expression = expression;
 	while (
 		ts.isParenthesizedExpression(current.parent) ||
 		ts.isAsExpression(current.parent) ||
@@ -4113,14 +4126,14 @@ function computeMaskedSource(
 			if (chars[index] !== "\n" && chars[index] !== "\r") chars[index] = " ";
 		}
 	};
-	const commentRanges = new Map<string, ts.CommentRange>();
-	const addCommentRanges = (ranges: readonly ts.CommentRange[] | undefined): void => {
+	const commentRanges = new Map<string, TS.CommentRange>();
+	const addCommentRanges = (ranges: readonly TS.CommentRange[] | undefined): void => {
 		for (const range of ranges ?? []) {
 			commentRanges.set(`${range.pos}:${range.end}`, range);
 		}
 	};
 
-	const visit = (node: ts.Node): void => {
+	const visit = (node: TS.Node): void => {
 		addCommentRanges(ts.getLeadingCommentRanges(source, node.getFullStart()));
 		addCommentRanges(ts.getTrailingCommentRanges(source, node.getEnd()));
 

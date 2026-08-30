@@ -1,4 +1,17 @@
-import ts from "typescript";
+import type TS from "typescript";
+
+const ts: typeof import("typescript") = await loadTypeScript();
+
+async function loadTypeScript(): Promise<typeof import("typescript")> {
+	try {
+		return await import("typescript");
+	} catch {
+		console.error(
+			"apifuse migrate-shape requires typescript; install it in the workspace running the CLI (bun add -d typescript)",
+		);
+		process.exit(1);
+	}
+}
 
 /**
  * Operation authoring-shape migration.
@@ -67,9 +80,9 @@ export function migrateOperationShape(
 	// Every legacy call site: a direct call to the bare helper identifier
 	// whose single argument is the config (i.e. NOT the curried form, whose
 	// outer call has zero arguments and optional type arguments).
-	const legacyCalls: ts.CallExpression[] = [];
+	const legacyCalls: TS.CallExpression[] = [];
 	let sawCurried = false;
-	const visit = (node: ts.Node): void => {
+	const visit = (node: TS.Node): void => {
 		if (
 			ts.isCallExpression(node) &&
 			ts.isIdentifier(node.expression) &&
@@ -158,9 +171,9 @@ export function migrateOperationShape(
 	};
 }
 
-function firstSyntaxError(source: ts.SourceFile): string | undefined {
+function firstSyntaxError(source: TS.SourceFile): string | undefined {
 	const diagnostics = (
-		source as ts.SourceFile & { parseDiagnostics?: ts.DiagnosticWithLocation[] }
+		source as TS.SourceFile & { parseDiagnostics?: TS.DiagnosticWithLocation[] }
 	).parseDiagnostics;
 	if (diagnostics === undefined || diagnostics.length === 0) return undefined;
 	const first = diagnostics[0];
