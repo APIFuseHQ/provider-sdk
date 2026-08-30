@@ -667,9 +667,9 @@ function findProviderSdkImport(
 
 /** Named import specifier binding `localName` in any import declaration. */
 function findNamedImportSpecifier(
-	source: ts.SourceFile,
+	source: TS.SourceFile,
 	localName: string,
-): ts.ImportSpecifier | undefined {
+): TS.ImportSpecifier | undefined {
 	for (const statement of source.statements) {
 		if (!ts.isImportDeclaration(statement)) continue;
 		const named = statement.importClause?.namedBindings;
@@ -688,8 +688,8 @@ function findNamedImportSpecifier(
  * defineProvider alongside the context type).
  */
 function removeImportSpecifier(
-	source: ts.SourceFile,
-	specifier: ts.ImportSpecifier,
+	source: TS.SourceFile,
+	specifier: TS.ImportSpecifier,
 ): TextEdit {
 	const list = specifier.parent;
 	const index = list.elements.indexOf(specifier);
