@@ -12,11 +12,11 @@ describe("stealth profiles", () => {
 		expect(profile.ja4).toBeUndefined();
 	});
 
-	it("maps chrome-desktop to the canonical chrome-146 profile", () => {
+	it("maps chrome-desktop to the current canonical Chrome profile", () => {
 		const profile = getStealthProfile("chrome-desktop");
 
-		expect(profile.name).toBe("chrome-146");
-		expect(profile.tlsClientIdentifier).toBe("chrome_146");
+		expect(profile.name).toBe("chrome-149");
+		expect(profile.tlsClientIdentifier).toBe("chrome_149");
 	});
 
 	it("returns the firefox-147 profile", () => {
@@ -33,6 +33,12 @@ describe("stealth profiles", () => {
 		expect(profile.tlsClientIdentifier).toBe("safari_ios_26_0");
 	});
 
+	it("maps browser-family intent aliases to the current registered profiles", () => {
+		expect(getStealthProfile("firefox-desktop").tlsClientIdentifier).toBe("firefox_147");
+		expect(getStealthProfile("safari-desktop").tlsClientIdentifier).toBe("safari_17_0");
+		expect(getStealthProfile("safari-mobile").tlsClientIdentifier).toBe("safari_ios_26_0");
+	});
+
 	it("throws SDKError for unknown profiles", () => {
 		expect(() => getStealthProfile("unknown-profile")).toThrow(SDKError);
 		expect(() => getStealthProfile("unknown-profile")).toThrow(
@@ -47,15 +53,25 @@ describe("stealth profiles", () => {
 		expect(() => getStealthProfile("chrome-131")).toThrow("Unknown stealth profile: chrome-131");
 	});
 
-	it("lists the canonical Chrome profile, alias, and non-Chrome profiles", () => {
+	it("lists only intent-based profile names", () => {
 		const profiles = listStealthProfiles();
 
-		expect(profiles).toEqual(
-			expect.arrayContaining(["chrome-146", "chrome-desktop", "firefox-147", "ios-safari-26"]),
-		);
-		expect(profiles).not.toContain("chrome-129");
-		expect(profiles).not.toContain("chrome-130");
-		expect(profiles).not.toContain("chrome-131");
-		expect(profiles).not.toContain("edge-131");
+		expect(profiles).toEqual([
+			"chrome-desktop",
+			"firefox-desktop",
+			"safari-desktop",
+			"safari-mobile",
+			"generic-desktop",
+			"generic-mobile",
+		]);
+		for (const versioned of [
+			"chrome-149",
+			"chrome-146",
+			"firefox-147",
+			"ios-safari-26",
+			"safari-17",
+		]) {
+			expect(profiles).not.toContain(versioned);
+		}
 	});
 });

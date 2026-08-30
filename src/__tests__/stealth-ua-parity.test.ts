@@ -1,9 +1,10 @@
 import { describe, expect, it } from "bun:test";
 
 import { resolveWreqProfile } from "../runtime/stealth.js";
-import { getStealthProfile, listStealthProfiles } from "../stealth/profiles.js";
+import { getStealthProfile, listRegisteredStealthProfiles } from "../stealth/profiles.js";
 
 type WreqProfileSnapshot = {
+	latestChromeProfile: string;
 	profiles: Parameters<typeof resolveWreqProfile>[1];
 	userAgents: Record<string, string | null>;
 };
@@ -31,7 +32,16 @@ async function loadWreqProfileSnapshot(): Promise<WreqProfileSnapshot> {
 const wreq = await loadWreqProfileSnapshot();
 
 describe("stealth user-agent parity", () => {
-	for (const profileName of listStealthProfiles()) {
+	it("keeps chrome-desktop on wreq-js's newest Chromium profile", () => {
+		const identifier = getStealthProfile("chrome-desktop").tlsClientIdentifier;
+		if (identifier !== wreq.latestChromeProfile) {
+			throw new Error(
+				`chrome-desktop resolves to "${identifier}" but wreq-js offers "${wreq.latestChromeProfile}". Update the chrome-desktop stealth profile, User-Agent, and client hints to wreq-js's newest Chromium profile.`,
+			);
+		}
+	});
+
+	for (const profileName of listRegisteredStealthProfiles()) {
 		it(`matches the wreq transport for ${profileName}`, () => {
 			const profile = getStealthProfile(profileName);
 			const { browser } = resolveWreqProfile(profileName, wreq.profiles);

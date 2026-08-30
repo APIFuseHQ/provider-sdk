@@ -715,7 +715,7 @@ function createProviderContext(
 				? stealthProfile
 					? capabilityModules.stealth.createStealthClient(
 							stealthBaseUrl,
-							stealthProfile.name,
+							provider.stealth!.profile,
 							stealthClientOptions,
 						)
 					: capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
@@ -723,7 +723,7 @@ function createProviderContext(
 					? createLazyStealthClient(
 							logStealthCleanupError,
 							stealthBaseUrl,
-							stealthProfile.name,
+							provider.stealth!.profile,
 							stealthClientOptions,
 						)
 					: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
@@ -930,7 +930,7 @@ function createAuthFlowContext(
 					? stealthProfile
 						? capabilityModules.stealth.createStealthClient(
 								stealthBaseUrl,
-								stealthProfile.name,
+								provider.stealth!.profile,
 								stealthClientOptions,
 							)
 						: capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
@@ -938,7 +938,7 @@ function createAuthFlowContext(
 						? createLazyStealthClient(
 								logStealthCleanupError,
 								stealthBaseUrl,
-								stealthProfile.name,
+								provider.stealth!.profile,
 								stealthClientOptions,
 							)
 						: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)

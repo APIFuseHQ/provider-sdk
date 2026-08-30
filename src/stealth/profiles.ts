@@ -1,9 +1,23 @@
+import { createRequire } from "node:module";
+
+import type { BrowserProfile } from "wreq-js";
+
 import { SDKError } from "../errors.js";
 import type { StealthPlatform, StealthProfile } from "../types.js";
 
 type StealthProfileDefinition = Omit<StealthProfile, "name" | "platform"> & {
 	platform: StealthPlatform;
 };
+
+type WreqProfileApi = Pick<typeof import("wreq-js"), "getEmulationHeaders" | "getProfiles">;
+
+const requireModule = createRequire(import.meta.url);
+let wreqProfileApi: WreqProfileApi | undefined;
+
+function getWreqProfileApi(): WreqProfileApi {
+	wreqProfileApi ??= requireModule("wreq-js") as WreqProfileApi;
+	return wreqProfileApi;
+}
 
 const CHROMIUM_HEADER_ORDER = [
 	":method",
@@ -81,6 +95,52 @@ const FIREFOX_JA3 =
 const SAFARI_JA3 =
 	"771,4865-4866-4867-49196-49195-52393-49200-49199-49188-49192-159-158-107-103-57-51-157-156-61-60-53-47-255,0-23-65281-10-11-16-5-13-18-51-45-43-27,29-23-24-25,0";
 
+/**
+ * The newest Chromium build wreq-js can emulate, resolved on first profile use.
+ *
+ * A literal version here rots: it went stale twice (146 was six releases behind
+ * stable when an upstream integrity analyzer flagged it), and a fingerprint that
+ * advertises an old Chrome is exactly what bot managers score against. wreq-js
+ * already ships the profile table, so the newest entry is derived from it rather
+ * than restated. `resolveProfile("chrome")` is deliberately NOT used because its
+ * conservative default can lag newer entries in that table.
+ *
+ * package.json pins wreq-js exactly on purpose. Even a semver-minor wreq-js update
+ * can change the profile table, emitted headers, native bindings, and therefore
+ * the wire fingerprint inherited by every provider. Upgrade that exact version
+ * only in a dedicated change with profile-parity and packed-native verification.
+ */
+function resolveLatestChromiumProfile(): {
+	readonly wreqName: BrowserProfile;
+	readonly version: string;
+} {
+	const { getProfiles } = getWreqProfileApi();
+	let newest: { name: BrowserProfile; version: number } | undefined;
+	for (const name of getProfiles()) {
+		const match = /^chrome_(\d+)$/.exec(name);
+		if (!match) continue;
+		const version = Number(match[1]);
+		if (!newest || version > newest.version) newest = { name, version };
+	}
+	if (!newest) {
+		throw new SDKError("wreq-js exposes no chrome_<version> emulation profile.", {
+			code: "STEALTH_PROFILE_UNAVAILABLE",
+		});
+	}
+	return { wreqName: newest.name, version: `${newest.version}.0.0.0` };
+}
+
+/** The user agent wreq-js itself emits for that profile, so the two never disagree. */
+function chromiumUserAgent(latest: ReturnType<typeof resolveLatestChromiumProfile>): string {
+	const { getEmulationHeaders } = getWreqProfileApi();
+	for (const [name, value] of getEmulationHeaders(latest.wreqName, "macos")) {
+		if (String(name).toLowerCase() === "user-agent") return String(value);
+	}
+	throw new SDKError(`wreq-js profile ${latest.wreqName} exposes no user-agent header.`, {
+		code: "STEALTH_PROFILE_UNAVAILABLE",
+	});
+}
+
 function createProfile(name: string, definition: StealthProfileDefinition): StealthProfile {
 	return {
 		name,
@@ -145,11 +205,24 @@ export function generateLayer2Headers(profile: StealthProfile): Record<string, s
 	return headers;
 }
 
-const STEALTH_PROFILE_ALIASES: Record<string, string> = {
-	"chrome-desktop": "chrome-146",
+const STATIC_STEALTH_PROFILE_ALIASES: Record<string, string> = {
+	"firefox-desktop": "firefox-147",
+	"safari-desktop": "safari-17",
+	"safari-mobile": "ios-safari-26",
 };
 
-const STEALTH_PROFILES: Record<string, StealthProfile> = {
+const PUBLIC_STEALTH_PROFILE_NAMES = [
+	"chrome-desktop",
+	"firefox-desktop",
+	"safari-desktop",
+	"safari-mobile",
+	"generic-desktop",
+	"generic-mobile",
+] as const;
+
+const PUBLIC_STEALTH_PROFILE_NAME_SET = new Set<string>(PUBLIC_STEALTH_PROFILE_NAMES);
+
+const STATIC_STEALTH_PROFILES: Record<string, StealthProfile> = {
 	"chrome-146": createProfile("chrome-146", {
 		platform: "macos",
 		version: "146.0.0.0",
@@ -260,16 +333,6 @@ const STEALTH_PROFILES: Record<string, StealthProfile> = {
 		h2Settings: SAFARI_H2_SETTINGS,
 		headerOrder: SAFARI_HEADER_ORDER,
 	}),
-	"generic-desktop": createProfile("generic-desktop", {
-		platform: "macos",
-		version: "146.0.0.0",
-		userAgent:
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-		tlsClientIdentifier: "chrome_146",
-		ja3: CHROMIUM_JA3,
-		h2Settings: CHROMIUM_H2_SETTINGS,
-		headerOrder: CHROMIUM_HEADER_ORDER,
-	}),
 	"generic-mobile": createProfile("generic-mobile", {
 		platform: "ios",
 		version: "26.0",
@@ -282,9 +345,45 @@ const STEALTH_PROFILES: Record<string, StealthProfile> = {
 	}),
 };
 
+type StealthProfileCatalog = {
+	aliases: Record<string, string>;
+	profiles: Record<string, StealthProfile>;
+};
+
+let stealthProfileCatalog: StealthProfileCatalog | undefined;
+
+function getStealthProfileCatalog(): StealthProfileCatalog {
+	if (stealthProfileCatalog) return stealthProfileCatalog;
+
+	const latest = resolveLatestChromiumProfile();
+	const currentName = `chrome-${latest.version.split(".")[0]}`;
+	const currentProfile = createProfile(currentName, {
+		platform: "macos",
+		version: latest.version,
+		userAgent: chromiumUserAgent(latest),
+		tlsClientIdentifier: latest.wreqName,
+		ja3: CHROMIUM_JA3,
+		h2Settings: CHROMIUM_H2_SETTINGS,
+		headerOrder: CHROMIUM_HEADER_ORDER,
+	});
+	stealthProfileCatalog = {
+		aliases: {
+			"chrome-desktop": currentName,
+			...STATIC_STEALTH_PROFILE_ALIASES,
+		},
+		profiles: {
+			[currentName]: currentProfile,
+			...STATIC_STEALTH_PROFILES,
+			"generic-desktop": createProfile("generic-desktop", currentProfile),
+		},
+	};
+	return stealthProfileCatalog;
+}
+
 export function getStealthProfile(name: string): StealthProfile {
-	const canonicalName = STEALTH_PROFILE_ALIASES[name] ?? name;
-	const profile = STEALTH_PROFILES[canonicalName];
+	const catalog = getStealthProfileCatalog();
+	const canonicalName = catalog.aliases[name] ?? name;
+	const profile = catalog.profiles[canonicalName];
 
 	if (!profile) {
 		throw new SDKError(`Unknown stealth profile: ${name}`);
@@ -297,6 +396,26 @@ export function getStealthProfile(name: string): StealthProfile {
 	};
 }
 
+/** Returns the intent alias that replaces a registered version-pinned profile. */
+export function getStealthProfileIntentAlias(name: string): string | undefined {
+	if (PUBLIC_STEALTH_PROFILE_NAME_SET.has(name)) return undefined;
+	if (/^(?:chrome|chromium|edge)[-_]\d/i.test(name)) {
+		return "chrome-desktop";
+	}
+	if (/^firefox[-_]\d/i.test(name)) return "firefox-desktop";
+	if (/^(?:ios[-_]safari|safari[-_](?:ios|ipad))[-_]\d/i.test(name)) {
+		return "safari-mobile";
+	}
+	if (/^safari[-_]\d/i.test(name)) return "safari-desktop";
+	return undefined;
+}
+
+/** Internal compatibility catalog used by transport-parity tests. */
+export function listRegisteredStealthProfiles(): string[] {
+	const catalog = getStealthProfileCatalog();
+	return [...Object.keys(catalog.profiles), ...Object.keys(catalog.aliases)];
+}
+
 export function listStealthProfiles(): string[] {
-	return [...Object.keys(STEALTH_PROFILES), ...Object.keys(STEALTH_PROFILE_ALIASES)];
+	return [...PUBLIC_STEALTH_PROFILE_NAMES];
 }

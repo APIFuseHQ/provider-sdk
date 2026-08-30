@@ -18,7 +18,7 @@ import {
 	vendorFromResolvedSource,
 } from "../config/loader.js";
 import { SDKError, TransportError } from "../errors.js";
-import { getStealthProfile } from "../stealth/profiles.js";
+import { getStealthProfile, getStealthProfileIntentAlias } from "../stealth/profiles.js";
 import type {
 	HttpMethod,
 	StealthClient,
@@ -67,7 +67,7 @@ import {
 	serializeRequestUrl,
 } from "./request-options.js";
 
-export const DEFAULT_PROFILE = "chrome-146";
+export const DEFAULT_PROFILE = "chrome-desktop";
 
 const MISSING_PROXY_WARNING =
 	"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.";
@@ -244,7 +244,12 @@ function resolveDefaultWreqProfileMapping(): { identifier: string; os: Emulation
 	return { identifier, os: profile.platform };
 }
 
-const DEFAULT_WREQ_PROFILE_MAPPING = resolveDefaultWreqProfileMapping();
+let defaultWreqProfileMapping: ReturnType<typeof resolveDefaultWreqProfileMapping> | undefined;
+
+function getDefaultWreqProfileMapping(): ReturnType<typeof resolveDefaultWreqProfileMapping> {
+	defaultWreqProfileMapping ??= resolveDefaultWreqProfileMapping();
+	return defaultWreqProfileMapping;
+}
 
 export function resolveWreqProfile(
 	profileName: string,
@@ -268,8 +273,9 @@ export function resolveWreqProfile(
 		// profile strings still run with the transport default instead of failing
 		// before the request starts. Removed built-in profile aliases above remain
 		// explicit errors so callers do not accidentally pin retired fingerprints.
-		identifier = DEFAULT_WREQ_PROFILE_MAPPING.identifier;
-		os = DEFAULT_WREQ_PROFILE_MAPPING.os;
+		const defaultMapping = getDefaultWreqProfileMapping();
+		identifier = defaultMapping.identifier;
+		os = defaultMapping.os;
 	}
 
 	const browser = closestWreqProfile(identifier, wreqProfiles);
@@ -772,6 +778,12 @@ function createSessionFetcher(
 	let closed = false;
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
+	const intentAlias = getStealthProfileIntentAlias(defaultProfile);
+	if (intentAlias) {
+		warn(
+			`[provider-sdk] Stealth profile "${defaultProfile}" pins a browser version and is deprecated. Use the intent profile "${intentAlias}" so TLS, headers, and User-Agent stay aligned with SDK updates; derive an explicit User-Agent with getStealthProfile("${intentAlias}").userAgent instead of hardcoding one.`,
+		);
+	}
 	const cookieJar = new StealthCookieJar([], baseUrl);
 
 	async function getClientEntry(

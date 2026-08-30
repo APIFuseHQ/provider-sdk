@@ -213,9 +213,7 @@ export default defineProvider({
 		);
 
 		const results = await runChecks(providerDir);
-		const declaration = results.find((result) =>
-			result.message.includes("fail-closed validation"),
-		);
+		const declaration = results.find((result) => result.message.includes("fail-closed validation"));
 
 		expect(declaration?.passed).toBe(false);
 		expect(declaration?.details).toEqual([
@@ -248,9 +246,7 @@ export default {
 		);
 
 		const results = await runChecks(providerDir);
-		const declaration = results.find((result) =>
-			result.message.includes("fail-closed validation"),
-		);
+		const declaration = results.find((result) => result.message.includes("fail-closed validation"));
 
 		expect(declaration?.passed).toBe(false);
 		expect(declaration?.details).toEqual([
@@ -497,6 +493,54 @@ export default defineProvider({
 		expect(authoring?.details?.join("\n")).toContain("playwright-direct-import");
 	});
 
+	it("blocks browser-version literals while excluding tests, fixtures, and comments", async () => {
+		const providerDir = makeProviderDir("apifuse-check-browser-version-literals-");
+		writeMinimalProviderIndex(providerDir);
+		mkdirSync(join(providerDir, "upstream"), { recursive: true });
+		writeFileSync(
+			join(providerDir, "upstream", "pinned.ts"),
+			`export const profile = "chrome_149";
+export const fallback = "firefox-135";
+export const safari = "safari-17";
+export const headers = {
+  "User-Agent": "Mozilla/5.0 AppleWebKit/537.36 Chrome/131.0.0.0 Safari/537.36",
+  "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131"',
+};
+// Measured behavior with chrome-120 and Firefox/120.0 belongs in this comment.
+`,
+		);
+
+		for (const relativePath of [
+			"__fixtures__/recorded.ts",
+			"__tests__/fixtures/recorded.ts",
+			"__tests__/profile.test.ts",
+		]) {
+			const path = join(providerDir, relativePath);
+			mkdirSync(dirname(path), { recursive: true });
+			writeFileSync(
+				path,
+				'export const recorded = "Mozilla/5.0 Chrome/130.0.0.0";\nexport const profile = "chrome-130";\n',
+			);
+		}
+
+		const results = await runChecks(providerDir);
+		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
+		const browserVersionDetails =
+			authoring?.details?.filter((detail) => detail.includes("browser-version-literal")) ?? [];
+
+		expect(authoring?.passed).toBe(false);
+		expect(browserVersionDetails).toHaveLength(5);
+		expect(browserVersionDetails.join("\n")).toContain("sourceFiles.upstream/pinned.ts");
+		expect(browserVersionDetails.join("\n")).toContain('"chrome-desktop"');
+		expect(browserVersionDetails.join("\n")).toContain(
+			'getStealthProfile("chrome-desktop").userAgent',
+		);
+		expect(browserVersionDetails.join("\n")).toContain("let ctx.stealth generate client hints");
+		expect(browserVersionDetails.join("\n")).not.toContain("__fixtures__");
+		expect(browserVersionDetails.join("\n")).not.toContain("__tests__");
+		expect(browserVersionDetails.join("\n")).not.toContain("chrome-120");
+	});
+
 	it("fails the prompt-assets check when the manifest is missing", async () => {
 		const providerDir = makeProviderDir("apifuse-check-prompt-assets-missing-");
 		writeMinimalProviderIndex(providerDir);
@@ -584,7 +628,9 @@ export default defineProvider({
 		const promptAssets = results.find((result) => result.message === PROMPT_ASSETS_CHECK_MESSAGE);
 
 		expect(promptAssets?.passed).toBe(false);
-		expect(promptAssets?.details?.join("\n")).toContain("CLAUDE.md (expected symlink -> AGENTS.md)");
+		expect(promptAssets?.details?.join("\n")).toContain(
+			"CLAUDE.md (expected symlink -> AGENTS.md)",
+		);
 	});
 });
 

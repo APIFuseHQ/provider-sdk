@@ -144,7 +144,8 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   flows that must inspect intermediate `Location`/`Set-Cookie` headers, create
   a session with `ctx.stealth.createSession()` and use `session.redirects.run()`;
   inspect accumulated cookies through `session.cookies`. Select an SDK stealth
-  `profile` such as `chrome-146`; do not tune JA3, HTTP/2 SETTINGS, or
+  intent-based `profile` such as `chrome-desktop`; do not pin a browser version
+  or tune JA3, HTTP/2 SETTINGS, or
   pseudo-header order in provider code. Chrome, Firefox, and Safari profiles
   are supported; use `ctx.browser` when the provider needs browser execution.
 - **Query-parameter credentials**: when an upstream requires a credential in
