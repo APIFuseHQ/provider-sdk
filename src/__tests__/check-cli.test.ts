@@ -91,6 +91,39 @@ afterEach(() => {
 });
 
 describe("apifuse check", () => {
+	it.each([
+		"standard",
+		"shared",
+		"browser",
+	] as const)("recognizes the declared %s provider runtime", async (runtime) => {
+		const providerDir = makeProviderDir(`apifuse-check-runtime-${runtime}-`);
+		writeRuntimeRecognitionFixture(providerDir, runtime);
+
+		const results = await runChecks(providerDir);
+		const index = results.find(
+			(result) => result.message === "index.ts exists and exports default defineProvider",
+		);
+		const metadata = results.find(
+			(result) => result.message === "Provider metadata is declared in defineProvider",
+		);
+
+		expect(index?.passed).toBe(true);
+		expect(metadata?.passed).toBe(true);
+		expect(metadata?.details).toContain(`runtime: ${runtime}`);
+	});
+
+	it("rejects a provider runtime outside the declared union", async () => {
+		const providerDir = makeProviderDir("apifuse-check-runtime-invalid-");
+		writeRuntimeRecognitionFixture(providerDir, "invalid");
+
+		const results = await runChecks(providerDir);
+		const index = results.find(
+			(result) => result.message === "index.ts exists and exports default defineProvider",
+		);
+
+		expect(index?.passed).toBe(false);
+	});
+
 	it("passes the provider.json check for a valid declaration", async () => {
 		const providerDir = makeProviderDir("apifuse-check-provider-json-valid-");
 
@@ -554,6 +587,22 @@ export default defineProvider({
 		expect(promptAssets?.details?.join("\n")).toContain("CLAUDE.md (expected symlink -> AGENTS.md)");
 	});
 });
+
+function writeRuntimeRecognitionFixture(providerDir: string, runtime: string): void {
+	writeFileSync(
+		join(providerDir, "index.ts"),
+		`
+export default {
+  id: "runtime-recognition-provider",
+  version: "1.0.0",
+  runtime: ${JSON.stringify(runtime)},
+  auth: { mode: "none" },
+  meta: { displayName: "Runtime Recognition Provider", category: "other" },
+  operations: {},
+};
+`,
+	);
+}
 
 function writeMinimalProviderIndex(providerDir: string): void {
 	writeFileSync(
