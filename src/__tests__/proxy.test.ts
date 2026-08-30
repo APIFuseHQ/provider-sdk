@@ -361,9 +361,19 @@ class MockWreqSession {
 
 mock.module("wreq-js", () => ({
 	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
+	getEmulationHeaders: (profile: string) => {
+		const version = /^chrome_(\d+)$/.exec(profile)?.[1] ?? "149";
+		return new Map([
+			[
+				"user-agent",
+				`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`,
+			],
+		]);
+	},
 	getProfiles: () => [
 		"chrome_145",
 		"chrome_146",
+		"chrome_149",
 		"firefox_128",
 		"firefox_133",
 		"firefox_135",

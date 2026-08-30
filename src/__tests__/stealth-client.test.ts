@@ -192,9 +192,19 @@ class MockWreqSession {
 
 mock.module("wreq-js", () => ({
 	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
+	getEmulationHeaders: (profile: string) => {
+		const version = /^chrome_(\d+)$/.exec(profile)?.[1] ?? "149";
+		return new Map([
+			[
+				"user-agent",
+				`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`,
+			],
+		]);
+	},
 	getProfiles: () => [
 		"chrome_145",
 		"chrome_146",
+		"chrome_149",
 		"firefox_128",
 		"firefox_133",
 		"firefox_135",
@@ -946,6 +956,26 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients).toHaveLength(0);
 	});
 
+	it("warns through the stealth diagnostic channel for a registered version pin", async () => {
+		const warnings: string[] = [];
+		const { createStealthClient } = await import("../runtime/stealth.js");
+
+		createStealthClient("https://example.com", "chrome-146", {
+			warn: (message) => warnings.push(message),
+		}).createSession();
+		createStealthClient("https://example.com", "chrome-desktop", {
+			warn: (message) => warnings.push(message),
+		}).createSession();
+
+		expect(warnings).toEqual([
+			expect.stringContaining(
+				'Stealth profile "chrome-146" pins a browser version and is deprecated',
+			),
+		]);
+		expect(warnings[0]).toContain('Use the intent profile "chrome-desktop"');
+		expect(warnings[0]).toContain('getStealthProfile("chrome-desktop").userAgent');
+	});
+
 	it("maps chrome-146 profile to a wreq browser profile and preserves headers", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 200,
@@ -1021,7 +1051,7 @@ describe("createStealthClient", () => {
 		await client.fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "chrome_146",
+			browser: "chrome_149",
 			os: "macos",
 		});
 	});

@@ -103,7 +103,7 @@ only when a provider declared `stealth.profile`. `danawa` and `naver-map` both
 declare `proxy: { mode: "required" }` without a stealth profile, so their leases
 resolved while the chain still failed closed with `missing_proxy_identity`.
 This revision settles the omitted source in subsection 5a: the resolver derives
-the user agent from `DEFAULT_PROFILE` (`chrome-146`) through the shared stealth
+the user agent from `DEFAULT_PROFILE` (`chrome-desktop`) through the shared stealth
 profile registry when the caller supplies no declared user agent, and records
 whether the identity was `declared` or `defaulted` in proxy telemetry and the
 resolver trace. A resolved lease with no derivable user agent is classified as

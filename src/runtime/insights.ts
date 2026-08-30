@@ -27,7 +27,7 @@ const DNS_WARN_MS = 5;
 const BROWSER_IDLE_MS = 5_000;
 const REFRESH_WARN_RATE = 0.1;
 
-const TLS_REUSE_FIX = `const session = ctx.stealth.createSession({ profile: 'chrome-146' });
+const TLS_REUSE_FIX = `const session = ctx.stealth.createSession({ profile: 'chrome-desktop' });
 const resp = await session.fetch(url, opts);`;
 
 const TRANSFORM_FIX = `transformResponse: (raw) => {
@@ -39,7 +39,7 @@ const LARGE_RESPONSE_FIX = `const resp = await ctx.http.get('/items', {
 });`;
 
 const DNS_FIX = `// Enable DNS caching or reuse a long-lived session per host.
-const session = ctx.stealth.createSession({ profile: 'chrome-146' });
+const session = ctx.stealth.createSession({ profile: 'chrome-desktop' });
 await session.fetch(url, opts);`;
 
 const PROXY_FIX = `// Re-check whether this operation really needs a proxy.

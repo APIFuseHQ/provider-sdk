@@ -1,3 +1,5 @@
+import { createRequire } from "node:module";
+
 import type { ZodType } from "zod";
 
 import {
@@ -6,6 +8,17 @@ import {
 } from "./error-resolution.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
+
+const requireModule = createRequire(import.meta.url);
+// `typeof import(...)` keeps the type without emitting a static import: the
+// typescript package is a CLI-only dependency and src/lint.ts is production
+// runtime, which the typescript-import-boundary test enforces.
+let typeScriptModule: typeof import("typescript") | undefined;
+
+function getTypeScript(): typeof import("typescript") {
+	typeScriptModule ??= requireModule("typescript") as typeof import("typescript");
+	return typeScriptModule;
+}
 
 type AuthModeLike =
 	| "none"
@@ -894,6 +907,146 @@ function lintSelfHostedBrowserPatterns(
 const THROWN_ERROR_CONSTRUCTION_PATTERN = /new\s+(?:ProviderError|ValidationError)\s*\(/g;
 
 const TEST_SOURCE_FILE_PATTERN = /(?:^|\/)(?:__tests__|__mocks__)\/|\.(?:test|spec)\.[cm]?[jt]sx?$/;
+const RECORDED_FIXTURE_SOURCE_FILE_PATTERN =
+	/(?:^|\/)__fixtures__(?:\/|$)|(?:^|\/)__tests__\/fixtures(?:\/|$)/;
+const JAVASCRIPT_SOURCE_FILE_PATTERN = /\.[cm]?[jt]sx?$/;
+const VERSIONED_PROFILE_LITERAL_PATTERN =
+	/\b(?:chrome|chromium|firefox|safari|edge|opera|ios[-_]safari)[-_]\d+(?:[._-]\d+)*(?=$|[^A-Za-z0-9])/i;
+const VERSIONED_USER_AGENT_PATTERN = /\b(?:Chrome|CriOS|Firefox|FxiOS|EdgA?|OPR)\/\d+(?:\.\d+)*/i;
+const VERSIONED_SAFARI_USER_AGENT_PATTERN = /\bVersion\/(\d+(?:\.\d+)*)(?=[\s\S]*\bSafari\/\d)/i;
+const VERSIONED_CLIENT_HINT_PATTERN = /(?:^|[;,\s])v\s*=\s*["']?\d+/i;
+
+type BrowserVersionLiteralKind = "profile" | "user-agent" | "sec-ch-ua";
+
+type BrowserVersionLiteralFinding = {
+	kind: BrowserVersionLiteralKind;
+	literal: string;
+	position: number;
+};
+
+function staticStringText(node: import("typescript").Node | undefined): string | undefined {
+	if (!node) return undefined;
+	const ts = getTypeScript();
+	if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) return node.text;
+	return undefined;
+}
+
+function staticPropertyName(node: import("typescript").PropertyName): string | undefined {
+	const ts = getTypeScript();
+	if (ts.isIdentifier(node) || ts.isStringLiteral(node) || ts.isNumericLiteral(node)) {
+		return node.text;
+	}
+	if (ts.isComputedPropertyName(node)) return staticStringText(node.expression);
+	return undefined;
+}
+
+function isSecChUaHeaderName(value: string | undefined): boolean {
+	return value?.toLowerCase() === "sec-ch-ua";
+}
+
+function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLiteralFinding[] {
+	const ts = getTypeScript();
+	const sourceFile = ts.createSourceFile(
+		"provider-source.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		true,
+		ts.ScriptKind.TSX,
+	);
+	const findings: BrowserVersionLiteralFinding[] = [];
+	const seen = new Set<string>();
+
+	const addFinding = (kind: BrowserVersionLiteralKind, literal: string, position: number) => {
+		const key = `${kind}:${position}:${literal}`;
+		if (seen.has(key)) return;
+		seen.add(key);
+		findings.push({ kind, literal, position });
+	};
+
+	const inspectLiteral = (text: string, position: number) => {
+		const profile = text.match(VERSIONED_PROFILE_LITERAL_PATTERN)?.[0];
+		if (profile) addFinding("profile", profile, position);
+
+		const userAgent =
+			text.match(VERSIONED_USER_AGENT_PATTERN)?.[0] ??
+			text.match(VERSIONED_SAFARI_USER_AGENT_PATTERN)?.[0];
+		if (userAgent) addFinding("user-agent", userAgent, position);
+	};
+
+	const inspectSecChUaValue = (node: import("typescript").Node | undefined) => {
+		const text = staticStringText(node);
+		if (text && VERSIONED_CLIENT_HINT_PATTERN.test(text)) {
+			addFinding("sec-ch-ua", "sec-ch-ua", node!.getStart(sourceFile));
+		}
+	};
+
+	const visit = (node: import("typescript").Node) => {
+		const text = staticStringText(node);
+		if (text !== undefined) inspectLiteral(text, node.getStart(sourceFile));
+
+		if (ts.isPropertyAssignment(node) && isSecChUaHeaderName(staticPropertyName(node.name))) {
+			inspectSecChUaValue(node.initializer);
+		}
+
+		if (ts.isCallExpression(node) && isSecChUaHeaderName(staticStringText(node.arguments[0]))) {
+			inspectSecChUaValue(node.arguments[1]);
+		}
+
+		if (
+			ts.isArrayLiteralExpression(node) &&
+			isSecChUaHeaderName(staticStringText(node.elements[0]))
+		) {
+			inspectSecChUaValue(node.elements[1]);
+		}
+
+		ts.forEachChild(node, visit);
+	};
+
+	visit(sourceFile);
+	return findings.sort((left, right) => left.position - right.position);
+}
+
+function browserVersionLiteralMessage(finding: BrowserVersionLiteralFinding): string {
+	switch (finding.kind) {
+		case "profile":
+			return `Hardcoded stealth profile "${finding.literal}" pins a browser version and will rot. Use the matching intent alias instead: "chrome-desktop", "firefox-desktop", "safari-desktop", or "safari-mobile".`;
+		case "user-agent":
+			return `Hardcoded User-Agent browser version "${finding.literal}" can disagree with the stealth TLS fingerprint. Remove the literal and derive it from the matching intent profile, for example getStealthProfile("chrome-desktop").userAgent.`;
+		case "sec-ch-ua":
+			return 'Hardcoded sec-ch-ua versions can disagree with the stealth TLS fingerprint. Remove the literal and let ctx.stealth generate client hints from an intent profile such as "chrome-desktop"; derive any explicit User-Agent with getStealthProfile("chrome-desktop").userAgent.';
+	}
+}
+
+function lintBrowserVersionLiterals(provider: ProviderSourceLike): LintDiagnostic[] {
+	const sources: Array<{ field: string; source: string }> = [];
+	const sourceFiles = Object.entries(provider.providerSourceFiles ?? {}).filter(
+		([filePath]) =>
+			JAVASCRIPT_SOURCE_FILE_PATTERN.test(filePath) &&
+			!TEST_SOURCE_FILE_PATTERN.test(filePath) &&
+			!RECORDED_FIXTURE_SOURCE_FILE_PATTERN.test(filePath),
+	);
+	if (sourceFiles.length > 0) {
+		for (const [filePath, source] of sourceFiles) {
+			sources.push({ field: `sourceFiles.${filePath}`, source });
+		}
+	} else {
+		if (provider.authFlowSource)
+			sources.push({ field: "auth.flow", source: provider.authFlowSource });
+		for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+			const source = getOperationSource(operation);
+			if (source) sources.push({ field: `operations.${operationKey}.handler`, source });
+		}
+	}
+
+	return sources.flatMap(({ field, source }) =>
+		collectBrowserVersionLiteralFindings(source).map((finding) => ({
+			rule: "browser-version-literal",
+			level: "error" as const,
+			field,
+			message: browserVersionLiteralMessage(finding),
+		})),
+	);
+}
 
 /**
  * Skips a string literal starting at `startIndex` (which must point at the
@@ -1348,6 +1501,7 @@ export function lintProvider(
 		...lintCredentialWriteUsage(provider),
 		...lintPlaywrightDirectImports(provider),
 		...lintSelfHostedBrowserPatterns(provider, options),
+		...lintBrowserVersionLiterals(provider),
 		...lintUndeclaredThrownErrorCodes(provider),
 	];
 

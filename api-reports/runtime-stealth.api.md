@@ -61,7 +61,7 @@ interface DeclarativeStealthResponse {
 }
 
 // @public (undocumented)
-export const DEFAULT_PROFILE = "chrome-146";
+export const DEFAULT_PROFILE = "chrome-desktop";
 
 // @public (undocumented)
 type HttpMethod = "HEAD" | "head" | "GET" | "get" | "POST" | "post" | "PUT" | "put" | "DELETE" | "delete" | "OPTIONS" | "options" | "TRACE" | "trace" | "PATCH" | "patch";
