@@ -79,7 +79,7 @@ export type ProviderPlanFile = {
 };
 
 // @public (undocumented)
-export const RUNTIME_OPTIONS: readonly ["standard", "browser"];
+export const RUNTIME_OPTIONS: readonly ["standard", "shared", "browser"];
 
 // @public (undocumented)
 export function toDisplayName(name: string): string;

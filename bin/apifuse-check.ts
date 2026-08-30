@@ -551,7 +551,7 @@ function isProviderDefinition(value: unknown): value is ProviderDefinition {
 	return (
 		typeof value.id === "string" &&
 		typeof value.version === "string" &&
-		(value.runtime === "standard" || value.runtime === "browser") &&
+		(value.runtime === "standard" || value.runtime === "shared" || value.runtime === "browser") &&
 		typeof value.meta.displayName === "string" &&
 		typeof value.meta.category === "string"
 	);

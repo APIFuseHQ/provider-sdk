@@ -26,7 +26,7 @@ export const CATEGORY_OPTIONS = [
 	"other",
 ] as const;
 export const AUTH_MODE_OPTIONS = ["none", "platform-managed", "credentials", "oauth2"] as const;
-export const RUNTIME_OPTIONS = ["standard", "browser"] as const;
+export const RUNTIME_OPTIONS = ["standard", "shared", "browser"] as const;
 export const PRESET_OPTIONS = ["standalone", "monorepo"] as const;
 
 export type CreateCategory = (typeof CATEGORY_OPTIONS)[number];
@@ -102,7 +102,7 @@ Options:
   --display-name <name>
   --category <category>
   --auth-mode <mode>
-  --runtime <standard|browser>
+  --runtime <standard|shared|browser>
   --yes
   --dry-run
   --json

@@ -8,6 +8,7 @@ import { COMMAND_MANIFEST } from "../cli/commands.js";
 import {
 	buildProviderCreatePlan,
 	type CreateResolvedOptions,
+	RUNTIME_OPTIONS,
 	toDisplayName,
 } from "../cli/create.js";
 
@@ -300,6 +301,16 @@ describe("provider create planning", () => {
 		expect(index?.content).not.toContain('engine: "nodriver"');
 		expect(readme?.content).toContain('browser.engine: "playwright-stealth"');
 		expect(readme?.content).toContain("nodriver` is Python-runtime only");
+	});
+
+	it("accepts and renders the shared runtime declared by the provider type surface", async () => {
+		const cwd = makeTempDir("apifuse-create-shared-");
+		const plan = await buildProviderCreatePlan(createOptions({ runtime: "shared" }), cwd);
+		const index = findGeneratedFile(plan, "index.ts");
+
+		expect(RUNTIME_OPTIONS).toEqual(["standard", "shared", "browser"]);
+		expect(index?.content).toContain('runtime: "shared"');
+		expect(index?.content).not.toContain("browser:");
 	});
 
 	it("renders credential auth start as an input-free form turn", async () => {
