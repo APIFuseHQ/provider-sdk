@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { z } from "zod";
 
-import { assertIsError, emptyArray } from "./test-utils.js";
+import { assertIsError, createProviderDefinitionDouble, emptyArray } from "./test-utils.js";
 import {
 	ProviderError,
 	SDKError,
@@ -13,6 +14,7 @@ import {
 	HttpRetryUnsafeMethodPolicy,
 	type StealthCookieStoreV1,
 	type StealthRedirectHop,
+	type ProviderDefinition,
 } from "../types.js";
 
 type MockSessionCookie = {
@@ -38,6 +40,7 @@ type MockWreqResponse = {
 	redirected?: boolean;
 	sessionCookies?: MockSessionCookie[];
 	beforeReturn?: (init?: Record<string, unknown>) => Promise<void>;
+	beforeStreamPull?: (pullIndex: number) => Promise<void>;
 };
 
 type MockBodyState = {
@@ -115,7 +118,9 @@ function toWreqResponse(response: MockWreqResponse) {
 		},
 		get body() {
 			stream ??= new ReadableStream<Uint8Array>({
-				pull(controller) {
+				async pull(controller) {
+					await response.beforeStreamPull?.(nextChunk);
+					if (streamState.cancelled) return;
 					const chunk = streamChunks[nextChunk];
 					if (!chunk) {
 						controller.close();
@@ -236,6 +241,150 @@ describe("createStealthClient", () => {
 
 		expect(client.fetch).toBeFunction();
 		expect(client.createSession).toBeFunction();
+	});
+
+	it("cancels an in-flight stealth fetch with the SDK transport cancellation error", async () => {
+		const controller = new AbortController();
+		let markStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "too late",
+			headers: {},
+			beforeReturn: async (init) => {
+				const signal = init?.signal;
+				if (!(signal instanceof AbortSignal)) return;
+				markStarted();
+				await new Promise<void>((_resolve, reject) => {
+					const onAbort = () => reject(new DOMException("native request aborted", "AbortError"));
+					signal.addEventListener("abort", onAbort, { once: true });
+					if (signal.aborted) onAbort();
+				});
+			},
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", { signal: controller.signal });
+		const request = client.fetch("/slow");
+		await started;
+		controller.abort(new Error("gateway request abandoned"));
+
+		await expect(request).rejects.toBeInstanceOf(TransportError);
+		await expect(request).rejects.toMatchObject({
+			name: "TransportError",
+			code: "transport_cancelled",
+			status: 0,
+			message: "Request cancelled",
+			options: { retryable: false },
+		});
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
+		expect(mockStealthState.clients[0]?.calls[0]?.init?.signal).toBe(controller.signal);
+	});
+
+	it("cancels an in-flight stealth response body with the SDK transport cancellation error", async () => {
+		const controller = new AbortController();
+		const streamState = createMockBodyState();
+		let markPullStarted!: () => void;
+		const pullStarted = new Promise<void>((resolve) => {
+			markPullStarted = resolve;
+		});
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "slow body",
+			headers: {},
+			streamChunks: byteChunks("slow ", "body"),
+			streamState,
+			beforeStreamPull: async () => {
+				markPullStarted();
+				await new Promise<void>((resolve) => {
+					controller.signal.addEventListener("abort", () => resolve(), { once: true });
+				});
+			},
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const request = createStealthClient("https://example.com", {
+			signal: controller.signal,
+		}).fetch("/slow-body");
+		await pullStarted;
+		controller.abort(new Error("gateway request abandoned during body read"));
+
+		await expect(request).rejects.toMatchObject({
+			name: "TransportError",
+			code: "transport_cancelled",
+			status: 0,
+			options: { retryable: false },
+		});
+		expect(streamState.cancelled).toBe(true);
+	});
+
+	it("does not issue a stealth retry after the client signal aborts", async () => {
+		const controller = new AbortController();
+		let markStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		mockStealthState.queuedResponses.push(
+			{
+				status: 200,
+				body: "first attempt",
+				headers: {},
+				beforeReturn: async (init) => {
+					const signal = init?.signal;
+					if (!(signal instanceof AbortSignal)) return;
+					markStarted();
+					await new Promise<void>((_resolve, reject) => {
+						const onAbort = () =>
+							reject(
+								new TransportError("native request failed during abort", {
+									code: "transport_network_error",
+									status: 0,
+								}),
+							);
+						signal.addEventListener("abort", onAbort, { once: true });
+						if (signal.aborted) onAbort();
+					});
+				},
+			},
+			{ status: 200, body: "retry must not run", headers: {} },
+		);
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const request = createStealthClient("https://example.com", {
+			signal: controller.signal,
+		}).fetch("/slow", {
+			proxy: "http://proxy.test",
+			retry: { attempts: 2, baseDelayMs: 0, errorCodes: ["transport_network_error"] },
+		});
+		await started;
+		controller.abort(new Error("gateway deadline exceeded"));
+
+		await expect(request).rejects.toMatchObject({ code: "transport_cancelled" });
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
+		expect(mockStealthState.queuedResponses).toHaveLength(1);
+	});
+
+	it("keeps the no-signal stealth request path byte-identical", async () => {
+		const bytes = new Uint8Array([0, 1, 2, 127, 128, 255]);
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "unused",
+			headers: { "content-type": "application/octet-stream", "x-test": "unchanged" },
+			arrayBufferBody: bytes,
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const response = await createStealthClient("https://example.com").fetch("/binary");
+
+		expect(await response.bytes()).toEqual(bytes);
+		expect(response.status).toBe(200);
+		expect(response.headers).toEqual({
+			"content-type": "application/octet-stream",
+			"x-test": "unchanged",
+		});
+		expect(Object.hasOwn(mockStealthState.clients[0]?.calls[0]?.init ?? {}, "signal")).toBe(false);
 	});
 
 	it("returns normalized response for successful fetch", async () => {
@@ -2286,5 +2435,184 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients[0]?.calls).toHaveLength(2);
 		expect(mockStealthState.clients[0]?.calls[0]?.init?.method).toBe("POST");
 		expect(mockStealthState.clients[0]?.calls[1]?.init?.method).toBe("POST");
+	});
+});
+
+type CancellationErrorShape = {
+	code: string;
+	instanceOfTransportError: boolean;
+	name: string;
+	retryable: boolean;
+	status: number;
+};
+
+function cancellationErrorShape(error: unknown): CancellationErrorShape {
+	if (!(error instanceof TransportError)) {
+		return {
+			code: "not_cancelled",
+			instanceOfTransportError: false,
+			name: error instanceof Error ? error.name : typeof error,
+			retryable: true,
+			status: -1,
+		};
+	}
+	return {
+		code: error.code ?? "missing_code",
+		instanceOfTransportError: true,
+		name: error.name,
+		retryable: error.options?.retryable ?? true,
+		status: error.status ?? -1,
+	};
+}
+
+const CancellationErrorShapeSchema = z.object({
+	code: z.string(),
+	instanceOfTransportError: z.boolean(),
+	name: z.string(),
+	retryable: z.boolean(),
+	status: z.number(),
+});
+
+function createStealthAbortProvider(): ProviderDefinition {
+	return createProviderDefinitionDouble({
+		id: "stealth-abort-provider",
+		allowedHosts: ["example.com"],
+		stealth: { profile: "chrome-desktop", platform: "macos" },
+		auth: {
+			mode: "credentials",
+			flow: {
+				start: async (ctx) => {
+					try {
+						await ctx.stealth.fetch("/auth-slow");
+						return {
+							kind: "complete",
+							turnId: "not-cancelled",
+							data: cancellationErrorShape(undefined),
+						};
+					} catch (error) {
+						return {
+							kind: "abort",
+							turnId: "cancelled",
+							data: cancellationErrorShape(error),
+						};
+					}
+				},
+				continue: async () => ({ kind: "abort", turnId: "unused" }),
+			},
+		},
+		operations: {
+			cancelStealth: {
+				input: z.object({}),
+				output: CancellationErrorShapeSchema,
+				upstream: { baseUrl: "https://example.com" },
+				handler: async (ctx) => {
+					try {
+						await ctx.stealth.fetch("/operation-slow");
+						return cancellationErrorShape(undefined);
+					} catch (error) {
+						return cancellationErrorShape(error);
+					}
+				},
+			},
+		},
+	});
+}
+
+async function startGatewayRequestAndAbort(
+	request: (signal: AbortSignal) => Response | Promise<Response>,
+): Promise<Response> {
+	const controller = new AbortController();
+	let markStarted!: () => void;
+	const started = new Promise<void>((resolve) => {
+		markStarted = resolve;
+	});
+	mockStealthState.queuedResponses.push({
+		status: 200,
+		body: "not cancelled",
+		headers: {},
+		beforeReturn: async (init) => {
+			const signal = init?.signal;
+			if (!(signal instanceof AbortSignal)) return;
+			markStarted();
+			await new Promise<void>((_resolve, reject) => {
+				const onAbort = () => reject(new DOMException("native request aborted", "AbortError"));
+				signal.addEventListener("abort", onAbort, { once: true });
+				if (signal.aborted) onAbort();
+			});
+		},
+	});
+	const response = Promise.resolve(request(controller.signal));
+	await Promise.race([started, Bun.sleep(100)]);
+	controller.abort(new Error("gateway request abandoned"));
+	return response;
+}
+
+describe("gateway stealth abort wiring", () => {
+	beforeEach(() => {
+		mockStealthState.clients.length = 0;
+		mockStealthState.queuedResponses.length = 0;
+		mockStealthState.queuedErrors.length = 0;
+		mockStealthState.queuedCloseErrors.length = 0;
+	});
+
+	it("propagates the operation request signal into ctx.stealth cancellation", async () => {
+		const { createServerAppAsync } = await import("../server/serve.js");
+		const app = await createServerAppAsync(createStealthAbortProvider());
+		const response = await startGatewayRequestAndAbort((signal) =>
+			app.request("/v1/cancelStealth", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req-operation-abort", input: {} }),
+				signal,
+			}),
+		);
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			data: {
+				code: "transport_cancelled",
+				instanceOfTransportError: true,
+				name: "TransportError",
+				retryable: false,
+				status: 0,
+			},
+		});
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
+		expect((mockStealthState.clients[0]?.calls[0]?.init?.signal as AbortSignal).aborted).toBe(true);
+	});
+
+	it("propagates the auth-flow request signal into ctx.stealth cancellation", async () => {
+		const { createServerAppAsync } = await import("../server/serve.js");
+		const app = await createServerAppAsync(createStealthAbortProvider());
+		const response = await startGatewayRequestAndAbort((signal) =>
+			app.request("/auth/start", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-auth-abort",
+					flowId: "flow-abort",
+					providerId: "stealth-abort-provider",
+					context: {},
+				}),
+				signal,
+			}),
+		);
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			data: {
+				kind: "abort",
+				turnId: "cancelled",
+				data: {
+					code: "transport_cancelled",
+					instanceOfTransportError: true,
+					name: "TransportError",
+					retryable: false,
+					status: 0,
+				},
+			},
+		});
+		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
+		expect((mockStealthState.clients[0]?.calls[0]?.init?.signal as AbortSignal).aborted).toBe(true);
 	});
 });
