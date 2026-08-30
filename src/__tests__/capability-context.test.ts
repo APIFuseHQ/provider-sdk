@@ -1,9 +1,19 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { defineProvider, type ProviderContextOf } from "../define.js";
+import {
+	defineOperation,
+	defineProvider,
+	defineStreamOperation,
+	type ProviderContextOf,
+} from "../define.js";
+import type { OperationDefinitionFor } from "../index.js";
+import type { ProviderDefinitionFor } from "../provider.js";
 import { executeOperation } from "../runtime/executor.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
+import { createServerApp } from "../server/serve.js";
+import { event } from "../stream.js";
+import type { OperationDefinition, ProviderContext, ProviderDefinition } from "../types.js";
 import { createProviderContextDouble } from "./test-utils.js";
 import factoredProvider from "./fixtures/capability-factored-provider.js";
 
@@ -92,6 +102,137 @@ describe("declaration-derived provider contexts", () => {
 
 	it("composes a separately authored context-bound operation", () => {
 		expect(factoredProvider.operations.factored).toBeDefined();
+	});
+
+	it("carries declaration-derived contexts through named operation and provider types", async () => {
+		const buildProvider = defineProvider({
+			id: "capability-context-carry",
+			version: "1.0.0",
+			runtime: "standard",
+			http: true,
+			meta,
+		});
+		type Context = ProviderContextOf<typeof buildProvider>;
+
+		// A: a named operation can call a sibling with the context it receives.
+		const child: OperationDefinitionFor<typeof buildProvider> = defineOperation<Context>()({
+			...operationSchemas,
+			async handler(ctx) {
+				void ctx.http;
+				return { ok: true };
+			},
+		});
+		const parent = defineOperation<Context>()({
+			...operationSchemas,
+			async handler(ctx) {
+				await child.handler(ctx, {});
+				// F: carrying the context must not expose undeclared capabilities.
+				// @ts-expect-error test-invalid: cache is absent from the declaration-derived context.
+				void ctx.cache;
+				return { ok: true };
+			},
+		});
+
+		// B: stream operations survive the context-preserving provider index signature.
+		const events = defineStreamOperation<Context>()({
+			input: z.object({}),
+			output: z.object({ ok: z.boolean() }),
+			transport: {
+				kind: "sse",
+				events: { status: z.object({ ok: z.boolean() }) },
+			},
+			async *handler(ctx) {
+				void ctx.http;
+				yield event("status", { ok: true });
+			},
+			healthCheckUnsupported: { reason: "type fixture" },
+		});
+
+		// C: a harness can retain the provider's derived handler context.
+		const provider: ProviderDefinitionFor<typeof buildProvider> = buildProvider({
+			operations: { child, parent, events },
+		});
+		const fullContext = createProviderContextDouble();
+		const ctx: Context = {
+			http: fullContext.http,
+			trace: fullContext.trace,
+			request: fullContext.request,
+		};
+		await provider.operations.child.handler(ctx, {});
+
+		// D: executeOperation retains the selected operation's carried context.
+		await executeOperation(provider, "child", ctx, {});
+
+		// E: utility projections can select declared and ambient context members.
+		const picked: Pick<Context, "http" | "trace"> = {
+			http: ctx.http,
+			trace: ctx.trace,
+		};
+		void picked;
+
+		// The server callback is contextually typed from the narrow provider.
+		const verifyServerExecutor = () =>
+			createServerApp(provider, {
+				operationExecutor: async ({ ctx: executorContext }) => {
+					void executorContext.http;
+					// @ts-expect-error test-invalid: server executors retain capability narrowing.
+					void executorContext.cache;
+					return { ok: true };
+				},
+			});
+		void verifyServerExecutor;
+
+		// G: today's bare annotations retain their wide default context.
+		const bareOperation: OperationDefinition = {
+			...operationSchemas,
+			async handler(bareContext) {
+				void bareContext.cache;
+				return { ok: true };
+			},
+		};
+		const bareProvider: ProviderDefinition = {
+			id: "capability-context-bare",
+			version: "1.0.0",
+			runtime: "standard",
+			meta,
+			operations: { bareOperation },
+		};
+		const bareContext: ProviderContext = fullContext;
+		await bareProvider.operations.bareOperation.handler(bareContext, {});
+
+		expect(provider.operations.events.transport?.kind).toBe("sse");
+	});
+
+	it("rejects a server provider whose context the runtime cannot build", () => {
+		// The public server factories are generic so a narrow provider can supply
+		// an operationExecutor without a cast, and they launder the provider
+		// through the wide runtime representation internally. That laundering is
+		// only sound while the context parameter stays within ProviderContext:
+		// an unconstrained parameter would let a provider demand members the SDK
+		// never supplies, and the handler would read undefined at runtime.
+		type ForeignContext = { upstreamSession: string };
+
+		const foreignProvider: ProviderDefinition<ForeignContext> = {
+			id: "capability-context-foreign",
+			version: "1.0.0",
+			runtime: "standard",
+			meta,
+			operations: {
+				probe: {
+					...operationSchemas,
+					async handler(ctx: ForeignContext) {
+						return { ok: ctx.upstreamSession.length > 0 };
+					},
+				},
+			},
+		};
+
+		const rejectsForeignContext = () =>
+			// @ts-expect-error test-invalid: the runtime never builds a foreign context.
+			createServerApp(foreignProvider);
+		void rejectsForeignContext;
+
+		expect(foreignProvider.id).toBe("capability-context-foreign");
 	});
 
 	it("executes with the selected operation's declaration-derived context", async () => {

@@ -2892,6 +2892,16 @@ export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer
 	? ProviderContextFor<TDeclaration>
 	: never;
 
+/** Annotate an operation while preserving the declaration-derived context. */
+export type OperationDefinitionFor<
+	TBuilder,
+	TInput extends SchemaLike = SchemaLike,
+	TOutput extends SchemaLike = SchemaLike,
+> = OperationDefinition<TInput, TOutput, ProviderContextOf<TBuilder>>;
+
+/** Annotate a built provider while preserving the declaration-derived context. */
+export type ProviderDefinitionFor<TBuilder> = ProviderDefinition<ProviderContextOf<TBuilder>>;
+
 /** Establish a provider declaration before its operations are contextually typed. */
 export function defineProvider<const TDeclaration extends ProviderDeclaration>(
 	declaration: TDeclaration &

@@ -2390,7 +2390,7 @@ interface ProviderContext {
 }
 
 // @public (undocumented)
-interface ProviderDefinition {
+interface ProviderDefinition<TContext = ProviderContext> {
     // Warning: (ae-forgotten-export) The symbol "ProviderAccessConfig" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -2442,7 +2442,7 @@ interface ProviderDefinition {
     // Warning: (ae-forgotten-export) The symbol "OperationDefinition" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
-    operations: Record<string, OperationDefinition<SchemaLike, SchemaLike>>;
+    operations: Record<string, OperationDefinition<SchemaLike, SchemaLike, TContext>>;
     // Warning: (ae-forgotten-export) The symbol "ProviderProxyConfig" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
