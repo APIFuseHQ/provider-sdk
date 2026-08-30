@@ -2409,7 +2409,7 @@ describe("provider HTTP server", () => {
 		return Object.getOwnPropertyDescriptor(event ?? {}, "causeChain")?.value;
 	}
 
-	it("keeps structurally safe redacted cause messages and collapses residual credential text", async () => {
+	it("logs readable redacted messages for every frame in a nested cause chain", async () => {
 		const bearerToken = "fake.header.signature";
 		const email = "person@example.com";
 		const password = "hunter2";
@@ -2464,7 +2464,7 @@ describe("provider HTTP server", () => {
 			{
 				errorClass: "ProviderError",
 				code: "INNER_CODE",
-				message: "[UNSTRUCTURED_UPSTREAM_TEXT]",
+				message: redactedCauseMessages[2],
 				messageLength: rawCauseMessages[2].length,
 				messageFingerprint: causeFingerprint(rawCauseMessages[2]),
 			},
@@ -2526,7 +2526,6 @@ describe("provider HTTP server", () => {
 	it("redacts adversarial cause messages without dropping useful context", async () => {
 		const opaqueToken = "tok_fake_Qj8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS";
 		const traceId = "0123456789abcdef0123456789abcdef";
-		const punctuationPassword = "P@ssw0rd!";
 		const cases = [
 			{
 				name: "opaque token",
@@ -2545,23 +2544,16 @@ describe("provider HTTP server", () => {
 			{
 				name: "control characters and newline",
 				raw: "worker line one\nline two\u0000\u001b[31m failed",
-				logged: "[UNSTRUCTURED_UPSTREAM_TEXT]",
+				logged: "worker line one line two\\u0000\\u001b[31m failed",
 				removed: ["\n", "\u0000", "\u001b"],
-				survives: [],
+				survives: ["worker line one", "line two", "failed"],
 			},
 			{
 				name: "trace id",
 				raw: `lookup trace_id=${traceId} password=secret-value failed`,
-				logged: "[UNSTRUCTURED_UPSTREAM_TEXT]",
-				removed: [traceId, "secret-value"],
-				survives: [],
-			},
-			{
-				name: "punctuation-heavy bare password",
-				raw: `upstream failed ${punctuationPassword}`,
-				logged: "[UNSTRUCTURED_UPSTREAM_TEXT]",
-				removed: [punctuationPassword],
-				survives: [],
+				logged: `lookup trace_id=${traceId} password=[REDACTED] failed`,
+				removed: ["secret-value"],
+				survives: ["lookup", `trace_id=${traceId}`, "failed"],
 			},
 		];
 
@@ -2596,7 +2588,7 @@ describe("provider HTTP server", () => {
 	});
 
 	it("visibly truncates sanitized cause messages after 300 characters", async () => {
-		const rawMessage = `upstream: ${"more detail ".repeat(40)}end`;
+		const rawMessage = `upstream diagnostic: ${"ordinary detail ".repeat(30)}final detail`;
 		const events: ProviderServerLogEvent[] = [];
 		await requestCauseError(
 			createCauseErrorApp(
@@ -2616,87 +2608,9 @@ describe("provider HTTP server", () => {
 			messageLength: rawMessage.length,
 			messageFingerprint: causeFingerprint(rawMessage),
 		});
-		expect(frame?.message).toStartWith("upstream: more detail");
-		expect(frame?.message).not.toContain("end");
+		expect(frame?.message).toStartWith("upstream diagnostic: ordinary detail");
+		expect(frame?.message).not.toContain("final detail");
 		expect(frame?.message).toEndWith("… [truncated]");
-	});
-
-	it("collapses unstructured upstream cause text while preserving original correlation metadata", async () => {
-		const rawMessage =
-			"upstream completion text member@example.com fixture-password fixture-token session_cookie=fixture-cookie";
-		const events: ProviderServerLogEvent[] = [];
-		await requestCauseError(
-			createCauseErrorApp(
-				() =>
-					new ProviderError("Public message", {
-						code: "UNSTRUCTURED_CAUSE",
-						cause: new Error(rawMessage),
-					}),
-				events,
-			),
-		);
-
-		expect(loggedCauseChain(events[0])?.[0]).toEqual({
-			errorClass: "Error",
-			message: "[UNSTRUCTURED_UPSTREAM_TEXT]",
-			messageLength: rawMessage.length,
-			messageFingerprint: causeFingerprint(rawMessage),
-		});
-		const serializedEvent = JSON.stringify(events[0]);
-		for (const forbidden of [
-			"member@example.com",
-			"fixture-password",
-			"fixture-token",
-			"fixture-cookie",
-			"upstream completion text",
-		]) {
-			expect(serializedEvent).not.toContain(forbidden);
-		}
-	});
-
-	it("keeps a structurally safe SDK-authored cause diagnostic readable", async () => {
-		const message = "NOL login completion failed upstream.";
-		const events: ProviderServerLogEvent[] = [];
-		await requestCauseError(
-			createCauseErrorApp(
-				() =>
-					new ProviderError("Public message", {
-						code: "SAFE_SDK_CAUSE",
-						cause: new TransportError(message, { code: "UPSTREAM_ERROR" }),
-					}),
-				events,
-			),
-		);
-
-		expect(loggedCauseChain(events[0])?.[0]).toEqual({
-			errorClass: "TransportError",
-			code: "UPSTREAM_ERROR",
-			message,
-			messageLength: message.length,
-			messageFingerprint: causeFingerprint(message),
-		});
-	});
-
-	it("keeps a fully sanitized structured cause diagnostic readable", async () => {
-		const message = "request failed with status=502 retry=true";
-		const events: ProviderServerLogEvent[] = [];
-		await requestCauseError(
-			createCauseErrorApp(
-				() =>
-					new ProviderError("Public message", {
-						code: "SAFE_STRUCTURED_CAUSE",
-						cause: new Error(message),
-					}),
-				events,
-			),
-		);
-
-		expect(loggedCauseChain(events[0])?.[0]).toEqual({
-			errorClass: "Error",
-			message,
-			messageLength: message.length,
-			messageFingerprint: causeFingerprint(message),
-		});
 	});
 
 	it("emits validated outer provider observability in the log and header", async () => {

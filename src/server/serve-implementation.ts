@@ -23,10 +23,7 @@ import {
 	type ProviderErrorObservability,
 	type ProviderErrorOptions,
 } from "../errors.js";
-import {
-	REDACTED_FIXTURE_VALUE,
-	sanitizeDiagnosticText,
-} from "../fixture-sanitization.js";
+import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import {
 	loadProviderLocaleCatalogs,
 	localizeAuthTurn,
@@ -1526,48 +1523,9 @@ export type ProviderErrorCauseFrame = {
 
 const MAX_PROVIDER_ERROR_CAUSE_FRAMES = 5;
 const MAX_PROVIDER_ERROR_CAUSE_MESSAGE_LENGTH = 300;
-const UNSTRUCTURED_PROVIDER_ERROR_CAUSE_MESSAGE = "[UNSTRUCTURED_UPSTREAM_TEXT]";
-const PROVIDER_ERROR_CAUSE_RETAINED_URL_RUN = /https?:\/\/[^\s"'<>]+/giu;
-const PROVIDER_ERROR_CAUSE_TOKEN_RUN = /\S+/gu;
-const PROVIDER_ERROR_CAUSE_TOKEN_EDGE_PUNCTUATION =
-	/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu;
-const STRUCTURALLY_SAFE_PROVIDER_ERROR_CAUSE_WORDS = new Set([
-	"completion",
-	"diagnostic",
-	"provider",
-	"rejected",
-	"returned",
-	"upstream",
-]);
-
-/**
- * Cause frames fail closed when sanitization leaves a plausible credential-shaped free-text run.
- * Redaction sentinels and retained URLs are ignored. Every other whitespace token (or each side
- * of a structured key=value token) with at least eight Unicode characters must reduce to this
- * small vocabulary drawn from SDK diagnostics; counting punctuation keeps bare passwords opaque.
- */
-function isStructurallySafeProviderErrorCauseMessage(message: string): boolean {
-	const classifiableMessage = message
-		.replaceAll(REDACTED_FIXTURE_VALUE, " ")
-		.replace(PROVIDER_ERROR_CAUSE_RETAINED_URL_RUN, " ");
-	for (const match of classifiableMessage.matchAll(PROVIDER_ERROR_CAUSE_TOKEN_RUN)) {
-		const token = match[0];
-		for (const run of token.split("=")) {
-			const diagnosticWord = run
-				.replace(PROVIDER_ERROR_CAUSE_TOKEN_EDGE_PUNCTUATION, "")
-				.toLowerCase();
-			if (STRUCTURALLY_SAFE_PROVIDER_ERROR_CAUSE_WORDS.has(diagnosticWord)) continue;
-			if ([...run].length >= 8) return false;
-		}
-	}
-	return true;
-}
 
 function providerErrorCauseMessage(message: string): string {
 	const sanitized = sanitizeDiagnosticText(message);
-	if (!isStructurallySafeProviderErrorCauseMessage(sanitized)) {
-		return UNSTRUCTURED_PROVIDER_ERROR_CAUSE_MESSAGE;
-	}
 	return sanitized.length > MAX_PROVIDER_ERROR_CAUSE_MESSAGE_LENGTH
 		? `${sanitized.slice(0, MAX_PROVIDER_ERROR_CAUSE_MESSAGE_LENGTH)}… [truncated]`
 		: sanitized;
