@@ -4003,6 +4003,10 @@ export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer
 // @public (undocumented)
 type ProviderContractMetaLike = {
     publicSchemaFieldNames?: "normalized";
+    pinnedWireFieldPaths?: readonly {
+        readonly path: string;
+        readonly reason: string;
+    }[];
 };
 
 // @public (undocumented)
@@ -4144,6 +4148,10 @@ export interface ProviderDeclaration {
         implementationProfile?: ProviderImplementationProfile;
         contract?: {
             publicSchemaFieldNames?: "normalized";
+            readonly pinnedWireFieldPaths?: readonly {
+                readonly path: string;
+                readonly reason: string;
+            }[];
         };
     };
     // (undocumented)
@@ -4450,6 +4458,10 @@ export interface ProviderMeta {
     // (undocumented)
     contract?: {
         publicSchemaFieldNames?: "normalized";
+        readonly pinnedWireFieldPaths?: readonly {
+            readonly path: string;
+            readonly reason: string;
+        }[];
     };
     // (undocumented)
     descriptionKey: ProviderLocaleKeyInput;
@@ -6912,11 +6924,11 @@ export { z }
 // dist/config/loader.d.ts:106:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:26:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:103:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:127:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:131:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:3:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:24:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:43:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:75:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:28:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:56:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:88:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
 // dist/runtime/choice.d.ts:22:5 - (ae-forgotten-export) The symbol "ProviderChoiceTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:27:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
@@ -6928,11 +6940,11 @@ export { z }
 // dist/server/serve-implementation.d.ts:152:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:212:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:664:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1528:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1652:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1710:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1718:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1719:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1532:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1656:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1714:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1722:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1723:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

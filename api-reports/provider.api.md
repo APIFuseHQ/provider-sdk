@@ -3458,6 +3458,10 @@ export interface ProviderDeclaration {
         implementationProfile?: ProviderImplementationProfile;
         contract?: {
             publicSchemaFieldNames?: "normalized";
+            readonly pinnedWireFieldPaths?: readonly {
+                readonly path: string;
+                readonly reason: string;
+            }[];
         };
     };
     // (undocumented)
@@ -3736,6 +3740,10 @@ interface ProviderMeta {
     // (undocumented)
     contract?: {
         publicSchemaFieldNames?: "normalized";
+        readonly pinnedWireFieldPaths?: readonly {
+            readonly path: string;
+            readonly reason: string;
+        }[];
     };
     // (undocumented)
     descriptionKey: ProviderLocaleKeyInput;
@@ -5501,7 +5509,7 @@ export { z }
 // dist/define.d.ts:15:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:62:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:103:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:127:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:131:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
 // dist/errors.d.ts:8:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:15:5 - (ae-forgotten-export) The symbol "EnvContext" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point provider.d.ts
@@ -5514,15 +5522,15 @@ export { z }
 // dist/types.d.ts:675:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:866:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:871:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1170:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1170:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1475:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1481:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1482:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1486:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1493:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1528:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1652:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1174:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1174:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1479:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1485:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1486:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1490:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1497:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1532:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1656:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

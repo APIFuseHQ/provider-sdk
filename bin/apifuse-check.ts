@@ -17,7 +17,7 @@ import {
 } from "../src/declaration-validation.js";
 import { isProviderError } from "../src/errors.js";
 import type { ProviderDefinition } from "../src/index.js";
-import { lintProvider, type ProviderLintMode } from "../src/lint.js";
+import { lintProviderWithInformation, type ProviderLintMode } from "../src/lint.js";
 import { safeParseSchemaSync } from "../src/schema.js";
 
 const HELP_TEXT = `Usage: apifuse check [path]
@@ -379,12 +379,21 @@ function checkAuthoringLint(
 		};
 	}
 
-	const diagnostics = lintProvider({ ...provider, providerSourceFiles }, { mode: lintMode });
+	const { diagnostics, information } = lintProviderWithInformation(
+		{ ...provider, providerSourceFiles },
+		{ mode: lintMode },
+	);
 	const errors = diagnostics.filter((diagnostic) => diagnostic.level === "error");
-	const details = diagnostics.map((diagnostic) => {
-		const field = diagnostic.field ? `${diagnostic.field}: ` : "";
-		return `${diagnostic.level.toUpperCase()} ${diagnostic.rule} ${field}${diagnostic.message}`;
+	const details = information.map((entry) => {
+		const field = entry.field ? `${entry.field}: ` : "";
+		return `INFO ${entry.rule} ${field}${entry.message}`;
 	});
+	details.push(
+		...diagnostics.map((diagnostic) => {
+			const field = diagnostic.field ? `${diagnostic.field}: ` : "";
+			return `${diagnostic.level.toUpperCase()} ${diagnostic.rule} ${field}${diagnostic.message}`;
+		}),
+	);
 
 	return {
 		message: "Provider authoring lint has no error-level diagnostics",

@@ -1,12 +1,151 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { lintProvider } from "../lint.js";
+import { defineProvider } from "../define.js";
+import { lintProvider, lintProviderWithInformation } from "../lint.js";
 
 const OPERATION_DESCRIPTION =
 	"Use this operation when callers need normalized commerce search results and when the provider must keep upstream parameter and response names behind the APIFuse mapping boundary.";
 
 describe("public provider schema field lint", () => {
+	it("suppresses only the exact pinned diagnostic and keeps an unpinned sibling enforced", () => {
+		const provider = {
+			id: "wire-protocol",
+			allowedHosts: ["checkout.example.com"],
+			reviewed: "first-party",
+			meta: {
+				contract: {
+					publicSchemaFieldNames: "normalized" as const,
+					pinnedWireFieldPaths: [
+						{
+							path: "operations.start-checkout.output.form_fields.authInfo",
+							reason: "Posted verbatim to the upstream checkout form endpoint.",
+						},
+					],
+				},
+			},
+			operations: {
+				"start-checkout": {
+					description: OPERATION_DESCRIPTION,
+					input: z.object({}),
+					output: z.object({
+						form_fields: z.object({
+							authInfo: z.string(),
+							userAgent: z.string(),
+						}),
+					}),
+					fixtures: {
+						request: {},
+						response: { form_fields: { authInfo: "auth", userAgent: "agent" } },
+					},
+				},
+			},
+		};
+
+		const result = lintProviderWithInformation(provider);
+		const fieldDiagnostics = result.diagnostics.filter(
+			(diagnostic) => diagnostic.rule === "public-schema-upstream-field",
+		);
+
+		expect(fieldDiagnostics.map((diagnostic) => diagnostic.field)).toEqual([
+			"operations.start-checkout.output.form_fields.userAgent",
+		]);
+		expect(result.information).toEqual([
+			expect.objectContaining({
+				rule: "public-schema-pinned-wire-field",
+				field: "operations.start-checkout.output.form_fields.authInfo",
+				message: expect.stringContaining("Posted verbatim"),
+			}),
+		]);
+	});
+
+	it("reports stale pins and treats glob-like paths as exact literals", () => {
+		const diagnostics = lintProvider({
+			id: "literal-pins",
+			allowedHosts: ["checkout.example.com"],
+			reviewed: "first-party",
+			meta: {
+				contract: {
+					publicSchemaFieldNames: "normalized",
+					pinnedWireFieldPaths: [
+						{
+							path: "operations.checkout.output.form_fields.*",
+							reason: "A glob-like spelling must remain a literal path.",
+						},
+						{
+							path: "operations.checkout.output.form_fields.removedField",
+							reason: "This path is intentionally stale for the test.",
+						},
+					],
+				},
+			},
+			operations: {
+				checkout: {
+					description: OPERATION_DESCRIPTION,
+					input: z.object({}),
+					output: z.object({ form_fields: z.object({ authInfo: z.string() }) }),
+					fixtures: { request: {}, response: { form_fields: { authInfo: "auth" } } },
+				},
+			},
+		});
+
+		expect(
+			diagnostics
+				.filter((diagnostic) => diagnostic.rule === "public-schema-upstream-field")
+				.map((diagnostic) => diagnostic.field),
+		).toEqual(["operations.checkout.output.form_fields.authInfo"]);
+		expect(
+			diagnostics
+				.filter((diagnostic) => diagnostic.rule === "public-schema-pinned-wire-field-stale")
+				.map((diagnostic) => diagnostic.field),
+		).toEqual([
+			"operations.checkout.output.form_fields.*",
+			"operations.checkout.output.form_fields.removedField",
+		]);
+	});
+
+	it("rejects pinned paths with empty or missing reasons during declaration validation", () => {
+		const declaration = {
+			id: "pinned-validation",
+			version: "1.0.0",
+			runtime: "standard" as const,
+			meta: {
+				displayName: "Pinned Validation",
+				descriptionKey: "providers.pinnedValidation.description",
+				category: "test",
+				contract: { publicSchemaFieldNames: "normalized" as const },
+			},
+		};
+		const path = "operations.checkout.output.form_fields.authInfo";
+
+		expect(() =>
+			defineProvider({
+				...declaration,
+				meta: {
+					...declaration.meta,
+					contract: {
+						...declaration.meta.contract,
+						pinnedWireFieldPaths: [{ path, reason: "   " }],
+					},
+				},
+			}),
+		).toThrow(/reason must be a non-empty string/);
+
+		expect(() =>
+			defineProvider({
+				...declaration,
+				meta: {
+					...declaration.meta,
+					contract: {
+						...declaration.meta.contract,
+						// @ts-expect-error test-invalid: declaration validation must reject a missing reason at runtime.
+						pinnedWireFieldPaths: [{ path }],
+					},
+				},
+			}),
+		).toThrow(/reason must be a non-empty string/);
+	});
+
 	it("reports upstream-shaped public schema fields with provider and operation context", () => {
 		const diagnostics = lintProvider({
 			id: "example-commerce",

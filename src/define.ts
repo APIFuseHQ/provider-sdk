@@ -638,6 +638,10 @@ export interface ProviderDeclaration {
 		implementationProfile?: ProviderImplementationProfile;
 		contract?: {
 			publicSchemaFieldNames?: "normalized";
+			readonly pinnedWireFieldPaths?: readonly {
+				readonly path: string;
+				readonly reason: string;
+			}[];
 		};
 	};
 	healthMonitor?: ProviderHealthMonitorConfig;

@@ -21,6 +21,7 @@ export const DECLARATION_RULE_IDS = {
 	proxyNoMixedVendors: "proxy-no-mixed-vendors",
 	proxySmartproxyGeo: "proxy-smartproxy-country-only",
 	operationUpstreamProxy: "operation-upstream-proxy-unsupported",
+	pinnedWireFieldPathValid: "public-schema-pinned-wire-field-valid",
 } as const;
 
 export type DeclarationRuleId =
@@ -53,13 +54,14 @@ export function declarationInvalidError(
 export function validateFailClosedDeclaration(provider: ProviderDefinition): void {
 	const violations: DeclarationViolation[] = [];
 	validateHealthDeclaration(provider, violations);
+	validatePinnedWireFieldPaths(provider, violations);
 	validateSchemaDeclaration(provider, violations);
 	validateProxyDeclaration(provider, violations);
 	validateOperationDeclaration(provider, violations);
 	if (violations.length > 0) throw declarationInvalidError(violations);
 }
 
-type ProviderDeclarationRulesInput = Pick<ProviderDefinition, "healthJourneys" | "proxy">;
+type ProviderDeclarationRulesInput = Pick<ProviderDefinition, "healthJourneys" | "meta" | "proxy">;
 type OperationDeclarationRulesInput = Pick<ProviderDefinition, "operations">;
 
 /** Enforces fail-closed rules that only depend on the provider declaration. */
@@ -85,7 +87,69 @@ function collectProviderDeclarationViolations(
 	violations: DeclarationViolation[],
 ): void {
 	validateHealthDeclaration(provider, violations);
+	validatePinnedWireFieldPaths(provider, violations);
 	validateProxyDeclaration(provider, violations);
+}
+
+function validatePinnedWireFieldPaths(
+	provider: ProviderDeclarationRulesInput,
+	violations: DeclarationViolation[],
+): void {
+	const pins = provider.meta?.contract?.pinnedWireFieldPaths;
+	if (pins === undefined) return;
+
+	if (!Array.isArray(pins)) {
+		violations.push({
+			ruleId: DECLARATION_RULE_IDS.pinnedWireFieldPathValid,
+			path: "meta.contract.pinnedWireFieldPaths",
+			message: "pinned wire field paths must be an array.",
+			fix: "Declare a readonly array of { path, reason } entries.",
+		});
+		return;
+	}
+
+	const seenPaths = new Set<string>();
+	for (const [index, pin] of pins.entries()) {
+		const entryPath = `meta.contract.pinnedWireFieldPaths[${index}]`;
+		if (!pin || typeof pin !== "object" || Array.isArray(pin)) {
+			violations.push({
+				ruleId: DECLARATION_RULE_IDS.pinnedWireFieldPathValid,
+				path: entryPath,
+				message: "each pinned wire field path must be an object.",
+				fix: `Replace ${entryPath} with { path: "operations.<operation-id>.<field-path>", reason: "<non-empty reason>" }.`,
+			});
+			continue;
+		}
+
+		const path = "path" in pin ? pin.path : undefined;
+		const reason = "reason" in pin ? pin.reason : undefined;
+		if (typeof path !== "string" || path.trim().length === 0) {
+			violations.push({
+				ruleId: DECLARATION_RULE_IDS.pinnedWireFieldPathValid,
+				path: `${entryPath}.path`,
+				message: "path must be a non-empty string.",
+				fix: `Set ${entryPath}.path to the exact public-schema-upstream-field diagnostic path.`,
+			});
+		} else if (seenPaths.has(path)) {
+			violations.push({
+				ruleId: DECLARATION_RULE_IDS.pinnedWireFieldPathValid,
+				path: `${entryPath}.path`,
+				message: `duplicate pinned wire field path ${JSON.stringify(path)}.`,
+				fix: `Keep exactly one declaration for ${JSON.stringify(path)}.`,
+			});
+		} else {
+			seenPaths.add(path);
+		}
+
+		if (typeof reason !== "string" || reason.trim().length === 0) {
+			violations.push({
+				ruleId: DECLARATION_RULE_IDS.pinnedWireFieldPathValid,
+				path: `${entryPath}.reason`,
+				message: "reason must be a non-empty string.",
+				fix: `Document why renaming the exact wire field would break the upstream contract.`,
+			});
+		}
+	}
 }
 
 function collectOperationDeclarationViolations(

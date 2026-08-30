@@ -120,6 +120,10 @@ function isAuthLifecycleOperationId(operationId: string, authMode: string): bool
 
 type ProviderContractMetaLike = {
 	publicSchemaFieldNames?: "normalized";
+	pinnedWireFieldPaths?: readonly {
+		readonly path: string;
+		readonly reason: string;
+	}[];
 };
 
 type SchemaLike = ZodType & {
@@ -152,6 +156,17 @@ export type ProviderLintMode = "official" | "standalone";
 type ProviderLintOptions = {
 	mode?: ProviderLintMode;
 };
+
+export interface ProviderLintInformation {
+	rule: string;
+	message: string;
+	field?: string;
+}
+
+export interface ProviderLintResult {
+	diagnostics: LintDiagnostic[];
+	information: ProviderLintInformation[];
+}
 
 type ProviderSourceLike = {
 	authFlowSource?: string;
@@ -1298,6 +1313,67 @@ export function lintOperation(op: {
 	return diagnostics;
 }
 
+function declaredPinnedWireFieldPaths(provider: {
+	meta?: { contract?: ProviderContractMetaLike };
+}): readonly { readonly path: string; readonly reason: string }[] {
+	const pins = provider.meta?.contract?.pinnedWireFieldPaths;
+	if (!Array.isArray(pins)) return [];
+	return pins.filter(
+		(pin) =>
+			pin !== null &&
+			typeof pin === "object" &&
+			typeof pin.path === "string" &&
+			pin.path.trim().length > 0 &&
+			typeof pin.reason === "string" &&
+			pin.reason.trim().length > 0,
+	);
+}
+
+function applyPinnedWireFieldPaths(
+	provider: { meta?: { contract?: ProviderContractMetaLike } },
+	diagnostics: readonly LintDiagnostic[],
+): ProviderLintResult {
+	const pins = declaredPinnedWireFieldPaths(provider);
+	if (pins.length === 0) {
+		return { diagnostics: [...diagnostics], information: [] };
+	}
+
+	const pinsByPath = new Map(pins.map((pin) => [pin.path, pin]));
+	const matchedPaths = new Set<string>();
+	const remainingDiagnostics = diagnostics.filter((diagnostic) => {
+		if (
+			diagnostic.rule !== "public-schema-upstream-field" ||
+			diagnostic.field === undefined ||
+			!pinsByPath.has(diagnostic.field)
+		) {
+			return true;
+		}
+		matchedPaths.add(diagnostic.field);
+		return false;
+	});
+
+	const information: ProviderLintInformation[] = [];
+	for (const pin of pins) {
+		if (matchedPaths.has(pin.path)) {
+			information.push({
+				rule: "public-schema-pinned-wire-field",
+				field: pin.path,
+				message: `Suppressed exact public-schema-upstream-field diagnostic. Reason: ${pin.reason}`,
+			});
+			continue;
+		}
+
+		remainingDiagnostics.push({
+			rule: "public-schema-pinned-wire-field-stale",
+			level: "error",
+			field: pin.path,
+			message: `Pinned wire field path ${JSON.stringify(pin.path)} matches no current public-schema-upstream-field diagnostic; remove the stale declaration.`,
+		});
+	}
+
+	return { diagnostics: remainingDiagnostics, information };
+}
+
 export function lintProvider(
 	provider: {
 		id?: string;
@@ -1340,6 +1416,14 @@ export function lintProvider(
 	},
 	options: ProviderLintOptions = {},
 ): LintDiagnostic[] {
+	return lintProviderWithInformation(provider, options).diagnostics;
+}
+
+/** Internal detailed result used by the CLI to render suppression audits. */
+export function lintProviderWithInformation(
+	provider: Parameters<typeof lintProvider>[0],
+	options: ProviderLintOptions = {},
+): ProviderLintResult {
 	const diagnostics: LintDiagnostic[] = [
 		...lintAllowedHosts(provider.id, provider.allowedHosts),
 		...lintReviewed(provider.id, provider.reviewed),
@@ -1375,7 +1459,7 @@ export function lintProvider(
 	}
 
 	if (!provider.operations) {
-		return diagnostics;
+		return applyPinnedWireFieldPaths(provider, diagnostics);
 	}
 
 	diagnostics.push(
@@ -1411,5 +1495,5 @@ export function lintProvider(
 		),
 	);
 
-	return diagnostics;
+	return applyPinnedWireFieldPaths(provider, diagnostics);
 }
