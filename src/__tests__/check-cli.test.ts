@@ -342,6 +342,71 @@ export default {
 		expect(authoring?.passed).toBe(true);
 	});
 
+	it("shows exact pinned wire-field suppressions as informational details", async () => {
+		const providerDir = makeProviderDir("apifuse-check-pinned-wire-info-");
+		writeValidLocaleCatalogs(providerDir);
+		writeFileSync(
+			join(providerDir, "index.ts"),
+			`
+import { describeKey, z } from "@apifuse/provider-sdk";
+
+const input = describeKey(z.object({}), "operations.checkout.input.description");
+const output = describeKey(
+  z.object({
+    form_fields: describeKey(
+      z.object({
+        authInfo: describeKey(z.string(), "operations.checkout.fields.authInfo.description"),
+      }),
+      "operations.checkout.fields.formFields.description",
+    ),
+  }),
+  "operations.checkout.output.description",
+);
+
+export default {
+  id: "pinned-wire-provider",
+  version: "1.0.0",
+  runtime: "standard",
+  allowedHosts: ["checkout.example.com"],
+  reviewed: "community",
+  auth: { mode: "none" },
+  meta: {
+    displayName: "Pinned Wire Provider",
+    category: "other",
+    contract: {
+      publicSchemaFieldNames: "normalized",
+      pinnedWireFieldPaths: [{
+        path: "operations.checkout.output.form_fields.authInfo",
+        reason: "Posted verbatim to the official checkout endpoint.",
+      }],
+    },
+  },
+  operations: {
+    checkout: {
+      descriptionKey: "operations.checkout.description",
+      input,
+      output,
+      handler: async () => ({ form_fields: { authInfo: "auth" } }),
+      fixtures: { request: {}, response: { form_fields: { authInfo: "auth" } } },
+      healthCheckUnsupported: { reason: "Unit test operation." },
+    },
+  },
+};
+`,
+		);
+
+		const results = await runChecks(providerDir);
+		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
+		const details = authoring?.details?.join("\n") ?? "";
+
+		expect(authoring?.passed).toBe(true);
+		expect(details).toContain(
+			"INFO public-schema-pinned-wire-field operations.checkout.output.form_fields.authInfo",
+		);
+		expect(details).toContain("Posted verbatim to the official checkout endpoint.");
+		expect(details).not.toContain("ERROR public-schema-upstream-field");
+	});
+
 	it("fails official authoring lint for nested self-hosted browser source and entrypoint scripts", async () => {
 		const providerDir = makeProviderDir("apifuse-check-browser-lint-fail-");
 		writeValidLocaleCatalogs(providerDir);

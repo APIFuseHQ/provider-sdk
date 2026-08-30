@@ -1130,6 +1130,10 @@ export interface ProviderMeta {
 	publicProfile?: ProviderPublicProfile;
 	contract?: {
 		publicSchemaFieldNames?: "normalized";
+		readonly pinnedWireFieldPaths?: readonly {
+			readonly path: string;
+			readonly reason: string;
+		}[];
 	};
 }
 
