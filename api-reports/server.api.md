@@ -568,11 +568,13 @@ export function createSelfTestInvoke(app: {
     request: (input: string, requestInit?: RequestInit) => Response | Promise<Response>;
 }): SelfTestOperationInvoke;
 
+// Warning: (ae-forgotten-export) The symbol "ProviderContext" needs to be exported by the entry point index.d.ts
+//
 // @public
-export function createServerApp(provider: ProviderDefinition, options?: ProviderServerOptions): Hono;
+export function createServerApp<TContext extends Partial<ProviderContext> = ProviderContext>(provider: ProviderDefinition<TContext>, options?: ProviderServerOptions<TContext>): Hono;
 
 // @public
-export function createServerAppAsync(provider: ProviderDefinition, options?: ProviderServerOptions): Promise<Hono>;
+export function createServerAppAsync<TContext extends Partial<ProviderContext> = ProviderContext>(provider: ProviderDefinition<TContext>, options?: ProviderServerOptions<TContext>): Promise<Hono>;
 
 // @public (undocumented)
 interface CredentialContext {
@@ -1689,8 +1691,6 @@ interface OperationContractMetadata {
     version?: string;
 }
 
-// Warning: (ae-forgotten-export) The symbol "ProviderContext" needs to be exported by the entry point index.d.ts
-//
 // @public (undocumented)
 interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike, TContext = ProviderContext> {
     // Warning: (ae-forgotten-export) The symbol "OperationAnnotations" needs to be exported by the entry point index.d.ts
@@ -2665,7 +2665,7 @@ interface ProviderContext {
 }
 
 // @public (undocumented)
-interface ProviderDefinition {
+interface ProviderDefinition<TContext = ProviderContext> {
     // Warning: (ae-forgotten-export) The symbol "ProviderAccessConfig" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -2715,7 +2715,7 @@ interface ProviderDefinition {
     // (undocumented)
     ocr?: ProviderOcrConfig;
     // (undocumented)
-    operations: Record<string, OperationDefinition<SchemaLike, SchemaLike>>;
+    operations: Record<string, OperationDefinition<SchemaLike, SchemaLike, TContext>>;
     // Warning: (ae-forgotten-export) The symbol "ProviderProxyConfig" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -3141,13 +3141,13 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
 export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
 
 // @public (undocumented)
-export type ProviderServerOperationExecutor = (input: ProviderServerOperationExecutorInput) => Promise<unknown>;
+export type ProviderServerOperationExecutor<TContext extends Partial<ProviderContext> = ProviderContext> = (input: ProviderServerOperationExecutorInput<TContext>) => Promise<unknown>;
 
 // @public (undocumented)
-export type ProviderServerOperationExecutorInput = {
-    readonly provider: ProviderDefinition;
+export type ProviderServerOperationExecutorInput<TContext extends Partial<ProviderContext> = ProviderContext> = {
+    readonly provider: ProviderDefinition<TContext>;
     readonly operationId: string;
-    readonly ctx: ProviderContext;
+    readonly ctx: TContext;
     readonly request: OperationRequest & {
         readonly deadlineAt?: string;
     };
@@ -3156,10 +3156,10 @@ export type ProviderServerOperationExecutorInput = {
 };
 
 // @public (undocumented)
-export type ProviderServerOptions = {
+export type ProviderServerOptions<TContext extends Partial<ProviderContext> = ProviderContext> = {
     logger?: ProviderServerLogger;
-    operationExecutor?: ProviderServerOperationExecutor;
-    internalOperationExecutor?: ProviderServerOperationExecutor;
+    operationExecutor?: ProviderServerOperationExecutor<TContext>;
+    internalOperationExecutor?: ProviderServerOperationExecutor<TContext>;
     statefulForwarding?: {
         readonly secret: string;
         readonly maxSkewMs?: number;
@@ -4049,10 +4049,10 @@ export interface SelfTestResponse {
 }
 
 // @public (undocumented)
-export function serve(provider: ProviderDefinition, options?: ServeOptions): Promise<ProviderServerHandle>;
+export function serve<TContext extends Partial<ProviderContext> = ProviderContext>(provider: ProviderDefinition<TContext>, options?: ServeOptions<TContext>): Promise<ProviderServerHandle>;
 
 // @public (undocumented)
-export interface ServeOptions extends ProviderServerOptions {
+export interface ServeOptions<TContext extends Partial<ProviderContext> = ProviderContext> extends ProviderServerOptions<TContext> {
     // (undocumented)
     host?: string;
     // (undocumented)

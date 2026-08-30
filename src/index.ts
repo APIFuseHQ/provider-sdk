@@ -37,9 +37,11 @@ export {
 	defineStreamOperation,
 	every,
 	type AuthStartNoInputGuard,
+	type OperationDefinitionFor,
 	type ProviderBuilder,
 	type ProviderContextOf,
 	type ProviderDeclaration,
+	type ProviderDefinitionFor,
 } from "./define.js";
 export {
 	AssertionExpressionSchema,

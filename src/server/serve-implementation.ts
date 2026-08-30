@@ -234,17 +234,21 @@ export type ProviderServerStatefulOwnerFenceValidator = (
 	signal: AbortSignal,
 ) => boolean | Promise<boolean>;
 
-export type ProviderServerOperationExecutorInput = {
-	readonly provider: ProviderDefinition;
+export type ProviderServerOperationExecutorInput<
+	TContext extends Partial<ProviderContext> = ProviderContext,
+> = {
+	readonly provider: ProviderDefinition<TContext>;
 	readonly operationId: string;
-	readonly ctx: ProviderContext;
+	readonly ctx: TContext;
 	readonly request: OperationRequest & { readonly deadlineAt?: string };
 	readonly signal?: AbortSignal;
 	readonly internalStatefulForward?: ProviderServerStatefulForwardEnvelope;
 };
 
-export type ProviderServerOperationExecutor = (
-	input: ProviderServerOperationExecutorInput,
+export type ProviderServerOperationExecutor<
+	TContext extends Partial<ProviderContext> = ProviderContext,
+> = (
+	input: ProviderServerOperationExecutorInput<TContext>,
 ) => Promise<unknown>;
 
 type RequestCleanup = () => void | Promise<void>;
@@ -1072,12 +1076,12 @@ export type ProviderServerLogEvent =
 
 export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
 
-export type ProviderServerOptions = {
+export type ProviderServerOptions<TContext extends Partial<ProviderContext> = ProviderContext> = {
 	logger?: ProviderServerLogger;
 	/** Optional provider-specific operation executor. Stateful providers use this to preserve provider-local runtime semantics. */
-	operationExecutor?: ProviderServerOperationExecutor;
+	operationExecutor?: ProviderServerOperationExecutor<TContext>;
 	/** Optional signed internal executor for stateful owner forwarding. */
-	internalOperationExecutor?: ProviderServerOperationExecutor;
+	internalOperationExecutor?: ProviderServerOperationExecutor<TContext>;
 	statefulForwarding?: {
 		readonly secret: string;
 		readonly maxSkewMs?: number;
@@ -2413,16 +2417,18 @@ function parseStatefulForwardingEnvelope(rawBody: unknown): ProviderServerStatef
  * Primary, cross-runtime app factory. Declared capability ESM is preloaded
  * asynchronously, so this path works on Bun and every supported Node release.
  */
-export async function createServerAppAsync(
-	provider: ProviderDefinition,
-	options: ProviderServerOptions = {},
+export async function createServerAppAsync<TContext extends Partial<ProviderContext> = ProviderContext>(
+	provider: ProviderDefinition<TContext>,
+	options: ProviderServerOptions<TContext> = {},
 ): Promise<Hono> {
-	validateFailClosedDeclaration(provider);
-	validateStatefulServerConfig(options);
+	const runtimeProvider = provider as unknown as ProviderDefinition;
+	const runtimeOptions = options as unknown as ProviderServerOptions;
+	validateFailClosedDeclaration(runtimeProvider);
+	validateStatefulServerConfig(runtimeOptions);
 	return createServerAppWithCapabilityModules(
-		provider,
-		options,
-		await loadProviderCapabilityModules(provider),
+		runtimeProvider,
+		runtimeOptions,
+		await loadProviderCapabilityModules(runtimeProvider),
 	);
 }
 
@@ -2432,16 +2438,18 @@ export async function createServerAppAsync(
  * capability require Bun or Node >=22.12; older Node releases receive an
  * actionable error directing them to createServerAppAsync().
  */
-export function createServerApp(
-	provider: ProviderDefinition,
-	options: ProviderServerOptions = {},
+export function createServerApp<TContext extends Partial<ProviderContext> = ProviderContext>(
+	provider: ProviderDefinition<TContext>,
+	options: ProviderServerOptions<TContext> = {},
 ): Hono {
-	validateFailClosedDeclaration(provider);
-	validateStatefulServerConfig(options);
+	const runtimeProvider = provider as unknown as ProviderDefinition;
+	const runtimeOptions = options as unknown as ProviderServerOptions;
+	validateFailClosedDeclaration(runtimeProvider);
+	validateStatefulServerConfig(runtimeOptions);
 	return createServerAppWithCapabilityModules(
-		provider,
-		options,
-		loadProviderCapabilityModulesSync(provider),
+		runtimeProvider,
+		runtimeOptions,
+		loadProviderCapabilityModulesSync(runtimeProvider),
 	);
 }
 
@@ -3131,7 +3139,8 @@ export type ProviderServerHandle = {
 	close(options?: ProviderServerCloseOptions): Promise<void>;
 };
 
-export interface ServeOptions extends ProviderServerOptions {
+export interface ServeOptions<TContext extends Partial<ProviderContext> = ProviderContext>
+	extends ProviderServerOptions<TContext> {
 	host?: string;
 	port?: number;
 	/**
@@ -3158,9 +3167,9 @@ type ProcessSignalCoordinator = {
 
 const processSignalCoordinators = new Map<NodeJS.Signals, ProcessSignalCoordinator>();
 
-export async function serve(
-	provider: ProviderDefinition,
-	options: ServeOptions = {},
+export async function serve<TContext extends Partial<ProviderContext> = ProviderContext>(
+	provider: ProviderDefinition<TContext>,
+	options: ServeOptions<TContext> = {},
 ): Promise<ProviderServerHandle> {
 	const bunRuntime = getBunServeRuntime();
 
@@ -3175,7 +3184,7 @@ export async function serve(
 	);
 	const configuredSignals = resolveShutdownSignals(options.shutdown?.signals ?? true);
 	const selfTestSecrets = resolveSelfTestMasterSecrets();
-	const serverAppOptions: ProviderServerOptions = {
+	const serverAppOptions: ProviderServerOptions<TContext> = {
 		logger: options.logger,
 		ocr: options.ocr,
 		stt: options.stt,
@@ -3205,12 +3214,15 @@ export async function serve(
 		// socket the tenant-facing gateway never dials. Off by default — it only
 		// starts when the shared self-test master secret env is present.
 		if (selfTestSecrets && selfTestModule) {
-			const selfTestApp = selfTestModule.createSelfTestApp(provider, {
-				secrets: selfTestSecrets,
-				invoke: selfTestModule.createSelfTestInvoke(app),
-				authFlow: selfTestModule.createSelfTestAuthFlowInvoke(app),
-				logger,
-			});
+			const selfTestApp = selfTestModule.createSelfTestApp(
+				provider as unknown as ProviderDefinition,
+				{
+					secrets: selfTestSecrets,
+					invoke: selfTestModule.createSelfTestInvoke(app),
+					authFlow: selfTestModule.createSelfTestAuthFlowInvoke(app),
+					logger,
+				},
+			);
 			servers.push(
 				bunRuntime.serve({
 					port: options.selfTestPort ?? selfTestModule.resolveSelfTestPort(),

@@ -2479,7 +2479,7 @@ export interface ProviderDeploymentOverrides {
 	buildContext?: string;
 }
 
-export interface ProviderDefinition {
+export interface ProviderDefinition<TContext = ProviderContext> {
 	id: string;
 	version: string;
 	runtime: "standard" | "shared" | "browser";
@@ -2509,7 +2509,7 @@ export interface ProviderDefinition {
 	credential?: CredentialDeclaration;
 	context?: ContextDeclaration;
 	meta: ProviderMeta;
-	operations: Record<string, OperationDefinition<SchemaLike, SchemaLike>>;
+	operations: Record<string, OperationDefinition<SchemaLike, SchemaLike, TContext>>;
 	healthMonitor?: ProviderHealthMonitorConfig;
 	/** Transitional alias for `healthMonitor`; `defineProvider` mirrors both. */
 	healthProbe?: ProviderHealthProbeConfig;

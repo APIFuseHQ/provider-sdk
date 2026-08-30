@@ -36,9 +36,11 @@ export {
 	every,
 } from "./define.js";
 export type {
+	OperationDefinitionFor,
 	ProviderBuilder,
 	ProviderContextOf,
 	ProviderDeclaration,
+	ProviderDefinitionFor,
 } from "./define.js";
 export type { JsonPrimitive, JsonValue } from "./contract-json.js";
 export {

@@ -1090,10 +1090,10 @@ export function createScratchpad(allowedKeys: string[], initial?: Record<string,
 // Warning: (ae-forgotten-export) The symbol "ProviderServerOptions" needs to be exported by the entry point index.d.ts
 //
 // @public
-export function createServerApp(provider: ProviderDefinition, options?: ProviderServerOptions): Hono;
+export function createServerApp<TContext extends Partial<ProviderContext> = ProviderContext>(provider: ProviderDefinition<TContext>, options?: ProviderServerOptions<TContext>): Hono;
 
 // @public
-export function createServerAppAsync(provider: ProviderDefinition, options?: ProviderServerOptions): Promise<Hono>;
+export function createServerAppAsync<TContext extends Partial<ProviderContext> = ProviderContext>(provider: ProviderDefinition<TContext>, options?: ProviderServerOptions<TContext>): Promise<Hono>;
 
 // Warning: (ae-forgotten-export) The symbol "EnvLike_2" needs to be exported by the entry point index.d.ts
 //
@@ -3045,6 +3045,9 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
     whenToUseKeys?: readonly ProviderLocaleKeyInput[];
 }
 
+// @public
+export type OperationDefinitionFor<TBuilder, TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike> = OperationDefinition<TInput, TOutput, ProviderContextOf<TBuilder>>;
+
 // @public (undocumented)
 export interface OperationDeprecationMetadata {
     // (undocumented)
@@ -4170,7 +4173,7 @@ export interface ProviderDeclaration {
 }
 
 // @public (undocumented)
-export interface ProviderDefinition {
+export interface ProviderDefinition<TContext = ProviderContext> {
     // (undocumented)
     access?: ProviderAccessConfig;
     // (undocumented)
@@ -4200,7 +4203,7 @@ export interface ProviderDefinition {
     // (undocumented)
     ocr?: ProviderOcrConfig;
     // (undocumented)
-    operations: Record<string, OperationDefinition<SchemaLike, SchemaLike>>;
+    operations: Record<string, OperationDefinition<SchemaLike, SchemaLike, TContext>>;
     // (undocumented)
     proxy?: ProviderProxyConfig;
     // (undocumented)
@@ -4221,6 +4224,9 @@ export interface ProviderDefinition {
     // (undocumented)
     version: string;
 }
+
+// @public
+export type ProviderDefinitionFor<TBuilder> = ProviderDefinition<ProviderContextOf<TBuilder>>;
 
 // @public
 export interface ProviderDeploymentOverrides {
@@ -4752,13 +4758,13 @@ type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
 // Warning: (ae-forgotten-export) The symbol "ProviderServerOperationExecutorInput" needs to be exported by the entry point index.d.ts
 //
 // @public (undocumented)
-type ProviderServerOperationExecutor = (input: ProviderServerOperationExecutorInput) => Promise<unknown>;
+type ProviderServerOperationExecutor<TContext extends Partial<ProviderContext> = ProviderContext> = (input: ProviderServerOperationExecutorInput<TContext>) => Promise<unknown>;
 
 // @public (undocumented)
-type ProviderServerOperationExecutorInput = {
-    readonly provider: ProviderDefinition;
+type ProviderServerOperationExecutorInput<TContext extends Partial<ProviderContext> = ProviderContext> = {
+    readonly provider: ProviderDefinition<TContext>;
     readonly operationId: string;
-    readonly ctx: ProviderContext;
+    readonly ctx: TContext;
     readonly request: OperationRequest & {
         readonly deadlineAt?: string;
     };
@@ -4767,10 +4773,10 @@ type ProviderServerOperationExecutorInput = {
 };
 
 // @public (undocumented)
-type ProviderServerOptions = {
+type ProviderServerOptions<TContext extends Partial<ProviderContext> = ProviderContext> = {
     logger?: ProviderServerLogger;
-    operationExecutor?: ProviderServerOperationExecutor;
-    internalOperationExecutor?: ProviderServerOperationExecutor;
+    operationExecutor?: ProviderServerOperationExecutor<TContext>;
+    internalOperationExecutor?: ProviderServerOperationExecutor<TContext>;
     statefulForwarding?: {
         readonly secret: string;
         readonly maxSkewMs?: number;
@@ -6144,10 +6150,10 @@ type SensitivePathSegment = string | "*";
 // Warning: (ae-forgotten-export) The symbol "ProviderServerHandle" needs to be exported by the entry point index.d.ts
 //
 // @public (undocumented)
-export function serve(provider: ProviderDefinition, options?: ServeOptions): Promise<ProviderServerHandle>;
+export function serve<TContext extends Partial<ProviderContext> = ProviderContext>(provider: ProviderDefinition<TContext>, options?: ServeOptions<TContext>): Promise<ProviderServerHandle>;
 
 // @public (undocumented)
-export interface ServeOptions extends ProviderServerOptions {
+export interface ServeOptions<TContext extends Partial<ProviderContext> = ProviderContext> extends ProviderServerOptions<TContext> {
     // (undocumented)
     host?: string;
     // (undocumented)

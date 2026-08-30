@@ -2538,6 +2538,9 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
     whenToUseKeys?: readonly ProviderLocaleKeyInput[];
 }
 
+// @public
+export type OperationDefinitionFor<TBuilder, TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike> = OperationDefinition<TInput, TOutput, ProviderContextOf<TBuilder>>;
+
 // @public (undocumented)
 interface OperationDeprecationMetadata {
     // (undocumented)
@@ -3496,7 +3499,7 @@ export interface ProviderDeclaration {
 }
 
 // @public (undocumented)
-export interface ProviderDefinition {
+export interface ProviderDefinition<TContext = ProviderContext> {
     // (undocumented)
     access?: ProviderAccessConfig;
     // (undocumented)
@@ -3529,7 +3532,7 @@ export interface ProviderDefinition {
     // (undocumented)
     ocr?: ProviderOcrConfig;
     // (undocumented)
-    operations: Record<string, OperationDefinition<SchemaLike, SchemaLike>>;
+    operations: Record<string, OperationDefinition<SchemaLike, SchemaLike, TContext>>;
     // (undocumented)
     proxy?: ProviderProxyConfig;
     // (undocumented)
@@ -3550,6 +3553,9 @@ export interface ProviderDefinition {
     // (undocumented)
     version: string;
 }
+
+// @public
+export type ProviderDefinitionFor<TBuilder> = ProviderDefinition<ProviderContextOf<TBuilder>>;
 
 // @public
 export interface ProviderDeploymentOverrides {
