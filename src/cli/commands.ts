@@ -59,7 +59,7 @@ export const COMMAND_MANIFEST: Record<
 	"migrate-shape": {
 		name: "migrate-shape",
 		summary:
-			"Migrate a provider index.ts from the single-phase defineProvider shape to the two-phase declaration builder.",
+			"Migrate a provider to the phase-separated SDK: two-phase defineProvider in index.ts and curried defineOperation across sources.",
 		usage: "apifuse migrate-shape [path] [--check] [--json]",
 		examples: ["apifuse migrate-shape .", "apifuse migrate-shape . --check"],
 		modulePath: "./apifuse-migrate-shape",
