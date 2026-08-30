@@ -414,24 +414,34 @@ async function readResponseArrayBuffer(
 ): Promise<ArrayBuffer> {
 	if (!signal) return response.arrayBuffer();
 	throwIfAmbientAborted(signal);
-	if (!response.body) return response.arrayBuffer();
-
-	const reader = response.body.getReader();
-	const chunks: Uint8Array[] = [];
-	let receivedBytes = 0;
-	try {
-		while (true) {
-			const { done, value } = await readResponseBodyChunk(reader, signal);
-			if (done) break;
-			if (!value) continue;
-			receivedBytes += value.byteLength;
-			chunks.push(value);
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const settle = (operation: () => void) => {
+			if (settled) return;
+			settled = true;
+			signal.removeEventListener("abort", onAbort);
+			operation();
+		};
+		const onAbort = () => {
+			const error = toAmbientCancellationError(signal);
+			try {
+				void response.body?.cancel().catch(() => undefined);
+			} catch {
+				// Preserve the cancellation error if accessing or cancelling the body fails.
+			}
+			settle(() => reject(error));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			void response.arrayBuffer().then(
+				(body) => settle(() => resolve(body)),
+				(error) => settle(() => reject(error)),
+			);
+		} catch (error) {
+			settle(() => reject(error));
 		}
-	} finally {
-		reader.releaseLock();
-	}
-
-	return concatenateResponseBodyChunks(chunks, receivedBytes);
+		if (signal.aborted) onAbort();
+	});
 }
 
 function responseTooLargeError(maxBodyBytes: number, observedBytes: number): TransportError {
@@ -1224,12 +1234,23 @@ function createSessionFetcher(
 							throwIfAmbientAborted(clientOptions.signal);
 							normalizedError = normalizeStealthTransportError(error);
 						} catch (normalizationError) {
-							throw redactSensitiveError(
+							const redactedNormalizationError = redactSensitiveError(
 								normalizationError,
 								sensitiveValues,
 								serializedUrl?.requestUrl ?? fallbackRequestUrl,
 								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
 							);
+							if (
+								normalizationError instanceof TransportError &&
+								normalizationError.code === "transport_cancelled"
+							) {
+								recordProxyAttempt(
+									"error",
+									proxyAttemptErrorCode(normalizationError),
+									proxyAttemptStatus(normalizationError),
+								);
+							}
+							throw redactedNormalizationError;
 						}
 						const retryErrorCode = proxyAttemptErrorCode(normalizedError);
 						const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);

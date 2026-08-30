@@ -40,6 +40,7 @@ type MockWreqResponse = {
 	redirected?: boolean;
 	sessionCookies?: MockSessionCookie[];
 	beforeReturn?: (init?: Record<string, unknown>) => Promise<void>;
+	beforeArrayBuffer?: () => Promise<void>;
 	beforeStreamPull?: (pullIndex: number) => Promise<void>;
 };
 
@@ -114,6 +115,8 @@ function toWreqResponse(response: MockWreqResponse) {
 		text: async () => response.body,
 		arrayBuffer: async () => {
 			streamState.arrayBufferCalls += 1;
+			await response.beforeArrayBuffer?.();
+			if (streamState.cancelled) throw new DOMException("response body cancelled", "AbortError");
 			return toArrayBuffer(responseBytes);
 		},
 		get body() {
@@ -290,18 +293,21 @@ describe("createStealthClient", () => {
 		const pullStarted = new Promise<void>((resolve) => {
 			markPullStarted = resolve;
 		});
+		const waitForAbort = async () => {
+			markPullStarted();
+			if (controller.signal.aborted) return;
+			await new Promise<void>((resolve) => {
+				controller.signal.addEventListener("abort", () => resolve(), { once: true });
+			});
+		};
 		mockStealthState.queuedResponses.push({
 			status: 200,
 			body: "slow body",
 			headers: {},
 			streamChunks: byteChunks("slow ", "body"),
 			streamState,
-			beforeStreamPull: async () => {
-				markPullStarted();
-				await new Promise<void>((resolve) => {
-					controller.signal.addEventListener("abort", () => resolve(), { once: true });
-				});
-			},
+			beforeArrayBuffer: waitForAbort,
+			beforeStreamPull: waitForAbort,
 		});
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
@@ -366,6 +372,59 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.queuedResponses).toHaveLength(1);
 	});
 
+	it("records a cancelled proxy attempt when the client signal aborts", async () => {
+		const controller = new AbortController();
+		const attempts: unknown[] = [];
+		let markStarted!: () => void;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "too late",
+			headers: {},
+			beforeReturn: async (init) => {
+				const signal = init?.signal;
+				if (!(signal instanceof AbortSignal)) return;
+				markStarted();
+				await new Promise<void>((_resolve, reject) => {
+					const onAbort = () => reject(new DOMException("native request aborted", "AbortError"));
+					signal.addEventListener("abort", onAbort, { once: true });
+					if (signal.aborted) onAbort();
+				});
+			},
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const request = createStealthClient("https://example.com", {
+			signal: controller.signal,
+			telemetry: {
+				recordProxyResolution: () => undefined,
+				recordProxyAttempt: (event) => attempts.push(event),
+			},
+		}).fetch("/slow", { proxy: "http://proxy.test", retry: false });
+		await started;
+		controller.abort(new Error("gateway deadline exceeded"));
+
+		await expect(request).rejects.toMatchObject({
+			name: "TransportError",
+			code: "transport_cancelled",
+			status: 0,
+			options: { retryable: false },
+		});
+		expect(attempts).toEqual([
+			{
+				provider: "smartproxy",
+				attempt: 1,
+				proxyHash: expect.any(String),
+				outcome: "error",
+				errorCode: "transport_cancelled",
+				status: 0,
+				durationMs: expect.any(Number),
+			},
+		]);
+	});
+
 	it("keeps the no-signal stealth request path byte-identical", async () => {
 		const bytes = new Uint8Array([0, 1, 2, 127, 128, 255]);
 		mockStealthState.queuedResponses.push({
@@ -385,6 +444,30 @@ describe("createStealthClient", () => {
 			"x-test": "unchanged",
 		});
 		expect(Object.hasOwn(mockStealthState.clients[0]?.calls[0]?.init ?? {}, "signal")).toBe(false);
+	});
+
+	it("keeps signal-backed uncapped responses on wreq arrayBuffer to avoid double buffering", async () => {
+		const controller = new AbortController();
+		const streamState = createMockBodyState();
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: '{"source":"arrayBuffer"}',
+			headers: { "content-type": "application/json" },
+			streamChunks: byteChunks('{"source":"stream"}'),
+			streamState,
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const response = await createStealthClient("https://example.com", {
+			signal: controller.signal,
+		}).fetch("/uncapped-with-signal");
+
+		expect(response.body).toBe('{"source":"arrayBuffer"}');
+		expect(streamState).toEqual({
+			arrayBufferCalls: 1,
+			pulledChunks: 0,
+			cancelled: false,
+		});
 	});
 
 	it("returns normalized response for successful fetch", async () => {
@@ -2438,13 +2521,15 @@ describe("createStealthClient", () => {
 	});
 });
 
-type CancellationErrorShape = {
-	code: string;
-	instanceOfTransportError: boolean;
-	name: string;
-	retryable: boolean;
-	status: number;
-};
+const CancellationErrorShapeSchema = z.object({
+	code: z.string(),
+	instanceOfTransportError: z.boolean(),
+	name: z.string(),
+	retryable: z.boolean(),
+	status: z.number(),
+});
+
+type CancellationErrorShape = z.infer<typeof CancellationErrorShapeSchema>;
 
 function cancellationErrorShape(error: unknown): CancellationErrorShape {
 	if (!(error instanceof TransportError)) {
@@ -2464,14 +2549,6 @@ function cancellationErrorShape(error: unknown): CancellationErrorShape {
 		status: error.status ?? -1,
 	};
 }
-
-const CancellationErrorShapeSchema = z.object({
-	code: z.string(),
-	instanceOfTransportError: z.boolean(),
-	name: z.string(),
-	retryable: z.boolean(),
-	status: z.number(),
-});
 
 function createStealthAbortProvider(): ProviderDefinition {
 	return createProviderDefinitionDouble({
@@ -2578,7 +2655,10 @@ describe("gateway stealth abort wiring", () => {
 			},
 		});
 		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
-		expect((mockStealthState.clients[0]?.calls[0]?.init?.signal as AbortSignal).aborted).toBe(true);
+		const recordedSignal = mockStealthState.clients[0]?.calls[0]?.init?.signal;
+		expect(recordedSignal).toBeInstanceOf(AbortSignal);
+		if (!(recordedSignal instanceof AbortSignal)) throw new Error("Expected recorded abort signal");
+		expect(recordedSignal.aborted).toBe(true);
 	});
 
 	it("propagates the auth-flow request signal into ctx.stealth cancellation", async () => {
@@ -2613,6 +2693,9 @@ describe("gateway stealth abort wiring", () => {
 			},
 		});
 		expect(mockStealthState.clients[0]?.calls).toHaveLength(1);
-		expect((mockStealthState.clients[0]?.calls[0]?.init?.signal as AbortSignal).aborted).toBe(true);
+		const recordedSignal = mockStealthState.clients[0]?.calls[0]?.init?.signal;
+		expect(recordedSignal).toBeInstanceOf(AbortSignal);
+		if (!(recordedSignal instanceof AbortSignal)) throw new Error("Expected recorded abort signal");
+		expect(recordedSignal.aborted).toBe(true);
 	});
 });
