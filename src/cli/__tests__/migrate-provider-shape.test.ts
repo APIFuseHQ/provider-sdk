@@ -298,3 +298,38 @@ export default provider;
 		expect(occurrences.length).toBe(1);
 	});
 });
+
+describe("migrateProviderShape ProviderContext import conflict", () => {
+	it("drops a conflicting ProviderContext named import when adding the alias (TS2440)", () => {
+		const legacyWithRootContext = `import {
+	defineProvider,
+	type ProviderContext,
+	ProviderError,
+	z,
+} from "@apifuse/provider-sdk/provider";
+
+import { operations } from "./operations";
+
+const provider = defineProvider({
+	id: "conflict-probe",
+	version: "1.0.0",
+	runtime: "standard",
+	operations: operations,
+});
+
+export default provider;
+`;
+		const result = migrateProviderShape(legacyWithRootContext);
+
+		expect(result.status).toBe("migrated");
+		if (result.status !== "migrated") return;
+		expect(result.code).toContain(
+			"export type ProviderContext = ProviderContextOf<typeof buildProvider>;",
+		);
+		// The named import of the deprecated root context type must be gone…
+		expect(result.code).not.toMatch(/import[^;]*type ProviderContext,/);
+		// …while its siblings survive.
+		expect(result.code).toContain("ProviderError");
+		expect(result.code).toContain("defineProvider");
+	});
+});

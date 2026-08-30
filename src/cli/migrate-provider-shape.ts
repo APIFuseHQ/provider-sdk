@@ -577,6 +577,15 @@ function ensureProviderContextType(
 			ts.isTypeAliasDeclaration(statement) &&
 			statement.name.text === PROVIDER_CONTEXT_TYPE_NAME,
 	);
+	// A named import of `ProviderContext` (the deprecated SDK-root context
+	// type, imported by legacy sources) occupies the same name: adding the
+	// alias alongside it is TS2440. The import must yield to the derived
+	// alias — the whole point of the two-phase shape — so drop it and let the
+	// alias own the name.
+	const conflictingImportSpecifier = findNamedImportSpecifier(
+		source,
+		PROVIDER_CONTEXT_TYPE_NAME,
+	);
 
 	if (!hasContextTypeAlias) {
 		// After the builder statement — which is the variable statement when the
@@ -591,6 +600,9 @@ function ensureProviderContextType(
 				end: insertAt,
 				text: `\n\nexport type ${PROVIDER_CONTEXT_TYPE_NAME} = ${PROVIDER_CONTEXT_OF_TYPE_NAME}<typeof ${builderName}>;`,
 			});
+			if (conflictingImportSpecifier !== undefined) {
+				edits.push(removeImportSpecifier(source, conflictingImportSpecifier));
+			}
 		}
 	}
 
@@ -638,6 +650,52 @@ function findProviderSdkImport(
 		}
 	}
 	return undefined;
+}
+
+/** Named import specifier binding `localName` in any import declaration. */
+function findNamedImportSpecifier(
+	source: ts.SourceFile,
+	localName: string,
+): ts.ImportSpecifier | undefined {
+	for (const statement of source.statements) {
+		if (!ts.isImportDeclaration(statement)) continue;
+		const named = statement.importClause?.namedBindings;
+		if (named === undefined || !ts.isNamedImports(named)) continue;
+		for (const element of named.elements) {
+			if (element.name.text === localName) return element;
+		}
+	}
+	return undefined;
+}
+
+/**
+ * Edit removing one specifier from its named-import list, absorbing one
+ * neighboring comma so the list stays well-formed. Callers guarantee the
+ * list has at least one other specifier (legacy sources always import
+ * defineProvider alongside the context type).
+ */
+function removeImportSpecifier(
+	source: ts.SourceFile,
+	specifier: ts.ImportSpecifier,
+): TextEdit {
+	const list = specifier.parent;
+	const index = list.elements.indexOf(specifier);
+	const text = source.getFullText();
+	let start = specifier.getFullStart();
+	let end = specifier.getEnd();
+	let cursor = end;
+	while (cursor < text.length && /\s/.test(text.charAt(cursor))) cursor += 1;
+	if (text.charAt(cursor) === ",") {
+		end = cursor + 1;
+	} else if (index > 0) {
+		const previous = list.elements[index - 1];
+		if (previous !== undefined) {
+			let back = previous.getEnd();
+			while (back < text.length && /\s/.test(text.charAt(back))) back += 1;
+			if (text.charAt(back) === ",") start = back;
+		}
+	}
+	return { start, end, text: "" };
 }
 
 /**
