@@ -64,7 +64,10 @@ import {
 	type ProxyTelemetryLogPayload,
 } from "../runtime/proxy-telemetry.js";
 import type * as ResolverRuntimeModule from "../runtime/resolver.js";
-import { createUnsupportedResolverClient } from "../runtime/resolver-shared.js";
+import {
+	createUnsupportedResolverClient,
+	type ResolverSolveWithRecorder,
+} from "../runtime/resolver-shared.js";
 import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
@@ -77,7 +80,7 @@ import {
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
-import { createTraceContext } from "../runtime/trace.js";
+import { createTraceContext, type TraceRecorder } from "../runtime/trace.js";
 import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
 import {
@@ -493,8 +496,14 @@ function bindResolverSignalWithoutRuntime(
 ): ResolverContext {
 	if (!defaultSignal) return resolver;
 	return {
-		solve(challenge, signal = defaultSignal) {
-			return resolver.solve(challenge, signal);
+		solve(challenge, signal = defaultSignal, traceRecorder?: TraceRecorder) {
+			// Forward the instrumentation trace recorder so resolver.vendor.* spans
+			// survive this wrapper. See ResolverSolveWithRecorder in resolver-shared.ts.
+			return (resolver as Partial<ResolverSolveWithRecorder> & ResolverContext).solve(
+				challenge,
+				signal,
+				traceRecorder,
+			);
 		},
 	};
 }
