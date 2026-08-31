@@ -4,6 +4,7 @@ import { assertIsError, capturedError } from "../../__tests__/test-utils.js";
 import { ProviderError } from "../../errors.js";
 import { getStealthProfile } from "../../stealth/profiles.js";
 import type { ProviderChallenge } from "../../types.js";
+import { createProviderCache } from "../cache.js";
 import {
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	createResolverClient,
@@ -123,6 +124,7 @@ describe("Capsolver resolver vendor", () => {
 			form: "cookies",
 			cookies: { "aws-waf-token": "aws-cookie-value" },
 			userAgent: getStealthProfile(DEFAULT_PROFILE).userAgent,
+			sdkEstimatedExpires: expect.any(Number),
 		});
 		expect(stub.calls[0]?.body).toEqual({
 			clientKey: "test-api-key",
@@ -165,6 +167,7 @@ describe("Capsolver resolver vendor", () => {
 			form: "cookies",
 			cookies: { "aws-waf-token": "proxied-cookie" },
 			userAgent: identity.userAgent,
+			sdkEstimatedExpires: expect.any(Number),
 		});
 		expect(stub.calls[0]?.body).toEqual({
 			clientKey: "test-api-key",
@@ -178,6 +181,53 @@ describe("Capsolver resolver vendor", () => {
 				proxy: expected,
 			},
 		});
+	});
+
+	it("caches a CapSolver AWS WAF cookie by its SDK-estimated expiry", async () => {
+		const beforeMs = Date.now();
+		const stub = createFetchStub([
+			jsonResponse({ errorId: 0, taskId: "cached-aws-task" }),
+			jsonResponse({
+				errorId: 0,
+				status: "ready",
+				solution: { cookie: "cached-aws-cookie" },
+			}),
+		]);
+		const capsolver = createAdapter(stub);
+		let adapterCalls = 0;
+		const countingAdapter: ResolverVendorAdapter = {
+			...capsolver,
+			async solve(challenge, identity, signal, traceRecorder) {
+				adapterCalls += 1;
+				return await capsolver.solve(challenge, identity, signal, traceRecorder);
+			},
+		};
+		const cache = createProviderCache({
+			providerId: "resolver-capsolver-estimated-expiry",
+			redisUrl: "",
+		});
+		const resolver = createResolverClient({
+			adapters: [countingAdapter],
+			cache,
+			kinds: ["aws_waf"],
+		});
+
+		const first = await resolver.solve(AWS_WAF_CHALLENGE);
+		const afterMs = Date.now();
+		const second = await resolver.solve(AWS_WAF_CHALLENGE);
+
+		expect(first).toMatchObject({
+			form: "cookies",
+			cookies: { "aws-waf-token": "cached-aws-cookie" },
+			userAgent: getStealthProfile(DEFAULT_PROFILE).userAgent,
+		});
+		if (first.form !== "cookies") throw new Error("expected cookies solution");
+		expect(first.sdkEstimatedExpires).toBeGreaterThanOrEqual((beforeMs + 60 * 60 * 1_000) / 1_000);
+		expect(first.sdkEstimatedExpires).toBeLessThanOrEqual((afterMs + 60 * 60 * 1_000) / 1_000);
+		expect(first).not.toHaveProperty("expires");
+		expect(second).toEqual(first);
+		expect(adapterCalls).toBe(1);
+		expect(stub.calls).toHaveLength(2);
 	});
 
 	it("classifies an AWS WAF allocation error during task creation", async () => {

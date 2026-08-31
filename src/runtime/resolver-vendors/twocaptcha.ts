@@ -497,6 +497,7 @@ export function createTwoCaptchaResolverVendorAdapter(
 								{ phase },
 							);
 						}
+						// AWS WAF remains a token solution here, so resolver cookie caching does not apply.
 						return { form: "token" as const, token };
 					}
 				};

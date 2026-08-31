@@ -1,5 +1,5 @@
 import { getStealthProfile } from "../../stealth/profiles.js";
-import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
+import type { ChallengeSolution, ProviderChallenge, ProviderChallengeKind } from "../../types.js";
 import { redactSensitiveText } from "../request-options.js";
 import { DEFAULT_PROFILE } from "../stealth.js";
 import type { TraceRecorder } from "../trace.js";
@@ -17,6 +17,11 @@ const CAPSOLVER_VENDOR_ID = "capsolver" as const;
 const DEFAULT_CAPSOLVER_BASE_URL = "https://api.capsolver.com";
 const DEFAULT_POLL_INTERVAL_MS = 2_000;
 const DEFAULT_TIMEOUT_MS = 120_000;
+const SDK_ESTIMATED_COOKIE_TTL_MS_BY_CHALLENGE_KIND = {
+	// CapSolver omits expiry, so use one conservative hour despite measured
+	// AWS WAF lifetimes of days.
+	aws_waf: 60 * 60 * 1_000,
+} satisfies Partial<Record<ProviderChallengeKind, number>>;
 
 type Delay = (ms: number, signal: AbortSignal) => Promise<void>;
 type CapsolverOperationPhase = "create_task" | "poll_result";
@@ -657,6 +662,8 @@ export function createCapsolverResolverVendorAdapter(
 									form: "cookies" as const,
 									cookies: { "aws-waf-token": solutionValue },
 									userAgent: identity?.userAgent ?? getStealthProfile(DEFAULT_PROFILE).userAgent,
+									sdkEstimatedExpires:
+										(now() + SDK_ESTIMATED_COOKIE_TTL_MS_BY_CHALLENGE_KIND.aws_waf) / 1_000,
 								}
 							: { form: "token" as const, token: solutionValue };
 					}

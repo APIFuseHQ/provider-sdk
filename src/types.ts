@@ -409,6 +409,11 @@ export type ChallengeSolution =
 			readonly userAgent: string;
 			/** Epoch seconds copied from the upstream cookie's own expiry attribute; never a constant. */
 			readonly expires?: number;
+			/**
+			 * Epoch seconds conservatively estimated by the SDK when a resolver vendor omits
+			 * the upstream cookie's expiry. `expires` takes precedence when both are present.
+			 */
+			readonly sdkEstimatedExpires?: number;
 		};
 
 export interface ProviderResolverConfig {

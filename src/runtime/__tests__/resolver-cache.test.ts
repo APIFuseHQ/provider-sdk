@@ -13,6 +13,8 @@ import {
 	APIFUSE__CDP_POOL__URL,
 	createResolverClient,
 	createResolverClientFromEnvForTests,
+	getResolverSolutionSource,
+	invalidateCachedResolverSolution,
 	invalidateResolverSolution,
 } from "../resolver.js";
 import {
@@ -733,8 +735,8 @@ describe("resolver solution caching", () => {
 		expect(stub.calls()).toBe(2);
 	});
 
-	it("does not cache a session-cookie solution without expires", async () => {
-		const { cache } = createRecordingCache();
+	it("does not cache a cookie solution without observed or SDK-estimated expiry", async () => {
+		const { cache, setCalls } = createRecordingCache();
 		const stub = createBrowserAdapter(() => ({
 			form: "cookies",
 			cookies: { "aws-waf-token": "session-token" },
@@ -747,6 +749,25 @@ describe("resolver solution caching", () => {
 		await resolver.solve(CHALLENGE);
 
 		expect(stub.calls()).toBe(3);
+		expect(setCalls).toHaveLength(0);
+	});
+
+	it("prefers observed expiry over SDK-estimated expiry", async () => {
+		const { cache, setCalls } = createRecordingCache();
+		const observedTtlMs = 60_000;
+		const stub = createBrowserAdapter(() => ({
+			form: "cookies",
+			cookies: { "aws-waf-token": "observed-expiry-token" },
+			userAgent: "Browser/observed-expiry",
+			expires: (Date.now() + observedTtlMs) / 1_000,
+			sdkEstimatedExpires: (Date.now() + 3_600_000) / 1_000,
+		}));
+
+		await createClient(stub.adapter, { cache }).solve(CHALLENGE);
+
+		const solutionWrite = setCalls.find((call) => call.key.includes(":resolver-solution:"));
+		expect(solutionWrite?.options.ttlMs).toBeGreaterThan(observedTtlMs - 1_000);
+		expect(solutionWrite?.options.ttlMs).toBeLessThan(observedTtlMs + 1_000);
 	});
 
 	it("does not cache a solution that is expired or inside the one-second floor", async () => {
@@ -796,6 +817,27 @@ describe("resolver solution caching", () => {
 		await firstResolver.solve(IDENTITY_SCOPED_CHALLENGE);
 		await secondResolver.solve(IDENTITY_SCOPED_CHALLENGE);
 		expect(stub.calls()).toBe(3);
+	});
+
+	it("distinguishes and invalidates a cached solution after a repeated challenge", async () => {
+		const { cache } = createRecordingCache();
+		const stub = createBrowserAdapter((_identity, call) =>
+			persistentSolution(`Browser/stale-recovery-${call}`),
+		);
+		const resolver = createClient(stub.adapter, { cache });
+
+		const freshlySolved = await resolver.solve(CHALLENGE);
+		expect(getResolverSolutionSource(freshlySolved)).toBe("vendor");
+		expect(await invalidateCachedResolverSolution(resolver, CHALLENGE, freshlySolved)).toBe(false);
+
+		const cached = await resolver.solve(CHALLENGE);
+		expect(getResolverSolutionSource(cached)).toBe("cache");
+		expect(await invalidateCachedResolverSolution(resolver, CHALLENGE, cached)).toBe(true);
+
+		const refreshed = await resolver.solve(CHALLENGE);
+		expect(getResolverSolutionSource(refreshed)).toBe("vendor");
+		expect(refreshed).not.toEqual(cached);
+		expect(stub.calls()).toBe(2);
 	});
 
 	it("never puts raw proxy credentials into cache key material", async () => {
