@@ -1296,14 +1296,17 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 	 * operation-affinity proxy.
 	 */
 	proxyAttemptOffset?: number;
-	/** Override the configured browser-like stealth profile for this request. */
-	profile?: string;
 	/**
-	 * Stealth transport certificate controls. Use only for proxy products that
-	 * terminate CONNECT with a private CA instead of tunneling the origin
-	 * certificate chain.
+	 * SDK-specific stealth controls. Standard HTTP metadata such as language,
+	 * referrer, and content type belongs in `headers`.
 	 */
 	stealth?: {
+		/** Override the configured intent profile for this request. */
+		profile?: string;
+		/**
+		 * Use only for proxy products that terminate CONNECT with a private CA
+		 * instead of tunneling the origin certificate chain.
+		 */
 		insecureSkipVerify?: boolean;
 	};
 }
@@ -1730,7 +1733,7 @@ export interface ProviderCache {
 
 export interface StealthClient {
 	fetch(url: string, options?: StealthFetchOptions): Promise<StealthResponse>;
-	createSession(opts?: { profile?: string }): StealthSession;
+	createSession(opts?: { stealth?: { profile?: string } }): StealthSession;
 	close?(): void;
 }
 

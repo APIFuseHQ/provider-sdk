@@ -1,8 +1,13 @@
-import { getEmulationHeaders, getProfiles, resolveProfile } from "wreq-js";
+import { getEmulationHeaders, getOperatingSystems, getProfiles, resolveProfile } from "wreq-js";
 
 const profiles = getProfiles();
 const userAgents = Object.fromEntries(
-	profiles.map((profile) => [profile, getEmulationHeaders(profile).get("user-agent")]),
+	profiles.flatMap((profile) =>
+		getOperatingSystems().map((os) => [
+			`${profile}:${os}`,
+			getEmulationHeaders(profile, os).get("user-agent"),
+		]),
+	),
 );
 
 console.log(

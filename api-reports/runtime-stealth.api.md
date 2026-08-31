@@ -337,7 +337,9 @@ interface StealthClient {
     //
     // (undocumented)
     createSession(opts?: {
-        profile?: string;
+        stealth?: {
+            profile?: string;
+        };
     }): StealthSession;
     // Warning: (ae-forgotten-export) The symbol "StealthFetchOptions" needs to be exported by the entry point stealth.d.ts
     //
@@ -351,6 +353,12 @@ interface StealthClient {
 export type StealthClientOptions = ProxyResolutionOptions & {
     warn?: (message: string) => void;
     signal?: AbortSignal;
+    stealth?: {
+        profile?: string;
+        browser?: "chrome";
+        os?: "windows" | "macos" | "linux";
+        acceptLanguage?: string;
+    };
     proxyStealth?: {
         insecureSkipVerify?: boolean;
     };
@@ -378,11 +386,11 @@ interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy"> {
     maxBodyBytes?: number;
     // (undocumented)
     method?: HttpMethod;
-    profile?: string;
     proxyAttemptOffset?: number;
     // (undocumented)
     redirect?: "follow" | "manual" | "error";
     stealth?: {
+        profile?: string;
         insecureSkipVerify?: boolean;
     };
 }
@@ -509,12 +517,12 @@ type StealthTransportResponse = {
 // dist/config/loader.d.ts:106:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:107:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:36:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:38:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:47:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:49:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:871:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:876:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1179:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1179:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1182:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1182:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 

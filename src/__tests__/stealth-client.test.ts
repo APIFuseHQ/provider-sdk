@@ -1,6 +1,8 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import { z } from "zod";
 
+import chromeGroundTruth from "../../chrome-ground-truth-capture.json";
+
 import { assertIsError, createProviderDefinitionDouble, emptyArray } from "./test-utils.js";
 import {
 	ProviderError,
@@ -69,6 +71,29 @@ const mockStealthState = {
 	queuedErrors: [] as (Error | (() => Error))[],
 	queuedCloseErrors: emptyArray<Error>(),
 };
+
+function allWreqCalls(): MockWreqCall[] {
+	return mockStealthState.clients.flatMap((client) => client.calls);
+}
+
+function requestHeader(
+	init: Record<string, unknown> | undefined,
+	name: string,
+): string | undefined {
+	const headers = init?.headers;
+	if (Array.isArray(headers)) {
+		return (headers as [string, string][]).find(
+			([headerName]) => headerName.toLowerCase() === name.toLowerCase(),
+		)?.[1];
+	}
+	if (headers && typeof headers === "object") {
+		const entry = Object.entries(headers).find(
+			([headerName]) => headerName.toLowerCase() === name.toLowerCase(),
+		);
+		return typeof entry?.[1] === "string" ? entry[1] : undefined;
+	}
+	return undefined;
+}
 
 function toHeaders(headers: MockWreqResponse["headers"]): Headers {
 	const result = new Headers();
@@ -200,13 +225,33 @@ class MockWreqSession {
 
 mock.module("wreq-js", () => ({
 	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
-	getEmulationHeaders: (profile: string) => {
+	getEmulationHeaders: (profile: string, os = "macos") => {
 		const version = /^chrome_(\d+)$/.exec(profile)?.[1] ?? "149";
+		const platform = os === "windows" ? '"Windows"' : os === "linux" ? '"Linux"' : '"macOS"';
+		const osToken =
+			os === "windows"
+				? "Windows NT 10.0; Win64; x64"
+				: os === "linux"
+					? "X11; Linux x86_64"
+					: "Macintosh; Intel Mac OS X 10_15_7";
 		return new Map([
+			["sec-ch-ua", `"Google Chrome";v="${version}", "Chromium";v="${version}"`],
+			["sec-ch-ua-mobile", "?0"],
+			["sec-ch-ua-platform", platform],
 			[
 				"user-agent",
-				`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`,
+				`Mozilla/5.0 (${osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`,
 			],
+			["sec-fetch-dest", "document"],
+			["sec-fetch-mode", "navigate"],
+			["sec-fetch-site", "none"],
+			[
+				"accept",
+				"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+			],
+			["accept-encoding", "gzip, deflate, br, zstd"],
+			["accept-language", "en-US,en;q=0.9"],
+			["priority", "u=0, i"],
 		]);
 	},
 	getProfiles: () => [
@@ -484,7 +529,7 @@ describe("createStealthClient", () => {
 		const client = createStealthClient("https://example.com");
 
 		const response = (await client.fetch("/health", {
-			headers: { accept: "text/plain" },
+			headers: { "x-request-id": "health" },
 		})) as DeclarativeStealthResponse;
 
 		expect(response.status).toBe(200);
@@ -890,14 +935,13 @@ describe("createStealthClient", () => {
 
 		expect(session.cookies.toHeader("https://host-a.example/account")).toBe("host_a=one");
 		expect(session.cookies.toHeader("https://host-b.example/account")).toBe("host_b=two");
-		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
-		expect(mockStealthState.clients[0]?.calls[2]?.init?.headers).toMatchObject({
-			Cookie: "host_a=one",
-		});
-		expect(mockStealthState.clients[0]?.calls[2]?.init?.headers).not.toMatchObject({
-			Cookie: expect.stringContaining("host_b=two"),
-		});
-		expect(mockStealthState.clients[0]?.clearCookieCalls).toBe(3);
+		const calls = allWreqCalls();
+		expect(requestHeader(calls[1]?.init, "cookie")).toBeUndefined();
+		expect(requestHeader(calls[2]?.init, "cookie")).toBe("host_a=one");
+		expect(requestHeader(calls[2]?.init, "cookie")).not.toContain("host_b=two");
+		expect(
+			mockStealthState.clients.reduce((total, client) => total + client.clearCookieCalls, 0),
+		).toBe(3);
 	});
 
 	it("serializes concurrent fetches that share a native session", async () => {
@@ -936,16 +980,12 @@ describe("createStealthClient", () => {
 
 		expect(callsWhileFirstPending).toBe(1);
 		expect(clearsWhileFirstPending).toBe(1);
-		expect(mockStealthState.clients[0]?.calls).toEqual([
-			expect.objectContaining({
-				url: "https://example.com/first",
-				init: expect.objectContaining({ headers: { Cookie: "request=first" } }),
-			}),
-			expect.objectContaining({
-				url: "https://example.com/second",
-				init: expect.objectContaining({ headers: { Cookie: "request=second" } }),
-			}),
-		]);
+		expect(requestHeader(mockStealthState.clients[0]?.calls[0]?.init, "cookie")).toBe(
+			"request=first",
+		);
+		expect(requestHeader(mockStealthState.clients[0]?.calls[1]?.init, "cookie")).toBe(
+			"request=second",
+		);
 	});
 
 	it("does not attach a host-only cookie to a request for another host", async () => {
@@ -996,10 +1036,9 @@ describe("createStealthClient", () => {
 		await session.fetch("https://host-a.example/next");
 		await session.fetch("https://host-b.example/next");
 
-		expect(mockStealthState.clients[0]?.calls[0]?.init?.headers).toMatchObject({
-			Cookie: "bridge=host-a",
-		});
-		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
+		const calls = allWreqCalls();
+		expect(requestHeader(calls[0]?.init, "cookie")).toBe("bridge=host-a");
+		expect(requestHeader(calls[1]?.init, "cookie")).toBeUndefined();
 	});
 
 	it("applies Domain suffix rules and rejects unrelated or public-suffix domains", async () => {
@@ -1180,35 +1219,24 @@ describe("createStealthClient", () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
 
 		for (const profile of ["chrome-129", "chrome-130", "chrome-131"]) {
-			const client = createStealthClient("https://example.com", profile);
-
-			await expect(client.fetch("/profile")).rejects.toThrow(SDKError);
+			expect(() => createStealthClient("https://example.com", profile).fetch("/profile")).toThrow(
+				SDKError,
+			);
 		}
 
 		expect(mockStealthState.clients).toHaveLength(0);
 	});
 
-	it("warns through the stealth diagnostic channel for a registered version pin", async () => {
-		const warnings: string[] = [];
+	it("rejects a version-pinned profile before starting wreq", async () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
 
-		createStealthClient("https://example.com", "chrome-146", {
-			warn: (message) => warnings.push(message),
-		}).createSession();
-		createStealthClient("https://example.com", "chrome-desktop", {
-			warn: (message) => warnings.push(message),
-		}).createSession();
-
-		expect(warnings).toEqual([
-			expect.stringContaining(
-				'Stealth profile "chrome-146" pins a browser version and is deprecated',
-			),
-		]);
-		expect(warnings[0]).toContain('Use the intent profile "chrome-desktop"');
-		expect(warnings[0]).toContain('getStealthProfile("chrome-desktop").userAgent');
+		expect(() => createStealthClient("https://example.com", "chrome-146").createSession()).toThrow(
+			SDKError,
+		);
+		expect(mockStealthState.clients).toHaveLength(0);
 	});
 
-	it("maps chrome-146 profile to a wreq browser profile and preserves headers", async () => {
+	it("createSession accepts an intent profile override", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 200,
 			body: "ok",
@@ -1216,39 +1244,16 @@ describe("createStealthClient", () => {
 		});
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", "chrome-146");
-		const session = client.createSession();
-
-		await session.fetch("/profile", {
-			headers: { "User-Agent": "provider-ua" },
+		const client = createStealthClient("https://example.com", {
+			stealth: { profile: "firefox-desktop" },
 		});
-
-		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "chrome_146",
-			os: "macos",
-		});
-		expect(mockStealthState.clients[0]?.calls[0]?.init).toMatchObject({
-			headers: { "User-Agent": "provider-ua" },
-			method: "GET",
-		});
-	});
-
-	it("createSession accepts a canonical profile override", async () => {
-		mockStealthState.queuedResponses.push({
-			status: 200,
-			body: "ok",
-			headers: { "content-type": "text/plain" },
-		});
-
-		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", "firefox-147");
-		const session = client.createSession({ profile: "chrome-146" });
+		const session = client.createSession({ stealth: { profile: "chrome-linux" } });
 
 		await session.fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "chrome_146",
-			os: "macos",
+			browser: "chrome_149",
+			os: "linux",
 		});
 	});
 
@@ -1260,12 +1265,12 @@ describe("createStealthClient", () => {
 		});
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", "firefox-132");
+		const client = createStealthClient("https://example.com", "firefox-desktop");
 
 		await client.fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "firefox_133",
+			browser: "firefox_147",
 			os: "macos",
 		});
 	});
@@ -1303,8 +1308,8 @@ describe("createStealthClient", () => {
 			{ status: 200, body: "ios", headers: {} },
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		await createStealthClient("https://example.com", "safari-17").fetch("/profile");
-		await createStealthClient("https://example.com", "ios-safari-26").fetch("/profile");
+		await createStealthClient("https://example.com", "safari-desktop").fetch("/profile");
+		await createStealthClient("https://example.com", "safari-mobile").fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
 			browser: "safari_17.0",
@@ -1395,7 +1400,7 @@ describe("createStealthClient", () => {
 
 		await client.fetch("/post", {
 			body: JSON.stringify({ ok: true }),
-			headers: { accept: "text/plain" },
+			headers: { "content-type": "application/json" },
 			method: "POST",
 			timeout: 12_000,
 		});
@@ -1403,9 +1408,9 @@ describe("createStealthClient", () => {
 		const requestInit = mockStealthState.clients[0]?.calls[0]?.init;
 		expect(requestInit).toMatchObject({
 			body: '{"ok":true}',
-			headers: { accept: "text/plain" },
 			method: "POST",
 		});
+		expect(requestHeader(requestInit, "content-type")).toBe("application/json");
 		expect(requestInit?.timeout).toBeGreaterThan(0);
 		expect(requestInit?.timeout).toBeLessThanOrEqual(12_000);
 	});
@@ -1575,7 +1580,7 @@ describe("createStealthClient", () => {
 		expect(result.cookies).toEqual({ a: "1", b: "2", c: "3" });
 		expect(result.cookieStore.version).toBe(1);
 		expect(result.cookieStore.jar.cookies.map((cookie) => cookie.key)).toEqual(["a", "b", "c"]);
-		expect(mockStealthState.clients[0]?.calls).toEqual([
+		expect(allWreqCalls()).toEqual([
 			expect.objectContaining({
 				url: "https://example.com/login",
 				init: expect.objectContaining({
@@ -1765,7 +1770,7 @@ describe("createStealthClient", () => {
 			body: "payload",
 		});
 
-		const calls = mockStealthState.clients[0]?.calls ?? [];
+		const calls = allWreqCalls();
 		expect(calls[1]?.init).toMatchObject({
 			method: "GET",
 			redirect: "manual",
@@ -2519,6 +2524,147 @@ describe("createStealthClient", () => {
 		expect(mockStealthState.clients[0]?.calls[0]?.init?.method).toBe("POST");
 		expect(mockStealthState.clients[0]?.calls[1]?.init?.method).toBe("POST");
 	});
+});
+
+describe("Chrome 149 header parity", () => {
+	const oses = ["windows", "macos", "linux"] as const;
+	const classes = [
+		{
+			name: "document_navigation_cold",
+			expected: chromeGroundTruth.document_navigation_cold.order,
+			options: {},
+		},
+		{
+			name: "document_navigation_same_origin",
+			expected: chromeGroundTruth.document_navigation_same_origin.order,
+			options: {},
+		},
+		{
+			name: "xhr",
+			expected: chromeGroundTruth.fetch_xhr.order,
+			options: { headers: { Referer: "https://example.com/page" } },
+		},
+		{
+			name: "post",
+			expected: chromeGroundTruth.fetch_post_json.order,
+			options: {
+				method: "POST" as const,
+				body: '{"ok":true}',
+				headers: {
+					Referer: "https://example.com/page",
+					Origin: "https://example.com",
+					"Content-Type": "application/json",
+				},
+			},
+		},
+	] as const;
+
+	beforeEach(() => {
+		mockStealthState.clients.length = 0;
+		mockStealthState.queuedResponses.length = 0;
+		mockStealthState.queuedErrors.length = 0;
+		mockStealthState.queuedCloseErrors.length = 0;
+	});
+
+	for (const os of oses) {
+		for (const requestClass of classes) {
+			it(`matches captured ${requestClass.name} order on ${os}`, async () => {
+				mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+				const { createStealthClient } = await import("../runtime/stealth.js");
+				await createStealthClient("https://example.com", {
+					stealth: { browser: "chrome", os },
+				}).fetch("/api", requestClass.options);
+
+				const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+				expect(defaults.map(([name]) => name)).toEqual(requestClass.expected.slice(4));
+				expect(requestHeader({ headers: defaults }, "sec-ch-ua-platform")).toBe(
+					os === "windows" ? '"Windows"' : os === "linux" ? '"Linux"' : '"macOS"',
+				);
+				const userAgent = requestHeader({ headers: defaults }, "user-agent");
+				expect(userAgent).toContain(
+					os === "windows" ? "Windows NT" : os === "linux" ? "X11; Linux" : "Macintosh",
+				);
+			});
+		}
+	}
+
+	it("ignores scrambled caller key order for captured fields", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/api", {
+			method: "POST",
+			body: '{"ok":true}',
+			headers: {
+				Referer: "https://example.com/page",
+				"Accept-Language": "ja",
+				Origin: "https://example.com",
+				"Content-Type": "application/json",
+			},
+		});
+
+		const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+		expect(defaults.map(([name]) => name)).toEqual(
+			chromeGroundTruth.fetch_post_json.order.slice(4),
+		);
+	});
+
+	it("changes Accept-Language at its captured position", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "default", headers: {} },
+			{ status: 200, body: "override", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			stealth: { browser: "chrome", os: "windows", acceptLanguage: "ja" },
+		});
+		await client.fetch("/api");
+		await client.fetch("/api", { headers: { "Accept-Language": "ko" } });
+
+		const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+		expect(defaults.map(([name]) => name)).toEqual(
+			chromeGroundTruth.document_navigation_cold.order.slice(4),
+		);
+		expect(requestHeader({ headers: defaults }, "accept-language")).toBe("ja");
+		const overrideHeaders = mockStealthState.clients[0]?.calls[1]?.init?.headers as [
+			string,
+			string,
+		][];
+		expect(overrideHeaders.map(([name]) => name)).toEqual(
+			chromeGroundTruth.document_navigation_cold.order.slice(4),
+		);
+		expect(requestHeader({ headers: overrideHeaders }, "accept-language")).toBe("ko");
+	});
+
+	for (const header of [
+		"user-agent",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"accept",
+		"accept-encoding",
+		"priority",
+		"sec-fetch-dest",
+		"sec-fetch-mode",
+		"sec-fetch-site",
+		"sec-fetch-user",
+		"upgrade-insecure-requests",
+	]) {
+		it(`rejects caller override of ${header}`, async () => {
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			let thrown: unknown;
+			try {
+				await createStealthClient("https://example.com").fetch("/api", {
+					headers: { [header]: "caller-value" },
+				});
+			} catch (error) {
+				thrown = error;
+			}
+			expect(thrown).toBeInstanceOf(SDKError);
+			if (!(thrown instanceof SDKError)) throw new Error("Expected SDKError");
+			expect(thrown.message).toContain(header);
+			expect(mockStealthState.clients).toHaveLength(0);
+		});
+	}
 });
 
 const CancellationErrorShapeSchema = z.object({

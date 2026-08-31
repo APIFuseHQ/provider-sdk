@@ -1,0 +1,95 @@
+{
+  "document_navigation_cold": {
+    "order": [
+      ":method",
+      ":authority",
+      ":scheme",
+      ":path",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "sec-ch-ua-platform",
+      "upgrade-insecure-requests",
+      "user-agent",
+      "accept-language",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-user",
+      "sec-fetch-dest",
+      "accept-encoding",
+      "priority"
+    ],
+    "ja4": "t13d1516h2_8daaf6152771_d8a2da3f94cd",
+    "akamai": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
+  },
+  "fetch_xhr": {
+    "order": [
+      ":method",
+      ":authority",
+      ":scheme",
+      ":path",
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ],
+    "ja4": "t13d1517h2_8daaf6152771_b6f405a00624",
+    "akamai": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
+  },
+  "fetch_post_json": {
+    "order": [
+      ":method",
+      ":authority",
+      ":scheme",
+      ":path",
+      "content-length",
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "content-type",
+      "sec-ch-ua-mobile",
+      "accept-language",
+      "accept",
+      "origin",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ],
+    "ja4": "t13d1517h2_8daaf6152771_b6f405a00624",
+    "akamai": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
+  },
+  "document_navigation_same_origin": {
+    "order": [
+      ":method",
+      ":authority",
+      ":scheme",
+      ":path",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "sec-ch-ua-platform",
+      "upgrade-insecure-requests",
+      "user-agent",
+      "accept-language",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-user",
+      "sec-fetch-dest",
+      "accept-encoding",
+      "priority"
+    ],
+    "ja4": "t13d1517h2_8daaf6152771_b6f405a00624",
+    "akamai": "1:65536;2:0;4:6291456;6:262144|15663105|0|m,a,s,p"
+  }
+}

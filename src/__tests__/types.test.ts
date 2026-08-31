@@ -500,8 +500,8 @@ describe("ProviderDefinition types", () => {
 		const options = {
 			method: "GET",
 			maxBodyBytes: 1_000_000,
-			profile: "chrome-146",
 			stealth: {
+				profile: "chrome-linux",
 				insecureSkipVerify: true,
 			},
 		} satisfies StealthFetchOptions;
