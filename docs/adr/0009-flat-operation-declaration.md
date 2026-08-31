@@ -46,7 +46,7 @@ lint). Script: `~/tmp/audit-operation-fields.sh`.
 | `docs.responseExample` | 5 | 0 | duplicate of `fixtures.response` |
 | `annotations.rateLimit` | 0 | 14* | dead — every gateway match is unrelated (OAuth limiter, error taxonomy) |
 | `annotations.idempotent` | 0 | 1 | copied into projection JSON only |
-| `toolRouter.approval` | 3 | 21 | fully derived from `riskClass`; zero providers override |
+| `toolRouter.approval` | 3 | 21 | **31 of 33 declarations are redundant restatements; 2 are real overrides** — see D5b |
 | `toolRouter.name` | — | — | zero providers override; `providerId__operationId` already resolves |
 | `retryOnAuthRefresh` | 0 | 0 | dead |
 
@@ -119,7 +119,8 @@ prose across blocks and reproduce the ambiguity it was meant to cure.
 | D2 | **Locale keys are first class.** Keep `titleKey` / `descriptionKey` / `summaryKey` / `markdownKey` / `whenToUseKeys` / `whenNotToUseKeys` / `normalizationNotesKeys`; delete the raw-prose `title` / `description`. | i18n was a founding constraint, and lint already rejects raw prose. The `Key` suffix states that the value is a key, and leaves the bare names free if raw prose is ever reintroduced. |
 | D3 | **`fixtures` and `examples` are different things; keep both.** `fixtures` stays the single recorded live-evidence pair (schema-validated, `recordedAt`-checked). `examples` replaces `inputExamples` and absorbs `docs.requestExample`. | Evidence answers "is this contract real"; examples answer "how is this used". Conflating them is why three overlapping fields existed. |
 | D4 | **`examples` must be wired to real consumers in this change** — docs-site request rendering and model-facing few-shot injection. Its `scenario` is a locale key. | A required-but-unread field is the worst DX defect found in the audit. Re-introducing one under a new name would repeat it. |
-| D5 | **`riskClass` is the safety SoT.** Enum `read \| write \| destructive \| external-send`. Delete `readOnly`, `destructive`, `idempotent`, `approval`. | The registry *already* derives risk from the booleans (`operation-risk.ts`); the enum is strictly more expressive (`readOnly: false` cannot distinguish write from destructive) and `external-send` has no boolean equivalent. MCP `readOnlyHint` / `destructiveHint` are re-derived in the projection. |
+| D5 | **`riskClass` is the safety SoT.** Enum `read \| write \| destructive \| external-send`. Delete `readOnly`, `destructive`, `idempotent`. **`approval` survives** as a narrow override — see D5b. | The registry *already* derives risk from the booleans (`operation-risk.ts`); the enum is strictly more expressive (`readOnly: false` cannot distinguish write from destructive) and `external-send` has no boolean equivalent. MCP `readOnlyHint` / `destructiveHint` are re-derived in the projection. |
+| D5b | **`approval` stays, and may only be declared when it differs from the derivation.** `defaultApprovalPolicy` (`index.ts:2048`) maps `read → never`, `write → risk-based`, everything else → `always`. An operation restating that mapping is a lint error; an operation departing from it must carry a justification. | An earlier draft deleted `approval` as "fully derived from `riskClass`, zero overrides". Measured across the fleet: of 33 declarations, 31 are redundant restatements — but **2 are real overrides**, both in tablecheck. `confirm-reservation` and `cancel-reservation` declare `riskClass: "write"` with `approval: "always"`; the derivation would give `risk-based`. The author wrote the reason inline: "This performs a real, binding restaurant reservation and always requires approval." Deleting the field silently downgrades an approval gate on operations that book and cancel real reservations. The 31 redundant declarations are the actual defect, and a lint removes those without removing the capability. |
 | D6 | **`connectionMode` is the access SoT**, at the top level, keeping its name and `none \| optional \| required` values. Delete `openWorld` and `requiresConnection`. `connectionExternalRefParam` joins it at the top level. | `Connection` is a defined domain term (`AGENTS.md`: "the canonical tenant-scoped authorization record", `af_con_<22>`), used by ~50 platform sites. Renaming it at the operation layer alone would add vocabulary, not clarity. |
 | D7 | **Mixed-auth providers must declare `connectionMode` explicitly** — lint error when `auth.mode` is credential-bearing and an operation omits it. Providers with `auth.mode: "none"` may still omit. | This is the exact silent-default that caused the incident. Fail-closed defaulting is correct; failing *silently* is not. |
 | D8 | **Delete `derivations`, `rateLimit`, `retryOnAuthRefresh`, `toolRouter.name`.** | No consumer. `providerId__operationId` already resolves every MCP tool name, and a predictable naming rule is worth more than an override nobody uses. |
@@ -136,6 +137,7 @@ defineOperation<ProviderContext>()({
 
   // safety — one axis, one field
   riskClass: "read",
+  approval: "always",                           // optional; only when it differs from the derivation (D5b)
 
   // execution
   timeoutMs: 30_000,                            // optional
@@ -176,6 +178,8 @@ defineOperation<ProviderContext>()({
   is scoped separately with its own removal gate.
 - **Not** adding `rateLimit` / `idempotent` back "for completeness". They return when a consumer
   exists, with that consumer.
+- **Not** deleting `approval`. An earlier draft did, on a "zero overrides" claim that measurement
+  refuted; see D5b.
 
 ## Pitfalls
 
@@ -183,7 +187,14 @@ defineOperation<ProviderContext>()({
    booleans; after D5 the projection must emit `readOnlyHint`/`destructiveHint` *from* the enum,
    or MCP clients silently lose safety metadata.
 2. **`examples` without consumers is `inputExamples` again.** D4 is a gate, not a nice-to-have:
-   do not merge the schema change ahead of the docs/few-shot wiring.
+   do not merge the schema change ahead of the docs/few-shot wiring. Note what that implies for
+   sequencing — the schema lives in `provider-sdk` and the consumers live in the monorepo, so
+   "one change" here spans two repositories. The SDK release carrying flat `examples` and the
+   monorepo PR consuming it are planned and reviewed together; the SDK may be published first
+   only because the monorepo must pin a real version, and the monorepo consumer PR follows
+   immediately. What is forbidden is *shipping the fleet* onto a schema whose `examples` still has
+   no reader — that is the state that recreates `inputExamples`. No provider repo migrates until
+   the consumers are live.
 3. **The lint in D7 needs a fleet sweep before it lands.** 84 SoT repos (92 on the org; recount
    before the sweep); any credential-mode provider that currently relies on the silent default
    will start failing its build.
@@ -195,12 +206,29 @@ defineOperation<ProviderContext>()({
 6. **Mixed-auth providers still need a product-surface decision, not just a lint.** D7 makes the
    declaration explicit; it does not decide which operations a downstream connector should expose.
    Credentialed operations stay metadata guardrails until that surface is chosen deliberately.
-7. **`riskClass` is authored, not migrated.** It exists in 4 repos today and must be written for
-   roughly 800 operations. The boolean triple maps cleanly only at its edges: `readOnly: true` is
-   `read`, and `destructive: true` is `destructive`. Everything else — `readOnly: false` with no
-   `destructive` flag — is genuinely ambiguous between `write` and `destructive`, and no
-   operation can be inferred as `external-send` from booleans at all. The codemod must refuse
-   the ambiguous branch and surface it for authoring rather than defaulting to `write`.
+7. **`riskClass` is authored, not migrated — and the codemod must refuse most of it.** Measured
+   across 857 operation declarations in the fleet (resolving hoisted `const annotations = {...}`
+   blocks referenced by shorthand, which a naive block-local scan misses and which inflated an
+   earlier count):
+
+   | bucket | count | share |
+   |---|---|---|
+   | mechanical (`readOnly: true` → `read`, `destructive: true` → `destructive`) | 346 | 40.4% |
+   | already declares `riskClass` | 32 | 3.7% |
+   | conflict (enum and booleans disagree) | 1 | 0.1% |
+   | **no safety declaration at all** | **478** | **55.8%** |
+
+   Those 478 fall through `operationRiskClass`'s final `return "write"` today, so the platform
+   already publishes `riskClass: "write"` for them. That value is a fallback, not a decision, and
+   the codemod must **refuse** it rather than freeze it: writing `write` into 478 declarations
+   would convert an unexamined default into an authored claim, permanently. Refusing means those
+   operations are authored by hand before their repo can migrate, and that work is a prerequisite
+   of the fleet wave, not a part of it. Heaviest: triple 154, baemin 52, ekitan 27.
+
+   The one conflict is `tablecheck/cancel-reservation`, which declares `riskClass: "write"` *and*
+   `destructive: true`. Today `toolRouter.riskClass` wins and it publishes `write`. The operation
+   cancels a real reservation. Collapsing the two axes changes its published safety class either
+   way, so it is authored by hand, not resolved by precedence.
 8. **The fleet cannot cut over atomically, and the registry fails silently at the seam.** 84
    repositories, each with its own SDK pin and its own PR, means `main` carries both shapes for
    the length of the wave. Measured against the real ingestion path (see D9 below), that seam is
@@ -253,12 +281,18 @@ no repository is ever half-migrated. Its removal gate is in Verification below.
 ## Verification
 
 - `openWorld`, `derivations`, `requiresConnection`, `inputExamples`, `rateLimit`, `idempotent`,
-  `approval`, `toolRouter.name`, `retryOnAuthRefresh` return zero hits across every provider SoT
-  repo and the SDK. Baseline to drive to zero, measured 2026-08-31: 193 `openWorld`, 429
-  `inputExamples`, 339 `annotations: {`, 332 `readOnly:`, 311 `idempotent:`, 251 `toolRouter: {`,
-  223 `docs: {`, 175 `rateLimit:`, 84 `requiresConnection:`.
+  `toolRouter.name`, `retryOnAuthRefresh` return zero hits across every provider SoT repo and the
+  SDK. Baseline to drive to zero, measured 2026-08-31: 193 `openWorld`, 429 `inputExamples`,
+  339 `annotations: {`, 332 `readOnly:`, 311 `idempotent:`, 251 `toolRouter: {`, 223 `docs: {`,
+  175 `rateLimit:`, 84 `requiresConnection:`. (`approval` is not on this list — it survives per
+  D5b, and its own criterion is below.)
 - For every provider whose `auth.mode` is credential-bearing, every operation declares
   `connectionMode`; lint fails when one does not.
+- Every operation declares `riskClass` explicitly. Zero operations reach a derived default —
+  the 478 measured undeclared operations are authored, not defaulted (pitfall 7).
+- `approval` appears only where it departs from `defaultApprovalPolicy`; lint rejects a
+  redundant restatement. `tablecheck/confirm-reservation` and `cancel-reservation` still publish
+  `approval: "always"` after the migration (D5b).
 - `zozotown` catalog operations publish `connectionMode: "none"`; member/order operations publish
   `"required"`.
 - MCP tool names are unchanged for all providers (`providerId__operationId`).
@@ -289,5 +323,8 @@ no repository is ever half-migrated. Its removal gate is in Verification below.
   `packages/provider-registry/src/index.ts:1701` (`importOptionalModule`),
   `scripts/lib/provider-sdk-pin.ts:620` (`providerSdkPinMeetsFloor`), `provider-sdk-floor.json`,
   `apps/gateway/internal/admission/projection.go:133`
-- Audit script: `~/tmp/audit-operation-fields.sh`; fleet scan: `~/tmp/adr9-fleet-scope.sh`
+- Audit script: `~/tmp/audit-operation-fields.sh`; fleet scan: `~/tmp/adr9-fleet-scope.sh`;
+  riskClass buckets: `~/tmp/adr9-riskclass-map-v2.py`; approval overrides:
+  `~/tmp/adr9-approval-override-audit.py`
+- Approval derivation: `packages/provider-registry/src/index.ts:2048` (`defaultApprovalPolicy`)
 - Domain term: monorepo `AGENTS.md` §Terminology — Connection
