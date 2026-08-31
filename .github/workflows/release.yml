@@ -115,7 +115,13 @@ jobs:
             echo "::warning::GitHub App credentials missing in Doppler; skipping dispatch."
             exit 1
           fi
-          echo "::add-mask::${private_key}"
+          # ::add-mask:: is a line-oriented workflow command. Feeding it a
+          # multiline value masks only the first line and PRINTS the remaining
+          # lines into the public log (this leaked the App private key in runs
+          # 33142176223 / 33370599719). Mask every line individually instead.
+          while IFS= read -r mask_line; do
+            [ -n "${mask_line}" ] && echo "::add-mask::${mask_line}"
+          done <<<"${private_key}"
           now=$(date +%s)
           header=$(printf '{"alg":"RS256","typ":"JWT"}' | openssl base64 -A | tr '+/' '-_' | tr -d '=')
           claims=$(printf '{"iat":%d,"exp":%d,"iss":"%s"}' "$((now - 60))" "$((now + 540))" "${app_id}" | openssl base64 -A | tr '+/' '-_' | tr -d '=')
