@@ -8,6 +8,11 @@ import {
 } from "./error-resolution.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
+import type {
+	AuthMode,
+	OperationApprovalPolicy,
+	OperationRiskClass,
+} from "./types.js";
 
 const requireModule = createRequire(import.meta.url);
 // `typeof import(...)` keeps the type without emitting a static import: the
@@ -27,6 +32,22 @@ type AuthModeLike =
 	| "oauth2"
 	| "oauth2_proxied"
 	| "api-key";
+
+const CREDENTIAL_BEARING_AUTH_MODES = [
+	"credentials",
+	"oauth2",
+	"oauth2_proxied",
+] satisfies readonly AuthMode[];
+
+function isCredentialBearingAuthMode(mode: AuthModeLike | undefined): boolean {
+	return CREDENTIAL_BEARING_AUTH_MODES.some((credentialMode) => credentialMode === mode);
+}
+
+function defaultApprovalPolicy(riskClass: OperationRiskClass): OperationApprovalPolicy {
+	if (riskClass === "read") return "never";
+	if (riskClass === "write") return "risk-based";
+	return "always";
+}
 
 type ProviderAuthLike = {
 	mode?: AuthModeLike;
@@ -699,21 +720,6 @@ function collectSchemaDescriptionKeyDiagnostics(
 	return diagnostics;
 }
 
-function isComplexSchema(schema: unknown, seen = new Set<SchemaLike>()): boolean {
-	if (!isSchema(schema) || seen.has(schema)) {
-		return false;
-	}
-
-	seen.add(schema);
-	const children = getChildSchemas(schema);
-	const hasNestedComposite = children.some(({ schema: child }) => {
-		const childChildren = getChildSchemas(child);
-		return childChildren.length > 0;
-	});
-
-	return hasNestedComposite || children.some(({ schema: child }) => isComplexSchema(child, seen));
-}
-
 function hasBidirectionalFixtures(fixtures: unknown): boolean {
 	if (!fixtures || typeof fixtures !== "object") {
 		return true;
@@ -1283,7 +1289,7 @@ function collectLiteralThrownErrorCodes(source: string): string[] {
  * `new ProviderError(...)` / `new ValidationError(...)` constructions whose
  * literal `code` is neither SDK-registered (SDK_RUNTIME_OWNED_ERROR_CODES
  * plus the canonical status-mapped codes shared with serve.ts toStatusCode)
- * nor declared in any operation's docs.errorCodes. At runtime such a code
+ * nor declared in any operation's errorCodes. At runtime such a code
  * serves HTTP 500 and emits the signal; this rule surfaces it at check time.
  *
  * A throw site cannot be attributed to a specific operation statically —
@@ -1303,7 +1309,7 @@ function lintUndeclaredThrownErrorCodes(provider: {
 		{
 			handler?: unknown;
 			source?: string;
-			docs?: { errorCodes?: ReadonlyArray<{ code: string }> };
+			errorCodes?: ReadonlyArray<{ code: string }>;
 		}
 	>;
 }): LintDiagnostic[] {
@@ -1312,7 +1318,7 @@ function lintUndeclaredThrownErrorCodes(provider: {
 		...SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES.keys(),
 	]);
 	for (const operation of Object.values(provider.operations ?? {})) {
-		for (const entry of operation.docs?.errorCodes ?? []) {
+		for (const entry of operation.errorCodes ?? []) {
 			if (typeof entry?.code === "string") {
 				knownCodes.add(entry.code);
 			}
@@ -1349,7 +1355,7 @@ function lintUndeclaredThrownErrorCodes(provider: {
 				rule: "thrown-error-code-undeclared",
 				level: "warn",
 				field,
-				message: `Thrown error code "${code}" (${field}) is neither SDK-registered nor declared in any operation's docs.errorCodes; at runtime it serves HTTP 500 and emits the unregistered_provider_error_code signal. Declare it in the owning operation's docs.errorCodes with status and retryable.`,
+				message: `Thrown error code "${code}" (${field}) is neither SDK-registered nor declared in any operation's errorCodes; at runtime it serves HTTP 500 and emits the unregistered_provider_error_code signal. Declare it in the owning operation's errorCodes with status and retryable.`,
 			});
 		}
 	}
@@ -1357,68 +1363,22 @@ function lintUndeclaredThrownErrorCodes(provider: {
 }
 
 export function lintOperation(op: {
-	description?: string;
 	descriptionKey?: string;
-	whenToUse?: readonly string[];
 	whenToUseKeys?: readonly string[];
-	whenNotToUse?: readonly string[];
 	whenNotToUseKeys?: readonly string[];
 	input: unknown;
 	output: unknown;
 	fixtures?: unknown;
-	inputExamples?: readonly unknown[];
-	derivations?: Record<string, string>;
 }): LintDiagnostic[] {
 	const diagnostics: LintDiagnostic[] = [];
-	const description = op.description ?? "";
 	const hasDescriptionKey = typeof op.descriptionKey === "string" && op.descriptionKey.length > 0;
 
-	if (description.trim().length > 0 && !hasDescriptionKey) {
+	if (!hasDescriptionKey) {
 		diagnostics.push({
-			rule: "operation-description-raw-prose",
+			rule: "description-key-required",
 			level: "error",
-			field: "description",
-			message: "Operation description must use descriptionKey instead of raw static prose.",
-		});
-	}
-
-	if (!hasDescriptionKey && description.length < 150) {
-		diagnostics.push({
-			rule: "description-min-length",
-			level: "error",
-			field: "description",
-			message: "Operation description must be at least 150 characters.",
-		});
-	}
-
-	if ((op.whenToUse?.length ?? 0) > 0 && !(op.whenToUseKeys?.length ?? 0)) {
-		diagnostics.push({
-			rule: "operation-when-to-use-raw-prose",
-			level: "error",
-			field: "whenToUse",
-			message: "Operation whenToUse must use whenToUseKeys instead of raw static prose.",
-		});
-	}
-
-	if ((op.whenNotToUse?.length ?? 0) > 0 && !(op.whenNotToUseKeys?.length ?? 0)) {
-		diagnostics.push({
-			rule: "operation-when-not-to-use-raw-prose",
-			level: "error",
-			field: "whenNotToUse",
-			message: "Operation whenNotToUse must use whenNotToUseKeys instead of raw static prose.",
-		});
-	}
-
-	const lowerDescription = description.toLowerCase();
-	if (
-		!hasDescriptionKey &&
-		!(lowerDescription.includes("use") && lowerDescription.includes("when"))
-	) {
-		diagnostics.push({
-			rule: "description-has-when-clause",
-			level: "warn",
-			field: "description",
-			message: 'Operation description should include both "use" and "when".',
+			field: "descriptionKey",
+			message: "Operation must declare a locale-backed descriptionKey.",
 		});
 	}
 
@@ -1433,15 +1393,6 @@ export function lintOperation(op: {
 			level: "error",
 			field: "fixtures",
 			message: "Fixtures must include both request and response.",
-		});
-	}
-
-	if (isComplexSchema(op.input) && (op.inputExamples?.length ?? 0) < 2) {
-		diagnostics.push({
-			rule: "complex-input-has-examples",
-			level: "warn",
-			field: "inputExamples",
-			message: "Complex input schemas should provide at least 2 input examples.",
 		});
 	}
 
@@ -1546,20 +1497,18 @@ export function lintProvider(
 		operations?: Record<
 			string,
 			{
-				description?: string;
 				descriptionKey?: string;
-				whenToUse?: readonly string[];
 				whenToUseKeys?: readonly string[];
-				whenNotToUse?: readonly string[];
 				whenNotToUseKeys?: readonly string[];
+				connectionMode?: "none" | "optional" | "required";
+				riskClass?: OperationRiskClass;
+				approval?: OperationApprovalPolicy;
 				input: unknown;
 				output: unknown;
 				fixtures?: unknown;
-				inputExamples?: readonly unknown[];
-				derivations?: Record<string, string>;
 				handler?: unknown;
 				source?: string;
-				docs?: { errorCodes?: ReadonlyArray<{ code: string }> };
+				errorCodes?: ReadonlyArray<{ code: string }>;
 			}
 		>;
 		meta?: {
@@ -1591,6 +1540,28 @@ export function lintProviderWithInformation(
 
 	if (provider.operations) {
 		const authMode = provider.auth?.mode;
+		for (const [operationKey, operation] of Object.entries(provider.operations)) {
+			if (isCredentialBearingAuthMode(authMode) && operation.connectionMode === undefined) {
+				diagnostics.push({
+					rule: "mixed-auth-connection-mode-required",
+					level: "error",
+					field: `operations.${operationKey}.connectionMode`,
+					message: `Provider "${provider.id ?? "unknown"}" uses credential-bearing auth.mode "${authMode}"; operation "${operationKey}" must declare connectionMode explicitly.`,
+				});
+			}
+			if (
+				operation.riskClass !== undefined &&
+				operation.approval !== undefined &&
+				operation.approval === defaultApprovalPolicy(operation.riskClass)
+			) {
+				diagnostics.push({
+					rule: "redundant-approval",
+					level: "error",
+					field: `operations.${operationKey}.approval`,
+					message: `Operation "${operationKey}" approval "${operation.approval}" repeats the default for riskClass "${operation.riskClass}"; omit approval unless it is a deliberate override.`,
+				});
+			}
+		}
 		// Every authenticated mode owns an auth.flow; `oauth2_proxied` was
 		// previously exempt, which let auth-lifecycle operations ship on
 		// proxied providers unchecked.
@@ -1620,17 +1591,12 @@ export function lintProviderWithInformation(
 		...Object.entries(provider.operations).flatMap(([operationKey, operation]) =>
 			[
 				...lintOperation({
-					description: operation.description ?? "",
 					descriptionKey: operation.descriptionKey,
-					whenToUse: operation.whenToUse,
 					whenToUseKeys: operation.whenToUseKeys,
-					whenNotToUse: operation.whenNotToUse,
 					whenNotToUseKeys: operation.whenNotToUseKeys,
 					input: operation.input,
 					output: operation.output,
 					fixtures: operation.fixtures,
-					inputExamples: operation.inputExamples,
-					derivations: operation.derivations,
 				}),
 				...lintPublicSchemaFieldNames(
 					provider.id,
