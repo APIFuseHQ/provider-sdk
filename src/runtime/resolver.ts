@@ -41,6 +41,7 @@ import {
 import {
 	createUnsupportedResolverClient,
 	RESOLVER_INSTRUMENTATION_METADATA,
+	type ResolverSolveWithRecorder,
 } from "./resolver-shared.js";
 import {
 	APIFUSE__CDP_POOL__URL,
@@ -1022,8 +1023,12 @@ export function bindResolverSignal(
 ): ResolverContext {
 	if (!defaultSignal) return resolver;
 	const boundResolver: ResolverContext = {
-		solve(challenge, signal = defaultSignal) {
-			return resolver.solve(challenge, signal);
+		solve(challenge, signal = defaultSignal, traceRecorder?: TraceRecorder) {
+			return (resolver as Partial<ResolverSolveWithRecorder> & ResolverContext).solve(
+				challenge,
+				signal,
+				traceRecorder,
+			);
 		},
 	};
 	if (resolverCaches.has(resolver)) {
