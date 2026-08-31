@@ -1,0 +1,11 @@
+import { toolRouterDefaults } from "./tool-router-defaults.js";
+
+const importedSpreadOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	toolRouter: {
+		...toolRouterDefaults,
+	},
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

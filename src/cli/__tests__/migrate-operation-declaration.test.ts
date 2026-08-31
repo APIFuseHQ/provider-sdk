@@ -81,6 +81,32 @@ describe("migrateOperationDeclaration transforms", () => {
 		expect(code).not.toContain("approval:");
 	});
 
+	it("resolves the inline object spread used by ekitan toolRouter declarations", () => {
+		const code = expectMigrated("inline-spread-ekitan", "getStationInfo");
+		expect(code).toContain('riskClass: "read"');
+		expect(code).toContain('connectionMode: "none" as const');
+		expect(code).not.toContain("requiresConnection");
+		expect(code).not.toContain("approval:");
+	});
+
+	it("unwraps chained casts on inline spreads and their members", () => {
+		const code = expectMigrated("inline-spread-cast-tail", "castTail");
+		expect(code).toContain('riskClass: "write" as const');
+		expect(code).toContain('approval: "always" as ApprovalMode');
+		expect(code).toContain('connectionMode: "none" as ConnectionMode');
+		expect(code).toContain("timeoutMs: 15_000 as Milliseconds");
+		expect(code).toContain('titleKey: "operations.castTail.title" as const');
+		expect(code).toContain('descriptionKey: "operations.castTail.description" as LocaleKey');
+	});
+
+	it("lets a member after an inline spread override the spread member", () => {
+		const code = expectMigrated("inline-spread-override", "override");
+		expect(code).toContain('connectionMode: "none" as const');
+		expect(code).toContain('approval: "always" as const');
+		expect(code).not.toContain('connectionMode: "required"');
+		expect(code).not.toContain('approval: "never"');
+	});
+
 	it("lets connectionMode win over requiresConnection", () => {
 		const code = expectMigrated("connection-precedence", "connect");
 		expect(code).toContain('connectionMode: "optional"');
@@ -150,6 +176,10 @@ describe("migrateOperationDeclaration refusals", () => {
 
 	it("refuses non-literal safety values", () => {
 		expectRefusal("non-literal", "non_literal");
+	});
+
+	it("still refuses spreads of imported identifiers", () => {
+		expectRefusal("imported-spread", "non_literal");
 	});
 
 	it("refuses factory-composed operation maps", () => {

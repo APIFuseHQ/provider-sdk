@@ -117,6 +117,7 @@ type ResolvedMember = {
 	readonly name: string;
 	readonly property: TS.ObjectLiteralElementLike;
 	readonly initializer?: TS.Expression;
+	readonly fromSpread?: boolean;
 };
 
 type OperationSite = {
@@ -1037,9 +1038,11 @@ function expandMembers(
 		if (ts.isSpreadAssignment(property)) {
 			const expression = unwrapExpression(property.expression);
 			const spreadObject =
-				expression !== undefined && ts.isIdentifier(expression)
-					? constObjects.get(expression.text)
-					: undefined;
+				expression !== undefined && ts.isObjectLiteralExpression(expression)
+					? expression
+					: expression !== undefined && ts.isIdentifier(expression)
+						? constObjects.get(expression.text)
+						: undefined;
 			if (spreadObject === undefined) {
 				members.push({ name: "<spread>", property });
 				continue;
@@ -1052,7 +1055,7 @@ function expandMembers(
 				new Set(seen),
 			);
 			if ("refusal" in expanded) return expanded;
-			members.push(...expanded.members);
+			members.push(...expanded.members.map((member) => ({ ...member, fromSpread: true as const })));
 			continue;
 		}
 		const name = staticPropertyName(property.name);
@@ -1079,7 +1082,8 @@ function indexMembers(
 			spreads.push(member);
 			continue;
 		}
-		if (byName.has(member.name)) {
+		const previous = byName.get(member.name);
+		if (previous !== undefined && previous.fromSpread !== true && member.fromSpread !== true) {
 			return nonLiteral(
 				fileName,
 				operationKey,
