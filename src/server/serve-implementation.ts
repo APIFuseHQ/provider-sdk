@@ -667,6 +667,7 @@ function createProviderContext(
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: proxyTelemetry,
+		...(signal ? { signal } : {}),
 	};
 	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>
@@ -891,6 +892,7 @@ function createAuthFlowContext(
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: proxyTelemetry,
+		...(signal ? { signal } : {}),
 	};
 	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>

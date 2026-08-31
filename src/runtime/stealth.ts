@@ -101,6 +101,8 @@ function sensitiveQueryParamNames(url: string): string[] {
 
 export type StealthClientOptions = ProxyResolutionOptions & {
 	warn?: (message: string) => void;
+	/** Abort all requests issued by this client. */
+	signal?: AbortSignal;
 	/**
 	 * Proxy-only stealth transport overrides. Use only for upstream proxy products
 	 * that terminate CONNECT with a private CA instead of tunneling the origin
@@ -361,6 +363,15 @@ export async function normalizeResponse(
 	requestUrl?: string,
 	maxBodyBytes?: number,
 ): Promise<StealthResponse> {
+	return normalizeResponseWithSignal(response, requestUrl, maxBodyBytes);
+}
+
+async function normalizeResponseWithSignal(
+	response: StealthTransportResponse,
+	requestUrl?: string,
+	maxBodyBytes?: number,
+	signal?: AbortSignal,
+): Promise<StealthResponse> {
 	const headers = Object.fromEntries(response.headers.entries());
 	const cookies = new StealthCookieJar(
 		setCookieHeadersFromResponse(response.headers),
@@ -368,8 +379,8 @@ export async function normalizeResponse(
 	);
 	const bodyBytes =
 		maxBodyBytes === undefined
-			? await response.arrayBuffer()
-			: await readResponseBodyWithLimit(response, maxBodyBytes);
+			? await readResponseArrayBuffer(response, signal)
+			: await readResponseBodyWithLimit(response, maxBodyBytes, signal);
 	const body = new TextDecoder().decode(bodyBytes);
 
 	return {
@@ -397,6 +408,42 @@ export async function normalizeResponse(
 	};
 }
 
+async function readResponseArrayBuffer(
+	response: StealthTransportResponse,
+	signal?: AbortSignal,
+): Promise<ArrayBuffer> {
+	if (!signal) return response.arrayBuffer();
+	throwIfAmbientAborted(signal);
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const settle = (operation: () => void) => {
+			if (settled) return;
+			settled = true;
+			signal.removeEventListener("abort", onAbort);
+			operation();
+		};
+		const onAbort = () => {
+			const error = toAmbientCancellationError(signal);
+			try {
+				void response.body?.cancel().catch(() => undefined);
+			} catch {
+				// Preserve the cancellation error if accessing or cancelling the body fails.
+			}
+			settle(() => reject(error));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			void response.arrayBuffer().then(
+				(body) => settle(() => resolve(body)),
+				(error) => settle(() => reject(error)),
+			);
+		} catch (error) {
+			settle(() => reject(error));
+		}
+		if (signal.aborted) onAbort();
+	});
+}
+
 function responseTooLargeError(maxBodyBytes: number, observedBytes: number): TransportError {
 	return new TransportError(
 		`Response body exceeded maxBodyBytes limit of ${maxBodyBytes} bytes (observed ${observedBytes} bytes)`,
@@ -419,7 +466,9 @@ function declaredContentLength(headers: StealthTransportHeaders): number | undef
 async function readResponseBodyWithLimit(
 	response: StealthTransportResponse,
 	maxBodyBytes: number,
+	signal?: AbortSignal,
 ): Promise<ArrayBuffer> {
+	throwIfAmbientAborted(signal);
 	const contentLength = declaredContentLength(response.headers);
 	if (contentLength !== undefined && contentLength > maxBodyBytes) {
 		await response.body?.cancel().catch(() => undefined);
@@ -439,7 +488,7 @@ async function readResponseBodyWithLimit(
 	let receivedBytes = 0;
 	try {
 		while (true) {
-			const { done, value } = await reader.read();
+			const { done, value } = await readResponseBodyChunk(reader, signal);
 			if (done) break;
 			if (!value) continue;
 			receivedBytes += value.byteLength;
@@ -453,6 +502,13 @@ async function readResponseBodyWithLimit(
 		reader.releaseLock();
 	}
 
+	return concatenateResponseBodyChunks(chunks, receivedBytes);
+}
+
+function concatenateResponseBodyChunks(
+	chunks: readonly Uint8Array[],
+	receivedBytes: number,
+): ArrayBuffer {
 	const bodyBytes = new Uint8Array(receivedBytes);
 	let offset = 0;
 	for (const chunk of chunks) {
@@ -460,6 +516,34 @@ async function readResponseBodyWithLimit(
 		offset += chunk.byteLength;
 	}
 	return bodyBytes.buffer;
+}
+
+function readResponseBodyChunk(
+	reader: ReturnType<StealthTransportBody["getReader"]>,
+	signal?: AbortSignal,
+): Promise<{ done: boolean; value?: Uint8Array }> {
+	if (!signal) return reader.read();
+	throwIfAmbientAborted(signal);
+	return new Promise((resolve, reject) => {
+		let settled = false;
+		const settle = (operation: () => void) => {
+			if (settled) return;
+			settled = true;
+			signal.removeEventListener("abort", onAbort);
+			operation();
+		};
+		const onAbort = () => {
+			const error = toAmbientCancellationError(signal);
+			void reader.cancel().catch(() => undefined);
+			settle(() => reject(error));
+		};
+		signal.addEventListener("abort", onAbort, { once: true });
+		void reader.read().then(
+			(chunk) => settle(() => resolve(chunk)),
+			(error) => settle(() => reject(error)),
+		);
+		if (signal.aborted) onAbort();
+	});
 }
 
 function normalizeBody(body: StealthFetchOptions["body"]): string {
@@ -627,8 +711,41 @@ function normalizeStealthTransportError(error: unknown): TransportError {
 	});
 }
 
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
+function toAmbientCancellationError(
+	signal: AbortSignal,
+	error: unknown = signal.reason,
+): TransportError {
+	if (error instanceof TransportError && error.code === "transport_cancelled") {
+		return error;
+	}
+	return new TransportError("Request cancelled", {
+		code: "transport_cancelled",
+		status: 0,
+		retryable: false,
+		...(error !== undefined
+			? { cause: error instanceof Error ? error : new Error(String(error)) }
+			: {}),
+	});
+}
+
+function throwIfAmbientAborted(signal: AbortSignal | undefined): void {
+	if (signal?.aborted) throw toAmbientCancellationError(signal);
+}
+
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+	if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+	throwIfAmbientAborted(signal);
+	return new Promise((resolve, reject) => {
+		const onAbort = () => {
+			clearTimeout(timer);
+			reject(toAmbientCancellationError(signal));
+		};
+		const timer = setTimeout(() => {
+			signal.removeEventListener("abort", onAbort);
+			resolve();
+		}, ms);
+		signal.addEventListener("abort", onAbort, { once: true });
+	});
 }
 
 function normalizeMethod(method: HttpMethod | string): StealthMethod {
@@ -693,6 +810,7 @@ async function fetchStealthRedirectChain(
 	requestUrl: string,
 	method: StealthMethod,
 	options: StealthFetchOptions,
+	signal?: AbortSignal,
 ): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> {
 	let currentUrl = requestUrl;
 	let currentMethod = method;
@@ -703,6 +821,7 @@ async function fetchStealthRedirectChain(
 	const deadline = options.timeout ? performance.now() + options.timeout : undefined;
 
 	while (true) {
+		throwIfAmbientAborted(signal);
 		const headers = { ...currentHeaders };
 		if (!hasHeader(headers, "Cookie")) {
 			const cookieHeader = cookieJar.toHeader(currentUrl);
@@ -712,10 +831,12 @@ async function fetchStealthRedirectChain(
 			headers: normalizeHeaders(headers),
 			method: currentMethod,
 			redirect: "manual",
+			...(signal ? { signal } : {}),
 		};
 		if (currentBody !== undefined) requestInit.body = currentBody;
 
 		await transport.clearCookies();
+		throwIfAmbientAborted(signal);
 		const remainingTimeout =
 			deadline === undefined ? undefined : Math.ceil(deadline - performance.now());
 		if (remainingTimeout !== undefined && remainingTimeout <= 0) {
@@ -726,6 +847,10 @@ async function fetchStealthRedirectChain(
 		}
 		if (remainingTimeout !== undefined) requestInit.timeout = remainingTimeout;
 		response = await transport.fetch(currentUrl, requestInit);
+		if (signal?.aborted) {
+			discardStealthRedirectBody(response);
+			throw toAmbientCancellationError(signal);
+		}
 		cookieJar.setFromCookieStrings(
 			setCookieHeadersFromResponse(response.headers),
 			response.url ?? currentUrl,
@@ -764,7 +889,12 @@ async function fetchStealthRedirectChain(
 		followedHops += 1;
 	}
 
-	const normalized = await normalizeResponse(response, currentUrl, options.maxBodyBytes);
+	const normalized = await normalizeResponseWithSignal(
+		response,
+		currentUrl,
+		options.maxBodyBytes,
+		signal,
+	);
 	if (followedHops > 0) normalized.redirected = true;
 	return { normalized, response };
 }
@@ -819,19 +949,57 @@ function createSessionFetcher(
 		proxyUrl: string | undefined,
 		ignoreTlsErrors: boolean,
 		operation: (client: WreqSession) => Promise<T>,
+		signal?: AbortSignal,
 	): Promise<T> {
+		throwIfAmbientAborted(signal);
 		const entry = await getClientEntry(profileName, proxyUrl, ignoreTlsErrors);
+		throwIfAmbientAborted(signal);
 		const previous = entry.tail;
 		let release!: () => void;
 		entry.tail = new Promise<void>((resolve) => {
 			release = resolve;
 		});
-		await previous;
+		let acquired = false;
 		try {
-			return await operation(await entry.session);
+			await waitForClientTurn(previous, signal);
+			acquired = true;
+			throwIfAmbientAborted(signal);
+			const client = await entry.session;
+			throwIfAmbientAborted(signal);
+			const result = await operation(client);
+			throwIfAmbientAborted(signal);
+			return result;
 		} finally {
-			release();
+			if (acquired) {
+				release();
+			} else {
+				void previous.then(release, release);
+			}
 		}
+	}
+
+	async function waitForClientTurn(previous: Promise<void>, signal?: AbortSignal): Promise<void> {
+		if (!signal) {
+			await previous;
+			return;
+		}
+		throwIfAmbientAborted(signal);
+		await new Promise<void>((resolve, reject) => {
+			let settled = false;
+			const settle = (operation: () => void) => {
+				if (settled) return;
+				settled = true;
+				signal.removeEventListener("abort", onAbort);
+				operation();
+			};
+			const onAbort = () => settle(() => reject(toAmbientCancellationError(signal)));
+			signal.addEventListener("abort", onAbort, { once: true });
+			void previous.then(
+				() => settle(resolve),
+				(error) => settle(() => reject(error)),
+			);
+			if (signal.aborted) onAbort();
+		});
 	}
 
 	async function resolveRequestProxy(
@@ -893,6 +1061,7 @@ function createSessionFetcher(
 					throw redactSensitiveRequestError(error, url, options.sensitiveParams);
 				}
 			})();
+			throwIfAmbientAborted(clientOptions.signal);
 			const hasPolicyProxy = isPolicyManagedProxy(clientOptions);
 			const usesPolicyAllocator = hasPolicyProxy && !options.proxy && !clientOptions.proxy;
 			const retryAttemptCap = Math.max(1, stealthRetryOptions?.attempts ?? 1);
@@ -933,6 +1102,7 @@ function createSessionFetcher(
 				const attemptedProxies = new Set<string>();
 
 				for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+					throwIfAmbientAborted(clientOptions.signal);
 					let proxy: string | undefined;
 					let attemptProxy: ResolvedAttemptProxy | undefined;
 					// Reuse the exact serialization used by this outbound attempt in its catch path.
@@ -963,6 +1133,7 @@ function createSessionFetcher(
 						});
 					};
 					try {
+						throwIfAmbientAborted(clientOptions.signal);
 						const sensitiveParams = normalizeSensitiveParams(options.sensitiveParams);
 						const structural = redactUrlQueryParams(url, Object.keys(sensitiveParams ?? {}));
 						fallbackSensitiveValues = [
@@ -975,6 +1146,7 @@ function createSessionFetcher(
 						fallbackRedactedUrl = structural.redactedUrl;
 						assertNoUnsupportedFingerprintOverrides(options);
 						attemptProxy = await resolveRequestProxy(options, attempt, refreshAttempt);
+						throwIfAmbientAborted(clientOptions.signal);
 						proxy = attemptProxy.url;
 						if (proxy && dedupeAllocatorEndpoints) {
 							// An under-filled allocation repeats endpoints (via the modulo
@@ -1003,7 +1175,15 @@ function createSessionFetcher(
 							proxy,
 							ignoreTlsErrors,
 							(transport) =>
-								fetchStealthRedirectChain(transport, cookieJar, requestUrl, method, options),
+								fetchStealthRedirectChain(
+									transport,
+									cookieJar,
+									requestUrl,
+									method,
+									options,
+									clientOptions.signal,
+								),
+							clientOptions.signal,
 						);
 
 						if (proxy && isProxyConnectFailureResponse(response, normalized.body)) {
@@ -1051,14 +1231,26 @@ function createSessionFetcher(
 						const sensitiveValues = serializedUrl?.sensitiveValues ?? fallbackSensitiveValues;
 						let normalizedError: TransportError;
 						try {
+							throwIfAmbientAborted(clientOptions.signal);
 							normalizedError = normalizeStealthTransportError(error);
 						} catch (normalizationError) {
-							throw redactSensitiveError(
+							const redactedNormalizationError = redactSensitiveError(
 								normalizationError,
 								sensitiveValues,
 								serializedUrl?.requestUrl ?? fallbackRequestUrl,
 								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
 							);
+							if (
+								normalizationError instanceof TransportError &&
+								normalizationError.code === "transport_cancelled"
+							) {
+								recordProxyAttempt(
+									"error",
+									proxyAttemptErrorCode(normalizationError),
+									proxyAttemptStatus(normalizationError),
+								);
+							}
+							throw redactedNormalizationError;
 						}
 						const retryErrorCode = proxyAttemptErrorCode(normalizedError);
 						const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);
@@ -1116,8 +1308,12 @@ function createSessionFetcher(
 							})
 						) {
 							if (stealthRetryOptions) {
-								await sleep(computeProxyTransportRetryDelayMs(stealthRetryOptions!, attempt + 1));
+								await sleep(
+									computeProxyTransportRetryDelayMs(stealthRetryOptions, attempt + 1),
+									clientOptions.signal,
+								);
 							}
+							throwIfAmbientAborted(clientOptions.signal);
 							continue;
 						}
 						throw normalizedError;
@@ -1129,11 +1325,13 @@ function createSessionFetcher(
 					stalePoolError &&
 					refreshAttempt < MAX_POLICY_PROXY_POOL_REFRESHES
 				) {
+					throwIfAmbientAborted(clientOptions.signal);
 					await invalidateProxyResolutionCacheAsync({
 						proxyPolicy: clientOptions.proxyPolicy,
 						upstream: clientOptions.upstream,
 						affinityKey: clientOptions.affinityKey,
 					});
+					throwIfAmbientAborted(clientOptions.signal);
 					continue;
 				}
 
@@ -1169,6 +1367,7 @@ function createSessionFetcher(
 				break;
 			}
 
+			throwIfAmbientAborted(clientOptions.signal);
 			throw normalizeStealthTransportError(lastError);
 		},
 		cookies: cookieJar,
@@ -1392,16 +1591,31 @@ function createSessionFetcher(
 		proxy: string,
 	): Promise<"source_ip_denied" | "edge_auth_rejected" | undefined> {
 		try {
-			return await withClient(profileName, proxy, false, async (client) => {
-				await client.clearCookies();
-				const response = await client.fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
-					method: "GET",
-					timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
-				});
-				const normalized = await normalizeResponse(response);
-				return classifyProxyAuthDiagnosticMessage(normalized.body);
-			});
+			return await withClient(
+				profileName,
+				proxy,
+				false,
+				async (client) => {
+					throwIfAmbientAborted(clientOptions.signal);
+					await client.clearCookies();
+					throwIfAmbientAborted(clientOptions.signal);
+					const response = await client.fetch(PROXY_AUTH_DIAGNOSTIC_URL, {
+						method: "GET",
+						timeout: PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS,
+						...(clientOptions.signal ? { signal: clientOptions.signal } : {}),
+					});
+					const normalized = await normalizeResponseWithSignal(
+						response,
+						undefined,
+						undefined,
+						clientOptions.signal,
+					);
+					return classifyProxyAuthDiagnosticMessage(normalized.body);
+				},
+				clientOptions.signal,
+			);
 		} catch (error) {
+			throwIfAmbientAborted(clientOptions.signal);
 			const message =
 				error instanceof Error
 					? [error.message, error.cause instanceof Error ? error.cause.message : ""]
