@@ -4312,6 +4312,7 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 	const operations = Object.entries(provider.operations);
 	const missing: string[] = [];
 	const vacuous: string[] = [];
+	const evidenceFreeScenario: string[] = [];
 	const placeholder: string[] = [];
 	const unsupported: string[] = [];
 	const generatedStarter: string[] = [];
@@ -4323,8 +4324,13 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 			missing.push(operationId);
 			continue;
 		}
-		if (hasCheck && !hasUnsupported && hasOnlyVacuousHealthCases(operation.healthCheck)) {
-			vacuous.push(operationId);
+		if (hasCheck && !hasUnsupported) {
+			const vacuousClass = vacuousHealthCaseClass(operation.healthCheck);
+			if (vacuousClass === "empty-assertions") {
+				vacuous.push(operationId);
+			} else if (vacuousClass === "evidence-free-scenario") {
+				evidenceFreeScenario.push(operationId);
+			}
 		}
 		if (hasUnsupported) {
 			const reason = operation.healthCheckUnsupported?.reason ?? "";
@@ -4351,14 +4357,36 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 		);
 	}
 
-	if (vacuous.length > 0) {
+	if (vacuous.length > 0 || evidenceFreeScenario.length > 0) {
+		const remediationParts: string[] = [];
+		if (vacuous.length > 0) {
+			remediationParts.push(
+				`healthCheck.assertions for ${vacuous.join(", ")} is empty — assert on status and response shape (e.g. throw or return {status:'degraded'} when the upstream contract breaks), or declare healthCheckUnsupported with a specific reason if the operation genuinely cannot be probed.`,
+			);
+		}
+		if (evidenceFreeScenario.length > 0) {
+			remediationParts.push(
+				`healthCheck scenario for ${evidenceFreeScenario.join(", ")} asserts nothing beyond transport — add an assert step whose expression reads the probe response (a field under data, an extracted value, or a quantifier over response rows), not just status_2xx or a bare response-envelope check.`,
+			);
+		}
+		const message =
+			evidenceFreeScenario.length === 0
+				? "One or more operations have healthCheck cases with empty assertions."
+				: vacuous.length === 0
+					? "One or more operations have healthCheck scenarios without response evidence."
+					: "One or more operations have healthCheck cases with empty assertions or evidence-free scenarios.";
 		return blocker(
 			"health-coverage",
 			"health",
-			"One or more operations have healthCheck cases with empty assertions.",
-			`healthCheck.assertions for ${vacuous.join(", ")} is empty — assert on status and response shape (e.g. throw or return {status:'degraded'} when the upstream contract breaks), or declare healthCheckUnsupported with a specific reason if the operation genuinely cannot be probed.`,
+			message,
+			remediationParts.join(" "),
 			CATEGORY_MAX_POINTS.health,
-			vacuous.map((operationId) => `${operationId}: empty healthCheck.assertions`),
+			[
+				...vacuous.map((operationId) => `${operationId}: empty healthCheck.assertions`),
+				...evidenceFreeScenario.map(
+					(operationId) => `${operationId}: healthCheck scenario asserts nothing beyond transport`,
+				),
+			],
 		);
 	}
 
@@ -4413,14 +4441,216 @@ function scoreHealthCoverage(provider: ProviderDefinition): SubmitCheck {
 	);
 }
 
-function hasOnlyVacuousHealthCases(
+type VacuousHealthCaseClass = "empty-assertions" | "evidence-free-scenario";
+
+/**
+ * Classify an operation whose every health case is vacuous. Returns undefined
+ * when at least one case carries real coverage: an imperative case with a
+ * non-vacuous assertions function, or a declarative case whose scenario reads
+ * the probe response. When all cases are vacuous, the class picks the blocker
+ * wording — "empty-assertions" whenever any vacuous case is imperative (the
+ * pre-scenario behavior, kept byte-identical), "evidence-free-scenario" when
+ * the suite is scenario-only.
+ */
+function vacuousHealthCaseClass(
 	healthCheck: ProviderDefinition["operations"][string]["healthCheck"],
-): boolean {
+): VacuousHealthCaseClass | undefined {
 	const cases = healthCheck?.cases;
 	if (!Array.isArray(cases) || cases.length === 0) {
+		return "empty-assertions";
+	}
+	let sawImperativeCase = false;
+	for (const healthCase of cases) {
+		if (healthCase?.scenario !== undefined) {
+			if (scenarioCarriesResponseEvidence(healthCase.scenario)) {
+				return undefined;
+			}
+			continue;
+		}
+		sawImperativeCase = true;
+		if (!isVacuousAssertionFunction(healthCase?.assertions)) {
+			return undefined;
+		}
+	}
+	return sawImperativeCase ? "empty-assertions" : "evidence-free-scenario";
+}
+
+/**
+ * A declarative case (`scenario`) carries real coverage when at least one
+ * `assert` step reads the probe response beyond the transport envelope. The
+ * SDK's own definitions drive this judgement:
+ *
+ * - The assert step is the scenario's only verdict-bearing construct
+ *   (`AssertResult.passed`). A guard can only attribute
+ *   degraded/expected_absence and stop the run (an escape hatch, not a health
+ *   verdict), and an operation step does not intrinsically fail on a non-2xx
+ *   response — that is what the explicit `status_2xx` predicate exists for. So
+ *   a scenario without a semantic assert step proves nothing beyond the
+ *   operation merely executing, which is the same emptiness the imperative
+ *   vacuity check flags.
+ * - Leaves that cannot observe upstream content carry no evidence: predicates
+ *   whose operands read nothing produced by a step (pure literals,
+ *   attempt/credential metadata, and the `status_code`/`request_id`/`kind`
+ *   envelope fields of a step result — this is what makes the legacy transport
+ *   pin `status_2xx` on `["status_code"]` non-evidence), predicates comparing
+ *   a reference against an identical copy of itself (`equals(x, x)` holds for
+ *   any response), and positive-polarity presence/type pins (`exists`,
+ *   `type_is`, `not(not_exists(...))`, zero-bound `array_length_gte`) on the
+ *   bare `data` root — the declarative spellings of the legacy transport-only
+ *   assertion (`status === 200` + `typeof data === "object"`), satisfied by
+ *   any well-formed response body. Polarity matters: `not(exists(data))`
+ *   ("this probe must return no body") is falsified by ordinary responses, so
+ *   the carve-out only applies where the pin appears un-negated.
+ * - Everything else counts: paths under `data`, extract-step results,
+ *   `duration_ms` (parity with imperative `ctx.durationMs` reads),
+ *   `status_2xx` applied to a body path (envelope-style upstreams answer HTTP
+ *   200 and carry the real code in the body), and quantifiers, which iterate
+ *   response rows by construction.
+ *
+ * Fail-open contract (same as isVacuousAssertionFunction): the provider module
+ * already validated this scenario against HealthScenarioSchema in its own SDK
+ * at import time, so any shape this walk does not recognize (unknown step
+ * kind, expression kind, operator, or reference namespace) indicates a newer
+ * grammar, not an empty probe — treat it as evidence rather than flag it.
+ * The inverse direction is accepted and documented: a determined author can
+ * still fabricate a read that never fails (a decorative deep path inside a
+ * disjunction, a degenerate bound). That effort is comparable to writing the
+ * real one-line assertion — the same accepted limitation as the imperative
+ * check's decorative-ctx-read — and the live `--smoke` probe remains the
+ * runtime defense.
+ */
+export function scenarioCarriesResponseEvidence(scenario: unknown): boolean {
+	if (!isRecord(scenario) || !Array.isArray(scenario.steps)) {
 		return true;
 	}
-	return cases.every((healthCase) => isVacuousAssertionFunction(healthCase?.assertions));
+	let sawUnknownStepKind = false;
+	for (const step of scenario.steps) {
+		if (!isRecord(step)) {
+			sawUnknownStepKind = true;
+			continue;
+		}
+		if (step.kind === "assert") {
+			if (expressionReadsResponse(step.expression)) {
+				return true;
+			}
+			continue;
+		}
+		if (step.kind !== "operation" && step.kind !== "extract" && step.kind !== "guard") {
+			sawUnknownStepKind = true;
+		}
+	}
+	return sawUnknownStepKind;
+}
+
+/**
+ * Predicate operators of the current scenario grammar. An operator outside
+ * this set indicates a newer grammar and fails open (counts as evidence),
+ * because a future operator may source the response through fields this walk
+ * does not know about.
+ */
+const KNOWN_SCENARIO_PREDICATE_OPERATORS: ReadonlySet<string> = new Set([
+	"exists",
+	"not_exists",
+	"non_empty",
+	"is_true",
+	"equals",
+	"not_equals",
+	"contains",
+	"matches",
+	"number_gt",
+	"number_gte",
+	"number_lt",
+	"number_lte",
+	"array_length_eq",
+	"array_length_gte",
+	"array_length_lte",
+	"status_2xx",
+	"type_is",
+]);
+
+function expressionReadsResponse(expression: unknown, negationDepth = 0): boolean {
+	if (!isRecord(expression)) {
+		return true;
+	}
+	if (expression.kind === "all" || expression.kind === "any") {
+		return Array.isArray(expression.clauses)
+			? expression.clauses.some((clause) => expressionReadsResponse(clause, negationDepth))
+			: true;
+	}
+	if (expression.kind === "not") {
+		return expressionReadsResponse(expression.clause, negationDepth + 1);
+	}
+	if (expression.kind === "quantifier") {
+		return true;
+	}
+	if (expression.kind !== "predicate" || typeof expression.operator !== "string") {
+		return true;
+	}
+	const operator = expression.operator;
+	if (!KNOWN_SCENARIO_PREDICATE_OPERATORS.has(operator)) {
+		return true;
+	}
+	const actualReads = operandReadsStepOutput(expression.actual);
+	const expectedReads = operandReadsStepOutput(expression.expected);
+	if (!actualReads && !expectedReads) {
+		return false;
+	}
+	// A predicate comparing a reference against an identical copy of itself
+	// (equals(x, x) and friends) holds or fails identically for every response,
+	// so the reads discriminate nothing.
+	if (
+		actualReads &&
+		expectedReads &&
+		JSON.stringify(expression.actual) === JSON.stringify(expression.expected)
+	) {
+		return false;
+	}
+	// Presence/type pins on the whole `data` root are satisfied by any
+	// well-formed JSON body — but only in positive polarity. Under an odd
+	// number of `not` wrappers the same pin means "this probe must return no
+	// body / a different shape", which ordinary responses falsify, so it is a
+	// real (if unusual) constraint and stays evidence.
+	const positivePolarity = negationDepth % 2 === 0;
+	const bareEnvelopePin = positivePolarity
+		? operator === "exists" ||
+			operator === "type_is" ||
+			(operator === "array_length_gte" && expression.expected === 0)
+		: operator === "not_exists";
+	if (bareEnvelopePin && !expectedReads && isBareResponseEnvelope(expression.actual)) {
+		return false;
+	}
+	return true;
+}
+
+function operandReadsStepOutput(operand: unknown): boolean {
+	if (!isRecord(operand) || !isRecord(operand.ref)) {
+		return false;
+	}
+	const reference = operand.ref;
+	if (reference.namespace === "attempt" || reference.namespace === "credentials") {
+		return false;
+	}
+	if (reference.namespace !== "steps") {
+		return true;
+	}
+	if (!Array.isArray(reference.path) || reference.path.length === 0) {
+		return true;
+	}
+	const head = reference.path[0];
+	return head !== "status_code" && head !== "request_id" && head !== "kind";
+}
+
+function isBareResponseEnvelope(operand: unknown): boolean {
+	if (!isRecord(operand) || !isRecord(operand.ref)) {
+		return false;
+	}
+	const reference = operand.ref;
+	return (
+		reference.namespace === "steps" &&
+		Array.isArray(reference.path) &&
+		reference.path.length === 1 &&
+		reference.path[0] === "data"
+	);
 }
 
 function isVacuousAssertionFunction(assertions: unknown): boolean {
