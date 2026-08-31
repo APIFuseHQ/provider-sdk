@@ -201,11 +201,54 @@ defineOperation<ProviderContext>()({
    `destructive` flag — is genuinely ambiguous between `write` and `destructive`, and no
    operation can be inferred as `external-send` from booleans at all. The codemod must refuse
    the ambiguous branch and surface it for authoring rather than defaulting to `write`.
-8. **The fleet cannot cut over atomically.** 84 repositories, each with its own SDK pin and its
-   own PR, means `main` carries both shapes for the length of the wave. Decide the registry's
-   ingestion tolerance for that window *before* the schema lands, and give whatever tolerance is
-   added an explicit deletion gate and an absence test — otherwise the window becomes the shim
-   this ADR refuses.
+8. **The fleet cannot cut over atomically, and the registry fails silently at the seam.** 84
+   repositories, each with its own SDK pin and its own PR, means `main` carries both shapes for
+   the length of the wave. Measured against the real ingestion path (see D9 below), that seam is
+   dangerous specifically because it is quiet: `defineOperation` is an identity function, so the
+   provider's own pin decides the runtime object, the registry reads that object by property, and
+   the readers default rather than throw. A flat operation ingested by today's registry publishes
+   `riskClass: "write"` from `operationRiskClass`'s final fallback, loses
+   `connectionExternalRefParam` to the `"externalRef"` default, and loses `timeoutMs` and the
+   destructive annotation at the gateway boundary — with a green build.
+
+## D9 — the wave window is an explicit ingestion mode, not a permissive fallback
+
+Measured 2026-08-31 against the production ingestion path. The findings that decide this:
+
+- Provider modules execute against **their own** installed pin.
+  `bootstrap-materialized-provider-dependencies.mjs:114` runs `bun install` per materialized
+  provider directory, and `provider-sdk-pin-resolution.test.ts` exists to prove a provider-local
+  SDK resolves ahead of the platform copy. Mixed pins are supported by design, not tolerated by
+  accident.
+- The pin gate is a **floor**, not an equality check. `providerSdkPinMeetsFloor`
+  (`scripts/lib/provider-sdk-pin.ts:620`) accepts any pin `>=` the floor, and
+  `provider-sdk-floor.json` is deliberately decoupled from the monorepo pin so a routine bump
+  cannot raise the fleet gate mid-flight. So there is no flag day available even if one were
+  wanted, and none is needed.
+- The registry reads operations **structurally**. `importOptionalModule`
+  (`packages/provider-registry/src/index.ts:1701`) performs a real `import()` and takes the
+  default export; `isProviderDefinition` only checks a shallow envelope. The
+  `Partial<OperationDefinition>` annotation on `toOperationCatalog` is erased at runtime.
+- The Go gateway is **insulated**. It never imports provider source or resolves a provider pin;
+  it consumes the registry's projection wire shape (`apps/gateway/internal/admission/projection.go:133`).
+  Flattening the authoring declaration does not require changing the registry-to-gateway wire
+  contract. The wave-window problem is confined to registry ingestion.
+
+Decision: the registry gains a temporary ingestion adapter at the operation boundary, before
+`toOperationCatalog`, and that adapter **discriminates on shape rather than falling back field by
+field**. An operation carrying any of `annotations`, `toolRouter`, or `docs` is legacy and takes
+the existing derivation unchanged; an operation carrying none of them is flat and must satisfy the
+flat contract — missing `riskClass`, or a missing `connectionMode` under a credential-bearing
+provider, throws.
+
+Field-by-field fallback was rejected: it cannot distinguish "flat provider that omitted
+`riskClass`" from "legacy provider", so it would preserve exactly the silent-default class that
+pitfall 8 describes. A shape discriminator makes the seam loud on both sides and makes the removal
+mechanical — delete the legacy branch and the flat path becomes the only path.
+
+This tolerance lives in the registry's ingestion boundary, never in the SDK. It is not the
+compatibility shim the anti-goals reject: the SDK ships one shape, providers author one shape, and
+no repository is ever half-migrated. Its removal gate is in Verification below.
 
 ## Verification
 
@@ -220,6 +263,15 @@ defineOperation<ProviderContext>()({
   `"required"`.
 - MCP tool names are unchanged for all providers (`providerId__operationId`).
 - Published `readOnlyHint`/`destructiveHint` match the pre-migration values for every operation.
+- The D9 ingestion adapter is gone. Removal sequence: every provider has landed the flat pin and
+  flat declarations, then `provider-sdk-floor.json` rises to that SDK, then a complete materialized
+  projection build passes. Only then does the legacy branch come out.
+- Absence test, two parts, because a fleet grep proves only that nobody *authors* the old shape —
+  not that the registry stopped *accepting* it. (1) The complete materialized build asserts every
+  imported operation carries the flat fields and no `annotations` / `toolRouter` / `docs`
+  container. (2) A registry unit test feeds a legacy-shaped operation and requires a loud
+  rejection, while a flat one succeeds. The adapter's module and its legacy-success fixtures must
+  be absent from the tree.
 
 ## When this might break
 
@@ -233,5 +285,9 @@ defineOperation<ProviderContext>()({
 - Incident: `apifuse-provider-zozotown` PR #13 (catalog published as login-required)
 - Derivation sites: `packages/provider-registry/src/operation-risk.ts`,
   `packages/provider-registry/src/index.ts:2063-2120` (connection mode), `:2384-2397` (default)
-- Audit script: `~/tmp/audit-operation-fields.sh`
+- Ingestion path (D9): `scripts/provider-deploy/bootstrap-materialized-provider-dependencies.mjs:114`,
+  `packages/provider-registry/src/index.ts:1701` (`importOptionalModule`),
+  `scripts/lib/provider-sdk-pin.ts:620` (`providerSdkPinMeetsFloor`), `provider-sdk-floor.json`,
+  `apps/gateway/internal/admission/projection.go:133`
+- Audit script: `~/tmp/audit-operation-fields.sh`; fleet scan: `~/tmp/adr9-fleet-scope.sh`
 - Domain term: monorepo `AGENTS.md` §Terminology — Connection
