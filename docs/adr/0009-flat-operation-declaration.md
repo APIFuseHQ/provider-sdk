@@ -278,6 +278,16 @@ This tolerance lives in the registry's ingestion boundary, never in the SDK. It 
 compatibility shim the anti-goals reject: the SDK ships one shape, providers author one shape, and
 no repository is ever half-migrated. Its removal gate is in Verification below.
 
+**The existing legacy derivations move into the adapter; they are not deleted alongside the SDK
+fields.** This is the same distinction stated above, and it is easy to get backwards: deleting the
+SDK's `requiresConnection` field and deleting the registry's `requiresConnection` *reader* are two
+different acts. The field goes away in the SDK immediately; the reader survives inside the adapter
+for exactly as long as an unmigrated provider can still declare it. Measured: 20 repos declare
+`requiresConnection` today (ekitan alone on 27 operations), so deleting the reader before the wave
+completes would fail the projection build for every one of them — which is the outcome D9 exists to
+prevent. The same applies to `annotations.destructive` / `readOnly` as risk inputs and to
+`docs.*` as the locale-key source. Each dies with the adapter, in one removal, gated below.
+
 ## Verification
 
 - `openWorld`, `derivations`, `requiresConnection`, `inputExamples`, `rateLimit`, `idempotent`,
