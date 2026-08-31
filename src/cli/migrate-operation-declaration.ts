@@ -946,12 +946,60 @@ function collectOperationsMaps(
 
 	const visit = (node: TS.Node): void => {
 		if (ts.isPropertyAssignment(node) && staticPropertyName(node.name) === "operations") {
-			inspect(node.initializer, "<operations>");
+			// Only provider declarations own an `operations` map: the property
+			// must sit inside an argument of defineProvider()/buildProvider()-style
+			// call, or its initializer (possibly via a same-file const) must
+			// contain defineOperation/defineStreamOperation members. A bare
+			// `operations:` key elsewhere (a zod schema field, a config object)
+			// is not a declaration site; treating it as one produced false
+			// factory_composed_operations refusals on ekitan's
+			// scripts/fixture-integrity.ts, whose schema field calls
+			// .superRefine(...).
+			if (isProviderOperationsProperty(node, constObjects)) {
+				inspect(node.initializer, "<operations>");
+			}
 		}
 		ts.forEachChild(node, visit);
 	};
 	visit(source);
 	return [...maps.values()];
+}
+
+function isProviderOperationsProperty(
+	node: TS.PropertyAssignment,
+	constObjects: ReadonlyMap<string, TS.ObjectLiteralExpression>,
+): boolean {
+	// (a) The initializer (direct or via same-file const) mentions
+	// defineOperation / defineStreamOperation — the strongest signal.
+	const target = ts.isIdentifier(unwrapExpression(node.initializer) ?? node.initializer)
+		? constObjects.get(
+				(unwrapExpression(node.initializer) as TS.Identifier).text,
+			)
+		: undefined;
+	const initializerText = (target ?? node.initializer).getText();
+	if (/\bdefine(?:Stream)?Operation\b/.test(initializerText)) return true;
+
+	// (b) The property is inside a call argument whose callee looks like a
+	// provider builder (defineProvider(...)(...) / buildProvider(...)).
+	let current: TS.Node = node;
+	while (current.parent !== undefined) {
+		const parent: TS.Node = current.parent;
+		if (ts.isCallExpression(parent)) {
+			const callee = parent.expression.getText();
+			if (/(?:defineProvider|Provider)\b/.test(callee)) return true;
+			// A call expression that is itself the invocation of a
+			// defineProvider(...) result: defineProvider({...})({operations})
+			if (ts.isCallExpression(parent.expression)) {
+				if (/\bdefineProvider\b/.test(parent.expression.expression.getText())) {
+					return true;
+				}
+			}
+			return false;
+		}
+		if (ts.isSourceFile(parent)) return false;
+		current = parent;
+	}
+	return false;
 }
 
 function operationObjectFromExpression(

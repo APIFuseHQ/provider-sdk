@@ -279,6 +279,38 @@ describe("migrateOperationDeclarationRepository", () => {
 			rmSync(root, { recursive: true, force: true });
 		}
 	});
+
+	it("ignores a bare `operations:` key outside a provider declaration", () => {
+		// Regression: ekitan's scripts/fixture-integrity.ts declares a zod
+		// schema field named `operations` whose initializer is a call chain
+		// (z.array(...).superRefine(...)). The map collector used to treat any
+		// `operations:` property as a provider declaration site and refused it
+		// as factory_composed_operations.
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-schema-key-"));
+		try {
+			const migratable = fixture("inline-map");
+			writeFileSync(join(root, "index.ts"), migratable);
+			mkdirSync(join(root, "scripts"), { recursive: true });
+			writeFileSync(
+				join(root, "scripts", "fixture-schema.ts"),
+				[
+					'import { z } from "@apifuse/provider-sdk/provider";',
+					"",
+					"export const manifestSchema = z.object({",
+					"  operations: z.array(z.enum([\"a\", \"b\"])).min(1).superRefine(() => {}),",
+					"  captured_operations: z.array(z.string().min(1)).min(1),",
+					"});",
+					"",
+				].join("\n"),
+			);
+			const result = migrateOperationDeclarationRepository(root, {
+				check: true,
+			});
+			expect(result.status).toBe("would-migrate");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("apifuse migrate-operation-declaration CLI", () => {
