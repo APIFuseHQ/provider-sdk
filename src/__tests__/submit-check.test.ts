@@ -239,8 +239,7 @@ export default defineProvider({
 })({
   operations: {
     lookup: {
-      riskClass: "read",
-      connectionMode: "none",
+      riskClass: "read", connectionMode: "none",
       descriptionKey: "operations.lookup.description",
       input,
       output,
@@ -304,7 +303,6 @@ describe("apifuse submit-check", () => {
 			smoke: true,
 			smokeNote: "GET /health and POST /v1/lookup passed locally.",
 		});
-
 		expect(report.score.verdict).toBe("ready");
 		expect(report.summary.blockers).toBe(0);
 		expect(report.score.total).toBeGreaterThanOrEqual(90);
@@ -3778,8 +3776,7 @@ const response = { updatedAt: "20260707222855" };
 			"    },\n  },\n});",
 			`    },
     empty: {
-      riskClass: "read",
-      connectionMode: "none",
+      riskClass: "read", connectionMode: "none",
       descriptionKey: "operations.lookup.description",
       input,
       output,
@@ -5425,8 +5422,7 @@ export default defineProvider({
   },
   operations: {
     lookup: {
-      riskClass: "read",
-      connectionMode: "none",
+      riskClass: "read", connectionMode: "none",
       descriptionKey: "operations.lookup.description",
       input,
       output,

@@ -154,6 +154,45 @@ describe("defineProvider", () => {
 		).toThrow(/errorCodes\[0\]\.status: 418.*not an emittable provider error status/);
 	});
 
+	it("rejects a structurally supplied operation without riskClass", () => {
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						riskClass: undefined,
+					},
+				},
+			}),
+		).toThrow(/operations\.prices\.riskClass/);
+	});
+
+	it("validates flat operation safety and access enums", () => {
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						riskClass: "unsafe",
+					},
+				},
+			}),
+		).toThrow(/operations\.prices\.riskClass/);
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						connectionMode: "sometimes",
+					},
+				},
+			}),
+		).toThrow(/operations\.prices\.connectionMode/);
+	});
+
 	it("warns when an SDK-owned error code declares an ignored runtime status", () => {
 		const warn = spyOn(console, "warn").mockImplementation(() => {});
 		try {

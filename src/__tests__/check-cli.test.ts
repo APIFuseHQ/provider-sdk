@@ -288,7 +288,7 @@ export default {
 		const authoring = results.find((result) => result.message.includes("Provider authoring lint"));
 
 		expect(authoring?.passed).toBe(false);
-		expect(authoring?.details?.join("\n")).toContain("description-min-length");
+		expect(authoring?.details?.join("\n")).toContain("description-key-required");
 		expect(authoring?.details?.join("\n")).toContain("schema-description-key-required");
 	});
 
@@ -325,6 +325,8 @@ export default {
   operations: {
     lookup: {
       descriptionKey: "operations.lookup.description",
+      connectionMode: "required",
+      riskClass: "read",
       input,
       output,
       handler: async () => ({ ok: true }),
@@ -518,6 +520,8 @@ export default defineProvider({
   operations: {
     lookup: {
       descriptionKey: "operations.lookup.description",
+      connectionMode: "required",
+      riskClass: "read",
       input,
       output,
       handler: async (ctx) => {

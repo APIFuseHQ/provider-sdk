@@ -129,16 +129,6 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 					cases: [{ name: "mutating case", input: {}, assertions: () => {} }],
 				},
 			},
-			unclassified: {
-				riskClass: "read",
-				input: z.object({}),
-				output: z.object({ ok: z.boolean() }),
-				handler: async () => ({ ok: true }),
-				healthCheck: {
-					interval: "5m",
-					cases: [{ name: "unclassified case", input: {}, assertions: () => {} }],
-				},
-			},
 			connected: {
 				riskClass: "read",
 				input: z.object({}),
@@ -324,7 +314,7 @@ describe("self-test internal listener", () => {
 		expect(response.status).toBe(200);
 	});
 
-	it("refuses non-read-only operations (explicit and unclassified) with 403", async () => {
+	it("refuses non-read operations with 403", async () => {
 		const { selfTestApp } = createApps();
 		const mutate = await postSelfTest(selfTestApp, {
 			operationId: "mutate",
@@ -335,12 +325,6 @@ describe("self-test internal listener", () => {
 			error: { code: string };
 		};
 		expect(mutateBody.error.code).toBe("operation_not_read_only");
-
-		const unclassified = await postSelfTest(selfTestApp, {
-			operationId: "unclassified",
-			caseName: "unclassified case",
-		});
-		expect(unclassified.status).toBe(403);
 	});
 
 	it("reports non-read-only cases as visible errors in batch mode", async () => {

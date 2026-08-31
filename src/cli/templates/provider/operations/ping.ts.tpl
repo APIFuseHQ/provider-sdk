@@ -4,6 +4,8 @@ import type { ProviderContext } from "../index";
 import { pingInputSchema, pingOutputSchema } from "../schemas/ping";
 
 export const pingOperation = defineOperation<ProviderContext>()({
+  connectionMode: "none",
+  riskClass: "read",
   descriptionKey: "operations.ping.description",
   input: pingInputSchema,
   output: pingOutputSchema,

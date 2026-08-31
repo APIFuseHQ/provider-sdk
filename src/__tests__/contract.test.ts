@@ -88,6 +88,8 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 				{
 					riskClass: "read",
 					connectionMode: "required",
+					connectionExternalRefParam: "accountRef",
+					approval: "always",
 					timeoutMs: 5000,
 					titleKey: `contract.operations.${operationId}.title`,
 					descriptionKey: `contract.operations.${operationId}.description`,
@@ -96,6 +98,13 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 					whenToUseKeys: [`contract.operations.${operationId}.whenToUse`],
 					whenNotToUseKeys: [`contract.operations.${operationId}.whenNotToUse`],
 					normalizationNotesKeys: [`contract.operations.${operationId}.normalization`],
+					errorCodes: [
+						{
+							code: "SEARCH_UNAVAILABLE",
+							status: 503,
+							description: "Search is temporarily unavailable.",
+						},
+					],
 					examples: [
 						{
 							scenarioKey: `contract.operations.${operationId}.examples.baseline.scenario`,
@@ -227,6 +236,40 @@ describe("provider contract extraction", () => {
 			request: { query: "alpha-search" },
 			response: { name: "alpha-search", score: 1 },
 			recordedAt: "2025-12-31",
+		});
+	});
+
+	it("preserves every flat declaration axis in the contract snapshot", () => {
+		const snapshot = extractProviderContract(buildProvider(["zeta-search", "alpha-search"]));
+		const operation = snapshot.operations.find((candidate) => candidate.id === "alpha-search");
+
+		expect(operation).toMatchObject({
+			connectionMode: "required",
+			connectionExternalRefParam: "accountRef",
+			riskClass: "read",
+			approval: "always",
+			timeoutMs: 5000,
+			titleKey: "contract.operations.alpha-search.title",
+			descriptionKey: "contract.operations.alpha-search.description",
+			summaryKey: "contract.operations.alpha-search.summary",
+			markdownKey: "contract.operations.alpha-search.markdown",
+			whenToUseKeys: ["contract.operations.alpha-search.whenToUse"],
+			whenNotToUseKeys: ["contract.operations.alpha-search.whenNotToUse"],
+			normalizationNotesKeys: ["contract.operations.alpha-search.normalization"],
+			errorCodes: [
+				{
+					code: "SEARCH_UNAVAILABLE",
+					status: 503,
+					description: "Search is temporarily unavailable.",
+				},
+			],
+			examples: [
+				{
+					scenarioKey: "contract.operations.alpha-search.examples.baseline.scenario",
+					input: { query: "alpha-search" },
+					rationaleKey: "contract.operations.alpha-search.examples.baseline.rationale",
+				},
+			],
 		});
 	});
 
