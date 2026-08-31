@@ -10,6 +10,8 @@ export {
 	createUnsupportedResolverClient,
 	DEFAULT_RESOLVER_VENDOR_PREFERENCE,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
+	getResolverSolutionSource,
+	invalidateCachedResolverSolution,
 	invalidateResolverSolution,
 	RESOLVER_ADAPTER_REGISTRY,
 	RESOLVER_INSTRUMENTATION_METADATA,
@@ -17,4 +19,5 @@ export {
 	type ResolverAdapterFactory,
 	type ResolverInstrumentationMetadata,
 	type ResolverRuntimeOptions,
+	type ResolverSolutionSource,
 } from "./resolver.js";
