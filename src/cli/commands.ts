@@ -4,6 +4,7 @@ export type ApifuseCommandName =
 	| "check"
 	| "sync-assets"
 	| "migrate-shape"
+	| "migrate-operation-declaration"
 	| "submit-check"
 	| "bounty-check"
 	| "record"
@@ -64,6 +65,17 @@ export const COMMAND_MANIFEST: Record<
 		examples: ["apifuse migrate-shape .", "apifuse migrate-shape . --check"],
 		modulePath: "./apifuse-migrate-shape",
 	},
+	"migrate-operation-declaration": {
+		name: "migrate-operation-declaration",
+		summary:
+			"Migrate legacy nested operation declarations to the ADR-0009 flat shape, refusing ambiguous safety or metadata.",
+		usage: "apifuse migrate-operation-declaration [path] [--check] [--json]",
+		examples: [
+			"apifuse migrate-operation-declaration .",
+			"apifuse migrate-operation-declaration . --check --json",
+		],
+		modulePath: "./apifuse-migrate-operation-declaration",
+	},
 	"submit-check": {
 		name: "submit-check",
 		summary:
@@ -123,6 +135,7 @@ export const COMMAND_ORDER: ApifuseCommandName[] = [
 	"check",
 	"sync-assets",
 	"migrate-shape",
+	"migrate-operation-declaration",
 	"submit-check",
 	"record",
 	"test",

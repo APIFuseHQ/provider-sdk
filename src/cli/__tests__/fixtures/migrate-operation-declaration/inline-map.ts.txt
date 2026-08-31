@@ -1,0 +1,11 @@
+const provider = buildProvider({
+	operations: {
+		ping: {
+			annotations: { readOnly: true },
+			docs: { descriptionKey: "operations.ping.description" },
+			input: InputSchema,
+			output: OutputSchema,
+			handler,
+		},
+	},
+});

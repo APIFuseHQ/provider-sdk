@@ -1,0 +1,15 @@
+const requiredConnection = {
+	requiresConnection: true,
+	connectionExternalRefParam: "profileId",
+} as const;
+
+const updateOperation = defineOperation<ProviderContext>()({
+	annotations: { destructive: true },
+	toolRouter: {
+		...requiredConnection,
+		approval: "always",
+	},
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
