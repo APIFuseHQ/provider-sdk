@@ -17,6 +17,7 @@ function providerWithHealthCheckInterval(interval: string) {
 		},
 	})({ operations: {
 			ping: {
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				async handler() {
@@ -40,6 +41,7 @@ function providerWithHealthCheckInterval(interval: string) {
 describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 	it("flows TOutput from operation.output schema into ctx.data", () => {
 		const operation = defineOperation<unknown>()({
+			riskClass: "read",
 			input: z.object({ market: z.string() }),
 			output: z.object({ price: z.number(), tradeId: z.string() }),
 			async handler(_ctx, input) {
@@ -79,6 +81,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -114,6 +117,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -146,6 +150,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 			},
 		})({ operations: {
 				ping: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -220,6 +225,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 			},
 		})({ operations: {
 				ping: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -256,6 +262,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 			},
 		})({ operations: {
 				ping: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -293,6 +300,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -328,6 +336,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -371,6 +380,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 			},
 		})({ operations: {
 				ping: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -417,6 +427,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -448,6 +459,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -482,6 +494,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -516,6 +529,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -550,6 +564,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -573,6 +588,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 			},
 		})({ operations: {
 				"wipe-all": {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -608,6 +624,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 			},
 		})({ operations: {
 				ping: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler() {
@@ -639,6 +656,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				healthMonitor: { interval: "1m" } as never,
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -669,6 +687,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				} as never,
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -693,6 +712,7 @@ describe("HealthCheckCase type inference (TInput/TOutput flow)", () => {
 				},
 			})({ operations: {
 					ping: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {

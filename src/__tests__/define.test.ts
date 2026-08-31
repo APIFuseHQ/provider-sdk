@@ -3,9 +3,9 @@ import { z } from "zod";
 
 import { ProviderError, ValidationError } from "../errors.js";
 import type {
-	OperationAnnotations,
 	ProviderContext,
 	ProviderDefinition,
+	OperationRiskClass,
 	SchemaLike,
 } from "../types.js";
 import {
@@ -15,6 +15,7 @@ import {
 
 const InputSchema = z.object({ id: z.string() });
 const OutputSchema = z.object({ name: z.string(), price: z.number() });
+const READ_RISK_CLASS: OperationRiskClass = "read";
 
 function requireZodSchema(schema: SchemaLike): z.ZodType {
 	if (!("safeParse" in schema) || typeof schema.safeParse !== "function") {
@@ -35,6 +36,7 @@ const validConfig = {
 	},
 	operations: {
 		prices: {
+			riskClass: READ_RISK_CLASS,
 			input: InputSchema,
 			output: OutputSchema,
 			handler: async (_ctx: ProviderContext, input: unknown) => {
@@ -139,15 +141,13 @@ describe("defineProvider", () => {
 				operations: {
 					prices: {
 						...validConfig.operations.prices,
-						docs: {
-							errorCodes: [
+						errorCodes: [
 								{
 									code: "UPSTREAM_TEAPOT",
 									status: 418,
 									description: "Unsupported upstream response",
 								},
 							],
-						},
 					},
 				},
 			}),
@@ -162,20 +162,18 @@ describe("defineProvider", () => {
 				operations: {
 					prices: {
 						...validConfig.operations.prices,
-						docs: {
-							errorCodes: [
+						errorCodes: [
 								{
 									code: "reauth_required",
 									status: 502,
 									description: "Provider session expired",
 								},
 							],
-						},
 					},
 				},
 			});
 
-			expect(provider.operations.prices.docs?.errorCodes?.[0]?.status).toBe(502);
+			expect(provider.operations.prices.errorCodes?.[0]?.status).toBe(502);
 			expect(warn).toHaveBeenCalledWith(
 				'[provider-sdk] Provider "korea-air-quality" operation "prices" declares status 502 for SDK-owned error code "reauth_required"; the declared status is documentation-only and will be ignored at runtime.',
 			);
@@ -780,53 +778,47 @@ describe("defineProvider", () => {
 		expect(parsed.success).toBe(true);
 	});
 
-	describe("annotations.timeoutMs validation", () => {
-		const withAnnotations = (annotations: OperationAnnotations) => ({
+	describe("operation timeoutMs validation", () => {
+		const withTimeoutMs = (timeoutMs: number | undefined) => ({
 			...validConfig,
 			operations: {
 				prices: {
 					...validConfig.operations.prices,
-					annotations,
+					timeoutMs,
 				},
 			},
 		});
 
 		it("accepts a valid integer in [1, 60000] ms", () => {
-			const provider = defineProvider(withAnnotations({ readOnly: true, timeoutMs: 30_000 }));
-			expect(provider.operations.prices.annotations?.timeoutMs).toBe(30_000);
+			const provider = defineProvider(withTimeoutMs(30_000));
+			expect(provider.operations.prices.timeoutMs).toBe(30_000);
 		});
 
-		it("accepts annotations without timeoutMs", () => {
-			expect(() => defineProvider(withAnnotations({ readOnly: true }))).not.toThrow();
-		});
-
-		it("accepts a provider with no annotations block", () => {
+		it("accepts a provider with no timeoutMs", () => {
 			expect(() => defineProvider(validConfig)).not.toThrow();
 		});
 
 		it("rejects timeoutMs of 0 (lower bound exclusive)", () => {
-			expect(() => defineProvider(withAnnotations({ timeoutMs: 0 }))).toThrow(ValidationError);
+			expect(() => defineProvider(withTimeoutMs(0))).toThrow(ValidationError);
 		});
 
 		it("rejects negative timeoutMs", () => {
-			expect(() => defineProvider(withAnnotations({ timeoutMs: -100 }))).toThrow(ValidationError);
+			expect(() => defineProvider(withTimeoutMs(-100))).toThrow(ValidationError);
 		});
 
 		it("rejects timeoutMs above 60000 ms (upper bound)", () => {
-			expect(() => defineProvider(withAnnotations({ timeoutMs: 60_001 }))).toThrow(ValidationError);
+			expect(() => defineProvider(withTimeoutMs(60_001))).toThrow(ValidationError);
 		});
 
 		it("rejects non-integer timeoutMs", () => {
-			expect(() => defineProvider(withAnnotations({ timeoutMs: 1500.5 }))).toThrow(ValidationError);
+			expect(() => defineProvider(withTimeoutMs(1500.5))).toThrow(ValidationError);
 		});
 
 		it("rejects non-number timeoutMs", () => {
 			expect(() =>
 				defineProvider(
-					withAnnotations({
-						// @ts-expect-error test-invalid: runtime validation must reject non-number timeouts.
-						timeoutMs: "30000",
-					}),
+					// @ts-expect-error test-invalid: runtime validation must reject non-number timeouts.
+					withTimeoutMs("30000"),
 				),
 			).toThrow(ValidationError);
 		});
@@ -909,32 +901,29 @@ describe("defineProvider", () => {
 		});
 	});
 
-	describe("operation title and description passthrough", () => {
-		it("preserves code-authored title and description on the built operation", () => {
+	describe("operation locale-key passthrough", () => {
+		it("preserves flat locale keys on the built operation", () => {
 			const provider = defineProvider({
 				...validConfig,
 				operations: {
 					prices: {
 						...validConfig.operations.prices,
-						title: "Get Prices",
-						description:
-							"Use this operation when you need the latest quoted price for an asset id; returns the display name and price in KRW.",
+						titleKey: "operations.prices.title",
+						descriptionKey: "operations.prices.description",
 					},
 				},
 			});
 
-			expect(provider.operations.prices.title).toBe("Get Prices");
-			expect(provider.operations.prices.description).toBe(
-				"Use this operation when you need the latest quoted price for an asset id; returns the display name and price in KRW.",
-			);
+			expect(provider.operations.prices.titleKey).toBe("operations.prices.title");
+			expect(provider.operations.prices.descriptionKey).toBe("operations.prices.description");
 		});
 
-		it("keeps title and description undefined when not declared", () => {
+		it("keeps locale keys undefined when not declared", () => {
 			const provider = defineProvider(validConfig);
 
 			const prices = provider.operations.prices as ProviderDefinition["operations"][string];
-			expect(prices.title).toBeUndefined();
-			expect(prices.description).toBeUndefined();
+			expect(prices.titleKey).toBeUndefined();
+			expect(prices.descriptionKey).toBeUndefined();
 		});
 	});
 

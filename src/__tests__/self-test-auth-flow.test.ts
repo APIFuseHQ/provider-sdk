@@ -208,7 +208,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 		},
 		operations: {
 			session: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx: {
@@ -258,7 +258,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 				},
 			},
 			prep: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx: {
@@ -299,7 +299,7 @@ function createFlowProvider(state: FlowProviderState): ProviderDefinition {
 				},
 			},
 			leaky: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx: { credential: { get(key: string): string | undefined } }) => {
@@ -340,7 +340,7 @@ function createFlowlessProvider(seenIds: string[] = []): ProviderDefinition {
 		auth: { mode: "credentials" },
 		operations: {
 			raw: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx: { credential: { get(key: string): string | undefined } }) => ({

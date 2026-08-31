@@ -245,17 +245,10 @@ export function computeSelfTestPlanDigest(provider: ProviderDefinition): string 
 
 /**
  * Fail-closed read-only classification: an operation may self-test only when
- * its own metadata marks it read-only (annotations.readOnly or
- * toolRouter.riskClass "read") and nothing marks it side-effecting. Unclassified
- * operations are refused so the endpoint cannot become a mutation oracle.
+ * its authored safety source of truth classifies it as read-only.
  */
 export function isSelfTestReadOnlyOperation(operation: OperationDefinition): boolean {
-	const annotations = operation.annotations;
-	if (annotations?.readOnly === false) return false;
-	if (annotations?.destructive === true) return false;
-	const riskClass = operation.toolRouter?.riskClass;
-	if (riskClass !== undefined && riskClass !== "read") return false;
-	return annotations?.readOnly === true || riskClass === "read";
+	return operation.riskClass === "read";
 }
 
 /** Binds the self-test executor to a tenant app's /v1 pipeline in-process. */

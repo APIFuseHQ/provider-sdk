@@ -239,10 +239,11 @@ export default defineProvider({
 })({
   operations: {
     lookup: {
+      riskClass: "read",
+      connectionMode: "none",
       descriptionKey: "operations.lookup.description",
       input,
       output,
-      annotations: { readOnly: true, idempotent: true, openWorld: true },
       handler: async () => ({ ok: true }),
       fixtures: { request: { q: "btc" }, response: { ok: true } },
       ${
@@ -3777,10 +3778,11 @@ const response = { updatedAt: "20260707222855" };
 			"    },\n  },\n});",
 			`    },
     empty: {
+      riskClass: "read",
+      connectionMode: "none",
       descriptionKey: "operations.lookup.description",
       input,
       output,
-      annotations: { readOnly: true, idempotent: true, openWorld: true },
       handler: async () => ({ ok: true }),
       fixtures: { request: { q: "eth" }, response: { ok: true } },
       healthCheck: {
@@ -3868,7 +3870,7 @@ const response = { updatedAt: "20260707222855" };
 				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
 				"fixtures: { request: { q: 123 }, response: { ok: true } },",
 			)
-			.replace("annotations: { readOnly: true, idempotent: true, openWorld: true },", "");
+			.replace('riskClass: "read",', "");
 		const dir = makeProviderDir(
 			"submit-remediation-coverage-",
 			brokenSource,
@@ -5423,10 +5425,11 @@ export default defineProvider({
   },
   operations: {
     lookup: {
+      riskClass: "read",
+      connectionMode: "none",
       descriptionKey: "operations.lookup.description",
       input,
       output,
-      annotations: { readOnly: true, idempotent: true, openWorld: true },
       handler: async () => ({ ok: true }),
       fixtures: { request: { q: "btc" }, response: { ok: true } },
       healthCheck: {

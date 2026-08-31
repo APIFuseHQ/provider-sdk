@@ -11,6 +11,7 @@ const state = Reflect.get(globalThis, "__capabilityImportGuardState") as Capabil
 
 const operations: ProviderDefinition["operations"] = {
 	stealth: {
+		riskClass: "read",
 		input: z.object({}),
 		output: z.object({}),
 		upstream: { baseUrl: "https://api.example.com" },
@@ -24,6 +25,7 @@ const operations: ProviderDefinition["operations"] = {
 		},
 	},
 	stealthSession: {
+		riskClass: "read",
 		input: z.object({}),
 		output: z.object({ cookie: z.string() }),
 		async handler(ctx) {
@@ -37,6 +39,7 @@ const operations: ProviderDefinition["operations"] = {
 		},
 	},
 	browser: {
+		riskClass: "read",
 		input: z.object({}),
 		output: z.object({}),
 		async handler(ctx) {
@@ -45,6 +48,7 @@ const operations: ProviderDefinition["operations"] = {
 		},
 	},
 	resolver: {
+		riskClass: "read",
 		input: z.object({}),
 		output: z.object({}),
 		async handler(ctx) {
@@ -57,6 +61,7 @@ const operations: ProviderDefinition["operations"] = {
 		},
 	},
 	native: {
+		riskClass: "read",
 		input: z.object({}),
 		output: z.object({ available: z.boolean() }),
 		async handler(ctx) {

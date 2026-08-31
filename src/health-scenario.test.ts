@@ -57,6 +57,7 @@ function providerWithJourney(journey: unknown) {
 		},
 		operations: {
 			ping: {
+				riskClass: "read",
 				description: "Ping",
 				input: z.object({}),
 				output: z.object({}),
@@ -79,6 +80,7 @@ function providerWithCase(caseValue: unknown): ProviderDefinition {
 		},
 		operations: {
 			ping: {
+				riskClass: "read",
 				description: "Ping",
 				input: z.object({}),
 				output: z.object({}),
@@ -90,6 +92,7 @@ function providerWithCase(caseValue: unknown): ProviderDefinition {
 				},
 			},
 			pong: {
+				riskClass: "read",
 				description: "Pong",
 				input: z.object({}),
 				output: z.object({}),

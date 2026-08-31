@@ -2947,13 +2947,17 @@ function collectProviderRequiredLocaleKeys(provider: ProviderDefinition): string
 
 	for (const operation of Object.values(provider.operations)) {
 		addLocaleKeys(keys, [
+			operation.titleKey,
 			operation.descriptionKey,
-			operation.docs?.titleKey,
-			operation.docs?.descriptionKey,
-			operation.docs?.summaryKey,
-			operation.docs?.markdownKey,
+			operation.summaryKey,
+			operation.markdownKey,
 			...(operation.whenToUseKeys ?? []),
 			...(operation.whenNotToUseKeys ?? []),
+			...(operation.normalizationNotesKeys ?? []),
+			...(operation.examples ?? []).flatMap((example) => [
+				example.scenarioKey,
+				example.rationaleKey,
+			]),
 			...collectSchemaDescriptionKeys(operation.input),
 			...collectSchemaDescriptionKeys(operation.output),
 		]);
@@ -3020,8 +3024,8 @@ function scoreOperationMetadata(provider: ProviderDefinition): SubmitCheck {
 			return true;
 		})
 		.map(([operationId]) => operationId);
-	const missingAnnotations = operations
-		.filter(([, operation]) => !operation.annotations)
+	const missingRiskClass = operations
+		.filter(([, operation]) => !operation.riskClass)
 		.map(([operationId]) => operationId);
 
 	if (weakDescriptions.length > 0) {
@@ -3033,30 +3037,30 @@ function scoreOperationMetadata(provider: ProviderDefinition): SubmitCheck {
 			points: 0,
 			maxPoints: CATEGORY_MAX_POINTS.operations,
 			message: "One or more operations have weak descriptions.",
-			remediation: `For ${weakDescriptions.join(", ")}, add an operation \`descriptionKey\` backed by \`locales/en.json\` and \`locales/ko.json\`, or add a 150+ character \`description\` explaining when to use it, when not to use it, outputs, and caveats.`,
+			remediation: `For ${weakDescriptions.join(", ")}, add an operation \`descriptionKey\` backed by \`locales/en.json\` and \`locales/ko.json\`.`,
 			evidence: weakDescriptions,
 		};
 	}
 
-	const points = missingAnnotations.length > 0 ? 11 : CATEGORY_MAX_POINTS.operations;
+	const points = missingRiskClass.length > 0 ? 11 : CATEGORY_MAX_POINTS.operations;
 	return {
 		id: "operation-metadata",
 		category: "operations",
-		level: missingAnnotations.length > 0 ? "warn" : "info",
-		status: missingAnnotations.length > 0 ? "warn" : "pass",
+		level: missingRiskClass.length > 0 ? "warn" : "info",
+		status: missingRiskClass.length > 0 ? "warn" : "pass",
 		points,
 		maxPoints: CATEGORY_MAX_POINTS.operations,
 		message:
-			missingAnnotations.length > 0
-				? "Operations are described, but some are missing safety annotations."
+			missingRiskClass.length > 0
+				? "Operations are described, but some are missing a safety classification."
 				: "Operation descriptions and metadata are review-ready.",
 		remediation:
-			missingAnnotations.length > 0
-				? `For ${missingAnnotations.join(", ")}, add \`annotations\` with the applicable safety fields, such as \`readOnly\`, \`destructive\`, \`idempotent\`, \`openWorld\`, \`rateLimit\`, or \`timeoutMs\`.`
+			missingRiskClass.length > 0
+				? `For ${missingRiskClass.join(", ")}, declare the operation's required \`riskClass\` as \`read\`, \`write\`, \`destructive\`, or \`external-send\`.`
 				: undefined,
 		evidence:
-			missingAnnotations.length > 0
-				? missingAnnotations.map((operationId) => `${operationId}: missing annotations`)
+			missingRiskClass.length > 0
+				? missingRiskClass.map((operationId) => `${operationId}: missing riskClass`)
 				: operations.map(([operationId]) => operationId),
 	};
 }
@@ -5100,25 +5104,6 @@ function scoreAuthSafety(provider: ProviderDefinition): SubmitCheck {
 			remediation:
 				"Add `credential: { keys: [...] }` to `defineProvider` with the persisted OAuth token fields returned by the real token exchange.",
 		};
-	}
-
-	if (authMode === "none") {
-		const securedOperations = Object.entries(provider.operations).filter(
-			([, operation]) => operation.annotations?.openWorld === false,
-		);
-		if (securedOperations.length > 0) {
-			return {
-				id: "auth-safety",
-				category: "auth",
-				level: "warn",
-				status: "warn",
-				points: 7,
-				maxPoints: CATEGORY_MAX_POINTS.auth,
-				message: "Provider is no-auth but at least one operation is not marked openWorld.",
-				remediation: `Either set \`auth.mode\` to the upstream auth model, or mark these public no-auth operations with \`annotations.openWorld: true\`: ${securedOperations.map(([operationId]) => operationId).join(", ")}.`,
-				evidence: securedOperations.map(([operationId]) => operationId),
-			};
-		}
 	}
 
 	return pass(

@@ -51,7 +51,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 		},
 		operations: {
 			echo: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({ value: z.string() }),
 				output: z.object({ echoed: z.string() }),
 				handler: async (_ctx, input) => ({
@@ -89,7 +89,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 				},
 			},
 			leak: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -104,7 +104,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 				},
 			},
 			slow: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -120,7 +120,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 				},
 			},
 			mutate: {
-				annotations: { readOnly: false },
+				riskClass: "write",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),
@@ -130,6 +130,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 				},
 			},
 			unclassified: {
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),
@@ -139,7 +140,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 				},
 			},
 			connected: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx) => ({
@@ -371,7 +372,7 @@ describe("self-test internal listener", () => {
 	it("aborts an in-flight ctx.http fetch when a self-test case times out", async () => {
 		const provider = createProvider();
 		provider.operations.abortableHttp = {
-			annotations: { readOnly: true },
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async (ctx) => {

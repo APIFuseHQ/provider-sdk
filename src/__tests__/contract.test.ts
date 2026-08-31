@@ -86,31 +86,26 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 			operationIds.map((operationId) => [
 				operationId,
 				{
+					riskClass: "read",
+					connectionMode: "required",
+					timeoutMs: 5000,
+					titleKey: `contract.operations.${operationId}.title`,
 					descriptionKey: `contract.operations.${operationId}.description`,
-					docs: {
-						titleKey: `contract.operations.${operationId}.title`,
-						requestExample: { query: operationId },
-						responseExample: { name: operationId, score: 1 },
-					},
+					summaryKey: `contract.operations.${operationId}.summary`,
+					markdownKey: `contract.operations.${operationId}.markdown`,
 					whenToUseKeys: [`contract.operations.${operationId}.whenToUse`],
 					whenNotToUseKeys: [`contract.operations.${operationId}.whenNotToUse`],
-					derivations: { normalizedName: "name" },
-					inputExamples: [
+					normalizationNotesKeys: [`contract.operations.${operationId}.normalization`],
+					examples: [
 						{
-							scenario: "baseline",
+							scenarioKey: `contract.operations.${operationId}.examples.baseline.scenario`,
 							input: { query: operationId },
-							rationale: "Stable deterministic example.",
+							rationaleKey: `contract.operations.${operationId}.examples.baseline.rationale`,
 						},
 					],
-					annotations: { readOnly: true, openWorld: true, timeoutMs: 5000 },
 					contract: { version: "1.0.0", lifecycle: "beta" },
 					tags: ["search"],
 					relatedOperations: { alternatives: ["fallback-search"] },
-					toolRouter: {
-						name: `${operationId.replaceAll("-", "_")}_tool`,
-						riskClass: "read",
-						approval: "never",
-					},
 					observability: { sensitive: { input: ["query"] } },
 					transport: { kind: "json" },
 					input: InputSchema,
@@ -163,6 +158,7 @@ function buildHostileContractProvider(): ProviderDefinition {
 		},
 		operations: {
 			lookup: {
+				riskClass: "read",
 				input: InputSchema,
 				output: OutputSchema,
 				handler,
@@ -349,6 +345,7 @@ describe("provider contract extraction", () => {
 		})({
 			operations: {
 				lookup: {
+					riskClass: "read",
 					input: InputSchema,
 					output: OutputSchema,
 					handler,

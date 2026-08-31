@@ -1266,11 +1266,8 @@ function providerObservabilityDetails(
 	const declaredRetryable = sdkOwnsErrorResolution(error)
 		? undefined
 		: declaredErrorCode?.retryable;
-	// Session-expiry surfaces the credential_expired category + the opt-in
-	// retryable signal so Gateway/Credential Service can refresh and re-drive the
-	// operation (see design.md §4.3 D3). Without this branch the auth error would
-	// serialize as a bare 401 with no retryable/category, losing the refresh
-	// signal for exactly the retryOnAuthRefresh operations it is meant to enable.
+	// Session-expiry surfaces the credential_expired category so Gateway and
+	// Credential Service can distinguish an expired credential from other 401s.
 	if (isSessionExpiredError(error)) {
 		return {
 			category: providerErrorOption(error, "category") ?? "credential_expired",
@@ -1487,7 +1484,7 @@ type OperationErrorCodeLookup = ReadonlyMap<string, ReadonlyMap<string, Operatio
 function buildOperationErrorCodeLookup(provider: ProviderDefinition): OperationErrorCodeLookup {
 	return new Map(
 		Object.entries(provider.operations).flatMap(([operationId, operation]) => {
-			const errorCodes = operation.docs?.errorCodes;
+			const errorCodes = operation.errorCodes;
 			return errorCodes?.length
 				? [[operationId, new Map(errorCodes.map((entry) => [entry.code, entry]))] as const]
 				: [];
@@ -1626,7 +1623,7 @@ function logProviderError(
 			? {
 					signal: "unregistered_provider_error_code" as const,
 					signalFix:
-						"Declare this code (with status and retryable) in the operation's docs.errorCodes so it serves its intended status instead of 500.",
+						"Declare this code (with status and retryable) in the operation's errorCodes so it serves its intended status instead of 500.",
 				}
 			: {}),
 		...(error instanceof z.ZodError ? { issues: zodDetails(error) } : {}),

@@ -289,6 +289,7 @@ describe("resolver server wiring", () => {
 				},
 			})({ operations: {
 					solve: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ first: z.string(), second: z.string() }),
 						async handler(ctx) {
@@ -375,6 +376,7 @@ describe("resolver server wiring", () => {
 				},
 			})({ operations: {
 					solve: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ token: z.string() }),
 						async handler(ctx) {
@@ -472,6 +474,7 @@ describe("resolver server wiring", () => {
 				},
 			})({ operations: {
 					unused: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -539,6 +542,7 @@ describe("resolver server wiring", () => {
 			},
 		})({ operations: {
 				solve: {
+					riskClass: "read",
 					input: resolverAuthoringInputSchema,
 					output: z.object({ ok: z.boolean() }),
 					async handler(ctx, input: ResolverAuthoringInput) {
@@ -596,6 +600,7 @@ describe("resolver server wiring", () => {
 			},
 		})({ operations: {
 				solve: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler(ctx) {
@@ -659,6 +664,7 @@ describe("resolver server wiring", () => {
 			},
 		})({ operations: {
 				solve: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ token: z.string() }),
 					async handler(ctx) {

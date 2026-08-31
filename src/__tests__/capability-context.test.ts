@@ -13,7 +13,12 @@ import { executeOperation } from "../runtime/executor.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import { createServerApp } from "../server/serve.js";
 import { event } from "../stream.js";
-import type { OperationDefinition, ProviderContext, ProviderDefinition } from "../types.js";
+import type {
+	OperationDefinition,
+	OperationRiskClass,
+	ProviderContext,
+	ProviderDefinition,
+} from "../types.js";
 import { createProviderContextDouble } from "./test-utils.js";
 import factoredProvider from "./fixtures/capability-factored-provider.js";
 
@@ -23,7 +28,10 @@ const meta = {
 	category: "test",
 };
 
+const READ_RISK_CLASS: OperationRiskClass = "read";
+
 const operationSchemas = {
+	riskClass: READ_RISK_CLASS,
 	input: z.object({}),
 	output: z.object({ ok: z.boolean() }),
 	healthCheckUnsupported: { reason: "type fixture" },
@@ -135,6 +143,7 @@ describe("declaration-derived provider contexts", () => {
 
 		// B: stream operations survive the context-preserving provider index signature.
 		const events = defineStreamOperation<Context>()({
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			transport: {
@@ -182,7 +191,7 @@ describe("declaration-derived provider contexts", () => {
 			});
 		void verifyServerExecutor;
 
-		// G: today's bare annotations retain their wide default context.
+		// G: today's bare operation retains its wide default context.
 		const bareOperation: OperationDefinition = {
 			...operationSchemas,
 			async handler(bareContext) {

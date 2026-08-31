@@ -26,7 +26,7 @@ describe("public provider schema field lint", () => {
 			},
 			operations: {
 				"start-checkout": {
-					description: OPERATION_DESCRIPTION,
+					descriptionKey: OPERATION_DESCRIPTION,
 					input: z.object({}),
 					output: z.object({
 						form_fields: z.object({
@@ -81,7 +81,7 @@ describe("public provider schema field lint", () => {
 			},
 			operations: {
 				checkout: {
-					description: OPERATION_DESCRIPTION,
+					descriptionKey: OPERATION_DESCRIPTION,
 					input: z.object({}),
 					output: z.object({ form_fields: z.object({ authInfo: z.string() }) }),
 					fixtures: { request: {}, response: { form_fields: { authInfo: "auth" } } },
@@ -154,7 +154,7 @@ describe("public provider schema field lint", () => {
 			meta: { contract: { publicSchemaFieldNames: "normalized" } },
 			operations: {
 				search: {
-					description: OPERATION_DESCRIPTION,
+					descriptionKey: OPERATION_DESCRIPTION,
 					input: z
 						.object({
 							query: z.string().describe("Search query"),
@@ -223,7 +223,7 @@ describe("public provider schema field lint", () => {
 			meta: { contract: { publicSchemaFieldNames: "normalized" } },
 			operations: {
 				search: {
-					description: OPERATION_DESCRIPTION,
+					descriptionKey: OPERATION_DESCRIPTION,
 					input: z.object({ query: z.string().describe("Search query") }).describe("Search input"),
 					output: z
 						.object({
@@ -263,7 +263,7 @@ describe("public provider schema field lint", () => {
 			meta: { contract: { publicSchemaFieldNames: "normalized" } },
 			operations: {
 				search: {
-					description: OPERATION_DESCRIPTION,
+					descriptionKey: OPERATION_DESCRIPTION,
 					input: z
 						.object({
 							query: z.string().describe("Search query"),

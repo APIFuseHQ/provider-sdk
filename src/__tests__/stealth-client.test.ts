@@ -2579,6 +2579,7 @@ function createStealthAbortProvider(): ProviderDefinition {
 		},
 		operations: {
 			cancelStealth: {
+				riskClass: "read",
 				input: z.object({}),
 				output: CancellationErrorShapeSchema,
 				upstream: { baseUrl: "https://example.com" },
