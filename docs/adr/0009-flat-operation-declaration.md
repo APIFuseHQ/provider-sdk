@@ -50,11 +50,44 @@ lint). Script: `~/tmp/audit-operation-fields.sh`.
 | `toolRouter.name` | — | — | zero providers override; `providerId__operationId` already resolves |
 | `retryOnAuthRefresh` | 0 | 0 | dead |
 
-Fleet scan across 92 provider SoT repos: `openWorld: true` appears 17 times (buyee 13, then
-amazon-jp / tabelog / nol / zozotown once each), `connectionMode` 5 times,
-`requiresConnection` 3 times. Buyee's 13 are pure decoration — its `authMode` is `none`, so the
-default already produced `none`. So `openWorld` is either redundant or ignored: it has never
-once changed an outcome.
+### Fleet scan — measured authoring surface
+
+Counted 2026-08-31 across 84 cloned provider SoT repos, restricted to `operations/`
+directories and excluding `node_modules`, `.git`, `dist`, `*.d.ts`, `__tests__`, and
+`__fixtures__`. Cross-checked against `main` through the GitHub contents API for
+`ekitan`, `baemin`, and `buyee`. Script: `~/tmp/adr9-fleet-scope.sh`.
+
+| declaration site | sites | repos |
+|---|---|---|
+| `defineOperation(` | 845 | 67 |
+| `inputExamples:` | 429 | 60 |
+| `annotations: {` | 339 | 61 |
+| `readOnly:` | 332 | 63 |
+| `idempotent:` | 311 | 57 |
+| `connectionMode:` (survives) | 297 | 30 |
+| `toolRouter: {` | 251 | 30 |
+| `docs: {` | 223 | 45 |
+| `openWorld:` | 193 | 40 |
+| `rateLimit:` | 175 | 35 |
+| `requiresConnection:` | 84 | 14 |
+| `riskClass:` (survives) | 33 | 4 |
+
+Fleet-wide, outside `operations/`: raw `title:` 509, raw `description:` 493,
+`retryOnAuthRefresh` 140 sites across 5 repos.
+
+`openWorld: true` appears 172 times across 33 repos (plus 35 explicit `false` across
+11). The heaviest declarants are ekitan (28), baemin (26), and buyee (13). Buyee's are
+pure decoration — its `authMode` is `none`, so the default already produced `none`.
+So `openWorld` is either redundant or ignored: at 207 declarations it has never once
+changed an outcome.
+
+Two consequences follow from the real size. `riskClass` exists in only 4 repos, so the
+migration does not *move* the safety axis — it **authors** it for roughly 800 operations
+out of booleans, and `readOnly: false` cannot say whether an operation is a write or a
+destructive one. That mapping needs an explicit rule and must refuse ambiguity rather
+than default. And the fleet is 84 separate repositories, so it cannot land atomically;
+the wave window in which `main` carries both shapes is a real operational state that the
+registry has to survive.
 
 ### The structural defect
 
@@ -131,8 +164,16 @@ defineOperation<ProviderContext>()({
 - **Not** renaming `connectionMode`. An earlier draft proposed `access: "public" | "user"`; it was
   withdrawn because it invents a second vocabulary for an already-defined domain term.
 - **Not** keeping compatibility shims for `openWorld` / `requiresConnection` / `inputExamples`.
-  The contract is early and the migration is 25 call sites across 5 repos; a shim would make the
-  misnomers permanent.
+  The migration is roughly 2,500 authoring sites across 84 SoT repositories, not the handful
+  an earlier draft assumed. That size does not change the verdict, because the cost a shim
+  would avoid is not paid per site: each repo lands its pin bump and its codemod in one PR, so
+  no repository ever sits in a mixed state, and the rewrite is mechanical. What a shim would
+  buy is the right to leave a repo half-migrated, and at 84 repos that is precisely the state
+  that would become permanent. The contract is early; a shim would make the misnomers
+  permanent instead.
+- **Not** a fleet-wide flag day either. The wave window — `main` carrying both shapes while
+  the fleet migrates — is an ingestion concern for the registry, not an authoring shim, and it
+  is scoped separately with its own removal gate.
 - **Not** adding `rateLimit` / `idempotent` back "for completeness". They return when a consumer
   exists, with that consumer.
 
@@ -143,8 +184,9 @@ defineOperation<ProviderContext>()({
    or MCP clients silently lose safety metadata.
 2. **`examples` without consumers is `inputExamples` again.** D4 is a gate, not a nice-to-have:
    do not merge the schema change ahead of the docs/few-shot wiring.
-3. **The lint in D7 needs a fleet sweep before it lands.** 92 repos; any credential-mode provider
-   that currently relies on the silent default will start failing its build.
+3. **The lint in D7 needs a fleet sweep before it lands.** 84 SoT repos (92 on the org; recount
+   before the sweep); any credential-mode provider that currently relies on the silent default
+   will start failing its build.
 4. **`descriptionKey` currently exists in two places.** Flattening must pick the surviving read
    path deliberately — `developer-artifacts.ts:697` reads the top-level one, other sites read
    `docs.*`.
@@ -153,12 +195,25 @@ defineOperation<ProviderContext>()({
 6. **Mixed-auth providers still need a product-surface decision, not just a lint.** D7 makes the
    declaration explicit; it does not decide which operations a downstream connector should expose.
    Credentialed operations stay metadata guardrails until that surface is chosen deliberately.
+7. **`riskClass` is authored, not migrated.** It exists in 4 repos today and must be written for
+   roughly 800 operations. The boolean triple maps cleanly only at its edges: `readOnly: true` is
+   `read`, and `destructive: true` is `destructive`. Everything else — `readOnly: false` with no
+   `destructive` flag — is genuinely ambiguous between `write` and `destructive`, and no
+   operation can be inferred as `external-send` from booleans at all. The codemod must refuse
+   the ambiguous branch and surface it for authoring rather than defaulting to `write`.
+8. **The fleet cannot cut over atomically.** 84 repositories, each with its own SDK pin and its
+   own PR, means `main` carries both shapes for the length of the wave. Decide the registry's
+   ingestion tolerance for that window *before* the schema lands, and give whatever tolerance is
+   added an explicit deletion gate and an absence test — otherwise the window becomes the shim
+   this ADR refuses.
 
 ## Verification
 
 - `openWorld`, `derivations`, `requiresConnection`, `inputExamples`, `rateLimit`, `idempotent`,
-  `approval`, `toolRouter.name`, `retryOnAuthRefresh` return zero hits across all 92 provider SoT
-  repos and the SDK.
+  `approval`, `toolRouter.name`, `retryOnAuthRefresh` return zero hits across every provider SoT
+  repo and the SDK. Baseline to drive to zero, measured 2026-08-31: 193 `openWorld`, 429
+  `inputExamples`, 339 `annotations: {`, 332 `readOnly:`, 311 `idempotent:`, 251 `toolRouter: {`,
+  223 `docs: {`, 175 `rateLimit:`, 84 `requiresConnection:`.
 - For every provider whose `auth.mode` is credential-bearing, every operation declares
   `connectionMode`; lint fails when one does not.
 - `zozotown` catalog operations publish `connectionMode: "none"`; member/order operations publish
