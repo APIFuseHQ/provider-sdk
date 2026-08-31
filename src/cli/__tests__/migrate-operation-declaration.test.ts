@@ -7,6 +7,7 @@ import {
 	migrateOperationDeclaration,
 	migrateOperationDeclarationRepository,
 	type OperationDeclarationRefusalReason,
+	verifyOperationDeclarationRewrite,
 } from "../migrate-operation-declaration.js";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "migrate-operation-declaration");
@@ -122,6 +123,16 @@ describe("migrateOperationDeclaration transforms", () => {
 		const code = expectMigrated("verbatim-template", "explain");
 		expect(code).toContain(template);
 	});
+
+	it("is idempotent on its own output", () => {
+		const code = expectMigrated("hoist-all", "search");
+		const result = migrateOperationDeclaration(code, "hoist-all.ts", {
+			operationIds: new Map([["searchOperation", "search"]]),
+			localeFiles: ["locales/en.json"],
+		});
+		expect(result.status).toBe("unchanged");
+		if (result.status === "unchanged") expect(result.code).toBe(code);
+	});
 });
 
 describe("migrateOperationDeclaration refusals", () => {
@@ -149,8 +160,22 @@ describe("migrateOperationDeclaration refusals", () => {
 		expectRefusal("unparseable", "source_syntax");
 	});
 
+	it("classifies an immediate post-rewrite parse failure as codemod_syntax", () => {
+		const result = verifyOperationDeclarationRewrite(
+			fixture("codemod-syntax"),
+			"codemod-syntax.ts",
+		);
+		expect(result).toEqual(
+			expect.objectContaining({
+				file: "codemod-syntax.ts",
+				operationKey: "<file>",
+				reason: "codemod_syntax",
+			}),
+		);
+	});
+
 	it("refuses example migration without locales/en.json", () => {
-		const input = fixture("examples-operation");
+		const input = fixture("missing-english-locale");
 		const result = migrateOperationDeclaration(input, "operations/search.ts", {
 			operationIds: new Map([["searchOperation", "search"]]),
 			localeFiles: [],

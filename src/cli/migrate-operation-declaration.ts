@@ -187,19 +187,11 @@ export function migrateOperationDeclaration(
 	}
 
 	const code = applyEdits(sourceText, edits);
-	const verified = parseSource(fileName, code);
-	const outputError = firstSyntaxError(verified);
-	if (outputError !== undefined) {
+	const outputRefusal = verifyOperationDeclarationRewrite(code, fileName);
+	if (outputRefusal !== undefined) {
 		return {
 			status: "refused",
-			refusals: [
-				refusal(
-					fileName,
-					"<file>",
-					"codemod_syntax",
-					`Transform output did not parse: ${outputError}`,
-				),
-			],
+			refusals: [outputRefusal],
 		};
 	}
 
@@ -209,6 +201,21 @@ export function migrateOperationDeclaration(
 		operations: discovery.sites.length,
 		localeTodos: todos,
 	};
+}
+
+/** Parse a proposed rewrite and classify a codemod-introduced syntax failure. */
+export function verifyOperationDeclarationRewrite(
+	code: string,
+	fileName: string,
+): OperationDeclarationRefusal | undefined {
+	const outputError = firstSyntaxError(parseSource(fileName, code));
+	if (outputError === undefined) return undefined;
+	return refusal(
+		fileName,
+		"<file>",
+		"codemod_syntax",
+		`Transform output did not parse: ${outputError}`,
+	);
 }
 
 function planOperationMigration(
