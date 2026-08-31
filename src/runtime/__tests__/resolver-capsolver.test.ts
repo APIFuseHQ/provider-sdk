@@ -184,6 +184,7 @@ describe("Capsolver resolver vendor", () => {
 	});
 
 	it("caches a CapSolver AWS WAF cookie by its SDK-estimated expiry", async () => {
+		const beforeMs = Date.now();
 		const stub = createFetchStub([
 			jsonResponse({ errorId: 0, taskId: "cached-aws-task" }),
 			jsonResponse({
@@ -212,13 +213,17 @@ describe("Capsolver resolver vendor", () => {
 		});
 
 		const first = await resolver.solve(AWS_WAF_CHALLENGE);
+		const afterMs = Date.now();
 		const second = await resolver.solve(AWS_WAF_CHALLENGE);
 
 		expect(first).toMatchObject({
 			form: "cookies",
 			cookies: { "aws-waf-token": "cached-aws-cookie" },
-			sdkEstimatedExpires: expect.any(Number),
+			userAgent: getStealthProfile(DEFAULT_PROFILE).userAgent,
 		});
+		if (first.form !== "cookies") throw new Error("expected cookies solution");
+		expect(first.sdkEstimatedExpires).toBeGreaterThanOrEqual((beforeMs + 60 * 60 * 1_000) / 1_000);
+		expect(first.sdkEstimatedExpires).toBeLessThanOrEqual((afterMs + 60 * 60 * 1_000) / 1_000);
 		expect(first).not.toHaveProperty("expires");
 		expect(second).toEqual(first);
 		expect(adapterCalls).toBe(1);
