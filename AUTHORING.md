@@ -102,16 +102,57 @@ description:
 - `fixtures.request` + `fixtures.response` both present (error-level rule)
 - Exactly one of `healthCheck`, `healthCheckUnsupported`, or `healthJourneys[].coversOperations` coverage per operation. Prefer `healthCheck` for safe read-only upstream probes; use `healthCheckUnsupported` only with a specific reason for destructive, paid, credential-sensitive, flaky, or otherwise unsafe probes. Use a provider-level health journey when a destructive or credential-sensitive flow can be proven safely only as a multi-step boundary test, such as stopping at a payment WebView URL.
 
+### Capability declarations
+
+Declare each capability used by provider operations. Capabilities without
+configuration use a bare object, for example `http: {}`, `choice: {}`, or
+`cache: {}`. `trace` is ambient and must not be declared: every operation
+context receives it. `allowedHosts`, `proxy`, `secrets`, and `context` declare
+policy or metadata only; they do not create context members and are not
+capability bindings.
+
 ### Factored operations
 
 `defineProvider(declaration)` returns the builder that accepts `operations`, so
 inline handlers are typed only after capability declarations are fixed. Export
-`ProviderContextOf<typeof buildProvider>` once from the provider entry point.
-Separate operation files import that provider context and call
-`defineOperation<ProviderContext>()({...})`; helpers should accept the one SDK
-client they use rather than the provider context. Zod and Standard Schema v1
-schemas retain input/output inference. Invalid configs name the offending field,
-such as `auth.mode` or `operations.<id>.fixtures.response`.
+one declaration-derived context alias from the provider entry point:
+
+```ts
+import {
+  defineProvider,
+  type ProviderContext,
+  type ProviderDeclaration,
+} from "@apifuse/provider-sdk/provider";
+
+const declaration = {
+  // ...id, version, runtime, meta
+  http: {},
+} as const satisfies ProviderDeclaration;
+
+export type Ctx = ProviderContext<typeof declaration>;
+const buildProvider = defineProvider(declaration);
+```
+
+Separate operation files need one provider-local type import and no generic
+handler signature:
+
+```ts
+import { defineOperation } from "@apifuse/provider-sdk/provider";
+import type { Ctx } from "../index.js";
+
+export const search = defineOperation<Ctx>()({
+  // ...input, output, fixtures, health check
+  async handler(ctx, input) {
+    return fetchSearch(ctx.http, input);
+  },
+});
+```
+
+`ProviderContextOf<typeof buildProvider>` remains an equivalent convenience
+alias. Helpers should accept the one SDK client they use rather than the
+provider context. Zod and Standard Schema v1 schemas retain input/output
+inference. Invalid configs name the offending field, such as `auth.mode` or
+`operations.<id>.fixtures.response`.
 
 ### Replay-safe fixtures
 

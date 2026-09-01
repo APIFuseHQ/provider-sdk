@@ -35,7 +35,6 @@ import type {
 	ProviderAccessConfig,
 	ProviderChallengeKind,
 	ProviderContext,
-	ProviderContextFor,
 	ProviderDefinition,
 	ProviderDeploymentOverrides,
 	ProviderHealthMonitorConfig,
@@ -590,35 +589,39 @@ export interface ProviderDeclaration {
 	 * resolves omitted fields against the runtime deployment profiles.
 	 */
 	deployment?: ProviderDeploymentOverrides;
-	/** Declares that provider operations use the SDK HTTP client. */
-	http?: true;
+	/** Declares the HTTP capability binding. A bare object states use without configuration. */
+	http?: Record<string, never> | true;
+	/** Declares upstream host policy; this does not add a `ctx.allowedHosts` member. */
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
 	stealth?: {
 		profile: string;
 		platform: StealthPlatform;
 	};
+	/** Declares proxy policy; this is provider intent and does not add a `ctx.proxy` member. */
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;
 	resolver?: ProviderResolverConfig;
 	browser?: { engine: BrowserEngine };
 	auth?: AuthConfig;
-	/** Declares that provider operations issue and consume SDK choice tokens. */
-	choice?: true;
+	/** Declares the choice capability binding. A bare object states use without configuration. */
+	choice?: Record<string, never> | true;
 	reviewed?: ProviderReviewed;
 	access?: ProviderAccessConfig;
+	/** Declares secret requirements; this does not add a `ctx.secrets` member. */
 	secrets?: ProviderSecretDeclaration[];
-	/** Declares that provider operations read SDK-managed environment values. */
-	env?: true;
+	/** Declares the environment capability binding. A bare object states use without configuration. */
+	env?: Record<string, never> | true;
 	credential?: CredentialDeclaration;
+	/** Declares provider context metadata; this does not add a `ctx.context` member. */
 	context?: ContextDeclaration;
-	/** Declares that provider operations use SDK-managed persistent state. */
-	state?: true;
-	/** Declares that provider operations use the SDK provider cache. */
-	cache?: true;
-	/** Declares that provider operations access runtime-resolvable files. */
-	files?: true;
+	/** Declares the state capability binding. A bare object states use without configuration. */
+	state?: Record<string, never> | true;
+	/** Declares the cache capability binding. A bare object states use without configuration. */
+	cache?: Record<string, never> | true;
+	/** Declares the files capability binding. A bare object states use without configuration. */
+	files?: Record<string, never> | true;
 	meta: {
 		displayName: string;
 		displayNameKey?: string;
@@ -2881,19 +2884,19 @@ function validateProviderDeployment(providerId: string, deployment: unknown): vo
 }
 
 /** The second authoring phase for a declaration established by defineProvider. */
-export type ProviderBuilder<TDeclaration extends ProviderDeclaration> = <
+export type ProviderBuilder<TConfig extends ProviderDeclaration> = <
 	TOperations extends Record<string, ProviderOperation>,
 >(
 	implementation: {
-		operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+		operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 	},
 ) => Omit<ProviderDefinition, "operations"> & {
-	operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+	operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 };
 
 /** Extract the declaration-derived operation context from a provider builder. */
-export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TDeclaration>
-	? ProviderContextFor<TDeclaration>
+export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TConfig>
+	? ProviderContext<TConfig>
 	: never;
 
 /** Annotate an operation while preserving the declaration-derived context. */
@@ -2907,22 +2910,22 @@ export type OperationDefinitionFor<
 export type ProviderDefinitionFor<TBuilder> = ProviderDefinition<ProviderContextOf<TBuilder>>;
 
 /** Establish a provider declaration before its operations are contextually typed. */
-export function defineProvider<const TDeclaration extends ProviderDeclaration>(
-	declaration: TDeclaration &
-		Record<Exclude<keyof TDeclaration, keyof ProviderDeclaration>, never> &
-		AuthStartNoInputGuard<TDeclaration>,
-): ProviderBuilder<TDeclaration> {
+export function defineProvider<const TConfig extends ProviderDeclaration>(
+	declaration: TConfig &
+		Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> &
+		AuthStartNoInputGuard<TConfig>,
+): ProviderBuilder<TConfig> {
 	validateProviderDeclaration(declaration);
 	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(
 		implementation: {
-			operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+			operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 		},
 	) =>
 		finalizeProvider({
 			...declaration,
 			...implementation,
-		} as ProviderConfig<TOperations, ProviderContextFor<TDeclaration>>);
-	return buildProvider as ProviderBuilder<TDeclaration>;
+		} as ProviderConfig<TOperations, ProviderContext<TConfig>>);
+	return buildProvider as ProviderBuilder<TConfig>;
 }
 
 function validateProviderDeclaration(config: ProviderDeclaration): void {

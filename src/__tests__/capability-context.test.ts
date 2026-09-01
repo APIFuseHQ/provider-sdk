@@ -30,12 +30,26 @@ const operationSchemas = {
 };
 
 describe("declaration-derived provider contexts", () => {
+	it("derives the public ProviderContext type directly from a declaration", () => {
+		const declaration = { http: {} } as const;
+		type Context = ProviderContext<typeof declaration>;
+		const verifyContext = (ctx: Context) => {
+			void ctx.http;
+			void ctx.trace;
+			// @ts-expect-error test-invalid: cache is absent from the declaration.
+			void ctx.cache;
+		};
+
+		void verifyContext;
+		expect(Object.hasOwn(declaration, "http")).toBe(true);
+	});
+
 	it("contextually types inline handlers from the first phase", () => {
 		const provider = defineProvider({
 			id: "capability-inline",
 			version: "1.0.0",
 			runtime: "standard",
-			http: true,
+			http: {},
 			meta,
 		})({
 			operations: {
@@ -54,6 +68,38 @@ describe("declaration-derived provider contexts", () => {
 		expect(provider.id).toBe("capability-inline");
 	});
 
+	it("exposes every bare-object capability declaration to handler context", () => {
+		const provider = defineProvider({
+			id: "capability-bare-objects",
+			version: "1.0.0",
+			runtime: "standard",
+			http: {},
+			choice: {},
+			env: {},
+			state: {},
+			cache: {},
+			files: {},
+			meta,
+		})({
+			operations: {
+				probe: {
+					...operationSchemas,
+					async handler(ctx) {
+						void ctx.http;
+						void ctx.choice;
+						void ctx.env;
+						void ctx.state;
+						void ctx.cache;
+						void ctx.files;
+						return { ok: true };
+					},
+				},
+			},
+		});
+
+		expect(provider.id).toBe("capability-bare-objects");
+	});
+
 	it("keeps only ambient members for a provider declaring no capabilities", () => {
 		const provider = defineProvider({
 			id: "capability-ambient",
@@ -67,6 +113,8 @@ describe("declaration-derived provider contexts", () => {
 					async handler(ctx) {
 						void ctx.trace;
 						void ctx.request?.headers;
+						// @ts-expect-error test-invalid: http is not declared.
+						void ctx.http;
 						// @ts-expect-error test-invalid: native is not declared.
 						void ctx.native;
 						return { ok: true };
@@ -100,6 +148,61 @@ describe("declaration-derived provider contexts", () => {
 		expect(provider.native).toEqual({});
 	});
 
+	it("does not turn policy and metadata declarations into context bindings", () => {
+		const provider = defineProvider({
+			id: "capability-non-bindings",
+			version: "1.0.0",
+			runtime: "standard",
+			allowedHosts: ["example.test"],
+			proxy: false,
+			secrets: [],
+			context: { keys: [] },
+			meta,
+		})({
+			operations: {
+				probe: {
+					...operationSchemas,
+					async handler(ctx) {
+						void ctx.trace;
+						// @ts-expect-error test-invalid: allowedHosts is policy, not a binding.
+						void ctx.allowedHosts;
+						// @ts-expect-error test-invalid: proxy is policy, not a binding.
+						void ctx.proxy;
+						// @ts-expect-error test-invalid: secrets are requirements, not a binding.
+						void ctx.secrets;
+						// @ts-expect-error test-invalid: context is metadata, not a binding.
+						void ctx.context;
+						return { ok: true };
+					},
+				},
+			},
+		});
+
+		expect(provider.id).toBe("capability-non-bindings");
+	});
+
+	it("keeps legacy true capability markers source-compatible", () => {
+		const provider = defineProvider({
+			id: "capability-legacy-marker",
+			version: "1.0.0",
+			runtime: "standard",
+			http: true,
+			meta,
+		})({
+			operations: {
+				probe: {
+					...operationSchemas,
+					async handler(ctx) {
+						void ctx.http;
+						return { ok: true };
+					},
+				},
+			},
+		});
+
+		expect(provider.id).toBe("capability-legacy-marker");
+	});
+
 	it("composes a separately authored context-bound operation", () => {
 		expect(factoredProvider.operations.factored).toBeDefined();
 	});
@@ -109,7 +212,7 @@ describe("declaration-derived provider contexts", () => {
 			id: "capability-context-carry",
 			version: "1.0.0",
 			runtime: "standard",
-			http: true,
+			http: {},
 			meta,
 		});
 		type Context = ProviderContextOf<typeof buildProvider>;
@@ -240,7 +343,7 @@ describe("declaration-derived provider contexts", () => {
 			id: "capability-executor",
 			version: "1.0.0",
 			runtime: "standard",
-			http: true,
+			http: {},
 			meta,
 		});
 		type Context = ProviderContextOf<typeof buildProvider>;
@@ -316,7 +419,15 @@ describe("declaration-derived provider contexts", () => {
 		});
 	});
 
-	it("rejects misspelled and invented declaration capabilities", () => {
+	it("rejects ambient trace and unknown declaration capabilities", () => {
+		defineProvider({
+			id: "capability-trace-declaration",
+			version: "1.0.0",
+			runtime: "standard",
+			meta,
+			// @ts-expect-error test-invalid: trace is ambient and cannot be declared.
+			trace: {},
+		});
 		defineProvider({
 			id: "capability-typo",
 			version: "1.0.0",
