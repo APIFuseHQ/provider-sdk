@@ -93,9 +93,7 @@ function assert(condition: unknown, message: string): asserts condition {
 	if (!condition) throw new Error(message);
 }
 
-function isCapabilityFailure(
-	value: unknown,
-): value is { capability: string; reason: string } {
+function isCapabilityFailure(value: unknown): value is { capability: string; reason: string } {
 	return (
 		value !== null &&
 		typeof value === "object" &&
@@ -108,6 +106,29 @@ function isCapabilityFailure(
 
 function assertEqual(actual: unknown, expected: unknown, message: string): void {
 	assert(actual === expected, message);
+}
+
+async function assertUndeclaredCapabilityResponse(
+	response: Response,
+	capability: string,
+): Promise<void> {
+	assert(response.status === 500, `Unexpected ${capability} status: ${response.status}`);
+	const body = await response.json();
+	assert(body !== null && typeof body === "object" && "error" in body, "Missing error body");
+	const error = body.error;
+	assert(error !== null && typeof error === "object", "Missing structured error");
+	assert(
+		"code" in error && error.code === "PROVIDER_CAPABILITY_UNDECLARED",
+		`Unexpected ${capability} error: ${JSON.stringify(body)}`,
+	);
+	assert(
+		"details" in error &&
+			error.details !== null &&
+			typeof error.details === "object" &&
+			"capability" in error.details &&
+			error.details.capability === capability,
+		`Missing ${capability} details: ${JSON.stringify(body)}`,
+	);
 }
 
 if (mode === "sync-esm") {
@@ -224,44 +245,19 @@ try {
 		mode === "tier2-stealth-session" ||
 		mode === "tier2-stealth-close-throw"
 	) {
-		assert(state.stealthLoads === 0, "Tier-2 stealth loaded during boot");
+		assert(state.stealthLoads === 0, "Undeclared stealth loaded during boot");
 		const operation = mode === "tier2-stealth-session" ? "stealthSession" : "stealth";
 		const response = await request(operation, `req-${mode}`);
-		assert(response.status === 200, `Unexpected tier-2 stealth status: ${response.status}`);
-		assertEqual(state.stealthLoads, 1, "Tier-2 stealth did not load on first use");
-		if (mode === "tier2-stealth-close-throw") {
-			assert(state.stealthCreateArgs.length === 0, "Stealth client loaded before request cleanup");
-			assert(state.releaseStealthLoad !== undefined, "Stealth import was not pending at cleanup");
-			state.releaseStealthLoad();
-			await Bun.sleep(50);
-		}
-		assert(state.stealthCreateArgs.length === 1, "Tier-2 stealth client was not single-flight");
-		const [stealthBaseUrl, stealthOptions] = state.stealthCreateArgs[0] ?? [];
-		assert(stealthBaseUrl === "https://api.example.com", "Unexpected tier-2 stealth base URL");
-		assert(
-			stealthOptions !== null && typeof stealthOptions === "object",
-			"Tier-2 stealth options were not delegated",
-		);
-		assert(
-			"affinityKey" in stealthOptions && stealthOptions.affinityKey === provider.id,
-			"Unexpected tier-2 stealth affinity key",
-		);
-		if (mode === "tier2-stealth-session") {
-			assert(
-				JSON.stringify(await response.json()) ===
-					JSON.stringify({ data: { cookie: "sync-cookie" } }),
-				"Tier-2 stealth session did not preserve synchronous cookies",
-			);
-		}
-		if (mode === "tier2-stealth-close-throw") {
-			const cleanupLogs = logs.filter((event) => event.event === "provider_cleanup_failed");
-			assert(cleanupLogs.length === 1, `Unexpected cleanup logs: ${JSON.stringify(cleanupLogs)}`);
-			assert(cleanupLogs[0]?.message === "stealth close failed", "Unexpected cleanup failure");
-		}
+		await assertUndeclaredCapabilityResponse(response, "stealth");
+		assertEqual(state.stealthLoads, 0, "Undeclared stealth loaded on access");
+		assert(state.stealthCreateArgs.length === 0, "Undeclared stealth client was created");
+		const cleanupLogs = logs.filter((event) => event.event === "provider_cleanup_failed");
+		assert(cleanupLogs.length === 0, `Unexpected cleanup logs: ${JSON.stringify(cleanupLogs)}`);
 	} else if (mode === "tier2-stealth-rejection") {
 		const response = await request("stealth", "req-tier2-stealth-rejection");
-		assert(response.status === 500, `Unexpected rejected stealth status: ${response.status}`);
+		await assertUndeclaredCapabilityResponse(response, "stealth");
 		await Bun.sleep(50);
+		assert(state.stealthLoads === 0, "Undeclared stealth import was attempted");
 		assert(unhandledRejections.length === 0, "Lazy stealth cleanup emitted an unhandled rejection");
 		const cleanupLogs = logs.filter((event) => event.event === "provider_cleanup_failed");
 		assert(cleanupLogs.length === 0, `Unexpected cleanup logs: ${JSON.stringify(cleanupLogs)}`);
@@ -272,44 +268,12 @@ try {
 	} else {
 		assert(state.stealthLoads === 0, "Standard provider loaded stealth during boot");
 
-		const expectedErrors = [
-			[
-				"browser",
-				"req-browser",
-				{
-					error: {
-						code: "BROWSER_RUNTIME_UNSUPPORTED",
-						message: "Browser runtime is not available",
-						requestId: "req-browser",
-						retryable: false,
-						source: "apifuse",
-					},
-				},
-			],
-			[
-				"resolver",
-				"req-resolver",
-				{
-					error: {
-						code: "RESOLVER_UNAVAILABLE",
-						message: "Provider does not declare resolver capability",
-						requestId: "req-resolver",
-						retryable: false,
-						source: "apifuse",
-						fix: "Declare resolver on the provider definition and configure vendor credentials.",
-					},
-				},
-			],
-		] as const;
-
-		for (const [operation, requestId, expectedBody] of expectedErrors) {
+		for (const [operation, requestId] of [
+			["browser", "req-browser"],
+			["resolver", "req-resolver"],
+		] as const) {
 			const response = await request(operation, requestId);
-			assert(response.status === 500, `Unexpected ${operation} status: ${response.status}`);
-			const body = await response.json();
-			assert(
-				JSON.stringify(body) === JSON.stringify(expectedBody),
-				`Unexpected ${operation} error: ${JSON.stringify(body)}`,
-			);
+			await assertUndeclaredCapabilityResponse(response, operation);
 		}
 	}
 } finally {

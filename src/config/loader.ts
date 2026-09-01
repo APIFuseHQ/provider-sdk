@@ -13,7 +13,6 @@ import {
 	NODEMAVEN_PASSWORD_ENV,
 	NODEMAVEN_USERNAME_ENV,
 	type ProxyProtocol,
-	hasNodemavenCredentials,
 	nodemavenPoolSize,
 	synthesizeNodemavenProxy,
 } from "../runtime/proxy-nodemaven.js";
@@ -83,6 +82,8 @@ export type ProxyResolutionOptions = {
 	 */
 	proxyRefreshEpoch?: number;
 	telemetry?: ProxyTelemetrySink;
+	/** Engine-owned credential snapshot. Provider code must never populate this field. */
+	engineCredentials?: Readonly<Record<string, string>>;
 };
 
 export type ProxyCacheStatus =
@@ -527,7 +528,7 @@ export async function resolveProxyConfigAsync(
 		const poolIndex = vendorIndex === startVendorIndex ? startPoolIndex : 0;
 		const protocol = options.protocol ?? VENDOR_DEFAULT_PROTOCOL[vendor];
 
-		if (!vendorHasCredentials(vendor)) {
+		if (!vendorHasCredentials(vendor, options.engineCredentials)) {
 			options.telemetry?.recordProxyVendorFailover?.({
 				vendor,
 				nextVendor,
@@ -555,6 +556,7 @@ export async function resolveProxyConfigAsync(
 				protocol,
 				poolIndex,
 				refreshEpoch,
+				credentials: options.engineCredentials,
 			});
 		} catch (error) {
 			// Config/programming errors (invalid filter, etc.) are not vendor
@@ -805,9 +807,28 @@ function envDefaultProvider(): ProviderProxyProvider | undefined {
 	return (raw as ProviderProxyProvider | undefined) ?? undefined;
 }
 
-function vendorHasCredentials(vendor: ProxyVendorName): boolean {
-	if (vendor === "nodemaven") return hasNodemavenCredentials();
-	return Boolean(process.env[SMARTPROXY_APP_KEY_ENV]?.trim());
+function vendorHasCredentials(
+	vendor: ProxyVendorName,
+	credentials?: Readonly<Record<string, string>>,
+): boolean {
+	if (vendor === "nodemaven") {
+		return Boolean(
+			(credentials === undefined
+				? process.env[NODEMAVEN_USERNAME_ENV]
+				: credentials[NODEMAVEN_USERNAME_ENV]
+			)?.trim() &&
+				(credentials === undefined
+					? process.env[NODEMAVEN_PASSWORD_ENV]
+					: credentials[NODEMAVEN_PASSWORD_ENV]
+				)?.trim(),
+		);
+	}
+	return Boolean(
+		(credentials === undefined
+			? process.env[SMARTPROXY_APP_KEY_ENV]
+			: credentials[SMARTPROXY_APP_KEY_ENV]
+		)?.trim(),
+	);
 }
 
 function missingCredentialEnv(vendor: ProxyVendorName): string {
@@ -1710,7 +1731,11 @@ function markSmartproxyCacheInvalidated(options: ProxyResolutionOptions = {}): s
 	}
 
 	const lifetimeMinutes = resolveSmartproxyLifetime(policy);
-	const appKey = process.env[SMARTPROXY_APP_KEY_ENV]?.trim();
+	const appKey = (
+		options.engineCredentials === undefined
+			? process.env[SMARTPROXY_APP_KEY_ENV]
+			: options.engineCredentials[SMARTPROXY_APP_KEY_ENV]
+	)?.trim();
 	if (!appKey) return undefined;
 	const cacheKey = buildSmartproxyCacheKey(
 		policy,

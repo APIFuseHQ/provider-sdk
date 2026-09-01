@@ -1,18 +1,20 @@
-import { defineProvider, type ProviderContextOf } from "../../define.js";
+import { defineProvider, type ProviderDeclaration } from "../../define.js";
+import type { ProviderContext } from "../../types.js";
 import { factoredOperation } from "./capability-factored-operation.js";
 
-const buildProvider = defineProvider({
+export const declaration = {
 	id: "capability-factored",
 	version: "1.0.0",
 	runtime: "standard",
-	http: true,
+	http: {},
 	meta: {
 		displayName: "Capability Factored",
 		descriptionKey: "capability-factored.description",
 		category: "test",
 	},
-});
+} as const satisfies ProviderDeclaration;
 
-export type ProviderContext = ProviderContextOf<typeof buildProvider>;
+export type Ctx = ProviderContext<typeof declaration>;
 
+const buildProvider = defineProvider(declaration);
 export default buildProvider({ operations: { factored: factoredOperation } });
