@@ -6,6 +6,7 @@ import {
 } from "./declaration-validation.js";
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
+import { isEngineOwnedProxyCredentialName } from "./engine.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
 import {
 	NativeEgressPolicyValidationError,
@@ -40,11 +41,11 @@ import type {
 	ProviderHealthMonitorConfig,
 	ProviderOcrConfig,
 	ProviderProxyConfig,
-	ProviderProxyProvider,
 	ProviderPublicProfile,
 	ProviderResolverConfig,
 	ProviderResolverVendor,
 	ProviderReviewed,
+	ProviderRuntimeTarget,
 	ProviderSecretDeclaration,
 	ProviderStreamEvent,
 	ProviderSttConfig,
@@ -94,6 +95,7 @@ interface ProviderImplementationProfile {
 const CONNECTOR_ID_REGEX = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/;
 const OPERATION_ID_REGEX = /^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/;
 const VALID_RUNTIMES = ["standard", "shared", "browser"] as const;
+const VALID_RUNTIME_TARGETS = ["vanilla", "engine"] as const;
 const VALID_AUTH_MODES = [
 	"none",
 	"platform-managed",
@@ -161,20 +163,6 @@ export const VALID_PROVIDER_CHALLENGE_KINDS = exhaustiveLiteralArray<ProviderCha
 	"akamai_sec_cpt",
 	"akamai_sensor",
 ] as const);
-const SMARTPROXY_APP_KEY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
-const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
-const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
-// Per-vendor provider-declared credential secrets. A required-mode chain must
-// declare every secret of every credentialed vendor it names, so a missing
-// credential fails at build/validation time rather than during a live outage: a
-// declared-but-uncredentialed fallback leg is a silently dead SPOF, which is
-// exactly the failure class the multi-vendor chain exists to remove. Vendors
-// absent from this map (the deprecated `custom`/`decodo` values have no managed
-// adapter) impose no declaration requirement.
-const VENDOR_REQUIRED_SECRETS: Partial<Record<ProviderProxyProvider, readonly string[]>> = {
-	smartproxy: [SMARTPROXY_APP_KEY_SECRET],
-	nodemaven: [NODEMAVEN_USERNAME_SECRET, NODEMAVEN_PASSWORD_SECRET],
-};
 const RESERVED_OPERATION_IDS = new Set(["auth", "health"]);
 const MCP_TOOL_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
 const VALID_OPERATION_RISK_CLASSES = ["read", "write", "destructive", "external-send"] as const;
@@ -582,6 +570,8 @@ export interface ProviderDeclaration {
 	id: string;
 	version: string;
 	runtime: "standard" | "shared" | "browser";
+	/** Provider business-logic target. Omit only while migrating a legacy provider. */
+	runtimeTarget?: ProviderRuntimeTarget;
 	/**
 	 * Optional deployment overrides, passed through verbatim onto the returned
 	 * provider definition. The SDK types this field but does not deep-validate
@@ -825,11 +815,31 @@ function validateProviderDeclarationShape(config: unknown): void {
 	assertRequiredField(config, "meta", String(config.id));
 	if (typeof config.runtime === "string")
 		assertLiteralField(config.runtime, "runtime", VALID_RUNTIMES, String(config.id));
+	if (config.runtimeTarget !== undefined && typeof config.runtimeTarget !== "string") {
+		throw new ValidationError(
+			`Provider "${String(config.id)}" has invalid runtimeTarget: expected "vanilla" or "engine"`,
+		);
+	}
+	if (typeof config.runtimeTarget === "string")
+		assertLiteralField(
+			config.runtimeTarget,
+			"runtimeTarget",
+			VALID_RUNTIME_TARGETS,
+			String(config.id),
+		);
 	if (config.native !== undefined && config.runtime === "browser") {
 		throw new ValidationError(
 			`Provider "${String(config.id)}" cannot declare capability "native" with runtime "browser"`,
 			{
 				fix: 'Use runtime: "standard" or runtime: "shared", or remove the native declaration.',
+			},
+		);
+	}
+	if (config.native !== undefined && config.runtimeTarget === "vanilla") {
+		throw new ValidationError(
+			`Provider "${String(config.id)}" cannot declare capability "native" with runtime target "vanilla"; native requires an engine-resident runtime`,
+			{
+				fix: 'Set runtimeTarget: "engine", or remove the native declaration.',
 			},
 		);
 	}
@@ -930,6 +940,15 @@ function validateProviderProxy(config: {
 	proxy?: ProviderProxyConfig;
 	secrets?: ProviderSecretDeclaration[];
 }): void {
+	for (const secret of config.secrets ?? []) {
+		if (!isEngineOwnedProxyCredentialName(secret.name)) continue;
+		throw new ValidationError(
+			`Provider "${config.id}" cannot declare engine-owned proxy credential "${secret.name}"`,
+			{
+				fix: `Remove "${secret.name}" from provider secrets; configure it only on the provider engine.`,
+			},
+		);
+	}
 	const proxy = config.proxy;
 	if (proxy === undefined || typeof proxy === "boolean") {
 		return;
@@ -1045,44 +1064,12 @@ function validateProviderProxy(config: {
 			);
 		}
 	}
-	// Every credentialed vendor in a required-mode chain must declare its
-	// provider secret(s) so a missing credential fails at build/validation time,
-	// not during a live outage. This covers the fallback legs too (not just the
-	// first vendor): a declared-but-uncredentialed nodemaven fallback would leave
-	// the chain silently down to a single vendor, reintroducing the SPOF the chain
-	// removes.
 	const vendorChain =
 		proxy.providers && proxy.providers.length > 0
 			? proxy.providers
 			: proxy.provider
 				? [proxy.provider]
 				: [];
-	if (proxy.mode === "required") {
-		for (const vendor of vendorChain) {
-			const requiredSecrets = VENDOR_REQUIRED_SECRETS[vendor];
-			if (!requiredSecrets) continue;
-			for (const secretName of requiredSecrets) {
-				// Match the canonical runtime gate (assertRequiredSecretsPresent /
-				// listMissingRequiredSecrets), which enforces only `required === true`
-				// declarations. A declaration that omits `required` (defaulting to
-				// optional) is skipped at runtime, so accepting it here would pass
-				// validation while leaving the credential unenforced until proxy
-				// resolution during a live request — the fail-open gap this check exists
-				// to close.
-				const declared = config.secrets?.some(
-					(secret) => secret.name === secretName && secret.required === true,
-				);
-				if (!declared) {
-					throw new ValidationError(
-						`Provider "${config.id}" requires ${vendor} egress but does not declare ${secretName}.`,
-						{
-							fix: `Add secrets: [{ name: "${secretName}", required: true }] to the provider (every vendor in a required proxy chain must declare its credential secrets).`,
-						},
-					);
-				}
-			}
-		}
-	}
 	// `decodo`/`custom` are deprecated vendor values (string-union members, so the
 	// @deprecated symbol gate can't catch them — warn at validation time instead).
 	const deprecatedVendors = vendorChain.filter(
@@ -3007,9 +2994,11 @@ function finalizeProvider<
 		id: config.id,
 		version: config.version,
 		runtime: config.runtime,
+		runtimeTarget: config.runtimeTarget,
 		// Verbatim passthrough: deployment validation and profile resolution
 		// are owned by the APIFuse registry builder, not the SDK.
 		deployment: config.deployment,
+		http: config.http,
 		allowedHosts: config.allowedHosts,
 		native: config.native,
 		stealth: config.stealth,
@@ -3019,11 +3008,16 @@ function finalizeProvider<
 		resolver: config.resolver,
 		browser: config.browser,
 		auth: config.auth,
+		choice: config.choice,
 		reviewed: config.reviewed,
 		access: config.access,
 		secrets: config.secrets,
+		env: config.env,
 		credential: config.credential,
 		context: config.context,
+		state: config.state,
+		cache: config.cache,
+		files: config.files,
 		meta: config.meta,
 		operations,
 		// Transitional healthMonitor → healthProbe alias: mirror whichever field

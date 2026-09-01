@@ -38,6 +38,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 		id: "self-test-provider",
 		version: "1.0.0",
 		runtime: "standard",
+		http: true,
 		secrets: [{ name: UPSTREAM_SECRET_ENV }],
 		credential: { keys: ["phone"] },
 		meta: {

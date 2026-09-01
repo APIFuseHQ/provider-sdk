@@ -1,9 +1,12 @@
 import { serve } from "./server/serve.js";
+import type { ProviderEngine } from "./engine.js";
 import type { ProviderDefinition } from "./types.js";
 
 export interface DevServerOptions {
 	port?: number;
 	sessionDbPath?: string;
+	/** Override the default in-process engine attachment. */
+	engine?: ProviderEngine;
 }
 
 export function createDevServer(
@@ -14,7 +17,7 @@ export function createDevServer(
 
 	return {
 		start: () => {
-			void serve(provider, { port });
+			void serve(provider, { port, engine: options?.engine });
 			console.log(
 				`[apifuse dev] ${provider.id}@${provider.version} running at http://localhost:${port}`,
 			);

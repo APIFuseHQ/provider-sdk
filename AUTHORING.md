@@ -111,6 +111,16 @@ context receives it. `allowedHosts`, `proxy`, `secrets`, and `context` declare
 policy or metadata only; they do not create context members and are not
 capability bindings.
 
+Declare `runtimeTarget: "vanilla"` for portable provider business logic. Use
+`runtimeTarget: "engine"` only for an approved session-bearing provider that
+must remain engine-resident. A vanilla target cannot declare `native`.
+
+Proxy vendor application keys, usernames, and passwords are engine-owned. Do
+not list `APIFUSE__PROXY__SMARTPROXY_APP_KEY`,
+`APIFUSE__PROXY__NODEMAVEN_USERNAME`, or
+`APIFUSE__PROXY__NODEMAVEN_PASSWORD` in provider `secrets`; `proxy` contains
+policy intent only.
+
 ### Factored operations
 
 `defineProvider(declaration)` returns the builder that accepts `operations`, so

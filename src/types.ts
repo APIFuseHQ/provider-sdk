@@ -1513,6 +1513,9 @@ export interface ProviderFilesContext {
 	resolve(input: string | ProviderFileRef): Promise<ProviderResolvedFile>;
 }
 
+/** Where provider business logic executes relative to the capability engine. */
+export type ProviderRuntimeTarget = "vanilla" | "engine";
+
 export type NativeTcpTlsMode = "required" | "allowed" | "disabled";
 
 export interface NativeTcpPortRange {
@@ -2308,7 +2311,9 @@ export type ProviderContext<TConfig = Record<string, unknown>> = {
 		: Record<never, never>)
 	& ("http" extends keyof TConfig ? { http: HttpClient } : Record<never, never>)
 	& ("files" extends keyof TConfig
-		? { readonly files?: ProviderFilesContext }
+		? string extends keyof TConfig
+			? { readonly files?: ProviderFilesContext }
+			: { readonly files: ProviderFilesContext }
 		: Record<never, never>)
 	& ("native" extends keyof TConfig
 		? { readonly native: NativeContext }
@@ -2486,11 +2491,20 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 	version: string;
 	runtime: "standard" | "shared" | "browser";
 	/**
+	 * `vanilla` executes provider business logic outside the engine; `engine`
+	 * keeps session-bearing provider logic in the engine process.
+	 *
+	 * Omitted only for definitions authored before the engine migration. New
+	 * providers should declare the target explicitly.
+	 */
+	runtimeTarget?: ProviderRuntimeTarget;
+	/**
 	 * Optional deployment overrides, passed through verbatim from
 	 * `defineProvider({ deployment })`. Validation and profile resolution are
 	 * owned by the APIFuse registry builder, not the SDK.
 	 */
 	deployment?: ProviderDeploymentOverrides;
+	http?: Record<string, never> | true;
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
 	stealth?: {
@@ -2505,11 +2519,16 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 		engine: BrowserEngine;
 	};
 	auth?: AuthConfig;
+	choice?: Record<string, never> | true;
 	reviewed?: ProviderReviewed;
 	access?: ProviderAccessConfig;
 	secrets?: ProviderSecretDeclaration[];
+	env?: Record<string, never> | true;
 	credential?: CredentialDeclaration;
 	context?: ContextDeclaration;
+	state?: Record<string, never> | true;
+	cache?: Record<string, never> | true;
+	files?: Record<string, never> | true;
 	meta: ProviderMeta;
 	operations: Record<string, OperationDefinition<SchemaLike, SchemaLike, TContext>>;
 	healthMonitor?: ProviderHealthMonitorConfig;

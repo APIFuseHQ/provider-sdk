@@ -76,6 +76,10 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 		id: "test-provider",
 		version: "1.0.0",
 		runtime: "standard",
+		runtimeTarget: "vanilla",
+		http: {},
+		choice: {},
+		cache: {},
 		meta: {
 			displayName: "Test Provider",
 			descriptionKey: "test-provider.description",
@@ -935,6 +939,7 @@ describe("provider HTTP server", () => {
 		try {
 			const openProvider = {
 				...createTestProvider(),
+				runtimeTarget: "engine",
 				native: {},
 				operations: { nativeConnect: operation },
 			} satisfies ProviderDefinition;
@@ -948,6 +953,7 @@ describe("provider HTTP server", () => {
 
 			const unsupportedGrantProvider = {
 				...createTestProvider(),
+				runtimeTarget: "engine",
 				native: {},
 				operations: {
 					unsupportedGrant: {
@@ -985,6 +991,7 @@ describe("provider HTTP server", () => {
 
 			const enforcedProvider = {
 				...createTestProvider(),
+				runtimeTarget: "engine",
 				native: {
 					network: {
 						tcp: [{ host: "elsewhere.example", ports: [443], tls: "disabled" }],
@@ -2170,6 +2177,7 @@ describe("provider HTTP server", () => {
 		const provider = {
 			...baseProvider,
 			allowedHosts: ["example.com"],
+			stealth: { profile: "chrome-desktop", platform: "macos" },
 			proxy: {
 				mode: "required",
 				provider: "smartproxy",

@@ -8,8 +8,10 @@ import { pathToFileURL } from "node:url";
 import {
 	createBypassProviderCache,
 	createHttpClient,
+	createInProcessProviderEngine,
 	createOcrClientFromEnv,
 	createProviderChoiceContext,
+	createProviderEnvironment,
 	createSttClientFromEnv,
 	createUnsupportedResolverClient,
 	executeOperation,
@@ -18,7 +20,9 @@ import {
 	type HttpStreamResponse,
 	type ProviderContext,
 	type ProviderDefinition,
+	type ProviderEngineBindingCandidates,
 	ProviderError,
+	readEngineProxyCredentials,
 	type ProviderProxyPolicy,
 	type RequestOptions,
 	type StealthClient,
@@ -509,9 +513,13 @@ export function createCaptureContext(
 		reserveCaptureOrder,
 	);
 
-	const env = {
-		get: (key: string) => process.env[key],
-	};
+	const providerEnvironment = createProviderEnvironment(
+		process.env,
+		provider.secrets?.map((secret) => secret.name) ?? [],
+	);
+	const env = { get: (key: string) => providerEnvironment[key] };
+	const engineEnv = { get: (key: string) => process.env[key] };
+	const engineCredentials = readEngineProxyCredentials();
 	const credential = {
 		mode: "none" as const,
 		get: () => undefined,
@@ -525,7 +533,7 @@ export function createCaptureContext(
 	const stealthProfile = provider.stealth?.profile
 		? getStealthProfile(provider.stealth.profile)
 		: undefined;
-	const ctx: ProviderContext = {
+	const candidates: ProviderEngineBindingCandidates = {
 		env,
 		credential,
 		request: { headers: {} },
@@ -560,7 +568,7 @@ export function createCaptureContext(
 		ocr: createOcrClientFromEnv(provider.ocr),
 		stt: createSttClientFromEnv(provider.stt),
 		resolver: provider.resolver
-			? createResolverClientFromEnv(provider.resolver, undefined, {
+			? createResolverClientFromEnv(provider.resolver, engineCredentials, {
 					allowedHosts: provider.allowedHosts,
 					cache,
 					...(proxyPolicy
@@ -576,12 +584,16 @@ export function createCaptureContext(
 			: createUnsupportedResolverClient("Provider does not declare resolver capability"),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
-			env,
+			env: engineEnv,
 			request: { headers: {} },
 			credential,
 			state,
 		}),
-	} satisfies Omit<ProviderContext, "native"> as unknown as ProviderContext;
+	};
+	const ctx = createInProcessProviderEngine().attach({
+		provider,
+		bindings: candidates,
+	}) as ProviderContext;
 
 	return {
 		ctx,
