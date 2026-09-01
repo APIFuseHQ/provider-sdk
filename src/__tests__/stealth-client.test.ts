@@ -2,6 +2,8 @@ import { beforeEach, describe, expect, it, mock } from "bun:test";
 import { z } from "zod";
 
 import chromeGroundTruth from "../../chrome-ground-truth-capture.json";
+import chromeExtendedCapture from "../../chrome-extended-capture.json";
+import h1CasingCapture from "../../h1-casing-capture.json";
 
 import { assertIsError, createProviderDefinitionDouble, emptyArray } from "./test-utils.js";
 import {
@@ -2542,7 +2544,10 @@ describe("Chrome 149 header parity", () => {
 		{
 			name: "xhr",
 			expected: chromeGroundTruth.fetch_xhr.order,
-			options: { headers: { Referer: "https://example.com/page" } },
+			options: {
+			stealth: { requestClass: "xhr" },
+			headers: { Referer: "https://example.com/page" },
+		},
 		},
 		{
 			name: "post",
@@ -2633,6 +2638,138 @@ describe("Chrome 149 header parity", () => {
 			chromeGroundTruth.document_navigation_cold.order.slice(4),
 		);
 		expect(requestHeader({ headers: overrideHeaders }, "accept-language")).toBe("ko");
+	});
+
+	it("places cookies at the captured position for every request class", async () => {
+		const cases = [
+			["navigation", chromeExtendedCapture.navigation_with_cookie.order.slice(4), {}],
+			[
+				"xhr",
+				chromeExtendedCapture.xhr_extra_headers.order.slice(4),
+				{
+					"Cache-Control": "no-cache",
+					"If-None-Match": '"etag-value"',
+					Pragma: "no-cache",
+					"X-Requested-With": "XMLHttpRequest",
+					Referer: "https://example.com/",
+				},
+			],
+			[
+				"post",
+				chromeExtendedCapture.post_form_urlencoded.order.slice(4),
+				{
+					"Content-Type": "application/x-www-form-urlencoded",
+					Origin: "https://example.com",
+					Referer: "https://example.com/",
+				},
+			],
+		] as const;
+		for (const [requestClass, expectedWithPseudo, headers] of cases) {
+			mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com").fetch("/api", {
+				method: requestClass === "post" ? "POST" : "GET",
+				body: requestClass === "post" ? "a=1" : undefined,
+				stealth: { requestClass },
+				headers: { ...headers, Cookie: "probe_sid=abc123" },
+			});
+			const init = mockStealthState.clients.at(-1)?.calls[0]?.init;
+			const names = (init?.headers as [string, string][]).map(([name]) => name);
+			expect(names).toEqual(expectedWithPseudo);
+			expect(names.indexOf("cookie")).toBe(expectedWithPseudo.indexOf("cookie"));
+		}
+	});
+
+	it("uses identity encoding for Range and compressed encoding otherwise", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "range", headers: {} },
+			{ status: 200, body: "normal", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		await client.fetch("/range", {
+			stealth: { requestClass: "xhr" },
+			headers: { Referer: "https://example.com/", Range: "bytes=0-1023" },
+		});
+		await client.fetch("/normal", { stealth: { requestClass: "xhr" } });
+		const calls = allWreqCalls();
+		expect(requestHeader(calls[0]?.init, "accept-encoding")).toBe("identity");
+		expect(requestHeader(calls[1]?.init, "accept-encoding")).toBe("gzip, deflate, br, zstd");
+	});
+
+	it("interleaves captured extension headers on h2 and h1", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "h2", headers: {} },
+			{ status: 200, body: "h1", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const h2 = createStealthClient("https://example.com");
+		await h2.fetch("/xhr", {
+			stealth: { requestClass: "xhr" },
+			headers: {
+				"Cache-Control": "no-cache",
+				"If-None-Match": '"etag-value"',
+				Pragma: "no-cache",
+				"X-Requested-With": "XMLHttpRequest",
+				Referer: "https://example.com/",
+				Cookie: "probe_sid=abc123",
+			},
+		});
+		const h1 = createStealthClient("http://example.com");
+		await h1.fetch("/xhr", {
+			stealth: { requestClass: "xhr" },
+			headers: {
+				"Cache-Control": "no-cache",
+				"X-Requested-With": "XMLHttpRequest",
+				Referer: "http://example.com/",
+				Cookie: "probe_sid=abc123",
+			},
+		});
+		const h2Names = (mockStealthState.clients[0]?.calls[0]?.init?.headers as [string, string][]).map(
+			([name]) => name,
+		);
+		expect(h2Names).toEqual(chromeExtendedCapture.xhr_extra_headers.order.slice(4));
+		const h1Names = (mockStealthState.clients[1]?.calls[0]?.init?.headers as [string, string][]).map(
+			([name]) => name,
+		);
+		expect(h1Names).toEqual(h1CasingCapture.chrome_xhr.names);
+	});
+
+	it("allows a refererless XHR without navigation-only headers", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/api", {
+			stealth: { requestClass: "xhr" },
+		});
+		const init = mockStealthState.clients[0]?.calls[0]?.init;
+		expect(requestHeader(init, "upgrade-insecure-requests")).toBeUndefined();
+		expect(requestHeader(init, "sec-fetch-user")).toBeUndefined();
+		expect(requestHeader(init, "accept")).toBe("*/*");
+	});
+
+	it("keeps h1 casing and Host/Connection order while omitting priority", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("http://example.com").fetch("/", {
+			stealth: { requestClass: "navigation" },
+			headers: { Cookie: "probe_sid=abc123" },
+		});
+		const names = (mockStealthState.clients[0]?.calls[0]?.init?.headers as [string, string][]).map(
+			([name]) => name,
+		);
+		expect(names).toEqual(h1CasingCapture.chrome_navigation.names);
+		expect(names[0]).toBe("Host");
+		expect(names[1]).toBe("Connection");
+		expect(names).not.toContain("priority");
+
+		mockStealthState.queuedResponses.push({ status: 200, body: "h2", headers: {} });
+		await createStealthClient("https://example.com").fetch("/", {
+			stealth: { requestClass: "navigation" },
+		});
+		const h2Names = (mockStealthState.clients[1]?.calls[0]?.init?.headers as [string, string][]).map(
+			([name]) => name,
+		);
+		expect(h2Names).toContain("priority");
 	});
 
 	for (const header of [

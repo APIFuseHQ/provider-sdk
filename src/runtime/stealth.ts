@@ -303,6 +303,8 @@ function normalizeHeaders(
 }
 
 const SDK_OWNED_CHROME_HEADERS = new Set([
+	"host",
+	"connection",
 	"user-agent",
 	"sec-ch-ua",
 	"sec-ch-ua-mobile",
@@ -332,6 +334,7 @@ const CHROME_HEADER_ORDERS = {
 		"sec-fetch-user",
 		"sec-fetch-dest",
 		"accept-encoding",
+		"cookie",
 		"priority",
 	],
 	xhr: [
@@ -346,6 +349,7 @@ const CHROME_HEADER_ORDERS = {
 		"sec-fetch-dest",
 		"referer",
 		"accept-encoding",
+		"cookie",
 		"priority",
 	],
 	post: [
@@ -363,12 +367,136 @@ const CHROME_HEADER_ORDERS = {
 		"sec-fetch-dest",
 		"referer",
 		"accept-encoding",
+		"cookie",
 		"priority",
 	],
 } as const;
 
+const CHROME_H1_HEADER_ORDERS = {
+	navigation: [
+		"host",
+		"connection",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"upgrade-insecure-requests",
+		"user-agent",
+		"accept-language",
+		"accept",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-user",
+		"sec-fetch-dest",
+		"accept-encoding",
+		"cookie",
+	],
+	xhr: [
+		"host",
+		"connection",
+		"sec-ch-ua-platform",
+		"cache-control",
+		"x-requested-with",
+		"user-agent",
+		"sec-ch-ua",
+		"accept-language",
+		"sec-ch-ua-mobile",
+		"accept",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"cookie",
+	],
+	post: [
+		"host",
+		"connection",
+		"content-length",
+		"sec-ch-ua-platform",
+		"user-agent",
+		"sec-ch-ua",
+		"content-type",
+		"sec-ch-ua-mobile",
+		"accept-language",
+		"accept",
+		"origin",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"cookie",
+	],
+} as const;
+
+const CHROME_H2_XHR_EXTENDED_ORDER = [
+	"cache-control",
+	"if-none-match",
+	"sec-ch-ua-platform",
+	"accept-language",
+	"pragma",
+	"sec-ch-ua",
+	"sec-ch-ua-mobile",
+	"x-requested-with",
+	"user-agent",
+	"accept",
+	"sec-fetch-site",
+	"sec-fetch-mode",
+	"sec-fetch-dest",
+	"referer",
+	"accept-encoding",
+	"cookie",
+	"range",
+	"priority",
+] as const;
+
+const CHROME_H1_HEADER_NAMES: Record<string, string> = {
+	host: "Host",
+	connection: "Connection",
+	"upgrade-insecure-requests": "Upgrade-Insecure-Requests",
+	"user-agent": "User-Agent",
+	"accept-language": "Accept-Language",
+	accept: "Accept",
+	"sec-fetch-site": "Sec-Fetch-Site",
+	"sec-fetch-mode": "Sec-Fetch-Mode",
+	"sec-fetch-user": "Sec-Fetch-User",
+	"sec-fetch-dest": "Sec-Fetch-Dest",
+	"accept-encoding": "Accept-Encoding",
+	cookie: "Cookie",
+	"cache-control": "Cache-Control",
+	"x-requested-with": "X-Requested-With",
+	referer: "Referer",
+	"content-length": "Content-Length",
+	"content-type": "Content-Type",
+	origin: "Origin",
+	range: "Range",
+};
+
 type ChromeRequestClass = keyof typeof CHROME_HEADER_ORDERS;
 type HeaderTuple = [string, string];
+
+function chromeHeaderOrder(
+	requestClass: ChromeRequestClass,
+	isHttp1: boolean,
+	caller: ReadonlyMap<string, string>,
+): readonly string[] {
+	if (isHttp1) return CHROME_H1_HEADER_ORDERS[requestClass];
+	if (
+		requestClass === "xhr" &&
+		["cache-control", "if-none-match", "pragma", "x-requested-with"].some((name) =>
+			caller.has(name),
+		)
+	)
+		return CHROME_H2_XHR_EXTENDED_ORDER;
+	const base: string[] = [...CHROME_HEADER_ORDERS[requestClass]];
+	if (requestClass !== "xhr") return base;
+	const insertBefore = (name: string, before: string) => {
+		const index = base.indexOf(before);
+		base.splice(index < 0 ? base.length : index, 0, name);
+	};
+	if (caller.has("range")) insertBefore("range", "priority");
+	return base;
+}
 
 function normalizedCallerHeaderEntries(
 	headers: Record<string, string | string[] | undefined>,
@@ -392,10 +520,10 @@ function normalizedCallerHeaderEntries(
 
 function chromeRequestClass(
 	method: StealthMethod,
-	caller: ReadonlyMap<string, string>,
+	requestedClass?: ChromeRequestClass,
 ): ChromeRequestClass {
+	if (requestedClass) return requestedClass;
 	if (method === "POST") return "post";
-	if (caller.has("referer")) return "xhr";
 	return "navigation";
 }
 
@@ -423,6 +551,7 @@ function buildChromeHeaderTuples(options: {
 	headers: Record<string, string | string[] | undefined>;
 	requestUrl: string;
 	acceptLanguage?: string;
+	requestClass?: ChromeRequestClass;
 }): HeaderTuple[] {
 	const callerEntries = normalizedCallerHeaderEntries(options.headers);
 	const caller = new Map(callerEntries);
@@ -432,7 +561,7 @@ function buildChromeHeaderTuples(options: {
 			([name, value]) => [name.toLowerCase(), value] as HeaderTuple,
 		),
 	);
-	const requestClass = chromeRequestClass(options.method, caller);
+	const requestClass = chromeRequestClass(options.method, options.requestClass);
 	const referer = caller.get("referer");
 	const fetchSite = secFetchSite(options.requestUrl, referer);
 	const isNavigation = requestClass === "navigation";
@@ -448,12 +577,16 @@ function buildChromeHeaderTuples(options: {
 				requiredEmulationHeader(emulation, "accept-language"),
 		],
 		["accept", isNavigation ? requiredEmulationHeader(emulation, "accept") : "*/*"],
-		["accept-encoding", requiredEmulationHeader(emulation, "accept-encoding")],
+		[
+			"accept-encoding",
+			caller.has("range") ? "identity" : requiredEmulationHeader(emulation, "accept-encoding"),
+		],
 		["priority", isNavigation ? requiredEmulationHeader(emulation, "priority") : "u=1, i"],
 		["sec-fetch-site", fetchSite],
 		["sec-fetch-mode", isNavigation ? "navigate" : "cors"],
 		["sec-fetch-dest", isNavigation ? "document" : "empty"],
 	]);
+	for (const [name, value] of callerEntries) values.set(name, value);
 	if (isNavigation) {
 		values.set("upgrade-insecure-requests", "1");
 		values.set("sec-fetch-user", "?1");
@@ -469,24 +602,23 @@ function buildChromeHeaderTuples(options: {
 		);
 	}
 
+	const isHttp1 = new URL(options.requestUrl).protocol === "http:";
+	if (isHttp1) {
+		values.set("host", new URL(options.requestUrl).host);
+		values.set("connection", "keep-alive");
+	}
+	const order = chromeHeaderOrder(requestClass, isHttp1, caller);
 	const tuples: HeaderTuple[] = [];
 	const placed = new Set<string>();
-	for (const name of CHROME_HEADER_ORDERS[requestClass]) {
+	for (const name of order) {
 		const value = values.get(name);
 		if (value === undefined) continue;
-		tuples.push([name, value]);
+		tuples.push([isHttp1 ? (CHROME_H1_HEADER_NAMES[name] ?? name) : name, value]);
 		placed.add(name);
-	}
-	// Cookie was not present in the authoritative capture. Keep it deterministic
-	// after every captured field and before caller-defined extension headers.
-	const cookie = caller.get("cookie");
-	if (cookie !== undefined) {
-		tuples.push(["cookie", cookie]);
-		placed.add("cookie");
 	}
 	for (const [name, value] of callerEntries) {
 		if (placed.has(name)) continue;
-		tuples.push([name, value]);
+		tuples.push([isHttp1 ? (CHROME_H1_HEADER_NAMES[name] ?? name) : name, value]);
 	}
 	return tuples;
 }
@@ -1022,6 +1154,7 @@ async function fetchStealthRedirectChain(
 				: normalizeHeaders(headers),
 			method: currentMethod,
 			redirect: "manual",
+			...(new URL(currentUrl).protocol === "http:" ? { disableDefaultHeaders: true } : {}),
 			...(signal ? { signal } : {}),
 		};
 		if (currentBody !== undefined) requestInit.body = currentBody;
@@ -1389,6 +1522,7 @@ function createSessionFetcher(
 										headers: currentHeaders,
 										requestUrl: currentUrl,
 										acceptLanguage: clientOptions.stealth?.acceptLanguage,
+										requestClass: options.stealth?.requestClass,
 									})
 							: undefined;
 						const initialHeaders = normalizeHeaders({ ...(options.headers ?? {}) });

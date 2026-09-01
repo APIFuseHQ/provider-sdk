@@ -1303,6 +1303,8 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 	stealth?: {
 		/** Override the configured intent profile for this request. */
 		profile?: string;
+		/** Declare the Chrome request class when it cannot be inferred from the method. */
+		requestClass?: "navigation" | "xhr" | "post";
 		/**
 		 * Use only for proxy products that terminate CONNECT with a private CA
 		 * instead of tunneling the origin certificate chain.
