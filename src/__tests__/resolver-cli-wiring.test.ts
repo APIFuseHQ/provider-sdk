@@ -81,7 +81,7 @@ function createProvider(options: {
 		version: "1.0.0",
 		runtime: "standard",
 		allowedHosts: ["example.com"],
-		stealth: { profile: "chrome-desktop", platform: "macos" },
+		stealth: { browser: "chrome", os: "macos" },
 		secrets: [
 			{ name: NODEMAVEN_USERNAME_ENV, required: true },
 			{ name: NODEMAVEN_PASSWORD_ENV, required: true },
@@ -235,7 +235,7 @@ describe("resolver CLI wiring", () => {
 		expect(identities).toEqual([
 			{
 				proxyUrl: expect.stringMatching(/^http:\/\/resolver-cli-account-/),
-				userAgent: getStealthProfile("chrome-desktop").userAgent,
+				userAgent: getStealthProfile({ browser: "chrome", os: "macos" }).userAgent,
 			},
 		]);
 	});

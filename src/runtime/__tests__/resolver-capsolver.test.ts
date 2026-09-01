@@ -18,7 +18,7 @@ import {
 	ResolverVendorUnavailableError,
 } from "../resolver-vendors/types.js";
 import { RESOLVER_VENDOR_CAPABILITIES } from "../resolver-vendors/types.js";
-import { DEFAULT_PROFILE } from "../stealth.js";
+import { DEFAULT_STEALTH_PROFILE } from "../stealth.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const TURNSTILE_CHALLENGE = {
@@ -123,7 +123,7 @@ describe("Capsolver resolver vendor", () => {
 		await expect(resolver.solve(AWS_WAF_CHALLENGE)).resolves.toEqual({
 			form: "cookies",
 			cookies: { "aws-waf-token": "aws-cookie-value" },
-			userAgent: getStealthProfile(DEFAULT_PROFILE).userAgent,
+			userAgent: getStealthProfile(DEFAULT_STEALTH_PROFILE).userAgent,
 			sdkEstimatedExpires: expect.any(Number),
 		});
 		expect(stub.calls[0]?.body).toEqual({
@@ -219,7 +219,7 @@ describe("Capsolver resolver vendor", () => {
 		expect(first).toMatchObject({
 			form: "cookies",
 			cookies: { "aws-waf-token": "cached-aws-cookie" },
-			userAgent: getStealthProfile(DEFAULT_PROFILE).userAgent,
+			userAgent: getStealthProfile(DEFAULT_STEALTH_PROFILE).userAgent,
 		});
 		if (first.form !== "cookies") throw new Error("expected cookies solution");
 		expect(first.sdkEstimatedExpires).toBeGreaterThanOrEqual((beforeMs + 60 * 60 * 1_000) / 1_000);

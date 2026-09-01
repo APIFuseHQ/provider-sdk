@@ -582,7 +582,7 @@ describe("lintProvider", () => {
 			id: "demo-provider",
 			allowedHosts: ["api.example.com"],
 			reviewed: "first-party",
-			stealth: { profile: "chrome-146", platform: "macos" },
+			stealth: { browser: "chrome", os: "macos" },
 			operations: {
 				search: {
 					description:

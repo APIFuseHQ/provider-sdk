@@ -225,9 +225,7 @@ class MockWreqSession {
 	}
 }
 
-mock.module("wreq-js", () => ({
-	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
-	getEmulationHeaders: (profile: string, os = "macos") => {
+function mockEmulationHeaders(profile: string, os = "macos") {
 		const version = /^chrome_(\d+)$/.exec(profile)?.[1] ?? "149";
 		const platform = os === "windows" ? '"Windows"' : os === "linux" ? '"Linux"' : '"macOS"';
 		const osToken =
@@ -255,7 +253,11 @@ mock.module("wreq-js", () => ({
 			["accept-language", "en-US,en;q=0.9"],
 			["priority", "u=0, i"],
 		]);
-	},
+}
+
+mock.module("wreq-js", () => ({
+	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
+	getEmulationHeaders: mockEmulationHeaders,
 	getProfiles: () => [
 		"chrome_145",
 		"chrome_146",
@@ -1221,7 +1223,8 @@ describe("createStealthClient", () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
 
 		for (const profile of ["chrome-129", "chrome-130", "chrome-131"]) {
-			expect(() => createStealthClient("https://example.com", profile).fetch("/profile")).toThrow(
+			// test-invalid: legacy JavaScript callers can still pass versioned string profiles.
+			expect(() => createStealthClient("https://example.com", profile as never).fetch("/profile")).toThrow(
 				SDKError,
 			);
 		}
@@ -1232,13 +1235,14 @@ describe("createStealthClient", () => {
 	it("rejects a version-pinned profile before starting wreq", async () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
 
-		expect(() => createStealthClient("https://example.com", "chrome-146").createSession()).toThrow(
+		// test-invalid: legacy JavaScript callers can still pass versioned string profiles.
+		expect(() => createStealthClient("https://example.com", "chrome-146" as never).createSession()).toThrow(
 			SDKError,
 		);
 		expect(mockStealthState.clients).toHaveLength(0);
 	});
 
-	it("createSession accepts an intent profile override", async () => {
+	it("createSession accepts a structured profile override", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 200,
 			body: "ok",
@@ -1247,9 +1251,9 @@ describe("createStealthClient", () => {
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com", {
-			stealth: { profile: "firefox-desktop" },
+			stealth: { browser: "firefox", os: "windows" },
 		});
-		const session = client.createSession({ stealth: { profile: "chrome-linux" } });
+		const session = client.createSession({ stealth: { browser: "chrome", os: "linux" } });
 
 		await session.fetch("/profile");
 
@@ -1259,7 +1263,7 @@ describe("createStealthClient", () => {
 		});
 	});
 
-	it("keeps Firefox profiles on Firefox impersonation instead of falling back to Chrome", async () => {
+	it("keeps Firefox selection on Firefox impersonation instead of falling back to Chrome", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 200,
 			body: "ok",
@@ -1267,7 +1271,9 @@ describe("createStealthClient", () => {
 		});
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", "firefox-desktop");
+		const client = createStealthClient("https://example.com", {
+			stealth: { browser: "firefox", os: "macos" },
+		});
 
 		await client.fetch("/profile");
 
@@ -1277,41 +1283,28 @@ describe("createStealthClient", () => {
 		});
 	});
 
-	it("keeps unknown profile names on the transport default for compatibility", async () => {
-		mockStealthState.queuedResponses.push({
-			status: 200,
-			body: "ok",
-			headers: { "content-type": "text/plain" },
-		});
-
+	it("rejects every removed string selection instead of defaulting it", async () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", "custom-profile");
-
-		await client.fetch("/profile");
-
-		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "chrome_149",
-			os: "macos",
-		});
+		for (const name of ["chrome-desktop", "chrome-windows", "custom-profile"]) {
+			// test-invalid: legacy JavaScript callers can still pass removed string profiles.
+			expect(() => createStealthClient("https://example.com", name as never)).toThrow(
+				"Stealth profile names are no longer supported",
+			);
+		}
 	});
 
-	it("maps unknown profile names through the derived default profile", async () => {
-		const { resolveWreqProfile } = await import("../runtime/stealth.js");
-
-		expect(resolveWreqProfile("custom-profile", ["chrome_145", "firefox_147"])).toEqual({
-			browser: "chrome_145",
-			os: "macos",
-		});
-	});
-
-	it("maps Safari profiles to same-family wreq impersonation", async () => {
+	it("maps Safari OS selection to the matching wreq family", async () => {
 		mockStealthState.queuedResponses.push(
 			{ status: 200, body: "desktop", headers: {} },
 			{ status: 200, body: "ios", headers: {} },
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		await createStealthClient("https://example.com", "safari-desktop").fetch("/profile");
-		await createStealthClient("https://example.com", "safari-mobile").fetch("/profile");
+		await createStealthClient("https://example.com", {
+			stealth: { browser: "safari", os: "macos" },
+		}).fetch("/profile");
+		await createStealthClient("https://example.com", {
+			stealth: { browser: "safari", os: "ios" },
+		}).fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
 			browser: "safari_17.0",
@@ -1321,6 +1314,25 @@ describe("createStealthClient", () => {
 			browser: "safari_ios_26",
 			os: "ios",
 		});
+	});
+
+	it("applies a per-request profile override once and preserves the client default", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "override", headers: {} },
+			{ status: 200, body: "default", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			stealth: { browser: "chrome", os: "windows" },
+		});
+
+		await client.fetch("/override", { stealth: { os: "linux" } });
+		await client.fetch("/default");
+
+		expect(mockStealthState.clients.map((entry) => entry.options?.os)).toEqual([
+			"linux",
+			"windows",
+		]);
 	});
 
 	it("rejects low-level stealth fingerprint overrides that the transport owns internally", async () => {
@@ -2582,12 +2594,12 @@ describe("Chrome 149 header parity", () => {
 
 				const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
 				expect(defaults.map(([name]) => name)).toEqual(requestClass.expected.slice(4));
+				const wreqHeaders = mockEmulationHeaders("chrome_149", os);
 				expect(requestHeader({ headers: defaults }, "sec-ch-ua-platform")).toBe(
-					os === "windows" ? '"Windows"' : os === "linux" ? '"Linux"' : '"macOS"',
+					wreqHeaders.get("sec-ch-ua-platform"),
 				);
-				const userAgent = requestHeader({ headers: defaults }, "user-agent");
-				expect(userAgent).toContain(
-					os === "windows" ? "Windows NT" : os === "linux" ? "X11; Linux" : "Macintosh",
+				expect(requestHeader({ headers: defaults }, "user-agent")).toBe(
+					wreqHeaders.get("user-agent"),
 				);
 			});
 		}
@@ -2837,7 +2849,7 @@ function createStealthAbortProvider(): ProviderDefinition {
 	return createProviderDefinitionDouble({
 		id: "stealth-abort-provider",
 		allowedHosts: ["example.com"],
-		stealth: { profile: "chrome-desktop", platform: "macos" },
+		stealth: { browser: "chrome", os: "macos" },
 		auth: {
 			mode: "credentials",
 			flow: {

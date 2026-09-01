@@ -87,9 +87,7 @@ export function createProviderContext(provider: ProviderDefinition): {
 	const state = createMemoryProviderRuntimeState();
 	const cache = createProviderCache({ providerId: provider.id });
 	const proxyPolicy = resolveNativeProxyPolicy(provider);
-	const stealthProfile = provider.stealth?.profile
-		? getStealthProfile(provider.stealth.profile)
-		: undefined;
+	const stealthProfile = provider.stealth ? getStealthProfile(provider.stealth) : undefined;
 	const ctx: ProviderContext = {
 		env,
 		credential,
@@ -105,7 +103,9 @@ export function createProviderContext(provider: ProviderDefinition): {
 		cache,
 		state,
 		trace: createTraceContext(),
-		stealth: createStealthClient("http://localhost"),
+		stealth: createStealthClient("http://localhost", {
+			...(provider.stealth ? { stealth: provider.stealth } : {}),
+		}),
 		ocr: createOcrClientFromEnv(provider.ocr),
 		stt: createSttClientFromEnv(provider.stt),
 		resolver: provider.resolver

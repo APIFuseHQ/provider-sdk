@@ -518,7 +518,7 @@ function getProviderStealthBaseUrl(provider: ProviderDefinition): string | undef
 }
 
 function getProviderStealthProfile(provider: ProviderDefinition) {
-	return provider.stealth?.profile ? getStealthProfile(provider.stealth.profile) : undefined;
+	return provider.stealth ? getStealthProfile(provider.stealth) : undefined;
 }
 
 function isProductionProviderBrowserMode(provider: ProviderDefinition, env = process.env): boolean {
@@ -677,6 +677,7 @@ function createProviderContext(
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: proxyTelemetry,
 		...(signal ? { signal } : {}),
+		...(provider.stealth ? { stealth: provider.stealth } : {}),
 	};
 	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>
@@ -722,21 +723,8 @@ function createProviderContext(
 		state: requestState,
 		stealth: stealthBaseUrl
 			? capabilityModules.stealth
-				? stealthProfile
-					? capabilityModules.stealth.createStealthClient(
-							stealthBaseUrl,
-							provider.stealth!.profile,
-							stealthClientOptions,
-						)
-					: capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
-				: stealthProfile
-					? createLazyStealthClient(
-							logStealthCleanupError,
-							stealthBaseUrl,
-							provider.stealth!.profile,
-							stealthClientOptions,
-						)
-					: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
+				? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
+				: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
 			: createStealthStub(),
 		browser:
 			provider.runtime === "browser"
@@ -902,6 +890,7 @@ function createAuthFlowContext(
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: proxyTelemetry,
 		...(signal ? { signal } : {}),
+		...(provider.stealth ? { stealth: provider.stealth } : {}),
 	};
 	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>
@@ -938,21 +927,8 @@ function createAuthFlowContext(
 			state: state.forConnection(resolveOperationConnectionId(request)),
 			stealth: stealthBaseUrl
 				? capabilityModules.stealth
-					? stealthProfile
-						? capabilityModules.stealth.createStealthClient(
-								stealthBaseUrl,
-								provider.stealth!.profile,
-								stealthClientOptions,
-							)
-						: capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
-					: stealthProfile
-						? createLazyStealthClient(
-								logStealthCleanupError,
-								stealthBaseUrl,
-								provider.stealth!.profile,
-								stealthClientOptions,
-							)
-						: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
+					? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
+					: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
 				: createStealthStub(),
 			...(provider.native
 				? {

@@ -1,50 +1,54 @@
 import { describe, expect, it } from "bun:test";
+import { getEmulationHeaders } from "wreq-js";
 
 import { SDKError } from "../errors.js";
-import { getStealthProfile, listStealthProfiles } from "../stealth/profiles.js";
+import {
+	DEFAULT_STEALTH_BROWSER,
+	DEFAULT_STEALTH_OS,
+	getStealthProfile,
+	listStealthProfiles,
+} from "../stealth/profiles.js";
 
 describe("stealth profiles", () => {
-	it("maps chrome-desktop to the current Chrome profile", () => {
-		const profile = getStealthProfile("chrome-desktop");
+	it("resolves the named browser and OS defaults explicitly", () => {
+		const profile = getStealthProfile();
 
-		expect(profile.name).toBe("chrome-desktop");
-		expect(profile.tlsClientIdentifier).toBe("chrome_149");
+		expect(profile.browser).toBe(DEFAULT_STEALTH_BROWSER);
+		expect(profile.os).toBe(DEFAULT_STEALTH_OS);
 	});
 
-	it("exposes explicit Chrome desktop operating-system intents", () => {
-		expect(getStealthProfile("chrome-windows").platform).toBe("windows");
-		expect(getStealthProfile("chrome-macos").platform).toBe("macos");
-		expect(getStealthProfile("chrome-linux").platform).toBe("linux");
-		expect(getStealthProfile("chrome-windows").userAgent).toContain("Windows NT");
-		expect(getStealthProfile("chrome-linux").userAgent).toContain("X11; Linux");
-	});
+	it("reads every Chrome desktop OS identity from wreq", () => {
+		for (const os of ["windows", "macos", "linux"] as const) {
+			const profile = getStealthProfile({ browser: "chrome", os });
+			const headers = new Map(
+				getEmulationHeaders(
+					profile.tlsClientIdentifier as Parameters<typeof getEmulationHeaders>[0],
+					os,
+				),
+			);
 
-	it("maps browser-family intent aliases to the current registered profiles", () => {
-		expect(getStealthProfile("firefox-desktop").tlsClientIdentifier).toBe("firefox_147");
-		expect(getStealthProfile("safari-desktop").tlsClientIdentifier).toBe("safari_17_0");
-		expect(getStealthProfile("safari-mobile").tlsClientIdentifier).toBe("safari_ios_26_0");
-	});
-
-	it("throws SDKError for unknown profiles", () => {
-		expect(() => getStealthProfile("unknown-profile")).toThrow(SDKError);
-		expect(() => getStealthProfile("unknown-profile")).toThrow(
-			"Unknown stealth profile: unknown-profile",
-		);
-	});
-
-	it("rejects every version-pinned browser profile with its intent replacement", () => {
-		for (const profile of ["chrome-146", "firefox-147", "safari-17", "ios-safari-26"]) {
-			expect(() => getStealthProfile(profile)).toThrow(SDKError);
+			expect(profile.os).toBe(os);
+			expect(profile.userAgent).toBe(headers.get("user-agent")!);
 		}
-		expect(() => getStealthProfile("chrome-146")).toThrow(
-			'Use the intent profile "chrome-desktop"',
+	});
+
+	it("models Firefox desktop OSes and Safari macOS/iOS as supported pairs", () => {
+		expect(getStealthProfile({ browser: "firefox", os: "windows" }).os).toBe("windows");
+		expect(getStealthProfile({ browser: "firefox", os: "linux" }).os).toBe("linux");
+		expect(getStealthProfile({ browser: "safari", os: "macos" }).tlsClientIdentifier).toBe(
+			"safari_17.0",
+		);
+		expect(getStealthProfile({ browser: "safari", os: "ios" }).tlsClientIdentifier).toBe(
+			"safari_ios_26",
+		);
+		// test-invalid: runtime validation must reject unsupported structured pairs.
+		expect(() => getStealthProfile({ browser: "safari", os: "windows" } as never)).toThrow(
+			"Unsupported stealth browser/OS combination: safari/windows",
 		);
 	});
 
-	it("lists only intent-based profile names", () => {
-		const profiles = listStealthProfiles();
-
-		expect(profiles).toEqual([
+	it("rejects removed string profile names", () => {
+		for (const name of [
 			"chrome-desktop",
 			"chrome-windows",
 			"chrome-macos",
@@ -54,15 +58,37 @@ describe("stealth profiles", () => {
 			"safari-mobile",
 			"generic-desktop",
 			"generic-mobile",
-		]);
-		for (const versioned of [
-			"chrome-149",
-			"chrome-146",
-			"firefox-147",
-			"ios-safari-26",
-			"safari-17",
 		]) {
-			expect(profiles).not.toContain(versioned);
+			// test-invalid: legacy JavaScript callers can still pass removed string names.
+			expect(() => getStealthProfile(name as never)).toThrow(SDKError);
+			// test-invalid: legacy JavaScript callers can still pass removed string names.
+			expect(() => getStealthProfile(name as never)).toThrow(
+				"Stealth profile names are no longer supported",
+			);
 		}
+	});
+
+	it("rejects version-pinned names with the structured replacement", () => {
+		for (const name of ["chrome-146", "firefox-147", "safari-17", "ios-safari-26"]) {
+			// test-invalid: version-pinned strings remain a guarded JavaScript input.
+			expect(() => getStealthProfile(name as never)).toThrow(SDKError);
+		}
+		// test-invalid: version-pinned strings remain a guarded JavaScript input.
+		expect(() => getStealthProfile("chrome-146" as never)).toThrow(
+			'stealth: { browser: "chrome", os: "macos" }',
+		);
+	});
+
+	it("lists structured supported descriptors", () => {
+		expect(listStealthProfiles()).toEqual([
+			{ browser: "chrome", os: "windows" },
+			{ browser: "chrome", os: "macos" },
+			{ browser: "chrome", os: "linux" },
+			{ browser: "firefox", os: "windows" },
+			{ browser: "firefox", os: "macos" },
+			{ browser: "firefox", os: "linux" },
+			{ browser: "safari", os: "macos" },
+			{ browser: "safari", os: "ios" },
+		]);
 	});
 });

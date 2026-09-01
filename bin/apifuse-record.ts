@@ -503,7 +503,9 @@ export function createCaptureContext(
 		},
 	});
 	const stealth = proxyStealthClient(
-		createStealthClient(baseUrl),
+		createStealthClient(baseUrl, {
+			...(provider.stealth ? { stealth: provider.stealth } : {}),
+		}),
 		captureSensitiveParams,
 		(order, response) => retainRawCapture(order, normalizeCapturedStealthResponse(response)),
 		reserveCaptureOrder,
@@ -522,9 +524,7 @@ export function createCaptureContext(
 	const state = createMemoryProviderRuntimeState();
 	const cache = createBypassProviderCache({ providerId: provider.id });
 	const proxyPolicy = resolveNativeProxyPolicy(provider);
-	const stealthProfile = provider.stealth?.profile
-		? getStealthProfile(provider.stealth.profile)
-		: undefined;
+	const stealthProfile = provider.stealth ? getStealthProfile(provider.stealth) : undefined;
 	const ctx: ProviderContext = {
 		env,
 		credential,

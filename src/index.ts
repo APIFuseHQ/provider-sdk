@@ -260,7 +260,12 @@ export {
 	type ServeOptions,
 	serve,
 } from "./server/serve.js";
-export { getStealthProfile, listStealthProfiles } from "./stealth/profiles.js";
+export {
+	DEFAULT_STEALTH_BROWSER,
+	DEFAULT_STEALTH_OS,
+	getStealthProfile,
+	listStealthProfiles,
+} from "./stealth/profiles.js";
 export * from "./stream.js";
 export type {
 	ApiFuseResponse,
@@ -437,11 +442,15 @@ export type {
 	StateValue,
 	StateWriteOptions,
 	StealthClient,
+	StealthBrowser,
 	StealthCookieStore,
 	StealthCookieStoreV1,
 	StealthFetchOptions,
 	StealthPlatform,
 	StealthProfile,
+	StealthProfileDescriptor,
+	StealthProfileSelection,
+	StealthOS,
 	StealthRedirectHop,
 	StealthRedirectRunOptions,
 	StealthRedirectRunResult,

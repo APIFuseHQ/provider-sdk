@@ -90,7 +90,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProviderSupportLevel ProxiedOAuthConfig RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams RequestWithMethodOptions
 			ResolverContext SchemaLike SmsOrigin SmsOtpExtractionPattern SmsOtpMatcherDefinition SmsPhoneIdentity SseMessage StandardSchemaV1
 			StateCasResult StateNamespaceOptions StateNamespaceScope StateValue StateWriteOptions StealthClient StealthCookieStore StealthCookieStoreV1
-			StealthFetchOptions StealthPlatform StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession StealthSessionCookies
+			StealthFetchOptions StealthProfileSelection StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession StealthSessionCookies
 			SttAudioInput SttContext SttPromptPolicy SttSegment SttTranscribeMode SttTranscribeRequest SttTranscript SttUnsupportedOptionPolicy
 			SttUsage SttVerificationCodeOptions SttWarning TraceContext VALID_OPERATION_ERROR_STATUSES VerificationCodeCandidate VerificationCodeCandidateSource VerificationCodeExtractionResult
 			AssertStep AssertionExpression AssertionPredicate AttemptReference BoundedJsonPath BoundedJsonPathSchema CandidateBlock CandidatePolicy CandidateReference
@@ -135,7 +135,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProviderProxySessionAffinity ProviderRequestContext ProviderResolverConfig ProviderResolverVendor ProviderReviewed ProviderSecretDeclaration ProviderStreamEvent ProviderSttConfig
 			ProviderSttMode ProxyProtocol RequestOptions RequestParamPrimitive RequestParamValue RequestParams RequestWithMethodOptions ResolverContext
 			SensitivePathSegment SmsOrigin SmsOtpExtractionPattern SmsPhoneIdentity SseMessage StealthClient StealthCookieStore StealthCookieStoreV1
-			StealthFetchOptions StealthPlatform StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession StealthSessionCookies
+			StealthFetchOptions StealthProfileSelection StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession StealthSessionCookies
 			SttAudioInput SttContext SttPromptPolicy SttSegment SttTranscribeMode SttTranscribeRequest SttTranscript SttUnsupportedOptionPolicy
 			SttUsage SttVerificationCodeOptions SttWarning TraceContext TransportErrorOptions VALID_OPERATION_ERROR_STATUSES ValidationErrorOptions VerificationCodeCandidate
 			VerificationCodeCandidateSource VerificationCodeExtractionResult
@@ -182,7 +182,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			HttpRetryOptions HttpRetryPreset HttpRetryUnsafeMethodPolicy Iso3166Alpha2CountryCode ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity
 			ProxyAttemptTelemetryEvent ProxyCacheStatus ProxyProtocol ProxyResolutionOptions ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource ProxyVendorFailoverTelemetryEvent
 			ProxyVendorName RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams SmartproxyAllocatorBodyClass StealthClient
-			StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession
+			StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthProfileDescriptor StealthProfileSelection StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession
 			StealthSessionCookies StealthTransportBody StealthTransportHeaders StealthTransportResponse
 		`,
 	),
@@ -214,7 +214,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProviderSttMode ProviderSupportLevel ProxiedOAuthConfig ProxyAttemptTelemetryEvent ProxyVendorFailoverTelemetryEvent RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams
 			RequestWithMethodOptions ResolverContext SchemaLike SelfTestCancellationLogEvent SmsOrigin SmsOtpExtractionPattern SmsOtpMatcherDefinition SmsPhoneIdentity
 			SseMessage StandardSchemaV1 StateCasResult StateNamespaceOptions StateNamespaceScope StateValue StateWriteOptions StealthClient
-			StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthPlatform StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse
+			StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthProfileSelection StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse
 			StealthSession StealthSessionCookies SttAudioInput SttContext SttPromptPolicy SttSegment SttTranscribeMode SttTranscribeRequest
 			SttTranscript SttUnsupportedOptionPolicy SttUsage SttVerificationCodeOptions SttWarning TraceContext VALID_OPERATION_ERROR_STATUSES VerificationCodeCandidate
 			VerificationCodeCandidateSource VerificationCodeExtractionResult
@@ -258,7 +258,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProviderSupportLevel ProxiedOAuthConfig RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams RequestWithMethodOptions
 			ResolverContext SchemaLike ShapeArray ShapeMatcher ShapeObject ShapeValue SmsOrigin SmsOtpExtractionPattern
 			SmsOtpMatcherDefinition SmsPhoneIdentity SseMessage StandardSchemaV1 StateCasResult StateNamespaceOptions StateNamespaceScope StateValue
-			StateWriteOptions StealthClient StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthPlatform StealthRedirectHop StealthRedirectRunOptions
+			StateWriteOptions StealthClient StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthProfileSelection StealthRedirectHop StealthRedirectRunOptions
 			StealthRedirectRunResult StealthResponse StealthSession StealthSessionCookies SttAudioInput SttContext SttPromptPolicy SttSegment
 			SttTranscribeMode SttTranscribeRequest SttTranscript SttUnsupportedOptionPolicy SttUsage SttVerificationCodeOptions SttWarning TraceContext
 			VALID_OPERATION_ERROR_STATUSES VerificationCodeCandidate VerificationCodeCandidateSource VerificationCodeExtractionResult
@@ -597,7 +597,10 @@ for (const { config, configPath } of parsedConfigs) {
 		console.error(`Missing committed API report: api-reports/${reportName}`);
 		process.exit(1);
 	}
-	if (stats !== undefined && realpathSync(committed) !== join(realpathSync(reportDir), reportName)) {
+	if (
+		stats !== undefined &&
+		realpathSync(committed) !== join(realpathSync(reportDir), reportName)
+	) {
 		console.error(
 			`Committed API report must resolve inside the report folder: api-reports/${reportName}.`,
 		);

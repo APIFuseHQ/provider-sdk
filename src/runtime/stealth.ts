@@ -18,11 +18,18 @@ import {
 	vendorFromResolvedSource,
 } from "../config/loader.js";
 import { SDKError, TransportError } from "../errors.js";
-import { getStealthProfile, getStealthProfileIntentAlias } from "../stealth/profiles.js";
+import {
+	DEFAULT_STEALTH_BROWSER,
+	DEFAULT_STEALTH_OS,
+	getStealthProfile,
+	resolveStealthProfileSelection,
+} from "../stealth/profiles.js";
 import type {
 	HttpMethod,
 	StealthClient,
 	StealthFetchOptions,
+	StealthProfileDescriptor,
+	StealthProfileSelection,
 	StealthRedirectHop,
 	StealthResponse,
 	StealthSession,
@@ -67,7 +74,10 @@ import {
 	serializeRequestUrl,
 } from "./request-options.js";
 
-export const DEFAULT_PROFILE = "chrome-desktop";
+export const DEFAULT_STEALTH_PROFILE: StealthProfileDescriptor = Object.freeze({
+	browser: DEFAULT_STEALTH_BROWSER,
+	os: DEFAULT_STEALTH_OS,
+});
 
 const MISSING_PROXY_WARNING =
 	"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.";
@@ -104,13 +114,7 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 	/** Abort all requests issued by this client. */
 	signal?: AbortSignal;
 	/** Browser identity and declaration-wide HTTP language defaults. */
-	stealth?: {
-		/** Intent profile. Version-pinned names are rejected. */
-		profile?: string;
-		/** Browser intent used with `os`; currently Chrome desktop parity is supported. */
-		browser?: "chrome";
-		/** Desktop operating system advertised by both UA and client hints. */
-		os?: "windows" | "macos" | "linux";
+	stealth?: StealthProfileSelection & {
 		/** Default Accept-Language value; requests may override it through `headers`. */
 		acceptLanguage?: string;
 	};
@@ -223,61 +227,21 @@ function closestWreqProfile(
 	return closest?.name;
 }
 
-function resolveDefaultWreqProfileMapping(): { identifier: string; os: EmulationOS } {
-	let profile: ReturnType<typeof getStealthProfile>;
-	try {
-		profile = getStealthProfile(DEFAULT_PROFILE);
-	} catch (error) {
-		throw new SDKError(
-			`Default stealth profile "${DEFAULT_PROFILE}" cannot be mapped to a wreq-js browser profile.`,
-			{ cause: error instanceof Error ? error : undefined },
-		);
-	}
-
-	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
-	if (!parseProfileIdentifier(identifier)) {
-		throw new SDKError(
-			`Default stealth profile "${DEFAULT_PROFILE}" cannot be mapped to a wreq-js browser profile.`,
-		);
-	}
-	return { identifier, os: profile.platform };
-}
-
-let defaultWreqProfileMapping: ReturnType<typeof resolveDefaultWreqProfileMapping> | undefined;
-
-function getDefaultWreqProfileMapping(): ReturnType<typeof resolveDefaultWreqProfileMapping> {
-	defaultWreqProfileMapping ??= resolveDefaultWreqProfileMapping();
-	return defaultWreqProfileMapping;
-}
-
 export function resolveWreqProfile(
-	profileName: string,
+	selection: StealthProfileSelection,
 	wreqProfiles: readonly BrowserProfile[],
 ): {
 	browser: BrowserProfile;
 	os: EmulationOS;
 } {
-	let identifier: string;
-	let os: EmulationOS;
-	try {
-		const profile = getStealthProfile(profileName);
-		identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
-		os = profile.platform;
-	} catch (error) {
-		if (getStealthProfileIntentAlias(profileName)) throw error;
-		// Preserve the previous ctx.stealth.fetch() compatibility behavior: unknown
-		// profile strings still run with the transport default instead of failing
-		// before the request starts. Version-pinned browser names remain explicit
-		// errors so callers do not accidentally pin retired fingerprints.
-		const defaultMapping = getDefaultWreqProfileMapping();
-		identifier = defaultMapping.identifier;
-		os = defaultMapping.os;
-	}
+	const profile = getStealthProfile(selection);
+	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
+	const os = profile.os;
 
 	const browser = closestWreqProfile(identifier, wreqProfiles);
 	if (!browser) {
 		throw new SDKError(
-			`Stealth profile "${profileName}" cannot be mapped to a wreq-js browser profile.`,
+			`Stealth profile ${profile.browser}/${profile.os} cannot be mapped to a wreq-js browser profile.`,
 		);
 	}
 	return { browser, os };
@@ -637,7 +601,7 @@ function assertNoUnsupportedFingerprintOverrides(options: unknown): void {
 	if (unsupported.length === 0) return;
 
 	throw new SDKError(
-		`ctx.stealth.fetch uses transport-managed browser fingerprints and no longer accepts low-level stealth overrides: ${unsupported.join(", ")}. Use stealth.profile instead.`,
+		`ctx.stealth.fetch uses transport-managed browser fingerprints and no longer accepts low-level stealth overrides: ${unsupported.join(", ")}. Use stealth.browser and stealth.os instead.`,
 	);
 }
 
@@ -1225,19 +1189,17 @@ async function fetchStealthRedirectChain(
 
 function createSessionFetcher(
 	baseUrl: string,
-	defaultProfile: string,
+	defaultProfile: StealthProfileDescriptor,
 	clientOptions: StealthClientOptions,
 ): StealthSession {
 	const clients = new Map<string, WreqSessionCacheEntry>();
 	let closed = false;
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
-	const intentAlias = getStealthProfileIntentAlias(defaultProfile);
-	if (intentAlias) getStealthProfile(defaultProfile);
 	const cookieJar = new StealthCookieJar([], baseUrl);
 
 	async function getClientEntry(
-		profileName: string,
+		profile: StealthProfileDescriptor,
 		proxyUrl: string | undefined,
 		ignoreTlsErrors: boolean,
 		defaultHeaders?: HeaderTuple[],
@@ -1246,7 +1208,7 @@ function createSessionFetcher(
 			throw new TransportError("Stealth session is closed", { status: 0 });
 		}
 		const wreq = await getWreqModule();
-		const { browser, os } = resolveWreqProfile(profileName, wreq.getProfiles());
+		const { browser, os } = resolveWreqProfile(profile, wreq.getProfiles());
 		const cacheKey = JSON.stringify({
 			browser,
 			os,
@@ -1273,7 +1235,7 @@ function createSessionFetcher(
 	}
 
 	async function withClient<T>(
-		profileName: string,
+		profile: StealthProfileDescriptor,
 		proxyUrl: string | undefined,
 		ignoreTlsErrors: boolean,
 		operation: (client: WreqSession) => Promise<T>,
@@ -1281,7 +1243,7 @@ function createSessionFetcher(
 		defaultHeaders?: HeaderTuple[],
 	): Promise<T> {
 		throwIfAmbientAborted(signal);
-		const entry = await getClientEntry(profileName, proxyUrl, ignoreTlsErrors, defaultHeaders);
+		const entry = await getClientEntry(profile, proxyUrl, ignoreTlsErrors, defaultHeaders);
 		throwIfAmbientAborted(signal);
 		const previous = entry.tail;
 		let release!: () => void;
@@ -1367,6 +1329,7 @@ function createSessionFetcher(
 
 	const session: StealthSession = {
 		async fetch(url, options: StealthFetchOptions = {}) {
+			const requestProfile = resolveStealthProfileSelection(options.stealth, defaultProfile);
 			const { hasExplicitRetryPolicy, method, stealthRetryOptions } = (() => {
 				try {
 					const method = normalizeMethod(options.method ?? "GET");
@@ -1493,7 +1456,6 @@ function createSessionFetcher(
 							options.stealth?.insecureSkipVerify ??
 								(!hasPolicyProxy && proxy && clientOptions.proxyStealth?.insecureSkipVerify),
 						);
-						const profileName = options.stealth?.profile ?? defaultProfile;
 						serializedUrl = serializeRequestUrl(
 							resolveUrl(baseUrl, url),
 							options.params,
@@ -1501,7 +1463,7 @@ function createSessionFetcher(
 						);
 						const { requestUrl } = serializedUrl;
 						const wreq = await getWreqModule();
-						const mapping = resolveWreqProfile(profileName, wreq.getProfiles());
+						const mapping = resolveWreqProfile(requestProfile, wreq.getProfiles());
 						const chromeEmulationHeaders = mapping.browser.startsWith("chrome_")
 							? Array.from(
 									wreq.getEmulationHeaders(mapping.browser, mapping.os),
@@ -1537,7 +1499,7 @@ function createSessionFetcher(
 							initialHeaders,
 						);
 						const { normalized, response } = await withClient(
-							profileName,
+							requestProfile,
 							proxy,
 							ignoreTlsErrors,
 							(transport) =>
@@ -1705,10 +1667,7 @@ function createSessionFetcher(
 
 				const proxyAuthDiagnostic =
 					stalePoolError && stalePoolDiagnosticProxy
-						? await classifyProxyAuthDiagnostic(
-								options.stealth?.profile ?? defaultProfile,
-								stalePoolDiagnosticProxy,
-							)
+						? await classifyProxyAuthDiagnostic(requestProfile, stalePoolDiagnosticProxy)
 						: undefined;
 				if (proxyAuthDiagnostic === "source_ip_denied") {
 					throw createProxyAuthIpDeniedError(
@@ -1955,12 +1914,12 @@ function createSessionFetcher(
 	return session;
 
 	async function classifyProxyAuthDiagnostic(
-		profileName: string,
+		profile: StealthProfileDescriptor,
 		proxy: string,
 	): Promise<"source_ip_denied" | "edge_auth_rejected" | undefined> {
 		try {
 			return await withClient(
-				profileName,
+				profile,
 				proxy,
 				false,
 				async (client) => {
@@ -2020,38 +1979,19 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
 	return Object.keys(headers).some((key) => key.toLowerCase() === needle);
 }
 
-function declaredClientProfile(options: StealthClientOptions): string {
-	const declaration = options.stealth;
-	if (!declaration) return DEFAULT_PROFILE;
-	if (declaration.profile && (declaration.browser || declaration.os)) {
-		throw new SDKError(
-			"Stealth client identity accepts either stealth.profile or stealth.browser/stealth.os, not both.",
-		);
-	}
-	if (declaration.profile) return declaration.profile;
-	if (!declaration.browser && !declaration.os) return DEFAULT_PROFILE;
-	if (declaration.browser && declaration.browser !== "chrome") {
-		throw new SDKError(`Unsupported stealth browser intent: ${declaration.browser}`);
-	}
-	return declaration.os ? `chrome-${declaration.os}` : "chrome-desktop";
-}
-
 export function createStealthClient(
 	baseUrl: string,
-	defaultProfileOrOptions: string | StealthClientOptions = DEFAULT_PROFILE,
 	clientOptions: StealthClientOptions = {},
 ): StealthClient {
-	const resolvedClientOptions =
-		typeof defaultProfileOrOptions === "string" ? clientOptions : defaultProfileOrOptions;
-	const defaultProfile =
-		typeof defaultProfileOrOptions === "string"
-			? defaultProfileOrOptions
-			: declaredClientProfile(resolvedClientOptions);
+	if (typeof clientOptions === "string") {
+		resolveStealthProfileSelection(clientOptions as unknown as StealthProfileSelection);
+	}
+	const defaultProfile = resolveStealthProfileSelection(clientOptions.stealth);
 	let sharedSession: StealthSession | null = null;
 
 	function getSharedSession(): StealthSession {
 		if (!sharedSession) {
-			sharedSession = createSessionFetcher(baseUrl, defaultProfile, resolvedClientOptions);
+			sharedSession = createSessionFetcher(baseUrl, defaultProfile, clientOptions);
 		}
 
 		return sharedSession;
@@ -2061,9 +2001,9 @@ export function createStealthClient(
 		fetch(url: string, options?: StealthFetchOptions) {
 			return getSharedSession().fetch(url, options);
 		},
-		createSession(opts?: { stealth?: { profile?: string } }) {
-			const sessionProfile = opts?.stealth?.profile ?? defaultProfile;
-			return createSessionFetcher(baseUrl, sessionProfile, resolvedClientOptions);
+		createSession(opts?: { stealth?: StealthProfileSelection }) {
+			const sessionProfile = resolveStealthProfileSelection(opts?.stealth, defaultProfile);
+			return createSessionFetcher(baseUrl, sessionProfile, clientOptions);
 		},
 		close() {
 			sharedSession?.close();

@@ -596,9 +596,9 @@ export const headers = {
 		expect(authoring?.passed).toBe(false);
 		expect(browserVersionDetails).toHaveLength(5);
 		expect(browserVersionDetails.join("\n")).toContain("sourceFiles.upstream/pinned.ts");
-		expect(browserVersionDetails.join("\n")).toContain('"chrome-desktop"');
+		expect(browserVersionDetails.join("\n")).toContain('browser: "chrome", os: "macos"');
 		expect(browserVersionDetails.join("\n")).toContain(
-			'getStealthProfile("chrome-desktop").userAgent',
+			'getStealthProfile({ browser: "chrome", os: "macos" }).userAgent',
 		);
 		expect(browserVersionDetails.join("\n")).toContain("let ctx.stealth generate client hints");
 		expect(browserVersionDetails.join("\n")).not.toContain("__fixtures__");

@@ -51,7 +51,7 @@ import type {
 	ProviderSttConfig,
 	SchemaLike,
 	SmsOtpMatcherDefinition,
-	StealthPlatform,
+	StealthProfileSelection,
 } from "./types.js";
 import {
 	HEALTH_CHECK_DEGRADED_THRESHOLD_MS_MAX,
@@ -594,10 +594,7 @@ export interface ProviderDeclaration {
 	http?: true;
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
-	stealth?: {
-		profile: string;
-		platform: StealthPlatform;
-	};
+	stealth?: StealthProfileSelection;
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;

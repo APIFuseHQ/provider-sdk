@@ -42,7 +42,7 @@ import {
 } from "../resolver-vendors/types.js";
 import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemaven.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
-import { DEFAULT_PROFILE } from "../stealth.js";
+import { DEFAULT_STEALTH_PROFILE } from "../stealth.js";
 import { getStealthProfile } from "../../stealth/profiles.js";
 import { ProxyTelemetryCollector } from "../proxy-telemetry.js";
 
@@ -780,7 +780,7 @@ describe("resolver vendor chain", () => {
 		expect(adapter.state.identities).toEqual([
 			{
 				proxyUrl: expect.stringMatching(/^http:\/\/resolver-default-profile-account-/),
-				userAgent: getStealthProfile(DEFAULT_PROFILE).userAgent,
+				userAgent: getStealthProfile(DEFAULT_STEALTH_PROFILE).userAgent,
 			},
 		]);
 		const telemetryHeader = telemetry.toHeaderValue();
@@ -797,7 +797,7 @@ describe("resolver vendor chain", () => {
 	it("keeps a declared resolver profile ahead of the SDK default", async () => {
 		process.env[NODEMAVEN_USERNAME_ENV] = "resolver-declared-profile-account";
 		process.env[NODEMAVEN_PASSWORD_ENV] = "resolver-declared-profile-password";
-		const declaredUserAgent = getStealthProfile("firefox-desktop").userAgent;
+		const declaredUserAgent = "declared-resolver-user-agent";
 		const telemetryEvents: unknown[] = [];
 		const adapter = createStubAdapter({ id: "browser" });
 		const resolver = createResolverClient({
@@ -819,7 +819,6 @@ describe("resolver vendor chain", () => {
 				userAgent: declaredUserAgent,
 			},
 		]);
-		expect(declaredUserAgent).not.toBe(getStealthProfile(DEFAULT_PROFILE).userAgent);
 		expect(telemetryEvents).toContainEqual(
 			expect.objectContaining({ userAgentSource: "declared" }),
 		);

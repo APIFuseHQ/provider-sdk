@@ -361,7 +361,7 @@ describe("resolver server wiring", () => {
 				id: "resolver-required-proxy-policy",
 				version: "1.0.0",
 				runtime: "standard",
-				stealth: { profile: "chrome-desktop", platform: "macos" },
+				stealth: { browser: "chrome", os: "macos" },
 				proxy: { mode: "required", providers: ["nodemaven"] },
 				secrets: [
 					{ name: NODEMAVEN_USERNAME_ENV, required: true },
@@ -405,7 +405,7 @@ describe("resolver server wiring", () => {
 			expect(identities).toEqual([
 				{
 					proxyUrl: expect.stringMatching(/^http:\/\/resolver-server-account-/),
-					userAgent: getStealthProfile("chrome-desktop").userAgent,
+					userAgent: getStealthProfile({ browser: "chrome", os: "macos" }).userAgent,
 				},
 			]);
 		} finally {
@@ -443,7 +443,7 @@ describe("resolver server wiring", () => {
 				id: "resolver-required-proxy-auth-flow",
 				version: "1.0.0",
 				runtime: "standard",
-				stealth: { profile: "chrome-desktop", platform: "macos" },
+				stealth: { browser: "chrome", os: "macos" },
 				proxy: { mode: "required", providers: ["nodemaven"] },
 				secrets: [
 					{ name: NODEMAVEN_USERNAME_ENV, required: true },
@@ -511,7 +511,7 @@ describe("resolver server wiring", () => {
 			expect(identities).toEqual([
 				{
 					proxyUrl: expect.stringMatching(/^http:\/\/resolver-server-account-/),
-					userAgent: getStealthProfile("chrome-desktop").userAgent,
+					userAgent: getStealthProfile({ browser: "chrome", os: "macos" }).userAgent,
 				},
 			]);
 		} finally {

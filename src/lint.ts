@@ -1024,11 +1024,11 @@ function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLit
 function browserVersionLiteralMessage(finding: BrowserVersionLiteralFinding): string {
 	switch (finding.kind) {
 		case "profile":
-			return `Hardcoded stealth profile "${finding.literal}" pins a browser version and will rot. Use the matching intent alias instead: "chrome-desktop", "firefox-desktop", "safari-desktop", or "safari-mobile".`;
+			return `Hardcoded stealth profile "${finding.literal}" pins a browser version and will rot. Select the browser and OS structurally, for example stealth: { browser: "chrome", os: "macos" }.`;
 		case "user-agent":
-			return `Hardcoded User-Agent browser version "${finding.literal}" can disagree with the stealth TLS fingerprint. Remove the literal and derive it from the matching intent profile, for example getStealthProfile("chrome-desktop").userAgent.`;
+			return `Hardcoded User-Agent browser version "${finding.literal}" can disagree with the stealth TLS fingerprint. Remove the literal and derive it from the structured profile, for example getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.`;
 		case "sec-ch-ua":
-			return 'Hardcoded sec-ch-ua versions can disagree with the stealth TLS fingerprint. Remove the literal and let ctx.stealth generate client hints from an intent profile such as "chrome-desktop"; derive any explicit User-Agent with getStealthProfile("chrome-desktop").userAgent.';
+			return 'Hardcoded sec-ch-ua versions can disagree with the stealth TLS fingerprint. Remove the literal and let ctx.stealth generate client hints from stealth: { browser: "chrome", os: "macos" }; derive any explicit User-Agent with getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.';
 	}
 }
 

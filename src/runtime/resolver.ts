@@ -51,7 +51,7 @@ import {
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
 } from "./resolver-config.js";
-import { DEFAULT_PROFILE } from "./stealth.js";
+import { DEFAULT_STEALTH_PROFILE } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
 
 export {
@@ -254,7 +254,7 @@ export function swapResolverAdapterFactoryForTests(
 }
 
 let resolveDefaultResolverUserAgent: () => string | undefined = () =>
-	getStealthProfile(DEFAULT_PROFILE).userAgent;
+	getStealthProfile(DEFAULT_STEALTH_PROFILE).userAgent;
 
 /** Internal test seam; deliberately not re-exported from the package root. */
 export function swapResolverDefaultUserAgentForTests(
@@ -262,7 +262,7 @@ export function swapResolverDefaultUserAgentForTests(
 ): () => void {
 	const original = resolveDefaultResolverUserAgent;
 	resolveDefaultResolverUserAgent =
-		resolver ?? (() => getStealthProfile(DEFAULT_PROFILE).userAgent);
+		resolver ?? (() => getStealthProfile(DEFAULT_STEALTH_PROFILE).userAgent);
 	let restored = false;
 	return () => {
 		if (restored) return;

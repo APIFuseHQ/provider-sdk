@@ -12,7 +12,6 @@ import type {
 	ProviderDefinition,
 	ProviderMeta,
 	StealthFetchOptions,
-	StealthPlatform,
 	StealthProfile,
 	StealthResponse,
 } from "../types.js";
@@ -416,8 +415,8 @@ describe("ProviderDefinition types", () => {
 			version: "1.0.0",
 			runtime: "standard" as const,
 			stealth: {
-				profile: "chrome-146",
-				platform: "macos" as StealthPlatform,
+				browser: "chrome" as const,
+				os: "macos" as const,
 			},
 			proxy: true,
 			browser: {
@@ -480,14 +479,14 @@ describe("ProviderDefinition types", () => {
 
 	it("should type stealth profiles", () => {
 		const stealthProfile = {
-			name: "chrome-146-macos",
-			platform: "macos",
+			browser: "chrome",
+			os: "macos",
 			version: "146",
 			userAgent: "Mozilla/5.0",
 			headerOrder: ["Host", "User-Agent"],
 		} satisfies StealthProfile;
 
-		expect(stealthProfile.platform).toBe("macos");
+		expect(stealthProfile.os).toBe("macos");
 	});
 
 	it("should type stealth fetch options and response extensions", async () => {
@@ -501,7 +500,8 @@ describe("ProviderDefinition types", () => {
 			method: "GET",
 			maxBodyBytes: 1_000_000,
 			stealth: {
-				profile: "chrome-linux",
+				browser: "chrome",
+				os: "linux",
 				insecureSkipVerify: true,
 			},
 		} satisfies StealthFetchOptions;
