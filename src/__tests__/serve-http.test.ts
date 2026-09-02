@@ -24,7 +24,7 @@ import {
 	type ProviderServerLogEvent,
 	resolveAuthFlowProxyAffinityKey,
 	resolveProviderProxyAffinityKey,
-} from "../server/serve.js";
+} from "./helpers/server.js";
 import { event } from "../stream.js";
 import type {
 	OperationErrorCode,
@@ -1850,13 +1850,13 @@ describe("provider HTTP server", () => {
 					output: z.object({ ok: z.boolean() }),
 					descriptionKey: "order",
 					errorCodes: [
-							{
-								code: "SOLD_OUT",
-								status: 422 as const,
-								description: "Item is sold out",
-								retryable: false,
-							},
-						],
+						{
+							code: "SOLD_OUT",
+							status: 422 as const,
+							description: "Item is sold out",
+							retryable: false,
+						},
+					],
 					handler: async () => {
 						throw new ProviderError("Item is sold out.", { code: "SOLD_OUT" });
 					},
@@ -3554,13 +3554,13 @@ describe("operation-declared error resolution", () => {
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					errorCodes: [
-							{
-								code: "STRUCTURAL_INVALID_STATUS",
-								// @ts-expect-error test-invalid: structural validation must reject non-emittable status
-								status: 600,
-								description: "Invalid structural status",
-							},
-						],
+						{
+							code: "STRUCTURAL_INVALID_STATUS",
+							// @ts-expect-error test-invalid: structural validation must reject non-emittable status
+							status: 600,
+							description: "Invalid structural status",
+						},
+					],
 					handler: async () => {
 						throw new ProviderError("Structural failure", {
 							code: "STRUCTURAL_INVALID_STATUS",
@@ -3623,13 +3623,13 @@ describe("provider HTTP server cross-module error identity", () => {
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					errorCodes: [
-							{
-								code: "DUPLICATE_DECLARED_ERROR",
-								status: 502,
-								description: "Duplicate-module declared failure",
-								retryable: true,
-							},
-						],
+						{
+							code: "DUPLICATE_DECLARED_ERROR",
+							status: 502,
+							description: "Duplicate-module declared failure",
+							retryable: true,
+						},
+					],
 					handler: async () => {
 						throw new Dup.ProviderError("Duplicate declared failure", {
 							code: "DUPLICATE_DECLARED_ERROR",
@@ -3809,7 +3809,14 @@ describe("SDK-owned secret enforcement over HTTP", () => {
 		const base = createTestProvider();
 		return {
 			...base,
-			secrets: [{ name: API_KEY_ENV, required: true, description: "Test upstream key" }],
+			secrets: [
+				{
+					name: API_KEY_ENV,
+					issuer: "contributor",
+					required: true,
+					description: "Test upstream key",
+				},
+			],
 		};
 	}
 

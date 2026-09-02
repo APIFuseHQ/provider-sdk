@@ -22,7 +22,7 @@ import {
 	APIFUSE__TRACE__EXPORTER,
 	resolveTraceConfigFromEnv,
 } from "../runtime/trace-config.js";
-import { createServerApp } from "../server/serve.js";
+import { createServerApp } from "./helpers/server.js";
 import { resolveServerTraceContextOptions } from "../server/trace-output.js";
 import type { TraceConfig } from "../types.js";
 import { createProviderDefinitionDouble } from "./test-utils.js";

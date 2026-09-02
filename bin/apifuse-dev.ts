@@ -6,21 +6,24 @@ import {
 	createCredentialContext,
 	createEnvContext,
 	createHttpClient,
-	createInProcessProviderEngine,
 	createOcrClientFromEnv,
 	createProviderCache,
 	createProviderChoiceContext,
 	createProviderEnvironment,
-	createUnsupportedResolverClient,
+	createRemoteProviderEngineFromEnv,
 	createSttClientFromEnv,
+	createUnsupportedResolverClient,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
 	readEngineProxyCredentials,
 	type ProviderDefinition,
+	type ProviderEngine,
 	type ProviderEngineBindingCandidates,
 	ProviderError,
 	type ProviderProxyPolicy,
+	workspaceApiKeyFromEnv,
 } from "../src/index.js";
 import { createBrowserClient } from "../src/runtime/browser.js";
+import { isRemoteProviderEngine } from "../src/engine-private.js";
 import { createResolverClientFromEnv } from "../src/runtime/resolver.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import { createStealthClient } from "../src/runtime/stealth.js";
@@ -39,6 +42,7 @@ export async function main() {
 		console.log(HELP_TEXT);
 		return;
 	}
+	workspaceApiKeyFromEnv();
 
 	const providerPath = resolveProviderPath(args[0] ?? ".");
 	const providerModule = await import(resolve(providerPath, "index.ts"));
@@ -47,7 +51,7 @@ export async function main() {
 	const { startDevServer } = await import("../src/dev.js");
 	const port = Number(process.env.APIFUSE__RUNTIME__PORT) || 3900;
 
-	startDevServer(provider, { port });
+	await startDevServer(provider, { port });
 
 	console.log("\nEndpoints:");
 	console.log(`  GET  http://localhost:${port}/health`);
@@ -80,64 +84,69 @@ export async function main() {
 	console.log(`  ${renderHotReloadCommand(providerPath, port)}`);
 }
 
-export function createProviderContext(provider: ProviderDefinition): {
+export function createProviderContext(
+	provider: ProviderDefinition,
+	engine: ProviderEngine = createRemoteProviderEngineFromEnv(provider),
+): {
 	ctx: ProviderContext;
 } {
-	const providerEnvironment = createProviderEnvironment(
-		process.env,
-		provider.secrets?.map((secret) => secret.name) ?? [],
-	);
+	const providerEnvironment = createProviderEnvironment(process.env, provider.secrets ?? []);
 	const providerEnv = { get: (key: string) => providerEnvironment[key] };
-	const engineEnv = createEnvContext([PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV]);
-	const engineCredentials = readEngineProxyCredentials();
-	const credential = createCredentialContext();
-	const state = createMemoryProviderRuntimeState();
-	const cache = createProviderCache({ providerId: provider.id });
-	const proxyPolicy = resolveNativeProxyPolicy(provider);
-	const stealthProfile = provider.stealth ? getStealthProfile(provider.stealth) : undefined;
 	const candidates: ProviderEngineBindingCandidates = {
 		env: providerEnv,
-		credential,
+		credential: createCredentialContext(),
 		auth: createUnsupportedAuthStub(),
-		browser:
-			provider.runtime === "browser"
-				? createBrowserClient({
-						allowedHosts: provider.allowedHosts,
-						engine: provider.browser?.engine ?? "playwright-stealth",
-					})
-				: createUnsupportedBrowserStub(),
-		http: createHttpClient(),
-		cache,
-		state,
 		trace: createTraceContext(),
-		stealth: createStealthClient("http://localhost", {
-			...(provider.stealth ? { stealth: provider.stealth } : {}),
-		}),
-		ocr: createOcrClientFromEnv(provider.ocr),
-		stt: createSttClientFromEnv(provider.stt),
-		resolver: provider.resolver
-			? createResolverClientFromEnv(provider.resolver, engineCredentials, {
-					allowedHosts: provider.allowedHosts,
-					cache,
-					...(proxyPolicy
-						? {
-								proxyIntent: {
-									mode: proxyPolicy.mode,
-									upstream: { proxy: provider.proxy },
-									...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
-								},
-							}
-						: {}),
-				})
-			: createUnsupportedResolverClient("Provider does not declare resolver capability"),
-		choice: createProviderChoiceContext({
-			providerId: provider.id,
-			env: engineEnv,
-			credential,
-			state,
-		}),
 	};
-	const ctx = createInProcessProviderEngine().attach({
+	if (!isRemoteProviderEngine(engine)) {
+		const engineEnv = createEnvContext([PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV]);
+		const engineCredentials = readEngineProxyCredentials();
+		const credential = createCredentialContext();
+		const state = createMemoryProviderRuntimeState();
+		const cache = createProviderCache({ providerId: provider.id });
+		const proxyPolicy = resolveNativeProxyPolicy(provider);
+		const stealthProfile = provider.stealth ? getStealthProfile(provider.stealth) : undefined;
+		Object.assign(candidates, {
+			credential,
+			browser:
+				provider.runtime === "browser"
+					? createBrowserClient({
+							allowedHosts: provider.allowedHosts,
+							engine: provider.browser?.engine ?? "playwright-stealth",
+						})
+					: createUnsupportedBrowserStub(),
+			http: createHttpClient(),
+			cache,
+			state,
+			stealth: createStealthClient("http://localhost", {
+				...(provider.stealth ? { stealth: provider.stealth } : {}),
+			}),
+			ocr: createOcrClientFromEnv(provider.ocr),
+			stt: createSttClientFromEnv(provider.stt),
+			resolver: provider.resolver
+				? createResolverClientFromEnv(provider.resolver, engineCredentials, {
+						allowedHosts: provider.allowedHosts,
+						cache,
+						...(proxyPolicy
+							? {
+									proxyIntent: {
+										mode: proxyPolicy.mode,
+										upstream: { proxy: provider.proxy },
+										...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+									},
+								}
+							: {}),
+					})
+				: createUnsupportedResolverClient("Provider does not declare resolver capability"),
+			choice: createProviderChoiceContext({
+				providerId: provider.id,
+				env: engineEnv,
+				credential,
+				state,
+			}),
+		});
+	}
+	const ctx = engine.attach({
 		provider,
 		bindings: candidates,
 	}) as ProviderContext;
@@ -200,33 +209,18 @@ function shellSingleQuote(value: string): string {
 }
 
 function createUnsupportedBrowserStub(): BrowserClient {
+	const unavailable = async () => {
+		throw new ProviderError("Browser runtime is not enabled for this provider", {
+			code: "BROWSER_RUNTIME_UNSUPPORTED",
+		});
+	};
 	return {
 		engine: "playwright-stealth",
 		async close() {},
-		async newPage() {
-			throw new ProviderError("Browser runtime is not enabled for this provider", {
-				code: "BROWSER_RUNTIME_UNSUPPORTED",
-				fix: 'Set provider runtime to "browser" to use ctx.browser',
-			});
-		},
-		async rawPage() {
-			throw new ProviderError("Browser runtime is not enabled for this provider", {
-				code: "BROWSER_RUNTIME_UNSUPPORTED",
-				fix: 'Set provider runtime to "browser" and APIFUSE__CDP_POOL__URL to use ctx.browser.rawPage',
-			});
-		},
-		async withIsolatedContext() {
-			throw new ProviderError("Browser runtime is not enabled for this provider", {
-				code: "BROWSER_RUNTIME_UNSUPPORTED",
-				fix: 'Set provider runtime to "browser" to use ctx.browser.withIsolatedContext',
-			});
-		},
-		async solveChallenge() {
-			throw new ProviderError("Browser runtime is not enabled for this provider", {
-				code: "BROWSER_RUNTIME_UNSUPPORTED",
-				fix: 'Set provider runtime to "browser" to use ctx.browser.solveChallenge',
-			});
-		},
+		newPage: unavailable,
+		rawPage: unavailable,
+		withIsolatedContext: unavailable,
+		solveChallenge: unavailable,
 	};
 }
 

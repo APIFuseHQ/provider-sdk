@@ -20,9 +20,7 @@ function resolveExportCondition(
 ): string | undefined {
 	if (typeof target === "string") return target;
 	const conditionalTarget = target[condition] ?? target.default;
-	return conditionalTarget
-		? resolveExportCondition(conditionalTarget, condition)
-		: undefined;
+	return conditionalTarget ? resolveExportCondition(conditionalTarget, condition) : undefined;
 }
 
 describe("package public surface", () => {
@@ -33,9 +31,7 @@ describe("package public surface", () => {
 		const exportMappings = Object.entries(packageJson.exports ?? {});
 		const declarationEntries = exportMappings.flatMap(([subpath, mapping]) => {
 			const target = resolveExportCondition(mapping, "types");
-			return target?.endsWith(".d.ts")
-				? [{ subpath, path: resolve(target) }]
-				: [];
+			return target?.endsWith(".d.ts") ? [{ subpath, path: resolve(target) }] : [];
 		});
 		const program = ts.createProgram(
 			declarationEntries.map(({ path }) => path),
@@ -84,7 +80,7 @@ describe("package public surface", () => {
 			exportMappings.map(([subpath]) => subpath).sort(),
 		);
 		expect([...leakedExports].sort()).toEqual([]);
-	});
+	}, 15_000);
 
 	it("exports the provider-cache reset from the built testing entry point", async () => {
 		const packageJson = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as {

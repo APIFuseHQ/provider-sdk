@@ -11,12 +11,7 @@ import {
 	every,
 	extractProviderContract,
 } from "../index.js";
-import type {
-	AuthTurn,
-	FlowContext,
-	ProviderContext,
-	ProviderDefinition,
-} from "../types.js";
+import type { AuthTurn, FlowContext, ProviderContext, ProviderDefinition } from "../types.js";
 
 const InputSchema = z.object({ query: z.string() });
 const OutputSchema = z.object({ name: z.string(), score: z.number() });
@@ -43,7 +38,7 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 			},
 		},
 		access: { visibility: "early_access" },
-		secrets: [{ name: "EXAMPLE_API_KEY", required: true }],
+		secrets: [{ name: "EXAMPLE_API_KEY", issuer: "contributor", required: true }],
 		credential: {
 			keys: ["accessToken"],
 			storesReusableSecret: true,
@@ -82,7 +77,8 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 				run: async () => ({ status: "ok" }),
 			}),
 		],
-	})({ operations: Object.fromEntries(
+	})({
+		operations: Object.fromEntries(
 			operationIds.map((operationId) => [
 				operationId,
 				{
@@ -152,7 +148,8 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 					},
 				},
 			]),
-		) });
+		),
+	});
 }
 
 function buildHostileContractProvider(): ProviderDefinition {

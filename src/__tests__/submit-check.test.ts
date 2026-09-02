@@ -326,7 +326,7 @@ afterEach(() => {
 });
 
 describe("apifuse submit-check", () => {
-	it("scores a review-ready provider and renders markdown", async () => {
+	it("fails measured smoke closed without a workspace API key", async () => {
 		const dir = makeProviderDir("submit-ready-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir, {
@@ -334,9 +334,11 @@ describe("apifuse submit-check", () => {
 			smoke: true,
 			smokeNote: "GET /health and POST /v1/lookup passed locally.",
 		});
-		expect(report.score.verdict).toBe("ready");
-		expect(report.summary.blockers).toBe(0);
-		expect(report.score.total).toBeGreaterThanOrEqual(90);
+		expect(report.score.verdict).toBe("blocked");
+		expect(report.summary.blockers).toBeGreaterThan(0);
+		expect(
+			report.checks.find((check) => check.id === "local-smoke")?.evidence?.join("\n"),
+		).toContain("APIFUSE__ENGINE__API_KEY is required");
 		expect(renderMarkdown(report)).toContain("APIFuse Provider Submission Report");
 	});
 
@@ -686,9 +688,9 @@ describe("apifuse submit-check", () => {
 				writeValidLocaleCatalogs(dir);
 
 				const report = await buildSubmitCheckReport(dir);
-				expect(
-					report.checks.find((item) => item.id === "provider-load")?.evidence,
-				).toEqual(["Load error: a ab abc evidence remains intact"]);
+				expect(report.checks.find((item) => item.id === "provider-load")?.evidence).toEqual([
+					"Load error: a ab abc evidence remains intact",
+				]);
 			}
 		} finally {
 			if (previousValue === undefined) {
@@ -736,9 +738,7 @@ describe("apifuse submit-check", () => {
 		const providerLoad = report.checks.find((item) => item.id === "provider-load");
 		expect(providerLoad?.level).toBe("blocker");
 		expect(providerLoad?.status).toBe("fail");
-		expect(providerLoad?.evidence).toEqual([
-			"Load error: <thrown value could not be rendered>",
-		]);
+		expect(providerLoad?.evidence).toEqual(["Load error: <thrown value could not be rendered>"]);
 		expect(report.score.verdict).toBe("blocked");
 	});
 
@@ -755,9 +755,7 @@ describe("apifuse submit-check", () => {
 		const report = await buildSubmitCheckReport(dir);
 		const providerLoad = report.checks.find((item) => item.id === "provider-load");
 		expect(providerLoad?.status).toBe("fail");
-		expect(providerLoad?.evidence).toEqual([
-			"Load error: <thrown value could not be rendered>",
-		]);
+		expect(providerLoad?.evidence).toEqual(["Load error: <thrown value could not be rendered>"]);
 		expect(report.score.verdict).toBe("blocked");
 	});
 
@@ -1921,8 +1919,8 @@ void examples;
 		const exitCode = await proc.exited;
 
 		expect(stderr).toBe("");
-		expect(exitCode).toBe(0);
-		expect(JSON.parse(stdout).score.verdict).toBe("ready");
+		expect(exitCode).toBe(1);
+		expect(JSON.parse(stdout).score.verdict).toBe("blocked");
 		expect(existsSync(markdownPath)).toBeTrue();
 		expect(readFileSync(markdownPath, "utf8")).toContain("APIFuse Provider Submission Report");
 	}, 60_000);
@@ -1943,15 +1941,15 @@ void examples;
 		);
 	});
 
-	it("passes measured smoke for an offline scaffold-like provider", async () => {
+	it("fails measured smoke closed for an offline scaffold without a workspace key", async () => {
 		const dir = makeProviderDir("submit-smoke-pass-", validProviderSource());
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir, { smoke: true });
 		const check = report.checks.find((item) => item.id === "local-smoke");
 
-		expect(check?.status).toBe("pass");
-		expect(check?.points).toBe(10);
-		expect(check?.evidence?.join("\n")).toContain("lookup: success HTTP 200");
+		expect(check?.status).toBe("fail");
+		expect(check?.points).toBe(0);
+		expect(check?.evidence?.join("\n")).toContain("APIFUSE__ENGINE__API_KEY is required");
 	});
 
 	it("blocks measured smoke when a handler throws an unstructured error", async () => {
@@ -1968,7 +1966,7 @@ void examples;
 		expect(check?.level).toBe("blocker");
 		expect(check?.status).toBe("fail");
 		expect(check?.points).toBe(0);
-		expect(check?.evidence?.join("\n")).toContain("lookup: incoherent HTTP 500");
+		expect(check?.evidence?.join("\n")).toContain("APIFUSE__ENGINE__API_KEY is required");
 	});
 
 	it("blocks when health coverage is missing", async () => {
@@ -2708,7 +2706,10 @@ void wire.safeParseAsync({ HTTPStatus: "200" });
 				'const wire = z.object({ HTTPStatus: z.string() });\nvoid wire.parse({ HTTPStatus: "200" });\n\nconst input = describeKey(',
 			)
 			.replace("      output,", "      output: wire,")
-			.replace("handler: async () => ({ ok: true }),", 'handler: async () => ({ HTTPStatus: "200" }),')
+			.replace(
+				"handler: async () => ({ ok: true }),",
+				'handler: async () => ({ HTTPStatus: "200" }),',
+			)
 			.replace(
 				'fixtures: { request: { q: "btc" }, response: { ok: true } },',
 				'fixtures: { request: { q: "btc" }, response: { HTTPStatus: "200" } },',
@@ -2868,9 +2869,7 @@ export function parseUpstream(value: unknown) { return upstreamResponse.parse(va
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 
-		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
-			"fail",
-		);
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe("fail");
 	});
 
 	it("detects vendor keys after a quote-matching regex literal", async () => {
@@ -2893,9 +2892,7 @@ export function parseUpstream(value: unknown) { return upstreamResponse.parse(va
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 
-		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
-			"fail",
-		);
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe("fail");
 	});
 
 	it("ignores vendor-key documentation text after a quote-matching regex", async () => {
@@ -2907,14 +2904,11 @@ const example = " output: z.object({ MKioskTy: z.string() })";
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 
-		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
-			"pass",
-		);
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe("pass");
 	});
 
 	it("masks schema-looking text in a ternary consequent string", () => {
-		const source =
-			'const example = ok ? "output: z.object({ MKioskTy: z.string() })" : "";';
+		const source = 'const example = ok ? "output: z.object({ MKioskTy: z.string() })" : "";';
 		const masked = maskCommentsAndStrings(source);
 
 		expect(masked).not.toContain("MKioskTy");
@@ -2928,9 +2922,7 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		writeValidLocaleCatalogs(dir);
 		const report = await buildSubmitCheckReport(dir);
 
-		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe(
-			"pass",
-		);
+		expect(report.checks.find((item) => item.id === "vendor-key-leak")?.status).toBe("pass");
 	});
 
 	it("preserves template interpolation code while masking its literal text", () => {
@@ -2968,8 +2960,7 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 	});
 
 	it("preserves mask offsets for code following literals", () => {
-		const source =
-			'const text = "hidden"; const pattern = /["\']/; const codeIdentifier = 1;';
+		const source = 'const text = "hidden"; const pattern = /["\']/; const codeIdentifier = 1;';
 		const masked = maskCommentsAndStrings(source);
 		const identifierOffset = source.indexOf("codeIdentifier");
 
@@ -3073,9 +3064,9 @@ const outputExample = true ? "output: z.object({ MKioskTy: z.string() })" : "";
 		expect(keyPreserving).toContain('"fetch ":');
 		expect(keyBlanked).not.toContain("fetch(");
 		expect(maskCommentsAndStrings(source)).toBe(keyPreserving);
-		expect(
-			maskCommentsAndStrings(source, "provider.ts", { blankPropertyKeys: true }),
-		).toBe(keyBlanked);
+		expect(maskCommentsAndStrings(source, "provider.ts", { blankPropertyKeys: true })).toBe(
+			keyBlanked,
+		);
 		expect(keyBlanked).not.toBe(keyPreserving);
 	});
 
@@ -5918,7 +5909,7 @@ export default defineProvider({ id: "spread", version: "1.0.0", runtime: "standa
 	it("blocks a factory spread after a quoted opening-brace operation key", async () => {
 		const source = sourceWithFactorySpreadDepthNoise("").replace(
 			"operations: {\n    lookup:",
-			"operations: {\n    \"{\": undefined as never,\n    lookup:",
+			'operations: {\n    "{": undefined as never,\n    lookup:',
 		);
 		const dir = makeProviderDir("submit-factory-spread-quoted-open-key-", source);
 		writeValidLocaleCatalogs(dir);
@@ -6235,7 +6226,7 @@ describe("sdk-owned-secret-presence rule", () => {
 	function sourceWithDeclaredSecret(): string {
 		return validProviderSource().replace(
 			'auth: { mode: "none" },',
-			`auth: { mode: "none" },\n  secrets: [{ name: "${SECRET_NAME}", required: true }],`,
+			`auth: { mode: "none" },\n  secrets: [{ name: "${SECRET_NAME}", issuer: "contributor", required: true }],`,
 		);
 	}
 
@@ -6335,7 +6326,7 @@ export function requireServiceKey(ctx: { env: { get(key: string): string | undef
 			validProviderSource()
 				.replace(
 					'auth: { mode: "none" },',
-					`auth: { mode: "none" },\n  secrets: [{ name: "${SECRET_NAME}", required: false }],`,
+					`auth: { mode: "none" },\n  secrets: [{ name: "${SECRET_NAME}", issuer: "contributor", required: false }],`,
 				)
 				.replace("handler: async () => ({ ok: true }),", literalGuardHandler()),
 		);

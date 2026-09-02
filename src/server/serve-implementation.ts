@@ -9,13 +9,14 @@ import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
 import {
-	createInProcessProviderEngine,
+	createRemoteProviderEngineFromEnv,
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
 	isEngineOwnedEnvName,
 	readEngineProxyCredentials,
 	type ProviderEngine,
 	type ProviderEngineBindingCandidates,
 } from "../engine.js";
+import { isRemoteProviderEngine } from "../engine-private.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
@@ -256,9 +257,7 @@ export type ProviderServerOperationExecutorInput<
 
 export type ProviderServerOperationExecutor<
 	TContext extends Partial<ProviderContext> = ProviderContext,
-> = (
-	input: ProviderServerOperationExecutorInput<TContext>,
-) => Promise<unknown>;
+> = (input: ProviderServerOperationExecutorInput<TContext>) => Promise<unknown>;
 
 type RequestCleanup = () => void | Promise<void>;
 
@@ -658,8 +657,50 @@ function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPo
 }
 
 function providerSecretNames(provider: ProviderDefinition): string[] {
-	return (provider.secrets?.map((secret) => secret.name) ?? []).filter(
-		(name) => !isEngineOwnedEnvName(name),
+	return (provider.secrets ?? [])
+		.filter((secret) => secret.issuer === "contributor")
+		.map((secret) => secret.name)
+		.filter((name) => !isEngineOwnedEnvName(name));
+}
+
+function createRemoteProviderContext(
+	provider: ProviderDefinition,
+	request: OperationRequest,
+	operationId: string,
+	options: ProviderServerRuntimeOptions,
+): ProviderContext {
+	const requestContext = {
+		connectionId: resolveOperationConnectionId(request),
+		headers: { ...request.headers, "x-request-id": request.requestId },
+	};
+	const env = createEnvContext(providerSecretNames(provider));
+	const credential = createCredentialContext({
+		allowedKeys: provider.credential?.keys,
+		mode: request.connection?.mode,
+		scopes: request.connection?.scopes,
+		values: request.connection?.secrets,
+	});
+	const traceConfig = resolveTraceConfigFromEnv();
+	const trace = traceConfig
+		? createTraceContext(
+				resolveServerTraceContextOptions(traceConfig, {
+					request_id: request.requestId,
+					provider_id: provider.id,
+					operation_id: operationId,
+				}),
+			)
+		: createTraceContext();
+	return wrapWithInstrumentation(
+		options.engine.attach({
+			provider,
+			bindings: {
+				env,
+				credential,
+				request: requestContext,
+				trace,
+				auth: createAuthStub(),
+			},
+		}) as ProviderContext,
 	);
 }
 
@@ -672,6 +713,9 @@ function createProviderContext(
 	proxyTelemetry?: ProxyTelemetryCollector,
 	signal?: AbortSignal,
 ): ProviderContext {
+	if (isRemoteProviderEngine(options.engine)) {
+		return createRemoteProviderContext(provider, request, operationId, options);
+	}
 	const traceConfig = resolveTraceConfigFromEnv();
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
@@ -1090,7 +1134,7 @@ export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
 
 export type ProviderServerOptions<TContext extends Partial<ProviderContext> = ProviderContext> = {
 	logger?: ProviderServerLogger;
-	/** Capability attachment boundary. Defaults to the local in-process engine. */
+	/** Capability attachment boundary. Omit to attach the authenticated remote engine. */
 	engine?: ProviderEngine;
 	/** Request-file resolver supplied by the engine host when `files` is declared. */
 	files?: ProviderFilesContext;
@@ -2397,7 +2441,9 @@ function parseStatefulForwardingEnvelope(rawBody: unknown): ProviderServerStatef
  * Primary, cross-runtime app factory. Declared capability ESM is preloaded
  * asynchronously, so this path works on Bun and every supported Node release.
  */
-export async function createServerAppAsync<TContext extends Partial<ProviderContext> = ProviderContext>(
+export async function createServerAppAsync<
+	TContext extends Partial<ProviderContext> = ProviderContext,
+>(
 	provider: ProviderDefinition<TContext>,
 	options: ProviderServerOptions<TContext> = {},
 ): Promise<Hono> {
@@ -2405,10 +2451,12 @@ export async function createServerAppAsync<TContext extends Partial<ProviderCont
 	const runtimeOptions = options as unknown as ProviderServerOptions;
 	validateFailClosedDeclaration(runtimeProvider);
 	validateStatefulServerConfig(runtimeOptions);
+	const engine = runtimeOptions.engine ?? createRemoteProviderEngineFromEnv(runtimeProvider);
+	await engine.ready?.();
 	return createServerAppWithCapabilityModules(
 		runtimeProvider,
-		runtimeOptions,
-		await loadProviderCapabilityModules(runtimeProvider),
+		{ ...runtimeOptions, engine },
+		isRemoteProviderEngine(engine) ? {} : await loadProviderCapabilityModules(runtimeProvider),
 	);
 }
 
@@ -2426,10 +2474,11 @@ export function createServerApp<TContext extends Partial<ProviderContext> = Prov
 	const runtimeOptions = options as unknown as ProviderServerOptions;
 	validateFailClosedDeclaration(runtimeProvider);
 	validateStatefulServerConfig(runtimeOptions);
+	const engine = runtimeOptions.engine ?? createRemoteProviderEngineFromEnv(runtimeProvider);
 	return createServerAppWithCapabilityModules(
 		runtimeProvider,
-		runtimeOptions,
-		loadProviderCapabilityModulesSync(runtimeProvider),
+		{ ...runtimeOptions, engine },
+		isRemoteProviderEngine(engine) ? {} : loadProviderCapabilityModulesSync(runtimeProvider),
 	);
 }
 
@@ -2441,7 +2490,7 @@ function createServerAppWithCapabilityModules(
 	const options: ProviderServerRuntimeOptions = {
 		...serverOptions,
 		capabilityModules,
-		engine: serverOptions.engine ?? createInProcessProviderEngine(),
+		engine: serverOptions.engine!,
 	};
 	const app = new Hono();
 	const logger = options.logger ?? defaultProviderServerLogger;
@@ -2452,10 +2501,12 @@ function createServerAppWithCapabilityModules(
 	);
 	const state =
 		options.state ??
-		createProviderRuntimeStateFromEnv({
-			providerId: provider.id,
-			allowMemoryFallback: options.allowMemoryStateFallback === true,
-		});
+		(isRemoteProviderEngine(options.engine)
+			? createUnsupportedProviderRuntimeState()
+			: createProviderRuntimeStateFromEnv({
+					providerId: provider.id,
+					allowMemoryFallback: options.allowMemoryStateFallback === true,
+				}));
 
 	// Boot-time visibility for unprovisioned declared secrets: emit a structured
 	// warn so deploy tooling/alerting sees the gap the moment the pod boots,

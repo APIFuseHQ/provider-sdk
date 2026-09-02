@@ -6,6 +6,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
+import { startProviderEngineStub } from "../scripts/test-support/provider-engine-stub.js";
 
 const PACK_RESULT_SCHEMA = z.array(
 	z.object({
@@ -28,13 +29,21 @@ const PING_RESPONSE_SCHEMA = z.object({
 });
 
 const KEEP_TEMP = process.env.APIFUSE__PACK_SMOKE__KEEP_TEMP === "1";
+const PACK_ENGINE_API_KEY = "apifuse_pack_smoke_workspace_key";
 
 const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-smoke-"));
 const packDir = join(tempRoot, "pack");
 const consumerDir = join(tempRoot, "consumer");
 const externalWorkspaceDir = join(tempRoot, "external-workspace");
+const providerEngine = startProviderEngineStub(PACK_ENGINE_API_KEY);
+const providerEngineEnvironment = {
+	...process.env,
+	APIFUSE__ENGINE__API_KEY: PACK_ENGINE_API_KEY,
+	APIFUSE__ENGINE__URL: providerEngine.url,
+};
 
 try {
+	await assertProviderEngineStubRejectsMissingAuthentication(providerEngine.url);
 	mkdirSync(packDir, { recursive: true });
 	mkdirSync(consumerDir, { recursive: true });
 	mkdirSync(join(externalWorkspaceDir, "providers"), { recursive: true });
@@ -58,8 +67,8 @@ try {
 		)}\n`,
 	);
 
-	run("bun", ["install"], consumerDir);
-	run(
+	await run("bun", ["install"], consumerDir);
+	await run(
 		"bun",
 		[
 			"--eval",
@@ -73,31 +82,51 @@ try {
 		],
 		consumerDir,
 	);
-	smokePackedStealthNative(consumerDir);
+	await smokePackedStealthNative(consumerDir);
 
 	const cliBin = join(consumerDir, "node_modules", ".bin", "apifuse");
 	if (!existsSync(cliBin)) {
 		throw new Error(`Expected CLI bin at ${cliBin}`);
 	}
 
-	run(
+	await run(
 		"bun",
 		[cliBin, "create", "dx-smoke", "--yes", "--json", "--sdk-specifier", tarballSpecifier],
 		consumerDir,
+		providerEngineEnvironment,
 	);
 
 	const generatedProviderDir = join(consumerDir, "dx-smoke");
-	run("bun", ["run", "check"], generatedProviderDir);
-	run("bun", ["run", "submit-check"], generatedProviderDir);
-	run("bun", ["run", "test"], generatedProviderDir);
+	await run("bun", ["run", "check"], generatedProviderDir, providerEngineEnvironment);
+	await run("bun", ["run", "submit-check"], generatedProviderDir, providerEngineEnvironment);
+	await run("bun", ["run", "test"], generatedProviderDir, providerEngineEnvironment);
 	assertGeneratedReadme(generatedProviderDir);
-	await smokeGeneratedDevServer(generatedProviderDir);
-	assertExternalWorkspaceTopology(cliBin, externalWorkspaceDir, tarballSpecifier);
+	await assertGeneratedDevRejectsWrongEngineKey(generatedProviderDir, providerEngine.url);
+	await smokeGeneratedDevServer(generatedProviderDir, providerEngine.url, PACK_ENGINE_API_KEY);
+	await assertExternalWorkspaceTopology(
+		cliBin,
+		externalWorkspaceDir,
+		tarballSpecifier,
+		providerEngineEnvironment,
+	);
+	if (
+		providerEngine.stats.acceptedHandshakes === 0 ||
+		providerEngine.stats.acceptedTraceSubscriptions === 0 ||
+		providerEngine.stats.rejectedAuthentications < 2
+	) {
+		throw new Error(
+			`Provider engine stub coverage was incomplete: ${JSON.stringify(providerEngine.stats)}`,
+		);
+	}
+	console.log(
+		`Packed remote-engine attachment passed: handshakes=${providerEngine.stats.acceptedHandshakes} traceSubscriptions=${providerEngine.stats.acceptedTraceSubscriptions} authRejections=${providerEngine.stats.rejectedAuthentications}`,
+	);
 
 	console.log(
 		`Provider SDK packed-artifact smoke passed: ${tarballPath} -> ${generatedProviderDir}`,
 	);
 } finally {
+	await providerEngine.stop();
 	if (KEEP_TEMP) {
 		console.log(`Keeping smoke temp directory: ${tempRoot}`);
 	} else {
@@ -105,11 +134,12 @@ try {
 	}
 }
 
-function assertExternalWorkspaceTopology(
+async function assertExternalWorkspaceTopology(
 	cliBin: string,
 	externalWorkspaceDir: string,
 	tarballSpecifier: string,
-): void {
+	providerEngineEnvironment: NodeJS.ProcessEnv,
+): Promise<void> {
 	writeFileSync(
 		join(externalWorkspaceDir, "package.json"),
 		`${JSON.stringify(
@@ -123,7 +153,7 @@ function assertExternalWorkspaceTopology(
 		)}\n`,
 	);
 
-	run(
+	await run(
 		"bun",
 		[
 			cliBin,
@@ -135,6 +165,7 @@ function assertExternalWorkspaceTopology(
 			tarballSpecifier,
 		],
 		externalWorkspaceDir,
+		providerEngineEnvironment,
 	);
 
 	const generatedProviderDir = join(externalWorkspaceDir, "external-workspace-smoke");
@@ -161,10 +192,10 @@ function assertExternalWorkspaceTopology(
 		throw new Error("External bounty workspace scaffold must not contain workspace: dependencies.");
 	}
 
-	run("bun", ["install"], generatedProviderDir);
-	run("bun", ["run", "check"], generatedProviderDir);
-	run("bun", ["run", "submit-check"], generatedProviderDir);
-	run("bun", ["run", "test"], generatedProviderDir);
+	await run("bun", ["install"], generatedProviderDir, providerEngineEnvironment);
+	await run("bun", ["run", "check"], generatedProviderDir, providerEngineEnvironment);
+	await run("bun", ["run", "submit-check"], generatedProviderDir, providerEngineEnvironment);
+	await run("bun", ["run", "test"], generatedProviderDir, providerEngineEnvironment);
 
 	const monorepoAttempt = spawnSync(
 		"bun",
@@ -199,26 +230,35 @@ function packSdk(destination: string): { filename: string } {
 	return first;
 }
 
-function run(command: string, args: string[], cwd: string): void {
-	const result = spawnSync(command, args, {
-		cwd,
-		env: process.env,
-		stdio: "inherit",
+async function run(
+	command: string,
+	args: string[],
+	cwd: string,
+	environment: NodeJS.ProcessEnv = process.env,
+): Promise<void> {
+	await new Promise<void>((resolvePromise, rejectPromise) => {
+		const child = spawn(command, args, {
+			cwd,
+			env: environment,
+			stdio: "inherit",
+		});
+		child.once("error", rejectPromise);
+		child.once("close", (code) => {
+			if (code === 0) {
+				resolvePromise();
+				return;
+			}
+			rejectPromise(
+				new Error(
+					`Command failed (${[command, ...args].join(" ")}) in ${cwd} with exit code ${code}`,
+				),
+			);
+		});
 	});
-
-	if (result.error) {
-		throw result.error;
-	}
-
-	if (result.status !== 0) {
-		throw new Error(
-			`Command failed (${[command, ...args].join(" ")}) in ${cwd} with exit code ${result.status}`,
-		);
-	}
 }
 
-function smokePackedStealthNative(consumerDir: string): void {
-	run(
+async function smokePackedStealthNative(consumerDir: string): Promise<void> {
+	await run(
 		"bun",
 		[
 			"--eval",
@@ -281,11 +321,90 @@ function assertGeneratedReadme(providerDir: string): void {
 	}
 }
 
-async function smokeGeneratedDevServer(providerDir: string): Promise<void> {
+async function assertProviderEngineStubRejectsMissingAuthentication(
+	providerEngineUrl: string,
+): Promise<void> {
+	const response = await fetch(`${providerEngineUrl}/v1/provider-engine/request`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({
+			version: "provider-engine.v1",
+			lane: "request",
+			providerId: "dx-smoke",
+			requestId: "req_pack_smoke_missing_key",
+			capability: "attachment",
+			method: "attach",
+			payload: {},
+		}),
+	});
+	const payload = (await response.json()) as {
+		readonly error?: { readonly code?: string };
+	};
+	if (response.status !== 401 || payload.error?.code !== "PROVIDER_ENGINE_AUTHENTICATION_FAILED") {
+		throw new Error(
+			`Provider engine stub accepted missing authentication: ${response.status} ${JSON.stringify(payload)}`,
+		);
+	}
+}
+
+async function assertGeneratedDevRejectsWrongEngineKey(
+	providerDir: string,
+	providerEngineUrl: string,
+): Promise<void> {
+	const port = await getAvailablePort();
+	const wrongKey = `${PACK_ENGINE_API_KEY}_wrong`;
+	const server = spawn("bun", ["run", "dev"], {
+		cwd: providerDir,
+		env: {
+			...process.env,
+			APIFUSE__ENGINE__API_KEY: wrongKey,
+			APIFUSE__ENGINE__URL: providerEngineUrl,
+			APIFUSE__RUNTIME__PORT: String(port),
+		},
+		detached: process.platform !== "win32",
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let output = "";
+	server.stdout?.on("data", (chunk) => {
+		output += chunk.toString();
+	});
+	server.stderr?.on("data", (chunk) => {
+		output += chunk.toString();
+	});
+
+	try {
+		const exitCode = await waitForExit(server, 10_000);
+		if (exitCode === 0) {
+			throw new Error("Packed consumer dev server accepted the wrong workspace API key.");
+		}
+		if (
+			!output.includes("ProviderEngineAuthenticationError") ||
+			!output.includes("rejected the workspace API key")
+		) {
+			throw new Error(`Unexpected wrong-key dev failure (exit ${exitCode}):\n${output}`);
+		}
+		if (output.includes(wrongKey)) {
+			throw new Error("Wrong workspace API key leaked into packed consumer dev output.");
+		}
+	} finally {
+		await stopServer(server);
+	}
+}
+
+async function smokeGeneratedDevServer(
+	providerDir: string,
+	providerEngineUrl: string,
+	providerEngineApiKey: string,
+): Promise<void> {
 	const port = await getAvailablePort();
 	const server = spawn("bun", ["run", "dev"], {
 		cwd: providerDir,
-		env: { ...process.env, APIFUSE__RUNTIME__PORT: String(port) },
+		env: {
+			...process.env,
+			APIFUSE__ENGINE__API_KEY: providerEngineApiKey,
+			APIFUSE__ENGINE__URL: providerEngineUrl,
+			APIFUSE__RUNTIME__PORT: String(port),
+		},
 		detached: process.platform !== "win32",
 		stdio: ["ignore", "pipe", "pipe"],
 	});
@@ -325,6 +444,23 @@ async function smokeGeneratedDevServer(providerDir: string): Promise<void> {
 	} finally {
 		await stopServer(server);
 	}
+}
+
+async function waitForExit(server: ChildProcess, timeoutMs: number): Promise<number | null> {
+	if (server.exitCode !== null) return server.exitCode;
+	return await new Promise((resolvePromise, rejectPromise) => {
+		const timeout = setTimeout(() => {
+			rejectPromise(new Error(`Timed out waiting ${timeoutMs}ms for child process to exit.`));
+		}, timeoutMs);
+		server.once("error", (error) => {
+			clearTimeout(timeout);
+			rejectPromise(error);
+		});
+		server.once("exit", (code) => {
+			clearTimeout(timeout);
+			resolvePromise(code);
+		});
+	});
 }
 
 async function getAvailablePort(): Promise<number> {

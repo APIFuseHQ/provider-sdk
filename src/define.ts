@@ -6,7 +6,11 @@ import {
 } from "./declaration-validation.js";
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
-import { isEngineOwnedProxyCredentialName, isEngineOwnedTelemetryEnvName } from "./engine.js";
+import {
+	isEngineOwnedEnvName,
+	isEngineOwnedProxyCredentialName,
+	isEngineOwnedTelemetryEnvName,
+} from "./engine.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
 import {
 	NativeEgressPolicyValidationError,
@@ -938,19 +942,24 @@ function validateProviderProxy(config: {
 	secrets?: ProviderSecretDeclaration[];
 }): void {
 	for (const secret of config.secrets ?? []) {
-		if (isEngineOwnedTelemetryEnvName(secret.name)) {
+		if (secret.issuer !== "apifuse" && secret.issuer !== "contributor") {
 			throw new ValidationError(
-				`Provider "${config.id}" cannot declare engine-owned telemetry variable "${secret.name}"`,
+				`Provider "${config.id}" secret "${secret.name}" must declare issuer "apifuse" or "contributor"`,
 				{
-					fix: `Remove "${secret.name}" from provider secrets; trace export is configured only on the provider engine.`,
+					fix: `Set issuer: "contributor" or issuer: "apifuse" on the "${secret.name}" declaration; the SDK does not default secret ownership.`,
 				},
 			);
 		}
-		if (!isEngineOwnedProxyCredentialName(secret.name)) continue;
+		if (!isEngineOwnedEnvName(secret.name)) continue;
+		const ownedClass = isEngineOwnedTelemetryEnvName(secret.name)
+			? "telemetry variable"
+			: isEngineOwnedProxyCredentialName(secret.name)
+				? "proxy credential"
+				: "environment variable";
 		throw new ValidationError(
-			`Provider "${config.id}" cannot declare engine-owned proxy credential "${secret.name}"`,
+			`Provider "${config.id}" cannot declare engine-owned ${ownedClass} "${secret.name}"`,
 			{
-				fix: `Remove "${secret.name}" from provider secrets; configure it only on the provider engine.`,
+				fix: `Remove "${secret.name}" from provider secrets; it is provisioned only on the provider engine.`,
 			},
 		);
 	}
@@ -1434,10 +1443,7 @@ function validateOperationErrorCodes(
 					},
 				);
 			}
-			if (
-				errorCode.status !== undefined &&
-				SDK_RUNTIME_OWNED_ERROR_CODES.has(errorCode.code)
-			) {
+			if (errorCode.status !== undefined && SDK_RUNTIME_OWNED_ERROR_CODES.has(errorCode.code)) {
 				console.warn(
 					`[provider-sdk] Provider "${providerId}" operation "${operationName}" declares status ${errorCode.status} for SDK-owned error code "${errorCode.code}"; the declared status is documentation-only and will be ignored at runtime.`,
 				);
@@ -2864,18 +2870,15 @@ function validateProviderDeployment(providerId: string, deployment: unknown): vo
 /** The second authoring phase for a declaration established by defineProvider. */
 export type ProviderBuilder<TConfig extends ProviderDeclaration> = <
 	TOperations extends Record<string, ProviderOperation>,
->(
-	implementation: {
-		operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
-	},
-) => Omit<ProviderDefinition, "operations"> & {
+>(implementation: {
+	operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
+}) => Omit<ProviderDefinition, "operations"> & {
 	operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 };
 
 /** Extract the declaration-derived operation context from a provider builder. */
-export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TConfig>
-	? ProviderContext<TConfig>
-	: never;
+export type ProviderContextOf<TBuilder> =
+	TBuilder extends ProviderBuilder<infer TConfig> ? ProviderContext<TConfig> : never;
 
 /** Annotate an operation while preserving the declaration-derived context. */
 export type OperationDefinitionFor<
@@ -2894,11 +2897,9 @@ export function defineProvider<const TConfig extends ProviderDeclaration>(
 		AuthStartNoInputGuard<TConfig>,
 ): ProviderBuilder<TConfig> {
 	validateProviderDeclaration(declaration);
-	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(
-		implementation: {
-			operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
-		},
-	) =>
+	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(implementation: {
+		operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
+	}) =>
 		finalizeProvider({
 			...declaration,
 			...implementation,
@@ -2951,10 +2952,7 @@ function validateProviderDeclaration(config: ProviderDeclaration): void {
 	validateFailClosedProviderDeclaration(config);
 }
 
-function finalizeProvider<
-	TOperations extends Record<string, ProviderOperation>,
-	TContext,
->(
+function finalizeProvider<TOperations extends Record<string, ProviderOperation>, TContext>(
 	config: ProviderConfig<TOperations, TContext>,
 ): Omit<ProviderDefinition, "operations"> & {
 	operations: OperationMapConfig<TOperations, TContext>;

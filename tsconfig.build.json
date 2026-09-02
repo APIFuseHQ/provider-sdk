@@ -17,6 +17,7 @@
 	"exclude": [
 		"node_modules",
 		"src/__tests__",
+		"src/internal",
 		"**/*.test.ts",
 		"**/*.spec.ts"
 	]

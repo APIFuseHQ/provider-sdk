@@ -425,9 +425,7 @@ export async function buildProviderCreatePlan(
 	// gate. `sync-assets` after an explicit SDK upgrade re-records the version.
 	const sdkSpecifier =
 		options.sdkSpecifier ??
-		(options.preset === "monorepo" && resolvedWorkspaceRoot
-			? "workspace:*"
-			: packageJson.version);
+		(options.preset === "monorepo" && resolvedWorkspaceRoot ? "workspace:*" : packageJson.version);
 	const relativeProviderRoot = relative(cwd, providerRoot) || options.name;
 	const nextDevCommand = `cd ${relativeProviderRoot} && bun run dev`;
 	const packageName =
@@ -449,6 +447,10 @@ export async function buildProviderCreatePlan(
 	};
 
 	const files: ProviderPlanFile[] = [
+		{
+			path: resolve(providerRoot, ".env.example"),
+			content: await renderTemplate(".env.example.tpl", {}),
+		},
 		{
 			path: resolve(providerRoot, ".dockerignore"),
 			content: await renderTemplate(".dockerignore.tpl", {}),
@@ -788,9 +790,9 @@ function renderAuthBlock(authMode: CreateAuthMode): string {
 function renderSecretsBlock(authMode: CreateAuthMode): string {
 	switch (authMode) {
 		case "platform-managed":
-			return 'secrets: [{ name: "EXAMPLE_API_KEY", required: true }],\n  ';
+			return 'secrets: [{ name: "EXAMPLE_API_KEY", issuer: "contributor", required: true }],\n  ';
 		case "oauth2":
-			return 'secrets: [{ name: "EXAMPLE_OAUTH_CLIENT_ID", required: true }, { name: "EXAMPLE_OAUTH_CLIENT_SECRET", required: true }],\n  ';
+			return 'secrets: [{ name: "EXAMPLE_OAUTH_CLIENT_ID", issuer: "contributor", required: true }, { name: "EXAMPLE_OAUTH_CLIENT_SECRET", issuer: "contributor", required: true }],\n  ';
 		default:
 			return "";
 	}
@@ -952,7 +954,9 @@ function printResult(plan: ProviderCreatePlan, jsonMode: boolean, dryRun: boolea
 		nextDevCommand: plan.nextDevCommand,
 		files: plan.files.map((file) => {
 			const relativePath = relative(plan.providerRoot, file.path) || file.path;
-			return file.kind === "symlink" ? `${relativePath} -> ${file.content} (symlink)` : relativePath;
+			return file.kind === "symlink"
+				? `${relativePath} -> ${file.content} (symlink)`
+				: relativePath;
 		}),
 	};
 
