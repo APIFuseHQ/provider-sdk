@@ -1,3 +1,165 @@
+# ADR-0008 v1.1 amendment: SBSD and safe challenge refetch
+
+- Status: **Accepted (v1.1 amendment)** — ratified by owner (Taehoon) 2026-09-02 on PR #249 ("249 이거 진행 ㄱㄱ")
+- Amendment date: 2026-09-02
+- Amends: ADR-0008 without superseding its SDK-owned Akamai loop or transport-seam decision
+- Implementation status: deferred; this amendment is paper-only
+- Evidence snapshots: provider SDK `origin/main` at `55540d7a762fbc9f382d4da1d61ddd4fd94ecce8` and ZOZOTOWN `main` at `85fbd652e579eb6e51c5f990e8654b1993609376`
+
+The owner asked, verbatim:
+
+> 이거 왜 provider가 프록시를 소유해야하는걸까?
+
+and:
+
+> 그리고 Akamai/SBSD가 챌린지도 sdk가 가지고 있어야할것 같네
+
+This amendment does not reverse ADR-0008. D4 already decided that the SDK owns
+the Akamai loop and its identity-bound transport. The amendment names the SBSD
+protocol the first consumer actually implemented and bounds which initiating
+requests the engine may replay after a solve.
+
+## v1.1 evidence
+
+The shipped model has `akamai_sec_cpt` and `_abck`-centred `akamai_sensor`, but
+no SBSD kind ([`src/types.ts:290-346`](../../src/types.ts#L290-L346)). The
+ZOZOTOWN default branch instead reads `sbsd_o` or `bm_so`, and its README states
+that no `_abck` loop is used
+([`upstream/sbsd.ts:615-616`](https://github.com/APIFuseHQ/apifuse-provider-zozotown/blob/85fbd652e579eb6e51c5f990e8654b1993609376/upstream/sbsd.ts#L615-L616),
+[`README.md:92-97`](https://github.com/APIFuseHQ/apifuse-provider-zozotown/blob/85fbd652e579eb6e51c5f990e8654b1993609376/README.md#L92-L97)). It fetches the
+SBSD script, sends the script and state-cookie inputs to Hyper, and posts the
+returned payload to the upstream script on the same session
+([`upstream/sbsd.ts:556-695`](https://github.com/APIFuseHQ/apifuse-provider-zozotown/blob/85fbd652e579eb6e51c5f990e8654b1993609376/upstream/sbsd.ts#L556-L695)).
+
+That provider implementation also supplies later evidence for D4's rejected
+alternative. Commit
+[`5d579528`](https://github.com/APIFuseHQ/apifuse-provider-zozotown/commit/5d5795284b91a3416c6e7e22155b94576f445dc4)
+added a provider-owned signed exact-route descriptor, validation, binding, and
+candidate acquisition on 2026-08-27
+([`upstream/sbsd.ts:189-378`](https://github.com/APIFuseHQ/apifuse-provider-zozotown/blob/85fbd652e579eb6e51c5f990e8654b1993609376/upstream/sbsd.ts#L189-L378)). This is the
+rejected provider-owned identity/loop design implemented independently, not a
+reason to move ownership out of the SDK.
+
+Finally, automatic challenge refetch is a replay operation. The existing
+stealth path defaults retries to safe methods and validates explicit unsafe
+method policies ([`src/runtime/stealth.ts:1337-1357`](../../src/runtime/stealth.ts#L1337-L1357));
+its shared retry policy names `GET`, `HEAD`, and `OPTIONS` as the default safe
+set and rejects unsafe methods unless explicitly allowed
+([`src/runtime/proxy-retry-policy.ts:29-48`](../../src/runtime/proxy-retry-policy.ts#L29-L48),
+[`src/runtime/proxy-retry-policy.ts:346-361`](../../src/runtime/proxy-retry-policy.ts#L346-L361)).
+ZOZOTOWN has both a credential-bearing login POST and BFF POSTs
+([`domain/auth.ts:712-730`](https://github.com/APIFuseHQ/apifuse-provider-zozotown/blob/85fbd652e579eb6e51c5f990e8654b1993609376/domain/auth.ts#L712-L730),
+[`upstream/zozotown.ts:568-574`](https://github.com/APIFuseHQ/apifuse-provider-zozotown/blob/85fbd652e579eb6e51c5f990e8654b1993609376/upstream/zozotown.ts#L568-L574)), so
+"retry every fetch transparently" is not a safe contract.
+
+## v1.1 decisions
+
+| # | Decision | Core |
+|---|---|---|
+| D8 | Add a distinct `akamai_sbsd` challenge kind | SBSD's `sbsd_o`/`bm_so` state and payload exchange are not the `_abck`/`bm_sz` sensor protocol |
+| D9 | Preserve D4 ownership for detection, solve, cookie mutation, and eligible refetch | The provider declares site knowledge; the SDK/engine owns solver protocol and exact transport identity |
+| D10 | Automatic challenge refetch is unconditional only for safe reads | Unsafe requests, including credential-bearing and BFF POSTs, require an explicit replay contract |
+
+### D8 — SBSD is a separate public kind
+
+`ProviderChallengeKind` is an open extension axis. It gains `akamai_sbsd`; it
+does not widen or reinterpret `akamai_sensor`. The kind models the measured
+SBSD exchange: page URL, discovered script URL and its UUID/token parameters,
+the current session's `sbsd_o` or `bm_so` state, the selected client profile,
+and the identity-bound transport needed to fetch the script and submit the
+payload. Session cookies and exact egress details remain engine state rather
+than provider-supplied values.
+
+`akamai_sbsd` is identity-scoped and not direct-cacheable. A vendor capability
+entry may be added only with a measured SBSD task/envelope; the first measured
+backend is Hyper Solutions. This closes the public-API extension axis now,
+rather than shipping an `_abck`-only abstraction when the first consumer is
+measurably SBSD.
+
+### D9 — the engine owns the whole challenge transaction
+
+The initiating stealth session detects the challenge, the resolver adapter
+performs its vendor and upstream exchanges through a transport created from
+that exact session, the engine installs resulting cookies into that session,
+and the engine performs an eligible refetch. A second independent
+`resolveProxyConfigAsync` call is not an identity-binding mechanism: current
+resolver code does exactly that ([`src/runtime/resolver.ts:824-867`](../../src/runtime/resolver.ts#L824-L867)),
+while its optional transport seam is created separately
+([`src/runtime/resolver.ts:934-950`](../../src/runtime/resolver.ts#L934-L950)).
+The operation and auth assembly paths currently pass proxy intent but no
+transport factory ([`src/server/serve-implementation.ts:786-804`](../../src/server/serve-implementation.ts#L786-L804),
+[`src/server/serve-implementation.ts:983-1001`](../../src/server/serve-implementation.ts#L983-L1001)).
+
+Providers retain only site knowledge: challenge admission fingerprints,
+allowed hosts, geo intent, page/BFF schemas, and success semantics. They declare
+`proxy: { mode: "required" }` and the necessary client profile. They do not
+receive an exact proxy endpoint, SID, pool index, solver key, or lease-binding
+API. ADR-0009 v1.1 defines the engine-owned credential and ceremony-handle
+boundary used here.
+
+### D10 — refetch is safe-read-only by default
+
+After one bounded solve, the engine may automatically refetch an initiating
+`GET` or `HEAD` using the same session, cookie jar, client profile, and ceremony
+lease. `OPTIONS` remains safe in the general retry vocabulary, but is not
+assumed to be a protected-resource read. The automatic challenge budget is one
+solve and one refetch unless a later decision supplies a narrower measured
+budget.
+
+An unsafe method is never replayed merely because challenge detection fired.
+It needs an explicit replay contract that identifies the eligible operation,
+establishes that its body can be replayed within a bound, and states how
+duplicate effects are prevented or tolerated. Without that contract, the
+engine may solve and update the session but must return the challenge/replay
+requirement instead of resubmitting the request. A credential-bearing POST is
+not made replay-safe by hiding its credentials, and a BFF POST is not made
+replay-safe by carrying an empty JSON object.
+
+## Anti-goals
+
+- Provider-owned SBSD or `_abck` loops. ADR-0008 D4 already rejected this;
+  ZOZOTOWN commit `5d579528` now demonstrates the resulting provider-owned
+  transport, signing, and lease complexity.
+- Folding SBSD into `akamai_sensor` without a new kind.
+- A provider-facing lease acquire/bind API such as
+  `ctx.proxy.lease.acquire()` or `ctx.proxy.lease.bind()`.
+- Transparent retry of unsafe methods, or a policy that retries every fetch.
+- Self-ratification: the draft was Proposed until the owner explicitly
+  approved PR #249; only that approval moved the status to Accepted.
+- Implementing the Hyper adapter, challenge detection, ceremony lease, cookie
+  installation, or refetch machinery in this PR.
+
+## Consequences
+
+- The kind table reflects the measured protocol instead of forcing unrelated
+  Akamai artifact families through one shape.
+- Providers cannot accidentally split the solver payload, upstream POST, and
+  redemption request across identities.
+- Protected safe reads can eventually recover without provider wrappers, while
+  mutations and credential submissions fail closed until replay semantics are
+  explicit.
+- The engine must retain session and ceremony state long enough to bind the
+  solve and refetch, increasing state-lifecycle and observability work.
+
+## Implementation Roadmap
+
+This ordered gap table records deferred work. It is not an implementation plan
+file and does not add decisions beyond D8-D10 and ADR-0009 v1.1.
+
+| Order | Current gap | Deferred implementation work |
+|---:|---|---|
+| 1 | The model has `_abck`-style `akamai_sensor`, but no measured SBSD kind ([`src/types.ts:330-346`](../../src/types.ts#L330-L346)). | Add `akamai_sbsd` inputs, binding metadata, capability-table drift coverage, and public type/API-report coverage. |
+| 2 | No registered adapter serves either Akamai kind; `custom` is the only declared Akamai-capable vocabulary and is unimplemented ([`src/runtime/resolver-vendors/types.ts:34-44`](../../src/runtime/resolver-vendors/types.ts#L34-L44), [`src/runtime/resolver.ts:209-238`](../../src/runtime/resolver.ts#L209-L238), [`src/runtime/resolver.ts:274-279`](../../src/runtime/resolver.ts#L274-L279)). | Add a measured `hypersolutions` SBSD adapter with bounded `/sbsd` and `/ip` response handling and exact host policy. |
+| 3 | Hyper is a provider secret in ZOZOTOWN, while SDK solver keys are runtime env inputs ([`index.ts:21-29`](https://github.com/APIFuseHQ/apifuse-provider-zozotown/blob/85fbd652e579eb6e51c5f990e8654b1993609376/index.ts#L21-L29), [`src/runtime/resolver-config.ts:1-5`](../../src/runtime/resolver-config.ts#L1-L5)). | Implement ADR-0009 v1.1's engine-owned Hyper credential and reject/filter every engine-owned solver key at the provider boundary. |
+| 4 | Stealth returns responses without challenge detection or resolver invocation ([`src/runtime/stealth.ts:1336-1470`](../../src/runtime/stealth.ts#L1336-L1470), [`src/runtime/stealth.ts:1988-2018`](../../src/runtime/stealth.ts#L1988-L2018)). | Add a bounded response-detector pipeline that classifies supported Akamai HTML/JSON and constructs `akamai_sbsd`. |
+| 5 | Resolver identity is independently resolved and server assembly supplies no session-derived transport ([`src/runtime/resolver.ts:824-867`](../../src/runtime/resolver.ts#L824-L867), [`src/server/serve-implementation.ts:786-804`](../../src/server/serve-implementation.ts#L786-L804)). | Create `ResolverVendorTransport` from the initiating stealth session so solver IP measurement, upstream exchange, cookies, UA, and egress are identical. |
+| 6 | Stable affinity exists, but Smartproxy extraction is cached for only 15 seconds and pool selection can rotate ([`src/config/loader.ts:243-248`](../../src/config/loader.ts#L243-L248), [`src/runtime/stealth.ts:1394-1460`](../../src/runtime/stealth.ts#L1394-L1460)). | Implement ADR-0009 v1.1's opaque ceremony/solve handle preserving vendor, exact endpoint or SID inputs, pool index, expiry, and affinity. |
+| 7 | Resolver returns a solution to provider code; the initiating request is not automatically retried ([`src/types.ts:350-370`](../../src/types.ts#L350-L370), [`src/runtime/resolver.ts:885-1001`](../../src/runtime/resolver.ts#L885-L1001)). | Install cookies into the initiating jar and add the D10 one-solve/one-refetch path for safe reads plus explicit replay contracts for unsafe requests. |
+| 8 | Auth request `context` and response `contextPatch` are plain records ([`src/server/types.ts:86-102`](../../src/server/types.ts#L86-L102)). | Keep ceremony/session state engine-side behind opaque handles so cross-turn callers cannot alter affinity or lease selection. |
+| 9 | Resolver spans identify vendor and kind but do not record billable units or charge outcome ([`src/runtime/resolver.ts:952-966`](../../src/runtime/resolver.ts#L952-L966)). | Emit one engine-owned usage event per paid task creation, correlated with vendor, kind, attempt, and outcome without exposing credentials. |
+
+---
+
 # ADR: Akamai Bot Manager challenge kinds and the sensor-loop transport seam
 
 - Status: proposed
@@ -149,6 +311,11 @@ first consumer needs both declared rather than one now and one later
 (`architectural-decision-records` Pitfall 13: do not ship a half-scoped axis
 when the first consumer measurably needs the whole axis).
 
+**[v1.1 amend 2026-09-02: Subsequent implementation evidence showed that the
+first consumer's solved protocol is SBSD (`sbsd_o`/`bm_so`), not the `_abck`
+sensor loop. D8 closes this Pitfall 13 scope gap by adding distinct
+`akamai_sbsd`; the original statement remains as the historical v1.0 record.]**
+
 ### D3 — capability and availability stay orthogonal
 
 ADR 0006 Rev 3 recorded three green-suite regressions from conflating "what a
@@ -167,6 +334,11 @@ identity because lease assignment is internal SDK state — and `_abck` is
 IP-bound, so a provider looping from a different egress than the payload was
 generated for produces a cookie the upstream refuses, with the resolver
 reporting success. Same failure direction ADR 0006 D3b guards against.
+
+**[v1.1 amend 2026-09-02: ZOZOTOWN commit `5d579528` independently implemented
+this rejected provider-owned direction for SBSD, including a signed exact-route
+descriptor and bind/acquire machinery. D4 remains unchanged; v1.1 records the
+implementation as evidence and assigns the deletable machinery to the engine.]**
 
 The seam is therefore SDK-owned and optional, mirroring how the `"browser"`
 adapter receives `cdpUrl`: an adapter that declares no transport need keeps
