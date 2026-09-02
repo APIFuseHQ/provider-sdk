@@ -22,12 +22,12 @@ Before deciding what stays local, the review measured what each capability actua
 
 | Capability | Measured backing | Source |
 |---|---|---|
-| `http`, `stealth`, `browser`, `native` | Egress paths that consult the provider's `proxy` policy; proxy is an axis on every transport, not a separate binding | `src/types.ts:1633` (`NativeProxyEgressInfo`), `src/runtime/http.ts:55,70` (`proxyUsed`), `proxy-retry-policy.js` |
+| `http`, `stealth`, `browser`, `native` | Egress paths that consult the provider's `proxy` policy; proxy is an axis on every transport, not a separate binding | `src/types.ts:1608` (`NativeProxyEgressInfo`), `src/runtime/http.ts:55,70` (`proxyUsed`), `proxy-retry-policy.js` |
 | `resolver`, `ocr`, `stt` | Paid vendor APIs | ADR-0006, ADR-0007, ADR-0010 v1.1 |
 | `cache`, `state` | Redis clients from `providerCacheRedisUrlFromEnv` / `providerStateRedisUrlFromEnv` | `src/runtime/cache.ts:3-18`, `src/runtime/state.ts:2-17` |
 | `choice` (`storage: "server"`) | Server-stored tokens; the only production mode for multi-step ceremonies (catchtable, tablecheck) | `src/runtime/choice.ts:63,71,115-125` |
 | `choice` (`storage: "inline"`) | Payload carried in the token, no store | `src/runtime/choice.ts:115` |
-| `files` | Resolves request-scoped `ProviderFileRef` uploads held by the gateway | `src/types.ts:1506-1509` |
+| `files` | Resolves request-scoped `ProviderFileRef` uploads held by the gateway | `src/types.ts:1478-1481` |
 | `env` | Process environment; mixes provider-owned upstream keys with platform vendor keys | `.env.example:248-258` |
 | `trace` | Ambient, local observer | ADR-0010 |
 
