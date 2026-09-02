@@ -1,0 +1,6 @@
+const reserveOperation = defineOperation<ProviderContext>()({
+	toolRouter: { riskClass: "write", approval: "always" },
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

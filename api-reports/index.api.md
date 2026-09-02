@@ -2452,17 +2452,12 @@ export interface LintDiagnostic {
 
 // @public (undocumented)
 export function lintOperation(op: {
-    description?: string;
     descriptionKey?: string;
-    whenToUse?: readonly string[];
     whenToUseKeys?: readonly string[];
-    whenNotToUse?: readonly string[];
     whenNotToUseKeys?: readonly string[];
     input: unknown;
     output: unknown;
     fixtures?: unknown;
-    inputExamples?: readonly unknown[];
-    derivations?: Record<string, string>;
 }): LintDiagnostic[];
 
 // Warning: (ae-forgotten-export) The symbol "ProviderLintOptions" needs to be exported by the entry point index.d.ts
@@ -2484,24 +2479,20 @@ export function lintProvider(provider: {
     authFlowSource?: string;
     providerSourceFiles?: Record<string, string>;
     operations?: Record<string, {
-        description?: string;
         descriptionKey?: string;
-        whenToUse?: readonly string[];
         whenToUseKeys?: readonly string[];
-        whenNotToUse?: readonly string[];
         whenNotToUseKeys?: readonly string[];
+        connectionMode?: "none" | "optional" | "required";
+        riskClass?: OperationRiskClass;
+        approval?: OperationApprovalPolicy;
         input: unknown;
         output: unknown;
         fixtures?: unknown;
-        inputExamples?: readonly unknown[];
-        derivations?: Record<string, string>;
         handler?: unknown;
         source?: string;
-        docs?: {
-            errorCodes?: ReadonlyArray<{
-                code: string;
-            }>;
-        };
+        errorCodes?: ReadonlyArray<{
+            code: string;
+        }>;
     }>;
     meta?: {
         contract?: ProviderContractMetaLike;
@@ -2979,24 +2970,6 @@ export const OperandSchema: z.ZodUnion<readonly [z.ZodType<JsonValue, unknown, z
 }, z.core.$strict>]>;
 
 // @public (undocumented)
-export interface OperationAnnotations {
-    // (undocumented)
-    destructive?: boolean;
-    // (undocumented)
-    idempotent?: boolean;
-    openWorld?: boolean;
-    // (undocumented)
-    rateLimit?: {
-        calls: number;
-        window: "minute" | "hour" | "day";
-    };
-    // (undocumented)
-    readOnly?: boolean;
-    // (undocumented)
-    timeoutMs?: number;
-}
-
-// @public (undocumented)
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
 
 // @public (undocumented)
@@ -3015,17 +2988,17 @@ export interface OperationContractMetadata {
 
 // @public (undocumented)
 export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOutput extends SchemaLike = SchemaLike, TContext = ProviderContext> {
-    // (undocumented)
-    annotations?: OperationAnnotations;
+    approval?: OperationApprovalPolicy;
+    connectionExternalRefParam?: string;
+    connectionMode?: "none" | "optional" | "required";
     // (undocumented)
     contract?: OperationContractMetadata;
     // (undocumented)
-    derivations?: Record<string, string>;
-    description?: string;
-    // (undocumented)
     descriptionKey?: ProviderLocaleKeyInput;
     // (undocumented)
-    docs?: OperationDocMeta;
+    errorCodes?: readonly OperationErrorCode[];
+    // (undocumented)
+    examples?: readonly OperationExample[];
     // (undocumented)
     fixtures?: {
         request: InferSchemaOutput<TInput>;
@@ -3043,20 +3016,24 @@ export interface OperationDefinition<TInput extends SchemaLike = SchemaLike, TOu
     // (undocumented)
     input: TInput;
     // (undocumented)
-    inputExamples?: readonly OperationInputExample[];
+    markdownKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    normalizationNotesKeys?: readonly ProviderLocaleKeyInput[];
     // (undocumented)
     observability?: OperationObservabilityConfig;
     // (undocumented)
     output: TOutput;
     // (undocumented)
     relatedOperations?: OperationRelationships;
+    riskClass: OperationRiskClass;
     // (undocumented)
-    retryOnAuthRefresh?: boolean;
+    summaryKey?: ProviderLocaleKeyInput;
     // (undocumented)
     tags?: readonly string[];
-    title?: string;
     // (undocumented)
-    toolRouter?: OperationToolRouterMetadata;
+    timeoutMs?: number;
+    // (undocumented)
+    titleKey?: ProviderLocaleKeyInput;
     // (undocumented)
     transport?: OperationTransport;
     // (undocumented)
@@ -3086,26 +3063,6 @@ export interface OperationDeprecationMetadata {
 }
 
 // @public (undocumented)
-export interface OperationDocMeta {
-    // (undocumented)
-    descriptionKey?: ProviderLocaleKeyInput;
-    // (undocumented)
-    errorCodes?: OperationErrorCode[];
-    // (undocumented)
-    markdownKey?: ProviderLocaleKeyInput;
-    // (undocumented)
-    normalizationNotesKeys?: ProviderLocaleKeyInput[];
-    // (undocumented)
-    requestExample?: Record<string, unknown>;
-    // (undocumented)
-    responseExample?: unknown;
-    // (undocumented)
-    summaryKey?: ProviderLocaleKeyInput;
-    // (undocumented)
-    titleKey?: ProviderLocaleKeyInput;
-}
-
-// @public (undocumented)
 export interface OperationErrorCode {
     // (undocumented)
     code: string;
@@ -3115,6 +3072,16 @@ export interface OperationErrorCode {
     retryable?: boolean;
     // (undocumented)
     status?: ProviderErrorStatus;
+}
+
+// @public (undocumented)
+export interface OperationExample {
+    // (undocumented)
+    input: unknown;
+    // (undocumented)
+    rationaleKey?: ProviderLocaleKeyInput;
+    // (undocumented)
+    scenarioKey: ProviderLocaleKeyInput;
 }
 
 // @public (undocumented)
@@ -3132,16 +3099,6 @@ interface OperationHttpStreamTransport {
     maxChunkBytes?: number;
     // (undocumented)
     maxDurationMs?: number;
-}
-
-// @public (undocumented)
-export interface OperationInputExample {
-    // (undocumented)
-    input: unknown;
-    // (undocumented)
-    rationale?: string;
-    // (undocumented)
-    scenario: string;
 }
 
 // @public (undocumented)
@@ -3270,16 +3227,6 @@ export const OperationStepSchema: z.ZodObject<{
     candidate: z.ZodOptional<z.ZodUnion<readonly [z.ZodType<CandidatePolicy, unknown, z.core.$ZodTypeInternals<CandidatePolicy, unknown>>, z.ZodType<CandidateBlock, unknown, z.core.$ZodTypeInternals<CandidateBlock, unknown>>]>>;
     journal: z.ZodOptional<z.ZodType<JournalPolicy, unknown, z.core.$ZodTypeInternals<JournalPolicy, unknown>>>;
 }, z.core.$strict>;
-
-// @public (undocumented)
-export interface OperationToolRouterMetadata {
-    approval?: OperationApprovalPolicy;
-    connectionExternalRefParam?: string;
-    connectionMode?: "none" | "optional" | "required";
-    name?: string;
-    requiresConnection?: boolean;
-    riskClass?: OperationRiskClass;
-}
 
 // Warning: (ae-forgotten-export) The symbol "OperationSseTransport" needs to be exported by the entry point index.d.ts
 // Warning: (ae-forgotten-export) The symbol "OperationWebSocketTransport" needs to be exported by the entry point index.d.ts
@@ -4044,15 +3991,19 @@ type ProviderContractMetaLike = {
 // @public (undocumented)
 export interface ProviderContractOperation {
     // (undocumented)
-    readonly annotations?: JsonValue;
+    readonly approval?: JsonValue;
+    // (undocumented)
+    readonly connectionExternalRefParam?: JsonValue;
+    // (undocumented)
+    readonly connectionMode?: JsonValue;
     // (undocumented)
     readonly contract?: JsonValue;
     // (undocumented)
-    readonly derivations?: JsonValue;
-    // (undocumented)
     readonly descriptionKey?: JsonValue;
     // (undocumented)
-    readonly docs?: JsonValue;
+    readonly errorCodes?: JsonValue;
+    // (undocumented)
+    readonly examples?: JsonValue;
     // (undocumented)
     readonly fixtures?: JsonValue;
     // (undocumented)
@@ -4064,9 +4015,11 @@ export interface ProviderContractOperation {
     // (undocumented)
     readonly id: string;
     // (undocumented)
-    readonly inputExamples?: JsonValue;
-    // (undocumented)
     readonly inputSchema: JsonValue;
+    // (undocumented)
+    readonly markdownKey?: JsonValue;
+    // (undocumented)
+    readonly normalizationNotesKeys?: JsonValue;
     // (undocumented)
     readonly observability?: JsonValue;
     // (undocumented)
@@ -4074,9 +4027,15 @@ export interface ProviderContractOperation {
     // (undocumented)
     readonly relatedOperations?: JsonValue;
     // (undocumented)
+    readonly riskClass: JsonValue;
+    // (undocumented)
+    readonly summaryKey?: JsonValue;
+    // (undocumented)
     readonly tags?: JsonValue;
     // (undocumented)
-    readonly toolRouter?: JsonValue;
+    readonly timeoutMs?: JsonValue;
+    // (undocumented)
+    readonly titleKey?: JsonValue;
     // (undocumented)
     readonly transport?: JsonValue;
     // (undocumented)
@@ -7062,10 +7021,10 @@ export { z }
 // dist/define.d.ts:26:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:109:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:137:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:3:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:28:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:56:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
-// dist/lint.d.ts:88:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:4:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:29:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:52:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
+// dist/lint.d.ts:80:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
 // dist/runtime/choice.d.ts:22:5 - (ae-forgotten-export) The symbol "ProviderChoiceTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:27:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
@@ -7076,14 +7035,14 @@ export { z }
 // dist/server/serve-implementation.d.ts:149:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:157:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:217:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:669:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1539:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1663:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1721:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1729:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1730:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1889:5 - (ae-forgotten-export) The symbol "TraceContext_2" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1909:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:624:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1483:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1607:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1665:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1673:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1674:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1833:5 - (ae-forgotten-export) The symbol "TraceContext_2" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1853:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

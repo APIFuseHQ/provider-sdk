@@ -32,6 +32,7 @@ function createTestProvider(state: { defaultExecutions: number }): ProviderDefin
 		},
 		operations: {
 			echo: {
+				riskClass: "read",
 				input: z.object({ value: z.string() }),
 				output: z.object({ source: z.string(), value: z.string() }),
 				handler: async (_ctx, input: { value: string }) => {

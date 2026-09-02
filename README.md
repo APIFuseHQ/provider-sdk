@@ -219,6 +219,7 @@ const buildProvider = defineProvider({
 export type ProviderContext = ProviderContextOf<typeof buildProvider>
 
 const search = defineOperation<ProviderContext>()({
+  riskClass: "read",
   input: z.object({ q: z.string().describe("Search query") }),
   output: z.object({ count: z.number().describe("Result count") }),
   async handler(ctx, input) {
@@ -266,17 +267,17 @@ healthCheck: {
 }
 ```
 
-### Operation annotations
+### Flat operation metadata
 
-Operations declare non-functional metadata via `annotations`:
+Operations declare access, safety, and execution metadata directly on the
+operation. `riskClass` is required and is the safety source of truth:
 
 | Field | Type | Notes |
 |---|---|---|
-| `readOnly` | `boolean` | Operation has no side effects (safe to test in production). |
-| `destructive` | `boolean` | Operation modifies/deletes state. |
-| `idempotent` | `boolean` | Safe to retry without duplicate side effects. |
-| `openWorld` | `boolean` | Callable without authentication. |
-| `rateLimit` | `{ calls, window }` | Per-operation rate hint. `window` is `"minute"\|"hour"\|"day"`. |
+| `riskClass` | `"read" \| "write" \| "destructive" \| "external-send"` | Required safety classification. |
+| `approval` | `"never" \| "risk-based" \| "always"` | Optional override; omit when it matches the risk-class default. |
+| `connectionMode` | `"none" \| "optional" \| "required"` | Access requirement. Required by lint for credential-bearing providers. |
+| `connectionExternalRefParam` | `string` | Public argument used to resolve a Connection. |
 | `timeoutMs` | `number` | Per-operation upstream timeout (1–60000 ms). Omit to inherit the gateway global default. |
 
 `defineProvider()` validates `timeoutMs` is an integer in `[1, 60000]` and throws `ValidationError` otherwise. The gateway applies the value via `context.WithTimeout` on every proxied call and clamps defensively to the same bound.

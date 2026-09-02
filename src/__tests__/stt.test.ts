@@ -328,6 +328,7 @@ describe("STT Provider SDK context integration", () => {
 			},
 		})({ operations: {
 				transcribe: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => ({ ok: true }),
@@ -391,6 +392,7 @@ describe("STT Provider SDK context integration", () => {
 			},
 		})({ operations: {
 				transcribe: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ text: z.string() }),
 					async handler(ctx) {
@@ -439,6 +441,7 @@ describe("STT Provider SDK context integration", () => {
 			},
 		})({ operations: {
 				transcribe: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler(ctx) {

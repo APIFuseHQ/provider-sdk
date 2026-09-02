@@ -8,6 +8,7 @@ async function fetchLabel(http: HttpClient): Promise<string> {
 }
 
 export const factoredOperation = defineOperation<Ctx>()({
+	riskClass: "read",
 	input: {
 		"~standard": {
 			version: 1,

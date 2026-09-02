@@ -1,0 +1,11 @@
+const getStationInfoOperation = defineOperation<ProviderContext>()({
+	toolRouter: {
+		riskClass: "read",
+		approval: "never",
+		requiresConnection: false,
+		...{ connectionMode: "none" as const },
+	},
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

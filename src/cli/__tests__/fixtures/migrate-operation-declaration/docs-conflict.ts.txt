@@ -1,0 +1,8 @@
+const searchOperation = defineOperation<ProviderContext>()({
+	riskClass: "read",
+	titleKey: "operations.search.title",
+	docs: { titleKey: "operations.search.otherTitle" },
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

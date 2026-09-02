@@ -73,32 +73,41 @@ payment state tokens in the platform monorepo.
 
 ### Description template
 
-Every operation `description` MUST be at least 150 characters and follow this structure:
+Every operation declares a `descriptionKey`. Its English locale value should
+follow this structure:
 
 ```
 <What the tool does in one sentence>. Use when <specific scenarios>. Do NOT use for <counter-scenarios; point to alternatives>. Returns <key output fields>. <Important caveats: rate limits, auth, freshness>.
 ```
 
-Example:
+Example declaration and locale entry:
 ```ts
-description:
-  "Retrieves KMA ultra-short-term weather observation for a given grid coordinate in South Korea, " +
-  "including temperature, humidity, wind speed, precipitation, and sky condition. " +
-  "Use when the user asks about current or hourly weather at a specific Korean location. " +
-  "Do NOT use for forecasts beyond 2 days — use kma_mid_forecast instead. " +
-  "Returns hourly data in KST timezone; null values indicate data unavailable. " +
-  "Rate-limited to 1000 calls/day on the free tier.",
+descriptionKey: "operations.realtimeWeather.description",
+```
+
+```json
+{
+  "operations": {
+    "realtimeWeather": {
+      "description": "Retrieves KMA ultra-short-term weather observations for a South Korean grid coordinate. Use when the user asks about current or hourly weather. Do NOT use for forecasts beyond two days; use the mid-range forecast operation instead. Returns hourly KST data; null values mean unavailable data."
+    }
+  }
+}
 ```
 
 ### Language policy
 
-- **Structural text**: English (operation `description`, Zod `.describe()`, `whenToUse`, `whenNotToUse`, `derivations`, `inputExamples.scenario/rationale`).
-- **Values only**: native language (fixtures payloads, `inputExamples[].input` values like "대방동", "KRW-BTC", entity catalog entries).
+- **Structural text**: locale keys (`descriptionKey`, the other `*Key`/`*Keys`
+  fields, schema `.describeKey()`, and `examples[].scenarioKey`/`rationaleKey`).
+- **Values only**: native language (fixtures payloads and `examples[].input`
+  values like "대방동", "KRW-BTC", entity catalog entries).
 
 ### Required per operation
 
-- `description` — 150+ chars English (error-level rule)
-- Every Zod field in input AND output has `.describe()` including nested objects + array items (error-level rule)
+- `riskClass` — authored as `read`, `write`, `destructive`, or `external-send`
+- `descriptionKey` — backed by every required provider locale catalog
+- `connectionMode` — explicit for `credentials`, `oauth2`, and `oauth2_proxied` providers
+- Every Zod field in input AND output has `.describeKey()` including nested objects + array items (error-level rule)
 - `fixtures.request` + `fixtures.response` both present (error-level rule)
 - Exactly one of `healthCheck`, `healthCheckUnsupported`, or `healthJourneys[].coversOperations` coverage per operation. Prefer `healthCheck` for safe read-only upstream probes; use `healthCheckUnsupported` only with a specific reason for destructive, paid, credential-sensitive, flaky, or otherwise unsafe probes. Use a provider-level health journey when a destructive or credential-sensitive flow can be proven safely only as a multi-step boundary test, such as stopping at a payment WebView URL.
 
@@ -272,15 +281,11 @@ healthCheck: {
 ```
 <!-- @magic-end:sample -->
 
-### Strongly recommended (warn-level rules)
-
-- `description` includes "use" AND "when" phrasing
-- `inputExamples` with 2+ scenarios for complex input (nested objects, enums, format-sensitive strings)
-- `derivations` for parameters not directly visible in the user query (e.g., `gridX` derived from geocoding)
-
 ### Optional but valuable
 
-- `annotations`: `{ readOnly, destructive, idempotent, openWorld, rateLimit }` — agentic safety signals
+- `examples`: usage examples with locale-keyed `scenarioKey`, an `input`, and optional `rationaleKey`
+- `approval`: only when it deliberately differs from the `riskClass` default (`read → never`, `write → risk-based`, otherwise `always`)
+- `titleKey`, `summaryKey`, `markdownKey`, `whenToUseKeys`, `whenNotToUseKeys`, and `normalizationNotesKeys`: locale-keyed operation prose
 - `tags`: operation-level semantic tags for retrieval (e.g., `["weather", "korea", "realtime"]`)
 - `relatedOperations`: `{ alternatives?: string[] }` — links to fallback/sibling operations
 
@@ -299,6 +304,7 @@ export default defineProvider({
 })({
   operations: {
     verifyAudioOtp: {
+      riskClass: "read",
       input: z.object({
         audioBase64: z.string().describe("Base64-encoded short OTP audio"),
         mediaType: z.string().optional().describe("Audio MIME type"),
@@ -473,7 +479,7 @@ Provider-server failures use a stable public envelope:
 `retryable` is always present on responses emitted by the current SDK. Set
 `retryable` in the `ProviderError` options when the provider knows the answer;
 an explicit `true` or `false` wins over the matching operation declaration and
-SDK derivation. When it is omitted, `operations.<id>.docs.errorCodes[].retryable`
+SDK derivation. When it is omitted, `operations.<id>.errorCodes[].retryable`
 is used for a matching provider-owned code, followed by SDK derivation (which
 defaults ordinary `ProviderError` values to `false`). During stateful rolling
 upgrades, the forwarding client also accepts an older owner response that omits
@@ -498,19 +504,17 @@ Treat this header as telemetry, not as provider-controlled public error detail.
 Its category, taxonomy version, retryability, and optional upstream status match
 the structured `provider_request_failed` log event.
 
-Declare provider-owned operation failures next to their documentation. The
+Declare provider-owned operation failures directly on the operation. The
 server builds a lookup once at startup and applies it to failures from that
 operation:
 
 ```ts
-docs: {
-  errorCodes: [{
-    code: "UPSTREAM_SCHEMA_ERROR",
-    status: 502,
-    retryable: true,
-    description: "The upstream response no longer matches its schema.",
-  }],
-},
+errorCodes: [{
+  code: "UPSTREAM_SCHEMA_ERROR",
+  status: 502,
+  retryable: true,
+  description: "The upstream response no longer matches its schema.",
+}],
 handler: async () => {
   throw new ProviderError("Upstream schema changed", {
     code: "UPSTREAM_SCHEMA_ERROR",

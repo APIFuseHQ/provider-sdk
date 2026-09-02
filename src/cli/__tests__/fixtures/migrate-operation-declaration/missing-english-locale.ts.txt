@@ -1,0 +1,7 @@
+const searchOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [{ scenario: "Search by title", input: { query: "castle" } }],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

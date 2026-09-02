@@ -13,6 +13,7 @@ const noopHandler = async () => ({});
 
 function dummyOperation() {
 	return {
+		riskClass: "read",
 		description: "Dummy operation for health journey tests.",
 		input: z.object({}),
 		output: z.object({}),

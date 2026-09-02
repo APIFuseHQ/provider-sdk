@@ -1,0 +1,10 @@
+const connectOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	toolRouter: {
+		connectionMode: "optional",
+		requiresConnection: true,
+	},
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

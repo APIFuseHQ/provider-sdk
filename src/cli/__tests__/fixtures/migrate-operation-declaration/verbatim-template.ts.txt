@@ -1,0 +1,12 @@
+const explainOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	docs: { descriptionKey: "operations.explain.description" },
+	input: InputSchema,
+	output: OutputSchema,
+	handler: async () => {
+		const message = `最初の行
+  ${value}
+	最後の行`;
+		return { message };
+	},
+});

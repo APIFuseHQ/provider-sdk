@@ -100,6 +100,7 @@ beforeEach(() => {
 const provider = createProviderDefinitionDouble({
 	operations: {
 		echo: {
+			riskClass: "read",
 			input: z.object({ value: z.string() }),
 			output: z.object({ value: z.string() }),
 			handler: async (ctx, input) => {
@@ -108,6 +109,7 @@ const provider = createProviderDefinitionDouble({
 			},
 		},
 		fail: {
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async (ctx) => {
@@ -129,6 +131,7 @@ const provider = createProviderDefinitionDouble({
 			},
 		},
 		get_flea_market_item: {
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async (ctx) => {

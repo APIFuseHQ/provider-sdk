@@ -1,0 +1,6 @@
+const searchOperation = defineOperation<ProviderContext>()({
+	toolRouter: { riskClass: "read", approval: "never" },
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

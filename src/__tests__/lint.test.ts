@@ -2,6 +2,13 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { lintOperation, lintProvider } from "../lint.js";
 import { describeKey, fields } from "../schema.js";
+import type {
+	AuthMode,
+	OperationApprovalPolicy,
+	OperationRiskClass,
+} from "../types.js";
+
+const READ_RISK_CLASS: OperationRiskClass = "read";
 
 function withDescriptionKey<TSchema extends z.ZodType>(schema: TSchema, key: string): TSchema {
 	return describeKey(schema, key);
@@ -10,19 +17,16 @@ function withDescriptionKey<TSchema extends z.ZodType>(schema: TSchema, key: str
 describe("lintOperation", () => {
 	it("reports expected diagnostics for weak operation metadata", () => {
 		const diagnostics = lintOperation({
-			description: "Short description",
 			input: z.object({
 				filters: z.object({ ids: z.array(z.string()) }),
 			}),
 			output: z.object({ result: z.string() }),
 			fixtures: { request: { filters: { ids: ["btc"] } } },
-			inputExamples: [{ scenario: "one", input: { filters: { ids: ["btc"] } } }],
 		});
 
-		expect(diagnostics.some((item) => item.rule === "description-min-length")).toBe(true);
+		expect(diagnostics.some((item) => item.rule === "description-key-required")).toBe(true);
 		expect(diagnostics.some((item) => item.rule === "schema-description-key-required")).toBe(true);
 		expect(diagnostics.some((item) => item.rule === "fixtures-both-directions")).toBe(true);
-		expect(diagnostics.some((item) => item.rule === "complex-input-has-examples")).toBe(true);
 	});
 
 	it("accepts key-only operation descriptions", () => {
@@ -46,8 +50,7 @@ describe("lintOperation", () => {
 			},
 		});
 
-		expect(diagnostics.some((item) => item.rule === "description-min-length")).toBe(false);
-		expect(diagnostics.some((item) => item.rule === "description-has-when-clause")).toBe(false);
+		expect(diagnostics.some((item) => item.rule === "description-key-required")).toBe(false);
 		expect(
 			diagnostics.some(
 				(item) =>
@@ -81,10 +84,9 @@ describe("lintOperation", () => {
 		expect(diagnostics).toEqual([]);
 	});
 
-	it("rejects raw operation descriptions", () => {
+	it("rejects raw schema descriptions", () => {
 		const diagnostics = lintOperation({
-			description:
-				"Use this operation when callers need raw prose rejected and when static operation metadata must be keyed.",
+			descriptionKey: "operations.search.description",
 			input: z.object({ query: z.string().describe("Search keyword") }).describe("Search input"),
 			output: withDescriptionKey(
 				z.object({
@@ -96,16 +98,13 @@ describe("lintOperation", () => {
 		});
 
 		expect(diagnostics).toContainEqual(
-			expect.objectContaining({ rule: "operation-description-raw-prose" }),
-		);
-		expect(diagnostics).toContainEqual(
 			expect.objectContaining({ rule: "schema-description-raw-prose" }),
 		);
 	});
 
 	it("does not require duplicate descriptions on transparent wrapper internals", () => {
 		const diagnostics = lintOperation({
-			description:
+			descriptionKey:
 				"Use this operation when a caller needs described optional, defaulted, array, and record fields and when wrapper internals should inherit the public field description instead of producing duplicate diagnostics.",
 			input: z
 				.object({
@@ -129,10 +128,6 @@ describe("lintOperation", () => {
 				request: { keyword: "cup", page: 1 },
 				response: { items: [{ id: "1", metadata: { color: "red" } }] },
 			},
-			inputExamples: [
-				{ scenario: "keyword", input: { keyword: "cup", page: 1 } },
-				{ scenario: "default keyword", input: { page: 2 } },
-			],
 		});
 
 		expect(diagnostics.filter((item) => item.rule === "all-fields-described")).toEqual([]);
@@ -147,7 +142,7 @@ describe("lintOperation", () => {
 			.describe("Normalized finite code");
 
 		const diagnostics = lintOperation({
-			description:
+			descriptionKey:
 				"Use this operation when callers may provide friendly code aliases and when the provider must normalize those aliases into a documented finite code before sending the upstream request.",
 			input: z
 				.object({
@@ -170,7 +165,7 @@ describe("lintOperation", () => {
 
 	it("still requires descriptions for indexed union branches", () => {
 		const diagnostics = lintOperation({
-			description:
+			descriptionKey:
 				"Use this operation when callers need one of several documented response envelopes and each indexed union branch must remain part of the public contract surface instead of being hidden as an internal wrapper.",
 			input: z
 				.object({
@@ -205,7 +200,7 @@ describe("lintOperation", () => {
 
 	it("does not treat public fields prefixed with element as array wrappers", () => {
 		const diagnostics = lintOperation({
-			description:
+			descriptionKey:
 				"Use this operation when public field names happen to start with element and those fields must still be linted as ordinary response contract properties.",
 			input: z
 				.object({
@@ -233,7 +228,7 @@ describe("lintOperation", () => {
 
 	it("warns when suspicious sensitive fields are not marked", () => {
 		const diagnostics = lintOperation({
-			description:
+			descriptionKey:
 				"Use this operation when callers submit credential-bearing login details and when invocation observability must redact sensitive provider payload fields automatically.",
 			input: z
 				.object({
@@ -272,7 +267,7 @@ describe("lintProvider", () => {
 			allowedHosts: ["api.example.com"],
 			operations: {
 				lookup: {
-					description: "Short description",
+					descriptionKey: "Short description",
 					input: z.object({ symbol: z.string() }),
 					output: z.object({ price: z.number() }),
 				},
@@ -512,7 +507,7 @@ describe("lintProvider", () => {
 			},
 			operations: {
 				search: {
-					description:
+					descriptionKey:
 						"Use this operation when callers need a fixture that proves operation handlers cannot write credentials.",
 					input: z.object({ query: z.string().describe("Search query") }),
 					output: z.object({ ok: z.boolean().describe("Success flag") }),
@@ -557,7 +552,7 @@ describe("lintProvider", () => {
 			reviewed: "first-party",
 			operations: {
 				search: {
-					description:
+					descriptionKey:
 						"Use this operation when callers need protected search results and when the provider must explicitly opt into browser-like stealth transport instead of relying on implicit HTTP behavior.",
 					input: z.object({ query: z.string().describe("Search query") }),
 					output: z.object({ ok: z.boolean().describe("Success flag") }),
@@ -585,7 +580,7 @@ describe("lintProvider", () => {
 			stealth: { profile: "chrome-146", platform: "macos" },
 			operations: {
 				search: {
-					description:
+					descriptionKey:
 						"Use this operation when callers need protected search results and when the provider has explicitly declared the stealth profile required by the source code.",
 					input: z.object({ query: z.string().describe("Search query") }),
 					output: z.object({ ok: z.boolean().describe("Success flag") }),
@@ -607,7 +602,7 @@ describe("lintProvider", () => {
 			reviewed: "first-party",
 			operations: {
 				search: {
-					description:
+					descriptionKey:
 						"Use this operation when callers need browser-backed upstream access and when the provider should use the SDK browser abstraction instead of importing browser runtimes directly.",
 					input: z.object({ query: z.string().describe("Search query") }),
 					output: z.object({ ok: z.boolean().describe("Success flag") }),
@@ -637,7 +632,8 @@ describe("lintProvider", () => {
 			},
 			operations: {
 				search: {
-					description:
+					riskClass: READ_RISK_CLASS,
+					descriptionKey:
 						"Use this operation when callers need browser-backed upstream access and when the provider should use the SDK browser abstraction instead of importing browser runtimes directly.",
 					input: z.object({ query: z.string().describe("Search query") }),
 					output: z.object({ ok: z.boolean().describe("Success flag") }),
@@ -679,7 +675,8 @@ await fetch(endpoint + "/json/version");
 			},
 			operations: {
 				search: {
-					description:
+					riskClass: READ_RISK_CLASS,
+					descriptionKey:
 						"Use this operation when callers need browser-backed upstream access and when the provider should use the SDK browser abstraction instead of self-hosting browser runtimes.",
 					input: z.object({ query: z.string().describe("Search query") }),
 					output: z.object({ ok: z.boolean().describe("Success flag") }),
@@ -825,6 +822,7 @@ describe("lintProvider thrown-error-code-undeclared", () => {
 			providerSourceFiles,
 			operations: {
 				lookup: {
+					riskClass: READ_RISK_CLASS,
 					descriptionKey: "operations.lookup.description",
 					input: withDescriptionKey(
 						z.object({
@@ -839,7 +837,7 @@ describe("lintProvider thrown-error-code-undeclared", () => {
 						"operations.lookup.output.description",
 					),
 					fixtures: { request: { symbol: "BTC" }, response: { price: 100 } },
-					docs: { errorCodes: [...errorCodes] },
+					errorCodes: [...errorCodes],
 				},
 			},
 		};
@@ -861,7 +859,7 @@ describe("lintProvider thrown-error-code-undeclared", () => {
 		]);
 		expect(diagnostics[0]?.message).toContain('"ITEM_SOLD_OUT"');
 		expect(diagnostics[0]?.message).toContain("upstream/client.ts");
-		expect(diagnostics[0]?.message).toContain("docs.errorCodes");
+		expect(diagnostics[0]?.message).toContain("errorCodes");
 	});
 
 	it("stays silent when any operation declares the thrown code", () => {
@@ -975,5 +973,95 @@ describe("lintProvider thrown-error-code-undeclared", () => {
 		).filter(undeclaredRule);
 
 		expect(diagnostics).toHaveLength(1);
+	});
+});
+
+describe("flat operation safety lint", () => {
+	const credentialBearingModes = [
+		"credentials",
+		"oauth2",
+		"oauth2_proxied",
+	] satisfies readonly AuthMode[];
+
+	function providerWithOperation(
+		operation: {
+			riskClass: OperationRiskClass;
+			approval?: OperationApprovalPolicy;
+			connectionMode?: "none" | "optional" | "required";
+		},
+		authMode: AuthMode = "none",
+	) {
+		return lintProvider({
+			id: "flat-safety-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			auth: { mode: authMode },
+			operations: {
+				lookup: {
+					...operation,
+					descriptionKey: "operations.lookup.description",
+					input: withDescriptionKey(z.object({}), "operations.lookup.input.description"),
+					output: withDescriptionKey(z.object({}), "operations.lookup.output.description"),
+					fixtures: { request: {}, response: {} },
+				},
+			},
+		});
+	}
+
+	it.each(credentialBearingModes)(
+		"requires explicit connectionMode for %s auth",
+		(authMode) => {
+			const diagnostics = providerWithOperation({ riskClass: "read" }, authMode);
+			expect(diagnostics).toContainEqual(
+				expect.objectContaining({
+					rule: "mixed-auth-connection-mode-required",
+					level: "error",
+					field: "operations.lookup.connectionMode",
+				}),
+			);
+		},
+	);
+
+	it("does not require connectionMode for none or platform-managed auth", () => {
+		for (const authMode of ["none", "platform-managed"] satisfies readonly AuthMode[]) {
+			const diagnostics = providerWithOperation({ riskClass: "read" }, authMode);
+			expect(
+				diagnostics.some((item) => item.rule === "mixed-auth-connection-mode-required"),
+			).toBe(false);
+		}
+	});
+
+	it("accepts explicit connectionMode for credential-bearing auth", () => {
+		const diagnostics = providerWithOperation(
+			{ riskClass: "read", connectionMode: "none" },
+			"credentials",
+		);
+		expect(
+			diagnostics.some((item) => item.rule === "mixed-auth-connection-mode-required"),
+		).toBe(false);
+	});
+
+	it.each([
+		{ riskClass: "read", approval: "never" },
+		{ riskClass: "write", approval: "risk-based" },
+		{ riskClass: "destructive", approval: "always" },
+		{ riskClass: "external-send", approval: "always" },
+	] satisfies readonly {
+		riskClass: OperationRiskClass;
+		approval: OperationApprovalPolicy;
+	}[])("rejects redundant $riskClass/$approval approval", (operation) => {
+		const diagnostics = providerWithOperation(operation);
+		expect(diagnostics).toContainEqual(
+			expect.objectContaining({
+				rule: "redundant-approval",
+				level: "error",
+				field: "operations.lookup.approval",
+			}),
+		);
+	});
+
+	it("accepts an approval override that differs from the risk default", () => {
+		const diagnostics = providerWithOperation({ riskClass: "write", approval: "always" });
+		expect(diagnostics.some((item) => item.rule === "redundant-approval")).toBe(false);
 	});
 });

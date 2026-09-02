@@ -92,6 +92,7 @@ function createProvider(options: {
 		},
 	})({ operations: {
 			lookup: {
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),

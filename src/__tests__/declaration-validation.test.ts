@@ -8,11 +8,14 @@ import {
 	validateFailClosedDeclaration,
 } from "../declaration-validation.js";
 import { isProviderError } from "../errors.js";
-import type { HealthCheckSuite, ProviderDefinition } from "../types.js";
+import type { HealthCheckSuite, OperationRiskClass, ProviderDefinition } from "../types.js";
 import { defineTestProvider as defineProvider } from "./test-utils.js";
+
+const READ_RISK_CLASS: OperationRiskClass = "read";
 
 function operation() {
 	return {
+		riskClass: READ_RISK_CLASS,
 		input: z.object({}),
 		output: z.object({ ok: z.boolean() }),
 		handler: async () => ({ ok: true }),

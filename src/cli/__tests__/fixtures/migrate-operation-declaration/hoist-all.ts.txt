@@ -1,0 +1,31 @@
+const searchOperation = defineOperation<ProviderContext>()({
+	annotations: {
+		readOnly: true,
+		openWorld: true,
+		idempotent: true,
+		rateLimit: { requests: 10 },
+		timeoutMs: 30_000,
+	},
+	toolRouter: {
+		name: "ignored",
+		requiresConnection: false,
+		connectionExternalRefParam: "accountId",
+	},
+	docs: {
+		titleKey: "operations.search.title",
+		descriptionKey: "operations.search.description",
+		summaryKey: "operations.search.summary",
+		markdownKey: "operations.search.markdown",
+		normalizationNotesKeys: ["operations.search.normalization.one"],
+		errorCodes: [{ code: "UPSTREAM" }],
+		requestExample: { query: "old" },
+		responseExample: { items: [] },
+	},
+	derivations: { value: "unused" } as unknown as Derivations,
+	retryOnAuthRefresh: true as unknown as boolean,
+	title: "Raw title" as unknown as string,
+	description: "Raw description" as unknown as string,
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

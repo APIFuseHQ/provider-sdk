@@ -164,9 +164,9 @@ export const VALID_PROVIDER_CHALLENGE_KINDS = exhaustiveLiteralArray<ProviderCha
 	"akamai_sensor",
 ] as const);
 const RESERVED_OPERATION_IDS = new Set(["auth", "health"]);
-const MCP_TOOL_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_]{0,127}$/;
 const VALID_OPERATION_RISK_CLASSES = ["read", "write", "destructive", "external-send"] as const;
 const VALID_OPERATION_APPROVAL_POLICIES = ["never", "risk-based", "always"] as const;
+const VALID_OPERATION_CONNECTION_MODES = ["none", "optional", "required"] as const;
 const VALID_OPERATION_TRANSPORT_KINDS = ["json", "sse", "http-stream", "websocket"] as const;
 const SSE_EVENT_NAME_REGEX = /^[A-Za-z][A-Za-z0-9_.-]{0,127}$/;
 const WEBSOCKET_SUBPROTOCOL_REGEX = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
@@ -1230,52 +1230,40 @@ function assertNonEmptyString(
 	}
 }
 
-function validateToolRouterMetadata(
+function validateOperationMetadata(
 	providerId: string,
 	operations: Record<string, ProviderOperation>,
 ): void {
 	for (const [operationName, operation] of Object.entries(operations)) {
-		const toolRouter = operation.toolRouter;
-		if (toolRouter === undefined) continue;
-		if (!toolRouter || typeof toolRouter !== "object") {
-			throw new ValidationError(
-				`Provider "${providerId}" operation "${operationName}" has invalid operations.${operationName}.toolRouter: must be an object.`,
-				{
-					fix: `Remove operations.${operationName}.toolRouter or provide MCP-safe metadata.`,
-				},
-			);
-		}
-		if (toolRouter.name !== undefined && !MCP_TOOL_NAME_REGEX.test(toolRouter.name)) {
-			throw new ValidationError(
-				`Provider "${providerId}" operation "${operationName}" has invalid operations.${operationName}.toolRouter.name: expected an MCP-safe name.`,
-				{
-					fix: `Use letters, numbers, and underscores only, starting with a letter, for example "${providerId.replace(/[^A-Za-z0-9]+/g, "_")}__${operationName.replace(/[^A-Za-z0-9]+/g, "_")}".`,
-				},
-			);
-		}
-		if (toolRouter.riskClass !== undefined) {
+		assertLiteralField(
+			operation.riskClass,
+			`operations.${operationName}.riskClass`,
+			VALID_OPERATION_RISK_CLASSES,
+			providerId,
+		);
+		if (operation.approval !== undefined) {
 			assertLiteralField(
-				toolRouter.riskClass,
-				`operations.${operationName}.toolRouter.riskClass`,
-				VALID_OPERATION_RISK_CLASSES,
-				providerId,
-			);
-		}
-		if (toolRouter.approval !== undefined) {
-			assertLiteralField(
-				toolRouter.approval,
-				`operations.${operationName}.toolRouter.approval`,
+				operation.approval,
+				`operations.${operationName}.approval`,
 				VALID_OPERATION_APPROVAL_POLICIES,
 				providerId,
 			);
 		}
+		if (operation.connectionMode !== undefined) {
+			assertLiteralField(
+				operation.connectionMode,
+				`operations.${operationName}.connectionMode`,
+				VALID_OPERATION_CONNECTION_MODES,
+				providerId,
+			);
+		}
 		if (
-			toolRouter.connectionExternalRefParam !== undefined &&
-			(typeof toolRouter.connectionExternalRefParam !== "string" ||
-				toolRouter.connectionExternalRefParam.trim().length === 0)
+			operation.connectionExternalRefParam !== undefined &&
+			(typeof operation.connectionExternalRefParam !== "string" ||
+				operation.connectionExternalRefParam.trim().length === 0)
 		) {
 			throw new ValidationError(
-				`Provider "${providerId}" operation "${operationName}" has invalid operations.${operationName}.toolRouter.connectionExternalRefParam: must be a non-empty string.`,
+				`Provider "${providerId}" operation "${operationName}" has invalid operations.${operationName}.connectionExternalRefParam: must be a non-empty string.`,
 				{
 					fix: `Use "externalRef" unless the operation has a documented public alias.`,
 				},
@@ -1348,16 +1336,14 @@ function validateOperationContracts(
 	}
 }
 
-function validateOperationAnnotations(
+function validateOperationTimeouts(
 	providerId: string,
 	operations: Record<string, ProviderOperation>,
 ): void {
 	for (const [operationName, operation] of Object.entries(operations)) {
-		const annotations = operation.annotations;
-		if (!annotations) continue;
-		const timeoutMs = annotations.timeoutMs;
+		const timeoutMs = operation.timeoutMs;
 		if (timeoutMs === undefined) continue;
-		const field = `operations.${operationName}.annotations.timeoutMs`;
+		const field = `operations.${operationName}.timeoutMs`;
 		if (typeof timeoutMs !== "number" || !Number.isInteger(timeoutMs))
 			throw new ValidationError(
 				`Provider "${providerId}" has invalid ${field}: must be an integer number of milliseconds.`,
@@ -1438,12 +1424,12 @@ function validateOperationErrorCodes(
 	operations: Record<string, ProviderOperation>,
 ): void {
 	for (const [operationName, operation] of Object.entries(operations)) {
-		for (const [index, errorCode] of (operation.docs?.errorCodes ?? []).entries()) {
+		for (const [index, errorCode] of (operation.errorCodes ?? []).entries()) {
 			if (
 				errorCode.status !== undefined &&
 				!VALID_OPERATION_ERROR_STATUSES.some((status) => status === errorCode.status)
 			) {
-				const field = `operations.${operationName}.docs.errorCodes[${index}].status`;
+				const field = `operations.${operationName}.errorCodes[${index}].status`;
 				throw new ValidationError(
 					`Provider "${providerId}" has invalid ${field}: ${String(errorCode.status)} is not an emittable provider error status.`,
 					{
@@ -2983,12 +2969,12 @@ function finalizeProvider<
 			fix: "Add at least one operation to the operations object",
 		});
 	validateOperationIds(config.id, config.operations);
-	validateOperationAnnotations(config.id, config.operations);
+	validateOperationTimeouts(config.id, config.operations);
 	validateOperationObservability(config.id, config.operations);
 	validateOperationErrorCodes(config.id, config.operations);
 	validateOperationTransports(config.id, config.operations);
 	validateOperationContracts(config.id, config.operations);
-	validateToolRouterMetadata(config.id, config.operations);
+	validateOperationMetadata(config.id, config.operations);
 	const journeyCoveredOperations = validateHealthJourneys(
 		config.id,
 		config.operations,

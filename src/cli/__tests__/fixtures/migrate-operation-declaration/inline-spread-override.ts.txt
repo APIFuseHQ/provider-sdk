@@ -1,0 +1,14 @@
+const overrideOperation = defineOperation<ProviderContext>()({
+	toolRouter: {
+		riskClass: "read",
+		connectionMode: "required" as const,
+		...{
+			connectionMode: "none" as const,
+			approval: "never" as const,
+		},
+		approval: "always" as const,
+	},
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

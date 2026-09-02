@@ -1,0 +1,11 @@
+const annotations = {
+	readOnly: true,
+	timeoutMs: 15_000,
+} as const;
+
+const detailOperation = defineOperation<ProviderContext>()({
+	annotations,
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

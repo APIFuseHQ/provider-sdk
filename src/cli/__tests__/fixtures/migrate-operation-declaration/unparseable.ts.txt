@@ -1,0 +1,4 @@
+const brokenOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	input:,
+});

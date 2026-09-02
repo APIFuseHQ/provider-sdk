@@ -1,10 +1,6 @@
-import { safeProviderErrorObservability } from "../error-observability.js";
 import {
-	isSessionExpiredError,
 	isValidationError,
 	ProviderError,
-	type ProviderErrorOptions,
-	SessionExpiredError,
 	ValidationError,
 } from "../errors.js";
 import { z } from "zod";
@@ -15,13 +11,6 @@ import { assertRequiredSecretsPresent } from "./secrets.js";
 export function isStreamingOperation(provider: ProviderDefinition, operationId: string): boolean {
 	const kind = provider.operations[operationId]?.transport?.kind ?? "json";
 	return kind !== "json";
-}
-
-function preservedSessionExpiredOptions(error: unknown): ProviderErrorOptions {
-	const observability = safeProviderErrorObservability(error);
-	return observability
-		? { observability, retryable: true }
-		: { retryable: true };
 }
 
 /**
@@ -77,32 +66,7 @@ export async function executeOperation<
 			Promise.resolve(operation.handler(ctx, validatedInput)),
 		);
 
-	let result: unknown;
-	try {
-		result = await execute();
-	} catch (error) {
-		// Session expiry is renewed by Credential Service via the /auth/refresh
-		// route, NOT in-process here: this executor cannot mutate ctx.credential,
-		// so an in-process retry would just repeat the call with the same stale
-		// credential (and risk repeating partial side-effects). Instead we surface
-		// the expiry so Credential Service refreshes and re-drives the operation
-		// with a fresh credential. `retryOnAuthRefresh` declares that this
-		// operation is safe to re-drive after refresh, which we signal by marking
-		// the surfaced error retryable; non-idempotent operations (the default)
-		// stay non-retryable so they are not auto-re-driven. See design.md §4.3 D3.
-		// Use the branded guard, not `instanceof`: a handler loaded through a
-		// duplicate/published SDK module can throw a correctly branded
-		// SessionExpiredError whose constructor identity differs from this
-		// executor's, which `instanceof` would miss — dropping the retryable
-		// upgrade and stranding an operation that opted into auth refresh.
-		if (isSessionExpiredError(error) && operation.retryOnAuthRefresh) {
-			// Preserve provider-authored safe metadata while forcing the retry signal.
-			// `cause` intentionally remains dropped, matching the pre-existing
-			// reconstruction semantics.
-			throw new SessionExpiredError(error.message, preservedSessionExpiredOptions(error));
-		}
-		throw error;
-	}
+	const result: unknown = await execute();
 
 	if (isStreamingOperation(provider, operationId)) {
 		return result;

@@ -86,31 +86,35 @@ function buildProvider(operationIds: readonly [string, string]): ProviderDefinit
 			operationIds.map((operationId) => [
 				operationId,
 				{
+					riskClass: "read",
+					connectionMode: "required",
+					connectionExternalRefParam: "accountRef",
+					approval: "always",
+					timeoutMs: 5000,
+					titleKey: `contract.operations.${operationId}.title`,
 					descriptionKey: `contract.operations.${operationId}.description`,
-					docs: {
-						titleKey: `contract.operations.${operationId}.title`,
-						requestExample: { query: operationId },
-						responseExample: { name: operationId, score: 1 },
-					},
+					summaryKey: `contract.operations.${operationId}.summary`,
+					markdownKey: `contract.operations.${operationId}.markdown`,
 					whenToUseKeys: [`contract.operations.${operationId}.whenToUse`],
 					whenNotToUseKeys: [`contract.operations.${operationId}.whenNotToUse`],
-					derivations: { normalizedName: "name" },
-					inputExamples: [
+					normalizationNotesKeys: [`contract.operations.${operationId}.normalization`],
+					errorCodes: [
 						{
-							scenario: "baseline",
-							input: { query: operationId },
-							rationale: "Stable deterministic example.",
+							code: "SEARCH_UNAVAILABLE",
+							status: 503,
+							description: "Search is temporarily unavailable.",
 						},
 					],
-					annotations: { readOnly: true, openWorld: true, timeoutMs: 5000 },
+					examples: [
+						{
+							scenarioKey: `contract.operations.${operationId}.examples.baseline.scenario`,
+							input: { query: operationId },
+							rationaleKey: `contract.operations.${operationId}.examples.baseline.rationale`,
+						},
+					],
 					contract: { version: "1.0.0", lifecycle: "beta" },
 					tags: ["search"],
 					relatedOperations: { alternatives: ["fallback-search"] },
-					toolRouter: {
-						name: `${operationId.replaceAll("-", "_")}_tool`,
-						riskClass: "read",
-						approval: "never",
-					},
 					observability: { sensitive: { input: ["query"] } },
 					transport: { kind: "json" },
 					input: InputSchema,
@@ -163,6 +167,7 @@ function buildHostileContractProvider(): ProviderDefinition {
 		},
 		operations: {
 			lookup: {
+				riskClass: "read",
 				input: InputSchema,
 				output: OutputSchema,
 				handler,
@@ -231,6 +236,40 @@ describe("provider contract extraction", () => {
 			request: { query: "alpha-search" },
 			response: { name: "alpha-search", score: 1 },
 			recordedAt: "2025-12-31",
+		});
+	});
+
+	it("preserves every flat declaration axis in the contract snapshot", () => {
+		const snapshot = extractProviderContract(buildProvider(["zeta-search", "alpha-search"]));
+		const operation = snapshot.operations.find((candidate) => candidate.id === "alpha-search");
+
+		expect(operation).toMatchObject({
+			connectionMode: "required",
+			connectionExternalRefParam: "accountRef",
+			riskClass: "read",
+			approval: "always",
+			timeoutMs: 5000,
+			titleKey: "contract.operations.alpha-search.title",
+			descriptionKey: "contract.operations.alpha-search.description",
+			summaryKey: "contract.operations.alpha-search.summary",
+			markdownKey: "contract.operations.alpha-search.markdown",
+			whenToUseKeys: ["contract.operations.alpha-search.whenToUse"],
+			whenNotToUseKeys: ["contract.operations.alpha-search.whenNotToUse"],
+			normalizationNotesKeys: ["contract.operations.alpha-search.normalization"],
+			errorCodes: [
+				{
+					code: "SEARCH_UNAVAILABLE",
+					status: 503,
+					description: "Search is temporarily unavailable.",
+				},
+			],
+			examples: [
+				{
+					scenarioKey: "contract.operations.alpha-search.examples.baseline.scenario",
+					input: { query: "alpha-search" },
+					rationaleKey: "contract.operations.alpha-search.examples.baseline.rationale",
+				},
+			],
 		});
 	});
 
@@ -349,6 +388,7 @@ describe("provider contract extraction", () => {
 		})({
 			operations: {
 				lookup: {
+					riskClass: "read",
 					input: InputSchema,
 					output: OutputSchema,
 					handler,

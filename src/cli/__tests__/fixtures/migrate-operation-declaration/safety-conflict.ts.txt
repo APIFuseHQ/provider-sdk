@@ -1,0 +1,7 @@
+const cancelOperation = defineOperation<ProviderContext>()({
+	annotations: { destructive: true },
+	toolRouter: { riskClass: "write" },
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

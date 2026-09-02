@@ -288,6 +288,7 @@ describe("engine credential containment", () => {
 				secrets: [{ name }, { name: "PROVIDER_TOKEN" }],
 				operations: {
 					inspectEnvironment: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({
 							proxyKey: z.string().optional(),

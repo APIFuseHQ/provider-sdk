@@ -43,10 +43,10 @@ export type InferSchemaOutput<TSchema extends SchemaLike> =
 			? Output
 			: unknown;
 
-export interface OperationInputExample {
-	scenario: string;
+export interface OperationExample {
+	scenarioKey: ProviderLocaleKeyInput;
 	input: unknown;
-	rationale?: string;
+	rationaleKey?: ProviderLocaleKeyInput;
 }
 
 export type OperationRiskClass =
@@ -56,21 +56,6 @@ export type OperationRiskClass =
 	| "external-send";
 
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
-
-export interface OperationToolRouterMetadata {
-	/** Optional MCP-safe override. Defaults to providerId__operationId. */
-	name?: string;
-	/** Safety class exposed to Tool Router clients and approval policy. */
-	riskClass?: OperationRiskClass;
-	/** OpenAI remote-MCP approval hint. Defaults from riskClass. */
-	approval?: OperationApprovalPolicy;
-	/** Canonical operation-level connection requirement consumed by the registry and Gateway. */
-	connectionMode?: "none" | "optional" | "required";
-	/** Override connection requirement when provider auth + openWorld inference is insufficient. */
-	requiresConnection?: boolean;
-	/** Public argument used to resolve the tenant-owned connection. Defaults to externalRef. */
-	connectionExternalRefParam?: string;
-}
 
 export type OperationSensitivePath = string;
 
@@ -94,38 +79,6 @@ export interface OperationObservabilityConfig {
 	 * express as stable public paths.
 	 */
 	sensitive?: OperationObservabilitySensitiveConfig;
-}
-
-export interface OperationAnnotations {
-	readOnly?: boolean;
-	destructive?: boolean;
-	idempotent?: boolean;
-	/**
-	 * Marks the operation as callable without provider-level authentication.
-	 *
-	 * Provider-level `auth.mode` describes the **majority** auth model of a
-	 * provider; individual operations can still opt out via `openWorld: true`
-	 * when their handler does not consume `ctx.credential`. This is the
-	 * canonical way to declare "this operation is public, even though the
-	 * provider is `credentials`-mode" without splitting the provider into two.
-	 *
-	 * Health-check projections treat `openWorld: true` operations as
-	 * connection-free probes (no `requiresConnection` required, no SA token
-	 * lookup). Future gateway work MAY extend this annotation to bypass
-	 * `X-ApiFuse-Connection-Id` enforcement at proxy time.
-	 *
-	 * Example: Naver Map's `search`, `geocode`, and directions operations
-	 * call public Naver endpoints with no cookies, while `collections` and
-	 * `export` consume the user's session cookie — the provider declares
-	 * `auth.mode: "credentials"` (for the latter) and the former mark
-	 * `openWorld: true`.
-	 */
-	openWorld?: boolean;
-	rateLimit?: {
-		calls: number;
-		window: "minute" | "hour" | "day";
-	};
-	timeoutMs?: number;
 }
 
 export const OPERATION_TIMEOUT_MS_MIN = 1;
@@ -931,17 +884,6 @@ export interface OperationErrorCode {
 	retryable?: boolean;
 }
 
-export interface OperationDocMeta {
-	titleKey?: ProviderLocaleKeyInput;
-	descriptionKey?: ProviderLocaleKeyInput;
-	summaryKey?: ProviderLocaleKeyInput;
-	markdownKey?: ProviderLocaleKeyInput;
-	normalizationNotesKeys?: ProviderLocaleKeyInput[];
-	requestExample?: Record<string, unknown>;
-	responseExample?: unknown;
-	errorCodes?: OperationErrorCode[];
-}
-
 export type StealthPlatform = "macos" | "windows" | "linux" | "android" | "ios";
 
 export type BrowserEngine = "playwright-stealth" | "nodriver" | "selenium-uc";
@@ -1057,8 +999,7 @@ export interface ProviderAccessConfig {
 	 *	 active customer organization has a provider-level access grant.
 	 *
 	 * This is intentionally provider-level only. It does not alter auth mode,
-	 * operation schemas, health-check authoring, `openWorld`, or Connection
-	 * requirements.
+	 * operation schemas, health-check authoring, or Connection requirements.
 	 */
 	visibility?: ProviderAccessVisibility;
 }
@@ -2391,33 +2332,29 @@ export interface OperationDefinition<
 	TOutput extends SchemaLike = SchemaLike,
 	TContext = ProviderContext,
 > {
-	/**
-	 * Short English display title for the operation. The SDK passes it through
-	 * verbatim; the APIFuse registry derives the operation's en locale title
-	 * baseline from it (`docs.titleKey` remains available as an explicit key
-	 * override).
-	 */
-	title?: string;
-	/**
-	 * Raw English operation description. The SDK passes it through verbatim;
-	 * keyed descriptions via `descriptionKey` remain the primary flow, and
-	 * provider lint rules for raw prose descriptions still apply.
-	 */
-	description?: string;
+	/** Canonical operation-level connection requirement. */
+	connectionMode?: "none" | "optional" | "required";
+	/** Public argument used to resolve the tenant-owned connection. Defaults to externalRef. */
+	connectionExternalRefParam?: string;
+	/** Safety source of truth exposed to clients and approval policy. */
+	riskClass: OperationRiskClass;
+	/** Approval override. Omit when the risk-class default is correct. */
+	approval?: OperationApprovalPolicy;
+	timeoutMs?: number;
+	titleKey?: ProviderLocaleKeyInput;
 	descriptionKey?: ProviderLocaleKeyInput;
-	docs?: OperationDocMeta;
+	summaryKey?: ProviderLocaleKeyInput;
+	markdownKey?: ProviderLocaleKeyInput;
 	whenToUseKeys?: readonly ProviderLocaleKeyInput[];
 	whenNotToUseKeys?: readonly ProviderLocaleKeyInput[];
-	derivations?: Record<string, string>;
-	inputExamples?: readonly OperationInputExample[];
-	annotations?: OperationAnnotations;
+	normalizationNotesKeys?: readonly ProviderLocaleKeyInput[];
+	errorCodes?: readonly OperationErrorCode[];
+	examples?: readonly OperationExample[];
 	contract?: OperationContractMetadata;
 	tags?: readonly string[];
 	relatedOperations?: OperationRelationships;
-	toolRouter?: OperationToolRouterMetadata;
 	observability?: OperationObservabilityConfig;
 	transport?: OperationTransport;
-	retryOnAuthRefresh?: boolean;
 	input: TInput;
 	output: TOutput;
 	handler(

@@ -85,7 +85,6 @@ function createMockCtx(fetchResponse: unknown, status = 200): ProviderContext {
 function createMockProvider(options?: {
 	handler?: ProviderDefinition["operations"][string]["handler"];
 	auth?: ProviderDefinition["auth"];
-	retryOnAuthRefresh?: boolean;
 }): ProviderDefinition {
 	return {
 		id: "test-provider",
@@ -99,7 +98,8 @@ function createMockProvider(options?: {
 		},
 		operations: {
 			search: {
-				description: "Search",
+				riskClass: "read",
+				descriptionKey: "operations.search.description",
 				input: z.object({ query: z.string() }),
 				output: z.object({ results: z.array(z.string()) }),
 				handler:
@@ -111,9 +111,6 @@ function createMockProvider(options?: {
 							results: [parsed.query],
 						};
 					}),
-				...(options?.retryOnAuthRefresh === undefined
-					? {}
-					: { retryOnAuthRefresh: options.retryOnAuthRefresh }),
 			},
 		},
 	};
@@ -198,7 +195,8 @@ describe("executeOperation", () => {
 			...createMockProvider(),
 			operations: {
 				search: {
-					description: "No upstream",
+					riskClass: "read",
+					descriptionKey: "operations.search.description",
 					input: z.object({ query: z.string() }),
 					output: z.object({ results: z.array(z.string()) }),
 					// @ts-expect-error test-invalid: operation deliberately omits its runtime handler
@@ -253,83 +251,14 @@ describe("executeOperation", () => {
 		expect(callCount).toBe(1);
 	});
 
-	it("surfaces SessionExpiredError as retryable for opt-in operations (no in-process retry)", async () => {
+	it("passes SessionExpiredError through unchanged", async () => {
 		const ctx = createMockCtx({});
 		let calls = 0;
+		const sessionExpired = new SessionExpiredError();
 		const provider = createMockProvider({
-			retryOnAuthRefresh: true,
 			handler: async () => {
 				calls++;
-				throw new SessionExpiredError();
-			},
-		});
-
-		// The SDK does NOT retry in-process (it cannot refresh ctx.credential).
-		// It surfaces the expiry as retryable so Credential Service refreshes and
-		// re-drives the operation with a fresh credential. Handler runs exactly once.
-		await expect(
-			executeOperation(provider, "search", ctx, { query: "test" }),
-		).rejects.toMatchObject({
-			name: "SessionExpiredError",
-			options: { retryable: true },
-		});
-		expect(calls).toBe(1);
-	});
-
-	it("preserves SessionExpiredError observability when retryOnAuthRefresh upgrades it", async () => {
-		const ctx = createMockCtx({});
-		const providerObservability = {
-			reason: "SESSION_REFRESH_FAILED",
-			fingerprint: "038ed7ef11d8",
-			messageLength: 42,
-		};
-		const details = { providerCode: "session_refresh_failed" };
-		const provider = createMockProvider({
-			retryOnAuthRefresh: true,
-			handler: async () => {
-				throw new SessionExpiredError("Session expired", {
-					code: "UPSTREAM_ERROR",
-					category: "upstream_http",
-					fix: "do not expose this",
-					observability: providerObservability,
-					details,
-				});
-			},
-		});
-
-		let caught: unknown;
-		try {
-			await executeOperation(provider, "search", ctx, { query: "test" });
-		} catch (error) {
-			caught = error;
-		}
-		expect(caught).toMatchObject({
-			name: "SessionExpiredError",
-			options: {
-				retryable: true,
-				observability: providerObservability,
-				code: "reauth_required",
-				category: "credential_expired",
-			},
-		});
-		expect((caught as SessionExpiredError).options?.fix).toBeUndefined();
-		expect((caught as SessionExpiredError).options?.details).toBeUndefined();
-	});
-
-	it("keeps the canonical retryable session error when observability descriptor inspection throws", async () => {
-		const ctx = createMockCtx({});
-		const observability = new Proxy(
-			{},
-			{
-				getOwnPropertyDescriptor() {
-					throw new Error("observability descriptor trap exploded");
-				},
-			},
-		);
-		const provider = createMockProvider({
-			retryOnAuthRefresh: true,
-			handler: async () => {
-				throw new SessionExpiredError("Session expired", { observability });
+				throw sessionExpired;
 			},
 		});
 
@@ -340,48 +269,8 @@ describe("executeOperation", () => {
 			caught = error;
 		}
 
+		expect(caught).toBe(sessionExpired);
 		expect(isSessionExpiredError(caught)).toBe(true);
-		expect(caught).toMatchObject({
-			name: "SessionExpiredError",
-			message: "Session expired",
-			options: {
-				code: "reauth_required",
-				category: "credential_expired",
-				retryable: true,
-			},
-		});
-		expect((caught as SessionExpiredError).options).not.toHaveProperty("observability");
-	});
-
-	it("upgrades a duplicate-module SessionExpiredError to retryable for opt-in operations", async () => {
-		const Dup = await duplicateSdk;
-		expect(Dup.SessionExpiredError).not.toBe(SessionExpiredError);
-
-		const ctx = createMockCtx({});
-		let calls = 0;
-		const provider = createMockProvider({
-			retryOnAuthRefresh: true,
-			handler: async () => {
-				calls++;
-				// A correctly branded SessionExpiredError thrown from a handler
-				// loaded through a duplicate/published SDK module: its constructor
-				// identity differs from the source executor's, so `instanceof`
-				// misses it and the retryable upgrade is silently skipped.
-				throw new Dup.SessionExpiredError();
-			},
-		});
-
-		let caught: unknown;
-		try {
-			await executeOperation(provider, "search", ctx, { query: "test" });
-		} catch (error) {
-			caught = error;
-		}
-
-		// The executor must recognize the cross-module error via the branded guard
-		// and upgrade it to retryable so Credential Service re-drives the operation.
-		expect(isSessionExpiredError(caught)).toBe(true);
-		expect((caught as SessionExpiredError).options?.retryable).toBe(true);
 		expect(calls).toBe(1);
 	});
 
@@ -404,22 +293,6 @@ describe("executeOperation", () => {
 		expect(calls).toBe(1);
 	});
 
-	it("never re-runs the handler in-process on session expiry", async () => {
-		const ctx = createMockCtx({});
-		let calls = 0;
-		const provider = createMockProvider({
-			retryOnAuthRefresh: true,
-			handler: async () => {
-				calls++;
-				throw new SessionExpiredError();
-			},
-		});
-
-		await expect(executeOperation(provider, "search", ctx, { query: "test" })).rejects.toThrow(
-			SessionExpiredError,
-		);
-		expect(calls).toBe(1);
-	});
 });
 
 describe("executeOperation SDK-owned secret enforcement", () => {
