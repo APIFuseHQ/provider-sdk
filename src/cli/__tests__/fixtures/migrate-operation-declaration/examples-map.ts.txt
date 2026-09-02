@@ -1,0 +1,5 @@
+import { searchOperation } from "./search";
+
+export const operations = {
+	search: searchOperation,
+};

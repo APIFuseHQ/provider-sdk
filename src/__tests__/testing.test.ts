@@ -28,6 +28,7 @@ const testProvider = defineProvider({
 	},
 })({ operations: {
 		search: {
+			riskClass: "read",
 			input: z.object({ q: z.string() }),
 			output: z.object({ result: z.string() }),
 			handler: async (_ctx, input: unknown) => {
@@ -105,6 +106,7 @@ const fixtureHarnessProvider = defineProvider({
 	},
 })({ operations: {
 		lookup: {
+			riskClass: "read",
 			input: z.object({ q: z.string() }),
 			output: z.object({ result: z.string() }),
 			handler: async (_ctx, input: unknown) => {
@@ -131,6 +133,7 @@ const snapshotHarnessProvider = defineProvider({
 	},
 })({ operations: {
 		normalize: {
+			riskClass: "read",
 			input: z.object({ id: z.string() }),
 			output: z.object({ id: z.string(), label: z.string() }),
 			handler: async (ctx, input: unknown) => {
@@ -160,6 +163,7 @@ const streamSnapshotHarnessProvider = defineProvider({
 	},
 })({ operations: {
 		download: {
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({
 				body: z.string(),
@@ -220,6 +224,7 @@ const multiStreamSnapshotHarnessProvider = defineProvider({
 	},
 })({ operations: {
 		download: {
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ first: z.string(), second: z.string() }),
 			handler: async (ctx) => {
@@ -258,6 +263,7 @@ const authHarnessProvider = defineProvider({
 	},
 })({ operations: {
 		me: {
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async () => ({ ok: true }),
@@ -278,6 +284,7 @@ const handlerE2eProvider = defineProvider({
 	},
 })({ operations: {
 		lookup: {
+			riskClass: "read",
 			input: z.object({
 				id: z.string(),
 				date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
@@ -349,6 +356,7 @@ const nativeEgressHarnessProvider = defineProvider({
 	},
 })({ operations: {
 		"snapshot-connect": {
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ reads: z.number() }),
 			fixtures: { request: {}, response: { reads: 1 } },
@@ -368,6 +376,7 @@ const nativeEgressHarnessProvider = defineProvider({
 			},
 		},
 		denied: {
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			fixtures: { request: {}, response: { ok: true } },
@@ -378,6 +387,7 @@ const nativeEgressHarnessProvider = defineProvider({
 			},
 		},
 		"grant-lifecycle": {
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ revokedCode: z.string() }),
 			fixtures: {

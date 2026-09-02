@@ -17,6 +17,7 @@ function provider(): ProviderDefinition {
 		},
 		operations: {
 			ping: {
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),

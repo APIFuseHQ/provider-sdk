@@ -82,17 +82,22 @@ function extractOperation(
 	operationId: string,
 	operation: OperationDefinition,
 ): ProviderContractOperation {
+	const connectionMode = toJsonValue(operation.connectionMode);
+	const connectionExternalRefParam = toJsonValue(operation.connectionExternalRefParam);
+	const approval = toJsonValue(operation.approval);
+	const timeoutMs = toJsonValue(operation.timeoutMs);
+	const titleKey = toJsonValue(operation.titleKey);
 	const descriptionKey = toJsonValue(operation.descriptionKey);
-	const docs = toJsonValue(operation.docs);
+	const summaryKey = toJsonValue(operation.summaryKey);
+	const markdownKey = toJsonValue(operation.markdownKey);
 	const whenToUseKeys = toJsonValue(operation.whenToUseKeys);
 	const whenNotToUseKeys = toJsonValue(operation.whenNotToUseKeys);
-	const derivations = toJsonValue(operation.derivations);
-	const inputExamples = toJsonValue(operation.inputExamples);
-	const annotations = toJsonValue(operation.annotations);
+	const normalizationNotesKeys = toJsonValue(operation.normalizationNotesKeys);
+	const errorCodes = toJsonValue(operation.errorCodes);
+	const examples = toJsonValue(operation.examples);
 	const contract = toJsonValue(operation.contract);
 	const tags = toJsonValue(operation.tags);
 	const relatedOperations = toJsonValue(operation.relatedOperations);
-	const toolRouter = toJsonValue(operation.toolRouter);
 	const observability = toJsonValue(operation.observability);
 	const transport = extractTransport(operation.transport);
 	const fixtures = toJsonValue(operation.fixtures);
@@ -105,17 +110,23 @@ function extractOperation(
 		id: operationId,
 		inputSchema: describeSchema(operation.input),
 		outputSchema: describeSchema(operation.output),
+		...(connectionMode === undefined ? {} : { connectionMode }),
+		...(connectionExternalRefParam === undefined ? {} : { connectionExternalRefParam }),
+		riskClass: operation.riskClass,
+		...(approval === undefined ? {} : { approval }),
+		...(timeoutMs === undefined ? {} : { timeoutMs }),
+		...(titleKey === undefined ? {} : { titleKey }),
 		...(descriptionKey === undefined ? {} : { descriptionKey }),
-		...(docs === undefined ? {} : { docs }),
+		...(summaryKey === undefined ? {} : { summaryKey }),
+		...(markdownKey === undefined ? {} : { markdownKey }),
 		...(whenToUseKeys === undefined ? {} : { whenToUseKeys }),
 		...(whenNotToUseKeys === undefined ? {} : { whenNotToUseKeys }),
-		...(derivations === undefined ? {} : { derivations }),
-		...(inputExamples === undefined ? {} : { inputExamples }),
-		...(annotations === undefined ? {} : { annotations }),
+		...(normalizationNotesKeys === undefined ? {} : { normalizationNotesKeys }),
+		...(errorCodes === undefined ? {} : { errorCodes }),
+		...(examples === undefined ? {} : { examples }),
 		...(contract === undefined ? {} : { contract }),
 		...(tags === undefined ? {} : { tags }),
 		...(relatedOperations === undefined ? {} : { relatedOperations }),
-		...(toolRouter === undefined ? {} : { toolRouter }),
 		...(observability === undefined ? {} : { observability }),
 		...(transport === undefined ? {} : { transport }),
 		...(fixtures === undefined ? {} : { fixtures }),

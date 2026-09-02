@@ -1,0 +1,16 @@
+export const searchOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [
+		{
+			scenario: "Search by a precise phrase",
+			input: {
+				query: `京都
+  ホテル`,
+			},
+			rationale: "Shows whitespace preservation",
+		},
+	],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

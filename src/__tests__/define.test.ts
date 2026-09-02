@@ -3,18 +3,16 @@ import { z } from "zod";
 
 import { ProviderError, ValidationError } from "../errors.js";
 import type {
-	OperationAnnotations,
 	ProviderContext,
 	ProviderDefinition,
+	OperationRiskClass,
 	SchemaLike,
 } from "../types.js";
-import {
-	createProviderContextDouble,
-	defineTestProvider as defineProvider,
-} from "./test-utils.js";
+import { createProviderContextDouble, defineTestProvider as defineProvider } from "./test-utils.js";
 
 const InputSchema = z.object({ id: z.string() });
 const OutputSchema = z.object({ name: z.string(), price: z.number() });
+const READ_RISK_CLASS: OperationRiskClass = "read";
 
 function requireZodSchema(schema: SchemaLike): z.ZodType {
 	if (!("safeParse" in schema) || typeof schema.safeParse !== "function") {
@@ -35,6 +33,7 @@ const validConfig = {
 	},
 	operations: {
 		prices: {
+			riskClass: READ_RISK_CLASS,
 			input: InputSchema,
 			output: OutputSchema,
 			handler: async (_ctx: ProviderContext, input: unknown) => {
@@ -139,19 +138,56 @@ describe("defineProvider", () => {
 				operations: {
 					prices: {
 						...validConfig.operations.prices,
-						docs: {
-							errorCodes: [
+						errorCodes: [
 								{
 									code: "UPSTREAM_TEAPOT",
 									status: 418,
 									description: "Unsupported upstream response",
 								},
 							],
-						},
 					},
 				},
 			}),
 		).toThrow(/errorCodes\[0\]\.status: 418.*not an emittable provider error status/);
+	});
+
+	it("rejects a structurally supplied operation without riskClass", () => {
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						riskClass: undefined,
+					},
+				},
+			}),
+		).toThrow(/operations\.prices\.riskClass/);
+	});
+
+	it("validates flat operation safety and access enums", () => {
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						riskClass: "unsafe",
+					},
+				},
+			}),
+		).toThrow(/operations\.prices\.riskClass/);
+		expect(() =>
+			defineProvider({
+				...validConfig,
+				operations: {
+					prices: {
+						...validConfig.operations.prices,
+						connectionMode: "sometimes",
+					},
+				},
+			}),
+		).toThrow(/operations\.prices\.connectionMode/);
 	});
 
 	it("warns when an SDK-owned error code declares an ignored runtime status", () => {
@@ -162,20 +198,18 @@ describe("defineProvider", () => {
 				operations: {
 					prices: {
 						...validConfig.operations.prices,
-						docs: {
-							errorCodes: [
+						errorCodes: [
 								{
 									code: "reauth_required",
 									status: 502,
 									description: "Provider session expired",
 								},
 							],
-						},
 					},
 				},
 			});
 
-			expect(provider.operations.prices.docs?.errorCodes?.[0]?.status).toBe(502);
+			expect(provider.operations.prices.errorCodes?.[0]?.status).toBe(502);
 			expect(warn).toHaveBeenCalledWith(
 				'[provider-sdk] Provider "korea-air-quality" operation "prices" declares status 502 for SDK-owned error code "reauth_required"; the declared status is documentation-only and will be ignored at runtime.',
 			);
@@ -224,7 +258,9 @@ describe("defineProvider", () => {
 	it("keeps transport optional for existing JSON operations", () => {
 		const provider = defineProvider(validConfig);
 
-		expect((provider.operations.prices as ProviderDefinition["operations"][string]).transport).toBeUndefined();
+		expect(
+			(provider.operations.prices as ProviderDefinition["operations"][string]).transport,
+		).toBeUndefined();
 	});
 
 	it("preserves typed native network declarations", () => {
@@ -261,9 +297,7 @@ describe("defineProvider", () => {
 
 	it("accepts native on standard and shared runtimes", () => {
 		expect(() => defineProvider({ ...validConfig, native: {} })).not.toThrow();
-		expect(() =>
-			defineProvider({ ...validConfig, runtime: "shared", native: {} }),
-		).not.toThrow();
+		expect(() => defineProvider({ ...validConfig, runtime: "shared", native: {} })).not.toThrow();
 	});
 
 	it("rejects native on the browser runtime", () => {
@@ -780,53 +814,47 @@ describe("defineProvider", () => {
 		expect(parsed.success).toBe(true);
 	});
 
-	describe("annotations.timeoutMs validation", () => {
-		const withAnnotations = (annotations: OperationAnnotations) => ({
+	describe("operation timeoutMs validation", () => {
+		const withTimeoutMs = (timeoutMs: number | undefined) => ({
 			...validConfig,
 			operations: {
 				prices: {
 					...validConfig.operations.prices,
-					annotations,
+					timeoutMs,
 				},
 			},
 		});
 
 		it("accepts a valid integer in [1, 60000] ms", () => {
-			const provider = defineProvider(withAnnotations({ readOnly: true, timeoutMs: 30_000 }));
-			expect(provider.operations.prices.annotations?.timeoutMs).toBe(30_000);
+			const provider = defineProvider(withTimeoutMs(30_000));
+			expect(provider.operations.prices.timeoutMs).toBe(30_000);
 		});
 
-		it("accepts annotations without timeoutMs", () => {
-			expect(() => defineProvider(withAnnotations({ readOnly: true }))).not.toThrow();
-		});
-
-		it("accepts a provider with no annotations block", () => {
+		it("accepts a provider with no timeoutMs", () => {
 			expect(() => defineProvider(validConfig)).not.toThrow();
 		});
 
 		it("rejects timeoutMs of 0 (lower bound exclusive)", () => {
-			expect(() => defineProvider(withAnnotations({ timeoutMs: 0 }))).toThrow(ValidationError);
+			expect(() => defineProvider(withTimeoutMs(0))).toThrow(ValidationError);
 		});
 
 		it("rejects negative timeoutMs", () => {
-			expect(() => defineProvider(withAnnotations({ timeoutMs: -100 }))).toThrow(ValidationError);
+			expect(() => defineProvider(withTimeoutMs(-100))).toThrow(ValidationError);
 		});
 
 		it("rejects timeoutMs above 60000 ms (upper bound)", () => {
-			expect(() => defineProvider(withAnnotations({ timeoutMs: 60_001 }))).toThrow(ValidationError);
+			expect(() => defineProvider(withTimeoutMs(60_001))).toThrow(ValidationError);
 		});
 
 		it("rejects non-integer timeoutMs", () => {
-			expect(() => defineProvider(withAnnotations({ timeoutMs: 1500.5 }))).toThrow(ValidationError);
+			expect(() => defineProvider(withTimeoutMs(1500.5))).toThrow(ValidationError);
 		});
 
 		it("rejects non-number timeoutMs", () => {
 			expect(() =>
 				defineProvider(
-					withAnnotations({
-						// @ts-expect-error test-invalid: runtime validation must reject non-number timeouts.
-						timeoutMs: "30000",
-					}),
+					// @ts-expect-error test-invalid: runtime validation must reject non-number timeouts.
+					withTimeoutMs("30000"),
 				),
 			).toThrow(ValidationError);
 		});
@@ -909,110 +937,95 @@ describe("defineProvider", () => {
 		});
 	});
 
-	describe("operation title and description passthrough", () => {
-		it("preserves code-authored title and description on the built operation", () => {
+	describe("operation locale-key passthrough", () => {
+		it("preserves flat locale keys on the built operation", () => {
 			const provider = defineProvider({
 				...validConfig,
 				operations: {
 					prices: {
 						...validConfig.operations.prices,
-						title: "Get Prices",
-						description:
-							"Use this operation when you need the latest quoted price for an asset id; returns the display name and price in KRW.",
+						titleKey: "operations.prices.title",
+						descriptionKey: "operations.prices.description",
 					},
 				},
 			});
 
-			expect(provider.operations.prices.title).toBe("Get Prices");
-			expect(provider.operations.prices.description).toBe(
-				"Use this operation when you need the latest quoted price for an asset id; returns the display name and price in KRW.",
-			);
+			expect(provider.operations.prices.titleKey).toBe("operations.prices.title");
+			expect(provider.operations.prices.descriptionKey).toBe("operations.prices.description");
 		});
 
-		it("keeps title and description undefined when not declared", () => {
+		it("keeps locale keys undefined when not declared", () => {
 			const provider = defineProvider(validConfig);
 
 			const prices = provider.operations.prices as ProviderDefinition["operations"][string];
-			expect(prices.title).toBeUndefined();
-			expect(prices.description).toBeUndefined();
+			expect(prices.titleKey).toBeUndefined();
+			expect(prices.descriptionKey).toBeUndefined();
 		});
 	});
 
-	describe("required proxy vendor credentials", () => {
+	describe("engine-owned telemetry configuration", () => {
+		it("rejects OTLP export variables in provider secrets", () => {
+			for (const name of [
+				"OTEL_EXPORTER_OTLP_HEADERS",
+				"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+				"OTEL_EXPORTER_OTLP_ENDPOINT",
+			]) {
+				expect(() =>
+					defineProvider({
+						...validConfig,
+						secrets: [{ name, required: true }],
+					}),
+				).toThrow(/cannot declare engine-owned telemetry variable/);
+			}
+		});
+
+		it("rejects mixed-case aliases of engine-owned variables", () => {
+			for (const name of ["otel_exporter_otlp_headers", "Otel_Exporter_Otlp_Traces_Headers"]) {
+				expect(() =>
+					defineProvider({
+						...validConfig,
+						secrets: [{ name, required: true }],
+					}),
+				).toThrow(/cannot declare engine-owned telemetry variable/);
+			}
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					secrets: [{ name: "apifuse__proxy__smartproxy_app_key", required: true }],
+				}),
+			).toThrow(/cannot declare engine-owned proxy credential/);
+		});
+	});
+
+	describe("engine-owned proxy vendor credentials", () => {
 		const SMARTPROXY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 		const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
-		const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
 
-		it("requires the smartproxy app key for a required smartproxy chain", () => {
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "required", provider: "smartproxy" },
-				}),
-			).toThrow(
-				/requires smartproxy egress but does not declare APIFUSE__PROXY__SMARTPROXY_APP_KEY/,
-			);
-		});
-
-		it("requires both nodemaven credentials for a required nodemaven-only chain", () => {
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "required", providers: ["nodemaven"] },
-				}),
-			).toThrow(
-				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
-			);
-		});
-
-		it("rejects a required smartproxy→nodemaven chain that only declares the smartproxy secret (silently dead fallback)", () => {
+		it("accepts required proxy intent without provider-owned vendor secrets", () => {
 			expect(() =>
 				defineProvider({
 					...validConfig,
 					proxy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
-					secrets: [{ name: SMARTPROXY_SECRET, required: true }],
-				}),
-			).toThrow(
-				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
-			);
-		});
-
-		it("rejects a required nodemaven chain that declares username but omits the password", () => {
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "required", providers: ["nodemaven"] },
-					secrets: [{ name: NODEMAVEN_USERNAME_SECRET, required: true }],
-				}),
-			).toThrow(
-				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_PASSWORD/,
-			);
-		});
-
-		it("accepts a required smartproxy→nodemaven chain that declares every vendor's secrets", () => {
-			const provider = defineProvider({
-				...validConfig,
-				proxy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
-				secrets: [
-					{ name: SMARTPROXY_SECRET, required: true },
-					{ name: NODEMAVEN_USERNAME_SECRET, required: true },
-					{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
-				],
-			});
-
-			expect(provider.proxy).toEqual({
-				mode: "required",
-				providers: ["smartproxy", "nodemaven"],
-			});
-		});
-
-		it("does not require nodemaven credentials when the chain is optional", () => {
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "optional", providers: ["smartproxy", "nodemaven"] },
 				}),
 			).not.toThrow();
+		});
+
+		it("rejects a smartproxy credential in provider secrets", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					secrets: [{ name: SMARTPROXY_SECRET, required: true }],
+				}),
+			).toThrow(/cannot declare engine-owned proxy credential/);
+		});
+
+		it("rejects a nodemaven credential in provider secrets", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					secrets: [{ name: NODEMAVEN_USERNAME_SECRET, required: true }],
+				}),
+			).toThrow(/cannot declare engine-owned proxy credential/);
 		});
 
 		it("rejects required proxy egress backed only by deprecated vendors", () => {
@@ -1042,49 +1055,9 @@ describe("defineProvider", () => {
 				warn.mockRestore();
 			}
 		});
-
-		it("treats a declared-but-optional (required: false) vendor secret as missing", () => {
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "required", providers: ["nodemaven"] },
-					secrets: [
-						{ name: NODEMAVEN_USERNAME_SECRET, required: false },
-						{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
-					],
-				}),
-			).toThrow(
-				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
-			);
-		});
-
-		it("treats a vendor secret that omits `required` as missing (matches the runtime gate)", () => {
-			// listMissingRequiredSecrets enforces only `required === true`, so a
-			// default-flag declaration is skipped at runtime; define-time validation
-			// must reject it too rather than pass a config the runtime won't enforce.
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "required", providers: ["nodemaven"] },
-					secrets: [
-						{ name: NODEMAVEN_USERNAME_SECRET },
-						{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
-					],
-				}),
-			).toThrow(
-				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
-			);
-		});
 	});
 
 	describe("proxy.session.drainLeadSeconds", () => {
-		const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
-		const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
-		const credentialedSecrets = [
-			{ name: NODEMAVEN_USERNAME_SECRET, required: true },
-			{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
-		];
-
 		// Regression guard: the type surface and the runtime validator drifted
 		// apart once (drainLeadSeconds was typed but rejected by the allowlist),
 		// so a provider could not declare the field the drain contract needs.
@@ -1101,7 +1074,6 @@ describe("defineProvider", () => {
 						drainLeadSeconds: 120,
 					},
 				},
-				secrets: credentialedSecrets,
 			});
 
 			expect(provider.proxy).toBeDefined();
@@ -1119,7 +1091,6 @@ describe("defineProvider", () => {
 						providers: ["nodemaven"],
 						session: { affinity: "connection", drainLeadSeconds: 0 },
 					},
-					secrets: credentialedSecrets,
 				}),
 			).toThrow(/invalid proxy\.session\.drainLeadSeconds/);
 		});
@@ -1137,7 +1108,6 @@ describe("defineProvider", () => {
 							drainLeadSeconds: 60,
 						},
 					},
-					secrets: credentialedSecrets,
 				}),
 			).toThrow(/greater than or equal to proxy\.session\.lifetimeMinutes/);
 		});
@@ -1154,7 +1124,6 @@ describe("defineProvider", () => {
 						// catch this typo, which is exactly why the validator must.
 						session: { affinity: "connection", drainLeadSecond: 120 },
 					},
-					secrets: credentialedSecrets,
 				}),
 			).toThrow(/Unknown field "drainLeadSecond" on proxy\.session/);
 		});

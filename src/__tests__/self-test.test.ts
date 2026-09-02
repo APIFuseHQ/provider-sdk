@@ -38,6 +38,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 		id: "self-test-provider",
 		version: "1.0.0",
 		runtime: "standard",
+		http: true,
 		secrets: [{ name: UPSTREAM_SECRET_ENV }],
 		credential: { keys: ["phone"] },
 		meta: {
@@ -51,7 +52,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 		},
 		operations: {
 			echo: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({ value: z.string() }),
 				output: z.object({ echoed: z.string() }),
 				handler: async (_ctx, input) => ({
@@ -89,7 +90,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 				},
 			},
 			leak: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -104,7 +105,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 				},
 			},
 			slow: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -120,7 +121,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 				},
 			},
 			mutate: {
-				annotations: { readOnly: false },
+				riskClass: "write",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => ({ ok: true }),
@@ -129,17 +130,8 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 					cases: [{ name: "mutating case", input: {}, assertions: () => {} }],
 				},
 			},
-			unclassified: {
-				input: z.object({}),
-				output: z.object({ ok: z.boolean() }),
-				handler: async () => ({ ok: true }),
-				healthCheck: {
-					interval: "5m",
-					cases: [{ name: "unclassified case", input: {}, assertions: () => {} }],
-				},
-			},
 			connected: {
-				annotations: { readOnly: true },
+				riskClass: "read",
 				input: z.object({}),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx) => ({
@@ -323,7 +315,7 @@ describe("self-test internal listener", () => {
 		expect(response.status).toBe(200);
 	});
 
-	it("refuses non-read-only operations (explicit and unclassified) with 403", async () => {
+	it("refuses non-read operations with 403", async () => {
 		const { selfTestApp } = createApps();
 		const mutate = await postSelfTest(selfTestApp, {
 			operationId: "mutate",
@@ -334,12 +326,6 @@ describe("self-test internal listener", () => {
 			error: { code: string };
 		};
 		expect(mutateBody.error.code).toBe("operation_not_read_only");
-
-		const unclassified = await postSelfTest(selfTestApp, {
-			operationId: "unclassified",
-			caseName: "unclassified case",
-		});
-		expect(unclassified.status).toBe(403);
 	});
 
 	it("reports non-read-only cases as visible errors in batch mode", async () => {
@@ -371,7 +357,7 @@ describe("self-test internal listener", () => {
 	it("aborts an in-flight ctx.http fetch when a self-test case times out", async () => {
 		const provider = createProvider();
 		provider.operations.abortableHttp = {
-			annotations: { readOnly: true },
+			riskClass: "read",
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async (ctx) => {

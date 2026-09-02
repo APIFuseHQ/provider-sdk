@@ -1,0 +1,7 @@
+const READ_ONLY = true;
+const searchOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: READ_ONLY },
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

@@ -28,7 +28,7 @@ The score is a triage aid, not a payout guarantee. Maintainers still review corr
 | Category | Points | Examples |
 |---|---:|---|
 | Definition & metadata | 15 | `defineProvider`, package, Dockerfile, SDK structural checks |
-| Operations & schemas | 15 | strong descriptions, annotations, input/output schemas |
+| Operations & schemas | 15 | locale-keyed descriptions, explicit risk classes, input/output schemas |
 | Fixtures & tests | 15 | bidirectional fixtures that parse against schemas |
 | Health coverage | 15 | real `healthCheck` or specific `healthCheckUnsupported.reason` |
 | Runtime/local smoke | 10 | `/health` and at least one `POST /v1/{operation}` note |

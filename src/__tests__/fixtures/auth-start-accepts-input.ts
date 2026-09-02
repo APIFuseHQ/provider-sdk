@@ -1,6 +1,7 @@
 import { defineOperation, defineProvider, z } from "../../provider.js";
 
 const noop = defineOperation<unknown>()({
+	riskClass: "read",
 	descriptionKey: "operations.noop.description",
 	input: z.object({}),
 	output: z.object({ ok: z.boolean() }),

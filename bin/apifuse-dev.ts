@@ -6,13 +6,17 @@ import {
 	createCredentialContext,
 	createEnvContext,
 	createHttpClient,
+	createInProcessProviderEngine,
 	createOcrClientFromEnv,
 	createProviderCache,
 	createProviderChoiceContext,
+	createProviderEnvironment,
 	createUnsupportedResolverClient,
 	createSttClientFromEnv,
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
+	readEngineProxyCredentials,
 	type ProviderDefinition,
+	type ProviderEngineBindingCandidates,
 	ProviderError,
 	type ProviderProxyPolicy,
 } from "../src/index.js";
@@ -79,17 +83,20 @@ export async function main() {
 export function createProviderContext(provider: ProviderDefinition): {
 	ctx: ProviderContext;
 } {
-	const env = createEnvContext([
-		...(provider.secrets?.map((secret) => secret.name) ?? []),
-		PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-	]);
+	const providerEnvironment = createProviderEnvironment(
+		process.env,
+		provider.secrets?.map((secret) => secret.name) ?? [],
+	);
+	const providerEnv = { get: (key: string) => providerEnvironment[key] };
+	const engineEnv = createEnvContext([PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV]);
+	const engineCredentials = readEngineProxyCredentials();
 	const credential = createCredentialContext();
 	const state = createMemoryProviderRuntimeState();
 	const cache = createProviderCache({ providerId: provider.id });
 	const proxyPolicy = resolveNativeProxyPolicy(provider);
 	const stealthProfile = provider.stealth ? getStealthProfile(provider.stealth) : undefined;
-	const ctx: ProviderContext = {
-		env,
+	const candidates: ProviderEngineBindingCandidates = {
+		env: providerEnv,
 		credential,
 		auth: createUnsupportedAuthStub(),
 		browser:
@@ -109,7 +116,7 @@ export function createProviderContext(provider: ProviderDefinition): {
 		ocr: createOcrClientFromEnv(provider.ocr),
 		stt: createSttClientFromEnv(provider.stt),
 		resolver: provider.resolver
-			? createResolverClientFromEnv(provider.resolver, undefined, {
+			? createResolverClientFromEnv(provider.resolver, engineCredentials, {
 					allowedHosts: provider.allowedHosts,
 					cache,
 					...(proxyPolicy
@@ -125,11 +132,15 @@ export function createProviderContext(provider: ProviderDefinition): {
 			: createUnsupportedResolverClient("Provider does not declare resolver capability"),
 		choice: createProviderChoiceContext({
 			providerId: provider.id,
-			env,
+			env: engineEnv,
 			credential,
 			state,
 		}),
-	} satisfies Omit<ProviderContext, "native"> as unknown as ProviderContext;
+	};
+	const ctx = createInProcessProviderEngine().attach({
+		provider,
+		bindings: candidates,
+	}) as ProviderContext;
 
 	return { ctx };
 }

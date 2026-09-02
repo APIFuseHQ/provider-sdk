@@ -66,6 +66,7 @@ describe("ProviderDefinition types", () => {
 
 	it("rejects auth start handlers that declare input at runtime", () => {
 		const noop = defineOperation<unknown>()({
+			riskClass: "read",
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -99,6 +100,7 @@ describe("ProviderDefinition types", () => {
 
 	it("rejects defaulted auth start input without rejecting no-input handlers", () => {
 		const noop = defineOperation<unknown>()({
+			riskClass: "read",
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -177,6 +179,7 @@ describe("ProviderDefinition types", () => {
 
 	it("does not reject one-parameter function handlers with misleading body or comments", () => {
 		const noop = defineOperation<unknown>()({
+			riskClass: "read",
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -249,6 +252,7 @@ describe("ProviderDefinition types", () => {
 
 	it("does not reject ambiguous auth start handler source shapes", () => {
 		const noop = defineOperation<unknown>()({
+			riskClass: "read",
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -320,6 +324,7 @@ describe("ProviderDefinition types", () => {
 
 	it("documents the known compile-time limitation for widened auth flows", () => {
 		const noop = defineOperation<unknown>()({
+			riskClass: "read",
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -381,6 +386,7 @@ describe("ProviderDefinition types", () => {
 
 	it("rejects legacy auth exchange handlers at runtime", () => {
 		const noop = defineOperation<unknown>()({
+			riskClass: "read",
 			descriptionKey: "operations.noop.description",
 			input: providerZ.object({}),
 			output: providerZ.object({ ok: providerZ.boolean() }),
@@ -451,6 +457,7 @@ describe("ProviderDefinition types", () => {
 			},
 			operations: {
 				search: {
+					riskClass: "read",
 					descriptionKey: "operations.search.description",
 					input: z.object({ query: z.string() }),
 					output: z.object({ results: z.array(z.string()) }),

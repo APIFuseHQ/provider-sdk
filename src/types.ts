@@ -43,10 +43,10 @@ export type InferSchemaOutput<TSchema extends SchemaLike> =
 			? Output
 			: unknown;
 
-export interface OperationInputExample {
-	scenario: string;
+export interface OperationExample {
+	scenarioKey: ProviderLocaleKeyInput;
 	input: unknown;
-	rationale?: string;
+	rationaleKey?: ProviderLocaleKeyInput;
 }
 
 export type OperationRiskClass =
@@ -56,21 +56,6 @@ export type OperationRiskClass =
 	| "external-send";
 
 export type OperationApprovalPolicy = "never" | "risk-based" | "always";
-
-export interface OperationToolRouterMetadata {
-	/** Optional MCP-safe override. Defaults to providerId__operationId. */
-	name?: string;
-	/** Safety class exposed to Tool Router clients and approval policy. */
-	riskClass?: OperationRiskClass;
-	/** OpenAI remote-MCP approval hint. Defaults from riskClass. */
-	approval?: OperationApprovalPolicy;
-	/** Canonical operation-level connection requirement consumed by the registry and Gateway. */
-	connectionMode?: "none" | "optional" | "required";
-	/** Override connection requirement when provider auth + openWorld inference is insufficient. */
-	requiresConnection?: boolean;
-	/** Public argument used to resolve the tenant-owned connection. Defaults to externalRef. */
-	connectionExternalRefParam?: string;
-}
 
 export type OperationSensitivePath = string;
 
@@ -94,38 +79,6 @@ export interface OperationObservabilityConfig {
 	 * express as stable public paths.
 	 */
 	sensitive?: OperationObservabilitySensitiveConfig;
-}
-
-export interface OperationAnnotations {
-	readOnly?: boolean;
-	destructive?: boolean;
-	idempotent?: boolean;
-	/**
-	 * Marks the operation as callable without provider-level authentication.
-	 *
-	 * Provider-level `auth.mode` describes the **majority** auth model of a
-	 * provider; individual operations can still opt out via `openWorld: true`
-	 * when their handler does not consume `ctx.credential`. This is the
-	 * canonical way to declare "this operation is public, even though the
-	 * provider is `credentials`-mode" without splitting the provider into two.
-	 *
-	 * Health-check projections treat `openWorld: true` operations as
-	 * connection-free probes (no `requiresConnection` required, no SA token
-	 * lookup). Future gateway work MAY extend this annotation to bypass
-	 * `X-ApiFuse-Connection-Id` enforcement at proxy time.
-	 *
-	 * Example: Naver Map's `search`, `geocode`, and directions operations
-	 * call public Naver endpoints with no cookies, while `collections` and
-	 * `export` consume the user's session cookie — the provider declares
-	 * `auth.mode: "credentials"` (for the latter) and the former mark
-	 * `openWorld: true`.
-	 */
-	openWorld?: boolean;
-	rateLimit?: {
-		calls: number;
-		window: "minute" | "hour" | "day";
-	};
-	timeoutMs?: number;
 }
 
 export const OPERATION_TIMEOUT_MS_MIN = 1;
@@ -931,17 +884,6 @@ export interface OperationErrorCode {
 	retryable?: boolean;
 }
 
-export interface OperationDocMeta {
-	titleKey?: ProviderLocaleKeyInput;
-	descriptionKey?: ProviderLocaleKeyInput;
-	summaryKey?: ProviderLocaleKeyInput;
-	markdownKey?: ProviderLocaleKeyInput;
-	normalizationNotesKeys?: ProviderLocaleKeyInput[];
-	requestExample?: Record<string, unknown>;
-	responseExample?: unknown;
-	errorCodes?: OperationErrorCode[];
-}
-
 export type StealthPlatform = "macos" | "windows" | "linux" | "android" | "ios";
 
 export type StealthBrowser = "chrome" | "firefox" | "safari";
@@ -1074,8 +1016,7 @@ export interface ProviderAccessConfig {
 	 *	 active customer organization has a provider-level access grant.
 	 *
 	 * This is intentionally provider-level only. It does not alter auth mode,
-	 * operation schemas, health-check authoring, `openWorld`, or Connection
-	 * requirements.
+	 * operation schemas, health-check authoring, or Connection requirements.
 	 */
 	visibility?: ProviderAccessVisibility;
 }
@@ -1539,6 +1480,9 @@ export interface ProviderFilesContext {
 	resolve(input: string | ProviderFileRef): Promise<ProviderResolvedFile>;
 }
 
+/** Where provider business logic executes relative to the capability engine. */
+export type ProviderRuntimeTarget = "vanilla" | "engine";
+
 export type NativeTcpTlsMode = "required" | "allowed" | "disabled";
 
 export interface NativeTcpPortRange {
@@ -1914,7 +1858,7 @@ export interface TraceConfig {
 	exporter?: "console" | "json" | "otlp" | "none";
 	endpoint?: string;
 	otlp?: {
-		endpoint: string;
+		endpoint?: string;
 		headers?: Record<string, string>;
 		timeout?: number;
 	};
@@ -2318,48 +2262,43 @@ export interface ProviderRuntimeState {
 	): ProviderStateNamespace;
 }
 
-export interface ProviderContext {
-	env: EnvContext;
-	credential: CredentialContext;
-	request?: ProviderRequestContext;
-	http: HttpClient;
-	/** Present for requests carrying runtime-resolvable file references. */
-	readonly files?: ProviderFilesContext;
-	/** Native network capability selected by declaration-derived contexts. */
-	readonly native: NativeContext;
-	cache: ProviderCache;
-	state: ProviderRuntimeState;
-	stealth: StealthClient;
-	browser: BrowserClient;
-	trace: TraceContext;
-	auth: AuthContext;
-	ocr: OcrContext;
-	stt: SttContext;
-	resolver: ResolverContext;
-	choice: ProviderChoiceContext;
-}
-
 /**
  * The operation context exposed for one provider declaration. Capability
  * bindings are present only when their corresponding declaration is present;
- * trace and request remain ambient runtime bindings.
+ * trace and request remain ambient runtime bindings. Omitting the type
+ * parameter preserves the legacy full context shape for existing annotations.
  */
-export type ProviderContextFor<TConfig> =
-	Pick<ProviderContext, "trace" | "request">
-	& ("env" extends keyof TConfig ? Pick<ProviderContext, "env"> : Record<never, never>)
-	& ("credential" extends keyof TConfig ? Pick<ProviderContext, "credential"> : Record<never, never>)
-	& ("http" extends keyof TConfig ? Pick<ProviderContext, "http"> : Record<never, never>)
-	& ("files" extends keyof TConfig ? Pick<ProviderContext, "files"> : Record<never, never>)
-	& ("native" extends keyof TConfig ? Pick<ProviderContext, "native"> : Record<never, never>)
-	& ("cache" extends keyof TConfig ? Pick<ProviderContext, "cache"> : Record<never, never>)
-	& ("state" extends keyof TConfig ? Pick<ProviderContext, "state"> : Record<never, never>)
-	& ("stealth" extends keyof TConfig ? Pick<ProviderContext, "stealth"> : Record<never, never>)
-	& ("browser" extends keyof TConfig ? Pick<ProviderContext, "browser"> : Record<never, never>)
-	& ("auth" extends keyof TConfig ? Pick<ProviderContext, "auth"> : Record<never, never>)
-	& ("ocr" extends keyof TConfig ? Pick<ProviderContext, "ocr"> : Record<never, never>)
-	& ("stt" extends keyof TConfig ? Pick<ProviderContext, "stt"> : Record<never, never>)
-	& ("resolver" extends keyof TConfig ? Pick<ProviderContext, "resolver"> : Record<never, never>)
-	& ("choice" extends keyof TConfig ? Pick<ProviderContext, "choice"> : Record<never, never>);
+export type ProviderContext<TConfig = Record<string, unknown>> = {
+	request?: ProviderRequestContext;
+	trace: TraceContext;
+}
+	& ("env" extends keyof TConfig ? { env: EnvContext } : Record<never, never>)
+	& ("credential" extends keyof TConfig
+		? { credential: CredentialContext }
+		: Record<never, never>)
+	& ("http" extends keyof TConfig ? { http: HttpClient } : Record<never, never>)
+	& ("files" extends keyof TConfig
+		? string extends keyof TConfig
+			? { readonly files?: ProviderFilesContext }
+			: { readonly files: ProviderFilesContext }
+		: Record<never, never>)
+	& ("native" extends keyof TConfig
+		? { readonly native: NativeContext }
+		: Record<never, never>)
+	& ("cache" extends keyof TConfig ? { cache: ProviderCache } : Record<never, never>)
+	& ("state" extends keyof TConfig ? { state: ProviderRuntimeState } : Record<never, never>)
+	& ("stealth" extends keyof TConfig ? { stealth: StealthClient } : Record<never, never>)
+	& ("browser" extends keyof TConfig ? { browser: BrowserClient } : Record<never, never>)
+	& ("auth" extends keyof TConfig ? { auth: AuthContext } : Record<never, never>)
+	& ("ocr" extends keyof TConfig ? { ocr: OcrContext } : Record<never, never>)
+	& ("stt" extends keyof TConfig ? { stt: SttContext } : Record<never, never>)
+	& ("resolver" extends keyof TConfig ? { resolver: ResolverContext } : Record<never, never>)
+	& ("choice" extends keyof TConfig
+		? { choice: ProviderChoiceContext }
+		: Record<never, never>);
+
+/** Backwards-compatible name for a declaration-derived provider context. */
+export type ProviderContextFor<TConfig> = ProviderContext<TConfig>;
 
 export interface ProxiedOAuthConfig {
 	authorizeUrl: string;
@@ -2419,33 +2358,29 @@ export interface OperationDefinition<
 	TOutput extends SchemaLike = SchemaLike,
 	TContext = ProviderContext,
 > {
-	/**
-	 * Short English display title for the operation. The SDK passes it through
-	 * verbatim; the APIFuse registry derives the operation's en locale title
-	 * baseline from it (`docs.titleKey` remains available as an explicit key
-	 * override).
-	 */
-	title?: string;
-	/**
-	 * Raw English operation description. The SDK passes it through verbatim;
-	 * keyed descriptions via `descriptionKey` remain the primary flow, and
-	 * provider lint rules for raw prose descriptions still apply.
-	 */
-	description?: string;
+	/** Canonical operation-level connection requirement. */
+	connectionMode?: "none" | "optional" | "required";
+	/** Public argument used to resolve the tenant-owned connection. Defaults to externalRef. */
+	connectionExternalRefParam?: string;
+	/** Safety source of truth exposed to clients and approval policy. */
+	riskClass: OperationRiskClass;
+	/** Approval override. Omit when the risk-class default is correct. */
+	approval?: OperationApprovalPolicy;
+	timeoutMs?: number;
+	titleKey?: ProviderLocaleKeyInput;
 	descriptionKey?: ProviderLocaleKeyInput;
-	docs?: OperationDocMeta;
+	summaryKey?: ProviderLocaleKeyInput;
+	markdownKey?: ProviderLocaleKeyInput;
 	whenToUseKeys?: readonly ProviderLocaleKeyInput[];
 	whenNotToUseKeys?: readonly ProviderLocaleKeyInput[];
-	derivations?: Record<string, string>;
-	inputExamples?: readonly OperationInputExample[];
-	annotations?: OperationAnnotations;
+	normalizationNotesKeys?: readonly ProviderLocaleKeyInput[];
+	errorCodes?: readonly OperationErrorCode[];
+	examples?: readonly OperationExample[];
 	contract?: OperationContractMetadata;
 	tags?: readonly string[];
 	relatedOperations?: OperationRelationships;
-	toolRouter?: OperationToolRouterMetadata;
 	observability?: OperationObservabilityConfig;
 	transport?: OperationTransport;
-	retryOnAuthRefresh?: boolean;
 	input: TInput;
 	output: TOutput;
 	handler(
@@ -2519,11 +2454,20 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 	version: string;
 	runtime: "standard" | "shared" | "browser";
 	/**
+	 * `vanilla` executes provider business logic outside the engine; `engine`
+	 * keeps session-bearing provider logic in the engine process.
+	 *
+	 * Omitted only for definitions authored before the engine migration. New
+	 * providers should declare the target explicitly.
+	 */
+	runtimeTarget?: ProviderRuntimeTarget;
+	/**
 	 * Optional deployment overrides, passed through verbatim from
 	 * `defineProvider({ deployment })`. Validation and profile resolution are
 	 * owned by the APIFuse registry builder, not the SDK.
 	 */
 	deployment?: ProviderDeploymentOverrides;
+	http?: Record<string, never> | true;
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
 	stealth?: StealthProfileSelection;
@@ -2535,11 +2479,16 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 		engine: BrowserEngine;
 	};
 	auth?: AuthConfig;
+	choice?: Record<string, never> | true;
 	reviewed?: ProviderReviewed;
 	access?: ProviderAccessConfig;
 	secrets?: ProviderSecretDeclaration[];
+	env?: Record<string, never> | true;
 	credential?: CredentialDeclaration;
 	context?: ContextDeclaration;
+	state?: Record<string, never> | true;
+	cache?: Record<string, never> | true;
+	files?: Record<string, never> | true;
 	meta: ProviderMeta;
 	operations: Record<string, OperationDefinition<SchemaLike, SchemaLike, TContext>>;
 	healthMonitor?: ProviderHealthMonitorConfig;

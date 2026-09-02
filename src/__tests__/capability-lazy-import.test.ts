@@ -35,25 +35,25 @@ describe("provider capability imports", () => {
 		});
 	}
 
-	it("loads tier-2 stealth on first use and delegates to the real client arguments", async () => {
+	it("fails closed before loading undeclared stealth", async () => {
 		const result = await runImportGuard("tier2-stealth");
 		expect(result.stderr).toBe("");
 		expect(result.exitCode).toBe(0);
 	});
 
-	it("keeps tier-2 stealth sessions and cookies synchronous before lazy transport use", async () => {
+	it("fails closed before opening an undeclared stealth session", async () => {
 		const result = await runImportGuard("tier2-stealth-session");
 		expect(result.stderr).toBe("");
 		expect(result.exitCode).toBe(0);
 	});
 
-	it("returns 500 without a cleanup event when a tier-2 stealth import rejects", async () => {
+	it("does not attempt an undeclared stealth import", async () => {
 		const result = await runImportGuard("tier2-stealth-rejection");
 		expect(result.stderr).toBe("");
 		expect(result.exitCode).toBe(0);
 	});
 
-	it("reports exactly one cleanup event when a tier-2 stealth client close throws", async () => {
+	it("does not create or clean up an undeclared stealth client", async () => {
 		const result = await runImportGuard("tier2-stealth-close-throw");
 		expect(result.stderr).toBe("");
 		expect(result.exitCode).toBe(0);
@@ -96,6 +96,7 @@ describe("provider capability imports", () => {
 			},
 			operations: {
 				solve: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ token: z.string() }),
 					async handler(ctx) {

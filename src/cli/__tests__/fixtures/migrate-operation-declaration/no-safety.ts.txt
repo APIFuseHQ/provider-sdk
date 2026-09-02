@@ -1,0 +1,6 @@
+const unknownOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: false, destructive: false },
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

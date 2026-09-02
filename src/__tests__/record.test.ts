@@ -161,7 +161,7 @@ const input = {
   },
 };
 export default {
-  id: "record-standard-schema", version: "1.0.0", runtime: "standard",
+  id: "record-standard-schema", version: "1.0.0", runtime: "standard", http: true,
   operations: { lookup: {
     input, output: z.object({ path: z.string() }),
     upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
@@ -222,7 +222,8 @@ export default {
 				join(providerDir, "index.ts"),
 				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
 export default {
-  id: "record-stealth-session-cookies", version: "1.0.0", runtime: "standard",
+  id: "record-stealth-session-cookies", version: "1.0.0", runtime: "standard", http: true,
+  stealth: { browser: "chrome", os: "macos" },
   operations: { lookup: {
     input: z.object({}), output: z.object({ received: z.string() }),
     upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
@@ -299,7 +300,7 @@ export default {
 				join(providerDir, "index.ts"),
 				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
 export default {
-  id: "record-ordinary-sanitize", version: "1.0.0", runtime: "standard",
+  id: "record-ordinary-sanitize", version: "1.0.0", runtime: "standard", http: true,
   operations: { lookup: {
     input: z.object({}), output: z.object({ public: z.string() }),
     upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
@@ -367,7 +368,7 @@ export default {
 				join(providerDir, "index.ts"),
 				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
 export default {
-  id: "record-ordinary-then-sse", version: "1.0.0", runtime: "standard",
+  id: "record-ordinary-then-sse", version: "1.0.0", runtime: "standard", http: true,
   operations: { events: {
     input: z.object({}), output: z.object({ ok: z.boolean() }),
     upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
@@ -435,6 +436,7 @@ export default {
   id: "record-single-invocation",
   version: "1.0.0",
   runtime: "standard",
+  http: true,
   operations: {
     lookup: {
 				  input: z.object({}),
@@ -522,6 +524,7 @@ export default {
   id: "record-stream-capture",
   version: "1.0.0",
   runtime: "standard",
+  http: true,
   operations: {
     download: {
       input: z.object({}),
@@ -649,6 +652,7 @@ export default {
   id: "record-multi-stream-capture",
   version: "1.0.0",
   runtime: "standard",
+  http: true,
   operations: {
     download: {
       input: z.object({}),
@@ -745,6 +749,7 @@ export default {
   id: "record-stream-json-sanitize",
   version: "1.0.0",
   runtime: "standard",
+  http: true,
   operations: {
     download: {
       input: z.object({}),
@@ -841,7 +846,7 @@ export default {
 			writeFileSync(
 				join(providerDir, "index.ts"),
 				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
-export default { id: "record-stream-sensitive-params", version: "1.0.0", runtime: "standard",
+export default { id: "record-stream-sensitive-params", version: "1.0.0", runtime: "standard", http: true,
  operations: { download: { input: z.object({}), output: z.object({ ok: z.boolean() }),
  upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
  handler: async (ctx) => {
@@ -915,7 +920,7 @@ export default { id: "record-stream-sensitive-params", version: "1.0.0", runtime
 			writeFileSync(
 				join(providerDir, "index.ts"),
 				`import { ProviderError, z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "src", "index.ts")).href)};
-export default { id: "record-error-redaction", version: "1.0.0", runtime: "standard",
+export default { id: "record-error-redaction", version: "1.0.0", runtime: "standard", http: true,
  operations: { lookup: { input: z.object({}), output: z.unknown(),
  upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
  handler: async (ctx) => {
@@ -994,6 +999,7 @@ export default {
   id: "record-sensitive-query",
   version: "1.0.0",
   runtime: "standard",
+  http: true,
   operations: {
     lookup: {
       input: z.object({}),
@@ -1109,7 +1115,7 @@ export default {
 				join(providerDir, "index.ts"),
 				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "src", "index.ts")).href)};
 export default {
-  id: "record-post-put", version: "1.0.0", runtime: "standard",
+  id: "record-post-put", version: "1.0.0", runtime: "standard", http: true,
   operations: { lookup: { input: z.object({}), output: z.unknown(),
     upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
     handler: async (ctx) => {
@@ -1191,6 +1197,7 @@ export default {
 				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "src", "index.ts")).href)};
 export default {
   id: "record-stealth", version: "1.0.0", runtime: "standard",
+  stealth: { browser: "chrome", os: "macos" },
   operations: { lookup: { input: z.object({}), output: z.unknown(),
     upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
     handler: async (ctx) => {
@@ -1277,7 +1284,7 @@ export default {
 			writeFileSync(
 				join(providerDir, "index.ts"),
 				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "src", "index.ts")).href)};
-export default { id: "record-default", version: "1.0.0", runtime: "standard",
+export default { id: "record-default", version: "1.0.0", runtime: "standard", http: true,
  operations: { lookup: { input: z.object({}), output: z.unknown(),
  upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
  handler: async (ctx) => (await ctx.http.get("/", {
@@ -1345,7 +1352,7 @@ export default { id: "record-default", version: "1.0.0", runtime: "standard",
 			writeFileSync(
 				join(providerDir, "index.ts"),
 				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "src", "index.ts")).href)};
-export default { id: "record-invalid", version: "1.0.0", runtime: "standard",
+export default { id: "record-invalid", version: "1.0.0", runtime: "standard", http: true,
  operations: { lookup: { input: z.object({}), output: z.unknown(),
  upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
  handler: async (ctx) => (await ctx.http.get("/", {

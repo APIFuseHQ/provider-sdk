@@ -25,6 +25,7 @@ const makeProviderConfig = () => ({
 	},
 	operations: {
 		lookup: defineOperation<ProviderContext>()({
+			riskClass: "read",
 			input: z.object({ id: z.string() }),
 			output: z.object({ result: z.string() }),
 			async handler(_ctx, input) {
@@ -51,6 +52,7 @@ describe("defineProvider ergonomics", () => {
 
 	it("defineOperation composes factored operations with inferred input", async () => {
 		const search = defineOperation<ProviderContext>()({
+			riskClass: "read",
 			input: z.object({ q: z.string() }),
 			output: z.object({ count: z.number() }),
 			async handler(_ctx, input) {
@@ -72,6 +74,7 @@ describe("defineProvider ergonomics", () => {
 
 	it("defineProvider accepts generated readonly metadata and factored operation maps", async () => {
 		const search = defineOperation<ProviderContext>()({
+			riskClass: "read",
 			input: z.object({ q: z.string() }),
 			output: z.object({ count: z.number() }),
 			async handler(_ctx, input) {
@@ -102,6 +105,7 @@ describe("defineProvider ergonomics", () => {
 
 	it("defineStreamOperation composes operations with explicit non-JSON transport", () => {
 		const events = defineStreamOperation<ProviderContext>()({
+			riskClass: "read",
 			input: z.object({ topic: z.string() }),
 			output: z.object({ accepted: z.boolean() }),
 			transport: {
@@ -163,6 +167,7 @@ describe("defineProvider ergonomics", () => {
 		};
 
 		const standard = defineOperation<ProviderContext>()({
+			riskClass: "read",
 			input: InputSchema,
 			output: OutputSchema,
 			async handler(_ctx, input) {

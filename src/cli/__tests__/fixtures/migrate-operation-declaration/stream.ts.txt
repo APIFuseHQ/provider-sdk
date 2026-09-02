@@ -1,0 +1,7 @@
+const downloadOperation = defineStreamOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	toolRouter: { connectionMode: "optional" },
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

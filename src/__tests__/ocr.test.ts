@@ -574,6 +574,7 @@ describe("OCR Provider SDK context integration", () => {
 			},
 			operations: {
 				recognize: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => ({ ok: true }),
@@ -593,6 +594,7 @@ describe("OCR Provider SDK context integration", () => {
 			meta: { displayName: "OCR Invalid Demo", category: "test" },
 			operations: {
 				recognize: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => ({ ok: true }),
@@ -667,6 +669,7 @@ describe("OCR Provider SDK context integration", () => {
 			},
 			operations: {
 				recognize: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ text: z.string() }),
 					async handler(ctx: { ocr: OcrContext }) {
@@ -713,6 +716,7 @@ describe("OCR Provider SDK context integration", () => {
 			},
 			operations: {
 				recognize: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler(ctx: { ocr: OcrContext }) {

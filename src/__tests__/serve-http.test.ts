@@ -26,8 +26,15 @@ import {
 	resolveProviderProxyAffinityKey,
 } from "../server/serve.js";
 import { event } from "../stream.js";
-import type { OperationErrorCode, ProviderContext, ProviderDefinition } from "../types.js";
+import type {
+	OperationErrorCode,
+	OperationRiskClass,
+	ProviderContext,
+	ProviderDefinition,
+} from "../types.js";
 import { HttpRetryPreset } from "../types.js";
+
+const READ_RISK_CLASS: OperationRiskClass = "read";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 
 function errorObservability(response: Response): ErrorObservabilityDetails {
@@ -76,6 +83,10 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 		id: "test-provider",
 		version: "1.0.0",
 		runtime: "standard",
+		runtimeTarget: "vanilla",
+		http: {},
+		choice: {},
+		cache: {},
 		meta: {
 			displayName: "Test Provider",
 			descriptionKey: "test-provider.description",
@@ -142,6 +153,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 		context: { keys: ["step", "otp"] },
 		operations: {
 			echo: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({
 					echoed: z.string(),
@@ -159,6 +171,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			issueServerChoice: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ token: z.string() }),
 				handler: async (ctx, input) => {
@@ -179,6 +192,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			parseServerChoice: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ token: z.string() }),
 				output: z.object({ value: z.string() }),
 				handler: async (ctx, input) => {
@@ -199,6 +213,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			cached: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ value: z.string() }),
 				handler: async (ctx, input) => {
@@ -212,6 +227,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			retryThenEcho: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (ctx) => {
@@ -225,6 +241,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			cachedRetryThenEcho: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ value: z.string() }),
 				handler: async (ctx, input) => {
@@ -244,6 +261,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			events: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -257,6 +275,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			invalidEvents: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -270,6 +289,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			undeclaredEvents: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -283,6 +303,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			rawSseResponse: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -297,6 +318,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					}),
 			},
 			rawTelemetryResponse: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async (_ctx, input) =>
@@ -310,6 +332,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					}),
 			},
 			oversizedEvents: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -324,6 +347,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			abortableEvents: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -342,6 +366,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			download: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: { kind: "http-stream", contentType: "text/plain" },
@@ -354,6 +379,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					}),
 			},
 			oversizedDownload: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: {
@@ -370,6 +396,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					}),
 			},
 			abortableDownload: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				transport: { kind: "http-stream", contentType: "text/plain" },
@@ -381,6 +408,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					}),
 			},
 			providerError: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -388,6 +416,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			validationError: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -395,12 +424,14 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			invalidOutput: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				// test-invalid: runtime output validation must reject a string in a boolean field.
 				handler: async () => ({ ok: "not-a-boolean" }) as never,
 			},
 			providerActionRequired: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -415,6 +446,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			noData: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -422,6 +454,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			lowercaseNotFound: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -431,6 +464,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			upstreamProviderError: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -440,6 +474,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			blockedProviderError: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -449,6 +484,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			rateLimitedProviderError: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -458,6 +494,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			transportTimeout: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -469,6 +506,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			transportNetwork: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -479,6 +517,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			transportWithDetails: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -490,6 +529,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			transportExplicitNonRetryable: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -502,6 +542,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			transportStringDetails: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -512,6 +553,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			transportArrayDetails: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -522,6 +564,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			proxyAuthIpDenied: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -532,6 +575,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			proxyEdgeAuthRejected: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -542,6 +586,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			upstreamBadRequest: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -552,6 +597,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			unexpectedError: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -559,19 +605,19 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				},
 			},
 			sessionExpiredRetryable: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
-				retryOnAuthRefresh: true,
 				handler: async () => {
 					throw new SessionExpiredError("Provider session expired", {
-						code: "UPSTREAM_ERROR",
-						category: "upstream_http",
 						fix: "must not reach the tenant body",
 						details: { mustNotReachTenant: true },
+						retryable: true,
 					});
 				},
 			},
 			sessionExpiredUnmarked: {
+				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
 				output: z.object({ ok: z.boolean() }),
 				handler: async () => {
@@ -796,6 +842,7 @@ describe("provider HTTP server", () => {
 			operations: {
 				...baseProvider.operations,
 				proxyOptionalFallback: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async (ctx) => {
@@ -851,6 +898,7 @@ describe("provider HTTP server", () => {
 			operations: {
 				...baseProvider.operations,
 				proxyRequiredFailure: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async (ctx) => {
@@ -923,6 +971,7 @@ describe("provider HTTP server", () => {
 		if (!address || typeof address === "string") throw new Error("native fixture did not bind");
 		const target = { host: "127.0.0.1", port: address.port };
 		const operation = {
+			riskClass: READ_RISK_CLASS,
 			input: z.object({}),
 			output: z.object({ ok: z.boolean() }),
 			handler: async (ctx: ProviderContext) => {
@@ -935,6 +984,7 @@ describe("provider HTTP server", () => {
 		try {
 			const openProvider = {
 				...createTestProvider(),
+				runtimeTarget: "engine",
 				native: {},
 				operations: { nativeConnect: operation },
 			} satisfies ProviderDefinition;
@@ -948,9 +998,11 @@ describe("provider HTTP server", () => {
 
 			const unsupportedGrantProvider = {
 				...createTestProvider(),
+				runtimeTarget: "engine",
 				native: {},
 				operations: {
 					unsupportedGrant: {
+						riskClass: READ_RISK_CLASS,
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						handler: async (ctx: ProviderContext) => {
@@ -985,6 +1037,7 @@ describe("provider HTTP server", () => {
 
 			const enforcedProvider = {
 				...createTestProvider(),
+				runtimeTarget: "engine",
 				native: {
 					network: {
 						tcp: [{ host: "elsewhere.example", ports: [443], tls: "disabled" }],
@@ -1025,6 +1078,7 @@ describe("provider HTTP server", () => {
 				browser: { engine: "playwright-stealth" },
 				operations: {
 					open: {
+						riskClass: READ_RISK_CLASS,
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						handler: async (ctx) => {
@@ -1726,6 +1780,7 @@ describe("provider HTTP server", () => {
 				...base,
 				operations: {
 					statusProbe: {
+						riskClass: READ_RISK_CLASS,
 						input: z.object({ value: z.string() }),
 						output: z.object({ ok: z.boolean() }),
 						handler: async () => {
@@ -1755,6 +1810,7 @@ describe("provider HTTP server", () => {
 			...base,
 			operations: {
 				reserve: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -1789,11 +1845,11 @@ describe("provider HTTP server", () => {
 			...base,
 			operations: {
 				order: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
-					docs: {
-						descriptionKey: "order",
-						errorCodes: [
+					descriptionKey: "order",
+					errorCodes: [
 							{
 								code: "SOLD_OUT",
 								status: 422 as const,
@@ -1801,7 +1857,6 @@ describe("provider HTTP server", () => {
 								retryable: false,
 							},
 						],
-					},
 					handler: async () => {
 						throw new ProviderError("Item is sold out.", { code: "SOLD_OUT" });
 					},
@@ -1838,6 +1893,7 @@ describe("provider HTTP server", () => {
 				...base,
 				operations: {
 					statusProbe: {
+						riskClass: READ_RISK_CLASS,
 						input: z.object({ value: z.string() }),
 						output: z.object({ ok: z.boolean() }),
 						handler: async () => {
@@ -1976,7 +2032,7 @@ describe("provider HTTP server", () => {
 		}
 	});
 
-	it("surfaces credential_expired + retryable:true in the HTTP error for retryOnAuthRefresh operations", async () => {
+	it("surfaces an authored retryable SessionExpiredError through HTTP", async () => {
 		const response = await app.request("/v1/sessionExpiredRetryable", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -1994,6 +2050,8 @@ describe("provider HTTP server", () => {
 				requestId: "req_session_retry",
 				retryable: true,
 				source: "client",
+				fix: "must not reach the tenant body",
+				details: { mustNotReachTenant: true },
 			},
 		});
 		expect(errorObservability(response)).toEqual({
@@ -2003,7 +2061,7 @@ describe("provider HTTP server", () => {
 		});
 	});
 
-	it("preserves SessionExpiredError observability through retryOnAuthRefresh", async () => {
+	it("preserves authored SessionExpiredError observability", async () => {
 		const providerObservability = {
 			reason: "SESSION_REFRESH_FAILED",
 			fingerprint: "038ed7ef11d8",
@@ -2016,12 +2074,13 @@ describe("provider HTTP server", () => {
 			operations: {
 				...baseProvider.operations,
 				sessionExpiredObservable: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
-					retryOnAuthRefresh: true,
 					handler: async () => {
 						throw new SessionExpiredError("Provider session expired", {
 							observability: providerObservability,
+							retryable: true,
 						});
 					},
 				},
@@ -2170,6 +2229,7 @@ describe("provider HTTP server", () => {
 		const provider = {
 			...baseProvider,
 			allowedHosts: ["example.com"],
+			stealth: { browser: "chrome", os: "macos" },
 			proxy: {
 				mode: "required",
 				provider: "smartproxy",
@@ -2179,6 +2239,7 @@ describe("provider HTTP server", () => {
 			operations: {
 				...baseProvider.operations,
 				proxyAllocationFailure: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					handler: async (ctx) => {
@@ -2367,6 +2428,7 @@ describe("provider HTTP server", () => {
 			...base,
 			operations: {
 				causeError: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -3214,9 +3276,10 @@ describe("operation-declared error resolution", () => {
 			...base,
 			operations: {
 				declaredError: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
-					...(input.entry ? { docs: { errorCodes: [input.entry] } } : {}),
+					...(input.entry ? { errorCodes: [input.entry] } : {}),
 					handler: async () => {
 						throw input.createError();
 					},
@@ -3487,10 +3550,10 @@ describe("operation-declared error resolution", () => {
 			...base,
 			operations: {
 				structuralError: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
-					docs: {
-						errorCodes: [
+					errorCodes: [
 							{
 								code: "STRUCTURAL_INVALID_STATUS",
 								// @ts-expect-error test-invalid: structural validation must reject non-emittable status
@@ -3498,7 +3561,6 @@ describe("operation-declared error resolution", () => {
 								description: "Invalid structural status",
 							},
 						],
-					},
 					handler: async () => {
 						throw new ProviderError("Structural failure", {
 							code: "STRUCTURAL_INVALID_STATUS",
@@ -3546,6 +3608,7 @@ describe("provider HTTP server cross-module error identity", () => {
 			operations: {
 				...base.operations,
 				dupProviderError: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -3556,10 +3619,10 @@ describe("provider HTTP server cross-module error identity", () => {
 					},
 				},
 				dupDeclaredProviderError: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
-					docs: {
-						errorCodes: [
+					errorCodes: [
 							{
 								code: "DUPLICATE_DECLARED_ERROR",
 								status: 502,
@@ -3567,7 +3630,6 @@ describe("provider HTTP server cross-module error identity", () => {
 								retryable: true,
 							},
 						],
-					},
 					handler: async () => {
 						throw new Dup.ProviderError("Duplicate declared failure", {
 							code: "DUPLICATE_DECLARED_ERROR",
@@ -3575,6 +3637,7 @@ describe("provider HTTP server cross-module error identity", () => {
 					},
 				},
 				dupSessionExpired: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -3582,6 +3645,7 @@ describe("provider HTTP server cross-module error identity", () => {
 					},
 				},
 				dupTransport: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -3591,6 +3655,7 @@ describe("provider HTTP server cross-module error identity", () => {
 					},
 				},
 				dupValidation: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -3600,6 +3665,7 @@ describe("provider HTTP server cross-module error identity", () => {
 					},
 				},
 				preBrandValidation: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {
@@ -3611,6 +3677,7 @@ describe("provider HTTP server cross-module error identity", () => {
 					},
 				},
 				unbrandedLookalike: {
+					riskClass: READ_RISK_CLASS,
 					input: z.object({ value: z.string() }),
 					output: z.object({ ok: z.boolean() }),
 					handler: async () => {

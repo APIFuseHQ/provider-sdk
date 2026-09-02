@@ -289,6 +289,7 @@ describe("resolver server wiring", () => {
 				},
 			})({ operations: {
 					solve: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ first: z.string(), second: z.string() }),
 						async handler(ctx) {
@@ -363,10 +364,6 @@ describe("resolver server wiring", () => {
 				runtime: "standard",
 				stealth: { browser: "chrome", os: "macos" },
 				proxy: { mode: "required", providers: ["nodemaven"] },
-				secrets: [
-					{ name: NODEMAVEN_USERNAME_ENV, required: true },
-					{ name: NODEMAVEN_PASSWORD_ENV, required: true },
-				],
 				resolver: { vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
 				meta: {
 					displayName: "Resolver Required Proxy Policy",
@@ -375,6 +372,7 @@ describe("resolver server wiring", () => {
 				},
 			})({ operations: {
 					solve: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ token: z.string() }),
 						async handler(ctx) {
@@ -445,10 +443,6 @@ describe("resolver server wiring", () => {
 				runtime: "standard",
 				stealth: { browser: "chrome", os: "macos" },
 				proxy: { mode: "required", providers: ["nodemaven"] },
-				secrets: [
-					{ name: NODEMAVEN_USERNAME_ENV, required: true },
-					{ name: NODEMAVEN_PASSWORD_ENV, required: true },
-				],
 				resolver: { vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
 				meta: {
 					displayName: "Resolver Required Proxy Auth Flow",
@@ -472,6 +466,7 @@ describe("resolver server wiring", () => {
 				},
 			})({ operations: {
 					unused: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({ ok: z.boolean() }),
 						async handler() {
@@ -539,6 +534,7 @@ describe("resolver server wiring", () => {
 			},
 		})({ operations: {
 				solve: {
+					riskClass: "read",
 					input: resolverAuthoringInputSchema,
 					output: z.object({ ok: z.boolean() }),
 					async handler(ctx, input: ResolverAuthoringInput) {
@@ -584,7 +580,7 @@ describe("resolver server wiring", () => {
 		expect(provider.resolver).toBe(declaration);
 	});
 
-	it("keeps undeclared providers on the unsupported resolver client", async () => {
+	it("fails closed when an undeclared provider accesses the resolver", async () => {
 		const provider = defineProvider({
 			id: "resolver-undeclared",
 			version: "1.0.0",
@@ -596,6 +592,7 @@ describe("resolver server wiring", () => {
 			},
 		})({ operations: {
 				solve: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ ok: z.boolean() }),
 					async handler(ctx) {
@@ -616,8 +613,8 @@ describe("resolver server wiring", () => {
 		expect(response.status).toBe(500);
 		expect(await response.json()).toMatchObject({
 			error: {
-				code: "RESOLVER_UNAVAILABLE",
-				message: "Provider does not declare resolver capability",
+				code: "PROVIDER_CAPABILITY_UNDECLARED",
+				message: expect.stringContaining('undeclared capability "resolver"'),
 			},
 		});
 	});
@@ -659,6 +656,7 @@ describe("resolver server wiring", () => {
 			},
 		})({ operations: {
 				solve: {
+					riskClass: "read",
 					input: z.object({}),
 					output: z.object({ token: z.string() }),
 					async handler(ctx) {

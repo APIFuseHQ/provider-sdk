@@ -1,0 +1,21 @@
+const castTailOperation = defineOperation<ProviderContext>()({
+	annotations: {
+		...({ timeoutMs: 15_000 as Milliseconds } as unknown as LegacyAnnotations),
+	},
+	toolRouter: {
+		...({
+			riskClass: "write" as const,
+			approval: "always" as ApprovalMode,
+			connectionMode: "none" as ConnectionMode,
+		} as unknown as LegacyToolRouter),
+	},
+	docs: {
+		...({
+			titleKey: "operations.castTail.title" as const,
+			descriptionKey: "operations.castTail.description" as LocaleKey,
+		} as unknown as LegacyDocs),
+	},
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

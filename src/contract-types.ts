@@ -30,17 +30,23 @@ export interface ProviderContractSnapshot {
 
 export interface ProviderContractOperation {
 	readonly id: string;
+	readonly connectionMode?: JsonValue;
+	readonly connectionExternalRefParam?: JsonValue;
+	readonly riskClass: JsonValue;
+	readonly approval?: JsonValue;
+	readonly timeoutMs?: JsonValue;
+	readonly titleKey?: JsonValue;
 	readonly descriptionKey?: JsonValue;
-	readonly docs?: JsonValue;
+	readonly summaryKey?: JsonValue;
+	readonly markdownKey?: JsonValue;
 	readonly whenToUseKeys?: JsonValue;
 	readonly whenNotToUseKeys?: JsonValue;
-	readonly derivations?: JsonValue;
-	readonly inputExamples?: JsonValue;
-	readonly annotations?: JsonValue;
+	readonly normalizationNotesKeys?: JsonValue;
+	readonly errorCodes?: JsonValue;
+	readonly examples?: JsonValue;
 	readonly contract?: JsonValue;
 	readonly tags?: JsonValue;
 	readonly relatedOperations?: JsonValue;
-	readonly toolRouter?: JsonValue;
 	readonly observability?: JsonValue;
 	readonly transport?: JsonValue;
 	readonly inputSchema: JsonValue;

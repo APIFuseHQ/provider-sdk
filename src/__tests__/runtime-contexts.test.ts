@@ -8,6 +8,27 @@ import type { HttpClient } from "../types.js";
 import { createProviderContextDouble } from "./test-utils.js";
 
 describe("runtime contexts", () => {
+	it("createEnvContext never resolves a mixed-case alias of an engine-owned name", () => {
+		const alias = "otel_exporter_otlp_headers";
+		const previousAlias = process.env[alias];
+		const previousExact = process.env.OTEL_EXPORTER_OTLP_HEADERS;
+		process.env[alias] = "Authorization=Bearer%20alias-token";
+		process.env.OTEL_EXPORTER_OTLP_HEADERS = "Authorization=Bearer%20exact-token";
+		try {
+			expect(createEnvContext([alias]).get(alias)).toBeUndefined();
+			expect(createEnvContext().get(alias)).toBeUndefined();
+			// Engine-internal contexts read the exact name.
+			expect(
+				createEnvContext(["OTEL_EXPORTER_OTLP_HEADERS"]).get("OTEL_EXPORTER_OTLP_HEADERS"),
+			).toBe("Authorization=Bearer%20exact-token");
+		} finally {
+			if (previousAlias === undefined) delete process.env[alias];
+			else process.env[alias] = previousAlias;
+			if (previousExact === undefined) delete process.env.OTEL_EXPORTER_OTLP_HEADERS;
+			else process.env.OTEL_EXPORTER_OTLP_HEADERS = previousExact;
+		}
+	});
+
 	it("createEnvContext respects the allowlist", () => {
 		process.env.TEST_ALLOWED_ENV = "allowed";
 		process.env.TEST_BLOCKED_ENV = "blocked";
