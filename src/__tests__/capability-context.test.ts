@@ -11,7 +11,7 @@ import type { OperationDefinitionFor } from "../index.js";
 import type { ProviderDefinitionFor } from "../provider.js";
 import { executeOperation } from "../runtime/executor.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
-import { createServerApp } from "../server/serve.js";
+import { createServerApp } from "./helpers/server.js";
 import { event } from "../stream.js";
 import type {
 	OperationDefinition,
@@ -403,7 +403,7 @@ describe("declaration-derived provider contexts", () => {
 			id: "capability-executor-secrets",
 			version: "1.0.0",
 			runtime: "standard",
-			secrets: [{ name: "CAPABILITY_EXECUTOR_SECRET", required: true }],
+			secrets: [{ name: "CAPABILITY_EXECUTOR_SECRET", issuer: "contributor", required: true }],
 			meta,
 		});
 		type Context = ProviderContextOf<typeof buildProvider>;

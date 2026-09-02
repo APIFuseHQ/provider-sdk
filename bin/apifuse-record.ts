@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import {
 	createBypassProviderCache,
 	createHttpClient,
-	createInProcessProviderEngine,
+	createRemoteProviderEngineFromEnv,
 	createOcrClientFromEnv,
 	createProviderChoiceContext,
 	createProviderEnvironment,
@@ -21,6 +21,7 @@ import {
 	type ProviderContext,
 	type ProviderDefinition,
 	type ProviderEngineBindingCandidates,
+	type ProviderEngine,
 	ProviderError,
 	readEngineProxyCredentials,
 	type ProviderProxyPolicy,
@@ -28,8 +29,10 @@ import {
 	type StealthClient,
 	TransportError,
 	ValidationError,
+	workspaceApiKeyFromEnv,
 } from "../src/index.js";
 import type { JsonValue } from "../src/contract-json.js";
+import { isRemoteProviderEngine } from "../src/engine-private.js";
 import {
 	isSensitiveFixtureKey,
 	requestPathForFixture,
@@ -100,20 +103,24 @@ Options:
 Example:
   apifuse record providers/korea-air-quality --operation realtime --params '{"stationName":"jongno"}'`;
 
-export async function main() {
+export async function main(options: { readonly engine?: ProviderEngine } = {}) {
 	let capture: ReturnType<typeof createCaptureContext> | undefined;
 	try {
 		const args = parseArgs(normalizeArgs(process.argv.slice(2)));
+		if (!options.engine) workspaceApiKeyFromEnv();
 		const location = resolveProviderLocation(args.providerPath);
 		const provider = await loadProvider(location.rootDir);
 		const operationName = resolveOperationName(provider, args.operation);
 		const operation = provider.operations[operationName];
 		const parsedParams = await parseParams(operation, args.params);
+		const engine = options.engine ?? createRemoteProviderEngineFromEnv(provider);
+		await engine.ready?.();
 
 		capture = createCaptureContext(
 			provider,
 			resolveOperationBaseUrl(provider, operationName),
 			args.sanitize,
+			engine,
 		);
 
 		console.log(`[apifuse record] Calling ${operationName} on ${provider.id}...`);
@@ -440,6 +447,7 @@ export function createCaptureContext(
 	provider: ProviderRuntime,
 	baseUrl: string,
 	sanitize: boolean,
+	engine: ProviderEngine,
 ) {
 	let nextCaptureOrder = 0;
 	let nextStreamOrdinal = 0;
@@ -470,7 +478,7 @@ export function createCaptureContext(
 		rawCaptures.push({ order, value: json });
 	};
 
-	const http = captureHttpClient(createHttpClient(baseUrl), {
+	const captureHttpOptions: Parameters<typeof captureHttpClient>[1] = {
 		reserveOrder: reserveCaptureOrder,
 		reserveStreamOrdinal: () => {
 			nextStreamOrdinal += 1;
@@ -505,23 +513,16 @@ export function createCaptureContext(
 				path: requestPathForFixture(new URL(requestUrl, baseUrl).toString()),
 			};
 		},
-	});
-	const stealth = proxyStealthClient(
-		createStealthClient(baseUrl, {
-			...(provider.stealth ? { stealth: provider.stealth } : {}),
-		}),
-		captureSensitiveParams,
-		(order, response) => retainRawCapture(order, normalizeCapturedStealthResponse(response)),
-		reserveCaptureOrder,
-	);
-
-	const providerEnvironment = createProviderEnvironment(
-		process.env,
-		provider.secrets?.map((secret) => secret.name) ?? [],
-	);
+	};
+	const createCapturingStealth = (client: StealthClient) =>
+		proxyStealthClient(
+			client,
+			captureSensitiveParams,
+			(order, response) => retainRawCapture(order, normalizeCapturedStealthResponse(response)),
+			reserveCaptureOrder,
+		);
+	const providerEnvironment = createProviderEnvironment(process.env, provider.secrets ?? []);
 	const env = { get: (key: string) => providerEnvironment[key] };
-	const engineEnv = { get: (key: string) => process.env[key] };
-	const engineCredentials = readEngineProxyCredentials();
 	const credential = {
 		mode: "none" as const,
 		get: () => undefined,
@@ -529,34 +530,11 @@ export function createCaptureContext(
 		getAccessToken: () => undefined,
 		getScopes: () => [],
 	};
-	const state = createMemoryProviderRuntimeState();
-	const cache = createBypassProviderCache({ providerId: provider.id });
-	const proxyPolicy = resolveNativeProxyPolicy(provider);
-	const stealthProfile = provider.stealth ? getStealthProfile(provider.stealth) : undefined;
+	const request = { headers: {} };
 	const candidates: ProviderEngineBindingCandidates = {
 		env,
 		credential,
-		request: { headers: {} },
-		http,
-		cache,
-		state,
-		stealth,
-		browser: {
-			engine: "playwright-stealth",
-			close: async () => {},
-			newPage: async () => {
-				throw new Error("Browser client is not available in apifuse record.");
-			},
-			rawPage: async () => {
-				throw new Error("Browser client is not available in apifuse record.");
-			},
-			withIsolatedContext: async () => {
-				throw new Error("Browser client is not available in apifuse record.");
-			},
-			solveChallenge: async () => {
-				throw new Error("Browser client is not available in apifuse record.");
-			},
-		},
+		request,
 		trace: {
 			span: async (_name, fn) => fn(),
 		},
@@ -565,35 +543,75 @@ export function createCaptureContext(
 				throw new Error("Auth prompts are not available in apifuse record.");
 			},
 		},
-		ocr: createOcrClientFromEnv(provider.ocr),
-		stt: createSttClientFromEnv(provider.stt),
-		resolver: provider.resolver
-			? createResolverClientFromEnv(provider.resolver, engineCredentials, {
-					allowedHosts: provider.allowedHosts,
-					cache,
-					...(proxyPolicy
-						? {
-								proxyIntent: {
-									mode: proxyPolicy.mode,
-									upstream: { proxy: provider.proxy },
-									...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
-								},
-							}
-						: {}),
-				})
-			: createUnsupportedResolverClient("Provider does not declare resolver capability"),
-		choice: createProviderChoiceContext({
-			providerId: provider.id,
-			env: engineEnv,
-			request: { headers: {} },
-			credential,
-			state,
-		}),
 	};
-	const ctx = createInProcessProviderEngine().attach({
+	if (!isRemoteProviderEngine(engine)) {
+		const engineEnv = { get: (key: string) => process.env[key] };
+		const engineCredentials = readEngineProxyCredentials();
+		const state = createMemoryProviderRuntimeState();
+		const cache = createBypassProviderCache({ providerId: provider.id });
+		const proxyPolicy = resolveNativeProxyPolicy(provider);
+		const stealthProfile = provider.stealth ? getStealthProfile(provider.stealth) : undefined;
+		Object.assign(candidates, {
+			http: captureHttpClient(createHttpClient(baseUrl), captureHttpOptions),
+			cache,
+			state,
+			stealth: createCapturingStealth(
+				createStealthClient(baseUrl, {
+					...(provider.stealth ? { stealth: provider.stealth } : {}),
+				}),
+			),
+			browser: {
+				engine: "playwright-stealth",
+				close: async () => {},
+				newPage: async () => {
+					throw new Error("Browser client is not available in apifuse record.");
+				},
+				rawPage: async () => {
+					throw new Error("Browser client is not available in apifuse record.");
+				},
+				withIsolatedContext: async () => {
+					throw new Error("Browser client is not available in apifuse record.");
+				},
+				solveChallenge: async () => {
+					throw new Error("Browser client is not available in apifuse record.");
+				},
+			},
+			ocr: createOcrClientFromEnv(provider.ocr),
+			stt: createSttClientFromEnv(provider.stt),
+			resolver: provider.resolver
+				? createResolverClientFromEnv(provider.resolver, engineCredentials, {
+						allowedHosts: provider.allowedHosts,
+						cache,
+						...(proxyPolicy
+							? {
+									proxyIntent: {
+										mode: proxyPolicy.mode,
+										upstream: { proxy: provider.proxy },
+										...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+									},
+								}
+							: {}),
+					})
+				: createUnsupportedResolverClient("Provider does not declare resolver capability"),
+			choice: createProviderChoiceContext({
+				providerId: provider.id,
+				env: engineEnv,
+				request,
+				credential,
+				state,
+			}),
+		});
+	}
+	const attached = engine.attach({
 		provider,
 		bindings: candidates,
 	}) as ProviderContext;
+	const isRemote = isRemoteProviderEngine(engine);
+	const ctx = isRemote ? ({ ...attached } as ProviderContext) : attached;
+	if (isRemote) {
+		if (provider.http) ctx.http = captureHttpClient(attached.http, captureHttpOptions);
+		if (provider.stealth) ctx.stealth = createCapturingStealth(attached.stealth);
+	}
 
 	return {
 		ctx,

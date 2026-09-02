@@ -20,16 +20,9 @@ import { createProviderCache } from "../runtime/cache.js";
 import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { executeOperation } from "../runtime/executor.js";
 import { createUnsupportedProviderRuntimeState } from "../runtime/state.js";
-import type {
-	DeclarativeStealthResponse,
-	ProviderContext,
-	ProviderDefinition,
-} from "../types.js";
+import type { DeclarativeStealthResponse, ProviderContext, ProviderDefinition } from "../types.js";
 
-function createStealthResponse(
-	value: unknown,
-	status: number,
-): DeclarativeStealthResponse {
+function createStealthResponse(value: unknown, status: number): DeclarativeStealthResponse {
 	const body = JSON.stringify(value);
 	return {
 		status,
@@ -292,7 +285,6 @@ describe("executeOperation", () => {
 		});
 		expect(calls).toBe(1);
 	});
-
 });
 
 describe("executeOperation SDK-owned secret enforcement", () => {
@@ -315,10 +307,13 @@ describe("executeOperation SDK-owned secret enforcement", () => {
 
 	it("throws structured MISSING_SECRET before the handler when a required secret is unset", async () => {
 		let calls = 0;
-		const provider = providerWithSecrets([{ name: API_KEY, required: true }], async () => {
-			calls++;
-			return { results: [] };
-		});
+		const provider = providerWithSecrets(
+			[{ name: API_KEY, issuer: "contributor", required: true }],
+			async () => {
+				calls++;
+				return { results: [] };
+			},
+		);
 
 		await expect(
 			executeOperation(provider, "search", ctxWithEnv({}), { query: "test" }),
@@ -335,9 +330,10 @@ describe("executeOperation SDK-owned secret enforcement", () => {
 	});
 
 	it("names the missing secret in the fix so operators know what to provision", async () => {
-		const provider = providerWithSecrets([{ name: API_KEY, required: true }], async () => ({
-			results: [],
-		}));
+		const provider = providerWithSecrets(
+			[{ name: API_KEY, issuer: "contributor", required: true }],
+			async () => ({ results: [] }),
+		);
 
 		let caught: unknown;
 		try {
@@ -350,9 +346,10 @@ describe("executeOperation SDK-owned secret enforcement", () => {
 	});
 
 	it("gates before input validation so probes fail with MISSING_SECRET, not invalid input", async () => {
-		const provider = providerWithSecrets([{ name: API_KEY, required: true }], async () => ({
-			results: [],
-		}));
+		const provider = providerWithSecrets(
+			[{ name: API_KEY, issuer: "contributor", required: true }],
+			async () => ({ results: [] }),
+		);
 
 		// Input violates the schema; the secret gate must still win.
 		await expect(
@@ -362,10 +359,13 @@ describe("executeOperation SDK-owned secret enforcement", () => {
 
 	it("treats whitespace-only values as missing", async () => {
 		let calls = 0;
-		const provider = providerWithSecrets([{ name: API_KEY, required: true }], async () => {
-			calls++;
-			return { results: [] };
-		});
+		const provider = providerWithSecrets(
+			[{ name: API_KEY, issuer: "contributor", required: true }],
+			async () => {
+				calls++;
+				return { results: [] };
+			},
+		);
 
 		await expect(
 			executeOperation(provider, "search", ctxWithEnv({ [API_KEY]: "   " }), { query: "test" }),
@@ -376,8 +376,8 @@ describe("executeOperation SDK-owned secret enforcement", () => {
 	it("lists every missing required secret in a single error", async () => {
 		const provider = providerWithSecrets(
 			[
-				{ name: API_KEY, required: true },
-				{ name: SECOND_KEY, required: true },
+				{ name: API_KEY, issuer: "contributor", required: true },
+				{ name: SECOND_KEY, issuer: "contributor", required: true },
 			],
 			async () => ({ results: [] }),
 		);
@@ -390,9 +390,10 @@ describe("executeOperation SDK-owned secret enforcement", () => {
 	});
 
 	it("runs the handler when the required secret is present", async () => {
-		const provider = providerWithSecrets([{ name: API_KEY, required: true }], async () => ({
-			results: ["ok"],
-		}));
+		const provider = providerWithSecrets(
+			[{ name: API_KEY, issuer: "contributor", required: true }],
+			async () => ({ results: ["ok"] }),
+		);
 
 		const result = await executeOperation(provider, "search", ctxWithEnv({ [API_KEY]: "value" }), {
 			query: "test",
@@ -403,7 +404,10 @@ describe("executeOperation SDK-owned secret enforcement", () => {
 
 	it("does not enforce optional or default-flag declarations", async () => {
 		const provider = providerWithSecrets(
-			[{ name: API_KEY, required: false }, { name: SECOND_KEY }],
+			[
+				{ name: API_KEY, issuer: "contributor", required: false },
+				{ name: SECOND_KEY, issuer: "contributor" },
+			],
 			async () => ({ results: ["ok"] }),
 		);
 

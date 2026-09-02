@@ -6,7 +6,7 @@ import {
 	createServerApp,
 	type ProviderServerLogEvent,
 	type ProviderServerOperationExecutorInput,
-} from "../server/serve.js";
+} from "./helpers/server.js";
 import type { ProviderDefinition } from "../types.js";
 
 const builtStatefulSpecifier: string = "../../dist/stateful/index.js";

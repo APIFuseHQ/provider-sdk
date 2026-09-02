@@ -2,6 +2,13 @@
 
 Generated with `apifuse create`.
 
+Local `dev`, `serve`, and `record` attach to the platform-operated provider
+engine. Copy `.env.example` to `.env.local` and set the workspace API key shown
+once in your authenticated bounty dashboard. This is not a tenant API key or an
+upstream service key. Engine request/response traces are rendered by
+`apifuse dev`; provider workspaces do not need proxy, resolver, browser, OCR,
+STT, cache, or choice-store vendor credentials.
+
 ## Commands
 
 ```bash

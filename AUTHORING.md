@@ -124,11 +124,28 @@ Declare `runtimeTarget: "vanilla"` for portable provider business logic. Use
 `runtimeTarget: "engine"` only for an approved session-bearing provider that
 must remain engine-resident. A vanilla target cannot declare `native`.
 
-Proxy vendor application keys, usernames, and passwords are engine-owned. Do
-not list `APIFUSE__PROXY__SMARTPROXY_APP_KEY`,
-`APIFUSE__PROXY__NODEMAVEN_USERNAME`, or
-`APIFUSE__PROXY__NODEMAVEN_PASSWORD` in provider `secrets`; `proxy` contains
-policy intent only.
+`serve`, `apifuse dev`, and `apifuse record` always attach the remote APIFuse
+provider engine. Set `APIFUSE__ENGINE__API_KEY` to the workspace API key from
+the authenticated bounty dashboard before starting any of them. They exit
+non-zero when it is missing or empty, and an unreachable engine never falls
+back to local capability execution. This workspace key is distinct from the
+tenant API key used to call the gateway and from any upstream service key.
+
+The engine owns HTTP, stealth, browser, native and proxy egress, resolver, OCR,
+STT, cache, state, server-mode choice, and request-file resolution. The provider
+process retains declarations and handler logic, ambient `trace`, locally read
+provider-owned secrets, and inline-mode choice. `apifuse dev` opens the
+`provider-engine.v1` trace stream and renders request/response host, method,
+status, timing, byte counts, retries, and safe error codes. Bodies are available
+only for the attached session within the engine-configured cap.
+
+Every platform-vendor variable is engine-owned and forbidden in provider
+`secrets`. This includes `APIFUSE__PROXY__*`, `APIFUSE__RESOLVER__*`,
+`APIFUSE__CDP_POOL__*`, hosted OCR/STT tokens, Cloudflare account identifiers,
+the cache-key pepper, choice-token master secret, and OTLP trace-export
+configuration. `proxy` contains policy intent only. An engine refusal outside
+the workspace's pinned `allowedHosts` surfaces as the typed provider error
+`ProviderEgressDeniedError` with code `PROVIDER_EGRESS_DENIED`.
 
 ### Factored operations
 
@@ -570,11 +587,20 @@ every env secret the provider needs in `defineProvider`:
 secrets: [
   {
     name: "APIFUSE__PROVIDER__MY_PROVIDER__API_KEY",
+	issuer: "contributor",
     required: true,
     description: "Upstream API key from the vendor portal",
   },
 ],
 ```
+
+`issuer` is required on every provider-owned secret and is exactly
+`"contributor"` or `"apifuse"`; omission is a declaration error and is never
+defaulted. Contributor-issued values are read from the local provider
+environment. The contributor-workspace delivery mechanism for
+`apifuse`-issued upstream values remains intentionally unavailable until the
+platform owner records it, so do not add a new `issuer: "apifuse"` declaration
+without that platform path.
 
 The runtime validates every `required: true` declaration before any operation
 handler or auth-flow handler (except `abort`) runs. When a required secret is

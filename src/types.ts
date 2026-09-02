@@ -2320,6 +2320,8 @@ export interface AuthConfig {
 
 export interface ProviderSecretDeclaration {
 	name: string;
+	/** Party responsible for issuing this provider-owned upstream credential. */
+	issuer: "apifuse" | "contributor";
 	description?: string;
 	required?: boolean;
 }

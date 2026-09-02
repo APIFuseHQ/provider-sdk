@@ -2704,6 +2704,7 @@ type ProviderRuntimeTarget = "vanilla" | "engine";
 interface ProviderSecretDeclaration {
     // (undocumented)
     description?: string;
+    issuer: "apifuse" | "contributor";
     // (undocumented)
     name: string;
     // (undocumented)
@@ -3923,7 +3924,7 @@ interface VerificationCodeExtractionResult {
 // dist/types.d.ts:1887:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1889:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1897:5 - (ae-forgotten-export) The symbol "ProviderChoiceContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1984:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1986:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

@@ -139,12 +139,12 @@ describe("defineProvider", () => {
 					prices: {
 						...validConfig.operations.prices,
 						errorCodes: [
-								{
-									code: "UPSTREAM_TEAPOT",
-									status: 418,
-									description: "Unsupported upstream response",
-								},
-							],
+							{
+								code: "UPSTREAM_TEAPOT",
+								status: 418,
+								description: "Unsupported upstream response",
+							},
+						],
 					},
 				},
 			}),
@@ -199,12 +199,12 @@ describe("defineProvider", () => {
 					prices: {
 						...validConfig.operations.prices,
 						errorCodes: [
-								{
-									code: "reauth_required",
-									status: 502,
-									description: "Provider session expired",
-								},
-							],
+							{
+								code: "reauth_required",
+								status: 502,
+								description: "Provider session expired",
+							},
+						],
 					},
 				},
 			});
@@ -973,7 +973,7 @@ describe("defineProvider", () => {
 				expect(() =>
 					defineProvider({
 						...validConfig,
-						secrets: [{ name, required: true }],
+						secrets: [{ name, issuer: "contributor", required: true }],
 					}),
 				).toThrow(/cannot declare engine-owned telemetry variable/);
 			}
@@ -984,14 +984,20 @@ describe("defineProvider", () => {
 				expect(() =>
 					defineProvider({
 						...validConfig,
-						secrets: [{ name, required: true }],
+						secrets: [{ name, issuer: "contributor", required: true }],
 					}),
 				).toThrow(/cannot declare engine-owned telemetry variable/);
 			}
 			expect(() =>
 				defineProvider({
 					...validConfig,
-					secrets: [{ name: "apifuse__proxy__smartproxy_app_key", required: true }],
+					secrets: [
+						{
+							name: "apifuse__proxy__smartproxy_app_key",
+							issuer: "contributor",
+							required: true,
+						},
+					],
 				}),
 			).toThrow(/cannot declare engine-owned proxy credential/);
 		});
@@ -1014,7 +1020,7 @@ describe("defineProvider", () => {
 			expect(() =>
 				defineProvider({
 					...validConfig,
-					secrets: [{ name: SMARTPROXY_SECRET, required: true }],
+					secrets: [{ name: SMARTPROXY_SECRET, issuer: "contributor", required: true }],
 				}),
 			).toThrow(/cannot declare engine-owned proxy credential/);
 		});
@@ -1023,7 +1029,7 @@ describe("defineProvider", () => {
 			expect(() =>
 				defineProvider({
 					...validConfig,
-					secrets: [{ name: NODEMAVEN_USERNAME_SECRET, required: true }],
+					secrets: [{ name: NODEMAVEN_USERNAME_SECRET, issuer: "contributor", required: true }],
 				}),
 			).toThrow(/cannot declare engine-owned proxy credential/);
 		});
@@ -1053,6 +1059,28 @@ describe("defineProvider", () => {
 				);
 			} finally {
 				warn.mockRestore();
+			}
+		});
+	});
+
+	describe("provider secret issuer", () => {
+		it("requires an explicit issuer and names the secret", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					secrets: [{ name: "UPSTREAM_API_KEY", required: true }],
+				}),
+			).toThrow(/UPSTREAM_API_KEY.*issuer "apifuse" or "contributor"/);
+		});
+
+		it("accepts both explicit issuer values", () => {
+			for (const issuer of ["apifuse", "contributor"] as const) {
+				expect(() =>
+					defineProvider({
+						...validConfig,
+						secrets: [{ name: `UPSTREAM_${issuer.toUpperCase()}_KEY`, issuer }],
+					}),
+				).not.toThrow();
 			}
 		});
 	});

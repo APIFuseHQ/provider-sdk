@@ -13,7 +13,7 @@ import {
 	type SelfTestResponse,
 } from "../server/self-test.js";
 import { deriveSelfTestToken } from "../server/self-test-token.js";
-import { createServerApp } from "../server/serve.js";
+import { createServerApp } from "./helpers/server.js";
 import type { AuthTurn, ProviderDefinition } from "../types.js";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 

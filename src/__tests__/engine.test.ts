@@ -3,13 +3,14 @@ import { z } from "zod";
 
 import { defineProvider } from "../define.js";
 import {
-	createInProcessProviderEngine,
 	createProviderEnvironment,
+	ENGINE_OWNED_RUNTIME_ENV_NAMES,
 	ENGINE_OWNED_TELEMETRY_ENV_NAMES,
 	isEngineOwnedEnvName,
 	readEngineProxyCredentials,
 } from "../engine.js";
-import { createServerApp } from "../server/serve.js";
+import { createInternalTestProviderEngine } from "../internal/in-process-engine.js";
+import { createServerApp } from "./helpers/server.js";
 import type { HttpClient, ProviderDefinition, TraceContext } from "../types.js";
 
 const trace: TraceContext = {
@@ -35,7 +36,7 @@ function definition(overrides: Partial<ProviderDefinition> = {}): ProviderDefini
 describe("provider engine attachment", () => {
 	it("attaches exactly declared bindings plus ambient tracing", () => {
 		const http = {} as HttpClient;
-		const ctx = createInProcessProviderEngine().attach<{
+		const ctx = createInternalTestProviderEngine().attach<{
 			readonly http: Record<string, never>;
 		}>({
 			provider: definition({ http: {} }),
@@ -48,7 +49,7 @@ describe("provider engine attachment", () => {
 	});
 
 	it("fails closed and names a dynamically accessed undeclared capability", () => {
-		const ctx = createInProcessProviderEngine().attach({
+		const ctx = createInternalTestProviderEngine().attach({
 			provider: definition(),
 			bindings: { trace, http: {} as HttpClient },
 		});
@@ -60,7 +61,7 @@ describe("provider engine attachment", () => {
 
 	it("fails attachment before execution when a declared binding is unavailable", () => {
 		expect(() =>
-			createInProcessProviderEngine().attach({
+			createInternalTestProviderEngine().attach({
 				provider: definition({ http: {} }),
 				bindings: { trace },
 			}),
@@ -86,7 +87,7 @@ describe("provider engine attachment", () => {
 
 	it("also rejects vanilla native at the local attachment boundary", () => {
 		expect(() =>
-			createInProcessProviderEngine().attach({
+			createInternalTestProviderEngine().attach({
 				provider: definition({ native: {} }),
 				// @ts-expect-error test-invalid: target validation runs before the native binding is inspected.
 				bindings: { trace, native: {} },
@@ -130,6 +131,30 @@ describe("provider engine attachment", () => {
 });
 
 describe("engine credential containment", () => {
+	const contributorSecrets = (names: readonly string[]) =>
+		names.map((name) => ({ name, issuer: "contributor" as const }));
+
+	it("projects only contributor-issued provider secrets into the local process", () => {
+		expect(
+			createProviderEnvironment({ CONTRIBUTOR_KEY: "local", APIFUSE_KEY: "platform" }, [
+				{ name: "CONTRIBUTOR_KEY", issuer: "contributor" },
+				{ name: "APIFUSE_KEY", issuer: "apifuse" },
+			]),
+		).toEqual({ CONTRIBUTOR_KEY: "local" });
+	});
+
+	it("filters every declared runtime vendor class and CDP-pool name", () => {
+		const source = Object.fromEntries(
+			[...ENGINE_OWNED_RUNTIME_ENV_NAMES, "APIFUSE__CDP_POOL__SMARTPROXY_GATEWAY_CIDRS"].map(
+				(name) => [name, `secret:${name}`],
+			),
+		);
+		source.PROVIDER_TOKEN = "provider-token";
+
+		expect(createProviderEnvironment(source, contributorSecrets(Object.keys(source)))).toEqual({
+			PROVIDER_TOKEN: "provider-token",
+		});
+	});
 	it("captures proxy credentials for the engine but omits them from provider environments", () => {
 		const source = {
 			APIFUSE__PROXY__SMARTPROXY_APP_KEY: "engine-key",
@@ -143,7 +168,7 @@ describe("engine credential containment", () => {
 			APIFUSE__PROXY__NODEMAVEN_USERNAME: "engine-user",
 			APIFUSE__PROXY__NODEMAVEN_PASSWORD: "engine-password",
 		});
-		expect(createProviderEnvironment(source, Object.keys(source))).toEqual({
+		expect(createProviderEnvironment(source, contributorSecrets(Object.keys(source)))).toEqual({
 			PROVIDER_TOKEN: "provider-token",
 		});
 	});
@@ -161,7 +186,7 @@ describe("engine credential containment", () => {
 
 		expect(ENGINE_OWNED_TELEMETRY_ENV_NAMES.every((name) => isEngineOwnedEnvName(name))).toBe(true);
 		expect(isEngineOwnedEnvName("PROVIDER_TOKEN")).toBe(false);
-		expect(createProviderEnvironment(source, Object.keys(source))).toEqual({
+		expect(createProviderEnvironment(source, contributorSecrets(Object.keys(source)))).toEqual({
 			PROVIDER_TOKEN: "provider-token",
 		});
 	});
@@ -181,7 +206,10 @@ describe("engine credential containment", () => {
 			PROVIDER_TOKEN: "provider-token",
 		};
 		expect(
-			createProviderEnvironment(source, ["otel_exporter_otlp_headers", "PROVIDER_TOKEN"]),
+			createProviderEnvironment(
+				source,
+				contributorSecrets(["otel_exporter_otlp_headers", "PROVIDER_TOKEN"]),
+			),
 		).toEqual({ PROVIDER_TOKEN: "provider-token" });
 	});
 
@@ -197,7 +225,10 @@ describe("engine credential containment", () => {
 		try {
 			const provider = definition({
 				env: true,
-				secrets: [{ name: alias }, { name: "PROVIDER_TOKEN" }],
+				secrets: [
+					{ name: alias, issuer: "contributor" },
+					{ name: "PROVIDER_TOKEN", issuer: "contributor" },
+				],
 				operations: {
 					inspectEnvironment: {
 						riskClass: "read",
@@ -242,7 +273,10 @@ describe("engine credential containment", () => {
 		try {
 			const provider = definition({
 				env: true,
-				secrets: [...names.map((name) => ({ name })), { name: "PROVIDER_TOKEN" }],
+				secrets: [
+					...names.map((name) => ({ name, issuer: "contributor" as const })),
+					{ name: "PROVIDER_TOKEN", issuer: "contributor" },
+				],
 				operations: {
 					inspectEnvironment: {
 						riskClass: "read",
@@ -287,7 +321,10 @@ describe("engine credential containment", () => {
 		try {
 			const provider = definition({
 				env: true,
-				secrets: [{ name }, { name: "PROVIDER_TOKEN" }],
+				secrets: [
+					{ name, issuer: "contributor" },
+					{ name: "PROVIDER_TOKEN", issuer: "contributor" },
+				],
 				operations: {
 					inspectEnvironment: {
 						riskClass: "read",
