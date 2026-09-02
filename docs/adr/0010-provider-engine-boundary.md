@@ -1,12 +1,12 @@
-# ADR-0009 v1.1 amendment: resolver credentials and ceremony leases
+# ADR-0010 v1.1 amendment: resolver credentials and ceremony leases
 
 - Status: **Accepted (v1.1 amendment)** — ratified by owner (Taehoon) 2026-09-02 on PR #249 ("249 이거 진행 ㄱㄱ")
 - Amendment date: 2026-09-02
-- Amends: ADR-0009's engine-owned credential and opaque-session boundaries
+- Amends: ADR-0010's engine-owned credential and opaque-session boundaries
 - Builds on: ADR-0008 v1.1
 - Implementation status: deferred; this amendment is paper-only
 
-ADR-0009 v1.0 already places proxy vendor credentials in the engine and says
+ADR-0010 v1.0 already places proxy vendor credentials in the engine and says
 stateful lifecycles use opaque engine-owned session handles. Resolver vendor
 credentials and an identity-bound challenge ceremony are the same existing
 axes, so this is an in-place amendment rather than a new capability ADR. The
@@ -63,7 +63,7 @@ It joins `APIFUSE__RESOLVER__2CAPTCHA__API_KEY`,
 `APIFUSE__RESOLVER__CAPSOLVER__API_KEY`, and
 `APIFUSE__RESOLVER__CAPMONSTER__API_KEY` in the engine host. These names are
 filtered from provider environment projections and rejected from provider
-`secrets`, case-insensitively, under the same fail-closed rule ADR-0009 v1.0
+`secrets`, case-insensitively, under the same fail-closed rule ADR-0010 v1.0
 applies to proxy credentials. Providers declare resolver kinds and optional
 vendor ordering; they do not own, read, forward, or meter solver keys.
 
@@ -130,11 +130,16 @@ descriptor or an engine lease vocabulary.
 
 ---
 
-# ADR 0009: Provider engine boundary and protocol
+# ADR 0010: Provider engine boundary and protocol
 
 ## Status
 
-Accepted.
+Accepted. **Partially superseded by ADR-0011** (2026-09-02): the sentence "The
+in-process implementation is the local-development transport" and the
+"private provider-to-engine channel" assumption no longer hold; local
+development attaches to the remote platform engine with a workspace-scoped API
+key. The attachment contract, `provider-engine.v1` envelope, runtime targets,
+and credential relocation below remain in force.
 
 ## Decision
 
