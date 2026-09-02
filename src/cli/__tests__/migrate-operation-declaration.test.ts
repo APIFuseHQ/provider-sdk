@@ -16,6 +16,30 @@ function fixture(name: string): string {
 	return readFileSync(join(FIXTURES, `${name}.ts.txt`), "utf8");
 }
 
+function localeFixture(locale: "en" | "ko" | "ja"): string {
+	return readFileSync(join(FIXTURES, `locale-canonical-${locale}.json`), "utf8");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function expectSharedKeyOrder(reference: unknown, value: unknown): void {
+	if (Array.isArray(value)) {
+		const referenceArray = Array.isArray(reference) ? reference : [];
+		for (let index = 0; index < value.length; index += 1) {
+			expectSharedKeyOrder(referenceArray[index], value[index]);
+		}
+		return;
+	}
+	if (!isRecord(reference) || !isRecord(value)) return;
+
+	const expected = Object.keys(reference).filter((key) => Object.hasOwn(value, key));
+	const actual = Object.keys(value).filter((key) => Object.hasOwn(reference, key));
+	expect(actual).toEqual(expected);
+	for (const key of expected) expectSharedKeyOrder(reference[key], value[key]);
+}
+
 function migrate(name: string, operationId?: string) {
 	const binding = name === "stream" ? "downloadOperation" : `${operationId ?? name}Operation`;
 	return migrateOperationDeclaration(fixture(name), `${name}.ts`, {
@@ -239,6 +263,66 @@ describe("migrateOperationDeclaration refusals", () => {
 });
 
 describe("migrateOperationDeclarationRepository", () => {
+	it("writes canonical locale JSON with non-English shared keys in English order", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-locale-canonical-"));
+		try {
+			writeFileSync(join(root, "search.ts"), fixture("examples-operation"));
+			writeFileSync(join(root, "operations.ts"), fixture("examples-map"));
+			mkdirSync(join(root, "locales"));
+			for (const locale of ["en", "ko", "ja"] as const) {
+				writeFileSync(join(root, "locales", `${locale}.json`), localeFixture(locale));
+			}
+
+			const result = migrateOperationDeclarationRepository(root);
+			expect(result.status).toBe("migrated");
+
+			const catalogs = new Map<string, unknown>();
+			for (const locale of ["en", "ko", "ja"] as const) {
+				const raw = readFileSync(join(root, "locales", `${locale}.json`), "utf8");
+				const parsed: unknown = JSON.parse(raw);
+				expect(raw).toBe(`${JSON.stringify(parsed, null, 2)}\n`);
+				catalogs.set(locale, parsed);
+			}
+
+			const english = catalogs.get("en");
+			const korean = catalogs.get("ko");
+			const japanese = catalogs.get("ja");
+			expectSharedKeyOrder(english, korean);
+			expectSharedKeyOrder(english, japanese);
+			if (!isRecord(korean) || !isRecord(japanese)) throw new Error("expected locale objects");
+			expect(Object.keys(korean).slice(-2)).toEqual(["koOnlyFirst", "koOnlyLast"]);
+			expect(Object.keys(japanese).slice(-2)).toEqual(["jaOnlyFirst", "jaOnlyLast"]);
+			const koOperations = korean.operations;
+			const jaOperations = japanese.operations;
+			if (!isRecord(koOperations) || !isRecord(jaOperations)) {
+				throw new Error("expected operations objects");
+			}
+			expect(Object.keys(koOperations).at(-1)).toBe("koOnlyOperation");
+			expect(Object.keys(jaOperations).at(-1)).toBe("jaOnlyOperation");
+			const koSearch = koOperations.search;
+			const jaSearch = jaOperations.search;
+			if (!isRecord(koSearch) || !isRecord(jaSearch)) throw new Error("expected search objects");
+			expect(Object.keys(koSearch)).toEqual([
+				"description",
+				"title",
+				"steps",
+				"examples",
+				"koOnly",
+			]);
+			expect(Object.keys(jaSearch)).toEqual([
+				"description",
+				"title",
+				"steps",
+				"examples",
+				"jaOnly",
+			]);
+			expect(Array.isArray(koSearch.steps)).toBe(true);
+			expect(Array.isArray(jaSearch.steps)).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	function migrateRegistryFixture(name: string, other?: string) {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-registry-"));
 		if (other === undefined) {
