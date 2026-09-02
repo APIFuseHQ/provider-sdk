@@ -1,0 +1,15 @@
+const LIST_INPUT_EXAMPLES = [
+	{
+		scenario: "List a full year",
+		rationale: "Shows the common calendar query",
+		input: { year: 2026 },
+	},
+] as const;
+
+const listOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [...LIST_INPUT_EXAMPLES],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

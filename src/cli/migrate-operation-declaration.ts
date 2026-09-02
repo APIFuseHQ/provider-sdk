@@ -154,6 +154,7 @@ export function migrateOperationDeclaration(
 	}
 
 	const constObjects = collectModuleConstObjects(source);
+	const constArrays = collectModuleConstArrays(source);
 	const discovery = discoverOperationSites(source, fileName, constObjects, options.operationIds);
 	if (discovery.refusals.length > 0) {
 		return { status: "refused", refusals: discovery.refusals };
@@ -168,6 +169,7 @@ export function migrateOperationDeclaration(
 			fileName,
 			site,
 			constObjects,
+			constArrays,
 			options.localeFiles ?? [],
 		);
 		if ("refusal" in plan) {
@@ -187,7 +189,12 @@ export function migrateOperationDeclaration(
 		};
 	}
 
-	const code = applyEdits(sourceText, edits);
+	const normalizedEdits = normalizeEdits(edits, fileName);
+	if ("refusal" in normalizedEdits) {
+		return { status: "refused", refusals: [normalizedEdits.refusal] };
+	}
+
+	const code = applyEdits(sourceText, normalizedEdits.edits);
 	const outputRefusal = verifyOperationDeclarationRewrite(code, fileName);
 	if (outputRefusal !== undefined) {
 		return {
@@ -224,6 +231,7 @@ function planOperationMigration(
 	fileName: string,
 	site: OperationSite,
 	constObjects: ReadonlyMap<string, TS.ObjectLiteralExpression>,
+	constArrays: ReadonlyMap<string, TS.ArrayLiteralExpression>,
 	localeFiles: readonly string[],
 ): PlannedOperation | { readonly refusal: OperationDeclarationRefusal } {
 	if (site.object.properties.some(ts.isSpreadAssignment)) {
@@ -398,6 +406,7 @@ function planOperationMigration(
 		fileName,
 		site,
 		source,
+		constArrays,
 		localeFiles,
 	);
 	if ("refusal" in examples) return examples;
@@ -653,6 +662,7 @@ function planExamples(
 	fileName: string,
 	site: OperationSite,
 	source: TS.SourceFile,
+	constArrays: ReadonlyMap<string, TS.ArrayLiteralExpression>,
 	localeFiles: readonly string[],
 ):
 	| { readonly edits: readonly TextEdit[]; readonly localeTodos: readonly LocaleTodo[] }
@@ -672,7 +682,9 @@ function planExamples(
 	if (array === undefined || !ts.isArrayLiteralExpression(array)) {
 		return nonLiteral(fileName, site.operationKey, "inputExamples must be an array literal.");
 	}
-	if (array.elements.length > 0 && !site.operationIdProven) {
+	const expanded = expandArrayElements(array, constArrays, fileName, site.operationKey);
+	if ("refusal" in expanded) return expanded;
+	if (expanded.elements.length > 0 && !site.operationIdProven) {
 		return {
 			refusal: refusal(
 				fileName,
@@ -682,7 +694,7 @@ function planExamples(
 			),
 		};
 	}
-	if (array.elements.length > 0 && !localeFiles.includes("locales/en.json")) {
+	if (expanded.elements.length > 0 && !localeFiles.includes("locales/en.json")) {
 		return {
 			refusal: refusal(
 				fileName,
@@ -709,8 +721,8 @@ function planExamples(
 		text: "examples",
 	});
 
-	for (let index = 0; index < array.elements.length; index += 1) {
-		const element = array.elements[index];
+	for (let index = 0; index < expanded.elements.length; index += 1) {
+		const element = expanded.elements[index];
 		const object = element === undefined ? undefined : unwrapExpression(element);
 		if (object === undefined || !ts.isObjectLiteralExpression(object)) {
 			return nonLiteral(
@@ -1070,6 +1082,66 @@ function collectModuleConstObjects(source: TS.SourceFile): Map<string, TS.Object
 	return objects;
 }
 
+function collectModuleConstArrays(source: TS.SourceFile): Map<string, TS.ArrayLiteralExpression> {
+	const arrays = new Map<string, TS.ArrayLiteralExpression>();
+	for (const statement of source.statements) {
+		if (!ts.isVariableStatement(statement)) continue;
+		if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+		for (const declaration of statement.declarationList.declarations) {
+			if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) continue;
+			const expression = unwrapExpression(declaration.initializer);
+			if (expression !== undefined && ts.isArrayLiteralExpression(expression)) {
+				arrays.set(declaration.name.text, expression);
+			}
+		}
+	}
+	return arrays;
+}
+
+function expandArrayElements(
+	array: TS.ArrayLiteralExpression,
+	constArrays: ReadonlyMap<string, TS.ArrayLiteralExpression>,
+	fileName: string,
+	operationKey: string,
+	seen = new Set<TS.ArrayLiteralExpression>(),
+): { readonly elements: TS.Expression[] } | { readonly refusal: OperationDeclarationRefusal } {
+	if (seen.has(array)) {
+		return nonLiteral(fileName, operationKey, "A module-level array spread is recursive.");
+	}
+	seen.add(array);
+	const elements: TS.Expression[] = [];
+	for (const element of array.elements) {
+		if (!ts.isSpreadElement(element)) {
+			elements.push(element);
+			continue;
+		}
+		const expression = unwrapExpression(element.expression);
+		const spreadArray =
+			expression !== undefined && ts.isArrayLiteralExpression(expression)
+				? expression
+				: expression !== undefined && ts.isIdentifier(expression)
+					? constArrays.get(expression.text)
+					: undefined;
+		if (spreadArray === undefined) {
+			return nonLiteral(
+				fileName,
+				operationKey,
+				"inputExamples contains an unresolved array spread.",
+			);
+		}
+		const expanded = expandArrayElements(
+			spreadArray,
+			constArrays,
+			fileName,
+			operationKey,
+			new Set(seen),
+		);
+		if ("refusal" in expanded) return expanded;
+		elements.push(...expanded.elements);
+	}
+	return { elements };
+}
+
 function expandMembers(
 	object: TS.ObjectLiteralExpression,
 	constObjects: ReadonlyMap<string, TS.ObjectLiteralExpression>,
@@ -1357,6 +1429,29 @@ function applyEdits(sourceText: string, edits: readonly TextEdit[]): string {
 	return code;
 }
 
+function normalizeEdits(
+	edits: readonly TextEdit[],
+	fileName: string,
+): { readonly edits: readonly TextEdit[] } | { readonly refusal: OperationDeclarationRefusal } {
+	const unique = new Map<string, TextEdit>();
+	for (const edit of edits) {
+		const key = `${edit.start}:${edit.end}`;
+		const previous = unique.get(key);
+		if (previous === undefined) {
+			unique.set(key, edit);
+			continue;
+		}
+		if (previous.text !== edit.text) {
+			return nonLiteral(
+				fileName,
+				"<shared>",
+				"A module-level input examples array is shared by operations that need different locale keys.",
+			);
+		}
+	}
+	return { edits: [...unique.values()] };
+}
+
 function indentationAt(text: string, position: number): string {
 	const lineStart = text.lastIndexOf("\n", position - 1) + 1;
 	return text.slice(lineStart, position).match(/^\s*/)?.[0] ?? "";
@@ -1548,7 +1643,9 @@ function collectSourceFiles(root: string): string[] {
 		for (const entry of readdirSync(directory, { withFileTypes: true })) {
 			if (entry.isDirectory()) {
 				if (SOURCE_SKIP_DIRECTORIES.has(entry.name)) continue;
-				walk(join(directory, entry.name));
+				const child = join(directory, entry.name);
+				if (existsSync(join(child, ".git"))) continue;
+				walk(child);
 				continue;
 			}
 			if (!entry.name.endsWith(".ts")) continue;
