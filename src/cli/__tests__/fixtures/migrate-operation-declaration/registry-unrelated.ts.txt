@@ -1,0 +1,13 @@
+const detailOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [{ scenario: "Detail", input: {} }],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
+
+const unrelated = {
+	detail: detailOperation,
+	count: 42,
+	created: makeValue(),
+};
