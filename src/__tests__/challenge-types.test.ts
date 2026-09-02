@@ -48,7 +48,7 @@ describe("challenge resolver types", () => {
 		expect(tokenChallenges).toHaveLength(4);
 	});
 
-	it("accepts both Akamai Bot Manager challenge contracts", () => {
+	it("accepts all Akamai Bot Manager challenge contracts", () => {
 		const challenges: readonly ProviderChallenge[] = [
 			{
 				kind: "akamai_sec_cpt",
@@ -63,9 +63,21 @@ describe("challenge resolver types", () => {
 				bmsz: "current-bm-sz",
 				version: "3",
 			},
+			{
+				kind: "akamai_sbsd",
+				pageUrl: "https://example.com/challenge",
+				scriptUrl: "https://example.com/.well-known/sbsd?v=uuid&t=token",
+				stateCookieName: "sbsd_o",
+				stateCookieValue: "state-cookie",
+				acceptLanguage: "en-US,en;q=0.9",
+			},
 		];
 
-		expect(challenges.map(({ kind }) => kind)).toEqual(["akamai_sec_cpt", "akamai_sensor"]);
+		expect(challenges.map(({ kind }) => kind)).toEqual([
+			"akamai_sec_cpt",
+			"akamai_sensor",
+			"akamai_sbsd",
+		]);
 	});
 
 	it("accepts aws_waf challenges with or without a site key", () => {

@@ -278,6 +278,7 @@ export type ProviderResolverVendor =
 	| "capsolver"
 	| "capmonster"
 	| "2captcha"
+	| "hypersolutions"
 	| "custom";
 
 /**
@@ -343,6 +344,16 @@ export type ProviderChallenge =
 			readonly bmsz?: string;
 			/** Bot Manager major version when known ("3" measured on zozo.jp). */
 			readonly version?: string;
+		}
+	| {
+			readonly kind: "akamai_sbsd";
+			readonly pageUrl: string;
+			/** Discovered SBSD script URL. `?v=&t=` is hard; `?v=` is passive. */
+			readonly scriptUrl: string;
+			readonly stateCookieName: "sbsd_o" | "bm_so";
+			readonly stateCookieValue: string;
+			/** Exact Accept-Language used by the bound upstream session. */
+			readonly acceptLanguage?: string;
 		};
 
 export type ProviderChallengeKind = ProviderChallenge["kind"];
@@ -351,8 +362,9 @@ export type ProviderChallengeKind = ProviderChallenge["kind"];
  * Token solutions carry no network-identity binding. Cookie-solution binding is
  * per challenge kind: `aws_waf` was measured portable across residential leases
  * on buyee, while `cf_clearance` is unmeasured here and treated as scoped to the
- * identity that produced it. The provider attaches the returned cookies to its
- * own requests.
+ * identity that produced it. The engine owns cookie installation. For SBSD,
+ * the bound transport has already updated its jar; the returned cookie map is
+ * evidence of that mutation, not a portable token for provider installation.
  */
 export type ChallengeSolution =
 	| { readonly form: "token"; readonly token: string }
@@ -360,6 +372,14 @@ export type ChallengeSolution =
 			readonly form: "cookies";
 			readonly cookies: Readonly<Record<string, string>>;
 			readonly userAgent: string;
+			/**
+			 * Present for SBSD only. It means Hyper's payload was accepted and the bound
+			 * transport observed updated state cookies; it does not mean the challenge is
+			 * solved. Only the next protected GET can verify success (Phase 2).
+			 */
+			readonly outcome?: "payload_accepted_cookies_updated";
+			/** SBSD remains unverified until the next protected GET no longer challenges. */
+			readonly verified?: false;
 			/** Epoch seconds copied from the upstream cookie's own expiry attribute; never a constant. */
 			readonly expires?: number;
 			/**

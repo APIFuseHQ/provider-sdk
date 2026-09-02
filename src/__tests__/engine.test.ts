@@ -5,6 +5,7 @@ import { defineProvider } from "../define.js";
 import {
 	createInProcessProviderEngine,
 	createProviderEnvironment,
+	ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES,
 	ENGINE_OWNED_TELEMETRY_ENV_NAMES,
 	isEngineOwnedEnvName,
 	readEngineProxyCredentials,
@@ -130,6 +131,23 @@ describe("provider engine attachment", () => {
 });
 
 describe("engine credential containment", () => {
+	it("classifies every hosted resolver key as engine-owned and omits it from providers", () => {
+		const source = Object.fromEntries([
+			...ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES.map((name) => [name, `secret-${name}`]),
+			["PROVIDER_TOKEN", "provider-token"],
+		]);
+
+		expect(ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES.every(isEngineOwnedEnvName)).toBe(true);
+		expect(createProviderEnvironment(source, Object.keys(source))).toEqual({
+			PROVIDER_TOKEN: "provider-token",
+		});
+	});
+
+	it("rejects provider-scoped Hyper aliases as engine-owned resolver credentials", () => {
+		expect(isEngineOwnedEnvName("APIFUSE__PROVIDER__ZOZOTOWN__HYPER_API_KEY")).toBe(true);
+		expect(isEngineOwnedEnvName("apifuse__provider__zozotown__hyper_api_key")).toBe(true);
+	});
+
 	it("captures proxy credentials for the engine but omits them from provider environments", () => {
 		const source = {
 			APIFUSE__PROXY__SMARTPROXY_APP_KEY: "engine-key",
@@ -318,6 +336,36 @@ describe("engine credential containment", () => {
 			else process.env[name] = previousProxyKey;
 			if (previousProviderToken === undefined) delete process.env.PROVIDER_TOKEN;
 			else process.env.PROVIDER_TOKEN = previousProviderToken;
+		}
+	});
+
+	it("keeps the Hyper resolver key out of ctx.env even if a raw fixture declares it", async () => {
+		const name = "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY";
+		const previous = process.env[name];
+		process.env[name] = "engine-only-hyper-key";
+		try {
+			const provider = definition({
+				env: true,
+				secrets: [{ name }],
+				operations: {
+					inspectEnvironment: {
+						riskClass: "read",
+						input: z.object({}),
+						output: z.object({ hyperKey: z.string().optional() }),
+						handler: async (ctx) => ({ hyperKey: ctx.env.get(name) }),
+					},
+				},
+			});
+			const response = await createServerApp(provider).request("/v1/inspectEnvironment", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "resolver-key-containment", input: {} }),
+			});
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({ data: {} });
+		} finally {
+			if (previous === undefined) delete process.env[name];
+			else process.env[name] = previous;
 		}
 	});
 });

@@ -18,6 +18,7 @@ import {
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
 	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+	APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 	createResolverClient,
 	createResolverClientFromEnv,
 	createResolverClientFromEnvForTests,
@@ -172,6 +173,7 @@ describe("resolver default vendor policy", () => {
 			aws_waf: ["capsolver", "2captcha"],
 			akamai_sec_cpt: [],
 			akamai_sensor: [],
+			akamai_sbsd: ["hypersolutions"],
 		});
 	});
 
@@ -221,6 +223,41 @@ describe("resolver default vendor policy", () => {
 		});
 		expect(capsolver.state.solveCalls).toBe(1);
 		expect(twoCaptcha.state.solveCalls).toBe(1);
+	});
+
+	it("resolves the Hyper key from the engine resolver environment path", async () => {
+		let receivedConfiguration: string | undefined;
+		const resolver = createResolverClientFromEnvForTests(
+			{ vendors: ["hypersolutions"], kinds: ["akamai_sbsd"] },
+			{ [APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY]: "hyper-engine-key" },
+			{},
+			{
+				hypersolutions(configuration) {
+					receivedConfiguration = configuration;
+					return {
+						id: "hypersolutions",
+						requiresTransport: true,
+						supports: (kind) => kind === "akamai_sbsd",
+						async solve() {
+							return { form: "token", token: "unreachable" };
+						},
+					};
+				},
+			},
+		);
+		await expect(
+			resolver.solve({
+				kind: "akamai_sbsd",
+				pageUrl: "https://example.com/protected",
+				scriptUrl: "https://example.com/.well-known/sbsd?v=uuid&t=token",
+				stateCookieName: "sbsd_o",
+				stateCookieValue: "state",
+			}),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "hypersolutions", reason: "missing_transport" }],
+		});
+		expect(receivedConfiguration).toBe("hyper-engine-key");
 	});
 
 	it("diagnoses a kind with no SDK default vendor", async () => {
@@ -367,15 +404,24 @@ describe("resolver vendor chain", () => {
 	it.each([
 		"akamai_sec_cpt",
 		"akamai_sensor",
+		"akamai_sbsd",
 	] as const)("reports %s as unsupported by a browser-only chain regardless of credentials", async (kind) => {
 		const challenge =
 			kind === "akamai_sec_cpt"
 				? ({ kind, pageUrl: CHALLENGE.pageUrl } satisfies ProviderChallenge)
-				: ({
-						kind,
-						pageUrl: CHALLENGE.pageUrl,
-						scriptUrl: "https://example.com/akamai/sensor.js",
-					} satisfies ProviderChallenge);
+				: kind === "akamai_sbsd"
+					? ({
+							kind,
+							pageUrl: CHALLENGE.pageUrl,
+							scriptUrl: "https://example.com/.well-known/sbsd?v=uuid&t=token",
+							stateCookieName: "sbsd_o",
+							stateCookieValue: "state",
+						} satisfies ProviderChallenge)
+					: ({
+							kind,
+							pageUrl: CHALLENGE.pageUrl,
+							scriptUrl: "https://example.com/akamai/sensor.js",
+						} satisfies ProviderChallenge);
 		const config = { vendors: ["browser"], kinds: [kind] } as const;
 		const withoutCredentials = await createResolverClientFromEnv(config, {})
 			.solve(challenge)
@@ -1200,6 +1246,21 @@ describe("resolver vendor chain", () => {
 		expect(unusable.state.solveCalls).toBe(0);
 	});
 
+	it("rejects an unknown runtime challenge kind before any adapter call", async () => {
+		const adapter = createStubAdapter({ id: "custom" });
+		const unknown = "unknown_kind" as ProviderChallengeKind;
+		await expect(
+			createResolverClient({ adapters: [adapter.adapter], kinds: [unknown] }).solve({
+				kind: unknown,
+				pageUrl: CHALLENGE.pageUrl,
+			} as ProviderChallenge),
+		).rejects.toMatchObject({
+			code: "RESOLVER_KIND_NOT_DECLARED",
+			message: 'Unknown resolver kind "unknown_kind"',
+		});
+		expect(adapter.state.solveCalls).toBe(0);
+	});
+
 	it("propagates an unclassified error without calling the next vendor", async () => {
 		const original = new Error("unclassified vendor failure");
 		const first = createStubAdapter({
@@ -1293,6 +1354,19 @@ describe("resolver vendor capabilities", () => {
 		);
 
 		expect(capableVendors).toEqual(["custom"]);
+	});
+
+	it("routes akamai_sbsd only to the measured hosted adapter", () => {
+		const capableHostedVendors = (
+			Object.keys(RESOLVER_VENDOR_CAPABILITIES) as ProviderResolverVendor[]
+		).filter(
+			(vendor) =>
+				vendor !== "custom" &&
+				(RESOLVER_VENDOR_CAPABILITIES[vendor] as readonly ProviderChallengeKind[]).includes(
+					"akamai_sbsd",
+				),
+		);
+		expect(capableHostedVendors).toEqual(["hypersolutions"]);
 	});
 
 	for (const vendor of Object.keys(RESOLVER_ADAPTER_REGISTRY) as ProviderResolverVendor[]) {

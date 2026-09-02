@@ -238,10 +238,11 @@ describe("resolver solution caching", () => {
 			aws_waf: { cacheable: true, directCacheable: true },
 			akamai_sec_cpt: { cacheable: true, directCacheable: false },
 			akamai_sensor: { cacheable: true, directCacheable: false },
+			akamai_sbsd: { cacheable: false, directCacheable: false },
 		});
 	});
 
-	it("treats both Akamai challenge kinds as identity-scoped", () => {
+	it("treats every Akamai challenge kind as identity-scoped", () => {
 		expect(
 			resolverChallengeIsIdentityScoped({
 				kind: "akamai_sec_cpt",
@@ -249,6 +250,17 @@ describe("resolver solution caching", () => {
 			}),
 		).toBe(true);
 		expect(resolverChallengeIsIdentityScoped(AKAMAI_SENSOR_CHALLENGE)).toBe(true);
+		expect(
+			resolverChallengeIsIdentityScoped({
+				kind: "akamai_sbsd",
+				pageUrl: CHALLENGE.pageUrl,
+				scriptUrl: "https://example.com/.well-known/sbsd?v=uuid&t=token",
+				stateCookieName: "sbsd_o",
+				stateCookieValue: "state",
+			}),
+		).toBe(true);
+		expect(RESOLVER_CHALLENGE_BINDINGS.akamai_sbsd.cacheable).toBe(false);
+		expect(RESOLVER_CHALLENGE_BINDINGS.akamai_sbsd.directCacheable).toBe(false);
 	});
 
 	it("does not consult the cache for token kinds and does consult it for cookie kinds", async () => {
