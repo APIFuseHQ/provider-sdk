@@ -17,6 +17,7 @@ import {
 	isAutoPromotionEligible,
 	maskCommentsAndStrings,
 	renderMarkdown,
+	scenarioCarriesResponseEvidence,
 	type SubmitCheckReport,
 } from "../../bin/apifuse-submit-check.js";
 import { STREAM_PREVIEW_BYTES } from "../stream-evidence.js";
@@ -256,6 +257,36 @@ export default defineProvider({
   },
 });
 `;
+}
+
+function scenarioHealthCheckSource(assertExpression: string, extraSteps = ""): string {
+	return `healthCheck: {
+        interval: "30m",
+        cases: [{
+          name: "lookup scenario baseline",
+          input: { q: "btc" },
+          scenario: {
+            scenarioVersion: 2,
+            id: "good-provider.lookup.baseline",
+            display: { titleKey: "health.lookup.scenarioTitle" },
+            schedule: { kind: "interval", intervalMs: 1800000, jitterMs: 60000 },
+            timeoutMs: 60000,
+            coversOperations: ["lookup"],
+            credentialRefs: [],
+            steps: [
+              { id: "probe", result: "probe", kind: "operation", operationId: "lookup", inputTemplate: { q: "btc" } },
+              ${extraSteps}
+              {
+                id: "verdict",
+                result: "verdict",
+                kind: "assert",
+                coversOperations: ["lookup"],
+                expression: ${assertExpression},
+              },
+            ],
+          },
+        }],
+      },`;
 }
 
 function sourceWithHandler(handlerSource: string): string {
@@ -3800,6 +3831,395 @@ const response = { updatedAt: "20260707222855" };
 		expect(check?.evidence).toEqual(["empty: empty healthCheck.assertions"]);
 		expect(check?.remediation).toContain("healthCheck.assertions for empty is empty");
 		expect(check?.remediation).not.toContain("lookup is empty");
+	});
+
+	it("recognizes a declarative scenario case that reads response data as coverage", async () => {
+		const dir = makeProviderDir(
+			"submit-scenario-health-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "predicate",
+	            operator: "is_true",
+	            actual: { ref: { namespace: "steps", binding: "probe", path: ["data", "ok"] } },
+	          }`),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("recognizes a scenario whose only assert reads an extract-step result", async () => {
+		const dir = makeProviderDir(
+			"submit-scenario-extract-health-",
+			validProviderSource(
+				scenarioHealthCheckSource(
+					`{ kind: "predicate", operator: "non_empty", actual: { ref: { namespace: "steps", binding: "extracted", path: ["value"] } } }`,
+					`{
+	            id: "pull",
+	            result: "extracted",
+	            kind: "extract",
+	            from: { namespace: "steps", binding: "probe", path: ["data"] },
+	            selector: { root: "$", segments: [{ kind: "property", name: "ok" }] },
+	            valueType: "boolean",
+	            required: true,
+	          },`,
+				),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("recognizes a scenario whose only assert is a quantifier over response rows", async () => {
+		const dir = makeProviderDir(
+			"submit-scenario-quantifier-health-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "quantifier",
+	            quantifier: "every",
+	            items: { ref: { namespace: "steps", binding: "probe", path: ["data", "items"] } },
+	            itemBinding: "row",
+	            maxItems: 50,
+	            clause: { kind: "predicate", operator: "non_empty", actual: { ref: { namespace: "item", binding: "row", path: ["id"] } } },
+	          }`),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("recognizes status_2xx applied to a body path as evidence", async () => {
+		// Envelope-style upstreams answer HTTP 200 and carry the real status in
+		// the body; status_2xx over a data path reads response content and must
+		// not be conflated with the transport pin on ["status_code"].
+		const dir = makeProviderDir(
+			"submit-scenario-body-status-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "predicate",
+	            operator: "status_2xx",
+	            actual: { ref: { namespace: "steps", binding: "probe", path: ["data", "code"] } },
+	          }`),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("blocks a negation-wrapped synonym of the bare-envelope presence pin", async () => {
+		// not(not_exists(data)) is byte-for-byte the semantics of the blocked
+		// exists(data); polarity tracking must catch the respelling.
+		const dir = makeProviderDir(
+			"submit-scenario-not-notexists-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "not",
+	            clause: { kind: "predicate", operator: "not_exists", actual: { ref: { namespace: "steps", binding: "probe", path: ["data"] } } },
+	          }`),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence).toEqual([
+			"lookup: healthCheck scenario asserts nothing beyond transport",
+		]);
+	});
+
+	it("blocks a zero-bound array_length_gte pin on the bare envelope", async () => {
+		// array_length_gte(data, 0) is always true for any array body — the
+		// degenerate spelling of type_is(data, "array").
+		const dir = makeProviderDir(
+			"submit-scenario-zero-bound-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "predicate",
+	            operator: "array_length_gte",
+	            actual: { ref: { namespace: "steps", binding: "probe", path: ["data"] } },
+	            expected: 0,
+	          }`),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence).toEqual([
+			"lookup: healthCheck scenario asserts nothing beyond transport",
+		]);
+	});
+
+	it("recognizes a non-zero cardinality floor on the bare envelope", async () => {
+		// For a top-level-array output, array_length_gte(data, 1) is a genuine
+		// cardinality constraint and must not be swept up by the envelope pin.
+		const dir = makeProviderDir(
+			"submit-scenario-cardinality-floor-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "predicate",
+	            operator: "array_length_gte",
+	            actual: { ref: { namespace: "steps", binding: "probe", path: ["data"] } },
+	            expected: 1,
+	          }`),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("recognizes a negated bare-envelope pin as a real absence probe", async () => {
+		// not(exists(data)) means "this probe must return no body" — falsified
+		// by any ordinary response, so it is a real (if unusual) constraint.
+		const dir = makeProviderDir(
+			"submit-scenario-absence-probe-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "not",
+	            clause: { kind: "predicate", operator: "exists", actual: { ref: { namespace: "steps", binding: "probe", path: ["data"] } } },
+	          }`),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("blocks a self-comparing reference tautology", async () => {
+		// equals(x, x) holds for every response; the reads discriminate nothing.
+		const dir = makeProviderDir(
+			"submit-scenario-ref-tautology-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "predicate",
+	            operator: "equals",
+	            actual: { ref: { namespace: "steps", binding: "probe", path: ["data", "ok"] } },
+	            expected: { ref: { namespace: "steps", binding: "probe", path: ["data", "ok"] } },
+	          }`),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence).toEqual([
+			"lookup: healthCheck scenario asserts nothing beyond transport",
+		]);
+	});
+
+	it("fails open on scenario grammar this SDK does not know", () => {
+		// A provider built on a newer SDK can carry steps, expression kinds,
+		// operators, or namespaces this walk has never seen; its own SDK already
+		// validated them at import time, so they count as evidence, not vacuity.
+		const base = {
+			scenarioVersion: 2,
+			id: "s",
+			display: { titleKey: "t" },
+			schedule: { kind: "interval", intervalMs: 1800000, jitterMs: 0 },
+			timeoutMs: 60000,
+			coversOperations: ["lookup"],
+			credentialRefs: [],
+		};
+		const assertWith = (expression: unknown) => ({
+			...base,
+			steps: [
+				{ id: "a", result: "verdict", kind: "assert", coversOperations: ["lookup"], expression },
+			],
+		});
+
+		// unknown predicate operator, operand-less
+		expect(
+			scenarioCarriesResponseEvidence(
+				assertWith({ kind: "predicate", operator: "body_matches_declared_schema" }),
+			),
+		).toBe(true);
+		// unknown expression kind
+		expect(scenarioCarriesResponseEvidence(assertWith({ kind: "xor", clauses: [] }))).toBe(true);
+		// unknown reference namespace
+		expect(
+			scenarioCarriesResponseEvidence(
+				assertWith({
+					kind: "predicate",
+					operator: "is_true",
+					actual: { ref: { namespace: "journal", key: "k" } },
+				}),
+			),
+		).toBe(true);
+		// unknown step kind alongside no semantic assert
+		expect(
+			scenarioCarriesResponseEvidence({
+				...base,
+				steps: [{ id: "w", result: "r", kind: "webhook_wait", timeoutMs: 1000 }],
+			}),
+		).toBe(true);
+		// malformed scenario shape (version skew)
+		expect(scenarioCarriesResponseEvidence({ steps: "not-an-array" })).toBe(true);
+		// ...while the known transport-only shape is still affirmatively vacuous
+		expect(
+			scenarioCarriesResponseEvidence(
+				assertWith({
+					kind: "predicate",
+					operator: "status_2xx",
+					actual: { ref: { namespace: "steps", binding: "probe", path: ["status_code"] } },
+				}),
+			),
+		).toBe(false);
+	});
+
+	it("blocks a transport-only scenario (status_2xx + bare-envelope type pin)", async () => {
+		const dir = makeProviderDir(
+			"submit-scenario-transport-only-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "all",
+	            clauses: [
+	              { kind: "predicate", operator: "status_2xx", actual: { ref: { namespace: "steps", binding: "probe", path: ["status_code"] } } },
+	              { kind: "predicate", operator: "type_is", expected: "object", actual: { ref: { namespace: "steps", binding: "probe", path: ["data"] } } },
+	              { kind: "predicate", operator: "exists", actual: { ref: { namespace: "steps", binding: "probe", path: ["data"] } } },
+	            ],
+	          }`),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.points).toBe(0);
+		expect(check?.evidence).toEqual([
+			"lookup: healthCheck scenario asserts nothing beyond transport",
+		]);
+		expect(check?.remediation).toContain("healthCheck scenario for lookup asserts nothing");
+		expect(report.score.verdict).toBe("blocked");
+	});
+
+	it("blocks a scenario with no assert step", async () => {
+		const dir = makeProviderDir(
+			"submit-scenario-no-assert-",
+			validProviderSource(`healthCheck: {
+	        interval: "30m",
+	        cases: [{
+	          name: "lookup scenario baseline",
+	          input: { q: "btc" },
+	          scenario: {
+	            scenarioVersion: 2,
+	            id: "good-provider.lookup.baseline",
+	            display: { titleKey: "health.lookup.scenarioTitle" },
+	            schedule: { kind: "interval", intervalMs: 1800000, jitterMs: 60000 },
+	            timeoutMs: 60000,
+	            coversOperations: ["lookup"],
+	            credentialRefs: [],
+	            steps: [
+	              { id: "probe", result: "probe", kind: "operation", operationId: "lookup", inputTemplate: { q: "btc" } },
+	            ],
+	          },
+	        }],
+	      },`),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence).toEqual([
+			"lookup: healthCheck scenario asserts nothing beyond transport",
+		]);
+	});
+
+	it("blocks a scenario whose assert expression is a literal tautology", async () => {
+		const dir = makeProviderDir(
+			"submit-scenario-tautology-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{ kind: "predicate", operator: "is_true", actual: true }`),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence).toEqual([
+			"lookup: healthCheck scenario asserts nothing beyond transport",
+		]);
+	});
+
+	it("passes an operation whose only real coverage is a scenario sibling case", async () => {
+		const dir = makeProviderDir(
+			"submit-scenario-sibling-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "predicate",
+	            operator: "number_gte",
+	            actual: { ref: { namespace: "steps", binding: "probe", path: ["duration_ms"] } },
+	            expected: 0,
+	          }`).replace(
+					"cases: [{",
+					`cases: [{ name: "transport only", input: { q: "btc" }, assertions: () => {} }, {`,
+				),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.status).toBe("pass");
+		expect(check?.points).toBe(15);
+	});
+
+	it("classifies a mixed all-vacuous suite under the empty-assertions wording", async () => {
+		const dir = makeProviderDir(
+			"submit-scenario-mixed-vacuous-",
+			validProviderSource(
+				scenarioHealthCheckSource(`{
+	            kind: "predicate",
+	            operator: "status_2xx",
+	            actual: { ref: { namespace: "steps", binding: "probe", path: ["status_code"] } },
+	          }`).replace(
+					"cases: [{",
+					`cases: [{ name: "transport only", input: { q: "btc" }, assertions: () => {} }, {`,
+				),
+			),
+		);
+		writeValidLocaleCatalogs(dir);
+		const report = await buildSubmitCheckReport(dir);
+		const check = report.checks.find((item) => item.id === "health-coverage");
+
+		expect(check?.level).toBe("blocker");
+		expect(check?.status).toBe("fail");
+		expect(check?.evidence).toEqual(["lookup: empty healthCheck.assertions"]);
+		expect(check?.remediation).toContain("healthCheck.assertions for lookup is empty");
 	});
 
 	it("warns but does not block generated OAuth providers without credential keys", async () => {

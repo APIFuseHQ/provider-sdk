@@ -120,6 +120,7 @@ export type {
 export type { DevServerOptions } from "./dev.js";
 export { createDevServer, startDevServer } from "./dev.js";
 export * from "./errors.js";
+export * from "./engine.js";
 export * from "./observability.js";
 export * from "./user-input.js";
 export * from "./i18n/index.js";
@@ -410,6 +411,7 @@ export type {
 	ProviderResolvedFile,
 	ProviderResolverConfig,
 	ProviderResolverVendor,
+	ProviderRuntimeTarget,
 	ProviderRuntimeState,
 	ProviderSecretDeclaration,
 	ProviderStateDurationString,

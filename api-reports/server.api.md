@@ -503,6 +503,7 @@ type ChallengeSolution = {
     readonly cookies: Readonly<Record<string, string>>;
     readonly userAgent: string;
     readonly expires?: number;
+    readonly sdkEstimatedExpires?: number;
 };
 
 // Warning: (ae-forgotten-export) The symbol "ProviderDefinition" needs to be exported by the entry point index.d.ts
@@ -2567,52 +2568,41 @@ type ProviderChoiceStorageOptions = {
     readonly unavailable?: "reject";
 };
 
-// @public (undocumented)
-interface ProviderContext {
-    // Warning: (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
-    //
-    // (undocumented)
-    auth: AuthContext;
-    // Warning: (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
-    //
-    // (undocumented)
-    browser: BrowserClient;
-    // Warning: (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point index.d.ts
-    //
-    // (undocumented)
-    cache: ProviderCache;
-    // Warning: (ae-forgotten-export) The symbol "ProviderChoiceContext" needs to be exported by the entry point index.d.ts
-    //
-    // (undocumented)
-    choice: ProviderChoiceContext;
-    // (undocumented)
-    credential: CredentialContext;
-    // (undocumented)
-    env: EnvContext;
-    // Warning: (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point index.d.ts
-    readonly files?: ProviderFilesContext;
-    // (undocumented)
-    http: HttpClient;
-    readonly native: NativeContext;
-    // (undocumented)
-    ocr: OcrContext;
-    // Warning: (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
-    //
-    // (undocumented)
+// @public
+type ProviderContext<TConfig = Record<string, unknown>> = {
     request?: ProviderRequestContext;
-    // (undocumented)
-    resolver: ResolverContext;
-    // (undocumented)
-    state: ProviderRuntimeState;
-    // (undocumented)
-    stealth: StealthClient;
-    // (undocumented)
-    stt: SttContext;
-    // Warning: (ae-forgotten-export) The symbol "TraceContext" needs to be exported by the entry point index.d.ts
-    //
-    // (undocumented)
     trace: TraceContext;
-}
+} & ("env" extends keyof TConfig ? {
+    env: EnvContext;
+} : Record<never, never>) & ("credential" extends keyof TConfig ? {
+    credential: CredentialContext;
+} : Record<never, never>) & ("http" extends keyof TConfig ? {
+    http: HttpClient;
+} : Record<never, never>) & ("files" extends keyof TConfig ? string extends keyof TConfig ? {
+    readonly files?: ProviderFilesContext;
+} : {
+    readonly files: ProviderFilesContext;
+} : Record<never, never>) & ("native" extends keyof TConfig ? {
+    readonly native: NativeContext;
+} : Record<never, never>) & ("cache" extends keyof TConfig ? {
+    cache: ProviderCache;
+} : Record<never, never>) & ("state" extends keyof TConfig ? {
+    state: ProviderRuntimeState;
+} : Record<never, never>) & ("stealth" extends keyof TConfig ? {
+    stealth: StealthClient;
+} : Record<never, never>) & ("browser" extends keyof TConfig ? {
+    browser: BrowserClient;
+} : Record<never, never>) & ("auth" extends keyof TConfig ? {
+    auth: AuthContext;
+} : Record<never, never>) & ("ocr" extends keyof TConfig ? {
+    ocr: OcrContext;
+} : Record<never, never>) & ("stt" extends keyof TConfig ? {
+    stt: SttContext;
+} : Record<never, never>) & ("resolver" extends keyof TConfig ? {
+    resolver: ResolverContext;
+} : Record<never, never>) & ("choice" extends keyof TConfig ? {
+    choice: ProviderChoiceContext;
+} : Record<never, never>);
 
 // @public (undocumented)
 interface ProviderDefinition<TContext = ProviderContext> {
@@ -2630,6 +2620,10 @@ interface ProviderDefinition<TContext = ProviderContext> {
     browser?: {
         engine: BrowserEngine;
     };
+    // (undocumented)
+    cache?: Record<string, never> | true;
+    // (undocumented)
+    choice?: Record<string, never> | true;
     // Warning: (ae-forgotten-export) The symbol "ContextDeclaration" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -2640,6 +2634,10 @@ interface ProviderDefinition<TContext = ProviderContext> {
     credential?: CredentialDeclaration;
     // Warning: (ae-forgotten-export) The symbol "ProviderDeploymentOverrides" needs to be exported by the entry point index.d.ts
     deployment?: ProviderDeploymentOverrides;
+    // (undocumented)
+    env?: Record<string, never> | true;
+    // (undocumented)
+    files?: Record<string, never> | true;
     // Warning: (ae-forgotten-export) The symbol "HealthJourneyDefinition" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
@@ -2650,6 +2648,8 @@ interface ProviderDefinition<TContext = ProviderContext> {
     healthMonitor?: ProviderHealthMonitorConfig;
     // Warning: (ae-forgotten-export) The symbol "ProviderHealthProbeConfig" needs to be exported by the entry point index.d.ts
     healthProbe?: ProviderHealthProbeConfig;
+    // (undocumented)
+    http?: Record<string, never> | true;
     // (undocumented)
     id: string;
     // Warning: (ae-forgotten-export) The symbol "ProviderMeta" needs to be exported by the entry point index.d.ts
@@ -2680,10 +2680,14 @@ interface ProviderDefinition<TContext = ProviderContext> {
     reviewed?: ProviderReviewed;
     // (undocumented)
     runtime: "standard" | "shared" | "browser";
+    // Warning: (ae-forgotten-export) The symbol "ProviderRuntimeTarget" needs to be exported by the entry point index.d.ts
+    runtimeTarget?: ProviderRuntimeTarget;
     // Warning: (ae-forgotten-export) The symbol "ProviderSecretDeclaration" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
     secrets?: ProviderSecretDeclaration[];
+    // (undocumented)
+    state?: Record<string, never> | true;
     // (undocumented)
     stealth?: {
         profile: string;
@@ -2730,6 +2734,65 @@ interface ProviderDeploymentOverrides {
     };
     // (undocumented)
     runtime?: "shared" | "dedicated" | "browser";
+}
+
+// @public
+interface ProviderEngine {
+    // Warning: (ae-forgotten-export) The symbol "ProviderEngineAttachmentInput" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    attach<TDeclaration extends object = Record<string, unknown>>(input: ProviderEngineAttachmentInput): ProviderContext<TDeclaration>;
+}
+
+// @public (undocumented)
+interface ProviderEngineAttachmentInput {
+    // Warning: (ae-forgotten-export) The symbol "ProviderEngineBindingCandidates" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    readonly bindings: ProviderEngineBindingCandidates;
+    // (undocumented)
+    readonly provider: ProviderDefinition;
+}
+
+// Warning: (ae-forgotten-export) The symbol "ProviderEngineCapabilitySurface" needs to be exported by the entry point index.d.ts
+// Warning: (ae-forgotten-export) The symbol "ProviderEngineResidentSurface" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+type ProviderEngineBindingCandidates = Partial<ProviderEngineCapabilitySurface & ProviderEngineResidentSurface & {
+    readonly env: EnvContext;
+    readonly credential: CredentialContext;
+    readonly files: ProviderFilesContext;
+    readonly auth: AuthContext;
+    readonly choice: ProviderChoiceContext;
+}> & {
+    readonly request?: ProviderRequestContext;
+    readonly trace: TraceContext;
+};
+
+// @public
+interface ProviderEngineCapabilitySurface {
+    // (undocumented)
+    readonly browser: BrowserClient;
+    // (undocumented)
+    readonly cache: ProviderCache;
+    // (undocumented)
+    readonly http: HttpClient;
+    // (undocumented)
+    readonly ocr: OcrContext;
+    // (undocumented)
+    readonly resolver: ResolverContext;
+    // (undocumented)
+    readonly state: ProviderRuntimeState;
+    // (undocumented)
+    readonly stealth: StealthClient;
+    // (undocumented)
+    readonly stt: SttContext;
+}
+
+// @public
+interface ProviderEngineResidentSurface {
+    // (undocumented)
+    readonly native: NativeContext;
 }
 
 // Warning: (ae-forgotten-export) The symbol "PROVIDER_ERROR_CATEGORIES" needs to be exported by the entry point index.d.ts
@@ -2997,6 +3060,9 @@ interface ProviderRuntimeState {
     namespace(name: string, options: StateNamespaceOptions): ProviderStateNamespace;
 }
 
+// @public
+type ProviderRuntimeTarget = "vanilla" | "engine";
+
 // @public (undocumented)
 interface ProviderSecretDeclaration {
     // (undocumented)
@@ -3112,6 +3178,8 @@ export type ProviderServerOperationExecutorInput<TContext extends Partial<Provid
 // @public (undocumented)
 export type ProviderServerOptions<TContext extends Partial<ProviderContext> = ProviderContext> = {
     logger?: ProviderServerLogger;
+    engine?: ProviderEngine;
+    files?: ProviderFilesContext;
     operationExecutor?: ProviderServerOperationExecutor<TContext>;
     internalOperationExecutor?: ProviderServerOperationExecutor<TContext>;
     statefulForwarding?: {
@@ -4542,38 +4610,46 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/health-scenario.d.ts:1838:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:27:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:38:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:12:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:152:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:13:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:145:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:157:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:127:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:522:5 - (ae-forgotten-export) The symbol "HealthJourneyRunContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:522:5 - (ae-forgotten-export) The symbol "HealthJourneyRunResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:619:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:630:5 - (ae-forgotten-export) The symbol "HealthCheckAssertionContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:630:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:635:5 - (ae-forgotten-export) The symbol "HealthScenario" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:647:9 - (ae-forgotten-export) The symbol "HealthScheduleRandomization" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:811:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:816:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:875:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1118:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1118:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1317:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1318:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1423:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1429:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1430:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1434:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1441:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1476:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1544:5 - (ae-forgotten-export) The symbol "ProviderChoiceConsumeResult" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1556:5 - (ae-forgotten-export) The symbol "ProviderStateDurationString" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1600:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1658:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1666:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1667:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1676:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1927:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1985:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:527:5 - (ae-forgotten-export) The symbol "HealthJourneyRunContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:527:5 - (ae-forgotten-export) The symbol "HealthJourneyRunResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:624:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:635:5 - (ae-forgotten-export) The symbol "HealthCheckAssertionContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:635:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:640:5 - (ae-forgotten-export) The symbol "HealthScenario" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:652:9 - (ae-forgotten-export) The symbol "HealthScheduleRandomization" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:816:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:821:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:880:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1123:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1123:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1324:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1325:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1430:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1436:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1437:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1441:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1448:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1483:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1551:5 - (ae-forgotten-export) The symbol "ProviderChoiceConsumeResult" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1563:5 - (ae-forgotten-export) The symbol "ProviderStateDurationString" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1607:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1665:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1673:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1674:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1683:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1832:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1833:5 - (ae-forgotten-export) The symbol "TraceContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1841:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1847:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1853:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1855:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1863:5 - (ae-forgotten-export) The symbol "ProviderChoiceContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1950:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:2017:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

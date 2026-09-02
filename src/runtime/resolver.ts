@@ -41,6 +41,7 @@ import {
 import {
 	createUnsupportedResolverClient,
 	RESOLVER_INSTRUMENTATION_METADATA,
+	type ResolverSolveWithRecorder,
 } from "./resolver-shared.js";
 import {
 	APIFUSE__CDP_POOL__URL,
@@ -142,11 +143,21 @@ type ResolverCacheIndex = {
 	}[];
 };
 
+export type ResolverSolutionSource = "cache" | "vendor";
+
+type ResolverSolutionInvalidationOutcome =
+	| "cache_disabled"
+	| "entry_deleted"
+	| "index_entry_deleted"
+	| "not_cookie_solution"
+	| "solution_not_cached";
+
 const RESOLVER_SOLUTION_CACHE_NAMESPACE = "resolver-solution";
 const RESOLVER_SOLUTION_INDEX_CACHE_NAMESPACE = "resolver-solution-index";
 const MIN_RESOLVER_CACHE_TTL_MS = 1_000;
 const resolverCaches = new WeakMap<object, ProviderCache | null>();
 const solutionIssuerDigests = new WeakMap<object, string>();
+const resolverSolutionSources = new WeakMap<object, ResolverSolutionSource>();
 const SAFE_CAUSE_MESSAGE_WORDS: ReadonlySet<string> = new Set([
 	"abort",
 	"aborted",
@@ -596,7 +607,7 @@ function isResolverCacheIndex(value: unknown): value is ResolverCacheIndex {
 
 function solutionExpiryMs(solution: ChallengeSolution): number | undefined {
 	if (solution.form !== "cookies") return undefined;
-	const expires = solution.expires;
+	const expires = solution.expires ?? solution.sdkEstimatedExpires;
 	if (typeof expires !== "number" || !Number.isFinite(expires)) return undefined;
 	return expires * 1_000;
 }
@@ -605,6 +616,22 @@ function rememberSolutionIssuer(solution: ChallengeSolution, issuerDigest: strin
 	if (typeof solution === "object" && solution !== null) {
 		solutionIssuerDigests.set(solution, issuerDigest);
 	}
+}
+
+function rememberSolutionSource(solution: ChallengeSolution, source: ResolverSolutionSource): void {
+	if (typeof solution === "object" && solution !== null) {
+		resolverSolutionSources.set(solution, source);
+	}
+}
+
+/**
+ * Identify whether this exact SDK-returned solution object came from the cache
+ * or a vendor solve. Returns undefined for copied or caller-created objects.
+ */
+export function getResolverSolutionSource(
+	solution: ChallengeSolution,
+): ResolverSolutionSource | undefined {
+	return resolverSolutionSources.get(solution);
 }
 
 async function readCachedSolution(
@@ -617,8 +644,14 @@ async function readCachedSolution(
 	if (!cached || !isCachedResolverSolution(cached.value)) return undefined;
 	if (cached.value.issuerDigest !== issuerDigest || cached.value.expiresAtMs <= now)
 		return undefined;
-	rememberSolutionIssuer(cached.value.solution, issuerDigest);
-	return cached.value.solution;
+	if (cached.value.solution.form !== "cookies") return undefined;
+	const solution = {
+		...cached.value.solution,
+		cookies: { ...cached.value.solution.cookies },
+	};
+	rememberSolutionIssuer(solution, issuerDigest);
+	rememberSolutionSource(solution, "cache");
+	return solution;
 }
 
 async function findCachedSolution(
@@ -719,25 +752,18 @@ async function cacheResolverSolution(
 	);
 }
 
-/** Remove the cached entry for the exact solution object returned by this resolver. */
-export async function invalidateResolverSolution(
+async function invalidateResolverSolutionWithOutcome(
 	resolver: ResolverContext,
 	challenge: ProviderChallenge,
 	solution: ChallengeSolution,
-): Promise<void> {
+): Promise<ResolverSolutionInvalidationOutcome> {
 	const metadata = (
 		resolver as ResolverContext & {
 			readonly [RESOLVER_INSTRUMENTATION_METADATA]?: ResolverInstrumentationMetadata;
 		}
 	)[RESOLVER_INSTRUMENTATION_METADATA];
 	const cacheOwner = metadata?.target ?? resolver;
-	const invalidate = async (): Promise<
-		| "cache_disabled"
-		| "entry_deleted"
-		| "index_entry_deleted"
-		| "not_cookie_solution"
-		| "solution_not_cached"
-	> => {
+	const invalidate = async (): Promise<ResolverSolutionInvalidationOutcome> => {
 		if (solution.form !== "cookies") return "not_cookie_solution";
 		if (!resolverCaches.has(cacheOwner)) {
 			throw new Error("Resolver cache registration lookup failed during solution invalidation");
@@ -763,13 +789,36 @@ export async function invalidateResolverSolution(
 	};
 
 	if (!metadata) {
-		await invalidate();
-		return;
+		return await invalidate();
 	}
-	await metadata.traceRecorder.runSpan("resolver.cache.invalidate", invalidate, {
+	return await metadata.traceRecorder.runSpan("resolver.cache.invalidate", invalidate, {
 		attributes: { challenge_kind: challenge.kind },
 		onSuccess: (outcome) => ({ outcome }),
 	});
+}
+
+/** Remove the cached entry for the exact solution object returned by this resolver. */
+export async function invalidateResolverSolution(
+	resolver: ResolverContext,
+	challenge: ProviderChallenge,
+	solution: ChallengeSolution,
+): Promise<void> {
+	await invalidateResolverSolutionWithOutcome(resolver, challenge, solution);
+}
+
+/**
+ * Remove a solution only when it was returned from the resolver cache. Providers
+ * should call this when an upstream serves the same challenge after a cached
+ * solution was applied, so the next `solve()` mints a fresh solution.
+ */
+export async function invalidateCachedResolverSolution(
+	resolver: ResolverContext,
+	challenge: ProviderChallenge,
+	solution: ChallengeSolution,
+): Promise<boolean> {
+	if (getResolverSolutionSource(solution) !== "cache") return false;
+	const outcome = await invalidateResolverSolutionWithOutcome(resolver, challenge, solution);
+	return outcome === "entry_deleted" || outcome === "index_entry_deleted";
 }
 
 async function resolveResolverIdentity(
@@ -937,6 +986,7 @@ function createResolverChainClient(options: {
 							);
 						}
 					}
+					rememberSolutionSource(solution, "vendor");
 					return solution;
 				} catch (error) {
 					signal.throwIfAborted();
@@ -1022,8 +1072,12 @@ export function bindResolverSignal(
 ): ResolverContext {
 	if (!defaultSignal) return resolver;
 	const boundResolver: ResolverContext = {
-		solve(challenge, signal = defaultSignal) {
-			return resolver.solve(challenge, signal);
+		solve(challenge, signal = defaultSignal, traceRecorder?: TraceRecorder) {
+			return (resolver as Partial<ResolverSolveWithRecorder> & ResolverContext).solve(
+				challenge,
+				signal,
+				traceRecorder,
+			);
 		},
 	};
 	if (resolverCaches.has(resolver)) {

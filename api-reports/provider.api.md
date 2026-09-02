@@ -798,6 +798,7 @@ type ChallengeSolution = {
     readonly cookies: Readonly<Record<string, string>>;
     readonly userAgent: string;
     readonly expires?: number;
+    readonly sdkEstimatedExpires?: number;
 };
 
 // @public (undocumented)
@@ -843,6 +844,9 @@ export function createFormCeremony(options: {
     mapCredential?: (input: Record<string, unknown>) => JsonObject;
 }): AuthFlowDefinition;
 
+// @public
+export function createInProcessProviderEngine(): ProviderEngine;
+
 // @public (undocumented)
 export function createProviderChoiceContext(options: CreateProviderChoiceContextOptions): ProviderChoiceContext;
 
@@ -872,6 +876,9 @@ interface CreateProviderChoiceTokenOptions<TPayload extends ProviderChoiceTokenP
     // (undocumented)
     secret: string;
 }
+
+// @public
+export function createProviderEnvironment(environment: Readonly<Record<string, string | undefined>>, declaredNames: readonly string[]): Readonly<Record<string, string>>;
 
 // @public (undocumented)
 export function createTestProviderChoiceContext(options: Omit<CreateProviderChoiceContextOptions, "masterSecret"> & {
@@ -1109,7 +1116,7 @@ export function defineOperation<TContext>(): <TInput extends SchemaLike, TOutput
 // Warning: (ae-forgotten-export) The symbol "AuthStartNoInputGuard" needs to be exported by the entry point provider.d.ts
 //
 // @public
-export function defineProvider<const TDeclaration extends ProviderDeclaration>(declaration: TDeclaration & Record<Exclude<keyof TDeclaration, keyof ProviderDeclaration>, never> & AuthStartNoInputGuard<TDeclaration>): ProviderBuilder<TDeclaration>;
+export function defineProvider<const TConfig extends ProviderDeclaration>(declaration: TConfig & Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> & AuthStartNoInputGuard<TConfig>): ProviderBuilder<TConfig>;
 
 // @public (undocumented)
 export function defineSmsOtpMatcher(config: Omit<SmsOtpMatcherDefinition, "extractOtp">): SmsOtpMatcherDefinition;
@@ -1122,6 +1129,9 @@ export function describeKey<TSchema extends ZodType>(schema: TSchema, key: Provi
 
 // @public (undocumented)
 type E164PhoneNumber = `+${string}`;
+
+// @public
+export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY__SMARTPROXY_APP_KEY", "APIFUSE__PROXY__NODEMAVEN_USERNAME", "APIFUSE__PROXY__NODEMAVEN_PASSWORD"];
 
 // @public (undocumented)
 interface EnvContext {
@@ -1970,6 +1980,9 @@ interface HttpStreamResponse {
 
 // @public
 export type InferSchemaOutput<TSchema extends SchemaLike> = TSchema extends ZodType ? infer<TSchema> : TSchema extends StandardSchemaV1<unknown, infer Output> ? Output : unknown;
+
+// @public (undocumented)
+export function isEngineOwnedProxyCredentialName(name: string): boolean;
 
 // @public (undocumented)
 type Iso3166Alpha2CountryCode = Uppercase<string>;
@@ -3003,6 +3016,12 @@ const predicateSchema: z.ZodUnion<readonly [z.ZodObject<{
 type ProbeInterval = ms.StringValue;
 
 // @public (undocumented)
+export const PROVIDER_CAPABILITY_KEYS: readonly ["env", "credential", "http", "files", "native", "cache", "state", "stealth", "browser", "auth", "ocr", "stt", "resolver", "choice"];
+
+// @public
+export const PROVIDER_ENGINE_PROTOCOL_VERSION: "provider-engine.v1";
+
+// @public (undocumented)
 const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
 
 // @public (undocumented)
@@ -3017,10 +3036,10 @@ interface ProviderAccessConfig {
 export type ProviderAccessVisibility = "public" | "early_access";
 
 // @public
-export type ProviderBuilder<TDeclaration extends ProviderDeclaration> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
-    operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+export type ProviderBuilder<TConfig extends ProviderDeclaration> = <TOperations extends Record<string, ProviderOperation>>(implementation: {
+    operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 }) => Omit<ProviderDefinition, "operations"> & {
-    operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+    operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 };
 
 // @public (undocumented)
@@ -3094,6 +3113,9 @@ interface ProviderCacheResult<T> {
     // (undocumented)
     value: T;
 }
+
+// @public (undocumented)
+export type ProviderCapabilityKey = (typeof PROVIDER_CAPABILITY_KEYS)[number];
 
 // @public
 type ProviderChallenge = {
@@ -3311,53 +3333,47 @@ export type ProviderChoiceTokenErrorReason = "invalid_shape" | "invalid_signatur
 // @public (undocumented)
 export type ProviderChoiceTokenPayload = Record<string, unknown>;
 
-// @public (undocumented)
-export interface ProviderContext {
-    // Warning: (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
-    auth: AuthContext;
-    // Warning: (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
-    browser: BrowserClient;
-    // Warning: (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
-    cache: ProviderCache;
-    // (undocumented)
-    choice: ProviderChoiceContext;
-    // (undocumented)
-    credential: CredentialContext;
-    // (undocumented)
-    env: EnvContext;
-    readonly files?: ProviderFilesContext;
-    // (undocumented)
-    http: HttpClient;
-    readonly native: NativeContext;
-    // (undocumented)
-    ocr: OcrContext;
-    // (undocumented)
+// @public
+export type ProviderContext<TConfig = Record<string, unknown>> = {
     request?: ProviderRequestContext;
-    // (undocumented)
-    resolver: ResolverContext;
-    // (undocumented)
-    state: ProviderRuntimeState;
-    // (undocumented)
-    stealth: StealthClient;
-    // (undocumented)
-    stt: SttContext;
-    // Warning: (ae-forgotten-export) The symbol "TraceContext" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
     trace: TraceContext;
-}
+} & ("env" extends keyof TConfig ? {
+    env: EnvContext;
+} : Record<never, never>) & ("credential" extends keyof TConfig ? {
+    credential: CredentialContext;
+} : Record<never, never>) & ("http" extends keyof TConfig ? {
+    http: HttpClient;
+} : Record<never, never>) & ("files" extends keyof TConfig ? string extends keyof TConfig ? {
+    readonly files?: ProviderFilesContext;
+} : {
+    readonly files: ProviderFilesContext;
+} : Record<never, never>) & ("native" extends keyof TConfig ? {
+    readonly native: NativeContext;
+} : Record<never, never>) & ("cache" extends keyof TConfig ? {
+    cache: ProviderCache;
+} : Record<never, never>) & ("state" extends keyof TConfig ? {
+    state: ProviderRuntimeState;
+} : Record<never, never>) & ("stealth" extends keyof TConfig ? {
+    stealth: StealthClient;
+} : Record<never, never>) & ("browser" extends keyof TConfig ? {
+    browser: BrowserClient;
+} : Record<never, never>) & ("auth" extends keyof TConfig ? {
+    auth: AuthContext;
+} : Record<never, never>) & ("ocr" extends keyof TConfig ? {
+    ocr: OcrContext;
+} : Record<never, never>) & ("stt" extends keyof TConfig ? {
+    stt: SttContext;
+} : Record<never, never>) & ("resolver" extends keyof TConfig ? {
+    resolver: ResolverContext;
+} : Record<never, never>) & ("choice" extends keyof TConfig ? {
+    choice: ProviderChoiceContext;
+} : Record<never, never>);
 
 // @public
-export type ProviderContextFor<TConfig> = Pick<ProviderContext, "trace" | "request"> & ("env" extends keyof TConfig ? Pick<ProviderContext, "env"> : Record<never, never>) & ("credential" extends keyof TConfig ? Pick<ProviderContext, "credential"> : Record<never, never>) & ("http" extends keyof TConfig ? Pick<ProviderContext, "http"> : Record<never, never>) & ("files" extends keyof TConfig ? Pick<ProviderContext, "files"> : Record<never, never>) & ("native" extends keyof TConfig ? Pick<ProviderContext, "native"> : Record<never, never>) & ("cache" extends keyof TConfig ? Pick<ProviderContext, "cache"> : Record<never, never>) & ("state" extends keyof TConfig ? Pick<ProviderContext, "state"> : Record<never, never>) & ("stealth" extends keyof TConfig ? Pick<ProviderContext, "stealth"> : Record<never, never>) & ("browser" extends keyof TConfig ? Pick<ProviderContext, "browser"> : Record<never, never>) & ("auth" extends keyof TConfig ? Pick<ProviderContext, "auth"> : Record<never, never>) & ("ocr" extends keyof TConfig ? Pick<ProviderContext, "ocr"> : Record<never, never>) & ("stt" extends keyof TConfig ? Pick<ProviderContext, "stt"> : Record<never, never>) & ("resolver" extends keyof TConfig ? Pick<ProviderContext, "resolver"> : Record<never, never>) & ("choice" extends keyof TConfig ? Pick<ProviderContext, "choice"> : Record<never, never>);
+export type ProviderContextFor<TConfig> = ProviderContext<TConfig>;
 
 // @public
-export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TDeclaration> ? ProviderContextFor<TDeclaration> : never;
+export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TConfig> ? ProviderContext<TConfig> : never;
 
 // @public (undocumented)
 export interface ProviderDeclaration {
@@ -3365,7 +3381,6 @@ export interface ProviderDeclaration {
     //
     // (undocumented)
     access?: ProviderAccessConfig;
-    // (undocumented)
     allowedHosts?: string[];
     // (undocumented)
     auth?: AuthConfig;
@@ -3373,15 +3388,14 @@ export interface ProviderDeclaration {
     browser?: {
         engine: BrowserEngine;
     };
-    cache?: true;
-    choice?: true;
-    // (undocumented)
+    cache?: Record<string, never> | true;
+    choice?: Record<string, never> | true;
     context?: ContextDeclaration;
     // (undocumented)
     credential?: CredentialDeclaration;
     deployment?: ProviderDeploymentOverrides;
-    env?: true;
-    files?: true;
+    env?: Record<string, never> | true;
+    files?: Record<string, never> | true;
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // Warning: (ae-forgotten-export) The symbol "ProviderHealthMonitorConfig" needs to be exported by the entry point provider.d.ts
@@ -3389,7 +3403,7 @@ export interface ProviderDeclaration {
     // (undocumented)
     healthMonitor?: ProviderHealthMonitorConfig;
     healthProbe?: ProviderHealthMonitorConfig;
-    http?: true;
+    http?: Record<string, never> | true;
     // (undocumented)
     id: string;
     // (undocumented)
@@ -3425,8 +3439,6 @@ export interface ProviderDeclaration {
     // (undocumented)
     ocr?: ProviderOcrConfig;
     // Warning: (ae-forgotten-export) The symbol "ProviderProxyConfig" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
     proxy?: ProviderProxyConfig;
     // Warning: (ae-forgotten-export) The symbol "ProviderResolverConfig" needs to be exported by the entry point provider.d.ts
     //
@@ -3438,11 +3450,10 @@ export interface ProviderDeclaration {
     reviewed?: ProviderReviewed;
     // (undocumented)
     runtime: "standard" | "shared" | "browser";
+    runtimeTarget?: ProviderRuntimeTarget;
     // Warning: (ae-forgotten-export) The symbol "ProviderSecretDeclaration" needs to be exported by the entry point provider.d.ts
-    //
-    // (undocumented)
     secrets?: ProviderSecretDeclaration[];
-    state?: true;
+    state?: Record<string, never> | true;
     // (undocumented)
     stealth?: {
         profile: string;
@@ -3469,16 +3480,26 @@ export interface ProviderDefinition<TContext = ProviderContext> {
         engine: BrowserEngine;
     };
     // (undocumented)
+    cache?: Record<string, never> | true;
+    // (undocumented)
+    choice?: Record<string, never> | true;
+    // (undocumented)
     context?: ContextDeclaration;
     // (undocumented)
     credential?: CredentialDeclaration;
     deployment?: ProviderDeploymentOverrides;
+    // (undocumented)
+    env?: Record<string, never> | true;
+    // (undocumented)
+    files?: Record<string, never> | true;
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // (undocumented)
     healthMonitor?: ProviderHealthMonitorConfig;
     // Warning: (ae-forgotten-export) The symbol "ProviderHealthProbeConfig" needs to be exported by the entry point provider.d.ts
     healthProbe?: ProviderHealthProbeConfig;
+    // (undocumented)
+    http?: Record<string, never> | true;
     // (undocumented)
     id: string;
     // Warning: (ae-forgotten-export) The symbol "ProviderMeta" needs to be exported by the entry point provider.d.ts
@@ -3499,8 +3520,11 @@ export interface ProviderDefinition<TContext = ProviderContext> {
     reviewed?: ProviderReviewed;
     // (undocumented)
     runtime: "standard" | "shared" | "browser";
+    runtimeTarget?: ProviderRuntimeTarget;
     // (undocumented)
     secrets?: ProviderSecretDeclaration[];
+    // (undocumented)
+    state?: Record<string, never> | true;
     // (undocumented)
     stealth?: {
         profile: string;
@@ -3548,6 +3572,92 @@ export interface ProviderDeploymentOverrides {
     };
     // (undocumented)
     runtime?: "shared" | "dedicated" | "browser";
+}
+
+// @public
+export interface ProviderEngine {
+    // (undocumented)
+    attach<TDeclaration extends object = Record<string, unknown>>(input: ProviderEngineAttachmentInput): ProviderContext<TDeclaration>;
+}
+
+// @public (undocumented)
+export interface ProviderEngineAttachmentInput {
+    // (undocumented)
+    readonly bindings: ProviderEngineBindingCandidates;
+    // (undocumented)
+    readonly provider: ProviderDefinition;
+}
+
+// @public (undocumented)
+export type ProviderEngineBindingCandidates = Partial<ProviderEngineCapabilitySurface & ProviderEngineResidentSurface & {
+    readonly env: EnvContext;
+    readonly credential: CredentialContext;
+    readonly files: ProviderFilesContext;
+    readonly auth: AuthContext;
+    readonly choice: ProviderChoiceContext;
+}> & {
+    readonly request?: ProviderRequestContext;
+    readonly trace: TraceContext;
+};
+
+// @public
+export interface ProviderEngineCapabilitySurface {
+    // (undocumented)
+    readonly browser: BrowserClient;
+    // (undocumented)
+    readonly cache: ProviderCache;
+    // (undocumented)
+    readonly http: HttpClient;
+    // (undocumented)
+    readonly ocr: OcrContext;
+    // (undocumented)
+    readonly resolver: ResolverContext;
+    // (undocumented)
+    readonly state: ProviderRuntimeState;
+    // (undocumented)
+    readonly stealth: StealthClient;
+    // (undocumented)
+    readonly stt: SttContext;
+}
+
+// @public (undocumented)
+export interface ProviderEngineRequest {
+    // (undocumented)
+    readonly capability: ProviderCapabilityKey;
+    // (undocumented)
+    readonly method: string;
+    // (undocumented)
+    readonly payload: unknown;
+    // (undocumented)
+    readonly providerId: string;
+    // (undocumented)
+    readonly requestId: string;
+    // (undocumented)
+    readonly version: typeof PROVIDER_ENGINE_PROTOCOL_VERSION;
+}
+
+// @public
+export interface ProviderEngineResidentSurface {
+    // (undocumented)
+    readonly native: NativeContext;
+}
+
+// @public (undocumented)
+export interface ProviderEngineSession {
+    // (undocumented)
+    close(): Promise<void>;
+    // (undocumented)
+    request<TResponse = unknown>(method: string, payload: unknown): Promise<TResponse>;
+}
+
+// @public
+export interface ProviderEngineTransport {
+    // (undocumented)
+    openSession?(request: ProviderEngineRequest): Promise<ProviderEngineSession>;
+    // (undocumented)
+    openStream?(request: ProviderEngineRequest): Promise<ReadableStream<Uint8Array>>;
+    // (undocumented)
+    request<TResponse = unknown>(request: ProviderEngineRequest): Promise<TResponse>;
 }
 
 // @public (undocumented)
@@ -3847,6 +3957,9 @@ export interface ProviderRuntimeState {
     namespace(name: string, options: StateNamespaceOptions): ProviderStateNamespace;
 }
 
+// @public
+export type ProviderRuntimeTarget = "vanilla" | "engine";
+
 // @public (undocumented)
 interface ProviderSecretDeclaration {
     // (undocumented)
@@ -3947,6 +4060,9 @@ export type Quantifier = {
 
 // @public (undocumented)
 export const QuantifierSchema: z.ZodType<Quantifier, unknown, z.core.$ZodTypeInternals<Quantifier, unknown>>;
+
+// @public
+export function readEngineProxyCredentials(environment?: Readonly<Record<string, string | undefined>>): Readonly<Record<string, string>>;
 
 // @public (undocumented)
 export function redactPayload(value: unknown, paths?: readonly SensitivePath[]): unknown;
@@ -5461,9 +5577,9 @@ export { z }
 //
 // dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point provider.d.ts
 // dist/define.d.ts:15:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:62:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:103:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:131:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:65:9 - (ae-forgotten-export) The symbol "StealthPlatform" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:109:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:137:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
 // dist/errors.d.ts:8:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:15:5 - (ae-forgotten-export) The symbol "EnvContext" needs to be exported by the entry point provider.d.ts
 // dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point provider.d.ts
@@ -5472,19 +5588,23 @@ export { z }
 // dist/runtime/native-network.d.ts:12:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:50:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:127:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:619:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:630:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:811:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:816:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1118:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1118:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1423:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1429:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1430:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1434:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1441:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1476:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1600:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:624:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:635:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:816:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:821:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1123:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1123:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1430:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1436:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1437:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1441:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1448:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1483:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1607:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1833:5 - (ae-forgotten-export) The symbol "TraceContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1847:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1853:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1855:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

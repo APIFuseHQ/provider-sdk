@@ -68,7 +68,11 @@ jobs:
             echo "::error::APIFUSE__BOUNTY__GITHUB_APP_ID and APIFUSE__BOUNTY__GITHUB_APP_PRIVATE_KEY are required in Doppler ${DOPPLER_PROJECT}/${DOPPLER_CONFIG}."
             exit 1
           fi
-          echo "::add-mask::${private_key}"
+          # Line-oriented ::add-mask:: leaks all but the first line of a
+          # multiline value into the log; mask the key line by line.
+          while IFS= read -r mask_line; do
+            [ -n "${mask_line}" ] && echo "::add-mask::${mask_line}"
+          done <<<"${private_key}"
           delimiter="github-app-private-key-${RANDOM}-${RANDOM}"
           {
             echo "app_id=${app_id}"

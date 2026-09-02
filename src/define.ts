@@ -6,6 +6,7 @@ import {
 } from "./declaration-validation.js";
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
+import { isEngineOwnedProxyCredentialName } from "./engine.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
 import {
 	NativeEgressPolicyValidationError,
@@ -35,17 +36,16 @@ import type {
 	ProviderAccessConfig,
 	ProviderChallengeKind,
 	ProviderContext,
-	ProviderContextFor,
 	ProviderDefinition,
 	ProviderDeploymentOverrides,
 	ProviderHealthMonitorConfig,
 	ProviderOcrConfig,
 	ProviderProxyConfig,
-	ProviderProxyProvider,
 	ProviderPublicProfile,
 	ProviderResolverConfig,
 	ProviderResolverVendor,
 	ProviderReviewed,
+	ProviderRuntimeTarget,
 	ProviderSecretDeclaration,
 	ProviderStreamEvent,
 	ProviderSttConfig,
@@ -95,6 +95,7 @@ interface ProviderImplementationProfile {
 const CONNECTOR_ID_REGEX = /^[a-z][a-z0-9]*(-[a-z][a-z0-9]*)*$/;
 const OPERATION_ID_REGEX = /^[a-z][a-z0-9]*(?:[-_][a-z0-9]+)*$/;
 const VALID_RUNTIMES = ["standard", "shared", "browser"] as const;
+const VALID_RUNTIME_TARGETS = ["vanilla", "engine"] as const;
 const VALID_AUTH_MODES = [
 	"none",
 	"platform-managed",
@@ -162,20 +163,6 @@ export const VALID_PROVIDER_CHALLENGE_KINDS = exhaustiveLiteralArray<ProviderCha
 	"akamai_sec_cpt",
 	"akamai_sensor",
 ] as const);
-const SMARTPROXY_APP_KEY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
-const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
-const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
-// Per-vendor provider-declared credential secrets. A required-mode chain must
-// declare every secret of every credentialed vendor it names, so a missing
-// credential fails at build/validation time rather than during a live outage: a
-// declared-but-uncredentialed fallback leg is a silently dead SPOF, which is
-// exactly the failure class the multi-vendor chain exists to remove. Vendors
-// absent from this map (the deprecated `custom`/`decodo` values have no managed
-// adapter) impose no declaration requirement.
-const VENDOR_REQUIRED_SECRETS: Partial<Record<ProviderProxyProvider, readonly string[]>> = {
-	smartproxy: [SMARTPROXY_APP_KEY_SECRET],
-	nodemaven: [NODEMAVEN_USERNAME_SECRET, NODEMAVEN_PASSWORD_SECRET],
-};
 const RESERVED_OPERATION_IDS = new Set(["auth", "health"]);
 const VALID_OPERATION_RISK_CLASSES = ["read", "write", "destructive", "external-send"] as const;
 const VALID_OPERATION_APPROVAL_POLICIES = ["never", "risk-based", "always"] as const;
@@ -583,6 +570,8 @@ export interface ProviderDeclaration {
 	id: string;
 	version: string;
 	runtime: "standard" | "shared" | "browser";
+	/** Provider business-logic target. Omit only while migrating a legacy provider. */
+	runtimeTarget?: ProviderRuntimeTarget;
 	/**
 	 * Optional deployment overrides, passed through verbatim onto the returned
 	 * provider definition. The SDK types this field but does not deep-validate
@@ -590,35 +579,39 @@ export interface ProviderDeclaration {
 	 * resolves omitted fields against the runtime deployment profiles.
 	 */
 	deployment?: ProviderDeploymentOverrides;
-	/** Declares that provider operations use the SDK HTTP client. */
-	http?: true;
+	/** Declares the HTTP capability binding. A bare object states use without configuration. */
+	http?: Record<string, never> | true;
+	/** Declares upstream host policy; this does not add a `ctx.allowedHosts` member. */
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
 	stealth?: {
 		profile: string;
 		platform: StealthPlatform;
 	};
+	/** Declares proxy policy; this is provider intent and does not add a `ctx.proxy` member. */
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;
 	resolver?: ProviderResolverConfig;
 	browser?: { engine: BrowserEngine };
 	auth?: AuthConfig;
-	/** Declares that provider operations issue and consume SDK choice tokens. */
-	choice?: true;
+	/** Declares the choice capability binding. A bare object states use without configuration. */
+	choice?: Record<string, never> | true;
 	reviewed?: ProviderReviewed;
 	access?: ProviderAccessConfig;
+	/** Declares secret requirements; this does not add a `ctx.secrets` member. */
 	secrets?: ProviderSecretDeclaration[];
-	/** Declares that provider operations read SDK-managed environment values. */
-	env?: true;
+	/** Declares the environment capability binding. A bare object states use without configuration. */
+	env?: Record<string, never> | true;
 	credential?: CredentialDeclaration;
+	/** Declares provider context metadata; this does not add a `ctx.context` member. */
 	context?: ContextDeclaration;
-	/** Declares that provider operations use SDK-managed persistent state. */
-	state?: true;
-	/** Declares that provider operations use the SDK provider cache. */
-	cache?: true;
-	/** Declares that provider operations access runtime-resolvable files. */
-	files?: true;
+	/** Declares the state capability binding. A bare object states use without configuration. */
+	state?: Record<string, never> | true;
+	/** Declares the cache capability binding. A bare object states use without configuration. */
+	cache?: Record<string, never> | true;
+	/** Declares the files capability binding. A bare object states use without configuration. */
+	files?: Record<string, never> | true;
 	meta: {
 		displayName: string;
 		displayNameKey?: string;
@@ -822,11 +815,31 @@ function validateProviderDeclarationShape(config: unknown): void {
 	assertRequiredField(config, "meta", String(config.id));
 	if (typeof config.runtime === "string")
 		assertLiteralField(config.runtime, "runtime", VALID_RUNTIMES, String(config.id));
+	if (config.runtimeTarget !== undefined && typeof config.runtimeTarget !== "string") {
+		throw new ValidationError(
+			`Provider "${String(config.id)}" has invalid runtimeTarget: expected "vanilla" or "engine"`,
+		);
+	}
+	if (typeof config.runtimeTarget === "string")
+		assertLiteralField(
+			config.runtimeTarget,
+			"runtimeTarget",
+			VALID_RUNTIME_TARGETS,
+			String(config.id),
+		);
 	if (config.native !== undefined && config.runtime === "browser") {
 		throw new ValidationError(
 			`Provider "${String(config.id)}" cannot declare capability "native" with runtime "browser"`,
 			{
 				fix: 'Use runtime: "standard" or runtime: "shared", or remove the native declaration.',
+			},
+		);
+	}
+	if (config.native !== undefined && config.runtimeTarget === "vanilla") {
+		throw new ValidationError(
+			`Provider "${String(config.id)}" cannot declare capability "native" with runtime target "vanilla"; native requires an engine-resident runtime`,
+			{
+				fix: 'Set runtimeTarget: "engine", or remove the native declaration.',
 			},
 		);
 	}
@@ -927,6 +940,15 @@ function validateProviderProxy(config: {
 	proxy?: ProviderProxyConfig;
 	secrets?: ProviderSecretDeclaration[];
 }): void {
+	for (const secret of config.secrets ?? []) {
+		if (!isEngineOwnedProxyCredentialName(secret.name)) continue;
+		throw new ValidationError(
+			`Provider "${config.id}" cannot declare engine-owned proxy credential "${secret.name}"`,
+			{
+				fix: `Remove "${secret.name}" from provider secrets; configure it only on the provider engine.`,
+			},
+		);
+	}
 	const proxy = config.proxy;
 	if (proxy === undefined || typeof proxy === "boolean") {
 		return;
@@ -1042,44 +1064,12 @@ function validateProviderProxy(config: {
 			);
 		}
 	}
-	// Every credentialed vendor in a required-mode chain must declare its
-	// provider secret(s) so a missing credential fails at build/validation time,
-	// not during a live outage. This covers the fallback legs too (not just the
-	// first vendor): a declared-but-uncredentialed nodemaven fallback would leave
-	// the chain silently down to a single vendor, reintroducing the SPOF the chain
-	// removes.
 	const vendorChain =
 		proxy.providers && proxy.providers.length > 0
 			? proxy.providers
 			: proxy.provider
 				? [proxy.provider]
 				: [];
-	if (proxy.mode === "required") {
-		for (const vendor of vendorChain) {
-			const requiredSecrets = VENDOR_REQUIRED_SECRETS[vendor];
-			if (!requiredSecrets) continue;
-			for (const secretName of requiredSecrets) {
-				// Match the canonical runtime gate (assertRequiredSecretsPresent /
-				// listMissingRequiredSecrets), which enforces only `required === true`
-				// declarations. A declaration that omits `required` (defaulting to
-				// optional) is skipped at runtime, so accepting it here would pass
-				// validation while leaving the credential unenforced until proxy
-				// resolution during a live request — the fail-open gap this check exists
-				// to close.
-				const declared = config.secrets?.some(
-					(secret) => secret.name === secretName && secret.required === true,
-				);
-				if (!declared) {
-					throw new ValidationError(
-						`Provider "${config.id}" requires ${vendor} egress but does not declare ${secretName}.`,
-						{
-							fix: `Add secrets: [{ name: "${secretName}", required: true }] to the provider (every vendor in a required proxy chain must declare its credential secrets).`,
-						},
-					);
-				}
-			}
-		}
-	}
 	// `decodo`/`custom` are deprecated vendor values (string-union members, so the
 	// @deprecated symbol gate can't catch them — warn at validation time instead).
 	const deprecatedVendors = vendorChain.filter(
@@ -2867,19 +2857,19 @@ function validateProviderDeployment(providerId: string, deployment: unknown): vo
 }
 
 /** The second authoring phase for a declaration established by defineProvider. */
-export type ProviderBuilder<TDeclaration extends ProviderDeclaration> = <
+export type ProviderBuilder<TConfig extends ProviderDeclaration> = <
 	TOperations extends Record<string, ProviderOperation>,
 >(
 	implementation: {
-		operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+		operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 	},
 ) => Omit<ProviderDefinition, "operations"> & {
-	operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+	operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 };
 
 /** Extract the declaration-derived operation context from a provider builder. */
-export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TDeclaration>
-	? ProviderContextFor<TDeclaration>
+export type ProviderContextOf<TBuilder> = TBuilder extends ProviderBuilder<infer TConfig>
+	? ProviderContext<TConfig>
 	: never;
 
 /** Annotate an operation while preserving the declaration-derived context. */
@@ -2893,22 +2883,22 @@ export type OperationDefinitionFor<
 export type ProviderDefinitionFor<TBuilder> = ProviderDefinition<ProviderContextOf<TBuilder>>;
 
 /** Establish a provider declaration before its operations are contextually typed. */
-export function defineProvider<const TDeclaration extends ProviderDeclaration>(
-	declaration: TDeclaration &
-		Record<Exclude<keyof TDeclaration, keyof ProviderDeclaration>, never> &
-		AuthStartNoInputGuard<TDeclaration>,
-): ProviderBuilder<TDeclaration> {
+export function defineProvider<const TConfig extends ProviderDeclaration>(
+	declaration: TConfig &
+		Record<Exclude<keyof TConfig, keyof ProviderDeclaration>, never> &
+		AuthStartNoInputGuard<TConfig>,
+): ProviderBuilder<TConfig> {
 	validateProviderDeclaration(declaration);
 	const buildProvider = <TOperations extends Record<string, ProviderOperation>>(
 		implementation: {
-			operations: OperationMapConfig<TOperations, ProviderContextFor<TDeclaration>>;
+			operations: OperationMapConfig<TOperations, ProviderContext<TConfig>>;
 		},
 	) =>
 		finalizeProvider({
 			...declaration,
 			...implementation,
-		} as ProviderConfig<TOperations, ProviderContextFor<TDeclaration>>);
-	return buildProvider as ProviderBuilder<TDeclaration>;
+		} as ProviderConfig<TOperations, ProviderContext<TConfig>>);
+	return buildProvider as ProviderBuilder<TConfig>;
 }
 
 function validateProviderDeclaration(config: ProviderDeclaration): void {
@@ -2990,9 +2980,11 @@ function finalizeProvider<
 		id: config.id,
 		version: config.version,
 		runtime: config.runtime,
+		runtimeTarget: config.runtimeTarget,
 		// Verbatim passthrough: deployment validation and profile resolution
 		// are owned by the APIFuse registry builder, not the SDK.
 		deployment: config.deployment,
+		http: config.http,
 		allowedHosts: config.allowedHosts,
 		native: config.native,
 		stealth: config.stealth,
@@ -3002,11 +2994,16 @@ function finalizeProvider<
 		resolver: config.resolver,
 		browser: config.browser,
 		auth: config.auth,
+		choice: config.choice,
 		reviewed: config.reviewed,
 		access: config.access,
 		secrets: config.secrets,
+		env: config.env,
 		credential: config.credential,
 		context: config.context,
+		state: config.state,
+		cache: config.cache,
+		files: config.files,
 		meta: config.meta,
 		operations,
 		// Transitional healthMonitor → healthProbe alias: mirror whichever field

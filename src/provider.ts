@@ -130,6 +130,26 @@ export {
 	ValidationError,
 } from "./errors.js";
 export {
+	createProviderEnvironment,
+	createInProcessProviderEngine,
+	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
+	isEngineOwnedProxyCredentialName,
+	PROVIDER_CAPABILITY_KEYS,
+	PROVIDER_ENGINE_PROTOCOL_VERSION,
+	readEngineProxyCredentials,
+} from "./engine.js";
+export type {
+	ProviderCapabilityKey,
+	ProviderEngine,
+	ProviderEngineAttachmentInput,
+	ProviderEngineBindingCandidates,
+	ProviderEngineCapabilitySurface,
+	ProviderEngineRequest,
+	ProviderEngineResidentSurface,
+	ProviderEngineSession,
+	ProviderEngineTransport,
+} from "./engine.js";
+export {
 	getProviderLocalePath,
 	providerLocaleKey,
 	qualifyProviderLocaleKey,
@@ -236,6 +256,7 @@ export type {
 	ProviderPublicConnectionMode,
 	ProviderPublicProfile,
 	ProviderResolvedFile,
+	ProviderRuntimeTarget,
 	ProviderRuntimeState,
 	ProviderStateDurationString,
 	ProviderStateNamespace,

@@ -82,10 +82,7 @@ function createProvider(options: {
 		runtime: "standard",
 		allowedHosts: ["example.com"],
 		stealth: { profile: "chrome-146", platform: "macos" },
-		secrets: [
-			{ name: NODEMAVEN_USERNAME_ENV, required: true },
-			{ name: NODEMAVEN_PASSWORD_ENV, required: true },
-		],
+		cache: true,
 		...(options.proxy ? { proxy: options.proxy } : {}),
 		...(options.resolver ? { resolver: options.resolver } : {}),
 		meta: {
@@ -151,16 +148,18 @@ describe("resolver CLI wiring", () => {
 		}
 	});
 
-	it.each(harnessTable)("keeps an undeclared resolver unsupported in $name", async (harness) => {
-		const error = await harness
-			.createContext(createProvider({}))
-			.resolver.solve(AWS_WAF_CHALLENGE)
-			.catch((cause: unknown) => cause);
+	it.each(harnessTable)("fails closed on an undeclared resolver in $name", async (harness) => {
+		let error: unknown;
+		try {
+			await harness.createContext(createProvider({})).resolver.solve(AWS_WAF_CHALLENGE);
+		} catch (cause) {
+			error = cause;
+		}
 
 		expect(error).toMatchObject({
-			code: "RESOLVER_UNAVAILABLE",
-			message: "Provider does not declare resolver capability",
-			fix: "Declare resolver on the provider definition and configure vendor credentials.",
+			code: "PROVIDER_CAPABILITY_UNDECLARED",
+			message: expect.stringContaining('undeclared capability "resolver"'),
+			fix: "Add resolver: {} to the provider declaration, or remove the access.",
 		});
 	});
 

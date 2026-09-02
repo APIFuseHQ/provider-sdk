@@ -9,6 +9,14 @@ import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
 import { safeProviderErrorObservability } from "../error-observability.js";
 import {
+	createInProcessProviderEngine,
+	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
+	isEngineOwnedProxyCredentialName,
+	readEngineProxyCredentials,
+	type ProviderEngine,
+	type ProviderEngineBindingCandidates,
+} from "../engine.js";
+import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
@@ -64,7 +72,10 @@ import {
 	type ProxyTelemetryLogPayload,
 } from "../runtime/proxy-telemetry.js";
 import type * as ResolverRuntimeModule from "../runtime/resolver.js";
-import { createUnsupportedResolverClient } from "../runtime/resolver-shared.js";
+import {
+	createUnsupportedResolverClient,
+	type ResolverSolveWithRecorder,
+} from "../runtime/resolver-shared.js";
 import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
@@ -77,7 +88,7 @@ import {
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
-import { createTraceContext } from "../runtime/trace.js";
+import { createTraceContext, type TraceRecorder } from "../runtime/trace.js";
 import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
 import {
@@ -109,6 +120,7 @@ import type {
 	ProviderErrorStatus,
 	ProviderContext,
 	ProviderDefinition,
+	ProviderFilesContext,
 	ProviderProxyPolicy,
 	ProviderRuntimeState,
 	ProviderStreamEvent,
@@ -259,6 +271,7 @@ type ProviderCapabilityModules = {
 
 type ProviderServerRuntimeOptions = ProviderServerOptions & {
 	readonly capabilityModules: ProviderCapabilityModules;
+	readonly engine: ProviderEngine;
 };
 
 const require = createRequire(import.meta.url);
@@ -493,8 +506,14 @@ function bindResolverSignalWithoutRuntime(
 ): ResolverContext {
 	if (!defaultSignal) return resolver;
 	return {
-		solve(challenge, signal = defaultSignal) {
-			return resolver.solve(challenge, signal);
+		solve(challenge, signal = defaultSignal, traceRecorder?: TraceRecorder) {
+			// Forward the instrumentation trace recorder so resolver.vendor.* spans
+			// survive this wrapper. See ResolverSolveWithRecorder in resolver-shared.ts.
+			return (resolver as Partial<ResolverSolveWithRecorder> & ResolverContext).solve(
+				challenge,
+				signal,
+				traceRecorder,
+			);
 		},
 	};
 }
@@ -638,6 +657,12 @@ function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPo
 	return undefined;
 }
 
+function providerSecretNames(provider: ProviderDefinition): string[] {
+	return (provider.secrets?.map((secret) => secret.name) ?? []).filter(
+		(name) => !isEngineOwnedProxyCredentialName(name),
+	);
+}
+
 function createProviderContext(
 	provider: ProviderDefinition,
 	request: OperationRequest,
@@ -652,10 +677,12 @@ function createProviderContext(
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
 	const proxyPolicy = resolveNativeProxyPolicy(provider);
+	const engineProxyCredentials = readEngineProxyCredentials();
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveProviderProxyAffinityKey(provider, request, operationId),
 		telemetry: proxyTelemetry,
+		engineCredentials: engineProxyCredentials,
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
 		provider,
@@ -667,6 +694,7 @@ function createProviderContext(
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: proxyTelemetry,
+		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
 	};
 	const { capabilityModules } = options;
@@ -682,7 +710,7 @@ function createProviderContext(
 		);
 
 	const env = createEnvContext([
-		...(provider.secrets?.map((secret) => secret.name) ?? []),
+		...providerSecretNames(provider),
 		PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
 	]);
 	const credential = createCredentialContext({
@@ -697,9 +725,10 @@ function createProviderContext(
 	};
 	const requestState = state.forConnection(requestContext.connectionId);
 	const cache = createProviderCache({ providerId: provider.id });
-	const context = wrapWithInstrumentation({
+	const bindings: ProviderEngineBindingCandidates = {
 		env,
 		credential,
+		...(options.files ? { files: options.files } : {}),
 		request: requestContext,
 		http: createHttpClient(baseUrl, {
 			...proxyClientOptions,
@@ -747,7 +776,9 @@ function createProviderContext(
 							egress: provider.native.network,
 							proxyPolicy: resolveNativeProxyPolicy(provider),
 							affinityKey: proxyClientOptions.affinityKey,
-							credentials: capabilityModules.nativeNetwork!.createEnvVendorCredentialResolver(env),
+							credentials: capabilityModules.nativeNetwork!.createEnvVendorCredentialResolver(
+								createEnvContext([...ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES]),
+							),
 						}),
 					},
 				}
@@ -801,7 +832,10 @@ function createProviderContext(
 					...event,
 				}),
 		}),
-	} as ProviderContext);
+	};
+	const context = wrapWithInstrumentation(
+		options.engine.attach({ provider, bindings }) as ProviderContext,
+	);
 	wrappedContext = context;
 	return context;
 }
@@ -873,6 +907,7 @@ function createAuthFlowContext(
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
 	const proxyPolicy = resolveNativeProxyPolicy(provider);
+	const engineProxyCredentials = readEngineProxyCredentials();
 	const contextData = request.context ?? {};
 	const flowContextStore = createFlowContextStore(
 		provider.context?.keys ?? Object.keys(contextData),
@@ -882,6 +917,7 @@ function createAuthFlowContext(
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveAuthFlowProxyAffinityKey(provider, request),
 		telemetry: proxyTelemetry,
+		engineCredentials: engineProxyCredentials,
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
 		provider,
@@ -892,6 +928,7 @@ function createAuthFlowContext(
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: proxyTelemetry,
+		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
 	};
 	const { capabilityModules } = options;
@@ -953,14 +990,14 @@ function createAuthFlowContext(
 								proxyPolicy: resolveNativeProxyPolicy(provider),
 								affinityKey: proxyClientOptions.affinityKey,
 								credentials: capabilityModules.nativeNetwork!.createEnvVendorCredentialResolver(
-									createEnvContext(provider.secrets?.map((secret) => secret.name)),
+									createEnvContext([...ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES]),
 								),
 							}),
 						},
 					}
 				: {}),
 			env: createEnvContext([
-				...(provider.secrets?.map((secret) => secret.name) ?? []),
+				...providerSecretNames(provider),
 				...(provider.auth?.mode === "oauth2_proxied" ? ["APIFUSE__AUTH_PROXY__URL"] : []),
 			]),
 			credential,
@@ -1077,6 +1114,10 @@ export type ProviderServerLogger = (event: ProviderServerLogEvent) => void;
 
 export type ProviderServerOptions<TContext extends Partial<ProviderContext> = ProviderContext> = {
 	logger?: ProviderServerLogger;
+	/** Capability attachment boundary. Defaults to the local in-process engine. */
+	engine?: ProviderEngine;
+	/** Request-file resolver supplied by the engine host when `files` is declared. */
+	files?: ProviderFilesContext;
 	/** Optional provider-specific operation executor. Stateful providers use this to preserve provider-local runtime semantics. */
 	operationExecutor?: ProviderServerOperationExecutor<TContext>;
 	/** Optional signed internal executor for stateful owner forwarding. */
@@ -1692,7 +1733,7 @@ function toJsonSuccessResponse(
 		return new Response(result);
 	}
 
-	const cacheMeta = ctx?.cache.responseMeta();
+	const cacheMeta = ctx && "cache" in ctx ? ctx.cache.responseMeta() : undefined;
 	const retryMeta = ctx ? retryResponseMeta.get(ctx) : undefined;
 	const meta =
 		cacheMeta || retryMeta
@@ -2093,31 +2134,35 @@ async function handleOperation(
 	const cleanup = async () => {
 		if (cleanupCalled) return;
 		cleanupCalled = true;
-		try {
-			ctx.stealth.close?.();
-		} catch (error) {
-			logProviderCleanupError(
-				options.logger,
-				provider,
-				"operation",
-				operationId,
-				request.requestId,
-				"stealth",
-				error,
-			);
+		if ("stealth" in ctx) {
+			try {
+				ctx.stealth.close?.();
+			} catch (error) {
+				logProviderCleanupError(
+					options.logger,
+					provider,
+					"operation",
+					operationId,
+					request.requestId,
+					"stealth",
+					error,
+				);
+			}
 		}
-		try {
-			await ctx.browser.close?.();
-		} catch (error) {
-			logProviderCleanupError(
-				options.logger,
-				provider,
-				"operation",
-				operationId,
-				request.requestId,
-				"browser",
-				error,
-			);
+		if ("browser" in ctx) {
+			try {
+				await ctx.browser.close?.();
+			} catch (error) {
+				logProviderCleanupError(
+					options.logger,
+					provider,
+					"operation",
+					operationId,
+					request.requestId,
+					"browser",
+					error,
+				);
+			}
 		}
 	};
 	try {
@@ -2129,7 +2174,9 @@ async function handleOperation(
 					request,
 					signal,
 				})
-			: await executeOperation(provider, operationId, ctx, request.input);
+			: await executeOperation(provider, operationId, ctx, request.input, {
+					env: createEnvContext(providerSecretNames(provider)),
+				});
 		if (streaming && operation) {
 			return toStreamingResponse(operation, result, cleanup, request.requestId);
 		}
@@ -2415,7 +2462,11 @@ function createServerAppWithCapabilityModules(
 	serverOptions: ProviderServerOptions,
 	capabilityModules: ProviderCapabilityModules,
 ): Hono {
-	const options: ProviderServerRuntimeOptions = { ...serverOptions, capabilityModules };
+	const options: ProviderServerRuntimeOptions = {
+		...serverOptions,
+		capabilityModules,
+		engine: serverOptions.engine ?? createInProcessProviderEngine(),
+	};
 	const app = new Hono();
 	const logger = options.logger ?? defaultProviderServerLogger;
 	const operationErrorCodes = buildOperationErrorCodeLookup(provider);
@@ -2437,7 +2488,7 @@ function createServerAppWithCapabilityModules(
 	// CrashLoopBackOff. Requests still fail closed via the executeOperation gate.
 	const missingSecretsAtBoot = listMissingRequiredSecrets(
 		provider,
-		createEnvContext(provider.secrets?.map((secret) => secret.name)),
+		createEnvContext(providerSecretNames(provider)),
 	);
 	if (missingSecretsAtBoot.length > 0) {
 		logger({
@@ -3143,6 +3194,8 @@ export async function serve<TContext extends Partial<ProviderContext> = Provider
 	const selfTestSecrets = resolveSelfTestMasterSecrets();
 	const serverAppOptions: ProviderServerOptions<TContext> = {
 		logger: options.logger,
+		engine: options.engine,
+		files: options.files,
 		ocr: options.ocr,
 		stt: options.stt,
 		resolver: options.resolver,

@@ -966,81 +966,35 @@ describe("defineProvider", () => {
 		});
 	});
 
-	describe("required proxy vendor credentials", () => {
+	describe("engine-owned proxy vendor credentials", () => {
 		const SMARTPROXY_SECRET = "APIFUSE__PROXY__SMARTPROXY_APP_KEY";
 		const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
-		const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
 
-		it("requires the smartproxy app key for a required smartproxy chain", () => {
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "required", provider: "smartproxy" },
-				}),
-			).toThrow(
-				/requires smartproxy egress but does not declare APIFUSE__PROXY__SMARTPROXY_APP_KEY/,
-			);
-		});
-
-		it("requires both nodemaven credentials for a required nodemaven-only chain", () => {
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "required", providers: ["nodemaven"] },
-				}),
-			).toThrow(
-				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
-			);
-		});
-
-		it("rejects a required smartproxy→nodemaven chain that only declares the smartproxy secret (silently dead fallback)", () => {
+		it("accepts required proxy intent without provider-owned vendor secrets", () => {
 			expect(() =>
 				defineProvider({
 					...validConfig,
 					proxy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
-					secrets: [{ name: SMARTPROXY_SECRET, required: true }],
-				}),
-			).toThrow(
-				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
-			);
-		});
-
-		it("rejects a required nodemaven chain that declares username but omits the password", () => {
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "required", providers: ["nodemaven"] },
-					secrets: [{ name: NODEMAVEN_USERNAME_SECRET, required: true }],
-				}),
-			).toThrow(
-				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_PASSWORD/,
-			);
-		});
-
-		it("accepts a required smartproxy→nodemaven chain that declares every vendor's secrets", () => {
-			const provider = defineProvider({
-				...validConfig,
-				proxy: { mode: "required", providers: ["smartproxy", "nodemaven"] },
-				secrets: [
-					{ name: SMARTPROXY_SECRET, required: true },
-					{ name: NODEMAVEN_USERNAME_SECRET, required: true },
-					{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
-				],
-			});
-
-			expect(provider.proxy).toEqual({
-				mode: "required",
-				providers: ["smartproxy", "nodemaven"],
-			});
-		});
-
-		it("does not require nodemaven credentials when the chain is optional", () => {
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "optional", providers: ["smartproxy", "nodemaven"] },
 				}),
 			).not.toThrow();
+		});
+
+		it("rejects a smartproxy credential in provider secrets", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					secrets: [{ name: SMARTPROXY_SECRET, required: true }],
+				}),
+			).toThrow(/cannot declare engine-owned proxy credential/);
+		});
+
+		it("rejects a nodemaven credential in provider secrets", () => {
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					secrets: [{ name: NODEMAVEN_USERNAME_SECRET, required: true }],
+				}),
+			).toThrow(/cannot declare engine-owned proxy credential/);
 		});
 
 		it("rejects required proxy egress backed only by deprecated vendors", () => {
@@ -1070,49 +1024,9 @@ describe("defineProvider", () => {
 				warn.mockRestore();
 			}
 		});
-
-		it("treats a declared-but-optional (required: false) vendor secret as missing", () => {
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "required", providers: ["nodemaven"] },
-					secrets: [
-						{ name: NODEMAVEN_USERNAME_SECRET, required: false },
-						{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
-					],
-				}),
-			).toThrow(
-				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
-			);
-		});
-
-		it("treats a vendor secret that omits `required` as missing (matches the runtime gate)", () => {
-			// listMissingRequiredSecrets enforces only `required === true`, so a
-			// default-flag declaration is skipped at runtime; define-time validation
-			// must reject it too rather than pass a config the runtime won't enforce.
-			expect(() =>
-				defineProvider({
-					...validConfig,
-					proxy: { mode: "required", providers: ["nodemaven"] },
-					secrets: [
-						{ name: NODEMAVEN_USERNAME_SECRET },
-						{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
-					],
-				}),
-			).toThrow(
-				/requires nodemaven egress but does not declare APIFUSE__PROXY__NODEMAVEN_USERNAME/,
-			);
-		});
 	});
 
 	describe("proxy.session.drainLeadSeconds", () => {
-		const NODEMAVEN_USERNAME_SECRET = "APIFUSE__PROXY__NODEMAVEN_USERNAME";
-		const NODEMAVEN_PASSWORD_SECRET = "APIFUSE__PROXY__NODEMAVEN_PASSWORD";
-		const credentialedSecrets = [
-			{ name: NODEMAVEN_USERNAME_SECRET, required: true },
-			{ name: NODEMAVEN_PASSWORD_SECRET, required: true },
-		];
-
 		// Regression guard: the type surface and the runtime validator drifted
 		// apart once (drainLeadSeconds was typed but rejected by the allowlist),
 		// so a provider could not declare the field the drain contract needs.
@@ -1129,7 +1043,6 @@ describe("defineProvider", () => {
 						drainLeadSeconds: 120,
 					},
 				},
-				secrets: credentialedSecrets,
 			});
 
 			expect(provider.proxy).toBeDefined();
@@ -1147,7 +1060,6 @@ describe("defineProvider", () => {
 						providers: ["nodemaven"],
 						session: { affinity: "connection", drainLeadSeconds: 0 },
 					},
-					secrets: credentialedSecrets,
 				}),
 			).toThrow(/invalid proxy\.session\.drainLeadSeconds/);
 		});
@@ -1165,7 +1077,6 @@ describe("defineProvider", () => {
 							drainLeadSeconds: 60,
 						},
 					},
-					secrets: credentialedSecrets,
 				}),
 			).toThrow(/greater than or equal to proxy\.session\.lifetimeMinutes/);
 		});
@@ -1182,7 +1093,6 @@ describe("defineProvider", () => {
 						// catch this typo, which is exactly why the validator must.
 						session: { affinity: "connection", drainLeadSecond: 120 },
 					},
-					secrets: credentialedSecrets,
 				}),
 			).toThrow(/Unknown field "drainLeadSecond" on proxy\.session/);
 		});

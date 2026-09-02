@@ -5,7 +5,7 @@ import {
 } from "../errors.js";
 import { z } from "zod";
 import { parseSchema } from "../schema.js";
-import type { ProviderDefinition } from "../types.js";
+import type { EnvContext, ProviderDefinition } from "../types.js";
 import { assertRequiredSecretsPresent } from "./secrets.js";
 
 export function isStreamingOperation(provider: ProviderDefinition, operationId: string): boolean {
@@ -32,7 +32,7 @@ export async function executeOperation<
 	operationId: TOperationId,
 	ctx: NoInfer<Parameters<TProvider["operations"][TOperationId]["handler"]>[0]>,
 	input: unknown,
-	_options?: { skipAuth?: boolean },
+	_options?: { skipAuth?: boolean; env?: EnvContext },
 ): Promise<unknown> {
 	const operation = provider.operations[operationId];
 
@@ -49,7 +49,10 @@ export async function executeOperation<
 	// record) fails with the same structured MISSING_SECRET error instead of a
 	// handler-specific crash. Providers must not re-check presence locally.
 	if (provider.secrets?.some((secret) => secret.required === true)) {
-		assertRequiredSecretsPresent(provider, "env" in ctx ? ctx.env : { get: () => undefined });
+		assertRequiredSecretsPresent(
+			provider,
+			_options?.env ?? ("env" in ctx ? ctx.env : { get: () => undefined }),
+		);
 	}
 
 	const validatedInput = await parseSchema(

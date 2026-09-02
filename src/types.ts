@@ -362,6 +362,11 @@ export type ChallengeSolution =
 			readonly userAgent: string;
 			/** Epoch seconds copied from the upstream cookie's own expiry attribute; never a constant. */
 			readonly expires?: number;
+			/**
+			 * Epoch seconds conservatively estimated by the SDK when a resolver vendor omits
+			 * the upstream cookie's expiry. `expires` takes precedence when both are present.
+			 */
+			readonly sdkEstimatedExpires?: number;
 		};
 
 export interface ProviderResolverConfig {
@@ -1449,6 +1454,9 @@ export interface ProviderFilesContext {
 	resolve(input: string | ProviderFileRef): Promise<ProviderResolvedFile>;
 }
 
+/** Where provider business logic executes relative to the capability engine. */
+export type ProviderRuntimeTarget = "vanilla" | "engine";
+
 export type NativeTcpTlsMode = "required" | "allowed" | "disabled";
 
 export interface NativeTcpPortRange {
@@ -2228,48 +2236,43 @@ export interface ProviderRuntimeState {
 	): ProviderStateNamespace;
 }
 
-export interface ProviderContext {
-	env: EnvContext;
-	credential: CredentialContext;
-	request?: ProviderRequestContext;
-	http: HttpClient;
-	/** Present for requests carrying runtime-resolvable file references. */
-	readonly files?: ProviderFilesContext;
-	/** Native network capability selected by declaration-derived contexts. */
-	readonly native: NativeContext;
-	cache: ProviderCache;
-	state: ProviderRuntimeState;
-	stealth: StealthClient;
-	browser: BrowserClient;
-	trace: TraceContext;
-	auth: AuthContext;
-	ocr: OcrContext;
-	stt: SttContext;
-	resolver: ResolverContext;
-	choice: ProviderChoiceContext;
-}
-
 /**
  * The operation context exposed for one provider declaration. Capability
  * bindings are present only when their corresponding declaration is present;
- * trace and request remain ambient runtime bindings.
+ * trace and request remain ambient runtime bindings. Omitting the type
+ * parameter preserves the legacy full context shape for existing annotations.
  */
-export type ProviderContextFor<TConfig> =
-	Pick<ProviderContext, "trace" | "request">
-	& ("env" extends keyof TConfig ? Pick<ProviderContext, "env"> : Record<never, never>)
-	& ("credential" extends keyof TConfig ? Pick<ProviderContext, "credential"> : Record<never, never>)
-	& ("http" extends keyof TConfig ? Pick<ProviderContext, "http"> : Record<never, never>)
-	& ("files" extends keyof TConfig ? Pick<ProviderContext, "files"> : Record<never, never>)
-	& ("native" extends keyof TConfig ? Pick<ProviderContext, "native"> : Record<never, never>)
-	& ("cache" extends keyof TConfig ? Pick<ProviderContext, "cache"> : Record<never, never>)
-	& ("state" extends keyof TConfig ? Pick<ProviderContext, "state"> : Record<never, never>)
-	& ("stealth" extends keyof TConfig ? Pick<ProviderContext, "stealth"> : Record<never, never>)
-	& ("browser" extends keyof TConfig ? Pick<ProviderContext, "browser"> : Record<never, never>)
-	& ("auth" extends keyof TConfig ? Pick<ProviderContext, "auth"> : Record<never, never>)
-	& ("ocr" extends keyof TConfig ? Pick<ProviderContext, "ocr"> : Record<never, never>)
-	& ("stt" extends keyof TConfig ? Pick<ProviderContext, "stt"> : Record<never, never>)
-	& ("resolver" extends keyof TConfig ? Pick<ProviderContext, "resolver"> : Record<never, never>)
-	& ("choice" extends keyof TConfig ? Pick<ProviderContext, "choice"> : Record<never, never>);
+export type ProviderContext<TConfig = Record<string, unknown>> = {
+	request?: ProviderRequestContext;
+	trace: TraceContext;
+}
+	& ("env" extends keyof TConfig ? { env: EnvContext } : Record<never, never>)
+	& ("credential" extends keyof TConfig
+		? { credential: CredentialContext }
+		: Record<never, never>)
+	& ("http" extends keyof TConfig ? { http: HttpClient } : Record<never, never>)
+	& ("files" extends keyof TConfig
+		? string extends keyof TConfig
+			? { readonly files?: ProviderFilesContext }
+			: { readonly files: ProviderFilesContext }
+		: Record<never, never>)
+	& ("native" extends keyof TConfig
+		? { readonly native: NativeContext }
+		: Record<never, never>)
+	& ("cache" extends keyof TConfig ? { cache: ProviderCache } : Record<never, never>)
+	& ("state" extends keyof TConfig ? { state: ProviderRuntimeState } : Record<never, never>)
+	& ("stealth" extends keyof TConfig ? { stealth: StealthClient } : Record<never, never>)
+	& ("browser" extends keyof TConfig ? { browser: BrowserClient } : Record<never, never>)
+	& ("auth" extends keyof TConfig ? { auth: AuthContext } : Record<never, never>)
+	& ("ocr" extends keyof TConfig ? { ocr: OcrContext } : Record<never, never>)
+	& ("stt" extends keyof TConfig ? { stt: SttContext } : Record<never, never>)
+	& ("resolver" extends keyof TConfig ? { resolver: ResolverContext } : Record<never, never>)
+	& ("choice" extends keyof TConfig
+		? { choice: ProviderChoiceContext }
+		: Record<never, never>);
+
+/** Backwards-compatible name for a declaration-derived provider context. */
+export type ProviderContextFor<TConfig> = ProviderContext<TConfig>;
 
 export interface ProxiedOAuthConfig {
 	authorizeUrl: string;
@@ -2425,11 +2428,20 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 	version: string;
 	runtime: "standard" | "shared" | "browser";
 	/**
+	 * `vanilla` executes provider business logic outside the engine; `engine`
+	 * keeps session-bearing provider logic in the engine process.
+	 *
+	 * Omitted only for definitions authored before the engine migration. New
+	 * providers should declare the target explicitly.
+	 */
+	runtimeTarget?: ProviderRuntimeTarget;
+	/**
 	 * Optional deployment overrides, passed through verbatim from
 	 * `defineProvider({ deployment })`. Validation and profile resolution are
 	 * owned by the APIFuse registry builder, not the SDK.
 	 */
 	deployment?: ProviderDeploymentOverrides;
+	http?: Record<string, never> | true;
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
 	stealth?: {
@@ -2444,11 +2456,16 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 		engine: BrowserEngine;
 	};
 	auth?: AuthConfig;
+	choice?: Record<string, never> | true;
 	reviewed?: ProviderReviewed;
 	access?: ProviderAccessConfig;
 	secrets?: ProviderSecretDeclaration[];
+	env?: Record<string, never> | true;
 	credential?: CredentialDeclaration;
 	context?: ContextDeclaration;
+	state?: Record<string, never> | true;
+	cache?: Record<string, never> | true;
+	files?: Record<string, never> | true;
 	meta: ProviderMeta;
 	operations: Record<string, OperationDefinition<SchemaLike, SchemaLike, TContext>>;
 	healthMonitor?: ProviderHealthMonitorConfig;

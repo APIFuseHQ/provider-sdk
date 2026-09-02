@@ -1,13 +1,13 @@
 import { defineOperation } from "../../define.js";
 import type { HttpClient } from "../../types.js";
-import type { ProviderContext } from "./capability-factored-provider.js";
+import type { Ctx } from "./capability-factored-provider.js";
 
 async function fetchLabel(http: HttpClient): Promise<string> {
 	const response = await http.get("https://example.test/label");
 	return (await response.json<{ label: string }>()).label;
 }
 
-export const factoredOperation = defineOperation<ProviderContext>()({
+export const factoredOperation = defineOperation<Ctx>()({
 	riskClass: "read",
 	input: {
 		"~standard": {
