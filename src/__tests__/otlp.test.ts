@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
 	exportSpansOTLP,
@@ -12,6 +13,7 @@ import {
 	resetOTLPExportForTests,
 	resolveOTLPExportOptions,
 	resolveOTLPResourceAttributes,
+	retryDelayMs,
 	spansToOTLP,
 	swapOTLPTransportForTests,
 } from "../runtime/otlp.js";
@@ -206,6 +208,37 @@ describe("otlp export", () => {
 		expect(warnedText(warn)).not.toContain("network down");
 	});
 
+	it("exportSpansOTLP() waits an exponentially growing delay between attempts", async () => {
+		console.warn = mock((_message?: unknown) => {});
+		const stamps: number[] = [];
+		installTransport(() => {
+			stamps.push(performance.now());
+			return new Response(null, { status: 503 });
+		});
+
+		await exportSpansOTLP([makeSpan({ id: "backoff-timing" })], { endpoint: ENDPOINT });
+
+		expect(stamps).toHaveLength(3);
+		const firstGap = (stamps[1] ?? 0) - (stamps[0] ?? 0);
+		const secondGap = (stamps[2] ?? 0) - (stamps[1] ?? 0);
+		const tolerance = 10;
+		expect(firstGap).toBeGreaterThanOrEqual(OTLP_EXPORT_LIMITS.retryBaseDelayMs - tolerance);
+		expect(secondGap).toBeGreaterThanOrEqual(OTLP_EXPORT_LIMITS.retryBaseDelayMs * 2 - tolerance);
+		expect(secondGap).toBeGreaterThan(firstGap);
+	});
+
+	it("retryDelayMs() doubles per attempt and caps at the maximum delay", () => {
+		const { retryBaseDelayMs, retryMaxDelayMs } = OTLP_EXPORT_LIMITS;
+		expect([1, 2, 3, 4].map(retryDelayMs)).toEqual([
+			retryBaseDelayMs,
+			retryBaseDelayMs * 2,
+			retryBaseDelayMs * 4,
+			retryBaseDelayMs * 8,
+		]);
+		expect(retryDelayMs(5)).toBe(retryMaxDelayMs);
+		expect(retryDelayMs(40)).toBe(retryMaxDelayMs);
+	});
+
 	it("exportSpansOTLP() drops a rejected export immediately by status without echoing headers", async () => {
 		const warn = mock((_message?: unknown) => {});
 		console.warn = warn;
@@ -311,6 +344,56 @@ describe("otlp export", () => {
 		expect(cancelled).toBe(true);
 	});
 
+	it("exportSpansOTLP() keeps the abort timer armed until the body cancellation settles", async () => {
+		const warn = mock((_message?: unknown) => {});
+		console.warn = warn;
+		let abortedDuringCancel: boolean | undefined;
+		installTransport((call) => {
+			const signal = call.init?.signal ?? undefined;
+			return new Response(
+				new ReadableStream({
+					cancel() {
+						return new Promise<void>((resolve) => {
+							setTimeout(() => {
+								abortedDuringCancel = signal?.aborted;
+								resolve();
+							}, 60);
+						});
+					},
+				}),
+				{ status: 200 },
+			);
+		});
+
+		await exportSpansOTLP([makeSpan({ id: "slow-cancel" })], { endpoint: ENDPOINT, timeout: 20 });
+
+		// The timeout elapsed while cancellation was pending, so the timer was still armed then.
+		expect(abortedDuringCancel).toBe(true);
+		expect(warn).not.toHaveBeenCalled();
+	});
+
+	it("exportSpansOTLP() never routes through a fetch replaced before the SDK was imported", async () => {
+		const preload = new URL("./fixtures/otlp-preload-fetch.ts", import.meta.url).pathname;
+		const runner = new URL("./fixtures/otlp-preload-runner.ts", import.meta.url).pathname;
+		const subprocess = Bun.spawn({
+			cmd: [process.execPath, "--preload", preload, runner],
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [exitCode, stdout, stderr] = await Promise.all([
+			subprocess.exited,
+			new Response(subprocess.stdout).text(),
+			new Response(subprocess.stderr).text(),
+		]);
+
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout.trim()) as Record<string, unknown>).toEqual({
+			hijackedCalls: 0,
+			hijackedSawSecret: false,
+			collectorSawSecret: true,
+		});
+	});
+
 	it("exportSpansOTLP() ignores a provider's replacement of globalThis.fetch", async () => {
 		const warn = mock((_message?: unknown) => {});
 		console.warn = warn;
@@ -385,6 +468,38 @@ describe("otlp export", () => {
 			Authorization: "Bearer env-token",
 			"X-Tenant": "acme",
 		});
+	});
+
+	it("runs queued deliveries in a detached engine context, not the context that freed the slot", async () => {
+		const storage = new AsyncLocalStorage<string>();
+		const release: Array<() => void> = [];
+		const observed: Array<string | undefined> = [];
+		installTransport(() => {
+			observed.push(storage.getStore());
+			return new Promise<Response>((resolve) => {
+				release.push(() => resolve(new Response(null, { status: 200 })));
+			});
+		});
+		const contexts = OTLP_EXPORT_LIMITS.maxInFlight + 1;
+		const pending = Array.from({ length: contexts }, (_unused, index) =>
+			storage.run(`ctx-${index}`, () =>
+				exportSpansOTLP([makeSpan({ id: `context-${index}` })], { endpoint: ENDPOINT }),
+			),
+		);
+		try {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			expect(observed).toHaveLength(OTLP_EXPORT_LIMITS.maxInFlight);
+
+			// Completing ctx-0's delivery admits the queued batch from its completion callback.
+			release.shift()?.();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+
+			expect(observed).toHaveLength(contexts);
+			expect(observed.every((store) => store === undefined)).toBe(true);
+		} finally {
+			while (release.length > 0) release.shift()?.();
+			await Promise.all(pending);
+		}
 	});
 
 	it("caps concurrent exports and drops batches beyond the queue bound", async () => {
@@ -652,7 +767,7 @@ describe("otlp resource attribute resolution", () => {
 		expect(
 			resolveOTLPResourceAttributes(defaults, {
 				[OTEL_RESOURCE_ATTRIBUTES]:
-					"deployment.environment=prod, region=eu%2Dwest ,provider_id=env-loses, ,k8s.pod=a,",
+					"deployment.environment=prod, region=eu%2Dwest ,provider_id=env-loses,k8s.pod=a",
 			}),
 		).toEqual({
 			attributes: {
@@ -689,6 +804,10 @@ describe("otlp resource attribute resolution", () => {
 			"region=eu%ZZ",
 			"=novalue",
 			"a%ZZ=1",
+			"a=b,,c=d",
+			"a=b,",
+			"a=b, ,c=d",
+			" ",
 		]) {
 			expect(
 				resolveOTLPResourceAttributes(defaults, { [OTEL_RESOURCE_ATTRIBUTES]: value }),

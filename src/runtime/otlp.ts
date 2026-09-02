@@ -1,3 +1,5 @@
+import { AsyncResource } from "node:async_hooks";
+
 import type { TraceSpan } from "../types.js";
 
 export interface OTLPExportOptions {
@@ -115,7 +117,8 @@ function parseHeaderList(value: string | undefined): Record<string, string> {
 function parseResourceAttributeList(value: string): Record<string, string> | undefined {
 	const entries: Array<[string, string]> = [];
 	for (const member of value.split(",")) {
-		if (member.trim() === "") continue;
+		// Every member must be `key=value`; an empty member (`a=b,,c=d`, a trailing comma, a
+		// whitespace-only value) is a parse error and discards the whole variable.
 		const separator = member.indexOf("=");
 		if (separator <= 0) return undefined;
 		try {
@@ -342,10 +345,37 @@ export function spansToOTLP(
 
 type ExportTransport = typeof fetch;
 
-// Bound when the SDK module loads, before any provider module body runs. Provider code that
-// later replaces globalThis.fetch can neither observe collector credentials nor inject failures.
-const engineTransport: ExportTransport = globalThis.fetch;
+/**
+ * Binds the transport that carries collector credentials.
+ *
+ * Trust model: in production the provider's own entry file is the process entry, so
+ * provider-controlled code (its earlier imports, a `bun --preload`, or a bunfig preload) can run
+ * before any SDK module evaluates; capture timing alone therefore cannot establish trust. On Bun
+ * the native fetch is also exposed as `Bun.fetch`, and both the `Bun` global and its `fetch`
+ * property are read-only and non-configurable, so no JavaScript in the process can replace that
+ * reference at any point. The engine binds it here and never consults `globalThis.fetch`.
+ *
+ * Residual assumptions: on a runtime without `Bun.fetch` the fallback is `globalThis.fetch` as
+ * seen when this module first evaluates, which code that runs earlier in the same process can
+ * have replaced (or can have forged a `Bun` global). Code with process authority can also patch
+ * other builtins on this path (Map, Object.fromEntries, Headers, AbortController, setTimeout),
+ * install module loader plugins, or reach the internal test seam below by importing this module
+ * by path; an in-process boundary cannot defend against any of that. The CLI flows load provider
+ * modules only after the engine has loaded.
+ */
+function bindEngineTransport(): ExportTransport {
+	const bunFetch: unknown = typeof Bun !== "undefined" ? Bun.fetch : undefined;
+	return typeof bunFetch === "function" ? (bunFetch as ExportTransport) : globalThis.fetch;
+}
+
+const engineTransport: ExportTransport = bindEngineTransport();
 let transport: ExportTransport = engineTransport;
+
+// Deliveries run inside this engine-owned async scope, created while the module evaluates, so a
+// batch admitted from another batch's completion never inherits that request's async context.
+// (The scope snapshots the async context active at module load: empty under the static imports
+// the engine uses.)
+const exportScope = new AsyncResource("apifuse.otlp.export");
 
 /** Process-wide bounds so a collector outage can never turn into unbounded sockets, memory, or log volume. */
 export const OTLP_EXPORT_LIMITS = {
@@ -490,7 +520,8 @@ async function sendBatch(batch: ExportBatch): Promise<ExportOutcome> {
 	}
 }
 
-function retryDelayMs(attempt: number): number {
+/** Exponential backoff between attempts: base * 2^(attempt-1), capped at the maximum delay. */
+export function retryDelayMs(attempt: number): number {
 	return Math.min(
 		OTLP_EXPORT_LIMITS.retryBaseDelayMs * 2 ** (attempt - 1),
 		OTLP_EXPORT_LIMITS.retryMaxDelayMs,
@@ -518,11 +549,13 @@ function pumpQueue(): void {
 		const batch = queue.shift();
 		if (!batch) return;
 		inFlight += 1;
-		void deliverBatch(batch).finally(() => {
-			inFlight -= 1;
-			batch.settle();
-			pumpQueue();
-		});
+		void exportScope
+			.runInAsyncScope(() => deliverBatch(batch))
+			.finally(() => {
+				inFlight -= 1;
+				batch.settle();
+				pumpQueue();
+			});
 	}
 }
 

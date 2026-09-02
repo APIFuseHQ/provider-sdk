@@ -166,6 +166,70 @@ describe("engine credential containment", () => {
 		});
 	});
 
+	it("treats mixed-case aliases of engine-owned names as engine-owned", () => {
+		for (const alias of [
+			"otel_exporter_otlp_headers",
+			"Otel_Exporter_Otlp_Traces_Headers",
+			"apifuse__proxy__smartproxy_app_key",
+		]) {
+			expect(isEngineOwnedEnvName(alias)).toBe(true);
+		}
+		// Simulates a case-insensitive environment where the alias resolves to the credential.
+		const source = {
+			otel_exporter_otlp_headers: "Authorization=Bearer%20engine-token",
+			OTEL_EXPORTER_OTLP_HEADERS: "Authorization=Bearer%20engine-token",
+			PROVIDER_TOKEN: "provider-token",
+		};
+		expect(
+			createProviderEnvironment(source, ["otel_exporter_otlp_headers", "PROVIDER_TOKEN"]),
+		).toEqual({ PROVIDER_TOKEN: "provider-token" });
+	});
+
+	it("keeps a mixed-case OTLP header alias out of a provider operation environment", async () => {
+		const alias = "otel_exporter_otlp_headers";
+		const previous = new Map<string, string | undefined>(
+			[alias, "PROVIDER_TOKEN"].map((name) => [name, process.env[name]]),
+		);
+		// On a case-insensitive platform this is the engine's variable; set it directly so the
+		// lookup resolves here as well.
+		process.env[alias] = "Authorization=Bearer%20engine-only-token";
+		process.env.PROVIDER_TOKEN = "provider-token";
+		try {
+			const provider = definition({
+				env: true,
+				secrets: [{ name: alias }, { name: "PROVIDER_TOKEN" }],
+				operations: {
+					inspectEnvironment: {
+						input: z.object({}),
+						output: z.object({
+							alias: z.string().optional(),
+							providerToken: z.string(),
+						}),
+						handler: async (ctx) => ({
+							alias: ctx.env.get(alias),
+							providerToken: ctx.env.get("PROVIDER_TOKEN") ?? "",
+						}),
+					},
+				},
+			});
+			const response = await createServerApp(provider).request("/v1/inspectEnvironment", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "telemetry-alias-containment", input: {} }),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({
+				data: { providerToken: "provider-token" },
+			});
+		} finally {
+			for (const [name, value] of previous) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	});
+
 	it("keeps OTLP header credentials out of a provider operation environment even when declared", async () => {
 		const names = ["OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS"] as const;
 		const previous = new Map<string, string | undefined>(

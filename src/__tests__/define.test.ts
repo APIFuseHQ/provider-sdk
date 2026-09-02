@@ -950,6 +950,23 @@ describe("defineProvider", () => {
 				).toThrow(/cannot declare engine-owned telemetry variable/);
 			}
 		});
+
+		it("rejects mixed-case aliases of engine-owned variables", () => {
+			for (const name of ["otel_exporter_otlp_headers", "Otel_Exporter_Otlp_Traces_Headers"]) {
+				expect(() =>
+					defineProvider({
+						...validConfig,
+						secrets: [{ name, required: true }],
+					}),
+				).toThrow(/cannot declare engine-owned telemetry variable/);
+			}
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					secrets: [{ name: "apifuse__proxy__smartproxy_app_key", required: true }],
+				}),
+			).toThrow(/cannot declare engine-owned proxy credential/);
+		});
 	});
 
 	describe("engine-owned proxy vendor credentials", () => {

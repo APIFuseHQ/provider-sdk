@@ -42,8 +42,17 @@ const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAME_SET = new Set<string>(
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
 );
 
+/**
+ * Environment names are compared case-insensitively: Windows resolves `otel_exporter_otlp_headers`
+ * to the same variable as `OTEL_EXPORTER_OTLP_HEADERS`, so a mixed-case alias must be treated as
+ * the engine-owned name it resolves to.
+ */
+function canonicalEnvName(name: string): string {
+	return name.toUpperCase();
+}
+
 export function isEngineOwnedProxyCredentialName(name: string): boolean {
-	return ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAME_SET.has(name);
+	return ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAME_SET.has(canonicalEnvName(name));
 }
 
 /**
@@ -63,7 +72,7 @@ export const ENGINE_OWNED_TELEMETRY_ENV_NAMES = [
 const ENGINE_OWNED_TELEMETRY_ENV_NAME_SET = new Set<string>(ENGINE_OWNED_TELEMETRY_ENV_NAMES);
 
 export function isEngineOwnedTelemetryEnvName(name: string): boolean {
-	return ENGINE_OWNED_TELEMETRY_ENV_NAME_SET.has(name);
+	return ENGINE_OWNED_TELEMETRY_ENV_NAME_SET.has(canonicalEnvName(name));
 }
 
 /** Every environment name the engine owns: rejected in declarations and filtered from provider projections. */
