@@ -1576,6 +1576,9 @@ export function migrateOperationDeclarationRepository(
 	if (refusals.length > 0) {
 		return { status: "refused", providerRoot, refusals };
 	}
+	for (const [path, code] of renderLocaleCatalogWrites(providerRoot, todos)) {
+		pendingWrites.set(path, code);
+	}
 
 	if (pendingWrites.size === 0) {
 		return {
@@ -1614,6 +1617,103 @@ export function renderLocaleTodoSidecar(todos: readonly LocaleTodo[]): string {
 		localeFiles[todo.localeFile][todo.key] = todo.originalProse;
 	}
 	return `${JSON.stringify({ schemaVersion: 1, localeFiles }, null, 2)}\n`;
+}
+
+function renderLocaleCatalogWrites(
+	providerRoot: string,
+	todos: readonly LocaleTodo[],
+): Map<string, string> {
+	const todosByFile = new Map<string, LocaleTodo[]>();
+	for (const todo of todos) {
+		const fileTodos = todosByFile.get(todo.localeFile) ?? [];
+		fileTodos.push(todo);
+		todosByFile.set(todo.localeFile, fileTodos);
+	}
+
+	const englishPath = "locales/en.json";
+	const englishTodos = todosByFile.get(englishPath);
+	if (englishTodos === undefined) return new Map();
+
+	const english = readLocaleCatalog(join(providerRoot, englishPath));
+	applyLocaleTodos(english, englishTodos);
+	const writes = new Map<string, string>([
+		[join(providerRoot, englishPath), renderCanonicalLocaleCatalog(english)],
+	]);
+
+	for (const [localeFile, fileTodos] of todosByFile) {
+		if (localeFile === englishPath) continue;
+		const catalog = readLocaleCatalog(join(providerRoot, localeFile));
+		applyLocaleTodos(catalog, fileTodos);
+		writes.set(
+			join(providerRoot, localeFile),
+			renderCanonicalLocaleCatalog(reorderLikeReference(english, catalog)),
+		);
+	}
+	return writes;
+}
+
+function readLocaleCatalog(path: string): Record<string, unknown> {
+	const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+	if (!isRecord(value)) throw new Error(`${path} must contain a JSON object.`);
+	return value;
+}
+
+function applyLocaleTodos(catalog: Record<string, unknown>, todos: readonly LocaleTodo[]): void {
+	for (const todo of todos) {
+		const segments = todo.key.split(".");
+		const leaf = segments.pop();
+		if (leaf === undefined) continue;
+		let cursor = catalog;
+		for (const segment of segments) {
+			const child = cursor[segment];
+			if (isRecord(child)) {
+				cursor = child;
+				continue;
+			}
+			const created: Record<string, unknown> = {};
+			cursor[segment] = created;
+			cursor = created;
+		}
+		cursor[leaf] = todo.originalProse;
+	}
+}
+
+/** Match provider-contract's canonical locale serialization exactly. */
+function renderCanonicalLocaleCatalog(value: unknown): string {
+	return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+/**
+ * Put shared keys first in English order, then retain locale-only authored order.
+ * Arrays keep their shape and use the English item at the same index as a reference.
+ */
+function reorderLikeReference(reference: unknown, value: unknown): unknown {
+	if (Array.isArray(value)) {
+		const referenceArray = Array.isArray(reference) ? reference : [];
+		return value.map((item, index) => reorderLikeReference(referenceArray[index], item));
+	}
+	if (!isRecord(value)) return value;
+
+	const referenceRecord = isRecord(reference) ? reference : {};
+	const ordered: Record<string, unknown> = {};
+	for (const key of Object.keys(referenceRecord)) {
+		if (Object.hasOwn(value, key)) {
+			ordered[key] = reorderLikeReference(referenceRecord[key], value[key]);
+		}
+	}
+	for (const [key, child] of Object.entries(value)) {
+		if (!Object.hasOwn(ordered, key)) {
+			ordered[key] = reorderLikeReference(
+				Object.hasOwn(referenceRecord, key) ? referenceRecord[key] : undefined,
+				child,
+			);
+		}
+	}
+	return ordered;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function findLocaleTodoConflict(
