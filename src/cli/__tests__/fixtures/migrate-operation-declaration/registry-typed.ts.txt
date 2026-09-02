@@ -1,0 +1,11 @@
+const permissionsRevoke = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [{ scenario: "Revoke permissions", input: {} }],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
+
+export const companionsOperations: Record<string, OperationDefinition> = {
+	"permissions-revoke": permissionsRevoke,
+};

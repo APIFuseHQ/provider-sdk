@@ -323,6 +323,64 @@ describe("migrateOperationDeclarationRepository", () => {
 		}
 	});
 
+	function migrateRegistryFixture(name: string, other?: string) {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-registry-"));
+		if (other === undefined) {
+			writeFileSync(join(root, "index.ts"), fixture(name));
+		} else {
+			writeFileSync(join(root, "index.ts"), fixture(name));
+			writeFileSync(join(root, "other.ts"), fixture(other));
+		}
+		mkdirSync(join(root, "locales"));
+		writeFileSync(join(root, "locales", "en.json"), "{}\n");
+		const result = migrateOperationDeclarationRepository(root, { check: true });
+		rmSync(root, { recursive: true, force: true });
+		return result;
+	}
+
+	it("indexes typed exported registries with hyphenated string keys", () => {
+		const result = migrateRegistryFixture("registry-typed");
+		expect(result.status).toBe("would-migrate");
+		if (result.status === "would-migrate") expect(result.operationCount).toBe(1);
+	});
+
+	it("indexes shorthand registry properties for direct stream helpers", () => {
+		const result = migrateRegistryFixture("registry-shorthand");
+		expect(result.status).toBe("would-migrate");
+		if (result.status === "would-migrate") expect(result.operationCount).toBe(1);
+	});
+
+	it("refuses a binding registered under two ids", () => {
+		const result = migrateRegistryFixture("registry-binding-ambiguous");
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals[0]?.reason).toBe("operation_id_unresolved");
+		}
+	});
+
+	it("refuses two bindings registered under one id", () => {
+		const result = migrateRegistryFixture("registry-key-ambiguous");
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals).toHaveLength(2);
+			expect(result.refusals.every((item) => item.reason === "operation_id_unresolved")).toBe(true);
+		}
+	});
+
+	it("scans operation members in unrelated const objects only", () => {
+		const result = migrateRegistryFixture("registry-unrelated");
+		expect(result.status).toBe("would-migrate");
+		if (result.status === "would-migrate") expect(result.operationCount).toBe(1);
+	});
+
+	it("ignores imported identifiers in same-file objects", () => {
+		const result = migrateRegistryFixture("registry-imported", "registry-imported-other");
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals[0]?.reason).toBe("operation_id_unresolved");
+		}
+	});
+
 	it("resolves an imported operation id and emits the examples locale sidecar", () => {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-declaration-"));
 		try {
