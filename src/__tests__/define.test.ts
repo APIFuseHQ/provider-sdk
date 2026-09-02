@@ -8,10 +8,7 @@ import type {
 	ProviderDefinition,
 	SchemaLike,
 } from "../types.js";
-import {
-	createProviderContextDouble,
-	defineTestProvider as defineProvider,
-} from "./test-utils.js";
+import { createProviderContextDouble, defineTestProvider as defineProvider } from "./test-utils.js";
 
 const InputSchema = z.object({ id: z.string() });
 const OutputSchema = z.object({ name: z.string(), price: z.number() });
@@ -224,7 +221,9 @@ describe("defineProvider", () => {
 	it("keeps transport optional for existing JSON operations", () => {
 		const provider = defineProvider(validConfig);
 
-		expect((provider.operations.prices as ProviderDefinition["operations"][string]).transport).toBeUndefined();
+		expect(
+			(provider.operations.prices as ProviderDefinition["operations"][string]).transport,
+		).toBeUndefined();
 	});
 
 	it("preserves typed native network declarations", () => {
@@ -261,9 +260,7 @@ describe("defineProvider", () => {
 
 	it("accepts native on standard and shared runtimes", () => {
 		expect(() => defineProvider({ ...validConfig, native: {} })).not.toThrow();
-		expect(() =>
-			defineProvider({ ...validConfig, runtime: "shared", native: {} }),
-		).not.toThrow();
+		expect(() => defineProvider({ ...validConfig, runtime: "shared", native: {} })).not.toThrow();
 	});
 
 	it("rejects native on the browser runtime", () => {
@@ -935,6 +932,40 @@ describe("defineProvider", () => {
 			const prices = provider.operations.prices as ProviderDefinition["operations"][string];
 			expect(prices.title).toBeUndefined();
 			expect(prices.description).toBeUndefined();
+		});
+	});
+
+	describe("engine-owned telemetry configuration", () => {
+		it("rejects OTLP export variables in provider secrets", () => {
+			for (const name of [
+				"OTEL_EXPORTER_OTLP_HEADERS",
+				"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+				"OTEL_EXPORTER_OTLP_ENDPOINT",
+			]) {
+				expect(() =>
+					defineProvider({
+						...validConfig,
+						secrets: [{ name, required: true }],
+					}),
+				).toThrow(/cannot declare engine-owned telemetry variable/);
+			}
+		});
+
+		it("rejects mixed-case aliases of engine-owned variables", () => {
+			for (const name of ["otel_exporter_otlp_headers", "Otel_Exporter_Otlp_Traces_Headers"]) {
+				expect(() =>
+					defineProvider({
+						...validConfig,
+						secrets: [{ name, required: true }],
+					}),
+				).toThrow(/cannot declare engine-owned telemetry variable/);
+			}
+			expect(() =>
+				defineProvider({
+					...validConfig,
+					secrets: [{ name: "apifuse__proxy__smartproxy_app_key", required: true }],
+				}),
+			).toThrow(/cannot declare engine-owned proxy credential/);
 		});
 	});
 

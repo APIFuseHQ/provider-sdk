@@ -6,7 +6,7 @@ import {
 } from "./declaration-validation.js";
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
-import { isEngineOwnedProxyCredentialName } from "./engine.js";
+import { isEngineOwnedProxyCredentialName, isEngineOwnedTelemetryEnvName } from "./engine.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
 import {
 	NativeEgressPolicyValidationError,
@@ -941,6 +941,14 @@ function validateProviderProxy(config: {
 	secrets?: ProviderSecretDeclaration[];
 }): void {
 	for (const secret of config.secrets ?? []) {
+		if (isEngineOwnedTelemetryEnvName(secret.name)) {
+			throw new ValidationError(
+				`Provider "${config.id}" cannot declare engine-owned telemetry variable "${secret.name}"`,
+				{
+					fix: `Remove "${secret.name}" from provider secrets; trace export is configured only on the provider engine.`,
+				},
+			);
+		}
 		if (!isEngineOwnedProxyCredentialName(secret.name)) continue;
 		throw new ValidationError(
 			`Provider "${config.id}" cannot declare engine-owned proxy credential "${secret.name}"`,
