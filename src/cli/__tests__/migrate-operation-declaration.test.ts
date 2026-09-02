@@ -9,6 +9,7 @@ import {
 	type OperationDeclarationRefusalReason,
 	verifyOperationDeclarationRewrite,
 } from "../migrate-operation-declaration.js";
+import { validateProviderLocaleCatalogs } from "../../i18n/catalog.js";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "migrate-operation-declaration");
 
@@ -309,9 +310,105 @@ describe("migrateOperationDeclaration refusals", () => {
 			expect(result.refusals[0]?.operationKey).toBe("search");
 		}
 	});
+
+	it("refuses rather than emitting a validator-illegal example locale key", () => {
+		const input = `const searchOperation = defineOperation<ProviderContext>()({
+  annotations: { readOnly: true },
+  descriptionKey: "operations.search_items.description",
+  inputExamples: [{ scenario: "Search items", input: {} }],
+  input: InputSchema,
+  output: OutputSchema,
+  handler,
+});
+`;
+		const result = migrateOperationDeclaration(input, "operations/search.ts", {
+			operationIds: new Map([["searchOperation", "search-items"]]),
+			localeFiles: ["locales/en.json"],
+		});
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals[0]?.reason).toBe("invalid_locale_key");
+			expect(result.refusals[0]?.detail).toContain(
+				'Refusing to write invalid provider locale key "operations.search_items.examples.0.scenario"',
+			);
+		}
+	});
 });
 
 describe("migrateOperationDeclarationRepository", () => {
+	for (const example of [
+		{
+			fixture: "examples-snake-operation-id",
+			namespace: "listRecentEarthquakes",
+		},
+		{
+			fixture: "examples-kebab-operation-id",
+			namespace: "listHospitals",
+		},
+	] as const) {
+		it(`writes validator-legal camelCase example keys for ${example.fixture}`, () => {
+			const root = mkdtempSync(join(tmpdir(), "apifuse-operation-example-namespace-"));
+			try {
+				writeFileSync(join(root, "index.ts"), fixture(example.fixture));
+				mkdirSync(join(root, "locales"));
+				writeFileSync(join(root, "locales", "en.json"), "{}\n");
+
+				const result = migrateOperationDeclarationRepository(root);
+				expect(result.status).toBe("migrated");
+				const scenarioKey = `operations.${example.namespace}.examples.0.scenario`;
+				const rationaleKey = `operations.${example.namespace}.examples.0.rationale`;
+				const migrated = readFileSync(join(root, "index.ts"), "utf8");
+				expect(migrated).toContain(`scenarioKey: ${JSON.stringify(scenarioKey)}`);
+				expect(migrated).toContain(`rationaleKey: ${JSON.stringify(rationaleKey)}`);
+				const english: unknown = JSON.parse(readFileSync(join(root, "locales", "en.json"), "utf8"));
+				expect(
+					validateProviderLocaleCatalogs({
+						catalogs: { en: english as Record<string, unknown> },
+						requiredLocales: ["en"],
+						requiredKeys: [scenarioKey, rationaleKey],
+					}),
+				).toEqual({ ok: true, issues: [] });
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it("reuses an existing camelCase operation catalog namespace without duplication", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-existing-namespace-"));
+		try {
+			writeFileSync(join(root, "index.ts"), fixture("examples-snake-operation-id"));
+			mkdirSync(join(root, "locales"));
+			writeFileSync(
+				join(root, "locales", "en.json"),
+				readFileSync(join(FIXTURES, "locale-existing-operation-namespace-en.json"), "utf8"),
+			);
+
+			const result = migrateOperationDeclarationRepository(root);
+			expect(result.status).toBe("migrated");
+			const english = JSON.parse(readFileSync(join(root, "locales", "en.json"), "utf8")) as Record<
+				string,
+				unknown
+			>;
+			const operations = english.operations;
+			if (!isRecord(operations)) throw new Error("expected operations catalog namespace");
+			expect(Object.keys(operations)).toEqual(["listRecentEarthquakes"]);
+			const requiredKeys = [
+				"operations.listRecentEarthquakes.examples.0.scenario",
+				"operations.listRecentEarthquakes.examples.0.rationale",
+			];
+			expect(
+				validateProviderLocaleCatalogs({
+					catalogs: { en: english },
+					requiredLocales: ["en"],
+					requiredKeys,
+				}),
+			).toEqual({ ok: true, issues: [] });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("writes a removed raw title to the English catalog without replacing translations", () => {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-title-locale-"));
 		try {
