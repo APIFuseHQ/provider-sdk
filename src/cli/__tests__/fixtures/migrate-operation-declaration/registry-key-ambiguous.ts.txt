@@ -1,0 +1,19 @@
+const firstOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [{ scenario: "First", input: {} }],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
+const secondOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [{ scenario: "Second", input: {} }],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
+
+const registry = {
+	shared: firstOperation,
+	"shared": secondOperation,
+};

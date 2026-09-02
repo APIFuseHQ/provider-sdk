@@ -1668,6 +1668,8 @@ function collectLocaleFiles(root: string): string[] {
 
 function buildOperationIdIndex(sourceFiles: readonly string[]): Map<string, Map<string, string>> {
 	const result = new Map<string, Map<string, string>>();
+	const idsByPath = new Map<string, Map<string, string | null>>();
+	const ambiguousBindingsByPath = new Map<string, Set<string>>();
 	const sources = new Map<string, TS.SourceFile>();
 	for (const path of sourceFiles) {
 		const source = parseSource(path, readFileSync(path, "utf8"));
@@ -1676,10 +1678,40 @@ function buildOperationIdIndex(sourceFiles: readonly string[]): Map<string, Map<
 
 	const record = (path: string, binding: string, operationId: string): void => {
 		const map = result.get(path) ?? new Map<string, string>();
-		const previous = map.get(binding);
-		if (previous === undefined || previous === operationId) map.set(binding, operationId);
-		else map.delete(binding);
+		const ids = idsByPath.get(path) ?? new Map<string, string | null>();
+		const ambiguousBindings = ambiguousBindingsByPath.get(path) ?? new Set<string>();
+
+		// An operation id is usable only when it identifies exactly one binding.
+		// Keep an explicit null marker for an ambiguous id so a later occurrence
+		// cannot accidentally make it usable again.
+		const previousBinding = ids.get(operationId);
+		if (ids.has(operationId)) {
+			if (
+				previousBinding !== undefined &&
+				previousBinding !== null &&
+				previousBinding !== binding
+			) {
+				map.delete(previousBinding);
+				map.delete(binding);
+				ambiguousBindings.add(previousBinding);
+				ambiguousBindings.add(binding);
+				ids.set(operationId, null);
+			}
+		} else {
+			ids.set(operationId, binding);
+		}
+
+		// A binding registered under two different ids is likewise ambiguous.
+		const previousId = map.get(binding);
+		if (previousId !== undefined && previousId !== operationId) {
+			map.delete(binding);
+			ambiguousBindings.add(binding);
+		} else if (!ambiguousBindings.has(binding) && ids.get(operationId) === binding) {
+			map.set(binding, operationId);
+		}
 		result.set(path, map);
+		idsByPath.set(path, ids);
+		ambiguousBindingsByPath.set(path, ambiguousBindings);
 	};
 
 	for (const [path, source] of sources) {
@@ -1700,8 +1732,89 @@ function buildOperationIdIndex(sourceFiles: readonly string[]): Map<string, Map<
 				else record(imported.path, imported.exportedName, operationId);
 			}
 		}
+
+		// Some providers keep their operation registry in a same-file const with
+		// an arbitrary name (for example, `companionsOperations`). This scan is
+		// deliberately ID-only: it accepts only static object members whose value
+		// is a same-file operation binding, and never evaluates spreads, factories,
+		// or imported values.
+		const operationBindings = collectModuleOperationBindings(source);
+		const importedBindings = collectImportedBindingNames(source);
+		for (const entry of collectStaticOperationRegistryEntries(source, operationBindings)) {
+			if (importedBindings.has(entry.binding)) continue;
+			record(path, entry.binding, entry.operationId);
+		}
 	}
 	return result;
+}
+
+type StaticOperationRegistryEntry = {
+	readonly operationId: string;
+	readonly binding: string;
+};
+
+function collectModuleOperationBindings(source: TS.SourceFile): ReadonlySet<string> {
+	const bindings = new Set<string>();
+	for (const statement of source.statements) {
+		if (!ts.isVariableStatement(statement)) continue;
+		if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+		for (const declaration of statement.declarationList.declarations) {
+			if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) continue;
+			const initializer = unwrapExpression(declaration.initializer);
+			if (
+				initializer !== undefined &&
+				ts.isCallExpression(initializer) &&
+				isOperationHelperCall(initializer)
+			) {
+				bindings.add(declaration.name.text);
+			}
+		}
+	}
+	return bindings;
+}
+
+function collectImportedBindingNames(source: TS.SourceFile): ReadonlySet<string> {
+	const bindings = new Set<string>();
+	for (const statement of source.statements) {
+		if (!ts.isImportDeclaration(statement)) continue;
+		const clause = statement.importClause;
+		if (clause?.name !== undefined) bindings.add(clause.name.text);
+		const named = clause?.namedBindings;
+		if (named === undefined) continue;
+		if (ts.isNamespaceImport(named)) {
+			bindings.add(named.name.text);
+			continue;
+		}
+		for (const element of named.elements) bindings.add(element.name.text);
+	}
+	return bindings;
+}
+
+function collectStaticOperationRegistryEntries(
+	source: TS.SourceFile,
+	operationBindings: ReadonlySet<string>,
+): StaticOperationRegistryEntry[] {
+	const entries: StaticOperationRegistryEntry[] = [];
+	for (const statement of source.statements) {
+		if (!ts.isVariableStatement(statement)) continue;
+		if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+		for (const declaration of statement.declarationList.declarations) {
+			if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) continue;
+			const object = unwrapExpression(declaration.initializer);
+			if (object === undefined || !ts.isObjectLiteralExpression(object)) continue;
+			for (const property of object.properties) {
+				if (ts.isSpreadAssignment(property)) continue;
+				const name = property.name;
+				if (name === undefined || (!ts.isIdentifier(name) && !ts.isStringLiteral(name))) continue;
+				const value = propertyValue(property);
+				const binding = unwrapExpression(value);
+				if (binding === undefined || !ts.isIdentifier(binding)) continue;
+				if (!operationBindings.has(binding.text)) continue;
+				entries.push({ operationId: name.text, binding: binding.text });
+			}
+		}
+	}
+	return entries;
 }
 
 function collectImports(
