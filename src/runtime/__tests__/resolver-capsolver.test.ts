@@ -147,14 +147,12 @@ describe("Capsolver resolver vendor", () => {
 		{
 			label: "HTTP with its default port",
 			proxyUrl: "http://proxy-user:proxy-password@proxy.example",
-			expected: "http:proxy.example:80:proxy-user:proxy-password",
 		},
 		{
 			label: "SOCKS5 with its default port and URL-encoded credentials",
 			proxyUrl: "socks5://proxy%40user:p%40ssword@proxy.example",
-			expected: "socks5:proxy.example:1080:proxy@user:p@ssword",
 		},
-	])("creates a proxied AWS WAF task from $label", async ({ proxyUrl, expected }) => {
+	])("creates a proxyless AWS WAF task with a $label identity", async ({ proxyUrl }) => {
 		const stub = createFetchStub([
 			jsonResponse({ errorId: 0, taskId: "aws-task-proxied" }),
 			jsonResponse({ errorId: 0, status: "ready", solution: { cookie: "proxied-cookie" } }),
@@ -172,15 +170,16 @@ describe("Capsolver resolver vendor", () => {
 		expect(stub.calls[0]?.body).toEqual({
 			clientKey: "test-api-key",
 			task: {
-				type: "AntiAwsWafTask",
+				type: "AntiAwsWafTaskProxyLess",
 				websiteURL: AWS_WAF_CHALLENGE.pageUrl,
 				awsKey: AWS_WAF_CHALLENGE.siteKey,
 				awsIv: AWS_WAF_CHALLENGE.iv,
 				awsContext: AWS_WAF_CHALLENGE.context,
 				awsChallengeJS: AWS_WAF_CHALLENGE.captchaScript,
-				proxy: expected,
+				userAgent: identity.userAgent,
 			},
 		});
+		expect(stub.calls[0]?.body.task).not.toHaveProperty("proxy");
 	});
 
 	it("caches a CapSolver AWS WAF cookie by its SDK-estimated expiry", async () => {

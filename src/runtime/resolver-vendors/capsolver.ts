@@ -466,17 +466,12 @@ export function createCapsolverResolverVendorAdapter(
 				throw new TypeError(`Capsolver resolver does not support ${challenge.kind}`);
 			}
 			const proxy = identity ? proxyForCapsolver(identity.proxyUrl) : undefined;
-			if (challenge.kind === "aws_waf" && identity && !proxy) {
-				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "transport_failure", {
-					phase: "create_task",
-				});
-			}
 			if (challenge.kind === "cloudflare_interstitial" && !identity) {
 				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "missing_proxy_identity", {
 					phase: "create_task",
 				});
 			}
-			if (identity && !proxy) {
+			if (challenge.kind !== "aws_waf" && identity && !proxy) {
 				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "transport_failure", {
 					phase: "create_task",
 				});
@@ -509,10 +504,14 @@ export function createCapsolverResolverVendorAdapter(
 
 			try {
 				const createTask = async () => {
+					// AWS WAF tokens are portable (ADR 0006 lease A→B), so minting can use solver
+					// egress independently of the redemption proxy. Passing the caller proxy makes
+					// allowlisted allocators such as Smartproxy reject solver workers with
+					// "custom proxy connect failed" (production measurement, 2026-09-02).
 					const task =
 						challenge.kind === "aws_waf"
 							? {
-									type: proxy ? "AntiAwsWafTask" : "AntiAwsWafTaskProxyLess",
+									type: "AntiAwsWafTaskProxyLess",
 									websiteURL: challenge.pageUrl,
 									...(challenge.siteKey !== undefined ? { awsKey: challenge.siteKey } : {}),
 									...(challenge.iv !== undefined ? { awsIv: challenge.iv } : {}),
@@ -520,7 +519,7 @@ export function createCapsolverResolverVendorAdapter(
 									...(challenge.captchaScript !== undefined
 										? { awsChallengeJS: challenge.captchaScript }
 										: {}),
-									...(proxy ? { proxy: proxy.value } : {}),
+									...(identity?.userAgent ? { userAgent: identity.userAgent } : {}),
 								}
 							: challenge.kind === "turnstile"
 								? {
