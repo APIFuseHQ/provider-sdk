@@ -1133,6 +1133,7 @@ export interface CreateTraceContextOptions {
     onSpan?: (span: Span) => void;
     // (undocumented)
     resourceAttributes?: Record<string, string>;
+    sanitizeSpanForExport?: (span: Span) => Span;
 }
 
 // @public (undocumented)

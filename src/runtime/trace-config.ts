@@ -6,9 +6,10 @@ export const APIFUSE__TRACE__EXPORTER = "APIFUSE__TRACE__EXPORTER";
 
 type EnvLike = Record<string, string | undefined>;
 
-const TRACE_EXPORTER_LOOKUP: Record<Exclude<NonNullable<TraceConfig["exporter"]>, "otlp">, true> = {
+const TRACE_EXPORTER_LOOKUP: Record<NonNullable<TraceConfig["exporter"]>, true> = {
 	console: true,
 	json: true,
+	otlp: true,
 	none: true,
 };
 const TRACE_EXPORTERS = new Set(Object.keys(TRACE_EXPORTER_LOOKUP));
@@ -66,7 +67,7 @@ export function resolveTraceConfigFromEnv(env: EnvLike = process.env): TraceConf
 	if (exporterRaw !== undefined && exporter === "none" && normalizedExporter !== "none") {
 		warnOnce(
 			APIFUSE__TRACE__EXPORTER,
-			`[apifuse] Invalid APIFUSE__TRACE__EXPORTER value "${normalizedExporter ?? exporterRaw}" (OTLP is unsupported for server output); supported exporters are "console", "json", and "none"; falling back to exporter "none".`,
+			`[apifuse] Invalid APIFUSE__TRACE__EXPORTER value "${normalizedExporter ?? exporterRaw}"; supported exporters are "console", "json", "otlp", and "none"; falling back to exporter "none".`,
 		);
 	}
 

@@ -21,6 +21,8 @@ export interface CreateTraceContextOptions {
 	onSpan?: (span: Span) => void;
 	exportOptions?: OTLPExportOptions;
 	resourceAttributes?: Record<string, string>;
+	/** Applied to each span copy immediately before OTLP export; never touches getSpans() or onSpan. */
+	sanitizeSpanForExport?: (span: Span) => Span;
 }
 
 type SpanHookOptions<T> = {
@@ -51,8 +53,6 @@ export const TRACE_RECORDER = Symbol.for("@apifuse/provider-sdk/runtime/trace-re
 
 type InternalTraceContext = TraceContext & {
 	[TRACE_RECORDER]: TraceRecorder;
-	_exportOptions?: OTLPExportOptions;
-	_resourceAttributes?: Record<string, string>;
 };
 
 function buildOTLPExportOptions(config?: TraceConfig): OTLPExportOptions | undefined {
@@ -124,6 +124,20 @@ function insertCompletedSpan(
 	}
 }
 
+/** Hands the hook a copy whose attributes are detached from the recorded span; a hook that returns nothing fails closed. */
+function prepareSpanForExport(
+	span: Span,
+	sanitize: CreateTraceContextOptions["sanitizeSpanForExport"],
+): Span {
+	const copy: Span = { ...span, attributes: { ...span.attributes } };
+	if (!sanitize) return copy;
+	const sanitized = sanitize(copy);
+	if (!sanitized || typeof sanitized !== "object") {
+		throw new Error("sanitizeSpanForExport returned no span");
+	}
+	return sanitized;
+}
+
 export function getTraceRecorder(trace: BaseTraceContext): TraceRecorder | null {
 	return (trace as Partial<InternalTraceContext>)[TRACE_RECORDER] ?? null;
 }
@@ -133,20 +147,32 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 	const completed: CompletedSpanEntry[] = [];
 	const activeSpanStorage = new AsyncLocalStorage<PendingSpan | undefined>();
 	let sequence = 0;
-	let traceContext!: InternalTraceContext;
+	// Export configuration (which can carry collector credentials) stays in this closure;
+	// the context object handed to provider code never exposes it.
+	const exportOptions = options.exportOptions;
+	const exportResourceAttributes = options.resourceAttributes
+		? { ...options.resourceAttributes }
+		: undefined;
+	// One trace id per context so every export batch of this request shares it and
+	// two processes can never mint the same id.
+	const exportTraceId = crypto.randomUUID().replace(/-/g, "");
 
 	const scheduleExport = () => {
-		if (!traceContext._exportOptions) {
+		if (!exportOptions) {
 			return;
 		}
 
-		const spans = completed.map((entry) => ({ ...entry.span }));
+		const snapshot = completed.map((entry) => entry.span);
 		setImmediate(() => {
-			void exportSpansOTLP(
-				spans,
-				traceContext._exportOptions as OTLPExportOptions,
-				traceContext._resourceAttributes,
-			);
+			// Sanitization runs off the request path; a faulty sanitizer drops the batch, never the request.
+			let spans: Span[];
+			try {
+				spans = snapshot.map((span) => prepareSpanForExport(span, options.sanitizeSpanForExport));
+			} catch {
+				console.warn("[apifuse] OTLP export skipped; span sanitization failed.");
+				return;
+			}
+			void exportSpansOTLP(spans, exportOptions, exportResourceAttributes, exportTraceId);
 		});
 	};
 
@@ -213,17 +239,13 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 		},
 	};
 
-	traceContext = {
+	const traceContext: InternalTraceContext = {
 		span(name, fn) {
 			return recorder.runSpan(name, fn);
 		},
 		getSpans() {
 			return completed.map((entry) => ({ ...entry.span }));
 		},
-		...(options.exportOptions ? { _exportOptions: options.exportOptions } : {}),
-		...(options.resourceAttributes
-			? { _resourceAttributes: { ...options.resourceAttributes } }
-			: {}),
 		[TRACE_RECORDER]: recorder,
 	};
 
