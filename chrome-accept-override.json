@@ -1,0 +1,51 @@
+{
+  "accept_json": {
+    "header": "Accept",
+    "requested": "application/json",
+    "observed": "application/json",
+    "honoured": true,
+    "error": null
+  },
+  "accept_xml": {
+    "header": "Accept",
+    "requested": "application/xml, text/xml",
+    "observed": "application/xml, text/xml",
+    "honoured": true,
+    "error": null
+  },
+  "accept_encoding": {
+    "header": "Accept-Encoding",
+    "requested": "identity",
+    "observed": "gzip, deflate, br, zstd",
+    "honoured": false,
+    "error": null
+  },
+  "user_agent": {
+    "header": "User-Agent",
+    "requested": "evil/1.0",
+    "observed": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+    "honoured": false,
+    "error": null
+  },
+  "sec_fetch_dest": {
+    "header": "Sec-Fetch-Dest",
+    "requested": "document",
+    "observed": "empty",
+    "honoured": false,
+    "error": null
+  },
+  "upgrade_insecure": {
+    "header": "Upgrade-Insecure-Requests",
+    "requested": "1",
+    "observed": "1",
+    "honoured": true,
+    "error": null
+  },
+  "priority": {
+    "header": "Priority",
+    "requested": "u=4, i",
+    "observed": "u=4, i",
+    "honoured": true,
+    "error": null
+  }
+}

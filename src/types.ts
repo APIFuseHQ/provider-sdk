@@ -1296,7 +1296,12 @@ export type HttpMethod =
 	| "PATCH"
 	| "patch";
 
-export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy"> {
+export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "headers"> {
+	/**
+	 * Request headers. Array values and case-insensitive duplicate names are
+	 * combined in caller order using `", "`, matching Chrome's Fetch behavior.
+	 */
+	headers?: Record<string, string | string[]>;
 	method?: HttpMethod;
 	body?: string | Buffer;
 	redirect?: "follow" | "manual" | "error";

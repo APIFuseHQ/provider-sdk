@@ -34,7 +34,7 @@ import type {
 	StealthResponse,
 	StealthSession,
 } from "../types.js";
-import { StealthCookieJar } from "./stealth-cookies.js";
+import { chrome149HeaderOrder } from "./chrome149-header-order.js";
 import {
 	createProxyAuthIpDeniedError,
 	createProxyEdgeAuthRejectedError,
@@ -73,6 +73,7 @@ import {
 	redactUrlQueryParams,
 	serializeRequestUrl,
 } from "./request-options.js";
+import { StealthCookieJar } from "./stealth-cookies.js";
 
 export const DEFAULT_STEALTH_PROFILE: StealthProfileDescriptor = Object.freeze({
 	browser: DEFAULT_STEALTH_BROWSER,
@@ -115,7 +116,11 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 	signal?: AbortSignal;
 	/** Browser identity and declaration-wide HTTP language defaults. */
 	stealth?: StealthProfileSelection & {
-		/** Default Accept-Language value; requests may override it through `headers`. */
+		/**
+		 * Default Accept-Language value, emitted where Chrome's network layer appends
+		 * it (after Accept-Encoding). Requests may override it through `headers`, in
+		 * which case it is placed like any other caller header.
+		 */
 		acceptLanguage?: string;
 	};
 	/**
@@ -255,35 +260,57 @@ function headerEntriesFromHeaders(headers: StealthTransportHeaders): [string, st
 	return Array.from(headers.entries());
 }
 
+type HeaderTuple = [string, string];
+
 function normalizeHeaders(
 	headers: Record<string, string | string[] | undefined>,
 ): Record<string, string> {
-	const normalized: Record<string, string> = {};
-	for (const [name, value] of Object.entries(headers)) {
-		if (value === undefined) continue;
-		normalized[name] = Array.isArray(value) ? value.join(", ") : value;
-	}
-	return normalized;
+	return Object.fromEntries(normalizedHeaderEntries(headers));
 }
 
-const SDK_OWNED_CHROME_HEADERS = new Set([
+function trimOuterHttpWhitespace(value: string): string {
+	return value.replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, "");
+}
+
+function normalizedHeaderEntries(
+	headers: Record<string, string | string[] | undefined>,
+): HeaderTuple[] {
+	const entries: HeaderTuple[] = [];
+	const indices = new Map<string, number>();
+	for (const [originalName, originalValue] of Object.entries(headers)) {
+		if (originalValue === undefined) continue;
+		const name = originalName.toLowerCase();
+		const value = (Array.isArray(originalValue) ? originalValue : [originalValue])
+			.map(trimOuterHttpWhitespace)
+			.join(", ");
+		const existingIndex = indices.get(name);
+		if (existingIndex === undefined) {
+			indices.set(name, entries.length);
+			entries.push([name, value]);
+			continue;
+		}
+		const existing = entries[existingIndex];
+		if (existing) existing[1] = `${existing[1]}, ${value}`;
+	}
+	return entries;
+}
+
+const SDK_OWNED_EXACT_CHROME_HEADERS = new Set([
 	"host",
 	"connection",
 	"user-agent",
 	"sec-ch-ua",
 	"sec-ch-ua-mobile",
 	"sec-ch-ua-platform",
-	"accept",
 	"accept-encoding",
-	"priority",
-	"sec-fetch-dest",
-	"sec-fetch-mode",
-	"sec-fetch-site",
-	"sec-fetch-user",
-	"upgrade-insecure-requests",
 ]);
 
-// Non-pseudo-header order captured from Chrome 149 in chrome-ground-truth-capture.json.
+// Non-pseudo-header order of real Chrome 149. The fixture captures
+// (chrome-ground-truth-capture.json, chrome-extended-capture.json,
+// h1-casing-capture.json) were taken through Playwright's `locale` option, which
+// installs Accept-Language via DevTools next to User-Agent; real Chrome only
+// receives it from //net (URLRequestHttpJob::AddExtraHeaders), after
+// Accept-Encoding and before Cookie, as al-placement-capture.json B/C show.
 const CHROME_HEADER_ORDERS = {
 	navigation: [
 		"sec-ch-ua",
@@ -291,31 +318,17 @@ const CHROME_HEADER_ORDERS = {
 		"sec-ch-ua-platform",
 		"upgrade-insecure-requests",
 		"user-agent",
-		"accept-language",
 		"accept",
 		"sec-fetch-site",
 		"sec-fetch-mode",
 		"sec-fetch-user",
 		"sec-fetch-dest",
 		"accept-encoding",
-		"cookie",
-		"priority",
-	],
-	xhr: [
-		"sec-ch-ua-platform",
-		"user-agent",
-		"sec-ch-ua",
 		"accept-language",
-		"sec-ch-ua-mobile",
-		"accept",
-		"sec-fetch-site",
-		"sec-fetch-mode",
-		"sec-fetch-dest",
-		"referer",
-		"accept-encoding",
 		"cookie",
 		"priority",
 	],
+	// xhr has no fixed table: it is emulated by chrome149HeaderOrder.
 	post: [
 		"content-length",
 		"sec-ch-ua-platform",
@@ -323,7 +336,6 @@ const CHROME_HEADER_ORDERS = {
 		"sec-ch-ua",
 		"content-type",
 		"sec-ch-ua-mobile",
-		"accept-language",
 		"accept",
 		"origin",
 		"sec-fetch-site",
@@ -331,6 +343,7 @@ const CHROME_HEADER_ORDERS = {
 		"sec-fetch-dest",
 		"referer",
 		"accept-encoding",
+		"accept-language",
 		"cookie",
 		"priority",
 	],
@@ -345,13 +358,13 @@ const CHROME_H1_HEADER_ORDERS = {
 		"sec-ch-ua-platform",
 		"upgrade-insecure-requests",
 		"user-agent",
-		"accept-language",
 		"accept",
 		"sec-fetch-site",
 		"sec-fetch-mode",
 		"sec-fetch-user",
 		"sec-fetch-dest",
 		"accept-encoding",
+		"accept-language",
 		"cookie",
 	],
 	xhr: [
@@ -362,7 +375,6 @@ const CHROME_H1_HEADER_ORDERS = {
 		"x-requested-with",
 		"user-agent",
 		"sec-ch-ua",
-		"accept-language",
 		"sec-ch-ua-mobile",
 		"accept",
 		"sec-fetch-site",
@@ -370,6 +382,7 @@ const CHROME_H1_HEADER_ORDERS = {
 		"sec-fetch-dest",
 		"referer",
 		"accept-encoding",
+		"accept-language",
 		"cookie",
 	],
 	post: [
@@ -381,7 +394,6 @@ const CHROME_H1_HEADER_ORDERS = {
 		"sec-ch-ua",
 		"content-type",
 		"sec-ch-ua-mobile",
-		"accept-language",
 		"accept",
 		"origin",
 		"sec-fetch-site",
@@ -389,30 +401,10 @@ const CHROME_H1_HEADER_ORDERS = {
 		"sec-fetch-dest",
 		"referer",
 		"accept-encoding",
+		"accept-language",
 		"cookie",
 	],
 } as const;
-
-const CHROME_H2_XHR_EXTENDED_ORDER = [
-	"cache-control",
-	"if-none-match",
-	"sec-ch-ua-platform",
-	"accept-language",
-	"pragma",
-	"sec-ch-ua",
-	"sec-ch-ua-mobile",
-	"x-requested-with",
-	"user-agent",
-	"accept",
-	"sec-fetch-site",
-	"sec-fetch-mode",
-	"sec-fetch-dest",
-	"referer",
-	"accept-encoding",
-	"cookie",
-	"range",
-	"priority",
-] as const;
 
 const CHROME_H1_HEADER_NAMES: Record<string, string> = {
 	host: "Host",
@@ -436,8 +428,7 @@ const CHROME_H1_HEADER_NAMES: Record<string, string> = {
 	range: "Range",
 };
 
-type ChromeRequestClass = keyof typeof CHROME_HEADER_ORDERS;
-type HeaderTuple = [string, string];
+type ChromeRequestClass = keyof typeof CHROME_HEADER_ORDERS | "xhr";
 
 function chromeHeaderOrder(
 	requestClass: ChromeRequestClass,
@@ -445,41 +436,56 @@ function chromeHeaderOrder(
 	caller: ReadonlyMap<string, string>,
 ): readonly string[] {
 	if (isHttp1) return CHROME_H1_HEADER_ORDERS[requestClass];
-	if (
-		requestClass === "xhr" &&
-		["cache-control", "if-none-match", "pragma", "x-requested-with"].some((name) =>
-			caller.has(name),
-		)
-	)
-		return CHROME_H2_XHR_EXTENDED_ORDER;
-	const base: string[] = [...CHROME_HEADER_ORDERS[requestClass]];
-	if (requestClass !== "xhr") return base;
-	const insertBefore = (name: string, before: string) => {
-		const index = base.indexOf(before);
-		base.splice(index < 0 ? base.length : index, 0, name);
-	};
-	if (caller.has("range")) insertBefore("range", "priority");
-	return base;
+	if (requestClass !== "xhr") return CHROME_HEADER_ORDERS[requestClass];
+	// Cookie and Referer are forbidden Fetch headers, so they never enter the page
+	// Fetch Headers map the emulator models. Range does occupy a map bucket
+	// (m1-capture.json range_*), but HttpCache::Transaction removes it from the
+	// request headers and PartialData re-adds it at the tail.
+	const order = chrome149HeaderOrder(
+		[...caller.keys()].filter((name) => name !== "cookie" && name !== "referer"),
+	);
+	if (caller.has("range")) order.splice(order.indexOf("range"), 1);
+	// //net appends Accept-Encoding and, unless the caller supplied one,
+	// Accept-Language (URLRequestHttpJob::AddExtraHeaders), then writes the Cookie
+	// header (SetCookieHeaderAndStart); the HTTP cache re-adds a caller Range after
+	// that, and the HTTP/2 Priority header stays last.
+	let insertAt = order.indexOf("accept-encoding") + 1;
+	if (order[insertAt] === "accept-language") insertAt += 1;
+	for (const name of ["cookie", "range"] as const) {
+		if (!caller.has(name)) continue;
+		order.splice(insertAt, 0, name);
+		insertAt += 1;
+	}
+	return order;
 }
 
 function normalizedCallerHeaderEntries(
 	headers: Record<string, string | string[] | undefined>,
 ): HeaderTuple[] {
-	const entries: HeaderTuple[] = [];
-	const seen = new Set<string>();
-	for (const [originalName, originalValue] of Object.entries(headers)) {
-		if (originalValue === undefined) continue;
-		const name = originalName.toLowerCase();
-		if (SDK_OWNED_CHROME_HEADERS.has(name)) {
+	const entries = normalizedHeaderEntries(headers);
+	assertCallerHeadersSupported(entries);
+	return entries;
+}
+
+function normalizedCallerHeaderEntriesFromRecord(headers: Record<string, string>): HeaderTuple[] {
+	// The record has been through normalizeHeaders (lowercase, merged names); the
+	// lowercase here only guards later insertions such as the cookie jar's header.
+	const entries: HeaderTuple[] = Object.entries(headers).map(([name, value]) => [
+		name.toLowerCase(),
+		value,
+	]);
+	assertCallerHeadersSupported(entries);
+	return entries;
+}
+
+function assertCallerHeadersSupported(entries: readonly HeaderTuple[]): void {
+	for (const [name] of entries) {
+		if (SDK_OWNED_EXACT_CHROME_HEADERS.has(name) || name.startsWith("sec-fetch-")) {
 			throw new SDKError(`Stealth transport owns the "${name}" header; remove it from headers.`, {
 				code: "STEALTH_HEADER_OVERRIDE_UNSUPPORTED",
 			});
 		}
-		if (seen.has(name)) continue;
-		seen.add(name);
-		entries.push([name, Array.isArray(originalValue) ? originalValue.join(", ") : originalValue]);
 	}
-	return entries;
 }
 
 function chromeRequestClass(
@@ -512,12 +518,12 @@ function buildChromeHeaderTuples(options: {
 	emulationHeaders: Iterable<[string, string]>;
 	method: StealthMethod;
 	body?: string;
-	headers: Record<string, string | string[] | undefined>;
+	headers: Record<string, string>;
 	requestUrl: string;
 	acceptLanguage?: string;
 	requestClass?: ChromeRequestClass;
 }): HeaderTuple[] {
-	const callerEntries = normalizedCallerHeaderEntries(options.headers);
+	const callerEntries = normalizedCallerHeaderEntriesFromRecord(options.headers);
 	const caller = new Map(callerEntries);
 	const emulation = new Map(
 		Array.from(
@@ -550,11 +556,11 @@ function buildChromeHeaderTuples(options: {
 		["sec-fetch-mode", isNavigation ? "navigate" : "cors"],
 		["sec-fetch-dest", isNavigation ? "document" : "empty"],
 	]);
-	for (const [name, value] of callerEntries) values.set(name, value);
 	if (isNavigation) {
 		values.set("upgrade-insecure-requests", "1");
 		values.set("sec-fetch-user", "?1");
 	}
+	for (const [name, value] of callerEntries) values.set(name, value);
 	for (const name of ["content-type", "origin", "referer"] as const) {
 		const value = caller.get(name);
 		if (value !== undefined) values.set(name, value);
@@ -1100,7 +1106,7 @@ async function fetchStealthRedirectChain(
 	let currentUrl = requestUrl;
 	let currentMethod = method;
 	let currentBody = options.body === undefined ? undefined : normalizeBody(options.body);
-	let currentHeaders = { ...(options.headers ?? {}) };
+	let currentHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
 	let followedHops = 0;
 	let response: StealthTransportResponse;
 	const deadline = options.timeout ? performance.now() + options.timeout : undefined;
@@ -1108,14 +1114,14 @@ async function fetchStealthRedirectChain(
 	while (true) {
 		throwIfAmbientAborted(signal);
 		const headers = { ...currentHeaders };
-		if (!hasHeader(headers, "Cookie")) {
+		if (!hasHeader(headers, "cookie")) {
 			const cookieHeader = cookieJar.toHeader(currentUrl);
-			if (cookieHeader) headers.Cookie = cookieHeader;
+			if (cookieHeader) headers.cookie = cookieHeader;
 		}
 		const requestInit: StealthRequestInit = {
 			headers: buildHeaders
-				? buildHeaders(currentUrl, currentMethod, currentBody, normalizeHeaders(headers))
-				: normalizeHeaders(headers),
+				? buildHeaders(currentUrl, currentMethod, currentBody, headers)
+				: headers,
 			method: currentMethod,
 			redirect: "manual",
 			...(new URL(currentUrl).protocol === "http:" ? { disableDefaultHeaders: true } : {}),
@@ -1488,9 +1494,9 @@ function createSessionFetcher(
 									})
 							: undefined;
 						const initialHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
-						if (!hasHeader(initialHeaders, "Cookie")) {
+						if (!hasHeader(initialHeaders, "cookie")) {
 							const cookieHeader = cookieJar.toHeader(requestUrl);
-							if (cookieHeader) initialHeaders.Cookie = cookieHeader;
+							if (cookieHeader) initialHeaders.cookie = cookieHeader;
 						}
 						const defaultHeaders = buildOrderedHeaders?.(
 							requestUrl,

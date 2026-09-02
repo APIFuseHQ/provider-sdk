@@ -1,0 +1,270 @@
+{
+  "m1_0": {
+    "caller": [
+      "Content-Type",
+      "Priority",
+      "X-Request-Id"
+    ],
+    "order": [
+      "x-request-id",
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "content-type",
+      "priority",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ],
+    "verdict": "size16"
+  },
+  "m1_1": {
+    "caller": [
+      "Content-Type",
+      "Priority",
+      "If-None-Match"
+    ],
+    "order": [
+      "cache-control",
+      "if-none-match",
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "content-type",
+      "priority",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ],
+    "verdict": "neither"
+  },
+  "m1_2": {
+    "caller": [
+      "Content-Type",
+      "X-Request-Id",
+      "Authorization"
+    ],
+    "order": [
+      "x-request-id",
+      "authorization",
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "content-type",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ],
+    "verdict": "size16"
+  },
+  "m1_3": {
+    "caller": [
+      "Content-Type",
+      "X-Request-Id",
+      "If-None-Match"
+    ],
+    "order": [
+      "cache-control",
+      "if-none-match",
+      "x-request-id",
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "content-type",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ],
+    "verdict": "neither"
+  },
+  "m1_4": {
+    "caller": [
+      "Content-Type",
+      "X-Request-Id",
+      "X-Csrf-Token"
+    ],
+    "order": [
+      "x-request-id",
+      "x-csrf-token",
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "content-type",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ],
+    "verdict": "size16"
+  },
+  "m1_5": {
+    "caller": [
+      "Content-Type",
+      "Authorization",
+      "If-None-Match"
+    ],
+    "order": [
+      "cache-control",
+      "if-none-match",
+      "authorization",
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "content-type",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ],
+    "verdict": "neither"
+  },
+  "m1_6": {
+    "caller": [
+      "Cache-Control",
+      "Priority",
+      "X-C"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "x-c",
+      "cache-control",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "priority",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ],
+    "verdict": "size8"
+  },
+  "m1_7": {
+    "caller": [
+      "Cache-Control",
+      "X-Api-Key",
+      "X-A"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "cache-control",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "x-api-key",
+      "x-a",
+      "user-agent",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ],
+    "verdict": "size8"
+  },
+  "range_alone": {
+    "caller": [
+      "Range"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "range",
+      "priority"
+    ]
+  },
+  "range_accept": {
+    "caller": [
+      "Range",
+      "Accept"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "range",
+      "priority"
+    ]
+  },
+  "range_ctype": {
+    "caller": [
+      "Range",
+      "Content-Type"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "content-type",
+      "sec-ch-ua-mobile",
+      "accept-language",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "range",
+      "priority"
+    ]
+  },
+  "__summary": {
+    "votes8": 2,
+    "votes16": 3,
+    "neither": 3
+  }
+}

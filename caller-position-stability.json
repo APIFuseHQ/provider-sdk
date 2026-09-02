@@ -1,0 +1,229 @@
+{
+  "A_accept_rep0": {
+    "note": "repeat identical request",
+    "sent": {
+      "Accept": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "A_accept_rep1": {
+    "note": "repeat identical request",
+    "sent": {
+      "Accept": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "A_accept_rep2": {
+    "note": "repeat identical request",
+    "sent": {
+      "Accept": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "A_accept_rep3": {
+    "note": "repeat identical request",
+    "sent": {
+      "Accept": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "B_accept_short": {
+    "note": "short value",
+    "sent": {
+      "Accept": "a/b"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "B_accept_long": {
+    "note": "long value",
+    "sent": {
+      "Accept": "application/json, text/plain, application/xml;q=0.9"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "C_accept_then_lang": {
+    "note": "accept first",
+    "sent": {
+      "Accept": "application/json",
+      "Accept-Language": "ko"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "accept",
+      "sec-ch-ua",
+      "user-agent",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "C_lang_then_accept": {
+    "note": "language first",
+    "sent": {
+      "Accept-Language": "ko",
+      "Accept": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "accept",
+      "sec-ch-ua",
+      "user-agent",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "C_prio_then_accept": {
+    "note": "priority first",
+    "sent": {
+      "Priority": "u=3",
+      "Accept": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "priority",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "C_accept_then_prio": {
+    "note": "accept first",
+    "sent": {
+      "Accept": "application/json",
+      "Priority": "u=3"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "priority",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "D_three": {
+    "note": "three caller headers together",
+    "sent": {
+      "Accept": "application/json",
+      "Priority": "u=3",
+      "Upgrade-Insecure-Requests": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "upgrade-insecure-requests",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "accept",
+      "priority",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  }
+}
