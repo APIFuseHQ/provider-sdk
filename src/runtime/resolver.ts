@@ -110,6 +110,8 @@ type ResolverChainClient = ResolverContext & {
 	): Promise<ChallengeSolution>;
 };
 
+type PortableCookieSolution = Extract<ChallengeSolution, { readonly cookies: unknown }>;
+
 export interface ResolverRuntimeOptions {
 	readonly allowedHosts?: readonly string[];
 	readonly cache?: ProviderCache;
@@ -136,7 +138,7 @@ export interface ResolverRuntimeOptions {
 type CachedResolverSolution = {
 	readonly expiresAtMs: number;
 	readonly issuerDigest: string;
-	readonly solution: ChallengeSolution;
+	readonly solution: PortableCookieSolution;
 };
 
 type ResolverCacheIndex = {
@@ -416,6 +418,10 @@ function assertClientProfileTransportContract(
 	);
 }
 
+function kindRequiresClientProfile(kind: ProviderChallengeKind): boolean {
+	return kind === "akamai_sensor" || kind === "akamai_sbsd";
+}
+
 function adapterRequiresTransport(
 	adapter: ResolverVendorAdapter,
 	kind: ProviderChallengeKind,
@@ -468,6 +474,8 @@ function restrictResolverTransport(
 	allowedHosts: readonly string[],
 ): ResolverVendorTransport {
 	return {
+		sessionHeaders: transport.sessionHeaders,
+		getCookie: transport.getCookie?.bind(transport),
 		async fetch(url, init) {
 			// Empty declarations remain deny-by-default, matching the adapter-factory/browser path.
 			assertResolverHostAllowed(url, allowedHosts);
@@ -624,7 +632,9 @@ function isResolverCacheIndex(value: unknown): value is ResolverCacheIndex {
 
 function solutionExpiryMs(solution: ChallengeSolution): number | undefined {
 	if (solution.form !== "cookies") return undefined;
-	const expires = solution.expires ?? solution.sdkEstimatedExpires;
+	const expires =
+		solution.expires ??
+		("sdkEstimatedExpires" in solution ? solution.sdkEstimatedExpires : undefined);
 	if (typeof expires !== "number" || !Number.isFinite(expires)) return undefined;
 	return expires * 1_000;
 }
@@ -724,7 +734,7 @@ async function writeResolverCacheIndex(
 async function cacheResolverSolution(
 	cache: ProviderCache,
 	challenge: ProviderChallenge,
-	solution: ChallengeSolution,
+	solution: PortableCookieSolution,
 	identity: ResolverIssuingIdentity,
 	identityScope: string | undefined,
 ): Promise<void> {
@@ -781,7 +791,9 @@ async function invalidateResolverSolutionWithOutcome(
 	)[RESOLVER_INSTRUMENTATION_METADATA];
 	const cacheOwner = metadata?.target ?? resolver;
 	const invalidate = async (): Promise<ResolverSolutionInvalidationOutcome> => {
-		if (solution.form !== "cookies") return "not_cookie_solution";
+		if (solution.form !== "cookies" || !("cookies" in solution)) {
+			return "not_cookie_solution";
+		}
 		if (!resolverCaches.has(cacheOwner)) {
 			throw new Error("Resolver cache registration lookup failed during solution invalidation");
 		}
@@ -916,6 +928,14 @@ function createResolverChainClient(options: {
 			if (supportingEntries.length === 0) {
 				throwUnsupportedKind(challenge.kind, options.usingDefaultVendors ?? false);
 			}
+			if (kindRequiresClientProfile(challenge.kind) && !options.clientProfile?.trim()) {
+				throwExhausted(
+					supportingEntries.map((entry) => ({
+						vendor: entry.id,
+						reason: "missing_client_profile",
+					})),
+				);
+			}
 			signal.throwIfAborted();
 			const identityResolution = options.proxyIntent
 				? await resolveResolverIdentity(options.proxyIntent)
@@ -988,6 +1008,7 @@ function createResolverChainClient(options: {
 						options.cache &&
 						resolverChallengeIsCacheable(challenge) &&
 						solution.form === "cookies" &&
+						"cookies" in solution &&
 						solutionExpiryMs(solution) !== undefined
 					) {
 						const issuingIdentity =

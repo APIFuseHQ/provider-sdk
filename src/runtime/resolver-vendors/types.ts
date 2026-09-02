@@ -88,9 +88,19 @@ export interface ResolverIssuingIdentity {
 
 export interface ResolverVendorTransport {
 	/**
-	 * Bound to the resolved proxy lease and client profile.
-	 * Implementations MUST NOT follow redirects and MUST return the initial redirect response.
+	 * Exact stable upstream headers owned by the proxy/profile-bound transport.
+	 * This does not include dynamic Cookie headers; the transport injects those from its jar.
+	 * Adapter requests do not receive these headers implicitly and must forward
+	 * them when their measured protocol requires session-header continuity.
 	 */
+	readonly sessionHeaders?: Readonly<Record<string, string>>;
+	/**
+	 * Read a cookie from the transport's bound jar for the supplied URL. Responses
+	 * returned by `fetch` MUST already have been applied to that jar before this
+	 * method is called. Profile-bound adapters fail closed when this seam is absent.
+	 */
+	readonly getCookie?: (name: string, url: string) => string | undefined;
+	/** Implementations MUST NOT follow redirects and must return the initial response. */
 	fetch(
 		url: string,
 		init: {

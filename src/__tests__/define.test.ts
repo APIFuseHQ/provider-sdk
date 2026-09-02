@@ -120,6 +120,11 @@ describe("defineProvider", () => {
 			{ vendors: ["custom"], kinds: ["funcaptcha"] },
 			"invalid resolver.kinds[0]",
 		],
+		[
+			"an Akamai resolver without a client profile",
+			{ vendors: ["hypersolutions"], kinds: ["akamai_sbsd"] },
+			"must declare resolver.clientProfile for Akamai challenge kinds",
+		],
 	] as const)("rejects %s at definition time", (_label, resolver, message) => {
 		let caught: unknown;
 		try {

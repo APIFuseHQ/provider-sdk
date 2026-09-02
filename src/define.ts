@@ -1179,6 +1179,17 @@ function validateProviderResolver(config: { id: string; resolver?: ProviderResol
 			},
 		);
 	}
+	if (
+		resolver.kinds.some((kind) => kind === "akamai_sensor" || kind === "akamai_sbsd") &&
+		resolver.clientProfile === undefined
+	) {
+		throw new ValidationError(
+			`Provider "${config.id}" must declare resolver.clientProfile for Akamai challenge kinds.`,
+			{
+				fix: `Set resolver.clientProfile for provider "${config.id}" to the transport-owned profile used by its Akamai session.`,
+			},
+		);
+	}
 }
 
 function validateResolverLiteralArray<TValue extends string>(

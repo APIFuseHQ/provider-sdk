@@ -483,10 +483,10 @@ export type VendorCredentialResolver = (vendor: ProviderProxyProvider) => Vendor
 // dist/runtime/native-network.d.ts:92:5 - (ae-forgotten-export) The symbol "NativeConnectTls" needs to be exported by the entry point native-network.d.ts
 // dist/runtime/native-network.d.ts:93:5 - (ae-forgotten-export) The symbol "NativeNetworkDynamicGrantOptions" needs to be exported by the entry point native-network.d.ts
 // dist/runtime/native-network.d.ts:93:5 - (ae-forgotten-export) The symbol "NativeNetworkEgressGrant" needs to be exported by the entry point native-network.d.ts
-// dist/types.d.ts:859:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point native-network.d.ts
-// dist/types.d.ts:864:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point native-network.d.ts
-// dist/types.d.ts:1376:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point native-network.d.ts
-// dist/types.d.ts:1377:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:878:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:883:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:1395:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point native-network.d.ts
+// dist/types.d.ts:1396:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point native-network.d.ts
 
 // (No @packageDocumentation comment for this package)
 

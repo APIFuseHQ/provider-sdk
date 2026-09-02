@@ -887,12 +887,18 @@ export type ChallengeSolution = {
     readonly token: string;
 } | {
     readonly form: "cookies";
+    readonly kind?: never;
     readonly cookies: Readonly<Record<string, string>>;
     readonly userAgent: string;
-    readonly outcome?: "payload_accepted_cookies_updated";
-    readonly verified?: false;
     readonly expires?: number;
     readonly sdkEstimatedExpires?: number;
+} | {
+    readonly form: "cookies";
+    readonly kind: "akamai_sbsd";
+    readonly outcome: "payload_accepted_cookies_updated";
+    readonly verified: false;
+    readonly stateCookieName: "sbsd_o" | "bm_so";
+    readonly expires?: number;
 };
 
 // @public
@@ -3788,8 +3794,7 @@ export type ProviderChallenge = {
     readonly pageUrl: string;
     readonly scriptUrl: string;
     readonly stateCookieName: "sbsd_o" | "bm_so";
-    readonly stateCookieValue: string;
-    readonly acceptLanguage?: string;
+    readonly challengeToken?: string;
 };
 
 // @public (undocumented)
@@ -4728,12 +4733,16 @@ export type ProviderResolvedFile = Omit<ProviderFileRef, "mime_type"> & {
     stream(): ReadableStream<Uint8Array>;
 };
 
-// @public (undocumented)
-export interface ProviderResolverConfig {
-    readonly clientProfile?: string;
-    readonly kinds: readonly ProviderChallengeKind[];
+// @public
+export type ProviderResolverConfig = {
     readonly vendors?: readonly ProviderResolverVendor[];
-}
+    readonly kinds: readonly Exclude<ProviderChallengeKind, "akamai_sensor" | "akamai_sbsd">[];
+    readonly clientProfile?: string;
+} | {
+    readonly vendors?: readonly ProviderResolverVendor[];
+    readonly kinds: readonly ProviderChallengeKind[];
+    readonly clientProfile: string;
+};
 
 // @public
 export type ProviderResolverVendor = "browser" | "capsolver" | "capmonster" | "2captcha" | "hypersolutions" | "custom";
@@ -5401,6 +5410,8 @@ export interface ResolverVendorTransport {
             readonly sameSite?: string;
         }[];
     }>;
+    readonly getCookie?: (name: string, url: string) => string | undefined;
+    readonly sessionHeaders?: Readonly<Record<string, string>>;
 }
 
 // @public (undocumented)
@@ -7074,14 +7085,14 @@ export { z }
 // dist/server/serve-implementation.d.ts:149:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:157:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:217:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:642:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1535:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1659:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1717:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1725:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1726:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1885:5 - (ae-forgotten-export) The symbol "TraceContext_2" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1905:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:661:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1554:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1678:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1736:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1744:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1745:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1904:5 - (ae-forgotten-export) The symbol "TraceContext_2" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1924:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

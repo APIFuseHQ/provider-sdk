@@ -153,15 +153,19 @@ function createTransportGuardResolver(
 	return createResolverClient({
 		adapters: [adapter],
 		kinds: ["akamai_sensor"],
+		clientProfile: "safari17_0",
 		allowedHosts,
-		transport,
+		createTransport: () => transport,
 	});
 }
 
 describe("resolver default vendor policy", () => {
 	it("derives the hosted vendor chain for every challenge kind", () => {
 		const chains = Object.fromEntries(
-			ALL_CHALLENGE_KINDS.map((kind) => [kind, resolveProviderResolverVendors({ kinds: [kind] })]),
+			ALL_CHALLENGE_KINDS.map((kind) => [
+				kind,
+				resolveProviderResolverVendors({ kinds: [kind], clientProfile: "safari17_0" }),
+			]),
 		);
 
 		expect(chains).toEqual({
@@ -181,8 +185,12 @@ describe("resolver default vendor policy", () => {
 		expect(DEFAULT_RESOLVER_VENDOR_PREFERENCE).not.toContain("browser");
 		expect(DEFAULT_RESOLVER_VENDOR_PREFERENCE).not.toContain("custom");
 		for (const kind of ALL_CHALLENGE_KINDS) {
-			expect(resolveProviderResolverVendors({ kinds: [kind] })).not.toContain("browser");
-			expect(resolveProviderResolverVendors({ kinds: [kind] })).not.toContain("custom");
+			expect(
+				resolveProviderResolverVendors({ kinds: [kind], clientProfile: "safari17_0" }),
+			).not.toContain("browser");
+			expect(
+				resolveProviderResolverVendors({ kinds: [kind], clientProfile: "safari17_0" }),
+			).not.toContain("custom");
 		}
 	});
 
@@ -228,7 +236,11 @@ describe("resolver default vendor policy", () => {
 	it("resolves the Hyper key from the engine resolver environment path", async () => {
 		let receivedConfiguration: string | undefined;
 		const resolver = createResolverClientFromEnvForTests(
-			{ vendors: ["hypersolutions"], kinds: ["akamai_sbsd"] },
+			{
+				vendors: ["hypersolutions"],
+				kinds: ["akamai_sbsd"],
+				clientProfile: "safari17_0",
+			},
 			{ [APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY]: "hyper-engine-key" },
 			{},
 			{
@@ -251,7 +263,6 @@ describe("resolver default vendor policy", () => {
 				pageUrl: "https://example.com/protected",
 				scriptUrl: "https://example.com/.well-known/sbsd?v=uuid&t=token",
 				stateCookieName: "sbsd_o",
-				stateCookieValue: "state",
 			}),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
@@ -261,7 +272,10 @@ describe("resolver default vendor policy", () => {
 	});
 
 	it("diagnoses a kind with no SDK default vendor", async () => {
-		const error = await createResolverClientFromEnv({ kinds: ["akamai_sensor"] }, {})
+		const error = await createResolverClientFromEnv(
+			{ kinds: ["akamai_sensor"], clientProfile: "safari17_0" },
+			{},
+		)
 			.solve({
 				kind: "akamai_sensor",
 				pageUrl: CHALLENGE.pageUrl,
@@ -415,14 +429,17 @@ describe("resolver vendor chain", () => {
 							pageUrl: CHALLENGE.pageUrl,
 							scriptUrl: "https://example.com/.well-known/sbsd?v=uuid&t=token",
 							stateCookieName: "sbsd_o",
-							stateCookieValue: "state",
 						} satisfies ProviderChallenge)
 					: ({
 							kind,
 							pageUrl: CHALLENGE.pageUrl,
 							scriptUrl: "https://example.com/akamai/sensor.js",
 						} satisfies ProviderChallenge);
-		const config = { vendors: ["browser"], kinds: [kind] } as const;
+		const config = {
+			vendors: ["browser"],
+			kinds: [kind],
+			clientProfile: "safari17_0",
+		} as const;
 		const withoutCredentials = await createResolverClientFromEnv(config, {})
 			.solve(challenge)
 			.catch((error: unknown) => error);
@@ -449,7 +466,11 @@ describe("resolver vendor chain", () => {
 
 		await expect(
 			createResolverClientFromEnv(
-				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
+				{
+					vendors: ["2captcha"],
+					kinds: ["akamai_sensor"],
+					clientProfile: "safari17_0",
+				},
 				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
 			).solve(challenge),
 		).rejects.toMatchObject({ code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN" });
@@ -473,7 +494,11 @@ describe("resolver vendor chain", () => {
 		} satisfies ProviderChallenge;
 
 		await expect(
-			createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"] }).solve(challenge),
+			createResolverClient({
+				adapters: [adapter],
+				kinds: ["akamai_sensor"],
+				clientProfile: "safari17_0",
+			}).solve(challenge),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
 			details: [{ vendor: "custom", reason: "missing_transport" }],
@@ -984,6 +1009,7 @@ describe("resolver vendor chain", () => {
 		const resolver = createResolverClient({
 			adapters: [adapter],
 			kinds: ["turnstile", "akamai_sensor"],
+			clientProfile: "safari17_0",
 		});
 
 		await expect(
@@ -1075,6 +1101,7 @@ describe("resolver vendor chain", () => {
 			createResolverClient({
 				adapters: [adapter],
 				kinds: ["akamai_sensor"],
+				clientProfile: "safari17_0",
 				allowedHosts,
 				createTransport: () => underlyingTransport,
 			});

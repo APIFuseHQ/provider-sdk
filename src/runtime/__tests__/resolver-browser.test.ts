@@ -345,7 +345,7 @@ describe("browser resolver vendor", () => {
 			cookies: { "aws-waf-token": "challenge-host-token" },
 		});
 		expect(
-			(cachedSolution?.solution as Extract<ChallengeSolution, { form: "cookies" }>).cookies,
+			(cachedSolution?.solution as Extract<ChallengeSolution, { cookies: unknown }>).cookies,
 		).toEqual({ "aws-waf-token": "challenge-host-token" });
 	});
 

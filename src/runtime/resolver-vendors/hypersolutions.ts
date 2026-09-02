@@ -15,7 +15,6 @@ const HYPERSOLUTIONS_VENDOR_ID = "hypersolutions" as const;
 const HYPER_SBSD_URL = "https://akm.hypersolutions.co/sbsd";
 const HYPER_IP_URL = "https://ip.hypersolutions.co/ip";
 const HYPER_TRANSPORT_HOSTS = ["akm.hypersolutions.co", "ip.hypersolutions.co"] as const;
-const DEFAULT_ACCEPT_LANGUAGE = "en-US,en;q=0.9";
 const IP_RESPONSE_MAX_BYTES = 4_096;
 const SCRIPT_MAX_BYTES = 1_000_000;
 const HYPER_RESPONSE_MAX_BYTES = 1_000_000;
@@ -31,11 +30,8 @@ export interface HypersolutionsResolverVendorOptions {
 
 export type AkamaiSbsdChallengeSolution = Extract<
 	ChallengeSolution,
-	{ readonly form: "cookies" }
-> & {
-	readonly outcome: "payload_accepted_cookies_updated";
-	readonly verified: false;
-};
+	{ readonly form: "cookies"; readonly kind: "akamai_sbsd" }
+>;
 
 export interface HypersolutionsResolverVendorAdapter extends ResolverVendorAdapter {
 	readonly id: "hypersolutions";
@@ -143,7 +139,10 @@ function hyperRequestBody(input: {
 	});
 }
 
-function scriptExchangeUrls(scriptUrl: string): {
+function scriptExchangeUrls(
+	scriptUrl: string,
+	laterChallengeToken: string | undefined,
+): {
 	readonly fetchUrl: string;
 	readonly postUrl: string;
 	readonly uuid: string;
@@ -159,18 +158,36 @@ function scriptExchangeUrls(scriptUrl: string): {
 			phase: "fetch_script",
 		});
 	}
-	const token = parsed.searchParams.get("t")?.trim();
+	const scriptToken = parsed.searchParams.get("t")?.trim();
+	const laterToken = laterChallengeToken?.trim();
+	if (scriptToken && laterToken) {
+		throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "missing_challenge_input", {
+			missingFields: ["challengeToken"],
+			phase: "fetch_script",
+		});
+	}
 	const fetchUrl = new URL(parsed.pathname, parsed.origin);
 	fetchUrl.searchParams.set("v", uuid);
-	if (token) fetchUrl.searchParams.set("t", token);
+	if (scriptToken) fetchUrl.searchParams.set("t", scriptToken);
 	const postUrl = new URL(parsed.pathname, parsed.origin);
-	if (token) postUrl.searchParams.set("t", token);
+	const postToken = laterToken || scriptToken;
+	if (postToken) postUrl.searchParams.set("t", postToken);
 	return {
 		fetchUrl: fetchUrl.toString(),
 		postUrl: postUrl.toString(),
 		uuid,
-		indices: token ? [0] : [0, 1],
+		indices: postToken ? [0] : [0, 1],
 	};
+}
+
+function sessionHeader(
+	headers: Readonly<Record<string, string>>,
+	name: string,
+): string | undefined {
+	const target = name.toLowerCase();
+	return Object.entries(headers)
+		.find(([header]) => header.toLowerCase() === target)?.[1]
+		?.trim();
 }
 
 function assertChallengeInput(
@@ -180,7 +197,12 @@ function assertChallengeInput(
 	const missingFields = [
 		...(challenge.pageUrl.trim() ? [] : ["pageUrl"]),
 		...(challenge.scriptUrl.trim() ? [] : ["scriptUrl"]),
-		...(challenge.stateCookieValue.trim() ? [] : ["stateCookieValue"]),
+		...(challenge.stateCookieName === "sbsd_o" || challenge.stateCookieName === "bm_so"
+			? []
+			: ["stateCookieName"]),
+		...(challenge.challengeToken === undefined || challenge.challengeToken.trim()
+			? []
+			: ["challengeToken"]),
 	];
 	if (missingFields.length > 0) {
 		throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "missing_challenge_input", {
@@ -225,7 +247,7 @@ export function createHypersolutionsResolverVendorAdapter(
 		requiresTransport: true,
 		transportAllowedHosts: HYPER_TRANSPORT_HOSTS,
 		supports: (kind) => kind === "akamai_sbsd",
-		async solve(challenge, identity, signal, _traceRecorder, transport) {
+		async solve(challenge, _identity, signal, _traceRecorder, transport) {
 			const timeoutController = new AbortController();
 			const operationSignal = options.timeoutMs
 				? AbortSignal.any([signal, timeoutController.signal])
@@ -243,14 +265,22 @@ export function createHypersolutionsResolverVendorAdapter(
 				if (!transport) {
 					throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "missing_transport");
 				}
-				if (!identity?.userAgent.trim()) {
+				if (!transport.getCookie) {
+					throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "missing_transport");
+				}
+				const sessionHeaders = transport.sessionHeaders;
+				const userAgent = sessionHeaders ? sessionHeader(sessionHeaders, "user-agent") : undefined;
+				const acceptLanguage = sessionHeaders
+					? sessionHeader(sessionHeaders, "accept-language")
+					: undefined;
+				if (!sessionHeaders || !userAgent || !acceptLanguage) {
 					throw new ResolverVendorUnavailableError(
 						HYPERSOLUTIONS_VENDOR_ID,
 						"missing_client_profile",
 					);
 				}
 				assertChallengeInput(challenge, options.allowedHosts);
-				const exchange = scriptExchangeUrls(challenge.scriptUrl);
+				const exchange = scriptExchangeUrls(challenge.scriptUrl, challenge.challengeToken);
 
 				for (const url of [HYPER_IP_URL, HYPER_SBSD_URL]) {
 					assertResolverHostAllowed(url, HYPER_TRANSPORT_HOSTS);
@@ -285,7 +315,7 @@ export function createHypersolutionsResolverVendorAdapter(
 					exchange.fetchUrl,
 					{
 						method: "GET",
-						headers: { Referer: challenge.pageUrl },
+						headers: { ...sessionHeaders, Referer: challenge.pageUrl },
 						signal: operationSignal,
 						redirect: "manual",
 						maxBodyBytes: SCRIPT_MAX_BYTES,
@@ -299,8 +329,18 @@ export function createHypersolutionsResolverVendorAdapter(
 						phase: "fetch_script",
 					});
 				}
+				const originCookie = transport
+					.getCookie(challenge.stateCookieName, challenge.pageUrl)
+					?.trim();
+				if (!originCookie) {
+					throw new ResolverVendorUnavailableError(
+						HYPERSOLUTIONS_VENDOR_ID,
+						"missing_challenge_input",
+						{ missingFields: [challenge.stateCookieName], phase: "fetch_script" },
+					);
+				}
 
-				const observedCookies = new Map<string, string>();
+				let expires: number | undefined;
 				for (const [roundIndex, index] of exchange.indices.entries()) {
 					const hyperResponse = await boundFetch(
 						transport,
@@ -315,12 +355,12 @@ export function createHypersolutionsResolverVendorAdapter(
 							body: hyperRequestBody({
 								index,
 								uuid: exchange.uuid,
-								stateCookieValue: challenge.stateCookieValue,
+								stateCookieValue: originCookie,
 								pageUrl: challenge.pageUrl,
-								userAgent: identity.userAgent,
+								userAgent,
 								script: scriptResponse.body,
 								ip,
-								acceptLanguage: challenge.acceptLanguage ?? DEFAULT_ACCEPT_LANGUAGE,
+								acceptLanguage,
 							}),
 							signal: operationSignal,
 							redirect: "manual",
@@ -352,6 +392,7 @@ export function createHypersolutionsResolverVendorAdapter(
 						{
 							method: "POST",
 							headers: {
+								...sessionHeaders,
 								"content-type": "application/json",
 								Referer: challenge.pageUrl,
 							},
@@ -364,22 +405,26 @@ export function createHypersolutionsResolverVendorAdapter(
 					);
 					assertBoundedBody(postResponse, PAYLOAD_RESPONSE_MAX_BYTES, "post_payload");
 					requireSuccess(postResponse.status, "post_payload");
-					for (const cookie of postResponse.cookies) {
-						observedCookies.set(cookie.name, cookie.value);
-					}
+					expires =
+						postResponse.cookies.find((cookie) => cookie.name === challenge.stateCookieName)
+							?.expires ?? expires;
 				}
 
-				if (![...observedCookies.keys()].some((name) => name === "sbsd_o" || name === "bm_so")) {
+				const updatedCookie = transport
+					.getCookie(challenge.stateCookieName, challenge.pageUrl)
+					?.trim();
+				if (!updatedCookie || updatedCookie === originCookie) {
 					throw new ResolverChallengeVerdictError(HYPERSOLUTIONS_VENDOR_ID, "solve_failed", {
 						phase: "post_payload",
 					});
 				}
 				return {
 					form: "cookies",
-					cookies: Object.fromEntries(observedCookies),
-					userAgent: identity.userAgent,
+					kind: "akamai_sbsd",
 					outcome: "payload_accepted_cookies_updated",
 					verified: false,
+					stateCookieName: challenge.stateCookieName,
+					...(expires === undefined ? {} : { expires }),
 				};
 			} catch (error) {
 				if (timeoutController.signal.aborted && !signal.aborted) {

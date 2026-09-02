@@ -195,6 +195,43 @@ describe("resolver tracing", () => {
 		expect(diagnostics).toContain("connect ETIMEDOUT");
 	});
 
+	it("sanitizes SBSD state and payload material from resolver traces", async () => {
+		const stateSecret = "SBSD_STATE_MUST_NOT_LEAK";
+		const payloadSecret = "SBSD_PAYLOAD_MUST_NOT_LEAK";
+		const resolver = createResolverClient({
+			clientProfile: "safari17_0",
+			kinds: ["akamai_sbsd"],
+			adapters: [
+				{
+					id: "custom",
+					supports: (kind) => kind === "akamai_sbsd",
+					async solve() {
+						throw new ResolverVendorUnavailableError("custom", "transport_failure", {
+							cause: new Error(`fetch failed sbsd_o=${stateSecret} payload=${payloadSecret}`),
+							phase: "post_payload",
+						});
+					},
+				},
+			],
+		});
+		const instrumented = instrumentResolver(resolver);
+
+		await expect(
+			instrumented.resolver.solve({
+				kind: "akamai_sbsd",
+				pageUrl: "https://example.com/protected",
+				scriptUrl: "https://example.com/.well-known/sbsd?v=uuid",
+				stateCookieName: "sbsd_o",
+			}),
+		).rejects.toMatchObject({ code: "RESOLVER_CHAIN_EXHAUSTED" });
+
+		const diagnostics = JSON.stringify(instrumented.trace.getSpans());
+		expect(diagnostics).toContain('"challenge_kind":"akamai_sbsd"');
+		expect(diagnostics).toContain('"transport_phase":"post_payload"');
+		expect(diagnostics).not.toContain(stateSecret);
+		expect(diagnostics).not.toContain(payloadSecret);
+	});
+
 	it("invalidates a cached solution through an instrumented resolver wrapper", async () => {
 		const innerCache = createProviderCache({
 			providerId: `resolver-trace-invalidation-${crypto.randomUUID()}`,
@@ -213,7 +250,9 @@ describe("resolver tracing", () => {
 			id: "browser",
 			supports: (kind) => kind === "aws_waf",
 			getIssuingIdentity(solution) {
-				return solution.form === "cookies" ? { userAgent: solution.userAgent } : undefined;
+				return solution.form === "cookies" && "cookies" in solution
+					? { userAgent: solution.userAgent }
+					: undefined;
 			},
 			async solve() {
 				vendorCalls += 1;

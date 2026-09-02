@@ -92,7 +92,7 @@ function createBrowserAdapter(
 	createSolution: (
 		identity: ResolverIdentity | undefined,
 		call: number,
-	) => Extract<ChallengeSolution, { readonly form: "cookies" }>,
+	) => Extract<ChallengeSolution, { readonly cookies: unknown }>,
 ): { readonly adapter: ResolverVendorAdapter; readonly calls: () => number } {
 	let calls = 0;
 	return {
@@ -100,7 +100,7 @@ function createBrowserAdapter(
 			id: "browser",
 			supports: (kind) => kind === "aws_waf" || kind === "cloudflare_interstitial",
 			getIssuingIdentity(solution, requestedIdentity, challenge) {
-				if (solution.form !== "cookies") return undefined;
+				if (solution.form !== "cookies" || !("cookies" in solution)) return undefined;
 				return resolverChallengeIssuingIdentity(challenge, {
 					...(requestedIdentity ? { proxyUrl: requestedIdentity.proxyUrl } : {}),
 					userAgent: solution.userAgent,
@@ -119,7 +119,7 @@ function createAkamaiAdapter(
 	createSolution: (
 		identity: ResolverIdentity | undefined,
 		call: number,
-	) => Extract<ChallengeSolution, { readonly form: "cookies" }>,
+	) => Extract<ChallengeSolution, { readonly cookies: unknown }>,
 ): { readonly adapter: ResolverVendorAdapter; readonly calls: () => number } {
 	let calls = 0;
 	return {
@@ -138,7 +138,7 @@ function createAkamaiAdapter(
 function persistentSolution(
 	userAgent = "Browser/1.0",
 	expires = (Date.now() + 60_000) / 1_000,
-): Extract<ChallengeSolution, { readonly form: "cookies" }> {
+): Extract<ChallengeSolution, { readonly cookies: unknown }> {
 	return {
 		form: "cookies",
 		cookies: { "aws-waf-token": `token-for-${userAgent}` },
@@ -150,7 +150,7 @@ function persistentSolution(
 function persistentAkamaiSolution(
 	userAgent = "Safari/17.0",
 	expires = (Date.now() + 60_000) / 1_000,
-): Extract<ChallengeSolution, { readonly form: "cookies" }> {
+): Extract<ChallengeSolution, { readonly cookies: unknown }> {
 	return {
 		form: "cookies",
 		cookies: { _abck: `sensor-cookie-for-${userAgent}` },
@@ -209,6 +209,7 @@ function createClient(
 ) {
 	return createResolverClient({
 		kinds: options.kinds ?? ["aws_waf"],
+		clientProfile: "safari17_0",
 		adapters: [adapter],
 		...(options.cache ? { cache: options.cache } : {}),
 		...(options.identity ? { identity: options.identity } : {}),
@@ -256,7 +257,6 @@ describe("resolver solution caching", () => {
 				pageUrl: CHALLENGE.pageUrl,
 				scriptUrl: "https://example.com/.well-known/sbsd?v=uuid&t=token",
 				stateCookieName: "sbsd_o",
-				stateCookieValue: "state",
 			}),
 		).toBe(true);
 		expect(RESOLVER_CHALLENGE_BINDINGS.akamai_sbsd.cacheable).toBe(false);

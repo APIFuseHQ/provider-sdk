@@ -25,6 +25,7 @@ describe("challenge resolver types", () => {
 
 		const readSolution = (solution: ChallengeSolution): string => {
 			if (solution.form === "token") return solution.token;
+			if (solution.kind === "akamai_sbsd") return solution.outcome;
 			return `${solution.userAgent}:${solution.cookies.cf_clearance}`;
 		};
 
@@ -68,8 +69,6 @@ describe("challenge resolver types", () => {
 				pageUrl: "https://example.com/challenge",
 				scriptUrl: "https://example.com/.well-known/sbsd?v=uuid&t=token",
 				stateCookieName: "sbsd_o",
-				stateCookieValue: "state-cookie",
-				acceptLanguage: "en-US,en;q=0.9",
 			},
 		];
 
@@ -78,6 +77,18 @@ describe("challenge resolver types", () => {
 			"akamai_sensor",
 			"akamai_sbsd",
 		]);
+	});
+
+	it("restricts SBSD state-cookie names at the type boundary", () => {
+		const invalidChallenge: ProviderChallenge = {
+			kind: "akamai_sbsd",
+			pageUrl: "https://example.com/challenge",
+			scriptUrl: "https://example.com/.well-known/sbsd?v=uuid",
+			// @ts-expect-error test-invalid: SBSD accepts only the two measured cookie names.
+			stateCookieName: "evil",
+		};
+
+		expect(invalidChallenge).toMatchObject({ stateCookieName: "evil" });
 	});
 
 	it("accepts aws_waf challenges with or without a site key", () => {
@@ -141,6 +152,13 @@ describe("challenge resolver types", () => {
 		await expect(
 			rejectingResolver.solve({ kind, siteKey: "key", pageUrl: "https://example.com" }),
 		).rejects.toThrow("resolver is unavailable in type tests");
+	});
+
+	it("requires clientProfile in Akamai resolver declarations", () => {
+		// @ts-expect-error test-invalid: Akamai resolver declarations require a bound profile.
+		const invalidResolver: ProviderResolverConfig = { kinds: ["akamai_sbsd"] };
+
+		expect(invalidResolver.kinds).toEqual(["akamai_sbsd"]);
 	});
 
 	it("accepts ADR vendor orderings", () => {

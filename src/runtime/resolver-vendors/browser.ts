@@ -62,7 +62,7 @@ export interface BrowserResolverVendorAdapter extends ResolverVendorAdapter {
 		identity: ResolverIdentity | undefined,
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
-	): Promise<Extract<ChallengeSolution, { readonly form: "cookies" }>>;
+	): Promise<Extract<ChallengeSolution, { readonly cookies: unknown }>>;
 }
 
 class BrowserSolveTimeoutError extends Error {
@@ -256,7 +256,7 @@ async function solveInPage(
 	gotoTimeoutMs: number,
 	blockedRequests: Set<string>,
 	signal: AbortSignal,
-): Promise<Extract<ChallengeSolution, { readonly form: "cookies" }>> {
+): Promise<Extract<ChallengeSolution, { readonly cookies: unknown }>> {
 	return await page.withResourcePolicy(
 		{
 			allowedMethods: ["GET", "HEAD", "POST"],
@@ -422,7 +422,13 @@ export function createBrowserResolverVendorAdapter(
 		},
 
 		getIssuingIdentity(solution, requestedIdentity, challenge) {
-			if (solution.form !== "cookies" || !isSupportedKind(challenge.kind)) return undefined;
+			if (
+				solution.form !== "cookies" ||
+				!("cookies" in solution) ||
+				!isSupportedKind(challenge.kind)
+			) {
+				return undefined;
+			}
 			return resolverChallengeIssuingIdentity(challenge, {
 				...(requestedIdentity ? { proxyUrl: requestedIdentity.proxyUrl } : {}),
 				userAgent: solution.userAgent,

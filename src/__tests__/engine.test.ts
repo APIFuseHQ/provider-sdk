@@ -131,6 +131,16 @@ describe("provider engine attachment", () => {
 });
 
 describe("engine credential containment", () => {
+	it("keeps the literal hosted resolver credential registry complete", () => {
+		expect([...ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES]).toEqual([
+			"APIFUSE__RESOLVER__2CAPTCHA__API_KEY",
+			"APIFUSE__RESOLVER__CAPSOLVER__API_KEY",
+			"APIFUSE__RESOLVER__CAPMONSTER__API_KEY",
+			"APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY",
+		]);
+		expect(isEngineOwnedEnvName("APIFUSE__PROVIDER__FIXTURE__HYPER_API_KEY")).toBe(true);
+	});
+
 	it("classifies every hosted resolver key as engine-owned and omits it from providers", () => {
 		const source = Object.fromEntries([
 			...ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES.map((name) => [name, `secret-${name}`]),
