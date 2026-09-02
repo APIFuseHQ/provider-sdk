@@ -1,0 +1,827 @@
+{
+  "baseline": {
+    "caller": [],
+    "sent": {},
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "one_accept": {
+    "caller": [
+      "accept"
+    ],
+    "sent": {
+      "Accept": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "one_priority": {
+    "caller": [
+      "priority"
+    ],
+    "sent": {
+      "Priority": "u=3"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "priority",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "one_uir": {
+    "caller": [
+      "uir"
+    ],
+    "sent": {
+      "Upgrade-Insecure-Requests": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "upgrade-insecure-requests",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "one_lang": {
+    "caller": [
+      "lang"
+    ],
+    "sent": {
+      "Accept-Language": "ko"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "user-agent",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "one_ctype": {
+    "caller": [
+      "ctype"
+    ],
+    "sent": {
+      "Content-Type": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "content-type",
+      "sec-ch-ua-mobile",
+      "accept-language",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "one_custom": {
+    "caller": [
+      "custom"
+    ],
+    "sent": {
+      "X-Custom-Probe": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "x-custom-probe",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "one_cachectl": {
+    "caller": [
+      "cachectl"
+    ],
+    "sent": {
+      "Cache-Control": "no-cache"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "cache-control",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_accept_priority": {
+    "caller": [
+      "accept",
+      "priority"
+    ],
+    "sent": {
+      "Accept": "application/json",
+      "Priority": "u=3"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "priority",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "two_accept_uir": {
+    "caller": [
+      "accept",
+      "uir"
+    ],
+    "sent": {
+      "Accept": "application/json",
+      "Upgrade-Insecure-Requests": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "upgrade-insecure-requests",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_accept_lang": {
+    "caller": [
+      "accept",
+      "lang"
+    ],
+    "sent": {
+      "Accept": "application/json",
+      "Accept-Language": "ko"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "accept",
+      "sec-ch-ua",
+      "user-agent",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_accept_ctype": {
+    "caller": [
+      "accept",
+      "ctype"
+    ],
+    "sent": {
+      "Accept": "application/json",
+      "Content-Type": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "content-type",
+      "sec-ch-ua-mobile",
+      "accept-language",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_accept_custom": {
+    "caller": [
+      "accept",
+      "custom"
+    ],
+    "sent": {
+      "Accept": "application/json",
+      "X-Custom-Probe": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "x-custom-probe",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_accept_cachectl": {
+    "caller": [
+      "accept",
+      "cachectl"
+    ],
+    "sent": {
+      "Accept": "application/json",
+      "Cache-Control": "no-cache"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "cache-control",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_priority_uir": {
+    "caller": [
+      "priority",
+      "uir"
+    ],
+    "sent": {
+      "Priority": "u=3",
+      "Upgrade-Insecure-Requests": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "upgrade-insecure-requests",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "priority",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "two_priority_lang": {
+    "caller": [
+      "priority",
+      "lang"
+    ],
+    "sent": {
+      "Priority": "u=3",
+      "Accept-Language": "ko"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "user-agent",
+      "sec-ch-ua-mobile",
+      "priority",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "two_priority_ctype": {
+    "caller": [
+      "priority",
+      "ctype"
+    ],
+    "sent": {
+      "Priority": "u=3",
+      "Content-Type": "application/json"
+    },
+    "order": [
+      "accept-language",
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "content-type",
+      "sec-ch-ua-mobile",
+      "priority",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "two_priority_custom": {
+    "caller": [
+      "priority",
+      "custom"
+    ],
+    "sent": {
+      "Priority": "u=3",
+      "X-Custom-Probe": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "x-custom-probe",
+      "sec-ch-ua-mobile",
+      "priority",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "two_priority_cachectl": {
+    "caller": [
+      "priority",
+      "cachectl"
+    ],
+    "sent": {
+      "Priority": "u=3",
+      "Cache-Control": "no-cache"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "cache-control",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "priority",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "two_uir_lang": {
+    "caller": [
+      "uir",
+      "lang"
+    ],
+    "sent": {
+      "Upgrade-Insecure-Requests": "1",
+      "Accept-Language": "ko"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "upgrade-insecure-requests",
+      "user-agent",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_uir_ctype": {
+    "caller": [
+      "uir",
+      "ctype"
+    ],
+    "sent": {
+      "Upgrade-Insecure-Requests": "1",
+      "Content-Type": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "upgrade-insecure-requests",
+      "content-type",
+      "sec-ch-ua-mobile",
+      "accept-language",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_uir_custom": {
+    "caller": [
+      "uir",
+      "custom"
+    ],
+    "sent": {
+      "Upgrade-Insecure-Requests": "1",
+      "X-Custom-Probe": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "upgrade-insecure-requests",
+      "accept-language",
+      "x-custom-probe",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_uir_cachectl": {
+    "caller": [
+      "uir",
+      "cachectl"
+    ],
+    "sent": {
+      "Upgrade-Insecure-Requests": "1",
+      "Cache-Control": "no-cache"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "cache-control",
+      "user-agent",
+      "sec-ch-ua",
+      "upgrade-insecure-requests",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_lang_ctype": {
+    "caller": [
+      "lang",
+      "ctype"
+    ],
+    "sent": {
+      "Accept-Language": "ko",
+      "Content-Type": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "content-type",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_lang_custom": {
+    "caller": [
+      "lang",
+      "custom"
+    ],
+    "sent": {
+      "Accept-Language": "ko",
+      "X-Custom-Probe": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "user-agent",
+      "x-custom-probe",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_lang_cachectl": {
+    "caller": [
+      "lang",
+      "cachectl"
+    ],
+    "sent": {
+      "Accept-Language": "ko",
+      "Cache-Control": "no-cache"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "cache-control",
+      "accept-language",
+      "sec-ch-ua",
+      "user-agent",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_ctype_custom": {
+    "caller": [
+      "ctype",
+      "custom"
+    ],
+    "sent": {
+      "Content-Type": "application/json",
+      "X-Custom-Probe": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "content-type",
+      "x-custom-probe",
+      "sec-ch-ua-mobile",
+      "accept-language",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_ctype_cachectl": {
+    "caller": [
+      "ctype",
+      "cachectl"
+    ],
+    "sent": {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-cache"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "cache-control",
+      "user-agent",
+      "sec-ch-ua",
+      "content-type",
+      "sec-ch-ua-mobile",
+      "accept-language",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "two_custom_cachectl": {
+    "caller": [
+      "custom",
+      "cachectl"
+    ],
+    "sent": {
+      "X-Custom-Probe": "1",
+      "Cache-Control": "no-cache"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "cache-control",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "x-custom-probe",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "three_accept_prio_uir": {
+    "caller": [
+      "accept",
+      "priority",
+      "uir"
+    ],
+    "sent": {
+      "Accept": "application/json",
+      "Priority": "u=3",
+      "Upgrade-Insecure-Requests": "1"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "upgrade-insecure-requests",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "accept",
+      "priority",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "three_accept_lang_ctype": {
+    "caller": [
+      "accept",
+      "lang",
+      "ctype"
+    ],
+    "sent": {
+      "Accept": "application/json",
+      "Accept-Language": "ko",
+      "Content-Type": "application/json"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "accept",
+      "sec-ch-ua",
+      "content-type",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "four_accept_prio_uir_lang": {
+    "caller": [
+      "accept",
+      "priority",
+      "uir",
+      "lang"
+    ],
+    "sent": {
+      "Accept": "application/json",
+      "Priority": "u=3",
+      "Upgrade-Insecure-Requests": "1",
+      "Accept-Language": "ko"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "accept-language",
+      "sec-ch-ua",
+      "upgrade-insecure-requests",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "accept",
+      "priority",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "all_seven": {
+    "caller": [
+      "accept",
+      "priority",
+      "uir",
+      "lang",
+      "ctype",
+      "custom",
+      "cachectl"
+    ],
+    "sent": {
+      "Accept": "application/json",
+      "Priority": "u=3",
+      "Upgrade-Insecure-Requests": "1",
+      "Accept-Language": "ko",
+      "Content-Type": "application/json",
+      "X-Custom-Probe": "1",
+      "Cache-Control": "no-cache"
+    },
+    "order": [
+      "sec-ch-ua-platform",
+      "cache-control",
+      "accept-language",
+      "sec-ch-ua",
+      "upgrade-insecure-requests",
+      "x-custom-probe",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "accept",
+      "content-type",
+      "priority",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  }
+}

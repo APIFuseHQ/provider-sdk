@@ -99,11 +99,11 @@ remain availability credentials. Sections changed: Decision 3a and
 Verification.
 
 **Revision 7 (2026-08-18).** The first lazy resolver wiring passed a user agent
-only when a provider declared `stealth.profile`. `danawa` and `naver-map` both
+only when a provider declared a structured `stealth: { browser, os }` identity. `danawa` and `naver-map` both
 declare `proxy: { mode: "required" }` without a stealth profile, so their leases
 resolved while the chain still failed closed with `missing_proxy_identity`.
 This revision settles the omitted source in subsection 5a: the resolver derives
-the user agent from `DEFAULT_PROFILE` (`chrome-desktop`) through the shared stealth
+the user agent from `DEFAULT_STEALTH_PROFILE` (`chrome`/`macos`) through the shared stealth
 profile registry when the caller supplies no declared user agent, and records
 whether the identity was `declared` or `defaulted` in proxy telemetry and the
 resolver trace. A resolved lease with no derivable user agent is classified as
@@ -938,9 +938,9 @@ verbatim through another's, with the same-exit control passing); for a kind that
 does bind, a CLI without an affinity key would need its own decision.
 
 **The resolver owns the user-agent fallback.** A provider-declared
-`stealth.profile` remains authoritative: its profile's user agent is passed in
+structured provider `stealth: { browser, os }` selection remains authoritative: its user agent is passed in
 the grouped `proxyIntent` and is marked `declared`. When the provider declares
-no profile, the resolver looks up `DEFAULT_PROFILE` from `src/runtime/stealth.ts`
+no selection, the resolver looks up `DEFAULT_STEALTH_PROFILE` from `src/runtime/stealth.ts`
 through `src/stealth/profiles.ts` and binds that profile's user agent to the
 lease. This keeps one source of truth for user-agent strings and avoids making
 server, record, and dev callers duplicate the default lookup. The selected
@@ -1104,8 +1104,8 @@ Negative / accepted:
 
 These must hold before `Status: accepted`:
 
-- A required-proxy provider without `stealth.profile` reaches its resolver
-  adapter with the user agent from `DEFAULT_PROFILE`, while a provider with a
+- A required-proxy provider without structured stealth selection reaches its resolver
+  adapter with the user agent from `DEFAULT_STEALTH_PROFILE`, while a provider with a
   declared profile reaches it with that profile's user agent. Existing proxy
   telemetry and resolver traces identify the source as `defaulted` or
   `declared` without carrying a proxy URL.

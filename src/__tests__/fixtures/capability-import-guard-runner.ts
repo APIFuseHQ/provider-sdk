@@ -84,7 +84,7 @@ const provider: ProviderDefinition = {
 		? { resolver: { vendors: ["2captcha"], kinds: ["turnstile"] } }
 		: {}),
 	...(["stealth", "tier1-stealth", "primitive", "aggregate", "sync-esm"].includes(mode)
-		? { stealth: { profile: "chrome-146", platform: "linux" as const } }
+		? { stealth: { browser: "chrome" as const, os: "linux" as const } }
 		: {}),
 	meta: {
 		displayName: "Capability import guard",

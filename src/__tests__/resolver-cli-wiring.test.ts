@@ -81,7 +81,7 @@ function createProvider(options: {
 		version: "1.0.0",
 		runtime: "standard",
 		allowedHosts: ["example.com"],
-		stealth: { profile: "chrome-146", platform: "macos" },
+		stealth: { browser: "chrome", os: "macos" },
 		cache: true,
 		...(options.proxy ? { proxy: options.proxy } : {}),
 		...(options.resolver ? { resolver: options.resolver } : {}),
@@ -235,7 +235,7 @@ describe("resolver CLI wiring", () => {
 		expect(identities).toEqual([
 			{
 				proxyUrl: expect.stringMatching(/^http:\/\/resolver-cli-account-/),
-				userAgent: getStealthProfile("chrome-146").userAgent,
+				userAgent: getStealthProfile({ browser: "chrome", os: "macos" }).userAgent,
 			},
 		]);
 	});

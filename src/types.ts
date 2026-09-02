@@ -886,6 +886,25 @@ export interface OperationErrorCode {
 
 export type StealthPlatform = "macos" | "windows" | "linux" | "android" | "ios";
 
+export type StealthBrowser = "chrome" | "firefox" | "safari";
+
+export type StealthOS = "windows" | "macos" | "linux" | "ios";
+
+/** A supported, fully resolved browser/OS fingerprint pair. */
+export type StealthProfileDescriptor =
+	| { browser: "chrome"; os: "windows" | "macos" | "linux" }
+	| { browser: "firefox"; os: "windows" | "macos" | "linux" }
+	| { browser: "safari"; os: "macos" | "ios" };
+
+/**
+ * Browser/OS fingerprint selection. Chrome and macOS are the named defaults
+ * when their respective axes are omitted.
+ */
+export type StealthProfileSelection =
+	| { browser?: "chrome"; os?: "windows" | "macos" | "linux" }
+	| { browser: "firefox"; os?: "windows" | "macos" | "linux" }
+	| { browser: "safari"; os?: "macos" | "ios" };
+
 export type BrowserEngine = "playwright-stealth" | "nodriver" | "selenium-uc";
 export interface BrowserOptions {
 	headless?: boolean;
@@ -895,9 +914,7 @@ export interface BrowserOptions {
 	requireCdpPool?: boolean;
 }
 
-export interface StealthProfile {
-	name: string;
-	platform: StealthPlatform;
+export type StealthProfile = StealthProfileDescriptor & {
 	version: string;
 	userAgent: string;
 	tlsClientIdentifier?: string;
@@ -905,7 +922,7 @@ export interface StealthProfile {
 	ja4?: string;
 	h2Settings?: Record<string, unknown>;
 	headerOrder?: string[];
-}
+};
 
 export type AuthMode =
 	| "none"
@@ -1220,7 +1237,12 @@ export type HttpMethod =
 	| "PATCH"
 	| "patch";
 
-export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy"> {
+export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "headers"> {
+	/**
+	 * Request headers. Array values and case-insensitive duplicate names are
+	 * combined in caller order using `", "`, matching Chrome's Fetch behavior.
+	 */
+	headers?: Record<string, string | string[]>;
 	method?: HttpMethod;
 	body?: string | Buffer;
 	redirect?: "follow" | "manual" | "error";
@@ -1237,14 +1259,18 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 	 * operation-affinity proxy.
 	 */
 	proxyAttemptOffset?: number;
-	/** Override the configured browser-like stealth profile for this request. */
-	profile?: string;
 	/**
-	 * Stealth transport certificate controls. Use only for proxy products that
-	 * terminate CONNECT with a private CA instead of tunneling the origin
-	 * certificate chain.
+	 * SDK-specific stealth controls. Standard HTTP metadata such as language,
+	 * referrer, and content type belongs in `headers`.
 	 */
-	stealth?: {
+	stealth?: StealthProfileSelection & {
+		/** Override the configured browser and/or OS for this request. */
+		/** Declare the Chrome request class when it cannot be inferred from the method. */
+		requestClass?: "navigation" | "xhr" | "post";
+		/**
+		 * Use only for proxy products that terminate CONNECT with a private CA
+		 * instead of tunneling the origin certificate chain.
+		 */
 		insecureSkipVerify?: boolean;
 	};
 }
@@ -1674,7 +1700,7 @@ export interface ProviderCache {
 
 export interface StealthClient {
 	fetch(url: string, options?: StealthFetchOptions): Promise<StealthResponse>;
-	createSession(opts?: { profile?: string }): StealthSession;
+	createSession(opts?: { stealth?: StealthProfileSelection }): StealthSession;
 	close?(): void;
 }
 
@@ -2444,10 +2470,7 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 	http?: Record<string, never> | true;
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
-	stealth?: {
-		profile: string;
-		platform: StealthPlatform;
-	};
+	stealth?: StealthProfileSelection;
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;

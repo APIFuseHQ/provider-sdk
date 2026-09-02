@@ -2229,7 +2229,7 @@ describe("provider HTTP server", () => {
 		const provider = {
 			...baseProvider,
 			allowedHosts: ["example.com"],
-			stealth: { profile: "chrome-desktop", platform: "macos" },
+			stealth: { browser: "chrome", os: "macos" },
 			proxy: {
 				mode: "required",
 				provider: "smartproxy",

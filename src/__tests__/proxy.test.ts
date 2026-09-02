@@ -361,13 +361,27 @@ class MockWreqSession {
 
 mock.module("wreq-js", () => ({
 	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
-	getEmulationHeaders: (profile: string) => {
+	getEmulationHeaders: (profile: string, os = "macos") => {
 		const version = /^chrome_(\d+)$/.exec(profile)?.[1] ?? "149";
+		const platform = os === "windows" ? '"Windows"' : os === "linux" ? '"Linux"' : '"macOS"';
+		const osToken =
+			os === "windows"
+				? "Windows NT 10.0; Win64; x64"
+				: os === "linux"
+					? "X11; Linux x86_64"
+					: "Macintosh; Intel Mac OS X 10_15_7";
 		return new Map([
+			["sec-ch-ua", `"Google Chrome";v="${version}", "Chromium";v="${version}"`],
+			["sec-ch-ua-mobile", "?0"],
+			["sec-ch-ua-platform", platform],
 			[
 				"user-agent",
-				`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`,
+				`Mozilla/5.0 (${osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`,
 			],
+			["accept", "text/html,application/xhtml+xml,*/*;q=0.8"],
+			["accept-encoding", "gzip, deflate, br, zstd"],
+			["accept-language", "en-US,en;q=0.9"],
+			["priority", "u=0, i"],
 		]);
 	},
 	getProfiles: () => [

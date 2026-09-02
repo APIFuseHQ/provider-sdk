@@ -222,7 +222,8 @@ export default {
 				join(providerDir, "index.ts"),
 				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "dist", "index.js")).href)};
 export default {
-  id: "record-stealth-session-cookies", version: "1.0.0", runtime: "standard", http: true, stealth: true,
+  id: "record-stealth-session-cookies", version: "1.0.0", runtime: "standard", http: true,
+  stealth: { browser: "chrome", os: "macos" },
   operations: { lookup: {
     input: z.object({}), output: z.object({ received: z.string() }),
     upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
@@ -1195,7 +1196,8 @@ export default {
 				join(providerDir, "index.ts"),
 				`import { z } from ${JSON.stringify(pathToFileURL(join(repoRoot, "src", "index.ts")).href)};
 export default {
-  id: "record-stealth", version: "1.0.0", runtime: "standard", stealth: true,
+  id: "record-stealth", version: "1.0.0", runtime: "standard",
+  stealth: { browser: "chrome", os: "macos" },
   operations: { lookup: { input: z.object({}), output: z.unknown(),
     upstream: { baseUrl: "http://127.0.0.1:${address.port}" },
     handler: async (ctx) => {

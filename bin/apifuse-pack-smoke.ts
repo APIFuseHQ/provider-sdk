@@ -236,7 +236,7 @@ function smokePackedStealthNative(consumerDir: string): void {
 				"const address = server.address();",
 				'if (!address || typeof address === "string") throw new Error("Local server has no TCP address");',
 				'const baseUrl = "http://127.0.0.1:" + address.port;',
-				'const session = createStealthClient(baseUrl).createSession({ profile: "safari-17" });',
+				'const session = createStealthClient(baseUrl).createSession({ stealth: { browser: "safari", os: "macos" } });',
 				"try {",
 				'  const response = await session.fetch("/native");',
 				'  if (response.body !== "packed native stealth ok") throw new Error("Unexpected stealth body: " + response.body);',

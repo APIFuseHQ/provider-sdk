@@ -1,0 +1,231 @@
+{
+  "h_xreq": {
+    "caller_names": [
+      "X-Request-Id"
+    ],
+    "order": [
+      "x-request-id",
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "h_auth": {
+    "caller_names": [
+      "Authorization"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "authorization",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "h_ifnone": {
+    "caller_names": [
+      "If-None-Match"
+    ],
+    "order": [
+      "cache-control",
+      "if-none-match",
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "h_xapi": {
+    "caller_names": [
+      "X-Api-Key"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "x-api-key",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "h_two_new": {
+    "caller_names": [
+      "X-Request-Id",
+      "X-Api-Key"
+    ],
+    "order": [
+      "x-request-id",
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "x-api-key",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "h_new_plus_known": {
+    "caller_names": [
+      "X-Request-Id",
+      "Accept"
+    ],
+    "order": [
+      "x-request-id",
+      "sec-ch-ua-platform",
+      "user-agent",
+      "accept",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "h_five": {
+    "caller_names": [
+      "Accept",
+      "Accept-Language",
+      "Content-Type",
+      "Cache-Control",
+      "X-Request-Id"
+    ],
+    "order": [
+      "x-request-id",
+      "sec-ch-ua-platform",
+      "cache-control",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "accept",
+      "content-type",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "h_six": {
+    "caller_names": [
+      "Accept",
+      "Accept-Language",
+      "Content-Type",
+      "Cache-Control",
+      "X-Request-Id",
+      "Priority"
+    ],
+    "order": [
+      "x-request-id",
+      "sec-ch-ua-platform",
+      "cache-control",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "accept",
+      "content-type",
+      "priority",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding"
+    ]
+  },
+  "h_seven_new": {
+    "caller_names": [
+      "X-A",
+      "X-B",
+      "X-C",
+      "X-D",
+      "X-E",
+      "X-F",
+      "X-G"
+    ],
+    "order": [
+      "x-g",
+      "x-d",
+      "sec-ch-ua-platform",
+      "x-c",
+      "x-f",
+      "accept-language",
+      "sec-ch-ua",
+      "x-a",
+      "x-e",
+      "sec-ch-ua-mobile",
+      "user-agent",
+      "x-b",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  },
+  "h_long_name": {
+    "caller_names": [
+      "X-Very-Long-Custom-Header-Name-For-Hashing"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "x-very-long-custom-header-name-for-hashing",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ]
+  }
+}

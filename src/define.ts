@@ -51,7 +51,7 @@ import type {
 	ProviderSttConfig,
 	SchemaLike,
 	SmsOtpMatcherDefinition,
-	StealthPlatform,
+	StealthProfileSelection,
 } from "./types.js";
 import {
 	HEALTH_CHECK_DEGRADED_THRESHOLD_MS_MAX,
@@ -584,10 +584,7 @@ export interface ProviderDeclaration {
 	/** Declares upstream host policy; this does not add a `ctx.allowedHosts` member. */
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
-	stealth?: {
-		profile: string;
-		platform: StealthPlatform;
-	};
+	stealth?: StealthProfileSelection;
 	/** Declares proxy policy; this is provider intent and does not add a `ctx.proxy` member. */
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;

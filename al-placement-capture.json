@@ -1,0 +1,227 @@
+{
+  "A_locale_none": {
+    "variant": "A_locale",
+    "caller": [],
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "accept-language",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ],
+    "acceptLanguage": "ja-JP"
+  },
+  "A_locale_three": {
+    "variant": "A_locale",
+    "caller": [
+      "X-Aa",
+      "X-Bb",
+      "X-Cc"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "x-aa",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "x-bb",
+      "x-cc",
+      "user-agent",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ],
+    "acceptLanguage": "ja-JP"
+  },
+  "A_locale_five": {
+    "variant": "A_locale",
+    "caller": [
+      "X-Za",
+      "X-Yb",
+      "X-Xc",
+      "X-Wd",
+      "X-Ve"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "x-wd",
+      "accept-language",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "x-ve",
+      "x-yb",
+      "x-xc",
+      "user-agent",
+      "x-za",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "priority"
+    ],
+    "acceptLanguage": "ja-JP"
+  },
+  "B_nolocale_none": {
+    "variant": "B_nolocale",
+    "caller": [],
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "accept-language",
+      "priority"
+    ],
+    "acceptLanguage": "en-US,en;q=0.9"
+  },
+  "B_nolocale_three": {
+    "variant": "B_nolocale",
+    "caller": [
+      "X-Aa",
+      "X-Bb",
+      "X-Cc"
+    ],
+    "order": [
+      "x-bb",
+      "sec-ch-ua-platform",
+      "x-aa",
+      "x-cc",
+      "user-agent",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "accept-language",
+      "priority"
+    ],
+    "acceptLanguage": "en-US,en;q=0.9"
+  },
+  "B_nolocale_five": {
+    "variant": "B_nolocale",
+    "caller": [
+      "X-Za",
+      "X-Yb",
+      "X-Xc",
+      "X-Wd",
+      "X-Ve"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "x-wd",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "x-ve",
+      "x-yb",
+      "x-xc",
+      "user-agent",
+      "x-za",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "accept-language",
+      "priority"
+    ],
+    "acceptLanguage": "en-US,en;q=0.9"
+  },
+  "C_acceptlang_none": {
+    "variant": "C_acceptlang",
+    "caller": [],
+    "order": [
+      "sec-ch-ua-platform",
+      "user-agent",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "accept-language",
+      "priority"
+    ],
+    "acceptLanguage": "ja"
+  },
+  "C_acceptlang_three": {
+    "variant": "C_acceptlang",
+    "caller": [
+      "X-Aa",
+      "X-Bb",
+      "X-Cc"
+    ],
+    "order": [
+      "x-bb",
+      "sec-ch-ua-platform",
+      "x-aa",
+      "x-cc",
+      "user-agent",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "accept-language",
+      "priority"
+    ],
+    "acceptLanguage": "ja"
+  },
+  "C_acceptlang_five": {
+    "variant": "C_acceptlang",
+    "caller": [
+      "X-Za",
+      "X-Yb",
+      "X-Xc",
+      "X-Wd",
+      "X-Ve"
+    ],
+    "order": [
+      "sec-ch-ua-platform",
+      "x-wd",
+      "sec-ch-ua",
+      "sec-ch-ua-mobile",
+      "x-ve",
+      "x-yb",
+      "x-xc",
+      "user-agent",
+      "x-za",
+      "accept",
+      "sec-fetch-site",
+      "sec-fetch-mode",
+      "sec-fetch-dest",
+      "referer",
+      "accept-encoding",
+      "accept-language",
+      "priority"
+    ],
+    "acceptLanguage": "ja"
+  }
+}

@@ -1350,6 +1350,12 @@ export const DEFAULT_OPERATION_TRANSPORT: OperationJsonTransport;
 // @public (undocumented)
 export const DEFAULT_RESOLVER_TIMEOUT_MS = 180000;
 
+// @public (undocumented)
+export const DEFAULT_STEALTH_BROWSER: "chrome";
+
+// @public (undocumented)
+export const DEFAULT_STEALTH_OS: "macos";
+
 // @public
 export function defineAuthFlow<const TFlow extends AuthFlowDefinition>(flow: TFlow & AuthStartNoInputGuard<TFlow>): TFlow;
 
@@ -1670,7 +1676,7 @@ export function getProviderBaseUrl(provider: ProviderDefinition): string | undef
 export function getProviderLocalePath(catalog: ProviderLocaleCatalog, key: ProviderLocaleKey | string): ProviderLocaleValue | undefined;
 
 // @public (undocumented)
-export function getStealthProfile(name: string): StealthProfile;
+export function getStealthProfile(selection?: StealthProfileSelection): StealthProfile;
 
 // @public (undocumented)
 export type GuardAttribution = {
@@ -2504,7 +2510,7 @@ export function lintProvider(provider: {
 export function listMissingRequiredSecrets(provider: ProviderDefinition, env: EnvContext): string[];
 
 // @public (undocumented)
-export function listStealthProfiles(): string[];
+export function listStealthProfiles(): StealthProfileDescriptor[];
 
 // @public (undocumented)
 export function loadApiFuseConfig(dir?: string): Promise<ApiFuseConfig>;
@@ -4158,10 +4164,7 @@ export interface ProviderDeclaration {
     secrets?: ProviderSecretDeclaration[];
     state?: Record<string, never> | true;
     // (undocumented)
-    stealth?: {
-        profile: string;
-        platform: StealthPlatform;
-    };
+    stealth?: StealthProfileSelection;
     // (undocumented)
     stt?: ProviderSttConfig;
     // (undocumented)
@@ -4224,10 +4227,7 @@ export interface ProviderDefinition<TContext = ProviderContext> {
     // (undocumented)
     state?: Record<string, never> | true;
     // (undocumented)
-    stealth?: {
-        profile: string;
-        platform: StealthPlatform;
-    };
+    stealth?: StealthProfileSelection;
     // (undocumented)
     stt?: ProviderSttConfig;
     // (undocumented)
@@ -6479,12 +6479,15 @@ export interface StateWriteOptions {
 }
 
 // @public (undocumented)
+export type StealthBrowser = "chrome" | "firefox" | "safari";
+
+// @public (undocumented)
 export interface StealthClient {
     // (undocumented)
     close?(): void;
     // (undocumented)
     createSession(opts?: {
-        profile?: string;
+        stealth?: StealthProfileSelection;
     }): StealthSession;
     // (undocumented)
     fetch(url: string, options?: StealthFetchOptions): Promise<StealthResponse>;
@@ -6509,45 +6512,62 @@ export class StealthCookieStoreVersionError extends SDKError {
 }
 
 // @public (undocumented)
-export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy"> {
+export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "headers"> {
     // (undocumented)
     body?: string | Buffer;
+    headers?: Record<string, string | string[]>;
     maxBodyBytes?: number;
     // (undocumented)
     method?: HttpMethod;
-    profile?: string;
     proxyAttemptOffset?: number;
     // (undocumented)
     redirect?: "follow" | "manual" | "error";
-    stealth?: {
+    stealth?: StealthProfileSelection & {
+        requestClass?: "navigation" | "xhr" | "post";
         insecureSkipVerify?: boolean;
     };
 }
 
 // @public (undocumented)
+export type StealthOS = "windows" | "macos" | "linux" | "ios";
+
+// @public (undocumented)
 export type StealthPlatform = "macos" | "windows" | "linux" | "android" | "ios";
 
 // @public (undocumented)
-export interface StealthProfile {
-    // (undocumented)
-    h2Settings?: Record<string, unknown>;
-    // (undocumented)
-    headerOrder?: string[];
-    // (undocumented)
-    ja3?: string;
-    // (undocumented)
-    ja4?: string;
-    // (undocumented)
-    name: string;
-    // (undocumented)
-    platform: StealthPlatform;
-    // (undocumented)
-    tlsClientIdentifier?: string;
-    // (undocumented)
-    userAgent: string;
-    // (undocumented)
+export type StealthProfile = StealthProfileDescriptor & {
     version: string;
-}
+    userAgent: string;
+    tlsClientIdentifier?: string;
+    ja3?: string;
+    ja4?: string;
+    h2Settings?: Record<string, unknown>;
+    headerOrder?: string[];
+};
+
+// @public
+export type StealthProfileDescriptor = {
+    browser: "chrome";
+    os: "windows" | "macos" | "linux";
+} | {
+    browser: "firefox";
+    os: "windows" | "macos" | "linux";
+} | {
+    browser: "safari";
+    os: "macos" | "ios";
+};
+
+// @public
+export type StealthProfileSelection = {
+    browser?: "chrome";
+    os?: "windows" | "macos" | "linux";
+} | {
+    browser: "firefox";
+    os?: "windows" | "macos" | "linux";
+} | {
+    browser: "safari";
+    os?: "macos" | "ios";
+};
 
 // @public (undocumented)
 export interface StealthRedirectHop {
@@ -7019,8 +7039,8 @@ export { z }
 // dist/config/loader.d.ts:60:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:26:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:109:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:137:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:106:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:134:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:4:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:29:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:52:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
@@ -7036,13 +7056,13 @@ export { z }
 // dist/server/serve-implementation.d.ts:157:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:217:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:624:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1483:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1607:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1665:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1673:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1674:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1833:5 - (ae-forgotten-export) The symbol "TraceContext_2" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1853:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1517:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1641:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1699:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1707:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1708:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1867:5 - (ae-forgotten-export) The symbol "TraceContext_2" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1887:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

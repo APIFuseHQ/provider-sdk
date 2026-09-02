@@ -22,7 +22,7 @@ interface CookieJar {
 // Warning: (ae-forgotten-export) The symbol "StealthClient" needs to be exported by the entry point stealth.d.ts
 //
 // @public (undocumented)
-export function createStealthClient(baseUrl: string, defaultProfileOrOptions?: string | StealthClientOptions, clientOptions?: StealthClientOptions): StealthClient;
+export function createStealthClient(baseUrl: string, clientOptions?: StealthClientOptions): StealthClient;
 
 // @public (undocumented)
 interface DeclarativeStealthResponse {
@@ -60,8 +60,10 @@ interface DeclarativeStealthResponse {
     url?: string;
 }
 
+// Warning: (ae-forgotten-export) The symbol "StealthProfileDescriptor" needs to be exported by the entry point stealth.d.ts
+//
 // @public (undocumented)
-export const DEFAULT_PROFILE = "chrome-desktop";
+export const DEFAULT_STEALTH_PROFILE: StealthProfileDescriptor;
 
 // @public (undocumented)
 type HttpMethod = "HEAD" | "head" | "GET" | "get" | "POST" | "post" | "PUT" | "put" | "DELETE" | "delete" | "OPTIONS" | "options" | "TRACE" | "trace" | "PATCH" | "patch";
@@ -321,8 +323,10 @@ type RequestParams = Record<string, RequestParamValue>;
 // @public (undocumented)
 type RequestParamValue = RequestParamPrimitive | readonly RequestParamPrimitive[];
 
+// Warning: (ae-forgotten-export) The symbol "StealthProfileSelection" needs to be exported by the entry point stealth.d.ts
+//
 // @public (undocumented)
-export function resolveWreqProfile(profileName: string, wreqProfiles: readonly BrowserProfile[]): {
+export function resolveWreqProfile(selection: StealthProfileSelection, wreqProfiles: readonly BrowserProfile[]): {
     browser: BrowserProfile;
     os: EmulationOS;
 };
@@ -338,7 +342,7 @@ interface StealthClient {
     //
     // (undocumented)
     createSession(opts?: {
-        profile?: string;
+        stealth?: StealthProfileSelection;
     }): StealthSession;
     // Warning: (ae-forgotten-export) The symbol "StealthFetchOptions" needs to be exported by the entry point stealth.d.ts
     //
@@ -352,6 +356,9 @@ interface StealthClient {
 export type StealthClientOptions = ProxyResolutionOptions & {
     warn?: (message: string) => void;
     signal?: AbortSignal;
+    stealth?: StealthProfileSelection & {
+        acceptLanguage?: string;
+    };
     proxyStealth?: {
         insecureSkipVerify?: boolean;
     };
@@ -373,20 +380,45 @@ interface StealthCookieStoreV1 {
 // Warning: (ae-forgotten-export) The symbol "RequestOptions" needs to be exported by the entry point stealth.d.ts
 //
 // @public (undocumented)
-interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy"> {
+interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "headers"> {
     // (undocumented)
     body?: string | Buffer;
+    headers?: Record<string, string | string[]>;
     maxBodyBytes?: number;
     // (undocumented)
     method?: HttpMethod;
-    profile?: string;
     proxyAttemptOffset?: number;
     // (undocumented)
     redirect?: "follow" | "manual" | "error";
-    stealth?: {
+    stealth?: StealthProfileSelection & {
+        requestClass?: "navigation" | "xhr" | "post";
         insecureSkipVerify?: boolean;
     };
 }
+
+// @public
+type StealthProfileDescriptor = {
+    browser: "chrome";
+    os: "windows" | "macos" | "linux";
+} | {
+    browser: "firefox";
+    os: "windows" | "macos" | "linux";
+} | {
+    browser: "safari";
+    os: "macos" | "ios";
+};
+
+// @public
+type StealthProfileSelection = {
+    browser?: "chrome";
+    os?: "windows" | "macos" | "linux";
+} | {
+    browser: "firefox";
+    os?: "windows" | "macos" | "linux";
+} | {
+    browser: "safari";
+    os?: "macos" | "ios";
+};
 
 // @public (undocumented)
 interface StealthRedirectHop {
@@ -510,12 +542,12 @@ type StealthTransportResponse = {
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:36:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:38:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:816:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:821:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1123:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1123:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:45:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:47:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:841:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:846:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1157:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1157:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 

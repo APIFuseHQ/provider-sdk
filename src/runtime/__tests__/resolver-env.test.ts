@@ -362,7 +362,7 @@ describe("resolver server wiring", () => {
 				id: "resolver-required-proxy-policy",
 				version: "1.0.0",
 				runtime: "standard",
-				stealth: { profile: "chrome-146", platform: "macos" },
+				stealth: { browser: "chrome", os: "macos" },
 				proxy: { mode: "required", providers: ["nodemaven"] },
 				resolver: { vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
 				meta: {
@@ -403,7 +403,7 @@ describe("resolver server wiring", () => {
 			expect(identities).toEqual([
 				{
 					proxyUrl: expect.stringMatching(/^http:\/\/resolver-server-account-/),
-					userAgent: getStealthProfile("chrome-146").userAgent,
+					userAgent: getStealthProfile({ browser: "chrome", os: "macos" }).userAgent,
 				},
 			]);
 		} finally {
@@ -441,7 +441,7 @@ describe("resolver server wiring", () => {
 				id: "resolver-required-proxy-auth-flow",
 				version: "1.0.0",
 				runtime: "standard",
-				stealth: { profile: "chrome-146", platform: "macos" },
+				stealth: { browser: "chrome", os: "macos" },
 				proxy: { mode: "required", providers: ["nodemaven"] },
 				resolver: { vendors: ["browser"], kinds: ["cloudflare_interstitial"] },
 				meta: {
@@ -506,7 +506,7 @@ describe("resolver server wiring", () => {
 			expect(identities).toEqual([
 				{
 					proxyUrl: expect.stringMatching(/^http:\/\/resolver-server-account-/),
-					userAgent: getStealthProfile("chrome-146").userAgent,
+					userAgent: getStealthProfile({ browser: "chrome", os: "macos" }).userAgent,
 				},
 			]);
 		} finally {

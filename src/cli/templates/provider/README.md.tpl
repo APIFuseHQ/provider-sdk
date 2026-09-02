@@ -113,9 +113,9 @@ Structured errors return an `error` object with `code`, `message`,
   `connection.secrets`, and read them with `ctx.credential`.
 - Auth flow: call `/auth/start`, then `/auth/continue` with the same `flowId`;
   carry returned `contextPatch` values into the next request's `context`.
-- Stealth/browser runtime: keep access-sensitive operations on `ctx.stealth.fetch()` with an
-  SDK stealth `profile`; the TypeScript stealth runtime uses `wreq-js` internally
-  and supports Chrome, Firefox, and Safari profiles. Use `ctx.browser` only when
+- Stealth/browser runtime: keep access-sensitive operations on `ctx.stealth.fetch()` with
+  structured SDK `stealth: { browser, os }` selection; the TypeScript stealth runtime uses
+  `wreq-js` internally and supports Chrome, Firefox, and Safari. Use `ctx.browser` only when
   the provider needs browser execution; TypeScript browser Providers use
   `browser.engine: "playwright-stealth"` (`nodriver` is Python-runtime only). Install local Chromium with
   `bunx playwright install chromium` or set `APIFUSE__CDP_POOL__URL`.

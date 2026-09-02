@@ -18,16 +18,23 @@ import {
 	vendorFromResolvedSource,
 } from "../config/loader.js";
 import { SDKError, TransportError } from "../errors.js";
-import { getStealthProfile, getStealthProfileIntentAlias } from "../stealth/profiles.js";
+import {
+	DEFAULT_STEALTH_BROWSER,
+	DEFAULT_STEALTH_OS,
+	getStealthProfile,
+	resolveStealthProfileSelection,
+} from "../stealth/profiles.js";
 import type {
 	HttpMethod,
 	StealthClient,
 	StealthFetchOptions,
+	StealthProfileDescriptor,
+	StealthProfileSelection,
 	StealthRedirectHop,
 	StealthResponse,
 	StealthSession,
 } from "../types.js";
-import { StealthCookieJar } from "./stealth-cookies.js";
+import { chrome149HeaderOrder } from "./chrome149-header-order.js";
 import {
 	createProxyAuthIpDeniedError,
 	createProxyEdgeAuthRejectedError,
@@ -66,8 +73,12 @@ import {
 	redactUrlQueryParams,
 	serializeRequestUrl,
 } from "./request-options.js";
+import { StealthCookieJar } from "./stealth-cookies.js";
 
-export const DEFAULT_PROFILE = "chrome-desktop";
+export const DEFAULT_STEALTH_PROFILE: StealthProfileDescriptor = Object.freeze({
+	browser: DEFAULT_STEALTH_BROWSER,
+	os: DEFAULT_STEALTH_OS,
+});
 
 const MISSING_PROXY_WARNING =
 	"[provider-sdk] Provider requested proxy routing, but no proxy URL was configured. Continuing without proxy.";
@@ -103,6 +114,15 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 	warn?: (message: string) => void;
 	/** Abort all requests issued by this client. */
 	signal?: AbortSignal;
+	/** Browser identity and declaration-wide HTTP language defaults. */
+	stealth?: StealthProfileSelection & {
+		/**
+		 * Default Accept-Language value, emitted where Chrome's network layer appends
+		 * it (after Accept-Encoding). Requests may override it through `headers`, in
+		 * which case it is placed like any other caller header.
+		 */
+		acceptLanguage?: string;
+	};
 	/**
 	 * Proxy-only stealth transport overrides. Use only for upstream proxy products
 	 * that terminate CONNECT with a private CA instead of tunneling the origin
@@ -110,20 +130,6 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 	 */
 	proxyStealth?: { insecureSkipVerify?: boolean };
 };
-
-const REMOVED_CHROME_PROFILE_NAMES = new Set([
-	"chrome-120",
-	"chrome-124",
-	"chrome-129",
-	"chrome-130",
-	"chrome-131",
-	"chrome-133",
-	"chrome-144",
-	"chrome-146-psk",
-	"chrome-131-psk",
-	"chrome-130-psk",
-	"edge-131",
-]);
 
 type StealthTransportHeaders = {
 	entries(): IterableIterator<[string, string]>;
@@ -226,64 +232,21 @@ function closestWreqProfile(
 	return closest?.name;
 }
 
-function resolveDefaultWreqProfileMapping(): { identifier: string; os: EmulationOS } {
-	let profile: ReturnType<typeof getStealthProfile>;
-	try {
-		profile = getStealthProfile(DEFAULT_PROFILE);
-	} catch (error) {
-		throw new SDKError(
-			`Default stealth profile "${DEFAULT_PROFILE}" cannot be mapped to a wreq-js browser profile.`,
-			{ cause: error instanceof Error ? error : undefined },
-		);
-	}
-
-	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
-	if (!parseProfileIdentifier(identifier)) {
-		throw new SDKError(
-			`Default stealth profile "${DEFAULT_PROFILE}" cannot be mapped to a wreq-js browser profile.`,
-		);
-	}
-	return { identifier, os: profile.platform };
-}
-
-let defaultWreqProfileMapping: ReturnType<typeof resolveDefaultWreqProfileMapping> | undefined;
-
-function getDefaultWreqProfileMapping(): ReturnType<typeof resolveDefaultWreqProfileMapping> {
-	defaultWreqProfileMapping ??= resolveDefaultWreqProfileMapping();
-	return defaultWreqProfileMapping;
-}
-
 export function resolveWreqProfile(
-	profileName: string,
+	selection: StealthProfileSelection,
 	wreqProfiles: readonly BrowserProfile[],
 ): {
 	browser: BrowserProfile;
 	os: EmulationOS;
 } {
-	if (REMOVED_CHROME_PROFILE_NAMES.has(profileName)) {
-		throw new SDKError(`Unknown stealth profile: ${profileName}`);
-	}
-
-	let identifier: string;
-	let os: EmulationOS;
-	try {
-		const profile = getStealthProfile(profileName);
-		identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
-		os = profile.platform;
-	} catch {
-		// Preserve the previous ctx.stealth.fetch() compatibility behavior: unknown
-		// profile strings still run with the transport default instead of failing
-		// before the request starts. Removed built-in profile aliases above remain
-		// explicit errors so callers do not accidentally pin retired fingerprints.
-		const defaultMapping = getDefaultWreqProfileMapping();
-		identifier = defaultMapping.identifier;
-		os = defaultMapping.os;
-	}
+	const profile = getStealthProfile(selection);
+	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
+	const os = profile.os;
 
 	const browser = closestWreqProfile(identifier, wreqProfiles);
 	if (!browser) {
 		throw new SDKError(
-			`Stealth profile "${profileName}" cannot be mapped to a wreq-js browser profile.`,
+			`Stealth profile ${profile.browser}/${profile.os} cannot be mapped to a wreq-js browser profile.`,
 		);
 	}
 	return { browser, os };
@@ -297,15 +260,337 @@ function headerEntriesFromHeaders(headers: StealthTransportHeaders): [string, st
 	return Array.from(headers.entries());
 }
 
+type HeaderTuple = [string, string];
+
 function normalizeHeaders(
 	headers: Record<string, string | string[] | undefined>,
 ): Record<string, string> {
-	const normalized: Record<string, string> = {};
-	for (const [name, value] of Object.entries(headers)) {
-		if (value === undefined) continue;
-		normalized[name] = Array.isArray(value) ? value.join(", ") : value;
+	return Object.fromEntries(normalizedHeaderEntries(headers));
+}
+
+function trimOuterHttpWhitespace(value: string): string {
+	return value.replace(/^[\t\n\r ]+|[\t\n\r ]+$/g, "");
+}
+
+function normalizedHeaderEntries(
+	headers: Record<string, string | string[] | undefined>,
+): HeaderTuple[] {
+	const entries: HeaderTuple[] = [];
+	const indices = new Map<string, number>();
+	for (const [originalName, originalValue] of Object.entries(headers)) {
+		if (originalValue === undefined) continue;
+		const name = originalName.toLowerCase();
+		const value = (Array.isArray(originalValue) ? originalValue : [originalValue])
+			.map(trimOuterHttpWhitespace)
+			.join(", ");
+		const existingIndex = indices.get(name);
+		if (existingIndex === undefined) {
+			indices.set(name, entries.length);
+			entries.push([name, value]);
+			continue;
+		}
+		const existing = entries[existingIndex];
+		if (existing) existing[1] = `${existing[1]}, ${value}`;
 	}
-	return normalized;
+	return entries;
+}
+
+const SDK_OWNED_EXACT_CHROME_HEADERS = new Set([
+	"host",
+	"connection",
+	"user-agent",
+	"sec-ch-ua",
+	"sec-ch-ua-mobile",
+	"sec-ch-ua-platform",
+	"accept-encoding",
+]);
+
+// Non-pseudo-header order of real Chrome 149. The fixture captures
+// (chrome-ground-truth-capture.json, chrome-extended-capture.json,
+// h1-casing-capture.json) were taken through Playwright's `locale` option, which
+// installs Accept-Language via DevTools next to User-Agent; real Chrome only
+// receives it from //net (URLRequestHttpJob::AddExtraHeaders), after
+// Accept-Encoding and before Cookie, as al-placement-capture.json B/C show.
+const CHROME_HEADER_ORDERS = {
+	navigation: [
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"upgrade-insecure-requests",
+		"user-agent",
+		"accept",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-user",
+		"sec-fetch-dest",
+		"accept-encoding",
+		"accept-language",
+		"cookie",
+		"priority",
+	],
+	// xhr has no fixed table: it is emulated by chrome149HeaderOrder.
+	post: [
+		"content-length",
+		"sec-ch-ua-platform",
+		"user-agent",
+		"sec-ch-ua",
+		"content-type",
+		"sec-ch-ua-mobile",
+		"accept",
+		"origin",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"accept-language",
+		"cookie",
+		"priority",
+	],
+} as const;
+
+const CHROME_H1_HEADER_ORDERS = {
+	navigation: [
+		"host",
+		"connection",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"sec-ch-ua-platform",
+		"upgrade-insecure-requests",
+		"user-agent",
+		"accept",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-user",
+		"sec-fetch-dest",
+		"accept-encoding",
+		"accept-language",
+		"cookie",
+	],
+	xhr: [
+		"host",
+		"connection",
+		"sec-ch-ua-platform",
+		"cache-control",
+		"x-requested-with",
+		"user-agent",
+		"sec-ch-ua",
+		"sec-ch-ua-mobile",
+		"accept",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"accept-language",
+		"cookie",
+	],
+	post: [
+		"host",
+		"connection",
+		"content-length",
+		"sec-ch-ua-platform",
+		"user-agent",
+		"sec-ch-ua",
+		"content-type",
+		"sec-ch-ua-mobile",
+		"accept",
+		"origin",
+		"sec-fetch-site",
+		"sec-fetch-mode",
+		"sec-fetch-dest",
+		"referer",
+		"accept-encoding",
+		"accept-language",
+		"cookie",
+	],
+} as const;
+
+const CHROME_H1_HEADER_NAMES: Record<string, string> = {
+	host: "Host",
+	connection: "Connection",
+	"upgrade-insecure-requests": "Upgrade-Insecure-Requests",
+	"user-agent": "User-Agent",
+	"accept-language": "Accept-Language",
+	accept: "Accept",
+	"sec-fetch-site": "Sec-Fetch-Site",
+	"sec-fetch-mode": "Sec-Fetch-Mode",
+	"sec-fetch-user": "Sec-Fetch-User",
+	"sec-fetch-dest": "Sec-Fetch-Dest",
+	"accept-encoding": "Accept-Encoding",
+	cookie: "Cookie",
+	"cache-control": "Cache-Control",
+	"x-requested-with": "X-Requested-With",
+	referer: "Referer",
+	"content-length": "Content-Length",
+	"content-type": "Content-Type",
+	origin: "Origin",
+	range: "Range",
+};
+
+type ChromeRequestClass = keyof typeof CHROME_HEADER_ORDERS | "xhr";
+
+function chromeHeaderOrder(
+	requestClass: ChromeRequestClass,
+	isHttp1: boolean,
+	caller: ReadonlyMap<string, string>,
+): readonly string[] {
+	if (isHttp1) return CHROME_H1_HEADER_ORDERS[requestClass];
+	if (requestClass !== "xhr") return CHROME_HEADER_ORDERS[requestClass];
+	// Cookie and Referer are forbidden Fetch headers, so they never enter the page
+	// Fetch Headers map the emulator models. Range does occupy a map bucket
+	// (m1-capture.json range_*), but HttpCache::Transaction removes it from the
+	// request headers and PartialData re-adds it at the tail.
+	const order = chrome149HeaderOrder(
+		[...caller.keys()].filter((name) => name !== "cookie" && name !== "referer"),
+	);
+	if (caller.has("range")) order.splice(order.indexOf("range"), 1);
+	// //net appends Accept-Encoding and, unless the caller supplied one,
+	// Accept-Language (URLRequestHttpJob::AddExtraHeaders), then writes the Cookie
+	// header (SetCookieHeaderAndStart); the HTTP cache re-adds a caller Range after
+	// that, and the HTTP/2 Priority header stays last.
+	let insertAt = order.indexOf("accept-encoding") + 1;
+	if (order[insertAt] === "accept-language") insertAt += 1;
+	for (const name of ["cookie", "range"] as const) {
+		if (!caller.has(name)) continue;
+		order.splice(insertAt, 0, name);
+		insertAt += 1;
+	}
+	return order;
+}
+
+function normalizedCallerHeaderEntries(
+	headers: Record<string, string | string[] | undefined>,
+): HeaderTuple[] {
+	const entries = normalizedHeaderEntries(headers);
+	assertCallerHeadersSupported(entries);
+	return entries;
+}
+
+function normalizedCallerHeaderEntriesFromRecord(headers: Record<string, string>): HeaderTuple[] {
+	// The record has been through normalizeHeaders (lowercase, merged names); the
+	// lowercase here only guards later insertions such as the cookie jar's header.
+	const entries: HeaderTuple[] = Object.entries(headers).map(([name, value]) => [
+		name.toLowerCase(),
+		value,
+	]);
+	assertCallerHeadersSupported(entries);
+	return entries;
+}
+
+function assertCallerHeadersSupported(entries: readonly HeaderTuple[]): void {
+	for (const [name] of entries) {
+		if (SDK_OWNED_EXACT_CHROME_HEADERS.has(name) || name.startsWith("sec-fetch-")) {
+			throw new SDKError(`Stealth transport owns the "${name}" header; remove it from headers.`, {
+				code: "STEALTH_HEADER_OVERRIDE_UNSUPPORTED",
+			});
+		}
+	}
+}
+
+function chromeRequestClass(
+	method: StealthMethod,
+	requestedClass?: ChromeRequestClass,
+): ChromeRequestClass {
+	if (requestedClass) return requestedClass;
+	if (method === "POST") return "post";
+	return "navigation";
+}
+
+function secFetchSite(requestUrl: string, referer: string | undefined): string {
+	if (!referer) return "none";
+	try {
+		return new URL(referer).origin === new URL(requestUrl).origin ? "same-origin" : "cross-site";
+	} catch {
+		return "cross-site";
+	}
+}
+
+function requiredEmulationHeader(headers: ReadonlyMap<string, string>, name: string): string {
+	const value = headers.get(name);
+	if (value !== undefined) return value;
+	throw new SDKError(`wreq-js Chrome emulation exposes no ${name} header.`, {
+		code: "STEALTH_PROFILE_UNAVAILABLE",
+	});
+}
+
+function buildChromeHeaderTuples(options: {
+	emulationHeaders: Iterable<[string, string]>;
+	method: StealthMethod;
+	body?: string;
+	headers: Record<string, string>;
+	requestUrl: string;
+	acceptLanguage?: string;
+	requestClass?: ChromeRequestClass;
+}): HeaderTuple[] {
+	const callerEntries = normalizedCallerHeaderEntriesFromRecord(options.headers);
+	const caller = new Map(callerEntries);
+	const emulation = new Map(
+		Array.from(
+			options.emulationHeaders,
+			([name, value]) => [name.toLowerCase(), value] as HeaderTuple,
+		),
+	);
+	const requestClass = chromeRequestClass(options.method, options.requestClass);
+	const referer = caller.get("referer");
+	const fetchSite = secFetchSite(options.requestUrl, referer);
+	const isNavigation = requestClass === "navigation";
+	const values = new Map<string, string>([
+		["sec-ch-ua", requiredEmulationHeader(emulation, "sec-ch-ua")],
+		["sec-ch-ua-mobile", requiredEmulationHeader(emulation, "sec-ch-ua-mobile")],
+		["sec-ch-ua-platform", requiredEmulationHeader(emulation, "sec-ch-ua-platform")],
+		["user-agent", requiredEmulationHeader(emulation, "user-agent")],
+		[
+			"accept-language",
+			caller.get("accept-language") ??
+				options.acceptLanguage ??
+				requiredEmulationHeader(emulation, "accept-language"),
+		],
+		["accept", isNavigation ? requiredEmulationHeader(emulation, "accept") : "*/*"],
+		[
+			"accept-encoding",
+			caller.has("range") ? "identity" : requiredEmulationHeader(emulation, "accept-encoding"),
+		],
+		["priority", isNavigation ? requiredEmulationHeader(emulation, "priority") : "u=1, i"],
+		["sec-fetch-site", fetchSite],
+		["sec-fetch-mode", isNavigation ? "navigate" : "cors"],
+		["sec-fetch-dest", isNavigation ? "document" : "empty"],
+	]);
+	if (isNavigation) {
+		values.set("upgrade-insecure-requests", "1");
+		values.set("sec-fetch-user", "?1");
+	}
+	for (const [name, value] of callerEntries) values.set(name, value);
+	for (const name of ["content-type", "origin", "referer"] as const) {
+		const value = caller.get(name);
+		if (value !== undefined) values.set(name, value);
+	}
+	if (requestClass === "post") {
+		values.set(
+			"content-length",
+			caller.get("content-length") ?? String(Buffer.byteLength(options.body ?? "")),
+		);
+	}
+
+	const isHttp1 = new URL(options.requestUrl).protocol === "http:";
+	if (isHttp1) {
+		values.set("host", new URL(options.requestUrl).host);
+		values.set("connection", "keep-alive");
+	}
+	const order = chromeHeaderOrder(requestClass, isHttp1, caller);
+	const tuples: HeaderTuple[] = [];
+	const placed = new Set<string>();
+	for (const name of order) {
+		const value = values.get(name);
+		if (value === undefined) continue;
+		tuples.push([isHttp1 ? (CHROME_H1_HEADER_NAMES[name] ?? name) : name, value]);
+		placed.add(name);
+	}
+	for (const [name, value] of callerEntries) {
+		if (placed.has(name)) continue;
+		tuples.push([isHttp1 ? (CHROME_H1_HEADER_NAMES[name] ?? name) : name, value]);
+	}
+	return tuples;
 }
 
 function hasOwn(object: object, key: string): boolean {
@@ -322,7 +607,7 @@ function assertNoUnsupportedFingerprintOverrides(options: unknown): void {
 	if (unsupported.length === 0) return;
 
 	throw new SDKError(
-		`ctx.stealth.fetch uses transport-managed browser fingerprints and no longer accepts low-level stealth overrides: ${unsupported.join(", ")}. Use the profile option instead.`,
+		`ctx.stealth.fetch uses transport-managed browser fingerprints and no longer accepts low-level stealth overrides: ${unsupported.join(", ")}. Use stealth.browser and stealth.os instead.`,
 	);
 }
 
@@ -811,11 +1096,17 @@ async function fetchStealthRedirectChain(
 	method: StealthMethod,
 	options: StealthFetchOptions,
 	signal?: AbortSignal,
+	buildHeaders?: (
+		url: string,
+		method: StealthMethod,
+		body: string | undefined,
+		headers: Record<string, string>,
+	) => HeaderTuple[],
 ): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> {
 	let currentUrl = requestUrl;
 	let currentMethod = method;
 	let currentBody = options.body === undefined ? undefined : normalizeBody(options.body);
-	let currentHeaders = { ...(options.headers ?? {}) };
+	let currentHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
 	let followedHops = 0;
 	let response: StealthTransportResponse;
 	const deadline = options.timeout ? performance.now() + options.timeout : undefined;
@@ -823,14 +1114,17 @@ async function fetchStealthRedirectChain(
 	while (true) {
 		throwIfAmbientAborted(signal);
 		const headers = { ...currentHeaders };
-		if (!hasHeader(headers, "Cookie")) {
+		if (!hasHeader(headers, "cookie")) {
 			const cookieHeader = cookieJar.toHeader(currentUrl);
-			if (cookieHeader) headers.Cookie = cookieHeader;
+			if (cookieHeader) headers.cookie = cookieHeader;
 		}
 		const requestInit: StealthRequestInit = {
-			headers: normalizeHeaders(headers),
+			headers: buildHeaders
+				? buildHeaders(currentUrl, currentMethod, currentBody, headers)
+				: headers,
 			method: currentMethod,
 			redirect: "manual",
+			...(new URL(currentUrl).protocol === "http:" ? { disableDefaultHeaders: true } : {}),
 			...(signal ? { signal } : {}),
 		};
 		if (currentBody !== undefined) requestInit.body = currentBody;
@@ -901,38 +1195,40 @@ async function fetchStealthRedirectChain(
 
 function createSessionFetcher(
 	baseUrl: string,
-	defaultProfile: string,
+	defaultProfile: StealthProfileDescriptor,
 	clientOptions: StealthClientOptions,
 ): StealthSession {
 	const clients = new Map<string, WreqSessionCacheEntry>();
 	let closed = false;
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
-	const intentAlias = getStealthProfileIntentAlias(defaultProfile);
-	if (intentAlias) {
-		warn(
-			`[provider-sdk] Stealth profile "${defaultProfile}" pins a browser version and is deprecated. Use the intent profile "${intentAlias}" so TLS, headers, and User-Agent stay aligned with SDK updates; derive an explicit User-Agent with getStealthProfile("${intentAlias}").userAgent instead of hardcoding one.`,
-		);
-	}
 	const cookieJar = new StealthCookieJar([], baseUrl);
 
 	async function getClientEntry(
-		profileName: string,
+		profile: StealthProfileDescriptor,
 		proxyUrl: string | undefined,
 		ignoreTlsErrors: boolean,
+		defaultHeaders?: HeaderTuple[],
 	): Promise<WreqSessionCacheEntry> {
 		if (closed) {
 			throw new TransportError("Stealth session is closed", { status: 0 });
 		}
 		const wreq = await getWreqModule();
-		const { browser, os } = resolveWreqProfile(profileName, wreq.getProfiles());
-		const cacheKey = JSON.stringify({ browser, proxyUrl, ignoreTlsErrors });
+		const { browser, os } = resolveWreqProfile(profile, wreq.getProfiles());
+		const cacheKey = JSON.stringify({
+			browser,
+			os,
+			proxyUrl,
+			ignoreTlsErrors,
+			headerOrder: defaultHeaders?.map(([name]) => name),
+		});
 		let entry = clients.get(cacheKey);
 		if (!entry) {
 			entry = {
 				session: wreq.createSession({
 					browser,
 					os,
+					...(defaultHeaders ? { defaultHeaders } : {}),
 					...(proxyUrl ? { proxy: proxyUrl } : {}),
 					...(ignoreTlsErrors ? { insecure: true } : {}),
 					timeout: 30_000,
@@ -945,14 +1241,15 @@ function createSessionFetcher(
 	}
 
 	async function withClient<T>(
-		profileName: string,
+		profile: StealthProfileDescriptor,
 		proxyUrl: string | undefined,
 		ignoreTlsErrors: boolean,
 		operation: (client: WreqSession) => Promise<T>,
 		signal?: AbortSignal,
+		defaultHeaders?: HeaderTuple[],
 	): Promise<T> {
 		throwIfAmbientAborted(signal);
-		const entry = await getClientEntry(profileName, proxyUrl, ignoreTlsErrors);
+		const entry = await getClientEntry(profile, proxyUrl, ignoreTlsErrors, defaultHeaders);
 		throwIfAmbientAborted(signal);
 		const previous = entry.tail;
 		let release!: () => void;
@@ -1038,9 +1335,11 @@ function createSessionFetcher(
 
 	const session: StealthSession = {
 		async fetch(url, options: StealthFetchOptions = {}) {
+			const requestProfile = resolveStealthProfileSelection(options.stealth, defaultProfile);
 			const { hasExplicitRetryPolicy, method, stealthRetryOptions } = (() => {
 				try {
 					const method = normalizeMethod(options.method ?? "GET");
+					normalizedCallerHeaderEntries(options.headers ?? {});
 					const hasExplicitRetryPolicy = options.retry !== undefined;
 					const stealthRetryOptions =
 						normalizeProxyTransportRetryOptions(options.retry, {
@@ -1163,15 +1462,50 @@ function createSessionFetcher(
 							options.stealth?.insecureSkipVerify ??
 								(!hasPolicyProxy && proxy && clientOptions.proxyStealth?.insecureSkipVerify),
 						);
-						const profileName = options.profile ?? defaultProfile;
 						serializedUrl = serializeRequestUrl(
 							resolveUrl(baseUrl, url),
 							options.params,
 							sensitiveParams,
 						);
 						const { requestUrl } = serializedUrl;
+						const wreq = await getWreqModule();
+						const mapping = resolveWreqProfile(requestProfile, wreq.getProfiles());
+						const chromeEmulationHeaders = mapping.browser.startsWith("chrome_")
+							? Array.from(
+									wreq.getEmulationHeaders(mapping.browser, mapping.os),
+									([name, value]) => [String(name), String(value)] as HeaderTuple,
+								)
+							: undefined;
+						const buildOrderedHeaders = chromeEmulationHeaders
+							? (
+									currentUrl: string,
+									currentMethod: StealthMethod,
+									currentBody: string | undefined,
+									currentHeaders: Record<string, string>,
+								) =>
+									buildChromeHeaderTuples({
+										emulationHeaders: chromeEmulationHeaders,
+										method: currentMethod,
+										body: currentBody,
+										headers: currentHeaders,
+										requestUrl: currentUrl,
+										acceptLanguage: clientOptions.stealth?.acceptLanguage,
+										requestClass: options.stealth?.requestClass,
+									})
+							: undefined;
+						const initialHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
+						if (!hasHeader(initialHeaders, "cookie")) {
+							const cookieHeader = cookieJar.toHeader(requestUrl);
+							if (cookieHeader) initialHeaders.cookie = cookieHeader;
+						}
+						const defaultHeaders = buildOrderedHeaders?.(
+							requestUrl,
+							method,
+							options.body === undefined ? undefined : normalizeBody(options.body),
+							initialHeaders,
+						);
 						const { normalized, response } = await withClient(
-							profileName,
+							requestProfile,
 							proxy,
 							ignoreTlsErrors,
 							(transport) =>
@@ -1182,8 +1516,10 @@ function createSessionFetcher(
 									method,
 									options,
 									clientOptions.signal,
+									buildOrderedHeaders,
 								),
 							clientOptions.signal,
+							defaultHeaders,
 						);
 
 						if (proxy && isProxyConnectFailureResponse(response, normalized.body)) {
@@ -1337,10 +1673,7 @@ function createSessionFetcher(
 
 				const proxyAuthDiagnostic =
 					stalePoolError && stalePoolDiagnosticProxy
-						? await classifyProxyAuthDiagnostic(
-								options.profile ?? defaultProfile,
-								stalePoolDiagnosticProxy,
-							)
+						? await classifyProxyAuthDiagnostic(requestProfile, stalePoolDiagnosticProxy)
 						: undefined;
 				if (proxyAuthDiagnostic === "source_ip_denied") {
 					throw createProxyAuthIpDeniedError(
@@ -1587,12 +1920,12 @@ function createSessionFetcher(
 	return session;
 
 	async function classifyProxyAuthDiagnostic(
-		profileName: string,
+		profile: StealthProfileDescriptor,
 		proxy: string,
 	): Promise<"source_ip_denied" | "edge_auth_rejected" | undefined> {
 		try {
 			return await withClient(
-				profileName,
+				profile,
 				proxy,
 				false,
 				async (client) => {
@@ -1654,18 +1987,17 @@ function hasHeader(headers: Record<string, string>, name: string): boolean {
 
 export function createStealthClient(
 	baseUrl: string,
-	defaultProfileOrOptions: string | StealthClientOptions = DEFAULT_PROFILE,
 	clientOptions: StealthClientOptions = {},
 ): StealthClient {
-	const defaultProfile =
-		typeof defaultProfileOrOptions === "string" ? defaultProfileOrOptions : DEFAULT_PROFILE;
-	const resolvedClientOptions =
-		typeof defaultProfileOrOptions === "string" ? clientOptions : defaultProfileOrOptions;
+	if (typeof clientOptions === "string") {
+		resolveStealthProfileSelection(clientOptions as unknown as StealthProfileSelection);
+	}
+	const defaultProfile = resolveStealthProfileSelection(clientOptions.stealth);
 	let sharedSession: StealthSession | null = null;
 
 	function getSharedSession(): StealthSession {
 		if (!sharedSession) {
-			sharedSession = createSessionFetcher(baseUrl, defaultProfile, resolvedClientOptions);
+			sharedSession = createSessionFetcher(baseUrl, defaultProfile, clientOptions);
 		}
 
 		return sharedSession;
@@ -1675,9 +2007,9 @@ export function createStealthClient(
 		fetch(url: string, options?: StealthFetchOptions) {
 			return getSharedSession().fetch(url, options);
 		},
-		createSession(opts?: { profile?: string }) {
-			const sessionProfile = opts?.profile ?? defaultProfile;
-			return createSessionFetcher(baseUrl, sessionProfile, resolvedClientOptions);
+		createSession(opts?: { stealth?: StealthProfileSelection }) {
+			const sessionProfile = resolveStealthProfileSelection(opts?.stealth, defaultProfile);
+			return createSessionFetcher(baseUrl, sessionProfile, clientOptions);
 		},
 		close() {
 			sharedSession?.close();

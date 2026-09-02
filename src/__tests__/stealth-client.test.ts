@@ -1,21 +1,27 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import { z } from "zod";
-
-import { assertIsError, createProviderDefinitionDouble, emptyArray } from "./test-utils.js";
+import alPlacementCapture from "../../al-placement-capture.json";
+import chromeAcceptOverride from "../../chrome-accept-override.json";
+import chromeExtendedCapture from "../../chrome-extended-capture.json";
+import chromeGroundTruth from "../../chrome-ground-truth-capture.json";
+import chromeValueTransform from "../../chrome-value-transform.json";
+import h1CasingCapture from "../../h1-casing-capture.json";
 import {
 	ProviderError,
 	SDKError,
 	StealthCookieStoreVersionError,
 	TransportError,
 } from "../errors.js";
+import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
 import { normalizeResponse } from "../runtime/stealth.js";
 import {
 	type DeclarativeStealthResponse,
 	HttpRetryUnsafeMethodPolicy,
+	type ProviderDefinition,
 	type StealthCookieStoreV1,
 	type StealthRedirectHop,
-	type ProviderDefinition,
 } from "../types.js";
+import { assertIsError, createProviderDefinitionDouble, emptyArray } from "./test-utils.js";
 
 type MockSessionCookie = {
 	name: string;
@@ -69,6 +75,29 @@ const mockStealthState = {
 	queuedErrors: [] as (Error | (() => Error))[],
 	queuedCloseErrors: emptyArray<Error>(),
 };
+
+function allWreqCalls(): MockWreqCall[] {
+	return mockStealthState.clients.flatMap((client) => client.calls);
+}
+
+function requestHeader(
+	init: Record<string, unknown> | undefined,
+	name: string,
+): string | undefined {
+	const headers = init?.headers;
+	if (Array.isArray(headers)) {
+		return (headers as [string, string][]).find(
+			([headerName]) => headerName.toLowerCase() === name.toLowerCase(),
+		)?.[1];
+	}
+	if (headers && typeof headers === "object") {
+		const entry = Object.entries(headers).find(
+			([headerName]) => headerName.toLowerCase() === name.toLowerCase(),
+		);
+		return typeof entry?.[1] === "string" ? entry[1] : undefined;
+	}
+	return undefined;
+}
 
 function toHeaders(headers: MockWreqResponse["headers"]): Headers {
 	const result = new Headers();
@@ -198,17 +227,39 @@ class MockWreqSession {
 	}
 }
 
+function mockEmulationHeaders(profile: string, os = "macos") {
+	const version = /^chrome_(\d+)$/.exec(profile)?.[1] ?? "149";
+	const platform = os === "windows" ? '"Windows"' : os === "linux" ? '"Linux"' : '"macOS"';
+	const osToken =
+		os === "windows"
+			? "Windows NT 10.0; Win64; x64"
+			: os === "linux"
+				? "X11; Linux x86_64"
+				: "Macintosh; Intel Mac OS X 10_15_7";
+	return new Map([
+		["sec-ch-ua", `"Google Chrome";v="${version}", "Chromium";v="${version}"`],
+		["sec-ch-ua-mobile", "?0"],
+		["sec-ch-ua-platform", platform],
+		[
+			"user-agent",
+			`Mozilla/5.0 (${osToken}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`,
+		],
+		["sec-fetch-dest", "document"],
+		["sec-fetch-mode", "navigate"],
+		["sec-fetch-site", "none"],
+		[
+			"accept",
+			"text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+		],
+		["accept-encoding", "gzip, deflate, br, zstd"],
+		["accept-language", "en-US,en;q=0.9"],
+		["priority", "u=0, i"],
+	]);
+}
+
 mock.module("wreq-js", () => ({
 	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
-	getEmulationHeaders: (profile: string) => {
-		const version = /^chrome_(\d+)$/.exec(profile)?.[1] ?? "149";
-		return new Map([
-			[
-				"user-agent",
-				`Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${version}.0.0.0 Safari/537.36`,
-			],
-		]);
-	},
+	getEmulationHeaders: mockEmulationHeaders,
 	getProfiles: () => [
 		"chrome_145",
 		"chrome_146",
@@ -484,7 +535,7 @@ describe("createStealthClient", () => {
 		const client = createStealthClient("https://example.com");
 
 		const response = (await client.fetch("/health", {
-			headers: { accept: "text/plain" },
+			headers: { "x-request-id": "health" },
 		})) as DeclarativeStealthResponse;
 
 		expect(response.status).toBe(200);
@@ -890,14 +941,13 @@ describe("createStealthClient", () => {
 
 		expect(session.cookies.toHeader("https://host-a.example/account")).toBe("host_a=one");
 		expect(session.cookies.toHeader("https://host-b.example/account")).toBe("host_b=two");
-		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
-		expect(mockStealthState.clients[0]?.calls[2]?.init?.headers).toMatchObject({
-			Cookie: "host_a=one",
-		});
-		expect(mockStealthState.clients[0]?.calls[2]?.init?.headers).not.toMatchObject({
-			Cookie: expect.stringContaining("host_b=two"),
-		});
-		expect(mockStealthState.clients[0]?.clearCookieCalls).toBe(3);
+		const calls = allWreqCalls();
+		expect(requestHeader(calls[1]?.init, "cookie")).toBeUndefined();
+		expect(requestHeader(calls[2]?.init, "cookie")).toBe("host_a=one");
+		expect(requestHeader(calls[2]?.init, "cookie")).not.toContain("host_b=two");
+		expect(
+			mockStealthState.clients.reduce((total, client) => total + client.clearCookieCalls, 0),
+		).toBe(3);
 	});
 
 	it("serializes concurrent fetches that share a native session", async () => {
@@ -936,16 +986,12 @@ describe("createStealthClient", () => {
 
 		expect(callsWhileFirstPending).toBe(1);
 		expect(clearsWhileFirstPending).toBe(1);
-		expect(mockStealthState.clients[0]?.calls).toEqual([
-			expect.objectContaining({
-				url: "https://example.com/first",
-				init: expect.objectContaining({ headers: { Cookie: "request=first" } }),
-			}),
-			expect.objectContaining({
-				url: "https://example.com/second",
-				init: expect.objectContaining({ headers: { Cookie: "request=second" } }),
-			}),
-		]);
+		expect(requestHeader(mockStealthState.clients[0]?.calls[0]?.init, "cookie")).toBe(
+			"request=first",
+		);
+		expect(requestHeader(mockStealthState.clients[0]?.calls[1]?.init, "cookie")).toBe(
+			"request=second",
+		);
 	});
 
 	it("does not attach a host-only cookie to a request for another host", async () => {
@@ -996,10 +1042,9 @@ describe("createStealthClient", () => {
 		await session.fetch("https://host-a.example/next");
 		await session.fetch("https://host-b.example/next");
 
-		expect(mockStealthState.clients[0]?.calls[0]?.init?.headers).toMatchObject({
-			Cookie: "bridge=host-a",
-		});
-		expect(mockStealthState.clients[0]?.calls[1]?.init?.headers).not.toHaveProperty("Cookie");
+		const calls = allWreqCalls();
+		expect(requestHeader(calls[0]?.init, "cookie")).toBe("bridge=host-a");
+		expect(requestHeader(calls[1]?.init, "cookie")).toBeUndefined();
 	});
 
 	it("applies Domain suffix rules and rejects unrelated or public-suffix domains", async () => {
@@ -1180,35 +1225,26 @@ describe("createStealthClient", () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
 
 		for (const profile of ["chrome-129", "chrome-130", "chrome-131"]) {
-			const client = createStealthClient("https://example.com", profile);
-
-			await expect(client.fetch("/profile")).rejects.toThrow(SDKError);
+			// test-invalid: legacy JavaScript callers can still pass versioned string profiles.
+			expect(() =>
+				createStealthClient("https://example.com", profile as never).fetch("/profile"),
+			).toThrow(SDKError);
 		}
 
 		expect(mockStealthState.clients).toHaveLength(0);
 	});
 
-	it("warns through the stealth diagnostic channel for a registered version pin", async () => {
-		const warnings: string[] = [];
+	it("rejects a version-pinned profile before starting wreq", async () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
 
-		createStealthClient("https://example.com", "chrome-146", {
-			warn: (message) => warnings.push(message),
-		}).createSession();
-		createStealthClient("https://example.com", "chrome-desktop", {
-			warn: (message) => warnings.push(message),
-		}).createSession();
-
-		expect(warnings).toEqual([
-			expect.stringContaining(
-				'Stealth profile "chrome-146" pins a browser version and is deprecated',
-			),
-		]);
-		expect(warnings[0]).toContain('Use the intent profile "chrome-desktop"');
-		expect(warnings[0]).toContain('getStealthProfile("chrome-desktop").userAgent');
+		// test-invalid: legacy JavaScript callers can still pass versioned string profiles.
+		expect(() =>
+			createStealthClient("https://example.com", "chrome-146" as never).createSession(),
+		).toThrow(SDKError);
+		expect(mockStealthState.clients).toHaveLength(0);
 	});
 
-	it("maps chrome-146 profile to a wreq browser profile and preserves headers", async () => {
+	it("createSession accepts a structured profile override", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 200,
 			body: "ok",
@@ -1216,95 +1252,61 @@ describe("createStealthClient", () => {
 		});
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", "chrome-146");
-		const session = client.createSession();
-
-		await session.fetch("/profile", {
-			headers: { "User-Agent": "provider-ua" },
+		const client = createStealthClient("https://example.com", {
+			stealth: { browser: "firefox", os: "windows" },
 		});
-
-		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "chrome_146",
-			os: "macos",
-		});
-		expect(mockStealthState.clients[0]?.calls[0]?.init).toMatchObject({
-			headers: { "User-Agent": "provider-ua" },
-			method: "GET",
-		});
-	});
-
-	it("createSession accepts a canonical profile override", async () => {
-		mockStealthState.queuedResponses.push({
-			status: 200,
-			body: "ok",
-			headers: { "content-type": "text/plain" },
-		});
-
-		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", "firefox-147");
-		const session = client.createSession({ profile: "chrome-146" });
+		const session = client.createSession({ stealth: { browser: "chrome", os: "linux" } });
 
 		await session.fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "chrome_146",
-			os: "macos",
-		});
-	});
-
-	it("keeps Firefox profiles on Firefox impersonation instead of falling back to Chrome", async () => {
-		mockStealthState.queuedResponses.push({
-			status: 200,
-			body: "ok",
-			headers: { "content-type": "text/plain" },
-		});
-
-		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", "firefox-132");
-
-		await client.fetch("/profile");
-
-		expect(mockStealthState.clients[0]?.options).toMatchObject({
-			browser: "firefox_133",
-			os: "macos",
-		});
-	});
-
-	it("keeps unknown profile names on the transport default for compatibility", async () => {
-		mockStealthState.queuedResponses.push({
-			status: 200,
-			body: "ok",
-			headers: { "content-type": "text/plain" },
-		});
-
-		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", "custom-profile");
-
-		await client.fetch("/profile");
-
-		expect(mockStealthState.clients[0]?.options).toMatchObject({
 			browser: "chrome_149",
+			os: "linux",
+		});
+	});
+
+	it("keeps Firefox selection on Firefox impersonation instead of falling back to Chrome", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "ok",
+			headers: { "content-type": "text/plain" },
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			stealth: { browser: "firefox", os: "macos" },
+		});
+
+		await client.fetch("/profile");
+
+		expect(mockStealthState.clients[0]?.options).toMatchObject({
+			browser: "firefox_147",
 			os: "macos",
 		});
 	});
 
-	it("maps unknown profile names through the derived default profile", async () => {
-		const { resolveWreqProfile } = await import("../runtime/stealth.js");
-
-		expect(resolveWreqProfile("custom-profile", ["chrome_145", "firefox_147"])).toEqual({
-			browser: "chrome_145",
-			os: "macos",
-		});
+	it("rejects every removed string selection instead of defaulting it", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		for (const name of ["chrome-desktop", "chrome-windows", "custom-profile"]) {
+			// test-invalid: legacy JavaScript callers can still pass removed string profiles.
+			expect(() => createStealthClient("https://example.com", name as never)).toThrow(
+				"Stealth profile names are no longer supported",
+			);
+		}
 	});
 
-	it("maps Safari profiles to same-family wreq impersonation", async () => {
+	it("maps Safari OS selection to the matching wreq family", async () => {
 		mockStealthState.queuedResponses.push(
 			{ status: 200, body: "desktop", headers: {} },
 			{ status: 200, body: "ios", headers: {} },
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		await createStealthClient("https://example.com", "safari-17").fetch("/profile");
-		await createStealthClient("https://example.com", "ios-safari-26").fetch("/profile");
+		await createStealthClient("https://example.com", {
+			stealth: { browser: "safari", os: "macos" },
+		}).fetch("/profile");
+		await createStealthClient("https://example.com", {
+			stealth: { browser: "safari", os: "ios" },
+		}).fetch("/profile");
 
 		expect(mockStealthState.clients[0]?.options).toMatchObject({
 			browser: "safari_17.0",
@@ -1314,6 +1316,25 @@ describe("createStealthClient", () => {
 			browser: "safari_ios_26",
 			os: "ios",
 		});
+	});
+
+	it("applies a per-request profile override once and preserves the client default", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "override", headers: {} },
+			{ status: 200, body: "default", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			stealth: { browser: "chrome", os: "windows" },
+		});
+
+		await client.fetch("/override", { stealth: { os: "linux" } });
+		await client.fetch("/default");
+
+		expect(mockStealthState.clients.map((entry) => entry.options?.os)).toEqual([
+			"linux",
+			"windows",
+		]);
 	});
 
 	it("rejects low-level stealth fingerprint overrides that the transport owns internally", async () => {
@@ -1395,7 +1416,7 @@ describe("createStealthClient", () => {
 
 		await client.fetch("/post", {
 			body: JSON.stringify({ ok: true }),
-			headers: { accept: "text/plain" },
+			headers: { "content-type": "application/json" },
 			method: "POST",
 			timeout: 12_000,
 		});
@@ -1403,9 +1424,9 @@ describe("createStealthClient", () => {
 		const requestInit = mockStealthState.clients[0]?.calls[0]?.init;
 		expect(requestInit).toMatchObject({
 			body: '{"ok":true}',
-			headers: { accept: "text/plain" },
 			method: "POST",
 		});
+		expect(requestHeader(requestInit, "content-type")).toBe("application/json");
 		expect(requestInit?.timeout).toBeGreaterThan(0);
 		expect(requestInit?.timeout).toBeLessThanOrEqual(12_000);
 	});
@@ -1575,7 +1596,7 @@ describe("createStealthClient", () => {
 		expect(result.cookies).toEqual({ a: "1", b: "2", c: "3" });
 		expect(result.cookieStore.version).toBe(1);
 		expect(result.cookieStore.jar.cookies.map((cookie) => cookie.key)).toEqual(["a", "b", "c"]);
-		expect(mockStealthState.clients[0]?.calls).toEqual([
+		expect(allWreqCalls()).toEqual([
 			expect.objectContaining({
 				url: "https://example.com/login",
 				init: expect.objectContaining({
@@ -1765,7 +1786,7 @@ describe("createStealthClient", () => {
 			body: "payload",
 		});
 
-		const calls = mockStealthState.clients[0]?.calls ?? [];
+		const calls = allWreqCalls();
 		expect(calls[1]?.init).toMatchObject({
 			method: "GET",
 			redirect: "manual",
@@ -2521,6 +2542,662 @@ describe("createStealthClient", () => {
 	});
 });
 
+describe("Chrome 149 header parity", () => {
+	const oses = ["windows", "macos", "linux"] as const;
+	// Every fixture capture below was taken through Playwright's `locale` option,
+	// which installs Accept-Language via DevTools next to User-Agent. Real Chrome
+	// receives it only from //net (URLRequestHttpJob::AddExtraHeaders): after
+	// Accept-Encoding, before Cookie. Moving it is exact whenever the harness key did
+	// not itself trigger a hash-table expansion, which al-placement-capture.json
+	// B_nolocale_none confirms for the XHR shape and which holds for every capture
+	// used here (at most two caller map keys, or a caller-supplied Accept-Language).
+	function realChromeOrder(harnessOrder: readonly string[]): string[] {
+		const acceptLanguage = harnessOrder.find((name) => name.toLowerCase() === "accept-language");
+		if (acceptLanguage === undefined) throw new Error("Harness capture lacks Accept-Language");
+		const order = harnessOrder.filter((name) => name !== acceptLanguage);
+		const acceptEncoding = order.findIndex((name) => name.toLowerCase() === "accept-encoding");
+		if (acceptEncoding < 0) throw new Error("Harness capture lacks Accept-Encoding");
+		order.splice(acceptEncoding + 1, 0, acceptLanguage);
+		return order;
+	}
+	const honouredOverrides = new Map(
+		Object.values(chromeAcceptOverride)
+			.filter((capture) => capture.honoured)
+			.map((capture) => [capture.header.toLowerCase(), capture]),
+	);
+	const classes = [
+		{
+			name: "document_navigation_cold",
+			expected: realChromeOrder(chromeGroundTruth.document_navigation_cold.order),
+			options: {},
+		},
+		{
+			name: "document_navigation_same_origin",
+			expected: realChromeOrder(chromeGroundTruth.document_navigation_same_origin.order),
+			options: {},
+		},
+		{
+			name: "xhr",
+			expected: [
+				...chromeGroundTruth.fetch_xhr.order.slice(0, 4),
+				...alPlacementCapture.B_nolocale_none.order,
+			],
+			options: {
+				stealth: { requestClass: "xhr" },
+				headers: { Referer: "https://example.com/page" },
+			},
+		},
+		{
+			name: "post",
+			expected: realChromeOrder(chromeGroundTruth.fetch_post_json.order),
+			options: {
+				method: "POST" as const,
+				body: '{"ok":true}',
+				headers: {
+					Referer: "https://example.com/page",
+					Origin: "https://example.com",
+					"Content-Type": "application/json",
+				},
+			},
+		},
+	] as const;
+
+	beforeEach(() => {
+		mockStealthState.clients.length = 0;
+		mockStealthState.queuedResponses.length = 0;
+		mockStealthState.queuedErrors.length = 0;
+		mockStealthState.queuedCloseErrors.length = 0;
+	});
+
+	it("derives the same real-Chrome XHR order from the harness capture and the no-DevTools capture", () => {
+		expect(realChromeOrder(chromeGroundTruth.fetch_xhr.order)).toEqual([
+			...chromeGroundTruth.fetch_xhr.order.slice(0, 4),
+			...alPlacementCapture.B_nolocale_none.order,
+		]);
+	});
+
+	for (const os of oses) {
+		for (const requestClass of classes) {
+			it(`matches real-Chrome ${requestClass.name} order on ${os}`, async () => {
+				mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+				const { createStealthClient } = await import("../runtime/stealth.js");
+				await createStealthClient("https://example.com", {
+					stealth: { browser: "chrome", os },
+				}).fetch("/api", requestClass.options);
+
+				const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+				expect(defaults.map(([name]) => name)).toEqual(requestClass.expected.slice(4));
+				const wreqHeaders = mockEmulationHeaders("chrome_149", os);
+				expect(requestHeader({ headers: defaults }, "sec-ch-ua-platform")).toBe(
+					wreqHeaders.get("sec-ch-ua-platform"),
+				);
+				expect(requestHeader({ headers: defaults }, "user-agent")).toBe(
+					wreqHeaders.get("user-agent"),
+				);
+			});
+		}
+	}
+
+	it("ignores scrambled caller key order for captured fields", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/api", {
+			method: "POST",
+			body: '{"ok":true}',
+			headers: {
+				Referer: "https://example.com/page",
+				Origin: "https://example.com",
+				"Content-Type": "application/json",
+			},
+		});
+
+		const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+		expect(defaults.map(([name]) => name)).toEqual(
+			realChromeOrder(chromeGroundTruth.fetch_post_json.order).slice(4),
+		);
+	});
+
+	it("emits Accept-Language where //net appends it and honours client and request overrides", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "default", headers: {} },
+			{ status: 200, body: "override", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			stealth: { browser: "chrome", os: "windows", acceptLanguage: "ja" },
+		});
+		await client.fetch("/api");
+		await client.fetch("/api", { headers: { "Accept-Language": "ko" } });
+
+		const expected = realChromeOrder(chromeGroundTruth.document_navigation_cold.order).slice(4);
+		expect(expected.indexOf("accept-language")).toBe(expected.indexOf("accept-encoding") + 1);
+		const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+		expect(defaults.map(([name]) => name)).toEqual(expected);
+		expect(requestHeader({ headers: defaults }, "accept-language")).toBe("ja");
+		const overrideHeaders = mockStealthState.clients[0]?.calls[1]?.init?.headers as [
+			string,
+			string,
+		][];
+		expect(overrideHeaders.map(([name]) => name)).toEqual(expected);
+		expect(requestHeader({ headers: overrideHeaders }, "accept-language")).toBe("ko");
+	});
+
+	interface AcceptLanguagePlacementCapture {
+		readonly variant: string;
+		readonly caller: readonly string[];
+		readonly order: readonly string[];
+		readonly acceptLanguage: string;
+	}
+	const acceptLanguagePlacementCases: Array<[string, AcceptLanguagePlacementCapture]> =
+		Object.entries(alPlacementCapture).filter(([, capture]) => capture.variant !== "A_locale");
+	for (const [label, capture] of acceptLanguagePlacementCases) {
+		it(`reproduces the no-DevTools ${label} capture through the transport`, async () => {
+			// B: Chrome's built-in default value; C: --accept-lang=ja, which maps to the
+			// client-wide stealth.acceptLanguage option. Same position either way.
+			const configured = capture.variant === "C_acceptlang";
+			mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com", {
+				stealth: {
+					browser: "chrome",
+					os: "linux",
+					...(configured ? { acceptLanguage: capture.acceptLanguage } : {}),
+				},
+			}).fetch("/api", {
+				stealth: { requestClass: "xhr" },
+				headers: {
+					Referer: "https://example.com/",
+					...Object.fromEntries(capture.caller.map((name) => [name, "1"])),
+				},
+			});
+			const init = mockStealthState.clients[0]?.calls[0]?.init;
+			const names = (init?.headers as [string, string][]).map(([name]) => name);
+			expect(names).toEqual([...capture.order]);
+			expect(requestHeader(init, "accept-language")).toBe(capture.acceptLanguage);
+		});
+	}
+
+	it("keeps a caller-supplied Accept-Language at its Fetch map bucket on XHR", async () => {
+		// Captured under the locale harness, but InspectorEmulationAgent::PrepareRequest
+		// skips a key the page already set, so the map was untouched: this is also
+		// real-Chrome order, and //net (SetHeaderIfMissing) appends no second
+		// Accept-Language.
+		const capture = chromeValueTransform.accept_language_override;
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com", {
+			stealth: { browser: "chrome", os: "linux", acceptLanguage: "ja" },
+		}).fetch("/api", {
+			stealth: { requestClass: "xhr" },
+			headers: { Referer: capture.observed.referer, ...capture.sent },
+		});
+		const headers = mockStealthState.clients[0]?.calls[0]?.init?.headers as [string, string][];
+		expect(headers.map(([name]) => name)).toEqual(Object.keys(capture.observed));
+		expect(headers.filter(([name]) => name === "accept-language")).toEqual([
+			["accept-language", capture.observed["accept-language"]],
+		]);
+	});
+
+	it("places cookies at the captured position for every request class", async () => {
+		const xhrCookieOrder = [...alPlacementCapture.B_nolocale_none.order];
+		xhrCookieOrder.splice(xhrCookieOrder.indexOf("priority"), 0, "cookie");
+		const cases = [
+			[
+				"navigation",
+				realChromeOrder(chromeExtendedCapture.navigation_with_cookie.order).slice(4),
+				{},
+			],
+			["xhr", xhrCookieOrder, { Referer: "https://example.com/" }],
+			[
+				"post",
+				realChromeOrder(chromeExtendedCapture.post_form_urlencoded.order).slice(4),
+				{
+					"Content-Type": "application/x-www-form-urlencoded",
+					Origin: "https://example.com",
+					Referer: "https://example.com/",
+				},
+			],
+		] as const;
+		for (const [requestClass, expectedWithPseudo, headers] of cases) {
+			mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com").fetch("/api", {
+				method: requestClass === "post" ? "POST" : "GET",
+				body: requestClass === "post" ? "a=1" : undefined,
+				stealth: { requestClass },
+				headers: { ...headers, Cookie: "probe_sid=abc123" },
+			});
+			const init = mockStealthState.clients.at(-1)?.calls[0]?.init;
+			const names = (init?.headers as [string, string][]).map(([name]) => name);
+			expect(names).toEqual(expectedWithPseudo);
+			expect(names.indexOf("cookie")).toBe(expectedWithPseudo.indexOf("cookie"));
+			expect(names.indexOf("cookie")).toBe(names.indexOf("accept-language") + 1);
+		}
+	});
+
+	it("uses identity encoding for Range and compressed encoding otherwise", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "range", headers: {} },
+			{ status: 200, body: "normal", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		await client.fetch("/range", {
+			stealth: { requestClass: "xhr" },
+			headers: { Referer: "https://example.com/", Range: "bytes=0-1023" },
+		});
+		await client.fetch("/normal", { stealth: { requestClass: "xhr" } });
+		const calls = allWreqCalls();
+		expect(requestHeader(calls[0]?.init, "accept-encoding")).toBe("identity");
+		expect(requestHeader(calls[1]?.init, "accept-encoding")).toBe("gzip, deflate, br, zstd");
+	});
+
+	it("uses HashMap order for h2 extension headers while preserving measured h1 order", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "h2", headers: {} },
+			{ status: 200, body: "h1", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const h2 = createStealthClient("https://example.com");
+		await h2.fetch("/xhr", {
+			stealth: { requestClass: "xhr" },
+			headers: {
+				"Cache-Control": "no-cache",
+				"If-None-Match": '"etag-value"',
+				Pragma: "no-cache",
+				"X-Requested-With": "XMLHttpRequest",
+				Referer: "https://example.com/",
+				Cookie: "probe_sid=abc123",
+			},
+		});
+		const h1 = createStealthClient("http://example.com");
+		await h1.fetch("/xhr", {
+			stealth: { requestClass: "xhr" },
+			headers: {
+				"Cache-Control": "no-cache",
+				"X-Requested-With": "XMLHttpRequest",
+				Referer: "http://example.com/",
+				Cookie: "probe_sid=abc123",
+			},
+		});
+		const h2Names = (
+			mockStealthState.clients[0]?.calls[0]?.init?.headers as [string, string][]
+		).map(([name]) => name);
+		const h2Expected = chrome149HeaderOrder([
+			"Cache-Control",
+			"If-None-Match",
+			"Pragma",
+			"X-Requested-With",
+		]);
+		h2Expected.splice(h2Expected.indexOf("accept-language") + 1, 0, "cookie");
+		expect(h2Names).toEqual(h2Expected);
+		const h1Names = (
+			mockStealthState.clients[1]?.calls[0]?.init?.headers as [string, string][]
+		).map(([name]) => name);
+		expect(h1Names).toEqual(realChromeOrder(h1CasingCapture.chrome_xhr.names));
+	});
+
+	it("allows a refererless XHR without navigation-only headers", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/api", {
+			stealth: { requestClass: "xhr" },
+		});
+		const init = mockStealthState.clients[0]?.calls[0]?.init;
+		expect(requestHeader(init, "upgrade-insecure-requests")).toBeUndefined();
+		expect(requestHeader(init, "sec-fetch-user")).toBeUndefined();
+		expect(requestHeader(init, "accept")).toBe("*/*");
+	});
+
+	it("keeps h1 casing and Host/Connection order while omitting priority", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("http://example.com").fetch("/", {
+			stealth: { requestClass: "navigation" },
+			headers: { Cookie: "probe_sid=abc123" },
+		});
+		const names = (mockStealthState.clients[0]?.calls[0]?.init?.headers as [string, string][]).map(
+			([name]) => name,
+		);
+		expect(names).toEqual(realChromeOrder(h1CasingCapture.chrome_navigation.names));
+		expect(names[0]).toBe("Host");
+		expect(names[1]).toBe("Connection");
+		expect(names).not.toContain("priority");
+
+		mockStealthState.queuedResponses.push({ status: 200, body: "h2", headers: {} });
+		await createStealthClient("https://example.com").fetch("/", {
+			stealth: { requestClass: "navigation" },
+		});
+		const h2Names = (
+			mockStealthState.clients[1]?.calls[0]?.init?.headers as [string, string][]
+		).map(([name]) => name);
+		expect(h2Names).toContain("priority");
+	});
+
+	const overridePositionCases = [
+		{
+			capture: honouredOverrides.get("accept"),
+			order: chromeValueTransform.accept_padded.observed,
+		},
+		{
+			capture: honouredOverrides.get("priority"),
+			order: chromeValueTransform.priority_custom.observed,
+		},
+		{
+			capture: honouredOverrides.get("upgrade-insecure-requests"),
+			order: chromeValueTransform.uir_zero.observed,
+		},
+	] as const;
+
+	for (const { capture, order } of overridePositionCases) {
+		if (!capture) throw new Error("Missing honoured Chrome override capture");
+		it(`honours ${capture.header} at its captured caller-provided XHR position`, async () => {
+			mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com").fetch("/api", {
+				stealth: { requestClass: "xhr" },
+				headers: {
+					Referer: chromeValueTransform.accept_padded.observed.referer,
+					[capture.header]: capture.requested,
+				},
+			});
+			const init = mockStealthState.clients[0]?.calls[0]?.init;
+			const headers = init?.headers as [string, string][];
+			expect(headers.map(([name]) => name)).toEqual(realChromeOrder(Object.keys(order)));
+			expect(requestHeader(init, capture.header)).toBe(capture.observed);
+		});
+	}
+
+	it("uses profile and request-class defaults when caller-overridable headers are omitted", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "navigation", headers: {} },
+			{ status: 200, body: "xhr", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		await client.fetch("/navigation");
+		await client.fetch("/xhr", { stealth: { requestClass: "xhr" } });
+
+		const navigation = allWreqCalls()[0]?.init;
+		const emulation = mockEmulationHeaders("chrome_149");
+		expect(requestHeader(navigation, "accept")).toBe(emulation.get("accept"));
+		expect(requestHeader(navigation, "priority")).toBe(emulation.get("priority"));
+		expect(requestHeader(navigation, "upgrade-insecure-requests")).toBe(
+			honouredOverrides.get("upgrade-insecure-requests")?.observed,
+		);
+
+		const xhr = allWreqCalls()[1]?.init;
+		expect(requestHeader(xhr, "accept")).toBe(chromeValueTransform.uir_zero.observed.accept);
+		expect(requestHeader(xhr, "priority")).toBe(chromeValueTransform.uir_zero.observed.priority);
+		expect(requestHeader(xhr, "upgrade-insecure-requests")).toBeUndefined();
+	});
+
+	const transformCases = [
+		chromeValueTransform.accept_padded,
+		chromeValueTransform.accept_inner_spaces,
+		chromeValueTransform.accept_uppercase,
+		chromeValueTransform.accept_q_values,
+		chromeValueTransform.accept_empty,
+	] as const;
+	for (const capture of transformCases) {
+		const [header, sent] = Object.entries(capture.sent)[0] ?? [];
+		if (header === undefined || sent === undefined) throw new Error("Invalid transform capture");
+		it(`${capture.note} matches the captured Chrome value`, async () => {
+			mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com").fetch("/api", {
+				stealth: { requestClass: "xhr" },
+				headers: { [header]: sent },
+			});
+			expect(requestHeader(allWreqCalls()[0]?.init, header)).toBe(
+				capture.observed[header.toLowerCase() as keyof typeof capture.observed],
+			);
+		});
+	}
+
+	it("applies captured outer trimming to caller extension headers too", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const sent = chromeValueTransform.accept_padded.sent.Accept;
+		await createStealthClient("https://example.com").fetch("/api", {
+			stealth: { requestClass: "xhr" },
+			headers: { "X-Captured-Value": sent },
+		});
+		expect(requestHeader(allWreqCalls()[0]?.init, "x-captured-value")).toBe(
+			chromeValueTransform.accept_padded.observed.accept,
+		);
+	});
+
+	it("joins captured duplicate and array values with the captured separator", async () => {
+		const duplicate = chromeValueTransform.accept_duplicate;
+		const [[header, first], [, second]] = duplicate.sent;
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "duplicate", headers: {} },
+			{ status: 200, body: "array", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		await client.fetch("/duplicate", {
+			stealth: { requestClass: "xhr" },
+			headers: { [header]: first, [header.toLowerCase()]: second },
+		});
+		await client.fetch("/array", {
+			stealth: { requestClass: "xhr" },
+			headers: { [header]: duplicate.sent.map(([, value]) => value) },
+		});
+		expect(requestHeader(allWreqCalls()[0]?.init, header)).toBe(duplicate.observed.accept);
+		expect(requestHeader(allWreqCalls()[1]?.init, header)).toBe(duplicate.observed.accept);
+	});
+
+	for (const capture of [
+		chromeValueTransform.accept_name_lower,
+		chromeValueTransform.accept_name_weird,
+	]) {
+		const [header, sent] = Object.entries(capture.sent)[0] ?? [];
+		if (header === undefined || sent === undefined) throw new Error("Invalid name capture");
+		it(`${capture.note} has no effect on the wire name or value`, async () => {
+			mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			await createStealthClient("https://example.com").fetch("/api", {
+				stealth: { requestClass: "xhr" },
+				headers: { [header]: sent },
+			});
+			const headers = allWreqCalls()[0]?.init?.headers as [string, string][];
+			expect(headers.filter(([name]) => name === "accept")).toEqual([
+				["accept", capture.observed.accept],
+			]);
+		});
+	}
+
+	it("transmits a malformed caller value without introducing validation", async () => {
+		const capture = chromeValueTransform.priority_invalid;
+		const [header, sent] = Object.entries(capture.sent)[0] ?? [];
+		if (header === undefined || sent === undefined) throw new Error("Invalid malformed capture");
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/api", {
+			stealth: { requestClass: "xhr" },
+			headers: { [header]: sent },
+		});
+		expect(requestHeader(allWreqCalls()[0]?.init, header)).toBe(capture.observed.priority);
+	});
+
+	it("keeps Range accept-encoding identity when Accept is caller-supplied", async () => {
+		const accept = honouredOverrides.get("accept");
+		if (!accept) throw new Error("Missing Accept override capture");
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/range", {
+			stealth: { requestClass: "xhr" },
+			headers: {
+				[accept.header]: accept.requested,
+				Range: chromeExtendedCapture.xhr_range.values.range,
+			},
+		});
+		const init = allWreqCalls()[0]?.init;
+		expect(requestHeader(init, "accept")).toBe(accept.observed);
+		expect(requestHeader(init, "accept-encoding")).toBe(
+			chromeExtendedCapture.xhr_range.values["accept-encoding"],
+		);
+	});
+
+	it("places Cookie and Range after //net's Accept-Language on XHR", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/range", {
+			stealth: { requestClass: "xhr" },
+			headers: {
+				Referer: chromeExtendedCapture.xhr_range.values.referer,
+				Cookie: chromeExtendedCapture.xhr_range.values.cookie,
+				Range: chromeExtendedCapture.xhr_range.values.range,
+			},
+		});
+		const names = (allWreqCalls()[0]?.init?.headers as [string, string][]).map(([name]) => name);
+		expect(names).toEqual(realChromeOrder(chromeExtendedCapture.xhr_range.order).slice(4));
+		expect(names.slice(names.indexOf("accept-encoding"))).toEqual([
+			"accept-encoding",
+			"accept-language",
+			"cookie",
+			"range",
+			"priority",
+		]);
+	});
+
+	it("places cookie-jar cookies at the Chrome position with the lowercase h2 name", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "login", headers: { "set-cookie": "sid=abc; Path=/" } },
+			{ status: 200, body: "xhr", headers: {} },
+			{ status: 200, body: "navigation", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		await client.fetch("/login");
+		await client.fetch("/api", {
+			stealth: { requestClass: "xhr" },
+			headers: { Referer: "https://example.com/" },
+		});
+		await client.fetch("/page");
+
+		const calls = allWreqCalls();
+		const xhrNames = (calls[1]?.init?.headers as [string, string][]).map(([name]) => name);
+		const xhrExpected = [...alPlacementCapture.B_nolocale_none.order];
+		xhrExpected.splice(xhrExpected.indexOf("priority"), 0, "cookie");
+		expect(xhrNames).toEqual(xhrExpected);
+		expect(requestHeader(calls[1]?.init, "cookie")).toBe("sid=abc");
+		const navigationNames = (calls[2]?.init?.headers as [string, string][]).map(([name]) => name);
+		expect(navigationNames).toEqual(
+			realChromeOrder(chromeExtendedCapture.navigation_with_cookie.order).slice(4),
+		);
+		expect(requestHeader(calls[2]?.init, "cookie")).toBe("sid=abc");
+	});
+
+	it("places Cookie directly after accept-encoding when the caller supplied Accept-Language on XHR", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/api", {
+			stealth: { requestClass: "xhr" },
+			headers: { Referer: "https://example.com/", "Accept-Language": "ko", Cookie: "sid=abc" },
+		});
+		const names = (allWreqCalls()[0]?.init?.headers as [string, string][]).map(([name]) => name);
+		const expected = [...Object.keys(chromeValueTransform.accept_language_override.observed)];
+		expected.splice(expected.indexOf("priority"), 0, "cookie");
+		expect(names).toEqual(expected);
+		expect(names.filter((name) => name === "accept-language")).toHaveLength(1);
+		expect(names.slice(names.indexOf("accept-encoding"))).toEqual([
+			"accept-encoding",
+			"cookie",
+			"priority",
+		]);
+	});
+
+	it("keeps Cookie and Range after //net's Accept-Language when the caller supplied Priority on XHR", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/api", {
+			stealth: { requestClass: "xhr" },
+			headers: {
+				Referer: "https://example.com/",
+				Priority: "u=4, i",
+				Cookie: "sid=abc",
+				Range: "bytes=0-1",
+			},
+		});
+		const init = allWreqCalls()[0]?.init;
+		const names = (init?.headers as [string, string][]).map(([name]) => name);
+		// Range occupies a map bucket and is then re-added at the tail by the HTTP
+		// cache; a caller Priority stays in the map, so nothing follows Range.
+		const expected = chrome149HeaderOrder(["Priority", "Range"]);
+		expected.splice(expected.indexOf("range"), 1);
+		expected.push("cookie", "range");
+		expect(names).toEqual(expected);
+		expect(names.indexOf("priority")).toBeLessThan(names.indexOf("accept"));
+		expect(names.slice(-4)).toEqual(["accept-encoding", "accept-language", "cookie", "range"]);
+		expect(requestHeader(init, "accept-encoding")).toBe("identity");
+	});
+
+	it("orders h1 POST with Accept-Language after Accept-Encoding and before Cookie", async () => {
+		mockStealthState.queuedResponses.push({ status: 200, body: "ok", headers: {} });
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("http://example.com").fetch("/submit", {
+			method: "POST",
+			body: "a=1",
+			headers: {
+				"Content-Type": "application/x-www-form-urlencoded",
+				Origin: "http://example.com",
+				Referer: "http://example.com/",
+				Cookie: "sid=abc",
+			},
+		});
+		const names = (allWreqCalls()[0]?.init?.headers as [string, string][]).map(([name]) => name);
+		expect(names.slice(0, 2)).toEqual(["Host", "Connection"]);
+		expect(names).not.toContain("priority");
+		expect(names.map((name) => name.toLowerCase())).toEqual([
+			"host",
+			"connection",
+			...realChromeOrder(chromeExtendedCapture.post_form_urlencoded.order)
+				.slice(4)
+				.filter((name) => name !== "priority"),
+		]);
+		expect(names.indexOf("Accept-Language")).toBe(names.indexOf("Accept-Encoding") + 1);
+		expect(names.indexOf("Cookie")).toBe(names.indexOf("Accept-Language") + 1);
+	});
+
+	const rejectedCaptures = Object.values(chromeAcceptOverride).filter(
+		(capture) => !capture.honoured,
+	);
+	const remainingRejected = [
+		...rejectedCaptures.map((capture) => ({ header: capture.header, value: capture.requested })),
+		...[
+			"host",
+			"connection",
+			"sec-ch-ua",
+			"sec-ch-ua-mobile",
+			"sec-ch-ua-platform",
+			"sec-fetch-mode",
+			"sec-fetch-site",
+			"sec-fetch-user",
+			"sec-fetch-future",
+		].map((header) => ({ header, value: "caller-value" })),
+	];
+	for (const { header, value } of remainingRejected) {
+		it(`rejects caller override of ${header}`, async () => {
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			let thrown: unknown;
+			try {
+				await createStealthClient("https://example.com").fetch("/api", {
+					headers: { [header]: value },
+				});
+			} catch (error) {
+				thrown = error;
+			}
+			expect(thrown).toBeInstanceOf(SDKError);
+			if (!(thrown instanceof SDKError)) throw new Error("Expected SDKError");
+			expect(thrown.message).toContain(header.toLowerCase());
+			expect(mockStealthState.clients).toHaveLength(0);
+		});
+	}
+});
+
 const CancellationErrorShapeSchema = z.object({
 	code: z.string(),
 	instanceOfTransportError: z.boolean(),
@@ -2554,7 +3231,7 @@ function createStealthAbortProvider(): ProviderDefinition {
 	return createProviderDefinitionDouble({
 		id: "stealth-abort-provider",
 		allowedHosts: ["example.com"],
-		stealth: { profile: "chrome-desktop", platform: "macos" },
+		stealth: { browser: "chrome", os: "macos" },
 		auth: {
 			mode: "credentials",
 			flow: {

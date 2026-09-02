@@ -1,14 +1,17 @@
 import { createRequire } from "node:module";
 
-import type { BrowserProfile } from "wreq-js";
+import type { BrowserProfile, EmulationOS } from "wreq-js";
 
 import { SDKError } from "../errors.js";
-import type { StealthPlatform, StealthProfile } from "../types.js";
+import type {
+	StealthBrowser,
+	StealthProfile,
+	StealthProfileDescriptor,
+	StealthProfileSelection,
+	StealthOS,
+} from "../types.js";
 
-type StealthProfileDefinition = Omit<StealthProfile, "name" | "platform"> & {
-	platform: StealthPlatform;
-};
-
+type StealthProfileDefinition = Omit<StealthProfile, "browser" | "os">;
 type WreqProfileApi = Pick<typeof import("wreq-js"), "getEmulationHeaders" | "getProfiles">;
 
 const requireModule = createRequire(import.meta.url);
@@ -19,53 +22,8 @@ function getWreqProfileApi(): WreqProfileApi {
 	return wreqProfileApi;
 }
 
-const CHROMIUM_HEADER_ORDER = [
-	":method",
-	":authority",
-	":scheme",
-	":path",
-	"user-agent",
-	"accept",
-	"accept-encoding",
-	"accept-language",
-	"cache-control",
-	"pragma",
-	"cookie",
-	"sec-ch-ua",
-	"sec-ch-ua-mobile",
-	"sec-ch-ua-platform",
-];
-
-const FIREFOX_HEADER_ORDER = [
-	":method",
-	":path",
-	":authority",
-	":scheme",
-	"user-agent",
-	"accept",
-	"accept-language",
-	"accept-encoding",
-	"referer",
-	"cookie",
-	"upgrade-insecure-requests",
-	"sec-fetch-dest",
-	"sec-fetch-mode",
-	"sec-fetch-site",
-	"sec-fetch-user",
-];
-
-const SAFARI_HEADER_ORDER = [
-	":method",
-	":scheme",
-	":path",
-	":authority",
-	"accept",
-	"user-agent",
-	"accept-language",
-	"accept-encoding",
-	"cookie",
-	"upgrade-insecure-requests",
-];
+export const DEFAULT_STEALTH_BROWSER = "chrome" as const;
+export const DEFAULT_STEALTH_OS = "macos" as const;
 
 const CHROMIUM_H2_SETTINGS = {
 	HEADER_TABLE_SIZE: 65536,
@@ -95,21 +53,104 @@ const FIREFOX_JA3 =
 const SAFARI_JA3 =
 	"771,4865-4866-4867-49196-49195-52393-49200-49199-49188-49192-159-158-107-103-57-51-157-156-61-60-53-47-255,0-23-65281-10-11-16-5-13-18-51-45-43-27,29-23-24-25,0";
 
-/**
- * The newest Chromium build wreq-js can emulate, resolved on first profile use.
- *
- * A literal version here rots: it went stale twice (146 was six releases behind
- * stable when an upstream integrity analyzer flagged it), and a fingerprint that
- * advertises an old Chrome is exactly what bot managers score against. wreq-js
- * already ships the profile table, so the newest entry is derived from it rather
- * than restated. `resolveProfile("chrome")` is deliberately NOT used because its
- * conservative default can lag newer entries in that table.
- *
- * package.json pins wreq-js exactly on purpose. Even a semver-minor wreq-js update
- * can change the profile table, emitted headers, native bindings, and therefore
- * the wire fingerprint inherited by every provider. Upgrade that exact version
- * only in a dedicated change with profile-parity and packed-native verification.
- */
+const SUPPORTED_STEALTH_PROFILES: readonly StealthProfileDescriptor[] = [
+	{ browser: "chrome", os: "windows" },
+	{ browser: "chrome", os: "macos" },
+	{ browser: "chrome", os: "linux" },
+	{ browser: "firefox", os: "windows" },
+	{ browser: "firefox", os: "macos" },
+	{ browser: "firefox", os: "linux" },
+	{ browser: "safari", os: "macos" },
+	{ browser: "safari", os: "ios" },
+];
+
+const DESKTOP_OSES = new Set<StealthOS>(["windows", "macos", "linux"]);
+
+function structuredReplacement(browser: StealthBrowser, os: StealthOS): string {
+	return `stealth: { browser: "${browser}", os: "${os}" }`;
+}
+
+/** Internal detector used to keep version-pinned string failures actionable. */
+export function getVersionPinnedStealthReplacement(name: string): string | undefined {
+	if (/^(?:chrome|chromium|edge)[-_]\d/i.test(name)) {
+		return structuredReplacement("chrome", DEFAULT_STEALTH_OS);
+	}
+	if (/^firefox[-_]\d/i.test(name)) {
+		return structuredReplacement("firefox", DEFAULT_STEALTH_OS);
+	}
+	if (/^(?:ios[-_]safari|safari[-_](?:ios|ipad))[-_]\d/i.test(name)) {
+		return structuredReplacement("safari", "ios");
+	}
+	if (/^safari[-_]\d/i.test(name)) {
+		return structuredReplacement("safari", DEFAULT_STEALTH_OS);
+	}
+	return undefined;
+}
+
+function rejectStringSelection(name: string): never {
+	const replacement = getVersionPinnedStealthReplacement(name);
+	if (replacement) {
+		throw new SDKError(
+			`Stealth profile "${name}" pins a browser version and is not supported. Use ${replacement}.`,
+			{ code: "STEALTH_VERSION_PIN_UNSUPPORTED" },
+		);
+	}
+	throw new SDKError(
+		`Stealth profile names are no longer supported: "${name}". Use structured browser/os options.`,
+		{ code: "STEALTH_PROFILE_NAME_UNSUPPORTED" },
+	);
+}
+
+function assertSupportedDescriptor(browser: StealthBrowser, os: StealthOS): void {
+	const supported =
+		(browser === "chrome" && DESKTOP_OSES.has(os)) ||
+		(browser === "firefox" && DESKTOP_OSES.has(os)) ||
+		(browser === "safari" && (os === "macos" || os === "ios"));
+	if (!supported) {
+		throw new SDKError(
+			`Unsupported stealth browser/OS combination: ${browser}/${os}. ` +
+				"Chrome and Firefox support windows, macos, and linux; Safari supports macos and ios.",
+			{ code: "STEALTH_PROFILE_UNAVAILABLE" },
+		);
+	}
+}
+
+/** Resolve omitted axes and validate that the resulting pair is supported. */
+export function resolveStealthProfileSelection(
+	selection: StealthProfileSelection | undefined,
+	base?: StealthProfileDescriptor,
+): StealthProfileDescriptor {
+	if (typeof selection === "string") rejectStringSelection(selection);
+	if (selection !== undefined && (typeof selection !== "object" || selection === null)) {
+		throw new SDKError("Stealth profile selection must use structured browser/os options.");
+	}
+	const unsafeSelection = selection as
+		| (Record<string, unknown> & { browser?: unknown; os?: unknown })
+		| undefined;
+	if (unsafeSelection && "profile" in unsafeSelection) {
+		if (typeof unsafeSelection.profile === "string") rejectStringSelection(unsafeSelection.profile);
+		throw new SDKError(
+			"stealth.profile is no longer supported. Use stealth.browser and stealth.os.",
+			{ code: "STEALTH_PROFILE_NAME_UNSUPPORTED" },
+		);
+	}
+
+	const browser = unsafeSelection?.browser ?? base?.browser ?? DEFAULT_STEALTH_BROWSER;
+	if (browser !== "chrome" && browser !== "firefox" && browser !== "safari") {
+		throw new SDKError(`Unsupported stealth browser: ${String(browser)}`);
+	}
+	const browserChanged =
+		base !== undefined && unsafeSelection?.browser !== undefined && browser !== base.browser;
+	const os =
+		unsafeSelection?.os ?? (browserChanged ? DEFAULT_STEALTH_OS : base?.os) ?? DEFAULT_STEALTH_OS;
+	if (os !== "windows" && os !== "macos" && os !== "linux" && os !== "ios") {
+		throw new SDKError(`Unsupported stealth OS: ${String(os)}`);
+	}
+	assertSupportedDescriptor(browser, os);
+	return { browser, os } as StealthProfileDescriptor;
+}
+
+/** Resolve the newest Chromium build exposed by the exactly pinned wreq-js package. */
 function resolveLatestChromiumProfile(): {
 	readonly wreqName: BrowserProfile;
 	readonly version: string;
@@ -130,292 +171,93 @@ function resolveLatestChromiumProfile(): {
 	return { wreqName: newest.name, version: `${newest.version}.0.0.0` };
 }
 
-/** The user agent wreq-js itself emits for that profile, so the two never disagree. */
-function chromiumUserAgent(latest: ReturnType<typeof resolveLatestChromiumProfile>): string {
-	const { getEmulationHeaders } = getWreqProfileApi();
-	for (const [name, value] of getEmulationHeaders(latest.wreqName, "macos")) {
+/** Read the identity wreq itself emits so the accessor and transport cannot diverge. */
+function emulationUserAgent(profile: BrowserProfile, os: EmulationOS): string {
+	for (const [name, value] of getWreqProfileApi().getEmulationHeaders(profile, os)) {
 		if (String(name).toLowerCase() === "user-agent") return String(value);
 	}
-	throw new SDKError(`wreq-js profile ${latest.wreqName} exposes no user-agent header.`, {
+	throw new SDKError(`wreq-js profile ${profile} exposes no user-agent header.`, {
 		code: "STEALTH_PROFILE_UNAVAILABLE",
 	});
 }
 
-function createProfile(name: string, definition: StealthProfileDefinition): StealthProfile {
+function createProfile(
+	descriptor: StealthProfileDescriptor,
+	definition: StealthProfileDefinition,
+): StealthProfile {
 	return {
-		name,
-		platform: definition.platform,
-		version: definition.version,
-		userAgent: definition.userAgent,
-		tlsClientIdentifier: definition.tlsClientIdentifier,
-		ja3: definition.ja3,
-		ja4: definition.ja4,
+		...descriptor,
+		...definition,
 		h2Settings: definition.h2Settings ? { ...definition.h2Settings } : undefined,
-		headerOrder: definition.headerOrder ? [...definition.headerOrder] : undefined,
 	};
 }
 
-function extractBrowserMajorVersion(profile: StealthProfile): string {
-	const chromeVersion = profile.userAgent.match(/Chrome\/(\d+)/)?.[1];
-	if (chromeVersion) {
-		return chromeVersion;
-	}
-
-	const identifierVersion = profile.tlsClientIdentifier?.match(/(\d+)(?!.*\d)/)?.[1];
-	if (identifierVersion) {
-		return identifierVersion;
-	}
-
-	return profile.version.split(".")[0] ?? profile.version;
+function profileKey(descriptor: StealthProfileDescriptor): string {
+	return `${descriptor.browser}:${descriptor.os}`;
 }
 
-function toPlatformHeaderValue(platform: StealthPlatform): string {
-	switch (platform) {
-		case "macos":
-			return '"macOS"';
-		case "windows":
-			return '"Windows"';
-		case "linux":
-			return '"Linux"';
-		case "android":
-			return '"Android"';
-		case "ios":
-			return '"iOS"';
-	}
-}
+let stealthProfileCatalog: Map<string, StealthProfile> | undefined;
 
-export function generateLayer2Headers(profile: StealthProfile): Record<string, string> {
-	const headers: Record<string, string> = {
-		"Accept-Language": "ko-KR,ko;q=0.9,en-US;q=0.8",
-	};
-
-	const identifier = profile.tlsClientIdentifier?.toLowerCase() ?? "";
-	const majorVersion = extractBrowserMajorVersion(profile);
-
-	if (identifier.startsWith("chrome_") || identifier.startsWith("edge_")) {
-		const isEdge = identifier.startsWith("edge_") || /\bEdg\//.test(profile.userAgent);
-		headers["Sec-Ch-Ua"] = isEdge
-			? `"Chromium";v="${majorVersion}", "Microsoft Edge";v="${majorVersion}", "Not)A;Brand";v="99"`
-			: `"Chromium";v="${majorVersion}", "Google Chrome";v="${majorVersion}", "Not)A;Brand";v="99"`;
-		headers["Sec-Ch-Ua-Platform"] = toPlatformHeaderValue(profile.platform);
-		headers["Sec-Ch-Ua-Mobile"] =
-			profile.platform === "android" || profile.platform === "ios" ? "?1" : "?0";
-	}
-
-	return headers;
-}
-
-const STATIC_STEALTH_PROFILE_ALIASES: Record<string, string> = {
-	"firefox-desktop": "firefox-147",
-	"safari-desktop": "safari-17",
-	"safari-mobile": "ios-safari-26",
-};
-
-const PUBLIC_STEALTH_PROFILE_NAMES = [
-	"chrome-desktop",
-	"firefox-desktop",
-	"safari-desktop",
-	"safari-mobile",
-	"generic-desktop",
-	"generic-mobile",
-] as const;
-
-const PUBLIC_STEALTH_PROFILE_NAME_SET = new Set<string>(PUBLIC_STEALTH_PROFILE_NAMES);
-
-const STATIC_STEALTH_PROFILES: Record<string, StealthProfile> = {
-	"chrome-146": createProfile("chrome-146", {
-		platform: "macos",
-		version: "146.0.0.0",
-		userAgent:
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-		tlsClientIdentifier: "chrome_146",
-		ja3: CHROMIUM_JA3,
-		h2Settings: CHROMIUM_H2_SETTINGS,
-		headerOrder: CHROMIUM_HEADER_ORDER,
-	}),
-	"firefox-147": createProfile("firefox-147", {
-		platform: "macos",
-		version: "147.0",
-		userAgent:
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0",
-		tlsClientIdentifier: "firefox_147",
-		ja3: FIREFOX_JA3,
-		h2Settings: FIREFOX_H2_SETTINGS,
-		headerOrder: FIREFOX_HEADER_ORDER,
-	}),
-	"firefox-135": createProfile("firefox-135", {
-		platform: "macos",
-		version: "135.0",
-		userAgent:
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:135.0) Gecko/20100101 Firefox/135.0",
-		tlsClientIdentifier: "firefox_135",
-		ja3: FIREFOX_JA3,
-		h2Settings: FIREFOX_H2_SETTINGS,
-		headerOrder: FIREFOX_HEADER_ORDER,
-	}),
-	"firefox-133": createProfile("firefox-133", {
-		platform: "macos",
-		version: "133.0",
-		userAgent:
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
-		tlsClientIdentifier: "firefox_133",
-		ja3: FIREFOX_JA3,
-		h2Settings: FIREFOX_H2_SETTINGS,
-		headerOrder: FIREFOX_HEADER_ORDER,
-	}),
-	"firefox-132": createProfile("firefox-132", {
-		platform: "macos",
-		version: "133.0",
-		userAgent:
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:133.0) Gecko/20100101 Firefox/133.0",
-		tlsClientIdentifier: "firefox_132",
-		ja3: FIREFOX_JA3,
-		h2Settings: FIREFOX_H2_SETTINGS,
-		headerOrder: FIREFOX_HEADER_ORDER,
-	}),
-	"safari-16": createProfile("safari-16", {
-		platform: "macos",
-		version: "16.0",
-		userAgent:
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15",
-		tlsClientIdentifier: "safari_16_0",
-		ja3: SAFARI_JA3,
-		h2Settings: SAFARI_H2_SETTINGS,
-		headerOrder: SAFARI_HEADER_ORDER,
-	}),
-	"safari-17": createProfile("safari-17", {
-		platform: "macos",
-		version: "17.0",
-		userAgent:
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
-		tlsClientIdentifier: "safari_17_0",
-		ja3: SAFARI_JA3,
-		h2Settings: SAFARI_H2_SETTINGS,
-		headerOrder: SAFARI_HEADER_ORDER,
-	}),
-	"safari-15": createProfile("safari-15", {
-		platform: "macos",
-		version: "15.6.1",
-		userAgent:
-			"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6.1 Safari/605.1.15",
-		tlsClientIdentifier: "safari_15_6_1",
-		ja3: SAFARI_JA3,
-		h2Settings: SAFARI_H2_SETTINGS,
-		headerOrder: SAFARI_HEADER_ORDER,
-	}),
-	"ios-safari-26": createProfile("ios-safari-26", {
-		platform: "ios",
-		version: "26.0",
-		userAgent:
-			"Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
-		tlsClientIdentifier: "safari_ios_26_0",
-		ja3: SAFARI_JA3,
-		h2Settings: SAFARI_H2_SETTINGS,
-		headerOrder: SAFARI_HEADER_ORDER,
-	}),
-	"ios-safari-18": createProfile("ios-safari-18", {
-		platform: "ios",
-		version: "18.1.1",
-		userAgent:
-			"Mozilla/5.0 (iPhone; CPU iPhone OS 18_1_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1.1 Mobile/15E148 Safari/604.1",
-		tlsClientIdentifier: "safari_ios_18_0",
-		ja3: SAFARI_JA3,
-		h2Settings: SAFARI_H2_SETTINGS,
-		headerOrder: SAFARI_HEADER_ORDER,
-	}),
-	"ios-safari-17": createProfile("ios-safari-17", {
-		platform: "ios",
-		version: "17.2",
-		userAgent:
-			"Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1",
-		tlsClientIdentifier: "safari_ios_17_0",
-		ja3: SAFARI_JA3,
-		h2Settings: SAFARI_H2_SETTINGS,
-		headerOrder: SAFARI_HEADER_ORDER,
-	}),
-	"generic-mobile": createProfile("generic-mobile", {
-		platform: "ios",
-		version: "26.0",
-		userAgent:
-			"Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1",
-		tlsClientIdentifier: "safari_ios_26_0",
-		ja3: SAFARI_JA3,
-		h2Settings: SAFARI_H2_SETTINGS,
-		headerOrder: SAFARI_HEADER_ORDER,
-	}),
-};
-
-type StealthProfileCatalog = {
-	aliases: Record<string, string>;
-	profiles: Record<string, StealthProfile>;
-};
-
-let stealthProfileCatalog: StealthProfileCatalog | undefined;
-
-function getStealthProfileCatalog(): StealthProfileCatalog {
+function getStealthProfileCatalog(): Map<string, StealthProfile> {
 	if (stealthProfileCatalog) return stealthProfileCatalog;
 
-	const latest = resolveLatestChromiumProfile();
-	const currentName = `chrome-${latest.version.split(".")[0]}`;
-	const currentProfile = createProfile(currentName, {
-		platform: "macos",
-		version: latest.version,
-		userAgent: chromiumUserAgent(latest),
-		tlsClientIdentifier: latest.wreqName,
-		ja3: CHROMIUM_JA3,
-		h2Settings: CHROMIUM_H2_SETTINGS,
-		headerOrder: CHROMIUM_HEADER_ORDER,
-	});
-	stealthProfileCatalog = {
-		aliases: {
-			"chrome-desktop": currentName,
-			...STATIC_STEALTH_PROFILE_ALIASES,
+	const latestChrome = resolveLatestChromiumProfile();
+	const definitions: Record<StealthBrowser, Omit<StealthProfileDefinition, "userAgent">> = {
+		chrome: {
+			version: latestChrome.version,
+			tlsClientIdentifier: latestChrome.wreqName,
+			ja3: CHROMIUM_JA3,
+			h2Settings: CHROMIUM_H2_SETTINGS,
 		},
-		profiles: {
-			[currentName]: currentProfile,
-			...STATIC_STEALTH_PROFILES,
-			"generic-desktop": createProfile("generic-desktop", currentProfile),
+		firefox: {
+			version: "147.0",
+			tlsClientIdentifier: "firefox_147",
+			ja3: FIREFOX_JA3,
+			h2Settings: FIREFOX_H2_SETTINGS,
+		},
+		safari: {
+			version: "17.0",
+			tlsClientIdentifier: "safari_17.0",
+			ja3: SAFARI_JA3,
+			h2Settings: SAFARI_H2_SETTINGS,
 		},
 	};
+
+	stealthProfileCatalog = new Map();
+	for (const descriptor of SUPPORTED_STEALTH_PROFILES) {
+		const isMobileSafari = descriptor.browser === "safari" && descriptor.os === "ios";
+		const definition = isMobileSafari
+			? {
+					version: "26.0",
+					tlsClientIdentifier: "safari_ios_26" as BrowserProfile,
+					ja3: SAFARI_JA3,
+					h2Settings: SAFARI_H2_SETTINGS,
+				}
+			: definitions[descriptor.browser];
+		const wreqName = definition.tlsClientIdentifier as BrowserProfile;
+		stealthProfileCatalog.set(
+			profileKey(descriptor),
+			createProfile(descriptor, {
+				...definition,
+				userAgent: emulationUserAgent(wreqName, descriptor.os),
+			}),
+		);
+	}
 	return stealthProfileCatalog;
 }
 
-export function getStealthProfile(name: string): StealthProfile {
-	const catalog = getStealthProfileCatalog();
-	const canonicalName = catalog.aliases[name] ?? name;
-	const profile = catalog.profiles[canonicalName];
-
+export function getStealthProfile(selection: StealthProfileSelection = {}): StealthProfile {
+	const descriptor = resolveStealthProfileSelection(selection);
+	const profile = getStealthProfileCatalog().get(profileKey(descriptor));
 	if (!profile) {
-		throw new SDKError(`Unknown stealth profile: ${name}`);
+		throw new SDKError(`Unknown stealth profile: ${descriptor.browser}/${descriptor.os}`);
 	}
-
 	return {
 		...profile,
 		h2Settings: profile.h2Settings ? { ...profile.h2Settings } : undefined,
-		headerOrder: profile.headerOrder ? [...profile.headerOrder] : undefined,
 	};
 }
 
-/** Returns the intent alias that replaces a registered version-pinned profile. */
-export function getStealthProfileIntentAlias(name: string): string | undefined {
-	if (PUBLIC_STEALTH_PROFILE_NAME_SET.has(name)) return undefined;
-	if (/^(?:chrome|chromium|edge)[-_]\d/i.test(name)) {
-		return "chrome-desktop";
-	}
-	if (/^firefox[-_]\d/i.test(name)) return "firefox-desktop";
-	if (/^(?:ios[-_]safari|safari[-_](?:ios|ipad))[-_]\d/i.test(name)) {
-		return "safari-mobile";
-	}
-	if (/^safari[-_]\d/i.test(name)) return "safari-desktop";
-	return undefined;
-}
-
-/** Internal compatibility catalog used by transport-parity tests. */
-export function listRegisteredStealthProfiles(): string[] {
-	const catalog = getStealthProfileCatalog();
-	return [...Object.keys(catalog.profiles), ...Object.keys(catalog.aliases)];
-}
-
-export function listStealthProfiles(): string[] {
-	return [...PUBLIC_STEALTH_PROFILE_NAMES];
+export function listStealthProfiles(): StealthProfileDescriptor[] {
+	return SUPPORTED_STEALTH_PROFILES.map((profile) => ({ ...profile }));
 }
