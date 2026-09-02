@@ -1,6 +1,6 @@
 # ADR-0008 v1.1 amendment: SBSD and safe challenge refetch
 
-- Status: **Proposed (v1.1 amendment)**
+- Status: **Accepted (v1.1 amendment)** — ratified by owner (Taehoon) 2026-09-02 on PR #249 ("249 이거 진행 ㄱㄱ")
 - Amendment date: 2026-09-02
 - Amends: ADR-0008 without superseding its SDK-owned Akamai loop or transport-seam decision
 - Implementation status: deferred; this amendment is paper-only
@@ -124,8 +124,8 @@ replay-safe by carrying an empty JSON object.
 - A provider-facing lease acquire/bind API such as
   `ctx.proxy.lease.acquire()` or `ctx.proxy.lease.bind()`.
 - Transparent retry of unsafe methods, or a policy that retries every fetch.
-- Marking this amendment or another ADR `Accepted` in this PR. Owner approval
-  to draft is not architectural self-ratification.
+- Self-ratification: the draft was Proposed until the owner explicitly
+  approved PR #249; only that approval moved the status to Accepted.
 - Implementing the Hyper adapter, challenge detection, ceremony lease, cookie
   installation, or refetch machinery in this PR.
 

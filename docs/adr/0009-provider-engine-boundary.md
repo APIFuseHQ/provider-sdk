@@ -1,6 +1,6 @@
 # ADR-0009 v1.1 amendment: resolver credentials and ceremony leases
 
-- Status: **Proposed (v1.1 amendment)**
+- Status: **Accepted (v1.1 amendment)** — ratified by owner (Taehoon) 2026-09-02 on PR #249 ("249 이거 진행 ㄱㄱ")
 - Amendment date: 2026-09-02
 - Amends: ADR-0009's engine-owned credential and opaque-session boundaries
 - Builds on: ADR-0008 v1.1
@@ -10,8 +10,9 @@ ADR-0009 v1.0 already places proxy vendor credentials in the engine and says
 stateful lifecycles use opaque engine-owned session handles. Resolver vendor
 credentials and an identity-bound challenge ceremony are the same existing
 axes, so this is an in-place amendment rather than a new capability ADR. The
-accepted v1.0 record is retained verbatim below; this v1.1 amendment remains
-Proposed and is not self-ratified by its draft PR.
+accepted v1.0 record is retained verbatim below; this v1.1 amendment was
+drafted as Proposed and became Accepted only on explicit owner approval of
+PR #249 (2026-09-02).
 
 ## v1.1 context
 
@@ -112,7 +113,8 @@ descriptor or an engine lease vocabulary.
 - Treating a Smartproxy extraction endpoint as a vendor-guaranteed lease.
 - Implementing credential filtering, the Hyper adapter, or ceremony-handle code
   in this paper-only PR.
-- Marking the v1.1 amendment Accepted before architectural ratification.
+- Self-ratification: Accepted status required explicit owner approval of
+  PR #249, not the drafting PR itself.
 
 ## v1.1 consequences
 
