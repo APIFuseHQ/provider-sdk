@@ -400,6 +400,16 @@ function planOperationMigration(
 		if (merged.insert !== undefined) addInsertion(insertions, "docs", merged.insert);
 	}
 
+	const title = planTitleLocale(
+		top.byName.get("title"),
+		top.byName.get("titleKey"),
+		docs.get("titleKey"),
+		fileName,
+		site,
+		localeFiles,
+	);
+	if ("refusal" in title) return title;
+
 	const examples = planExamples(
 		top.byName.get("inputExamples"),
 		top.byName.get("examples"),
@@ -431,7 +441,90 @@ function planOperationMigration(
 		if (!edits.some((existing) => rangesOverlap(existing, edit))) edits.push(edit);
 	}
 
-	return { edits, localeTodos: examples.localeTodos };
+	return { edits, localeTodos: [...title.localeTodos, ...examples.localeTodos] };
+}
+
+function planTitleLocale(
+	title: ResolvedMember | undefined,
+	flatTitleKey: ResolvedMember | undefined,
+	nestedTitleKey: ResolvedMember | undefined,
+	fileName: string,
+	site: OperationSite,
+	localeFiles: readonly string[],
+):
+	| { readonly localeTodos: readonly LocaleTodo[] }
+	| { readonly refusal: OperationDeclarationRefusal } {
+	if (title === undefined) return { localeTodos: [] };
+	const originalProse = literalString(title.initializer);
+	if (originalProse === undefined) {
+		return nonLiteral(
+			fileName,
+			site.operationKey,
+			"title must be a string literal so its authored prose can be preserved in the English locale catalog.",
+		);
+	}
+	if (!site.operationIdProven) {
+		return {
+			refusal: refusal(
+				fileName,
+				site.operationKey,
+				"operation_id_unresolved",
+				"title requires an exact operation id proven from a static operations map.",
+			),
+		};
+	}
+	if (!localeFiles.includes("locales/en.json")) {
+		return {
+			refusal: refusal(
+				fileName,
+				site.operationKey,
+				"missing_english_locale",
+				"title cannot be migrated because locales/en.json does not exist.",
+			),
+		};
+	}
+
+	let selectedTitleKey = flatTitleKey ?? nestedTitleKey;
+	if (flatTitleKey !== undefined && nestedTitleKey !== undefined) {
+		const same = equivalentLiteral(flatTitleKey.initializer, nestedTitleKey.initializer);
+		if (same === undefined) {
+			return nonLiteral(
+				fileName,
+				site.operationKey,
+				"titleKey must be literal when both top-level and nested declarations exist.",
+			);
+		}
+		if (!same) {
+			return {
+				refusal: refusal(
+					fileName,
+					site.operationKey,
+					"locale_key_conflict",
+					"Top-level titleKey conflicts with nested titleKey.",
+				),
+			};
+		}
+		selectedTitleKey = flatTitleKey;
+	}
+	const explicitTitleKey =
+		selectedTitleKey === undefined ? undefined : literalString(selectedTitleKey.initializer);
+	if (selectedTitleKey !== undefined && explicitTitleKey === undefined) {
+		return nonLiteral(
+			fileName,
+			site.operationKey,
+			"titleKey must be a string literal so the title locale destination is provable.",
+		);
+	}
+	return {
+		localeTodos: [
+			{
+				localeFile: "locales/en.json",
+				operationKey: site.operationKey,
+				key: explicitTitleKey ?? `operations.${site.operationKey}.title`,
+				originalProse,
+			},
+		],
+	};
 }
 
 function resolveRiskClass(
@@ -984,9 +1077,7 @@ function isProviderOperationsProperty(
 	// (a) The initializer (direct or via same-file const) mentions
 	// defineOperation / defineStreamOperation — the strongest signal.
 	const target = ts.isIdentifier(unwrapExpression(node.initializer) ?? node.initializer)
-		? constObjects.get(
-				(unwrapExpression(node.initializer) as TS.Identifier).text,
-			)
+		? constObjects.get((unwrapExpression(node.initializer) as TS.Identifier).text)
 		: undefined;
 	const initializerText = (target ?? node.initializer).getText();
 	if (/\bdefine(?:Stream)?Operation\b/.test(initializerText)) return true;

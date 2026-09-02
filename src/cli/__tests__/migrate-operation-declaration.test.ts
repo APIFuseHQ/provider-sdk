@@ -89,6 +89,55 @@ describe("migrateOperationDeclaration transforms", () => {
 		);
 	});
 
+	it("preserves a removed raw title as an English locale todo", () => {
+		const source = `const companyProfileOperation = defineOperation<ProviderContext>()({
+  title: "Get company profile",
+  annotations: { readOnly: true },
+  input: InputSchema,
+  output: OutputSchema,
+  handler,
+});
+`;
+		const result = migrateOperationDeclaration(source, "operations/get-company-profile.ts", {
+			operationIds: new Map([["companyProfileOperation", "getCompanyProfile"]]),
+			localeFiles: ["locales/en.json", "locales/ko.json"],
+		});
+
+		expect(result.status).toBe("migrated");
+		if (result.status !== "migrated") return;
+		expect(result.code).not.toContain('title: "Get company profile"');
+		expect(result.localeTodos).toEqual([
+			{
+				localeFile: "locales/en.json",
+				operationKey: "getCompanyProfile",
+				key: "operations.getCompanyProfile.title",
+				originalProse: "Get company profile",
+			},
+		]);
+	});
+
+	it("uses an explicit titleKey for the preserved English title", () => {
+		const result = migrateOperationDeclaration(fixture("hoist-all"), "hoist-all.ts", {
+			operationIds: new Map([["searchOperation", "search"]]),
+			localeFiles: ["locales/en.json", "locales/ja.json"],
+		});
+
+		expect(result.status).toBe("migrated");
+		if (result.status !== "migrated") return;
+		expect(result.localeTodos).toContainEqual({
+			localeFile: "locales/en.json",
+			operationKey: "search",
+			key: "operations.search.title",
+			originalProse: "Raw title",
+		});
+		expect(result.localeTodos).not.toContainEqual(
+			expect.objectContaining({
+				localeFile: "locales/ja.json",
+				key: "operations.search.title",
+			}),
+		);
+	});
+
 	it("resolves a module-level const referenced by shorthand", () => {
 		const code = expectMigrated("hoisted-const", "detail");
 		expect(code).toContain('riskClass: "read"');
@@ -263,6 +312,49 @@ describe("migrateOperationDeclaration refusals", () => {
 });
 
 describe("migrateOperationDeclarationRepository", () => {
+	it("writes a removed raw title to the English catalog without replacing translations", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-title-locale-"));
+		try {
+			writeFileSync(
+				join(root, "index.ts"),
+				`const companyProfileOperation = defineOperation<ProviderContext>()({
+  title: "Get company profile",
+  annotations: { readOnly: true },
+  input: InputSchema,
+  output: OutputSchema,
+  handler,
+});
+export default buildProvider({
+  operations: { getCompanyProfile: companyProfileOperation },
+});
+`,
+			);
+			mkdirSync(join(root, "locales"));
+			writeFileSync(
+				join(root, "locales", "en.json"),
+				'{"operations":{"getCompanyProfile":{"description":"Company profile"}}}\n',
+			);
+			writeFileSync(
+				join(root, "locales", "ko.json"),
+				'{"operations":{"getCompanyProfile":{"description":"기업 개황","title":"기업 개황 조회"}}}\n',
+			);
+
+			const result = migrateOperationDeclarationRepository(root);
+
+			expect(result.status).toBe("migrated");
+			const english = JSON.parse(readFileSync(join(root, "locales", "en.json"), "utf8")) as {
+				operations: { getCompanyProfile: { title: string } };
+			};
+			const korean = JSON.parse(readFileSync(join(root, "locales", "ko.json"), "utf8")) as {
+				operations: { getCompanyProfile: { title: string } };
+			};
+			expect(english.operations.getCompanyProfile.title).toBe("Get company profile");
+			expect(korean.operations.getCompanyProfile.title).toBe("기업 개황 조회");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("writes canonical locale JSON with non-English shared keys in English order", () => {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-locale-canonical-"));
 		try {
@@ -459,7 +551,7 @@ describe("migrateOperationDeclarationRepository", () => {
 					'import { z } from "@apifuse/provider-sdk/provider";',
 					"",
 					"export const manifestSchema = z.object({",
-					"  operations: z.array(z.enum([\"a\", \"b\"])).min(1).superRefine(() => {}),",
+					'  operations: z.array(z.enum(["a", "b"])).min(1).superRefine(() => {}),',
 					"  captured_operations: z.array(z.string().min(1)).min(1),",
 					"});",
 					"",
