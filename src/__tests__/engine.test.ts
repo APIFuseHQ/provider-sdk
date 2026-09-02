@@ -200,6 +200,7 @@ describe("engine credential containment", () => {
 				secrets: [{ name: alias }, { name: "PROVIDER_TOKEN" }],
 				operations: {
 					inspectEnvironment: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({
 							alias: z.string().optional(),
@@ -244,6 +245,7 @@ describe("engine credential containment", () => {
 				secrets: [...names.map((name) => ({ name })), { name: "PROVIDER_TOKEN" }],
 				operations: {
 					inspectEnvironment: {
+						riskClass: "read",
 						input: z.object({}),
 						output: z.object({
 							headers: z.string().optional(),
