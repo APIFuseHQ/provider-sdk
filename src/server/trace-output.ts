@@ -4,6 +4,7 @@ import {
 	OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
 	type OTLPExportOptions,
 	type OTLPExportResolution,
+	type OTLPResourceResolution,
 	resolveOTLPExportOptions,
 	resolveOTLPResourceAttributes,
 } from "../runtime/otlp.js";
@@ -23,6 +24,15 @@ type EnvLike = Record<string, string | undefined>;
 
 // Warn once per environment object: process.env in production, each injected env in tests.
 const warnedEnvironments = new WeakSet<EnvLike>();
+const warnedResourceEnvironments = new WeakSet<EnvLike>();
+
+function warnDiscardedResourceAttributes(env: EnvLike, resolution: OTLPResourceResolution): void {
+	if (resolution.discarded.length === 0 || warnedResourceEnvironments.has(env)) return;
+	warnedResourceEnvironments.add(env);
+	console.warn(
+		`[apifuse] ${resolution.discarded.join(", ")} could not be parsed as an OTel key=value list and was ignored.`,
+	);
+}
 
 function warnExportDisabled(
 	env: EnvLike,
@@ -64,8 +74,10 @@ function resolveExportResourceAttributes(
 	requestAttributes: Record<string, string>,
 	env: EnvLike,
 ): Record<string, string> {
+	const resolution = resolveOTLPResourceAttributes({}, env);
+	warnDiscardedResourceAttributes(env, resolution);
 	const operatorAttributes = Object.fromEntries(
-		Object.entries(resolveOTLPResourceAttributes({}, env)).map(([key, value]) => [
+		Object.entries(resolution.attributes).map(([key, value]) => [
 			sanitizeSpanNameForOutput(key),
 			isSensitiveFixtureKey(key) ? REDACTED_FIXTURE_VALUE : sanitizeSpanNameForOutput(value),
 		]),

@@ -1133,7 +1133,7 @@ export interface CreateTraceContextOptions {
     onSpan?: (span: Span) => void;
     // (undocumented)
     resourceAttributes?: Record<string, string>;
-    sanitizeSpanForExport?: (span: Span) => Span;
+    sanitizeSpanForExport?: (span: Span) => Span | undefined;
 }
 
 // @public (undocumented)
@@ -1452,6 +1452,9 @@ export function encodeSseEvent(input: SseEvent): string;
 
 // @public
 export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY__SMARTPROXY_APP_KEY", "APIFUSE__PROXY__NODEMAVEN_USERNAME", "APIFUSE__PROXY__NODEMAVEN_PASSWORD"];
+
+// @public
+export const ENGINE_OWNED_TELEMETRY_ENV_NAMES: readonly ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES"];
 
 // @public (undocumented)
 export interface EnvContext {
@@ -2358,8 +2361,14 @@ export type InstrumentedProviderContext<T extends Pick<ProviderContext, "trace">
 // @public
 export function isEmptyResult(raw: unknown): boolean;
 
+// @public
+export function isEngineOwnedEnvName(name: string): boolean;
+
 // @public (undocumented)
 export function isEngineOwnedProxyCredentialName(name: string): boolean;
+
+// @public (undocumented)
+export function isEngineOwnedTelemetryEnvName(name: string): boolean;
 
 // @public (undocumented)
 export type Iso3166Alpha2CountryCode = Uppercase<string>;
@@ -6867,7 +6876,7 @@ export interface TraceConfig {
     onSpan?: (span: TraceSpan) => void;
     // (undocumented)
     otlp?: {
-        endpoint: string;
+        endpoint?: string;
         headers?: Record<string, string>;
         timeout?: number;
     };

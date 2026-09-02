@@ -21,8 +21,11 @@ export interface CreateTraceContextOptions {
 	onSpan?: (span: Span) => void;
 	exportOptions?: OTLPExportOptions;
 	resourceAttributes?: Record<string, string>;
-	/** Applied to each span copy immediately before OTLP export; never touches getSpans() or onSpan. */
-	sanitizeSpanForExport?: (span: Span) => Span;
+	/**
+	 * Applied to a detached copy of each span immediately before OTLP export; never touches
+	 * getSpans() or onSpan. Returning nothing (or throwing) drops that export batch.
+	 */
+	sanitizeSpanForExport?: (span: Span) => Span | undefined;
 }
 
 type SpanHookOptions<T> = {
@@ -43,6 +46,8 @@ type PendingSpan = {
 type CompletedSpanEntry = {
 	sequence: number;
 	span: Span;
+	/** Set once the span has been handed to the exporter so no batch re-sends it. */
+	exported: boolean;
 };
 
 export interface TraceRecorder {
@@ -156,18 +161,27 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 	// One trace id per context so every export batch of this request shares it and
 	// two processes can never mint the same id.
 	const exportTraceId = crypto.randomUUID().replace(/-/g, "");
+	let exportScheduled = false;
 
+	// One pending batch per context: roots completing before the flush share it, and a span is
+	// handed to the exporter exactly once, so later roots never re-send earlier spans.
 	const scheduleExport = () => {
-		if (!exportOptions) {
+		if (!exportOptions || exportScheduled) {
 			return;
 		}
+		exportScheduled = true;
 
-		const snapshot = completed.map((entry) => entry.span);
 		setImmediate(() => {
+			exportScheduled = false;
+			const pending = completed.filter((entry) => !entry.exported);
+			for (const entry of pending) entry.exported = true;
+			if (pending.length === 0) return;
 			// Sanitization runs off the request path; a faulty sanitizer drops the batch, never the request.
 			let spans: Span[];
 			try {
-				spans = snapshot.map((span) => prepareSpanForExport(span, options.sanitizeSpanForExport));
+				spans = pending.map((entry) =>
+					prepareSpanForExport(entry.span, options.sanitizeSpanForExport),
+				);
 			} catch {
 				console.warn("[apifuse] OTLP export skipped; span sanitization failed.");
 				return;
@@ -215,7 +229,11 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 					...(pendingSpan.parentId ? { parentId: pendingSpan.parentId } : {}),
 				};
 
-				insertCompletedSpan(completed, { sequence: pendingSpan.sequence, span }, maxSpans);
+				insertCompletedSpan(
+					completed,
+					{ sequence: pendingSpan.sequence, span, exported: false },
+					maxSpans,
+				);
 				options.onSpan?.(span);
 
 				if (!pendingSpan.parentId) {

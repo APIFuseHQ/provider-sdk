@@ -1,4 +1,12 @@
 import { ProviderError } from "./errors.js";
+import {
+	OTEL_EXPORTER_OTLP_ENDPOINT,
+	OTEL_EXPORTER_OTLP_HEADERS,
+	OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+	OTEL_EXPORTER_OTLP_TRACES_HEADERS,
+	OTEL_RESOURCE_ATTRIBUTES,
+	OTEL_SERVICE_NAME,
+} from "./runtime/otlp.js";
 import type {
 	AuthContext,
 	BrowserClient,
@@ -38,6 +46,31 @@ export function isEngineOwnedProxyCredentialName(name: string): boolean {
 	return ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAME_SET.has(name);
 }
 
+/**
+ * Trace-export configuration owned by the engine and forbidden in provider
+ * declarations. The header variables carry collector credentials; the rest are
+ * engine deployment settings a provider has no reason to read.
+ */
+export const ENGINE_OWNED_TELEMETRY_ENV_NAMES = [
+	OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+	OTEL_EXPORTER_OTLP_ENDPOINT,
+	OTEL_EXPORTER_OTLP_TRACES_HEADERS,
+	OTEL_EXPORTER_OTLP_HEADERS,
+	OTEL_SERVICE_NAME,
+	OTEL_RESOURCE_ATTRIBUTES,
+] as const;
+
+const ENGINE_OWNED_TELEMETRY_ENV_NAME_SET = new Set<string>(ENGINE_OWNED_TELEMETRY_ENV_NAMES);
+
+export function isEngineOwnedTelemetryEnvName(name: string): boolean {
+	return ENGINE_OWNED_TELEMETRY_ENV_NAME_SET.has(name);
+}
+
+/** Every environment name the engine owns: rejected in declarations and filtered from provider projections. */
+export function isEngineOwnedEnvName(name: string): boolean {
+	return isEngineOwnedProxyCredentialName(name) || isEngineOwnedTelemetryEnvName(name);
+}
+
 /** Capture credentials in the engine host before constructing provider bindings. */
 export function readEngineProxyCredentials(
 	environment: Readonly<Record<string, string | undefined>> = process.env,
@@ -57,7 +90,7 @@ export function createProviderEnvironment(
 ): Readonly<Record<string, string>> {
 	return Object.fromEntries(
 		declaredNames.flatMap((name) => {
-			if (isEngineOwnedProxyCredentialName(name)) return [];
+			if (isEngineOwnedEnvName(name)) return [];
 			const value = environment[name];
 			return value === undefined ? [] : [[name, value] as const];
 		}),

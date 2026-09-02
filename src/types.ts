@@ -1891,7 +1891,7 @@ export interface TraceConfig {
 	exporter?: "console" | "json" | "otlp" | "none";
 	endpoint?: string;
 	otlp?: {
-		endpoint: string;
+		endpoint?: string;
 		headers?: Record<string, string>;
 		timeout?: number;
 	};

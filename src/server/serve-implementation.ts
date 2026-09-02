@@ -11,7 +11,7 @@ import { safeProviderErrorObservability } from "../error-observability.js";
 import {
 	createInProcessProviderEngine,
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
-	isEngineOwnedProxyCredentialName,
+	isEngineOwnedEnvName,
 	readEngineProxyCredentials,
 	type ProviderEngine,
 	type ProviderEngineBindingCandidates,
@@ -659,7 +659,7 @@ function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPo
 
 function providerSecretNames(provider: ProviderDefinition): string[] {
 	return (provider.secrets?.map((secret) => secret.name) ?? []).filter(
-		(name) => !isEngineOwnedProxyCredentialName(name),
+		(name) => !isEngineOwnedEnvName(name),
 	);
 }
 

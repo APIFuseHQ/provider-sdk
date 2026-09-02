@@ -24,6 +24,12 @@ export type OTLPExportResolution =
 	| { status: "unconfigured" }
 	| { status: "invalid"; source: string; reason: string };
 
+export type OTLPResourceResolution = {
+	attributes: Record<string, string>;
+	/** Environment variables whose whole value was discarded because it could not be parsed. */
+	discarded: string[];
+};
+
 const OTLP_HTTP_PROTOCOLS = new Set(["http:", "https:"]);
 const INVALID_ENDPOINT_URL = "is not an absolute http(s) URL";
 const INVALID_ENDPOINT_CREDENTIALS = `embeds credentials in the URL; send them through ${OTEL_EXPORTER_OTLP_HEADERS} instead`;
@@ -31,9 +37,9 @@ const INVALID_HEADERS = "contains an HTTP header name or value that cannot be se
 const EXPLICIT_ENDPOINT_SOURCE = "the configured OTLP endpoint";
 const EXPLICIT_HEADERS_SOURCE = "the configured OTLP headers";
 
-function nonEmptyValue(value: string | undefined): string | undefined {
-	const trimmed = value?.trim();
-	return trimmed ? trimmed : undefined;
+/** Only an unset or empty variable is absent (OTel env rules); whitespace is a value and is validated as one. */
+function presentValue(value: string | undefined): string | undefined {
+	return value === undefined || value === "" ? undefined : value;
 }
 
 function parseHttpUrl(value: string): { url: URL } | { reason: string } {
@@ -58,33 +64,69 @@ function headersAreSendable(headers: Record<string, string>): boolean {
 	}
 }
 
-/** OTEL_EXPORTER_OTLP_ENDPOINT is a base URL; traces go to `<base>/v1/traces` without doubling slashes. */
+/** Appends the traces signal path to a base URL, keeping every configured path byte and adding only the separator. */
 function appendTracesPath(base: URL): string {
 	const endpoint = new URL(base.toString());
-	endpoint.pathname = `${endpoint.pathname.replace(/\/+$/, "")}/v1/traces`;
+	const separator = endpoint.pathname.endsWith("/") ? "" : "/";
+	endpoint.pathname = `${endpoint.pathname}${separator}v1/traces`;
 	return endpoint.toString();
 }
 
-function decodeListMember(value: string): string {
+/** HTTP header names are case-insensitive: a later source replaces an earlier one whatever its casing. */
+function mergeHeaders(
+	...sources: Array<Record<string, string> | undefined>
+): Record<string, string> {
+	const merged = new Map<string, [string, string]>();
+	for (const source of sources) {
+		for (const [key, value] of Object.entries(source ?? {})) {
+			merged.set(key.toLowerCase(), [key, value]);
+		}
+	}
+	return Object.fromEntries(merged.values());
+}
+
+function decodeHeaderMember(value: string): string {
 	try {
 		return decodeURIComponent(value);
 	} catch {
-		// A literal "%" that is not a valid escape is passed through rather than dropping the entry.
+		// A literal "%" that is not a valid escape is passed through rather than dropping the header.
 		return value;
 	}
 }
 
-/** Parses the OTel `key=value,key2=value2` list format shared by headers and resource attributes. */
-function parseKeyValueList(value: string | undefined): Record<string, string> {
-	const entries: Record<string, string> = {};
+/** Baggage-style header list: malformed members are skipped and an invalid percent-escape keeps the raw text. */
+function parseHeaderList(value: string | undefined): Record<string, string> {
+	const entries: Array<[string, string]> = [];
 	for (const member of value?.split(",") ?? []) {
 		const separator = member.indexOf("=");
 		if (separator <= 0) continue;
-		const key = decodeListMember(member.slice(0, separator).trim());
+		const key = decodeHeaderMember(member.slice(0, separator).trim());
 		if (!key) continue;
-		entries[key] = decodeListMember(member.slice(separator + 1).trim());
+		entries.push([key, decodeHeaderMember(member.slice(separator + 1).trim())]);
 	}
-	return entries;
+	return mergeHeaders(Object.fromEntries(entries));
+}
+
+/**
+ * OTel resource list: a member without `key=value` or with an invalid
+ * percent-escape discards the whole value, as the Resource SDK spec requires,
+ * so a partially malformed variable can never export a wrong identity.
+ */
+function parseResourceAttributeList(value: string): Record<string, string> | undefined {
+	const entries: Array<[string, string]> = [];
+	for (const member of value.split(",")) {
+		if (member.trim() === "") continue;
+		const separator = member.indexOf("=");
+		if (separator <= 0) return undefined;
+		try {
+			const key = decodeURIComponent(member.slice(0, separator).trim());
+			if (!key) return undefined;
+			entries.push([key, decodeURIComponent(member.slice(separator + 1).trim())]);
+		} catch {
+			return undefined;
+		}
+	}
+	return Object.fromEntries(entries);
 }
 
 /**
@@ -118,7 +160,7 @@ export function resolveOTLPExportOptions(
 		},
 	];
 	const candidate = candidates
-		.map((entry) => ({ ...entry, value: nonEmptyValue(entry.value) }))
+		.map((entry) => ({ ...entry, value: presentValue(entry.value) }))
 		.find((entry): entry is typeof entry & { value: string } => entry.value !== undefined);
 	if (!candidate) return { status: "unconfigured" };
 
@@ -128,16 +170,16 @@ export function resolveOTLPExportOptions(
 	}
 	const endpoint = candidate.appendPath ? appendTracesPath(parsed.url) : candidate.value;
 
-	const tracesHeaders = nonEmptyValue(env[OTEL_EXPORTER_OTLP_TRACES_HEADERS]);
+	const tracesHeaders = presentValue(env[OTEL_EXPORTER_OTLP_TRACES_HEADERS]);
 	const headersSource =
 		tracesHeaders !== undefined ? OTEL_EXPORTER_OTLP_TRACES_HEADERS : OTEL_EXPORTER_OTLP_HEADERS;
-	const envHeaders = parseKeyValueList(
-		tracesHeaders ?? nonEmptyValue(env[OTEL_EXPORTER_OTLP_HEADERS]),
+	const envHeaders = parseHeaderList(
+		tracesHeaders ?? presentValue(env[OTEL_EXPORTER_OTLP_HEADERS]),
 	);
 	if (!headersAreSendable(envHeaders)) {
 		return { status: "invalid", source: headersSource, reason: INVALID_HEADERS };
 	}
-	const headers = { ...envHeaders, ...explicit.headers };
+	const headers = mergeHeaders(envHeaders, explicit.headers);
 	if (!headersAreSendable(headers)) {
 		return { status: "invalid", source: EXPLICIT_HEADERS_SOURCE, reason: INVALID_HEADERS };
 	}
@@ -155,17 +197,26 @@ export function resolveOTLPExportOptions(
 /**
  * Merges OTEL_RESOURCE_ATTRIBUTES and OTEL_SERVICE_NAME under the caller's
  * explicit resource attributes: explicit wins per key, OTEL_SERVICE_NAME wins
- * over a `service.name` inside OTEL_RESOURCE_ATTRIBUTES.
+ * over a `service.name` inside OTEL_RESOURCE_ATTRIBUTES. An unparseable
+ * OTEL_RESOURCE_ATTRIBUTES value is discarded as a unit and reported in `discarded`.
  */
 export function resolveOTLPResourceAttributes(
 	explicit: Record<string, string>,
 	env: EnvLike = process.env,
-): Record<string, string> {
-	const serviceName = nonEmptyValue(env[OTEL_SERVICE_NAME]);
+): OTLPResourceResolution {
+	const discarded: string[] = [];
+	const resourceList = presentValue(env[OTEL_RESOURCE_ATTRIBUTES]);
+	const resourceAttributes =
+		resourceList === undefined ? {} : parseResourceAttributeList(resourceList);
+	if (resourceAttributes === undefined) discarded.push(OTEL_RESOURCE_ATTRIBUTES);
+	const serviceName = presentValue(env[OTEL_SERVICE_NAME]);
 	return {
-		...parseKeyValueList(env[OTEL_RESOURCE_ATTRIBUTES]),
-		...(serviceName ? { "service.name": serviceName } : {}),
-		...explicit,
+		attributes: {
+			...resourceAttributes,
+			...(serviceName ? { "service.name": serviceName } : {}),
+			...explicit,
+		},
+		discarded,
 	};
 }
 
@@ -289,49 +340,234 @@ export function spansToOTLP(
 	};
 }
 
-/** Classifies an export failure without echoing endpoint, header, or message text. */
-function describeExportFailure(error: unknown): string {
-	if (!(error instanceof Error)) return "unknown error";
-	if (error.name === "AbortError" || error.name === "TimeoutError") return "timeout";
-	const code = (error as { code?: unknown }).code;
-	return typeof code === "string" && code ? `${error.name}: ${code}` : error.name;
+type ExportTransport = typeof fetch;
+
+// Bound when the SDK module loads, before any provider module body runs. Provider code that
+// later replaces globalThis.fetch can neither observe collector credentials nor inject failures.
+const engineTransport: ExportTransport = globalThis.fetch;
+let transport: ExportTransport = engineTransport;
+
+/** Process-wide bounds so a collector outage can never turn into unbounded sockets, memory, or log volume. */
+export const OTLP_EXPORT_LIMITS = {
+	maxInFlight: 4,
+	maxQueued: 64,
+	maxAttempts: 3,
+	retryBaseDelayMs: 200,
+	retryMaxDelayMs: 2_000,
+	warningCooldownMs: 10_000,
+} as const;
+
+const RETRYABLE_STATUSES = new Set([408, 429, 502, 503, 504]);
+const TIMEOUT_ERROR_NAMES = new Set(["AbortError", "TimeoutError"]);
+/** Certificate failures do not clear up on retry; they are reported once and the batch dropped. */
+const CERTIFICATE_ERROR_CODES = new Set([
+	"CERT_HAS_EXPIRED",
+	"DEPTH_ZERO_SELF_SIGNED_CERT",
+	"SELF_SIGNED_CERT_IN_CHAIN",
+	"UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+	"ERR_TLS_CERT_ALTNAME_INVALID",
+]);
+/** Only these system codes are ever echoed; anything else is reported as a plain network error. */
+const NETWORK_ERROR_CODES = new Set([
+	"ECONNREFUSED",
+	"ECONNRESET",
+	"ECONNABORTED",
+	"ENOTFOUND",
+	"EAI_AGAIN",
+	"ETIMEDOUT",
+	"EHOSTUNREACH",
+	"ENETUNREACH",
+	"EPIPE",
+	"CERT_HAS_EXPIRED",
+	"DEPTH_ZERO_SELF_SIGNED_CERT",
+	"SELF_SIGNED_CERT_IN_CHAIN",
+	"UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+	"ERR_TLS_CERT_ALTNAME_INVALID",
+	"ConnectionRefused",
+	"ConnectionClosed",
+	"FailedToOpenSocket",
+]);
+
+type ExportOutcome = { ok: true } | { ok: false; reason: string; retryable: boolean };
+
+type ExportBatch = {
+	body: string;
+	options: OTLPExportOptions;
+	settle: () => void;
+};
+
+const queue: ExportBatch[] = [];
+let inFlight = 0;
+let lastWarningAt = Number.NEGATIVE_INFINITY;
+let suppressedDrops = 0;
+let suppressedFlush: ReturnType<typeof setTimeout> | undefined;
+
+function errorCode(error: unknown): string | undefined {
+	const own = (error as { code?: unknown } | null)?.code;
+	if (typeof own === "string") return own;
+	const cause = (error as { cause?: { code?: unknown } } | null)?.cause?.code;
+	return typeof cause === "string" ? cause : undefined;
 }
 
-export async function exportSpansOTLP(
+/** Maps a transport failure onto a fixed vocabulary; nothing from the error object is interpolated. */
+function describeExportFailure(error: unknown): { reason: string; retryable: boolean } {
+	if (error instanceof Error && TIMEOUT_ERROR_NAMES.has(error.name)) {
+		return { reason: "timeout", retryable: true };
+	}
+	const code = errorCode(error);
+	if (code !== undefined && CERTIFICATE_ERROR_CODES.has(code)) {
+		return { reason: `certificate error: ${code}`, retryable: false };
+	}
+	return {
+		reason:
+			code !== undefined && NETWORK_ERROR_CODES.has(code)
+				? `network error: ${code}`
+				: "network error",
+		retryable: true,
+	};
+}
+
+function batchesLabel(count: number): string {
+	return `${count} ${count === 1 ? "batch" : "batches"}`;
+}
+
+/** Emits the count of drops suppressed during a cooldown once it ends, so a burst is never under-reported. */
+function flushSuppressedDrops(): void {
+	suppressedFlush = undefined;
+	if (suppressedDrops === 0) return;
+	const dropped = suppressedDrops;
+	suppressedDrops = 0;
+	lastWarningAt = Date.now();
+	console.warn(
+		`[apifuse] OTLP export: ${batchesLabel(dropped)} more dropped since the last warning.`,
+	);
+}
+
+function noteDroppedBatch(reason: string): void {
+	const now = Date.now();
+	const sinceLastWarning = now - lastWarningAt;
+	if (sinceLastWarning < OTLP_EXPORT_LIMITS.warningCooldownMs) {
+		suppressedDrops += 1;
+		if (suppressedFlush === undefined) {
+			suppressedFlush = setTimeout(
+				flushSuppressedDrops,
+				OTLP_EXPORT_LIMITS.warningCooldownMs - sinceLastWarning,
+			);
+			suppressedFlush.unref?.();
+		}
+		return;
+	}
+	lastWarningAt = now;
+	console.warn(`[apifuse] OTLP export failed (${reason}); ${batchesLabel(1)} dropped.`);
+}
+
+async function sendBatch(batch: ExportBatch): Promise<ExportOutcome> {
+	const controller = new AbortController();
+	const timer = setTimeout(() => controller.abort(), batch.options.timeout ?? 5_000);
+	try {
+		const response = await transport(batch.options.endpoint, {
+			method: "POST",
+			headers: mergeHeaders(batch.options.headers, { "Content-Type": "application/json" }),
+			body: batch.body,
+			signal: controller.signal,
+		});
+		// The reply body is not needed; cancel it while the abort timer still bounds the socket.
+		try {
+			await response.body?.cancel();
+		} catch {
+			// A body that cannot be cancelled does not change the outcome of the export.
+		}
+		if (response.ok) return { ok: true };
+		return {
+			ok: false,
+			reason: `HTTP ${response.status}`,
+			retryable: RETRYABLE_STATUSES.has(response.status),
+		};
+	} catch (error) {
+		return { ok: false, ...describeExportFailure(error) };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+function retryDelayMs(attempt: number): number {
+	return Math.min(
+		OTLP_EXPORT_LIMITS.retryBaseDelayMs * 2 ** (attempt - 1),
+		OTLP_EXPORT_LIMITS.retryMaxDelayMs,
+	);
+}
+
+async function deliverBatch(batch: ExportBatch): Promise<void> {
+	for (let attempt = 1; ; attempt += 1) {
+		const outcome = await sendBatch(batch);
+		if (outcome.ok) return;
+		if (!outcome.retryable || attempt >= OTLP_EXPORT_LIMITS.maxAttempts) {
+			noteDroppedBatch(
+				attempt > 1 ? `${outcome.reason} after ${attempt} attempts` : outcome.reason,
+			);
+			return;
+		}
+		await new Promise<void>((resolve) => {
+			setTimeout(resolve, retryDelayMs(attempt)).unref?.();
+		});
+	}
+}
+
+function pumpQueue(): void {
+	while (inFlight < OTLP_EXPORT_LIMITS.maxInFlight && queue.length > 0) {
+		const batch = queue.shift();
+		if (!batch) return;
+		inFlight += 1;
+		void deliverBatch(batch).finally(() => {
+			inFlight -= 1;
+			batch.settle();
+			pumpQueue();
+		});
+	}
+}
+
+/**
+ * Queues one export batch behind the process-wide concurrency and queue bounds.
+ * Resolves once the batch has been delivered or dropped; it never rejects, so
+ * callers can fire and forget.
+ */
+export function exportSpansOTLP(
 	spans: TraceSpan[],
 	options: OTLPExportOptions,
 	resourceAttributes?: Record<string, string>,
 	traceId?: string,
 ): Promise<void> {
 	if (spans.length === 0) {
-		return;
+		return Promise.resolve();
 	}
-
-	const controller = new AbortController();
-	const timer = setTimeout(() => controller.abort(), options.timeout ?? 5_000);
-	let failure: string | undefined;
-
+	if (queue.length >= OTLP_EXPORT_LIMITS.maxQueued) {
+		noteDroppedBatch("export queue is full");
+		return Promise.resolve();
+	}
+	let body: string;
 	try {
-		const response = await fetch(options.endpoint, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				...options.headers,
-			},
-			body: JSON.stringify(spansToOTLP(spans, resourceAttributes, traceId)),
-			signal: controller.signal,
-		});
-
-		if (!response.ok) {
-			failure = `HTTP ${response.status}`;
-		}
-	} catch (error) {
-		failure = describeExportFailure(error);
-	} finally {
-		clearTimeout(timer);
+		body = JSON.stringify(spansToOTLP(spans, resourceAttributes, traceId));
+	} catch {
+		noteDroppedBatch("span serialization failed");
+		return Promise.resolve();
 	}
+	return new Promise<void>((settle) => {
+		queue.push({ body, options, settle });
+		pumpQueue();
+	});
+}
 
-	if (failure !== undefined) {
-		console.warn(`[apifuse] OTLP export failed (${failure}); spans were dropped.`);
-	}
+/** Test seam (not re-exported from any package entry point): substitute the engine transport. */
+export function swapOTLPTransportForTests(next?: ExportTransport): void {
+	transport = next ?? engineTransport;
+}
+
+/** Test seam: drop queued batches, clear the warning throttle, and restore the engine transport. */
+export function resetOTLPExportForTests(): void {
+	for (const batch of queue.splice(0)) batch.settle();
+	if (suppressedFlush !== undefined) clearTimeout(suppressedFlush);
+	suppressedFlush = undefined;
+	lastWarningAt = Number.NEGATIVE_INFINITY;
+	suppressedDrops = 0;
+	transport = engineTransport;
 }

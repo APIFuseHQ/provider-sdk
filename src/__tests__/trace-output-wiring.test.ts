@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { beforeEach, describe, expect, it, mock } from "bun:test";
 import { z } from "zod";
 
 import {
@@ -8,6 +8,9 @@ import {
 	OTEL_EXPORTER_OTLP_TRACES_HEADERS,
 	OTEL_RESOURCE_ATTRIBUTES,
 	OTEL_SERVICE_NAME,
+	OTLP_EXPORT_LIMITS,
+	resetOTLPExportForTests,
+	swapOTLPTransportForTests,
 } from "../runtime/otlp.js";
 import {
 	createTraceContext,
@@ -21,6 +24,7 @@ import {
 } from "../runtime/trace-config.js";
 import { createServerApp } from "../server/serve.js";
 import { resolveServerTraceContextOptions } from "../server/trace-output.js";
+import type { TraceConfig } from "../types.js";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 
 const TRACE_CREDENTIAL = "tok_fake_Qj8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS";
@@ -58,23 +62,26 @@ function attributeMap(attributes: OTLPAttribute[]): Record<string, string | numb
 	);
 }
 
-/** Replaces global fetch with a recorder; exports are fire-and-forget, so callers await settleExports(). */
+/** Installs a recording transport through the engine seam; exports are fire-and-forget, so callers await settleExports(). */
 function captureExports(status = 200): { exports: CapturedExport[]; restore: () => void } {
 	const exports: CapturedExport[] = [];
-	const originalFetch = global.fetch;
-	global.fetch = Object.assign(
-		async (url: string | URL | Request, init?: RequestInit) => {
-			exports.push({ url: typeof url === "string" ? url : url.toString(), init });
-			return new Response(null, { status });
-		},
-		{ preconnect: originalFetch.preconnect },
+	swapOTLPTransportForTests(
+		Object.assign(
+			async (url: string | URL | Request, init?: RequestInit) => {
+				exports.push({ url: typeof url === "string" ? url : url.toString(), init });
+				return new Response(null, { status });
+			},
+			{ preconnect: global.fetch.preconnect },
+		),
 	);
-	return {
-		exports,
-		restore: () => {
-			global.fetch = originalFetch;
-		},
-	};
+	return { exports, restore: () => swapOTLPTransportForTests() };
+}
+
+async function waitUntil(condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!condition() && Date.now() < deadline) {
+		await new Promise<void>((resolve) => setTimeout(resolve, 10));
+	}
 }
 
 async function settleExports(exports: CapturedExport[], expected = 1): Promise<void> {
@@ -85,6 +92,10 @@ async function settleExports(exports: CapturedExport[], expected = 1): Promise<v
 	await new Promise<void>((resolve) => setImmediate(resolve));
 	await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+beforeEach(() => {
+	resetOTLPExportForTests();
+});
 
 const provider = createProviderDefinitionDouble({
 	operations: {
@@ -510,6 +521,44 @@ describe("server OTLP trace output wiring", () => {
 		});
 	});
 
+	it("accepts a typed otlp config without an endpoint and resolves it from the environment", () => {
+		const config: TraceConfig = {
+			enabled: true,
+			exporter: "otlp",
+			otlp: { headers: { "X-Tenant": "acme" }, timeout: 250 },
+		};
+		const options = resolveServerTraceContextOptions(config, requestAttributes, {
+			[OTEL_EXPORTER_OTLP_TRACES_ENDPOINT]: "http://collector.test/v1/traces",
+		});
+		expect(options.exportOptions).toEqual({
+			endpoint: "http://collector.test/v1/traces",
+			headers: { "X-Tenant": "acme" },
+			timeout: 250,
+		});
+	});
+
+	it("ignores an unparseable OTEL_RESOURCE_ATTRIBUTES value and warns once without echoing it", () => {
+		const warn = mock((_message?: unknown) => {});
+		const originalWarn = console.warn;
+		console.warn = warn;
+		try {
+			const env = {
+				[OTEL_EXPORTER_OTLP_TRACES_ENDPOINT]: "http://collector.test/v1/traces",
+				[OTEL_RESOURCE_ATTRIBUTES]: `deployment.environment=prod,${TRACE_CREDENTIAL}`,
+			};
+			const options = resolveServerTraceContextOptions(otlpConfig, requestAttributes, env);
+			resolveServerTraceContextOptions(otlpConfig, requestAttributes, env);
+			expect(options.resourceAttributes).toEqual(requestAttributes);
+		} finally {
+			console.warn = originalWarn;
+		}
+		expect(warn).toHaveBeenCalledTimes(1);
+		const message = String(warn.mock.calls[0]?.[0]);
+		expect(message).toContain(OTEL_RESOURCE_ATTRIBUTES);
+		expect(message).not.toContain(TRACE_CREDENTIAL);
+		expect(message).not.toContain("prod");
+	});
+
 	it("warns once per environment and disables export when no endpoint is resolvable", async () => {
 		const warn = mock(() => {});
 		const originalWarn = console.warn;
@@ -627,7 +676,6 @@ describe("server OTLP trace output wiring", () => {
 			await expect(throwing.span("provider.throwing", async () => "ok")).resolves.toBe("ok");
 			const returningNothing = createTraceContext({
 				...resolveServerTraceContextOptions(otlpConfig, requestAttributes, {}),
-				// @ts-expect-error test-invalid: a JavaScript caller can return nothing from the hook; export must fail closed.
 				sanitizeSpanForExport: () => undefined,
 			});
 			await expect(returningNothing.span("provider.nothing", async () => "ok")).resolves.toBe("ok");
@@ -675,7 +723,73 @@ describe("server OTLP trace output wiring", () => {
 		expect(Object.keys(trace)).toEqual(["span", "getSpans"]);
 	});
 
-	it("assigns one trace id per trace context across export batches", async () => {
+	it("coalesces roots that complete in the same tick into one export batch", async () => {
+		const capture = captureExports();
+		try {
+			const trace = createTraceContext(
+				resolveServerTraceContextOptions(otlpConfig, requestAttributes, {}),
+			);
+			await Promise.all([
+				trace.span("root.a", async () => undefined),
+				trace.span("root.b", async () => undefined),
+			]);
+			await settleExports(capture.exports, 1);
+			await settleExports(capture.exports, 2);
+
+			expect(capture.exports).toHaveLength(1);
+			const body = JSON.parse(String(capture.exports[0]?.init?.body)) as OTLPBody;
+			const names = body.resourceSpans[0]?.scopeSpans[0]?.spans.map((span) => span.name) ?? [];
+			expect(names.sort()).toEqual(["root.a", "root.b"]);
+		} finally {
+			capture.restore();
+		}
+	});
+
+	it("never has more concurrent collector requests than the in-flight cap", async () => {
+		const release: Array<() => void> = [];
+		const exports: CapturedExport[] = [];
+		swapOTLPTransportForTests(
+			Object.assign(
+				(url: string | URL | Request, init?: RequestInit) => {
+					exports.push({ url: typeof url === "string" ? url : url.toString(), init });
+					return new Promise<Response>((resolve) => {
+						release.push(() => resolve(new Response(null, { status: 200 })));
+					});
+				},
+				{ preconnect: global.fetch.preconnect },
+			),
+		);
+		const concurrentRequests = OTLP_EXPORT_LIMITS.maxInFlight + 2;
+		try {
+			await withTraceEnv(
+				{
+					[APIFUSE__TRACE__ENABLED]: "true",
+					[APIFUSE__TRACE__EXPORTER]: "otlp",
+					[OTEL_EXPORTER_OTLP_TRACES_ENDPOINT]: "http://collector.test/v1/traces",
+				},
+				async () => {
+					const responses = await Promise.all(
+						Array.from({ length: concurrentRequests }, () => invokeEcho()),
+					);
+					for (const response of responses) expect(response.status).toBe(200);
+					await settleExports(exports, OTLP_EXPORT_LIMITS.maxInFlight);
+					await settleExports(exports, concurrentRequests);
+					expect(exports).toHaveLength(OTLP_EXPORT_LIMITS.maxInFlight);
+				},
+			);
+		} finally {
+			while (release.length > 0) {
+				release.shift()?.();
+				await new Promise<void>((resolve) => setImmediate(resolve));
+			}
+			await waitUntil(() => exports.length === concurrentRequests && release.length === 0);
+			while (release.length > 0) release.shift()?.();
+			swapOTLPTransportForTests();
+		}
+		expect(exports).toHaveLength(concurrentRequests);
+	});
+
+	it("assigns one trace id per trace context and never re-sends an exported span", async () => {
 		const capture = captureExports();
 		try {
 			const first = createTraceContext(
@@ -685,22 +799,27 @@ describe("server OTLP trace output wiring", () => {
 				resolveServerTraceContextOptions(otlpConfig, requestAttributes, {}),
 			);
 			await first.span("first.root.a", async () => undefined);
+			await settleExports(capture.exports, 1);
 			await first.span("first.root.b", async () => undefined);
 			await second.span("second.root", async () => undefined);
 			await settleExports(capture.exports, 3);
 
-			const traceIds = capture.exports.map((entry) => {
+			const batches = capture.exports.map((entry) => {
 				const body = JSON.parse(String(entry.init?.body)) as OTLPBody;
-				const ids = new Set(
-					body.resourceSpans[0]?.scopeSpans[0]?.spans.map((span) => span.traceId),
-				);
-				expect(ids.size).toBe(1);
-				return [...ids][0] ?? "";
+				const spans = body.resourceSpans[0]?.scopeSpans[0]?.spans ?? [];
+				const traceIds = new Set(spans.map((span) => span.traceId));
+				expect(traceIds.size).toBe(1);
+				return { traceId: [...traceIds][0] ?? "", names: spans.map((span) => span.name) };
 			});
-			expect(traceIds).toHaveLength(3);
-			for (const traceId of traceIds) expect(traceId).toMatch(/^[0-9a-f]{32}$/);
-			expect(traceIds[0]).toBe(traceIds[1] ?? "");
-			expect(traceIds[2]).not.toBe(traceIds[0]);
+			const exportedNames = batches.flatMap((batch) => batch.names);
+			expect(exportedNames.sort()).toEqual(["first.root.a", "first.root.b", "second.root"]);
+			const firstIds = new Set(
+				batches.filter((batch) => batch.names[0]?.startsWith("first.")).map((b) => b.traceId),
+			);
+			expect(firstIds.size).toBe(1);
+			const secondId = batches.find((batch) => batch.names.includes("second.root"))?.traceId;
+			expect(secondId).toMatch(/^[0-9a-f]{32}$/);
+			expect(firstIds.has(secondId ?? "")).toBe(false);
 		} finally {
 			capture.restore();
 		}
@@ -738,14 +857,15 @@ describe("server OTLP trace output wiring", () => {
 			releaseExport = resolve;
 		});
 		const exports: CapturedExport[] = [];
-		const originalFetch = global.fetch;
-		global.fetch = Object.assign(
-			async (url: string | URL | Request, init?: RequestInit) => {
-				exports.push({ url: typeof url === "string" ? url : url.toString(), init });
-				await exportReleased;
-				return new Response(null, { status: 200 });
-			},
-			{ preconnect: originalFetch.preconnect },
+		swapOTLPTransportForTests(
+			Object.assign(
+				async (url: string | URL | Request, init?: RequestInit) => {
+					exports.push({ url: typeof url === "string" ? url : url.toString(), init });
+					await exportReleased;
+					return new Response(null, { status: 200 });
+				},
+				{ preconnect: global.fetch.preconnect },
+			),
 		);
 		try {
 			await withTraceEnv(
@@ -766,7 +886,7 @@ describe("server OTLP trace output wiring", () => {
 				},
 			);
 		} finally {
-			global.fetch = originalFetch;
+			swapOTLPTransportForTests();
 		}
 	});
 
@@ -862,7 +982,36 @@ describe("server OTLP trace output wiring", () => {
 			"Content-Type": "application/json",
 			Authorization: `Bearer ${TRACE_CREDENTIAL}`,
 		});
-		expect(warnings).toEqual(["[apifuse] OTLP export failed (HTTP 401); spans were dropped."]);
+		expect(warnings).toEqual(["[apifuse] OTLP export failed (HTTP 401); 1 batch dropped."]);
 		expect(warnings.join("\n")).not.toContain(TRACE_CREDENTIAL);
+	});
+
+	it("keeps the request successful while a failing collector is retried and then dropped", async () => {
+		const warnings: string[] = [];
+		const originalWarn = console.warn;
+		console.warn = (...args: unknown[]) => warnings.push(args.map(String).join(" "));
+		const capture = captureExports(503);
+		try {
+			await withTraceEnv(
+				{
+					[APIFUSE__TRACE__ENABLED]: "true",
+					[APIFUSE__TRACE__EXPORTER]: "otlp",
+					[OTEL_EXPORTER_OTLP_TRACES_ENDPOINT]: "http://collector.test/v1/traces",
+				},
+				async () => {
+					const response = await invokeEcho();
+					expect(response.status).toBe(200);
+					expect(await response.json()).toEqual({ data: { value: "hello" } });
+					await waitUntil(() => warnings.length > 0);
+				},
+			);
+		} finally {
+			capture.restore();
+			console.warn = originalWarn;
+		}
+		expect(capture.exports).toHaveLength(OTLP_EXPORT_LIMITS.maxAttempts);
+		expect(warnings).toEqual([
+			`[apifuse] OTLP export failed (HTTP 503 after ${OTLP_EXPORT_LIMITS.maxAttempts} attempts); 1 batch dropped.`,
+		]);
 	});
 });

@@ -5,6 +5,8 @@ import { defineProvider } from "../define.js";
 import {
 	createInProcessProviderEngine,
 	createProviderEnvironment,
+	ENGINE_OWNED_TELEMETRY_ENV_NAMES,
+	isEngineOwnedEnvName,
 	readEngineProxyCredentials,
 } from "../engine.js";
 import { createServerApp } from "../server/serve.js";
@@ -144,6 +146,70 @@ describe("engine credential containment", () => {
 		expect(createProviderEnvironment(source, Object.keys(source))).toEqual({
 			PROVIDER_TOKEN: "provider-token",
 		});
+	});
+
+	it("classifies OTLP export configuration as engine-owned and omits it from provider environments", () => {
+		const source = {
+			OTEL_EXPORTER_OTLP_HEADERS: "Authorization=Bearer%20engine-token",
+			OTEL_EXPORTER_OTLP_TRACES_HEADERS: "Authorization=Bearer%20engine-traces-token",
+			OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.test:4318",
+			OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://collector.test:4318/v1/traces",
+			OTEL_SERVICE_NAME: "engine-service",
+			OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=prod",
+			PROVIDER_TOKEN: "provider-token",
+		};
+
+		expect(ENGINE_OWNED_TELEMETRY_ENV_NAMES.every((name) => isEngineOwnedEnvName(name))).toBe(true);
+		expect(isEngineOwnedEnvName("PROVIDER_TOKEN")).toBe(false);
+		expect(createProviderEnvironment(source, Object.keys(source))).toEqual({
+			PROVIDER_TOKEN: "provider-token",
+		});
+	});
+
+	it("keeps OTLP header credentials out of a provider operation environment even when declared", async () => {
+		const names = ["OTEL_EXPORTER_OTLP_HEADERS", "OTEL_EXPORTER_OTLP_TRACES_HEADERS"] as const;
+		const previous = new Map<string, string | undefined>(
+			[...names, "PROVIDER_TOKEN"].map((name) => [name, process.env[name]]),
+		);
+		process.env.OTEL_EXPORTER_OTLP_HEADERS = "Authorization=Bearer%20engine-only-token";
+		process.env.OTEL_EXPORTER_OTLP_TRACES_HEADERS = "Authorization=Bearer%20engine-only-traces";
+		process.env.PROVIDER_TOKEN = "provider-token";
+		try {
+			const provider = definition({
+				env: true,
+				secrets: [...names.map((name) => ({ name })), { name: "PROVIDER_TOKEN" }],
+				operations: {
+					inspectEnvironment: {
+						input: z.object({}),
+						output: z.object({
+							headers: z.string().optional(),
+							tracesHeaders: z.string().optional(),
+							providerToken: z.string(),
+						}),
+						handler: async (ctx) => ({
+							headers: ctx.env.get(names[0]),
+							tracesHeaders: ctx.env.get(names[1]),
+							providerToken: ctx.env.get("PROVIDER_TOKEN") ?? "",
+						}),
+					},
+				},
+			});
+			const response = await createServerApp(provider).request("/v1/inspectEnvironment", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "telemetry-containment", input: {} }),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({
+				data: { providerToken: "provider-token" },
+			});
+		} finally {
+			for (const [name, value] of previous) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
 	});
 
 	it("keeps proxy credentials out of a provider operation environment", async () => {
