@@ -220,7 +220,9 @@ describe("Capsolver resolver vendor", () => {
 			cookies: { "aws-waf-token": "cached-aws-cookie" },
 			userAgent: getStealthProfile(DEFAULT_STEALTH_PROFILE).userAgent,
 		});
-		if (first.form !== "cookies") throw new Error("expected cookies solution");
+		if (first.form !== "cookies" || !("cookies" in first)) {
+			throw new Error("expected cookies solution");
+		}
 		expect(first.sdkEstimatedExpires).toBeGreaterThanOrEqual((beforeMs + 60 * 60 * 1_000) / 1_000);
 		expect(first.sdkEstimatedExpires).toBeLessThanOrEqual((afterMs + 60 * 60 * 1_000) / 1_000);
 		expect(first).not.toHaveProperty("expires");

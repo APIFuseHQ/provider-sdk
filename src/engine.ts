@@ -1,5 +1,11 @@
 import { ProviderError } from "./errors.js";
 import {
+	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
+	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
+	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+	APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
+} from "./runtime/resolver-config.js";
+import {
 	OTEL_EXPORTER_OTLP_ENDPOINT,
 	OTEL_EXPORTER_OTLP_HEADERS,
 	OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
@@ -55,6 +61,27 @@ export function isEngineOwnedProxyCredentialName(name: string): boolean {
 	return ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAME_SET.has(canonicalEnvName(name));
 }
 
+/** Hosted resolver credentials owned by the engine and never projected to providers. */
+export const ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES = [
+	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
+	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
+	APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
+] as const;
+
+const ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAME_SET = new Set<string>(
+	ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES,
+);
+
+export function isEngineOwnedResolverCredentialName(name: string): boolean {
+	const canonical = canonicalEnvName(name);
+	return (
+		ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAME_SET.has(canonical) ||
+		canonical.startsWith("APIFUSE__RESOLVER__") ||
+		/^APIFUSE__PROVIDER__.+__HYPER_API_KEY$/u.test(canonical)
+	);
+}
+
 /**
  * Trace-export configuration owned by the engine and forbidden in provider
  * declarations. The header variables carry collector credentials; the rest are
@@ -77,7 +104,11 @@ export function isEngineOwnedTelemetryEnvName(name: string): boolean {
 
 /** Every environment name the engine owns: rejected in declarations and filtered from provider projections. */
 export function isEngineOwnedEnvName(name: string): boolean {
-	return isEngineOwnedProxyCredentialName(name) || isEngineOwnedTelemetryEnvName(name);
+	return (
+		isEngineOwnedProxyCredentialName(name) ||
+		isEngineOwnedResolverCredentialName(name) ||
+		isEngineOwnedTelemetryEnvName(name)
+	);
 }
 
 /** Capture credentials in the engine host before constructing provider bindings. */

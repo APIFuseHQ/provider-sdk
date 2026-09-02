@@ -12,8 +12,8 @@ export const RESOLVER_VENDOR_CAPABILITIES = {
 	// Every kind listed per vendor is implemented by that vendor's adapter; the
 	// per-adapter "agrees with every declared capability" tests iterate this
 	// table, so adding a kind here without an implementation fails the suite.
-	// 2captcha omits `cloudflare_interstitial`, `akamai_sec_cpt`, and
-	// `akamai_sensor`: their API offers no task type for them, so declaring them
+	// 2captcha omits `cloudflare_interstitial` and every Akamai kind: its API
+	// offers no measured task type for them, so declaring them
 	// would route challenges to a vendor that can only refuse.
 	"2captcha": [
 		"turnstile",
@@ -31,6 +31,9 @@ export const RESOLVER_VENDOR_CAPABILITIES = {
 		"aws_waf",
 	],
 	capmonster: ["turnstile", "recaptcha_v2", "recaptcha_v3", "hcaptcha"],
+	// Hyper's /sbsd envelope is measured. Its sensor endpoint is deliberately
+	// omitted until that separate protocol is implemented and verified.
+	hypersolutions: ["akamai_sbsd"],
 	custom: [
 		"turnstile",
 		"recaptcha_v2",
@@ -40,6 +43,7 @@ export const RESOLVER_VENDOR_CAPABILITIES = {
 		"aws_waf",
 		"akamai_sec_cpt",
 		"akamai_sensor",
+		"akamai_sbsd",
 	],
 } as const satisfies Readonly<Record<ProviderResolverVendor, readonly ProviderChallengeKind[]>>;
 
@@ -51,6 +55,7 @@ export const RESOLVER_VENDOR_CAPABILITIES = {
 export const DEFAULT_RESOLVER_VENDOR_PREFERENCE = [
 	"capsolver",
 	"2captcha",
+	"hypersolutions",
 ] as const satisfies readonly ProviderResolverVendor[];
 
 export function resolverVendorSupports(
@@ -83,9 +88,19 @@ export interface ResolverIssuingIdentity {
 
 export interface ResolverVendorTransport {
 	/**
-	 * Bound to the resolved proxy lease and client profile.
-	 * Implementations MUST NOT follow redirects and MUST return the initial redirect response.
+	 * Exact stable upstream headers owned by the proxy/profile-bound transport.
+	 * This does not include dynamic Cookie headers; the transport injects those from its jar.
+	 * Adapter requests do not receive these headers implicitly and must forward
+	 * them when their measured protocol requires session-header continuity.
 	 */
+	readonly sessionHeaders?: Readonly<Record<string, string>>;
+	/**
+	 * Read a cookie from the transport's bound jar for the supplied URL. Responses
+	 * returned by `fetch` MUST already have been applied to that jar before this
+	 * method is called. Profile-bound adapters fail closed when this seam is absent.
+	 */
+	readonly getCookie?: (name: string, url: string) => string | undefined;
+	/** Implementations MUST NOT follow redirects and must return the initial response. */
 	fetch(
 		url: string,
 		init: {
@@ -95,6 +110,8 @@ export interface ResolverVendorTransport {
 			signal: AbortSignal;
 			/** Implementations MUST honor manual redirect handling when the SDK guard sets it. */
 			redirect?: "manual";
+			/** Maximum UTF-8 response body size; implementations must stop reading at this bound. */
+			maxBodyBytes?: number;
 		},
 	): Promise<{
 		readonly status: number;
@@ -118,6 +135,8 @@ export interface ResolverVendorTransport {
 export interface ResolverVendorAdapter {
 	readonly id: ProviderResolverVendor;
 	readonly requiresTransport?: boolean | ((kind: ProviderChallengeKind) => boolean);
+	/** Exact SDK-owned service hosts this adapter may reach through its bound transport. */
+	readonly transportAllowedHosts?: readonly string[];
 	supports(kind: ProviderChallengeKind): boolean;
 	/** Identity the adapter actually used, reported after a successful solve. */
 	getIssuingIdentity?(

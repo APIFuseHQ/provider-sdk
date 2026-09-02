@@ -278,6 +278,7 @@ export type ProviderResolverVendor =
 	| "capsolver"
 	| "capmonster"
 	| "2captcha"
+	| "hypersolutions"
 	| "custom";
 
 /**
@@ -343,21 +344,39 @@ export type ProviderChallenge =
 			readonly bmsz?: string;
 			/** Bot Manager major version when known ("3" measured on zozo.jp). */
 			readonly version?: string;
+		}
+	| {
+			readonly kind: "akamai_sbsd";
+			readonly pageUrl: string;
+			/**
+			 * Discovered SBSD script URL. `?v=&t=` is a hard challenge and `?v=`
+			 * is passive or a remembered script. A later challenge token never
+			 * changes this URL.
+			 */
+			readonly scriptUrl: string;
+			readonly stateCookieName: "sbsd_o" | "bm_so";
+			/**
+			 * Token returned by a later `cpr_chlge` response. When present with a
+			 * remembered v-only script, it selects index 0 and is appended only to
+			 * the payload POST URL.
+			 */
+			readonly challengeToken?: string;
 		};
 
 export type ProviderChallengeKind = ProviderChallenge["kind"];
 
 /**
- * Token solutions carry no network-identity binding. Cookie-solution binding is
- * per challenge kind: `aws_waf` was measured portable across residential leases
- * on buyee, while `cf_clearance` is unmeasured here and treated as scoped to the
- * identity that produced it. The provider attaches the returned cookies to its
- * own requests.
+ * Token solutions carry no network-identity binding. Portable cookie solutions
+ * carry values for engine-owned installation. SBSD instead returns an opaque
+ * cookie-state outcome: values remain exclusively in the bound engine-owned jar.
+ * A payload POST is never proof that SBSD was solved; only the next protected GET
+ * can verify success (the safe refetch is Phase 2).
  */
 export type ChallengeSolution =
 	| { readonly form: "token"; readonly token: string }
 	| {
 			readonly form: "cookies";
+			readonly kind?: never;
 			readonly cookies: Readonly<Record<string, string>>;
 			readonly userAgent: string;
 			/** Epoch seconds copied from the upstream cookie's own expiry attribute; never a constant. */
@@ -367,21 +386,47 @@ export type ChallengeSolution =
 			 * the upstream cookie's expiry. `expires` takes precedence when both are present.
 			 */
 			readonly sdkEstimatedExpires?: number;
+		}
+	| {
+			readonly form: "cookies";
+			readonly kind: "akamai_sbsd";
+			readonly outcome: "payload_accepted_cookies_updated";
+			/** Always false until a later protected GET verifies the bound jar (Phase 2). */
+			readonly verified: false;
+			/** Name only; the identity-bound cookie value remains in the engine-owned jar. */
+			readonly stateCookieName: "sbsd_o" | "bm_so";
+			/** Epoch seconds observed on the updated state cookie, when supplied upstream. */
+			readonly expires?: number;
 		};
 
-export interface ProviderResolverConfig {
-	/** Optional ordered override for the SDK-owned vendor fallback chain. */
-	readonly vendors?: readonly ProviderResolverVendor[];
-	/** Challenge kinds this provider is permitted to request. */
-	readonly kinds: readonly ProviderChallengeKind[];
-	/**
-	 * Client fingerprint profile the SDK must use when reaching this upstream.
-	 * Measured on zozo.jp: Chrome/Firefox profiles are refused 403 before any
-	 * challenge is served, while a Safari profile is admitted. Provider-declared
-	 * because only the provider knows its upstream's admission rule.
-	 */
-	readonly clientProfile?: string;
-}
+/**
+ * Akamai challenge declarations require a transport-owned client profile.
+ * Other challenge families may omit it.
+ */
+export type ProviderResolverConfig =
+	| {
+			/** Optional ordered override for the SDK-owned vendor fallback chain. */
+			readonly vendors?: readonly ProviderResolverVendor[];
+			/** Challenge kinds this provider is permitted to request. */
+			readonly kinds: readonly Exclude<
+				ProviderChallengeKind,
+				"akamai_sensor" | "akamai_sbsd"
+			>[];
+			readonly clientProfile?: string;
+		}
+	| {
+			/** Optional ordered override for the SDK-owned vendor fallback chain. */
+			readonly vendors?: readonly ProviderResolverVendor[];
+			/** Challenge kinds this provider is permitted to request. */
+			readonly kinds: readonly ProviderChallengeKind[];
+			/**
+			 * Client fingerprint profile the SDK must use when reaching this upstream.
+			 * Measured on zozo.jp: Chrome/Firefox profiles are refused 403 before any
+			 * challenge is served, while a Safari profile is admitted. Provider-declared
+			 * because only the provider knows its upstream's admission rule.
+			 */
+			readonly clientProfile: string;
+		};
 
 export type SttAudioInput = {
 	kind: "base64";

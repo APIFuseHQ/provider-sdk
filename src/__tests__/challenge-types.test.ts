@@ -25,6 +25,7 @@ describe("challenge resolver types", () => {
 
 		const readSolution = (solution: ChallengeSolution): string => {
 			if (solution.form === "token") return solution.token;
+			if (solution.kind === "akamai_sbsd") return solution.outcome;
 			return `${solution.userAgent}:${solution.cookies.cf_clearance}`;
 		};
 
@@ -48,7 +49,7 @@ describe("challenge resolver types", () => {
 		expect(tokenChallenges).toHaveLength(4);
 	});
 
-	it("accepts both Akamai Bot Manager challenge contracts", () => {
+	it("accepts all Akamai Bot Manager challenge contracts", () => {
 		const challenges: readonly ProviderChallenge[] = [
 			{
 				kind: "akamai_sec_cpt",
@@ -63,9 +64,31 @@ describe("challenge resolver types", () => {
 				bmsz: "current-bm-sz",
 				version: "3",
 			},
+			{
+				kind: "akamai_sbsd",
+				pageUrl: "https://example.com/challenge",
+				scriptUrl: "https://example.com/.well-known/sbsd?v=uuid&t=token",
+				stateCookieName: "sbsd_o",
+			},
 		];
 
-		expect(challenges.map(({ kind }) => kind)).toEqual(["akamai_sec_cpt", "akamai_sensor"]);
+		expect(challenges.map(({ kind }) => kind)).toEqual([
+			"akamai_sec_cpt",
+			"akamai_sensor",
+			"akamai_sbsd",
+		]);
+	});
+
+	it("restricts SBSD state-cookie names at the type boundary", () => {
+		const invalidChallenge: ProviderChallenge = {
+			kind: "akamai_sbsd",
+			pageUrl: "https://example.com/challenge",
+			scriptUrl: "https://example.com/.well-known/sbsd?v=uuid",
+			// @ts-expect-error test-invalid: SBSD accepts only the two measured cookie names.
+			stateCookieName: "evil",
+		};
+
+		expect(invalidChallenge).toMatchObject({ stateCookieName: "evil" });
 	});
 
 	it("accepts aws_waf challenges with or without a site key", () => {
@@ -129,6 +152,13 @@ describe("challenge resolver types", () => {
 		await expect(
 			rejectingResolver.solve({ kind, siteKey: "key", pageUrl: "https://example.com" }),
 		).rejects.toThrow("resolver is unavailable in type tests");
+	});
+
+	it("requires clientProfile in Akamai resolver declarations", () => {
+		// @ts-expect-error test-invalid: Akamai resolver declarations require a bound profile.
+		const invalidResolver: ProviderResolverConfig = { kinds: ["akamai_sbsd"] };
+
+		expect(invalidResolver.kinds).toEqual(["akamai_sbsd"]);
 	});
 
 	it("accepts ADR vendor orderings", () => {

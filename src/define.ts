@@ -6,7 +6,11 @@ import {
 } from "./declaration-validation.js";
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
-import { isEngineOwnedProxyCredentialName, isEngineOwnedTelemetryEnvName } from "./engine.js";
+import {
+	isEngineOwnedProxyCredentialName,
+	isEngineOwnedResolverCredentialName,
+	isEngineOwnedTelemetryEnvName,
+} from "./engine.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
 import {
 	NativeEgressPolicyValidationError,
@@ -151,6 +155,7 @@ export const VALID_PROVIDER_RESOLVER_VENDORS = exhaustiveLiteralArray<ProviderRe
 	"capsolver",
 	"capmonster",
 	"2captcha",
+	"hypersolutions",
 	"custom",
 ] as const);
 export const VALID_PROVIDER_CHALLENGE_KINDS = exhaustiveLiteralArray<ProviderChallengeKind>()([
@@ -162,6 +167,7 @@ export const VALID_PROVIDER_CHALLENGE_KINDS = exhaustiveLiteralArray<ProviderCha
 	"aws_waf",
 	"akamai_sec_cpt",
 	"akamai_sensor",
+	"akamai_sbsd",
 ] as const);
 const RESERVED_OPERATION_IDS = new Set(["auth", "health"]);
 const VALID_OPERATION_RISK_CLASSES = ["read", "write", "destructive", "external-send"] as const;
@@ -938,6 +944,17 @@ function validateProviderProxy(config: {
 	secrets?: ProviderSecretDeclaration[];
 }): void {
 	for (const secret of config.secrets ?? []) {
+		if (isEngineOwnedResolverCredentialName(secret.name)) {
+			const engineName = /^APIFUSE__PROVIDER__.+__HYPER_API_KEY$/iu.test(secret.name)
+				? "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY"
+				: secret.name.toUpperCase();
+			throw new ValidationError(
+				`Provider "${config.id}" cannot declare engine-owned resolver credential "${secret.name}"`,
+				{
+					fix: `Remove "${secret.name}" from provider secrets; configure the solver key only on the provider engine as ${engineName}.`,
+				},
+			);
+		}
 		if (isEngineOwnedTelemetryEnvName(secret.name)) {
 			throw new ValidationError(
 				`Provider "${config.id}" cannot declare engine-owned telemetry variable "${secret.name}"`,
@@ -1159,6 +1176,17 @@ function validateProviderResolver(config: { id: string; resolver?: ProviderResol
 			`Provider "${config.id}" has invalid resolver.clientProfile: must be a non-empty string.`,
 			{
 				fix: `Set resolver.clientProfile for provider "${config.id}" to a transport-owned profile name.`,
+			},
+		);
+	}
+	if (
+		resolver.kinds.some((kind) => kind === "akamai_sensor" || kind === "akamai_sbsd") &&
+		resolver.clientProfile === undefined
+	) {
+		throw new ValidationError(
+			`Provider "${config.id}" must declare resolver.clientProfile for Akamai challenge kinds.`,
+			{
+				fix: `Set resolver.clientProfile for provider "${config.id}" to the transport-owned profile used by its Akamai session.`,
 			},
 		);
 	}

@@ -64,6 +64,7 @@ describe("defineProvider", () => {
 			"capsolver",
 			"capmonster",
 			"2captcha",
+			"hypersolutions",
 			"custom",
 		]);
 		expect(defineModule.VALID_PROVIDER_CHALLENGE_KINDS).toEqual([
@@ -75,6 +76,7 @@ describe("defineProvider", () => {
 			"aws_waf",
 			"akamai_sec_cpt",
 			"akamai_sensor",
+			"akamai_sbsd",
 		]);
 	});
 
@@ -117,6 +119,11 @@ describe("defineProvider", () => {
 			"an unknown resolver kind",
 			{ vendors: ["custom"], kinds: ["funcaptcha"] },
 			"invalid resolver.kinds[0]",
+		],
+		[
+			"an Akamai resolver without a client profile",
+			{ vendors: ["hypersolutions"], kinds: ["akamai_sbsd"] },
+			"must declare resolver.clientProfile for Akamai challenge kinds",
 		],
 	] as const)("rejects %s at definition time", (_label, resolver, message) => {
 		let caught: unknown;
@@ -1054,6 +1061,43 @@ describe("defineProvider", () => {
 			} finally {
 				warn.mockRestore();
 			}
+		});
+	});
+
+	describe("engine-owned resolver credentials", () => {
+		it.each([
+			"APIFUSE__RESOLVER__2CAPTCHA__API_KEY",
+			"APIFUSE__RESOLVER__CAPSOLVER__API_KEY",
+			"APIFUSE__RESOLVER__CAPMONSTER__API_KEY",
+			"APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY",
+			"APIFUSE__RESOLVER__TIMEOUT_MS",
+		])("rejects %s in provider secrets with the engine migration path", (name) => {
+			let caught: unknown;
+			try {
+				defineProvider({ ...validConfig, secrets: [{ name, required: true }] });
+			} catch (error) {
+				caught = error;
+			}
+			expect(caught).toBeInstanceOf(ValidationError);
+			expect(caught).toMatchObject({
+				message: expect.stringContaining("cannot declare engine-owned resolver credential"),
+				fix: expect.stringContaining(name),
+			});
+		});
+
+		it("rejects a provider-scoped Hyper alias with the exact engine env fix", () => {
+			let caught: unknown;
+			try {
+				defineProvider({
+					...validConfig,
+					secrets: [{ name: "APIFUSE__PROVIDER__ZOZOTOWN__HYPER_API_KEY", required: true }],
+				});
+			} catch (error) {
+				caught = error;
+			}
+			expect(caught).toMatchObject({
+				fix: expect.stringContaining("APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY"),
+			});
 		});
 	});
 
