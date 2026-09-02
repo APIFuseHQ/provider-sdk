@@ -150,6 +150,22 @@ describe("migrateOperationDeclaration transforms", () => {
 		expect(code).toContain(template);
 	});
 
+	it("resolves a hoisted const array spread inside inputExamples", () => {
+		const code = expectMigrated("examples-hoisted-array-spread", "list");
+		expect(code).toContain("examples: [...LIST_INPUT_EXAMPLES]");
+		expect(code).toContain('scenarioKey: "operations.list.examples.0.scenario"');
+		expect(code).toContain('rationaleKey: "operations.list.examples.0.rationale"');
+		expect(code).not.toContain("inputExamples:");
+	});
+
+	it("resolves mixed literal and hoisted input example elements in runtime order", () => {
+		const code = expectMigrated("examples-mixed-array-spread", "mixed");
+		expect(code).toContain('scenarioKey: "operations.mixed.examples.0.scenario"');
+		expect(code).toContain('scenarioKey: "operations.mixed.examples.1.scenario"');
+		expect(code).toContain('scenarioKey: "operations.mixed.examples.2.scenario"');
+		expect(code).not.toContain("inputExamples:");
+	});
+
 	it("is idempotent on its own output", () => {
 		const code = expectMigrated("hoist-all", "search");
 		const result = migrateOperationDeclaration(code, "hoist-all.ts", {
@@ -180,6 +196,10 @@ describe("migrateOperationDeclaration refusals", () => {
 
 	it("still refuses spreads of imported identifiers", () => {
 		expectRefusal("imported-spread", "non_literal");
+	});
+
+	it("still refuses input example array spreads from imported symbols", () => {
+		expectRefusal("examples-imported-array-spread", "non_literal");
 	});
 
 	it("refuses factory-composed operation maps", () => {
@@ -314,6 +334,46 @@ describe("migrateOperationDeclarationRepository", () => {
 });
 
 describe("apifuse migrate-operation-declaration CLI", () => {
+	it("skips nested repositories identified by a .git file", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-nested-worktree-"));
+		try {
+			const main = fixture("inline-map");
+			const nested = fixture("safety-conflict");
+			writeFileSync(join(root, "index.ts"), main);
+			const nestedRoot = join(root, ".worktree", "stale");
+			mkdirSync(nestedRoot, { recursive: true });
+			writeFileSync(join(nestedRoot, ".git"), "gitdir: /tmp/stale\n");
+			writeFileSync(join(nestedRoot, "operation.ts"), nested);
+
+			const command = Bun.spawnSync({
+				cmd: [
+					process.execPath,
+					join(import.meta.dir, "../../../bin/apifuse.ts"),
+					"migrate-operation-declaration",
+					root,
+					"--json",
+				],
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			expect(command.exitCode).toBe(0);
+			const stdout = command.stdout.toString();
+			const payload = JSON.parse(stdout) as {
+				status: string;
+				changedFiles: string[];
+				operationCount: number;
+			};
+			expect(payload.status).toBe("migrated");
+			expect(payload.changedFiles).toEqual(["index.ts"]);
+			expect(payload.operationCount).toBe(1);
+			expect(stdout).not.toContain(".worktree");
+			expect(readFileSync(join(root, "index.ts"), "utf8")).toContain('riskClass: "read"');
+			expect(readFileSync(join(nestedRoot, "operation.ts"), "utf8")).toBe(nested);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("emits machine-readable refusals and exits 2", () => {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-cli-"));
 		try {

@@ -1,0 +1,24 @@
+const SHARED_INPUT_EXAMPLES = [
+	{
+		scenario: "Shared middle example",
+		input: { page: 2 },
+	},
+] as const;
+
+const mixedOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [
+		{
+			scenario: "Literal first example",
+			input: { page: 1 },
+		},
+		...SHARED_INPUT_EXAMPLES,
+		{
+			scenario: "Literal last example",
+			input: { page: 3 },
+		},
+	],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

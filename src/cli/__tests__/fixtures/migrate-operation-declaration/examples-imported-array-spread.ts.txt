@@ -1,0 +1,9 @@
+import { LIST_INPUT_EXAMPLES } from "./shared.js";
+
+const importedExamplesOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [...LIST_INPUT_EXAMPLES],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
