@@ -3,6 +3,9 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 
 import type TS from "typescript";
 
+import { assertProviderLocaleKey } from "../i18n/keys.js";
+import { operationIdToLocaleNamespace } from "../i18n/operation-locale-namespace.js";
+
 const ts: typeof import("typescript") = await loadTypeScript();
 
 async function loadTypeScript(): Promise<typeof import("typescript")> {
@@ -67,6 +70,7 @@ export type OperationDeclarationRefusalReason =
 	| "missing_english_locale"
 	| "operation_id_unresolved"
 	| "examples_conflict"
+	| "invalid_locale_key"
 	| "locale_todo_conflict";
 
 export type OperationDeclarationRefusal = {
@@ -180,6 +184,10 @@ export function migrateOperationDeclaration(
 		todos.push(...plan.localeTodos);
 	}
 	if (refusals.length > 0) return { status: "refused", refusals };
+	const invalidLocaleKey = findInvalidLocaleTodo(todos, fileName);
+	if (invalidLocaleKey !== undefined) {
+		return { status: "refused", refusals: [invalidLocaleKey] };
+	}
 
 	if (edits.length === 0) {
 		return {
@@ -409,6 +417,20 @@ function planOperationMigration(
 		localeFiles,
 	);
 	if ("refusal" in title) return title;
+	const localeNamespace =
+		top.byName.get("inputExamples") === undefined
+			? { namespace: site.operationKey }
+			: resolveOperationLocaleNamespace(
+					[
+						top.byName.get("titleKey"),
+						docs.get("titleKey"),
+						top.byName.get("descriptionKey"),
+						docs.get("descriptionKey"),
+					],
+					fileName,
+					site,
+				);
+	if ("refusal" in localeNamespace) return localeNamespace;
 
 	const examples = planExamples(
 		top.byName.get("inputExamples"),
@@ -418,6 +440,7 @@ function planOperationMigration(
 		source,
 		constArrays,
 		localeFiles,
+		localeNamespace.namespace,
 	);
 	if ("refusal" in examples) return examples;
 
@@ -515,12 +538,29 @@ function planTitleLocale(
 			"titleKey must be a string literal so the title locale destination is provable.",
 		);
 	}
+	let selectedTitleLocaleKey: string;
+	if (explicitTitleKey !== undefined) {
+		selectedTitleLocaleKey = explicitTitleKey;
+	} else {
+		try {
+			selectedTitleLocaleKey = `operations.${operationIdToLocaleNamespace(site.operationKey)}.title`;
+		} catch (error) {
+			return {
+				refusal: invalidLocaleKeyRefusal(
+					fileName,
+					site.operationKey,
+					`operations.${site.operationKey}.title`,
+					error,
+				),
+			};
+		}
+	}
 	return {
 		localeTodos: [
 			{
 				localeFile: "locales/en.json",
 				operationKey: site.operationKey,
-				key: explicitTitleKey ?? `operations.${site.operationKey}.title`,
+				key: selectedTitleLocaleKey,
 				originalProse,
 			},
 		],
@@ -757,6 +797,7 @@ function planExamples(
 	source: TS.SourceFile,
 	constArrays: ReadonlyMap<string, TS.ArrayLiteralExpression>,
 	localeFiles: readonly string[],
+	localeNamespace: string,
 ):
 	| { readonly edits: readonly TextEdit[]; readonly localeTodos: readonly LocaleTodo[] }
 	| { readonly refusal: OperationDeclarationRefusal } {
@@ -853,7 +894,7 @@ function planExamples(
 				`inputExamples[${index}].scenario must be a string literal.`,
 			);
 		}
-		const scenarioKey = `operations.${site.operationKey}.examples.${index}.scenario`;
+		const scenarioKey = `operations.${localeNamespace}.examples.${index}.scenario`;
 		edits.push(replaceExampleLocaleMember(scenario, "scenarioKey", scenarioKey, source));
 		for (const localeFile of localeFiles) {
 			todos.push({
@@ -874,7 +915,7 @@ function planExamples(
 					`inputExamples[${index}].rationale must be a string literal.`,
 				);
 			}
-			const rationaleKey = `operations.${site.operationKey}.examples.${index}.rationale`;
+			const rationaleKey = `operations.${localeNamespace}.examples.${index}.rationale`;
 			edits.push(replaceExampleLocaleMember(rationale, "rationaleKey", rationaleKey, source));
 			for (const localeFile of localeFiles) {
 				todos.push({
@@ -887,6 +928,47 @@ function planExamples(
 		}
 	}
 	return { edits, localeTodos: todos };
+}
+
+function resolveOperationLocaleNamespace(
+	members: readonly (ResolvedMember | undefined)[],
+	fileName: string,
+	site: OperationSite,
+): { readonly namespace: string } | { readonly refusal: OperationDeclarationRefusal } {
+	const authoredNamespaces = new Set<string>();
+	for (const member of members) {
+		const localeKey = literalString(member?.initializer);
+		if (localeKey === undefined) continue;
+		const segments = localeKey.split(".");
+		if (segments[0] === "operations" && segments[1] !== undefined) {
+			authoredNamespaces.add(segments[1]);
+		}
+	}
+	if (authoredNamespaces.size > 1) {
+		return {
+			refusal: refusal(
+				fileName,
+				site.operationKey,
+				"locale_key_conflict",
+				`Operation titleKey and descriptionKey declarations use different locale namespaces: ${[...authoredNamespaces].join(", ")}.`,
+			),
+		};
+	}
+	const authored = authoredNamespaces.values().next().value;
+	if (authored !== undefined) return { namespace: authored };
+
+	try {
+		return { namespace: operationIdToLocaleNamespace(site.operationKey) };
+	} catch (error) {
+		return {
+			refusal: invalidLocaleKeyRefusal(
+				fileName,
+				site.operationKey,
+				`operations.${site.operationKey}.examples`,
+				error,
+			),
+		};
+	}
 }
 
 function replaceExampleLocaleMember(
@@ -1602,6 +1684,35 @@ function refusal(
 	detail: string,
 ): OperationDeclarationRefusal {
 	return { file, operationKey, reason, detail };
+}
+
+function findInvalidLocaleTodo(
+	todos: readonly LocaleTodo[],
+	fileName: string,
+): OperationDeclarationRefusal | undefined {
+	for (const todo of todos) {
+		try {
+			assertProviderLocaleKey(todo.key);
+		} catch (error) {
+			return invalidLocaleKeyRefusal(fileName, todo.operationKey, todo.key, error);
+		}
+	}
+	return undefined;
+}
+
+function invalidLocaleKeyRefusal(
+	fileName: string,
+	operationKey: string,
+	localeKey: string,
+	error: unknown,
+): OperationDeclarationRefusal {
+	const validatorDetail = error instanceof Error ? error.message : String(error);
+	return refusal(
+		fileName,
+		operationKey,
+		"invalid_locale_key",
+		`Refusing to write invalid provider locale key ${JSON.stringify(localeKey)}: ${validatorDetail}`,
+	);
 }
 
 function nonLiteral(
