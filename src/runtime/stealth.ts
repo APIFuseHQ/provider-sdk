@@ -1,11 +1,11 @@
 import { createHash } from "node:crypto";
+import { Cookie } from "tough-cookie";
 import type {
 	BrowserProfile,
 	EmulationOS,
 	RequestInit as WreqRequestInit,
 	Session as WreqSession,
 } from "wreq-js";
-import { Cookie } from "tough-cookie";
 
 import type { ProxyResolutionOptions, ProxyVendorName } from "../config/loader.js";
 import {
@@ -57,12 +57,11 @@ import {
 	computeProxyAttemptIndex,
 	computeProxyTransportRetryDelayMs,
 	createDefaultProxyTransportRetryOptions,
-	DEFAULT_PROXY_TRANSPORT_RETRY_METHODS,
+	isProxyTransportRetryMethod,
 	normalizeProxyTransportRetryOptions,
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
 } from "./proxy-retry-policy.js";
-import type { ResolverVendorTransport } from "./resolver-vendors/types.js";
 import {
 	evaluateRedirectHop,
 	isRedirectStatus,
@@ -78,6 +77,7 @@ import {
 	redactUrlQueryParams,
 	serializeRequestUrl,
 } from "./request-options.js";
+import type { ResolverVendorTransport } from "./resolver-vendors/types.js";
 import { StealthCookieJar } from "./stealth-cookies.js";
 
 export const DEFAULT_STEALTH_PROFILE: StealthProfileDescriptor = Object.freeze({
@@ -131,9 +131,12 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 		challengeRuntime?: {
 			readonly akamaiSbsd?: {
 				readonly allowedHosts: readonly string[];
+				/** Resolver-declared transport profile that must match the live native session. */
+				readonly clientProfile?: string;
 				readonly solve?: (
 					challenge: Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>,
 					transport: ResolverVendorTransport,
+					initiatingClientProfile: string,
 					signal: AbortSignal,
 				) => Promise<ChallengeSolution>;
 			};
@@ -148,6 +151,19 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 };
 
 type AkamaiSbsdChallenge = Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>;
+type AkamaiSbsdSessionState = {
+	rememberedScript?: URL;
+	transaction?: {
+		readonly key: string;
+		readonly result: Promise<
+			{ readonly solved: true } | { readonly solved: false; error: unknown }
+		>;
+	};
+};
+
+const SBSD_INTERSTITIAL_MAX_BYTES = 4_000;
+const SBSD_SCRIPT_DISCOVERY_MAX_BYTES = 4 * 1_024 * 1_024;
+const SBSD_CHALLENGE_TOKEN_MAX_BYTES = 1_024;
 
 function htmlAttribute(value: string): string {
 	return value.replace(/&amp;/giu, "&");
@@ -156,37 +172,18 @@ function htmlAttribute(value: string): string {
 function isDeclaredHost(url: URL, allowedHosts: readonly string[]): boolean {
 	const hostname = url.hostname.trim().toLowerCase().replace(/\.$/u, "");
 	return allowedHosts.some(
-		(host) =>
-			!host.includes("*") && host.trim().toLowerCase().replace(/\.$/u, "") === hostname,
+		(host) => !host.includes("*") && host.trim().toLowerCase().replace(/\.$/u, "") === hostname,
 	);
 }
 
-function detectAkamaiSbsdChallenge(
-	response: StealthResponse,
-	pageUrl: string,
-	jar: StealthCookieJar,
+function findAkamaiSbsdScript(
+	body: string,
+	page: URL,
 	allowedHosts: readonly string[],
-): AkamaiSbsdChallenge | undefined {
-	if (
-		new TextEncoder().encode(response.body).byteLength >= 4_000 ||
-		!/sec-bc-tile-container|Access Denied|Reference #\d|Pardon Our Interruption|cpr_chlge/iu.test(
-			response.body,
-		)
-	) {
-		return undefined;
-	}
-	let page: URL;
-	try {
-		page = new URL(response.url ?? pageUrl);
-	} catch {
-		return undefined;
-	}
-	if (!isDeclaredHost(page, allowedHosts)) return undefined;
-
+): URL | undefined {
+	if (Buffer.byteLength(body) > SBSD_SCRIPT_DISCOVERY_MAX_BYTES) return undefined;
 	let passiveScript: URL | undefined;
-	for (const match of response.body.matchAll(
-		/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/giu,
-	)) {
+	for (const match of body.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/giu)) {
 		let script: URL;
 		try {
 			script = new URL(htmlAttribute(match[1]!), page.origin);
@@ -200,48 +197,123 @@ function detectAkamaiSbsdChallenge(
 		) {
 			continue;
 		}
-		if (script.searchParams.get("t")?.trim()) {
-			passiveScript = script;
-			break;
-		}
+		if (script.searchParams.get("t")?.trim()) return script;
 		passiveScript ??= script;
 	}
-	if (!passiveScript) return undefined;
+	return passiveScript;
+}
+
+function parseAkamaiSbsdChallengeToken(body: string): string | undefined {
+	if (Buffer.byteLength(body) >= SBSD_INTERSTITIAL_MAX_BYTES) return undefined;
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		return undefined;
+	}
+	if (
+		!parsed ||
+		typeof parsed !== "object" ||
+		Array.isArray(parsed) ||
+		!("cpr_chlge" in parsed) ||
+		parsed.cpr_chlge !== "true" ||
+		!("t" in parsed) ||
+		typeof parsed.t !== "string"
+	) {
+		return undefined;
+	}
+	const token = parsed.t.trim();
+	return token && Buffer.byteLength(token) <= SBSD_CHALLENGE_TOKEN_MAX_BYTES ? token : undefined;
+}
+
+function detectAkamaiSbsdChallenge(
+	response: StealthResponse,
+	pageUrl: string,
+	jar: StealthCookieJar,
+	allowedHosts: readonly string[],
+	state: AkamaiSbsdSessionState,
+): AkamaiSbsdChallenge | undefined {
+	let page: URL;
+	try {
+		page = new URL(response.url ?? pageUrl);
+	} catch {
+		return undefined;
+	}
+	if (!isDeclaredHost(page, allowedHosts)) return undefined;
+	const currentScript = findAkamaiSbsdScript(response.body, page, allowedHosts);
+	if (currentScript && !currentScript.searchParams.get("t")?.trim()) {
+		state.rememberedScript = currentScript;
+	}
 	const stateCookieName = jar.has("sbsd_o", page.toString())
 		? "sbsd_o"
 		: jar.has("bm_so", page.toString())
 			? "bm_so"
 			: undefined;
 	if (!stateCookieName) return undefined;
+
+	const laterToken = parseAkamaiSbsdChallengeToken(response.body);
+	const rememberedScript = state.rememberedScript;
+	if (
+		laterToken &&
+		rememberedScript &&
+		rememberedScript.origin === page.origin &&
+		isDeclaredHost(rememberedScript, allowedHosts)
+	) {
+		return {
+			kind: "akamai_sbsd",
+			pageUrl: page.toString(),
+			scriptUrl: rememberedScript.toString(),
+			stateCookieName,
+			challengeToken: laterToken,
+		};
+	}
+	if (
+		!currentScript ||
+		Buffer.byteLength(response.body) >= SBSD_INTERSTITIAL_MAX_BYTES ||
+		!/sec-bc-tile-container|Access Denied|Reference #\d|Pardon Our Interruption|cpr_chlge/iu.test(
+			response.body,
+		)
+	) {
+		return undefined;
+	}
 	return {
 		kind: "akamai_sbsd",
 		pageUrl: page.toString(),
-		scriptUrl: passiveScript.toString(),
+		scriptUrl: currentScript.toString(),
 		stateCookieName,
 	};
 }
 
-function hasCredentialBearingHeaders(
-	headers: Record<string, string | string[] | undefined> | undefined,
-): boolean {
-	return Object.keys(headers ?? {}).some((name) => {
-		const normalized = name.toLowerCase();
-		return normalized === "cookie" || normalized === "proxy-authorization" || isSensitiveKey(name);
-	});
+function normalizedClientProfile(value: string): string {
+	return value
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]/gu, "");
 }
 
-function isAutomaticChallengeRefetchEligible(
-	method: StealthMethod,
-	options: StealthFetchOptions,
-): boolean {
-	return (
-		DEFAULT_PROXY_TRANSPORT_RETRY_METHODS.includes(
-			method as (typeof DEFAULT_PROXY_TRANSPORT_RETRY_METHODS)[number],
-		) &&
-		method !== "OPTIONS" &&
-		options.body === undefined &&
-		!hasCredentialBearingHeaders(options.headers)
+function assertAkamaiSbsdClientProfile(declared: string | undefined, actual: string): void {
+	if (
+		declared === undefined ||
+		normalizedClientProfile(declared) === normalizedClientProfile(actual)
+	) {
+		return;
+	}
+	throw new SDKError(
+		`Resolver client profile "${declared}" does not match the initiating stealth session profile`,
+		{
+			code: "RESOLVER_CLIENT_PROFILE_MISMATCH",
+			fix: "Make resolver.clientProfile match the provider stealth browser/OS profile.",
+		},
 	);
+}
+
+function akamaiSbsdChallengeKey(challenge: AkamaiSbsdChallenge, actualProfile: string): string {
+	return JSON.stringify([
+		new URL(challenge.scriptUrl).toString(),
+		challenge.challengeToken ?? "",
+		challenge.stateCookieName,
+		normalizedClientProfile(actualProfile),
+	]);
 }
 
 type StealthTransportHeaders = {
@@ -1343,6 +1415,11 @@ function createSessionFetcher(
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
 	const cookieJar = new StealthCookieJar([], baseUrl);
+	const akamaiSbsdState: AkamaiSbsdSessionState = {};
+	const automaticChallengeRefetchPolicy = {
+		...createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
+		methods: ["GET", "HEAD"],
+	};
 
 	async function getClientEntry(
 		profile: StealthProfileDescriptor,
@@ -1718,6 +1795,7 @@ function createSessionFetcher(
 									requestUrl,
 									cookieJar,
 									akamaiSbsd.allowedHosts,
+									akamaiSbsdState,
 								)
 							: undefined;
 						if (detected && akamaiSbsd) {
@@ -1729,7 +1807,12 @@ function createSessionFetcher(
 								recordProxyAttempt("ok", undefined, response.status);
 								return normalized;
 							}
-							if (!isAutomaticChallengeRefetchEligible(method, options)) {
+							if (
+								!isProxyTransportRetryMethod(method, automaticChallengeRefetchPolicy, {
+									body: options.body,
+									headers: options.headers,
+								})
+							) {
 								normalized.challenge = {
 									challenge: detected,
 									outcome: "replay_required",
@@ -1737,6 +1820,7 @@ function createSessionFetcher(
 								recordProxyAttempt("ok", undefined, response.status);
 								return normalized;
 							}
+							assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, mapping.browser);
 							if (!akamaiSbsd.solve) {
 								normalized.challenge = {
 									challenge: detected,
@@ -1747,9 +1831,7 @@ function createSessionFetcher(
 							}
 
 							const emulationHeaderMap = new Map(
-								emulationHeaders.map(
-									([name, value]) => [name.toLowerCase(), value] as const,
-								),
+								emulationHeaders.map(([name, value]) => [name.toLowerCase(), value] as const),
 							);
 							const initiatingHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
 							const sessionHeaders = {
@@ -1816,12 +1898,38 @@ function createSessionFetcher(
 									};
 								},
 							};
-							challengeSolveAttempted = true;
-							await akamaiSbsd.solve(
-								detected,
-								resolverTransport,
-								clientOptions.signal ?? new AbortController().signal,
-							);
+							const transactionKey = akamaiSbsdChallengeKey(detected, mapping.browser);
+							let transaction = akamaiSbsdState.transaction;
+							let ownsTransaction = false;
+							if (!transaction || transaction.key !== transactionKey) {
+								challengeSolveAttempted = true;
+								ownsTransaction = true;
+								transaction = {
+									key: transactionKey,
+									result: akamaiSbsd
+										.solve(
+											detected,
+											resolverTransport,
+											mapping.browser,
+											clientOptions.signal ?? new AbortController().signal,
+										)
+										.then(
+											() => ({ solved: true }) as const,
+											(error: unknown) => ({ solved: false, error }) as const,
+										),
+								};
+								akamaiSbsdState.transaction = transaction;
+							}
+							const transactionResult = await transaction.result;
+							if (!transactionResult.solved) {
+								if (ownsTransaction) throw transactionResult.error;
+								normalized.challenge = {
+									challenge: detected,
+									outcome: "challenge_persisted",
+								};
+								recordProxyAttempt("ok", undefined, response.status);
+								return normalized;
+							}
 							challengeRefetchAttempted = true;
 							({ normalized, response } = await fetchOnBoundSession(
 								requestUrl,
@@ -1834,6 +1942,7 @@ function createSessionFetcher(
 								requestUrl,
 								cookieJar,
 								akamaiSbsd.allowedHosts,
+								akamaiSbsdState,
 							);
 							if (persisted) {
 								normalized.challenge = {

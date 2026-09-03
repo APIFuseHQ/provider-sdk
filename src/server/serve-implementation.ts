@@ -7,15 +7,15 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
-import { safeProviderErrorObservability } from "../error-observability.js";
 import {
 	createInProcessProviderEngine,
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
 	isEngineOwnedEnvName,
-	readEngineProxyCredentials,
 	type ProviderEngine,
 	type ProviderEngineBindingCandidates,
+	readEngineProxyCredentials,
 } from "../engine.js";
+import { safeProviderErrorObservability } from "../error-observability.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
@@ -30,6 +30,7 @@ import {
 	ProviderError,
 	type ProviderErrorObservability,
 	type ProviderErrorOptions,
+	SDKError,
 } from "../errors.js";
 import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import {
@@ -40,11 +41,11 @@ import {
 import type { ProviderLocale } from "../i18n/keys.js";
 import {
 	categoryForStatus,
-	type ProviderErrorSource,
-	sourceForCategory,
 	isRetryableCategory,
 	PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	type ProviderErrorCategory,
+	type ProviderErrorSource,
+	sourceForCategory,
 } from "../observability.js";
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type * as BrowserRuntimeModule from "../runtime/browser.js";
@@ -59,8 +60,8 @@ import { executeOperation } from "../runtime/executor.js";
 import { createHttpClient } from "../runtime/http.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import type * as NativeNetworkRuntimeModule from "../runtime/native-network.js";
-import { getProviderBaseUrl } from "../runtime/provider.js";
 import { createOcrClientFromEnv } from "../runtime/ocr.js";
+import { getProviderBaseUrl } from "../runtime/provider.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
 	PROXY_EDGE_AUTH_REJECTED_CODE,
@@ -85,19 +86,19 @@ import {
 	createProviderRuntimeStateFromEnv,
 	createUnsupportedProviderRuntimeState,
 } from "../runtime/state.js";
-import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
+import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import { createTraceContext, type TraceRecorder } from "../runtime/trace.js";
 import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
+import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import {
 	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
 	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
 	STATEFUL_TIMESTAMP_HEADER as STATEFUL_FORWARDING_TIMESTAMP_HEADER,
 	verifyStatefulRequestSignature,
 } from "../stateful-signing.js";
-import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import { getStealthProfile } from "../stealth/profiles.js";
 import {
 	APIFUSE_STREAM_DONE_EVENT,
@@ -112,14 +113,14 @@ import type {
 	FlowContext,
 	FlowContextStore,
 	HttpRetrySummary,
+	OcrContext,
 	OperationDefinition,
 	OperationErrorCode,
 	OperationHttpStreamTransport,
 	OperationSseTransport,
-	OcrContext,
-	ProviderErrorStatus,
 	ProviderContext,
 	ProviderDefinition,
+	ProviderErrorStatus,
 	ProviderFilesContext,
 	ProviderProxyPolicy,
 	ProviderRuntimeState,
@@ -256,9 +257,7 @@ export type ProviderServerOperationExecutorInput<
 
 export type ProviderServerOperationExecutor<
 	TContext extends Partial<ProviderContext> = ProviderContext,
-> = (
-	input: ProviderServerOperationExecutorInput<TContext>,
-) => Promise<unknown>;
+> = (input: ProviderServerOperationExecutorInput<TContext>) => Promise<unknown>;
 
 type RequestCleanup = () => void | Promise<void>;
 
@@ -531,6 +530,33 @@ function getProviderStealthProfile(provider: ProviderDefinition) {
 	return provider.stealth ? getStealthProfile(provider.stealth) : undefined;
 }
 
+function normalizeResolverClientProfile(value: string): string {
+	return value
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]/gu, "");
+}
+
+function assertResolverClientProfileMatches(
+	declaredClientProfile: string | undefined,
+	initiatingClientProfile: string,
+): void {
+	if (
+		declaredClientProfile &&
+		normalizeResolverClientProfile(declaredClientProfile) ===
+			normalizeResolverClientProfile(initiatingClientProfile)
+	) {
+		return;
+	}
+	throw new SDKError(
+		"The resolver client profile does not match the initiating stealth session profile",
+		{
+			code: "RESOLVER_CLIENT_PROFILE_MISMATCH",
+			fix: "Make resolver.clientProfile match the provider stealth browser/OS profile.",
+		},
+	);
+}
+
 function createStealthChallengeDetection(
 	provider: ProviderDefinition,
 	resolverRuntime: typeof ResolverRuntimeModule | undefined,
@@ -547,20 +573,37 @@ function createStealthChallengeDetection(
 	return {
 		akamaiSbsd: {
 			allowedHosts: provider.allowedHosts ?? [],
+			...(provider.resolver?.clientProfile
+				? { clientProfile: provider.resolver.clientProfile }
+				: {}),
 			...(resolverDeclared && resolverRuntime
 				? {
-						async solve(challenge, transport, solveSignal) {
-							const resolver =
-								resolverOverride ??
-								resolverRuntime.createResolverClientFromEnv(provider.resolver, undefined, {
+						async solve(challenge, transport, initiatingClientProfile, solveSignal) {
+							if (resolverOverride) {
+								throw new SDKError(
+									"Automatic SBSD solving cannot use an unbound resolver override",
+									{
+										code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
+										fix: "Use the SDK-owned resolver so the initiating stealth transport remains bound.",
+									},
+								);
+							}
+							const resolver = resolverRuntime.createResolverClientFromEnv(
+								provider.resolver,
+								undefined,
+								{
 									allowedHosts: provider.allowedHosts,
 									cache,
 									identityScope,
 									// The transport already owns the initiating request's exact proxy,
 									// profile headers, and cookie jar. Re-resolving proxy intent here
 									// would break identity equality rather than establish it.
-									createTransport: () => transport,
-								});
+									createTransport: ({ clientProfile }) => {
+										assertResolverClientProfileMatches(clientProfile, initiatingClientProfile);
+										return transport;
+									},
+								},
+							);
 							return resolverRuntime
 								.bindResolverSignal(resolver, signal)
 								.solve(challenge, solveSignal);
@@ -2466,7 +2509,9 @@ function parseStatefulForwardingEnvelope(rawBody: unknown): ProviderServerStatef
  * Primary, cross-runtime app factory. Declared capability ESM is preloaded
  * asynchronously, so this path works on Bun and every supported Node release.
  */
-export async function createServerAppAsync<TContext extends Partial<ProviderContext> = ProviderContext>(
+export async function createServerAppAsync<
+	TContext extends Partial<ProviderContext> = ProviderContext,
+>(
 	provider: ProviderDefinition<TContext>,
 	options: ProviderServerOptions<TContext> = {},
 ): Promise<Hono> {
