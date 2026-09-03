@@ -1,0 +1,1 @@
+{"meta":{"displayName":"Canonical fixture"},"operations":{"alpha":{"title":"Alpha"},"search":{"description":"English description","title":"English title","steps":[{"first":"one","second":"two"}]},"omega":{"title":"Omega"}},"tail":"English tail","enOnly":"Keep this last"}

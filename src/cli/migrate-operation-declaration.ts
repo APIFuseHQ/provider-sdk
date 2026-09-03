@@ -3,6 +3,9 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 
 import type TS from "typescript";
 
+import { assertProviderLocaleKey } from "../i18n/keys.js";
+import { operationIdToLocaleNamespace } from "../i18n/operation-locale-namespace.js";
+
 const ts: typeof import("typescript") = await loadTypeScript();
 
 async function loadTypeScript(): Promise<typeof import("typescript")> {
@@ -67,6 +70,7 @@ export type OperationDeclarationRefusalReason =
 	| "missing_english_locale"
 	| "operation_id_unresolved"
 	| "examples_conflict"
+	| "invalid_locale_key"
 	| "locale_todo_conflict";
 
 export type OperationDeclarationRefusal = {
@@ -180,6 +184,10 @@ export function migrateOperationDeclaration(
 		todos.push(...plan.localeTodos);
 	}
 	if (refusals.length > 0) return { status: "refused", refusals };
+	const invalidLocaleKey = findInvalidLocaleTodo(todos, fileName);
+	if (invalidLocaleKey !== undefined) {
+		return { status: "refused", refusals: [invalidLocaleKey] };
+	}
 
 	if (edits.length === 0) {
 		return {
@@ -400,6 +408,30 @@ function planOperationMigration(
 		if (merged.insert !== undefined) addInsertion(insertions, "docs", merged.insert);
 	}
 
+	const title = planTitleLocale(
+		top.byName.get("title"),
+		top.byName.get("titleKey"),
+		docs.get("titleKey"),
+		fileName,
+		site,
+		localeFiles,
+	);
+	if ("refusal" in title) return title;
+	const localeNamespace =
+		top.byName.get("inputExamples") === undefined
+			? { namespace: site.operationKey }
+			: resolveOperationLocaleNamespace(
+					[
+						top.byName.get("titleKey"),
+						docs.get("titleKey"),
+						top.byName.get("descriptionKey"),
+						docs.get("descriptionKey"),
+					],
+					fileName,
+					site,
+				);
+	if ("refusal" in localeNamespace) return localeNamespace;
+
 	const examples = planExamples(
 		top.byName.get("inputExamples"),
 		top.byName.get("examples"),
@@ -408,6 +440,7 @@ function planOperationMigration(
 		source,
 		constArrays,
 		localeFiles,
+		localeNamespace.namespace,
 	);
 	if ("refusal" in examples) return examples;
 
@@ -431,7 +464,107 @@ function planOperationMigration(
 		if (!edits.some((existing) => rangesOverlap(existing, edit))) edits.push(edit);
 	}
 
-	return { edits, localeTodos: examples.localeTodos };
+	return { edits, localeTodos: [...title.localeTodos, ...examples.localeTodos] };
+}
+
+function planTitleLocale(
+	title: ResolvedMember | undefined,
+	flatTitleKey: ResolvedMember | undefined,
+	nestedTitleKey: ResolvedMember | undefined,
+	fileName: string,
+	site: OperationSite,
+	localeFiles: readonly string[],
+):
+	| { readonly localeTodos: readonly LocaleTodo[] }
+	| { readonly refusal: OperationDeclarationRefusal } {
+	if (title === undefined) return { localeTodos: [] };
+	const originalProse = literalString(title.initializer);
+	if (originalProse === undefined) {
+		return nonLiteral(
+			fileName,
+			site.operationKey,
+			"title must be a string literal so its authored prose can be preserved in the English locale catalog.",
+		);
+	}
+	if (!site.operationIdProven) {
+		return {
+			refusal: refusal(
+				fileName,
+				site.operationKey,
+				"operation_id_unresolved",
+				"title requires an exact operation id proven from a static operations map.",
+			),
+		};
+	}
+	if (!localeFiles.includes("locales/en.json")) {
+		return {
+			refusal: refusal(
+				fileName,
+				site.operationKey,
+				"missing_english_locale",
+				"title cannot be migrated because locales/en.json does not exist.",
+			),
+		};
+	}
+
+	let selectedTitleKey = flatTitleKey ?? nestedTitleKey;
+	if (flatTitleKey !== undefined && nestedTitleKey !== undefined) {
+		const same = equivalentLiteral(flatTitleKey.initializer, nestedTitleKey.initializer);
+		if (same === undefined) {
+			return nonLiteral(
+				fileName,
+				site.operationKey,
+				"titleKey must be literal when both top-level and nested declarations exist.",
+			);
+		}
+		if (!same) {
+			return {
+				refusal: refusal(
+					fileName,
+					site.operationKey,
+					"locale_key_conflict",
+					"Top-level titleKey conflicts with nested titleKey.",
+				),
+			};
+		}
+		selectedTitleKey = flatTitleKey;
+	}
+	const explicitTitleKey =
+		selectedTitleKey === undefined ? undefined : literalString(selectedTitleKey.initializer);
+	if (selectedTitleKey !== undefined && explicitTitleKey === undefined) {
+		return nonLiteral(
+			fileName,
+			site.operationKey,
+			"titleKey must be a string literal so the title locale destination is provable.",
+		);
+	}
+	let selectedTitleLocaleKey: string;
+	if (explicitTitleKey !== undefined) {
+		selectedTitleLocaleKey = explicitTitleKey;
+	} else {
+		try {
+			selectedTitleLocaleKey = `operations.${operationIdToLocaleNamespace(site.operationKey)}.title`;
+		} catch (error) {
+			return {
+				refusal: invalidLocaleKeyRefusal(
+					fileName,
+					site.operationKey,
+					`operations.${site.operationKey}.title`,
+					error,
+				),
+			};
+		}
+	}
+	return {
+		localeTodos: [
+			{
+				localeFile: "locales/en.json",
+				operationKey: site.operationKey,
+				key: selectedTitleLocaleKey,
+				originalProse,
+			},
+		],
+	};
 }
 
 function resolveRiskClass(
@@ -664,6 +797,7 @@ function planExamples(
 	source: TS.SourceFile,
 	constArrays: ReadonlyMap<string, TS.ArrayLiteralExpression>,
 	localeFiles: readonly string[],
+	localeNamespace: string,
 ):
 	| { readonly edits: readonly TextEdit[]; readonly localeTodos: readonly LocaleTodo[] }
 	| { readonly refusal: OperationDeclarationRefusal } {
@@ -760,7 +894,7 @@ function planExamples(
 				`inputExamples[${index}].scenario must be a string literal.`,
 			);
 		}
-		const scenarioKey = `operations.${site.operationKey}.examples.${index}.scenario`;
+		const scenarioKey = `operations.${localeNamespace}.examples.${index}.scenario`;
 		edits.push(replaceExampleLocaleMember(scenario, "scenarioKey", scenarioKey, source));
 		for (const localeFile of localeFiles) {
 			todos.push({
@@ -781,7 +915,7 @@ function planExamples(
 					`inputExamples[${index}].rationale must be a string literal.`,
 				);
 			}
-			const rationaleKey = `operations.${site.operationKey}.examples.${index}.rationale`;
+			const rationaleKey = `operations.${localeNamespace}.examples.${index}.rationale`;
 			edits.push(replaceExampleLocaleMember(rationale, "rationaleKey", rationaleKey, source));
 			for (const localeFile of localeFiles) {
 				todos.push({
@@ -794,6 +928,47 @@ function planExamples(
 		}
 	}
 	return { edits, localeTodos: todos };
+}
+
+function resolveOperationLocaleNamespace(
+	members: readonly (ResolvedMember | undefined)[],
+	fileName: string,
+	site: OperationSite,
+): { readonly namespace: string } | { readonly refusal: OperationDeclarationRefusal } {
+	const authoredNamespaces = new Set<string>();
+	for (const member of members) {
+		const localeKey = literalString(member?.initializer);
+		if (localeKey === undefined) continue;
+		const segments = localeKey.split(".");
+		if (segments[0] === "operations" && segments[1] !== undefined) {
+			authoredNamespaces.add(segments[1]);
+		}
+	}
+	if (authoredNamespaces.size > 1) {
+		return {
+			refusal: refusal(
+				fileName,
+				site.operationKey,
+				"locale_key_conflict",
+				`Operation titleKey and descriptionKey declarations use different locale namespaces: ${[...authoredNamespaces].join(", ")}.`,
+			),
+		};
+	}
+	const authored = authoredNamespaces.values().next().value;
+	if (authored !== undefined) return { namespace: authored };
+
+	try {
+		return { namespace: operationIdToLocaleNamespace(site.operationKey) };
+	} catch (error) {
+		return {
+			refusal: invalidLocaleKeyRefusal(
+				fileName,
+				site.operationKey,
+				`operations.${site.operationKey}.examples`,
+				error,
+			),
+		};
+	}
 }
 
 function replaceExampleLocaleMember(
@@ -984,9 +1159,7 @@ function isProviderOperationsProperty(
 	// (a) The initializer (direct or via same-file const) mentions
 	// defineOperation / defineStreamOperation — the strongest signal.
 	const target = ts.isIdentifier(unwrapExpression(node.initializer) ?? node.initializer)
-		? constObjects.get(
-				(unwrapExpression(node.initializer) as TS.Identifier).text,
-			)
+		? constObjects.get((unwrapExpression(node.initializer) as TS.Identifier).text)
 		: undefined;
 	const initializerText = (target ?? node.initializer).getText();
 	if (/\bdefine(?:Stream)?Operation\b/.test(initializerText)) return true;
@@ -1513,6 +1686,35 @@ function refusal(
 	return { file, operationKey, reason, detail };
 }
 
+function findInvalidLocaleTodo(
+	todos: readonly LocaleTodo[],
+	fileName: string,
+): OperationDeclarationRefusal | undefined {
+	for (const todo of todos) {
+		try {
+			assertProviderLocaleKey(todo.key);
+		} catch (error) {
+			return invalidLocaleKeyRefusal(fileName, todo.operationKey, todo.key, error);
+		}
+	}
+	return undefined;
+}
+
+function invalidLocaleKeyRefusal(
+	fileName: string,
+	operationKey: string,
+	localeKey: string,
+	error: unknown,
+): OperationDeclarationRefusal {
+	const validatorDetail = error instanceof Error ? error.message : String(error);
+	return refusal(
+		fileName,
+		operationKey,
+		"invalid_locale_key",
+		`Refusing to write invalid provider locale key ${JSON.stringify(localeKey)}: ${validatorDetail}`,
+	);
+}
+
 function nonLiteral(
 	fileName: string,
 	operationKey: string,
@@ -1576,6 +1778,9 @@ export function migrateOperationDeclarationRepository(
 	if (refusals.length > 0) {
 		return { status: "refused", providerRoot, refusals };
 	}
+	for (const [path, code] of renderLocaleCatalogWrites(providerRoot, todos)) {
+		pendingWrites.set(path, code);
+	}
 
 	if (pendingWrites.size === 0) {
 		return {
@@ -1614,6 +1819,103 @@ export function renderLocaleTodoSidecar(todos: readonly LocaleTodo[]): string {
 		localeFiles[todo.localeFile][todo.key] = todo.originalProse;
 	}
 	return `${JSON.stringify({ schemaVersion: 1, localeFiles }, null, 2)}\n`;
+}
+
+function renderLocaleCatalogWrites(
+	providerRoot: string,
+	todos: readonly LocaleTodo[],
+): Map<string, string> {
+	const todosByFile = new Map<string, LocaleTodo[]>();
+	for (const todo of todos) {
+		const fileTodos = todosByFile.get(todo.localeFile) ?? [];
+		fileTodos.push(todo);
+		todosByFile.set(todo.localeFile, fileTodos);
+	}
+
+	const englishPath = "locales/en.json";
+	const englishTodos = todosByFile.get(englishPath);
+	if (englishTodos === undefined) return new Map();
+
+	const english = readLocaleCatalog(join(providerRoot, englishPath));
+	applyLocaleTodos(english, englishTodos);
+	const writes = new Map<string, string>([
+		[join(providerRoot, englishPath), renderCanonicalLocaleCatalog(english)],
+	]);
+
+	for (const [localeFile, fileTodos] of todosByFile) {
+		if (localeFile === englishPath) continue;
+		const catalog = readLocaleCatalog(join(providerRoot, localeFile));
+		applyLocaleTodos(catalog, fileTodos);
+		writes.set(
+			join(providerRoot, localeFile),
+			renderCanonicalLocaleCatalog(reorderLikeReference(english, catalog)),
+		);
+	}
+	return writes;
+}
+
+function readLocaleCatalog(path: string): Record<string, unknown> {
+	const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+	if (!isRecord(value)) throw new Error(`${path} must contain a JSON object.`);
+	return value;
+}
+
+function applyLocaleTodos(catalog: Record<string, unknown>, todos: readonly LocaleTodo[]): void {
+	for (const todo of todos) {
+		const segments = todo.key.split(".");
+		const leaf = segments.pop();
+		if (leaf === undefined) continue;
+		let cursor = catalog;
+		for (const segment of segments) {
+			const child = cursor[segment];
+			if (isRecord(child)) {
+				cursor = child;
+				continue;
+			}
+			const created: Record<string, unknown> = {};
+			cursor[segment] = created;
+			cursor = created;
+		}
+		cursor[leaf] = todo.originalProse;
+	}
+}
+
+/** Match provider-contract's canonical locale serialization exactly. */
+function renderCanonicalLocaleCatalog(value: unknown): string {
+	return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+/**
+ * Put shared keys first in English order, then retain locale-only authored order.
+ * Arrays keep their shape and use the English item at the same index as a reference.
+ */
+function reorderLikeReference(reference: unknown, value: unknown): unknown {
+	if (Array.isArray(value)) {
+		const referenceArray = Array.isArray(reference) ? reference : [];
+		return value.map((item, index) => reorderLikeReference(referenceArray[index], item));
+	}
+	if (!isRecord(value)) return value;
+
+	const referenceRecord = isRecord(reference) ? reference : {};
+	const ordered: Record<string, unknown> = {};
+	for (const key of Object.keys(referenceRecord)) {
+		if (Object.hasOwn(value, key)) {
+			ordered[key] = reorderLikeReference(referenceRecord[key], value[key]);
+		}
+	}
+	for (const [key, child] of Object.entries(value)) {
+		if (!Object.hasOwn(ordered, key)) {
+			ordered[key] = reorderLikeReference(
+				Object.hasOwn(referenceRecord, key) ? referenceRecord[key] : undefined,
+				child,
+			);
+		}
+	}
+	return ordered;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function findLocaleTodoConflict(
@@ -1668,6 +1970,8 @@ function collectLocaleFiles(root: string): string[] {
 
 function buildOperationIdIndex(sourceFiles: readonly string[]): Map<string, Map<string, string>> {
 	const result = new Map<string, Map<string, string>>();
+	const idsByPath = new Map<string, Map<string, string | null>>();
+	const ambiguousBindingsByPath = new Map<string, Set<string>>();
 	const sources = new Map<string, TS.SourceFile>();
 	for (const path of sourceFiles) {
 		const source = parseSource(path, readFileSync(path, "utf8"));
@@ -1676,10 +1980,40 @@ function buildOperationIdIndex(sourceFiles: readonly string[]): Map<string, Map<
 
 	const record = (path: string, binding: string, operationId: string): void => {
 		const map = result.get(path) ?? new Map<string, string>();
-		const previous = map.get(binding);
-		if (previous === undefined || previous === operationId) map.set(binding, operationId);
-		else map.delete(binding);
+		const ids = idsByPath.get(path) ?? new Map<string, string | null>();
+		const ambiguousBindings = ambiguousBindingsByPath.get(path) ?? new Set<string>();
+
+		// An operation id is usable only when it identifies exactly one binding.
+		// Keep an explicit null marker for an ambiguous id so a later occurrence
+		// cannot accidentally make it usable again.
+		const previousBinding = ids.get(operationId);
+		if (ids.has(operationId)) {
+			if (
+				previousBinding !== undefined &&
+				previousBinding !== null &&
+				previousBinding !== binding
+			) {
+				map.delete(previousBinding);
+				map.delete(binding);
+				ambiguousBindings.add(previousBinding);
+				ambiguousBindings.add(binding);
+				ids.set(operationId, null);
+			}
+		} else {
+			ids.set(operationId, binding);
+		}
+
+		// A binding registered under two different ids is likewise ambiguous.
+		const previousId = map.get(binding);
+		if (previousId !== undefined && previousId !== operationId) {
+			map.delete(binding);
+			ambiguousBindings.add(binding);
+		} else if (!ambiguousBindings.has(binding) && ids.get(operationId) === binding) {
+			map.set(binding, operationId);
+		}
 		result.set(path, map);
+		idsByPath.set(path, ids);
+		ambiguousBindingsByPath.set(path, ambiguousBindings);
 	};
 
 	for (const [path, source] of sources) {
@@ -1700,8 +2034,89 @@ function buildOperationIdIndex(sourceFiles: readonly string[]): Map<string, Map<
 				else record(imported.path, imported.exportedName, operationId);
 			}
 		}
+
+		// Some providers keep their operation registry in a same-file const with
+		// an arbitrary name (for example, `companionsOperations`). This scan is
+		// deliberately ID-only: it accepts only static object members whose value
+		// is a same-file operation binding, and never evaluates spreads, factories,
+		// or imported values.
+		const operationBindings = collectModuleOperationBindings(source);
+		const importedBindings = collectImportedBindingNames(source);
+		for (const entry of collectStaticOperationRegistryEntries(source, operationBindings)) {
+			if (importedBindings.has(entry.binding)) continue;
+			record(path, entry.binding, entry.operationId);
+		}
 	}
 	return result;
+}
+
+type StaticOperationRegistryEntry = {
+	readonly operationId: string;
+	readonly binding: string;
+};
+
+function collectModuleOperationBindings(source: TS.SourceFile): ReadonlySet<string> {
+	const bindings = new Set<string>();
+	for (const statement of source.statements) {
+		if (!ts.isVariableStatement(statement)) continue;
+		if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+		for (const declaration of statement.declarationList.declarations) {
+			if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) continue;
+			const initializer = unwrapExpression(declaration.initializer);
+			if (
+				initializer !== undefined &&
+				ts.isCallExpression(initializer) &&
+				isOperationHelperCall(initializer)
+			) {
+				bindings.add(declaration.name.text);
+			}
+		}
+	}
+	return bindings;
+}
+
+function collectImportedBindingNames(source: TS.SourceFile): ReadonlySet<string> {
+	const bindings = new Set<string>();
+	for (const statement of source.statements) {
+		if (!ts.isImportDeclaration(statement)) continue;
+		const clause = statement.importClause;
+		if (clause?.name !== undefined) bindings.add(clause.name.text);
+		const named = clause?.namedBindings;
+		if (named === undefined) continue;
+		if (ts.isNamespaceImport(named)) {
+			bindings.add(named.name.text);
+			continue;
+		}
+		for (const element of named.elements) bindings.add(element.name.text);
+	}
+	return bindings;
+}
+
+function collectStaticOperationRegistryEntries(
+	source: TS.SourceFile,
+	operationBindings: ReadonlySet<string>,
+): StaticOperationRegistryEntry[] {
+	const entries: StaticOperationRegistryEntry[] = [];
+	for (const statement of source.statements) {
+		if (!ts.isVariableStatement(statement)) continue;
+		if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+		for (const declaration of statement.declarationList.declarations) {
+			if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) continue;
+			const object = unwrapExpression(declaration.initializer);
+			if (object === undefined || !ts.isObjectLiteralExpression(object)) continue;
+			for (const property of object.properties) {
+				if (ts.isSpreadAssignment(property)) continue;
+				const name = property.name;
+				if (name === undefined || (!ts.isIdentifier(name) && !ts.isStringLiteral(name))) continue;
+				const value = propertyValue(property);
+				const binding = unwrapExpression(value);
+				if (binding === undefined || !ts.isIdentifier(binding)) continue;
+				if (!operationBindings.has(binding.text)) continue;
+				entries.push({ operationId: name.text, binding: binding.text });
+			}
+		}
+	}
+	return entries;
 }
 
 function collectImports(

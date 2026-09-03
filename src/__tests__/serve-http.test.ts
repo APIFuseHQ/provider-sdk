@@ -811,6 +811,7 @@ describe("provider HTTP server", () => {
 				kind: "operation",
 				route: "echo",
 				requestId: "req_1",
+				connectionId: "af_con_1",
 				status: 200,
 				durationMs: expect.any(Number),
 				cpuUserMicros: expect.any(Number),
@@ -1523,6 +1524,57 @@ describe("provider HTTP server", () => {
 				step: "started",
 			},
 		});
+	});
+
+	it("logs auth request correlation identifiers", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const appWithLogger = createServerApp(createTestProvider(), {
+			logger: (event) => events.push(event),
+		});
+		const response = await appWithLogger.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_auth_correlation",
+				flowId: "flow_auth_correlation",
+				connectionId: "af_con_auth_correlation",
+				tenantId: "tenant_auth_correlation",
+				providerId: "gateway-selected-provider",
+				context: {},
+			}),
+		});
+
+		expect(response.status).toBe(200);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_completed",
+				requestId: "req_auth_correlation",
+				connectionId: "af_con_auth_correlation",
+				flowId: "flow_auth_correlation",
+				tenantId: "tenant_auth_correlation",
+				providerId: "test-provider",
+				requestedProviderId: "gateway-selected-provider",
+			}),
+		);
+
+		const matchingResponse = await appWithLogger.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_auth_matching_provider",
+				flowId: "flow_auth_matching_provider",
+				providerId: "test-provider",
+				context: {},
+			}),
+		});
+		expect(matchingResponse.status).toBe(200);
+		const matchingEvent = events.find(
+			(event) =>
+				event.event === "provider_request_completed" &&
+				event.requestId === "req_auth_matching_provider",
+		);
+		expect(matchingEvent).toBeDefined();
+		expect(matchingEvent).not.toHaveProperty("requestedProviderId");
 	});
 
 	it("dispatches auth disconnect through the standard endpoint", async () => {
@@ -2298,6 +2350,7 @@ describe("provider HTTP server", () => {
 			expect(decoded.proxy).not.toHaveProperty("userAgentSource");
 			const failedEvent = events.find((event) => event.event === "provider_request_failed");
 			expect(failedEvent).toBeDefined();
+			expect(failedEvent).toMatchObject({ connectionId: "af_con_failure" });
 			expect(failedEvent && "proxy" in failedEvent ? failedEvent.proxy : undefined).toEqual(
 				decoded.proxy,
 			);
@@ -2309,10 +2362,15 @@ describe("provider HTTP server", () => {
 				category: "proxy_pool",
 				retryable: true,
 			});
-			const serialized = JSON.stringify({ body, decoded, error: errorObservability(response) });
-			expect(serialized).not.toContain("redacted-test-key");
-			expect(serialized).not.toContain("5.78.24.25");
-			expect(serialized).not.toContain("af_con_failure");
+			const tenantSerialized = JSON.stringify({
+				body,
+				decoded,
+				error: errorObservability(response),
+			});
+			expect(tenantSerialized).not.toContain("redacted-test-key");
+			expect(tenantSerialized).not.toContain("5.78.24.25");
+			expect(tenantSerialized).not.toContain("af_con_failure");
+			expect(JSON.stringify(failedEvent)).toContain("af_con_failure");
 		} finally {
 			global.fetch = originalFetch;
 			if (originalSmartproxyKey) {
@@ -2416,6 +2474,45 @@ describe("provider HTTP server", () => {
 				retryable: header.retryable,
 			}),
 		]);
+	});
+
+	it("logs exactly one failure when success response serialization throws", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const appWithUnserializableResult = createServerApp(createTestProvider(), {
+			logger: (event) => events.push(event),
+			operationExecutor: async () => 1n,
+		});
+		const response = await appWithUnserializableResult.request("/v1/echo", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_bigint", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(500);
+		expect(events.filter((event) => event.event === "provider_request_failed")).toHaveLength(1);
+		expect(events.filter((event) => event.event === "provider_request_completed")).toHaveLength(0);
+	});
+
+	it("logs one failure when final response wrapping rejects a disturbed body", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const appWithDisturbedResponse = createServerApp(createTestProvider(), {
+			logger: (event) => events.push(event),
+			operationExecutor: async () => {
+				const response = Response.json({ data: { value: "already consumed" } });
+				const reader = response.body?.getReader();
+				await reader?.read();
+				return response;
+			},
+		});
+		const response = await appWithDisturbedResponse.request("/v1/echo", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_disturbed_response", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(500);
+		expect(events.filter((event) => event.event === "provider_request_failed")).toHaveLength(1);
+		expect(events.filter((event) => event.event === "provider_request_completed")).toHaveLength(0);
 	});
 
 	function createCauseErrorApp(

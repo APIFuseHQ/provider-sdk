@@ -9,11 +9,36 @@ import {
 	type OperationDeclarationRefusalReason,
 	verifyOperationDeclarationRewrite,
 } from "../migrate-operation-declaration.js";
+import { validateProviderLocaleCatalogs } from "../../i18n/catalog.js";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "migrate-operation-declaration");
 
 function fixture(name: string): string {
 	return readFileSync(join(FIXTURES, `${name}.ts.txt`), "utf8");
+}
+
+function localeFixture(locale: "en" | "ko" | "ja"): string {
+	return readFileSync(join(FIXTURES, `locale-canonical-${locale}.json`), "utf8");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function expectSharedKeyOrder(reference: unknown, value: unknown): void {
+	if (Array.isArray(value)) {
+		const referenceArray = Array.isArray(reference) ? reference : [];
+		for (let index = 0; index < value.length; index += 1) {
+			expectSharedKeyOrder(referenceArray[index], value[index]);
+		}
+		return;
+	}
+	if (!isRecord(reference) || !isRecord(value)) return;
+
+	const expected = Object.keys(reference).filter((key) => Object.hasOwn(value, key));
+	const actual = Object.keys(value).filter((key) => Object.hasOwn(reference, key));
+	expect(actual).toEqual(expected);
+	for (const key of expected) expectSharedKeyOrder(reference[key], value[key]);
 }
 
 function migrate(name: string, operationId?: string) {
@@ -62,6 +87,55 @@ describe("migrateOperationDeclaration transforms", () => {
 		expect(code).toContain("errorCodes:");
 		expect(code).not.toMatch(
 			/annotations|toolRouter|docs:|requestExample|responseExample|derivations|retryOnAuthRefresh|Raw title|Raw description/,
+		);
+	});
+
+	it("preserves a removed raw title as an English locale todo", () => {
+		const source = `const companyProfileOperation = defineOperation<ProviderContext>()({
+  title: "Get company profile",
+  annotations: { readOnly: true },
+  input: InputSchema,
+  output: OutputSchema,
+  handler,
+});
+`;
+		const result = migrateOperationDeclaration(source, "operations/get-company-profile.ts", {
+			operationIds: new Map([["companyProfileOperation", "getCompanyProfile"]]),
+			localeFiles: ["locales/en.json", "locales/ko.json"],
+		});
+
+		expect(result.status).toBe("migrated");
+		if (result.status !== "migrated") return;
+		expect(result.code).not.toContain('title: "Get company profile"');
+		expect(result.localeTodos).toEqual([
+			{
+				localeFile: "locales/en.json",
+				operationKey: "getCompanyProfile",
+				key: "operations.getCompanyProfile.title",
+				originalProse: "Get company profile",
+			},
+		]);
+	});
+
+	it("uses an explicit titleKey for the preserved English title", () => {
+		const result = migrateOperationDeclaration(fixture("hoist-all"), "hoist-all.ts", {
+			operationIds: new Map([["searchOperation", "search"]]),
+			localeFiles: ["locales/en.json", "locales/ja.json"],
+		});
+
+		expect(result.status).toBe("migrated");
+		if (result.status !== "migrated") return;
+		expect(result.localeTodos).toContainEqual({
+			localeFile: "locales/en.json",
+			operationKey: "search",
+			key: "operations.search.title",
+			originalProse: "Raw title",
+		});
+		expect(result.localeTodos).not.toContainEqual(
+			expect.objectContaining({
+				localeFile: "locales/ja.json",
+				key: "operations.search.title",
+			}),
 		);
 	});
 
@@ -236,9 +310,266 @@ describe("migrateOperationDeclaration refusals", () => {
 			expect(result.refusals[0]?.operationKey).toBe("search");
 		}
 	});
+
+	it("refuses rather than emitting a validator-illegal example locale key", () => {
+		const input = `const searchOperation = defineOperation<ProviderContext>()({
+  annotations: { readOnly: true },
+  descriptionKey: "operations.search_items.description",
+  inputExamples: [{ scenario: "Search items", input: {} }],
+  input: InputSchema,
+  output: OutputSchema,
+  handler,
+});
+`;
+		const result = migrateOperationDeclaration(input, "operations/search.ts", {
+			operationIds: new Map([["searchOperation", "search-items"]]),
+			localeFiles: ["locales/en.json"],
+		});
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals[0]?.reason).toBe("invalid_locale_key");
+			expect(result.refusals[0]?.detail).toContain(
+				'Refusing to write invalid provider locale key "operations.search_items.examples.0.scenario"',
+			);
+		}
+	});
 });
 
 describe("migrateOperationDeclarationRepository", () => {
+	for (const example of [
+		{
+			fixture: "examples-snake-operation-id",
+			namespace: "listRecentEarthquakes",
+		},
+		{
+			fixture: "examples-kebab-operation-id",
+			namespace: "listHospitals",
+		},
+	] as const) {
+		it(`writes validator-legal camelCase example keys for ${example.fixture}`, () => {
+			const root = mkdtempSync(join(tmpdir(), "apifuse-operation-example-namespace-"));
+			try {
+				writeFileSync(join(root, "index.ts"), fixture(example.fixture));
+				mkdirSync(join(root, "locales"));
+				writeFileSync(join(root, "locales", "en.json"), "{}\n");
+
+				const result = migrateOperationDeclarationRepository(root);
+				expect(result.status).toBe("migrated");
+				const scenarioKey = `operations.${example.namespace}.examples.0.scenario`;
+				const rationaleKey = `operations.${example.namespace}.examples.0.rationale`;
+				const migrated = readFileSync(join(root, "index.ts"), "utf8");
+				expect(migrated).toContain(`scenarioKey: ${JSON.stringify(scenarioKey)}`);
+				expect(migrated).toContain(`rationaleKey: ${JSON.stringify(rationaleKey)}`);
+				const english: unknown = JSON.parse(readFileSync(join(root, "locales", "en.json"), "utf8"));
+				expect(
+					validateProviderLocaleCatalogs({
+						catalogs: { en: english as Record<string, unknown> },
+						requiredLocales: ["en"],
+						requiredKeys: [scenarioKey, rationaleKey],
+					}),
+				).toEqual({ ok: true, issues: [] });
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it("reuses an existing camelCase operation catalog namespace without duplication", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-existing-namespace-"));
+		try {
+			writeFileSync(join(root, "index.ts"), fixture("examples-snake-operation-id"));
+			mkdirSync(join(root, "locales"));
+			writeFileSync(
+				join(root, "locales", "en.json"),
+				readFileSync(join(FIXTURES, "locale-existing-operation-namespace-en.json"), "utf8"),
+			);
+
+			const result = migrateOperationDeclarationRepository(root);
+			expect(result.status).toBe("migrated");
+			const english = JSON.parse(readFileSync(join(root, "locales", "en.json"), "utf8")) as Record<
+				string,
+				unknown
+			>;
+			const operations = english.operations;
+			if (!isRecord(operations)) throw new Error("expected operations catalog namespace");
+			expect(Object.keys(operations)).toEqual(["listRecentEarthquakes"]);
+			const requiredKeys = [
+				"operations.listRecentEarthquakes.examples.0.scenario",
+				"operations.listRecentEarthquakes.examples.0.rationale",
+			];
+			expect(
+				validateProviderLocaleCatalogs({
+					catalogs: { en: english },
+					requiredLocales: ["en"],
+					requiredKeys,
+				}),
+			).toEqual({ ok: true, issues: [] });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("writes a removed raw title to the English catalog without replacing translations", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-title-locale-"));
+		try {
+			writeFileSync(
+				join(root, "index.ts"),
+				`const companyProfileOperation = defineOperation<ProviderContext>()({
+  title: "Get company profile",
+  annotations: { readOnly: true },
+  input: InputSchema,
+  output: OutputSchema,
+  handler,
+});
+export default buildProvider({
+  operations: { getCompanyProfile: companyProfileOperation },
+});
+`,
+			);
+			mkdirSync(join(root, "locales"));
+			writeFileSync(
+				join(root, "locales", "en.json"),
+				'{"operations":{"getCompanyProfile":{"description":"Company profile"}}}\n',
+			);
+			writeFileSync(
+				join(root, "locales", "ko.json"),
+				'{"operations":{"getCompanyProfile":{"description":"기업 개황","title":"기업 개황 조회"}}}\n',
+			);
+
+			const result = migrateOperationDeclarationRepository(root);
+
+			expect(result.status).toBe("migrated");
+			const english = JSON.parse(readFileSync(join(root, "locales", "en.json"), "utf8")) as {
+				operations: { getCompanyProfile: { title: string } };
+			};
+			const korean = JSON.parse(readFileSync(join(root, "locales", "ko.json"), "utf8")) as {
+				operations: { getCompanyProfile: { title: string } };
+			};
+			expect(english.operations.getCompanyProfile.title).toBe("Get company profile");
+			expect(korean.operations.getCompanyProfile.title).toBe("기업 개황 조회");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("writes canonical locale JSON with non-English shared keys in English order", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-locale-canonical-"));
+		try {
+			writeFileSync(join(root, "search.ts"), fixture("examples-operation"));
+			writeFileSync(join(root, "operations.ts"), fixture("examples-map"));
+			mkdirSync(join(root, "locales"));
+			for (const locale of ["en", "ko", "ja"] as const) {
+				writeFileSync(join(root, "locales", `${locale}.json`), localeFixture(locale));
+			}
+
+			const result = migrateOperationDeclarationRepository(root);
+			expect(result.status).toBe("migrated");
+
+			const catalogs = new Map<string, unknown>();
+			for (const locale of ["en", "ko", "ja"] as const) {
+				const raw = readFileSync(join(root, "locales", `${locale}.json`), "utf8");
+				const parsed: unknown = JSON.parse(raw);
+				expect(raw).toBe(`${JSON.stringify(parsed, null, 2)}\n`);
+				catalogs.set(locale, parsed);
+			}
+
+			const english = catalogs.get("en");
+			const korean = catalogs.get("ko");
+			const japanese = catalogs.get("ja");
+			expectSharedKeyOrder(english, korean);
+			expectSharedKeyOrder(english, japanese);
+			if (!isRecord(korean) || !isRecord(japanese)) throw new Error("expected locale objects");
+			expect(Object.keys(korean).slice(-2)).toEqual(["koOnlyFirst", "koOnlyLast"]);
+			expect(Object.keys(japanese).slice(-2)).toEqual(["jaOnlyFirst", "jaOnlyLast"]);
+			const koOperations = korean.operations;
+			const jaOperations = japanese.operations;
+			if (!isRecord(koOperations) || !isRecord(jaOperations)) {
+				throw new Error("expected operations objects");
+			}
+			expect(Object.keys(koOperations).at(-1)).toBe("koOnlyOperation");
+			expect(Object.keys(jaOperations).at(-1)).toBe("jaOnlyOperation");
+			const koSearch = koOperations.search;
+			const jaSearch = jaOperations.search;
+			if (!isRecord(koSearch) || !isRecord(jaSearch)) throw new Error("expected search objects");
+			expect(Object.keys(koSearch)).toEqual([
+				"description",
+				"title",
+				"steps",
+				"examples",
+				"koOnly",
+			]);
+			expect(Object.keys(jaSearch)).toEqual([
+				"description",
+				"title",
+				"steps",
+				"examples",
+				"jaOnly",
+			]);
+			expect(Array.isArray(koSearch.steps)).toBe(true);
+			expect(Array.isArray(jaSearch.steps)).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	function migrateRegistryFixture(name: string, other?: string) {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-registry-"));
+		if (other === undefined) {
+			writeFileSync(join(root, "index.ts"), fixture(name));
+		} else {
+			writeFileSync(join(root, "index.ts"), fixture(name));
+			writeFileSync(join(root, "other.ts"), fixture(other));
+		}
+		mkdirSync(join(root, "locales"));
+		writeFileSync(join(root, "locales", "en.json"), "{}\n");
+		const result = migrateOperationDeclarationRepository(root, { check: true });
+		rmSync(root, { recursive: true, force: true });
+		return result;
+	}
+
+	it("indexes typed exported registries with hyphenated string keys", () => {
+		const result = migrateRegistryFixture("registry-typed");
+		expect(result.status).toBe("would-migrate");
+		if (result.status === "would-migrate") expect(result.operationCount).toBe(1);
+	});
+
+	it("indexes shorthand registry properties for direct stream helpers", () => {
+		const result = migrateRegistryFixture("registry-shorthand");
+		expect(result.status).toBe("would-migrate");
+		if (result.status === "would-migrate") expect(result.operationCount).toBe(1);
+	});
+
+	it("refuses a binding registered under two ids", () => {
+		const result = migrateRegistryFixture("registry-binding-ambiguous");
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals[0]?.reason).toBe("operation_id_unresolved");
+		}
+	});
+
+	it("refuses two bindings registered under one id", () => {
+		const result = migrateRegistryFixture("registry-key-ambiguous");
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals).toHaveLength(2);
+			expect(result.refusals.every((item) => item.reason === "operation_id_unresolved")).toBe(true);
+		}
+	});
+
+	it("scans operation members in unrelated const objects only", () => {
+		const result = migrateRegistryFixture("registry-unrelated");
+		expect(result.status).toBe("would-migrate");
+		if (result.status === "would-migrate") expect(result.operationCount).toBe(1);
+	});
+
+	it("ignores imported identifiers in same-file objects", () => {
+		const result = migrateRegistryFixture("registry-imported", "registry-imported-other");
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals[0]?.reason).toBe("operation_id_unresolved");
+		}
+	});
+
 	it("resolves an imported operation id and emits the examples locale sidecar", () => {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-declaration-"));
 		try {
@@ -317,7 +648,7 @@ describe("migrateOperationDeclarationRepository", () => {
 					'import { z } from "@apifuse/provider-sdk/provider";',
 					"",
 					"export const manifestSchema = z.object({",
-					"  operations: z.array(z.enum([\"a\", \"b\"])).min(1).superRefine(() => {}),",
+					'  operations: z.array(z.enum(["a", "b"])).min(1).superRefine(() => {}),',
 					"  captured_operations: z.array(z.string().min(1)).min(1),",
 					"});",
 					"",

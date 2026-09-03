@@ -1,0 +1,9 @@
+const searchOperation = defineStreamOperation({
+	annotations: { readOnly: true },
+	inputExamples: [{ scenario: "Search", input: {} }],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
+
+const arbitraryRegistry = { searchOperation };

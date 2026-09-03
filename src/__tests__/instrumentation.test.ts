@@ -145,6 +145,22 @@ describe("createTraceContext", () => {
 
 		expect(trace.getSpans().map((span) => span.name)).toEqual(["second", "third"]);
 	});
+
+	it.each([
+		["uppercase", "0123456789ABCDEF0123456789ABCDEF"],
+		["too short", "0123456789abcdef0123456789abcde"],
+		["all zero", "00000000000000000000000000000000"],
+	])("rejects an invalid public trace id seed: %s", (_label, traceId) => {
+		expect(() => createTraceContext({ traceId })).toThrow(
+			"traceId must be 32 lowercase hexadecimal characters and non-zero",
+		);
+	});
+
+	it("accepts a valid public trace id seed", () => {
+		expect(() =>
+			createTraceContext({ traceId: "0123456789abcdef0123456789abcdef" }),
+		).not.toThrow();
+	});
 });
 
 describe("wrapWithInstrumentation", () => {

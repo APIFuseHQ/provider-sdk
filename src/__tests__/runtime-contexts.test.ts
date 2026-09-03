@@ -4,6 +4,7 @@ import { ContextAccessError, CredentialModeError } from "../errors.js";
 import { createFlowContext, createScratchpad } from "../runtime/auth-flow.js";
 import { createCredentialContext } from "../runtime/credential.js";
 import { createEnvContext } from "../runtime/env.js";
+import { createTraceContext } from "../runtime/trace.js";
 import type { HttpClient } from "../types.js";
 import { createProviderContextDouble } from "./test-utils.js";
 
@@ -124,5 +125,18 @@ describe("runtime contexts", () => {
 		expect(context.tenantId).toBe("tenant-1");
 		expect(context.providerId).toBe("demo-provider");
 		expect(context.context.get("state")).toBe("draft");
+		expect(context.trace).toBeDefined();
+
+		const trace = createTraceContext();
+		const contextWithTrace = createFlowContext({
+			http,
+			stealth: createProviderContextDouble().stealth,
+			env: createEnvContext(),
+			tenantId: "tenant-1",
+			providerId: "demo-provider",
+			allowedKeys: [],
+			trace,
+		});
+		expect(contextWithTrace.trace).toBe(trace);
 	});
 });
