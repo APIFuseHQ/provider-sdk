@@ -950,6 +950,14 @@ export type StealthProfileSelection =
 	| { browser: "firefox"; os?: "windows" | "macos" | "linux" }
 	| { browser: "safari"; os?: "macos" | "ios" };
 
+/** Provider-owned opt-ins layered onto the transport-owned browser/OS profile. */
+export type ProviderStealthConfig = StealthProfileSelection & {
+	readonly challengeDetection?: {
+		/** Classify SBSD responses even when no resolver is declared (detect/report mode). */
+		readonly akamaiSbsd?: boolean;
+	};
+};
+
 export type BrowserEngine = "playwright-stealth" | "nodriver" | "selenium-uc";
 export interface BrowserOptions {
 	headless?: boolean;
@@ -1371,6 +1379,8 @@ export interface DeclarativeStealthResponse {
 	headers: Record<string, string>;
 	rawHeaders: [string, string][];
 	body: string;
+	/** Present only when an opted-in SDK detector returned an unresolved challenge response. */
+	challenge?: StealthChallengeClassification;
 	httpVersion?: string;
 	tlsInfo?: { protocol?: string; cipher?: string; [key: string]: unknown };
 	cookies: CookieJar;
@@ -1380,6 +1390,11 @@ export interface DeclarativeStealthResponse {
 }
 
 export type StealthResponse = DeclarativeStealthResponse;
+
+export type StealthChallengeClassification = {
+	readonly challenge: Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>;
+	readonly outcome: "resolver_unavailable" | "replay_required" | "challenge_persisted";
+};
 
 export type RequestWithMethodOptions = RequestOptions & {
 	method?: string;
@@ -2515,7 +2530,7 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 	http?: Record<string, never> | true;
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
-	stealth?: StealthProfileSelection;
+	stealth?: ProviderStealthConfig;
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;

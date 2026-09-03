@@ -531,6 +531,46 @@ function getProviderStealthProfile(provider: ProviderDefinition) {
 	return provider.stealth ? getStealthProfile(provider.stealth) : undefined;
 }
 
+function createStealthChallengeDetection(
+	provider: ProviderDefinition,
+	resolverRuntime: typeof ResolverRuntimeModule | undefined,
+	resolverOverride: ResolverContext | undefined,
+	cache: ReturnType<typeof createProviderCache>,
+	identityScope: string,
+	signal: AbortSignal | undefined,
+): NonNullable<StealthRuntimeModule.StealthClientOptions["stealth"]>["challengeRuntime"] {
+	const resolverDeclared = provider.resolver?.kinds.some((kind) => kind === "akamai_sbsd") === true;
+	const detectOnly = provider.stealth?.challengeDetection?.akamaiSbsd === true;
+	if (!resolverDeclared && !detectOnly) {
+		return undefined;
+	}
+	return {
+		akamaiSbsd: {
+			allowedHosts: provider.allowedHosts ?? [],
+			...(resolverDeclared && resolverRuntime
+				? {
+						async solve(challenge, transport, solveSignal) {
+							const resolver =
+								resolverOverride ??
+								resolverRuntime.createResolverClientFromEnv(provider.resolver, undefined, {
+									allowedHosts: provider.allowedHosts,
+									cache,
+									identityScope,
+									// The transport already owns the initiating request's exact proxy,
+									// profile headers, and cookie jar. Re-resolving proxy intent here
+									// would break identity equality rather than establish it.
+									createTransport: () => transport,
+								});
+							return resolverRuntime
+								.bindResolverSignal(resolver, signal)
+								.solve(challenge, solveSignal);
+						},
+					}
+				: {}),
+		},
+	};
+}
+
 function isProductionProviderBrowserMode(provider: ProviderDefinition, env = process.env): boolean {
 	if (provider.runtime !== "browser") {
 		return false;
@@ -689,16 +729,32 @@ function createProviderContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
+	const cache = createProviderCache({ providerId: provider.id });
 	let wrappedContext: ProviderContext | undefined;
+	const { capabilityModules } = options;
+	const challengeRuntime = createStealthChallengeDetection(
+		provider,
+		capabilityModules.resolver,
+		options.resolver,
+		cache,
+		resolverIdentityScope,
+		signal,
+	);
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
-		...(provider.stealth ? { stealth: provider.stealth } : {}),
+		...(provider.stealth
+			? {
+					stealth: {
+						...provider.stealth,
+						...(challengeRuntime ? { challengeRuntime } : {}),
+					},
+				}
+			: {}),
 	};
-	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>
 		logProviderCleanupError(
 			options.logger,
@@ -725,7 +781,6 @@ function createProviderContext(
 		headers: request.headers ?? {},
 	};
 	const requestState = state.forConnection(requestContext.connectionId);
-	const cache = createProviderCache({ providerId: provider.id });
 	const bindings: ProviderEngineBindingCandidates = {
 		env,
 		credential,
@@ -912,15 +967,31 @@ function createAuthFlowContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
+	const cache = createProviderCache({ providerId: provider.id });
+	const { capabilityModules } = options;
+	const challengeRuntime = createStealthChallengeDetection(
+		provider,
+		capabilityModules.resolver,
+		options.resolver,
+		cache,
+		resolverIdentityScope,
+		signal,
+	);
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
-		...(provider.stealth ? { stealth: provider.stealth } : {}),
+		...(provider.stealth
+			? {
+					stealth: {
+						...provider.stealth,
+						...(challengeRuntime ? { challengeRuntime } : {}),
+					},
+				}
+			: {}),
 	};
-	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>
 		logProviderCleanupError(
 			options.logger,
@@ -939,8 +1010,6 @@ function createAuthFlowContext(
 				values: request.connection.secrets,
 			})
 		: undefined;
-	const cache = createProviderCache({ providerId: provider.id });
-
 	return {
 		context: {
 			flowId: request.flowId,

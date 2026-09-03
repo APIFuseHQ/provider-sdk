@@ -8,6 +8,26 @@ import type { BrowserProfile } from 'wreq-js';
 import type { EmulationOS } from 'wreq-js';
 import type { SerializedCookieJar } from 'tough-cookie';
 
+// @public
+type ChallengeSolution = {
+    readonly form: "token";
+    readonly token: string;
+} | {
+    readonly form: "cookies";
+    readonly kind?: never;
+    readonly cookies: Readonly<Record<string, string>>;
+    readonly userAgent: string;
+    readonly expires?: number;
+    readonly sdkEstimatedExpires?: number;
+} | {
+    readonly form: "cookies";
+    readonly kind: "akamai_sbsd";
+    readonly outcome: "payload_accepted_cookies_updated";
+    readonly verified: false;
+    readonly stateCookieName: "sbsd_o" | "bm_so";
+    readonly expires?: number;
+};
+
 // @public (undocumented)
 interface CookieJar {
     // (undocumented)
@@ -32,6 +52,8 @@ interface DeclarativeStealthResponse {
     body: string;
     // (undocumented)
     bytes(): Promise<Uint8Array>;
+    // Warning: (ae-forgotten-export) The symbol "StealthChallengeClassification" needs to be exported by the entry point stealth.d.ts
+    challenge?: StealthChallengeClassification;
     // Warning: (ae-forgotten-export) The symbol "CookieJar" needs to be exported by the entry point stealth.d.ts
     //
     // (undocumented)
@@ -173,6 +195,57 @@ type Iso3166Alpha2CountryCode = Uppercase<string>;
 //
 // @public (undocumented)
 export function normalizeResponse(response: StealthTransportResponse, requestUrl?: string, maxBodyBytes?: number): Promise<StealthResponse>;
+
+// @public
+type ProviderChallenge = {
+    readonly kind: "turnstile";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+    readonly action?: string;
+    readonly cdata?: string;
+} | {
+    readonly kind: "recaptcha_v2";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+} | {
+    readonly kind: "recaptcha_v3";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+    readonly action: string;
+    readonly minScore?: number;
+} | {
+    readonly kind: "hcaptcha";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+} | {
+    readonly kind: "cloudflare_interstitial";
+    readonly pageUrl: string;
+    readonly blockedHtml?: string;
+} | {
+    readonly kind: "aws_waf";
+    readonly pageUrl: string;
+    readonly siteKey?: string;
+    readonly captchaScript?: string;
+    readonly context?: string;
+    readonly iv?: string;
+} | {
+    readonly kind: "akamai_sec_cpt";
+    readonly pageUrl: string;
+    readonly challengeHtml?: string;
+} | {
+    readonly kind: "akamai_sensor";
+    readonly pageUrl: string;
+    readonly scriptUrl: string;
+    readonly abck?: string;
+    readonly bmsz?: string;
+    readonly version?: string;
+} | {
+    readonly kind: "akamai_sbsd";
+    readonly pageUrl: string;
+    readonly scriptUrl: string;
+    readonly stateCookieName: "sbsd_o" | "bm_so";
+    readonly challengeToken?: string;
+};
 
 // @public (undocumented)
 type ProviderProxyMode = "disabled" | "optional" | "required";
@@ -323,6 +396,34 @@ type RequestParams = Record<string, RequestParamValue>;
 // @public (undocumented)
 type RequestParamValue = RequestParamPrimitive | readonly RequestParamPrimitive[];
 
+// @public (undocumented)
+interface ResolverVendorTransport {
+    fetch(url: string, init: {
+        method: "GET" | "POST";
+        headers?: Readonly<Record<string, string>>;
+        body?: string;
+        signal: AbortSignal;
+        redirect?: "manual";
+        maxBodyBytes?: number;
+    }): Promise<{
+        readonly status: number;
+        readonly headers: Readonly<Record<string, string>>;
+        readonly body: string;
+        readonly cookies: readonly {
+            readonly name: string;
+            readonly value: string;
+            readonly expires?: number;
+            readonly httpOnly: boolean;
+            readonly secure: boolean;
+            readonly domain?: string;
+            readonly path?: string;
+            readonly sameSite?: string;
+        }[];
+    }>;
+    readonly getCookie?: (name: string, url: string) => string | undefined;
+    readonly sessionHeaders?: Readonly<Record<string, string>>;
+}
+
 // Warning: (ae-forgotten-export) The symbol "StealthProfileSelection" needs to be exported by the entry point stealth.d.ts
 //
 // @public (undocumented)
@@ -333,6 +434,14 @@ export function resolveWreqProfile(selection: StealthProfileSelection, wreqProfi
 
 // @public (undocumented)
 type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
+
+// @public (undocumented)
+type StealthChallengeClassification = {
+    readonly challenge: Extract<ProviderChallenge, {
+        readonly kind: "akamai_sbsd";
+    }>;
+    readonly outcome: "resolver_unavailable" | "replay_required" | "challenge_persisted";
+};
 
 // @public (undocumented)
 interface StealthClient {
@@ -358,6 +467,14 @@ export type StealthClientOptions = ProxyResolutionOptions & {
     signal?: AbortSignal;
     stealth?: StealthProfileSelection & {
         acceptLanguage?: string;
+        challengeRuntime?: {
+            readonly akamaiSbsd?: {
+                readonly allowedHosts: readonly string[];
+                readonly solve?: (challenge: Extract<ProviderChallenge, {
+                    readonly kind: "akamai_sbsd";
+                }>, transport: ResolverVendorTransport, signal: AbortSignal) => Promise<ChallengeSolution>;
+            };
+        };
     };
     proxyStealth?: {
         insecureSkipVerify?: boolean;
@@ -542,12 +659,15 @@ type StealthTransportResponse = {
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:45:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:47:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:878:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:883:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1194:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1194:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:22:17 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:22:17 - (ae-forgotten-export) The symbol "ChallengeSolution" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:55:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:57:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:885:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:890:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1172:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1209:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1209:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 

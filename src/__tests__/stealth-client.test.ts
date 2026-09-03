@@ -257,6 +257,49 @@ function mockEmulationHeaders(profile: string, os = "macos") {
 	]);
 }
 
+function sbsdInterstitial(scriptUrl: string): string {
+	return `<!doctype html><div id="sec-bc-tile-container">fixture challenge</div><script src="${scriptUrl}"></script>`;
+}
+
+function queueHardSbsdSolve(
+	refetch: MockWreqResponse,
+	pageUrl = "https://example.com/protected",
+): void {
+	mockStealthState.queuedResponses.push(
+		{
+			status: 403,
+			body: sbsdInterstitial("/.well-known/sbsd?v=fixture-uuid&amp;t=fixture-token"),
+			headers: { "set-cookie": "sbsd_o=initial-state; Path=/; Secure" },
+			url: pageUrl,
+		},
+		{
+			status: 200,
+			body: '{"ip":"203.0.113.9"}',
+			headers: {},
+			url: "https://ip.hypersolutions.co/ip",
+		},
+		{
+			status: 200,
+			body: "fixture-sbsd-script",
+			headers: {},
+			url: "https://example.com/.well-known/sbsd?v=fixture-uuid&t=fixture-token",
+		},
+		{
+			status: 200,
+			body: '{"payload":"fixture-payload"}',
+			headers: {},
+			url: "https://akm.hypersolutions.co/sbsd",
+		},
+		{
+			status: 200,
+			body: "payload accepted",
+			headers: { "set-cookie": "sbsd_o=updated-state; Path=/; Secure" },
+			url: "https://example.com/.well-known/sbsd?t=fixture-token",
+		},
+		refetch,
+	);
+}
+
 mock.module("wreq-js", () => ({
 	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
 	getEmulationHeaders: mockEmulationHeaders,
@@ -3196,6 +3239,246 @@ describe("Chrome 149 header parity", () => {
 			expect(mockStealthState.clients).toHaveLength(0);
 		});
 	}
+
+	it("classifies all three SBSD script URL variants without a resolver or cookie values", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=hard-uuid&amp;t=hard-token"),
+				headers: { "set-cookie": "sbsd_o=fixture-secret; Path=/; Secure" },
+				url: "https://example.com/hard",
+			},
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=hard-raw&t=hard-raw-token"),
+				headers: { "set-cookie": "sbsd_o=raw-secret; Path=/; Secure" },
+				url: "https://example.com/hard-raw",
+			},
+			{
+				status: 200,
+				body: sbsdInterstitial("https://example.com/.well-known/sbsd?v=passive-uuid"),
+				headers: { "set-cookie": "bm_so=another-secret; Path=/; Secure" },
+				url: "https://example.com/passive",
+			},
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const clientOptions = {
+			stealth: {
+				browser: "safari",
+				os: "macos",
+				challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+			},
+		} as const;
+
+		const hard = await createStealthClient("https://example.com", clientOptions).fetch("/hard");
+		const hardRaw = await createStealthClient("https://example.com", clientOptions).fetch(
+			"/hard-raw",
+		);
+		const passive = await createStealthClient("https://example.com", clientOptions).fetch(
+			"/passive",
+		);
+
+		expect(hard.challenge).toEqual({
+			challenge: {
+				kind: "akamai_sbsd",
+				pageUrl: "https://example.com/hard",
+				scriptUrl: "https://example.com/.well-known/sbsd?v=hard-uuid&t=hard-token",
+				stateCookieName: "sbsd_o",
+			},
+			outcome: "resolver_unavailable",
+		});
+		expect(hardRaw.challenge).toEqual({
+			challenge: {
+				kind: "akamai_sbsd",
+				pageUrl: "https://example.com/hard-raw",
+				scriptUrl: "https://example.com/.well-known/sbsd?v=hard-raw&t=hard-raw-token",
+				stateCookieName: "sbsd_o",
+			},
+			outcome: "resolver_unavailable",
+		});
+		expect(passive.challenge).toEqual({
+			challenge: {
+				kind: "akamai_sbsd",
+				pageUrl: "https://example.com/passive",
+				scriptUrl: "https://example.com/.well-known/sbsd?v=passive-uuid",
+				stateCookieName: "bm_so",
+			},
+			outcome: "resolver_unavailable",
+		});
+		const classifications = JSON.stringify([
+			hard.challenge,
+			hardRaw.challenge,
+			passive.challenge,
+		]);
+		expect(classifications).not.toContain("fixture-secret");
+		expect(classifications).not.toContain("raw-secret");
+		expect(classifications).not.toContain("another-secret");
+	});
+
+	it("does not classify a non-Akamai 403", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: "ordinary forbidden response",
+			headers: { "set-cookie": "sbsd_o=irrelevant; Path=/" },
+			url: "https://example.com/forbidden",
+		});
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const response = await createStealthClient("https://example.com", {
+			stealth: {
+				challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+			},
+		}).fetch("/forbidden", { throwOnHttpError: false });
+
+		expect(response.status).toBe(403);
+		expect(response.challenge).toBeUndefined();
+		expect(allWreqCalls()).toHaveLength(1);
+	});
+
+	it("solves once on the initiating jar and proxy, then judges success only from one GET refetch", async () => {
+		queueHardSbsdSolve({
+			status: 200,
+			body: "protected fixture",
+			headers: {},
+			url: "https://example.com/protected",
+		});
+		const resolutions: unknown[] = [];
+		let solves = 0;
+		const { createHypersolutionsResolverVendorAdapter } = await import(
+			"../runtime/resolver-vendors/hypersolutions.js"
+		);
+		const adapter = createHypersolutionsResolverVendorAdapter({
+			apiKey: "fixture-hyper-key",
+			allowedHosts: ["example.com"],
+		});
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const response = await createStealthClient("https://example.com", {
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["nodemaven"],
+					session: { affinity: "connection" },
+				},
+			},
+			affinityKey: "fixture-lease-id",
+			engineCredentials: {
+				[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+				[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+			},
+			telemetry: {
+				recordProxyResolution: (event) => resolutions.push(event),
+			},
+			stealth: {
+				browser: "safari",
+				os: "macos",
+				acceptLanguage: "ja-JP,ja;q=0.9",
+				challengeRuntime: {
+					akamaiSbsd: {
+						allowedHosts: ["example.com"],
+						async solve(challenge, transport, signal) {
+							solves += 1;
+							expect(transport.getCookie?.("sbsd_o", challenge.pageUrl)).toBe(
+								"initial-state",
+							);
+							expect(transport.sessionHeaders?.["Accept-Language"]).toBe(
+								"ja-JP,ja;q=0.9",
+							);
+							return adapter.solve(challenge, undefined, signal, undefined, transport);
+						},
+					},
+				},
+			},
+		}).fetch("/protected");
+
+		expect(response).toMatchObject({ status: 200, body: "protected fixture" });
+		expect(response.challenge).toBeUndefined();
+		expect(solves).toBe(1);
+		expect(resolutions).toHaveLength(1);
+		const proxies = new Set(
+			mockStealthState.clients.map((client) => String(client.options?.proxy)),
+		);
+		expect(proxies.size).toBe(1);
+		expect([...proxies][0]).toContain("fixture-account-");
+		expect(
+			allWreqCalls().filter((call) => call.url === "https://example.com/protected"),
+		).toHaveLength(2);
+		expect(requestHeader(allWreqCalls().at(-1)?.init, "cookie")).toContain(
+			"sbsd_o=updated-state",
+		);
+	});
+
+	it("returns challenge_persisted after one solve and exactly one refetch", async () => {
+		queueHardSbsdSolve({
+			status: 403,
+			body: sbsdInterstitial("/.well-known/sbsd?v=second-uuid&t=second-token"),
+			headers: {},
+			url: "https://example.com/protected",
+		});
+		let solves = 0;
+		const { createHypersolutionsResolverVendorAdapter } = await import(
+			"../runtime/resolver-vendors/hypersolutions.js"
+		);
+		const adapter = createHypersolutionsResolverVendorAdapter({
+			apiKey: "fixture-hyper-key",
+			allowedHosts: ["example.com"],
+		});
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const response = await createStealthClient("https://example.com", {
+			stealth: {
+				challengeRuntime: {
+					akamaiSbsd: {
+						allowedHosts: ["example.com"],
+						async solve(challenge, transport, signal) {
+							solves += 1;
+							return adapter.solve(challenge, undefined, signal, undefined, transport);
+						},
+					},
+				},
+			},
+		}).fetch("/protected");
+
+		expect(response.challenge?.outcome).toBe("challenge_persisted");
+		expect(solves).toBe(1);
+		expect(
+			allWreqCalls().filter((call) => call.url === "https://example.com/protected"),
+		).toHaveLength(2);
+	});
+
+	it.each([
+		{ name: "POST", options: { method: "POST" as const, body: '{"fixture":true}' } },
+		{
+			name: "credential-bearing GET",
+			options: { method: "GET" as const, headers: { Authorization: "Bearer fixture" } },
+		},
+	])("returns replay_required without solving or refetching a $name", async ({ options }) => {
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: sbsdInterstitial("/.well-known/sbsd?v=unsafe-uuid&t=unsafe-token"),
+			headers: { "set-cookie": "sbsd_o=unsafe-state; Path=/; Secure" },
+			url: "https://example.com/protected",
+		});
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const response = await createStealthClient("https://example.com", {
+			stealth: {
+				challengeRuntime: {
+					akamaiSbsd: {
+						allowedHosts: ["example.com"],
+						async solve() {
+							solves += 1;
+							throw new Error("unsafe solve must not run");
+						},
+					},
+				},
+			},
+		}).fetch("/protected", options);
+
+		expect(response.challenge?.outcome).toBe("replay_required");
+		expect(solves).toBe(0);
+		expect(allWreqCalls()).toHaveLength(1);
+	});
 });
 
 const CancellationErrorShapeSchema = z.object({
@@ -3272,6 +3555,180 @@ function createStealthAbortProvider(): ProviderDefinition {
 		},
 	});
 }
+
+function createSbsdWiringProvider(): ProviderDefinition {
+	return createProviderDefinitionDouble({
+		id: "stealth-sbsd-wiring-provider",
+		allowedHosts: ["example.com"],
+		stealth: { browser: "safari", os: "macos" },
+		proxy: {
+			mode: "required",
+			providers: ["nodemaven"],
+			session: { affinity: "connection" },
+		},
+		resolver: {
+			vendors: ["hypersolutions"],
+			kinds: ["akamai_sbsd"],
+			clientProfile: "safari17_0",
+		},
+		auth: {
+			mode: "credentials",
+			flow: {
+				start: async (ctx) => {
+					const response = await ctx.stealth.fetch("/auth-protected");
+					return {
+						kind: "message",
+						turnId: "sbsd-auth",
+						data: { status: response.status, outcome: response.challenge?.outcome ?? "solved" },
+					};
+				},
+				continue: async () => ({ kind: "abort", turnId: "unused" }),
+			},
+		},
+		operations: {
+			sbsd: {
+				riskClass: "read",
+				input: z.object({}),
+				output: z.object({ status: z.number(), outcome: z.string() }),
+				upstream: { baseUrl: "https://example.com" },
+				handler: async (ctx) => {
+					const response = await ctx.stealth.fetch("/operation-protected");
+					return { status: response.status, outcome: response.challenge?.outcome ?? "solved" };
+				},
+			},
+		},
+	});
+}
+
+describe("server SBSD bound-transport wiring", () => {
+	beforeEach(() => {
+		mockStealthState.clients.length = 0;
+		mockStealthState.queuedResponses.length = 0;
+		mockStealthState.queuedErrors.length = 0;
+		mockStealthState.queuedCloseErrors.length = 0;
+	});
+
+	it("returns detection-only classification for a provider without a resolver", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: sbsdInterstitial("/.well-known/sbsd?v=report-only&t=fixture-token"),
+			headers: { "set-cookie": "sbsd_o=report-only-secret; Path=/; Secure" },
+			url: "https://example.com/report-only",
+		});
+		const provider = createProviderDefinitionDouble({
+			id: "stealth-sbsd-report-only",
+			allowedHosts: ["example.com"],
+			stealth: {
+				browser: "safari",
+				os: "macos",
+				challengeDetection: { akamaiSbsd: true },
+			},
+			operations: {
+				report: {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ outcome: z.string() }),
+					upstream: { baseUrl: "https://example.com" },
+					handler: async (ctx) => {
+						const response = await ctx.stealth.fetch("/report-only");
+						return { outcome: response.challenge?.outcome ?? "missing" };
+					},
+				},
+			},
+		});
+		const { createServerAppAsync } = await import("../server/serve.js");
+		const app = await createServerAppAsync(provider, { logger: () => undefined });
+		const response = await app.request("/v1/report", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req-sbsd-report", input: {} }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ data: { outcome: "resolver_unavailable" } });
+		expect(allWreqCalls()).toHaveLength(1);
+	});
+
+	it("supplies the bound transport in operation and auth FlowContext assembly", async () => {
+		const { APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY } = await import(
+			"../runtime/resolver-config.js"
+		);
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const previous = new Map(
+			[
+				APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
+				NODEMAVEN_USERNAME_ENV,
+				NODEMAVEN_PASSWORD_ENV,
+			].map((name) => [name, process.env[name]] as const),
+		);
+		process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY] = "fixture-hyper-key";
+		process.env[NODEMAVEN_USERNAME_ENV] = "fixture-server-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "fixture-server-password";
+		try {
+			const { createServerAppAsync } = await import("../server/serve.js");
+			const app = await createServerAppAsync(createSbsdWiringProvider(), {
+				logger: () => undefined,
+			});
+			queueHardSbsdSolve(
+				{
+					status: 200,
+					body: "operation protected",
+					headers: {},
+					url: "https://example.com/operation-protected",
+				},
+				"https://example.com/operation-protected",
+			);
+			const operation = await app.request("/v1/sbsd", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-operation",
+					connectionId: "connection-sbsd",
+					input: {},
+				}),
+			});
+			expect(operation.status).toBe(200);
+			expect(await operation.json()).toEqual({ data: { status: 200, outcome: "solved" } });
+
+			queueHardSbsdSolve(
+				{
+					status: 200,
+					body: "auth protected",
+					headers: {},
+					url: "https://example.com/auth-protected",
+				},
+				"https://example.com/auth-protected",
+			);
+			const auth = await app.request("/auth/start", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-auth",
+					flowId: "flow-sbsd",
+					providerId: "stealth-sbsd-wiring-provider",
+					connectionId: "connection-sbsd",
+					context: {},
+				}),
+			});
+			expect(auth.status).toBe(200);
+			expect(await auth.json()).toMatchObject({
+				data: { data: { status: 200, outcome: "solved" } },
+			});
+			expect(
+				allWreqCalls().filter((call) =>
+					/https:\/\/example\.com\/(?:operation|auth)-protected/u.test(call.url),
+				),
+			).toHaveLength(4);
+		} finally {
+			for (const [name, value] of previous) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	});
+});
 
 async function startGatewayRequestAndAbort(
 	request: (signal: AbortSignal) => Response | Promise<Response>,
