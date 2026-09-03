@@ -16,6 +16,7 @@ import {
 	ValidationError,
 } from "../errors.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
+import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import {
 	createServerApp,
@@ -875,7 +876,7 @@ describe("provider HTTP server", () => {
 			const telemetryHeader = response.headers.get(PROVIDER_TELEMETRY_HEADER);
 			expect(telemetryHeader).toBeTruthy();
 			const decoded = JSON.parse(Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8"));
-			expect(decoded).toEqual({ v: 1, proxy });
+			expect(decoded).toEqual({ v: 1, taxonomy: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION, proxy });
 		} finally {
 			global.fetch = originalFetch;
 			if (originalSmartproxyKey === undefined) {

@@ -292,6 +292,58 @@ const NEGATIVE_CONTROLS = [
 			"",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-telemetry-header-vendor.ts",
+		expectedCode: "TS2322",
+		description: "gateway telemetry headers reject an unbranded vendor string",
+		source: [
+			'import type { TelemetryContributor } from "@apifuse/provider-sdk";',
+			"",
+			"const bad: TelemetryContributor<{}, { vendor: string }> = {",
+			'\tkey: "resolver",',
+			"\ttoLogPayload: () => ({}),",
+			'\ttoHeaderPayload: () => ({ vendor: "free-text" }),',
+			"};",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-telemetry-header-host.ts",
+		expectedCode: "TS2322",
+		description: "gateway telemetry headers reject an unbranded host string",
+		source: [
+			'import type { TelemetryContributor } from "@apifuse/provider-sdk";',
+			"",
+			"const bad: TelemetryContributor<{}, { host: string }> = {",
+			'\tkey: "http",',
+			"\ttoLogPayload: () => ({}),",
+			'\ttoHeaderPayload: () => ({ host: "x.example" }),',
+			"};",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-telemetry-tenant-vendor.ts",
+		expectedCode: "TS2322",
+		description: "tenant-neutral projections reject vendor identities",
+		source: [
+			'import type { TenantNeutral } from "@apifuse/provider-sdk";',
+			"",
+			'export const bad: TenantNeutral<{ vendorUsed: "smartproxy" }> = { vendorUsed: "smartproxy" };',
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-proxy-telemetry-contributor.ts",
+		expectedCode: "",
+		description: "proxy telemetry contributor satisfies the public contributor contract",
+		source: [
+			'import type { ProxyTelemetryLogPayload, TelemetryContributor } from "@apifuse/provider-sdk";',
+			"",
+			"export const proxy: TelemetryContributor<ProxyTelemetryLogPayload, any> = { key: \"proxy\", toLogPayload: () => undefined, toHeaderPayload: () => undefined };",
+			"",
+		].join("\n"),
+	},
 ] as const;
 
 const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-types-"));
@@ -513,6 +565,12 @@ function assertNegativeControlFails(consumerDir: string): void {
 			],
 			{ cwd: consumerDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
 		);
+		if (negativeControl.expectedCode === "") {
+			if (result.status !== 0) {
+				throw new Error(`Positive control "${negativeControl.description}" failed to compile:\n${result.stdout}\n${result.stderr}`);
+			}
+			continue;
+		}
 		if (result.status === 0) {
 			throw new Error(
 				'Negative control "' +

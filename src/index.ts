@@ -181,10 +181,22 @@ export {
 export type { PrevalidateResult } from "./runtime/prevalidate.js";
 export { getProviderBaseUrl } from "./runtime/provider.js";
 export type {
+	ProxyHash,
 	ProxyTelemetryLogPayload,
 	ProxyTelemetryResolvedPayload,
 	ProxyTelemetryUnresolvedPayload,
 } from "./runtime/proxy-telemetry.js";
+export {
+	RequestTelemetry,
+	closedEnum,
+	type ClosedEnum,
+	type GatewayIngestible,
+	type RequestTelemetryLogPayload,
+	type SpanIndex,
+	type TelemetryContributor,
+	type TelemetryKey,
+	type TenantNeutral,
+} from "./runtime/request-telemetry.js";
 export {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,

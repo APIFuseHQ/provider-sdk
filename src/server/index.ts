@@ -6,10 +6,23 @@ export type {
 	SmartproxyAllocatorBodyClass,
 } from "../config/loader.js";
 export type {
+	ProxyHash,
 	ProxyTelemetryLogPayload,
 	ProxyTelemetryResolvedPayload,
 	ProxyTelemetryUnresolvedPayload,
 } from "../runtime/proxy-telemetry.js";
+export {
+	RequestTelemetry,
+	closedEnum,
+	type ClosedEnum,
+	type GatewayIngestible,
+	type RequestTelemetryLogPayload,
+	type SpanIndex,
+	type TelemetryContributor,
+	type TelemetryKey,
+	type TenantNeutral,
+} from "../runtime/request-telemetry.js";
+export type { Span, TraceContext } from "../runtime/trace.js";
 export {
 	createServerApp,
 	createServerAppAsync,

@@ -72,6 +72,7 @@ import {
 	ProxyTelemetryCollector,
 	type ProxyTelemetryLogPayload,
 } from "../runtime/proxy-telemetry.js";
+import { RequestTelemetry, type TenantNeutral } from "../runtime/request-telemetry.js";
 import type * as ResolverRuntimeModule from "../runtime/resolver.js";
 import {
 	createUnsupportedResolverClient,
@@ -682,7 +683,7 @@ function providerSecretNames(provider: ProviderDefinition): string[] {
 
 type RequestScopeContext = {
 	trace: RuntimeTraceContext;
-	proxyTelemetry: ProxyTelemetryCollector;
+	telemetry: RequestTelemetry;
 };
 
 function createProviderContext(
@@ -702,7 +703,7 @@ function createProviderContext(
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveProviderProxyAffinityKey(provider, request, operationId),
-		telemetry: scope.proxyTelemetry,
+		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
@@ -714,7 +715,7 @@ function createProviderContext(
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
-		telemetry: scope.proxyTelemetry,
+		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
 		...(provider.stealth ? { stealth: provider.stealth } : {}),
@@ -917,7 +918,7 @@ function createAuthFlowContext(
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveAuthFlowProxyAffinityKey(provider, request),
-		telemetry: scope.proxyTelemetry,
+		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
@@ -928,7 +929,7 @@ function createAuthFlowContext(
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
-		telemetry: scope.proxyTelemetry,
+		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
 		...(provider.stealth ? { stealth: provider.stealth } : {}),
@@ -1614,7 +1615,7 @@ function logProviderError(
 	status: number,
 	cost: ProviderRequestCost,
 	declaredErrorCode: OperationErrorCode | undefined,
-	proxyTelemetry: ProxyTelemetryCollector | undefined,
+	telemetry: RequestTelemetry | undefined,
 	observabilityDetails: ErrorObservabilityDetails,
 	correlation: RequestCorrelationIds = {},
 ): void {
@@ -1637,7 +1638,7 @@ function logProviderError(
 		typeof providerCode === "string" &&
 		!SDK_OWNED_PROVIDER_ERROR_CODES.has(providerCode) &&
 		declaredErrorCode === undefined;
-	const proxy = proxyTelemetry?.toLogPayload();
+	const telemetryPayload = telemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	// The logger is caller-supplied and may mutate the event synchronously.
 	// Give it an independent snapshot so those mutations cannot corrupt the
@@ -1662,7 +1663,7 @@ function logProviderError(
 			: {}),
 		status,
 		...cost,
-		...(proxy ? { proxy } : {}),
+		...(telemetryPayload ?? {}),
 		code,
 		errorClass,
 		message,
@@ -1716,10 +1717,10 @@ function logProviderSuccess(
 	requestId: string | undefined,
 	status: number,
 	cost: ProviderRequestCost,
-	proxyTelemetry?: ProxyTelemetryCollector,
+	telemetry?: RequestTelemetry,
 	correlation: RequestCorrelationIds = {},
 ): void {
-	const proxy = proxyTelemetry?.toLogPayload();
+	const telemetryPayload = telemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	emit({
 		level: "info",
@@ -1738,7 +1739,7 @@ function logProviderSuccess(
 			: {}),
 		status,
 		...cost,
-		...(proxy ? { proxy } : {}),
+		...(telemetryPayload ?? {}),
 	});
 }
 
@@ -1834,7 +1835,6 @@ function createRequestScope(input: {
 }): RequestScope {
 	const requestCost = startRequestCost();
 	const traceConfig = resolveTraceConfigFromEnv();
-	const proxyTelemetry = new ProxyTelemetryCollector();
 	const details = {
 		route: input.route,
 		requestId: input.requestId,
@@ -1857,6 +1857,8 @@ function createRequestScope(input: {
 				...(initialTraceId ? { traceId: initialTraceId } : {}),
 			})
 		: createTraceContext();
+	const proxyCollector = new ProxyTelemetryCollector();
+	const telemetry = new RequestTelemetry(trace, [proxyCollector]);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
 	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
 	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
@@ -1904,7 +1906,7 @@ function createRequestScope(input: {
 		await Promise.all(streamCleanups.map(runCleanupEntry));
 	};
 	const headerSnapshot = (error?: unknown): RequestScopeFinishResult => {
-		const providerTelemetryHeader = proxyTelemetry.toHeaderValue();
+		const providerTelemetryHeader = telemetry.toHeaderValue();
 		const declaredErrorCode = error === undefined ? undefined : input.declaredErrorCode?.(error);
 		const errorObservability =
 			error === undefined ? undefined : errorObservabilityDetails(error, declaredErrorCode);
@@ -1933,7 +1935,7 @@ function createRequestScope(input: {
 
 	const scope: RequestScope = {
 		trace,
-		proxyTelemetry,
+		telemetry,
 		enrich(enrichment): void {
 			if (terminalOutcome) return;
 			if (enrichment.route !== undefined) details.route = enrichment.route;
@@ -2004,7 +2006,7 @@ function createRequestScope(input: {
 							details.requestId,
 							status,
 							cost,
-							proxyTelemetry,
+							telemetry,
 							details.correlation,
 						);
 					} else {
@@ -2018,7 +2020,7 @@ function createRequestScope(input: {
 							status,
 							cost,
 							declaredErrorCode,
-							proxyTelemetry,
+							telemetry,
 							finishedResult.errorObservability as ErrorObservabilityDetails,
 							details.correlation,
 						);
@@ -2121,6 +2123,15 @@ function toJsonSuccessResponse(
 					...(retryMeta ? { retry: retryMeta } : {}),
 				}
 			: undefined;
+	// Tenant-visible scalar flags are explicitly constrained to neutral values.
+	// TODO(owner): cache.keys contains request-derived key material; retain it
+	// unchanged until the owner decides whether it is acceptable on this surface.
+	const _neutralFlags: TenantNeutral<{ cached?: boolean; stale?: boolean }> | undefined = meta
+		? { cached: meta.cached, stale: meta.stale }
+		: undefined;
+	void _neutralFlags;
+	// TODO(owner): retry.lastErrorCode is an open transport/provider code string;
+	// retain the existing field and leave this sub-object unguarded pending policy.
 	return {
 		data: result,
 		...(meta ? { meta } : {}),

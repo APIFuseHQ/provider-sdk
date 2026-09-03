@@ -894,6 +894,17 @@ export type ChallengeSolution = {
 export function checkResultCode(raw: unknown, successCodes?: string[]): boolean;
 
 // @public (undocumented)
+const CLOSED_ENUM: unique symbol;
+
+// @public
+export type ClosedEnum<T extends string> = T & {
+    readonly [CLOSED_ENUM]: true;
+};
+
+// @public
+export function closedEnum<T extends string>(value: T): ClosedEnum<T>;
+
+// @public (undocumented)
 export const CLOUDFLARE_ACCOUNT_ID_ENV = "APIFUSE__CLOUDFLARE__ACCOUNT_ID";
 
 // @public (undocumented)
@@ -1671,6 +1682,11 @@ export interface FreshProviderChoiceIssuedAtOptions {
     // (undocumented)
     ttlMs: number;
 }
+
+// @public
+export type GatewayIngestible<T> = T extends object ? {
+    [K in keyof T]: NonNullable<T[K]> extends number | boolean | ClosedEnum<string> ? T[K] : NonNullable<T[K]> extends readonly (infer U)[] ? U extends number | boolean | ClosedEnum<string> | GatewayIngestible<U> ? T[K] : never : NonNullable<T[K]> extends object ? GatewayIngestible<NonNullable<T[K]>> : never;
+} : never;
 
 // @public (undocumented)
 export function generateInsights(spans: Span[]): Insight[];
@@ -5028,6 +5044,9 @@ export interface ProxiedOAuthConfig {
 }
 
 // @public (undocumented)
+const PROXY_HASH: unique symbol;
+
+// @public (undocumented)
 type ProxyAttemptTelemetryEvent = {
     provider: ProxyVendorName;
     attempt: number;
@@ -5041,6 +5060,11 @@ type ProxyAttemptTelemetryEvent = {
 
 // @public (undocumented)
 export type ProxyCacheStatus = "memory_hit" | "redis_hit" | "allocator" | "soft_stale_refresh" | "lock_wait" | "redis_error" | "redis_corrupt" | "disabled";
+
+// @public
+export type ProxyHash = string & {
+    readonly [PROXY_HASH]: true;
+};
 
 // @public
 export type ProxyProtocol = "http" | "socks5";
@@ -5319,6 +5343,26 @@ type RequestParams = Record<string, RequestParamValue>;
 //
 // @public (undocumented)
 type RequestParamValue = RequestParamPrimitive | readonly RequestParamPrimitive[];
+
+// @public
+export class RequestTelemetry {
+    constructor(trace: TraceContext, contributors: readonly TelemetryContributor<any, any>[]);
+    // (undocumented)
+    readonly contributors: Readonly<Partial<Record<TelemetryKey, TelemetryContributor<any, any>>>>;
+    // (undocumented)
+    readonly proxy: ProxyTelemetrySink | undefined;
+    // (undocumented)
+    toHeaderValue(): string | undefined;
+    // (undocumented)
+    toLogPayload(): RequestTelemetryLogPayload | undefined;
+    // (undocumented)
+    readonly trace: TraceContext;
+}
+
+// @public (undocumented)
+export type RequestTelemetryLogPayload = {
+    proxy?: ProxyTelemetryLogPayload;
+} & Partial<Record<Exclude<TelemetryKey, "proxy">, object>>;
 
 // @public (undocumented)
 type RequestWithMethodOptions = RequestOptions & {
@@ -6355,6 +6399,18 @@ export function sourceForCategory(category: ProviderErrorCategory): ProviderErro
 export type Span = TraceSpan;
 
 // @public (undocumented)
+export interface SpanIndex {
+    // (undocumented)
+    readonly byName: ReadonlyMap<string, readonly Span[]>;
+    // (undocumented)
+    count(name: string): number;
+    // (undocumented)
+    durationMs(name: string): number;
+    // (undocumented)
+    readonly spans: readonly Span[];
+}
+
+// @public (undocumented)
 export interface SseErrorData {
     // (undocumented)
     code: string;
@@ -6830,6 +6886,26 @@ export interface SttWarning {
     message: string;
 }
 
+// @public (undocumented)
+export interface TelemetryContributor<Log extends object, Header extends object> {
+    // (undocumented)
+    readonly key: TelemetryKey;
+    // (undocumented)
+    toHeaderPayload(log: Log): Header extends GatewayIngestible<Header> ? Header | undefined : never;
+    // (undocumented)
+    toLogPayload(spans: SpanIndex): Log | undefined;
+}
+
+// @public (undocumented)
+export type TelemetryKey = "proxy" | "resolver" | "http" | "stealth" | "native" | "browser" | "ocr" | "stt" | "cache" | "state" | "events";
+
+// @public
+export type TenantNeutral<T> = {
+    [K in keyof T]: NonNullable<T[K]> extends number | boolean | ClosedEnum<string> ? T[K] : never;
+} & {
+    [K in keyof T as K extends `vendor${string}` | "provider" | "engine" | "model" | `${string}Host` ? K : never]?: never;
+};
+
 // @public
 export function toBoolean(v: unknown): boolean;
 
@@ -7057,8 +7133,8 @@ export { z }
 // dist/lint.d.ts:80:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
 // dist/runtime/choice.d.ts:22:5 - (ae-forgotten-export) The symbol "ProviderChoiceTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:27:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/runtime/proxy-telemetry.d.ts:38:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:33:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/proxy-telemetry.d.ts:44:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:61:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:65:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:147:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
