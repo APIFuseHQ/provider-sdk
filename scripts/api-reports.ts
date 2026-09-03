@@ -64,7 +64,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"contract.api.md": forgottenExports(
-		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		"These indirect declarations are intentionally not direct contract entry-point exports; their full definitions are included in this report for semver review.",
 		`
 			AuthAbortRetry AuthConfig AuthContext AuthFlowDefinition AuthFlowInputHandler AuthFlowStartHandler AuthFlowTerminalContext AuthMode
 			AuthSafeData AuthSafeJson AuthTurn Bcp47Locale BrowserChallengeRequest BrowserChallengeResult BrowserClient BrowserCookie
@@ -98,6 +98,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			JournalPolicy JsonTemplate ManualTriggerPolicy NonEmpty OperationStep Quantifier Reference ReferenceNode RelativeDateNode RetryPolicy ScopedAssertionExpression
 			ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema
 			relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
+			ProviderStealthConfig StealthChallengeClassification
 		`,
 	),
 	"index.api.md": forgottenExports(
@@ -176,7 +177,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"runtime-stealth.api.md": forgottenExports(
-		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		"Shared response types and the SDK-owned resolver callback seam are intentionally indirect in the runtime-stealth entry point; their full definitions remain included for semver review.",
 		`
 			CookieJar DeclarativeStealthResponse HttpMethod HttpRedirectPolicy HttpRedirectPolicyMode HttpRetryAfterPolicy HttpRetryDelayStrategy HttpRetryJitter
 			HttpRetryOptions HttpRetryPreset HttpRetryUnsafeMethodPolicy Iso3166Alpha2CountryCode ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity
@@ -184,10 +185,11 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProxyVendorName RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams SmartproxyAllocatorBodyClass StealthClient
 			StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthProfileDescriptor StealthProfileSelection StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession
 			StealthSessionCookies StealthTransportBody StealthTransportHeaders StealthTransportResponse
+			ChallengeSolution ProviderChallenge ResolverVendorTransport StealthChallengeClassification
 		`,
 	),
 	"server.api.md": forgottenExports(
-		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		"These indirect declarations are intentionally not direct server entry-point exports; their full definitions are included in this report for semver review.",
 		`
 			AuthAbortRetry AuthConfig AuthContext AuthFlowDefinition AuthFlowErrorResponse AuthFlowErrorResponseSchema AuthFlowInputHandler AuthFlowStartHandler
 			AuthFlowTerminalContext AuthMode AuthSafeData AuthSafeJson AuthTurn Bcp47Locale BrowserChallengeRequest BrowserChallengeResult
@@ -224,6 +226,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			JournalPolicy JsonPrimitive JsonTemplate JsonValue ManualTriggerPolicy NonEmpty OperationStep Quantifier Reference ReferenceNode RelativeDateNode RetryPolicy
 			ScopedAssertionExpression ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
 			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
+			ProviderStealthConfig StealthChallengeClassification
 		`,
 	),
 	"stateful.api.md": forgottenExports(
@@ -233,7 +236,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"testing.api.md": forgottenExports(
-		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		"These indirect declarations are intentionally not direct testing entry-point exports; their full definitions are included in this report for semver review.",
 		`
 			AuthAbortRetry AuthConfig AuthContext AuthFlowDefinition AuthFlowInputHandler AuthFlowStartHandler AuthFlowTerminalContext AuthMode
 			AuthSafeData AuthSafeJson AuthTurn Bcp47Locale BrowserChallengeRequest BrowserChallengeResult BrowserClient BrowserCookie
@@ -268,6 +271,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			JournalPolicy JsonPrimitive JsonTemplate JsonValue ManualTriggerPolicy NonEmpty OperationStep Quantifier Reference ReferenceNode RelativeDateNode RetryPolicy
 			ScopedAssertionExpression ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
 			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
+			ProviderStealthConfig StealthChallengeClassification
 		`,
 	),
 };

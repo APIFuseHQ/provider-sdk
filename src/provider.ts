@@ -263,6 +263,7 @@ export type {
 	ProviderResolvedFile,
 	ProviderRuntimeTarget,
 	ProviderRuntimeState,
+	ProviderStealthConfig,
 	ProviderStateDurationString,
 	ProviderStateNamespace,
 	ProviderSupportLevel,
@@ -275,6 +276,7 @@ export type {
 	StateNamespaceScope,
 	StateValue,
 	StateWriteOptions,
+	StealthChallengeClassification,
 } from "./types.js";
 export {
 	NativeEgressGrantExpiredError,
