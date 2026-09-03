@@ -153,7 +153,11 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 
 type AkamaiSbsdChallenge = Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>;
 type AkamaiSbsdSessionState = {
-	/** Latest v-only script for this session; Phase 2 deliberately has no wall-clock TTL. */
+	/**
+	 * Latest v-only script for this session; Phase 2 deliberately has no wall-clock TTL.
+	 * Challenge-state expiry belongs to the Phase 3 ceremony/solve lease handle
+	 * (ADR-0009 v1.1), not to the stealth session.
+	 */
 	rememberedScript?: URL;
 	transaction?: {
 		readonly key: string;
