@@ -8,6 +8,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
+import { VALID_PROVIDER_RESOLVER_VENDORS } from "../define.js";
 import {
 	createInProcessProviderEngine,
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
@@ -74,7 +75,6 @@ import {
 	type ProxyTelemetryLogPayload,
 } from "../runtime/proxy-telemetry.js";
 import type * as ResolverRuntimeModule from "../runtime/resolver.js";
-import { RESOLVER_VENDOR_CAPABILITIES } from "../runtime/resolver-vendors/types.js";
 import {
 	createUnsupportedResolverClient,
 	type ResolverSolveWithRecorder,
@@ -593,8 +593,12 @@ function rejectAutoSolveResolverSelection(): never {
 	);
 }
 
+const KNOWN_AUTO_SOLVE_RESOLVER_VENDORS: ReadonlySet<string> = new Set(
+	VALID_PROVIDER_RESOLVER_VENDORS,
+);
+
 function isKnownResolverVendor(value: string): value is ProviderResolverVendor {
-	return Object.hasOwn(RESOLVER_VENDOR_CAPABILITIES, value);
+	return KNOWN_AUTO_SOLVE_RESOLVER_VENDORS.has(value);
 }
 
 function validateAndSnapshotAutoSolveResolverSelection(
