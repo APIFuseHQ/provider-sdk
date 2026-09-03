@@ -1,0 +1,17 @@
+const listHospitalsOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [
+		{
+			scenario: "List nearby hospitals",
+			input: { latitude: 37.5665, longitude: 126.978 },
+			rationale: "Exercises a kebab-case operation id.",
+		},
+	],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
+
+export default buildProvider({
+	operations: { "list-hospitals": listHospitalsOperation },
+});

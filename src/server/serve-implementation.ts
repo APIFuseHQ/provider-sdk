@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -7,15 +8,16 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
-import { safeProviderErrorObservability } from "../error-observability.js";
+import { VALID_PROVIDER_RESOLVER_VENDORS } from "../define.js";
 import {
 	createInProcessProviderEngine,
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
 	isEngineOwnedEnvName,
-	readEngineProxyCredentials,
 	type ProviderEngine,
 	type ProviderEngineBindingCandidates,
+	readEngineProxyCredentials,
 } from "../engine.js";
+import { safeProviderErrorObservability } from "../error-observability.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
@@ -30,6 +32,7 @@ import {
 	ProviderError,
 	type ProviderErrorObservability,
 	type ProviderErrorOptions,
+	SDKError,
 } from "../errors.js";
 import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import {
@@ -40,11 +43,11 @@ import {
 import type { ProviderLocale } from "../i18n/keys.js";
 import {
 	categoryForStatus,
-	type ProviderErrorSource,
-	sourceForCategory,
 	isRetryableCategory,
 	PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	type ProviderErrorCategory,
+	type ProviderErrorSource,
+	sourceForCategory,
 } from "../observability.js";
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type * as BrowserRuntimeModule from "../runtime/browser.js";
@@ -59,8 +62,8 @@ import { executeOperation } from "../runtime/executor.js";
 import { createHttpClient } from "../runtime/http.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import type * as NativeNetworkRuntimeModule from "../runtime/native-network.js";
-import { getProviderBaseUrl } from "../runtime/provider.js";
 import { createOcrClientFromEnv } from "../runtime/ocr.js";
+import { getProviderBaseUrl } from "../runtime/provider.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
 	PROXY_EDGE_AUTH_REJECTED_CODE,
@@ -85,20 +88,26 @@ import {
 	createProviderRuntimeStateFromEnv,
 	createUnsupportedProviderRuntimeState,
 } from "../runtime/state.js";
-import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
+import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
-import { createTraceContext, type TraceRecorder } from "../runtime/trace.js";
+import {
+	createTraceContext,
+	type TraceContext as RuntimeTraceContext,
+	type TraceRecorder,
+	updateTraceContextExportMetadata,
+} from "../runtime/trace.js";
 import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
+import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import {
 	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
 	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
 	STATEFUL_TIMESTAMP_HEADER as STATEFUL_FORWARDING_TIMESTAMP_HEADER,
 	verifyStatefulRequestSignature,
 } from "../stateful-signing.js";
-import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import { getStealthProfile } from "../stealth/profiles.js";
+import { sanitizeTraceAttributes } from "../trace-sanitization.js";
 import {
 	APIFUSE_STREAM_DONE_EVENT,
 	APIFUSE_STREAM_ERROR_EVENT,
@@ -106,23 +115,25 @@ import {
 	error as streamError,
 } from "../stream.js";
 import type {
+	AutoSolveResolverFactory,
 	AuthContext,
 	AuthTurn,
 	BrowserClient,
 	FlowContext,
 	FlowContextStore,
 	HttpRetrySummary,
+	OcrContext,
 	OperationDefinition,
 	OperationErrorCode,
 	OperationHttpStreamTransport,
 	OperationSseTransport,
-	OcrContext,
-	ProviderErrorStatus,
 	ProviderContext,
 	ProviderDefinition,
+	ProviderErrorStatus,
 	ProviderFilesContext,
 	ProviderProxyPolicy,
 	ProviderRuntimeState,
+	ProviderResolverVendor,
 	ProviderStreamEvent,
 	ResolverContext,
 	StealthClient,
@@ -256,11 +267,19 @@ export type ProviderServerOperationExecutorInput<
 
 export type ProviderServerOperationExecutor<
 	TContext extends Partial<ProviderContext> = ProviderContext,
-> = (
-	input: ProviderServerOperationExecutorInput<TContext>,
-) => Promise<unknown>;
+> = (input: ProviderServerOperationExecutorInput<TContext>) => Promise<unknown>;
 
-type RequestCleanup = () => void | Promise<void>;
+type RequestTerminalOutcome =
+	| { kind: "completed"; status: number }
+	| { kind: "failed"; status?: number; error: unknown }
+	| { kind: "cancelled"; status?: number };
+
+type RequestStreamLifecycle = {
+	runStep<T>(fn: () => Promise<T>): Promise<T>;
+	registerCleanup(cleanup: () => void | Promise<void>): void;
+	terminalize(outcome: RequestTerminalOutcome): void;
+	cleanup(): Promise<void>;
+};
 
 type ProviderCapabilityModules = {
 	readonly browser?: typeof BrowserRuntimeModule;
@@ -531,6 +550,187 @@ function getProviderStealthProfile(provider: ProviderDefinition) {
 	return provider.stealth ? getStealthProfile(provider.stealth) : undefined;
 }
 
+function normalizeResolverClientProfile(value: string): string {
+	return value
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]/gu, "");
+}
+
+function assertResolverClientProfileMatches(
+	declaredClientProfile: string | undefined,
+	initiatingClientProfile: string,
+): void {
+	if (
+		declaredClientProfile &&
+		normalizeResolverClientProfile(declaredClientProfile) ===
+			normalizeResolverClientProfile(initiatingClientProfile)
+	) {
+		return;
+	}
+	throw new SDKError(
+		"The resolver client profile does not match the initiating stealth session profile",
+		{
+			code: "RESOLVER_CLIENT_PROFILE_MISMATCH",
+			fix: "Make resolver.clientProfile match the provider stealth browser/OS profile.",
+		},
+	);
+}
+
+function resolverContextOverride(
+	resolver: ResolverContext | AutoSolveResolverFactory | undefined,
+): ResolverContext | undefined {
+	return typeof resolver === "function" ? undefined : resolver;
+}
+
+function rejectAutoSolveResolverSelection(): never {
+	throw new SDKError(
+		"An automatic SBSD resolver override must return a transport-free resolver selection",
+		{
+			code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
+			fix: "Return only an optional array of known resolver vendor names; the SDK constructs the resolver and transport.",
+		},
+	);
+}
+
+const KNOWN_AUTO_SOLVE_RESOLVER_VENDORS: ReadonlySet<string> = new Set(
+	VALID_PROVIDER_RESOLVER_VENDORS,
+);
+
+function isKnownResolverVendor(value: string): value is ProviderResolverVendor {
+	return KNOWN_AUTO_SOLVE_RESOLVER_VENDORS.has(value);
+}
+
+function validateAndSnapshotAutoSolveResolverSelection(
+	selection: unknown,
+): readonly ProviderResolverVendor[] | undefined {
+	if (
+		!selection ||
+		typeof selection !== "object" ||
+		Array.isArray(selection) ||
+		"solve" in selection ||
+		"transport" in selection ||
+		"createTransport" in selection ||
+		Reflect.ownKeys(selection).some((key) => key !== "vendors")
+	) {
+		return rejectAutoSolveResolverSelection();
+	}
+	if (!("vendors" in selection) || selection.vendors === undefined) return undefined;
+	const suppliedVendors = selection.vendors;
+	if (!Array.isArray(suppliedVendors)) return rejectAutoSolveResolverSelection();
+	const vendors: ProviderResolverVendor[] = [];
+	const seen = new Set<ProviderResolverVendor>();
+	for (let index = 0; index < suppliedVendors.length; index += 1) {
+		if (!Object.hasOwn(suppliedVendors, index)) return rejectAutoSolveResolverSelection();
+		const vendor: unknown = suppliedVendors[index];
+		if (typeof vendor !== "string" || !isKnownResolverVendor(vendor) || seen.has(vendor)) {
+			return rejectAutoSolveResolverSelection();
+		}
+		seen.add(vendor);
+		vendors.push(vendor);
+	}
+	return vendors;
+}
+
+function createStealthChallengeDetection(
+	provider: ProviderDefinition,
+	resolverRuntime: typeof ResolverRuntimeModule | undefined,
+	resolverOverride: ResolverContext | AutoSolveResolverFactory | undefined,
+	cache: ReturnType<typeof createProviderCache>,
+	identityScope: string,
+	signal: AbortSignal | undefined,
+): NonNullable<StealthRuntimeModule.StealthClientOptions["stealth"]>["challengeRuntime"] {
+	const resolverDeclared = provider.resolver?.kinds.some((kind) => kind === "akamai_sbsd") === true;
+	const detectOnly = provider.stealth?.challengeDetection?.akamaiSbsd === true;
+	if (!resolverDeclared && !detectOnly) {
+		return undefined;
+	}
+	return {
+		akamaiSbsd: {
+			allowedHosts: provider.allowedHosts ?? [],
+			...(provider.resolver?.clientProfile
+				? { clientProfile: provider.resolver.clientProfile }
+				: {}),
+			...(resolverDeclared && resolverRuntime
+				? {
+						async solve(
+							challenge,
+							transport,
+							initiatingClientProfile,
+							solveSignal,
+							initiatingClientProfileSelection,
+						) {
+							if (resolverOverride) {
+								if (typeof resolverOverride !== "function") {
+									throw new SDKError(
+										"An automatic SBSD resolver override must be a bound resolver factory",
+										{
+											code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
+											fix: "Supply an AutoSolveResolverFactory that returns only a resolver vendor selection.",
+										},
+									);
+								}
+								assertResolverClientProfileMatches(
+									provider.resolver?.clientProfile,
+									initiatingClientProfile,
+								);
+								const selection = resolverOverride({
+									clientProfile: initiatingClientProfileSelection,
+								});
+								const selectedVendors =
+									validateAndSnapshotAutoSolveResolverSelection(selection);
+								const selectedResolver = resolverRuntime.createResolverClientFromEnv(
+									{
+										kinds: provider.resolver?.kinds ?? [],
+										clientProfile: provider.resolver?.clientProfile ?? "",
+										...(selectedVendors === undefined
+											? {}
+											: { vendors: selectedVendors }),
+									},
+									undefined,
+									{
+										allowedHosts: provider.allowedHosts,
+										cache,
+										identityScope,
+										createTransport: ({ clientProfile }) => {
+											assertResolverClientProfileMatches(
+												clientProfile,
+												initiatingClientProfile,
+											);
+											return transport;
+										},
+									},
+								);
+								return resolverRuntime
+									.bindResolverSignal(selectedResolver, signal)
+									.solve(challenge, solveSignal);
+							}
+							const resolver = resolverRuntime.createResolverClientFromEnv(
+								provider.resolver,
+								undefined,
+								{
+									allowedHosts: provider.allowedHosts,
+									cache,
+									identityScope,
+									// The transport already owns the initiating request's exact proxy,
+									// profile headers, and cookie jar. Re-resolving proxy intent here
+									// would break identity equality rather than establish it.
+									createTransport: ({ clientProfile }) => {
+										assertResolverClientProfileMatches(clientProfile, initiatingClientProfile);
+										return transport;
+									},
+								},
+							);
+							return resolverRuntime
+								.bindResolverSignal(resolver, signal)
+								.solve(challenge, solveSignal);
+						},
+					}
+				: {}),
+		},
+	};
+}
+
 function isProductionProviderBrowserMode(provider: ProviderDefinition, env = process.env): boolean {
 	if (provider.runtime !== "browser") {
 		return false;
@@ -663,16 +863,20 @@ function providerSecretNames(provider: ProviderDefinition): string[] {
 	);
 }
 
+type RequestScopeContext = {
+	trace: RuntimeTraceContext;
+	proxyTelemetry: ProxyTelemetryCollector;
+};
+
 function createProviderContext(
 	provider: ProviderDefinition,
 	request: OperationRequest,
 	operationId: string,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
-	proxyTelemetry?: ProxyTelemetryCollector,
+	scope: RequestScopeContext,
 	signal?: AbortSignal,
 ): ProviderContext {
-	const traceConfig = resolveTraceConfigFromEnv();
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
@@ -681,7 +885,7 @@ function createProviderContext(
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveProviderProxyAffinityKey(provider, request, operationId),
-		telemetry: proxyTelemetry,
+		telemetry: scope.proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
@@ -689,16 +893,32 @@ function createProviderContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
+	const cache = createProviderCache({ providerId: provider.id });
 	let wrappedContext: ProviderContext | undefined;
+	const { capabilityModules } = options;
+	const challengeRuntime = createStealthChallengeDetection(
+		provider,
+		capabilityModules.resolver,
+		options.resolver,
+		cache,
+		resolverIdentityScope,
+		signal,
+	);
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
-		telemetry: proxyTelemetry,
+		telemetry: scope.proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
-		...(provider.stealth ? { stealth: provider.stealth } : {}),
+		...(provider.stealth
+			? {
+					stealth: {
+						...provider.stealth,
+						...(challengeRuntime ? { challengeRuntime } : {}),
+					},
+				}
+			: {}),
 	};
-	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>
 		logProviderCleanupError(
 			options.logger,
@@ -725,7 +945,6 @@ function createProviderContext(
 		headers: request.headers ?? {},
 	};
 	const requestState = state.forConnection(requestContext.connectionId);
-	const cache = createProviderCache({ providerId: provider.id });
 	const bindings: ProviderEngineBindingCandidates = {
 		env,
 		credential,
@@ -771,21 +990,13 @@ function createProviderContext(
 					},
 				}
 			: {}),
-		trace: traceConfig
-			? createTraceContext(
-					resolveServerTraceContextOptions(traceConfig, {
-						request_id: request.requestId,
-						provider_id: provider.id,
-						operation_id: operationId,
-					}),
-				)
-			: createTraceContext(),
+		trace: scope.trace,
 		auth: createAuthStub(),
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
-					options.resolver ??
+					resolverContextOverride(options.resolver) ??
 						capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
 							allowedHosts: provider.allowedHosts,
 							cache,
@@ -803,7 +1014,7 @@ function createProviderContext(
 					signal,
 				)
 			: bindResolverSignalWithoutRuntime(
-					options.resolver ??
+					resolverContextOverride(options.resolver) ??
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
 				),
@@ -885,7 +1096,7 @@ function createAuthFlowContext(
 	request: AuthFlowRequest,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState,
-	proxyTelemetry?: ProxyTelemetryCollector,
+	scope: RequestScopeContext,
 	signal?: AbortSignal,
 ): {
 	context: FlowContext;
@@ -904,7 +1115,7 @@ function createAuthFlowContext(
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveAuthFlowProxyAffinityKey(provider, request),
-		telemetry: proxyTelemetry,
+		telemetry: scope.proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
@@ -912,15 +1123,31 @@ function createAuthFlowContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
+	const cache = createProviderCache({ providerId: provider.id });
+	const { capabilityModules } = options;
+	const challengeRuntime = createStealthChallengeDetection(
+		provider,
+		capabilityModules.resolver,
+		options.resolver,
+		cache,
+		resolverIdentityScope,
+		signal,
+	);
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
-		telemetry: proxyTelemetry,
+		telemetry: scope.proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
-		...(provider.stealth ? { stealth: provider.stealth } : {}),
+		...(provider.stealth
+			? {
+					stealth: {
+						...provider.stealth,
+						...(challengeRuntime ? { challengeRuntime } : {}),
+					},
+				}
+			: {}),
 	};
-	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>
 		logProviderCleanupError(
 			options.logger,
@@ -939,73 +1166,74 @@ function createAuthFlowContext(
 				values: request.connection.secrets,
 			})
 		: undefined;
-	const cache = createProviderCache({ providerId: provider.id });
+	const context: FlowContext = wrapWithInstrumentation({
+		flowId: request.flowId,
+		connectionId: resolveOperationConnectionId(request),
+		externalRef: request.externalRef,
+		tenantId: request.tenantId ?? "",
+		providerId: request.providerId ?? provider.id,
+		trace: scope.trace,
+		http: createHttpClient(baseUrl, {
+			...proxyClientOptions,
+			...(signal ? { signal } : {}),
+		}),
+		state: state.forConnection(resolveOperationConnectionId(request)),
+		stealth: stealthBaseUrl
+			? capabilityModules.stealth
+				? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
+				: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
+			: createStealthStub(),
+		...(provider.native
+			? {
+					native: {
+						network: capabilityModules.nativeNetwork!.createNativeNetworkClient({
+							egress: provider.native.network,
+							proxyPolicy: resolveNativeProxyPolicy(provider),
+							affinityKey: proxyClientOptions.affinityKey,
+							credentials: capabilityModules.nativeNetwork!.createEnvVendorCredentialResolver(
+								createEnvContext([...ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES]),
+							),
+						}),
+					},
+				}
+			: {}),
+		env: createEnvContext([
+			...providerSecretNames(provider),
+			...(provider.auth?.mode === "oauth2_proxied" ? ["APIFUSE__AUTH_PROXY__URL"] : []),
+		]),
+		credential,
+		context: flowContextStore.context,
+		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
+		stt: options.stt ?? createSttClientFromEnv(provider.stt),
+		resolver: capabilityModules.resolver
+			? capabilityModules.resolver.bindResolverSignal(
+					resolverContextOverride(options.resolver) ??
+						capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
+							allowedHosts: provider.allowedHosts,
+							cache,
+							identityScope: resolverIdentityScope,
+							...(proxyPolicy
+								? {
+										proxyIntent: {
+											mode: proxyPolicy.mode,
+											...proxyClientOptions,
+											...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+										},
+									}
+								: {}),
+						}),
+					signal,
+				)
+			: bindResolverSignalWithoutRuntime(
+					resolverContextOverride(options.resolver) ??
+						createUnsupportedResolverClient("Provider does not declare resolver capability"),
+					signal,
+				),
+		auth: createAuthFlowHelpers({ signal }),
+	});
 
 	return {
-		context: {
-			flowId: request.flowId,
-			connectionId: resolveOperationConnectionId(request),
-			externalRef: request.externalRef,
-			tenantId: request.tenantId ?? "",
-			providerId: request.providerId ?? provider.id,
-			http: createHttpClient(baseUrl, {
-				...proxyClientOptions,
-				...(signal ? { signal } : {}),
-			}),
-			state: state.forConnection(resolveOperationConnectionId(request)),
-			stealth: stealthBaseUrl
-				? capabilityModules.stealth
-					? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
-					: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
-				: createStealthStub(),
-			...(provider.native
-				? {
-						native: {
-							network: capabilityModules.nativeNetwork!.createNativeNetworkClient({
-								egress: provider.native.network,
-								proxyPolicy: resolveNativeProxyPolicy(provider),
-								affinityKey: proxyClientOptions.affinityKey,
-								credentials: capabilityModules.nativeNetwork!.createEnvVendorCredentialResolver(
-									createEnvContext([...ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES]),
-								),
-							}),
-						},
-					}
-				: {}),
-			env: createEnvContext([
-				...providerSecretNames(provider),
-				...(provider.auth?.mode === "oauth2_proxied" ? ["APIFUSE__AUTH_PROXY__URL"] : []),
-			]),
-			credential,
-			context: flowContextStore.context,
-			ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
-			stt: options.stt ?? createSttClientFromEnv(provider.stt),
-			resolver: capabilityModules.resolver
-				? capabilityModules.resolver.bindResolverSignal(
-						options.resolver ??
-							capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
-								allowedHosts: provider.allowedHosts,
-								cache,
-								identityScope: resolverIdentityScope,
-								...(proxyPolicy
-									? {
-											proxyIntent: {
-												mode: proxyPolicy.mode,
-												...proxyClientOptions,
-												...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
-											},
-										}
-									: {}),
-							}),
-						signal,
-					)
-				: bindResolverSignalWithoutRuntime(
-						options.resolver ??
-							createUnsupportedResolverClient("Provider does not declare resolver capability"),
-						signal,
-					),
-			auth: createAuthFlowHelpers({ signal }),
-		},
+		context,
 		getPatch: flowContextStore.getPatch,
 	};
 }
@@ -1017,11 +1245,22 @@ type ProviderRequestCost = {
 	cpuTotalMicros: number;
 };
 
+type RequestCorrelationIds = {
+	connectionId?: string;
+	flowId?: string;
+	tenantId?: string;
+	requestedProviderId?: string;
+};
+
 type ProviderServerLogEventBase = ProviderRequestCost & {
 	providerId: string;
 	kind: "operation" | "auth";
 	route: string;
 	requestId?: string;
+	connectionId?: string;
+	flowId?: string;
+	tenantId?: string;
+	requestedProviderId?: string;
 	status: number;
 	proxy?: ProxyTelemetryLogPayload;
 };
@@ -1109,8 +1348,12 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
 	stt?: SttContext;
 	/** Optional OCR override for tests or custom hosts; local/prod normally resolves from env. */
 	ocr?: OcrContext;
-	/** Optional resolver override for tests or custom hosts; local/prod normally resolves from env. */
-	resolver?: ResolverContext;
+	/**
+	 * Optional resolver override for tests or custom hosts; local/prod normally resolves from env.
+	 * Automatic challenge solving accepts only a vendor-selection factory; the SDK constructs
+	 * its resolver on the initiating stealth session.
+	 */
+	resolver?: ResolverContext | AutoSolveResolverFactory;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */
 	state?: ProviderRuntimeState;
 	/** Allow process-local runtime state only for local development and tests. */
@@ -1589,6 +1832,7 @@ function logProviderError(
 	declaredErrorCode: OperationErrorCode | undefined,
 	proxyTelemetry: ProxyTelemetryCollector | undefined,
 	observabilityDetails: ErrorObservabilityDetails,
+	correlation: RequestCorrelationIds = {},
 ): void {
 	const providerCode = isProviderError(error) ? providerErrorCode(error) : undefined;
 	const code = isProviderError(error)
@@ -1624,6 +1868,14 @@ function logProviderError(
 		kind,
 		route,
 		...(requestId ? { requestId } : {}),
+		...(correlation.connectionId !== undefined
+			? { connectionId: correlation.connectionId }
+			: {}),
+		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
+		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
+		...(correlation.requestedProviderId !== undefined
+			? { requestedProviderId: correlation.requestedProviderId }
+			: {}),
 		status,
 		...cost,
 		...(proxy ? { proxy } : {}),
@@ -1681,6 +1933,7 @@ function logProviderSuccess(
 	status: number,
 	cost: ProviderRequestCost,
 	proxyTelemetry?: ProxyTelemetryCollector,
+	correlation: RequestCorrelationIds = {},
 ): void {
 	const proxy = proxyTelemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
@@ -1691,10 +1944,370 @@ function logProviderSuccess(
 		kind,
 		route,
 		...(requestId ? { requestId } : {}),
+		...(correlation.connectionId !== undefined
+			? { connectionId: correlation.connectionId }
+			: {}),
+		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
+		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
+		...(correlation.requestedProviderId !== undefined
+			? { requestedProviderId: correlation.requestedProviderId }
+			: {}),
 		status,
 		...cost,
 		...(proxy ? { proxy } : {}),
 	});
+}
+
+type RequestScopeFinishResult = {
+	providerTelemetryHeader?: string;
+	errorObservability?: ErrorObservabilityDetails;
+};
+
+type RequestScope = RequestScopeContext & {
+	enrich(input: {
+		route?: string;
+		requestId?: string;
+		operationId?: string;
+		flowId?: string;
+		headers?: Record<string, string>;
+		correlation?: RequestCorrelationIds;
+	}): void;
+	run<T>(fn: () => Promise<T>): Promise<T>;
+	runStreaming<T>(fn: () => Promise<T>): Promise<T>;
+	runStreamStep<T>(fn: () => Promise<T>): Promise<T>;
+	watchAbort(signal: AbortSignal): void;
+	registerStreamCleanup(cleanup: () => void | Promise<void>): void;
+	cleanupStream(): Promise<void>;
+	snapshotHeaders(error?: unknown): RequestScopeFinishResult;
+	terminalize(outcome: RequestTerminalOutcome): RequestScopeFinishResult;
+};
+
+const STREAM_CLEANUP_TIMEOUT_MS = 100;
+const CLIENT_CANCELLED_STATUS = 400;
+
+function clientCancelledError(): ProviderError {
+	return new ProviderError("Request stream was cancelled by the client.", {
+		code: "client_cancelled",
+		category: "client_cancelled",
+		retryable: false,
+	});
+}
+
+async function runBestEffortWithTimeout(cleanup: () => void | Promise<void>): Promise<void> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	const work = Promise.resolve()
+		.then(cleanup)
+		.catch(() => undefined);
+	try {
+		await Promise.race([
+			work,
+			new Promise<void>((resolve) => {
+				timeout = setTimeout(resolve, STREAM_CLEANUP_TIMEOUT_MS);
+			}),
+		]);
+	} finally {
+		if (timeout !== undefined) clearTimeout(timeout);
+	}
+}
+
+function traceIdFromTraceparent(headers: Record<string, string>): string | undefined {
+	const traceparent = Object.entries(headers).find(
+		([name]) => name.toLowerCase() === "traceparent",
+	)?.[1];
+	if (!traceparent) return undefined;
+	const match = /^(00)-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/.exec(traceparent);
+	if (!match) return undefined;
+	const traceId = match[2];
+	const parentId = match[3];
+	if (!traceId || !parentId || /^0+$/.test(traceId) || /^0+$/.test(parentId)) return undefined;
+	return traceId;
+}
+
+function requestTraceId(
+	headers: Record<string, string>,
+	requestId: string | undefined,
+): string | undefined {
+	return (
+		traceIdFromTraceparent(headers) ??
+		(requestId
+			? createHash("sha256").update(requestId, "utf8").digest("hex").slice(0, 32)
+			: undefined)
+	);
+}
+
+function createRequestScope(input: {
+	provider: ProviderDefinition;
+	kind: "operation" | "auth";
+	route: string;
+	requestId?: string;
+	operationId?: string;
+	flowId?: string;
+	headers: Record<string, string>;
+	correlation?: RequestCorrelationIds;
+	logger?: ProviderServerLogger;
+	setHeader?: (name: string, value: string) => void;
+	declaredErrorCode?: (error: unknown) => OperationErrorCode | undefined;
+}): RequestScope {
+	const requestCost = startRequestCost();
+	const traceConfig = resolveTraceConfigFromEnv();
+	const proxyTelemetry = new ProxyTelemetryCollector();
+	const details = {
+		route: input.route,
+		requestId: input.requestId,
+		operationId: input.operationId,
+		flowId: input.flowId,
+		headers: input.headers,
+		correlation: { ...(input.correlation ?? {}) },
+	};
+	const traceAttributes: Record<string, string> = {
+		provider_id: input.provider.id,
+		...(input.operationId ? { operation_id: input.operationId } : {}),
+		...(input.flowId ? { flow_id: input.flowId } : {}),
+		...(input.requestId ? { request_id: input.requestId } : {}),
+		route: input.route,
+	};
+	const initialTraceId = requestTraceId(input.headers, input.requestId);
+	const trace: RuntimeTraceContext = traceConfig
+		? createTraceContext({
+				...resolveServerTraceContextOptions(traceConfig, traceAttributes),
+				...(initialTraceId ? { traceId: initialTraceId } : {}),
+			})
+		: createTraceContext();
+	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
+	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
+	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
+		resolveRoot = resolve;
+	});
+	let streamingSetupPending = false;
+	let rootSettled = false;
+	let headersSnapshotted = false;
+	let terminalOutcome: RequestTerminalOutcome | undefined;
+	let finishedResult: RequestScopeFinishResult | undefined;
+	let abortSignal: AbortSignal | undefined;
+	let abortListener: (() => void) | undefined;
+	type CleanupEntry = {
+		cleanup: () => void | Promise<void>;
+		promise?: Promise<void>;
+	};
+	const streamCleanups: CleanupEntry[] = [];
+
+	const terminalError = (outcome: RequestTerminalOutcome): unknown | undefined => {
+		if (outcome.kind === "failed") return outcome.error;
+		if (outcome.kind === "cancelled") return clientCancelledError();
+		return undefined;
+	};
+	const root = trace.span(`request:${input.kind}:${input.route}`, async () => {
+		rootRunner = AsyncLocalStorage.snapshot();
+		const outcome = await rootTerminal;
+		const error = terminalError(outcome);
+		if (error !== undefined) throw error;
+	});
+	void root.catch(() => undefined);
+
+	const settleRoot = (): void => {
+		if (!terminalOutcome || streamingSetupPending || rootSettled) return;
+		rootSettled = true;
+		if (abortSignal && abortListener) {
+			abortSignal.removeEventListener("abort", abortListener);
+		}
+		resolveRoot(terminalOutcome);
+	};
+	const runCleanupEntry = (entry: CleanupEntry): Promise<void> => {
+		entry.promise ??= runBestEffortWithTimeout(entry.cleanup);
+		return entry.promise;
+	};
+	const cleanupStream = async (): Promise<void> => {
+		await Promise.all(streamCleanups.map(runCleanupEntry));
+	};
+	const headerSnapshot = (error?: unknown): RequestScopeFinishResult => {
+		const providerTelemetryHeader = proxyTelemetry.toHeaderValue();
+		const declaredErrorCode = error === undefined ? undefined : input.declaredErrorCode?.(error);
+		const errorObservability =
+			error === undefined ? undefined : errorObservabilityDetails(error, declaredErrorCode);
+		return {
+			...(providerTelemetryHeader ? { providerTelemetryHeader } : {}),
+			...(errorObservability ? { errorObservability } : {}),
+		};
+	};
+	const updateTraceMetadata = (): void => {
+		if (details.requestId) traceAttributes.request_id = details.requestId;
+		if (details.operationId) traceAttributes.operation_id = details.operationId;
+		if (details.flowId) traceAttributes.flow_id = details.flowId;
+		traceAttributes.route = details.route;
+		const traceId = requestTraceId(details.headers, details.requestId);
+		const sanitizedAttributes = Object.fromEntries(
+			Object.entries(sanitizeTraceAttributes(traceAttributes)).map(([key, value]) => [
+				key,
+				String(value),
+			]),
+		);
+		updateTraceContextExportMetadata(trace, {
+			...(traceId ? { traceId } : {}),
+			resourceAttributes: sanitizedAttributes,
+		});
+	};
+
+	const scope: RequestScope = {
+		trace,
+		proxyTelemetry,
+		enrich(enrichment): void {
+			if (terminalOutcome) return;
+			if (enrichment.route !== undefined) details.route = enrichment.route;
+			if (enrichment.requestId !== undefined) details.requestId = enrichment.requestId;
+			if (enrichment.operationId !== undefined) details.operationId = enrichment.operationId;
+			if (enrichment.flowId !== undefined) details.flowId = enrichment.flowId;
+			if (enrichment.headers !== undefined) details.headers = enrichment.headers;
+			if (enrichment.correlation !== undefined) {
+				Object.assign(details.correlation, enrichment.correlation);
+			}
+			updateTraceMetadata();
+		},
+		run<T>(fn: () => Promise<T>): Promise<T> {
+			return rootRunner(fn);
+		},
+		async runStreaming<T>(fn: () => Promise<T>): Promise<T> {
+			streamingSetupPending = true;
+			try {
+				return await rootRunner(fn);
+			} finally {
+				streamingSetupPending = false;
+				settleRoot();
+			}
+		},
+		runStreamStep<T>(fn: () => Promise<T>): Promise<T> {
+			return rootRunner(fn);
+		},
+		watchAbort(signal): void {
+			if (terminalOutcome) return;
+			abortSignal = signal;
+			abortListener = () => {
+				scope.terminalize({ kind: "cancelled", status: CLIENT_CANCELLED_STATUS });
+				void cleanupStream();
+			};
+			if (signal.aborted) abortListener();
+			else signal.addEventListener("abort", abortListener, { once: true });
+		},
+		registerStreamCleanup(cleanup): void {
+			const entry = { cleanup };
+			streamCleanups.push(entry);
+			if (terminalOutcome) void runCleanupEntry(entry);
+		},
+		cleanupStream,
+		snapshotHeaders(error): RequestScopeFinishResult {
+			headersSnapshotted = true;
+			return headerSnapshot(error);
+		},
+		terminalize(outcome): RequestScopeFinishResult {
+			if (finishedResult) return finishedResult;
+			terminalOutcome = outcome;
+			const error = terminalError(outcome);
+			finishedResult = {};
+			try {
+				const declaredErrorCode =
+					error === undefined ? undefined : input.declaredErrorCode?.(error);
+				const status =
+					outcome.status ??
+					(error === undefined ? 200 : toStatusCode(error, declaredErrorCode));
+				finishedResult = headerSnapshot(error);
+				const cost = finishRequestCost(requestCost);
+				try {
+					if (error === undefined) {
+						logProviderSuccess(
+							input.logger,
+							input.provider,
+							input.kind,
+							details.route,
+							details.requestId,
+							status,
+							cost,
+							proxyTelemetry,
+							details.correlation,
+						);
+					} else {
+						logProviderError(
+							input.logger,
+							input.provider,
+							input.kind,
+							details.route,
+							details.requestId,
+							error,
+							status,
+							cost,
+							declaredErrorCode,
+							proxyTelemetry,
+							finishedResult.errorObservability as ErrorObservabilityDetails,
+							details.correlation,
+						);
+					}
+				} catch {
+					// Observer callbacks cannot hold the request root open or change the response.
+				}
+
+				if (!headersSnapshotted) {
+					if (finishedResult.providerTelemetryHeader) {
+						try {
+							input.setHeader?.(PROVIDER_TELEMETRY_HEADER, finishedResult.providerTelemetryHeader);
+						} catch {
+							// Header observers are isolated independently from request settlement.
+						}
+					}
+					if (finishedResult.errorObservability) {
+						try {
+							input.setHeader?.(
+								ERROR_OBSERVABILITY_HEADER,
+								JSON.stringify(finishedResult.errorObservability),
+							);
+						} catch {
+							// Header observers are isolated independently from request settlement.
+						}
+					}
+				}
+			} finally {
+				settleRoot();
+				void cleanupStream();
+			}
+			return finishedResult;
+		},
+	};
+	return scope;
+}
+
+function responseWithRequestScopeHeaders(
+	response: Response,
+	finished: RequestScopeFinishResult,
+): Response {
+	const headers = new Headers(response.headers);
+	headers.delete(PROVIDER_TELEMETRY_HEADER);
+	if (finished.providerTelemetryHeader) {
+		headers.set(PROVIDER_TELEMETRY_HEADER, finished.providerTelemetryHeader);
+	}
+	if (finished.errorObservability) {
+		headers.set(ERROR_OBSERVABILITY_HEADER, JSON.stringify(finished.errorObservability));
+	}
+	return new Response(response.body, {
+		headers,
+		status: response.status,
+		statusText: response.statusText,
+	});
+}
+
+function finalizeRequestResponse(
+	scope: RequestScope,
+	response: Response,
+	outcome: RequestTerminalOutcome,
+): Response {
+	try {
+		const error = outcome.kind === "failed" ? outcome.error : undefined;
+		const finalResponse = responseWithRequestScopeHeaders(
+			response,
+			scope.snapshotHeaders(error),
+		);
+		scope.terminalize(outcome);
+		return finalResponse;
+	} catch (error) {
+		scope.terminalize({ kind: "failed", status: 500, error });
+		throw error;
+	}
 }
 
 function toJsonSuccessResponse(
@@ -1736,41 +2349,41 @@ function isAsyncIterable<T = unknown>(value: unknown): value is AsyncIterable<T>
 	return typeof iterator === "function";
 }
 
-function responseWithCleanup(response: Response, cleanup: RequestCleanup): Response {
+function responseWithCleanup(response: Response, lifecycle: RequestStreamLifecycle): Response {
 	if (!response.body) {
-		void cleanup();
+		lifecycle.terminalize({ kind: "completed", status: response.status });
+		void lifecycle.cleanup();
 		return response;
 	}
 	const reader = response.body.getReader();
-	let cleaned = false;
-	const runCleanup = async () => {
-		if (cleaned) return;
-		cleaned = true;
-		await cleanup();
-	};
-	const body = new ReadableStream<Uint8Array>({
-		async pull(controller) {
-			try {
-				const { done, value } = await reader.read();
-				if (done) {
-					controller.close();
-					await runCleanup();
-					return;
+	let cleanupReason: unknown = "request terminalized";
+	lifecycle.registerCleanup(() => lifecycle.runStep(() => reader.cancel(cleanupReason)));
+	const body = new ReadableStream<Uint8Array>(
+		{
+			async pull(controller) {
+				try {
+					const { done, value } = await lifecycle.runStep(() => reader.read());
+					if (done) {
+						controller.close();
+						lifecycle.terminalize({ kind: "completed", status: response.status });
+						await lifecycle.cleanup();
+						return;
+					}
+					if (value) controller.enqueue(value);
+				} catch (error) {
+					lifecycle.terminalize({ kind: "failed", error });
+					await lifecycle.cleanup();
+					controller.error(error);
 				}
-				if (value) controller.enqueue(value);
-			} catch (error) {
-				await runCleanup();
-				controller.error(error);
-			}
+			},
+			async cancel(reason) {
+				cleanupReason = reason;
+				lifecycle.terminalize({ kind: "cancelled", status: CLIENT_CANCELLED_STATUS });
+				await lifecycle.cleanup();
+			},
 		},
-		async cancel(reason) {
-			try {
-				await reader.cancel(reason);
-			} finally {
-				await runCleanup();
-			}
-		},
-	});
+		{ highWaterMark: 0 },
+	);
 	return new Response(body, {
 		headers: response.headers,
 		status: response.status,
@@ -1832,63 +2445,74 @@ function assertStreamPayloadWithinLimit(
 function toSseResponse(
 	operation: OperationDefinition,
 	result: AsyncIterable<ProviderStreamEvent>,
-	cleanup: RequestCleanup,
+	lifecycle: RequestStreamLifecycle,
 	requestId?: string,
 ): Response {
 	const encoder = new TextEncoder();
 	const iterator = result[Symbol.asyncIterator]();
+	let cleanupReason: unknown;
+	lifecycle.registerCleanup(() =>
+		lifecycle.runStep(async () => {
+			await iterator.return?.(cleanupReason);
+		}),
+	);
 	const transport = getSseTransport(operation);
 	let done = false;
-	let cleaned = false;
-	const runCleanup = async () => {
-		if (cleaned) return;
-		cleaned = true;
-		await cleanup();
-	};
-	const body = new ReadableStream<Uint8Array>({
-		async pull(controller) {
-			try {
-				if (done) {
-					controller.close();
-					await runCleanup();
-					return;
-				}
-				const next = await iterator.next();
-				if (next.done) {
-					done = true;
-					controller.close();
-					await runCleanup();
-					return;
-				}
-				const validated = await validateSseEvent(operation, next.value);
-				const encodedEvent = encodeSseEvent(validated);
-				const encodedBytes = encoder.encode(encodedEvent);
-				assertStreamPayloadWithinLimit(encodedBytes.byteLength, transport?.maxEventBytes, "event");
-				controller.enqueue(encodedBytes);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : "Stream failed";
-				controller.enqueue(
-					encoder.encode(
-						encodeSseEvent(
-							streamError("stream_error", message, {
-								...(requestId ? { requestId } : {}),
-							}),
+	const body = new ReadableStream<Uint8Array>(
+		{
+			async pull(controller) {
+				try {
+					if (done) {
+						controller.close();
+						lifecycle.terminalize({ kind: "completed", status: 200 });
+						await lifecycle.cleanup();
+						return;
+					}
+					const next = await lifecycle.runStep(() => iterator.next());
+					if (next.done) {
+						done = true;
+						controller.close();
+						lifecycle.terminalize({ kind: "completed", status: 200 });
+						await lifecycle.cleanup();
+						return;
+					}
+					const encodedBytes = await lifecycle.runStep(async () => {
+						const validated = await validateSseEvent(operation, next.value);
+						const encodedEvent = encodeSseEvent(validated);
+						const bytes = encoder.encode(encodedEvent);
+						assertStreamPayloadWithinLimit(
+							bytes.byteLength,
+							transport?.maxEventBytes,
+							"event",
+						);
+						return bytes;
+					});
+					controller.enqueue(encodedBytes);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : "Stream failed";
+					controller.enqueue(
+						encoder.encode(
+							encodeSseEvent(
+								streamError("stream_error", message, {
+									...(requestId ? { requestId } : {}),
+								}),
+							),
 						),
-					),
-				);
-				controller.close();
-				done = true;
-				await runCleanup();
-			}
+					);
+					controller.close();
+					done = true;
+					lifecycle.terminalize({ kind: "failed", error });
+					await lifecycle.cleanup();
+				}
+			},
+			async cancel(reason) {
+				cleanupReason = reason;
+				lifecycle.terminalize({ kind: "cancelled", status: CLIENT_CANCELLED_STATUS });
+				await lifecycle.cleanup();
+			},
 		},
-		async cancel(reason) {
-			try {
-				await iterator.return?.(reason);
-			} finally {
-				await runCleanup();
-			}
-		},
-	});
+		{ highWaterMark: 0 },
+	);
 	return new Response(body, {
 		headers: {
 			"Cache-Control": "no-cache, no-transform",
@@ -1929,12 +2553,11 @@ function enforceStreamChunkLimit(
 function toStreamingResponse(
 	operation: OperationDefinition,
 	result: unknown,
-	cleanup: RequestCleanup,
+	lifecycle: RequestStreamLifecycle,
 	requestId?: string,
 ): Response {
 	const transport = operation.transport?.kind ?? "json";
 	if (transport === "sse" && (result instanceof Response || result instanceof ReadableStream)) {
-		void cleanup();
 		throw new ProviderError(
 			"SSE operations must return an AsyncIterable of typed stream.event(...) values.",
 			{
@@ -1954,10 +2577,10 @@ function toStreamingResponse(
 					status: result.status,
 					statusText: result.statusText,
 				}),
-				cleanup,
+				lifecycle,
 			);
 		}
-		return responseWithCleanup(result, cleanup);
+		return responseWithCleanup(result, lifecycle);
 	}
 	if (result instanceof ReadableStream) {
 		const httpTransport = getHttpStreamTransport(operation);
@@ -1977,13 +2600,12 @@ function toStreamingResponse(
 										: "application/octet-stream",
 							},
 			}),
-			cleanup,
+			lifecycle,
 		);
 	}
 	if (transport === "sse" && isAsyncIterable<ProviderStreamEvent>(result)) {
-		return toSseResponse(operation, result, cleanup, requestId);
+		return toSseResponse(operation, result, lifecycle, requestId);
 	}
-	void cleanup();
 	throw new ProviderError(
 		`Streaming operation returned unsupported result for transport "${transport}"`,
 		{
@@ -2092,18 +2714,10 @@ async function handleOperation(
 	operationId: string,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
-	proxyTelemetry?: ProxyTelemetryCollector,
+	scope: RequestScope,
 	signal?: AbortSignal,
 ): Promise<Response | OperationResponse> {
-	const ctx = createProviderContext(
-		provider,
-		request,
-		operationId,
-		options,
-		state,
-		proxyTelemetry,
-		signal,
-	);
+	const ctx = createProviderContext(provider, request, operationId, options, state, scope, signal);
 	const operation = provider.operations[operationId];
 	const streaming = operation?.transport?.kind && operation.transport.kind !== "json";
 	let cleanupCalled = false;
@@ -2141,6 +2755,21 @@ async function handleOperation(
 			}
 		}
 	};
+	const streamLifecycle: RequestStreamLifecycle = {
+		runStep<T>(fn: () => Promise<T>): Promise<T> {
+			return scope.runStreamStep(fn);
+		},
+		registerCleanup(streamCleanup): void {
+			scope.registerStreamCleanup(streamCleanup);
+		},
+		terminalize(outcome): void {
+			scope.terminalize(outcome);
+		},
+		cleanup(): Promise<void> {
+			return scope.cleanupStream();
+		},
+	};
+	scope.registerStreamCleanup(() => scope.runStreamStep(cleanup));
 	try {
 		const result = options.operationExecutor
 			? await options.operationExecutor({
@@ -2154,7 +2783,7 @@ async function handleOperation(
 					env: createEnvContext(providerSecretNames(provider)),
 				});
 		if (streaming && operation) {
-			return toStreamingResponse(operation, result, cleanup, request.requestId);
+			return toStreamingResponse(operation, result, streamLifecycle, request.requestId);
 		}
 		return toJsonSuccessResponse(result, ctx);
 	} catch (error) {
@@ -2165,21 +2794,6 @@ async function handleOperation(
 	}
 }
 
-function responseWithProviderTelemetry(
-	response: Response,
-	proxyTelemetry?: ProxyTelemetryCollector,
-): Response {
-	const headerValue = proxyTelemetry?.toHeaderValue();
-	const headers = new Headers(response.headers);
-	headers.delete(PROVIDER_TELEMETRY_HEADER);
-	if (headerValue) headers.set(PROVIDER_TELEMETRY_HEADER, headerValue);
-	return new Response(response.body, {
-		headers,
-		status: response.status,
-		statusText: response.statusText,
-	});
-}
-
 type AuthRoute = "start" | "continue" | "poll" | "abort" | "refresh";
 
 async function handleAuthFlow(
@@ -2188,7 +2802,7 @@ async function handleAuthFlow(
 	route: AuthRoute,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState,
-	proxyTelemetry?: ProxyTelemetryCollector,
+	scope: RequestScopeContext,
 	signal?: AbortSignal,
 ): Promise<Response | AuthFlowResponse> {
 	const flow = provider.auth?.flow;
@@ -2208,7 +2822,7 @@ async function handleAuthFlow(
 		request,
 		options,
 		state,
-		proxyTelemetry,
+		scope,
 		signal,
 	);
 	try {
@@ -2397,7 +3011,9 @@ function parseStatefulForwardingEnvelope(rawBody: unknown): ProviderServerStatef
  * Primary, cross-runtime app factory. Declared capability ESM is preloaded
  * asynchronously, so this path works on Bun and every supported Node release.
  */
-export async function createServerAppAsync<TContext extends Partial<ProviderContext> = ProviderContext>(
+export async function createServerAppAsync<
+	TContext extends Partial<ProviderContext> = ProviderContext,
+>(
 	provider: ProviderDefinition<TContext>,
 	options: ProviderServerOptions<TContext> = {},
 ): Promise<Hono> {
@@ -2497,7 +3113,15 @@ function createServerAppWithCapabilityModules(
 		let rawBody: unknown;
 		let operationId: string | undefined;
 		const operation = "stateful-internal";
-		const requestCost = startRequestCost();
+		const requestScope = createRequestScope({
+			provider,
+			kind: "operation",
+			route: operation,
+			headers: Object.fromEntries(c.req.raw.headers.entries()),
+			logger,
+			setHeader: (name, value) => c.header(name, value),
+			declaredErrorCode: (error) => declaredErrorCodeFor(error, operationId, operationErrorCodes),
+		});
 		try {
 			if (!options.internalOperationExecutor) {
 				throw new ProviderError("Stateful internal operation executor is not configured.", {
@@ -2607,36 +3231,40 @@ function createServerAppWithCapabilityModules(
 			}
 			const request = operationRequestFromForwardingEnvelope(envelope);
 			operationId = envelope.operationId;
-			const ctx = createProviderContext(
-				provider,
-				request,
+			requestScope.enrich({
+				route: operationId,
+				requestId: request.requestId,
 				operationId,
-				options,
-				state,
-				undefined,
-				signal,
-			);
-			if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
-				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
-			}
-			const output = await options.internalOperationExecutor({
-				provider,
-				operationId,
-				ctx,
-				request,
-				internalStatefulForward: envelope,
-				signal,
+				headers: request.headers ?? {},
+				correlation: { connectionId: envelope.connectionId },
 			});
-			logProviderSuccess(
-				logger,
-				provider,
-				"operation",
-				operationId || operation,
-				request.requestId,
-				200,
-				finishRequestCost(requestCost),
-			);
-			return c.json({ data: output });
+			const response = await requestScope.run(async () => {
+				const ctx = createProviderContext(
+					provider,
+					request,
+					operationId as string,
+					options,
+					state,
+					requestScope as RequestScope,
+					signal,
+				);
+				if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
+					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+				}
+				const output = await options.internalOperationExecutor!({
+					provider,
+					operationId: operationId as string,
+					ctx,
+					request,
+					internalStatefulForward: envelope,
+					signal,
+				});
+				return c.json({ data: output });
+			});
+			return finalizeRequestResponse(requestScope, response, {
+				kind: "completed",
+				status: 200,
+			});
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operationId, operationErrorCodes);
 			const status = toStatusCode(error, declaredErrorCode);
@@ -2647,32 +3275,33 @@ function createServerAppWithCapabilityModules(
 				c.header("Retry-After", String(STATEFUL_FORWARDING_REPLAY_RETRY_AFTER_SECONDS));
 			}
 			const requestId = extractRequestId(rawBody);
+			requestScope.enrich({
+				...(operationId ? { route: operationId, operationId } : {}),
+				...(requestId ? { requestId } : {}),
+			});
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
-			logProviderError(
-				logger,
-				provider,
-				"operation",
-				operationId || operation,
-				requestId,
-				error,
+			const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
+			return finalizeRequestResponse(requestScope, response, {
+				kind: "failed",
 				status,
-				finishRequestCost(requestCost),
-				declaredErrorCode,
-				undefined,
-				observabilityDetails,
-			);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
+				error,
+			});
 		}
 	});
 
 	app.post("/v1/:operation", async (c) => {
 		let rawBody: unknown;
 		const operation = c.req.param("operation");
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
+		const requestScope = createRequestScope({
+			provider,
+			kind: "operation",
+			route: operation,
+			operationId: operation,
+			headers: Object.fromEntries(c.req.raw.headers.entries()),
+			logger,
+			setHeader: (name, value) => c.header(name, value),
+			declaredErrorCode: (error) => declaredErrorCodeFor(error, operation, operationErrorCodes),
+		});
 		try {
 			rawBody = await c.req.raw
 				.clone()
@@ -2681,367 +3310,129 @@ function createServerAppWithCapabilityModules(
 			const body = OperationRequestSchema.parse(rawBody);
 			const requestHeaders = Object.fromEntries(c.req.raw.headers.entries());
 			body.headers = { ...requestHeaders, ...body.headers };
-			const response = await handleOperation(
-				provider,
-				body,
-				operation,
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			if (response instanceof Response) {
-				logProviderSuccess(
-					logger,
+			requestScope.enrich({
+				requestId: body.requestId,
+				headers: body.headers,
+				correlation: { connectionId: resolveOperationConnectionId(body) },
+			});
+			const streaming = provider.operations[operation]?.transport?.kind
+				? provider.operations[operation]?.transport?.kind !== "json"
+				: false;
+			if (streaming) requestScope.watchAbort(c.req.raw.signal);
+			const execute = async () => {
+				const handled = await handleOperation(
 					provider,
-					"operation",
+					body,
 					operation,
-					body.requestId,
-					response.status,
-					finishRequestCost(requestCost),
-					proxyTelemetry,
+					options,
+					state,
+					requestScope,
+					c.req.raw.signal,
 				);
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			}
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			logProviderSuccess(
-				logger,
-				provider,
-				"operation",
-				operation,
-				body.requestId,
-				200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			return c.json(response);
+				const response = handled instanceof Response ? handled : c.json(handled);
+				return streaming
+					? responseWithRequestScopeHeaders(response, requestScope.snapshotHeaders())
+					: response;
+			};
+			const response = streaming
+				? await requestScope.runStreaming(execute)
+				: await requestScope.run(execute);
+			if (streaming) return response;
+			return finalizeRequestResponse(requestScope, response, {
+				kind: "completed",
+				status: response.status,
+			});
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operation, operationErrorCodes);
 			const status = toStatusCode(error, declaredErrorCode);
 			const requestId = extractRequestId(rawBody);
+			requestScope.enrich({ ...(requestId ? { requestId } : {}) });
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
-			logProviderError(
-				logger,
-				provider,
-				"operation",
-				operation,
-				requestId,
-				error,
+			const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
+			return finalizeRequestResponse(requestScope, response, {
+				kind: "failed",
 				status,
-				finishRequestCost(requestCost),
-				declaredErrorCode,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
+				error,
+			});
 		}
 	});
 
-	app.post("/auth/start", async (c) => {
-		let rawBody: unknown;
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
-		try {
-			rawBody = await c.req.raw
-				.clone()
-				.json()
-				.catch(() => undefined);
-			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"start",
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			logProviderSuccess(
-				logger,
-				provider,
-				"auth",
-				"start",
-				body.requestId,
-				response instanceof Response ? response.status : 200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			if (response instanceof Response)
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(response);
-		} catch (error) {
-			const status = toStatusCode(error);
-			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error);
-			logProviderError(
-				logger,
-				provider,
-				"auth",
-				"start",
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				undefined,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
-		}
-	});
+	const authRoutes = [
+		{ path: "/auth/start", flowRoute: "start", logRoute: "start" },
+		{ path: "/auth/continue", flowRoute: "continue", logRoute: "continue" },
+		{ path: "/auth/poll", flowRoute: "poll", logRoute: "poll" },
+		{ path: "/auth/refresh", flowRoute: "refresh", logRoute: "refresh" },
+		{ path: "/auth/disconnect", flowRoute: "abort", logRoute: "disconnect" },
+	] as const satisfies ReadonlyArray<{
+		path: string;
+		flowRoute: AuthRoute;
+		logRoute: string;
+	}>;
 
-	app.post("/auth/continue", async (c) => {
-		let rawBody: unknown;
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
-		try {
-			rawBody = await c.req.raw
-				.clone()
-				.json()
-				.catch(() => undefined);
-			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(
+	for (const { path, flowRoute, logRoute } of authRoutes) {
+		app.post(path, async (c) => {
+			let rawBody: unknown;
+			const requestScope = createRequestScope({
 				provider,
-				body,
-				"continue",
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			logProviderSuccess(
+				kind: "auth",
+				route: logRoute,
+				headers: Object.fromEntries(c.req.raw.headers.entries()),
 				logger,
-				provider,
-				"auth",
-				"continue",
-				body.requestId,
-				response instanceof Response ? response.status : 200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			if (response instanceof Response)
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(response);
-		} catch (error) {
-			const status = toStatusCode(error);
-			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error);
-			logProviderError(
-				logger,
-				provider,
-				"auth",
-				"continue",
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				undefined,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
-		}
-	});
-
-	app.post("/auth/poll", async (c) => {
-		let rawBody: unknown;
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
-		try {
-			rawBody = await c.req.raw
-				.clone()
-				.json()
-				.catch(() => undefined);
-			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"poll",
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			logProviderSuccess(
-				logger,
-				provider,
-				"auth",
-				"poll",
-				body.requestId,
-				response instanceof Response ? response.status : 200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			if (response instanceof Response)
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(response);
-		} catch (error) {
-			const status = toStatusCode(error);
-			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error);
-			logProviderError(
-				logger,
-				provider,
-				"auth",
-				"poll",
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				undefined,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
-		}
-	});
-
-	app.post("/auth/refresh", async (c) => {
-		let rawBody: unknown;
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
-		try {
-			rawBody = await c.req.raw
-				.clone()
-				.json()
-				.catch(() => undefined);
-			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"refresh",
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			logProviderSuccess(
-				logger,
-				provider,
-				"auth",
-				"refresh",
-				body.requestId,
-				response instanceof Response ? response.status : 200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			if (response instanceof Response)
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(response);
-		} catch (error) {
-			const status = toStatusCode(error);
-			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error);
-			logProviderError(
-				logger,
-				provider,
-				"auth",
-				"refresh",
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				undefined,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
-		}
-	});
-
-	app.post("/auth/disconnect", async (c) => {
-		let rawBody: unknown;
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
-		try {
-			rawBody = await c.req.raw
-				.clone()
-				.json()
-				.catch(() => undefined);
-			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"abort",
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			logProviderSuccess(
-				logger,
-				provider,
-				"auth",
-				"disconnect",
-				body.requestId,
-				response instanceof Response ? response.status : 200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			if (response instanceof Response)
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(response);
-		} catch (error) {
-			const status = toStatusCode(error);
-			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error);
-			logProviderError(
-				logger,
-				provider,
-				"auth",
-				"disconnect",
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				undefined,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
-		}
-	});
+				setHeader: (name, value) => c.header(name, value),
+			});
+			try {
+				rawBody = await c.req.raw
+					.clone()
+					.json()
+					.catch(() => undefined);
+				const body = withAuthRequestHeaders(
+					AuthFlowRequestSchema.parse(rawBody),
+					c.req.raw.headers,
+				);
+				requestScope.enrich({
+					requestId: body.requestId,
+					flowId: body.flowId,
+					headers: body.headers ?? {},
+					correlation: {
+						connectionId: resolveOperationConnectionId(body),
+						flowId: body.flowId,
+						tenantId: body.tenantId,
+						requestedProviderId:
+							body.providerId !== undefined && body.providerId !== provider.id
+								? body.providerId
+								: undefined,
+					},
+				});
+				const response = await requestScope.run(async () => {
+					const handled = await handleAuthFlow(
+						provider,
+						body,
+						flowRoute,
+						options,
+						state,
+						requestScope as RequestScope,
+						c.req.raw.signal,
+					);
+					return handled instanceof Response ? handled : c.json(handled);
+				});
+				return finalizeRequestResponse(requestScope, response, {
+					kind: "completed",
+					status: response.status,
+				});
+			} catch (error) {
+				const status = toStatusCode(error);
+				const requestId = extractRequestId(rawBody);
+				requestScope.enrich({ ...(requestId ? { requestId } : {}) });
+				const observabilityDetails = errorObservabilityDetails(error);
+				const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
+				return finalizeRequestResponse(requestScope, response, {
+					kind: "failed",
+					status,
+					error,
+				});
+			}
+		});
+	}
 
 	return app;
 }

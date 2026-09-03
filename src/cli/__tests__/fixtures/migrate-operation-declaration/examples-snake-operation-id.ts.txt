@@ -1,0 +1,21 @@
+const listRecentEarthquakesOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	docs: {
+		titleKey: "operations.listRecentEarthquakes.title",
+		descriptionKey: "operations.listRecentEarthquakes.description",
+	},
+	inputExamples: [
+		{
+			scenario: "List recent earthquakes",
+			input: { limit: 10 },
+			rationale: "Exercises a snake-case operation id.",
+		},
+	],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
+
+export default buildProvider({
+	operations: { list_recent_earthquakes: listRecentEarthquakesOperation },
+});

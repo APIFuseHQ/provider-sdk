@@ -271,6 +271,8 @@ export {
 export * from "./stream.js";
 export type {
 	ApiFuseResponse,
+	AutoSolveResolverFactory,
+	AutoSolveResolverSelection,
 	AuthConfig,
 	AuthContext,
 	AuthFlowDefinition,
@@ -420,6 +422,7 @@ export type {
 	ProviderRuntimeTarget,
 	ProviderRuntimeState,
 	ProviderSecretDeclaration,
+	ProviderStealthConfig,
 	ProviderStateDurationString,
 	ProviderStateNamespace,
 	ProviderStreamEvent,
@@ -443,6 +446,7 @@ export type {
 	StateWriteOptions,
 	StealthClient,
 	StealthBrowser,
+	StealthChallengeClassification,
 	StealthCookieStore,
 	StealthCookieStoreV1,
 	StealthFetchOptions,

@@ -510,6 +510,25 @@ export interface ResolverContext {
 	solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
 }
 
+/**
+ * Selects the resolver vendor chain used for automatic challenge solving.
+ * Transport, identity, admission, and cache construction remain SDK-owned.
+ */
+export type AutoSolveResolverSelection = {
+	/** Optional ordered override for the provider-declared resolver vendor chain. */
+	readonly vendors?: readonly ProviderResolverVendor[];
+	/** Transport ownership is reserved to the SDK on the automatic solve path. */
+	readonly transport?: never;
+	/** Transport construction is reserved to the SDK on the automatic solve path. */
+	readonly createTransport?: never;
+};
+
+/** Selects automatic resolver construction without receiving or returning a transport. */
+export type AutoSolveResolverFactory = (bound: {
+	/** Fully resolved browser/OS identity of the initiating stealth session. */
+	readonly clientProfile: StealthProfileSelection;
+}) => AutoSolveResolverSelection;
+
 export interface HealthJourneySchedule {
 	kind: "interval";
 	/** ISO 8601 duration, for example PT8H. */
@@ -950,6 +969,14 @@ export type StealthProfileSelection =
 	| { browser: "firefox"; os?: "windows" | "macos" | "linux" }
 	| { browser: "safari"; os?: "macos" | "ios" };
 
+/** Provider-owned opt-ins layered onto the transport-owned browser/OS profile. */
+export type ProviderStealthConfig = StealthProfileSelection & {
+	readonly challengeDetection?: {
+		/** Classify SBSD responses even when no resolver is declared (detect/report mode). */
+		readonly akamaiSbsd?: boolean;
+	};
+};
+
 export type BrowserEngine = "playwright-stealth" | "nodriver" | "selenium-uc";
 export interface BrowserOptions {
 	headless?: boolean;
@@ -1371,6 +1398,8 @@ export interface DeclarativeStealthResponse {
 	headers: Record<string, string>;
 	rawHeaders: [string, string][];
 	body: string;
+	/** Present only when an opted-in SDK detector returned an unresolved challenge response. */
+	challenge?: StealthChallengeClassification;
 	httpVersion?: string;
 	tlsInfo?: { protocol?: string; cipher?: string; [key: string]: unknown };
 	cookies: CookieJar;
@@ -1380,6 +1409,11 @@ export interface DeclarativeStealthResponse {
 }
 
 export type StealthResponse = DeclarativeStealthResponse;
+
+export type StealthChallengeClassification = {
+	readonly challenge: Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>;
+	readonly outcome: "resolver_unavailable" | "replay_required" | "challenge_persisted";
+};
 
 export type RequestWithMethodOptions = RequestOptions & {
 	method?: string;
@@ -2164,6 +2198,7 @@ export interface FlowContext {
 	externalRef?: string;
 	tenantId: string;
 	providerId: string;
+	trace: TraceContext;
 	http: HttpClient;
 	/** Durable connection-scoped runtime state. Present when the host runtime
 	 * supplies one; auth ceremonies must fail closed when absent rather than
@@ -2515,7 +2550,7 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 	http?: Record<string, never> | true;
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
-	stealth?: StealthProfileSelection;
+	stealth?: ProviderStealthConfig;
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;

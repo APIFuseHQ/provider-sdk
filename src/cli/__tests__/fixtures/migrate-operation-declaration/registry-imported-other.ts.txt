@@ -1,0 +1,7 @@
+export const importedOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [{ scenario: "Imported", input: {} }],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
