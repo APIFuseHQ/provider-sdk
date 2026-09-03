@@ -7,6 +7,7 @@ import {
 	HttpRetryPreset,
 	HttpRetryUnsafeMethodPolicy,
 } from "../types.js";
+import { isSensitiveKey } from "./request-options.js";
 
 export type NormalizedProxyTransportRetryOptions = Required<
 	Pick<
@@ -364,10 +365,20 @@ export function validateUnsafeProxyTransportRetryMethods(
 export function isProxyTransportRetryMethod(
 	method: HttpMethod | string,
 	options: NormalizedProxyTransportRetryOptions,
+	request?: {
+		readonly body?: unknown;
+		readonly headers?: Readonly<Record<string, string | readonly string[] | undefined>>;
+	},
 ): boolean {
-	return options.methods
+	const methodAllowed = options.methods
 		.map((allowedMethod) => allowedMethod.toUpperCase())
 		.includes(method.toUpperCase());
+	if (!methodAllowed || request === undefined) return methodAllowed;
+	if (request.body !== undefined) return false;
+	return !Object.keys(request.headers ?? {}).some((name) => {
+		const normalized = name.toLowerCase();
+		return normalized === "cookie" || normalized === "proxy-authorization" || isSensitiveKey(name);
+	});
 }
 
 export function shouldRetryProxyTransportError(

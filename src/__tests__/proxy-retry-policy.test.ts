@@ -6,6 +6,7 @@ import {
 	createDefaultProxyTransportRetryOptions,
 	DEFAULT_PROXY_TRANSPORT_RETRY_ERROR_CODES,
 	DEFAULT_PROXY_TRANSPORT_RETRY_METHODS,
+	isProxyTransportRetryMethod,
 	MAX_PROXY_TRANSPORT_RETRY_ATTEMPTS,
 	normalizeProxyTransportRetryOptions,
 	shouldRetryProxyTransportAttempt,
@@ -64,6 +65,46 @@ describe("proxy transport retry policy", () => {
 				proxyUsed: false,
 			}),
 		).toBe(false);
+	});
+
+	it("classifies automatic challenge refetches with the shared safe-request policy", () => {
+		const policy = {
+			...createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
+			methods: ["GET", "HEAD"],
+		};
+		const cases = [
+			{ method: "GET", expected: true },
+			{
+				method: "GET",
+				request: { headers: { Authorization: "Bearer test" } },
+				expected: false,
+			},
+			{
+				method: "GET",
+				request: { headers: { Cookie: "session=test" } },
+				expected: false,
+			},
+			{ method: "HEAD", expected: true },
+			{ method: "POST", expected: false },
+			{ method: "PUT", expected: false },
+			{ method: "DELETE", expected: false },
+			{
+				method: "GET",
+				request: { body: "caller body" },
+				expected: false,
+			},
+		] as const;
+
+		for (const testCase of cases) {
+			expect(
+				isProxyTransportRetryMethod(
+					testCase.method,
+					policy,
+					"request" in testCase ? testCase.request : undefined,
+				),
+				testCase.method,
+			).toBe(testCase.expected);
+		}
 	});
 
 	it("treats retry false as an explicit disable", () => {
