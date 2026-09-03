@@ -73,6 +73,7 @@ import {
 	type ProxyTelemetryLogPayload,
 } from "../runtime/proxy-telemetry.js";
 import type * as ResolverRuntimeModule from "../runtime/resolver.js";
+import { RESOLVER_VENDOR_CAPABILITIES } from "../runtime/resolver-vendors/types.js";
 import {
 	createUnsupportedResolverClient,
 	type ResolverSolveWithRecorder,
@@ -108,7 +109,6 @@ import {
 } from "../stream.js";
 import type {
 	AutoSolveResolverFactory,
-	AutoSolveResolverSelection,
 	AuthContext,
 	AuthTurn,
 	BrowserClient,
@@ -126,6 +126,7 @@ import type {
 	ProviderFilesContext,
 	ProviderProxyPolicy,
 	ProviderRuntimeState,
+	ProviderResolverVendor,
 	ProviderStreamEvent,
 	ResolverContext,
 	StealthClient,
@@ -565,9 +566,23 @@ function resolverContextOverride(
 	return typeof resolver === "function" ? undefined : resolver;
 }
 
-function assertAutoSolveResolverSelection(
+function rejectAutoSolveResolverSelection(): never {
+	throw new SDKError(
+		"An automatic SBSD resolver override must return a transport-free resolver selection",
+		{
+			code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
+			fix: "Return only an optional array of known resolver vendor names; the SDK constructs the resolver and transport.",
+		},
+	);
+}
+
+function isKnownResolverVendor(value: string): value is ProviderResolverVendor {
+	return Object.hasOwn(RESOLVER_VENDOR_CAPABILITIES, value);
+}
+
+function validateAndSnapshotAutoSolveResolverSelection(
 	selection: unknown,
-): asserts selection is AutoSolveResolverSelection {
+): readonly ProviderResolverVendor[] | undefined {
 	if (
 		!selection ||
 		typeof selection !== "object" ||
@@ -577,14 +592,23 @@ function assertAutoSolveResolverSelection(
 		"createTransport" in selection ||
 		Reflect.ownKeys(selection).some((key) => key !== "vendors")
 	) {
-		throw new SDKError(
-			"An automatic SBSD resolver override must return a transport-free resolver selection",
-			{
-				code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
-				fix: "Return only an optional provider resolver vendor chain; the SDK constructs the resolver and transport.",
-			},
-		);
+		return rejectAutoSolveResolverSelection();
 	}
+	if (!("vendors" in selection) || selection.vendors === undefined) return undefined;
+	const suppliedVendors = selection.vendors;
+	if (!Array.isArray(suppliedVendors)) return rejectAutoSolveResolverSelection();
+	const vendors: ProviderResolverVendor[] = [];
+	const seen = new Set<ProviderResolverVendor>();
+	for (let index = 0; index < suppliedVendors.length; index += 1) {
+		if (!Object.hasOwn(suppliedVendors, index)) return rejectAutoSolveResolverSelection();
+		const vendor: unknown = suppliedVendors[index];
+		if (typeof vendor !== "string" || !isKnownResolverVendor(vendor) || seen.has(vendor)) {
+			return rejectAutoSolveResolverSelection();
+		}
+		seen.add(vendor);
+		vendors.push(vendor);
+	}
+	return vendors;
 }
 
 function createStealthChallengeDetection(
@@ -632,14 +656,15 @@ function createStealthChallengeDetection(
 								const selection = resolverOverride({
 									clientProfile: initiatingClientProfileSelection,
 								});
-								assertAutoSolveResolverSelection(selection);
+								const selectedVendors =
+									validateAndSnapshotAutoSolveResolverSelection(selection);
 								const selectedResolver = resolverRuntime.createResolverClientFromEnv(
 									{
 										kinds: provider.resolver?.kinds ?? [],
 										clientProfile: provider.resolver?.clientProfile ?? "",
-										...(selection.vendors === undefined
+										...(selectedVendors === undefined
 											? {}
-											: { vendors: selection.vendors }),
+											: { vendors: selectedVendors }),
 									},
 									undefined,
 									{

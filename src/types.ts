@@ -517,6 +517,10 @@ export interface ResolverContext {
 export type AutoSolveResolverSelection = {
 	/** Optional ordered override for the provider-declared resolver vendor chain. */
 	readonly vendors?: readonly ProviderResolverVendor[];
+	/** Transport ownership is reserved to the SDK on the automatic solve path. */
+	readonly transport?: never;
+	/** Transport construction is reserved to the SDK on the automatic solve path. */
+	readonly createTransport?: never;
 };
 
 /** Selects automatic resolver construction without receiving or returning a transport. */

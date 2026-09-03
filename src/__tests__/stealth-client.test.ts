@@ -4406,7 +4406,7 @@ describe("server SBSD bound-transport wiring", () => {
 		expect(allWreqCalls()).toHaveLength(1);
 	});
 
-	it("runs a resolver override on the initiating session transport", async () => {
+	it("snapshots a valid hooked vendor array before running on the initiating session transport", async () => {
 		const { APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY } = await import(
 			"../runtime/resolver-config.js"
 		);
@@ -4436,10 +4436,27 @@ describe("server SBSD bound-transport wiring", () => {
 			"https://example.com/operation-protected",
 		);
 		let overrideCalls = 0;
+		let suppliedArrayMapCalls = 0;
+		let suppliedArrayIteratorCalls = 0;
+		let downstreamReceivedSuppliedArray = false;
+		const suppliedVendors = ["hypersolutions"] as const;
+		Object.defineProperty(suppliedVendors, "map", {
+			value: function () {
+				suppliedArrayMapCalls += 1;
+				downstreamReceivedSuppliedArray = this === suppliedVendors;
+				return [];
+			},
+		});
+		Object.defineProperty(suppliedVendors, Symbol.iterator, {
+			value: () => {
+				suppliedArrayIteratorCalls += 1;
+				return [][Symbol.iterator]();
+			},
+		});
 		const resolverOverride: AutoSolveResolverFactory = ({ clientProfile }) => {
 			overrideCalls += 1;
 			expect(clientProfile).toMatchObject({ browser: "safari", os: "macos" });
-			return { vendors: ["hypersolutions"] };
+			return { vendors: suppliedVendors };
 		};
 		try {
 			const { createServerAppAsync } = await import("../server/serve.js");
@@ -4460,6 +4477,9 @@ describe("server SBSD bound-transport wiring", () => {
 			expect(response.status).toBe(200);
 			expect(await response.json()).toEqual({ data: { status: 200, outcome: "solved" } });
 			expect(overrideCalls).toBe(1);
+			expect(suppliedArrayMapCalls).toBe(0);
+			expect(suppliedArrayIteratorCalls).toBe(0);
+			expect(downstreamReceivedSuppliedArray).toBeFalse();
 			expect(mockStealthState.clients).toHaveLength(1);
 			expect(String(mockStealthState.clients[0]?.options?.proxy)).toContain(
 				"fixture-override-account-",
@@ -4588,8 +4608,26 @@ describe("server SBSD bound-transport wiring", () => {
 			// @ts-expect-error test-invalid: a caller-owned transport is never selectable.
 			transport: {},
 		} satisfies AutoSolveResolverSelection;
+		const structurallyWiderTransportSelection = {
+			vendors: ["hypersolutions"] as const,
+			transport: {},
+		};
+		const structurallyWiderFactorySelection = {
+			vendors: ["hypersolutions"] as const,
+			createTransport() {
+				return {};
+			},
+		};
+		// @ts-expect-error test-invalid: exact exclusion also rejects structurally wider variables.
+		const structuralTransportTypeCheck: AutoSolveResolverSelection =
+			structurallyWiderTransportSelection;
+		// @ts-expect-error test-invalid: exact exclusion also rejects structurally wider variables.
+		const structuralFactoryTypeCheck: AutoSolveResolverSelection =
+			structurallyWiderFactorySelection;
 		void createTransportTypeCheck;
 		void transportTypeCheck;
+		void structuralTransportTypeCheck;
+		void structuralFactoryTypeCheck;
 		const invalidSelections = [
 			{
 				vendors: ["hypersolutions"] as const,
@@ -4615,9 +4653,12 @@ describe("server SBSD bound-transport wiring", () => {
 				`stealth-sbsd-selection-transport-rejected-${index}`,
 				{ browser: "safari", os: "macos" },
 			);
+			const invalidFactory = () => invalidSelection;
+			// @ts-expect-error test-invalid: runtime validation rejects transport-owning selections.
+			const resolverOverride: AutoSolveResolverFactory = invalidFactory;
 			const app = await createServerAppAsync(provider, {
 				logger: () => undefined,
-				resolver: () => invalidSelection,
+				resolver: resolverOverride,
 			});
 			const response = await app.request("/v1/probe", {
 				method: "POST",
@@ -4632,6 +4673,113 @@ describe("server SBSD bound-transport wiring", () => {
 		}
 		expect(transportCalls).toBe(0);
 		expect(allWreqCalls()).toHaveLength(2);
+	});
+
+	it("rejects a hooked vendors container before it can inject a closure-owned adapter", async () => {
+		let containerMapCalls = 0;
+		let containerIteratorCalls = 0;
+		let injectedAdapterCalls = 0;
+		let closureTransportCalls = 0;
+		const hookedVendors = {
+			length: 1,
+			0: "hypersolutions",
+			map() {
+				containerMapCalls += 1;
+				return [
+					{
+						id: "hypersolutions",
+						supports: () => true,
+						createAdapter: () => {
+							injectedAdapterCalls += 1;
+							return {
+								id: "injected",
+								requiresTransport: false,
+								supports: () => true,
+								async solve() {
+									closureTransportCalls += 1;
+									return fixtureSbsdCookieSolution();
+								},
+							};
+						},
+					},
+				];
+			},
+			[Symbol.iterator]() {
+				containerIteratorCalls += 1;
+				return ["hypersolutions"][Symbol.iterator]();
+			},
+		};
+		const hookedFactory = () => ({ vendors: hookedVendors });
+		// @ts-expect-error test-invalid: a vendors container must be a primitive-name array.
+		const resolverOverride: AutoSolveResolverFactory = hookedFactory;
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: sbsdInterstitial("/.well-known/sbsd?v=hooked&t=hooked-token"),
+			headers: { "set-cookie": "sbsd_o=hooked-state; Path=/; Secure" },
+			url: "https://example.com/profile-probe",
+		});
+		const { createServerAppAsync } = await import("../server/serve.js");
+		const app = await createServerAppAsync(
+			createSbsdFailureCodeProvider("stealth-sbsd-hooked-vendors-rejected", {
+				browser: "safari",
+				os: "macos",
+			}),
+			{ logger: () => undefined, resolver: resolverOverride },
+		);
+		const response = await app.request("/v1/probe", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req-sbsd-hooked-vendors", input: {} }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			data: { code: "RESOLVER_BOUND_TRANSPORT_REQUIRED" },
+		});
+		expect(containerMapCalls).toBe(0);
+		expect(containerIteratorCalls).toBe(0);
+		expect([injectedAdapterCalls, closureTransportCalls]).toEqual([0, 0]);
+		expect(allWreqCalls()).toHaveLength(1);
+	});
+
+	it("rejects malformed automatic resolver vendor selections", async () => {
+		const invalidSelections: readonly unknown[] = [
+			{ vendors: "hypersolutions" },
+			{ vendors: [42] },
+			{ vendors: ["foreign-vendor"] },
+			{ vendors: Array(1) },
+			{ vendors: ["hypersolutions", "hypersolutions"] },
+		];
+		const { createServerAppAsync } = await import("../server/serve.js");
+		for (const [index, invalidSelection] of invalidSelections.entries()) {
+			mockStealthState.queuedResponses.push({
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=invalid&t=invalid-token"),
+				headers: { "set-cookie": "sbsd_o=invalid-state; Path=/; Secure" },
+				url: "https://example.com/profile-probe",
+			});
+			const invalidFactory = () => invalidSelection;
+			// @ts-expect-error test-invalid: runtime validation covers JavaScript/cast callers.
+			const resolverOverride: AutoSolveResolverFactory = invalidFactory;
+			const app = await createServerAppAsync(
+				createSbsdFailureCodeProvider(`stealth-sbsd-invalid-vendors-${index}`, {
+					browser: "safari",
+					os: "macos",
+				}),
+				{ logger: () => undefined, resolver: resolverOverride },
+			);
+			const response = await app.request("/v1/probe", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: `req-sbsd-invalid-vendors-${index}`, input: {} }),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({
+				data: { code: "RESOLVER_BOUND_TRANSPORT_REQUIRED" },
+			});
+		}
+		expect(allWreqCalls()).toHaveLength(invalidSelections.length);
 	});
 
 	it("supplies the bound transport in operation and auth FlowContext assembly", async () => {
