@@ -1450,6 +1450,12 @@ export interface StealthRedirectRunResult {
 
 export interface StealthSession {
 	fetch(url: string, options?: StealthFetchOptions): Promise<StealthResponse>;
+	/**
+	 * Explicitly solve and replay one unsafe request previously classified as
+	 * `replay_required`. The original method, URL, headers, and body bytes are
+	 * retained by this session and may be replayed exactly once.
+	 */
+	replayChallenged(response: StealthResponse): Promise<StealthResponse>;
 	cookies: StealthSessionCookies;
 	redirects: {
 		run(options: StealthRedirectRunOptions): Promise<StealthRedirectRunResult>;

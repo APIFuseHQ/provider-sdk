@@ -15,13 +15,7 @@ export const RESOLVER_VENDOR_CAPABILITIES = {
 	// 2captcha omits `cloudflare_interstitial` and every Akamai kind: its API
 	// offers no measured task type for them, so declaring them
 	// would route challenges to a vendor that can only refuse.
-	"2captcha": [
-		"turnstile",
-		"recaptcha_v2",
-		"recaptcha_v3",
-		"hcaptcha",
-		"aws_waf",
-	],
+	"2captcha": ["turnstile", "recaptcha_v2", "recaptcha_v3", "hcaptcha", "aws_waf"],
 	capsolver: [
 		"turnstile",
 		"recaptcha_v2",
@@ -150,6 +144,11 @@ export interface ResolverVendorAdapter {
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
 		transport?: ResolverVendorTransport,
+		usage?: {
+			readonly attemptIndex: number;
+			/** SHA-256 scope digest; never the raw affinity, proxy URL, cookie, or IP. */
+			readonly resolverIdentityScope?: string;
+		},
 	): Promise<ChallengeSolution>;
 }
 
@@ -195,7 +194,9 @@ export class ResolverVendorUnavailableError extends Error {
 				? options.missingFields?.filter((field) => /^[A-Za-z][A-Za-z0-9_]*$/u.test(field))
 				: undefined;
 		super(
-			reason === "missing_challenge_input" && missingFields !== undefined && missingFields.length > 0
+			reason === "missing_challenge_input" &&
+				missingFields !== undefined &&
+				missingFields.length > 0
 				? `Resolver vendor ${vendor} cannot use incomplete challenge input; missing fields: ${missingFields.join(", ")}`
 				: `Resolver vendor ${vendor} is unavailable: ${reason}`,
 		);

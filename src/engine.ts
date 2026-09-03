@@ -102,9 +102,15 @@ export function isEngineOwnedTelemetryEnvName(name: string): boolean {
 	return ENGINE_OWNED_TELEMETRY_ENV_NAME_SET.has(canonicalEnvName(name));
 }
 
+/** Engine control-plane configuration is never declarable or visible to provider code. */
+function isEngineOwnedEngineEnvName(name: string): boolean {
+	return canonicalEnvName(name).startsWith("APIFUSE__ENGINE__");
+}
+
 /** Every environment name the engine owns: rejected in declarations and filtered from provider projections. */
 export function isEngineOwnedEnvName(name: string): boolean {
 	return (
+		isEngineOwnedEngineEnvName(name) ||
 		isEngineOwnedProxyCredentialName(name) ||
 		isEngineOwnedResolverCredentialName(name) ||
 		isEngineOwnedTelemetryEnvName(name)

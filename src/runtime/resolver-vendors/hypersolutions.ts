@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
 
 import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
+import { recordPaidResolverCreate } from "../resolver-usage.js";
 import type { TraceRecorder } from "../trace.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
@@ -10,6 +11,8 @@ import {
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 } from "./types.js";
+
+type ResolverPaidUsageContext = NonNullable<Parameters<ResolverVendorAdapter["solve"]>[5]>;
 
 const HYPERSOLUTIONS_VENDOR_ID = "hypersolutions" as const;
 const HYPER_SBSD_URL = "https://akm.hypersolutions.co/sbsd";
@@ -43,6 +46,7 @@ export interface HypersolutionsResolverVendorAdapter extends ResolverVendorAdapt
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
 		transport?: ResolverVendorTransport,
+		usage?: ResolverPaidUsageContext,
 	): Promise<AkamaiSbsdChallengeSolution>;
 }
 
@@ -247,7 +251,7 @@ export function createHypersolutionsResolverVendorAdapter(
 		requiresTransport: true,
 		transportAllowedHosts: HYPER_TRANSPORT_HOSTS,
 		supports: (kind) => kind === "akamai_sbsd",
-		async solve(challenge, _identity, signal, _traceRecorder, transport) {
+		async solve(challenge, _identity, signal, traceRecorder, transport, usage) {
 			const timeoutController = new AbortController();
 			const operationSignal = options.timeoutMs
 				? AbortSignal.any([signal, timeoutController.signal])
@@ -286,29 +290,44 @@ export function createHypersolutionsResolverVendorAdapter(
 					assertResolverHostAllowed(url, HYPER_TRANSPORT_HOSTS);
 				}
 
-				const ipResponse = await boundFetch(
-					transport,
-					HYPER_IP_URL,
-					{
-						method: "GET",
-						headers: {
-							accept: "application/json, text/plain;q=0.9",
-							"x-api-key": apiKey,
-						},
-						signal: operationSignal,
-						redirect: "manual",
-						maxBodyBytes: IP_RESPONSE_MAX_BYTES,
+				// Hyper documents /ip as an authenticated service request but does not
+				// publish an explicit exclusion from request quota. Meter conservatively.
+				const ip = await recordPaidResolverCreate({
+					traceRecorder,
+					vendor: HYPERSOLUTIONS_VENDOR_ID,
+					kind: challenge.kind,
+					endpoint: "hyper:ip",
+					signal: operationSignal,
+					usage,
+					create: async () => {
+						const ipResponse = await boundFetch(
+							transport,
+							HYPER_IP_URL,
+							{
+								method: "GET",
+								headers: {
+									accept: "application/json, text/plain;q=0.9",
+									"x-api-key": apiKey,
+								},
+								signal: operationSignal,
+								redirect: "manual",
+								maxBodyBytes: IP_RESPONSE_MAX_BYTES,
+							},
+							"measure_ip",
+						);
+						assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
+						requireSuccess(ipResponse.status, "measure_ip");
+						const observedIp = parseObservedIp(ipResponse.body);
+						if (!observedIp) {
+							throw new ResolverVendorUnavailableError(
+								HYPERSOLUTIONS_VENDOR_ID,
+								"transport_failure",
+								{ phase: "measure_ip" },
+							);
+						}
+						return observedIp;
 					},
-					"measure_ip",
-				);
-				assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
-				requireSuccess(ipResponse.status, "measure_ip");
-				const ip = parseObservedIp(ipResponse.body);
-				if (!ip) {
-					throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "transport_failure", {
-						phase: "measure_ip",
-					});
-				}
+				});
 
 				const scriptResponse = await boundFetch(
 					transport,
@@ -342,42 +361,53 @@ export function createHypersolutionsResolverVendorAdapter(
 
 				let expires: number | undefined;
 				for (const [roundIndex, index] of exchange.indices.entries()) {
-					const hyperResponse = await boundFetch(
-						transport,
-						HYPER_SBSD_URL,
-						{
-							method: "POST",
-							headers: {
-								accept: "application/json",
-								"content-type": "application/json",
-								"x-api-key": apiKey,
-							},
-							body: hyperRequestBody({
-								index,
-								uuid: exchange.uuid,
-								stateCookieValue: originCookie,
-								pageUrl: challenge.pageUrl,
-								userAgent,
-								script: scriptResponse.body,
-								ip,
-								acceptLanguage,
-							}),
-							signal: operationSignal,
-							redirect: "manual",
-							maxBodyBytes: HYPER_RESPONSE_MAX_BYTES,
+					const payload = await recordPaidResolverCreate({
+						traceRecorder,
+						vendor: HYPERSOLUTIONS_VENDOR_ID,
+						kind: challenge.kind,
+						endpoint: "hyper:sbsd_create",
+						signal: operationSignal,
+						usage,
+						create: async () => {
+							const hyperResponse = await boundFetch(
+								transport,
+								HYPER_SBSD_URL,
+								{
+									method: "POST",
+									headers: {
+										accept: "application/json",
+										"content-type": "application/json",
+										"x-api-key": apiKey,
+									},
+									body: hyperRequestBody({
+										index,
+										uuid: exchange.uuid,
+										stateCookieValue: originCookie,
+										pageUrl: challenge.pageUrl,
+										userAgent,
+										script: scriptResponse.body,
+										ip,
+										acceptLanguage,
+									}),
+									signal: operationSignal,
+									redirect: "manual",
+									maxBodyBytes: HYPER_RESPONSE_MAX_BYTES,
+								},
+								"generate_payload",
+							);
+							assertBoundedBody(hyperResponse, HYPER_RESPONSE_MAX_BYTES, "generate_payload");
+							requireSuccess(hyperResponse.status, "generate_payload");
+							const payload = parsePayload(hyperResponse.body);
+							if (!payload) {
+								throw new ResolverVendorUnavailableError(
+									HYPERSOLUTIONS_VENDOR_ID,
+									"transport_failure",
+									{ phase: "generate_payload", round: roundIndex + 1 },
+								);
+							}
+							return payload;
 						},
-						"generate_payload",
-					);
-					assertBoundedBody(hyperResponse, HYPER_RESPONSE_MAX_BYTES, "generate_payload");
-					requireSuccess(hyperResponse.status, "generate_payload");
-					const payload = parsePayload(hyperResponse.body);
-					if (!payload) {
-						throw new ResolverVendorUnavailableError(
-							HYPERSOLUTIONS_VENDOR_ID,
-							"transport_failure",
-							{ phase: "generate_payload", round: roundIndex + 1 },
-						);
-					}
+					});
 					const payloadBody = JSON.stringify({ body: payload });
 					if (bodyByteLength(payloadBody) > PAYLOAD_RESPONSE_MAX_BYTES) {
 						throw new ResolverVendorUnavailableError(
