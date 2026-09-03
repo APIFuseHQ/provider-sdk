@@ -21,6 +21,8 @@ export interface CreateTraceContextOptions {
 	onSpan?: (span: Span) => void;
 	exportOptions?: OTLPExportOptions;
 	resourceAttributes?: Record<string, string>;
+	/** W3C-compatible 32-character lowercase hexadecimal trace id used for export. */
+	traceId?: string;
 	/**
 	 * Applied to a detached copy of each span immediately before OTLP export; never touches
 	 * getSpans() or onSpan. Returning nothing (or throwing) drops that export batch.
@@ -160,7 +162,7 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 		: undefined;
 	// One trace id per context so every export batch of this request shares it and
 	// two processes can never mint the same id.
-	const exportTraceId = crypto.randomUUID().replace(/-/g, "");
+	const exportTraceId = options.traceId ?? crypto.randomUUID().replace(/-/g, "");
 	let exportScheduled = false;
 
 	// One pending batch per context: roots completing before the flush share it, and a span is

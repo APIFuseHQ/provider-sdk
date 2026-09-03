@@ -16,6 +16,7 @@ import {
 	createTraceContext,
 	getTraceRecorder,
 	resolveTraceContextOptions,
+	type TraceRecorder,
 } from "../runtime/trace.js";
 import {
 	APIFUSE__TRACE__ENABLED,
@@ -24,7 +25,7 @@ import {
 } from "../runtime/trace-config.js";
 import { createServerApp } from "../server/serve.js";
 import { resolveServerTraceContextOptions } from "../server/trace-output.js";
-import type { TraceConfig } from "../types.js";
+import type { FlowContext, ResolverContext, TraceConfig } from "../types.js";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 
 const TRACE_CREDENTIAL = "tok_fake_Qj8nV2xK9mP4sT7yB3cD6fG1hL5zX0aS";
@@ -170,14 +171,24 @@ function withTraceEnv(values: Record<string, string | undefined>, run: () => Pro
 	});
 }
 
-async function invokeEcho(): Promise<Response> {
+async function invokeEcho(
+	input: {
+		requestId?: string;
+		headers?: Record<string, string>;
+		bodyHeaders?: Record<string, string>;
+	} = {},
+): Promise<Response> {
 	return createServerApp(provider, {
 		allowMemoryStateFallback: true,
 		logger: () => {},
 	}).request("/v1/echo", {
 		method: "POST",
-		headers: { "content-type": "application/json" },
-		body: JSON.stringify({ requestId: "trace-output-test", input: { value: "hello" } }),
+		headers: { "content-type": "application/json", ...input.headers },
+		body: JSON.stringify({
+			requestId: input.requestId ?? "trace-output-test",
+			input: { value: "hello" },
+			...(input.bodyHeaders ? { headers: input.bodyHeaders } : {}),
+		}),
 	});
 }
 
@@ -202,6 +213,42 @@ async function invokeSpanNames(): Promise<Response> {
 		body: JSON.stringify({ requestId: "trace-name-test", input: {} }),
 	});
 }
+
+function createLocalFetchDouble(
+	implementation: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+	return Object.assign(implementation, {
+		preconnect: () => {},
+	});
+}
+
+async function exerciseAuthNamespaces(ctx: FlowContext, route: string) {
+	await ctx.http.get("https://auth-trace.test/ping");
+	if (!ctx.state) throw new Error("auth trace test requires runtime state");
+	await ctx.state
+		.namespace("auth_trace", {
+			defaultTtl: "1m",
+			maxTtl: "1h",
+			maxEntries: 10,
+			maxValueBytes: 1_024,
+		})
+		.get(route);
+	return { kind: "message", turnId: `turn-${route}`, data: { route } };
+}
+
+const authTraceProvider = createProviderDefinitionDouble({
+	auth: {
+		mode: "credentials",
+		flow: {
+			start: async (ctx) => exerciseAuthNamespaces(ctx, "start"),
+			continue: async (ctx) => exerciseAuthNamespaces(ctx, "continue"),
+			poll: async (ctx) => exerciseAuthNamespaces(ctx, "poll"),
+			refresh: async (ctx) => exerciseAuthNamespaces(ctx, "refresh"),
+			abort: async (ctx) => exerciseAuthNamespaces(ctx, "disconnect"),
+		},
+	},
+	operations: provider.operations,
+});
 
 describe("server trace output wiring", () => {
 	it("keeps the default in-memory trace behavior silent", async () => {
@@ -254,8 +301,137 @@ describe("server trace output wiring", () => {
 			console.log = originalLog;
 		}
 
-		const names = output.map((line) => (JSON.parse(line) as { name: string }).name);
-		expect(names).toContain("handler:echo");
+		const spans = output.map(
+			(line) => JSON.parse(line) as { id: string; name: string; parentId?: string },
+		);
+		const roots = spans.filter((span) => span.name === "request:operation:echo");
+		expect(roots).toHaveLength(1);
+		expect(spans.find((span) => span.name === "handler:echo")?.parentId).toBe(roots[0]?.id);
+	});
+
+	it("parents auth resolver and vendor spans under the request root", async () => {
+		const output: string[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		const resolver = {
+			async solve(_challenge: unknown, _signal?: AbortSignal, traceRecorder?: TraceRecorder) {
+				if (!traceRecorder) throw new Error("resolver trace recorder missing");
+				return traceRecorder.runSpan("resolver.vendor.attempt", async () => ({
+					form: "token" as const,
+					token: "solved",
+				}));
+			},
+		} as ResolverContext;
+		const resolverProvider = createProviderDefinitionDouble({
+			auth: {
+				mode: "credentials",
+				flow: {
+					start: async () => ({ kind: "form", turnId: "start" }),
+					continue: async (ctx) => {
+						await ctx.resolver.solve({
+							kind: "turnstile",
+							siteKey: "site-key",
+							pageUrl: "https://example.com/challenge",
+						});
+						return { kind: "complete", turnId: "complete" };
+					},
+				},
+			},
+			operations: provider.operations,
+		});
+
+		try {
+			await withTraceEnv(
+				{ [APIFUSE__TRACE__ENABLED]: "true", [APIFUSE__TRACE__EXPORTER]: "json" },
+				async () => {
+					const response = await createServerApp(resolverProvider, {
+						allowMemoryStateFallback: true,
+						logger: () => {},
+						resolver,
+					}).request("/auth/continue", {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							requestId: "auth-resolver-trace",
+							flowId: "flow-resolver-trace",
+							input: {},
+						}),
+					});
+					expect(response.status).toBe(200);
+				},
+			);
+		} finally {
+			console.log = originalLog;
+		}
+
+		const spans = output.map(
+			(line) => JSON.parse(line) as { id: string; name: string; parentId?: string },
+		);
+		const root = spans.find((span) => span.name === "request:auth:continue");
+		const solve = spans.find((span) => span.name === "resolver.solve");
+		const vendor = spans.find((span) => span.name === "resolver.vendor.attempt");
+		expect(root).toBeDefined();
+		expect(solve?.parentId).toBe(root?.id);
+		expect(vendor?.parentId).toBe(solve?.id);
+	});
+
+	it("emits HTTP and state spans under one request root on every auth route", async () => {
+		const output: string[] = [];
+		const originalLog = console.log;
+		const originalFetch = global.fetch;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		global.fetch = createLocalFetchDouble(async () => Response.json({ ok: true }));
+		const routes = ["start", "continue", "poll", "refresh", "disconnect"] as const;
+
+		try {
+			await withTraceEnv(
+				{ [APIFUSE__TRACE__ENABLED]: "true", [APIFUSE__TRACE__EXPORTER]: "json" },
+				async () => {
+					const app = createServerApp(authTraceProvider, {
+						allowMemoryStateFallback: true,
+						logger: () => {},
+					});
+					for (const route of routes) {
+						const response = await app.request(`/auth/${route}`, {
+							method: "POST",
+							headers: { "content-type": "application/json" },
+							body: JSON.stringify({
+								requestId: `auth-route-${route}`,
+								flowId: `flow-${route}`,
+								input: {},
+							}),
+						});
+						expect(response.status).toBe(200);
+					}
+				},
+			);
+		} finally {
+			global.fetch = originalFetch;
+			console.log = originalLog;
+		}
+
+		const spans = output.map(
+			(line) =>
+				JSON.parse(line) as {
+					id: string;
+					name: string;
+					parentId?: string;
+					attributes: Record<string, string | number | boolean>;
+				},
+		);
+		for (const route of routes) {
+			const requestSpans = spans.filter(
+				(span) => span.attributes.request_id === `auth-route-${route}`,
+			);
+			const roots = requestSpans.filter((span) => span.name === `request:auth:${route}`);
+			expect(roots).toHaveLength(1);
+			const root = roots[0];
+			for (const name of ["http.get", "state.get"]) {
+				const span = requestSpans.find((candidate) => candidate.name === name);
+				expect(span).toBeDefined();
+				expect(span?.parentId).toBe(root?.id);
+			}
+		}
 	});
 
 	it("emits JSON spans with names and durations for the console exporter", async () => {
@@ -828,6 +1004,70 @@ describe("server OTLP trace output wiring", () => {
 		}
 	});
 
+	it("seeds the exported trace id from an inbound traceparent", async () => {
+		const capture = captureExports();
+		const inboundTraceId = "0123456789abcdef0123456789abcdef";
+		try {
+			await withTraceEnv(
+				{
+					[APIFUSE__TRACE__ENABLED]: "true",
+					[APIFUSE__TRACE__EXPORTER]: "otlp",
+					[OTEL_EXPORTER_OTLP_TRACES_ENDPOINT]: "http://collector.test/v1/traces",
+				},
+				async () => {
+					const response = await invokeEcho({
+						requestId: "traceparent-request",
+						headers: {
+							traceparent: `00-${inboundTraceId}-0123456789abcdef-01`,
+						},
+					});
+					expect(response.status).toBe(200);
+					await settleExports(capture.exports, 1);
+				},
+			);
+
+			expect(capture.exports).toHaveLength(1);
+			const body = JSON.parse(String(capture.exports[0]?.init?.body)) as OTLPBody;
+			const spans = body.resourceSpans[0]?.scopeSpans[0]?.spans ?? [];
+			expect(new Set(spans.map((span) => span.traceId))).toEqual(new Set([inboundTraceId]));
+		} finally {
+			capture.restore();
+		}
+	});
+
+	it("derives a stable exported trace id from the request id", async () => {
+		const capture = captureExports();
+		try {
+			await withTraceEnv(
+				{
+					[APIFUSE__TRACE__ENABLED]: "true",
+					[APIFUSE__TRACE__EXPORTER]: "otlp",
+					[OTEL_EXPORTER_OTLP_TRACES_ENDPOINT]: "http://collector.test/v1/traces",
+				},
+				async () => {
+					for (let invocation = 0; invocation < 2; invocation += 1) {
+						const response = await invokeEcho({ requestId: "stable-request-id" });
+						expect(response.status).toBe(200);
+					}
+					await settleExports(capture.exports, 2);
+				},
+			);
+
+			expect(capture.exports).toHaveLength(2);
+			const traceIds = capture.exports.map((entry) => {
+				const body = JSON.parse(String(entry.init?.body)) as OTLPBody;
+				const spans = body.resourceSpans[0]?.scopeSpans[0]?.spans ?? [];
+				const ids = new Set(spans.map((span) => span.traceId));
+				expect(ids.size).toBe(1);
+				return [...ids][0];
+			});
+			expect(traceIds[0]).toMatch(/^[0-9a-f]{32}$/);
+			expect(traceIds[1]).toBe(traceIds[0]);
+		} finally {
+			capture.restore();
+		}
+	});
+
 	it("keeps provider operations unaffected when otlp is enabled without an endpoint", async () => {
 		const output: string[] = [];
 		const originalLog = console.log;
@@ -940,6 +1180,7 @@ describe("server OTLP trace output wiring", () => {
 			request_id: "trace-secret-test",
 			provider_id: "test-provider",
 			operation_id: "fail",
+			route: "fail",
 			"service.name": "apifuse-provider-under-test-production",
 		});
 		const spans = body.resourceSpans[0]?.scopeSpans[0]?.spans ?? [];

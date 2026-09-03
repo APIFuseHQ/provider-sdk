@@ -88,7 +88,11 @@ import {
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
-import { createTraceContext, type TraceRecorder } from "../runtime/trace.js";
+import {
+	createTraceContext,
+	type TraceContext as RuntimeTraceContext,
+	type TraceRecorder,
+} from "../runtime/trace.js";
 import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
 import {
@@ -663,16 +667,20 @@ function providerSecretNames(provider: ProviderDefinition): string[] {
 	);
 }
 
+type RequestScopeContext = {
+	trace: RuntimeTraceContext;
+	proxyTelemetry: ProxyTelemetryCollector;
+};
+
 function createProviderContext(
 	provider: ProviderDefinition,
 	request: OperationRequest,
 	operationId: string,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
-	proxyTelemetry?: ProxyTelemetryCollector,
+	scope: RequestScopeContext,
 	signal?: AbortSignal,
 ): ProviderContext {
-	const traceConfig = resolveTraceConfigFromEnv();
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
 	const stealthProfile = getProviderStealthProfile(provider);
@@ -681,7 +689,7 @@ function createProviderContext(
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveProviderProxyAffinityKey(provider, request, operationId),
-		telemetry: proxyTelemetry,
+		telemetry: scope.proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
@@ -693,7 +701,7 @@ function createProviderContext(
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
-		telemetry: proxyTelemetry,
+		telemetry: scope.proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
 		...(provider.stealth ? { stealth: provider.stealth } : {}),
@@ -771,15 +779,7 @@ function createProviderContext(
 					},
 				}
 			: {}),
-		trace: traceConfig
-			? createTraceContext(
-					resolveServerTraceContextOptions(traceConfig, {
-						request_id: request.requestId,
-						provider_id: provider.id,
-						operation_id: operationId,
-					}),
-				)
-			: createTraceContext(),
+		trace: scope.trace,
 		auth: createAuthStub(),
 		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
@@ -885,7 +885,7 @@ function createAuthFlowContext(
 	request: AuthFlowRequest,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState,
-	proxyTelemetry?: ProxyTelemetryCollector,
+	scope: RequestScopeContext,
 	signal?: AbortSignal,
 ): {
 	context: FlowContext;
@@ -904,7 +904,7 @@ function createAuthFlowContext(
 	const proxyClientOptions = {
 		upstream: { proxy: provider.proxy },
 		affinityKey: resolveAuthFlowProxyAffinityKey(provider, request),
-		telemetry: proxyTelemetry,
+		telemetry: scope.proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 	};
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
@@ -915,7 +915,7 @@ function createAuthFlowContext(
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
-		telemetry: proxyTelemetry,
+		telemetry: scope.proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
 		...(provider.stealth ? { stealth: provider.stealth } : {}),
@@ -941,71 +941,74 @@ function createAuthFlowContext(
 		: undefined;
 	const cache = createProviderCache({ providerId: provider.id });
 
+	const context: FlowContext = wrapWithInstrumentation({
+		flowId: request.flowId,
+		connectionId: resolveOperationConnectionId(request),
+		externalRef: request.externalRef,
+		tenantId: request.tenantId ?? "",
+		providerId: request.providerId ?? provider.id,
+		trace: scope.trace,
+		http: createHttpClient(baseUrl, {
+			...proxyClientOptions,
+			...(signal ? { signal } : {}),
+		}),
+		state: state.forConnection(resolveOperationConnectionId(request)),
+		stealth: stealthBaseUrl
+			? capabilityModules.stealth
+				? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
+				: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
+			: createStealthStub(),
+		...(provider.native
+			? {
+					native: {
+						network: capabilityModules.nativeNetwork!.createNativeNetworkClient({
+							egress: provider.native.network,
+							proxyPolicy: resolveNativeProxyPolicy(provider),
+							affinityKey: proxyClientOptions.affinityKey,
+							credentials: capabilityModules.nativeNetwork!.createEnvVendorCredentialResolver(
+								createEnvContext([...ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES]),
+							),
+						}),
+					},
+				}
+			: {}),
+		env: createEnvContext([
+			...providerSecretNames(provider),
+			...(provider.auth?.mode === "oauth2_proxied" ? ["APIFUSE__AUTH_PROXY__URL"] : []),
+		]),
+		credential,
+		context: flowContextStore.context,
+		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
+		stt: options.stt ?? createSttClientFromEnv(provider.stt),
+		resolver: capabilityModules.resolver
+			? capabilityModules.resolver.bindResolverSignal(
+					options.resolver ??
+						capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
+							allowedHosts: provider.allowedHosts,
+							cache,
+							identityScope: resolverIdentityScope,
+							...(proxyPolicy
+								? {
+										proxyIntent: {
+											mode: proxyPolicy.mode,
+											...proxyClientOptions,
+											...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+										},
+									}
+								: {}),
+						}),
+					signal,
+				)
+			: bindResolverSignalWithoutRuntime(
+					options.resolver ??
+						createUnsupportedResolverClient("Provider does not declare resolver capability"),
+					signal,
+				),
+		auth: createAuthFlowHelpers({ signal }),
+	});
+
 	return {
-		context: {
-			flowId: request.flowId,
-			connectionId: resolveOperationConnectionId(request),
-			externalRef: request.externalRef,
-			tenantId: request.tenantId ?? "",
-			providerId: request.providerId ?? provider.id,
-			http: createHttpClient(baseUrl, {
-				...proxyClientOptions,
-				...(signal ? { signal } : {}),
-			}),
-			state: state.forConnection(resolveOperationConnectionId(request)),
-			stealth: stealthBaseUrl
-				? capabilityModules.stealth
-					? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
-					: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
-				: createStealthStub(),
-			...(provider.native
-				? {
-						native: {
-							network: capabilityModules.nativeNetwork!.createNativeNetworkClient({
-								egress: provider.native.network,
-								proxyPolicy: resolveNativeProxyPolicy(provider),
-								affinityKey: proxyClientOptions.affinityKey,
-								credentials: capabilityModules.nativeNetwork!.createEnvVendorCredentialResolver(
-									createEnvContext([...ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES]),
-								),
-							}),
-						},
-					}
-				: {}),
-			env: createEnvContext([
-				...providerSecretNames(provider),
-				...(provider.auth?.mode === "oauth2_proxied" ? ["APIFUSE__AUTH_PROXY__URL"] : []),
-			]),
-			credential,
-			context: flowContextStore.context,
-			ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
-			stt: options.stt ?? createSttClientFromEnv(provider.stt),
-			resolver: capabilityModules.resolver
-				? capabilityModules.resolver.bindResolverSignal(
-						options.resolver ??
-							capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
-								allowedHosts: provider.allowedHosts,
-								cache,
-								identityScope: resolverIdentityScope,
-								...(proxyPolicy
-									? {
-											proxyIntent: {
-												mode: proxyPolicy.mode,
-												...proxyClientOptions,
-												...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
-											},
-										}
-									: {}),
-							}),
-						signal,
-					)
-				: bindResolverSignalWithoutRuntime(
-						options.resolver ??
-							createUnsupportedResolverClient("Provider does not declare resolver capability"),
-						signal,
-					),
-			auth: createAuthFlowHelpers({ signal }),
-		},
+		context,
 		getPatch: flowContextStore.getPatch,
 	};
 }
@@ -1017,11 +1020,21 @@ type ProviderRequestCost = {
 	cpuTotalMicros: number;
 };
 
+type RequestCorrelationIds = {
+	connectionId?: string;
+	flowId?: string;
+	tenantId?: string;
+	providerId?: string;
+};
+
 type ProviderServerLogEventBase = ProviderRequestCost & {
 	providerId: string;
 	kind: "operation" | "auth";
 	route: string;
 	requestId?: string;
+	connectionId?: string;
+	flowId?: string;
+	tenantId?: string;
 	status: number;
 	proxy?: ProxyTelemetryLogPayload;
 };
@@ -1589,6 +1602,7 @@ function logProviderError(
 	declaredErrorCode: OperationErrorCode | undefined,
 	proxyTelemetry: ProxyTelemetryCollector | undefined,
 	observabilityDetails: ErrorObservabilityDetails,
+	correlation: RequestCorrelationIds = {},
 ): void {
 	const providerCode = isProviderError(error) ? providerErrorCode(error) : undefined;
 	const code = isProviderError(error)
@@ -1620,10 +1634,15 @@ function logProviderError(
 	emit({
 		level: status >= 500 ? "error" : "warn",
 		event: "provider_request_failed",
-		providerId: provider.id,
+		providerId: correlation.providerId ?? provider.id,
 		kind,
 		route,
 		...(requestId ? { requestId } : {}),
+		...(correlation.connectionId !== undefined
+			? { connectionId: correlation.connectionId }
+			: {}),
+		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
+		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
 		status,
 		...cost,
 		...(proxy ? { proxy } : {}),
@@ -1681,19 +1700,168 @@ function logProviderSuccess(
 	status: number,
 	cost: ProviderRequestCost,
 	proxyTelemetry?: ProxyTelemetryCollector,
+	correlation: RequestCorrelationIds = {},
 ): void {
 	const proxy = proxyTelemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	emit({
 		level: "info",
 		event: "provider_request_completed",
-		providerId: provider.id,
+		providerId: correlation.providerId ?? provider.id,
 		kind,
 		route,
 		...(requestId ? { requestId } : {}),
+		...(correlation.connectionId !== undefined
+			? { connectionId: correlation.connectionId }
+			: {}),
+		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
+		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
 		status,
 		...cost,
 		...(proxy ? { proxy } : {}),
+	});
+}
+
+type RequestScopeFinishResult = {
+	providerTelemetryHeader?: string;
+	errorObservability?: ErrorObservabilityDetails;
+};
+
+type RequestScope = RequestScopeContext & {
+	run<T>(fn: () => Promise<T>): Promise<T>;
+	finish(status: number, error?: unknown): RequestScopeFinishResult;
+};
+
+function traceIdFromTraceparent(headers: Record<string, string>): string | undefined {
+	const traceparent = Object.entries(headers).find(
+		([name]) => name.toLowerCase() === "traceparent",
+	)?.[1];
+	if (!traceparent) return undefined;
+	const match = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(
+		traceparent.trim(),
+	);
+	if (!match || match[1]?.toLowerCase() === "ff") return undefined;
+	const traceId = match[2]?.toLowerCase();
+	const parentId = match[3]?.toLowerCase();
+	if (!traceId || !parentId || /^0+$/.test(traceId) || /^0+$/.test(parentId)) return undefined;
+	return traceId;
+}
+
+function requestTraceId(
+	headers: Record<string, string>,
+	requestId: string | undefined,
+): string | undefined {
+	return (
+		traceIdFromTraceparent(headers) ??
+		(requestId
+			? createHash("sha256").update(requestId, "utf8").digest("hex").slice(0, 32)
+			: undefined)
+	);
+}
+
+function createRequestScope(input: {
+	provider: ProviderDefinition;
+	kind: "operation" | "auth";
+	route: string;
+	requestId?: string;
+	operationId?: string;
+	flowId?: string;
+	headers: Record<string, string>;
+	correlation?: RequestCorrelationIds;
+	logger?: ProviderServerLogger;
+	setHeader?: (name: string, value: string) => void;
+	declaredErrorCode?: (error: unknown) => OperationErrorCode | undefined;
+}): RequestScope {
+	const requestCost = startRequestCost();
+	const traceConfig = resolveTraceConfigFromEnv();
+	const traceAttributes = {
+		...(input.requestId ? { request_id: input.requestId } : {}),
+		provider_id: input.provider.id,
+		...(input.kind === "operation" && input.operationId ? { operation_id: input.operationId } : {}),
+		...(input.kind === "auth" && input.flowId ? { flow_id: input.flowId } : {}),
+		route: input.route,
+	};
+	const traceId = requestTraceId(input.headers, input.requestId);
+	const trace = traceConfig
+		? createTraceContext({
+				...resolveServerTraceContextOptions(traceConfig, traceAttributes),
+				...(traceId ? { traceId } : {}),
+			})
+		: createTraceContext();
+	const proxyTelemetry = new ProxyTelemetryCollector();
+	const correlation = input.correlation ?? {};
+
+	return {
+		trace,
+		proxyTelemetry,
+		run<T>(fn: () => Promise<T>): Promise<T> {
+			return trace.span(`request:${input.kind}:${input.route}`, fn);
+		},
+		finish(status: number, error?: unknown): RequestScopeFinishResult {
+			const cost = finishRequestCost(requestCost);
+			let errorObservability: ErrorObservabilityDetails | undefined;
+			if (error === undefined) {
+				logProviderSuccess(
+					input.logger,
+					input.provider,
+					input.kind,
+					input.route,
+					input.requestId,
+					status,
+					cost,
+					proxyTelemetry,
+					correlation,
+				);
+			} else {
+				const declaredErrorCode = input.declaredErrorCode?.(error);
+				errorObservability = errorObservabilityDetails(error, declaredErrorCode);
+				logProviderError(
+					input.logger,
+					input.provider,
+					input.kind,
+					input.route,
+					input.requestId,
+					error,
+					status,
+					cost,
+					declaredErrorCode,
+					proxyTelemetry,
+					errorObservability,
+					correlation,
+				);
+			}
+
+			const providerTelemetryHeader = proxyTelemetry.toHeaderValue();
+			if (providerTelemetryHeader) {
+				input.setHeader?.(PROVIDER_TELEMETRY_HEADER, providerTelemetryHeader);
+			}
+			if (errorObservability) {
+				input.setHeader?.(ERROR_OBSERVABILITY_HEADER, JSON.stringify(errorObservability));
+			}
+			return {
+				...(providerTelemetryHeader ? { providerTelemetryHeader } : {}),
+				...(errorObservability ? { errorObservability } : {}),
+			};
+		},
+	};
+}
+
+function responseWithRequestScopeHeaders(
+	response: Response,
+	finished: RequestScopeFinishResult,
+): Response {
+	const headers = new Headers(response.headers);
+	headers.delete(PROVIDER_TELEMETRY_HEADER);
+	if (finished.providerTelemetryHeader) {
+		headers.set(PROVIDER_TELEMETRY_HEADER, finished.providerTelemetryHeader);
+	}
+	if (finished.errorObservability) {
+		headers.set(ERROR_OBSERVABILITY_HEADER, JSON.stringify(finished.errorObservability));
+	}
+	return new Response(response.body, {
+		headers,
+		status: response.status,
+		statusText: response.statusText,
 	});
 }
 
@@ -2092,18 +2260,10 @@ async function handleOperation(
 	operationId: string,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState = createUnsupportedProviderRuntimeState(),
-	proxyTelemetry?: ProxyTelemetryCollector,
+	scope: RequestScope,
 	signal?: AbortSignal,
 ): Promise<Response | OperationResponse> {
-	const ctx = createProviderContext(
-		provider,
-		request,
-		operationId,
-		options,
-		state,
-		proxyTelemetry,
-		signal,
-	);
+	const ctx = createProviderContext(provider, request, operationId, options, state, scope, signal);
 	const operation = provider.operations[operationId];
 	const streaming = operation?.transport?.kind && operation.transport.kind !== "json";
 	let cleanupCalled = false;
@@ -2142,17 +2302,19 @@ async function handleOperation(
 		}
 	};
 	try {
-		const result = options.operationExecutor
-			? await options.operationExecutor({
-					provider,
-					operationId,
-					ctx,
-					request,
-					signal,
-				})
-			: await executeOperation(provider, operationId, ctx, request.input, {
-					env: createEnvContext(providerSecretNames(provider)),
-				});
+		const result = await scope.run(() =>
+			options.operationExecutor
+				? options.operationExecutor({
+						provider,
+						operationId,
+						ctx,
+						request,
+						signal,
+					})
+				: executeOperation(provider, operationId, ctx, request.input, {
+						env: createEnvContext(providerSecretNames(provider)),
+					}),
+		);
 		if (streaming && operation) {
 			return toStreamingResponse(operation, result, cleanup, request.requestId);
 		}
@@ -2165,21 +2327,6 @@ async function handleOperation(
 	}
 }
 
-function responseWithProviderTelemetry(
-	response: Response,
-	proxyTelemetry?: ProxyTelemetryCollector,
-): Response {
-	const headerValue = proxyTelemetry?.toHeaderValue();
-	const headers = new Headers(response.headers);
-	headers.delete(PROVIDER_TELEMETRY_HEADER);
-	if (headerValue) headers.set(PROVIDER_TELEMETRY_HEADER, headerValue);
-	return new Response(response.body, {
-		headers,
-		status: response.status,
-		statusText: response.statusText,
-	});
-}
-
 type AuthRoute = "start" | "continue" | "poll" | "abort" | "refresh";
 
 async function handleAuthFlow(
@@ -2188,7 +2335,7 @@ async function handleAuthFlow(
 	route: AuthRoute,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState,
-	proxyTelemetry?: ProxyTelemetryCollector,
+	scope: RequestScopeContext,
 	signal?: AbortSignal,
 ): Promise<Response | AuthFlowResponse> {
 	const flow = provider.auth?.flow;
@@ -2208,7 +2355,7 @@ async function handleAuthFlow(
 		request,
 		options,
 		state,
-		proxyTelemetry,
+		scope,
 		signal,
 	);
 	try {
@@ -2496,6 +2643,7 @@ function createServerAppWithCapabilityModules(
 		let rawBodyText = "";
 		let rawBody: unknown;
 		let operationId: string | undefined;
+		let requestScope: RequestScope | undefined;
 		const operation = "stateful-internal";
 		const requestCost = startRequestCost();
 		try {
@@ -2607,36 +2755,42 @@ function createServerAppWithCapabilityModules(
 			}
 			const request = operationRequestFromForwardingEnvelope(envelope);
 			operationId = envelope.operationId;
-			const ctx = createProviderContext(
+			requestScope = createRequestScope({
 				provider,
-				request,
+				kind: "operation",
+				route: operationId,
+				requestId: request.requestId,
 				operationId,
-				options,
-				state,
-				undefined,
-				signal,
-			);
-			if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
-				throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
-			}
-			const output = await options.internalOperationExecutor({
-				provider,
-				operationId,
-				ctx,
-				request,
-				internalStatefulForward: envelope,
-				signal,
-			});
-			logProviderSuccess(
+				headers: request.headers ?? {},
+				correlation: { connectionId: envelope.connectionId },
 				logger,
-				provider,
-				"operation",
-				operationId || operation,
-				request.requestId,
-				200,
-				finishRequestCost(requestCost),
-			);
-			return c.json({ data: output });
+				setHeader: (name, value) => c.header(name, value),
+				declaredErrorCode: (error) => declaredErrorCodeFor(error, operationId, operationErrorCodes),
+			});
+			const output = await requestScope.run(async () => {
+				const ctx = createProviderContext(
+					provider,
+					request,
+					operationId as string,
+					options,
+					state,
+					requestScope as RequestScope,
+					signal,
+				);
+				if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
+					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
+				}
+				return options.internalOperationExecutor!({
+					provider,
+					operationId: operationId as string,
+					ctx,
+					request,
+					internalStatefulForward: envelope,
+					signal,
+				});
+			});
+			const finished = requestScope.finish(200);
+			return responseWithRequestScopeHeaders(c.json({ data: output }), finished);
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operationId, operationErrorCodes);
 			const status = toStatusCode(error, declaredErrorCode);
@@ -2647,31 +2801,40 @@ function createServerAppWithCapabilityModules(
 				c.header("Retry-After", String(STATEFUL_FORWARDING_REPLAY_RETRY_AFTER_SECONDS));
 			}
 			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
-			logProviderError(
-				logger,
-				provider,
-				"operation",
-				operationId || operation,
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				declaredErrorCode,
-				undefined,
-				observabilityDetails,
-			);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
+			const finished = requestScope?.finish(status, error);
+			const observabilityDetails =
+				finished?.errorObservability ?? errorObservabilityDetails(error, declaredErrorCode);
+			if (!requestScope) {
+				logProviderError(
+					logger,
+					provider,
+					"operation",
+					operationId || operation,
+					requestId,
+					error,
+					status,
+					finishRequestCost(requestCost),
+					declaredErrorCode,
+					undefined,
+					observabilityDetails,
+				);
+			}
+			return finished
+				? responseWithRequestScopeHeaders(
+						c.json(toErrorResponse(error, requestId, observabilityDetails), status),
+						finished,
+					)
+				: responseWithErrorObservability(
+						c.json(toErrorResponse(error, requestId, observabilityDetails), status),
+						observabilityDetails,
+					);
 		}
 	});
 
 	app.post("/v1/:operation", async (c) => {
 		let rawBody: unknown;
+		let requestScope: RequestScope | undefined;
 		const operation = c.req.param("operation");
-		const proxyTelemetry = new ProxyTelemetryCollector();
 		const requestCost = startRequestCost();
 		try {
 			rawBody = await c.req.raw
@@ -2681,367 +2844,149 @@ function createServerAppWithCapabilityModules(
 			const body = OperationRequestSchema.parse(rawBody);
 			const requestHeaders = Object.fromEntries(c.req.raw.headers.entries());
 			body.headers = { ...requestHeaders, ...body.headers };
+			requestScope = createRequestScope({
+				provider,
+				kind: "operation",
+				route: operation,
+				requestId: body.requestId,
+				operationId: operation,
+				headers: body.headers,
+				correlation: { connectionId: resolveOperationConnectionId(body) },
+				logger,
+				setHeader: (name, value) => c.header(name, value),
+				declaredErrorCode: (error) => declaredErrorCodeFor(error, operation, operationErrorCodes),
+			});
 			const response = await handleOperation(
 				provider,
 				body,
 				operation,
 				options,
 				state,
-				proxyTelemetry,
+				requestScope,
 				c.req.raw.signal,
 			);
-			if (response instanceof Response) {
-				logProviderSuccess(
-					logger,
-					provider,
-					"operation",
-					operation,
-					body.requestId,
-					response.status,
-					finishRequestCost(requestCost),
-					proxyTelemetry,
-				);
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			}
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			logProviderSuccess(
-				logger,
-				provider,
-				"operation",
-				operation,
-				body.requestId,
-				200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
+			const status = response instanceof Response ? response.status : 200;
+			const finished = requestScope.finish(status);
+			return responseWithRequestScopeHeaders(
+				response instanceof Response ? response : c.json(response),
+				finished,
 			);
-			return c.json(response);
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operation, operationErrorCodes);
 			const status = toStatusCode(error, declaredErrorCode);
 			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
-			logProviderError(
-				logger,
-				provider,
-				"operation",
-				operation,
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				declaredErrorCode,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
+			const finished = requestScope?.finish(status, error);
+			const observabilityDetails =
+				finished?.errorObservability ?? errorObservabilityDetails(error, declaredErrorCode);
+			if (!requestScope) {
+				logProviderError(
+					logger,
+					provider,
+					"operation",
+					operation,
+					requestId,
+					error,
+					status,
+					finishRequestCost(requestCost),
+					declaredErrorCode,
+					undefined,
+					observabilityDetails,
+				);
+			}
+			return responseWithRequestScopeHeaders(
 				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
+				finished ?? { errorObservability: observabilityDetails },
 			);
 		}
 	});
 
-	app.post("/auth/start", async (c) => {
-		let rawBody: unknown;
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
-		try {
-			rawBody = await c.req.raw
-				.clone()
-				.json()
-				.catch(() => undefined);
-			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"start",
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			logProviderSuccess(
-				logger,
-				provider,
-				"auth",
-				"start",
-				body.requestId,
-				response instanceof Response ? response.status : 200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			if (response instanceof Response)
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(response);
-		} catch (error) {
-			const status = toStatusCode(error);
-			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error);
-			logProviderError(
-				logger,
-				provider,
-				"auth",
-				"start",
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				undefined,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
-		}
-	});
+	const authRoutes = [
+		{ path: "/auth/start", flowRoute: "start", logRoute: "start" },
+		{ path: "/auth/continue", flowRoute: "continue", logRoute: "continue" },
+		{ path: "/auth/poll", flowRoute: "poll", logRoute: "poll" },
+		{ path: "/auth/refresh", flowRoute: "refresh", logRoute: "refresh" },
+		{ path: "/auth/disconnect", flowRoute: "abort", logRoute: "disconnect" },
+	] as const satisfies ReadonlyArray<{
+		path: string;
+		flowRoute: AuthRoute;
+		logRoute: string;
+	}>;
 
-	app.post("/auth/continue", async (c) => {
-		let rawBody: unknown;
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
-		try {
-			rawBody = await c.req.raw
-				.clone()
-				.json()
-				.catch(() => undefined);
-			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"continue",
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			logProviderSuccess(
-				logger,
-				provider,
-				"auth",
-				"continue",
-				body.requestId,
-				response instanceof Response ? response.status : 200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			if (response instanceof Response)
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(response);
-		} catch (error) {
-			const status = toStatusCode(error);
-			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error);
-			logProviderError(
-				logger,
-				provider,
-				"auth",
-				"continue",
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				undefined,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
-		}
-	});
-
-	app.post("/auth/poll", async (c) => {
-		let rawBody: unknown;
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
-		try {
-			rawBody = await c.req.raw
-				.clone()
-				.json()
-				.catch(() => undefined);
-			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"poll",
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			logProviderSuccess(
-				logger,
-				provider,
-				"auth",
-				"poll",
-				body.requestId,
-				response instanceof Response ? response.status : 200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			if (response instanceof Response)
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(response);
-		} catch (error) {
-			const status = toStatusCode(error);
-			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error);
-			logProviderError(
-				logger,
-				provider,
-				"auth",
-				"poll",
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				undefined,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
-		}
-	});
-
-	app.post("/auth/refresh", async (c) => {
-		let rawBody: unknown;
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
-		try {
-			rawBody = await c.req.raw
-				.clone()
-				.json()
-				.catch(() => undefined);
-			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"refresh",
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			logProviderSuccess(
-				logger,
-				provider,
-				"auth",
-				"refresh",
-				body.requestId,
-				response instanceof Response ? response.status : 200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			if (response instanceof Response)
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(response);
-		} catch (error) {
-			const status = toStatusCode(error);
-			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error);
-			logProviderError(
-				logger,
-				provider,
-				"auth",
-				"refresh",
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				undefined,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
-		}
-	});
-
-	app.post("/auth/disconnect", async (c) => {
-		let rawBody: unknown;
-		const proxyTelemetry = new ProxyTelemetryCollector();
-		const requestCost = startRequestCost();
-		try {
-			rawBody = await c.req.raw
-				.clone()
-				.json()
-				.catch(() => undefined);
-			const body = withAuthRequestHeaders(AuthFlowRequestSchema.parse(rawBody), c.req.raw.headers);
-			const response = await handleAuthFlow(
-				provider,
-				body,
-				"abort",
-				options,
-				state,
-				proxyTelemetry,
-				c.req.raw.signal,
-			);
-			logProviderSuccess(
-				logger,
-				provider,
-				"auth",
-				"disconnect",
-				body.requestId,
-				response instanceof Response ? response.status : 200,
-				finishRequestCost(requestCost),
-				proxyTelemetry,
-			);
-			if (response instanceof Response)
-				return responseWithProviderTelemetry(response, proxyTelemetry);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return c.json(response);
-		} catch (error) {
-			const status = toStatusCode(error);
-			const requestId = extractRequestId(rawBody);
-			const observabilityDetails = errorObservabilityDetails(error);
-			logProviderError(
-				logger,
-				provider,
-				"auth",
-				"disconnect",
-				requestId,
-				error,
-				status,
-				finishRequestCost(requestCost),
-				undefined,
-				proxyTelemetry,
-				observabilityDetails,
-			);
-			const telemetryHeader = proxyTelemetry.toHeaderValue();
-			if (telemetryHeader) c.header(PROVIDER_TELEMETRY_HEADER, telemetryHeader);
-			return responseWithErrorObservability(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				observabilityDetails,
-			);
-		}
-	});
+	for (const { path, flowRoute, logRoute } of authRoutes) {
+		app.post(path, async (c) => {
+			let rawBody: unknown;
+			let requestScope: RequestScope | undefined;
+			const requestCost = startRequestCost();
+			try {
+				rawBody = await c.req.raw
+					.clone()
+					.json()
+					.catch(() => undefined);
+				const body = withAuthRequestHeaders(
+					AuthFlowRequestSchema.parse(rawBody),
+					c.req.raw.headers,
+				);
+				requestScope = createRequestScope({
+					provider,
+					kind: "auth",
+					route: logRoute,
+					requestId: body.requestId,
+					flowId: body.flowId,
+					headers: body.headers ?? {},
+					correlation: {
+						connectionId: resolveOperationConnectionId(body),
+						flowId: body.flowId,
+						tenantId: body.tenantId,
+						providerId: body.providerId,
+					},
+					logger,
+					setHeader: (name, value) => c.header(name, value),
+				});
+				const response = await requestScope.run(() =>
+					handleAuthFlow(
+						provider,
+						body,
+						flowRoute,
+						options,
+						state,
+						requestScope as RequestScope,
+						c.req.raw.signal,
+					),
+				);
+				const status = response instanceof Response ? response.status : 200;
+				const finished = requestScope.finish(status);
+				return responseWithRequestScopeHeaders(
+					response instanceof Response ? response : c.json(response),
+					finished,
+				);
+			} catch (error) {
+				const status = toStatusCode(error);
+				const requestId = extractRequestId(rawBody);
+				const finished = requestScope?.finish(status, error);
+				const observabilityDetails =
+					finished?.errorObservability ?? errorObservabilityDetails(error);
+				if (!requestScope) {
+					logProviderError(
+						logger,
+						provider,
+						"auth",
+						logRoute,
+						requestId,
+						error,
+						status,
+						finishRequestCost(requestCost),
+						undefined,
+						undefined,
+						observabilityDetails,
+					);
+				}
+				return responseWithRequestScopeHeaders(
+					c.json(toErrorResponse(error, requestId, observabilityDetails), status),
+					finished ?? { errorObservability: observabilityDetails },
+				);
+			}
+		});
+	}
 
 	return app;
 }

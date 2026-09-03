@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
+import { clearProxyResolutionCache } from "../config/loader.js";
 import { ProviderError } from "../errors.js";
 import {
 	createServerApp,
@@ -19,6 +20,12 @@ const STATEFUL_ROUTE = "/__apifuse/stateful/operations";
 const SIGNATURE_HEADER = "x-apifuse-stateful-signature";
 const TIMESTAMP_HEADER = "x-apifuse-stateful-timestamp";
 const FORWARDING_SECRET = "test-stateful-forwarding-secret";
+
+function createLocalFetchDouble(
+	implementation: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+	return Object.assign(implementation, { preconnect: () => {} });
+}
 
 function createTestProvider(state: { defaultExecutions: number }): ProviderDefinition {
 	return {
@@ -200,6 +207,60 @@ describe("signed stateful operation forwarding", () => {
 		});
 		expect(received?.internalStatefulForward).toEqual(JSON.parse(body));
 		expect(received?.signal).toBeInstanceOf(AbortSignal);
+	});
+
+	it("logs proxy telemetry recorded by a forwarded operation", async () => {
+		const originalFetch = global.fetch;
+		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		clearProxyResolutionCache();
+		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+		global.fetch = createLocalFetchDouble(async () => Response.json({ ok: true }));
+		const baseProvider = createTestProvider({ defaultExecutions: 0 });
+		const provider = {
+			...baseProvider,
+			http: {},
+			allowedHosts: ["example.com"],
+			proxy: { mode: "optional", providers: ["smartproxy"] },
+		} satisfies ProviderDefinition;
+		const events: ProviderServerLogEvent[] = [];
+		const app = createServerApp(provider, {
+			logger: (event) => events.push(event),
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async ({ ctx }) => {
+				await ctx.http.get("https://example.com/forwarded");
+				return { accepted: true };
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({ forwardedAt: timestamp });
+
+		try {
+			const response = await app.request(STATEFUL_ROUTE, {
+				method: "POST",
+				headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+				body,
+			});
+			expect(response.status).toBe(200);
+			const event = events.find((candidate) => candidate.event === "provider_request_completed");
+			expect(event).toMatchObject({
+				event: "provider_request_completed",
+				route: "echo",
+				connectionId: "connection-1",
+				proxy: {
+					kind: "unresolved",
+					vendors: ["smartproxy"],
+					failovers: [{ v: "smartproxy", p: "resolution", r: "no_credentials" }],
+				},
+			});
+		} finally {
+			global.fetch = originalFetch;
+			if (originalSmartproxyKey === undefined) {
+				delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
+			} else {
+				process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = originalSmartproxyKey;
+			}
+			clearProxyResolutionCache();
+		}
 	});
 
 	it("logs the forwarded operation id when internal execution fails", async () => {

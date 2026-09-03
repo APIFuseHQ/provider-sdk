@@ -811,6 +811,7 @@ describe("provider HTTP server", () => {
 				kind: "operation",
 				route: "echo",
 				requestId: "req_1",
+				connectionId: "af_con_1",
 				status: 200,
 				durationMs: expect.any(Number),
 				cpuUserMicros: expect.any(Number),
@@ -1523,6 +1524,37 @@ describe("provider HTTP server", () => {
 				step: "started",
 			},
 		});
+	});
+
+	it("logs auth request correlation identifiers", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const appWithLogger = createServerApp(createTestProvider(), {
+			logger: (event) => events.push(event),
+		});
+		const response = await appWithLogger.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_auth_correlation",
+				flowId: "flow_auth_correlation",
+				connectionId: "af_con_auth_correlation",
+				tenantId: "tenant_auth_correlation",
+				providerId: "test-provider",
+				context: {},
+			}),
+		});
+
+		expect(response.status).toBe(200);
+		expect(events).toContainEqual(
+			expect.objectContaining({
+				event: "provider_request_completed",
+				requestId: "req_auth_correlation",
+				connectionId: "af_con_auth_correlation",
+				flowId: "flow_auth_correlation",
+				tenantId: "tenant_auth_correlation",
+				providerId: "test-provider",
+			}),
+		);
 	});
 
 	it("dispatches auth disconnect through the standard endpoint", async () => {
@@ -2298,6 +2330,7 @@ describe("provider HTTP server", () => {
 			expect(decoded.proxy).not.toHaveProperty("userAgentSource");
 			const failedEvent = events.find((event) => event.event === "provider_request_failed");
 			expect(failedEvent).toBeDefined();
+			expect(failedEvent).toMatchObject({ connectionId: "af_con_failure" });
 			expect(failedEvent && "proxy" in failedEvent ? failedEvent.proxy : undefined).toEqual(
 				decoded.proxy,
 			);
@@ -2309,10 +2342,15 @@ describe("provider HTTP server", () => {
 				category: "proxy_pool",
 				retryable: true,
 			});
-			const serialized = JSON.stringify({ body, decoded, error: errorObservability(response) });
-			expect(serialized).not.toContain("redacted-test-key");
-			expect(serialized).not.toContain("5.78.24.25");
-			expect(serialized).not.toContain("af_con_failure");
+			const tenantSerialized = JSON.stringify({
+				body,
+				decoded,
+				error: errorObservability(response),
+			});
+			expect(tenantSerialized).not.toContain("redacted-test-key");
+			expect(tenantSerialized).not.toContain("5.78.24.25");
+			expect(tenantSerialized).not.toContain("af_con_failure");
+			expect(JSON.stringify(failedEvent)).toContain("af_con_failure");
 		} finally {
 			global.fetch = originalFetch;
 			if (originalSmartproxyKey) {
