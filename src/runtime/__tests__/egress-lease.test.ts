@@ -39,6 +39,17 @@ describe("engine ceremony egress lease", () => {
 		const handle = first.handle();
 		expect(handle).toBeString();
 		expect(handle).not.toContain("gate.nodemaven.com");
+		const adversaryViews = String(handle)
+			.split(".")
+			.map((part) => Buffer.from(part, "base64url").toString("utf8"));
+		for (const view of adversaryViews) {
+			expect(view).not.toContain("proxyUrl");
+			expect(view).not.toContain("nodemaven");
+			expect(view).not.toContain("account-sid-fixed");
+			expect(view).not.toContain("password");
+			expect(view).not.toContain("gate.nodemaven.com");
+		}
+		expect(() => JSON.parse(adversaryViews[0] ?? "")).toThrow();
 
 		const next = runtime({ handle, now: () => 1_001 });
 		expect(next.binding).toEqual({
@@ -49,6 +60,17 @@ describe("engine ceremony egress lease", () => {
 			refreshEpoch: 3,
 			lifetimeMinutes: 30,
 		});
+	});
+
+	it("fails before binding when the engine key is missing", () => {
+		expect(() =>
+			createCeremonyEgressLeaseRuntime({
+				providerId: "lease-provider",
+				flowId: "flow-1",
+				affinityKey: "connection-1",
+				environment: {},
+			}),
+		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_KEY_MISSING" }));
 	});
 
 	it("rejects a tampered handle before returning any binding", () => {

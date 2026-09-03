@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { z } from "zod";
 import alPlacementCapture from "../../al-placement-capture.json";
 import chromeAcceptOverride from "../../chrome-accept-override.json";
@@ -101,6 +101,17 @@ function requestHeader(
 		return typeof entry?.[1] === "string" ? entry[1] : undefined;
 	}
 	return undefined;
+}
+
+function requestBodyBytes(init: Record<string, unknown> | undefined): Buffer {
+	const body = init?.body;
+	if (typeof body === "string") return Buffer.from(body, "utf8");
+	if (Buffer.isBuffer(body)) return Buffer.from(body);
+	if (ArrayBuffer.isView(body)) {
+		return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+	}
+	if (body instanceof ArrayBuffer) return Buffer.from(body);
+	throw new Error("Captured request body was not a byte-preserving body");
 }
 
 function toHeaders(headers: MockWreqResponse["headers"]): Headers {
@@ -4143,7 +4154,8 @@ describe("Chrome 149 header parity", () => {
 			},
 		);
 		let solves = 0;
-		const originalBody = Buffer.from([0x66, 0x69, 0x78, 0x74, 0x75, 0x72, 0x65]);
+		const originalBody = Buffer.from([0x00, 0xff, 0xc3, 0x28, 0x80, 0x66, 0x00, 0xfe]);
+		const expectedBody = Buffer.from(originalBody);
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient("https://example.com", {
 			stealth: {
@@ -4173,8 +4185,8 @@ describe("Chrome 149 header parity", () => {
 		expect(solves).toBe(1);
 		const calls = allWreqCalls();
 		expect(calls).toHaveLength(2);
-		expect(calls[0]?.init?.body).toBe("fixture");
-		expect(calls[1]?.init?.body).toBe("fixture");
+		expect(requestBodyBytes(calls[0]?.init)).toEqual(expectedBody);
+		expect(requestBodyBytes(calls[1]?.init)).toEqual(expectedBody);
 		expect(calls[1]?.url).toBe(calls[0]?.url);
 		expect(requestHeader(calls[1]?.init, "x-fixture")).toBe("one, two");
 
@@ -4236,18 +4248,61 @@ describe("Chrome 149 header parity", () => {
 				},
 			},
 		}).createSession();
-		const challenged = await session.fetch("/mutate", {
-			method: "POST",
-			// test-invalid: exercise the runtime guard for a body outside the public replayable union.
-			body: new ReadableStream<Uint8Array>() as never,
-			throwOnHttpError: false,
-		});
-
-		await expect(session.replayChallenged(challenged)).rejects.toMatchObject({
+		await expect(
+			session.fetch("/mutate", {
+				method: "POST",
+				// test-invalid: exercise the runtime guard for a body outside the public replayable union.
+				body: new ReadableStream<Uint8Array>() as never,
+				throwOnHttpError: false,
+			}),
+		).rejects.toMatchObject({
 			code: "REPLAY_BODY_UNAVAILABLE",
 		});
 		expect(solves).toBe(0);
-		expect(allWreqCalls()).toHaveLength(1);
+		expect(allWreqCalls()).toHaveLength(0);
+	});
+
+	it("reuses a settled successful safe solve for a later same-epoch explicit replay", async () => {
+		const challenge = {
+			status: 403,
+			body: sbsdInterstitial("/.well-known/sbsd?v=shared-epoch&t=shared-token"),
+			headers: { "set-cookie": "sbsd_o=shared-state; Path=/; Secure" },
+			url: "https://example.com/protected",
+		};
+		mockStealthState.queuedResponses.push(
+			challenge,
+			{ status: 200, body: "safe replay", headers: {}, url: "https://example.com/safe" },
+			challenge,
+			{ status: 200, body: "explicit replay", headers: {}, url: "https://example.com/mutate" },
+		);
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com", {
+			stealth: {
+				challengeRuntime: {
+					akamaiSbsd: {
+						allowedHosts: ["example.com"],
+						async solve() {
+							solves += 1;
+							return fixtureSbsdCookieSolution();
+						},
+					},
+				},
+			},
+		}).createSession();
+
+		await expect(session.fetch("/safe", { throwOnHttpError: false })).resolves.toMatchObject({
+			status: 200,
+		});
+		const challenged = await session.fetch("/mutate", {
+			method: "POST",
+			body: Buffer.from([0x00, 0xff]),
+			throwOnHttpError: false,
+		});
+		expect(challenged.challenge?.outcome).toBe("replay_required");
+		await expect(session.replayChallenged(challenged)).resolves.toMatchObject({ status: 200 });
+		expect(solves).toBe(1);
+		expect(allWreqCalls()).toHaveLength(4);
 	});
 
 	it("returns challenge_persisted when the single explicit replay is challenged again", async () => {
@@ -4602,6 +4657,228 @@ describe("server SBSD bound-transport wiring", () => {
 		mockStealthState.queuedResponses.length = 0;
 		mockStealthState.queuedErrors.length = 0;
 		mockStealthState.queuedCloseErrors.length = 0;
+	});
+
+	it("fails an auth request before provider code when the engine lease key is missing", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
+		delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
+		try {
+			const { createServerAppAsync } = await import("../server/serve.js");
+			const app = await createServerAppAsync(createSbsdWiringProvider(), {
+				logger: () => undefined,
+			});
+			const response = await app.request("/auth/start", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-missing-engine-key",
+					flowId: "flow-missing-engine-key",
+					providerId: "stealth-sbsd-wiring-provider",
+					connectionId: "connection-sbsd",
+					context: {},
+				}),
+			});
+
+			expect(response.status).toBe(500);
+			expect(await response.json()).toMatchObject({
+				error: { code: "EGRESS_LEASE_KEY_MISSING" },
+			});
+			expect(allWreqCalls()).toHaveLength(0);
+		} finally {
+			if (previous === undefined) delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
+			else process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY] = previous;
+		}
+	});
+
+	it("threads request metering through safe auto-solve, explicit replay, failure, and early exit", async () => {
+		const {
+			APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+			APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
+		} = await import(
+			"../runtime/resolver-config.js"
+		);
+		const envNames = [
+			APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
+			APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+			"APIFUSE__TRACE__ENABLED",
+			"APIFUSE__TRACE__EXPORTER",
+		] as const;
+		const previous = new Map(envNames.map((name) => [name, process.env[name]] as const));
+		process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY] = "fixture-metered-hyper-key";
+		process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY] = "fixture-metered-capsolver-key";
+		process.env.APIFUSE__TRACE__ENABLED = "true";
+		process.env.APIFUSE__TRACE__EXPORTER = "json";
+		const logLines: string[] = [];
+		const logSpy = spyOn(console, "log").mockImplementation((value?: unknown) => {
+			logLines.push(String(value));
+		});
+		let fetchSpy: ReturnType<typeof spyOn> | undefined;
+		const usageSpans = () =>
+			logLines.flatMap((line) => {
+				try {
+					const span = JSON.parse(line) as { name?: string; attributes?: Record<string, unknown> };
+					return span.name === "resolver.usage" ? [span] : [];
+				} catch {
+					return [];
+				}
+			});
+		const providerFor = (id: string, explicitReplay: boolean) =>
+			createProviderDefinitionDouble({
+				id,
+				allowedHosts: ["example.com"],
+				stealth: { browser: "safari", os: "macos" },
+				resolver: {
+					vendors: ["hypersolutions"],
+					kinds: ["akamai_sbsd"],
+					clientProfile: "safari17_0",
+				},
+				operations: {
+					probe: {
+						riskClass: "read",
+						input: z.object({}),
+						output: z.object({ status: z.number() }),
+						upstream: { baseUrl: "https://example.com" },
+						handler: async (ctx) => {
+							const session = ctx.stealth.createSession();
+							const response = await session.fetch("/protected", {
+								...(explicitReplay ? { method: "POST" as const, body: Buffer.from([0, 255]) } : {}),
+								throwOnHttpError: false,
+							});
+							return {
+								status: explicitReplay
+									? (await session.replayChallenged(response)).status
+									: response.status,
+							};
+						},
+					},
+				},
+			});
+		try {
+			const { createServerAppAsync } = await import("../server/serve.js");
+			for (const explicitReplay of [false, true]) {
+				logLines.length = 0;
+				queueHardSbsdSolve(
+					{ status: 200, body: "solved", headers: {}, url: "https://example.com/protected" },
+					"https://example.com/protected",
+				);
+				const app = await createServerAppAsync(
+					providerFor(`metered-${explicitReplay ? "explicit" : "safe"}`, explicitReplay),
+					{ logger: () => undefined },
+				);
+				const response = await app.request("/v1/probe", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: `req-metered-${explicitReplay}`, input: {} }),
+				});
+				expect(response.status).toBe(200);
+				expect(usageSpans()).toHaveLength(2);
+				expect(usageSpans().every((span) => span.attributes?.outcome === "success")).toBe(true);
+			}
+
+			logLines.length = 0;
+			mockStealthState.queuedResponses.push(
+				{
+					status: 403,
+					body: sbsdInterstitial("/.well-known/sbsd?v=meter-fail&t=token"),
+					headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+					url: "https://example.com/protected",
+				},
+				{ status: 503, body: "unavailable", headers: {}, url: "https://ip.hypersolutions.co/ip" },
+			);
+			const failedApp = await createServerAppAsync(providerFor("metered-failure", false), {
+				logger: () => undefined,
+			});
+			await failedApp.request("/v1/probe", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req-metered-failure", input: {} }),
+			});
+			expect(usageSpans()).toHaveLength(1);
+			expect(usageSpans()[0]?.attributes?.outcome).toBe("vendor_error");
+
+			logLines.length = 0;
+			delete process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY];
+			mockStealthState.queuedResponses.push({
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=missing-key&t=token"),
+				headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+				url: "https://example.com/protected",
+			});
+			const earlyApp = await createServerAppAsync(providerFor("metered-early-exit", false), {
+				logger: () => undefined,
+			});
+			await earlyApp.request("/v1/probe", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req-metered-early", input: {} }),
+			});
+			expect(usageSpans()).toHaveLength(0);
+
+			logLines.length = 0;
+			fetchSpy = spyOn(globalThis, "fetch");
+			const vendorResponses = [
+				new Response(JSON.stringify({ errorId: 0, taskId: "server-cache-task" }), {
+					headers: { "content-type": "application/json" },
+				}),
+				new Response(
+					JSON.stringify({
+						errorId: 0,
+						status: "ready",
+						solution: { cookie: "server-cache-cookie" },
+					}),
+					{ headers: { "content-type": "application/json" } },
+				),
+			];
+			fetchSpy.mockImplementation(async () => {
+				const response = vendorResponses.shift();
+				if (!response) throw new Error("cache hit unexpectedly called CapSolver again");
+				return response;
+			});
+			const cacheProvider = createProviderDefinitionDouble({
+				id: "metered-cache-hit",
+				allowedHosts: ["example.com"],
+				resolver: { vendors: ["capsolver"], kinds: ["aws_waf"] },
+				operations: {
+					probe: {
+						riskClass: "read",
+						input: z.object({}),
+						output: z.object({ status: z.number() }),
+						handler: async (ctx) => {
+							const challenge = {
+								kind: "aws_waf" as const,
+								pageUrl: "https://example.com/protected",
+								siteKey: "server-cache-key",
+								iv: "server-cache-iv",
+								context: "server-cache-context",
+								captchaScript: "https://captcha.awswaf.com/challenge.js",
+							};
+							await ctx.resolver.solve(challenge);
+							await ctx.resolver.solve(challenge);
+							return { status: 200 };
+						},
+					},
+				},
+			});
+			const cacheApp = await createServerAppAsync(cacheProvider, { logger: () => undefined });
+			const cacheResponse = await cacheApp.request("/v1/probe", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req-metered-cache", input: {} }),
+			});
+			expect(cacheResponse.status).toBe(200);
+			expect(vendorResponses).toHaveLength(0);
+			expect(usageSpans()).toHaveLength(1);
+		} finally {
+			fetchSpy?.mockRestore();
+			logSpy.mockRestore();
+			for (const [name, value] of previous) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
 	});
 
 	it("returns detection-only classification for a provider without a resolver", async () => {

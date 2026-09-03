@@ -425,6 +425,7 @@ describe("resolver server wiring", () => {
 	});
 
 	it("passes a server-owned proxy identity through the auth-flow context", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY } = await import("../egress-lease.js");
 		const identities: Array<ResolverIdentity | undefined> = [];
 		const adapter: ResolverVendorAdapter = {
 			id: "browser",
@@ -440,9 +441,11 @@ describe("resolver server wiring", () => {
 			},
 		};
 		const originalCdpUrl = process.env[APIFUSE__CDP_POOL__URL];
+		const originalLeaseKey = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
 		const restoreAdapter = swapResolverAdapterFactoryForTests("browser", () => adapter);
 		const restoreProxyCredentials = installNodemavenTestCredentials();
 		process.env[APIFUSE__CDP_POOL__URL] = "ws://cdp-pool.test";
+		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY] = "resolver-auth-fixture-key";
 		try {
 			const provider = defineProvider({
 				id: "resolver-required-proxy-auth-flow",
@@ -523,6 +526,11 @@ describe("resolver server wiring", () => {
 				delete process.env[APIFUSE__CDP_POOL__URL];
 			} else {
 				process.env[APIFUSE__CDP_POOL__URL] = originalCdpUrl;
+			}
+			if (originalLeaseKey === undefined) {
+				delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
+			} else {
+				process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY] = originalLeaseKey;
 			}
 		}
 	});

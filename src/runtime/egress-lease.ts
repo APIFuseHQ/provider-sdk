@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 import type { ProxyVendorName } from "../config/loader.js";
 import { SDKError } from "../errors.js";
@@ -22,6 +22,10 @@ export const ENGINE_OWNED_CEREMONY_LEASE_ENV_NAMES = [
 
 const HANDLE_VERSION = 1;
 const HANDLE_MAX_BYTES = 16_384;
+const AEAD_NONCE_BYTES = 12;
+const AEAD_TAG_BYTES = 16;
+const AEAD_ALGORITHM = "aes-256-gcm";
+const AEAD_KEY_DOMAIN = "apifuse:ceremony-egress-lease:v1\0";
 const DEFAULT_NODEMAVEN_TTL_MS = 24 * 60 * 60 * 1_000;
 // Smartproxy extraction results are cached for only 15 seconds because a raw
 // endpoint is not a vendor-guaranteed lease (config/loader.ts).
@@ -98,13 +102,26 @@ function ttlMsForBinding(
 	);
 }
 
-function sign(encodedPayload: string, key: string): Buffer {
-	return createHmac("sha256", key).update(encodedPayload, "utf8").digest();
+function encryptionKey(key: string): Buffer {
+	return createHash("sha256").update(AEAD_KEY_DOMAIN, "utf8").update(key, "utf8").digest();
 }
 
 function encodeHandle(payload: CeremonyEgressLeasePayloadV1, key: string): string {
-	const encodedPayload = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-	return `${encodedPayload}.${sign(encodedPayload, key).toString("base64url")}`;
+	const nonce = randomBytes(AEAD_NONCE_BYTES);
+	const cipher = createCipheriv(AEAD_ALGORITHM, encryptionKey(key), nonce, {
+		authTagLength: AEAD_TAG_BYTES,
+	});
+	cipher.setAAD(Buffer.from(`v${HANDLE_VERSION}`, "utf8"));
+	const ciphertext = Buffer.concat([
+		cipher.update(JSON.stringify(payload), "utf8"),
+		cipher.final(),
+	]);
+	return [
+		`v${HANDLE_VERSION}`,
+		nonce.toString("base64url"),
+		ciphertext.toString("base64url"),
+		cipher.getAuthTag().toString("base64url"),
+	].join(".");
 }
 
 function isFiniteInteger(value: unknown): value is number {
@@ -114,24 +131,32 @@ function isFiniteInteger(value: unknown): value is number {
 function decodeHandle(handle: string, key: string): CeremonyEgressLeasePayloadV1 {
 	if (Buffer.byteLength(handle, "utf8") > HANDLE_MAX_BYTES) return invalidLease();
 	const parts = handle.split(".");
-	if (parts.length !== 2 || !parts[0] || !parts[1]) return invalidLease();
-	let suppliedSignature: Buffer;
-	try {
-		suppliedSignature = Buffer.from(parts[1], "base64url");
-	} catch {
-		return invalidLease();
-	}
-	const expectedSignature = sign(parts[0], key);
 	if (
-		suppliedSignature.byteLength !== expectedSignature.byteLength ||
-		!timingSafeEqual(suppliedSignature, expectedSignature)
+		parts.length !== 4 ||
+		parts[0] !== `v${HANDLE_VERSION}` ||
+		parts.slice(1).some((part) => !/^[A-Za-z0-9_-]+$/u.test(part))
 	) {
 		return invalidLease();
 	}
-
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+		const nonce = Buffer.from(parts[1]!, "base64url");
+		const ciphertext = Buffer.from(parts[2]!, "base64url");
+		const tag = Buffer.from(parts[3]!, "base64url");
+		if (
+			nonce.byteLength !== AEAD_NONCE_BYTES ||
+			tag.byteLength !== AEAD_TAG_BYTES ||
+			ciphertext.byteLength === 0
+		) {
+			return invalidLease();
+		}
+		const decipher = createDecipheriv(AEAD_ALGORITHM, encryptionKey(key), nonce, {
+			authTagLength: AEAD_TAG_BYTES,
+		});
+		decipher.setAAD(Buffer.from(parts[0]!, "utf8"));
+		decipher.setAuthTag(tag);
+		const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+		parsed = JSON.parse(plaintext.toString("utf8"));
 	} catch {
 		return invalidLease();
 	}
@@ -180,11 +205,16 @@ export function createCeremonyEgressLeaseRuntime(options: {
 	const environment = options.environment ?? process.env;
 	const now = options.now ?? Date.now;
 	const key = environment[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY]?.trim();
+	if (!key) {
+		throw new SDKError("The engine ceremony egress lease key is not configured", {
+			code: "EGRESS_LEASE_KEY_MISSING",
+			fix: `Configure ${APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY} in the engine host.`,
+		});
+	}
 	let payload: CeremonyEgressLeasePayloadV1 | undefined;
 	let currentHandle: string | undefined;
 
 	if (options.handle !== undefined) {
-		if (!key) return invalidLease();
 		payload = decodeHandle(options.handle, key);
 		if (
 			payload.providerId !== options.providerId ||
@@ -232,12 +262,6 @@ export function createCeremonyEgressLeaseRuntime(options: {
 					return invalidLease();
 				}
 				return;
-			}
-			if (!key) {
-				throw new SDKError("The engine ceremony egress lease key is not configured", {
-					code: "EGRESS_LEASE_KEY_MISSING",
-					fix: `Configure ${APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY} in the engine host.`,
-				});
 			}
 			const mintedAtMs = now();
 			payload = {

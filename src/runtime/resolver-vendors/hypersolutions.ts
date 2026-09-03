@@ -290,29 +290,43 @@ export function createHypersolutionsResolverVendorAdapter(
 					assertResolverHostAllowed(url, HYPER_TRANSPORT_HOSTS);
 				}
 
-				const ipResponse = await boundFetch(
-					transport,
-					HYPER_IP_URL,
-					{
-						method: "GET",
-						headers: {
-							accept: "application/json, text/plain;q=0.9",
-							"x-api-key": apiKey,
-						},
-						signal: operationSignal,
-						redirect: "manual",
-						maxBodyBytes: IP_RESPONSE_MAX_BYTES,
+				// Hyper documents /ip as an authenticated service request but does not
+				// publish an explicit exclusion from request quota. Meter conservatively.
+				const ip = await recordPaidResolverCreate({
+					traceRecorder,
+					vendor: HYPERSOLUTIONS_VENDOR_ID,
+					kind: challenge.kind,
+					signal: operationSignal,
+					usage,
+					create: async () => {
+						const ipResponse = await boundFetch(
+							transport,
+							HYPER_IP_URL,
+							{
+								method: "GET",
+								headers: {
+									accept: "application/json, text/plain;q=0.9",
+									"x-api-key": apiKey,
+								},
+								signal: operationSignal,
+								redirect: "manual",
+								maxBodyBytes: IP_RESPONSE_MAX_BYTES,
+							},
+							"measure_ip",
+						);
+						assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
+						requireSuccess(ipResponse.status, "measure_ip");
+						const observedIp = parseObservedIp(ipResponse.body);
+						if (!observedIp) {
+							throw new ResolverVendorUnavailableError(
+								HYPERSOLUTIONS_VENDOR_ID,
+								"transport_failure",
+								{ phase: "measure_ip" },
+							);
+						}
+						return observedIp;
 					},
-					"measure_ip",
-				);
-				assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
-				requireSuccess(ipResponse.status, "measure_ip");
-				const ip = parseObservedIp(ipResponse.body);
-				if (!ip) {
-					throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "transport_failure", {
-						phase: "measure_ip",
-					});
-				}
+				});
 
 				const scriptResponse = await boundFetch(
 					transport,

@@ -7,6 +7,7 @@ import {
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
 import {
+	isEngineOwnedEnvName,
 	isEngineOwnedProxyCredentialName,
 	isEngineOwnedResolverCredentialName,
 	isEngineOwnedTelemetryEnvName,
@@ -960,6 +961,14 @@ function validateProviderProxy(config: {
 				`Provider "${config.id}" cannot declare engine-owned telemetry variable "${secret.name}"`,
 				{
 					fix: `Remove "${secret.name}" from provider secrets; trace export is configured only on the provider engine.`,
+				},
+			);
+		}
+		if (isEngineOwnedEnvName(secret.name) && !isEngineOwnedProxyCredentialName(secret.name)) {
+			throw new ValidationError(
+				`Provider "${config.id}" cannot declare engine-owned control variable "${secret.name}"`,
+				{
+					fix: `Remove "${secret.name}" from provider secrets; configure it only on the provider engine.`,
 				},
 			);
 		}

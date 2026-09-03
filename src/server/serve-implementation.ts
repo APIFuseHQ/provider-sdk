@@ -97,6 +97,7 @@ import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import {
 	createTraceContext,
+	getTraceRecorder,
 	type TraceContext as RuntimeTraceContext,
 	type TraceRecorder,
 	updateTraceContextExportMetadata,
@@ -646,6 +647,7 @@ function createStealthChallengeDetection(
 	cache: ReturnType<typeof createProviderCache>,
 	identityScope: string,
 	signal: AbortSignal | undefined,
+	traceRecorder: TraceRecorder | null,
 ): NonNullable<StealthRuntimeModule.StealthClientOptions["stealth"]>["challengeRuntime"] {
 	const resolverDeclared = provider.resolver?.kinds.some((kind) => kind === "akamai_sbsd") === true;
 	const detectOnly = provider.stealth?.challengeDetection?.akamaiSbsd === true;
@@ -702,9 +704,10 @@ function createStealthChallengeDetection(
 										},
 									},
 								);
-								return resolverRuntime
-									.bindResolverSignal(selectedResolver, signal)
-									.solve(challenge, solveSignal);
+								return (
+									resolverRuntime.bindResolverSignal(selectedResolver, signal) as ResolverContext &
+										ResolverSolveWithRecorder
+								).solve(challenge, solveSignal, traceRecorder ?? undefined);
 							}
 							const resolver = resolverRuntime.createResolverClientFromEnv(
 								provider.resolver,
@@ -722,9 +725,10 @@ function createStealthChallengeDetection(
 									},
 								},
 							);
-							return resolverRuntime
-								.bindResolverSignal(resolver, signal)
-								.solve(challenge, solveSignal);
+							return (
+								resolverRuntime.bindResolverSignal(resolver, signal) as ResolverContext &
+									ResolverSolveWithRecorder
+							).solve(challenge, solveSignal, traceRecorder ?? undefined);
 						},
 					}
 				: {}),
@@ -904,6 +908,7 @@ function createProviderContext(
 		cache,
 		resolverIdentityScope,
 		signal,
+		getTraceRecorder(scope.trace),
 	);
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
@@ -1121,7 +1126,7 @@ function createAuthFlowContext(
 		engineCredentials: engineProxyCredentials,
 	};
 	const ceremonyEgressLease =
-		proxyPolicy && proxyPolicy.mode !== "disabled"
+		provider.stealth && proxyPolicy && proxyPolicy.mode !== "disabled"
 			? createCeremonyEgressLeaseRuntime({
 					providerId: provider.id,
 					flowId: request.flowId,
@@ -1148,6 +1153,7 @@ function createAuthFlowContext(
 		cache,
 		resolverIdentityScope,
 		signal,
+		getTraceRecorder(scope.trace),
 	);
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,

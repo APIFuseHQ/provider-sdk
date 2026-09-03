@@ -174,11 +174,11 @@ type AkamaiSbsdSessionState = {
 			{ readonly solved: true } | { readonly solved: false; error: unknown }
 		>;
 	};
+	completedSuccessKey?: string;
 };
 
 type ChallengedReplayRecord = {
 	consumed: boolean;
-	bodyReplayable: boolean;
 	replay(): Promise<StealthResponse>;
 };
 
@@ -728,7 +728,7 @@ function requiredEmulationHeader(headers: ReadonlyMap<string, string>, name: str
 function buildChromeHeaderTuples(options: {
 	emulationHeaders: Iterable<[string, string]>;
 	method: StealthMethod;
-	body?: string;
+	body?: string | Buffer;
 	headers: Record<string, string>;
 	requestUrl: string;
 	acceptLanguage?: string;
@@ -1069,9 +1069,9 @@ function readResponseBodyChunk(
 	});
 }
 
-function normalizeBody(body: StealthFetchOptions["body"]): string {
+function normalizeBody(body: unknown): string | Buffer | undefined {
 	if (body === undefined) {
-		return "";
+		return undefined;
 	}
 
 	if (typeof body === "string") {
@@ -1079,10 +1079,13 @@ function normalizeBody(body: StealthFetchOptions["body"]): string {
 	}
 
 	if (Buffer.isBuffer(body)) {
-		return body.toString();
+		return Buffer.from(body);
 	}
 
-	return String(body);
+	throw new SDKError("The request body cannot be preserved for a byte-exact replay", {
+		code: "REPLAY_BODY_UNAVAILABLE",
+		fix: "Supply a string or Buffer body so the SDK can snapshot it before the first request.",
+	});
 }
 
 function isPolicyManagedProxy(options: StealthClientOptions): boolean {
@@ -1347,7 +1350,7 @@ async function fetchStealthRedirectChain(
 	buildHeaders?: (
 		url: string,
 		method: StealthMethod,
-		body: string | undefined,
+		body: string | Buffer | undefined,
 		headers: Record<string, string>,
 	) => HeaderTuple[],
 ): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> {
@@ -1464,6 +1467,7 @@ function createSessionFetcher(
 	function clearAkamaiSbsdState(): void {
 		akamaiSbsdState.rememberedScript = undefined;
 		akamaiSbsdState.transaction = undefined;
+		akamaiSbsdState.completedSuccessKey = undefined;
 	}
 
 	function assertCeremonyEgressLeaseActive(): void {
@@ -1655,6 +1659,7 @@ function createSessionFetcher(
 	const session: StealthSession = {
 		async fetch(url, options: StealthFetchOptions = {}) {
 			const requestProfile = resolveStealthProfileSelection(options.stealth, defaultProfile);
+			const requestBody = normalizeBody(options.body);
 			let challengeSolveAttempted = false;
 			let challengeRefetchAttempted = false;
 			const { hasExplicitRetryPolicy, method, stealthRetryOptions } = (() => {
@@ -1807,7 +1812,7 @@ function createSessionFetcher(
 							? (
 									currentUrl: string,
 									currentMethod: StealthMethod,
-									currentBody: string | undefined,
+									currentBody: string | Buffer | undefined,
 									currentHeaders: Record<string, string>,
 								) =>
 									buildChromeHeaderTuples({
@@ -1828,7 +1833,7 @@ function createSessionFetcher(
 						const defaultHeaders = buildOrderedHeaders?.(
 							requestUrl,
 							method,
-							options.body === undefined ? undefined : normalizeBody(options.body),
+							requestBody,
 							initialHeaders,
 						);
 						const fetchOnBoundSession = (
@@ -1860,7 +1865,7 @@ function createSessionFetcher(
 						let { normalized, response } = await fetchOnBoundSession(
 							requestUrl,
 							method,
-							options,
+							{ ...options, body: requestBody },
 							clientOptions.signal,
 						);
 
@@ -1924,7 +1929,7 @@ function createSessionFetcher(
 								method,
 								automaticChallengeRefetchPolicy,
 								{
-									body: options.body,
+									body: requestBody,
 									headers: options.headers,
 								},
 							);
@@ -1950,9 +1955,9 @@ function createSessionFetcher(
 							};
 							const resolverBuildHeaders = chromeEmulationHeaders
 								? (
-										currentUrl: string,
-										currentMethod: StealthMethod,
-										currentBody: string | undefined,
+									currentUrl: string,
+									currentMethod: StealthMethod,
+									currentBody: string | Buffer | undefined,
 										currentHeaders: Record<string, string>,
 									) =>
 										buildChromeHeaderTuples({
@@ -2017,22 +2022,12 @@ function createSessionFetcher(
 											),
 										}
 									: {}),
-								...(Buffer.isBuffer(options.body) ? { body: Buffer.from(options.body) } : {}),
+								...(Buffer.isBuffer(requestBody)
+									? { body: Buffer.from(requestBody) }
+									: { body: requestBody }),
 							};
-							const bodyReplayable =
-								options.body === undefined ||
-								typeof options.body === "string" ||
-								Buffer.isBuffer(options.body);
-							const solveAndReplay = async (): Promise<StealthResponse> => {
+							const solveAndReplay = async (explicitReplay = false): Promise<StealthResponse> => {
 								assertCeremonyEgressLeaseActive();
-								if (!bodyReplayable) {
-									throw new SDKError(
-										"The challenged request body cannot be replayed byte-exactly",
-										{
-											code: "REPLAY_BODY_UNAVAILABLE",
-										},
-									);
-								}
 								assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, mapping.browser);
 								if (!akamaiSbsd.solve) {
 									throw new SDKError("No resolver is available for the challenged request", {
@@ -2040,9 +2035,15 @@ function createSessionFetcher(
 									});
 								}
 								const transactionKey = akamaiSbsdChallengeKey(detected, mapping.browser);
+								const reuseCompletedSuccess =
+									explicitReplay && akamaiSbsdState.completedSuccessKey === transactionKey;
+								if (explicitReplay) {
+									if (reuseCompletedSuccess) akamaiSbsdState.completedSuccessKey = undefined;
+								}
 								let transaction = akamaiSbsdState.transaction;
 								let ownsTransaction = false;
-								if (!transaction || transaction.key !== transactionKey) {
+								if (!reuseCompletedSuccess && (!transaction || transaction.key !== transactionKey)) {
+									akamaiSbsdState.completedSuccessKey = undefined;
 									challengeSolveAttempted = true;
 									ownsTransaction = true;
 									let createdTransaction!: NonNullable<AkamaiSbsdSessionState["transaction"]>;
@@ -2067,14 +2068,16 @@ function createSessionFetcher(
 									transaction = createdTransaction;
 									akamaiSbsdState.transaction = createdTransaction;
 								}
-								const transactionResult = await transaction.result;
-								if (!transactionResult.solved) {
-									if (ownsTransaction) throw transactionResult.error;
-									normalized.challenge = {
-										challenge: detected,
-										outcome: "challenge_persisted",
-									};
-									return normalized;
+								if (!reuseCompletedSuccess) {
+									const transactionResult = await transaction!.result;
+									if (!transactionResult.solved) {
+										if (ownsTransaction) throw transactionResult.error;
+										normalized.challenge = {
+											challenge: detected,
+											outcome: "challenge_persisted",
+										};
+										return normalized;
+									}
 								}
 								challengeRefetchAttempted = true;
 								({ normalized, response } = await fetchOnBoundSession(
@@ -2095,6 +2098,8 @@ function createSessionFetcher(
 										challenge: persisted,
 										outcome: "challenge_persisted",
 									};
+								} else if (ownsTransaction && !explicitReplay) {
+									akamaiSbsdState.completedSuccessKey = transactionKey;
 								}
 								return normalized;
 							};
@@ -2106,8 +2111,7 @@ function createSessionFetcher(
 								};
 								challengedReplays.set(normalized, {
 									consumed: false,
-									bodyReplayable,
-									replay: solveAndReplay,
+									replay: () => solveAndReplay(true),
 								});
 								recordProxyAttempt("ok", undefined, response.status);
 								return normalized;
@@ -2281,11 +2285,6 @@ function createSessionFetcher(
 				});
 			}
 			replay.consumed = true;
-			if (!replay.bodyReplayable) {
-				throw new SDKError("The challenged request body cannot be replayed byte-exactly", {
-					code: "REPLAY_BODY_UNAVAILABLE",
-				});
-			}
 			return replay.replay();
 		},
 		cookies: cookieJar,

@@ -172,7 +172,7 @@ describe("hypersolutions resolver vendor", () => {
 			Referer: PAGE_URL,
 		});
 		const usageSpans = trace.getSpans().filter((span) => span.name === "resolver.usage");
-		expect(usageSpans).toHaveLength(1);
+		expect(usageSpans).toHaveLength(2);
 		expect(usageSpans[0]?.attributes).toEqual({
 			vendor: "hypersolutions",
 			challenge_kind: "akamai_sbsd",
@@ -212,7 +212,7 @@ describe("hypersolutions resolver vendor", () => {
 					url === "https://shop.example.com/.well-known/sbsd" && init.method === "POST",
 			),
 		).toHaveLength(2);
-		expect(trace.getSpans().filter((span) => span.name === "resolver.usage")).toHaveLength(2);
+		expect(trace.getSpans().filter((span) => span.name === "resolver.usage")).toHaveLength(3);
 	});
 
 	it("keeps a remembered v-only script separate from a later cpr_chlge token", async () => {
