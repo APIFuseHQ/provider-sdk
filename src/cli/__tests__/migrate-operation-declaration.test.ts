@@ -527,6 +527,237 @@ export default buildProvider({
 		return result;
 	}
 
+	function writeFixtureFiles(root: string, files: Readonly<Record<string, string>>): void {
+		for (const [path, fixtureName] of Object.entries(files)) {
+			const directory = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+			if (directory !== "") mkdirSync(join(root, directory), { recursive: true });
+			writeFileSync(join(root, path), fixture(fixtureName));
+		}
+	}
+
+	it("follows a Daiso-shaped imported spread registry and edits each leaf origin", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-daiso-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-daiso-index",
+				"operations/index.ts": "discovery-daiso-barrel",
+				"operations/catalog.ts": "discovery-daiso-catalog",
+				"operations/stores.ts": "discovery-daiso-stores",
+				"operations/docs.ts": "discovery-daiso-docs",
+			});
+			mkdirSync(join(root, "locales"));
+			writeFileSync(join(root, "locales/en.json"), "{}\n");
+			const indexBefore = readFileSync(join(root, "index.ts"), "utf8");
+			const barrelBefore = readFileSync(join(root, "operations/index.ts"), "utf8");
+
+			const result = migrateOperationDeclarationRepository(root);
+
+			expect(result.status).toBe("migrated");
+			if (result.status === "refused") return;
+			expect(result.operationCount).toBe(3);
+			expect(result.changedFiles).toEqual(["operations/catalog.ts", "operations/stores.ts"]);
+			expect(readFileSync(join(root, "index.ts"), "utf8")).toBe(indexBefore);
+			expect(readFileSync(join(root, "operations/index.ts"), "utf8")).toBe(barrelBefore);
+			const catalog = readFileSync(join(root, "operations/catalog.ts"), "utf8");
+			expect(catalog).toContain('riskClass: "read"');
+			expect(catalog).toContain('titleKey: "operations.groupedRead.title"');
+			expect(catalog).toContain('descriptionKey: "operations.browseCatalog.description"');
+			expect(catalog).toContain('scenarioKey: "operations.browseCatalog.examples.0.scenario"');
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("follows a two-level static relative re-export chain", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-reexport-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-reexport-index",
+				"barrel-one.ts": "discovery-reexport-one",
+				"barrel-two.ts": "discovery-reexport-two",
+				"leaf.ts": "discovery-reexport-leaf",
+			});
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("would-migrate");
+			if (result.status !== "would-migrate") return;
+			expect(result.operationCount).toBe(1);
+			expect(result.changedFiles).toEqual(["leaf.ts"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a package-imported registry and reports zero discovery", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-package-discovery-"));
+		try {
+			writeFixtureFiles(root, { "index.ts": "discovery-package-index" });
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals.map((item) => item.reason)).toEqual([
+				"non_literal",
+				"no_operations_discovered",
+			]);
+			expect(result.refusals[0]?.detail).toContain(
+				'non-relative import "provider-operation-package"',
+			);
+			expect(result.refusals[1]?.detail).toContain("Provider construct buildProvider");
+			expect(result.refusals[1]?.detail).toContain('initializer "packageRegistry"');
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses cycles in static relative re-exports", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-cycle-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-cycle-index",
+				"cycle-a.ts": "discovery-cycle-a",
+				"cycle-b.ts": "discovery-cycle-b",
+			});
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals.some((item) => item.detail.includes("export cycle"))).toBe(true);
+			expect(result.refusals.some((item) => item.reason === "no_operations_discovered")).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses ambiguous star re-exports", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-ambiguous-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-ambiguous-index",
+				"ambiguous-barrel.ts": "discovery-ambiguous-barrel",
+				"ambiguous-a.ts": "discovery-ambiguous-a",
+				"ambiguous-b.ts": "discovery-ambiguous-b",
+			});
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals.some((item) => item.detail.includes("ambiguous"))).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not hide a package star export behind a resolvable relative star", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-star-package-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-star-package-index",
+				"star-barrel.ts": "discovery-star-package-barrel",
+				"star-leaf.ts": "discovery-star-package-leaf",
+			});
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals.some((item) => item.detail.includes("non-relative import"))).toBe(
+				true,
+			);
+			expect(result.operationCount).toBe(0);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("enforces zero discovery through an indirect local provider config", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-indirect-config-"));
+		try {
+			writeFixtureFiles(root, { "index.ts": "discovery-indirect-config" });
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals.some((item) => item.reason === "no_operations_discovered")).toBe(true);
+			expect(result.refusals.some((item) => item.detail.includes("packageRegistry"))).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	for (const [fixtureName, detail] of [
+		["discovery-computed", "computed key"],
+		["discovery-nonstatic", "not a static object literal"],
+	] as const) {
+		it(`refuses ${fixtureName} registries`, () => {
+			const root = mkdtempSync(join(tmpdir(), "apifuse-operation-nonstatic-discovery-"));
+			try {
+				writeFixtureFiles(root, { "index.ts": fixtureName });
+				const result = migrateOperationDeclarationRepository(root, { check: true });
+				expect(result.status).toBe("refused");
+				if (result.status !== "refused") return;
+				expect(result.refusals.some((item) => item.detail.includes(detail))).toBe(true);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it("indexes a one-to-one same-file operation factory", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-factory-one-"));
+		try {
+			writeFixtureFiles(root, { "index.ts": "factory-one-to-one" });
+			mkdirSync(join(root, "locales"));
+			writeFileSync(join(root, "locales/en.json"), "{}\n");
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("would-migrate");
+			if (result.status !== "would-migrate") return;
+			expect(result.operationCount).toBe(1);
+			expect(result.localeTodoCount).toBe(1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a one-to-many same-file operation factory with every id", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-factory-many-"));
+		try {
+			writeFixtureFiles(root, { "index.ts": "factory-one-to-many" });
+			mkdirSync(join(root, "locales"));
+			writeFileSync(join(root, "locales/en.json"), "{}\n");
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals).toHaveLength(1);
+			expect(result.refusals[0]?.reason).toBe("factory_operation_id_ambiguous");
+			for (const id of [
+				"used-goods-search",
+				"realty-search-listings",
+				"jobs-search",
+				"cars-search",
+			]) {
+				expect(result.refusals[0]?.detail).toContain(id);
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not call one factory id ambiguous when duplicate provider declarations repeat it", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-factory-duplicate-"));
+		try {
+			writeFixtureFiles(root, { "index.ts": "factory-duplicate-provider" });
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("would-migrate");
+			if (result.status !== "would-migrate") return;
+			expect(result.operationCount).toBe(1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("proves an operation id before constructing example locale keys", () => {
+		const result = migrateOperationDeclaration(fixture("factory-id-unresolved"), "index.ts", {
+			localeFiles: ["locales/en.json"],
+		});
+		expect(result.status).toBe("refused");
+		if (result.status !== "refused") return;
+		expect(result.refusals.map((item) => item.reason)).toEqual(["operation_id_unresolved"]);
+	});
+
 	it("indexes typed exported registries with hyphenated string keys", () => {
 		const result = migrateRegistryFixture("registry-typed");
 		expect(result.status).toBe("would-migrate");
@@ -665,6 +896,39 @@ export default buildProvider({
 });
 
 describe("apifuse migrate-operation-declaration CLI", () => {
+	it("exits 2 when a provider operations initializer yields zero discovered sites", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-zero-discovery-cli-"));
+		try {
+			writeFileSync(join(root, "index.ts"), fixture("discovery-package-index"));
+			const command = Bun.spawnSync({
+				cmd: [
+					process.execPath,
+					join(import.meta.dir, "../../../bin/apifuse.ts"),
+					"migrate-operation-declaration",
+					root,
+					"--check",
+					"--json",
+				],
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			expect(command.exitCode).toBe(2);
+			const payload = JSON.parse(command.stdout.toString()) as {
+				status: string;
+				refusals: Array<{ reason: string; detail: string }>;
+			};
+			expect(payload.status).toBe("refused");
+			expect(payload.refusals).toContainEqual(
+				expect.objectContaining({
+					reason: "no_operations_discovered",
+					detail: expect.stringContaining("buildProvider"),
+				}),
+			);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("skips nested repositories identified by a .git file", () => {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-nested-worktree-"));
 		try {

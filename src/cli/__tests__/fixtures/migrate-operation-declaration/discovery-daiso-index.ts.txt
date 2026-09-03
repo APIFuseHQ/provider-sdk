@@ -1,0 +1,3 @@
+import { daisoOperations } from "./operations";
+
+export default buildProvider({ operations: daisoOperations });

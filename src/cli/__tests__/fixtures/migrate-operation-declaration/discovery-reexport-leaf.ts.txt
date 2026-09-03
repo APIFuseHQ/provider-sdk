@@ -1,0 +1,10 @@
+const leafRegistry = {
+	ping: {
+		annotations: { readOnly: true },
+		input: InputSchema,
+		output: OutputSchema,
+		handler,
+	},
+};
+
+export const registry = leafRegistry;

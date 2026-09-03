@@ -1,0 +1,7 @@
+defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [{ scenario: "Anonymous", input: {} }],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});

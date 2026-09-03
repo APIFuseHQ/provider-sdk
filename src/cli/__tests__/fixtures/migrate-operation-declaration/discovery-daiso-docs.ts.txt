@@ -1,0 +1,6 @@
+export const OPERATION_DOCS = {
+	catalog: {
+		titleKey: "operations.groupedRead.title",
+		descriptionKey: "operations.groupedRead.description",
+	},
+};

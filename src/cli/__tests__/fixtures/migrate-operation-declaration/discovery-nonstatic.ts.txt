@@ -1,0 +1,4 @@
+const first = { ping: pingOperation };
+const second = { pong: pongOperation };
+
+export default buildProvider({ operations: enabled ? first : second });

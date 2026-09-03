@@ -1,0 +1,8 @@
+export const storeOperations = {
+	"search-stores": {
+		annotations: { readOnly: true },
+		input: InputSchema,
+		output: OutputSchema,
+		handler,
+	},
+};
