@@ -124,6 +124,12 @@ replay-safe by carrying an empty JSON object.
 - A provider-facing lease acquire/bind API such as
   `ctx.proxy.lease.acquire()` or `ctx.proxy.lease.bind()`.
 - Transparent retry of unsafe methods, or a policy that retries every fetch.
+- Defending against arbitrary hostile JavaScript on the auto-solve path. The D4 seam
+  guarantees initiating-session transport identity for providers that honor the
+  TypeScript contract (a selection of primitive vendor names with no transport); the
+  SDK validates and snapshots those primitives, but a provider that casts through the
+  contract to inject prototype hooks or a foreign adapter is out of scope (PR #259,
+  review round 5).
 - Self-ratification: the draft was Proposed until the owner explicitly
   approved PR #249; only that approval moved the status to Accepted.
 - Implementing the Hyper adapter, challenge detection, ceremony lease, cookie
