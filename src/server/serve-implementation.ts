@@ -107,6 +107,7 @@ import {
 	error as streamError,
 } from "../stream.js";
 import type {
+	AutoSolveResolverFactory,
 	AuthContext,
 	AuthTurn,
 	BrowserClient,
@@ -557,14 +558,16 @@ function assertResolverClientProfileMatches(
 	);
 }
 
-function resolverOverrideOwnsTransport(resolver: ResolverContext): boolean {
-	return "transport" in resolver || "createTransport" in resolver;
+function resolverContextOverride(
+	resolver: ResolverContext | AutoSolveResolverFactory | undefined,
+): ResolverContext | undefined {
+	return typeof resolver === "function" ? undefined : resolver;
 }
 
 function createStealthChallengeDetection(
 	provider: ProviderDefinition,
 	resolverRuntime: typeof ResolverRuntimeModule | undefined,
-	resolverOverride: ResolverContext | undefined,
+	resolverOverride: ResolverContext | AutoSolveResolverFactory | undefined,
 	cache: ReturnType<typeof createProviderCache>,
 	identityScope: string,
 	signal: AbortSignal | undefined,
@@ -582,14 +585,20 @@ function createStealthChallengeDetection(
 				: {}),
 			...(resolverDeclared && resolverRuntime
 				? {
-						async solve(challenge, transport, initiatingClientProfile, solveSignal) {
+						async solve(
+							challenge,
+							transport,
+							initiatingClientProfile,
+							solveSignal,
+							initiatingClientProfileSelection,
+						) {
 							if (resolverOverride) {
-								if (resolverOverrideOwnsTransport(resolverOverride)) {
+								if (typeof resolverOverride !== "function") {
 									throw new SDKError(
-										"A resolver override cannot supply its own automatic SBSD transport",
+										"An automatic SBSD resolver override must be a bound resolver factory",
 										{
 											code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
-											fix: "Remove transport/createTransport from the override and use the SDK-supplied initiating-session transport.",
+											fix: "Supply an AutoSolveResolverFactory that constructs the resolver with the SDK-owned createTransport input.",
 										},
 									);
 								}
@@ -597,17 +606,26 @@ function createStealthChallengeDetection(
 									provider.resolver?.clientProfile,
 									initiatingClientProfile,
 								);
-								const solveWithBoundTransport = resolverOverride.solve as (
-									selectedChallenge: typeof challenge,
-									selectedSignal: AbortSignal,
-									boundTransport: typeof transport,
-								) => ReturnType<ResolverContext["solve"]>;
-								return solveWithBoundTransport.call(
-									resolverOverride,
-									challenge,
-									solveSignal,
-									transport,
-								);
+								let boundTransportClaimed = false;
+								const selectedResolver = resolverOverride({
+									createTransport: () => {
+										boundTransportClaimed = true;
+										return transport;
+									},
+									clientProfile: initiatingClientProfileSelection,
+								});
+								if (!boundTransportClaimed) {
+									throw new SDKError(
+										"The automatic SBSD resolver factory ignored the bound session transport",
+										{
+											code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
+											fix: "Construct the resolver with the createTransport input supplied to the factory.",
+										},
+									);
+								}
+								return resolverRuntime
+									.bindResolverSignal(selectedResolver, signal)
+									.solve(challenge, solveSignal);
 							}
 							const resolver = resolverRuntime.createResolverClientFromEnv(
 								provider.resolver,
@@ -904,7 +922,7 @@ function createProviderContext(
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
-					options.resolver ??
+					resolverContextOverride(options.resolver) ??
 						capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
 							allowedHosts: provider.allowedHosts,
 							cache,
@@ -922,7 +940,7 @@ function createProviderContext(
 					signal,
 				)
 			: bindResolverSignalWithoutRuntime(
-					options.resolver ??
+					resolverContextOverride(options.resolver) ??
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
 				),
@@ -1115,7 +1133,7 @@ function createAuthFlowContext(
 			stt: options.stt ?? createSttClientFromEnv(provider.stt),
 			resolver: capabilityModules.resolver
 				? capabilityModules.resolver.bindResolverSignal(
-						options.resolver ??
+						resolverContextOverride(options.resolver) ??
 							capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
 								allowedHosts: provider.allowedHosts,
 								cache,
@@ -1133,7 +1151,7 @@ function createAuthFlowContext(
 						signal,
 					)
 				: bindResolverSignalWithoutRuntime(
-						options.resolver ??
+						resolverContextOverride(options.resolver) ??
 							createUnsupportedResolverClient("Provider does not declare resolver capability"),
 						signal,
 					),
@@ -1242,8 +1260,11 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
 	stt?: SttContext;
 	/** Optional OCR override for tests or custom hosts; local/prod normally resolves from env. */
 	ocr?: OcrContext;
-	/** Optional resolver override for tests or custom hosts; local/prod normally resolves from env. */
-	resolver?: ResolverContext;
+	/**
+	 * Optional resolver override for tests or custom hosts; local/prod normally resolves from env.
+	 * Automatic challenge solving accepts only a factory bound to the initiating stealth session.
+	 */
+	resolver?: ResolverContext | AutoSolveResolverFactory;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */
 	state?: ProviderRuntimeState;
 	/** Allow process-local runtime state only for local development and tests. */

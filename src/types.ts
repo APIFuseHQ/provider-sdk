@@ -1,5 +1,6 @@
 import type ms from "ms";
 import type { HealthScenario } from "./health-scenario.js";
+import type { ResolverVendorTransport } from "./runtime/resolver-vendors/types.js";
 import type { SerializedCookieJar } from "tough-cookie";
 
 import type { infer as ZodInfer, ZodType } from "zod";
@@ -509,6 +510,17 @@ export interface SttContext {
 export interface ResolverContext {
 	solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
 }
+
+/**
+ * Selects a custom resolver for automatic challenge solving while keeping all
+ * adapter I/O on the SDK-owned initiating stealth session.
+ */
+export type AutoSolveResolverFactory = (bound: {
+	/** Returns the only transport an auto-solve resolver may use. */
+	readonly createTransport: () => ResolverVendorTransport;
+	/** Fully resolved browser/OS identity of the initiating stealth session. */
+	readonly clientProfile: StealthProfileSelection;
+}) => ResolverContext;
 
 export interface HealthJourneySchedule {
 	kind: "interval";

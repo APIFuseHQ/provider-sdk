@@ -138,6 +138,7 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 					transport: ResolverVendorTransport,
 					initiatingClientProfile: string,
 					signal: AbortSignal,
+					initiatingClientProfileSelection: StealthProfileDescriptor,
 				) => Promise<ChallengeSolution>;
 			};
 		};
@@ -152,6 +153,7 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 
 type AkamaiSbsdChallenge = Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>;
 type AkamaiSbsdSessionState = {
+	/** Latest v-only script for this session; Phase 2 deliberately has no wall-clock TTL. */
 	rememberedScript?: URL;
 	transaction?: {
 		readonly key: string;
@@ -241,8 +243,13 @@ function detectAkamaiSbsdChallenge(
 	}
 	if (!isDeclaredHost(page, allowedHosts)) return undefined;
 	const currentScript = findAkamaiSbsdScript(response.body, page, allowedHosts);
-	if (currentScript && !currentScript.searchParams.get("t")?.trim()) {
-		state.rememberedScript = currentScript;
+	if (currentScript) {
+		const version = currentScript.searchParams.get("v")?.trim();
+		if (version) {
+			const rememberedScript = new URL(currentScript.pathname, currentScript.origin);
+			rememberedScript.searchParams.set("v", version);
+			state.rememberedScript = rememberedScript;
+		}
 	}
 	const stateCookieName = jar.has("sbsd_o", page.toString())
 		? "sbsd_o"
@@ -1911,6 +1918,7 @@ function createSessionFetcher(
 										resolverTransport,
 										mapping.browser,
 										clientOptions.signal ?? new AbortController().signal,
+										requestProfile,
 									)
 									.then(
 										() => ({ solved: true }) as const,
@@ -2314,6 +2322,8 @@ function createSessionFetcher(
 		},
 		close() {
 			closed = true;
+			akamaiSbsdState.rememberedScript = undefined;
+			akamaiSbsdState.transaction = undefined;
 			for (const client of clients.values()) {
 				void client.session
 					.then((session) => session.close())

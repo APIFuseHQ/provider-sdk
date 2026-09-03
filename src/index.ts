@@ -271,6 +271,7 @@ export {
 export * from "./stream.js";
 export type {
 	ApiFuseResponse,
+	AutoSolveResolverFactory,
 	AuthConfig,
 	AuthContext,
 	AuthFlowDefinition,
