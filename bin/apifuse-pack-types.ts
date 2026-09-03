@@ -334,13 +334,36 @@ const NEGATIVE_CONTROLS = [
 		].join("\n"),
 	},
 	{
+		filename: "negative-control-telemetry-header-any.ts",
+		expectedCode: "TS2322",
+		description: "gateway telemetry projections reject any-valued properties",
+		source: [
+			'import type { GatewayIngestible } from "@apifuse/provider-sdk";',
+			"",
+			'export const bad: GatewayIngestible<{ x: any }> = { x: "free-text" };',
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-telemetry-meta-vendor.ts",
+		expectedCode: "TS2322",
+		description: "success metadata rejects tenant-visible vendor identity keys",
+		source: [
+			'import { closedEnum, type ClosedEnum, type TenantNeutral } from "@apifuse/provider-sdk";',
+			"",
+			'type Meta = { cached: boolean; detail: { vendorUsed: ClosedEnum<"smartproxy"> } };',
+			'export const bad: TenantNeutral<Meta> = { cached: false, detail: { vendorUsed: closedEnum("smartproxy") } };',
+			"",
+		].join("\n"),
+	},
+	{
 		filename: "positive-control-proxy-telemetry-contributor.ts",
 		expectedCode: "",
 		description: "proxy telemetry contributor satisfies the public contributor contract",
 		source: [
-			'import type { ProxyTelemetryLogPayload, TelemetryContributor } from "@apifuse/provider-sdk";',
+			'import { ProxyTelemetryCollector, type ProxyTelemetryHeaderPayload, type ProxyTelemetryLogPayload, type TelemetryContributor } from "@apifuse/provider-sdk";',
 			"",
-			"export const proxy: TelemetryContributor<ProxyTelemetryLogPayload, any> = { key: \"proxy\", toLogPayload: () => undefined, toHeaderPayload: () => undefined };",
+			"export const proxy: TelemetryContributor<ProxyTelemetryLogPayload, ProxyTelemetryHeaderPayload> = new ProxyTelemetryCollector();",
 			"",
 		].join("\n"),
 	},
@@ -567,8 +590,11 @@ function assertNegativeControlFails(consumerDir: string): void {
 		);
 		if (negativeControl.expectedCode === "") {
 			if (result.status !== 0) {
-				throw new Error(`Positive control "${negativeControl.description}" failed to compile:\n${result.stdout}\n${result.stderr}`);
+				throw new Error(
+					`Positive control "${negativeControl.description}" failed to compile:\n${result.stdout}\n${result.stderr}`,
+				);
 			}
+			console.log(`Positive control accepted: ${negativeControl.description}`);
 			continue;
 		}
 		if (result.status === 0) {
@@ -586,6 +612,9 @@ function assertNegativeControlFails(consumerDir: string): void {
 				`Negative control "${negativeControl.description}" (${negativeControl.filename}) failed for an unexpected reason (wanted ${negativeControl.expectedCode}):\n${output}`,
 			);
 		}
+		console.log(
+			`Negative control rejected (${negativeControl.expectedCode}): ${negativeControl.description}`,
+		);
 	}
 }
 

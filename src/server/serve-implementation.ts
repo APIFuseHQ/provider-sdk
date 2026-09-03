@@ -72,7 +72,14 @@ import {
 	ProxyTelemetryCollector,
 	type ProxyTelemetryLogPayload,
 } from "../runtime/proxy-telemetry.js";
-import { RequestTelemetry, type TenantNeutral } from "../runtime/request-telemetry.js";
+import {
+	closedEnum,
+	RequestTelemetry,
+	tenantOpaqueKeys,
+	type ClosedEnum,
+	type TenantNeutral,
+	type TenantOpaqueKeys,
+} from "../runtime/request-telemetry.js";
 import type * as ResolverRuntimeModule from "../runtime/resolver.js";
 import {
 	createUnsupportedResolverClient,
@@ -127,6 +134,7 @@ import type {
 	OcrContext,
 	ProviderErrorStatus,
 	ProviderContext,
+	ProviderCacheResponseMeta,
 	ProviderDefinition,
 	ProviderFilesContext,
 	ProviderProxyPolicy,
@@ -196,6 +204,69 @@ function providerErrorCode(error: unknown): string | undefined {
 
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
+type RetryLastErrorCode =
+	| "transport_network_error"
+	| "transport_timeout"
+	| "transport_cancelled"
+	| "upstream_http_error"
+	| "proxy_connect_failed"
+	| "PROXY_REQUIRED"
+	| "PROXY_ALLOCATION_FAILED"
+	| "PROXY_PROTOCOL_UNSUPPORTED"
+	| "PROXY_AUTH_IP_DENIED"
+	| "PROXY_EDGE_AUTH_REJECTED"
+	| "PROXY_POOL_STALE"
+	| "PROXY_EDGE_TLS_REJECTED"
+	| "PROXY_POOL_EXHAUSTED"
+	| "ECONNRESET"
+	| "ECONNREFUSED"
+	| "ECONNABORTED"
+	| "ETIMEDOUT"
+	| "EAI_AGAIN"
+	| "EHOSTUNREACH"
+	| "ENETUNREACH"
+	| "ENOTFOUND"
+	| "EPIPE"
+	| "UND_ERR_CONNECT_TIMEOUT"
+	| "UND_ERR_HEADERS_TIMEOUT"
+	| "UND_ERR_BODY_TIMEOUT"
+	| "UND_ERR_SOCKET"
+	| "UND_ERR_ABORTED"
+	| "other";
+const RETRY_LAST_ERROR_CODES = [
+	"transport_network_error",
+	"transport_timeout",
+	"transport_cancelled",
+	"upstream_http_error",
+	"proxy_connect_failed",
+	"PROXY_REQUIRED",
+	"PROXY_ALLOCATION_FAILED",
+	"PROXY_PROTOCOL_UNSUPPORTED",
+	"PROXY_AUTH_IP_DENIED",
+	"PROXY_EDGE_AUTH_REJECTED",
+	"PROXY_POOL_STALE",
+	"PROXY_EDGE_TLS_REJECTED",
+	"PROXY_POOL_EXHAUSTED",
+	"ECONNRESET",
+	"ECONNREFUSED",
+	"ECONNABORTED",
+	"ETIMEDOUT",
+	"EAI_AGAIN",
+	"EHOSTUNREACH",
+	"ENETUNREACH",
+	"ENOTFOUND",
+	"EPIPE",
+	"UND_ERR_CONNECT_TIMEOUT",
+	"UND_ERR_HEADERS_TIMEOUT",
+	"UND_ERR_BODY_TIMEOUT",
+	"UND_ERR_SOCKET",
+	"UND_ERR_ABORTED",
+	"other",
+] as const satisfies readonly RetryLastErrorCode[];
+
+function tenantRetryLastErrorCode(value: string): RetryLastErrorCode {
+	return RETRY_LAST_ERROR_CODES.find((candidate) => candidate === value) ?? "other";
+}
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
 const STATEFUL_FORWARDING_SOURCE_POD_HEADER = "x-apifuse-stateful-source-pod";
 const DEFAULT_STATEFUL_FORWARDING_MAX_SKEW_MS = 5 * 60_000;
@@ -1858,7 +1929,8 @@ function createRequestScope(input: {
 			})
 		: createTraceContext();
 	const proxyCollector = new ProxyTelemetryCollector();
-	const telemetry = new RequestTelemetry(trace, [proxyCollector]);
+	const telemetry = new RequestTelemetry(trace);
+	telemetry.register(proxyCollector);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
 	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
 	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
@@ -2110,28 +2182,58 @@ function toJsonSuccessResponse(
 
 	const cacheMeta = ctx && "cache" in ctx ? ctx.cache.responseMeta() : undefined;
 	const retryMeta = ctx ? retryResponseMeta.get(ctx) : undefined;
+	type TenantCacheMeta = {
+		hit: boolean;
+		stale: boolean;
+		keys: TenantOpaqueKeys;
+		source?: ClosedEnum<NonNullable<ProviderCacheResponseMeta["source"]>>;
+	};
+	type TenantRetryMeta = {
+		attempts: number;
+		retries: number;
+		preset?: ClosedEnum<NonNullable<HttpRetrySummary["preset"]>>;
+		transport: ClosedEnum<HttpRetrySummary["transport"]>;
+		lastErrorCode?: ClosedEnum<RetryLastErrorCode>;
+		lastStatus?: number;
+	};
+	const cache: TenantNeutral<TenantCacheMeta> | undefined = cacheMeta
+		? {
+				hit: cacheMeta.hit,
+				stale: cacheMeta.stale,
+				// TODO(owner): keep or remove implementation-shaped cache keys from tenant meta.
+				keys: tenantOpaqueKeys(cacheMeta.keys),
+				...(cacheMeta.source ? { source: closedEnum(cacheMeta.source) } : {}),
+			}
+		: undefined;
+	const retry: TenantNeutral<TenantRetryMeta> | undefined = retryMeta
+		? {
+				attempts: retryMeta.attempts,
+				retries: retryMeta.retries,
+				...(retryMeta.preset ? { preset: closedEnum(retryMeta.preset) } : {}),
+				transport: closedEnum(retryMeta.transport),
+				...(retryMeta.lastErrorCode
+					? {
+							lastErrorCode: closedEnum(tenantRetryLastErrorCode(retryMeta.lastErrorCode)),
+						}
+					: {}),
+				...(retryMeta.lastStatus ? { lastStatus: retryMeta.lastStatus } : {}),
+			}
+		: undefined;
 	const meta =
 		cacheMeta || retryMeta
 			? {
-					...(cacheMeta
+					...(cache
 						? {
-								cached: cacheMeta.hit,
-								stale: cacheMeta.stale,
-								cache: cacheMeta,
+								cached: cache.hit,
+								stale: cache.stale,
+								cache,
 							}
 						: {}),
-					...(retryMeta ? { retry: retryMeta } : {}),
+					...(retry ? { retry } : {}),
 				}
 			: undefined;
-	// Tenant-visible scalar flags are explicitly constrained to neutral values.
-	// TODO(owner): cache.keys contains request-derived key material; retain it
-	// unchanged until the owner decides whether it is acceptable on this surface.
-	const _neutralFlags: TenantNeutral<{ cached?: boolean; stale?: boolean }> | undefined = meta
-		? { cached: meta.cached, stale: meta.stale }
-		: undefined;
-	void _neutralFlags;
-	// TODO(owner): retry.lastErrorCode is an open transport/provider code string;
-	// retain the existing field and leave this sub-object unguarded pending policy.
+	const _neutralMeta: TenantNeutral<NonNullable<typeof meta>> | undefined = meta;
+	void _neutralMeta;
 	return {
 		data: result,
 		...(meta ? { meta } : {}),

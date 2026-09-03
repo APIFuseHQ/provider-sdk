@@ -241,6 +241,21 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					return response.data;
 				},
 			},
+			retryUnknownThenEcho: {
+				riskClass: READ_RISK_CLASS,
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async (ctx) => {
+					const response = await ctx.http.get("https://example.com/flaky", {
+						retry: {
+							preset: HttpRetryPreset.TransportTransient,
+							errorCodes: ["vendor said hello"],
+							baseDelayMs: 0,
+						},
+					});
+					return response.data;
+				},
+			},
 			cachedRetryThenEcho: {
 				riskClass: READ_RISK_CLASS,
 				input: z.object({ value: z.string() }),
@@ -1279,6 +1294,47 @@ describe("provider HTTP server", () => {
 						preset: HttpRetryPreset.TransportTransient,
 						transport: "native",
 						lastErrorCode: "transport_network_error",
+					},
+				},
+			});
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("maps unknown retry error codes to the tenant-neutral other bucket", async () => {
+		const originalFetch = globalThis.fetch;
+		let attempts = 0;
+		globalThis.fetch = createLocalFetchDouble(async () => {
+			attempts += 1;
+			if (attempts === 1) {
+				throw new TransportError("Vendor transport failed", { code: "vendor said hello" });
+			}
+			return new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		});
+		try {
+			const response = await app.request("/v1/retryUnknownThenEcho", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req_retry_unknown_code",
+					input: { value: "hello" },
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({
+				data: { ok: true },
+				meta: {
+					retry: {
+						attempts: 2,
+						retries: 1,
+						preset: HttpRetryPreset.TransportTransient,
+						transport: "native",
+						lastErrorCode: "other",
 					},
 				},
 			});

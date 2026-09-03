@@ -23,51 +23,84 @@ declare const CLOSED_ENUM: unique symbol;
 /** A string from an SDK-declared, closed observability taxonomy. */
 export type ClosedEnum<T extends string> = T & { readonly [CLOSED_ENUM]: true };
 
-const closedEnumValues = new Set<string>();
-
-/** Brands and runtime-registers a value from an SDK-declared closed string union. */
+/** Brands a value from an SDK-declared closed string union without changing it. */
 export function closedEnum<T extends string>(value: T): ClosedEnum<T> {
-	closedEnumValues.add(value);
 	return value as ClosedEnum<T>;
+}
+
+declare const TENANT_OPAQUE_KEYS: unique symbol;
+
+/** Explicit exemption for the existing implementation-shaped cache key list. */
+export type TenantOpaqueKeys = string[] & { readonly [TENANT_OPAQUE_KEYS]: true };
+
+/** Names the deliberate tenant cache-key exemption without changing its wire value. */
+export function tenantOpaqueKeys(value: string[]): TenantOpaqueKeys {
+	return value as TenantOpaqueKeys;
 }
 
 /**
  * Compile-time projection for the gateway ingestion contract. Plain strings,
- * URLs, hostnames, and free text reduce to `never`.
+ * URLs, hostnames, free text, unknown values, and escape-hatch properties reduce to `never`.
  */
-export type GatewayIngestible<T> = T extends object
-	? {
-			[K in keyof T]: NonNullable<T[K]> extends number | boolean | ClosedEnum<string>
-				? T[K]
-				: NonNullable<T[K]> extends readonly (infer U)[]
-					? U extends
-							| number
-							| boolean
-							| ClosedEnum<string>
-							| GatewayIngestible<U>
-						? T[K]
-						: never
-					: NonNullable<T[K]> extends object
-						? GatewayIngestible<NonNullable<T[K]>>
-						: never;
-		}
-	: never;
+export type GatewayIngestible<T> = 0 extends 1 & T
+	? never
+	: T extends object
+		? keyof T extends never
+			? never
+			: {
+					[K in keyof T]: 0 extends 1 & T[K]
+						? never
+						: unknown extends T[K]
+							? never
+							: NonNullable<T[K]> extends number | boolean | ClosedEnum<string>
+							? T[K]
+							: NonNullable<T[K]> extends readonly (infer U)[]
+								? 0 extends 1 & U
+									? never
+									: unknown extends U
+										? never
+										: U extends number | boolean | ClosedEnum<string>
+										? T[K]
+										: U extends object
+											? [U] extends [GatewayIngestible<U>]
+											? T[K]
+											: never
+										: never
+							: NonNullable<T[K]> extends object
+								? NonNullable<T[K]> extends GatewayIngestible<NonNullable<T[K]>>
+									? T[K]
+									: never
+								: never;
+			}
+		: never;
 
 /** Compile-time projection for tenant-visible, identity-neutral metadata. */
-export type TenantNeutral<T> = {
-	[K in keyof T]: NonNullable<T[K]> extends number | boolean | ClosedEnum<string>
-		? T[K]
+export type TenantNeutral<T> = 0 extends 1 & T
+	? never
+	: T extends object
+		? {
+				[K in keyof T]: K extends
+					| `vendor${string}`
+					| "provider"
+					| "engine"
+					| "model"
+					| `${string}Host`
+					? never
+					: 0 extends 1 & T[K]
+						? never
+						: unknown extends T[K]
+							? never
+							: NonNullable<T[K]> extends TenantOpaqueKeys
+							? T[K]
+							: NonNullable<T[K]> extends number | boolean | ClosedEnum<string>
+								? T[K]
+								: NonNullable<T[K]> extends object
+									? NonNullable<T[K]> extends TenantNeutral<NonNullable<T[K]>>
+										? T[K]
+										: never
+									: never;
+			}
 		: never;
-} & {
-	[K in keyof T as K extends
-		| `vendor${string}`
-		| "provider"
-		| "engine"
-		| "model"
-		| `${string}Host`
-		? K
-		: never]?: never;
-};
 
 export interface SpanIndex {
 	readonly spans: readonly Span[];
@@ -79,7 +112,13 @@ export interface SpanIndex {
 export interface TelemetryContributor<Log extends object, Header extends object> {
 	readonly key: TelemetryKey;
 	toLogPayload(spans: SpanIndex): Log | undefined;
-	toHeaderPayload(log: Log): Header extends GatewayIngestible<Header> ? Header | undefined : never;
+	toHeaderPayload(
+		log: Log,
+	): 0 extends 1 & Header
+		? never
+		: [Header] extends [GatewayIngestible<Header>]
+			? Header | undefined
+			: never;
 }
 
 export type RequestTelemetryLogPayload = {
@@ -89,7 +128,7 @@ export type RequestTelemetryLogPayload = {
 type RegisteredTelemetryContributor = {
 	readonly key: TelemetryKey;
 	toLogPayload(spans: SpanIndex): object | undefined;
-	toHeaderPayload(log: never): object | undefined;
+	toHeaderPayload(log: object): object | undefined;
 };
 
 type ProviderTelemetryEnvelope = {
@@ -99,6 +138,10 @@ type ProviderTelemetryEnvelope = {
 } & Partial<Record<Exclude<TelemetryKey, "events">, object>>;
 
 const MAX_HEADER_BYTES = 4_096;
+const MAX_INGESTIBLE_ARRAY_LENGTH = 64;
+const MAX_INGESTIBLE_OBJECT_KEYS = 32;
+const MAX_INGESTIBLE_DEPTH = 4;
+const INGESTIBLE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
 const HEADER_PRIORITY = [
 	"proxy",
 	"resolver",
@@ -111,7 +154,7 @@ const HEADER_PRIORITY = [
 	"cache",
 	"state",
 ] as const satisfies readonly Exclude<TelemetryKey, "events">[];
-const warnedInvalidHeaderKeys = new Set<TelemetryKey>();
+const warnedInvalidKeys = new Set<TelemetryKey>();
 
 function createSpanIndex(trace: TraceContext): SpanIndex {
 	const spans = trace.getSpans().slice();
@@ -134,70 +177,148 @@ function createSpanIndex(trace: TraceContext): SpanIndex {
 	};
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+	const prototype = Object.getPrototypeOf(value);
+	return prototype === Object.prototype || prototype === null;
 }
 
-/** Runtime counterpart to `GatewayIngestible`, including closed-enum registration. */
+/**
+ * Bounded structural defence in depth against casts and accidental free text.
+ * Closed-enum brands are erased at runtime; the type-level guard is the contract,
+ * while this check only enforces safe token shapes and collection bounds.
+ */
 export function isGatewayIngestible(value: unknown): boolean {
-	if (typeof value === "number") return Number.isFinite(value);
-	if (typeof value === "boolean") return true;
-	if (typeof value === "string") return closedEnumValues.has(value);
-	if (Array.isArray(value)) return value.every(isGatewayIngestible);
-	if (!isRecord(value)) return false;
-	return Object.values(value).every(isGatewayIngestible);
+	const ancestors = new Set<object>();
+	const visit = (candidate: unknown, depth: number): boolean => {
+		if (typeof candidate === "number") return Number.isFinite(candidate);
+		if (typeof candidate === "boolean") return true;
+		if (typeof candidate === "string") return INGESTIBLE_TOKEN.test(candidate);
+		if (candidate === null || typeof candidate !== "object") return false;
+		if (depth >= MAX_INGESTIBLE_DEPTH || ancestors.has(candidate)) return false;
+
+		if (Array.isArray(candidate)) {
+			if (candidate.length > MAX_INGESTIBLE_ARRAY_LENGTH) return false;
+			ancestors.add(candidate);
+			const valid = candidate.every(
+				(item, index) => Object.hasOwn(candidate, index) && visit(item, depth + 1),
+			);
+			ancestors.delete(candidate);
+			return valid;
+		}
+
+		if (!isPlainRecord(candidate)) return false;
+		const keys = Object.keys(candidate);
+		if (keys.length > MAX_INGESTIBLE_OBJECT_KEYS) return false;
+		ancestors.add(candidate);
+		const valid = keys.every((key) => visit(candidate[key], depth + 1));
+		ancestors.delete(candidate);
+		return valid;
+	};
+	try {
+		return visit(value, 0);
+	} catch {
+		return false;
+	}
 }
 
 function encodeEnvelope(envelope: ProviderTelemetryEnvelope): string {
 	return Buffer.from(JSON.stringify(envelope), "utf8").toString("base64url");
 }
 
-function warnInvalidHeaderSibling(key: TelemetryKey): void {
-	if (warnedInvalidHeaderKeys.has(key)) return;
-	warnedInvalidHeaderKeys.add(key);
-	console.warn(
-		`[provider-sdk] Dropped invalid gateway telemetry sibling "${key}"; header values must be finite numbers, booleans, registered closed enums, or arrays/objects of those values.`,
-	);
+function warnInvalidSibling(key: TelemetryKey): void {
+	if (warnedInvalidKeys.has(key)) return;
+	warnedInvalidKeys.add(key);
+	try {
+		console.warn(
+			`[provider-sdk] Dropped invalid telemetry sibling "${key}"; contributors must return serializable log objects and bounded gateway-safe header values.`,
+		);
+	} catch {
+		// A host-provided console must not let telemetry fail the request path.
+	}
 }
 
-function proxySink(
-	contributor: RegisteredTelemetryContributor | undefined,
-): ProxyTelemetrySink | undefined {
-	if (contributor?.key !== "proxy") return undefined;
-	const candidate = contributor as RegisteredTelemetryContributor & Partial<ProxyTelemetrySink>;
-	return typeof candidate.recordProxyResolution === "function"
-		? (candidate as unknown as ProxyTelemetrySink)
-		: undefined;
+function isProxySink(value: unknown): value is ProxyTelemetrySink {
+	if (value === null || typeof value !== "object") return false;
+	try {
+		return typeof Reflect.get(value, "recordProxyResolution") === "function";
+	} catch {
+		return false;
+	}
 }
 
 /** One finalisation owner for every request-scoped telemetry contributor. */
 export class RequestTelemetry {
 	readonly trace: TraceContext;
 	readonly contributors: Readonly<
-		Partial<Record<TelemetryKey, TelemetryContributor<any, any>>>
+		Partial<
+			Record<
+				TelemetryKey,
+				{
+					readonly key: TelemetryKey;
+					toLogPayload(spans: SpanIndex): object | undefined;
+				}
+			>
+		>
 	>;
-	readonly proxy: ProxyTelemetrySink | undefined;
-
-	constructor(trace: TraceContext, contributors: readonly TelemetryContributor<any, any>[]) {
-		this.trace = trace;
-		const registered: Partial<Record<TelemetryKey, RegisteredTelemetryContributor>> = {};
-		for (const contributor of contributors) {
-			if (registered[contributor.key]) {
-				throw new TypeError(`Telemetry contributor "${contributor.key}" is already registered.`);
+	readonly #registered: Partial<Record<TelemetryKey, RegisteredTelemetryContributor>> = {};
+	readonly #exposed: Partial<
+		Record<
+			TelemetryKey,
+			{
+				readonly key: TelemetryKey;
+				toLogPayload(spans: SpanIndex): object | undefined;
 			}
-			registered[contributor.key] = contributor as RegisteredTelemetryContributor;
+		>
+	> = {};
+	#proxy: ProxyTelemetrySink | undefined;
+
+	constructor(trace: TraceContext) {
+		this.trace = trace;
+		this.contributors = this.#exposed;
+	}
+
+	register<Log extends object, Header extends object>(
+		contributor: TelemetryContributor<Log, Header> &
+			(0 extends 1 & Log
+				? never
+				: 0 extends 1 & Header
+					? never
+					: [Header] extends [GatewayIngestible<Header>]
+						? unknown
+						: never),
+	): void {
+		if (this.#registered[contributor.key]) {
+			throw new TypeError(`Telemetry contributor "${contributor.key}" is already registered.`);
 		}
-		this.contributors = Object.freeze(registered);
-		this.proxy = proxySink(registered.proxy);
+		const registered: RegisteredTelemetryContributor = {
+			key: contributor.key,
+			toLogPayload: (spans) => contributor.toLogPayload(spans),
+			toHeaderPayload: (log) => contributor.toHeaderPayload(log as Log),
+		};
+		this.#registered[contributor.key] = registered;
+		this.#exposed[contributor.key] = contributor;
+		if (contributor.key === "proxy" && isProxySink(contributor)) this.#proxy = contributor;
+	}
+
+	get proxy(): ProxyTelemetrySink | undefined {
+		return this.#proxy;
 	}
 
 	toLogPayload(): RequestTelemetryLogPayload | undefined {
 		const spans = createSpanIndex(this.trace);
 		const payload: Partial<Record<TelemetryKey, object>> = {};
-		for (const key of Object.keys(this.contributors) as TelemetryKey[]) {
-			const contributor = this.contributors[key] as RegisteredTelemetryContributor | undefined;
-			const sibling = contributor?.toLogPayload(spans);
-			if (sibling !== undefined) payload[key] = sibling;
+		for (const key of Object.keys(this.#registered) as TelemetryKey[]) {
+			const contributor = this.#registered[key];
+			if (!contributor) continue;
+			try {
+				const sibling = contributor.toLogPayload(spans);
+				if (sibling === undefined) continue;
+				JSON.stringify(sibling);
+				payload[key] = sibling;
+			} catch {
+				warnInvalidSibling(key);
+			}
 		}
 		return Object.keys(payload).length > 0 ? (payload as RequestTelemetryLogPayload) : undefined;
 	}
@@ -206,20 +327,27 @@ export class RequestTelemetry {
 		const spans = createSpanIndex(this.trace);
 		const siblings: Partial<Record<Exclude<TelemetryKey, "events">, object>> = {};
 		for (const key of HEADER_PRIORITY) {
-			const contributor = this.contributors[key] as RegisteredTelemetryContributor | undefined;
-			const log = contributor?.toLogPayload(spans);
-			if (log === undefined) continue;
-			const projected = contributor?.toHeaderPayload(log as never);
-			if (projected === undefined) continue;
-
-			// Validate the JSON-decoded value: symbols and TypeScript brands are erased
-			// on the wire, so only values registered through closedEnum() survive.
-			const decoded: unknown = JSON.parse(JSON.stringify(projected));
-			if (!isGatewayIngestible(decoded)) {
-				warnInvalidHeaderSibling(key);
-				continue;
+			const contributor = this.#registered[key];
+			if (!contributor) continue;
+			try {
+				const log = contributor.toLogPayload(spans);
+				if (log === undefined) continue;
+				const projected = contributor.toHeaderPayload(log);
+				if (projected === undefined) continue;
+				if (!isGatewayIngestible(projected)) {
+					warnInvalidSibling(key);
+					continue;
+				}
+				const serialized = JSON.stringify(projected);
+				const decoded: unknown = JSON.parse(serialized);
+				if (!isGatewayIngestible(decoded) || !isPlainRecord(decoded)) {
+					warnInvalidSibling(key);
+					continue;
+				}
+				siblings[key] = decoded;
+			} catch {
+				warnInvalidSibling(key);
 			}
-			siblings[key] = projected;
 		}
 
 		if (Object.keys(siblings).length === 0) return undefined;

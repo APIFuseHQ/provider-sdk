@@ -12,6 +12,7 @@ import type {
 import {
 	closedEnum,
 	RequestTelemetry,
+	type ClosedEnum,
 	type TelemetryContributor,
 } from "./request-telemetry.js";
 import { createTraceContext } from "./trace.js";
@@ -19,8 +20,8 @@ import { createTraceContext } from "./trace.js";
 export { PROVIDER_TELEMETRY_HEADER } from "./request-telemetry.js";
 
 declare const PROXY_HASH: unique symbol;
-/** 12-hex host hash used in bounded proxy attempt samples. */
-export type ProxyHash = string & { readonly [PROXY_HASH]: true };
+/** Bounded hexadecimal host hash used in proxy attempt samples. */
+export type ProxyHash = ClosedEnum<string> & { readonly [PROXY_HASH]: true };
 
 export type ProxyTelemetryResolvedPayload = {
 	kind: "resolved";
@@ -104,6 +105,46 @@ export type ProxyTelemetryLogPayload =
 	| ProxyTelemetryResolvedPayload
 	| ProxyTelemetryUnresolvedPayload;
 
+/** Concrete gateway-safe projection of the unchanged proxy sibling. */
+export type ProxyTelemetryHeaderPayload = {
+	kind: ClosedEnum<"resolved" | "unresolved">;
+	provider?: ClosedEnum<ProxyVendorName>;
+	userAgentSource?: ClosedEnum<ProxyUserAgentSource>;
+	protocol?: ClosedEnum<ProxyProtocol>;
+	cacheStatus?: ClosedEnum<ProxyCacheStatus>;
+	cacheHit?: boolean;
+	resolutionMs?: number;
+	allocatorMs?: number;
+	allocatorStatus?: number;
+	allocatorBodyClass?: ClosedEnum<SmartproxyAllocatorBodyClass>;
+	allocatorAttempts?: number;
+	lockWaitMs?: number;
+	redisReadMs?: number;
+	redisWriteMs?: number;
+	poolAgeMs?: number;
+	poolExpiresInMs?: number;
+	attempts?: number;
+	refreshes?: number;
+	attemptSamples?: {
+		n: number;
+		a: number;
+		i?: number;
+		h?: ProxyHash;
+		o: ClosedEnum<ProxyAttemptTelemetryEvent["outcome"]>;
+		c?: ClosedEnum<string>;
+		s?: number;
+		d?: number;
+	}[];
+	vendors?: ClosedEnum<ProxyVendorName>[];
+	failovers?: {
+		v: ClosedEnum<ProxyVendorName>;
+		nx?: ClosedEnum<ProxyVendorName>;
+		p: ClosedEnum<ProxyVendorFailoverTelemetryEvent["phase"]>;
+		r: ClosedEnum<ProxyVendorFailoverTelemetryEvent["reason"]>;
+		a?: number;
+	}[];
+};
+
 const MAX_PROXY_ATTEMPT_SAMPLES = 24;
 const MAX_PROXY_FAILOVER_SAMPLES = 12;
 
@@ -133,7 +174,10 @@ function worseStatus(left: ProxyCacheStatus, right: ProxyCacheStatus): ProxyCach
 }
 
 export class ProxyTelemetryCollector
-	implements ProxyTelemetrySink, TelemetryContributor<ProxyTelemetryLogPayload, any> {
+	implements
+		ProxyTelemetrySink,
+		TelemetryContributor<ProxyTelemetryLogPayload, ProxyTelemetryHeaderPayload>
+{
 	readonly key = "proxy" as const;
 	#events: ProxyResolutionTelemetryEvent[] = [];
 	#attempts: ProxyAttemptTelemetryEvent[] = [];
@@ -221,17 +265,17 @@ export class ProxyTelemetryCollector
 			n: index + 1,
 			a: attempt.attempt,
 			...(attempt.poolIndex === undefined ? {} : { i: attempt.poolIndex }),
-			...(attempt.proxyHash ? { h: closedEnum(attempt.proxyHash) as unknown as ProxyHash } : {}),
-			o: closedEnum(attempt.outcome),
-			...(attempt.errorCode ? { c: closedEnum(attempt.errorCode) } : {}),
+			...(attempt.proxyHash ? { h: attempt.proxyHash } : {}),
+			o: attempt.outcome,
+			...(attempt.errorCode ? { c: attempt.errorCode } : {}),
 			...(attempt.status === undefined ? {} : { s: attempt.status }),
 			...(attempt.durationMs === undefined ? {} : { d: attempt.durationMs }),
 		}));
 		const failovers = this.#failovers.map((failover) => ({
-			v: closedEnum(failover.vendor),
-			...(failover.nextVendor ? { nx: closedEnum(failover.nextVendor) } : {}),
-			p: closedEnum(failover.phase),
-			r: closedEnum(failover.reason),
+			v: failover.vendor,
+			...(failover.nextVendor ? { nx: failover.nextVendor } : {}),
+			p: failover.phase,
+			r: failover.reason,
 			...(failover.attempt === undefined ? {} : { a: failover.attempt }),
 		}));
 
@@ -263,11 +307,11 @@ export class ProxyTelemetryCollector
 					)
 				: undefined;
 			return {
-				kind: closedEnum("unresolved"),
-				vendors: this.#unresolvedVendors.map((vendor) => closedEnum(vendor)),
+				kind: "unresolved",
+				vendors: this.#unresolvedVendors,
 				...(aggregate
 					? {
-							cacheStatus: closedEnum(aggregate.cacheStatus),
+							cacheStatus: aggregate.cacheStatus,
 							cacheHit: aggregate.cacheHit,
 							resolutionMs: aggregate.resolutionMs,
 							...(aggregate.allocatorMs !== undefined
@@ -277,7 +321,7 @@ export class ProxyTelemetryCollector
 								? { allocatorStatus: aggregate.allocatorStatus }
 								: {}),
 							...(aggregate.allocatorBodyClass !== undefined
-								? { allocatorBodyClass: closedEnum(aggregate.allocatorBodyClass) }
+								? { allocatorBodyClass: aggregate.allocatorBodyClass }
 								: {}),
 							...(aggregate.allocatorAttempts !== undefined
 								? { allocatorAttempts: aggregate.allocatorAttempts }
@@ -331,11 +375,11 @@ export class ProxyTelemetryCollector
 			first,
 		);
 		return {
-			kind: closedEnum("resolved"),
-			provider: closedEnum(serving.provider),
-			...(aggregate.userAgentSource ? { userAgentSource: closedEnum(aggregate.userAgentSource) } : {}),
-			...(serving.protocol ? { protocol: closedEnum(serving.protocol) } : {}),
-			cacheStatus: closedEnum(aggregate.cacheStatus),
+			kind: "resolved",
+			provider: serving.provider,
+			...(aggregate.userAgentSource ? { userAgentSource: aggregate.userAgentSource } : {}),
+			...(serving.protocol ? { protocol: serving.protocol } : {}),
+			cacheStatus: aggregate.cacheStatus,
 			cacheHit: aggregate.cacheHit,
 			resolutionMs: aggregate.resolutionMs,
 			...(aggregate.allocatorMs !== undefined ? { allocatorMs: aggregate.allocatorMs } : {}),
@@ -343,7 +387,7 @@ export class ProxyTelemetryCollector
 				? { allocatorStatus: aggregate.allocatorStatus }
 				: {}),
 			...(aggregate.allocatorBodyClass !== undefined
-				? { allocatorBodyClass: closedEnum(aggregate.allocatorBodyClass) }
+				? { allocatorBodyClass: aggregate.allocatorBodyClass }
 				: {}),
 			...(aggregate.allocatorAttempts !== undefined
 				? { allocatorAttempts: aggregate.allocatorAttempts }
@@ -363,11 +407,50 @@ export class ProxyTelemetryCollector
 		};
 	}
 
-	toHeaderPayload(log: ProxyTelemetryLogPayload): ProxyTelemetryLogPayload {
-		return log;
+	toHeaderPayload(log: ProxyTelemetryLogPayload): ProxyTelemetryHeaderPayload {
+		const attemptSamples = log.attemptSamples?.map((sample) => ({
+			...sample,
+			...(sample.h ? { h: closedEnum(sample.h) as ProxyHash } : {}),
+			o: closedEnum(sample.o),
+			...(sample.c ? { c: closedEnum(sample.c) } : {}),
+		}));
+		const failovers = log.failovers?.map((failover) => ({
+			...failover,
+			v: closedEnum(failover.v),
+			...(failover.nx ? { nx: closedEnum(failover.nx) } : {}),
+			p: closedEnum(failover.p),
+			r: closedEnum(failover.r),
+		}));
+		if (log.kind === "resolved") {
+			return {
+				...log,
+				kind: closedEnum(log.kind),
+				provider: closedEnum(log.provider),
+				...(log.userAgentSource ? { userAgentSource: closedEnum(log.userAgentSource) } : {}),
+				...(log.protocol ? { protocol: closedEnum(log.protocol) } : {}),
+				cacheStatus: closedEnum(log.cacheStatus),
+				...(log.allocatorBodyClass
+					? { allocatorBodyClass: closedEnum(log.allocatorBodyClass) }
+					: {}),
+				...(attemptSamples ? { attemptSamples } : {}),
+				...(log.vendors ? { vendors: log.vendors.map((vendor) => closedEnum(vendor)) } : {}),
+				...(failovers ? { failovers } : {}),
+			} as ProxyTelemetryHeaderPayload;
+		}
+		return {
+			...log,
+			kind: closedEnum(log.kind),
+			vendors: log.vendors.map((vendor) => closedEnum(vendor)),
+			...(log.cacheStatus ? { cacheStatus: closedEnum(log.cacheStatus) } : {}),
+			...(log.allocatorBodyClass ? { allocatorBodyClass: closedEnum(log.allocatorBodyClass) } : {}),
+			...(failovers ? { failovers } : {}),
+			...(attemptSamples ? { attemptSamples } : {}),
+		} as ProxyTelemetryHeaderPayload;
 	}
 
 	toHeaderValue(): string | undefined {
-		return new RequestTelemetry(createTraceContext(), [this]).toHeaderValue();
+		const telemetry = new RequestTelemetry(createTraceContext());
+		telemetry.register(this);
+		return telemetry.toHeaderValue();
 	}
 }
