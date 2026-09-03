@@ -13,10 +13,10 @@ import {
 	TransportError,
 } from "../errors.js";
 import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
-import type { ResolverVendorTransport } from "../runtime/resolver-vendors/types.js";
 import { normalizeResponse } from "../runtime/stealth.js";
 import {
 	type AutoSolveResolverFactory,
+	type AutoSolveResolverSelection,
 	type DeclarativeStealthResponse,
 	HttpRetryUnsafeMethodPolicy,
 	type ProviderDefinition,
@@ -4407,14 +4407,23 @@ describe("server SBSD bound-transport wiring", () => {
 	});
 
 	it("runs a resolver override on the initiating session transport", async () => {
+		const { APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY } = await import(
+			"../runtime/resolver-config.js"
+		);
 		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
 			"../runtime/proxy-nodemaven.js"
 		);
 		const previous = new Map(
-			[NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV].map(
+			[
+				APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
+				NODEMAVEN_USERNAME_ENV,
+				NODEMAVEN_PASSWORD_ENV,
+			].map(
 				(name) => [name, process.env[name]] as const,
 			),
 		);
+		process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY] =
+			"fixture-selection-hyper-key";
 		process.env[NODEMAVEN_USERNAME_ENV] = "fixture-override-account";
 		process.env[NODEMAVEN_PASSWORD_ENV] = "fixture-override-password";
 		queueHardSbsdSolve(
@@ -4426,31 +4435,11 @@ describe("server SBSD bound-transport wiring", () => {
 			},
 			"https://example.com/operation-protected",
 		);
-		const { createHypersolutionsResolverVendorAdapter } = await import(
-			"../runtime/resolver-vendors/hypersolutions.js"
-		);
-		const adapter = createHypersolutionsResolverVendorAdapter({
-			apiKey: "fixture-override-hyper-key",
-			allowedHosts: ["example.com"],
-		});
 		let overrideCalls = 0;
-		const resolverOverride: AutoSolveResolverFactory = ({ createTransport, clientProfile }) => {
+		const resolverOverride: AutoSolveResolverFactory = ({ clientProfile }) => {
+			overrideCalls += 1;
 			expect(clientProfile).toMatchObject({ browser: "safari", os: "macos" });
-			const transport = createTransport();
-			return {
-				async solve(challenge, signal) {
-					overrideCalls += 1;
-					expect(transport.getCookie?.("sbsd_o", challenge.pageUrl)).toBe("initial-state");
-					expect(transport.sessionHeaders?.["User-Agent"]).toContain("Safari");
-					return adapter.solve(
-						challenge,
-						undefined,
-						signal ?? new AbortController().signal,
-						undefined,
-						transport,
-					);
-				},
-			};
+			return { vendors: ["hypersolutions"] };
 		};
 		try {
 			const { createServerAppAsync } = await import("../server/serve.js");
@@ -4478,6 +4467,9 @@ describe("server SBSD bound-transport wiring", () => {
 			expect(
 				allWreqCalls().filter((call) => call.url === "https://example.com/operation-protected"),
 			).toHaveLength(2);
+			expect(requestHeader(allWreqCalls().at(-1)?.init, "cookie")).toContain(
+				"sbsd_o=updated-state",
+			);
 		} finally {
 			for (const [name, value] of previous) {
 				if (value === undefined) delete process.env[name];
@@ -4523,54 +4515,41 @@ describe("server SBSD bound-transport wiring", () => {
 		expect(allWreqCalls()).toHaveLength(1);
 	});
 
-	it("rejects an automatic resolver factory that ignores createTransport and builds a fresh client", async () => {
+	it("rejects an old factory that could call and discard a supplied transport", async () => {
 		let overrideCalls = 0;
-		const { createHypersolutionsResolverVendorAdapter } = await import(
-			"../runtime/resolver-vendors/hypersolutions.js"
-		);
-		const adapter = createHypersolutionsResolverVendorAdapter({
-			apiKey: "fixture-off-session-hyper-key",
-			allowedHosts: ["example.com"],
-		});
-		const { createStealthClient } = await import("../runtime/stealth.js");
-		const resolverOverride: AutoSolveResolverFactory = () => {
-			const freshClient = createStealthClient("https://example.com");
-			const offSessionTransport: ResolverVendorTransport = {
-				async fetch(url, init) {
-					const response = await freshClient.fetch(url, {
-						method: init.method,
-						headers: init.headers,
-						...(init.body === undefined ? {} : { body: init.body }),
-						throwOnHttpError: false,
-					});
-					return {
-						status: response.status,
-						headers: response.headers,
-						body: response.body,
-						cookies: [],
-					};
-				},
-			};
+		let discardedTransportCalls = 0;
+		const oldResolverFactory = (bound: {
+			readonly clientProfile: unknown;
+			readonly createTransport: () => unknown;
+		}) => {
+			bound.createTransport();
 			return {
-				async solve(challenge, signal) {
+				async solve() {
 					overrideCalls += 1;
-					return adapter.solve(
-						challenge,
-						undefined,
-						signal ?? new AbortController().signal,
-						undefined,
-						offSessionTransport,
-					);
+					return { form: "token", token: "must-not-run" } as const;
 				},
 			};
 		};
+		// @ts-expect-error test-invalid: the retired factory received transport construction and returned a resolver.
+		const oldFactoryTypeCheck: AutoSolveResolverFactory = oldResolverFactory;
+		void oldFactoryTypeCheck;
+		const castAroundOldFactory = () =>
+			oldResolverFactory({
+				clientProfile: { browser: "safari", os: "macos" },
+				createTransport: () => {
+					discardedTransportCalls += 1;
+					return {};
+				},
+			});
+		// @ts-expect-error test-invalid: runtime validation must reject a cast-around resolver return.
+		const resolverOverride: AutoSolveResolverFactory = castAroundOldFactory;
 		mockStealthState.queuedResponses.push({
 			status: 403,
 			body: sbsdInterstitial("/.well-known/sbsd?v=ignored&t=ignored-token"),
 			headers: { "set-cookie": "sbsd_o=ignored-state; Path=/; Secure" },
 			url: "https://example.com/profile-probe",
 		});
-		const provider = createSbsdFailureCodeProvider("stealth-sbsd-factory-ignores-transport", {
+		const provider = createSbsdFailureCodeProvider("stealth-sbsd-old-factory-rejected", {
 			browser: "safari",
 			os: "macos",
 		});
@@ -4582,7 +4561,7 @@ describe("server SBSD bound-transport wiring", () => {
 		const response = await app.request("/v1/probe", {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ requestId: "req-sbsd-factory-ignores-transport", input: {} }),
+			body: JSON.stringify({ requestId: "req-sbsd-old-factory-rejected", input: {} }),
 		});
 
 		expect(response.status).toBe(200);
@@ -4590,8 +4569,69 @@ describe("server SBSD bound-transport wiring", () => {
 			data: { code: "RESOLVER_BOUND_TRANSPORT_REQUIRED" },
 		});
 		expect(overrideCalls).toBe(0);
+		expect(discardedTransportCalls).toBe(1);
 		expect(allWreqCalls()).toHaveLength(1);
 		expect(mockStealthState.clients).toHaveLength(1);
+	});
+
+	it("rejects automatic resolver selections containing transport ownership keys", async () => {
+		let transportCalls = 0;
+		const createTransportTypeCheck = {
+			vendors: ["hypersolutions"],
+			// @ts-expect-error test-invalid: transport construction is always SDK-owned.
+			createTransport() {
+				return {};
+			},
+		} satisfies AutoSolveResolverSelection;
+		const transportTypeCheck = {
+			vendors: ["hypersolutions"],
+			// @ts-expect-error test-invalid: a caller-owned transport is never selectable.
+			transport: {},
+		} satisfies AutoSolveResolverSelection;
+		void createTransportTypeCheck;
+		void transportTypeCheck;
+		const invalidSelections = [
+			{
+				vendors: ["hypersolutions"] as const,
+				transport: {},
+			},
+			{
+				vendors: ["hypersolutions"] as const,
+				createTransport() {
+					transportCalls += 1;
+					return {};
+				},
+			},
+		];
+		const { createServerAppAsync } = await import("../server/serve.js");
+		for (const [index, invalidSelection] of invalidSelections.entries()) {
+			mockStealthState.queuedResponses.push({
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=selection&t=selection-token"),
+				headers: { "set-cookie": "sbsd_o=selection-state; Path=/; Secure" },
+				url: "https://example.com/profile-probe",
+			});
+			const provider = createSbsdFailureCodeProvider(
+				`stealth-sbsd-selection-transport-rejected-${index}`,
+				{ browser: "safari", os: "macos" },
+			);
+			const app = await createServerAppAsync(provider, {
+				logger: () => undefined,
+				resolver: () => invalidSelection,
+			});
+			const response = await app.request("/v1/probe", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: `req-sbsd-selection-transport-${index}`, input: {} }),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({
+				data: { code: "RESOLVER_BOUND_TRANSPORT_REQUIRED" },
+			});
+		}
+		expect(transportCalls).toBe(0);
+		expect(allWreqCalls()).toHaveLength(2);
 	});
 
 	it("supplies the bound transport in operation and auth FlowContext assembly", async () => {

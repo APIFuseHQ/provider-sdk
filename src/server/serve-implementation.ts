@@ -108,6 +108,7 @@ import {
 } from "../stream.js";
 import type {
 	AutoSolveResolverFactory,
+	AutoSolveResolverSelection,
 	AuthContext,
 	AuthTurn,
 	BrowserClient,
@@ -564,6 +565,28 @@ function resolverContextOverride(
 	return typeof resolver === "function" ? undefined : resolver;
 }
 
+function assertAutoSolveResolverSelection(
+	selection: unknown,
+): asserts selection is AutoSolveResolverSelection {
+	if (
+		!selection ||
+		typeof selection !== "object" ||
+		Array.isArray(selection) ||
+		"solve" in selection ||
+		"transport" in selection ||
+		"createTransport" in selection ||
+		Reflect.ownKeys(selection).some((key) => key !== "vendors")
+	) {
+		throw new SDKError(
+			"An automatic SBSD resolver override must return a transport-free resolver selection",
+			{
+				code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
+				fix: "Return only an optional provider resolver vendor chain; the SDK constructs the resolver and transport.",
+			},
+		);
+	}
+}
+
 function createStealthChallengeDetection(
 	provider: ProviderDefinition,
 	resolverRuntime: typeof ResolverRuntimeModule | undefined,
@@ -598,7 +621,7 @@ function createStealthChallengeDetection(
 										"An automatic SBSD resolver override must be a bound resolver factory",
 										{
 											code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
-											fix: "Supply an AutoSolveResolverFactory that constructs the resolver with the SDK-owned createTransport input.",
+											fix: "Supply an AutoSolveResolverFactory that returns only a resolver vendor selection.",
 										},
 									);
 								}
@@ -606,23 +629,32 @@ function createStealthChallengeDetection(
 									provider.resolver?.clientProfile,
 									initiatingClientProfile,
 								);
-								let boundTransportClaimed = false;
-								const selectedResolver = resolverOverride({
-									createTransport: () => {
-										boundTransportClaimed = true;
-										return transport;
-									},
+								const selection = resolverOverride({
 									clientProfile: initiatingClientProfileSelection,
 								});
-								if (!boundTransportClaimed) {
-									throw new SDKError(
-										"The automatic SBSD resolver factory ignored the bound session transport",
-										{
-											code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
-											fix: "Construct the resolver with the createTransport input supplied to the factory.",
+								assertAutoSolveResolverSelection(selection);
+								const selectedResolver = resolverRuntime.createResolverClientFromEnv(
+									{
+										kinds: provider.resolver?.kinds ?? [],
+										clientProfile: provider.resolver?.clientProfile ?? "",
+										...(selection.vendors === undefined
+											? {}
+											: { vendors: selection.vendors }),
+									},
+									undefined,
+									{
+										allowedHosts: provider.allowedHosts,
+										cache,
+										identityScope,
+										createTransport: ({ clientProfile }) => {
+											assertResolverClientProfileMatches(
+												clientProfile,
+												initiatingClientProfile,
+											);
+											return transport;
 										},
-									);
-								}
+									},
+								);
 								return resolverRuntime
 									.bindResolverSignal(selectedResolver, signal)
 									.solve(challenge, solveSignal);
@@ -1262,7 +1294,8 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
 	ocr?: OcrContext;
 	/**
 	 * Optional resolver override for tests or custom hosts; local/prod normally resolves from env.
-	 * Automatic challenge solving accepts only a factory bound to the initiating stealth session.
+	 * Automatic challenge solving accepts only a vendor-selection factory; the SDK constructs
+	 * its resolver on the initiating stealth session.
 	 */
 	resolver?: ResolverContext | AutoSolveResolverFactory;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */

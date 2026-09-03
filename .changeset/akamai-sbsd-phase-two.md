@@ -14,7 +14,7 @@ classification, and the new types are new exports. Classifications cover
 Successful solves are represented only by the unclassified refetched response; unsafe
 requests are never replayed automatically.
 
-Custom hosts may add an `AutoSolveResolverFactory` to select the resolver used by
-automatic solving while accepting the initiating session's SDK-owned transport and
-resolved profile. This factory option is additive; existing provider-invoked
+Custom hosts may add an `AutoSolveResolverFactory` to select the vendor chain used by
+automatic solving from the initiating session's resolved profile. The SDK alone
+constructs the resolver and injects its session-bound transport. This option is additive; existing provider-invoked
 `ResolverContext` overrides remain supported outside automatic solving.

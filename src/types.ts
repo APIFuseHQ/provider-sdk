@@ -1,6 +1,5 @@
 import type ms from "ms";
 import type { HealthScenario } from "./health-scenario.js";
-import type { ResolverVendorTransport } from "./runtime/resolver-vendors/types.js";
 import type { SerializedCookieJar } from "tough-cookie";
 
 import type { infer as ZodInfer, ZodType } from "zod";
@@ -512,15 +511,19 @@ export interface ResolverContext {
 }
 
 /**
- * Selects a custom resolver for automatic challenge solving while keeping all
- * adapter I/O on the SDK-owned initiating stealth session.
+ * Selects the resolver vendor chain used for automatic challenge solving.
+ * Transport, identity, admission, and cache construction remain SDK-owned.
  */
+export type AutoSolveResolverSelection = {
+	/** Optional ordered override for the provider-declared resolver vendor chain. */
+	readonly vendors?: readonly ProviderResolverVendor[];
+};
+
+/** Selects automatic resolver construction without receiving or returning a transport. */
 export type AutoSolveResolverFactory = (bound: {
-	/** Returns the only transport an auto-solve resolver may use. */
-	readonly createTransport: () => ResolverVendorTransport;
 	/** Fully resolved browser/OS identity of the initiating stealth session. */
 	readonly clientProfile: StealthProfileSelection;
-}) => ResolverContext;
+}) => AutoSolveResolverSelection;
 
 export interface HealthJourneySchedule {
 	kind: "interval";

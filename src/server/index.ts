@@ -28,8 +28,7 @@ export {
 	serve,
 } from "./serve.js";
 export type { ProviderErrorObservability } from "../errors.js";
-export type { ResolverVendorTransport } from "../runtime/resolver-vendors/types.js";
-export type { AutoSolveResolverFactory } from "../types.js";
+export type { AutoSolveResolverFactory, AutoSolveResolverSelection } from "../types.js";
 export {
 	computeSelfTestPlanDigest,
 	createSelfTestApp,
