@@ -198,6 +198,16 @@ describe("request telemetry ledger", () => {
 		expect(envelope.truncated).toBe(true);
 	});
 
+	it("drops an oversized resolver sibling before the proxy sibling", () => {
+		const ledger = new RequestTelemetry(createTraceContext());
+		ledger.register(recordedProxy());
+		ledger.register(castContributor("resolver", largeValidPayload("r", 64)));
+		const envelope = decode(ledger.toHeaderValue() ?? "");
+		expect(envelope.proxy).toBeDefined();
+		expect(envelope.resolver).toBeUndefined();
+		expect(envelope.truncated).toBe(true);
+	});
+
 	it.each([
 		["BigInt", "stealth", { big: 1n }],
 		[

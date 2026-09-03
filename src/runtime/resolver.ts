@@ -17,6 +17,7 @@ import type {
 	ProviderResolverVendor,
 	ResolverContext,
 } from "../types.js";
+import { isProviderCacheBypassed } from "./cache.js";
 import {
 	RESOLVER_CHALLENGE_BINDINGS,
 	resolverChallengeAllowsDirectCache,
@@ -36,12 +37,15 @@ import {
 	type ResolverVendorAdapter,
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
+	attachResolverVendorPollObserver,
 	type ResolverVendorUnavailableReason,
 	resolveProviderResolverVendors,
 	resolverVendorSupports,
 } from "./resolver-vendors/types.js";
 import {
 	createUnsupportedResolverClient,
+	inheritResolverTelemetryBinding,
+	registerResolverTelemetryBinding,
 	RESOLVER_INSTRUMENTATION_METADATA,
 	type ResolverSolveWithRecorder,
 } from "./resolver-shared.js";
@@ -57,6 +61,11 @@ import {
 } from "./resolver-config.js";
 import { DEFAULT_STEALTH_PROFILE } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
+import type {
+	ResolverTelemetryErrorClass,
+	ResolverTelemetryPhase,
+	ResolverTelemetrySink,
+} from "./resolver-telemetry.js";
 
 export {
 	createUnsupportedResolverClient,
@@ -114,6 +123,8 @@ type ResolverChainClient = ResolverContext & {
 export interface ResolverRuntimeOptions {
 	readonly allowedHosts?: readonly string[];
 	readonly cache?: ProviderCache;
+	/** Optional request-scoped observability sink; never used as resolver identity. */
+	readonly telemetry?: ResolverTelemetrySink;
 	/** Inputs for SDK-owned lazy proxy resolution. The SDK never accepts a caller-built identity. */
 	readonly proxyIntent?: {
 		readonly mode: ProviderProxyMode;
@@ -383,23 +394,26 @@ function throwUnsupportedKind(kind: ProviderChallengeKind, usingDefaultVendors: 
 	});
 }
 
-function throwExhausted(attempts: readonly ResolverChainAttempt[]): never {
+function throwExhausted(
+	challengeKind: ProviderChallengeKind,
+	attempts: readonly ResolverChainAttempt[],
+	executedAttemptCount = attempts.length,
+): never {
 	const hasMissingChallengeInput = attempts.some(
 		(attempt) => attempt.reason === "missing_challenge_input",
 	);
-	const summary = attempts
-		.map(({ vendor, reason, missingFields }) =>
-			missingFields === undefined || missingFields.length === 0
-				? `${vendor}: ${reason}`
-				: `${vendor}: ${reason} (missing fields: ${missingFields.join(", ")})`,
-		)
-		.join(", ");
-	throw new ProviderError(`Resolver vendor chain exhausted: ${summary}`, {
+	throw new ProviderError("The challenge could not be resolved.", {
 		code: "RESOLVER_CHAIN_EXHAUSTED",
 		fix: hasMissingChallengeInput
-			? "Capture the named challenge fields or configure another supporting resolver vendor."
-			: "Configure another supporting resolver vendor or restore an unavailable vendor.",
-		details: attempts,
+			? "Capture all required challenge fields and retry the request."
+			: "Retry the request or contact support if the challenge continues.",
+		retryable: false,
+		details: {
+			challengeKind,
+			attempts: executedAttemptCount,
+			outcome: "exhausted",
+			retryable: false,
+		},
 	});
 }
 
@@ -522,10 +536,21 @@ function safePhase(phase: string | undefined): string | undefined {
 	return phase !== undefined && /^[a-z\d_.:-]{1,64}$/i.test(phase) ? phase : undefined;
 }
 
-function unavailableAttempt(error: ResolverVendorUnavailableError): ResolverChainAttempt {
-	const cause = safeCause(error);
+function unavailableAttempt(
+	error: ResolverVendorUnavailableError,
+	forTelemetry = false,
+): ResolverChainAttempt {
+	// Preserve the full input for the collector's redact-then-bound path. Span
+	// attributes retain their existing sanitization and phase validation.
+	const cause =
+		forTelemetry && error.cause !== undefined
+			? {
+					name: error.cause instanceof Error ? error.cause.name : "Error",
+					message: error.cause instanceof Error ? error.cause.message : String(error.cause),
+				}
+			: safeCause(error);
 	const upstreamHost = safeUpstreamHost(error.upstreamHost);
-	const phase = safePhase(error.phase);
+	const phase = forTelemetry ? error.phase : safePhase(error.phase);
 	const round =
 		Number.isSafeInteger(error.round) && (error.round as number) > 0 ? error.round : undefined;
 	return {
@@ -550,6 +575,125 @@ function unavailableSpanAttributes(error: ResolverVendorUnavailableError): Recor
 		transport_phase: attempt.phase,
 		transport_round: attempt.round,
 	};
+}
+
+type ResolverAttemptDiagnostics = {
+	phase?: string;
+	pollCount?: number;
+	vendorErrorCode?: string;
+	vendorErrorDescription?: string;
+};
+
+function resolverTelemetryPhase(value: unknown): ResolverTelemetryPhase | undefined {
+	return value === "create_task" ||
+		value === "poll_result" ||
+		value === "cleanup" ||
+		value === "measure_ip" ||
+		value === "fetch_script" ||
+		value === "generate_payload" ||
+		value === "post_payload"
+		? value
+		: undefined;
+}
+
+function diagnosticString(value: unknown): string | undefined {
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function diagnosticCount(value: unknown): number | undefined {
+	return typeof value === "number" && Number.isFinite(value)
+		? Math.max(0, Math.floor(value))
+		: undefined;
+}
+
+function createResolverTelemetryTraceRecorder(input: {
+	base?: TraceRecorder;
+	vendor: ProviderResolverVendor;
+	attemptIndex: number;
+	telemetry?: ResolverTelemetrySink;
+	diagnostics: ResolverAttemptDiagnostics;
+}): TraceRecorder | undefined {
+	if (!input.base && !input.telemetry) return undefined;
+	const recorder: TraceRecorder = {
+		async runSpan<T>(
+			name: string,
+			fn: () => Promise<T> | T,
+			spanOptions: {
+				attributes?: Record<string, unknown>;
+				onSuccess?: (value: T) => Record<string, unknown> | undefined;
+				onError?: (error: unknown) => Record<string, unknown> | undefined;
+			} = {},
+		) {
+			const adapterPhase = name.startsWith("resolver.vendor.")
+				? diagnosticString(name.replace("resolver.vendor.", ""))
+				: undefined;
+			const phase = resolverTelemetryPhase(adapterPhase);
+			const startedAt = Date.now();
+			let attributes: Record<string, unknown> | undefined;
+			let spanOutcome: "ok" | "error" = "ok";
+			const wrappedOptions = {
+				...spanOptions,
+				onSuccess(value: T) {
+					attributes = spanOptions.onSuccess?.(value);
+					return attributes;
+				},
+				onError(error: unknown) {
+					attributes = spanOptions.onError?.(error);
+					return attributes;
+				},
+			};
+			try {
+				if (input.base) return await input.base.runSpan(name, fn, wrappedOptions);
+				const value = await fn();
+				attributes = spanOptions.onSuccess?.(value);
+				return value;
+			} catch (error) {
+				spanOutcome = "error";
+				if (!input.base) attributes = spanOptions.onError?.(error);
+				throw error;
+			} finally {
+				if (adapterPhase && adapterPhase !== "attempt") {
+					const reportedPhase = diagnosticString(attributes?.transport_phase) ?? adapterPhase;
+					const pollCount = diagnosticCount(attributes?.poll_count);
+					const vendorErrorCode = diagnosticString(attributes?.vendor_error_code);
+					const vendorErrorDescription = diagnosticString(
+						attributes?.vendor_error_description ?? attributes?.error_message,
+					);
+					if (phase === "cleanup") {
+						input.telemetry?.recordVendorAttempt({
+							vendor: input.vendor,
+							phase: "cleanup",
+							diagnostics: { phase: reportedPhase, attemptIndex: input.attemptIndex },
+							outcome: spanOutcome,
+							ms: Date.now() - startedAt,
+							...(pollCount === undefined ? {} : { pollCount }),
+							...(vendorErrorCode ? { vendorErrorCode } : {}),
+							...(vendorErrorDescription ? { vendorErrorDescription } : {}),
+							...(spanOutcome === "error" ? { errorClass: "unexpected" as const } : {}),
+						});
+					} else {
+						input.diagnostics.phase = reportedPhase;
+						if (pollCount !== undefined) input.diagnostics.pollCount = pollCount;
+						if (vendorErrorCode) input.diagnostics.vendorErrorCode = vendorErrorCode;
+						if (vendorErrorDescription) {
+							input.diagnostics.vendorErrorDescription = vendorErrorDescription;
+						}
+					}
+				}
+			}
+		},
+	};
+	return attachResolverVendorPollObserver(recorder, () => {
+		input.diagnostics.pollCount = (input.diagnostics.pollCount ?? 0) + 1;
+	});
+}
+
+function resolverAttemptErrorClass(
+	error: unknown,
+	signal: AbortSignal,
+): ResolverTelemetryErrorClass {
+	if (signal.aborted) return "aborted";
+	return error instanceof ResolverVendorUnavailableError ? error.reason : "unexpected";
 }
 
 function challengeOrigin(challenge: ProviderChallenge): string {
@@ -738,13 +882,13 @@ async function cacheResolverSolution(
 	solution: ChallengeSolution,
 	identity: ResolverIssuingIdentity,
 	identityScope: string | undefined,
-): Promise<void> {
-	if (!resolverChallengeIsCacheable(challenge)) return;
+): Promise<{ written: boolean; reason?: "no_expires" | "not_cacheable" }> {
+	if (!resolverChallengeIsCacheable(challenge)) return { written: false, reason: "not_cacheable" };
 	const expiresAtMs = solutionExpiryMs(solution);
 	const now = Date.now();
-	if (expiresAtMs === undefined) return;
+	if (expiresAtMs === undefined) return { written: false, reason: "no_expires" };
 	const ttlMs = Math.floor(expiresAtMs - now);
-	if (ttlMs <= MIN_RESOLVER_CACHE_TTL_MS) return;
+	if (ttlMs <= MIN_RESOLVER_CACHE_TTL_MS) return { written: false, reason: "no_expires" };
 
 	const scopedDigest =
 		identityScope !== undefined && resolverChallengeIsIdentityScoped(challenge)
@@ -755,7 +899,7 @@ async function cacheResolverSolution(
 		scopedDigest === undefined &&
 		identity.proxyUrl === undefined
 	) {
-		return;
+		return { written: false, reason: "not_cacheable" };
 	}
 	const issuerDigest = scopedDigest ?? resolverIdentityDigest(identity);
 	await cache.set(
@@ -764,7 +908,7 @@ async function cacheResolverSolution(
 		{ ttlMs },
 	);
 	rememberSolutionIssuer(solution, issuerDigest);
-	if (scopedDigest !== undefined || identity.proxyUrl !== undefined) return;
+	if (scopedDigest !== undefined || identity.proxyUrl !== undefined) return { written: true };
 
 	const indexKey = resolverSolutionIndexCacheKey(cache, challenge);
 	const current = await cache.get(indexKey);
@@ -778,6 +922,7 @@ async function cacheResolverSolution(
 		],
 		now,
 	);
+	return { written: true };
 }
 
 async function invalidateResolverSolutionWithOutcome(
@@ -894,6 +1039,10 @@ async function resolveResolverIdentity(
 	}
 }
 
+function createChainTelemetryBinding(options: Parameters<typeof createResolverChainClient>[0]) {
+	return (telemetry: ResolverTelemetrySink) => createResolverChainClient({ ...options, telemetry });
+}
+
 function createResolverChainClient(options: {
 	readonly kinds: readonly ProviderChallengeKind[];
 	readonly entries: readonly ResolverChainEntry[];
@@ -907,139 +1056,266 @@ function createResolverChainClient(options: {
 	readonly createTransport?: ResolverRuntimeOptions["createTransport"];
 	readonly clientProfile?: string;
 	readonly allowedHosts?: readonly string[];
+	readonly telemetry?: ResolverTelemetrySink;
 }): ResolverChainClient {
 	assertClientProfileTransportContract(options.clientProfile, options.transport);
+	const cache =
+		options.cache && !isProviderCacheBypassed(options.cache) ? options.cache : undefined;
 	const client: ResolverChainClient = {
 		async solve(
 			challenge: ProviderChallenge,
 			signal: AbortSignal = new AbortController().signal,
 			traceRecorder?: TraceRecorder,
 		) {
-			assertDeclaredKind(challenge.kind, options.kinds);
-			if (options.unavailableReason) {
-				throw new ProviderError(options.unavailableReason, {
-					code: "RESOLVER_UNAVAILABLE",
-					fix: "Configure at least one declared resolver vendor or provide a test ResolverContext override.",
-				});
-			}
+			const solveStartedAt = Date.now();
+			let terminalOutcome: "solved" | "cached" | "exhausted" | "aborted" | "error" = "error";
+			try {
+				assertDeclaredKind(challenge.kind, options.kinds);
+				if (options.unavailableReason) {
+					throw new ProviderError(options.unavailableReason, {
+						code: "RESOLVER_UNAVAILABLE",
+						fix: "Configure at least one declared resolver vendor or provide a test ResolverContext override.",
+					});
+				}
 
-			const supportingEntries = options.entries.filter((entry) => entry.supports(challenge.kind));
-			if (supportingEntries.length === 0) {
-				throwUnsupportedKind(challenge.kind, options.usingDefaultVendors ?? false);
-			}
-			if (kindRequiresClientProfile(challenge.kind) && !options.clientProfile?.trim()) {
-				throwExhausted(
-					supportingEntries.map((entry) => ({
-						vendor: entry.id,
-						reason: "missing_client_profile",
-					})),
-				);
-			}
-			signal.throwIfAborted();
-			const identityResolution = options.proxyIntent
-				? await resolveResolverIdentity(options.proxyIntent)
-				: { identity: options.identity };
-			const identity = identityResolution.identity;
-			signal.throwIfAborted();
-			// Resolve a required proxy lease before consulting the cache. Solutions minted
-			// under a previous release are shared and long-lived, but a portable cached token
-			// must not bypass the upstream admission policy when no lease can be resolved.
-			const requiredProxyIdentityMissing =
-				options.proxyIntent?.mode === "required" && identity === undefined;
-			if (requiredProxyIdentityMissing) {
-				throwExhausted(
-					supportingEntries.map((entry) => ({
-						vendor: entry.id,
-						reason: identityResolution.unavailableReason ?? "missing_proxy_identity",
-					})),
-				);
-			}
-			if (options.cache && resolverChallengeIsCacheable(challenge)) {
-				const cached = await findCachedSolution(
-					options.cache,
-					challenge,
-					identity,
-					options.identityScope,
-				);
-				if (cached) return cached;
-			}
-			const attempts: ResolverChainAttempt[] = [];
-			for (const entry of supportingEntries) {
-				const adapter = entry.createAdapter();
-				try {
-					const solveAttempt = () => {
-						const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
-						const unrestrictedTransport =
-							options.transport ??
-							(requiresTransport
-								? options.createTransport?.({
-										clientProfile: options.clientProfile,
-										identityScope: options.identityScope,
-									})
-								: undefined);
-						if (requiresTransport && unrestrictedTransport === undefined) {
-							throw new ResolverVendorUnavailableError(adapter.id, "missing_transport");
+				const supportingEntries = options.entries.filter((entry) => entry.supports(challenge.kind));
+				if (supportingEntries.length === 0) {
+					throwUnsupportedKind(challenge.kind, options.usingDefaultVendors ?? false);
+				}
+				if (kindRequiresClientProfile(challenge.kind) && !options.clientProfile?.trim()) {
+					options.telemetry?.recordIdentity({ source: "none", failure: "missing_client_profile" });
+					throwExhausted(
+						challenge.kind,
+						supportingEntries.map((entry) => ({
+							vendor: entry.id,
+							reason: "missing_client_profile",
+						})),
+						0,
+					);
+				}
+				signal.throwIfAborted();
+				const identityResolution = options.proxyIntent
+					? await resolveResolverIdentity(options.proxyIntent)
+					: { identity: options.identity };
+				const identity = identityResolution.identity;
+				options.telemetry?.recordIdentity({
+					// For SBSD, "declared" identifies the configured client profile and its bound
+					// session identity; the engine independently supplies solver credentials.
+					source:
+						kindRequiresClientProfile(challenge.kind) && options.clientProfile
+							? "declared"
+							: options.proxyIntent
+								? (identityResolution.userAgentSource ?? "defaulted")
+								: identity
+									? "declared"
+									: "none",
+					...(identityResolution.unavailableReason
+						? { failure: identityResolution.unavailableReason }
+						: {}),
+				});
+				signal.throwIfAborted();
+				const requiredProxyIdentityMissing =
+					options.proxyIntent?.mode === "required" && identity === undefined;
+				if (requiredProxyIdentityMissing) {
+					const reason = identityResolution.unavailableReason ?? "missing_proxy_identity";
+					for (const [entryIndex, entry] of supportingEntries.entries()) {
+						options.telemetry?.recordVendorAttempt({
+							vendor: entry.id,
+							phase: "create_task",
+							diagnostics: { attemptIndex: entryIndex + 1 },
+							outcome: "error",
+							ms: 0,
+							errorClass: reason,
+						});
+						const next = supportingEntries[entryIndex + 1];
+						if (next) {
+							options.telemetry?.recordFailover({ from: entry.id, to: next.id, reason });
 						}
-						const transport = unrestrictedTransport
-							? restrictResolverTransport(unrestrictedTransport, [
-									...(options.allowedHosts ?? []),
-									...(adapter.transportAllowedHosts ?? []),
-								])
-							: undefined;
-						return adapter.solve(challenge, identity, signal, traceRecorder, transport);
-					};
-					const solution = traceRecorder
-						? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
-								attributes: {
-									vendor: adapter.id,
-									challenge_kind: challenge.kind,
-									client_profile: options.clientProfile,
-									resolver_identity_source: identityResolution.userAgentSource,
-								},
-								onError(error) {
-									return error instanceof ResolverVendorUnavailableError
-										? unavailableSpanAttributes(error)
-										: undefined;
-								},
-							})
-						: await solveAttempt();
-					if (
-						options.cache &&
-						resolverChallengeIsCacheable(challenge) &&
-						solution.form === "cookies" &&
-						solutionExpiryMs(solution) !== undefined
-					) {
-						const issuingIdentity =
-							adapter.getIssuingIdentity?.(solution, identity, challenge) ??
-							resolverChallengeIssuingIdentity(challenge, {
-								...(identity ? { proxyUrl: identity.proxyUrl } : {}),
-								userAgent: solution.userAgent,
+					}
+					throwExhausted(
+						challenge.kind,
+						supportingEntries.map((entry) => ({
+							vendor: entry.id,
+							reason,
+						})),
+					);
+				}
+				if (!cache) {
+					options.telemetry?.recordCacheRead({ status: "disabled", challengeKind: challenge.kind });
+				} else if (!resolverChallengeIsCacheable(challenge)) {
+					options.telemetry?.recordCacheRead({
+						status: "not_cacheable",
+						challengeKind: challenge.kind,
+					});
+				} else {
+					const cached = await findCachedSolution(
+						cache,
+						challenge,
+						identity,
+						options.identityScope,
+					);
+					options.telemetry?.recordCacheRead({
+						status: cached ? "hit" : "miss",
+						challengeKind: challenge.kind,
+					});
+					if (cached) {
+						terminalOutcome = "cached";
+						return cached;
+					}
+				}
+				const attempts: ResolverChainAttempt[] = [];
+				for (const [entryIndex, entry] of supportingEntries.entries()) {
+					const adapter = entry.createAdapter();
+					const attemptStartedAt = Date.now();
+					const diagnostics: ResolverAttemptDiagnostics = {};
+					const telemetryTraceRecorder = createResolverTelemetryTraceRecorder({
+						base: traceRecorder,
+						vendor: adapter.id,
+						attemptIndex: entryIndex + 1,
+						telemetry: options.telemetry,
+						diagnostics,
+					});
+					let solution: ChallengeSolution;
+					try {
+						const solveAttempt = () => {
+							const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
+							const unrestrictedTransport =
+								options.transport ??
+								(requiresTransport
+									? options.createTransport?.({
+											clientProfile: options.clientProfile,
+											identityScope: options.identityScope,
+										})
+									: undefined);
+							if (requiresTransport && unrestrictedTransport === undefined) {
+								throw new ResolverVendorUnavailableError(adapter.id, "missing_transport");
+							}
+							const transport = unrestrictedTransport
+								? restrictResolverTransport(unrestrictedTransport, [
+										...(options.allowedHosts ?? []),
+										...(adapter.transportAllowedHosts ?? []),
+									])
+								: undefined;
+							return adapter.solve(challenge, identity, signal, telemetryTraceRecorder, transport);
+						};
+						solution = traceRecorder
+							? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
+									attributes: {
+										vendor: adapter.id,
+										challenge_kind: challenge.kind,
+										client_profile: options.clientProfile,
+										resolver_identity_source: identityResolution.userAgentSource,
+									},
+									onError(error) {
+										return error instanceof ResolverVendorUnavailableError
+											? unavailableSpanAttributes(error)
+											: undefined;
+									},
+								})
+							: await solveAttempt();
+					} catch (error) {
+						const unavailable = error instanceof ResolverVendorUnavailableError ? error : undefined;
+						const attempt = unavailable ? unavailableAttempt(unavailable, true) : undefined;
+						options.telemetry?.recordVendorAttempt({
+							vendor: adapter.id,
+							phase:
+								resolverTelemetryPhase(unavailable?.phase) ??
+								resolverTelemetryPhase(diagnostics.phase) ??
+								"create_task",
+							diagnostics: {
+								...attempt,
+								attemptIndex: entryIndex + 1,
+								phase: attempt?.phase ?? diagnostics.phase,
+							},
+							outcome: "error",
+							ms: Date.now() - attemptStartedAt,
+							errorClass: resolverAttemptErrorClass(error, signal),
+							...(diagnostics.pollCount === undefined ? {} : { pollCount: diagnostics.pollCount }),
+							...(diagnostics.vendorErrorCode
+								? { vendorErrorCode: diagnostics.vendorErrorCode }
+								: {}),
+							...(diagnostics.vendorErrorDescription
+								? { vendorErrorDescription: diagnostics.vendorErrorDescription }
+								: {}),
+						});
+						signal.throwIfAborted();
+						if (!unavailable || !attempt) throw error;
+						attempts.push(attempt);
+						const next = supportingEntries[entryIndex + 1];
+						if (next) {
+							options.telemetry?.recordFailover({
+								from: adapter.id,
+								to: next.id,
+								reason: unavailable.reason,
 							});
-						if (issuingIdentity) {
-							await cacheResolverSolution(
-								options.cache,
-								challenge,
-								solution,
-								issuingIdentity,
-								options.identityScope,
-							);
+						}
+						continue;
+					}
+					options.telemetry?.recordVendorAttempt({
+						vendor: adapter.id,
+						phase: resolverTelemetryPhase(diagnostics.phase) ?? "poll_result",
+						diagnostics: { attemptIndex: entryIndex + 1, phase: diagnostics.phase },
+						outcome: "ok",
+						ms: Date.now() - attemptStartedAt,
+						...(diagnostics.pollCount === undefined ? {} : { pollCount: diagnostics.pollCount }),
+					});
+					if (cache) {
+						try {
+							let cacheWrite: { written: boolean; reason?: "no_expires" | "not_cacheable" };
+							if (!resolverChallengeIsCacheable(challenge)) {
+								cacheWrite = { written: false, reason: "not_cacheable" };
+							} else if (solution.form !== "cookies" || solutionExpiryMs(solution) === undefined) {
+								cacheWrite = { written: false, reason: "no_expires" };
+							} else {
+								const issuingIdentity =
+									adapter.getIssuingIdentity?.(solution, identity, challenge) ??
+									resolverChallengeIssuingIdentity(challenge, {
+										...(identity ? { proxyUrl: identity.proxyUrl } : {}),
+										userAgent: solution.userAgent,
+									});
+								cacheWrite = issuingIdentity
+									? await cacheResolverSolution(
+											cache,
+											challenge,
+											solution,
+											issuingIdentity,
+											options.identityScope,
+										)
+									: { written: false, reason: "not_cacheable" };
+							}
+							options.telemetry?.recordCacheWrite(cacheWrite);
+						} catch (error) {
+							options.telemetry?.recordCacheWrite({ written: false, reason: "error" });
+							throw error;
 						}
 					}
 					rememberSolutionSource(solution, "vendor");
+					// Adapter success includes SBSD payload acceptance with verified:false.
+					// The caller reports protected-refetch verification separately.
+					terminalOutcome = "solved";
 					return solution;
-				} catch (error) {
-					signal.throwIfAborted();
-					if (!(error instanceof ResolverVendorUnavailableError)) throw error;
-					// Every vendor-unavailable result, including missing_challenge_input, falls
-					// through so another adapter can solve with a different input contract.
-					attempts.push(unavailableAttempt(error));
 				}
-			}
 
-			throwExhausted(attempts);
+				throwExhausted(challenge.kind, attempts);
+			} catch (error) {
+				terminalOutcome = signal.aborted
+					? "aborted"
+					: error instanceof ProviderError && error.code === "RESOLVER_CHAIN_EXHAUSTED"
+						? "exhausted"
+						: "error";
+				throw error;
+			} finally {
+				options.telemetry?.recordOutcome({
+					outcome: terminalOutcome,
+					solveMs: Date.now() - solveStartedAt,
+					challengeKind: challenge.kind,
+				});
+			}
 		},
 	};
-	resolverCaches.set(client, options.cache ?? null);
+	resolverCaches.set(client, cache ?? null);
+	const reusableOptions = { ...options, telemetry: undefined };
+	registerResolverTelemetryBinding(client, createChainTelemetryBinding(reusableOptions));
 	return client;
 }
 
@@ -1054,6 +1330,7 @@ export function createResolverClient(options: {
 	readonly createTransport?: ResolverRuntimeOptions["createTransport"];
 	readonly clientProfile?: string;
 	readonly allowedHosts?: readonly string[];
+	readonly telemetry?: ResolverTelemetrySink;
 }): ResolverChainClient {
 	return createResolverChainClient({
 		kinds: options.kinds,
@@ -1070,6 +1347,7 @@ export function createResolverClient(options: {
 		createTransport: options.createTransport,
 		clientProfile: options.clientProfile,
 		allowedHosts: options.allowedHosts,
+		telemetry: options.telemetry,
 	});
 }
 
@@ -1124,6 +1402,7 @@ export function bindResolverSignal(
 	if (resolverCaches.has(resolver)) {
 		resolverCaches.set(boundResolver, resolverCaches.get(resolver) ?? null);
 	}
+	inheritResolverTelemetryBinding(resolver, boundResolver);
 	return boundResolver;
 }
 
@@ -1144,6 +1423,7 @@ function createResolverClientFromEnvInternal(
 			kinds: config.kinds,
 			entries: [],
 			unavailableReason: "Provider resolver vendor chain is empty",
+			telemetry: options.telemetry,
 		});
 	}
 
@@ -1176,6 +1456,7 @@ function createResolverClientFromEnvInternal(
 		createTransport: options.createTransport,
 		clientProfile: config.clientProfile,
 		allowedHosts,
+		telemetry: options.telemetry,
 	});
 }
 

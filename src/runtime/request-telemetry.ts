@@ -1,6 +1,7 @@
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import type { ProxyTelemetrySink } from "../config/loader.js";
 import type { ProxyTelemetryLogPayload } from "./proxy-telemetry.js";
+import type { ResolverTelemetryLogPayload } from "./resolver-telemetry.js";
 import type { Span, TraceContext } from "./trace.js";
 
 export const PROVIDER_TELEMETRY_HEADER = "X-ApiFuse-Provider-Telemetry";
@@ -57,9 +58,7 @@ export type GatewayIngestible<T> = 0 extends 1 & T
 										? never
 										: unknown extends U
 											? never
-											: [U] extends [
-													number | boolean | ClosedEnum<string> | GatewayIngestible<U>,
-												]
+											: [U] extends [number | boolean | ClosedEnum<string> | GatewayIngestible<U>]
 												? T[K]
 												: never
 									: [NonNullable<T[K]>] extends [object]
@@ -86,9 +85,7 @@ export type TenantNeutral<T> = 0 extends 1 & T
 						? never
 						: unknown extends T[K]
 							? never
-							: [NonNullable<T[K]>] extends [
-									string[] & { readonly __tenantOpaqueCacheKeys: true },
-								]
+							: [NonNullable<T[K]>] extends [string[] & { readonly __tenantOpaqueCacheKeys: true }]
 								? K extends "keys"
 									? T[K]
 									: never
@@ -123,7 +120,8 @@ export interface TelemetryContributor<Log extends object, Header extends object>
 
 export type RequestTelemetryLogPayload = {
 	proxy?: ProxyTelemetryLogPayload;
-} & Partial<Record<Exclude<TelemetryKey, "proxy">, object>>;
+	resolver?: ResolverTelemetryLogPayload;
+} & Partial<Record<Exclude<TelemetryKey, "proxy" | "resolver">, object>>;
 
 type RegisteredTelemetryContributor = {
 	readonly key: TelemetryKey;
