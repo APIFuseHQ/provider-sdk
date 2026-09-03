@@ -119,7 +119,7 @@ prose across blocks and reproduce the ambiguity it was meant to cure.
 | D2 | **Locale keys are first class.** Keep `titleKey` / `descriptionKey` / `summaryKey` / `markdownKey` / `whenToUseKeys` / `whenNotToUseKeys` / `normalizationNotesKeys`; delete the raw-prose `title` / `description`. | i18n was a founding constraint, and lint already rejects raw prose. The `Key` suffix states that the value is a key, and leaves the bare names free if raw prose is ever reintroduced. |
 | D3 | **`fixtures` and `examples` are different things; keep both.** `fixtures` stays the single recorded live-evidence pair (schema-validated, `recordedAt`-checked). `examples` replaces `inputExamples` and absorbs `docs.requestExample`. | Evidence answers "is this contract real"; examples answer "how is this used". Conflating them is why three overlapping fields existed. |
 | D4 | **`examples` must be wired to real consumers in this change** — docs-site request rendering and model-facing few-shot injection. Its `scenario` is a locale key. | A required-but-unread field is the worst DX defect found in the audit. Re-introducing one under a new name would repeat it. |
-| D5 | **`riskClass` is the safety SoT.** Enum `read \| write \| destructive \| external-send`. Delete `readOnly`, `destructive`, `idempotent`. **`approval` survives** as a narrow override — see D5b. | The registry *already* derives risk from the booleans (`operation-risk.ts`); the enum is strictly more expressive (`readOnly: false` cannot distinguish write from destructive) and `external-send` has no boolean equivalent. MCP `readOnlyHint` / `destructiveHint` are re-derived in the projection. |
+| D5 | **`riskClass` is the safety SoT.** Enum `read \| write \| destructive \| external-send`. Delete `readOnly`, `destructive`, `idempotent`. **`approval` survives** as a narrow override — see D5b. | The registry *already* derives risk from the booleans (`operation-risk.ts`); the enum is strictly more expressive (`readOnly: false` cannot distinguish write from destructive) and `external-send` has no boolean equivalent. Registry projection `annotations.readOnly` / `annotations.destructive` are re-derived from the enum. |
 | D5b | **`approval` stays, and may only be declared when it differs from the derivation.** `defaultApprovalPolicy` (`index.ts:2048`) maps `read → never`, `write → risk-based`, everything else → `always`. An operation restating that mapping is a lint error; an operation departing from it must carry a justification. | An earlier draft deleted `approval` as "fully derived from `riskClass`, zero overrides". Measured across the fleet: of 33 declarations, 31 are redundant restatements — but **2 are real overrides**, both in tablecheck. `confirm-reservation` and `cancel-reservation` declare `riskClass: "write"` with `approval: "always"`; the derivation would give `risk-based`. The author wrote the reason inline: "This performs a real, binding restaurant reservation and always requires approval." Deleting the field silently downgrades an approval gate on operations that book and cancel real reservations. The 31 redundant declarations are the actual defect, and a lint removes those without removing the capability. |
 | D6 | **`connectionMode` is the access SoT**, at the top level, keeping its name and `none \| optional \| required` values. Delete `openWorld` and `requiresConnection`. `connectionExternalRefParam` joins it at the top level. | `Connection` is a defined domain term (`AGENTS.md`: "the canonical tenant-scoped authorization record", `af_con_<22>`), used by ~50 platform sites. Renaming it at the operation layer alone would add vocabulary, not clarity. |
 | D7 | **Mixed-auth providers must declare `connectionMode` explicitly** — lint error when `auth.mode` is credential-bearing and an operation omits it. Providers with `auth.mode: "none"` may still omit. | This is the exact silent-default that caused the incident. Fail-closed defaulting is correct; failing *silently* is not. |
@@ -183,9 +183,14 @@ defineOperation<ProviderContext>()({
 
 ## Pitfalls
 
-1. **`riskClass` re-derivation must preserve MCP hints.** `operation-risk.ts` currently reads the
-   booleans; after D5 the projection must emit `readOnlyHint`/`destructiveHint` *from* the enum,
-   or MCP clients silently lose safety metadata.
+1. **`riskClass` re-derivation must preserve the registry safety projection.** A full-monorepo
+   audit found zero occurrences of `readOnlyHint` / `destructiveHint`; the real safety carrier is
+   `annotations.readOnly` / `annotations.destructive`. The D9 adapter derives those annotations
+   from the flat `riskClass` enum in
+   `packages/provider-registry/src/operation-declaration-ingestion.ts:708–717` and preserves them
+   for legacy input at `:758–759`; the gateway reads them in
+   `apps/gateway/internal/admission/projection.go:1034–1048`. Published annotation values must not
+   change for any operation when the legacy inputs and adapter are removed.
 2. **`examples` without consumers is `inputExamples` again.** D4 is a gate, not a nice-to-have:
    do not merge the schema change ahead of the docs/few-shot wiring. Note what that implies for
    sequencing — the schema lives in `provider-sdk` and the consumers live in the monorepo, so
@@ -306,7 +311,11 @@ prevent. The same applies to `annotations.destructive` / `readOnly` as risk inpu
 - `zozotown` catalog operations publish `connectionMode: "none"`; member/order operations publish
   `"required"`.
 - MCP tool names are unchanged for all providers (`providerId__operationId`).
-- Published `readOnlyHint`/`destructiveHint` match the pre-migration values for every operation.
+- Published `annotations.readOnly` / `annotations.destructive` match the pre-migration values for
+  every operation.
+- 2026-09-03 full-fleet snapshot: 610/610 published operations carry `riskClass` +
+  `connectionMode`; 190 flat-shaped / 420 legacy-shaped inputs at pinned SHAs; D9 adapter still
+  required.
 - The D9 ingestion adapter is gone. Removal sequence: every provider has landed the flat pin and
   flat declarations, then `provider-sdk-floor.json` rises to that SDK, then a complete materialized
   projection build passes. Only then does the legacy branch come out.
