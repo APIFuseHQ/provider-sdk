@@ -1,0 +1,3 @@
+export const registry = {
+	second: { annotations: { readOnly: true }, input: InputSchema, output: OutputSchema, handler },
+};

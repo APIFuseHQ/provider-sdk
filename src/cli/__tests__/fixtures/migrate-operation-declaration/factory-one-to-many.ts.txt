@@ -1,0 +1,18 @@
+function makeSearchOperation(kind: string) {
+	return defineOperation<ProviderContext>()({
+		annotations: { readOnly: true },
+		inputExamples: [{ scenario: "Search items", input: { kind } }],
+		input: InputSchema,
+		output: OutputSchema,
+		handler,
+	});
+}
+
+export default buildProvider({
+	operations: {
+		"used-goods-search": makeSearchOperation("used"),
+		"realty-search-listings": makeSearchOperation("realty"),
+		"jobs-search": makeSearchOperation("jobs"),
+		"cars-search": makeSearchOperation("cars"),
+	},
+});

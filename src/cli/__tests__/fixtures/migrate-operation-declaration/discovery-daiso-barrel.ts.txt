@@ -1,0 +1,7 @@
+import { catalogOperations } from "./catalog";
+import { storeOperations } from "./stores";
+
+export const daisoOperations = {
+	...catalogOperations,
+	...storeOperations,
+};

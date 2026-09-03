@@ -1,0 +1,19 @@
+import { OPERATION_DOCS } from "./docs";
+
+export const catalogOperations = {
+	"browse-catalog": {
+		docs: { ...OPERATION_DOCS.catalog },
+		descriptionKey: "operations.browseCatalog.description",
+		annotations: { readOnly: true },
+		inputExamples: [{ scenario: "Browse the catalog", input: {} }],
+		input: InputSchema,
+		output: OutputSchema,
+		handler,
+	},
+	"search-products": {
+		annotations: { readOnly: true },
+		input: InputSchema,
+		output: OutputSchema,
+		handler,
+	},
+};

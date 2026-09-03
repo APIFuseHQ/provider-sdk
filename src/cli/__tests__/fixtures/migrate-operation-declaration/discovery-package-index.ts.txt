@@ -1,0 +1,3 @@
+import { packageRegistry } from "provider-operation-package";
+
+export default buildProvider({ operations: packageRegistry });
