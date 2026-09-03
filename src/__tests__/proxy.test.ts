@@ -14,6 +14,7 @@ import {
 import type { HttpRetrySummary, ProviderProxyPolicy } from "../types.js";
 import { TransportError } from "../errors.js";
 import { ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
+import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { HttpRetryUnsafeMethodPolicy } from "../types.js";
 
 type MockWreqResponse = {
@@ -554,7 +555,7 @@ describe("proxy integration", () => {
 		const header = telemetry.toHeaderValue();
 		expect(header).toBeTruthy();
 		const decoded = JSON.parse(Buffer.from(header ?? "", "base64url").toString("utf8"));
-		expect(decoded).toEqual({ v: 1, proxy: payload });
+		expect(decoded).toEqual({ v: 1, taxonomy: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION, proxy: payload });
 	});
 
 	it("uses the last successful resolution as the serving vendor while aggregating failures", () => {

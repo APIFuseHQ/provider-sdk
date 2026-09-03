@@ -9,8 +9,19 @@ import type {
 	ProxyVendorName,
 	SmartproxyAllocatorBodyClass,
 } from "../config/loader.js";
+import {
+	closedEnum,
+	RequestTelemetry,
+	type ClosedEnum,
+	type TelemetryContributor,
+} from "./request-telemetry.js";
+import { createTraceContext } from "./trace.js";
 
-export const PROVIDER_TELEMETRY_HEADER = "X-ApiFuse-Provider-Telemetry";
+export { PROVIDER_TELEMETRY_HEADER } from "./request-telemetry.js";
+
+declare const PROXY_HASH: unique symbol;
+/** Bounded hexadecimal host hash used in proxy attempt samples. */
+export type ProxyHash = ClosedEnum<string> & { readonly [PROXY_HASH]: true };
 
 export type ProxyTelemetryResolvedPayload = {
 	kind: "resolved";
@@ -94,14 +105,51 @@ export type ProxyTelemetryLogPayload =
 	| ProxyTelemetryResolvedPayload
 	| ProxyTelemetryUnresolvedPayload;
 
-type ProviderTelemetryHeader = {
-	v: 1;
-	proxy?: ProxyTelemetryLogPayload;
+/** Concrete gateway-safe projection of the unchanged proxy sibling. */
+export type ProxyTelemetryHeaderPayload = {
+	kind: ClosedEnum<"resolved" | "unresolved">;
+	provider?: ClosedEnum<ProxyVendorName>;
+	userAgentSource?: ClosedEnum<ProxyUserAgentSource>;
+	protocol?: ClosedEnum<ProxyProtocol>;
+	cacheStatus?: ClosedEnum<ProxyCacheStatus>;
+	cacheHit?: boolean;
+	resolutionMs?: number;
+	allocatorMs?: number;
+	allocatorStatus?: number;
+	allocatorBodyClass?: ClosedEnum<SmartproxyAllocatorBodyClass>;
+	allocatorAttempts?: number;
+	lockWaitMs?: number;
+	redisReadMs?: number;
+	redisWriteMs?: number;
+	poolAgeMs?: number;
+	poolExpiresInMs?: number;
+	attempts?: number;
+	refreshes?: number;
+	attemptSamples?: {
+		n: number;
+		a: number;
+		i?: number;
+		h?: ProxyHash;
+		o: ClosedEnum<ProxyAttemptTelemetryEvent["outcome"]>;
+		c?: ClosedEnum<string>;
+		s?: number;
+		d?: number;
+	}[];
+	vendors?: ClosedEnum<ProxyVendorName>[];
+	failovers?: {
+		v: ClosedEnum<ProxyVendorName>;
+		nx?: ClosedEnum<ProxyVendorName>;
+		p: ClosedEnum<ProxyVendorFailoverTelemetryEvent["phase"]>;
+		r: ClosedEnum<ProxyVendorFailoverTelemetryEvent["reason"]>;
+		a?: number;
+	}[];
 };
 
-const MAX_HEADER_BYTES = 4_096;
 const MAX_PROXY_ATTEMPT_SAMPLES = 24;
 const MAX_PROXY_FAILOVER_SAMPLES = 12;
+const MAX_RETAINED_PROXY_RESOLUTIONS = 64;
+const PROXY_HEADER_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
+const PROXY_HEADER_HASH = /^[0-9a-f]{1,16}$/;
 
 const CACHE_STATUS_SEVERITY: Record<ProxyCacheStatus, number> = {
 	disabled: 0,
@@ -128,19 +176,48 @@ function worseStatus(left: ProxyCacheStatus, right: ProxyCacheStatus): ProxyCach
 	return CACHE_STATUS_SEVERITY[right] > CACHE_STATUS_SEVERITY[left] ? right : left;
 }
 
-function encodeBase64Url(value: string): string {
-	return Buffer.from(value, "utf8").toString("base64url");
+function aggregateResolution(
+	acc: ProxyResolutionTelemetryEvent,
+	event: ProxyResolutionTelemetryEvent,
+): ProxyResolutionTelemetryEvent {
+	return {
+		provider: event.provider,
+		userAgentSource: event.userAgentSource ?? acc.userAgentSource,
+		cacheStatus: worseStatus(acc.cacheStatus, event.cacheStatus),
+		cacheHit: acc.cacheHit && event.cacheHit,
+		resolutionMs: acc.resolutionMs + event.resolutionMs,
+		allocatorMs: sumOptional(acc.allocatorMs, event.allocatorMs),
+		allocatorStatus: event.allocatorStatus ?? acc.allocatorStatus,
+		allocatorBodyClass: event.allocatorBodyClass ?? acc.allocatorBodyClass,
+		allocatorAttempts: sumOptional(acc.allocatorAttempts, event.allocatorAttempts),
+		lockWaitMs: sumOptional(acc.lockWaitMs, event.lockWaitMs),
+		redisReadMs: sumOptional(acc.redisReadMs, event.redisReadMs),
+		redisWriteMs: sumOptional(acc.redisWriteMs, event.redisWriteMs),
+		poolAgeMs: maxOptional(acc.poolAgeMs, event.poolAgeMs),
+		poolExpiresInMs: maxOptional(acc.poolExpiresInMs, event.poolExpiresInMs),
+		attempts: acc.attempts + event.attempts,
+		refreshes: sumOptional(acc.refreshes, event.refreshes),
+	};
 }
 
-export class ProxyTelemetryCollector implements ProxyTelemetrySink {
+export class ProxyTelemetryCollector
+	implements
+		ProxyTelemetrySink,
+		TelemetryContributor<ProxyTelemetryLogPayload, ProxyTelemetryHeaderPayload>
+{
+	readonly key = "proxy" as const;
 	#events: ProxyResolutionTelemetryEvent[] = [];
+	#resolutionCount = 0;
+	#aggregateResolution: ProxyResolutionTelemetryEvent | undefined;
+	#lastSuccessfulResolution: ProxyResolutionTelemetryEvent | undefined;
+	#vendors: ProxyVendorName[] = [];
 	#attempts: ProxyAttemptTelemetryEvent[] = [];
 	#failovers: ProxyVendorFailoverTelemetryEvent[] = [];
 	#unresolvedVendors: ProxyVendorName[] = [];
 
 	recordProxyResolution(event: ProxyResolutionTelemetryEvent): void {
 		const outcome = event.outcome === "error" ? "error" : "ok";
-		this.#events.push({
+		const normalized: ProxyResolutionTelemetryEvent = {
 			provider: event.provider,
 			outcome,
 			...(event.userAgentSource ? { userAgentSource: event.userAgentSource } : {}),
@@ -174,10 +251,27 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 			attempts: Math.max(1, Math.floor(event.attempts || 1)),
 			refreshes:
 				event.refreshes === undefined ? undefined : Math.max(0, Math.floor(event.refreshes)),
-		});
+		};
+		this.#resolutionCount += 1;
+		if (this.#events.length < MAX_RETAINED_PROXY_RESOLUTIONS) this.#events.push(normalized);
+		this.#aggregateResolution = this.#aggregateResolution
+			? aggregateResolution(this.#aggregateResolution, normalized)
+			: normalized;
+		if (outcome === "ok") this.#lastSuccessfulResolution = normalized;
+		if (!this.#vendors.includes(event.provider)) this.#vendors.push(event.provider);
 		if (outcome === "error" && !this.#unresolvedVendors.includes(event.provider)) {
 			this.#unresolvedVendors.push(event.provider);
 		}
+	}
+
+	/** Number of raw resolution events retained for bounded-history verification. */
+	get retainedResolutionEventCount(): number {
+		return this.#events.length;
+	}
+
+	/** Total resolutions included in the incremental aggregate. */
+	get resolutionEventCount(): number {
+		return this.#resolutionCount;
 	}
 
 	recordProxyVendorFailover(event: ProxyVendorFailoverTelemetryEvent): void {
@@ -213,8 +307,7 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 	}
 
 	toLogPayload(): ProxyTelemetryLogPayload | undefined {
-		const [first, ...rest] = this.#events;
-		const okEvents = this.#events.filter((event) => event.outcome !== "error");
+		const aggregate = this.#aggregateResolution;
 		const attemptSamples = this.#attempts.map((attempt, index) => ({
 			n: index + 1,
 			a: attempt.attempt,
@@ -233,33 +326,8 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 			...(failover.attempt === undefined ? {} : { a: failover.attempt }),
 		}));
 
-		if (okEvents.length === 0) {
-			if (!first && failovers.length === 0) return undefined;
-			const failureEvents = this.#events.filter((event) => event.outcome === "error");
-			const [firstFailure, ...remainingFailures] = failureEvents;
-			const aggregate = firstFailure
-				? remainingFailures.reduce<ProxyResolutionTelemetryEvent>(
-						(acc, event) => ({
-							provider: event.provider,
-							outcome: "error",
-							cacheStatus: worseStatus(acc.cacheStatus, event.cacheStatus),
-							cacheHit: acc.cacheHit && event.cacheHit,
-							resolutionMs: acc.resolutionMs + event.resolutionMs,
-							allocatorMs: sumOptional(acc.allocatorMs, event.allocatorMs),
-							allocatorStatus: event.allocatorStatus ?? acc.allocatorStatus,
-							allocatorBodyClass: event.allocatorBodyClass ?? acc.allocatorBodyClass,
-							allocatorAttempts: sumOptional(acc.allocatorAttempts, event.allocatorAttempts),
-							lockWaitMs: sumOptional(acc.lockWaitMs, event.lockWaitMs),
-							redisReadMs: sumOptional(acc.redisReadMs, event.redisReadMs),
-							redisWriteMs: sumOptional(acc.redisWriteMs, event.redisWriteMs),
-							poolAgeMs: maxOptional(acc.poolAgeMs, event.poolAgeMs),
-							poolExpiresInMs: maxOptional(acc.poolExpiresInMs, event.poolExpiresInMs),
-							attempts: acc.attempts + event.attempts,
-							refreshes: sumOptional(acc.refreshes, event.refreshes),
-						}),
-						firstFailure,
-					)
-				: undefined;
+		if (!this.#lastSuccessfulResolution) {
+			if (!aggregate && failovers.length === 0) return undefined;
 			return {
 				kind: "unresolved",
 				vendors: [...this.#unresolvedVendors],
@@ -301,33 +369,8 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 		}
 
 		// The serving vendor/protocol is the last successful resolution.
-		const serving = okEvents[okEvents.length - 1] ?? first;
-		const vendors: ProxyVendorName[] = [];
-		for (const event of this.#events) {
-			if (!vendors.includes(event.provider)) vendors.push(event.provider);
-		}
-
-		const aggregate = rest.reduce<ProxyResolutionTelemetryEvent>(
-			(acc, event) => ({
-				provider: event.provider,
-				userAgentSource: event.userAgentSource ?? acc.userAgentSource,
-				cacheStatus: worseStatus(acc.cacheStatus, event.cacheStatus),
-				cacheHit: acc.cacheHit && event.cacheHit,
-				resolutionMs: acc.resolutionMs + event.resolutionMs,
-				allocatorMs: sumOptional(acc.allocatorMs, event.allocatorMs),
-				allocatorStatus: event.allocatorStatus ?? acc.allocatorStatus,
-				allocatorBodyClass: event.allocatorBodyClass ?? acc.allocatorBodyClass,
-				allocatorAttempts: sumOptional(acc.allocatorAttempts, event.allocatorAttempts),
-				lockWaitMs: sumOptional(acc.lockWaitMs, event.lockWaitMs),
-				redisReadMs: sumOptional(acc.redisReadMs, event.redisReadMs),
-				redisWriteMs: sumOptional(acc.redisWriteMs, event.redisWriteMs),
-				poolAgeMs: maxOptional(acc.poolAgeMs, event.poolAgeMs),
-				poolExpiresInMs: maxOptional(acc.poolExpiresInMs, event.poolExpiresInMs),
-				attempts: acc.attempts + event.attempts,
-				refreshes: sumOptional(acc.refreshes, event.refreshes),
-			}),
-			first,
-		);
+		if (!aggregate) return undefined;
+		const serving = this.#lastSuccessfulResolution;
 		return {
 			kind: "resolved",
 			provider: serving.provider,
@@ -356,18 +399,61 @@ export class ProxyTelemetryCollector implements ProxyTelemetrySink {
 			attempts: aggregate.attempts,
 			...(aggregate.refreshes !== undefined ? { refreshes: aggregate.refreshes } : {}),
 			...(attemptSamples.length > 0 ? { attemptSamples } : {}),
-			...(vendors.length > 1 ? { vendors } : {}),
+			...(this.#vendors.length > 1 ? { vendors: [...this.#vendors] } : {}),
 			...(failovers.length > 0 ? { failovers } : {}),
 		};
 	}
 
-	toHeaderValue(): string | undefined {
-		const proxy = this.toLogPayload();
-		if (!proxy) return undefined;
-		const payload: ProviderTelemetryHeader = { v: 1, proxy };
+	toHeaderPayload(log: ProxyTelemetryLogPayload): ProxyTelemetryHeaderPayload {
+		const attemptSamples = log.attemptSamples?.map((sample) => ({
+			n: sample.n,
+			a: sample.a,
+			...(sample.i === undefined ? {} : { i: sample.i }),
+			...(sample.h && PROXY_HEADER_HASH.test(sample.h)
+				? { h: closedEnum(sample.h) as ProxyHash }
+				: {}),
+			o: closedEnum(sample.o),
+			...(sample.c && PROXY_HEADER_TOKEN.test(sample.c) ? { c: closedEnum(sample.c) } : {}),
+			...(sample.s === undefined ? {} : { s: sample.s }),
+			...(sample.d === undefined ? {} : { d: sample.d }),
+		}));
+		const failovers = log.failovers?.map((failover) => ({
+			...failover,
+			v: closedEnum(failover.v),
+			...(failover.nx ? { nx: closedEnum(failover.nx) } : {}),
+			p: closedEnum(failover.p),
+			r: closedEnum(failover.r),
+		}));
+		if (log.kind === "resolved") {
+			return {
+				...log,
+				kind: closedEnum(log.kind),
+				provider: closedEnum(log.provider),
+				...(log.userAgentSource ? { userAgentSource: closedEnum(log.userAgentSource) } : {}),
+				...(log.protocol ? { protocol: closedEnum(log.protocol) } : {}),
+				cacheStatus: closedEnum(log.cacheStatus),
+				...(log.allocatorBodyClass
+					? { allocatorBodyClass: closedEnum(log.allocatorBodyClass) }
+					: {}),
+				...(attemptSamples ? { attemptSamples } : {}),
+				...(log.vendors ? { vendors: log.vendors.map((vendor) => closedEnum(vendor)) } : {}),
+				...(failovers ? { failovers } : {}),
+			} as ProxyTelemetryHeaderPayload;
+		}
+		return {
+			...log,
+			kind: closedEnum(log.kind),
+			vendors: log.vendors.map((vendor) => closedEnum(vendor)),
+			...(log.cacheStatus ? { cacheStatus: closedEnum(log.cacheStatus) } : {}),
+			...(log.allocatorBodyClass ? { allocatorBodyClass: closedEnum(log.allocatorBodyClass) } : {}),
+			...(failovers ? { failovers } : {}),
+			...(attemptSamples ? { attemptSamples } : {}),
+		} as ProxyTelemetryHeaderPayload;
+	}
 
-		const encoded = encodeBase64Url(JSON.stringify(payload));
-		if (encoded.length > MAX_HEADER_BYTES) return undefined;
-		return encoded;
+	toHeaderValue(): string | undefined {
+		const telemetry = new RequestTelemetry(createTraceContext());
+		telemetry.register(this);
+		return telemetry.toHeaderValue();
 	}
 }

@@ -16,6 +16,7 @@ import {
 	ValidationError,
 } from "../errors.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
+import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import {
 	createServerApp,
@@ -234,6 +235,21 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 					const response = await ctx.http.get("https://example.com/flaky", {
 						retry: {
 							preset: HttpRetryPreset.TransportTransient,
+							baseDelayMs: 0,
+						},
+					});
+					return response.data;
+				},
+			},
+			retryUnknownThenEcho: {
+				riskClass: READ_RISK_CLASS,
+				input: z.object({ value: z.string() }),
+				output: z.object({ ok: z.boolean() }),
+				handler: async (ctx) => {
+					const response = await ctx.http.get("https://example.com/flaky", {
+						retry: {
+							preset: HttpRetryPreset.TransportTransient,
+							errorCodes: ["vendor said hello"],
 							baseDelayMs: 0,
 						},
 					});
@@ -875,7 +891,7 @@ describe("provider HTTP server", () => {
 			const telemetryHeader = response.headers.get(PROVIDER_TELEMETRY_HEADER);
 			expect(telemetryHeader).toBeTruthy();
 			const decoded = JSON.parse(Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8"));
-			expect(decoded).toEqual({ v: 1, proxy });
+			expect(decoded).toEqual({ v: 1, taxonomy: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION, proxy });
 		} finally {
 			global.fetch = originalFetch;
 			if (originalSmartproxyKey === undefined) {
@@ -1278,6 +1294,47 @@ describe("provider HTTP server", () => {
 						preset: HttpRetryPreset.TransportTransient,
 						transport: "native",
 						lastErrorCode: "transport_network_error",
+					},
+				},
+			});
+		} finally {
+			globalThis.fetch = originalFetch;
+		}
+	});
+
+	it("maps unknown retry error codes to the tenant-neutral other bucket", async () => {
+		const originalFetch = globalThis.fetch;
+		let attempts = 0;
+		globalThis.fetch = createLocalFetchDouble(async () => {
+			attempts += 1;
+			if (attempts === 1) {
+				throw new TransportError("Vendor transport failed", { code: "vendor said hello" });
+			}
+			return new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			});
+		});
+		try {
+			const response = await app.request("/v1/retryUnknownThenEcho", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req_retry_unknown_code",
+					input: { value: "hello" },
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({
+				data: { ok: true },
+				meta: {
+					retry: {
+						attempts: 2,
+						retries: 1,
+						preset: HttpRetryPreset.TransportTransient,
+						transport: "native",
+						lastErrorCode: "other",
 					},
 				},
 			});
