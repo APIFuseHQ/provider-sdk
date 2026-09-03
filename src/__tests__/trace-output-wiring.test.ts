@@ -24,7 +24,11 @@ import {
 	APIFUSE__TRACE__EXPORTER,
 	resolveTraceConfigFromEnv,
 } from "../runtime/trace-config.js";
-import { createServerApp, type ProviderServerLogEvent } from "../server/serve.js";
+import {
+	createServerApp,
+	ERROR_OBSERVABILITY_HEADER,
+	type ProviderServerLogEvent,
+} from "../server/serve.js";
 import { resolveServerTraceContextOptions } from "../server/trace-output.js";
 import { event } from "../stream.js";
 import type { FlowContext, ResolverContext, TraceConfig } from "../types.js";
@@ -252,6 +256,39 @@ const authTraceProvider = createProviderDefinitionDouble({
 	operations: provider.operations,
 });
 
+type LifecycleSpan = {
+	id: string;
+	name: string;
+	parentId?: string;
+	status: string;
+	duration_ms: number;
+};
+
+async function captureStreamingLifecycle(
+	rootName: string,
+	run: (events: ProviderServerLogEvent[]) => Promise<void>,
+): Promise<{ events: ProviderServerLogEvent[]; spans: LifecycleSpan[] }> {
+	const output: string[] = [];
+	const events: ProviderServerLogEvent[] = [];
+	const originalLog = console.log;
+	console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+	try {
+		await withTraceEnv(
+			{ [APIFUSE__TRACE__ENABLED]: "true", [APIFUSE__TRACE__EXPORTER]: "json" },
+			async () => {
+				await run(events);
+				await waitUntil(() => output.some((line) => line.includes(rootName)));
+			},
+		);
+	} finally {
+		console.log = originalLog;
+	}
+	return {
+		events,
+		spans: output.map((line) => JSON.parse(line) as LifecycleSpan),
+	};
+}
+
 describe("server trace output wiring", () => {
 	it("keeps the default in-memory trace behavior silent", async () => {
 		const output: string[] = [];
@@ -331,6 +368,45 @@ describe("server trace output wiring", () => {
 		}
 		expect(events.filter((entry) => entry.event === "provider_request_failed")).toHaveLength(6);
 		expect(events.filter((entry) => entry.event === "provider_request_completed")).toHaveLength(0);
+	});
+
+	it("starts the malformed-body request root before delayed body parsing", async () => {
+		const output: string[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		try {
+			await withTraceEnv(
+				{ [APIFUSE__TRACE__ENABLED]: "true", [APIFUSE__TRACE__EXPORTER]: "json" },
+				async () => {
+					const body = new ReadableStream<Uint8Array>(
+						{
+						async pull(controller) {
+							await new Promise<void>((resolve) => setTimeout(resolve, 30));
+							controller.enqueue(new TextEncoder().encode("{"));
+							controller.close();
+						},
+						},
+						{ highWaterMark: 0 },
+					);
+					const response = await createServerApp(provider, { logger: () => {} }).request(
+						new Request("http://provider.test/v1/echo", {
+							method: "POST",
+							headers: { "content-type": "application/json" },
+							body,
+						}),
+					);
+					expect(response.status).toBe(400);
+					await waitUntil(() => output.some((line) => line.includes("request:operation:echo")));
+				},
+			);
+		} finally {
+			console.log = originalLog;
+		}
+
+		const root = output
+			.map((line) => JSON.parse(line) as { name: string; duration_ms: number })
+			.find((span) => span.name === "request:operation:echo");
+		expect(root?.duration_ms).toBeGreaterThanOrEqual(20);
 	});
 
 	it("emits JSON spans for the json exporter", async () => {
@@ -576,13 +652,19 @@ describe("server trace output wiring", () => {
 					}).request("/v1/tracedEvents", {
 						method: "POST",
 						headers: { "content-type": "application/json" },
-						body: JSON.stringify({ requestId: "stream-trace", input: {} }),
+						body: JSON.stringify({
+							requestId: "stream-trace",
+							connectionId: "stream-connection-private",
+							input: {},
+						}),
 					});
 					expect(response.status).toBe(200);
+					expect(response.headers.get(ERROR_OBSERVABILITY_HEADER)).toBeNull();
 					expect(events).toEqual([]);
 					const body = await response.text();
 					expect(body).toContain("event: delta");
 					expect(body).toContain("event: apifuse.error");
+					expect(body).not.toContain("stream-connection-private");
 					await waitUntil(() => output.some((line) => line.includes("request:operation:tracedEvents")));
 				},
 			);
@@ -599,6 +681,308 @@ describe("server trace output wiring", () => {
 		expect(child).toMatchObject({ status: "ok", parentId: root?.id });
 		expect(events.filter((entry) => entry.event === "provider_request_failed")).toHaveLength(1);
 		expect(events.filter((entry) => entry.event === "provider_request_completed")).toHaveLength(0);
+	});
+
+	it("terminalizes a bodyful HTTP stream as one completed request", async () => {
+		const streamingProvider = createProviderDefinitionDouble({
+			operations: {
+				bodyful: {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					transport: { kind: "http-stream", contentType: "text/plain" },
+					handler: async () => new Response("complete body"),
+				},
+			},
+		});
+		const captured = await captureStreamingLifecycle(
+			"request:operation:bodyful",
+			async (events) => {
+				const response = await createServerApp(streamingProvider, {
+					logger: (entry) => events.push(entry),
+				}).request("/v1/bodyful", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: "bodyful-stream", input: {} }),
+				});
+				expect(await response.text()).toBe("complete body");
+			},
+		);
+
+		expect(captured.events).toHaveLength(1);
+		expect(captured.events[0]).toMatchObject({ event: "provider_request_completed", status: 200 });
+		expect(captured.spans.filter((span) => span.name === "request:operation:bodyful")).toEqual([
+			expect.objectContaining({ status: "ok" }),
+		]);
+	});
+
+	it("terminalizes a bodyless HTTP stream after response setup", async () => {
+		const streamingProvider = createProviderDefinitionDouble({
+			operations: {
+				bodyless: {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					transport: { kind: "http-stream", contentType: "text/plain" },
+					handler: async () => new Response(null, { status: 204 }),
+				},
+			},
+		});
+		const captured = await captureStreamingLifecycle(
+			"request:operation:bodyless",
+			async (events) => {
+				const response = await createServerApp(streamingProvider, {
+					logger: (entry) => events.push(entry),
+				}).request("/v1/bodyless", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: "bodyless-stream", input: {} }),
+				});
+				expect(response.status).toBe(204);
+			},
+		);
+
+		expect(captured.events).toHaveLength(1);
+		expect(captured.events[0]).toMatchObject({ event: "provider_request_completed", status: 204 });
+		expect(captured.spans.filter((span) => span.name === "request:operation:bodyless")).toEqual([
+			expect.objectContaining({ status: "ok" }),
+		]);
+	});
+
+	it("classifies cooperative stream cancellation once and closes the root", async () => {
+		let sourceCancelled = false;
+		const streamingProvider = createProviderDefinitionDouble({
+			operations: {
+				cooperativeCancel: {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					transport: {
+						kind: "sse",
+						events: { delta: z.object({ value: z.string() }) },
+					},
+					async *handler() {
+						try {
+							yield event("delta", { value: "prefix" });
+							await new Promise<void>(() => undefined);
+						} finally {
+							sourceCancelled = true;
+						}
+					},
+				},
+			},
+		});
+		const captured = await captureStreamingLifecycle(
+			"request:operation:cooperativeCancel",
+			async (events) => {
+				const response = await createServerApp(streamingProvider, {
+					logger: (entry) => events.push(entry),
+				}).request("/v1/cooperativeCancel", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: "cooperative-cancel", input: {} }),
+				});
+				const reader = response.body?.getReader();
+				expect((await reader?.read())?.done).toBe(false);
+				await reader?.cancel("consumer stopped");
+			},
+		);
+
+		expect(sourceCancelled).toBe(true);
+		expect(captured.events).toHaveLength(1);
+		expect(captured.events[0]).toMatchObject({
+			event: "provider_request_failed",
+			status: 400,
+			code: "client_cancelled",
+			errorCategory: "client_cancelled",
+		});
+		expect(
+			captured.spans.filter((span) => span.name === "request:operation:cooperativeCancel"),
+		).toEqual([expect.objectContaining({ status: "error" })]);
+	});
+
+	it("terminalizes client cancellation before a stalled generator return", async () => {
+		const never = new Promise<void>(() => undefined);
+		const streamingProvider = createProviderDefinitionDouble({
+			operations: {
+				stalledCancel: {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					transport: {
+						kind: "sse",
+						events: { delta: z.object({ value: z.string() }) },
+					},
+					async *handler() {
+						await never;
+						yield event("delta", { value: "unreachable" });
+					},
+				},
+			},
+		});
+		const captured = await captureStreamingLifecycle(
+			"request:operation:stalledCancel",
+			async (events) => {
+				const response = await createServerApp(streamingProvider, {
+					logger: (entry) => events.push(entry),
+				}).request("/v1/stalledCancel", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: "stalled-cancel", input: {} }),
+				});
+				const reader = response.body?.getReader();
+				void reader?.read().catch(() => undefined);
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				await reader?.cancel("consumer stopped during pull");
+			},
+		);
+
+		expect(captured.events).toHaveLength(1);
+		expect(captured.events[0]).toMatchObject({
+			event: "provider_request_failed",
+			errorCategory: "client_cancelled",
+		});
+		expect(
+			captured.spans.filter((span) => span.name === "request:operation:stalledCancel"),
+		).toEqual([expect.objectContaining({ status: "error" })]);
+	});
+
+	it("terminalizes request abort while a generator pull is stalled", async () => {
+		const never = new Promise<void>(() => undefined);
+		const controller = new AbortController();
+		const streamingProvider = createProviderDefinitionDouble({
+			operations: {
+				stalledAbort: {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					transport: {
+						kind: "sse",
+						events: { delta: z.object({ value: z.string() }) },
+					},
+					async *handler() {
+						await never;
+						yield event("delta", { value: "unreachable" });
+					},
+				},
+			},
+		});
+		const captured = await captureStreamingLifecycle(
+			"request:operation:stalledAbort",
+			async (events) => {
+				const response = await createServerApp(streamingProvider, {
+					logger: (entry) => events.push(entry),
+				}).request("/v1/stalledAbort", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: "stalled-abort", input: {} }),
+					signal: controller.signal,
+				});
+				void response.body?.getReader().read().catch(() => undefined);
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				controller.abort();
+			},
+		);
+
+		expect(captured.events).toHaveLength(1);
+		expect(captured.events[0]).toMatchObject({
+			event: "provider_request_failed",
+			errorCategory: "client_cancelled",
+		});
+		expect(
+			captured.spans.filter((span) => span.name === "request:operation:stalledAbort"),
+		).toEqual([expect.objectContaining({ status: "error" })]);
+	});
+
+	it("terminalizes request abort when the source never yields or returns", async () => {
+		const never = new Promise<IteratorResult<ReturnType<typeof event>>>(() => undefined);
+		const controller = new AbortController();
+		const source = {
+			[Symbol.asyncIterator]() {
+				return {
+					next: () => never,
+					return: () => never,
+				};
+			},
+		};
+		const streamingProvider = createProviderDefinitionDouble({
+			operations: {
+				neverReturns: {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					transport: {
+						kind: "sse",
+						events: { delta: z.object({ value: z.string() }) },
+					},
+					handler: async () => source,
+				},
+			},
+		});
+		const captured = await captureStreamingLifecycle(
+			"request:operation:neverReturns",
+			async (events) => {
+				await createServerApp(streamingProvider, {
+					logger: (entry) => events.push(entry),
+				}).request("/v1/neverReturns", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: "never-returns-abort", input: {} }),
+					signal: controller.signal,
+				});
+				controller.abort();
+			},
+		);
+
+		expect(captured.events).toHaveLength(1);
+		expect(captured.events[0]).toMatchObject({
+			event: "provider_request_failed",
+			errorCategory: "client_cancelled",
+		});
+		expect(
+			captured.spans.filter((span) => span.name === "request:operation:neverReturns"),
+		).toEqual([expect.objectContaining({ status: "error" })]);
+	});
+
+	it("closes the request root when an injected logger throws", async () => {
+		const output: string[] = [];
+		const unhandled: unknown[] = [];
+		const originalLog = console.log;
+		const onUnhandled = (error: unknown) => unhandled.push(error);
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			await withTraceEnv(
+				{ [APIFUSE__TRACE__ENABLED]: "true", [APIFUSE__TRACE__EXPORTER]: "json" },
+				async () => {
+					const response = await createServerApp(provider, {
+						logger: () => {
+							throw new Error("logger unavailable");
+						},
+					}).request("/v1/echo", {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							requestId: "throwing-logger",
+							input: { value: "hello" },
+						}),
+					});
+					expect(response.status).toBe(200);
+					await waitUntil(() => output.some((line) => line.includes("request:operation:echo")));
+					await new Promise<void>((resolve) => setImmediate(resolve));
+				},
+			);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+			console.log = originalLog;
+		}
+
+		expect(unhandled).toEqual([]);
+		expect(
+			output
+				.map((line) => JSON.parse(line) as LifecycleSpan)
+				.filter((span) => span.name === "request:operation:echo"),
+		).toEqual([expect.objectContaining({ status: "ok" })]);
 	});
 
 	it("emits JSON spans with names and durations for the console exporter", async () => {

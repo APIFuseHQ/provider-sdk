@@ -93,6 +93,7 @@ import {
 	createTraceContext,
 	type TraceContext as RuntimeTraceContext,
 	type TraceRecorder,
+	updateTraceContextExportMetadata,
 } from "../runtime/trace.js";
 import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
@@ -104,6 +105,7 @@ import {
 } from "../stateful-signing.js";
 import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import { getStealthProfile } from "../stealth/profiles.js";
+import { sanitizeTraceAttributes } from "../trace-sanitization.js";
 import {
 	APIFUSE_STREAM_DONE_EVENT,
 	APIFUSE_STREAM_ERROR_EVENT,
@@ -265,11 +267,16 @@ export type ProviderServerOperationExecutor<
 	input: ProviderServerOperationExecutorInput<TContext>,
 ) => Promise<unknown>;
 
+type RequestTerminalOutcome =
+	| { kind: "completed"; status: number }
+	| { kind: "failed"; status?: number; error: unknown }
+	| { kind: "cancelled"; status?: number };
+
 type RequestStreamLifecycle = {
 	runStep<T>(fn: () => Promise<T>): Promise<T>;
-	complete(status: number): Promise<void>;
-	fail(error: unknown): Promise<void>;
-	cancel(status: number): Promise<void>;
+	registerCleanup(cleanup: () => void | Promise<void>): void;
+	terminalize(outcome: RequestTerminalOutcome): void;
+	cleanup(): Promise<void>;
 };
 
 type ProviderCapabilityModules = {
@@ -1752,10 +1759,40 @@ type RequestScope = RequestScopeContext & {
 	run<T>(fn: () => Promise<T>): Promise<T>;
 	runStreaming<T>(fn: () => Promise<T>): Promise<T>;
 	runStreamStep<T>(fn: () => Promise<T>): Promise<T>;
-	snapshotHeaders(): RequestScopeFinishResult;
-	finishError(error: unknown): RequestScopeFinishResult;
-	finish(status: number, error?: unknown): RequestScopeFinishResult;
+	watchAbort(signal: AbortSignal): void;
+	registerStreamCleanup(cleanup: () => void | Promise<void>): void;
+	cleanupStream(): Promise<void>;
+	snapshotHeaders(error?: unknown): RequestScopeFinishResult;
+	terminalize(outcome: RequestTerminalOutcome): RequestScopeFinishResult;
 };
+
+const STREAM_CLEANUP_TIMEOUT_MS = 100;
+const CLIENT_CANCELLED_STATUS = 400;
+
+function clientCancelledError(): ProviderError {
+	return new ProviderError("Request stream was cancelled by the client.", {
+		code: "client_cancelled",
+		category: "client_cancelled",
+		retryable: false,
+	});
+}
+
+async function runBestEffortWithTimeout(cleanup: () => void | Promise<void>): Promise<void> {
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	const work = Promise.resolve()
+		.then(cleanup)
+		.catch(() => undefined);
+	try {
+		await Promise.race([
+			work,
+			new Promise<void>((resolve) => {
+				timeout = setTimeout(resolve, STREAM_CLEANUP_TIMEOUT_MS);
+			}),
+		]);
+	} finally {
+		if (timeout !== undefined) clearTimeout(timeout);
+	}
+}
 
 function traceIdFromTraceparent(headers: Record<string, string>): string | undefined {
 	const traceparent = Object.entries(headers).find(
@@ -1806,46 +1843,99 @@ function createRequestScope(input: {
 		headers: input.headers,
 		correlation: { ...(input.correlation ?? {}) },
 	};
-	let trace: RuntimeTraceContext | undefined;
-	let rootStarted = false;
-	let streamRunner: (<T>(fn: () => Promise<T>) => Promise<T>) | undefined;
-	let streamAwaitingTerminal = false;
-	let resolveStreamTerminal: (() => void) | undefined;
-	let rejectStreamTerminal: ((error: unknown) => void) | undefined;
-	let finishedResult: RequestScopeFinishResult | undefined;
-
-	const ensureTrace = (): RuntimeTraceContext => {
-		if (trace) return trace;
-		const traceAttributes = {
-			...(details.requestId ? { request_id: details.requestId } : {}),
-			provider_id: input.provider.id,
-			...(input.kind === "operation" && details.operationId
-				? { operation_id: details.operationId }
-				: {}),
-			...(input.kind === "auth" && details.flowId ? { flow_id: details.flowId } : {}),
-			route: details.route,
-		};
-		const traceId = requestTraceId(details.headers, details.requestId);
-		trace = traceConfig
-			? createTraceContext({
-					...resolveServerTraceContextOptions(traceConfig, traceAttributes),
-					...(traceId ? { traceId } : {}),
-				})
-			: createTraceContext();
-		return trace;
+	const traceAttributes: Record<string, string> = {
+		provider_id: input.provider.id,
+		...(input.operationId ? { operation_id: input.operationId } : {}),
+		...(input.flowId ? { flow_id: input.flowId } : {}),
+		...(input.requestId ? { request_id: input.requestId } : {}),
+		route: input.route,
 	};
-	const rootName = () => `request:${input.kind}:${details.route}`;
-	const headerSnapshot = (): RequestScopeFinishResult => {
+	const initialTraceId = requestTraceId(input.headers, input.requestId);
+	const trace: RuntimeTraceContext = traceConfig
+		? createTraceContext({
+				...resolveServerTraceContextOptions(traceConfig, traceAttributes),
+				...(initialTraceId ? { traceId: initialTraceId } : {}),
+			})
+		: createTraceContext();
+	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
+	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
+	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
+		resolveRoot = resolve;
+	});
+	let streamingSetupPending = false;
+	let rootSettled = false;
+	let headersSnapshotted = false;
+	let terminalOutcome: RequestTerminalOutcome | undefined;
+	let finishedResult: RequestScopeFinishResult | undefined;
+	let abortSignal: AbortSignal | undefined;
+	let abortListener: (() => void) | undefined;
+	type CleanupEntry = {
+		cleanup: () => void | Promise<void>;
+		promise?: Promise<void>;
+	};
+	const streamCleanups: CleanupEntry[] = [];
+
+	const terminalError = (outcome: RequestTerminalOutcome): unknown | undefined => {
+		if (outcome.kind === "failed") return outcome.error;
+		if (outcome.kind === "cancelled") return clientCancelledError();
+		return undefined;
+	};
+	const root = trace.span(`request:${input.kind}:${input.route}`, async () => {
+		rootRunner = AsyncLocalStorage.snapshot();
+		const outcome = await rootTerminal;
+		const error = terminalError(outcome);
+		if (error !== undefined) throw error;
+	});
+	void root.catch(() => undefined);
+
+	const settleRoot = (): void => {
+		if (!terminalOutcome || streamingSetupPending || rootSettled) return;
+		rootSettled = true;
+		if (abortSignal && abortListener) {
+			abortSignal.removeEventListener("abort", abortListener);
+		}
+		resolveRoot(terminalOutcome);
+	};
+	const runCleanupEntry = (entry: CleanupEntry): Promise<void> => {
+		entry.promise ??= runBestEffortWithTimeout(entry.cleanup);
+		return entry.promise;
+	};
+	const cleanupStream = async (): Promise<void> => {
+		await Promise.all(streamCleanups.map(runCleanupEntry));
+	};
+	const headerSnapshot = (error?: unknown): RequestScopeFinishResult => {
 		const providerTelemetryHeader = proxyTelemetry.toHeaderValue();
-		return providerTelemetryHeader ? { providerTelemetryHeader } : {};
+		const declaredErrorCode = error === undefined ? undefined : input.declaredErrorCode?.(error);
+		const errorObservability =
+			error === undefined ? undefined : errorObservabilityDetails(error, declaredErrorCode);
+		return {
+			...(providerTelemetryHeader ? { providerTelemetryHeader } : {}),
+			...(errorObservability ? { errorObservability } : {}),
+		};
+	};
+	const updateTraceMetadata = (): void => {
+		if (details.requestId) traceAttributes.request_id = details.requestId;
+		if (details.operationId) traceAttributes.operation_id = details.operationId;
+		if (details.flowId) traceAttributes.flow_id = details.flowId;
+		traceAttributes.route = details.route;
+		const traceId = requestTraceId(details.headers, details.requestId);
+		const sanitizedAttributes = Object.fromEntries(
+			Object.entries(sanitizeTraceAttributes(traceAttributes)).map(([key, value]) => [
+				key,
+				String(value),
+			]),
+		);
+		updateTraceContextExportMetadata(trace, {
+			...(traceId ? { traceId } : {}),
+			resourceAttributes: sanitizedAttributes,
+		});
 	};
 
 	const scope: RequestScope = {
-		get trace() {
-			return ensureTrace();
-		},
+		trace,
 		proxyTelemetry,
 		enrich(enrichment): void {
+			if (terminalOutcome) return;
 			if (enrichment.route !== undefined) details.route = enrichment.route;
 			if (enrichment.requestId !== undefined) details.requestId = enrichment.requestId;
 			if (enrichment.operationId !== undefined) details.operationId = enrichment.operationId;
@@ -1854,105 +1944,111 @@ function createRequestScope(input: {
 			if (enrichment.correlation !== undefined) {
 				Object.assign(details.correlation, enrichment.correlation);
 			}
+			updateTraceMetadata();
 		},
 		run<T>(fn: () => Promise<T>): Promise<T> {
-			rootStarted = true;
-			return ensureTrace().span(rootName(), fn);
+			return rootRunner(fn);
 		},
-		runStreaming<T>(fn: () => Promise<T>): Promise<T> {
-			rootStarted = true;
-			let resolveReady!: (value: T) => void;
-			let rejectReady!: (error: unknown) => void;
-			const ready = new Promise<T>((resolve, reject) => {
-				resolveReady = resolve;
-				rejectReady = reject;
-			});
-			const terminal = new Promise<void>((resolve, reject) => {
-				resolveStreamTerminal = resolve;
-				rejectStreamTerminal = reject;
-			});
-			const root = ensureTrace().span(rootName(), async () => {
-				streamRunner = AsyncLocalStorage.snapshot();
-				try {
-					const value = await fn();
-					streamAwaitingTerminal = true;
-					resolveReady(value);
-					await terminal;
-				} catch (error) {
-					if (!streamAwaitingTerminal) rejectReady(error);
-					throw error;
-				}
-			});
-			void root.catch(() => undefined);
-			return ready;
+		async runStreaming<T>(fn: () => Promise<T>): Promise<T> {
+			streamingSetupPending = true;
+			try {
+				return await rootRunner(fn);
+			} finally {
+				streamingSetupPending = false;
+				settleRoot();
+			}
 		},
 		runStreamStep<T>(fn: () => Promise<T>): Promise<T> {
-			return streamRunner ? streamRunner(fn) : fn();
+			return rootRunner(fn);
 		},
-		snapshotHeaders(): RequestScopeFinishResult {
-			return headerSnapshot();
-		},
-		finishError(error: unknown): RequestScopeFinishResult {
-			const declaredErrorCode = input.declaredErrorCode?.(error);
-			return scope.finish(toStatusCode(error, declaredErrorCode), error);
-		},
-		finish(status: number, error?: unknown): RequestScopeFinishResult {
-			if (finishedResult) return finishedResult;
-			finishedResult = {};
-			const cost = finishRequestCost(requestCost);
-			let errorObservability: ErrorObservabilityDetails | undefined;
-			if (error === undefined) {
-				logProviderSuccess(
-					input.logger,
-					input.provider,
-					input.kind,
-					details.route,
-					details.requestId,
-					status,
-					cost,
-					proxyTelemetry,
-					details.correlation,
-				);
-			} else {
-				const declaredErrorCode = input.declaredErrorCode?.(error);
-				errorObservability = errorObservabilityDetails(error, declaredErrorCode);
-				logProviderError(
-					input.logger,
-					input.provider,
-					input.kind,
-					details.route,
-					details.requestId,
-					error,
-					status,
-					cost,
-					declaredErrorCode,
-					proxyTelemetry,
-					errorObservability,
-					details.correlation,
-				);
-			}
-
-			const providerTelemetryHeader = proxyTelemetry.toHeaderValue();
-			if (providerTelemetryHeader) {
-				input.setHeader?.(PROVIDER_TELEMETRY_HEADER, providerTelemetryHeader);
-			}
-			if (errorObservability) {
-				input.setHeader?.(ERROR_OBSERVABILITY_HEADER, JSON.stringify(errorObservability));
-			}
-			finishedResult = {
-				...(providerTelemetryHeader ? { providerTelemetryHeader } : {}),
-				...(errorObservability ? { errorObservability } : {}),
+		watchAbort(signal): void {
+			if (terminalOutcome) return;
+			abortSignal = signal;
+			abortListener = () => {
+				scope.terminalize({ kind: "cancelled", status: CLIENT_CANCELLED_STATUS });
+				void cleanupStream();
 			};
-			if (!rootStarted) {
-				rootStarted = true;
-				const root = ensureTrace().span(rootName(), async () => {
-					if (error !== undefined) throw error;
-				});
-				void root.catch(() => undefined);
-			} else if (streamAwaitingTerminal) {
-				streamAwaitingTerminal = false;
-				if (error === undefined) resolveStreamTerminal?.();
-				else rejectStreamTerminal?.(error);
+			if (signal.aborted) abortListener();
+			else signal.addEventListener("abort", abortListener, { once: true });
+		},
+		registerStreamCleanup(cleanup): void {
+			const entry = { cleanup };
+			streamCleanups.push(entry);
+			if (terminalOutcome) void runCleanupEntry(entry);
+		},
+		cleanupStream,
+		snapshotHeaders(error): RequestScopeFinishResult {
+			headersSnapshotted = true;
+			return headerSnapshot(error);
+		},
+		terminalize(outcome): RequestScopeFinishResult {
+			if (finishedResult) return finishedResult;
+			terminalOutcome = outcome;
+			const error = terminalError(outcome);
+			finishedResult = {};
+			try {
+				const declaredErrorCode =
+					error === undefined ? undefined : input.declaredErrorCode?.(error);
+				const status =
+					outcome.status ??
+					(error === undefined ? 200 : toStatusCode(error, declaredErrorCode));
+				finishedResult = headerSnapshot(error);
+				const cost = finishRequestCost(requestCost);
+				try {
+					if (error === undefined) {
+						logProviderSuccess(
+							input.logger,
+							input.provider,
+							input.kind,
+							details.route,
+							details.requestId,
+							status,
+							cost,
+							proxyTelemetry,
+							details.correlation,
+						);
+					} else {
+						logProviderError(
+							input.logger,
+							input.provider,
+							input.kind,
+							details.route,
+							details.requestId,
+							error,
+							status,
+							cost,
+							declaredErrorCode,
+							proxyTelemetry,
+							finishedResult.errorObservability as ErrorObservabilityDetails,
+							details.correlation,
+						);
+					}
+				} catch {
+					// Observer callbacks cannot hold the request root open or change the response.
+				}
+
+				if (!headersSnapshotted) {
+					if (finishedResult.providerTelemetryHeader) {
+						try {
+							input.setHeader?.(PROVIDER_TELEMETRY_HEADER, finishedResult.providerTelemetryHeader);
+						} catch {
+							// Header observers are isolated independently from request settlement.
+						}
+					}
+					if (finishedResult.errorObservability) {
+						try {
+							input.setHeader?.(
+								ERROR_OBSERVABILITY_HEADER,
+								JSON.stringify(finishedResult.errorObservability),
+							);
+						} catch {
+							// Header observers are isolated independently from request settlement.
+						}
+					}
+				}
+			} finally {
+				settleRoot();
+				void cleanupStream();
 			}
 			return finishedResult;
 		},
@@ -1977,6 +2073,25 @@ function responseWithRequestScopeHeaders(
 		status: response.status,
 		statusText: response.statusText,
 	});
+}
+
+function finalizeRequestResponse(
+	scope: RequestScope,
+	response: Response,
+	outcome: RequestTerminalOutcome,
+): Response {
+	try {
+		const error = outcome.kind === "failed" ? outcome.error : undefined;
+		const finalResponse = responseWithRequestScopeHeaders(
+			response,
+			scope.snapshotHeaders(error),
+		);
+		scope.terminalize(outcome);
+		return finalResponse;
+	} catch (error) {
+		scope.terminalize({ kind: "failed", status: 500, error });
+		throw error;
+	}
 }
 
 function toJsonSuccessResponse(
@@ -2020,10 +2135,13 @@ function isAsyncIterable<T = unknown>(value: unknown): value is AsyncIterable<T>
 
 function responseWithCleanup(response: Response, lifecycle: RequestStreamLifecycle): Response {
 	if (!response.body) {
-		void lifecycle.complete(response.status);
+		lifecycle.terminalize({ kind: "completed", status: response.status });
+		void lifecycle.cleanup();
 		return response;
 	}
 	const reader = response.body.getReader();
+	let cleanupReason: unknown = "request terminalized";
+	lifecycle.registerCleanup(() => lifecycle.runStep(() => reader.cancel(cleanupReason)));
 	const body = new ReadableStream<Uint8Array>(
 		{
 			async pull(controller) {
@@ -2031,23 +2149,21 @@ function responseWithCleanup(response: Response, lifecycle: RequestStreamLifecyc
 					const { done, value } = await lifecycle.runStep(() => reader.read());
 					if (done) {
 						controller.close();
-						await lifecycle.complete(response.status);
+						lifecycle.terminalize({ kind: "completed", status: response.status });
+						await lifecycle.cleanup();
 						return;
 					}
 					if (value) controller.enqueue(value);
 				} catch (error) {
-					await lifecycle.fail(error);
+					lifecycle.terminalize({ kind: "failed", error });
+					await lifecycle.cleanup();
 					controller.error(error);
 				}
 			},
 			async cancel(reason) {
-				try {
-					await lifecycle.runStep(() => reader.cancel(reason));
-					await lifecycle.cancel(response.status);
-				} catch (error) {
-					await lifecycle.fail(error);
-					throw error;
-				}
+				cleanupReason = reason;
+				lifecycle.terminalize({ kind: "cancelled", status: CLIENT_CANCELLED_STATUS });
+				await lifecycle.cleanup();
 			},
 		},
 		{ highWaterMark: 0 },
@@ -2118,6 +2234,12 @@ function toSseResponse(
 ): Response {
 	const encoder = new TextEncoder();
 	const iterator = result[Symbol.asyncIterator]();
+	let cleanupReason: unknown;
+	lifecycle.registerCleanup(() =>
+		lifecycle.runStep(async () => {
+			await iterator.return?.(cleanupReason);
+		}),
+	);
 	const transport = getSseTransport(operation);
 	let done = false;
 	const body = new ReadableStream<Uint8Array>(
@@ -2126,14 +2248,16 @@ function toSseResponse(
 				try {
 					if (done) {
 						controller.close();
-						await lifecycle.complete(200);
+						lifecycle.terminalize({ kind: "completed", status: 200 });
+						await lifecycle.cleanup();
 						return;
 					}
 					const next = await lifecycle.runStep(() => iterator.next());
 					if (next.done) {
 						done = true;
 						controller.close();
-						await lifecycle.complete(200);
+						lifecycle.terminalize({ kind: "completed", status: 200 });
+						await lifecycle.cleanup();
 						return;
 					}
 					const encodedBytes = await lifecycle.runStep(async () => {
@@ -2161,19 +2285,14 @@ function toSseResponse(
 					);
 					controller.close();
 					done = true;
-					await lifecycle.fail(error);
+					lifecycle.terminalize({ kind: "failed", error });
+					await lifecycle.cleanup();
 				}
 			},
 			async cancel(reason) {
-				try {
-					await lifecycle.runStep(async () => {
-						await iterator.return?.(reason);
-					});
-					await lifecycle.cancel(200);
-				} catch (error) {
-					await lifecycle.fail(error);
-					throw error;
-				}
+				cleanupReason = reason;
+				lifecycle.terminalize({ kind: "cancelled", status: CLIENT_CANCELLED_STATUS });
+				await lifecycle.cleanup();
 			},
 		},
 		{ highWaterMark: 0 },
@@ -2424,19 +2543,17 @@ async function handleOperation(
 		runStep<T>(fn: () => Promise<T>): Promise<T> {
 			return scope.runStreamStep(fn);
 		},
-		async complete(status): Promise<void> {
-			await scope.runStreamStep(cleanup);
-			scope.finish(status);
+		registerCleanup(streamCleanup): void {
+			scope.registerStreamCleanup(streamCleanup);
 		},
-		async fail(error): Promise<void> {
-			await scope.runStreamStep(cleanup);
-			scope.finishError(error);
+		terminalize(outcome): void {
+			scope.terminalize(outcome);
 		},
-		async cancel(status): Promise<void> {
-			await scope.runStreamStep(cleanup);
-			scope.finish(status);
+		cleanup(): Promise<void> {
+			return scope.cleanupStream();
 		},
 	};
+	scope.registerStreamCleanup(() => scope.runStreamStep(cleanup));
 	try {
 		const result = options.operationExecutor
 			? await options.operationExecutor({
@@ -2926,8 +3043,10 @@ function createServerAppWithCapabilityModules(
 				});
 				return c.json({ data: output });
 			});
-			const finished = requestScope.finish(200);
-			return responseWithRequestScopeHeaders(response, finished);
+			return finalizeRequestResponse(requestScope, response, {
+				kind: "completed",
+				status: 200,
+			});
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operationId, operationErrorCodes);
 			const status = toStatusCode(error, declaredErrorCode);
@@ -2944,8 +3063,11 @@ function createServerAppWithCapabilityModules(
 			});
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
 			const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
-			const finished = requestScope.finish(status, error);
-			return responseWithRequestScopeHeaders(response, finished);
+			return finalizeRequestResponse(requestScope, response, {
+				kind: "failed",
+				status,
+				error,
+			});
 		}
 	});
 
@@ -2978,6 +3100,7 @@ function createServerAppWithCapabilityModules(
 			const streaming = provider.operations[operation]?.transport?.kind
 				? provider.operations[operation]?.transport?.kind !== "json"
 				: false;
+			if (streaming) requestScope.watchAbort(c.req.raw.signal);
 			const execute = async () => {
 				const handled = await handleOperation(
 					provider,
@@ -2997,8 +3120,10 @@ function createServerAppWithCapabilityModules(
 				? await requestScope.runStreaming(execute)
 				: await requestScope.run(execute);
 			if (streaming) return response;
-			const finished = requestScope.finish(response.status);
-			return responseWithRequestScopeHeaders(response, finished);
+			return finalizeRequestResponse(requestScope, response, {
+				kind: "completed",
+				status: response.status,
+			});
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operation, operationErrorCodes);
 			const status = toStatusCode(error, declaredErrorCode);
@@ -3006,8 +3131,11 @@ function createServerAppWithCapabilityModules(
 			requestScope.enrich({ ...(requestId ? { requestId } : {}) });
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
 			const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
-			const finished = requestScope.finish(status, error);
-			return responseWithRequestScopeHeaders(response, finished);
+			return finalizeRequestResponse(requestScope, response, {
+				kind: "failed",
+				status,
+				error,
+			});
 		}
 	});
 
@@ -3069,19 +3197,21 @@ function createServerAppWithCapabilityModules(
 					);
 					return handled instanceof Response ? handled : c.json(handled);
 				});
-				const finished = requestScope.finish(response.status);
-				return responseWithRequestScopeHeaders(response, finished);
+				return finalizeRequestResponse(requestScope, response, {
+					kind: "completed",
+					status: response.status,
+				});
 			} catch (error) {
 				const status = toStatusCode(error);
 				const requestId = extractRequestId(rawBody);
 				requestScope.enrich({ ...(requestId ? { requestId } : {}) });
 				const observabilityDetails = errorObservabilityDetails(error);
 				const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
-				const finished = requestScope.finish(status, error);
-				return responseWithRequestScopeHeaders(
-					response,
-					finished,
-				);
+				return finalizeRequestResponse(requestScope, response, {
+					kind: "failed",
+					status,
+					error,
+				});
 			}
 		});
 	}

@@ -57,10 +57,32 @@ export interface TraceRecorder {
 }
 
 export const TRACE_RECORDER = Symbol.for("@apifuse/provider-sdk/runtime/trace-recorder");
+const TRACE_EXPORT_METADATA = Symbol.for(
+	"@apifuse/provider-sdk/runtime/trace-export-metadata",
+);
+
+type TraceExportMetadata = {
+	update(input: { traceId?: string; resourceAttributes?: Record<string, string> }): void;
+};
 
 type InternalTraceContext = TraceContext & {
 	[TRACE_RECORDER]: TraceRecorder;
+	[TRACE_EXPORT_METADATA]: TraceExportMetadata;
 };
+
+function assertValidTraceId(traceId: string): void {
+	if (!/^[0-9a-f]{32}$/.test(traceId) || /^0{32}$/.test(traceId)) {
+		throw new TypeError("traceId must be 32 lowercase hexadecimal characters and non-zero");
+	}
+}
+
+/** Updates request metadata before its pending root span completes and exports. */
+export function updateTraceContextExportMetadata(
+	trace: BaseTraceContext,
+	input: { traceId?: string; resourceAttributes?: Record<string, string> },
+): void {
+	(trace as Partial<InternalTraceContext>)[TRACE_EXPORT_METADATA]?.update(input);
+}
 
 function buildOTLPExportOptions(config?: TraceConfig): OTLPExportOptions | undefined {
 	if (config?.exporter !== "otlp") {
@@ -150,12 +172,7 @@ export function getTraceRecorder(trace: BaseTraceContext): TraceRecorder | null 
 }
 
 export function createTraceContext(options: CreateTraceContextOptions = {}): TraceContext {
-	if (
-		options.traceId !== undefined &&
-		(!/^[0-9a-f]{32}$/.test(options.traceId) || /^0{32}$/.test(options.traceId))
-	) {
-		throw new TypeError("traceId must be 32 lowercase hexadecimal characters and non-zero");
-	}
+	if (options.traceId !== undefined) assertValidTraceId(options.traceId);
 	const maxSpans = options.maxSpans ?? 1000;
 	const completed: CompletedSpanEntry[] = [];
 	const activeSpanStorage = new AsyncLocalStorage<PendingSpan | undefined>();
@@ -168,7 +185,7 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 		: undefined;
 	// One trace id per context so every export batch of this request shares it and
 	// two processes can never mint the same id.
-	const exportTraceId = options.traceId ?? crypto.randomUUID().replace(/-/g, "");
+	let exportTraceId = options.traceId ?? crypto.randomUUID().replace(/-/g, "");
 	let exportScheduled = false;
 
 	// One pending batch per context: roots completing before the flush share it, and a span is
@@ -273,6 +290,17 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 			return completed.map((entry) => ({ ...entry.span }));
 		},
 		[TRACE_RECORDER]: recorder,
+		[TRACE_EXPORT_METADATA]: {
+			update(input) {
+				if (input.traceId !== undefined) {
+					assertValidTraceId(input.traceId);
+					exportTraceId = input.traceId;
+				}
+				if (input.resourceAttributes !== undefined && exportResourceAttributes) {
+					Object.assign(exportResourceAttributes, input.resourceAttributes);
+				}
+			},
+		},
 	};
 
 	return traceContext;

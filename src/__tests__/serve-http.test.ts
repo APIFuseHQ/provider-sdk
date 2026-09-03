@@ -2493,6 +2493,28 @@ describe("provider HTTP server", () => {
 		expect(events.filter((event) => event.event === "provider_request_completed")).toHaveLength(0);
 	});
 
+	it("logs one failure when final response wrapping rejects a disturbed body", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const appWithDisturbedResponse = createServerApp(createTestProvider(), {
+			logger: (event) => events.push(event),
+			operationExecutor: async () => {
+				const response = Response.json({ data: { value: "already consumed" } });
+				const reader = response.body?.getReader();
+				await reader?.read();
+				return response;
+			},
+		});
+		const response = await appWithDisturbedResponse.request("/v1/echo", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_disturbed_response", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(500);
+		expect(events.filter((event) => event.event === "provider_request_failed")).toHaveLength(1);
+		expect(events.filter((event) => event.event === "provider_request_completed")).toHaveLength(0);
+	});
+
 	function createCauseErrorApp(
 		createError: () => ProviderError,
 		events: ProviderServerLogEvent[],
