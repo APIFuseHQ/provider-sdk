@@ -104,7 +104,9 @@ export function isEngineOwnedTelemetryEnvName(name: string): boolean {
 
 /** Every environment name the engine owns: rejected in declarations and filtered from provider projections. */
 export function isEngineOwnedEnvName(name: string): boolean {
+	const canonical = canonicalEnvName(name);
 	return (
+		canonical.startsWith("APIFUSE__ENGINE__") ||
 		isEngineOwnedProxyCredentialName(name) ||
 		isEngineOwnedResolverCredentialName(name) ||
 		isEngineOwnedTelemetryEnvName(name)

@@ -4,6 +4,7 @@ import type { ProviderChallenge } from "../../types.js";
 import { createResolverClient } from "../resolver.js";
 import { createHypersolutionsResolverVendorAdapter } from "../resolver-vendors/hypersolutions.js";
 import type { ResolverVendorTransport } from "../resolver-vendors/types.js";
+import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const API_KEY = "hyper-test-key";
 const PAGE_URL = "https://shop.example.com/products/sku-1";
@@ -111,9 +112,14 @@ function createResolver(transport?: ResolverVendorTransport) {
 describe("hypersolutions resolver vendor", () => {
 	it("runs the measured hard SBSD envelope entirely on the bound transport", async () => {
 		const { transport, calls } = createProtocolTransport();
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
 		const directFetch = spyOn(globalThis, "fetch");
 		try {
-			await expect(createResolver(transport).solve(HARD_CHALLENGE)).resolves.toEqual({
+			await expect(
+				createResolver(transport).solve(HARD_CHALLENGE, new AbortController().signal, recorder),
+			).resolves.toEqual({
 				form: "cookies",
 				kind: "akamai_sbsd",
 				outcome: "payload_accepted_cookies_updated",
@@ -165,17 +171,32 @@ describe("hypersolutions resolver vendor", () => {
 			"content-type": "application/json",
 			Referer: PAGE_URL,
 		});
+		const usageSpans = trace.getSpans().filter((span) => span.name === "resolver.usage");
+		expect(usageSpans).toHaveLength(1);
+		expect(usageSpans[0]?.attributes).toEqual({
+			vendor: "hypersolutions",
+			challenge_kind: "akamai_sbsd",
+			billable_units: 1,
+			attempt_index: 1,
+			outcome: "success",
+			duration_ms: expect.any(Number),
+		});
 	});
 
 	it("uses indices 0 and 1 for the passive v-only variant and no post query", async () => {
 		const { transport, calls } = createProtocolTransport("bm_so");
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
 		const passiveChallenge = {
 			...HARD_CHALLENGE,
 			scriptUrl: "https://shop.example.com/.well-known/sbsd?v=dcc78710-14fe-3835-cc6e-b9b5ea3b6010",
 			stateCookieName: "bm_so",
 		} satisfies ProviderChallenge;
 
-		await expect(createResolver(transport).solve(passiveChallenge)).resolves.toMatchObject({
+		await expect(
+			createResolver(transport).solve(passiveChallenge, new AbortController().signal, recorder),
+		).resolves.toMatchObject({
 			kind: "akamai_sbsd",
 			outcome: "payload_accepted_cookies_updated",
 			verified: false,
@@ -191,6 +212,7 @@ describe("hypersolutions resolver vendor", () => {
 					url === "https://shop.example.com/.well-known/sbsd" && init.method === "POST",
 			),
 		).toHaveLength(2);
+		expect(trace.getSpans().filter((span) => span.name === "resolver.usage")).toHaveLength(2);
 	});
 
 	it("keeps a remembered v-only script separate from a later cpr_chlge token", async () => {
@@ -216,10 +238,15 @@ describe("hypersolutions resolver vendor", () => {
 	});
 
 	it("fails with missing_transport and never falls back to direct egress", async () => {
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
 		const directFetch = spyOn(globalThis, "fetch");
 		directFetch.mockRejectedValue(new Error("direct egress mutant reached global fetch"));
 		try {
-			await expect(createResolver().solve(HARD_CHALLENGE)).rejects.toMatchObject({
+			await expect(
+				createResolver().solve(HARD_CHALLENGE, new AbortController().signal, recorder),
+			).rejects.toMatchObject({
 				code: "RESOLVER_CHAIN_EXHAUSTED",
 				details: [{ vendor: "hypersolutions", reason: "missing_transport" }],
 			});
@@ -227,6 +254,7 @@ describe("hypersolutions resolver vendor", () => {
 		} finally {
 			directFetch.mockRestore();
 		}
+		expect(trace.getSpans().filter((span) => span.name === "resolver.usage")).toHaveLength(0);
 	});
 
 	it("admits only provider-declared upstream hosts plus Hyper's two exact hosts", async () => {

@@ -598,6 +598,7 @@ interface StealthSession {
     redirects: {
         run(options: StealthRedirectRunOptions): Promise<StealthRedirectRunResult>;
     };
+    replayChallenged(response: StealthResponse): Promise<StealthResponse>;
 }
 
 // @public (undocumented)
@@ -667,8 +668,8 @@ type StealthTransportResponse = {
 // dist/types.d.ts:902:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:907:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:1189:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1226:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1226:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1232:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1232:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 

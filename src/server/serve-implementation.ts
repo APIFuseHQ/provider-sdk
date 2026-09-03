@@ -57,6 +57,10 @@ import {
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
 } from "../runtime/choice.js";
 import { createCredentialContext } from "../runtime/credential.js";
+import {
+	createCeremonyEgressLeaseRuntime,
+	ENGINE_CEREMONY_EGRESS_LEASE,
+} from "../runtime/egress-lease.js";
 import { createEnvContext } from "../runtime/env.js";
 import { executeOperation } from "../runtime/executor.js";
 import { createHttpClient } from "../runtime/http.js";
@@ -484,6 +488,9 @@ function createLazyStealthClient(
 				async fetch(...args) {
 					return (await getSession()).fetch(...args);
 				},
+				async replayChallenged(...args) {
+					return (await getSession()).replayChallenged(...args);
+				},
 				redirects: {
 					async run(...args) {
 						return (await getSession()).redirects.run(...args);
@@ -677,15 +684,12 @@ function createStealthChallengeDetection(
 								const selection = resolverOverride({
 									clientProfile: initiatingClientProfileSelection,
 								});
-								const selectedVendors =
-									validateAndSnapshotAutoSolveResolverSelection(selection);
+								const selectedVendors = validateAndSnapshotAutoSolveResolverSelection(selection);
 								const selectedResolver = resolverRuntime.createResolverClientFromEnv(
 									{
 										kinds: provider.resolver?.kinds ?? [],
 										clientProfile: provider.resolver?.clientProfile ?? "",
-										...(selectedVendors === undefined
-											? {}
-											: { vendors: selectedVendors }),
+										...(selectedVendors === undefined ? {} : { vendors: selectedVendors }),
 									},
 									undefined,
 									{
@@ -693,10 +697,7 @@ function createStealthChallengeDetection(
 										cache,
 										identityScope,
 										createTransport: ({ clientProfile }) => {
-											assertResolverClientProfileMatches(
-												clientProfile,
-												initiatingClientProfile,
-											);
+											assertResolverClientProfileMatches(clientProfile, initiatingClientProfile);
 											return transport;
 										},
 									},
@@ -1101,6 +1102,7 @@ function createAuthFlowContext(
 ): {
 	context: FlowContext;
 	getPatch: () => Record<string, unknown | null> | undefined;
+	getEngineState: () => AuthFlowSuccessResponse["engine"];
 } {
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
@@ -1118,6 +1120,20 @@ function createAuthFlowContext(
 		telemetry: scope.proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
 	};
+	const ceremonyEgressLease =
+		proxyPolicy && proxyPolicy.mode !== "disabled"
+			? createCeremonyEgressLeaseRuntime({
+					providerId: provider.id,
+					flowId: request.flowId,
+					affinityKey: proxyClientOptions.affinityKey,
+					...(request.engine?.egressLease ? { handle: request.engine.egressLease } : {}),
+				})
+			: undefined;
+	if (request.engine?.egressLease && !ceremonyEgressLease) {
+		throw new SDKError("An egress lease was supplied for an auth flow without proxy egress", {
+			code: "EGRESS_LEASE_INVALID",
+		});
+	}
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
 		provider,
 		proxyClientOptions.affinityKey,
@@ -1138,6 +1154,7 @@ function createAuthFlowContext(
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: scope.proxyTelemetry,
 		engineCredentials: engineProxyCredentials,
+		...(ceremonyEgressLease ? { [ENGINE_CEREMONY_EGRESS_LEASE]: ceremonyEgressLease } : {}),
 		...(signal ? { signal } : {}),
 		...(provider.stealth
 			? {
@@ -1235,6 +1252,10 @@ function createAuthFlowContext(
 	return {
 		context,
 		getPatch: flowContextStore.getPatch,
+		getEngineState() {
+			const egressLease = ceremonyEgressLease?.handle();
+			return egressLease ? { egressLease } : undefined;
+		},
 	};
 }
 
@@ -1868,9 +1889,7 @@ function logProviderError(
 		kind,
 		route,
 		...(requestId ? { requestId } : {}),
-		...(correlation.connectionId !== undefined
-			? { connectionId: correlation.connectionId }
-			: {}),
+		...(correlation.connectionId !== undefined ? { connectionId: correlation.connectionId } : {}),
 		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
 		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
 		...(correlation.requestedProviderId !== undefined
@@ -1944,9 +1963,7 @@ function logProviderSuccess(
 		kind,
 		route,
 		...(requestId ? { requestId } : {}),
-		...(correlation.connectionId !== undefined
-			? { connectionId: correlation.connectionId }
-			: {}),
+		...(correlation.connectionId !== undefined ? { connectionId: correlation.connectionId } : {}),
 		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
 		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
 		...(correlation.requestedProviderId !== undefined
@@ -2206,8 +2223,7 @@ function createRequestScope(input: {
 				const declaredErrorCode =
 					error === undefined ? undefined : input.declaredErrorCode?.(error);
 				const status =
-					outcome.status ??
-					(error === undefined ? 200 : toStatusCode(error, declaredErrorCode));
+					outcome.status ?? (error === undefined ? 200 : toStatusCode(error, declaredErrorCode));
 				finishedResult = headerSnapshot(error);
 				const cost = finishRequestCost(requestCost);
 				try {
@@ -2298,10 +2314,7 @@ function finalizeRequestResponse(
 ): Response {
 	try {
 		const error = outcome.kind === "failed" ? outcome.error : undefined;
-		const finalResponse = responseWithRequestScopeHeaders(
-			response,
-			scope.snapshotHeaders(error),
-		);
+		const finalResponse = responseWithRequestScopeHeaders(response, scope.snapshotHeaders(error));
 		scope.terminalize(outcome);
 		return finalResponse;
 	} catch (error) {
@@ -2480,11 +2493,7 @@ function toSseResponse(
 						const validated = await validateSseEvent(operation, next.value);
 						const encodedEvent = encodeSseEvent(validated);
 						const bytes = encoder.encode(encodedEvent);
-						assertStreamPayloadWithinLimit(
-							bytes.byteLength,
-							transport?.maxEventBytes,
-							"event",
-						);
+						assertStreamPayloadWithinLimit(bytes.byteLength, transport?.maxEventBytes, "event");
 						return bytes;
 					});
 					controller.enqueue(encodedBytes);
@@ -2628,6 +2637,7 @@ function getHttpStreamTransport(
 function toAuthFlowResponse(
 	result: unknown,
 	contextPatch: Record<string, unknown | null> | undefined,
+	engine: AuthFlowSuccessResponse["engine"],
 ): Response | AuthFlowSuccessResponse {
 	if (result instanceof Response) {
 		return result;
@@ -2640,6 +2650,7 @@ function toAuthFlowResponse(
 	return {
 		data: result,
 		...(contextPatch ? { contextPatch } : {}),
+		...(engine ? { engine } : {}),
 	};
 }
 
@@ -2817,7 +2828,7 @@ async function handleAuthFlow(
 	// any flow code runs instead of at whatever point the ceremony first reads
 	// the env. `abort` stays exempt: a user must always be able to cancel a
 	// stranded flow even when provisioning is broken.
-	const { context, getPatch } = createAuthFlowContext(
+	const { context, getPatch, getEngineState } = createAuthFlowContext(
 		provider,
 		request,
 		options,
@@ -2859,10 +2870,10 @@ async function handleAuthFlow(
 			isAuthTurn(result)
 				? materializeAuthFlowTurn(provider, request, result)
 				: result;
-		return toAuthFlowResponse(materializedResult, getPatch());
+		return toAuthFlowResponse(materializedResult, getPatch(), getEngineState());
 	} catch (error) {
 		if (error instanceof AuthAbortError) {
-			return toAuthFlowResponse(error.turn, getPatch());
+			return toAuthFlowResponse(error.turn, getPatch(), getEngineState());
 		}
 		throw error;
 	} finally {

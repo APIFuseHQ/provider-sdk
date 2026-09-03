@@ -425,7 +425,10 @@ interface ResolverVendorAdapter {
     // (undocumented)
     readonly requiresTransport?: boolean | ((kind: ProviderChallengeKind) => boolean);
     // (undocumented)
-    solve(challenge: ProviderChallenge, identity: ResolverIdentity | undefined, signal: AbortSignal, traceRecorder?: TraceRecorder, transport?: ResolverVendorTransport): Promise<ChallengeSolution>;
+    solve(challenge: ProviderChallenge, identity: ResolverIdentity | undefined, signal: AbortSignal, traceRecorder?: TraceRecorder, transport?: ResolverVendorTransport, usage?: {
+        readonly attemptIndex: number;
+        readonly resolverIdentityScope?: string;
+    }): Promise<ChallengeSolution>;
     // (undocumented)
     supports(kind: ProviderChallengeKind): boolean;
     readonly transportAllowedHosts?: readonly string[];

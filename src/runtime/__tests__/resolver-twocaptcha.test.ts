@@ -118,7 +118,6 @@ function successfulFetch(solution: Record<string, unknown>) {
 	]);
 }
 
-
 function createTwoVendorChain(
 	first: ResolverVendorAdapter,
 	secondBehavior: () => Promise<ChallengeSolution> = async () => ({
@@ -165,7 +164,7 @@ describe("2captcha resolver vendor", () => {
 			),
 		).resolves.toEqual({ form: "token", token: "traced-token" });
 
-		expect(trace.getSpans()).toHaveLength(2);
+		expect(trace.getSpans()).toHaveLength(3);
 		expect(trace.getSpans()).toEqual([
 			expect.objectContaining({
 				name: "resolver.vendor.create_task",
@@ -173,6 +172,17 @@ describe("2captcha resolver vendor", () => {
 				attributes: expect.objectContaining({
 					vendor: "2captcha",
 					challenge_kind: "recaptcha_v2",
+				}),
+			}),
+			expect.objectContaining({
+				name: "resolver.usage",
+				status: "ok",
+				attributes: expect.objectContaining({
+					vendor: "2captcha",
+					challenge_kind: "recaptcha_v2",
+					billable_units: 1,
+					attempt_index: 1,
+					outcome: "success",
 				}),
 			}),
 			expect.objectContaining({
@@ -209,7 +219,7 @@ describe("2captcha resolver vendor", () => {
 			phase: "create_task",
 		});
 		expect(error.cause).toBe(networkError);
-		expect(trace.getSpans()).toHaveLength(1);
+		expect(trace.getSpans()).toHaveLength(2);
 		expect(trace.getSpans()[0]).toMatchObject({
 			name: "resolver.vendor.create_task",
 			status: "error",
@@ -219,6 +229,11 @@ describe("2captcha resolver vendor", () => {
 				unavailability_reason: "transport_failure",
 				transport_phase: "create_task",
 			},
+		});
+		expect(trace.getSpans()[1]).toMatchObject({
+			name: "resolver.usage",
+			status: "error",
+			attributes: expect.objectContaining({ outcome: "vendor_error", billable_units: 1 }),
 		});
 	});
 
@@ -262,7 +277,16 @@ describe("2captcha resolver vendor", () => {
 			),
 		);
 
-		expect(trace.getSpans()).toHaveLength(1);
+		expect(trace.getSpans()).toHaveLength(2);
+		const usageSpan = trace.getSpans().find((span) => span.name === "resolver.usage");
+		expect(Object.keys(usageSpan?.attributes ?? {}).sort()).toEqual([
+			"attempt_index",
+			"billable_units",
+			"challenge_kind",
+			"duration_ms",
+			"outcome",
+			"vendor",
+		]);
 		const recordedAttributes = JSON.stringify(trace.getSpans().map((span) => span.attributes));
 		for (const secret of [apiKey, proxyUrl, "span-user", "span-password"]) {
 			expect(recordedAttributes).not.toContain(secret);
@@ -326,20 +350,54 @@ describe("2captcha resolver vendor", () => {
 
 	it.each([
 		{
-			challenge: { kind: "turnstile", siteKey: "ts-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "managed", cdata: "data" } satisfies ProviderChallenge,
-			task: { type: "TurnstileTaskProxyless", websiteURL: RECAPTCHA_CHALLENGE.pageUrl, websiteKey: "ts-key", action: "managed", data: "data" },
+			challenge: {
+				kind: "turnstile",
+				siteKey: "ts-key",
+				pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
+				action: "managed",
+				cdata: "data",
+			} satisfies ProviderChallenge,
+			task: {
+				type: "TurnstileTaskProxyless",
+				websiteURL: RECAPTCHA_CHALLENGE.pageUrl,
+				websiteKey: "ts-key",
+				action: "managed",
+				data: "data",
+			},
 		},
 		{
-			challenge: { kind: "recaptcha_v3", siteKey: "v3-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl, action: "login", minScore: 0.7 } satisfies ProviderChallenge,
-			task: { type: "RecaptchaV3TaskProxyless", websiteURL: RECAPTCHA_CHALLENGE.pageUrl, websiteKey: "v3-key", minScore: 0.7, pageAction: "login" },
+			challenge: {
+				kind: "recaptcha_v3",
+				siteKey: "v3-key",
+				pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
+				action: "login",
+				minScore: 0.7,
+			} satisfies ProviderChallenge,
+			task: {
+				type: "RecaptchaV3TaskProxyless",
+				websiteURL: RECAPTCHA_CHALLENGE.pageUrl,
+				websiteKey: "v3-key",
+				minScore: 0.7,
+				pageAction: "login",
+			},
 		},
 		{
-			challenge: { kind: "hcaptcha", siteKey: "h-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl } satisfies ProviderChallenge,
-			task: { type: "HCaptchaTaskProxyless", websiteURL: RECAPTCHA_CHALLENGE.pageUrl, websiteKey: "h-key" },
+			challenge: {
+				kind: "hcaptcha",
+				siteKey: "h-key",
+				pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
+			} satisfies ProviderChallenge,
+			task: {
+				type: "HCaptchaTaskProxyless",
+				websiteURL: RECAPTCHA_CHALLENGE.pageUrl,
+				websiteKey: "h-key",
+			},
 		},
 	])("creates and maps $challenge.kind", async ({ challenge, task }) => {
 		const stub = successfulFetch({ token: `${challenge.kind}-token` });
-		await expect(createAdapter(stub).solve(challenge, undefined, new AbortController().signal)).resolves.toEqual({ form: "token", token: `${challenge.kind}-token` });
+		await expect(
+			createAdapter(stub).solve(challenge, undefined, new AbortController().signal),
+		).resolves.toEqual({ form: "token", token: `${challenge.kind}-token` });
 		expect(stub.calls[0]?.body.task).toEqual(task);
 	});
 
@@ -370,12 +428,32 @@ describe("2captcha resolver vendor", () => {
 
 	it("creates proxied Turnstile and hCaptcha tasks", async () => {
 		for (const challenge of [
-			{ kind: "turnstile", siteKey: "ts-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl } satisfies ProviderChallenge,
-			{ kind: "hcaptcha", siteKey: "h-key", pageUrl: RECAPTCHA_CHALLENGE.pageUrl } satisfies ProviderChallenge,
+			{
+				kind: "turnstile",
+				siteKey: "ts-key",
+				pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
+			} satisfies ProviderChallenge,
+			{
+				kind: "hcaptcha",
+				siteKey: "h-key",
+				pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
+			} satisfies ProviderChallenge,
 		]) {
 			const stub = successfulFetch({ token: "proxied-token" });
-			await createAdapter(stub).solve(challenge, { proxyUrl: "socks5://u:p@proxy.example:1080", userAgent: "UA" }, new AbortController().signal);
-			expect(stub.calls[0]?.body.task).toMatchObject({ type: challenge.kind === "turnstile" ? "TurnstileTask" : "HCaptchaTask", proxyType: "socks5", proxyAddress: "proxy.example", proxyPort: 1080, proxyLogin: "u", proxyPassword: "p", userAgent: "UA" });
+			await createAdapter(stub).solve(
+				challenge,
+				{ proxyUrl: "socks5://u:p@proxy.example:1080", userAgent: "UA" },
+				new AbortController().signal,
+			);
+			expect(stub.calls[0]?.body.task).toMatchObject({
+				type: challenge.kind === "turnstile" ? "TurnstileTask" : "HCaptchaTask",
+				proxyType: "socks5",
+				proxyAddress: "proxy.example",
+				proxyPort: 1080,
+				proxyLogin: "u",
+				proxyPassword: "p",
+				userAgent: "UA",
+			});
 		}
 	});
 
@@ -569,9 +647,7 @@ describe("2captcha resolver vendor", () => {
 
 		await expect(chain.client.solve(challenge)).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			message: expect.stringContaining(
-				"missing fields: siteKey, captchaScript, context, iv",
-			),
+			message: expect.stringContaining("missing fields: siteKey, captchaScript, context, iv"),
 			fix: "Capture the named challenge fields or configure another supporting resolver vendor.",
 			details: [
 				{
@@ -624,7 +700,9 @@ describe("2captcha resolver vendor", () => {
 		expect(stub.calls).toHaveLength(0);
 	});
 
-	it.each(UNSUPPORTED_CHALLENGES)("rejects unsupported $kind without attempting a request", async (challenge) => {
+	it.each(
+		UNSUPPORTED_CHALLENGES,
+	)("rejects unsupported $kind without attempting a request", async (challenge) => {
 		const stub = createFetchStub([]);
 		const error = await capturedError(
 			createAdapter(stub).solve(challenge, undefined, new AbortController().signal),
@@ -638,9 +716,9 @@ describe("2captcha resolver vendor", () => {
 		const adapter = createAdapter(createFetchStub([]));
 		const declared = RESOLVER_VENDOR_CAPABILITIES["2captcha"];
 
-		expect(
-			Object.fromEntries(declared.map((kind) => [kind, adapter.supports(kind)])),
-		).toEqual(Object.fromEntries(declared.map((kind) => [kind, true])));
+		expect(Object.fromEntries(declared.map((kind) => [kind, adapter.supports(kind)]))).toEqual(
+			Object.fromEntries(declared.map((kind) => [kind, true])),
+		);
 	});
 
 	it("agrees with every declared capability without a not_implemented result", async () => {
@@ -728,9 +806,13 @@ describe("2captcha resolver vendor", () => {
 		expect(error).toMatchObject({ vendor: "2captcha", reason: "timeout" });
 
 		const spans = trace.getSpans();
-		expect(spans).toHaveLength(2);
+		expect(spans).toHaveLength(3);
 		expect(spans[0]).toMatchObject({ name: "resolver.vendor.create_task", status: "ok" });
-		expect(spans[1]).toEqual(
+		expect(spans[1]).toMatchObject({
+			name: "resolver.usage",
+			attributes: expect.objectContaining({ outcome: "success", billable_units: 1 }),
+		});
+		expect(spans[2]).toEqual(
 			expect.objectContaining({
 				name: "resolver.vendor.poll_result",
 				attributes: expect.objectContaining({

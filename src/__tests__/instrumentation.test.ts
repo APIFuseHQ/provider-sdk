@@ -54,22 +54,23 @@ function createMockContext(): ProviderContext {
 	);
 
 	const response = (): DeclarativeStealthResponse => ({
-			status: 201,
-			ok: true,
-			headers: {},
-			rawHeaders: [] as [string, string][],
-			body: "created",
-			cookies: {
-				get: () => undefined,
-				getAll: () => ({}),
-				toString: () => "",
-			},
-			json: async <T>() => ({}) as T,
-			arrayBuffer: async () => new ArrayBuffer(0),
-			bytes: async () => new Uint8Array(),
-		});
+		status: 201,
+		ok: true,
+		headers: {},
+		rawHeaders: [] as [string, string][],
+		body: "created",
+		cookies: {
+			get: () => undefined,
+			getAll: () => ({}),
+			toString: () => "",
+		},
+		json: async <T>() => ({}) as T,
+		arrayBuffer: async () => new ArrayBuffer(0),
+		bytes: async () => new Uint8Array(),
+	});
 	const session: StealthSession = {
 		fetch: async () => response(),
+		replayChallenged: async () => response(),
 		cookies: {
 			get: () => undefined,
 			getAll: () => ({}),
@@ -79,11 +80,35 @@ function createMockContext(): ProviderContext {
 			toHeader: () => "",
 			snapshot: () => ({}),
 			restore: () => {},
-			serialize: () => ({ version: 1, jar: { version: "1", storeType: "MemoryCookieStore", rejectPublicSuffixes: true, cookies: [] } }),
+			serialize: () => ({
+				version: 1,
+				jar: {
+					version: "1",
+					storeType: "MemoryCookieStore",
+					rejectPublicSuffixes: true,
+					cookies: [],
+				},
+			}),
 			deserialize: () => {},
 			clear: () => {},
 		},
-		redirects: { run: async () => ({ final: response(), hops: [], reason: "completed", cookies: {}, cookieStore: { version: 1, jar: { version: "1", storeType: "MemoryCookieStore", rejectPublicSuffixes: true, cookies: [] } } }) },
+		redirects: {
+			run: async () => ({
+				final: response(),
+				hops: [],
+				reason: "completed",
+				cookies: {},
+				cookieStore: {
+					version: 1,
+					jar: {
+						version: "1",
+						storeType: "MemoryCookieStore",
+						rejectPublicSuffixes: true,
+						cookies: [],
+					},
+				},
+			}),
+		},
 		close: () => {},
 	};
 	const stealth: StealthClient = {
@@ -157,9 +182,7 @@ describe("createTraceContext", () => {
 	});
 
 	it("accepts a valid public trace id seed", () => {
-		expect(() =>
-			createTraceContext({ traceId: "0123456789abcdef0123456789abcdef" }),
-		).not.toThrow();
+		expect(() => createTraceContext({ traceId: "0123456789abcdef0123456789abcdef" })).not.toThrow();
 	});
 });
 
@@ -661,6 +684,7 @@ describe("synchronous return fidelity (state + stealth factories)", () => {
 		};
 		const mockSession = {
 			fetch: ctx.stealth.fetch,
+			replayChallenged: async () => final,
 			cookies,
 			redirects: {
 				run: async (options) => ({

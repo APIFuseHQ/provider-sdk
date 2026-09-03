@@ -39,6 +39,11 @@ import type {
 } from "../types.js";
 import { chrome149HeaderOrder } from "./chrome149-header-order.js";
 import {
+	ENGINE_CEREMONY_EGRESS_LEASE,
+	type CeremonyEgressBinding,
+	type CeremonyEgressLeaseRuntime,
+} from "./egress-lease.js";
+import {
 	createProxyAuthIpDeniedError,
 	createProxyEdgeAuthRejectedError,
 	createProxyEdgeTlsRejectedError,
@@ -151,6 +156,10 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 	proxyStealth?: { insecureSkipVerify?: boolean };
 };
 
+type EngineStealthClientOptions = StealthClientOptions & {
+	readonly [ENGINE_CEREMONY_EGRESS_LEASE]?: CeremonyEgressLeaseRuntime;
+};
+
 type AkamaiSbsdChallenge = Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>;
 type AkamaiSbsdSessionState = {
 	/**
@@ -165,6 +174,12 @@ type AkamaiSbsdSessionState = {
 			{ readonly solved: true } | { readonly solved: false; error: unknown }
 		>;
 	};
+};
+
+type ChallengedReplayRecord = {
+	consumed: boolean;
+	bodyReplayable: boolean;
+	replay(): Promise<StealthResponse>;
 };
 
 const SBSD_INTERSTITIAL_MAX_BYTES = 4_000;
@@ -1113,6 +1128,8 @@ type ResolvedAttemptProxy = {
 	poolIndex?: number;
 	proxyHash?: string;
 	vendor?: ProxyVendorName;
+	refreshEpoch?: number;
+	lifetimeMinutes?: number;
 };
 
 function proxyPoolIndexFromDiagnostics(
@@ -1123,6 +1140,14 @@ function proxyPoolIndexFromDiagnostics(
 		return undefined;
 	}
 	return Math.floor(value);
+}
+
+function positiveDiagnosticNumber(
+	diagnostics: Record<string, string | number | boolean> | undefined,
+	name: string,
+): number | undefined {
+	const value = diagnostics?.[name];
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function proxyEndpointHash(proxyUrl: string | undefined): string | undefined {
@@ -1427,10 +1452,28 @@ function createSessionFetcher(
 	const warn = clientOptions.warn ?? console.warn;
 	const cookieJar = new StealthCookieJar([], baseUrl);
 	const akamaiSbsdState: AkamaiSbsdSessionState = {};
+	const challengedReplays = new WeakMap<StealthResponse, ChallengedReplayRecord>();
+	const ceremonyEgressLease = (clientOptions as EngineStealthClientOptions)[
+		ENGINE_CEREMONY_EGRESS_LEASE
+	];
 	const automaticChallengeRefetchPolicy = {
 		...createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
 		methods: ["GET", "HEAD"],
 	};
+
+	function clearAkamaiSbsdState(): void {
+		akamaiSbsdState.rememberedScript = undefined;
+		akamaiSbsdState.transaction = undefined;
+	}
+
+	function assertCeremonyEgressLeaseActive(): void {
+		try {
+			ceremonyEgressLease?.assertActive();
+		} catch (error) {
+			clearAkamaiSbsdState();
+			throw error;
+		}
+	}
 
 	async function getClientEntry(
 		profile: StealthProfileDescriptor,
@@ -1532,6 +1575,26 @@ function createSessionFetcher(
 		proxyAttempt?: number,
 		refreshEpoch?: number,
 	): Promise<ResolvedAttemptProxy> {
+		assertCeremonyEgressLeaseActive();
+		const bound = ceremonyEgressLease?.binding;
+		if (bound) {
+			if (options?.proxy !== undefined || options?.proxyAttemptOffset !== undefined) {
+				throw new SDKError(
+					"A ceremony-bound egress cannot be overridden by provider request options",
+					{
+						code: "EGRESS_LEASE_INVALID",
+					},
+				);
+			}
+			return {
+				url: bound.proxyUrl,
+				poolIndex: bound.poolIndex,
+				proxyHash: proxyEndpointHash(bound.proxyUrl),
+				vendor: bound.vendor,
+				refreshEpoch: bound.refreshEpoch,
+				...(bound.lifetimeMinutes === undefined ? {} : { lifetimeMinutes: bound.lifetimeMinutes }),
+			};
+		}
 		const resolvedProxy = await resolveProxyConfigAsync({
 			proxy: options?.proxy ?? clientOptions.proxy,
 			upstream: clientOptions.upstream,
@@ -1559,7 +1622,34 @@ function createSessionFetcher(
 			poolIndex: proxyPoolIndexFromDiagnostics(resolvedProxy.diagnostics),
 			proxyHash: proxyEndpointHash(resolvedProxy.url),
 			vendor: vendorFromResolvedSource(resolvedProxy.source),
+			refreshEpoch: refreshEpoch ?? 0,
+			...(positiveDiagnosticNumber(resolvedProxy.diagnostics, "lifetimeMinutes") === undefined
+				? {}
+				: {
+						lifetimeMinutes: positiveDiagnosticNumber(resolvedProxy.diagnostics, "lifetimeMinutes"),
+					}),
 		};
+	}
+
+	function bindCeremonyEgress(attemptProxy: ResolvedAttemptProxy | undefined): void {
+		const lease = ceremonyEgressLease;
+		if (!lease || lease.binding || !attemptProxy?.url || !attemptProxy.vendor) return;
+		if (attemptProxy.poolIndex === undefined || !clientOptions.affinityKey) {
+			throw new SDKError("The selected egress cannot be represented by a ceremony lease", {
+				code: "EGRESS_LEASE_INVALID",
+			});
+		}
+		const binding: CeremonyEgressBinding = {
+			vendor: attemptProxy.vendor,
+			proxyUrl: attemptProxy.url,
+			poolIndex: attemptProxy.poolIndex,
+			affinityKey: clientOptions.affinityKey,
+			refreshEpoch: attemptProxy.refreshEpoch ?? 0,
+			...(attemptProxy.lifetimeMinutes === undefined
+				? {}
+				: { lifetimeMinutes: attemptProxy.lifetimeMinutes }),
+		};
+		lease.bind(binding);
 	}
 
 	const session: StealthSession = {
@@ -1618,7 +1708,11 @@ function createSessionFetcher(
 			// transport-retry budget instead.
 			const rotatesRegistryChain =
 				usesPolicyAllocator && policyResolvesRegistryVendorChain(policyProxy);
-			const maxAttempts = rotatesRegistryChain ? policyProxyAttemptCap : retryAttemptCap;
+			const maxAttempts = ceremonyEgressLease?.binding
+				? 1
+				: rotatesRegistryChain
+					? policyProxyAttemptCap
+					: retryAttemptCap;
 			const dedupeAllocatorEndpoints = rotatesRegistryChain;
 			let lastError: unknown;
 
@@ -1632,6 +1726,7 @@ function createSessionFetcher(
 				const attemptedProxies = new Set<string>();
 
 				for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+					assertCeremonyEgressLeaseActive();
 					throwIfAmbientAborted(clientOptions.signal);
 					let proxy: string | undefined;
 					let attemptProxy: ResolvedAttemptProxy | undefined;
@@ -1742,8 +1837,9 @@ function createSessionFetcher(
 							fetchOptions: StealthFetchOptions,
 							fetchSignal: AbortSignal | undefined,
 							orderedHeaders = buildOrderedHeaders,
-						) =>
-							withClient(
+						) => {
+							assertCeremonyEgressLeaseActive();
+							return withClient(
 								requestProfile,
 								proxy,
 								ignoreTlsErrors,
@@ -1760,6 +1856,7 @@ function createSessionFetcher(
 								fetchSignal,
 								defaultHeaders,
 							);
+						};
 						let { normalized, response } = await fetchOnBoundSession(
 							requestUrl,
 							method,
@@ -1799,6 +1896,11 @@ function createSessionFetcher(
 							}
 						}
 
+						// Commit only after the selected endpoint reached the origin. A failed
+						// proxy attempt may rotate pool index; the successful exact endpoint is
+						// the one sealed into the ceremony handle.
+						bindCeremonyEgress(attemptProxy);
+
 						const akamaiSbsd = clientOptions.stealth?.challengeRuntime?.akamaiSbsd;
 						const detected = akamaiSbsd
 							? detectAkamaiSbsdChallenge(
@@ -1818,21 +1920,15 @@ function createSessionFetcher(
 								recordProxyAttempt("ok", undefined, response.status);
 								return normalized;
 							}
-							if (
-								!isProxyTransportRetryMethod(method, automaticChallengeRefetchPolicy, {
+							const automaticReplayEligible = isProxyTransportRetryMethod(
+								method,
+								automaticChallengeRefetchPolicy,
+								{
 									body: options.body,
 									headers: options.headers,
-								})
-							) {
-								normalized.challenge = {
-									challenge: detected,
-									outcome: "replay_required",
-								};
-								recordProxyAttempt("ok", undefined, response.status);
-								return normalized;
-							}
-							assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, mapping.browser);
-							if (!akamaiSbsd.solve) {
+								},
+							);
+							if (automaticReplayEligible && !akamaiSbsd.solve) {
 								normalized.challenge = {
 									challenge: detected,
 									outcome: "resolver_unavailable",
@@ -1909,66 +2005,115 @@ function createSessionFetcher(
 									};
 								},
 							};
-							const transactionKey = akamaiSbsdChallengeKey(detected, mapping.browser);
-							let transaction = akamaiSbsdState.transaction;
-							let ownsTransaction = false;
-							if (!transaction || transaction.key !== transactionKey) {
-								challengeSolveAttempted = true;
-								ownsTransaction = true;
-								let createdTransaction!: NonNullable<AkamaiSbsdSessionState["transaction"]>;
-								const result = akamaiSbsd
-									.solve(
-										detected,
-										resolverTransport,
-										mapping.browser,
-										clientOptions.signal ?? new AbortController().signal,
-										requestProfile,
-									)
-									.then(
-										() => ({ solved: true }) as const,
-										(error: unknown) => ({ solved: false, error }) as const,
-									)
-									.finally(() => {
-										if (akamaiSbsdState.transaction === createdTransaction) {
-											akamaiSbsdState.transaction = undefined;
+							const replayOptions: StealthFetchOptions = {
+								...options,
+								...(options.headers
+									? {
+											headers: Object.fromEntries(
+												Object.entries(options.headers).map(([name, value]) => [
+													name,
+													Array.isArray(value) ? [...value] : value,
+												]),
+											),
 										}
+									: {}),
+								...(Buffer.isBuffer(options.body) ? { body: Buffer.from(options.body) } : {}),
+							};
+							const bodyReplayable =
+								options.body === undefined ||
+								typeof options.body === "string" ||
+								Buffer.isBuffer(options.body);
+							const solveAndReplay = async (): Promise<StealthResponse> => {
+								assertCeremonyEgressLeaseActive();
+								if (!bodyReplayable) {
+									throw new SDKError(
+										"The challenged request body cannot be replayed byte-exactly",
+										{
+											code: "REPLAY_BODY_UNAVAILABLE",
+										},
+									);
+								}
+								assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, mapping.browser);
+								if (!akamaiSbsd.solve) {
+									throw new SDKError("No resolver is available for the challenged request", {
+										code: "RESOLVER_UNAVAILABLE",
 									});
-								createdTransaction = {
-									key: transactionKey,
-									result,
-								};
-								transaction = createdTransaction;
-								akamaiSbsdState.transaction = createdTransaction;
-							}
-							const transactionResult = await transaction.result;
-							if (!transactionResult.solved) {
-								if (ownsTransaction) throw transactionResult.error;
+								}
+								const transactionKey = akamaiSbsdChallengeKey(detected, mapping.browser);
+								let transaction = akamaiSbsdState.transaction;
+								let ownsTransaction = false;
+								if (!transaction || transaction.key !== transactionKey) {
+									challengeSolveAttempted = true;
+									ownsTransaction = true;
+									let createdTransaction!: NonNullable<AkamaiSbsdSessionState["transaction"]>;
+									const result = akamaiSbsd
+										.solve(
+											detected,
+											resolverTransport,
+											mapping.browser,
+											clientOptions.signal ?? new AbortController().signal,
+											requestProfile,
+										)
+										.then(
+											() => ({ solved: true }) as const,
+											(error: unknown) => ({ solved: false, error }) as const,
+										)
+										.finally(() => {
+											if (akamaiSbsdState.transaction === createdTransaction) {
+												akamaiSbsdState.transaction = undefined;
+											}
+										});
+									createdTransaction = { key: transactionKey, result };
+									transaction = createdTransaction;
+									akamaiSbsdState.transaction = createdTransaction;
+								}
+								const transactionResult = await transaction.result;
+								if (!transactionResult.solved) {
+									if (ownsTransaction) throw transactionResult.error;
+									normalized.challenge = {
+										challenge: detected,
+										outcome: "challenge_persisted",
+									};
+									return normalized;
+								}
+								challengeRefetchAttempted = true;
+								({ normalized, response } = await fetchOnBoundSession(
+									requestUrl,
+									method,
+									replayOptions,
+									clientOptions.signal,
+								));
+								const persisted = detectAkamaiSbsdChallenge(
+									normalized,
+									requestUrl,
+									cookieJar,
+									akamaiSbsd.allowedHosts,
+									akamaiSbsdState,
+								);
+								if (persisted) {
+									normalized.challenge = {
+										challenge: persisted,
+										outcome: "challenge_persisted",
+									};
+								}
+								return normalized;
+							};
+
+							if (!automaticReplayEligible) {
 								normalized.challenge = {
 									challenge: detected,
-									outcome: "challenge_persisted",
+									outcome: "replay_required",
 								};
+								challengedReplays.set(normalized, {
+									consumed: false,
+									bodyReplayable,
+									replay: solveAndReplay,
+								});
 								recordProxyAttempt("ok", undefined, response.status);
 								return normalized;
 							}
-							challengeRefetchAttempted = true;
-							({ normalized, response } = await fetchOnBoundSession(
-								requestUrl,
-								method,
-								options,
-								clientOptions.signal,
-							));
-							const persisted = detectAkamaiSbsdChallenge(
-								normalized,
-								requestUrl,
-								cookieJar,
-								akamaiSbsd.allowedHosts,
-								akamaiSbsdState,
-							);
-							if (persisted) {
-								normalized.challenge = {
-									challenge: persisted,
-									outcome: "challenge_persisted",
-								};
+							await solveAndReplay();
+							if (normalized.challenge?.outcome === "challenge_persisted") {
 								recordProxyAttempt("ok", undefined, response.status);
 								return normalized;
 							}
@@ -2122,6 +2267,26 @@ function createSessionFetcher(
 
 			throwIfAmbientAborted(clientOptions.signal);
 			throw normalizeStealthTransportError(lastError);
+		},
+		async replayChallenged(challengedResponse) {
+			const replay = challengedReplays.get(challengedResponse);
+			if (!replay || challengedResponse.challenge?.outcome !== "replay_required") {
+				throw new SDKError("The challenged response does not belong to this stealth session", {
+					code: "REPLAY_SESSION_MISMATCH",
+				});
+			}
+			if (replay.consumed) {
+				throw new SDKError("The challenged request has already used its one replay budget", {
+					code: "REPLAY_ALREADY_ATTEMPTED",
+				});
+			}
+			replay.consumed = true;
+			if (!replay.bodyReplayable) {
+				throw new SDKError("The challenged request body cannot be replayed byte-exactly", {
+					code: "REPLAY_BODY_UNAVAILABLE",
+				});
+			}
+			return replay.replay();
 		},
 		cookies: cookieJar,
 		redirects: {
@@ -2326,8 +2491,7 @@ function createSessionFetcher(
 		},
 		close() {
 			closed = true;
-			akamaiSbsdState.rememberedScript = undefined;
-			akamaiSbsdState.transaction = undefined;
+			clearAkamaiSbsdState();
 			for (const client of clients.values()) {
 				void client.session
 					.then((session) => session.close())
