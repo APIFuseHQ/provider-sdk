@@ -1009,6 +1009,7 @@ export function createFlowContext(options: {
     initialContext?: Record<string, unknown>;
     ocr?: OcrContext;
     stt?: SttContext;
+    trace?: FlowContext["trace"];
 }): FlowContext;
 
 // @public (undocumented)
@@ -1134,6 +1135,7 @@ export interface CreateTraceContextOptions {
     // (undocumented)
     resourceAttributes?: Record<string, string>;
     sanitizeSpanForExport?: (span: Span) => Span | undefined;
+    traceId?: string;
 }
 
 // @public (undocumented)
@@ -1646,6 +1648,10 @@ export interface FlowContext {
     stt: SttContext;
     // (undocumented)
     tenantId: string;
+    // Warning: (ae-forgotten-export) The symbol "TraceContext_2" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    trace: TraceContext_2;
 }
 
 // @public (undocumented)
@@ -4848,6 +4854,10 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
     kind: "operation" | "auth";
     route: string;
     requestId?: string;
+    connectionId?: string;
+    flowId?: string;
+    tenantId?: string;
+    requestedProviderId?: string;
     status: number;
     proxy?: ProxyTelemetryLogPayload;
 };
@@ -7051,18 +7061,17 @@ export { z }
 // dist/runtime/proxy-telemetry.d.ts:38:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:61:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:65:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:143:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:149:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:157:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:217:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:147:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:153:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:161:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:221:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:624:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1517:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1641:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1699:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1707:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:1708:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1867:5 - (ae-forgotten-export) The symbol "TraceContext_2" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1887:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1888:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

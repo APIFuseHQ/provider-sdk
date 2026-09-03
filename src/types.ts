@@ -2119,6 +2119,7 @@ export interface FlowContext {
 	externalRef?: string;
 	tenantId: string;
 	providerId: string;
+	trace: TraceContext;
 	http: HttpClient;
 	/** Durable connection-scoped runtime state. Present when the host runtime
 	 * supplies one; auth ceremonies must fail closed when absent rather than
