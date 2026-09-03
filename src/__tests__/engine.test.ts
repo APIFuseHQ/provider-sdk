@@ -9,6 +9,7 @@ import {
 	isEngineOwnedEnvName,
 	readEngineProxyCredentials,
 } from "../engine.js";
+import { createCredentialContext } from "../runtime/credential.js";
 import { createServerApp } from "../server/serve.js";
 import type { HttpClient, ProviderDefinition, TraceContext } from "../types.js";
 
@@ -56,6 +57,108 @@ describe("provider engine attachment", () => {
 		expect(() => Reflect.get(ctx, "http")).toThrow(
 			'Provider "engine-fixture" accessed undeclared capability "http"',
 		);
+	});
+
+	it("keeps credential access closed for non-platform auth without a declaration", async () => {
+		const provider = definition({
+			auth: { mode: "none" },
+			operations: {
+				"read-credential": {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ serviceKey: z.string().optional() }),
+					handler: async (ctx) => ({
+						serviceKey: ctx.credential.get("serviceKey"),
+					}),
+				},
+			},
+		});
+		const response = await createServerApp(provider).request("/v1/read-credential", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "non-platform-credential",
+				input: {},
+				connection: {
+					id: "af_con_none",
+					mode: "none",
+					secrets: { serviceKey: "secret-value" },
+					metadata: {},
+					externalRef: "none-connection",
+				},
+			}),
+		});
+
+		expect(response.status).toBe(500);
+		expect(await response.json()).toMatchObject({
+			error: {
+				code: "PROVIDER_CAPABILITY_UNDECLARED",
+				message: expect.stringContaining('undeclared capability "credential"'),
+			},
+		});
+	});
+
+	it("keeps explicit credential declarations working for non-platform auth", () => {
+		const credential = createCredentialContext({
+			allowedKeys: ["serviceKey"],
+			values: { serviceKey: "secret-value" },
+		});
+		const ctx = createInProcessProviderEngine().attach<{
+			credential: { keys: string[] };
+		}>({
+			provider: definition({
+				credential: { keys: ["serviceKey"] },
+			}),
+			bindings: { trace, credential },
+		});
+
+		expect(ctx.credential.get("serviceKey")).toBe("secret-value");
+	});
+
+	it("serves platform-managed credentials without an explicit credential declaration", async () => {
+		const provider = defineProvider({
+			id: "platform-managed-fixture",
+			version: "1.0.0",
+			runtime: "standard",
+			runtimeTarget: "vanilla",
+			auth: { mode: "platform-managed" },
+			meta: {
+				displayName: "Platform-managed fixture",
+				descriptionKey: "platform-managed-fixture.description",
+				category: "test",
+			},
+		})({
+			operations: {
+				"read-credential": {
+					riskClass: "read",
+					connectionMode: "required",
+					input: z.object({}),
+					output: z.object({ serviceKey: z.string().optional() }),
+					healthCheckUnsupported: { reason: "Requires an injected platform credential." },
+					handler: async (ctx) => ({
+						serviceKey: ctx.credential.get("serviceKey"),
+					}),
+				},
+			},
+		});
+		const response = await createServerApp(provider).request("/v1/read-credential", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "platform-managed-credential",
+				input: {},
+				connection: {
+					id: "af_con_platform_managed",
+					mode: "platform-managed",
+					secrets: { serviceKey: "platform-secret" },
+					metadata: {},
+					externalRef: "platform-connection",
+				},
+			}),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ data: { serviceKey: "platform-secret" } });
 	});
 
 	it("fails attachment before execution when a declared binding is unavailable", () => {

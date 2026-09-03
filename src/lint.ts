@@ -398,7 +398,7 @@ function lintAuthModel(provider: {
 			rule: "platform-managed-no-credential-keys",
 			level: "error",
 			field: "credential.keys",
-			message: `${providerLabel} must not declare credential.keys for platform-managed auth mode.`,
+			message: `${providerLabel} must not declare credential.keys because platform-managed auth mode already implies the unfiltered credential capability.`,
 		});
 	}
 

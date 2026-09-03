@@ -2266,8 +2266,9 @@ export interface ProviderRuntimeState {
 /**
  * The operation context exposed for one provider declaration. Capability
  * bindings are present only when their corresponding declaration is present;
- * trace and request remain ambient runtime bindings. Omitting the type
- * parameter preserves the legacy full context shape for existing annotations.
+ * platform-managed auth itself declares the credential binding. Trace and
+ * request remain ambient runtime bindings. Omitting the type parameter
+ * preserves the legacy full context shape for existing annotations.
  */
 export type ProviderContext<TConfig = Record<string, unknown>> = {
 	request?: ProviderRequestContext;
@@ -2276,7 +2277,9 @@ export type ProviderContext<TConfig = Record<string, unknown>> = {
 	& ("env" extends keyof TConfig ? { env: EnvContext } : Record<never, never>)
 	& ("credential" extends keyof TConfig
 		? { credential: CredentialContext }
-		: Record<never, never>)
+		: TConfig extends { auth: { mode: "platform-managed" } }
+			? { credential: CredentialContext }
+			: Record<never, never>)
 	& ("http" extends keyof TConfig ? { http: HttpClient } : Record<never, never>)
 	& ("files" extends keyof TConfig
 		? string extends keyof TConfig

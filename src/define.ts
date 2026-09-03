@@ -600,6 +600,7 @@ export interface ProviderDeclaration {
 	secrets?: ProviderSecretDeclaration[];
 	/** Declares the environment capability binding. A bare object states use without configuration. */
 	env?: Record<string, never> | true;
+	/** Declares credential keys; platform-managed auth declares this capability without key filtering. */
 	credential?: CredentialDeclaration;
 	/** Declares provider context metadata; this does not add a `ctx.context` member. */
 	context?: ContextDeclaration;
