@@ -9,13 +9,30 @@ import {
 
 const KEY = "fixture-engine-owned-ceremony-hmac-key";
 
+type LeaseScope = {
+	tenantId: string;
+	providerId: string;
+	flowId: string;
+	affinityKey: string;
+};
+
+const DEFAULT_SCOPE: LeaseScope = {
+	tenantId: "tenant-1",
+	providerId: "lease-provider",
+	flowId: "flow-1",
+	affinityKey: "connection-1",
+};
+
 function runtime(
-	options: { handle?: string; now?: () => number; environment?: Record<string, string> } = {},
+	options: Partial<LeaseScope> & {
+		handle?: string;
+		now?: () => number;
+		environment?: Record<string, string>;
+	} = {},
 ) {
 	return createCeremonyEgressLeaseRuntime({
-		providerId: "lease-provider",
-		flowId: "flow-1",
-		affinityKey: "connection-1",
+		...DEFAULT_SCOPE,
+		...options,
 		...(options.handle ? { handle: options.handle } : {}),
 		...(options.now ? { now: options.now } : {}),
 		environment: {
@@ -23,6 +40,37 @@ function runtime(
 			...(options.environment ?? {}),
 		},
 	});
+}
+
+function mintSmartproxyHandle(): string {
+	const lease = runtime({ now: () => 1_000 });
+	lease.bind({
+		vendor: "smartproxy",
+		proxyUrl: "http://user:password@198.51.100.7:9000",
+		poolIndex: 2,
+		affinityKey: DEFAULT_SCOPE.affinityKey,
+		refreshEpoch: 0,
+	});
+	const handle = lease.handle();
+	if (!handle) throw new Error("fixture handle was not minted");
+	return handle;
+}
+
+function flipWirePart(handle: string, partIndex: 1 | 2 | 3): string {
+	const parts = handle.split(".");
+	const bytes = Buffer.from(parts[partIndex] ?? "", "base64url");
+	bytes[0] = (bytes[0] ?? 0) ^ 1;
+	parts[partIndex] = bytes.toString("base64url");
+	return parts.join(".");
+}
+
+function capturedError(run: () => unknown): unknown {
+	try {
+		run();
+	} catch (error) {
+		return error;
+	}
+	throw new Error("Expected fixture to throw");
 }
 
 describe("engine ceremony egress lease", () => {
@@ -65,6 +113,7 @@ describe("engine ceremony egress lease", () => {
 	it("fails before binding when the engine key is missing", () => {
 		expect(() =>
 			createCeremonyEgressLeaseRuntime({
+				tenantId: DEFAULT_SCOPE.tenantId,
 				providerId: "lease-provider",
 				flowId: "flow-1",
 				affinityKey: "connection-1",
@@ -73,25 +122,52 @@ describe("engine ceremony egress lease", () => {
 		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_KEY_MISSING" }));
 	});
 
-	it("rejects a tampered handle before returning any binding", () => {
-		const first = runtime();
-		first.bind({
-			vendor: "smartproxy",
-			proxyUrl: "http://user:password@198.51.100.7:9000",
-			poolIndex: 2,
-			affinityKey: "connection-1",
-			refreshEpoch: 0,
-		});
-		const handle = first.handle();
-		if (!handle) throw new Error("fixture handle was not minted");
-		const separator = handle.indexOf(".");
-		const signatureStart = separator + 1;
-		const signatureFirst = handle[signatureStart];
-		const tampered = `${handle.slice(0, signatureStart)}${signatureFirst === "A" ? "B" : "A"}${handle.slice(signatureStart + 1)}`;
+	it("rejects a missing tenant before a lease can be minted", () => {
+		expect(() =>
+			createCeremonyEgressLeaseRuntime({
+				providerId: DEFAULT_SCOPE.providerId,
+				flowId: DEFAULT_SCOPE.flowId,
+				affinityKey: DEFAULT_SCOPE.affinityKey,
+				environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY]: KEY },
+			}),
+		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_INVALID" }));
+	});
 
-		expect(() => runtime({ handle: tampered })).toThrow(
-			expect.objectContaining({ code: "EGRESS_LEASE_INVALID" }),
-		);
+	it("authenticates tenant, provider, flow, and affinity as ceremony-scope AAD", () => {
+		const handle = mintSmartproxyHandle();
+		const changedScopes = [
+			{ tenantId: "tenant-2" },
+			{ providerId: "other-provider" },
+			{ flowId: "other-flow" },
+			{ affinityKey: "other-affinity" },
+		] satisfies ReadonlyArray<Partial<LeaseScope>>;
+
+		for (const changedScope of changedScopes) {
+			expect(() => runtime({ handle, ...changedScope, now: () => 1_001 })).toThrow(
+				expect.objectContaining({ code: "EGRESS_LEASE_INVALID" }),
+			);
+		}
+	});
+
+	it("uses a distinct random GCM nonce and wire token for every mint", () => {
+		const handles = Array.from({ length: 64 }, () => mintSmartproxyHandle());
+		const nonces = handles.map((handle) => handle.split(".")[1]);
+
+		expect(new Set(nonces).size).toBe(64);
+		expect(new Set(handles).size).toBe(64);
+	});
+
+	it("rejects nonce, ciphertext, and tag tampering without exposing partial payload", () => {
+		const handle = mintSmartproxyHandle();
+		for (const partIndex of [1, 2, 3] as const) {
+			const error = capturedError(() => runtime({ handle: flipWirePart(handle, partIndex) }));
+			expect(error).toMatchObject({ code: "EGRESS_LEASE_INVALID", details: undefined });
+			const observable = JSON.stringify(error);
+			expect(observable).not.toContain("proxyUrl");
+			expect(observable).not.toContain("198.51.100.7");
+			expect(observable).not.toContain("password");
+			expect(observable).not.toContain(DEFAULT_SCOPE.tenantId);
+		}
 	});
 
 	it("rejects an expired handle without silently minting another binding", () => {

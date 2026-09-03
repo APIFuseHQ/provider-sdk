@@ -11,6 +11,12 @@ export const RESOLVER_PAID_USAGE_SPAN = "resolver.usage";
 
 export type ResolverPaidUsageOutcome = "success" | "vendor_error" | "timeout" | "abandoned";
 
+export type ResolverPaidUsageEndpoint =
+	| "capsolver:create_task"
+	| "twocaptcha:create_task"
+	| "hyper:ip"
+	| "hyper:sbsd_create";
+
 function errorOutcome(error: unknown, signal: AbortSignal): ResolverPaidUsageOutcome {
 	const signalReason = signal.reason;
 	const errorName = error instanceof Error ? error.name : "";
@@ -36,6 +42,7 @@ export async function recordPaidResolverCreate<T>(options: {
 	readonly traceRecorder?: TraceRecorder;
 	readonly vendor: ProviderResolverVendor;
 	readonly kind: ProviderChallengeKind;
+	readonly endpoint: ResolverPaidUsageEndpoint;
 	readonly signal: AbortSignal;
 	readonly usage?: ResolverPaidUsageContext;
 	readonly create: () => Promise<T>;
@@ -44,6 +51,7 @@ export async function recordPaidResolverCreate<T>(options: {
 	const baseAttributes = {
 		vendor: options.vendor,
 		challenge_kind: options.kind,
+		endpoint: options.endpoint,
 		billable_units: 1,
 		attempt_index: options.usage?.attemptIndex ?? 1,
 		resolver_identity_scope: options.usage?.resolverIdentityScope,

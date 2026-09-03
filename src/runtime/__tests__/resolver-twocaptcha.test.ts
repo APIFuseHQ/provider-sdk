@@ -284,9 +284,11 @@ describe("2captcha resolver vendor", () => {
 			"billable_units",
 			"challenge_kind",
 			"duration_ms",
+			"endpoint",
 			"outcome",
 			"vendor",
 		]);
+		expect(usageSpan?.attributes.endpoint).toBe("twocaptcha:create_task");
 		const recordedAttributes = JSON.stringify(trace.getSpans().map((span) => span.attributes));
 		for (const secret of [apiKey, proxyUrl, "span-user", "span-password"]) {
 			expect(recordedAttributes).not.toContain(secret);

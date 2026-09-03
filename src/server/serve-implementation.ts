@@ -1128,6 +1128,7 @@ function createAuthFlowContext(
 	const ceremonyEgressLease =
 		provider.stealth && proxyPolicy && proxyPolicy.mode !== "disabled"
 			? createCeremonyEgressLeaseRuntime({
+					tenantId: request.tenantId,
 					providerId: provider.id,
 					flowId: request.flowId,
 					affinityKey: proxyClientOptions.affinityKey,

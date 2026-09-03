@@ -4368,6 +4368,7 @@ describe("Chrome 149 header parity", () => {
 			},
 		};
 		const firstLease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
 			providerId: "fixture-provider",
 			flowId: "flow-1",
 			affinityKey: "connection-1",
@@ -4388,6 +4389,7 @@ describe("Chrome 149 header parity", () => {
 		const selectedProxy = mockStealthState.clients.at(-1)?.options?.proxy;
 
 		const secondLease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
 			providerId: "fixture-provider",
 			flowId: "flow-1",
 			affinityKey: "connection-1",
@@ -4422,6 +4424,7 @@ describe("Chrome 149 header parity", () => {
 		let now = 0;
 		let resolutions = 0;
 		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
 			providerId: "fixture-provider",
 			flowId: "flow-1",
 			affinityKey: "connection-1",
@@ -4676,6 +4679,7 @@ describe("server SBSD bound-transport wiring", () => {
 				body: JSON.stringify({
 					requestId: "req-sbsd-missing-engine-key",
 					flowId: "flow-missing-engine-key",
+					tenantId: "tenant-sbsd",
 					providerId: "stealth-sbsd-wiring-provider",
 					connectionId: "connection-sbsd",
 					context: {},
@@ -4685,6 +4689,40 @@ describe("server SBSD bound-transport wiring", () => {
 			expect(response.status).toBe(500);
 			expect(await response.json()).toMatchObject({
 				error: { code: "EGRESS_LEASE_KEY_MISSING" },
+			});
+			expect(allWreqCalls()).toHaveLength(0);
+		} finally {
+			if (previous === undefined) delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
+			else process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY] = previous;
+		}
+	});
+
+	it("fails an auth request before provider code when the ceremony tenant is missing", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
+		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY] = "fixture-ceremony-key";
+		try {
+			const { createServerAppAsync } = await import("../server/serve.js");
+			const app = await createServerAppAsync(createSbsdWiringProvider(), {
+				logger: () => undefined,
+			});
+			const response = await app.request("/auth/start", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-missing-tenant",
+					flowId: "flow-missing-tenant",
+					providerId: "stealth-sbsd-wiring-provider",
+					connectionId: "connection-sbsd",
+					context: {},
+				}),
+			});
+
+			expect(response.status).toBe(409);
+			expect(await response.json()).toMatchObject({
+				error: { code: "EGRESS_LEASE_INVALID" },
 			});
 			expect(allWreqCalls()).toHaveLength(0);
 		} finally {
@@ -4776,6 +4814,10 @@ describe("server SBSD bound-transport wiring", () => {
 				expect(response.status).toBe(200);
 				expect(usageSpans()).toHaveLength(2);
 				expect(usageSpans().every((span) => span.attributes?.outcome === "success")).toBe(true);
+				expect(usageSpans().map((span) => span.attributes?.endpoint)).toEqual([
+					"hyper:ip",
+					"hyper:sbsd_create",
+				]);
 			}
 
 			logLines.length = 0;
@@ -4798,6 +4840,7 @@ describe("server SBSD bound-transport wiring", () => {
 			});
 			expect(usageSpans()).toHaveLength(1);
 			expect(usageSpans()[0]?.attributes?.outcome).toBe("vendor_error");
+			expect(usageSpans()[0]?.attributes?.endpoint).toBe("hyper:ip");
 
 			logLines.length = 0;
 			delete process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY];
@@ -4871,6 +4914,7 @@ describe("server SBSD bound-transport wiring", () => {
 			expect(cacheResponse.status).toBe(200);
 			expect(vendorResponses).toHaveLength(0);
 			expect(usageSpans()).toHaveLength(1);
+			expect(usageSpans()[0]?.attributes?.endpoint).toBe("capsolver:create_task");
 		} finally {
 			fetchSpy?.mockRestore();
 			logSpy.mockRestore();
@@ -5432,6 +5476,7 @@ describe("server SBSD bound-transport wiring", () => {
 				body: JSON.stringify({
 					requestId: "req-sbsd-auth",
 					flowId: "flow-sbsd",
+					tenantId: "tenant-sbsd",
 					providerId: "stealth-sbsd-wiring-provider",
 					connectionId: "connection-sbsd",
 					context: {},
@@ -5472,6 +5517,7 @@ describe("server SBSD bound-transport wiring", () => {
 				body: JSON.stringify({
 					requestId: "req-sbsd-auth-isolated",
 					flowId: "flow-sbsd",
+					tenantId: "tenant-sbsd",
 					providerId: "stealth-sbsd-wiring-provider",
 					connectionId: "connection-sbsd",
 					context: {},
@@ -5503,6 +5549,7 @@ describe("server SBSD bound-transport wiring", () => {
 				body: JSON.stringify({
 					requestId: "req-sbsd-auth-continue",
 					flowId: "flow-sbsd",
+					tenantId: "tenant-sbsd",
 					providerId: "stealth-sbsd-wiring-provider",
 					connectionId: "connection-sbsd",
 					context: { egressLease: "caller-forged", engine: "caller-forged" },
@@ -5533,6 +5580,7 @@ describe("server SBSD bound-transport wiring", () => {
 				body: JSON.stringify({
 					requestId: "req-sbsd-auth-tampered",
 					flowId: "flow-sbsd",
+					tenantId: "tenant-sbsd",
 					providerId: "stealth-sbsd-wiring-provider",
 					connectionId: "connection-sbsd",
 					context: {},

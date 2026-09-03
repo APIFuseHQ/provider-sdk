@@ -589,6 +589,7 @@ export function createCapsolverResolverVendorAdapter(
 						traceRecorder,
 						vendor: CAPSOLVER_VENDOR_ID,
 						kind: challenge.kind,
+						endpoint: "capsolver:create_task",
 						signal: solveController.signal,
 						usage,
 						create: async () => {

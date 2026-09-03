@@ -20,6 +20,7 @@ describe("paid resolver usage telemetry", () => {
 				traceRecorder: recorder,
 				vendor: "capsolver",
 				kind: "turnstile",
+				endpoint: "capsolver:create_task",
 				signal: new AbortController().signal,
 				usage: { attemptIndex: 2, resolverIdentityScope: "scope-digest" },
 				create: async () => {
@@ -35,6 +36,7 @@ describe("paid resolver usage telemetry", () => {
 			attributes: {
 				vendor: "capsolver",
 				challenge_kind: "turnstile",
+				endpoint: "capsolver:create_task",
 				billable_units: 1,
 				attempt_index: 2,
 				resolver_identity_scope: "scope-digest",
@@ -55,6 +57,7 @@ describe("paid resolver usage telemetry", () => {
 				traceRecorder: recorder,
 				vendor: "2captcha",
 				kind: "recaptcha_v2",
+				endpoint: "twocaptcha:create_task",
 				signal: controller.signal,
 				create: async () => {
 					throw reason;

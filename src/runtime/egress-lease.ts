@@ -42,11 +42,17 @@ export type CeremonyEgressBinding = {
 
 type CeremonyEgressLeasePayloadV1 = CeremonyEgressBinding & {
 	readonly version: typeof HANDLE_VERSION;
+	readonly tenantId: string;
 	readonly providerId: string;
 	readonly flowId: string;
 	readonly mintedAtMs: number;
 	readonly expiresAtMs: number;
 };
+
+type CeremonyEgressLeaseScopeV1 = Pick<
+	CeremonyEgressLeasePayloadV1,
+	"tenantId" | "providerId" | "flowId" | "affinityKey"
+>;
 
 export type CeremonyEgressLeaseRuntime = {
 	readonly binding: CeremonyEgressBinding | undefined;
@@ -106,12 +112,30 @@ function encryptionKey(key: string): Buffer {
 	return createHash("sha256").update(AEAD_KEY_DOMAIN, "utf8").update(key, "utf8").digest();
 }
 
-function encodeHandle(payload: CeremonyEgressLeasePayloadV1, key: string): string {
+/** Fixed field order and JSON.stringify's compact form are the canonical AAD encoding. */
+function scopeAad(scope: CeremonyEgressLeaseScopeV1): Buffer {
+	return Buffer.from(
+		JSON.stringify({
+			version: HANDLE_VERSION,
+			tenantId: scope.tenantId,
+			providerId: scope.providerId,
+			flowId: scope.flowId,
+			affinityKey: scope.affinityKey,
+		}),
+		"utf8",
+	);
+}
+
+function encodeHandle(
+	payload: CeremonyEgressLeasePayloadV1,
+	key: string,
+	scope: CeremonyEgressLeaseScopeV1,
+): string {
 	const nonce = randomBytes(AEAD_NONCE_BYTES);
 	const cipher = createCipheriv(AEAD_ALGORITHM, encryptionKey(key), nonce, {
 		authTagLength: AEAD_TAG_BYTES,
 	});
-	cipher.setAAD(Buffer.from(`v${HANDLE_VERSION}`, "utf8"));
+	cipher.setAAD(scopeAad(scope));
 	const ciphertext = Buffer.concat([
 		cipher.update(JSON.stringify(payload), "utf8"),
 		cipher.final(),
@@ -128,7 +152,11 @@ function isFiniteInteger(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
-function decodeHandle(handle: string, key: string): CeremonyEgressLeasePayloadV1 {
+function decodeHandle(
+	handle: string,
+	key: string,
+	scope: CeremonyEgressLeaseScopeV1,
+): CeremonyEgressLeasePayloadV1 {
 	if (Buffer.byteLength(handle, "utf8") > HANDLE_MAX_BYTES) return invalidLease();
 	const parts = handle.split(".");
 	if (
@@ -153,7 +181,7 @@ function decodeHandle(handle: string, key: string): CeremonyEgressLeasePayloadV1
 		const decipher = createDecipheriv(AEAD_ALGORITHM, encryptionKey(key), nonce, {
 			authTagLength: AEAD_TAG_BYTES,
 		});
-		decipher.setAAD(Buffer.from(parts[0]!, "utf8"));
+		decipher.setAAD(scopeAad(scope));
 		decipher.setAuthTag(tag);
 		const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 		parsed = JSON.parse(plaintext.toString("utf8"));
@@ -171,6 +199,8 @@ function decodeHandle(handle: string, key: string): CeremonyEgressLeasePayloadV1
 		typeof candidate.affinityKey !== "string" ||
 		!candidate.affinityKey ||
 		!isFiniteInteger(candidate.refreshEpoch) ||
+		typeof candidate.tenantId !== "string" ||
+		!candidate.tenantId ||
 		typeof candidate.providerId !== "string" ||
 		!candidate.providerId ||
 		typeof candidate.flowId !== "string" ||
@@ -195,6 +225,7 @@ function decodeHandle(handle: string, key: string): CeremonyEgressLeasePayloadV1
 }
 
 export function createCeremonyEgressLeaseRuntime(options: {
+	readonly tenantId?: string;
 	readonly providerId: string;
 	readonly flowId: string;
 	readonly affinityKey: string;
@@ -204,6 +235,18 @@ export function createCeremonyEgressLeaseRuntime(options: {
 }): CeremonyEgressLeaseRuntime {
 	const environment = options.environment ?? process.env;
 	const now = options.now ?? Date.now;
+	if (typeof options.tenantId !== "string" || !options.tenantId.trim()) {
+		throw new SDKError("A tenant is required for an engine ceremony egress lease", {
+			code: "EGRESS_LEASE_INVALID",
+			fix: "Restart the authentication ceremony with its tenant identity.",
+		});
+	}
+	const scope: CeremonyEgressLeaseScopeV1 = {
+		tenantId: options.tenantId,
+		providerId: options.providerId,
+		flowId: options.flowId,
+		affinityKey: options.affinityKey,
+	};
 	const key = environment[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY]?.trim();
 	if (!key) {
 		throw new SDKError("The engine ceremony egress lease key is not configured", {
@@ -215,14 +258,9 @@ export function createCeremonyEgressLeaseRuntime(options: {
 	let currentHandle: string | undefined;
 
 	if (options.handle !== undefined) {
-		payload = decodeHandle(options.handle, key);
-		if (
-			payload.providerId !== options.providerId ||
-			payload.flowId !== options.flowId ||
-			payload.affinityKey !== options.affinityKey
-		) {
-			return invalidLease();
-		}
+		// Scope mismatch fails GCM authentication because scope is AAD; there is
+		// deliberately no post-decrypt scope comparison fallback.
+		payload = decodeHandle(options.handle, key, scope);
 		if (now() >= payload.expiresAtMs) return expiredLease();
 		currentHandle = options.handle;
 	}
@@ -266,6 +304,7 @@ export function createCeremonyEgressLeaseRuntime(options: {
 			const mintedAtMs = now();
 			payload = {
 				version: HANDLE_VERSION,
+				tenantId: scope.tenantId,
 				providerId: options.providerId,
 				flowId: options.flowId,
 				vendor: binding.vendor,
@@ -279,7 +318,7 @@ export function createCeremonyEgressLeaseRuntime(options: {
 				mintedAtMs,
 				expiresAtMs: mintedAtMs + ttlMsForBinding(binding, environment),
 			};
-			currentHandle = encodeHandle(payload, key);
+			currentHandle = encodeHandle(payload, key, scope);
 		},
 		handle() {
 			return currentHandle;

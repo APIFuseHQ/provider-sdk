@@ -296,6 +296,7 @@ export function createHypersolutionsResolverVendorAdapter(
 					traceRecorder,
 					vendor: HYPERSOLUTIONS_VENDOR_ID,
 					kind: challenge.kind,
+					endpoint: "hyper:ip",
 					signal: operationSignal,
 					usage,
 					create: async () => {
@@ -364,6 +365,7 @@ export function createHypersolutionsResolverVendorAdapter(
 						traceRecorder,
 						vendor: HYPERSOLUTIONS_VENDOR_ID,
 						kind: challenge.kind,
+						endpoint: "hyper:sbsd_create",
 						signal: operationSignal,
 						usage,
 						create: async () => {

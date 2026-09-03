@@ -446,6 +446,7 @@ export function createTwoCaptchaResolverVendorAdapter(
 						traceRecorder,
 						vendor: TWOCAPTCHA_VENDOR_ID,
 						kind: challenge.kind,
+						endpoint: "twocaptcha:create_task",
 						signal: solveController.signal,
 						usage,
 						create: async () => {

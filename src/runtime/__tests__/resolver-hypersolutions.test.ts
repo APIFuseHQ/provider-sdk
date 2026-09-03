@@ -173,9 +173,14 @@ describe("hypersolutions resolver vendor", () => {
 		});
 		const usageSpans = trace.getSpans().filter((span) => span.name === "resolver.usage");
 		expect(usageSpans).toHaveLength(2);
+		expect(usageSpans.map((span) => span.attributes.endpoint)).toEqual([
+			"hyper:ip",
+			"hyper:sbsd_create",
+		]);
 		expect(usageSpans[0]?.attributes).toEqual({
 			vendor: "hypersolutions",
 			challenge_kind: "akamai_sbsd",
+			endpoint: "hyper:ip",
 			billable_units: 1,
 			attempt_index: 1,
 			outcome: "success",
