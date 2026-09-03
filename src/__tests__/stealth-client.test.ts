@@ -13,11 +13,14 @@ import {
 	TransportError,
 } from "../errors.js";
 import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
+import type { ResolverVendorTransport } from "../runtime/resolver-vendors/types.js";
 import { normalizeResponse } from "../runtime/stealth.js";
 import {
 	type DeclarativeStealthResponse,
 	HttpRetryUnsafeMethodPolicy,
+	type ProviderChallenge,
 	type ProviderDefinition,
+	type ResolverContext,
 	type StealthCookieStoreV1,
 	type StealthFetchOptions,
 	type StealthRedirectHop,
@@ -299,6 +302,16 @@ function queueHardSbsdSolve(
 		},
 		refetch,
 	);
+}
+
+function fixtureSbsdCookieSolution() {
+	return {
+		form: "cookies",
+		kind: "akamai_sbsd",
+		outcome: "payload_accepted_cookies_updated",
+		verified: false,
+		stateCookieName: "sbsd_o",
+	} as const;
 }
 
 mock.module("wreq-js", () => ({
@@ -3449,6 +3462,41 @@ describe("Chrome 149 header parity", () => {
 		expect(JSON.parse(String(hyperCall?.init?.body))).toMatchObject({ index: 0 });
 	});
 
+	it("does not share a remembered SBSD script across stealth sessions", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 200,
+				body: '<!doctype html><script src="/.well-known/sbsd?v=session-a"></script>',
+				headers: { "set-cookie": "sbsd_o=session-a-state; Path=/; Secure" },
+				url: "https://example.com/bootstrap",
+			},
+			{
+				status: 429,
+				body: '{"cpr_chlge":"true","t":"session-b-token"}',
+				headers: { "set-cookie": "sbsd_o=session-b-state; Path=/; Secure" },
+				url: "https://example.com/apis/bff/session-b",
+			},
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			stealth: {
+				challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+			},
+		});
+		const sessionA = client.createSession();
+		const sessionB = client.createSession();
+
+		const bootstrap = await sessionA.fetch("/bootstrap");
+		const laterToken = await sessionB.fetch("/apis/bff/session-b", {
+			throwOnHttpError: false,
+		});
+
+		expect(bootstrap.challenge).toBeUndefined();
+		expect(laterToken.status).toBe(429);
+		expect(laterToken.challenge).toBeUndefined();
+		expect(allWreqCalls()).toHaveLength(2);
+	});
+
 	it("solves once on the initiating jar and proxy, then judges success only from one GET refetch", async () => {
 		queueHardSbsdSolve({
 			status: 200,
@@ -3617,6 +3665,170 @@ describe("Chrome 149 header parity", () => {
 		const responses = await Promise.all([first, second]);
 
 		expect(solves).toBe(1);
+		expect(responses.map((response) => response.status)).toEqual([200, 200]);
+		expect(responses.every((response) => response.challenge === undefined)).toBe(true);
+		expect(allWreqCalls()).toHaveLength(4);
+	});
+
+	it("shares a failed in-flight solve without hanging the owner or its waiter", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=failed-epoch&t=shared-token"),
+				headers: { "set-cookie": "sbsd_o=shared-failure; Path=/; Secure" },
+				url: "https://example.com/failure-owner",
+			},
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=failed-epoch&t=shared-token"),
+				headers: {},
+				url: "https://example.com/failure-waiter",
+			},
+		);
+		let releaseFailure!: () => void;
+		let markSolveStarted!: () => void;
+		const solveStarted = new Promise<void>((resolve) => {
+			markSolveStarted = resolve;
+		});
+		const failureReleased = new Promise<void>((resolve) => {
+			releaseFailure = resolve;
+		});
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com", {
+			stealth: {
+				challengeRuntime: {
+					akamaiSbsd: {
+						allowedHosts: ["example.com"],
+						async solve() {
+							solves += 1;
+							markSolveStarted();
+							await failureReleased;
+							throw new SDKError("fixture shared solve failure", {
+								code: "FIXTURE_SHARED_SOLVE_FAILED",
+							});
+						},
+					},
+				},
+			},
+		}).createSession();
+
+		const owner = session.fetch("/failure-owner");
+		await solveStarted;
+		const waiter = session.fetch("/failure-waiter");
+		while (allWreqCalls().length < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+		releaseFailure();
+		const [ownerOutcome, waiterOutcome] = await Promise.allSettled([owner, waiter]);
+
+		expect(solves).toBe(1);
+		expect(ownerOutcome.status).toBe("rejected");
+		if (ownerOutcome.status !== "rejected") throw new Error("owner must reject");
+		expect(ownerOutcome.reason).toMatchObject({ code: "FIXTURE_SHARED_SOLVE_FAILED" });
+		expect(waiterOutcome.status).toBe("fulfilled");
+		if (waiterOutcome.status !== "fulfilled") throw new Error("waiter must resolve");
+		expect(waiterOutcome.value.challenge?.outcome).toBe("challenge_persisted");
+		expect(allWreqCalls()).toHaveLength(2);
+	});
+
+	it("starts a new solve epoch after a failed solve settles", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=retry-epoch&t=same-token"),
+				headers: { "set-cookie": "sbsd_o=first-epoch; Path=/; Secure" },
+				url: "https://example.com/retry-epoch",
+			},
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=retry-epoch&t=same-token"),
+				headers: {},
+				url: "https://example.com/retry-epoch",
+			},
+			{ status: 200, body: "recovered", headers: {}, url: "https://example.com/retry-epoch" },
+		);
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient("https://example.com", {
+			stealth: {
+				challengeRuntime: {
+					akamaiSbsd: {
+						allowedHosts: ["example.com"],
+						async solve() {
+							solves += 1;
+							if (solves === 1) {
+								throw new SDKError("fixture first epoch failure", {
+									code: "FIXTURE_FIRST_EPOCH_FAILED",
+								});
+							}
+							return fixtureSbsdCookieSolution();
+						},
+					},
+				},
+			},
+		}).createSession();
+
+		await expect(session.fetch("/retry-epoch")).rejects.toMatchObject({
+			code: "FIXTURE_FIRST_EPOCH_FAILED",
+		});
+		const recovered = await session.fetch("/retry-epoch");
+
+		expect(recovered).toMatchObject({ status: 200, body: "recovered" });
+		expect(recovered.challenge).toBeUndefined();
+		expect(solves).toBe(2);
+		expect(allWreqCalls()).toHaveLength(3);
+	});
+
+	it("does not coalesce concurrent challenges across different sessions", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=session-local&t=shared-token"),
+				headers: { "set-cookie": "sbsd_o=session-a; Path=/; Secure" },
+				url: "https://example.com/session-a",
+			},
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=session-local&t=shared-token"),
+				headers: { "set-cookie": "sbsd_o=session-b; Path=/; Secure" },
+				url: "https://example.com/session-b",
+			},
+			{ status: 200, body: "session a solved", headers: {}, url: "https://example.com/session-a" },
+			{ status: 200, body: "session b solved", headers: {}, url: "https://example.com/session-b" },
+		);
+		let releaseSolves!: () => void;
+		let markBothStarted!: () => void;
+		const bothStarted = new Promise<void>((resolve) => {
+			markBothStarted = resolve;
+		});
+		const solvesReleased = new Promise<void>((resolve) => {
+			releaseSolves = resolve;
+		});
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com", {
+			stealth: {
+				challengeRuntime: {
+					akamaiSbsd: {
+						allowedHosts: ["example.com"],
+						async solve() {
+							solves += 1;
+							if (solves === 2) markBothStarted();
+							await solvesReleased;
+							return fixtureSbsdCookieSolution();
+						},
+					},
+				},
+			},
+		});
+		const sessionA = client.createSession();
+		const sessionB = client.createSession();
+
+		const requests = [sessionA.fetch("/session-a"), sessionB.fetch("/session-b")];
+		await bothStarted;
+		releaseSolves();
+		const responses = await Promise.all(requests);
+
+		expect(solves).toBe(2);
 		expect(responses.map((response) => response.status)).toEqual([200, 200]);
 		expect(responses.every((response) => response.challenge === undefined)).toBe(true);
 		expect(allWreqCalls()).toHaveLength(4);
@@ -3985,43 +4197,136 @@ describe("server SBSD bound-transport wiring", () => {
 		expect(allWreqCalls()).toHaveLength(1);
 	});
 
-	it("rejects an auto-solve resolver override before it can construct a fresh client", async () => {
-		mockStealthState.queuedResponses.push({
-			status: 403,
-			body: sbsdInterstitial("/.well-known/sbsd?v=override&t=override-token"),
-			headers: { "set-cookie": "sbsd_o=override-state; Path=/; Secure" },
-			url: "https://example.com/profile-probe",
+	it("runs a resolver override on the initiating session transport", async () => {
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const previous = new Map(
+			[NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV].map(
+				(name) => [name, process.env[name]] as const,
+			),
+		);
+		process.env[NODEMAVEN_USERNAME_ENV] = "fixture-override-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "fixture-override-password";
+		queueHardSbsdSolve(
+			{
+				status: 200,
+				body: "override protected",
+				headers: {},
+				url: "https://example.com/operation-protected",
+			},
+			"https://example.com/operation-protected",
+		);
+		const { createHypersolutionsResolverVendorAdapter } = await import(
+			"../runtime/resolver-vendors/hypersolutions.js"
+		);
+		const adapter = createHypersolutionsResolverVendorAdapter({
+			apiKey: "fixture-override-hyper-key",
+			allowedHosts: ["example.com"],
 		});
 		let overrideCalls = 0;
-		const resolverOverride = {
-			async solve() {
+		const resolverOverride: ResolverContext = {
+			async solve(
+				challenge: ProviderChallenge,
+				signal?: AbortSignal,
+				transport?: ResolverVendorTransport,
+			) {
 				overrideCalls += 1;
-				const { createStealthClient } = await import("../runtime/stealth.js");
-				await createStealthClient("https://example.com").fetch("/fresh-client-bypass");
-				return { form: "token", token: "must-not-run" } as const;
+				expect(transport).toBeDefined();
+				expect(transport?.getCookie?.("sbsd_o", challenge.pageUrl)).toBe("initial-state");
+				expect(transport?.sessionHeaders?.["User-Agent"]).toContain("Safari");
+				return adapter.solve(
+					challenge,
+					undefined,
+					signal ?? new AbortController().signal,
+					undefined,
+					transport,
+				);
 			},
 		};
-		const provider = createSbsdFailureCodeProvider("stealth-sbsd-override-rejected", {
-			browser: "safari",
-			os: "macos",
-		});
-		const { createServerAppAsync } = await import("../server/serve.js");
-		const app = await createServerAppAsync(provider, {
-			logger: () => undefined,
-			resolver: resolverOverride,
-		});
-		const response = await app.request("/v1/probe", {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ requestId: "req-sbsd-override", input: {} }),
-		});
+		try {
+			const { createServerAppAsync } = await import("../server/serve.js");
+			const app = await createServerAppAsync(createSbsdWiringProvider(), {
+				logger: () => undefined,
+				resolver: resolverOverride,
+			});
+			const response = await app.request("/v1/sbsd", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-bound-override",
+					connectionId: "connection-sbsd-override",
+					input: {},
+				}),
+			});
 
-		expect(response.status).toBe(200);
-		expect(await response.json()).toEqual({
-			data: { code: "RESOLVER_BOUND_TRANSPORT_REQUIRED" },
-		});
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({ data: { status: 200, outcome: "solved" } });
+			expect(overrideCalls).toBe(1);
+			expect(mockStealthState.clients).toHaveLength(1);
+			expect(String(mockStealthState.clients[0]?.options?.proxy)).toContain(
+				"fixture-override-account-",
+			);
+			expect(
+				allWreqCalls().filter((call) => call.url === "https://example.com/operation-protected"),
+			).toHaveLength(2);
+		} finally {
+			for (const [name, value] of previous) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	});
+
+	it("rejects only resolver overrides that supply transport or createTransport", async () => {
+		let overrideCalls = 0;
+		const resolverOverrides = [
+			{
+				transport: { kind: "caller-owned" },
+				async solve() {
+					overrideCalls += 1;
+					return { form: "token", token: "must-not-run" } as const;
+				},
+			},
+			{
+				createTransport() {
+					return { kind: "caller-created" };
+				},
+				async solve() {
+					overrideCalls += 1;
+					return { form: "token", token: "must-not-run" } as const;
+				},
+			},
+		];
+		const { createServerAppAsync } = await import("../server/serve.js");
+		for (const [index, resolverOverride] of resolverOverrides.entries()) {
+			mockStealthState.queuedResponses.push({
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=override&t=override-token"),
+				headers: { "set-cookie": "sbsd_o=override-state; Path=/; Secure" },
+				url: "https://example.com/profile-probe",
+			});
+			const provider = createSbsdFailureCodeProvider(
+				`stealth-sbsd-override-transport-rejected-${index}`,
+				{ browser: "safari", os: "macos" },
+			);
+			const app = await createServerAppAsync(provider, {
+				logger: () => undefined,
+				resolver: resolverOverride,
+			});
+			const response = await app.request("/v1/probe", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: `req-sbsd-override-transport-${index}`, input: {} }),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({
+				data: { code: "RESOLVER_BOUND_TRANSPORT_REQUIRED" },
+			});
+		}
 		expect(overrideCalls).toBe(0);
-		expect(allWreqCalls()).toHaveLength(1);
+		expect(allWreqCalls()).toHaveLength(2);
 	});
 
 	it("supplies the bound transport in operation and auth FlowContext assembly", async () => {

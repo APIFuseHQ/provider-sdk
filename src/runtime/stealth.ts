@@ -1904,21 +1904,29 @@ function createSessionFetcher(
 							if (!transaction || transaction.key !== transactionKey) {
 								challengeSolveAttempted = true;
 								ownsTransaction = true;
-								transaction = {
+								let createdTransaction!: NonNullable<AkamaiSbsdSessionState["transaction"]>;
+								const result = akamaiSbsd
+									.solve(
+										detected,
+										resolverTransport,
+										mapping.browser,
+										clientOptions.signal ?? new AbortController().signal,
+									)
+									.then(
+										() => ({ solved: true }) as const,
+										(error: unknown) => ({ solved: false, error }) as const,
+									)
+									.finally(() => {
+										if (akamaiSbsdState.transaction === createdTransaction) {
+											akamaiSbsdState.transaction = undefined;
+										}
+									});
+								createdTransaction = {
 									key: transactionKey,
-									result: akamaiSbsd
-										.solve(
-											detected,
-											resolverTransport,
-											mapping.browser,
-											clientOptions.signal ?? new AbortController().signal,
-										)
-										.then(
-											() => ({ solved: true }) as const,
-											(error: unknown) => ({ solved: false, error }) as const,
-										),
+									result,
 								};
-								akamaiSbsdState.transaction = transaction;
+								transaction = createdTransaction;
+								akamaiSbsdState.transaction = createdTransaction;
 							}
 							const transactionResult = await transaction.result;
 							if (!transactionResult.solved) {

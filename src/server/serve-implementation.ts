@@ -557,6 +557,10 @@ function assertResolverClientProfileMatches(
 	);
 }
 
+function resolverOverrideOwnsTransport(resolver: ResolverContext): boolean {
+	return "transport" in resolver || "createTransport" in resolver;
+}
+
 function createStealthChallengeDetection(
 	provider: ProviderDefinition,
 	resolverRuntime: typeof ResolverRuntimeModule | undefined,
@@ -580,12 +584,29 @@ function createStealthChallengeDetection(
 				? {
 						async solve(challenge, transport, initiatingClientProfile, solveSignal) {
 							if (resolverOverride) {
-								throw new SDKError(
-									"Automatic SBSD solving cannot use an unbound resolver override",
-									{
-										code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
-										fix: "Use the SDK-owned resolver so the initiating stealth transport remains bound.",
-									},
+								if (resolverOverrideOwnsTransport(resolverOverride)) {
+									throw new SDKError(
+										"A resolver override cannot supply its own automatic SBSD transport",
+										{
+											code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
+											fix: "Remove transport/createTransport from the override and use the SDK-supplied initiating-session transport.",
+										},
+									);
+								}
+								assertResolverClientProfileMatches(
+									provider.resolver?.clientProfile,
+									initiatingClientProfile,
+								);
+								const solveWithBoundTransport = resolverOverride.solve as (
+									selectedChallenge: typeof challenge,
+									selectedSignal: AbortSignal,
+									boundTransport: typeof transport,
+								) => ReturnType<ResolverContext["solve"]>;
+								return solveWithBoundTransport.call(
+									resolverOverride,
+									challenge,
+									solveSignal,
+									transport,
 								);
 							}
 							const resolver = resolverRuntime.createResolverClientFromEnv(
