@@ -13,3 +13,8 @@ classification, and the new types are new exports. Classifications cover
 `resolver_unavailable`, `replay_required`, and `challenge_persisted` outcomes.
 Successful solves are represented only by the unclassified refetched response; unsafe
 requests are never replayed automatically.
+
+Custom hosts may add an `AutoSolveResolverFactory` to select the resolver used by
+automatic solving while accepting the initiating session's SDK-owned transport and
+resolved profile. This factory option is additive; existing provider-invoked
+`ResolverContext` overrides remain supported outside automatic solving.
