@@ -13,7 +13,7 @@ import { createTraceContext } from "../runtime/trace.js";
 
 const BASE_SHA = "94f708a";
 const BASE_PROXY_BYTES =
-	'{"kind":"resolved","provider":"brightdata","userAgentSource":"request","protocol":"https","cacheStatus":"allocator","cacheHit":false,"resolutionMs":16,"allocatorMs":3,"allocatorStatus":201,"allocatorBodyClass":"json","allocatorAttempts":2,"lockWaitMs":1,"redisReadMs":2,"redisWriteMs":4,"poolAgeMs":5,"poolExpiresInMs":8,"attempts":3,"refreshes":1,"attemptSamples":[{"n":1,"a":2,"i":3,"h":"abcdef1234567890","o":"error","c":"E_FAIL","s":502,"d":9},{"n":2,"a":1,"o":"ok","c":"E_OTHER"}],"vendors":["smartproxy","brightdata"],"failovers":[{"v":"smartproxy","nx":"brightdata","p":"resolve","r":"timeout","a":2}]}';
+	'{"kind":"resolved","provider":"brightdata","userAgentSource":"request","protocol":"https","cacheStatus":"allocator","cacheHit":false,"resolutionMs":16,"allocatorMs":3,"allocatorStatus":201,"allocatorBodyClass":"json","allocatorAttempts":2,"lockWaitMs":1,"redisReadMs":2,"redisWriteMs":4,"poolAgeMs":5,"poolExpiresInMs":8,"attempts":3,"refreshes":1,"attemptSamples":[{"n":1,"a":2,"i":3,"h":"abcdef1234567890","o":"error","c":"E_FAIL","s":502,"d":9},{"n":2,"a":1,"o":"ok","c":"E_OTHER"},{"n":3,"a":1,"o":"ok","c":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}],"vendors":["smartproxy","brightdata"],"failovers":[{"v":"smartproxy","nx":"brightdata","p":"resolve","r":"timeout","a":2}]}';
 
 function decode(value: string): Record<string, unknown> {
 	return JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
@@ -100,6 +100,12 @@ function oracleProxy(): ProxyTelemetryCollector {
 		outcome: "ok",
 		errorCode: "E_OTHER",
 	} as never); // test-invalid: base-SHA oracle includes a legacy vendor.
+	collector.recordProxyAttempt({
+		provider: "smartproxy",
+		attempt: 1,
+		outcome: "ok",
+		errorCode: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+	});
 	// test-invalid: reproduce the exact base-SHA oracle failover literals.
 	collector.recordProxyVendorFailover({
 		vendor: "smartproxy",
@@ -192,25 +198,88 @@ describe("request telemetry ledger", () => {
 		expect(envelope.truncated).toBe(true);
 	});
 
-	it("contains BigInt and cyclic contributor failures on log and header surfaces", () => {
-		const cyclic: Record<string, unknown> = {};
-		cyclic.self = cyclic;
-		const invalid = { big: 1n, cyclic };
+	it.each([
+		["BigInt", "stealth", { big: 1n }],
+		[
+			"cyclic object",
+			"browser",
+			(() => {
+				const cyclic: Record<string, unknown> = {};
+				cyclic.self = cyclic;
+				return cyclic;
+			})(),
+		],
+	] as const)("contains an independent %s contributor failure", (_name, key, invalid) => {
 		const warn = mock(() => {});
 		const original = console.warn;
 		console.warn = warn;
 		try {
 			const ledger = new RequestTelemetry(createTraceContext());
 			ledger.register(recordedProxy());
-			ledger.register(castContributor("stealth", invalid));
+			ledger.register(castContributor(key, invalid));
 			expect(ledger.toLogPayload()).toEqual({ proxy: recordedProxy().toLogPayload() });
 			const envelope = decode(ledger.toHeaderValue() ?? "");
 			expect(envelope.proxy).toBeDefined();
-			expect(envelope.stealth).toBeUndefined();
+			expect(envelope[key]).toBeUndefined();
 			expect(warn).toHaveBeenCalledTimes(1);
 		} finally {
 			console.warn = original;
 		}
+	});
+
+	it("keeps proxy logs verbatim while omitting invalid open sample strings from the header", () => {
+		const collector = recordedProxy();
+		collector.recordProxyAttempt({
+			provider: "smartproxy",
+			attempt: 1,
+			proxyHash: "bad hash",
+			outcome: "error",
+			errorCode: "vendor said hello",
+		});
+		const log = collector.toLogPayload();
+		expect(log?.attemptSamples?.[0]).toMatchObject({
+			h: "bad hash",
+			c: "vendor said hello",
+		});
+
+		const warn = mock(() => {});
+		const original = console.warn;
+		console.warn = warn;
+		try {
+			const ledger = new RequestTelemetry(createTraceContext());
+			ledger.register(collector);
+			const envelope = decode(ledger.toHeaderValue() ?? "");
+			const proxy = envelope.proxy as { attemptSamples?: Record<string, unknown>[] };
+			expect(proxy).toBeDefined();
+			expect(proxy.attemptSamples?.[0]).toEqual({ n: 1, a: 1, o: "error" });
+			expect(warn).not.toHaveBeenCalled();
+		} finally {
+			console.warn = original;
+		}
+	});
+
+	it("bounds retained proxy resolution history while aggregating 10,000 resolutions", () => {
+		const collector = new ProxyTelemetryCollector();
+		for (let index = 0; index < 10_000; index += 1) {
+			collector.recordProxyResolution({
+				provider: index % 2 === 0 ? "smartproxy" : "nodemaven",
+				cacheStatus: "memory_hit",
+				cacheHit: true,
+				resolutionMs: 1,
+				attempts: 1,
+			});
+		}
+		expect(collector.resolutionEventCount).toBe(10_000);
+		expect(collector.retainedResolutionEventCount).toBe(64);
+		expect(collector.toLogPayload()).toEqual({
+			kind: "resolved",
+			provider: "nodemaven",
+			cacheStatus: "memory_hit",
+			cacheHit: true,
+			resolutionMs: 10_000,
+			attempts: 10_000,
+			vendors: ["smartproxy", "nodemaven"],
+		});
 	});
 
 	it("isolates a contributor whose log projection throws", () => {

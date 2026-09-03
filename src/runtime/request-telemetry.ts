@@ -28,10 +28,8 @@ export function closedEnum<T extends string>(value: T): ClosedEnum<T> {
 	return value as ClosedEnum<T>;
 }
 
-declare const TENANT_OPAQUE_KEYS: unique symbol;
-
 /** Explicit exemption for the existing implementation-shaped cache key list. */
-export type TenantOpaqueKeys = string[] & { readonly [TENANT_OPAQUE_KEYS]: true };
+export type TenantOpaqueKeys = string[] & { readonly __tenantOpaqueCacheKeys: true };
 
 /** Names the deliberate tenant cache-key exemption without changing its wire value. */
 export function tenantOpaqueKeys(value: string[]): TenantOpaqueKeys {
@@ -52,26 +50,24 @@ export type GatewayIngestible<T> = 0 extends 1 & T
 						? never
 						: unknown extends T[K]
 							? never
-							: NonNullable<T[K]> extends number | boolean | ClosedEnum<string>
-							? T[K]
-							: NonNullable<T[K]> extends readonly (infer U)[]
-								? 0 extends 1 & U
-									? never
-									: unknown extends U
+							: [NonNullable<T[K]>] extends [number | boolean | ClosedEnum<string>]
+								? T[K]
+								: [NonNullable<T[K]>] extends [readonly (infer U)[]]
+									? 0 extends 1 & U
 										? never
-										: U extends number | boolean | ClosedEnum<string>
-										? T[K]
-										: U extends object
-											? [U] extends [GatewayIngestible<U>]
+										: unknown extends U
+											? never
+											: [U] extends [
+													number | boolean | ClosedEnum<string> | GatewayIngestible<U>,
+												]
+												? T[K]
+												: never
+									: [NonNullable<T[K]>] extends [object]
+										? [NonNullable<T[K]>] extends [GatewayIngestible<NonNullable<T[K]>>]
 											? T[K]
 											: never
-										: never
-							: NonNullable<T[K]> extends object
-								? NonNullable<T[K]> extends GatewayIngestible<NonNullable<T[K]>>
-									? T[K]
-									: never
-								: never;
-			}
+										: never;
+				}
 		: never;
 
 /** Compile-time projection for tenant-visible, identity-neutral metadata. */
@@ -90,15 +86,19 @@ export type TenantNeutral<T> = 0 extends 1 & T
 						? never
 						: unknown extends T[K]
 							? never
-							: NonNullable<T[K]> extends TenantOpaqueKeys
-							? T[K]
-							: NonNullable<T[K]> extends number | boolean | ClosedEnum<string>
-								? T[K]
-								: NonNullable<T[K]> extends object
-									? NonNullable<T[K]> extends TenantNeutral<NonNullable<T[K]>>
-										? T[K]
-										: never
-									: never;
+							: [NonNullable<T[K]>] extends [
+									string[] & { readonly __tenantOpaqueCacheKeys: true },
+								]
+								? K extends "keys"
+									? T[K]
+									: never
+								: [NonNullable<T[K]>] extends [number | boolean | ClosedEnum<string>]
+									? T[K]
+									: [NonNullable<T[K]>] extends [object]
+										? [NonNullable<T[K]>] extends [TenantNeutral<NonNullable<T[K]>>]
+											? T[K]
+											: never
+										: never;
 			}
 		: never;
 

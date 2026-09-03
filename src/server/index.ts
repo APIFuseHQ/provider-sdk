@@ -5,18 +5,16 @@ export type {
 	ProxyVendorName,
 	SmartproxyAllocatorBodyClass,
 } from "../config/loader.js";
-export {
-	ProxyTelemetryCollector,
-	type ProxyTelemetryHeaderPayload,
-	type ProxyHash,
-	type ProxyTelemetryLogPayload,
-	type ProxyTelemetryResolvedPayload,
-	type ProxyTelemetryUnresolvedPayload,
+export type {
+	ProxyTelemetryHeaderPayload,
+	ProxyHash,
+	ProxyTelemetryLogPayload,
+	ProxyTelemetryResolvedPayload,
+	ProxyTelemetryUnresolvedPayload,
 } from "../runtime/proxy-telemetry.js";
 export {
 	RequestTelemetry,
 	closedEnum,
-	tenantOpaqueKeys,
 	type ClosedEnum,
 	type GatewayIngestible,
 	type RequestTelemetryLogPayload,
@@ -24,7 +22,6 @@ export {
 	type TelemetryContributor,
 	type TelemetryKey,
 	type TenantNeutral,
-	type TenantOpaqueKeys,
 } from "../runtime/request-telemetry.js";
 export type { Span, TraceContext } from "../runtime/trace.js";
 export {

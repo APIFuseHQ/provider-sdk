@@ -205,62 +205,21 @@ function providerErrorCode(error: unknown): string | undefined {
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
 const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
 type RetryLastErrorCode =
-	| "transport_network_error"
-	| "transport_timeout"
+	// runtime/http.ts:178-179 preserves ambient cancellation.
 	| "transport_cancelled"
+	// runtime/http.ts:180-196 normalizes timeout aborts and timeout-shaped errors.
+	| "transport_timeout"
+	// runtime/http.ts:198-225 normalizes other native fetch failures.
+	| "transport_network_error"
+	// runtime/http.ts:119-126,763-771,829-837 creates upstream status errors.
 	| "upstream_http_error"
-	| "proxy_connect_failed"
-	| "PROXY_REQUIRED"
-	| "PROXY_ALLOCATION_FAILED"
-	| "PROXY_PROTOCOL_UNSUPPORTED"
-	| "PROXY_AUTH_IP_DENIED"
-	| "PROXY_EDGE_AUTH_REJECTED"
-	| "PROXY_POOL_STALE"
-	| "PROXY_EDGE_TLS_REJECTED"
-	| "PROXY_POOL_EXHAUSTED"
-	| "ECONNRESET"
-	| "ECONNREFUSED"
-	| "ECONNABORTED"
-	| "ETIMEDOUT"
-	| "EAI_AGAIN"
-	| "EHOSTUNREACH"
-	| "ENETUNREACH"
-	| "ENOTFOUND"
-	| "EPIPE"
-	| "UND_ERR_CONNECT_TIMEOUT"
-	| "UND_ERR_HEADERS_TIMEOUT"
-	| "UND_ERR_BODY_TIMEOUT"
-	| "UND_ERR_SOCKET"
-	| "UND_ERR_ABORTED"
+	// runtime/proxy-retry-policy.ts:64-84 forwards other coded TransportErrors; the builder closes them.
 	| "other";
 const RETRY_LAST_ERROR_CODES = [
-	"transport_network_error",
-	"transport_timeout",
 	"transport_cancelled",
+	"transport_timeout",
+	"transport_network_error",
 	"upstream_http_error",
-	"proxy_connect_failed",
-	"PROXY_REQUIRED",
-	"PROXY_ALLOCATION_FAILED",
-	"PROXY_PROTOCOL_UNSUPPORTED",
-	"PROXY_AUTH_IP_DENIED",
-	"PROXY_EDGE_AUTH_REJECTED",
-	"PROXY_POOL_STALE",
-	"PROXY_EDGE_TLS_REJECTED",
-	"PROXY_POOL_EXHAUSTED",
-	"ECONNRESET",
-	"ECONNREFUSED",
-	"ECONNABORTED",
-	"ETIMEDOUT",
-	"EAI_AGAIN",
-	"EHOSTUNREACH",
-	"ENETUNREACH",
-	"ENOTFOUND",
-	"EPIPE",
-	"UND_ERR_CONNECT_TIMEOUT",
-	"UND_ERR_HEADERS_TIMEOUT",
-	"UND_ERR_BODY_TIMEOUT",
-	"UND_ERR_SOCKET",
-	"UND_ERR_ABORTED",
 	"other",
 ] as const satisfies readonly RetryLastErrorCode[];
 
