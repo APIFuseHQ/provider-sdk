@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -264,7 +265,12 @@ export type ProviderServerOperationExecutor<
 	input: ProviderServerOperationExecutorInput<TContext>,
 ) => Promise<unknown>;
 
-type RequestCleanup = () => void | Promise<void>;
+type RequestStreamLifecycle = {
+	runStep<T>(fn: () => Promise<T>): Promise<T>;
+	complete(status: number): Promise<void>;
+	fail(error: unknown): Promise<void>;
+	cancel(status: number): Promise<void>;
+};
 
 type ProviderCapabilityModules = {
 	readonly browser?: typeof BrowserRuntimeModule;
@@ -1024,7 +1030,7 @@ type RequestCorrelationIds = {
 	connectionId?: string;
 	flowId?: string;
 	tenantId?: string;
-	providerId?: string;
+	requestedProviderId?: string;
 };
 
 type ProviderServerLogEventBase = ProviderRequestCost & {
@@ -1035,6 +1041,7 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
 	connectionId?: string;
 	flowId?: string;
 	tenantId?: string;
+	requestedProviderId?: string;
 	status: number;
 	proxy?: ProxyTelemetryLogPayload;
 };
@@ -1634,7 +1641,7 @@ function logProviderError(
 	emit({
 		level: status >= 500 ? "error" : "warn",
 		event: "provider_request_failed",
-		providerId: correlation.providerId ?? provider.id,
+		providerId: provider.id,
 		kind,
 		route,
 		...(requestId ? { requestId } : {}),
@@ -1643,6 +1650,9 @@ function logProviderError(
 			: {}),
 		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
 		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
+		...(correlation.requestedProviderId !== undefined
+			? { requestedProviderId: correlation.requestedProviderId }
+			: {}),
 		status,
 		...cost,
 		...(proxy ? { proxy } : {}),
@@ -1707,7 +1717,7 @@ function logProviderSuccess(
 	emit({
 		level: "info",
 		event: "provider_request_completed",
-		providerId: correlation.providerId ?? provider.id,
+		providerId: provider.id,
 		kind,
 		route,
 		...(requestId ? { requestId } : {}),
@@ -1716,6 +1726,9 @@ function logProviderSuccess(
 			: {}),
 		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
 		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
+		...(correlation.requestedProviderId !== undefined
+			? { requestedProviderId: correlation.requestedProviderId }
+			: {}),
 		status,
 		...cost,
 		...(proxy ? { proxy } : {}),
@@ -1728,7 +1741,19 @@ type RequestScopeFinishResult = {
 };
 
 type RequestScope = RequestScopeContext & {
+	enrich(input: {
+		route?: string;
+		requestId?: string;
+		operationId?: string;
+		flowId?: string;
+		headers?: Record<string, string>;
+		correlation?: RequestCorrelationIds;
+	}): void;
 	run<T>(fn: () => Promise<T>): Promise<T>;
+	runStreaming<T>(fn: () => Promise<T>): Promise<T>;
+	runStreamStep<T>(fn: () => Promise<T>): Promise<T>;
+	snapshotHeaders(): RequestScopeFinishResult;
+	finishError(error: unknown): RequestScopeFinishResult;
 	finish(status: number, error?: unknown): RequestScopeFinishResult;
 };
 
@@ -1737,12 +1762,10 @@ function traceIdFromTraceparent(headers: Record<string, string>): string | undef
 		([name]) => name.toLowerCase() === "traceparent",
 	)?.[1];
 	if (!traceparent) return undefined;
-	const match = /^([0-9a-f]{2})-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/i.exec(
-		traceparent.trim(),
-	);
-	if (!match || match[1]?.toLowerCase() === "ff") return undefined;
-	const traceId = match[2]?.toLowerCase();
-	const parentId = match[3]?.toLowerCase();
+	const match = /^(00)-([0-9a-f]{32})-([0-9a-f]{16})-([0-9a-f]{2})$/.exec(traceparent);
+	if (!match) return undefined;
+	const traceId = match[2];
+	const parentId = match[3];
 	if (!traceId || !parentId || /^0+$/.test(traceId) || /^0+$/.test(parentId)) return undefined;
 	return traceId;
 }
@@ -1774,30 +1797,108 @@ function createRequestScope(input: {
 }): RequestScope {
 	const requestCost = startRequestCost();
 	const traceConfig = resolveTraceConfigFromEnv();
-	const traceAttributes = {
-		...(input.requestId ? { request_id: input.requestId } : {}),
-		provider_id: input.provider.id,
-		...(input.kind === "operation" && input.operationId ? { operation_id: input.operationId } : {}),
-		...(input.kind === "auth" && input.flowId ? { flow_id: input.flowId } : {}),
-		route: input.route,
-	};
-	const traceId = requestTraceId(input.headers, input.requestId);
-	const trace = traceConfig
-		? createTraceContext({
-				...resolveServerTraceContextOptions(traceConfig, traceAttributes),
-				...(traceId ? { traceId } : {}),
-			})
-		: createTraceContext();
 	const proxyTelemetry = new ProxyTelemetryCollector();
-	const correlation = input.correlation ?? {};
+	const details = {
+		route: input.route,
+		requestId: input.requestId,
+		operationId: input.operationId,
+		flowId: input.flowId,
+		headers: input.headers,
+		correlation: { ...(input.correlation ?? {}) },
+	};
+	let trace: RuntimeTraceContext | undefined;
+	let rootStarted = false;
+	let streamRunner: (<T>(fn: () => Promise<T>) => Promise<T>) | undefined;
+	let streamAwaitingTerminal = false;
+	let resolveStreamTerminal: (() => void) | undefined;
+	let rejectStreamTerminal: ((error: unknown) => void) | undefined;
+	let finishedResult: RequestScopeFinishResult | undefined;
 
-	return {
-		trace,
+	const ensureTrace = (): RuntimeTraceContext => {
+		if (trace) return trace;
+		const traceAttributes = {
+			...(details.requestId ? { request_id: details.requestId } : {}),
+			provider_id: input.provider.id,
+			...(input.kind === "operation" && details.operationId
+				? { operation_id: details.operationId }
+				: {}),
+			...(input.kind === "auth" && details.flowId ? { flow_id: details.flowId } : {}),
+			route: details.route,
+		};
+		const traceId = requestTraceId(details.headers, details.requestId);
+		trace = traceConfig
+			? createTraceContext({
+					...resolveServerTraceContextOptions(traceConfig, traceAttributes),
+					...(traceId ? { traceId } : {}),
+				})
+			: createTraceContext();
+		return trace;
+	};
+	const rootName = () => `request:${input.kind}:${details.route}`;
+	const headerSnapshot = (): RequestScopeFinishResult => {
+		const providerTelemetryHeader = proxyTelemetry.toHeaderValue();
+		return providerTelemetryHeader ? { providerTelemetryHeader } : {};
+	};
+
+	const scope: RequestScope = {
+		get trace() {
+			return ensureTrace();
+		},
 		proxyTelemetry,
+		enrich(enrichment): void {
+			if (enrichment.route !== undefined) details.route = enrichment.route;
+			if (enrichment.requestId !== undefined) details.requestId = enrichment.requestId;
+			if (enrichment.operationId !== undefined) details.operationId = enrichment.operationId;
+			if (enrichment.flowId !== undefined) details.flowId = enrichment.flowId;
+			if (enrichment.headers !== undefined) details.headers = enrichment.headers;
+			if (enrichment.correlation !== undefined) {
+				Object.assign(details.correlation, enrichment.correlation);
+			}
+		},
 		run<T>(fn: () => Promise<T>): Promise<T> {
-			return trace.span(`request:${input.kind}:${input.route}`, fn);
+			rootStarted = true;
+			return ensureTrace().span(rootName(), fn);
+		},
+		runStreaming<T>(fn: () => Promise<T>): Promise<T> {
+			rootStarted = true;
+			let resolveReady!: (value: T) => void;
+			let rejectReady!: (error: unknown) => void;
+			const ready = new Promise<T>((resolve, reject) => {
+				resolveReady = resolve;
+				rejectReady = reject;
+			});
+			const terminal = new Promise<void>((resolve, reject) => {
+				resolveStreamTerminal = resolve;
+				rejectStreamTerminal = reject;
+			});
+			const root = ensureTrace().span(rootName(), async () => {
+				streamRunner = AsyncLocalStorage.snapshot();
+				try {
+					const value = await fn();
+					streamAwaitingTerminal = true;
+					resolveReady(value);
+					await terminal;
+				} catch (error) {
+					if (!streamAwaitingTerminal) rejectReady(error);
+					throw error;
+				}
+			});
+			void root.catch(() => undefined);
+			return ready;
+		},
+		runStreamStep<T>(fn: () => Promise<T>): Promise<T> {
+			return streamRunner ? streamRunner(fn) : fn();
+		},
+		snapshotHeaders(): RequestScopeFinishResult {
+			return headerSnapshot();
+		},
+		finishError(error: unknown): RequestScopeFinishResult {
+			const declaredErrorCode = input.declaredErrorCode?.(error);
+			return scope.finish(toStatusCode(error, declaredErrorCode), error);
 		},
 		finish(status: number, error?: unknown): RequestScopeFinishResult {
+			if (finishedResult) return finishedResult;
+			finishedResult = {};
 			const cost = finishRequestCost(requestCost);
 			let errorObservability: ErrorObservabilityDetails | undefined;
 			if (error === undefined) {
@@ -1805,12 +1906,12 @@ function createRequestScope(input: {
 					input.logger,
 					input.provider,
 					input.kind,
-					input.route,
-					input.requestId,
+					details.route,
+					details.requestId,
 					status,
 					cost,
 					proxyTelemetry,
-					correlation,
+					details.correlation,
 				);
 			} else {
 				const declaredErrorCode = input.declaredErrorCode?.(error);
@@ -1819,15 +1920,15 @@ function createRequestScope(input: {
 					input.logger,
 					input.provider,
 					input.kind,
-					input.route,
-					input.requestId,
+					details.route,
+					details.requestId,
 					error,
 					status,
 					cost,
 					declaredErrorCode,
 					proxyTelemetry,
 					errorObservability,
-					correlation,
+					details.correlation,
 				);
 			}
 
@@ -1838,12 +1939,25 @@ function createRequestScope(input: {
 			if (errorObservability) {
 				input.setHeader?.(ERROR_OBSERVABILITY_HEADER, JSON.stringify(errorObservability));
 			}
-			return {
+			finishedResult = {
 				...(providerTelemetryHeader ? { providerTelemetryHeader } : {}),
 				...(errorObservability ? { errorObservability } : {}),
 			};
+			if (!rootStarted) {
+				rootStarted = true;
+				const root = ensureTrace().span(rootName(), async () => {
+					if (error !== undefined) throw error;
+				});
+				void root.catch(() => undefined);
+			} else if (streamAwaitingTerminal) {
+				streamAwaitingTerminal = false;
+				if (error === undefined) resolveStreamTerminal?.();
+				else rejectStreamTerminal?.(error);
+			}
+			return finishedResult;
 		},
 	};
+	return scope;
 }
 
 function responseWithRequestScopeHeaders(
@@ -1904,41 +2018,40 @@ function isAsyncIterable<T = unknown>(value: unknown): value is AsyncIterable<T>
 	return typeof iterator === "function";
 }
 
-function responseWithCleanup(response: Response, cleanup: RequestCleanup): Response {
+function responseWithCleanup(response: Response, lifecycle: RequestStreamLifecycle): Response {
 	if (!response.body) {
-		void cleanup();
+		void lifecycle.complete(response.status);
 		return response;
 	}
 	const reader = response.body.getReader();
-	let cleaned = false;
-	const runCleanup = async () => {
-		if (cleaned) return;
-		cleaned = true;
-		await cleanup();
-	};
-	const body = new ReadableStream<Uint8Array>({
-		async pull(controller) {
-			try {
-				const { done, value } = await reader.read();
-				if (done) {
-					controller.close();
-					await runCleanup();
-					return;
+	const body = new ReadableStream<Uint8Array>(
+		{
+			async pull(controller) {
+				try {
+					const { done, value } = await lifecycle.runStep(() => reader.read());
+					if (done) {
+						controller.close();
+						await lifecycle.complete(response.status);
+						return;
+					}
+					if (value) controller.enqueue(value);
+				} catch (error) {
+					await lifecycle.fail(error);
+					controller.error(error);
 				}
-				if (value) controller.enqueue(value);
-			} catch (error) {
-				await runCleanup();
-				controller.error(error);
-			}
+			},
+			async cancel(reason) {
+				try {
+					await lifecycle.runStep(() => reader.cancel(reason));
+					await lifecycle.cancel(response.status);
+				} catch (error) {
+					await lifecycle.fail(error);
+					throw error;
+				}
+			},
 		},
-		async cancel(reason) {
-			try {
-				await reader.cancel(reason);
-			} finally {
-				await runCleanup();
-			}
-		},
-	});
+		{ highWaterMark: 0 },
+	);
 	return new Response(body, {
 		headers: response.headers,
 		status: response.status,
@@ -2000,63 +2113,71 @@ function assertStreamPayloadWithinLimit(
 function toSseResponse(
 	operation: OperationDefinition,
 	result: AsyncIterable<ProviderStreamEvent>,
-	cleanup: RequestCleanup,
+	lifecycle: RequestStreamLifecycle,
 	requestId?: string,
 ): Response {
 	const encoder = new TextEncoder();
 	const iterator = result[Symbol.asyncIterator]();
 	const transport = getSseTransport(operation);
 	let done = false;
-	let cleaned = false;
-	const runCleanup = async () => {
-		if (cleaned) return;
-		cleaned = true;
-		await cleanup();
-	};
-	const body = new ReadableStream<Uint8Array>({
-		async pull(controller) {
-			try {
-				if (done) {
-					controller.close();
-					await runCleanup();
-					return;
-				}
-				const next = await iterator.next();
-				if (next.done) {
-					done = true;
-					controller.close();
-					await runCleanup();
-					return;
-				}
-				const validated = await validateSseEvent(operation, next.value);
-				const encodedEvent = encodeSseEvent(validated);
-				const encodedBytes = encoder.encode(encodedEvent);
-				assertStreamPayloadWithinLimit(encodedBytes.byteLength, transport?.maxEventBytes, "event");
-				controller.enqueue(encodedBytes);
-			} catch (error) {
-				const message = error instanceof Error ? error.message : "Stream failed";
-				controller.enqueue(
-					encoder.encode(
-						encodeSseEvent(
-							streamError("stream_error", message, {
-								...(requestId ? { requestId } : {}),
-							}),
+	const body = new ReadableStream<Uint8Array>(
+		{
+			async pull(controller) {
+				try {
+					if (done) {
+						controller.close();
+						await lifecycle.complete(200);
+						return;
+					}
+					const next = await lifecycle.runStep(() => iterator.next());
+					if (next.done) {
+						done = true;
+						controller.close();
+						await lifecycle.complete(200);
+						return;
+					}
+					const encodedBytes = await lifecycle.runStep(async () => {
+						const validated = await validateSseEvent(operation, next.value);
+						const encodedEvent = encodeSseEvent(validated);
+						const bytes = encoder.encode(encodedEvent);
+						assertStreamPayloadWithinLimit(
+							bytes.byteLength,
+							transport?.maxEventBytes,
+							"event",
+						);
+						return bytes;
+					});
+					controller.enqueue(encodedBytes);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : "Stream failed";
+					controller.enqueue(
+						encoder.encode(
+							encodeSseEvent(
+								streamError("stream_error", message, {
+									...(requestId ? { requestId } : {}),
+								}),
+							),
 						),
-					),
-				);
-				controller.close();
-				done = true;
-				await runCleanup();
-			}
+					);
+					controller.close();
+					done = true;
+					await lifecycle.fail(error);
+				}
+			},
+			async cancel(reason) {
+				try {
+					await lifecycle.runStep(async () => {
+						await iterator.return?.(reason);
+					});
+					await lifecycle.cancel(200);
+				} catch (error) {
+					await lifecycle.fail(error);
+					throw error;
+				}
+			},
 		},
-		async cancel(reason) {
-			try {
-				await iterator.return?.(reason);
-			} finally {
-				await runCleanup();
-			}
-		},
-	});
+		{ highWaterMark: 0 },
+	);
 	return new Response(body, {
 		headers: {
 			"Cache-Control": "no-cache, no-transform",
@@ -2097,12 +2218,11 @@ function enforceStreamChunkLimit(
 function toStreamingResponse(
 	operation: OperationDefinition,
 	result: unknown,
-	cleanup: RequestCleanup,
+	lifecycle: RequestStreamLifecycle,
 	requestId?: string,
 ): Response {
 	const transport = operation.transport?.kind ?? "json";
 	if (transport === "sse" && (result instanceof Response || result instanceof ReadableStream)) {
-		void cleanup();
 		throw new ProviderError(
 			"SSE operations must return an AsyncIterable of typed stream.event(...) values.",
 			{
@@ -2122,10 +2242,10 @@ function toStreamingResponse(
 					status: result.status,
 					statusText: result.statusText,
 				}),
-				cleanup,
+				lifecycle,
 			);
 		}
-		return responseWithCleanup(result, cleanup);
+		return responseWithCleanup(result, lifecycle);
 	}
 	if (result instanceof ReadableStream) {
 		const httpTransport = getHttpStreamTransport(operation);
@@ -2145,13 +2265,12 @@ function toStreamingResponse(
 										: "application/octet-stream",
 							},
 			}),
-			cleanup,
+			lifecycle,
 		);
 	}
 	if (transport === "sse" && isAsyncIterable<ProviderStreamEvent>(result)) {
-		return toSseResponse(operation, result, cleanup, requestId);
+		return toSseResponse(operation, result, lifecycle, requestId);
 	}
-	void cleanup();
 	throw new ProviderError(
 		`Streaming operation returned unsupported result for transport "${transport}"`,
 		{
@@ -2301,22 +2420,37 @@ async function handleOperation(
 			}
 		}
 	};
+	const streamLifecycle: RequestStreamLifecycle = {
+		runStep<T>(fn: () => Promise<T>): Promise<T> {
+			return scope.runStreamStep(fn);
+		},
+		async complete(status): Promise<void> {
+			await scope.runStreamStep(cleanup);
+			scope.finish(status);
+		},
+		async fail(error): Promise<void> {
+			await scope.runStreamStep(cleanup);
+			scope.finishError(error);
+		},
+		async cancel(status): Promise<void> {
+			await scope.runStreamStep(cleanup);
+			scope.finish(status);
+		},
+	};
 	try {
-		const result = await scope.run(() =>
-			options.operationExecutor
-				? options.operationExecutor({
-						provider,
-						operationId,
-						ctx,
-						request,
-						signal,
-					})
-				: executeOperation(provider, operationId, ctx, request.input, {
-						env: createEnvContext(providerSecretNames(provider)),
-					}),
-		);
+		const result = options.operationExecutor
+			? await options.operationExecutor({
+					provider,
+					operationId,
+					ctx,
+					request,
+					signal,
+				})
+			: await executeOperation(provider, operationId, ctx, request.input, {
+					env: createEnvContext(providerSecretNames(provider)),
+				});
 		if (streaming && operation) {
-			return toStreamingResponse(operation, result, cleanup, request.requestId);
+			return toStreamingResponse(operation, result, streamLifecycle, request.requestId);
 		}
 		return toJsonSuccessResponse(result, ctx);
 	} catch (error) {
@@ -2643,9 +2777,16 @@ function createServerAppWithCapabilityModules(
 		let rawBodyText = "";
 		let rawBody: unknown;
 		let operationId: string | undefined;
-		let requestScope: RequestScope | undefined;
 		const operation = "stateful-internal";
-		const requestCost = startRequestCost();
+		const requestScope = createRequestScope({
+			provider,
+			kind: "operation",
+			route: operation,
+			headers: Object.fromEntries(c.req.raw.headers.entries()),
+			logger,
+			setHeader: (name, value) => c.header(name, value),
+			declaredErrorCode: (error) => declaredErrorCodeFor(error, operationId, operationErrorCodes),
+		});
 		try {
 			if (!options.internalOperationExecutor) {
 				throw new ProviderError("Stateful internal operation executor is not configured.", {
@@ -2755,19 +2896,14 @@ function createServerAppWithCapabilityModules(
 			}
 			const request = operationRequestFromForwardingEnvelope(envelope);
 			operationId = envelope.operationId;
-			requestScope = createRequestScope({
-				provider,
-				kind: "operation",
+			requestScope.enrich({
 				route: operationId,
 				requestId: request.requestId,
 				operationId,
 				headers: request.headers ?? {},
 				correlation: { connectionId: envelope.connectionId },
-				logger,
-				setHeader: (name, value) => c.header(name, value),
-				declaredErrorCode: (error) => declaredErrorCodeFor(error, operationId, operationErrorCodes),
 			});
-			const output = await requestScope.run(async () => {
+			const response = await requestScope.run(async () => {
 				const ctx = createProviderContext(
 					provider,
 					request,
@@ -2780,7 +2916,7 @@ function createServerAppWithCapabilityModules(
 				if (deadlineAtMs !== undefined && deadlineAtMs <= Date.now()) {
 					throw new StatefulRoutingDeadlineError(envelope.requestId, envelope.deadlineAt as string);
 				}
-				return options.internalOperationExecutor!({
+				const output = await options.internalOperationExecutor!({
 					provider,
 					operationId: operationId as string,
 					ctx,
@@ -2788,9 +2924,10 @@ function createServerAppWithCapabilityModules(
 					internalStatefulForward: envelope,
 					signal,
 				});
+				return c.json({ data: output });
 			});
 			const finished = requestScope.finish(200);
-			return responseWithRequestScopeHeaders(c.json({ data: output }), finished);
+			return responseWithRequestScopeHeaders(response, finished);
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operationId, operationErrorCodes);
 			const status = toStatusCode(error, declaredErrorCode);
@@ -2801,41 +2938,30 @@ function createServerAppWithCapabilityModules(
 				c.header("Retry-After", String(STATEFUL_FORWARDING_REPLAY_RETRY_AFTER_SECONDS));
 			}
 			const requestId = extractRequestId(rawBody);
-			const finished = requestScope?.finish(status, error);
-			const observabilityDetails =
-				finished?.errorObservability ?? errorObservabilityDetails(error, declaredErrorCode);
-			if (!requestScope) {
-				logProviderError(
-					logger,
-					provider,
-					"operation",
-					operationId || operation,
-					requestId,
-					error,
-					status,
-					finishRequestCost(requestCost),
-					declaredErrorCode,
-					undefined,
-					observabilityDetails,
-				);
-			}
-			return finished
-				? responseWithRequestScopeHeaders(
-						c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-						finished,
-					)
-				: responseWithErrorObservability(
-						c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-						observabilityDetails,
-					);
+			requestScope.enrich({
+				...(operationId ? { route: operationId, operationId } : {}),
+				...(requestId ? { requestId } : {}),
+			});
+			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
+			const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
+			const finished = requestScope.finish(status, error);
+			return responseWithRequestScopeHeaders(response, finished);
 		}
 	});
 
 	app.post("/v1/:operation", async (c) => {
 		let rawBody: unknown;
-		let requestScope: RequestScope | undefined;
 		const operation = c.req.param("operation");
-		const requestCost = startRequestCost();
+		const requestScope = createRequestScope({
+			provider,
+			kind: "operation",
+			route: operation,
+			operationId: operation,
+			headers: Object.fromEntries(c.req.raw.headers.entries()),
+			logger,
+			setHeader: (name, value) => c.header(name, value),
+			declaredErrorCode: (error) => declaredErrorCodeFor(error, operation, operationErrorCodes),
+		});
 		try {
 			rawBody = await c.req.raw
 				.clone()
@@ -2844,59 +2970,44 @@ function createServerAppWithCapabilityModules(
 			const body = OperationRequestSchema.parse(rawBody);
 			const requestHeaders = Object.fromEntries(c.req.raw.headers.entries());
 			body.headers = { ...requestHeaders, ...body.headers };
-			requestScope = createRequestScope({
-				provider,
-				kind: "operation",
-				route: operation,
+			requestScope.enrich({
 				requestId: body.requestId,
-				operationId: operation,
 				headers: body.headers,
 				correlation: { connectionId: resolveOperationConnectionId(body) },
-				logger,
-				setHeader: (name, value) => c.header(name, value),
-				declaredErrorCode: (error) => declaredErrorCodeFor(error, operation, operationErrorCodes),
 			});
-			const response = await handleOperation(
-				provider,
-				body,
-				operation,
-				options,
-				state,
-				requestScope,
-				c.req.raw.signal,
-			);
-			const status = response instanceof Response ? response.status : 200;
-			const finished = requestScope.finish(status);
-			return responseWithRequestScopeHeaders(
-				response instanceof Response ? response : c.json(response),
-				finished,
-			);
+			const streaming = provider.operations[operation]?.transport?.kind
+				? provider.operations[operation]?.transport?.kind !== "json"
+				: false;
+			const execute = async () => {
+				const handled = await handleOperation(
+					provider,
+					body,
+					operation,
+					options,
+					state,
+					requestScope,
+					c.req.raw.signal,
+				);
+				const response = handled instanceof Response ? handled : c.json(handled);
+				return streaming
+					? responseWithRequestScopeHeaders(response, requestScope.snapshotHeaders())
+					: response;
+			};
+			const response = streaming
+				? await requestScope.runStreaming(execute)
+				: await requestScope.run(execute);
+			if (streaming) return response;
+			const finished = requestScope.finish(response.status);
+			return responseWithRequestScopeHeaders(response, finished);
 		} catch (error) {
 			const declaredErrorCode = declaredErrorCodeFor(error, operation, operationErrorCodes);
 			const status = toStatusCode(error, declaredErrorCode);
 			const requestId = extractRequestId(rawBody);
-			const finished = requestScope?.finish(status, error);
-			const observabilityDetails =
-				finished?.errorObservability ?? errorObservabilityDetails(error, declaredErrorCode);
-			if (!requestScope) {
-				logProviderError(
-					logger,
-					provider,
-					"operation",
-					operation,
-					requestId,
-					error,
-					status,
-					finishRequestCost(requestCost),
-					declaredErrorCode,
-					undefined,
-					observabilityDetails,
-				);
-			}
-			return responseWithRequestScopeHeaders(
-				c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-				finished ?? { errorObservability: observabilityDetails },
-			);
+			requestScope.enrich({ ...(requestId ? { requestId } : {}) });
+			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
+			const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
+			const finished = requestScope.finish(status, error);
+			return responseWithRequestScopeHeaders(response, finished);
 		}
 	});
 
@@ -2915,8 +3026,14 @@ function createServerAppWithCapabilityModules(
 	for (const { path, flowRoute, logRoute } of authRoutes) {
 		app.post(path, async (c) => {
 			let rawBody: unknown;
-			let requestScope: RequestScope | undefined;
-			const requestCost = startRequestCost();
+			const requestScope = createRequestScope({
+				provider,
+				kind: "auth",
+				route: logRoute,
+				headers: Object.fromEntries(c.req.raw.headers.entries()),
+				logger,
+				setHeader: (name, value) => c.header(name, value),
+			});
 			try {
 				rawBody = await c.req.raw
 					.clone()
@@ -2926,10 +3043,7 @@ function createServerAppWithCapabilityModules(
 					AuthFlowRequestSchema.parse(rawBody),
 					c.req.raw.headers,
 				);
-				requestScope = createRequestScope({
-					provider,
-					kind: "auth",
-					route: logRoute,
+				requestScope.enrich({
 					requestId: body.requestId,
 					flowId: body.flowId,
 					headers: body.headers ?? {},
@@ -2937,13 +3051,14 @@ function createServerAppWithCapabilityModules(
 						connectionId: resolveOperationConnectionId(body),
 						flowId: body.flowId,
 						tenantId: body.tenantId,
-						providerId: body.providerId,
+						requestedProviderId:
+							body.providerId !== undefined && body.providerId !== provider.id
+								? body.providerId
+								: undefined,
 					},
-					logger,
-					setHeader: (name, value) => c.header(name, value),
 				});
-				const response = await requestScope.run(() =>
-					handleAuthFlow(
+				const response = await requestScope.run(async () => {
+					const handled = await handleAuthFlow(
 						provider,
 						body,
 						flowRoute,
@@ -2951,38 +3066,21 @@ function createServerAppWithCapabilityModules(
 						state,
 						requestScope as RequestScope,
 						c.req.raw.signal,
-					),
-				);
-				const status = response instanceof Response ? response.status : 200;
-				const finished = requestScope.finish(status);
-				return responseWithRequestScopeHeaders(
-					response instanceof Response ? response : c.json(response),
-					finished,
-				);
+					);
+					return handled instanceof Response ? handled : c.json(handled);
+				});
+				const finished = requestScope.finish(response.status);
+				return responseWithRequestScopeHeaders(response, finished);
 			} catch (error) {
 				const status = toStatusCode(error);
 				const requestId = extractRequestId(rawBody);
-				const finished = requestScope?.finish(status, error);
-				const observabilityDetails =
-					finished?.errorObservability ?? errorObservabilityDetails(error);
-				if (!requestScope) {
-					logProviderError(
-						logger,
-						provider,
-						"auth",
-						logRoute,
-						requestId,
-						error,
-						status,
-						finishRequestCost(requestCost),
-						undefined,
-						undefined,
-						observabilityDetails,
-					);
-				}
+				requestScope.enrich({ ...(requestId ? { requestId } : {}) });
+				const observabilityDetails = errorObservabilityDetails(error);
+				const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
+				const finished = requestScope.finish(status, error);
 				return responseWithRequestScopeHeaders(
-					c.json(toErrorResponse(error, requestId, observabilityDetails), status),
-					finished ?? { errorObservability: observabilityDetails },
+					response,
+					finished,
 				);
 			}
 		});

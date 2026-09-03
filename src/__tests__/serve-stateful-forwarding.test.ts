@@ -4,6 +4,10 @@ import { z } from "zod";
 import { clearProxyResolutionCache } from "../config/loader.js";
 import { ProviderError } from "../errors.js";
 import {
+	APIFUSE__TRACE__ENABLED,
+	APIFUSE__TRACE__EXPORTER,
+} from "../runtime/trace-config.js";
+import {
 	createServerApp,
 	type ProviderServerLogEvent,
 	type ProviderServerOperationExecutorInput,
@@ -427,26 +431,49 @@ describe("signed stateful operation forwarding", () => {
 	});
 
 	it("rejects an invalid signature without echoing secret material", async () => {
+		const previousEnabled = process.env[APIFUSE__TRACE__ENABLED];
+		const previousExporter = process.env[APIFUSE__TRACE__EXPORTER];
+		const traceOutput: string[] = [];
+		const events: ProviderServerLogEvent[] = [];
+		const originalLog = console.log;
+		let executions = 0;
+		process.env[APIFUSE__TRACE__ENABLED] = "true";
+		process.env[APIFUSE__TRACE__EXPORTER] = "json";
+		console.log = (...args: unknown[]) => traceOutput.push(args.map(String).join(" "));
 		const app = createServerApp(createTestProvider({ defaultExecutions: 0 }), {
-			logger: () => {},
+			logger: (event) => events.push(event),
 			statefulForwarding: forwardingConfig(),
-			internalOperationExecutor: async () => ({ accepted: true }),
+			internalOperationExecutor: async () => {
+				executions += 1;
+				return { accepted: true };
+			},
 		});
 		const timestamp = new Date().toISOString();
 		const body = forwardingBody({ forwardedAt: timestamp });
 
-		const response = await app.request(STATEFUL_ROUTE, {
-			method: "POST",
-			headers: {
-				"content-type": "application/json",
-				"x-apifuse-stateful-nonce": "invalid-signature-nonce",
-				"x-apifuse-stateful-source-pod": "pod-source",
-				[SIGNATURE_HEADER]: "v1=invalid",
-				[TIMESTAMP_HEADER]: timestamp,
-			},
-			body,
-		});
-		const responseText = await response.text();
+		let response!: Response;
+		let responseText!: string;
+		try {
+			response = await app.request(STATEFUL_ROUTE, {
+				method: "POST",
+				headers: {
+					"content-type": "application/json",
+					"x-apifuse-stateful-nonce": "invalid-signature-nonce",
+					"x-apifuse-stateful-source-pod": "pod-source",
+					[SIGNATURE_HEADER]: "v1=invalid",
+					[TIMESTAMP_HEADER]: timestamp,
+				},
+				body,
+			});
+			responseText = await response.text();
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		} finally {
+			console.log = originalLog;
+			if (previousEnabled === undefined) delete process.env[APIFUSE__TRACE__ENABLED];
+			else process.env[APIFUSE__TRACE__ENABLED] = previousEnabled;
+			if (previousExporter === undefined) delete process.env[APIFUSE__TRACE__EXPORTER];
+			else process.env[APIFUSE__TRACE__EXPORTER] = previousExporter;
+		}
 
 		expect(response.status).toBe(500);
 		expectStructuredError(
@@ -456,6 +483,15 @@ describe("signed stateful operation forwarding", () => {
 		);
 		expect(responseText).not.toContain(FORWARDING_SECRET);
 		expect(responseText).not.toContain("sensitive-envelope-material");
+		expect(executions).toBe(0);
+		expect(events.filter((event) => event.event === "provider_request_failed")).toHaveLength(1);
+		expect(events.filter((event) => event.event === "provider_request_completed")).toHaveLength(0);
+		expect(traceOutput.map((line) => JSON.parse(line))).toEqual([
+			expect.objectContaining({
+				name: "request:operation:stateful-internal",
+				status: "error",
+			}),
+		]);
 	});
 
 	it("rejects a signed timestamp outside the configured skew", async () => {

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import { z } from "zod";
 
@@ -23,8 +24,9 @@ import {
 	APIFUSE__TRACE__EXPORTER,
 	resolveTraceConfigFromEnv,
 } from "../runtime/trace-config.js";
-import { createServerApp } from "../server/serve.js";
+import { createServerApp, type ProviderServerLogEvent } from "../server/serve.js";
 import { resolveServerTraceContextOptions } from "../server/trace-output.js";
+import { event } from "../stream.js";
 import type { FlowContext, ResolverContext, TraceConfig } from "../types.js";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 
@@ -285,6 +287,52 @@ describe("server trace output wiring", () => {
 		expect(output).toEqual([]);
 	});
 
+	it("emits one failed request root for malformed bodies on every public execution route", async () => {
+		const output: string[] = [];
+		const events: ProviderServerLogEvent[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		const routes = [
+			["/v1/echo", "request:operation:echo"],
+			["/auth/start", "request:auth:start"],
+			["/auth/continue", "request:auth:continue"],
+			["/auth/poll", "request:auth:poll"],
+			["/auth/refresh", "request:auth:refresh"],
+			["/auth/disconnect", "request:auth:disconnect"],
+		] as const;
+
+		try {
+			await withTraceEnv(
+				{ [APIFUSE__TRACE__ENABLED]: "true", [APIFUSE__TRACE__EXPORTER]: "json" },
+				async () => {
+					const app = createServerApp(provider, { logger: (entry) => events.push(entry) });
+					for (const [route] of routes) {
+						const response = await app.request(route, {
+							method: "POST",
+							headers: { "content-type": "application/json" },
+							body: "{",
+						});
+						expect(response.status).toBe(400);
+					}
+					await waitUntil(() => output.length >= routes.length);
+				},
+			);
+		} finally {
+			console.log = originalLog;
+		}
+
+		const spans = output.map(
+			(line) => JSON.parse(line) as { name: string; status: string; parentId?: string },
+		);
+		for (const [, rootName] of routes) {
+			expect(spans.filter((span) => span.name === rootName)).toEqual([
+				expect.objectContaining({ status: "error" }),
+			]);
+		}
+		expect(events.filter((entry) => entry.event === "provider_request_failed")).toHaveLength(6);
+		expect(events.filter((entry) => entry.event === "provider_request_completed")).toHaveLength(0);
+	});
+
 	it("emits JSON spans for the json exporter", async () => {
 		const output: string[] = [];
 		const originalLog = console.log;
@@ -375,6 +423,60 @@ describe("server trace output wiring", () => {
 		expect(vendor?.parentId).toBe(solve?.id);
 	});
 
+	it("parents a thrown auth-flow span under one failed request root", async () => {
+		const output: string[] = [];
+		const events: ProviderServerLogEvent[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		const throwingProvider = createProviderDefinitionDouble({
+			auth: {
+				mode: "credentials",
+				flow: {
+					start: async () => ({ kind: "form", turnId: "start" }),
+					continue: async (ctx) =>
+						ctx.trace.span("auth.flow.throw", async () => {
+							throw new Error("auth flow failed");
+						}),
+				},
+			},
+			operations: provider.operations,
+		});
+
+		try {
+			await withTraceEnv(
+				{ [APIFUSE__TRACE__ENABLED]: "true", [APIFUSE__TRACE__EXPORTER]: "json" },
+				async () => {
+					const response = await createServerApp(throwingProvider, {
+						allowMemoryStateFallback: true,
+						logger: (entry) => events.push(entry),
+					}).request("/auth/continue", {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({
+							requestId: "auth-flow-throw",
+							flowId: "flow-throw",
+							input: {},
+						}),
+					});
+					expect(response.status).toBe(500);
+					await waitUntil(() => output.some((line) => line.includes("request:auth:continue")));
+				},
+			);
+		} finally {
+			console.log = originalLog;
+		}
+
+		const spans = output.map(
+			(line) => JSON.parse(line) as { id: string; name: string; parentId?: string; status: string },
+		);
+		const root = spans.find((span) => span.name === "request:auth:continue");
+		const thrown = spans.find((span) => span.name === "auth.flow.throw");
+		expect(root).toMatchObject({ status: "error" });
+		expect(thrown).toMatchObject({ status: "error", parentId: root?.id });
+		expect(events.filter((entry) => entry.event === "provider_request_failed")).toHaveLength(1);
+		expect(events.filter((entry) => entry.event === "provider_request_completed")).toHaveLength(0);
+	});
+
 	it("emits HTTP and state spans under one request root on every auth route", async () => {
 		const output: string[] = [];
 		const originalLog = console.log;
@@ -398,6 +500,8 @@ describe("server trace output wiring", () => {
 							body: JSON.stringify({
 								requestId: `auth-route-${route}`,
 								flowId: `flow-${route}`,
+								connectionId: `connection-${route}`,
+								tenantId: `tenant-${route}`,
 								input: {},
 							}),
 						});
@@ -431,7 +535,70 @@ describe("server trace output wiring", () => {
 				expect(span).toBeDefined();
 				expect(span?.parentId).toBe(root?.id);
 			}
+			for (const span of requestSpans) {
+				expect(span.attributes).not.toHaveProperty("connection_id");
+				expect(span.attributes).not.toHaveProperty("tenant_id");
+			}
 		}
+	});
+
+	it("keeps an SSE child under the request root and logs a mid-stream failure once", async () => {
+		const output: string[] = [];
+		const events: ProviderServerLogEvent[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		const streamingProvider = createProviderDefinitionDouble({
+			operations: {
+				tracedEvents: {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ ok: z.boolean() }),
+					transport: {
+						kind: "sse",
+						events: { delta: z.object({ value: z.string() }) },
+					},
+					async *handler(ctx) {
+						yield await ctx.trace.span("stream.child", async () =>
+							event("delta", { value: "first" }),
+						);
+						throw new Error("stream failed after first event");
+					},
+				},
+			},
+		});
+
+		try {
+			await withTraceEnv(
+				{ [APIFUSE__TRACE__ENABLED]: "true", [APIFUSE__TRACE__EXPORTER]: "json" },
+				async () => {
+					const response = await createServerApp(streamingProvider, {
+						logger: (entry) => events.push(entry),
+					}).request("/v1/tracedEvents", {
+						method: "POST",
+						headers: { "content-type": "application/json" },
+						body: JSON.stringify({ requestId: "stream-trace", input: {} }),
+					});
+					expect(response.status).toBe(200);
+					expect(events).toEqual([]);
+					const body = await response.text();
+					expect(body).toContain("event: delta");
+					expect(body).toContain("event: apifuse.error");
+					await waitUntil(() => output.some((line) => line.includes("request:operation:tracedEvents")));
+				},
+			);
+		} finally {
+			console.log = originalLog;
+		}
+
+		const spans = output.map(
+			(line) => JSON.parse(line) as { id: string; name: string; parentId?: string; status: string },
+		);
+		const root = spans.find((span) => span.name === "request:operation:tracedEvents");
+		const child = spans.find((span) => span.name === "stream.child");
+		expect(root).toMatchObject({ status: "error" });
+		expect(child).toMatchObject({ status: "ok", parentId: root?.id });
+		expect(events.filter((entry) => entry.event === "provider_request_failed")).toHaveLength(1);
+		expect(events.filter((entry) => entry.event === "provider_request_completed")).toHaveLength(0);
 	});
 
 	it("emits JSON spans with names and durations for the console exporter", async () => {
@@ -1030,6 +1197,42 @@ describe("server OTLP trace output wiring", () => {
 			const body = JSON.parse(String(capture.exports[0]?.init?.body)) as OTLPBody;
 			const spans = body.resourceSpans[0]?.scopeSpans[0]?.spans ?? [];
 			expect(new Set(spans.map((span) => span.traceId))).toEqual(new Set([inboundTraceId]));
+		} finally {
+			capture.restore();
+		}
+	});
+
+	it.each([
+		["uppercase", "00-0123456789ABCDEF0123456789ABCDEF-0123456789abcdef-01"],
+		["surrounding whitespace", " 00-0123456789abcdef0123456789abcdef-0123456789abcdef-01 "],
+		["wrong trace-id length", "00-0123456789abcdef0123456789abcde-0123456789abcdef-01"],
+		["ff version", "ff-0123456789abcdef0123456789abcdef-0123456789abcdef-01"],
+		["all-zero trace id", "00-00000000000000000000000000000000-0123456789abcdef-01"],
+		["all-zero parent id", "00-0123456789abcdef0123456789abcdef-0000000000000000-01"],
+	])("falls back to the request-id trace seed for invalid traceparent: %s", async (label, traceparent) => {
+		const capture = captureExports();
+		const requestId = `invalid-traceparent-${label}`;
+		try {
+			await withTraceEnv(
+				{
+					[APIFUSE__TRACE__ENABLED]: "true",
+					[APIFUSE__TRACE__EXPORTER]: "otlp",
+					[OTEL_EXPORTER_OTLP_TRACES_ENDPOINT]: "http://collector.test/v1/traces",
+				},
+				async () => {
+					const response = await invokeEcho({
+						requestId,
+						bodyHeaders: { traceparent },
+					});
+					expect(response.status).toBe(200);
+					await settleExports(capture.exports, 1);
+				},
+			);
+
+			const body = JSON.parse(String(capture.exports[0]?.init?.body)) as OTLPBody;
+			const spans = body.resourceSpans[0]?.scopeSpans[0]?.spans ?? [];
+			const expectedTraceId = createHash("sha256").update(requestId).digest("hex").slice(0, 32);
+			expect(new Set(spans.map((span) => span.traceId))).toEqual(new Set([expectedTraceId]));
 		} finally {
 			capture.restore();
 		}

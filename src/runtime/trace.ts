@@ -150,6 +150,12 @@ export function getTraceRecorder(trace: BaseTraceContext): TraceRecorder | null 
 }
 
 export function createTraceContext(options: CreateTraceContextOptions = {}): TraceContext {
+	if (
+		options.traceId !== undefined &&
+		(!/^[0-9a-f]{32}$/.test(options.traceId) || /^0{32}$/.test(options.traceId))
+	) {
+		throw new TypeError("traceId must be 32 lowercase hexadecimal characters and non-zero");
+	}
 	const maxSpans = options.maxSpans ?? 1000;
 	const completed: CompletedSpanEntry[] = [];
 	const activeSpanStorage = new AsyncLocalStorage<PendingSpan | undefined>();

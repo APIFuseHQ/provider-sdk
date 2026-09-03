@@ -1539,7 +1539,7 @@ describe("provider HTTP server", () => {
 				flowId: "flow_auth_correlation",
 				connectionId: "af_con_auth_correlation",
 				tenantId: "tenant_auth_correlation",
-				providerId: "test-provider",
+				providerId: "gateway-selected-provider",
 				context: {},
 			}),
 		});
@@ -1553,8 +1553,28 @@ describe("provider HTTP server", () => {
 				flowId: "flow_auth_correlation",
 				tenantId: "tenant_auth_correlation",
 				providerId: "test-provider",
+				requestedProviderId: "gateway-selected-provider",
 			}),
 		);
+
+		const matchingResponse = await appWithLogger.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req_auth_matching_provider",
+				flowId: "flow_auth_matching_provider",
+				providerId: "test-provider",
+				context: {},
+			}),
+		});
+		expect(matchingResponse.status).toBe(200);
+		const matchingEvent = events.find(
+			(event) =>
+				event.event === "provider_request_completed" &&
+				event.requestId === "req_auth_matching_provider",
+		);
+		expect(matchingEvent).toBeDefined();
+		expect(matchingEvent).not.toHaveProperty("requestedProviderId");
 	});
 
 	it("dispatches auth disconnect through the standard endpoint", async () => {
@@ -2454,6 +2474,23 @@ describe("provider HTTP server", () => {
 				retryable: header.retryable,
 			}),
 		]);
+	});
+
+	it("logs exactly one failure when success response serialization throws", async () => {
+		const events: ProviderServerLogEvent[] = [];
+		const appWithUnserializableResult = createServerApp(createTestProvider(), {
+			logger: (event) => events.push(event),
+			operationExecutor: async () => 1n,
+		});
+		const response = await appWithUnserializableResult.request("/v1/echo", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req_bigint", input: { value: "hello" } }),
+		});
+
+		expect(response.status).toBe(500);
+		expect(events.filter((event) => event.event === "provider_request_failed")).toHaveLength(1);
+		expect(events.filter((event) => event.event === "provider_request_completed")).toHaveLength(0);
 	});
 
 	function createCauseErrorApp(

@@ -3159,6 +3159,7 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
     connectionId?: string;
     flowId?: string;
     tenantId?: string;
+    requestedProviderId?: string;
     status: number;
     proxy?: ProxyTelemetryLogPayload;
 };
@@ -4627,8 +4628,8 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/runtime/proxy-telemetry.d.ts:27:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:38:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:13:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:148:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:160:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:149:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:161:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:127:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:527:5 - (ae-forgotten-export) The symbol "HealthJourneyRunContext" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:527:5 - (ae-forgotten-export) The symbol "HealthJourneyRunResult" needs to be exported by the entry point index.d.ts
