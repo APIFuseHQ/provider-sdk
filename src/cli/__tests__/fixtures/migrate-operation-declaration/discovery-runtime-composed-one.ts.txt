@@ -1,0 +1,6 @@
+export const firstOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	input: FirstInputSchema,
+	output: FirstOutputSchema,
+	handler: firstHandler,
+});

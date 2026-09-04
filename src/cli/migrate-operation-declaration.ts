@@ -141,6 +141,8 @@ type RepositoryMigrationContext = {
 	readonly operationSites?: ReadonlyMap<number, string>;
 	readonly excludedBindings?: ReadonlySet<string>;
 	readonly staticObjectResolver?: StaticObjectResolver;
+	readonly runtimeComposedInitializers?: ReadonlySet<number>;
+	readonly recordDiscoveredSites?: (count: number) => void;
 };
 
 type OperationSite = {
@@ -194,7 +196,9 @@ function migrateOperationDeclarationInternal(
 		options.operationIds,
 		context.operationSites,
 		context.excludedBindings,
+		context.runtimeComposedInitializers,
 	);
+	context.recordDiscoveredSites?.(discovery.discoveredCount);
 	if (discovery.refusals.length > 0) {
 		return { status: "refused", refusals: discovery.refusals };
 	}
@@ -1047,18 +1051,27 @@ function discoverOperationSites(
 	operationIds: ReadonlyMap<string, string> | undefined,
 	operationSites: ReadonlyMap<number, string> | undefined,
 	excludedBindings: ReadonlySet<string> | undefined,
+	runtimeComposedInitializers: ReadonlySet<number> | undefined,
 ): {
 	readonly sites: OperationSite[];
+	readonly discoveredCount: number;
 	readonly refusals: OperationDeclarationRefusal[];
 } {
 	const sitesByStart = new Map<number, OperationSite>();
+	const discoveredStarts = new Set<number>();
 	const localIds = new Map(operationIds ?? []);
 	const localExcludedBindings = new Set(excludedBindings ?? []);
 	const refusals: OperationDeclarationRefusal[] = [];
 	const operationFactories = collectSimpleOperationFactories(source);
 	const factoryCallIds = new Map<string, Set<string>>();
 
-	for (const map of collectOperationsMaps(source, constObjects, fileName, refusals)) {
+	for (const map of collectOperationsMaps(
+		source,
+		constObjects,
+		fileName,
+		refusals,
+		runtimeComposedInitializers,
+	)) {
 		for (const property of map.properties) {
 			if (ts.isSpreadAssignment(property)) continue;
 			const key = staticPropertyName(property.name);
@@ -1145,12 +1158,15 @@ function discoverOperationSites(
 		if (ts.isCallExpression(node) && isOperationHelperCall(node)) {
 			const argument = operationArgument(node);
 			const bindingName = enclosingBindingName(node);
+			const unwrappedArgument = unwrapExpression(argument);
+			if (unwrappedArgument !== undefined && ts.isObjectLiteralExpression(unwrappedArgument)) {
+				discoveredStarts.add(unwrappedArgument.getStart(source));
+			}
 			if (bindingName !== undefined && localExcludedBindings.has(bindingName)) return;
 			const operationKey =
 				(bindingName === undefined ? undefined : localIds.get(bindingName)) ??
 				bindingName ??
 				"<anonymous>";
-			const unwrappedArgument = unwrapExpression(argument);
 			if (unwrappedArgument === undefined || !ts.isObjectLiteralExpression(unwrappedArgument)) {
 				refusals.push(
 					refusal(
@@ -1181,10 +1197,12 @@ function discoverOperationSites(
 		ts.forEachChild(node, visit);
 	};
 	visit(source);
+	for (const start of sitesByStart.keys()) discoveredStarts.add(start);
 	return {
 		sites: [...sitesByStart.values()].sort(
 			(left, right) => left.object.getStart(source) - right.object.getStart(source),
 		),
+		discoveredCount: discoveredStarts.size,
 		refusals,
 	};
 }
@@ -1223,6 +1241,7 @@ function collectOperationsMaps(
 	constObjects: ReadonlyMap<string, TS.ObjectLiteralExpression>,
 	fileName: string,
 	refusals: OperationDeclarationRefusal[],
+	runtimeComposedInitializers?: ReadonlySet<number>,
 ): TS.ObjectLiteralExpression[] {
 	const maps = new Map<number, TS.ObjectLiteralExpression>();
 	const inspect = (expression: TS.Expression, label: string): void => {
@@ -1238,6 +1257,7 @@ function collectOperationsMaps(
 			return;
 		}
 		if (ts.isCallExpression(unwrapped)) {
+			if (runtimeComposedInitializers?.has(expression.getStart(source)) === true) return;
 			refusals.push(
 				refusal(
 					fileName,
@@ -1893,6 +1913,7 @@ export type OperationDeclarationRepositoryResult =
 			readonly providerRoot: string;
 			readonly changedFiles: readonly string[];
 			readonly operationCount: number;
+			readonly notes: readonly OperationDeclarationNote[];
 			readonly sidecar?: string;
 			readonly localeTodoCount: number;
 	  }
@@ -1902,9 +1923,16 @@ export type OperationDeclarationRepositoryResult =
 			readonly refusals: readonly OperationDeclarationRefusal[];
 			/** Operations that were independently migratable before repository-atomic refusal. */
 			readonly operationCount: number;
+			readonly notes: readonly OperationDeclarationNote[];
 			readonly changedFiles: readonly string[];
 			readonly localeTodoCount: number;
 	  };
+
+export type OperationDeclarationNote = {
+	readonly code: "runtime_composed_registry";
+	readonly path: string;
+	readonly initializer: string;
+};
 
 /** Run the file transform repository-wide, committing writes only if every file is provable. */
 export function migrateOperationDeclarationRepository(
@@ -1920,6 +1948,7 @@ export function migrateOperationDeclarationRepository(
 	const todos: LocaleTodo[] = [];
 	const refusals: OperationDeclarationRefusal[] = [...repositoryIndex.refusals];
 	let operationCount = 0;
+	let repositoryDiscoveredCount = 0;
 
 	for (const sourcePath of sourceFiles) {
 		const relativePath = slash(relative(providerRoot, sourcePath));
@@ -1934,6 +1963,10 @@ export function migrateOperationDeclarationRepository(
 				operationSites: repositoryIndex.operationSites.get(sourcePath),
 				excludedBindings: repositoryIndex.excludedBindings.get(sourcePath),
 				staticObjectResolver: repositoryIndex.staticObjectResolverFor(sourcePath),
+				runtimeComposedInitializers: repositoryIndex.runtimeComposedInitializers.get(sourcePath),
+				recordDiscoveredSites: (count) => {
+					repositoryDiscoveredCount += count;
+				},
 			},
 		);
 		if (result.status === "refused") {
@@ -1947,7 +1980,21 @@ export function migrateOperationDeclarationRepository(
 			todos.push(...result.localeTodos);
 		}
 	}
-	if (repositoryIndex.declarations.length > 0 && repositoryIndex.discoveredCount === 0) {
+	const notes: OperationDeclarationNote[] =
+		repositoryDiscoveredCount === 0
+			? []
+			: repositoryIndex.declarations.flatMap((declaration) =>
+					declaration.runtimeInitializer === undefined
+						? []
+						: [
+								{
+									code: "runtime_composed_registry" as const,
+									path: slash(relative(providerRoot, declaration.path)),
+									initializer: declaration.runtimeInitializer,
+								},
+							],
+				);
+	if (repositoryIndex.declarations.length > 0 && repositoryDiscoveredCount === 0) {
 		for (const declaration of repositoryIndex.declarations) {
 			refusals.push(
 				refusal(
@@ -1970,6 +2017,7 @@ export function migrateOperationDeclarationRepository(
 			providerRoot,
 			refusals,
 			operationCount,
+			notes,
 			changedFiles,
 			localeTodoCount: todos.length,
 		};
@@ -1984,6 +2032,7 @@ export function migrateOperationDeclarationRepository(
 			providerRoot,
 			changedFiles: [],
 			operationCount,
+			notes,
 			localeTodoCount: 0,
 		};
 	}
@@ -2000,6 +2049,7 @@ export function migrateOperationDeclarationRepository(
 		providerRoot,
 		changedFiles,
 		operationCount,
+		notes,
 		sidecar,
 		localeTodoCount: todos.length,
 	};
@@ -2180,15 +2230,16 @@ type ProviderOperationsDeclaration = {
 	readonly path: string;
 	readonly construct: string;
 	readonly initializer: TS.Expression;
+	readonly runtimeInitializer?: string;
 };
 
 type RepositoryOperationIndex = {
 	readonly operationIds: Map<string, Map<string, string>>;
 	readonly operationSites: Map<string, Map<number, string>>;
 	readonly excludedBindings: Map<string, Set<string>>;
+	readonly runtimeComposedInitializers: Map<string, Set<number>>;
 	readonly refusals: OperationDeclarationRefusal[];
 	readonly declarations: ProviderOperationsDeclaration[];
-	readonly discoveredCount: number;
 	readonly staticObjectResolverFor: (path: string) => StaticObjectResolver;
 };
 
@@ -2205,12 +2256,12 @@ function buildRepositoryOperationIndex(
 	const operationIds = buildOperationIdIndex(sourceFiles);
 	const operationSites = new Map<string, Map<number, string>>();
 	const excludedBindings = new Map<string, Set<string>>();
+	const runtimeComposedInitializers = new Map<string, Set<number>>();
 	const refusals: OperationDeclarationRefusal[] = [];
 	const declarations: ProviderOperationsDeclaration[] = [];
 	const indexedProviderProperties = new Set<string>();
 	const factoryIds = new Map<string, { path: string; name: string; ids: Set<string> }>();
 	const bindingCandidates = new Map<string, { path: string; name: string; ids: Set<string> }>();
-	let discoveredCount = 0;
 
 	const relativePath = (path: string): string => slash(relative(providerRoot, path));
 	const resolutionRefusal = (path: string, operationKey: string, detail: string): void => {
@@ -2489,7 +2540,6 @@ function buildRepositoryOperationIndex(
 		}
 		sites.set(start, operationId);
 		operationSites.set(path, sites);
-		discoveredCount += 1;
 	};
 
 	const classifyEntry = (entry: RegistryEntry): void => {
@@ -2543,7 +2593,6 @@ function buildRepositoryOperationIndex(
 			};
 			factory.ids.add(entry.operationId);
 			factoryIds.set(key, factory);
-			discoveredCount += 1;
 			return;
 		}
 		resolutionRefusal(
@@ -2562,10 +2611,26 @@ function buildRepositoryOperationIndex(
 		const key = `${path}\0${node.getStart(source)}`;
 		if (indexedProviderProperties.has(key)) return;
 		indexedProviderProperties.add(key);
-		declarations.push({ path, construct, initializer: node.initializer });
+		const resolvedInitializer = resolveLocatedExpression(
+			{ path, source, expression: node.initializer },
+			new Set(),
+		);
+		let runtimeInitializer: string | undefined;
+		if (resolvedInitializer.status === "resolved") {
+			const resolvedExpression = unwrapExpression(resolvedInitializer.value.expression);
+			if (resolvedExpression !== undefined && ts.isCallExpression(resolvedExpression)) {
+				runtimeInitializer = resolvedExpression.getText(resolvedInitializer.value.source);
+				const initializers = runtimeComposedInitializers.get(path) ?? new Set<number>();
+				initializers.add(node.initializer.getStart(source));
+				runtimeComposedInitializers.set(path, initializers);
+			}
+		}
+		declarations.push({ path, construct, initializer: node.initializer, runtimeInitializer });
 		const flattened = flattenRegistry({ path, source, expression: node.initializer }, new Set());
 		if ("detail" in flattened) {
-			resolutionRefusal(path, "<operations>", flattened.detail);
+			if (runtimeInitializer === undefined) {
+				resolutionRefusal(path, "<operations>", flattened.detail);
+			}
 		} else {
 			for (const entry of flattened.entries.values()) classifyEntry(entry);
 		}
@@ -2691,9 +2756,9 @@ function buildRepositoryOperationIndex(
 		operationIds,
 		operationSites,
 		excludedBindings,
+		runtimeComposedInitializers,
 		refusals,
 		declarations,
-		discoveredCount,
 		staticObjectResolverFor: (currentPath) => (expression, source) =>
 			resolveStaticObject(expression, sources.has(source.fileName) ? source.fileName : currentPath),
 	};

@@ -568,6 +568,33 @@ export default buildProvider({
 		}
 	});
 
+	it("sums literal and runtime-composed operation sites across the repository", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-mixed-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-runtime-mixed-index",
+				"operations/one.ts": "discovery-runtime-composed-one",
+				"operations/registry.ts": "discovery-runtime-registry",
+				"operations/two.ts": "discovery-runtime-composed-two",
+			});
+
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+
+			expect(result.status).toBe("would-migrate");
+			if (result.status !== "would-migrate") return;
+			expect(result.operationCount).toBe(3);
+			expect(result.notes).toEqual([
+				{
+					code: "runtime_composed_registry",
+					path: "index.ts",
+					initializer: "makeRegistry({ publicOnly: true })",
+				},
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("follows a two-level static relative re-export chain", () => {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-reexport-discovery-"));
 		try {
@@ -896,7 +923,7 @@ export default buildProvider({
 });
 
 describe("apifuse migrate-operation-declaration CLI", () => {
-	it("exits 2 when a provider operations initializer yields zero discovered sites", () => {
+	it("exits 2 for a Daiso-shaped package registry with zero discovered sites", () => {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-zero-discovery-cli-"));
 		try {
 			writeFileSync(join(root, "index.ts"), fixture("discovery-package-index"));
@@ -924,6 +951,48 @@ describe("apifuse migrate-operation-declaration CLI", () => {
 					detail: expect.stringContaining("buildProvider"),
 				}),
 			);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("migrates Baemin-shaped sites and reports a runtime-composed registry note", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-runtime-composed-cli-"));
+		try {
+			mkdirSync(join(root, "operations"));
+			writeFileSync(join(root, "index.ts"), fixture("discovery-runtime-composed-index"));
+			writeFileSync(join(root, "operations", "one.ts"), fixture("discovery-runtime-composed-one"));
+			writeFileSync(join(root, "operations", "registry.ts"), fixture("discovery-runtime-registry"));
+			writeFileSync(join(root, "operations", "two.ts"), fixture("discovery-runtime-composed-two"));
+			const command = Bun.spawnSync({
+				cmd: [
+					process.execPath,
+					join(import.meta.dir, "../../../bin/apifuse.ts"),
+					"migrate-operation-declaration",
+					root,
+					"--json",
+				],
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+
+			expect(command.exitCode).toBe(0);
+			const payload = JSON.parse(command.stdout.toString()) as {
+				status: string;
+				operationCount: number;
+				refusals?: unknown[];
+				notes: Array<{ code: string; path: string; initializer: string }>;
+			};
+			expect(payload.status).toBe("migrated");
+			expect(payload.operationCount).toBe(2);
+			expect(payload.refusals).toBeUndefined();
+			expect(payload.notes).toEqual([
+				{
+					code: "runtime_composed_registry",
+					path: "index.ts",
+					initializer: "makeRegistry({ publicOnly: true })",
+				},
+			]);
 		} finally {
 			rmSync(root, { recursive: true, force: true });
 		}
