@@ -46,7 +46,8 @@ Fix all blockers before submitting:
 - Missing fixture request or response.
 - Fixture data does not parse against schemas.
 - Missing `healthCheck` or `healthCheckUnsupported` on any Operation.
-- Credential-backed auth mode without declared credential keys.
+- User-managed credential auth mode without declared credential keys
+  (`platform-managed` auth instead implies the credential capability and forbids keys).
 - High-confidence secret or token material in source, README, package metadata, or fixtures.
 - SDK-native source blockers: prefixed Provider ids, `vendor/` SDK shims or imports, raw `.describe()` prose instead of `describeKey`, raw global `fetch()` calls, and excessive `as Type` assertions.
 

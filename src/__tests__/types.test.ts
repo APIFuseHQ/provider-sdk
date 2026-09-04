@@ -64,6 +64,32 @@ describe("ProviderDefinition types", () => {
 		expect(modes).toContain("credentials");
 	});
 
+	it("types platform-managed credentials without an explicit declaration", () => {
+		const provider = defineProvider({
+			id: "platform-managed-types",
+			version: "1.0.0",
+			runtime: "standard",
+			auth: { mode: "platform-managed" },
+			meta: {
+				displayName: "Platform-managed types",
+				descriptionKey: "platform-managed-types.description",
+				category: "test",
+			},
+		})({
+			operations: {
+				"read-credential": {
+					riskClass: "read",
+					input: providerZ.object({}),
+					output: providerZ.object({ value: providerZ.string().optional() }),
+					healthCheckUnsupported: { reason: "Compile-time context fixture." },
+					handler: async (ctx) => ({ value: ctx.credential.get("serviceKey") }),
+				},
+			},
+		});
+
+		expect(provider.id).toBe("platform-managed-types");
+	});
+
 	it("rejects auth start handlers that declare input at runtime", () => {
 		const noop = defineOperation<unknown>()({
 			riskClass: "read",

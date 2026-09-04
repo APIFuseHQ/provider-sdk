@@ -109,8 +109,10 @@ Structured errors return an `error` object with `code`, `message`,
 
 - `invalid_request`: include `requestId` and `input`; omit `connection` for
   public/no-auth operations and never send `connection: null`.
-- Credentials: declare `credential.keys`, pass local-only values through
-  `connection.secrets`, and read them with `ctx.credential`.
+- Credentials: declare `credential.keys` unless `auth.mode` is `platform-managed`;
+  that mode implies an unfiltered credential capability and forbids key declarations.
+  Pass local-only values through `connection.secrets` and read them with
+  `ctx.credential`.
 - Auth flow: call `/auth/start`, then `/auth/continue` with the same `flowId`;
   carry returned `contextPatch` values into the next request's `context`.
 - Stealth/browser runtime: keep access-sensitive operations on `ctx.stealth.fetch()` with
