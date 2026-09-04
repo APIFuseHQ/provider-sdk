@@ -1,0 +1,3 @@
+import { makeRegistry } from "./operations/registry";
+
+export default buildProvider({ operations: makeRegistry({ publicOnly: true }) });
