@@ -276,6 +276,8 @@ export {
 	type TraceContext,
 } from "./runtime/trace.js";
 export {
+	APIFUSE_CONTENT_PROVENANCE_META_KEY,
+	APIFUSE_CONTENT_TRUST_META_KEY,
 	APIFUSE_DESCRIPTION_KEY_META_KEY,
 	APIFUSE_REDACTION_MARKER,
 	APIFUSE_SENSITIVE_KIND_META_KEY,
@@ -290,6 +292,7 @@ export {
 	type SensitiveFieldOptions,
 	type SensitivePath,
 	sensitive,
+	untrustedContent,
 	z,
 } from "./schema.js";
 export {

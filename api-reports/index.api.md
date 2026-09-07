@@ -61,6 +61,12 @@ export const APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV = "APIFUSE__STT__CLOUDFLARE_
 export const APIFUSE__STT__MODEL_ENV = "APIFUSE__STT__MODEL";
 
 // @public (undocumented)
+export const APIFUSE_CONTENT_PROVENANCE_META_KEY = "x-apifuse-content-provenance";
+
+// @public (undocumented)
+export const APIFUSE_CONTENT_TRUST_META_KEY = "x-apifuse-content-trust";
+
+// @public (undocumented)
 export const APIFUSE_DESCRIPTION_KEY_META_KEY = "x-apifuse-description-key";
 
 // @public (undocumented)
@@ -7302,6 +7308,9 @@ export class TurnValidationError extends ProviderError {
 export class UnsupportedProviderStateError extends ProviderError {
     constructor(message?: string);
 }
+
+// @public
+export function untrustedContent<TSchema extends ZodType>(schema: TSchema): TSchema;
 
 // @public
 export function unwrapEnvelope(data: unknown, path?: string): unknown;

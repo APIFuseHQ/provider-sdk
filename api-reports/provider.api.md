@@ -12,6 +12,12 @@ import { ZodString } from 'zod';
 import { ZodType } from 'zod';
 
 // @public (undocumented)
+export const APIFUSE_CONTENT_PROVENANCE_META_KEY = "x-apifuse-content-provenance";
+
+// @public (undocumented)
+export const APIFUSE_CONTENT_TRUST_META_KEY = "x-apifuse-content-trust";
+
+// @public (undocumented)
 export const APIFUSE_DESCRIPTION_KEY_META_KEY = "x-apifuse-description-key";
 
 // @public (undocumented)
@@ -5554,6 +5560,9 @@ type TransportErrorOptions = ProviderErrorOptions & {
     status?: number;
     upstreamStatus?: number;
 };
+
+// @public
+export function untrustedContent<TSchema extends ZodType>(schema: TSchema): TSchema;
 
 // @public (undocumented)
 const VALID_OPERATION_ERROR_STATUSES: readonly [400, 401, 404, 409, 410, 422, 429, 500, 502, 503, 504];

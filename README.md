@@ -336,3 +336,8 @@ External bounty contributors should submit standalone Provider source plus
 `bun run check` / `bun run test` evidence. APIFuse maintainers own monorepo
 import, registry generation, deployment projection checks, and release
 publishing.
+
+Relayed user-generated text (listing bodies, reviews, posts) is contained by the
+platform, not by the provider. Wrap such output fields in `untrustedContent(...)`
+so the schema carries `x-apifuse-content-trust: untrusted` and
+`x-apifuse-content-provenance: external`; do not strip instruction-like prose.
