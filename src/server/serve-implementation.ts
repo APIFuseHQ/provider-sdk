@@ -636,9 +636,13 @@ function createStealthChallengeDetection(
 							const resolver = resolverRuntime.bindResolverSignal(
 								resolverOverride ??
 									resolverRuntime.createResolverClientFromEnv(provider.resolver, undefined, {
-										...resolverOptions,
-										// The transport already owns the initiating request's exact proxy,
-										// profile headers, and cookie jar; the resolver must not build another.
+										allowedHosts: resolverOptions.allowedHosts,
+										cache: resolverOptions.cache,
+										identityScope: resolverOptions.identityScope,
+										// No proxyIntent: the transport is already bound to the initiating
+										// request's lease, and a second identity resolution would allocate
+										// again (and fail closed without allocator credentials) for nothing
+										// the SBSD adapters consume.
 										createTransport: () => transport,
 									}),
 								signal,

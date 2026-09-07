@@ -30,12 +30,15 @@ export type AkamaiSbsdSessionState = {
 	 * (ADR-0010 v1.1), not to the stealth session.
 	 */
 	rememberedScript?: URL;
-	transaction?: {
-		readonly key: string;
-		readonly result: Promise<
-			{ readonly solved: true } | { readonly solved: false; error: unknown }
-		>;
-	};
+	/** In-flight solves keyed by akamaiSbsdChallengeKey; an entry leaves only when it settles. */
+	readonly transactions: Map<
+		string,
+		{
+			readonly result: Promise<
+				{ readonly solved: true } | { readonly solved: false; error: unknown }
+			>;
+		}
+	>;
 };
 
 /** Akamai serves the SBSD script from this fixed path; cache-busted bundles never match it. */
@@ -157,15 +160,25 @@ export function detectAkamaiSbsdChallenge(
 	};
 }
 
-/** One in-flight solve per session and challenge; the wreq profile is part of the identity. */
+/**
+ * One in-flight solve per session, challenge, and bound identity: requests on one session
+ * may still pick a different wreq browser/OS or proxy, and a solve is only valid for the
+ * identity that ran it.
+ */
 export function akamaiSbsdChallengeKey(
 	challenge: AkamaiSbsdChallenge,
-	wreqBrowser: string,
+	identity: {
+		readonly wreqBrowser: string;
+		readonly wreqOs: string;
+		readonly proxyUrl: string | undefined;
+	},
 ): string {
 	return JSON.stringify([
 		new URL(challenge.scriptUrl).toString(),
 		challenge.challengeToken ?? "",
 		challenge.stateCookieName,
-		wreqBrowser,
+		identity.wreqBrowser,
+		identity.wreqOs,
+		identity.proxyUrl ?? "",
 	]);
 }

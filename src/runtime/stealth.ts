@@ -1280,7 +1280,7 @@ function createSessionFetcher(
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
 	const cookieJar = new StealthCookieJar([], baseUrl);
-	const akamaiSbsdState: AkamaiSbsdSessionState = {};
+	const akamaiSbsdState: AkamaiSbsdSessionState = { transactions: new Map() };
 	const automaticChallengeRefetchPolicy = {
 		...createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
 		methods: ["GET"],
@@ -1421,6 +1421,7 @@ function createSessionFetcher(
 			const requestProfile = resolveStealthProfileSelection(options.stealth, defaultProfile);
 			let challengeSolveAttempted = false;
 			let challengeRefetchAttempted = false;
+			let challengeSolveFailure: { readonly error: unknown } | undefined;
 			const { hasExplicitRetryPolicy, method, stealthRetryOptions } = (() => {
 				try {
 					const method = normalizeMethod(options.method ?? "GET");
@@ -1596,6 +1597,7 @@ function createSessionFetcher(
 							fetchOptions: StealthFetchOptions,
 							fetchSignal: AbortSignal | undefined,
 							orderedHeaders = buildOrderedHeaders,
+							sessionDefaultHeaders = defaultHeaders,
 						) =>
 							withClient(
 								requestProfile,
@@ -1612,7 +1614,7 @@ function createSessionFetcher(
 										orderedHeaders,
 									),
 								fetchSignal,
-								defaultHeaders,
+								sessionDefaultHeaders,
 							);
 						const throwProxyTransportFault = (
 							faultResponse: StealthTransportResponse,
@@ -1741,6 +1743,9 @@ function createSessionFetcher(
 											}
 										}
 									}
+									// Session defaults come from this request's own shape, never from the
+									// initiating request: its defaults carry the upstream Cookie header,
+									// which wreq would otherwise merge into the Hyper /ip call.
 									const result = await fetchOnBoundSession(
 										transportUrl,
 										init.method,
@@ -1756,6 +1761,12 @@ function createSessionFetcher(
 										},
 										boundSignal,
 										resolverBuildHeaders,
+										resolverBuildHeaders?.(
+											transportUrl,
+											init.method,
+											init.body,
+											normalizeHeaders(transportHeaders),
+										),
 									);
 									return {
 										status: result.normalized.status,
@@ -1765,38 +1776,43 @@ function createSessionFetcher(
 									};
 								},
 							};
-							const transactionKey = akamaiSbsdChallengeKey(detected, mapping.browser);
-							let transaction = akamaiSbsdState.transaction;
+							const transactionKey = akamaiSbsdChallengeKey(detected, {
+								wreqBrowser: mapping.browser,
+								wreqOs: mapping.os,
+								proxyUrl: proxy,
+							});
+							let transaction = akamaiSbsdState.transactions.get(transactionKey);
 							let ownsTransaction = false;
-							if (!transaction || transaction.key !== transactionKey) {
+							if (!transaction) {
 								challengeSolveAttempted = true;
 								ownsTransaction = true;
-								let createdTransaction!: NonNullable<AkamaiSbsdSessionState["transaction"]>;
-								const result = akamaiSbsd
-									.solve(
-										detected,
-										resolverTransport,
-										clientOptions.signal ?? new AbortController().signal,
-									)
-									.then(
-										() => ({ solved: true }) as const,
-										(error: unknown) => ({ solved: false, error }) as const,
-									)
-									.finally(() => {
-										if (akamaiSbsdState.transaction === createdTransaction) {
-											akamaiSbsdState.transaction = undefined;
-										}
-									});
-								createdTransaction = {
-									key: transactionKey,
-									result,
+								transaction = {
+									result: akamaiSbsd
+										.solve(
+											detected,
+											resolverTransport,
+											clientOptions.signal ?? new AbortController().signal,
+										)
+										.then(
+											() => ({ solved: true }) as const,
+											(error: unknown) => ({ solved: false, error }) as const,
+										)
+										.finally(() => {
+											akamaiSbsdState.transactions.delete(transactionKey);
+										}),
 								};
-								transaction = createdTransaction;
-								akamaiSbsdState.transaction = createdTransaction;
+								akamaiSbsdState.transactions.set(transactionKey, transaction);
 							}
 							const transactionResult = await transaction.result;
 							if (!transactionResult.solved) {
-								if (ownsTransaction) throw transactionResult.error;
+								if (ownsTransaction) {
+									// The proxy delivered the challenged response; the resolver failed.
+									// Surface that failure as-is: it is not a transport fault to normalize
+									// or retry.
+									recordProxyAttempt("ok", undefined, response.status);
+									challengeSolveFailure = { error: transactionResult.error };
+									throw challengeSolveFailure;
+								}
 								normalized.challenge = {
 									challenge: detected,
 									outcome: "solve_failed",
@@ -1863,6 +1879,14 @@ function createSessionFetcher(
 							}
 							throw redactedNormalizationError;
 						}
+						if (challengeSolveFailure && error === challengeSolveFailure) {
+							throw redactSensitiveError(
+								challengeSolveFailure.error,
+								sensitiveValues,
+								serializedUrl?.requestUrl ?? fallbackRequestUrl,
+								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
+							);
+						}
 						const retryErrorCode = proxyAttemptErrorCode(normalizedError);
 						const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);
 						const runProxyAuthDiagnostic = shouldRunProxyAuthDiagnostic(normalizedError);
@@ -1878,6 +1902,11 @@ function createSessionFetcher(
 							proxyAttemptStatus(normalizedError),
 						);
 						lastError = normalizedError;
+						if (challengeSolveAttempted) {
+							// The single refetch is spent: another transport attempt would replay the
+							// original request and may rotate the proxy the solved jar is bound to.
+							throw normalizedError;
+						}
 						if (proxy && rotatesRegistryChain && refreshableProxyError) {
 							stalePoolError = normalizedError;
 							if (runProxyAuthDiagnostic) {
@@ -2182,7 +2211,7 @@ function createSessionFetcher(
 		close() {
 			closed = true;
 			akamaiSbsdState.rememberedScript = undefined;
-			akamaiSbsdState.transaction = undefined;
+			akamaiSbsdState.transactions.clear();
 			for (const client of clients.values()) {
 				void client.session
 					.then((session) => session.close())

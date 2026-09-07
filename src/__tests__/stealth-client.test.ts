@@ -3359,7 +3359,6 @@ describe("Chrome 149 header parity", () => {
 			expect(mockStealthState.clients).toHaveLength(0);
 		});
 	}
-
 });
 
 describe("Akamai SBSD detection and safe refetch", () => {
@@ -4177,6 +4176,282 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(responses.map((response) => response.status)).toEqual([200, 200]);
 		expect(responses.every((response) => response.challenge === undefined)).toBe(true);
 		expect(allWreqCalls()).toHaveLength(5);
+	});
+
+	it("keeps upstream cookies out of the resolver transport session defaults", async () => {
+		installHyperPayloadFetch();
+		mockStealthState.queuedResponses.push({
+			status: 200,
+			body: "warm",
+			headers: { "set-cookie": "session=upstream-secret; Path=/; Secure" },
+			url: "https://example.com/warm",
+		});
+		queueHardSbsdSolve({
+			status: 200,
+			body: "protected fixture",
+			headers: {},
+			url: "https://example.com/protected",
+		});
+		const { createHypersolutionsResolverVendorAdapter } = await import(
+			"../runtime/resolver-vendors/hypersolutions.js"
+		);
+		const adapter = createHypersolutionsResolverVendorAdapter({
+			apiKey: "fixture-hyper-key",
+			allowedHosts: ["example.com"],
+		});
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					browser: "chrome",
+					os: "macos",
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							clientProfile: "chrome_149",
+							async solve(challenge, transport, signal) {
+								return adapter.solve(challenge, undefined, signal, undefined, transport);
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+
+		await session.fetch("/warm");
+		const response = await session.fetch("/protected");
+
+		expect(response).toMatchObject({ status: 200, body: "protected fixture" });
+		const ipClient = mockStealthState.clients.find((client) =>
+			client.calls.some((call) => call.url === "https://ip.hypersolutions.co/ip"),
+		);
+		const ipCall = ipClient?.calls.find((call) => call.url === "https://ip.hypersolutions.co/ip");
+		expect(ipCall).toBeDefined();
+		expect(requestHeader(ipCall?.init, "cookie")).toBeUndefined();
+		const ipDefaults = (ipClient?.options?.defaultHeaders ?? []) as [string, string][];
+		expect(ipDefaults.some(([name]) => name.toLowerCase() === "cookie")).toBe(false);
+		expect(JSON.stringify(ipClient?.options)).not.toContain("upstream-secret");
+		const scriptCall = allWreqCalls().find(
+			(call) => call.url === "https://example.com/.well-known/sbsd?v=fixture-uuid&t=fixture-token",
+		);
+		expect(requestHeader(scriptCall?.init, "cookie")).toContain("sbsd_o=initial-state");
+	});
+
+	it("surfaces a resolver failure unnormalized and without transport retries", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: sbsdInterstitial("/.well-known/sbsd?v=exhausted&t=exhausted-token"),
+			headers: { "set-cookie": "sbsd_o=exhausted-state; Path=/; Secure" },
+			url: "https://example.com/protected",
+		});
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const request = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								throw new ProviderError("Resolver vendor chain exhausted", {
+									code: "RESOLVER_CHAIN_EXHAUSTED",
+								});
+							},
+						},
+					},
+				},
+			}),
+		).fetch("/protected", {
+			retry: { attempts: 3, baseDelayMs: 0, errorCodes: ["transport_network_error"] },
+		});
+
+		await expect(request).rejects.toMatchObject({ code: "RESOLVER_CHAIN_EXHAUSTED" });
+		expect(allWreqCalls()).toHaveLength(1);
+	});
+
+	it("does not retry the original request after the single refetch fails", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=budget&t=budget-token"),
+				headers: { "set-cookie": "sbsd_o=budget-state; Path=/; Secure" },
+				url: "https://example.com/protected",
+			},
+			{
+				status: 200,
+				body: "never read",
+				headers: {},
+				url: "https://example.com/protected",
+				beforeReturn: async () => {
+					throw new Error("Request timed out");
+				},
+			},
+			{
+				status: 200,
+				body: "third GET must not happen",
+				headers: {},
+				url: "https://example.com/protected",
+			},
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const request = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).fetch("/protected", {
+			retry: { attempts: 3, baseDelayMs: 0, errorCodes: ["transport_timeout"] },
+		});
+
+		await expect(request).rejects.toMatchObject({ code: "transport_timeout" });
+		expect(allWreqCalls()).toHaveLength(2);
+	});
+
+	it("does not coalesce concurrent challenges that resolve different wreq identities on one session", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=identity&t=identity-token"),
+				headers: { "set-cookie": "sbsd_o=identity-state; Path=/; Secure" },
+				url: "https://example.com/windows",
+			},
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=identity&t=identity-token"),
+				headers: {},
+				url: "https://example.com/macos",
+			},
+			{ status: 200, body: "solved", headers: {}, url: "https://example.com/windows" },
+			{ status: 200, body: "solved", headers: {}, url: "https://example.com/macos" },
+		);
+		let releaseSolves!: () => void;
+		let markBothStarted!: () => void;
+		const bothStarted = new Promise<void>((resolve) => {
+			markBothStarted = resolve;
+		});
+		const solvesReleased = new Promise<void>((resolve) => {
+			releaseSolves = resolve;
+		});
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					browser: "chrome",
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								if (solves === 2) markBothStarted();
+								await solvesReleased;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+
+		const requests = [
+			session.fetch("/windows", { stealth: { browser: "chrome", os: "windows" } }),
+			session.fetch("/macos", { stealth: { browser: "chrome", os: "macos" } }),
+		];
+		await bothStarted;
+		releaseSolves();
+		const responses = await Promise.all(requests);
+
+		expect(solves).toBe(2);
+		expect(responses.map((response) => response.status)).toEqual([200, 200]);
+		expect(responses.every((response) => response.challenge === undefined)).toBe(true);
+		expect(allWreqCalls()).toHaveLength(4);
+	});
+
+	it("keeps an older in-flight transaction while a different challenge key is also pending", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=pending-a&t=token-a"),
+				headers: { "set-cookie": "sbsd_o=pending-a; Path=/; Secure" },
+				url: "https://example.com/a-first",
+			},
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=pending-b&t=token-b"),
+				headers: {},
+				url: "https://example.com/b",
+			},
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=pending-a&t=token-a"),
+				headers: {},
+				url: "https://example.com/a-second",
+			},
+			{ status: 200, body: "a first solved", headers: {}, url: "https://example.com/a-first" },
+			{ status: 200, body: "b solved", headers: {}, url: "https://example.com/b" },
+			{ status: 200, body: "a second solved", headers: {}, url: "https://example.com/a-second" },
+		);
+		const started = new Map<string, () => void>();
+		const startedPromises = new Map<string, Promise<void>>();
+		for (const version of ["pending-a", "pending-b"]) {
+			startedPromises.set(
+				version,
+				new Promise<void>((resolve) => {
+					started.set(version, resolve);
+				}),
+			);
+		}
+		let releaseSolves!: () => void;
+		const solvesReleased = new Promise<void>((resolve) => {
+			releaseSolves = resolve;
+		});
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve(challenge) {
+								solves += 1;
+								started.get(new URL(challenge.scriptUrl).searchParams.get("v") ?? "")?.();
+								await solvesReleased;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+
+		const aFirst = session.fetch("/a-first");
+		await startedPromises.get("pending-a");
+		const b = session.fetch("/b");
+		await startedPromises.get("pending-b");
+		const aSecond = session.fetch("/a-second");
+		while (allWreqCalls().length < 3) await new Promise((resolve) => setTimeout(resolve, 0));
+		for (let pendingStep = 0; pendingStep < 10; pendingStep += 1) await Promise.resolve();
+		expect(solves).toBe(2);
+
+		releaseSolves();
+		const responses = await Promise.all([aFirst, b, aSecond]);
+		expect(solves).toBe(2);
+		expect(responses.map((response) => response.status)).toEqual([200, 200, 200]);
+		expect(responses.every((response) => response.challenge === undefined)).toBe(true);
+		expect(allWreqCalls()).toHaveLength(6);
 	});
 
 	it("does not coalesce concurrent challenges across different sessions", async () => {
