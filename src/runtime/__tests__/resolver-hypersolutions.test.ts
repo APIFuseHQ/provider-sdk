@@ -325,6 +325,54 @@ describe("hypersolutions resolver vendor", () => {
 		expect(calls).toHaveLength(0);
 	});
 
+	it("keeps the validated script host when its pathname is a network-path reference", async () => {
+		// `//ip.hypersolutions.co/...` passes the host allowlist and the same-origin check
+		// as shop.example.com; rebuilding the URL from `pathname` + `origin` would have
+		// swapped the host to one the restricted transport admits for `/ip`.
+		const calls: string[] = [];
+		const transport: ResolverVendorTransport = {
+			sessionHeaders: SESSION_HEADERS,
+			getCookie: () => "script-established-state",
+			async fetch(url) {
+				calls.push(url);
+				return response(url === HYPER_IP_URL ? '{"ip":"203.0.113.42"}' : SCRIPT_BODY);
+			},
+		};
+		const scriptUrl = HARD_SCRIPT_URL.replace("/.well-known/sbsd", "//ip.hypersolutions.co/sbsd");
+		expect(new URL(scriptUrl).pathname).toBe("//ip.hypersolutions.co/sbsd");
+
+		await expect(
+			createResolver(transport).solve({ ...HARD_CHALLENGE, scriptUrl }),
+		).resolves.toMatchObject({ form: "cookie_state", outcome: "payload_accepted" });
+
+		expect(calls).toEqual([
+			HYPER_IP_URL,
+			scriptUrl,
+			"https://shop.example.com//ip.hypersolutions.co/sbsd?t=99543528",
+		]);
+		for (const url of calls.slice(1)) expect(new URL(url).host).toBe("shop.example.com");
+	});
+
+	it("propagates a caller abort instead of classifying it as transport_failure", async () => {
+		const controller = new AbortController();
+		const transport: ResolverVendorTransport = {
+			sessionHeaders: SESSION_HEADERS,
+			getCookie: () => "unreached-state",
+			async fetch(_url, init) {
+				controller.abort();
+				throw init.signal.reason;
+			},
+		};
+		const adapter = createHypersolutionsResolverVendorAdapter({
+			apiKey: API_KEY,
+			allowedHosts: ["shop.example.com"],
+		});
+		const rejection: unknown = await adapter
+			.solve(HARD_CHALLENGE, undefined, controller.signal, undefined, transport)
+			.catch((error: unknown) => error);
+		expect(rejection).toBe(controller.signal.reason);
+	});
+
 	it("requires the resolver declaration's Akamai client profile", async () => {
 		const { transport } = createProtocolTransport();
 		const resolver = createResolverClient({

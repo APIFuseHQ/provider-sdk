@@ -151,10 +151,16 @@ function scriptExchangeUrls(
 			phase: "fetch_script",
 		});
 	}
-	const fetchUrl = new URL(parsed.pathname, parsed.origin);
+	// Clone the validated URL and only replace its query: reparsing `pathname`
+	// against `origin` would read a `//host/...` pathname as a network-path
+	// reference and swap the host that assertChallengeInput just admitted.
+	const fetchUrl = new URL(parsed);
+	fetchUrl.search = "";
+	fetchUrl.hash = "";
 	fetchUrl.searchParams.set("v", uuid);
 	if (scriptToken) fetchUrl.searchParams.set("t", scriptToken);
-	const postUrl = new URL(parsed.pathname, parsed.origin);
+	const postUrl = new URL(fetchUrl);
+	postUrl.search = "";
 	const postToken = laterToken || scriptToken;
 	if (postToken) postUrl.searchParams.set("t", postToken);
 	return {
@@ -209,6 +215,8 @@ async function boundFetch(
 		) {
 			throw cause;
 		}
+		// An abort is the caller's (or the adapter timeout's) verdict, not a transport fault.
+		if (init.signal.aborted) throw init.signal.reason ?? cause;
 		throw transportFailure(phase, cause);
 	}
 }
@@ -257,6 +265,7 @@ async function generatePayload(
 		// A body that fails mid-read is as much a transport fault as a refused connection.
 		return { status: response.status, body: await readBoundedText(response, BODY_MAX_BYTES) };
 	} catch (cause) {
+		if (signal.aborted) throw signal.reason ?? cause;
 		throw transportFailure("generate_payload", cause);
 	}
 }

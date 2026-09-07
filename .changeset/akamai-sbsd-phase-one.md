@@ -15,7 +15,8 @@ by the next protected GET (phase 2).
 
 Nothing constructs that bound transport yet: until phase 2 wires it from the
 initiating stealth session, every `akamai_sbsd` solve fails typed with
-`RESOLVER_CHAIN_EXHAUSTED` / `missing_transport`. Providers that solve SBSD
+`RESOLVER_CHAIN_EXHAUSTED` (`missing_credentials` without the engine key,
+`missing_transport` with it). Providers that solve SBSD
 themselves today (zozotown) must keep their current SDK pin until phase 2 lands
 and the engine carries the Hyper key.
 
