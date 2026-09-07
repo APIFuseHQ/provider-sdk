@@ -256,6 +256,25 @@ function resolveUrl(baseUrl: string, url: string): string {
 	return new URL(url, baseUrl).toString();
 }
 
+function resolveRequestUrl(baseUrl: string, url: string): string {
+	try {
+		return resolveUrl(baseUrl, url);
+	} catch (error) {
+		// Both inputs are caller-owned, so an unparsable URL is a programming error, never a
+		// transport condition: not retryable, not the upstream's fault. Classify it here rather
+		// than in normalizeStealthTransportError, which also sees ERR_INVALID_URL from malformed
+		// upstream redirect targets. The fixed message keeps the URL (and any inline query
+		// values) out of the diagnostic surface; the runtime TypeError stays in `cause`.
+		throw new TransportError("Invalid request URL", {
+			code: "transport_invalid_url",
+			status: 0,
+			category: "provider_error",
+			retryable: false,
+			...(error instanceof Error ? { cause: error } : {}),
+		});
+	}
+}
+
 function headerEntriesFromHeaders(headers: StealthTransportHeaders): [string, string][] {
 	return Array.from(headers.entries());
 }
@@ -1463,7 +1482,7 @@ function createSessionFetcher(
 								(!hasPolicyProxy && proxy && clientOptions.proxyStealth?.insecureSkipVerify),
 						);
 						serializedUrl = serializeRequestUrl(
-							resolveUrl(baseUrl, url),
+							resolveRequestUrl(baseUrl, url),
 							options.params,
 							sensitiveParams,
 						);

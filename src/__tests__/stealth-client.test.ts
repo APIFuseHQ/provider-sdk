@@ -2284,6 +2284,78 @@ describe("createStealthClient", () => {
 		});
 	});
 
+	it("classifies invalid base URL errors as caller faults", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		// What a caller gets after passing an options object where `baseUrl: string` is expected.
+		const client = createStealthClient("[object Object]");
+		const session = client.createSession();
+		let thrown: unknown;
+		try {
+			await session.fetch("https://api.ipify.org", { throwOnHttpError: false });
+		} catch (error) {
+			thrown = error;
+		}
+
+		assertIsError(thrown);
+		expect(thrown).toBeInstanceOf(TransportError);
+		expect(thrown).toMatchObject({
+			code: "transport_invalid_url",
+			status: 0,
+			message: "Invalid request URL",
+			options: { category: "provider_error", retryable: false },
+		});
+		assertIsError(thrown.cause);
+		expect(thrown.cause).toBeInstanceOf(TypeError);
+		expect((thrown.cause as TypeError & { code?: string }).code).toBe("ERR_INVALID_URL");
+	});
+
+	it("classifies invalid URLs without consulting the runtime message", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("[object Object]");
+		let thrown: unknown;
+		try {
+			// Bun's ERR_INVALID_URL message quotes the offending URL, so a message-based
+			// classifier would read "timeout" here and mark a caller fault as retryable.
+			await client.fetch("https://api.example.com/v1?timeout=30");
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(TransportError);
+		expect(thrown).toMatchObject({
+			code: "transport_invalid_url",
+			message: "Invalid request URL",
+			options: { retryable: false },
+		});
+	});
+
+	it("keeps malformed upstream redirect targets classified as network errors", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: "http://[" },
+			url: "https://example.com/start",
+		});
+
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("https://example.com");
+		let thrown: unknown;
+		try {
+			await client.fetch("/start");
+		} catch (error) {
+			thrown = error;
+		}
+
+		// The upstream sent the unparsable URL, so this is not a caller fault and stays
+		// eligible for the default transport retry.
+		expect(thrown).toBeInstanceOf(TransportError);
+		expect(thrown).toMatchObject({
+			code: "transport_network_error",
+			status: 0,
+			message: "Network error",
+		});
+	});
+
 	it("redacts sensitive request URLs from stealth transport errors and their metadata", async () => {
 		const secret = "stealth-network-secret";
 		const requestUrl = `https://example.com/network?serviceKey=${secret}`;
@@ -2405,7 +2477,6 @@ describe("createStealthClient", () => {
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
-
 		await expect(client.fetch("/slow", { timeout: 10 })).rejects.toMatchObject({
 			code: "transport_timeout",
 			status: 0,
