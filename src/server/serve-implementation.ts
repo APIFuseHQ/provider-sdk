@@ -2294,9 +2294,13 @@ function rawResponseErrorObservability(status: number): ErrorObservabilityDetail
 	};
 }
 
+// `rawStatusFallback` is decided by the caller from the outcome, not from a
+// missing snapshot: a failed outcome whose thrown value is `undefined` also has
+// no `errorObservability`, and its 500 carries the SDK envelope, not a raw body.
 function responseWithRequestScopeHeaders(
 	response: Response,
 	finished: RequestScopeFinishResult,
+	rawStatusFallback: boolean,
 ): Response {
 	const headers = new Headers(response.headers);
 	headers.delete(PROVIDER_TELEMETRY_HEADER);
@@ -2306,7 +2310,9 @@ function responseWithRequestScopeHeaders(
 	headers.delete(ERROR_OBSERVABILITY_HEADER);
 	const errorObservability =
 		finished.errorObservability ??
-		(response.status >= 400 ? rawResponseErrorObservability(response.status) : undefined);
+		(rawStatusFallback && response.status >= 400
+			? rawResponseErrorObservability(response.status)
+			: undefined);
 	if (errorObservability) {
 		headers.set(ERROR_OBSERVABILITY_HEADER, JSON.stringify(errorObservability));
 	}
@@ -2327,6 +2333,7 @@ function finalizeRequestResponse(
 		const finalResponse = responseWithRequestScopeHeaders(
 			response,
 			scope.snapshotHeaders(error),
+			outcome.kind === "completed",
 		);
 		scope.terminalize(outcome);
 		return finalResponse;
@@ -3398,7 +3405,7 @@ function createServerAppWithCapabilityModules(
 				);
 				const response = handled instanceof Response ? handled : c.json(handled);
 				return streaming
-					? responseWithRequestScopeHeaders(response, requestScope.snapshotHeaders())
+					? responseWithRequestScopeHeaders(response, requestScope.snapshotHeaders(), true)
 					: response;
 			};
 			const response = streaming

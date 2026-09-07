@@ -1536,6 +1536,10 @@ describe("provider HTTP server", () => {
 					...rawOperation(503),
 					transport: { kind: "http-stream", contentType: "application/json" },
 				},
+				rejectUndefined: {
+					...rawOperation(500),
+					handler: async () => Promise.reject(),
+				},
 			},
 		} satisfies ProviderDefinition);
 		const post = (operation: string) =>
@@ -1585,6 +1589,15 @@ describe("provider HTTP server", () => {
 				retryable: true,
 			});
 			expect(await response.json()).toEqual({ upstream: 503 });
+		});
+
+		it("leaves an SDK envelope for a thrown `undefined` without a status-derived header", async () => {
+			const response = await post("rejectUndefined");
+
+			expect(response.status).toBe(500);
+			expect(response.headers.get(ERROR_OBSERVABILITY_HEADER)).toBeNull();
+			const body = (await response.json()) as { error: { retryable: boolean } };
+			expect(body.error.retryable).toBe(false);
 		});
 	});
 
