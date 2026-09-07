@@ -93,12 +93,26 @@ export const AuthFlowRequestSchema = z.object({
 	headers: z.record(z.string(), z.string()).optional(),
 	input: z.record(z.string(), z.unknown()).optional(),
 	context: z.record(z.string(), z.unknown()).optional(),
+	/** Opaque engine state. This is never projected into FlowContext or provider contextPatch. */
+	engine: z
+		.object({
+			egressLease: z.string().min(1).max(16_384).optional(),
+		})
+		.strict()
+		.optional(),
 	connection: OperationConnectionSchema.optional(),
 });
 
 export const AuthFlowSuccessResponseSchema = z.object({
 	data: z.unknown(),
 	contextPatch: z.record(z.string(), z.unknown().nullable()).optional(),
+	/** Opaque engine state to carry verbatim to the next auth turn. */
+	engine: z
+		.object({
+			egressLease: z.string().min(1).max(16_384).optional(),
+		})
+		.strict()
+		.optional(),
 });
 
 export const AuthFlowErrorResponseSchema = OperationErrorResponseSchema;

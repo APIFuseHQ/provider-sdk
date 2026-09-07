@@ -39,6 +39,12 @@ export type AkamaiSbsdSessionState = {
 			>;
 		}
 	>;
+	/**
+	 * Key of the last automatic (safe-method) solve whose refetch was not challenged again.
+	 * An explicit replay for the same key reuses the solved cookies once instead of solving
+	 * again; any newer solve or lease expiry clears it.
+	 */
+	completedSuccessKey?: string;
 };
 
 /**

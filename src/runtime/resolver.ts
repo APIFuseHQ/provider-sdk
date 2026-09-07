@@ -58,6 +58,8 @@ import {
 import { DEFAULT_STEALTH_PROFILE } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
 
+type ResolverPaidUsageContext = NonNullable<Parameters<ResolverVendorAdapter["solve"]>[5]>;
+
 export {
 	createUnsupportedResolverClient,
 	RESOLVER_INSTRUMENTATION_METADATA,
@@ -964,7 +966,7 @@ function createResolverChainClient(options: {
 				if (cached) return cached;
 			}
 			const attempts: ResolverChainAttempt[] = [];
-			for (const entry of supportingEntries) {
+			for (const [entryIndex, entry] of supportingEntries.entries()) {
 				const adapter = entry.createAdapter();
 				try {
 					const solveAttempt = () => {
@@ -986,7 +988,17 @@ function createResolverChainClient(options: {
 									...(adapter.transportAllowedHosts ?? []),
 								])
 							: undefined;
-						return adapter.solve(challenge, identity, signal, traceRecorder, transport);
+						const usage: ResolverPaidUsageContext = {
+							attemptIndex: entryIndex + 1,
+							...(options.identityScope
+								? {
+										resolverIdentityScope: createHash("sha256")
+											.update(options.identityScope, "utf8")
+											.digest("hex"),
+									}
+								: {}),
+						};
+						return adapter.solve(challenge, identity, signal, traceRecorder, transport, usage);
 					};
 					const solution = traceRecorder
 						? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {

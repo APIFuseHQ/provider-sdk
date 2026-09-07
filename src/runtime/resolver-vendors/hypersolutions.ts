@@ -1,6 +1,7 @@
 import { isIP } from "node:net";
 
 import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
+import { recordPaidResolverCreate } from "../resolver-usage.js";
 import type { TraceRecorder } from "../trace.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
@@ -10,6 +11,8 @@ import {
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 } from "./types.js";
+
+type ResolverPaidUsageContext = NonNullable<Parameters<ResolverVendorAdapter["solve"]>[5]>;
 
 const HYPERSOLUTIONS_VENDOR_ID = "hypersolutions" as const;
 const HYPER_SBSD_URL = "https://akm.hypersolutions.co/sbsd";
@@ -49,6 +52,7 @@ export interface HypersolutionsResolverVendorAdapter extends ResolverVendorAdapt
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
 		transport?: ResolverVendorTransport,
+		usage?: ResolverPaidUsageContext,
 	): Promise<AkamaiSbsdChallengeSolution>;
 }
 
@@ -280,7 +284,7 @@ export function createHypersolutionsResolverVendorAdapter(
 		requiresTransport: true,
 		transportAllowedHosts: HYPER_TRANSPORT_HOSTS,
 		supports: (kind) => kind === "akamai_sbsd",
-		async solve(challenge, _identity, signal, _traceRecorder, transport) {
+		async solve(challenge, _identity, signal, traceRecorder, transport, usage) {
 			const timeoutController = new AbortController();
 			const operationSignal = options.timeoutMs
 				? AbortSignal.any([signal, timeoutController.signal])
@@ -312,25 +316,38 @@ export function createHypersolutionsResolverVendorAdapter(
 				assertChallengeInput(challenge, options.allowedHosts);
 				const exchange = scriptExchangeUrls(challenge.scriptUrl, challenge.challengeToken);
 
-				const ipResponse = await boundFetch(
-					transport,
-					HYPER_IP_URL,
-					{
-						method: "GET",
-						headers: {
-							accept: "application/json, text/plain;q=0.9",
-							"x-api-key": apiKey,
-						},
-						signal: operationSignal,
-						redirect: "manual",
-						maxBodyBytes: IP_RESPONSE_MAX_BYTES,
+				// Hyper documents /ip as an authenticated service request but does not
+				// publish an explicit exclusion from request quota. Meter conservatively.
+				const ip = await recordPaidResolverCreate({
+					traceRecorder,
+					vendor: HYPERSOLUTIONS_VENDOR_ID,
+					kind: challenge.kind,
+					endpoint: "hyper:ip",
+					signal: operationSignal,
+					usage,
+					create: async () => {
+						const ipResponse = await boundFetch(
+							transport,
+							HYPER_IP_URL,
+							{
+								method: "GET",
+								headers: {
+									accept: "application/json, text/plain;q=0.9",
+									"x-api-key": apiKey,
+								},
+								signal: operationSignal,
+								redirect: "manual",
+								maxBodyBytes: IP_RESPONSE_MAX_BYTES,
+							},
+							"measure_ip",
+						);
+						requireSuccess(ipResponse.status, "measure_ip");
+						assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
+						const observedIp = parseObservedIp(ipResponse.body);
+						if (!observedIp) throw transportFailure("measure_ip");
+						return observedIp;
 					},
-					"measure_ip",
-				);
-				requireSuccess(ipResponse.status, "measure_ip");
-				assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
-				const ip = parseObservedIp(ipResponse.body);
-				if (!ip) throw transportFailure("measure_ip");
+				});
 
 				const scriptResponse = await boundFetch(
 					transport,
@@ -365,31 +382,42 @@ export function createHypersolutionsResolverVendorAdapter(
 				let expires: number | undefined;
 				for (const [roundIndex, index] of exchange.indices.entries()) {
 					const round = roundIndex + 1;
-					const hyperResponse = await generatePayload(
-						fetchImpl,
-						apiKey,
-						JSON.stringify({
-							index,
-							uuid: exchange.uuid,
-							o: stateCookie,
-							pageUrl: challenge.pageUrl,
-							userAgent,
-							script: scriptResponse.body,
-							ip,
-							acceptLanguage,
-						}),
-						operationSignal,
-					);
-					requireSuccess(hyperResponse.status, "generate_payload");
-					const payload =
-						hyperResponse.body === undefined ? undefined : parsePayload(hyperResponse.body);
-					if (!payload) {
-						throw new ResolverVendorUnavailableError(
-							HYPERSOLUTIONS_VENDOR_ID,
-							"transport_failure",
-							{ phase: "generate_payload", round },
-						);
-					}
+					const payload = await recordPaidResolverCreate({
+						traceRecorder,
+						vendor: HYPERSOLUTIONS_VENDOR_ID,
+						kind: challenge.kind,
+						endpoint: "hyper:sbsd_create",
+						signal: operationSignal,
+						usage,
+						create: async () => {
+							const hyperResponse = await generatePayload(
+								fetchImpl,
+								apiKey,
+								JSON.stringify({
+									index,
+									uuid: exchange.uuid,
+									o: stateCookie,
+									pageUrl: challenge.pageUrl,
+									userAgent,
+									script: scriptResponse.body,
+									ip,
+									acceptLanguage,
+								}),
+								operationSignal,
+							);
+							requireSuccess(hyperResponse.status, "generate_payload");
+							const generated =
+								hyperResponse.body === undefined ? undefined : parsePayload(hyperResponse.body);
+							if (!generated) {
+								throw new ResolverVendorUnavailableError(
+									HYPERSOLUTIONS_VENDOR_ID,
+									"transport_failure",
+									{ phase: "generate_payload", round },
+								);
+							}
+							return generated;
+						},
+					});
 					const postResponse = await boundFetch(
 						transport,
 						exchange.postUrl,

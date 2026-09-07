@@ -971,6 +971,28 @@ describe("defineProvider", () => {
 	});
 
 	describe("engine-owned telemetry configuration", () => {
+		it("rejects the entire APIFUSE__ENGINE__ family with a provider-facing fix", () => {
+			for (const name of [
+				"APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY",
+				"APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS",
+				"apifuse__engine__ceremony_lease_smartproxy_ttl_ms",
+			]) {
+				let error: unknown;
+				try {
+					defineProvider({
+						...validConfig,
+						secrets: [{ name, required: true }],
+					});
+				} catch (caught) {
+					error = caught;
+				}
+				expect(error).toMatchObject({
+					message: expect.stringContaining("cannot declare engine-owned control variable"),
+					fix: expect.stringContaining(`Remove "${name}" from provider secrets`),
+				});
+			}
+		});
+
 		it("rejects OTLP export variables in provider secrets", () => {
 			for (const name of [
 				"OTEL_EXPORTER_OTLP_HEADERS",
