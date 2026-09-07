@@ -508,25 +508,6 @@ export interface ResolverContext {
 	solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
 }
 
-/**
- * Selects the resolver vendor chain used for automatic challenge solving.
- * Transport, identity, admission, and cache construction remain SDK-owned.
- */
-export type AutoSolveResolverSelection = {
-	/** Optional ordered override for the provider-declared resolver vendor chain. */
-	readonly vendors?: readonly ProviderResolverVendor[];
-	/** Transport ownership is reserved to the SDK on the automatic solve path. */
-	readonly transport?: never;
-	/** Transport construction is reserved to the SDK on the automatic solve path. */
-	readonly createTransport?: never;
-};
-
-/** Selects automatic resolver construction without receiving or returning a transport. */
-export type AutoSolveResolverFactory = (bound: {
-	/** Fully resolved browser/OS identity of the initiating stealth session. */
-	readonly clientProfile: StealthProfileSelection;
-}) => AutoSolveResolverSelection;
-
 export interface HealthJourneySchedule {
 	kind: "interval";
 	/** ISO 8601 duration, for example PT8H. */

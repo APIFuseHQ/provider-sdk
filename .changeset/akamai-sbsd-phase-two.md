@@ -13,9 +13,3 @@ classification, and the new types are new exports. Classifications cover
 `resolver_unavailable`, `replay_required`, and `challenge_persisted` outcomes.
 Successful solves are represented only by the unclassified refetched response; unsafe
 requests are never replayed automatically.
-
-Custom hosts may add an `AutoSolveResolverFactory` to select the vendor chain used by
-automatic solving from the initiating session's resolved profile. The SDK alone
-validates and snapshots primitive vendor names, constructs the resolver, and injects its
-session-bound transport. This option is additive; existing provider-invoked
-`ResolverContext` overrides remain supported outside automatic solving.

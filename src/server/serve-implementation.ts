@@ -8,7 +8,6 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
-import { VALID_PROVIDER_RESOLVER_VENDORS } from "../define.js";
 import {
 	createInProcessProviderEngine,
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
@@ -32,7 +31,6 @@ import {
 	ProviderError,
 	type ProviderErrorObservability,
 	type ProviderErrorOptions,
-	SDKError,
 } from "../errors.js";
 import { sanitizeDiagnosticText } from "../fixture-sanitization.js";
 import {
@@ -123,7 +121,6 @@ import {
 	error as streamError,
 } from "../stream.js";
 import type {
-	AutoSolveResolverFactory,
 	AuthContext,
 	AuthTurn,
 	BrowserClient,
@@ -142,7 +139,6 @@ import type {
 	ProviderFilesContext,
 	ProviderProxyPolicy,
 	ProviderRuntimeState,
-	ProviderResolverVendor,
 	ProviderStreamEvent,
 	ResolverContext,
 	StealthClient,
@@ -581,92 +577,10 @@ function getProviderStealthProfile(provider: ProviderDefinition) {
 	return provider.stealth ? getStealthProfile(provider.stealth) : undefined;
 }
 
-function normalizeResolverClientProfile(value: string): string {
-	return value
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9]/gu, "");
-}
-
-function assertResolverClientProfileMatches(
-	declaredClientProfile: string | undefined,
-	initiatingClientProfile: string,
-): void {
-	if (
-		declaredClientProfile &&
-		normalizeResolverClientProfile(declaredClientProfile) ===
-			normalizeResolverClientProfile(initiatingClientProfile)
-	) {
-		return;
-	}
-	throw new SDKError(
-		"The resolver client profile does not match the initiating stealth session profile",
-		{
-			code: "RESOLVER_CLIENT_PROFILE_MISMATCH",
-			fix: "Make resolver.clientProfile match the provider stealth browser/OS profile.",
-		},
-	);
-}
-
-function resolverContextOverride(
-	resolver: ResolverContext | AutoSolveResolverFactory | undefined,
-): ResolverContext | undefined {
-	return typeof resolver === "function" ? undefined : resolver;
-}
-
-function rejectAutoSolveResolverSelection(): never {
-	throw new SDKError(
-		"An automatic SBSD resolver override must return a transport-free resolver selection",
-		{
-			code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
-			fix: "Return only an optional array of known resolver vendor names; the SDK constructs the resolver and transport.",
-		},
-	);
-}
-
-const KNOWN_AUTO_SOLVE_RESOLVER_VENDORS: ReadonlySet<string> = new Set(
-	VALID_PROVIDER_RESOLVER_VENDORS,
-);
-
-function isKnownResolverVendor(value: string): value is ProviderResolverVendor {
-	return KNOWN_AUTO_SOLVE_RESOLVER_VENDORS.has(value);
-}
-
-function validateAndSnapshotAutoSolveResolverSelection(
-	selection: unknown,
-): readonly ProviderResolverVendor[] | undefined {
-	if (
-		!selection ||
-		typeof selection !== "object" ||
-		Array.isArray(selection) ||
-		"solve" in selection ||
-		"transport" in selection ||
-		"createTransport" in selection ||
-		Reflect.ownKeys(selection).some((key) => key !== "vendors")
-	) {
-		return rejectAutoSolveResolverSelection();
-	}
-	if (!("vendors" in selection) || selection.vendors === undefined) return undefined;
-	const suppliedVendors = selection.vendors;
-	if (!Array.isArray(suppliedVendors)) return rejectAutoSolveResolverSelection();
-	const vendors: ProviderResolverVendor[] = [];
-	const seen = new Set<ProviderResolverVendor>();
-	for (let index = 0; index < suppliedVendors.length; index += 1) {
-		if (!Object.hasOwn(suppliedVendors, index)) return rejectAutoSolveResolverSelection();
-		const vendor: unknown = suppliedVendors[index];
-		if (typeof vendor !== "string" || !isKnownResolverVendor(vendor) || seen.has(vendor)) {
-			return rejectAutoSolveResolverSelection();
-		}
-		seen.add(vendor);
-		vendors.push(vendor);
-	}
-	return vendors;
-}
-
 function createStealthChallengeDetection(
 	provider: ProviderDefinition,
 	resolverRuntime: typeof ResolverRuntimeModule | undefined,
-	resolverOverride: ResolverContext | AutoSolveResolverFactory | undefined,
+	resolverOverride: ResolverContext | undefined,
 	cache: ReturnType<typeof createProviderCache>,
 	identityScope: string,
 	signal: AbortSignal | undefined,
@@ -684,74 +598,18 @@ function createStealthChallengeDetection(
 				: {}),
 			...(resolverDeclared && resolverRuntime
 				? {
-						async solve(
-							challenge,
-							transport,
-							initiatingClientProfile,
-							solveSignal,
-							initiatingClientProfileSelection,
-						) {
-							if (resolverOverride) {
-								if (typeof resolverOverride !== "function") {
-									throw new SDKError(
-										"An automatic SBSD resolver override must be a bound resolver factory",
-										{
-											code: "RESOLVER_BOUND_TRANSPORT_REQUIRED",
-											fix: "Supply an AutoSolveResolverFactory that returns only a resolver vendor selection.",
-										},
-									);
-								}
-								assertResolverClientProfileMatches(
-									provider.resolver?.clientProfile,
-									initiatingClientProfile,
-								);
-								const selection = resolverOverride({
-									clientProfile: initiatingClientProfileSelection,
-								});
-								const selectedVendors =
-									validateAndSnapshotAutoSolveResolverSelection(selection);
-								const selectedResolver = resolverRuntime.createResolverClientFromEnv(
-									{
-										kinds: provider.resolver?.kinds ?? [],
-										clientProfile: provider.resolver?.clientProfile ?? "",
-										...(selectedVendors === undefined
-											? {}
-											: { vendors: selectedVendors }),
-									},
-									undefined,
-									{
-										allowedHosts: provider.allowedHosts,
-										cache,
-										identityScope,
-										createTransport: ({ clientProfile }) => {
-											assertResolverClientProfileMatches(
-												clientProfile,
-												initiatingClientProfile,
-											);
-											return transport;
-										},
-									},
-								);
-								return resolverRuntime
-									.bindResolverSignal(selectedResolver, signal)
-									.solve(challenge, solveSignal);
-							}
-							const resolver = resolverRuntime.createResolverClientFromEnv(
-								provider.resolver,
-								undefined,
-								{
+						async solve(challenge, transport, solveSignal) {
+							const resolver =
+								resolverOverride ??
+								resolverRuntime.createResolverClientFromEnv(provider.resolver, undefined, {
 									allowedHosts: provider.allowedHosts,
 									cache,
 									identityScope,
 									// The transport already owns the initiating request's exact proxy,
 									// profile headers, and cookie jar. Re-resolving proxy intent here
 									// would break identity equality rather than establish it.
-									createTransport: ({ clientProfile }) => {
-										assertResolverClientProfileMatches(clientProfile, initiatingClientProfile);
-										return transport;
-									},
-								},
-							);
+									createTransport: () => transport,
+								});
 							return resolverRuntime
 								.bindResolverSignal(resolver, signal)
 								.solve(challenge, solveSignal);
@@ -1027,7 +885,7 @@ function createProviderContext(
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
-					resolverContextOverride(options.resolver) ??
+					options.resolver ??
 						capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
 							allowedHosts: provider.allowedHosts,
 							cache,
@@ -1045,7 +903,7 @@ function createProviderContext(
 					signal,
 				)
 			: bindResolverSignalWithoutRuntime(
-					resolverContextOverride(options.resolver) ??
+					options.resolver ??
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
 				),
@@ -1238,7 +1096,7 @@ function createAuthFlowContext(
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
-					resolverContextOverride(options.resolver) ??
+					options.resolver ??
 						capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
 							allowedHosts: provider.allowedHosts,
 							cache,
@@ -1256,7 +1114,7 @@ function createAuthFlowContext(
 					signal,
 				)
 			: bindResolverSignalWithoutRuntime(
-					resolverContextOverride(options.resolver) ??
+					options.resolver ??
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
 				),
@@ -1379,12 +1237,8 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
 	stt?: SttContext;
 	/** Optional OCR override for tests or custom hosts; local/prod normally resolves from env. */
 	ocr?: OcrContext;
-	/**
-	 * Optional resolver override for tests or custom hosts; local/prod normally resolves from env.
-	 * Automatic challenge solving accepts only a vendor-selection factory; the SDK constructs
-	 * its resolver on the initiating stealth session.
-	 */
-	resolver?: ResolverContext | AutoSolveResolverFactory;
+	/** Optional resolver override for tests or custom hosts; local/prod normally resolves from env. */
+	resolver?: ResolverContext;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */
 	state?: ProviderRuntimeState;
 	/** Allow process-local runtime state only for local development and tests. */

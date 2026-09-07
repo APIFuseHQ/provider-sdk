@@ -136,9 +136,7 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 				readonly solve?: (
 					challenge: Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>,
 					transport: ResolverVendorTransport,
-					initiatingClientProfile: string,
 					signal: AbortSignal,
-					initiatingClientProfileSelection: StealthProfileDescriptor,
 				) => Promise<ChallengeSolution>;
 			};
 		};
@@ -1939,9 +1937,7 @@ function createSessionFetcher(
 									.solve(
 										detected,
 										resolverTransport,
-										mapping.browser,
 										clientOptions.signal ?? new AbortController().signal,
-										requestProfile,
 									)
 									.then(
 										() => ({ solved: true }) as const,
