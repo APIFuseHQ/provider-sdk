@@ -5141,7 +5141,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 
 	it("mints after pool rotation and rebinds the exact endpoint without resolving on turn two", async () => {
 		const {
-			APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY,
+			APIFUSE__ENGINE__CEREMONY_LEASE_KEY,
 			createCeremonyEgressLeaseRuntime,
 			ENGINE_CEREMONY_EGRESS_LEASE,
 		} = await import("../runtime/egress-lease.js");
@@ -5150,7 +5150,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const environment = {
-			[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY]: "fixture-ceremony-key",
+			[APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "fixture-ceremony-key",
 		};
 		const engineCredentials = {
 			[NODEMAVEN_USERNAME_ENV]: "fixture-account",
@@ -5216,13 +5216,10 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(secondLease.binding?.poolIndex).toBe(1);
 	});
 
-	it("drops remembered SBSD state when the ceremony lease expires", async () => {
-		const {
-			APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY,
-			APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS,
-			createCeremonyEgressLeaseRuntime,
-			ENGINE_CEREMONY_EGRESS_LEASE,
-		} = await import("../runtime/egress-lease.js");
+	it("rebinds a fresh egress and drops remembered SBSD state when the ceremony lease expires", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
 		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
 			"../runtime/proxy-nodemaven.js"
 		);
@@ -5235,10 +5232,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			flowId: "flow-1",
 			affinityKey: "connection-1",
 			now: () => now,
-			environment: {
-				[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY]: "fixture-ceremony-key",
-				[APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS]: "10",
-			},
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "fixture-ceremony-key" },
 		});
 		mockStealthState.queuedResponses.push(
 			{
@@ -5261,7 +5255,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 					proxy: {
 						mode: "required",
 						providers: ["nodemaven"],
-						session: { affinity: "connection", poolSize: 1 },
+						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 5 },
 					},
 				},
 				affinityKey: "connection-1",
@@ -5281,18 +5275,84 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			}),
 		).createSession();
 		await session.fetch("/page");
+		const firstHandle = lease.handle();
 		expect(resolutions).toBe(1);
-		now = 10;
-		await expect(session.fetch("/page")).rejects.toMatchObject({
-			code: "EGRESS_LEASE_EXPIRED",
-		});
-		expect(resolutions).toBe(1);
-		now = 5;
+		expect(lease.binding?.lifetimeMinutes).toBe(5);
+
+		now = 5 * 60_000;
 		const response = await session.fetch("/page");
 
+		// A cpr_chlge token is classified only against a remembered script; expiry cleared
+		// it together with the old binding, and the request bound a freshly selected endpoint.
+		expect(response.status).toBe(200);
 		expect(response.challenge).toBeUndefined();
+		expect(resolutions).toBe(2);
+		expect(lease.binding?.lifetimeMinutes).toBe(5);
+		expect(lease.handle()).toBeString();
+		expect(lease.handle()).not.toBe(firstHandle);
 		expect(allWreqCalls()).toHaveLength(2);
-		expect(resolutions).toBe(1);
+	});
+
+	it("keeps a Smartproxy binding across fetches 20 s apart: the lease follows the session lifetime, not the extraction cache", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const boundProxy = "http://user:password@198.51.100.7:9000";
+		let now = 0;
+		let resolutions = 0;
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			now: () => now,
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "fixture-ceremony-key" },
+		});
+		lease.bind({
+			vendor: "smartproxy",
+			proxyUrl: boundProxy,
+			poolIndex: 0,
+			affinityKey: "connection-1",
+			refreshEpoch: 0,
+			lifetimeMinutes: 30,
+		});
+		const handle = lease.handle();
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "turn one", headers: {} },
+			{ status: 200, body: "turn two", headers: {} },
+		);
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["smartproxy"],
+						session: { affinity: "connection", lifetimeMinutes: 30 },
+					},
+				},
+				affinityKey: "connection-1",
+				telemetry: {
+					recordProxyResolution() {
+						resolutions += 1;
+					},
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+			}),
+		).createSession();
+
+		await expect(session.fetch("/one")).resolves.toMatchObject({ status: 200 });
+		now = 20_000;
+		await expect(session.fetch("/two")).resolves.toMatchObject({ status: 200 });
+
+		expect(resolutions).toBe(0);
+		expect(mockStealthState.clients.length).toBeGreaterThan(0);
+		expect(mockStealthState.clients.every((client) => client.options?.proxy === boundProxy)).toBe(
+			true,
+		);
+		expect(lease.handle()).toBe(handle);
+		expect(lease.binding?.proxyUrl).toBe(boundProxy);
 	});
 });
 
@@ -5473,11 +5533,11 @@ describe("server SBSD bound-transport wiring", () => {
 	});
 
 	it("fails an auth request before provider code when the engine lease key is missing", async () => {
-		const { APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY } = await import(
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import(
 			"../runtime/egress-lease.js"
 		);
-		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
-		delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
+		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+		delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
 		try {
 			const { createServerAppAsync } = await import("../server/serve.js");
 			const app = await createServerAppAsync(createSbsdWiringProvider(), {
@@ -5502,17 +5562,17 @@ describe("server SBSD bound-transport wiring", () => {
 			});
 			expect(allWreqCalls()).toHaveLength(0);
 		} finally {
-			if (previous === undefined) delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
-			else process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY] = previous;
+			if (previous === undefined) delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+			else process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = previous;
 		}
 	});
 
 	it("fails an auth request before provider code when the ceremony tenant is missing", async () => {
-		const { APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY } = await import(
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import(
 			"../runtime/egress-lease.js"
 		);
-		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
-		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY] = "fixture-ceremony-key";
+		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = "fixture-ceremony-key";
 		try {
 			const { createServerAppAsync } = await import("../server/serve.js");
 			const app = await createServerAppAsync(createSbsdWiringProvider(), {
@@ -5536,8 +5596,8 @@ describe("server SBSD bound-transport wiring", () => {
 			});
 			expect(allWreqCalls()).toHaveLength(0);
 		} finally {
-			if (previous === undefined) delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY];
-			else process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY] = previous;
+			if (previous === undefined) delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+			else process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = previous;
 		}
 	});
 
@@ -6009,7 +6069,7 @@ describe("server SBSD bound-transport wiring", () => {
 
 	it("supplies the bound transport in operation and auth FlowContext assembly", async () => {
 		installHyperPayloadFetch();
-		const { APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY } = await import("../runtime/egress-lease.js");
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import("../runtime/egress-lease.js");
 		const { APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY } = await import(
 			"../runtime/resolver-config.js"
 		);
@@ -6021,13 +6081,13 @@ describe("server SBSD bound-transport wiring", () => {
 				APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 				NODEMAVEN_USERNAME_ENV,
 				NODEMAVEN_PASSWORD_ENV,
-				APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY,
+				APIFUSE__ENGINE__CEREMONY_LEASE_KEY,
 			].map((name) => [name, process.env[name]] as const),
 		);
 		process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY] = "fixture-hyper-key";
 		process.env[NODEMAVEN_USERNAME_ENV] = "fixture-server-account";
 		process.env[NODEMAVEN_PASSWORD_ENV] = "fixture-server-password";
-		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY] = "fixture-engine-owned-ceremony-key";
+		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = "fixture-engine-owned-ceremony-key";
 		try {
 			const { createServerAppAsync } = await import("../server/serve.js");
 			const app = await createServerAppAsync(createSbsdWiringProvider(), {

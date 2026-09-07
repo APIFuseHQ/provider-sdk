@@ -198,6 +198,7 @@ export {
 	type TelemetryKey,
 	type TenantNeutral,
 } from "./runtime/request-telemetry.js";
+export { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } from "./runtime/egress-lease.js";
 export {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,

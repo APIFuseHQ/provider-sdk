@@ -1318,13 +1318,12 @@ function createSessionFetcher(
 		akamaiSbsdState.completedSuccessKey = undefined;
 	}
 
-	function assertCeremonyEgressLeaseActive(): void {
-		try {
-			ceremonyEgressLease?.assertActive();
-		} catch (error) {
-			clearAkamaiSbsdState();
-			throw error;
-		}
+	/**
+	 * A binding past its vendor session lifetime is dropped, together with the challenge
+	 * state that was only valid on that endpoint, so this request selects and binds afresh.
+	 */
+	function expireCeremonyEgressLease(): void {
+		if (ceremonyEgressLease?.dropExpiredBinding()) clearAkamaiSbsdState();
 	}
 
 	async function getClientEntry(
@@ -1427,14 +1426,14 @@ function createSessionFetcher(
 		proxyAttempt?: number,
 		refreshEpoch?: number,
 	): Promise<ResolvedAttemptProxy> {
-		assertCeremonyEgressLeaseActive();
 		const bound = ceremonyEgressLease?.binding;
 		if (bound) {
 			if (options?.proxy !== undefined || options?.proxyAttemptOffset !== undefined) {
 				throw new SDKError(
 					"A ceremony-bound egress cannot be overridden by provider request options",
 					{
-						code: "EGRESS_LEASE_INVALID",
+						code: "EGRESS_LEASE_BINDING_INVALID",
+						fix: "Remove `proxy` and `proxyAttemptOffset` from stealth requests made inside an auth ceremony.",
 					},
 				);
 			}
@@ -1444,7 +1443,7 @@ function createSessionFetcher(
 				proxyHash: proxyEndpointHash(bound.proxyUrl),
 				vendor: bound.vendor,
 				refreshEpoch: bound.refreshEpoch,
-				...(bound.lifetimeMinutes === undefined ? {} : { lifetimeMinutes: bound.lifetimeMinutes }),
+				lifetimeMinutes: bound.lifetimeMinutes,
 			};
 		}
 		const resolvedProxy = await resolveProxyConfigAsync({
@@ -1486,9 +1485,15 @@ function createSessionFetcher(
 	function bindCeremonyEgress(attemptProxy: ResolvedAttemptProxy | undefined): void {
 		const lease = ceremonyEgressLease;
 		if (!lease || lease.binding || !attemptProxy?.url || !attemptProxy.vendor) return;
-		if (attemptProxy.poolIndex === undefined || !clientOptions.affinityKey) {
+		if (
+			attemptProxy.poolIndex === undefined ||
+			attemptProxy.lifetimeMinutes === undefined ||
+			!clientOptions.affinityKey
+		) {
+			// Registry vendors always report pool index and session lifetime; missing either
+			// is an SDK fault, not something the caller can correct.
 			throw new SDKError("The selected egress cannot be represented by a ceremony lease", {
-				code: "EGRESS_LEASE_INVALID",
+				code: "EGRESS_LEASE_BINDING_INVALID",
 			});
 		}
 		const binding: CeremonyEgressBinding = {
@@ -1497,15 +1502,14 @@ function createSessionFetcher(
 			poolIndex: attemptProxy.poolIndex,
 			affinityKey: clientOptions.affinityKey,
 			refreshEpoch: attemptProxy.refreshEpoch ?? 0,
-			...(attemptProxy.lifetimeMinutes === undefined
-				? {}
-				: { lifetimeMinutes: attemptProxy.lifetimeMinutes }),
+			lifetimeMinutes: attemptProxy.lifetimeMinutes,
 		};
 		lease.bind(binding);
 	}
 
 	const session: StealthSession = {
 		async fetch(url, options: StealthFetchOptions = {}) {
+			expireCeremonyEgressLease();
 			const requestProfile = resolveStealthProfileSelection(options.stealth, defaultProfile);
 			const requestBody = normalizeBody(options.body);
 			let challengeSolveAttempted = false;
@@ -1580,7 +1584,6 @@ function createSessionFetcher(
 				const attemptedProxies = new Set<string>();
 
 				for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-					assertCeremonyEgressLeaseActive();
 					throwIfAmbientAborted(clientOptions.signal);
 					let proxy: string | undefined;
 					let attemptProxy: ResolvedAttemptProxy | undefined;
@@ -1692,9 +1695,8 @@ function createSessionFetcher(
 							fetchSignal: AbortSignal | undefined,
 							orderedHeaders = buildOrderedHeaders,
 							sessionDefaultHeaders = defaultHeaders,
-						) => {
-							assertCeremonyEgressLeaseActive();
-							return withClient(
+						) =>
+							withClient(
 								requestProfile,
 								proxy,
 								ignoreTlsErrors,
@@ -1711,7 +1713,6 @@ function createSessionFetcher(
 								fetchSignal,
 								sessionDefaultHeaders,
 							);
-						};
 						const throwProxyTransportFault = (
 							faultResponse: StealthTransportResponse,
 							faultBody: string,
@@ -1895,7 +1896,6 @@ function createSessionFetcher(
 								proxyUrl: proxy,
 							});
 							const solveAndReplay = async (explicitReplay: boolean): Promise<StealthResponse> => {
-								assertCeremonyEgressLeaseActive();
 								if (!akamaiSbsd.solve) {
 									throw new SDKError("No resolver is available for the challenged request", {
 										code: "RESOLVER_UNAVAILABLE",

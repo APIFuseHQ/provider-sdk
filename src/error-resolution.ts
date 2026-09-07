@@ -52,7 +52,7 @@ export const SDK_OWNED_PROVIDER_ERROR_CODES = new Set([
 	"http_redirect_loop",
 	"transport_invalid_url",
 	"EGRESS_LEASE_INVALID",
-	"EGRESS_LEASE_EXPIRED",
+	"EGRESS_LEASE_BINDING_INVALID",
 	"EGRESS_LEASE_KEY_MISSING",
 	"REPLAY_BODY_UNAVAILABLE",
 	"REPLAY_SESSION_MISMATCH",
@@ -123,8 +123,9 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		// contract): the upstream evaluated the request and said no under its
 		// own rules — a conflict with upstream state, never a 5xx.
 		["UPSTREAM_REJECTED", 409],
+		// Only an unverifiable or foreign handle is the caller's: key and binding
+		// faults stay unmapped (500) because the engine host, not the caller, owns them.
 		["EGRESS_LEASE_INVALID", 409],
-		["EGRESS_LEASE_EXPIRED", 410],
 		["REPLAY_BODY_UNAVAILABLE", 409],
 		["REPLAY_SESSION_MISMATCH", 409],
 		["REPLAY_ALREADY_ATTEMPTED", 409],

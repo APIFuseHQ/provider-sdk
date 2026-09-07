@@ -1,13 +1,12 @@
 import { describe, expect, it } from "bun:test";
 
 import {
-	APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY,
-	APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS,
-	APIFUSE__ENGINE__CEREMONY_LEASE_SMARTPROXY_TTL_MS,
+	APIFUSE__ENGINE__CEREMONY_LEASE_KEY,
+	type CeremonyEgressBinding,
 	createCeremonyEgressLeaseRuntime,
 } from "../egress-lease.js";
 
-const KEY = "fixture-engine-owned-ceremony-hmac-key";
+const KEY = "fixture-engine-owned-ceremony-key";
 
 type LeaseScope = {
 	tenantId: string;
@@ -23,6 +22,15 @@ const DEFAULT_SCOPE: LeaseScope = {
 	affinityKey: "connection-1",
 };
 
+const SMARTPROXY_BINDING: CeremonyEgressBinding = {
+	vendor: "smartproxy",
+	proxyUrl: "http://user:password@198.51.100.7:9000",
+	poolIndex: 2,
+	affinityKey: DEFAULT_SCOPE.affinityKey,
+	refreshEpoch: 0,
+	lifetimeMinutes: 30,
+};
+
 function runtime(
 	options: Partial<LeaseScope> & {
 		handle?: string;
@@ -36,21 +44,15 @@ function runtime(
 		...(options.handle ? { handle: options.handle } : {}),
 		...(options.now ? { now: options.now } : {}),
 		environment: {
-			[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY]: KEY,
+			[APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: KEY,
 			...(options.environment ?? {}),
 		},
 	});
 }
 
-function mintSmartproxyHandle(): string {
-	const lease = runtime({ now: () => 1_000 });
-	lease.bind({
-		vendor: "smartproxy",
-		proxyUrl: "http://user:password@198.51.100.7:9000",
-		poolIndex: 2,
-		affinityKey: DEFAULT_SCOPE.affinityKey,
-		refreshEpoch: 0,
-	});
+function mintSmartproxyHandle(now = 1_000): string {
+	const lease = runtime({ now: () => now });
+	lease.bind(SMARTPROXY_BINDING);
 	const handle = lease.handle();
 	if (!handle) throw new Error("fixture handle was not minted");
 	return handle;
@@ -128,7 +130,7 @@ describe("engine ceremony egress lease", () => {
 				providerId: DEFAULT_SCOPE.providerId,
 				flowId: DEFAULT_SCOPE.flowId,
 				affinityKey: DEFAULT_SCOPE.affinityKey,
-				environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY]: KEY },
+				environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: KEY },
 			}),
 		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_INVALID" }));
 	});
@@ -170,50 +172,65 @@ describe("engine ceremony egress lease", () => {
 		}
 	});
 
-	it("rejects an expired handle without silently minting another binding", () => {
-		let now = 10_000;
-		const first = runtime({
-			now: () => now,
-			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_SMARTPROXY_TTL_MS]: "25" },
-		});
-		first.bind({
-			vendor: "smartproxy",
-			proxyUrl: "http://user:password@198.51.100.8:9000",
-			poolIndex: 1,
-			affinityKey: "connection-1",
-			refreshEpoch: 0,
-		});
-		now += 25;
-
+	it("rejects a handle whose key was rotated as invalid, never as expired", () => {
+		const handle = mintSmartproxyHandle();
 		expect(() =>
 			runtime({
-				handle: first.handle(),
-				now: () => now,
-				environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_SMARTPROXY_TTL_MS]: "25" },
+				handle,
+				now: () => 1_001,
+				environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "rotated-engine-key" },
 			}),
-		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_EXPIRED" }));
+		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_INVALID" }));
 	});
 
-	it("uses engine-only per-vendor expiry overrides", () => {
-		let now = 5_000;
-		const first = runtime({
-			now: () => now,
-			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS]: "50" },
-		});
-		first.bind({
-			vendor: "nodemaven",
-			proxyUrl: "http://account-sid-fixed:password@gate.nodemaven.com:8080",
-			poolIndex: 0,
-			affinityKey: "connection-1",
-			refreshEpoch: 0,
-		});
-		now += 49;
-		expect(
-			runtime({
-				handle: first.handle(),
-				now: () => now,
-				environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS]: "50" },
-			}).binding?.poolIndex,
-		).toBe(0);
+	it("keeps a Smartproxy binding for its session lifetime, not the 15 s extraction cache", () => {
+		const handle = mintSmartproxyHandle(1_000);
+
+		const twentySecondsLater = runtime({ handle, now: () => 21_000 });
+		expect(twentySecondsLater.binding).toEqual(SMARTPROXY_BINDING);
+		expect(twentySecondsLater.handle()).toBe(handle);
+
+		const afterLifetime = runtime({ handle, now: () => 1_000 + 30 * 60_000 });
+		expect(afterLifetime.binding).toBeUndefined();
+		expect(afterLifetime.handle()).toBeUndefined();
+	});
+
+	it("drops an expired binding in place so the next attempt binds a fresh endpoint", () => {
+		let now = 10_000;
+		const lease = runtime({ now: () => now });
+		lease.bind({ ...SMARTPROXY_BINDING, lifetimeMinutes: 1 });
+		const firstHandle = lease.handle();
+		now += 59_999;
+		expect(lease.dropExpiredBinding()).toBe(false);
+		expect(lease.binding?.poolIndex).toBe(2);
+
+		now += 1;
+		expect(lease.dropExpiredBinding()).toBe(true);
+		expect(lease.binding).toBeUndefined();
+		expect(lease.handle()).toBeUndefined();
+		expect(lease.dropExpiredBinding()).toBe(false);
+
+		lease.bind({ ...SMARTPROXY_BINDING, poolIndex: 5 });
+		expect(lease.binding?.poolIndex).toBe(5);
+		expect(lease.handle()).toBeString();
+		expect(lease.handle()).not.toBe(firstHandle);
+	});
+
+	it("treats a second bind and an unrepresentable egress as engine faults, not caller faults", () => {
+		const lease = runtime({ now: () => 1_000 });
+		lease.bind(SMARTPROXY_BINDING);
+		expect(() => lease.bind(SMARTPROXY_BINDING)).toThrow(
+			expect.objectContaining({ code: "EGRESS_LEASE_BINDING_INVALID" }),
+		);
+
+		for (const binding of [
+			{ ...SMARTPROXY_BINDING, affinityKey: "other-affinity" },
+			{ ...SMARTPROXY_BINDING, lifetimeMinutes: 0 },
+			{ ...SMARTPROXY_BINDING, proxyUrl: "" },
+		]) {
+			expect(() => runtime({ now: () => 1_000 }).bind(binding)).toThrow(
+				expect.objectContaining({ code: "EGRESS_LEASE_BINDING_INVALID" }),
+			);
+		}
 	});
 });

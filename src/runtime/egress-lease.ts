@@ -3,22 +3,20 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:
 import type { ProxyVendorName } from "../config/loader.js";
 import { SDKError } from "../errors.js";
 
-export const APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY = "APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY";
-export const APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS =
-	"APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS";
-export const APIFUSE__ENGINE__CEREMONY_LEASE_SMARTPROXY_TTL_MS =
-	"APIFUSE__ENGINE__CEREMONY_LEASE_SMARTPROXY_TTL_MS";
+/**
+ * AES-256-GCM key for the engine ceremony egress lease handle (ADR-0010 v1.1).
+ * Engine host only: the `APIFUSE__ENGINE__` family is rejected from provider
+ * secrets and filtered from provider env projections. Supply at least 32 random
+ * bytes (for example `openssl rand -base64 32`). Rotating the key fails
+ * verification of every outstanding handle (`EGRESS_LEASE_INVALID`, 409): the
+ * affected ceremonies restart; they do not expire.
+ */
+export const APIFUSE__ENGINE__CEREMONY_LEASE_KEY = "APIFUSE__ENGINE__CEREMONY_LEASE_KEY";
 
 /** Internal option key shared only by the server assembler and stealth runtime. */
 export const ENGINE_CEREMONY_EGRESS_LEASE = Symbol.for(
 	"@apifuse/provider-sdk/engine-ceremony-egress-lease",
 );
-
-export const ENGINE_OWNED_CEREMONY_LEASE_ENV_NAMES = [
-	APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY,
-	APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS,
-	APIFUSE__ENGINE__CEREMONY_LEASE_SMARTPROXY_TTL_MS,
-] as const;
 
 const HANDLE_VERSION = 1;
 const HANDLE_MAX_BYTES = 16_384;
@@ -26,10 +24,6 @@ const AEAD_NONCE_BYTES = 12;
 const AEAD_TAG_BYTES = 16;
 const AEAD_ALGORITHM = "aes-256-gcm";
 const AEAD_KEY_DOMAIN = "apifuse:ceremony-egress-lease:v1\0";
-const DEFAULT_NODEMAVEN_TTL_MS = 24 * 60 * 60 * 1_000;
-// Smartproxy extraction results are cached for only 15 seconds because a raw
-// endpoint is not a vendor-guaranteed lease (config/loader.ts).
-const DEFAULT_SMARTPROXY_TTL_MS = 15_000;
 
 export type CeremonyEgressBinding = {
 	readonly vendor: ProxyVendorName;
@@ -37,7 +31,14 @@ export type CeremonyEgressBinding = {
 	readonly poolIndex: number;
 	readonly affinityKey: string;
 	readonly refreshEpoch: number;
-	readonly lifetimeMinutes?: number;
+	/**
+	 * Vendor session lifetime the endpoint was allocated for (`proxy.session.lifetimeMinutes`,
+	 * Smartproxy `life`, NodeMaven SID window). It bounds the lease: the ceremony keeps the
+	 * exact endpoint for as long as the vendor was asked to keep the session, then rebinds.
+	 * Smartproxy's 15 s extraction cache is unrelated: it only bounds how long a raw
+	 * allocation result is reused for *new* selections, which the lease exists to avoid.
+	 */
+	readonly lifetimeMinutes: number;
 };
 
 type CeremonyEgressLeasePayloadV1 = CeremonyEgressBinding & {
@@ -55,12 +56,19 @@ type CeremonyEgressLeaseScopeV1 = Pick<
 >;
 
 export type CeremonyEgressLeaseRuntime = {
+	/** Exact egress bound to this ceremony; undefined until the first successful attempt binds one. */
 	readonly binding: CeremonyEgressBinding | undefined;
-	assertActive(): void;
+	/**
+	 * Drops the binding once its vendor session lifetime has elapsed so the next attempt
+	 * selects and binds a fresh endpoint. Returns true when a binding was dropped: the
+	 * caller must also discard challenge state that was only valid for that endpoint.
+	 */
+	dropExpiredBinding(): boolean;
 	bind(binding: CeremonyEgressBinding): void;
 	handle(): string | undefined;
 };
 
+/** The caller presented a handle this engine cannot verify for this ceremony (409). */
 function invalidLease(): never {
 	throw new SDKError("The engine ceremony egress lease is invalid", {
 		code: "EGRESS_LEASE_INVALID",
@@ -68,44 +76,12 @@ function invalidLease(): never {
 	});
 }
 
-function expiredLease(): never {
-	throw new SDKError("The engine ceremony egress lease has expired", {
-		code: "EGRESS_LEASE_EXPIRED",
-		fix: "Restart the authentication ceremony to obtain a fresh engine-owned egress lease.",
+/** The engine violated its own binding invariant (500); never attributable to the caller. */
+function bindingFault(message: string): never {
+	throw new SDKError(message, {
+		code: "EGRESS_LEASE_BINDING_INVALID",
+		fix: "This is an SDK or provider-runtime fault; the ceremony lease cannot bind the selected egress.",
 	});
-}
-
-function positiveIntegerEnv(
-	environment: Readonly<Record<string, string | undefined>>,
-	name: string,
-): number | undefined {
-	const raw = environment[name]?.trim();
-	if (!raw) return undefined;
-	const value = Number(raw);
-	if (!Number.isSafeInteger(value) || value <= 0) {
-		throw new SDKError(`${name} must be a positive integer number of milliseconds`, {
-			code: "EGRESS_LEASE_INVALID",
-		});
-	}
-	return value;
-}
-
-function ttlMsForBinding(
-	binding: CeremonyEgressBinding,
-	environment: Readonly<Record<string, string | undefined>>,
-): number {
-	if (binding.vendor === "smartproxy") {
-		return (
-			positiveIntegerEnv(environment, APIFUSE__ENGINE__CEREMONY_LEASE_SMARTPROXY_TTL_MS) ??
-			DEFAULT_SMARTPROXY_TTL_MS
-		);
-	}
-	return (
-		positiveIntegerEnv(environment, APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS) ??
-		(binding.lifetimeMinutes === undefined
-			? DEFAULT_NODEMAVEN_TTL_MS
-			: binding.lifetimeMinutes * 60_000)
-	);
 }
 
 function encryptionKey(key: string): Buffer {
@@ -150,6 +126,10 @@ function encodeHandle(
 
 function isFiniteInteger(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isPositiveFinite(value: unknown): value is number {
+	return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
 function decodeHandle(
@@ -208,10 +188,7 @@ function decodeHandle(
 		!isFiniteInteger(candidate.mintedAtMs) ||
 		!isFiniteInteger(candidate.expiresAtMs) ||
 		candidate.expiresAtMs <= candidate.mintedAtMs ||
-		(candidate.lifetimeMinutes !== undefined &&
-			(typeof candidate.lifetimeMinutes !== "number" ||
-				!Number.isFinite(candidate.lifetimeMinutes) ||
-				candidate.lifetimeMinutes <= 0))
+		!isPositiveFinite(candidate.lifetimeMinutes)
 	) {
 		return invalidLease();
 	}
@@ -222,6 +199,17 @@ function decodeHandle(
 		return invalidLease();
 	}
 	return candidate as CeremonyEgressLeasePayloadV1;
+}
+
+function bindingOf(payload: CeremonyEgressLeasePayloadV1): CeremonyEgressBinding {
+	return {
+		vendor: payload.vendor,
+		proxyUrl: payload.proxyUrl,
+		poolIndex: payload.poolIndex,
+		affinityKey: payload.affinityKey,
+		refreshEpoch: payload.refreshEpoch,
+		lifetimeMinutes: payload.lifetimeMinutes,
+	};
 }
 
 export function createCeremonyEgressLeaseRuntime(options: {
@@ -247,59 +235,52 @@ export function createCeremonyEgressLeaseRuntime(options: {
 		flowId: options.flowId,
 		affinityKey: options.affinityKey,
 	};
-	const key = environment[APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY]?.trim();
+	const key = environment[APIFUSE__ENGINE__CEREMONY_LEASE_KEY]?.trim();
 	if (!key) {
 		throw new SDKError("The engine ceremony egress lease key is not configured", {
 			code: "EGRESS_LEASE_KEY_MISSING",
-			fix: `Configure ${APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY} in the engine host.`,
+			fix: `Configure ${APIFUSE__ENGINE__CEREMONY_LEASE_KEY} in the engine host.`,
 		});
 	}
 	let payload: CeremonyEgressLeasePayloadV1 | undefined;
 	let currentHandle: string | undefined;
 
+	const dropExpiredBinding = (): boolean => {
+		if (!payload || now() < payload.expiresAtMs) return false;
+		payload = undefined;
+		currentHandle = undefined;
+		return true;
+	};
+
 	if (options.handle !== undefined) {
 		// Scope mismatch fails GCM authentication because scope is AAD; there is
 		// deliberately no post-decrypt scope comparison fallback.
 		payload = decodeHandle(options.handle, key, scope);
-		if (now() >= payload.expiresAtMs) return expiredLease();
 		currentHandle = options.handle;
+		// An expired but authentic handle is not a fault: the ceremony continues on a
+		// freshly selected endpoint and the next turn receives the new handle.
+		dropExpiredBinding();
 	}
 
 	return {
 		get binding() {
-			if (!payload) return undefined;
-			return {
-				vendor: payload.vendor,
-				proxyUrl: payload.proxyUrl,
-				poolIndex: payload.poolIndex,
-				affinityKey: payload.affinityKey,
-				refreshEpoch: payload.refreshEpoch,
-				...(payload.lifetimeMinutes === undefined
-					? {}
-					: { lifetimeMinutes: payload.lifetimeMinutes }),
-			};
+			return payload ? bindingOf(payload) : undefined;
 		},
-		assertActive() {
-			if (payload && now() >= payload.expiresAtMs) return expiredLease();
-		},
+		dropExpiredBinding,
 		bind(binding) {
+			if (payload) {
+				// The stealth runtime reuses the bound endpoint while a binding exists and
+				// never rebinds it; a second bind is an engine invariant break.
+				return bindingFault("The ceremony egress lease is already bound");
+			}
 			if (
 				binding.affinityKey !== options.affinityKey ||
 				!binding.proxyUrl ||
-				(binding.vendor !== "smartproxy" && binding.vendor !== "nodemaven")
+				(binding.vendor !== "smartproxy" && binding.vendor !== "nodemaven") ||
+				!isFiniteInteger(binding.poolIndex) ||
+				!isPositiveFinite(binding.lifetimeMinutes)
 			) {
-				return invalidLease();
-			}
-			if (payload) {
-				if (
-					payload.vendor !== binding.vendor ||
-					payload.proxyUrl !== binding.proxyUrl ||
-					payload.poolIndex !== binding.poolIndex ||
-					payload.refreshEpoch !== binding.refreshEpoch
-				) {
-					return invalidLease();
-				}
-				return;
+				return bindingFault("The selected egress cannot be bound to the ceremony lease");
 			}
 			const mintedAtMs = now();
 			payload = {
@@ -307,16 +288,9 @@ export function createCeremonyEgressLeaseRuntime(options: {
 				tenantId: scope.tenantId,
 				providerId: options.providerId,
 				flowId: options.flowId,
-				vendor: binding.vendor,
-				proxyUrl: binding.proxyUrl,
-				poolIndex: binding.poolIndex,
-				affinityKey: binding.affinityKey,
-				refreshEpoch: binding.refreshEpoch,
-				...(binding.lifetimeMinutes === undefined
-					? {}
-					: { lifetimeMinutes: binding.lifetimeMinutes }),
+				...binding,
 				mintedAtMs,
-				expiresAtMs: mintedAtMs + ttlMsForBinding(binding, environment),
+				expiresAtMs: mintedAtMs + binding.lifetimeMinutes * 60_000,
 			};
 			currentHandle = encodeHandle(payload, key, scope);
 		},

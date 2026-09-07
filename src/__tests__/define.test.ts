@@ -973,9 +973,8 @@ describe("defineProvider", () => {
 	describe("engine-owned telemetry configuration", () => {
 		it("rejects the entire APIFUSE__ENGINE__ family with a provider-facing fix", () => {
 			for (const name of [
-				"APIFUSE__ENGINE__CEREMONY_LEASE_HMAC_KEY",
-				"APIFUSE__ENGINE__CEREMONY_LEASE_NODEMAVEN_TTL_MS",
-				"apifuse__engine__ceremony_lease_smartproxy_ttl_ms",
+				"APIFUSE__ENGINE__CEREMONY_LEASE_KEY",
+				"apifuse__engine__ceremony_lease_key",
 			]) {
 				let error: unknown;
 				try {
