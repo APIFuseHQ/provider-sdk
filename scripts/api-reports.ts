@@ -64,7 +64,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"contract.api.md": forgottenExports(
-		"These indirect declarations are intentionally not direct contract entry-point exports; their full definitions are included in this report for semver review.",
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
 		`
 			AuthAbortRetry AuthConfig AuthContext AuthFlowDefinition AuthFlowInputHandler AuthFlowStartHandler AuthFlowTerminalContext AuthMode
 			AuthSafeData AuthSafeJson AuthTurn Bcp47Locale BrowserChallengeRequest BrowserChallengeResult BrowserClient BrowserCookie
@@ -177,7 +177,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"runtime-stealth.api.md": forgottenExports(
-		"Shared response types and the SDK-owned resolver callback seam are intentionally indirect in the runtime-stealth entry point; their full definitions remain included for semver review.",
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
 		`
 			CookieJar DeclarativeStealthResponse HttpMethod HttpRedirectPolicy HttpRedirectPolicyMode HttpRetryAfterPolicy HttpRetryDelayStrategy HttpRetryJitter
 			HttpRetryOptions HttpRetryPreset HttpRetryUnsafeMethodPolicy Iso3166Alpha2CountryCode ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity
@@ -185,11 +185,11 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProxyVendorName RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams SmartproxyAllocatorBodyClass StealthClient
 			StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthProfileDescriptor StealthProfileSelection StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession
 			StealthSessionCookies StealthTransportBody StealthTransportHeaders StealthTransportResponse
-			ChallengeSolution ProviderChallenge ResolverVendorTransport StealthChallengeClassification
+			ProviderChallenge StealthChallengeClassification
 		`,
 	),
 	"server.api.md": forgottenExports(
-		"These indirect declarations are intentionally not direct server entry-point exports; their full definitions are included in this report for semver review.",
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
 		`
 			AuthAbortRetry AuthConfig AuthContext AuthFlowDefinition AuthFlowErrorResponse AuthFlowErrorResponseSchema AuthFlowInputHandler AuthFlowStartHandler
 			AuthFlowTerminalContext AuthMode AuthSafeData AuthSafeJson AuthTurn Bcp47Locale BrowserChallengeRequest BrowserChallengeResult
@@ -236,7 +236,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"testing.api.md": forgottenExports(
-		"These indirect declarations are intentionally not direct testing entry-point exports; their full definitions are included in this report for semver review.",
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
 		`
 			AuthAbortRetry AuthConfig AuthContext AuthFlowDefinition AuthFlowInputHandler AuthFlowStartHandler AuthFlowTerminalContext AuthMode
 			AuthSafeData AuthSafeJson AuthTurn Bcp47Locale BrowserChallengeRequest BrowserChallengeResult BrowserClient BrowserCookie

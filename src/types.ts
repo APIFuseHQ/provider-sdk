@@ -1241,6 +1241,11 @@ export interface RequestOptions {
 	/**
 	 * Defaults to true. Set to false when callers need to inspect upstream
 	 * non-2xx bodies themselves instead of converting them to TransportError.
+	 *
+	 * Documented exception: a non-2xx response that an opted-in SDK challenge
+	 * detector classified (`response.challenge` is set) is returned, not thrown,
+	 * whatever this flag says, so the classification stays observable. Callers
+	 * that need the failure semantics check `response.challenge` first.
 	 */
 	throwOnHttpError?: boolean;
 	retry?: boolean | HttpRetryPreset | HttpRetryOptions;

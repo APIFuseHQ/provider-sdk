@@ -3360,6 +3360,16 @@ describe("Chrome 149 header parity", () => {
 		});
 	}
 
+});
+
+describe("Akamai SBSD detection and safe refetch", () => {
+	beforeEach(() => {
+		mockStealthState.clients.length = 0;
+		mockStealthState.queuedResponses.length = 0;
+		mockStealthState.queuedErrors.length = 0;
+		mockStealthState.queuedCloseErrors.length = 0;
+	});
+
 	it("classifies all three SBSD script URL variants without a resolver or cookie values", async () => {
 		mockStealthState.queuedResponses.push(
 			{

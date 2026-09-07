@@ -8,25 +8,6 @@ import type { BrowserProfile } from 'wreq-js';
 import type { EmulationOS } from 'wreq-js';
 import type { SerializedCookieJar } from 'tough-cookie';
 
-// @public
-type ChallengeSolution = {
-    readonly form: "token";
-    readonly token: string;
-} | {
-    readonly form: "cookies";
-    readonly cookies: Readonly<Record<string, string>>;
-    readonly userAgent: string;
-    readonly expires?: number;
-    readonly sdkEstimatedExpires?: number;
-} | {
-    readonly form: "cookie_state";
-    readonly kind: "akamai_sbsd";
-    readonly outcome: "payload_accepted";
-    readonly verified: false;
-    readonly stateCookieName: "sbsd_o" | "bm_so";
-    readonly expires?: number;
-};
-
 // @public (undocumented)
 interface CookieJar {
     // (undocumented)
@@ -395,34 +376,6 @@ type RequestParams = Record<string, RequestParamValue>;
 // @public (undocumented)
 type RequestParamValue = RequestParamPrimitive | readonly RequestParamPrimitive[];
 
-// @public (undocumented)
-interface ResolverVendorTransport {
-    fetch(url: string, init: {
-        method: "GET" | "POST";
-        headers?: Readonly<Record<string, string>>;
-        body?: string;
-        signal: AbortSignal;
-        redirect?: "manual";
-        maxBodyBytes?: number;
-    }): Promise<{
-        readonly status: number;
-        readonly headers: Readonly<Record<string, string>>;
-        readonly body: string;
-        readonly cookies: readonly {
-            readonly name: string;
-            readonly value: string;
-            readonly expires?: number;
-            readonly httpOnly: boolean;
-            readonly secure: boolean;
-            readonly domain?: string;
-            readonly path?: string;
-            readonly sameSite?: string;
-        }[];
-    }>;
-    readonly getCookie?: (name: string, url: string) => string | undefined;
-    readonly sessionHeaders?: Readonly<Record<string, string>>;
-}
-
 // Warning: (ae-forgotten-export) The symbol "StealthProfileSelection" needs to be exported by the entry point stealth.d.ts
 //
 // @public (undocumented)
@@ -439,7 +392,7 @@ type StealthChallengeClassification = {
     readonly challenge: Extract<ProviderChallenge, {
         readonly kind: "akamai_sbsd";
     }>;
-    readonly outcome: "resolver_unavailable" | "replay_required" | "challenge_persisted";
+    readonly outcome: "resolver_unavailable" | "replay_required" | "solve_failed" | "challenge_persisted";
 };
 
 // @public (undocumented)
@@ -466,15 +419,6 @@ export type StealthClientOptions = ProxyResolutionOptions & {
     signal?: AbortSignal;
     stealth?: StealthProfileSelection & {
         acceptLanguage?: string;
-        challengeRuntime?: {
-            readonly akamaiSbsd?: {
-                readonly allowedHosts: readonly string[];
-                readonly clientProfile?: string;
-                readonly solve?: (challenge: Extract<ProviderChallenge, {
-                    readonly kind: "akamai_sbsd";
-                }>, transport: ResolverVendorTransport, initiatingClientProfile: string, signal: AbortSignal, initiatingClientProfileSelection: StealthProfileDescriptor) => Promise<ChallengeSolution>;
-            };
-        };
     };
     proxyStealth?: {
         insecureSkipVerify?: boolean;
@@ -659,15 +603,13 @@ type StealthTransportResponse = {
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:24:17 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:24:17 - (ae-forgotten-export) The symbol "ChallengeSolution" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:57:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:59:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:903:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:908:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1190:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1227:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1227:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:45:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:47:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:886:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:891:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1178:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1222:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1222:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 
