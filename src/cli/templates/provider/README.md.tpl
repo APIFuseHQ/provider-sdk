@@ -98,16 +98,20 @@ The `POST /v1/{operation}` body is a request envelope:
 - `input` contains the operation input shape.
 - `headers` is optional.
 - `connectionId` is optional connection identity only and does not include
-  credentials. The gateway sends it for `optional` connection mode.
+  credentials. The gateway sends it for `optional` connection mode, and only
+  when the caller supplied a connection that passed authorization. It is
+  exposed as `ctx.request.connectionId`.
 - `connection` is optional credential-bearing connection data. The gateway
-  sends it for `required` connection mode; for local debugging, pass
+  sends it for `required` connection mode; omit it for no-auth/public (`none`
+  mode) operations. For local debugging, pass
   `{ "id", "mode", "secrets", "metadata", "externalRef" }` with local-only
   secret values.
 
 The gateway sends only `connection` for `required` mode, only `connectionId`
-for `optional` mode, and neither field for `none` mode. If a malformed or
-manually constructed envelope contains both, nested `connection.id` takes
-precedence over the top-level `connectionId`.
+for `optional` mode (and nothing when the caller passed no connection), and
+neither field for `none` mode. If a malformed or manually constructed envelope
+contains both, a non-empty nested `connection.id` takes precedence over the
+top-level `connectionId`; an empty string is treated as absent.
 
 Structured errors return an `error` object with `code`, `message`,
 `requestId`, and optional `details`; validation failures include field paths in
