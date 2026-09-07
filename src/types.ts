@@ -1241,11 +1241,6 @@ export interface RequestOptions {
 	/**
 	 * Defaults to true. Set to false when callers need to inspect upstream
 	 * non-2xx bodies themselves instead of converting them to TransportError.
-	 *
-	 * Documented exception: a non-2xx response that an opted-in SDK challenge
-	 * detector classified (`response.challenge` is set) is returned, not thrown,
-	 * whatever this flag says, so the classification stays observable. Callers
-	 * that need the failure semantics check `response.challenge` first.
 	 */
 	throwOnHttpError?: boolean;
 	retry?: boolean | HttpRetryPreset | HttpRetryOptions;
@@ -1294,6 +1289,16 @@ export type HttpMethod =
 	| "patch";
 
 export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "headers"> {
+	/**
+	 * Defaults to true. Set to false when callers need to inspect upstream
+	 * non-2xx bodies themselves instead of converting them to TransportError.
+	 *
+	 * Documented exception: a non-2xx response that an opted-in SDK challenge
+	 * detector classified (`response.challenge` is set) is returned, not thrown,
+	 * whatever this flag says, so the classification stays observable. Callers
+	 * that need the failure semantics check `response.challenge` first.
+	 */
+	throwOnHttpError?: boolean;
 	/**
 	 * Request headers. Array values and case-insensitive duplicate names are
 	 * combined in caller order using `", "`, matching Chrome's Fetch behavior.
@@ -1394,6 +1399,7 @@ export interface DeclarativeStealthResponse {
 
 export type StealthResponse = DeclarativeStealthResponse;
 
+/** Why a detected challenge response was returned to the caller instead of being solved and refetched. */
 export type StealthChallengeClassification = {
 	readonly challenge: Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>;
 	/**

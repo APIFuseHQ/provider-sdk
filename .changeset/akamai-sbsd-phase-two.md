@@ -7,15 +7,18 @@ Akamai SBSD detection, bound resolver transport, and one safe refetch
 
 A stealth session whose provider declares `resolver.kinds: ["akamai_sbsd"]`
 (or opts in with `stealth.challengeDetection.akamaiSbsd: true`) now classifies
-SBSD responses: a hard/passive interstitial that loads `/.well-known/sbsd?v=`
-or a later `cpr_chlge` JSON token composed with the session's remembered
-script. When a resolver is declared, the SDK solves once per session and
+SBSD responses: an interstitial that loads a same-origin script with a UUID
+`v` (the script path itself is per-site obfuscated), or a later `cpr_chlge`
+JSON token composed with the session's remembered script. When a resolver is declared, the SDK solves once per session and
 challenge on the initiating request's own proxy lease, cookie jar, and profile
 headers (`ResolverVendorTransport.sessionHeaders`/`getCookie` are supplied
 here), then refetches the original request exactly once. Success is judged
 only from that refetch. Only a plain GET (no body, no `Authorization`, caller
 `Cookie`, or other credential header) is solved and refetched automatically;
-everything else is classified and returned.
+everything else is classified and returned. The solve runs under the client's
+ambient signal and the resolver's own timeouts, not the initiating fetch's
+`timeout`. A provider that declares the resolver without a `stealth` block gets
+the same detection on its default Chrome client (auth flows included).
 
 Consumer-visible changes:
 

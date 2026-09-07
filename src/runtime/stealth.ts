@@ -1689,7 +1689,6 @@ function createSessionFetcher(
 								recordProxyAttempt("ok", undefined, response.status);
 								return normalized;
 							}
-							assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, requestProfile);
 							if (!akamaiSbsd.solve) {
 								normalized.challenge = {
 									challenge: detected,
@@ -1698,6 +1697,8 @@ function createSessionFetcher(
 								recordProxyAttempt("ok", undefined, response.status);
 								return normalized;
 							}
+							// Only a solve that will actually run on this session needs the profile match.
+							assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, requestProfile);
 
 							const emulationHeaderMap = new Map(
 								emulationHeaders.map(([name, value]) => [name.toLowerCase(), value] as const),
@@ -1786,6 +1787,8 @@ function createSessionFetcher(
 							if (!transaction) {
 								challengeSolveAttempted = true;
 								ownsTransaction = true;
+								// The solve spans several round trips, so it runs under the client's ambient
+								// signal and the resolver's own timeouts, not this fetch's per-request `timeout`.
 								transaction = {
 									result: akamaiSbsd
 										.solve(
@@ -1902,9 +1905,10 @@ function createSessionFetcher(
 							proxyAttemptStatus(normalizedError),
 						);
 						lastError = normalizedError;
-						if (challengeSolveAttempted) {
-							// The single refetch is spent: another transport attempt would replay the
-							// original request and may rotate the proxy the solved jar is bound to.
+						if (challengeSolveAttempted || challengeRefetchAttempted) {
+							// The single refetch is spent (owner or waiter of a shared solve): another
+							// transport attempt would replay the original request and may rotate the
+							// proxy the solved jar is bound to.
 							throw normalizedError;
 						}
 						if (proxy && rotatesRegistryChain && refreshableProxyError) {

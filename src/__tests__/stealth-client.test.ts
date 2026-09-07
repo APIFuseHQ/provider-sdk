@@ -287,7 +287,9 @@ function queueHardSbsdSolve(
 	mockStealthState.queuedResponses.push(
 		{
 			status: 403,
-			body: sbsdInterstitial("/.well-known/sbsd?v=fixture-uuid&amp;t=fixture-token"),
+			body: sbsdInterstitial(
+				"/EdTyEb8L/9iGcpl/Gm?v=f2a6dfca-cc41-5685-7029-1dbc32e8fe77&amp;t=fixture-token",
+			),
 			headers: { "set-cookie": "sbsd_o=initial-state; Path=/; Secure" },
 			url: pageUrl,
 		},
@@ -301,13 +303,13 @@ function queueHardSbsdSolve(
 			status: 200,
 			body: "fixture-sbsd-script",
 			headers: {},
-			url: "https://example.com/.well-known/sbsd?v=fixture-uuid&t=fixture-token",
+			url: "https://example.com/EdTyEb8L/9iGcpl/Gm?v=f2a6dfca-cc41-5685-7029-1dbc32e8fe77&t=fixture-token",
 		},
 		{
 			status: 200,
 			body: "payload accepted",
 			headers: { "set-cookie": "sbsd_o=updated-state; Path=/; Secure" },
-			url: "https://example.com/.well-known/sbsd?t=fixture-token",
+			url: "https://example.com/EdTyEb8L/9iGcpl/Gm?t=fixture-token",
 		},
 		refetch,
 	);
@@ -348,6 +350,25 @@ function fixtureSbsdCookieSolution() {
 		stateCookieName: "sbsd_o",
 	} as const;
 }
+
+const PENDING_A_VERSION = "f0cbf170-ff58-e0d9-eb04-42bcbe09e0be";
+const PENDING_B_VERSION = "3fea4a54-d5b2-e9e8-1ee4-1bc2cda10436";
+/**
+ * Verbatim zozo.jp `Access Denied` interstitial (sbsd-conformance HAR, 2026-08-28): the
+ * script path is obfuscated, `v` is a UUID with no `t`, and bm_so arrives on the same response.
+ */
+const LIVE_SBSD_ACCESS_DENIED_PATH = "/EdTyEb8Lyxqf/9iGcpl/GmKux0/DXObrkm53w/B1p4AQ/ZCF5f/VoJN08X";
+const LIVE_SBSD_ACCESS_DENIED_BODY = `<HTML><HEAD>
+<TITLE>Access Denied</TITLE>
+</HEAD><BODY>
+<H1>Access Denied</H1>
+ 
+You don't have permission to access "http&#58;&#47;&#47;zozo&#46;jp&#47;shop&#47;nike&#47;goods&#47;88470490&#47;" on this server.<P>
+Reference&#32;&#35;18&#46;d39c717&#46;1788010637&#46;6f3a4cb
+<P>https&#58;&#47;&#47;errors&#46;edgesuite&#46;net&#47;18&#46;d39c717&#46;1788010637&#46;6f3a4cb</P>
+<script type="text/javascript"  src="${LIVE_SBSD_ACCESS_DENIED_PATH}?v=30d52eec-2996-2ec2-539a-eb352f7e17c7" defer></script></BODY>
+</HTML>
+`;
 
 mock.module("wreq-js", () => ({
 	createSession: async (options?: Record<string, unknown>) => new MockWreqSession(options),
@@ -3373,19 +3394,25 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=hard-uuid&amp;t=hard-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=cc02dfc1-9ae3-c08a-756d-1a70a7494ebc&amp;t=hard-token",
+				),
 				headers: { "set-cookie": "sbsd_o=fixture-secret; Path=/; Secure" },
 				url: "https://example.com/hard",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=hard-raw&t=hard-raw-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=7da19b81-03f1-3b40-0097-d52231cf43e2&t=hard-raw-token",
+				),
 				headers: { "set-cookie": "sbsd_o=raw-secret; Path=/; Secure" },
 				url: "https://example.com/hard-raw",
 			},
 			{
 				status: 200,
-				body: sbsdInterstitial("https://example.com/.well-known/sbsd?v=passive-uuid"),
+				body: sbsdInterstitial(
+					"https://example.com/EdTyEb8L/9iGcpl/Gm?v=4d59eb4e-21b3-0dac-25d5-0fd50f72055b",
+				),
 				headers: { "set-cookie": "bm_so=another-secret; Path=/; Secure" },
 				url: "https://example.com/passive",
 			},
@@ -3411,7 +3438,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			challenge: {
 				kind: "akamai_sbsd",
 				pageUrl: "https://example.com/hard",
-				scriptUrl: "https://example.com/.well-known/sbsd?v=hard-uuid&t=hard-token",
+				scriptUrl:
+					"https://example.com/EdTyEb8L/9iGcpl/Gm?v=cc02dfc1-9ae3-c08a-756d-1a70a7494ebc&t=hard-token",
 				stateCookieName: "sbsd_o",
 			},
 			outcome: "resolver_unavailable",
@@ -3420,7 +3448,8 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			challenge: {
 				kind: "akamai_sbsd",
 				pageUrl: "https://example.com/hard-raw",
-				scriptUrl: "https://example.com/.well-known/sbsd?v=hard-raw&t=hard-raw-token",
+				scriptUrl:
+					"https://example.com/EdTyEb8L/9iGcpl/Gm?v=7da19b81-03f1-3b40-0097-d52231cf43e2&t=hard-raw-token",
 				stateCookieName: "sbsd_o",
 			},
 			outcome: "resolver_unavailable",
@@ -3429,7 +3458,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			challenge: {
 				kind: "akamai_sbsd",
 				pageUrl: "https://example.com/passive",
-				scriptUrl: "https://example.com/.well-known/sbsd?v=passive-uuid",
+				scriptUrl: "https://example.com/EdTyEb8L/9iGcpl/Gm?v=4d59eb4e-21b3-0dac-25d5-0fd50f72055b",
 				stateCookieName: "bm_so",
 			},
 			outcome: "resolver_unavailable",
@@ -3484,7 +3513,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(allWreqCalls()).toHaveLength(1);
 	});
 
-	it("ignores cache-busted bundles that are not served from /.well-known/sbsd", async () => {
+	it("ignores scripts whose v is not a UUID, wherever they are served from", async () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 200,
@@ -3494,7 +3523,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/assets/vendor.js?v=hard-uuid&amp;t=hard-token"),
+				body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=2.31.0&amp;t=hard-token"),
 				headers: {},
 				url: "https://example.com/hard",
 			},
@@ -3527,12 +3556,103 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(allWreqCalls()).toHaveLength(3);
 	});
 
+	it("does not remember a UUID-versioned bundle before any Akamai signal, but does on an interstitial", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 200,
+				body: '<!doctype html><script src="/static/app.js?v=0f5d3a77-7ad5-4a1e-9f42-6b4d0f4c1c2e"></script>',
+				headers: {},
+				url: "https://example.com/bootstrap",
+			},
+			{
+				status: 429,
+				body: '{"cpr_chlge":"true","t":"orphan-token"}',
+				headers: { "set-cookie": "sbsd_o=late-state; Path=/; Secure" },
+				url: "https://example.com/apis/bff/orphan",
+			},
+			{
+				status: 403,
+				body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=cc02dfc1-9ae3-c08a-756d-1a70a7494ebc"),
+				headers: {},
+				url: "https://example.com/hard",
+			},
+			{
+				status: 429,
+				body: '{"cpr_chlge":"true","t":"later-token"}',
+				headers: { "content-type": "application/json" },
+				url: "https://example.com/apis/bff/latest",
+			},
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		).createSession();
+
+		const bootstrap = await session.fetch("/bootstrap");
+		const orphan = await session.fetch("/apis/bff/orphan", { throwOnHttpError: false });
+		const hard = await session.fetch("/hard", { throwOnHttpError: false });
+		const later = await session.fetch("/apis/bff/latest", { throwOnHttpError: false });
+
+		expect(bootstrap.challenge).toBeUndefined();
+		expect(orphan.challenge).toBeUndefined();
+		expect(hard.challenge?.challenge.scriptUrl).toBe(
+			"https://example.com/EdTyEb8L/9iGcpl/Gm?v=cc02dfc1-9ae3-c08a-756d-1a70a7494ebc",
+		);
+		expect(later.challenge).toEqual({
+			challenge: {
+				kind: "akamai_sbsd",
+				pageUrl: "https://example.com/apis/bff/latest",
+				scriptUrl: "https://example.com/EdTyEb8L/9iGcpl/Gm?v=cc02dfc1-9ae3-c08a-756d-1a70a7494ebc",
+				stateCookieName: "sbsd_o",
+				challengeToken: "later-token",
+			},
+			outcome: "resolver_unavailable",
+		});
+	});
+
+	it("classifies the live obfuscated-path Access Denied shape with a v-only script and bm_so", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: LIVE_SBSD_ACCESS_DENIED_BODY,
+			headers: { "set-cookie": "bm_so=live-state; Path=/; Secure" },
+			url: "https://example.com/shop/nike/goods/88470490/",
+		});
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const response = await createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					browser: "chrome",
+					os: "windows",
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		).fetch("/shop/nike/goods/88470490/", { throwOnHttpError: false });
+
+		expect(response.status).toBe(403);
+		expect(response.challenge).toEqual({
+			challenge: {
+				kind: "akamai_sbsd",
+				pageUrl: "https://example.com/shop/nike/goods/88470490/",
+				scriptUrl: `https://example.com${LIVE_SBSD_ACCESS_DENIED_PATH}?v=30d52eec-2996-2ec2-539a-eb352f7e17c7`,
+				stateCookieName: "bm_so",
+			},
+			outcome: "resolver_unavailable",
+		});
+		expect(JSON.stringify(response.challenge)).not.toContain("live-state");
+	});
+
 	it("remembers a v-only script and applies a later cpr_chlge token as index zero", async () => {
 		const directCalls = installHyperPayloadFetch();
 		mockStealthState.queuedResponses.push(
 			{
 				status: 200,
-				body: '<!doctype html><script src="/.well-known/sbsd?v=remembered-uuid"></script>',
+				body: '<!doctype html><script src="/EdTyEb8L/9iGcpl/Gm?v=d8933a8a-961c-b0d5-e760-ffe1c8ef2e67"></script>',
 				headers: { "set-cookie": "sbsd_o=remembered-state; Path=/; Secure" },
 				url: "https://example.com/bootstrap",
 			},
@@ -3552,13 +3672,13 @@ describe("Akamai SBSD detection and safe refetch", () => {
 				status: 200,
 				body: "fixture-remembered-script",
 				headers: {},
-				url: "https://example.com/.well-known/sbsd?v=remembered-uuid",
+				url: "https://example.com/EdTyEb8L/9iGcpl/Gm?v=d8933a8a-961c-b0d5-e760-ffe1c8ef2e67",
 			},
 			{
 				status: 200,
 				body: "payload accepted",
 				headers: { "set-cookie": "sbsd_o=later-token-state; Path=/; Secure" },
-				url: "https://example.com/.well-known/sbsd?t=298133469",
+				url: "https://example.com/EdTyEb8L/9iGcpl/Gm?t=298133469",
 			},
 			{
 				status: 200,
@@ -3604,18 +3724,20 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(observedChallenge).toEqual({
 			kind: "akamai_sbsd",
 			pageUrl: "https://example.com/apis/bff/home/shortcuts",
-			scriptUrl: "https://example.com/.well-known/sbsd?v=remembered-uuid",
+			scriptUrl: "https://example.com/EdTyEb8L/9iGcpl/Gm?v=d8933a8a-961c-b0d5-e760-ffe1c8ef2e67",
 			stateCookieName: "sbsd_o",
 			challengeToken: "298133469",
 		});
 		expect(
 			allWreqCalls().some(
-				(call) => call.url === "https://example.com/.well-known/sbsd?v=remembered-uuid",
+				(call) =>
+					call.url ===
+					"https://example.com/EdTyEb8L/9iGcpl/Gm?v=d8933a8a-961c-b0d5-e760-ffe1c8ef2e67",
 			),
 		).toBe(true);
 		expect(
 			allWreqCalls().some(
-				(call) => call.url === "https://example.com/.well-known/sbsd?t=298133469",
+				(call) => call.url === "https://example.com/EdTyEb8L/9iGcpl/Gm?t=298133469",
 			),
 		).toBe(true);
 		expect(directCalls).toHaveLength(1);
@@ -3626,7 +3748,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 200,
-				body: '<!doctype html><script src="/.well-known/sbsd?v=session-a"></script>',
+				body: '<!doctype html><script src="/EdTyEb8L/9iGcpl/Gm?v=d3cbc8c4-3aec-9ac9-b85d-923eaadc1bbb"></script>',
 				headers: { "set-cookie": "sbsd_o=session-a-state; Path=/; Secure" },
 				url: "https://example.com/bootstrap",
 			},
@@ -3664,13 +3786,15 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 200,
-				body: '<!doctype html><script src="/.well-known/sbsd?v=old-version"></script>',
+				body: '<!doctype html><script src="/EdTyEb8L/9iGcpl/Gm?v=41977c8e-541e-d05c-aa32-22b6ba56dae5"></script>',
 				headers: { "set-cookie": "sbsd_o=old-state; Path=/; Secure" },
 				url: "https://example.com/bootstrap",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=new-version&t=hard-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=c344bb72-2179-d26d-d720-c0b885ba7278&t=hard-token",
+				),
 				headers: { "set-cookie": "sbsd_o=new-state; Path=/; Secure" },
 				url: "https://example.com/hard",
 			},
@@ -3697,13 +3821,13 @@ describe("Akamai SBSD detection and safe refetch", () => {
 
 		expect(bootstrap.challenge).toBeUndefined();
 		expect(hard.challenge?.challenge.scriptUrl).toBe(
-			"https://example.com/.well-known/sbsd?v=new-version&t=hard-token",
+			"https://example.com/EdTyEb8L/9iGcpl/Gm?v=c344bb72-2179-d26d-d720-c0b885ba7278&t=hard-token",
 		);
 		expect(later.challenge).toEqual({
 			challenge: {
 				kind: "akamai_sbsd",
 				pageUrl: "https://example.com/apis/bff/latest",
-				scriptUrl: "https://example.com/.well-known/sbsd?v=new-version",
+				scriptUrl: "https://example.com/EdTyEb8L/9iGcpl/Gm?v=c344bb72-2179-d26d-d720-c0b885ba7278",
 				stateCookieName: "sbsd_o",
 				challengeToken: "later-token",
 			},
@@ -3737,7 +3861,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 200,
-				body: '<!doctype html><script src="/.well-known/sbsd?v=before-close"></script>',
+				body: '<!doctype html><script src="/EdTyEb8L/9iGcpl/Gm?v=a8a33e78-c760-c215-941e-837f43b97f2c"></script>',
 				headers: { "set-cookie": "sbsd_o=before-close-state; Path=/; Secure" },
 				url: "https://example.com/bootstrap",
 			},
@@ -3848,7 +3972,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		installHyperPayloadFetch();
 		queueHardSbsdSolve({
 			status: 403,
-			body: sbsdInterstitial("/.well-known/sbsd?v=second-uuid&t=second-token"),
+			body: sbsdInterstitial(
+				"/EdTyEb8L/9iGcpl/Gm?v=93ab8e1e-6d8b-882a-679e-b8621bd7eee8&t=second-token",
+			),
 			headers: {},
 			url: "https://example.com/protected",
 		});
@@ -3879,7 +4005,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		).fetch("/protected");
 
 		expect(response.challenge?.outcome).toBe("challenge_persisted");
-		expect(response.body).toContain("second-uuid");
+		expect(response.body).toContain("93ab8e1e-6d8b-882a-679e-b8621bd7eee8");
 		expect(solves).toBe(1);
 		expect(
 			allWreqCalls().filter((call) => call.url === "https://example.com/protected"),
@@ -3890,13 +4016,17 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=shared-uuid&t=shared-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=bf2c617b-b4b9-4164-14c9-f4d9a2fc8643&t=shared-token",
+				),
 				headers: { "set-cookie": "sbsd_o=shared-state; Path=/; Secure" },
 				url: "https://example.com/first",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=shared-uuid&t=shared-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=bf2c617b-b4b9-4164-14c9-f4d9a2fc8643&t=shared-token",
+				),
 				headers: {},
 				url: "https://example.com/second",
 			},
@@ -3957,13 +4087,17 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=failed-epoch&t=shared-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=9313142f-5127-f727-570a-d6ddac6e1eea&t=shared-token",
+				),
 				headers: { "set-cookie": "sbsd_o=shared-failure; Path=/; Secure" },
 				url: "https://example.com/failure-owner",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=failed-epoch&t=shared-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=9313142f-5127-f727-570a-d6ddac6e1eea&t=shared-token",
+				),
 				headers: {},
 				url: "https://example.com/failure-waiter",
 			},
@@ -4020,13 +4154,17 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=retry-epoch&t=same-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=c3724777-9527-1875-f4c4-46d8dda4a040&t=same-token",
+				),
 				headers: { "set-cookie": "sbsd_o=first-epoch; Path=/; Secure" },
 				url: "https://example.com/retry-epoch",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=retry-epoch&t=same-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=c3724777-9527-1875-f4c4-46d8dda4a040&t=same-token",
+				),
 				headers: {},
 				url: "https://example.com/retry-epoch",
 			},
@@ -4079,19 +4217,25 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=overlap-a&t=token-a"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=246d4798-0879-fdf3-23c6-f60e0fe08aa3&t=token-a",
+				),
 				headers: { "set-cookie": "sbsd_o=overlap-a; Path=/; Secure" },
 				url: "https://example.com/overlap-a",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=overlap-b&t=token-b"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=61cb52f8-0d7d-35d5-5830-9e0a7b79754c&t=token-b",
+				),
 				headers: { "set-cookie": "sbsd_o=overlap-b; Path=/; Secure" },
 				url: "https://example.com/overlap-b-owner",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=overlap-b&t=token-b"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=61cb52f8-0d7d-35d5-5830-9e0a7b79754c&t=token-b",
+				),
 				headers: {},
 				url: "https://example.com/overlap-b-waiter",
 				beforeArrayBuffer: async () => {
@@ -4140,7 +4284,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 							async solve(challenge) {
 								solves += 1;
 								const version = new URL(challenge.scriptUrl).searchParams.get("v");
-								if (version === "overlap-a") {
+								if (version === "246d4798-0879-fdf3-23c6-f60e0fe08aa3") {
 									markAStarted();
 									await aReleased;
 									throw new SDKError("fixture overlap A failure", {
@@ -4233,7 +4377,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(ipDefaults.some(([name]) => name.toLowerCase() === "cookie")).toBe(false);
 		expect(JSON.stringify(ipClient?.options)).not.toContain("upstream-secret");
 		const scriptCall = allWreqCalls().find(
-			(call) => call.url === "https://example.com/.well-known/sbsd?v=fixture-uuid&t=fixture-token",
+			(call) =>
+				call.url ===
+				"https://example.com/EdTyEb8L/9iGcpl/Gm?v=f2a6dfca-cc41-5685-7029-1dbc32e8fe77&t=fixture-token",
 		);
 		expect(requestHeader(scriptCall?.init, "cookie")).toContain("sbsd_o=initial-state");
 	});
@@ -4241,7 +4387,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 	it("surfaces a resolver failure unnormalized and without transport retries", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 403,
-			body: sbsdInterstitial("/.well-known/sbsd?v=exhausted&t=exhausted-token"),
+			body: sbsdInterstitial(
+				"/EdTyEb8L/9iGcpl/Gm?v=e349d735-a5fa-5b10-d977-0031e669c477&t=exhausted-token",
+			),
 			headers: { "set-cookie": "sbsd_o=exhausted-state; Path=/; Secure" },
 			url: "https://example.com/protected",
 		});
@@ -4274,7 +4422,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=budget&t=budget-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=2f212049-ce79-d2b9-49fd-242043004288&t=budget-token",
+				),
 				headers: { "set-cookie": "sbsd_o=budget-state; Path=/; Secure" },
 				url: "https://example.com/protected",
 			},
@@ -4317,17 +4467,116 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(allWreqCalls()).toHaveLength(2);
 	});
 
+	it("holds a waiter of a shared solve to the same one-refetch budget", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=2f212049-ce79-d2b9-49fd-242043004288&t=budget-token",
+				),
+				headers: { "set-cookie": "sbsd_o=budget-state; Path=/; Secure" },
+				url: "https://example.com/owner",
+			},
+			{
+				status: 403,
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=2f212049-ce79-d2b9-49fd-242043004288&t=budget-token",
+				),
+				headers: {},
+				url: "https://example.com/waiter",
+			},
+			{
+				status: 200,
+				body: "never read",
+				headers: {},
+				url: "https://example.com/owner",
+				beforeReturn: async () => {
+					throw new Error("Request timed out");
+				},
+			},
+			{
+				status: 200,
+				body: "never read",
+				headers: {},
+				url: "https://example.com/waiter",
+				beforeReturn: async () => {
+					throw new Error("Request timed out");
+				},
+			},
+			{
+				status: 200,
+				body: "third GET must not happen",
+				headers: {},
+				url: "https://example.com/waiter",
+			},
+		);
+		let releaseSolve!: () => void;
+		let markSolveStarted!: () => void;
+		const solveStarted = new Promise<void>((resolve) => {
+			markSolveStarted = resolve;
+		});
+		const solveReleased = new Promise<void>((resolve) => {
+			releaseSolve = resolve;
+		});
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								markSolveStarted();
+								await solveReleased;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+
+		const owner = session.fetch("/owner");
+		await solveStarted;
+		const waiter = session.fetch("/waiter", {
+			retry: { attempts: 3, baseDelayMs: 0, errorCodes: ["transport_timeout"] },
+		});
+		while (allWreqCalls().filter((call) => /\/(?:owner|waiter)$/u.test(call.url)).length < 2) {
+			await new Promise((resolve) => setTimeout(resolve, 0));
+		}
+		releaseSolve();
+		const settled = await Promise.allSettled([owner, waiter]);
+
+		expect(settled.map((result) => result.status)).toEqual(["rejected", "rejected"]);
+		for (const result of settled) {
+			if (result.status === "rejected") {
+				expect(result.reason).toMatchObject({ code: "transport_timeout" });
+			}
+		}
+		expect(solves).toBe(1);
+		// Owner and waiter each spent their single refetch; the queued third GET stays unread.
+		expect(allWreqCalls()).toHaveLength(4);
+		expect(mockStealthState.queuedResponses).toHaveLength(1);
+	});
+
 	it("does not coalesce concurrent challenges that resolve different wreq identities on one session", async () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=identity&t=identity-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=ff483d1f-f591-898a-9942-916050d2ca3f&t=identity-token",
+				),
 				headers: { "set-cookie": "sbsd_o=identity-state; Path=/; Secure" },
 				url: "https://example.com/windows",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=identity&t=identity-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=ff483d1f-f591-898a-9942-916050d2ca3f&t=identity-token",
+				),
 				headers: {},
 				url: "https://example.com/macos",
 			},
@@ -4382,19 +4631,25 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=pending-a&t=token-a"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=f0cbf170-ff58-e0d9-eb04-42bcbe09e0be&t=token-a",
+				),
 				headers: { "set-cookie": "sbsd_o=pending-a; Path=/; Secure" },
 				url: "https://example.com/a-first",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=pending-b&t=token-b"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=3fea4a54-d5b2-e9e8-1ee4-1bc2cda10436&t=token-b",
+				),
 				headers: {},
 				url: "https://example.com/b",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=pending-a&t=token-a"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=f0cbf170-ff58-e0d9-eb04-42bcbe09e0be&t=token-a",
+				),
 				headers: {},
 				url: "https://example.com/a-second",
 			},
@@ -4404,7 +4659,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		);
 		const started = new Map<string, () => void>();
 		const startedPromises = new Map<string, Promise<void>>();
-		for (const version of ["pending-a", "pending-b"]) {
+		for (const version of [PENDING_A_VERSION, PENDING_B_VERSION]) {
 			startedPromises.set(
 				version,
 				new Promise<void>((resolve) => {
@@ -4438,9 +4693,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		).createSession();
 
 		const aFirst = session.fetch("/a-first");
-		await startedPromises.get("pending-a");
+		await startedPromises.get(PENDING_A_VERSION);
 		const b = session.fetch("/b");
-		await startedPromises.get("pending-b");
+		await startedPromises.get(PENDING_B_VERSION);
 		const aSecond = session.fetch("/a-second");
 		while (allWreqCalls().length < 3) await new Promise((resolve) => setTimeout(resolve, 0));
 		for (let pendingStep = 0; pendingStep < 10; pendingStep += 1) await Promise.resolve();
@@ -4458,13 +4713,17 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=session-local&t=shared-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=ec946973-10d6-3c74-6113-d9a0245e607c&t=shared-token",
+				),
 				headers: { "set-cookie": "sbsd_o=session-a; Path=/; Secure" },
 				url: "https://example.com/session-a",
 			},
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=session-local&t=shared-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=ec946973-10d6-3c74-6113-d9a0245e607c&t=shared-token",
+				),
 				headers: { "set-cookie": "sbsd_o=session-b; Path=/; Secure" },
 				url: "https://example.com/session-b",
 			},
@@ -4535,7 +4794,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 	)("returns replay_required without solving or refetching a $name", async ({ options }) => {
 		mockStealthState.queuedResponses.push({
 			status: 403,
-			body: sbsdInterstitial("/.well-known/sbsd?v=unsafe-uuid&t=unsafe-token"),
+			body: sbsdInterstitial(
+				"/EdTyEb8L/9iGcpl/Gm?v=5c4be91d-b5df-9b75-ddbd-45c3f6a8230b&t=unsafe-token",
+			),
 			headers: { "set-cookie": "sbsd_o=unsafe-state; Path=/; Secure" },
 			url: "https://example.com/protected",
 		});
@@ -4729,7 +4990,9 @@ describe("server SBSD bound-transport wiring", () => {
 	it("returns detection-only classification for a provider without a resolver", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 403,
-			body: sbsdInterstitial("/.well-known/sbsd?v=report-only&t=fixture-token"),
+			body: sbsdInterstitial(
+				"/EdTyEb8L/9iGcpl/Gm?v=1a698841-06a1-45da-88d3-caa3390ef962&t=fixture-token",
+			),
 			headers: { "set-cookie": "sbsd_o=report-only-secret; Path=/; Secure" },
 			url: "https://example.com/report-only",
 		});
@@ -4768,15 +5031,63 @@ describe("server SBSD bound-transport wiring", () => {
 		expect(response.status).toBe(200);
 		expect(await response.json()).toEqual({
 			data: {
-				body: sbsdInterstitial("/.well-known/sbsd?v=report-only&t=fixture-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=1a698841-06a1-45da-88d3-caa3390ef962&t=fixture-token",
+				),
 				outcome: "resolver_unavailable",
 			},
 		});
 		expect(allWreqCalls()).toHaveLength(1);
 	});
 
+	it("keeps detect-only classification when an unrelated resolver kind names another browser family", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: sbsdInterstitial(
+				"/EdTyEb8L/9iGcpl/Gm?v=1a698841-06a1-45da-88d3-caa3390ef962&t=fixture-token",
+			),
+			headers: { "set-cookie": "sbsd_o=unrelated-secret; Path=/; Secure" },
+			url: "https://example.com/report-only",
+		});
+		const provider = createProviderDefinitionDouble({
+			id: "stealth-sbsd-detect-only-unrelated-resolver",
+			allowedHosts: ["example.com"],
+			stealth: {
+				browser: "chrome",
+				os: "macos",
+				challengeDetection: { akamaiSbsd: true },
+			},
+			resolver: { vendors: ["2captcha"], kinds: ["turnstile"], clientProfile: "safari17_0" },
+			operations: {
+				report: {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ outcome: z.string() }),
+					upstream: { baseUrl: "https://example.com" },
+					handler: async (ctx) => {
+						const response = await ctx.stealth.fetch("/report-only");
+						return { outcome: response.challenge?.outcome ?? "missing" };
+					},
+				},
+			},
+		});
+		const { createServerAppAsync } = await import("../server/serve.js");
+		const app = await createServerAppAsync(provider, { logger: () => undefined });
+		const response = await app.request("/v1/report", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req-sbsd-unrelated-resolver", input: {} }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ data: { outcome: "resolver_unavailable" } });
+		expect(allWreqCalls()).toHaveLength(1);
+	});
+
 	it("does not inspect SBSD responses when neither resolver nor detection flag is declared", async () => {
-		const interstitial = sbsdInterstitial("/.well-known/sbsd?v=ignored&t=ignored-token");
+		const interstitial = sbsdInterstitial(
+			"/EdTyEb8L/9iGcpl/Gm?v=f3f98c5d-41d7-c992-a6fb-63799f700f2b&t=ignored-token",
+		);
 		mockStealthState.queuedResponses.push({
 			status: 403,
 			body: interstitial,
@@ -4840,7 +5151,9 @@ describe("server SBSD bound-transport wiring", () => {
 	it("rejects a per-request stealth browser override outside the resolver client profile family", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 403,
-			body: sbsdInterstitial("/.well-known/sbsd?v=mismatch&t=mismatch-token"),
+			body: sbsdInterstitial(
+				"/EdTyEb8L/9iGcpl/Gm?v=1d1c5b76-da94-4b44-db42-c9d0558021c5&t=mismatch-token",
+			),
 			headers: { "set-cookie": "sbsd_o=mismatch-state; Path=/; Secure" },
 			url: "https://example.com/profile-probe",
 		});
@@ -4868,7 +5181,9 @@ describe("server SBSD bound-transport wiring", () => {
 		mockStealthState.queuedResponses.push(
 			{
 				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=defined-uuid&t=defined-token"),
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=6ca5ebff-2e9b-746a-caf7-39410ab1802f&t=defined-token",
+				),
 				headers: { "set-cookie": "sbsd_o=defined-state; Path=/; Secure" },
 				url: "https://example.com/defined",
 			},
@@ -4933,7 +5248,8 @@ describe("server SBSD bound-transport wiring", () => {
 				challenge: {
 					kind: "akamai_sbsd",
 					pageUrl: "https://example.com/defined",
-					scriptUrl: "https://example.com/.well-known/sbsd?v=defined-uuid&t=defined-token",
+					scriptUrl:
+						"https://example.com/EdTyEb8L/9iGcpl/Gm?v=6ca5ebff-2e9b-746a-caf7-39410ab1802f&t=defined-token",
 					stateCookieName: "sbsd_o",
 				},
 				tracedSpan: true,
@@ -5026,6 +5342,79 @@ describe("server SBSD bound-transport wiring", () => {
 				else process.env[name] = value;
 			}
 		}
+	});
+
+	it("solves challenged auth-flow GETs through a declared resolver when stealth is not declared", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial(
+					"/EdTyEb8L/9iGcpl/Gm?v=6ca5ebff-2e9b-746a-caf7-39410ab1802f&t=auth-token",
+				),
+				headers: { "set-cookie": "sbsd_o=auth-state; Path=/; Secure" },
+				url: "https://example.com/auth-protected",
+			},
+			{
+				status: 200,
+				body: "auth protected",
+				headers: {},
+				url: "https://example.com/auth-protected",
+			},
+		);
+		const solved: unknown[] = [];
+		const resolver = {
+			async solve(challenge: unknown) {
+				solved.push(challenge);
+				return fixtureSbsdCookieSolution();
+			},
+		} as ResolverContext;
+		const provider = createProviderDefinitionDouble({
+			id: "stealth-sbsd-auth-default-client",
+			allowedHosts: ["example.com"],
+			resolver: {
+				vendors: ["hypersolutions"],
+				kinds: ["akamai_sbsd"],
+				clientProfile: "chrome_149",
+			},
+			auth: {
+				mode: "credentials",
+				flow: {
+					start: async (ctx) => {
+						const response = await ctx.stealth.fetch("/auth-protected");
+						return {
+							kind: "message",
+							turnId: "sbsd-auth-default",
+							data: { status: response.status, outcome: response.challenge?.outcome ?? "solved" },
+						};
+					},
+					continue: async () => ({ kind: "abort", turnId: "unused" }),
+				},
+			},
+		});
+		const { createServerAppAsync } = await import("../server/serve.js");
+		const app = await createServerAppAsync(provider, { logger: () => undefined, resolver });
+		const auth = await app.request("/auth/start", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				requestId: "req-sbsd-auth-default",
+				flowId: "flow-sbsd-default",
+				providerId: "stealth-sbsd-auth-default-client",
+				connectionId: "connection-sbsd-default",
+				context: {},
+			}),
+		});
+
+		expect(auth.status).toBe(200);
+		expect(await auth.json()).toMatchObject({
+			data: { data: { status: 200, outcome: "solved" } },
+		});
+		expect(solved).toHaveLength(1);
+		expect(solved[0]).toMatchObject({ kind: "akamai_sbsd", stateCookieName: "sbsd_o" });
+		expect(allWreqCalls()).toHaveLength(2);
+		expect(
+			mockStealthState.clients.every((client) => client.options?.browser === "chrome_149"),
+		).toBe(true);
 	});
 });
 

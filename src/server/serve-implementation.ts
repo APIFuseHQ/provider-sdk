@@ -627,7 +627,9 @@ function createStealthChallengeDetection(
 	return {
 		akamaiSbsd: {
 			allowedHosts: provider.allowedHosts ?? [],
-			...(provider.resolver?.clientProfile
+			// The profile belongs to the SBSD resolver; a resolver declared for other kinds
+			// may name a different browser without affecting detect-only classification.
+			...(resolverDeclared && provider.resolver?.clientProfile
 				? { clientProfile: provider.resolver.clientProfile }
 				: {}),
 			...(resolverDeclared && resolverRuntime
@@ -849,10 +851,12 @@ function createProviderContext(
 		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
-		...(provider.stealth
+		// A declared resolver without a `stealth` block still gets the default Chrome client
+		// (auth FlowContext is not capability-gated), so the runtime must ride along.
+		...(provider.stealth || challengeRuntime
 			? {
 					stealth: {
-						...provider.stealth,
+						...(provider.stealth ?? {}),
 						...(challengeRuntime ? { challengeRuntime } : {}),
 					},
 				}
@@ -1077,10 +1081,12 @@ function createAuthFlowContext(
 		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
-		...(provider.stealth
+		// A declared resolver without a `stealth` block still gets the default Chrome client
+		// (auth FlowContext is not capability-gated), so the runtime must ride along.
+		...(provider.stealth || challengeRuntime
 			? {
 					stealth: {
-						...provider.stealth,
+						...(provider.stealth ?? {}),
 						...(challengeRuntime ? { challengeRuntime } : {}),
 					},
 				}

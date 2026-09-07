@@ -41,11 +41,20 @@ export type AkamaiSbsdSessionState = {
 	>;
 };
 
-/** Akamai serves the SBSD script from this fixed path; cache-busted bundles never match it. */
-const SBSD_SCRIPT_PATH = "/.well-known/sbsd";
+/**
+ * Live SBSD `<script src>` paths are per-site obfuscated (zozo.jp captures, 2026-08-28:
+ * `/EdTyEb8Lyxqf/9iGcpl/GmKux0/DXObrkm53w/B1p4AQ/ZCF5f/VoJN08X?v=<uuid>` on the
+ * `Access Denied` shape, `/SHO9K/...?v=<uuid>&t=<token>` on the behavioral-tile hard shape).
+ * `/.well-known/sbsd` is only the POST endpoint string inside the deobfuscated
+ * script, never the page's script path. The stable shape is a same-origin script whose `v`
+ * is a UUID; cache-busted bundles (`?v=abc123`, hashes, semver) never match it.
+ */
+const SBSD_SCRIPT_VERSION = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/iu;
 const SBSD_INTERSTITIAL_MAX_BYTES = 4_000;
 const SBSD_SCRIPT_DISCOVERY_MAX_BYTES = 4 * 1_024 * 1_024;
 const SBSD_CHALLENGE_TOKEN_MAX_BYTES = 1_024;
+const SBSD_INTERSTITIAL_MARKER =
+	/sec-bc-tile-container|Access Denied|Reference #\d|Pardon Our Interruption|cpr_chlge/iu;
 
 function htmlAttribute(value: string): string {
 	return value.replace(/&amp;/giu, "&");
@@ -57,7 +66,10 @@ function isDeclaredHost(url: URL, allowedHosts: readonly string[]): boolean {
 }
 
 export function findAkamaiSbsdScript(body: string, page: URL): URL | undefined {
-	if (Buffer.byteLength(body) > SBSD_SCRIPT_DISCOVERY_MAX_BYTES) return undefined;
+	// Only markup carries the script tag; JSON and binary bodies skip the scan entirely.
+	if (!/^\s*</u.test(body) || Buffer.byteLength(body) > SBSD_SCRIPT_DISCOVERY_MAX_BYTES) {
+		return undefined;
+	}
 	let passiveScript: URL | undefined;
 	for (const match of body.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/giu)) {
 		let script: URL;
@@ -66,17 +78,20 @@ export function findAkamaiSbsdScript(body: string, page: URL): URL | undefined {
 		} catch {
 			continue;
 		}
-		if (
-			script.origin !== page.origin ||
-			script.pathname !== SBSD_SCRIPT_PATH ||
-			!script.searchParams.get("v")?.trim()
-		) {
+		const version = script.searchParams.get("v")?.trim();
+		if (script.origin !== page.origin || !version || !SBSD_SCRIPT_VERSION.test(version)) {
 			continue;
 		}
 		if (script.searchParams.get("t")?.trim()) return script;
 		passiveScript ??= script;
 	}
 	return passiveScript;
+}
+
+function isAkamaiSbsdInterstitial(body: string): boolean {
+	return (
+		Buffer.byteLength(body) < SBSD_INTERSTITIAL_MAX_BYTES && SBSD_INTERSTITIAL_MARKER.test(body)
+	);
 }
 
 function parseAkamaiSbsdChallengeToken(body: string): string | undefined {
@@ -116,6 +131,17 @@ export function detectAkamaiSbsdChallenge(
 		return undefined;
 	}
 	if (!isDeclaredHost(page, allowedHosts)) return undefined;
+	const stateCookieName = jar.has("sbsd_o", page.toString())
+		? "sbsd_o"
+		: jar.has("bm_so", page.toString())
+			? "bm_so"
+			: undefined;
+	const interstitial = isAkamaiSbsdInterstitial(response.body);
+	// Without the state cookie (the jar already holds the Set-Cookie of this very response;
+	// the live capture sets bm_so on the page that carries the script) or an interstitial,
+	// nothing here is Akamai's: do not scan, and do not let an unrelated UUID-versioned
+	// bundle become the remembered script.
+	if (!stateCookieName && !interstitial) return undefined;
 	const currentScript = findAkamaiSbsdScript(response.body, page);
 	if (currentScript) {
 		const version = currentScript.searchParams.get("v")?.trim();
@@ -125,11 +151,6 @@ export function detectAkamaiSbsdChallenge(
 			state.rememberedScript = rememberedScript;
 		}
 	}
-	const stateCookieName = jar.has("sbsd_o", page.toString())
-		? "sbsd_o"
-		: jar.has("bm_so", page.toString())
-			? "bm_so"
-			: undefined;
 	if (!stateCookieName) return undefined;
 
 	const laterToken = parseAkamaiSbsdChallengeToken(response.body);
@@ -143,15 +164,7 @@ export function detectAkamaiSbsdChallenge(
 			challengeToken: laterToken,
 		};
 	}
-	if (
-		!currentScript ||
-		Buffer.byteLength(response.body) >= SBSD_INTERSTITIAL_MAX_BYTES ||
-		!/sec-bc-tile-container|Access Denied|Reference #\d|Pardon Our Interruption|cpr_chlge/iu.test(
-			response.body,
-		)
-	) {
-		return undefined;
-	}
+	if (!currentScript || !interstitial) return undefined;
 	return {
 		kind: "akamai_sbsd",
 		pageUrl: page.toString(),
