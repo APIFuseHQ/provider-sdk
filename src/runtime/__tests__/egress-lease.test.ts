@@ -124,6 +124,24 @@ describe("engine ceremony egress lease", () => {
 		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_KEY_MISSING" }));
 	});
 
+	it("rejects a key shorter than the documented 32 bytes before minting or verifying", () => {
+		const thirtyOneBytes = "0123456789abcdef0123456789abcde";
+		expect(() =>
+			runtime({ environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: thirtyOneBytes } }),
+		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_KEY_WEAK" }));
+		const handle = mintSmartproxyHandle();
+		expect(() =>
+			runtime({
+				handle,
+				environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: thirtyOneBytes },
+			}),
+		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_KEY_WEAK" }));
+		expect(
+			runtime({ environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: `${thirtyOneBytes}f` } })
+				.binding,
+		).toBeUndefined();
+	});
+
 	it("rejects a missing tenant before a lease can be minted", () => {
 		expect(() =>
 			createCeremonyEgressLeaseRuntime({
@@ -178,7 +196,7 @@ describe("engine ceremony egress lease", () => {
 			runtime({
 				handle,
 				now: () => 1_001,
-				environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "rotated-engine-key" },
+				environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "rotated-engine-key-0123456789abcdef" },
 			}),
 		).toThrow(expect.objectContaining({ code: "EGRESS_LEASE_INVALID" }));
 	});
@@ -213,6 +231,22 @@ describe("engine ceremony egress lease", () => {
 		lease.bind({ ...SMARTPROXY_BINDING, poolIndex: 5 });
 		expect(lease.binding?.poolIndex).toBe(5);
 		expect(lease.handle()).toBeString();
+		expect(lease.handle()).not.toBe(firstHandle);
+	});
+
+	it("releases a binding on demand so the next attempt binds a fresh endpoint", () => {
+		const lease = runtime({ now: () => 1_000 });
+		expect(lease.dropBinding()).toBe(false);
+		lease.bind(SMARTPROXY_BINDING);
+		const firstHandle = lease.handle();
+
+		expect(lease.dropBinding()).toBe(true);
+		expect(lease.binding).toBeUndefined();
+		expect(lease.handle()).toBeUndefined();
+		expect(lease.dropBinding()).toBe(false);
+
+		lease.bind({ ...SMARTPROXY_BINDING, poolIndex: 5 });
+		expect(lease.binding?.poolIndex).toBe(5);
 		expect(lease.handle()).not.toBe(firstHandle);
 	});
 

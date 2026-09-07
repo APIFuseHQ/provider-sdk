@@ -161,6 +161,8 @@ describe("2captcha resolver vendor", () => {
 				undefined,
 				new AbortController().signal,
 				recorder,
+				undefined,
+				{ vendorIndex: 1 },
 			),
 		).resolves.toEqual({ form: "token", token: "traced-token" });
 
@@ -275,6 +277,8 @@ describe("2captcha resolver vendor", () => {
 				{ proxyUrl, userAgent: "Browser/1.0" },
 				new AbortController().signal,
 				recorder,
+				undefined,
+				{ vendorIndex: 1 },
 			),
 		);
 

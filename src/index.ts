@@ -210,7 +210,10 @@ export {
 } from "./runtime/resolver-config.js";
 export { createUnsupportedResolverClient } from "./runtime/resolver-shared.js";
 export type { ResolverRuntimeOptions } from "./runtime/resolver.js";
-export type { ResolverVendorTransport } from "./runtime/resolver-vendors/types.js";
+export type {
+	ResolverPaidUsageContext,
+	ResolverVendorTransport,
+} from "./runtime/resolver-vendors/types.js";
 export {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,

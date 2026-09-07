@@ -279,6 +279,9 @@ function mockEmulationHeaders(profile: string, os = "macos") {
 	]);
 }
 
+/** 37 bytes: the lease runtime enforces the documented 32-byte minimum. */
+const FIXTURE_LEASE_KEY = "fixture-ceremony-key-0123456789abcdef";
+
 /** Attaches the server-owned challenge wiring and ceremony lease the way createServerApp does. */
 function sbsdClientOptions(
 	options: StealthClientOptions & {
@@ -5166,7 +5169,12 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			url: "https://example.com/mutate",
 		};
 		mockStealthState.queuedResponses.push(challenge, failure, challenge, failure);
-		const attempts: Array<{ outcome: string; status?: number; errorCode?: string }> = [];
+		const attempts: Array<{
+			outcome: string;
+			status?: number;
+			errorCode?: string;
+			durationMs?: number;
+		}> = [];
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const session = createStealthClient(
 			"https://example.com",
@@ -5204,7 +5212,13 @@ describe("Akamai SBSD detection and safe refetch", () => {
 
 		const lenient = await session.fetch("/mutate", { method: "POST", throwOnHttpError: false });
 		expect(lenient.challenge?.outcome).toBe("replay_required");
+		// The caller's think time between the challenged fetch and the replay is not transport
+		// duration: the replay's record is timed from the replay, not from the initiating fetch.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		const replayStartedAt = Date.now();
 		await expect(session.replayChallenged(lenient)).resolves.toMatchObject({ status: 500 });
+		const replayDurationCeiling = Date.now() - replayStartedAt;
+		expect(attempts[1]?.durationMs).toBeLessThanOrEqual(replayDurationCeiling);
 
 		// The classified 403 is returned even with the default throwOnHttpError (documented
 		// exception); the replayed 500 is not classified, so it throws like any fetch would.
@@ -5235,7 +5249,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const environment = {
-			[APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "fixture-ceremony-key",
+			[APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY,
 		};
 		const engineCredentials = {
 			[NODEMAVEN_USERNAME_ENV]: "fixture-account",
@@ -5317,7 +5331,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			flowId: "flow-1",
 			affinityKey: "connection-1",
 			now: () => now,
-			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "fixture-ceremony-key" },
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
 		});
 		mockStealthState.queuedResponses.push(
 			{
@@ -5394,7 +5408,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			flowId: "flow-1",
 			affinityKey: "connection-1",
 			now: () => now,
-			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "fixture-ceremony-key" },
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
 		});
 		mockStealthState.queuedResponses.push(
 			{
@@ -5470,6 +5484,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 				return boundElsewhere ? foreignBinding : undefined;
 			},
 			dropExpiredBinding: () => false,
+			dropBinding: () => false,
 			bind() {
 				throw new Error("the racing request must not bind over the existing binding");
 			},
@@ -5521,7 +5536,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			flowId: "flow-1",
 			affinityKey: "connection-1",
 			now: () => now,
-			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "fixture-ceremony-key" },
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
 		});
 		lease.bind({
 			vendor: "smartproxy",
@@ -5567,6 +5582,141 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		);
 		expect(lease.handle()).toBe(handle);
 		expect(lease.binding?.proxyUrl).toBe(boundProxy);
+	});
+
+	it("releases a bound endpoint that fails at the transport and rebinds a fresh egress in the same request", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		// A raw Smartproxy endpoint bound by an earlier turn that has since died. The fresh
+		// selection goes to the policy's NodeMaven leg (Smartproxy needs the allocator API).
+		const deadProxy = "http://user:password@198.51.100.7:9000";
+		let resolutions = 0;
+		const attempts: Array<{ outcome: string; errorCode?: string }> = [];
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
+		});
+		lease.bind({
+			vendor: "smartproxy",
+			proxyUrl: deadProxy,
+			poolIndex: 0,
+			affinityKey: "connection-1",
+			refreshEpoch: 0,
+			lifetimeMinutes: 30,
+		});
+		const deadHandle = lease.handle();
+		mockStealthState.queuedErrors.push(new Error("proxy CONNECT failed"));
+		mockStealthState.queuedResponses.push({ status: 200, body: "fresh egress", headers: {} });
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 30 },
+					},
+				},
+				affinityKey: "connection-1",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				telemetry: {
+					recordProxyResolution() {
+						resolutions += 1;
+					},
+					recordProxyAttempt(attempt) {
+						attempts.push(attempt);
+					},
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+			}),
+		).createSession();
+
+		// An unsafe method: the tunnel never opened, so the origin never saw the request and
+		// the fresh attempt is safe whatever the method.
+		await expect(
+			session.fetch("/otp", { method: "POST", body: "code=123456" }),
+		).resolves.toMatchObject({ status: 200 });
+
+		expect(resolutions).toBe(1);
+		expect(mockStealthState.clients).toHaveLength(2);
+		expect(mockStealthState.clients[0]?.options?.proxy).toBe(deadProxy);
+		expect(mockStealthState.clients[1]?.options?.proxy).not.toBe(deadProxy);
+		expect(lease.binding?.vendor).toBe("nodemaven");
+		expect(lease.binding?.proxyUrl).not.toBe(deadProxy);
+		expect(lease.handle()).toBeString();
+		expect(lease.handle()).not.toBe(deadHandle);
+		expect(attempts.map(({ outcome, errorCode }) => [outcome, errorCode])).toEqual([
+			["error", "proxy_connect_failed"],
+			["ok", undefined],
+		]);
+	});
+
+	it("keeps the binding when the bound endpoint carries an origin error response", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const boundProxy = "http://user:password@198.51.100.7:9000";
+		let resolutions = 0;
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
+		});
+		lease.bind({
+			vendor: "smartproxy",
+			proxyUrl: boundProxy,
+			poolIndex: 0,
+			affinityKey: "connection-1",
+			refreshEpoch: 0,
+			lifetimeMinutes: 30,
+		});
+		const handle = lease.handle();
+		mockStealthState.queuedResponses.push({ status: 500, body: "origin broke", headers: {} });
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["smartproxy"],
+						session: { affinity: "connection", lifetimeMinutes: 30 },
+					},
+				},
+				affinityKey: "connection-1",
+				telemetry: {
+					recordProxyResolution() {
+						resolutions += 1;
+					},
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+			}),
+		).createSession();
+
+		// The endpoint is alive: it carried the request to the origin and brought the answer
+		// back. Whatever the origin said, the ceremony stays on it.
+		await expect(session.fetch("/otp", { method: "POST", body: "code=1" })).rejects.toMatchObject({
+			code: "upstream_http_error",
+			status: 500,
+		});
+
+		expect(resolutions).toBe(0);
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(lease.binding?.proxyUrl).toBe(boundProxy);
+		expect(lease.handle()).toBe(handle);
 	});
 });
 
@@ -5817,7 +5967,7 @@ describe("server SBSD bound-transport wiring", () => {
 			"../runtime/egress-lease.js"
 		);
 		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
-		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = "fixture-ceremony-key";
+		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = FIXTURE_LEASE_KEY;
 		try {
 			const { createServerAppAsync } = await import("../server/serve.js");
 			const app = await createServerAppAsync(createSbsdWiringProvider(), {

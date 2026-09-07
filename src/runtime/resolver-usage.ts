@@ -83,7 +83,8 @@ export async function recordPaidResolverCreate<T>(options: {
 		challenge_kind: options.kind,
 		endpoint: options.endpoint,
 		...ENDPOINT_BILLING[options.endpoint],
-		vendor_index: options.usage?.vendorIndex ?? 1,
+		// Only the resolver chain knows the vendor's position; a direct adapter call has none.
+		...(options.usage ? { vendor_index: options.usage.vendorIndex } : {}),
 		...(options.round === undefined ? {} : { round: options.round }),
 		resolver_identity_scope: options.usage?.resolverIdentityScope,
 	};

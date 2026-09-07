@@ -22,3 +22,4 @@ export {
 	type ResolverRuntimeOptions,
 	type ResolverSolutionSource,
 } from "./resolver.js";
+export type { ResolverPaidUsageContext } from "./resolver-vendors/types.js";

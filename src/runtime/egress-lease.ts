@@ -24,6 +24,7 @@ const AEAD_NONCE_BYTES = 12;
 const AEAD_TAG_BYTES = 16;
 const AEAD_ALGORITHM = "aes-256-gcm";
 const AEAD_KEY_DOMAIN = "apifuse:ceremony-egress-lease:v1\0";
+const LEASE_KEY_MIN_BYTES = 32;
 
 export type CeremonyEgressBinding = {
 	readonly vendor: ProxyVendorName;
@@ -33,10 +34,12 @@ export type CeremonyEgressBinding = {
 	readonly refreshEpoch: number;
 	/**
 	 * Vendor session lifetime the endpoint was allocated for (`proxy.session.lifetimeMinutes`,
-	 * Smartproxy `life`, NodeMaven SID window). It bounds the lease: the ceremony keeps the
-	 * exact endpoint for as long as the vendor was asked to keep the session, then rebinds.
-	 * Smartproxy's 15 s extraction cache is unrelated: it only bounds how long a raw
-	 * allocation result is reused for *new* selections, which the lease exists to avoid.
+	 * Smartproxy `life`, NodeMaven SID window). It is the upper bound of the lease, counted
+	 * from the mint (the first successful attempt), so a Smartproxy lease can outlive the
+	 * vendor session by the extraction-cache reuse window; expiry then drops and rebinds.
+	 * The bound is not a vendor guarantee (ADR-0010: a raw Smartproxy endpoint is not a hard
+	 * lease): the stealth runtime releases the binding as soon as the endpoint fails at the
+	 * transport, so a dead endpoint is left before the lifetime elapses.
 	 */
 	readonly lifetimeMinutes: number;
 };
@@ -64,6 +67,12 @@ export type CeremonyEgressLeaseRuntime = {
 	 * caller must also discard challenge state that was only valid for that endpoint.
 	 */
 	dropExpiredBinding(): boolean;
+	/**
+	 * Drops the binding unconditionally; the stealth runtime calls this when the bound
+	 * endpoint fails at the transport. Same return and caller obligation as
+	 * `dropExpiredBinding`.
+	 */
+	dropBinding(): boolean;
 	bind(binding: CeremonyEgressBinding): void;
 	handle(): string | undefined;
 };
@@ -242,15 +251,28 @@ export function createCeremonyEgressLeaseRuntime(options: {
 			fix: `Configure ${APIFUSE__ENGINE__CEREMONY_LEASE_KEY} in the engine host.`,
 		});
 	}
+	// The key is the whole authenticity boundary of a handle (a verified handle's proxyUrl
+	// becomes the ceremony egress), so the documented minimum is enforced, not advisory.
+	if (Buffer.byteLength(key, "utf8") < LEASE_KEY_MIN_BYTES) {
+		throw new SDKError(
+			`The engine ceremony egress lease key is shorter than ${LEASE_KEY_MIN_BYTES} bytes`,
+			{
+				code: "EGRESS_LEASE_KEY_WEAK",
+				fix: `Set ${APIFUSE__ENGINE__CEREMONY_LEASE_KEY} to at least ${LEASE_KEY_MIN_BYTES} random bytes (for example \`openssl rand -base64 32\`).`,
+			},
+		);
+	}
 	let payload: CeremonyEgressLeasePayloadV1 | undefined;
 	let currentHandle: string | undefined;
 
-	const dropExpiredBinding = (): boolean => {
-		if (!payload || now() < payload.expiresAtMs) return false;
+	const dropBinding = (): boolean => {
+		if (!payload) return false;
 		payload = undefined;
 		currentHandle = undefined;
 		return true;
 	};
+	const dropExpiredBinding = (): boolean =>
+		payload !== undefined && now() >= payload.expiresAtMs ? dropBinding() : false;
 
 	if (options.handle !== undefined) {
 		// Scope mismatch fails GCM authentication because scope is AAD; there is
@@ -267,6 +289,7 @@ export function createCeremonyEgressLeaseRuntime(options: {
 			return payload ? bindingOf(payload) : undefined;
 		},
 		dropExpiredBinding,
+		dropBinding,
 		bind(binding) {
 			if (payload) {
 				// The stealth runtime reuses the bound endpoint while a binding exists and

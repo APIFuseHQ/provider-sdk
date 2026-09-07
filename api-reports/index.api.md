@@ -5484,6 +5484,12 @@ export interface ResolverContext {
     solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
 }
 
+// @public
+export type ResolverPaidUsageContext = {
+    readonly vendorIndex: number;
+    readonly resolverIdentityScope?: string;
+};
+
 // @public (undocumented)
 export interface ResolverRuntimeOptions {
     // (undocumented)

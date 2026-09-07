@@ -105,6 +105,21 @@ const PROXY_CONNECT_FAILURE_BODY_PATTERN =
 const PROXY_AUTH_DIAGNOSTIC_URL = "http://example.com/";
 const PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS = 5_000;
 const STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES = [PROXY_CONNECT_FAILURE_CODE] as const;
+// Failures that mean the bound ceremony endpoint did not carry the request to the origin.
+// Proxy-level refusals are covered by isProxyPoolRefreshableError; PROXY_AUTH_IP_DENIED is
+// deliberately absent because another endpoint of the same vendor is denied just the same.
+const BOUND_EGRESS_TRANSPORT_FAILURE_CODES: ReadonlySet<string> = new Set([
+	PROXY_CONNECT_FAILURE_CODE,
+	"transport_network_error",
+	"transport_timeout",
+]);
+
+function isBoundEgressTransportFailure(error: TransportError): boolean {
+	return (
+		isProxyPoolRefreshableError(error) ||
+		(error.code !== undefined && BOUND_EGRESS_TRANSPORT_FAILURE_CODES.has(error.code))
+	);
+}
 const MAX_STEALTH_REDIRECT_HOPS = 10;
 const REDIRECT_BODY_HEADERS = new Set([
 	"content-encoding",
@@ -1324,13 +1339,48 @@ function createSessionFetcher(
 	}
 
 	/**
+	 * Every path that leaves the bound endpoint also discards the challenge state that was
+	 * only valid on it and retires outstanding replay records made on it.
+	 */
+	function unbindCeremonyEgress(): void {
+		clearAkamaiSbsdState();
+		ceremonyEgressGeneration += 1;
+	}
+
+	/**
 	 * A binding past its vendor session lifetime is dropped, together with the challenge
 	 * state that was only valid on that endpoint, so this request selects and binds afresh.
 	 */
 	function expireCeremonyEgressLease(): void {
 		if (!ceremonyEgressLease?.dropExpiredBinding()) return;
-		clearAkamaiSbsdState();
-		ceremonyEgressGeneration += 1;
+		unbindCeremonyEgress();
+	}
+
+	/**
+	 * The lease is best effort (ADR-0010: a raw Smartproxy endpoint is not a vendor-guaranteed
+	 * lease). When the attempt that ran on the bound endpoint fails at the transport (the
+	 * proxy refused it, the tunnel never opened, the socket died or timed out) the binding is
+	 * released so the ceremony can leave a dead endpoint before its lifetime elapses. Origin
+	 * responses, however bad, keep the binding: the endpoint is alive. Returns true when a
+	 * binding was released.
+	 */
+	function releaseFailedCeremonyEgress(
+		attemptProxyUrl: string | undefined,
+		error: TransportError,
+	): boolean {
+		const bound = ceremonyEgressLease?.binding;
+		if (
+			!ceremonyEgressLease ||
+			!bound ||
+			!attemptProxyUrl ||
+			attemptProxyUrl !== bound.proxyUrl ||
+			!isBoundEgressTransportFailure(error)
+		) {
+			return false;
+		}
+		ceremonyEgressLease.dropBinding();
+		unbindCeremonyEgress();
+		return true;
 	}
 
 	async function getClientEntry(
@@ -1602,11 +1652,10 @@ function createSessionFetcher(
 			// transport-retry budget instead.
 			const rotatesRegistryChain =
 				usesPolicyAllocator && policyResolvesRegistryVendorChain(policyProxy);
-			const maxAttempts = ceremonyEgressLease?.binding
-				? 1
-				: rotatesRegistryChain
-					? policyProxyAttemptCap
-					: retryAttemptCap;
+			const unboundMaxAttempts = rotatesRegistryChain ? policyProxyAttemptCap : retryAttemptCap;
+			// A bound ceremony has exactly one endpoint to try; releasing the binding after a
+			// transport failure widens the budget back to the ordinary rotation span.
+			let maxAttempts = ceremonyEgressLease?.binding ? 1 : unboundMaxAttempts;
 			const dedupeAllocatorEndpoints = rotatesRegistryChain;
 			let lastError: unknown;
 
@@ -1628,7 +1677,7 @@ function createSessionFetcher(
 					let fallbackSensitiveValues: readonly string[] = [];
 					let fallbackRequestUrl: string | undefined;
 					let fallbackRedactedUrl: string | undefined;
-					const attemptStartedAt = Date.now();
+					let attemptStartedAt = Date.now();
 					let attemptRecorded = false;
 					const recordProxyAttempt = (
 						outcome: "ok" | "error",
@@ -2045,9 +2094,13 @@ function createSessionFetcher(
 								}
 								challengeRefetchAttempted = true;
 								// An explicit replay is a new transport exchange on the bound endpoint and
-								// gets its own proxy-attempt record; the automatic refetch stays within the
-								// initiating attempt's record.
-								if (explicitReplay) attemptRecorded = false;
+								// gets its own proxy-attempt record timed from here, not from the initiating
+								// fetch (the caller's think time in between is not transport duration); the
+								// automatic refetch stays within the initiating attempt's record.
+								if (explicitReplay) {
+									attemptRecorded = false;
+									attemptStartedAt = Date.now();
+								}
 								const replayed = await fetchOnBoundSession(
 									requestUrl,
 									method,
@@ -2086,7 +2139,9 @@ function createSessionFetcher(
 											const replayed = await solveAndReplay(true);
 											return finalizeAttempt(replayed.response, replayed.normalized);
 										} catch (error) {
-											throw recordAttemptFailure(normalizeAttemptError(error));
+											const normalizedError = normalizeAttemptError(error);
+											releaseFailedCeremonyEgress(proxy, normalizedError);
+											throw recordAttemptFailure(normalizedError);
 										}
 									},
 								});
@@ -2103,11 +2158,28 @@ function createSessionFetcher(
 						const runProxyAuthDiagnostic = shouldRunProxyAuthDiagnostic(normalizedError);
 						const redactedError = recordAttemptFailure(normalizedError);
 						lastError = redactedError;
+						const releasedBoundEgress = releaseFailedCeremonyEgress(proxy, normalizedError);
+						if (releasedBoundEgress) {
+							// The request now proceeds as an unbound one with the full rotation budget;
+							// the attempt spent on the dead endpoint does not count against it.
+							maxAttempts = attempt + 1 + unboundMaxAttempts;
+						}
 						if (challengeSolveAttempted || challengeRefetchAttempted) {
 							// The single refetch is spent (owner or waiter of a shared solve): another
 							// transport attempt would replay the original request and may rotate the
 							// proxy the solved jar is bound to.
 							throw redactedError;
+						}
+						if (
+							releasedBoundEgress &&
+							attempt + 1 < maxAttempts &&
+							(refreshableProxyError || retryErrorCode === PROXY_CONNECT_FAILURE_CODE)
+						) {
+							// The proxy refused the request or the tunnel never opened, so the origin never
+							// saw it: selecting and binding a fresh endpoint in this request is safe for
+							// any method. Ambiguous failures (reset, timeout) fall through to the ordinary
+							// method-aware retry decision below with the binding already released.
+							continue;
 						}
 						if (proxy && rotatesRegistryChain && refreshableProxyError) {
 							stalePoolError = redactedError;
@@ -2210,6 +2282,10 @@ function createSessionFetcher(
 			throw normalizeStealthTransportError(lastError);
 		},
 		async replayChallenged(challengedResponse) {
+			// Lease expiry is evaluated when a fetch starts, not here: the replay belongs to the
+			// exchange that was challenged on the bound endpoint (Akamai state is IP-bound), so a
+			// lifetime boundary crossed during the solve does not move it elsewhere. The next
+			// fetch drops the expired binding and rebinds.
 			const replay = challengedReplays.get(challengedResponse);
 			if (!replay || challengedResponse.challenge?.outcome !== "replay_required") {
 				throw new SDKError("The challenged response does not belong to this stealth session", {
