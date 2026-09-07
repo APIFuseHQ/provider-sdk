@@ -2281,6 +2281,19 @@ function createRequestScope(input: {
 	return scope;
 }
 
+// A raw `Response` result skips `toErrorResponse`, so its body stays
+// provider-owned, but the observability header is still SDK-owned: derive it
+// from the status. Only timeouts, rate limits, and 5xx are retryable;
+// `isRetryableCategory` would otherwise mark every other 4xx (`upstream_http`)
+// as retryable.
+function rawResponseErrorObservability(status: number): ErrorObservabilityDetails {
+	return {
+		category: categoryForStatus(status),
+		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+		retryable: status === 408 || status === 429 || status >= 500,
+	};
+}
+
 function responseWithRequestScopeHeaders(
 	response: Response,
 	finished: RequestScopeFinishResult,
@@ -2290,8 +2303,12 @@ function responseWithRequestScopeHeaders(
 	if (finished.providerTelemetryHeader) {
 		headers.set(PROVIDER_TELEMETRY_HEADER, finished.providerTelemetryHeader);
 	}
-	if (finished.errorObservability) {
-		headers.set(ERROR_OBSERVABILITY_HEADER, JSON.stringify(finished.errorObservability));
+	headers.delete(ERROR_OBSERVABILITY_HEADER);
+	const errorObservability =
+		finished.errorObservability ??
+		(response.status >= 400 ? rawResponseErrorObservability(response.status) : undefined);
+	if (errorObservability) {
+		headers.set(ERROR_OBSERVABILITY_HEADER, JSON.stringify(errorObservability));
 	}
 	return new Response(response.body, {
 		headers,

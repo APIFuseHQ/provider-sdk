@@ -507,6 +507,9 @@ SDK observability is emitted separately in the
 ```
 
 Treat this header as telemetry, not as provider-controlled public error detail.
+It is SDK-owned even when a handler returns a raw `Response`: a caller-set
+header is dropped, and a raw status of 400 or above gets a status-derived one
+(retryable only for 408, 429, and 5xx) while the body is left untouched.
 Its category, taxonomy version, retryability, and optional upstream status match
 the structured `provider_request_failed` log event.
 
