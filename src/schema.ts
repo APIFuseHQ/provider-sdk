@@ -83,6 +83,8 @@ export function safeParseSchemaSync(
 export const APIFUSE_SENSITIVE_META_KEY = "x-apifuse-sensitive";
 export const APIFUSE_SENSITIVE_KIND_META_KEY = "x-apifuse-sensitive-kind";
 export const APIFUSE_DESCRIPTION_KEY_META_KEY = "x-apifuse-description-key";
+export const APIFUSE_CONTENT_TRUST_META_KEY = "x-apifuse-content-trust";
+export const APIFUSE_CONTENT_PROVENANCE_META_KEY = "x-apifuse-content-provenance";
 export const APIFUSE_REDACTION_MARKER = "<redacted>";
 
 export type SensitivePathSegment = string | "*";
@@ -124,6 +126,21 @@ export function describeKey<TSchema extends ZodType>(
 	return schema.meta({
 		...metadata,
 		[APIFUSE_DESCRIPTION_KEY_META_KEY]: descriptionKey,
+	});
+}
+
+/**
+ * Mark an output field as externally authored text (listing bodies, reviews,
+ * posts) that the provider relays verbatim. Sets both content-trust JSON Schema
+ * meta keys on the field node so the platform can enforce the boundary when it
+ * assembles tool output; validation and the parsed value are unchanged.
+ */
+export function untrustedContent<TSchema extends ZodType>(schema: TSchema): TSchema {
+	const metadata = schema.meta() ?? {};
+	return schema.meta({
+		...metadata,
+		[APIFUSE_CONTENT_TRUST_META_KEY]: "untrusted",
+		[APIFUSE_CONTENT_PROVENANCE_META_KEY]: "external",
 	});
 }
 
