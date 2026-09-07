@@ -289,7 +289,11 @@ export function createHypersolutionsResolverVendorAdapter(
 				? AbortSignal.any([signal, timeoutController.signal])
 				: signal;
 			const timeout = options.timeoutMs
-				? setTimeout(() => timeoutController.abort(), options.timeoutMs)
+				? setTimeout(
+						// A named reason lets the usage span record `timeout`, not a caller abort.
+						() => timeoutController.abort(new DOMException("Hyper solve timed out", "TimeoutError")),
+						options.timeoutMs,
+					)
 				: undefined;
 			try {
 				if (challenge.kind !== "akamai_sbsd") {

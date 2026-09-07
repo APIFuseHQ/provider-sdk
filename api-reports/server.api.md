@@ -4122,6 +4122,9 @@ export type SelfTestAuthFlowInvoke = (args: {
     externalRef?: string;
     input?: Record<string, unknown>;
     context?: Record<string, unknown>;
+    engine?: {
+        egressLease: string;
+    };
     signal?: AbortSignal;
 }) => Promise<{
     status: number;

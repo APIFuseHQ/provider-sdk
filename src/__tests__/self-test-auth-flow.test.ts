@@ -721,6 +721,45 @@ describe("self-test auth-flow connection semantics (DR-7)", () => {
 		expect(state.lastFlowExternalRef).toBe(`${PROVIDER_ID}-session-self-test`);
 	});
 
+	it("carries the start turn's engine state into the continue turn the way the gateway does", async () => {
+		const state = createFlowProviderState();
+		const provider = createFlowProvider(state);
+		const tenantApp = createServerApp(provider, {
+			logger: () => {},
+			state: createMemoryProviderRuntimeState(),
+		});
+		const tenantInvoke = createSelfTestAuthFlowInvoke(tenantApp);
+		const observed: Array<{ route: string; engine?: { egressLease: string } }> = [];
+		const selfTestApp = createSelfTestApp(provider, {
+			secrets: { current: MASTER_SECRET },
+			invoke: createSelfTestInvoke(tenantApp),
+			authFlow: async ({ engine, ...args }) => {
+				observed.push({ route: args.route, ...(engine ? { engine } : {}) });
+				// This provider declares no ceremony lease, so the tenant app would refuse a
+				// handle (409): stand in for the `engine` field an SBSD provider's start turn
+				// carries, record what the driver sends back, and delegate without it.
+				const result = await tenantInvoke(args);
+				if (args.route === "start" && result.body && typeof result.body === "object") {
+					return {
+						...result,
+						body: {
+							...(result.body as Record<string, unknown>),
+							engine: { egressLease: "fixture-lease-handle" },
+						},
+					};
+				}
+				return result;
+			},
+		});
+
+		const body = await runCase(selfTestApp, "session", "session case", "req-engine-carry");
+		expect(body.result?.status).toBe("ok");
+		expect(observed).toEqual([
+			{ route: "start" },
+			{ route: "continue", engine: { egressLease: "fixture-lease-handle" } },
+		]);
+	});
+
 	it("keeps the connection id stable across cycles so cached sessions ride one affinity", async () => {
 		const state = createFlowProviderState();
 		const { selfTestApp } = createApps(createFlowProvider(state));

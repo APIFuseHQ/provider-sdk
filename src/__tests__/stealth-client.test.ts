@@ -4959,14 +4959,22 @@ describe("Akamai SBSD detection and safe refetch", () => {
 			}),
 		).createSession();
 
+		const headers: Record<string, string | string[]> = {
+			"content-type": "application/octet-stream",
+			"x-fixture": ["one", "two"],
+		};
 		const challenged = await session.fetch("/mutate", {
 			method: "POST",
 			body: originalBody,
-			headers: { "content-type": "application/octet-stream", "x-fixture": ["one", "two"] },
+			headers,
 			throwOnHttpError: false,
 		});
 		expect(challenged.challenge?.outcome).toBe("replay_required");
+		// The caller's own objects are not the replay's source: both sends use the snapshot
+		// taken before the first request.
 		originalBody.fill(0x78);
+		headers["x-fixture"] = ["changed"];
+		headers["x-late"] = "added after the challenge";
 		const replayed = await session.replayChallenged(challenged);
 
 		expect(replayed.status).toBe(200);
@@ -4976,7 +4984,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(requestBodyBytes(calls[0]?.init)).toEqual(expectedBody);
 		expect(requestBodyBytes(calls[1]?.init)).toEqual(expectedBody);
 		expect(calls[1]?.url).toBe(calls[0]?.url);
+		expect(requestHeader(calls[0]?.init, "x-fixture")).toBe("one, two");
 		expect(requestHeader(calls[1]?.init, "x-fixture")).toBe("one, two");
+		expect(requestHeader(calls[1]?.init, "x-late")).toBeUndefined();
 
 		await expect(session.replayChallenged(challenged)).rejects.toMatchObject({
 			code: "REPLAY_ALREADY_ATTEMPTED",
@@ -5366,6 +5376,135 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(lease.handle()).toBeString();
 		expect(lease.handle()).not.toBe(firstHandle);
 		expect(allWreqCalls()).toHaveLength(2);
+	});
+
+	it("retires an explicit replay whose ceremony egress was rebound after expiry", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		let now = 0;
+		let solves = 0;
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			now: () => now,
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: "fixture-ceremony-key" },
+		});
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=9ef01cab-e3b2-4f10-8a8a-b3def01a920c&t=token"),
+				headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+				url: "https://example.com/mutate",
+			},
+			{ status: 200, body: "later safe request", headers: {}, url: "https://example.com/page" },
+		);
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 5 },
+					},
+				},
+				affinityKey: "connection-1",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+		const challenged = await session.fetch("/mutate", { method: "POST", throwOnHttpError: false });
+		expect(challenged.challenge?.outcome).toBe("replay_required");
+		const firstHandle = lease.handle();
+
+		now = 5 * 60_000;
+		await expect(session.fetch("/page")).resolves.toMatchObject({ status: 200 });
+		expect(lease.handle()).not.toBe(firstHandle);
+
+		await expect(session.replayChallenged(challenged)).rejects.toMatchObject({
+			code: "REPLAY_SESSION_MISMATCH",
+		});
+		expect(solves).toBe(0);
+		expect(allWreqCalls()).toHaveLength(2);
+	});
+
+	it("fails a response that arrived on an egress other than the ceremony's bound endpoint", async () => {
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		// Models a concurrent request that bound the ceremony to another endpoint while this
+		// request was in flight on the one it selected before any binding existed.
+		let boundElsewhere = false;
+		const foreignBinding = {
+			vendor: "nodemaven" as const,
+			proxyUrl: "http://other-sid:password@gate.nodemaven.com:8080",
+			poolIndex: 1,
+			affinityKey: "connection-1",
+			refreshEpoch: 0,
+			lifetimeMinutes: 30,
+		};
+		const lease: CeremonyEgressLeaseRuntime = {
+			get binding() {
+				return boundElsewhere ? foreignBinding : undefined;
+			},
+			dropExpiredBinding: () => false,
+			bind() {
+				throw new Error("the racing request must not bind over the existing binding");
+			},
+			handle: () => undefined,
+		};
+		mockStealthState.queuedResponses.push({ status: 200, body: "reached origin", headers: {} });
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1 },
+					},
+				},
+				affinityKey: "connection-1",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				telemetry: {
+					recordProxyResolution() {
+						// This request has selected its egress; the other request binds now.
+						boundElsewhere = true;
+					},
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+			}),
+		).createSession();
+
+		await expect(session.fetch("/racing")).rejects.toMatchObject({
+			code: "EGRESS_LEASE_BINDING_INVALID",
+		});
+		expect(allWreqCalls()).toHaveLength(1);
 	});
 
 	it("keeps a Smartproxy binding across fetches 20 s apart: the lease follows the session lifetime, not the extraction cache", async () => {

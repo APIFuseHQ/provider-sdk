@@ -965,7 +965,7 @@ function createResolverChainClient(options: {
 				if (cached) return cached;
 			}
 			const attempts: ResolverChainAttempt[] = [];
-			for (const [entryIndex, entry] of supportingEntries.entries()) {
+			for (const entry of supportingEntries) {
 				const adapter = entry.createAdapter();
 				try {
 					const solveAttempt = () => {
@@ -988,7 +988,8 @@ function createResolverChainClient(options: {
 								])
 							: undefined;
 						const usage: ResolverPaidUsageContext = {
-							vendorIndex: entryIndex + 1,
+							// Position in the declared chain, not in the kind-filtered list.
+							vendorIndex: options.entries.indexOf(entry) + 1,
 							...(options.identityScope
 								? {
 										resolverIdentityScope: createHash("sha256")

@@ -156,6 +156,8 @@ type StealthSessionClientOptions = StealthClientOptions & {
 
 type ChallengedReplayRecord = {
 	consumed: boolean;
+	/** Ceremony egress generation the challenged request ran on; a rebind retires the record. */
+	readonly generation: number;
 	replay(): Promise<StealthResponse>;
 };
 
@@ -1309,6 +1311,7 @@ function createSessionFetcher(
 	const akamaiSbsdState: AkamaiSbsdSessionState = { transactions: new Map() };
 	const challengedReplays = new WeakMap<StealthResponse, ChallengedReplayRecord>();
 	const ceremonyEgressLease = clientOptions[ENGINE_CEREMONY_EGRESS_LEASE];
+	let ceremonyEgressGeneration = 0;
 	const automaticChallengeRefetchPolicy = {
 		...createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
 		methods: ["GET"],
@@ -1325,7 +1328,9 @@ function createSessionFetcher(
 	 * state that was only valid on that endpoint, so this request selects and binds afresh.
 	 */
 	function expireCeremonyEgressLease(): void {
-		if (ceremonyEgressLease?.dropExpiredBinding()) clearAkamaiSbsdState();
+		if (!ceremonyEgressLease?.dropExpiredBinding()) return;
+		clearAkamaiSbsdState();
+		ceremonyEgressGeneration += 1;
 	}
 
 	async function getClientEntry(
@@ -1486,7 +1491,19 @@ function createSessionFetcher(
 
 	function bindCeremonyEgress(attemptProxy: ResolvedAttemptProxy | undefined): void {
 		const lease = ceremonyEgressLease;
-		if (!lease || lease.binding || !attemptProxy?.url || !attemptProxy.vendor) return;
+		if (!lease || !attemptProxy?.url || !attemptProxy.vendor) return;
+		if (lease.binding) {
+			// A concurrent request on this session may have bound the ceremony while this one
+			// was in flight on an endpoint it selected before the binding existed (pool
+			// rotation after a transport failure). Its response reached the origin from an
+			// egress the handle does not name; accepting it would split the ceremony identity.
+			if (attemptProxy.url !== lease.binding.proxyUrl) {
+				throw new SDKError("The response arrived on an egress other than the ceremony's bound endpoint", {
+					code: "EGRESS_LEASE_BINDING_INVALID",
+				});
+			}
+			return;
+		}
 		if (
 			attemptProxy.poolIndex === undefined ||
 			attemptProxy.lifetimeMinutes === undefined ||
@@ -1510,10 +1527,27 @@ function createSessionFetcher(
 	}
 
 	const session: StealthSession = {
-		async fetch(url, options: StealthFetchOptions = {}) {
+		async fetch(url, callerOptions: StealthFetchOptions = {}) {
 			expireCeremonyEgressLease();
+			const requestBody = normalizeBody(callerOptions.body);
+			// Snapshot the caller's headers with the body before the first send: the first
+			// request and an explicit replay both use this copy, so a caller mutating its own
+			// objects afterwards cannot make the two sends differ.
+			const options: StealthFetchOptions = {
+				...callerOptions,
+				...(callerOptions.headers
+					? {
+							headers: Object.fromEntries(
+								Object.entries(callerOptions.headers).map(([name, value]) => [
+									name,
+									Array.isArray(value) ? [...value] : value,
+								]),
+							),
+						}
+					: {}),
+				...(requestBody === undefined ? {} : { body: requestBody }),
+			};
 			const requestProfile = resolveStealthProfileSelection(options.stealth, defaultProfile);
-			const requestBody = normalizeBody(options.body);
 			let challengeSolveAttempted = false;
 			let challengeRefetchAttempted = false;
 			let challengeSolveFailure: { readonly error: unknown } | undefined;
@@ -1813,7 +1847,7 @@ function createSessionFetcher(
 						let { normalized, response } = await fetchOnBoundSession(
 							requestUrl,
 							method,
-							{ ...options, body: requestBody },
+							options,
 							clientOptions.signal,
 						);
 						throwProxyTransportFault(response, normalized.body);
@@ -1934,23 +1968,11 @@ function createSessionFetcher(
 									};
 								},
 							};
-							// Snapshot the request shape now: an explicit replay must send the same
-							// bytes even if the caller mutates its headers or body buffer afterwards.
+							// `options` is already the fetch-start snapshot; the replay gets its own copy
+							// of the body bytes so the transport cannot alias the first send's buffer.
 							const replayOptions: StealthFetchOptions = {
 								...options,
-								...(options.headers
-									? {
-											headers: Object.fromEntries(
-												Object.entries(options.headers).map(([name, value]) => [
-													name,
-													Array.isArray(value) ? [...value] : value,
-												]),
-											),
-										}
-									: {}),
-								...(Buffer.isBuffer(requestBody)
-									? { body: Buffer.from(requestBody) }
-									: { body: requestBody }),
+								...(Buffer.isBuffer(requestBody) ? { body: Buffer.from(requestBody) } : {}),
 							};
 							const transactionKey = akamaiSbsdChallengeKey(detected, {
 								wreqBrowser: mapping.browser,
@@ -2058,6 +2080,7 @@ function createSessionFetcher(
 								};
 								challengedReplays.set(normalized, {
 									consumed: false,
+									generation: ceremonyEgressGeneration,
 									async replay() {
 										try {
 											const replayed = await solveAndReplay(true);
@@ -2192,6 +2215,14 @@ function createSessionFetcher(
 				throw new SDKError("The challenged response does not belong to this stealth session", {
 					code: "REPLAY_SESSION_MISMATCH",
 				});
+			}
+			if (replay.generation !== ceremonyEgressGeneration) {
+				// The ceremony rebound to another egress after this request ran; solving and
+				// replaying on the retired endpoint would split the identity the handle names.
+				throw new SDKError(
+					"The challenged response predates the ceremony's current egress binding",
+					{ code: "REPLAY_SESSION_MISMATCH" },
+				);
 			}
 			if (replay.consumed) {
 				throw new SDKError("The challenged request has already used its one replay budget", {

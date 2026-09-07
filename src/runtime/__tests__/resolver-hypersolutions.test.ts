@@ -3,7 +3,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import type { ProviderChallenge } from "../../types.js";
 import { createResolverClient } from "../resolver.js";
 import { createHypersolutionsResolverVendorAdapter } from "../resolver-vendors/hypersolutions.js";
-import type { ResolverVendorTransport } from "../resolver-vendors/types.js";
+import type { ResolverVendorAdapter, ResolverVendorTransport } from "../resolver-vendors/types.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const API_KEY = "hyper-test-key";
@@ -328,6 +328,82 @@ describe("hypersolutions resolver vendor", () => {
 			globalFetch.mockRestore();
 		}
 		expect(trace.getSpans().filter((span) => span.name === "resolver.usage")).toHaveLength(0);
+	});
+
+	it("records the vendor's declared chain position, not its position among supporting vendors", async () => {
+		const { transport } = createProtocolTransport();
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+		const declaredFirst: ResolverVendorAdapter = {
+			id: "2captcha",
+			supports: () => false,
+			async solve() {
+				throw new Error("a vendor that does not support the kind is never asked");
+			},
+		};
+		const resolver = createResolverClient({
+			adapters: [
+				declaredFirst,
+				createHypersolutionsResolverVendorAdapter({
+					apiKey: API_KEY,
+					allowedHosts: ["shop.example.com"],
+					fetchImpl: createDirectFetch().fetchImpl,
+				}),
+			],
+			kinds: ["akamai_sbsd"],
+			clientProfile: "safari17_0",
+			allowedHosts: ["shop.example.com"],
+			createTransport: () => transport,
+		});
+
+		await resolver.solve(HARD_CHALLENGE, new AbortController().signal, recorder);
+
+		const usageSpans = trace.getSpans().filter((span) => span.name === "resolver.usage");
+		expect(usageSpans.length).toBeGreaterThan(0);
+		expect(usageSpans.every((span) => span.attributes.vendor_index === 2)).toBe(true);
+	});
+
+	it("records a Hyper timeout as timeout, not as an abandoned call", async () => {
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+		const transport: ResolverVendorTransport = {
+			sessionHeaders: SESSION_HEADERS,
+			getCookie: () => "state",
+			fetch(_url, init) {
+				return new Promise((_resolve, reject) => {
+					init.signal.addEventListener("abort", () => reject(init.signal.reason), {
+						once: true,
+					});
+				});
+			},
+		};
+		const resolver = createResolverClient({
+			adapters: [
+				createHypersolutionsResolverVendorAdapter({
+					apiKey: API_KEY,
+					allowedHosts: ["shop.example.com"],
+					timeoutMs: 5,
+					fetchImpl: createDirectFetch().fetchImpl,
+				}),
+			],
+			kinds: ["akamai_sbsd"],
+			clientProfile: "safari17_0",
+			allowedHosts: ["shop.example.com"],
+			createTransport: () => transport,
+		});
+
+		await expect(
+			resolver.solve(HARD_CHALLENGE, new AbortController().signal, recorder),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "hypersolutions", reason: "timeout" }],
+		});
+		const usageSpans = trace.getSpans().filter((span) => span.name === "resolver.usage");
+		expect(usageSpans.map((span) => [span.attributes.endpoint, span.attributes.outcome])).toEqual([
+			["hyper:ip", "timeout"],
+		]);
 	});
 
 	it("admits only provider-declared upstream hosts plus Hyper's exact /ip host", async () => {
