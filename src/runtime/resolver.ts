@@ -18,6 +18,7 @@ import type {
 	ResolverContext,
 } from "../types.js";
 import {
+	RESOLVER_CHALLENGE_BINDINGS,
 	resolverChallengeAllowsDirectCache,
 	resolverChallengeIsCacheable,
 	resolverChallengeIsIdentityScoped,
@@ -25,6 +26,7 @@ import {
 } from "./resolver-vendors/bindings.js";
 import { createBrowserResolverVendorAdapter } from "./resolver-vendors/browser.js";
 import { createCapsolverResolverVendorAdapter } from "./resolver-vendors/capsolver.js";
+import { createHypersolutionsResolverVendorAdapter } from "./resolver-vendors/hypersolutions.js";
 import { assertResolverHostAllowed } from "./resolver-vendors/hosts.js";
 import { createTwoCaptchaResolverVendorAdapter } from "./resolver-vendors/twocaptcha.js";
 import {
@@ -48,8 +50,10 @@ import {
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
 	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+	APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
+	kindRequiresClientProfile,
 } from "./resolver-config.js";
 import { DEFAULT_STEALTH_PROFILE } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
@@ -63,6 +67,7 @@ export {
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
 	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
 	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+	APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
 } from "./resolver-config.js";
@@ -231,6 +236,13 @@ const resolverAdapterRegistry: Partial<Record<ProviderResolverVendor, ResolverAd
 			timeoutMs,
 		});
 	},
+	hypersolutions(configuration, timeoutMs, allowedHosts) {
+		return createHypersolutionsResolverVendorAdapter({
+			allowedHosts,
+			apiKey: configuration,
+			timeoutMs,
+		});
+	},
 };
 
 export const RESOLVER_ADAPTER_REGISTRY: Partial<
@@ -302,6 +314,12 @@ function assertDeclaredKind(
 	requestedKind: ProviderChallengeKind,
 	declaredKinds: readonly ProviderChallengeKind[],
 ): void {
+	if (!Object.hasOwn(RESOLVER_CHALLENGE_BINDINGS, requestedKind)) {
+		throw new ProviderError(`Unknown resolver kind "${requestedKind}"`, {
+			code: "RESOLVER_KIND_NOT_DECLARED",
+			fix: "Use a challenge kind exported by @apifuse/provider-sdk.",
+		});
+	}
 	if (declaredKinds.includes(requestedKind)) return;
 
 	const declared = declaredKinds.length > 0 ? declaredKinds.join(", ") : "none";
@@ -451,6 +469,16 @@ function restrictResolverTransport(
 	allowedHosts: readonly string[],
 ): ResolverVendorTransport {
 	return {
+		sessionHeaders: transport.sessionHeaders,
+		...(transport.getCookie
+			? {
+					getCookie(name, url) {
+						// Jar reads are gated like fetches: an adapter may only read state for declared hosts.
+						assertResolverHostAllowed(url, allowedHosts);
+						return transport.getCookie?.(name, url);
+					},
+				}
+			: {}),
 		async fetch(url, init) {
 			// Empty declarations remain deny-by-default, matching the adapter-factory/browser path.
 			assertResolverHostAllowed(url, allowedHosts);
@@ -899,6 +927,14 @@ function createResolverChainClient(options: {
 			if (supportingEntries.length === 0) {
 				throwUnsupportedKind(challenge.kind, options.usingDefaultVendors ?? false);
 			}
+			if (kindRequiresClientProfile(challenge.kind) && !options.clientProfile?.trim()) {
+				throwExhausted(
+					supportingEntries.map((entry) => ({
+						vendor: entry.id,
+						reason: "missing_client_profile",
+					})),
+				);
+			}
 			signal.throwIfAborted();
 			const identityResolution = options.proxyIntent
 				? await resolveResolverIdentity(options.proxyIntent)
@@ -945,7 +981,10 @@ function createResolverChainClient(options: {
 							throw new ResolverVendorUnavailableError(adapter.id, "missing_transport");
 						}
 						const transport = unrestrictedTransport
-							? restrictResolverTransport(unrestrictedTransport, options.allowedHosts ?? [])
+							? restrictResolverTransport(unrestrictedTransport, [
+									...(options.allowedHosts ?? []),
+									...(adapter.transportAllowedHosts ?? []),
+								])
 							: undefined;
 						return adapter.solve(challenge, identity, signal, traceRecorder, transport);
 					};
@@ -1058,7 +1097,9 @@ function resolveVendorAvailability(
 			? APIFUSE__RESOLVER__2CAPTCHA__API_KEY
 			: vendor === "capsolver"
 				? APIFUSE__RESOLVER__CAPSOLVER__API_KEY
-				: APIFUSE__RESOLVER__CAPMONSTER__API_KEY;
+				: vendor === "capmonster"
+					? APIFUSE__RESOLVER__CAPMONSTER__API_KEY
+					: APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY;
 
 	const configuration = normalizedEnvValue(env, envKey);
 	return configuration

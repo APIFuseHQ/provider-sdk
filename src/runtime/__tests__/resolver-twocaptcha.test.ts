@@ -38,6 +38,12 @@ const UNSUPPORTED_CHALLENGES = [
 		pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
 		scriptUrl: "https://example.com/akamai/sensor.js",
 	},
+	{
+		kind: "akamai_sbsd",
+		pageUrl: RECAPTCHA_CHALLENGE.pageUrl,
+		scriptUrl: "https://example.com/.well-known/sbsd?v=uuid",
+		stateCookieName: "sbsd_o",
+	},
 ] satisfies ProviderChallenge[];
 
 function challengeForTwoCaptchaKind(

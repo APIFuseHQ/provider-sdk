@@ -31,6 +31,11 @@ export const RESOLVER_CHALLENGE_BINDINGS = {
 		identityBinding: "identity_scoped",
 		directCacheable: false,
 	},
+	akamai_sbsd: {
+		cacheable: false,
+		identityBinding: "identity_scoped",
+		directCacheable: false,
+	},
 } as const satisfies Readonly<Record<ProviderChallengeKind, ResolverChallengeBinding>>;
 
 export function resolverChallengeIsCacheable(challenge: ProviderChallenge): boolean {

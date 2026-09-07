@@ -43,6 +43,9 @@ export const APIFUSE__RESOLVER__CAPMONSTER__API_KEY = "APIFUSE__RESOLVER__CAPMON
 export const APIFUSE__RESOLVER__CAPSOLVER__API_KEY = "APIFUSE__RESOLVER__CAPSOLVER__API_KEY";
 
 // @public (undocumented)
+export const APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY = "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY";
+
+// @public (undocumented)
 export const APIFUSE__RESOLVER__TIMEOUT_MS = "APIFUSE__RESOLVER__TIMEOUT_MS";
 
 // @public (undocumented)
@@ -888,6 +891,13 @@ export type ChallengeSolution = {
     readonly userAgent: string;
     readonly expires?: number;
     readonly sdkEstimatedExpires?: number;
+} | {
+    readonly form: "cookie_state";
+    readonly kind: "akamai_sbsd";
+    readonly outcome: "payload_accepted";
+    readonly verified: false;
+    readonly stateCookieName: "sbsd_o" | "bm_so";
+    readonly expires?: number;
 };
 
 // @public
@@ -1473,7 +1483,13 @@ export function encodeSseEvent(input: SseEvent): string;
 export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY__SMARTPROXY_APP_KEY", "APIFUSE__PROXY__NODEMAVEN_USERNAME", "APIFUSE__PROXY__NODEMAVEN_PASSWORD"];
 
 // @public
+export const ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__RESOLVER__2CAPTCHA__API_KEY", "APIFUSE__RESOLVER__CAPSOLVER__API_KEY", "APIFUSE__RESOLVER__CAPMONSTER__API_KEY", "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY"];
+
+// @public
 export const ENGINE_OWNED_TELEMETRY_ENV_NAMES: readonly ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES"];
+
+// @public
+export function engineOwnedResolverCredentialTarget(name: string): string | undefined;
 
 // @public (undocumented)
 export interface EnvContext {
@@ -2396,6 +2412,9 @@ export function isEngineOwnedEnvName(name: string): boolean;
 
 // @public (undocumented)
 export function isEngineOwnedProxyCredentialName(name: string): boolean;
+
+// @public (undocumented)
+export function isEngineOwnedResolverCredentialName(name: string): boolean;
 
 // @public (undocumented)
 export function isEngineOwnedTelemetryEnvName(name: string): boolean;
@@ -3796,6 +3815,12 @@ export type ProviderChallenge = {
     readonly abck?: string;
     readonly bmsz?: string;
     readonly version?: string;
+} | {
+    readonly kind: "akamai_sbsd";
+    readonly pageUrl: string;
+    readonly scriptUrl: string;
+    readonly stateCookieName: "sbsd_o" | "bm_so";
+    readonly challengeToken?: string;
 };
 
 // @public (undocumented)
@@ -4739,15 +4764,19 @@ export type ProviderResolvedFile = Omit<ProviderFileRef, "mime_type"> & {
     stream(): ReadableStream<Uint8Array>;
 };
 
-// @public (undocumented)
-export interface ProviderResolverConfig {
-    readonly clientProfile?: string;
-    readonly kinds: readonly ProviderChallengeKind[];
+// @public
+export type ProviderResolverConfig = {
     readonly vendors?: readonly ProviderResolverVendor[];
-}
+    readonly kinds: readonly Exclude<ProviderChallengeKind, "akamai_sbsd">[];
+    readonly clientProfile?: string;
+} | {
+    readonly vendors?: readonly ProviderResolverVendor[];
+    readonly kinds: readonly ProviderChallengeKind[];
+    readonly clientProfile: string;
+};
 
 // @public
-export type ProviderResolverVendor = "browser" | "capsolver" | "capmonster" | "2captcha" | "custom";
+export type ProviderResolverVendor = "browser" | "capsolver" | "capmonster" | "2captcha" | "hypersolutions" | "custom";
 
 // @public (undocumented)
 export type ProviderReviewed = "first-party" | "community" | "staging";
@@ -5473,6 +5502,7 @@ export interface ResolverVendorTransport {
         body?: string;
         signal: AbortSignal;
         redirect?: "manual";
+        maxBodyBytes?: number;
     }): Promise<{
         readonly status: number;
         readonly headers: Readonly<Record<string, string>>;
@@ -5488,6 +5518,8 @@ export interface ResolverVendorTransport {
             readonly sameSite?: string;
         }[];
     }>;
+    readonly getCookie?: (name: string, url: string) => string | undefined;
+    readonly sessionHeaders?: Readonly<Record<string, string>>;
 }
 
 // @public (undocumented)
@@ -7195,13 +7227,13 @@ export { z }
 // dist/server/serve-implementation.d.ts:153:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:161:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:221:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:624:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1517:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1641:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1699:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1707:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1708:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1895:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:662:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1555:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1679:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1737:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1745:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1746:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1933:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

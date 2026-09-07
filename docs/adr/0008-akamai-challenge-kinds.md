@@ -76,6 +76,15 @@ backend is Hyper Solutions. This closes the public-API extension axis now,
 rather than shipping an `_abck`-only abstraction when the first consumer is
 measurably SBSD.
 
+**[v1.1 amend 2026-09-07 (PR #251, owner decision): of the Hyper adapter's
+exchanges, the upstream script GET, the upstream payload POST, and the
+observed-IP reflector `ip.hypersolutions.co/ip` ride the identity-bound
+transport, because Hyper must observe the egress address the upstream will
+see. The `akm.hypersolutions.co/sbsd` payload-generation POST carries no
+identity and goes direct, as in the measured zozotown source
+(`upstream/sbsd.ts:621` `directFetch`); it does not consume the provider's
+proxy lease.]**
+
 ### D9 — the engine owns the whole challenge transaction
 
 The initiating stealth session detects the challenge, the resolver adapter
@@ -295,6 +304,12 @@ which ADR 0006 measured portable on buyee.
 | D5 | No third `ChallengeSolution` form | A sensor loop resolves to `{form:"cookies"}` like any cookie family; the loop is adapter-internal |
 | D6 | Provider declaration additionally carries `clientProfile?` | The provider knows which fingerprint reaches its upstream; the SDK cannot guess `safari17_0` |
 | D7 | Ship both kinds with `2captcha` capability only, `capsolver`/`capmonster` omitted until measured | Vendor task vocabularies are not interchangeable (ADR 0006 Rev 1); an unmeasured entry is a false capability claim |
+
+**[v1.1 amend 2026-09-07: D5 is superseded for `akamai_sbsd` (PR #251). The
+SBSD adapter returns a value-free `{ form: "cookie_state", verified: false }`
+solution: the state cookie lives only in the engine-owned jar of the bound
+transport, so there is no cookie value to hand back, and the solve is verified
+only by the next protected GET. D5 stands for the `_abck` sensor loop.]**
 
 ### D1 — why two kinds
 

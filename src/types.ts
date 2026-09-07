@@ -278,6 +278,7 @@ export type ProviderResolverVendor =
 	| "capsolver"
 	| "capmonster"
 	| "2captcha"
+	| "hypersolutions"
 	| "custom";
 
 /**
@@ -343,6 +344,23 @@ export type ProviderChallenge =
 			readonly bmsz?: string;
 			/** Bot Manager major version when known ("3" measured on zozo.jp). */
 			readonly version?: string;
+		}
+	| {
+			readonly kind: "akamai_sbsd";
+			readonly pageUrl: string;
+			/**
+			 * Discovered SBSD script URL. `?v=&t=` is a hard challenge and `?v=`
+			 * is passive or a remembered script. A later challenge token never
+			 * changes this URL.
+			 */
+			readonly scriptUrl: string;
+			readonly stateCookieName: "sbsd_o" | "bm_so";
+			/**
+			 * Token returned by a later `cpr_chlge` response. When present with a
+			 * remembered v-only script, it selects index 0 and is appended only to
+			 * the payload POST URL.
+			 */
+			readonly challengeToken?: string;
 		};
 
 export type ProviderChallengeKind = ProviderChallenge["kind"];
@@ -352,7 +370,9 @@ export type ProviderChallengeKind = ProviderChallenge["kind"];
  * per challenge kind: `aws_waf` was measured portable across residential leases
  * on buyee, while `cf_clearance` is unmeasured here and treated as scoped to the
  * identity that produced it. The provider attaches the returned cookies to its
- * own requests.
+ * own requests. `cookie_state` solutions carry no values: SBSD state lives only
+ * in the engine-owned bound jar, and a 2xx payload POST is not proof of a solve;
+ * only the next protected GET can verify it (the safe refetch is Phase 2).
  */
 export type ChallengeSolution =
 	| { readonly form: "token"; readonly token: string }
@@ -367,21 +387,44 @@ export type ChallengeSolution =
 			 * the upstream cookie's expiry. `expires` takes precedence when both are present.
 			 */
 			readonly sdkEstimatedExpires?: number;
+		}
+	| {
+			readonly form: "cookie_state";
+			readonly kind: "akamai_sbsd";
+			readonly outcome: "payload_accepted";
+			/** Always false until a later protected GET verifies the bound jar (Phase 2). */
+			readonly verified: false;
+			/** Name only; the identity-bound cookie value remains in the engine-owned jar. */
+			readonly stateCookieName: "sbsd_o" | "bm_so";
+			/** Epoch seconds observed on the updated state cookie, when supplied upstream. */
+			readonly expires?: number;
 		};
 
-export interface ProviderResolverConfig {
-	/** Optional ordered override for the SDK-owned vendor fallback chain. */
-	readonly vendors?: readonly ProviderResolverVendor[];
-	/** Challenge kinds this provider is permitted to request. */
-	readonly kinds: readonly ProviderChallengeKind[];
-	/**
-	 * Client fingerprint profile the SDK must use when reaching this upstream.
-	 * Measured on zozo.jp: Chrome/Firefox profiles are refused 403 before any
-	 * challenge is served, while a Safari profile is admitted. Provider-declared
-	 * because only the provider knows its upstream's admission rule.
-	 */
-	readonly clientProfile?: string;
-}
+/**
+ * `akamai_sbsd` declarations require a transport-owned client profile because the
+ * solve runs on the provider's admitted session. Other kinds may omit it.
+ */
+export type ProviderResolverConfig =
+	| {
+			/** Optional ordered override for the SDK-owned vendor fallback chain. */
+			readonly vendors?: readonly ProviderResolverVendor[];
+			/** Challenge kinds this provider is permitted to request. */
+			readonly kinds: readonly Exclude<ProviderChallengeKind, "akamai_sbsd">[];
+			readonly clientProfile?: string;
+		}
+	| {
+			/** Optional ordered override for the SDK-owned vendor fallback chain. */
+			readonly vendors?: readonly ProviderResolverVendor[];
+			/** Challenge kinds this provider is permitted to request. */
+			readonly kinds: readonly ProviderChallengeKind[];
+			/**
+			 * Client fingerprint profile the SDK must use when reaching this upstream.
+			 * Measured on zozo.jp: Chrome/Firefox profiles are refused 403 before any
+			 * challenge is served, while a Safari profile is admitted. Provider-declared
+			 * because only the provider knows its upstream's admission rule.
+			 */
+			readonly clientProfile: string;
+		};
 
 export type SttAudioInput = {
 	kind: "base64";

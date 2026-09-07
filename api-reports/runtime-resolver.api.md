@@ -17,6 +17,9 @@ export const APIFUSE__RESOLVER__CAPMONSTER__API_KEY = "APIFUSE__RESOLVER__CAPMON
 export const APIFUSE__RESOLVER__CAPSOLVER__API_KEY = "APIFUSE__RESOLVER__CAPSOLVER__API_KEY";
 
 // @public (undocumented)
+export const APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY = "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY";
+
+// @public (undocumented)
 export const APIFUSE__RESOLVER__TIMEOUT_MS = "APIFUSE__RESOLVER__TIMEOUT_MS";
 
 // Warning: (ae-forgotten-export) The symbol "ResolverContext" needs to be exported by the entry point resolver-public.d.ts
@@ -34,6 +37,13 @@ type ChallengeSolution = {
     readonly userAgent: string;
     readonly expires?: number;
     readonly sdkEstimatedExpires?: number;
+} | {
+    readonly form: "cookie_state";
+    readonly kind: "akamai_sbsd";
+    readonly outcome: "payload_accepted";
+    readonly verified: false;
+    readonly stateCookieName: "sbsd_o" | "bm_so";
+    readonly expires?: number;
 };
 
 // Warning: (ae-forgotten-export) The symbol "ResolverChainClient" needs to be exported by the entry point resolver-public.d.ts
@@ -65,7 +75,7 @@ export function createUnsupportedResolverClient(reason?: string): ResolverContex
 export const DEFAULT_RESOLVER_TIMEOUT_MS = 180000;
 
 // @public
-export const DEFAULT_RESOLVER_VENDOR_PREFERENCE: readonly ["capsolver", "2captcha"];
+export const DEFAULT_RESOLVER_VENDOR_PREFERENCE: readonly ["capsolver", "2captcha", "hypersolutions"];
 
 // @public (undocumented)
 type EnvLike = Record<string, string | undefined>;
@@ -201,6 +211,12 @@ type ProviderChallenge = {
     readonly abck?: string;
     readonly bmsz?: string;
     readonly version?: string;
+} | {
+    readonly kind: "akamai_sbsd";
+    readonly pageUrl: string;
+    readonly scriptUrl: string;
+    readonly stateCookieName: "sbsd_o" | "bm_so";
+    readonly challengeToken?: string;
 };
 
 // @public (undocumented)
@@ -239,16 +255,19 @@ type ProviderProxyProvider = "smartproxy" | "nodemaven" | "decodo" | "custom";
 // @public (undocumented)
 type ProviderProxySessionAffinity = "request" | "operation" | "auth-flow" | "connection";
 
-// @public (undocumented)
-interface ProviderResolverConfig {
-    readonly clientProfile?: string;
-    readonly kinds: readonly ProviderChallengeKind[];
-    // Warning: (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
+// @public
+type ProviderResolverConfig = {
     readonly vendors?: readonly ProviderResolverVendor[];
-}
+    readonly kinds: readonly Exclude<ProviderChallengeKind, "akamai_sbsd">[];
+    readonly clientProfile?: string;
+} | {
+    readonly vendors?: readonly ProviderResolverVendor[];
+    readonly kinds: readonly ProviderChallengeKind[];
+    readonly clientProfile: string;
+};
 
 // @public
-type ProviderResolverVendor = "browser" | "capsolver" | "capmonster" | "2captcha" | "custom";
+type ProviderResolverVendor = "browser" | "capsolver" | "capmonster" | "2captcha" | "hypersolutions" | "custom";
 
 // @public (undocumented)
 type ProxyAttemptTelemetryEvent = {
@@ -408,6 +427,7 @@ interface ResolverVendorAdapter {
     solve(challenge: ProviderChallenge, identity: ResolverIdentity | undefined, signal: AbortSignal, traceRecorder?: TraceRecorder, transport?: ResolverVendorTransport): Promise<ChallengeSolution>;
     // (undocumented)
     supports(kind: ProviderChallengeKind): boolean;
+    readonly transportAllowedHosts?: readonly string[];
 }
 
 // @public (undocumented)
@@ -418,6 +438,7 @@ interface ResolverVendorTransport {
         body?: string;
         signal: AbortSignal;
         redirect?: "manual";
+        maxBodyBytes?: number;
     }): Promise<{
         readonly status: number;
         readonly headers: Readonly<Record<string, string>>;
@@ -433,6 +454,8 @@ interface ResolverVendorTransport {
             readonly sameSite?: string;
         }[];
     }>;
+    readonly getCookie?: (name: string, url: string) => string | undefined;
+    readonly sessionHeaders?: Readonly<Record<string, string>>;
 }
 
 // @public (undocumented)
@@ -472,8 +495,9 @@ interface TraceRecorder {
 // dist/runtime/resolver.d.ts:61:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:62:5 - (ae-forgotten-export) The symbol "ResolverIdentity" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:64:5 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:841:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:846:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:336:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:879:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:884:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
 
 // (No @packageDocumentation comment for this package)
 
