@@ -13,6 +13,7 @@ import type {
 import { createUnsupportedOcrClient } from "./ocr.js";
 import { createUnsupportedResolverClient } from "./resolver-shared.js";
 import { createUnsupportedSttClient } from "./stt.js";
+import { createTraceContext } from "./trace.js";
 
 function normalizeAllowedKeys(allowedKeys: string[]): Set<string> {
 	return new Set(allowedKeys.filter((key) => key.trim().length > 0));
@@ -66,6 +67,7 @@ export function createFlowContext(options: {
 	initialContext?: Record<string, unknown>;
 	ocr?: OcrContext;
 	stt?: SttContext;
+	trace?: FlowContext["trace"];
 }): FlowContext {
 	return {
 		flowId: options.flowId,
@@ -73,6 +75,7 @@ export function createFlowContext(options: {
 		externalRef: options.externalRef,
 		tenantId: options.tenantId,
 		providerId: options.providerId,
+		trace: options.trace ?? createTraceContext(),
 		http: options.http,
 		state: options.state,
 		stealth: options.stealth,

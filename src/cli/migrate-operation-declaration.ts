@@ -3,6 +3,9 @@ import { dirname, extname, join, relative, resolve } from "node:path";
 
 import type TS from "typescript";
 
+import { assertProviderLocaleKey } from "../i18n/keys.js";
+import { operationIdToLocaleNamespace } from "../i18n/operation-locale-namespace.js";
+
 const ts: typeof import("typescript") = await loadTypeScript();
 
 async function loadTypeScript(): Promise<typeof import("typescript")> {
@@ -66,7 +69,10 @@ export type OperationDeclarationRefusalReason =
 	| "codemod_syntax"
 	| "missing_english_locale"
 	| "operation_id_unresolved"
+	| "factory_operation_id_ambiguous"
+	| "no_operations_discovered"
 	| "examples_conflict"
+	| "invalid_locale_key"
 	| "locale_todo_conflict";
 
 export type OperationDeclarationRefusal = {
@@ -118,6 +124,25 @@ type ResolvedMember = {
 	readonly property: TS.ObjectLiteralElementLike;
 	readonly initializer?: TS.Expression;
 	readonly fromSpread?: boolean;
+	readonly source: TS.SourceFile;
+};
+
+type StaticObjectReference = {
+	readonly object: TS.ObjectLiteralExpression;
+	readonly source: TS.SourceFile;
+};
+
+type StaticObjectResolver = (
+	expression: TS.Expression,
+	source: TS.SourceFile,
+) => StaticObjectReference | undefined;
+
+type RepositoryMigrationContext = {
+	readonly operationSites?: ReadonlyMap<number, string>;
+	readonly excludedBindings?: ReadonlySet<string>;
+	readonly staticObjectResolver?: StaticObjectResolver;
+	readonly runtimeComposedInitializers?: ReadonlySet<number>;
+	readonly recordDiscoveredSites?: (count: number) => void;
 };
 
 type OperationSite = {
@@ -144,6 +169,15 @@ export function migrateOperationDeclaration(
 	fileName: string,
 	options: OperationDeclarationMigrationOptions = {},
 ): OperationDeclarationMigration {
+	return migrateOperationDeclarationInternal(sourceText, fileName, options);
+}
+
+function migrateOperationDeclarationInternal(
+	sourceText: string,
+	fileName: string,
+	options: OperationDeclarationMigrationOptions,
+	context: RepositoryMigrationContext = {},
+): OperationDeclarationMigration {
 	const source = parseSource(fileName, sourceText);
 	const parseError = firstSyntaxError(source);
 	if (parseError !== undefined) {
@@ -155,7 +189,16 @@ export function migrateOperationDeclaration(
 
 	const constObjects = collectModuleConstObjects(source);
 	const constArrays = collectModuleConstArrays(source);
-	const discovery = discoverOperationSites(source, fileName, constObjects, options.operationIds);
+	const discovery = discoverOperationSites(
+		source,
+		fileName,
+		constObjects,
+		options.operationIds,
+		context.operationSites,
+		context.excludedBindings,
+		context.runtimeComposedInitializers,
+	);
+	context.recordDiscoveredSites?.(discovery.discoveredCount);
 	if (discovery.refusals.length > 0) {
 		return { status: "refused", refusals: discovery.refusals };
 	}
@@ -171,6 +214,7 @@ export function migrateOperationDeclaration(
 			constObjects,
 			constArrays,
 			options.localeFiles ?? [],
+			context.staticObjectResolver,
 		);
 		if ("refusal" in plan) {
 			refusals.push(plan.refusal);
@@ -180,6 +224,10 @@ export function migrateOperationDeclaration(
 		todos.push(...plan.localeTodos);
 	}
 	if (refusals.length > 0) return { status: "refused", refusals };
+	const invalidLocaleKey = findInvalidLocaleTodo(todos, fileName);
+	if (invalidLocaleKey !== undefined) {
+		return { status: "refused", refusals: [invalidLocaleKey] };
+	}
 
 	if (edits.length === 0) {
 		return {
@@ -233,6 +281,7 @@ function planOperationMigration(
 	constObjects: ReadonlyMap<string, TS.ObjectLiteralExpression>,
 	constArrays: ReadonlyMap<string, TS.ArrayLiteralExpression>,
 	localeFiles: readonly string[],
+	staticObjectResolver?: StaticObjectResolver,
 ): PlannedOperation | { readonly refusal: OperationDeclarationRefusal } {
 	if (site.object.properties.some(ts.isSpreadAssignment)) {
 		return {
@@ -244,7 +293,14 @@ function planOperationMigration(
 			),
 		};
 	}
-	const expanded = expandMembers(site.object, constObjects, fileName, site.operationKey);
+	const expanded = expandMembers(
+		site.object,
+		source,
+		constObjects,
+		fileName,
+		site.operationKey,
+		staticObjectResolver,
+	);
 	if ("refusal" in expanded) return expanded;
 
 	const top = indexMembers(expanded.members, fileName, site.operationKey);
@@ -264,8 +320,13 @@ function planOperationMigration(
 	for (const containerName of ["annotations", "toolRouter", "docs"] as const) {
 		const member = top.byName.get(containerName);
 		if (member === undefined) continue;
-		const object = resolveObjectInitializer(member, constObjects);
-		if (object === undefined) {
+		const resolvedObject = resolveObjectInitializer(
+			member,
+			source,
+			constObjects,
+			staticObjectResolver,
+		);
+		if (resolvedObject === undefined) {
 			return {
 				refusal: refusal(
 					fileName,
@@ -275,7 +336,14 @@ function planOperationMigration(
 				),
 			};
 		}
-		const members = expandMembers(object, constObjects, fileName, site.operationKey);
+		const members = expandMembers(
+			resolvedObject.object,
+			resolvedObject.source,
+			constObjects,
+			fileName,
+			site.operationKey,
+			staticObjectResolver,
+		);
 		if ("refusal" in members) return members;
 		const indexed = indexMembers(members.members, fileName, site.operationKey);
 		if ("refusal" in indexed) return indexed;
@@ -342,19 +410,12 @@ function planOperationMigration(
 		annotations.get("timeoutMs"),
 		fileName,
 		site.operationKey,
-		source,
 		"execution_conflict",
 	);
 	if ("refusal" in timeout) return timeout;
 	if (timeout.insert !== undefined) addInsertion(insertions, "annotations", timeout.insert);
 
-	const connection = resolveConnectionMode(
-		top.byName,
-		toolRouter,
-		fileName,
-		site.operationKey,
-		source,
-	);
+	const connection = resolveConnectionMode(top.byName, toolRouter, fileName, site.operationKey);
 	if ("refusal" in connection) return connection;
 	if (connection.insert !== undefined) {
 		addInsertion(insertions, "toolRouter", connection.insert);
@@ -366,7 +427,6 @@ function planOperationMigration(
 		toolRouter.get("connectionExternalRefParam"),
 		fileName,
 		site.operationKey,
-		source,
 		"connection_mode_conflict",
 	);
 	if ("refusal" in externalRef) return externalRef;
@@ -380,7 +440,6 @@ function planOperationMigration(
 		risk.value,
 		fileName,
 		site.operationKey,
-		source,
 	);
 	if ("refusal" in approval) return approval;
 	if (approval.removeTop !== undefined) removals.push(approval.removeTop);
@@ -393,12 +452,35 @@ function planOperationMigration(
 			docs.get(field),
 			fileName,
 			site.operationKey,
-			source,
 			"locale_key_conflict",
 		);
 		if ("refusal" in merged) return merged;
 		if (merged.insert !== undefined) addInsertion(insertions, "docs", merged.insert);
 	}
+
+	const title = planTitleLocale(
+		top.byName.get("title"),
+		top.byName.get("titleKey"),
+		docs.get("titleKey"),
+		fileName,
+		site,
+		localeFiles,
+	);
+	if ("refusal" in title) return title;
+	const localeNamespace =
+		top.byName.get("inputExamples") === undefined
+			? { namespace: site.operationKey }
+			: resolveOperationLocaleNamespace(
+					[
+						top.byName.get("titleKey"),
+						docs.get("titleKey"),
+						top.byName.get("descriptionKey"),
+						docs.get("descriptionKey"),
+					],
+					fileName,
+					site,
+				);
+	if ("refusal" in localeNamespace) return localeNamespace;
 
 	const examples = planExamples(
 		top.byName.get("inputExamples"),
@@ -408,6 +490,7 @@ function planOperationMigration(
 		source,
 		constArrays,
 		localeFiles,
+		localeNamespace.namespace,
 	);
 	if ("refusal" in examples) return examples;
 
@@ -431,7 +514,107 @@ function planOperationMigration(
 		if (!edits.some((existing) => rangesOverlap(existing, edit))) edits.push(edit);
 	}
 
-	return { edits, localeTodos: examples.localeTodos };
+	return { edits, localeTodos: [...title.localeTodos, ...examples.localeTodos] };
+}
+
+function planTitleLocale(
+	title: ResolvedMember | undefined,
+	flatTitleKey: ResolvedMember | undefined,
+	nestedTitleKey: ResolvedMember | undefined,
+	fileName: string,
+	site: OperationSite,
+	localeFiles: readonly string[],
+):
+	| { readonly localeTodos: readonly LocaleTodo[] }
+	| { readonly refusal: OperationDeclarationRefusal } {
+	if (title === undefined) return { localeTodos: [] };
+	const originalProse = literalString(title.initializer);
+	if (originalProse === undefined) {
+		return nonLiteral(
+			fileName,
+			site.operationKey,
+			"title must be a string literal so its authored prose can be preserved in the English locale catalog.",
+		);
+	}
+	if (!site.operationIdProven) {
+		return {
+			refusal: refusal(
+				fileName,
+				site.operationKey,
+				"operation_id_unresolved",
+				"title requires an exact operation id proven from a static operations map.",
+			),
+		};
+	}
+	if (!localeFiles.includes("locales/en.json")) {
+		return {
+			refusal: refusal(
+				fileName,
+				site.operationKey,
+				"missing_english_locale",
+				"title cannot be migrated because locales/en.json does not exist.",
+			),
+		};
+	}
+
+	let selectedTitleKey = flatTitleKey ?? nestedTitleKey;
+	if (flatTitleKey !== undefined && nestedTitleKey !== undefined) {
+		const same = equivalentLiteral(flatTitleKey.initializer, nestedTitleKey.initializer);
+		if (same === undefined) {
+			return nonLiteral(
+				fileName,
+				site.operationKey,
+				"titleKey must be literal when both top-level and nested declarations exist.",
+			);
+		}
+		if (!same) {
+			return {
+				refusal: refusal(
+					fileName,
+					site.operationKey,
+					"locale_key_conflict",
+					"Top-level titleKey conflicts with nested titleKey.",
+				),
+			};
+		}
+		selectedTitleKey = flatTitleKey;
+	}
+	const explicitTitleKey =
+		selectedTitleKey === undefined ? undefined : literalString(selectedTitleKey.initializer);
+	if (selectedTitleKey !== undefined && explicitTitleKey === undefined) {
+		return nonLiteral(
+			fileName,
+			site.operationKey,
+			"titleKey must be a string literal so the title locale destination is provable.",
+		);
+	}
+	let selectedTitleLocaleKey: string;
+	if (explicitTitleKey !== undefined) {
+		selectedTitleLocaleKey = explicitTitleKey;
+	} else {
+		try {
+			selectedTitleLocaleKey = `operations.${operationIdToLocaleNamespace(site.operationKey)}.title`;
+		} catch (error) {
+			return {
+				refusal: invalidLocaleKeyRefusal(
+					fileName,
+					site.operationKey,
+					`operations.${site.operationKey}.title`,
+					error,
+				),
+			};
+		}
+	}
+	return {
+		localeTodos: [
+			{
+				localeFile: "locales/en.json",
+				operationKey: site.operationKey,
+				key: selectedTitleLocaleKey,
+				originalProse,
+			},
+		],
+	};
 }
 
 function resolveRiskClass(
@@ -535,7 +718,6 @@ function resolveConnectionMode(
 	toolRouter: ReadonlyMap<string, ResolvedMember>,
 	fileName: string,
 	operationKey: string,
-	source: TS.SourceFile,
 ): { readonly insert?: string } | { readonly refusal: OperationDeclarationRefusal } {
 	const flat = top.get("connectionMode");
 	const nested = toolRouter.get("connectionMode");
@@ -562,7 +744,7 @@ function resolveConnectionMode(
 	}
 	if (flat !== undefined) return {};
 	if (nested !== undefined) {
-		return { insert: memberText(nested, "connectionMode", source) };
+		return { insert: memberText(nested, "connectionMode") };
 	}
 
 	const required = toolRouter.get("requiresConnection");
@@ -583,7 +765,6 @@ function resolveApproval(
 	riskClass: string,
 	fileName: string,
 	operationKey: string,
-	source: TS.SourceFile,
 ):
 	| { readonly insert?: string; readonly removeTop?: TS.ObjectLiteralElementLike }
 	| { readonly refusal: OperationDeclarationRefusal } {
@@ -615,7 +796,7 @@ function resolveApproval(
 		return flat === undefined ? {} : { removeTop: flat.property };
 	}
 	if (flat !== undefined) return {};
-	return { insert: memberText(selected, "approval", source) };
+	return { insert: memberText(selected, "approval") };
 }
 
 function defaultApprovalPolicy(riskClass: string): string {
@@ -630,11 +811,10 @@ function mergeFlatAndNested(
 	nested: ResolvedMember | undefined,
 	fileName: string,
 	operationKey: string,
-	source: TS.SourceFile,
 	reason: "locale_key_conflict" | "connection_mode_conflict" | "execution_conflict",
 ): { readonly insert?: string } | { readonly refusal: OperationDeclarationRefusal } {
 	if (nested === undefined) return {};
-	if (flat === undefined) return { insert: memberText(nested, field, source) };
+	if (flat === undefined) return { insert: memberText(nested, field) };
 	const same = equivalentLiteral(flat.initializer, nested.initializer);
 	if (same === undefined) {
 		return nonLiteral(
@@ -644,6 +824,11 @@ function mergeFlatAndNested(
 		);
 	}
 	if (!same) {
+		// A shared imported docs template is intentionally lower-precedence than
+		// an operation's explicit flat locale key. Keep direct-vs-direct
+		// conflicts fail-closed, but do not let a spread default replace the
+		// operation-specific key during flattening.
+		if (reason === "locale_key_conflict" && nested.fromSpread === true) return {};
 		return {
 			refusal: refusal(
 				fileName,
@@ -664,6 +849,7 @@ function planExamples(
 	source: TS.SourceFile,
 	constArrays: ReadonlyMap<string, TS.ArrayLiteralExpression>,
 	localeFiles: readonly string[],
+	localeNamespace: string,
 ):
 	| { readonly edits: readonly TextEdit[]; readonly localeTodos: readonly LocaleTodo[] }
 	| { readonly refusal: OperationDeclarationRefusal } {
@@ -760,7 +946,7 @@ function planExamples(
 				`inputExamples[${index}].scenario must be a string literal.`,
 			);
 		}
-		const scenarioKey = `operations.${site.operationKey}.examples.${index}.scenario`;
+		const scenarioKey = `operations.${localeNamespace}.examples.${index}.scenario`;
 		edits.push(replaceExampleLocaleMember(scenario, "scenarioKey", scenarioKey, source));
 		for (const localeFile of localeFiles) {
 			todos.push({
@@ -781,7 +967,7 @@ function planExamples(
 					`inputExamples[${index}].rationale must be a string literal.`,
 				);
 			}
-			const rationaleKey = `operations.${site.operationKey}.examples.${index}.rationale`;
+			const rationaleKey = `operations.${localeNamespace}.examples.${index}.rationale`;
 			edits.push(replaceExampleLocaleMember(rationale, "rationaleKey", rationaleKey, source));
 			for (const localeFile of localeFiles) {
 				todos.push({
@@ -794,6 +980,55 @@ function planExamples(
 		}
 	}
 	return { edits, localeTodos: todos };
+}
+
+function resolveOperationLocaleNamespace(
+	members: readonly (ResolvedMember | undefined)[],
+	fileName: string,
+	site: OperationSite,
+): { readonly namespace: string } | { readonly refusal: OperationDeclarationRefusal } {
+	const authoredNamespaces = new Set<string>();
+	const directMembers = members.filter(
+		(member) => member !== undefined && member.fromSpread !== true,
+	);
+	const namespaceMembers = directMembers.length > 0 ? directMembers : members;
+	for (const member of namespaceMembers) {
+		const localeKey = literalString(member?.initializer);
+		if (localeKey === undefined) continue;
+		const segments = localeKey.split(".");
+		if (segments[0] === "operations" && segments[1] !== undefined) {
+			authoredNamespaces.add(segments[1]);
+		}
+	}
+	if (authoredNamespaces.size > 1) {
+		return {
+			refusal: refusal(
+				fileName,
+				site.operationKey,
+				"locale_key_conflict",
+				`Operation titleKey and descriptionKey declarations use different locale namespaces: ${[...authoredNamespaces].join(", ")}.`,
+			),
+		};
+	}
+	const authored = authoredNamespaces.values().next().value;
+	if (authored !== undefined) return { namespace: authored };
+	// planExamples proves the id before using this placeholder to construct a
+	// locale key. Avoid validating an unproven binding such as <anonymous> as
+	// though it were an authored operation id.
+	if (!site.operationIdProven) return { namespace: site.operationKey };
+
+	try {
+		return { namespace: operationIdToLocaleNamespace(site.operationKey) };
+	} catch (error) {
+		return {
+			refusal: invalidLocaleKeyRefusal(
+				fileName,
+				site.operationKey,
+				`operations.${site.operationKey}.examples`,
+				error,
+			),
+		};
+	}
 }
 
 function replaceExampleLocaleMember(
@@ -814,15 +1049,29 @@ function discoverOperationSites(
 	fileName: string,
 	constObjects: ReadonlyMap<string, TS.ObjectLiteralExpression>,
 	operationIds: ReadonlyMap<string, string> | undefined,
+	operationSites: ReadonlyMap<number, string> | undefined,
+	excludedBindings: ReadonlySet<string> | undefined,
+	runtimeComposedInitializers: ReadonlySet<number> | undefined,
 ): {
 	readonly sites: OperationSite[];
+	readonly discoveredCount: number;
 	readonly refusals: OperationDeclarationRefusal[];
 } {
 	const sitesByStart = new Map<number, OperationSite>();
+	const discoveredStarts = new Set<number>();
 	const localIds = new Map(operationIds ?? []);
+	const localExcludedBindings = new Set(excludedBindings ?? []);
 	const refusals: OperationDeclarationRefusal[] = [];
+	const operationFactories = collectSimpleOperationFactories(source);
+	const factoryCallIds = new Map<string, Set<string>>();
 
-	for (const map of collectOperationsMaps(source, constObjects, fileName, refusals)) {
+	for (const map of collectOperationsMaps(
+		source,
+		constObjects,
+		fileName,
+		refusals,
+		runtimeComposedInitializers,
+	)) {
 		for (const property of map.properties) {
 			if (ts.isSpreadAssignment(property)) continue;
 			const key = staticPropertyName(property.name);
@@ -854,6 +1103,18 @@ function discoverOperationSites(
 				});
 				continue;
 			}
+			if (
+				ts.isCallExpression(unwrapped) &&
+				ts.isIdentifier(unwrapped.expression) &&
+				operationFactories.has(unwrapped.expression.text) &&
+				!localExcludedBindings.has(unwrapped.expression.text)
+			) {
+				const factoryName = unwrapped.expression.text;
+				const operationIdsForFactory = factoryCallIds.get(factoryName) ?? new Set<string>();
+				operationIdsForFactory.add(key);
+				factoryCallIds.set(factoryName, operationIdsForFactory);
+				continue;
+			}
 			if (ts.isObjectLiteralExpression(unwrapped)) {
 				sitesByStart.set(unwrapped.getStart(source), {
 					object: unwrapped,
@@ -863,16 +1124,49 @@ function discoverOperationSites(
 			}
 		}
 	}
+	for (const [factoryName, operationIdsForFactory] of factoryCallIds) {
+		const ids = [...operationIdsForFactory];
+		if (ids.length === 1) {
+			const operationId = ids[0];
+			if (operationId !== undefined) localIds.set(factoryName, operationId);
+			continue;
+		}
+		localExcludedBindings.add(factoryName);
+		refusals.push(
+			refusal(
+				fileName,
+				factoryName,
+				"factory_operation_id_ambiguous",
+				`Factory ${factoryName} is registered under multiple operation ids: ${ids
+					.map((id) => JSON.stringify(id))
+					.join(", ")}. A shared operation body cannot own one examples locale namespace.`,
+			),
+		);
+	}
 
 	const visit = (node: TS.Node): void => {
+		if (ts.isObjectLiteralExpression(node)) {
+			const indexedOperationKey = operationSites?.get(node.getStart(source));
+			if (indexedOperationKey !== undefined) {
+				sitesByStart.set(node.getStart(source), {
+					object: node,
+					operationKey: indexedOperationKey,
+					operationIdProven: true,
+				});
+			}
+		}
 		if (ts.isCallExpression(node) && isOperationHelperCall(node)) {
 			const argument = operationArgument(node);
 			const bindingName = enclosingBindingName(node);
+			const unwrappedArgument = unwrapExpression(argument);
+			if (unwrappedArgument !== undefined && ts.isObjectLiteralExpression(unwrappedArgument)) {
+				discoveredStarts.add(unwrappedArgument.getStart(source));
+			}
+			if (bindingName !== undefined && localExcludedBindings.has(bindingName)) return;
 			const operationKey =
 				(bindingName === undefined ? undefined : localIds.get(bindingName)) ??
 				bindingName ??
 				"<anonymous>";
-			const unwrappedArgument = unwrapExpression(argument);
 			if (unwrappedArgument === undefined || !ts.isObjectLiteralExpression(unwrappedArgument)) {
 				refusals.push(
 					refusal(
@@ -903,12 +1197,43 @@ function discoverOperationSites(
 		ts.forEachChild(node, visit);
 	};
 	visit(source);
+	for (const start of sitesByStart.keys()) discoveredStarts.add(start);
 	return {
 		sites: [...sitesByStart.values()].sort(
 			(left, right) => left.object.getStart(source) - right.object.getStart(source),
 		),
+		discoveredCount: discoveredStarts.size,
 		refusals,
 	};
+}
+
+function collectSimpleOperationFactories(source: TS.SourceFile): ReadonlySet<string> {
+	const factories = new Set<string>();
+	for (const statement of source.statements) {
+		if (
+			!ts.isFunctionDeclaration(statement) ||
+			statement.name === undefined ||
+			statement.body === undefined ||
+			statement.body.statements.length !== 1
+		) {
+			continue;
+		}
+		const returned = statement.body.statements[0];
+		if (!ts.isReturnStatement(returned) || returned.expression === undefined) continue;
+		const expression = unwrapExpression(returned.expression);
+		if (
+			expression !== undefined &&
+			ts.isCallExpression(expression) &&
+			isOperationHelperCall(expression)
+		) {
+			const argument = operationArgument(expression);
+			const object = argument === undefined ? undefined : unwrapExpression(argument);
+			if (object !== undefined && ts.isObjectLiteralExpression(object)) {
+				factories.add(statement.name.text);
+			}
+		}
+	}
+	return factories;
 }
 
 function collectOperationsMaps(
@@ -916,6 +1241,7 @@ function collectOperationsMaps(
 	constObjects: ReadonlyMap<string, TS.ObjectLiteralExpression>,
 	fileName: string,
 	refusals: OperationDeclarationRefusal[],
+	runtimeComposedInitializers?: ReadonlySet<number>,
 ): TS.ObjectLiteralExpression[] {
 	const maps = new Map<number, TS.ObjectLiteralExpression>();
 	const inspect = (expression: TS.Expression, label: string): void => {
@@ -931,6 +1257,7 @@ function collectOperationsMaps(
 			return;
 		}
 		if (ts.isCallExpression(unwrapped)) {
+			if (runtimeComposedInitializers?.has(expression.getStart(source)) === true) return;
 			refusals.push(
 				refusal(
 					fileName,
@@ -984,9 +1311,7 @@ function isProviderOperationsProperty(
 	// (a) The initializer (direct or via same-file const) mentions
 	// defineOperation / defineStreamOperation — the strongest signal.
 	const target = ts.isIdentifier(unwrapExpression(node.initializer) ?? node.initializer)
-		? constObjects.get(
-				(unwrapExpression(node.initializer) as TS.Identifier).text,
-			)
+		? constObjects.get((unwrapExpression(node.initializer) as TS.Identifier).text)
 		: undefined;
 	const initializerText = (target ?? node.initializer).getText();
 	if (/\bdefine(?:Stream)?Operation\b/.test(initializerText)) return true;
@@ -1057,6 +1382,9 @@ function enclosingBindingName(node: TS.Node): string | undefined {
 	let current: TS.Node | undefined = node;
 	while (current !== undefined) {
 		if (ts.isVariableDeclaration(current) && ts.isIdentifier(current.name)) {
+			return current.name.text;
+		}
+		if (ts.isFunctionDeclaration(current) && current.name !== undefined) {
 			return current.name.text;
 		}
 		if (ts.isPropertyAssignment(current)) return staticPropertyName(current.name);
@@ -1144,9 +1472,11 @@ function expandArrayElements(
 
 function expandMembers(
 	object: TS.ObjectLiteralExpression,
+	source: TS.SourceFile,
 	constObjects: ReadonlyMap<string, TS.ObjectLiteralExpression>,
 	fileName: string,
 	operationKey: string,
+	staticObjectResolver?: StaticObjectResolver,
 	seen = new Set<TS.ObjectLiteralExpression>(),
 ): { readonly members: ResolvedMember[] } | { readonly refusal: OperationDeclarationRefusal } {
 	if (seen.has(object)) {
@@ -1156,22 +1486,23 @@ function expandMembers(
 	const members: ResolvedMember[] = [];
 	for (const property of object.properties) {
 		if (ts.isSpreadAssignment(property)) {
-			const expression = unwrapExpression(property.expression);
-			const spreadObject =
-				expression !== undefined && ts.isObjectLiteralExpression(expression)
-					? expression
-					: expression !== undefined && ts.isIdentifier(expression)
-						? constObjects.get(expression.text)
-						: undefined;
+			const spreadObject = resolveStaticObjectExpression(
+				property.expression,
+				source,
+				constObjects,
+				staticObjectResolver,
+			);
 			if (spreadObject === undefined) {
-				members.push({ name: "<spread>", property });
+				members.push({ name: "<spread>", property, source });
 				continue;
 			}
 			const expanded = expandMembers(
-				spreadObject,
+				spreadObject.object,
+				spreadObject.source,
 				constObjects,
 				fileName,
 				operationKey,
+				staticObjectResolver,
 				new Set(seen),
 			);
 			if ("refusal" in expanded) return expanded;
@@ -1183,7 +1514,7 @@ function expandMembers(
 			return nonLiteral(fileName, operationKey, "A declaration member uses a computed name.");
 		}
 		const initializer = propertyValue(property);
-		members.push({ name, property, initializer });
+		members.push({ name, property, initializer, source });
 	}
 	return { members };
 }
@@ -1232,7 +1563,7 @@ function indexMembersFromObject(
 		if (name === undefined || initializer === undefined) {
 			return nonLiteral(fileName, operationKey, "Example members must be literal properties.");
 		}
-		members.push({ name, property, initializer });
+		members.push({ name, property, initializer, source: object.getSourceFile() });
 	}
 	const indexed = indexMembers(members, fileName, operationKey);
 	if ("refusal" in indexed) return indexed;
@@ -1241,12 +1572,36 @@ function indexMembersFromObject(
 
 function resolveObjectInitializer(
 	member: ResolvedMember,
+	rootSource: TS.SourceFile,
 	constObjects: ReadonlyMap<string, TS.ObjectLiteralExpression>,
-): TS.ObjectLiteralExpression | undefined {
-	const initializer = unwrapExpression(member.initializer);
-	if (initializer === undefined) return undefined;
-	if (ts.isObjectLiteralExpression(initializer)) return initializer;
-	if (ts.isIdentifier(initializer)) return constObjects.get(initializer.text);
+	staticObjectResolver?: StaticObjectResolver,
+): StaticObjectReference | undefined {
+	if (member.initializer === undefined) return undefined;
+	return resolveStaticObjectExpression(
+		member.initializer,
+		member.source,
+		constObjects,
+		staticObjectResolver,
+		rootSource,
+	);
+}
+
+function resolveStaticObjectExpression(
+	expression: TS.Expression,
+	source: TS.SourceFile,
+	constObjects: ReadonlyMap<string, TS.ObjectLiteralExpression>,
+	staticObjectResolver?: StaticObjectResolver,
+	rootSource: TS.SourceFile = source,
+): StaticObjectReference | undefined {
+	const unwrapped = unwrapExpression(expression);
+	if (unwrapped === undefined) return undefined;
+	if (ts.isObjectLiteralExpression(unwrapped)) return { object: unwrapped, source };
+	const externallyResolved = staticObjectResolver?.(unwrapped, source);
+	if (externallyResolved !== undefined) return externallyResolved;
+	if (source === rootSource && ts.isIdentifier(unwrapped)) {
+		const object = constObjects.get(unwrapped.text);
+		if (object !== undefined) return { object, source };
+	}
 	return undefined;
 }
 
@@ -1348,9 +1703,9 @@ function literalValue(expression: TS.Expression | undefined): unknown | typeof N
 	return NOT_LITERAL;
 }
 
-function memberText(member: ResolvedMember, name: string, source: TS.SourceFile): string {
+function memberText(member: ResolvedMember, name: string): string {
 	if (member.initializer === undefined) return name;
-	return `${name}: ${member.initializer.getText(source)}`;
+	return `${name}: ${member.initializer.getText(member.source)}`;
 }
 
 function addInsertion(
@@ -1513,6 +1868,35 @@ function refusal(
 	return { file, operationKey, reason, detail };
 }
 
+function findInvalidLocaleTodo(
+	todos: readonly LocaleTodo[],
+	fileName: string,
+): OperationDeclarationRefusal | undefined {
+	for (const todo of todos) {
+		try {
+			assertProviderLocaleKey(todo.key);
+		} catch (error) {
+			return invalidLocaleKeyRefusal(fileName, todo.operationKey, todo.key, error);
+		}
+	}
+	return undefined;
+}
+
+function invalidLocaleKeyRefusal(
+	fileName: string,
+	operationKey: string,
+	localeKey: string,
+	error: unknown,
+): OperationDeclarationRefusal {
+	const validatorDetail = error instanceof Error ? error.message : String(error);
+	return refusal(
+		fileName,
+		operationKey,
+		"invalid_locale_key",
+		`Refusing to write invalid provider locale key ${JSON.stringify(localeKey)}: ${validatorDetail}`,
+	);
+}
+
 function nonLiteral(
 	fileName: string,
 	operationKey: string,
@@ -1529,6 +1913,7 @@ export type OperationDeclarationRepositoryResult =
 			readonly providerRoot: string;
 			readonly changedFiles: readonly string[];
 			readonly operationCount: number;
+			readonly notes: readonly OperationDeclarationNote[];
 			readonly sidecar?: string;
 			readonly localeTodoCount: number;
 	  }
@@ -1536,7 +1921,18 @@ export type OperationDeclarationRepositoryResult =
 			readonly status: "refused";
 			readonly providerRoot: string;
 			readonly refusals: readonly OperationDeclarationRefusal[];
+			/** Operations that were independently migratable before repository-atomic refusal. */
+			readonly operationCount: number;
+			readonly notes: readonly OperationDeclarationNote[];
+			readonly changedFiles: readonly string[];
+			readonly localeTodoCount: number;
 	  };
+
+export type OperationDeclarationNote = {
+	readonly code: "runtime_composed_registry";
+	readonly path: string;
+	readonly initializer: string;
+};
 
 /** Run the file transform repository-wide, committing writes only if every file is provable. */
 export function migrateOperationDeclarationRepository(
@@ -1546,19 +1942,33 @@ export function migrateOperationDeclarationRepository(
 	const providerRoot = resolve(providerRootInput);
 	const sourceFiles = collectSourceFiles(providerRoot);
 	const localeFiles = collectLocaleFiles(providerRoot);
-	const operationIds = buildOperationIdIndex(sourceFiles);
+	const repositoryIndex = buildRepositoryOperationIndex(sourceFiles, providerRoot);
 	const pendingWrites = new Map<string, string>();
 	const changedFiles: string[] = [];
 	const todos: LocaleTodo[] = [];
-	const refusals: OperationDeclarationRefusal[] = [];
+	const refusals: OperationDeclarationRefusal[] = [...repositoryIndex.refusals];
 	let operationCount = 0;
+	let repositoryDiscoveredCount = 0;
 
 	for (const sourcePath of sourceFiles) {
 		const relativePath = slash(relative(providerRoot, sourcePath));
-		const result = migrateOperationDeclaration(readFileSync(sourcePath, "utf8"), relativePath, {
-			operationIds: operationIds.get(sourcePath),
-			localeFiles,
-		});
+		const result = migrateOperationDeclarationInternal(
+			readFileSync(sourcePath, "utf8"),
+			relativePath,
+			{
+				operationIds: repositoryIndex.operationIds.get(sourcePath),
+				localeFiles,
+			},
+			{
+				operationSites: repositoryIndex.operationSites.get(sourcePath),
+				excludedBindings: repositoryIndex.excludedBindings.get(sourcePath),
+				staticObjectResolver: repositoryIndex.staticObjectResolverFor(sourcePath),
+				runtimeComposedInitializers: repositoryIndex.runtimeComposedInitializers.get(sourcePath),
+				recordDiscoveredSites: (count) => {
+					repositoryDiscoveredCount += count;
+				},
+			},
+		);
 		if (result.status === "refused") {
 			refusals.push(...result.refusals);
 			continue;
@@ -1570,11 +1980,50 @@ export function migrateOperationDeclarationRepository(
 			todos.push(...result.localeTodos);
 		}
 	}
+	const notes: OperationDeclarationNote[] =
+		repositoryDiscoveredCount === 0
+			? []
+			: repositoryIndex.declarations.flatMap((declaration) =>
+					declaration.runtimeInitializer === undefined
+						? []
+						: [
+								{
+									code: "runtime_composed_registry" as const,
+									path: slash(relative(providerRoot, declaration.path)),
+									initializer: declaration.runtimeInitializer,
+								},
+							],
+				);
+	if (repositoryIndex.declarations.length > 0 && repositoryDiscoveredCount === 0) {
+		for (const declaration of repositoryIndex.declarations) {
+			refusals.push(
+				refusal(
+					slash(relative(providerRoot, declaration.path)),
+					"<operations>",
+					"no_operations_discovered",
+					`Provider construct ${declaration.construct} declares operations via unresolved initializer ${JSON.stringify(
+						declaration.initializer.getText(declaration.initializer.getSourceFile()),
+					)}, but repository-wide discovery found zero operation sites.`,
+				),
+			);
+		}
+	}
 
 	const todoConflict = findLocaleTodoConflict(todos);
 	if (todoConflict !== undefined) refusals.push(todoConflict);
 	if (refusals.length > 0) {
-		return { status: "refused", providerRoot, refusals };
+		return {
+			status: "refused",
+			providerRoot,
+			refusals,
+			operationCount,
+			notes,
+			changedFiles,
+			localeTodoCount: todos.length,
+		};
+	}
+	for (const [path, code] of renderLocaleCatalogWrites(providerRoot, todos)) {
+		pendingWrites.set(path, code);
 	}
 
 	if (pendingWrites.size === 0) {
@@ -1583,6 +2032,7 @@ export function migrateOperationDeclarationRepository(
 			providerRoot,
 			changedFiles: [],
 			operationCount,
+			notes,
 			localeTodoCount: 0,
 		};
 	}
@@ -1599,6 +2049,7 @@ export function migrateOperationDeclarationRepository(
 		providerRoot,
 		changedFiles,
 		operationCount,
+		notes,
 		sidecar,
 		localeTodoCount: todos.length,
 	};
@@ -1614,6 +2065,103 @@ export function renderLocaleTodoSidecar(todos: readonly LocaleTodo[]): string {
 		localeFiles[todo.localeFile][todo.key] = todo.originalProse;
 	}
 	return `${JSON.stringify({ schemaVersion: 1, localeFiles }, null, 2)}\n`;
+}
+
+function renderLocaleCatalogWrites(
+	providerRoot: string,
+	todos: readonly LocaleTodo[],
+): Map<string, string> {
+	const todosByFile = new Map<string, LocaleTodo[]>();
+	for (const todo of todos) {
+		const fileTodos = todosByFile.get(todo.localeFile) ?? [];
+		fileTodos.push(todo);
+		todosByFile.set(todo.localeFile, fileTodos);
+	}
+
+	const englishPath = "locales/en.json";
+	const englishTodos = todosByFile.get(englishPath);
+	if (englishTodos === undefined) return new Map();
+
+	const english = readLocaleCatalog(join(providerRoot, englishPath));
+	applyLocaleTodos(english, englishTodos);
+	const writes = new Map<string, string>([
+		[join(providerRoot, englishPath), renderCanonicalLocaleCatalog(english)],
+	]);
+
+	for (const [localeFile, fileTodos] of todosByFile) {
+		if (localeFile === englishPath) continue;
+		const catalog = readLocaleCatalog(join(providerRoot, localeFile));
+		applyLocaleTodos(catalog, fileTodos);
+		writes.set(
+			join(providerRoot, localeFile),
+			renderCanonicalLocaleCatalog(reorderLikeReference(english, catalog)),
+		);
+	}
+	return writes;
+}
+
+function readLocaleCatalog(path: string): Record<string, unknown> {
+	const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+	if (!isRecord(value)) throw new Error(`${path} must contain a JSON object.`);
+	return value;
+}
+
+function applyLocaleTodos(catalog: Record<string, unknown>, todos: readonly LocaleTodo[]): void {
+	for (const todo of todos) {
+		const segments = todo.key.split(".");
+		const leaf = segments.pop();
+		if (leaf === undefined) continue;
+		let cursor = catalog;
+		for (const segment of segments) {
+			const child = cursor[segment];
+			if (isRecord(child)) {
+				cursor = child;
+				continue;
+			}
+			const created: Record<string, unknown> = {};
+			cursor[segment] = created;
+			cursor = created;
+		}
+		cursor[leaf] = todo.originalProse;
+	}
+}
+
+/** Match provider-contract's canonical locale serialization exactly. */
+function renderCanonicalLocaleCatalog(value: unknown): string {
+	return `${JSON.stringify(value, null, 2)}\n`;
+}
+
+/**
+ * Put shared keys first in English order, then retain locale-only authored order.
+ * Arrays keep their shape and use the English item at the same index as a reference.
+ */
+function reorderLikeReference(reference: unknown, value: unknown): unknown {
+	if (Array.isArray(value)) {
+		const referenceArray = Array.isArray(reference) ? reference : [];
+		return value.map((item, index) => reorderLikeReference(referenceArray[index], item));
+	}
+	if (!isRecord(value)) return value;
+
+	const referenceRecord = isRecord(reference) ? reference : {};
+	const ordered: Record<string, unknown> = {};
+	for (const key of Object.keys(referenceRecord)) {
+		if (Object.hasOwn(value, key)) {
+			ordered[key] = reorderLikeReference(referenceRecord[key], value[key]);
+		}
+	}
+	for (const [key, child] of Object.entries(value)) {
+		if (!Object.hasOwn(ordered, key)) {
+			ordered[key] = reorderLikeReference(
+				Object.hasOwn(referenceRecord, key) ? referenceRecord[key] : undefined,
+				child,
+			);
+		}
+	}
+	return ordered;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function findLocaleTodoConflict(
@@ -1666,8 +2214,620 @@ function collectLocaleFiles(root: string): string[] {
 		.sort();
 }
 
+type LocatedExpression = {
+	readonly path: string;
+	readonly source: TS.SourceFile;
+	readonly expression: TS.Expression;
+	readonly bindingName?: string;
+};
+
+type StaticResolution =
+	| { readonly status: "resolved"; readonly value: LocatedExpression }
+	| { readonly status: "missing" }
+	| { readonly status: "refused"; readonly detail: string };
+
+type ProviderOperationsDeclaration = {
+	readonly path: string;
+	readonly construct: string;
+	readonly initializer: TS.Expression;
+	readonly runtimeInitializer?: string;
+};
+
+type RepositoryOperationIndex = {
+	readonly operationIds: Map<string, Map<string, string>>;
+	readonly operationSites: Map<string, Map<number, string>>;
+	readonly excludedBindings: Map<string, Set<string>>;
+	readonly runtimeComposedInitializers: Map<string, Set<number>>;
+	readonly refusals: OperationDeclarationRefusal[];
+	readonly declarations: ProviderOperationsDeclaration[];
+	readonly staticObjectResolverFor: (path: string) => StaticObjectResolver;
+};
+
+function buildRepositoryOperationIndex(
+	sourceFiles: readonly string[],
+	providerRoot: string,
+): RepositoryOperationIndex {
+	const sources = new Map<string, TS.SourceFile>();
+	for (const path of sourceFiles) {
+		const source = parseSource(path, readFileSync(path, "utf8"));
+		if (firstSyntaxError(source) === undefined) sources.set(path, source);
+	}
+
+	const operationIds = buildOperationIdIndex(sourceFiles);
+	const operationSites = new Map<string, Map<number, string>>();
+	const excludedBindings = new Map<string, Set<string>>();
+	const runtimeComposedInitializers = new Map<string, Set<number>>();
+	const refusals: OperationDeclarationRefusal[] = [];
+	const declarations: ProviderOperationsDeclaration[] = [];
+	const indexedProviderProperties = new Set<string>();
+	const factoryIds = new Map<string, { path: string; name: string; ids: Set<string> }>();
+	const bindingCandidates = new Map<string, { path: string; name: string; ids: Set<string> }>();
+
+	const relativePath = (path: string): string => slash(relative(providerRoot, path));
+	const resolutionRefusal = (path: string, operationKey: string, detail: string): void => {
+		refusals.push(refusal(relativePath(path), operationKey, "non_literal", detail));
+	};
+
+	const resolveExport = (
+		path: string,
+		exportedName: string,
+		active: ReadonlySet<string>,
+	): StaticResolution => {
+		const key = `${path}\0export\0${exportedName}`;
+		if (active.has(key)) {
+			return {
+				status: "refused",
+				detail: `Static relative export cycle while resolving ${JSON.stringify(exportedName)} from ${relativePath(path)}.`,
+			};
+		}
+		const source = sources.get(path);
+		if (source === undefined) return { status: "missing" };
+		const nextActive = new Set(active);
+		nextActive.add(key);
+		const explicit: Array<() => StaticResolution> = [];
+		const exportStars: string[] = [];
+
+		for (const statement of source.statements) {
+			if (ts.isVariableStatement(statement) && hasExportModifier(statement)) {
+				for (const declaration of statement.declarationList.declarations) {
+					if (
+						ts.isIdentifier(declaration.name) &&
+						declaration.name.text === exportedName &&
+						declaration.initializer !== undefined
+					) {
+						const initializer = declaration.initializer;
+						const bindingName = declaration.name.text;
+						explicit.push(() => ({
+							status: "resolved",
+							value: {
+								path,
+								source,
+								expression: initializer,
+								bindingName,
+							},
+						}));
+					}
+				}
+			}
+			if (
+				ts.isExportAssignment(statement) &&
+				!statement.isExportEquals &&
+				exportedName === "default"
+			) {
+				explicit.push(() => ({
+					status: "resolved",
+					value: { path, source, expression: statement.expression },
+				}));
+			}
+			if (!ts.isExportDeclaration(statement)) continue;
+			const specifier =
+				statement.moduleSpecifier !== undefined && ts.isStringLiteral(statement.moduleSpecifier)
+					? statement.moduleSpecifier.text
+					: undefined;
+			if (statement.exportClause === undefined) {
+				if (specifier !== undefined) exportStars.push(specifier);
+				continue;
+			}
+			if (!ts.isNamedExports(statement.exportClause)) continue;
+			for (const element of statement.exportClause.elements) {
+				if (element.name.text !== exportedName) continue;
+				const localName = element.propertyName?.text ?? element.name.text;
+				explicit.push(() => {
+					if (specifier === undefined) {
+						return resolveIdentifier(path, localName, nextActive);
+					}
+					const target = resolveStaticModule(path, specifier, sources);
+					if (target.status !== "resolved") return target;
+					return resolveExport(target.path, localName, nextActive);
+				});
+			}
+		}
+
+		if (explicit.length > 1) {
+			return {
+				status: "refused",
+				detail: `Export ${JSON.stringify(exportedName)} is ambiguous in ${relativePath(path)}.`,
+			};
+		}
+		if (explicit.length === 1) return explicit[0]?.() ?? { status: "missing" };
+
+		const resolvedStars: LocatedExpression[] = [];
+		let firstStarRefusal: StaticResolution | undefined;
+		for (const specifier of exportStars) {
+			const target = resolveStaticModule(path, specifier, sources);
+			if (target.status !== "resolved") {
+				if (target.status === "refused") firstStarRefusal ??= target;
+				continue;
+			}
+			const candidate = resolveExport(target.path, exportedName, nextActive);
+			if (candidate.status === "resolved") resolvedStars.push(candidate.value);
+			else if (candidate.status === "refused") firstStarRefusal ??= candidate;
+		}
+		const origins = new Set(
+			resolvedStars.map((item) => `${item.path}\0${item.expression.getStart(item.source)}`),
+		);
+		if (origins.size > 1) {
+			return {
+				status: "refused",
+				detail: `Export ${JSON.stringify(exportedName)} is ambiguous across relative re-exports from ${relativePath(path)}.`,
+			};
+		}
+		if (firstStarRefusal !== undefined) return firstStarRefusal;
+		const resolved = resolvedStars[0];
+		return resolved === undefined ? { status: "missing" } : { status: "resolved", value: resolved };
+	};
+
+	const resolveIdentifier = (
+		path: string,
+		name: string,
+		active: ReadonlySet<string>,
+	): StaticResolution => {
+		const source = sources.get(path);
+		if (source === undefined) return { status: "missing" };
+		for (const statement of source.statements) {
+			if (!ts.isVariableStatement(statement)) continue;
+			if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+			for (const declaration of statement.declarationList.declarations) {
+				if (
+					ts.isIdentifier(declaration.name) &&
+					declaration.name.text === name &&
+					declaration.initializer !== undefined
+				) {
+					return {
+						status: "resolved",
+						value: {
+							path,
+							source,
+							expression: declaration.initializer,
+							bindingName: name,
+						},
+					};
+				}
+			}
+		}
+		for (const statement of source.statements) {
+			if (!ts.isImportDeclaration(statement) || !ts.isStringLiteral(statement.moduleSpecifier)) {
+				continue;
+			}
+			let exportedName: string | undefined;
+			if (statement.importClause?.name?.text === name) exportedName = "default";
+			const bindings = statement.importClause?.namedBindings;
+			if (bindings !== undefined && ts.isNamedImports(bindings)) {
+				for (const element of bindings.elements) {
+					if (element.name.text === name) {
+						exportedName = element.propertyName?.text ?? element.name.text;
+					}
+				}
+			}
+			if (exportedName === undefined) continue;
+			const specifier = statement.moduleSpecifier.text;
+			const target = resolveStaticModule(path, specifier, sources);
+			if (target.status !== "resolved") return target;
+			return resolveExport(target.path, exportedName, active);
+		}
+		return { status: "missing" };
+	};
+
+	const resolveLocatedExpression = (
+		located: LocatedExpression,
+		active: ReadonlySet<string>,
+	): StaticResolution => {
+		const expression = unwrapExpression(located.expression);
+		if (expression === undefined) return { status: "missing" };
+		if (!ts.isIdentifier(expression)) {
+			return { status: "resolved", value: { ...located, expression } };
+		}
+		const key = `${located.path}\0identifier\0${expression.text}`;
+		if (active.has(key)) {
+			return {
+				status: "refused",
+				detail: `Static identifier cycle while resolving ${JSON.stringify(expression.text)} in ${relativePath(located.path)}.`,
+			};
+		}
+		const nextActive = new Set(active);
+		nextActive.add(key);
+		const resolved = resolveIdentifier(located.path, expression.text, nextActive);
+		return resolved.status === "resolved"
+			? resolveLocatedExpression(resolved.value, nextActive)
+			: resolved;
+	};
+
+	type RegistryEntry = { readonly operationId: string; readonly value: LocatedExpression };
+	const flattenRegistry = (
+		locatedInput: LocatedExpression,
+		active: ReadonlySet<string>,
+	): { readonly entries: Map<string, RegistryEntry> } | { readonly detail: string } => {
+		const resolved = resolveLocatedExpression(locatedInput, active);
+		if (resolved.status === "refused") return { detail: resolved.detail };
+		if (resolved.status === "missing") {
+			return {
+				detail: `Operations initializer ${JSON.stringify(locatedInput.expression.getText(locatedInput.source))} is not a static local or relative-imported object.`,
+			};
+		}
+		const expression = unwrapExpression(resolved.value.expression);
+		if (expression === undefined || !ts.isObjectLiteralExpression(expression)) {
+			return {
+				detail: `Operations initializer ${JSON.stringify(resolved.value.expression.getText(resolved.value.source))} is not a static object literal.`,
+			};
+		}
+		const cycleKey = `${resolved.value.path}\0object\0${expression.getStart(resolved.value.source)}`;
+		if (active.has(cycleKey)) {
+			return {
+				detail: `Static operations registry spread cycle reaches ${relativePath(resolved.value.path)}.`,
+			};
+		}
+		const nextActive = new Set(active);
+		nextActive.add(cycleKey);
+		const entries = new Map<string, RegistryEntry>();
+		for (const property of expression.properties) {
+			if (ts.isSpreadAssignment(property)) {
+				const spread = flattenRegistry(
+					{
+						path: resolved.value.path,
+						source: resolved.value.source,
+						expression: property.expression,
+					},
+					nextActive,
+				);
+				if ("detail" in spread) return spread;
+				for (const [operationId, entry] of spread.entries) entries.set(operationId, entry);
+				continue;
+			}
+			const operationId = staticPropertyName(property.name);
+			const value = propertyValue(property);
+			if (operationId === undefined) {
+				return {
+					detail: `Operations registry in ${relativePath(resolved.value.path)} uses a computed key.`,
+				};
+			}
+			if (value === undefined) {
+				return { detail: `Operation ${JSON.stringify(operationId)} has a non-static initializer.` };
+			}
+			entries.set(operationId, {
+				operationId,
+				value: {
+					path: resolved.value.path,
+					source: resolved.value.source,
+					expression: value,
+				},
+			});
+		}
+		return { entries };
+	};
+
+	const addBindingCandidate = (path: string, name: string, operationId: string): void => {
+		const key = `${path}\0${name}`;
+		const candidate = bindingCandidates.get(key) ?? { path, name, ids: new Set<string>() };
+		candidate.ids.add(operationId);
+		bindingCandidates.set(key, candidate);
+	};
+	const addObjectSite = (
+		path: string,
+		source: TS.SourceFile,
+		object: TS.ObjectLiteralExpression,
+		operationId: string,
+	): void => {
+		const sites = operationSites.get(path) ?? new Map<number, string>();
+		const start = object.getStart(source);
+		const previous = sites.get(start);
+		if (previous !== undefined && previous !== operationId) {
+			resolutionRefusal(
+				path,
+				operationId,
+				`One static operation object is registered under both ${JSON.stringify(previous)} and ${JSON.stringify(operationId)}.`,
+			);
+			return;
+		}
+		sites.set(start, operationId);
+		operationSites.set(path, sites);
+	};
+
+	const classifyEntry = (entry: RegistryEntry): void => {
+		const resolved = resolveLocatedExpression(entry.value, new Set());
+		if (resolved.status === "refused") {
+			resolutionRefusal(entry.value.path, entry.operationId, resolved.detail);
+			return;
+		}
+		if (resolved.status === "missing") {
+			resolutionRefusal(
+				entry.value.path,
+				entry.operationId,
+				`Operation initializer ${JSON.stringify(entry.value.expression.getText(entry.value.source))} is not statically resolvable.`,
+			);
+			return;
+		}
+		const expression = unwrapExpression(resolved.value.expression);
+		if (expression === undefined) return;
+		if (ts.isObjectLiteralExpression(expression)) {
+			addObjectSite(resolved.value.path, resolved.value.source, expression, entry.operationId);
+			return;
+		}
+		if (ts.isCallExpression(expression) && isOperationHelperCall(expression)) {
+			const argument = operationArgument(expression);
+			const object = argument === undefined ? undefined : unwrapExpression(argument);
+			if (object === undefined || !ts.isObjectLiteralExpression(object)) {
+				resolutionRefusal(
+					resolved.value.path,
+					entry.operationId,
+					"Operation helper argument must be a static object literal.",
+				);
+				return;
+			}
+			if (resolved.value.bindingName !== undefined) {
+				addBindingCandidate(resolved.value.path, resolved.value.bindingName, entry.operationId);
+			}
+			addObjectSite(resolved.value.path, resolved.value.source, object, entry.operationId);
+			return;
+		}
+		if (
+			ts.isCallExpression(expression) &&
+			ts.isIdentifier(expression.expression) &&
+			collectSimpleOperationFactories(resolved.value.source).has(expression.expression.text)
+		) {
+			const name = expression.expression.text;
+			const key = `${resolved.value.path}\0${name}`;
+			const factory = factoryIds.get(key) ?? {
+				path: resolved.value.path,
+				name,
+				ids: new Set<string>(),
+			};
+			factory.ids.add(entry.operationId);
+			factoryIds.set(key, factory);
+			return;
+		}
+		resolutionRefusal(
+			resolved.value.path,
+			entry.operationId,
+			`Operation initializer ${JSON.stringify(expression.getText(resolved.value.source))} is not a raw object, operation helper, or simple same-file factory call.`,
+		);
+	};
+
+	const inspectProviderProperty = (
+		path: string,
+		source: TS.SourceFile,
+		node: TS.PropertyAssignment,
+		construct: string,
+	): void => {
+		const key = `${path}\0${node.getStart(source)}`;
+		if (indexedProviderProperties.has(key)) return;
+		indexedProviderProperties.add(key);
+		const resolvedInitializer = resolveLocatedExpression(
+			{ path, source, expression: node.initializer },
+			new Set(),
+		);
+		let runtimeInitializer: string | undefined;
+		if (resolvedInitializer.status === "resolved") {
+			const resolvedExpression = unwrapExpression(resolvedInitializer.value.expression);
+			if (resolvedExpression !== undefined && ts.isCallExpression(resolvedExpression)) {
+				runtimeInitializer = resolvedExpression.getText(resolvedInitializer.value.source);
+				const initializers = runtimeComposedInitializers.get(path) ?? new Set<number>();
+				initializers.add(node.initializer.getStart(source));
+				runtimeComposedInitializers.set(path, initializers);
+			}
+		}
+		declarations.push({ path, construct, initializer: node.initializer, runtimeInitializer });
+		const flattened = flattenRegistry({ path, source, expression: node.initializer }, new Set());
+		if ("detail" in flattened) {
+			if (runtimeInitializer === undefined) {
+				resolutionRefusal(path, "<operations>", flattened.detail);
+			}
+		} else {
+			for (const entry of flattened.entries.values()) classifyEntry(entry);
+		}
+	};
+
+	for (const [path, source] of sources) {
+		const constObjects = collectModuleConstObjects(source);
+		const visit = (node: TS.Node): void => {
+			if (
+				ts.isPropertyAssignment(node) &&
+				staticPropertyName(node.name) === "operations" &&
+				isProviderOperationsProperty(node, constObjects)
+			) {
+				inspectProviderProperty(path, source, node, providerConstructName(node));
+			}
+			if (ts.isCallExpression(node)) {
+				const construct = providerCallConstruct(node);
+				if (construct !== undefined) {
+					for (const argument of node.arguments) {
+						const resolved = resolveLocatedExpression(
+							{ path, source, expression: argument },
+							new Set(),
+						);
+						if (resolved.status !== "resolved") continue;
+						const object = unwrapExpression(resolved.value.expression);
+						if (object === undefined || !ts.isObjectLiteralExpression(object)) continue;
+						for (const property of object.properties) {
+							if (
+								ts.isPropertyAssignment(property) &&
+								staticPropertyName(property.name) === "operations"
+							) {
+								inspectProviderProperty(
+									resolved.value.path,
+									resolved.value.source,
+									property,
+									construct,
+								);
+							}
+						}
+					}
+				}
+			}
+			ts.forEachChild(node, visit);
+		};
+		visit(source);
+	}
+
+	for (const candidate of bindingCandidates.values()) {
+		const ids = [...candidate.ids];
+		const indexed = operationIds.get(candidate.path) ?? new Map<string, string>();
+		if (ids.length === 1) {
+			const operationId = ids[0];
+			if (operationId !== undefined) indexed.set(candidate.name, operationId);
+		} else {
+			indexed.delete(candidate.name);
+			const excluded = excludedBindings.get(candidate.path) ?? new Set<string>();
+			excluded.add(candidate.name);
+			excludedBindings.set(candidate.path, excluded);
+		}
+		operationIds.set(candidate.path, indexed);
+	}
+	for (const factory of factoryIds.values()) {
+		const indexed = operationIds.get(factory.path) ?? new Map<string, string>();
+		const ids = [...factory.ids];
+		if (ids.length === 1) {
+			const operationId = ids[0];
+			if (operationId !== undefined) indexed.set(factory.name, operationId);
+		} else {
+			indexed.delete(factory.name);
+			const excluded = excludedBindings.get(factory.path) ?? new Set<string>();
+			excluded.add(factory.name);
+			excludedBindings.set(factory.path, excluded);
+			refusals.push(
+				refusal(
+					relativePath(factory.path),
+					factory.name,
+					"factory_operation_id_ambiguous",
+					`Factory ${factory.name} is registered under multiple operation ids: ${ids
+						.map((id) => JSON.stringify(id))
+						.join(", ")}. A shared operation body cannot own one examples locale namespace.`,
+				),
+			);
+		}
+		operationIds.set(factory.path, indexed);
+	}
+
+	const resolveStaticObject = (
+		expressionInput: TS.Expression,
+		path: string,
+		active = new Set<string>(),
+	): StaticObjectReference | undefined => {
+		const expression = unwrapExpression(expressionInput);
+		if (expression === undefined) return undefined;
+		if (ts.isObjectLiteralExpression(expression)) {
+			const source = sources.get(path) ?? expression.getSourceFile();
+			return { object: expression, source };
+		}
+		if (ts.isIdentifier(expression)) {
+			const key = `${path}\0member\0${expression.text}`;
+			if (active.has(key)) return undefined;
+			const nextActive = new Set(active);
+			nextActive.add(key);
+			const resolved = resolveIdentifier(path, expression.text, nextActive);
+			return resolved.status === "resolved"
+				? resolveStaticObject(resolved.value.expression, resolved.value.path, nextActive)
+				: undefined;
+		}
+		if (ts.isPropertyAccessExpression(expression)) {
+			const owner = resolveStaticObject(expression.expression, path, active);
+			if (owner === undefined) return undefined;
+			for (const property of owner.object.properties) {
+				if (ts.isSpreadAssignment(property)) continue;
+				if (staticPropertyName(property.name) !== expression.name.text) continue;
+				const value = propertyValue(property);
+				if (value === undefined) return undefined;
+				return resolveStaticObject(value, owner.source.fileName, active);
+			}
+		}
+		return undefined;
+	};
+
+	return {
+		operationIds,
+		operationSites,
+		excludedBindings,
+		runtimeComposedInitializers,
+		refusals,
+		declarations,
+		staticObjectResolverFor: (currentPath) => (expression, source) =>
+			resolveStaticObject(expression, sources.has(source.fileName) ? source.fileName : currentPath),
+	};
+}
+
+function hasExportModifier(node: TS.Node): boolean {
+	return (
+		ts.canHaveModifiers(node) &&
+		ts.getModifiers(node)?.some((modifier) => modifier.kind === ts.SyntaxKind.ExportKeyword) ===
+			true
+	);
+}
+
+function resolveStaticModule(
+	containingPath: string,
+	specifier: string,
+	sources: ReadonlyMap<string, TS.SourceFile>,
+):
+	| { readonly status: "resolved"; readonly path: string }
+	| Exclude<StaticResolution, { status: "resolved" }> {
+	if (!specifier.startsWith(".")) {
+		return {
+			status: "refused",
+			detail: `Static operation discovery refuses non-relative import ${JSON.stringify(specifier)}.`,
+		};
+	}
+	const path = resolveLocalModule(containingPath, specifier, sources);
+	if (path === undefined) {
+		return {
+			status: "refused",
+			detail: `Static relative import ${JSON.stringify(specifier)} from ${containingPath} could not be resolved.`,
+		};
+	}
+	return { status: "resolved", path };
+}
+
+function providerConstructName(node: TS.PropertyAssignment): string {
+	let current: TS.Node = node;
+	while (current.parent !== undefined) {
+		const parent = current.parent;
+		if (ts.isCallExpression(parent)) {
+			return providerCallConstruct(parent) ?? parent.expression.getText();
+		}
+		current = parent;
+	}
+	return "provider declaration";
+}
+
+function providerCallConstruct(call: TS.CallExpression): string | undefined {
+	if (
+		ts.isIdentifier(call.expression) &&
+		/(?:defineProvider|Provider)\b/.test(call.expression.text)
+	) {
+		return call.expression.text;
+	}
+	if (
+		ts.isCallExpression(call.expression) &&
+		ts.isIdentifier(call.expression.expression) &&
+		/\bdefineProvider\b/.test(call.expression.expression.text)
+	) {
+		return call.expression.expression.text;
+	}
+	return undefined;
+}
+
 function buildOperationIdIndex(sourceFiles: readonly string[]): Map<string, Map<string, string>> {
 	const result = new Map<string, Map<string, string>>();
+	const idsByPath = new Map<string, Map<string, string | null>>();
+	const ambiguousBindingsByPath = new Map<string, Set<string>>();
 	const sources = new Map<string, TS.SourceFile>();
 	for (const path of sourceFiles) {
 		const source = parseSource(path, readFileSync(path, "utf8"));
@@ -1676,10 +2836,40 @@ function buildOperationIdIndex(sourceFiles: readonly string[]): Map<string, Map<
 
 	const record = (path: string, binding: string, operationId: string): void => {
 		const map = result.get(path) ?? new Map<string, string>();
-		const previous = map.get(binding);
-		if (previous === undefined || previous === operationId) map.set(binding, operationId);
-		else map.delete(binding);
+		const ids = idsByPath.get(path) ?? new Map<string, string | null>();
+		const ambiguousBindings = ambiguousBindingsByPath.get(path) ?? new Set<string>();
+
+		// An operation id is usable only when it identifies exactly one binding.
+		// Keep an explicit null marker for an ambiguous id so a later occurrence
+		// cannot accidentally make it usable again.
+		const previousBinding = ids.get(operationId);
+		if (ids.has(operationId)) {
+			if (
+				previousBinding !== undefined &&
+				previousBinding !== null &&
+				previousBinding !== binding
+			) {
+				map.delete(previousBinding);
+				map.delete(binding);
+				ambiguousBindings.add(previousBinding);
+				ambiguousBindings.add(binding);
+				ids.set(operationId, null);
+			}
+		} else {
+			ids.set(operationId, binding);
+		}
+
+		// A binding registered under two different ids is likewise ambiguous.
+		const previousId = map.get(binding);
+		if (previousId !== undefined && previousId !== operationId) {
+			map.delete(binding);
+			ambiguousBindings.add(binding);
+		} else if (!ambiguousBindings.has(binding) && ids.get(operationId) === binding) {
+			map.set(binding, operationId);
+		}
 		result.set(path, map);
+		idsByPath.set(path, ids);
+		ambiguousBindingsByPath.set(path, ambiguousBindings);
 	};
 
 	for (const [path, source] of sources) {
@@ -1700,8 +2890,89 @@ function buildOperationIdIndex(sourceFiles: readonly string[]): Map<string, Map<
 				else record(imported.path, imported.exportedName, operationId);
 			}
 		}
+
+		// Some providers keep their operation registry in a same-file const with
+		// an arbitrary name (for example, `companionsOperations`). This scan is
+		// deliberately ID-only: it accepts only static object members whose value
+		// is a same-file operation binding, and never evaluates spreads, factories,
+		// or imported values.
+		const operationBindings = collectModuleOperationBindings(source);
+		const importedBindings = collectImportedBindingNames(source);
+		for (const entry of collectStaticOperationRegistryEntries(source, operationBindings)) {
+			if (importedBindings.has(entry.binding)) continue;
+			record(path, entry.binding, entry.operationId);
+		}
 	}
 	return result;
+}
+
+type StaticOperationRegistryEntry = {
+	readonly operationId: string;
+	readonly binding: string;
+};
+
+function collectModuleOperationBindings(source: TS.SourceFile): ReadonlySet<string> {
+	const bindings = new Set<string>();
+	for (const statement of source.statements) {
+		if (!ts.isVariableStatement(statement)) continue;
+		if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+		for (const declaration of statement.declarationList.declarations) {
+			if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) continue;
+			const initializer = unwrapExpression(declaration.initializer);
+			if (
+				initializer !== undefined &&
+				ts.isCallExpression(initializer) &&
+				isOperationHelperCall(initializer)
+			) {
+				bindings.add(declaration.name.text);
+			}
+		}
+	}
+	return bindings;
+}
+
+function collectImportedBindingNames(source: TS.SourceFile): ReadonlySet<string> {
+	const bindings = new Set<string>();
+	for (const statement of source.statements) {
+		if (!ts.isImportDeclaration(statement)) continue;
+		const clause = statement.importClause;
+		if (clause?.name !== undefined) bindings.add(clause.name.text);
+		const named = clause?.namedBindings;
+		if (named === undefined) continue;
+		if (ts.isNamespaceImport(named)) {
+			bindings.add(named.name.text);
+			continue;
+		}
+		for (const element of named.elements) bindings.add(element.name.text);
+	}
+	return bindings;
+}
+
+function collectStaticOperationRegistryEntries(
+	source: TS.SourceFile,
+	operationBindings: ReadonlySet<string>,
+): StaticOperationRegistryEntry[] {
+	const entries: StaticOperationRegistryEntry[] = [];
+	for (const statement of source.statements) {
+		if (!ts.isVariableStatement(statement)) continue;
+		if ((statement.declarationList.flags & ts.NodeFlags.Const) === 0) continue;
+		for (const declaration of statement.declarationList.declarations) {
+			if (!ts.isIdentifier(declaration.name) || declaration.initializer === undefined) continue;
+			const object = unwrapExpression(declaration.initializer);
+			if (object === undefined || !ts.isObjectLiteralExpression(object)) continue;
+			for (const property of object.properties) {
+				if (ts.isSpreadAssignment(property)) continue;
+				const name = property.name;
+				if (name === undefined || (!ts.isIdentifier(name) && !ts.isStringLiteral(name))) continue;
+				const value = propertyValue(property);
+				const binding = unwrapExpression(value);
+				if (binding === undefined || !ts.isIdentifier(binding)) continue;
+				if (!operationBindings.has(binding.text)) continue;
+				entries.push({ operationId: name.text, binding: binding.text });
+			}
+		}
+	}
+	return entries;
 }
 
 function collectImports(
@@ -1740,7 +3011,11 @@ function resolveLocalModule(
 ): string | undefined {
 	if (!specifier.startsWith(".")) return undefined;
 	const base = resolve(dirname(containingPath), specifier);
-	for (const candidate of [base, `${base}.ts`, join(base, "index.ts")]) {
+	const emittedExtensionSource = /\.(?:c|m)?js$/.test(base)
+		? base.replace(/\.(?:c|m)?js$/, ".ts")
+		: undefined;
+	for (const candidate of [base, emittedExtensionSource, `${base}.ts`, join(base, "index.ts")]) {
+		if (candidate === undefined) continue;
 		if (sources.has(candidate)) return candidate;
 	}
 	return undefined;

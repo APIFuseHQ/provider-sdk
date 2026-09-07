@@ -639,6 +639,10 @@ interface FlowContext {
     stt: SttContext;
     // (undocumented)
     tenantId: string;
+    // Warning: (ae-forgotten-export) The symbol "TraceContext" needs to be exported by the entry point contract.d.ts
+    //
+    // (undocumented)
+    trace: TraceContext;
 }
 
 // @public (undocumented)
@@ -2325,6 +2329,12 @@ type ProviderContext<TConfig = Record<string, unknown>> = {
     env: EnvContext;
 } : Record<never, never>) & ("credential" extends keyof TConfig ? {
     credential: CredentialContext;
+} : TConfig extends {
+    auth: {
+        mode: "platform-managed";
+    };
+} ? {
+    credential: CredentialContext;
 } : Record<never, never>) & ("http" extends keyof TConfig ? {
     http: HttpClient;
 } : Record<never, never>) & ("files" extends keyof TConfig ? string extends keyof TConfig ? {
@@ -3937,14 +3947,13 @@ interface VerificationCodeExtractionResult {
 // dist/types.d.ts:1744:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point contract.d.ts
 // dist/types.d.ts:1745:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point contract.d.ts
 // dist/types.d.ts:1754:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1903:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1904:5 - (ae-forgotten-export) The symbol "TraceContext" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1912:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1918:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1924:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1926:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1934:5 - (ae-forgotten-export) The symbol "ProviderChoiceContext" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:2021:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1905:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1920:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1926:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1932:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1934:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1942:5 - (ae-forgotten-export) The symbol "ProviderChoiceContext" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:2029:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point contract.d.ts
 
 // (No @packageDocumentation comment for this package)
 

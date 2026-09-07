@@ -1,0 +1,8 @@
+{
+	"operations": {
+		"listRecentEarthquakes": {
+			"title": "Recent earthquakes",
+			"description": "Lists recent earthquakes."
+		}
+	}
+}

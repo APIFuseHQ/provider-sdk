@@ -230,6 +230,7 @@ function declaresCapability(
 	provider: ProviderDefinition,
 	capability: ProviderCapabilityKey,
 ): boolean {
+	if (capability === "credential" && provider.auth?.mode === "platform-managed") return true;
 	return Object.hasOwn(provider, capability) && provider[capability] !== undefined;
 }
 

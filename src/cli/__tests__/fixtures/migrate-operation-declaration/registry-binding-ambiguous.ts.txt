@@ -1,0 +1,12 @@
+const operation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	inputExamples: [{ scenario: "Ambiguous", input: {} }],
+	input: InputSchema,
+	output: OutputSchema,
+	handler,
+});
+
+const registry = {
+	first: operation,
+	second: operation,
+};

@@ -76,7 +76,14 @@ The operation request body is the same envelope used by the APIFuse gateway:
 | `requestId` | yes | Any unique string is fine for local debugging; it is echoed in structured errors. |
 | `input` | yes | The operation input after schema validation. |
 | `headers` | no | Extra caller headers to expose through `ctx.request.headers`. |
-| `connection` | no | Omit for no-auth/public operations. For credential debugging, pass an object with `id`, `mode`, `secrets`, `metadata`, and `externalRef`. Do not pass `null`. |
+| `connectionId` | no | Connection identity only; it does not include credentials. The gateway sends it for `optional` connection mode, and only when the caller supplied a connection that passed authorization. Exposed as `ctx.request.connectionId`. |
+| `connection` | no | Credential-bearing connection data. The gateway sends it for `required` connection mode; omit it for no-auth/public (`none` mode) operations. For local debugging, pass an object with `id`, `mode`, `secrets`, `metadata`, and `externalRef`. Do not pass `null`. |
+
+The gateway sends only `connection` for `required` mode, only `connectionId`
+for `optional` mode (and nothing when the caller passed no connection), and
+neither field for `none` mode. If a malformed or manually constructed envelope
+contains both, a non-empty nested `connection.id` takes precedence over the
+top-level `connectionId`; an empty string is treated as absent.
 
 Credential-bearing local smoke example:
 
@@ -115,9 +122,10 @@ the bad request path; provider/runtime failures include `code`, `message`, and
 - **`invalid_request` on `/v1/{operation}`**: confirm the request body includes
   `requestId` and `input`. Omit `connection` for public/no-auth operations;
   never send `connection: null`.
-- **Credential-backed operations**: declare `credential.keys`, then pass matching
-  local-only values through `connection.secrets`. Read them in handlers with
-  `ctx.credential.get("key")` or `ctx.credential.getAccessToken()`.
+- **Credential-backed operations**: declare `credential.keys`, except when
+  `auth.mode` is `platform-managed`; that auth declaration implies an unfiltered
+  credential capability. Pass local-only values through `connection.secrets` and
+  read them with `ctx.credential.get("key")` or `ctx.credential.getAccessToken()`.
 - **Provider env secrets**: declare `secrets[]`, set values in your shell or
   `.env`, and read only those names through `ctx.env.get("NAME")`. The SDK
   enforces presence of `required: true` declarations before handlers and auth

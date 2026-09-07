@@ -1,0 +1,5 @@
+import { packageRegistry } from "provider-operation-package";
+
+const config = { operations: packageRegistry };
+
+export default buildProvider(config);

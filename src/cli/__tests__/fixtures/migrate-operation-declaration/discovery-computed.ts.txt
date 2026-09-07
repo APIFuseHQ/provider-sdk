@@ -1,0 +1,6 @@
+const operationId = "ping";
+const registry = {
+	[operationId]: { annotations: { readOnly: true }, input: InputSchema, output: OutputSchema, handler },
+};
+
+export default buildProvider({ operations: registry });

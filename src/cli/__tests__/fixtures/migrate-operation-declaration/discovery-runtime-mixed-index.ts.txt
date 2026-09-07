@@ -1,0 +1,14 @@
+import { makeRegistry } from "./operations/registry";
+
+const literalOperation = defineOperation<ProviderContext>()({
+	annotations: { readOnly: true },
+	input: LiteralInputSchema,
+	output: LiteralOutputSchema,
+	handler: literalHandler,
+});
+
+export const literalProvider = buildProvider({
+	operations: { literal: literalOperation },
+});
+
+export default buildProvider({ operations: makeRegistry({ publicOnly: true }) });

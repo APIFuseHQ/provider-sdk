@@ -94,7 +94,7 @@ Providers retain only site knowledge: challenge admission fingerprints,
 allowed hosts, geo intent, page/BFF schemas, and success semantics. They declare
 `proxy: { mode: "required" }` and the necessary client profile. They do not
 receive an exact proxy endpoint, SID, pool index, solver key, or lease-binding
-API. ADR-0009 v1.1 defines the engine-owned credential and ceremony-handle
+API. ADR-0010 v1.1 defines the engine-owned credential and ceremony-handle
 boundary used here.
 
 ### D10 — refetch is safe-read-only by default
@@ -144,16 +144,16 @@ replay-safe by carrying an empty JSON object.
 ## Implementation Roadmap
 
 This ordered gap table records deferred work. It is not an implementation plan
-file and does not add decisions beyond D8-D10 and ADR-0009 v1.1.
+file and does not add decisions beyond D8-D10 and ADR-0010 v1.1.
 
 | Order | Current gap | Deferred implementation work |
 |---:|---|---|
 | 1 | The model has `_abck`-style `akamai_sensor`, but no measured SBSD kind ([`src/types.ts:330-346`](../../src/types.ts#L330-L346)). | Add `akamai_sbsd` inputs, binding metadata, capability-table drift coverage, and public type/API-report coverage. |
 | 2 | No registered adapter serves either Akamai kind; `custom` is the only declared Akamai-capable vocabulary and is unimplemented ([`src/runtime/resolver-vendors/types.ts:34-44`](../../src/runtime/resolver-vendors/types.ts#L34-L44), [`src/runtime/resolver.ts:209-238`](../../src/runtime/resolver.ts#L209-L238), [`src/runtime/resolver.ts:274-279`](../../src/runtime/resolver.ts#L274-L279)). | Add a measured `hypersolutions` SBSD adapter with bounded `/sbsd` and `/ip` response handling and exact host policy. |
-| 3 | Hyper is a provider secret in ZOZOTOWN, while SDK solver keys are runtime env inputs ([`index.ts:21-29`](https://github.com/APIFuseHQ/apifuse-provider-zozotown/blob/85fbd652e579eb6e51c5f990e8654b1993609376/index.ts#L21-L29), [`src/runtime/resolver-config.ts:1-5`](../../src/runtime/resolver-config.ts#L1-L5)). | Implement ADR-0009 v1.1's engine-owned Hyper credential and reject/filter every engine-owned solver key at the provider boundary. |
+| 3 | Hyper is a provider secret in ZOZOTOWN, while SDK solver keys are runtime env inputs ([`index.ts:21-29`](https://github.com/APIFuseHQ/apifuse-provider-zozotown/blob/85fbd652e579eb6e51c5f990e8654b1993609376/index.ts#L21-L29), [`src/runtime/resolver-config.ts:1-5`](../../src/runtime/resolver-config.ts#L1-L5)). | Implement ADR-0010 v1.1's engine-owned Hyper credential and reject/filter every engine-owned solver key at the provider boundary. |
 | 4 | Stealth returns responses without challenge detection or resolver invocation ([`src/runtime/stealth.ts:1336-1470`](../../src/runtime/stealth.ts#L1336-L1470), [`src/runtime/stealth.ts:1988-2018`](../../src/runtime/stealth.ts#L1988-L2018)). | Add a bounded response-detector pipeline that classifies supported Akamai HTML/JSON and constructs `akamai_sbsd`. |
 | 5 | Resolver identity is independently resolved and server assembly supplies no session-derived transport ([`src/runtime/resolver.ts:824-867`](../../src/runtime/resolver.ts#L824-L867), [`src/server/serve-implementation.ts:786-804`](../../src/server/serve-implementation.ts#L786-L804)). | Create `ResolverVendorTransport` from the initiating stealth session so solver IP measurement, upstream exchange, cookies, UA, and egress are identical. |
-| 6 | Stable affinity exists, but Smartproxy extraction is cached for only 15 seconds and pool selection can rotate ([`src/config/loader.ts:243-248`](../../src/config/loader.ts#L243-L248), [`src/runtime/stealth.ts:1394-1460`](../../src/runtime/stealth.ts#L1394-L1460)). | Implement ADR-0009 v1.1's opaque ceremony/solve handle preserving vendor, exact endpoint or SID inputs, pool index, expiry, and affinity. |
+| 6 | Stable affinity exists, but Smartproxy extraction is cached for only 15 seconds and pool selection can rotate ([`src/config/loader.ts:243-248`](../../src/config/loader.ts#L243-L248), [`src/runtime/stealth.ts:1394-1460`](../../src/runtime/stealth.ts#L1394-L1460)). | Implement ADR-0010 v1.1's opaque ceremony/solve handle preserving vendor, exact endpoint or SID inputs, pool index, expiry, and affinity. |
 | 7 | Resolver returns a solution to provider code; the initiating request is not automatically retried ([`src/types.ts:350-370`](../../src/types.ts#L350-L370), [`src/runtime/resolver.ts:885-1001`](../../src/runtime/resolver.ts#L885-L1001)). | Install cookies into the initiating jar and add the D10 one-solve/one-refetch path for safe reads plus explicit replay contracts for unsafe requests. |
 | 8 | Auth request `context` and response `contextPatch` are plain records ([`src/server/types.ts:86-102`](../../src/server/types.ts#L86-L102)). | Keep ceremony/session state engine-side behind opaque handles so cross-turn callers cannot alter affinity or lease selection. |
 | 9 | Resolver spans identify vendor and kind but do not record billable units or charge outcome ([`src/runtime/resolver.ts:952-966`](../../src/runtime/resolver.ts#L952-L966)). | Emit one engine-owned usage event per paid task creation, correlated with vendor, kind, attempt, and outcome without exposing credentials. |

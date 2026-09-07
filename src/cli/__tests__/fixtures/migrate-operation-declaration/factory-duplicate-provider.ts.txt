@@ -1,0 +1,11 @@
+function makePingOperation() {
+	return defineOperation<ProviderContext>()({
+		annotations: { readOnly: true },
+		input: InputSchema,
+		output: OutputSchema,
+		handler,
+	});
+}
+
+export const first = buildProvider({ operations: { ping: makePingOperation() } });
+export default buildProvider({ operations: { ping: makePingOperation() } });

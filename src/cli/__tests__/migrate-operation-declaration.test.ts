@@ -9,11 +9,36 @@ import {
 	type OperationDeclarationRefusalReason,
 	verifyOperationDeclarationRewrite,
 } from "../migrate-operation-declaration.js";
+import { validateProviderLocaleCatalogs } from "../../i18n/catalog.js";
 
 const FIXTURES = join(import.meta.dir, "fixtures", "migrate-operation-declaration");
 
 function fixture(name: string): string {
 	return readFileSync(join(FIXTURES, `${name}.ts.txt`), "utf8");
+}
+
+function localeFixture(locale: "en" | "ko" | "ja"): string {
+	return readFileSync(join(FIXTURES, `locale-canonical-${locale}.json`), "utf8");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function expectSharedKeyOrder(reference: unknown, value: unknown): void {
+	if (Array.isArray(value)) {
+		const referenceArray = Array.isArray(reference) ? reference : [];
+		for (let index = 0; index < value.length; index += 1) {
+			expectSharedKeyOrder(referenceArray[index], value[index]);
+		}
+		return;
+	}
+	if (!isRecord(reference) || !isRecord(value)) return;
+
+	const expected = Object.keys(reference).filter((key) => Object.hasOwn(value, key));
+	const actual = Object.keys(value).filter((key) => Object.hasOwn(reference, key));
+	expect(actual).toEqual(expected);
+	for (const key of expected) expectSharedKeyOrder(reference[key], value[key]);
 }
 
 function migrate(name: string, operationId?: string) {
@@ -62,6 +87,55 @@ describe("migrateOperationDeclaration transforms", () => {
 		expect(code).toContain("errorCodes:");
 		expect(code).not.toMatch(
 			/annotations|toolRouter|docs:|requestExample|responseExample|derivations|retryOnAuthRefresh|Raw title|Raw description/,
+		);
+	});
+
+	it("preserves a removed raw title as an English locale todo", () => {
+		const source = `const companyProfileOperation = defineOperation<ProviderContext>()({
+  title: "Get company profile",
+  annotations: { readOnly: true },
+  input: InputSchema,
+  output: OutputSchema,
+  handler,
+});
+`;
+		const result = migrateOperationDeclaration(source, "operations/get-company-profile.ts", {
+			operationIds: new Map([["companyProfileOperation", "getCompanyProfile"]]),
+			localeFiles: ["locales/en.json", "locales/ko.json"],
+		});
+
+		expect(result.status).toBe("migrated");
+		if (result.status !== "migrated") return;
+		expect(result.code).not.toContain('title: "Get company profile"');
+		expect(result.localeTodos).toEqual([
+			{
+				localeFile: "locales/en.json",
+				operationKey: "getCompanyProfile",
+				key: "operations.getCompanyProfile.title",
+				originalProse: "Get company profile",
+			},
+		]);
+	});
+
+	it("uses an explicit titleKey for the preserved English title", () => {
+		const result = migrateOperationDeclaration(fixture("hoist-all"), "hoist-all.ts", {
+			operationIds: new Map([["searchOperation", "search"]]),
+			localeFiles: ["locales/en.json", "locales/ja.json"],
+		});
+
+		expect(result.status).toBe("migrated");
+		if (result.status !== "migrated") return;
+		expect(result.localeTodos).toContainEqual({
+			localeFile: "locales/en.json",
+			operationKey: "search",
+			key: "operations.search.title",
+			originalProse: "Raw title",
+		});
+		expect(result.localeTodos).not.toContainEqual(
+			expect.objectContaining({
+				localeFile: "locales/ja.json",
+				key: "operations.search.title",
+			}),
 		);
 	});
 
@@ -236,9 +310,524 @@ describe("migrateOperationDeclaration refusals", () => {
 			expect(result.refusals[0]?.operationKey).toBe("search");
 		}
 	});
+
+	it("refuses rather than emitting a validator-illegal example locale key", () => {
+		const input = `const searchOperation = defineOperation<ProviderContext>()({
+  annotations: { readOnly: true },
+  descriptionKey: "operations.search_items.description",
+  inputExamples: [{ scenario: "Search items", input: {} }],
+  input: InputSchema,
+  output: OutputSchema,
+  handler,
+});
+`;
+		const result = migrateOperationDeclaration(input, "operations/search.ts", {
+			operationIds: new Map([["searchOperation", "search-items"]]),
+			localeFiles: ["locales/en.json"],
+		});
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals[0]?.reason).toBe("invalid_locale_key");
+			expect(result.refusals[0]?.detail).toContain(
+				'Refusing to write invalid provider locale key "operations.search_items.examples.0.scenario"',
+			);
+		}
+	});
 });
 
 describe("migrateOperationDeclarationRepository", () => {
+	for (const example of [
+		{
+			fixture: "examples-snake-operation-id",
+			namespace: "listRecentEarthquakes",
+		},
+		{
+			fixture: "examples-kebab-operation-id",
+			namespace: "listHospitals",
+		},
+	] as const) {
+		it(`writes validator-legal camelCase example keys for ${example.fixture}`, () => {
+			const root = mkdtempSync(join(tmpdir(), "apifuse-operation-example-namespace-"));
+			try {
+				writeFileSync(join(root, "index.ts"), fixture(example.fixture));
+				mkdirSync(join(root, "locales"));
+				writeFileSync(join(root, "locales", "en.json"), "{}\n");
+
+				const result = migrateOperationDeclarationRepository(root);
+				expect(result.status).toBe("migrated");
+				const scenarioKey = `operations.${example.namespace}.examples.0.scenario`;
+				const rationaleKey = `operations.${example.namespace}.examples.0.rationale`;
+				const migrated = readFileSync(join(root, "index.ts"), "utf8");
+				expect(migrated).toContain(`scenarioKey: ${JSON.stringify(scenarioKey)}`);
+				expect(migrated).toContain(`rationaleKey: ${JSON.stringify(rationaleKey)}`);
+				const english: unknown = JSON.parse(readFileSync(join(root, "locales", "en.json"), "utf8"));
+				expect(
+					validateProviderLocaleCatalogs({
+						catalogs: { en: english as Record<string, unknown> },
+						requiredLocales: ["en"],
+						requiredKeys: [scenarioKey, rationaleKey],
+					}),
+				).toEqual({ ok: true, issues: [] });
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it("reuses an existing camelCase operation catalog namespace without duplication", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-existing-namespace-"));
+		try {
+			writeFileSync(join(root, "index.ts"), fixture("examples-snake-operation-id"));
+			mkdirSync(join(root, "locales"));
+			writeFileSync(
+				join(root, "locales", "en.json"),
+				readFileSync(join(FIXTURES, "locale-existing-operation-namespace-en.json"), "utf8"),
+			);
+
+			const result = migrateOperationDeclarationRepository(root);
+			expect(result.status).toBe("migrated");
+			const english = JSON.parse(readFileSync(join(root, "locales", "en.json"), "utf8")) as Record<
+				string,
+				unknown
+			>;
+			const operations = english.operations;
+			if (!isRecord(operations)) throw new Error("expected operations catalog namespace");
+			expect(Object.keys(operations)).toEqual(["listRecentEarthquakes"]);
+			const requiredKeys = [
+				"operations.listRecentEarthquakes.examples.0.scenario",
+				"operations.listRecentEarthquakes.examples.0.rationale",
+			];
+			expect(
+				validateProviderLocaleCatalogs({
+					catalogs: { en: english },
+					requiredLocales: ["en"],
+					requiredKeys,
+				}),
+			).toEqual({ ok: true, issues: [] });
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("writes a removed raw title to the English catalog without replacing translations", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-title-locale-"));
+		try {
+			writeFileSync(
+				join(root, "index.ts"),
+				`const companyProfileOperation = defineOperation<ProviderContext>()({
+  title: "Get company profile",
+  annotations: { readOnly: true },
+  input: InputSchema,
+  output: OutputSchema,
+  handler,
+});
+export default buildProvider({
+  operations: { getCompanyProfile: companyProfileOperation },
+});
+`,
+			);
+			mkdirSync(join(root, "locales"));
+			writeFileSync(
+				join(root, "locales", "en.json"),
+				'{"operations":{"getCompanyProfile":{"description":"Company profile"}}}\n',
+			);
+			writeFileSync(
+				join(root, "locales", "ko.json"),
+				'{"operations":{"getCompanyProfile":{"description":"기업 개황","title":"기업 개황 조회"}}}\n',
+			);
+
+			const result = migrateOperationDeclarationRepository(root);
+
+			expect(result.status).toBe("migrated");
+			const english = JSON.parse(readFileSync(join(root, "locales", "en.json"), "utf8")) as {
+				operations: { getCompanyProfile: { title: string } };
+			};
+			const korean = JSON.parse(readFileSync(join(root, "locales", "ko.json"), "utf8")) as {
+				operations: { getCompanyProfile: { title: string } };
+			};
+			expect(english.operations.getCompanyProfile.title).toBe("Get company profile");
+			expect(korean.operations.getCompanyProfile.title).toBe("기업 개황 조회");
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("writes canonical locale JSON with non-English shared keys in English order", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-locale-canonical-"));
+		try {
+			writeFileSync(join(root, "search.ts"), fixture("examples-operation"));
+			writeFileSync(join(root, "operations.ts"), fixture("examples-map"));
+			mkdirSync(join(root, "locales"));
+			for (const locale of ["en", "ko", "ja"] as const) {
+				writeFileSync(join(root, "locales", `${locale}.json`), localeFixture(locale));
+			}
+
+			const result = migrateOperationDeclarationRepository(root);
+			expect(result.status).toBe("migrated");
+
+			const catalogs = new Map<string, unknown>();
+			for (const locale of ["en", "ko", "ja"] as const) {
+				const raw = readFileSync(join(root, "locales", `${locale}.json`), "utf8");
+				const parsed: unknown = JSON.parse(raw);
+				expect(raw).toBe(`${JSON.stringify(parsed, null, 2)}\n`);
+				catalogs.set(locale, parsed);
+			}
+
+			const english = catalogs.get("en");
+			const korean = catalogs.get("ko");
+			const japanese = catalogs.get("ja");
+			expectSharedKeyOrder(english, korean);
+			expectSharedKeyOrder(english, japanese);
+			if (!isRecord(korean) || !isRecord(japanese)) throw new Error("expected locale objects");
+			expect(Object.keys(korean).slice(-2)).toEqual(["koOnlyFirst", "koOnlyLast"]);
+			expect(Object.keys(japanese).slice(-2)).toEqual(["jaOnlyFirst", "jaOnlyLast"]);
+			const koOperations = korean.operations;
+			const jaOperations = japanese.operations;
+			if (!isRecord(koOperations) || !isRecord(jaOperations)) {
+				throw new Error("expected operations objects");
+			}
+			expect(Object.keys(koOperations).at(-1)).toBe("koOnlyOperation");
+			expect(Object.keys(jaOperations).at(-1)).toBe("jaOnlyOperation");
+			const koSearch = koOperations.search;
+			const jaSearch = jaOperations.search;
+			if (!isRecord(koSearch) || !isRecord(jaSearch)) throw new Error("expected search objects");
+			expect(Object.keys(koSearch)).toEqual([
+				"description",
+				"title",
+				"steps",
+				"examples",
+				"koOnly",
+			]);
+			expect(Object.keys(jaSearch)).toEqual([
+				"description",
+				"title",
+				"steps",
+				"examples",
+				"jaOnly",
+			]);
+			expect(Array.isArray(koSearch.steps)).toBe(true);
+			expect(Array.isArray(jaSearch.steps)).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	function migrateRegistryFixture(name: string, other?: string) {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-registry-"));
+		if (other === undefined) {
+			writeFileSync(join(root, "index.ts"), fixture(name));
+		} else {
+			writeFileSync(join(root, "index.ts"), fixture(name));
+			writeFileSync(join(root, "other.ts"), fixture(other));
+		}
+		mkdirSync(join(root, "locales"));
+		writeFileSync(join(root, "locales", "en.json"), "{}\n");
+		const result = migrateOperationDeclarationRepository(root, { check: true });
+		rmSync(root, { recursive: true, force: true });
+		return result;
+	}
+
+	function writeFixtureFiles(root: string, files: Readonly<Record<string, string>>): void {
+		for (const [path, fixtureName] of Object.entries(files)) {
+			const directory = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+			if (directory !== "") mkdirSync(join(root, directory), { recursive: true });
+			writeFileSync(join(root, path), fixture(fixtureName));
+		}
+	}
+
+	it("follows a Daiso-shaped imported spread registry and edits each leaf origin", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-daiso-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-daiso-index",
+				"operations/index.ts": "discovery-daiso-barrel",
+				"operations/catalog.ts": "discovery-daiso-catalog",
+				"operations/stores.ts": "discovery-daiso-stores",
+				"operations/docs.ts": "discovery-daiso-docs",
+			});
+			mkdirSync(join(root, "locales"));
+			writeFileSync(join(root, "locales/en.json"), "{}\n");
+			const indexBefore = readFileSync(join(root, "index.ts"), "utf8");
+			const barrelBefore = readFileSync(join(root, "operations/index.ts"), "utf8");
+
+			const result = migrateOperationDeclarationRepository(root);
+
+			expect(result.status).toBe("migrated");
+			if (result.status === "refused") return;
+			expect(result.operationCount).toBe(3);
+			expect(result.changedFiles).toEqual(["operations/catalog.ts", "operations/stores.ts"]);
+			expect(readFileSync(join(root, "index.ts"), "utf8")).toBe(indexBefore);
+			expect(readFileSync(join(root, "operations/index.ts"), "utf8")).toBe(barrelBefore);
+			const catalog = readFileSync(join(root, "operations/catalog.ts"), "utf8");
+			expect(catalog).toContain('riskClass: "read"');
+			expect(catalog).toContain('titleKey: "operations.groupedRead.title"');
+			expect(catalog).toContain('descriptionKey: "operations.browseCatalog.description"');
+			expect(catalog).toContain('scenarioKey: "operations.browseCatalog.examples.0.scenario"');
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("sums literal and runtime-composed operation sites across the repository", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-mixed-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-runtime-mixed-index",
+				"operations/one.ts": "discovery-runtime-composed-one",
+				"operations/registry.ts": "discovery-runtime-registry",
+				"operations/two.ts": "discovery-runtime-composed-two",
+			});
+
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+
+			expect(result.status).toBe("would-migrate");
+			if (result.status !== "would-migrate") return;
+			expect(result.operationCount).toBe(3);
+			expect(result.notes).toEqual([
+				{
+					code: "runtime_composed_registry",
+					path: "index.ts",
+					initializer: "makeRegistry({ publicOnly: true })",
+				},
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("follows a two-level static relative re-export chain", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-reexport-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-reexport-index",
+				"barrel-one.ts": "discovery-reexport-one",
+				"barrel-two.ts": "discovery-reexport-two",
+				"leaf.ts": "discovery-reexport-leaf",
+			});
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("would-migrate");
+			if (result.status !== "would-migrate") return;
+			expect(result.operationCount).toBe(1);
+			expect(result.changedFiles).toEqual(["leaf.ts"]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a package-imported registry and reports zero discovery", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-package-discovery-"));
+		try {
+			writeFixtureFiles(root, { "index.ts": "discovery-package-index" });
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals.map((item) => item.reason)).toEqual([
+				"non_literal",
+				"no_operations_discovered",
+			]);
+			expect(result.refusals[0]?.detail).toContain(
+				'non-relative import "provider-operation-package"',
+			);
+			expect(result.refusals[1]?.detail).toContain("Provider construct buildProvider");
+			expect(result.refusals[1]?.detail).toContain('initializer "packageRegistry"');
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses cycles in static relative re-exports", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-cycle-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-cycle-index",
+				"cycle-a.ts": "discovery-cycle-a",
+				"cycle-b.ts": "discovery-cycle-b",
+			});
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals.some((item) => item.detail.includes("export cycle"))).toBe(true);
+			expect(result.refusals.some((item) => item.reason === "no_operations_discovered")).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses ambiguous star re-exports", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-ambiguous-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-ambiguous-index",
+				"ambiguous-barrel.ts": "discovery-ambiguous-barrel",
+				"ambiguous-a.ts": "discovery-ambiguous-a",
+				"ambiguous-b.ts": "discovery-ambiguous-b",
+			});
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals.some((item) => item.detail.includes("ambiguous"))).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not hide a package star export behind a resolvable relative star", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-star-package-discovery-"));
+		try {
+			writeFixtureFiles(root, {
+				"index.ts": "discovery-star-package-index",
+				"star-barrel.ts": "discovery-star-package-barrel",
+				"star-leaf.ts": "discovery-star-package-leaf",
+			});
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals.some((item) => item.detail.includes("non-relative import"))).toBe(
+				true,
+			);
+			expect(result.operationCount).toBe(0);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("enforces zero discovery through an indirect local provider config", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-indirect-config-"));
+		try {
+			writeFixtureFiles(root, { "index.ts": "discovery-indirect-config" });
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals.some((item) => item.reason === "no_operations_discovered")).toBe(true);
+			expect(result.refusals.some((item) => item.detail.includes("packageRegistry"))).toBe(true);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	for (const [fixtureName, detail] of [
+		["discovery-computed", "computed key"],
+		["discovery-nonstatic", "not a static object literal"],
+	] as const) {
+		it(`refuses ${fixtureName} registries`, () => {
+			const root = mkdtempSync(join(tmpdir(), "apifuse-operation-nonstatic-discovery-"));
+			try {
+				writeFixtureFiles(root, { "index.ts": fixtureName });
+				const result = migrateOperationDeclarationRepository(root, { check: true });
+				expect(result.status).toBe("refused");
+				if (result.status !== "refused") return;
+				expect(result.refusals.some((item) => item.detail.includes(detail))).toBe(true);
+			} finally {
+				rmSync(root, { recursive: true, force: true });
+			}
+		});
+	}
+
+	it("indexes a one-to-one same-file operation factory", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-factory-one-"));
+		try {
+			writeFixtureFiles(root, { "index.ts": "factory-one-to-one" });
+			mkdirSync(join(root, "locales"));
+			writeFileSync(join(root, "locales/en.json"), "{}\n");
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("would-migrate");
+			if (result.status !== "would-migrate") return;
+			expect(result.operationCount).toBe(1);
+			expect(result.localeTodoCount).toBe(1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a one-to-many same-file operation factory with every id", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-factory-many-"));
+		try {
+			writeFixtureFiles(root, { "index.ts": "factory-one-to-many" });
+			mkdirSync(join(root, "locales"));
+			writeFileSync(join(root, "locales/en.json"), "{}\n");
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("refused");
+			if (result.status !== "refused") return;
+			expect(result.refusals).toHaveLength(1);
+			expect(result.refusals[0]?.reason).toBe("factory_operation_id_ambiguous");
+			for (const id of [
+				"used-goods-search",
+				"realty-search-listings",
+				"jobs-search",
+				"cars-search",
+			]) {
+				expect(result.refusals[0]?.detail).toContain(id);
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("does not call one factory id ambiguous when duplicate provider declarations repeat it", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-factory-duplicate-"));
+		try {
+			writeFixtureFiles(root, { "index.ts": "factory-duplicate-provider" });
+			const result = migrateOperationDeclarationRepository(root, { check: true });
+			expect(result.status).toBe("would-migrate");
+			if (result.status !== "would-migrate") return;
+			expect(result.operationCount).toBe(1);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("proves an operation id before constructing example locale keys", () => {
+		const result = migrateOperationDeclaration(fixture("factory-id-unresolved"), "index.ts", {
+			localeFiles: ["locales/en.json"],
+		});
+		expect(result.status).toBe("refused");
+		if (result.status !== "refused") return;
+		expect(result.refusals.map((item) => item.reason)).toEqual(["operation_id_unresolved"]);
+	});
+
+	it("indexes typed exported registries with hyphenated string keys", () => {
+		const result = migrateRegistryFixture("registry-typed");
+		expect(result.status).toBe("would-migrate");
+		if (result.status === "would-migrate") expect(result.operationCount).toBe(1);
+	});
+
+	it("indexes shorthand registry properties for direct stream helpers", () => {
+		const result = migrateRegistryFixture("registry-shorthand");
+		expect(result.status).toBe("would-migrate");
+		if (result.status === "would-migrate") expect(result.operationCount).toBe(1);
+	});
+
+	it("refuses a binding registered under two ids", () => {
+		const result = migrateRegistryFixture("registry-binding-ambiguous");
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals[0]?.reason).toBe("operation_id_unresolved");
+		}
+	});
+
+	it("refuses two bindings registered under one id", () => {
+		const result = migrateRegistryFixture("registry-key-ambiguous");
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals).toHaveLength(2);
+			expect(result.refusals.every((item) => item.reason === "operation_id_unresolved")).toBe(true);
+		}
+	});
+
+	it("scans operation members in unrelated const objects only", () => {
+		const result = migrateRegistryFixture("registry-unrelated");
+		expect(result.status).toBe("would-migrate");
+		if (result.status === "would-migrate") expect(result.operationCount).toBe(1);
+	});
+
+	it("ignores imported identifiers in same-file objects", () => {
+		const result = migrateRegistryFixture("registry-imported", "registry-imported-other");
+		expect(result.status).toBe("refused");
+		if (result.status === "refused") {
+			expect(result.refusals[0]?.reason).toBe("operation_id_unresolved");
+		}
+	});
+
 	it("resolves an imported operation id and emits the examples locale sidecar", () => {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-declaration-"));
 		try {
@@ -317,7 +906,7 @@ describe("migrateOperationDeclarationRepository", () => {
 					'import { z } from "@apifuse/provider-sdk/provider";',
 					"",
 					"export const manifestSchema = z.object({",
-					"  operations: z.array(z.enum([\"a\", \"b\"])).min(1).superRefine(() => {}),",
+					'  operations: z.array(z.enum(["a", "b"])).min(1).superRefine(() => {}),',
 					"  captured_operations: z.array(z.string().min(1)).min(1),",
 					"});",
 					"",
@@ -334,6 +923,81 @@ describe("migrateOperationDeclarationRepository", () => {
 });
 
 describe("apifuse migrate-operation-declaration CLI", () => {
+	it("exits 2 for a Daiso-shaped package registry with zero discovered sites", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-zero-discovery-cli-"));
+		try {
+			writeFileSync(join(root, "index.ts"), fixture("discovery-package-index"));
+			const command = Bun.spawnSync({
+				cmd: [
+					process.execPath,
+					join(import.meta.dir, "../../../bin/apifuse.ts"),
+					"migrate-operation-declaration",
+					root,
+					"--check",
+					"--json",
+				],
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			expect(command.exitCode).toBe(2);
+			const payload = JSON.parse(command.stdout.toString()) as {
+				status: string;
+				refusals: Array<{ reason: string; detail: string }>;
+			};
+			expect(payload.status).toBe("refused");
+			expect(payload.refusals).toContainEqual(
+				expect.objectContaining({
+					reason: "no_operations_discovered",
+					detail: expect.stringContaining("buildProvider"),
+				}),
+			);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("migrates Baemin-shaped sites and reports a runtime-composed registry note", () => {
+		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-runtime-composed-cli-"));
+		try {
+			mkdirSync(join(root, "operations"));
+			writeFileSync(join(root, "index.ts"), fixture("discovery-runtime-composed-index"));
+			writeFileSync(join(root, "operations", "one.ts"), fixture("discovery-runtime-composed-one"));
+			writeFileSync(join(root, "operations", "registry.ts"), fixture("discovery-runtime-registry"));
+			writeFileSync(join(root, "operations", "two.ts"), fixture("discovery-runtime-composed-two"));
+			const command = Bun.spawnSync({
+				cmd: [
+					process.execPath,
+					join(import.meta.dir, "../../../bin/apifuse.ts"),
+					"migrate-operation-declaration",
+					root,
+					"--json",
+				],
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+
+			expect(command.exitCode).toBe(0);
+			const payload = JSON.parse(command.stdout.toString()) as {
+				status: string;
+				operationCount: number;
+				refusals?: unknown[];
+				notes: Array<{ code: string; path: string; initializer: string }>;
+			};
+			expect(payload.status).toBe("migrated");
+			expect(payload.operationCount).toBe(2);
+			expect(payload.refusals).toBeUndefined();
+			expect(payload.notes).toEqual([
+				{
+					code: "runtime_composed_registry",
+					path: "index.ts",
+					initializer: "makeRegistry({ publicOnly: true })",
+				},
+			]);
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	});
+
 	it("skips nested repositories identified by a .git file", () => {
 		const root = mkdtempSync(join(tmpdir(), "apifuse-operation-nested-worktree-"));
 		try {

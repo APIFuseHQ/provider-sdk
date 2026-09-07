@@ -1,0 +1,3 @@
+import { registry } from "./barrel-one.js";
+
+export default buildProvider({ operations: registry });

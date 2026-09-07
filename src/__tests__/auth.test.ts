@@ -3,15 +3,21 @@ import { describe, expect, it } from "bun:test";
 import { ProviderError } from "../errors.js";
 import { DECLARATION_RULE_IDS } from "../declaration-validation.js";
 import { credentialsAuthChallenge, defineCredentialsAuth } from "../provider.js";
-import { createScratchpad } from "../runtime/auth-flow.js";
+import { createFlowContext as createRuntimeFlowContext } from "../runtime/auth-flow.js";
 import type { FlowContext } from "../types.js";
+import { createProviderContextDouble } from "./test-utils.js";
 
 function createFlowContext(initialContext: Record<string, unknown> = {}): FlowContext {
-	return {
+	const base = createProviderContextDouble();
+	return createRuntimeFlowContext({
 		tenantId: "tenant-test",
 		providerId: "provider-test",
-		context: createScratchpad(["__credentialsAuthChallenge"], initialContext),
-	} as FlowContext;
+		http: base.http,
+		stealth: base.stealth,
+		env: base.env,
+		allowedKeys: ["__credentialsAuthChallenge"],
+		initialContext,
+	});
 }
 
 describe("defineCredentialsAuth", () => {

@@ -97,9 +97,21 @@ The `POST /v1/{operation}` body is a request envelope:
 - `requestId` is required and can be any unique local debugging string.
 - `input` contains the operation input shape.
 - `headers` is optional.
-- `connection` is optional; omit it for no-auth/public operations. For
-  credential debugging, pass `{ "id", "mode", "secrets", "metadata",
-  "externalRef" }` with local-only secret values.
+- `connectionId` is optional connection identity only and does not include
+  credentials. The gateway sends it for `optional` connection mode, and only
+  when the caller supplied a connection that passed authorization. It is
+  exposed as `ctx.request.connectionId`.
+- `connection` is optional credential-bearing connection data. The gateway
+  sends it for `required` connection mode; omit it for no-auth/public (`none`
+  mode) operations. For local debugging, pass
+  `{ "id", "mode", "secrets", "metadata", "externalRef" }` with local-only
+  secret values.
+
+The gateway sends only `connection` for `required` mode, only `connectionId`
+for `optional` mode (and nothing when the caller passed no connection), and
+neither field for `none` mode. If a malformed or manually constructed envelope
+contains both, a non-empty nested `connection.id` takes precedence over the
+top-level `connectionId`; an empty string is treated as absent.
 
 Structured errors return an `error` object with `code`, `message`,
 `requestId`, and optional `details`; validation failures include field paths in
@@ -109,8 +121,10 @@ Structured errors return an `error` object with `code`, `message`,
 
 - `invalid_request`: include `requestId` and `input`; omit `connection` for
   public/no-auth operations and never send `connection: null`.
-- Credentials: declare `credential.keys`, pass local-only values through
-  `connection.secrets`, and read them with `ctx.credential`.
+- Credentials: declare `credential.keys` unless `auth.mode` is `platform-managed`;
+  that mode implies an unfiltered credential capability and forbids key declarations.
+  Pass local-only values through `connection.secrets` and read them with
+  `ctx.credential`.
 - Auth flow: call `/auth/start`, then `/auth/continue` with the same `flowId`;
   carry returned `contextPatch` values into the next request's `context`.
 - Stealth/browser runtime: keep access-sensitive operations on `ctx.stealth.fetch()` with

@@ -1,0 +1,3 @@
+export const registry = {
+	ping: { annotations: { readOnly: true }, input: InputSchema, output: OutputSchema, handler },
+};

@@ -292,6 +292,115 @@ const NEGATIVE_CONTROLS = [
 			"",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-telemetry-header-vendor.ts",
+		expectedCode: "TS2322",
+		description: "gateway telemetry headers reject an unbranded vendor string",
+		source: [
+			'import type { TelemetryContributor } from "@apifuse/provider-sdk";',
+			"",
+			"const bad: TelemetryContributor<{}, { vendor: string }> = {",
+			'\tkey: "resolver",',
+			"\ttoLogPayload: () => ({}),",
+			'\ttoHeaderPayload: () => ({ vendor: "free-text" }),',
+			"};",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-telemetry-header-host.ts",
+		expectedCode: "TS2322",
+		description: "gateway telemetry headers reject an unbranded host string",
+		source: [
+			'import type { TelemetryContributor } from "@apifuse/provider-sdk";',
+			"",
+			"const bad: TelemetryContributor<{}, { host: string }> = {",
+			'\tkey: "http",',
+			"\ttoLogPayload: () => ({}),",
+			'\ttoHeaderPayload: () => ({ host: "x.example" }),',
+			"};",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-telemetry-tenant-vendor.ts",
+		expectedCode: "TS2322",
+		description: "tenant-neutral projections reject vendor identities",
+		source: [
+			'import type { TenantNeutral } from "@apifuse/provider-sdk";',
+			"",
+			'export const bad: TenantNeutral<{ vendorUsed: "smartproxy" }> = { vendorUsed: "smartproxy" };',
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-telemetry-header-any.ts",
+		expectedCode: "TS2322",
+		description: "gateway telemetry projections reject any-valued properties",
+		source: [
+			'import type { GatewayIngestible } from "@apifuse/provider-sdk";',
+			"",
+			'export const bad: GatewayIngestible<{ x: any }> = { x: "free-text" };',
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-telemetry-header-union-array.ts",
+		expectedCode: "TS2322",
+		description: "gateway telemetry projections reject arrays mixing numbers and strings",
+		source: [
+			'import type { TelemetryContributor } from "@apifuse/provider-sdk";',
+			"",
+			"const bad: TelemetryContributor<{}, { values: (number | string)[] }> = {",
+			'\tkey: "resolver",',
+			"\ttoLogPayload: () => ({}),",
+			'\ttoHeaderPayload: () => ({ values: [1, "free prose"] }),',
+			"};",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-telemetry-opaque-identity.ts",
+		expectedCode: "TS2322",
+		description: "tenant opaque array brands are not accepted outside the cache keys property",
+		source: [
+			'import type { TenantNeutral } from "@apifuse/provider-sdk";',
+			"",
+			"type LocalOpaque = string[] & { readonly __tenantOpaqueCacheKeys: true };",
+			"declare const opaque: LocalOpaque;",
+			"export const bad: TenantNeutral<{ identity: LocalOpaque }> = { identity: opaque };",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-telemetry-meta-vendor.ts",
+		expectedCode: "TS2322",
+		description: "success metadata rejects tenant-visible vendor identity keys",
+		source: [
+			'import { closedEnum, type ClosedEnum, type TenantNeutral } from "@apifuse/provider-sdk";',
+			"",
+			'type Meta = { cached: boolean; detail: { vendorUsed: ClosedEnum<"smartproxy"> } };',
+			'export const bad: TenantNeutral<Meta> = { cached: false, detail: { vendorUsed: closedEnum("smartproxy") } };',
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-proxy-telemetry-contributor.ts",
+		expectedCode: "",
+		description: "proxy telemetry contributor satisfies the public contributor contract",
+		source: [
+			'import { closedEnum, type ClosedEnum, type GatewayIngestible, type ProxyTelemetryHeaderPayload, type ProxyTelemetryLogPayload, type TelemetryContributor } from "@apifuse/provider-sdk";',
+			"",
+			"export const proxy: TelemetryContributor<ProxyTelemetryLogPayload, ProxyTelemetryHeaderPayload> = {",
+			'\tkey: "proxy",',
+			'\ttoLogPayload: () => ({ kind: "unresolved", vendors: [] }),',
+			'\ttoHeaderPayload: () => ({ kind: closedEnum("unresolved"), vendors: [] }),',
+			"};",
+			'type Values = { values: ClosedEnum<"a" | "b">[] };',
+			'export const values: GatewayIngestible<Values> = { values: [closedEnum("a"), closedEnum("b")] };',
+			"",
+		].join("\n"),
+	},
 ] as const;
 
 const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-types-"));
@@ -513,6 +622,15 @@ function assertNegativeControlFails(consumerDir: string): void {
 			],
 			{ cwd: consumerDir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] },
 		);
+		if (negativeControl.expectedCode === "") {
+			if (result.status !== 0) {
+				throw new Error(
+					`Positive control "${negativeControl.description}" failed to compile:\n${result.stdout}\n${result.stderr}`,
+				);
+			}
+			console.log(`Positive control accepted: ${negativeControl.description}`);
+			continue;
+		}
 		if (result.status === 0) {
 			throw new Error(
 				'Negative control "' +
@@ -528,6 +646,9 @@ function assertNegativeControlFails(consumerDir: string): void {
 				`Negative control "${negativeControl.description}" (${negativeControl.filename}) failed for an unexpected reason (wanted ${negativeControl.expectedCode}):\n${output}`,
 			);
 		}
+		console.log(
+			`Negative control rejected (${negativeControl.expectedCode}): ${negativeControl.description}`,
+		);
 	}
 }
 
