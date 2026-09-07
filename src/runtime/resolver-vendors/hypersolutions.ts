@@ -280,7 +280,7 @@ export function createHypersolutionsResolverVendorAdapter(
 		requiresTransport: true,
 		transportAllowedHosts: HYPER_TRANSPORT_HOSTS,
 		supports: (kind) => kind === "akamai_sbsd",
-		async solve(challenge, _identity, signal, _traceRecorder, transport) {
+		async solve(challenge, _identity, signal, traceRecorder, transport) {
 			const timeoutController = new AbortController();
 			const operationSignal = options.timeoutMs
 				? AbortSignal.any([signal, timeoutController.signal])
@@ -288,6 +288,8 @@ export function createHypersolutionsResolverVendorAdapter(
 			const timeout = options.timeoutMs
 				? setTimeout(() => timeoutController.abort(), options.timeoutMs)
 				: undefined;
+			const runPhase = <T>(phase: HyperPhase, fn: () => Promise<T>): Promise<T> =>
+				traceRecorder ? traceRecorder.runSpan(`resolver.vendor.${phase}`, fn) : fn();
 			try {
 				if (challenge.kind !== "akamai_sbsd") {
 					throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "not_implemented");
@@ -312,45 +314,51 @@ export function createHypersolutionsResolverVendorAdapter(
 				assertChallengeInput(challenge, options.allowedHosts);
 				const exchange = scriptExchangeUrls(challenge.scriptUrl, challenge.challengeToken);
 
-				const ipResponse = await boundFetch(
-					transport,
-					HYPER_IP_URL,
-					{
-						method: "GET",
-						headers: {
-							accept: "application/json, text/plain;q=0.9",
-							"x-api-key": apiKey,
+				const ip = await runPhase("measure_ip", async () => {
+					const ipResponse = await boundFetch(
+						transport,
+						HYPER_IP_URL,
+						{
+							method: "GET",
+							headers: {
+								accept: "application/json, text/plain;q=0.9",
+								"x-api-key": apiKey,
+							},
+							signal: operationSignal,
+							redirect: "manual",
+							maxBodyBytes: IP_RESPONSE_MAX_BYTES,
 						},
-						signal: operationSignal,
-						redirect: "manual",
-						maxBodyBytes: IP_RESPONSE_MAX_BYTES,
-					},
-					"measure_ip",
-				);
-				requireSuccess(ipResponse.status, "measure_ip");
-				assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
-				const ip = parseObservedIp(ipResponse.body);
-				if (!ip) throw transportFailure("measure_ip");
+						"measure_ip",
+					);
+					requireSuccess(ipResponse.status, "measure_ip");
+					assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
+					const ip = parseObservedIp(ipResponse.body);
+					if (!ip) throw transportFailure("measure_ip");
+					return ip;
+				});
 
-				const scriptResponse = await boundFetch(
-					transport,
-					exchange.fetchUrl,
-					{
-						method: "GET",
-						headers: { ...sessionHeaders, Referer: challenge.pageUrl },
-						signal: operationSignal,
-						redirect: "manual",
-						maxBodyBytes: BODY_MAX_BYTES,
-					},
-					"fetch_script",
-				);
-				requireSuccess(scriptResponse.status, "fetch_script");
-				assertBoundedBody(scriptResponse, BODY_MAX_BYTES, "fetch_script");
-				if (!scriptResponse.body) {
-					throw new ResolverChallengeVerdictError(HYPERSOLUTIONS_VENDOR_ID, "solve_failed", {
-						phase: "fetch_script",
-					});
-				}
+				const scriptResponse = await runPhase("fetch_script", async () => {
+					const scriptResponse = await boundFetch(
+						transport,
+						exchange.fetchUrl,
+						{
+							method: "GET",
+							headers: { ...sessionHeaders, Referer: challenge.pageUrl },
+							signal: operationSignal,
+							redirect: "manual",
+							maxBodyBytes: BODY_MAX_BYTES,
+						},
+						"fetch_script",
+					);
+					requireSuccess(scriptResponse.status, "fetch_script");
+					assertBoundedBody(scriptResponse, BODY_MAX_BYTES, "fetch_script");
+					if (!scriptResponse.body) {
+						throw new ResolverChallengeVerdictError(HYPERSOLUTIONS_VENDOR_ID, "solve_failed", {
+							phase: "fetch_script",
+						});
+					}
+					return scriptResponse;
+				});
 				const stateCookie = transport
 					.getCookie(challenge.stateCookieName, challenge.pageUrl)
 					?.trim();
@@ -365,50 +373,56 @@ export function createHypersolutionsResolverVendorAdapter(
 				let expires: number | undefined;
 				for (const [roundIndex, index] of exchange.indices.entries()) {
 					const round = roundIndex + 1;
-					const hyperResponse = await generatePayload(
-						fetchImpl,
-						apiKey,
-						JSON.stringify({
-							index,
-							uuid: exchange.uuid,
-							o: stateCookie,
-							pageUrl: challenge.pageUrl,
-							userAgent,
-							script: scriptResponse.body,
-							ip,
-							acceptLanguage,
-						}),
-						operationSignal,
-					);
-					requireSuccess(hyperResponse.status, "generate_payload");
-					const payload =
-						hyperResponse.body === undefined ? undefined : parsePayload(hyperResponse.body);
-					if (!payload) {
-						throw new ResolverVendorUnavailableError(
-							HYPERSOLUTIONS_VENDOR_ID,
-							"transport_failure",
-							{ phase: "generate_payload", round },
+					const payload = await runPhase("generate_payload", async () => {
+						const hyperResponse = await generatePayload(
+							fetchImpl,
+							apiKey,
+							JSON.stringify({
+								index,
+								uuid: exchange.uuid,
+								o: stateCookie,
+								pageUrl: challenge.pageUrl,
+								userAgent,
+								script: scriptResponse.body,
+								ip,
+								acceptLanguage,
+							}),
+							operationSignal,
 						);
-					}
-					const postResponse = await boundFetch(
-						transport,
-						exchange.postUrl,
-						{
-							method: "POST",
-							headers: {
-								...sessionHeaders,
-								"content-type": "application/json",
-								Referer: challenge.pageUrl,
+						requireSuccess(hyperResponse.status, "generate_payload");
+						const payload =
+							hyperResponse.body === undefined ? undefined : parsePayload(hyperResponse.body);
+						if (!payload) {
+							throw new ResolverVendorUnavailableError(
+								HYPERSOLUTIONS_VENDOR_ID,
+								"transport_failure",
+								{ phase: "generate_payload", round },
+							);
+						}
+						return payload;
+					});
+					const postResponse = await runPhase("post_payload", async () => {
+						const postResponse = await boundFetch(
+							transport,
+							exchange.postUrl,
+							{
+								method: "POST",
+								headers: {
+									...sessionHeaders,
+									"content-type": "application/json",
+									Referer: challenge.pageUrl,
+								},
+								body: JSON.stringify({ body: payload }),
+								signal: operationSignal,
+								redirect: "manual",
+								maxBodyBytes: BODY_MAX_BYTES,
 							},
-							body: JSON.stringify({ body: payload }),
-							signal: operationSignal,
-							redirect: "manual",
-							maxBodyBytes: BODY_MAX_BYTES,
-						},
-						"post_payload",
-					);
-					requireSuccess(postResponse.status, "post_payload");
-					assertBoundedBody(postResponse, BODY_MAX_BYTES, "post_payload");
+							"post_payload",
+						);
+						requireSuccess(postResponse.status, "post_payload");
+						assertBoundedBody(postResponse, BODY_MAX_BYTES, "post_payload");
+						return postResponse;
+					});
 					expires =
 						postResponse.cookies.find((cookie) => cookie.name === challenge.stateCookieName)
 							?.expires ?? expires;

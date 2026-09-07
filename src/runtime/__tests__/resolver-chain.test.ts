@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 
 import { createBrowserClientDouble, createBrowserPageDouble } from "../../__tests__/test-utils.js";
 import { VALID_PROVIDER_CHALLENGE_KINDS } from "../../define.js";
+import { ProviderError } from "../../errors.js";
 import { createProviderCache } from "../cache.js";
+import { ResolverTelemetryCollector } from "../resolver-telemetry.js";
 import type {
 	BrowserPage,
 	ChallengeSolution,
@@ -51,6 +53,10 @@ const CHALLENGE = {
 	kind: "aws_waf",
 	pageUrl: "https://example.com/protected",
 } satisfies ProviderChallenge;
+
+function exhaustedDetails(challengeKind: ProviderChallengeKind, attempts: number) {
+	return { challengeKind, attempts, outcome: "exhausted", retryable: false };
+}
 
 const ALL_CHALLENGE_KINDS: readonly ProviderChallengeKind[] = VALID_PROVIDER_CHALLENGE_KINDS;
 const REQUIRED_PROXY_POLICY: ProviderProxyPolicy = {
@@ -234,6 +240,7 @@ describe("resolver default vendor policy", () => {
 
 	it("resolves the Hyper key from the engine resolver environment path", async () => {
 		let receivedConfiguration: string | undefined;
+		const telemetry = new ResolverTelemetryCollector();
 		const resolver = createResolverClientFromEnvForTests(
 			{
 				vendors: ["hypersolutions"],
@@ -241,7 +248,7 @@ describe("resolver default vendor policy", () => {
 				clientProfile: "safari17_0",
 			},
 			{ [APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY]: "hyper-engine-key" },
-			{},
+			{ telemetry },
 			{
 				hypersolutions(configuration) {
 					receivedConfiguration = configuration;
@@ -256,17 +263,29 @@ describe("resolver default vendor policy", () => {
 				},
 			},
 		);
-		await expect(
-			resolver.solve({
+		const error: unknown = await resolver
+			.solve({
 				kind: "akamai_sbsd",
 				pageUrl: "https://example.com/protected",
 				scriptUrl: "https://example.com/.well-known/sbsd?v=uuid&t=token",
 				stateCookieName: "sbsd_o",
-			}),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "hypersolutions", reason: "missing_transport" }],
-		});
+			})
+			.catch((cause: unknown) => cause);
+		expect(error).toBeInstanceOf(ProviderError);
+		if (!(error instanceof ProviderError)) throw error;
+		expect(error.code).toBe("RESOLVER_CHAIN_EXHAUSTED");
+		expect(error.details).toEqual(exhaustedDetails("akamai_sbsd", 1));
+		expect(telemetry.toLogPayload()?.attemptSamples).toEqual([
+			{
+				v: "hypersolutions",
+				p: "create_task",
+				o: "error",
+				ms: expect.any(Number),
+				e: "missing_transport",
+				diagnostics: { attemptIndex: 1 },
+			},
+		]);
+		expect(JSON.stringify(telemetry.toLogPayload())).not.toContain("hyper-engine-key");
 		expect(receivedConfiguration).toBe("hyper-engine-key");
 	});
 
@@ -489,7 +508,7 @@ describe("resolver vendor chain", () => {
 			createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"] }).solve(challenge),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "custom", reason: "missing_transport" }],
+			details: exhaustedDetails("akamai_sensor", 1),
 		});
 		expect(solveCalls).toBe(0);
 	});
@@ -504,7 +523,7 @@ describe("resolver vendor chain", () => {
 
 		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "browser", reason: "missing_proxy_identity" }],
+			details: exhaustedDetails("aws_waf", 1),
 		});
 		expect(adapter.state.solveCalls).toBe(0);
 	});
@@ -544,7 +563,7 @@ describe("resolver vendor chain", () => {
 
 		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "browser", reason: "missing_proxy_identity" }],
+			details: exhaustedDetails("aws_waf", 1),
 		});
 		expect(guarded.state.solveCalls).toBe(0);
 	});
@@ -782,7 +801,7 @@ describe("resolver vendor chain", () => {
 			}),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor, reason: "missing_credentials" }],
+			details: exhaustedDetails("turnstile", 1),
 		});
 	});
 
@@ -810,10 +829,7 @@ describe("resolver vendor chain", () => {
 
 		await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{ vendor: "browser", reason: "allocation_exhausted" },
-				{ vendor: "2captcha", reason: "missing_credentials" },
-			],
+			details: exhaustedDetails("aws_waf", 2),
 		});
 		expect(browser.state.solveCalls).toBe(1);
 		expect(twoCaptchaFactoryCalls).toBe(0);
@@ -900,7 +916,7 @@ describe("resolver vendor chain", () => {
 
 			await expect(resolver.solve(CHALLENGE)).rejects.toMatchObject({
 				code: "RESOLVER_CHAIN_EXHAUSTED",
-				details: [{ vendor: "browser", reason: "missing_client_profile" }],
+				details: exhaustedDetails("aws_waf", 1),
 			});
 			expect(adapter.state.solveCalls).toBe(0);
 		} finally {
@@ -1014,7 +1030,7 @@ describe("resolver vendor chain", () => {
 			}),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "custom", reason: "missing_transport" }],
+			details: exhaustedDetails("akamai_sensor", 1),
 		});
 		expect(solvedKinds).toEqual(["turnstile"]);
 	});
@@ -1271,11 +1287,8 @@ describe("resolver vendor chain", () => {
 
 		expect(error).toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			message: expect.stringMatching(/browser: allocation_exhausted, capsolver: not_implemented/),
-			details: [
-				{ vendor: "browser", reason: "allocation_exhausted" },
-				{ vendor: "capsolver", reason: "not_implemented" },
-			],
+			message: "The challenge could not be resolved.",
+			details: exhaustedDetails("aws_waf", 2),
 		});
 	});
 
@@ -1360,7 +1373,7 @@ describe("resolver vendor chain", () => {
 
 		expect(error).toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "capmonster", reason: "not_implemented" }],
+			details: exhaustedDetails("recaptcha_v2", 1),
 		});
 	});
 

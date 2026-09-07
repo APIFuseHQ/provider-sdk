@@ -176,23 +176,16 @@ describe("resolver tracing", () => {
 		});
 		expect(error).toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{
-					vendor: "custom",
-					reason: "transport_failure",
-					cause: {
-						name: "TlsError",
-						message: "connect ETIMEDOUT at [REDACTED_PROXY_URL] [REDACTED]",
-					},
-					upstreamHost: "sensor.example.com",
-					phase: "post_sensor",
-					round: 2,
-				},
-			],
+			details: {
+				challengeKind: "akamai_sensor",
+				attempts: 1,
+				outcome: "exhausted",
+				retryable: false,
+			},
 		});
 		const diagnostics = JSON.stringify({ attempt, details: error.details });
 		for (const secret of secrets) expect(diagnostics).not.toContain(secret);
-		expect(diagnostics).toContain("connect ETIMEDOUT");
+		expect(JSON.stringify(attempt)).toContain("connect ETIMEDOUT");
 	});
 
 	it("invalidates a cached solution through an instrumented resolver wrapper", async () => {

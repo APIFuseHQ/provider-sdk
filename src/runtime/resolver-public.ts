@@ -22,3 +22,20 @@ export {
 	type ResolverRuntimeOptions,
 	type ResolverSolutionSource,
 } from "./resolver.js";
+export {
+	type ResolverCacheReadTelemetryEvent,
+	type ResolverCacheWriteTelemetryEvent,
+	type ResolverFailoverTelemetryEvent,
+	type ResolverIdentityTelemetryEvent,
+	type ResolverOutcomeTelemetryEvent,
+	type ResolverTelemetryAttemptOutcome,
+	type ResolverTelemetryCacheStatus,
+	type ResolverTelemetryCacheWriteReason,
+	type ResolverTelemetryErrorClass,
+	type ResolverTelemetryIdentitySource,
+	type ResolverTelemetryOutcome,
+	type ResolverTelemetryPhase,
+	type ResolverTelemetrySink,
+	type ResolverVendorAttemptTelemetryEvent,
+} from "./resolver-telemetry.js";
+export type { ResolverVendorUnavailableReason } from "./resolver-vendors/types.js";

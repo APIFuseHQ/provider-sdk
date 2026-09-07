@@ -23,6 +23,27 @@ export {
 	type TelemetryKey,
 	type TenantNeutral,
 } from "../runtime/request-telemetry.js";
+export {
+	ResolverTelemetryCollector,
+	type ResolverAttemptSample,
+	type ResolverCacheReadTelemetryEvent,
+	type ResolverCacheWriteTelemetryEvent,
+	type ResolverFailoverTelemetryEvent,
+	type ResolverIdentityTelemetryEvent,
+	type ResolverOutcomeTelemetryEvent,
+	type ResolverTelemetryAttemptOutcome,
+	type ResolverTelemetryCacheStatus,
+	type ResolverTelemetryCacheWriteReason,
+	type ResolverTelemetryErrorClass,
+	type ResolverTelemetryHeaderPayload,
+	type ResolverTelemetryIdentitySource,
+	type ResolverTelemetryLogPayload,
+	type ResolverTelemetryOutcome,
+	type ResolverTelemetryPhase,
+	type ResolverTelemetrySink,
+	type ResolverVendorAttemptTelemetryEvent,
+} from "../runtime/resolver-telemetry.js";
+export type { ResolverVendorUnavailableReason } from "../runtime/resolver-vendors/types.js";
 export type { Span, TraceContext } from "../runtime/trace.js";
 export {
 	createServerApp,

@@ -33,6 +33,8 @@ const harnesses = [
 		},
 		expectedSolveCalls: 2,
 		expectedSecondToken: "token-2",
+		expectedCacheGets: 0,
+		expectedCacheSets: 0,
 	},
 	{
 		name: "apifuse dev",
@@ -41,6 +43,8 @@ const harnesses = [
 		},
 		expectedSolveCalls: 1,
 		expectedSecondToken: "token-1",
+		expectedCacheGets: 4,
+		expectedCacheSets: 2,
 	},
 ] as const;
 const harnessTable = harnesses.map((harness) => [harness] as const);
@@ -90,7 +94,8 @@ function createProvider(options: {
 			descriptionKey: "resolver-cli-wiring.description",
 			category: "test",
 		},
-	})({ operations: {
+	})({
+		operations: {
 			lookup: {
 				riskClass: "read",
 				input: z.object({}),
@@ -98,7 +103,8 @@ function createProvider(options: {
 				handler: async () => ({ ok: true }),
 				healthCheckUnsupported: { reason: "CLI context unit test" },
 			},
-		} });
+		},
+	});
 }
 
 describe("resolver CLI wiring", () => {
@@ -139,8 +145,8 @@ describe("resolver CLI wiring", () => {
 				cookies: { aws_waf_token: harness.expectedSecondToken },
 			});
 			expect(factoryAllowedHosts).toEqual(["example.com"]);
-			expect(cacheGet).toHaveBeenCalled();
-			expect(cacheSet).toHaveBeenCalled();
+			expect(cacheGet).toHaveBeenCalledTimes(harness.expectedCacheGets);
+			expect(cacheSet).toHaveBeenCalledTimes(harness.expectedCacheSets);
 			expect(solveCalls).toBe(harness.expectedSolveCalls);
 		} finally {
 			cacheGet.mockRestore();
@@ -170,11 +176,13 @@ describe("resolver CLI wiring", () => {
 				.resolver.solve(AWS_WAF_CHALLENGE),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "browser", reason: "missing_credentials" }],
+			details: { challengeKind: "aws_waf", attempts: 1, outcome: "exhausted", retryable: false },
 		});
 	});
 
-	it.each(harnessTable)("preserves required-proxy fail-closed behavior in $name", async (harness) => {
+	it.each(
+		harnessTable,
+	)("preserves required-proxy fail-closed behavior in $name", async (harness) => {
 		let solveCalls = 0;
 		const adapter: ResolverVendorAdapter = {
 			id: "browser",
@@ -202,7 +210,7 @@ describe("resolver CLI wiring", () => {
 				.resolver.solve(AWS_WAF_CHALLENGE),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "browser", reason: "missing_proxy_identity" }],
+			details: { challengeKind: "aws_waf", attempts: 1, outcome: "exhausted", retryable: false },
 		});
 		expect(solveCalls).toBe(0);
 	});

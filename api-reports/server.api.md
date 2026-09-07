@@ -797,9 +797,7 @@ interface FlowContext {
 
 // @public
 export type GatewayIngestible<T> = 0 extends 1 & T ? never : T extends object ? keyof T extends never ? never : {
-    [K in keyof T]: 0 extends 1 & T[K] ? never : unknown extends T[K] ? never : [NonNullable<T[K]>] extends [number | boolean | ClosedEnum<string>] ? T[K] : [NonNullable<T[K]>] extends [readonly (infer U)[]] ? 0 extends 1 & U ? never : unknown extends U ? never : [U] extends [
-    number | boolean | ClosedEnum<string> | GatewayIngestible<U>
-    ] ? T[K] : never : [NonNullable<T[K]>] extends [object] ? [NonNullable<T[K]>] extends [GatewayIngestible<NonNullable<T[K]>>] ? T[K] : never : never;
+    [K in keyof T]: 0 extends 1 & T[K] ? never : unknown extends T[K] ? never : [NonNullable<T[K]>] extends [number | boolean | ClosedEnum<string>] ? T[K] : [NonNullable<T[K]>] extends [readonly (infer U)[]] ? 0 extends 1 & U ? never : unknown extends U ? never : [U] extends [number | boolean | ClosedEnum<string> | GatewayIngestible<U>] ? T[K] : never : [NonNullable<T[K]>] extends [object] ? [NonNullable<T[K]>] extends [GatewayIngestible<NonNullable<T[K]>>] ? T[K] : never : never;
 } : never;
 
 // @public (undocumented)
@@ -3203,6 +3201,7 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
     requestedProviderId?: string;
     status: number;
     proxy?: ProxyTelemetryLogPayload;
+    resolver?: ResolverTelemetryLogPayload;
 };
 
 // @public (undocumented)
@@ -3679,7 +3678,8 @@ export class RequestTelemetry {
 // @public (undocumented)
 export type RequestTelemetryLogPayload = {
     proxy?: ProxyTelemetryLogPayload;
-} & Partial<Record<Exclude<TelemetryKey, "proxy">, object>>;
+    resolver?: ResolverTelemetryLogPayload;
+} & Partial<Record<Exclude<TelemetryKey, "proxy" | "resolver">, object>>;
 
 // @public (undocumented)
 type RequestWithMethodOptions = RequestOptions & {
@@ -3691,12 +3691,185 @@ type RequestWithMethodOptions = RequestOptions & {
 export function resolveHealthCheckInputDateTokens(value: unknown, now?: Date, calendar?: InputDateTokenCalendar): unknown;
 
 // @public (undocumented)
+export type ResolverAttemptSample = {
+    v: ProviderResolverVendor;
+    p: ResolverTelemetryPhase;
+    o: ResolverTelemetryAttemptOutcome;
+    ms: number;
+    c?: string;
+    e?: ResolverTelemetryErrorClass;
+    diagnostics?: ResolverVendorAttemptTelemetryEvent["diagnostics"];
+};
+
+// @public (undocumented)
+export type ResolverCacheReadTelemetryEvent = {
+    readonly status: ResolverTelemetryCacheStatus;
+    readonly challengeKind: ProviderChallengeKind;
+};
+
+// @public (undocumented)
+export type ResolverCacheWriteTelemetryEvent = {
+    readonly written: boolean;
+    readonly reason?: ResolverTelemetryCacheWriteReason;
+};
+
+// @public (undocumented)
 interface ResolverContext {
     // Warning: (ae-forgotten-export) The symbol "ChallengeSolution" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
     solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
 }
+
+// @public (undocumented)
+export type ResolverFailoverTelemetryEvent = {
+    readonly from: ProviderResolverVendor;
+    readonly to: ProviderResolverVendor;
+    readonly reason: ResolverVendorUnavailableReason;
+};
+
+// @public (undocumented)
+export type ResolverIdentityTelemetryEvent = {
+    readonly source: ResolverTelemetryIdentitySource;
+    readonly failure?: ResolverVendorUnavailableReason;
+};
+
+// @public (undocumented)
+export type ResolverOutcomeTelemetryEvent = {
+    readonly outcome: ResolverTelemetryOutcome;
+    readonly solveMs: number;
+    readonly challengeKind: ProviderChallengeKind;
+};
+
+// @public (undocumented)
+export type ResolverTelemetryAttemptOutcome = "ok" | "error";
+
+// @public (undocumented)
+export type ResolverTelemetryCacheStatus = "hit" | "miss" | "disabled" | "not_cacheable";
+
+// @public (undocumented)
+export type ResolverTelemetryCacheWriteReason = "no_expires" | "not_cacheable" | "error";
+
+// @public (undocumented)
+export class ResolverTelemetryCollector implements ResolverTelemetrySink, TelemetryContributor<ResolverTelemetryLogPayload, ResolverTelemetryHeaderPayload> {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "resolver";
+    // (undocumented)
+    recordCacheRead(event: ResolverCacheReadTelemetryEvent): void;
+    // (undocumented)
+    recordCacheWrite(event: ResolverCacheWriteTelemetryEvent): void;
+    // (undocumented)
+    recordFailover(_event: ResolverFailoverTelemetryEvent): void;
+    // (undocumented)
+    recordIdentity(event: ResolverIdentityTelemetryEvent): void;
+    // (undocumented)
+    recordOutcome(event: ResolverOutcomeTelemetryEvent): void;
+    // (undocumented)
+    recordVendorAttempt(event: ResolverVendorAttemptTelemetryEvent): void;
+    // (undocumented)
+    toHeaderPayload(log: ResolverTelemetryLogPayload): ResolverTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(): ResolverTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type ResolverTelemetryErrorClass = ResolverVendorUnavailableReason | "aborted" | "unexpected";
+
+// @public (undocumented)
+export type ResolverTelemetryHeaderPayload = {
+    outcome?: ClosedEnum<ResolverTelemetryOutcome>;
+    cacheStatus?: ClosedEnum<ResolverTelemetryCacheStatus>;
+    solveMs?: number;
+    attempts: number;
+    failovers: number;
+    vendorUsed?: ClosedEnum<ProviderResolverVendor>;
+    vendorChain: ClosedEnum<ProviderResolverVendor>[];
+    pollCount: number;
+    identitySource?: ClosedEnum<ResolverTelemetryIdentitySource>;
+    attemptSamples?: {
+        v: ClosedEnum<ProviderResolverVendor>;
+        p: ClosedEnum<ResolverTelemetryPhase>;
+        o: ClosedEnum<ResolverTelemetryAttemptOutcome>;
+        ms: number;
+        c?: ClosedEnum<string>;
+    }[];
+};
+
+// @public (undocumented)
+export type ResolverTelemetryIdentitySource = "declared" | "defaulted" | "none";
+
+// @public (undocumented)
+export type ResolverTelemetryLogPayload = {
+    outcome?: ResolverTelemetryOutcome;
+    challengeKind?: ProviderChallengeKind;
+    cacheStatus?: ResolverTelemetryCacheStatus;
+    cacheWrite?: {
+        written: boolean;
+        reason?: ResolverTelemetryCacheWriteReason;
+    };
+    identitySource?: ResolverTelemetryIdentitySource;
+    identityFailure?: ResolverVendorUnavailableReason;
+    solveMs?: number;
+    attempts: number;
+    failovers: number;
+    vendorChain: ProviderResolverVendor[];
+    vendorUsed?: ProviderResolverVendor;
+    pollCount: number;
+    attemptSamples?: ResolverAttemptSample[];
+    attemptSamplesDropped?: number;
+    lastVendorErrorDescription?: string;
+};
+
+// @public
+export type ResolverTelemetryOutcome = "solved" | "cached" | "exhausted" | "aborted" | "error";
+
+// @public (undocumented)
+export type ResolverTelemetryPhase = "create_task" | "poll_result" | "cleanup" | "measure_ip" | "fetch_script" | "generate_payload" | "post_payload";
+
+// @public (undocumented)
+export interface ResolverTelemetrySink {
+    // (undocumented)
+    recordCacheRead(event: ResolverCacheReadTelemetryEvent): void;
+    // (undocumented)
+    recordCacheWrite(event: ResolverCacheWriteTelemetryEvent): void;
+    // (undocumented)
+    recordFailover(event: ResolverFailoverTelemetryEvent): void;
+    // (undocumented)
+    recordIdentity(event: ResolverIdentityTelemetryEvent): void;
+    // (undocumented)
+    recordOutcome(event: ResolverOutcomeTelemetryEvent): void;
+    // (undocumented)
+    recordVendorAttempt(event: ResolverVendorAttemptTelemetryEvent): void;
+}
+
+// @public (undocumented)
+export type ResolverVendorAttemptTelemetryEvent = {
+    readonly vendor: ProviderResolverVendor;
+    readonly phase: ResolverTelemetryPhase;
+    readonly outcome: ResolverTelemetryAttemptOutcome;
+    readonly ms: number;
+    readonly pollCount?: number;
+    readonly errorClass?: ResolverTelemetryErrorClass;
+    readonly vendorErrorCode?: string;
+    readonly vendorErrorDescription?: string;
+    readonly diagnostics?: {
+        readonly cause?: {
+            readonly name: string;
+            readonly message: string;
+        };
+        readonly upstreamHost?: string;
+        readonly missingFields?: readonly string[];
+        readonly round?: number;
+        readonly attemptIndex?: number;
+        readonly phase?: string;
+    };
+};
+
+// @public (undocumented)
+export type ResolverVendorUnavailableReason = "missing_credentials" | "missing_proxy_identity" | "missing_client_profile" | "missing_challenge_input" | "missing_transport" | "allocation_exhausted" | "transport_failure" | "timeout" | "not_implemented";
 
 // @public (undocumented)
 export function resolveSelfTestMasterSecrets(env?: Readonly<Record<string, string | undefined>>): SelfTestMasterSecrets | undefined;
@@ -4739,11 +4912,9 @@ export type TelemetryKey = "proxy" | "resolver" | "http" | "stealth" | "native" 
 
 // @public
 export type TenantNeutral<T> = 0 extends 1 & T ? never : T extends object ? {
-    [K in keyof T]: K extends `vendor${string}` | "provider" | "engine" | "model" | `${string}Host` ? never : 0 extends 1 & T[K] ? never : unknown extends T[K] ? never : [NonNullable<T[K]>] extends [
-    string[] & {
+    [K in keyof T]: K extends `vendor${string}` | "provider" | "engine" | "model" | `${string}Host` ? never : 0 extends 1 & T[K] ? never : unknown extends T[K] ? never : [NonNullable<T[K]>] extends [string[] & {
         readonly __tenantOpaqueCacheKeys: true;
-    }
-    ] ? K extends "keys" ? T[K] : never : [NonNullable<T[K]>] extends [number | boolean | ClosedEnum<string>] ? T[K] : [NonNullable<T[K]>] extends [object] ? [NonNullable<T[K]>] extends [TenantNeutral<NonNullable<T[K]>>] ? T[K] : never : never;
+    }] ? K extends "keys" ? T[K] : never : [NonNullable<T[K]>] extends [number | boolean | ClosedEnum<string>] ? T[K] : [NonNullable<T[K]>] extends [object] ? [NonNullable<T[K]>] extends [TenantNeutral<NonNullable<T[K]>>] ? T[K] : never : never;
 } : never;
 
 // @public (undocumented)
@@ -4863,9 +5034,9 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/health-scenario.d.ts:1838:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:13:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:149:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:161:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:14:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:151:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:163:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:127:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:336:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:338:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point index.d.ts

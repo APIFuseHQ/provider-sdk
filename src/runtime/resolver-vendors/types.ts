@@ -7,6 +7,25 @@ import type {
 } from "../../types.js";
 import type { TraceRecorder } from "../trace.js";
 
+const RESOLVER_VENDOR_POLL_OBSERVER = Symbol.for(
+	"@apifuse/provider-sdk/runtime/resolver-vendor-poll-observer",
+);
+
+/** Internal chain-runner hook; vendor adapters never receive the telemetry sink itself. */
+export function recordResolverVendorPoll(traceRecorder: TraceRecorder | undefined): void {
+	(
+		traceRecorder as (TraceRecorder & { [RESOLVER_VENDOR_POLL_OBSERVER]?: () => void }) | undefined
+	)?.[RESOLVER_VENDOR_POLL_OBSERVER]?.();
+}
+
+export function attachResolverVendorPollObserver(
+	traceRecorder: TraceRecorder,
+	observer: () => void,
+): TraceRecorder {
+	Object.defineProperty(traceRecorder, RESOLVER_VENDOR_POLL_OBSERVER, { value: observer });
+	return traceRecorder;
+}
+
 export const RESOLVER_VENDOR_CAPABILITIES = {
 	browser: ["aws_waf", "cloudflare_interstitial"],
 	// Every kind listed per vendor is implemented by that vendor's adapter; the
@@ -15,13 +34,7 @@ export const RESOLVER_VENDOR_CAPABILITIES = {
 	// 2captcha omits `cloudflare_interstitial` and every Akamai kind: its API
 	// offers no measured task type for them, so declaring them
 	// would route challenges to a vendor that can only refuse.
-	"2captcha": [
-		"turnstile",
-		"recaptcha_v2",
-		"recaptcha_v3",
-		"hcaptcha",
-		"aws_waf",
-	],
+	"2captcha": ["turnstile", "recaptcha_v2", "recaptcha_v3", "hcaptcha", "aws_waf"],
 	capsolver: [
 		"turnstile",
 		"recaptcha_v2",
@@ -200,7 +213,9 @@ export class ResolverVendorUnavailableError extends Error {
 				? options.missingFields?.filter((field) => /^[A-Za-z][A-Za-z0-9_]*$/u.test(field))
 				: undefined;
 		super(
-			reason === "missing_challenge_input" && missingFields !== undefined && missingFields.length > 0
+			reason === "missing_challenge_input" &&
+				missingFields !== undefined &&
+				missingFields.length > 0
 				? `Resolver vendor ${vendor} cannot use incomplete challenge input; missing fields: ${missingFields.join(", ")}`
 				: `Resolver vendor ${vendor} is unavailable: ${reason}`,
 		);

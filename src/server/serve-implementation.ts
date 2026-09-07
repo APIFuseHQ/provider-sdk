@@ -80,9 +80,15 @@ import {
 	type TenantNeutral,
 	type TenantOpaqueKeys,
 } from "../runtime/request-telemetry.js";
+import {
+	ResolverTelemetryCollector,
+	type ResolverTelemetryLogPayload,
+} from "../runtime/resolver-telemetry.js";
 import type * as ResolverRuntimeModule from "../runtime/resolver.js";
 import {
 	createUnsupportedResolverClient,
+	bindResolverTelemetry,
+	inheritResolverTelemetryBinding,
 	type ResolverSolveWithRecorder,
 } from "../runtime/resolver-shared.js";
 import {
@@ -555,7 +561,7 @@ function bindResolverSignalWithoutRuntime(
 	defaultSignal: AbortSignal | undefined,
 ): ResolverContext {
 	if (!defaultSignal) return resolver;
-	return {
+	const boundResolver: ResolverContext = {
 		solve(challenge, signal = defaultSignal, traceRecorder?: TraceRecorder) {
 			// Forward the instrumentation trace recorder so resolver.vendor.* spans
 			// survive this wrapper. See ResolverSolveWithRecorder in resolver-shared.ts.
@@ -566,6 +572,8 @@ function bindResolverSignalWithoutRuntime(
 			);
 		},
 	};
+	inheritResolverTelemetryBinding(resolver, boundResolver);
+	return boundResolver;
 }
 
 function getProviderStealthBaseUrl(provider: ProviderDefinition): string | undefined {
@@ -594,10 +602,12 @@ function createResolverRuntimeOptions(
 		"mode" | "userAgent"
 	>,
 	stealthProfile: { readonly userAgent: string } | undefined,
+	telemetry: ResolverTelemetryCollector,
 ): ResolverRuntimeOptions {
 	return {
 		allowedHosts: provider.allowedHosts,
 		cache,
+		telemetry,
 		identityScope,
 		...(proxyPolicy
 			? {
@@ -636,10 +646,13 @@ function createStealthChallengeDetection(
 				? {
 						async solve(challenge, transport, solveSignal) {
 							const resolver = resolverRuntime.bindResolverSignal(
-								resolverOverride ??
+								(resolverOverride
+									? bindResolverTelemetry(resolverOverride, resolverOptions.telemetry)
+									: undefined) ??
 									resolverRuntime.createResolverClientFromEnv(provider.resolver, undefined, {
 										allowedHosts: resolverOptions.allowedHosts,
 										cache: resolverOptions.cache,
+										telemetry: resolverOptions.telemetry,
 										identityScope: resolverOptions.identityScope,
 										// No proxyIntent: the transport is already bound to the initiating
 										// request's lease, and a second identity resolution would allocate
@@ -799,6 +812,7 @@ function providerSecretNames(provider: ProviderDefinition): string[] {
 type RequestScopeContext = {
 	trace: RuntimeTraceContext;
 	telemetry: RequestTelemetry;
+	resolverTelemetry: ResolverTelemetryCollector;
 };
 
 function createProviderContext(
@@ -836,6 +850,7 @@ function createProviderContext(
 		proxyPolicy,
 		proxyClientOptions,
 		stealthProfile,
+		scope.resolverTelemetry,
 	);
 	const challengeRuntime = createStealthChallengeDetection(
 		provider,
@@ -939,7 +954,9 @@ function createProviderContext(
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
-					options.resolver ??
+					(options.resolver
+						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						: undefined) ??
 						capabilityModules.resolver.createResolverClientFromEnv(
 							provider.resolver,
 							undefined,
@@ -948,7 +965,9 @@ function createProviderContext(
 					signal,
 				)
 			: bindResolverSignalWithoutRuntime(
-					options.resolver ??
+					(options.resolver
+						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						: undefined) ??
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
 				),
@@ -1066,6 +1085,7 @@ function createAuthFlowContext(
 		proxyPolicy,
 		proxyClientOptions,
 		stealthProfile,
+		scope.resolverTelemetry,
 	);
 	const challengeRuntime = createStealthChallengeDetection(
 		provider,
@@ -1151,7 +1171,9 @@ function createAuthFlowContext(
 		stt: options.stt ?? createSttClientFromEnv(provider.stt),
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
-					options.resolver ??
+					(options.resolver
+						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						: undefined) ??
 						capabilityModules.resolver.createResolverClientFromEnv(
 							provider.resolver,
 							undefined,
@@ -1160,7 +1182,9 @@ function createAuthFlowContext(
 					signal,
 				)
 			: bindResolverSignalWithoutRuntime(
-					options.resolver ??
+					(options.resolver
+						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						: undefined) ??
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
 				),
@@ -1198,6 +1222,7 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
 	requestedProviderId?: string;
 	status: number;
 	proxy?: ProxyTelemetryLogPayload;
+	resolver?: ResolverTelemetryLogPayload;
 };
 
 export type ProviderServerLogEvent =
@@ -1283,7 +1308,11 @@ export type ProviderServerOptions<TContext extends Partial<ProviderContext> = Pr
 	stt?: SttContext;
 	/** Optional OCR override for tests or custom hosts; local/prod normally resolves from env. */
 	ocr?: OcrContext;
-	/** Optional resolver override for tests or custom hosts; local/prod normally resolves from env. */
+	/**
+	 * Optional resolver override for tests or custom hosts; local/prod normally resolves from env.
+	 * SDK chains are reconstructed with each request's telemetry sink. An opaque host
+	 * resolver is reported as one custom invocation; its internal vendor work is not exposed.
+	 */
 	resolver?: ResolverContext;
 	/** Optional runtime state override for tests or custom hosts. Production resolves Redis from env and fails closed when unavailable. */
 	state?: ProviderRuntimeState;
@@ -2004,8 +2033,10 @@ function createRequestScope(input: {
 			})
 		: createTraceContext();
 	const proxyCollector = new ProxyTelemetryCollector();
+	const resolverCollector = new ResolverTelemetryCollector();
 	const telemetry = new RequestTelemetry(trace);
 	telemetry.register(proxyCollector);
+	telemetry.register(resolverCollector);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
 	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
 	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
@@ -2083,6 +2114,7 @@ function createRequestScope(input: {
 	const scope: RequestScope = {
 		trace,
 		telemetry,
+		resolverTelemetry: resolverCollector,
 		enrich(enrichment): void {
 			if (terminalOutcome) return;
 			if (enrichment.route !== undefined) details.route = enrichment.route;
