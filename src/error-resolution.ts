@@ -54,7 +54,7 @@ export const SDK_OWNED_PROVIDER_ERROR_CODES = new Set([
 	"EGRESS_LEASE_INVALID",
 	"EGRESS_LEASE_BINDING_INVALID",
 	"EGRESS_LEASE_KEY_MISSING",
-	"REPLAY_BODY_UNAVAILABLE",
+	"STEALTH_BODY_UNSUPPORTED",
 	"REPLAY_SESSION_MISMATCH",
 	"REPLAY_ALREADY_ATTEMPTED",
 	"retry_exhausted",
@@ -126,7 +126,6 @@ export const SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES: ReadonlyMap<string, Provide
 		// Only an unverifiable or foreign handle is the caller's: key and binding
 		// faults stay unmapped (500) because the engine host, not the caller, owns them.
 		["EGRESS_LEASE_INVALID", 409],
-		["REPLAY_BODY_UNAVAILABLE", 409],
 		["REPLAY_SESSION_MISMATCH", 409],
 		["REPLAY_ALREADY_ATTEMPTED", 409],
 		["UPSTREAM_ERROR", 502],

@@ -932,9 +932,11 @@ function normalizeBody(body: unknown): string | Buffer | undefined {
 		return Buffer.from(body);
 	}
 
-	throw new SDKError("The request body cannot be preserved for a byte-exact replay", {
-		code: "REPLAY_BODY_UNAVAILABLE",
-		fix: "Supply a string or Buffer body so the SDK can snapshot it before the first request.",
+	// `StealthFetchOptions.body` is `string | Buffer`; anything else is a provider fault,
+	// caught before the first request so a later replay can send the same bytes.
+	throw new SDKError("Stealth request bodies must be a string or Buffer", {
+		code: "STEALTH_BODY_UNSUPPORTED",
+		fix: "Supply a string or Buffer body; streams and typed arrays are not snapshotted.",
 	});
 }
 
@@ -1614,6 +1616,68 @@ function createSessionFetcher(
 							durationMs: Date.now() - attemptStartedAt,
 						});
 					};
+					// Shared tail of the first fetch, the automatic refetch, and an explicit replay: a
+					// classified challenge is returned whatever `throwOnHttpError` says (documented on
+					// StealthFetchOptions), any other non-2xx honours it, and the proxy attempt is
+					// recorded once per delivered response.
+					const finalizeAttempt = (
+						attemptResponse: StealthTransportResponse,
+						attemptNormalized: StealthResponse,
+					): StealthResponse => {
+						if (
+							!attemptNormalized.challenge &&
+							attemptResponse.status >= 400 &&
+							options.throwOnHttpError !== false
+						) {
+							throw new TransportError(
+								`Upstream request failed with status ${attemptResponse.status}`,
+								{ code: "upstream_http_error", status: attemptResponse.status },
+							);
+						}
+						recordProxyAttempt("ok", undefined, attemptResponse.status);
+						return attemptNormalized;
+					};
+					const redactAttemptError = <T>(error: T): T =>
+						redactSensitiveError(
+							error,
+							serializedUrl?.sensitiveValues ?? fallbackSensitiveValues,
+							serializedUrl?.requestUrl ?? fallbackRequestUrl,
+							serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
+						);
+					// Cancellation and resolver failures leave the transport path here, redacted; any
+					// other failure becomes the TransportError the retry decision reasons about.
+					const normalizeAttemptError = (error: unknown): TransportError => {
+						let normalizedError: TransportError;
+						try {
+							throwIfAmbientAborted(clientOptions.signal);
+							normalizedError = normalizeStealthTransportError(error);
+						} catch (normalizationError) {
+							if (
+								normalizationError instanceof TransportError &&
+								normalizationError.code === "transport_cancelled"
+							) {
+								recordProxyAttempt(
+									"error",
+									proxyAttemptErrorCode(normalizationError),
+									proxyAttemptStatus(normalizationError),
+								);
+							}
+							throw redactAttemptError(normalizationError);
+						}
+						if (challengeSolveFailure && error === challengeSolveFailure) {
+							throw redactAttemptError(challengeSolveFailure.error);
+						}
+						return normalizedError;
+					};
+					const recordAttemptFailure = (normalizedError: TransportError): TransportError => {
+						const redactedError = redactAttemptError(normalizedError);
+						recordProxyAttempt(
+							"error",
+							proxyAttemptErrorCode(redactedError),
+							proxyAttemptStatus(redactedError),
+						);
+						return redactedError;
+					};
 					try {
 						throwIfAmbientAborted(clientOptions.signal);
 						const sensitiveParams = normalizeSensitiveParams(options.sensitiveParams);
@@ -1775,8 +1839,7 @@ function createSessionFetcher(
 									challenge: detected,
 									outcome: "challenge_persisted",
 								};
-								recordProxyAttempt("ok", undefined, response.status);
-								return normalized;
+								return finalizeAttempt(response, normalized);
 							}
 							const automaticReplayEligible = isProxyTransportRetryMethod(
 								method,
@@ -1788,8 +1851,7 @@ function createSessionFetcher(
 									challenge: detected,
 									outcome: "resolver_unavailable",
 								};
-								recordProxyAttempt("ok", undefined, response.status);
-								return normalized;
+								return finalizeAttempt(response, normalized);
 							}
 
 							const emulationHeaderMap = new Map(
@@ -1895,7 +1957,10 @@ function createSessionFetcher(
 								wreqOs: mapping.os,
 								proxyUrl: proxy,
 							});
-							const solveAndReplay = async (explicitReplay: boolean): Promise<StealthResponse> => {
+							const challenged = { normalized, response };
+							const solveAndReplay = async (
+								explicitReplay: boolean,
+							): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> => {
 								if (!akamaiSbsd.solve) {
 									throw new SDKError("No resolver is available for the challenged request", {
 										code: "RESOLVER_UNAVAILABLE",
@@ -1941,42 +2006,49 @@ function createSessionFetcher(
 											// The proxy delivered the challenged response; the resolver failed.
 											// Surface that failure as-is: it is not a transport fault to normalize
 											// or retry.
-											if (explicitReplay) throw transactionResult.error;
-											recordProxyAttempt("ok", undefined, response.status);
+											if (!explicitReplay) {
+												recordProxyAttempt("ok", undefined, challenged.response.status);
+											}
 											challengeSolveFailure = { error: transactionResult.error };
 											throw challengeSolveFailure;
 										}
-										normalized.challenge = {
-											challenge: detected,
-											outcome: "solve_failed",
+										return {
+											normalized: {
+												...challenged.normalized,
+												challenge: { challenge: detected, outcome: "solve_failed" },
+											},
+											response: challenged.response,
 										};
-										return normalized;
 									}
 								}
 								challengeRefetchAttempted = true;
-								({ normalized, response } = await fetchOnBoundSession(
+								// An explicit replay is a new transport exchange on the bound endpoint and
+								// gets its own proxy-attempt record; the automatic refetch stays within the
+								// initiating attempt's record.
+								if (explicitReplay) attemptRecorded = false;
+								const replayed = await fetchOnBoundSession(
 									requestUrl,
 									method,
 									replayOptions,
 									clientOptions.signal,
-								));
-								throwProxyTransportFault(response, normalized.body);
+								);
+								throwProxyTransportFault(replayed.response, replayed.normalized.body);
 								const persisted = detectAkamaiSbsdChallenge(
-									normalized,
+									replayed.normalized,
 									requestUrl,
 									cookieJar,
 									akamaiSbsd.allowedHosts,
 									akamaiSbsdState,
 								);
 								if (persisted) {
-									normalized.challenge = {
+									replayed.normalized.challenge = {
 										challenge: persisted,
 										outcome: "challenge_persisted",
 									};
 								} else if (ownsTransaction && !explicitReplay) {
 									akamaiSbsdState.completedSuccessKey = transactionKey;
 								}
-								return normalized;
+								return replayed;
 							};
 
 							if (!automaticReplayEligible) {
@@ -1986,83 +2058,36 @@ function createSessionFetcher(
 								};
 								challengedReplays.set(normalized, {
 									consumed: false,
-									replay: () => solveAndReplay(true),
+									async replay() {
+										try {
+											const replayed = await solveAndReplay(true);
+											return finalizeAttempt(replayed.response, replayed.normalized);
+										} catch (error) {
+											throw recordAttemptFailure(normalizeAttemptError(error));
+										}
+									},
 								});
-								recordProxyAttempt("ok", undefined, response.status);
-								return normalized;
+								return finalizeAttempt(response, normalized);
 							}
-							await solveAndReplay(false);
-							if (normalized.challenge) {
-								recordProxyAttempt("ok", undefined, response.status);
-								return normalized;
-							}
+							({ normalized, response } = await solveAndReplay(false));
 						}
 
-						if (response.status >= 400 && options.throwOnHttpError !== false) {
-							throw new TransportError(`Upstream request failed with status ${response.status}`, {
-								code: "upstream_http_error",
-								status: response.status,
-							});
-						}
-
-						recordProxyAttempt("ok", undefined, response.status);
-						return normalized;
+						return finalizeAttempt(response, normalized);
 					} catch (error) {
-						const sensitiveValues = serializedUrl?.sensitiveValues ?? fallbackSensitiveValues;
-						let normalizedError: TransportError;
-						try {
-							throwIfAmbientAborted(clientOptions.signal);
-							normalizedError = normalizeStealthTransportError(error);
-						} catch (normalizationError) {
-							const redactedNormalizationError = redactSensitiveError(
-								normalizationError,
-								sensitiveValues,
-								serializedUrl?.requestUrl ?? fallbackRequestUrl,
-								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
-							);
-							if (
-								normalizationError instanceof TransportError &&
-								normalizationError.code === "transport_cancelled"
-							) {
-								recordProxyAttempt(
-									"error",
-									proxyAttemptErrorCode(normalizationError),
-									proxyAttemptStatus(normalizationError),
-								);
-							}
-							throw redactedNormalizationError;
-						}
-						if (challengeSolveFailure && error === challengeSolveFailure) {
-							throw redactSensitiveError(
-								challengeSolveFailure.error,
-								sensitiveValues,
-								serializedUrl?.requestUrl ?? fallbackRequestUrl,
-								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
-							);
-						}
+						const normalizedError = normalizeAttemptError(error);
 						const retryErrorCode = proxyAttemptErrorCode(normalizedError);
 						const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);
 						const runProxyAuthDiagnostic = shouldRunProxyAuthDiagnostic(normalizedError);
-						normalizedError = redactSensitiveError(
-							normalizedError,
-							sensitiveValues,
-							serializedUrl?.requestUrl ?? fallbackRequestUrl,
-							serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
-						);
-						recordProxyAttempt(
-							"error",
-							proxyAttemptErrorCode(normalizedError),
-							proxyAttemptStatus(normalizedError),
-						);
-						lastError = normalizedError;
+						const redactedError = recordAttemptFailure(normalizedError);
+						lastError = redactedError;
 						if (challengeSolveAttempted || challengeRefetchAttempted) {
 							// The single refetch is spent (owner or waiter of a shared solve): another
 							// transport attempt would replay the original request and may rotate the
 							// proxy the solved jar is bound to.
-							throw normalizedError;
+							throw redactedError;
 						}
 						if (proxy && rotatesRegistryChain && refreshableProxyError) {
-							stalePoolError = normalizedError;
+							stalePoolError = redactedError;
 							if (runProxyAuthDiagnostic) {
 								stalePoolDiagnosticProxy = proxy;
 							}
@@ -2110,7 +2135,7 @@ function createSessionFetcher(
 							throwIfAmbientAborted(clientOptions.signal);
 							continue;
 						}
-						throw normalizedError;
+						throw redactedError;
 					}
 				}
 

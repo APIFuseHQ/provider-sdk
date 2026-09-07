@@ -5050,7 +5050,7 @@ describe("Akamai SBSD detection and safe refetch", () => {
 				throwOnHttpError: false,
 			}),
 		).rejects.toMatchObject({
-			code: "REPLAY_BODY_UNAVAILABLE",
+			code: "STEALTH_BODY_UNSUPPORTED",
 		});
 		expect(solves).toBe(0);
 		expect(allWreqCalls()).toHaveLength(0);
@@ -5137,6 +5137,81 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(replayed.challenge?.outcome).toBe("challenge_persisted");
 		expect(solves).toBe(1);
 		expect(allWreqCalls()).toHaveLength(2);
+	});
+
+	it("gives an explicit replay the same status and proxy-telemetry tail as fetch", async () => {
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const challenge = {
+			status: 403,
+			body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=8def0b9a-d2a1-4e0f-9f79-a2cdef0f819b&t=token"),
+			headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+			url: "https://example.com/mutate",
+		};
+		const failure = {
+			status: 500,
+			body: "upstream broke",
+			headers: {},
+			url: "https://example.com/mutate",
+		};
+		mockStealthState.queuedResponses.push(challenge, failure, challenge, failure);
+		const attempts: Array<{ outcome: string; status?: number; errorCode?: string }> = [];
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1 },
+					},
+				},
+				affinityKey: "connection-1",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				telemetry: {
+					recordProxyResolution() {},
+					recordProxyAttempt(attempt) {
+						attempts.push(attempt);
+					},
+				},
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+
+		const lenient = await session.fetch("/mutate", { method: "POST", throwOnHttpError: false });
+		expect(lenient.challenge?.outcome).toBe("replay_required");
+		await expect(session.replayChallenged(lenient)).resolves.toMatchObject({ status: 500 });
+
+		// The classified 403 is returned even with the default throwOnHttpError (documented
+		// exception); the replayed 500 is not classified, so it throws like any fetch would.
+		const strict = await session.fetch("/mutate", { method: "POST" });
+		expect(strict.challenge?.outcome).toBe("replay_required");
+		await expect(session.replayChallenged(strict)).rejects.toMatchObject({
+			code: "upstream_http_error",
+			status: 500,
+		});
+
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["ok", 403, undefined],
+			["ok", 500, undefined],
+			["ok", 403, undefined],
+			["error", 500, "upstream_http_error"],
+		]);
+		expect(allWreqCalls()).toHaveLength(4);
 	});
 
 	it("mints after pool rotation and rebinds the exact endpoint without resolving on turn two", async () => {
