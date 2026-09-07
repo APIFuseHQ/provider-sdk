@@ -12,6 +12,7 @@ import {
 	type ResolverVendorAdapter,
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
+	recordResolverVendorPoll,
 	type ResolverVendorUnavailableReason,
 	resolverVendorSupports,
 } from "./types.js";
@@ -623,6 +624,7 @@ export function createCapsolverResolverVendorAdapter(
 						callerSignal.throwIfAborted();
 						if (now() - startedAt >= timeoutMs) throw new CapsolverSolveTimeoutError();
 
+						recordResolverVendorPoll(traceRecorder);
 						const result = await postJson(
 							fetchImpl,
 							endpoint(baseUrl, "getTaskResult"),

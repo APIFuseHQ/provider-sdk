@@ -581,7 +581,7 @@ describe("Capsolver resolver vendor", () => {
 		}
 	});
 
-	it("retains a sanitized JSON parse cause without exposing response secrets in public diagnostics", async () => {
+	it("keeps a sanitized JSON parse cause internal and exposes neutral public diagnostics", async () => {
 		const apiKey = "capsolver-public-diagnostic-secret";
 		const responseText = `<html>${apiKey}: super-secret-upstream-body</html>`;
 		const stub = createFetchStub([
@@ -618,17 +618,12 @@ describe("Capsolver resolver vendor", () => {
 		const publicError = await capturedError(resolver.solve(TURNSTILE_CHALLENGE));
 		expect(publicError).toBeInstanceOf(ProviderError);
 		expect((publicError as ProviderError).code).toBe("RESOLVER_CHAIN_EXHAUSTED");
-		const [attempt] = (publicError as ProviderError).details as Array<{
-			vendor: string;
-			reason: string;
-			cause?: { name: string; message: string };
-		}>;
-		expect(attempt).toMatchObject({
-			vendor: "capsolver",
-			reason: "transport_failure",
-			cause: { name: "SyntaxError" },
+		expect((publicError as ProviderError).details).toEqual({
+			challengeKind: "turnstile",
+			attempts: 1,
+			outcome: "exhausted",
+			retryable: false,
 		});
-		expect(attempt?.cause?.message.startsWith("Upstream response failed")).toBe(true);
 
 		const exposedStrings = collectNestedStrings({ error, publicError });
 		const publicDiagnostics = exposedStrings.join("\n");

@@ -10,11 +10,16 @@ import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../proxy-nodemav
 import {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
+	APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	createResolverClientFromEnv,
 	swapResolverAdapterFactoryForTests,
 } from "../resolver.js";
-import type { ResolverIdentity, ResolverVendorAdapter } from "../resolver-vendors/types.js";
+import {
+	type ResolverIdentity,
+	type ResolverVendorAdapter,
+	ResolverVendorUnavailableError,
+} from "../resolver-vendors/types.js";
 
 const turnstileChallenge = {
 	kind: "turnstile",
@@ -26,6 +31,10 @@ const resolverAuthoringInputSchema = z.object({
 	kind: z.enum(["turnstile", "aws_waf"]),
 });
 type ResolverAuthoringInput = z.infer<typeof resolverAuthoringInputSchema>;
+
+function exhaustedDetails(challengeKind: ProviderChallenge["kind"], attempts: number) {
+	return { challengeKind, attempts, outcome: "exhausted", retryable: false };
+}
 
 function installNodemavenTestCredentials(): () => void {
 	const originalUsername = process.env[NODEMAVEN_USERNAME_ENV];
@@ -82,7 +91,7 @@ describe("resolver env availability", () => {
 			),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "2captcha", reason: "missing_credentials" }],
+			details: exhaustedDetails("turnstile", 1),
 		});
 	});
 
@@ -95,7 +104,7 @@ describe("resolver env availability", () => {
 			).solve(turnstileChallenge),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "2captcha", reason: "transport_failure" }],
+			details: exhaustedDetails("turnstile", 1),
 		});
 	});
 
@@ -135,7 +144,7 @@ describe("resolver env availability", () => {
 			}),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "browser", reason: "missing_credentials" }],
+			details: exhaustedDetails("aws_waf", 1),
 		});
 	});
 
@@ -147,10 +156,7 @@ describe("resolver env availability", () => {
 			).solve(turnstileChallenge),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{ vendor: "2captcha", reason: "missing_credentials" },
-				{ vendor: "capsolver", reason: "missing_credentials" },
-			],
+			details: exhaustedDetails("turnstile", 2),
 		});
 	});
 
@@ -161,7 +167,7 @@ describe("resolver env availability", () => {
 			),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "custom", reason: "missing_transport" }],
+			details: exhaustedDetails("turnstile", 1),
 		});
 	});
 
@@ -188,7 +194,7 @@ describe("resolver env availability", () => {
 			).solve(turnstileChallenge),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "2captcha", reason: "missing_credentials" }],
+			details: exhaustedDetails("turnstile", 1),
 		});
 	});
 
@@ -222,7 +228,7 @@ describe("resolver env availability", () => {
 			).solve({ kind: "aws_waf", pageUrl: "https://example.com/challenge" }),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "browser", reason: "missing_credentials" }],
+			details: exhaustedDetails("aws_waf", 1),
 		});
 	});
 
@@ -234,7 +240,7 @@ describe("resolver env availability", () => {
 			}),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "browser", reason: "missing_credentials" }],
+			details: exhaustedDetails("aws_waf", 1),
 		});
 	});
 
@@ -248,12 +254,219 @@ describe("resolver env availability", () => {
 			).solve({ kind: "aws_waf", pageUrl: "https://example.com/challenge" }),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "browser", reason: "missing_credentials" }],
+			details: exhaustedDetails("aws_waf", 1),
 		});
 	});
 });
 
 describe("resolver server wiring", () => {
+	it("emits resolver telemetry with failover parity on operation and auth/continue", async () => {
+		const originalCapsolverKey = process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY];
+		const originalTwoCaptchaKey = process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY];
+		process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY] = "capsolver-test-key";
+		process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY] = "2captcha-test-key";
+		const failing: ResolverVendorAdapter = {
+			id: "capsolver",
+			supports: () => true,
+			async solve() {
+				throw new ResolverVendorUnavailableError("capsolver", "allocation_exhausted", {
+					phase: "create_task",
+				});
+			},
+		};
+		const succeeding: ResolverVendorAdapter = {
+			id: "2captcha",
+			supports: () => true,
+			async solve() {
+				return { form: "token", token: "solved" };
+			},
+		};
+		const restoreCapsolver = swapResolverAdapterFactoryForTests("capsolver", () => failing);
+		const restoreTwoCaptcha = swapResolverAdapterFactoryForTests("2captcha", () => succeeding);
+		try {
+			const provider = defineProvider({
+				id: "resolver-telemetry-parity",
+				version: "1.0.0",
+				runtime: "standard",
+				resolver: { vendors: ["capsolver", "2captcha"], kinds: ["turnstile"] },
+				meta: {
+					displayName: "Resolver Telemetry Parity",
+					descriptionKey: "resolver-telemetry-parity.description",
+					category: "test",
+				},
+				auth: {
+					mode: "credentials",
+					flow: {
+						async start() {
+							return { kind: "form", turnId: "start" };
+						},
+						async continue(ctx) {
+							await ctx.resolver.solve(turnstileChallenge);
+							return { kind: "complete", turnId: "complete" };
+						},
+					},
+				},
+			})({
+				operations: {
+					solve: {
+						riskClass: "read",
+						input: z.object({}),
+						output: z.object({ ok: z.boolean() }),
+						async handler(ctx) {
+							await ctx.resolver.solve(turnstileChallenge);
+							return { ok: true };
+						},
+						healthCheckUnsupported: { reason: "unit test" },
+					},
+				},
+			});
+			const events: import("../../server/serve.js").ProviderServerLogEvent[] = [];
+			const app = createServerApp(provider, { logger: (event) => events.push(event) });
+			const requests = [
+				app.request("/v1/solve", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: "resolver-op", input: {} }),
+				}),
+				app.request("/auth/continue", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: "resolver-auth", flowId: "flow", input: {} }),
+				}),
+			];
+			for (const response of await Promise.all(requests)) {
+				expect(response.status).toBe(200);
+				const encoded = response.headers.get(PROVIDER_TELEMETRY_HEADER);
+				const envelope = JSON.parse(Buffer.from(encoded ?? "", "base64url").toString("utf8"));
+				expect(envelope).toMatchObject({
+					v: 1,
+					taxonomy: expect.any(String),
+					resolver: {
+						outcome: "solved",
+						attempts: 2,
+						failovers: 1,
+						vendorUsed: "2captcha",
+						vendorChain: ["capsolver", "2captcha"],
+					},
+				});
+			}
+			const completed = events.filter(
+				(event) =>
+					event.event === "provider_request_completed" && "resolver" in event && event.resolver,
+			);
+			expect(completed).toHaveLength(2);
+			for (const event of completed) {
+				expect("resolver" in event ? event.resolver : undefined).toMatchObject({
+					outcome: "solved",
+					attempts: 2,
+					failovers: 1,
+					vendorUsed: "2captcha",
+					vendorChain: ["capsolver", "2captcha"],
+				});
+			}
+		} finally {
+			restoreTwoCaptcha();
+			restoreCapsolver();
+			if (originalCapsolverKey === undefined)
+				delete process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY];
+			else process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY] = originalCapsolverKey;
+			if (originalTwoCaptchaKey === undefined)
+				delete process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY];
+			else process.env[APIFUSE__RESOLVER__2CAPTCHA__API_KEY] = originalTwoCaptchaKey;
+		}
+	});
+
+	it("keeps exhausted vendor diagnostics in logs and out of the public body", async () => {
+		const sentinelDescription = "SENTINEL vendor account diagnostics";
+		const sentinelHost = "sentinel.vendor.invalid";
+		const originalKey = process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY];
+		process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY] = "capsolver-test-key";
+		const adapter: ResolverVendorAdapter = {
+			id: "capsolver",
+			supports: () => true,
+			async solve(_challenge, _identity, _signal, traceRecorder) {
+				const fail = () => {
+					throw new ResolverVendorUnavailableError("capsolver", "transport_failure", {
+						upstreamHost: sentinelHost,
+						phase: "create_task",
+					});
+				};
+				return traceRecorder
+					? traceRecorder.runSpan("resolver.vendor.create_task", fail, {
+							onError: () => ({
+								vendor_error_code: "SENTINEL_ERROR",
+								vendor_error_description: sentinelDescription,
+							}),
+						})
+					: fail();
+			},
+		};
+		const restore = swapResolverAdapterFactoryForTests("capsolver", () => adapter);
+		try {
+			const provider = defineProvider({
+				id: "resolver-telemetry-exhausted",
+				version: "1.0.0",
+				runtime: "standard",
+				resolver: { vendors: ["capsolver"], kinds: ["turnstile"] },
+				meta: {
+					displayName: "Resolver Exhausted",
+					descriptionKey: "resolver-exhausted.description",
+					category: "test",
+				},
+			})({
+				operations: {
+					solve: {
+						riskClass: "read",
+						input: z.object({}),
+						output: z.object({ ok: z.boolean() }),
+						async handler(ctx) {
+							await ctx.resolver.solve(turnstileChallenge);
+							return { ok: true };
+						},
+						healthCheckUnsupported: { reason: "unit test" },
+					},
+				},
+			});
+			const events: import("../../server/serve.js").ProviderServerLogEvent[] = [];
+			const response = await createServerApp(provider, {
+				logger: (event) => events.push(event),
+			}).request("/v1/solve", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "resolver-exhausted", input: {} }),
+			});
+			expect(response.status).toBe(500);
+			const body = await response.json();
+			expect(body).toMatchObject({
+				error: {
+					code: "RESOLVER_CHAIN_EXHAUSTED",
+					retryable: false,
+					details: exhaustedDetails("turnstile", 1),
+				},
+			});
+			const serializedBody = JSON.stringify(body);
+			expect(serializedBody).not.toContain("capsolver");
+			expect(serializedBody).not.toContain(sentinelHost);
+			expect(serializedBody).not.toContain(sentinelDescription);
+			const failed = events.find((event) => event.event === "provider_request_failed");
+			expect(failed?.resolver).toMatchObject({
+				outcome: "exhausted",
+				attempts: 1,
+				vendorChain: ["capsolver"],
+				lastVendorErrorDescription: sentinelDescription,
+				attemptSamples: [{ c: "SENTINEL_ERROR", e: "transport_failure" }],
+			});
+			const encoded = response.headers.get(PROVIDER_TELEMETRY_HEADER);
+			const envelope = JSON.parse(Buffer.from(encoded ?? "", "base64url").toString("utf8"));
+			expect(envelope.resolver).not.toHaveProperty("lastVendorErrorDescription");
+			expect(JSON.stringify(envelope)).not.toContain(sentinelDescription);
+		} finally {
+			restore();
+			if (originalKey === undefined) delete process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY];
+			else process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY] = originalKey;
+		}
+	});
+
 	it("passes a context-scoped production identity into the resolver factory", async () => {
 		let calls = 0;
 		const adapter: ResolverVendorAdapter = {
@@ -287,7 +500,8 @@ describe("resolver server wiring", () => {
 					descriptionKey: "resolver-production-identity.description",
 					category: "test",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					solve: {
 						riskClass: "read",
 						input: z.object({}),
@@ -309,7 +523,8 @@ describe("resolver server wiring", () => {
 						},
 						healthCheckUnsupported: { reason: "unit test" },
 					},
-				} });
+				},
+			});
 			const app = createServerApp(provider, { logger: () => undefined });
 			const request = (requestId: string) =>
 				app.request("/v1/solve", {
@@ -370,7 +585,8 @@ describe("resolver server wiring", () => {
 					descriptionKey: "resolver-required-proxy-policy.description",
 					category: "test",
 				},
-			})({ operations: {
+			})({
+				operations: {
 					solve: {
 						riskClass: "read",
 						input: z.object({}),
@@ -384,7 +600,8 @@ describe("resolver server wiring", () => {
 						},
 						healthCheckUnsupported: { reason: "unit test" },
 					},
-				} });
+				},
+			});
 			const app = createServerApp(provider, { logger: () => undefined });
 			const response = await app.request("/v1/solve", {
 				method: "POST",
@@ -464,7 +681,8 @@ describe("resolver server wiring", () => {
 						},
 					},
 				},
-			})({ operations: {
+			})({
+				operations: {
 					unused: {
 						riskClass: "read",
 						input: z.object({}),
@@ -474,7 +692,8 @@ describe("resolver server wiring", () => {
 						},
 						healthCheckUnsupported: { reason: "unit test" },
 					},
-				} });
+				},
+			});
 			const events: import("../../server/serve.js").ProviderServerLogEvent[] = [];
 			const app = createServerApp(provider, { logger: (event) => events.push(event) });
 			const response = await app.request("/auth/start", {
@@ -532,7 +751,8 @@ describe("resolver server wiring", () => {
 				descriptionKey: "resolver-authoring-path.description",
 				category: "test",
 			},
-		})({ operations: {
+		})({
+			operations: {
 				solve: {
 					riskClass: "read",
 					input: resolverAuthoringInputSchema,
@@ -548,7 +768,8 @@ describe("resolver server wiring", () => {
 					},
 					healthCheckUnsupported: { reason: "unit test" },
 				},
-			} });
+			},
+		});
 		const app = createServerApp(provider, { logger: () => undefined });
 
 		const vendorResponse = await app.request("/v1/solve", {
@@ -560,8 +781,8 @@ describe("resolver server wiring", () => {
 		expect(await vendorResponse.json()).toMatchObject({
 			error: {
 				code: "RESOLVER_CHAIN_EXHAUSTED",
-				message: `Resolver vendor chain exhausted: ${declaration.vendors[0]}: missing_transport`,
-				details: declaration.vendors.map((vendor) => ({ vendor, reason: "missing_transport" })),
+				message: "The challenge could not be resolved.",
+				details: exhaustedDetails("turnstile", declaration.vendors.length),
 			},
 		});
 
@@ -590,7 +811,8 @@ describe("resolver server wiring", () => {
 				descriptionKey: "resolver-undeclared.description",
 				category: "test",
 			},
-		})({ operations: {
+		})({
+			operations: {
 				solve: {
 					riskClass: "read",
 					input: z.object({}),
@@ -601,7 +823,8 @@ describe("resolver server wiring", () => {
 					},
 					healthCheckUnsupported: { reason: "unit test" },
 				},
-			} });
+			},
+		});
 		const app = createServerApp(provider, { logger: () => undefined });
 
 		expect(provider.resolver).toBeUndefined();
@@ -654,7 +877,8 @@ describe("resolver server wiring", () => {
 					},
 				},
 			},
-		})({ operations: {
+		})({
+			operations: {
 				solve: {
 					riskClass: "read",
 					input: z.object({}),
@@ -665,7 +889,8 @@ describe("resolver server wiring", () => {
 					},
 					healthCheckUnsupported: { reason: "unit test" },
 				},
-			} });
+			},
+		});
 		const app = createServerApp(provider, { resolver });
 		const operationController = new AbortController();
 

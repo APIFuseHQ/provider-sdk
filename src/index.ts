@@ -200,6 +200,26 @@ export {
 } from "./runtime/request-telemetry.js";
 export { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } from "./runtime/egress-lease.js";
 export {
+	ResolverTelemetryCollector,
+	type ResolverCacheReadTelemetryEvent,
+	type ResolverCacheWriteTelemetryEvent,
+	type ResolverFailoverTelemetryEvent,
+	type ResolverIdentityTelemetryEvent,
+	type ResolverOutcomeTelemetryEvent,
+	type ResolverTelemetryAttemptOutcome,
+	type ResolverAttemptSample,
+	type ResolverTelemetryCacheStatus,
+	type ResolverTelemetryCacheWriteReason,
+	type ResolverTelemetryErrorClass,
+	type ResolverTelemetryHeaderPayload,
+	type ResolverTelemetryIdentitySource,
+	type ResolverTelemetryLogPayload,
+	type ResolverTelemetryOutcome,
+	type ResolverTelemetryPhase,
+	type ResolverTelemetrySink,
+	type ResolverVendorAttemptTelemetryEvent,
+} from "./runtime/resolver-telemetry.js";
+export {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
 	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,
@@ -213,6 +233,7 @@ export type { ResolverRuntimeOptions } from "./runtime/resolver.js";
 export type {
 	ResolverPaidUsageContext,
 	ResolverVendorTransport,
+	ResolverVendorUnavailableReason,
 } from "./runtime/resolver-vendors/types.js";
 export {
 	assertRequiredSecretsPresent,

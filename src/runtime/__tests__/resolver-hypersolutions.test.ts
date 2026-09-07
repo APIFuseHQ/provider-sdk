@@ -1,9 +1,15 @@
 import { describe, expect, it, spyOn } from "bun:test";
 
+import { ProviderError } from "../../errors.js";
+import { ResolverTelemetryCollector } from "../resolver-telemetry.js";
 import type { ProviderChallenge } from "../../types.js";
 import { createResolverClient } from "../resolver.js";
 import { createHypersolutionsResolverVendorAdapter } from "../resolver-vendors/hypersolutions.js";
-import type { ResolverVendorAdapter, ResolverVendorTransport } from "../resolver-vendors/types.js";
+import type {
+	ResolverVendorAdapter,
+	ResolverVendorTransport,
+	ResolverVendorUnavailableReason,
+} from "../resolver-vendors/types.js";
 import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const API_KEY = "hyper-test-key";
@@ -111,11 +117,49 @@ function createProtocolTransport(
 	return { transport, calls };
 }
 
+function observedResolver(options: Parameters<typeof createResolverClient>[0]) {
+	const telemetry = new ResolverTelemetryCollector();
+	return Object.assign(createResolverClient({ ...options, telemetry }), { telemetry });
+}
+
+async function expectExhausted(
+	resolver: ReturnType<typeof observedResolver>,
+	challenge: ProviderChallenge,
+	expected: {
+		readonly vendor: "hypersolutions";
+		readonly reason: ResolverVendorUnavailableReason;
+		readonly missingFields?: readonly string[];
+		readonly phase?: string;
+		readonly round?: number;
+	},
+) {
+	const error: unknown = await resolver.solve(challenge).catch((cause: unknown) => cause);
+	expect(error).toBeInstanceOf(ProviderError);
+	if (!(error instanceof ProviderError)) throw error;
+	expect(error.code).toBe("RESOLVER_CHAIN_EXHAUSTED");
+	expect(error.details).toEqual({
+		challengeKind: "akamai_sbsd",
+		attempts: 1,
+		outcome: "exhausted",
+		retryable: false,
+	});
+	const log = resolver.telemetry.toLogPayload()!;
+	const attempt = log.attemptSamples?.[0];
+	expect(log.attempts).toBe(1);
+	expect(attempt?.v).toBe(expected.vendor);
+	expect(attempt?.e).toBe(expected.reason);
+	if (expected.missingFields !== undefined) {
+		expect(attempt?.diagnostics?.missingFields).toEqual(expected.missingFields);
+	}
+	if (expected.phase !== undefined) expect(attempt?.diagnostics?.phase).toBe(expected.phase);
+	if (expected.round !== undefined) expect(attempt?.diagnostics?.round).toBe(expected.round);
+}
+
 function createResolver(
 	transport?: ResolverVendorTransport,
 	fetchImpl: typeof fetch = createDirectFetch().fetchImpl,
 ) {
-	return createResolverClient({
+	return observedResolver({
 		adapters: [
 			createHypersolutionsResolverVendorAdapter({
 				apiKey: API_KEY,
@@ -312,16 +356,18 @@ describe("hypersolutions resolver vendor", () => {
 		const globalFetch = spyOn(globalThis, "fetch");
 		globalFetch.mockRejectedValue(new Error("direct egress mutant reached global fetch"));
 		try {
+			await expectExhausted(createResolver(undefined, direct.fetchImpl), HARD_CHALLENGE, {
+				vendor: "hypersolutions",
+				reason: "missing_transport",
+			});
+			// Same preflight failure with a trace recorder attached: no paid call, no usage record.
 			await expect(
 				createResolver(undefined, direct.fetchImpl).solve(
 					HARD_CHALLENGE,
 					new AbortController().signal,
 					recorder,
 				),
-			).rejects.toMatchObject({
-				code: "RESOLVER_CHAIN_EXHAUSTED",
-				details: [{ vendor: "hypersolutions", reason: "missing_transport" }],
-			});
+			).rejects.toMatchObject({ code: "RESOLVER_CHAIN_EXHAUSTED" });
 			expect(globalFetch).not.toHaveBeenCalled();
 			expect(direct.calls).toHaveLength(0);
 		} finally {
@@ -398,7 +444,7 @@ describe("hypersolutions resolver vendor", () => {
 			resolver.solve(HARD_CHALLENGE, new AbortController().signal, recorder),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "hypersolutions", reason: "timeout" }],
+			details: { challengeKind: "akamai_sbsd", attempts: 1, outcome: "exhausted", retryable: false },
 		});
 		const usageSpans = trace.getSpans().filter((span) => span.name === "resolver.usage");
 		expect(usageSpans.map((span) => [span.attributes.endpoint, span.attributes.outcome])).toEqual([
@@ -423,7 +469,7 @@ describe("hypersolutions resolver vendor", () => {
 
 	it("rejects a script URL from another declared origin as incomplete challenge input", async () => {
 		const { transport, calls } = createProtocolTransport();
-		const resolver = createResolverClient({
+		const resolver = observedResolver({
 			adapters: [
 				createHypersolutionsResolverVendorAdapter({
 					apiKey: API_KEY,
@@ -435,21 +481,18 @@ describe("hypersolutions resolver vendor", () => {
 			allowedHosts: ["shop.example.com", "cdn.example.com"],
 			createTransport: () => transport,
 		});
-		await expect(
-			resolver.solve({
+		await expectExhausted(
+			resolver,
+			{
 				...HARD_CHALLENGE,
 				scriptUrl: HARD_SCRIPT_URL.replace("shop.example.com", "cdn.example.com"),
-			}),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{
-					vendor: "hypersolutions",
-					reason: "missing_challenge_input",
-					missingFields: ["scriptUrl"],
-				},
-			],
-		});
+			},
+			{
+				vendor: "hypersolutions",
+				reason: "missing_challenge_input",
+				missingFields: ["scriptUrl"],
+			},
+		);
 		expect(calls).toHaveLength(0);
 	});
 
@@ -503,7 +546,7 @@ describe("hypersolutions resolver vendor", () => {
 
 	it("requires the resolver declaration's Akamai client profile", async () => {
 		const { transport } = createProtocolTransport();
-		const resolver = createResolverClient({
+		const resolver = observedResolver({
 			adapters: [
 				createHypersolutionsResolverVendorAdapter({
 					apiKey: API_KEY,
@@ -515,9 +558,26 @@ describe("hypersolutions resolver vendor", () => {
 			createTransport: () => transport,
 		});
 
-		await expect(resolver.solve(HARD_CHALLENGE)).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "hypersolutions", reason: "missing_client_profile" }],
+		const error: unknown = await resolver.solve(HARD_CHALLENGE).catch((cause: unknown) => cause);
+		expect(error).toBeInstanceOf(ProviderError);
+		if (!(error instanceof ProviderError)) throw error;
+		expect(error.code).toBe("RESOLVER_CHAIN_EXHAUSTED");
+		expect(error.details).toEqual({
+			challengeKind: "akamai_sbsd",
+			attempts: 0,
+			outcome: "exhausted",
+			retryable: false,
+		});
+		expect(resolver.telemetry.toLogPayload()).toEqual({
+			outcome: "exhausted",
+			challengeKind: "akamai_sbsd",
+			identitySource: "none",
+			identityFailure: "missing_client_profile",
+			solveMs: expect.any(Number),
+			attempts: 0,
+			failovers: 0,
+			vendorChain: [],
+			pollCount: 0,
 		});
 	});
 
@@ -531,9 +591,9 @@ describe("hypersolutions resolver vendor", () => {
 			},
 		};
 
-		await expect(createResolver(transport).solve(HARD_CHALLENGE)).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "hypersolutions", reason: "missing_client_profile" }],
+		await expectExhausted(createResolver(transport), HARD_CHALLENGE, {
+			vendor: "hypersolutions",
+			reason: "missing_client_profile",
 		});
 		expect(calls).toHaveLength(0);
 	});
@@ -548,31 +608,28 @@ describe("hypersolutions resolver vendor", () => {
 			},
 		};
 
-		await expect(createResolver(transport).solve(HARD_CHALLENGE)).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "hypersolutions", reason: "missing_transport" }],
+		await expectExhausted(createResolver(transport), HARD_CHALLENGE, {
+			vendor: "hypersolutions",
+			reason: "missing_transport",
 		});
 		expect(calls).toHaveLength(0);
 	});
 
 	it("rejects an arbitrary SBSD state-cookie name at runtime", async () => {
 		const { transport, calls } = createProtocolTransport();
-		await expect(
-			createResolver(transport).solve({
+		await expectExhausted(
+			createResolver(transport),
+			{
 				...HARD_CHALLENGE,
 				// @ts-expect-error test-invalid: runtime validation must reject arbitrary cookie names.
 				stateCookieName: "evil",
-			}),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{
-					vendor: "hypersolutions",
-					reason: "missing_challenge_input",
-					missingFields: ["stateCookieName"],
-				},
-			],
-		});
+			},
+			{
+				vendor: "hypersolutions",
+				reason: "missing_challenge_input",
+				missingFields: ["stateCookieName"],
+			},
+		);
 		expect(calls).toHaveLength(0);
 	});
 
@@ -589,9 +646,10 @@ describe("hypersolutions resolver vendor", () => {
 				return response("", { status });
 			},
 		};
-		await expect(createResolver(transport).solve(HARD_CHALLENGE)).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "hypersolutions", reason, phase: "measure_ip" }],
+		await expectExhausted(createResolver(transport), HARD_CHALLENGE, {
+			vendor: "hypersolutions",
+			reason,
+			phase: "measure_ip",
 		});
 		expect(calls).toEqual([HYPER_IP_URL]);
 	});
@@ -599,13 +657,10 @@ describe("hypersolutions resolver vendor", () => {
 	it("classifies a failed Hyper payload generation as transport_failure without posting upstream", async () => {
 		const { transport, calls } = createProtocolTransport();
 		const direct = createDirectFetch(() => new Response("upstream busy", { status: 502 }));
-		await expect(
-			createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{ vendor: "hypersolutions", reason: "transport_failure", phase: "generate_payload" },
-			],
+		await expectExhausted(createResolver(transport, direct.fetchImpl), HARD_CHALLENGE, {
+			vendor: "hypersolutions",
+			reason: "transport_failure",
+			phase: "generate_payload",
 		});
 		expect(direct.calls).toHaveLength(1);
 		expect(calls.map(({ url }) => url)).toEqual([HYPER_IP_URL, HARD_SCRIPT_URL]);
@@ -614,18 +669,11 @@ describe("hypersolutions resolver vendor", () => {
 	it("classifies a Hyper 2xx without a payload field as transport_failure", async () => {
 		const { transport } = createProtocolTransport();
 		const direct = createDirectFetch(() => Response.json({ error: "no payload" }));
-		await expect(
-			createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{
-					vendor: "hypersolutions",
-					reason: "transport_failure",
-					phase: "generate_payload",
-					round: 1,
-				},
-			],
+		await expectExhausted(createResolver(transport, direct.fetchImpl), HARD_CHALLENGE, {
+			vendor: "hypersolutions",
+			reason: "transport_failure",
+			phase: "generate_payload",
+			round: 1,
 		});
 	});
 
@@ -653,9 +701,10 @@ describe("hypersolutions resolver vendor", () => {
 				return response("x".repeat(4_097));
 			},
 		};
-		await expect(createResolver(transport).solve(HARD_CHALLENGE)).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [{ vendor: "hypersolutions", reason: "transport_failure", phase: "measure_ip" }],
+		await expectExhausted(createResolver(transport), HARD_CHALLENGE, {
+			vendor: "hypersolutions",
+			reason: "transport_failure",
+			phase: "measure_ip",
 		});
 		expect(calls).toBe(1);
 	});
@@ -673,13 +722,10 @@ describe("hypersolutions resolver vendor", () => {
 					{ status: 200 },
 				),
 		);
-		await expect(
-			createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{ vendor: "hypersolutions", reason: "transport_failure", phase: "generate_payload" },
-			],
+		await expectExhausted(createResolver(transport, direct.fetchImpl), HARD_CHALLENGE, {
+			vendor: "hypersolutions",
+			reason: "transport_failure",
+			phase: "generate_payload",
 		});
 		expect(calls.filter(({ init }) => init.method === "POST")).toHaveLength(0);
 	});
@@ -698,12 +744,10 @@ describe("hypersolutions resolver vendor", () => {
 					{ status: 200, headers: { "content-length": "1000001" } },
 				),
 		);
-		await expect(
-			createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
-		).rejects.toMatchObject({
-			details: [
-				{ vendor: "hypersolutions", reason: "transport_failure", phase: "generate_payload" },
-			],
+		await expectExhausted(createResolver(transport, direct.fetchImpl), HARD_CHALLENGE, {
+			vendor: "hypersolutions",
+			reason: "transport_failure",
+			phase: "generate_payload",
 		});
 		expect(cancelled).toBe(true);
 	});
@@ -713,13 +757,10 @@ describe("hypersolutions resolver vendor", () => {
 		const direct = createDirectFetch(
 			() => new Response(`{"payload":"${"x".repeat(1_000_000)}"}`, { status: 200 }),
 		);
-		await expect(
-			createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
-		).rejects.toMatchObject({
-			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{ vendor: "hypersolutions", reason: "transport_failure", phase: "generate_payload" },
-			],
+		await expectExhausted(createResolver(transport, direct.fetchImpl), HARD_CHALLENGE, {
+			vendor: "hypersolutions",
+			reason: "transport_failure",
+			phase: "generate_payload",
 		});
 		expect(calls.filter(({ init }) => init.method === "POST")).toHaveLength(0);
 	});

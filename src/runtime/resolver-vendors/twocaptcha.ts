@@ -9,6 +9,7 @@ import {
 	type ResolverVendorTransport,
 	ResolverChallengeVerdictError,
 	ResolverVendorUnavailableError,
+	recordResolverVendorPoll,
 	resolverVendorSupports,
 } from "./types.js";
 
@@ -485,6 +486,7 @@ export function createTwoCaptchaResolverVendorAdapter(
 						callerSignal.throwIfAborted();
 						if (now() - startedAt >= timeoutMs) throw new TwoCaptchaSolveTimeoutError();
 
+						recordResolverVendorPoll(traceRecorder);
 						const pollResult = await postJson(
 							fetchImpl,
 							endpoint(baseUrl, "getTaskResult"),

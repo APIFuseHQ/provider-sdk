@@ -14,9 +14,12 @@ import {
 } from "../errors.js";
 import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
 import { type CeremonyEgressLeaseRuntime, ENGINE_CEREMONY_EGRESS_LEASE } from "../runtime/egress-lease.js";
+import { PROVIDER_TELEMETRY_HEADER } from "../runtime/request-telemetry.js";
+import { ResolverTelemetryCollector } from "../runtime/resolver-telemetry.js";
 import { normalizeResponse, type StealthClientOptions } from "../runtime/stealth.js";
 import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
 import type { TraceRecorder } from "../runtime/trace.js";
+import type { ProviderServerLogEvent } from "../server/serve.js";
 import {
 	type DeclarativeStealthResponse,
 	HttpRetryUnsafeMethodPolicy,
@@ -5833,7 +5836,12 @@ function createSbsdWiringProvider(): ProviderDefinition {
 					return {
 						kind: "message",
 						turnId: "sbsd-auth-continue",
-						data: { status: response.status, observedEgressLease, observedEngine },
+						data: {
+							status: response.status,
+							outcome: response.challenge?.outcome ?? "solved",
+							observedEgressLease,
+							observedEngine,
+						},
 					};
 				},
 			},
@@ -6462,6 +6470,102 @@ describe("server SBSD bound-transport wiring", () => {
 		expect(allWreqCalls()).toHaveLength(2);
 	});
 
+	it("reports adapter acceptance separately from a failed protected refetch", async () => {
+		// Reuses review2's persisted-refetch probe with the actual env/Hyper adapter.
+		const directCalls = installHyperPayloadFetch();
+		const key = "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY";
+		const previous = process.env[key];
+		process.env[key] = "fixture-hyper-refetch-key";
+		const recordOutcome = spyOn(ResolverTelemetryCollector.prototype, "recordOutcome");
+		try {
+			const provider = createSbsdWiringProvider();
+			delete provider.proxy;
+			const pageUrl = "https://example.com/operation-protected";
+			queueHardSbsdSolve(
+				{
+					status: 403,
+					body: sbsdInterstitial(
+						"/EdTyEb8L/9iGcpl/Gm?v=f2a6dfca-cc41-5685-7029-1dbc32e8fe77&t=fixture-token",
+					),
+					headers: {},
+					url: pageUrl,
+				},
+				pageUrl,
+			);
+			const events: ProviderServerLogEvent[] = [];
+			const { createServerAppAsync } = await import("../server/serve.js");
+			const app = await createServerAppAsync(provider, {
+				logger: (event) => events.push(event),
+			});
+			const response = await app.request("/v1/sbsd", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "refetch-persisted", input: {} }),
+			});
+			expect(response.status).toBe(200);
+			expect(await response.json()).toEqual({
+				data: { status: 403, outcome: "challenge_persisted" },
+			});
+			expect(recordOutcome).toHaveBeenCalledTimes(1);
+			expect(directCalls).toHaveLength(1);
+			expect(allWreqCalls().map((call) => call.url)).toEqual([
+				pageUrl,
+				"https://ip.hypersolutions.co/ip",
+				"https://example.com/EdTyEb8L/9iGcpl/Gm?v=f2a6dfca-cc41-5685-7029-1dbc32e8fe77&t=fixture-token",
+				"https://example.com/EdTyEb8L/9iGcpl/Gm?t=fixture-token",
+				pageUrl,
+			]);
+			const log = events.find((event) => event.event === "provider_request_completed")?.resolver;
+			expect(log).toEqual({
+				outcome: "solved",
+				challengeKind: "akamai_sbsd",
+				solveMs: expect.any(Number),
+				cacheStatus: "not_cacheable",
+				cacheWrite: { written: false, reason: "not_cacheable" },
+				identitySource: "declared",
+				attempts: 1,
+				failovers: 0,
+				vendorChain: ["hypersolutions"],
+				vendorUsed: "hypersolutions",
+				pollCount: 0,
+				attemptSamples: [
+					{
+						v: "hypersolutions",
+						p: "post_payload",
+						o: "ok",
+						ms: expect.any(Number),
+						diagnostics: { attemptIndex: 1, phase: "post_payload" },
+					},
+				],
+			});
+			const header = response.headers.get(PROVIDER_TELEMETRY_HEADER);
+			expect(header).not.toBeNull();
+			expect(JSON.parse(Buffer.from(header ?? "", "base64url").toString()).resolver).toEqual({
+				outcome: "solved",
+				cacheStatus: "not_cacheable",
+				solveMs: expect.any(Number),
+				attempts: 1,
+				failovers: 0,
+				vendorUsed: "hypersolutions",
+				vendorChain: ["hypersolutions"],
+				pollCount: 0,
+				identitySource: "declared",
+				attemptSamples: [
+					{
+						v: "hypersolutions",
+						p: "post_payload",
+						o: "ok",
+						ms: expect.any(Number),
+					},
+				],
+			});
+		} finally {
+			recordOutcome.mockRestore();
+			if (previous === undefined) delete process.env[key];
+			else process.env[key] = previous;
+		}
+	});
+
 	it("supplies the bound transport in operation and auth FlowContext assembly", async () => {
 		installHyperPayloadFetch();
 		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import("../runtime/egress-lease.js");
@@ -6648,6 +6752,165 @@ describe("server SBSD bound-transport wiring", () => {
 		}
 	});
 
+	it.each([
+		{
+			label: "operation",
+			path: "/v1/sbsd",
+			pageUrl: "https://example.com/operation-protected",
+			body: {
+				requestId: "req-sbsd-telemetry-operation",
+				connectionId: "connection-sbsd-telemetry",
+				input: {},
+			},
+		},
+		{
+			label: "auth continue",
+			path: "/auth/continue",
+			pageUrl: "https://example.com/auth-protected",
+			body: {
+				requestId: "req-sbsd-telemetry-auth",
+				flowId: "flow-sbsd-telemetry",
+				// An SBSD-declaring provider's auth turn carries a ceremony lease, which needs the tenant.
+				tenantId: "tenant-sbsd-telemetry",
+				providerId: "stealth-sbsd-wiring-provider",
+				connectionId: "connection-sbsd-telemetry",
+				input: {},
+			},
+		},
+	])("threads request telemetry through the automatic SBSD bound resolver on $label", async ({
+		path,
+		pageUrl,
+		body,
+	}) => {
+		const directCalls = installHyperPayloadFetch();
+		const { APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY } = await import(
+			"../runtime/resolver-config.js"
+		);
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import("../runtime/egress-lease.js");
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const previous = new Map(
+			[
+				APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
+				APIFUSE__ENGINE__CEREMONY_LEASE_KEY,
+				NODEMAVEN_USERNAME_ENV,
+				NODEMAVEN_PASSWORD_ENV,
+			].map((name) => [name, process.env[name]] as const),
+		);
+		process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY] = "fixture-hyper-key";
+		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = FIXTURE_LEASE_KEY;
+		process.env[NODEMAVEN_USERNAME_ENV] = "fixture-server-account";
+		process.env[NODEMAVEN_PASSWORD_ENV] = "fixture-server-password";
+		const recordVendorAttempt = spyOn(ResolverTelemetryCollector.prototype, "recordVendorAttempt");
+		try {
+			const events: ProviderServerLogEvent[] = [];
+			const { createServerAppAsync } = await import("../server/serve.js");
+			const app = await createServerAppAsync(createSbsdWiringProvider(), {
+				logger: (event) => events.push(event),
+			});
+			queueHardSbsdSolve(
+				{
+					status: 200,
+					body: "telemetry protected",
+					headers: {},
+					url: pageUrl,
+				},
+				pageUrl,
+			);
+
+			const response = await app.request(path, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			});
+
+			expect(response.status).toBe(200);
+			expect(directCalls).toHaveLength(1);
+			expect(directCalls[0]?.url).toBe(HYPER_SBSD_URL);
+			expect(recordVendorAttempt).toHaveBeenCalledTimes(1);
+			expect(recordVendorAttempt).toHaveBeenCalledWith({
+				vendor: "hypersolutions",
+				phase: "post_payload",
+				diagnostics: { attemptIndex: 1, phase: "post_payload" },
+				outcome: "ok",
+				ms: expect.any(Number),
+			});
+
+			const completed = events.find((event) => event.event === "provider_request_completed");
+			expect(completed?.resolver).toEqual({
+				outcome: "solved",
+				challengeKind: "akamai_sbsd",
+				cacheStatus: "not_cacheable",
+				cacheWrite: { written: false, reason: "not_cacheable" },
+				identitySource: "declared",
+				solveMs: expect.any(Number),
+				attempts: 1,
+				failovers: 0,
+				vendorChain: ["hypersolutions"],
+				vendorUsed: "hypersolutions",
+				pollCount: 0,
+				attemptSamples: [
+					{
+						v: "hypersolutions",
+						p: "post_payload",
+						o: "ok",
+						ms: expect.any(Number),
+						diagnostics: { attemptIndex: 1, phase: "post_payload" },
+					},
+				],
+			});
+			const encodedTelemetry = response.headers.get(PROVIDER_TELEMETRY_HEADER);
+			expect(encodedTelemetry).toBeTruthy();
+			const telemetry = JSON.parse(
+				Buffer.from(encodedTelemetry ?? "", "base64url").toString("utf8"),
+			) as { resolver?: unknown };
+			expect(telemetry.resolver).toEqual({
+				outcome: "solved",
+				cacheStatus: "not_cacheable",
+				solveMs: expect.any(Number),
+				attempts: 1,
+				failovers: 0,
+				vendorUsed: "hypersolutions",
+				vendorChain: ["hypersolutions"],
+				pollCount: 0,
+				identitySource: "declared",
+				attemptSamples: [
+					{
+						v: "hypersolutions",
+						p: "post_payload",
+						o: "ok",
+						ms: expect.any(Number),
+					},
+				],
+			});
+
+			const boundClient = mockStealthState.clients.find((client) =>
+				client.calls.some((call) => call.url === "https://ip.hypersolutions.co/ip"),
+			);
+			expect(boundClient?.calls.map((call) => call.url)).toEqual([
+				pageUrl,
+				"https://ip.hypersolutions.co/ip",
+				"https://example.com/EdTyEb8L/9iGcpl/Gm?v=f2a6dfca-cc41-5685-7029-1dbc32e8fe77&t=fixture-token",
+				"https://example.com/EdTyEb8L/9iGcpl/Gm?t=fixture-token",
+				pageUrl,
+			]);
+			expect(boundClient?.options).toMatchObject({
+				browser: "safari_17.0",
+				os: "macos",
+				proxy: expect.stringContaining("fixture-server-account"),
+			});
+			const scriptCall = boundClient?.calls.find((call) => call.url.includes("?v="));
+			expect(requestHeader(scriptCall?.init, "cookie")).toContain("sbsd_o=initial-state");
+		} finally {
+			recordVendorAttempt.mockRestore();
+			for (const [name, value] of previous) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	});
+
 	it("solves challenged auth-flow GETs through a declared resolver when stealth is not declared", async () => {
 		mockStealthState.queuedResponses.push(
 			{
@@ -6825,4 +7088,167 @@ describe("gateway stealth abort wiring", () => {
 		if (!(recordedSignal instanceof AbortSignal)) throw new Error("Expected recorded abort signal");
 		expect(recordedSignal.aborted).toBe(true);
 	});
+});
+
+// Extends review round 2's bound harness across every server factory/route/override selection.
+describe("automatic SBSD server construction-path telemetry matrix", () => {
+	beforeEach(() => {
+		mockStealthState.clients.length = 0;
+		mockStealthState.queuedResponses.length = 0;
+		mockStealthState.queuedErrors.length = 0;
+		mockStealthState.queuedCloseErrors.length = 0;
+	});
+	for (const factory of ["sync", "async"] as const) {
+		for (const source of ["env", "chain override", "opaque override"] as const) {
+			it.each([
+				"operation",
+				"auth start",
+				"auth continue",
+				"signed stateful",
+				"lazy auth",
+			] as const)(`${factory} ${source} automatic %s receives a fresh request sink`, async (route) => {
+				const { createResolverClient } = await import("../runtime/resolver.js");
+				const { createServerApp, createServerAppAsync } = await import("../server/serve.js");
+				const { statefulSignedHeaders } = await import("../stateful-signing.js");
+				const key = "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY";
+				const previous = process.env[key];
+				process.env[key] = "synthetic-hyper-key";
+				const directCalls = installHyperPayloadFetch();
+				let customCalls = 0;
+				const oldSink = new ResolverTelemetryCollector();
+				const oldOutcome = spyOn(oldSink, "recordOutcome");
+				const outcome = spyOn(ResolverTelemetryCollector.prototype, "recordOutcome");
+				const attempt = spyOn(ResolverTelemetryCollector.prototype, "recordVendorAttempt");
+				try {
+					const customSolve = async () => {
+						customCalls++;
+						return fixtureSbsdCookieSolution();
+					};
+					const resolver =
+						source === "chain override"
+							? createResolverClient({
+									kinds: ["akamai_sbsd"],
+									clientProfile: route === "lazy auth" ? "chrome149" : "safari17_0",
+									telemetry: oldSink,
+									adapters: [{ id: "custom", supports: () => true, solve: customSolve }],
+								})
+							: source === "opaque override"
+								? { solve: customSolve }
+								: undefined;
+					const provider = { ...createSbsdWiringProvider(), proxy: undefined };
+					if (route === "lazy auth") {
+						delete provider.stealth;
+						provider.resolver = { ...provider.resolver!, clientProfile: "chrome149" };
+					}
+					const events: ProviderServerLogEvent[] = [];
+					const app = await (factory === "sync" ? createServerApp : createServerAppAsync)(
+						provider,
+						{
+							resolver,
+							logger: (event) => events.push(event),
+							statefulForwarding: { secret: "probe-secret", validateOwnerFence: async () => true },
+							internalOperationExecutor: async ({ ctx }) => {
+								const response = await ctx.stealth.fetch("/operation-protected");
+								return { status: response.status, outcome: response.challenge?.outcome };
+							},
+						},
+					);
+					const stateful = route === "signed stateful";
+					const isAuth = route.startsWith("auth") || route === "lazy auth";
+					const path = stateful
+						? "/__apifuse/stateful/operations"
+						: route === "auth continue"
+							? "/auth/continue"
+							: isAuth
+								? "/auth/start"
+								: "/v1/sbsd";
+					const pageUrl = `https://example.com/${isAuth ? "auth" : "operation"}-protected`;
+					for (let turn = 0; turn < 2; turn++) {
+						const protectedResponse = { status: 200, body: "protected", headers: {}, url: pageUrl };
+						if (source === "env") queueHardSbsdSolve(protectedResponse, pageUrl);
+						else
+							mockStealthState.queuedResponses.push(
+								{
+									status: 403,
+									body: sbsdInterstitial(
+										"/EdTyEb8L/9iGcpl/Gm?v=f2a6dfca-cc41-5685-7029-1dbc32e8fe77&t=fixture-token",
+									),
+									headers: { "set-cookie": "sbsd_o=state; Path=/; Secure" },
+									url: pageUrl,
+								},
+								protectedResponse,
+							);
+						const timestamp = new Date().toISOString();
+						const operationRequest = {
+							requestId: `${factory}-${source}-${route}-${turn}`,
+							input: {},
+							...(isAuth ? { flowId: "flow" } : {}),
+						};
+						const body = JSON.stringify(
+							stateful
+								? {
+										requestId: operationRequest.requestId,
+										providerId: provider.id,
+										operationId: "sbsd",
+										sessionKey: "provider:account:connection",
+										connectionId: "connection-1",
+										serviceAccountId: "account-1",
+										ownerPodId: "pod-owner",
+										generation: 7,
+										sourcePodId: "pod-source",
+										forwardedAt: timestamp,
+										operationRequest,
+									}
+								: operationRequest,
+						);
+						const response = await app.request(path, {
+							method: "POST",
+							headers: {
+								"content-type": "application/json",
+								...(stateful
+									? {
+											"x-apifuse-stateful-source-pod": "pod-source",
+											...statefulSignedHeaders({
+												secret: "probe-secret",
+												timestamp,
+												rawBody: body,
+												method: "POST",
+												path,
+											}),
+										}
+									: {}),
+							},
+							body,
+						});
+						expect(response.status).toBe(200);
+						expect(source === "env" ? directCalls.length : customCalls).toBe(turn + 1);
+						expect(outcome).toHaveBeenCalledTimes(turn + 1);
+						expect(attempt).toHaveBeenCalledTimes(turn + 1);
+						const vendor = source === "env" ? "hypersolutions" : "custom";
+						const log = [...events]
+							.reverse()
+							.find((event) => event.event === "provider_request_completed")?.resolver;
+						expect(log?.outcome).toBe("solved");
+						expect(log?.attempts).toBe(1);
+						expect(log?.vendorChain).toEqual([vendor]);
+						expect(log?.attemptSamples).toHaveLength(1);
+						const header = response.headers.get(PROVIDER_TELEMETRY_HEADER);
+						expect(header).toBeTruthy();
+						const decoded = JSON.parse(Buffer.from(header ?? "", "base64url").toString());
+						expect(decoded.resolver.outcome).toBe("solved");
+						expect(decoded.resolver.attempts).toBe(1);
+						expect(decoded.resolver.vendorChain).toEqual([vendor]);
+						expect(decoded.resolver.attemptSamples).toHaveLength(1);
+					}
+					expect(oldOutcome).toHaveBeenCalledTimes(0);
+				} finally {
+					outcome.mockRestore();
+					attempt.mockRestore();
+					oldOutcome.mockRestore();
+					if (previous === undefined) delete process.env[key];
+					else process.env[key] = previous;
+				}
+			});
+		}
+	}
 });

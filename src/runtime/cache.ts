@@ -589,6 +589,13 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 	};
 }
 
+const bypassCaches = new WeakSet<ProviderCache>();
+
+/** Internal cache capability, separate from hit/miss metadata. */
+export function isProviderCacheBypassed(cache: ProviderCache): boolean {
+	return bypassCaches.has(cache);
+}
+
 export function createBypassProviderCache(
 	options: Pick<ProviderCacheOptions, "providerId">,
 ): ProviderCache {
@@ -597,7 +604,7 @@ export function createBypassProviderCache(
 	const events: ProviderCacheLookupMeta[] = [];
 	const secretScopedKeys = new Set<string>();
 
-	return {
+	const cache: ProviderCache = {
 		key(namespace, parts, keyOptions?: ProviderCacheKeyOptions) {
 			const extra = new Set((keyOptions?.redactFields ?? []).map((field) => field.toLowerCase()));
 			const normalized = normalizeKeyPart(parts, extra, pepper);
@@ -643,6 +650,8 @@ export function createBypassProviderCache(
 			};
 		},
 	};
+	bypassCaches.add(cache);
+	return cache;
 }
 
 export function resetProviderCacheForTests(): void {

@@ -655,17 +655,9 @@ describe("2captcha resolver vendor", () => {
 
 		await expect(chain.client.solve(challenge)).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			message: expect.stringContaining("missing fields: siteKey, captchaScript, context, iv"),
-			fix: "Capture the named challenge fields or configure another supporting resolver vendor.",
-			details: [
-				{
-					vendor: "2captcha",
-					reason: "missing_challenge_input",
-					missingFields: ["siteKey", "captchaScript", "context", "iv"],
-					phase: "create_task",
-				},
-				{ vendor: "custom", reason: "not_implemented" },
-			],
+			message: "The challenge could not be resolved.",
+			fix: "Capture all required challenge fields and retry the request.",
+			details: { challengeKind: "aws_waf", attempts: 2, outcome: "exhausted", retryable: false },
 		});
 		expect(stub.calls).toHaveLength(0);
 	});
@@ -879,10 +871,7 @@ describe("2captcha resolver vendor", () => {
 
 		await expect(chain.client.solve(AWS_WAF_CHALLENGE)).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{ vendor: "2captcha", reason: "transport_failure", phase: "create_task" },
-				{ vendor: "custom", reason: "not_implemented" },
-			],
+			details: { challengeKind: "aws_waf", attempts: 2, outcome: "exhausted", retryable: false },
 		});
 		expect(chain.secondCalls()).toBe(1);
 	});
@@ -901,10 +890,7 @@ describe("2captcha resolver vendor", () => {
 
 		await expect(chain.client.solve(AWS_WAF_CHALLENGE)).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
-			details: [
-				{ vendor: "2captcha", reason: "allocation_exhausted", phase: "create_task" },
-				{ vendor: "custom", reason: "not_implemented" },
-			],
+			details: { challengeKind: "aws_waf", attempts: 2, outcome: "exhausted", retryable: false },
 		});
 		expect(chain.secondCalls()).toBe(1);
 	});
