@@ -153,9 +153,8 @@ function createTransportGuardResolver(
 	return createResolverClient({
 		adapters: [adapter],
 		kinds: ["akamai_sensor"],
-		clientProfile: "safari17_0",
 		allowedHosts,
-		createTransport: () => transport,
+		transport,
 	});
 }
 
@@ -272,10 +271,7 @@ describe("resolver default vendor policy", () => {
 	});
 
 	it("diagnoses a kind with no SDK default vendor", async () => {
-		const error = await createResolverClientFromEnv(
-			{ kinds: ["akamai_sensor"], clientProfile: "safari17_0" },
-			{},
-		)
+		const error = await createResolverClientFromEnv({ kinds: ["akamai_sensor"] }, {})
 			.solve({
 				kind: "akamai_sensor",
 				pageUrl: CHALLENGE.pageUrl,
@@ -466,11 +462,7 @@ describe("resolver vendor chain", () => {
 
 		await expect(
 			createResolverClientFromEnv(
-				{
-					vendors: ["2captcha"],
-					kinds: ["akamai_sensor"],
-					clientProfile: "safari17_0",
-				},
+				{ vendors: ["2captcha"], kinds: ["akamai_sensor"] },
 				{ [APIFUSE__RESOLVER__2CAPTCHA__API_KEY]: "sk-test" },
 			).solve(challenge),
 		).rejects.toMatchObject({ code: "RESOLVER_KIND_UNSUPPORTED_BY_CHAIN" });
@@ -494,11 +486,7 @@ describe("resolver vendor chain", () => {
 		} satisfies ProviderChallenge;
 
 		await expect(
-			createResolverClient({
-				adapters: [adapter],
-				kinds: ["akamai_sensor"],
-				clientProfile: "safari17_0",
-			}).solve(challenge),
+			createResolverClient({ adapters: [adapter], kinds: ["akamai_sensor"] }).solve(challenge),
 		).rejects.toMatchObject({
 			code: "RESOLVER_CHAIN_EXHAUSTED",
 			details: [{ vendor: "custom", reason: "missing_transport" }],
@@ -1009,7 +997,6 @@ describe("resolver vendor chain", () => {
 		const resolver = createResolverClient({
 			adapters: [adapter],
 			kinds: ["turnstile", "akamai_sensor"],
-			clientProfile: "safari17_0",
 		});
 
 		await expect(
@@ -1101,7 +1088,6 @@ describe("resolver vendor chain", () => {
 			createResolverClient({
 				adapters: [adapter],
 				kinds: ["akamai_sensor"],
-				clientProfile: "safari17_0",
 				allowedHosts,
 				createTransport: () => underlyingTransport,
 			});

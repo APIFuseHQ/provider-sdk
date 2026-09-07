@@ -123,7 +123,7 @@ describe("defineProvider", () => {
 		[
 			"an Akamai resolver without a client profile",
 			{ vendors: ["hypersolutions"], kinds: ["akamai_sbsd"] },
-			"must declare resolver.clientProfile for Akamai challenge kinds",
+			"must declare resolver.clientProfile for akamai_sbsd",
 		],
 	] as const)("rejects %s at definition time", (_label, resolver, message) => {
 		let caught: unknown;

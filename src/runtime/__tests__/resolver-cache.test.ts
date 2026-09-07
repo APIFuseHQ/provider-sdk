@@ -209,7 +209,6 @@ function createClient(
 ) {
 	return createResolverClient({
 		kinds: options.kinds ?? ["aws_waf"],
-		clientProfile: "safari17_0",
 		adapters: [adapter],
 		...(options.cache ? { cache: options.cache } : {}),
 		...(options.identity ? { identity: options.identity } : {}),

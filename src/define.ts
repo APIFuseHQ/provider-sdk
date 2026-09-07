@@ -12,6 +12,7 @@ import {
 	isEngineOwnedTelemetryEnvName,
 } from "./engine.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
+import { kindRequiresClientProfile } from "./runtime/resolver-config.js";
 import {
 	NativeEgressPolicyValidationError,
 	validateNativeProviderConfig,
@@ -1180,12 +1181,9 @@ function validateProviderResolver(config: { id: string; resolver?: ProviderResol
 			},
 		);
 	}
-	if (
-		resolver.kinds.some((kind) => kind === "akamai_sensor" || kind === "akamai_sbsd") &&
-		resolver.clientProfile === undefined
-	) {
+	if (resolver.kinds.some(kindRequiresClientProfile) && resolver.clientProfile === undefined) {
 		throw new ValidationError(
-			`Provider "${config.id}" must declare resolver.clientProfile for Akamai challenge kinds.`,
+			`Provider "${config.id}" must declare resolver.clientProfile for akamai_sbsd.`,
 			{
 				fix: `Set resolver.clientProfile for provider "${config.id}" to the transport-owned profile used by its Akamai session.`,
 			},

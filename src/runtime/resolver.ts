@@ -53,6 +53,7 @@ import {
 	APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 	APIFUSE__RESOLVER__TIMEOUT_MS,
 	DEFAULT_RESOLVER_TIMEOUT_MS,
+	kindRequiresClientProfile,
 } from "./resolver-config.js";
 import { DEFAULT_STEALTH_PROFILE } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
@@ -416,10 +417,6 @@ function assertClientProfileTransportContract(
 			fix: "Remove the pre-bound transport and provide createTransport({ clientProfile, identityScope }) so the SDK can apply the provider-declared profile.",
 		},
 	);
-}
-
-function kindRequiresClientProfile(kind: ProviderChallengeKind): boolean {
-	return kind === "akamai_sensor" || kind === "akamai_sbsd";
 }
 
 function adapterRequiresTransport(

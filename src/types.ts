@@ -400,18 +400,15 @@ export type ChallengeSolution =
 		};
 
 /**
- * Akamai challenge declarations require a transport-owned client profile.
- * Other challenge families may omit it.
+ * `akamai_sbsd` declarations require a transport-owned client profile because the
+ * solve runs on the provider's admitted session. Other kinds may omit it.
  */
 export type ProviderResolverConfig =
 	| {
 			/** Optional ordered override for the SDK-owned vendor fallback chain. */
 			readonly vendors?: readonly ProviderResolverVendor[];
 			/** Challenge kinds this provider is permitted to request. */
-			readonly kinds: readonly Exclude<
-				ProviderChallengeKind,
-				"akamai_sensor" | "akamai_sbsd"
-			>[];
+			readonly kinds: readonly Exclude<ProviderChallengeKind, "akamai_sbsd">[];
 			readonly clientProfile?: string;
 		}
 	| {
