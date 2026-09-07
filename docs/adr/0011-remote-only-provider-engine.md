@@ -1,6 +1,6 @@
 # ADR-0011 — Remote-only provider engine: local development attaches to the platform engine with a workspace-scoped API key
 
-**Status:** Proposed (owner decisions D1–D5 confirmed in the 2026-09-02 design review; Accepted on merge of this ADR by the repo owner)
+**Status:** Accepted (owner decisions D1–D5 confirmed in the 2026-09-02 design review; ratified on merge of PR #250)
 **Type:** Architecture / Platform boundary / DX
 **Date:** 2026-09-02
 **Decision owner:** Taehoon Kim (repo owner)
@@ -10,7 +10,7 @@
 
 ADR-0010 moved runtime capabilities behind `ProviderEngine.attach` and named two transports: an in-process implementation for local development, and RPC bridges over "the platform's private provider-to-engine channel" for deployment. The SDK shipped the in-process default in v2.2.0-beta.49 (`serve`, `dev`, `record` attach the local engine).
 
-That split leaves the contributor experience unchanged in the one place the engine was supposed to help. A bounty contributor cloning a provider workspace today must fill six vendor variables in `.env.local` before a CAPTCHA- or proxy-dependent operation runs locally (`.env.example:248-258` in the APIFuse monorepo: `APIFUSE__PROXY__SMARTPROXY_APP_KEY`, `APIFUSE__PROXY__NODEMAVEN_USERNAME`, `APIFUSE__PROXY__NODEMAVEN_PASSWORD`, `APIFUSE__RESOLVER__2CAPTCHA__API_KEY`, `APIFUSE__RESOLVER__CAPSOLVER__API_KEY`, plus the Smartproxy gateway CIDR). Each of those is a paid account the contributor has to open in their own name. The same variables are the credentials ADR-0010 v1.0 §7 already decided to withdraw from provider pods, so the in-process local engine is the last place they are still handed to third parties.
+That split leaves the contributor experience unchanged in the one place the engine was supposed to help. A bounty contributor cloning a provider workspace today must fill six vendor variables in `.env.local` before a CAPTCHA- or proxy-dependent operation runs locally (`.env.example:242-262` in the APIFuse monorepo: `APIFUSE__PROXY__SMARTPROXY_APP_KEY`, `APIFUSE__PROXY__NODEMAVEN_USERNAME`, `APIFUSE__PROXY__NODEMAVEN_PASSWORD`, `APIFUSE__RESOLVER__2CAPTCHA__API_KEY`, `APIFUSE__RESOLVER__CAPSOLVER__API_KEY`, plus the Smartproxy gateway CIDR). Each of those is a paid account the contributor has to open in their own name. The same variables are the credentials ADR-0010 v1.0 (Decision: proxy vendor credentials are captured by the engine host) and the monorepo `provider-engine-architecture` tasks §7 (credential relocation) already decided to withdraw from provider pods, so the in-process local engine is the last place they are still handed to third parties.
 
 The in-process transport also ships the engine core itself. `@apifuse/provider-sdk` is public on npm, so the stealth transport, solver orchestration, proxy allocation, and vendor fallback logic are readable by anyone who installs the SDK. ADR-0010 accepted this because the boundary was about deployment topology, not confidentiality.
 
@@ -18,17 +18,17 @@ Owner directive, 2026-09-02, after the design meeting with ino (verbatim):
 
 > 로컬 개발환경도 마찬가지로 엔진을 아예 우리 서버가 관리하고 접근을 위해 바운티별 또는 바운티 유저 apikey를 받는 구조, 어뷰징을 막기 위해. 이렇게 하면 유저가 직접 캡챠 솔버 같은 서비스 가입해서 직접 로컬 디버깅을 할 필요도 없고 apifuse가 모두 지원해줄수 있고, apifuse는 엔진 코어를 private하게 관리할수 있음
 
-Before deciding what stays local, the review measured what each capability actually needs (all paths in this repo at `origin/main` 55540d7):
+Before deciding what stays local, the review measured what each capability actually needs (all paths in this repo at `origin/main` f468d1f):
 
 | Capability | Measured backing | Source |
 |---|---|---|
-| `http`, `stealth`, `browser`, `native` | Egress paths that consult the provider's `proxy` policy; proxy is an axis on every transport, not a separate binding | `src/types.ts:1608` (`NativeProxyEgressInfo`), `src/runtime/http.ts:55,70` (`proxyUsed`), `proxy-retry-policy.js` |
+| `http`, `stealth`, `browser`, `native` | Egress paths that consult the provider's `proxy` policy; proxy is an axis on every transport, not a separate binding | `src/types.ts:1574` (`NativeProxyEgressInfo`), `src/runtime/http.ts:55,70` (`proxyUsed`), `src/runtime/proxy-retry-policy.ts` |
 | `resolver`, `ocr`, `stt` | Paid vendor APIs | ADR-0006, ADR-0007, ADR-0010 v1.1 |
 | `cache`, `state` | Redis clients from `providerCacheRedisUrlFromEnv` / `providerStateRedisUrlFromEnv` | `src/runtime/cache.ts:3-18`, `src/runtime/state.ts:2-17` |
 | `choice` (`storage: "server"`) | Server-stored tokens; the only production mode for multi-step ceremonies (catchtable, tablecheck) | `src/runtime/choice.ts:63,71,115-125` |
 | `choice` (`storage: "inline"`) | Payload carried in the token, no store | `src/runtime/choice.ts:115` |
-| `files` | Resolves request-scoped `ProviderFileRef` uploads held by the gateway | `src/types.ts:1478-1481` |
-| `env` | Process environment; mixes provider-owned upstream keys with platform vendor keys | `.env.example:248-258` |
+| `files` | Resolves request-scoped `ProviderFileRef` inputs through a resolver the runtime supplies | `src/types.ts:1477-1481` |
+| `env` | Process environment; mixes provider-owned upstream keys with platform vendor keys | `.env.example:242-262` |
 | `trace` | Ambient, local observer | ADR-0010 |
 
 Nothing in that table except `env`, `trace`, and inline `choice` is satisfiable on a contributor's laptop without either a paid account or an APIFuse-operated store. The earlier proposal to keep `http`/`cache`/`state`/`choice` local was a guess that the measurement refuted.
@@ -45,11 +45,11 @@ Nothing in that table except `env`, `trace`, and inline `choice` is satisfiable 
 
 ## Why remote-only over in-process-with-remote-option?
 
-The runner-up was to keep ADR-0010's in-process transport and add a remote one, letting contributors choose. It was rejected because the two goals in the directive are both defeated by the option existing: the in-process engine must contain the core (so it is not private), and it must accept vendor credentials from the environment (so contributors still need accounts to use it). A local option that works only with paid keys is the status quo with an extra flag. Remote-only also collapses ADR-0010's §6.2 requirement (local capability set equals deployed set) from a gate the SDK must enforce into a property that holds by construction, because local and deployed providers attach to the same engine.
+The runner-up was to keep ADR-0010's in-process transport and add a remote one, letting contributors choose. It was rejected because the two goals in the directive are both defeated by the option existing: the in-process engine must contain the core (so it is not private), and it must accept vendor credentials from the environment (so contributors still need accounts to use it). A local option that works only with paid keys is the status quo with an extra flag. Remote-only also collapses the monorepo `provider-engine-architecture` tasks §6.2 requirement (local capability set equals deployed set) from a gate the SDK must enforce into a property that holds by construction, because local and deployed providers attach to the same engine.
 
 ## Why egress-all over "proxy: false stays local"?
 
-An alternative kept requests that declare no proxy policy on the laptop, since they never touch our IP pool. It was rejected on two grounds: it reintroduces two execution paths whose observability, retry policy, and TLS behavior can drift (the exact divergence ADR-0010 §6.2 exists to prevent), and it moves the local/remote split from a stable declaration-level fact to a per-request property that contributors would have to reason about while debugging. Debuggability is addressed by the engine streaming request and response traces back to the session owner (see Consequences), not by running the request on the laptop.
+An alternative kept requests that declare no proxy policy on the laptop, since they never touch our IP pool. It was rejected on two grounds: it reintroduces two execution paths whose observability, retry policy, and TLS behavior can drift (the exact divergence tasks §6.2 exists to prevent), and it moves the local/remote split from a stable declaration-level fact to a per-request property that contributors would have to reason about while debugging. Debuggability is addressed by the engine streaming request and response traces back to the session owner (see Consequences), not by running the request on the laptop.
 
 ## Why (provider, contributor) keys over the two alternatives the directive named?
 
@@ -63,7 +63,7 @@ The directive left "바운티별 또는 바운티 유저 apikey" open.
 
 - APIFuse does not become the issuer of every provider's upstream credentials. D3 keeps contributor-owned upstream keys contributor-owned; `apifuse`-issued upstream keys are a per-provider declaration, not a default.
 - No offline or air-gapped development mode. A contributor without network access to the platform engine cannot run capability-bearing operations. Pure handler logic remains unit-testable with engine mocks.
-- No public, unauthenticated engine endpoint. Every engine call carries a platform-issued principal: a workspace key for contributor sessions (D5), or a deployed-provider principal for pods running in APIFuse infrastructure. The two classes share one validation path and one key table (`principal_class`) but have different lifecycles: workspace keys are quota-bound and die with the workspace; deployed-provider principals are issued by the manifest generator per provider, are not quota-bound, and are revoked when the provider is retired. (Owner decision 2026-09-02; closes tasks.md 5.13.)
+- No public, unauthenticated engine endpoint. Every engine call carries a platform-issued principal: a workspace key for contributor sessions (D5), or a deployed-provider principal for pods running in APIFuse infrastructure. The two classes share one validation path and one key table (`principal_class`) but have different lifecycles: workspace keys are quota-bound and die with the workspace; deployed-provider principals are issued by the manifest generator per provider, are not quota-bound, and are revoked when the provider is retired. (Owner decision 2026-09-02.)
 - The `provider-engine.v1` protocol shape from ADR-0010 is not redesigned here. This ADR changes who the clients are, not the envelope.
 - Runtime target semantics (`vanilla` / `engine`) from ADR-0010 are unchanged. kakaotalk remains the engine-resident provider.
 
@@ -72,7 +72,7 @@ The directive left "바운티별 또는 바운티 유저 apikey" open.
 1. **ADR-0010 §"Decision" second sentence is superseded.** "The in-process implementation is the local-development transport" no longer holds. The in-process attachment shipped in v2.2.0-beta.49 becomes an internal test seam for the SDK's own suite and is not exported as a supported runtime.
 2. **The engine becomes an externally reachable, authenticated, rate-limited service**, not an internal sidecar over mTLS/UDS. Its deployment (APIFuse monorepo, the H2 handoff from the `provider-engine-architecture` change) must include key validation, per-key quota, per-key `allowedHosts` enforcement, and abuse telemetry before any contributor is pointed at it.
 3. **Debugging moves to trace streaming.** Because no request leaves the laptop, the engine must stream request/response metadata (and, for the session's own traffic, bodies within a size cap) to the attached session so `apifuse dev` can show them. This is a protocol addition on the existing stream lane, tracked in the follow-up plan.
-4. **`.env.example` in the monorepo loses the six vendor variables** for provider development and gains one: the workspace API key. The monorepo `provider-engine-architecture` change (§6, §7) is re-planned against D1–D5; §6.1 is deleted, §6.2 is satisfied by construction, §7 widens from three proxy names to all vendor credentials.
+4. **`.env.example` in the monorepo loses the vendor block** (`:242-262`: five vendor credentials, the Smartproxy gateway CIDR, and four proxy settings) for provider development and gains the engine attachment entries: the engine URL and the workspace API key. The monorepo `provider-engine-architecture` change (§6, §7) is re-planned against D1–D5; §6.1 is deleted, §6.2 is satisfied by construction, §7 widens from three proxy names to all vendor credentials.
 5. **Provider declarations gain an issuer per provider-owned secret** (D3). This is a declaration-schema change and needs its own SDK release and fleet codemod; it rides the same wave as the ADR-0009 flat-declaration migration rather than a separate one.
 6. **Quota and rate-limit basis is not decided here.** D5 fixes the unit (per workspace key); whether the limit counts requests, vendor cost, or both is the next decision and is recorded when measured against real contributor sessions.
 
