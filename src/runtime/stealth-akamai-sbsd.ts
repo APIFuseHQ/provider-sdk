@@ -74,7 +74,8 @@ export function findAkamaiSbsdScript(body: string, page: URL): URL | undefined {
 	for (const match of body.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/giu)) {
 		let script: URL;
 		try {
-			script = new URL(htmlAttribute(match[1]!), page.origin);
+			// Relative sources resolve against the page URL, as the browser would.
+			script = new URL(htmlAttribute(match[1]!), page);
 		} catch {
 			continue;
 		}
@@ -146,7 +147,10 @@ export function detectAkamaiSbsdChallenge(
 	if (currentScript) {
 		const version = currentScript.searchParams.get("v")?.trim();
 		if (version) {
-			const rememberedScript = new URL(currentScript.pathname, currentScript.origin);
+			// Clone rather than re-parse the pathname: a `//x` path would re-parse as a host.
+			const rememberedScript = new URL(currentScript);
+			rememberedScript.search = "";
+			rememberedScript.hash = "";
 			rememberedScript.searchParams.set("v", version);
 			state.rememberedScript = rememberedScript;
 		}

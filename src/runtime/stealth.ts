@@ -1704,11 +1704,14 @@ function createSessionFetcher(
 								emulationHeaders.map(([name, value]) => [name.toLowerCase(), value] as const),
 							);
 							const initiatingHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
+							// Mirror what the protected request actually sent: `stealth.acceptLanguage` is
+							// applied by the Chrome header builder only; Safari/Firefox sessions send the
+							// emulation default.
 							const sessionHeaders = {
 								"User-Agent": requiredEmulationHeader(emulationHeaderMap, "user-agent"),
 								"Accept-Language":
 									initiatingHeaders["accept-language"] ??
-									clientOptions.stealth?.acceptLanguage ??
+									(chromeEmulationHeaders ? clientOptions.stealth?.acceptLanguage : undefined) ??
 									requiredEmulationHeader(emulationHeaderMap, "accept-language"),
 							};
 							const resolverBuildHeaders = chromeEmulationHeaders

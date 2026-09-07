@@ -3615,6 +3615,90 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		});
 	});
 
+	it("resolves a relative script source against the page URL and keeps a double-slash path", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("guard?v=7f1c1b2e-3d4a-4f5b-8c6d-9e0f1a2b3c4d&amp;t=relative-token"),
+				headers: { "set-cookie": "sbsd_o=relative-state; Path=/; Secure" },
+				url: "https://example.com/shop/item/",
+			},
+			{
+				status: 200,
+				body: '<!doctype html><script src="https://example.com//guard?v=0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9"></script>',
+				headers: {},
+				url: "https://example.com/shop/item/",
+			},
+			{
+				status: 429,
+				body: '{"cpr_chlge":"true","t":"later-token"}',
+				headers: { "content-type": "application/json" },
+				url: "https://example.com/apis/bff/latest",
+			},
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		).createSession();
+
+		const relative = await session.fetch("/shop/item/", { throwOnHttpError: false });
+		await session.fetch("/shop/item/");
+		const later = await session.fetch("/apis/bff/latest", { throwOnHttpError: false });
+
+		expect(relative.challenge?.challenge.scriptUrl).toBe(
+			"https://example.com/shop/item/guard?v=7f1c1b2e-3d4a-4f5b-8c6d-9e0f1a2b3c4d&t=relative-token",
+		);
+		expect(later.challenge?.challenge).toMatchObject({
+			scriptUrl: "https://example.com//guard?v=0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9",
+			challengeToken: "later-token",
+		});
+	});
+
+	it("gives the resolver transport the Accept-Language the session actually sends", async () => {
+		const observed: string[] = [];
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		for (const browser of ["chrome", "safari"] as const) {
+			mockStealthState.queuedResponses.push(
+				{
+					status: 403,
+					body: sbsdInterstitial(
+						"/EdTyEb8L/9iGcpl/Gm?v=5c0d3e1f-2a3b-4c5d-8e6f-7a8b9c0d1e2f&t=language-token",
+					),
+					headers: { "set-cookie": "sbsd_o=language-state; Path=/; Secure" },
+					url: `https://example.com/${browser}`,
+				},
+				{ status: 200, body: "solved", headers: {}, url: `https://example.com/${browser}` },
+			);
+			const response = await createStealthClient(
+				"https://example.com",
+				sbsdClientOptions({
+					stealth: {
+						browser,
+						acceptLanguage: "ja-JP,ja;q=0.9",
+						challengeRuntime: {
+							akamaiSbsd: {
+								allowedHosts: ["example.com"],
+								async solve(_challenge, transport) {
+									observed.push(transport.sessionHeaders?.["Accept-Language"] ?? "missing");
+									return fixtureSbsdCookieSolution();
+								},
+							},
+						},
+					},
+				}),
+			).fetch(`/${browser}`);
+			expect(response.status).toBe(200);
+		}
+
+		// Chrome applies `stealth.acceptLanguage`; Safari sends the emulation default.
+		expect(observed).toEqual(["ja-JP,ja;q=0.9", "en-US,en;q=0.9"]);
+	});
+
 	it("classifies the live obfuscated-path Access Denied shape with a v-only script and bm_so", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 403,
@@ -3944,7 +4028,9 @@ describe("Akamai SBSD detection and safe refetch", () => {
 							async solve(challenge, transport, signal) {
 								solves += 1;
 								expect(transport.getCookie?.("sbsd_o", challenge.pageUrl)).toBe("initial-state");
-								expect(transport.sessionHeaders?.["Accept-Language"]).toBe("ja-JP,ja;q=0.9");
+								// Safari sessions send the emulation default; `stealth.acceptLanguage` is
+								// applied by the Chrome header builder only.
+								expect(transport.sessionHeaders?.["Accept-Language"]).toBe("en-US,en;q=0.9");
 								return adapter.solve(challenge, undefined, signal, undefined, transport);
 							},
 						},
