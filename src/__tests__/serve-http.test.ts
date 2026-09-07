@@ -1502,6 +1502,105 @@ describe("provider HTTP server", () => {
 		expect(await response.json()).toEqual({ data: { ok: true } });
 	});
 
+	describe("raw Response results and the error envelope contract", () => {
+		const forgedHeader = JSON.stringify({
+			category: "ok",
+			taxonomyVersion: "forged",
+			retryable: false,
+		});
+		const rawResponse = (status: number) =>
+			new Response(JSON.stringify({ upstream: status }), {
+				status,
+				headers: {
+					"Content-Type": "application/json",
+					[ERROR_OBSERVABILITY_HEADER]: forgedHeader,
+				},
+			});
+		// A json-transport handler only hands a raw Response through when the
+		// output schema does not reshape it.
+		const rawOperation = (status: number) => ({
+			riskClass: READ_RISK_CLASS,
+			input: z.object({}),
+			output: z.unknown(),
+			handler: async () => rawResponse(status),
+		});
+		const baseProvider = createTestProvider();
+		const rawApp = createServerApp({
+			...baseProvider,
+			operations: {
+				...baseProvider.operations,
+				raw200: rawOperation(200),
+				raw404: rawOperation(404),
+				raw503: rawOperation(503),
+				rawStream503: {
+					...rawOperation(503),
+					transport: { kind: "http-stream", contentType: "application/json" },
+				},
+				rejectUndefined: {
+					...rawOperation(500),
+					handler: async () => Promise.reject(),
+				},
+			},
+		} satisfies ProviderDefinition);
+		const post = (operation: string) =>
+			rawApp.request(`/v1/${operation}`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: `req_${operation}`, input: {} }),
+			});
+
+		it("strips a provider-forged observability header from a raw success", async () => {
+			const response = await post("raw200");
+
+			expect(response.status).toBe(200);
+			expect(response.headers.get(ERROR_OBSERVABILITY_HEADER)).toBeNull();
+			expect(await response.json()).toEqual({ upstream: 200 });
+		});
+
+		it("replaces the forged header with the SDK-derived one on a raw 5xx", async () => {
+			const response = await post("raw503");
+
+			expect(response.status).toBe(503);
+			expect(errorObservability(response)).toEqual({
+				category: "upstream_http",
+				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+				retryable: true,
+			});
+			expect(await response.json()).toEqual({ upstream: 503 });
+		});
+
+		it("does not mark a raw 4xx retryable", async () => {
+			const response = await post("raw404");
+
+			expect(response.status).toBe(404);
+			expect(errorObservability(response)).toMatchObject({
+				category: "upstream_http",
+				retryable: false,
+			});
+		});
+
+		it("covers the streaming early return", async () => {
+			const response = await post("rawStream503");
+
+			expect(response.status).toBe(503);
+			expect(errorObservability(response)).toEqual({
+				category: "upstream_http",
+				taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+				retryable: true,
+			});
+			expect(await response.json()).toEqual({ upstream: 503 });
+		});
+
+		it("leaves an SDK envelope for a thrown `undefined` without a status-derived header", async () => {
+			const response = await post("rejectUndefined");
+
+			expect(response.status).toBe(500);
+			expect(response.headers.get(ERROR_OBSERVABILITY_HEADER)).toBeNull();
+			const body = (await response.json()) as { error: { retryable: boolean } };
+			expect(body.error.retryable).toBe(false);
+		});
+	});
+
 	it("enforces declared SSE event byte limits", async () => {
 		const response = await app.request("/v1/oversizedEvents", {
 			method: "POST",
