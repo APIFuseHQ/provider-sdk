@@ -6,6 +6,7 @@ import path from "node:path";
 import type { Redis } from "ioredis";
 
 import type { ProviderProxyPolicy, ProviderProxyProvider, TraceConfig } from "../types.js";
+import { BoundedExpiringMap } from "../runtime/bounded-expiring-map.js";
 import {
 	NODEMAVEN_DEFAULT_PROTOCOL,
 	NODEMAVEN_FILTER_ENV,
@@ -223,7 +224,13 @@ type ProxyRedisClient = Pick<
 	"connect" | "del" | "eval" | "get" | "on" | "pttl" | "set" | "status"
 >;
 
-const proxyCache = new Map<string, CachedProxyPool>();
+// Keyed per (policy, affinity). Connection affinities are minted by callers, so
+// without a cap a long-lived process accumulates one pool per affinity it ever
+// saw. Evicting a still-fresh pool forces a fresh allocation (a different
+// egress endpoint) for that affinity, so the cap is generous and every
+// capacity eviction is reported as `diagnostics.poolCacheEvictions`.
+const SMARTPROXY_POOL_CACHE_MAX_ENTRIES = 10_000;
+let proxyCache = createSmartproxyPoolCache(SMARTPROXY_POOL_CACHE_MAX_ENTRIES);
 const require = createRequire(import.meta.url);
 const proxyInflight = new Map<string, Promise<SmartproxyAllocationResult>>();
 const invalidatedProxyKeys = new Map<string, number>();
@@ -275,6 +282,22 @@ export function __setProxyRedisForTests(redis: ProxyRedisClient | undefined): vo
 
 export function __setSmartproxyAllocatorDeadlineMsForTests(deadlineMs: number | undefined): void {
 	smartproxyAllocatorDeadlineMsForTests = deadlineMs;
+}
+
+/** @internal Test-only hook for exercising the pool-cache capacity bound at a small size. */
+export function __setSmartproxyPoolCacheMaxEntriesForTests(maxEntries: number | undefined): void {
+	proxyCache = createSmartproxyPoolCache(maxEntries ?? SMARTPROXY_POOL_CACHE_MAX_ENTRIES);
+}
+
+/** @internal Test-only view of the in-memory Smartproxy cache sizes. */
+export function __getSmartproxyCacheSizesForTests(): { pools: number; tombstones: number } {
+	return { pools: proxyCache.size, tombstones: invalidatedProxyKeys.size };
+}
+
+function createSmartproxyPoolCache(
+	maxEntries: number,
+): BoundedExpiringMap<string, CachedProxyPool> {
+	return new BoundedExpiringMap(maxEntries, (pool) => pool.expiresAt);
 }
 
 function getProxyRedis(): ProxyRedisClient | undefined {
@@ -760,6 +783,7 @@ export async function resolveWithVendor(
 			...allocated.pool.diagnostics,
 			poolSize: allocated.pool.urls.length,
 			poolIndex,
+			poolCacheEvictions: proxyCache.capacityEvictions,
 		},
 	};
 }
@@ -1082,8 +1106,8 @@ async function allocateSmartproxy(
 	const now = startedAt;
 	const invalidatedUntil = invalidatedProxyKeys.get(cacheKey) ?? 0;
 	const skipCached = invalidatedUntil > now;
-	const cached = proxyCache.get(cacheKey);
-	if (!skipCached && cached && isFresh(cached, now)) {
+	const cached = skipCached ? undefined : proxyCache.get(cacheKey, now);
+	if (cached) {
 		if (shouldSoftRefresh(cached, now)) {
 			void refreshSmartproxyPool(
 				cacheKey,
@@ -1158,7 +1182,7 @@ async function readSmartproxyRedisPool(
 	}
 	const now = Date.now();
 	if (!isFresh(pool, now)) return null;
-	proxyCache.set(cacheKey, pool);
+	proxyCache.set(cacheKey, pool, now);
 	return {
 		pool,
 		telemetry: telemetryForPool(pool, "redis_hit", startedAt, { redisReadMs }),
@@ -1482,7 +1506,7 @@ async function allocateAndStoreSmartproxyPool(
 			rawConnect: true,
 		},
 	};
-	proxyCache.set(cacheKey, result);
+	proxyCache.set(cacheKey, result, allocatedAt);
 	if (options.redis && options.poolKey) {
 		const redis = options.redis;
 		const poolKey = options.poolKey;
@@ -1744,7 +1768,11 @@ function markSmartproxyCacheInvalidated(options: ProxyResolutionOptions = {}): s
 		lifetimeMinutes,
 		options.protocol ?? VENDOR_DEFAULT_PROTOCOL.smartproxy,
 	);
-	invalidatedProxyKeys.set(cacheKey, Date.now() + SMARTPROXY_INVALIDATION_SKIP_REDIS_MS);
+	const now = Date.now();
+	for (const [key, invalidatedUntil] of invalidatedProxyKeys) {
+		if (invalidatedUntil <= now) invalidatedProxyKeys.delete(key);
+	}
+	invalidatedProxyKeys.set(cacheKey, now + SMARTPROXY_INVALIDATION_SKIP_REDIS_MS);
 	proxyCache.delete(cacheKey);
 	proxyInflight.delete(cacheKey);
 	return cacheKey;
