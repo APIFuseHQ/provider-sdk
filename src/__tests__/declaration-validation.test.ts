@@ -238,6 +238,44 @@ describe("fail-closed provider declaration validation", () => {
 		).not.toThrow();
 	});
 
+	it("requires resolver.clientProfile to name the stealth browser family for akamai_sbsd", () => {
+		const resolver = {
+			vendors: ["hypersolutions" as const],
+			kinds: ["akamai_sbsd" as const],
+			clientProfile: "safari17_0",
+		};
+		expectRule(
+			provider({ resolver, stealth: { browser: "chrome", os: "macos" } }),
+			DECLARATION_RULE_IDS.resolverClientProfileFamily,
+			"resolver.clientProfile",
+		);
+		// No stealth declaration means the default Chrome session.
+		expectRule(
+			provider({ resolver }),
+			DECLARATION_RULE_IDS.resolverClientProfileFamily,
+			"resolver.clientProfile",
+		);
+		expectRule(
+			provider({
+				resolver: { ...resolver, clientProfile: "ie11" },
+				stealth: { browser: "safari" },
+			}),
+			DECLARATION_RULE_IDS.resolverClientProfileFamily,
+			"resolver.clientProfile",
+		);
+		expect(() =>
+			validateFailClosedDeclaration(provider({ resolver, stealth: { browser: "safari" } })),
+		).not.toThrow();
+		expect(() =>
+			validateFailClosedDeclaration(
+				provider({
+					resolver: { ...resolver, kinds: ["akamai_sensor"], clientProfile: "chrome_149" },
+					stealth: { browser: "safari" },
+				}),
+			),
+		).not.toThrow();
+	});
+
 	it("rejects operation-level upstream proxy declarations", () => {
 		expectRule(
 			provider({

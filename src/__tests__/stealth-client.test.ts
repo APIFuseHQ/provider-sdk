@@ -15,15 +15,23 @@ import {
 import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
 import { normalizeResponse, type StealthClientOptions } from "../runtime/stealth.js";
 import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
+import type { TraceRecorder } from "../runtime/trace.js";
 import {
 	type DeclarativeStealthResponse,
 	HttpRetryUnsafeMethodPolicy,
+	type ProviderContext,
 	type ProviderDefinition,
+	type ResolverContext,
 	type StealthCookieStoreV1,
 	type StealthFetchOptions,
 	type StealthRedirectHop,
 } from "../types.js";
-import { assertIsError, createProviderDefinitionDouble, emptyArray } from "./test-utils.js";
+import {
+	assertIsError,
+	createProviderDefinitionDouble,
+	defineTestProvider,
+	emptyArray,
+} from "./test-utils.js";
 
 type MockSessionCookie = {
 	name: string;
@@ -4393,6 +4401,7 @@ function createSbsdWiringProvider(): ProviderDefinition {
 function createSbsdFailureCodeProvider(
 	id: string,
 	stealth: NonNullable<ProviderDefinition["stealth"]>,
+	fetchOptions?: StealthFetchOptions,
 ): ProviderDefinition {
 	return createProviderDefinitionDouble({
 		id,
@@ -4411,7 +4420,7 @@ function createSbsdFailureCodeProvider(
 				upstream: { baseUrl: "https://example.com" },
 				handler: async (ctx) => {
 					try {
-						await ctx.stealth.fetch("/profile-probe");
+						await ctx.stealth.fetch("/profile-probe", fetchOptions);
 						return { code: "missing_error" };
 					} catch (error) {
 						return {
@@ -4523,17 +4532,38 @@ describe("server SBSD bound-transport wiring", () => {
 		expect(allWreqCalls()).toHaveLength(1);
 	});
 
-	it("rejects a resolver client profile that does not match the initiating session", async () => {
+	it("rejects a resolver client profile outside the declared stealth browser family at boot", async () => {
+		const provider = createSbsdFailureCodeProvider("stealth-sbsd-profile-mismatch", {
+			browser: "chrome",
+			os: "macos",
+		});
+		const { createServerAppAsync } = await import("../server/serve.js");
+
+		await expect(createServerAppAsync(provider, { logger: () => undefined })).rejects.toMatchObject(
+			{
+				code: "DECLARATION_INVALID",
+				details: {
+					violations: [
+						{ ruleId: "resolver-client-profile-family", path: "resolver.clientProfile" },
+					],
+				},
+			},
+		);
+		expect(allWreqCalls()).toHaveLength(0);
+	});
+
+	it("rejects a per-request stealth browser override outside the resolver client profile family", async () => {
 		mockStealthState.queuedResponses.push({
 			status: 403,
 			body: sbsdInterstitial("/.well-known/sbsd?v=mismatch&t=mismatch-token"),
 			headers: { "set-cookie": "sbsd_o=mismatch-state; Path=/; Secure" },
 			url: "https://example.com/profile-probe",
 		});
-		const provider = createSbsdFailureCodeProvider("stealth-sbsd-profile-mismatch", {
-			browser: "chrome",
-			os: "macos",
-		});
+		const provider = createSbsdFailureCodeProvider(
+			"stealth-sbsd-request-profile-mismatch",
+			{ browser: "safari", os: "macos" },
+			{ stealth: { browser: "chrome" } },
+		);
 		const { createServerAppAsync } = await import("../server/serve.js");
 		const app = await createServerAppAsync(provider, { logger: () => undefined });
 		const response = await app.request("/v1/probe", {
@@ -4547,6 +4577,84 @@ describe("server SBSD bound-transport wiring", () => {
 			data: { code: "RESOLVER_CLIENT_PROFILE_MISMATCH" },
 		});
 		expect(allWreqCalls()).toHaveLength(1);
+	});
+
+	it("solves through a defineProvider declaration with the host resolver override and request trace", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/.well-known/sbsd?v=defined-uuid&t=defined-token"),
+				headers: { "set-cookie": "sbsd_o=defined-state; Path=/; Secure" },
+				url: "https://example.com/defined",
+			},
+			{
+				status: 200,
+				body: '{"items":["defined"]}',
+				headers: {},
+				url: "https://example.com/defined",
+			},
+		);
+		const observed: Array<{ challenge: unknown; tracedSpan: boolean }> = [];
+		const resolver = {
+			async solve(challenge: unknown, _signal?: AbortSignal, traceRecorder?: TraceRecorder) {
+				observed.push({ challenge, tracedSpan: traceRecorder !== undefined });
+				return fixtureSbsdCookieSolution();
+			},
+		} as ResolverContext;
+		const provider = defineTestProvider({
+			id: "stealth-sbsd-defined-provider",
+			version: "1.0.0",
+			runtime: "standard",
+			meta: {
+				displayName: "SBSD Defined",
+				descriptionKey: "providers.sbsdDefined.description",
+				category: "test",
+			},
+			allowedHosts: ["example.com"],
+			stealth: { browser: "safari", os: "macos", challengeDetection: { akamaiSbsd: true } },
+			resolver: {
+				vendors: ["hypersolutions"],
+				kinds: ["akamai_sbsd"],
+				clientProfile: "safari17_0",
+			},
+			operations: {
+				defined: {
+					riskClass: "read",
+					input: z.object({}),
+					output: z.object({ body: z.string(), outcome: z.string() }),
+					upstream: { baseUrl: "https://example.com" },
+					healthCheckUnsupported: { reason: "fixture operation" },
+					handler: async (ctx: ProviderContext) => {
+						const response = await ctx.stealth.fetch("/defined");
+						return { body: response.body, outcome: response.challenge?.outcome ?? "solved" };
+					},
+				},
+			},
+		});
+		const { createServerAppAsync } = await import("../server/serve.js");
+		const app = await createServerAppAsync(provider, { logger: () => undefined, resolver });
+		const response = await app.request("/v1/defined", {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({ requestId: "req-sbsd-defined", input: {} }),
+		});
+
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({
+			data: { body: '{"items":["defined"]}', outcome: "solved" },
+		});
+		expect(observed).toEqual([
+			{
+				challenge: {
+					kind: "akamai_sbsd",
+					pageUrl: "https://example.com/defined",
+					scriptUrl: "https://example.com/.well-known/sbsd?v=defined-uuid&t=defined-token",
+					stateCookieName: "sbsd_o",
+				},
+				tracedSpan: true,
+			},
+		]);
+		expect(allWreqCalls()).toHaveLength(2);
 	});
 
 	it("supplies the bound transport in operation and auth FlowContext assembly", async () => {

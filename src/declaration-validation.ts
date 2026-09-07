@@ -1,6 +1,8 @@
 import { describeSchema } from "./contract-serialization.js";
 import { ProviderError } from "./errors.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
+import { kindRequiresClientProfile } from "./runtime/resolver-config.js";
+import { resolverClientProfileFamily, resolveStealthProfileSelection } from "./stealth/profiles.js";
 import type {
 	HealthJourneyDefinition,
 	ProviderDefinition,
@@ -22,6 +24,7 @@ export const DECLARATION_RULE_IDS = {
 	proxySmartproxyGeo: "proxy-smartproxy-country-only",
 	operationUpstreamProxy: "operation-upstream-proxy-unsupported",
 	pinnedWireFieldPathValid: "public-schema-pinned-wire-field-valid",
+	resolverClientProfileFamily: "resolver-client-profile-family",
 } as const;
 
 export type DeclarationRuleId =
@@ -57,11 +60,15 @@ export function validateFailClosedDeclaration(provider: ProviderDefinition): voi
 	validatePinnedWireFieldPaths(provider, violations);
 	validateSchemaDeclaration(provider, violations);
 	validateProxyDeclaration(provider, violations);
+	validateResolverClientProfileDeclaration(provider, violations);
 	validateOperationDeclaration(provider, violations);
 	if (violations.length > 0) throw declarationInvalidError(violations);
 }
 
-type ProviderDeclarationRulesInput = Pick<ProviderDefinition, "healthJourneys" | "meta" | "proxy">;
+type ProviderDeclarationRulesInput = Pick<
+	ProviderDefinition,
+	"healthJourneys" | "meta" | "proxy" | "resolver" | "stealth"
+>;
 type OperationDeclarationRulesInput = Pick<ProviderDefinition, "operations">;
 
 /** Enforces fail-closed rules that only depend on the provider declaration. */
@@ -89,6 +96,7 @@ function collectProviderDeclarationViolations(
 	validateHealthDeclaration(provider, violations);
 	validatePinnedWireFieldPaths(provider, violations);
 	validateProxyDeclaration(provider, violations);
+	validateResolverClientProfileDeclaration(provider, violations);
 }
 
 function validatePinnedWireFieldPaths(
@@ -305,6 +313,44 @@ function validateProxyDeclaration(
 			});
 		}
 	}
+}
+
+/**
+ * An akamai_sbsd solve runs on the provider's own stealth session, so the declared
+ * resolver.clientProfile must name the browser family that session emulates. The
+ * stealth runtime re-checks per request (a fetch may override the browser); this
+ * rule fails the declaration instead of the first challenged request.
+ */
+function validateResolverClientProfileDeclaration(
+	provider: ProviderDeclarationRulesInput,
+	violations: DeclarationViolation[],
+): void {
+	const resolver = provider.resolver;
+	if (
+		!resolver ||
+		!Array.isArray(resolver.kinds) ||
+		!resolver.kinds.some(kindRequiresClientProfile) ||
+		typeof resolver.clientProfile !== "string"
+	) {
+		return;
+	}
+	let sessionBrowser: string;
+	try {
+		sessionBrowser = resolveStealthProfileSelection(provider.stealth).browser;
+	} catch {
+		// An unsupported stealth selection is reported by the stealth runtime itself.
+		return;
+	}
+	const family = resolverClientProfileFamily(resolver.clientProfile);
+	if (family === sessionBrowser) return;
+	violations.push({
+		ruleId: DECLARATION_RULE_IDS.resolverClientProfileFamily,
+		path: "resolver.clientProfile",
+		message: family
+			? `"${resolver.clientProfile}" names ${family}, but the stealth session browser is ${sessionBrowser}.`
+			: `"${resolver.clientProfile}" does not name a supported browser family (chrome, firefox, safari).`,
+		fix: `Declare stealth.browser as the family resolver.clientProfile names, or set resolver.clientProfile to the ${sessionBrowser} profile the SBSD session runs on.`,
+	});
 }
 
 function declaredProxyVendors(policy: ProviderProxyPolicy): ProviderProxyProvider[] {
