@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { z } from "zod";
 import alPlacementCapture from "../../al-placement-capture.json";
 import chromeAcceptOverride from "../../chrome-accept-override.json";
@@ -287,12 +287,6 @@ function queueHardSbsdSolve(
 		},
 		{
 			status: 200,
-			body: '{"payload":"fixture-payload"}',
-			headers: {},
-			url: "https://akm.hypersolutions.co/sbsd",
-		},
-		{
-			status: 200,
 			body: "payload accepted",
 			headers: { "set-cookie": "sbsd_o=updated-state; Path=/; Secure" },
 			url: "https://example.com/.well-known/sbsd?t=fixture-token",
@@ -301,11 +295,38 @@ function queueHardSbsdSolve(
 	);
 }
 
+const HYPER_SBSD_URL = "https://akm.hypersolutions.co/sbsd";
+const originalGlobalFetch = globalThis.fetch;
+
+/**
+ * The Hyper payload-generation POST goes direct (never through the bound transport), so
+ * tests that run the real adapter stub globalThis.fetch for exactly that URL. The
+ * file-level afterEach restores the original fetch.
+ */
+function installHyperPayloadFetch(): Array<{ url: string; init?: RequestInit }> {
+	const directCalls: Array<{ url: string; init?: RequestInit }> = [];
+	globalThis.fetch = Object.assign(
+		async (input: string | URL | Request, init?: RequestInit) => {
+			const url =
+				typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			directCalls.push({ url, init });
+			if (url !== HYPER_SBSD_URL) throw new Error(`direct egress reached ${url}`);
+			return Response.json({ payload: "fixture-payload" });
+		},
+		{ preconnect: originalGlobalFetch.preconnect },
+	);
+	return directCalls;
+}
+
+afterEach(() => {
+	globalThis.fetch = originalGlobalFetch;
+});
+
 function fixtureSbsdCookieSolution() {
 	return {
-		form: "cookies",
+		form: "cookie_state",
 		kind: "akamai_sbsd",
-		outcome: "payload_accepted_cookies_updated",
+		outcome: "payload_accepted",
 		verified: false,
 		stateCookieName: "sbsd_o",
 	} as const;
@@ -3432,6 +3453,7 @@ describe("Chrome 149 header parity", () => {
 	});
 
 	it("remembers a v-only script and applies a later cpr_chlge token as index zero", async () => {
+		const directCalls = installHyperPayloadFetch();
 		mockStealthState.queuedResponses.push(
 			{
 				status: 200,
@@ -3456,12 +3478,6 @@ describe("Chrome 149 header parity", () => {
 				body: "fixture-remembered-script",
 				headers: {},
 				url: "https://example.com/.well-known/sbsd?v=remembered-uuid",
-			},
-			{
-				status: 200,
-				body: '{"payload":"fixture-later-token-payload"}',
-				headers: {},
-				url: "https://akm.hypersolutions.co/sbsd",
 			},
 			{
 				status: 200,
@@ -3524,10 +3540,8 @@ describe("Chrome 149 header parity", () => {
 				(call) => call.url === "https://example.com/.well-known/sbsd?t=298133469",
 			),
 		).toBe(true);
-		const hyperCall = allWreqCalls().find(
-			(call) => call.url === "https://akm.hypersolutions.co/sbsd",
-		);
-		expect(JSON.parse(String(hyperCall?.init?.body))).toMatchObject({ index: 0 });
+		expect(directCalls).toHaveLength(1);
+		expect(JSON.parse(String(directCalls[0]?.init?.body))).toMatchObject({ index: 0 });
 	});
 
 	it("does not share a remembered SBSD script across stealth sessions", async () => {
@@ -3667,6 +3681,7 @@ describe("Chrome 149 header parity", () => {
 	});
 
 	it("solves once on the initiating jar and proxy, then judges success only from one GET refetch", async () => {
+		installHyperPayloadFetch();
 		queueHardSbsdSolve({
 			status: 200,
 			body: "protected fixture",
@@ -3737,6 +3752,7 @@ describe("Chrome 149 header parity", () => {
 	});
 
 	it("returns challenge_persisted after one solve and exactly one refetch", async () => {
+		installHyperPayloadFetch();
 		queueHardSbsdSolve({
 			status: 403,
 			body: sbsdInterstitial("/.well-known/sbsd?v=second-uuid&t=second-token"),
@@ -3811,9 +3827,9 @@ describe("Chrome 149 header parity", () => {
 							markSolveStarted();
 							await solveReleased;
 							return {
-								form: "cookies",
+								form: "cookie_state",
 								kind: "akamai_sbsd",
-								outcome: "payload_accepted_cookies_updated",
+								outcome: "payload_accepted",
 								verified: false,
 								stateCookieName: "sbsd_o",
 							} as const;
@@ -4130,9 +4146,9 @@ describe("Chrome 149 header parity", () => {
 						async solve() {
 							solves += 1;
 							return {
-								form: "cookies",
+								form: "cookie_state",
 								kind: "akamai_sbsd",
-								outcome: "payload_accepted_cookies_updated",
+								outcome: "payload_accepted",
 								verified: false,
 								stateCookieName: "sbsd_o",
 							} as const;
@@ -4474,6 +4490,7 @@ describe("server SBSD bound-transport wiring", () => {
 	});
 
 	it("supplies the bound transport in operation and auth FlowContext assembly", async () => {
+		installHyperPayloadFetch();
 		const { APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY } = await import(
 			"../runtime/resolver-config.js"
 		);
