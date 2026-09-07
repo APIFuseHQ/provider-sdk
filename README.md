@@ -76,13 +76,14 @@ The operation request body is the same envelope used by the APIFuse gateway:
 | `requestId` | yes | Any unique string is fine for local debugging; it is echoed in structured errors. |
 | `input` | yes | The operation input after schema validation. |
 | `headers` | no | Extra caller headers to expose through `ctx.request.headers`. |
-| `connectionId` | no | Connection identity only; it does not include credentials. The gateway sends it for `optional` connection mode. |
-| `connection` | no | Credential-bearing connection data. The gateway sends it for `required` connection mode; for local debugging, pass an object with `id`, `mode`, `secrets`, `metadata`, and `externalRef`. Do not pass `null`. |
+| `connectionId` | no | Connection identity only; it does not include credentials. The gateway sends it for `optional` connection mode, and only when the caller supplied a connection that passed authorization. Exposed as `ctx.request.connectionId`. |
+| `connection` | no | Credential-bearing connection data. The gateway sends it for `required` connection mode; omit it for no-auth/public (`none` mode) operations. For local debugging, pass an object with `id`, `mode`, `secrets`, `metadata`, and `externalRef`. Do not pass `null`. |
 
 The gateway sends only `connection` for `required` mode, only `connectionId`
-for `optional` mode, and neither field for `none` mode. If a malformed or
-manually constructed envelope contains both, nested `connection.id` takes
-precedence over the top-level `connectionId`.
+for `optional` mode (and nothing when the caller passed no connection), and
+neither field for `none` mode. If a malformed or manually constructed envelope
+contains both, a non-empty nested `connection.id` takes precedence over the
+top-level `connectionId`; an empty string is treated as absent.
 
 Credential-bearing local smoke example:
 
