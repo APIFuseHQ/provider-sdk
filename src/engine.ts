@@ -73,13 +73,22 @@ const ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAME_SET = new Set<string>(
 	ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES,
 );
 
-export function isEngineOwnedResolverCredentialName(name: string): boolean {
+/**
+ * Engine variable a provider-declared secret name resolves to, or `undefined` when the
+ * name is not an engine-owned resolver credential. Provider-scoped Hyper aliases
+ * (`APIFUSE__PROVIDER__<ID>__HYPER_API_KEY`, measured on zozotown) map to the shared key.
+ */
+export function engineOwnedResolverCredentialTarget(name: string): string | undefined {
 	const canonical = canonicalEnvName(name);
-	return (
-		ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAME_SET.has(canonical) ||
-		canonical.startsWith("APIFUSE__RESOLVER__") ||
-		/^APIFUSE__PROVIDER__.+__HYPER_API_KEY$/u.test(canonical)
-	);
+	if (ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAME_SET.has(canonical)) return canonical;
+	if (/^APIFUSE__PROVIDER__.+__HYPER_API_KEY$/u.test(canonical)) {
+		return APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY;
+	}
+	return undefined;
+}
+
+export function isEngineOwnedResolverCredentialName(name: string): boolean {
+	return engineOwnedResolverCredentialTarget(name) !== undefined;
 }
 
 /**

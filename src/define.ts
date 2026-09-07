@@ -7,8 +7,8 @@ import {
 import { SDK_RUNTIME_OWNED_ERROR_CODES } from "./error-resolution.js";
 import { ProviderError, ValidationError } from "./errors.js";
 import {
+	engineOwnedResolverCredentialTarget,
 	isEngineOwnedProxyCredentialName,
-	isEngineOwnedResolverCredentialName,
 	isEngineOwnedTelemetryEnvName,
 } from "./engine.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
@@ -946,10 +946,8 @@ function validateProviderProxy(config: {
 	secrets?: ProviderSecretDeclaration[];
 }): void {
 	for (const secret of config.secrets ?? []) {
-		if (isEngineOwnedResolverCredentialName(secret.name)) {
-			const engineName = /^APIFUSE__PROVIDER__.+__HYPER_API_KEY$/iu.test(secret.name)
-				? "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY"
-				: secret.name.toUpperCase();
+		const engineName = engineOwnedResolverCredentialTarget(secret.name);
+		if (engineName !== undefined) {
 			throw new ValidationError(
 				`Provider "${config.id}" cannot declare engine-owned resolver credential "${secret.name}"`,
 				{

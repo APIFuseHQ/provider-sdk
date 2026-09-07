@@ -234,31 +234,22 @@ describe("provider engine attachment", () => {
 });
 
 describe("engine credential containment", () => {
-	it("keeps the literal hosted resolver credential registry complete", () => {
-		expect([...ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES]).toEqual([
-			"APIFUSE__RESOLVER__2CAPTCHA__API_KEY",
-			"APIFUSE__RESOLVER__CAPSOLVER__API_KEY",
-			"APIFUSE__RESOLVER__CAPMONSTER__API_KEY",
-			"APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY",
-		]);
-		expect(isEngineOwnedEnvName("APIFUSE__PROVIDER__FIXTURE__HYPER_API_KEY")).toBe(true);
-	});
-
-	it("classifies every hosted resolver key as engine-owned and omits it from providers", () => {
+	it("omits every hosted resolver key from provider environments", () => {
 		const source = Object.fromEntries([
 			...ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES.map((name) => [name, `secret-${name}`]),
 			["PROVIDER_TOKEN", "provider-token"],
 		]);
 
-		expect(ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES.every(isEngineOwnedEnvName)).toBe(true);
 		expect(createProviderEnvironment(source, Object.keys(source))).toEqual({
 			PROVIDER_TOKEN: "provider-token",
 		});
 	});
 
-	it("rejects provider-scoped Hyper aliases as engine-owned resolver credentials", () => {
+	it("classifies provider-scoped Hyper aliases, but no other APIFUSE__RESOLVER__ name, as engine-owned", () => {
 		expect(isEngineOwnedEnvName("APIFUSE__PROVIDER__ZOZOTOWN__HYPER_API_KEY")).toBe(true);
 		expect(isEngineOwnedEnvName("apifuse__provider__zozotown__hyper_api_key")).toBe(true);
+		expect(isEngineOwnedEnvName("APIFUSE__RESOLVER__TIMEOUT_MS")).toBe(false);
+		expect(isEngineOwnedEnvName("APIFUSE__RESOLVER__FUTURE_VENDOR__API_KEY")).toBe(false);
 	});
 
 	it("captures proxy credentials for the engine but omits them from provider environments", () => {

@@ -1070,7 +1070,6 @@ describe("defineProvider", () => {
 			"APIFUSE__RESOLVER__CAPSOLVER__API_KEY",
 			"APIFUSE__RESOLVER__CAPMONSTER__API_KEY",
 			"APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY",
-			"APIFUSE__RESOLVER__TIMEOUT_MS",
 		])("rejects %s in provider secrets with the engine migration path", (name) => {
 			let caught: unknown;
 			try {
