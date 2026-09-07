@@ -832,6 +832,12 @@ function proxyStealthSession(
 			onResponse(order, response);
 			return response;
 		},
+		replayChallenged: async (...args: Parameters<StealthSession["replayChallenged"]>) => {
+			const order = reserveOrder();
+			const response = await session.replayChallenged(...args);
+			onResponse(order, response);
+			return response;
+		},
 		cookies: session.cookies,
 		redirects: {
 			run: async (...args: Parameters<StealthSession["redirects"]["run"]>) => {

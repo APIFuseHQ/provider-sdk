@@ -13,6 +13,7 @@ import {
 	TransportError,
 } from "../errors.js";
 import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
+import { type CeremonyEgressLeaseRuntime, ENGINE_CEREMONY_EGRESS_LEASE } from "../runtime/egress-lease.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/request-telemetry.js";
 import { ResolverTelemetryCollector } from "../runtime/resolver-telemetry.js";
 import { normalizeResponse, type StealthClientOptions } from "../runtime/stealth.js";
@@ -110,6 +111,17 @@ function requestHeader(
 		return typeof entry?.[1] === "string" ? entry[1] : undefined;
 	}
 	return undefined;
+}
+
+function requestBodyBytes(init: Record<string, unknown> | undefined): Buffer {
+	const body = init?.body;
+	if (typeof body === "string") return Buffer.from(body, "utf8");
+	if (Buffer.isBuffer(body)) return Buffer.from(body);
+	if (ArrayBuffer.isView(body)) {
+		return Buffer.from(body.buffer, body.byteOffset, body.byteLength);
+	}
+	if (body instanceof ArrayBuffer) return Buffer.from(body);
+	throw new Error("Captured request body was not a byte-preserving body");
 }
 
 function toHeaders(headers: MockWreqResponse["headers"]): Headers {
@@ -270,10 +282,14 @@ function mockEmulationHeaders(profile: string, os = "macos") {
 	]);
 }
 
-/** Attaches the server-owned challenge wiring the way createServerApp does. */
+/** 37 bytes: the lease runtime enforces the documented 32-byte minimum. */
+const FIXTURE_LEASE_KEY = "fixture-ceremony-key-0123456789abcdef";
+
+/** Attaches the server-owned challenge wiring and ceremony lease the way createServerApp does. */
 function sbsdClientOptions(
 	options: StealthClientOptions & {
 		stealth?: StealthClientOptions["stealth"] & { challengeRuntime?: StealthChallengeRuntime };
+		[ENGINE_CEREMONY_EGRESS_LEASE]?: CeremonyEgressLeaseRuntime;
 	},
 ): StealthClientOptions {
 	return options;
@@ -4912,6 +4928,1050 @@ describe("Akamai SBSD detection and safe refetch", () => {
 		expect(solves).toBe(0);
 		expect(allWreqCalls()).toHaveLength(1);
 	});
+
+	it("explicitly solves and byte-exactly replays one unsafe POST", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=0b6d3c1e-5a2f-4c8e-9d71-2a4b6c8e0f13&t=replay-token"),
+				headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+				url: "https://example.com/mutate",
+			},
+			{
+				status: 200,
+				body: "replayed",
+				headers: {},
+				url: "https://example.com/mutate",
+			},
+		);
+		let solves = 0;
+		const originalBody = Buffer.from([0x00, 0xff, 0xc3, 0x28, 0x80, 0x66, 0x00, 0xfe]);
+		const expectedBody = Buffer.from(originalBody);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+
+		const headers: Record<string, string | string[]> = {
+			"content-type": "application/octet-stream",
+			"x-fixture": ["one", "two"],
+		};
+		const challenged = await session.fetch("/mutate", {
+			method: "POST",
+			body: originalBody,
+			headers,
+			throwOnHttpError: false,
+		});
+		expect(challenged.challenge?.outcome).toBe("replay_required");
+		// The caller's own objects are not the replay's source: both sends use the snapshot
+		// taken before the first request.
+		originalBody.fill(0x78);
+		headers["x-fixture"] = ["changed"];
+		headers["x-late"] = "added after the challenge";
+		const replayed = await session.replayChallenged(challenged);
+
+		expect(replayed.status).toBe(200);
+		expect(solves).toBe(1);
+		const calls = allWreqCalls();
+		expect(calls).toHaveLength(2);
+		expect(requestBodyBytes(calls[0]?.init)).toEqual(expectedBody);
+		expect(requestBodyBytes(calls[1]?.init)).toEqual(expectedBody);
+		expect(calls[1]?.url).toBe(calls[0]?.url);
+		expect(requestHeader(calls[0]?.init, "x-fixture")).toBe("one, two");
+		expect(requestHeader(calls[1]?.init, "x-fixture")).toBe("one, two");
+		expect(requestHeader(calls[1]?.init, "x-late")).toBeUndefined();
+
+		await expect(session.replayChallenged(challenged)).rejects.toMatchObject({
+			code: "REPLAY_ALREADY_ATTEMPTED",
+		});
+	});
+
+	it("rejects explicit replay from a different stealth session", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=1c7e4d2f-6b3a-4d9f-8e02-3b5c7d9f1a24&t=token"),
+			headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+			url: "https://example.com/mutate",
+		});
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		);
+		const challenged = await client.createSession().fetch("/mutate", {
+			method: "POST",
+			throwOnHttpError: false,
+		});
+
+		await expect(client.createSession().replayChallenged(challenged)).rejects.toMatchObject({
+			code: "REPLAY_SESSION_MISMATCH",
+		});
+		expect(allWreqCalls()).toHaveLength(1);
+	});
+
+	it("rejects an unreadable streamed body before solving or issuing a replay", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=2d8f5e3a-7c4b-4eaf-9f13-4c6d8eaf2b35&t=token"),
+			headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+			url: "https://example.com/mutate",
+		});
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+		await expect(
+			session.fetch("/mutate", {
+				method: "POST",
+				// test-invalid: exercise the runtime guard for a body outside the public replayable union.
+				body: new ReadableStream<Uint8Array>() as never,
+				throwOnHttpError: false,
+			}),
+		).rejects.toMatchObject({
+			code: "STEALTH_BODY_UNSUPPORTED",
+		});
+		expect(solves).toBe(0);
+		expect(allWreqCalls()).toHaveLength(0);
+	});
+
+	it("reuses a settled successful safe solve for a later same-epoch explicit replay", async () => {
+		const challenge = {
+			status: 403,
+			body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=3e9a6f4b-8d5c-4fba-8a24-5d7e9fba3c46&t=shared-token"),
+			headers: { "set-cookie": "sbsd_o=shared-state; Path=/; Secure" },
+			url: "https://example.com/protected",
+		};
+		mockStealthState.queuedResponses.push(
+			challenge,
+			{ status: 200, body: "safe replay", headers: {}, url: "https://example.com/safe" },
+			challenge,
+			{ status: 200, body: "explicit replay", headers: {}, url: "https://example.com/mutate" },
+		);
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+
+		await expect(session.fetch("/safe", { throwOnHttpError: false })).resolves.toMatchObject({
+			status: 200,
+		});
+		const challenged = await session.fetch("/mutate", {
+			method: "POST",
+			body: Buffer.from([0x00, 0xff]),
+			throwOnHttpError: false,
+		});
+		expect(challenged.challenge?.outcome).toBe("replay_required");
+		await expect(session.replayChallenged(challenged)).resolves.toMatchObject({ status: 200 });
+		expect(solves).toBe(1);
+		expect(allWreqCalls()).toHaveLength(4);
+	});
+
+	it("returns challenge_persisted when the single explicit replay is challenged again", async () => {
+		const challenge = {
+			status: 403,
+			body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=4fab7a5c-9e6d-4acb-9b35-6e8fabcb4d57&t=token"),
+			headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+			url: "https://example.com/mutate",
+		};
+		mockStealthState.queuedResponses.push(challenge, challenge);
+		let solves = 0;
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+		const challenged = await session.fetch("/mutate", {
+			method: "POST",
+			throwOnHttpError: false,
+		});
+		const replayed = await session.replayChallenged(challenged);
+
+		expect(replayed.challenge?.outcome).toBe("challenge_persisted");
+		expect(solves).toBe(1);
+		expect(allWreqCalls()).toHaveLength(2);
+	});
+
+	it("gives an explicit replay the same status and proxy-telemetry tail as fetch", async () => {
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const challenge = {
+			status: 403,
+			body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=8def0b9a-d2a1-4e0f-9f79-a2cdef0f819b&t=token"),
+			headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+			url: "https://example.com/mutate",
+		};
+		const failure = {
+			status: 500,
+			body: "upstream broke",
+			headers: {},
+			url: "https://example.com/mutate",
+		};
+		mockStealthState.queuedResponses.push(challenge, failure, challenge, failure);
+		const attempts: Array<{
+			outcome: string;
+			status?: number;
+			errorCode?: string;
+			durationMs?: number;
+		}> = [];
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1 },
+					},
+				},
+				affinityKey: "connection-1",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				telemetry: {
+					recordProxyResolution() {},
+					recordProxyAttempt(attempt) {
+						attempts.push(attempt);
+					},
+				},
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+
+		const lenient = await session.fetch("/mutate", { method: "POST", throwOnHttpError: false });
+		expect(lenient.challenge?.outcome).toBe("replay_required");
+		// The caller's think time between the challenged fetch and the replay is not transport
+		// duration: the replay's record is timed from the replay, not from the initiating fetch.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		const replayStartedAt = Date.now();
+		await expect(session.replayChallenged(lenient)).resolves.toMatchObject({ status: 500 });
+		const replayDurationCeiling = Date.now() - replayStartedAt;
+		expect(attempts[1]?.durationMs).toBeLessThanOrEqual(replayDurationCeiling);
+
+		// The classified 403 is returned even with the default throwOnHttpError (documented
+		// exception); the replayed 500 is not classified, so it throws like any fetch would.
+		const strict = await session.fetch("/mutate", { method: "POST" });
+		expect(strict.challenge?.outcome).toBe("replay_required");
+		await expect(session.replayChallenged(strict)).rejects.toMatchObject({
+			code: "upstream_http_error",
+			status: 500,
+		});
+
+		expect(attempts.map(({ outcome, status, errorCode }) => [outcome, status, errorCode])).toEqual([
+			["ok", 403, undefined],
+			["ok", 500, undefined],
+			["ok", 403, undefined],
+			["error", 500, "upstream_http_error"],
+		]);
+		expect(allWreqCalls()).toHaveLength(4);
+	});
+
+	it("mints after pool rotation and rebinds the exact endpoint without resolving on turn two", async () => {
+		const {
+			APIFUSE__ENGINE__CEREMONY_LEASE_KEY,
+			createCeremonyEgressLeaseRuntime,
+			ENGINE_CEREMONY_EGRESS_LEASE,
+		} = await import("../runtime/egress-lease.js");
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const environment = {
+			[APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY,
+		};
+		const engineCredentials = {
+			[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+			[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+		};
+		const policy = {
+			mode: "required" as const,
+			providers: ["nodemaven" as const],
+			session: { affinity: "connection" as const, poolSize: 2, lifetimeMinutes: 30 },
+		};
+		let resolutions = 0;
+		const telemetry = {
+			recordProxyResolution() {
+				resolutions += 1;
+			},
+		};
+		const firstLease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			environment,
+		});
+		mockStealthState.queuedErrors.push(new Error("first pool endpoint unavailable"));
+		mockStealthState.queuedResponses.push({ status: 200, body: "turn one", headers: {} });
+		await createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: { proxy: policy },
+				affinityKey: "connection-1",
+				engineCredentials,
+				telemetry,
+				[ENGINE_CEREMONY_EGRESS_LEASE]: firstLease,
+			}),
+		).fetch("/bind");
+		const handle = firstLease.handle();
+		expect(firstLease.binding?.poolIndex).toBe(1);
+		expect(resolutions).toBe(2);
+		const selectedProxy = mockStealthState.clients.at(-1)?.options?.proxy;
+
+		const secondLease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			handle,
+			environment,
+		});
+		mockStealthState.queuedResponses.push({ status: 200, body: "turn two", headers: {} });
+		await createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: { proxy: policy },
+				affinityKey: "connection-1",
+				engineCredentials,
+				telemetry,
+				[ENGINE_CEREMONY_EGRESS_LEASE]: secondLease,
+			}),
+		).fetch("/rebind");
+
+		expect(resolutions).toBe(2);
+		expect(mockStealthState.clients.at(-1)?.options?.proxy).toBe(selectedProxy);
+		expect(secondLease.binding?.poolIndex).toBe(1);
+	});
+
+	it("rebinds a fresh egress and drops remembered SBSD state when the ceremony lease expires", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		let now = 0;
+		let resolutions = 0;
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			now: () => now,
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
+		});
+		mockStealthState.queuedResponses.push(
+			{
+				status: 200,
+				body: '<script src="/EdTyEb8L/9iGcpl/Gm?v=5abc8b6d-af7e-4bdc-8c46-7f9abcdc5e68"></script>',
+				headers: { "set-cookie": "sbsd_o=state; Path=/; Secure" },
+				url: "https://example.com/page",
+			},
+			{
+				status: 200,
+				body: '{"cpr_chlge":"true","t":"later-token"}',
+				headers: {},
+				url: "https://example.com/page",
+			},
+		);
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 5 },
+					},
+				},
+				affinityKey: "connection-1",
+				telemetry: {
+					recordProxyResolution() {
+						resolutions += 1;
+					},
+				},
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+				stealth: {
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		).createSession();
+		await session.fetch("/page");
+		const firstHandle = lease.handle();
+		expect(resolutions).toBe(1);
+		expect(lease.binding?.lifetimeMinutes).toBe(5);
+
+		now = 5 * 60_000;
+		const response = await session.fetch("/page");
+
+		// A cpr_chlge token is classified only against a remembered script; expiry cleared
+		// it together with the old binding, and the request bound a freshly selected endpoint.
+		expect(response.status).toBe(200);
+		expect(response.challenge).toBeUndefined();
+		expect(resolutions).toBe(2);
+		expect(lease.binding?.lifetimeMinutes).toBe(5);
+		expect(lease.handle()).toBeString();
+		expect(lease.handle()).not.toBe(firstHandle);
+		expect(allWreqCalls()).toHaveLength(2);
+	});
+
+	it("retires an explicit replay whose ceremony egress was rebound after expiry", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		let now = 0;
+		let solves = 0;
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			now: () => now,
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
+		});
+		mockStealthState.queuedResponses.push(
+			{
+				status: 403,
+				body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=9ef01cab-e3b2-4f10-8a8a-b3def01a920c&t=token"),
+				headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+				url: "https://example.com/mutate",
+			},
+			{ status: 200, body: "later safe request", headers: {}, url: "https://example.com/page" },
+		);
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 5 },
+					},
+				},
+				affinityKey: "connection-1",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+		const challenged = await session.fetch("/mutate", { method: "POST", throwOnHttpError: false });
+		expect(challenged.challenge?.outcome).toBe("replay_required");
+		const firstHandle = lease.handle();
+
+		now = 5 * 60_000;
+		await expect(session.fetch("/page")).resolves.toMatchObject({ status: 200 });
+		expect(lease.handle()).not.toBe(firstHandle);
+
+		await expect(session.replayChallenged(challenged)).rejects.toMatchObject({
+			code: "REPLAY_SESSION_MISMATCH",
+		});
+		expect(solves).toBe(0);
+		expect(allWreqCalls()).toHaveLength(2);
+	});
+
+	it("fails a response that arrived on an egress other than the ceremony's bound endpoint", async () => {
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		// Models a concurrent request that bound the ceremony to another endpoint while this
+		// request was in flight on the one it selected before any binding existed.
+		let boundElsewhere = false;
+		const foreignBinding = {
+			vendor: "nodemaven" as const,
+			proxyUrl: "http://other-sid:password@gate.nodemaven.com:8080",
+			poolIndex: 1,
+			affinityKey: "connection-1",
+			refreshEpoch: 0,
+			lifetimeMinutes: 30,
+		};
+		const lease: CeremonyEgressLeaseRuntime = {
+			get binding() {
+				return boundElsewhere ? foreignBinding : undefined;
+			},
+			dropExpiredBinding: () => false,
+			dropBinding: () => false,
+			generation: 0,
+			bind() {
+				throw new Error("the racing request must not bind over the existing binding");
+			},
+			handle: () => undefined,
+		};
+		mockStealthState.queuedResponses.push({ status: 200, body: "reached origin", headers: {} });
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1 },
+					},
+				},
+				affinityKey: "connection-1",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				telemetry: {
+					recordProxyResolution() {
+						// This request has selected its egress; the other request binds now.
+						boundElsewhere = true;
+					},
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+			}),
+		).createSession();
+
+		await expect(session.fetch("/racing")).rejects.toMatchObject({
+			code: "EGRESS_LEASE_BINDING_INVALID",
+		});
+		expect(allWreqCalls()).toHaveLength(1);
+	});
+
+	it("keeps a Smartproxy binding across fetches 20 s apart: the lease follows the session lifetime, not the extraction cache", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const boundProxy = "http://user:password@198.51.100.7:9000";
+		let now = 0;
+		let resolutions = 0;
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			now: () => now,
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
+		});
+		lease.bind({
+			vendor: "smartproxy",
+			proxyUrl: boundProxy,
+			poolIndex: 0,
+			affinityKey: "connection-1",
+			refreshEpoch: 0,
+			lifetimeMinutes: 30,
+		});
+		const handle = lease.handle();
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "turn one", headers: {} },
+			{ status: 200, body: "turn two", headers: {} },
+		);
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["smartproxy"],
+						session: { affinity: "connection", lifetimeMinutes: 30 },
+					},
+				},
+				affinityKey: "connection-1",
+				telemetry: {
+					recordProxyResolution() {
+						resolutions += 1;
+					},
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+			}),
+		).createSession();
+
+		await expect(session.fetch("/one")).resolves.toMatchObject({ status: 200 });
+		now = 20_000;
+		await expect(session.fetch("/two")).resolves.toMatchObject({ status: 200 });
+
+		expect(resolutions).toBe(0);
+		expect(mockStealthState.clients.length).toBeGreaterThan(0);
+		expect(mockStealthState.clients.every((client) => client.options?.proxy === boundProxy)).toBe(
+			true,
+		);
+		expect(lease.handle()).toBe(handle);
+		expect(lease.binding?.proxyUrl).toBe(boundProxy);
+	});
+
+	it("releases a bound endpoint that fails at the transport and rebinds a fresh egress in the same request", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		// A raw Smartproxy endpoint bound by an earlier turn that has since died. The fresh
+		// selection goes to the policy's NodeMaven leg (Smartproxy needs the allocator API).
+		const deadProxy = "http://user:password@198.51.100.7:9000";
+		let resolutions = 0;
+		const attempts: Array<{ outcome: string; errorCode?: string }> = [];
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
+		});
+		lease.bind({
+			vendor: "smartproxy",
+			proxyUrl: deadProxy,
+			poolIndex: 0,
+			affinityKey: "connection-1",
+			refreshEpoch: 0,
+			lifetimeMinutes: 30,
+		});
+		const deadHandle = lease.handle();
+		mockStealthState.queuedErrors.push(new Error("proxy CONNECT failed"));
+		mockStealthState.queuedResponses.push({ status: 200, body: "fresh egress", headers: {} });
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 30 },
+					},
+				},
+				affinityKey: "connection-1",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				telemetry: {
+					recordProxyResolution() {
+						resolutions += 1;
+					},
+					recordProxyAttempt(attempt) {
+						attempts.push(attempt);
+					},
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+			}),
+		).createSession();
+
+		// An unsafe method: the tunnel never opened, so the origin never saw the request and
+		// the fresh attempt is safe whatever the method.
+		await expect(
+			session.fetch("/otp", { method: "POST", body: "code=123456" }),
+		).resolves.toMatchObject({ status: 200 });
+
+		expect(resolutions).toBe(1);
+		expect(mockStealthState.clients).toHaveLength(2);
+		expect(mockStealthState.clients[0]?.options?.proxy).toBe(deadProxy);
+		expect(mockStealthState.clients[1]?.options?.proxy).not.toBe(deadProxy);
+		expect(lease.binding?.vendor).toBe("nodemaven");
+		expect(lease.binding?.proxyUrl).not.toBe(deadProxy);
+		expect(lease.handle()).toBeString();
+		expect(lease.handle()).not.toBe(deadHandle);
+		expect(attempts.map(({ outcome, errorCode }) => [outcome, errorCode])).toEqual([
+			["error", "proxy_connect_failed"],
+			["ok", undefined],
+		]);
+	});
+
+	it("keeps the binding when the bound endpoint carries an origin error response", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const boundProxy = "http://user:password@198.51.100.7:9000";
+		let resolutions = 0;
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
+		});
+		lease.bind({
+			vendor: "smartproxy",
+			proxyUrl: boundProxy,
+			poolIndex: 0,
+			affinityKey: "connection-1",
+			refreshEpoch: 0,
+			lifetimeMinutes: 30,
+		});
+		const handle = lease.handle();
+		mockStealthState.queuedResponses.push({ status: 500, body: "origin broke", headers: {} });
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["smartproxy"],
+						session: { affinity: "connection", lifetimeMinutes: 30 },
+					},
+				},
+				affinityKey: "connection-1",
+				telemetry: {
+					recordProxyResolution() {
+						resolutions += 1;
+					},
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+			}),
+		).createSession();
+
+		// The endpoint is alive: it carried the request to the origin and brought the answer
+		// back. Whatever the origin said, the ceremony stays on it.
+		await expect(session.fetch("/otp", { method: "POST", body: "code=1" })).rejects.toMatchObject({
+			code: "upstream_http_error",
+			status: 500,
+		});
+
+		expect(resolutions).toBe(0);
+		expect(allWreqCalls()).toHaveLength(1);
+		expect(lease.binding?.proxyUrl).toBe(boundProxy);
+		expect(lease.handle()).toBe(handle);
+	});
+
+	it("refreshes the pool when the released bound endpoint is the one a sticky pool re-selects", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const environment = { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY };
+		const engineCredentials = {
+			[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+			[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+		};
+		// One sticky NodeMaven SID: without a refresh pass every selection is the same endpoint.
+		const policy = {
+			mode: "required" as const,
+			providers: ["nodemaven" as const],
+			session: { affinity: "connection" as const, poolSize: 1, lifetimeMinutes: 30 },
+		};
+		let resolutions = 0;
+		const telemetry = {
+			recordProxyResolution() {
+				resolutions += 1;
+			},
+		};
+		const scope = {
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			environment,
+		};
+		const firstLease = createCeremonyEgressLeaseRuntime(scope);
+		mockStealthState.queuedResponses.push({ status: 200, body: "turn one", headers: {} });
+		await createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: { proxy: policy },
+				affinityKey: "connection-1",
+				engineCredentials,
+				telemetry,
+				[ENGINE_CEREMONY_EGRESS_LEASE]: firstLease,
+			}),
+		).fetch("/one");
+		const boundProxy = firstLease.binding?.proxyUrl;
+		expect(boundProxy).toBeString();
+		expect(firstLease.binding?.refreshEpoch).toBe(0);
+
+		// Turn two: the bound endpoint answers with a pool-level refusal. Releasing it and
+		// re-selecting yields the same SID, so only the allocator refresh pass can move on.
+		const secondLease = createCeremonyEgressLeaseRuntime({ ...scope, handle: firstLease.handle() });
+		mockStealthState.queuedErrors.push(new Error("proxy pool unavailable"));
+		mockStealthState.queuedResponses.push({ status: 200, body: "turn two", headers: {} });
+		await expect(
+			createStealthClient(
+				"https://example.com",
+				sbsdClientOptions({
+					upstream: { proxy: policy },
+					affinityKey: "connection-1",
+					engineCredentials,
+					telemetry,
+					[ENGINE_CEREMONY_EGRESS_LEASE]: secondLease,
+				}),
+			).fetch("/two"),
+		).resolves.toMatchObject({ status: 200 });
+
+		expect(allWreqCalls()).toHaveLength(3);
+		expect(secondLease.binding?.refreshEpoch).toBe(1);
+		expect(secondLease.binding?.proxyUrl).toBeString();
+		expect(secondLease.binding?.proxyUrl).not.toBe(boundProxy);
+		expect(secondLease.handle()).not.toBe(firstLease.handle());
+		// turn one, the deduplicated re-selection, and the refreshed selection
+		expect(resolutions).toBe(3);
+	});
+
+	it("retires a sibling session's replay record when this session releases and rebinds the shared lease", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const deadProxy = "http://user:password@198.51.100.7:9000";
+		let solves = 0;
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
+		});
+		lease.bind({
+			vendor: "smartproxy",
+			proxyUrl: deadProxy,
+			poolIndex: 0,
+			affinityKey: "connection-1",
+			refreshEpoch: 0,
+			lifetimeMinutes: 30,
+		});
+		const client = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 30 },
+					},
+				},
+				affinityKey: "connection-1",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		);
+		const sessionA = client.createSession();
+		const sessionB = client.createSession();
+
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=6a0c1d2e-3f40-4a5b-8c6d-7e8f90a1b2c3&t=token"),
+			headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+			url: "https://example.com/mutate",
+		});
+		const challenged = await sessionA.fetch("/mutate", {
+			method: "POST",
+			body: "code=1",
+			throwOnHttpError: false,
+		});
+		expect(challenged.challenge?.outcome).toBe("replay_required");
+
+		// The other session finds the bound endpoint dead and moves the ceremony.
+		mockStealthState.queuedErrors.push(new Error("proxy CONNECT failed"));
+		mockStealthState.queuedResponses.push({ status: 200, body: "fresh egress", headers: {} });
+		await expect(sessionB.fetch("/page")).resolves.toMatchObject({ status: 200 });
+		expect(lease.binding?.proxyUrl).not.toBe(deadProxy);
+		expect(lease.generation).toBe(1);
+
+		await expect(sessionA.replayChallenged(challenged)).rejects.toMatchObject({
+			code: "REPLAY_SESSION_MISMATCH",
+		});
+		expect(solves).toBe(0);
+		expect(allWreqCalls()).toHaveLength(3);
+	});
+
+	it("refuses to send a replay whose ceremony was moved by a sibling session during the solve", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY, createCeremonyEgressLeaseRuntime } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const deadProxy = "http://user:password@198.51.100.7:9000";
+		let solves = 0;
+		let releaseSolve!: () => void;
+		const solveReleased = new Promise<void>((resolve) => {
+			releaseSolve = resolve;
+		});
+		const lease = createCeremonyEgressLeaseRuntime({
+			tenantId: "tenant-1",
+			providerId: "fixture-provider",
+			flowId: "flow-1",
+			affinityKey: "connection-1",
+			environment: { [APIFUSE__ENGINE__CEREMONY_LEASE_KEY]: FIXTURE_LEASE_KEY },
+		});
+		lease.bind({
+			vendor: "smartproxy",
+			proxyUrl: deadProxy,
+			poolIndex: 0,
+			affinityKey: "connection-1",
+			refreshEpoch: 0,
+			lifetimeMinutes: 30,
+		});
+		const client = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 30 },
+					},
+				},
+				affinityKey: "connection-1",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				[ENGINE_CEREMONY_EGRESS_LEASE]: lease,
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								await solveReleased;
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		);
+		const sessionA = client.createSession();
+		const sessionB = client.createSession();
+
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=7b1d2e3f-4a50-4b6c-9d7e-8f90a1b2c3d4&t=token"),
+			headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+			url: "https://example.com/mutate",
+		});
+		const challenged = await sessionA.fetch("/mutate", {
+			method: "POST",
+			body: "code=1",
+			throwOnHttpError: false,
+		});
+		expect(challenged.challenge?.outcome).toBe("replay_required");
+
+		// The replay passes the entry check and is now inside the (slow) solve.
+		const replay = sessionA.replayChallenged(challenged);
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(solves).toBe(1);
+
+		mockStealthState.queuedErrors.push(new Error("proxy CONNECT failed"));
+		mockStealthState.queuedResponses.push({ status: 200, body: "fresh egress", headers: {} });
+		await expect(sessionB.fetch("/page")).resolves.toMatchObject({ status: 200 });
+		expect(lease.generation).toBe(1);
+
+		releaseSolve();
+		await expect(replay).rejects.toMatchObject({ code: "REPLAY_SESSION_MISMATCH" });
+		// A's 403, B's failed tunnel and B's fresh fetch; the mutation was never sent again.
+		expect(allWreqCalls()).toHaveLength(3);
+	});
 });
 
 const CancellationErrorShapeSchema = z.object({
@@ -5004,6 +6064,7 @@ function createSbsdWiringProvider(): ProviderDefinition {
 			kinds: ["akamai_sbsd"],
 			clientProfile: "safari17_0",
 		},
+		context: { keys: ["egressLease", "engine"] },
 		auth: {
 			mode: "credentials",
 			flow: {
@@ -5015,12 +6076,23 @@ function createSbsdWiringProvider(): ProviderDefinition {
 						data: { status: response.status, outcome: response.challenge?.outcome ?? "solved" },
 					};
 				},
-				continue: async (ctx) => {
+				continue: async (ctx, input) => {
+					const observedEgressLease = ctx.context.get("egressLease");
+					const observedEngine = ctx.context.get("engine");
+					if (input?.injectContext === true) {
+						ctx.context.set("egressLease", "provider-forged-handle");
+						ctx.context.set("engine", "provider-forged-envelope");
+					}
 					const response = await ctx.stealth.fetch("/auth-protected");
 					return {
 						kind: "message",
 						turnId: "sbsd-auth-continue",
-						data: { status: response.status, outcome: response.challenge?.outcome ?? "solved" },
+						data: {
+							status: response.status,
+							outcome: response.challenge?.outcome ?? "solved",
+							observedEgressLease,
+							observedEngine,
+						},
 					};
 				},
 			},
@@ -5081,6 +6153,301 @@ describe("server SBSD bound-transport wiring", () => {
 		mockStealthState.queuedResponses.length = 0;
 		mockStealthState.queuedErrors.length = 0;
 		mockStealthState.queuedCloseErrors.length = 0;
+	});
+
+	it("fails an auth request before provider code when the engine lease key is missing", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+		delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+		try {
+			const { createServerAppAsync } = await import("../server/serve.js");
+			const app = await createServerAppAsync(createSbsdWiringProvider(), {
+				logger: () => undefined,
+			});
+			const response = await app.request("/auth/start", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-missing-engine-key",
+					flowId: "flow-missing-engine-key",
+					tenantId: "tenant-sbsd",
+					providerId: "stealth-sbsd-wiring-provider",
+					connectionId: "connection-sbsd",
+					context: {},
+				}),
+			});
+
+			expect(response.status).toBe(500);
+			expect(await response.json()).toMatchObject({
+				error: { code: "EGRESS_LEASE_KEY_MISSING" },
+			});
+			expect(allWreqCalls()).toHaveLength(0);
+		} finally {
+			if (previous === undefined) delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+			else process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = previous;
+		}
+	});
+
+	it("lets abort cancel a stranded ceremony without evaluating the engine lease key or tenant", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import("../runtime/egress-lease.js");
+		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+		delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+		try {
+			const { createServerAppAsync } = await import("../server/serve.js");
+			const app = await createServerAppAsync(createSbsdWiringProvider(), {
+				logger: () => undefined,
+			});
+			const response = await app.request("/auth/disconnect", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-abort-without-engine-key",
+					flowId: "flow-abort-without-engine-key",
+					providerId: "stealth-sbsd-wiring-provider",
+					connectionId: "connection-sbsd",
+					context: {},
+					engine: { egressLease: "stale-handle-from-a-previous-turn" },
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).not.toHaveProperty("engine");
+			expect(allWreqCalls()).toHaveLength(0);
+		} finally {
+			if (previous === undefined) delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+			else process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = previous;
+		}
+	});
+
+	it("fails an auth request before provider code when the ceremony tenant is missing", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import(
+			"../runtime/egress-lease.js"
+		);
+		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = FIXTURE_LEASE_KEY;
+		try {
+			const { createServerAppAsync } = await import("../server/serve.js");
+			const app = await createServerAppAsync(createSbsdWiringProvider(), {
+				logger: () => undefined,
+			});
+			const response = await app.request("/auth/start", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-missing-tenant",
+					flowId: "flow-missing-tenant",
+					providerId: "stealth-sbsd-wiring-provider",
+					connectionId: "connection-sbsd",
+					context: {},
+				}),
+			});
+
+			expect(response.status).toBe(409);
+			expect(await response.json()).toMatchObject({
+				error: { code: "EGRESS_LEASE_INVALID" },
+			});
+			expect(allWreqCalls()).toHaveLength(0);
+		} finally {
+			if (previous === undefined) delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+			else process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = previous;
+		}
+	});
+
+	it("threads request metering through safe auto-solve, explicit replay, failure, and early exit", async () => {
+		const {
+			APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+			APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
+		} = await import(
+			"../runtime/resolver-config.js"
+		);
+		const envNames = [
+			APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
+			APIFUSE__RESOLVER__CAPSOLVER__API_KEY,
+			"APIFUSE__TRACE__ENABLED",
+			"APIFUSE__TRACE__EXPORTER",
+		] as const;
+		const previous = new Map(envNames.map((name) => [name, process.env[name]] as const));
+		process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY] = "fixture-metered-hyper-key";
+		process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY] = "fixture-metered-capsolver-key";
+		process.env.APIFUSE__TRACE__ENABLED = "true";
+		process.env.APIFUSE__TRACE__EXPORTER = "json";
+		const logLines: string[] = [];
+		const logSpy = spyOn(console, "log").mockImplementation((value?: unknown) => {
+			logLines.push(String(value));
+		});
+		let fetchSpy: ReturnType<typeof spyOn> | undefined;
+		const usageSpans = () =>
+			logLines.flatMap((line) => {
+				try {
+					const span = JSON.parse(line) as { name?: string; attributes?: Record<string, unknown> };
+					return span.name === "resolver.usage" ? [span] : [];
+				} catch {
+					return [];
+				}
+			});
+		const providerFor = (id: string, explicitReplay: boolean) =>
+			createProviderDefinitionDouble({
+				id,
+				allowedHosts: ["example.com"],
+				stealth: { browser: "safari", os: "macos" },
+				resolver: {
+					vendors: ["hypersolutions"],
+					kinds: ["akamai_sbsd"],
+					clientProfile: "safari17_0",
+				},
+				operations: {
+					probe: {
+						riskClass: "read",
+						input: z.object({}),
+						output: z.object({ status: z.number() }),
+						upstream: { baseUrl: "https://example.com" },
+						handler: async (ctx) => {
+							const session = ctx.stealth.createSession();
+							const response = await session.fetch("/protected", {
+								...(explicitReplay ? { method: "POST" as const, body: Buffer.from([0, 255]) } : {}),
+								throwOnHttpError: false,
+							});
+							return {
+								status: explicitReplay
+									? (await session.replayChallenged(response)).status
+									: response.status,
+							};
+						},
+					},
+				},
+			});
+		try {
+			installHyperPayloadFetch();
+			const { createServerAppAsync } = await import("../server/serve.js");
+			for (const explicitReplay of [false, true]) {
+				logLines.length = 0;
+				queueHardSbsdSolve(
+					{ status: 200, body: "solved", headers: {}, url: "https://example.com/protected" },
+					"https://example.com/protected",
+				);
+				const app = await createServerAppAsync(
+					providerFor(`metered-${explicitReplay ? "explicit" : "safe"}`, explicitReplay),
+					{ logger: () => undefined },
+				);
+				const response = await app.request("/v1/probe", {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify({ requestId: `req-metered-${explicitReplay}`, input: {} }),
+				});
+				expect(response.status).toBe(200);
+				expect(usageSpans()).toHaveLength(2);
+				expect(usageSpans().every((span) => span.attributes?.outcome === "success")).toBe(true);
+				expect(usageSpans().map((span) => span.attributes?.endpoint)).toEqual([
+					"hyper:ip",
+					"hyper:sbsd_create",
+				]);
+			}
+
+			logLines.length = 0;
+			mockStealthState.queuedResponses.push(
+				{
+					status: 403,
+					body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=6bcd9c7e-b08f-4ced-9d57-80abcded6f79&t=token"),
+					headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+					url: "https://example.com/protected",
+				},
+				{ status: 503, body: "unavailable", headers: {}, url: "https://ip.hypersolutions.co/ip" },
+			);
+			const failedApp = await createServerAppAsync(providerFor("metered-failure", false), {
+				logger: () => undefined,
+			});
+			await failedApp.request("/v1/probe", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req-metered-failure", input: {} }),
+			});
+			expect(usageSpans()).toHaveLength(1);
+			expect(usageSpans()[0]?.attributes?.outcome).toBe("vendor_error");
+			expect(usageSpans()[0]?.attributes?.endpoint).toBe("hyper:ip");
+
+			logLines.length = 0;
+			delete process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY];
+			mockStealthState.queuedResponses.push({
+				status: 403,
+				body: sbsdInterstitial("/EdTyEb8L/9iGcpl/Gm?v=7cdead8f-c190-4dfe-8e68-91bcdefe708a&t=token"),
+				headers: { "set-cookie": "sbsd_o=initial; Path=/; Secure" },
+				url: "https://example.com/protected",
+			});
+			const earlyApp = await createServerAppAsync(providerFor("metered-early-exit", false), {
+				logger: () => undefined,
+			});
+			await earlyApp.request("/v1/probe", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req-metered-early", input: {} }),
+			});
+			expect(usageSpans()).toHaveLength(0);
+
+			logLines.length = 0;
+			fetchSpy = spyOn(globalThis, "fetch");
+			const vendorResponses = [
+				new Response(JSON.stringify({ errorId: 0, taskId: "server-cache-task" }), {
+					headers: { "content-type": "application/json" },
+				}),
+				new Response(
+					JSON.stringify({
+						errorId: 0,
+						status: "ready",
+						solution: { cookie: "server-cache-cookie" },
+					}),
+					{ headers: { "content-type": "application/json" } },
+				),
+			];
+			fetchSpy.mockImplementation(async () => {
+				const response = vendorResponses.shift();
+				if (!response) throw new Error("cache hit unexpectedly called CapSolver again");
+				return response;
+			});
+			const cacheProvider = createProviderDefinitionDouble({
+				id: "metered-cache-hit",
+				allowedHosts: ["example.com"],
+				resolver: { vendors: ["capsolver"], kinds: ["aws_waf"] },
+				operations: {
+					probe: {
+						riskClass: "read",
+						input: z.object({}),
+						output: z.object({ status: z.number() }),
+						handler: async (ctx) => {
+							const challenge = {
+								kind: "aws_waf" as const,
+								pageUrl: "https://example.com/protected",
+								siteKey: "server-cache-key",
+								iv: "server-cache-iv",
+								context: "server-cache-context",
+								captchaScript: "https://captcha.awswaf.com/challenge.js",
+							};
+							await ctx.resolver.solve(challenge);
+							await ctx.resolver.solve(challenge);
+							return { status: 200 };
+						},
+					},
+				},
+			});
+			const cacheApp = await createServerAppAsync(cacheProvider, { logger: () => undefined });
+			const cacheResponse = await cacheApp.request("/v1/probe", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ requestId: "req-metered-cache", input: {} }),
+			});
+			expect(cacheResponse.status).toBe(200);
+			expect(vendorResponses).toHaveLength(0);
+			expect(usageSpans()).toHaveLength(1);
+			expect(usageSpans()[0]?.attributes?.endpoint).toBe("capsolver:create_task");
+		} finally {
+			fetchSpy?.mockRestore();
+			logSpy.mockRestore();
+			for (const [name, value] of previous) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
 	});
 
 	it("returns detection-only classification for a provider without a resolver", async () => {
@@ -5452,6 +6819,7 @@ describe("server SBSD bound-transport wiring", () => {
 
 	it("supplies the bound transport in operation and auth FlowContext assembly", async () => {
 		installHyperPayloadFetch();
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import("../runtime/egress-lease.js");
 		const { APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY } = await import(
 			"../runtime/resolver-config.js"
 		);
@@ -5463,11 +6831,13 @@ describe("server SBSD bound-transport wiring", () => {
 				APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
 				NODEMAVEN_USERNAME_ENV,
 				NODEMAVEN_PASSWORD_ENV,
+				APIFUSE__ENGINE__CEREMONY_LEASE_KEY,
 			].map((name) => [name, process.env[name]] as const),
 		);
 		process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY] = "fixture-hyper-key";
 		process.env[NODEMAVEN_USERNAME_ENV] = "fixture-server-account";
 		process.env[NODEMAVEN_PASSWORD_ENV] = "fixture-server-password";
+		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = "fixture-engine-owned-ceremony-key";
 		try {
 			const { createServerAppAsync } = await import("../server/serve.js");
 			const app = await createServerAppAsync(createSbsdWiringProvider(), {
@@ -5509,15 +6879,23 @@ describe("server SBSD bound-transport wiring", () => {
 				body: JSON.stringify({
 					requestId: "req-sbsd-auth",
 					flowId: "flow-sbsd",
+					tenantId: "tenant-sbsd",
 					providerId: "stealth-sbsd-wiring-provider",
 					connectionId: "connection-sbsd",
 					context: {},
 				}),
 			});
 			expect(auth.status).toBe(200);
-			expect(await auth.json()).toMatchObject({
+			const authBody = (await auth.json()) as {
+				data: unknown;
+				engine?: { egressLease?: string };
+			};
+			const handle = authBody.engine?.egressLease;
+			if (!handle) throw new Error("auth response did not carry a ceremony lease");
+			expect(authBody).toMatchObject({
 				data: { data: { status: 200, outcome: "solved" } },
 			});
+			expect(typeof handle).toBe("string");
 			expect(
 				allWreqCalls().filter((call) =>
 					/https:\/\/example\.com\/(?:operation|auth)-protected/u.test(call.url),
@@ -5528,6 +6906,95 @@ describe("server SBSD bound-transport wiring", () => {
 					(client) => client.options?.browser === "safari_17.0" && client.options?.os === "macos",
 				),
 			).toBe(true);
+
+			const authProxy = mockStealthState.clients.at(-1)?.options?.proxy;
+			mockStealthState.queuedResponses.push({
+				status: 200,
+				body: "continued without provider-visible lease",
+				headers: {},
+				url: "https://example.com/auth-protected",
+			});
+			const isolatedContinuation = await app.request("/auth/continue", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-auth-isolated",
+					flowId: "flow-sbsd",
+					tenantId: "tenant-sbsd",
+					providerId: "stealth-sbsd-wiring-provider",
+					connectionId: "connection-sbsd",
+					context: {},
+					engine: { egressLease: handle },
+				}),
+			});
+			expect(isolatedContinuation.status).toBe(200);
+			const isolatedBody = (await isolatedContinuation.json()) as {
+				data: { data: Record<string, unknown> };
+				engine?: { egressLease?: string };
+			};
+			expect(isolatedBody).toMatchObject({
+				data: { data: { status: 200 } },
+				engine: { egressLease: handle },
+			});
+			expect(isolatedBody.data.data).not.toHaveProperty("observedEgressLease");
+			expect(isolatedBody.data.data).not.toHaveProperty("observedEngine");
+			expect(mockStealthState.clients.at(-1)?.options?.proxy).toBe(authProxy);
+
+			mockStealthState.queuedResponses.push({
+				status: 200,
+				body: "continued on bound egress",
+				headers: {},
+				url: "https://example.com/auth-protected",
+			});
+			const continuation = await app.request("/auth/continue", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-auth-continue",
+					flowId: "flow-sbsd",
+					tenantId: "tenant-sbsd",
+					providerId: "stealth-sbsd-wiring-provider",
+					connectionId: "connection-sbsd",
+					context: { egressLease: "caller-forged", engine: "caller-forged" },
+					input: { injectContext: true },
+					engine: { egressLease: handle },
+				}),
+			});
+			expect(continuation.status).toBe(200);
+			const continuationBody = (await continuation.json()) as Record<string, unknown>;
+			expect(continuationBody).toMatchObject({
+				data: { data: { status: 200 } },
+				contextPatch: {
+					egressLease: "provider-forged-handle",
+					engine: "provider-forged-envelope",
+				},
+				engine: { egressLease: handle },
+			});
+			expect(mockStealthState.clients.at(-1)?.options?.proxy).toBe(authProxy);
+
+			const separator = handle.indexOf(".");
+			const signatureStart = separator + 1;
+			const signatureFirst = handle[signatureStart];
+			const tampered = `${handle.slice(0, signatureStart)}${signatureFirst === "A" ? "B" : "A"}${handle.slice(signatureStart + 1)}`;
+			const callsBeforeTamper = allWreqCalls().length;
+			const rejected = await app.request("/auth/continue", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-auth-tampered",
+					flowId: "flow-sbsd",
+					tenantId: "tenant-sbsd",
+					providerId: "stealth-sbsd-wiring-provider",
+					connectionId: "connection-sbsd",
+					context: {},
+					engine: { egressLease: tampered },
+				}),
+			});
+			expect(rejected.status).toBe(409);
+			expect(await rejected.json()).toMatchObject({
+				error: { code: "EGRESS_LEASE_INVALID" },
+			});
+			expect(allWreqCalls()).toHaveLength(callsBeforeTamper);
 		} finally {
 			for (const [name, value] of previous) {
 				if (value === undefined) delete process.env[name];
@@ -5554,6 +7021,8 @@ describe("server SBSD bound-transport wiring", () => {
 			body: {
 				requestId: "req-sbsd-telemetry-auth",
 				flowId: "flow-sbsd-telemetry",
+				// An SBSD-declaring provider's auth turn carries a ceremony lease, which needs the tenant.
+				tenantId: "tenant-sbsd-telemetry",
 				providerId: "stealth-sbsd-wiring-provider",
 				connectionId: "connection-sbsd-telemetry",
 				input: {},
@@ -5568,17 +7037,20 @@ describe("server SBSD bound-transport wiring", () => {
 		const { APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY } = await import(
 			"../runtime/resolver-config.js"
 		);
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import("../runtime/egress-lease.js");
 		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
 			"../runtime/proxy-nodemaven.js"
 		);
 		const previous = new Map(
 			[
 				APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY,
+				APIFUSE__ENGINE__CEREMONY_LEASE_KEY,
 				NODEMAVEN_USERNAME_ENV,
 				NODEMAVEN_PASSWORD_ENV,
 			].map((name) => [name, process.env[name]] as const),
 		);
 		process.env[APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY] = "fixture-hyper-key";
+		process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = FIXTURE_LEASE_KEY;
 		process.env[NODEMAVEN_USERNAME_ENV] = "fixture-server-account";
 		process.env[NODEMAVEN_PASSWORD_ENV] = "fixture-server-password";
 		const recordVendorAttempt = spyOn(ResolverTelemetryCollector.prototype, "recordVendorAttempt");

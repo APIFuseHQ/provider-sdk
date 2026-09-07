@@ -198,6 +198,7 @@ export {
 	type TelemetryKey,
 	type TenantNeutral,
 } from "./runtime/request-telemetry.js";
+export { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } from "./runtime/egress-lease.js";
 export {
 	ResolverTelemetryCollector,
 	type ResolverCacheReadTelemetryEvent,
@@ -230,6 +231,7 @@ export {
 export { createUnsupportedResolverClient } from "./runtime/resolver-shared.js";
 export type { ResolverRuntimeOptions } from "./runtime/resolver.js";
 export type {
+	ResolverPaidUsageContext,
 	ResolverVendorTransport,
 	ResolverVendorUnavailableReason,
 } from "./runtime/resolver-vendors/types.js";

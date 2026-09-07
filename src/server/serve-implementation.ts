@@ -29,6 +29,7 @@ import {
 	isTransportError,
 	isValidationError,
 	ProviderError,
+	SDKError,
 	type ProviderErrorObservability,
 	type ProviderErrorOptions,
 } from "../errors.js";
@@ -55,6 +56,10 @@ import {
 	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
 } from "../runtime/choice.js";
 import { createCredentialContext } from "../runtime/credential.js";
+import {
+	createCeremonyEgressLeaseRuntime,
+	ENGINE_CEREMONY_EGRESS_LEASE,
+} from "../runtime/egress-lease.js";
 import { createEnvContext } from "../runtime/env.js";
 import { executeOperation } from "../runtime/executor.js";
 import { createHttpClient } from "../runtime/http.js";
@@ -521,6 +526,9 @@ function createLazyStealthClient(
 				async fetch(...args) {
 					return (await getSession()).fetch(...args);
 				},
+				async replayChallenged(...args) {
+					return (await getSession()).replayChallenged(...args);
+				},
 				redirects: {
 					async run(...args) {
 						return (await getSession()).redirects.run(...args);
@@ -621,6 +629,11 @@ function createResolverRuntimeOptions(
 	};
 }
 
+/** Shared predicate for the SBSD challenge runtime and the ceremony egress lease. */
+function declaresAkamaiSbsdResolver(provider: ProviderDefinition): boolean {
+	return provider.resolver?.kinds.some((kind) => kind === "akamai_sbsd") === true;
+}
+
 function createStealthChallengeDetection(
 	provider: ProviderDefinition,
 	resolverRuntime: typeof ResolverRuntimeModule | undefined,
@@ -629,7 +642,7 @@ function createStealthChallengeDetection(
 	trace: RuntimeTraceContext,
 	signal: AbortSignal | undefined,
 ): StealthChallengeRuntime | undefined {
-	const resolverDeclared = provider.resolver?.kinds.some((kind) => kind === "akamai_sbsd") === true;
+	const resolverDeclared = declaresAkamaiSbsdResolver(provider);
 	const detectOnly = provider.stealth?.challengeDetection?.akamaiSbsd === true;
 	if (!resolverDeclared && !detectOnly) {
 		return undefined;
@@ -1047,6 +1060,7 @@ export function resolveAuthFlowProxyAffinityKey(
 function createAuthFlowContext(
 	provider: ProviderDefinition,
 	request: AuthFlowRequest,
+	route: AuthRoute,
 	options: ProviderServerRuntimeOptions,
 	state: ProviderRuntimeState,
 	scope: RequestScopeContext,
@@ -1054,6 +1068,7 @@ function createAuthFlowContext(
 ): {
 	context: FlowContext;
 	getPatch: () => Record<string, unknown | null> | undefined;
+	getEngineState: () => AuthFlowSuccessResponse["engine"];
 } {
 	const baseUrl = getProviderBaseUrl(provider);
 	const stealthBaseUrl = getProviderStealthBaseUrl(provider);
@@ -1071,6 +1086,30 @@ function createAuthFlowContext(
 		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
 	};
+	// The lease pins the proxy egress a challenged ceremony solved on, so only providers
+	// that declare the akamai_sbsd resolver kind carry one (same predicate as the challenge
+	// runtime). `abort` never evaluates the key or tenant: a user must be able to cancel a
+	// stranded flow even when engine provisioning is broken, and an abort is not a
+	// continuation of the ceremony the lease pins.
+	const ceremonyEgressLease =
+		route !== "abort" &&
+		declaresAkamaiSbsdResolver(provider) &&
+		proxyPolicy &&
+		proxyPolicy.mode !== "disabled"
+			? createCeremonyEgressLeaseRuntime({
+					tenantId: request.tenantId,
+					providerId: provider.id,
+					flowId: request.flowId,
+					affinityKey: proxyClientOptions.affinityKey,
+					...(request.engine?.egressLease ? { handle: request.engine.egressLease } : {}),
+				})
+			: undefined;
+	if (route !== "abort" && request.engine?.egressLease && !ceremonyEgressLease) {
+		throw new SDKError(
+			"An egress lease was supplied for an auth flow that does not use a ceremony lease",
+			{ code: "EGRESS_LEASE_INVALID" },
+		);
+	}
 	const resolverIdentityScope = resolveProviderResolverIdentityScope(
 		provider,
 		proxyClientOptions.affinityKey,
@@ -1100,6 +1139,7 @@ function createAuthFlowContext(
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
+		...(ceremonyEgressLease ? { [ENGINE_CEREMONY_EGRESS_LEASE]: ceremonyEgressLease } : {}),
 		...(signal ? { signal } : {}),
 		// A declared resolver without a `stealth` block still gets the default Chrome client
 		// (auth FlowContext is not capability-gated), so the runtime must ride along.
@@ -1194,6 +1234,10 @@ function createAuthFlowContext(
 	return {
 		context,
 		getPatch: flowContextStore.getPatch,
+		getEngineState() {
+			const egressLease = ceremonyEgressLease?.handle();
+			return egressLease ? { egressLease } : undefined;
+		},
 	};
 }
 
@@ -2632,6 +2676,7 @@ function getHttpStreamTransport(
 function toAuthFlowResponse(
 	result: unknown,
 	contextPatch: Record<string, unknown | null> | undefined,
+	engine: AuthFlowSuccessResponse["engine"],
 ): Response | AuthFlowSuccessResponse {
 	if (result instanceof Response) {
 		return result;
@@ -2644,6 +2689,7 @@ function toAuthFlowResponse(
 	return {
 		data: result,
 		...(contextPatch ? { contextPatch } : {}),
+		...(engine ? { engine } : {}),
 	};
 }
 
@@ -2820,10 +2866,12 @@ async function handleAuthFlow(
 	// depend on declared secrets (client ids/secrets), so fail structured before
 	// any flow code runs instead of at whatever point the ceremony first reads
 	// the env. `abort` stays exempt: a user must always be able to cancel a
-	// stranded flow even when provisioning is broken.
-	const { context, getPatch } = createAuthFlowContext(
+	// stranded flow even when provisioning is broken (createAuthFlowContext
+	// applies the same exemption to the engine ceremony lease).
+	const { context, getPatch, getEngineState } = createAuthFlowContext(
 		provider,
 		request,
+		route,
 		options,
 		state,
 		scope,
@@ -2863,10 +2911,10 @@ async function handleAuthFlow(
 			isAuthTurn(result)
 				? materializeAuthFlowTurn(provider, request, result)
 				: result;
-		return toAuthFlowResponse(materializedResult, getPatch());
+		return toAuthFlowResponse(materializedResult, getPatch(), getEngineState());
 	} catch (error) {
 		if (error instanceof AuthAbortError) {
-			return toAuthFlowResponse(error.turn, getPatch());
+			return toAuthFlowResponse(error.turn, getPatch(), getEngineState());
 		}
 		throw error;
 	} finally {

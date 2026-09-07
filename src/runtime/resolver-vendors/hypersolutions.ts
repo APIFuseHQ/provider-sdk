@@ -1,11 +1,13 @@
 import { isIP } from "node:net";
 
 import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
+import { recordPaidResolverCreate } from "../resolver-usage.js";
 import type { TraceRecorder } from "../trace.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
 	ResolverChallengeVerdictError,
 	type ResolverIdentity,
+	type ResolverPaidUsageContext,
 	type ResolverVendorAdapter,
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
@@ -49,6 +51,7 @@ export interface HypersolutionsResolverVendorAdapter extends ResolverVendorAdapt
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
 		transport?: ResolverVendorTransport,
+		usage?: ResolverPaidUsageContext,
 	): Promise<AkamaiSbsdChallengeSolution>;
 }
 
@@ -280,13 +283,17 @@ export function createHypersolutionsResolverVendorAdapter(
 		requiresTransport: true,
 		transportAllowedHosts: HYPER_TRANSPORT_HOSTS,
 		supports: (kind) => kind === "akamai_sbsd",
-		async solve(challenge, _identity, signal, traceRecorder, transport) {
+		async solve(challenge, _identity, signal, traceRecorder, transport, usage) {
 			const timeoutController = new AbortController();
 			const operationSignal = options.timeoutMs
 				? AbortSignal.any([signal, timeoutController.signal])
 				: signal;
 			const timeout = options.timeoutMs
-				? setTimeout(() => timeoutController.abort(), options.timeoutMs)
+				? setTimeout(
+						// A named reason lets the usage span record `timeout`, not a caller abort.
+						() => timeoutController.abort(new DOMException("Hyper solve timed out", "TimeoutError")),
+						options.timeoutMs,
+					)
 				: undefined;
 			const runPhase = <T>(phase: HyperPhase, fn: () => Promise<T>): Promise<T> =>
 				traceRecorder ? traceRecorder.runSpan(`resolver.vendor.${phase}`, fn) : fn();
@@ -314,7 +321,17 @@ export function createHypersolutionsResolverVendorAdapter(
 				assertChallengeInput(challenge, options.allowedHosts);
 				const exchange = scriptExchangeUrls(challenge.scriptUrl, challenge.challengeToken);
 
-				const ip = await runPhase("measure_ip", async () => {
+				// Hyper documents /ip as an authenticated service request but does not
+				// publish an explicit exclusion from request quota. Meter conservatively.
+				const ip = await recordPaidResolverCreate({
+					traceRecorder,
+					vendor: HYPERSOLUTIONS_VENDOR_ID,
+					kind: challenge.kind,
+					endpoint: "hyper:ip",
+					signal: operationSignal,
+					usage,
+					create: () =>
+						runPhase("measure_ip", async () => {
 					const ipResponse = await boundFetch(
 						transport,
 						HYPER_IP_URL,
@@ -332,9 +349,10 @@ export function createHypersolutionsResolverVendorAdapter(
 					);
 					requireSuccess(ipResponse.status, "measure_ip");
 					assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
-					const ip = parseObservedIp(ipResponse.body);
-					if (!ip) throw transportFailure("measure_ip");
-					return ip;
+					const observedIp = parseObservedIp(ipResponse.body);
+					if (!observedIp) throw transportFailure("measure_ip");
+					return observedIp;
+						}),
 				});
 
 				const scriptResponse = await runPhase("fetch_script", async () => {
@@ -373,7 +391,16 @@ export function createHypersolutionsResolverVendorAdapter(
 				let expires: number | undefined;
 				for (const [roundIndex, index] of exchange.indices.entries()) {
 					const round = roundIndex + 1;
-					const payload = await runPhase("generate_payload", async () => {
+					const payload = await recordPaidResolverCreate({
+						traceRecorder,
+						vendor: HYPERSOLUTIONS_VENDOR_ID,
+						kind: challenge.kind,
+						endpoint: "hyper:sbsd_create",
+						round,
+						signal: operationSignal,
+						usage,
+						create: () =>
+							runPhase("generate_payload", async () => {
 						const hyperResponse = await generatePayload(
 							fetchImpl,
 							apiKey,
@@ -390,16 +417,17 @@ export function createHypersolutionsResolverVendorAdapter(
 							operationSignal,
 						);
 						requireSuccess(hyperResponse.status, "generate_payload");
-						const payload =
+						const generated =
 							hyperResponse.body === undefined ? undefined : parsePayload(hyperResponse.body);
-						if (!payload) {
+						if (!generated) {
 							throw new ResolverVendorUnavailableError(
 								HYPERSOLUTIONS_VENDOR_ID,
 								"transport_failure",
 								{ phase: "generate_payload", round },
 							);
 						}
-						return payload;
+						return generated;
+							}),
 					});
 					const postResponse = await runPhase("post_payload", async () => {
 						const postResponse = await boundFetch(

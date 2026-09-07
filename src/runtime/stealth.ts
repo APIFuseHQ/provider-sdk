@@ -38,6 +38,11 @@ import type {
 } from "../types.js";
 import { chrome149HeaderOrder } from "./chrome149-header-order.js";
 import {
+	ENGINE_CEREMONY_EGRESS_LEASE,
+	type CeremonyEgressBinding,
+	type CeremonyEgressLeaseRuntime,
+} from "./egress-lease.js";
+import {
 	createProxyAuthIpDeniedError,
 	createProxyEdgeAuthRejectedError,
 	createProxyEdgeTlsRejectedError,
@@ -100,6 +105,21 @@ const PROXY_CONNECT_FAILURE_BODY_PATTERN =
 const PROXY_AUTH_DIAGNOSTIC_URL = "http://example.com/";
 const PROXY_AUTH_DIAGNOSTIC_TIMEOUT_MS = 5_000;
 const STEALTH_PROXY_TRANSPORT_RETRY_ERROR_CODES = [PROXY_CONNECT_FAILURE_CODE] as const;
+// Failures that mean the bound ceremony endpoint did not carry the request to the origin.
+// Proxy-level refusals are covered by isProxyPoolRefreshableError; PROXY_AUTH_IP_DENIED is
+// deliberately absent because another endpoint of the same vendor is denied just the same.
+const BOUND_EGRESS_TRANSPORT_FAILURE_CODES: ReadonlySet<string> = new Set([
+	PROXY_CONNECT_FAILURE_CODE,
+	"transport_network_error",
+	"transport_timeout",
+]);
+
+function isBoundEgressTransportFailure(error: TransportError): boolean {
+	return (
+		isProxyPoolRefreshableError(error) ||
+		(error.code !== undefined && BOUND_EGRESS_TRANSPORT_FAILURE_CODES.has(error.code))
+	);
+}
 const MAX_STEALTH_REDIRECT_HOPS = 10;
 const REDIRECT_BODY_HEADERS = new Set([
 	"content-encoding",
@@ -141,11 +161,19 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 	proxyStealth?: { insecureSkipVerify?: boolean };
 };
 
-/** Server-attached challenge wiring; kept off the public StealthClientOptions type. */
+/** Server-attached challenge wiring and engine lease; kept off the public StealthClientOptions type. */
 type StealthSessionClientOptions = StealthClientOptions & {
 	stealth?: StealthClientOptions["stealth"] & {
 		readonly challengeRuntime?: StealthChallengeRuntime;
 	};
+	readonly [ENGINE_CEREMONY_EGRESS_LEASE]?: CeremonyEgressLeaseRuntime;
+};
+
+type ChallengedReplayRecord = {
+	consumed: boolean;
+	/** Ceremony egress generation the challenged request ran on; a rebind retires the record. */
+	readonly generation: number;
+	replay(): Promise<StealthResponse>;
 };
 
 function assertAkamaiSbsdClientProfile(
@@ -567,7 +595,7 @@ function requiredEmulationHeader(headers: ReadonlyMap<string, string>, name: str
 function buildChromeHeaderTuples(options: {
 	emulationHeaders: Iterable<[string, string]>;
 	method: StealthMethod;
-	body?: string;
+	body?: string | Buffer;
 	headers: Record<string, string>;
 	requestUrl: string;
 	acceptLanguage?: string;
@@ -908,9 +936,9 @@ function readResponseBodyChunk(
 	});
 }
 
-function normalizeBody(body: StealthFetchOptions["body"]): string {
+function normalizeBody(body: unknown): string | Buffer | undefined {
 	if (body === undefined) {
-		return "";
+		return undefined;
 	}
 
 	if (typeof body === "string") {
@@ -918,10 +946,15 @@ function normalizeBody(body: StealthFetchOptions["body"]): string {
 	}
 
 	if (Buffer.isBuffer(body)) {
-		return body.toString();
+		return Buffer.from(body);
 	}
 
-	return String(body);
+	// `StealthFetchOptions.body` is `string | Buffer`; anything else is a provider fault,
+	// caught before the first request so a later replay can send the same bytes.
+	throw new SDKError("Stealth request bodies must be a string or Buffer", {
+		code: "STEALTH_BODY_UNSUPPORTED",
+		fix: "Supply a string or Buffer body; streams and typed arrays are not snapshotted.",
+	});
 }
 
 function isPolicyManagedProxy(options: StealthClientOptions): boolean {
@@ -967,6 +1000,8 @@ type ResolvedAttemptProxy = {
 	poolIndex?: number;
 	proxyHash?: string;
 	vendor?: ProxyVendorName;
+	refreshEpoch?: number;
+	lifetimeMinutes?: number;
 };
 
 function proxyPoolIndexFromDiagnostics(
@@ -977,6 +1012,14 @@ function proxyPoolIndexFromDiagnostics(
 		return undefined;
 	}
 	return Math.floor(value);
+}
+
+function positiveDiagnosticNumber(
+	diagnostics: Record<string, string | number | boolean> | undefined,
+	name: string,
+): number | undefined {
+	const value = diagnostics?.[name];
+	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function proxyEndpointHash(proxyUrl: string | undefined): string | undefined {
@@ -1176,7 +1219,7 @@ async function fetchStealthRedirectChain(
 	buildHeaders?: (
 		url: string,
 		method: StealthMethod,
-		body: string | undefined,
+		body: string | Buffer | undefined,
 		headers: Record<string, string>,
 	) => HeaderTuple[],
 ): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> {
@@ -1281,10 +1324,73 @@ function createSessionFetcher(
 	const warn = clientOptions.warn ?? console.warn;
 	const cookieJar = new StealthCookieJar([], baseUrl);
 	const akamaiSbsdState: AkamaiSbsdSessionState = { transactions: new Map() };
+	const challengedReplays = new WeakMap<StealthResponse, ChallengedReplayRecord>();
+	const ceremonyEgressLease = clientOptions[ENGINE_CEREMONY_EGRESS_LEASE];
+	// The lease is shared by every session of this client; this is the lease generation this
+	// session's challenge state and replay records were built against.
+	let observedEgressGeneration = ceremonyEgressLease?.generation ?? 0;
 	const automaticChallengeRefetchPolicy = {
 		...createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
 		methods: ["GET"],
 	};
+
+	function clearAkamaiSbsdState(): void {
+		akamaiSbsdState.rememberedScript = undefined;
+		akamaiSbsdState.transactions.clear();
+		akamaiSbsdState.completedSuccessKey = undefined;
+	}
+
+	function currentEgressGeneration(): number {
+		return ceremonyEgressLease?.generation ?? 0;
+	}
+
+	/**
+	 * Whoever dropped the binding (this session by expiry or release, or another session of
+	 * the same client), the challenge state that was only valid on the retired endpoint goes
+	 * with it, and replay records made against the old generation stop matching.
+	 */
+	function syncCeremonyEgress(): void {
+		const generation = currentEgressGeneration();
+		if (generation === observedEgressGeneration) return;
+		observedEgressGeneration = generation;
+		clearAkamaiSbsdState();
+	}
+
+	/**
+	 * A binding past its vendor session lifetime is dropped, together with the challenge
+	 * state that was only valid on that endpoint, so this request selects and binds afresh.
+	 */
+	function expireCeremonyEgressLease(): void {
+		ceremonyEgressLease?.dropExpiredBinding();
+		syncCeremonyEgress();
+	}
+
+	/**
+	 * The lease is best effort (ADR-0010: a raw Smartproxy endpoint is not a vendor-guaranteed
+	 * lease). When the attempt that ran on the bound endpoint fails at the transport (the
+	 * proxy refused it, the tunnel never opened, the socket died or timed out) the binding is
+	 * released so the ceremony can leave a dead endpoint before its lifetime elapses. Origin
+	 * responses, however bad, keep the binding: the endpoint is alive. Returns true when a
+	 * binding was released.
+	 */
+	function releaseFailedCeremonyEgress(
+		attemptProxyUrl: string | undefined,
+		error: TransportError,
+	): boolean {
+		const bound = ceremonyEgressLease?.binding;
+		if (
+			!ceremonyEgressLease ||
+			!bound ||
+			!attemptProxyUrl ||
+			attemptProxyUrl !== bound.proxyUrl ||
+			!isBoundEgressTransportFailure(error)
+		) {
+			return false;
+		}
+		ceremonyEgressLease.dropBinding();
+		syncCeremonyEgress();
+		return true;
+	}
 
 	async function getClientEntry(
 		profile: StealthProfileDescriptor,
@@ -1386,6 +1492,26 @@ function createSessionFetcher(
 		proxyAttempt?: number,
 		refreshEpoch?: number,
 	): Promise<ResolvedAttemptProxy> {
+		const bound = ceremonyEgressLease?.binding;
+		if (bound) {
+			if (options?.proxy !== undefined || options?.proxyAttemptOffset !== undefined) {
+				throw new SDKError(
+					"A ceremony-bound egress cannot be overridden by provider request options",
+					{
+						code: "EGRESS_LEASE_BINDING_INVALID",
+						fix: "Remove `proxy` and `proxyAttemptOffset` from stealth requests made inside an auth ceremony.",
+					},
+				);
+			}
+			return {
+				url: bound.proxyUrl,
+				poolIndex: bound.poolIndex,
+				proxyHash: proxyEndpointHash(bound.proxyUrl),
+				vendor: bound.vendor,
+				refreshEpoch: bound.refreshEpoch,
+				lifetimeMinutes: bound.lifetimeMinutes,
+			};
+		}
 		const resolvedProxy = await resolveProxyConfigAsync({
 			proxy: options?.proxy ?? clientOptions.proxy,
 			upstream: clientOptions.upstream,
@@ -1413,11 +1539,73 @@ function createSessionFetcher(
 			poolIndex: proxyPoolIndexFromDiagnostics(resolvedProxy.diagnostics),
 			proxyHash: proxyEndpointHash(resolvedProxy.url),
 			vendor: vendorFromResolvedSource(resolvedProxy.source),
+			refreshEpoch: refreshEpoch ?? 0,
+			...(positiveDiagnosticNumber(resolvedProxy.diagnostics, "lifetimeMinutes") === undefined
+				? {}
+				: {
+						lifetimeMinutes: positiveDiagnosticNumber(resolvedProxy.diagnostics, "lifetimeMinutes"),
+					}),
 		};
 	}
 
+	function bindCeremonyEgress(attemptProxy: ResolvedAttemptProxy | undefined): void {
+		const lease = ceremonyEgressLease;
+		if (!lease || !attemptProxy?.url || !attemptProxy.vendor) return;
+		if (lease.binding) {
+			// A concurrent request on this session may have bound the ceremony while this one
+			// was in flight on an endpoint it selected before the binding existed (pool
+			// rotation after a transport failure). Its response reached the origin from an
+			// egress the handle does not name; accepting it would split the ceremony identity.
+			if (attemptProxy.url !== lease.binding.proxyUrl) {
+				throw new SDKError("The response arrived on an egress other than the ceremony's bound endpoint", {
+					code: "EGRESS_LEASE_BINDING_INVALID",
+				});
+			}
+			return;
+		}
+		if (
+			attemptProxy.poolIndex === undefined ||
+			attemptProxy.lifetimeMinutes === undefined ||
+			!clientOptions.affinityKey
+		) {
+			// Registry vendors always report pool index and session lifetime; missing either
+			// is an SDK fault, not something the caller can correct.
+			throw new SDKError("The selected egress cannot be represented by a ceremony lease", {
+				code: "EGRESS_LEASE_BINDING_INVALID",
+			});
+		}
+		const binding: CeremonyEgressBinding = {
+			vendor: attemptProxy.vendor,
+			proxyUrl: attemptProxy.url,
+			poolIndex: attemptProxy.poolIndex,
+			affinityKey: clientOptions.affinityKey,
+			refreshEpoch: attemptProxy.refreshEpoch ?? 0,
+			lifetimeMinutes: attemptProxy.lifetimeMinutes,
+		};
+		lease.bind(binding);
+	}
+
 	const session: StealthSession = {
-		async fetch(url, options: StealthFetchOptions = {}) {
+		async fetch(url, callerOptions: StealthFetchOptions = {}) {
+			expireCeremonyEgressLease();
+			const requestBody = normalizeBody(callerOptions.body);
+			// Snapshot the caller's headers with the body before the first send: the first
+			// request and an explicit replay both use this copy, so a caller mutating its own
+			// objects afterwards cannot make the two sends differ.
+			const options: StealthFetchOptions = {
+				...callerOptions,
+				...(callerOptions.headers
+					? {
+							headers: Object.fromEntries(
+								Object.entries(callerOptions.headers).map(([name, value]) => [
+									name,
+									Array.isArray(value) ? [...value] : value,
+								]),
+							),
+						}
+					: {}),
+				...(requestBody === undefined ? {} : { body: requestBody }),
+			};
 			const requestProfile = resolveStealthProfileSelection(options.stealth, defaultProfile);
 			let challengeSolveAttempted = false;
 			let challengeRefetchAttempted = false;
@@ -1473,7 +1661,10 @@ function createSessionFetcher(
 			// transport-retry budget instead.
 			const rotatesRegistryChain =
 				usesPolicyAllocator && policyResolvesRegistryVendorChain(policyProxy);
-			const maxAttempts = rotatesRegistryChain ? policyProxyAttemptCap : retryAttemptCap;
+			const unboundMaxAttempts = rotatesRegistryChain ? policyProxyAttemptCap : retryAttemptCap;
+			// A bound ceremony has exactly one endpoint to try; releasing the binding after a
+			// transport failure widens the budget back to the ordinary rotation span.
+			let maxAttempts = ceremonyEgressLease?.binding ? 1 : unboundMaxAttempts;
 			const dedupeAllocatorEndpoints = rotatesRegistryChain;
 			let lastError: unknown;
 
@@ -1495,8 +1686,9 @@ function createSessionFetcher(
 					let fallbackSensitiveValues: readonly string[] = [];
 					let fallbackRequestUrl: string | undefined;
 					let fallbackRedactedUrl: string | undefined;
-					const attemptStartedAt = Date.now();
+					let attemptStartedAt = Date.now();
 					let attemptRecorded = false;
+					const attemptEgressGeneration = currentEgressGeneration();
 					const recordProxyAttempt = (
 						outcome: "ok" | "error",
 						errorCode?: string,
@@ -1516,6 +1708,68 @@ function createSessionFetcher(
 							...(status === undefined ? {} : { status }),
 							durationMs: Date.now() - attemptStartedAt,
 						});
+					};
+					// Shared tail of the first fetch, the automatic refetch, and an explicit replay: a
+					// classified challenge is returned whatever `throwOnHttpError` says (documented on
+					// StealthFetchOptions), any other non-2xx honours it, and the proxy attempt is
+					// recorded once per delivered response.
+					const finalizeAttempt = (
+						attemptResponse: StealthTransportResponse,
+						attemptNormalized: StealthResponse,
+					): StealthResponse => {
+						if (
+							!attemptNormalized.challenge &&
+							attemptResponse.status >= 400 &&
+							options.throwOnHttpError !== false
+						) {
+							throw new TransportError(
+								`Upstream request failed with status ${attemptResponse.status}`,
+								{ code: "upstream_http_error", status: attemptResponse.status },
+							);
+						}
+						recordProxyAttempt("ok", undefined, attemptResponse.status);
+						return attemptNormalized;
+					};
+					const redactAttemptError = <T>(error: T): T =>
+						redactSensitiveError(
+							error,
+							serializedUrl?.sensitiveValues ?? fallbackSensitiveValues,
+							serializedUrl?.requestUrl ?? fallbackRequestUrl,
+							serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
+						);
+					// Cancellation and resolver failures leave the transport path here, redacted; any
+					// other failure becomes the TransportError the retry decision reasons about.
+					const normalizeAttemptError = (error: unknown): TransportError => {
+						let normalizedError: TransportError;
+						try {
+							throwIfAmbientAborted(clientOptions.signal);
+							normalizedError = normalizeStealthTransportError(error);
+						} catch (normalizationError) {
+							if (
+								normalizationError instanceof TransportError &&
+								normalizationError.code === "transport_cancelled"
+							) {
+								recordProxyAttempt(
+									"error",
+									proxyAttemptErrorCode(normalizationError),
+									proxyAttemptStatus(normalizationError),
+								);
+							}
+							throw redactAttemptError(normalizationError);
+						}
+						if (challengeSolveFailure && error === challengeSolveFailure) {
+							throw redactAttemptError(challengeSolveFailure.error);
+						}
+						return normalizedError;
+					};
+					const recordAttemptFailure = (normalizedError: TransportError): TransportError => {
+						const redactedError = redactAttemptError(normalizedError);
+						recordProxyAttempt(
+							"error",
+							proxyAttemptErrorCode(redactedError),
+							proxyAttemptStatus(redactedError),
+						);
+						return redactedError;
 					};
 					try {
 						throwIfAmbientAborted(clientOptions.signal);
@@ -1567,7 +1821,7 @@ function createSessionFetcher(
 							? (
 									currentUrl: string,
 									currentMethod: StealthMethod,
-									currentBody: string | undefined,
+									currentBody: string | Buffer | undefined,
 									currentHeaders: Record<string, string>,
 								) =>
 									buildChromeHeaderTuples({
@@ -1588,7 +1842,7 @@ function createSessionFetcher(
 						const defaultHeaders = buildOrderedHeaders?.(
 							requestUrl,
 							method,
-							options.body === undefined ? undefined : normalizeBody(options.body),
+							requestBody,
 							initialHeaders,
 						);
 						const fetchOnBoundSession = (
@@ -1657,6 +1911,11 @@ function createSessionFetcher(
 						);
 						throwProxyTransportFault(response, normalized.body);
 
+						// Commit only after the selected endpoint reached the origin. A failed
+						// proxy attempt may rotate pool index; the successful exact endpoint is
+						// the one sealed into the ceremony handle.
+						bindCeremonyEgress(attemptProxy);
+
 						const akamaiSbsd = clientOptions.stealth?.challengeRuntime?.akamaiSbsd;
 						const detected = akamaiSbsd
 							? detectAkamaiSbsdChallenge(
@@ -1673,32 +1932,20 @@ function createSessionFetcher(
 									challenge: detected,
 									outcome: "challenge_persisted",
 								};
-								recordProxyAttempt("ok", undefined, response.status);
-								return normalized;
+								return finalizeAttempt(response, normalized);
 							}
-							if (
-								!isProxyTransportRetryMethod(method, automaticChallengeRefetchPolicy, {
-									body: options.body,
-									headers: options.headers,
-								})
-							) {
-								normalized.challenge = {
-									challenge: detected,
-									outcome: "replay_required",
-								};
-								recordProxyAttempt("ok", undefined, response.status);
-								return normalized;
-							}
-							if (!akamaiSbsd.solve) {
+							const automaticReplayEligible = isProxyTransportRetryMethod(
+								method,
+								automaticChallengeRefetchPolicy,
+								{ body: requestBody, headers: options.headers },
+							);
+							if (automaticReplayEligible && !akamaiSbsd.solve) {
 								normalized.challenge = {
 									challenge: detected,
 									outcome: "resolver_unavailable",
 								};
-								recordProxyAttempt("ok", undefined, response.status);
-								return normalized;
+								return finalizeAttempt(response, normalized);
 							}
-							// Only a solve that will actually run on this session needs the profile match.
-							assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, requestProfile);
 
 							const emulationHeaderMap = new Map(
 								emulationHeaders.map(([name, value]) => [name.toLowerCase(), value] as const),
@@ -1718,7 +1965,7 @@ function createSessionFetcher(
 								? (
 										currentUrl: string,
 										currentMethod: StealthMethod,
-										currentBody: string | undefined,
+										currentBody: string | Buffer | undefined,
 										currentHeaders: Record<string, string>,
 									) =>
 										buildChromeHeaderTuples({
@@ -1780,14 +2027,39 @@ function createSessionFetcher(
 									};
 								},
 							};
+							// `options` is already the fetch-start snapshot; the replay gets its own copy
+							// of the body bytes so the transport cannot alias the first send's buffer.
+							const replayOptions: StealthFetchOptions = {
+								...options,
+								...(Buffer.isBuffer(requestBody) ? { body: Buffer.from(requestBody) } : {}),
+							};
 							const transactionKey = akamaiSbsdChallengeKey(detected, {
 								wreqBrowser: mapping.browser,
 								wreqOs: mapping.os,
 								proxyUrl: proxy,
 							});
-							let transaction = akamaiSbsdState.transactions.get(transactionKey);
+							const challenged = { normalized, response };
+							const solveAndReplay = async (
+								explicitReplay: boolean,
+							): Promise<{ normalized: StealthResponse; response: StealthTransportResponse }> => {
+								if (!akamaiSbsd.solve) {
+									throw new SDKError("No resolver is available for the challenged request", {
+										code: "RESOLVER_UNAVAILABLE",
+									});
+								}
+								// Only a solve that will actually run on this session needs the profile match.
+								assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, requestProfile);
+								// A safe request that already solved this exact challenge on this identity
+								// left the session cookies valid: the explicit replay reuses them once
+								// instead of paying for a second solve.
+								const reuseCompletedSuccess =
+									explicitReplay && akamaiSbsdState.completedSuccessKey === transactionKey;
+								if (reuseCompletedSuccess) akamaiSbsdState.completedSuccessKey = undefined;
 							let ownsTransaction = false;
+								if (!reuseCompletedSuccess) {
+									let transaction = akamaiSbsdState.transactions.get(transactionKey);
 							if (!transaction) {
+										akamaiSbsdState.completedSuccessKey = undefined;
 								challengeSolveAttempted = true;
 								ownsTransaction = true;
 								// The solve spans several round trips, so it runs under the client's ambient
@@ -1815,107 +2087,113 @@ function createSessionFetcher(
 									// The proxy delivered the challenged response; the resolver failed.
 									// Surface that failure as-is: it is not a transport fault to normalize
 									// or retry.
-									recordProxyAttempt("ok", undefined, response.status);
+											if (!explicitReplay) {
+												recordProxyAttempt("ok", undefined, challenged.response.status);
+											}
 									challengeSolveFailure = { error: transactionResult.error };
 									throw challengeSolveFailure;
 								}
-								normalized.challenge = {
-									challenge: detected,
-									outcome: "solve_failed",
+										return {
+											normalized: {
+												...challenged.normalized,
+												challenge: { challenge: detected, outcome: "solve_failed" },
+											},
+											response: challenged.response,
 								};
-								recordProxyAttempt("ok", undefined, response.status);
-								return normalized;
+									}
 							}
 							challengeRefetchAttempted = true;
-							({ normalized, response } = await fetchOnBoundSession(
+								// An explicit replay is a new transport exchange on the bound endpoint and
+								// gets its own proxy-attempt record timed from here, not from the initiating
+								// fetch (the caller's think time in between is not transport duration); the
+								// automatic refetch stays within the initiating attempt's record.
+								if (explicitReplay) {
+									// The solve above may have taken seconds; if another session of this client
+									// moved the ceremony meanwhile, the mutation must not go out on the retired
+									// endpoint.
+									if (currentEgressGeneration() !== attemptEgressGeneration) {
+										throw new SDKError(
+											"The ceremony's egress binding changed while the replay was being solved",
+											{ code: "REPLAY_SESSION_MISMATCH" },
+										);
+									}
+									attemptRecorded = false;
+									attemptStartedAt = Date.now();
+								}
+								const replayed = await fetchOnBoundSession(
 								requestUrl,
 								method,
-								options,
+									replayOptions,
 								clientOptions.signal,
-							));
-							throwProxyTransportFault(response, normalized.body);
+								);
+								throwProxyTransportFault(replayed.response, replayed.normalized.body);
 							const persisted = detectAkamaiSbsdChallenge(
-								normalized,
+									replayed.normalized,
 								requestUrl,
 								cookieJar,
 								akamaiSbsd.allowedHosts,
 								akamaiSbsdState,
 							);
 							if (persisted) {
-								normalized.challenge = {
+									replayed.normalized.challenge = {
 									challenge: persisted,
 									outcome: "challenge_persisted",
 								};
-								recordProxyAttempt("ok", undefined, response.status);
-								return normalized;
-							}
+								} else if (ownsTransaction && !explicitReplay) {
+									akamaiSbsdState.completedSuccessKey = transactionKey;
 						}
+								return replayed;
+							};
 
-						if (response.status >= 400 && options.throwOnHttpError !== false) {
-							throw new TransportError(`Upstream request failed with status ${response.status}`, {
-								code: "upstream_http_error",
-								status: response.status,
-							});
-						}
-
-						recordProxyAttempt("ok", undefined, response.status);
-						return normalized;
-					} catch (error) {
-						const sensitiveValues = serializedUrl?.sensitiveValues ?? fallbackSensitiveValues;
-						let normalizedError: TransportError;
+							if (!automaticReplayEligible) {
+								normalized.challenge = {
+									challenge: detected,
+									outcome: "replay_required",
+								};
+								challengedReplays.set(normalized, {
+									consumed: false,
+									generation: attemptEgressGeneration,
+									async replay() {
 						try {
-							throwIfAmbientAborted(clientOptions.signal);
-							normalizedError = normalizeStealthTransportError(error);
-						} catch (normalizationError) {
-							const redactedNormalizationError = redactSensitiveError(
-								normalizationError,
-								sensitiveValues,
-								serializedUrl?.requestUrl ?? fallbackRequestUrl,
-								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
-							);
-							if (
-								normalizationError instanceof TransportError &&
-								normalizationError.code === "transport_cancelled"
-							) {
-								recordProxyAttempt(
-									"error",
-									proxyAttemptErrorCode(normalizationError),
-									proxyAttemptStatus(normalizationError),
-								);
+											const replayed = await solveAndReplay(true);
+											return finalizeAttempt(replayed.response, replayed.normalized);
+										} catch (error) {
+											const normalizedError = normalizeAttemptError(error);
+											releaseFailedCeremonyEgress(proxy, normalizedError);
+											throw recordAttemptFailure(normalizedError);
 							}
-							throw redactedNormalizationError;
+									},
+								});
+								return finalizeAttempt(response, normalized);
 						}
-						if (challengeSolveFailure && error === challengeSolveFailure) {
-							throw redactSensitiveError(
-								challengeSolveFailure.error,
-								sensitiveValues,
-								serializedUrl?.requestUrl ?? fallbackRequestUrl,
-								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
-							);
+							({ normalized, response } = await solveAndReplay(false));
 						}
+
+						return finalizeAttempt(response, normalized);
+					} catch (error) {
+						const normalizedError = normalizeAttemptError(error);
 						const retryErrorCode = proxyAttemptErrorCode(normalizedError);
 						const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);
 						const runProxyAuthDiagnostic = shouldRunProxyAuthDiagnostic(normalizedError);
-						normalizedError = redactSensitiveError(
-							normalizedError,
-							sensitiveValues,
-							serializedUrl?.requestUrl ?? fallbackRequestUrl,
-							serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
-						);
-						recordProxyAttempt(
-							"error",
-							proxyAttemptErrorCode(normalizedError),
-							proxyAttemptStatus(normalizedError),
-						);
-						lastError = normalizedError;
+						const redactedError = recordAttemptFailure(normalizedError);
+						lastError = redactedError;
+						const releasedBoundEgress = releaseFailedCeremonyEgress(proxy, normalizedError);
+						if (releasedBoundEgress) {
+							// The request now proceeds as an unbound one with the full rotation budget;
+							// the attempt spent on the dead endpoint does not count against it.
+							maxAttempts = attempt + 1 + unboundMaxAttempts;
+						}
 						if (challengeSolveAttempted || challengeRefetchAttempted) {
 							// The single refetch is spent (owner or waiter of a shared solve): another
 							// transport attempt would replay the original request and may rotate the
 							// proxy the solved jar is bound to.
-							throw normalizedError;
+							throw redactedError;
 						}
 						if (proxy && rotatesRegistryChain && refreshableProxyError) {
-							stalePoolError = normalizedError;
+							// Also the path a released bound endpoint takes after a proxy-level refusal:
+							// the stale-pool bookkeeping here is what drives allocator invalidation and the
+							// refresh pass when the fresh selection lands on the same endpoint again.
+							stalePoolError = redactedError;
 							if (runProxyAuthDiagnostic) {
 								stalePoolDiagnosticProxy = proxy;
 							}
@@ -1923,6 +2201,17 @@ function createSessionFetcher(
 								continue;
 							}
 							break;
+						}
+						if (
+							releasedBoundEgress &&
+							attempt + 1 < maxAttempts &&
+							retryErrorCode === PROXY_CONNECT_FAILURE_CODE
+						) {
+							// The tunnel to the released endpoint never opened, so the origin never saw the
+							// request: selecting and binding a fresh endpoint in this request is safe for
+							// any method. Ambiguous failures (reset, timeout) fall through to the ordinary
+							// method-aware retry decision below with the binding already released.
+							continue;
 						}
 						// Cap the number of transport retries. For a policy-allocator chain,
 						// every attempt resolves a *different* endpoint/vendor (poolIndex
@@ -1963,7 +2252,7 @@ function createSessionFetcher(
 							throwIfAmbientAborted(clientOptions.signal);
 							continue;
 						}
-						throw normalizedError;
+						throw redactedError;
 					}
 				}
 
@@ -2013,6 +2302,35 @@ function createSessionFetcher(
 
 			throwIfAmbientAborted(clientOptions.signal);
 			throw normalizeStealthTransportError(lastError);
+		},
+		async replayChallenged(challengedResponse) {
+			// Lease expiry is evaluated when a fetch starts, not here: the replay belongs to the
+			// exchange that was challenged on the bound endpoint (Akamai state is IP-bound), so a
+			// lifetime boundary crossed during the solve does not move it elsewhere. The next
+			// fetch drops the expired binding and rebinds.
+			const replay = challengedReplays.get(challengedResponse);
+			if (!replay || challengedResponse.challenge?.outcome !== "replay_required") {
+				throw new SDKError("The challenged response does not belong to this stealth session", {
+					code: "REPLAY_SESSION_MISMATCH",
+				});
+			}
+			syncCeremonyEgress();
+			if (replay.generation !== currentEgressGeneration()) {
+				// The ceremony rebound to another egress after this request ran (in this session or
+				// another of the same client); solving and replaying on the retired endpoint would
+				// split the identity the handle names.
+				throw new SDKError(
+					"The challenged response predates the ceremony's current egress binding",
+					{ code: "REPLAY_SESSION_MISMATCH" },
+				);
+			}
+			if (replay.consumed) {
+				throw new SDKError("The challenged request has already used its one replay budget", {
+					code: "REPLAY_ALREADY_ATTEMPTED",
+				});
+			}
+			replay.consumed = true;
+			return replay.replay();
 		},
 		cookies: cookieJar,
 		redirects: {
@@ -2217,8 +2535,7 @@ function createSessionFetcher(
 		},
 		close() {
 			closed = true;
-			akamaiSbsdState.rememberedScript = undefined;
-			akamaiSbsdState.transactions.clear();
+			clearAkamaiSbsdState();
 			for (const client of clients.values()) {
 				void client.session
 					.then((session) => session.close())

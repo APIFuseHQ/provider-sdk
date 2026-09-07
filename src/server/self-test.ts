@@ -117,6 +117,8 @@ export type SelfTestAuthFlowInvoke = (args: {
 	externalRef?: string;
 	input?: Record<string, unknown>;
 	context?: Record<string, unknown>;
+	/** Opaque engine state from the previous turn (`engine` in the auth response), sent verbatim. */
+	engine?: { egressLease: string };
 	signal?: AbortSignal;
 }) => Promise<{
 	status: number;
@@ -343,6 +345,7 @@ export function createSelfTestAuthFlowInvoke(app: {
 		externalRef,
 		input,
 		context,
+		engine,
 		signal,
 	}) => {
 		const response = await app.request(`/auth/${route}`, {
@@ -351,10 +354,14 @@ export function createSelfTestAuthFlowInvoke(app: {
 			body: JSON.stringify({
 				requestId,
 				flowId,
+				// Engine ceremony leases are scoped to a tenant; the self-test has no
+				// customer tenant, so it presents a fixed one that never collides.
+				tenantId: "self-test",
 				...(connectionId ? { connectionId } : {}),
 				...(externalRef ? { externalRef } : {}),
 				...(input ? { input } : {}),
 				...(context ? { context } : {}),
+				...(engine ? { engine } : {}),
 			}),
 			...(signal ? { signal } : {}),
 		});
@@ -550,6 +557,7 @@ type ParsedAuthFlowTurn =
 			ok: true;
 			turn: { kind: string; data?: unknown; expectedInput?: unknown };
 			contextPatch?: Record<string, unknown>;
+			engine?: { egressLease: string };
 	  }
 	| { ok: false; code: string; message: string; httpStatus: number };
 
@@ -578,6 +586,7 @@ function parseAuthFlowResponse(result: { status: number; body: unknown }): Parse
 		};
 	}
 	const contextPatch = objectProperty(result.body, "contextPatch");
+	const egressLease = objectProperty(objectProperty(result.body, "engine"), "egressLease");
 	return {
 		ok: true,
 		turn: {
@@ -588,6 +597,7 @@ function parseAuthFlowResponse(result: { status: number; body: unknown }): Parse
 		...(contextPatch && typeof contextPatch === "object" && !Array.isArray(contextPatch)
 			? { contextPatch: contextPatch as Record<string, unknown> }
 			: {}),
+		...(typeof egressLease === "string" && egressLease ? { engine: { egressLease } } : {}),
 	};
 }
 
@@ -777,6 +787,9 @@ async function materializeFlowCredential(
 				...(options.externalRef ? { externalRef: options.externalRef } : {}),
 				input: submitInputs,
 				...(Object.keys(flowContext).length > 0 ? { context: flowContext } : {}),
+				// The ceremony egress lease is engine state, not flow context: carry it the
+				// way the gateway does so the continue turn stays on the start turn's egress.
+				...(started.engine ? { engine: started.engine } : {}),
 				...(options.signal ? { signal: options.signal } : {}),
 			}),
 		);

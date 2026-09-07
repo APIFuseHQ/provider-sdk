@@ -34,6 +34,7 @@ import {
 	RESOLVER_VENDOR_CAPABILITIES,
 	type ResolverIdentity,
 	type ResolverIssuingIdentity,
+	type ResolverPaidUsageContext,
 	type ResolverVendorAdapter,
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
@@ -1196,7 +1197,25 @@ function createResolverChainClient(options: {
 										...(adapter.transportAllowedHosts ?? []),
 									])
 								: undefined;
-							return adapter.solve(challenge, identity, signal, telemetryTraceRecorder, transport);
+							const usage: ResolverPaidUsageContext = {
+								// Position in the declared chain, not in the kind-filtered list.
+								vendorIndex: options.entries.indexOf(entry) + 1,
+								...(options.identityScope
+									? {
+											resolverIdentityScope: createHash("sha256")
+												.update(options.identityScope, "utf8")
+												.digest("hex"),
+										}
+									: {}),
+							};
+							return adapter.solve(
+								challenge,
+								identity,
+								signal,
+								telemetryTraceRecorder,
+								transport,
+								usage,
+							);
 						};
 						solution = traceRecorder
 							? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {

@@ -424,6 +424,12 @@ export type ResolverOutcomeTelemetryEvent = {
     readonly challengeKind: ProviderChallengeKind;
 };
 
+// @public
+export type ResolverPaidUsageContext = {
+    readonly vendorIndex: number;
+    readonly resolverIdentityScope?: string;
+};
+
 // @public (undocumented)
 export interface ResolverRuntimeOptions {
     // (undocumented)
@@ -495,7 +501,7 @@ interface ResolverVendorAdapter {
     // (undocumented)
     readonly requiresTransport?: boolean | ((kind: ProviderChallengeKind) => boolean);
     // (undocumented)
-    solve(challenge: ProviderChallenge, identity: ResolverIdentity | undefined, signal: AbortSignal, traceRecorder?: TraceRecorder, transport?: ResolverVendorTransport): Promise<ChallengeSolution>;
+    solve(challenge: ProviderChallenge, identity: ResolverIdentity | undefined, signal: AbortSignal, traceRecorder?: TraceRecorder, transport?: ResolverVendorTransport, usage?: ResolverPaidUsageContext): Promise<ChallengeSolution>;
     // (undocumented)
     supports(kind: ProviderChallengeKind): boolean;
     readonly transportAllowedHosts?: readonly string[];

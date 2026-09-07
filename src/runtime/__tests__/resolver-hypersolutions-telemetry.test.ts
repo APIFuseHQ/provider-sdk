@@ -164,10 +164,20 @@ describe("hypersolutions resolver telemetry integration", () => {
 		await context.resolver.solve(challenge(true));
 		expect(run.solveCalls).toBe(1);
 		expect(run.recordAttempt).toHaveBeenCalledTimes(1);
+		// A `resolver.usage` span precedes each metered vendor call: the /ip probe and every
+		// payload round; the passive phase spans are all still present.
 		expect(trace.getSpans().map(({ name }) => name)).toEqual([
 			"resolver.solve",
 			"resolver.vendor.attempt",
-			...[...PHASES, "generate_payload", "post_payload"].map((phase) => `resolver.vendor.${phase}`),
+			"resolver.usage",
+			"resolver.vendor.measure_ip",
+			"resolver.vendor.fetch_script",
+			"resolver.usage",
+			"resolver.vendor.generate_payload",
+			"resolver.vendor.post_payload",
+			"resolver.usage",
+			"resolver.vendor.generate_payload",
+			"resolver.vendor.post_payload",
 		]);
 		const log = run.telemetry.toLogPayload()!;
 		expect(log.attemptSamples?.[0]?.diagnostics).toEqual({

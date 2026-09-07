@@ -2,12 +2,15 @@ import { getStealthProfile } from "../../stealth/profiles.js";
 import type { ChallengeSolution, ProviderChallenge, ProviderChallengeKind } from "../../types.js";
 import { redactSensitiveText } from "../request-options.js";
 import { DEFAULT_STEALTH_PROFILE } from "../stealth.js";
+import { recordPaidResolverCreate } from "../resolver-usage.js";
 import type { TraceRecorder } from "../trace.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
 	ResolverChallengeVerdictError,
 	type ResolverIdentity,
+	type ResolverPaidUsageContext,
 	type ResolverVendorAdapter,
+	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 	recordResolverVendorPoll,
 	type ResolverVendorUnavailableReason,
@@ -47,6 +50,8 @@ export interface CapsolverResolverVendorAdapter extends ResolverVendorAdapter {
 		identity: ResolverIdentity | undefined,
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
+		transport?: ResolverVendorTransport,
+		usage?: ResolverPaidUsageContext,
 	): Promise<ChallengeSolution>;
 }
 
@@ -456,7 +461,7 @@ export function createCapsolverResolverVendorAdapter(
 			return resolverVendorSupports(CAPSOLVER_VENDOR_ID, kind);
 		},
 
-		async solve(challenge, identity, callerSignal, traceRecorder) {
+		async solve(challenge, identity, callerSignal, traceRecorder, _transport, usage) {
 			const apiKey = options.apiKey?.trim();
 			if (!apiKey) {
 				throw new ResolverVendorUnavailableError(CAPSOLVER_VENDOR_ID, "missing_credentials", {
@@ -570,8 +575,18 @@ export function createCapsolverResolverVendorAdapter(
 											: {}),
 									}
 								: (() => {
-										throw new TypeError(`Capsolver resolver does not support ${challenge.kind}`);
+														throw new TypeError(
+															`Capsolver resolver does not support ${challenge.kind}`,
+														);
 									})();
+					return await recordPaidResolverCreate({
+						traceRecorder,
+						vendor: CAPSOLVER_VENDOR_ID,
+						kind: challenge.kind,
+						endpoint: "capsolver:create_task",
+						signal: solveController.signal,
+						usage,
+						create: async () => {
 					const createResult = await postJson(
 						fetchImpl,
 						endpoint(baseUrl, "createTask"),
@@ -586,6 +601,8 @@ export function createCapsolverResolverVendorAdapter(
 						throw unavailableForPayload(createResult.payload, phase, sensitiveValues);
 					}
 					return taskId;
+						},
+					});
 				};
 				const taskId = traceRecorder
 					? await traceRecorder.runSpan("resolver.vendor.create_task", createTask, {
@@ -635,7 +652,7 @@ export function createCapsolverResolverVendorAdapter(
 						const solutionValue =
 							challenge.kind === "aws_waf"
 								? result.payload.solution?.cookie
-								: result.payload.solution?.token ?? result.payload.solution?.gRecaptchaResponse;
+								: (result.payload.solution?.token ?? result.payload.solution?.gRecaptchaResponse);
 						if (challenge.kind === "cloudflare_interstitial") {
 							const cookies = result.payload.solution?.cookies;
 							const clearance = cookies?.cf_clearance ?? solutionValue;

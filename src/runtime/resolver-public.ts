@@ -38,4 +38,7 @@ export {
 	type ResolverTelemetrySink,
 	type ResolverVendorAttemptTelemetryEvent,
 } from "./resolver-telemetry.js";
-export type { ResolverVendorUnavailableReason } from "./resolver-vendors/types.js";
+export type {
+	ResolverPaidUsageContext,
+	ResolverVendorUnavailableReason,
+} from "./resolver-vendors/types.js";

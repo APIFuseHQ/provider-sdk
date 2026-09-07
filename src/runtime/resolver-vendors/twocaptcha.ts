@@ -1,9 +1,12 @@
 import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
 import type { TraceRecorder } from "../trace.js";
+import { recordPaidResolverCreate } from "../resolver-usage.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
 	type ResolverIdentity,
+	type ResolverPaidUsageContext,
 	type ResolverVendorAdapter,
+	type ResolverVendorTransport,
 	ResolverChallengeVerdictError,
 	ResolverVendorUnavailableError,
 	recordResolverVendorPoll,
@@ -38,6 +41,8 @@ export interface TwoCaptchaResolverVendorAdapter extends ResolverVendorAdapter {
 		identity: ResolverIdentity | undefined,
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
+		transport?: ResolverVendorTransport,
+		usage?: ResolverPaidUsageContext,
 	): Promise<Extract<ChallengeSolution, { readonly form: "token" }>>;
 }
 
@@ -329,7 +334,7 @@ export function createTwoCaptchaResolverVendorAdapter(
 			return resolverVendorSupports(TWOCAPTCHA_VENDOR_ID, kind);
 		},
 
-		async solve(challenge, identity, callerSignal, traceRecorder) {
+		async solve(challenge, identity, callerSignal, traceRecorder, _transport, usage) {
 			const apiKey = options.apiKey?.trim();
 			if (!apiKey) {
 				throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "missing_credentials", {
@@ -350,7 +355,8 @@ export function createTwoCaptchaResolverVendorAdapter(
 					throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "missing_challenge_input", {
 						missingFields,
 						phase: "create_task",
-					});
+						},
+					);
 				}
 			}
 			if (challenge.kind === "recaptcha_v3" && challenge.minScore === undefined) {
@@ -436,6 +442,14 @@ export function createTwoCaptchaResolverVendorAdapter(
 										`2captcha resolver does not support ${challenge.kind}`,
 									);
 								})();
+					return await recordPaidResolverCreate({
+						traceRecorder,
+						vendor: TWOCAPTCHA_VENDOR_ID,
+						kind: challenge.kind,
+						endpoint: "twocaptcha:create_task",
+						signal: solveController.signal,
+						usage,
+						create: async () => {
 					const createResult = await postJson(
 						fetchImpl,
 						endpoint(baseUrl, "createTask"),
@@ -449,6 +463,8 @@ export function createTwoCaptchaResolverVendorAdapter(
 						throw unavailableForPayload(createResult.payload, phase);
 					}
 					return taskId;
+						},
+					});
 				};
 				const taskId = traceRecorder
 					? await traceRecorder.runSpan("resolver.vendor.create_task", createTask, {
@@ -484,20 +500,16 @@ export function createTwoCaptchaResolverVendorAdapter(
 						}
 						if (pollResult.payload.status === "processing") continue;
 						if (pollResult.payload.status !== "ready") {
-							throw new ResolverVendorUnavailableError(
-								TWOCAPTCHA_VENDOR_ID,
-								"transport_failure",
-								{ phase },
-							);
+							throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+								phase,
+							});
 						}
 
 						const token = tokenFrom(pollResult.payload, challenge);
 						if (!token?.trim()) {
-							throw new ResolverVendorUnavailableError(
-								TWOCAPTCHA_VENDOR_ID,
-								"transport_failure",
-								{ phase },
-							);
+							throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "transport_failure", {
+								phase,
+							});
 						}
 						// AWS WAF remains a token solution here, so resolver cookie caching does not apply.
 						return { form: "token" as const, token };

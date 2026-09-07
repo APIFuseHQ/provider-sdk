@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
+import { ProviderError } from "../errors.js";
 import { createProviderCache } from "../runtime/cache.js";
 import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
@@ -425,6 +426,11 @@ function createUpstreamContext(
 
 	const createStealthSession = (): ReturnType<ProviderContext["stealth"]["createSession"]> => ({
 		fetch: stealthCall,
+		async replayChallenged() {
+			throw new ProviderError("Recorded transports cannot replay an engine-owned challenge", {
+				code: "REPLAY_SESSION_MISMATCH",
+			});
+		},
 		cookies: {
 			...emptyCookieJar,
 			has: () => false,

@@ -6,9 +6,11 @@ import type { ProviderChallenge } from "../../types.js";
 import { createResolverClient } from "../resolver.js";
 import { createHypersolutionsResolverVendorAdapter } from "../resolver-vendors/hypersolutions.js";
 import type {
+	ResolverVendorAdapter,
 	ResolverVendorTransport,
 	ResolverVendorUnavailableReason,
 } from "../resolver-vendors/types.js";
+import { createTraceContext, getTraceRecorder } from "../trace.js";
 
 const API_KEY = "hyper-test-key";
 const PAGE_URL = "https://shop.example.com/products/sku-1";
@@ -180,10 +182,17 @@ describe("hypersolutions resolver vendor", () => {
 	it("runs the measured hard SBSD envelope: upstream and /ip bound, Hyper /sbsd direct", async () => {
 		const { transport, calls } = createProtocolTransport();
 		const direct = createDirectFetch();
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
 		const globalFetch = spyOn(globalThis, "fetch");
 		try {
 			await expect(
-				createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
+				createResolver(transport, direct.fetchImpl).solve(
+					HARD_CHALLENGE,
+					new AbortController().signal,
+					recorder,
+				),
 			).resolves.toEqual({
 				form: "cookie_state",
 				kind: "akamai_sbsd",
@@ -237,11 +246,37 @@ describe("hypersolutions resolver vendor", () => {
 			"content-type": "application/json",
 			Referer: PAGE_URL,
 		});
+		const usageSpans = trace.getSpans().filter((span) => span.name === "resolver.usage");
+		expect(usageSpans).toHaveLength(2);
+		expect(usageSpans.map((span) => span.attributes.endpoint)).toEqual([
+			"hyper:ip",
+			"hyper:sbsd_create",
+		]);
+		// /ip is authenticated but has no published price: counted as 0 units, not invented as 1.
+		expect(usageSpans[0]?.attributes).toEqual({
+			vendor: "hypersolutions",
+			challenge_kind: "akamai_sbsd",
+			endpoint: "hyper:ip",
+			billable_units: 0,
+			billing: "unconfirmed",
+			vendor_index: 1,
+			outcome: "success",
+			duration_ms: expect.any(Number),
+		});
+		expect(usageSpans[1]?.attributes).toMatchObject({
+			endpoint: "hyper:sbsd_create",
+			billable_units: 1,
+			billing: "metered",
+			round: 1,
+		});
 	});
 
 	it("uses indices 0 and 1 for the passive v-only variant and no post query", async () => {
 		const { transport, calls } = createProtocolTransport("bm_so");
 		const direct = createDirectFetch();
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
 		const passiveChallenge = {
 			...HARD_CHALLENGE,
 			scriptUrl: "https://shop.example.com/.well-known/sbsd?v=dcc78710-14fe-3835-cc6e-b9b5ea3b6010",
@@ -249,7 +284,11 @@ describe("hypersolutions resolver vendor", () => {
 		} satisfies ProviderChallenge;
 
 		await expect(
-			createResolver(transport, direct.fetchImpl).solve(passiveChallenge),
+			createResolver(transport, direct.fetchImpl).solve(
+				passiveChallenge,
+				new AbortController().signal,
+				recorder,
+			),
 		).resolves.toMatchObject({
 			kind: "akamai_sbsd",
 			outcome: "payload_accepted",
@@ -264,6 +303,12 @@ describe("hypersolutions resolver vendor", () => {
 					url === "https://shop.example.com/.well-known/sbsd" && init.method === "POST",
 			),
 		).toHaveLength(2);
+		expect(
+			trace
+				.getSpans()
+				.filter((span) => span.name === "resolver.usage")
+				.map((span) => `${span.attributes.endpoint}#${span.attributes.round ?? "-"}`),
+		).toEqual(["hyper:ip#-", "hyper:sbsd_create#1", "hyper:sbsd_create#2"]);
 	});
 
 	it("keeps a remembered v-only script separate from a later cpr_chlge token", async () => {
@@ -305,6 +350,9 @@ describe("hypersolutions resolver vendor", () => {
 
 	it("fails with missing_transport before any egress: the upstream is never fetched directly", async () => {
 		const direct = createDirectFetch();
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
 		const globalFetch = spyOn(globalThis, "fetch");
 		globalFetch.mockRejectedValue(new Error("direct egress mutant reached global fetch"));
 		try {
@@ -312,11 +360,96 @@ describe("hypersolutions resolver vendor", () => {
 				vendor: "hypersolutions",
 				reason: "missing_transport",
 			});
+			// Same preflight failure with a trace recorder attached: no paid call, no usage record.
+			await expect(
+				createResolver(undefined, direct.fetchImpl).solve(
+					HARD_CHALLENGE,
+					new AbortController().signal,
+					recorder,
+				),
+			).rejects.toMatchObject({ code: "RESOLVER_CHAIN_EXHAUSTED" });
 			expect(globalFetch).not.toHaveBeenCalled();
 			expect(direct.calls).toHaveLength(0);
 		} finally {
 			globalFetch.mockRestore();
 		}
+		expect(trace.getSpans().filter((span) => span.name === "resolver.usage")).toHaveLength(0);
+	});
+
+	it("records the vendor's declared chain position, not its position among supporting vendors", async () => {
+		const { transport } = createProtocolTransport();
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+		const declaredFirst: ResolverVendorAdapter = {
+			id: "2captcha",
+			supports: () => false,
+			async solve() {
+				throw new Error("a vendor that does not support the kind is never asked");
+			},
+		};
+		const resolver = createResolverClient({
+			adapters: [
+				declaredFirst,
+				createHypersolutionsResolverVendorAdapter({
+					apiKey: API_KEY,
+					allowedHosts: ["shop.example.com"],
+					fetchImpl: createDirectFetch().fetchImpl,
+				}),
+			],
+			kinds: ["akamai_sbsd"],
+			clientProfile: "safari17_0",
+			allowedHosts: ["shop.example.com"],
+			createTransport: () => transport,
+		});
+
+		await resolver.solve(HARD_CHALLENGE, new AbortController().signal, recorder);
+
+		const usageSpans = trace.getSpans().filter((span) => span.name === "resolver.usage");
+		expect(usageSpans.length).toBeGreaterThan(0);
+		expect(usageSpans.every((span) => span.attributes.vendor_index === 2)).toBe(true);
+	});
+
+	it("records a Hyper timeout as timeout, not as an abandoned call", async () => {
+		const trace = createTraceContext();
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("Test trace context did not expose its recorder");
+		const transport: ResolverVendorTransport = {
+			sessionHeaders: SESSION_HEADERS,
+			getCookie: () => "state",
+			fetch(_url, init) {
+				return new Promise((_resolve, reject) => {
+					init.signal.addEventListener("abort", () => reject(init.signal.reason), {
+						once: true,
+					});
+				});
+			},
+		};
+		const resolver = createResolverClient({
+			adapters: [
+				createHypersolutionsResolverVendorAdapter({
+					apiKey: API_KEY,
+					allowedHosts: ["shop.example.com"],
+					timeoutMs: 5,
+					fetchImpl: createDirectFetch().fetchImpl,
+				}),
+			],
+			kinds: ["akamai_sbsd"],
+			clientProfile: "safari17_0",
+			allowedHosts: ["shop.example.com"],
+			createTransport: () => transport,
+		});
+
+		await expect(
+			resolver.solve(HARD_CHALLENGE, new AbortController().signal, recorder),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: { challengeKind: "akamai_sbsd", attempts: 1, outcome: "exhausted", retryable: false },
+		});
+		const usageSpans = trace.getSpans().filter((span) => span.name === "resolver.usage");
+		expect(usageSpans.map((span) => [span.attributes.endpoint, span.attributes.outcome])).toEqual([
+			["hyper:ip", "timeout"],
+		]);
 	});
 
 	it("admits only provider-declared upstream hosts plus Hyper's exact /ip host", async () => {
