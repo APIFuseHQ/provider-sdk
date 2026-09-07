@@ -260,9 +260,7 @@ describe("resolver server wiring", () => {
 			id: "browser",
 			supports: (kind) => kind === "cloudflare_interstitial",
 			getIssuingIdentity(solution) {
-				return solution.form === "cookies" && "cookies" in solution
-					? { userAgent: solution.userAgent }
-					: undefined;
+				return solution.form === "cookies" ? { userAgent: solution.userAgent } : undefined;
 			},
 			async solve() {
 				calls += 1;
@@ -301,12 +299,7 @@ describe("resolver server wiring", () => {
 							} as const;
 							const first = await ctx.resolver.solve(challenge);
 							const second = await ctx.resolver.solve(challenge);
-							if (
-								first.form !== "cookies" ||
-								!("cookies" in first) ||
-								second.form !== "cookies" ||
-								!("cookies" in second)
-							) {
+							if (first.form !== "cookies" || second.form !== "cookies") {
 								throw new Error("Expected cookie solutions");
 							}
 							return {

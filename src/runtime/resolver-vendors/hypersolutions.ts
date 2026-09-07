@@ -30,7 +30,7 @@ export interface HypersolutionsResolverVendorOptions {
 
 export type AkamaiSbsdChallengeSolution = Extract<
 	ChallengeSolution,
-	{ readonly form: "cookies"; readonly kind: "akamai_sbsd" }
+	{ readonly form: "cookie_state" }
 >;
 
 export interface HypersolutionsResolverVendorAdapter extends ResolverVendorAdapter {
@@ -419,9 +419,9 @@ export function createHypersolutionsResolverVendorAdapter(
 					});
 				}
 				return {
-					form: "cookies",
+					form: "cookie_state",
 					kind: "akamai_sbsd",
-					outcome: "payload_accepted_cookies_updated",
+					outcome: "payload_accepted",
 					verified: false,
 					stateCookieName: challenge.stateCookieName,
 					...(expires === undefined ? {} : { expires }),

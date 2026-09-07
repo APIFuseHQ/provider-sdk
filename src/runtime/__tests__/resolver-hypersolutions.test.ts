@@ -114,9 +114,9 @@ describe("hypersolutions resolver vendor", () => {
 		const directFetch = spyOn(globalThis, "fetch");
 		try {
 			await expect(createResolver(transport).solve(HARD_CHALLENGE)).resolves.toEqual({
-				form: "cookies",
+				form: "cookie_state",
 				kind: "akamai_sbsd",
-				outcome: "payload_accepted_cookies_updated",
+				outcome: "payload_accepted",
 				verified: false,
 				stateCookieName: "sbsd_o",
 				expires: 2_000_000_000,
@@ -177,7 +177,7 @@ describe("hypersolutions resolver vendor", () => {
 
 		await expect(createResolver(transport).solve(passiveChallenge)).resolves.toMatchObject({
 			kind: "akamai_sbsd",
-			outcome: "payload_accepted_cookies_updated",
+			outcome: "payload_accepted",
 			verified: false,
 			stateCookieName: "bm_so",
 		});

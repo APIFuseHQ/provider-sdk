@@ -25,7 +25,7 @@ describe("challenge resolver types", () => {
 
 		const readSolution = (solution: ChallengeSolution): string => {
 			if (solution.form === "token") return solution.token;
-			if (solution.kind === "akamai_sbsd") return solution.outcome;
+			if (solution.form === "cookie_state") return solution.outcome;
 			return `${solution.userAgent}:${solution.cookies.cf_clearance}`;
 		};
 

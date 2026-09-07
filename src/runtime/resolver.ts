@@ -111,8 +111,6 @@ type ResolverChainClient = ResolverContext & {
 	): Promise<ChallengeSolution>;
 };
 
-type PortableCookieSolution = Extract<ChallengeSolution, { readonly cookies: unknown }>;
-
 export interface ResolverRuntimeOptions {
 	readonly allowedHosts?: readonly string[];
 	readonly cache?: ProviderCache;
@@ -139,7 +137,7 @@ export interface ResolverRuntimeOptions {
 type CachedResolverSolution = {
 	readonly expiresAtMs: number;
 	readonly issuerDigest: string;
-	readonly solution: PortableCookieSolution;
+	readonly solution: ChallengeSolution;
 };
 
 type ResolverCacheIndex = {
@@ -629,9 +627,7 @@ function isResolverCacheIndex(value: unknown): value is ResolverCacheIndex {
 
 function solutionExpiryMs(solution: ChallengeSolution): number | undefined {
 	if (solution.form !== "cookies") return undefined;
-	const expires =
-		solution.expires ??
-		("sdkEstimatedExpires" in solution ? solution.sdkEstimatedExpires : undefined);
+	const expires = solution.expires ?? solution.sdkEstimatedExpires;
 	if (typeof expires !== "number" || !Number.isFinite(expires)) return undefined;
 	return expires * 1_000;
 }
@@ -731,7 +727,7 @@ async function writeResolverCacheIndex(
 async function cacheResolverSolution(
 	cache: ProviderCache,
 	challenge: ProviderChallenge,
-	solution: PortableCookieSolution,
+	solution: ChallengeSolution,
 	identity: ResolverIssuingIdentity,
 	identityScope: string | undefined,
 ): Promise<void> {
@@ -788,9 +784,7 @@ async function invalidateResolverSolutionWithOutcome(
 	)[RESOLVER_INSTRUMENTATION_METADATA];
 	const cacheOwner = metadata?.target ?? resolver;
 	const invalidate = async (): Promise<ResolverSolutionInvalidationOutcome> => {
-		if (solution.form !== "cookies" || !("cookies" in solution)) {
-			return "not_cookie_solution";
-		}
+		if (solution.form !== "cookies") return "not_cookie_solution";
 		if (!resolverCaches.has(cacheOwner)) {
 			throw new Error("Resolver cache registration lookup failed during solution invalidation");
 		}
@@ -1005,7 +999,6 @@ function createResolverChainClient(options: {
 						options.cache &&
 						resolverChallengeIsCacheable(challenge) &&
 						solution.form === "cookies" &&
-						"cookies" in solution &&
 						solutionExpiryMs(solution) !== undefined
 					) {
 						const issuingIdentity =

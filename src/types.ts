@@ -366,17 +366,18 @@ export type ProviderChallenge =
 export type ProviderChallengeKind = ProviderChallenge["kind"];
 
 /**
- * Token solutions carry no network-identity binding. Portable cookie solutions
- * carry values for engine-owned installation. SBSD instead returns an opaque
- * cookie-state outcome: values remain exclusively in the bound engine-owned jar.
- * A payload POST is never proof that SBSD was solved; only the next protected GET
- * can verify success (the safe refetch is Phase 2).
+ * Token solutions carry no network-identity binding. Cookie-solution binding is
+ * per challenge kind: `aws_waf` was measured portable across residential leases
+ * on buyee, while `cf_clearance` is unmeasured here and treated as scoped to the
+ * identity that produced it. The provider attaches the returned cookies to its
+ * own requests. `cookie_state` solutions carry no values: SBSD state lives only
+ * in the engine-owned bound jar, and a 2xx payload POST is not proof of a solve;
+ * only the next protected GET can verify it (the safe refetch is Phase 2).
  */
 export type ChallengeSolution =
 	| { readonly form: "token"; readonly token: string }
 	| {
 			readonly form: "cookies";
-			readonly kind?: never;
 			readonly cookies: Readonly<Record<string, string>>;
 			readonly userAgent: string;
 			/** Epoch seconds copied from the upstream cookie's own expiry attribute; never a constant. */
@@ -388,9 +389,9 @@ export type ChallengeSolution =
 			readonly sdkEstimatedExpires?: number;
 		}
 	| {
-			readonly form: "cookies";
+			readonly form: "cookie_state";
 			readonly kind: "akamai_sbsd";
-			readonly outcome: "payload_accepted_cookies_updated";
+			readonly outcome: "payload_accepted";
 			/** Always false until a later protected GET verifies the bound jar (Phase 2). */
 			readonly verified: false;
 			/** Name only; the identity-bound cookie value remains in the engine-owned jar. */

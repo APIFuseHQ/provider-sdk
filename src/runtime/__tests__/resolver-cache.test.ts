@@ -92,7 +92,7 @@ function createBrowserAdapter(
 	createSolution: (
 		identity: ResolverIdentity | undefined,
 		call: number,
-	) => Extract<ChallengeSolution, { readonly cookies: unknown }>,
+	) => Extract<ChallengeSolution, { readonly form: "cookies" }>,
 ): { readonly adapter: ResolverVendorAdapter; readonly calls: () => number } {
 	let calls = 0;
 	return {
@@ -100,7 +100,7 @@ function createBrowserAdapter(
 			id: "browser",
 			supports: (kind) => kind === "aws_waf" || kind === "cloudflare_interstitial",
 			getIssuingIdentity(solution, requestedIdentity, challenge) {
-				if (solution.form !== "cookies" || !("cookies" in solution)) return undefined;
+				if (solution.form !== "cookies") return undefined;
 				return resolverChallengeIssuingIdentity(challenge, {
 					...(requestedIdentity ? { proxyUrl: requestedIdentity.proxyUrl } : {}),
 					userAgent: solution.userAgent,
@@ -119,7 +119,7 @@ function createAkamaiAdapter(
 	createSolution: (
 		identity: ResolverIdentity | undefined,
 		call: number,
-	) => Extract<ChallengeSolution, { readonly cookies: unknown }>,
+	) => Extract<ChallengeSolution, { readonly form: "cookies" }>,
 ): { readonly adapter: ResolverVendorAdapter; readonly calls: () => number } {
 	let calls = 0;
 	return {
@@ -138,7 +138,7 @@ function createAkamaiAdapter(
 function persistentSolution(
 	userAgent = "Browser/1.0",
 	expires = (Date.now() + 60_000) / 1_000,
-): Extract<ChallengeSolution, { readonly cookies: unknown }> {
+): Extract<ChallengeSolution, { readonly form: "cookies" }> {
 	return {
 		form: "cookies",
 		cookies: { "aws-waf-token": `token-for-${userAgent}` },
@@ -150,7 +150,7 @@ function persistentSolution(
 function persistentAkamaiSolution(
 	userAgent = "Safari/17.0",
 	expires = (Date.now() + 60_000) / 1_000,
-): Extract<ChallengeSolution, { readonly cookies: unknown }> {
+): Extract<ChallengeSolution, { readonly form: "cookies" }> {
 	return {
 		form: "cookies",
 		cookies: { _abck: `sensor-cookie-for-${userAgent}` },
