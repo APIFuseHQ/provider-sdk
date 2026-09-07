@@ -1032,9 +1032,9 @@ function browserVersionLiteralMessage(finding: BrowserVersionLiteralFinding): st
 		case "profile":
 			return `Hardcoded stealth profile "${finding.literal}" pins a browser version and will rot. Select the browser and OS structurally, for example stealth: { browser: "chrome", os: "macos" }.`;
 		case "user-agent":
-			return `Hardcoded User-Agent browser version "${finding.literal}" can disagree with the stealth TLS fingerprint. Remove the literal and derive it from the structured profile, for example getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.`;
+			return `Hardcoded User-Agent browser version "${finding.literal}" can disagree with the stealth TLS fingerprint. Remove the literal. ctx.stealth owns User-Agent and rejects a caller value with STEALTH_HEADER_OVERRIDE_UNSUPPORTED, so omit the header there and select the profile with stealth: { browser: "chrome", os: "macos" }. For ctx.http only, derive it from getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.`;
 		case "sec-ch-ua":
-			return 'Hardcoded sec-ch-ua versions can disagree with the stealth TLS fingerprint. Remove the literal and let ctx.stealth generate client hints from stealth: { browser: "chrome", os: "macos" }; derive any explicit User-Agent with getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.';
+			return 'Hardcoded sec-ch-ua versions can disagree with the stealth TLS fingerprint. Remove the literal and let ctx.stealth generate client hints from stealth: { browser: "chrome", os: "macos" }. ctx.stealth also owns User-Agent, so omit that header there as well; for ctx.http only, derive it from getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.';
 	}
 }
 
