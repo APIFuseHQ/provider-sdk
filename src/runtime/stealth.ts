@@ -256,6 +256,25 @@ function resolveUrl(baseUrl: string, url: string): string {
 	return new URL(url, baseUrl).toString();
 }
 
+function resolveRequestUrl(baseUrl: string, url: string): string {
+	try {
+		return resolveUrl(baseUrl, url);
+	} catch (error) {
+		// Both inputs are caller-owned, so an unparsable URL is a programming error, never a
+		// transport condition: not retryable, not the upstream's fault. Classify it here rather
+		// than in normalizeStealthTransportError, which also sees ERR_INVALID_URL from malformed
+		// upstream redirect targets. The fixed message keeps the URL (and any inline query
+		// values) out of the diagnostic surface; the runtime TypeError stays in `cause`.
+		throw new TransportError("Invalid request URL", {
+			code: "transport_invalid_url",
+			status: 0,
+			category: "provider_error",
+			retryable: false,
+			...(error instanceof Error ? { cause: error } : {}),
+		});
+	}
+}
+
 function headerEntriesFromHeaders(headers: StealthTransportHeaders): [string, string][] {
 	return Array.from(headers.entries());
 }
@@ -941,36 +960,6 @@ function isTimeoutError(error: unknown, message: string): boolean {
 	return /\b(timed out|timeout|deadline exceeded)\b/i.test(message);
 }
 
-function findErrorWithCode(error: unknown, code: string): Error | undefined {
-	const seen = new Set<Error>();
-	let current: unknown = error;
-	while (current instanceof Error && !seen.has(current)) {
-		seen.add(current);
-		if (isRecord(current) && current.code === code) return current;
-		current = current.cause;
-	}
-	return undefined;
-}
-
-function findInvalidUrlError(error: unknown): Error | undefined {
-	const codedError = findErrorWithCode(error, "ERR_INVALID_URL");
-	if (codedError) return codedError;
-
-	const seen = new Set<Error>();
-	let current: unknown = error;
-	while (current instanceof Error && !seen.has(current)) {
-		seen.add(current);
-		if (
-			current.name === "TypeError" &&
-			/\b(?:invalid url|cannot be parsed as a URL)\b/i.test(current.message)
-		) {
-			return current;
-		}
-		current = current.cause;
-	}
-	return undefined;
-}
-
 function normalizeStealthTransportError(error: unknown): TransportError {
 	if (error instanceof ProxyResolutionError) {
 		return new TransportError(error.message, {
@@ -1017,15 +1006,6 @@ function normalizeStealthTransportError(error: unknown): TransportError {
 
 	if (PROXY_CONNECT_FAILURE_BODY_PATTERN.test(message)) {
 		return createProxyConnectFailureError(message, error instanceof Error ? error : undefined);
-	}
-
-	const invalidUrlError = findInvalidUrlError(error);
-	if (invalidUrlError) {
-		return new TransportError(invalidUrlError.message, {
-			code: "transport_invalid_url",
-			status: 0,
-			cause: error instanceof Error ? error : undefined,
-		});
 	}
 
 	return new TransportError("Network error", {
@@ -1502,7 +1482,7 @@ function createSessionFetcher(
 								(!hasPolicyProxy && proxy && clientOptions.proxyStealth?.insecureSkipVerify),
 						);
 						serializedUrl = serializeRequestUrl(
-							resolveUrl(baseUrl, url),
+							resolveRequestUrl(baseUrl, url),
 							options.params,
 							sensitiveParams,
 						);

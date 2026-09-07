@@ -2301,35 +2301,59 @@ describe("createStealthClient", () => {
 		expect(thrown).toMatchObject({
 			code: "transport_invalid_url",
 			status: 0,
+			message: "Invalid request URL",
+			options: { category: "provider_error", retryable: false },
 		});
 		assertIsError(thrown.cause);
 		expect(thrown.cause).toBeInstanceOf(TypeError);
 		expect((thrown.cause as TypeError & { code?: string }).code).toBe("ERR_INVALID_URL");
 	});
 
-	it("finds invalid URL codes through wrapped wreq causes", async () => {
-		const invalidUrl = new TypeError("Invalid URL");
-		Object.assign(invalidUrl, { code: "ERR_INVALID_URL" });
-		const wrapper = new Error("wreq wrapper", { cause: invalidUrl });
-		mockStealthState.queuedErrors.push(wrapper);
+	it("classifies invalid URLs without consulting the runtime message", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const client = createStealthClient("[object Object]");
+		let thrown: unknown;
+		try {
+			// Bun's ERR_INVALID_URL message quotes the offending URL, so a message-based
+			// classifier would read "timeout" here and mark a caller fault as retryable.
+			await client.fetch("https://api.example.com/v1?timeout=30");
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toBeInstanceOf(TransportError);
+		expect(thrown).toMatchObject({
+			code: "transport_invalid_url",
+			message: "Invalid request URL",
+			options: { retryable: false },
+		});
+	});
+
+	it("keeps malformed upstream redirect targets classified as network errors", async () => {
+		mockStealthState.queuedResponses.push({
+			status: 302,
+			body: "",
+			headers: { location: "http://[" },
+			url: "https://example.com/start",
+		});
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
 		let thrown: unknown;
 		try {
-			await client.fetch("/invalid");
+			await client.fetch("/start");
 		} catch (error) {
 			thrown = error;
 		}
 
-		assertIsError(thrown);
+		// The upstream sent the unparsable URL, so this is not a caller fault and stays
+		// eligible for the default transport retry.
+		expect(thrown).toBeInstanceOf(TransportError);
 		expect(thrown).toMatchObject({
-			code: "transport_invalid_url",
-			message: invalidUrl.message,
+			code: "transport_network_error",
+			status: 0,
+			message: "Network error",
 		});
-		expect(thrown.cause).toBe(wrapper);
-		assertIsError(thrown.cause);
-		expect(thrown.cause.cause).toBe(invalidUrl);
 	});
 
 	it("redacts sensitive request URLs from stealth transport errors and their metadata", async () => {
