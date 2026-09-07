@@ -116,12 +116,40 @@ function isEngineOwnedEngineEnvName(name: string): boolean {
 	return canonicalEnvName(name).startsWith("APIFUSE__ENGINE__");
 }
 
+/**
+ * Hosted runtime settings the engine reads for OCR, STT, cache keying, choice
+ * tokens, and the CDP pool. Providers never own them: declarations are rejected
+ * and projections drop them, like the vendor credentials above.
+ */
+export const ENGINE_OWNED_RUNTIME_ENV_NAMES = [
+	"APIFUSE__STT__CLOUDFLARE_API_TOKEN",
+	"APIFUSE__OCR__CLOUDFLARE_API_TOKEN",
+	"APIFUSE__OCR__API_KEY",
+	"APIFUSE__CLOUDFLARE__ACCOUNT_ID",
+	"APIFUSE__CACHE__KEY_PEPPER",
+	"APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET",
+] as const;
+
+const ENGINE_OWNED_RUNTIME_ENV_NAME_SET = new Set<string>(ENGINE_OWNED_RUNTIME_ENV_NAMES);
+
+/** CDP pool settings form a prefix family (`APIFUSE__CDP_POOL__URL` today); the whole prefix is engine-owned. */
+const ENGINE_OWNED_CDP_POOL_ENV_PREFIX = "APIFUSE__CDP_POOL__";
+
+export function isEngineOwnedRuntimeEnvName(name: string): boolean {
+	const canonical = canonicalEnvName(name);
+	return (
+		ENGINE_OWNED_RUNTIME_ENV_NAME_SET.has(canonical) ||
+		canonical.startsWith(ENGINE_OWNED_CDP_POOL_ENV_PREFIX)
+	);
+}
+
 /** Every environment name the engine owns: rejected in declarations and filtered from provider projections. */
 export function isEngineOwnedEnvName(name: string): boolean {
 	return (
 		isEngineOwnedEngineEnvName(name) ||
 		isEngineOwnedProxyCredentialName(name) ||
 		isEngineOwnedResolverCredentialName(name) ||
+		isEngineOwnedRuntimeEnvName(name) ||
 		isEngineOwnedTelemetryEnvName(name)
 	);
 }

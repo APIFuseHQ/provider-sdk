@@ -1145,6 +1145,9 @@ export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY_
 export const ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__RESOLVER__2CAPTCHA__API_KEY", "APIFUSE__RESOLVER__CAPSOLVER__API_KEY", "APIFUSE__RESOLVER__CAPMONSTER__API_KEY", "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY"];
 
 // @public
+export const ENGINE_OWNED_RUNTIME_ENV_NAMES: readonly ["APIFUSE__STT__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__API_KEY", "APIFUSE__CLOUDFLARE__ACCOUNT_ID", "APIFUSE__CACHE__KEY_PEPPER", "APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET"];
+
+// @public
 export const ENGINE_OWNED_TELEMETRY_ENV_NAMES: readonly ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES"];
 
 // @public (undocumented)
@@ -2007,6 +2010,9 @@ export function isEngineOwnedProxyCredentialName(name: string): boolean;
 
 // @public (undocumented)
 export function isEngineOwnedResolverCredentialName(name: string): boolean;
+
+// @public (undocumented)
+export function isEngineOwnedRuntimeEnvName(name: string): boolean;
 
 // @public (undocumented)
 export function isEngineOwnedTelemetryEnvName(name: string): boolean;

@@ -1085,6 +1085,19 @@ describe("defineProvider", () => {
 		});
 	});
 
+	describe("engine-owned runtime settings", () => {
+		it.each([
+			"APIFUSE__CDP_POOL__URL",
+			"apifuse__cdp_pool__url",
+			"APIFUSE__CACHE__KEY_PEPPER",
+			"APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET",
+		])("rejects %s in provider secrets", (name) => {
+			expect(() =>
+				defineProvider({ ...validConfig, secrets: [{ name, required: true }] }),
+			).toThrow(/cannot declare engine-owned runtime variable/);
+		});
+	});
+
 	describe("engine-owned resolver credentials", () => {
 		it.each([
 			"APIFUSE__RESOLVER__2CAPTCHA__API_KEY",
