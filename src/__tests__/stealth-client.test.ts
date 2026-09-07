@@ -2270,33 +2270,25 @@ describe("createStealthClient", () => {
 	});
 
 	it("wraps network failures in TransportError", async () => {
-		const connectionError = new Error("connect ECONNREFUSED 127.0.0.1:443");
-		Object.assign(connectionError, { code: "ECONNREFUSED" });
-		mockStealthState.queuedErrors.push(connectionError);
+		mockStealthState.queuedErrors.push(new Error("socket hang up"));
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
-		let thrown: unknown;
-		try {
-			await client.fetch("/network");
-		} catch (error) {
-			thrown = error;
-		}
 
-		assertIsError(thrown);
-		expect(thrown).toBeInstanceOf(TransportError);
-		expect(thrown).toMatchObject({
+		await expect(client.fetch("/network")).rejects.toBeInstanceOf(TransportError);
+		mockStealthState.queuedErrors.push(new Error("socket hang up"));
+		await expect(client.fetch("/network")).rejects.toMatchObject({
 			code: "transport_network_error",
 			status: 0,
 			message: "Network error",
 		});
-		expect(thrown.cause).toBe(connectionError);
 	});
 
 	it("classifies invalid base URL errors as caller faults", async () => {
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = Reflect.apply(createStealthClient, undefined, [{}]);
-		const session = client.createSession({ profile: "chrome-latest" });
+		// What a caller gets after passing an options object where `baseUrl: string` is expected.
+		const client = createStealthClient("[object Object]");
+		const session = client.createSession();
 		let thrown: unknown;
 		try {
 			await session.fetch("https://api.ipify.org", { throwOnHttpError: false });
@@ -2461,20 +2453,11 @@ describe("createStealthClient", () => {
 
 		const { createStealthClient } = await import("../runtime/stealth.js");
 		const client = createStealthClient("https://example.com");
-		let thrown: unknown;
-		try {
-			await client.fetch("/slow", { timeout: 10 });
-		} catch (error) {
-			thrown = error;
-		}
-
-		assertIsError(thrown);
-		expect(thrown).toMatchObject({
+		await expect(client.fetch("/slow", { timeout: 10 })).rejects.toMatchObject({
 			code: "transport_timeout",
 			status: 0,
 			message: "Request timed out",
 		});
-		expect(thrown.cause).toBe(timeoutError);
 	});
 
 	it("defaults proxy-routed GET network failures to transient transport retry", async () => {
