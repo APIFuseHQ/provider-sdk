@@ -10,6 +10,7 @@ import {
 	engineOwnedResolverCredentialTarget,
 	isEngineOwnedEnvName,
 	isEngineOwnedProxyCredentialName,
+	isEngineOwnedRuntimeEnvName,
 	isEngineOwnedTelemetryEnvName,
 } from "./engine.js";
 import { HealthScenarioSchema } from "./health-scenario.js";
@@ -961,6 +962,14 @@ function validateProviderProxy(config: {
 				`Provider "${config.id}" cannot declare engine-owned telemetry variable "${secret.name}"`,
 				{
 					fix: `Remove "${secret.name}" from provider secrets; trace export is configured only on the provider engine.`,
+				},
+			);
+		}
+		if (isEngineOwnedRuntimeEnvName(secret.name)) {
+			throw new ValidationError(
+				`Provider "${config.id}" cannot declare engine-owned runtime variable "${secret.name}"`,
+				{
+					fix: `Remove "${secret.name}" from provider secrets; the provider engine reads it from its own environment.`,
 				},
 			);
 		}

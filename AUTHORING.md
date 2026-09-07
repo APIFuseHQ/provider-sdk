@@ -130,6 +130,12 @@ not list `APIFUSE__PROXY__SMARTPROXY_APP_KEY`,
 `APIFUSE__PROXY__NODEMAVEN_PASSWORD` in provider `secrets`; `proxy` contains
 policy intent only.
 
+Hosted runtime settings are engine-owned as well: every `APIFUSE__CDP_POOL__*`
+variable, the Cloudflare OCR/STT tokens and account identifier,
+`APIFUSE__OCR__API_KEY`, `APIFUSE__CACHE__KEY_PEPPER`, and
+`APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET`. `defineProvider`
+rejects them in `secrets`; the engine reads them from its own environment.
+
 ### Factored operations
 
 `defineProvider(declaration)` returns the builder that accepts `operations`, so

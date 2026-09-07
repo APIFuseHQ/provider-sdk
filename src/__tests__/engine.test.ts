@@ -6,11 +6,24 @@ import {
 	createInProcessProviderEngine,
 	createProviderEnvironment,
 	ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES,
+	ENGINE_OWNED_RUNTIME_ENV_NAMES,
 	ENGINE_OWNED_TELEMETRY_ENV_NAMES,
 	isEngineOwnedEnvName,
+	isEngineOwnedRuntimeEnvName,
 	readEngineProxyCredentials,
 } from "../engine.js";
+import { APIFUSE__CACHE__KEY_PEPPER_ENV } from "../runtime/cache.js";
+import { PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV } from "../runtime/choice.js";
 import { createCredentialContext } from "../runtime/credential.js";
+import {
+	APIFUSE__OCR__API_KEY_ENV,
+	APIFUSE__OCR__CLOUDFLARE_API_TOKEN_ENV,
+} from "../runtime/ocr.js";
+import { APIFUSE__CDP_POOL__URL } from "../runtime/resolver-config.js";
+import {
+	APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV,
+	CLOUDFLARE_ACCOUNT_ID_ENV,
+} from "../runtime/stt.js";
 import { createServerApp } from "../server/serve.js";
 import type { HttpClient, ProviderDefinition, TraceContext } from "../types.js";
 
@@ -250,6 +263,43 @@ describe("engine credential containment", () => {
 		expect(isEngineOwnedEnvName("apifuse__provider__zozotown__hyper_api_key")).toBe(true);
 		expect(isEngineOwnedEnvName("APIFUSE__RESOLVER__TIMEOUT_MS")).toBe(false);
 		expect(isEngineOwnedEnvName("APIFUSE__RESOLVER__FUTURE_VENDOR__API_KEY")).toBe(false);
+	});
+
+	it("lists exactly the hosted runtime settings the runtime modules read", () => {
+		expect([...ENGINE_OWNED_RUNTIME_ENV_NAMES]).toEqual([
+			APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV,
+			APIFUSE__OCR__CLOUDFLARE_API_TOKEN_ENV,
+			APIFUSE__OCR__API_KEY_ENV,
+			CLOUDFLARE_ACCOUNT_ID_ENV,
+			APIFUSE__CACHE__KEY_PEPPER_ENV,
+			PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
+		]);
+	});
+
+	it("omits hosted runtime settings and every APIFUSE__CDP_POOL__ name from provider environments", () => {
+		const source = Object.fromEntries([
+			...ENGINE_OWNED_RUNTIME_ENV_NAMES.map((name) => [name, `secret-${name}`]),
+			[APIFUSE__CDP_POOL__URL, "ws://pool.test"],
+			["APIFUSE__CDP_POOL__SMARTPROXY_GATEWAY_CIDRS", "10.0.0.0/8"],
+			["apifuse__cdp_pool__url", "ws://alias.test"],
+			["PROVIDER_TOKEN", "provider-token"],
+		]);
+
+		expect(isEngineOwnedRuntimeEnvName("apifuse__cdp_pool__url")).toBe(true);
+		expect(createProviderEnvironment(source, Object.keys(source))).toEqual({
+			PROVIDER_TOKEN: "provider-token",
+		});
+	});
+
+	it("keeps non-secret OCR settings and near-miss CDP names provider-readable", () => {
+		for (const name of [
+			"APIFUSE__OCR__BACKEND",
+			"APIFUSE__OCR__MODEL",
+			"APIFUSE__CDP_POOL",
+			"APIFUSE__CDP_POOLS__URL",
+		]) {
+			expect(isEngineOwnedEnvName(name)).toBe(false);
+		}
 	});
 
 	it("captures proxy credentials for the engine but omits them from provider environments", () => {
