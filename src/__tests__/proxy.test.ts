@@ -3,9 +3,12 @@ import type { Callback, Redis, RedisKey, RedisValue } from "ioredis";
 
 import { assertIsError } from "./test-utils.js";
 import {
+	__getSmartproxyCacheSizesForTests,
 	__setProxyRedisForTests,
 	__setSmartproxyAllocatorDeadlineMsForTests,
+	__setSmartproxyPoolCacheMaxEntriesForTests,
 	clearProxyResolutionCache,
+	invalidateProxyResolutionCache,
 	invalidateProxyResolutionCacheAsync,
 	resolvePolicyTransportAttemptCap,
 	resolveProxyConfigAsync,
@@ -428,6 +431,7 @@ describe("proxy integration", () => {
 		nativeFetchCalls.length = 0;
 		__setProxyRedisForTests(undefined);
 		__setSmartproxyAllocatorDeadlineMsForTests(undefined);
+		__setSmartproxyPoolCacheMaxEntriesForTests(undefined);
 	});
 
 	afterEach(() => {
@@ -455,6 +459,7 @@ describe("proxy integration", () => {
 		clearProxyResolutionCache();
 		__setProxyRedisForTests(undefined);
 		__setSmartproxyAllocatorDeadlineMsForTests(undefined);
+		__setSmartproxyPoolCacheMaxEntriesForTests(undefined);
 	});
 
 	it("encodes bounded public-safe per-attempt proxy telemetry", () => {
@@ -843,6 +848,116 @@ describe("proxy integration", () => {
 			expect(cached.url).toBe("http://5.78.24.21:31001");
 			expect(fresh.url).toBe("http://5.78.24.22:31001");
 			expect(allocatorCalls).toBe(2);
+		} finally {
+			Date.now = originalNow;
+		}
+	});
+
+	it("reclaims expired Smartproxy pools when another affinity is allocated", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		let now = 1_700_000_000_000;
+		Date.now = () => now;
+		let allocatorCalls = 0;
+		global.fetch = createFetchDouble(async () => {
+			allocatorCalls += 1;
+			return new Response(`5.78.24.${40 + allocatorCalls}:31001`, { status: 200 });
+		});
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+
+		try {
+			await resolveProxyConfigAsync({
+				affinityKey: "af_con_reclaim_a",
+				upstream: { proxy: policy },
+			});
+			expect(__getSmartproxyCacheSizesForTests().pools).toBe(1);
+
+			now += 16_000;
+			await resolveProxyConfigAsync({
+				affinityKey: "af_con_reclaim_b",
+				upstream: { proxy: policy },
+			});
+
+			expect(allocatorCalls).toBe(2);
+			expect(__getSmartproxyCacheSizesForTests().pools).toBe(1);
+		} finally {
+			Date.now = originalNow;
+		}
+	});
+
+	it("evicts the least recently used Smartproxy pool past capacity and counts it", async () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		__setSmartproxyPoolCacheMaxEntriesForTests(1);
+		let allocatorCalls = 0;
+		global.fetch = createFetchDouble(async () => {
+			allocatorCalls += 1;
+			return new Response(`5.78.24.${50 + allocatorCalls}:31001`, { status: 200 });
+		});
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+
+		const first = await resolveProxyConfigAsync({
+			affinityKey: "af_con_cap_a",
+			upstream: { proxy: policy },
+		});
+		const second = await resolveProxyConfigAsync({
+			affinityKey: "af_con_cap_b",
+			upstream: { proxy: policy },
+		});
+		// The still-fresh pool for `a` was evicted by capacity, so `a` re-allocates
+		// and lands on a different endpoint than it first received.
+		const firstAgain = await resolveProxyConfigAsync({
+			affinityKey: "af_con_cap_a",
+			upstream: { proxy: policy },
+		});
+
+		expect(first.diagnostics?.poolCacheEvictions).toBe(0);
+		expect(second.diagnostics?.poolCacheEvictions).toBe(1);
+		expect(firstAgain.diagnostics?.poolCacheEvictions).toBe(2);
+		expect(firstAgain.url).not.toBe(first.url);
+		expect(allocatorCalls).toBe(3);
+		expect(__getSmartproxyCacheSizesForTests().pools).toBe(1);
+	});
+
+	it("sweeps expired Smartproxy invalidation tombstones on the next invalidation", () => {
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		const originalNow = Date.now;
+		let now = 1_700_000_000_000;
+		Date.now = () => now;
+		const policy: ProviderProxyPolicy = {
+			mode: "required",
+			provider: "smartproxy",
+			geo: { country: "KR" },
+			session: { affinity: "connection", poolSize: 1 },
+		};
+
+		try {
+			expect(
+				invalidateProxyResolutionCache({
+					affinityKey: "af_con_tombstone_a",
+					upstream: { proxy: policy },
+				}),
+			).toBe(true);
+			expect(__getSmartproxyCacheSizesForTests().tombstones).toBe(1);
+
+			now += 31_000;
+			expect(
+				invalidateProxyResolutionCache({
+					affinityKey: "af_con_tombstone_b",
+					upstream: { proxy: policy },
+				}),
+			).toBe(true);
+
+			expect(__getSmartproxyCacheSizesForTests().tombstones).toBe(1);
 		} finally {
 			Date.now = originalNow;
 		}
