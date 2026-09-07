@@ -605,6 +605,7 @@ export const headers = {
 			'getStealthProfile({ browser: "chrome", os: "macos" }).userAgent',
 		);
 		expect(browserVersionDetails.join("\n")).toContain("let ctx.stealth generate client hints");
+		expect(browserVersionDetails.join("\n")).toContain("STEALTH_HEADER_OVERRIDE_UNSUPPORTED");
 		expect(browserVersionDetails.join("\n")).not.toContain("__fixtures__");
 		expect(browserVersionDetails.join("\n")).not.toContain("__tests__");
 		expect(browserVersionDetails.join("\n")).not.toContain("chrome-120");

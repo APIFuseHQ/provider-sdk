@@ -1302,6 +1302,12 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 	/**
 	 * Request headers. Array values and case-insensitive duplicate names are
 	 * combined in caller order using `", "`, matching Chrome's Fetch behavior.
+	 *
+	 * The stealth transport owns `host`, `connection`, `user-agent`, `sec-ch-ua`,
+	 * `sec-ch-ua-mobile`, `sec-ch-ua-platform`, `accept-encoding`, and every
+	 * `sec-fetch-*` header. Supplying any of them throws
+	 * `STEALTH_HEADER_OVERRIDE_UNSUPPORTED` at request time; declare the request
+	 * shape with `stealth.requestClass` instead.
 	 */
 	headers?: Record<string, string | string[]>;
 	method?: HttpMethod;
@@ -1321,12 +1327,18 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 	 */
 	proxyAttemptOffset?: number;
 	/**
-	 * SDK-specific stealth controls. Standard HTTP metadata such as language,
-	 * referrer, and content type belongs in `headers`.
+	 * SDK-specific stealth controls, including a per-request browser and/or OS
+	 * override. Standard HTTP metadata such as language, referrer, and content
+	 * type belongs in `headers`.
 	 */
 	stealth?: StealthProfileSelection & {
-		/** Override the configured browser and/or OS for this request. */
-		/** Declare the Chrome request class when it cannot be inferred from the method. */
+		/**
+		 * Declare the Chrome request class when it cannot be inferred from the
+		 * method (`POST` infers `post`, everything else `navigation`). This is the
+		 * replacement for hand-set `Sec-Fetch-*` headers, which the transport
+		 * rejects; it drives `Sec-Fetch-Mode`/`Dest`/`User`, `Accept`, `Priority`,
+		 * and `Upgrade-Insecure-Requests`.
+		 */
 		requestClass?: "navigation" | "xhr" | "post";
 		/**
 		 * Use only for proxy products that terminate CONNECT with a private CA

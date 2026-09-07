@@ -3395,6 +3395,7 @@ describe("Chrome 149 header parity", () => {
 			}
 			expect(thrown).toBeInstanceOf(SDKError);
 			if (!(thrown instanceof SDKError)) throw new Error("Expected SDKError");
+			expect(thrown.code).toBe("STEALTH_HEADER_OVERRIDE_UNSUPPORTED");
 			expect(thrown.message).toContain(header.toLowerCase());
 			expect(mockStealthState.clients).toHaveLength(0);
 		});

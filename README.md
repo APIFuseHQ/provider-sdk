@@ -153,7 +153,11 @@ the bad request path; provider/runtime failures include `code`, `message`, and
   a session with `ctx.stealth.createSession()` and use `session.redirects.run()`;
   inspect accumulated cookies through `session.cookies`. Select an SDK stealth
   identity with structured `stealth: { browser, os }` options; omitted `os`
-  explicitly defaults to `macos`. Do not pin a browser version
+  explicitly defaults to `macos`. The transport owns `User-Agent`,
+  `Accept-Encoding`, `sec-ch-ua*`, and every `Sec-Fetch-*` header and throws
+  `STEALTH_HEADER_OVERRIDE_UNSUPPORTED` if you set one; declare
+  `stealth.requestClass: "navigation" | "xhr" | "post"` instead. Do not pin a
+  browser version
   or tune JA3, HTTP/2 SETTINGS, or
   pseudo-header order in provider code. Chrome, Firefox, and Safari profiles
   are supported; use `ctx.browser` when the provider needs browser execution.
