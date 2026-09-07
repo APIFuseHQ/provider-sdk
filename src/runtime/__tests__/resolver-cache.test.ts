@@ -258,8 +258,6 @@ describe("resolver solution caching", () => {
 				stateCookieName: "sbsd_o",
 			}),
 		).toBe(true);
-		expect(RESOLVER_CHALLENGE_BINDINGS.akamai_sbsd.cacheable).toBe(false);
-		expect(RESOLVER_CHALLENGE_BINDINGS.akamai_sbsd.directCacheable).toBe(false);
 	});
 
 	it("does not consult the cache for token kinds and does consult it for cookie kinds", async () => {

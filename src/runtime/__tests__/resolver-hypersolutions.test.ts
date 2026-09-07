@@ -9,6 +9,8 @@ const API_KEY = "hyper-test-key";
 const PAGE_URL = "https://shop.example.com/products/sku-1";
 const HARD_SCRIPT_URL =
 	"https://shop.example.com/.well-known/sbsd?v=dcc78710-14fe-3835-cc6e-b9b5ea3b6010&t=99543528";
+const HYPER_SBSD_URL = "https://akm.hypersolutions.co/sbsd";
+const HYPER_IP_URL = "https://ip.hypersolutions.co/ip";
 const SCRIPT_BODY = "/* measured SBSD script */";
 const USER_AGENT = "Mozilla/5.0 measured-agent";
 const ACCEPT_LANGUAGE = "ja,en-US;q=0.9,en;q=0.8";
@@ -29,6 +31,8 @@ type TransportCall = {
 	readonly init: Parameters<ResolverVendorTransport["fetch"]>[1];
 };
 
+type DirectCall = { readonly url: string; readonly init: RequestInit | undefined };
+
 function response(
 	body: string,
 	options: {
@@ -44,13 +48,32 @@ function response(
 	};
 }
 
-function createProtocolTransport(stateCookieName: "sbsd_o" | "bm_so" = "sbsd_o"): {
+/** Direct egress stub for the Hyper payload POST; anything else is a routing mutant. */
+function createDirectFetch(
+	respond: (call: DirectCall, callNumber: number) => Response = (_call, callNumber) =>
+		Response.json({ payload: `payload-${callNumber}` }),
+): { readonly fetchImpl: typeof fetch; readonly calls: DirectCall[] } {
+	const calls: DirectCall[] = [];
+	const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+		const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+		const call = { url, init };
+		calls.push(call);
+		if (url !== HYPER_SBSD_URL) throw new Error(`direct egress reached ${url}`);
+		return respond(call, calls.length);
+	}) as typeof fetch;
+	return { fetchImpl, calls };
+}
+
+function createProtocolTransport(
+	stateCookieName: "sbsd_o" | "bm_so" = "sbsd_o",
+	options: { readonly rotateStateCookie?: boolean } = {},
+): {
 	readonly transport: ResolverVendorTransport;
 	readonly calls: TransportCall[];
 } {
 	const calls: TransportCall[] = [];
 	const jar = new Map<string, string>();
-	let payloadNumber = 0;
+	let postNumber = 0;
 	const transport: ResolverVendorTransport = {
 		sessionHeaders: SESSION_HEADERS,
 		getCookie(name) {
@@ -58,24 +81,22 @@ function createProtocolTransport(stateCookieName: "sbsd_o" | "bm_so" = "sbsd_o")
 		},
 		async fetch(url, init) {
 			calls.push({ url, init });
-			if (url === "https://ip.hypersolutions.co/ip") {
+			if (url === HYPER_IP_URL) {
 				return response('{"ip":"203.0.113.42"}');
 			}
 			if (url.includes("/.well-known/sbsd?v=")) {
 				jar.set(stateCookieName, "script-established-state");
 				return response(SCRIPT_BODY);
 			}
-			if (url === "https://akm.hypersolutions.co/sbsd") {
-				payloadNumber += 1;
-				return response(JSON.stringify({ payload: `payload-${payloadNumber}` }));
-			}
 			if (url.includes("/.well-known/sbsd")) {
-				jar.set(stateCookieName, `rotated-state-${payloadNumber}`);
+				postNumber += 1;
+				if (options.rotateStateCookie === false) return response("");
+				jar.set(stateCookieName, `rotated-state-${postNumber}`);
 				return response("", {
 					cookies: [
 						{
 							name: stateCookieName,
-							value: `rotated-state-${payloadNumber}`,
+							value: `rotated-state-${postNumber}`,
 							expires: 2_000_000_000,
 							httpOnly: true,
 							secure: true,
@@ -83,18 +104,22 @@ function createProtocolTransport(stateCookieName: "sbsd_o" | "bm_so" = "sbsd_o")
 					],
 				});
 			}
-			throw new Error("unexpected transport destination");
+			throw new Error(`unexpected bound transport destination ${url}`);
 		},
 	};
 	return { transport, calls };
 }
 
-function createResolver(transport?: ResolverVendorTransport) {
+function createResolver(
+	transport?: ResolverVendorTransport,
+	fetchImpl: typeof fetch = createDirectFetch().fetchImpl,
+) {
 	return createResolverClient({
 		adapters: [
 			createHypersolutionsResolverVendorAdapter({
 				apiKey: API_KEY,
 				allowedHosts: ["shop.example.com"],
+				fetchImpl,
 			}),
 		],
 		kinds: ["akamai_sbsd"],
@@ -109,11 +134,14 @@ function createResolver(transport?: ResolverVendorTransport) {
 }
 
 describe("hypersolutions resolver vendor", () => {
-	it("runs the measured hard SBSD envelope entirely on the bound transport", async () => {
+	it("runs the measured hard SBSD envelope: upstream and /ip bound, Hyper /sbsd direct", async () => {
 		const { transport, calls } = createProtocolTransport();
-		const directFetch = spyOn(globalThis, "fetch");
+		const direct = createDirectFetch();
+		const globalFetch = spyOn(globalThis, "fetch");
 		try {
-			await expect(createResolver(transport).solve(HARD_CHALLENGE)).resolves.toEqual({
+			await expect(
+				createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
+			).resolves.toEqual({
 				form: "cookie_state",
 				kind: "akamai_sbsd",
 				outcome: "payload_accepted",
@@ -121,15 +149,14 @@ describe("hypersolutions resolver vendor", () => {
 				stateCookieName: "sbsd_o",
 				expires: 2_000_000_000,
 			});
-			expect(directFetch).not.toHaveBeenCalled();
+			expect(globalFetch).not.toHaveBeenCalled();
 		} finally {
-			directFetch.mockRestore();
+			globalFetch.mockRestore();
 		}
 
 		expect(calls.map(({ url }) => url)).toEqual([
-			"https://ip.hypersolutions.co/ip",
+			HYPER_IP_URL,
 			HARD_SCRIPT_URL,
-			"https://akm.hypersolutions.co/sbsd",
 			"https://shop.example.com/.well-known/sbsd?t=99543528",
 		]);
 		const ipCall = calls[0]!;
@@ -141,14 +168,16 @@ describe("hypersolutions resolver vendor", () => {
 		expect(ipCall.init.maxBodyBytes).toBe(4_096);
 		expect(calls[1]?.init.headers).toEqual({ ...SESSION_HEADERS, Referer: PAGE_URL });
 
-		const hyperCall = calls[2]!;
-		expect(hyperCall.init.method).toBe("POST");
-		expect(hyperCall.init.headers).toEqual({
+		expect(direct.calls.map(({ url }) => url)).toEqual([HYPER_SBSD_URL]);
+		const hyperCall = direct.calls[0]!;
+		expect(hyperCall.init?.method).toBe("POST");
+		expect(hyperCall.init?.redirect).toBe("error");
+		expect(hyperCall.init?.headers).toEqual({
 			accept: "application/json",
 			"content-type": "application/json",
 			"x-api-key": API_KEY,
 		});
-		expect(JSON.parse(hyperCall.init.body ?? "")).toEqual({
+		expect(JSON.parse(String(hyperCall.init?.body))).toEqual({
 			index: 0,
 			uuid: "dcc78710-14fe-3835-cc6e-b9b5ea3b6010",
 			o: "script-established-state",
@@ -158,7 +187,7 @@ describe("hypersolutions resolver vendor", () => {
 			ip: "203.0.113.42",
 			acceptLanguage: ACCEPT_LANGUAGE,
 		});
-		const postCall = calls[3]!;
+		const postCall = calls[2]!;
 		expect(postCall.init.body).toBe('{"body":"payload-1"}');
 		expect(postCall.init.headers).toEqual({
 			...SESSION_HEADERS,
@@ -169,21 +198,22 @@ describe("hypersolutions resolver vendor", () => {
 
 	it("uses indices 0 and 1 for the passive v-only variant and no post query", async () => {
 		const { transport, calls } = createProtocolTransport("bm_so");
+		const direct = createDirectFetch();
 		const passiveChallenge = {
 			...HARD_CHALLENGE,
 			scriptUrl: "https://shop.example.com/.well-known/sbsd?v=dcc78710-14fe-3835-cc6e-b9b5ea3b6010",
 			stateCookieName: "bm_so",
 		} satisfies ProviderChallenge;
 
-		await expect(createResolver(transport).solve(passiveChallenge)).resolves.toMatchObject({
+		await expect(
+			createResolver(transport, direct.fetchImpl).solve(passiveChallenge),
+		).resolves.toMatchObject({
 			kind: "akamai_sbsd",
 			outcome: "payload_accepted",
 			verified: false,
 			stateCookieName: "bm_so",
 		});
-		const hyperBodies = calls
-			.filter(({ url }) => url === "https://akm.hypersolutions.co/sbsd")
-			.map(({ init }) => JSON.parse(init.body ?? ""));
+		const hyperBodies = direct.calls.map(({ init }) => JSON.parse(String(init?.body)));
 		expect(hyperBodies.map(({ index }) => index)).toEqual([0, 1]);
 		expect(
 			calls.filter(
@@ -195,48 +225,103 @@ describe("hypersolutions resolver vendor", () => {
 
 	it("keeps a remembered v-only script separate from a later cpr_chlge token", async () => {
 		const { transport, calls } = createProtocolTransport();
+		const direct = createDirectFetch();
 		const rememberedChallenge = {
 			...HARD_CHALLENGE,
 			scriptUrl: "https://shop.example.com/.well-known/sbsd?v=dcc78710-14fe-3835-cc6e-b9b5ea3b6010",
 			challengeToken: "298133469",
 		} satisfies ProviderChallenge;
 
-		await expect(createResolver(transport).solve(rememberedChallenge)).resolves.toMatchObject({
+		await expect(
+			createResolver(transport, direct.fetchImpl).solve(rememberedChallenge),
+		).resolves.toMatchObject({
 			kind: "akamai_sbsd",
 			stateCookieName: "sbsd_o",
 			verified: false,
 		});
 		expect(calls.map(({ url }) => url)).toEqual([
-			"https://ip.hypersolutions.co/ip",
+			HYPER_IP_URL,
 			"https://shop.example.com/.well-known/sbsd?v=dcc78710-14fe-3835-cc6e-b9b5ea3b6010",
-			"https://akm.hypersolutions.co/sbsd",
 			"https://shop.example.com/.well-known/sbsd?t=298133469",
 		]);
-		expect(JSON.parse(calls[2]?.init.body ?? "").index).toBe(0);
+		expect(JSON.parse(String(direct.calls[0]?.init?.body)).index).toBe(0);
 	});
 
-	it("fails with missing_transport and never falls back to direct egress", async () => {
-		const directFetch = spyOn(globalThis, "fetch");
-		directFetch.mockRejectedValue(new Error("direct egress mutant reached global fetch"));
+	it("reports payload_accepted even when the state cookie did not rotate", async () => {
+		// The measured source and Hyper's docs verify only through the next protected
+		// GET; a non-rotating cookie is not a failure signal (Phase 2 refetch decides).
+		const { transport } = createProtocolTransport("sbsd_o", { rotateStateCookie: false });
+		await expect(createResolver(transport).solve(HARD_CHALLENGE)).resolves.toEqual({
+			form: "cookie_state",
+			kind: "akamai_sbsd",
+			outcome: "payload_accepted",
+			verified: false,
+			stateCookieName: "sbsd_o",
+		});
+	});
+
+	it("fails with missing_transport before any egress: the upstream is never fetched directly", async () => {
+		const direct = createDirectFetch();
+		const globalFetch = spyOn(globalThis, "fetch");
+		globalFetch.mockRejectedValue(new Error("direct egress mutant reached global fetch"));
 		try {
-			await expect(createResolver().solve(HARD_CHALLENGE)).rejects.toMatchObject({
+			await expect(
+				createResolver(undefined, direct.fetchImpl).solve(HARD_CHALLENGE),
+			).rejects.toMatchObject({
 				code: "RESOLVER_CHAIN_EXHAUSTED",
 				details: [{ vendor: "hypersolutions", reason: "missing_transport" }],
 			});
-			expect(directFetch).not.toHaveBeenCalled();
+			expect(globalFetch).not.toHaveBeenCalled();
+			expect(direct.calls).toHaveLength(0);
 		} finally {
-			directFetch.mockRestore();
+			globalFetch.mockRestore();
 		}
 	});
 
-	it("admits only provider-declared upstream hosts plus Hyper's two exact hosts", async () => {
+	it("admits only provider-declared upstream hosts plus Hyper's exact /ip host", async () => {
 		const { transport, calls } = createProtocolTransport();
+		expect(
+			createHypersolutionsResolverVendorAdapter({ apiKey: API_KEY, allowedHosts: [] })
+				.transportAllowedHosts,
+		).toEqual(["ip.hypersolutions.co"]);
 		await expect(
 			createResolver(transport).solve({
 				...HARD_CHALLENGE,
 				scriptUrl: HARD_SCRIPT_URL.replace("shop.example.com", "attacker.example"),
 			}),
 		).rejects.toMatchObject({ code: "RESOLVER_HOST_NOT_ALLOWED" });
+		expect(calls).toHaveLength(0);
+	});
+
+	it("rejects a script URL from another declared origin as incomplete challenge input", async () => {
+		const { transport, calls } = createProtocolTransport();
+		const resolver = createResolverClient({
+			adapters: [
+				createHypersolutionsResolverVendorAdapter({
+					apiKey: API_KEY,
+					allowedHosts: ["shop.example.com", "cdn.example.com"],
+				}),
+			],
+			kinds: ["akamai_sbsd"],
+			clientProfile: "safari17_0",
+			allowedHosts: ["shop.example.com", "cdn.example.com"],
+			createTransport: () => transport,
+		});
+		await expect(
+			resolver.solve({
+				...HARD_CHALLENGE,
+				scriptUrl: HARD_SCRIPT_URL.replace("shop.example.com", "cdn.example.com"),
+			}),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{
+					vendor: "hypersolutions",
+					reason: "missing_challenge_input",
+					missingFields: ["scriptUrl"],
+				},
+			],
+		});
 		expect(calls).toHaveLength(0);
 	});
 
@@ -315,21 +400,65 @@ describe("hypersolutions resolver vendor", () => {
 		expect(calls).toHaveLength(0);
 	});
 
-	it("does not report the payload POST as solved when no state cookie was updated", async () => {
-		const jar = new Map<string, string>();
+	it.each([
+		[401, "missing_credentials"],
+		[503, "transport_failure"],
+	] as const)("classifies a %i from Hyper's /ip reflector as %s", async (status, reason) => {
+		const calls: string[] = [];
 		const transport: ResolverVendorTransport = {
 			sessionHeaders: SESSION_HEADERS,
-			getCookie: (name) => jar.get(name),
+			getCookie: () => "unreached-state",
 			async fetch(url) {
-				if (url === "https://ip.hypersolutions.co/ip") return response("203.0.113.42");
-				if (url === "https://akm.hypersolutions.co/sbsd") {
-					return response('{"payload":"payload"}');
-				}
-				if (url.includes("?v=")) {
-					jar.set("sbsd_o", "unchanged-state");
-					return response(SCRIPT_BODY);
-				}
-				return response("");
+				calls.push(url);
+				return response("", { status });
+			},
+		};
+		await expect(createResolver(transport).solve(HARD_CHALLENGE)).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [{ vendor: "hypersolutions", reason, phase: "measure_ip" }],
+		});
+		expect(calls).toEqual([HYPER_IP_URL]);
+	});
+
+	it("classifies a failed Hyper payload generation as transport_failure without posting upstream", async () => {
+		const { transport, calls } = createProtocolTransport();
+		const direct = createDirectFetch(() => new Response("upstream busy", { status: 502 }));
+		await expect(
+			createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{ vendor: "hypersolutions", reason: "transport_failure", phase: "generate_payload" },
+			],
+		});
+		expect(direct.calls).toHaveLength(1);
+		expect(calls.map(({ url }) => url)).toEqual([HYPER_IP_URL, HARD_SCRIPT_URL]);
+	});
+
+	it("classifies a Hyper 2xx without a payload field as transport_failure", async () => {
+		const { transport } = createProtocolTransport();
+		const direct = createDirectFetch(() => Response.json({ error: "no payload" }));
+		await expect(
+			createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{
+					vendor: "hypersolutions",
+					reason: "transport_failure",
+					phase: "generate_payload",
+					round: 1,
+				},
+			],
+		});
+	});
+
+	it("reports an upstream refusal of the script GET as a solve verdict, not a transport fault", async () => {
+		const transport: ResolverVendorTransport = {
+			sessionHeaders: SESSION_HEADERS,
+			getCookie: () => "state",
+			async fetch(url) {
+				return url === HYPER_IP_URL ? response("203.0.113.42") : response("", { status: 403 });
 			},
 		};
 		await expect(createResolver(transport).solve(HARD_CHALLENGE)).rejects.toMatchObject({
@@ -353,5 +482,21 @@ describe("hypersolutions resolver vendor", () => {
 			details: [{ vendor: "hypersolutions", reason: "transport_failure", phase: "measure_ip" }],
 		});
 		expect(calls).toBe(1);
+	});
+
+	it("rejects an over-limit Hyper payload response", async () => {
+		const { transport, calls } = createProtocolTransport();
+		const direct = createDirectFetch(
+			() => new Response(`{"payload":"${"x".repeat(1_000_000)}"}`, { status: 200 }),
+		);
+		await expect(
+			createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{ vendor: "hypersolutions", reason: "transport_failure", phase: "generate_payload" },
+			],
+		});
+		expect(calls.filter(({ init }) => init.method === "POST")).toHaveLength(0);
 	});
 });

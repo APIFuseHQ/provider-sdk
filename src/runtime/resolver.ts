@@ -470,7 +470,15 @@ function restrictResolverTransport(
 ): ResolverVendorTransport {
 	return {
 		sessionHeaders: transport.sessionHeaders,
-		getCookie: transport.getCookie?.bind(transport),
+		...(transport.getCookie
+			? {
+					getCookie(name, url) {
+						// Jar reads are gated like fetches: an adapter may only read state for declared hosts.
+						assertResolverHostAllowed(url, allowedHosts);
+						return transport.getCookie?.(name, url);
+					},
+				}
+			: {}),
 		async fetch(url, init) {
 			// Empty declarations remain deny-by-default, matching the adapter-factory/browser path.
 			assertResolverHostAllowed(url, allowedHosts);

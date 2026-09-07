@@ -14,11 +14,15 @@ import {
 const HYPERSOLUTIONS_VENDOR_ID = "hypersolutions" as const;
 const HYPER_SBSD_URL = "https://akm.hypersolutions.co/sbsd";
 const HYPER_IP_URL = "https://ip.hypersolutions.co/ip";
-const HYPER_TRANSPORT_HOSTS = ["akm.hypersolutions.co", "ip.hypersolutions.co"] as const;
+/**
+ * Only the observed-IP reflector rides the bound transport: Hyper must see the
+ * egress address the upstream will see. The payload-generation POST carries no
+ * identity and goes direct, as in the measured zozotown source.
+ */
+const HYPER_TRANSPORT_HOSTS = ["ip.hypersolutions.co"] as const;
 const IP_RESPONSE_MAX_BYTES = 4_096;
-const SCRIPT_MAX_BYTES = 1_000_000;
-const HYPER_RESPONSE_MAX_BYTES = 1_000_000;
-const PAYLOAD_RESPONSE_MAX_BYTES = 1_000_000;
+/** Measured bound shared by the script, the Hyper envelope, and the payload submission. */
+const BODY_MAX_BYTES = 1_000_000;
 
 type HyperPhase = "measure_ip" | "fetch_script" | "generate_payload" | "post_payload";
 
@@ -26,6 +30,8 @@ export interface HypersolutionsResolverVendorOptions {
 	readonly apiKey?: string;
 	readonly timeoutMs?: number;
 	readonly allowedHosts: readonly string[];
+	/** Direct egress used only for the Hyper payload-generation POST. */
+	readonly fetchImpl?: typeof fetch;
 }
 
 export type AkamaiSbsdChallengeSolution = Extract<
@@ -46,45 +52,46 @@ export interface HypersolutionsResolverVendorAdapter extends ResolverVendorAdapt
 	): Promise<AkamaiSbsdChallengeSolution>;
 }
 
-function responseHeader(
-	headers: Readonly<Record<string, string>>,
-	name: string,
-): string | undefined {
+type TransportResponse = Awaited<ReturnType<ResolverVendorTransport["fetch"]>>;
+
+function headerValue(headers: Readonly<Record<string, string>>, name: string): string | undefined {
 	const target = name.toLowerCase();
-	return Object.entries(headers).find(([header]) => header.toLowerCase() === target)?.[1];
+	return Object.entries(headers)
+		.find(([header]) => header.toLowerCase() === target)?.[1]
+		?.trim();
 }
 
-function bodyByteLength(body: string): number {
-	return new TextEncoder().encode(body).byteLength;
+function declaredLengthExceeds(declared: string | undefined, maxBytes: number): boolean {
+	return declared !== undefined && /^\d+$/u.test(declared) && BigInt(declared) > BigInt(maxBytes);
 }
 
-function assertBoundedBody(
-	response: Awaited<ReturnType<ResolverVendorTransport["fetch"]>>,
-	maxBytes: number,
-	phase: HyperPhase,
-): void {
-	const declared = responseHeader(response.headers, "content-length")?.trim();
-	if (declared && /^\d+$/u.test(declared) && BigInt(declared) > BigInt(maxBytes)) {
-		throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "transport_failure", {
-			phase,
-		});
-	}
-	if (bodyByteLength(response.body) > maxBytes) {
-		throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "transport_failure", {
-			phase,
-		});
+function transportFailure(phase: HyperPhase, cause?: unknown): ResolverVendorUnavailableError {
+	return new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "transport_failure", {
+		phase,
+		...(cause === undefined ? {} : { cause }),
+	});
+}
+
+function assertBoundedBody(response: TransportResponse, maxBytes: number, phase: HyperPhase): void {
+	if (
+		declaredLengthExceeds(headerValue(response.headers, "content-length"), maxBytes) ||
+		new TextEncoder().encode(response.body).byteLength > maxBytes
+	) {
+		throw transportFailure(phase);
 	}
 }
 
 function requireSuccess(status: number, phase: HyperPhase): void {
 	if (status >= 200 && status < 300) return;
-	if (phase === "generate_payload") {
+	if (phase === "measure_ip" || phase === "generate_payload") {
+		// Hyper's own service: a rejected key is a credential fault, anything else is transport.
 		throw new ResolverVendorUnavailableError(
 			HYPERSOLUTIONS_VENDOR_ID,
 			status === 401 || status === 403 ? "missing_credentials" : "transport_failure",
 			{ phase },
 		);
 	}
+	// The upstream refused the script GET or the payload POST: that is the challenge verdict.
 	throw new ResolverChallengeVerdictError(HYPERSOLUTIONS_VENDOR_ID, "solve_failed", { phase });
 }
 
@@ -115,28 +122,6 @@ function parsePayload(body: string): string | undefined {
 	} catch {
 		return undefined;
 	}
-}
-
-function hyperRequestBody(input: {
-	readonly index: number;
-	readonly uuid: string;
-	readonly stateCookieValue: string;
-	readonly pageUrl: string;
-	readonly userAgent: string;
-	readonly script: string;
-	readonly ip: string;
-	readonly acceptLanguage: string;
-}): string {
-	return JSON.stringify({
-		index: input.index,
-		uuid: input.uuid,
-		o: input.stateCookieValue,
-		pageUrl: input.pageUrl,
-		userAgent: input.userAgent,
-		script: input.script,
-		ip: input.ip,
-		acceptLanguage: input.acceptLanguage,
-	});
 }
 
 function scriptExchangeUrls(
@@ -180,16 +165,6 @@ function scriptExchangeUrls(
 	};
 }
 
-function sessionHeader(
-	headers: Readonly<Record<string, string>>,
-	name: string,
-): string | undefined {
-	const target = name.toLowerCase();
-	return Object.entries(headers)
-		.find(([header]) => header.toLowerCase() === target)?.[1]
-		?.trim();
-}
-
 function assertChallengeInput(
 	challenge: Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>,
 	allowedHosts: readonly string[],
@@ -212,7 +187,10 @@ function assertChallengeInput(
 	assertResolverHostAllowed(challenge.pageUrl, allowedHosts);
 	assertResolverHostAllowed(challenge.scriptUrl, allowedHosts);
 	if (new URL(challenge.pageUrl).origin !== new URL(challenge.scriptUrl).origin) {
-		throw new ResolverChallengeVerdictError(HYPERSOLUTIONS_VENDOR_ID, "solve_failed");
+		// The state cookie is read for pageUrl and posted to scriptUrl; they must share an origin.
+		throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "missing_challenge_input", {
+			missingFields: ["scriptUrl"],
+		});
 	}
 }
 
@@ -221,7 +199,7 @@ async function boundFetch(
 	url: string,
 	init: Parameters<ResolverVendorTransport["fetch"]>[1],
 	phase: HyperPhase,
-): Promise<Awaited<ReturnType<ResolverVendorTransport["fetch"]>>> {
+): Promise<TransportResponse> {
 	try {
 		return await transport.fetch(url, init);
 	} catch (cause) {
@@ -231,17 +209,62 @@ async function boundFetch(
 		) {
 			throw cause;
 		}
-		throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "transport_failure", {
-			cause,
-			phase,
-		});
+		throw transportFailure(phase, cause);
 	}
+}
+
+async function readBoundedText(response: Response, maxBytes: number): Promise<string | undefined> {
+	if (declaredLengthExceeds(response.headers.get("content-length")?.trim(), maxBytes)) {
+		return undefined;
+	}
+	if (!response.body) return "";
+	const reader = response.body.getReader();
+	const decoder = new TextDecoder();
+	let received = 0;
+	let text = "";
+	for (;;) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		received += value.byteLength;
+		if (received > maxBytes) {
+			await reader.cancel();
+			return undefined;
+		}
+		text += decoder.decode(value, { stream: true });
+	}
+	return text + decoder.decode();
+}
+
+async function generatePayload(
+	fetchImpl: typeof fetch,
+	apiKey: string,
+	body: string,
+	signal: AbortSignal,
+): Promise<{ readonly status: number; readonly body: string | undefined }> {
+	let response: Response;
+	try {
+		response = await fetchImpl(HYPER_SBSD_URL, {
+			method: "POST",
+			headers: {
+				accept: "application/json",
+				"content-type": "application/json",
+				"x-api-key": apiKey,
+			},
+			body,
+			signal,
+			redirect: "error",
+		});
+	} catch (cause) {
+		throw transportFailure("generate_payload", cause);
+	}
+	return { status: response.status, body: await readBoundedText(response, BODY_MAX_BYTES) };
 }
 
 export function createHypersolutionsResolverVendorAdapter(
 	options: HypersolutionsResolverVendorOptions,
 ): HypersolutionsResolverVendorAdapter {
 	const apiKey = options.apiKey?.trim();
+	const fetchImpl = options.fetchImpl ?? globalThis.fetch;
 	return {
 		id: HYPERSOLUTIONS_VENDOR_ID,
 		requiresTransport: true,
@@ -262,16 +285,13 @@ export function createHypersolutionsResolverVendorAdapter(
 				if (!apiKey) {
 					throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "missing_credentials");
 				}
-				if (!transport) {
-					throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "missing_transport");
-				}
-				if (!transport.getCookie) {
+				if (!transport?.getCookie) {
 					throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "missing_transport");
 				}
 				const sessionHeaders = transport.sessionHeaders;
-				const userAgent = sessionHeaders ? sessionHeader(sessionHeaders, "user-agent") : undefined;
+				const userAgent = sessionHeaders ? headerValue(sessionHeaders, "user-agent") : undefined;
 				const acceptLanguage = sessionHeaders
-					? sessionHeader(sessionHeaders, "accept-language")
+					? headerValue(sessionHeaders, "accept-language")
 					: undefined;
 				if (!sessionHeaders || !userAgent || !acceptLanguage) {
 					throw new ResolverVendorUnavailableError(
@@ -281,10 +301,6 @@ export function createHypersolutionsResolverVendorAdapter(
 				}
 				assertChallengeInput(challenge, options.allowedHosts);
 				const exchange = scriptExchangeUrls(challenge.scriptUrl, challenge.challengeToken);
-
-				for (const url of [HYPER_IP_URL, HYPER_SBSD_URL]) {
-					assertResolverHostAllowed(url, HYPER_TRANSPORT_HOSTS);
-				}
 
 				const ipResponse = await boundFetch(
 					transport,
@@ -301,14 +317,10 @@ export function createHypersolutionsResolverVendorAdapter(
 					},
 					"measure_ip",
 				);
-				assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
 				requireSuccess(ipResponse.status, "measure_ip");
+				assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
 				const ip = parseObservedIp(ipResponse.body);
-				if (!ip) {
-					throw new ResolverVendorUnavailableError(HYPERSOLUTIONS_VENDOR_ID, "transport_failure", {
-						phase: "measure_ip",
-					});
-				}
+				if (!ip) throw transportFailure("measure_ip");
 
 				const scriptResponse = await boundFetch(
 					transport,
@@ -318,21 +330,21 @@ export function createHypersolutionsResolverVendorAdapter(
 						headers: { ...sessionHeaders, Referer: challenge.pageUrl },
 						signal: operationSignal,
 						redirect: "manual",
-						maxBodyBytes: SCRIPT_MAX_BYTES,
+						maxBodyBytes: BODY_MAX_BYTES,
 					},
 					"fetch_script",
 				);
-				assertBoundedBody(scriptResponse, SCRIPT_MAX_BYTES, "fetch_script");
 				requireSuccess(scriptResponse.status, "fetch_script");
+				assertBoundedBody(scriptResponse, BODY_MAX_BYTES, "fetch_script");
 				if (!scriptResponse.body) {
 					throw new ResolverChallengeVerdictError(HYPERSOLUTIONS_VENDOR_ID, "solve_failed", {
 						phase: "fetch_script",
 					});
 				}
-				const originCookie = transport
+				const stateCookie = transport
 					.getCookie(challenge.stateCookieName, challenge.pageUrl)
 					?.trim();
-				if (!originCookie) {
+				if (!stateCookie) {
 					throw new ResolverVendorUnavailableError(
 						HYPERSOLUTIONS_VENDOR_ID,
 						"missing_challenge_input",
@@ -342,48 +354,30 @@ export function createHypersolutionsResolverVendorAdapter(
 
 				let expires: number | undefined;
 				for (const [roundIndex, index] of exchange.indices.entries()) {
-					const hyperResponse = await boundFetch(
-						transport,
-						HYPER_SBSD_URL,
-						{
-							method: "POST",
-							headers: {
-								accept: "application/json",
-								"content-type": "application/json",
-								"x-api-key": apiKey,
-							},
-							body: hyperRequestBody({
-								index,
-								uuid: exchange.uuid,
-								stateCookieValue: originCookie,
-								pageUrl: challenge.pageUrl,
-								userAgent,
-								script: scriptResponse.body,
-								ip,
-								acceptLanguage,
-							}),
-							signal: operationSignal,
-							redirect: "manual",
-							maxBodyBytes: HYPER_RESPONSE_MAX_BYTES,
-						},
-						"generate_payload",
+					const round = roundIndex + 1;
+					const hyperResponse = await generatePayload(
+						fetchImpl,
+						apiKey,
+						JSON.stringify({
+							index,
+							uuid: exchange.uuid,
+							o: stateCookie,
+							pageUrl: challenge.pageUrl,
+							userAgent,
+							script: scriptResponse.body,
+							ip,
+							acceptLanguage,
+						}),
+						operationSignal,
 					);
-					assertBoundedBody(hyperResponse, HYPER_RESPONSE_MAX_BYTES, "generate_payload");
 					requireSuccess(hyperResponse.status, "generate_payload");
-					const payload = parsePayload(hyperResponse.body);
+					const payload =
+						hyperResponse.body === undefined ? undefined : parsePayload(hyperResponse.body);
 					if (!payload) {
 						throw new ResolverVendorUnavailableError(
 							HYPERSOLUTIONS_VENDOR_ID,
 							"transport_failure",
-							{ phase: "generate_payload", round: roundIndex + 1 },
-						);
-					}
-					const payloadBody = JSON.stringify({ body: payload });
-					if (bodyByteLength(payloadBody) > PAYLOAD_RESPONSE_MAX_BYTES) {
-						throw new ResolverVendorUnavailableError(
-							HYPERSOLUTIONS_VENDOR_ID,
-							"transport_failure",
-							{ phase: "post_payload", round: roundIndex + 1 },
+							{ phase: "generate_payload", round },
 						);
 					}
 					const postResponse = await boundFetch(
@@ -396,28 +390,23 @@ export function createHypersolutionsResolverVendorAdapter(
 								"content-type": "application/json",
 								Referer: challenge.pageUrl,
 							},
-							body: payloadBody,
+							body: JSON.stringify({ body: payload }),
 							signal: operationSignal,
 							redirect: "manual",
-							maxBodyBytes: PAYLOAD_RESPONSE_MAX_BYTES,
+							maxBodyBytes: BODY_MAX_BYTES,
 						},
 						"post_payload",
 					);
-					assertBoundedBody(postResponse, PAYLOAD_RESPONSE_MAX_BYTES, "post_payload");
 					requireSuccess(postResponse.status, "post_payload");
+					assertBoundedBody(postResponse, BODY_MAX_BYTES, "post_payload");
 					expires =
 						postResponse.cookies.find((cookie) => cookie.name === challenge.stateCookieName)
 							?.expires ?? expires;
 				}
 
-				const updatedCookie = transport
-					.getCookie(challenge.stateCookieName, challenge.pageUrl)
-					?.trim();
-				if (!updatedCookie || updatedCookie === originCookie) {
-					throw new ResolverChallengeVerdictError(HYPERSOLUTIONS_VENDOR_ID, "solve_failed", {
-						phase: "post_payload",
-					});
-				}
+				// A 2xx payload POST is not proof of a solve and the state cookie is not
+				// required to rotate (measured zozotown source and Hyper's docs both verify
+				// only through the next protected GET, which is Phase 2).
 				return {
 					form: "cookie_state",
 					kind: "akamai_sbsd",

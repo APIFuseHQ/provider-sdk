@@ -1105,6 +1105,41 @@ describe("resolver vendor chain", () => {
 		expect(fetchCalls).toBe(1);
 	});
 
+	it("gates bound-jar cookie reads by the same host allowlist as transport fetches", async () => {
+		const readUrls: string[] = [];
+		const underlyingTransport: ResolverVendorTransport = {
+			getCookie(_name, url) {
+				readUrls.push(url);
+				return "state";
+			},
+			async fetch() {
+				return { status: 200, headers: {}, body: "", cookies: [] };
+			},
+		};
+		const adapter: ResolverVendorAdapter = {
+			id: "custom",
+			requiresTransport: true,
+			supports: (kind) => kind === "akamai_sensor",
+			async solve(_challenge, _identity, _signal, _traceRecorder, transport) {
+				transport?.getCookie?.("sbsd_o", "https://attacker.example/");
+				return { form: "token", token: "unreachable" };
+			},
+		};
+		await expect(
+			createResolverClient({
+				adapters: [adapter],
+				kinds: ["akamai_sensor"],
+				allowedHosts: ["sensor.example.com"],
+				createTransport: () => underlyingTransport,
+			}).solve({
+				kind: "akamai_sensor",
+				pageUrl: "https://sensor.example.com/",
+				scriptUrl: "https://sensor.example.com/akamai/sensor.js",
+			}),
+		).rejects.toMatchObject({ name: "ProviderError", code: "RESOLVER_HOST_NOT_ALLOWED" });
+		expect(readUrls).toEqual([]);
+	});
+
 	it("allows declared resolver hosts over both https and http", async () => {
 		const dialedUrls: string[] = [];
 		const resolver = createTransportGuardResolver({
