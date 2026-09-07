@@ -258,6 +258,16 @@ export function getStealthProfile(selection: StealthProfileSelection = {}): Stea
 	};
 }
 
+/**
+ * The transport owns the browser version (Chromium follows the pinned wreq-js build), so a
+ * resolver `clientProfile` such as `safari17_0` or `chrome_149` only has to name the same
+ * browser family as the stealth session it runs on.
+ */
+export function resolverClientProfileFamily(clientProfile: string): StealthBrowser | undefined {
+	const family = /^[a-z]+/u.exec(clientProfile.trim().toLowerCase())?.[0];
+	return family === "chrome" || family === "firefox" || family === "safari" ? family : undefined;
+}
+
 export function listStealthProfiles(): StealthProfileDescriptor[] {
 	return SUPPORTED_STEALTH_PROFILES.map((profile) => ({ ...profile }));
 }

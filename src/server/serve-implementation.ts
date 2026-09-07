@@ -96,9 +96,11 @@ import {
 } from "../runtime/state.js";
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
+import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import {
 	createTraceContext,
+	getTraceRecorder,
 	type TraceContext as RuntimeTraceContext,
 	type TraceRecorder,
 	updateTraceContextExportMetadata,
@@ -579,6 +581,89 @@ function getProviderStealthProfile(provider: ProviderDefinition) {
 	return provider.stealth ? getStealthProfile(provider.stealth) : undefined;
 }
 
+type ResolverRuntimeOptions = ResolverRuntimeModule.ResolverRuntimeOptions;
+
+/** One option set for ctx.resolver and the automatic SBSD solve, so both share identity scope, cache, proxy intent, and telemetry. */
+function createResolverRuntimeOptions(
+	provider: ProviderDefinition,
+	cache: ReturnType<typeof createProviderCache>,
+	identityScope: string,
+	proxyPolicy: ProviderProxyPolicy | undefined,
+	proxyClientOptions: Omit<
+		NonNullable<ResolverRuntimeOptions["proxyIntent"]>,
+		"mode" | "userAgent"
+	>,
+	stealthProfile: { readonly userAgent: string } | undefined,
+): ResolverRuntimeOptions {
+	return {
+		allowedHosts: provider.allowedHosts,
+		cache,
+		identityScope,
+		...(proxyPolicy
+			? {
+					proxyIntent: {
+						mode: proxyPolicy.mode,
+						...proxyClientOptions,
+						...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
+					},
+				}
+			: {}),
+	};
+}
+
+function createStealthChallengeDetection(
+	provider: ProviderDefinition,
+	resolverRuntime: typeof ResolverRuntimeModule | undefined,
+	resolverOverride: ResolverContext | undefined,
+	resolverOptions: ResolverRuntimeOptions,
+	trace: RuntimeTraceContext,
+	signal: AbortSignal | undefined,
+): StealthChallengeRuntime | undefined {
+	const resolverDeclared = provider.resolver?.kinds.some((kind) => kind === "akamai_sbsd") === true;
+	const detectOnly = provider.stealth?.challengeDetection?.akamaiSbsd === true;
+	if (!resolverDeclared && !detectOnly) {
+		return undefined;
+	}
+	return {
+		akamaiSbsd: {
+			allowedHosts: provider.allowedHosts ?? [],
+			// The profile belongs to the SBSD resolver; a resolver declared for other kinds
+			// may name a different browser without affecting detect-only classification.
+			...(resolverDeclared && provider.resolver?.clientProfile
+				? { clientProfile: provider.resolver.clientProfile }
+				: {}),
+			...(resolverDeclared && resolverRuntime
+				? {
+						async solve(challenge, transport, solveSignal) {
+							const resolver = resolverRuntime.bindResolverSignal(
+								resolverOverride ??
+									resolverRuntime.createResolverClientFromEnv(provider.resolver, undefined, {
+										allowedHosts: resolverOptions.allowedHosts,
+										cache: resolverOptions.cache,
+										identityScope: resolverOptions.identityScope,
+										// No proxyIntent: the transport is already bound to the initiating
+										// request's lease, and a second identity resolution would allocate
+										// again (and fail closed without allocator credentials) for nothing
+										// the SBSD adapters consume.
+										createTransport: () => transport,
+									}),
+								signal,
+							) as ResolverContext & Partial<ResolverSolveWithRecorder>;
+							// Same span and recorder threading as the instrumented ctx.resolver.solve.
+							const recorder = getTraceRecorder(trace);
+							const solve = () => resolver.solve(challenge, solveSignal, recorder ?? undefined);
+							return recorder
+								? recorder.runSpan("resolver.solve", solve, {
+										attributes: { challenge_kind: challenge.kind },
+									})
+								: solve();
+						},
+					}
+				: {}),
+		},
+	};
+}
+
 function isProductionProviderBrowserMode(provider: ProviderDefinition, env = process.env): boolean {
 	if (provider.runtime !== "browser") {
 		return false;
@@ -741,16 +826,42 @@ function createProviderContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
+	const cache = createProviderCache({ providerId: provider.id });
 	let wrappedContext: ProviderContext | undefined;
+	const { capabilityModules } = options;
+	const resolverOptions = createResolverRuntimeOptions(
+		provider,
+		cache,
+		resolverIdentityScope,
+		proxyPolicy,
+		proxyClientOptions,
+		stealthProfile,
+	);
+	const challengeRuntime = createStealthChallengeDetection(
+		provider,
+		capabilityModules.resolver,
+		options.resolver,
+		resolverOptions,
+		scope.trace,
+		signal,
+	);
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
-		...(provider.stealth ? { stealth: provider.stealth } : {}),
+		// A declared resolver without a `stealth` block still gets the default Chrome client
+		// (auth FlowContext is not capability-gated), so the runtime must ride along.
+		...(provider.stealth || challengeRuntime
+			? {
+					stealth: {
+						...(provider.stealth ?? {}),
+						...(challengeRuntime ? { challengeRuntime } : {}),
+					},
+				}
+			: {}),
 	};
-	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>
 		logProviderCleanupError(
 			options.logger,
@@ -777,7 +888,6 @@ function createProviderContext(
 		headers: request.headers ?? {},
 	};
 	const requestState = state.forConnection(requestContext.connectionId);
-	const cache = createProviderCache({ providerId: provider.id });
 	const bindings: ProviderEngineBindingCandidates = {
 		env,
 		credential,
@@ -830,20 +940,11 @@ function createProviderContext(
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
 					options.resolver ??
-						capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
-							allowedHosts: provider.allowedHosts,
-							cache,
-							identityScope: resolverIdentityScope,
-							...(proxyPolicy
-								? {
-										proxyIntent: {
-											mode: proxyPolicy.mode,
-											...proxyClientOptions,
-											...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
-										},
-									}
-								: {}),
-						}),
+						capabilityModules.resolver.createResolverClientFromEnv(
+							provider.resolver,
+							undefined,
+							resolverOptions,
+						),
 					signal,
 				)
 			: bindResolverSignalWithoutRuntime(
@@ -956,15 +1057,41 @@ function createAuthFlowContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
+	const cache = createProviderCache({ providerId: provider.id });
+	const { capabilityModules } = options;
+	const resolverOptions = createResolverRuntimeOptions(
+		provider,
+		cache,
+		resolverIdentityScope,
+		proxyPolicy,
+		proxyClientOptions,
+		stealthProfile,
+	);
+	const challengeRuntime = createStealthChallengeDetection(
+		provider,
+		capabilityModules.resolver,
+		options.resolver,
+		resolverOptions,
+		scope.trace,
+		signal,
+	);
 	const stealthClientOptions = {
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: scope.telemetry.proxy,
 		engineCredentials: engineProxyCredentials,
 		...(signal ? { signal } : {}),
-		...(provider.stealth ? { stealth: provider.stealth } : {}),
+		// A declared resolver without a `stealth` block still gets the default Chrome client
+		// (auth FlowContext is not capability-gated), so the runtime must ride along.
+		...(provider.stealth || challengeRuntime
+			? {
+					stealth: {
+						...(provider.stealth ?? {}),
+						...(challengeRuntime ? { challengeRuntime } : {}),
+					},
+				}
+			: {}),
 	};
-	const { capabilityModules } = options;
 	const logStealthCleanupError = (error: unknown) =>
 		logProviderCleanupError(
 			options.logger,
@@ -983,8 +1110,6 @@ function createAuthFlowContext(
 				values: request.connection.secrets,
 			})
 		: undefined;
-	const cache = createProviderCache({ providerId: provider.id });
-
 	const context: FlowContext = wrapWithInstrumentation({
 		flowId: request.flowId,
 		connectionId: resolveOperationConnectionId(request),
@@ -1027,20 +1152,11 @@ function createAuthFlowContext(
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
 					options.resolver ??
-						capabilityModules.resolver.createResolverClientFromEnv(provider.resolver, undefined, {
-							allowedHosts: provider.allowedHosts,
-							cache,
-							identityScope: resolverIdentityScope,
-							...(proxyPolicy
-								? {
-										proxyIntent: {
-											mode: proxyPolicy.mode,
-											...proxyClientOptions,
-											...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
-										},
-									}
-								: {}),
-						}),
+						capabilityModules.resolver.createResolverClientFromEnv(
+							provider.resolver,
+							undefined,
+							resolverOptions,
+						),
 					signal,
 				)
 			: bindResolverSignalWithoutRuntime(

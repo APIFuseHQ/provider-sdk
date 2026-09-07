@@ -948,6 +948,14 @@ export type StealthProfileSelection =
 	| { browser: "firefox"; os?: "windows" | "macos" | "linux" }
 	| { browser: "safari"; os?: "macos" | "ios" };
 
+/** Provider-owned opt-ins layered onto the transport-owned browser/OS profile. */
+export type ProviderStealthConfig = StealthProfileSelection & {
+	readonly challengeDetection?: {
+		/** Classify SBSD responses even when no resolver is declared (detect/report mode). */
+		readonly akamaiSbsd?: boolean;
+	};
+};
+
 export type BrowserEngine = "playwright-stealth" | "nodriver" | "selenium-uc";
 export interface BrowserOptions {
 	headless?: boolean;
@@ -1282,6 +1290,16 @@ export type HttpMethod =
 
 export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "headers"> {
 	/**
+	 * Defaults to true. Set to false when callers need to inspect upstream
+	 * non-2xx bodies themselves instead of converting them to TransportError.
+	 *
+	 * Documented exception: a non-2xx response that an opted-in SDK challenge
+	 * detector classified (`response.challenge` is set) is returned, not thrown,
+	 * whatever this flag says, so the classification stays observable. Callers
+	 * that need the failure semantics check `response.challenge` first.
+	 */
+	throwOnHttpError?: boolean;
+	/**
 	 * Request headers. Array values and case-insensitive duplicate names are
 	 * combined in caller order using `", "`, matching Chrome's Fetch behavior.
 	 */
@@ -1369,6 +1387,8 @@ export interface DeclarativeStealthResponse {
 	headers: Record<string, string>;
 	rawHeaders: [string, string][];
 	body: string;
+	/** Present only when an opted-in SDK detector returned an unresolved challenge response. */
+	challenge?: StealthChallengeClassification;
 	httpVersion?: string;
 	tlsInfo?: { protocol?: string; cipher?: string; [key: string]: unknown };
 	cookies: CookieJar;
@@ -1378,6 +1398,23 @@ export interface DeclarativeStealthResponse {
 }
 
 export type StealthResponse = DeclarativeStealthResponse;
+
+/** Why a detected challenge response was returned to the caller instead of being solved and refetched. */
+export type StealthChallengeClassification = {
+	readonly challenge: Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>;
+	/**
+	 * `resolver_unavailable`: detect-only provider or no solver configured.
+	 * `replay_required`: the request is not a plain GET, so it is never solved or replayed
+	 * automatically. `solve_failed`: a concurrent request on the same session owned the
+	 * solve and it rejected (that owner receives the error). `challenge_persisted`: the
+	 * single refetch after a solve was challenged again.
+	 */
+	readonly outcome:
+		| "resolver_unavailable"
+		| "replay_required"
+		| "solve_failed"
+		| "challenge_persisted";
+};
 
 export type RequestWithMethodOptions = RequestOptions & {
 	method?: string;
@@ -2517,7 +2554,7 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 	http?: Record<string, never> | true;
 	allowedHosts?: string[];
 	native?: NativeProviderConfig;
-	stealth?: StealthProfileSelection;
+	stealth?: ProviderStealthConfig;
 	proxy?: ProviderProxyConfig;
 	ocr?: ProviderOcrConfig;
 	stt?: ProviderSttConfig;

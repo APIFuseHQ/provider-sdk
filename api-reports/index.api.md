@@ -1336,6 +1336,7 @@ interface DeclarativeStealthResponse {
     body: string;
     // (undocumented)
     bytes(): Promise<Uint8Array>;
+    challenge?: StealthChallengeClassification;
     // (undocumented)
     cookies: CookieJar;
     // (undocumented)
@@ -4218,7 +4219,7 @@ export interface ProviderDeclaration {
     secrets?: ProviderSecretDeclaration[];
     state?: Record<string, never> | true;
     // (undocumented)
-    stealth?: StealthProfileSelection;
+    stealth?: ProviderStealthConfig;
     // (undocumented)
     stt?: ProviderSttConfig;
     // (undocumented)
@@ -4281,7 +4282,7 @@ export interface ProviderDefinition<TContext = ProviderContext> {
     // (undocumented)
     state?: Record<string, never> | true;
     // (undocumented)
-    stealth?: StealthProfileSelection;
+    stealth?: ProviderStealthConfig;
     // (undocumented)
     stt?: ProviderSttConfig;
     // (undocumented)
@@ -5034,6 +5035,13 @@ export interface ProviderStateNamespace {
     // (undocumented)
     set<T = unknown>(key: string, value: T, options?: StateWriteOptions): Promise<StateValue<T>>;
 }
+
+// @public
+export type ProviderStealthConfig = StealthProfileSelection & {
+    readonly challengeDetection?: {
+        readonly akamaiSbsd?: boolean;
+    };
+};
 
 // @public (undocumented)
 export interface ProviderStreamEvent<TData = unknown> {
@@ -6631,6 +6639,14 @@ export interface StateWriteOptions {
 // @public (undocumented)
 export type StealthBrowser = "chrome" | "firefox" | "safari";
 
+// @public
+export type StealthChallengeClassification = {
+    readonly challenge: Extract<ProviderChallenge, {
+        readonly kind: "akamai_sbsd";
+    }>;
+    readonly outcome: "resolver_unavailable" | "replay_required" | "solve_failed" | "challenge_persisted";
+};
+
 // @public (undocumented)
 export interface StealthClient {
     // (undocumented)
@@ -6676,6 +6692,7 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
         requestClass?: "navigation" | "xhr" | "post";
         insecureSkipVerify?: boolean;
     };
+    throwOnHttpError?: boolean;
 }
 
 // @public (undocumented)
@@ -7228,12 +7245,12 @@ export { z }
 // dist/server/serve-implementation.d.ts:161:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:221:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:662:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1555:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1679:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1737:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1745:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1746:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1933:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1588:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1712:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1770:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1778:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1779:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1966:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

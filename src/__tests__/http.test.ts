@@ -1350,6 +1350,49 @@ describe("createHttpClient", () => {
 		}
 	});
 
+	it("resolves a required proxy from engine-supplied credentials without env fallbacks", async () => {
+		const { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } = await import(
+			"../runtime/proxy-nodemaven.js"
+		);
+		const previous = new Map(
+			[NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV].map(
+				(name) => [name, process.env[name]] as const,
+			),
+		);
+		delete process.env[NODEMAVEN_USERNAME_ENV];
+		delete process.env[NODEMAVEN_PASSWORD_ENV];
+		mockNativeFetchState.queuedResponses.push({
+			status: 200,
+			body: JSON.stringify({ ok: true }),
+			headers: { "content-type": "application/json" },
+		});
+
+		const { createHttpClient } = await import("../runtime/http.js");
+		const http = createHttpClient(undefined, {
+			upstream: { proxy: { mode: "required", providers: ["nodemaven"] } },
+			engineCredentials: {
+				[NODEMAVEN_USERNAME_ENV]: "fixture-engine-account",
+				[NODEMAVEN_PASSWORD_ENV]: "fixture-engine-password",
+			},
+			warn: () => undefined,
+		});
+
+		try {
+			const response = await http.get("https://example.com");
+
+			expect(response.data).toEqual({ ok: true });
+			expect(mockNativeFetchState.calls).toHaveLength(1);
+			expect(
+				(mockNativeFetchState.calls[0]?.init as RequestInit & { proxy?: string })?.proxy,
+			).toContain("fixture-engine-account");
+		} finally {
+			for (const [name, value] of previous) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	});
+
 	it("honors explicit retry when optional proxy policies resolve without a proxy URL", async () => {
 		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
 		delete process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;

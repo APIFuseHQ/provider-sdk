@@ -32,6 +32,8 @@ interface DeclarativeStealthResponse {
     body: string;
     // (undocumented)
     bytes(): Promise<Uint8Array>;
+    // Warning: (ae-forgotten-export) The symbol "StealthChallengeClassification" needs to be exported by the entry point stealth.d.ts
+    challenge?: StealthChallengeClassification;
     // Warning: (ae-forgotten-export) The symbol "CookieJar" needs to be exported by the entry point stealth.d.ts
     //
     // (undocumented)
@@ -173,6 +175,57 @@ type Iso3166Alpha2CountryCode = Uppercase<string>;
 //
 // @public (undocumented)
 export function normalizeResponse(response: StealthTransportResponse, requestUrl?: string, maxBodyBytes?: number): Promise<StealthResponse>;
+
+// @public
+type ProviderChallenge = {
+    readonly kind: "turnstile";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+    readonly action?: string;
+    readonly cdata?: string;
+} | {
+    readonly kind: "recaptcha_v2";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+} | {
+    readonly kind: "recaptcha_v3";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+    readonly action: string;
+    readonly minScore?: number;
+} | {
+    readonly kind: "hcaptcha";
+    readonly siteKey: string;
+    readonly pageUrl: string;
+} | {
+    readonly kind: "cloudflare_interstitial";
+    readonly pageUrl: string;
+    readonly blockedHtml?: string;
+} | {
+    readonly kind: "aws_waf";
+    readonly pageUrl: string;
+    readonly siteKey?: string;
+    readonly captchaScript?: string;
+    readonly context?: string;
+    readonly iv?: string;
+} | {
+    readonly kind: "akamai_sec_cpt";
+    readonly pageUrl: string;
+    readonly challengeHtml?: string;
+} | {
+    readonly kind: "akamai_sensor";
+    readonly pageUrl: string;
+    readonly scriptUrl: string;
+    readonly abck?: string;
+    readonly bmsz?: string;
+    readonly version?: string;
+} | {
+    readonly kind: "akamai_sbsd";
+    readonly pageUrl: string;
+    readonly scriptUrl: string;
+    readonly stateCookieName: "sbsd_o" | "bm_so";
+    readonly challengeToken?: string;
+};
 
 // @public (undocumented)
 type ProviderProxyMode = "disabled" | "optional" | "required";
@@ -334,6 +387,14 @@ export function resolveWreqProfile(selection: StealthProfileSelection, wreqProfi
 // @public (undocumented)
 type SmartproxyAllocatorBodyClass = "network_error" | "http_error" | "empty" | "json_without_proxies" | "text_without_proxies" | "usable_proxy_endpoints";
 
+// @public
+type StealthChallengeClassification = {
+    readonly challenge: Extract<ProviderChallenge, {
+        readonly kind: "akamai_sbsd";
+    }>;
+    readonly outcome: "resolver_unavailable" | "replay_required" | "solve_failed" | "challenge_persisted";
+};
+
 // @public (undocumented)
 interface StealthClient {
     // (undocumented)
@@ -394,6 +455,7 @@ interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "h
         requestClass?: "navigation" | "xhr" | "post";
         insecureSkipVerify?: boolean;
     };
+    throwOnHttpError?: boolean;
 }
 
 // @public
@@ -544,10 +606,11 @@ type StealthTransportResponse = {
 // dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:45:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:47:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:879:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:884:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1195:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1195:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:886:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:891:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1184:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1228:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1228:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 

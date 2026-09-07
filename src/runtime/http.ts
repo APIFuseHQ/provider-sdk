@@ -654,6 +654,7 @@ async function resolveNativeProxy(
 		// supported here, so a socks5 policy fails loudly rather than downgrading.
 		transportProtocols: ["http"],
 		telemetry: clientOptions.telemetry,
+		engineCredentials: clientOptions.engineCredentials,
 	});
 	if (resolvedProxy.shouldWarn) {
 		warn(

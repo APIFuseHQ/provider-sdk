@@ -98,6 +98,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			JournalPolicy JsonTemplate ManualTriggerPolicy NonEmpty OperationStep Quantifier Reference ReferenceNode RelativeDateNode RetryPolicy ScopedAssertionExpression
 			ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema
 			relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
+			ProviderStealthConfig StealthChallengeClassification
 		`,
 	),
 	"index.api.md": forgottenExports(
@@ -184,6 +185,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProxyVendorName RedirectRunReason RequestOptions RequestParamPrimitive RequestParamValue RequestParams SmartproxyAllocatorBodyClass StealthClient
 			StealthCookieStore StealthCookieStoreV1 StealthFetchOptions StealthProfileDescriptor StealthProfileSelection StealthRedirectHop StealthRedirectRunOptions StealthRedirectRunResult StealthResponse StealthSession
 			StealthSessionCookies StealthTransportBody StealthTransportHeaders StealthTransportResponse
+			ProviderChallenge StealthChallengeClassification
 		`,
 	),
 	"server.api.md": forgottenExports(
@@ -224,6 +226,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			JournalPolicy JsonPrimitive JsonTemplate JsonValue ManualTriggerPolicy NonEmpty OperationStep Quantifier Reference ReferenceNode RelativeDateNode RetryPolicy
 			ScopedAssertionExpression ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
 			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
+			ProviderStealthConfig StealthChallengeClassification
 		`,
 	),
 	"stateful.api.md": forgottenExports(
@@ -268,6 +271,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			JournalPolicy JsonPrimitive JsonTemplate JsonValue ManualTriggerPolicy NonEmpty OperationStep Quantifier Reference ReferenceNode RelativeDateNode RetryPolicy
 			ScopedAssertionExpression ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
 			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
+			ProviderStealthConfig StealthChallengeClassification
 		`,
 	),
 };

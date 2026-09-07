@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { Cookie } from "tough-cookie";
 import type {
 	BrowserProfile,
 	EmulationOS,
@@ -22,6 +23,7 @@ import {
 	DEFAULT_STEALTH_BROWSER,
 	DEFAULT_STEALTH_OS,
 	getStealthProfile,
+	resolverClientProfileFamily,
 	resolveStealthProfileSelection,
 } from "../stealth/profiles.js";
 import type {
@@ -54,6 +56,7 @@ import {
 	computeProxyAttemptIndex,
 	computeProxyTransportRetryDelayMs,
 	createDefaultProxyTransportRetryOptions,
+	isProxyTransportRetryMethod,
 	normalizeProxyTransportRetryOptions,
 	shouldRetryProxyTransportAttempt,
 	validateUnsafeProxyTransportRetryMethods,
@@ -73,6 +76,13 @@ import {
 	redactUrlQueryParams,
 	serializeRequestUrl,
 } from "./request-options.js";
+import type { ResolverVendorTransport } from "./resolver-vendors/types.js";
+import {
+	type AkamaiSbsdSessionState,
+	akamaiSbsdChallengeKey,
+	detectAkamaiSbsdChallenge,
+	type StealthChallengeRuntime,
+} from "./stealth-akamai-sbsd.js";
 import { StealthCookieJar } from "./stealth-cookies.js";
 
 export const DEFAULT_STEALTH_PROFILE: StealthProfileDescriptor = Object.freeze({
@@ -130,6 +140,27 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 	 */
 	proxyStealth?: { insecureSkipVerify?: boolean };
 };
+
+/** Server-attached challenge wiring; kept off the public StealthClientOptions type. */
+type StealthSessionClientOptions = StealthClientOptions & {
+	stealth?: StealthClientOptions["stealth"] & {
+		readonly challengeRuntime?: StealthChallengeRuntime;
+	};
+};
+
+function assertAkamaiSbsdClientProfile(
+	declared: string | undefined,
+	session: StealthProfileDescriptor,
+): void {
+	if (declared === undefined || resolverClientProfileFamily(declared) === session.browser) return;
+	throw new SDKError(
+		`Resolver client profile "${declared}" does not match the initiating stealth session browser "${session.browser}"`,
+		{
+			code: "RESOLVER_CLIENT_PROFILE_MISMATCH",
+			fix: "Make resolver.clientProfile name the provider stealth browser family (chrome, firefox, or safari).",
+		},
+	);
+}
 
 type StealthTransportHeaders = {
 	entries(): IterableIterator<[string, string]>;
@@ -643,6 +674,33 @@ function setCookieHeadersFromResponse(headers: StealthTransportHeaders): string[
 	if (typeof getSetCookie === "function") return getSetCookie.call(headers);
 	const setCookie = headers.get("set-cookie");
 	return setCookie ? splitCombinedSetCookieHeader(setCookie) : [];
+}
+
+function resolverCookiesFromResponse(
+	response: StealthTransportResponse,
+	requestUrl: string,
+): Awaited<ReturnType<ResolverVendorTransport["fetch"]>>["cookies"] {
+	const responseUrl = response.url ?? requestUrl;
+	return setCookieHeadersFromResponse(response.headers).flatMap((cookieString) => {
+		const cookie = Cookie.parse(cookieString);
+		if (!cookie?.key) return [];
+		const expires =
+			cookie.expires instanceof Date && Number.isFinite(cookie.expires.getTime())
+				? cookie.expires.getTime() / 1_000
+				: undefined;
+		return [
+			{
+				name: cookie.key,
+				value: cookie.value,
+				...(expires === undefined ? {} : { expires }),
+				httpOnly: cookie.httpOnly,
+				secure: cookie.secure,
+				...(cookie.domain ? { domain: cookie.domain } : { domain: new URL(responseUrl).hostname }),
+				...(cookie.path ? { path: cookie.path } : {}),
+				...(cookie.sameSite ? { sameSite: cookie.sameSite } : {}),
+			},
+		];
+	});
 }
 
 function splitCombinedSetCookieHeader(headerValue: string): string[] {
@@ -1215,13 +1273,18 @@ async function fetchStealthRedirectChain(
 function createSessionFetcher(
 	baseUrl: string,
 	defaultProfile: StealthProfileDescriptor,
-	clientOptions: StealthClientOptions,
+	clientOptions: StealthSessionClientOptions,
 ): StealthSession {
 	const clients = new Map<string, WreqSessionCacheEntry>();
 	let closed = false;
 	let hasWarnedMissingProxy = false;
 	const warn = clientOptions.warn ?? console.warn;
 	const cookieJar = new StealthCookieJar([], baseUrl);
+	const akamaiSbsdState: AkamaiSbsdSessionState = { transactions: new Map() };
+	const automaticChallengeRefetchPolicy = {
+		...createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
+		methods: ["GET"],
+	};
 
 	async function getClientEntry(
 		profile: StealthProfileDescriptor,
@@ -1337,6 +1400,7 @@ function createSessionFetcher(
 			transportProtocols: ["http", "socks5"],
 			...(refreshEpoch === undefined ? {} : { proxyRefreshEpoch: refreshEpoch }),
 			telemetry: clientOptions.telemetry,
+			engineCredentials: clientOptions.engineCredentials,
 		});
 
 		if (resolvedProxy.shouldWarn && !hasWarnedMissingProxy) {
@@ -1355,6 +1419,9 @@ function createSessionFetcher(
 	const session: StealthSession = {
 		async fetch(url, options: StealthFetchOptions = {}) {
 			const requestProfile = resolveStealthProfileSelection(options.stealth, defaultProfile);
+			let challengeSolveAttempted = false;
+			let challengeRefetchAttempted = false;
+			let challengeSolveFailure: { readonly error: unknown } | undefined;
 			const { hasExplicitRetryPolicy, method, stealthRetryOptions } = (() => {
 				try {
 					const method = normalizeMethod(options.method ?? "GET");
@@ -1489,11 +1556,12 @@ function createSessionFetcher(
 						const { requestUrl } = serializedUrl;
 						const wreq = await getWreqModule();
 						const mapping = resolveWreqProfile(requestProfile, wreq.getProfiles());
+						const emulationHeaders = Array.from(
+							wreq.getEmulationHeaders(mapping.browser, mapping.os),
+							([name, value]) => [String(name), String(value)] as HeaderTuple,
+						);
 						const chromeEmulationHeaders = mapping.browser.startsWith("chrome_")
-							? Array.from(
-									wreq.getEmulationHeaders(mapping.browser, mapping.os),
-									([name, value]) => [String(name), String(value)] as HeaderTuple,
-								)
+							? emulationHeaders
 							: undefined;
 						const buildOrderedHeaders = chromeEmulationHeaders
 							? (
@@ -1523,53 +1591,263 @@ function createSessionFetcher(
 							options.body === undefined ? undefined : normalizeBody(options.body),
 							initialHeaders,
 						);
-						const { normalized, response } = await withClient(
-							requestProfile,
-							proxy,
-							ignoreTlsErrors,
-							(transport) =>
-								fetchStealthRedirectChain(
-									transport,
-									cookieJar,
-									requestUrl,
-									method,
-									options,
-									clientOptions.signal,
-									buildOrderedHeaders,
-								),
-							clientOptions.signal,
-							defaultHeaders,
-						);
-
-						if (proxy && isProxyConnectFailureResponse(response, normalized.body)) {
-							throw createProxyConnectFailureError(normalized.body);
-						}
-
-						if (response.status >= 400) {
+						const fetchOnBoundSession = (
+							fetchUrl: string,
+							fetchMethod: StealthMethod,
+							fetchOptions: StealthFetchOptions,
+							fetchSignal: AbortSignal | undefined,
+							orderedHeaders = buildOrderedHeaders,
+							sessionDefaultHeaders = defaultHeaders,
+						) =>
+							withClient(
+								requestProfile,
+								proxy,
+								ignoreTlsErrors,
+								(transport) =>
+									fetchStealthRedirectChain(
+										transport,
+										cookieJar,
+										fetchUrl,
+										fetchMethod,
+										fetchOptions,
+										fetchSignal,
+										orderedHeaders,
+									),
+								fetchSignal,
+								sessionDefaultHeaders,
+							);
+						const throwProxyTransportFault = (
+							faultResponse: StealthTransportResponse,
+							faultBody: string,
+						) => {
+							if (!proxy) return;
+							if (isProxyConnectFailureResponse(faultResponse, faultBody)) {
+								throw createProxyConnectFailureError(faultBody);
+							}
+							if (faultResponse.status < 400) return;
 							if (
-								proxy &&
 								usesPolicyAllocator &&
 								isProxyEdgeTlsRejectedResponse(
-									response.status,
-									[JSON.stringify(responseHeadersToRecord(response.headers)), normalized.body].join(
+									faultResponse.status,
+									[JSON.stringify(responseHeadersToRecord(faultResponse.headers)), faultBody].join(
 										"\n",
 									),
 								)
 							) {
-								throw createProxyEdgeTlsRejectedError(response.status);
+								throw createProxyEdgeTlsRejectedError(faultResponse.status);
 							}
-							if (proxy && isProxyAuthIpDeniedMessage(normalized.body)) {
+							if (isProxyAuthIpDeniedMessage(faultBody)) {
 								throw createProxyAuthIpDeniedError();
 							}
-							if (proxy && isProxyEdgeAuthRejectedMessage(normalized.body)) {
+							if (isProxyEdgeAuthRejectedMessage(faultBody)) {
 								throw createProxyEdgeAuthRejectedError();
 							}
 							if (
-								proxy &&
-								isProxyPoolStaleStatus(response.status) &&
-								isProxyPoolStaleMessage(normalized.body)
+								isProxyPoolStaleStatus(faultResponse.status) &&
+								isProxyPoolStaleMessage(faultBody)
 							) {
-								throw createProxyPoolStaleError(response.status);
+								throw createProxyPoolStaleError(faultResponse.status);
+							}
+						};
+						let { normalized, response } = await fetchOnBoundSession(
+							requestUrl,
+							method,
+							options,
+							clientOptions.signal,
+						);
+						throwProxyTransportFault(response, normalized.body);
+
+						const akamaiSbsd = clientOptions.stealth?.challengeRuntime?.akamaiSbsd;
+						const detected = akamaiSbsd
+							? detectAkamaiSbsdChallenge(
+									normalized,
+									requestUrl,
+									cookieJar,
+									akamaiSbsd.allowedHosts,
+									akamaiSbsdState,
+								)
+							: undefined;
+						if (detected && akamaiSbsd) {
+							if (challengeSolveAttempted || challengeRefetchAttempted) {
+								normalized.challenge = {
+									challenge: detected,
+									outcome: "challenge_persisted",
+								};
+								recordProxyAttempt("ok", undefined, response.status);
+								return normalized;
+							}
+							if (
+								!isProxyTransportRetryMethod(method, automaticChallengeRefetchPolicy, {
+									body: options.body,
+									headers: options.headers,
+								})
+							) {
+								normalized.challenge = {
+									challenge: detected,
+									outcome: "replay_required",
+								};
+								recordProxyAttempt("ok", undefined, response.status);
+								return normalized;
+							}
+							if (!akamaiSbsd.solve) {
+								normalized.challenge = {
+									challenge: detected,
+									outcome: "resolver_unavailable",
+								};
+								recordProxyAttempt("ok", undefined, response.status);
+								return normalized;
+							}
+							// Only a solve that will actually run on this session needs the profile match.
+							assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, requestProfile);
+
+							const emulationHeaderMap = new Map(
+								emulationHeaders.map(([name, value]) => [name.toLowerCase(), value] as const),
+							);
+							const initiatingHeaders = normalizeHeaders({ ...(options.headers ?? {}) });
+							// Mirror what the protected request actually sent: `stealth.acceptLanguage` is
+							// applied by the Chrome header builder only; Safari/Firefox sessions send the
+							// emulation default.
+							const sessionHeaders = {
+								"User-Agent": requiredEmulationHeader(emulationHeaderMap, "user-agent"),
+								"Accept-Language":
+									initiatingHeaders["accept-language"] ??
+									(chromeEmulationHeaders ? clientOptions.stealth?.acceptLanguage : undefined) ??
+									requiredEmulationHeader(emulationHeaderMap, "accept-language"),
+							};
+							const resolverBuildHeaders = chromeEmulationHeaders
+								? (
+										currentUrl: string,
+										currentMethod: StealthMethod,
+										currentBody: string | undefined,
+										currentHeaders: Record<string, string>,
+									) =>
+										buildChromeHeaderTuples({
+											emulationHeaders: chromeEmulationHeaders,
+											method: currentMethod,
+											body: currentBody,
+											headers: currentHeaders,
+											requestUrl: currentUrl,
+											acceptLanguage: clientOptions.stealth?.acceptLanguage,
+										})
+								: undefined;
+							const resolverTransport: ResolverVendorTransport = {
+								sessionHeaders,
+								getCookie(name, cookieUrl) {
+									return cookieJar.get(name, cookieUrl);
+								},
+								async fetch(transportUrl, init) {
+									const boundSignal = clientOptions.signal
+										? AbortSignal.any([clientOptions.signal, init.signal])
+										: init.signal;
+									const transportHeaders = { ...(init.headers ?? {}) };
+									if (resolverBuildHeaders) {
+										for (const name of Object.keys(transportHeaders)) {
+											if (name.toLowerCase() === "user-agent") {
+												delete transportHeaders[name];
+											}
+										}
+									}
+									// Session defaults come from this request's own shape, never from the
+									// initiating request: its defaults carry the upstream Cookie header,
+									// which wreq would otherwise merge into the Hyper /ip call.
+									const result = await fetchOnBoundSession(
+										transportUrl,
+										init.method,
+										{
+											method: init.method,
+											headers: transportHeaders,
+											...(init.body === undefined ? {} : { body: init.body }),
+											redirect: "manual",
+											throwOnHttpError: false,
+											...(init.maxBodyBytes === undefined
+												? {}
+												: { maxBodyBytes: init.maxBodyBytes }),
+										},
+										boundSignal,
+										resolverBuildHeaders,
+										resolverBuildHeaders?.(
+											transportUrl,
+											init.method,
+											init.body,
+											normalizeHeaders(transportHeaders),
+										),
+									);
+									return {
+										status: result.normalized.status,
+										headers: result.normalized.headers,
+										body: result.normalized.body,
+										cookies: resolverCookiesFromResponse(result.response, transportUrl),
+									};
+								},
+							};
+							const transactionKey = akamaiSbsdChallengeKey(detected, {
+								wreqBrowser: mapping.browser,
+								wreqOs: mapping.os,
+								proxyUrl: proxy,
+							});
+							let transaction = akamaiSbsdState.transactions.get(transactionKey);
+							let ownsTransaction = false;
+							if (!transaction) {
+								challengeSolveAttempted = true;
+								ownsTransaction = true;
+								// The solve spans several round trips, so it runs under the client's ambient
+								// signal and the resolver's own timeouts, not this fetch's per-request `timeout`.
+								transaction = {
+									result: akamaiSbsd
+										.solve(
+											detected,
+											resolverTransport,
+											clientOptions.signal ?? new AbortController().signal,
+										)
+										.then(
+											() => ({ solved: true }) as const,
+											(error: unknown) => ({ solved: false, error }) as const,
+										)
+										.finally(() => {
+											akamaiSbsdState.transactions.delete(transactionKey);
+										}),
+								};
+								akamaiSbsdState.transactions.set(transactionKey, transaction);
+							}
+							const transactionResult = await transaction.result;
+							if (!transactionResult.solved) {
+								if (ownsTransaction) {
+									// The proxy delivered the challenged response; the resolver failed.
+									// Surface that failure as-is: it is not a transport fault to normalize
+									// or retry.
+									recordProxyAttempt("ok", undefined, response.status);
+									challengeSolveFailure = { error: transactionResult.error };
+									throw challengeSolveFailure;
+								}
+								normalized.challenge = {
+									challenge: detected,
+									outcome: "solve_failed",
+								};
+								recordProxyAttempt("ok", undefined, response.status);
+								return normalized;
+							}
+							challengeRefetchAttempted = true;
+							({ normalized, response } = await fetchOnBoundSession(
+								requestUrl,
+								method,
+								options,
+								clientOptions.signal,
+							));
+							throwProxyTransportFault(response, normalized.body);
+							const persisted = detectAkamaiSbsdChallenge(
+								normalized,
+								requestUrl,
+								cookieJar,
+								akamaiSbsd.allowedHosts,
+								akamaiSbsdState,
+							);
+							if (persisted) {
+								normalized.challenge = {
+									challenge: persisted,
+									outcome: "challenge_persisted",
+								};
+								recordProxyAttempt("ok", undefined, response.status);
+								return normalized;
 							}
 						}
 
@@ -1607,6 +1885,14 @@ function createSessionFetcher(
 							}
 							throw redactedNormalizationError;
 						}
+						if (challengeSolveFailure && error === challengeSolveFailure) {
+							throw redactSensitiveError(
+								challengeSolveFailure.error,
+								sensitiveValues,
+								serializedUrl?.requestUrl ?? fallbackRequestUrl,
+								serializedUrl?.redactedUrl ?? fallbackRedactedUrl,
+							);
+						}
 						const retryErrorCode = proxyAttemptErrorCode(normalizedError);
 						const refreshableProxyError = isProxyPoolRefreshableError(normalizedError);
 						const runProxyAuthDiagnostic = shouldRunProxyAuthDiagnostic(normalizedError);
@@ -1622,6 +1908,12 @@ function createSessionFetcher(
 							proxyAttemptStatus(normalizedError),
 						);
 						lastError = normalizedError;
+						if (challengeSolveAttempted || challengeRefetchAttempted) {
+							// The single refetch is spent (owner or waiter of a shared solve): another
+							// transport attempt would replay the original request and may rotate the
+							// proxy the solved jar is bound to.
+							throw normalizedError;
+						}
 						if (proxy && rotatesRegistryChain && refreshableProxyError) {
 							stalePoolError = normalizedError;
 							if (runProxyAuthDiagnostic) {
@@ -1925,6 +2217,8 @@ function createSessionFetcher(
 		},
 		close() {
 			closed = true;
+			akamaiSbsdState.rememberedScript = undefined;
+			akamaiSbsdState.transactions.clear();
 			for (const client of clients.values()) {
 				void client.session
 					.then((session) => session.close())
