@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { AsyncResource } from "node:async_hooks";
 
 import type { TraceSpan } from "../types.js";
@@ -153,12 +154,12 @@ export function resolveOTLPExportOptions(
 		{ source: EXPLICIT_ENDPOINT_SOURCE, value: explicit.endpoint, appendPath: false },
 		{
 			source: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
-			value: env[OTEL_EXPORTER_OTLP_TRACES_ENDPOINT],
+			value: readDiagnosticEnv(OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, env),
 			appendPath: false,
 		},
 		{
 			source: OTEL_EXPORTER_OTLP_ENDPOINT,
-			value: env[OTEL_EXPORTER_OTLP_ENDPOINT],
+			value: readDiagnosticEnv(OTEL_EXPORTER_OTLP_ENDPOINT, env),
 			appendPath: true,
 		},
 	];
@@ -173,11 +174,11 @@ export function resolveOTLPExportOptions(
 	}
 	const endpoint = candidate.appendPath ? appendTracesPath(parsed.url) : candidate.value;
 
-	const tracesHeaders = presentValue(env[OTEL_EXPORTER_OTLP_TRACES_HEADERS]);
+	const tracesHeaders = presentValue(readDiagnosticEnv(OTEL_EXPORTER_OTLP_TRACES_HEADERS, env));
 	const headersSource =
 		tracesHeaders !== undefined ? OTEL_EXPORTER_OTLP_TRACES_HEADERS : OTEL_EXPORTER_OTLP_HEADERS;
 	const envHeaders = parseHeaderList(
-		tracesHeaders ?? presentValue(env[OTEL_EXPORTER_OTLP_HEADERS]),
+		tracesHeaders ?? presentValue(readDiagnosticEnv(OTEL_EXPORTER_OTLP_HEADERS, env)),
 	);
 	if (!headersAreSendable(envHeaders)) {
 		return { status: "invalid", source: headersSource, reason: INVALID_HEADERS };

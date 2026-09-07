@@ -1,5 +1,7 @@
-import { createHash } from "node:crypto";
+import { STATUS_CODES } from "node:http";
+import { readDiagnosticEnv, withDiagnosticEnv } from "../runtime/diagnostic-env.js";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
 import { join } from "node:path";
@@ -8,15 +10,15 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { validateFailClosedDeclaration } from "../declaration-validation.js";
-import { safeProviderErrorObservability } from "../error-observability.js";
 import {
 	createInProcessProviderEngine,
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
 	isEngineOwnedEnvName,
-	readEngineProxyCredentials,
 	type ProviderEngine,
 	type ProviderEngineBindingCandidates,
+	readEngineProxyCredentials,
 } from "../engine.js";
+import { safeProviderErrorObservability } from "../error-observability.js";
 import {
 	SDK_OWNED_PROVIDER_ERROR_CODES,
 	SDK_RUNTIME_OWNED_ERROR_CODES,
@@ -42,11 +44,11 @@ import {
 import type { ProviderLocale } from "../i18n/keys.js";
 import {
 	categoryForStatus,
-	type ProviderErrorSource,
-	sourceForCategory,
 	isRetryableCategory,
 	PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
 	type ProviderErrorCategory,
+	type ProviderErrorSource,
+	sourceForCategory,
 } from "../observability.js";
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type * as BrowserRuntimeModule from "../runtime/browser.js";
@@ -57,6 +59,19 @@ import {
 } from "../runtime/choice.js";
 import { createCredentialContext } from "../runtime/credential.js";
 import {
+	bindDiagnosticSensitiveRegistry,
+	type CompiledDiagnosticSensitiveValues,
+	compileProcessDiagnosticSensitiveValues,
+	createDiagnosticRedactor,
+	type DiagnosticRedactor,
+	REDACTION_FAILED,
+	isDiagnosticRedactionSuppressed,
+	bindCriticalDiagnosticRedactor,
+	redactCriticalDiagnosticText,
+	redactDiagnosticText,
+	registerDiagnosticSensitiveValues,
+} from "../runtime/diagnostic-redactor.js";
+import {
 	createCeremonyEgressLeaseRuntime,
 	ENGINE_CEREMONY_EGRESS_LEASE,
 } from "../runtime/egress-lease.js";
@@ -65,8 +80,8 @@ import { executeOperation } from "../runtime/executor.js";
 import { createHttpClient } from "../runtime/http.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import type * as NativeNetworkRuntimeModule from "../runtime/native-network.js";
-import { getProviderBaseUrl } from "../runtime/provider.js";
 import { createOcrClientFromEnv } from "../runtime/ocr.js";
+import { getProviderBaseUrl } from "../runtime/provider.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
 	PROXY_EDGE_AUTH_REJECTED_CODE,
@@ -78,24 +93,24 @@ import {
 	type ProxyTelemetryLogPayload,
 } from "../runtime/proxy-telemetry.js";
 import {
+	type ClosedEnum,
 	closedEnum,
 	RequestTelemetry,
-	tenantOpaqueKeys,
-	type ClosedEnum,
 	type TenantNeutral,
 	type TenantOpaqueKeys,
+	tenantOpaqueKeys,
 } from "../runtime/request-telemetry.js";
+import type * as ResolverRuntimeModule from "../runtime/resolver.js";
+import {
+	bindResolverTelemetry,
+	createUnsupportedResolverClient,
+	inheritResolverTelemetryBinding,
+	type ResolverSolveWithRecorder,
+} from "../runtime/resolver-shared.js";
 import {
 	ResolverTelemetryCollector,
 	type ResolverTelemetryLogPayload,
 } from "../runtime/resolver-telemetry.js";
-import type * as ResolverRuntimeModule from "../runtime/resolver.js";
-import {
-	createUnsupportedResolverClient,
-	bindResolverTelemetry,
-	inheritResolverTelemetryBinding,
-	type ResolverSolveWithRecorder,
-} from "../runtime/resolver-shared.js";
 import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
@@ -105,9 +120,9 @@ import {
 	createProviderRuntimeStateFromEnv,
 	createUnsupportedProviderRuntimeState,
 } from "../runtime/state.js";
-import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
+import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import {
 	createTraceContext,
@@ -118,21 +133,21 @@ import {
 } from "../runtime/trace.js";
 import { resolveTraceConfigFromEnv } from "../runtime/trace-config.js";
 import { parseSchema } from "../schema.js";
+import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import {
 	STATEFUL_NONCE_HEADER as STATEFUL_FORWARDING_NONCE_HEADER,
 	STATEFUL_SIGNATURE_HEADER as STATEFUL_FORWARDING_SIGNATURE_HEADER,
 	STATEFUL_TIMESTAMP_HEADER as STATEFUL_FORWARDING_TIMESTAMP_HEADER,
 	verifyStatefulRequestSignature,
 } from "../stateful-signing.js";
-import { StatefulRoutingDeadlineError } from "../stateful/errors.js";
 import { getStealthProfile } from "../stealth/profiles.js";
-import { sanitizeTraceAttributes } from "../trace-sanitization.js";
 import {
 	APIFUSE_STREAM_DONE_EVENT,
 	APIFUSE_STREAM_ERROR_EVENT,
 	encodeSseEvent,
 	error as streamError,
 } from "../stream.js";
+import { sanitizeSpanNameForOutput, sanitizeTraceAttributes } from "../trace-sanitization.js";
 import type {
 	AuthContext,
 	AuthTurn,
@@ -140,15 +155,15 @@ import type {
 	FlowContext,
 	FlowContextStore,
 	HttpRetrySummary,
+	OcrContext,
 	OperationDefinition,
 	OperationErrorCode,
 	OperationHttpStreamTransport,
 	OperationSseTransport,
-	OcrContext,
-	ProviderErrorStatus,
-	ProviderContext,
 	ProviderCacheResponseMeta,
+	ProviderContext,
 	ProviderDefinition,
+	ProviderErrorStatus,
 	ProviderFilesContext,
 	ProviderProxyPolicy,
 	ProviderRuntimeState,
@@ -162,6 +177,10 @@ import type {
 import { VALID_OPERATION_ERROR_STATUSES } from "../types.js";
 import type { SelfTestCancellationLogEvent } from "./self-test.js";
 import { resolveSelfTestMasterSecrets } from "./self-test-token.js";
+import {
+	collectStaticDiagnosticSensitiveValues,
+	createDiagnosticEnvObserver,
+} from "./sensitive-values.js";
 import { resolveServerTraceContextOptions } from "./trace-output.js";
 import {
 	type AuthFlowRequest,
@@ -307,9 +326,7 @@ export type ProviderServerOperationExecutorInput<
 
 export type ProviderServerOperationExecutor<
 	TContext extends Partial<ProviderContext> = ProviderContext,
-> = (
-	input: ProviderServerOperationExecutorInput<TContext>,
-) => Promise<unknown>;
+> = (input: ProviderServerOperationExecutorInput<TContext>) => Promise<unknown>;
 
 type RequestTerminalOutcome =
 	| { kind: "completed"; status: number }
@@ -317,6 +334,7 @@ type RequestTerminalOutcome =
 	| { kind: "cancelled"; status?: number };
 
 type RequestStreamLifecycle = {
+	redact: DiagnosticRedactor;
 	runStep<T>(fn: () => Promise<T>): Promise<T>;
 	registerCleanup(cleanup: () => void | Promise<void>): void;
 	terminalize(outcome: RequestTerminalOutcome): void;
@@ -823,6 +841,7 @@ function providerSecretNames(provider: ProviderDefinition): string[] {
 }
 
 type RequestScopeContext = {
+	redact: DiagnosticRedactor;
 	trace: RuntimeTraceContext;
 	telemetry: RequestTelemetry;
 	resolverTelemetry: ResolverTelemetryCollector;
@@ -899,6 +918,7 @@ function createProviderContext(
 			request.requestId,
 			"stealth",
 			error,
+			scope.redact,
 		);
 
 	const env = createEnvContext([
@@ -940,7 +960,7 @@ function createProviderContext(
 			provider.runtime === "browser"
 				? capabilityModules.browser!.createBrowserClient({
 						allowedHosts: provider.allowedHosts,
-						cdpUrl: process.env.APIFUSE__CDP_POOL__URL,
+						cdpUrl: readDiagnosticEnv("APIFUSE__CDP_POOL__URL"),
 						headless: true,
 						requireCdpPool: isProductionProviderBrowserMode(provider),
 						stealth: true,
@@ -1101,6 +1121,7 @@ function createAuthFlowContext(
 					providerId: provider.id,
 					flowId: request.flowId,
 					affinityKey: proxyClientOptions.affinityKey,
+					onHandle: (handle) => registerDiagnosticSensitiveValues(scope.trace, [handle]),
 					...(request.engine?.egressLease ? { handle: request.engine.egressLease } : {}),
 				})
 			: undefined;
@@ -1161,6 +1182,7 @@ function createAuthFlowContext(
 			request.requestId,
 			"stealth",
 			error,
+			scope.redact,
 		);
 	const credential = request.connection
 		? createCredentialContext({
@@ -1418,15 +1440,18 @@ function finishRequestCost(input: {
 	};
 }
 
-function zodDetails(error: z.ZodError): Array<{
+function zodDetails(
+	error: z.ZodError,
+	redact?: DiagnosticRedactor,
+): Array<{
 	path: string;
 	code: string;
 	message: string;
 }> {
 	return error.issues.map((issue) => ({
-		path: issue.path.join("."),
-		code: issue.code,
-		message: issue.message,
+		path: sanitizeSpanNameForOutput(issue.path.join("."), redact),
+		code: sanitizeSpanNameForOutput(issue.code, redact),
+		message: sanitizeSpanNameForOutput(issue.message, redact),
 	}));
 }
 
@@ -1453,6 +1478,7 @@ function toErrorResponse(
 	error: unknown,
 	requestId: string | undefined,
 	observabilityDetails: ErrorObservabilityDetails,
+	redact?: DiagnosticRedactor,
 ): OperationErrorResponse {
 	const observability = observabilityDetails;
 	const source = publicErrorSource(error, observability.category);
@@ -1491,7 +1517,7 @@ function toErrorResponse(
 				...(requestId ? { requestId } : {}),
 				retryable: observability.retryable,
 				source,
-				details: zodDetails(error),
+				details: zodDetails(error, redact),
 			},
 		};
 	}
@@ -1787,14 +1813,17 @@ export type ProviderErrorCauseFrame = {
 const MAX_PROVIDER_ERROR_CAUSE_FRAMES = 5;
 const MAX_PROVIDER_ERROR_CAUSE_MESSAGE_LENGTH = 300;
 
-function providerErrorCauseMessage(message: string): string {
-	const sanitized = sanitizeDiagnosticText(message);
+function providerErrorCauseMessage(message: string, redact?: DiagnosticRedactor): string {
+	const sanitized = sanitizeDiagnosticText(redactDiagnosticText(message, redact));
 	return sanitized.length > MAX_PROVIDER_ERROR_CAUSE_MESSAGE_LENGTH
 		? `${sanitized.slice(0, MAX_PROVIDER_ERROR_CAUSE_MESSAGE_LENGTH)}… [truncated]`
 		: sanitized;
 }
 
-function providerErrorCauseChain(error: unknown): ProviderErrorCauseFrame[] | undefined {
+function providerErrorCauseChain(
+	error: unknown,
+	redact?: DiagnosticRedactor,
+): ProviderErrorCauseFrame[] | undefined {
 	if (!(error instanceof Error) && !isProviderError(error)) return undefined;
 
 	const seen = new Set<object>([error]);
@@ -1811,9 +1840,9 @@ function providerErrorCauseChain(error: unknown): ProviderErrorCauseFrame[] | un
 		const providerObservability = safeProviderErrorObservability(cause);
 		const causeCode = providerErrorCode(cause);
 		frames.push({
-			errorClass: cause.name,
-			...(causeCode !== undefined ? { code: causeCode } : {}),
-			message: providerErrorCauseMessage(message),
+			errorClass: redactDiagnosticText(cause.name, redact),
+			...(causeCode !== undefined ? { code: redactDiagnosticText(causeCode, redact) } : {}),
+			message: providerErrorCauseMessage(message, redact),
 			messageLength: message.length,
 			messageFingerprint: createHash("sha256").update(message).digest("hex").slice(0, 12),
 			...(providerObservability ? { providerObservability } : {}),
@@ -1837,6 +1866,7 @@ function logProviderError(
 	telemetry: RequestTelemetry | undefined,
 	observabilityDetails: ErrorObservabilityDetails,
 	correlation: RequestCorrelationIds = {},
+	redact?: DiagnosticRedactor,
 ): void {
 	const providerCode = isProviderError(error) ? providerErrorCode(error) : undefined;
 	const code = isProviderError(error)
@@ -1848,7 +1878,7 @@ function logProviderError(
 				: "internal_error";
 	const errorClass = error instanceof Error ? error.name : typeof error;
 	const message = error instanceof Error ? error.message : String(error);
-	const causeChain = providerErrorCauseChain(error);
+	const causeChain = providerErrorCauseChain(error, redact);
 	const details = observabilityDetails;
 	const isUnregisteredProviderErrorCode =
 		status === 500 &&
@@ -1868,24 +1898,28 @@ function logProviderError(
 	emit({
 		level: status >= 500 ? "error" : "warn",
 		event: "provider_request_failed",
-		providerId: provider.id,
+		providerId: redactDiagnosticText(provider.id, redact),
 		kind,
-		route,
-		...(requestId ? { requestId } : {}),
+		route: redactCriticalDiagnosticText(route, redact),
+		...(requestId ? { requestId: redactCriticalDiagnosticText(requestId, redact) } : {}),
 		...(correlation.connectionId !== undefined
-			? { connectionId: correlation.connectionId }
+			? { connectionId: redactDiagnosticText(correlation.connectionId, redact) }
 			: {}),
-		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
-		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
+		...(correlation.flowId !== undefined
+			? { flowId: redactDiagnosticText(correlation.flowId, redact) }
+			: {}),
+		...(correlation.tenantId !== undefined
+			? { tenantId: redactDiagnosticText(correlation.tenantId, redact) }
+			: {}),
 		...(correlation.requestedProviderId !== undefined
-			? { requestedProviderId: correlation.requestedProviderId }
+			? { requestedProviderId: redactDiagnosticText(correlation.requestedProviderId, redact) }
 			: {}),
 		status,
 		...cost,
 		...(telemetryPayload ?? {}),
-		code,
-		errorClass,
-		message,
+		code: sanitizeSpanNameForOutput(redactCriticalDiagnosticText(code, redact)),
+		errorClass: redactDiagnosticText(errorClass, redact),
+		message: sanitizeDiagnosticText(redactDiagnosticText(message, redact)),
 		...(causeChain ? { causeChain } : {}),
 		...(providerObservability ? { providerObservability } : {}),
 		...(details.upstreamStatus ? { upstreamStatus: details.upstreamStatus } : {}),
@@ -1899,7 +1933,7 @@ function logProviderError(
 						"Declare this code (with status and retryable) in the operation's errorCodes so it serves its intended status instead of 500.",
 				}
 			: {}),
-		...(error instanceof z.ZodError ? { issues: zodDetails(error) } : {}),
+		...(error instanceof z.ZodError ? { issues: zodDetails(error, redact) } : {}),
 	});
 }
 
@@ -1911,6 +1945,7 @@ function logProviderCleanupError(
 	requestId: string | undefined,
 	resource: "browser" | "stealth",
 	error: unknown,
+	redact?: DiagnosticRedactor,
 ): void {
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	const errorClass = error instanceof Error ? error.name : typeof error;
@@ -1918,13 +1953,13 @@ function logProviderCleanupError(
 	emit({
 		level: "warn",
 		event: "provider_cleanup_failed",
-		providerId: provider.id,
+		providerId: redactDiagnosticText(provider.id, redact),
 		kind,
-		route: operationId,
-		...(requestId ? { requestId } : {}),
+		route: redactCriticalDiagnosticText(operationId, redact),
+		...(requestId ? { requestId: redactCriticalDiagnosticText(requestId, redact) } : {}),
 		resource,
-		errorClass,
-		message,
+		errorClass: redactDiagnosticText(errorClass, redact),
+		message: sanitizeDiagnosticText(redactDiagnosticText(message, redact)),
 	});
 }
 
@@ -1938,23 +1973,28 @@ function logProviderSuccess(
 	cost: ProviderRequestCost,
 	telemetry?: RequestTelemetry,
 	correlation: RequestCorrelationIds = {},
+	redact?: DiagnosticRedactor,
 ): void {
 	const telemetryPayload = telemetry?.toLogPayload();
 	const emit = typeof logger === "function" ? logger : defaultProviderServerLogger;
 	emit({
 		level: "info",
 		event: "provider_request_completed",
-		providerId: provider.id,
+		providerId: redactDiagnosticText(provider.id, redact),
 		kind,
-		route,
-		...(requestId ? { requestId } : {}),
+		route: redactCriticalDiagnosticText(route, redact),
+		...(requestId ? { requestId: redactCriticalDiagnosticText(requestId, redact) } : {}),
 		...(correlation.connectionId !== undefined
-			? { connectionId: correlation.connectionId }
+			? { connectionId: redactDiagnosticText(correlation.connectionId, redact) }
 			: {}),
-		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
-		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
+		...(correlation.flowId !== undefined
+			? { flowId: redactDiagnosticText(correlation.flowId, redact) }
+			: {}),
+		...(correlation.tenantId !== undefined
+			? { tenantId: redactDiagnosticText(correlation.tenantId, redact) }
+			: {}),
 		...(correlation.requestedProviderId !== undefined
-			? { requestedProviderId: correlation.requestedProviderId }
+			? { requestedProviderId: redactDiagnosticText(correlation.requestedProviderId, redact) }
 			: {}),
 		status,
 		...cost,
@@ -1968,6 +2008,7 @@ type RequestScopeFinishResult = {
 };
 
 type RequestScope = RequestScopeContext & {
+	seedCredentials(rawBody: unknown, kind: "operation" | "auth" | "stateful"): void;
 	enrich(input: {
 		route?: string;
 		requestId?: string;
@@ -2039,8 +2080,91 @@ function requestTraceId(
 	);
 }
 
+/** Harvest only credential subtrees, iteratively and before schema diagnostics. */
+function rawRequestCredentials(
+	rawBody: unknown,
+	kind: "operation" | "auth" | "stateful",
+): { values: string[]; exhausted: boolean } {
+	const record = (value: unknown): Record<string, unknown> | undefined =>
+		value !== null && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
+	const own = (value: unknown, key: string): unknown => {
+		const object = record(value);
+		return object && Object.hasOwn(object, key) ? object[key] : undefined;
+	};
+	const body = kind === "stateful" ? own(rawBody, "operationRequest") : rawBody;
+	const values: string[] = [];
+	let remainingBytes = 64 * 1024;
+	let exhausted = false;
+	const add = (value: unknown): void => {
+		if (typeof value !== "string") return;
+		const bytes = Buffer.byteLength(value, "utf8");
+		if (bytes > remainingBytes) {
+			exhausted = true;
+			return;
+		}
+		remainingBytes -= bytes;
+		if (value) values.push(value);
+		const trimmed = value.trim();
+		if (trimmed && trimmed !== value) values.push(trimmed);
+	};
+	function* entries(object: Record<string, unknown>) {
+		for (const key in object) {
+			if (Object.hasOwn(object, key)) yield [key, object[key]] as const;
+		}
+	}
+	const visit = (root: unknown): void => {
+		const object = record(root);
+		if (!object) {
+			add(root);
+			return;
+		}
+		// Connection inventories are usually flat. Walk the root directly and only
+		// allocate iterator frames when a nested credential container is encountered.
+		for (const key in object) {
+			if (!Object.hasOwn(object, key)) continue;
+			const value = object[key];
+			add(key);
+			if (exhausted) break;
+			const child = record(value);
+			if (!child) {
+				add(value);
+				if (exhausted) break;
+				continue;
+			}
+			const stack = [{ iterator: entries(child), depth: 1 }];
+			while (stack.length && !exhausted) {
+				const frame = stack[stack.length - 1];
+				const entry = frame.iterator.next();
+				if (entry.done) {
+					stack.pop();
+					continue;
+				}
+				const [key, value] = entry.value;
+				add(key);
+				if (exhausted) break;
+				const child = record(value);
+				if (child) {
+					if (frame.depth >= 8) {
+						exhausted = true;
+						break;
+					}
+					stack.push({ iterator: entries(child), depth: frame.depth + 1 });
+				} else add(value);
+			}
+			if (exhausted) break;
+		}
+	};
+	visit(own(own(body, "connection"), "secrets"));
+	if (kind === "auth" && !exhausted) {
+		add(own(own(body, "engine"), "egressLease"));
+		if (!exhausted) visit(own(body, "input"));
+	}
+	return { values, exhausted };
+}
+
 function createRequestScope(input: {
 	provider: ProviderDefinition;
+	staticSensitiveValues: CompiledDiagnosticSensitiveValues;
 	kind: "operation" | "auth";
 	route: string;
 	requestId?: string;
@@ -2052,8 +2176,25 @@ function createRequestScope(input: {
 	setHeader?: (name: string, value: string) => void;
 	declaredErrorCode?: (error: unknown) => OperationErrorCode | undefined;
 }): RequestScope {
+	const sensitiveRegistry = createDiagnosticRedactor([], input.staticSensitiveValues);
+	const redact = (text: string) => redactDiagnosticText(text, sensitiveRegistry.redact);
+	bindCriticalDiagnosticRedactor(
+		redact,
+		sensitiveRegistry.redactCritical,
+		sensitiveRegistry.redactStructured,
+		() => sensitiveRegistry.suppressed,
+	);
 	const requestCost = startRequestCost();
-	const traceConfig = resolveTraceConfigFromEnv();
+	const observeEnv = {
+		observe: createDiagnosticEnvObserver(
+			input.provider,
+			sensitiveRegistry.add,
+			sensitiveRegistry.has,
+		),
+		finished: false,
+		staticValues: input.staticSensitiveValues,
+	};
+	const traceConfig = withDiagnosticEnv(observeEnv, () => resolveTraceConfigFromEnv());
 	const details = {
 		route: input.route,
 		requestId: input.requestId,
@@ -2072,12 +2213,16 @@ function createRequestScope(input: {
 	const initialTraceId = requestTraceId(input.headers, input.requestId);
 	const trace: RuntimeTraceContext = traceConfig
 		? createTraceContext({
-				...resolveServerTraceContextOptions(traceConfig, traceAttributes),
+				...withDiagnosticEnv(observeEnv, () =>
+					resolveServerTraceContextOptions(traceConfig, traceAttributes, undefined, redact),
+				),
+				redact,
 				...(initialTraceId ? { traceId: initialTraceId } : {}),
 			})
-		: createTraceContext();
+		: createTraceContext({ redact });
+	bindDiagnosticSensitiveRegistry(trace, sensitiveRegistry);
 	const proxyCollector = new ProxyTelemetryCollector();
-	const resolverCollector = new ResolverTelemetryCollector();
+	const resolverCollector = new ResolverTelemetryCollector({ redact });
 	const telemetry = new RequestTelemetry(trace);
 	telemetry.register(proxyCollector);
 	telemetry.register(resolverCollector);
@@ -2104,12 +2249,14 @@ function createRequestScope(input: {
 		if (outcome.kind === "cancelled") return clientCancelledError();
 		return undefined;
 	};
-	const root = trace.span(`request:${input.kind}:${input.route}`, async () => {
-		rootRunner = AsyncLocalStorage.snapshot();
-		const outcome = await rootTerminal;
-		const error = terminalError(outcome);
-		if (error !== undefined) throw error;
-	});
+	const root = withDiagnosticEnv(observeEnv, () =>
+		trace.span(`request:${input.kind}:${input.route}`, async () => {
+			rootRunner = AsyncLocalStorage.snapshot();
+			const outcome = await rootTerminal;
+			const error = terminalError(outcome);
+			if (error !== undefined) throw error;
+		}),
+	);
 	void root.catch(() => undefined);
 
 	const settleRoot = (): void => {
@@ -2144,7 +2291,7 @@ function createRequestScope(input: {
 		traceAttributes.route = details.route;
 		const traceId = requestTraceId(details.headers, details.requestId);
 		const sanitizedAttributes = Object.fromEntries(
-			Object.entries(sanitizeTraceAttributes(traceAttributes)).map(([key, value]) => [
+			Object.entries(sanitizeTraceAttributes(traceAttributes, redact)).map(([key, value]) => [
 				key,
 				String(value),
 			]),
@@ -2156,9 +2303,16 @@ function createRequestScope(input: {
 	};
 
 	const scope: RequestScope = {
+		redact,
 		trace,
 		telemetry,
 		resolverTelemetry: resolverCollector,
+		seedCredentials(rawBody, kind): void {
+			const harvested = rawRequestCredentials(rawBody, kind);
+			sensitiveRegistry.add(harvested.values);
+			// An incomplete inventory cannot certify free text: emit less.
+			if (harvested.exhausted) sensitiveRegistry.suppress();
+		},
 		enrich(enrichment): void {
 			if (terminalOutcome) return;
 			if (enrichment.route !== undefined) details.route = enrichment.route;
@@ -2208,6 +2362,7 @@ function createRequestScope(input: {
 		},
 		terminalize(outcome): RequestScopeFinishResult {
 			if (finishedResult) return finishedResult;
+			observeEnv.finished = true;
 			terminalOutcome = outcome;
 			const error = terminalError(outcome);
 			finishedResult = {};
@@ -2215,8 +2370,7 @@ function createRequestScope(input: {
 				const declaredErrorCode =
 					error === undefined ? undefined : input.declaredErrorCode?.(error);
 				const status =
-					outcome.status ??
-					(error === undefined ? 200 : toStatusCode(error, declaredErrorCode));
+					outcome.status ?? (error === undefined ? 200 : toStatusCode(error, declaredErrorCode));
 				finishedResult = headerSnapshot(error);
 				const cost = finishRequestCost(requestCost);
 				try {
@@ -2231,6 +2385,7 @@ function createRequestScope(input: {
 							cost,
 							telemetry,
 							details.correlation,
+							redact,
 						);
 					} else {
 						logProviderError(
@@ -2246,6 +2401,7 @@ function createRequestScope(input: {
 							telemetry,
 							finishedResult.errorObservability as ErrorObservabilityDetails,
 							details.correlation,
+							redact,
 						);
 					}
 				} catch {
@@ -2281,8 +2437,9 @@ function createRequestScope(input: {
 	return scope;
 }
 
-// A raw `Response` result skips `toErrorResponse`, so its body stays
-// provider-owned, but the observability header is still SDK-owned: derive it
+// A raw `Response` result skips `toErrorResponse`. Its payload shape stays
+// provider-owned; known credentials in error payloads still need redaction.
+// The observability header is SDK-owned: derive it
 // from the status. Only timeouts, rate limits, and 5xx are retryable;
 // `isRetryableCategory` would otherwise mark every other 4xx (`upstream_http`)
 // as retryable.
@@ -2297,11 +2454,12 @@ function rawResponseErrorObservability(status: number): ErrorObservabilityDetail
 // `rawStatusFallback` is decided by the caller from the outcome, not from a
 // missing snapshot: a failed outcome whose thrown value is `undefined` also has
 // no `errorObservability`, and its 500 carries the SDK envelope, not a raw body.
-function responseWithRequestScopeHeaders(
+async function responseWithRequestScopeHeaders(
 	response: Response,
 	finished: RequestScopeFinishResult,
 	rawStatusFallback: boolean,
-): Response {
+	redact: DiagnosticRedactor,
+): Promise<Response> {
 	const headers = new Headers(response.headers);
 	headers.delete(PROVIDER_TELEMETRY_HEADER);
 	if (finished.providerTelemetryHeader) {
@@ -2316,24 +2474,36 @@ function responseWithRequestScopeHeaders(
 	if (errorObservability) {
 		headers.set(ERROR_OBSERVABILITY_HEADER, JSON.stringify(errorObservability));
 	}
-	return new Response(response.body, {
+	// Raw Response bodies are provider-owned. Preserve their stream and representation.
+	const body = response.body;
+	const statusText =
+		rawStatusFallback && response.status >= 400
+			? redactDiagnosticText(response.statusText, redact)
+			: response.statusText;
+	return new Response(body, {
 		headers,
 		status: response.status,
-		statusText: response.statusText,
+		// When free text cannot be certified, use the SDK's standard HTTP reason
+		// phrase. It preserves the status contract without trusting provider text.
+		statusText:
+			statusText === REDACTION_FAILED && isDiagnosticRedactionSuppressed(redact)
+				? (STATUS_CODES[response.status] ?? "")
+				: statusText,
 	});
 }
 
-function finalizeRequestResponse(
+async function finalizeRequestResponse(
 	scope: RequestScope,
 	response: Response,
 	outcome: RequestTerminalOutcome,
-): Response {
+): Promise<Response> {
 	try {
 		const error = outcome.kind === "failed" ? outcome.error : undefined;
-		const finalResponse = responseWithRequestScopeHeaders(
+		const finalResponse = await responseWithRequestScopeHeaders(
 			response,
 			scope.snapshotHeaders(error),
 			outcome.kind === "completed",
+			scope.redact,
 		);
 		scope.terminalize(outcome);
 		return finalResponse;
@@ -2552,11 +2722,7 @@ function toSseResponse(
 						const validated = await validateSseEvent(operation, next.value);
 						const encodedEvent = encodeSseEvent(validated);
 						const bytes = encoder.encode(encodedEvent);
-						assertStreamPayloadWithinLimit(
-							bytes.byteLength,
-							transport?.maxEventBytes,
-							"event",
-						);
+						assertStreamPayloadWithinLimit(bytes.byteLength, transport?.maxEventBytes, "event");
 						return bytes;
 					});
 					controller.enqueue(encodedBytes);
@@ -2565,9 +2731,13 @@ function toSseResponse(
 					controller.enqueue(
 						encoder.encode(
 							encodeSseEvent(
-								streamError("stream_error", message, {
-									...(requestId ? { requestId } : {}),
-								}),
+								streamError(
+									"stream_error",
+									sanitizeDiagnosticText(redactDiagnosticText(message, lifecycle.redact)),
+									{
+										...(requestId ? { requestId } : {}),
+									},
+								),
 							),
 						),
 					);
@@ -2810,6 +2980,7 @@ async function handleOperation(
 					request.requestId,
 					"stealth",
 					error,
+					scope.redact,
 				);
 			}
 		}
@@ -2825,11 +2996,13 @@ async function handleOperation(
 					request.requestId,
 					"browser",
 					error,
+					scope.redact,
 				);
 			}
 		}
 	};
 	const streamLifecycle: RequestStreamLifecycle = {
+		redact: scope.redact,
 		runStep<T>(fn: () => Promise<T>): Promise<T> {
 			return scope.runStreamStep(fn);
 		},
@@ -2953,6 +3126,7 @@ async function handleAuthFlow(
 				request.requestId,
 				"stealth",
 				error,
+				scope.redact,
 			);
 		}
 	}
@@ -3074,12 +3248,15 @@ function operationRequestFromForwardingEnvelope(
 	};
 }
 
-function parseStatefulForwardingEnvelope(rawBody: unknown): ProviderServerStatefulForwardEnvelope {
+function parseStatefulForwardingEnvelope(
+	rawBody: unknown,
+	redact: DiagnosticRedactor,
+): ProviderServerStatefulForwardEnvelope {
 	const parsed = ProviderServerStatefulForwardEnvelopeSchema.safeParse(rawBody);
 	if (parsed.success) return parsed.data;
 	throw new ProviderError("Stateful forwarding envelope is invalid.", {
 		code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
-		details: zodDetails(parsed.error),
+		details: zodDetails(parsed.error, redact),
 	});
 }
 
@@ -3087,7 +3264,9 @@ function parseStatefulForwardingEnvelope(rawBody: unknown): ProviderServerStatef
  * Primary, cross-runtime app factory. Declared capability ESM is preloaded
  * asynchronously, so this path works on Bun and every supported Node release.
  */
-export async function createServerAppAsync<TContext extends Partial<ProviderContext> = ProviderContext>(
+export async function createServerAppAsync<
+	TContext extends Partial<ProviderContext> = ProviderContext,
+>(
 	provider: ProviderDefinition<TContext>,
 	options: ProviderServerOptions<TContext> = {},
 ): Promise<Hono> {
@@ -3134,6 +3313,12 @@ function createServerAppWithCapabilityModules(
 		engine: serverOptions.engine ?? createInProcessProviderEngine(),
 	};
 	const app = new Hono();
+	// Compile the startup inventory once, composed with the shared outside-context fallback.
+	const staticSensitiveValues = compileProcessDiagnosticSensitiveValues(
+		collectStaticDiagnosticSensitiveValues(provider, {
+			statefulForwardingSecret: options.statefulForwarding?.secret,
+		}),
+	);
 	const logger = options.logger ?? defaultProviderServerLogger;
 	const operationErrorCodes = buildOperationErrorCodeLookup(provider);
 	const statefulForwardingReplayCache = new StatefulForwardingReplayCache(
@@ -3189,6 +3374,7 @@ function createServerAppWithCapabilityModules(
 		const operation = "stateful-internal";
 		const requestScope = createRequestScope({
 			provider,
+			staticSensitiveValues,
 			kind: "operation",
 			route: operation,
 			headers: Object.fromEntries(c.req.raw.headers.entries()),
@@ -3218,7 +3404,8 @@ function createServerAppWithCapabilityModules(
 					code: "STATEFUL_FORWARDING_ENVELOPE_INVALID",
 				});
 			}
-			const envelope = parseStatefulForwardingEnvelope(rawBody);
+			requestScope.seedCredentials(rawBody, "stateful");
+			const envelope = parseStatefulForwardingEnvelope(rawBody, requestScope.redact);
 			if (envelope.providerId !== provider.id) {
 				throw new ProviderError(
 					"Stateful forwarding envelope providerId does not match the served provider.",
@@ -3354,7 +3541,10 @@ function createServerAppWithCapabilityModules(
 				...(requestId ? { requestId } : {}),
 			});
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
-			const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
+			const response = c.json(
+				toErrorResponse(error, requestId, observabilityDetails, requestScope.redact),
+				status,
+			);
 			return finalizeRequestResponse(requestScope, response, {
 				kind: "failed",
 				status,
@@ -3368,6 +3558,7 @@ function createServerAppWithCapabilityModules(
 		const operation = c.req.param("operation");
 		const requestScope = createRequestScope({
 			provider,
+			staticSensitiveValues,
 			kind: "operation",
 			route: operation,
 			operationId: operation,
@@ -3381,6 +3572,7 @@ function createServerAppWithCapabilityModules(
 				.clone()
 				.json()
 				.catch(() => undefined);
+			requestScope.seedCredentials(rawBody, "operation");
 			const body = OperationRequestSchema.parse(rawBody);
 			const requestHeaders = Object.fromEntries(c.req.raw.headers.entries());
 			body.headers = { ...requestHeaders, ...body.headers };
@@ -3405,7 +3597,12 @@ function createServerAppWithCapabilityModules(
 				);
 				const response = handled instanceof Response ? handled : c.json(handled);
 				return streaming
-					? responseWithRequestScopeHeaders(response, requestScope.snapshotHeaders(), true)
+					? responseWithRequestScopeHeaders(
+							response,
+							requestScope.snapshotHeaders(),
+							true,
+							requestScope.redact,
+						)
 					: response;
 			};
 			const response = streaming
@@ -3422,7 +3619,10 @@ function createServerAppWithCapabilityModules(
 			const requestId = extractRequestId(rawBody);
 			requestScope.enrich({ ...(requestId ? { requestId } : {}) });
 			const observabilityDetails = errorObservabilityDetails(error, declaredErrorCode);
-			const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
+			const response = c.json(
+				toErrorResponse(error, requestId, observabilityDetails, requestScope.redact),
+				status,
+			);
 			return finalizeRequestResponse(requestScope, response, {
 				kind: "failed",
 				status,
@@ -3448,6 +3648,7 @@ function createServerAppWithCapabilityModules(
 			let rawBody: unknown;
 			const requestScope = createRequestScope({
 				provider,
+				staticSensitiveValues,
 				kind: "auth",
 				route: logRoute,
 				headers: Object.fromEntries(c.req.raw.headers.entries()),
@@ -3459,6 +3660,7 @@ function createServerAppWithCapabilityModules(
 					.clone()
 					.json()
 					.catch(() => undefined);
+				requestScope.seedCredentials(rawBody, "auth");
 				const body = withAuthRequestHeaders(
 					AuthFlowRequestSchema.parse(rawBody),
 					c.req.raw.headers,
@@ -3498,7 +3700,10 @@ function createServerAppWithCapabilityModules(
 				const requestId = extractRequestId(rawBody);
 				requestScope.enrich({ ...(requestId ? { requestId } : {}) });
 				const observabilityDetails = errorObservabilityDetails(error);
-				const response = c.json(toErrorResponse(error, requestId, observabilityDetails), status);
+				const response = c.json(
+					toErrorResponse(error, requestId, observabilityDetails, requestScope.redact),
+					status,
+				);
 				return finalizeRequestResponse(requestScope, response, {
 					kind: "failed",
 					status,

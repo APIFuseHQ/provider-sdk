@@ -20,7 +20,8 @@
 	},
 	"include": [
 		"src/**/*",
-		"bin/**/*"
+		"bin/**/*",
+		"scripts/benchmark-request-redaction.ts"
 	],
 	"exclude": [
 		"node_modules",

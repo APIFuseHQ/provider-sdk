@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { readDiagnosticEnv } from "../src/runtime/diagnostic-env.js";
 
 import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
@@ -87,7 +88,7 @@ export function createProviderContext(provider: ProviderDefinition): {
 		process.env,
 		provider.secrets?.map((secret) => secret.name) ?? [],
 	);
-	const providerEnv = { get: (key: string) => providerEnvironment[key] };
+	const providerEnv = { get: (key: string) => readDiagnosticEnv(key, providerEnvironment) };
 	const engineEnv = createEnvContext([PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV]);
 	const engineCredentials = readEngineProxyCredentials();
 	const credential = createCredentialContext();

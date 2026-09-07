@@ -275,6 +275,7 @@ export {
 	type Span,
 	type TraceContext,
 } from "./runtime/trace.js";
+export type { DiagnosticRedactor } from "./runtime/diagnostic-redactor.js";
 export {
 	APIFUSE_CONTENT_PROVENANCE_META_KEY,
 	APIFUSE_CONTENT_TRUST_META_KEY,

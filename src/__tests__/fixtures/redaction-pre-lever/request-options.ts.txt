@@ -161,7 +161,7 @@ export function serializeRequestUrl(
 	};
 }
 
-const MIN_UNSCOPED_SENSITIVE_VALUE_LENGTH = 8;
+const MIN_UNSCOPED_SENSITIVE_VALUE_LENGTH = 4;
 
 export function normalizePercentEscapes(value: string): string {
 	return value.replace(/%[\da-f]{2}/gi, (percentEscape) => percentEscape.toUpperCase());
@@ -170,24 +170,6 @@ export function normalizePercentEscapes(value: string): string {
 function sensitiveValueVariants(value: string): string[] {
 	if (!value || value === REDACTED_QUERY_VALUE) return [];
 
-	// Owner-visible policy: short credentials are literal, case-sensitive tokens only.
-	// Encoded short needles collide with benign cursors and ordinary diagnostic text.
-	if (value.length < 8) return [value];
-	// These ASCII characters are identical under NFC, JSON, URI-component and
-	// form encoding. Avoid constructing those identical variants for common tokens.
-	if (/^[A-Za-z0-9._*-]+$/.test(value)) {
-		const base64 = Buffer.from(value, "utf8").toString("base64");
-		const base64Url = base64.replaceAll("+", "-").replaceAll("/", "_");
-		return [
-			...new Set([
-				value,
-				base64,
-				base64.replace(/=+$/, ""),
-				base64Url,
-				base64Url.replace(/=+$/, ""),
-			]),
-		];
-	}
 	const normalized = value.normalize("NFC");
 	const formEncoded = new URLSearchParams({ value }).toString().slice("value=".length);
 	let componentEncoded: string;
@@ -257,7 +239,7 @@ function isTokenCharacter(value: string | undefined): boolean {
 
 function replaceSensitiveVariant(text: string, variant: SensitiveValueVariant): string {
 	const normalized = normalizePercentEscapes(text);
-	const comparable = variant.caseInsensitive ? normalized.toLowerCase() : text;
+	const comparable = variant.caseInsensitive ? normalized.toLowerCase() : normalized;
 	const needle = variant.caseInsensitive ? variant.value.toLowerCase() : variant.value;
 	let cursor = 0;
 	let output = "";

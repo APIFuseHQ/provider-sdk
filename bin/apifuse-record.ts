@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import { readDiagnosticEnv } from "../src/runtime/diagnostic-env.js";
 
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -519,8 +520,8 @@ export function createCaptureContext(
 		process.env,
 		provider.secrets?.map((secret) => secret.name) ?? [],
 	);
-	const env = { get: (key: string) => providerEnvironment[key] };
-	const engineEnv = { get: (key: string) => process.env[key] };
+	const env = { get: (key: string) => readDiagnosticEnv(key, providerEnvironment) };
+	const engineEnv = { get: (key: string) => readDiagnosticEnv(key) };
 	const engineCredentials = readEngineProxyCredentials();
 	const credential = {
 		mode: "none" as const,

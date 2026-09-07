@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "./runtime/diagnostic-env.js";
 import { ProviderError } from "./errors.js";
 import {
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
@@ -160,7 +161,7 @@ export function readEngineProxyCredentials(
 ): Readonly<Record<string, string>> {
 	return Object.fromEntries(
 		ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES.flatMap((name) => {
-			const value = environment[name]?.trim();
+			const value = readDiagnosticEnv(name, environment)?.trim();
 			return value ? [[name, value] as const] : [];
 		}),
 	);
@@ -174,7 +175,7 @@ export function createProviderEnvironment(
 	return Object.fromEntries(
 		declaredNames.flatMap((name) => {
 			if (isEngineOwnedEnvName(name)) return [];
-			const value = environment[name];
+			const value = readDiagnosticEnv(name, environment);
 			return value === undefined ? [] : [[name, value] as const];
 		}),
 	);

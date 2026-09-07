@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
+import { createDiagnosticRedactor } from "../diagnostic-redactor.js";
 import {
 	APIFUSE__ENGINE__CEREMONY_LEASE_KEY,
 	type CeremonyEgressBinding,
@@ -35,6 +36,7 @@ function runtime(
 	options: Partial<LeaseScope> & {
 		handle?: string;
 		now?: () => number;
+		onHandle?: (handle: string) => void;
 		environment?: Record<string, string>;
 	} = {},
 ) {
@@ -76,6 +78,38 @@ function capturedError(run: () => unknown): unknown {
 }
 
 describe("engine ceremony egress lease", () => {
+	it("registers newly minted and restored handles before callers can emit them", () => {
+		const mintedRegistry = createDiagnosticRedactor([]);
+		const minted: string[] = [];
+		const first = runtime({
+			now: () => 1_000,
+			onHandle(handle) {
+				mintedRegistry.add([handle]);
+				minted.push(handle);
+			},
+		});
+		expect(minted).toEqual([]);
+		first.bind(SMARTPROXY_BINDING);
+		const handle = first.handle();
+		if (!handle) throw new Error("fixture handle was not minted");
+		expect(minted).toEqual([handle]);
+		expect(mintedRegistry.redact(`lease ${handle}`)).toBe("lease [REDACTED]");
+
+		const restoredRegistry = createDiagnosticRedactor([]);
+		const restored: string[] = [];
+		const next = runtime({
+			handle,
+			now: () => 1_001,
+			onHandle(value) {
+				restoredRegistry.add([value]);
+				restored.push(value);
+			},
+		});
+		expect(restored).toEqual([handle]);
+		expect(next.handle()).toBe(handle);
+		expect(restoredRegistry.redact(`lease ${next.handle()}`)).toBe("lease [REDACTED]");
+	});
+
 	it("mints and verifies an opaque exact NodeMaven binding", () => {
 		const first = runtime({ now: () => 1_000 });
 		first.bind({

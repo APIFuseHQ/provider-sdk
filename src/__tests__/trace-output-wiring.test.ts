@@ -1,7 +1,12 @@
-import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
+import {
+	createDiagnosticRedactor,
+	REDACTION_FAILED,
+	redactDiagnosticText,
+} from "../runtime/diagnostic-redactor.js";
 import {
 	OTEL_EXPORTER_OTLP_ENDPOINT,
 	OTEL_EXPORTER_OTLP_HEADERS,
@@ -103,6 +108,36 @@ async function settleExports(exports: CapturedExport[], expected = 1): Promise<v
 beforeEach(() => {
 	resetOTLPExportForTests();
 });
+
+type RedactorFailureMode = "undefined" | "boxed" | "object" | "identity" | "second" | "late";
+
+function createFailureModeRedactor(mode: RedactorFailureMode, secret: string) {
+	const registry = createDiagnosticRedactor([secret]);
+	const knownGood = registry.redact;
+	let calls = 0;
+	const invalid = { redact: (text: string) => text };
+	Object.defineProperty(invalid, "redact", {
+		value: (text: string) => {
+			calls += 1;
+			if (mode === "undefined") return undefined;
+			if (mode === "boxed") return new String(text);
+			if (mode === "object") return { text };
+			if (mode === "identity") return text;
+			if (mode === "second" && calls === 2) throw new Error(secret);
+			return knownGood(text);
+		},
+	});
+	registry.redact = invalid.redact;
+	return {
+		redact: (text: string) => redactDiagnosticText(text, registry.redact),
+		failLate() {
+			if (mode === "late")
+				registry.redact = () => {
+					throw new Error(secret);
+				};
+		},
+	};
+}
 
 const provider = createProviderDefinitionDouble({
 	operations: {
@@ -290,6 +325,161 @@ async function captureStreamingLifecycle(
 }
 
 describe("server trace output wiring", () => {
+	it.each([
+		["json", false],
+		["console", false],
+		["otlp", false],
+		["json", true],
+		["console", true],
+		["otlp", true],
+	] as const)("applies the redactor before onSpan and %s export; throwing=%s", async (exporter, throws) => {
+		const secret = "hrfcokey1234";
+		const output: string[] = [];
+		const observed: string[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		const capture = captureExports();
+		try {
+			const resourceAttributes = { request_id: `request-${secret}` };
+			const trace = createTraceContext(
+				resolveServerTraceContextOptions(
+					{
+						enabled: true,
+						exporter,
+						endpoint: "http://collector.test/v1/traces",
+						onSpan: (span) => observed.push(JSON.stringify(span)),
+					},
+					resourceAttributes,
+					{ [OTEL_SERVICE_NAME]: `service-${secret}` },
+					(text) => {
+						if (throws) throw new Error(`redactor ${secret} failed`);
+						return text.replaceAll(secret, "[REDACTED]");
+					},
+				),
+			);
+			resourceAttributes.request_id = `enriched-${secret}`;
+			const recorder = getTraceRecorder(trace);
+			if (!recorder) throw new Error("trace recorder missing");
+			await expect(
+				recorder.runSpan(
+					"provider.redaction",
+					() => {
+						throw new Error(`upstream ${secret} rejected`);
+					},
+					{ attributes: { url: `https://vendor.test/${secret}/items` } },
+				),
+			).rejects.toThrow(secret);
+			if (exporter === "otlp") await settleExports(capture.exports);
+			expect(observed).toHaveLength(1);
+			expect(observed.join("\n")).not.toContain(secret);
+			if (throws) {
+				expect(trace.getSpans()[0]?.attributes).toEqual({
+					"[REDACTED#1]": "[REDACTION_FAILED]",
+					"[REDACTED#2]": "[REDACTION_FAILED]",
+				});
+			} else {
+				expect(trace.getSpans()[0]?.attributes.url).toBe("https://vendor.test/[REDACTED]/items");
+			}
+			expect(trace.getSpans()[0]?.error).toBe(
+				throws ? "[REDACTION_FAILED]" : "upstream [REDACTED] rejected",
+			);
+			const exported =
+				exporter === "otlp" ? capture.exports.map((entry) => String(entry.init?.body)) : output;
+			if (throws && exporter === "otlp") {
+				// Failed trace-ID verification suppresses the batch instead of emitting invalid OTLP.
+				expect(exported).toEqual([]);
+				return;
+			}
+			expect(exported).toHaveLength(1);
+			expect(exported.join("\n")).not.toContain(secret);
+			if (throws) expect(exported.join("\n")).toContain("[REDACTION_FAILED]");
+			const attributes =
+				exporter === "otlp"
+					? attributeMap(
+							(JSON.parse(exported[0] ?? "{}") as OTLPBody).resourceSpans[0]?.resource.attributes ??
+								[],
+						)
+					: (JSON.parse(exported[0] ?? "{}") as { attributes: Record<string, string> }).attributes;
+			if (throws) {
+				expect(attributes).toEqual({
+					"[REDACTED#1]": "[REDACTION_FAILED]",
+					"[REDACTED#2]": "[REDACTION_FAILED]",
+					"[REDACTED#3]": "[REDACTION_FAILED]",
+				});
+			} else {
+				expect(attributes.request_id).toBe(
+					`${exporter === "otlp" ? "request" : "enriched"}-[REDACTED]`,
+				);
+			}
+			if (exporter === "otlp" && !throws)
+				expect(attributes["service.name"]).toBe("service-[REDACTED]");
+		} finally {
+			capture.restore();
+			console.log = originalLog;
+		}
+	});
+
+	it.each([
+		"undefined",
+		"boxed",
+		"object",
+		"identity",
+		"second",
+		"late",
+	] as const)("fails closed for a %s registry callback in JSON and OTLP resources", async (mode) => {
+		const secret = "willowforest";
+		const output: string[] = [];
+		const originalLog = console.log;
+		console.log = (...args: unknown[]) => output.push(args.map(String).join(" "));
+		const capture = captureExports();
+		try {
+			const jsonFailure = createFailureModeRedactor(mode, secret);
+			const jsonOptions = resolveServerTraceContextOptions(
+				{ enabled: true, exporter: "json" },
+				{ resource: secret },
+				{},
+				jsonFailure.redact,
+			);
+			jsonFailure.failLate();
+			jsonOptions.onSpan?.({
+				id: "json-span",
+				name: "safe",
+				startedAt: 0,
+				endedAt: 1,
+				duration_ms: 1,
+				status: "ok",
+				attributes: {},
+			});
+
+			const otlpFailure = createFailureModeRedactor(mode, secret);
+			const trace = createTraceContext(
+				resolveServerTraceContextOptions(
+					{
+						enabled: true,
+						exporter: "otlp",
+						endpoint: "http://collector.test/v1/traces",
+					},
+					{ resource: secret },
+					{},
+					otlpFailure.redact,
+				),
+			);
+			otlpFailure.failLate();
+			await trace.span("safe", async () => undefined);
+			await settleExports(capture.exports);
+
+			const serialized = [...output, ...capture.exports.map((entry) => String(entry.init?.body))];
+			const exportedBatch = mode === "identity" || mode === "second";
+			expect(capture.exports).toHaveLength(exportedBatch ? 1 : 0);
+			expect(serialized).toHaveLength(exportedBatch ? 2 : 1);
+			expect(serialized.join("\n")).not.toContain(secret);
+			expect(serialized.join("\n")).toContain(REDACTION_FAILED);
+		} finally {
+			capture.restore();
+			console.log = originalLog;
+		}
+	});
+
 	it("keeps the default in-memory trace behavior silent", async () => {
 		const output: string[] = [];
 		const originalLog = console.log;
@@ -380,11 +570,11 @@ describe("server trace output wiring", () => {
 				async () => {
 					const body = new ReadableStream<Uint8Array>(
 						{
-						async pull(controller) {
-							await new Promise<void>((resolve) => setTimeout(resolve, 30));
-							controller.enqueue(new TextEncoder().encode("{"));
-							controller.close();
-						},
+							async pull(controller) {
+								await new Promise<void>((resolve) => setTimeout(resolve, 30));
+								controller.enqueue(new TextEncoder().encode("{"));
+								controller.close();
+							},
 						},
 						{ highWaterMark: 0 },
 					);
@@ -665,7 +855,9 @@ describe("server trace output wiring", () => {
 					expect(body).toContain("event: delta");
 					expect(body).toContain("event: apifuse.error");
 					expect(body).not.toContain("stream-connection-private");
-					await waitUntil(() => output.some((line) => line.includes("request:operation:tracedEvents")));
+					await waitUntil(() =>
+						output.some((line) => line.includes("request:operation:tracedEvents")),
+					);
 				},
 			);
 		} finally {
@@ -878,7 +1070,10 @@ describe("server trace output wiring", () => {
 					body: JSON.stringify({ requestId: "stalled-abort", input: {} }),
 					signal: controller.signal,
 				});
-				void response.body?.getReader().read().catch(() => undefined);
+				void response.body
+					?.getReader()
+					.read()
+					.catch(() => undefined);
 				await new Promise<void>((resolve) => setImmediate(resolve));
 				controller.abort();
 			},
@@ -889,9 +1084,9 @@ describe("server trace output wiring", () => {
 			event: "provider_request_failed",
 			errorCategory: "client_cancelled",
 		});
-		expect(
-			captured.spans.filter((span) => span.name === "request:operation:stalledAbort"),
-		).toEqual([expect.objectContaining({ status: "error" })]);
+		expect(captured.spans.filter((span) => span.name === "request:operation:stalledAbort")).toEqual(
+			[expect.objectContaining({ status: "error" })],
+		);
 	});
 
 	it("terminalizes request abort when the source never yields or returns", async () => {
@@ -939,9 +1134,9 @@ describe("server trace output wiring", () => {
 			event: "provider_request_failed",
 			errorCategory: "client_cancelled",
 		});
-		expect(
-			captured.spans.filter((span) => span.name === "request:operation:neverReturns"),
-		).toEqual([expect.objectContaining({ status: "error" })]);
+		expect(captured.spans.filter((span) => span.name === "request:operation:neverReturns")).toEqual(
+			[expect.objectContaining({ status: "error" })],
+		);
 	});
 
 	it("closes the request root when an injected logger throws", async () => {
@@ -1240,14 +1435,16 @@ describe("server OTLP trace output wiring", () => {
 			endpoint: "http://collector.test:4318/v1/traces",
 			headers: { Authorization: "Bearer env-token" },
 		});
+		// The raw snapshot stays private in trace export state so credentials added
+		// later can be matched before output bounds are applied.
 		expect(options.resourceAttributes).toEqual({
 			...requestAttributes,
 			"service.name": "apifuse-provider-under-test-production",
 			"deployment.environment": "prod",
 			"k8s.pod.name": "provider-under-test-7d9f8b6c5d-x2k9q",
 			"telemetry.distro.version": "1.0.0",
-			region: "eu\\u001bwest",
-			api_key: "[REDACTED]",
+			region: "eu\u001bwest",
+			api_key: "operator-secret",
 		});
 	});
 
@@ -1355,9 +1552,9 @@ describe("server OTLP trace output wiring", () => {
 			{},
 		);
 		expect(options.resourceAttributes).toEqual({
-			request_id: "req\\u0000\\u001b",
+			request_id: "req\u0000\u001b",
 			provider_id: "p",
-			api_key: "[REDACTED]",
+			api_key: TRACE_CREDENTIAL,
 		});
 
 		const capture = captureExports();
@@ -1386,6 +1583,44 @@ describe("server OTLP trace output wiring", () => {
 				provider_id: "p",
 				api_key: "[REDACTED]",
 			});
+		} finally {
+			capture.restore();
+		}
+	});
+
+	it("matches late resource keys and values before applying output bounds", async () => {
+		const secret = "orchardkey12";
+		const privateValue = "unregistered-private-value";
+		const straddledValue = `${"x".repeat(290)}${secret}`;
+		const registry = createDiagnosticRedactor();
+		const options = resolveServerTraceContextOptions(
+			otlpConfig,
+			{},
+			{
+				[OTEL_SERVICE_NAME]: straddledValue,
+				[OTEL_RESOURCE_ATTRIBUTES]: `${secret}=${privateValue}`,
+			},
+			registry.redact,
+		);
+		expect(options.resourceAttributes).toEqual({
+			"service.name": straddledValue,
+			[secret]: privateValue,
+		});
+		const capture = captureExports();
+		try {
+			const trace = createTraceContext(options);
+			registry.add([secret]);
+			await trace.span("provider.late_resource", async () => undefined);
+			await settleExports(capture.exports);
+			const body = JSON.parse(String(capture.exports[0]?.init?.body)) as OTLPBody;
+			expect(attributeMap(body.resourceSpans[0]?.resource.attributes ?? [])).toEqual({
+				"service.name": `${"x".repeat(290)}[REDACTED]`,
+				"[REDACTED#1]": "[REDACTED]",
+			});
+			const serialized = String(capture.exports[0]?.init?.body);
+			expect(serialized).not.toContain(secret);
+			expect(serialized).not.toContain(privateValue);
+			expect(serialized).not.toContain("truncated");
 		} finally {
 			capture.restore();
 		}

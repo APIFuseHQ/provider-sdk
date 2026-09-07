@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { createHash, createHmac } from "node:crypto";
 
 import { providerCacheRedisUrlFromEnv } from "../config/loader.js";
@@ -362,7 +363,7 @@ async function withRedisFallback<T>(operation: () => Promise<T>): Promise<T | un
 
 export function createProviderCache(options: ProviderCacheOptions): ProviderCache {
 	const redisUrl = options.redisUrl ?? providerCacheRedisUrlFromEnv();
-	const configuredPepper = process.env[APIFUSE__CACHE__KEY_PEPPER_ENV];
+	const configuredPepper = readDiagnosticEnv(APIFUSE__CACHE__KEY_PEPPER_ENV);
 	const pepper = configuredPepper && configuredPepper.length > 0 ? configuredPepper : undefined;
 	const backend = getSharedBackend(redisUrl);
 	const memoryMaxEntries = Math.max(1, options.memoryMaxEntries ?? DEFAULT_MEMORY_MAX_ENTRIES);
@@ -599,7 +600,7 @@ export function isProviderCacheBypassed(cache: ProviderCache): boolean {
 export function createBypassProviderCache(
 	options: Pick<ProviderCacheOptions, "providerId">,
 ): ProviderCache {
-	const configuredPepper = process.env[APIFUSE__CACHE__KEY_PEPPER_ENV];
+	const configuredPepper = readDiagnosticEnv(APIFUSE__CACHE__KEY_PEPPER_ENV);
 	const pepper = configuredPepper && configuredPepper.length > 0 ? configuredPepper : undefined;
 	const events: ProviderCacheLookupMeta[] = [];
 	const secretScopedKeys = new Set<string>();

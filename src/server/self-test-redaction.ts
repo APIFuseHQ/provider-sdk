@@ -1,8 +1,8 @@
 import type { ProviderDefinition } from "../types.js";
 import {
-	PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_ENV,
-	PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_PREVIOUS_ENV,
-} from "./self-test-token.js";
+	collectDiagnosticSensitiveValues,
+	SELF_TEST_SENSITIVE_SOURCE_KINDS,
+} from "./sensitive-values.js";
 
 export const SELF_TEST_REDACTED_PLACEHOLDER = "[REDACTED]";
 
@@ -31,39 +31,12 @@ export function collectSelfTestSensitiveValues(
 		credentialInputs?: Readonly<Record<string, string>>;
 	} = {},
 ): string[] {
-	const env = options.env ?? process.env;
-	const envNames = new Set<string>([
-		PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_ENV,
-		PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_PREVIOUS_ENV,
-	]);
-	for (const secret of provider.secrets ?? []) {
-		envNames.add(secret.name);
-	}
-	const healthProbe = provider.healthProbe ?? provider.healthMonitor;
-	for (const name of healthProbe?.requiredSecrets ?? []) {
-		envNames.add(name);
-	}
-	for (const name of Object.values(healthProbe?.credentialInputs ?? {})) {
-		envNames.add(name);
-	}
-
-	const values = new Set<string>();
-	for (const name of envNames) {
-		const value = env[name];
-		if (typeof value === "string" && value.length >= MIN_SENSITIVE_VALUE_LENGTH) {
-			values.add(value);
-		}
-	}
-	for (const value of Object.values(options.credentialInputs ?? {})) {
-		if (value.length >= MIN_SENSITIVE_VALUE_LENGTH) {
-			values.add(value);
-		}
-	}
-	return [...values];
-}
-
-function escapeRegExp(value: string): string {
-	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return collectDiagnosticSensitiveValues(provider, {
+		...options,
+		sourceKinds: SELF_TEST_SENSITIVE_SOURCE_KINDS,
+		minimumLength: MIN_SENSITIVE_VALUE_LENGTH,
+		includeResolvedEnvVariants: false,
+	});
 }
 
 /**
@@ -79,10 +52,7 @@ export function redactSelfTestText(
 	let redacted = text;
 	for (const value of sensitiveValues) {
 		if (value.length < MIN_SENSITIVE_VALUE_LENGTH) continue;
-		redacted = redacted.replace(
-			new RegExp(escapeRegExp(value), "g"),
-			SELF_TEST_REDACTED_PLACEHOLDER,
-		);
+		redacted = redacted.replaceAll(value, SELF_TEST_REDACTED_PLACEHOLDER);
 	}
 	for (const pattern of HEADER_SHAPED_SECRETS) {
 		redacted = redacted.replace(

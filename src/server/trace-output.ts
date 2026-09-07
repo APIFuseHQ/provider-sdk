@@ -1,5 +1,12 @@
 import { isSensitiveFixtureKey, REDACTED_FIXTURE_VALUE } from "../fixture-sanitization.js";
 import {
+	type DiagnosticRedactor,
+	redactedKeyAllocator,
+	isRedactedKey,
+	REDACTION_FAILED,
+	redactDiagnosticText,
+} from "../runtime/diagnostic-redactor.js";
+import {
 	OTEL_EXPORTER_OTLP_ENDPOINT,
 	OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
 	type OTLPExportOptions,
@@ -21,6 +28,16 @@ import {
 import type { TraceConfig } from "../types.js";
 
 type EnvLike = Record<string, string | undefined>;
+
+const TRACE_RESOURCE_ATTRIBUTE_SANITIZER = Symbol.for(
+	"@apifuse/provider-sdk/runtime/trace-resource-attribute-sanitizer",
+);
+
+type ResourceAttributesWithSanitizer = Record<string, string> & {
+	[TRACE_RESOURCE_ATTRIBUTE_SANITIZER]?: (
+		attributes: Record<string, string>,
+	) => Record<string, string>;
+};
 
 // Warn once per environment object: process.env in production, each injected env in tests.
 const warnedEnvironments = new WeakSet<EnvLike>();
@@ -73,22 +90,52 @@ function resolveServerOTLPExportOptions(
 function resolveExportResourceAttributes(
 	requestAttributes: Record<string, string>,
 	env: EnvLike,
-): Record<string, string> {
+	redact?: DiagnosticRedactor,
+): {
+	attributes: Record<string, string>;
+	sanitize: (attributes: Record<string, string>) => Record<string, string>;
+} {
 	const resolution = resolveOTLPResourceAttributes({}, env);
 	warnDiscardedResourceAttributes(env, resolution);
-	const operatorAttributes = Object.fromEntries(
-		Object.entries(resolution.attributes).map(([key, value]) => [
-			sanitizeSpanNameForOutput(key),
-			isSensitiveFixtureKey(key) ? REDACTED_FIXTURE_VALUE : sanitizeSpanNameForOutput(value),
-		]),
-	);
-	const sanitizedRequestAttributes = Object.fromEntries(
-		Object.entries(sanitizeTraceAttributes(requestAttributes)).map(([key, value]) => [
-			key,
-			String(value),
-		]),
-	);
-	return { ...operatorAttributes, ...sanitizedRequestAttributes };
+	const operatorAttributes = resolution.attributes;
+	const requestKeys = new Set(Object.keys(requestAttributes));
+	return {
+		// Keep the raw snapshot private until export. A credential registered after
+		// trace creation must be matched before any key or value is bounded.
+		attributes: { ...operatorAttributes, ...requestAttributes },
+		sanitize(attributes) {
+			const nextKey = redactedKeyAllocator(Object.keys(attributes));
+			const sanitizedOperatorAttributes: Record<string, string> = {};
+			const rawRequestAttributes: Record<string, string> = {};
+			for (const [key, value] of Object.entries(attributes)) {
+				const unchangedOperatorValue = !requestKeys.has(key) && operatorAttributes[key] === value;
+				if (unchangedOperatorValue) {
+					const redactedKey = isRedactedKey(key) ? key : redactDiagnosticText(key, redact);
+					const keyChanged = redactedKey !== key;
+					const sanitizedKey = keyChanged ? nextKey() : sanitizeSpanNameForOutput(key);
+					sanitizedOperatorAttributes[sanitizedKey] = keyChanged
+						? redactedKey === REDACTION_FAILED
+							? REDACTION_FAILED
+							: REDACTED_FIXTURE_VALUE
+						: isSensitiveFixtureKey(key)
+							? REDACTED_FIXTURE_VALUE
+							: sanitizeSpanNameForOutput(value, redact);
+				} else {
+					rawRequestAttributes[key] = value;
+				}
+			}
+			const sanitizedRequestAttributes = Object.fromEntries(
+				Object.entries(
+					sanitizeTraceAttributes(
+						rawRequestAttributes,
+						redact,
+						Object.keys(sanitizedOperatorAttributes),
+					),
+				).map(([key, value]) => [key, String(value)]),
+			);
+			return { ...sanitizedOperatorAttributes, ...sanitizedRequestAttributes };
+		},
+	};
 }
 
 /** Server-only trace output policy. Shared programmatic trace callers stay in-memory. */
@@ -96,12 +143,14 @@ export function resolveServerTraceContextOptions(
 	config: TraceConfig,
 	resourceAttributes: Record<string, string>,
 	env: EnvLike = process.env,
+	redact?: DiagnosticRedactor,
 ): CreateTraceContextOptions {
 	const resolved = resolveTraceContextOptions(config);
 	const outputEnabled = config.enabled !== false && config.exporter !== "none";
 	const consoleHook =
 		outputEnabled && (config.exporter === "console" || config.exporter === "json")
-			? (span: Span) => console.log(JSON.stringify(sanitizeSpanForOutput(span, resourceAttributes)))
+			? (span: Span) =>
+					console.log(JSON.stringify(sanitizeSpanForOutput(span, resourceAttributes, redact)))
 			: undefined;
 	const onSpan =
 		consoleHook && resolved.onSpan
@@ -114,15 +163,26 @@ export function resolveServerTraceContextOptions(
 		outputEnabled && config.exporter === "otlp"
 			? resolveServerOTLPExportOptions(config, env)
 			: undefined;
+	const exportResources = exportOptions
+		? resolveExportResourceAttributes(resourceAttributes, env, redact)
+		: undefined;
+	if (exportResources) {
+		Object.defineProperty(
+			exportResources.attributes as ResourceAttributesWithSanitizer,
+			TRACE_RESOURCE_ATTRIBUTE_SANITIZER,
+			{ value: exportResources.sanitize },
+		);
+	}
 
 	return {
 		maxSpans: resolved.maxSpans,
 		onSpan,
+		...(redact ? { redact } : {}),
 		...(exportOptions
 			? {
 					exportOptions,
-					resourceAttributes: resolveExportResourceAttributes(resourceAttributes, env),
-					sanitizeSpanForExport: (span: Span) => sanitizeSpanForOutput(span),
+					resourceAttributes: exportResources?.attributes,
+					sanitizeSpanForExport: (span: Span) => sanitizeSpanForOutput(span, undefined, redact),
 				}
 			: {}),
 	};

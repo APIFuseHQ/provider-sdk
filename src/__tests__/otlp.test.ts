@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { AsyncLocalStorage } from "node:async_hooks";
+import { withDiagnosticFallbackScope } from "../runtime/diagnostic-redactor.js";
 
 import {
 	exportSpansOTLP,
@@ -11,13 +12,19 @@ import {
 	OTEL_SERVICE_NAME,
 	OTLP_EXPORT_LIMITS,
 	resetOTLPExportForTests,
-	resolveOTLPExportOptions,
+	resolveOTLPExportOptions as resolveOptions,
 	resolveOTLPResourceAttributes,
 	retryDelayMs,
 	spansToOTLP,
 	swapOTLPTransportForTests,
 } from "../runtime/otlp.js";
 import type { TraceSpan } from "../types.js";
+
+// Each synthetic configuration has an independent runtime lifetime. Resolving
+// these fixtures must not register their header values in unrelated server apps.
+function resolveOTLPExportOptions(...args: Parameters<typeof resolveOptions>) {
+	return withDiagnosticFallbackScope(() => resolveOptions(...args));
+}
 
 type TransportCall = { url: string; init?: RequestInit };
 

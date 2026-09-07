@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { createHash, randomBytes } from "node:crypto";
 
 import type { ProviderProxyPolicy } from "../types.js";
@@ -43,11 +44,11 @@ export function hasNodemavenCredentials(): boolean {
 }
 
 function readNodemavenUsername(): string | undefined {
-	return process.env[NODEMAVEN_USERNAME_ENV]?.trim() || undefined;
+	return readDiagnosticEnv(NODEMAVEN_USERNAME_ENV)?.trim() || undefined;
 }
 
 function readNodemavenPassword(): string | undefined {
-	return process.env[NODEMAVEN_PASSWORD_ENV]?.trim() || undefined;
+	return readDiagnosticEnv(NODEMAVEN_PASSWORD_ENV)?.trim() || undefined;
 }
 
 function resolveNodemavenFilter(value: string | undefined): string {

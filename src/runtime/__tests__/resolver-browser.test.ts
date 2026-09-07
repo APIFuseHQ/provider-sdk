@@ -1,9 +1,6 @@
 import { describe, expect, it } from "bun:test";
 
-import {
-	createBrowserClientDouble,
-	createBrowserPageDouble,
-} from "../../__tests__/test-utils.js";
+import { createBrowserClientDouble, createBrowserPageDouble } from "../../__tests__/test-utils.js";
 import { ProviderError } from "../../errors.js";
 import type {
 	BrowserCookie,
@@ -15,6 +12,11 @@ import type {
 } from "../../types.js";
 import { createBrowserClient } from "../browser.js";
 import { createProviderCache } from "../cache.js";
+import {
+	createDiagnosticRedactor,
+	REDACTION_FAILED,
+	redactDiagnosticText,
+} from "../diagnostic-redactor.js";
 import {
 	APIFUSE__CDP_POOL__URL,
 	createResolverClient,
@@ -260,9 +262,7 @@ describe("browser resolver vendor", () => {
 			),
 		).toEqual({ userAgent: "Measured Chromium" });
 		expect(stub.state.gotoUrls).toEqual([AWS_CHALLENGE.pageUrl]);
-		expect(stub.state.gotoOptions).toEqual([
-			{ timeout: 100, waitUntil: "domcontentloaded" },
-		]);
+		expect(stub.state.gotoOptions).toEqual([{ timeout: 100, waitUntil: "domcontentloaded" }]);
 		expect(stub.state.pageOperations).toEqual(["evaluate-user-agent", "goto"]);
 		expect(stub.state.contextCloseCalls).toBe(1);
 	});
@@ -851,9 +851,7 @@ describe("browser resolver vendor", () => {
 		const redirectedUrl = "https://www.example.com/protected";
 		const stub = createBrowserStub({
 			blockedRequestUrl: redirectedUrl,
-			gotoError: new Error(
-				`page.goto: net::ERR_BLOCKED_BY_CLIENT at ${AWS_CHALLENGE.pageUrl}`,
-			),
+			gotoError: new Error(`page.goto: net::ERR_BLOCKED_BY_CLIENT at ${AWS_CHALLENGE.pageUrl}`),
 		});
 
 		const error = await createAdapter(stub)
@@ -914,9 +912,105 @@ describe("browser resolver vendor", () => {
 				challenge_kind: "aws_waf",
 				operation: "client.close",
 				error_message: cleanupError.message,
-				error_stack: expect.stringContaining(cleanupError.message),
 			},
 		});
+		expect(trace.getSpans()[0]?.attributes.error_stack).toBeUndefined();
+	});
+
+	it.each([
+		"normal",
+		"throw",
+		"undefined",
+		"boxed",
+		"object",
+		"identity",
+		"second",
+		"late",
+	] as const)("redacts cleanup diagnostics without a stack; redactor=%s", async (mode) => {
+		const secret = "hrfcokey1234";
+		const stub = createBrowserStub({
+			closeError: new Error(`CDP cleanup ${secret} failed`),
+			cookieJars: [[{ ...COOKIE_BASE, name: "aws-waf-token", value: "successful-token" }]],
+		});
+		const registry = createDiagnosticRedactor([secret]);
+		const knownGood = registry.redact;
+		let calls = 0;
+		const invalid = { redact: (text: string) => text };
+		Object.defineProperty(invalid, "redact", {
+			value: (text: string) => {
+				calls += 1;
+				if (mode === "throw") throw new Error(secret);
+				if (mode === "undefined") return undefined;
+				if (mode === "boxed") return new String(text);
+				if (mode === "object") return { text };
+				if (mode === "identity") return text;
+				if (mode === "second" && calls === 2) throw new Error(secret);
+				return knownGood(text);
+			},
+		});
+		registry.redact = invalid.redact;
+		const trace = createTraceContext({
+			redact: (text) => redactDiagnosticText(text, registry.redact),
+		});
+		if (mode === "late")
+			registry.redact = () => {
+				throw new Error(secret);
+			};
+		const recorder = getTraceRecorder(trace);
+		if (!recorder) throw new Error("trace recorder missing");
+		const result = await createAdapter(stub).solve(
+			AWS_CHALLENGE,
+			undefined,
+			new AbortController().signal,
+			recorder,
+		);
+		expect(result.cookies).toEqual({ "aws-waf-token": "successful-token" });
+		const span = trace.getSpans()[0];
+		expect(span?.attributes.error_stack).toBeUndefined();
+		expect(Object.keys(span?.attributes ?? {})).toHaveLength(5);
+		if (mode === "normal") {
+			expect(span).toMatchObject({
+				name: "resolver.vendor.cleanup",
+				error: "CDP cleanup [REDACTED] failed",
+				attributes: {
+					vendor: "browser",
+					challenge_kind: "aws_waf",
+					operation: "client.close",
+					error_message: "CDP cleanup [REDACTED] failed",
+				},
+			});
+		} else if (mode === "identity") {
+			expect(span).toMatchObject({
+				name: "resolver.vendor.cleanup",
+				error: REDACTION_FAILED,
+				attributes: {
+					vendor: "browser",
+					challenge_kind: "aws_waf",
+					operation: "client.close",
+					error_message: REDACTION_FAILED,
+				},
+			});
+		} else if (mode === "second") {
+			expect(span).toMatchObject({
+				name: "resolver.vendor.cleanup",
+				error: "CDP cleanup [REDACTED] failed",
+				attributes: {
+					"[REDACTED#1]": REDACTION_FAILED,
+					challenge_kind: "aws_waf",
+					operation: "client.close",
+					error_message: "CDP cleanup [REDACTED] failed",
+				},
+			});
+		} else {
+			expect(span).toMatchObject({
+				name: REDACTION_FAILED,
+				error: REDACTION_FAILED,
+				attributes: Object.fromEntries(
+					[1, 2, 3, 4, 5].map((index) => [`[REDACTED#${index}]`, REDACTION_FAILED]),
+				),
+			});
+		}
+		expect(JSON.stringify(trace.getSpans())).not.toContain(secret);
 	});
 
 	it("records cleanup failure without masking the solve-time error", async () => {

@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { ProviderError, TransportError } from "../errors.js";
 import type {
 	OcrCaptchaCandidate,
@@ -96,7 +97,7 @@ export function createUnsupportedOcrClient(reason?: string): OcrContext {
 }
 
 function normalizedEnvValue(env: EnvLike, key: string): string | undefined {
-	const value = env[key]?.trim();
+	const value = readDiagnosticEnv(key, env)?.trim();
 	return value ? value : undefined;
 }
 

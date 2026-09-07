@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { createHash } from "node:crypto";
 
 import {
@@ -309,12 +310,12 @@ type ResolverChainEntry = {
 };
 
 function normalizedEnvValue(env: EnvLike, key: string): string | undefined {
-	const value = env[key]?.trim();
+	const value = readDiagnosticEnv(key, env)?.trim();
 	return value ? value : undefined;
 }
 
 function readPositiveIntegerEnv(env: EnvLike, name: string): string | undefined {
-	const raw = env[name]?.trim();
+	const raw = readDiagnosticEnv(name, env)?.trim();
 	if (!raw) return undefined;
 	if (!/^[1-9]\d*$/.test(raw)) {
 		throw new Error(`${name} must be a positive integer`);
