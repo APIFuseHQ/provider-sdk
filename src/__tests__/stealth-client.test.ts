@@ -3077,6 +3077,62 @@ describe("Chrome 149 header parity", () => {
 		expect(h2Names).toContain("priority");
 	});
 
+	it("omits Sec-Fetch-User from script-driven navigations on h2 and h1", async () => {
+		mockStealthState.queuedResponses.push(
+			{ status: 200, body: "h2", headers: {} },
+			{ status: 200, body: "h1", headers: {} },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/", {
+			stealth: { requestClass: "navigation", userActivation: false },
+		});
+		await createStealthClient("http://example.com").fetch("/", {
+			stealth: { requestClass: "navigation", userActivation: false },
+			headers: { Cookie: "probe_sid=abc123" },
+		});
+		const h2Init = mockStealthState.clients[0]?.calls[0]?.init;
+		expect((h2Init?.headers as [string, string][]).map(([name]) => name)).toEqual(
+			realChromeOrder(chromeGroundTruth.document_navigation_cold.order)
+				.slice(4)
+				.filter((name) => name !== "sec-fetch-user"),
+		);
+		expect(requestHeader(h2Init, "sec-fetch-mode")).toBe("navigate");
+		expect(requestHeader(h2Init, "sec-fetch-dest")).toBe("document");
+		expect(requestHeader(h2Init, "upgrade-insecure-requests")).toBe("1");
+		const defaults = mockStealthState.clients[0]?.options?.defaultHeaders as [string, string][];
+		expect(requestHeader({ headers: defaults }, "sec-fetch-user")).toBeUndefined();
+		const h1Names = (
+			mockStealthState.clients[1]?.calls[0]?.init?.headers as [string, string][]
+		).map(([name]) => name);
+		expect(h1Names).toEqual(
+			realChromeOrder(h1CasingCapture.chrome_navigation.names).filter(
+				(name) => name !== "Sec-Fetch-User",
+			),
+		);
+	});
+
+	it("carries userActivation across redirect hops", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 302,
+				body: "",
+				headers: { location: "https://example.com/landing" },
+				url: "https://example.com/start",
+			},
+			{ status: 200, body: "landed", headers: {}, url: "https://example.com/landing" },
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		await createStealthClient("https://example.com").fetch("/start", {
+			stealth: { requestClass: "navigation", userActivation: false },
+		});
+		const calls = allWreqCalls();
+		expect(calls).toHaveLength(2);
+		for (const call of calls) {
+			expect(requestHeader(call.init, "sec-fetch-mode")).toBe("navigate");
+			expect(requestHeader(call.init, "sec-fetch-user")).toBeUndefined();
+		}
+	});
+
 	const overridePositionCases = [
 		{
 			capture: honouredOverrides.get("accept"),

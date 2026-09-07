@@ -3617,6 +3617,7 @@ interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "h
     redirect?: "follow" | "manual" | "error";
     stealth?: StealthProfileSelection & {
         requestClass?: "navigation" | "xhr" | "post";
+        userActivation?: boolean;
         insecureSkipVerify?: boolean;
     };
     throwOnHttpError?: boolean;
@@ -3950,30 +3951,30 @@ interface VerificationCodeExtractionResult {
 // dist/types.d.ts:886:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point contract.d.ts
 // dist/types.d.ts:891:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point contract.d.ts
 // dist/types.d.ts:950:9 - (ae-forgotten-export) The symbol "ProviderSupportLevel" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1246:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1246:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1447:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1448:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1553:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1559:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1560:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1564:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1571:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1606:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1674:5 - (ae-forgotten-export) The symbol "ProviderChoiceConsumeResult" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1686:5 - (ae-forgotten-export) The symbol "ProviderStateDurationString" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1730:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1788:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1796:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1797:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1806:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1957:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1972:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1978:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1984:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1986:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:1994:5 - (ae-forgotten-export) The symbol "ProviderChoiceContext" needs to be exported by the entry point contract.d.ts
-// dist/types.d.ts:2081:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1253:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1253:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1454:9 - (ae-forgotten-export) The symbol "NativeTcpEgressRule" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1455:9 - (ae-forgotten-export) The symbol "NativeTcpDynamicEgressRule" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1560:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1566:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1567:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1571:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1578:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1613:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1681:5 - (ae-forgotten-export) The symbol "ProviderChoiceConsumeResult" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1693:5 - (ae-forgotten-export) The symbol "ProviderStateDurationString" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1737:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1795:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1803:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1804:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1813:9 - (ae-forgotten-export) The symbol "ProviderLocaleKeyInput" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1964:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1979:5 - (ae-forgotten-export) The symbol "ProviderFilesContext" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1985:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1991:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:1993:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:2001:5 - (ae-forgotten-export) The symbol "ProviderChoiceContext" needs to be exported by the entry point contract.d.ts
+// dist/types.d.ts:2088:9 - (ae-forgotten-export) The symbol "ProviderProxyPolicy" needs to be exported by the entry point contract.d.ts
 
 // (No @packageDocumentation comment for this package)
 

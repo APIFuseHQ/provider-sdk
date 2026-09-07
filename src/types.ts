@@ -1341,6 +1341,13 @@ export interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolic
 		 */
 		requestClass?: "navigation" | "xhr" | "post";
 		/**
+		 * Whether a `navigation` request carries a user gesture and therefore
+		 * `Sec-Fetch-User: ?1` (default `true`). Set `false` for script-driven
+		 * navigations such as `location.replace`, which Chrome sends without it.
+		 * Ignored for the `xhr` and `post` request classes.
+		 */
+		userActivation?: boolean;
+		/**
 		 * Use only for proxy products that terminate CONNECT with a private CA
 		 * instead of tunneling the origin certificate chain.
 		 */
