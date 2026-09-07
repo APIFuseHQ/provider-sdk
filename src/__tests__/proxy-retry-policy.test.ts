@@ -70,7 +70,7 @@ describe("proxy transport retry policy", () => {
 	it("classifies automatic challenge refetches with the shared safe-request policy", () => {
 		const policy = {
 			...createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
-			methods: ["GET", "HEAD"],
+			methods: ["GET"],
 		};
 		const cases = [
 			{ method: "GET", expected: true },
@@ -84,7 +84,7 @@ describe("proxy transport retry policy", () => {
 				request: { headers: { Cookie: "session=test" } },
 				expected: false,
 			},
-			{ method: "HEAD", expected: true },
+			{ method: "HEAD", expected: false },
 			{ method: "POST", expected: false },
 			{ method: "PUT", expected: false },
 			{ method: "DELETE", expected: false },

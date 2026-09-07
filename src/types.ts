@@ -1391,7 +1391,18 @@ export type StealthResponse = DeclarativeStealthResponse;
 
 export type StealthChallengeClassification = {
 	readonly challenge: Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>;
-	readonly outcome: "resolver_unavailable" | "replay_required" | "challenge_persisted";
+	/**
+	 * `resolver_unavailable`: detect-only provider or no solver configured.
+	 * `replay_required`: the request is not a plain GET, so it is never solved or replayed
+	 * automatically. `solve_failed`: a concurrent request on the same session owned the
+	 * solve and it rejected (that owner receives the error). `challenge_persisted`: the
+	 * single refetch after a solve was challenged again.
+	 */
+	readonly outcome:
+		| "resolver_unavailable"
+		| "replay_required"
+		| "solve_failed"
+		| "challenge_persisted";
 };
 
 export type RequestWithMethodOptions = RequestOptions & {

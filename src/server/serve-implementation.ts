@@ -95,6 +95,7 @@ import {
 	createUnsupportedProviderRuntimeState,
 } from "../runtime/state.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
+import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import {
@@ -584,7 +585,7 @@ function createStealthChallengeDetection(
 	cache: ReturnType<typeof createProviderCache>,
 	identityScope: string,
 	signal: AbortSignal | undefined,
-): NonNullable<StealthRuntimeModule.StealthClientOptions["stealth"]>["challengeRuntime"] {
+): StealthChallengeRuntime | undefined {
 	const resolverDeclared = provider.resolver?.kinds.some((kind) => kind === "akamai_sbsd") === true;
 	const detectOnly = provider.stealth?.challengeDetection?.akamaiSbsd === true;
 	if (!resolverDeclared && !detectOnly) {

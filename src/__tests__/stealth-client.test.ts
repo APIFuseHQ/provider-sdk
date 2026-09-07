@@ -13,7 +13,8 @@ import {
 	TransportError,
 } from "../errors.js";
 import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
-import { normalizeResponse } from "../runtime/stealth.js";
+import { normalizeResponse, type StealthClientOptions } from "../runtime/stealth.js";
+import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
 import {
 	type DeclarativeStealthResponse,
 	HttpRetryUnsafeMethodPolicy,
@@ -258,6 +259,15 @@ function mockEmulationHeaders(profile: string, os = "macos") {
 	]);
 }
 
+/** Attaches the server-owned challenge wiring the way createServerApp does. */
+function sbsdClientOptions(
+	options: StealthClientOptions & {
+		stealth?: StealthClientOptions["stealth"] & { challengeRuntime?: StealthChallengeRuntime };
+	},
+): StealthClientOptions {
+	return options;
+}
+
 function sbsdInterstitial(scriptUrl: string): string {
 	return `<!doctype html><div id="sec-bc-tile-container">fixture challenge</div><script src="${scriptUrl}"></script>`;
 }
@@ -307,8 +317,7 @@ function installHyperPayloadFetch(): Array<{ url: string; init?: RequestInit }> 
 	const directCalls: Array<{ url: string; init?: RequestInit }> = [];
 	globalThis.fetch = Object.assign(
 		async (input: string | URL | Request, init?: RequestInit) => {
-			const url =
-				typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
 			directCalls.push({ url, init });
 			if (url !== HYPER_SBSD_URL) throw new Error(`direct egress reached ${url}`);
 			return Response.json({ payload: "fixture-payload" });
@@ -3365,13 +3374,13 @@ describe("Chrome 149 header parity", () => {
 			},
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const clientOptions = {
+		const clientOptions = sbsdClientOptions({
 			stealth: {
 				browser: "safari",
 				os: "macos",
 				challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
 			},
-		} as const;
+		});
 
 		const hard = await createStealthClient("https://example.com", clientOptions).fetch("/hard");
 		const hardRaw = await createStealthClient("https://example.com", clientOptions).fetch(
@@ -3422,11 +3431,14 @@ describe("Chrome 149 header parity", () => {
 			url: "https://example.com/forbidden",
 		});
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const response = await createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
-			},
-		}).fetch("/forbidden", { throwOnHttpError: false });
+		const response = await createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		).fetch("/forbidden", { throwOnHttpError: false });
 
 		expect(response.status).toBe(403);
 		expect(response.challenge).toBeUndefined();
@@ -3441,15 +3453,61 @@ describe("Chrome 149 header parity", () => {
 			url: "https://example.com/ordinary",
 		});
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const response = await createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
-			},
-		}).fetch("/ordinary");
+		const response = await createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		).fetch("/ordinary");
 
 		expect(response.body).toBe('{"items":["ordinary fixture"]}');
 		expect(response.challenge).toBeUndefined();
 		expect(allWreqCalls()).toHaveLength(1);
+	});
+
+	it("ignores cache-busted bundles that are not served from /.well-known/sbsd", async () => {
+		mockStealthState.queuedResponses.push(
+			{
+				status: 200,
+				body: '<!doctype html><script src="/static/app.js?v=abc123"></script>',
+				headers: { "set-cookie": "sbsd_o=bundle-state; Path=/; Secure" },
+				url: "https://example.com/bootstrap",
+			},
+			{
+				status: 403,
+				body: sbsdInterstitial("/assets/vendor.js?v=hard-uuid&amp;t=hard-token"),
+				headers: {},
+				url: "https://example.com/hard",
+			},
+			{
+				status: 429,
+				body: '{"cpr_chlge":"true","t":"later-token"}',
+				headers: { "content-type": "application/json" },
+				url: "https://example.com/apis/bff/latest",
+			},
+		);
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		).createSession();
+
+		const bootstrap = await session.fetch("/bootstrap");
+		const hard = await session.fetch("/hard", { throwOnHttpError: false });
+		const later = await session.fetch("/apis/bff/latest", { throwOnHttpError: false });
+
+		expect(bootstrap.challenge).toBeUndefined();
+		expect(hard.status).toBe(403);
+		expect(hard.challenge).toBeUndefined();
+		expect(later.status).toBe(429);
+		expect(later.challenge).toBeUndefined();
+		expect(allWreqCalls()).toHaveLength(3);
 	});
 
 	it("remembers a v-only script and applies a later cpr_chlge token as index zero", async () => {
@@ -3501,22 +3559,25 @@ describe("Chrome 149 header parity", () => {
 			allowedHosts: ["example.com"],
 		});
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", {
-			stealth: {
-				browser: "safari",
-				os: "macos",
-				challengeRuntime: {
-					akamaiSbsd: {
-						allowedHosts: ["example.com"],
-						clientProfile: "safari17_0",
-						async solve(challenge, transport, signal) {
-							observedChallenge = challenge;
-							return adapter.solve(challenge, undefined, signal, undefined, transport);
+		const client = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					browser: "safari",
+					os: "macos",
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							clientProfile: "safari17_0",
+							async solve(challenge, transport, signal) {
+								observedChallenge = challenge;
+								return adapter.solve(challenge, undefined, signal, undefined, transport);
+							},
 						},
 					},
 				},
-			},
-		});
+			}),
+		);
 
 		const bootstrap = await client.fetch("/bootstrap");
 		const result = await client.fetch("/apis/bff/home/shortcuts");
@@ -3560,11 +3621,14 @@ describe("Chrome 149 header parity", () => {
 			},
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
-			},
-		});
+		const client = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		);
 		const sessionA = client.createSession();
 		const sessionB = client.createSession();
 
@@ -3601,11 +3665,14 @@ describe("Chrome 149 header parity", () => {
 			},
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const session = createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
-			},
-		}).createSession();
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		).createSession();
 
 		const bootstrap = await session.fetch("/bootstrap");
 		const hard = await session.fetch("/hard", { throwOnHttpError: false });
@@ -3635,11 +3702,14 @@ describe("Chrome 149 header parity", () => {
 			url: "https://example.com/apis/bff/orphan",
 		});
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const response = await createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
-			},
-		}).fetch("/apis/bff/orphan", { throwOnHttpError: false });
+		const response = await createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		).fetch("/apis/bff/orphan", { throwOnHttpError: false });
 
 		expect(response.status).toBe(429);
 		expect(response.challenge).toBeUndefined();
@@ -3662,11 +3732,14 @@ describe("Chrome 149 header parity", () => {
 			},
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
-			},
-		});
+		const client = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: { akamaiSbsd: { allowedHosts: ["example.com"] } },
+				},
+			}),
+		);
 
 		const bootstrap = await client.fetch("/bootstrap");
 		expect(bootstrap.challenge).toBeUndefined();
@@ -3701,40 +3774,43 @@ describe("Chrome 149 header parity", () => {
 			"../runtime/proxy-nodemaven.js"
 		);
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const response = await createStealthClient("https://example.com", {
-			upstream: {
-				proxy: {
-					mode: "required",
-					providers: ["nodemaven"],
-					session: { affinity: "connection" },
+		const response = await createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["nodemaven"],
+						session: { affinity: "connection" },
+					},
 				},
-			},
-			affinityKey: "fixture-lease-id",
-			engineCredentials: {
-				[NODEMAVEN_USERNAME_ENV]: "fixture-account",
-				[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
-			},
-			telemetry: {
-				recordProxyResolution: (event) => resolutions.push(event),
-			},
-			stealth: {
-				browser: "safari",
-				os: "macos",
-				acceptLanguage: "ja-JP,ja;q=0.9",
-				challengeRuntime: {
-					akamaiSbsd: {
-						allowedHosts: ["example.com"],
-						clientProfile: "safari17_0",
-						async solve(challenge, transport, signal) {
-							solves += 1;
-							expect(transport.getCookie?.("sbsd_o", challenge.pageUrl)).toBe("initial-state");
-							expect(transport.sessionHeaders?.["Accept-Language"]).toBe("ja-JP,ja;q=0.9");
-							return adapter.solve(challenge, undefined, signal, undefined, transport);
+				affinityKey: "fixture-lease-id",
+				engineCredentials: {
+					[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+					[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+				},
+				telemetry: {
+					recordProxyResolution: (event) => resolutions.push(event),
+				},
+				stealth: {
+					browser: "safari",
+					os: "macos",
+					acceptLanguage: "ja-JP,ja;q=0.9",
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							clientProfile: "safari17_0",
+							async solve(challenge, transport, signal) {
+								solves += 1;
+								expect(transport.getCookie?.("sbsd_o", challenge.pageUrl)).toBe("initial-state");
+								expect(transport.sessionHeaders?.["Accept-Language"]).toBe("ja-JP,ja;q=0.9");
+								return adapter.solve(challenge, undefined, signal, undefined, transport);
+							},
 						},
 					},
 				},
-			},
-		}).fetch("/protected");
+			}),
+		).fetch("/protected");
 
 		expect(response).toMatchObject({ status: 200, body: "protected fixture" });
 		expect(response.challenge).toBeUndefined();
@@ -3768,19 +3844,22 @@ describe("Chrome 149 header parity", () => {
 			allowedHosts: ["example.com"],
 		});
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const response = await createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: {
-					akamaiSbsd: {
-						allowedHosts: ["example.com"],
-						async solve(challenge, transport, signal) {
-							solves += 1;
-							return adapter.solve(challenge, undefined, signal, undefined, transport);
+		const response = await createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve(challenge, transport, signal) {
+								solves += 1;
+								return adapter.solve(challenge, undefined, signal, undefined, transport);
+							},
 						},
 					},
 				},
-			},
-		}).fetch("/protected");
+			}),
+		).fetch("/protected");
 
 		expect(response.challenge?.outcome).toBe("challenge_persisted");
 		expect(response.body).toContain("second-uuid");
@@ -3817,27 +3896,30 @@ describe("Chrome 149 header parity", () => {
 		});
 		let solves = 0;
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const session = createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: {
-					akamaiSbsd: {
-						allowedHosts: ["example.com"],
-						async solve() {
-							solves += 1;
-							markSolveStarted();
-							await solveReleased;
-							return {
-								form: "cookie_state",
-								kind: "akamai_sbsd",
-								outcome: "payload_accepted",
-								verified: false,
-								stateCookieName: "sbsd_o",
-							} as const;
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								markSolveStarted();
+								await solveReleased;
+								return {
+									form: "cookie_state",
+									kind: "akamai_sbsd",
+									outcome: "payload_accepted",
+									verified: false,
+									stateCookieName: "sbsd_o",
+								} as const;
+							},
 						},
 					},
 				},
-			},
-		}).createSession();
+			}),
+		).createSession();
 
 		const first = session.fetch("/first");
 		await solveStarted;
@@ -3879,23 +3961,26 @@ describe("Chrome 149 header parity", () => {
 		});
 		let solves = 0;
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const session = createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: {
-					akamaiSbsd: {
-						allowedHosts: ["example.com"],
-						async solve() {
-							solves += 1;
-							markSolveStarted();
-							await failureReleased;
-							throw new SDKError("fixture shared solve failure", {
-								code: "FIXTURE_SHARED_SOLVE_FAILED",
-							});
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								markSolveStarted();
+								await failureReleased;
+								throw new SDKError("fixture shared solve failure", {
+									code: "FIXTURE_SHARED_SOLVE_FAILED",
+								});
+							},
 						},
 					},
 				},
-			},
-		}).createSession();
+			}),
+		).createSession();
 
 		const owner = session.fetch("/failure-owner");
 		await solveStarted;
@@ -3910,7 +3995,7 @@ describe("Chrome 149 header parity", () => {
 		expect(ownerOutcome.reason).toMatchObject({ code: "FIXTURE_SHARED_SOLVE_FAILED" });
 		expect(waiterOutcome.status).toBe("fulfilled");
 		if (waiterOutcome.status !== "fulfilled") throw new Error("waiter must resolve");
-		expect(waiterOutcome.value.challenge?.outcome).toBe("challenge_persisted");
+		expect(waiterOutcome.value.challenge?.outcome).toBe("solve_failed");
 		expect(allWreqCalls()).toHaveLength(2);
 	});
 
@@ -3932,24 +4017,27 @@ describe("Chrome 149 header parity", () => {
 		);
 		let solves = 0;
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const session = createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: {
-					akamaiSbsd: {
-						allowedHosts: ["example.com"],
-						async solve() {
-							solves += 1;
-							if (solves === 1) {
-								throw new SDKError("fixture first epoch failure", {
-									code: "FIXTURE_FIRST_EPOCH_FAILED",
-								});
-							}
-							return fixtureSbsdCookieSolution();
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								if (solves === 1) {
+									throw new SDKError("fixture first epoch failure", {
+										code: "FIXTURE_FIRST_EPOCH_FAILED",
+									});
+								}
+								return fixtureSbsdCookieSolution();
+							},
 						},
 					},
 				},
-			},
-		}).createSession();
+			}),
+		).createSession();
 
 		await expect(session.fetch("/retry-epoch")).rejects.toMatchObject({
 			code: "FIXTURE_FIRST_EPOCH_FAILED",
@@ -4025,29 +4113,32 @@ describe("Chrome 149 header parity", () => {
 		});
 		let solves = 0;
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const session = createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: {
-					akamaiSbsd: {
-						allowedHosts: ["example.com"],
-						async solve(challenge) {
-							solves += 1;
-							const version = new URL(challenge.scriptUrl).searchParams.get("v");
-							if (version === "overlap-a") {
-								markAStarted();
-								await aReleased;
-								throw new SDKError("fixture overlap A failure", {
-									code: "FIXTURE_OVERLAP_A_FAILED",
-								});
-							}
-							markBStarted();
-							await bReleased;
-							return fixtureSbsdCookieSolution();
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve(challenge) {
+								solves += 1;
+								const version = new URL(challenge.scriptUrl).searchParams.get("v");
+								if (version === "overlap-a") {
+									markAStarted();
+									await aReleased;
+									throw new SDKError("fixture overlap A failure", {
+										code: "FIXTURE_OVERLAP_A_FAILED",
+									});
+								}
+								markBStarted();
+								await bReleased;
+								return fixtureSbsdCookieSolution();
+							},
 						},
 					},
 				},
-			},
-		}).createSession();
+			}),
+		).createSession();
 
 		const requestA = session.fetch("/overlap-a");
 		await aStarted;
@@ -4097,21 +4188,24 @@ describe("Chrome 149 header parity", () => {
 		});
 		let solves = 0;
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const client = createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: {
-					akamaiSbsd: {
-						allowedHosts: ["example.com"],
-						async solve() {
-							solves += 1;
-							if (solves === 2) markBothStarted();
-							await solvesReleased;
-							return fixtureSbsdCookieSolution();
+		const client = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								if (solves === 2) markBothStarted();
+								await solvesReleased;
+								return fixtureSbsdCookieSolution();
+							},
 						},
 					},
 				},
-			},
-		});
+			}),
+		);
 		const sessionA = client.createSession();
 		const sessionB = client.createSession();
 
@@ -4126,45 +4220,8 @@ describe("Chrome 149 header parity", () => {
 		expect(allWreqCalls()).toHaveLength(4);
 	});
 
-	it("automatically solves and refetches a plain HEAD", async () => {
-		mockStealthState.queuedResponses.push(
-			{
-				status: 403,
-				body: sbsdInterstitial("/.well-known/sbsd?v=head-uuid&t=head-token"),
-				headers: { "set-cookie": "sbsd_o=head-state; Path=/; Secure" },
-				url: "https://example.com/head",
-			},
-			{ status: 204, body: "", headers: {}, url: "https://example.com/head" },
-		);
-		let solves = 0;
-		const { createStealthClient } = await import("../runtime/stealth.js");
-		const response = await createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: {
-					akamaiSbsd: {
-						allowedHosts: ["example.com"],
-						async solve() {
-							solves += 1;
-							return {
-								form: "cookie_state",
-								kind: "akamai_sbsd",
-								outcome: "payload_accepted",
-								verified: false,
-								stateCookieName: "sbsd_o",
-							} as const;
-						},
-					},
-				},
-			},
-		}).fetch("/head", { method: "HEAD" });
-
-		expect(response.status).toBe(204);
-		expect(response.challenge).toBeUndefined();
-		expect(solves).toBe(1);
-		expect(allWreqCalls()).toHaveLength(2);
-	});
-
 	const unsafeSbsdRequests: Array<{ name: string; options: StealthFetchOptions }> = [
+		{ name: "HEAD", options: { method: "HEAD" } },
 		{ name: "POST without a body", options: { method: "POST" } },
 		{ name: "POST with a body", options: { method: "POST", body: '{"fixture":true}' } },
 		{ name: "PUT", options: { method: "PUT" } },
@@ -4191,19 +4248,22 @@ describe("Chrome 149 header parity", () => {
 		});
 		let solves = 0;
 		const { createStealthClient } = await import("../runtime/stealth.js");
-		const response = await createStealthClient("https://example.com", {
-			stealth: {
-				challengeRuntime: {
-					akamaiSbsd: {
-						allowedHosts: ["example.com"],
-						async solve() {
-							solves += 1;
-							throw new Error("unsafe solve must not run");
+		const response = await createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve() {
+								solves += 1;
+								throw new Error("unsafe solve must not run");
+							},
 						},
 					},
 				},
-			},
-		}).fetch("/protected", options);
+			}),
+		).fetch("/protected", options);
 
 		expect(response.challenge?.outcome).toBe("replay_required");
 		expect(solves).toBe(0);

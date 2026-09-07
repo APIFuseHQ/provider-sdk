@@ -23,12 +23,11 @@ import {
 	DEFAULT_STEALTH_BROWSER,
 	DEFAULT_STEALTH_OS,
 	getStealthProfile,
+	resolverClientProfileFamily,
 	resolveStealthProfileSelection,
 } from "../stealth/profiles.js";
 import type {
-	ChallengeSolution,
 	HttpMethod,
-	ProviderChallenge,
 	StealthClient,
 	StealthFetchOptions,
 	StealthProfileDescriptor,
@@ -78,6 +77,12 @@ import {
 	serializeRequestUrl,
 } from "./request-options.js";
 import type { ResolverVendorTransport } from "./resolver-vendors/types.js";
+import {
+	type AkamaiSbsdSessionState,
+	akamaiSbsdChallengeKey,
+	detectAkamaiSbsdChallenge,
+	type StealthChallengeRuntime,
+} from "./stealth-akamai-sbsd.js";
 import { StealthCookieJar } from "./stealth-cookies.js";
 
 export const DEFAULT_STEALTH_PROFILE: StealthProfileDescriptor = Object.freeze({
@@ -127,19 +132,6 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 		 * which case it is placed like any other caller header.
 		 */
 		acceptLanguage?: string;
-		/** @internal SDK-owned response detection/solve wiring, derived from the provider declaration. */
-		challengeRuntime?: {
-			readonly akamaiSbsd?: {
-				readonly allowedHosts: readonly string[];
-				/** Resolver-declared transport profile that must match the live native session. */
-				readonly clientProfile?: string;
-				readonly solve?: (
-					challenge: Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>,
-					transport: ResolverVendorTransport,
-					signal: AbortSignal,
-				) => Promise<ChallengeSolution>;
-			};
-		};
 	};
 	/**
 	 * Proxy-only stealth transport overrides. Use only for upstream proxy products
@@ -149,180 +141,25 @@ export type StealthClientOptions = ProxyResolutionOptions & {
 	proxyStealth?: { insecureSkipVerify?: boolean };
 };
 
-type AkamaiSbsdChallenge = Extract<ProviderChallenge, { readonly kind: "akamai_sbsd" }>;
-type AkamaiSbsdSessionState = {
-	/**
-	 * Latest v-only script for this session; Phase 2 deliberately has no wall-clock TTL.
-	 * Challenge-state expiry belongs to the Phase 3 ceremony/solve lease handle
-	 * (ADR-0009 v1.1), not to the stealth session.
-	 */
-	rememberedScript?: URL;
-	transaction?: {
-		readonly key: string;
-		readonly result: Promise<
-			{ readonly solved: true } | { readonly solved: false; error: unknown }
-		>;
+/** Server-attached challenge wiring; kept off the public StealthClientOptions type. */
+type StealthSessionClientOptions = StealthClientOptions & {
+	stealth?: StealthClientOptions["stealth"] & {
+		readonly challengeRuntime?: StealthChallengeRuntime;
 	};
 };
 
-const SBSD_INTERSTITIAL_MAX_BYTES = 4_000;
-const SBSD_SCRIPT_DISCOVERY_MAX_BYTES = 4 * 1_024 * 1_024;
-const SBSD_CHALLENGE_TOKEN_MAX_BYTES = 1_024;
-
-function htmlAttribute(value: string): string {
-	return value.replace(/&amp;/giu, "&");
-}
-
-function isDeclaredHost(url: URL, allowedHosts: readonly string[]): boolean {
-	const hostname = url.hostname.trim().toLowerCase().replace(/\.$/u, "");
-	return allowedHosts.some(
-		(host) => !host.includes("*") && host.trim().toLowerCase().replace(/\.$/u, "") === hostname,
-	);
-}
-
-function findAkamaiSbsdScript(
-	body: string,
-	page: URL,
-	allowedHosts: readonly string[],
-): URL | undefined {
-	if (Buffer.byteLength(body) > SBSD_SCRIPT_DISCOVERY_MAX_BYTES) return undefined;
-	let passiveScript: URL | undefined;
-	for (const match of body.matchAll(/<script\b[^>]*\bsrc\s*=\s*["']([^"']+)["'][^>]*>/giu)) {
-		let script: URL;
-		try {
-			script = new URL(htmlAttribute(match[1]!), page.origin);
-		} catch {
-			continue;
-		}
-		if (
-			script.origin !== page.origin ||
-			!isDeclaredHost(script, allowedHosts) ||
-			!script.searchParams.get("v")?.trim()
-		) {
-			continue;
-		}
-		if (script.searchParams.get("t")?.trim()) return script;
-		passiveScript ??= script;
-	}
-	return passiveScript;
-}
-
-function parseAkamaiSbsdChallengeToken(body: string): string | undefined {
-	if (Buffer.byteLength(body) >= SBSD_INTERSTITIAL_MAX_BYTES) return undefined;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(body);
-	} catch {
-		return undefined;
-	}
-	if (
-		!parsed ||
-		typeof parsed !== "object" ||
-		Array.isArray(parsed) ||
-		!("cpr_chlge" in parsed) ||
-		parsed.cpr_chlge !== "true" ||
-		!("t" in parsed) ||
-		typeof parsed.t !== "string"
-	) {
-		return undefined;
-	}
-	const token = parsed.t.trim();
-	return token && Buffer.byteLength(token) <= SBSD_CHALLENGE_TOKEN_MAX_BYTES ? token : undefined;
-}
-
-function detectAkamaiSbsdChallenge(
-	response: StealthResponse,
-	pageUrl: string,
-	jar: StealthCookieJar,
-	allowedHosts: readonly string[],
-	state: AkamaiSbsdSessionState,
-): AkamaiSbsdChallenge | undefined {
-	let page: URL;
-	try {
-		page = new URL(response.url ?? pageUrl);
-	} catch {
-		return undefined;
-	}
-	if (!isDeclaredHost(page, allowedHosts)) return undefined;
-	const currentScript = findAkamaiSbsdScript(response.body, page, allowedHosts);
-	if (currentScript) {
-		const version = currentScript.searchParams.get("v")?.trim();
-		if (version) {
-			const rememberedScript = new URL(currentScript.pathname, currentScript.origin);
-			rememberedScript.searchParams.set("v", version);
-			state.rememberedScript = rememberedScript;
-		}
-	}
-	const stateCookieName = jar.has("sbsd_o", page.toString())
-		? "sbsd_o"
-		: jar.has("bm_so", page.toString())
-			? "bm_so"
-			: undefined;
-	if (!stateCookieName) return undefined;
-
-	const laterToken = parseAkamaiSbsdChallengeToken(response.body);
-	const rememberedScript = state.rememberedScript;
-	if (
-		laterToken &&
-		rememberedScript &&
-		rememberedScript.origin === page.origin &&
-		isDeclaredHost(rememberedScript, allowedHosts)
-	) {
-		return {
-			kind: "akamai_sbsd",
-			pageUrl: page.toString(),
-			scriptUrl: rememberedScript.toString(),
-			stateCookieName,
-			challengeToken: laterToken,
-		};
-	}
-	if (
-		!currentScript ||
-		Buffer.byteLength(response.body) >= SBSD_INTERSTITIAL_MAX_BYTES ||
-		!/sec-bc-tile-container|Access Denied|Reference #\d|Pardon Our Interruption|cpr_chlge/iu.test(
-			response.body,
-		)
-	) {
-		return undefined;
-	}
-	return {
-		kind: "akamai_sbsd",
-		pageUrl: page.toString(),
-		scriptUrl: currentScript.toString(),
-		stateCookieName,
-	};
-}
-
-function normalizedClientProfile(value: string): string {
-	return value
-		.trim()
-		.toLowerCase()
-		.replace(/[^a-z0-9]/gu, "");
-}
-
-function assertAkamaiSbsdClientProfile(declared: string | undefined, actual: string): void {
-	if (
-		declared === undefined ||
-		normalizedClientProfile(declared) === normalizedClientProfile(actual)
-	) {
-		return;
-	}
+function assertAkamaiSbsdClientProfile(
+	declared: string | undefined,
+	session: StealthProfileDescriptor,
+): void {
+	if (declared === undefined || resolverClientProfileFamily(declared) === session.browser) return;
 	throw new SDKError(
-		`Resolver client profile "${declared}" does not match the initiating stealth session profile`,
+		`Resolver client profile "${declared}" does not match the initiating stealth session browser "${session.browser}"`,
 		{
 			code: "RESOLVER_CLIENT_PROFILE_MISMATCH",
-			fix: "Make resolver.clientProfile match the provider stealth browser/OS profile.",
+			fix: "Make resolver.clientProfile name the provider stealth browser family (chrome, firefox, or safari).",
 		},
 	);
-}
-
-function akamaiSbsdChallengeKey(challenge: AkamaiSbsdChallenge, actualProfile: string): string {
-	return JSON.stringify([
-		new URL(challenge.scriptUrl).toString(),
-		challenge.challengeToken ?? "",
-		challenge.stateCookieName,
-		normalizedClientProfile(actualProfile),
-	]);
 }
 
 type StealthTransportHeaders = {
@@ -1436,7 +1273,7 @@ async function fetchStealthRedirectChain(
 function createSessionFetcher(
 	baseUrl: string,
 	defaultProfile: StealthProfileDescriptor,
-	clientOptions: StealthClientOptions,
+	clientOptions: StealthSessionClientOptions,
 ): StealthSession {
 	const clients = new Map<string, WreqSessionCacheEntry>();
 	let closed = false;
@@ -1446,7 +1283,7 @@ function createSessionFetcher(
 	const akamaiSbsdState: AkamaiSbsdSessionState = {};
 	const automaticChallengeRefetchPolicy = {
 		...createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
-		methods: ["GET", "HEAD"],
+		methods: ["GET"],
 	};
 
 	async function getClientEntry(
@@ -1777,44 +1614,46 @@ function createSessionFetcher(
 								fetchSignal,
 								defaultHeaders,
 							);
+						const throwProxyTransportFault = (
+							faultResponse: StealthTransportResponse,
+							faultBody: string,
+						) => {
+							if (!proxy) return;
+							if (isProxyConnectFailureResponse(faultResponse, faultBody)) {
+								throw createProxyConnectFailureError(faultBody);
+							}
+							if (faultResponse.status < 400) return;
+							if (
+								usesPolicyAllocator &&
+								isProxyEdgeTlsRejectedResponse(
+									faultResponse.status,
+									[JSON.stringify(responseHeadersToRecord(faultResponse.headers)), faultBody].join(
+										"\n",
+									),
+								)
+							) {
+								throw createProxyEdgeTlsRejectedError(faultResponse.status);
+							}
+							if (isProxyAuthIpDeniedMessage(faultBody)) {
+								throw createProxyAuthIpDeniedError();
+							}
+							if (isProxyEdgeAuthRejectedMessage(faultBody)) {
+								throw createProxyEdgeAuthRejectedError();
+							}
+							if (
+								isProxyPoolStaleStatus(faultResponse.status) &&
+								isProxyPoolStaleMessage(faultBody)
+							) {
+								throw createProxyPoolStaleError(faultResponse.status);
+							}
+						};
 						let { normalized, response } = await fetchOnBoundSession(
 							requestUrl,
 							method,
 							options,
 							clientOptions.signal,
 						);
-
-						if (proxy && isProxyConnectFailureResponse(response, normalized.body)) {
-							throw createProxyConnectFailureError(normalized.body);
-						}
-
-						if (response.status >= 400) {
-							if (
-								proxy &&
-								usesPolicyAllocator &&
-								isProxyEdgeTlsRejectedResponse(
-									response.status,
-									[JSON.stringify(responseHeadersToRecord(response.headers)), normalized.body].join(
-										"\n",
-									),
-								)
-							) {
-								throw createProxyEdgeTlsRejectedError(response.status);
-							}
-							if (proxy && isProxyAuthIpDeniedMessage(normalized.body)) {
-								throw createProxyAuthIpDeniedError();
-							}
-							if (proxy && isProxyEdgeAuthRejectedMessage(normalized.body)) {
-								throw createProxyEdgeAuthRejectedError();
-							}
-							if (
-								proxy &&
-								isProxyPoolStaleStatus(response.status) &&
-								isProxyPoolStaleMessage(normalized.body)
-							) {
-								throw createProxyPoolStaleError(response.status);
-							}
-						}
+						throwProxyTransportFault(response, normalized.body);
 
 						const akamaiSbsd = clientOptions.stealth?.challengeRuntime?.akamaiSbsd;
 						const detected = akamaiSbsd
@@ -1848,7 +1687,7 @@ function createSessionFetcher(
 								recordProxyAttempt("ok", undefined, response.status);
 								return normalized;
 							}
-							assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, mapping.browser);
+							assertAkamaiSbsdClientProfile(akamaiSbsd.clientProfile, requestProfile);
 							if (!akamaiSbsd.solve) {
 								normalized.challenge = {
 									challenge: detected,
@@ -1960,7 +1799,7 @@ function createSessionFetcher(
 								if (ownsTransaction) throw transactionResult.error;
 								normalized.challenge = {
 									challenge: detected,
-									outcome: "challenge_persisted",
+									outcome: "solve_failed",
 								};
 								recordProxyAttempt("ok", undefined, response.status);
 								return normalized;
@@ -1972,6 +1811,7 @@ function createSessionFetcher(
 								options,
 								clientOptions.signal,
 							));
+							throwProxyTransportFault(response, normalized.body);
 							const persisted = detectAkamaiSbsdChallenge(
 								normalized,
 								requestUrl,
