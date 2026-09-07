@@ -391,6 +391,12 @@ interface ResolverIssuingIdentity {
     readonly userAgent: string;
 }
 
+// @public
+type ResolverPaidUsageContext = {
+    readonly vendorIndex: number;
+    readonly resolverIdentityScope?: string;
+};
+
 // @public (undocumented)
 export interface ResolverRuntimeOptions {
     // (undocumented)
@@ -423,11 +429,10 @@ interface ResolverVendorAdapter {
     readonly id: ProviderResolverVendor;
     // (undocumented)
     readonly requiresTransport?: boolean | ((kind: ProviderChallengeKind) => boolean);
+    // Warning: (ae-forgotten-export) The symbol "ResolverPaidUsageContext" needs to be exported by the entry point resolver-public.d.ts
+    //
     // (undocumented)
-    solve(challenge: ProviderChallenge, identity: ResolverIdentity | undefined, signal: AbortSignal, traceRecorder?: TraceRecorder, transport?: ResolverVendorTransport, usage?: {
-        readonly attemptIndex: number;
-        readonly resolverIdentityScope?: string;
-    }): Promise<ChallengeSolution>;
+    solve(challenge: ProviderChallenge, identity: ResolverIdentity | undefined, signal: AbortSignal, traceRecorder?: TraceRecorder, transport?: ResolverVendorTransport, usage?: ResolverPaidUsageContext): Promise<ChallengeSolution>;
     // (undocumented)
     supports(kind: ProviderChallengeKind): boolean;
     readonly transportAllowedHosts?: readonly string[];

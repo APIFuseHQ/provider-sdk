@@ -18,6 +18,9 @@ export const APIFUSE__CACHE__KEY_PEPPER_ENV = "APIFUSE__CACHE__KEY_PEPPER";
 // @public (undocumented)
 export const APIFUSE__CDP_POOL__URL = "APIFUSE__CDP_POOL__URL";
 
+// @public
+export const APIFUSE__ENGINE__CEREMONY_LEASE_KEY = "APIFUSE__ENGINE__CEREMONY_LEASE_KEY";
+
 // @public (undocumented)
 export const APIFUSE__OCR__API_KEY_ENV = "APIFUSE__OCR__API_KEY";
 
