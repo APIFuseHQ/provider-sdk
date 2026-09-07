@@ -5567,6 +5567,37 @@ describe("server SBSD bound-transport wiring", () => {
 		}
 	});
 
+	it("lets abort cancel a stranded ceremony without evaluating the engine lease key or tenant", async () => {
+		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import("../runtime/egress-lease.js");
+		const previous = process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+		delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+		try {
+			const { createServerAppAsync } = await import("../server/serve.js");
+			const app = await createServerAppAsync(createSbsdWiringProvider(), {
+				logger: () => undefined,
+			});
+			const response = await app.request("/auth/disconnect", {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					requestId: "req-sbsd-abort-without-engine-key",
+					flowId: "flow-abort-without-engine-key",
+					providerId: "stealth-sbsd-wiring-provider",
+					connectionId: "connection-sbsd",
+					context: {},
+					engine: { egressLease: "stale-handle-from-a-previous-turn" },
+				}),
+			});
+
+			expect(response.status).toBe(200);
+			expect(await response.json()).not.toHaveProperty("engine");
+			expect(allWreqCalls()).toHaveLength(0);
+		} finally {
+			if (previous === undefined) delete process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY];
+			else process.env[APIFUSE__ENGINE__CEREMONY_LEASE_KEY] = previous;
+		}
+	});
+
 	it("fails an auth request before provider code when the ceremony tenant is missing", async () => {
 		const { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } = await import(
 			"../runtime/egress-lease.js"

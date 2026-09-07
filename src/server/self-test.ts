@@ -351,6 +351,9 @@ export function createSelfTestAuthFlowInvoke(app: {
 			body: JSON.stringify({
 				requestId,
 				flowId,
+				// Engine ceremony leases are scoped to a tenant; the self-test has no
+				// customer tenant, so it presents a fixed one that never collides.
+				tenantId: "self-test",
 				...(connectionId ? { connectionId } : {}),
 				...(externalRef ? { externalRef } : {}),
 				...(input ? { input } : {}),
