@@ -484,6 +484,54 @@ describe("hypersolutions resolver vendor", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("classifies a Hyper body that fails mid-read as transport_failure", async () => {
+		const { transport, calls } = createProtocolTransport();
+		const direct = createDirectFetch(
+			() =>
+				new Response(
+					new ReadableStream({
+						pull(controller) {
+							controller.error(new Error("connection reset while reading"));
+						},
+					}),
+					{ status: 200 },
+				),
+		);
+		await expect(
+			createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
+		).rejects.toMatchObject({
+			code: "RESOLVER_CHAIN_EXHAUSTED",
+			details: [
+				{ vendor: "hypersolutions", reason: "transport_failure", phase: "generate_payload" },
+			],
+		});
+		expect(calls.filter(({ init }) => init.method === "POST")).toHaveLength(0);
+	});
+
+	it("cancels a Hyper response whose declared length exceeds the bound", async () => {
+		const { transport } = createProtocolTransport();
+		let cancelled = false;
+		const direct = createDirectFetch(
+			() =>
+				new Response(
+					new ReadableStream({
+						cancel() {
+							cancelled = true;
+						},
+					}),
+					{ status: 200, headers: { "content-length": "1000001" } },
+				),
+		);
+		await expect(
+			createResolver(transport, direct.fetchImpl).solve(HARD_CHALLENGE),
+		).rejects.toMatchObject({
+			details: [
+				{ vendor: "hypersolutions", reason: "transport_failure", phase: "generate_payload" },
+			],
+		});
+		expect(cancelled).toBe(true);
+	});
+
 	it("rejects an over-limit Hyper payload response", async () => {
 		const { transport, calls } = createProtocolTransport();
 		const direct = createDirectFetch(

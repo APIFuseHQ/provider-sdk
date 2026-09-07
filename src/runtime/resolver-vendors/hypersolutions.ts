@@ -215,6 +215,7 @@ async function boundFetch(
 
 async function readBoundedText(response: Response, maxBytes: number): Promise<string | undefined> {
 	if (declaredLengthExceeds(response.headers.get("content-length")?.trim(), maxBytes)) {
+		await response.body?.cancel();
 		return undefined;
 	}
 	if (!response.body) return "";
@@ -241,9 +242,8 @@ async function generatePayload(
 	body: string,
 	signal: AbortSignal,
 ): Promise<{ readonly status: number; readonly body: string | undefined }> {
-	let response: Response;
 	try {
-		response = await fetchImpl(HYPER_SBSD_URL, {
+		const response = await fetchImpl(HYPER_SBSD_URL, {
 			method: "POST",
 			headers: {
 				accept: "application/json",
@@ -254,10 +254,11 @@ async function generatePayload(
 			signal,
 			redirect: "error",
 		});
+		// A body that fails mid-read is as much a transport fault as a refused connection.
+		return { status: response.status, body: await readBoundedText(response, BODY_MAX_BYTES) };
 	} catch (cause) {
 		throw transportFailure("generate_payload", cause);
 	}
-	return { status: response.status, body: await readBoundedText(response, BODY_MAX_BYTES) };
 }
 
 export function createHypersolutionsResolverVendorAdapter(
