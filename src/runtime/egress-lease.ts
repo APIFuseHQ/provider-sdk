@@ -73,6 +73,13 @@ export type CeremonyEgressLeaseRuntime = {
 	 * `dropExpiredBinding`.
 	 */
 	dropBinding(): boolean;
+	/**
+	 * Number of bindings dropped so far (expiry or release). Every stealth session created
+	 * from one client shares the lease; a session compares this to what it last observed to
+	 * retire endpoint-bound challenge state and replay records after another session moved
+	 * the ceremony.
+	 */
+	readonly generation: number;
 	bind(binding: CeremonyEgressBinding): void;
 	handle(): string | undefined;
 };
@@ -264,11 +271,13 @@ export function createCeremonyEgressLeaseRuntime(options: {
 	}
 	let payload: CeremonyEgressLeasePayloadV1 | undefined;
 	let currentHandle: string | undefined;
+	let generation = 0;
 
 	const dropBinding = (): boolean => {
 		if (!payload) return false;
 		payload = undefined;
 		currentHandle = undefined;
+		generation += 1;
 		return true;
 	};
 	const dropExpiredBinding = (): boolean =>
@@ -290,6 +299,9 @@ export function createCeremonyEgressLeaseRuntime(options: {
 		},
 		dropExpiredBinding,
 		dropBinding,
+		get generation() {
+			return generation;
+		},
 		bind(binding) {
 			if (payload) {
 				// The stealth runtime reuses the bound endpoint while a binding exists and

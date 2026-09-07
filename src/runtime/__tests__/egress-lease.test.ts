@@ -226,7 +226,9 @@ describe("engine ceremony egress lease", () => {
 		expect(lease.dropExpiredBinding()).toBe(true);
 		expect(lease.binding).toBeUndefined();
 		expect(lease.handle()).toBeUndefined();
+		expect(lease.generation).toBe(1);
 		expect(lease.dropExpiredBinding()).toBe(false);
+		expect(lease.generation).toBe(1);
 
 		lease.bind({ ...SMARTPROXY_BINDING, poolIndex: 5 });
 		expect(lease.binding?.poolIndex).toBe(5);
@@ -237,16 +239,21 @@ describe("engine ceremony egress lease", () => {
 	it("releases a binding on demand so the next attempt binds a fresh endpoint", () => {
 		const lease = runtime({ now: () => 1_000 });
 		expect(lease.dropBinding()).toBe(false);
+		expect(lease.generation).toBe(0);
 		lease.bind(SMARTPROXY_BINDING);
 		const firstHandle = lease.handle();
 
 		expect(lease.dropBinding()).toBe(true);
 		expect(lease.binding).toBeUndefined();
 		expect(lease.handle()).toBeUndefined();
+		expect(lease.generation).toBe(1);
 		expect(lease.dropBinding()).toBe(false);
+		expect(lease.generation).toBe(1);
 
+		// Rebinding does not count as a drop: sessions compare drops, not binds.
 		lease.bind({ ...SMARTPROXY_BINDING, poolIndex: 5 });
 		expect(lease.binding?.poolIndex).toBe(5);
+		expect(lease.generation).toBe(1);
 		expect(lease.handle()).not.toBe(firstHandle);
 	});
 

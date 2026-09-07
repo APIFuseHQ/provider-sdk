@@ -1326,7 +1326,9 @@ function createSessionFetcher(
 	const akamaiSbsdState: AkamaiSbsdSessionState = { transactions: new Map() };
 	const challengedReplays = new WeakMap<StealthResponse, ChallengedReplayRecord>();
 	const ceremonyEgressLease = clientOptions[ENGINE_CEREMONY_EGRESS_LEASE];
-	let ceremonyEgressGeneration = 0;
+	// The lease is shared by every session of this client; this is the lease generation this
+	// session's challenge state and replay records were built against.
+	let observedEgressGeneration = ceremonyEgressLease?.generation ?? 0;
 	const automaticChallengeRefetchPolicy = {
 		...createDefaultProxyTransportRetryOptions({ label: "Stealth" }),
 		methods: ["GET"],
@@ -1338,13 +1340,20 @@ function createSessionFetcher(
 		akamaiSbsdState.completedSuccessKey = undefined;
 	}
 
+	function currentEgressGeneration(): number {
+		return ceremonyEgressLease?.generation ?? 0;
+	}
+
 	/**
-	 * Every path that leaves the bound endpoint also discards the challenge state that was
-	 * only valid on it and retires outstanding replay records made on it.
+	 * Whoever dropped the binding (this session by expiry or release, or another session of
+	 * the same client), the challenge state that was only valid on the retired endpoint goes
+	 * with it, and replay records made against the old generation stop matching.
 	 */
-	function unbindCeremonyEgress(): void {
+	function syncCeremonyEgress(): void {
+		const generation = currentEgressGeneration();
+		if (generation === observedEgressGeneration) return;
+		observedEgressGeneration = generation;
 		clearAkamaiSbsdState();
-		ceremonyEgressGeneration += 1;
 	}
 
 	/**
@@ -1352,8 +1361,8 @@ function createSessionFetcher(
 	 * state that was only valid on that endpoint, so this request selects and binds afresh.
 	 */
 	function expireCeremonyEgressLease(): void {
-		if (!ceremonyEgressLease?.dropExpiredBinding()) return;
-		unbindCeremonyEgress();
+		ceremonyEgressLease?.dropExpiredBinding();
+		syncCeremonyEgress();
 	}
 
 	/**
@@ -1379,7 +1388,7 @@ function createSessionFetcher(
 			return false;
 		}
 		ceremonyEgressLease.dropBinding();
-		unbindCeremonyEgress();
+		syncCeremonyEgress();
 		return true;
 	}
 
@@ -1679,6 +1688,7 @@ function createSessionFetcher(
 					let fallbackRedactedUrl: string | undefined;
 					let attemptStartedAt = Date.now();
 					let attemptRecorded = false;
+					const attemptEgressGeneration = currentEgressGeneration();
 					const recordProxyAttempt = (
 						outcome: "ok" | "error",
 						errorCode?: string,
@@ -2098,6 +2108,15 @@ function createSessionFetcher(
 								// fetch (the caller's think time in between is not transport duration); the
 								// automatic refetch stays within the initiating attempt's record.
 								if (explicitReplay) {
+									// The solve above may have taken seconds; if another session of this client
+									// moved the ceremony meanwhile, the mutation must not go out on the retired
+									// endpoint.
+									if (currentEgressGeneration() !== attemptEgressGeneration) {
+										throw new SDKError(
+											"The ceremony's egress binding changed while the replay was being solved",
+											{ code: "REPLAY_SESSION_MISMATCH" },
+										);
+									}
 									attemptRecorded = false;
 									attemptStartedAt = Date.now();
 								}
@@ -2133,7 +2152,7 @@ function createSessionFetcher(
 								};
 								challengedReplays.set(normalized, {
 									consumed: false,
-									generation: ceremonyEgressGeneration,
+									generation: attemptEgressGeneration,
 									async replay() {
 						try {
 											const replayed = await solveAndReplay(true);
@@ -2170,18 +2189,10 @@ function createSessionFetcher(
 							// proxy the solved jar is bound to.
 							throw redactedError;
 						}
-						if (
-							releasedBoundEgress &&
-							attempt + 1 < maxAttempts &&
-							(refreshableProxyError || retryErrorCode === PROXY_CONNECT_FAILURE_CODE)
-						) {
-							// The proxy refused the request or the tunnel never opened, so the origin never
-							// saw it: selecting and binding a fresh endpoint in this request is safe for
-							// any method. Ambiguous failures (reset, timeout) fall through to the ordinary
-							// method-aware retry decision below with the binding already released.
-							continue;
-						}
 						if (proxy && rotatesRegistryChain && refreshableProxyError) {
+							// Also the path a released bound endpoint takes after a proxy-level refusal:
+							// the stale-pool bookkeeping here is what drives allocator invalidation and the
+							// refresh pass when the fresh selection lands on the same endpoint again.
 							stalePoolError = redactedError;
 							if (runProxyAuthDiagnostic) {
 								stalePoolDiagnosticProxy = proxy;
@@ -2190,6 +2201,17 @@ function createSessionFetcher(
 								continue;
 							}
 							break;
+						}
+						if (
+							releasedBoundEgress &&
+							attempt + 1 < maxAttempts &&
+							retryErrorCode === PROXY_CONNECT_FAILURE_CODE
+						) {
+							// The tunnel to the released endpoint never opened, so the origin never saw the
+							// request: selecting and binding a fresh endpoint in this request is safe for
+							// any method. Ambiguous failures (reset, timeout) fall through to the ordinary
+							// method-aware retry decision below with the binding already released.
+							continue;
 						}
 						// Cap the number of transport retries. For a policy-allocator chain,
 						// every attempt resolves a *different* endpoint/vendor (poolIndex
@@ -2292,9 +2314,11 @@ function createSessionFetcher(
 					code: "REPLAY_SESSION_MISMATCH",
 				});
 			}
-			if (replay.generation !== ceremonyEgressGeneration) {
-				// The ceremony rebound to another egress after this request ran; solving and
-				// replaying on the retired endpoint would split the identity the handle names.
+			syncCeremonyEgress();
+			if (replay.generation !== currentEgressGeneration()) {
+				// The ceremony rebound to another egress after this request ran (in this session or
+				// another of the same client); solving and replaying on the retired endpoint would
+				// split the identity the handle names.
 				throw new SDKError(
 					"The challenged response predates the ceremony's current egress binding",
 					{ code: "REPLAY_SESSION_MISMATCH" },
