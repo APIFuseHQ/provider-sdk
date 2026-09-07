@@ -79,7 +79,10 @@ function containsSensitiveValue(value: unknown, sensitiveValues: readonly string
 		if (typeof candidate === "string") {
 			return secrets.some((secret) => candidate.includes(secret));
 		}
-		if (candidate === null || (typeof candidate !== "object" && typeof candidate !== "function")) {
+		if (
+			candidate === null ||
+			(typeof candidate !== "object" && typeof candidate !== "function")
+		) {
 			return false;
 		}
 		if (seen.has(candidate)) return false;
@@ -348,12 +351,9 @@ export function createTwoCaptchaResolverVendorAdapter(
 					...(challenge.iv?.trim() ? [] : ["iv"]),
 				];
 				if (missingFields.length > 0) {
-					throw new ResolverVendorUnavailableError(
-						TWOCAPTCHA_VENDOR_ID,
-						"missing_challenge_input",
-						{
-							missingFields,
-							phase: "create_task",
+					throw new ResolverVendorUnavailableError(TWOCAPTCHA_VENDOR_ID, "missing_challenge_input", {
+						missingFields,
+						phase: "create_task",
 						},
 					);
 				}
@@ -398,49 +398,49 @@ export function createTwoCaptchaResolverVendorAdapter(
 									...(identity ? { userAgent: identity.userAgent } : {}),
 									...(proxy ?? {}),
 								}
-							: challenge.kind === "recaptcha_v2"
-								? {
-										type: proxy ? "RecaptchaV2Task" : "RecaptchaV2TaskProxyless",
-										websiteURL: challenge.pageUrl,
-										websiteKey: challenge.siteKey,
-										isInvisible: false,
-										...(identity ? { userAgent: identity.userAgent } : {}),
-										...(proxy ?? {}),
-									}
-								: challenge.kind === "recaptcha_v3"
-									? {
-											type: "RecaptchaV3TaskProxyless",
-											websiteURL: challenge.pageUrl,
-											websiteKey: challenge.siteKey,
-											minScore: challenge.minScore,
-											pageAction: challenge.action,
-											...(identity ? { userAgent: identity.userAgent } : {}),
-										}
-									: challenge.kind === "hcaptcha"
-										? {
-												type: proxy ? "HCaptchaTask" : "HCaptchaTaskProxyless",
-												websiteURL: challenge.pageUrl,
-												websiteKey: challenge.siteKey,
-												...(identity ? { userAgent: identity.userAgent } : {}),
-												...(proxy ?? {}),
-											}
-										: challenge.kind === "turnstile"
-											? {
-													type: proxy ? "TurnstileTask" : "TurnstileTaskProxyless",
-													websiteURL: challenge.pageUrl,
-													websiteKey: challenge.siteKey,
-													...(challenge.action !== undefined ? { action: challenge.action } : {}),
-													...(challenge.cdata !== undefined ? { data: challenge.cdata } : {}),
-													...(identity ? { userAgent: identity.userAgent } : {}),
-													...(proxy ?? {}),
-												}
-											: // `resolverVendorSupports` above already rejected every kind this
-												// adapter does not build a task for, so this branch is unreachable.
-												(() => {
-													throw new TypeError(
-														`2captcha resolver does not support ${challenge.kind}`,
-													);
-												})();
+						: challenge.kind === "recaptcha_v2"
+							? {
+								type: proxy ? "RecaptchaV2Task" : "RecaptchaV2TaskProxyless",
+									websiteURL: challenge.pageUrl,
+									websiteKey: challenge.siteKey,
+									isInvisible: false,
+									...(identity ? { userAgent: identity.userAgent } : {}),
+								...(proxy ?? {}),
+							}
+						: challenge.kind === "recaptcha_v3"
+							? {
+									type: "RecaptchaV3TaskProxyless",
+									websiteURL: challenge.pageUrl,
+									websiteKey: challenge.siteKey,
+									minScore: challenge.minScore,
+									pageAction: challenge.action,
+									...(identity ? { userAgent: identity.userAgent } : {}),
+								}
+						: challenge.kind === "hcaptcha"
+							? {
+									type: proxy ? "HCaptchaTask" : "HCaptchaTaskProxyless",
+									websiteURL: challenge.pageUrl,
+									websiteKey: challenge.siteKey,
+									...(identity ? { userAgent: identity.userAgent } : {}),
+									...(proxy ?? {}),
+								}
+						: challenge.kind === "turnstile"
+							? {
+									type: proxy ? "TurnstileTask" : "TurnstileTaskProxyless",
+									websiteURL: challenge.pageUrl,
+									websiteKey: challenge.siteKey,
+									...(challenge.action !== undefined ? { action: challenge.action } : {}),
+									...(challenge.cdata !== undefined ? { data: challenge.cdata } : {}),
+									...(identity ? { userAgent: identity.userAgent } : {}),
+									...(proxy ?? {}),
+								}
+							: // `resolverVendorSupports` above already rejected every kind this
+								// adapter does not build a task for, so this branch is unreachable.
+								(() => {
+									throw new TypeError(
+										`2captcha resolver does not support ${challenge.kind}`,
+									);
+								})();
 					return await recordPaidResolverCreate({
 						traceRecorder,
 						vendor: TWOCAPTCHA_VENDOR_ID,
@@ -449,19 +449,19 @@ export function createTwoCaptchaResolverVendorAdapter(
 						signal: solveController.signal,
 						usage,
 						create: async () => {
-							const createResult = await postJson(
-								fetchImpl,
-								endpoint(baseUrl, "createTask"),
-								{ clientKey: apiKey, task },
-								solveController.signal,
-								phase,
-								[apiKey],
-							);
-							const taskId = taskIdFrom(createResult.payload);
-							if (!createResult.ok || createResult.payload.errorId !== 0 || taskId === undefined) {
-								throw unavailableForPayload(createResult.payload, phase);
-							}
-							return taskId;
+					const createResult = await postJson(
+						fetchImpl,
+						endpoint(baseUrl, "createTask"),
+						{ clientKey: apiKey, task },
+						solveController.signal,
+						phase,
+						[apiKey],
+					);
+					const taskId = taskIdFrom(createResult.payload);
+					if (!createResult.ok || createResult.payload.errorId !== 0 || taskId === undefined) {
+						throw unavailableForPayload(createResult.payload, phase);
+					}
+					return taskId;
 						},
 					});
 				};

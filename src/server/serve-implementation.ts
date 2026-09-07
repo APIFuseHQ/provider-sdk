@@ -1843,7 +1843,9 @@ function logProviderError(
 		kind,
 		route,
 		...(requestId ? { requestId } : {}),
-		...(correlation.connectionId !== undefined ? { connectionId: correlation.connectionId } : {}),
+		...(correlation.connectionId !== undefined
+			? { connectionId: correlation.connectionId }
+			: {}),
 		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
 		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
 		...(correlation.requestedProviderId !== undefined
@@ -1917,7 +1919,9 @@ function logProviderSuccess(
 		kind,
 		route,
 		...(requestId ? { requestId } : {}),
-		...(correlation.connectionId !== undefined ? { connectionId: correlation.connectionId } : {}),
+		...(correlation.connectionId !== undefined
+			? { connectionId: correlation.connectionId }
+			: {}),
 		...(correlation.flowId !== undefined ? { flowId: correlation.flowId } : {}),
 		...(correlation.tenantId !== undefined ? { tenantId: correlation.tenantId } : {}),
 		...(correlation.requestedProviderId !== undefined
@@ -2179,7 +2183,8 @@ function createRequestScope(input: {
 				const declaredErrorCode =
 					error === undefined ? undefined : input.declaredErrorCode?.(error);
 				const status =
-					outcome.status ?? (error === undefined ? 200 : toStatusCode(error, declaredErrorCode));
+					outcome.status ??
+					(error === undefined ? 200 : toStatusCode(error, declaredErrorCode));
 				finishedResult = headerSnapshot(error);
 				const cost = finishRequestCost(requestCost);
 				try {
@@ -2270,7 +2275,10 @@ function finalizeRequestResponse(
 ): Response {
 	try {
 		const error = outcome.kind === "failed" ? outcome.error : undefined;
-		const finalResponse = responseWithRequestScopeHeaders(response, scope.snapshotHeaders(error));
+		const finalResponse = responseWithRequestScopeHeaders(
+			response,
+			scope.snapshotHeaders(error),
+		);
 		scope.terminalize(outcome);
 		return finalResponse;
 	} catch (error) {
@@ -2488,7 +2496,11 @@ function toSseResponse(
 						const validated = await validateSseEvent(operation, next.value);
 						const encodedEvent = encodeSseEvent(validated);
 						const bytes = encoder.encode(encodedEvent);
-						assertStreamPayloadWithinLimit(bytes.byteLength, transport?.maxEventBytes, "event");
+						assertStreamPayloadWithinLimit(
+							bytes.byteLength,
+							transport?.maxEventBytes,
+							"event",
+						);
 						return bytes;
 					});
 					controller.enqueue(encodedBytes);

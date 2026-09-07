@@ -105,12 +105,12 @@ interface CapsolverPollResultResponse extends CapsolverResponseErrorFields {
 	readonly status: string | undefined;
 	readonly solution:
 		| {
-				readonly token: string | undefined;
-				readonly cookie: string | undefined;
-				readonly gRecaptchaResponse: string | undefined;
-				readonly cookies: Readonly<Record<string, string>> | undefined;
-				readonly userAgent: string | undefined;
-		  }
+					readonly token: string | undefined;
+					readonly cookie: string | undefined;
+					readonly gRecaptchaResponse: string | undefined;
+					readonly cookies: Readonly<Record<string, string>> | undefined;
+					readonly userAgent: string | undefined;
+				}
 		| undefined;
 }
 
@@ -253,18 +253,17 @@ function parseCreateTaskResponse(payload: JsonRecord): CapsolverCreateTaskRespon
 
 function parsePollResultResponse(payload: JsonRecord): CapsolverPollResultResponse {
 	const solution = isJsonRecord(payload.solution) ? payload.solution : undefined;
-	const cookies =
-		solution && isJsonRecord(solution.cookies)
-			? Object.fromEntries(
-					Object.entries(solution.cookies).filter(
-						(entry): entry is [string, string] => typeof entry[1] === "string",
-					),
-				)
-			: undefined;
+	const cookies = solution && isJsonRecord(solution.cookies)
+		? Object.fromEntries(
+				Object.entries(solution.cookies).filter(
+					(entry): entry is [string, string] => typeof entry[1] === "string",
+				),
+			)
+		: undefined;
 	return {
 		...responseErrorFields(payload),
 		status: typeof payload.status === "string" ? payload.status : undefined,
-		solution: solution
+			solution: solution
 			? {
 					token: typeof solution.token === "string" ? solution.token : undefined,
 					cookie: typeof solution.cookie === "string" ? solution.cookie : undefined,
@@ -274,7 +273,7 @@ function parsePollResultResponse(payload: JsonRecord): CapsolverPollResultRespon
 							: undefined,
 					cookies,
 					userAgent: typeof solution.userAgent === "string" ? solution.userAgent : undefined,
-				}
+				  }
 			: undefined,
 	};
 }
@@ -490,9 +489,7 @@ export function createCapsolverResolverVendorAdapter(
 				...(typeof challengeFields.action === "string" ? [challengeFields.action] : []),
 				...(typeof challengeFields.cdata === "string" ? [challengeFields.cdata] : []),
 				...(typeof challengeFields.blockedHtml === "string" ? [challengeFields.blockedHtml] : []),
-				...(typeof challengeFields.captchaScript === "string"
-					? [challengeFields.captchaScript]
-					: []),
+				...(typeof challengeFields.captchaScript === "string" ? [challengeFields.captchaScript] : []),
 				...(typeof challengeFields.context === "string" ? [challengeFields.context] : []),
 				...(typeof challengeFields.iv === "string" ? [challengeFields.iv] : []),
 				...(proxy?.sensitive ?? []),
@@ -543,47 +540,44 @@ export function createCapsolverResolverVendorAdapter(
 												}
 											: {}),
 									}
-								: challenge.kind === "recaptcha_v2"
-									? {
-											type: proxy ? "ReCaptchaV2Task" : "ReCaptchaV2TaskProxyLess",
-											websiteURL: challenge.pageUrl,
-											websiteKey: challenge.siteKey,
-											...(proxy ? { proxy: proxy.value } : {}),
-										}
-									: challenge.kind === "recaptcha_v3"
-										? {
-												type: proxy ? "ReCaptchaV3Task" : "ReCaptchaV3TaskProxyLess",
-												websiteURL: challenge.pageUrl,
-												websiteKey: challenge.siteKey,
-												pageAction: challenge.action,
-												...(challenge.minScore !== undefined
-													? { minScore: challenge.minScore }
-													: {}),
-												...(proxy ? { proxy: proxy.value } : {}),
-											}
-										: challenge.kind === "hcaptcha"
-											? {
-													type: proxy ? "HCaptchaTask" : "HCaptchaTaskProxyLess",
-													websiteURL: challenge.pageUrl,
-													websiteKey: challenge.siteKey,
-													...(proxy ? { proxy: proxy.value } : {}),
-												}
-											: challenge.kind === "cloudflare_interstitial"
-												? {
-														type: "AntiCloudflareTask",
-														websiteURL: challenge.pageUrl,
-														proxy: proxy?.value,
-														...(identity?.userAgent ? { userAgent: identity.userAgent } : {}),
-														...(challenge.kind === "cloudflare_interstitial" &&
-														challenge.blockedHtml !== undefined
-															? { html: challenge.blockedHtml }
-															: {}),
-													}
-												: (() => {
+							: challenge.kind === "recaptcha_v2"
+								? {
+										type: proxy ? "ReCaptchaV2Task" : "ReCaptchaV2TaskProxyLess",
+										websiteURL: challenge.pageUrl,
+										websiteKey: challenge.siteKey,
+										...(proxy ? { proxy: proxy.value } : {}),
+									}
+							: challenge.kind === "recaptcha_v3"
+								? {
+										type: proxy ? "ReCaptchaV3Task" : "ReCaptchaV3TaskProxyLess",
+										websiteURL: challenge.pageUrl,
+										websiteKey: challenge.siteKey,
+										pageAction: challenge.action,
+										...(challenge.minScore !== undefined ? { minScore: challenge.minScore } : {}),
+										...(proxy ? { proxy: proxy.value } : {}),
+									}
+							: challenge.kind === "hcaptcha"
+								? {
+										type: proxy ? "HCaptchaTask" : "HCaptchaTaskProxyLess",
+										websiteURL: challenge.pageUrl,
+										websiteKey: challenge.siteKey,
+										...(proxy ? { proxy: proxy.value } : {}),
+									}
+							: challenge.kind === "cloudflare_interstitial"
+								? {
+										type: "AntiCloudflareTask",
+										websiteURL: challenge.pageUrl,
+										proxy: proxy?.value,
+										...(identity?.userAgent ? { userAgent: identity.userAgent } : {}),
+										...(challenge.kind === "cloudflare_interstitial" && challenge.blockedHtml !== undefined
+											? { html: challenge.blockedHtml }
+											: {}),
+									}
+								: (() => {
 														throw new TypeError(
 															`Capsolver resolver does not support ${challenge.kind}`,
 														);
-													})();
+									})();
 					return await recordPaidResolverCreate({
 						traceRecorder,
 						vendor: CAPSOLVER_VENDOR_ID,
@@ -592,20 +586,20 @@ export function createCapsolverResolverVendorAdapter(
 						signal: solveController.signal,
 						usage,
 						create: async () => {
-							const createResult = await postJson(
-								fetchImpl,
-								endpoint(baseUrl, "createTask"),
-								{ clientKey: apiKey, task },
-								solveController.signal,
-								phase,
-								sensitiveValues,
-								parseCreateTaskResponse,
-							);
-							const taskId = createResult.payload.taskId;
-							if (!createResult.ok || createResult.payload.errorId !== 0 || taskId === undefined) {
-								throw unavailableForPayload(createResult.payload, phase, sensitiveValues);
-							}
-							return taskId;
+					const createResult = await postJson(
+						fetchImpl,
+						endpoint(baseUrl, "createTask"),
+						{ clientKey: apiKey, task },
+						solveController.signal,
+						phase,
+						sensitiveValues,
+						parseCreateTaskResponse,
+					);
+					const taskId = createResult.payload.taskId;
+					if (!createResult.ok || createResult.payload.errorId !== 0 || taskId === undefined) {
+						throw unavailableForPayload(createResult.payload, phase, sensitiveValues);
+					}
+					return taskId;
 						},
 					});
 				};
@@ -667,10 +661,7 @@ export function createCapsolverResolverVendorAdapter(
 							}
 							return {
 								form: "cookies" as const,
-								cookies:
-									cookies && Object.keys(cookies).length > 0
-										? cookies
-										: { cf_clearance: clearance },
+								cookies: cookies && Object.keys(cookies).length > 0 ? cookies : { cf_clearance: clearance },
 								userAgent:
 									result.payload.solution?.userAgent ??
 									identity?.userAgent ??

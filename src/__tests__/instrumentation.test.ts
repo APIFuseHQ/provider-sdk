@@ -54,20 +54,20 @@ function createMockContext(): ProviderContext {
 	);
 
 	const response = (): DeclarativeStealthResponse => ({
-		status: 201,
-		ok: true,
-		headers: {},
-		rawHeaders: [] as [string, string][],
-		body: "created",
-		cookies: {
-			get: () => undefined,
-			getAll: () => ({}),
-			toString: () => "",
-		},
-		json: async <T>() => ({}) as T,
-		arrayBuffer: async () => new ArrayBuffer(0),
-		bytes: async () => new Uint8Array(),
-	});
+			status: 201,
+			ok: true,
+			headers: {},
+			rawHeaders: [] as [string, string][],
+			body: "created",
+			cookies: {
+				get: () => undefined,
+				getAll: () => ({}),
+				toString: () => "",
+			},
+			json: async <T>() => ({}) as T,
+			arrayBuffer: async () => new ArrayBuffer(0),
+			bytes: async () => new Uint8Array(),
+		});
 	const session: StealthSession = {
 		fetch: async () => response(),
 		replayChallenged: async () => response(),

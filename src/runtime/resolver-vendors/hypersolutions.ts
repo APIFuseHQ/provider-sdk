@@ -329,23 +329,23 @@ export function createHypersolutionsResolverVendorAdapter(
 					signal: operationSignal,
 					usage,
 					create: async () => {
-						const ipResponse = await boundFetch(
-							transport,
-							HYPER_IP_URL,
-							{
-								method: "GET",
-								headers: {
-									accept: "application/json, text/plain;q=0.9",
-									"x-api-key": apiKey,
-								},
-								signal: operationSignal,
-								redirect: "manual",
-								maxBodyBytes: IP_RESPONSE_MAX_BYTES,
-							},
-							"measure_ip",
-						);
-						requireSuccess(ipResponse.status, "measure_ip");
-						assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
+				const ipResponse = await boundFetch(
+					transport,
+					HYPER_IP_URL,
+					{
+						method: "GET",
+						headers: {
+							accept: "application/json, text/plain;q=0.9",
+							"x-api-key": apiKey,
+						},
+						signal: operationSignal,
+						redirect: "manual",
+						maxBodyBytes: IP_RESPONSE_MAX_BYTES,
+					},
+					"measure_ip",
+				);
+				requireSuccess(ipResponse.status, "measure_ip");
+				assertBoundedBody(ipResponse, IP_RESPONSE_MAX_BYTES, "measure_ip");
 						const observedIp = parseObservedIp(ipResponse.body);
 						if (!observedIp) throw transportFailure("measure_ip");
 						return observedIp;
@@ -394,31 +394,31 @@ export function createHypersolutionsResolverVendorAdapter(
 						signal: operationSignal,
 						usage,
 						create: async () => {
-							const hyperResponse = await generatePayload(
-								fetchImpl,
-								apiKey,
-								JSON.stringify({
-									index,
-									uuid: exchange.uuid,
-									o: stateCookie,
-									pageUrl: challenge.pageUrl,
-									userAgent,
-									script: scriptResponse.body,
-									ip,
-									acceptLanguage,
-								}),
-								operationSignal,
-							);
-							requireSuccess(hyperResponse.status, "generate_payload");
+					const hyperResponse = await generatePayload(
+						fetchImpl,
+						apiKey,
+						JSON.stringify({
+							index,
+							uuid: exchange.uuid,
+							o: stateCookie,
+							pageUrl: challenge.pageUrl,
+							userAgent,
+							script: scriptResponse.body,
+							ip,
+							acceptLanguage,
+						}),
+						operationSignal,
+					);
+					requireSuccess(hyperResponse.status, "generate_payload");
 							const generated =
-								hyperResponse.body === undefined ? undefined : parsePayload(hyperResponse.body);
+						hyperResponse.body === undefined ? undefined : parsePayload(hyperResponse.body);
 							if (!generated) {
-								throw new ResolverVendorUnavailableError(
-									HYPERSOLUTIONS_VENDOR_ID,
-									"transport_failure",
-									{ phase: "generate_payload", round },
-								);
-							}
+						throw new ResolverVendorUnavailableError(
+							HYPERSOLUTIONS_VENDOR_ID,
+							"transport_failure",
+							{ phase: "generate_payload", round },
+						);
+					}
 							return generated;
 						},
 					});

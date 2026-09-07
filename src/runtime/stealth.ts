@@ -2045,54 +2045,54 @@ function createSessionFetcher(
 								const reuseCompletedSuccess =
 									explicitReplay && akamaiSbsdState.completedSuccessKey === transactionKey;
 								if (reuseCompletedSuccess) akamaiSbsdState.completedSuccessKey = undefined;
-								let ownsTransaction = false;
+							let ownsTransaction = false;
 								if (!reuseCompletedSuccess) {
 									let transaction = akamaiSbsdState.transactions.get(transactionKey);
-									if (!transaction) {
+							if (!transaction) {
 										akamaiSbsdState.completedSuccessKey = undefined;
-										challengeSolveAttempted = true;
-										ownsTransaction = true;
-										// The solve spans several round trips, so it runs under the client's ambient
-										// signal and the resolver's own timeouts, not this fetch's per-request `timeout`.
-										transaction = {
-											result: akamaiSbsd
-												.solve(
-													detected,
-													resolverTransport,
-													clientOptions.signal ?? new AbortController().signal,
-												)
-												.then(
-													() => ({ solved: true }) as const,
-													(error: unknown) => ({ solved: false, error }) as const,
-												)
-												.finally(() => {
-													akamaiSbsdState.transactions.delete(transactionKey);
-												}),
-										};
-										akamaiSbsdState.transactions.set(transactionKey, transaction);
-									}
-									const transactionResult = await transaction.result;
-									if (!transactionResult.solved) {
-										if (ownsTransaction) {
-											// The proxy delivered the challenged response; the resolver failed.
-											// Surface that failure as-is: it is not a transport fault to normalize
-											// or retry.
+								challengeSolveAttempted = true;
+								ownsTransaction = true;
+								// The solve spans several round trips, so it runs under the client's ambient
+								// signal and the resolver's own timeouts, not this fetch's per-request `timeout`.
+								transaction = {
+									result: akamaiSbsd
+										.solve(
+											detected,
+											resolverTransport,
+											clientOptions.signal ?? new AbortController().signal,
+										)
+										.then(
+											() => ({ solved: true }) as const,
+											(error: unknown) => ({ solved: false, error }) as const,
+										)
+										.finally(() => {
+											akamaiSbsdState.transactions.delete(transactionKey);
+										}),
+								};
+								akamaiSbsdState.transactions.set(transactionKey, transaction);
+							}
+							const transactionResult = await transaction.result;
+							if (!transactionResult.solved) {
+								if (ownsTransaction) {
+									// The proxy delivered the challenged response; the resolver failed.
+									// Surface that failure as-is: it is not a transport fault to normalize
+									// or retry.
 											if (!explicitReplay) {
 												recordProxyAttempt("ok", undefined, challenged.response.status);
 											}
-											challengeSolveFailure = { error: transactionResult.error };
-											throw challengeSolveFailure;
-										}
+									challengeSolveFailure = { error: transactionResult.error };
+									throw challengeSolveFailure;
+								}
 										return {
 											normalized: {
 												...challenged.normalized,
 												challenge: { challenge: detected, outcome: "solve_failed" },
 											},
 											response: challenged.response,
-										};
+								};
 									}
-								}
-								challengeRefetchAttempted = true;
+							}
+							challengeRefetchAttempted = true;
 								// An explicit replay is a new transport exchange on the bound endpoint and
 								// gets its own proxy-attempt record timed from here, not from the initiating
 								// fetch (the caller's think time in between is not transport duration); the
@@ -2102,27 +2102,27 @@ function createSessionFetcher(
 									attemptStartedAt = Date.now();
 								}
 								const replayed = await fetchOnBoundSession(
-									requestUrl,
-									method,
+								requestUrl,
+								method,
 									replayOptions,
-									clientOptions.signal,
+								clientOptions.signal,
 								);
 								throwProxyTransportFault(replayed.response, replayed.normalized.body);
-								const persisted = detectAkamaiSbsdChallenge(
+							const persisted = detectAkamaiSbsdChallenge(
 									replayed.normalized,
-									requestUrl,
-									cookieJar,
-									akamaiSbsd.allowedHosts,
-									akamaiSbsdState,
-								);
-								if (persisted) {
+								requestUrl,
+								cookieJar,
+								akamaiSbsd.allowedHosts,
+								akamaiSbsdState,
+							);
+							if (persisted) {
 									replayed.normalized.challenge = {
-										challenge: persisted,
-										outcome: "challenge_persisted",
-									};
+									challenge: persisted,
+									outcome: "challenge_persisted",
+								};
 								} else if (ownsTransaction && !explicitReplay) {
 									akamaiSbsdState.completedSuccessKey = transactionKey;
-								}
+						}
 								return replayed;
 							};
 
@@ -2135,18 +2135,18 @@ function createSessionFetcher(
 									consumed: false,
 									generation: ceremonyEgressGeneration,
 									async replay() {
-										try {
+						try {
 											const replayed = await solveAndReplay(true);
 											return finalizeAttempt(replayed.response, replayed.normalized);
 										} catch (error) {
 											const normalizedError = normalizeAttemptError(error);
 											releaseFailedCeremonyEgress(proxy, normalizedError);
 											throw recordAttemptFailure(normalizedError);
-										}
+							}
 									},
 								});
 								return finalizeAttempt(response, normalized);
-							}
+						}
 							({ normalized, response } = await solveAndReplay(false));
 						}
 

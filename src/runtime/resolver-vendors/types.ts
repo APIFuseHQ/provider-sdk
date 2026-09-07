@@ -203,9 +203,7 @@ export class ResolverVendorUnavailableError extends Error {
 				? options.missingFields?.filter((field) => /^[A-Za-z][A-Za-z0-9_]*$/u.test(field))
 				: undefined;
 		super(
-			reason === "missing_challenge_input" &&
-				missingFields !== undefined &&
-				missingFields.length > 0
+			reason === "missing_challenge_input" && missingFields !== undefined && missingFields.length > 0
 				? `Resolver vendor ${vendor} cannot use incomplete challenge input; missing fields: ${missingFields.join(", ")}`
 				: `Resolver vendor ${vendor} is unavailable: ${reason}`,
 		);
