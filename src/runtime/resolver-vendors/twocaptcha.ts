@@ -4,14 +4,13 @@ import { recordPaidResolverCreate } from "../resolver-usage.js";
 import { assertResolverHostAllowed } from "./hosts.js";
 import {
 	type ResolverIdentity,
+	type ResolverPaidUsageContext,
 	type ResolverVendorAdapter,
 	type ResolverVendorTransport,
 	ResolverChallengeVerdictError,
 	ResolverVendorUnavailableError,
 	resolverVendorSupports,
 } from "./types.js";
-
-type ResolverPaidUsageContext = NonNullable<Parameters<ResolverVendorAdapter["solve"]>[5]>;
 
 const TWOCAPTCHA_VENDOR_ID = "2captcha" as const;
 const DEFAULT_TWOCAPTCHA_BASE_URL = "https://api.2captcha.com";

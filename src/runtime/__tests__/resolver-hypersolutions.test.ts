@@ -208,14 +208,22 @@ describe("hypersolutions resolver vendor", () => {
 			"hyper:ip",
 			"hyper:sbsd_create",
 		]);
+		// /ip is authenticated but has no published price: counted as 0 units, not invented as 1.
 		expect(usageSpans[0]?.attributes).toEqual({
 			vendor: "hypersolutions",
 			challenge_kind: "akamai_sbsd",
 			endpoint: "hyper:ip",
-			billable_units: 1,
-			attempt_index: 1,
+			billable_units: 0,
+			billing: "unconfirmed",
+			vendor_index: 1,
 			outcome: "success",
 			duration_ms: expect.any(Number),
+		});
+		expect(usageSpans[1]?.attributes).toMatchObject({
+			endpoint: "hyper:sbsd_create",
+			billable_units: 1,
+			billing: "metered",
+			round: 1,
 		});
 	});
 
@@ -251,7 +259,12 @@ describe("hypersolutions resolver vendor", () => {
 					url === "https://shop.example.com/.well-known/sbsd" && init.method === "POST",
 			),
 		).toHaveLength(2);
-		expect(trace.getSpans().filter((span) => span.name === "resolver.usage")).toHaveLength(3);
+		expect(
+			trace
+				.getSpans()
+				.filter((span) => span.name === "resolver.usage")
+				.map((span) => `${span.attributes.endpoint}#${span.attributes.round ?? "-"}`),
+		).toEqual(["hyper:ip#-", "hyper:sbsd_create#1", "hyper:sbsd_create#2"]);
 	});
 
 	it("keeps a remembered v-only script separate from a later cpr_chlge token", async () => {

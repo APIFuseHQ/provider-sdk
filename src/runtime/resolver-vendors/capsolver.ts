@@ -8,14 +8,13 @@ import { assertResolverHostAllowed } from "./hosts.js";
 import {
 	ResolverChallengeVerdictError,
 	type ResolverIdentity,
-	type ResolverVendorTransport,
+	type ResolverPaidUsageContext,
 	type ResolverVendorAdapter,
+	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 	type ResolverVendorUnavailableReason,
 	resolverVendorSupports,
 } from "./types.js";
-
-type ResolverPaidUsageContext = NonNullable<Parameters<ResolverVendorAdapter["solve"]>[5]>;
 
 const CAPSOLVER_VENDOR_ID = "capsolver" as const;
 const DEFAULT_CAPSOLVER_BASE_URL = "https://api.capsolver.com";

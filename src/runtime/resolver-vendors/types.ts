@@ -126,6 +126,14 @@ export interface ResolverVendorTransport {
 	}>;
 }
 
+/** Metering context the resolver chain hands each vendor adapter for its paid calls. */
+export type ResolverPaidUsageContext = {
+	/** 1-based position of the vendor in the provider's declared resolver chain. */
+	readonly vendorIndex: number;
+	/** SHA-256 scope digest; never the raw affinity, proxy URL, cookie, or IP. */
+	readonly resolverIdentityScope?: string;
+};
+
 export interface ResolverVendorAdapter {
 	readonly id: ProviderResolverVendor;
 	readonly requiresTransport?: boolean | ((kind: ProviderChallengeKind) => boolean);
@@ -149,11 +157,7 @@ export interface ResolverVendorAdapter {
 		signal: AbortSignal,
 		traceRecorder?: TraceRecorder,
 		transport?: ResolverVendorTransport,
-		usage?: {
-			readonly attemptIndex: number;
-			/** SHA-256 scope digest; never the raw affinity, proxy URL, cookie, or IP. */
-			readonly resolverIdentityScope?: string;
-		},
+		usage?: ResolverPaidUsageContext,
 	): Promise<ChallengeSolution>;
 }
 

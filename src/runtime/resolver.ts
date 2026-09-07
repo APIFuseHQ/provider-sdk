@@ -33,6 +33,7 @@ import {
 	RESOLVER_VENDOR_CAPABILITIES,
 	type ResolverIdentity,
 	type ResolverIssuingIdentity,
+	type ResolverPaidUsageContext,
 	type ResolverVendorAdapter,
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
@@ -57,8 +58,6 @@ import {
 } from "./resolver-config.js";
 import { DEFAULT_STEALTH_PROFILE } from "./stealth.js";
 import type { TraceRecorder } from "./trace.js";
-
-type ResolverPaidUsageContext = NonNullable<Parameters<ResolverVendorAdapter["solve"]>[5]>;
 
 export {
 	createUnsupportedResolverClient,
@@ -989,7 +988,7 @@ function createResolverChainClient(options: {
 								])
 							: undefined;
 						const usage: ResolverPaidUsageContext = {
-							attemptIndex: entryIndex + 1,
+							vendorIndex: entryIndex + 1,
 							...(options.identityScope
 								? {
 										resolverIdentityScope: createHash("sha256")

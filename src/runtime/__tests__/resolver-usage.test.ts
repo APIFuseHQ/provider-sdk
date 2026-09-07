@@ -22,7 +22,7 @@ describe("paid resolver usage telemetry", () => {
 				kind: "turnstile",
 				endpoint: "capsolver:create_task",
 				signal: new AbortController().signal,
-				usage: { attemptIndex: 2, resolverIdentityScope: "scope-digest" },
+				usage: { vendorIndex: 2, resolverIdentityScope: "scope-digest" },
 				create: async () => {
 					throw timeout;
 				},
@@ -38,12 +38,41 @@ describe("paid resolver usage telemetry", () => {
 				challenge_kind: "turnstile",
 				endpoint: "capsolver:create_task",
 				billable_units: 1,
-				attempt_index: 2,
+				billing: "metered",
+				vendor_index: 2,
 				resolver_identity_scope: "scope-digest",
 				outcome: "timeout",
 				duration_ms: expect.any(Number),
 			},
 		});
+	});
+
+	it("runs the paid call without a recorder and warns once per sink about the lost record", async () => {
+		const warnings: string[] = [];
+		const warn = (message: string) => {
+			warnings.push(message);
+		};
+		let creates = 0;
+		for (const endpoint of ["hyper:ip", "hyper:sbsd_create"] as const) {
+			await expect(
+				recordPaidResolverCreate({
+					vendor: "hypersolutions",
+					kind: "akamai_sbsd",
+					endpoint,
+					signal: new AbortController().signal,
+					warn,
+					create: async () => {
+						creates += 1;
+						return endpoint;
+					},
+				}),
+			).resolves.toBe(endpoint);
+		}
+
+		expect(creates).toBe(2);
+		expect(warnings).toHaveLength(1);
+		expect(warnings[0]).toContain("hyper:ip");
+		expect(warnings[0]).toContain("without a trace recorder");
 	});
 
 	it("records an abandoned paid create separately from vendor failure", async () => {

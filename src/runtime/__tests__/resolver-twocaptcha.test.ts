@@ -181,7 +181,8 @@ describe("2captcha resolver vendor", () => {
 					vendor: "2captcha",
 					challenge_kind: "recaptcha_v2",
 					billable_units: 1,
-					attempt_index: 1,
+					billing: "metered",
+					vendor_index: 1,
 					outcome: "success",
 				}),
 			}),
@@ -280,13 +281,14 @@ describe("2captcha resolver vendor", () => {
 		expect(trace.getSpans()).toHaveLength(2);
 		const usageSpan = trace.getSpans().find((span) => span.name === "resolver.usage");
 		expect(Object.keys(usageSpan?.attributes ?? {}).sort()).toEqual([
-			"attempt_index",
 			"billable_units",
+			"billing",
 			"challenge_kind",
 			"duration_ms",
 			"endpoint",
 			"outcome",
 			"vendor",
+			"vendor_index",
 		]);
 		expect(usageSpan?.attributes.endpoint).toBe("twocaptcha:create_task");
 		const recordedAttributes = JSON.stringify(trace.getSpans().map((span) => span.attributes));

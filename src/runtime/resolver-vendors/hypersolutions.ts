@@ -7,12 +7,11 @@ import { assertResolverHostAllowed } from "./hosts.js";
 import {
 	ResolverChallengeVerdictError,
 	type ResolverIdentity,
+	type ResolverPaidUsageContext,
 	type ResolverVendorAdapter,
 	type ResolverVendorTransport,
 	ResolverVendorUnavailableError,
 } from "./types.js";
-
-type ResolverPaidUsageContext = NonNullable<Parameters<ResolverVendorAdapter["solve"]>[5]>;
 
 const HYPERSOLUTIONS_VENDOR_ID = "hypersolutions" as const;
 const HYPER_SBSD_URL = "https://akm.hypersolutions.co/sbsd";
@@ -387,6 +386,7 @@ export function createHypersolutionsResolverVendorAdapter(
 						vendor: HYPERSOLUTIONS_VENDOR_ID,
 						kind: challenge.kind,
 						endpoint: "hyper:sbsd_create",
+						round,
 						signal: operationSignal,
 						usage,
 						create: async () => {
