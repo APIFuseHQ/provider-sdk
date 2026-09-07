@@ -14,15 +14,14 @@ type ChallengeSolution = {
     readonly token: string;
 } | {
     readonly form: "cookies";
-    readonly kind?: never;
     readonly cookies: Readonly<Record<string, string>>;
     readonly userAgent: string;
     readonly expires?: number;
     readonly sdkEstimatedExpires?: number;
 } | {
-    readonly form: "cookies";
+    readonly form: "cookie_state";
     readonly kind: "akamai_sbsd";
-    readonly outcome: "payload_accepted_cookies_updated";
+    readonly outcome: "payload_accepted";
     readonly verified: false;
     readonly stateCookieName: "sbsd_o" | "bm_so";
     readonly expires?: number;
@@ -664,11 +663,11 @@ type StealthTransportResponse = {
 // dist/runtime/stealth.d.ts:24:17 - (ae-forgotten-export) The symbol "ChallengeSolution" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:57:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
 // dist/runtime/stealth.d.ts:59:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:902:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:907:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1189:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1226:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1226:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:903:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:908:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1190:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1227:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1227:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 

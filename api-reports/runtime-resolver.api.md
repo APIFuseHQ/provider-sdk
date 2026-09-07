@@ -33,15 +33,14 @@ type ChallengeSolution = {
     readonly token: string;
 } | {
     readonly form: "cookies";
-    readonly kind?: never;
     readonly cookies: Readonly<Record<string, string>>;
     readonly userAgent: string;
     readonly expires?: number;
     readonly sdkEstimatedExpires?: number;
 } | {
-    readonly form: "cookies";
+    readonly form: "cookie_state";
     readonly kind: "akamai_sbsd";
-    readonly outcome: "payload_accepted_cookies_updated";
+    readonly outcome: "payload_accepted";
     readonly verified: false;
     readonly stateCookieName: "sbsd_o" | "bm_so";
     readonly expires?: number;
@@ -259,7 +258,7 @@ type ProviderProxySessionAffinity = "request" | "operation" | "auth-flow" | "con
 // @public
 type ProviderResolverConfig = {
     readonly vendors?: readonly ProviderResolverVendor[];
-    readonly kinds: readonly Exclude<ProviderChallengeKind, "akamai_sensor" | "akamai_sbsd">[];
+    readonly kinds: readonly Exclude<ProviderChallengeKind, "akamai_sbsd">[];
     readonly clientProfile?: string;
 } | {
     readonly vendors?: readonly ProviderResolverVendor[];
@@ -496,9 +495,9 @@ interface TraceRecorder {
 // dist/runtime/resolver.d.ts:61:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:62:5 - (ae-forgotten-export) The symbol "ResolverIdentity" needs to be exported by the entry point resolver-public.d.ts
 // dist/runtime/resolver.d.ts:64:5 - (ae-forgotten-export) The symbol "ResolverVendorTransport" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:335:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:902:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
-// dist/types.d.ts:907:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:336:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:903:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point resolver-public.d.ts
+// dist/types.d.ts:908:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point resolver-public.d.ts
 
 // (No @packageDocumentation comment for this package)
 
