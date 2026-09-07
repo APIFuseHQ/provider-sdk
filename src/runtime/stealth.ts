@@ -600,6 +600,7 @@ function buildChromeHeaderTuples(options: {
 	requestUrl: string;
 	acceptLanguage?: string;
 	requestClass?: ChromeRequestClass;
+	userActivation?: boolean;
 }): HeaderTuple[] {
 	const callerEntries = normalizedCallerHeaderEntriesFromRecord(options.headers);
 	const caller = new Map(callerEntries);
@@ -636,7 +637,7 @@ function buildChromeHeaderTuples(options: {
 	]);
 	if (isNavigation) {
 		values.set("upgrade-insecure-requests", "1");
-		values.set("sec-fetch-user", "?1");
+		if (options.userActivation !== false) values.set("sec-fetch-user", "?1");
 	}
 	for (const [name, value] of callerEntries) values.set(name, value);
 	for (const name of ["content-type", "origin", "referer"] as const) {
@@ -1832,6 +1833,7 @@ function createSessionFetcher(
 										requestUrl: currentUrl,
 										acceptLanguage: clientOptions.stealth?.acceptLanguage,
 										requestClass: options.stealth?.requestClass,
+										userActivation: options.stealth?.userActivation,
 									})
 							: undefined;
 						const initialHeaders = normalizeHeaders({ ...(options.headers ?? {}) });

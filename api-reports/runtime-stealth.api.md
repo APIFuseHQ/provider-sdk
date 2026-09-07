@@ -453,6 +453,7 @@ interface StealthFetchOptions extends Omit<RequestOptions, "redirectPolicy" | "h
     redirect?: "follow" | "manual" | "error";
     stealth?: StealthProfileSelection & {
         requestClass?: "navigation" | "xhr" | "post";
+        userActivation?: boolean;
         insecureSkipVerify?: boolean;
     };
     throwOnHttpError?: boolean;
@@ -609,9 +610,9 @@ type StealthTransportResponse = {
 // dist/runtime/stealth.d.ts:47:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:886:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:891:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1196:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1246:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
-// dist/types.d.ts:1246:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1203:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1253:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point stealth.d.ts
+// dist/types.d.ts:1253:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point stealth.d.ts
 
 // (No @packageDocumentation comment for this package)
 
