@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
 import { defineProvider } from "../../define.js";
-import { createServerApp } from "../../server/serve.js";
+import { createServerApp } from "../../__tests__/helpers/server.js";
 import type { ProviderChallenge, ProviderContext, ResolverContext } from "../../types.js";
 import { getStealthProfile } from "../../stealth/profiles.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../proxy-telemetry.js";

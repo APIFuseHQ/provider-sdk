@@ -16,7 +16,7 @@ import {
 	extractVerificationCode,
 	resolveSttPrompt,
 } from "../runtime/stt.js";
-import { createServerApp } from "../server/serve.js";
+import { createServerApp } from "./helpers/server.js";
 import type { HttpClient, StealthClient, SttContext } from "../types.js";
 
 const previousEnv = {

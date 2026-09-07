@@ -97,6 +97,62 @@ export class SDKError extends ProviderError {
 	}
 }
 
+/** Raised when the remote provider engine speaks an incompatible protocol version. */
+export class ProviderEngineProtocolVersionError extends SDKError {
+	constructor(
+		public readonly receivedVersion: unknown,
+		public readonly expectedVersion: string,
+	) {
+		super(
+			`Provider engine protocol version mismatch: expected ${expectedVersion}, received ${String(receivedVersion)}`,
+			{
+				code: "PROVIDER_ENGINE_PROTOCOL_VERSION_MISMATCH",
+				details: { receivedVersion, expectedVersion },
+				fix: "Update @apifuse/provider-sdk or use a compatible APIFuse provider engine.",
+			},
+		);
+		this.name = "ProviderEngineProtocolVersionError";
+	}
+}
+
+/** Raised when the remote provider engine rejects a workspace API key. */
+export class ProviderEngineAuthenticationError extends SDKError {
+	constructor(message = "Provider engine authentication failed", options?: ProviderErrorOptions) {
+		super(message, {
+			code: "PROVIDER_ENGINE_AUTHENTICATION_FAILED",
+			fix: "Set APIFUSE__ENGINE__API_KEY to the workspace API key from your APIFuse bounty dashboard.",
+			...options,
+		});
+		this.name = "ProviderEngineAuthenticationError";
+	}
+}
+
+/** Raised when the remote engine cannot be reached. There is no local fallback. */
+export class ProviderEngineUnavailableError extends SDKError {
+	constructor(message = "The remote APIFuse provider engine is unavailable", cause?: Error) {
+		super(message, {
+			code: "PROVIDER_ENGINE_UNAVAILABLE",
+			retryable: true,
+			fix: "Check network access and the provider engine endpoint, then retry.",
+			...(cause ? { cause } : {}),
+		});
+		this.name = "ProviderEngineUnavailableError";
+	}
+}
+
+/** Raised when the engine refuses egress outside the workspace's pinned allowlist. */
+export class ProviderEgressDeniedError extends ProviderError {
+	constructor(message: string, details?: unknown) {
+		super(message, {
+			code: "PROVIDER_EGRESS_DENIED",
+			retryable: false,
+			details,
+			fix: "Use a host in the provider's pinned allowedHosts declaration, or request a trusted pin update.",
+		});
+		this.name = "ProviderEgressDeniedError";
+	}
+}
+
 /** Raised when persisted stealth cookies use a store version this SDK cannot read. */
 export class StealthCookieStoreVersionError extends SDKError {
 	constructor(public readonly version: unknown) {

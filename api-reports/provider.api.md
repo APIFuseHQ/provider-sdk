@@ -844,9 +844,6 @@ export function createFormCeremony(options: {
     mapCredential?: (input: Record<string, unknown>) => JsonObject;
 }): AuthFlowDefinition;
 
-// @public
-export function createInProcessProviderEngine(): ProviderEngine;
-
 // @public (undocumented)
 export function createProviderChoiceContext(options: CreateProviderChoiceContextOptions): ProviderChoiceContext;
 
@@ -877,8 +874,16 @@ interface CreateProviderChoiceTokenOptions<TPayload extends ProviderChoiceTokenP
     secret: string;
 }
 
+// Warning: (ae-forgotten-export) The symbol "ProviderSecretDeclaration" needs to be exported by the entry point provider.d.ts
+//
 // @public
-export function createProviderEnvironment(environment: Readonly<Record<string, string | undefined>>, declaredNames: readonly string[]): Readonly<Record<string, string>>;
+export function createProviderEnvironment(environment: Readonly<Record<string, string | undefined>>, declaredSecrets: readonly ProviderSecretDeclaration[]): Readonly<Record<string, string>>;
+
+// @public
+export function createRemoteProviderEngine(options: RemoteProviderEngineOptions): ProviderEngine;
+
+// @public (undocumented)
+export function createRemoteProviderEngineFromEnv(provider: ProviderDefinition, environment?: Readonly<Record<string, string | undefined>>): ProviderEngine;
 
 // @public (undocumented)
 export function createTestProviderChoiceContext(options: Omit<CreateProviderChoiceContextOptions, "masterSecret"> & {
@@ -1057,6 +1062,9 @@ interface DeclarativeStealthResponse {
     url?: string;
 }
 
+// @public
+export const DEFAULT_PROVIDER_ENGINE_URL: "https://engine.apifuse.com";
+
 // @public (undocumented)
 export function defineCredentialsAuth<TFields extends CredentialsAuthFields, TCredentialKeys extends readonly [string, ...string[]], TChallenges extends Record<string, CredentialsAuthChallengeDefinition<CredentialsAuthFields, TCredentialKeys, keyof TChallenges & string>> = Record<string, CredentialsAuthChallengeDefinition<CredentialsAuthFields, TCredentialKeys, string>>>(options: DefineCredentialsAuthOptions<TFields, TCredentialKeys, TChallenges>): DefinedCredentialsAuth;
 
@@ -1132,6 +1140,9 @@ type E164PhoneNumber = `+${string}`;
 
 // @public
 export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY__SMARTPROXY_APP_KEY", "APIFUSE__PROXY__NODEMAVEN_USERNAME", "APIFUSE__PROXY__NODEMAVEN_PASSWORD"];
+
+// @public
+export const ENGINE_OWNED_RUNTIME_ENV_NAMES: readonly ["APIFUSE__PROXY__SMARTPROXY_APP_KEY", "APIFUSE__PROXY__NODEMAVEN_USERNAME", "APIFUSE__PROXY__NODEMAVEN_PASSWORD", "APIFUSE__RESOLVER__2CAPTCHA__API_KEY", "APIFUSE__RESOLVER__CAPSOLVER__API_KEY", "APIFUSE__RESOLVER__CAPMONSTER__API_KEY", "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY", "APIFUSE__STT__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__API_KEY", "APIFUSE__CLOUDFLARE__ACCOUNT_ID", "APIFUSE__CACHE__KEY_PEPPER", "APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET"];
 
 // @public
 export const ENGINE_OWNED_TELEMETRY_ENV_NAMES: readonly ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES"];
@@ -1989,6 +2000,9 @@ export function isEngineOwnedEnvName(name: string): boolean;
 
 // @public (undocumented)
 export function isEngineOwnedProxyCredentialName(name: string): boolean;
+
+// @public (undocumented)
+export function isEngineOwnedRuntimeEnvName(name: string): boolean;
 
 // @public (undocumented)
 export function isEngineOwnedTelemetryEnvName(name: string): boolean;
@@ -3028,7 +3042,13 @@ type ProbeInterval = ms.StringValue;
 export const PROVIDER_CAPABILITY_KEYS: readonly ["env", "credential", "http", "files", "native", "cache", "state", "stealth", "browser", "auth", "ocr", "stt", "resolver", "choice"];
 
 // @public
+export const PROVIDER_ENGINE_API_KEY_ENV: "APIFUSE__ENGINE__API_KEY";
+
+// @public
 export const PROVIDER_ENGINE_PROTOCOL_VERSION: "provider-engine.v1";
+
+// @public
+export const PROVIDER_ENGINE_URL_ENV: "APIFUSE__ENGINE__URL";
 
 // @public (undocumented)
 const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
@@ -3460,7 +3480,6 @@ export interface ProviderDeclaration {
     // (undocumented)
     runtime: "standard" | "shared" | "browser";
     runtimeTarget?: ProviderRuntimeTarget;
-    // Warning: (ae-forgotten-export) The symbol "ProviderSecretDeclaration" needs to be exported by the entry point provider.d.ts
     secrets?: ProviderSecretDeclaration[];
     state?: Record<string, never> | true;
     // Warning: (ae-forgotten-export) The symbol "StealthProfileSelection" needs to be exported by the entry point provider.d.ts
@@ -3580,9 +3599,18 @@ export interface ProviderDeploymentOverrides {
 }
 
 // @public
+export class ProviderEgressDeniedError extends ProviderError {
+    constructor(message: string, details?: unknown);
+}
+
+// @public
 export interface ProviderEngine {
     // (undocumented)
     attach<TDeclaration extends object = Record<string, unknown>>(input: ProviderEngineAttachmentInput): ProviderContext<TDeclaration>;
+    // (undocumented)
+    openTraceStream?(): Promise<ReadableStream<Uint8Array>>;
+    // (undocumented)
+    ready?(): Promise<void>;
 }
 
 // @public (undocumented)
@@ -3591,6 +3619,19 @@ export interface ProviderEngineAttachmentInput {
     readonly bindings: ProviderEngineBindingCandidates;
     // (undocumented)
     readonly provider: ProviderDefinition;
+}
+
+// @public (undocumented)
+export interface ProviderEngineAuthentication {
+    // (undocumented)
+    readonly credential: string;
+    // (undocumented)
+    readonly scheme: "workspace-api-key";
+}
+
+// @public
+export class ProviderEngineAuthenticationError extends SDKError {
+    constructor(message?: string, options?: ProviderErrorOptions);
 }
 
 // @public (undocumented)
@@ -3612,6 +3653,10 @@ export interface ProviderEngineCapabilitySurface {
     // (undocumented)
     readonly cache: ProviderCache;
     // (undocumented)
+    readonly choice: ProviderChoiceContext;
+    // (undocumented)
+    readonly files: ProviderFilesContext;
+    // (undocumented)
     readonly http: HttpClient;
     // (undocumented)
     readonly ocr: OcrContext;
@@ -3626,9 +3671,57 @@ export interface ProviderEngineCapabilitySurface {
 }
 
 // @public (undocumented)
+export interface ProviderEngineHandshakeRequest extends ProviderEngineRequest {
+    // (undocumented)
+    readonly capability: "attachment";
+    // (undocumented)
+    readonly lane: "request";
+    // (undocumented)
+    readonly method: "attach";
+    // (undocumented)
+    readonly payload: {
+        readonly runtimeTarget: "vanilla" | "engine";
+        readonly capabilities: readonly ProviderCapabilityKey[];
+    };
+}
+
+// @public (undocumented)
+export type ProviderEngineProtocolCapability = ProviderCapabilityKey | "attachment" | "trace";
+
+// @public (undocumented)
+export type ProviderEngineProtocolRequest = ProviderEngineRequest | ProviderEngineHandshakeRequest;
+
+// @public
+export class ProviderEngineProtocolVersionError extends SDKError {
+    constructor(receivedVersion: unknown, expectedVersion: string);
+    // (undocumented)
+    readonly expectedVersion: string;
+    // (undocumented)
+    readonly receivedVersion: unknown;
+}
+
+// @public (undocumented)
+export interface ProviderEngineRemoteError {
+    // (undocumented)
+    readonly code: string;
+    // (undocumented)
+    readonly details?: unknown;
+    // (undocumented)
+    readonly fix?: string;
+    // (undocumented)
+    readonly message: string;
+    // (undocumented)
+    readonly retryable?: boolean;
+}
+
+// @public (undocumented)
 export interface ProviderEngineRequest {
     // (undocumented)
-    readonly capability: ProviderCapabilityKey;
+    readonly authentication: ProviderEngineAuthentication;
+    // (undocumented)
+    readonly capability: ProviderEngineProtocolCapability;
+    // (undocumented)
+    readonly lane: "request" | "stream" | "session";
     // (undocumented)
     readonly method: string;
     // (undocumented)
@@ -3648,6 +3741,19 @@ export interface ProviderEngineResidentSurface {
 }
 
 // @public (undocumented)
+export type ProviderEngineResponse<T = unknown> = {
+    readonly version: string;
+    readonly requestId: string;
+    readonly ok: true;
+    readonly result: T;
+} | {
+    readonly version: string;
+    readonly requestId: string;
+    readonly ok: false;
+    readonly error: ProviderEngineRemoteError;
+};
+
+// @public (undocumented)
 export interface ProviderEngineSession {
     // (undocumented)
     close(): Promise<void>;
@@ -3655,14 +3761,65 @@ export interface ProviderEngineSession {
     request<TResponse = unknown>(method: string, payload: unknown): Promise<TResponse>;
 }
 
+// @public (undocumented)
+export interface ProviderEngineTraceBody {
+    // (undocumented)
+    readonly bytes: number;
+    // (undocumented)
+    readonly data: string;
+    // (undocumented)
+    readonly encoding: "utf8" | "base64";
+    // (undocumented)
+    readonly truncated: boolean;
+}
+
+// @public
+export interface ProviderEngineTraceEvent {
+    // (undocumented)
+    readonly body?: ProviderEngineTraceBody;
+    // (undocumented)
+    readonly capability: Exclude<ProviderEngineProtocolCapability, "attachment" | "trace">;
+    // (undocumented)
+    readonly durationMs?: number;
+    // (undocumented)
+    readonly errorCode?: string;
+    // (undocumented)
+    readonly host: string;
+    // (undocumented)
+    readonly method: string;
+    // (undocumented)
+    readonly operationId?: string;
+    // (undocumented)
+    readonly path: string;
+    // (undocumented)
+    readonly phase: "request" | "response" | "error";
+    // (undocumented)
+    readonly requestBytes?: number;
+    // (undocumented)
+    readonly requestId: string;
+    // (undocumented)
+    readonly responseBytes?: number;
+    // (undocumented)
+    readonly retryCount?: number;
+    // (undocumented)
+    readonly status?: number;
+    // (undocumented)
+    readonly type: "provider-engine.trace";
+}
+
 // @public
 export interface ProviderEngineTransport {
     // (undocumented)
-    openSession?(request: ProviderEngineRequest): Promise<ProviderEngineSession>;
+    openSession?(request: ProviderEngineProtocolRequest): Promise<ProviderEngineSession>;
     // (undocumented)
-    openStream?(request: ProviderEngineRequest): Promise<ReadableStream<Uint8Array>>;
+    openStream?(request: ProviderEngineProtocolRequest): Promise<ReadableStream<Uint8Array>>;
     // (undocumented)
-    request<TResponse = unknown>(request: ProviderEngineRequest): Promise<TResponse>;
+    request(request: ProviderEngineProtocolRequest): Promise<unknown>;
+}
+
+// @public
+export class ProviderEngineUnavailableError extends SDKError {
+    constructor(message?: string, cause?: Error);
 }
 
 // @public (undocumented)
@@ -3969,6 +4126,7 @@ export type ProviderRuntimeTarget = "vanilla" | "engine";
 interface ProviderSecretDeclaration {
     // (undocumented)
     description?: string;
+    issuer: "apifuse" | "contributor";
     // (undocumented)
     name: string;
     // (undocumented)
@@ -4138,6 +4296,18 @@ const relativeDateNodeSchema: z.ZodObject<{
         }>;
     }, z.core.$strict>;
 }, z.core.$strict>;
+
+// @public (undocumented)
+export interface RemoteProviderEngineOptions {
+    // (undocumented)
+    readonly apiKey: string;
+    // (undocumented)
+    readonly endpoint?: string;
+    // (undocumented)
+    readonly provider: ProviderDefinition;
+    // (undocumented)
+    readonly transport?: ProviderEngineTransport;
+}
 
 // @public (undocumented)
 interface RequestOptions {
@@ -5007,6 +5177,11 @@ const scopedPredicateSchema: z.ZodUnion<readonly [z.ZodObject<{
 }, z.core.$strict>]>;
 
 // @public (undocumented)
+export class SDKError extends ProviderError {
+    constructor(message: string, options?: ProviderErrorOptions);
+}
+
+// @public (undocumented)
 export function sensitive<TSchema extends ZodType>(schema: TSchema, kind?: SensitiveFieldKind): TSchema;
 
 // @public (undocumented)
@@ -5585,6 +5760,9 @@ interface VerificationCodeExtractionResult {
     // (undocumented)
     normalizedText: string;
 }
+
+// @public (undocumented)
+export function workspaceApiKeyFromEnv(environment?: Readonly<Record<string, string | undefined>>): string;
 
 export { z }
 

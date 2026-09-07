@@ -11,12 +11,19 @@ import type {
 	ProviderContext,
 	ProviderDefinition,
 	ProviderMeta,
+	ProviderSecretDeclaration,
 	StealthFetchOptions,
 	StealthProfile,
 	StealthResponse,
 } from "../types.js";
 
 describe("ProviderDefinition types", () => {
+	it("requires an issuer on every provider secret declaration", () => {
+		// @ts-expect-error test-invalid: issuer is mandatory and never defaulted.
+		const missingIssuer: ProviderSecretDeclaration = { name: "UPSTREAM_API_KEY" };
+		void missingIssuer;
+		expect(true).toBe(true);
+	});
 	it("should allow valid provider meta", () => {
 		const meta = {
 			displayName: "AirKorea Realtime",
@@ -441,7 +448,7 @@ describe("ProviderDefinition types", () => {
 					}),
 				},
 			},
-			secrets: [{ name: "NOTION_OAUTH_CLIENT_ID", required: true }],
+			secrets: [{ name: "NOTION_OAUTH_CLIENT_ID", issuer: "contributor", required: true }],
 			credential: {
 				keys: ["access_token"],
 				storesReusableSecret: true,

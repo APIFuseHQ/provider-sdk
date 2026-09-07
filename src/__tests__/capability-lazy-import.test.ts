@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 
-import { createServerAppAsync } from "../server/serve.js";
+import { createServerAppAsync } from "./helpers/server.js";
 import type { ProviderDefinition, ResolverContext } from "../types.js";
 
 const preload = new URL("./fixtures/capability-import-guard-preload.ts", import.meta.url).pathname;

@@ -12,6 +12,7 @@ import {
 	StealthCookieStoreVersionError,
 	TransportError,
 } from "../errors.js";
+import { createInternalTestProviderEngine } from "../internal/in-process-engine.js";
 import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
 import { normalizeResponse } from "../runtime/stealth.js";
 import {
@@ -3312,7 +3313,9 @@ describe("gateway stealth abort wiring", () => {
 
 	it("propagates the operation request signal into ctx.stealth cancellation", async () => {
 		const { createServerAppAsync } = await import("../server/serve.js");
-		const app = await createServerAppAsync(createStealthAbortProvider());
+		const app = await createServerAppAsync(createStealthAbortProvider(), {
+			engine: createInternalTestProviderEngine(),
+		});
 		const response = await startGatewayRequestAndAbort((signal) =>
 			app.request("/v1/cancelStealth", {
 				method: "POST",
@@ -3341,7 +3344,9 @@ describe("gateway stealth abort wiring", () => {
 
 	it("propagates the auth-flow request signal into ctx.stealth cancellation", async () => {
 		const { createServerAppAsync } = await import("../server/serve.js");
-		const app = await createServerAppAsync(createStealthAbortProvider());
+		const app = await createServerAppAsync(createStealthAbortProvider(), {
+			engine: createInternalTestProviderEngine(),
+		});
 		const response = await startGatewayRequestAndAbort((signal) =>
 			app.request("/auth/start", {
 				method: "POST",

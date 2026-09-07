@@ -2,7 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import { z } from "zod";
 
 import { DECLARATION_INVALID_CODE, DECLARATION_RULE_IDS } from "../declaration-validation.js";
-import { createServerApp, type ProviderServerLogEvent, serve } from "../server/serve.js";
+import { createServerApp, type ProviderServerLogEvent, serve } from "./helpers/server.js";
 import type { ProviderDefinition } from "../types.js";
 
 function provider(): ProviderDefinition {

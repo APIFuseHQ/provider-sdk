@@ -154,7 +154,9 @@ describe("provider create planning", () => {
 		// No stray CLAUDE.md file plan entry and no legacy top-level skills/.
 		const relativePaths = plan.files.map((file) => file.path.slice(plan.providerRoot.length + 1));
 		expect(relativePaths.filter((path) => path === "CLAUDE.md")).toHaveLength(1);
-		expect(relativePaths.some((path) => path === "skills" || path.startsWith("skills/"))).toBeFalse();
+		expect(
+			relativePaths.some((path) => path === "skills" || path.startsWith("skills/")),
+		).toBeFalse();
 
 		const sdkVersion = (
 			JSON.parse(readFileSync(resolve(import.meta.dir, "../../package.json"), "utf8")) as {
@@ -369,6 +371,11 @@ describe("provider create planning", () => {
 		expect(readme?.content).toContain("wreq-js");
 		expect(readme?.content).toContain("bunx playwright install chromium");
 		expect(readme?.content).toContain("bun run submit-check");
+		expect(readme?.content).toContain("workspace API key");
+		const environmentExample = findGeneratedFile(plan, ".env.example");
+		expect(environmentExample?.content).toContain("APIFUSE__ENGINE__API_KEY=");
+		expect(environmentExample?.content).not.toContain("APIFUSE__PROXY__");
+		expect(environmentExample?.content).not.toContain("APIFUSE__RESOLVER__");
 	});
 
 	it("renders split provider module layout with index as composition root", async () => {
@@ -385,6 +392,7 @@ describe("provider create planning", () => {
 		expect(generatedPaths).toContain("index.ts");
 		expect(generatedPaths).toContain(".dockerignore");
 		expect(generatedPaths).toContain(".gitignore");
+		expect(generatedPaths).toContain(".env.example");
 		expect(generatedPaths).toContain("meta.ts");
 		expect(generatedPaths).toContain(join("operations", "index.ts"));
 		expect(generatedPaths).toContain(join("operations", "ping.ts"));

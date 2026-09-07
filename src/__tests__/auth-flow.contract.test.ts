@@ -4,7 +4,7 @@ import { z } from "zod";
 import { AuthAbortError, createAuthFlowHelpers } from "../auth.js";
 import { createMagicLinkCeremony } from "../ceremonies/index.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
-import { createServerApp } from "../server/serve.js";
+import { createServerApp } from "./helpers/server.js";
 import type {
 	AuthTurn,
 	ProviderDefinition,

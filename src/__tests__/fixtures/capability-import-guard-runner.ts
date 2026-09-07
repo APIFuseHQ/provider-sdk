@@ -4,6 +4,7 @@ import { z } from "zod";
 import { createServerApp, serve } from "../../index.js";
 import type { ProviderDefinition } from "../../index.js";
 import type { ProviderServerLogEvent } from "../../server/serve.js";
+import { createInternalTestProviderEngine } from "../../internal/in-process-engine.js";
 import type { CapabilityImportGuardState } from "./capability-import-guard-state.js";
 
 const mode = process.argv[2] ?? "standard";
@@ -138,7 +139,7 @@ async function assertUndeclaredCapabilityResponse(
 
 if (mode === "sync-esm") {
 	try {
-		createServerApp(provider);
+		createServerApp(provider, { engine: createInternalTestProviderEngine() });
 		throw new Error("Expected synchronous capability loading to fail");
 	} catch (error) {
 		assert(error && typeof error === "object", "Expected a structured synchronous load error");
@@ -156,7 +157,11 @@ if (mode === "sync-esm") {
 if (["browser", "native", "resolver", "stealth", "aggregate", "primitive"].includes(mode)) {
 	const listen = spyOn(Bun, "serve");
 	try {
-		await serve(provider, { port: 0, shutdown: { signals: false } });
+		await serve(provider, {
+			port: 0,
+			shutdown: { signals: false },
+			engine: createInternalTestProviderEngine(),
+		});
 		throw new Error(`Expected ${mode} capability startup to fail`);
 	} catch (error) {
 		assert(error && typeof error === "object", "Expected a structured capability load error");
@@ -219,6 +224,7 @@ if (mode === "tier2-stealth-rejection") {
 }
 
 const handle = await serve(provider, {
+	engine: createInternalTestProviderEngine(),
 	port: 0,
 	logger: (event) => logs.push(event),
 	shutdown: { signals: false },

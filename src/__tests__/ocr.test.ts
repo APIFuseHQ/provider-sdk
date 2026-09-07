@@ -19,7 +19,7 @@ import {
 	extractCaptchaCandidates,
 	OPENAI_COMPATIBLE_OCR_BACKEND,
 } from "../runtime/ocr.js";
-import { createServerApp } from "../server/serve.js";
+import { createServerApp } from "./helpers/server.js";
 import type { HttpClient, OcrContext, StealthClient } from "../types.js";
 
 const image = { kind: "base64", data: "aW1hZ2U=", mediaType: "image/png" } as const;

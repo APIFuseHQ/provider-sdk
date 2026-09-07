@@ -16,7 +16,7 @@ import {
 	PROVIDER_RUNTIME_SELF_TEST_MASTER_SECRET_ENV,
 	resolveSelfTestMasterSecrets,
 } from "../server/self-test-token.js";
-import { createServerApp } from "../server/serve.js";
+import { createServerApp } from "./helpers/server.js";
 import type { ProviderDefinition } from "../types.js";
 import { createProviderDefinitionDouble } from "./test-utils.js";
 
@@ -39,7 +39,7 @@ function createProvider(overrides: { caseName?: string } = {}): ProviderDefiniti
 		version: "1.0.0",
 		runtime: "standard",
 		http: true,
-		secrets: [{ name: UPSTREAM_SECRET_ENV }],
+		secrets: [{ name: UPSTREAM_SECRET_ENV, issuer: "contributor" }],
 		credential: { keys: ["phone"] },
 		meta: {
 			displayName: "Self Test Provider",
@@ -183,18 +183,20 @@ function postSelfTest(
 	token: string | "no-token" = validToken,
 	path: string = SELF_TEST_PATH,
 ): Promise<Response> {
-	return Promise.resolve(app.request(path, {
-		method: "POST",
-		headers: {
-			"content-type": "application/json",
-			...(token === "no-token" ? {} : { authorization: `Bearer ${token}` }),
-		},
-		body: JSON.stringify({
-			schemaVersion: 1,
-			requestId: "req-test",
-			...body,
+	return Promise.resolve(
+		app.request(path, {
+			method: "POST",
+			headers: {
+				"content-type": "application/json",
+				...(token === "no-token" ? {} : { authorization: `Bearer ${token}` }),
+			},
+			body: JSON.stringify({
+				schemaVersion: 1,
+				requestId: "req-test",
+				...body,
+			}),
 		}),
-	}));
+	);
 }
 
 describe("self-test internal listener", () => {

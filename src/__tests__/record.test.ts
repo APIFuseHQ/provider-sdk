@@ -14,6 +14,13 @@ import {
 } from "../stream-evidence.js";
 
 const repoRoot = dirname(dirname(import.meta.dir));
+const internalRecordCli = join(
+	repoRoot,
+	"src",
+	"__tests__",
+	"fixtures",
+	"apifuse-record-internal.ts",
+);
 const tempRoot = join(repoRoot, ".tmp-provider-sdk-record-tests");
 const tempDirs: string[] = [];
 
@@ -174,7 +181,7 @@ export default {
 			const process = Bun.spawn({
 				cmd: [
 					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
+					internalRecordCli,
 					"record",
 					providerDir,
 					"--operation",
@@ -245,14 +252,7 @@ export default {
 			);
 
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"lookup",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "lookup"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -311,14 +311,7 @@ export default {
 			);
 
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"lookup",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "lookup"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -383,14 +376,7 @@ export default {
 			);
 
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"events",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "events"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -450,14 +436,7 @@ export default {
 			);
 
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"lookup",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "lookup"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -553,14 +532,7 @@ export default {
 			);
 
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"download",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "download"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -675,14 +647,7 @@ export default {
 			);
 
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"download",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "download"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -772,14 +737,7 @@ export default {
 			);
 
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"download",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "download"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -865,7 +823,7 @@ export default { id: "record-stream-sensitive-params", version: "1.0.0", runtime
 			const process = Bun.spawn({
 				cmd: [
 					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
+					internalRecordCli,
 					"record",
 					providerDir,
 					"--operation",
@@ -931,14 +889,7 @@ export default { id: "record-error-redaction", version: "1.0.0", runtime: "stand
 `,
 			);
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"lookup",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "lookup"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -1030,15 +981,7 @@ export default {
 			);
 
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"lookup",
-					"--append",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "lookup", "--append"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -1129,7 +1072,7 @@ export default {
 			const process = Bun.spawn({
 				cmd: [
 					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
+					internalRecordCli,
 					"record",
 					providerDir,
 					"--operation",
@@ -1217,7 +1160,7 @@ export default {
 			const process = Bun.spawn({
 				cmd: [
 					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
+					internalRecordCli,
 					"record",
 					providerDir,
 					"--operation",
@@ -1294,14 +1237,7 @@ export default { id: "record-default", version: "1.0.0", runtime: "standard", ht
 `,
 			);
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"lookup",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "lookup"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",
@@ -1363,14 +1299,7 @@ export default { id: "record-invalid", version: "1.0.0", runtime: "standard", ht
 `,
 			);
 			const process = Bun.spawn({
-				cmd: [
-					"bun",
-					join(repoRoot, "bin", "apifuse.ts"),
-					"record",
-					providerDir,
-					"--operation",
-					"lookup",
-				],
+				cmd: ["bun", internalRecordCli, "record", providerDir, "--operation", "lookup"],
 				cwd: repoRoot,
 				stdout: "pipe",
 				stderr: "pipe",

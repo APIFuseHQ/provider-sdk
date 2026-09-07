@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 
 import { createProviderContext as createDevProviderContext } from "../../bin/apifuse-dev.js";
 import { createCaptureContext } from "../../bin/apifuse-record.js";
+import { createInternalTestProviderEngine } from "../internal/in-process-engine.js";
 import { defineProvider, z } from "../index.js";
 import { NODEMAVEN_PASSWORD_ENV, NODEMAVEN_USERNAME_ENV } from "../runtime/proxy-nodemaven.js";
 import { APIFUSE__CDP_POOL__URL, swapResolverAdapterFactoryForTests } from "../runtime/resolver.js";
@@ -29,7 +30,12 @@ const harnesses = [
 	{
 		name: "apifuse record",
 		createContext(provider: ProviderDefinition): ProviderContext {
-			return createCaptureContext(provider, "https://example.com", true).ctx;
+			return createCaptureContext(
+				provider,
+				"https://example.com",
+				true,
+				createInternalTestProviderEngine(),
+			).ctx;
 		},
 		expectedSolveCalls: 2,
 		expectedSecondToken: "token-2",
@@ -37,7 +43,7 @@ const harnesses = [
 	{
 		name: "apifuse dev",
 		createContext(provider: ProviderDefinition): ProviderContext {
-			return createDevProviderContext(provider).ctx;
+			return createDevProviderContext(provider, createInternalTestProviderEngine()).ctx;
 		},
 		expectedSolveCalls: 1,
 		expectedSecondToken: "token-1",
@@ -90,7 +96,8 @@ function createProvider(options: {
 			descriptionKey: "resolver-cli-wiring.description",
 			category: "test",
 		},
-	})({ operations: {
+	})({
+		operations: {
 			lookup: {
 				riskClass: "read",
 				input: z.object({}),
@@ -98,7 +105,8 @@ function createProvider(options: {
 				handler: async () => ({ ok: true }),
 				healthCheckUnsupported: { reason: "CLI context unit test" },
 			},
-		} });
+		},
+	});
 }
 
 describe("resolver CLI wiring", () => {
@@ -174,7 +182,9 @@ describe("resolver CLI wiring", () => {
 		});
 	});
 
-	it.each(harnessTable)("preserves required-proxy fail-closed behavior in $name", async (harness) => {
+	it.each(
+		harnessTable,
+	)("preserves required-proxy fail-closed behavior in $name", async (harness) => {
 		let solveCalls = 0;
 		const adapter: ResolverVendorAdapter = {
 			id: "browser",
