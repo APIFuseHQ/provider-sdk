@@ -33,6 +33,10 @@ import {
 	createBrowserResolverVendorAdapter,
 	swapBrowserResolverClientFactoryForTests,
 } from "../resolver-vendors/browser.js";
+import {
+	assertResolverVendorTransportHosts,
+	RESOLVER_VENDOR_TRANSPORT_HOSTS,
+} from "../resolver-vendors/hosts.js";
 import { createTwoCaptchaResolverVendorAdapter } from "../resolver-vendors/twocaptcha.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
@@ -1220,6 +1224,87 @@ describe("resolver vendor chain", () => {
 				message: 'Resolver vendor "custom" may not declare transport host "ip.hypersolutions.co"',
 			}),
 		);
+	});
+
+	it("keeps the SDK-owned host table immutable through the registry adapter's alias", () => {
+		// The registry Hyper adapter hands the table's own entry out as transportAllowedHosts.
+		const createHyperAdapter = RESOLVER_ADAPTER_REGISTRY.hypersolutions;
+		if (!createHyperAdapter) throw new Error("Missing registered hypersolutions adapter factory");
+		const adapter = createHyperAdapter("hyper-key", 1_000, ["upstream.example"]);
+		expect(adapter.transportAllowedHosts).toBe(RESOLVER_VENDOR_TRANSPORT_HOSTS.hypersolutions);
+		expect(Object.isFrozen(RESOLVER_VENDOR_TRANSPORT_HOSTS)).toBe(true);
+		for (const hosts of Object.values(RESOLVER_VENDOR_TRANSPORT_HOSTS)) {
+			expect(Object.isFrozen(hosts)).toBe(true);
+		}
+
+		// A holder that casts away `readonly` cannot widen the boundary for later adapters.
+		expect(() => Array.prototype.push.call(adapter.transportAllowedHosts, "evil.example")).toThrow(
+			TypeError,
+		);
+		expect(RESOLVER_VENDOR_TRANSPORT_HOSTS.hypersolutions).toEqual(["ip.hypersolutions.co"]);
+		expect(() => assertResolverVendorTransportHosts("hypersolutions", ["evil.example"])).toThrow(
+			expect.objectContaining({ code: "RESOLVER_VENDOR_HOST_NOT_ALLOWED" }),
+		);
+	});
+
+	it("rejects a vendor id outside the table with the typed boundary error", () => {
+		const notAllowed = expect.objectContaining({
+			name: "ProviderError",
+			code: "RESOLVER_VENDOR_HOST_NOT_ALLOWED",
+		});
+		for (const vendor of ["bogus", "constructor", "__proto__"]) {
+			expect(() =>
+				assertResolverVendorTransportHosts(vendor as ProviderResolverVendor, ["evil.example"]),
+			).toThrow(notAllowed);
+		}
+		expect(() =>
+			assertResolverVendorTransportHosts("bogus" as ProviderResolverVendor, []),
+		).not.toThrow();
+	});
+
+	it("re-validates transportAllowedHosts on every attempt, not only at construction", async () => {
+		let fetchCalls = 0;
+		const underlyingTransport: ResolverVendorTransport = {
+			async fetch() {
+				fetchCalls += 1;
+				return { status: 200, headers: {}, body: "", cookies: [] };
+			},
+		};
+		let declaredHosts: readonly string[] = [];
+		const driftingAdapter: ResolverVendorAdapter = {
+			id: "custom",
+			requiresTransport: true,
+			get transportAllowedHosts() {
+				return declaredHosts;
+			},
+			supports: (kind) => kind === "akamai_sensor",
+			async solve(_challenge, _identity, signal, _traceRecorder, transport) {
+				await transport?.fetch("https://evil.example/", { method: "GET", signal });
+				return { form: "token", token: "unreachable" };
+			},
+		};
+		const resolver = createResolverClient({
+			adapters: [driftingAdapter],
+			kinds: ["akamai_sensor"],
+			allowedHosts: ["sensor.example.com"],
+			transport: underlyingTransport,
+		});
+
+		// The declaration drifts after construction admitted it; the attempt still fails closed.
+		declaredHosts = ["evil.example"];
+		await expect(
+			resolver.solve({
+				kind: "akamai_sensor",
+				pageUrl: "https://sensor.example.com/",
+				scriptUrl: "https://sensor.example.com/akamai/sensor.js",
+			}),
+		).rejects.toThrow(
+			expect.objectContaining({
+				code: "RESOLVER_VENDOR_HOST_NOT_ALLOWED",
+				message: 'Resolver vendor "custom" may not declare transport host "evil.example"',
+			}),
+		);
+		expect(fetchCalls).toBe(0);
 	});
 
 	it("revokes the bound transport once the adapter's solve settles", async () => {

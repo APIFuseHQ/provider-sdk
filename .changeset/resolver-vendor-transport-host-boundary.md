@@ -18,5 +18,7 @@ reference fails `fetch` and `getCookie` with `RESOLVER_TRANSPORT_REVOKED`.
 Behaviour change for callers of `createResolverClient` that supply adapters
 declaring hosts outside the table: the adapter is no longer admitted. Route
 such calls through the provider's declared `allowedHosts` (the only other
-source of bound-transport hosts) or add the host to the SDK-owned table for that
-vendor. Registry adapters are unaffected. No public type or signature changes.
+source of bound-transport hosts), or open an SDK change adding the host to that
+vendor's entry in `RESOLVER_VENDOR_TRANSPORT_HOSTS` (internal, not exported;
+the table is frozen at runtime). Registry adapters are unaffected. No public
+type or signature changes.

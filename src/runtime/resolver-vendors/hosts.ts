@@ -8,15 +8,18 @@ import type { ProviderResolverVendor } from "../../types.js";
  * declaration outside its vendor's entry is rejected, whoever supplied the adapter.
  * Only Hyper's observed-IP reflector rides the identity-bound transport (ADR-0008
  * v1.1 amend, PR #251); every other vendor talks to its own service directly.
+ * Frozen at runtime, not just in the type: the Hyper adapter hands its entry out by
+ * reference as `transportAllowedHosts`, so a mutable table would let any holder of a
+ * registry adapter widen the boundary for every later adapter in the process.
  */
-export const RESOLVER_VENDOR_TRANSPORT_HOSTS = {
-	"2captcha": [],
-	browser: [],
-	capmonster: [],
-	capsolver: [],
-	custom: [],
-	hypersolutions: ["ip.hypersolutions.co"],
-} as const satisfies Readonly<Record<ProviderResolverVendor, readonly string[]>>;
+export const RESOLVER_VENDOR_TRANSPORT_HOSTS = Object.freeze({
+	"2captcha": Object.freeze([] as const),
+	browser: Object.freeze([] as const),
+	capmonster: Object.freeze([] as const),
+	capsolver: Object.freeze([] as const),
+	custom: Object.freeze([] as const),
+	hypersolutions: Object.freeze(["ip.hypersolutions.co"] as const),
+}) satisfies Readonly<Record<ProviderResolverVendor, readonly string[]>>;
 
 export function normalizedResolverHostname(hostname: string): string {
 	return hostname.trim().toLowerCase().replace(/\.$/, "");
@@ -59,7 +62,11 @@ export function assertResolverVendorTransportHosts(
 	vendor: ProviderResolverVendor,
 	declaredHosts: readonly string[],
 ): void {
-	const ownedHosts: readonly string[] = RESOLVER_VENDOR_TRANSPORT_HOSTS[vendor];
+	// A vendor id outside the table (only reachable from untyped callers) owns no hosts and
+	// is rejected below like any other overreach; `hasOwn` keeps prototype keys out too.
+	const ownedHosts: readonly string[] = Object.hasOwn(RESOLVER_VENDOR_TRANSPORT_HOSTS, vendor)
+		? RESOLVER_VENDOR_TRANSPORT_HOSTS[vendor]
+		: [];
 	for (const declaredHost of declaredHosts) {
 		const normalizedHost = normalizedResolverHostname(declaredHost);
 		if (ownedHosts.some((host) => normalizedResolverHostname(host) === normalizedHost)) continue;
