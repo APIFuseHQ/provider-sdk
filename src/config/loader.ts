@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "../runtime/diagnostic-env.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -256,8 +257,8 @@ const SMARTPROXY_EXTRACTION_SOFT_REFRESH_MS = 10_000;
 
 function redisUrlFromEnv(): string | undefined {
 	return (
-		process.env.APIFUSE__PROVIDER__CACHE_REDIS_URL?.trim() ||
-		process.env[REDIS_URL_ENV]?.trim() ||
+		readDiagnosticEnv(PROVIDER_CACHE_REDIS_URL_ENV)?.trim() ||
+		readDiagnosticEnv(REDIS_URL_ENV)?.trim() ||
 		undefined
 	);
 }
@@ -268,9 +269,9 @@ export function providerCacheRedisUrlFromEnv(): string | undefined {
 
 export function providerStateRedisUrlFromEnv(): string | undefined {
 	return (
-		process.env[PROVIDER_STATE_REDIS_URL_ENV]?.trim() ||
-		process.env[PROVIDER_CACHE_REDIS_URL_ENV]?.trim() ||
-		process.env[REDIS_URL_ENV]?.trim() ||
+		readDiagnosticEnv(PROVIDER_STATE_REDIS_URL_ENV)?.trim() ||
+		readDiagnosticEnv(PROVIDER_CACHE_REDIS_URL_ENV)?.trim() ||
+		readDiagnosticEnv(REDIS_URL_ENV)?.trim() ||
 		undefined
 	);
 }
@@ -693,12 +694,12 @@ export async function resolveWithVendor(
 		const startedAt = Date.now();
 		const username = (
 			context.credentials === undefined
-				? process.env[NODEMAVEN_USERNAME_ENV]
+				? readDiagnosticEnv(NODEMAVEN_USERNAME_ENV)
 				: context.credentials[NODEMAVEN_USERNAME_ENV]
 		)?.trim();
 		const password = (
 			context.credentials === undefined
-				? process.env[NODEMAVEN_PASSWORD_ENV]
+				? readDiagnosticEnv(NODEMAVEN_PASSWORD_ENV)
 				: context.credentials[NODEMAVEN_PASSWORD_ENV]
 		)?.trim();
 		const filter =
@@ -749,7 +750,7 @@ export async function resolveWithVendor(
 	// smartproxy allocation-style vendor.
 	const appKey = (
 		context.credentials === undefined
-			? process.env[SMARTPROXY_APP_KEY_ENV]
+			? readDiagnosticEnv(SMARTPROXY_APP_KEY_ENV)
 			: context.credentials[SMARTPROXY_APP_KEY_ENV]
 	)?.trim();
 	if (!appKey) {
@@ -838,18 +839,18 @@ function vendorHasCredentials(
 	if (vendor === "nodemaven") {
 		return Boolean(
 			(credentials === undefined
-				? process.env[NODEMAVEN_USERNAME_ENV]
+				? readDiagnosticEnv(NODEMAVEN_USERNAME_ENV)
 				: credentials[NODEMAVEN_USERNAME_ENV]
 			)?.trim() &&
 				(credentials === undefined
-					? process.env[NODEMAVEN_PASSWORD_ENV]
+					? readDiagnosticEnv(NODEMAVEN_PASSWORD_ENV)
 					: credentials[NODEMAVEN_PASSWORD_ENV]
 				)?.trim(),
 		);
 	}
 	return Boolean(
 		(credentials === undefined
-			? process.env[SMARTPROXY_APP_KEY_ENV]
+			? readDiagnosticEnv(SMARTPROXY_APP_KEY_ENV)
 			: credentials[SMARTPROXY_APP_KEY_ENV]
 		)?.trim(),
 	);
@@ -1757,7 +1758,7 @@ function markSmartproxyCacheInvalidated(options: ProxyResolutionOptions = {}): s
 	const lifetimeMinutes = resolveSmartproxyLifetime(policy);
 	const appKey = (
 		options.engineCredentials === undefined
-			? process.env[SMARTPROXY_APP_KEY_ENV]
+			? readDiagnosticEnv(SMARTPROXY_APP_KEY_ENV)
 			: options.engineCredentials[SMARTPROXY_APP_KEY_ENV]
 	)?.trim();
 	if (!appKey) return undefined;

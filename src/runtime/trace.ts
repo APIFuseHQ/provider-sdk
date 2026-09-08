@@ -1,12 +1,25 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-
+import { sanitizeSpanNameForOutput } from "../trace-sanitization.js";
 import type {
 	TraceContext as BaseTraceContext,
 	TraceAttributeValue,
 	TraceConfig,
 	TraceSpan,
 } from "../types.js";
+import {
+	type DiagnosticRedactor,
+	diagnosticStructuredRedactor,
+	redactDiagnosticAttributeKey,
+	copyDiagnosticAttributeTypes,
+	redactedKeyAllocator,
+	isRedactedKey,
+	redactCriticalDiagnosticText,
+	diagnosticAttributeRedactor,
+	REDACTION_FAILED,
+	redactDiagnosticText,
+} from "./diagnostic-redactor.js";
 import { exportSpansOTLP, type OTLPExportOptions } from "./otlp.js";
+import { REDACTED_QUERY_VALUE } from "./request-options.js";
 
 export type SpanAttributeValue = TraceAttributeValue;
 
@@ -19,6 +32,8 @@ export interface TraceContext extends BaseTraceContext {
 export interface CreateTraceContextOptions {
 	maxSpans?: number;
 	onSpan?: (span: Span) => void;
+	/** Redacts diagnostic attribute values and errors before recording or calling onSpan. */
+	redact?: DiagnosticRedactor;
 	exportOptions?: OTLPExportOptions;
 	resourceAttributes?: Record<string, string>;
 	/** W3C-compatible 32-character lowercase hexadecimal trace id used for export. */
@@ -42,7 +57,7 @@ type PendingSpan = {
 	startedAt: number;
 	parentId?: string;
 	sequence: number;
-	attributes: Record<string, SpanAttributeValue>;
+	attributes: Record<string, SpanAttributeValue | bigint>;
 };
 
 type CompletedSpanEntry = {
@@ -52,14 +67,22 @@ type CompletedSpanEntry = {
 	exported: boolean;
 };
 
+const TRACE_RESOURCE_ATTRIBUTE_SANITIZER = Symbol.for(
+	"@apifuse/provider-sdk/runtime/trace-resource-attribute-sanitizer",
+);
+
+type ResourceAttributesWithSanitizer = Record<string, string> & {
+	[TRACE_RESOURCE_ATTRIBUTE_SANITIZER]?: (
+		attributes: Record<string, string>,
+	) => Record<string, string>;
+};
+
 export interface TraceRecorder {
 	runSpan<T>(name: string, fn: () => Promise<T> | T, options?: SpanHookOptions<T>): Promise<T>;
 }
 
 export const TRACE_RECORDER = Symbol.for("@apifuse/provider-sdk/runtime/trace-recorder");
-const TRACE_EXPORT_METADATA = Symbol.for(
-	"@apifuse/provider-sdk/runtime/trace-export-metadata",
-);
+const TRACE_EXPORT_METADATA = Symbol.for("@apifuse/provider-sdk/runtime/trace-export-metadata");
 
 type TraceExportMetadata = {
 	update(input: { traceId?: string; resourceAttributes?: Record<string, string> }): void;
@@ -109,30 +132,104 @@ export function resolveTraceContextOptions(config?: TraceConfig): CreateTraceCon
 	};
 }
 
-function normalizeAttributeValue(value: unknown): SpanAttributeValue | undefined {
-	if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-		return value;
+function normalizeAttributeValue(
+	value: unknown,
+	redact?: DiagnosticRedactor,
+	retainBigints = false,
+): SpanAttributeValue | bigint | undefined {
+	if (typeof value === "number" || typeof value === "boolean") {
+		// Typed columns are contracts: unlike string tokens, number/boolean/bigint
+		// values only consult the registry at >=8 characters in string form.
+		const text = String(value);
+		if (text.length < 8) return value;
+		const redacted = redactDiagnosticText(text, diagnosticStructuredRedactor(redact));
+		return redacted === text ? value : redacted;
+	}
+	if (typeof value === "bigint") {
+		// Bigints are not valid OTLP attribute primitives, so retain their prior
+		// string normalization while still checking their diagnostic form.
+		const text = String(value);
+		if (text.length < 8) return retainBigints ? value : text;
+		const redacted = redactDiagnosticText(text, diagnosticStructuredRedactor(redact));
+		return retainBigints && redacted === text ? value : redacted;
 	}
 
 	if (value === null || value === undefined) {
 		return undefined;
 	}
 
-	return String(value);
+	return redactDiagnosticText(String(value), redact);
 }
 
 function normalizeAttributes(
+	attributes: Record<string, unknown> | undefined,
+	redact: DiagnosticRedactor | undefined,
+	retainBigints: true,
+): Record<string, SpanAttributeValue | bigint>;
+function normalizeAttributes(
 	attributes?: Record<string, unknown>,
-): Record<string, SpanAttributeValue> {
+	redact?: DiagnosticRedactor,
+): Record<string, SpanAttributeValue>;
+function normalizeAttributes(
+	attributes?: Record<string, unknown>,
+	redact?: DiagnosticRedactor,
+	retainBigints = false,
+): Record<string, SpanAttributeValue | bigint> {
 	if (!attributes) {
 		return {};
 	}
 
+	const nextKey = redactedKeyAllocator(Object.keys(attributes));
 	const normalizedEntries = Object.entries(attributes)
-		.map(([key, value]) => [key, normalizeAttributeValue(value)] as const)
-		.filter((entry): entry is readonly [string, SpanAttributeValue] => entry[1] !== undefined);
+		.map(([key, value]) => {
+			const redactedKey = isRedactedKey(key) ? key : redactDiagnosticAttributeKey(key, redact);
+			const keyChanged = redactedKey !== key;
+			const normalizedKey = keyChanged ? nextKey() : key;
+			// Once a key changes, its original sensitivity classification is no
+			// longer available to later output sanitizers. Suppress the value here.
+			const normalizedValue = keyChanged
+				? redactedKey === REDACTION_FAILED
+					? REDACTION_FAILED
+					: REDACTED_QUERY_VALUE
+				: normalizeAttributeValue(value, diagnosticAttributeRedactor(key, redact), retainBigints);
+			return [normalizedKey, normalizedValue] as const;
+		})
+		.filter(
+			(entry): entry is readonly [string, SpanAttributeValue | bigint] => entry[1] !== undefined,
+		);
 
-	return Object.fromEntries(normalizedEntries);
+	return copyDiagnosticAttributeTypes(attributes, Object.fromEntries(normalizedEntries));
+}
+
+function prepareResourceAttributesForExport(
+	attributes: Record<string, string> | undefined,
+	redact?: DiagnosticRedactor,
+	sanitize?: (attributes: Record<string, string>) => Record<string, string>,
+): Record<string, string> | undefined {
+	if (!attributes) return undefined;
+	if (sanitize) {
+		const sanitized = sanitize({ ...attributes });
+		if (!sanitized || typeof sanitized !== "object") {
+			throw new Error("resource attribute sanitizer returned no attributes");
+		}
+		return sanitized;
+	}
+	const nextKey = redactedKeyAllocator(Object.keys(attributes));
+	return Object.fromEntries(
+		Object.entries(attributes).map(([key, value]) => {
+			const redactedKey = isRedactedKey(key) ? key : redactDiagnosticAttributeKey(key, redact);
+			const keyChanged = redactedKey !== key;
+			const sanitizedKey = keyChanged ? nextKey() : sanitizeSpanNameForOutput(key);
+			return [
+				sanitizedKey,
+				keyChanged
+					? redactedKey === REDACTION_FAILED
+						? REDACTION_FAILED
+						: REDACTED_QUERY_VALUE
+					: sanitizeSpanNameForOutput(value, diagnosticAttributeRedactor(key, redact)),
+			];
+		}),
+	);
 }
 
 function insertCompletedSpan(
@@ -158,7 +255,10 @@ function prepareSpanForExport(
 	span: Span,
 	sanitize: CreateTraceContextOptions["sanitizeSpanForExport"],
 ): Span {
-	const copy: Span = { ...span, attributes: { ...span.attributes } };
+	const copy: Span = {
+		...span,
+		attributes: copyDiagnosticAttributeTypes(span.attributes, { ...span.attributes }),
+	};
 	if (!sanitize) return copy;
 	const sanitized = sanitize(copy);
 	if (!sanitized || typeof sanitized !== "object") {
@@ -171,6 +271,25 @@ export function getTraceRecorder(trace: BaseTraceContext): TraceRecorder | null 
 	return (trace as Partial<InternalTraceContext>)[TRACE_RECORDER] ?? null;
 }
 
+const droppedOTLPSpans = new Map<string, number>();
+
+/** Internal, read-only process counters; no reset can re-arm a warning. */
+export function getDroppedOTLPSpanCount(reason: string): number {
+	return droppedOTLPSpans.get(reason) ?? 0;
+}
+
+function warnDroppedOTLPSpans(reason: string, count: number): void {
+	const previous = getDroppedOTLPSpanCount(reason);
+	const total = previous + count;
+	droppedOTLPSpans.set(reason, total);
+	if (previous !== 0) return;
+	try {
+		console.warn(`[apifuse] OTLP export skipped; reason=${reason}; dropped_spans=${total}`);
+	} catch {
+		// Warning sinks are best-effort. The counter/latch survives a failed sink.
+	}
+}
+
 export function createTraceContext(options: CreateTraceContextOptions = {}): TraceContext {
 	if (options.traceId !== undefined) assertValidTraceId(options.traceId);
 	const maxSpans = options.maxSpans ?? 1000;
@@ -180,9 +299,14 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 	// Export configuration (which can carry collector credentials) stays in this closure;
 	// the context object handed to provider code never exposes it.
 	const exportOptions = options.exportOptions;
-	const exportResourceAttributes = options.resourceAttributes
-		? { ...options.resourceAttributes }
+	const resourceAttributeOptions = options.resourceAttributes as
+		| ResourceAttributesWithSanitizer
+		| undefined;
+	const exportResourceAttributes = resourceAttributeOptions
+		? { ...resourceAttributeOptions }
 		: undefined;
+	const exportResourceAttributeSanitizer =
+		resourceAttributeOptions?.[TRACE_RESOURCE_ATTRIBUTE_SANITIZER];
 	// One trace id per context so every export batch of this request shares it and
 	// two processes can never mint the same id.
 	let exportTraceId = options.traceId ?? crypto.randomUUID().replace(/-/g, "");
@@ -203,15 +327,30 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 			if (pending.length === 0) return;
 			// Sanitization runs off the request path; a faulty sanitizer drops the batch, never the request.
 			let spans: Span[];
+			let resourceAttributes: Record<string, string> | undefined;
 			try {
 				spans = pending.map((entry) =>
 					prepareSpanForExport(entry.span, options.sanitizeSpanForExport),
 				);
+				resourceAttributes = prepareResourceAttributesForExport(
+					exportResourceAttributes,
+					options.redact,
+					exportResourceAttributeSanitizer,
+				);
 			} catch {
-				console.warn("[apifuse] OTLP export skipped; span sanitization failed.");
+				try {
+					console.warn("[apifuse] OTLP export skipped; span sanitization failed.");
+				} catch {
+					// A broken diagnostic sink must not escape this detached callback.
+				}
 				return;
 			}
-			void exportSpansOTLP(spans, exportOptions, exportResourceAttributes, exportTraceId);
+			// A matching trace ID cannot be replaced with non-hex text on the wire. Emit less.
+			if (redactCriticalDiagnosticText(exportTraceId, options.redact) !== exportTraceId) {
+				warnDroppedOTLPSpans("unverifiable_trace_id", pending.length);
+				return;
+			}
+			void exportSpansOTLP(spans, exportOptions, resourceAttributes, exportTraceId);
 		});
 	};
 
@@ -219,11 +358,11 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 		async runSpan(name, fn, spanOptions = {}) {
 			const pendingSpan: PendingSpan = {
 				id: crypto.randomUUID(),
-				name,
+				name: redactCriticalDiagnosticText(name, options.redact),
 				startedAt: Date.now(),
 				parentId: activeSpanStorage.getStore()?.id,
 				sequence: sequence++,
-				attributes: normalizeAttributes(spanOptions.attributes),
+				attributes: normalizeAttributes(spanOptions.attributes, options.redact, true),
 			};
 
 			const finalize = (
@@ -235,7 +374,7 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 				const duration = endedAt - pendingSpan.startedAt;
 				const attributes = {
 					...pendingSpan.attributes,
-					...normalizeAttributes(extraAttributes),
+					...extraAttributes,
 				};
 
 				if (attributes.duration_ms === undefined) {
@@ -243,15 +382,18 @@ export function createTraceContext(options: CreateTraceContextOptions = {}): Tra
 				}
 
 				const span: Span = {
-					id: pendingSpan.id,
-					name: pendingSpan.name,
+					id: redactCriticalDiagnosticText(pendingSpan.id, options.redact),
+					// Recheck at recording: harvest and live env reads may follow span start.
+					name: redactCriticalDiagnosticText(pendingSpan.name, options.redact),
 					startedAt: pendingSpan.startedAt,
 					endedAt,
 					duration_ms: duration,
 					status,
-					attributes,
-					...(error ? { error } : {}),
-					...(pendingSpan.parentId ? { parentId: pendingSpan.parentId } : {}),
+					attributes: normalizeAttributes(attributes, options.redact),
+					...(error ? { error: redactDiagnosticText(error, options.redact) } : {}),
+					...(pendingSpan.parentId
+						? { parentId: redactCriticalDiagnosticText(pendingSpan.parentId, options.redact) }
+						: {}),
 				};
 
 				insertCompletedSpan(

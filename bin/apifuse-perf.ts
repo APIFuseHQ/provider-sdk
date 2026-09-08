@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 // @ts-nocheck
+import { readDiagnosticEnv } from "../src/runtime/diagnostic-env.js";
 
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -25,11 +26,20 @@ import {
 	type StealthResponse,
 	wrapWithInstrumentation,
 } from "../src/index.js";
+import {
+	bindDiagnosticSensitiveRegistry,
+	type CompiledDiagnosticSensitiveValues,
+	compileProcessDiagnosticSensitiveValues,
+	createDiagnosticRedactor,
+	redactDiagnosticText,
+} from "../src/runtime/diagnostic-redactor.js";
 import { computeStats, groupSpansByName, type PerfStats } from "../src/runtime/perf.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import { createStealthClient } from "../src/runtime/stealth.js";
 import { createTraceContext, resolveTraceContextOptions } from "../src/runtime/trace.js";
 import { renderWaterfall } from "../src/runtime/waterfall.js";
+import { collectStaticDiagnosticSensitiveValues } from "../src/server/sensitive-values.js";
+import { sanitizeSpanForOutput } from "../src/trace-sanitization.js";
 import type { BrowserClient } from "../src/types.js";
 
 type CliArgs = {
@@ -100,6 +110,9 @@ export async function main() {
 		const providerDirectory = resolve(process.cwd(), args.providerPath);
 		const providerEntry = resolveProviderEntry(providerDirectory);
 		const provider = await loadProvider(providerEntry);
+		const staticSensitiveValues = compileProcessDiagnosticSensitiveValues(
+			collectStaticDiagnosticSensitiveValues(provider),
+		);
 		const providerId = basename(providerDirectory);
 		const config = await loadApiFuseConfig(process.cwd());
 		const operation = getOperation(provider, args.operation);
@@ -119,6 +132,7 @@ export async function main() {
 			operationName: args.operation,
 			outputSchema,
 			proxyEnabled: false,
+			staticSensitiveValues,
 		});
 
 		let proxySuite: ProfileSuite | undefined;
@@ -135,6 +149,7 @@ export async function main() {
 				operationName: args.operation,
 				outputSchema,
 				proxyEnabled: true,
+				staticSensitiveValues,
 			});
 		}
 
@@ -170,8 +185,8 @@ export async function main() {
 				runs: args.runs,
 				warmup: args.warmup,
 				concurrency: args.concurrency,
-				direct: directSuite,
-				proxy: proxySuite,
+				direct: sanitizeProfileSuiteForExport(directSuite),
+				proxy: proxySuite ? sanitizeProfileSuiteForExport(proxySuite) : undefined,
 				flamePath,
 			});
 			console.log(`Exported JSON: ${resolve(process.cwd(), args.exportPath)}`);
@@ -480,6 +495,7 @@ async function runProfileSuite(options: {
 	operationName: string;
 	outputSchema: { parse(input: unknown): unknown };
 	proxyEnabled: boolean;
+	staticSensitiveValues: CompiledDiagnosticSensitiveValues;
 }): Promise<ProfileSuite> {
 	for (let index = 0; index < options.args.warmup; index += 1) {
 		await profileRun({
@@ -492,6 +508,7 @@ async function runProfileSuite(options: {
 			operationName: options.operationName,
 			outputSchema: options.outputSchema,
 			proxyEnabled: options.proxyEnabled,
+			staticSensitiveValues: options.staticSensitiveValues,
 		});
 	}
 
@@ -509,6 +526,7 @@ async function runProfileSuite(options: {
 				operationName: options.operationName,
 				outputSchema: options.outputSchema,
 				proxyEnabled: options.proxyEnabled,
+				staticSensitiveValues: options.staticSensitiveValues,
 			}),
 		);
 		runs.push(...(await Promise.all(batch)));
@@ -545,6 +563,7 @@ async function profileRun(options: {
 	operationName: string;
 	outputSchema: { parse(input: unknown): unknown };
 	proxyEnabled: boolean;
+	staticSensitiveValues: CompiledDiagnosticSensitiveValues;
 }): Promise<RunResult> {
 	try {
 		return await executeProfileRun({ ...options, forceFixtureReplay: false });
@@ -576,9 +595,16 @@ async function executeProfileRun(options: {
 	operationName: string;
 	outputSchema: { parse(input: unknown): unknown };
 	proxyEnabled: boolean;
+	staticSensitiveValues: CompiledDiagnosticSensitiveValues;
 }): Promise<RunResult> {
 	const _operation = getOperation(options.provider, options.operationName);
-	const traceContext = createTraceContext(resolveTraceContextOptions(options.config.trace));
+	const sensitiveRegistry = createDiagnosticRedactor([], options.staticSensitiveValues);
+	const redact = (text: string) => redactDiagnosticText(text, sensitiveRegistry.redact);
+	const traceContext = createTraceContext({
+		...resolveTraceContextOptions(options.config.trace),
+		redact,
+	});
+	bindDiagnosticSensitiveRegistry(traceContext, sensitiveRegistry);
 	const baseContext = createBaseContext({
 		config: options.config,
 		provider: options.provider,
@@ -650,7 +676,7 @@ function createBaseContext(options: {
 				});
 
 	const env = {
-		get: (key: string) => process.env[key],
+		get: (key: string) => readDiagnosticEnv(key),
 	};
 	const credential = {
 		mode: "none" as const,
@@ -923,6 +949,17 @@ function selectRepresentativeRun(runs: RunResult[]): RunResult {
 	}
 
 	return first;
+}
+
+function sanitizeProfileSuiteForExport(suite: ProfileSuite): ProfileSuite {
+	// The perf CLI has no server request scope; retain the shared output policy on disk.
+	return {
+		...suite,
+		runs: suite.runs.map((run) => ({
+			...run,
+			spans: run.spans.map((span) => sanitizeSpanForOutput(span)),
+		})),
+	};
 }
 
 async function writeExport(filePath: string, payload: unknown): Promise<void> {

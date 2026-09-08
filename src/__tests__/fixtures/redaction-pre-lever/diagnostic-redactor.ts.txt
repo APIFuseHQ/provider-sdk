@@ -1,0 +1,322 @@
+import {
+	allSensitiveValueVariants,
+	normalizePercentEscapes,
+	REDACTED_QUERY_VALUE,
+	type SensitiveValueVariant,
+} from "./request-options.js";
+
+export type DiagnosticRedactor = (text: string) => string;
+export const REDACTION_FAILED = "[REDACTION_FAILED]";
+
+/** Observer failures must never return the original diagnostic, including via ?? fallbacks. */
+export function redactDiagnosticText(text: string, redact?: DiagnosticRedactor): string {
+	try {
+		const result = redact ? redact(text) : text;
+		return typeof result === "string" ? result : REDACTION_FAILED;
+	} catch {
+		return REDACTION_FAILED;
+	}
+}
+
+export interface DiagnosticSensitiveRegistry {
+	redact: DiagnosticRedactor;
+	add(values: readonly string[]): void;
+}
+
+type Node = { next: Map<string, Node>; boundary?: boolean };
+type Matcher = {
+	exact: Node;
+	folded: Node;
+	hasFolded: boolean;
+	size: number;
+	cache: Map<string, string>;
+	needles?: SensitiveValueVariant[];
+};
+function node(): Node {
+	return { next: new Map() };
+}
+
+function compile(variants: readonly SensitiveValueVariant[]): Matcher {
+	const matcher: Matcher = {
+		exact: node(),
+		folded: node(),
+		hasFolded: false,
+		size: variants.length,
+		cache: new Map(),
+	};
+	// A few request credentials are cheaper as native literal searches; large
+	// process-static inventories use tries to avoid per-needle scans.
+	if (variants.length <= 16) {
+		matcher.needles = variants.map((variant) => ({
+			...variant,
+			value: variant.caseInsensitive ? variant.value.toLowerCase() : variant.value,
+		}));
+		matcher.hasFolded = variants.some((variant) => variant.caseInsensitive);
+		return matcher;
+	}
+	for (const variant of variants) {
+		let current = variant.caseInsensitive ? matcher.folded : matcher.exact;
+		if (variant.caseInsensitive) matcher.hasFolded = true;
+		const value = variant.caseInsensitive ? variant.value.toLowerCase() : variant.value;
+		for (let index = 0; index < value.length; index++) {
+			const character = value[index];
+			let child = current.next.get(character);
+			if (!child) {
+				child = node();
+				current.next.set(character, child);
+			}
+			current = child;
+		}
+		current.boundary =
+			current.boundary === undefined
+				? variant.requiresTokenBoundary
+				: current.boundary && variant.requiresTokenBoundary;
+	}
+	return matcher;
+}
+
+/** Opaque handle: callers cannot modify either of the two independently compiled matchers. */
+export interface CompiledDiagnosticSensitiveValues {
+	readonly kind: "compiled-diagnostic-sensitive-values";
+}
+const compiledValues = new WeakMap<
+	CompiledDiagnosticSensitiveValues,
+	{ primary: Matcher; check: Matcher }
+>();
+
+export function compileDiagnosticSensitiveValues(
+	values: readonly string[],
+): CompiledDiagnosticSensitiveValues {
+	const handle: CompiledDiagnosticSensitiveValues = Object.freeze({
+		kind: "compiled-diagnostic-sensitive-values",
+	});
+	const variants = allSensitiveValueVariants(values);
+	compiledValues.set(handle, { primary: compile(variants), check: compile(variants) });
+	return handle;
+}
+
+function isTokenCharacter(value: string | undefined): boolean {
+	return value !== undefined && /[\p{L}\p{N}]/u.test(value);
+}
+
+function matchLength(root: Node, comparable: string, original: string, start: number): number {
+	let current = root;
+	let length = 0;
+	for (let index = start; index < comparable.length; index++) {
+		const child = current.next.get(comparable[index]);
+		if (!child) break;
+		current = child;
+		if (
+			current.boundary !== undefined &&
+			(!current.boundary ||
+				(!isTokenCharacter(original[start - 1]) && !isTokenCharacter(original[index + 1])))
+		) {
+			length = index - start + 1;
+		}
+	}
+	return length;
+}
+
+function replaceNeedles(text: string, matcher: Matcher, checkOnly: boolean): string {
+	const comparable = text.includes("%") ? normalizePercentEscapes(text) : text;
+	const folded = matcher.hasFolded ? comparable.toLowerCase() : comparable;
+	let cursor = 0;
+	let output = "";
+	while (cursor < text.length) {
+		let first = text.length;
+		let length = 0;
+		for (const variant of matcher.needles ?? []) {
+			const source = variant.caseInsensitive ? folded : comparable;
+			let index = source.indexOf(variant.value, cursor);
+			while (index !== -1) {
+				const end = index + variant.value.length;
+				const markerStart = source.lastIndexOf("[", index);
+				const withinMarker =
+					markerStart !== -1 &&
+					[REDACTED_QUERY_VALUE, REDACTION_FAILED].some(
+						(marker) =>
+							comparable.startsWith(marker, markerStart) && index < markerStart + marker.length,
+					);
+				if (
+					!withinMarker &&
+					(!variant.requiresTokenBoundary ||
+						(!isTokenCharacter(source[index - 1]) && !isTokenCharacter(source[end])))
+				)
+					break;
+				index = source.indexOf(variant.value, index + 1);
+			}
+			if (index === -1) continue;
+			if (checkOnly || (variant.caseInsensitive && folded.length !== text.length))
+				return REDACTED_QUERY_VALUE;
+			if (index < first || (index === first && variant.value.length > length)) {
+				first = index;
+				length = variant.value.length;
+			}
+		}
+		if (!length) break;
+		output += text.slice(cursor, first) + REDACTED_QUERY_VALUE;
+		cursor = first + length;
+	}
+	return cursor ? output + text.slice(cursor) : text;
+}
+
+/** Literal tries have no secret-built regular expressions and no per-needle no-match scans. */
+function replaceMatches(text: string, matchers: readonly Matcher[], checkOnly = false): string {
+	if (matchers.length === 1 && matchers[0].needles)
+		return replaceNeedles(text, matchers[0], checkOnly);
+	const comparable = text.includes("%") ? normalizePercentEscapes(text) : text;
+	const folded = matchers.some((matcher) => matcher.hasFolded)
+		? comparable.toLowerCase()
+		: comparable;
+	// Unicode case folding can change offsets. Suppress the field on a folded match.
+	if (folded.length !== comparable.length) {
+		for (const matcher of matchers) {
+			for (let index = 0; index < folded.length; index++) {
+				if (matchLength(matcher.folded, folded, folded, index)) return REDACTED_QUERY_VALUE;
+			}
+		}
+	}
+	let cursor = 0;
+	let output = "";
+	for (let index = 0; index < text.length; index++) {
+		// Sentinels are emitted constants, not evidence of a residual credential.
+		if (text.startsWith(REDACTED_QUERY_VALUE, index)) {
+			index += REDACTED_QUERY_VALUE.length - 1;
+			continue;
+		}
+		if (text.startsWith(REDACTION_FAILED, index)) {
+			index += REDACTION_FAILED.length - 1;
+			continue;
+		}
+		let length = 0;
+		for (const matcher of matchers) {
+			length = Math.max(length, matchLength(matcher.exact, comparable, text, index));
+			if (matcher.hasFolded && folded.length === comparable.length) {
+				length = Math.max(length, matchLength(matcher.folded, folded, text, index));
+			}
+		}
+		if (!length) continue;
+		if (checkOnly) return REDACTED_QUERY_VALUE;
+		output += text.slice(cursor, index) + REDACTED_QUERY_VALUE;
+		cursor = index + length;
+		index = cursor - 1;
+	}
+	return cursor === 0 ? text : output + text.slice(cursor);
+}
+
+function decodePercent(text: string): string {
+	try {
+		return decodeURIComponent(text);
+	} catch {
+		// An unrelated malformed escape must not hide valid encoded credential text.
+		return text.replace(/(?:%[\da-f]{2})+/gi, (part) => {
+			try {
+				return decodeURIComponent(part);
+			} catch {
+				return part.replace(/%([\da-f]{2})/gi, (encodedByte, hex: string) => {
+					const byte = Number.parseInt(hex, 16);
+					return byte < 128 ? String.fromCharCode(byte) : encodedByte;
+				});
+			}
+		});
+	}
+}
+
+function applyMatcher(text: string, matcher: Matcher): string {
+	if (!matcher.size) return text;
+	const cached = matcher.cache.get(text);
+	if (cached !== undefined) return cached;
+	const matchers = [matcher];
+	const direct = replaceMatches(text, matchers);
+	let result = direct;
+	let normalized = direct;
+	for (let round = 0; round < 3 && normalized.includes("%"); round++) {
+		const decoded = decodePercent(normalized);
+		if (decoded === normalized) break;
+		normalized = decoded;
+		if (replaceMatches(normalized, matchers, true) !== normalized) {
+			result = REDACTED_QUERY_VALUE;
+			break;
+		}
+	}
+	const nfc = normalized.normalize("NFC");
+	if (nfc !== normalized && replaceMatches(nfc, matchers, true) !== nfc)
+		result = REDACTED_QUERY_VALUE;
+	// Matchers are immutable; additions compile a new request matcher. Independent
+	// caches can reuse safe results across repeated span/resource exports. Bound both
+	// entry count and input size; process-static matchers never retain unbounded text.
+	if (text.length <= 4096) {
+		if (matcher.cache.size >= 256) matcher.cache.clear();
+		matcher.cache.set(text, result);
+	}
+	return result;
+}
+
+function applyMatchers(text: string, matchers: readonly Matcher[]): string {
+	let result = text;
+	for (const matcher of matchers) {
+		const candidate = applyMatcher(text, matcher);
+		if (candidate === text) continue;
+		// Static and request secrets may overlap. Scan original text independently
+		// so an earlier replacement cannot hide the rest of a longer credential.
+		if (result !== text && result !== candidate) return REDACTED_QUERY_VALUE;
+		result = candidate;
+	}
+	return result;
+}
+
+/** One small mutable registry per request, composed with precompiled process-static values. */
+export function createDiagnosticRedactor(
+	values: readonly string[] = [],
+	staticValues?: CompiledDiagnosticSensitiveValues,
+): DiagnosticSensitiveRegistry {
+	const shared = staticValues ? compiledValues.get(staticValues) : undefined;
+	const known = new Set<string>();
+	let primary: Matcher[] = shared ? [shared.primary] : [];
+	let check: Matcher[] = shared ? [shared.check] : [];
+	const add = (incoming: readonly string[]) => {
+		let changed = false;
+		for (const value of incoming) {
+			if (!value || known.has(value)) continue;
+			known.add(value);
+			changed = true;
+		}
+		if (!changed) return;
+		const variants = allSensitiveValueVariants([...known]);
+		primary = [...(shared ? [shared.primary] : []), compile(variants)];
+		check = [...(shared ? [shared.check] : []), compile(variants)];
+	};
+	add(values);
+	const protect =
+		(callback: DiagnosticRedactor): DiagnosticRedactor =>
+		(text) => {
+			const result = redactDiagnosticText(text, callback);
+			// This private matcher is a separate object from the callback's matcher,
+			// survives callback replacement, and sees additions made after trace creation.
+			return applyMatchers(result, check) === result ? result : REDACTION_FAILED;
+		};
+	let safeRedact = protect((text) => applyMatchers(text, primary));
+	return {
+		add,
+		get redact() {
+			return safeRedact;
+		},
+		set redact(callback: DiagnosticRedactor) {
+			safeRedact = protect(callback);
+		},
+	};
+}
+
+const requestRegistries = new WeakMap<object, DiagnosticSensitiveRegistry>();
+
+/** Internal binding; neither the registry nor its values enter provider-facing context types. */
+export function bindDiagnosticSensitiveRegistry(
+	trace: object,
+	registry: DiagnosticSensitiveRegistry,
+): void {
+	requestRegistries.set(trace, registry);
+}
+
+export function registerDiagnosticSensitiveValues(trace: object, values: readonly string[]): void {
+	requestRegistries.get(trace)?.add(values);
+}

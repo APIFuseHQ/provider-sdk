@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { isEngineOwnedEnvName } from "../engine.js";
 import type { EnvContext } from "../types.js";
 
@@ -20,7 +21,7 @@ export function createEnvContext(allowedKeys?: string[]): EnvContext {
 				return undefined;
 			}
 
-			return process.env[key];
+			return readDiagnosticEnv(key);
 		},
 	};
 }

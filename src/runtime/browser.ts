@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { createRequire } from "node:module";
 import type { CDPSession, Frame, LaunchOptions, Locator, Page, Request, Route } from "playwright";
 
@@ -495,7 +496,7 @@ type SupportedBrowserClient = {
 };
 
 function getDefaultCdpPoolUrl(env = process.env): string | undefined {
-	return env.APIFUSE__CDP_POOL__URL;
+	return readDiagnosticEnv("APIFUSE__CDP_POOL__URL", env);
 }
 
 async function importOptionalModule<T extends object>(moduleName: string): Promise<T> {

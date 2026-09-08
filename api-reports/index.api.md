@@ -1162,6 +1162,7 @@ export interface CreateTraceContextOptions {
     maxSpans?: number;
     // (undocumented)
     onSpan?: (span: Span) => void;
+    redact?: DiagnosticRedactor;
     // (undocumented)
     resourceAttributes?: Record<string, string>;
     sanitizeSpanForExport?: (span: Span) => Span | undefined;
@@ -1470,6 +1471,9 @@ export interface DevServerOptions {
     // (undocumented)
     sessionDbPath?: string;
 }
+
+// @public (undocumented)
+export type DiagnosticRedactor = (text: string) => string;
 
 // @public (undocumented)
 export function digestProviderContract(snapshot: ProviderContractSnapshot): string;

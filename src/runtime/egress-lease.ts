@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 
 import type { ProxyVendorName } from "../config/loader.js";
@@ -234,6 +235,8 @@ export function createCeremonyEgressLeaseRuntime(options: {
 	readonly flowId: string;
 	readonly affinityKey: string;
 	readonly handle?: string;
+	/** Server-only registration before a handle can reach request diagnostics. */
+	readonly onHandle?: (handle: string) => void;
 	readonly environment?: Readonly<Record<string, string | undefined>>;
 	readonly now?: () => number;
 }): CeremonyEgressLeaseRuntime {
@@ -251,7 +254,7 @@ export function createCeremonyEgressLeaseRuntime(options: {
 		flowId: options.flowId,
 		affinityKey: options.affinityKey,
 	};
-	const key = environment[APIFUSE__ENGINE__CEREMONY_LEASE_KEY]?.trim();
+	const key = readDiagnosticEnv(APIFUSE__ENGINE__CEREMONY_LEASE_KEY, environment)?.trim();
 	if (!key) {
 		throw new SDKError("The engine ceremony egress lease key is not configured", {
 			code: "EGRESS_LEASE_KEY_MISSING",
@@ -284,6 +287,7 @@ export function createCeremonyEgressLeaseRuntime(options: {
 		payload !== undefined && now() >= payload.expiresAtMs ? dropBinding() : false;
 
 	if (options.handle !== undefined) {
+		options.onHandle?.(options.handle);
 		// Scope mismatch fails GCM authentication because scope is AAD; there is
 		// deliberately no post-decrypt scope comparison fallback.
 		payload = decodeHandle(options.handle, key, scope);
@@ -328,6 +332,7 @@ export function createCeremonyEgressLeaseRuntime(options: {
 				expiresAtMs: mintedAtMs + binding.lifetimeMinutes * 60_000,
 			};
 			currentHandle = encodeHandle(payload, key, scope);
+			options.onHandle?.(currentHandle);
 		},
 		handle() {
 			return currentHandle;

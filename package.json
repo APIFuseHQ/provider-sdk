@@ -110,6 +110,7 @@
 		"format": "biome format --write",
 		"type-check": "tsc --noEmit",
 		"test": "bun test",
+		"bench:redaction": "bun scripts/benchmark-request-redaction.ts",
 		"check": "bun run lint && bun run type-check && bun run lint:deprecated && bun run lint:test-typesafety && bun run build",
 		"api:update": "bun run build && bun scripts/api-reports.ts update",
 		"api:check": "bun run build && bun scripts/api-reports.ts check",

@@ -2752,6 +2752,55 @@ describe("provider HTTP server", () => {
 		return Object.getOwnPropertyDescriptor(event ?? {}, "causeChain")?.value;
 	}
 
+	it("redacts resolved secret values in the top-level message and causeChain messages", async () => {
+		const name = "P4_CAUSE_MESSAGE_SECRET";
+		const sentinel = "hrfcokey1234";
+		const previous = process.env[name];
+		process.env[name] = sentinel;
+		const events: ProviderServerLogEvent[] = [];
+		try {
+			const app = createServerApp(
+				{
+					...createTestProvider(),
+					secrets: [{ name, required: true }],
+					operations: {
+						causeError: {
+							riskClass: READ_RISK_CLASS,
+							input: z.object({ value: z.string() }),
+							output: z.object({ ok: z.boolean() }),
+							handler: async () => {
+								throw new ProviderError(`Provider rejected ${sentinel}`, {
+									code: "UPSTREAM_ERROR",
+									cause: new Error(`Upstream rejected ${sentinel}`),
+								});
+							},
+						},
+					},
+				},
+				{ logger: (entry) => events.push(entry) },
+			);
+			const response = await requestCauseError(app);
+			expect(response.status).toBe(502);
+			expect(events).toHaveLength(1);
+			expect(events[0]).toMatchObject({
+				event: "provider_request_failed",
+				message: "Provider rejected [REDACTED]",
+			});
+			expect(loggedCauseChain(events[0])).toEqual([
+				{
+					errorClass: "Error",
+					message: "Upstream rejected [REDACTED]",
+					messageLength: `Upstream rejected ${sentinel}`.length,
+					messageFingerprint: causeFingerprint(`Upstream rejected ${sentinel}`),
+				},
+			]);
+			expect(JSON.stringify(events[0])).not.toContain(sentinel);
+		} finally {
+			if (previous === undefined) delete process.env[name];
+			else process.env[name] = previous;
+		}
+	});
+
 	it("logs readable redacted messages for every frame in a nested cause chain", async () => {
 		const bearerToken = "fake.header.signature";
 		const email = "person@example.com";

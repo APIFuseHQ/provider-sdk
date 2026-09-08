@@ -1,3 +1,4 @@
+import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { ProviderError, TransportError, ValidationError } from "../errors.js";
 import type {
 	Bcp47Locale,
@@ -69,7 +70,7 @@ export function createUnsupportedSttClient(reason?: string): SttContext {
 }
 
 function normalizedEnvValue(env: EnvLike, key: string): string | undefined {
-	const value = env[key]?.trim();
+	const value = readDiagnosticEnv(key, env)?.trim();
 	return value ? value : undefined;
 }
 
@@ -99,7 +100,7 @@ export function createSttClientFromEnv(
 	}
 
 	const accountId = env.APIFUSE__CLOUDFLARE__ACCOUNT_ID?.trim();
-	const apiToken = env.APIFUSE__STT__CLOUDFLARE_API_TOKEN?.trim();
+	const apiToken = readDiagnosticEnv(APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV, env)?.trim();
 	if (!accountId || !apiToken) {
 		return createUnsupportedSttClient(
 			`STT backend ${backend} requires ${CLOUDFLARE_ACCOUNT_ID_ENV} and ${APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV}`,

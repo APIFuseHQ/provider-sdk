@@ -1,4 +1,4 @@
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock, spyOn } from "bun:test";
 import { createProviderCache } from "../runtime/cache.js";
 import { createTestProviderChoiceContext } from "../runtime/choice.js";
 import { createCredentialContext } from "../runtime/credential.js";
@@ -6,7 +6,9 @@ import { createEnvContext } from "../runtime/env.js";
 import { isProviderError } from "../errors.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
-import { createTraceContext } from "../runtime/trace.js";
+import { createTraceContext, type Span } from "../runtime/trace.js";
+import { createDiagnosticRedactor } from "../runtime/diagnostic-redactor.js";
+import { resolveServerTraceContextOptions } from "../server/trace-output.js";
 import {
 	createBrowserClientDouble,
 	createBrowserPageDouble,
@@ -187,6 +189,39 @@ describe("createTraceContext", () => {
 });
 
 describe("wrapWithInstrumentation", () => {
+	it("#149 regression: a path sentinel is absent from getSpans, onSpan, and JSON output", async () => {
+		const sentinel = "hrfcokey1234";
+		const received: Span[] = [];
+		const output: string[] = [];
+		const print = spyOn(console, "log").mockImplementation((line) => output.push(String(line)));
+		const options = resolveServerTraceContextOptions({ enabled: true, exporter: "json" }, {});
+		const trace = createTraceContext({
+			...options,
+			redact: createDiagnosticRedactor([sentinel]).redact,
+			onSpan: (span) => {
+				received.push(span);
+				options.onSpan?.(span);
+			},
+		});
+		try {
+			const context = createMockContext();
+			context.trace = trace;
+			const instrumented = wrapWithInstrumentation(context);
+			await instrumented.http.get(`https://api.example.test/by-key/${sentinel}/items`);
+			expect(trace.getSpans()[0]?.attributes.url).toBe(
+				"https://api.example.test/by-key/[REDACTED]/items",
+			);
+			expect(received).toHaveLength(1);
+			expect(output).toHaveLength(1);
+			for (const surface of [trace.getSpans(), received, output]) {
+				expect(JSON.stringify(surface)).not.toContain(sentinel);
+				expect(JSON.stringify(surface)).toContain("[REDACTED]");
+			}
+		} finally {
+			print.mockRestore();
+		}
+	});
+
 	it("creates spans for http, stealth, and browser method calls", async () => {
 		const onSpan = mock(() => {});
 		const ctx = createMockContext();

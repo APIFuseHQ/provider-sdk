@@ -1,3 +1,4 @@
+import { registerDiagnosticSensitiveValues } from "./diagnostic-redactor.js";
 import type {
 	HttpStreamResponse,
 	ProviderContext,
@@ -570,6 +571,7 @@ function wrapStealthRedirects(
 		run(...args: Parameters<StealthSession["redirects"]["run"]>) {
 			const diagnosticArgs = [args[0].url, args[0]];
 			const diagnostics = snapshotRequestDiagnostics("stealth", "fetch", diagnosticArgs);
+			registerDiagnosticSensitiveValues(trace, diagnostics.sensitiveValues);
 			let result: ReturnType<StealthSession["redirects"]["run"]>;
 			try {
 				result = redirects.run(...args);
@@ -750,6 +752,7 @@ function wrapNamespace<T extends object>(
 					return Reflect.apply(value, namespaceTarget, args);
 				}
 				const requestDiagnostics = snapshotRequestDiagnostics(namespace, methodName, args);
+				registerDiagnosticSensitiveValues(trace, requestDiagnostics.sensitiveValues);
 				// Invoke first and decide by the RETURN VALUE. `runSpan` always
 				// returns a Promise, so unconditionally span-wrapping every member
 				// silently rewrote synchronous contracts: `ctx.state.namespace()`

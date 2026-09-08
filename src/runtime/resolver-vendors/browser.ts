@@ -173,7 +173,6 @@ async function runBoundedCleanup(
 			onError(error) {
 				return {
 					error_message: error instanceof Error ? error.message : String(error),
-					...(error instanceof Error && error.stack ? { error_stack: error.stack } : {}),
 				};
 			},
 		})
