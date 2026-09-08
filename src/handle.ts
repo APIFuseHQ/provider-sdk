@@ -16,12 +16,15 @@ import {
 } from "./errors.js";
 import {
 	APIFUSE_HANDLE_META_KEY,
+	formatHandleIssuers,
 	handleFieldDescription,
 	HANDLE_KIND_NAME_PATTERN,
 	type HandleAccess,
 	type HandleFieldMeta,
+	type HandleIssuedBy,
 	type HandleKindDeclaration,
 	type HandleKindType,
+	isHandleIssuedBy,
 } from "./handle-meta.js";
 import type { ProviderErrorCategory } from "./observability.js";
 import {
@@ -31,9 +34,15 @@ import {
 } from "./runtime/handle-wordlist.js";
 import type { ProviderStateDurationString } from "./types.js";
 
-export type { HandleAccess, HandleFieldMeta, HandleKindDeclaration, HandleKindType };
+export type {
+	HandleAccess,
+	HandleFieldMeta,
+	HandleIssuedBy,
+	HandleKindDeclaration,
+	HandleKindType,
+};
 
-/** Public cursors whose ttl exceeds this are issued with five words (auto-high). */
+/** Public kinds whose (max) ttl exceeds this are issued with five words (auto-high). */
 const AUTO_HIGH_TTL_MS = 3_600_000;
 const DEFAULT_BOUND_MAX_ENTRIES = 200;
 const DEFAULT_CURSOR_MAX_VALUE_BYTES = 16_000;
@@ -76,7 +85,10 @@ export interface DraftKind<
 	TResultSchema extends ZodType | undefined = ZodType | undefined,
 > extends HandleKindBase<TSchema> {
 	readonly type: "draft";
-	readonly access: "bound";
+	/** `"bound"` (default): connection-scoped, 2 words. `"public"`: provider-scoped, 4-5 words. */
+	readonly access: HandleAccess;
+	/** Public only; `"high"` forces 5 words. Always `"standard"` for bound drafts. */
+	readonly strength: HandleStrength;
 	readonly ttl: {
 		readonly idle: ProviderStateDurationString;
 		readonly max: ProviderStateDurationString;
@@ -87,7 +99,6 @@ export interface DraftKind<
 	readonly resultTtlMs: number;
 	/** Optional schema describing the commit result; type-level only at runtime. */
 	readonly result: TResultSchema | undefined;
-	readonly wordCount: 2;
 }
 
 // `any` here is variance-only: a concrete `CursorKind<{ page: number }>` must be
@@ -123,6 +134,12 @@ export interface HandleCommitResult<K extends HandleKind> {
 export interface HandleContext {
 	/** Validates `data` with `kind.schema`, stores it, and returns the canonical handle. */
 	create<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<string>;
+	/**
+	 * Same as `create` but returns the full record (`handle`, `status`, `data`,
+	 * `createdAt`, `expiresAt`) so a provider can expose `expires_at` without
+	 * recomputing ttl math. `create` is the string-returning shortcut.
+	 */
+	createRecord<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<HandleRecord<K>>;
 	/** Tolerantly parses `handle`, loads the record; drafts get their idle TTL touched. */
 	read<K extends HandleKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
 	/** CAS update of an active draft (3 retries) with sliding TTL. */
@@ -242,10 +259,11 @@ export function isHandleError(value: unknown): value is HandleError {
  */
 export function handleRecoverySentence(kind: {
 	readonly fieldName: string;
-	readonly issuedBy?: string;
+	readonly issuedBy?: HandleIssuedBy;
 }): string {
-	if (kind.issuedBy) {
-		return `Call \`${kind.issuedBy}\` again and pass the new \`${kind.fieldName}\` exactly as returned.`;
+	const issuers = formatHandleIssuers(kind.issuedBy);
+	if (issuers) {
+		return `Call ${issuers} again and pass the new \`${kind.fieldName}\` exactly as returned.`;
 	}
 	return `Request a new \`${kind.fieldName}\` and pass it exactly as returned.`;
 }
@@ -311,8 +329,8 @@ export interface DefineCursorOptions<TSchema extends ZodType> {
 	readonly maxValueBytes?: number;
 	/** Public only; `"high"` forces 5 words. Auto-high when ttl > 1h. */
 	readonly strength?: HandleStrength;
-	/** Operation key that issues this handle; used in error text and lint. */
-	readonly issuedBy?: string;
+	/** Operation key(s) that issue this handle; used in error text and lint. */
+	readonly issuedBy?: HandleIssuedBy;
 }
 
 export interface DefineDraftOptions<
@@ -330,11 +348,20 @@ export interface DefineDraftOptions<
 	};
 	/** How long a committed record stays for replay. Default "24h". */
 	readonly resultTtl?: ProviderStateDurationString;
-	/** Default 200 per connection. */
+	/**
+	 * `"bound"` (default): connection-scoped, 2 words. `"public"`: provider-scoped
+	 * draft for connectionless providers (`auth: none`), 4-5 words, `maxEntries`
+	 * required; every lookup failure collapses to `HANDLE_INVALID`.
+	 */
+	readonly access?: HandleAccess;
+	/** Required when public. Bound default 200 per connection. */
 	readonly maxEntries?: number;
 	/** Default 64,000. */
 	readonly maxValueBytes?: number;
-	readonly issuedBy?: string;
+	/** Public only; `"high"` forces 5 words. Auto-high when ttl.max > 1h. */
+	readonly strength?: HandleStrength;
+	/** Operation key(s) that issue this handle; used in error text and lint. */
+	readonly issuedBy?: HandleIssuedBy;
 }
 
 function assertKindName(name: unknown, define: string): asserts name is string {
@@ -359,6 +386,49 @@ function assertPositiveInteger(value: number, label: string, define: string): vo
 	}
 }
 
+function assertAccess(value: unknown, define: string): asserts value is HandleAccess {
+	if (value !== "bound" && value !== "public") {
+		throw new Error(`${define}: access must be "bound" or "public"; received ${String(value)}.`);
+	}
+}
+
+function assertStrength(value: unknown, define: string): asserts value is HandleStrength {
+	if (value !== "standard" && value !== "high") {
+		throw new Error(`${define}: strength must be "standard" or "high"; received ${String(value)}.`);
+	}
+}
+
+/** Validates `issuedBy` and returns a frozen copy for lists; `undefined` stays undefined. */
+function normalizeIssuedBy(
+	value: unknown,
+	define: string,
+	name: string,
+): HandleIssuedBy | undefined {
+	if (value === undefined) return undefined;
+	if (!isHandleIssuedBy(value) || (typeof value === "string" ? value.length === 0 : false)) {
+		throw new Error(
+			`${define}: "${name}" issuedBy must be an operation key or a non-empty list of operation keys; received ${JSON.stringify(value)}.`,
+		);
+	}
+	if (typeof value === "string") return value;
+	if (value.some((operation) => operation.length === 0)) {
+		throw new Error(`${define}: "${name}" issuedBy must not contain empty operation keys.`);
+	}
+	return Object.freeze([...value]);
+}
+
+/** Word count for a kind: 2 bound; public 4, or 5 when high strength or the lifetime exceeds 1h. */
+function wordCountFor(
+	access: HandleAccess,
+	strength: HandleStrength,
+	lifetimeMs: number,
+): HandleWordCount {
+	if (access === "bound") return BOUND_HANDLE_WORD_COUNT;
+	return strength === "high" || lifetimeMs > AUTO_HIGH_TTL_MS
+		? HIGH_PUBLIC_HANDLE_WORD_COUNT
+		: PUBLIC_HANDLE_WORD_COUNT;
+}
+
 function createHandleField(meta: HandleFieldMeta): ZodString {
 	const described = z.string().min(1).describe(handleFieldDescription(meta));
 	// zod v4 `.meta()` replaces the registry entry, so carry the description over.
@@ -374,17 +444,12 @@ export function defineCursor<TSchema extends ZodType>(
 	assertKindName(options.name, define);
 	const fieldName = options.fieldName ?? `${options.name}_token`;
 	assertFieldName(fieldName, define);
-	const access: HandleAccess = options.access ?? "bound";
-	if (access !== "bound" && access !== "public") {
-		throw new Error(`${define}: access must be "bound" or "public"; received ${String(access)}.`);
-	}
+	const access: unknown = options.access ?? "bound";
+	assertAccess(access, define);
 	const ttlMs = parseHandleDurationMs(options.ttl, `"${options.name}" ttl`);
-	const strength: HandleStrength = options.strength ?? "standard";
-	if (strength !== "standard" && strength !== "high") {
-		throw new Error(
-			`${define}: strength must be "standard" or "high"; received ${String(strength)}.`,
-		);
-	}
+	const strength: unknown = options.strength ?? "standard";
+	assertStrength(strength, define);
+	const issuedBy = normalizeIssuedBy(options.issuedBy, define, options.name);
 	if (access === "public" && options.maxEntries === undefined) {
 		throw new Error(
 			`${define}: public cursor "${options.name}" must declare maxEntries (provider-wide live-entry quota).`,
@@ -394,24 +459,19 @@ export function defineCursor<TSchema extends ZodType>(
 	assertPositiveInteger(maxEntries, "maxEntries", define);
 	const maxValueBytes = options.maxValueBytes ?? DEFAULT_CURSOR_MAX_VALUE_BYTES;
 	assertPositiveInteger(maxValueBytes, "maxValueBytes", define);
-	const wordCount: HandleWordCount =
-		access === "bound"
-			? BOUND_HANDLE_WORD_COUNT
-			: strength === "high" || ttlMs > AUTO_HIGH_TTL_MS
-				? HIGH_PUBLIC_HANDLE_WORD_COUNT
-				: PUBLIC_HANDLE_WORD_COUNT;
+	const wordCount = wordCountFor(access, strength, ttlMs);
 	const meta: HandleFieldMeta = {
 		kind: options.name,
 		type: "cursor",
 		fieldName,
-		...(options.issuedBy ? { issuedBy: options.issuedBy } : {}),
+		...(issuedBy ? { issuedBy } : {}),
 	};
 	return Object.freeze({
 		name: options.name,
 		type: "cursor",
 		fieldName,
 		access,
-		issuedBy: options.issuedBy,
+		issuedBy,
 		schema: options.schema,
 		ttl: options.ttl,
 		ttlMs,
@@ -423,7 +483,11 @@ export function defineCursor<TSchema extends ZodType>(
 	});
 }
 
-/** Defines a mutable, always-bound draft kind (multi-turn forms with one-shot commit). */
+/**
+ * Defines a mutable draft kind (multi-turn forms with one-shot commit). Bound
+ * by default; `access: "public"` opts a connectionless provider into a
+ * provider-scoped draft under the public guessing analysis (ADR-0012 D3).
+ */
 export function defineDraft<
 	TSchema extends ZodType,
 	TResultSchema extends ZodType | undefined = undefined,
@@ -444,22 +508,40 @@ export function defineDraft<
 	}
 	const resultTtl = options.resultTtl ?? DEFAULT_RESULT_TTL;
 	const resultTtlMs = parseHandleDurationMs(resultTtl, `"${options.name}" resultTtl`);
+	const access: unknown = options.access ?? "bound";
+	assertAccess(access, define);
+	const strength: unknown = options.strength ?? "standard";
+	assertStrength(strength, define);
+	if (access === "bound" && strength !== "standard") {
+		throw new Error(
+			`${define}: draft "${options.name}" strength applies to public drafts only; bound drafts are always two words.`,
+		);
+	}
+	const issuedBy = normalizeIssuedBy(options.issuedBy, define, options.name);
+	if (access === "public" && options.maxEntries === undefined) {
+		throw new Error(
+			`${define}: public draft "${options.name}" must declare maxEntries (provider-wide live-entry quota).`,
+		);
+	}
 	const maxEntries = options.maxEntries ?? DEFAULT_BOUND_MAX_ENTRIES;
 	assertPositiveInteger(maxEntries, "maxEntries", define);
 	const maxValueBytes = options.maxValueBytes ?? DEFAULT_DRAFT_MAX_VALUE_BYTES;
 	assertPositiveInteger(maxValueBytes, "maxValueBytes", define);
+	// A public draft's guessable lifetime is its hard `max` ttl (idle only shortens it).
+	const wordCount = wordCountFor(access, strength, maxTtlMs);
 	const meta: HandleFieldMeta = {
 		kind: options.name,
 		type: "draft",
 		fieldName,
-		...(options.issuedBy ? { issuedBy: options.issuedBy } : {}),
+		...(issuedBy ? { issuedBy } : {}),
 	};
 	return Object.freeze({
 		name: options.name,
 		type: "draft",
 		fieldName,
-		access: "bound",
-		issuedBy: options.issuedBy,
+		access,
+		strength,
+		issuedBy,
 		schema: options.schema,
 		result: options.result,
 		ttl: options.ttl,
@@ -469,7 +551,7 @@ export function defineDraft<
 		resultTtlMs,
 		maxEntries,
 		maxValueBytes,
-		wordCount: BOUND_HANDLE_WORD_COUNT,
+		wordCount,
 		field: () => createHandleField(meta),
 	});
 }
@@ -491,8 +573,8 @@ export interface PickOptions<T> {
 	readonly field: string;
 	/** Item property compared against `value`. Default = `field`. */
 	readonly by?: keyof T & string;
-	/** Operation that listed the items; used in the error message when known. */
-	readonly issuedBy?: string;
+	/** Operation(s) that listed the items; used in the error message when known. */
+	readonly issuedBy?: HandleIssuedBy;
 }
 
 /**
@@ -518,8 +600,9 @@ export function pick<T extends Record<string, unknown>>(
 	const loose = items.filter((item) => keyOf(item).trim().toLowerCase() === folded);
 	if (loose.length === 1) return loose[0]!;
 	const allowed = items.map(keyOf);
-	const listed = options.issuedBy
-		? ` Use the values exactly as listed by \`${options.issuedBy}\`.`
+	const issuers = formatHandleIssuers(options.issuedBy);
+	const listed = issuers
+		? ` Use the values exactly as listed by ${issuers}.`
 		: " Use the values exactly as listed.";
 	throw new HandleError(
 		"PICK_NOT_OFFERED",

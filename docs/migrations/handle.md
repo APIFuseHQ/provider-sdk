@@ -21,13 +21,14 @@ the bump outside the provider's peak window.
 | `prefix` / `purpose` (e.g. `ct_wait_choice_v1`) | kind `name` — `/^[a-z]{2,12}$/`, letters only, **no version suffix**. The handle string is `${name}_word-word`. Schema changes are a new kind name, not `_v2`. |
 | `payload` | `data`, validated by the kind's zod `schema` on `create`/`update` |
 | `ttlMs` | cursor: `ttl: "10m"` (`ProviderStateDurationString`); draft: `ttl: { idle: "30m", max: "2h" }` (sliding, touched on read/update) |
-| `bind: { connection: true }` | bound kind — the default `access: "bound"` for cursors; drafts are always bound. Isolation is `state.forConnection(connectionId)`; no hash, no secret. `create` throws `HANDLE_CONNECTION_REQUIRED` without a connection. |
-| no `bind` (anonymous cursor) | `defineCursor({ access: "public", maxEntries: /* required */ })` — 4 words, 5 when `ttl > 1h` or `strength: "high"` |
+| `bind: { connection: true }` | bound kind — the default `access: "bound"` for cursors and drafts. Isolation is `state.forConnection(connectionId)`; no hash, no secret. `create` throws `HANDLE_CONNECTION_REQUIRED` without a connection. |
+| no `bind` (anonymous cursor) | `defineCursor({ access: "public", maxEntries: /* required */ })` — 4 words, 5 when `ttl > 1h` or `strength: "high"`. A connectionless provider (`auth: none`) may also declare `defineDraft({ access: "public", maxEntries })`; see §4a. |
 | `bind: { credentialKeys }` | no equivalent; scope is the connection. If a site needs credential-level fencing, store the discriminator in `data` and compare it in the handler. |
 | `storage: { mode: "server", namespace, maxEntries, maxValueBytes }` | kind definition: `maxEntries` (bound default 200 per connection; public required), `maxValueBytes` (cursor default 16,000; draft default 64,000). Namespace is `handle.<name>`, not chosen by the provider. |
 | `storage: { mode: "inline" }` / `mode: "auto"` / `maxInlineBytes` / `unavailable` | removed. There is no payload carrier. |
 | `strength: "high"` | `defineCursor({ strength: "high" })` — public only; applied automatically when `ttl > 1h` |
 | `ctx.choice.parse({ token, prefix, purpose, ttlMs, bind, storage })` | `await ctx.handle.read(Kind, handle)` → `HandleRecord` (`handle` canonical, `status`, `data`, `result?`, `createdAt`, `expiresAt`). Input is normalized (case, whitespace, quotes, separators, one typo per word). |
+| hand-computed `expires_at` / `expires_in_min` next to an issued token | `const record = await ctx.handle.createRecord(Kind, data)` → the same `HandleRecord` as `read`; return `record.handle` and `record.expiresAt` instead of redoing ttl math. `create` is the string-returning shortcut. |
 | `consume: "never"` | `read` |
 | `consume: "explicit"` → `claim.consume()` after upstream success | `await ctx.handle.commit(Kind, handle, async (data) => upstreamWork(data))` → `{ status: "committed" \| "replayed", handle, result }` |
 | `consume: "on-parse"` | `commit` — there is no consume-without-result. If the old site consumed on parse and did the work afterwards, move the work into `commit`'s callback. |
@@ -102,6 +103,31 @@ export const WaitingDraft = defineDraft({
 });
 ```
 
+`issuedBy` may also be a list when several operations issue the same handle
+(one `location_token` from both `search-address` and `reverse-geocode`):
+
+```ts
+export const LocationCursor = defineCursor({
+  name: "location",
+  fieldName: "location_token",
+  schema: LocationSchema,
+  ttl: "10m",
+  access: "public",
+  maxEntries: 10_000,
+  issuedBy: ["search-address", "reverse-geocode"],
+});
+// field description: "Opaque handle issued by `search-address` or `reverse-geocode`. Copy it exactly…"
+// recovery sentence: "Call `search-address` or `reverse-geocode` again and pass the new `location_token` exactly as returned."
+```
+
+Lint `handle-issued-by` checks that every listed operation exists and that at
+least one of them outputs the field.
+
+> **Two keys, two fields.** `Kind.field()` returns a schema instance; putting the
+> *same instance* under two property keys (`{ waiting_token: f, token: f }`) is
+> two handle fields to lint, and the second key fails `handle-field-name`. Call
+> `Kind.field()` once per property (or accept that only `fieldName` is legal).
+
 ## 3. The pattern: one handle per offer, plain picks
 
 The unit that gets a handle is the **offer** (the list the user chooses from),
@@ -155,6 +181,9 @@ export const waitingPrepare = defineOperation<ProviderContext>()({
     const offer = await loadWaitingOffer(ctx, input.shop_ref);          // upstream info + menus
     const waiting_token = await ctx.handle.create(WaitingDraft, offer);  // validated against WaitingDraftSchema
     return { waiting_token, ...offer, expires_in_min: 30 };
+    // To return the real deadline instead of a constant, use createRecord:
+    //   const record = await ctx.handle.createRecord(WaitingDraft, offer);
+    //   return { waiting_token: record.handle, ...offer, expires_at: record.expiresAt };
   },
 });
 
@@ -209,6 +238,11 @@ export const registerWaiting = defineOperation<ProviderContext>()({
   },
 });
 ```
+
+`pick` compares as strings: `item[by]` is stringified before the exact and
+case-insensitive match. Numeric keys work (`pick(items, input.lot, { field: "lot" })`
+finds `{ lot: 7 }` for `"7"`), but when *your* value is a number, pass
+`String(id)` — the `value` parameter is a string.
 
 What changed for the model: it copies one 20-odd-character handle instead of
 1 + N + M + K 369-character tokens, and everything else it sends is a key it
@@ -302,6 +336,101 @@ try {
 }
 ```
 
+### Commits with real-money upstream calls: the side effect must never re-run
+
+`commit` guarantees the callback runs at most once *per successful commit*. A
+callback that throws restores the draft to `active` so the caller can retry —
+which is right when the upstream call itself failed, and wrong when the upstream
+call succeeded and something *after* it threw (a parse error on the receipt, a
+logging bug). A retry would then charge the customer twice. Two rules:
+
+1. **Persist a `dispatch_attempted`-style marker with `update` before the
+   upstream call.** If the process dies mid-call, the next attempt sees the
+   marker and reconciles (query the upstream for the order) instead of
+   dispatching again.
+2. **After the upstream call has returned, never throw out of the callback.**
+   Treat a failure at that point as "outcome unknown": return a result that
+   records the failure so it is committed and replayed, and let the operation
+   report it.
+
+```ts
+const PaymentResult = z.object({
+  status: z.enum(["paid", "unknown"]),
+  receipt: z.string().optional(),
+  failure: z.string().optional(),
+});
+
+// Pay flow: mark, dispatch, commit whatever happened.
+const draft = await ctx.handle.read(PayDraft, input.pay_token);
+if (draft.data.dispatch_attempted) {
+  // A previous attempt reached the upstream. Reconcile instead of paying again.
+  const existing = await upstreamFindPayment(ctx, draft.data.quote_id);
+  if (existing) {
+    const { result } = await ctx.handle.commit(PayDraft, input.pay_token, async () => ({
+      status: "paid", receipt: existing.receipt,
+    }));
+    return result;
+  }
+}
+await ctx.handle.update(PayDraft, input.pay_token, (d) => ({ ...d, dispatch_attempted: true }));
+
+const { result } = await ctx.handle.commit(PayDraft, input.pay_token, async (data) => {
+  const response = await upstreamPay(ctx, data);            // may throw: nothing charged, retry is safe
+  try {
+    return { status: "paid", receipt: parseReceipt(response) };
+  } catch (error) {
+    // Money moved (or may have); do NOT throw — commit the unknown outcome so a
+    // retry replays it instead of paying twice.
+    return { status: "unknown", failure: error instanceof Error ? error.message : String(error) };
+  }
+});
+if (result.status === "unknown") {
+  throw new ProviderError("Payment outcome unknown; check the receipt list before retrying.", {
+    code: "PAYMENT_OUTCOME_UNKNOWN", category: "provider_error", retryable: false, details: result,
+  });
+}
+return result;
+```
+
+`upstreamPay` throwing *before* it sends anything is the case `commit` already
+handles (draft restored, retry safe). Everything after the request left the
+process belongs to the "outcome unknown" branch.
+
+## 4a. Connectionless providers (`auth: none`)
+
+A provider with no connections has no `request.connectionId`, so a bound draft
+throws `HANDLE_CONNECTION_REQUIRED` on `create`. If such a provider still needs
+a multi-turn form with a one-shot commit — modu-parking's quote → pay flow was
+the motivating case; without a draft its payment had no replay guard — declare
+the draft public:
+
+```ts
+export const PayDraft = defineDraft({
+  name: "pay",
+  fieldName: "pay_token",
+  schema: PaySchema,
+  result: PaymentResult,
+  ttl: { idle: "5m", max: "30m" },
+  access: "public",                 // provider scope; 4 words (5 when ttl.max > 1h or strength: "high")
+  maxEntries: 10_000,               // required, provider-wide live-entry quota
+  issuedBy: "parking-quote",
+});
+```
+
+What changes versus a bound draft:
+
+- Word count follows the public rules (ADR-0012 D3): 4 words, 5 when
+  `ttl.max > 1h` or `strength: "high"` (`strength` is public-only).
+- `maxEntries` is required and is provider-wide, not per connection.
+- Every lookup failure collapses to `HANDLE_INVALID` — not found, idle expiry,
+  max expiry, malformed — exactly like a public cursor. Map it to your
+  "start the flow again" code. `HANDLE_BUSY` and `HANDLE_COMMITTED` are still
+  reported (they need the exact live key).
+- `update`, `commit`, replay, and `discard` behave the same as for bound drafts.
+
+Do not make a draft public on a provider that *has* connections; that trades
+connection isolation for a guessable key (ADR-0012 Pitfall 1).
+
 ## 5. Error handling
 
 `HandleError` is already a `ProviderError` with `category`, `retryable`, and a
@@ -353,20 +482,34 @@ const token = await choice.issue({
   bind: { connection: true }, storage: WAITING_STORAGE,
 });
 
-// after
-import { createTestHandleContext, normalizeHandle } from "@apifuse/provider-sdk";
+// after — everything comes from the package root
+import {
+  createMemoryProviderRuntimeState,
+  createTestHandleContext,
+  normalizeHandle,
+} from "@apifuse/provider-sdk";
 import { WaitingDraft } from "../handles";
 
+const state = createMemoryProviderRuntimeState();                    // share it to test isolation
 const request = { connectionId: "af_con_test0000000000000000" };   // bound kinds need one
-const handle = createTestHandleContext({ providerId: "catchtable", request });   // memory state by default
+const handle = createTestHandleContext({ providerId: "catchtable", state, request });
 
 const token = await handle.create(WaitingDraft, offer);
 expect(token).toMatch(/^waiting_[a-z]+-[a-z]+$/);
 
+// createRecord returns what read returns, including the deadline
+const issued = await handle.createRecord(WaitingDraft, offer);
+expect(issued.expiresAt).toBe(new Date(Date.now() + 30 * 60_000).toISOString()); // with a fake clock
+
 // tolerant read: the 2026-08-21 damage classes resolve to the same record
 const record = await handle.read(WaitingDraft, ` "${token.toUpperCase()}". `);
 expect(record.handle).toBe(token);
-expect(normalizeHandle(WaitingDraft, token.replace("-", " "))).toBe(token);
+// normalizeHandle returns { canonical, words, normalization }
+expect(normalizeHandle(WaitingDraft, token.replace("-", " "))).toEqual({
+  canonical: token,
+  words: token.slice("waiting_".length).split("-"),
+  normalization: ["separator", "whitespace"],
+});
 
 // commit once, replay after
 const first = await handle.commit(WaitingDraft, token, async () => ({ waiting_number: 7, registered_at: now }));
@@ -374,8 +517,10 @@ const again = await handle.commit(WaitingDraft, token, async () => { throw new E
 expect(first.status).toBe("committed");
 expect(again).toMatchObject({ status: "replayed", result: first.result });
 
-// isolation: another connection cannot see it
-const other = createTestHandleContext({ providerId: "catchtable", request: { connectionId: "af_con_other000000000000000" } });
+// isolation: another connection on the same state cannot see it
+const other = createTestHandleContext({
+  providerId: "catchtable", state, request: { connectionId: "af_con_other000000000000000" },
+});
 await expect(other.read(WaitingDraft, token)).rejects.toMatchObject({ code: "HANDLE_NOT_FOUND" });
 ```
 
@@ -394,6 +539,7 @@ asserted a synchronous `string` return from inline `issue` become `await`.
    version suffix.
 3. If the old site had no `bind` and the operation has `connectionMode: "none"`,
    the kind is `access: "public"` and needs `maxEntries`. Otherwise keep it bound.
+   A draft may be public only on a connectionless provider (§4a).
 4. Replace per-option tokens with plain keys stored in the draft and validated
    with `pick`. Remove inputs that only existed for cross-validation (`shop_ref`).
 5. Replace `consume: "explicit"` + replay-record code with `commit`. Delete the

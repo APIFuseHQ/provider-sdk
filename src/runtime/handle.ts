@@ -3,7 +3,8 @@
  *
  * Storage layout: one state namespace per kind, `handle.<kind>`, scoped by the
  * kind's access (bound → connection scope via `state.forConnection`, public →
- * provider scope). The state key is the canonical handle string. Records hold
+ * provider scope; both cursors and drafts may be either). The state key is the
+ * canonical handle string. Records hold
  * the validated data plus status/timestamps; the handle string itself carries
  * no payload and no signature.
  */
@@ -26,6 +27,7 @@ import {
 	isDraftKind,
 	type ResultOf,
 } from "../handle.js";
+import { formatHandleIssuers } from "../handle-meta.js";
 import type {
 	ProviderRequestContext,
 	ProviderRuntimeState,
@@ -246,9 +248,8 @@ export function formatNormalizationClasses(classes: readonly string[]): string {
 // ---------------------------------------------------------------------------
 
 function publicCollapsedMessage(kind: HandleKind): string {
-	const again = kind.issuedBy
-		? `Call \`${kind.issuedBy}\` again to get a new one.`
-		: "Request a new one.";
+	const issuers = formatHandleIssuers(kind.issuedBy);
+	const again = issuers ? `Call ${issuers} again to get a new one.` : "Request a new one.";
 	return `\`${kind.fieldName}\` is not valid or has expired. ${again}`;
 }
 
@@ -257,7 +258,7 @@ function normalizationError(kind: HandleKind, failure: NormalizationFailure): Ha
 		return new HandleError(
 			"HANDLE_KIND_MISMATCH",
 			`\`${kind.fieldName}\` must be a \`${kind.name}_...\` handle as returned by ${
-				kind.issuedBy ? `\`${kind.issuedBy}\`` : "the issuing operation"
+				formatHandleIssuers(kind.issuedBy) ?? "the issuing operation"
 			}. ${handleRecoverySentence(kind)}`,
 			{ kind: kind.name, details: { field: kind.fieldName } },
 		);
@@ -352,7 +353,7 @@ function committedError(kind: HandleKind): HandleError {
 function connectionRequiredError(kind: HandleKind, operation: HandleOperation): HandleError {
 	return new HandleError(
 		"HANDLE_CONNECTION_REQUIRED",
-		`Handle kind "${kind.name}" is bound to a connection, but request.connectionId is missing for ${operation}. Bound handles require a connection-scoped request; use access: "public" for connection-less cursors.`,
+		`Handle kind "${kind.name}" is bound to a connection, but request.connectionId is missing for ${operation}. Bound handles require a connection-scoped request; use access: "public" for connection-less kinds.`,
 		{ kind: kind.name },
 	);
 }
@@ -738,8 +739,11 @@ export function createHandleContext(options: CreateHandleContextOptions): Handle
 		};
 	}
 
-	async function create<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<string> {
-		return await instrumented<string>(kind, "create", async (report) => {
+	async function createRecord<K extends HandleKind>(
+		kind: K,
+		data: InputOf<K>,
+	): Promise<HandleRecord<K>> {
+		return await instrumented<HandleRecord<K>>(kind, "create", async (report) => {
 			const validated = validateData(kind, "create", data);
 			const namespace = resolveNamespace(kind, "create");
 			const now = nowMs();
@@ -766,13 +770,19 @@ export function createHandleContext(options: CreateHandleContextOptions): Handle
 				const result = await storage(kind, () =>
 					namespace.compareAndSet(canonical, 0, record, { ttl: msDuration(writeTtlMs) }),
 				);
-				if (result.ok) return { value: canonical, outcome: "success" };
+				if (result.ok) {
+					return { value: toHandleRecord(kind, canonical, record), outcome: "success" };
+				}
 			}
 			throw storageUnavailableError(
 				kind,
 				`could not allocate a unique handle after ${CREATE_ATTEMPTS} attempts`,
 			);
 		});
+	}
+
+	async function create<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<string> {
+		return (await createRecord(kind, data)).handle;
 	}
 
 	async function read<K extends HandleKind>(kind: K, handle: string): Promise<HandleRecord<K>> {
@@ -1139,7 +1149,7 @@ export function createHandleContext(options: CreateHandleContextOptions): Handle
 		});
 	}
 
-	return { create, read, update, commit, discard };
+	return { create, createRecord, read, update, commit, discard };
 }
 
 /**

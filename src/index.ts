@@ -140,6 +140,12 @@ export {
 } from "./runtime/cache.js";
 export * from "./handle.js";
 export {
+	APIFUSE_HANDLE_META_KEY,
+	HANDLE_KIND_NAME_PATTERN,
+	handleFieldDescription,
+	isHandleFieldMeta,
+} from "./handle-meta.js";
+export {
 	type CreateHandleContextOptions,
 	type CreateTestHandleContextOptions,
 	createHandleContext,
@@ -244,6 +250,7 @@ export {
 	MISSING_SECRET_CODE,
 } from "./runtime/secrets.js";
 export {
+	createMemoryProviderRuntimeState,
 	createUnsupportedProviderRuntimeState,
 	UnsupportedProviderStateError,
 } from "./runtime/state.js";

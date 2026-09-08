@@ -261,6 +261,93 @@ describe("handle lint rules", () => {
 
 			expect(byRule(lintProvider(provider), "handle-issued-by")).toEqual([]);
 		});
+
+		describe("issuer lists", () => {
+			/** Two issuing operations; `waiting-prepare` and `waiting-restart` both output the field. */
+			function multiIssuerProvider(): ProviderFixture {
+				const provider = validProvider();
+				const issuedBy = ["waiting-prepare", "waiting-restart"] as const;
+				const meta: HandleFieldMeta = { ...WAITING_META, issuedBy };
+				provider.handle = [{ ...WAITING_KIND, issuedBy }];
+				provider.operations["waiting-prepare"] = operation(
+					{ shop_id: described(z.string(), "fields.shopId") },
+					{ waiting_token: handleField(meta) },
+				);
+				provider.operations["waiting-restart"] = operation(
+					{ shop_id: described(z.string(), "fields.shopId") },
+					{ waiting_token: handleField(meta) },
+				);
+				provider.operations["waiting-confirm"] = operation(
+					{ waiting_token: handleField(meta) },
+					{ confirmed: described(z.boolean(), "fields.confirmed") },
+				);
+				return provider;
+			}
+
+			it("is silent when every listed issuer is an operation that outputs the field", () => {
+				const diagnostics = lintProvider(multiIssuerProvider());
+
+				expect(rulesOf(diagnostics, "handle-")).toEqual([]);
+				// The two-issuer SDK wording is still exempt from describeKey.
+				expect(
+					diagnostics.filter((diagnostic) => diagnostic.rule.startsWith("schema-description")),
+				).toEqual([]);
+			});
+
+			it("is silent when at least one listed issuer outputs the field", () => {
+				const provider = multiIssuerProvider();
+				provider.operations["waiting-restart"] = operation(
+					{ shop_id: described(z.string(), "fields.shopId") },
+					{ ok: described(z.boolean(), "fields.ok") },
+				);
+
+				expect(byRule(lintProvider(provider), "handle-issued-by")).toEqual([]);
+			});
+
+			it("reports each listed issuer that is not an operation key", () => {
+				const provider = multiIssuerProvider();
+				provider.handle = [
+					{ ...WAITING_KIND, issuedBy: ["waiting-prepare", "waiting-start", "waiting-resume"] },
+				];
+
+				const found = byRule(lintProvider(provider), "handle-issued-by");
+
+				expect(found.map((diagnostic) => diagnostic.message)).toEqual([
+					expect.stringContaining('"waiting-start", which is not an operation key'),
+					expect.stringContaining('"waiting-resume", which is not an operation key'),
+				]);
+			});
+
+			it("reports when none of the listed issuers outputs the field", () => {
+				const provider = multiIssuerProvider();
+				provider.handle = [{ ...WAITING_KIND, issuedBy: ["waiting-confirm", "waiting-restart"] }];
+				provider.operations["waiting-restart"] = operation(
+					{ shop_id: described(z.string(), "fields.shopId") },
+					{ ok: described(z.boolean(), "fields.ok") },
+				);
+
+				const found = byRule(lintProvider(provider), "handle-issued-by");
+
+				expect(found).toEqual([
+					expect.objectContaining({
+						level: "error",
+						field: "handle.waiting",
+						message: expect.stringContaining(
+							'issuedBy "waiting-confirm", "waiting-restart", but none of those operations\' outputs has a "waiting_token" handle field',
+						),
+					}),
+				]);
+			});
+
+			it("skips a kind whose issuedBy is an empty or non-string list (malformed declaration)", () => {
+				const provider = validProvider();
+				provider.handle = [{ ...WAITING_KIND, issuedBy: [] }];
+
+				// The malformed declaration is not read as a kind, so its fields are undeclared.
+				expect(byRule(lintProvider(provider), "handle-issued-by")).toEqual([]);
+				expect(byRule(lintProvider(provider), "handle-kind-undeclared")).toHaveLength(2);
+			});
+		});
 	});
 
 	describe("handle-requires-state", () => {
