@@ -116,7 +116,10 @@ import {
 	ResolverTelemetryCollector,
 	type ResolverTelemetryLogPayload,
 } from "../runtime/resolver-telemetry.js";
-import { createResolverRuntimeOptions } from "../runtime/resolver-runtime-options.js";
+import {
+	createResolverRuntimeOptions,
+	resolveNativeProxyPolicy,
+} from "../runtime/resolver-runtime-options.js";
 import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
@@ -170,7 +173,6 @@ import type {
 	ProviderDefinition,
 	ProviderErrorStatus,
 	ProviderFilesContext,
-	ProviderProxyPolicy,
 	ProviderRuntimeState,
 	ProviderStreamEvent,
 	ResolverContext,
@@ -778,13 +780,6 @@ function resolveOperationConnectionId(
 
 function normalizeConnectionId(id: string | undefined): string | undefined {
 	return id === "" ? undefined : id;
-}
-
-function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPolicy | undefined {
-	if (typeof provider.proxy === "object") return provider.proxy;
-	if (provider.proxy === true) return { mode: "optional" };
-	if (provider.proxy === false) return { mode: "disabled" };
-	return undefined;
 }
 
 function providerSecretNames(provider: ProviderDefinition): string[] {

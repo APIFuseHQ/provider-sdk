@@ -6,16 +6,14 @@ import {
 	createResolverClientFromEnv,
 	createUnsupportedResolverClient,
 } from "../runtime/resolver.js";
-import { createResolverRuntimeOptions } from "../runtime/resolver-runtime-options.js";
+import {
+	createResolverRuntimeOptions,
+	resolveNativeProxyPolicy,
+} from "../runtime/resolver-runtime-options.js";
 import { ResolverTelemetryCollector } from "../runtime/resolver-telemetry.js";
 import { collectStaticDiagnosticSensitiveValues } from "../server/sensitive-values.js";
 import { getStealthProfile } from "../stealth/profiles.js";
-import type {
-	ProviderCache,
-	ProviderDefinition,
-	ProviderProxyPolicy,
-	ResolverContext,
-} from "../types.js";
+import type { ProviderCache, ProviderDefinition, ResolverContext } from "../types.js";
 
 export interface CliResolverRuntime {
 	readonly resolver: ResolverContext;
@@ -55,7 +53,7 @@ export function createCliResolverRuntime(
 				provider,
 				cache,
 				undefined,
-				resolveProxyPolicy(provider),
+				resolveNativeProxyPolicy(provider),
 				{ upstream: { proxy: provider.proxy } },
 				stealthProfile,
 				resolverTelemetry,
@@ -63,11 +61,4 @@ export function createCliResolverRuntime(
 		),
 		resolverTelemetry,
 	};
-}
-
-function resolveProxyPolicy(provider: ProviderDefinition): ProviderProxyPolicy | undefined {
-	if (typeof provider.proxy === "object") return provider.proxy;
-	if (provider.proxy === true) return { mode: "optional" };
-	if (provider.proxy === false) return { mode: "disabled" };
-	return undefined;
 }
