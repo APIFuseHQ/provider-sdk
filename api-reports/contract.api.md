@@ -584,8 +584,8 @@ export function digestProviderContract(snapshot: ProviderContractSnapshot): stri
 
 // @public (undocumented)
 interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema extends ZodType | undefined = ZodType | undefined> extends HandleKindBase<TSchema> {
-    // (undocumented)
-    readonly access: "bound";
+    // Warning: (ae-forgotten-export) The symbol "HandleAccess" needs to be exported by the entry point contract.d.ts
+    readonly access: HandleAccess;
     // (undocumented)
     readonly idleTtlMs: number;
     // (undocumented)
@@ -595,6 +595,7 @@ interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema extends Zod
     readonly resultTtl: ProviderStateDurationString;
     // (undocumented)
     readonly resultTtlMs: number;
+    readonly strength: HandleStrength;
     // (undocumented)
     readonly ttl: {
         readonly idle: ProviderStateDurationString;
@@ -602,8 +603,6 @@ interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema extends Zod
     };
     // (undocumented)
     readonly type: "draft";
-    // (undocumented)
-    readonly wordCount: 2;
 }
 
 // @public (undocumented)
@@ -736,13 +735,17 @@ interface HandleContext {
     commit<K extends DraftKind>(kind: K, handle: string, work: (data: DataOf<K>) => Promise<ResultOf<K>>): Promise<HandleCommitResult<K>>;
     // Warning: (ae-forgotten-export) The symbol "InputOf" needs to be exported by the entry point contract.d.ts
     create<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<string>;
-    discard<K extends HandleKind>(kind: K, handle: string): Promise<void>;
     // Warning: (ae-forgotten-export) The symbol "HandleRecord" needs to be exported by the entry point contract.d.ts
+    createRecord<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<HandleRecord<K>>;
+    discard<K extends HandleKind>(kind: K, handle: string): Promise<void>;
     read<K extends HandleKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
     // Warning: (ae-forgotten-export) The symbol "DraftKind" needs to be exported by the entry point contract.d.ts
     // Warning: (ae-forgotten-export) The symbol "DataOf" needs to be exported by the entry point contract.d.ts
     update<K extends DraftKind>(kind: K, handle: string, updater: (data: DataOf<K>) => InputOf<K> | Promise<InputOf<K>>): Promise<HandleRecord<K>>;
 }
+
+// @public
+type HandleIssuedBy = string | readonly string[];
 
 // Warning: (ae-forgotten-export) The symbol "CursorKind" needs to be exported by the entry point contract.d.ts
 //
@@ -763,14 +766,14 @@ interface HandleKindBase<TSchema extends ZodType = ZodType> extends HandleKindDe
 
 // @public
 interface HandleKindDeclaration {
-    // Warning: (ae-forgotten-export) The symbol "HandleAccess" needs to be exported by the entry point contract.d.ts
-    //
     // (undocumented)
     readonly access: HandleAccess;
     // (undocumented)
     readonly fieldName: string;
+    // Warning: (ae-forgotten-export) The symbol "HandleIssuedBy" needs to be exported by the entry point contract.d.ts
+    //
     // (undocumented)
-    readonly issuedBy?: string;
+    readonly issuedBy?: HandleIssuedBy;
     // (undocumented)
     readonly name: string;
     // Warning: (ae-forgotten-export) The symbol "HandleKindType" needs to be exported by the entry point contract.d.ts

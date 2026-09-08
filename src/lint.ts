@@ -11,6 +11,8 @@ import {
 	type HandleFieldMeta,
 	type HandleKindDeclaration,
 	handleFieldDescription,
+	handleIssuerList,
+	isHandleIssuedBy,
 	isHandleFieldMeta,
 } from "./handle-meta.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
@@ -1534,7 +1536,7 @@ function readHandleKindDeclarations(value: unknown): HandleKindDeclaration[] {
 			typeof record.name === "string" &&
 			(record.type === "cursor" || record.type === "draft") &&
 			typeof record.fieldName === "string" &&
-			(record.issuedBy === undefined || typeof record.issuedBy === "string")
+			(record.issuedBy === undefined || isHandleIssuedBy(record.issuedBy))
 		);
 	});
 }
@@ -1542,8 +1544,9 @@ function readHandleKindDeclarations(value: unknown): HandleKindDeclaration[] {
 /**
  * ADR-0012 handle rules: every `x-apifuse-handle` schema field must belong to
  * a declared kind under its declared property key; every declared kind must be
- * both issued (some output) and accepted (some input); `issuedBy` must name an
- * operation whose output carries the field; and `ctx.handle` needs `state`.
+ * both issued (some output) and accepted (some input); every `issuedBy` entry
+ * must be an operation key and at least one of them must output the field; and
+ * `ctx.handle` needs `state`.
  */
 function lintHandleDeclarations(provider: {
 	id?: string;
@@ -1636,19 +1639,39 @@ function lintHandleDeclarations(provider: {
 		}
 
 		if (kind.issuedBy === undefined) continue;
-		if (!Object.hasOwn(operations, kind.issuedBy)) {
+		const issuers = handleIssuerList(kind.issuedBy);
+		const known = issuers.filter((operationKey) => Object.hasOwn(operations, operationKey));
+		for (const operationKey of issuers) {
+			if (known.includes(operationKey)) continue;
 			diagnostics.push({
 				rule: "handle-issued-by",
 				level: "error",
 				field,
-				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy "${kind.issuedBy}", which is not an operation key.`,
+				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy "${operationKey}", which is not an operation key.`,
 			});
-		} else if (!outputKindsByOperation.get(kind.issuedBy)?.has(kind.name)) {
+		}
+		if (known.length === 0) continue;
+		const issuing = known.filter((operationKey) =>
+			outputKindsByOperation.get(operationKey)?.has(kind.name),
+		);
+		if (issuing.length > 0) continue;
+		if (known.length === 1) {
 			diagnostics.push({
 				rule: "handle-issued-by",
 				level: "error",
 				field,
-				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy "${kind.issuedBy}", but that operation's output has no "${kind.fieldName}" handle field.`,
+				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy "${known[0]}", but that operation's output has no "${kind.fieldName}" handle field.`,
+			});
+		} else {
+			diagnostics.push({
+				rule: "handle-issued-by",
+				level: "error",
+				field,
+				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy ${known
+					.map((operationKey) => `"${operationKey}"`)
+					.join(
+						", ",
+					)}, but none of those operations' outputs has a "${kind.fieldName}" handle field. At least one listed issuer must output it.`,
 			});
 		}
 	}

@@ -99,7 +99,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema
 			relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			ProviderStealthConfig StealthChallengeClassification
-					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleKindBase HandleKindDeclaration HandleKindType HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
+					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
 					InputOf
 		`,
 	),
@@ -229,7 +229,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ScopedAssertionExpression ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
 			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			ProviderStealthConfig StealthChallengeClassification NativeNetworkErrorCode
-								CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleKindBase HandleKindDeclaration HandleKindType HandleOperation HandleRecord HandleStatus HandleStrength HandleTelemetryEvent HandleTelemetryOutcome HandleWordCount ResultOf
+								CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType HandleOperation HandleRecord HandleStatus HandleStrength HandleTelemetryEvent HandleTelemetryOutcome HandleWordCount ResultOf
 					InputOf
 		`,
 	),
@@ -276,7 +276,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ScopedAssertionExpression ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
 			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			ProviderStealthConfig StealthChallengeClassification
-					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleKindBase HandleKindDeclaration HandleKindType HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
+					CursorKind DataOf DraftKind HandleAccess HandleCommitResult HandleContext HandleKind HandleIssuedBy HandleKindBase HandleKindDeclaration HandleKindType HandleRecord HandleStatus HandleStrength HandleWordCount ResultOf
 					InputOf
 		`,
 	),

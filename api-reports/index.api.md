@@ -69,6 +69,9 @@ export const APIFUSE_CONTENT_TRUST_META_KEY = "x-apifuse-content-trust";
 // @public (undocumented)
 export const APIFUSE_DESCRIPTION_KEY_META_KEY = "x-apifuse-description-key";
 
+// @public
+export const APIFUSE_HANDLE_META_KEY: "x-apifuse-handle";
+
 // @public (undocumented)
 export const APIFUSE_REDACTION_MARKER = "<redacted>";
 
@@ -1084,6 +1087,11 @@ export function createMagicLinkCeremony(options: {
 }): AuthFlowDefinition;
 
 // @public (undocumented)
+export function createMemoryProviderRuntimeState(options?: {
+    readonly now?: () => number;
+}): ProviderRuntimeState;
+
+// @public (undocumented)
 export function createOAuth2Ceremony(options: {
     authorizeUrl: string;
     tokenUrl: string;
@@ -1449,7 +1457,7 @@ export function defineCursor<TSchema extends ZodType>(options: DefineCursorOptio
 export interface DefineCursorOptions<TSchema extends ZodType> {
     readonly access?: HandleAccess;
     readonly fieldName?: string;
-    readonly issuedBy?: string;
+    readonly issuedBy?: HandleIssuedBy;
     readonly maxEntries?: number;
     readonly maxValueBytes?: number;
     readonly name: string;
@@ -1475,10 +1483,10 @@ export function defineDraft<TSchema extends ZodType, TResultSchema extends ZodTy
 
 // @public (undocumented)
 export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema extends ZodType | undefined> {
+    readonly access?: HandleAccess;
     // (undocumented)
     readonly fieldName?: string;
-    // (undocumented)
-    readonly issuedBy?: string;
+    readonly issuedBy?: HandleIssuedBy;
     readonly maxEntries?: number;
     readonly maxValueBytes?: number;
     // (undocumented)
@@ -1487,6 +1495,7 @@ export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema exten
     readonly resultTtl?: ProviderStateDurationString;
     // (undocumented)
     readonly schema: TSchema;
+    readonly strength?: HandleStrength;
     // (undocumented)
     readonly ttl: {
         readonly idle: ProviderStateDurationString;
@@ -1548,8 +1557,7 @@ export function done<TData>(data: TData, options?: {
 
 // @public (undocumented)
 export interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema extends ZodType | undefined = ZodType | undefined> extends HandleKindBase<TSchema> {
-    // (undocumented)
-    readonly access: "bound";
+    readonly access: HandleAccess;
     // (undocumented)
     readonly idleTtlMs: number;
     // (undocumented)
@@ -1559,6 +1567,7 @@ export interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema exte
     readonly resultTtl: ProviderStateDurationString;
     // (undocumented)
     readonly resultTtlMs: number;
+    readonly strength: HandleStrength;
     // (undocumented)
     readonly ttl: {
         readonly idle: ProviderStateDurationString;
@@ -1566,8 +1575,6 @@ export interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema exte
     };
     // (undocumented)
     readonly type: "draft";
-    // (undocumented)
-    readonly wordCount: 2;
 }
 
 // @public (undocumented)
@@ -1871,6 +1878,9 @@ export const GuardStepSchema: z.ZodObject<{
     }, z.core.$strict>;
 }, z.core.$strict>;
 
+// @public
+export const HANDLE_KIND_NAME_PATTERN: RegExp;
+
 // @public (undocumented)
 export type HandleAccess = "bound" | "public";
 
@@ -1888,6 +1898,7 @@ export interface HandleCommitResult<K extends HandleKind> {
 export interface HandleContext {
     commit<K extends DraftKind>(kind: K, handle: string, work: (data: DataOf<K>) => Promise<ResultOf<K>>): Promise<HandleCommitResult<K>>;
     create<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<string>;
+    createRecord<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<HandleRecord<K>>;
     discard<K extends HandleKind>(kind: K, handle: string): Promise<void>;
     read<K extends HandleKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
     update<K extends DraftKind>(kind: K, handle: string, updater: (data: DataOf<K>) => InputOf<K> | Promise<InputOf<K>>): Promise<HandleRecord<K>>;
@@ -1913,16 +1924,22 @@ export type HandleErrorOptions = Omit<ProviderErrorOptions, "code"> & {
 };
 
 // @public
+export function handleFieldDescription(meta: Pick<HandleFieldMeta, "issuedBy">): string;
+
+// @public
 export interface HandleFieldMeta {
     // (undocumented)
     readonly fieldName: string;
     // (undocumented)
-    readonly issuedBy?: string;
+    readonly issuedBy?: HandleIssuedBy;
     // (undocumented)
     readonly kind: string;
     // (undocumented)
     readonly type: HandleKindType;
 }
+
+// @public
+export type HandleIssuedBy = string | readonly string[];
 
 // @public (undocumented)
 export type HandleKind = CursorKind<any> | DraftKind<any, any>;
@@ -1943,7 +1960,7 @@ export interface HandleKindDeclaration {
     // (undocumented)
     readonly fieldName: string;
     // (undocumented)
-    readonly issuedBy?: string;
+    readonly issuedBy?: HandleIssuedBy;
     // (undocumented)
     readonly name: string;
     // (undocumented)
@@ -1979,7 +1996,7 @@ export interface HandleRecord<K extends HandleKind> {
 // @public
 export function handleRecoverySentence(kind: {
     readonly fieldName: string;
-    readonly issuedBy?: string;
+    readonly issuedBy?: HandleIssuedBy;
 }): string;
 
 // @public (undocumented)
@@ -2780,6 +2797,9 @@ export function isEngineOwnedTelemetryEnvName(name: string): boolean;
 
 // @public
 export function isHandleError(value: unknown): value is HandleError;
+
+// @public (undocumented)
+export function isHandleFieldMeta(value: unknown): value is HandleFieldMeta;
 
 // @public (undocumented)
 export type Iso3166Alpha2CountryCode = Uppercase<string>;
@@ -3902,7 +3922,7 @@ export function pick<T extends Record<string, unknown>>(items: readonly T[], val
 export interface PickOptions<T> {
     readonly by?: keyof T & string;
     readonly field: string;
-    readonly issuedBy?: string;
+    readonly issuedBy?: HandleIssuedBy;
 }
 
 // @public

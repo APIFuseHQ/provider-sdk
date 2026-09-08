@@ -1491,3 +1491,349 @@ describe("codex review regressions (2026-09-08)", () => {
 		expect(resultError.options?.details).toMatchObject({ deadline: "result" });
 	});
 });
+
+// ---------------------------------------------------------------------------
+// ADR-0012 follow-ups (2026-09-08): multi-issuer kinds, public drafts,
+// createRecord, root exports.
+// ---------------------------------------------------------------------------
+
+const LocationSchema = z.object({ lat: z.number(), lng: z.number(), label: z.string() });
+const LocationCursor = defineCursor({
+	name: "location",
+	fieldName: "location_token",
+	schema: LocationSchema,
+	ttl: "10m",
+	access: "public",
+	maxEntries: 1_000,
+	issuedBy: ["search-address", "reverse-geocode"],
+});
+const BoundLocation = defineCursor({
+	name: "loc",
+	fieldName: "loc_token",
+	schema: LocationSchema,
+	ttl: "10m",
+	issuedBy: ["search-address", "reverse-geocode"],
+});
+
+const PaymentSchema = z.object({
+	lot: z.string(),
+	amount: z.number().int(),
+	dispatch_attempted: z.boolean().default(false),
+});
+const PaymentResultSchema = z.object({ receipt: z.string() });
+const PublicPayment = defineDraft({
+	name: "pay",
+	fieldName: "pay_token",
+	schema: PaymentSchema,
+	result: PaymentResultSchema,
+	ttl: { idle: "5m", max: "30m" },
+	access: "public",
+	maxEntries: 5_000,
+	issuedBy: "parking-quote",
+});
+
+function paymentData(): z.input<typeof PaymentSchema> {
+	return { lot: "lot-7", amount: 4_000 };
+}
+
+describe("multi-issuer kinds", () => {
+	it("accepts a list of issuing operations and keeps a single string valid", () => {
+		expect(LocationCursor.issuedBy).toEqual(["search-address", "reverse-geocode"]);
+		expect(Object.isFrozen(LocationCursor.issuedBy)).toBe(true);
+		expect(PublicPayment.issuedBy).toBe("parking-quote");
+		const declarations: HandleKindDeclaration[] = [LocationCursor, PublicPayment];
+		expect(declarations.map((kind) => kind.name)).toEqual(["location", "pay"]);
+		const meta = LocationCursor.field().meta()?.[APIFUSE_HANDLE_META_KEY];
+		expect(isHandleFieldMeta(meta)).toBe(true);
+		expect(meta).toEqual({
+			kind: "location",
+			type: "cursor",
+			fieldName: "location_token",
+			issuedBy: ["search-address", "reverse-geocode"],
+		});
+		expect(isHandleFieldMeta({ kind: "x", type: "cursor", fieldName: "x", issuedBy: [] })).toBe(
+			false,
+		);
+		expect(isHandleFieldMeta({ kind: "x", type: "cursor", fieldName: "x", issuedBy: [1] })).toBe(
+			false,
+		);
+	});
+
+	it("rejects empty or malformed issuer lists at definition time", () => {
+		expect(() =>
+			defineCursor({ name: "bad", schema: PageSchema, ttl: "1m", issuedBy: [] }),
+		).toThrow(/issuedBy must be an operation key or a non-empty list/);
+		expect(() =>
+			defineDraft({
+				name: "bad",
+				schema: PageSchema,
+				ttl: { idle: "1m", max: "2m" },
+				issuedBy: ["search", ""],
+			}),
+		).toThrow(/must not contain empty operation keys/);
+	});
+
+	it("words the field description and every recovery sentence with all issuers", async () => {
+		expect(LocationCursor.field().meta()?.description).toBe(
+			"Opaque handle issued by `search-address` or `reverse-geocode`. Copy it exactly as returned; do not edit or shorten it.",
+		);
+		const three = defineCursor({
+			name: "tri",
+			schema: PageSchema,
+			ttl: "1m",
+			issuedBy: ["a", "b", "c"],
+		});
+		expect(three.field().meta()?.description).toBe(
+			"Opaque handle issued by `a`, `b`, or `c`. Copy it exactly as returned; do not edit or shorten it.",
+		);
+
+		const ctx = createTestHandleContext({ request: { headers: {}, connectionId: "alice" } });
+		const missing = await expectHandleError(
+			ctx.read(BoundLocation, "loc_visor-anagram"),
+			"HANDLE_NOT_FOUND",
+		);
+		expect(missing.message).toBe(
+			"`loc_token` was not found; it may have expired or belong to another session. Call `search-address` or `reverse-geocode` again and pass the new `loc_token` exactly as returned.",
+		);
+		const mismatch = await expectHandleError(
+			ctx.read(BoundLocation, "page_visor-anagram"),
+			"HANDLE_KIND_MISMATCH",
+		);
+		expect(mismatch.message).toBe(
+			"`loc_token` must be a `loc_...` handle as returned by `search-address` or `reverse-geocode`. Call `search-address` or `reverse-geocode` again and pass the new `loc_token` exactly as returned.",
+		);
+		const collapsed = await expectHandleError(
+			ctx.read(LocationCursor, "location_visor-anagram-atlas-cobweb"),
+			"HANDLE_INVALID",
+		);
+		expect(collapsed.message).toBe(
+			"`location_token` is not valid or has expired. Call `search-address` or `reverse-geocode` again to get a new one.",
+		);
+	});
+
+	it("pick names every listing operation in PICK_NOT_OFFERED", () => {
+		const items = [{ lot: "a" }, { lot: "b" }];
+		expect(() =>
+			pick(items, "z", { field: "lot", issuedBy: ["search-address", "reverse-geocode"] }),
+		).toThrow("Use the values exactly as listed by `search-address` or `reverse-geocode`.");
+	});
+});
+
+describe("public drafts", () => {
+	it("defaults to bound and applies the public word-count rules with a required quota", () => {
+		expect(WaitingDraft.access).toBe("bound");
+		expect(WaitingDraft.strength).toBe("standard");
+		expect(WaitingDraft.wordCount).toBe(2);
+		expect(PublicPayment.access).toBe("public");
+		expect(PublicPayment.wordCount).toBe(4);
+		expect(PublicPayment.maxEntries).toBe(5_000);
+		const long = defineDraft({
+			name: "long",
+			schema: PaymentSchema,
+			ttl: { idle: "10m", max: "2h" },
+			access: "public",
+			maxEntries: 10,
+		});
+		const high = defineDraft({
+			name: "high",
+			schema: PaymentSchema,
+			ttl: { idle: "1m", max: "5m" },
+			access: "public",
+			maxEntries: 10,
+			strength: "high",
+		});
+		expect(long.wordCount).toBe(5);
+		expect(high.wordCount).toBe(5);
+		expect(() =>
+			defineDraft({
+				name: "pay",
+				schema: PaymentSchema,
+				ttl: { idle: "1m", max: "5m" },
+				access: "public",
+			}),
+		).toThrow(/public draft "pay" must declare maxEntries/);
+		expect(() =>
+			defineDraft({
+				name: "pay",
+				schema: PaymentSchema,
+				ttl: { idle: "1m", max: "5m" },
+				strength: "high",
+			}),
+		).toThrow(/strength applies to public drafts only/);
+	});
+
+	it("shares a public draft across connections and without a connection; bound drafts stay isolated", async () => {
+		const state = createMemoryProviderRuntimeState();
+		const alice = createTestHandleContext({
+			state,
+			request: { headers: {}, connectionId: "alice" },
+		});
+		const bob = createTestHandleContext({ state, request: { headers: {}, connectionId: "bob" } });
+		const anonymous = createTestHandleContext({ state, request: { headers: {} } });
+
+		const token = await anonymous.create(PublicPayment, paymentData());
+		expect(wordsOf(token, PublicPayment)).toHaveLength(4);
+		expect((await alice.read(PublicPayment, token)).data).toEqual({
+			lot: "lot-7",
+			amount: 4_000,
+			dispatch_attempted: false,
+		});
+		await bob.update(PublicPayment, token, (data) => ({ ...data, dispatch_attempted: true }));
+		expect((await anonymous.read(PublicPayment, token)).data.dispatch_attempted).toBe(true);
+
+		let runs = 0;
+		const first = await alice.commit(PublicPayment, token, async (data) => {
+			runs += 1;
+			return { receipt: `r-${data.lot}` };
+		});
+		const replayed = await bob.commit(PublicPayment, token, async () => {
+			runs += 1;
+			return { receipt: "must-not-run" };
+		});
+		expect(first).toEqual({ status: "committed", handle: token, result: { receipt: "r-lot-7" } });
+		expect(replayed).toEqual({ status: "replayed", handle: token, result: { receipt: "r-lot-7" } });
+		expect(runs).toBe(1);
+		// Exact live key: HANDLE_COMMITTED is still reported for a public draft.
+		await expectHandleError(
+			anonymous.update(PublicPayment, token, (data) => data),
+			"HANDLE_COMMITTED",
+		);
+
+		const bound = await alice.create(WaitingDraft, waitingData());
+		await expectHandleError(bob.read(WaitingDraft, bound), "HANDLE_NOT_FOUND");
+		await expectHandleError(anonymous.read(WaitingDraft, bound), "HANDLE_CONNECTION_REQUIRED");
+	});
+
+	it("collapses not-found, expiry (idle and max), and malformed input to HANDLE_INVALID", async () => {
+		const clock = fakeClock();
+		const ctx = createTestHandleContext({ nowMs: clock.nowMs, request: { headers: {} } });
+		const idle = await ctx.create(PublicPayment, paymentData());
+		const max = await ctx.create(PublicPayment, paymentData());
+		const expectedMessage =
+			"`pay_token` is not valid or has expired. Call `parking-quote` again to get a new one.";
+
+		const missing = await expectHandleError(
+			ctx.read(PublicPayment, "pay_visor-anagram-atlas-cobweb"),
+			"HANDLE_INVALID",
+		);
+		expect(missing.message).toBe(expectedMessage);
+		const malformed = await expectHandleError(
+			ctx.read(PublicPayment, "pay_visor-anagram"),
+			"HANDLE_INVALID",
+		);
+		expect(malformed.message).toBe(expectedMessage);
+
+		// Keep `max` alive by touching it inside every idle window; leave `idle` untouched.
+		clock.advance(4 * MINUTE);
+		await ctx.read(PublicPayment, max);
+		clock.advance(2 * MINUTE);
+		await ctx.read(PublicPayment, max);
+		const idleExpired = await expectHandleError(ctx.read(PublicPayment, idle), "HANDLE_INVALID");
+		expect(idleExpired.message).toBe(expectedMessage);
+		expect(idleExpired.options?.details).toEqual({ field: "pay_token" });
+		while (clock.nowMs() - T0 < 26 * MINUTE) {
+			clock.advance(4 * MINUTE);
+			await ctx.read(PublicPayment, max);
+		}
+		// Last touch at 26m slides to min(31m, max 30m) = 30m; at 30m the hard deadline collapses too.
+		clock.advance(4 * MINUTE);
+		const maxExpired = await expectHandleError(ctx.read(PublicPayment, max), "HANDLE_INVALID");
+		expect(maxExpired.message).toBe(expectedMessage);
+		await expectHandleError(
+			ctx.commit(PublicPayment, max, async () => ({ receipt: "x" })),
+			"HANDLE_INVALID",
+		);
+	});
+
+	it("still reports HANDLE_BUSY for a public draft under a live commit", async () => {
+		const ctx = createTestHandleContext({ request: { headers: {} } });
+		const token = await ctx.create(PublicPayment, paymentData());
+		let release: (() => void) | undefined;
+		const gate = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const slow = ctx.commit(PublicPayment, token, async () => {
+			await gate;
+			return { receipt: "slow" };
+		});
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		const busy = await expectHandleError(
+			ctx.commit(PublicPayment, token, async () => ({ receipt: "fast" })),
+			"HANDLE_BUSY",
+		);
+		expect(busy.options?.retryable).toBe(true);
+		release?.();
+		expect((await slow).status).toBe("committed");
+	});
+});
+
+describe("createRecord", () => {
+	it("returns the full record and create is its handle-only shortcut", async () => {
+		const clock = fakeClock();
+		const events: HandleTelemetryEvent[] = [];
+		const ctx = createTestHandleContext({
+			nowMs: clock.nowMs,
+			request: { headers: {}, connectionId: "alice" },
+			onTelemetry: (event) => events.push(event),
+		});
+
+		const cursor = await ctx.createRecord(BoundPage, { query: "q", page: 2 });
+		expect(cursor).toEqual({
+			handle: cursor.handle,
+			kind: "page",
+			status: "active",
+			data: { query: "q", page: 2 },
+			createdAt: new Date(T0).toISOString(),
+			expiresAt: new Date(T0 + 10 * MINUTE).toISOString(),
+		});
+		expect(wordsOf(cursor.handle, BoundPage)).toHaveLength(2);
+		expect(await ctx.read(BoundPage, cursor.handle)).toEqual(cursor);
+
+		const draft = await ctx.createRecord(WaitingDraft, waitingData());
+		expect(draft.status).toBe("active");
+		expect(draft.expiresAt).toBe(new Date(T0 + 30 * MINUTE).toISOString());
+		expect("result" in draft).toBe(false);
+
+		const shortcut = await ctx.create(BoundPage, { query: "q", page: 3 });
+		expect(typeof shortcut).toBe("string");
+		expect((await ctx.read(BoundPage, shortcut)).data.page).toBe(3);
+
+		// Both paths emit exactly one `create` event; no new operation name is introduced.
+		expect(events.filter((event) => event.operation === "create")).toHaveLength(3);
+		expect(events.map((event) => event.operation)).toEqual([
+			"create",
+			"read",
+			"create",
+			"create",
+			"read",
+		]);
+	});
+
+	it("validates data and rejects oversized records before allocating a handle", async () => {
+		const ctx = createTestHandleContext({ request: { headers: {}, connectionId: "alice" } });
+		const invalid = await expectHandleError(
+			ctx.createRecord(BoundPage, { query: "q", page: 1.5 }),
+			"HANDLE_INVALID_DATA",
+		);
+		expect(invalid.options?.category).toBe("internal_error");
+	});
+});
+
+describe("root exports", () => {
+	it("re-exports the handle meta helpers and runtime state factories from both entry points", async () => {
+		const root = await import("../index.js");
+		const provider = await import("../provider.js");
+		const meta = await import("../handle-meta.js");
+		const state = await import("../runtime/state.js");
+		for (const entry of [root, provider]) {
+			expect(entry.APIFUSE_HANDLE_META_KEY).toBe(meta.APIFUSE_HANDLE_META_KEY);
+			expect(entry.handleFieldDescription).toBe(meta.handleFieldDescription);
+			expect(entry.isHandleFieldMeta).toBe(meta.isHandleFieldMeta);
+			expect(entry.HANDLE_KIND_NAME_PATTERN).toBe(meta.HANDLE_KIND_NAME_PATTERN);
+			expect(entry.createMemoryProviderRuntimeState).toBe(state.createMemoryProviderRuntimeState);
+			expect(entry.createUnsupportedProviderRuntimeState).toBe(
+				state.createUnsupportedProviderRuntimeState,
+			);
+		}
+	});
+});

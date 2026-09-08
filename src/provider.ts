@@ -155,6 +155,12 @@ export {
 } from "./i18n/index.js";
 export * from "./handle.js";
 export {
+	APIFUSE_HANDLE_META_KEY,
+	HANDLE_KIND_NAME_PATTERN,
+	handleFieldDescription,
+	isHandleFieldMeta,
+} from "./handle-meta.js";
+export {
 	type CreateHandleContextOptions,
 	type CreateTestHandleContextOptions,
 	createHandleContext,
@@ -163,6 +169,10 @@ export {
 	type NormalizedHandle,
 	normalizeHandle,
 } from "./runtime/handle.js";
+export {
+	createMemoryProviderRuntimeState,
+	createUnsupportedProviderRuntimeState,
+} from "./runtime/state.js";
 export {
 	APIFUSE_CONTENT_PROVENANCE_META_KEY,
 	APIFUSE_CONTENT_TRUST_META_KEY,
