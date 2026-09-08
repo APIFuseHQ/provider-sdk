@@ -223,6 +223,20 @@ export {
 	type ResolverVendorAttemptTelemetryEvent,
 } from "./runtime/resolver-telemetry.js";
 export {
+	StealthTelemetryCollector,
+	type StealthTelemetryAttemptEvent,
+	type StealthTelemetryAttemptKind,
+	type StealthTelemetryAttemptSample,
+	type StealthTelemetryDiagnostics,
+	type StealthTelemetryErrorCode,
+	type StealthTelemetryHeaderPayload,
+	type StealthTelemetryLogPayload,
+	type StealthTelemetryRequestClass,
+	type StealthTelemetrySbsdEvent,
+	type StealthTelemetrySbsdOutcome,
+	type StealthTelemetrySink,
+} from "./runtime/stealth-telemetry.js";
+export {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,
 	APIFUSE__RESOLVER__CAPMONSTER__API_KEY,

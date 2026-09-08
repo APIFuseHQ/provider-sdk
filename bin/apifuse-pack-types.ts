@@ -22,7 +22,7 @@
 // type errors, so this check cannot rot into a false-positive green.
 
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { z } from "zod";
@@ -293,14 +293,14 @@ const NEGATIVE_CONTROLS = [
 		].join("\n"),
 	},
 	{
-		filename: "negative-control-telemetry-header-vendor.ts",
+		filename: "negative-control-proxy-telemetry-vendor.ts",
 		expectedCode: "TS2322",
-		description: "gateway telemetry headers reject an unbranded vendor string",
+		description: "proxy gateway telemetry rejects an unbranded vendor string",
 		source: [
 			'import type { TelemetryContributor } from "@apifuse/provider-sdk";',
 			"",
 			"const bad: TelemetryContributor<{}, { vendor: string }> = {",
-			'\tkey: "resolver",',
+			'\tkey: "proxy",',
 			"\ttoLogPayload: () => ({}),",
 			'\ttoHeaderPayload: () => ({ vendor: "free-text" }),',
 			"};",
@@ -451,6 +451,28 @@ const NEGATIVE_CONTROLS = [
 		].join("\n"),
 	},
 	{
+		filename: "negative-control-native-telemetry-description.ts",
+		expectedCode: "TS2322",
+		description: "native gateway telemetry rejects free-string diagnostic fields",
+		source: [
+			'import type { GatewayIngestible, NativeTelemetryHeaderPayload } from "@apifuse/provider-sdk";',
+			"type UnsafeHeader = NativeTelemetryHeaderPayload & { vendorErrorMessage: string };",
+			"declare const header: NativeTelemetryHeaderPayload;",
+			'export const mustNotCompile: GatewayIngestible<UnsafeHeader> = { ...header, vendorErrorMessage: "free text stays log-only" };',
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-native-telemetry-contributor.ts",
+		expectedCode: "",
+		description: "native telemetry contributor satisfies the gateway-ingestible contract",
+		source: [
+			'import { NativeTelemetryCollector, type GatewayIngestible, type NativeTelemetryHeaderPayload, type NativeTelemetryLogPayload, type TelemetryContributor } from "@apifuse/provider-sdk";',
+			"export const native: TelemetryContributor<NativeTelemetryLogPayload, NativeTelemetryHeaderPayload> = new NativeTelemetryCollector();",
+			"declare const header: NativeTelemetryHeaderPayload;",
+			"export const ingestible: GatewayIngestible<NativeTelemetryHeaderPayload> = header;",
+		].join("\n"),
+	},
+	{
 		filename: "negative-control-http-telemetry-free-text.ts",
 		expectedCode: "TS2322",
 		description: "HTTP gateway telemetry rejects a free-string diagnostic field",
@@ -476,7 +498,64 @@ const NEGATIVE_CONTROLS = [
 			"",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-stealth-telemetry-diagnostics.ts",
+		expectedCode: "TS2322",
+		description: "stealth gateway telemetry rejects a free-string header field",
+		source: [
+			'import { type GatewayIngestible, type StealthTelemetryHeaderPayload } from "@apifuse/provider-sdk";',
+			"type UnsafeHeader = StealthTelemetryHeaderPayload & { diagnostics: string };",
+			"declare const unsafeHeader: UnsafeHeader;",
+			"export const mustNotCompile: GatewayIngestible<UnsafeHeader> = unsafeHeader;",
+			"",
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-stealth-telemetry-contributor.ts",
+		expectedCode: "",
+		description: "stealth telemetry contributor satisfies the gateway-ingestible contract",
+		source: [
+			'import { StealthTelemetryCollector, type GatewayIngestible, type StealthTelemetryHeaderPayload, type StealthTelemetryLogPayload, type TelemetryContributor } from "@apifuse/provider-sdk";',
+			"",
+			"export const stealth: TelemetryContributor<StealthTelemetryLogPayload, StealthTelemetryHeaderPayload> = new StealthTelemetryCollector();",
+			"declare const header: StealthTelemetryHeaderPayload;",
+			"export const ingestible: GatewayIngestible<StealthTelemetryHeaderPayload> = header;",
+			"",
+		].join("\n"),
+	},
 ] as const;
+
+assertTelemetryContributorControls();
+
+function assertTelemetryContributorControls(): void {
+	const requestTelemetry = readFileSync(join(sdkRoot, "src/runtime/request-telemetry.ts"), "utf8");
+	const priorityMatch = requestTelemetry.match(
+		/const HEADER_PRIORITY = \[([\s\S]*?)\] as const satisfies/,
+	);
+	if (!priorityMatch) throw new Error("Could not read request telemetry header priority list");
+
+	const priority = [...priorityMatch[1].matchAll(/"([a-z]+)"/g)].map((match) => match[1]);
+	const shipped = priority.filter((name) =>
+		existsSync(join(sdkRoot, "src/runtime", `${name}-telemetry.ts`)),
+	);
+	const missing: string[] = [];
+	for (const name of shipped) {
+		const hasPositive = NEGATIVE_CONTROLS.some(
+			({ filename }) => filename === `positive-control-${name}-telemetry-contributor.ts`,
+		);
+		const hasNegative = NEGATIVE_CONTROLS.some(({ filename }) =>
+			filename.startsWith(`negative-control-${name}-telemetry-`),
+		);
+		if (!hasNegative || !hasPositive) {
+			missing.push(
+				`${name} (${hasNegative ? "negative" : "missing negative"}, ${hasPositive ? "positive" : "missing positive"})`,
+			);
+		}
+	}
+	if (missing.length > 0) {
+		throw new Error(`Missing telemetry contributor pack controls: ${missing.join(", ")}`);
+	}
+}
 
 const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-types-"));
 const packDir = join(tempRoot, "pack");

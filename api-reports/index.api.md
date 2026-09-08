@@ -7382,6 +7382,132 @@ export interface StealthSessionCookies extends CookieJar {
 }
 
 // @public (undocumented)
+export type StealthTelemetryAttemptEvent = {
+    readonly ms: number;
+    readonly status?: number;
+    readonly errorCode?: StealthTelemetryErrorCode;
+    readonly diagnostics?: StealthTelemetryDiagnostics;
+    readonly profileId: StealthProfileDescriptor;
+    readonly proxyUsed: boolean;
+    readonly requestClass: StealthTelemetryRequestClass;
+    readonly kind?: StealthTelemetryAttemptKind;
+};
+
+// @public (undocumented)
+export type StealthTelemetryAttemptKind = "request" | "resolver" | "proxy_diagnostic";
+
+// @public (undocumented)
+export type StealthTelemetryAttemptSample = {
+    n: number;
+    ms: number;
+    status?: number;
+    e?: StealthTelemetryErrorCode;
+    kind?: StealthTelemetryAttemptKind;
+    diagnostics?: StealthTelemetryDiagnostics;
+};
+
+// @public (undocumented)
+export class StealthTelemetryCollector implements StealthTelemetrySink, TelemetryContributor<StealthTelemetryLogPayload, StealthTelemetryHeaderPayload> {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "stealth";
+    // (undocumented)
+    recordAttempt(event: StealthTelemetryAttemptEvent): void;
+    // (undocumented)
+    recordPoolRefresh(): void;
+    // (undocumented)
+    recordRedirectHop(): void;
+    // (undocumented)
+    recordSafeRefetch(): void;
+    // (undocumented)
+    recordSbsd(event?: StealthTelemetrySbsdEvent | StealthTelemetrySbsdOutcome): void;
+    // (undocumented)
+    toHeaderPayload(log: StealthTelemetryLogPayload): StealthTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(): StealthTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type StealthTelemetryDiagnostics = {
+    readonly name?: string;
+    readonly message?: string;
+    readonly code?: string;
+};
+
+// @public (undocumented)
+export type StealthTelemetryErrorCode = "transport_network_error" | "transport_timeout" | "transport_cancelled" | "upstream_http_error" | "response_too_large" | "proxy_connect_failed" | "PROXY_POOL_STALE" | "PROXY_EDGE_AUTH_REJECTED" | "PROXY_AUTH_IP_DENIED" | "PROXY_EDGE_TLS_REJECTED" | "PROXY_REQUIRED" | "other";
+
+// @public (undocumented)
+export type StealthTelemetryHeaderPayload = {
+    attempts: number;
+    poolRefreshes: number;
+    redirectHops: number;
+    profileId?: {
+        browser: ClosedEnum<StealthBrowser>;
+        os: ClosedEnum<StealthOS>;
+    };
+    proxyUsed: boolean;
+    requestClass?: ClosedEnum<StealthTelemetryRequestClass>;
+    sbsdDetected?: boolean;
+    sbsdOutcome?: ClosedEnum<StealthTelemetrySbsdOutcome>;
+    safeRefetch: number;
+    lastStatus?: number;
+    ms: number;
+    attemptSamples?: {
+        n: number;
+        ms: number;
+        status?: number;
+        e?: ClosedEnum<StealthTelemetryErrorCode>;
+        kind?: ClosedEnum<StealthTelemetryAttemptKind>;
+    }[];
+};
+
+// @public (undocumented)
+export type StealthTelemetryLogPayload = {
+    attempts: number;
+    poolRefreshes: number;
+    redirectHops: number;
+    profileId?: StealthProfileDescriptor;
+    proxyUsed: boolean;
+    requestClass?: StealthTelemetryRequestClass;
+    sbsdDetected?: boolean;
+    sbsdOutcome?: StealthTelemetrySbsdOutcome;
+    safeRefetch: number;
+    lastStatus?: number;
+    ms: number;
+    attemptSamples?: StealthTelemetryAttemptSample[];
+    attemptSamplesDropped?: number;
+};
+
+// @public (undocumented)
+export type StealthTelemetryRequestClass = "navigation" | "script_navigation" | "xhr" | "post";
+
+// @public (undocumented)
+export type StealthTelemetrySbsdEvent = {
+    readonly detected: boolean;
+    readonly outcome?: StealthTelemetrySbsdOutcome;
+};
+
+// @public (undocumented)
+export type StealthTelemetrySbsdOutcome = StealthChallengeClassification["outcome"] | "detected" | "refetch_clear";
+
+// @public (undocumented)
+export interface StealthTelemetrySink {
+    // (undocumented)
+    recordAttempt(event: StealthTelemetryAttemptEvent): void;
+    // (undocumented)
+    recordPoolRefresh(): void;
+    // (undocumented)
+    recordRedirectHop(): void;
+    // (undocumented)
+    recordSafeRefetch(): void;
+    // (undocumented)
+    recordSbsd(event?: StealthTelemetrySbsdEvent | StealthTelemetrySbsdOutcome): void;
+}
+
+// @public (undocumented)
 export type StepBase = {
     id: string;
     result: string;

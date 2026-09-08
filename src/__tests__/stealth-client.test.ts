@@ -13,10 +13,13 @@ import {
 	TransportError,
 } from "../errors.js";
 import { chrome149HeaderOrder } from "../runtime/chrome149-header-order.js";
+import { withDiagnosticEnv } from "../runtime/diagnostic-env.js";
+import { createDiagnosticRedactor } from "../runtime/diagnostic-redactor.js";
 import { type CeremonyEgressLeaseRuntime, ENGINE_CEREMONY_EGRESS_LEASE } from "../runtime/egress-lease.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/request-telemetry.js";
 import { ResolverTelemetryCollector } from "../runtime/resolver-telemetry.js";
 import { normalizeResponse, type StealthClientOptions } from "../runtime/stealth.js";
+import { StealthTelemetryCollector } from "../runtime/stealth-telemetry.js";
 import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
 import type { TraceRecorder } from "../runtime/trace.js";
 import type { ProviderServerLogEvent } from "../server/serve.js";
@@ -358,6 +361,104 @@ function installHyperPayloadFetch(): Array<{ url: string; init?: RequestInit }> 
 
 afterEach(() => {
 	globalThis.fetch = originalGlobalFetch;
+});
+
+describe("stealth cookie diagnostic privacy", () => {
+	beforeEach(() => {
+		mockStealthState.clients.length = 0;
+		mockStealthState.queuedResponses.length = 0;
+		mockStealthState.queuedErrors.length = 0;
+	});
+
+	it("structurally strips a cookie value shorter than the registration floor", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const collector = new StealthTelemetryCollector();
+		const registry = createDiagnosticRedactor();
+		const session = createStealthClient("https://example.com", {
+			stealthTelemetry: collector,
+		}).createSession();
+		await withDiagnosticEnv({ observe() {}, finished: false, register: registry.add }, async () => {
+			session.cookies.restore({ tiny: "x" });
+			mockStealthState.queuedErrors.push(new Error("upstream failed: tiny=x"));
+			await expect(session.fetch("/short-cookie", { retry: false })).rejects.toBeDefined();
+		});
+		const sample = collector.toLogPayload()?.attemptSamples?.[0];
+		expect(sample?.diagnostics?.message).not.toContain("tiny=x");
+		expect(registry.has("x")).toBe(false);
+	});
+
+	it("redacts a registered cookie value when echoed in a redirect URL query", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const value = "redirect-cookie-value";
+		const registry = createDiagnosticRedactor();
+		const collector = new StealthTelemetryCollector({ redact: registry.redact });
+		const session = createStealthClient("https://example.com", {
+			stealthTelemetry: collector,
+		}).createSession();
+		await withDiagnosticEnv({ observe() {}, finished: false, register: registry.add }, async () => {
+			mockStealthState.queuedResponses.push({
+				status: 302,
+				body: "",
+				headers: {
+					location: `/next?q=${value}`,
+					"set-cookie": `redirect_cookie=${value}; Path=/; Secure`,
+				},
+				url: "https://example.com/start",
+				beforeReturn: async () => {
+					mockStealthState.queuedErrors.push(
+						new Error(`redirect failed at https://example.com/next?q=${value}`),
+					);
+				},
+			});
+			await expect(session.fetch("/start", { retry: false })).rejects.toBeDefined();
+		});
+		expect(mockStealthState.clients[0]?.calls[1]?.url).toContain(value);
+		expect(registry.has(value)).toBe(true);
+		expect(collector.toLogPayload()?.attemptSamples?.[1]?.diagnostics?.message).not.toContain(
+			value,
+		);
+	});
+
+	it("cleans a cookie echoed by a resolver-kind bound transport sample", async () => {
+		const { createStealthClient } = await import("../runtime/stealth.js");
+		const collector = new StealthTelemetryCollector();
+		const session = createStealthClient(
+			"https://example.com",
+			sbsdClientOptions({
+				stealthTelemetry: collector,
+				stealth: {
+					challengeRuntime: {
+						akamaiSbsd: {
+							allowedHosts: ["example.com"],
+							async solve(_challenge, transport) {
+								mockStealthState.queuedErrors.push(
+									new Error("resolver failed; Cookie: sbsd_o=state; Set-Cookie: sid=short"),
+								);
+								await transport.fetch("https://example.com/resolve", {
+									method: "GET",
+									signal: new AbortController().signal,
+								});
+								return fixtureSbsdCookieSolution();
+							},
+						},
+					},
+				},
+			}),
+		).createSession();
+		mockStealthState.queuedResponses.push({
+			status: 403,
+			body: sbsdInterstitial(
+				"/EdTyEb8L/9iGcpl/Gm?v=5c0d3e1f-2a3b-4c5d-8e6f-7a8b9c0d1e2f&t=resolver",
+			),
+			headers: { "set-cookie": "sbsd_o=state; Path=/; Secure" },
+			url: "https://example.com/protected",
+		});
+		await expect(session.fetch("/protected", { retry: false })).rejects.toBeDefined();
+		const samples = collector.toLogPayload()?.attemptSamples ?? [];
+		expect(samples.map((sample) => sample.kind)).toEqual(["request", "resolver"]);
+		expect(JSON.stringify(samples[1]?.diagnostics)).not.toContain("sbsd_o=state");
+		expect(JSON.stringify(samples[1]?.diagnostics)).not.toContain("sid=short");
+	});
 });
 
 function fixtureSbsdCookieSolution() {
@@ -7558,5 +7659,315 @@ describe("automatic SBSD server construction-path telemetry matrix", () => {
 				}
 			});
 		}
+	}
+});
+
+describe("stealth telemetry transport differential", () => {
+	const scenarios = [
+		"success",
+		"http-error",
+		"http-error-returned",
+		"network-error",
+		"timeout",
+		"retry-three",
+		"abort-before",
+		"abort-response",
+		"redirect-follow",
+		"redirect-manual",
+		"redirect-error",
+		"post-303",
+		"body-limit",
+		"script-navigation",
+		"xhr",
+		"profile-override",
+		"sbsd-clear",
+		"sbsd-persisted",
+		"sbsd-solve-failure",
+		"sbsd-explicit-replay",
+		"sbsd-bound-resolver",
+	] as const;
+
+	for (const scenario of scenarios) {
+		it(`preserves requests, bytes, ordering and errors with recorder on/off: ${scenario}`, async () => {
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			const { StealthTelemetryCollector } = await import("../runtime/stealth-telemetry.js");
+			const run = async (recording: boolean) => {
+				mockStealthState.clients.length = 0;
+				mockStealthState.queuedResponses.length = 0;
+				mockStealthState.queuedErrors.length = 0;
+				mockStealthState.queuedCloseErrors.length = 0;
+				const collector = new StealthTelemetryCollector();
+				const controller = new AbortController();
+				const options: StealthFetchOptions = { retry: { attempts: 1 } };
+				const clientOptions: StealthClientOptions = {
+					signal: controller.signal,
+					...(recording ? { stealthTelemetry: collector } : {}),
+				};
+				const final: MockWreqResponse = {
+					status: 200,
+					body: "ok",
+					url: "https://example.com/final",
+				};
+				let expectedAttempts = 1;
+				if (scenario === "http-error" || scenario === "http-error-returned") final.status = 503;
+				if (scenario === "http-error-returned") options.throwOnHttpError = false;
+				if (scenario === "network-error")
+					mockStealthState.queuedErrors.push(new Error("socket disconnected"));
+				if (scenario === "timeout")
+					mockStealthState.queuedErrors.push(new Error("Request timed out"));
+				if (scenario === "retry-three") {
+					mockStealthState.queuedErrors.push(
+						new Error("socket disconnected"),
+						new Error("socket disconnected"),
+					);
+					options.retry = { attempts: 3, baseDelayMs: 0, errorCodes: ["transport_network_error"] };
+					expectedAttempts = 3;
+				}
+				if (scenario === "abort-before") {
+					controller.abort(new Error("cancelled by caller"));
+					expectedAttempts = 0;
+				}
+				if (scenario === "abort-response")
+					final.beforeReturn = async () => {
+						controller.abort(new Error("cancelled by caller"));
+					};
+				if (scenario.startsWith("redirect-") || scenario === "post-303") {
+					mockStealthState.queuedResponses.push({
+						status: scenario === "post-303" ? 303 : 302,
+						body: "",
+						url: "https://example.com/start",
+						headers: { location: "/final", "set-cookie": "hop=value; Path=/" },
+					});
+					expectedAttempts = 2;
+					if (scenario === "redirect-manual") {
+						options.redirect = "manual";
+						expectedAttempts = 1;
+					}
+					if (scenario === "redirect-error") {
+						options.redirect = "error";
+						expectedAttempts = 1;
+					}
+					if (scenario === "post-303") {
+						options.method = "POST";
+						options.body = Buffer.from([0, 255, 1, 2]);
+					}
+				}
+				if (scenario === "body-limit") {
+					options.maxBodyBytes = 1;
+					final.body = "oversized";
+				}
+				if (scenario === "script-navigation") options.stealth = { userActivation: false };
+				if (scenario === "xhr") options.stealth = { requestClass: "xhr" };
+				if (scenario === "profile-override") options.stealth = { browser: "safari", os: "ios" };
+				if (scenario.startsWith("sbsd-")) {
+					const challenge: MockWreqResponse = {
+						status: 403,
+						body: sbsdInterstitial(
+							"/script?v=2f212049-ce79-d2b9-49fd-242043004288&t=fixture-token",
+						),
+						url: "https://example.com/start",
+						headers: { "set-cookie": "sbsd_o=fixture-state; Path=/; Secure" },
+					};
+					mockStealthState.queuedResponses.push(challenge);
+					expectedAttempts =
+						scenario === "sbsd-solve-failure" ? 1 : scenario === "sbsd-bound-resolver" ? 3 : 2;
+					if (scenario === "sbsd-persisted") Object.assign(final, challenge);
+					if (scenario === "sbsd-explicit-replay") {
+						options.method = "POST";
+						options.body = Buffer.from([0, 255, 65]);
+					}
+					if (scenario === "sbsd-bound-resolver")
+						mockStealthState.queuedResponses.push({
+							status: 200,
+							body: "script",
+							url: "https://example.com/script",
+						});
+					Object.assign(
+						clientOptions,
+						sbsdClientOptions({
+							stealth: {
+								challengeRuntime: {
+									akamaiSbsd: {
+										allowedHosts: ["example.com"],
+										async solve(_challenge, transport, signal) {
+											if (scenario === "sbsd-solve-failure")
+												throw new ProviderError("resolver fixture failure", {
+													code: "RESOLVER_CHAIN_EXHAUSTED",
+												});
+											if (scenario === "sbsd-bound-resolver")
+												await transport.fetch("https://example.com/script", {
+													method: "GET",
+													signal,
+												});
+											return fixtureSbsdCookieSolution();
+										},
+									},
+								},
+							},
+						}),
+					);
+				}
+				mockStealthState.queuedResponses.push(final);
+				const client = createStealthClient("https://example.com", clientOptions);
+				const session = client.createSession({ stealth: { browser: "firefox", os: "linux" } });
+				const fetcher = scenario === "profile-override" ? session : client;
+				let outcome: object;
+				try {
+					let response = await (scenario === "sbsd-explicit-replay" ? session : fetcher).fetch(
+						"/start",
+						options,
+					);
+					if (scenario === "sbsd-explicit-replay")
+						response = await session.replayChallenged!(response);
+					outcome = {
+						status: response.status,
+						body: response.body,
+						bytes: Buffer.from(await response.bytes()).toString("hex"),
+						url: response.url,
+						headers: response.headers,
+						challenge: response.challenge,
+						redirected: response.redirected,
+					};
+				} catch (error) {
+					assertIsError(error);
+					outcome = {
+						name: error.name,
+						message: error.message,
+						...(error instanceof ProviderError
+							? { code: error.code, retryable: error.options?.retryable }
+							: {}),
+						...(error instanceof TransportError
+							? { status: error.status, upstreamStatus: error.upstreamStatus }
+							: {}),
+						cause: error.cause instanceof Error ? error.cause.message : undefined,
+					};
+				}
+				const calls = allWreqCalls().map(({ url, init }) => ({
+					url,
+					...init,
+					signal:
+						init?.signal instanceof AbortSignal ? { aborted: init.signal.aborted } : undefined,
+					...(init?.body === undefined ? {} : { body: requestBodyBytes(init).toString("hex") }),
+				}));
+				const clients = mockStealthState.clients.map(({ options, clearCookieCalls }) => ({
+					options,
+					clearCookieCalls,
+				}));
+				expect(calls).toHaveLength(expectedAttempts);
+				const log = collector.toLogPayload();
+				if (recording && expectedAttempts) {
+					expect(log?.attempts).toBe(expectedAttempts);
+					expect(log?.attemptSamples).toHaveLength(expectedAttempts);
+					expect(log?.attemptSamples?.map(({ n }) => n)).toEqual(
+						Array.from({ length: expectedAttempts }, (_, index) => index + 1),
+					);
+					if (scenario === "abort-response")
+						expect(log?.attemptSamples?.[0]?.e).toBe("transport_cancelled");
+					if (scenario === "body-limit")
+						expect(log?.attemptSamples?.[0]?.e).toBe("response_too_large");
+					if (scenario === "script-navigation") expect(log?.requestClass).toBe("script_navigation");
+					if (scenario === "profile-override")
+						expect(log?.profileId).toEqual({ browser: "safari", os: "ios" });
+					if (scenario.startsWith("sbsd-")) {
+						expect(log?.sbsdDetected).toBe(true);
+						expect(log?.safeRefetch).toBe(
+							scenario === "sbsd-explicit-replay" || scenario === "sbsd-solve-failure" ? 0 : 1,
+						);
+						expect(log?.sbsdOutcome).toBe(
+							scenario === "sbsd-persisted"
+								? "challenge_persisted"
+								: scenario === "sbsd-solve-failure"
+									? "solve_failed"
+									: "refetch_clear",
+						);
+					}
+				} else expect(log).toBeUndefined();
+				client.close?.();
+				session.close?.();
+				return { outcome, calls, clients };
+			};
+			const withoutRecorder = await run(false);
+			const withRecorder = await run(true);
+			expect(withRecorder).toEqual(withoutRecorder);
+		});
+	}
+});
+
+describe("stealth telemetry managed proxy observations", () => {
+	for (const diagnostic of [false, true]) {
+		it(`preserves managed pool refresh and diagnostic=${diagnostic} exchanges with recorder on/off`, async () => {
+			const { createStealthClient } = await import("../runtime/stealth.js");
+			const { StealthTelemetryCollector } = await import("../runtime/stealth-telemetry.js");
+			const { NODEMAVEN_USERNAME_ENV, NODEMAVEN_PASSWORD_ENV } = await import(
+				"../runtime/proxy-nodemaven.js"
+			);
+			const run = async (recording: boolean) => {
+				mockStealthState.clients.length = 0;
+				mockStealthState.queuedErrors.length = 0;
+				mockStealthState.queuedResponses.length = 0;
+				const collector = new StealthTelemetryCollector();
+				const stale = () =>
+					new TransportError("proxy pool unavailable", {
+						code: "PROXY_POOL_STALE",
+						status: 512,
+						cause: new Error("proxy non-200 code: 512"),
+					});
+				mockStealthState.queuedErrors.push(stale());
+				if (diagnostic) mockStealthState.queuedErrors.push(stale());
+				mockStealthState.queuedResponses.push({
+					status: 200,
+					body: diagnostic ? "source IP denied" : "ok",
+				});
+				const client = createStealthClient("https://example.com", {
+					upstream: {
+						proxy: {
+							mode: "required",
+							providers: ["nodemaven"],
+							session: { affinity: "connection", poolSize: 1, lifetimeMinutes: 30 },
+						},
+					},
+					affinityKey: "stealth-telemetry-managed-fixture",
+					engineCredentials: {
+						[NODEMAVEN_USERNAME_ENV]: "fixture-account",
+						[NODEMAVEN_PASSWORD_ENV]: "fixture-password",
+					},
+					...(recording ? { stealthTelemetry: collector } : {}),
+				});
+				let outcome: object;
+				try {
+					const response = await client.fetch("/pool");
+					outcome = { status: response.status, body: response.body };
+				} catch (error) {
+					assertIsError(error);
+					outcome = {
+						name: error.name,
+						message: error.message,
+						...(error instanceof ProviderError ? { code: error.code } : {}),
+					};
+				}
+				const calls = allWreqCalls();
+				expect(calls).toHaveLength(diagnostic ? 3 : 2);
+				if (recording) {
+					expect(collector.toLogPayload()).toMatchObject({
+						attempts: diagnostic ? 3 : 2,
+						poolRefreshes: 1,
+						proxyUsed: true,
+					});
+					expect(collector.toLogPayload()?.attemptSamples).toHaveLength(calls.length);
+					if (diagnostic)
+						expect(collector.toLogPayload()?.attemptSamples?.at(-1)?.kind).toBe("proxy_diagnostic");
+				}
+				client.close?.();
+				return {
+					calls,
+					outcome,
+					clients: mockStealthState.clients.map(({ options, clearCookieCalls }) => ({
+						options,
+						clearCookieCalls,
+					})),
+				};
+			};
+			expect(await run(true)).toEqual(await run(false));
+		});
 	}
 });

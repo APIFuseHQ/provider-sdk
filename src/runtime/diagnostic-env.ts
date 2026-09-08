@@ -1,9 +1,9 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 
 import {
+	otlpHeaderCredentialValues,
 	resolvedStringVariants,
 	urlCredentialComponents,
-	otlpHeaderCredentialValues,
 } from "./diagnostic-env-values.js";
 import {
 	type CompiledDiagnosticSensitiveValues,
@@ -17,6 +17,7 @@ export interface DiagnosticEnvScope {
 	observe: EnvObserver;
 	finished: boolean;
 	staticValues?: CompiledDiagnosticSensitiveValues;
+	register?: (values: readonly string[]) => void;
 }
 const observers = new AsyncLocalStorage<DiagnosticEnvScope>();
 
@@ -46,6 +47,15 @@ export function readDiagnosticEnv(
 		}
 	}
 	return value;
+}
+
+/** Register a runtime-discovered sensitive value in the active request inventory. */
+export function registerDiagnosticValue(value: string): void {
+	if (!value) return;
+	const scope = observers.getStore();
+	if (scope && !scope.finished && scope.register) {
+		scope.register([value]);
+	}
 }
 
 export function withDiagnosticEnv<T>(observer: EnvObserver | DiagnosticEnvScope, fn: () => T): T {
