@@ -90,6 +90,8 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 		}
 	});
 
+	// The two cases below spawn a full tsc compile: 4-9 s on an idle 20-core host, longer
+	// under load. bun's default 5000 ms per-test deadline measured host speed, not correctness.
 	it("provider auth start flow type-check rejects input parameters", () => {
 		const fixture = join(import.meta.dir, "fixtures", "auth-start-accepts-input.ts");
 		const result = spawnSync(
@@ -116,10 +118,14 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 		);
 
 		expect(
+			result.error,
+			"tsc must run to completion for the negative control to be meaningful",
+		).toBeUndefined();
+		expect(
 			result.status,
 			`auth start fixture unexpectedly type-checked\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
 		).not.toBe(0);
-	});
+	}, 120_000);
 
 	it("provider-owned health journey files type-check against the provider authoring subpath", () => {
 		const journeyFiles = collectProviderHealthJourneyFiles(join(REPO_ROOT, "providers"));
@@ -154,7 +160,7 @@ describe("provider-sdk public surface (architectural invariant)", () => {
 			result.status,
 			`provider health journey type-check failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
 		).toBe(0);
-	});
+	}, 120_000);
 });
 
 function collectProviderHealthJourneyFiles(root: string): string[] {
