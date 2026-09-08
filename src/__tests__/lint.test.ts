@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { z } from "zod";
 import { lintOperation, lintProvider } from "../lint.js";
-import { describeKey, fields } from "../schema.js";
+import { describeKey, fields, publicField } from "../schema.js";
 import type {
 	AuthMode,
 	OperationApprovalPolicy,
@@ -257,6 +257,25 @@ describe("lintOperation", () => {
 				(item) => item.field === "output.accessToken" && item.rule === "sensitive-field-unmarked",
 			),
 		).toBeUndefined();
+	});
+
+	it("accepts an explicit public declaration on a sensitive-looking field", () => {
+		const diagnostics = lintOperation({
+			input: z.object({ id: z.string() }),
+			output: z.object({
+				phone: publicField(z.string()),
+				phoneNumber: z.string(),
+			}),
+			fixtures: {
+				request: { id: "hospital-1" },
+				response: { phone: "02-000-0000", phoneNumber: "02-000-0001" },
+			},
+		});
+
+		const unmarked = diagnostics
+			.filter((item) => item.rule === "sensitive-field-unmarked")
+			.map((item) => item.field);
+		expect(unmarked).toEqual(["output.phoneNumber"]);
 	});
 });
 

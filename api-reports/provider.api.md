@@ -4098,6 +4098,9 @@ export interface ProxiedOAuthConfig {
 // @public
 type ProxyProtocol = "http" | "socks5";
 
+// @public
+export function publicField<TSchema extends ZodType>(schema: TSchema): TSchema;
+
 // @public (undocumented)
 export function qualifyProviderLocaleKey(providerId: string, key: ProviderLocaleKey | string): string;
 

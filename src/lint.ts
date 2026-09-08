@@ -550,7 +550,7 @@ function uniqueFields(fields: string[]): string[] {
 	return Array.from(new Set(fields));
 }
 
-function isSensitiveSchema(schema: unknown): boolean {
+function hasSensitivityDeclaration(schema: unknown): boolean {
 	if (!schema || typeof schema !== "object" || !("meta" in schema)) {
 		return false;
 	}
@@ -560,7 +560,7 @@ function isSensitiveSchema(schema: unknown): boolean {
 	return (
 		!!metadata &&
 		typeof metadata === "object" &&
-		Reflect.get(metadata, APIFUSE_SENSITIVE_META_KEY) === true
+		typeof Reflect.get(metadata, APIFUSE_SENSITIVE_META_KEY) === "boolean"
 	);
 }
 
@@ -608,7 +608,7 @@ function collectUnmarkedSensitiveFields(
 	const out: string[] = [];
 	for (const [key, child] of Object.entries(getObjectShape(schema))) {
 		const childPath = basePath ? `${basePath}.${key}` : key;
-		if (isSensitiveFieldName(key) && !isSensitiveSchema(child)) {
+		if (isSensitiveFieldName(key) && !hasSensitivityDeclaration(child)) {
 			out.push(childPath);
 		}
 		out.push(...collectUnmarkedSensitiveFields(child, childPath, seen));
@@ -1401,7 +1401,7 @@ export function lintOperation(op: {
 			rule: "sensitive-field-unmarked",
 			level: "warn",
 			field,
-			message: `Schema field "${field}" looks sensitive; mark it with fields.*(), field(..., { sensitive: true }), or sensitive(...).`,
+			message: `Schema field "${field}" looks sensitive; mark it with fields.*(), sensitive(...), or publicField(...) for reviewed public data.`,
 		});
 	}
 
@@ -1410,7 +1410,7 @@ export function lintOperation(op: {
 			rule: "sensitive-field-unmarked",
 			level: "warn",
 			field,
-			message: `Schema field "${field}" looks sensitive; mark it with fields.*(), field(..., { sensitive: true }), or sensitive(...).`,
+			message: `Schema field "${field}" looks sensitive; mark it with fields.*(), sensitive(...), or publicField(...) for reviewed public data.`,
 		});
 	}
 

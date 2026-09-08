@@ -105,6 +105,8 @@ export type SensitiveFieldKind =
 export interface SensitiveFieldOptions {
 	/**
 	 * Mark this schema as sensitive. Defaults to true for the helper presets.
+	 * An explicit `false` emits `x-apifuse-sensitive: false` (reviewed public
+	 * data, never redacted) and drops any sensitivity kind.
 	 */
 	sensitive?: boolean;
 	/**
@@ -208,10 +210,18 @@ export function field<TSchema extends ZodType>(
 			? schema.describe(options.description)
 			: schema;
 	const metadata = described.meta() ?? {};
+	const isSensitive = options.sensitive ?? true;
+	// Zod merges meta with the parent chain, so an inherited kind can only be
+	// cleared by writing undefined over it (dropped from JSON Schema output).
+	const kind = isSensitive
+		? (options.kind ?? Reflect.get(metadata, APIFUSE_SENSITIVE_KIND_META_KEY))
+		: undefined;
 	return described.meta({
 		...metadata,
-		...((options.sensitive ?? true) ? { [APIFUSE_SENSITIVE_META_KEY]: true } : {}),
-		...(options.kind ? { [APIFUSE_SENSITIVE_KIND_META_KEY]: options.kind } : {}),
+		[APIFUSE_SENSITIVE_META_KEY]: isSensitive,
+		...(kind !== undefined || APIFUSE_SENSITIVE_KIND_META_KEY in metadata
+			? { [APIFUSE_SENSITIVE_KIND_META_KEY]: kind }
+			: {}),
 	});
 }
 
@@ -220,6 +230,17 @@ export function sensitive<TSchema extends ZodType>(
 	kind?: SensitiveFieldKind,
 ): TSchema {
 	return field(schema, { sensitive: true, kind });
+}
+
+/**
+ * Declare a field as reviewed public data (business, facility, product, or
+ * place names and contacts) so a key-based privacy classifier hit counts as
+ * declared instead of undeclared. Emits `x-apifuse-sensitive: false` on the
+ * JSON Schema leaf; nothing is redacted. Use `sensitive()` for anything that
+ * identifies a person.
+ */
+export function publicField<TSchema extends ZodType>(schema: TSchema): TSchema {
+	return field(schema, { sensitive: false });
 }
 
 function sensitiveString(
