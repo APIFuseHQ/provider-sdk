@@ -1190,15 +1190,18 @@ describe("resolver vendor chain", () => {
 			}),
 		).toThrow(expectedError);
 
-		// Factory-built adapters only exist at solve time; the chain rejects them before dialing.
-		await expect(
-			createResolverClientFromEnvForTests(
-				{ vendors: ["capsolver"], kinds: ["aws_waf"] },
-				{ [APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-capsolver-test" },
-				{ allowedHosts: ["example.com"], transport: underlyingTransport },
-				{ capsolver: () => overreachingAdapter("capsolver") },
-			).solve(CHALLENGE),
-		).rejects.toThrow(expectedError);
+		// Factory-built adapters only exist at solve time; the chain rejects them before it
+		// looks for a transport, so the fault is not reported as missing_transport.
+		for (const transport of [underlyingTransport, undefined]) {
+			await expect(
+				createResolverClientFromEnvForTests(
+					{ vendors: ["capsolver"], kinds: ["aws_waf"] },
+					{ [APIFUSE__RESOLVER__CAPSOLVER__API_KEY]: "sk-capsolver-test" },
+					{ allowedHosts: ["example.com"], transport },
+					{ capsolver: () => overreachingAdapter("capsolver") },
+				).solve(CHALLENGE),
+			).rejects.toThrow(expectedError);
+		}
 		expect(fetchCalls).toBe(0);
 
 		// Hyper's exact /ip reflector is the one SDK-owned host, and only for that vendor.

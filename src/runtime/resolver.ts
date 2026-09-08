@@ -1201,6 +1201,10 @@ function createResolverChainClient(options: {
 					let solution: ChallengeSolution;
 					try {
 						const solveAttempt = async () => {
+							// Boundary first: an overreaching declaration is a caller fault even when no
+							// transport is configured, not a "missing_transport" vendor unavailability.
+							const adapterHosts = adapter.transportAllowedHosts ?? [];
+							assertResolverVendorTransportHosts(adapter.id, adapterHosts);
 							const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
 							const unrestrictedTransport =
 								options.transport ??
@@ -1213,8 +1217,6 @@ function createResolverChainClient(options: {
 							if (requiresTransport && unrestrictedTransport === undefined) {
 								throw new ResolverVendorUnavailableError(adapter.id, "missing_transport");
 							}
-							const adapterHosts = adapter.transportAllowedHosts ?? [];
-							assertResolverVendorTransportHosts(adapter.id, adapterHosts);
 							const boundTransport = unrestrictedTransport
 								? restrictResolverTransport(unrestrictedTransport, [
 										...(options.allowedHosts ?? []),
