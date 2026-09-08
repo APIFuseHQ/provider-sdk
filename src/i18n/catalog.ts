@@ -191,6 +191,28 @@ export function localizeAuthTurn(
 	};
 }
 
+/**
+ * Markers that indicate a locale value was scaffolded but never translated.
+ *
+ * ASCII tokens are matched case-sensitively as whole `\w` tokens so ordinary
+ * prose such as "todo list" or identifiers like "TBDx" are not flagged. Locale
+ * tags such as `[ko]` are matched literally (the brackets are the boundary), and
+ * the Korean/Japanese phrases are matched as-is since CJK text has no `\b`.
+ */
+const PROVIDER_LOCALE_PLACEHOLDER_PATTERNS: readonly RegExp[] = [
+	/\b(?:TODO|FIXME|TBD|TRANSLATE)\b/,
+	/\[(?:en|ko|ja)\]/i,
+	/번역\s*필요/,
+	/翻訳が必要/,
+];
+
+function isProviderLocalePlaceholderText(text: string): boolean {
+	if (text.trim().length === 0) {
+		return true;
+	}
+	return PROVIDER_LOCALE_PLACEHOLDER_PATTERNS.some((pattern) => pattern.test(text));
+}
+
 export function validateProviderLocaleCatalogs(options: {
 	catalogs: ProviderLocaleCatalogMap;
 	requiredLocales: readonly ProviderLocale[];
@@ -239,7 +261,7 @@ export function validateProviderLocaleCatalogs(options: {
 				continue;
 			}
 			for (const text of Array.isArray(value) ? value : [value]) {
-				if (text.trim().length === 0 || /\bTODO\b/i.test(text)) {
+				if (isProviderLocalePlaceholderText(text)) {
 					issues.push({
 						locale,
 						key,
