@@ -19,6 +19,12 @@ export interface CliResolverRuntime {
 	readonly resolver: ResolverContext;
 	/** Per-context sink; `toLogPayload()` is the `resolver` sibling of the server request log. */
 	readonly resolverTelemetry: ResolverTelemetryCollector;
+	/**
+	 * Extend the collector's redaction with values learned after construction (request-scoped
+	 * `sensitiveParams` the recorder captures); the collector redacts at record time, before it
+	 * truncates, so values must be registered before the vendor call that may echo them.
+	 */
+	readonly registerSensitiveValues: (values: readonly string[]) => void;
 }
 
 /**
@@ -32,16 +38,17 @@ export function createCliResolverRuntime(
 	provider: ProviderDefinition,
 	cache: ProviderCache,
 ): CliResolverRuntime {
-	const resolverTelemetry = new ResolverTelemetryCollector({
-		redact: createDiagnosticRedactor(
-			[],
-			compileProcessDiagnosticSensitiveValues(collectStaticDiagnosticSensitiveValues(provider)),
-		).redact,
-	});
+	const sensitiveValues = createDiagnosticRedactor(
+		[],
+		compileProcessDiagnosticSensitiveValues(collectStaticDiagnosticSensitiveValues(provider)),
+	);
+	const resolverTelemetry = new ResolverTelemetryCollector({ redact: sensitiveValues.redact });
+	const registerSensitiveValues = (values: readonly string[]) => sensitiveValues.add(values);
 	if (!provider.resolver) {
 		return {
 			resolver: createUnsupportedResolverClient("Provider does not declare resolver capability"),
 			resolverTelemetry,
+			registerSensitiveValues,
 		};
 	}
 	const stealthProfile = provider.stealth ? getStealthProfile(provider.stealth) : undefined;
@@ -60,5 +67,6 @@ export function createCliResolverRuntime(
 			),
 		),
 		resolverTelemetry,
+		registerSensitiveValues,
 	};
 }

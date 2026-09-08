@@ -138,7 +138,10 @@ export async function main() {
 			}
 			throw operationError;
 		} finally {
-			const telemetryLine = formatResolverTelemetry(capture.resolverTelemetry);
+			const telemetryLine = formatResolverTelemetry(
+				capture.resolverTelemetry,
+				capture.getCapturedSensitiveParams().values,
+			);
 			if (telemetryLine) console.log(telemetryLine);
 		}
 		const captured = await capture.getCapturedRaw();
@@ -256,11 +259,22 @@ function parseArgs(argv: string[]): CliArgs {
 	return { append, providerPath, operation, params, sanitize };
 }
 
-/** The `resolver` sibling of the server request log, printed once per recorded invocation. */
-export function formatResolverTelemetry(collector: ResolverTelemetryCollector): string | undefined {
+/**
+ * The `resolver` sibling of the server request log, printed once per recorded invocation. The
+ * collector redacts at record time with the values registered so far; the mandatory query-secret
+ * pass over the final line also covers values captured after a solve and short low-entropy values
+ * the diagnostic redactor does not match, the same way handleCliError treats CLI errors.
+ */
+export function formatResolverTelemetry(
+	collector: ResolverTelemetryCollector,
+	sensitiveValues: readonly string[] = [],
+): string | undefined {
 	const resolver = collector.toLogPayload();
 	return resolver
-		? `[apifuse record] Resolver telemetry ${JSON.stringify({ resolver })}`
+		? `[apifuse record] Resolver telemetry ${redactSensitiveText(
+				JSON.stringify({ resolver }),
+				sensitiveValues,
+			)}`
 		: undefined;
 }
 
@@ -455,8 +469,19 @@ export function createCaptureContext(
 	let capturedSse: { order: number; method: string; path: string } | undefined;
 	const sensitiveParamNames = new Set<string>();
 	const sensitiveParamValues = new Set<string>();
+	const cache = createBypassProviderCache({ providerId: provider.id });
+	const { resolver, resolverTelemetry, registerSensitiveValues } = createCliResolverRuntime(
+		provider,
+		cache,
+	);
 	const captureSensitiveParams = (url: string, options?: SensitiveRequestOptions) => {
-		captureSensitiveRequestValues(url, options, sensitiveParamNames, sensitiveParamValues);
+		try {
+			captureSensitiveRequestValues(url, options, sensitiveParamNames, sensitiveParamValues);
+		} finally {
+			// Resolver telemetry redacts at record time, so the vendor diagnostics of a later solve
+			// must not echo a query secret captured here (same guarantee as handleCliError).
+			registerSensitiveValues([...sensitiveParamValues]);
+		}
 	};
 	const getCapturedSensitiveParams = (): CapturedSensitiveParams => ({
 		names: [...sensitiveParamNames],
@@ -530,8 +555,6 @@ export function createCaptureContext(
 		getScopes: () => [],
 	};
 	const state = createMemoryProviderRuntimeState();
-	const cache = createBypassProviderCache({ providerId: provider.id });
-	const { resolver, resolverTelemetry } = createCliResolverRuntime(provider, cache);
 	const candidates: ProviderEngineBindingCandidates = {
 		env,
 		credential,

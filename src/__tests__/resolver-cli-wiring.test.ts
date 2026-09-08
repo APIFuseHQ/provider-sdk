@@ -113,6 +113,7 @@ afterEach(() => {
 function createProvider(options: {
 	resolver?: ProviderResolverConfig;
 	proxy?: ProviderProxyPolicy;
+	http?: true;
 }): ProviderDefinition {
 	providerOrdinal += 1;
 	return defineProvider({
@@ -124,6 +125,7 @@ function createProvider(options: {
 		cache: true,
 		...(options.proxy ? { proxy: options.proxy } : {}),
 		...(options.resolver ? { resolver: options.resolver } : {}),
+		...(options.http ? { http: true } : {}),
 		meta: {
 			displayName: "Resolver CLI Wiring",
 			descriptionKey: "resolver-cli-wiring.description",
@@ -382,6 +384,70 @@ describe("resolver CLI wiring", () => {
 			"vendor rejected key [REDACTED]",
 		);
 		expect(JSON.stringify(payload)).not.toContain("cli-capsolver-key");
+	});
+
+	it("redacts request-scoped sensitiveParams from apifuse record resolver diagnostics", async () => {
+		process.env[APIFUSE__RESOLVER__CAPSOLVER__API_KEY] = "cli-capsolver-key";
+		const upstream = Bun.serve({ port: 0, fetch: () => Response.json({ ok: true }) });
+		try {
+			const adapter: ResolverVendorAdapter = {
+				id: "capsolver",
+				supports: () => true,
+				async solve() {
+					throw new ResolverVendorUnavailableError("capsolver", "allocation_exhausted", {
+						phase: "create_task",
+						cause: new Error("vendor echoed query-secret-value"),
+					});
+				},
+			};
+			restoreAdapter = swapResolverAdapterFactoryForTests("capsolver", () => adapter);
+			const runtime = createCaptureContext(
+				createProvider({ resolver: HOSTED_RESOLVER, http: true }),
+				upstream.url.origin,
+				true,
+			);
+			// The recorder learns the query secret from the request; the later solve must not echo it.
+			await runtime.ctx.http.get("/lookup", { sensitiveParams: { token: "query-secret-value" } });
+			expect(runtime.getCapturedSensitiveParams().values).toEqual(["query-secret-value"]);
+
+			await expect(runtime.ctx.resolver.solve(TURNSTILE_CHALLENGE)).rejects.toMatchObject({
+				code: "RESOLVER_CHAIN_EXHAUSTED",
+			});
+			const payload = runtime.resolverTelemetry.toLogPayload();
+			// Diagnostic values other test files leave in the process fallback may overlap this
+			// text; the redactor then collapses the whole message to the marker instead of splicing.
+			expect(payload?.attemptSamples?.[0]?.diagnostics?.cause?.message).toMatch(
+				/^(vendor echoed )?\[REDACTED\]$/,
+			);
+			expect(JSON.stringify(payload)).not.toContain("query-secret-value");
+			expect(formatResolverTelemetry(runtime.resolverTelemetry)).not.toContain("query-secret-value");
+		} finally {
+			upstream.stop(true);
+		}
+	});
+
+	it("redacts captured query secrets the collector could not know at record time", () => {
+		// No redactor: the sample was recorded before the recorder learned these values, and
+		// "pin" is too short for the diagnostic redactor's matcher either way.
+		const collector = new ResolverTelemetryCollector();
+		collector.recordVendorAttempt({
+			vendor: "capsolver",
+			phase: "create_task",
+			outcome: "error",
+			ms: 3,
+			diagnostics: {
+				phase: "create_task",
+				cause: { name: "Error", message: "vendor echoed late-secret-value and pin" },
+			},
+		});
+		collector.recordOutcome({ outcome: "exhausted", challengeKind: "turnstile", solveMs: 3 });
+
+		const line = formatResolverTelemetry(collector, ["late-secret-value", "pin"]);
+		expect(line).toStartWith("[apifuse record] Resolver telemetry {");
+		expect(line).not.toContain("late-secret-value");
+		expect(line).not.toMatch(/\bpin\b/);
+		expect(line).toContain("vendor echoed [REDACTED] and [REDACTED]");
+		expect(formatResolverTelemetry(collector)).toContain("late-secret-value and pin");
 	});
 
 	it("prints the record telemetry line in the server request-log shape", () => {
