@@ -116,6 +116,7 @@ import {
 	ResolverTelemetryCollector,
 	type ResolverTelemetryLogPayload,
 } from "../runtime/resolver-telemetry.js";
+import { createResolverRuntimeOptions } from "../runtime/resolver-runtime-options.js";
 import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
@@ -598,36 +599,6 @@ function getProviderStealthProfile(provider: ProviderDefinition) {
 }
 
 type ResolverRuntimeOptions = ResolverRuntimeModule.ResolverRuntimeOptions;
-
-/** One option set for ctx.resolver and the automatic SBSD solve, so both share identity scope, cache, proxy intent, and telemetry. */
-function createResolverRuntimeOptions(
-	provider: ProviderDefinition,
-	cache: ReturnType<typeof createProviderCache>,
-	identityScope: string,
-	proxyPolicy: ProviderProxyPolicy | undefined,
-	proxyClientOptions: Omit<
-		NonNullable<ResolverRuntimeOptions["proxyIntent"]>,
-		"mode" | "userAgent"
-	>,
-	stealthProfile: { readonly userAgent: string } | undefined,
-	telemetry: ResolverTelemetryCollector,
-): ResolverRuntimeOptions {
-	return {
-		allowedHosts: provider.allowedHosts,
-		cache,
-		telemetry,
-		identityScope,
-		...(proxyPolicy
-			? {
-					proxyIntent: {
-						mode: proxyPolicy.mode,
-						...proxyClientOptions,
-						...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
-					},
-				}
-			: {}),
-	};
-}
 
 /** Shared predicate for the SBSD challenge runtime and the ceremony egress lease. */
 function declaresAkamaiSbsdResolver(provider: ProviderDefinition): boolean {

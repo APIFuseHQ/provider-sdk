@@ -14,7 +14,6 @@ import {
 	createHandleContext,
 	createProviderEnvironment,
 	createSttClientFromEnv,
-	createUnsupportedResolverClient,
 	executeOperation,
 	type HttpClient,
 	type HttpResponse,
@@ -23,13 +22,12 @@ import {
 	type ProviderDefinition,
 	type ProviderEngineBindingCandidates,
 	ProviderError,
-	readEngineProxyCredentials,
-	type ProviderProxyPolicy,
 	type RequestOptions,
 	type StealthClient,
 	TransportError,
 	ValidationError,
 } from "../src/index.js";
+import { createCliResolverRuntime } from "../src/cli/resolver-runtime.js";
 import type { JsonValue } from "../src/contract-json.js";
 import {
 	isSensitiveFixtureKey,
@@ -37,7 +35,6 @@ import {
 	sanitizeDiagnosticText,
 	sanitizeFixtureString,
 } from "../src/fixture-sanitization.js";
-import { createResolverClientFromEnv } from "../src/runtime/resolver.js";
 import {
 	isSensitiveKey,
 	normalizeSensitiveParams,
@@ -50,10 +47,10 @@ import {
 	requestOptionsFromHttpInvocation,
 	serializeRequestUrl,
 } from "../src/runtime/request-options.js";
+import type { ResolverTelemetryCollector } from "../src/runtime/resolver-telemetry.js";
 import { createMemoryProviderRuntimeState } from "../src/runtime/state.js";
 import { createStealthClient } from "../src/runtime/stealth.js";
 import { parseSchema } from "../src/schema.js";
-import { getStealthProfile } from "../src/stealth/profiles.js";
 import {
 	captureStreamEvidence,
 	createStreamCaptureEnvelope,
@@ -140,6 +137,9 @@ export async function main() {
 				);
 			}
 			throw operationError;
+		} finally {
+			const telemetryLine = formatResolverTelemetry(capture.resolverTelemetry);
+			if (telemetryLine) console.log(telemetryLine);
 		}
 		const captured = await capture.getCapturedRaw();
 
@@ -254,6 +254,14 @@ function parseArgs(argv: string[]): CliArgs {
 	}
 
 	return { append, providerPath, operation, params, sanitize };
+}
+
+/** The `resolver` sibling of the server request log, printed once per recorded invocation. */
+export function formatResolverTelemetry(collector: ResolverTelemetryCollector): string | undefined {
+	const resolver = collector.toLogPayload();
+	return resolver
+		? `[apifuse record] Resolver telemetry ${JSON.stringify({ resolver })}`
+		: undefined;
 }
 
 function handleCliError(error: unknown, sensitiveValues: readonly string[] = []): never {
@@ -430,13 +438,6 @@ function resolveOperationBaseUrl(provider: ProviderRuntime, operationName: strin
 	return baseUrl;
 }
 
-function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPolicy | undefined {
-	if (typeof provider.proxy === "object") return provider.proxy;
-	if (provider.proxy === true) return { mode: "optional" };
-	if (provider.proxy === false) return { mode: "disabled" };
-	return undefined;
-}
-
 export function createCaptureContext(
 	provider: ProviderRuntime,
 	baseUrl: string,
@@ -521,7 +522,6 @@ export function createCaptureContext(
 		provider.secrets?.map((secret) => secret.name) ?? [],
 	);
 	const env = { get: (key: string) => readDiagnosticEnv(key, providerEnvironment) };
-	const engineCredentials = readEngineProxyCredentials();
 	const credential = {
 		mode: "none" as const,
 		get: () => undefined,
@@ -531,8 +531,7 @@ export function createCaptureContext(
 	};
 	const state = createMemoryProviderRuntimeState();
 	const cache = createBypassProviderCache({ providerId: provider.id });
-	const proxyPolicy = resolveNativeProxyPolicy(provider);
-	const stealthProfile = provider.stealth ? getStealthProfile(provider.stealth) : undefined;
+	const { resolver, resolverTelemetry } = createCliResolverRuntime(provider, cache);
 	const candidates: ProviderEngineBindingCandidates = {
 		env,
 		credential,
@@ -567,21 +566,7 @@ export function createCaptureContext(
 		},
 		ocr: createOcrClientFromEnv(provider.ocr),
 		stt: createSttClientFromEnv(provider.stt),
-		resolver: provider.resolver
-			? createResolverClientFromEnv(provider.resolver, engineCredentials, {
-					allowedHosts: provider.allowedHosts,
-					cache,
-					...(proxyPolicy
-						? {
-								proxyIntent: {
-									mode: proxyPolicy.mode,
-									upstream: { proxy: provider.proxy },
-									...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
-								},
-							}
-						: {}),
-				})
-			: createUnsupportedResolverClient("Provider does not declare resolver capability"),
+		resolver,
 		handle: createHandleContext({
 			providerId: provider.id,
 			request: { headers: {}, connectionId: "local-record" },
@@ -595,6 +580,7 @@ export function createCaptureContext(
 
 	return {
 		ctx,
+		resolverTelemetry,
 		getCapturedRaw: async () => {
 			if (streamCaptures.length === 0) {
 				if (capturedSse) throw unsupportedSseCaptureError(capturedSse);
