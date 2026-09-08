@@ -117,6 +117,10 @@ import {
 	type ResolverTelemetryLogPayload,
 } from "../runtime/resolver-telemetry.js";
 import {
+	createResolverRuntimeOptions,
+	resolveNativeProxyPolicy,
+} from "../runtime/resolver-runtime-options.js";
+import {
 	assertRequiredSecretsPresent,
 	listMissingRequiredSecrets,
 	MISSING_SECRET_CODE,
@@ -169,7 +173,6 @@ import type {
 	ProviderDefinition,
 	ProviderErrorStatus,
 	ProviderFilesContext,
-	ProviderProxyPolicy,
 	ProviderRuntimeState,
 	ProviderStreamEvent,
 	ResolverContext,
@@ -599,36 +602,6 @@ function getProviderStealthProfile(provider: ProviderDefinition) {
 
 type ResolverRuntimeOptions = ResolverRuntimeModule.ResolverRuntimeOptions;
 
-/** One option set for ctx.resolver and the automatic SBSD solve, so both share identity scope, cache, proxy intent, and telemetry. */
-function createResolverRuntimeOptions(
-	provider: ProviderDefinition,
-	cache: ReturnType<typeof createProviderCache>,
-	identityScope: string,
-	proxyPolicy: ProviderProxyPolicy | undefined,
-	proxyClientOptions: Omit<
-		NonNullable<ResolverRuntimeOptions["proxyIntent"]>,
-		"mode" | "userAgent"
-	>,
-	stealthProfile: { readonly userAgent: string } | undefined,
-	telemetry: ResolverTelemetryCollector,
-): ResolverRuntimeOptions {
-	return {
-		allowedHosts: provider.allowedHosts,
-		cache,
-		telemetry,
-		identityScope,
-		...(proxyPolicy
-			? {
-					proxyIntent: {
-						mode: proxyPolicy.mode,
-						...proxyClientOptions,
-						...(stealthProfile ? { userAgent: stealthProfile.userAgent } : {}),
-					},
-				}
-			: {}),
-	};
-}
-
 /** Shared predicate for the SBSD challenge runtime and the ceremony egress lease. */
 function declaresAkamaiSbsdResolver(provider: ProviderDefinition): boolean {
 	return provider.resolver?.kinds.some((kind) => kind === "akamai_sbsd") === true;
@@ -807,13 +780,6 @@ function resolveOperationConnectionId(
 
 function normalizeConnectionId(id: string | undefined): string | undefined {
 	return id === "" ? undefined : id;
-}
-
-function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPolicy | undefined {
-	if (typeof provider.proxy === "object") return provider.proxy;
-	if (provider.proxy === true) return { mode: "optional" };
-	if (provider.proxy === false) return { mode: "disabled" };
-	return undefined;
 }
 
 function providerSecretNames(provider: ProviderDefinition): string[] {
