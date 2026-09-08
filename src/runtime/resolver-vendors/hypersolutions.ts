@@ -3,7 +3,7 @@ import { isIP } from "node:net";
 import type { ChallengeSolution, ProviderChallenge } from "../../types.js";
 import { recordPaidResolverCreate } from "../resolver-usage.js";
 import type { TraceRecorder } from "../trace.js";
-import { assertResolverHostAllowed } from "./hosts.js";
+import { assertResolverHostAllowed, RESOLVER_VENDOR_TRANSPORT_HOSTS } from "./hosts.js";
 import {
 	ResolverChallengeVerdictError,
 	type ResolverIdentity,
@@ -21,7 +21,7 @@ const HYPER_IP_URL = "https://ip.hypersolutions.co/ip";
  * egress address the upstream will see. The payload-generation POST carries no
  * identity and goes direct, as in the measured zozotown source.
  */
-const HYPER_TRANSPORT_HOSTS = ["ip.hypersolutions.co"] as const;
+const HYPER_TRANSPORT_HOSTS = RESOLVER_VENDOR_TRANSPORT_HOSTS.hypersolutions;
 const IP_RESPONSE_MAX_BYTES = 4_096;
 /** Measured bound shared by the script, the Hyper envelope, and the payload submission. */
 const BODY_MAX_BYTES = 1_000_000;

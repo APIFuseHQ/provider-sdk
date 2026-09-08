@@ -29,7 +29,10 @@ import {
 import { createBrowserResolverVendorAdapter } from "./resolver-vendors/browser.js";
 import { createCapsolverResolverVendorAdapter } from "./resolver-vendors/capsolver.js";
 import { createHypersolutionsResolverVendorAdapter } from "./resolver-vendors/hypersolutions.js";
-import { assertResolverHostAllowed } from "./resolver-vendors/hosts.js";
+import {
+	assertResolverHostAllowed,
+	assertResolverVendorTransportHosts,
+} from "./resolver-vendors/hosts.js";
 import { createTwoCaptchaResolverVendorAdapter } from "./resolver-vendors/twocaptcha.js";
 import {
 	RESOLVER_VENDOR_CAPABILITIES,
@@ -480,15 +483,26 @@ function sanitizeCauseMessage(message: string): string {
 		.slice(0, 512);
 }
 
+function assertResolverTransportLive(revoked: boolean): void {
+	if (!revoked) return;
+	throw new ProviderError("Resolver transport was revoked when the vendor solve settled", {
+		code: "RESOLVER_TRANSPORT_REVOKED",
+		fix: "Complete every bound-transport call before solve() settles; the transport is per-attempt and must not be retained.",
+	});
+}
+
 function restrictResolverTransport(
 	transport: ResolverVendorTransport,
 	allowedHosts: readonly string[],
-): ResolverVendorTransport {
-	return {
+): { readonly transport: ResolverVendorTransport; revoke(): void } {
+	// A retained reference must fail closed once the adapter's solve has settled.
+	let revoked = false;
+	const restricted: ResolverVendorTransport = {
 		sessionHeaders: transport.sessionHeaders,
 		...(transport.getCookie
 			? {
 					getCookie(name, url) {
+						assertResolverTransportLive(revoked);
 						// Jar reads are gated like fetches: an adapter may only read state for declared hosts.
 						assertResolverHostAllowed(url, allowedHosts);
 						return transport.getCookie?.(name, url);
@@ -496,6 +510,7 @@ function restrictResolverTransport(
 				}
 			: {}),
 		async fetch(url, init) {
+			assertResolverTransportLive(revoked);
 			// Empty declarations remain deny-by-default, matching the adapter-factory/browser path.
 			assertResolverHostAllowed(url, allowedHosts);
 			const response = await transport.fetch(url, { ...init, redirect: "manual" });
@@ -509,6 +524,12 @@ function restrictResolverTransport(
 				});
 			}
 			return response;
+		},
+	};
+	return {
+		transport: restricted,
+		revoke() {
+			revoked = true;
 		},
 	};
 }
@@ -1179,7 +1200,11 @@ function createResolverChainClient(options: {
 					});
 					let solution: ChallengeSolution;
 					try {
-						const solveAttempt = () => {
+						const solveAttempt = async () => {
+							// Boundary first: an overreaching declaration is a caller fault even when no
+							// transport is configured, not a "missing_transport" vendor unavailability.
+							const adapterHosts = adapter.transportAllowedHosts ?? [];
+							assertResolverVendorTransportHosts(adapter.id, adapterHosts);
 							const requiresTransport = adapterRequiresTransport(adapter, challenge.kind);
 							const unrestrictedTransport =
 								options.transport ??
@@ -1192,10 +1217,10 @@ function createResolverChainClient(options: {
 							if (requiresTransport && unrestrictedTransport === undefined) {
 								throw new ResolverVendorUnavailableError(adapter.id, "missing_transport");
 							}
-							const transport = unrestrictedTransport
+							const boundTransport = unrestrictedTransport
 								? restrictResolverTransport(unrestrictedTransport, [
 										...(options.allowedHosts ?? []),
-										...(adapter.transportAllowedHosts ?? []),
+										...adapterHosts,
 									])
 								: undefined;
 							const usage: ResolverPaidUsageContext = {
@@ -1209,14 +1234,18 @@ function createResolverChainClient(options: {
 										}
 									: {}),
 							};
-							return adapter.solve(
-								challenge,
-								identity,
-								signal,
-								telemetryTraceRecorder,
-								transport,
-								usage,
-							);
+							try {
+								return await adapter.solve(
+									challenge,
+									identity,
+									signal,
+									telemetryTraceRecorder,
+									boundTransport?.transport,
+									usage,
+								);
+							} finally {
+								boundTransport?.revoke();
+							}
 						};
 						solution = traceRecorder
 							? await traceRecorder.runSpan("resolver.vendor.attempt", solveAttempt, {
@@ -1352,6 +1381,10 @@ export function createResolverClient(options: {
 	readonly allowedHosts?: readonly string[];
 	readonly telemetry?: ResolverTelemetrySink;
 }): ResolverChainClient {
+	for (const adapter of options.adapters) {
+		// Fail at construction, not on the first solve, when a supplied adapter oversteps its vendor.
+		assertResolverVendorTransportHosts(adapter.id, adapter.transportAllowedHosts ?? []);
+	}
 	return createResolverChainClient({
 		kinds: options.kinds,
 		entries: options.adapters.map((adapter) => ({
