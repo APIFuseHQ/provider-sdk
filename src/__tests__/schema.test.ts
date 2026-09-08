@@ -186,4 +186,10 @@ describe("public field declaration", () => {
 			[APIFUSE_SENSITIVE_KIND_META_KEY]: "personal_data",
 		});
 	});
+
+	it("does not reach a sensitive() declaration inside a wrapper and still redacts it", () => {
+		const schema = z.object({ phone: publicField(sensitive(z.string(), "phone").optional()) });
+
+		expect(collectSensitivePaths(schema)).toEqual([["phone"]]);
+	});
 });

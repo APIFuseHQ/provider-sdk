@@ -265,10 +265,12 @@ describe("lintOperation", () => {
 			output: z.object({
 				phone: publicField(z.string()),
 				phoneNumber: z.string(),
+				faxPhone: publicField(z.string()).nullable(),
+				token: fields.token().optional(),
 			}),
 			fixtures: {
 				request: { id: "hospital-1" },
-				response: { phone: "02-000-0000", phoneNumber: "02-000-0001" },
+				response: { phone: "02-000-0000", phoneNumber: "02-000-0001", token: "t" },
 			},
 		});
 

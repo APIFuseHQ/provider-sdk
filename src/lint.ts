@@ -551,17 +551,13 @@ function uniqueFields(fields: string[]): string[] {
 }
 
 function hasSensitivityDeclaration(schema: unknown): boolean {
-	if (!schema || typeof schema !== "object" || !("meta" in schema)) {
-		return false;
+	// Declarations sit on the leaf; same-path wrappers such as .optional() or
+	// .nullable() carry no metadata of their own, so look through them.
+	for (let current = schema; isSchema(current); current = getSchemaDef(current).innerType) {
+		const metadata = getSchemaMetadata(current);
+		if (typeof Reflect.get(metadata, APIFUSE_SENSITIVE_META_KEY) === "boolean") return true;
 	}
-	const meta = schema.meta;
-	if (typeof meta !== "function") return false;
-	const metadata = meta.call(schema);
-	return (
-		!!metadata &&
-		typeof metadata === "object" &&
-		typeof Reflect.get(metadata, APIFUSE_SENSITIVE_META_KEY) === "boolean"
-	);
+	return false;
 }
 
 function getSchemaMetadata(schema: SchemaLike): Record<string, unknown> {

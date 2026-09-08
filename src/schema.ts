@@ -237,7 +237,8 @@ export function sensitive<TSchema extends ZodType>(
  * place names and contacts) so a key-based privacy classifier hit counts as
  * declared instead of undeclared. Emits `x-apifuse-sensitive: false` on the
  * JSON Schema leaf; nothing is redacted. Use `sensitive()` for anything that
- * identifies a person.
+ * identifies a person. Apply it to the leaf, before `.optional()` or
+ * `.nullable()`; it does not override a declaration inside a wrapper.
  */
 export function publicField<TSchema extends ZodType>(schema: TSchema): TSchema {
 	return field(schema, { sensitive: false });
