@@ -1,4 +1,5 @@
 import type ms from "ms";
+import type { HandleContext, HandleKind } from "./handle.js";
 import type { HealthScenario } from "./health-scenario.js";
 import type { SerializedCookieJar } from "tough-cookie";
 
@@ -1997,140 +1998,6 @@ export interface ProviderRequestContext {
 	headers: Record<string, string>;
 }
 
-export interface ProviderChoiceBindingOptions {
-	connection?: boolean;
-	credentialKeys?: readonly string[];
-}
-
-export type ProviderChoiceConsumeMode = "never" | "on-parse" | "explicit";
-
-export type ProviderChoiceConsumeResult =
-	| { readonly status: "consumed" }
-	| { readonly status: "already-consumed" }
-	| { readonly status: "unsupported" };
-
-export type ProviderChoiceExplicitParseResult =
-	| {
-			readonly status: "active";
-			readonly payload: Record<string, unknown>;
-			/** Stable, opaque key for provider-owned idempotency records. */
-			readonly replayKey: string;
-			/** Atomically claims a word token. Inline tokens report unsupported. */
-			consume(): Promise<ProviderChoiceConsumeResult>;
-	  }
-	| {
-			readonly status: "consumed";
-			/** Use this key to read the provider-owned result before returning an error. */
-			readonly replayKey: string;
-	  };
-
-export type ProviderChoiceStorageOptions =
-	| {
-			readonly mode: "inline";
-		}
-	| {
-			readonly mode: "server";
-			readonly namespace: string;
-			readonly state?: ProviderRuntimeState;
-			readonly ttl?: ProviderStateDurationString;
-			readonly maxEntries: number;
-			readonly maxValueBytes: number;
-			readonly unavailable?: "reject";
-		}
-	| {
-			readonly mode: "auto";
-			readonly namespace: string;
-			readonly state?: ProviderRuntimeState;
-			readonly ttl?: ProviderStateDurationString;
-			readonly maxInlineBytes: number;
-			readonly maxEntries: number;
-			readonly maxValueBytes: number;
-			readonly unavailable?: "reject";
-		};
-
-export interface ProviderChoiceIssueOptions<
-	TPayload extends Record<string, unknown>,
-> {
-	prefix: string;
-	purpose: string;
-	payload: TPayload;
-	ttlMs: number;
-	nowMs?: number;
-	bind?: ProviderChoiceBindingOptions;
-	/** Server storage only: standard emits four words; high emits five. */
-	strength?: "standard" | "high";
-	storage?: ProviderChoiceStorageOptions;
-}
-
-export interface ProviderChoiceParseOptions {
-	token: string;
-	prefix: string;
-	purpose: string;
-	ttlMs?: number;
-	nowMs?: number;
-	futureToleranceMs?: number;
-	bind?: ProviderChoiceBindingOptions;
-	storage?: ProviderChoiceStorageOptions;
-	/** Defaults to never, preserving reusable choice-token parse semantics. */
-	consume?: ProviderChoiceConsumeMode;
-}
-
-export interface ProviderChoiceContext {
-	issue<TPayload extends Record<string, unknown>>(
-		options: ProviderChoiceIssueOptions<TPayload> & {
-			readonly storage?: { readonly mode: "inline" };
-		},
-	): string;
-	issue<TPayload extends Record<string, unknown>>(
-		options: ProviderChoiceIssueOptions<TPayload> & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "server" }
-			>;
-		},
-	): Promise<string>;
-	issue<TPayload extends Record<string, unknown>>(
-		options: ProviderChoiceIssueOptions<TPayload> & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "auto" }
-			>;
-		},
-	): string | Promise<string>;
-	issue<TPayload extends Record<string, unknown>>(
-		options: ProviderChoiceIssueOptions<TPayload>,
-	): string | Promise<string>;
-	parse(
-		options: ProviderChoiceParseOptions & { readonly consume: "explicit" },
-	): Promise<ProviderChoiceExplicitParseResult>;
-	parse(
-		options: ProviderChoiceParseOptions & {
-			readonly storage?: { readonly mode: "inline" };
-		},
-	): Record<string, unknown>;
-	parse(
-		options: ProviderChoiceParseOptions & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "server" }
-			>;
-		},
-	): Promise<Record<string, unknown>>;
-	parse(
-		options: ProviderChoiceParseOptions & {
-			readonly storage: Extract<
-				ProviderChoiceStorageOptions,
-				{ readonly mode: "auto" }
-			>;
-		},
-	): Record<string, unknown> | Promise<Record<string, unknown>>;
-	parse(
-		options: ProviderChoiceParseOptions,
-	):
-		| Record<string, unknown>
-		| Promise<Record<string, unknown> | ProviderChoiceExplicitParseResult>;
-}
-
 export interface ContextScratchpad {
 	get(key: string): unknown;
 	set(key: string, value: unknown): void;
@@ -2402,8 +2269,8 @@ export type ProviderContext<TConfig = Record<string, unknown>> = {
 	& ("ocr" extends keyof TConfig ? { ocr: OcrContext } : Record<never, never>)
 	& ("stt" extends keyof TConfig ? { stt: SttContext } : Record<never, never>)
 	& ("resolver" extends keyof TConfig ? { resolver: ResolverContext } : Record<never, never>)
-	& ("choice" extends keyof TConfig
-		? { choice: ProviderChoiceContext }
+	& ("handle" extends keyof TConfig
+		? { handle: HandleContext }
 		: Record<never, never>);
 
 /** Backwards-compatible name for a declaration-derived provider context. */
@@ -2588,7 +2455,7 @@ export interface ProviderDefinition<TContext = ProviderContext> {
 		engine: BrowserEngine;
 	};
 	auth?: AuthConfig;
-	choice?: Record<string, never> | true;
+	handle?: readonly HandleKind[];
 	reviewed?: ProviderReviewed;
 	access?: ProviderAccessConfig;
 	secrets?: ProviderSecretDeclaration[];

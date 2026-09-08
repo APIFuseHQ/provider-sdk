@@ -17,7 +17,9 @@ export function createDevServer(
 
 	return {
 		start: () => {
-			void serve(provider, { port, engine: options?.engine });
+			// Local development has no Redis by default; handles (ADR-0012) need a
+			// state backend, so fall back to memory state when none is configured.
+			void serve(provider, { port, engine: options?.engine, allowMemoryStateFallback: true });
 			console.log(
 				`[apifuse dev] ${provider.id}@${provider.version} running at http://localhost:${port}`,
 			);

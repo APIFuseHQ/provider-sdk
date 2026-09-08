@@ -2,7 +2,6 @@
 
 export * from "./auth.js";
 export * from "./ceremonies/index.js";
-export * from "./choice-token.js";
 export type {
 	ApiFuseConfig,
 	BrowserConfig,
@@ -139,12 +138,16 @@ export {
 	createProviderCache,
 	type ProviderCacheOptions,
 } from "./runtime/cache.js";
+export * from "./handle.js";
 export {
-	type CreateProviderChoiceContextOptions,
-	createProviderChoiceContext,
-	createTestProviderChoiceContext,
-	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-} from "./runtime/choice.js";
+	type CreateHandleContextOptions,
+	type CreateTestHandleContextOptions,
+	createHandleContext,
+	createTestHandleContext,
+	type HandleNormalizationClass,
+	type NormalizedHandle,
+	normalizeHandle,
+} from "./runtime/handle.js";
 export {
 	type CreateCredentialContextOptions,
 	createCredentialContext,
@@ -424,13 +427,6 @@ export type {
 	ProviderCacheLookupMeta,
 	ProviderCacheResponseMeta,
 	ProviderCacheResult,
-	ProviderChoiceBindingOptions,
-	ProviderChoiceConsumeMode,
-	ProviderChoiceConsumeResult,
-	ProviderChoiceContext,
-	ProviderChoiceExplicitParseResult,
-	ProviderChoiceIssueOptions,
-	ProviderChoiceParseOptions,
 	ProviderChallenge,
 	ProviderChallengeKind,
 	ProviderContext,

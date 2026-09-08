@@ -11,7 +11,7 @@ import {
 	type ApiFuseConfig,
 	createBypassProviderCache,
 	createHttpClient,
-	createProviderChoiceContext,
+	createHandleContext,
 	createSttClientFromEnv,
 	executeOperation,
 	getProviderBaseUrl,
@@ -689,7 +689,7 @@ function createBaseContext(options: {
 	return {
 		env,
 		credential,
-		request: { headers: {} },
+		request: { headers: {}, connectionId: "local-perf" },
 		http,
 		cache: createBypassProviderCache({ providerId: options.provider.id }),
 		state,
@@ -698,11 +698,9 @@ function createBaseContext(options: {
 		trace: options.traceContext,
 		auth: createAuthStub(),
 		stt: createSttClientFromEnv(options.provider.stt),
-		choice: createProviderChoiceContext({
+		handle: createHandleContext({
 			providerId: options.provider.id,
-			env,
-			request: { headers: {} },
-			credential,
+			request: { headers: {}, connectionId: "local-perf" },
 			state,
 		}),
 	};

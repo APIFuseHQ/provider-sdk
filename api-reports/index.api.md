@@ -108,9 +108,6 @@ export interface ApiFuseResponse<T> {
 }
 
 // @public (undocumented)
-export function assertFreshProviderChoiceIssuedAt(issuedAtMs: unknown, options: FreshProviderChoiceIssuedAtOptions): number;
-
-// @public (undocumented)
 export type AssertionExpression = {
     kind: "all" | "any";
     clauses: NonEmpty<AssertionExpression>;
@@ -644,6 +641,9 @@ export const BoundedJsonPathSchema: z.ZodObject<{
     }, z.core.$strict>]>>;
 }, z.core.$strict>;
 
+// @public
+export function brandHandleError(target: object): void;
+
 // @public (undocumented)
 type BrowserChallengeRequest = {
     type: "recaptcha";
@@ -1049,6 +1049,24 @@ export function createFormCeremony(options: {
     mapCredential?: (input: Record<string, unknown>) => JsonObject;
 }): AuthFlowDefinition;
 
+// @public (undocumented)
+export function createHandleContext(options: CreateHandleContextOptions): HandleContext;
+
+// @public (undocumented)
+export interface CreateHandleContextOptions {
+    readonly commitLeaseMs?: number;
+    readonly nowMs?: () => number;
+    readonly onTelemetry?: (event: HandleTelemetryEvent) => void;
+    // (undocumented)
+    readonly providerId: string;
+    // Warning: (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
+    //
+    // (undocumented)
+    readonly request?: ProviderRequestContext;
+    // (undocumented)
+    readonly state?: ProviderRuntimeState;
+}
+
 // Warning: (ae-forgotten-export) The symbol "HttpClientOptions" needs to be exported by the entry point index.d.ts
 //
 // @public (undocumented)
@@ -1091,34 +1109,6 @@ export function createOpenAiCompatibleOcrClient(options: OpenAiCompatibleOcrClie
 // @public (undocumented)
 export function createProviderCache(options: ProviderCacheOptions): ProviderCache;
 
-// @public (undocumented)
-export function createProviderChoiceContext(options: CreateProviderChoiceContextOptions): ProviderChoiceContext;
-
-// @public (undocumented)
-export type CreateProviderChoiceContextOptions = {
-    readonly providerId: string;
-    readonly env?: EnvContext;
-    readonly request?: ProviderRequestContext;
-    readonly credential?: CredentialContext;
-    readonly state?: ProviderRuntimeState;
-    readonly masterSecret?: string;
-    readonly kid?: string;
-    readonly onTelemetry?: (event: ProviderChoiceTelemetryEvent) => void;
-};
-
-// @public (undocumented)
-export function createProviderChoiceToken<TPayload extends ProviderChoiceTokenPayload>(options: CreateProviderChoiceTokenOptions<TPayload>): string;
-
-// @public (undocumented)
-export interface CreateProviderChoiceTokenOptions<TPayload extends ProviderChoiceTokenPayload> {
-    // (undocumented)
-    payload: TPayload;
-    // (undocumented)
-    prefix: string;
-    // (undocumented)
-    secret: string;
-}
-
 // @public
 export function createProviderEnvironment(environment: Readonly<Record<string, string | undefined>>, declaredNames: readonly string[]): Readonly<Record<string, string>>;
 
@@ -1144,10 +1134,22 @@ export function createSwitchCeremony(options: {
     prompt?: string;
 }): AuthFlowDefinition;
 
+// @public
+export function createTestHandleContext(options?: CreateTestHandleContextOptions): HandleContext;
+
 // @public (undocumented)
-export function createTestProviderChoiceContext(options: Omit<CreateProviderChoiceContextOptions, "masterSecret"> & {
-    readonly masterSecret?: string;
-}): ProviderChoiceContext;
+export interface CreateTestHandleContextOptions {
+    // (undocumented)
+    readonly nowMs?: () => number;
+    // (undocumented)
+    readonly onTelemetry?: (event: HandleTelemetryEvent) => void;
+    // (undocumented)
+    readonly providerId?: string;
+    // (undocumented)
+    readonly request?: ProviderRequestContext;
+    // (undocumented)
+    readonly state?: ProviderRuntimeState;
+}
 
 // @public (undocumented)
 export function createTraceContext(options?: CreateTraceContextOptions): TraceContext;
@@ -1339,6 +1341,21 @@ export type CredentialsAuthLoginResult<TCredentialKeys extends readonly string[]
 export function currentHour(timezone: string): string;
 
 // @public (undocumented)
+export interface CursorKind<TSchema extends ZodType = ZodType> extends HandleKindBase<TSchema> {
+    // (undocumented)
+    readonly strength: HandleStrength;
+    // (undocumented)
+    readonly ttl: ProviderStateDurationString;
+    // (undocumented)
+    readonly ttlMs: number;
+    // (undocumented)
+    readonly type: "cursor";
+}
+
+// @public
+export type DataOf<K extends HandleKind> = z.output<K["schema"]>;
+
+// @public (undocumented)
 interface DeclarativeStealthResponse {
     // (undocumented)
     arrayBuffer(): Promise<ArrayBuffer>;
@@ -1425,6 +1442,24 @@ export interface DefineCredentialsAuthOptions<TFields extends CredentialsAuthFie
     storesReusableSecret?: boolean;
 }
 
+// @public
+export function defineCursor<TSchema extends ZodType>(options: DefineCursorOptions<TSchema>): CursorKind<TSchema>;
+
+// @public (undocumented)
+export interface DefineCursorOptions<TSchema extends ZodType> {
+    readonly access?: HandleAccess;
+    readonly fieldName?: string;
+    readonly issuedBy?: string;
+    readonly maxEntries?: number;
+    readonly maxValueBytes?: number;
+    readonly name: string;
+    // (undocumented)
+    readonly schema: TSchema;
+    readonly strength?: HandleStrength;
+    // (undocumented)
+    readonly ttl: ProviderStateDurationString;
+}
+
 // @public (undocumented)
 export interface DefinedCredentialsAuth {
     // (undocumented)
@@ -1433,6 +1468,30 @@ export interface DefinedCredentialsAuth {
     context: ContextDeclaration;
     // (undocumented)
     credential: CredentialDeclaration;
+}
+
+// @public
+export function defineDraft<TSchema extends ZodType, TResultSchema extends ZodType | undefined = undefined>(options: DefineDraftOptions<TSchema, TResultSchema>): DraftKind<TSchema, TResultSchema>;
+
+// @public (undocumented)
+export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema extends ZodType | undefined> {
+    // (undocumented)
+    readonly fieldName?: string;
+    // (undocumented)
+    readonly issuedBy?: string;
+    readonly maxEntries?: number;
+    readonly maxValueBytes?: number;
+    // (undocumented)
+    readonly name: string;
+    readonly result?: TResultSchema;
+    readonly resultTtl?: ProviderStateDurationString;
+    // (undocumented)
+    readonly schema: TSchema;
+    // (undocumented)
+    readonly ttl: {
+        readonly idle: ProviderStateDurationString;
+        readonly max: ProviderStateDurationString;
+    };
 }
 
 // @public (undocumented)
@@ -1488,6 +1547,30 @@ export function done<TData>(data: TData, options?: {
 }): SseEvent<TData>;
 
 // @public (undocumented)
+export interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema extends ZodType | undefined = ZodType | undefined> extends HandleKindBase<TSchema> {
+    // (undocumented)
+    readonly access: "bound";
+    // (undocumented)
+    readonly idleTtlMs: number;
+    // (undocumented)
+    readonly maxTtlMs: number;
+    readonly result: TResultSchema | undefined;
+    // (undocumented)
+    readonly resultTtl: ProviderStateDurationString;
+    // (undocumented)
+    readonly resultTtlMs: number;
+    // (undocumented)
+    readonly ttl: {
+        readonly idle: ProviderStateDurationString;
+        readonly max: ProviderStateDurationString;
+    };
+    // (undocumented)
+    readonly type: "draft";
+    // (undocumented)
+    readonly wordCount: 2;
+}
+
+// @public (undocumented)
 export type E164PhoneNumber = `+${string}`;
 
 // @public (undocumented)
@@ -1500,7 +1583,7 @@ export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY_
 export const ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__RESOLVER__2CAPTCHA__API_KEY", "APIFUSE__RESOLVER__CAPSOLVER__API_KEY", "APIFUSE__RESOLVER__CAPMONSTER__API_KEY", "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY"];
 
 // @public
-export const ENGINE_OWNED_RUNTIME_ENV_NAMES: readonly ["APIFUSE__STT__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__API_KEY", "APIFUSE__CLOUDFLARE__ACCOUNT_ID", "APIFUSE__CACHE__KEY_PEPPER", "APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET"];
+export const ENGINE_OWNED_RUNTIME_ENV_NAMES: readonly ["APIFUSE__STT__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__API_KEY", "APIFUSE__CLOUDFLARE__ACCOUNT_ID", "APIFUSE__CACHE__KEY_PEPPER"];
 
 // @public
 export const ENGINE_OWNED_TELEMETRY_ENV_NAMES: readonly ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES"];
@@ -1706,16 +1789,6 @@ export class FlowExpiredError extends ProviderError {
     constructor(message: string, options?: ProviderErrorOptions);
 }
 
-// @public (undocumented)
-export interface FreshProviderChoiceIssuedAtOptions {
-    // (undocumented)
-    futureToleranceMs?: number;
-    // (undocumented)
-    nowMs?: number;
-    // (undocumented)
-    ttlMs: number;
-}
-
 // @public
 export type GatewayIngestible<T> = 0 extends 1 & T ? never : T extends object ? keyof T extends never ? never : {
     [K in keyof T]: 0 extends 1 & T[K] ? never : unknown extends T[K] ? never : [NonNullable<T[K]>] extends [number | boolean | ClosedEnum<string>] ? T[K] : [NonNullable<T[K]>] extends [readonly (infer U)[]] ? 0 extends 1 & U ? never : unknown extends U ? never : [U] extends [number | boolean | ClosedEnum<string> | GatewayIngestible<U>] ? T[K] : never : [NonNullable<T[K]>] extends [object] ? [NonNullable<T[K]>] extends [GatewayIngestible<NonNullable<T[K]>>] ? T[K] : never : never;
@@ -1797,6 +1870,149 @@ export const GuardStepSchema: z.ZodObject<{
         stop: z.ZodLiteral<"scenario">;
     }, z.core.$strict>;
 }, z.core.$strict>;
+
+// @public (undocumented)
+export type HandleAccess = "bound" | "public";
+
+// @public (undocumented)
+export interface HandleCommitResult<K extends HandleKind> {
+    // (undocumented)
+    readonly handle: string;
+    // (undocumented)
+    readonly result: ResultOf<K>;
+    // (undocumented)
+    readonly status: "committed" | "replayed";
+}
+
+// @public (undocumented)
+export interface HandleContext {
+    commit<K extends DraftKind>(kind: K, handle: string, work: (data: DataOf<K>) => Promise<ResultOf<K>>): Promise<HandleCommitResult<K>>;
+    create<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<string>;
+    discard<K extends HandleKind>(kind: K, handle: string): Promise<void>;
+    read<K extends HandleKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
+    update<K extends DraftKind>(kind: K, handle: string, updater: (data: DataOf<K>) => InputOf<K> | Promise<InputOf<K>>): Promise<HandleRecord<K>>;
+}
+
+// @public (undocumented)
+export class HandleError extends ProviderError {
+    constructor(code: HandleErrorCode, message: string, options?: HandleErrorOptions);
+    // (undocumented)
+    get code(): HandleErrorCode;
+    // (undocumented)
+    readonly handleCode: HandleErrorCode;
+    // (undocumented)
+    readonly kind?: string;
+}
+
+// @public (undocumented)
+export type HandleErrorCode = "HANDLE_INVALID" | "HANDLE_NOT_FOUND" | "HANDLE_EXPIRED" | "HANDLE_KIND_MISMATCH" | "HANDLE_BUSY" | "HANDLE_COMMITTED" | "HANDLE_CONNECTION_REQUIRED" | "HANDLE_STORAGE_UNAVAILABLE" | "HANDLE_TOO_LARGE" | "HANDLE_INVALID_DATA" | "PICK_NOT_OFFERED";
+
+// @public (undocumented)
+export type HandleErrorOptions = Omit<ProviderErrorOptions, "code"> & {
+    readonly kind?: string;
+};
+
+// @public
+export interface HandleFieldMeta {
+    // (undocumented)
+    readonly fieldName: string;
+    // (undocumented)
+    readonly issuedBy?: string;
+    // (undocumented)
+    readonly kind: string;
+    // (undocumented)
+    readonly type: HandleKindType;
+}
+
+// @public (undocumented)
+export type HandleKind = CursorKind<any> | DraftKind<any, any>;
+
+// @public (undocumented)
+export interface HandleKindBase<TSchema extends ZodType = ZodType> extends HandleKindDeclaration {
+    field(): ZodString;
+    readonly maxEntries: number;
+    readonly maxValueBytes: number;
+    readonly schema: TSchema;
+    readonly wordCount: HandleWordCount;
+}
+
+// @public
+export interface HandleKindDeclaration {
+    // (undocumented)
+    readonly access: HandleAccess;
+    // (undocumented)
+    readonly fieldName: string;
+    // (undocumented)
+    readonly issuedBy?: string;
+    // (undocumented)
+    readonly name: string;
+    // (undocumented)
+    readonly type: HandleKindType;
+}
+
+// @public (undocumented)
+export type HandleKindType = "cursor" | "draft";
+
+// @public (undocumented)
+export type HandleNormalizationClass = "case" | "whitespace" | "separator" | "punctuation" | "typo";
+
+// @public (undocumented)
+export type HandleOperation = "create" | "read" | "update" | "commit" | "discard";
+
+// @public (undocumented)
+export interface HandleRecord<K extends HandleKind> {
+    // (undocumented)
+    readonly createdAt: string;
+    // (undocumented)
+    readonly data: DataOf<K>;
+    // (undocumented)
+    readonly expiresAt: string;
+    readonly handle: string;
+    // (undocumented)
+    readonly kind: string;
+    // (undocumented)
+    readonly result?: ResultOf<K>;
+    // (undocumented)
+    readonly status: HandleStatus;
+}
+
+// @public
+export function handleRecoverySentence(kind: {
+    readonly fieldName: string;
+    readonly issuedBy?: string;
+}): string;
+
+// @public (undocumented)
+export type HandleStatus = "active" | "committing" | "committed";
+
+// @public (undocumented)
+export type HandleStrength = "standard" | "high";
+
+// @public
+export interface HandleTelemetryEvent {
+    // (undocumented)
+    readonly kind: string;
+    readonly normalization: string;
+    // (undocumented)
+    readonly operation: HandleOperation;
+    // (undocumented)
+    readonly outcome: HandleTelemetryOutcome;
+    // (undocumented)
+    readonly providerId: string;
+    // (undocumented)
+    readonly type: HandleKindType;
+    // (undocumented)
+    readonly words: number;
+}
+
+// @public (undocumented)
+export type HandleTelemetryOutcome = "success" | "not_found" | "expired" | "invalid" | "kind_mismatch" | "busy" | "replayed" | "error";
+
+// @public
+export type HandleWordCount = 2 | 4 | 5;
+
+// @public (undocumented)
+export function hasHandleErrorBrand(value: unknown): boolean;
 
 // @public
 export interface HealthCheckAssertionContext<TOutput = unknown> {
@@ -2399,6 +2615,9 @@ export type IanaTimeZone = string;
 // @public
 export type InferSchemaOutput<TSchema extends SchemaLike> = TSchema extends ZodType ? infer<TSchema> : TSchema extends StandardSchemaV1<unknown, infer Output> ? Output : unknown;
 
+// @public
+export type InputOf<K extends HandleKind> = z.input<K["schema"]>;
+
 // @public (undocumented)
 export type Insight = {
     id: string;
@@ -2419,6 +2638,12 @@ export type InstrumentedProviderContext<T extends Pick<ProviderContext, "trace">
     trace: TraceContext;
 };
 
+// @public (undocumented)
+export function isCursorKind(kind: HandleKind): kind is CursorKind<any>;
+
+// @public (undocumented)
+export function isDraftKind(kind: HandleKind): kind is DraftKind<any, any>;
+
 // @public
 export function isEmptyResult(raw: unknown): boolean;
 
@@ -2436,6 +2661,9 @@ export function isEngineOwnedRuntimeEnvName(name: string): boolean;
 
 // @public (undocumented)
 export function isEngineOwnedTelemetryEnvName(name: string): boolean;
+
+// @public
+export function isHandleError(value: unknown): value is HandleError;
 
 // @public (undocumented)
 export type Iso3166Alpha2CountryCode = Uppercase<string>;
@@ -2565,6 +2793,8 @@ export function lintProvider(provider: {
         contract?: ProviderContractMetaLike;
     };
     reviewed?: string;
+    handle?: unknown;
+    state?: unknown;
 }, options?: ProviderLintOptions): LintDiagnostic[];
 
 // @public
@@ -3077,11 +3307,28 @@ export const NEEDS_INPUT_STATUS: "needs_input";
 // @public (undocumented)
 export type NonEmpty<T> = readonly [T, ...T[]];
 
+// @public (undocumented)
+export interface NormalizedHandle {
+    // (undocumented)
+    readonly canonical: string;
+    // (undocumented)
+    readonly normalization: readonly HandleNormalizationClass[];
+    // (undocumented)
+    readonly words: readonly string[];
+}
+
 // @public
 export function normalizeErrorResponse(raw: unknown): {
     message: string;
     code?: string;
 } | null;
+
+// @public
+export function normalizeHandle(kind: HandleKind, raw: string): {
+    canonical: string;
+    words: string[];
+    normalization: string[];
+};
 
 // @public
 export function nullIfPlaceholder(v: unknown, patterns: string[]): unknown | null;
@@ -3523,24 +3770,24 @@ export interface PaginationInfo {
     totalPages: number;
 }
 
-// @public (undocumented)
-export function parseProviderChoiceToken(options: ParseProviderChoiceTokenOptions): ProviderChoiceTokenPayload;
-
-// @public (undocumented)
-export interface ParseProviderChoiceTokenOptions {
-    // (undocumented)
-    prefix: string;
-    // (undocumented)
-    secret: string;
-    // (undocumented)
-    token: string;
-}
+// @public
+export function parseHandleDurationMs(value: ProviderStateDurationString, label: string): number;
 
 // @public (undocumented)
 export function parseSseStream(body: ReadableStream<Uint8Array>): AsyncIterable<SseMessage>;
 
 // @public
 export function parseXmlItems(xml: string, tag: string): string[];
+
+// @public
+export function pick<T extends Record<string, unknown>>(items: readonly T[], value: string, options: PickOptions<T>): T;
+
+// @public (undocumented)
+export interface PickOptions<T> {
+    readonly by?: keyof T & string;
+    readonly field: string;
+    readonly issuedBy?: string;
+}
 
 // @public
 export function pivotByField(items: unknown[], keyField: string, valueField: string): Record<string, unknown>;
@@ -3847,7 +4094,7 @@ export const PROBE_INTERVALS: readonly ProbeInterval[];
 export type ProbeInterval = ms.StringValue;
 
 // @public (undocumented)
-export const PROVIDER_CAPABILITY_KEYS: readonly ["env", "credential", "http", "files", "native", "cache", "state", "stealth", "browser", "auth", "ocr", "stt", "resolver", "choice"];
+export const PROVIDER_CAPABILITY_KEYS: readonly ["env", "credential", "http", "files", "native", "cache", "state", "stealth", "browser", "auth", "ocr", "stt", "resolver", "handle"];
 
 // @public (undocumented)
 export const PROVIDER_CONTRACT_SCHEMA_VERSION = "2026-06-23";
@@ -3863,9 +4110,6 @@ export const PROVIDER_ERROR_SOURCES: readonly ["client", "upstream_rule", "upstr
 
 // @public (undocumented)
 export const PROVIDER_OBSERVABILITY_TAXONOMY_VERSION = "2026-08-07";
-
-// @public (undocumented)
-export const PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV = "APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET";
 
 // @public (undocumented)
 export interface ProviderAccessConfig {
@@ -4022,172 +4266,6 @@ export type ProviderChallenge = {
 // @public (undocumented)
 export type ProviderChallengeKind = ProviderChallenge["kind"];
 
-// @public (undocumented)
-export interface ProviderChoiceBindingOptions {
-    // (undocumented)
-    connection?: boolean;
-    // (undocumented)
-    credentialKeys?: readonly string[];
-}
-
-// @public (undocumented)
-export type ProviderChoiceConsumeMode = "never" | "on-parse" | "explicit";
-
-// @public (undocumented)
-export type ProviderChoiceConsumeResult = {
-    readonly status: "consumed";
-} | {
-    readonly status: "already-consumed";
-} | {
-    readonly status: "unsupported";
-};
-
-// @public (undocumented)
-export interface ProviderChoiceContext {
-    // (undocumented)
-    issue<TPayload extends Record<string, unknown>>(options: ProviderChoiceIssueOptions<TPayload> & {
-        readonly storage?: {
-            readonly mode: "inline";
-        };
-    }): string;
-    // (undocumented)
-    issue<TPayload extends Record<string, unknown>>(options: ProviderChoiceIssueOptions<TPayload> & {
-        readonly storage: Extract<ProviderChoiceStorageOptions, {
-            readonly mode: "server";
-        }>;
-    }): Promise<string>;
-    // (undocumented)
-    issue<TPayload extends Record<string, unknown>>(options: ProviderChoiceIssueOptions<TPayload> & {
-        readonly storage: Extract<ProviderChoiceStorageOptions, {
-            readonly mode: "auto";
-        }>;
-    }): string | Promise<string>;
-    // (undocumented)
-    issue<TPayload extends Record<string, unknown>>(options: ProviderChoiceIssueOptions<TPayload>): string | Promise<string>;
-    // (undocumented)
-    parse(options: ProviderChoiceParseOptions & {
-        readonly consume: "explicit";
-    }): Promise<ProviderChoiceExplicitParseResult>;
-    // (undocumented)
-    parse(options: ProviderChoiceParseOptions & {
-        readonly storage?: {
-            readonly mode: "inline";
-        };
-    }): Record<string, unknown>;
-    // (undocumented)
-    parse(options: ProviderChoiceParseOptions & {
-        readonly storage: Extract<ProviderChoiceStorageOptions, {
-            readonly mode: "server";
-        }>;
-    }): Promise<Record<string, unknown>>;
-    // (undocumented)
-    parse(options: ProviderChoiceParseOptions & {
-        readonly storage: Extract<ProviderChoiceStorageOptions, {
-            readonly mode: "auto";
-        }>;
-    }): Record<string, unknown> | Promise<Record<string, unknown>>;
-    // (undocumented)
-    parse(options: ProviderChoiceParseOptions): Record<string, unknown> | Promise<Record<string, unknown> | ProviderChoiceExplicitParseResult>;
-}
-
-// @public (undocumented)
-export type ProviderChoiceExplicitParseResult = {
-    readonly status: "active";
-    readonly payload: Record<string, unknown>;
-    readonly replayKey: string;
-    consume(): Promise<ProviderChoiceConsumeResult>;
-} | {
-    readonly status: "consumed";
-    readonly replayKey: string;
-};
-
-// @public (undocumented)
-export interface ProviderChoiceIssueOptions<TPayload extends Record<string, unknown>> {
-    // (undocumented)
-    bind?: ProviderChoiceBindingOptions;
-    // (undocumented)
-    nowMs?: number;
-    // (undocumented)
-    payload: TPayload;
-    // (undocumented)
-    prefix: string;
-    // (undocumented)
-    purpose: string;
-    // (undocumented)
-    storage?: ProviderChoiceStorageOptions;
-    strength?: "standard" | "high";
-    // (undocumented)
-    ttlMs: number;
-}
-
-// @public (undocumented)
-export interface ProviderChoiceParseOptions {
-    // (undocumented)
-    bind?: ProviderChoiceBindingOptions;
-    consume?: ProviderChoiceConsumeMode;
-    // (undocumented)
-    futureToleranceMs?: number;
-    // (undocumented)
-    nowMs?: number;
-    // (undocumented)
-    prefix: string;
-    // (undocumented)
-    purpose: string;
-    // (undocumented)
-    storage?: ProviderChoiceStorageOptions;
-    // (undocumented)
-    token: string;
-    // (undocumented)
-    ttlMs?: number;
-}
-
-// @public (undocumented)
-type ProviderChoiceStorageOptions = {
-    readonly mode: "inline";
-} | {
-    readonly mode: "server";
-    readonly namespace: string;
-    readonly state?: ProviderRuntimeState;
-    readonly ttl?: ProviderStateDurationString;
-    readonly maxEntries: number;
-    readonly maxValueBytes: number;
-    readonly unavailable?: "reject";
-} | {
-    readonly mode: "auto";
-    readonly namespace: string;
-    readonly state?: ProviderRuntimeState;
-    readonly ttl?: ProviderStateDurationString;
-    readonly maxInlineBytes: number;
-    readonly maxEntries: number;
-    readonly maxValueBytes: number;
-    readonly unavailable?: "reject";
-};
-
-// @public (undocumented)
-type ProviderChoiceTelemetryEvent = {
-    readonly providerId: string;
-    readonly purpose: string;
-    readonly operation: "parse" | "consume";
-    readonly format: "word" | "legacy";
-    readonly outcome: "success" | "not-found" | "invalid" | "unsupported" | "error";
-    readonly consumeMode: ProviderChoiceConsumeMode;
-    readonly consumed: boolean;
-    readonly replay: boolean;
-};
-
-// @public (undocumented)
-export class ProviderChoiceTokenError extends Error {
-    constructor(reason: ProviderChoiceTokenErrorReason, message: string);
-    // (undocumented)
-    readonly reason: ProviderChoiceTokenErrorReason;
-}
-
-// @public (undocumented)
-export type ProviderChoiceTokenErrorReason = "invalid_shape" | "invalid_signature" | "invalid_payload" | "invalid_binding" | "stale";
-
-// @public (undocumented)
-export type ProviderChoiceTokenPayload = Record<string, unknown>;
-
 // @public
 export type ProviderContext<TConfig = Record<string, unknown>> = {
     request?: ProviderRequestContext;
@@ -4226,8 +4304,8 @@ export type ProviderContext<TConfig = Record<string, unknown>> = {
     stt: SttContext;
 } : Record<never, never>) & ("resolver" extends keyof TConfig ? {
     resolver: ResolverContext;
-} : Record<never, never>) & ("choice" extends keyof TConfig ? {
-    choice: ProviderChoiceContext;
+} : Record<never, never>) & ("handle" extends keyof TConfig ? {
+    handle: HandleContext;
 } : Record<never, never>);
 
 // @public
@@ -4359,12 +4437,12 @@ export interface ProviderDeclaration {
         engine: BrowserEngine;
     };
     cache?: Record<string, never> | true;
-    choice?: Record<string, never> | true;
     context?: ContextDeclaration;
     credential?: CredentialDeclaration;
     deployment?: ProviderDeploymentOverrides;
     env?: Record<string, never> | true;
     files?: Record<string, never> | true;
+    handle?: readonly HandleKind[];
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // (undocumented)
@@ -4436,8 +4514,6 @@ export interface ProviderDefinition<TContext = ProviderContext> {
     // (undocumented)
     cache?: Record<string, never> | true;
     // (undocumented)
-    choice?: Record<string, never> | true;
-    // (undocumented)
     context?: ContextDeclaration;
     // (undocumented)
     credential?: CredentialDeclaration;
@@ -4446,6 +4522,8 @@ export interface ProviderDefinition<TContext = ProviderContext> {
     env?: Record<string, never> | true;
     // (undocumented)
     files?: Record<string, never> | true;
+    // (undocumented)
+    handle?: readonly HandleKind[];
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // (undocumented)
@@ -4542,7 +4620,7 @@ export type ProviderEngineBindingCandidates = Partial<ProviderEngineCapabilitySu
     readonly credential: CredentialContext;
     readonly files: ProviderFilesContext;
     readonly auth: AuthContext;
-    readonly choice: ProviderChoiceContext;
+    readonly handle: HandleContext;
 }> & {
     readonly request?: ProviderRequestContext;
     readonly trace: TraceContext_2;
@@ -5064,18 +5142,10 @@ type ProviderServerLogEvent = (ProviderServerLogEventBase & {
     event: "provider_secrets_missing";
     providerId: string;
     missingSecrets: string[];
-} | {
+} | ({
     level: "info";
-    event: "provider_choice_token";
-    providerId: string;
-    purpose: string;
-    operation: "parse" | "consume";
-    format: "word" | "legacy";
-    outcome: "success" | "not-found" | "invalid" | "unsupported" | "error";
-    consumeMode: "never" | "on-parse" | "explicit";
-    consumed: boolean;
-    replay: boolean;
-} | {
+    event: "provider_handle";
+} & HandleTelemetryEvent) | {
     level: "warn";
     event: "provider_cleanup_failed";
     providerId: string;
@@ -5912,6 +5982,9 @@ export type ResolverVendorUnavailableReason = "missing_credentials" | "missing_p
 
 // @public (undocumented)
 export function resolveSttPrompt(request: SttTranscribeRequest): string | undefined;
+
+// @public (undocumented)
+export type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R> ? (R extends ZodType ? z.output<R> : unknown) : never;
 
 // @public (undocumented)
 export type RetryPolicy = {
@@ -7609,31 +7682,28 @@ export { z }
 //
 // dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point index.d.ts
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:26:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:107:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
-// dist/define.d.ts:135:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:27:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:108:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
+// dist/define.d.ts:136:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:4:5 - (ae-forgotten-export) The symbol "AuthModeLike" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:29:5 - (ae-forgotten-export) The symbol "ProviderLintMode" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:52:5 - (ae-forgotten-export) The symbol "ProviderAuthLike" needs to be exported by the entry point index.d.ts
 // dist/lint.d.ts:80:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
-// dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
-// dist/runtime/choice.d.ts:22:5 - (ae-forgotten-export) The symbol "ProviderChoiceTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:62:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:66:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:149:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:155:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:163:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:227:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:662:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1613:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1737:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1795:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1803:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1804:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
-// dist/types.d.ts:1991:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:63:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:67:5 - (ae-forgotten-export) The symbol "ProviderServerStatefulForwardEnvelope" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:142:5 - (ae-forgotten-export) The symbol "ProviderServerLogger" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:148:5 - (ae-forgotten-export) The symbol "ProviderServerOperationExecutor" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:156:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:220:5 - (ae-forgotten-export) The symbol "ProviderServerCloseOptions" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:663:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1614:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1692:9 - (ae-forgotten-export) The symbol "AuthSafeData" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1700:9 - (ae-forgotten-export) The symbol "AuthAbortRetry" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1701:9 - (ae-forgotten-export) The symbol "AuthSafeJson" needs to be exported by the entry point index.d.ts
+// dist/types.d.ts:1888:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point index.d.ts
 
 // (No @packageDocumentation comment for this package)
 

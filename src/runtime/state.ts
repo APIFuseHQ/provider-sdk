@@ -75,9 +75,12 @@ if not indexed and redis.call("ZCARD", KEYS[2]) >= max_entries then
 end
 
 if current_decoded and type(current_decoded.createdAt) == "string" then
-	local next_decoded = cjson.decode(envelope)
-	next_decoded.createdAt = current_decoded.createdAt
-	envelope = cjson.encode(next_decoded)
+	-- Preserve the original createdAt by patching the encoded envelope in place.
+	-- The envelope puts its metadata before "value", so the first match is the
+	-- envelope's own key, never a provider value; re-encoding with cjson would
+	-- silently turn [] inside the value into {}.
+	local preserved = string.gsub(current_decoded.createdAt, "%%", "%%%%")
+	envelope = (string.gsub(envelope, '"createdAt":"[^"]*"', '"createdAt":"' .. preserved .. '"', 1))
 end
 redis.call("SET", KEYS[1], envelope, "PXAT", expires_at)
 redis.call("ZADD", KEYS[2], expires_at, KEYS[1])
@@ -267,7 +270,11 @@ function redisEnvelope(
 	expiresAt: string,
 ): RedisStateEnvelope {
 	const updatedAt = new Date().toISOString();
-	return { value, version, expiresAt, createdAt, updatedAt };
+	// Metadata precedes `value` on purpose: the compare-and-set Lua script patches
+	// `createdAt` in the encoded string (first occurrence) instead of decoding and
+	// re-encoding with cjson, which would turn empty arrays inside `value` into
+	// objects. Keep the key order stable.
+	return { version, expiresAt, createdAt, updatedAt, value };
 }
 
 class RedisProviderStateNamespace implements ProviderStateNamespace {
@@ -604,7 +611,10 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 	// biome-ignore lint/suspicious/noExplicitAny: in-memory state stores heterogeneous generic values by key.
 	readonly values = new Map<string, StateValue<any>>();
 
-	constructor(private readonly options: StateNamespaceOptions) {}
+	constructor(
+		private readonly options: StateNamespaceOptions,
+		private readonly now: () => number = Date.now,
+	) {}
 
 	private enforceValueSize(value: unknown): void {
 		const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
@@ -631,7 +641,7 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 		}
 	}
 
-	private pruneExpired(nowMs = Date.now()): void {
+	private pruneExpired(nowMs = this.now()): void {
 		for (const [key, row] of this.values.entries()) {
 			if (row.expiresAt && Date.parse(row.expiresAt) <= nowMs) {
 				this.values.delete(key);
@@ -655,9 +665,12 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 	async set<T>(key: string, value: T, options?: StateWriteOptions): Promise<StateValue<T>> {
 		this.pruneExpired();
 		this.enforceWritePolicy(key, value, options?.ttl);
-		const now = new Date().toISOString();
+		const now = new Date(this.now()).toISOString();
 		const current = this.values.get(key);
-		const expiresAt = resolveMemoryStateExpiresAt(options?.ttl ?? this.options.defaultTtl);
+		const expiresAt = resolveMemoryStateExpiresAt(
+			options?.ttl ?? this.options.defaultTtl,
+			this.now(),
+		);
 		const row = {
 			key,
 			value,
@@ -692,13 +705,14 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 			return { ok: false, current: current ?? null };
 		}
 		this.enforceWritePolicy(key, value, options?.ttl);
-		const now = new Date().toISOString();
+		const now = new Date(this.now()).toISOString();
 		const stored = {
 			key,
 			value,
 			version: expectedVersion + 1,
 			expiresAt: resolveMemoryStateExpiresAt(
 				options?.ttl ?? this.options.defaultTtl,
+				this.now(),
 			),
 			createdAt: current?.createdAt ?? now,
 			updatedAt: now,
@@ -725,11 +739,16 @@ class MemoryProviderStateNamespace implements ProviderStateNamespace {
 
 type MemoryProviderStateBackend = {
 	readonly namespaces: Map<string, MemoryProviderStateNamespace>;
+	/** Clock used for expiry; tests inject a fake clock so ttl behaviour matches production. */
+	readonly now: () => number;
 };
 
 class MemoryProviderRuntimeState implements ProviderRuntimeState {
 	constructor(
-		private readonly backend: MemoryProviderStateBackend = { namespaces: new Map() },
+		private readonly backend: MemoryProviderStateBackend = {
+			namespaces: new Map(),
+			now: Date.now,
+		},
 		private readonly scopeDiscriminator = MISSING_CONNECTION_SCOPE_DISCRIMINATOR,
 	) {}
 
@@ -746,15 +765,18 @@ class MemoryProviderRuntimeState implements ProviderRuntimeState {
 		const namespaceIdentity = `${scopeDiscriminator}\0${name}`;
 		const existing = this.backend.namespaces.get(namespaceIdentity);
 		if (existing) return existing;
-		const created = new MemoryProviderStateNamespace(options);
+		const created = new MemoryProviderStateNamespace(options, this.backend.now);
 		this.backend.namespaces.set(namespaceIdentity, created);
 		return created;
 	}
 }
 
-function resolveMemoryStateExpiresAt(ttl: StateWriteOptions["ttl"]): string {
+function resolveMemoryStateExpiresAt(
+	ttl: StateWriteOptions["ttl"],
+	nowMs = Date.now(),
+): string {
 	const match = /^(\d+)(ms|s|m|h|d)$/.exec(ttl ?? "1h");
-	if (!match) return new Date(Date.now() + 3_600_000).toISOString();
+	if (!match) return new Date(nowMs + 3_600_000).toISOString();
 	const amount = Number(match[1]);
 	const unit = match[2];
 	const multiplier =
@@ -767,7 +789,7 @@ function resolveMemoryStateExpiresAt(ttl: StateWriteOptions["ttl"]): string {
 					: unit === "h"
 						? 3_600_000
 						: 86_400_000;
-	return new Date(Date.now() + amount * multiplier).toISOString();
+	return new Date(nowMs + amount * multiplier).toISOString();
 }
 
 export function createRedisProviderRuntimeState(
@@ -792,8 +814,14 @@ export function createProviderRuntimeStateFromEnv(
 	return createUnsupportedProviderRuntimeState();
 }
 
-export function createMemoryProviderRuntimeState(): ProviderRuntimeState {
-	return new MemoryProviderRuntimeState();
+export function createMemoryProviderRuntimeState(options?: {
+	/** Clock for expiry and timestamps; defaults to `Date.now`. */
+	readonly now?: () => number;
+}): ProviderRuntimeState {
+	return new MemoryProviderRuntimeState({
+		namespaces: new Map(),
+		now: options?.now ?? Date.now,
+	});
 }
 
 export function createUnsupportedProviderRuntimeState(): ProviderRuntimeState {

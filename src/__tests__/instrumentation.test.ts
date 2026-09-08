@@ -1,6 +1,6 @@
 import { describe, expect, it, mock, spyOn } from "bun:test";
 import { createProviderCache } from "../runtime/cache.js";
-import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import { createTestHandleContext } from "../runtime/handle.js";
 import { createCredentialContext } from "../runtime/credential.js";
 import { createEnvContext } from "../runtime/env.js";
 import { isProviderError } from "../errors.js";
@@ -138,7 +138,7 @@ function createMockContext(): ProviderContext {
 		stealth,
 		browser,
 		trace: createTraceContext(),
-		choice: createTestProviderChoiceContext({
+		handle: createTestHandleContext({
 			providerId: "instrumented-provider",
 		}),
 	});

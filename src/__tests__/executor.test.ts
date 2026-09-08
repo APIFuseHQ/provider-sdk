@@ -17,7 +17,7 @@ import { createProviderContextDouble } from "./test-utils.js";
 const duplicateSdkSpecifier: string = "../errors.ts?duplicate-sdk-instance";
 const duplicateSdk: Promise<typeof import("../errors.js")> = import(duplicateSdkSpecifier);
 import { createProviderCache } from "../runtime/cache.js";
-import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import { createTestHandleContext } from "../runtime/handle.js";
 import { executeOperation } from "../runtime/executor.js";
 import { createUnsupportedProviderRuntimeState } from "../runtime/state.js";
 import type {
@@ -78,7 +78,7 @@ function createMockCtx(fetchResponse: unknown, status = 200): ProviderContext {
 		auth: {
 			requestField: mock(async () => ""),
 		},
-		choice: createTestProviderChoiceContext({ providerId: "test-provider" }),
+		handle: createTestHandleContext({ providerId: "test-provider" }),
 	});
 }
 

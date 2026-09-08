@@ -54,10 +54,8 @@ import {
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type * as BrowserRuntimeModule from "../runtime/browser.js";
 import { createProviderCache } from "../runtime/cache.js";
-import {
-	createProviderChoiceContext,
-	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-} from "../runtime/choice.js";
+import type { HandleTelemetryEvent } from "../handle.js";
+import { createHandleContext } from "../runtime/handle.js";
 import { createCredentialContext } from "../runtime/credential.js";
 import {
 	bindDiagnosticSensitiveRegistry,
@@ -923,10 +921,7 @@ function createProviderContext(
 			scope.redact,
 		);
 
-	const env = createEnvContext([
-		...providerSecretNames(provider),
-		PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-	]);
+	const env = createEnvContext([...providerSecretNames(provider)]);
 	const credential = createCredentialContext({
 		allowedKeys: provider.credential?.keys,
 		mode: request.connection?.mode,
@@ -1008,16 +1003,14 @@ function createProviderContext(
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
 				),
-		choice: createProviderChoiceContext({
+		handle: createHandleContext({
 			providerId: provider.id,
-			env,
 			request: requestContext,
-			credential,
 			state: requestState,
 			onTelemetry: (event) =>
 				(options.logger ?? defaultProviderServerLogger)({
 					level: "info",
-					event: "provider_choice_token",
+					event: "provider_handle",
 					...event,
 				}),
 		}),
@@ -1324,18 +1317,10 @@ export type ProviderServerLogEvent =
 			providerId: string;
 			missingSecrets: string[];
 	  }
-	| {
+	| ({
 			level: "info";
-			event: "provider_choice_token";
-			providerId: string;
-			purpose: string;
-			operation: "parse" | "consume";
-			format: "word" | "legacy";
-			outcome: "success" | "not-found" | "invalid" | "unsupported" | "error";
-			consumeMode: "never" | "on-parse" | "explicit";
-			consumed: boolean;
-			replay: boolean;
-	  }
+			event: "provider_handle";
+	  } & HandleTelemetryEvent)
 	| {
 			level: "warn";
 			event: "provider_cleanup_failed";

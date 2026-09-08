@@ -12,6 +12,7 @@ const PROVIDER_ERROR_BRAND_VALUE = 1;
 const SESSION_EXPIRED_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/session-expired@1");
 const TRANSPORT_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/transport@1");
 const VALIDATION_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/validation@1");
+const HANDLE_BRAND = Symbol.for("@apifuse/provider-sdk/error-kind/handle@1");
 
 // Defines a non-enumerable, non-writable, non-configurable own data property.
 // Immutable + own means a guard can trust it via a single descriptor read
@@ -206,6 +207,18 @@ export function isSessionExpiredError(value: unknown): value is SessionExpiredEr
 
 export function isTransportError(value: unknown): value is TransportError {
 	return isProviderError(value) && hasOwnBrand(value, TRANSPORT_BRAND, true);
+}
+
+/** Brands a handle error (ADR-0012) so `isHandleError` works across duplicate SDK module copies. */
+export function brandHandleError(target: object): void {
+	defineErrorBrand(target, HANDLE_BRAND, true);
+}
+
+export function hasHandleErrorBrand(value: unknown): boolean {
+	return (
+		hasOwnBrand(value, PROVIDER_ERROR_BRAND, PROVIDER_ERROR_BRAND_VALUE) &&
+		hasOwnBrand(value, HANDLE_BRAND, true)
+	);
 }
 
 export function isValidationError(value: unknown): value is ValidationError {

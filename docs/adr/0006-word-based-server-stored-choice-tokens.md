@@ -1,6 +1,6 @@
 # ADR: Word-based server-stored choice tokens
 
-- Status: accepted
+- Status: superseded by ADR-0012 (2026-09-08); the wordlist choice and §2 guessing analysis remain normative for public handles
 - Date: 2026-08-10; amended 2026-08-19 and 2026-08-20 (legacy sunset; bound-verified stale disclosure)
 - Deciders: Taehoon (owner), Soju (agent)
 - Scope: `@apifuse/provider-sdk` managed provider choice tokens stored in runtime state

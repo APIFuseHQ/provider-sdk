@@ -233,12 +233,12 @@ export function createBrowserClient(options?: BrowserClientOptions): BrowserClie
 
 // Warnings were encountered during analysis:
 //
-// dist/types.d.ts:1560:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point browser.d.ts
-// dist/types.d.ts:1566:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point browser.d.ts
-// dist/types.d.ts:1567:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point browser.d.ts
-// dist/types.d.ts:1571:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point browser.d.ts
-// dist/types.d.ts:1578:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point browser.d.ts
-// dist/types.d.ts:1613:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1561:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1567:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1568:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1572:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1579:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point browser.d.ts
+// dist/types.d.ts:1614:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point browser.d.ts
 
 // (No @packageDocumentation comment for this package)
 

@@ -19,14 +19,6 @@ export type {
 } from "./auth.js";
 export { createFormCeremony } from "./ceremonies/index.js";
 export {
-	assertFreshProviderChoiceIssuedAt,
-	createProviderChoiceToken,
-	ProviderChoiceTokenError,
-	type ProviderChoiceTokenErrorReason,
-	type ProviderChoiceTokenPayload,
-	parseProviderChoiceToken,
-} from "./choice-token.js";
-export {
 	centered,
 	delayed,
 	defineHealthJourney,
@@ -161,12 +153,16 @@ export {
 	providerLocaleKey,
 	qualifyProviderLocaleKey,
 } from "./i18n/index.js";
+export * from "./handle.js";
 export {
-	type CreateProviderChoiceContextOptions,
-	createProviderChoiceContext,
-	createTestProviderChoiceContext,
-	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
-} from "./runtime/choice.js";
+	type CreateHandleContextOptions,
+	type CreateTestHandleContextOptions,
+	createHandleContext,
+	createTestHandleContext,
+	type HandleNormalizationClass,
+	type NormalizedHandle,
+	normalizeHandle,
+} from "./runtime/handle.js";
 export {
 	APIFUSE_CONTENT_PROVENANCE_META_KEY,
 	APIFUSE_CONTENT_TRUST_META_KEY,
@@ -245,13 +241,6 @@ export type {
 	OperationSensitivePath,
 	OperationTransport,
 	ProviderAccessVisibility,
-	ProviderChoiceBindingOptions,
-	ProviderChoiceConsumeMode,
-	ProviderChoiceConsumeResult,
-	ProviderChoiceContext,
-	ProviderChoiceExplicitParseResult,
-	ProviderChoiceIssueOptions,
-	ProviderChoiceParseOptions,
 	ProviderContext,
 	ProviderContextFor,
 	ProviderDefinition,

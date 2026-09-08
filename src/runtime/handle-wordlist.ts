@@ -119,12 +119,22 @@ yacht yahoo yard yearbook yesterday yiddish yield yo-yo yodel yogurt yuppie zeal
 zestfully zigzagged zillion zipping zirconium zodiac zombie zookeeper zucchini
 `;
 
-export const CHOICE_WORDLIST_SIZE = 1_296;
-export const CHOICE_WORD_ENTROPY_BITS = Math.log2(CHOICE_WORDLIST_SIZE);
-export const STANDARD_CHOICE_WORD_COUNT = 4;
-export const HIGH_CHOICE_WORD_COUNT = 5;
-export const STANDARD_CHOICE_ENTROPY_BITS = STANDARD_CHOICE_WORD_COUNT * CHOICE_WORD_ENTROPY_BITS;
-export const HIGH_CHOICE_ENTROPY_BITS = HIGH_CHOICE_WORD_COUNT * CHOICE_WORD_ENTROPY_BITS;
+export const HANDLE_WORDLIST_SIZE = 1_296;
+export const HANDLE_WORD_ENTROPY_BITS = Math.log2(HANDLE_WORDLIST_SIZE);
+/**
+ * Bound handles live under `state.forConnection(connectionId)`: another
+ * connection cannot address them at all, so no guessing analysis applies. The
+ * only requirement is uniqueness among live handles of one connection
+ * (1,296^2 = 1.68M keys, CAS-if-absent with retries), which two words satisfy.
+ */
+export const BOUND_HANDLE_WORD_COUNT = 2;
+/** Public handles are addressable by anyone; ADR 0006 §2 guessing numbers apply. */
+export const PUBLIC_HANDLE_WORD_COUNT = 4;
+/** Used when a public kind declares `strength: "high"` or its ttl exceeds one hour. */
+export const HIGH_PUBLIC_HANDLE_WORD_COUNT = 5;
+export const PUBLIC_HANDLE_ENTROPY_BITS = PUBLIC_HANDLE_WORD_COUNT * HANDLE_WORD_ENTROPY_BITS;
+export const HIGH_PUBLIC_HANDLE_ENTROPY_BITS =
+	HIGH_PUBLIC_HANDLE_WORD_COUNT * HANDLE_WORD_ENTROPY_BITS;
 
 export const EFF_SHORT_WORDLIST_2: readonly string[] = Object.freeze(
 	EFF_SHORT_WORDLIST_2_TEXT.trim().split(/\s+/),
@@ -132,14 +142,125 @@ export const EFF_SHORT_WORDLIST_2: readonly string[] = Object.freeze(
 
 const EFF_SHORT_WORD_SET: ReadonlySet<string> = new Set(EFF_SHORT_WORDLIST_2);
 
-export function choiceWordAt(index: number): string {
+/**
+ * Words the runtime may issue. The handle grammar joins words with `-`, so the
+ * one hyphenated official entry (`yo-yo`) would fuse with the separator and is
+ * never issued. The official list itself stays embedded unchanged.
+ */
+export const ISSUABLE_HANDLE_WORDS: readonly string[] = Object.freeze(
+	EFF_SHORT_WORDLIST_2.filter((word) => !word.includes("-")),
+);
+
+export function handleWordAt(index: number): string {
 	const word = EFF_SHORT_WORDLIST_2[index];
 	if (word === undefined) {
-		throw new RangeError(`Choice word index is out of range: ${index}`);
+		throw new RangeError(`Handle word index is out of range: ${index}`);
 	}
 	return word;
 }
 
-export function isChoiceWord(value: string): boolean {
+export function isHandleWord(value: string): boolean {
 	return EFF_SHORT_WORD_SET.has(value);
+}
+
+/**
+ * Symmetric-deletion index (SymSpell, max distance 1). Two strings at
+ * Levenshtein distance <= 1 always share a form reachable by deleting at most
+ * one character from each side, so a lookup of the query and its one-deletion
+ * variants yields every candidate; a real distance check then removes the false
+ * positives (e.g. transpositions). ~10k entries, O(len) per lookup.
+ */
+/** Shortest and longest words in the list (3 and 10 for the official list). */
+export const MIN_HANDLE_WORD_LENGTH: number = Math.min(
+	...EFF_SHORT_WORDLIST_2.map((word) => word.length),
+);
+export const MAX_HANDLE_WORD_LENGTH: number = Math.max(
+	...EFF_SHORT_WORDLIST_2.map((word) => word.length),
+);
+
+const DELETION_INDEX: ReadonlyMap<string, readonly string[]> = (() => {
+	const index = new Map<string, string[]>();
+	const add = (form: string, word: string): void => {
+		const bucket = index.get(form);
+		if (bucket === undefined) index.set(form, [word]);
+		else if (!bucket.includes(word)) bucket.push(word);
+	};
+	for (const word of EFF_SHORT_WORDLIST_2) {
+		add(word, word);
+		for (const variant of oneDeletionVariants(word)) add(variant, word);
+	}
+	return index;
+})();
+
+function oneDeletionVariants(value: string): string[] {
+	const variants: string[] = [];
+	for (let position = 0; position < value.length; position += 1) {
+		variants.push(value.slice(0, position) + value.slice(position + 1));
+	}
+	return variants;
+}
+
+/** True when Levenshtein distance between `left` and `right` is at most 1. */
+function withinEditDistanceOne(left: string, right: string): boolean {
+	if (left === right) return true;
+	const lengthDelta = left.length - right.length;
+	if (lengthDelta > 1 || lengthDelta < -1) return false;
+	if (lengthDelta === 0) {
+		let mismatches = 0;
+		for (let position = 0; position < left.length; position += 1) {
+			if (left[position] !== right[position]) {
+				mismatches += 1;
+				if (mismatches > 1) return false;
+			}
+		}
+		return true;
+	}
+	const longer = lengthDelta > 0 ? left : right;
+	const shorter = lengthDelta > 0 ? right : left;
+	let longIndex = 0;
+	let shortIndex = 0;
+	let skipped = false;
+	while (shortIndex < shorter.length) {
+		if (longer[longIndex] === shorter[shortIndex]) {
+			longIndex += 1;
+			shortIndex += 1;
+			continue;
+		}
+		if (skipped) return false;
+		skipped = true;
+		longIndex += 1;
+	}
+	return true;
+}
+
+/**
+ * Resolves one handle segment to a wordlist entry: the exact word, or the
+ * unique word at edit distance <= `maxDistance`. Returns null when no word or
+ * more than one word qualifies. The official list has pairwise edit distance
+ * >= 3, so at distance 1 every non-null answer is unique; the uniqueness check
+ * is kept as a guard so a wordlist change cannot silently make normalization
+ * map one input onto two different canonical handles.
+ */
+export function findHandleWordWithinDistance(segment: string, maxDistance: 1): string | null {
+	if (segment.length === 0) return null;
+	if (EFF_SHORT_WORD_SET.has(segment)) return segment;
+	if (maxDistance !== 1) return null;
+	// A segment that is more than one character shorter or longer than every
+	// word cannot be within distance 1 of any word. Rejecting it here also bounds
+	// the variant generation below (which is O(len²) in memory) against
+	// client-supplied garbage of arbitrary length.
+	if (
+		segment.length < MIN_HANDLE_WORD_LENGTH - maxDistance ||
+		segment.length > MAX_HANDLE_WORD_LENGTH + maxDistance
+	) {
+		return null;
+	}
+	const matches = new Set<string>();
+	for (const form of [segment, ...oneDeletionVariants(segment)]) {
+		for (const candidate of DELETION_INDEX.get(form) ?? []) {
+			if (withinEditDistanceOne(segment, candidate)) matches.add(candidate);
+		}
+	}
+	if (matches.size !== 1) return null;
+	return matches.values().next().value ?? null;
 }

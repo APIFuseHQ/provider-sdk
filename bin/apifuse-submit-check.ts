@@ -949,11 +949,11 @@ function scoreNoDynamicCode(providerRoot: string): SubmitCheck {
 }
 
 const REDUNDANT_RUNTIME_GUARD_PATTERNS: readonly RegExp[] = [
-	/\bctx\.(?:stealth|http|cache|state|browser|trace|auth|stt|choice)\?\./,
+	/\bctx\.(?:stealth|http|cache|state|browser|trace|auth|stt|handle)\?\./,
 ];
 
 const SDK_CONTEXT_METHOD_ALIAS_PATTERN =
-	/\bconst\s+(\w+)\s*=\s*ctx\.(?:stealth|http|cache|state|browser|trace|auth|stt|choice)\.(?:\w+)/;
+	/\bconst\s+(\w+)\s*=\s*ctx\.(?:stealth|http|cache|state|browser|trace|auth|stt|handle)\.(?:\w+)/;
 
 function hasRedundantRuntimeGuard(line: string, remainingLines: readonly string[]): boolean {
 	if (REDUNDANT_RUNTIME_GUARD_PATTERNS.some((pattern) => pattern.test(line))) {

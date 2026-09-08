@@ -11,7 +11,7 @@ import {
 	createHttpClient,
 	createInProcessProviderEngine,
 	createOcrClientFromEnv,
-	createProviderChoiceContext,
+	createHandleContext,
 	createProviderEnvironment,
 	createSttClientFromEnv,
 	createUnsupportedResolverClient,
@@ -521,7 +521,6 @@ export function createCaptureContext(
 		provider.secrets?.map((secret) => secret.name) ?? [],
 	);
 	const env = { get: (key: string) => readDiagnosticEnv(key, providerEnvironment) };
-	const engineEnv = { get: (key: string) => readDiagnosticEnv(key) };
 	const engineCredentials = readEngineProxyCredentials();
 	const credential = {
 		mode: "none" as const,
@@ -537,7 +536,7 @@ export function createCaptureContext(
 	const candidates: ProviderEngineBindingCandidates = {
 		env,
 		credential,
-		request: { headers: {} },
+		request: { headers: {}, connectionId: "local-record" },
 		http,
 		cache,
 		state,
@@ -583,11 +582,9 @@ export function createCaptureContext(
 						: {}),
 				})
 			: createUnsupportedResolverClient("Provider does not declare resolver capability"),
-		choice: createProviderChoiceContext({
+		handle: createHandleContext({
 			providerId: provider.id,
-			env: engineEnv,
-			request: { headers: {} },
-			credential,
+			request: { headers: {}, connectionId: "local-record" },
 			state,
 		}),
 	};
