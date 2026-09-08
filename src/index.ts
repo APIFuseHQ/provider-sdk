@@ -538,6 +538,18 @@ export * from "./utils/text.js";
 export * from "./utils/transform.js";
 
 export {
+	HttpTelemetryCollector,
+	type HttpTelemetrySink,
+	type HttpTelemetryRequestSink,
+	type HttpAttemptTelemetryEvent,
+	type HttpAttemptSample,
+	type HttpTelemetryErrorCode,
+	type HttpTelemetryRetryPayload,
+	type HttpTelemetryLogPayload,
+	type HttpTelemetryHeaderPayload,
+} from "./runtime/http-telemetry.js";
+
+export {
 	NativeTelemetryCollector,
 	type NativeAttemptSample,
 	type NativeConnectTelemetryEvent,

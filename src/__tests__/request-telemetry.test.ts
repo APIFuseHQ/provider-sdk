@@ -1,3 +1,4 @@
+import { HttpTelemetryCollector } from "../runtime/http-telemetry.js";
 import { describe, expect, it, mock } from "bun:test";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
 import { ProxyTelemetryCollector } from "../runtime/proxy-telemetry.js";
@@ -208,23 +209,6 @@ describe("request telemetry ledger", () => {
 		expect(envelope.truncated).toBe(true);
 	});
 
-	it("drops native before resolver before proxy regardless of registration order", () => {
-		for (const resolverSize of [20, 64]) {
-			const ledger = new RequestTelemetry(createTraceContext());
-			ledger.register(castContributor("native", largeValidPayload("n", 32)));
-			ledger.register(castContributor("resolver", largeValidPayload("r", resolverSize)));
-			ledger.register(recordedProxy());
-			const header = ledger.toHeaderValue()!;
-			const envelope = decode(header);
-			expect(header.length).toBeLessThanOrEqual(4096);
-			expect(envelope.v).toBe(1);
-			expect(envelope.native).toBeUndefined();
-			expect(envelope.resolver !== undefined).toBe(resolverSize === 20);
-			expect(envelope.proxy).toEqual(recordedProxy().toLogPayload());
-			expect(envelope.truncated).toBe(true);
-		}
-	});
-
 	it.each([
 		["BigInt", "stealth", { big: 1n }],
 		[
@@ -355,5 +339,38 @@ describe("request telemetry ledger", () => {
 		expect(isGatewayIngestible({ value: "vendor said hello" })).toBe(false);
 		const branded: ClosedEnum<"x"> = closedEnum("x");
 		expect(String(branded)).toBe("x");
+	});
+});
+
+describe("HTTP sibling priority", () => {
+	it.each([32, 64])("drops http before resolver before proxy: resolver samples=%i", (count) => {
+		const http = new HttpTelemetryCollector();
+		const request = http.startRequest({ retryPreset: "transport_transient" });
+		for (let n = 1; n <= 24; n++)
+			request.recordAttempt({ ms: 100, proxyUsed: true, e: "transport_network_error", status: 0 });
+		request.finish(2400);
+		const ledger = new RequestTelemetry(createTraceContext());
+		ledger.register(recordedProxy());
+		ledger.register(castContributor("resolver", largeValidPayload("r", count)));
+		ledger.register(http);
+		const value = ledger.toHeaderValue()!;
+		expect(value.length).toBeLessThanOrEqual(4096);
+		const envelope = decode(value);
+		expect(envelope.http).toBeUndefined();
+		expect(envelope.resolver).toEqual(count === 32 ? largeValidPayload("r", count) : undefined);
+		expect(envelope.proxy).toEqual(recordedProxy().toLogPayload());
+		expect(envelope.truncated).toBe(true);
+	});
+
+	it("preserves the proxy wire oracle when HTTP is recorded alongside it", () => {
+		const ledger = new RequestTelemetry(createTraceContext());
+		ledger.register(oracleProxy());
+		const http = new HttpTelemetryCollector();
+		http.startRequest({}).recordAttempt({ ms: 1, proxyUsed: true, status: 200 });
+		ledger.register(http);
+		const envelope = decode(ledger.toHeaderValue()!);
+		expect(JSON.stringify(envelope.proxy)).toBe(BASE_PROXY_BYTES);
+		expect(JSON.stringify(ledger.toLogPayload()?.proxy)).toBe(BASE_PROXY_BYTES);
+		expect(Object.keys(envelope)).toEqual(["v", "taxonomy", "proxy", "http"]);
 	});
 });
