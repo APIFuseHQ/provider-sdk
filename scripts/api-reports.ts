@@ -119,7 +119,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"provider.api.md": forgottenExports(
-		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review. Native telemetry sink/event dependencies are intentionally indirect on this subpath; the contributor and payload types are exported from root/server, and all dependency definitions remain included here for review.",
 		`
 			AuthConfig AuthContext AuthFlowDefinition AuthFlowInputHandler AuthFlowStartHandler AuthStartHandlerNoInputGuard AuthStartNoInputGuard AuthTurn Bcp47Locale
 			BrowserChallengeRequest BrowserChallengeResult BrowserClient BrowserCookie BrowserEngine BrowserFrame BrowserLocator BrowserPage
@@ -142,6 +142,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			VerificationCodeCandidateSource VerificationCodeExtractionResult
 			HealthJourneyDefinitionBase attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema predicateSchema relativeDateNodeSchema
 			scopedItemReferenceSchema scopedOperandSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
+			NativeConnectTelemetryEvent NativeLifecycleTelemetryEvent NativeTelemetryDiagnostics NativeTelemetryErrorCode NativeTelemetryKind NativeTelemetryLifecycleKind NativeTelemetryOutcome NativeTelemetrySink NativeTelemetryVendorSkipReason NativeVendorSkipTelemetryEvent ProxyAttemptTelemetryEvent ProxyCacheStatus ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource ProxyVendorFailoverTelemetryEvent ProxyVendorName SmartproxyAllocatorBodyClass
 		`,
 	),
 	"runtime-browser.api.md": forgottenExports(
@@ -152,12 +153,13 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"runtime-native-network.api.md": forgottenExports(
-		"These indirect declarations are intentionally not direct native-network exports; ProviderErrorObservability is authored through the root or provider entry point, and all full definitions remain included here for semver review.",
+		"These indirect declarations are intentionally not direct native-network exports; ProviderErrorObservability is authored through the root or provider entry point, and all full definitions remain included here for semver review. Native telemetry sink/event dependencies are intentionally indirect on this subpath; the contributor and payload types are exported from root/server, and all dependency definitions remain included here for review.",
 		`
 			DynamicEgressRuleSnapshot EnvContext Iso3166Alpha2CountryCode NativeConnectTls NativeNetworkClient NativeNetworkCloseReason NativeNetworkConnectInput NativeNetworkConnectOptions
 			NativeNetworkConnection NativeNetworkDynamicGrantOptions NativeNetworkEgressGrant NativeProviderConfig NativeProxyDrainHandler NativeProxyEgressInfo NativeProxyExpiringEvent NativeProxyExpiringReason
 			NativeTcpDynamicEgressRule NativeTcpEgressRule NativeTcpPortRange NativeTcpTlsMode NativeTlsConnectOptions PROVIDER_ERROR_CATEGORIES ProviderError ProviderErrorCategory
 			ProviderErrorObservability ProviderErrorOptions ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity ProxyProtocol TransportError TransportErrorOptions
+			NativeConnectTelemetryEvent NativeLifecycleTelemetryEvent NativeTelemetryDiagnostics NativeTelemetryErrorCode NativeTelemetryKind NativeTelemetryLifecycleKind NativeTelemetryOutcome NativeTelemetrySink NativeTelemetryVendorSkipReason NativeVendorSkipTelemetryEvent ProxyAttemptTelemetryEvent ProxyCacheStatus ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource ProxyVendorFailoverTelemetryEvent ProxyVendorName SmartproxyAllocatorBodyClass
 		`,
 	),
 	"runtime-prevalidate.api.md": forgottenExports(
@@ -189,7 +191,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"server.api.md": forgottenExports(
-		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review. Native telemetry sink/event dependencies are intentionally indirect on this subpath; the contributor and payload types are exported from root/server, and all dependency definitions remain included here for review.",
 		`
 			AuthAbortRetry AuthConfig AuthContext AuthFlowDefinition AuthFlowErrorResponse AuthFlowErrorResponseSchema AuthFlowInputHandler AuthFlowStartHandler
 			AuthFlowTerminalContext AuthMode AuthSafeData AuthSafeJson AuthTurn Bcp47Locale BrowserChallengeRequest BrowserChallengeResult
@@ -227,6 +229,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ScopedAssertionExpression ScopedAssertionPredicate StepBase StepReference ValueType attemptReferenceSchema candidateReferenceSchema credentialReferenceSchema
 			predicateSchema relativeDateNodeSchema scopedPredicateSchema stepReferenceSchema valueTypeSchema
 			ProviderStealthConfig StealthChallengeClassification
+			NativeNetworkErrorCode
 		`,
 	),
 	"stateful.api.md": forgottenExports(

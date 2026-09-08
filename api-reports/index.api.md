@@ -2613,6 +2613,23 @@ export const ManualTriggerPolicySchema: z.ZodType<ManualTriggerPolicy, unknown, 
 export const MISSING_SECRET_CODE = "MISSING_SECRET";
 
 // @public (undocumented)
+export type NativeAttemptSample = NativeConnectTelemetryEvent & {
+    n: number;
+};
+
+// @public (undocumented)
+export type NativeConnectTelemetryEvent = {
+    kind: NativeTelemetryKind;
+    outcome: NativeTelemetryOutcome;
+    ms: number;
+    tunnelMs: number;
+    proxyUsed: boolean;
+    vendor?: ProviderProxyProvider;
+    errorCode?: NativeTelemetryErrorCode;
+    diagnostics?: NativeTelemetryDiagnostics;
+};
+
+// @public (undocumented)
 export interface NativeContext {
     // (undocumented)
     readonly network: NativeNetworkClient;
@@ -2655,6 +2672,8 @@ export type NativeGatewayProxyResolutionInput = {
     readonly protocol?: ProxyProtocol;
     readonly credentials?: VendorCredentialResolver;
     readonly gatewaySynthesizers?: readonly NativeGatewayProxySynthesizer[];
+    readonly telemetry?: ProxyTelemetrySink;
+    readonly nativeTelemetry?: NativeTelemetrySink;
 };
 
 // @public (undocumented)
@@ -2680,6 +2699,7 @@ export type NativeGatewayProxySynthesisInput = {
     readonly now: number;
     readonly protocol: ProxyProtocol;
     readonly credentials: VendorCredentialResolver;
+    readonly telemetry?: ProxyTelemetrySink;
 };
 
 // @public (undocumented)
@@ -2697,6 +2717,13 @@ export class NativeIdleTimeoutError extends NativeNetworkError {
 }
 
 // @public (undocumented)
+export type NativeLifecycleTelemetryEvent = {
+    kind: NativeTelemetryLifecycleKind;
+    errorCode?: NativeTelemetryErrorCode;
+    diagnostics?: NativeTelemetryDiagnostics;
+};
+
+// @public (undocumented)
 export interface NativeNetworkClient {
     // (undocumented)
     connectTcp(input: NativeNetworkConnectOptions): Promise<NativeNetworkConnection>;
@@ -2708,6 +2735,8 @@ export interface NativeNetworkClient {
 
 // @public (undocumented)
 export type NativeNetworkClientOptions = {
+    readonly telemetry?: ProxyTelemetrySink;
+    readonly nativeTelemetry?: NativeTelemetrySink;
     readonly proxyPolicy?: ProviderProxyPolicy;
     readonly affinityKey?: string;
     readonly credentialIdentity?: string;
@@ -2891,7 +2920,156 @@ export interface NativeTcpPortRange {
 export type NativeTcpTlsMode = "required" | "allowed" | "disabled";
 
 // @public (undocumented)
+export class NativeTelemetryCollector implements NativeTelemetrySink, TelemetryContributor<NativeTelemetryLogPayload, NativeTelemetryHeaderPayload> {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "native";
+    // (undocumented)
+    recordBytes(event: {
+        direction: "in" | "out";
+        bytes: number;
+    }): void;
+    // (undocumented)
+    recordConnect(event: NativeConnectTelemetryEvent): void;
+    // (undocumented)
+    recordError(event: {
+        errorCode: NativeTelemetryErrorCode;
+        diagnostics?: NativeTelemetryDiagnostics;
+    }): void;
+    // (undocumented)
+    recordLifecycle(event: NativeLifecycleTelemetryEvent): void;
+    // (undocumented)
+    recordVendorSkip(event: NativeVendorSkipTelemetryEvent): void;
+    // (undocumented)
+    toHeaderPayload(log: NativeTelemetryLogPayload): NativeTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(): NativeTelemetryLogPayload | undefined;
+}
+
+// @public
+export type NativeTelemetryDiagnostics = {
+    host?: string;
+    serverName?: string;
+    protocol?: string;
+    sessionId?: string;
+    expiresAt?: string;
+    errorName?: string;
+    errorMessage?: string;
+    causeName?: string;
+    causeMessage?: string;
+    systemCode?: string;
+    missingFields?: readonly string[];
+    port?: number;
+    timeoutMs?: number;
+    idleTimeoutMs?: number;
+    status?: number;
+    socksReplyCode?: number;
+    sticky?: boolean;
+};
+
+// @public (undocumented)
+export type NativeTelemetryErrorCode = NativeNetworkErrorCode | "PROXY_REQUIRED" | "PROXY_ALLOCATION_FAILED" | "other";
+
+// @public (undocumented)
+export type NativeTelemetryHeaderPayload = {
+    attempts: number;
+    connectMs: number;
+    tunnelMs: number;
+    vendorSkips: number;
+    vendorSkipReasons: {
+        reason: ClosedEnum<NativeTelemetryVendorSkipReason>;
+        count: number;
+    }[];
+    drain: number;
+    drainAcknowledged: number;
+    drainErrors: number;
+    drainMissingHandler: number;
+    idle: number;
+    expiry: number;
+    bytesIn: number;
+    bytesOut: number;
+    lastErrorCode?: ClosedEnum<NativeTelemetryErrorCode>;
+    attemptSamples?: {
+        n: number;
+        kind: ClosedEnum<NativeTelemetryKind>;
+        outcome: ClosedEnum<NativeTelemetryOutcome>;
+        ms: number;
+        tunnelMs: number;
+        proxyUsed: boolean;
+        errorCode?: ClosedEnum<NativeTelemetryErrorCode>;
+    }[];
+    attemptSamplesDropped?: number;
+    vendorSkipSamplesDropped?: number;
+};
+
+// @public (undocumented)
+export type NativeTelemetryKind = "tcp" | "tls";
+
+// @public (undocumented)
+export type NativeTelemetryLifecycleKind = "drain" | "drain_acknowledged" | "drain_error" | "drain_missing_handler" | "idle" | "expiry";
+
+// @public (undocumented)
+export type NativeTelemetryLogPayload = {
+    attempts: number;
+    connectMs: number;
+    tunnelMs: number;
+    vendorSkips: number;
+    vendorSkipReasons: {
+        reason: NativeTelemetryVendorSkipReason;
+        count: number;
+    }[];
+    drain: number;
+    drainAcknowledged: number;
+    drainErrors: number;
+    drainMissingHandler: number;
+    idle: number;
+    expiry: number;
+    bytesIn: number;
+    bytesOut: number;
+    lastErrorCode?: NativeTelemetryErrorCode;
+    lastErrorDiagnostics?: NativeTelemetryDiagnostics;
+    attemptSamples?: NativeAttemptSample[];
+    attemptSamplesDropped?: number;
+    vendorSkipSamples?: NativeVendorSkipTelemetryEvent[];
+    vendorSkipSamplesDropped?: number;
+};
+
+// @public (undocumented)
+export type NativeTelemetryOutcome = "ok" | "error";
+
+// @public (undocumented)
+export interface NativeTelemetrySink {
+    recordBytes(event: {
+        direction: "in" | "out";
+        bytes: number;
+    }): void;
+    // (undocumented)
+    recordConnect(event: NativeConnectTelemetryEvent): void;
+    // (undocumented)
+    recordError(event: {
+        errorCode: NativeTelemetryErrorCode;
+        diagnostics?: NativeTelemetryDiagnostics;
+    }): void;
+    // (undocumented)
+    recordLifecycle(event: NativeLifecycleTelemetryEvent): void;
+    // (undocumented)
+    recordVendorSkip(event: NativeVendorSkipTelemetryEvent): void;
+}
+
+// @public (undocumented)
+export type NativeTelemetryVendorSkipReason = "credentials_absent" | "protocol_unsupported" | "allocation_failed" | "credential_lookup_failed" | "adapter_unavailable";
+
+// @public (undocumented)
 export type NativeTlsConnectOptions = NativeNetworkConnectInput;
+
+// @public (undocumented)
+export type NativeVendorSkipTelemetryEvent = {
+    vendor: ProviderProxyProvider;
+    reason: NativeTelemetryVendorSkipReason;
+    diagnostics?: NativeTelemetryDiagnostics;
+};
 
 // @public (undocumented)
 export const NEEDS_INPUT_STATUS: "needs_input";
@@ -7430,7 +7608,6 @@ export { z }
 // Warnings were encountered during analysis:
 //
 // dist/ceremonies/index.d.ts:48:5 - (ae-forgotten-export) The symbol "JsonObject" needs to be exported by the entry point index.d.ts
-// dist/config/loader.d.ts:60:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:26:5 - (ae-forgotten-export) The symbol "OperationHttpStreamTransport" needs to be exported by the entry point index.d.ts
 // dist/define.d.ts:107:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point index.d.ts
@@ -7441,6 +7618,7 @@ export { z }
 // dist/lint.d.ts:80:9 - (ae-forgotten-export) The symbol "ProviderContractMetaLike" needs to be exported by the entry point index.d.ts
 // dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point index.d.ts
 // dist/runtime/choice.d.ts:22:5 - (ae-forgotten-export) The symbol "ProviderChoiceTelemetryEvent" needs to be exported by the entry point index.d.ts
+// dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:62:5 - (ae-forgotten-export) The symbol "OperationRequest" needs to be exported by the entry point index.d.ts

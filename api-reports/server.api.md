@@ -1385,12 +1385,36 @@ type ManualTriggerPolicy = {
 };
 
 // @public (undocumented)
+export type NativeAttemptSample = NativeConnectTelemetryEvent & {
+    n: number;
+};
+
+// @public (undocumented)
+export type NativeConnectTelemetryEvent = {
+    kind: NativeTelemetryKind;
+    outcome: NativeTelemetryOutcome;
+    ms: number;
+    tunnelMs: number;
+    proxyUsed: boolean;
+    vendor?: ProviderProxyProvider;
+    errorCode?: NativeTelemetryErrorCode;
+    diagnostics?: NativeTelemetryDiagnostics;
+};
+
+// @public (undocumented)
 interface NativeContext {
     // Warning: (ae-forgotten-export) The symbol "NativeNetworkClient" needs to be exported by the entry point index.d.ts
     //
     // (undocumented)
     readonly network: NativeNetworkClient;
 }
+
+// @public (undocumented)
+export type NativeLifecycleTelemetryEvent = {
+    kind: NativeTelemetryLifecycleKind;
+    errorCode?: NativeTelemetryErrorCode;
+    diagnostics?: NativeTelemetryDiagnostics;
+};
 
 // @public (undocumented)
 interface NativeNetworkClient {
@@ -1481,6 +1505,9 @@ interface NativeNetworkEgressGrant {
 }
 
 // @public (undocumented)
+type NativeNetworkErrorCode = "native_connection_aborted" | "native_connection_closed" | "native_connection_failed" | "native_connection_idle_timeout" | "native_connection_timeout" | "native_egress_authorization_failed" | "native_egress_grant_expired" | "native_egress_grant_invalid" | "native_egress_grant_limit_exceeded" | "native_egress_input_invalid" | "native_egress_not_declared" | "native_egress_policy_invalid" | "native_dynamic_egress_unsupported" | "native_proxy_expired" | "native_proxy_invalid";
+
+// @public (undocumented)
 interface NativeProviderConfig {
     // (undocumented)
     readonly network?: {
@@ -1500,8 +1527,6 @@ interface NativeProxyEgressInfo {
     readonly sessionId?: string;
     // (undocumented)
     readonly sticky: boolean;
-    // Warning: (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point index.d.ts
-    //
     // (undocumented)
     readonly vendor: ProviderProxyProvider;
 }
@@ -1577,7 +1602,158 @@ interface NativeTcpPortRange {
 type NativeTcpTlsMode = "required" | "allowed" | "disabled";
 
 // @public (undocumented)
+export class NativeTelemetryCollector implements NativeTelemetrySink, TelemetryContributor<NativeTelemetryLogPayload, NativeTelemetryHeaderPayload> {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "native";
+    // (undocumented)
+    recordBytes(event: {
+        direction: "in" | "out";
+        bytes: number;
+    }): void;
+    // (undocumented)
+    recordConnect(event: NativeConnectTelemetryEvent): void;
+    // (undocumented)
+    recordError(event: {
+        errorCode: NativeTelemetryErrorCode;
+        diagnostics?: NativeTelemetryDiagnostics;
+    }): void;
+    // (undocumented)
+    recordLifecycle(event: NativeLifecycleTelemetryEvent): void;
+    // (undocumented)
+    recordVendorSkip(event: NativeVendorSkipTelemetryEvent): void;
+    // (undocumented)
+    toHeaderPayload(log: NativeTelemetryLogPayload): NativeTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(): NativeTelemetryLogPayload | undefined;
+}
+
+// @public
+export type NativeTelemetryDiagnostics = {
+    host?: string;
+    serverName?: string;
+    protocol?: string;
+    sessionId?: string;
+    expiresAt?: string;
+    errorName?: string;
+    errorMessage?: string;
+    causeName?: string;
+    causeMessage?: string;
+    systemCode?: string;
+    missingFields?: readonly string[];
+    port?: number;
+    timeoutMs?: number;
+    idleTimeoutMs?: number;
+    status?: number;
+    socksReplyCode?: number;
+    sticky?: boolean;
+};
+
+// Warning: (ae-forgotten-export) The symbol "NativeNetworkErrorCode" needs to be exported by the entry point index.d.ts
+//
+// @public (undocumented)
+export type NativeTelemetryErrorCode = NativeNetworkErrorCode | "PROXY_REQUIRED" | "PROXY_ALLOCATION_FAILED" | "other";
+
+// @public (undocumented)
+export type NativeTelemetryHeaderPayload = {
+    attempts: number;
+    connectMs: number;
+    tunnelMs: number;
+    vendorSkips: number;
+    vendorSkipReasons: {
+        reason: ClosedEnum<NativeTelemetryVendorSkipReason>;
+        count: number;
+    }[];
+    drain: number;
+    drainAcknowledged: number;
+    drainErrors: number;
+    drainMissingHandler: number;
+    idle: number;
+    expiry: number;
+    bytesIn: number;
+    bytesOut: number;
+    lastErrorCode?: ClosedEnum<NativeTelemetryErrorCode>;
+    attemptSamples?: {
+        n: number;
+        kind: ClosedEnum<NativeTelemetryKind>;
+        outcome: ClosedEnum<NativeTelemetryOutcome>;
+        ms: number;
+        tunnelMs: number;
+        proxyUsed: boolean;
+        errorCode?: ClosedEnum<NativeTelemetryErrorCode>;
+    }[];
+    attemptSamplesDropped?: number;
+    vendorSkipSamplesDropped?: number;
+};
+
+// @public (undocumented)
+export type NativeTelemetryKind = "tcp" | "tls";
+
+// @public (undocumented)
+export type NativeTelemetryLifecycleKind = "drain" | "drain_acknowledged" | "drain_error" | "drain_missing_handler" | "idle" | "expiry";
+
+// @public (undocumented)
+export type NativeTelemetryLogPayload = {
+    attempts: number;
+    connectMs: number;
+    tunnelMs: number;
+    vendorSkips: number;
+    vendorSkipReasons: {
+        reason: NativeTelemetryVendorSkipReason;
+        count: number;
+    }[];
+    drain: number;
+    drainAcknowledged: number;
+    drainErrors: number;
+    drainMissingHandler: number;
+    idle: number;
+    expiry: number;
+    bytesIn: number;
+    bytesOut: number;
+    lastErrorCode?: NativeTelemetryErrorCode;
+    lastErrorDiagnostics?: NativeTelemetryDiagnostics;
+    attemptSamples?: NativeAttemptSample[];
+    attemptSamplesDropped?: number;
+    vendorSkipSamples?: NativeVendorSkipTelemetryEvent[];
+    vendorSkipSamplesDropped?: number;
+};
+
+// @public (undocumented)
+export type NativeTelemetryOutcome = "ok" | "error";
+
+// @public (undocumented)
+export interface NativeTelemetrySink {
+    recordBytes(event: {
+        direction: "in" | "out";
+        bytes: number;
+    }): void;
+    // (undocumented)
+    recordConnect(event: NativeConnectTelemetryEvent): void;
+    // (undocumented)
+    recordError(event: {
+        errorCode: NativeTelemetryErrorCode;
+        diagnostics?: NativeTelemetryDiagnostics;
+    }): void;
+    // (undocumented)
+    recordLifecycle(event: NativeLifecycleTelemetryEvent): void;
+    // (undocumented)
+    recordVendorSkip(event: NativeVendorSkipTelemetryEvent): void;
+}
+
+// @public (undocumented)
+export type NativeTelemetryVendorSkipReason = "credentials_absent" | "protocol_unsupported" | "allocation_failed" | "credential_lookup_failed" | "adapter_unavailable";
+
+// @public (undocumented)
 type NativeTlsConnectOptions = NativeNetworkConnectInput;
+
+// @public (undocumented)
+export type NativeVendorSkipTelemetryEvent = {
+    vendor: ProviderProxyProvider;
+    reason: NativeTelemetryVendorSkipReason;
+    diagnostics?: NativeTelemetryDiagnostics;
+};
 
 // @public (undocumented)
 type NonEmpty<T> = readonly [T, ...T[]];
@@ -5043,6 +5219,7 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/health-scenario.d.ts:1835:5 - (ae-forgotten-export) The symbol "ManualTriggerPolicy" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1837:5 - (ae-forgotten-export) The symbol "CredentialRefDeclaration" needs to be exported by the entry point index.d.ts
 // dist/health-scenario.d.ts:1838:5 - (ae-forgotten-export) The symbol "HealthStep" needs to be exported by the entry point index.d.ts
+// dist/runtime/native-telemetry.d.ts:38:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/server/serve-implementation.d.ts:14:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts

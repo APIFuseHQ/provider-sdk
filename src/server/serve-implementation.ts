@@ -1,3 +1,4 @@
+import { NativeTelemetryCollector } from "../runtime/native-telemetry.js";
 import { STATUS_CODES } from "node:http";
 import { readDiagnosticEnv, withDiagnosticEnv } from "../runtime/diagnostic-env.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -845,6 +846,7 @@ type RequestScopeContext = {
 	trace: RuntimeTraceContext;
 	telemetry: RequestTelemetry;
 	resolverTelemetry: ResolverTelemetryCollector;
+	nativeTelemetry: NativeTelemetryCollector;
 };
 
 function createProviderContext(
@@ -971,6 +973,8 @@ function createProviderContext(
 			? {
 					native: {
 						network: capabilityModules.nativeNetwork!.createNativeNetworkClient({
+							telemetry: scope.telemetry.proxy,
+							nativeTelemetry: scope.nativeTelemetry,
 							egress: provider.native.network,
 							proxyPolicy: resolveNativeProxyPolicy(provider),
 							affinityKey: proxyClientOptions.affinityKey,
@@ -1213,6 +1217,8 @@ function createAuthFlowContext(
 			? {
 					native: {
 						network: capabilityModules.nativeNetwork!.createNativeNetworkClient({
+							telemetry: scope.telemetry.proxy,
+							nativeTelemetry: scope.nativeTelemetry,
 							egress: provider.native.network,
 							proxyPolicy: resolveNativeProxyPolicy(provider),
 							affinityKey: proxyClientOptions.affinityKey,
@@ -1549,6 +1555,48 @@ function toErrorResponse(
 // narrowing from a ProviderError-typed value would collapse the negative branch
 // to `never`. Narrowing from unknown avoids that while still recognizing errors
 // from a duplicate SDK module instance.
+function ownErrorCode(error: unknown): string | undefined {
+	if (error === null || (typeof error !== "object" && typeof error !== "function")) {
+		return undefined;
+	}
+	try {
+		const descriptor = Object.getOwnPropertyDescriptor(error, "code");
+		return descriptor && Object.hasOwn(descriptor, "value") && typeof descriptor.value === "string"
+			? descriptor.value
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function errorChainHasCode(error: unknown, expected: string): boolean {
+	const seen = new Set<object>();
+	let current = error;
+	for (let depth = 0; depth < 5; depth++) {
+		if (current === null || (typeof current !== "object" && typeof current !== "function")) {
+			return false;
+		}
+		if (seen.has(current)) return false;
+		seen.add(current);
+		let code: string | undefined;
+		try {
+			code = providerErrorCode(current) ?? ownErrorCode(current);
+		} catch {
+			code = ownErrorCode(current);
+		}
+		if (code === expected) return true;
+		let cause: PropertyDescriptor | undefined;
+		try {
+			cause = Object.getOwnPropertyDescriptor(current, "cause");
+		} catch {
+			return false;
+		}
+		if (!cause || !Object.hasOwn(cause, "value")) return false;
+		current = cause.value;
+	}
+	return false;
+}
+
 function providerObservabilityDetails(
 	error: unknown,
 	declaredErrorCode?: OperationErrorCode,
@@ -1577,26 +1625,45 @@ function providerObservabilityDetails(
 			retryable: providerErrorOption(error, "retryable") ?? declaredRetryable ?? false,
 		};
 	}
+	// Native proxy resolution throws ProxyResolutionError directly, while HTTP
+	// normalizes it beneath a transport_network_error cause and stealth retains
+	// the original code. Preserve proxy attribution across all three forms.
+	if (errorChainHasCode(error, "PROXY_REQUIRED")) {
+		return {
+			category: "proxy_pool",
+			taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			retryable: true,
+		};
+	}
 	if (!isTransportError(error)) {
 		return undefined;
 	}
+	const errorCode = providerErrorCode(error);
 	const isProxyPoolCode =
-		providerErrorCode(error) === PROXY_POOL_EXHAUSTED_CODE ||
-		providerErrorCode(error) === PROXY_EDGE_AUTH_REJECTED_CODE ||
-		providerErrorCode(error) === "PROXY_ALLOCATION_FAILED";
+		errorCode === PROXY_POOL_EXHAUSTED_CODE ||
+		errorCode === PROXY_EDGE_AUTH_REJECTED_CODE ||
+		errorCode === "PROXY_ALLOCATION_FAILED" ||
+		errorCode === "native_proxy_expired" ||
+		errorCode === "native_proxy_invalid";
 	const category =
 		providerErrorOption(error, "category") ??
 		(isProxyPoolCode
 			? "proxy_pool"
-			: providerErrorCode(error) === PROXY_AUTH_IP_DENIED_CODE
+			: errorCode === PROXY_AUTH_IP_DENIED_CODE
 				? "anti_bot_blocked"
-				: providerErrorCode(error) === "transport_timeout"
+				: errorCode === "transport_timeout" ||
+						errorCode === "native_connection_timeout" ||
+						errorCode === "native_connection_idle_timeout"
 					? "timeout"
-					: providerErrorCode(error) === "transport_network_error"
+					: errorCode === "transport_network_error" ||
+							errorCode === "native_connection_failed" ||
+							errorCode === "native_connection_closed"
 						? "network"
-						: error.upstreamStatus
-							? categoryForStatus(error.upstreamStatus)
-							: "upstream_http");
+						: errorCode === "native_connection_aborted"
+							? "client_cancelled"
+							: error.upstreamStatus
+								? categoryForStatus(error.upstreamStatus)
+								: "upstream_http");
 	return {
 		category,
 		taxonomyVersion: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
@@ -2223,9 +2290,11 @@ function createRequestScope(input: {
 	bindDiagnosticSensitiveRegistry(trace, sensitiveRegistry);
 	const proxyCollector = new ProxyTelemetryCollector();
 	const resolverCollector = new ResolverTelemetryCollector({ redact });
+	const nativeCollector = new NativeTelemetryCollector({ redact });
 	const telemetry = new RequestTelemetry(trace);
 	telemetry.register(proxyCollector);
 	telemetry.register(resolverCollector);
+	telemetry.register(nativeCollector);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
 	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
 	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
@@ -2307,6 +2376,7 @@ function createRequestScope(input: {
 		trace,
 		telemetry,
 		resolverTelemetry: resolverCollector,
+		nativeTelemetry: nativeCollector,
 		seedCredentials(rawBody, kind): void {
 			const harvested = rawRequestCredentials(rawBody, kind);
 			sensitiveRegistry.add(harvested.values);

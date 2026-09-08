@@ -450,6 +450,28 @@ const NEGATIVE_CONTROLS = [
 			"",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-native-telemetry-description.ts",
+		expectedCode: "TS2322",
+		description: "native gateway telemetry rejects free-string diagnostic fields",
+		source: [
+			'import type { GatewayIngestible, NativeTelemetryHeaderPayload } from "@apifuse/provider-sdk";',
+			"type UnsafeHeader = NativeTelemetryHeaderPayload & { vendorErrorMessage: string };",
+			"declare const header: NativeTelemetryHeaderPayload;",
+			'export const mustNotCompile: GatewayIngestible<UnsafeHeader> = { ...header, vendorErrorMessage: "free text stays log-only" };',
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-native-telemetry-contributor.ts",
+		expectedCode: "",
+		description: "native telemetry contributor satisfies the gateway-ingestible contract",
+		source: [
+			'import { NativeTelemetryCollector, type GatewayIngestible, type NativeTelemetryHeaderPayload, type NativeTelemetryLogPayload, type TelemetryContributor } from "@apifuse/provider-sdk";',
+			"export const native: TelemetryContributor<NativeTelemetryLogPayload, NativeTelemetryHeaderPayload> = new NativeTelemetryCollector();",
+			"declare const header: NativeTelemetryHeaderPayload;",
+			"export const ingestible: GatewayIngestible<NativeTelemetryHeaderPayload> = header;",
+		].join("\n"),
+	},
 ] as const;
 
 const tempRoot = mkdtempSync(join(tmpdir(), "apifuse-provider-sdk-pack-types-"));
