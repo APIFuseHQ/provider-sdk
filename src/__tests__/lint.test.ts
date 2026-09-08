@@ -266,18 +266,31 @@ describe("lintOperation", () => {
 				phone: publicField(z.string()),
 				phoneNumber: z.string(),
 				faxPhone: publicField(z.string()).nullable(),
+				phone_number: z.string().pipe(publicField(z.string())),
+				Phone: z.preprocess((value) => value, publicField(z.string())),
 				token: fields.token().optional(),
+				// Credential-shaped keys cannot be declared public.
+				password: publicField(z.string()),
+				apiKey: publicField(z.string()).optional(),
 			}),
 			fixtures: {
 				request: { id: "hospital-1" },
-				response: { phone: "02-000-0000", phoneNumber: "02-000-0001", token: "t" },
+				response: {
+					phone: "02-000-0000",
+					phoneNumber: "02-000-0001",
+					phone_number: "02-000-0002",
+					Phone: "02-000-0003",
+					token: "t",
+					password: "p",
+					apiKey: "k",
+				},
 			},
 		});
 
 		const unmarked = diagnostics
 			.filter((item) => item.rule === "sensitive-field-unmarked")
 			.map((item) => item.field);
-		expect(unmarked).toEqual(["output.phoneNumber"]);
+		expect(unmarked).toEqual(["output.phoneNumber", "output.password", "output.apiKey"]);
 	});
 });
 

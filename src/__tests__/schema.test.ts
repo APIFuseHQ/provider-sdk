@@ -11,6 +11,7 @@ import {
 	collectSensitivePaths,
 	describeKey,
 	field,
+	fields,
 	publicField,
 	sensitive,
 	untrustedContent,
@@ -95,15 +96,15 @@ describe("public field declaration", () => {
 		});
 		const jsonSchema = z.toJSONSchema(output) as JsonSchemaObject;
 
-		expect(jsonSchema.properties.shopName).toEqual({
+		expect(jsonSchema.properties.shopName).toStrictEqual({
 			type: "string",
 			[APIFUSE_SENSITIVE_META_KEY]: false,
 		});
-		expect(jsonSchema.properties.shopPhone).toEqual({
+		expect(jsonSchema.properties.shopPhone).toStrictEqual({
 			type: "string",
 			[APIFUSE_SENSITIVE_META_KEY]: false,
 		});
-		expect(jsonSchema.properties.memberPhone).toEqual({
+		expect(jsonSchema.properties.memberPhone).toStrictEqual({
 			type: "string",
 			[APIFUSE_SENSITIVE_META_KEY]: true,
 			[APIFUSE_SENSITIVE_KIND_META_KEY]: "phone",
@@ -123,11 +124,11 @@ describe("public field declaration", () => {
 			}),
 		) as JsonSchemaObject;
 
-		expect(jsonSchema.properties.bare).toEqual({
+		expect(jsonSchema.properties.bare).toStrictEqual({
 			type: "string",
 			[APIFUSE_SENSITIVE_META_KEY]: true,
 		});
-		expect(jsonSchema.properties.kinded).toEqual({
+		expect(jsonSchema.properties.kinded).toStrictEqual({
 			type: "string",
 			[APIFUSE_SENSITIVE_META_KEY]: true,
 			[APIFUSE_SENSITIVE_KIND_META_KEY]: "payment_url",
@@ -176,20 +177,63 @@ describe("public field declaration", () => {
 			}),
 		) as JsonSchemaObject;
 
-		expect(jsonSchema.properties.reviewedPublic).toEqual({
+		expect(jsonSchema.properties.reviewedPublic).toStrictEqual({
 			type: "string",
 			[APIFUSE_SENSITIVE_META_KEY]: false,
 		});
-		expect(jsonSchema.properties.reclassified).toEqual({
+		expect(jsonSchema.properties.reclassified).toStrictEqual({
 			type: "string",
 			[APIFUSE_SENSITIVE_META_KEY]: true,
 			[APIFUSE_SENSITIVE_KIND_META_KEY]: "personal_data",
 		});
 	});
 
-	it("does not reach a sensitive() declaration inside a wrapper and still redacts it", () => {
-		const schema = z.object({ phone: publicField(sensitive(z.string(), "phone").optional()) });
+	it("rejects a public declaration over a wrapper that hides a sensitive() leaf", () => {
+		// Same-path wrappers share the JSON Schema leaf; a public flag on the
+		// wrapper would publish `false` next to the leaf's kind while the SDK
+		// still redacts the path, so field() refuses at definition time.
+		const leaf = sensitive(z.string(), "phone");
+		const conflicting: Record<string, () => unknown> = {
+			optional: () => publicField(leaf.optional()),
+			nullable: () => publicField(leaf.nullable()),
+			default: () => publicField(leaf.default("")),
+			catch: () => publicField(leaf.catch("")),
+			readonly: () => publicField(leaf.readonly()),
+			pipe: () => publicField(leaf.pipe(z.string())),
+			chained: () => publicField(leaf.optional().nullable()),
+			preset: () => publicField(fields.phone().optional()),
+			lazy: () => publicField(z.lazy(() => leaf)),
+			option: () => field(leaf.optional(), { sensitive: false }),
+		};
+		for (const [name, build] of Object.entries(conflicting)) {
+			expect(build, name).toThrow(/wraps a sensitive\(\) declaration/);
+		}
 
-		expect(collectSensitivePaths(schema)).toEqual([["phone"]]);
+		// A lazy forward reference is not resolvable at definition time; the
+		// declaration is accepted and the getter is resolved later as usual.
+		const forward = publicField(z.lazy(() => later));
+		const later = z.string();
+		expect(z.toJSONSchema(z.object({ forward })).properties?.forward).toStrictEqual({
+			type: "string",
+			[APIFUSE_SENSITIVE_META_KEY]: false,
+		});
+
+		// Public-over-public and sensitive-over-public wrappers are consistent
+		// on the artifact and in redaction, so they stay allowed.
+		const jsonSchema = z.toJSONSchema(
+			z.object({
+				publicTwice: publicField(publicField(z.string()).optional()),
+				reclassified: sensitive(publicField(z.string()).optional(), "phone"),
+			}),
+		) as JsonSchemaObject;
+		expect(jsonSchema.properties.publicTwice).toStrictEqual({
+			type: "string",
+			[APIFUSE_SENSITIVE_META_KEY]: false,
+		});
+		expect(jsonSchema.properties.reclassified).toStrictEqual({
+			type: "string",
+			[APIFUSE_SENSITIVE_META_KEY]: true,
+			[APIFUSE_SENSITIVE_KIND_META_KEY]: "phone",
+		});
 	});
 });

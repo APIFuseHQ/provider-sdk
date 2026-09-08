@@ -211,6 +211,15 @@ export function field<TSchema extends ZodType>(
 			: schema;
 	const metadata = described.meta() ?? {};
 	const isSensitive = options.sensitive ?? true;
+	// A public declaration only rewrites the meta of the node it receives;
+	// z.toJSONSchema folds that over the inner leaf, so `false` on a wrapper
+	// around a sensitive() leaf would publish `false` next to the leaf's kind
+	// while collectSensitivePaths() still redacts. Refuse the contradiction.
+	if (!isSensitive && wrapsSensitiveDeclaration(described)) {
+		throw new TypeError(
+			"publicField()/field({ sensitive: false }) wraps a sensitive() declaration; apply it to the leaf, before .optional(), .nullable(), .default(), .pipe(), z.lazy() or similar wrappers.",
+		);
+	}
 	// Zod merges meta with the parent chain, so an inherited kind can only be
 	// cleared by writing undefined over it (dropped from JSON Schema output).
 	const kind = isSensitive
@@ -238,7 +247,7 @@ export function sensitive<TSchema extends ZodType>(
  * declared instead of undeclared. Emits `x-apifuse-sensitive: false` on the
  * JSON Schema leaf; nothing is redacted. Use `sensitive()` for anything that
  * identifies a person. Apply it to the leaf, before `.optional()` or
- * `.nullable()`; it does not override a declaration inside a wrapper.
+ * `.nullable()`; wrapping a `sensitive()` declaration throws at definition time.
  */
 export function publicField<TSchema extends ZodType>(schema: TSchema): TSchema {
 	return field(schema, { sensitive: false });
@@ -402,6 +411,36 @@ function readZodMetadata(schema: unknown): object | undefined {
 	if (typeof maybeMeta !== "function") return undefined;
 	const metadata = maybeMeta.call(schema);
 	return metadata && typeof metadata === "object" ? metadata : undefined;
+}
+
+// Same-path wrappers (optional, nullable, default, catch, readonly, pipe,
+// lazy, ...) share the JSON Schema leaf with the schema they wrap.
+function wrapsSensitiveDeclaration(schema: unknown, seen = new Set<unknown>()): boolean {
+	const def = readZodDef(schema);
+	if (!def || seen.has(schema)) return false;
+	seen.add(schema);
+	return sameLeafChildren(def).some(
+		(child) => isSensitiveSchema(child) || wrapsSensitiveDeclaration(child, seen),
+	);
+}
+
+function sameLeafChildren(def: object): unknown[] {
+	switch (Reflect.get(def, "type")) {
+		case "pipe":
+			return [Reflect.get(def, "in"), Reflect.get(def, "out")];
+		case "lazy": {
+			// A forward-reference getter can throw before its target is
+			// initialised; treat that as no declaration rather than failing.
+			const getter = Reflect.get(def, "getter");
+			try {
+				return typeof getter === "function" ? [getter()] : [];
+			} catch {
+				return [];
+			}
+		}
+		default:
+			return [Reflect.get(def, "innerType")];
+	}
 }
 
 function readZodDef(schema: unknown): object | undefined {

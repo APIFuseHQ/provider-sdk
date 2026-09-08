@@ -550,14 +550,29 @@ function uniqueFields(fields: string[]): string[] {
 	return Array.from(new Set(fields));
 }
 
-function hasSensitivityDeclaration(schema: unknown): boolean {
-	// Declarations sit on the leaf; same-path wrappers such as .optional() or
-	// .nullable() carry no metadata of their own, so look through them.
-	for (let current = schema; isSchema(current); current = getSchemaDef(current).innerType) {
-		const metadata = getSchemaMetadata(current);
-		if (typeof Reflect.get(metadata, APIFUSE_SENSITIVE_META_KEY) === "boolean") return true;
+function readSensitivityDeclaration(
+	schema: unknown,
+	seen = new Set<unknown>(),
+): boolean | undefined {
+	// Declarations sit on the leaf; same-path wrappers such as .optional(),
+	// .nullable(), .pipe() or z.lazy() carry no metadata of their own, so look
+	// through them.
+	if (!isSchema(schema) || seen.has(schema)) return undefined;
+	seen.add(schema);
+	const value = Reflect.get(getSchemaMetadata(schema), APIFUSE_SENSITIVE_META_KEY);
+	if (typeof value === "boolean") return value;
+	const def = getSchemaDef(schema);
+	const children =
+		def.type === "pipe"
+			? [def.in, def.out]
+			: def.type === "lazy" && typeof def.getter === "function"
+				? [def.getter()]
+				: [def.innerType];
+	for (const child of children) {
+		const declaration = readSensitivityDeclaration(child, seen);
+		if (declaration !== undefined) return declaration;
 	}
-	return false;
+	return undefined;
 }
 
 function getSchemaMetadata(schema: SchemaLike): Record<string, unknown> {
@@ -587,9 +602,24 @@ const SENSITIVE_FIELD_NAMES = new Set([
 	"paymenturl",
 ]);
 
+// Only phone-shaped keys can hold reviewed public data (facility phones); the
+// rest are credentials, which a public declaration must not launder.
+const PUBLIC_DECLARABLE_FIELD_NAMES = new Set(["phone", "phonenumber"]);
+
+function normalizeFieldName(name: string): string {
+	return name.toLowerCase().replace(/[-_\s]/g, "");
+}
+
 function isSensitiveFieldName(name: string): boolean {
-	const normalized = name.toLowerCase().replace(/[-_\s]/g, "");
-	return SENSITIVE_FIELD_NAMES.has(normalized);
+	return SENSITIVE_FIELD_NAMES.has(normalizeFieldName(name));
+}
+
+function isDeclaredSensitiveField(key: string, schema: unknown): boolean {
+	const declaration = readSensitivityDeclaration(schema);
+	return (
+		declaration === true ||
+		(declaration === false && PUBLIC_DECLARABLE_FIELD_NAMES.has(normalizeFieldName(key)))
+	);
 }
 
 function collectUnmarkedSensitiveFields(
@@ -604,7 +634,7 @@ function collectUnmarkedSensitiveFields(
 	const out: string[] = [];
 	for (const [key, child] of Object.entries(getObjectShape(schema))) {
 		const childPath = basePath ? `${basePath}.${key}` : key;
-		if (isSensitiveFieldName(key) && !hasSensitivityDeclaration(child)) {
+		if (isSensitiveFieldName(key) && !isDeclaredSensitiveField(key, child)) {
 			out.push(childPath);
 		}
 		out.push(...collectUnmarkedSensitiveFields(child, childPath, seen));
@@ -1397,7 +1427,7 @@ export function lintOperation(op: {
 			rule: "sensitive-field-unmarked",
 			level: "warn",
 			field,
-			message: `Schema field "${field}" looks sensitive; mark it with fields.*(), sensitive(...), or publicField(...) for reviewed public data.`,
+			message: `Schema field "${field}" looks sensitive; mark it with fields.*() or sensitive(...); publicField(...) is accepted only for reviewed public phone-shaped fields.`,
 		});
 	}
 
@@ -1406,7 +1436,7 @@ export function lintOperation(op: {
 			rule: "sensitive-field-unmarked",
 			level: "warn",
 			field,
-			message: `Schema field "${field}" looks sensitive; mark it with fields.*(), sensitive(...), or publicField(...) for reviewed public data.`,
+			message: `Schema field "${field}" looks sensitive; mark it with fields.*() or sensitive(...); publicField(...) is accepted only for reviewed public phone-shaped fields.`,
 		});
 	}
 
