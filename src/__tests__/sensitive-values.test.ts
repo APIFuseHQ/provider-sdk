@@ -126,12 +126,8 @@ it("registers live values and components from the full env allowlist in only the
 		"APIFUSE__OCR__CLOUDFLARE_API_TOKEN",
 		"APIFUSE__STT__CLOUDFLARE_API_TOKEN",
 		"APIFUSE__ENGINE__CEREMONY_LEASE_KEY",
-		"APIFUSE__AUTH__CHOICE_TOKEN_MASTER_SECRET",
 		"APIFUSE__CACHE__KEY_PEPPER",
 	];
-	const { PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV } = await import("../runtime/choice.js");
-	names[names.indexOf("APIFUSE__AUTH__CHOICE_TOKEN_MASTER_SECRET")] =
-		PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV;
 	const provider = createProviderDefinitionDouble({ secrets: [{ name: "P4_ENV_SECRET" }] });
 	for (const name of names) {
 		const a = createDiagnosticRedactor(),

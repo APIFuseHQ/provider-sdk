@@ -17,6 +17,7 @@ import {
 } from "../errors.js";
 import { PROVIDER_TELEMETRY_HEADER } from "../runtime/proxy-telemetry.js";
 import { PROVIDER_OBSERVABILITY_TAXONOMY_VERSION } from "../observability.js";
+import { defineCursor } from "../handle.js";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import {
 	createServerApp,
@@ -79,6 +80,14 @@ function createLocalFetchDouble(
 	});
 }
 
+const ProbeCursor = defineCursor({
+	name: "probe",
+	fieldName: "token",
+	schema: z.object({ value: z.string() }),
+	ttl: "10m",
+	maxValueBytes: 10_000,
+});
+
 function createTestProvider(state: { streamCancelled?: boolean } = {}): ProviderDefinition {
 	return {
 		id: "test-provider",
@@ -86,7 +95,7 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 		runtime: "standard",
 		runtimeTarget: "vanilla",
 		http: {},
-		choice: {},
+		handle: [ProbeCursor],
 		cache: {},
 		meta: {
 			displayName: "Test Provider",
@@ -176,18 +185,8 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				input: z.object({ value: z.string() }),
 				output: z.object({ token: z.string() }),
 				handler: async (ctx, input) => {
-					const token = await ctx.choice.issue({
-						prefix: "test_choice_v1",
-						purpose: "server-state-http-test",
-						payload: { value: parseValueInput(input).value },
-						ttlMs: 60_000,
-						storage: {
-							mode: "server",
-							namespace: "choice.http.test.v1",
-							ttl: "10m",
-							maxEntries: 20,
-							maxValueBytes: 10_000,
-						},
+					const token = await ctx.handle.create(ProbeCursor, {
+						value: parseValueInput(input).value,
 					});
 					return { token };
 				},
@@ -197,20 +196,8 @@ function createTestProvider(state: { streamCancelled?: boolean } = {}): Provider
 				input: z.object({ token: z.string() }),
 				output: z.object({ value: z.string() }),
 				handler: async (ctx, input) => {
-					const parsed = await ctx.choice.parse({
-						token: parseTokenInput(input).token,
-						prefix: "test_choice_v1",
-						purpose: "server-state-http-test",
-						ttlMs: 60_000,
-						storage: {
-							mode: "server",
-							namespace: "choice.http.test.v1",
-							ttl: "10m",
-							maxEntries: 20,
-							maxValueBytes: 10_000,
-						},
-					});
-					return z.object({ value: z.string() }).parse(parsed);
+					const record = await ctx.handle.read(ProbeCursor, parseTokenInput(input).token);
+					return { value: record.data.value };
 				},
 			},
 			cached: {
@@ -1168,12 +1155,8 @@ describe("provider HTTP server", () => {
 		}
 	});
 
-	it("rejects server-backed choice state without a durable runtime state backend", async () => {
-		const previousMasterSecret = process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
-		process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET = Buffer.from(
-			"x".repeat(32),
-		).toString("base64");
-		try {
+	it("rejects handle storage without a durable runtime state backend", async () => {
+		{
 			const serverChoiceApp = createServerApp(createTestProvider());
 			const response = await serverChoiceApp.request("/v1/issueServerChoice", {
 				method: "POST",
@@ -1193,23 +1176,13 @@ describe("provider HTTP server", () => {
 
 			expect(response.status).toBe(500);
 			expect(await response.json()).toMatchObject({
-				error: { code: "PROVIDER_STATE_UNSUPPORTED" },
+				error: { code: "HANDLE_STORAGE_UNAVAILABLE" },
 			});
-		} finally {
-			if (previousMasterSecret === undefined) {
-				delete process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
-			} else {
-				process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET = previousMasterSecret;
-			}
 		}
 	});
 
-	it("keeps injected server-backed choice state across operation HTTP requests", async () => {
-		const previousMasterSecret = process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
-		process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET = Buffer.from(
-			"x".repeat(32),
-		).toString("base64");
-		try {
+	it("keeps injected handle state across operation HTTP requests", async () => {
+		{
 			const serverChoiceApp = createServerApp(createTestProvider(), {
 				state: createMemoryProviderRuntimeState(),
 			});
@@ -1247,12 +1220,6 @@ describe("provider HTTP server", () => {
 			expect(await parseResponse.json()).toEqual({
 				data: { value: "persisted" },
 			});
-		} finally {
-			if (previousMasterSecret === undefined) {
-				delete process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET;
-			} else {
-				process.env.APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET = previousMasterSecret;
-			}
 		}
 	});
 

@@ -5,16 +5,14 @@ import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 import {
 	createCredentialContext,
-	createEnvContext,
 	createHttpClient,
 	createInProcessProviderEngine,
 	createOcrClientFromEnv,
 	createProviderCache,
-	createProviderChoiceContext,
+	createHandleContext,
 	createProviderEnvironment,
 	createUnsupportedResolverClient,
 	createSttClientFromEnv,
-	PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
 	readEngineProxyCredentials,
 	type ProviderDefinition,
 	type ProviderEngineBindingCandidates,
@@ -89,7 +87,6 @@ export function createProviderContext(provider: ProviderDefinition): {
 		provider.secrets?.map((secret) => secret.name) ?? [],
 	);
 	const providerEnv = { get: (key: string) => readDiagnosticEnv(key, providerEnvironment) };
-	const engineEnv = createEnvContext([PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV]);
 	const engineCredentials = readEngineProxyCredentials();
 	const credential = createCredentialContext();
 	const state = createMemoryProviderRuntimeState();
@@ -131,10 +128,11 @@ export function createProviderContext(provider: ProviderDefinition): {
 						: {}),
 				})
 			: createUnsupportedResolverClient("Provider does not declare resolver capability"),
-		choice: createProviderChoiceContext({
+		handle: createHandleContext({
 			providerId: provider.id,
-			env: engineEnv,
-			credential,
+			// Local dev is a single-user session: one stable connection scope so
+			// bound handles (drafts, default cursors) work exactly as in production.
+			request: { headers: {}, connectionId: "local-dev" },
 			state,
 		}),
 	};

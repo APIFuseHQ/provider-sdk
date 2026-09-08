@@ -8,7 +8,7 @@ import type {
 } from "../types.js";
 import { defineProvider, type ProviderDeclaration } from "../define.js";
 import { createProviderCache } from "../runtime/cache.js";
-import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import { createTestHandleContext } from "../runtime/handle.js";
 import { createCredentialContext } from "../runtime/credential.js";
 import { createEnvContext } from "../runtime/env.js";
 import { createHttpClient } from "../runtime/http.js";
@@ -150,7 +150,7 @@ export function createProviderContextDouble(
 		},
 		browser: createBrowserClientDouble(),
 		cache: createProviderCache({ providerId: "test-provider" }),
-		choice: createTestProviderChoiceContext({ providerId: "test-provider" }),
+		handle: createTestHandleContext({ providerId: "test-provider" }),
 		credential: createCredentialContext(),
 		env: createEnvContext(),
 		http: createHttpClient(),

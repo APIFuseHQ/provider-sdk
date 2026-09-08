@@ -13,7 +13,6 @@ import {
 	readEngineProxyCredentials,
 } from "../engine.js";
 import { APIFUSE__CACHE__KEY_PEPPER_ENV } from "../runtime/cache.js";
-import { PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV } from "../runtime/choice.js";
 import { createCredentialContext } from "../runtime/credential.js";
 import {
 	APIFUSE__OCR__API_KEY_ENV,
@@ -272,7 +271,6 @@ describe("engine credential containment", () => {
 			APIFUSE__OCR__API_KEY_ENV,
 			CLOUDFLARE_ACCOUNT_ID_ENV,
 			APIFUSE__CACHE__KEY_PEPPER_ENV,
-			PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV,
 		]);
 	});
 

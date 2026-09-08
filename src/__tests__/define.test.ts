@@ -1090,7 +1090,6 @@ describe("defineProvider", () => {
 			"APIFUSE__CDP_POOL__URL",
 			"apifuse__cdp_pool__url",
 			"APIFUSE__CACHE__KEY_PEPPER",
-			"APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET",
 		])("rejects %s in provider secrets", (name) => {
 			expect(() =>
 				defineProvider({ ...validConfig, secrets: [{ name, required: true }] }),

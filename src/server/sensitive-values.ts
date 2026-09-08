@@ -13,7 +13,6 @@ import {
 	ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES,
 } from "../engine.js";
 import { APIFUSE__CACHE__KEY_PEPPER_ENV } from "../runtime/cache.js";
-import { PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV } from "../runtime/choice.js";
 import { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } from "../runtime/egress-lease.js";
 import {
 	APIFUSE__OCR__API_KEY_ENV,
@@ -46,7 +45,6 @@ export const DIAGNOSTIC_SENSITIVE_SOURCE_KINDS = [
 	"engineProxyCredentials",
 	"engineSolverKeys",
 	"engineCeremonyLeaseCredentials",
-	"choiceMasterSecret",
 	"ocrCredentials",
 	"sttCredentials",
 	"cdpCredentials",
@@ -122,7 +120,6 @@ export function collectDiagnosticSensitiveValues(
 		// These are the resolver-config API keys after #251's engine credential projection.
 		engineSolverKeys: () => resolvedEnvValues(ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES),
 		engineCeremonyLeaseCredentials: () => resolvedEnvValues([APIFUSE__ENGINE__CEREMONY_LEASE_KEY]),
-		choiceMasterSecret: () => resolvedEnvValues([PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV]),
 		ocrCredentials: () =>
 			resolvedEnvValues([APIFUSE__OCR__CLOUDFLARE_API_TOKEN_ENV, APIFUSE__OCR__API_KEY_ENV]),
 		sttCredentials: () => resolvedEnvValues([APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV]),

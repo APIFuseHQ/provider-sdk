@@ -6,7 +6,6 @@ import {
 } from "../engine.js";
 import { ProviderError } from "../errors.js";
 import * as browserRuntime from "../runtime/browser.js";
-import { PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV } from "../runtime/choice.js";
 import * as diagnosticRedactor from "../runtime/diagnostic-redactor.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import { registerResolverTelemetryBinding } from "../runtime/resolver-shared.js";
@@ -49,7 +48,6 @@ const SOURCE_FIXTURE: ReadonlyArray<{ source: SourceKind; env?: string }> = [
 		env,
 	})),
 	{ source: "engineCeremonyLeaseCredentials", env: "APIFUSE__ENGINE__CEREMONY_LEASE_KEY" },
-	{ source: "choiceMasterSecret", env: PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV },
 	{ source: "ocrCredentials", env: "APIFUSE__OCR__CLOUDFLARE_API_TOKEN" },
 	{ source: "ocrCredentials", env: "APIFUSE__OCR__API_KEY" },
 	{ source: "sttCredentials", env: "APIFUSE__STT__CLOUDFLARE_API_TOKEN" },
@@ -103,7 +101,6 @@ async function exerciseServer(shape: Shape, throwing = false): Promise<void> {
 										"engineProxyCredentials",
 										"engineSolverKeys",
 										"engineCeremonyLeaseCredentials",
-										"choiceMasterSecret",
 									].includes(entry.source)
 								? `\t${entry.value}\n`
 								: entry.value,

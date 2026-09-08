@@ -41,9 +41,10 @@ rounds — weak models drop or corrupt it. Split the operation into a
 
 - The prepare operation is non-destructive. A start call takes only the
   scalar intent fields; every response returns a fresh `attempt_token`
-  referencing a server-side record (`ctx.choice.issue` with
-  `storage.mode: "server"`) that stores every settled decision. Continue
-  calls take `attempt_token` plus only the NEW answers.
+  referencing a server-side record (a `ctx.handle` draft kind from
+  `defineDraft`, declared on the schema with `kind.field()`) that stores
+  every settled decision. Continue calls take `attempt_token` plus only the
+  NEW answers.
 - `needs_input` rounds list only the still-pending selections; settled
   decisions may ride along in a display-only field but are never re-sent.
 - When nothing is pending, the prepare operation returns `status: "ready"`
@@ -55,15 +56,14 @@ rounds — weak models drop or corrupt it. Split the operation into a
   for what the user picked.
 - Expired or foreign tokens fail factually (nothing happened; start a new
   attempt with the scalar fields) — no answer salvage from a dead token.
-- **The provider must enforce consumption itself.** `ctx.choice` server
-  storage keeps tokens parseable until TTL — `parse` does not invalidate
-  them, so a confirm handler that only parses can be replayed into a second
-  booking or payment. After a successful execution, record the result under
-  the token's digest in `ctx.state` and make replays idempotent: a repeated
-  confirm returns the original created payload without touching upstream,
-  and later prepare rounds on the consumed token fail factually with the
-  existing reference. Record the result only after upstream success, so an
-  interrupted confirm stays retryable.
+- **Commit is one-shot with replay; providers no longer hand-roll dedup.**
+  `ctx.handle.read` and `ctx.handle.update` never consume a draft, so a
+  confirm handler must execute upstream work through `ctx.handle.commit`. It
+  runs the work once, stores the result under the handle, and a repeated
+  confirm returns `{ status: "replayed", result }` without touching upstream.
+  A failing upstream call restores the draft to `active`, so an interrupted
+  confirm stays retryable; later prepare rounds on a committed draft fail
+  factually with `HANDLE_COMMITTED`.
 
 The invariant behind all of it: complex flow state is the system's job, not
 the model's. The model carries exactly one opaque key between calls.
@@ -114,8 +114,10 @@ descriptionKey: "operations.realtimeWeather.description",
 ### Capability declarations
 
 Declare each capability used by provider operations. Capabilities without
-configuration use a bare object, for example `http: {}`, `choice: {}`, or
-`cache: {}`. `trace` is ambient and must not be declared: every operation
+configuration use a bare object, for example `http: {}`, `state: {}`, or
+`cache: {}`. `handle` is the exception: it takes an array of kinds
+(`handle: [WaitingDraft]`) and requires `state: {}` alongside it. `trace` is
+ambient and must not be declared: every operation
 context receives it. `allowedHosts`, `proxy`, `secrets`, and `context` declare
 policy or metadata only; they do not create context members and are not
 capability bindings.
@@ -132,8 +134,7 @@ policy intent only.
 
 Hosted runtime settings are engine-owned as well: every `APIFUSE__CDP_POOL__*`
 variable, the Cloudflare OCR/STT tokens and account identifier,
-`APIFUSE__OCR__API_KEY`, `APIFUSE__CACHE__KEY_PEPPER`, and
-`APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET`. `defineProvider`
+`APIFUSE__OCR__API_KEY`, and `APIFUSE__CACHE__KEY_PEPPER`. `defineProvider`
 rejects them in `secrets`; the engine reads them from its own environment.
 
 ### Factored operations

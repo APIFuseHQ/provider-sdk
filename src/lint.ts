@@ -6,13 +6,16 @@ import {
 	SDK_RUNTIME_OWNED_ERROR_CODES,
 	SDK_STATUS_MAPPED_PROVIDER_ERROR_CODES,
 } from "./error-resolution.js";
+import {
+	APIFUSE_HANDLE_META_KEY,
+	type HandleFieldMeta,
+	type HandleKindDeclaration,
+	handleFieldDescription,
+	isHandleFieldMeta,
+} from "./handle-meta.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
-import type {
-	AuthMode,
-	OperationApprovalPolicy,
-	OperationRiskClass,
-} from "./types.js";
+import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
 
 const requireModule = createRequire(import.meta.url);
 // `typeof import(...)` keeps the type without emitting a static import: the
@@ -92,12 +95,7 @@ const AUTH_LIFECYCLE_SEGMENT_WORDS = new Set([
 ]);
 
 // Ambiguous as a prefix, unambiguous when they are the whole operation id.
-const AUTH_LIFECYCLE_WHOLE_ID_WORDS = new Set([
-	"authorize",
-	"revoke",
-	"unlink",
-	"disconnect",
-]);
+const AUTH_LIFECYCLE_WHOLE_ID_WORDS = new Set(["authorize", "revoke", "unlink", "disconnect"]);
 
 // A verb stem followed by a direction word across two segments: `sign-out`,
 // `user_sign_up_flow`, and the spelled-out `log-in` / `shop-log-out` forms
@@ -465,19 +463,30 @@ function getObjectShape(schema: SchemaLike): Record<string, SchemaLike> {
 	return {};
 }
 
-function getChildSchemas(schema: SchemaLike): Array<{ key: string; schema: SchemaLike }> {
+/**
+ * Child edges of a schema node. `origin: "shape"` marks object properties whose
+ * key is provider-chosen (and may collide with a structural edge name such as
+ * `item`, `type`, or `schema`); `origin: "structural"` marks zod internals
+ * (wrappers, array elements, union options, pipe stages).
+ */
+type SchemaChildEdge = { key: string; schema: SchemaLike; origin: "shape" | "structural" };
+
+function getChildSchemas(schema: SchemaLike): SchemaChildEdge[] {
 	const seen = new Map<string, SchemaLike>();
+	const origins = new Map<string, "shape" | "structural">();
 	const def = getSchemaDef(schema);
 
-	const add = (key: string, value: unknown) => {
+	const add = (key: string, value: unknown, origin: "shape" | "structural" = "structural") => {
 		if (!isSchema(value)) {
 			return;
 		}
-		seen.set(`${key}:${seen.size}`, value);
+		const id = `${key}:${seen.size}`;
+		seen.set(id, value);
+		origins.set(id, origin);
 	};
 
 	for (const [key, value] of Object.entries(getObjectShape(schema))) {
-		add(key, value);
+		add(key, value, "shape");
 	}
 
 	add("element", schema.element);
@@ -520,6 +529,9 @@ function getChildSchemas(schema: SchemaLike): Array<{ key: string; schema: Schem
 		"schema",
 		"innerType",
 		"type",
+		// zod v4 intersections keep their branches on the definition.
+		"left",
+		"right",
 		"valueType",
 		"keyType",
 		"item",
@@ -543,6 +555,7 @@ function getChildSchemas(schema: SchemaLike): Array<{ key: string; schema: Schem
 	return Array.from(seen.entries()).map(([entryKey, child]) => ({
 		key: entryKey.split(":")[0] ?? entryKey,
 		schema: child,
+		origin: origins.get(entryKey) ?? "structural",
 	}));
 }
 
@@ -622,6 +635,77 @@ function isDeclaredSensitiveField(key: string, schema: unknown): boolean {
 	);
 }
 
+// Child keys produced by getChildSchemas() that wrap a schema without adding a
+// property path segment (optional/nullable/default/pipe/effects/etc.).
+const SCHEMA_WRAPPER_NODE_KEYS: readonly string[] = [
+	"unwrap",
+	"innerType",
+	"sourceType",
+	"schema",
+	"type",
+	"in",
+	"out",
+	"option",
+	"pipe",
+	"payload",
+	"item",
+	"rest",
+	"catchall",
+	"keyType",
+	"valueType",
+	// zod v4 intersection branches: transparent, the enclosing property key applies.
+	"left",
+	"right",
+];
+
+function isSchemaWrapperNodeKey(key: string): boolean {
+	return SCHEMA_WRAPPER_NODE_KEYS.includes(key) || key.startsWith("pipe.");
+}
+
+function getOwnHandleFieldMeta(schema: SchemaLike): HandleFieldMeta | undefined {
+	const value = Reflect.get(getSchemaMetadata(schema), APIFUSE_HANDLE_META_KEY);
+	return isHandleFieldMeta(value) ? value : undefined;
+}
+
+/**
+ * Handle meta placed by `kind.field()` lives on the string schema itself; zod
+ * wrappers (`.optional()`, `.nullable()`, `.default()`, pipes) do not inherit
+ * registry metadata, so look through wrapper nodes until a non-wrapper is hit.
+ */
+function getHandleFieldMeta(
+	schema: unknown,
+	seen = new Set<SchemaLike>(),
+): HandleFieldMeta | undefined {
+	if (!isSchema(schema) || seen.has(schema)) return undefined;
+	seen.add(schema);
+	const own = getOwnHandleFieldMeta(schema);
+	if (own) return own;
+	for (const child of getChildSchemas(schema)) {
+		if (child.origin === "shape" || !isSchemaWrapperNodeKey(child.key)) continue;
+		const found = getHandleFieldMeta(child.schema, seen);
+		if (found) return found;
+	}
+	return undefined;
+}
+
+/**
+ * True when `schema` is a handle field (directly or through zod wrappers) whose
+ * description is still the SDK-generated wording and no wrapper adds its own
+ * description.
+ */
+function isSdkOwnedHandleField(schema: unknown, seen = new Set<SchemaLike>()): boolean {
+	if (!isSchema(schema) || seen.has(schema)) return false;
+	seen.add(schema);
+	const own = getOwnHandleFieldMeta(schema);
+	if (own) return schema.description === handleFieldDescription(own);
+	if (schema.description) return false;
+	for (const child of getChildSchemas(schema)) {
+		if (child.origin === "shape" || !isSchemaWrapperNodeKey(child.key)) continue;
+		if (isSdkOwnedHandleField(child.schema, seen)) return true;
+	}
+	return false;
+}
+
 function collectUnmarkedSensitiveFields(
 	schema: unknown,
 	basePath: string,
@@ -641,23 +725,7 @@ function collectUnmarkedSensitiveFields(
 	}
 	for (const child of getChildSchemas(schema)) {
 		if (Object.hasOwn(getObjectShape(schema), child.key)) continue;
-		const isWrapperNode = [
-			"unwrap",
-			"innerType",
-			"sourceType",
-			"schema",
-			"type",
-			"in",
-			"out",
-			"option",
-			"pipe",
-			"payload",
-			"item",
-			"rest",
-			"catchall",
-			"keyType",
-			"valueType",
-		].includes(child.key);
+		const isWrapperNode = SCHEMA_WRAPPER_NODE_KEYS.includes(child.key);
 		const childPath =
 			child.key === "element" || child.key.startsWith("element.")
 				? `${basePath}[]`
@@ -686,6 +754,15 @@ function collectSchemaDescriptionKeyDiagnostics(
 	const currentPath = basePath || "schema";
 	const hasDescriptionKey = getSchemaDescriptionKey(schema) !== undefined;
 
+	// Handle fields (`kind.field()`, ADR-0012) carry SDK-owned wording via
+	// .describe() plus x-apifuse-handle meta; they count as described and are
+	// leaves, so neither this node nor its wrapper chain needs a describeKey.
+	// A provider override of that wording (`.describe("…")` on the field or on
+	// a wrapper) is provider prose again and stays subject to the rules below.
+	if (isSdkOwnedHandleField(schema)) {
+		return diagnostics;
+	}
+
 	if (schema.description && !hasDescriptionKey) {
 		diagnostics.push({
 			rule: "schema-description-raw-prose",
@@ -707,23 +784,7 @@ function collectSchemaDescriptionKeyDiagnostics(
 	}
 
 	for (const child of getChildSchemas(schema)) {
-		const isWrapperNode = [
-			"unwrap",
-			"innerType",
-			"sourceType",
-			"schema",
-			"type",
-			"in",
-			"out",
-			"option",
-			"pipe",
-			"payload",
-			"item",
-			"rest",
-			"catchall",
-			"keyType",
-			"valueType",
-		].includes(child.key);
+		const isWrapperNode = SCHEMA_WRAPPER_NODE_KEYS.includes(child.key);
 		const isStructuralNode =
 			isWrapperNode ||
 			child.key.startsWith("pipe.") ||
@@ -1275,7 +1336,10 @@ function collectLiteralErrorCodeValues(args: string): string[] {
 							after++;
 						}
 						const nextChar = after < args.length ? (args[after] ?? "") : "";
-						if (!value.includes("\\") && (nextChar === "," || nextChar === "}" || nextChar === "")) {
+						if (
+							!value.includes("\\") &&
+							(nextChar === "," || nextChar === "}" || nextChar === "")
+						) {
 							codes.push(value);
 						}
 						index = end;
@@ -1386,6 +1450,300 @@ function lintUndeclaredThrownErrorCodes(provider: {
 		}
 	}
 	return diagnostics;
+}
+
+type HandleFieldOccurrence = {
+	/** Diagnostic path, e.g. `output.offers[].waiting_token`. */
+	path: string;
+	/** Property key the field is declared under (inherited through arrays/wrappers). */
+	key: string;
+	meta: HandleFieldMeta;
+};
+
+function collectHandleFields(
+	schema: unknown,
+	basePath: string,
+	key: string | undefined = undefined,
+	seen = new Set<SchemaLike>(),
+): HandleFieldOccurrence[] {
+	if (!isSchema(schema)) return [];
+
+	// Record before the cycle guard so one `kind.field()` instance reused under
+	// two property keys is still reported at both positions.
+	const own = getOwnHandleFieldMeta(schema);
+	if (own && key !== undefined) {
+		return [{ path: basePath, key, meta: own }];
+	}
+	// Path-local cycle guard: the same wrapped schema instance may legitimately
+	// appear under several property keys (`Kind.field().optional()` reused), and
+	// each position must be checked. Only true ancestor cycles are cut.
+	if (seen.has(schema)) return [];
+	seen.add(schema);
+	try {
+		return collectHandleFieldChildren(schema, basePath, key, seen);
+	} finally {
+		seen.delete(schema);
+	}
+}
+
+function collectHandleFieldChildren(
+	schema: SchemaLike,
+	basePath: string,
+	key: string | undefined,
+	seen: Set<SchemaLike>,
+): HandleFieldOccurrence[] {
+	const out: HandleFieldOccurrence[] = [];
+	// zod exposes the same inner schema under several structural edges
+	// (`unwrap`/`innerType`, `element`/`def.element`); traverse each structural
+	// child object once. Shape children are always traversed: the same instance
+	// under two property keys is two fields.
+	const structuralSeen = new Set<SchemaLike>();
+	for (const child of getChildSchemas(schema)) {
+		if (child.origin !== "shape") {
+			if (structuralSeen.has(child.schema)) continue;
+			structuralSeen.add(child.schema);
+		}
+		if (child.origin === "shape") {
+			// Provider-chosen property key: always a real field, even when it is
+			// spelled like a structural edge (`item`, `type`, `schema`, ...).
+			out.push(...collectHandleFields(child.schema, `${basePath}.${child.key}`, child.key, seen));
+		} else if (isSchemaWrapperNodeKey(child.key)) {
+			out.push(...collectHandleFields(child.schema, basePath, key, seen));
+		} else if (child.key === "element" || child.key.startsWith("element.")) {
+			out.push(...collectHandleFields(child.schema, `${basePath}[]`, key, seen));
+		} else if (/^\d+$/.test(child.key)) {
+			out.push(...collectHandleFields(child.schema, `${basePath}[${child.key}]`, key, seen));
+		} else {
+			out.push(...collectHandleFields(child.schema, `${basePath}.${child.key}`, child.key, seen));
+		}
+	}
+	return out;
+}
+
+/**
+ * Reads `provider.handle` structurally. The declaration type is owned by
+ * define.ts/types.ts; lint only needs the HandleKindDeclaration view, so
+ * malformed entries are skipped rather than reported.
+ */
+function readHandleKindDeclarations(value: unknown): HandleKindDeclaration[] {
+	if (!Array.isArray(value)) return [];
+	return value.filter((entry): entry is HandleKindDeclaration => {
+		if (typeof entry !== "object" || entry === null) return false;
+		const record = entry as Record<string, unknown>;
+		return (
+			typeof record.name === "string" &&
+			(record.type === "cursor" || record.type === "draft") &&
+			typeof record.fieldName === "string" &&
+			(record.issuedBy === undefined || typeof record.issuedBy === "string")
+		);
+	});
+}
+
+/**
+ * ADR-0012 handle rules: every `x-apifuse-handle` schema field must belong to
+ * a declared kind under its declared property key; every declared kind must be
+ * both issued (some output) and accepted (some input); `issuedBy` must name an
+ * operation whose output carries the field; and `ctx.handle` needs `state`.
+ */
+function lintHandleDeclarations(provider: {
+	id?: string;
+	handle?: unknown;
+	state?: unknown;
+	operations?: Record<string, { input: unknown; output: unknown }>;
+}): LintDiagnostic[] {
+	const diagnostics: LintDiagnostic[] = [];
+	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
+	const kinds = readHandleKindDeclarations(provider.handle);
+	const kindByName = new Map(kinds.map((kind) => [kind.name, kind]));
+	const operations = provider.operations ?? {};
+
+	if (kinds.length > 0 && !provider.state) {
+		diagnostics.push({
+			rule: "handle-requires-state",
+			level: "warn",
+			field: "handle",
+			message: `${providerLabel} declares handle kinds but not the state capability; ctx.handle stores records through ctx.state, so declare state: true.`,
+		});
+	}
+
+	const kindsInInputs = new Set<string>();
+	const kindsInOutputs = new Set<string>();
+	const outputKindsByOperation = new Map<string, Set<string>>();
+
+	for (const [operationKey, operation] of Object.entries(operations)) {
+		const positions = [
+			{ side: "input", fields: collectHandleFields(operation.input, "input") },
+			{ side: "output", fields: collectHandleFields(operation.output, "output") },
+		] as const;
+		for (const { side, fields } of positions) {
+			for (const occurrence of fields) {
+				const field = `operations.${operationKey}.${occurrence.path}`;
+				const { kind, fieldName } = occurrence.meta;
+
+				if (!kindByName.has(kind)) {
+					diagnostics.push({
+						rule: "handle-kind-undeclared",
+						level: "error",
+						field,
+						message: `${providerLabel} operation "${operationKey}" ${side} field "${occurrence.path}" is a handle of kind "${kind}", which is not declared in provider.handle. Add the kind to handle: [...] or remove the field.`,
+					});
+				}
+
+				if (occurrence.key !== fieldName) {
+					diagnostics.push({
+						rule: "handle-field-name",
+						level: "error",
+						field,
+						message: `${providerLabel} operation "${operationKey}" ${side} declares handle kind "${kind}" under property "${occurrence.key}" but the kind's fieldName is "${fieldName}". Use the same key in every schema so the LLM sees one name.`,
+					});
+				}
+
+				if (side === "input") {
+					kindsInInputs.add(kind);
+				} else {
+					kindsInOutputs.add(kind);
+					let outputKinds = outputKindsByOperation.get(operationKey);
+					if (!outputKinds) {
+						outputKinds = new Set<string>();
+						outputKindsByOperation.set(operationKey, outputKinds);
+					}
+					outputKinds.add(kind);
+				}
+			}
+		}
+	}
+
+	for (const kind of kinds) {
+		const field = `handle.${kind.name}`;
+		const issued = kindsInOutputs.has(kind.name);
+		const accepted = kindsInInputs.has(kind.name);
+
+		if (!issued) {
+			diagnostics.push({
+				rule: "handle-field-parity",
+				level: "error",
+				field,
+				message: `${providerLabel} handle kind "${kind.name}" is never issued: no operation output contains its field "${kind.fieldName}". Add ${kind.name}.field() to the issuing operation's output.`,
+			});
+		}
+		if (!accepted) {
+			diagnostics.push({
+				rule: "handle-field-parity",
+				level: "error",
+				field,
+				message: `${providerLabel} handle kind "${kind.name}" is never accepted: no operation input contains its field "${kind.fieldName}". Add ${kind.name}.field() to the consuming operation's input.`,
+			});
+		}
+
+		if (kind.issuedBy === undefined) continue;
+		if (!Object.hasOwn(operations, kind.issuedBy)) {
+			diagnostics.push({
+				rule: "handle-issued-by",
+				level: "error",
+				field,
+				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy "${kind.issuedBy}", which is not an operation key.`,
+			});
+		} else if (!outputKindsByOperation.get(kind.issuedBy)?.has(kind.name)) {
+			diagnostics.push({
+				rule: "handle-issued-by",
+				level: "error",
+				field,
+				message: `${providerLabel} handle kind "${kind.name}" declares issuedBy "${kind.issuedBy}", but that operation's output has no "${kind.fieldName}" handle field.`,
+			});
+		}
+	}
+
+	return diagnostics;
+}
+
+const LEGACY_CHOICE_USAGE_PATTERN =
+	/\bctx\.choice\b|\b(?:createProviderChoiceToken|parseProviderChoiceToken|ProviderChoiceTokenError|createTestProviderChoiceContext)\b/;
+
+const LEGACY_CHOICE_USAGE_MESSAGE =
+	"Choice tokens were replaced by handles (ADR-0012). See docs/migrations/handle.md.";
+
+/**
+ * The inline choice-token API was removed outright (no aliases). Any surviving
+ * reference in provider source would fail at runtime, so report it at check time.
+ */
+const LEGACY_CHOICE_IDENTIFIERS = new Set([
+	"createProviderChoiceToken",
+	"parseProviderChoiceToken",
+	"ProviderChoiceTokenError",
+	"createTestProviderChoiceContext",
+]);
+
+/**
+ * Finds the first legacy choice API reference in executable code. Uses the
+ * TypeScript AST when available so comments, string and template literal text
+ * never count (a migration note such as `// moved from ctx.choice` must not fail
+ * the provider) while code inside `${}` interpolations still does. Falls back
+ * to a raw-source regex when TypeScript is not installed.
+ */
+function findLegacyChoiceUsage(source: string): string | undefined {
+	let ts: typeof import("typescript");
+	try {
+		ts = getTypeScript();
+	} catch {
+		return LEGACY_CHOICE_USAGE_PATTERN.exec(source)?.[0];
+	}
+	const file = ts.createSourceFile(
+		"provider.ts",
+		source,
+		ts.ScriptTarget.Latest,
+		false,
+		ts.ScriptKind.TSX,
+	);
+	let found: string | undefined;
+	const visit = (node: import("typescript").Node): void => {
+		if (found) return;
+		if (ts.isIdentifier(node) && LEGACY_CHOICE_IDENTIFIERS.has(node.text)) {
+			found = node.text;
+			return;
+		}
+		if (
+			ts.isPropertyAccessExpression(node) &&
+			ts.isIdentifier(node.expression) &&
+			node.expression.text === "ctx" &&
+			node.name.text === "choice"
+		) {
+			found = "ctx.choice";
+			return;
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(file);
+	return found;
+}
+
+function lintLegacyChoiceUsage(provider: ProviderSourceLike): LintDiagnostic[] {
+	const sources: Array<{ field: string; source: string }> = [];
+
+	if (provider.authFlowSource) {
+		sources.push({ field: "auth.flow", source: provider.authFlowSource });
+	}
+	for (const [filePath, source] of Object.entries(provider.providerSourceFiles ?? {})) {
+		sources.push({ field: `sourceFiles.${filePath}`, source });
+	}
+	for (const [operationKey, operation] of Object.entries(provider.operations ?? {})) {
+		const source = getOperationSource(operation);
+		if (source) {
+			sources.push({ field: `operations.${operationKey}.handler`, source });
+		}
+	}
+
+	return sources.flatMap(({ field, source }) => {
+		const match = findLegacyChoiceUsage(source);
+		if (!match) return [];
+		return [
+			{
+				rule: "legacy-choice-usage",
+				level: "error" as const,
+				field,
+				message: `Legacy choice API "${match}" is no longer supported. ${LEGACY_CHOICE_USAGE_MESSAGE}`,
+			},
+		];
+	});
 }
 
 export function lintOperation(op: {
@@ -1541,6 +1899,9 @@ export function lintProvider(
 			contract?: ProviderContractMetaLike;
 		};
 		reviewed?: string;
+		/** Declared handle kinds (ADR-0012); read structurally, see readHandleKindDeclarations. */
+		handle?: unknown;
+		state?: unknown;
 	},
 	options: ProviderLintOptions = {},
 ): LintDiagnostic[] {
@@ -1562,6 +1923,8 @@ export function lintProviderWithInformation(
 		...lintSelfHostedBrowserPatterns(provider, options),
 		...lintBrowserVersionLiterals(provider),
 		...lintUndeclaredThrownErrorCodes(provider),
+		...lintLegacyChoiceUsage(provider),
+		...lintHandleDeclarations(provider),
 	];
 
 	if (provider.operations) {
@@ -1591,11 +1954,7 @@ export function lintProviderWithInformation(
 		// Every authenticated mode owns an auth.flow; `oauth2_proxied` was
 		// previously exempt, which let auth-lifecycle operations ship on
 		// proxied providers unchecked.
-		if (
-			authMode === "credentials" ||
-			authMode === "oauth2" ||
-			authMode === "oauth2_proxied"
-		) {
+		if (authMode === "credentials" || authMode === "oauth2" || authMode === "oauth2_proxied") {
 			for (const operationKey of Object.keys(provider.operations)) {
 				if (isAuthLifecycleOperationId(operationKey, authMode)) {
 					diagnostics.push({

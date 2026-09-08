@@ -82,7 +82,7 @@ describe("declaration-derived provider contexts", () => {
 			version: "1.0.0",
 			runtime: "standard",
 			http: {},
-			choice: {},
+			handle: [],
 			env: {},
 			state: {},
 			cache: {},
@@ -94,7 +94,7 @@ describe("declaration-derived provider contexts", () => {
 					...operationSchemas,
 					async handler(ctx) {
 						void ctx.http;
-						void ctx.choice;
+						void ctx.handle;
 						void ctx.env;
 						void ctx.state;
 						void ctx.cache;

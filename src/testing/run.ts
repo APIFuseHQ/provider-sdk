@@ -2,7 +2,13 @@ import { describe, expect, it } from "bun:test";
 
 import { ProviderError } from "../errors.js";
 import { createProviderCache } from "../runtime/cache.js";
-import { createTestProviderChoiceContext } from "../runtime/choice.js";
+import { createTestHandleContext } from "../runtime/handle.js";
+
+/**
+ * Stable connection scope for the local test harness so bound handles (drafts,
+ * default cursors) can be exercised exactly as in a connected production call.
+ */
+const STANDARD_TEST_CONNECTION_ID = "standard-test-connection";
 import { createMemoryProviderRuntimeState } from "../runtime/state.js";
 import { createUnsupportedOcrClient } from "../runtime/ocr.js";
 import { createUnsupportedSttClient } from "../runtime/stt.js";
@@ -319,7 +325,7 @@ function createUpstreamContext(
 		getAccessToken: () => undefined,
 		getScopes: () => [],
 	};
-	const request = { headers: {} };
+	const request = { headers: {}, connectionId: STANDARD_TEST_CONNECTION_ID };
 	const state = createMemoryProviderRuntimeState();
 	const nativeEgress = provider.native
 		? createNativeEgressAuthorization({ egress: provider.native.network })
@@ -578,10 +584,9 @@ function createUpstreamContext(
 		resolver: {
 			solve: async () => unsupported("ctx.resolver.solve"),
 		},
-		choice: createTestProviderChoiceContext({
+		handle: createTestHandleContext({
 			providerId: `standard-test-${operationName}`,
 			request,
-			credential,
 			state,
 		}),
 	} as ProviderContext;
@@ -622,7 +627,7 @@ export function createSnapshotContext(rawFixture: unknown): ProviderContext {
 		getAccessToken: () => undefined,
 		getScopes: () => [],
 	};
-	const request = { headers: {} };
+	const request = { headers: {}, connectionId: STANDARD_TEST_CONNECTION_ID };
 	const state = createMemoryProviderRuntimeState();
 	const streamCaptureGroup = findStreamCaptureGroup(rawFixture);
 	let nextCaptureItem = 0;
@@ -709,10 +714,9 @@ export function createSnapshotContext(rawFixture: unknown): ProviderContext {
 		resolver: {
 			solve: async () => unsupported("ctx.resolver.solve"),
 		},
-		choice: createTestProviderChoiceContext({
+		handle: createTestHandleContext({
 			providerId: "standard-test",
 			request,
-			credential,
 			state,
 		}),
 	} satisfies Omit<ProviderContext, "native"> as unknown as ProviderContext;

@@ -14,6 +14,7 @@ import {
 	OTEL_RESOURCE_ATTRIBUTES,
 	OTEL_SERVICE_NAME,
 } from "./runtime/otlp.js";
+import type { HandleContext } from "./handle.js";
 import type {
 	AuthContext,
 	BrowserClient,
@@ -23,7 +24,6 @@ import type {
 	NativeContext,
 	OcrContext,
 	ProviderCache,
-	ProviderChoiceContext,
 	ProviderContext,
 	ProviderDefinition,
 	ProviderFilesContext,
@@ -118,8 +118,8 @@ function isEngineOwnedEngineEnvName(name: string): boolean {
 }
 
 /**
- * Hosted runtime settings the engine reads for OCR, STT, cache keying, choice
- * tokens, and the CDP pool. Providers never own them: declarations are rejected
+ * Hosted runtime settings the engine reads for OCR, STT, cache keying, and
+ * the CDP pool. Providers never own them: declarations are rejected
  * and projections drop them, like the vendor credentials above.
  */
 export const ENGINE_OWNED_RUNTIME_ENV_NAMES = [
@@ -128,7 +128,6 @@ export const ENGINE_OWNED_RUNTIME_ENV_NAMES = [
 	"APIFUSE__OCR__API_KEY",
 	"APIFUSE__CLOUDFLARE__ACCOUNT_ID",
 	"APIFUSE__CACHE__KEY_PEPPER",
-	"APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET",
 ] as const;
 
 const ENGINE_OWNED_RUNTIME_ENV_NAME_SET = new Set<string>(ENGINE_OWNED_RUNTIME_ENV_NAMES);
@@ -237,7 +236,7 @@ export const PROVIDER_CAPABILITY_KEYS = [
 	"ocr",
 	"stt",
 	"resolver",
-	"choice",
+	"handle",
 ] as const;
 
 export type ProviderCapabilityKey = (typeof PROVIDER_CAPABILITY_KEYS)[number];
@@ -249,7 +248,7 @@ export type ProviderEngineBindingCandidates = Partial<
 			readonly credential: CredentialContext;
 			readonly files: ProviderFilesContext;
 			readonly auth: AuthContext;
-			readonly choice: ProviderChoiceContext;
+			readonly handle: HandleContext;
 		}
 > & {
 	readonly request?: ProviderRequestContext;

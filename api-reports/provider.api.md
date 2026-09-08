@@ -29,11 +29,6 @@ export const APIFUSE_SENSITIVE_KIND_META_KEY = "x-apifuse-sensitive-kind";
 // @public (undocumented)
 export const APIFUSE_SENSITIVE_META_KEY = "x-apifuse-sensitive";
 
-// Warning: (ae-forgotten-export) The symbol "FreshProviderChoiceIssuedAtOptions" needs to be exported by the entry point provider.d.ts
-//
-// @public (undocumented)
-export function assertFreshProviderChoiceIssuedAt(issuedAtMs: unknown, options: FreshProviderChoiceIssuedAtOptions): number;
-
 // @public (undocumented)
 export type AssertionExpression = {
     kind: "all" | "any";
@@ -857,46 +852,46 @@ export function createFormCeremony(options: {
     mapCredential?: (input: Record<string, unknown>) => JsonObject;
 }): AuthFlowDefinition;
 
+// @public (undocumented)
+export function createHandleContext(options: CreateHandleContextOptions): HandleContext;
+
+// @public (undocumented)
+export interface CreateHandleContextOptions {
+    readonly commitLeaseMs?: number;
+    readonly nowMs?: () => number;
+    readonly onTelemetry?: (event: HandleTelemetryEvent) => void;
+    // (undocumented)
+    readonly providerId: string;
+    // Warning: (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point provider.d.ts
+    //
+    // (undocumented)
+    readonly request?: ProviderRequestContext;
+    // (undocumented)
+    readonly state?: ProviderRuntimeState;
+}
+
 // @public
 export function createInProcessProviderEngine(): ProviderEngine;
-
-// @public (undocumented)
-export function createProviderChoiceContext(options: CreateProviderChoiceContextOptions): ProviderChoiceContext;
-
-// @public (undocumented)
-export type CreateProviderChoiceContextOptions = {
-    readonly providerId: string;
-    readonly env?: EnvContext;
-    readonly request?: ProviderRequestContext;
-    readonly credential?: CredentialContext;
-    readonly state?: ProviderRuntimeState;
-    readonly masterSecret?: string;
-    readonly kid?: string;
-    readonly onTelemetry?: (event: ProviderChoiceTelemetryEvent) => void;
-};
-
-// Warning: (ae-forgotten-export) The symbol "CreateProviderChoiceTokenOptions" needs to be exported by the entry point provider.d.ts
-//
-// @public (undocumented)
-export function createProviderChoiceToken<TPayload extends ProviderChoiceTokenPayload>(options: CreateProviderChoiceTokenOptions<TPayload>): string;
-
-// @public (undocumented)
-interface CreateProviderChoiceTokenOptions<TPayload extends ProviderChoiceTokenPayload> {
-    // (undocumented)
-    payload: TPayload;
-    // (undocumented)
-    prefix: string;
-    // (undocumented)
-    secret: string;
-}
 
 // @public
 export function createProviderEnvironment(environment: Readonly<Record<string, string | undefined>>, declaredNames: readonly string[]): Readonly<Record<string, string>>;
 
+// @public
+export function createTestHandleContext(options?: CreateTestHandleContextOptions): HandleContext;
+
 // @public (undocumented)
-export function createTestProviderChoiceContext(options: Omit<CreateProviderChoiceContextOptions, "masterSecret"> & {
-    readonly masterSecret?: string;
-}): ProviderChoiceContext;
+export interface CreateTestHandleContextOptions {
+    // (undocumented)
+    readonly nowMs?: () => number;
+    // (undocumented)
+    readonly onTelemetry?: (event: HandleTelemetryEvent) => void;
+    // (undocumented)
+    readonly providerId?: string;
+    // (undocumented)
+    readonly request?: ProviderRequestContext;
+    // (undocumented)
+    readonly state?: ProviderRuntimeState;
+}
 
 // @public (undocumented)
 interface CredentialContext {
@@ -1035,6 +1030,21 @@ export type CredentialsAuthInput<TFields extends CredentialsAuthFields> = {
 export type CredentialsAuthLoginResult<TCredentialKeys extends readonly string[], TChallengeId extends string = string> = CredentialsAuthCompleteResult<TCredentialKeys> | CredentialsAuthChallengeRequest<TChallengeId>;
 
 // @public (undocumented)
+export interface CursorKind<TSchema extends ZodType = ZodType> extends HandleKindBase<TSchema> {
+    // (undocumented)
+    readonly strength: HandleStrength;
+    // (undocumented)
+    readonly ttl: ProviderStateDurationString;
+    // (undocumented)
+    readonly ttlMs: number;
+    // (undocumented)
+    readonly type: "cursor";
+}
+
+// @public
+export type DataOf<K extends HandleKind> = z.output<K["schema"]>;
+
+// @public (undocumented)
 interface DeclarativeStealthResponse {
     // (undocumented)
     arrayBuffer(): Promise<ArrayBuffer>;
@@ -1100,6 +1110,24 @@ export interface DefineCredentialsAuthOptions<TFields extends CredentialsAuthFie
     storesReusableSecret?: boolean;
 }
 
+// @public
+export function defineCursor<TSchema extends ZodType>(options: DefineCursorOptions<TSchema>): CursorKind<TSchema>;
+
+// @public (undocumented)
+export interface DefineCursorOptions<TSchema extends ZodType> {
+    readonly access?: HandleAccess;
+    readonly fieldName?: string;
+    readonly issuedBy?: string;
+    readonly maxEntries?: number;
+    readonly maxValueBytes?: number;
+    readonly name: string;
+    // (undocumented)
+    readonly schema: TSchema;
+    readonly strength?: HandleStrength;
+    // (undocumented)
+    readonly ttl: ProviderStateDurationString;
+}
+
 // @public (undocumented)
 export interface DefinedCredentialsAuth {
     // Warning: (ae-forgotten-export) The symbol "AuthConfig" needs to be exported by the entry point provider.d.ts
@@ -1114,6 +1142,30 @@ export interface DefinedCredentialsAuth {
     //
     // (undocumented)
     credential: CredentialDeclaration;
+}
+
+// @public
+export function defineDraft<TSchema extends ZodType, TResultSchema extends ZodType | undefined = undefined>(options: DefineDraftOptions<TSchema, TResultSchema>): DraftKind<TSchema, TResultSchema>;
+
+// @public (undocumented)
+export interface DefineDraftOptions<TSchema extends ZodType, TResultSchema extends ZodType | undefined> {
+    // (undocumented)
+    readonly fieldName?: string;
+    // (undocumented)
+    readonly issuedBy?: string;
+    readonly maxEntries?: number;
+    readonly maxValueBytes?: number;
+    // (undocumented)
+    readonly name: string;
+    readonly result?: TResultSchema;
+    readonly resultTtl?: ProviderStateDurationString;
+    // (undocumented)
+    readonly schema: TSchema;
+    // (undocumented)
+    readonly ttl: {
+        readonly idle: ProviderStateDurationString;
+        readonly max: ProviderStateDurationString;
+    };
 }
 
 // @public (undocumented)
@@ -1142,6 +1194,30 @@ export function delayed(maxDelay: string): HealthScheduleRandomization;
 export function describeKey<TSchema extends ZodType>(schema: TSchema, key: ProviderLocaleKey | string): TSchema;
 
 // @public (undocumented)
+export interface DraftKind<TSchema extends ZodType = ZodType, TResultSchema extends ZodType | undefined = ZodType | undefined> extends HandleKindBase<TSchema> {
+    // (undocumented)
+    readonly access: "bound";
+    // (undocumented)
+    readonly idleTtlMs: number;
+    // (undocumented)
+    readonly maxTtlMs: number;
+    readonly result: TResultSchema | undefined;
+    // (undocumented)
+    readonly resultTtl: ProviderStateDurationString;
+    // (undocumented)
+    readonly resultTtlMs: number;
+    // (undocumented)
+    readonly ttl: {
+        readonly idle: ProviderStateDurationString;
+        readonly max: ProviderStateDurationString;
+    };
+    // (undocumented)
+    readonly type: "draft";
+    // (undocumented)
+    readonly wordCount: 2;
+}
+
+// @public (undocumented)
 type E164PhoneNumber = `+${string}`;
 
 // @public
@@ -1151,7 +1227,7 @@ export const ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__PROXY_
 export const ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES: readonly ["APIFUSE__RESOLVER__2CAPTCHA__API_KEY", "APIFUSE__RESOLVER__CAPSOLVER__API_KEY", "APIFUSE__RESOLVER__CAPMONSTER__API_KEY", "APIFUSE__RESOLVER__HYPERSOLUTIONS__API_KEY"];
 
 // @public
-export const ENGINE_OWNED_RUNTIME_ENV_NAMES: readonly ["APIFUSE__STT__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__API_KEY", "APIFUSE__CLOUDFLARE__ACCOUNT_ID", "APIFUSE__CACHE__KEY_PEPPER", "APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET"];
+export const ENGINE_OWNED_RUNTIME_ENV_NAMES: readonly ["APIFUSE__STT__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__CLOUDFLARE_API_TOKEN", "APIFUSE__OCR__API_KEY", "APIFUSE__CLOUDFLARE__ACCOUNT_ID", "APIFUSE__CACHE__KEY_PEPPER"];
 
 // @public
 export const ENGINE_OWNED_TELEMETRY_ENV_NAMES: readonly ["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "OTEL_EXPORTER_OTLP_ENDPOINT", "OTEL_EXPORTER_OTLP_TRACES_HEADERS", "OTEL_EXPORTER_OTLP_HEADERS", "OTEL_SERVICE_NAME", "OTEL_RESOURCE_ATTRIBUTES"];
@@ -1281,8 +1357,12 @@ export interface FlowContext {
     //
     // (undocumented)
     context: ContextScratchpad;
+    // Warning: (ae-forgotten-export) The symbol "CredentialContext" needs to be exported by the entry point provider.d.ts
+    //
     // (undocumented)
     credential?: CredentialContext;
+    // Warning: (ae-forgotten-export) The symbol "EnvContext" needs to be exported by the entry point provider.d.ts
+    //
     // (undocumented)
     env: EnvContext;
     // (undocumented)
@@ -1318,16 +1398,6 @@ export interface FlowContext {
     //
     // (undocumented)
     trace: TraceContext;
-}
-
-// @public (undocumented)
-interface FreshProviderChoiceIssuedAtOptions {
-    // (undocumented)
-    futureToleranceMs?: number;
-    // (undocumented)
-    nowMs?: number;
-    // (undocumented)
-    ttlMs: number;
 }
 
 // Warning: (ae-forgotten-export) The symbol "ProviderLocaleCatalog" needs to be exported by the entry point provider.d.ts
@@ -1400,6 +1470,146 @@ export const GuardStepSchema: z.ZodObject<{
         stop: z.ZodLiteral<"scenario">;
     }, z.core.$strict>;
 }, z.core.$strict>;
+
+// @public (undocumented)
+export type HandleAccess = "bound" | "public";
+
+// @public (undocumented)
+export interface HandleCommitResult<K extends HandleKind> {
+    // (undocumented)
+    readonly handle: string;
+    // (undocumented)
+    readonly result: ResultOf<K>;
+    // (undocumented)
+    readonly status: "committed" | "replayed";
+}
+
+// @public (undocumented)
+export interface HandleContext {
+    commit<K extends DraftKind>(kind: K, handle: string, work: (data: DataOf<K>) => Promise<ResultOf<K>>): Promise<HandleCommitResult<K>>;
+    create<K extends HandleKind>(kind: K, data: InputOf<K>): Promise<string>;
+    discard<K extends HandleKind>(kind: K, handle: string): Promise<void>;
+    read<K extends HandleKind>(kind: K, handle: string): Promise<HandleRecord<K>>;
+    update<K extends DraftKind>(kind: K, handle: string, updater: (data: DataOf<K>) => InputOf<K> | Promise<InputOf<K>>): Promise<HandleRecord<K>>;
+}
+
+// @public (undocumented)
+export class HandleError extends ProviderError {
+    constructor(code: HandleErrorCode, message: string, options?: HandleErrorOptions);
+    // (undocumented)
+    get code(): HandleErrorCode;
+    // (undocumented)
+    readonly handleCode: HandleErrorCode;
+    // (undocumented)
+    readonly kind?: string;
+}
+
+// @public (undocumented)
+export type HandleErrorCode = "HANDLE_INVALID" | "HANDLE_NOT_FOUND" | "HANDLE_EXPIRED" | "HANDLE_KIND_MISMATCH" | "HANDLE_BUSY" | "HANDLE_COMMITTED" | "HANDLE_CONNECTION_REQUIRED" | "HANDLE_STORAGE_UNAVAILABLE" | "HANDLE_TOO_LARGE" | "HANDLE_INVALID_DATA" | "PICK_NOT_OFFERED";
+
+// @public (undocumented)
+export type HandleErrorOptions = Omit<ProviderErrorOptions, "code"> & {
+    readonly kind?: string;
+};
+
+// @public
+export interface HandleFieldMeta {
+    // (undocumented)
+    readonly fieldName: string;
+    // (undocumented)
+    readonly issuedBy?: string;
+    // (undocumented)
+    readonly kind: string;
+    // (undocumented)
+    readonly type: HandleKindType;
+}
+
+// @public (undocumented)
+export type HandleKind = CursorKind<any> | DraftKind<any, any>;
+
+// @public (undocumented)
+export interface HandleKindBase<TSchema extends ZodType = ZodType> extends HandleKindDeclaration {
+    field(): ZodString;
+    readonly maxEntries: number;
+    readonly maxValueBytes: number;
+    readonly schema: TSchema;
+    readonly wordCount: HandleWordCount;
+}
+
+// @public
+export interface HandleKindDeclaration {
+    // (undocumented)
+    readonly access: HandleAccess;
+    // (undocumented)
+    readonly fieldName: string;
+    // (undocumented)
+    readonly issuedBy?: string;
+    // (undocumented)
+    readonly name: string;
+    // (undocumented)
+    readonly type: HandleKindType;
+}
+
+// @public (undocumented)
+export type HandleKindType = "cursor" | "draft";
+
+// @public (undocumented)
+export type HandleNormalizationClass = "case" | "whitespace" | "separator" | "punctuation" | "typo";
+
+// @public (undocumented)
+export type HandleOperation = "create" | "read" | "update" | "commit" | "discard";
+
+// @public (undocumented)
+export interface HandleRecord<K extends HandleKind> {
+    // (undocumented)
+    readonly createdAt: string;
+    // (undocumented)
+    readonly data: DataOf<K>;
+    // (undocumented)
+    readonly expiresAt: string;
+    readonly handle: string;
+    // (undocumented)
+    readonly kind: string;
+    // (undocumented)
+    readonly result?: ResultOf<K>;
+    // (undocumented)
+    readonly status: HandleStatus;
+}
+
+// @public
+export function handleRecoverySentence(kind: {
+    readonly fieldName: string;
+    readonly issuedBy?: string;
+}): string;
+
+// @public (undocumented)
+export type HandleStatus = "active" | "committing" | "committed";
+
+// @public (undocumented)
+export type HandleStrength = "standard" | "high";
+
+// @public
+export interface HandleTelemetryEvent {
+    // (undocumented)
+    readonly kind: string;
+    readonly normalization: string;
+    // (undocumented)
+    readonly operation: HandleOperation;
+    // (undocumented)
+    readonly outcome: HandleTelemetryOutcome;
+    // (undocumented)
+    readonly providerId: string;
+    // (undocumented)
+    readonly type: HandleKindType;
+    // (undocumented)
+    readonly words: number;
+}
+
+// @public (undocumented)
+export type HandleTelemetryOutcome = "success" | "not_found" | "expired" | "invalid" | "kind_mismatch" | "busy" | "replayed" | "error";
+
+// @public
+export type HandleWordCount = 2 | 4 | 5;
 
 // @public
 export interface HealthCheckAssertionContext<TOutput = unknown> {
@@ -2009,6 +2219,15 @@ interface HttpStreamResponse {
 export type InferSchemaOutput<TSchema extends SchemaLike> = TSchema extends ZodType ? infer<TSchema> : TSchema extends StandardSchemaV1<unknown, infer Output> ? Output : unknown;
 
 // @public
+export type InputOf<K extends HandleKind> = z.input<K["schema"]>;
+
+// @public (undocumented)
+export function isCursorKind(kind: HandleKind): kind is CursorKind<any>;
+
+// @public (undocumented)
+export function isDraftKind(kind: HandleKind): kind is DraftKind<any, any>;
+
+// @public
 export function isEngineOwnedEnvName(name: string): boolean;
 
 // @public (undocumented)
@@ -2022,6 +2241,9 @@ export function isEngineOwnedRuntimeEnvName(name: string): boolean;
 
 // @public (undocumented)
 export function isEngineOwnedTelemetryEnvName(name: string): boolean;
+
+// @public
+export function isHandleError(value: unknown): value is HandleError;
 
 // @public (undocumented)
 type Iso3166Alpha2CountryCode = Uppercase<string>;
@@ -2465,6 +2687,23 @@ type NativeVendorSkipTelemetryEvent = {
 export type NonEmpty<T> = readonly [T, ...T[]];
 
 // @public (undocumented)
+export interface NormalizedHandle {
+    // (undocumented)
+    readonly canonical: string;
+    // (undocumented)
+    readonly normalization: readonly HandleNormalizationClass[];
+    // (undocumented)
+    readonly words: readonly string[];
+}
+
+// @public
+export function normalizeHandle(kind: HandleKind, raw: string): {
+    canonical: string;
+    words: string[];
+    normalization: string[];
+};
+
+// @public (undocumented)
 interface OcrCaptchaCandidate {
     // (undocumented)
     readonly satisfiesConstraints: boolean;
@@ -2844,19 +3083,17 @@ interface OperationWebSocketTransport {
     subprotocols?: readonly string[];
 }
 
-// Warning: (ae-forgotten-export) The symbol "ParseProviderChoiceTokenOptions" needs to be exported by the entry point provider.d.ts
-//
-// @public (undocumented)
-export function parseProviderChoiceToken(options: ParseProviderChoiceTokenOptions): ProviderChoiceTokenPayload;
+// @public
+export function parseHandleDurationMs(value: ProviderStateDurationString, label: string): number;
+
+// @public
+export function pick<T extends Record<string, unknown>>(items: readonly T[], value: string, options: PickOptions<T>): T;
 
 // @public (undocumented)
-interface ParseProviderChoiceTokenOptions {
-    // (undocumented)
-    prefix: string;
-    // (undocumented)
-    secret: string;
-    // (undocumented)
-    token: string;
+export interface PickOptions<T> {
+    readonly by?: keyof T & string;
+    readonly field: string;
+    readonly issuedBy?: string;
 }
 
 // @public (undocumented)
@@ -3147,16 +3384,13 @@ const predicateSchema: z.ZodUnion<readonly [z.ZodObject<{
 type ProbeInterval = ms.StringValue;
 
 // @public (undocumented)
-export const PROVIDER_CAPABILITY_KEYS: readonly ["env", "credential", "http", "files", "native", "cache", "state", "stealth", "browser", "auth", "ocr", "stt", "resolver", "choice"];
+export const PROVIDER_CAPABILITY_KEYS: readonly ["env", "credential", "http", "files", "native", "cache", "state", "stealth", "browser", "auth", "ocr", "stt", "resolver", "handle"];
 
 // @public
 export const PROVIDER_ENGINE_PROTOCOL_VERSION: "provider-engine.v1";
 
 // @public (undocumented)
 const PROVIDER_ERROR_CATEGORIES: readonly ["ok", "timeout", "network", "upstream_http", "upstream_rate_limited", "upstream_auth", "upstream_rejected", "upstream_schema_drift", "proxy_pool", "anti_bot_blocked", "credential_expired", "credential_unavailable", "input_validation", "output_validation", "provider_error", "internal_error", "dependency_unavailable", "unsupported_transport", "client_cancelled", "unclassified"];
-
-// @public (undocumented)
-export const PROVIDER_RUNTIME_CHOICE_TOKEN_MASTER_SECRET_ENV = "APIFUSE__PROVIDER_RUNTIME__CHOICE_TOKEN_MASTER_SECRET";
 
 // @public (undocumented)
 interface ProviderAccessConfig {
@@ -3304,172 +3538,6 @@ type ProviderChallenge = {
 // @public (undocumented)
 type ProviderChallengeKind = ProviderChallenge["kind"];
 
-// @public (undocumented)
-export interface ProviderChoiceBindingOptions {
-    // (undocumented)
-    connection?: boolean;
-    // (undocumented)
-    credentialKeys?: readonly string[];
-}
-
-// @public (undocumented)
-export type ProviderChoiceConsumeMode = "never" | "on-parse" | "explicit";
-
-// @public (undocumented)
-export type ProviderChoiceConsumeResult = {
-    readonly status: "consumed";
-} | {
-    readonly status: "already-consumed";
-} | {
-    readonly status: "unsupported";
-};
-
-// @public (undocumented)
-export interface ProviderChoiceContext {
-    // (undocumented)
-    issue<TPayload extends Record<string, unknown>>(options: ProviderChoiceIssueOptions<TPayload> & {
-        readonly storage?: {
-            readonly mode: "inline";
-        };
-    }): string;
-    // (undocumented)
-    issue<TPayload extends Record<string, unknown>>(options: ProviderChoiceIssueOptions<TPayload> & {
-        readonly storage: Extract<ProviderChoiceStorageOptions, {
-            readonly mode: "server";
-        }>;
-    }): Promise<string>;
-    // (undocumented)
-    issue<TPayload extends Record<string, unknown>>(options: ProviderChoiceIssueOptions<TPayload> & {
-        readonly storage: Extract<ProviderChoiceStorageOptions, {
-            readonly mode: "auto";
-        }>;
-    }): string | Promise<string>;
-    // (undocumented)
-    issue<TPayload extends Record<string, unknown>>(options: ProviderChoiceIssueOptions<TPayload>): string | Promise<string>;
-    // (undocumented)
-    parse(options: ProviderChoiceParseOptions & {
-        readonly consume: "explicit";
-    }): Promise<ProviderChoiceExplicitParseResult>;
-    // (undocumented)
-    parse(options: ProviderChoiceParseOptions & {
-        readonly storage?: {
-            readonly mode: "inline";
-        };
-    }): Record<string, unknown>;
-    // (undocumented)
-    parse(options: ProviderChoiceParseOptions & {
-        readonly storage: Extract<ProviderChoiceStorageOptions, {
-            readonly mode: "server";
-        }>;
-    }): Promise<Record<string, unknown>>;
-    // (undocumented)
-    parse(options: ProviderChoiceParseOptions & {
-        readonly storage: Extract<ProviderChoiceStorageOptions, {
-            readonly mode: "auto";
-        }>;
-    }): Record<string, unknown> | Promise<Record<string, unknown>>;
-    // (undocumented)
-    parse(options: ProviderChoiceParseOptions): Record<string, unknown> | Promise<Record<string, unknown> | ProviderChoiceExplicitParseResult>;
-}
-
-// @public (undocumented)
-export type ProviderChoiceExplicitParseResult = {
-    readonly status: "active";
-    readonly payload: Record<string, unknown>;
-    readonly replayKey: string;
-    consume(): Promise<ProviderChoiceConsumeResult>;
-} | {
-    readonly status: "consumed";
-    readonly replayKey: string;
-};
-
-// @public (undocumented)
-export interface ProviderChoiceIssueOptions<TPayload extends Record<string, unknown>> {
-    // (undocumented)
-    bind?: ProviderChoiceBindingOptions;
-    // (undocumented)
-    nowMs?: number;
-    // (undocumented)
-    payload: TPayload;
-    // (undocumented)
-    prefix: string;
-    // (undocumented)
-    purpose: string;
-    // (undocumented)
-    storage?: ProviderChoiceStorageOptions;
-    strength?: "standard" | "high";
-    // (undocumented)
-    ttlMs: number;
-}
-
-// @public (undocumented)
-export interface ProviderChoiceParseOptions {
-    // (undocumented)
-    bind?: ProviderChoiceBindingOptions;
-    consume?: ProviderChoiceConsumeMode;
-    // (undocumented)
-    futureToleranceMs?: number;
-    // (undocumented)
-    nowMs?: number;
-    // (undocumented)
-    prefix: string;
-    // (undocumented)
-    purpose: string;
-    // (undocumented)
-    storage?: ProviderChoiceStorageOptions;
-    // (undocumented)
-    token: string;
-    // (undocumented)
-    ttlMs?: number;
-}
-
-// @public (undocumented)
-type ProviderChoiceStorageOptions = {
-    readonly mode: "inline";
-} | {
-    readonly mode: "server";
-    readonly namespace: string;
-    readonly state?: ProviderRuntimeState;
-    readonly ttl?: ProviderStateDurationString;
-    readonly maxEntries: number;
-    readonly maxValueBytes: number;
-    readonly unavailable?: "reject";
-} | {
-    readonly mode: "auto";
-    readonly namespace: string;
-    readonly state?: ProviderRuntimeState;
-    readonly ttl?: ProviderStateDurationString;
-    readonly maxInlineBytes: number;
-    readonly maxEntries: number;
-    readonly maxValueBytes: number;
-    readonly unavailable?: "reject";
-};
-
-// @public (undocumented)
-type ProviderChoiceTelemetryEvent = {
-    readonly providerId: string;
-    readonly purpose: string;
-    readonly operation: "parse" | "consume";
-    readonly format: "word" | "legacy";
-    readonly outcome: "success" | "not-found" | "invalid" | "unsupported" | "error";
-    readonly consumeMode: ProviderChoiceConsumeMode;
-    readonly consumed: boolean;
-    readonly replay: boolean;
-};
-
-// @public (undocumented)
-export class ProviderChoiceTokenError extends Error {
-    constructor(reason: ProviderChoiceTokenErrorReason, message: string);
-    // (undocumented)
-    readonly reason: ProviderChoiceTokenErrorReason;
-}
-
-// @public (undocumented)
-export type ProviderChoiceTokenErrorReason = "invalid_shape" | "invalid_signature" | "invalid_payload" | "invalid_binding" | "stale";
-
-// @public (undocumented)
-export type ProviderChoiceTokenPayload = Record<string, unknown>;
-
 // @public
 export type ProviderContext<TConfig = Record<string, unknown>> = {
     request?: ProviderRequestContext;
@@ -3508,8 +3576,8 @@ export type ProviderContext<TConfig = Record<string, unknown>> = {
     stt: SttContext;
 } : Record<never, never>) & ("resolver" extends keyof TConfig ? {
     resolver: ResolverContext;
-} : Record<never, never>) & ("choice" extends keyof TConfig ? {
-    choice: ProviderChoiceContext;
+} : Record<never, never>) & ("handle" extends keyof TConfig ? {
+    handle: HandleContext;
 } : Record<never, never>);
 
 // @public
@@ -3532,12 +3600,12 @@ export interface ProviderDeclaration {
         engine: BrowserEngine;
     };
     cache?: Record<string, never> | true;
-    choice?: Record<string, never> | true;
     context?: ContextDeclaration;
     credential?: CredentialDeclaration;
     deployment?: ProviderDeploymentOverrides;
     env?: Record<string, never> | true;
     files?: Record<string, never> | true;
+    handle?: readonly HandleKind[];
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // Warning: (ae-forgotten-export) The symbol "ProviderHealthMonitorConfig" needs to be exported by the entry point provider.d.ts
@@ -3621,8 +3689,6 @@ export interface ProviderDefinition<TContext = ProviderContext> {
     // (undocumented)
     cache?: Record<string, never> | true;
     // (undocumented)
-    choice?: Record<string, never> | true;
-    // (undocumented)
     context?: ContextDeclaration;
     // (undocumented)
     credential?: CredentialDeclaration;
@@ -3631,6 +3697,8 @@ export interface ProviderDefinition<TContext = ProviderContext> {
     env?: Record<string, never> | true;
     // (undocumented)
     files?: Record<string, never> | true;
+    // (undocumented)
+    handle?: readonly HandleKind[];
     // (undocumented)
     healthJourneys?: readonly HealthJourneyDefinition[];
     // (undocumented)
@@ -3730,7 +3798,7 @@ export type ProviderEngineBindingCandidates = Partial<ProviderEngineCapabilitySu
     readonly credential: CredentialContext;
     readonly files: ProviderFilesContext;
     readonly auth: AuthContext;
-    readonly choice: ProviderChoiceContext;
+    readonly handle: HandleContext;
 }> & {
     readonly request?: ProviderRequestContext;
     readonly trace: TraceContext;
@@ -4388,6 +4456,9 @@ interface ResolverContext {
     // (undocumented)
     solve(challenge: ProviderChallenge, signal?: AbortSignal): Promise<ChallengeSolution>;
 }
+
+// @public (undocumented)
+export type ResultOf<K extends HandleKind> = K extends DraftKind<any, infer R> ? (R extends ZodType ? z.output<R> : unknown) : never;
 
 // @public (undocumented)
 export type RetryPolicy = {
@@ -5819,14 +5890,10 @@ export { z }
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:15:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:107:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
-// dist/define.d.ts:135:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:16:5 - (ae-forgotten-export) The symbol "OperationHandlerResult" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:108:9 - (ae-forgotten-export) The symbol "ProviderImplementationProfile" needs to be exported by the entry point provider.d.ts
+// dist/define.d.ts:136:5 - (ae-forgotten-export) The symbol "OperationMapConfig" needs to be exported by the entry point provider.d.ts
 // dist/errors.d.ts:8:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point provider.d.ts
-// dist/runtime/choice.d.ts:15:5 - (ae-forgotten-export) The symbol "EnvContext" needs to be exported by the entry point provider.d.ts
-// dist/runtime/choice.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderRequestContext" needs to be exported by the entry point provider.d.ts
-// dist/runtime/choice.d.ts:17:5 - (ae-forgotten-export) The symbol "CredentialContext" needs to be exported by the entry point provider.d.ts
-// dist/runtime/choice.d.ts:22:5 - (ae-forgotten-export) The symbol "ProviderChoiceTelemetryEvent" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:53:5 - (ae-forgotten-export) The symbol "ProxyProtocol" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:56:5 - (ae-forgotten-export) The symbol "ProxyTelemetrySink" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-network.d.ts:57:5 - (ae-forgotten-export) The symbol "NativeTelemetrySink" needs to be exported by the entry point provider.d.ts
@@ -5837,25 +5904,24 @@ export { z }
 // dist/runtime/native-telemetry.d.ts:40:5 - (ae-forgotten-export) The symbol "NativeTelemetryDiagnostics" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-telemetry.d.ts:44:5 - (ae-forgotten-export) The symbol "NativeTelemetryVendorSkipReason" needs to be exported by the entry point provider.d.ts
 // dist/runtime/native-telemetry.d.ts:48:5 - (ae-forgotten-export) The symbol "NativeTelemetryLifecycleKind" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:127:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:336:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:338:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:662:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:673:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:886:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:891:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1253:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1253:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1560:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1566:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1567:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1571:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1578:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1613:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1737:9 - (ae-forgotten-export) The symbol "ProviderChoiceStorageOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1985:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1991:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1993:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:128:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:337:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:339:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:663:5 - (ae-forgotten-export) The symbol "HealthCheckInputPreparationContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:674:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:887:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:892:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1254:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1254:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1561:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1567:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1568:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1572:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1579:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1614:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1882:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1888:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1890:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

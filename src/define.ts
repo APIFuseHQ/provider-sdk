@@ -21,6 +21,7 @@ import {
 } from "./native-egress-policy.js";
 import { safeParseSchemaSync } from "./schema.js";
 import { resolveHealthCheckInputDateTokens } from "./server/self-test-input-tokens.js";
+import type { HandleKind } from "./handle.js";
 import type {
 	AuthConfig,
 	BrowserEngine,
@@ -601,8 +602,8 @@ export interface ProviderDeclaration {
 	resolver?: ProviderResolverConfig;
 	browser?: { engine: BrowserEngine };
 	auth?: AuthConfig;
-	/** Declares the choice capability binding. A bare object states use without configuration. */
-	choice?: Record<string, never> | true;
+	/** Declares the handle kinds this provider issues and accepts (ADR-0012). */
+	handle?: readonly HandleKind[];
 	reviewed?: ProviderReviewed;
 	access?: ProviderAccessConfig;
 	/** Declares secret requirements; this does not add a `ctx.secrets` member. */
@@ -3042,7 +3043,7 @@ function finalizeProvider<
 		resolver: config.resolver,
 		browser: config.browser,
 		auth: config.auth,
-		choice: config.choice,
+		handle: config.handle,
 		reviewed: config.reviewed,
 		access: config.access,
 		secrets: config.secrets,
