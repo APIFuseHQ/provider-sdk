@@ -157,10 +157,11 @@ export interface ResolverVendorAdapter {
 	readonly id: ProviderResolverVendor;
 	readonly requiresTransport?: boolean | ((kind: ProviderChallengeKind) => boolean);
 	/**
-	 * Exact SDK-owned service hosts this adapter may reach through its bound transport.
-	 * Honored for every adapter the chain runs, so whoever supplies `adapters` to
-	 * `createResolverClient` is the trust boundary; the engine path
-	 * (`createResolverClientFromEnv`) only constructs registry adapters.
+	 * Exact SDK-owned service hosts this adapter may reach through its bound transport,
+	 * in addition to the provider's `allowedHosts`. Every host must appear in the
+	 * SDK-owned `RESOLVER_VENDOR_TRANSPORT_HOSTS` entry for `id`; the chain rejects any
+	 * other declaration with `RESOLVER_VENDOR_HOST_NOT_ALLOWED`, whoever supplied the
+	 * adapter. The transport handed to `solve` is revoked once `solve` settles.
 	 */
 	readonly transportAllowedHosts?: readonly string[];
 	supports(kind: ProviderChallengeKind): boolean;
