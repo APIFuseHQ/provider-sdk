@@ -226,6 +226,22 @@ const utcInput = resolveHealthCheckInputDateTokens({ date: "+45d" }, new Date(),
 Do not re-resolve a health assertion's dates in UTC when its case input used the
 default KST calendar.
 
+### Sensitive vs public fields
+
+The platform fixture-privacy ratchet flags name-, phone-, and address-shaped keys
+unless the schema at that path declares them one way or the other. Declare every hit:
+
+- `sensitive(schema, kind)` / `fields.*()` — anything about a person: user, profile,
+  passenger, driver, or member names, emails, member ids, personal phone numbers.
+  Emits `x-apifuse-sensitive: true`; the value is redacted in published artifacts.
+- `publicField(schema)` — reviewed public data: business, shop, product, artist, or
+  facility names, hospital/hotel/station phones, timezone names. Emits
+  `x-apifuse-sensitive: false`; nothing is redacted. It is a review verdict, not a mute.
+  Credential-shaped keys (token, password, apiKey, …) cannot be declared public.
+
+Apply either helper to the leaf, before `.optional()`/`.nullable()`/`.default()`;
+`publicField()` over a wrapper that hides a `sensitive()` leaf throws at definition time.
+
 ### Real-handler E2E in standard tests
 
 `runStandardTests(provider)` validates declarations and fixtures but reports a

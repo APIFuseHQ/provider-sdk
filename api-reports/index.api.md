@@ -5314,6 +5314,9 @@ type ProxyVendorFailoverTelemetryEvent = {
 // @public
 export type ProxyVendorName = "smartproxy" | "nodemaven";
 
+// @public
+export function publicField<TSchema extends ZodType>(schema: TSchema): TSchema;
+
 // @public (undocumented)
 export function qualifyProviderLocaleKey(providerId: string, key: ProviderLocaleKey | string): string;
 

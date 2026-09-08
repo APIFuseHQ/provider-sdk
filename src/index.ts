@@ -288,6 +288,7 @@ export {
 	field,
 	fields,
 	isSensitiveSchema,
+	publicField,
 	redactPayload,
 	type SensitiveFieldKind,
 	type SensitiveFieldOptions,
