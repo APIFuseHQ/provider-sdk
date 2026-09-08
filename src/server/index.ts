@@ -130,6 +130,19 @@ export {
 } from "./types.js";
 
 export {
+	HttpTelemetryCollector,
+	type HttpTelemetrySink,
+	type HttpTelemetryRequestSink,
+	type HttpAttemptTelemetryEvent,
+	type HttpAttemptSample,
+	type HttpTelemetryErrorCode,
+	type HttpTelemetryRetryPayload,
+	type HttpTelemetryLogPayload,
+	type HttpTelemetryHeaderPayload,
+} from "../runtime/http-telemetry.js";
+export type { HttpRetrySummary } from "../types.js";
+
+export {
 	NativeTelemetryCollector,
 	type NativeAttemptSample,
 	type NativeConnectTelemetryEvent,

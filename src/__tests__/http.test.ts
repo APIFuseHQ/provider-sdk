@@ -2098,3 +2098,273 @@ describe("createHttpClient", () => {
 		});
 	});
 });
+
+import {
+	faultingHttpSink,
+	observerFaults,
+	observerFailure,
+	type ObserverFault,
+} from "./fixtures/http-telemetry-observers.js";
+
+// Observe actual native-fetch inputs and terminal results, with/without the request sink.
+describe("HTTP telemetry transport differential", () => {
+	it.each([
+		"get",
+		"post",
+		"binary",
+		"head",
+		"status retry",
+		"network retry",
+		"timeout retry",
+		"status failure",
+		"network failure",
+		"already aborted",
+		"inflight abort",
+		"invalid JSON",
+		"inspect error response",
+		"redirect",
+		"backoff abort",
+		"throwing sink",
+	] as const)("preserves request bytes, ordering and errors: %s", async (scenario) => {
+		const { createHttpClient } = await import("../runtime/http.js");
+		const { HttpTelemetryCollector } = await import("../runtime/http-telemetry.js");
+		const savedFetch = globalThis.fetch;
+		async function run(recording: boolean, fault?: ObserverFault) {
+			const collector = new HttpTelemetryCollector();
+			const controller = new AbortController();
+			const transcript: unknown[] = [];
+			const retry = {
+				attempts: 3,
+				baseDelayMs: scenario === "backoff abort" ? 100 : 0,
+				jitter: "none",
+				statusCodes: [503],
+			} as const;
+			let count = 0;
+			if (scenario === "already aborted") controller.abort(new Error("cancelled before dispatch"));
+			globalThis.fetch = createLocalFetchDouble(async (input, init) => {
+				count++;
+				transcript.push({
+					url: String(input),
+					method: init?.method,
+					headers: Object.fromEntries(new Headers(init?.headers).entries()),
+					body: init?.body instanceof Uint8Array ? [...init.body] : init?.body,
+					proxy: init && "proxy" in init ? init.proxy : undefined,
+				});
+				if (scenario === "inflight abort") {
+					controller.abort(new Error("inflight cancelled"));
+					throw new DOMException("fetch aborted", "AbortError");
+				}
+				if (scenario === "backoff abort") {
+					setTimeout(() => controller.abort(new Error("backoff cancelled")), 1);
+					throw new Error("socket hang up");
+				}
+				if (scenario === "network failure" || (scenario === "network retry" && count < 3))
+					throw new Error("socket hang up");
+				if (scenario === "timeout retry" && count < 3)
+					throw new DOMException("request timed out", "TimeoutError");
+				if (
+					scenario === "status failure" ||
+					scenario === "inspect error response" ||
+					(scenario === "status retry" && count < 3)
+				)
+					return new Response("upstream unavailable", { status: 503 });
+				if (scenario === "invalid JSON")
+					return new Response("{invalid", { headers: { "content-type": "application/json" } });
+				if (scenario === "redirect" && count === 1)
+					return new Response(null, { status: 302, headers: { location: "/destination" } });
+				if (scenario === "head") return new Response(null, { status: 200 });
+				return new Response(new Uint8Array([0x00, 0xff, 0x42]), { status: 200 });
+			});
+			const sink =
+				scenario === "throwing sink"
+					? {
+							startRequest: () => {
+								throw new Error("observer failed");
+							},
+						}
+					: collector;
+			const client = createHttpClient(undefined, {
+				signal: controller.signal,
+				...(recording ? { httpTelemetry: fault ? faultingHttpSink(collector, fault) : sink } : {}),
+				...(fault?.hook === "onRetrySummary"
+					? {
+							onRetrySummary: () => {
+								observerFailure(fault);
+							},
+						}
+					: {}),
+				...(scenario === "binary" ? { proxy: "http://static.proxy.test:8080" } : {}),
+			});
+			try {
+				const response = await client.request("https://example.com/probe", {
+					method:
+						scenario === "post" || scenario === "binary"
+							? "POST"
+							: scenario === "head"
+								? "HEAD"
+								: "GET",
+					...(scenario === "post" ? { body: { value: "request body" } } : {}),
+					...(scenario === "binary" ? { body: new Uint8Array([0, 255, 3]) } : {}),
+					headers: { "X-Probe": "kept" },
+					...(scenario.includes("retry") ||
+					scenario === "status failure" ||
+					scenario === "backoff abort"
+						? { retry }
+						: { retry: false }),
+					...(scenario === "inspect error response" ? { throwOnHttpError: false } : {}),
+					...(scenario === "redirect"
+						? { redirectPolicy: { mode: "same-origin", maxHops: 2 } }
+						: {}),
+				});
+				transcript.push({ status: response.status, bytes: [...(await response.bytes())] });
+			} catch (error) {
+				if (!(error instanceof Error)) throw error;
+				transcript.push({
+					name: error.name,
+					message: error.message,
+					...(error instanceof TransportError
+						? {
+								code: error.code,
+								status: error.status,
+								retryable: "retryable" in error ? error.retryable : undefined,
+							}
+						: {}),
+				});
+			}
+			return { transcript, log: collector.toLogPayload(), count };
+		}
+		try {
+			const off = await run(false);
+			const on = await run(true);
+			for (const fault of observerFaults) {
+				const faulty = await run(true, fault);
+				expect(faulty.transcript).toEqual(off.transcript);
+			}
+			expect(on.transcript).toEqual(off.transcript);
+			expect(on.count).toBe(off.count);
+			if (scenario === "already aborted" || scenario === "throwing sink")
+				expect(on.log).toBeUndefined();
+			else {
+				expect(on.log?.attempts).toBe(scenario === "redirect" ? 1 : on.count);
+				expect(on.log?.attemptSamples).toHaveLength(on.log!.attempts);
+				if (scenario.includes("retry") || scenario === "status failure")
+					expect(on.log?.attempts).toBe(3);
+				if (scenario === "timeout retry") expect(on.log?.timeouts).toBe(2);
+				if (scenario === "binary") expect(on.log?.proxyUsed).toBe(true);
+				if (scenario === "inflight abort")
+					expect(on.log?.lastErrorCode).toBe("transport_cancelled");
+			}
+		} finally {
+			globalThis.fetch = savedFetch;
+		}
+	});
+});
+
+describe("HTTP stream header telemetry differential", () => {
+	it.each([
+		"stream",
+		"sse",
+		"status failure",
+		"network failure",
+		"timeout",
+		"abort",
+		"body failure",
+	] as const)("preserves stream protocol and records only header setup: %s", async (scenario) => {
+		const { createHttpClient } = await import("../runtime/http.js");
+		const { HttpTelemetryCollector } = await import("../runtime/http-telemetry.js");
+		const savedFetch = globalThis.fetch;
+		async function run(recording: boolean, fault?: ObserverFault) {
+			const collector = new HttpTelemetryCollector();
+			const controller = new AbortController();
+			const transcript: unknown[] = [];
+			globalThis.fetch = createLocalFetchDouble(async (input, init) => {
+				transcript.push({
+					url: String(input),
+					method: init?.method,
+					headers: Object.fromEntries(new Headers(init?.headers)),
+					proxy: init && "proxy" in init ? init.proxy : undefined,
+				});
+				if (scenario === "network failure") throw new Error("connection reset");
+				if (scenario === "timeout") throw new DOMException("deadline exceeded", "TimeoutError");
+				if (scenario === "abort") {
+					controller.abort(new Error("cancelled"));
+					throw new DOMException("aborted", "AbortError");
+				}
+				if (scenario === "body failure")
+					return new Response(
+						new ReadableStream({
+							pull(c) {
+								c.error(new Error("body failed"));
+							},
+						}),
+					);
+				return new Response("data: hello\n\n", {
+					status: scenario === "status failure" ? 503 : 200,
+				});
+			});
+			const client = createHttpClient(undefined, {
+				proxy: "http://proxy.example:8080",
+				signal: controller.signal,
+				...(recording
+					? { httpTelemetry: fault ? faultingHttpSink(collector, fault) : collector }
+					: {}),
+				...(fault?.hook === "onRetrySummary"
+					? {
+							onRetrySummary: () => {
+								observerFailure(fault);
+							},
+						}
+					: {}),
+			});
+			let atHeaders: ReturnType<typeof collector.toLogPayload>;
+			try {
+				if (scenario === "sse") {
+					const messages = await client.sse("https://example.com/stream");
+					atHeaders = collector.toLogPayload();
+					for await (const message of messages)
+						transcript.push({ event: message.event, data: message.data });
+				} else {
+					const response = await client.stream("https://example.com/stream");
+					atHeaders = collector.toLogPayload();
+					transcript.push({ status: response.status });
+					transcript.push({
+						bytes: [...new Uint8Array(await new Response(response.body).arrayBuffer())],
+					});
+				}
+			} catch (error) {
+				if (!(error instanceof Error)) throw error;
+				transcript.push({
+					name: error.name,
+					message: error.message,
+					...(error instanceof TransportError ? { code: error.code, status: error.status } : {}),
+				});
+			}
+			if (atHeaders) expect(collector.toLogPayload()).toEqual(atHeaders);
+			return { transcript, log: collector.toLogPayload() };
+		}
+		try {
+			const off = await run(false);
+			const on = await run(true);
+			for (const fault of observerFaults) {
+				const faulty = await run(true, fault);
+				expect(faulty.transcript).toEqual(off.transcript);
+			}
+			expect(on.transcript).toEqual(off.transcript);
+			expect(on.log).toMatchObject({
+				attempts: 1,
+				retries: 0,
+				proxyUsed: true,
+				retryPreset: "off",
+				dropped: 0,
+			});
+			expect(on.log?.attemptSamples).toHaveLength(1);
+			if (scenario === "timeout") expect(on.log?.timeouts).toBe(1);
+			if (scenario === "body failure") {
+				expect(on.log?.lastStatus).toBe(200);
+				expect(on.log?.lastErrorCode).toBeUndefined();
+			}
+		} finally {
+			globalThis.fetch = savedFetch;
+		}
+	});
+});

@@ -878,7 +878,23 @@ describe("provider HTTP server", () => {
 			const telemetryHeader = response.headers.get(PROVIDER_TELEMETRY_HEADER);
 			expect(telemetryHeader).toBeTruthy();
 			const decoded = JSON.parse(Buffer.from(telemetryHeader ?? "", "base64url").toString("utf8"));
-			expect(decoded).toEqual({ v: 1, taxonomy: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION, proxy });
+			expect(decoded).toEqual({
+				v: 1,
+				taxonomy: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+				proxy,
+				http: {
+					attempts: 1,
+					retries: 0,
+					timeouts: 0,
+					proxyUsed: false,
+					lastStatus: 200,
+					retryPreset: "transport_transient",
+					transport: "native",
+					dropped: 0,
+					ms: expect.any(Number),
+					attemptSamples: [{ n: 1, ms: expect.any(Number), status: 200 }],
+				},
+			});
 		} finally {
 			global.fetch = originalFetch;
 			if (originalSmartproxyKey === undefined) {

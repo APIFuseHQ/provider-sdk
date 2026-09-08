@@ -1,3 +1,4 @@
+import { HttpTelemetryCollector } from "../runtime/http-telemetry.js";
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { Callback, Redis, RedisKey, RedisValue } from "ioredis";
 
@@ -560,7 +561,11 @@ describe("proxy integration", () => {
 		const header = telemetry.toHeaderValue();
 		expect(header).toBeTruthy();
 		const decoded = JSON.parse(Buffer.from(header ?? "", "base64url").toString("utf8"));
-		expect(decoded).toEqual({ v: 1, taxonomy: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION, proxy: payload });
+		expect(decoded).toEqual({
+			v: 1,
+			taxonomy: PROVIDER_OBSERVABILITY_TAXONOMY_VERSION,
+			proxy: payload,
+		});
 	});
 
 	it("uses the last successful resolution as the serving vendor while aggregating failures", () => {
@@ -1622,9 +1627,11 @@ describe("proxy integration", () => {
 		);
 
 		let retrySummary: HttpRetrySummary | undefined;
+		const httpTelemetry = new HttpTelemetryCollector();
 		const { createHttpClient } = await import("../runtime/http.js");
 		const http = createHttpClient("https://example.com", {
 			affinityKey: "af_con_http_partial_crossover",
+			httpTelemetry,
 			onRetrySummary: (summary) => {
 				retrySummary = summary;
 			},
@@ -1658,6 +1665,10 @@ describe("proxy integration", () => {
 			transport: "native",
 			lastErrorCode: "transport_network_error",
 		});
+		expect(httpTelemetry.toLogPayload()?.attempts).toBe(3);
+		expect(httpTelemetry.toLogPayload()?.attemptSamples.map(({ n }) => n)).toEqual([1, 2, 3]);
+		expect(httpTelemetry.toLogPayload()?.retry as unknown).toEqual(retrySummary);
+		expect(httpTelemetry.toLogPayload()?.proxyUsed).toBe(true);
 	});
 
 	it("honors an explicit ctx.http retry count against a single-endpoint allocation", async () => {

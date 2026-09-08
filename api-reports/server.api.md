@@ -1331,6 +1331,32 @@ type HealthScheduleRandomization = {
 type HealthStep = OperationStep | ExtractStep | AssertStep | GuardStep;
 
 // @public (undocumented)
+export type HttpAttemptSample = {
+    n: number;
+    ms: number;
+    status?: number;
+    e?: HttpTelemetryErrorCode;
+    diagnostics?: HttpAttemptTelemetryEvent["diagnostics"];
+};
+
+// @public (undocumented)
+export type HttpAttemptTelemetryEvent = {
+    ms: number;
+    proxyUsed: boolean;
+    status?: number;
+    e?: HttpTelemetryErrorCode;
+    statusRetry?: boolean;
+    diagnostics?: {
+        name: string;
+        message: string;
+        cause?: {
+            name: string;
+            message: string;
+        };
+    };
+};
+
+// @public (undocumented)
 interface HttpClient {
     // (undocumented)
     delete(url: string, options?: RequestOptions): Promise<HttpResponse>;
@@ -1469,6 +1495,22 @@ const HttpRetryPreset: {
 type HttpRetryPreset = (typeof HttpRetryPreset)[keyof typeof HttpRetryPreset];
 
 // @public (undocumented)
+export interface HttpRetrySummary {
+    // (undocumented)
+    attempts: number;
+    // (undocumented)
+    lastErrorCode?: string;
+    // (undocumented)
+    lastStatus?: number;
+    // (undocumented)
+    preset?: HttpRetryPreset;
+    // (undocumented)
+    retries: number;
+    // (undocumented)
+    transport: "native";
+}
+
+// @public (undocumented)
 const HttpRetryUnsafeMethodPolicy: {
     readonly Reject: "reject";
     readonly AllowExplicitUnsafe: "allow_explicit_unsafe";
@@ -1493,6 +1535,95 @@ interface HttpStreamResponse {
     status: number;
     // (undocumented)
     textChunks(): AsyncIterable<string>;
+}
+
+// @public (undocumented)
+export class HttpTelemetryCollector implements HttpTelemetrySink, TelemetryContributor<HttpTelemetryLogPayload, HttpTelemetryHeaderPayload> {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "http";
+    // (undocumented)
+    markTelemetryFailed(): void;
+    // (undocumented)
+    startRequest(options: {
+        retryPreset?: HttpRetrySummary["preset"];
+    }): HttpTelemetryRequestSink;
+    // (undocumented)
+    toHeaderPayload(log: HttpTelemetryLogPayload): HttpTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(): HttpTelemetryLogPayload | undefined;
+    // (undocumented)
+    toTenantRetryPayload(): TenantNeutral<HttpTelemetryRetryPayload> | undefined;
+}
+
+// @public
+export type HttpTelemetryErrorCode = "transport_network_error" | "transport_timeout" | "transport_cancelled" | "upstream_http_error" | "other";
+
+// @public (undocumented)
+export type HttpTelemetryHeaderPayload = {
+    attempts: number;
+    retries: number;
+    timeouts: number;
+    proxyUsed: boolean;
+    lastStatus?: number;
+    retryPreset?: ClosedEnum<NonNullable<HttpRetrySummary["preset"]>>;
+    transport: ClosedEnum<HttpRetrySummary["transport"]>;
+    lastErrorCode?: ClosedEnum<HttpTelemetryErrorCode>;
+    attemptSamples: {
+        n: number;
+        ms: number;
+        status?: number;
+        e?: ClosedEnum<HttpTelemetryErrorCode>;
+    }[];
+    dropped: number;
+    ms: number;
+    retry?: HttpTelemetryRetryPayload;
+};
+
+// @public (undocumented)
+export type HttpTelemetryLogPayload = {
+    telemetryFailed?: true;
+    attempts: number;
+    retries: number;
+    timeouts: number;
+    proxyUsed: boolean;
+    lastStatus?: number;
+    retryPreset?: HttpRetrySummary["preset"];
+    transport: HttpRetrySummary["transport"];
+    lastErrorCode?: HttpTelemetryErrorCode;
+    attemptSamples: HttpAttemptSample[];
+    dropped: number;
+    ms: number;
+    retry?: HttpTelemetryRetryPayload;
+};
+
+// @public (undocumented)
+export interface HttpTelemetryRequestSink {
+    finish(ms: number): void;
+    // (undocumented)
+    recordAttempt(event: HttpAttemptTelemetryEvent): void;
+    // (undocumented)
+    toTenantRetryPayload(): TenantNeutral<HttpTelemetryRetryPayload> | undefined;
+}
+
+// @public (undocumented)
+export type HttpTelemetryRetryPayload = {
+    attempts: number;
+    retries: number;
+    preset?: ClosedEnum<NonNullable<HttpRetrySummary["preset"]>>;
+    transport: ClosedEnum<HttpRetrySummary["transport"]>;
+    lastErrorCode?: ClosedEnum<HttpTelemetryErrorCode>;
+    lastStatus?: number;
+};
+
+// @public (undocumented)
+export interface HttpTelemetrySink {
+    markTelemetryFailed?(): void;
+    startRequest(options: {
+        retryPreset?: HttpRetrySummary["preset"];
+    }): HttpTelemetryRequestSink;
 }
 
 // Warning: (ae-forgotten-export) The symbol "SchemaLike" needs to be exported by the entry point index.d.ts
@@ -3401,6 +3532,7 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
     status: number;
     proxy?: ProxyTelemetryLogPayload;
     resolver?: ResolverTelemetryLogPayload;
+    http?: HttpTelemetryLogPayload;
 };
 
 // @public (undocumented)
@@ -5242,9 +5374,9 @@ export function verifySelfTestAuthorization(authorizationHeader: string | undefi
 // dist/runtime/native-telemetry.d.ts:38:5 - (ae-forgotten-export) The symbol "ProviderProxyProvider" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:111:9 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point index.d.ts
 // dist/runtime/proxy-telemetry.d.ts:120:9 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:15:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:144:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
-// dist/server/serve-implementation.d.ts:156:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:16:5 - (ae-forgotten-export) The symbol "ProviderErrorCategory" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:146:5 - (ae-forgotten-export) The symbol "ProviderEngine" needs to be exported by the entry point index.d.ts
+// dist/server/serve-implementation.d.ts:158:9 - (ae-forgotten-export) The symbol "ProviderServerStatefulOwnerFenceValidator" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:128:5 - (ae-forgotten-export) The symbol "E164PhoneNumber" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:337:5 - (ae-forgotten-export) The symbol "ProviderResolverVendor" needs to be exported by the entry point index.d.ts
 // dist/types.d.ts:339:5 - (ae-forgotten-export) The symbol "ProviderChallengeKind" needs to be exported by the entry point index.d.ts

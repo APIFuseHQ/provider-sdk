@@ -1,4 +1,3 @@
-import { NativeTelemetryCollector } from "../runtime/native-telemetry.js";
 import { STATUS_CODES } from "node:http";
 import { readDiagnosticEnv, withDiagnosticEnv } from "../runtime/diagnostic-env.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -77,6 +76,13 @@ import {
 import { createEnvContext } from "../runtime/env.js";
 import { executeOperation } from "../runtime/executor.js";
 import { createHttpClient } from "../runtime/http.js";
+import { NativeTelemetryCollector } from "../runtime/native-telemetry.js";
+import {
+	bindHttpTelemetry,
+	isSupportedHttpBinding,
+	warnUnsupportedHttpBinding,
+} from "../runtime/http-telemetry-binding.js";
+import { HttpTelemetryCollector, type HttpTelemetryLogPayload } from "../runtime/http-telemetry.js";
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import type * as NativeNetworkRuntimeModule from "../runtime/native-network.js";
 import { createOcrClientFromEnv } from "../runtime/ocr.js";
@@ -153,7 +159,6 @@ import type {
 	BrowserClient,
 	FlowContext,
 	FlowContextStore,
-	HttpRetrySummary,
 	OcrContext,
 	OperationDefinition,
 	OperationErrorCode,
@@ -234,29 +239,7 @@ function providerErrorCode(error: unknown): string | undefined {
 }
 
 const AUTH_FLOW_LOCALES = ["en", "ko", "ja"] as const;
-const retryResponseMeta = new WeakMap<ProviderContext, HttpRetrySummary>();
-type RetryLastErrorCode =
-	// runtime/http.ts:178-179 preserves ambient cancellation.
-	| "transport_cancelled"
-	// runtime/http.ts:180-196 normalizes timeout aborts and timeout-shaped errors.
-	| "transport_timeout"
-	// runtime/http.ts:198-225 normalizes other native fetch failures.
-	| "transport_network_error"
-	// runtime/http.ts:119-126,763-771,829-837 creates upstream status errors.
-	| "upstream_http_error"
-	// runtime/proxy-retry-policy.ts:64-84 forwards other coded TransportErrors; the builder closes them.
-	| "other";
-const RETRY_LAST_ERROR_CODES = [
-	"transport_cancelled",
-	"transport_timeout",
-	"transport_network_error",
-	"upstream_http_error",
-	"other",
-] as const satisfies readonly RetryLastErrorCode[];
-
-function tenantRetryLastErrorCode(value: string): RetryLastErrorCode {
-	return RETRY_LAST_ERROR_CODES.find((candidate) => candidate === value) ?? "other";
-}
+const retryResponseMeta = new WeakMap<ProviderContext, HttpTelemetryCollector>();
 const STATEFUL_INTERNAL_OPERATIONS_ROUTE = "/__apifuse/stateful/operations";
 const STATEFUL_FORWARDING_SOURCE_POD_HEADER = "x-apifuse-stateful-source-pod";
 const DEFAULT_STATEFUL_FORWARDING_MAX_SKEW_MS = 5 * 60_000;
@@ -845,6 +828,7 @@ type RequestScopeContext = {
 	telemetry: RequestTelemetry;
 	resolverTelemetry: ResolverTelemetryCollector;
 	nativeTelemetry: NativeTelemetryCollector;
+	httpTelemetry: HttpTelemetryCollector;
 };
 
 function createProviderContext(
@@ -873,7 +857,6 @@ function createProviderContext(
 		request.requestId,
 	);
 	const cache = createProviderCache({ providerId: provider.id });
-	let wrappedContext: ProviderContext | undefined;
 	const { capabilityModules } = options;
 	const resolverOptions = createResolverRuntimeOptions(
 		provider,
@@ -941,10 +924,7 @@ function createProviderContext(
 		http: createHttpClient(baseUrl, {
 			...proxyClientOptions,
 			...(signal ? { signal } : {}),
-			onRetrySummary: (summary) => {
-				if (summary.attempts <= 1 || !wrappedContext) return;
-				retryResponseMeta.set(wrappedContext, summary);
-			},
+			httpTelemetry: scope.httpTelemetry,
 		}),
 		cache,
 		state: requestState,
@@ -1015,10 +995,30 @@ function createProviderContext(
 				}),
 		}),
 	};
-	const context = wrapWithInstrumentation(
-		options.engine.attach({ provider, bindings }) as ProviderContext,
-	);
-	wrappedContext = context;
+	const candidateHttp = bindings.http;
+	const attached = options.engine.attach({ provider, bindings }) as ProviderContext;
+	const hostHttp = provider.http ? attached.http : undefined;
+	const supportedHostHttp = provider.http && isSupportedHttpBinding(hostHttp);
+	if (provider.http && !supportedHostHttp) warnUnsupportedHttpBinding();
+	const observedHttp =
+		supportedHostHttp && hostHttp !== candidateHttp
+			? bindHttpTelemetry(hostHttp, scope.httpTelemetry)
+			: undefined;
+	const contextTarget = observedHttp
+		? new Proxy(attached, {
+				get(target, property, receiver) {
+					return property === "http" ? observedHttp : Reflect.get(target, property, receiver);
+				},
+			})
+		: provider.http && !supportedHostHttp
+			? new Proxy(attached, {
+					get(target, property, receiver) {
+						return property === "http" ? undefined : Reflect.get(target, property, receiver);
+					},
+				})
+			: attached;
+	const context = wrapWithInstrumentation(contextTarget);
+	retryResponseMeta.set(context, scope.httpTelemetry);
 	return context;
 }
 
@@ -1199,6 +1199,7 @@ function createAuthFlowContext(
 		http: createHttpClient(baseUrl, {
 			...proxyClientOptions,
 			...(signal ? { signal } : {}),
+			httpTelemetry: scope.httpTelemetry,
 		}),
 		state: state.forConnection(resolveOperationConnectionId(request)),
 		stealth: stealthBaseUrl
@@ -1288,6 +1289,7 @@ type ProviderServerLogEventBase = ProviderRequestCost & {
 	status: number;
 	proxy?: ProxyTelemetryLogPayload;
 	resolver?: ResolverTelemetryLogPayload;
+	http?: HttpTelemetryLogPayload;
 };
 
 export type ProviderServerLogEvent =
@@ -2276,10 +2278,12 @@ function createRequestScope(input: {
 	const proxyCollector = new ProxyTelemetryCollector();
 	const resolverCollector = new ResolverTelemetryCollector({ redact });
 	const nativeCollector = new NativeTelemetryCollector({ redact });
+	const httpCollector = new HttpTelemetryCollector({ redact });
 	const telemetry = new RequestTelemetry(trace);
 	telemetry.register(proxyCollector);
 	telemetry.register(resolverCollector);
 	telemetry.register(nativeCollector);
+	telemetry.register(httpCollector);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
 	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
 	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
@@ -2362,6 +2366,7 @@ function createRequestScope(input: {
 		telemetry,
 		resolverTelemetry: resolverCollector,
 		nativeTelemetry: nativeCollector,
+		httpTelemetry: httpCollector,
 		seedCredentials(rawBody, kind): void {
 			const harvested = rawRequestCredentials(rawBody, kind);
 			sensitiveRegistry.add(harvested.values);
@@ -2581,20 +2586,12 @@ function toJsonSuccessResponse(
 	}
 
 	const cacheMeta = ctx && "cache" in ctx ? ctx.cache.responseMeta() : undefined;
-	const retryMeta = ctx ? retryResponseMeta.get(ctx) : undefined;
+	const retry = ctx ? retryResponseMeta.get(ctx)?.toTenantRetryPayload() : undefined;
 	type TenantCacheMeta = {
 		hit: boolean;
 		stale: boolean;
 		keys: TenantOpaqueKeys;
 		source?: ClosedEnum<NonNullable<ProviderCacheResponseMeta["source"]>>;
-	};
-	type TenantRetryMeta = {
-		attempts: number;
-		retries: number;
-		preset?: ClosedEnum<NonNullable<HttpRetrySummary["preset"]>>;
-		transport: ClosedEnum<HttpRetrySummary["transport"]>;
-		lastErrorCode?: ClosedEnum<RetryLastErrorCode>;
-		lastStatus?: number;
 	};
 	const cache: TenantNeutral<TenantCacheMeta> | undefined = cacheMeta
 		? {
@@ -2605,22 +2602,8 @@ function toJsonSuccessResponse(
 				...(cacheMeta.source ? { source: closedEnum(cacheMeta.source) } : {}),
 			}
 		: undefined;
-	const retry: TenantNeutral<TenantRetryMeta> | undefined = retryMeta
-		? {
-				attempts: retryMeta.attempts,
-				retries: retryMeta.retries,
-				...(retryMeta.preset ? { preset: closedEnum(retryMeta.preset) } : {}),
-				transport: closedEnum(retryMeta.transport),
-				...(retryMeta.lastErrorCode
-					? {
-							lastErrorCode: closedEnum(tenantRetryLastErrorCode(retryMeta.lastErrorCode)),
-						}
-					: {}),
-				...(retryMeta.lastStatus ? { lastStatus: retryMeta.lastStatus } : {}),
-			}
-		: undefined;
 	const meta =
-		cacheMeta || retryMeta
+		cacheMeta || retry
 			? {
 					...(cache
 						? {
