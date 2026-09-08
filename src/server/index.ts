@@ -128,3 +128,20 @@ export {
 	OperationRequestSchema,
 	OperationSuccessResponseSchema,
 } from "./types.js";
+
+export {
+	NativeTelemetryCollector,
+	type NativeAttemptSample,
+	type NativeConnectTelemetryEvent,
+	type NativeLifecycleTelemetryEvent,
+	type NativeTelemetryDiagnostics,
+	type NativeTelemetryErrorCode,
+	type NativeTelemetryHeaderPayload,
+	type NativeTelemetryKind,
+	type NativeTelemetryLifecycleKind,
+	type NativeTelemetryLogPayload,
+	type NativeTelemetryOutcome,
+	type NativeTelemetrySink,
+	type NativeTelemetryVendorSkipReason,
+	type NativeVendorSkipTelemetryEvent,
+} from "../runtime/native-telemetry.js";

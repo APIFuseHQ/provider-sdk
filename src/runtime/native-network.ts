@@ -11,6 +11,7 @@ import {
 	type ProxyProtocol,
 	VENDOR_DEFAULT_PROTOCOL,
 	resolveWithVendor,
+	type ProxyTelemetrySink,
 } from "../config/loader.js";
 import {
 	type DynamicEgressRuleSnapshot,
@@ -61,6 +62,12 @@ import {
 	synthesizeNodemavenProxy,
 } from "./proxy-nodemaven.js";
 import { redactSensitiveError } from "./request-options.js";
+import type {
+	NativeConnectTelemetryEvent,
+	NativeTelemetryDiagnostics,
+	NativeTelemetryErrorCode,
+	NativeTelemetrySink,
+} from "./native-telemetry.js";
 
 export {
 	NativeEgressGrantExpiredError,
@@ -82,6 +89,8 @@ export type NativeGatewayProxySynthesisInput = {
 	readonly now: number;
 	readonly protocol: ProxyProtocol;
 	readonly credentials: VendorCredentialResolver;
+	/** Existing proxy lease telemetry; adapters may report detailed allocation facts. */
+	readonly telemetry?: ProxyTelemetrySink;
 };
 
 export type VendorCredentialLookup =
@@ -113,9 +122,15 @@ export type NativeGatewayProxyResolutionInput = {
 	readonly protocol?: ProxyProtocol;
 	readonly credentials?: VendorCredentialResolver;
 	readonly gatewaySynthesizers?: readonly NativeGatewayProxySynthesizer[];
+	readonly telemetry?: ProxyTelemetrySink;
+	readonly nativeTelemetry?: NativeTelemetrySink;
 };
 
 export type NativeNetworkClientOptions = {
+	/** Existing proxy lease contributor, shared with HTTP and stealth. */
+	readonly telemetry?: ProxyTelemetrySink;
+	/** Request-scoped connection, byte and lifecycle observations. */
+	readonly nativeTelemetry?: NativeTelemetrySink;
 	readonly proxyPolicy?: ProviderProxyPolicy;
 	readonly affinityKey?: string;
 	/** Stable credential/account identity; hashed before vendor synthesis. */
@@ -238,6 +253,7 @@ async function synthesizeSmartproxyGateway(
 				proxyPolicy: input.policy,
 				affinityKey: input.affinityKey,
 				protocol: input.protocol,
+				telemetry: input.telemetry,
 			},
 			{
 				protocol: input.protocol,
@@ -257,6 +273,9 @@ async function synthesizeSmartproxyGateway(
 			sticky: isStickyPolicy(input.policy),
 		};
 	} catch (error) {
+		if (error instanceof ProxyResolutionError && error.telemetry) {
+			emitTelemetry(() => input.telemetry?.recordProxyResolution(error.telemetry!));
+		}
 		const cause = error instanceof Error ? error : new Error(String(error));
 		return skipped({
 			kind: "allocation_failed",
@@ -345,6 +364,61 @@ function defaultVendorProtocol(vendor: ProviderProxyProvider): ProxyProtocol {
 		: "http";
 }
 
+// Instrumentation must not change the transport's exceptions or vendor ordering.
+function emitTelemetry(emit: () => void): void {
+	try {
+		emit();
+	} catch {
+		/* An observer cannot fail an underlying operation. */
+	}
+}
+
+function nativeErrorCode(error: unknown): NativeTelemetryErrorCode {
+	const code =
+		error instanceof NativeNetworkError || error instanceof ProxyResolutionError
+			? error.code
+			: undefined;
+	switch (code) {
+		case "native_connection_aborted":
+		case "native_connection_closed":
+		case "native_connection_failed":
+		case "native_connection_idle_timeout":
+		case "native_connection_timeout":
+		case "native_egress_authorization_failed":
+		case "native_egress_grant_expired":
+		case "native_egress_grant_invalid":
+		case "native_egress_grant_limit_exceeded":
+		case "native_egress_input_invalid":
+		case "native_egress_not_declared":
+		case "native_egress_policy_invalid":
+		case "native_dynamic_egress_unsupported":
+		case "native_proxy_expired":
+		case "native_proxy_invalid":
+		case "PROXY_REQUIRED":
+		case "PROXY_ALLOCATION_FAILED":
+			return code;
+		default:
+			return "other";
+	}
+}
+
+function nativeErrorDiagnostics(error: unknown): NativeTelemetryDiagnostics {
+	if (!(error instanceof Error)) return {};
+	const cause = error.cause instanceof Error ? error.cause : undefined;
+	const detail = cause ?? error;
+	const systemCode: unknown = Reflect.get(detail, "code");
+	const status: unknown = Reflect.get(detail, "connectStatusCode");
+	const socksReplyCode: unknown = Reflect.get(detail, "socks5ReplyCode");
+	return {
+		errorName: error.name,
+		errorMessage: error.message,
+		...(cause ? { causeName: cause.name, causeMessage: cause.message } : {}),
+		...(typeof systemCode === "string" ? { systemCode } : {}),
+		...(typeof status === "number" ? { status } : {}),
+		...(typeof socksReplyCode === "number" ? { socksReplyCode } : {}),
+	};
+}
+
 async function resolveNativeGatewayProxyDetailed(
 	input: NativeGatewayProxyResolutionInput,
 ): Promise<{ proxy?: NativeGatewayProxy; skips: readonly NativeGatewayVendorSkip[] }> {
@@ -353,14 +427,67 @@ async function resolveNativeGatewayProxyDetailed(
 	const credentials = input.credentials ?? createEnvVendorCredentialResolver();
 	const now = input.now ?? Date.now();
 	const skips: NativeGatewayVendorSkip[] = [];
-	for (const vendor of resolveNativeVendorChain(input.policy)) {
+	const chain = resolveNativeVendorChain(input.policy);
+	const recordSkip = (skip: NativeGatewayVendorSkip): void => {
+		skips.push(skip);
+		emitTelemetry(() =>
+			input.nativeTelemetry?.recordVendorSkip({
+				vendor: skip.vendor,
+				reason: skip.reason.kind,
+				diagnostics:
+					skip.reason.kind === "credentials_absent"
+						? { missingFields: skip.reason.missing }
+						: skip.reason.kind === "protocol_unsupported"
+							? { protocol: skip.reason.protocol }
+							: skip.reason.kind === "allocation_failed" ||
+									skip.reason.kind === "credential_lookup_failed"
+								? nativeErrorDiagnostics(skip.reason.cause)
+								: {},
+			}),
+		);
+		if (skip.vendor === "smartproxy" || skip.vendor === "nodemaven") {
+			const vendor = skip.vendor;
+			const next = chain[chain.indexOf(vendor) + 1];
+			emitTelemetry(() =>
+				input.telemetry?.recordProxyVendorFailover?.({
+					vendor,
+					...(next === "smartproxy" || next === "nodemaven" ? { nextVendor: next } : {}),
+					phase: "resolution",
+					reason:
+						skip.reason.kind === "credentials_absent"
+							? "no_credentials"
+							: skip.reason.kind === "protocol_unsupported"
+								? "protocol_unsupported"
+								: "allocation_failed",
+				}),
+			);
+		}
+	};
+	for (const vendor of chain) {
 		const protocol = input.protocol ?? defaultVendorProtocol(vendor);
 		if (!isProxyProtocol(protocol)) {
-			skips.push({ vendor, reason: { kind: "protocol_unsupported", protocol: String(protocol) } });
+			recordSkip({ vendor, reason: { kind: "protocol_unsupported", protocol: String(protocol) } });
 			continue;
 		}
+		let resolutionRecorded = false;
+		const telemetry: ProxyTelemetrySink | undefined = input.telemetry
+			? {
+					recordProxyResolution(event) {
+						resolutionRecorded = true;
+						emitTelemetry(() => input.telemetry?.recordProxyResolution(event));
+					},
+					recordProxyAttempt(event) {
+						emitTelemetry(() => input.telemetry?.recordProxyAttempt?.(event));
+					},
+					recordProxyVendorFailover(event) {
+						emitTelemetry(() => input.telemetry?.recordProxyVendorFailover?.(event));
+					},
+				}
+			: undefined;
 		let vendorSkip: NativeGatewayVendorSkip["reason"] | undefined;
 		for (const synthesize of synthesizers) {
+			const startedAt = Date.now();
+			resolutionRecorded = false;
 			try {
 				const resolved = await synthesize({
 					vendor,
@@ -369,6 +496,7 @@ async function resolveNativeGatewayProxyDetailed(
 					now,
 					protocol,
 					credentials,
+					telemetry,
 				});
 				if (!resolved) continue;
 				if (isSkippedSynthesis(resolved)) {
@@ -377,6 +505,19 @@ async function resolveNativeGatewayProxyDetailed(
 				}
 				if (resolved.vendor === vendor) {
 					assertTunnelingScheme(resolved.url);
+					if (!resolutionRecorded && (vendor === "smartproxy" || vendor === "nodemaven")) {
+						const resolvedProtocol = new URL(resolved.url).protocol === "http:" ? "http" : "socks5";
+						emitTelemetry(() =>
+							telemetry?.recordProxyResolution({
+								provider: vendor,
+								protocol: resolvedProtocol,
+								cacheStatus: "disabled",
+								cacheHit: false,
+								resolutionMs: Math.max(0, Date.now() - startedAt),
+								attempts: 1,
+							}),
+						);
+					}
 					return { proxy: resolved, skips };
 				}
 			} catch (error) {
@@ -386,7 +527,7 @@ async function resolveNativeGatewayProxyDetailed(
 				};
 			}
 		}
-		skips.push({ vendor, reason: vendorSkip ?? { kind: "adapter_unavailable" } });
+		recordSkip({ vendor, reason: vendorSkip ?? { kind: "adapter_unavailable" } });
 	}
 	return { skips };
 }
@@ -908,6 +1049,12 @@ export function createNativeNetworkConnection(
 				idleTimer = undefined;
 				if (socket.readableEnded || socket.destroyed) return;
 				closeReason = new NativeIdleTimeoutError();
+				emitTelemetry(() =>
+					options.nativeTelemetry?.recordLifecycle({
+						kind: "idle",
+						errorCode: "native_connection_idle_timeout",
+					}),
+				);
 				socket.destroy(closeReason);
 			},
 			Math.max(0, idleTimeoutMs),
@@ -924,6 +1071,13 @@ export function createNativeNetworkConnection(
 	};
 	socket.on("error", (error) => {
 		terminalError = error;
+		if (!closeReason)
+			emitTelemetry(() =>
+				options.nativeTelemetry?.recordError({
+					errorCode: "native_connection_failed",
+					diagnostics: nativeErrorDiagnostics(error),
+				}),
+			);
 	});
 	socket.once("end", clearIdleTimer);
 	socket.once("close", clearLifecycle);
@@ -948,15 +1102,35 @@ export function createNativeNetworkConnection(
 		const leadDelay = Math.max(0, remaining - leadSeconds * 1_000);
 		expiringTimer = setTimeout(() => {
 			expiringTimer = undefined;
+			emitTelemetry(() => options.nativeTelemetry?.recordLifecycle({ kind: "drain" }));
 			const handler = drainHandler;
 			if (!handler) {
+				emitTelemetry(() =>
+					options.nativeTelemetry?.recordLifecycle({ kind: "drain_missing_handler" }),
+				);
 				warn("Native sticky proxy is expiring without a drain handler");
 				return;
 			}
 			void (async () => {
 				try {
-					await Promise.race([Promise.resolve(handler(event)), lifecycleCutoff]);
-				} catch {
+					await Promise.race([
+						Promise.resolve(handler(event)).then(() => {
+							if (socket.destroyed || lifecycleSettled) return;
+							emitTelemetry(() =>
+								options.nativeTelemetry?.recordLifecycle({ kind: "drain_acknowledged" }),
+							);
+						}),
+						lifecycleCutoff,
+					]);
+				} catch (error) {
+					if (socket.destroyed || lifecycleSettled) return;
+					emitTelemetry(() =>
+						options.nativeTelemetry?.recordLifecycle({
+							kind: "drain_error",
+							errorCode: "other",
+							diagnostics: nativeErrorDiagnostics(error),
+						}),
+					);
 					// Drain failures do not bypass the hard-expiry fail-safe.
 				}
 			})();
@@ -966,6 +1140,13 @@ export function createNativeNetworkConnection(
 			hardExpiryTimer = undefined;
 			if (socket.destroyed) return;
 			closeReason = new NativeProxyExpiredError(expiresAt);
+			emitTelemetry(() =>
+				options.nativeTelemetry?.recordLifecycle({
+					kind: "expiry",
+					errorCode: "native_proxy_expired",
+					diagnostics: { expiresAt },
+				}),
+			);
 			settleLifecycle();
 			socket.destroy();
 		}, remaining);
@@ -978,6 +1159,9 @@ export function createNativeNetworkConnection(
 		const chunk = socket.read() as Buffer | null;
 		if (chunk) {
 			resetIdleTimer();
+			emitTelemetry(() =>
+				options.nativeTelemetry?.recordBytes({ direction: "in", bytes: chunk.byteLength }),
+			);
 			return new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength);
 		}
 		if (socket.readableEnded || socket.destroyed) return null;
@@ -1025,6 +1209,9 @@ export function createNativeNetworkConnection(
 		write: async (data) => {
 			if (closeReason) throw closeReason;
 			if (socket.destroyed) {
+				emitTelemetry(() =>
+					options.nativeTelemetry?.recordError({ errorCode: "native_connection_closed" }),
+				);
 				throw new NativeNetworkError("Native connection is closed", "native_connection_closed");
 			}
 			await new Promise<void>((resolve, reject) => {
@@ -1033,6 +1220,9 @@ export function createNativeNetworkConnection(
 					else resolve();
 				});
 			});
+			emitTelemetry(() =>
+				options.nativeTelemetry?.recordBytes({ direction: "out", bytes: data.byteLength }),
+			);
 		},
 		close: async () => {
 			if (socket.closed || socket.destroyed) {
@@ -1067,6 +1257,8 @@ async function resolveConnectionProxy(
 			protocol: options.proxyProtocol,
 			credentials: options.credentials,
 			gatewaySynthesizers: options.gatewaySynthesizers,
+			telemetry: options.telemetry,
+			nativeTelemetry: options.nativeTelemetry,
 		}),
 		input.signal,
 		deadline,
@@ -1570,36 +1762,92 @@ export function createNativeNetworkClient(
 	options: NativeNetworkClientOptions = {},
 ): NativeNetworkClient {
 	const egress = createNativeEgressAuthorization(options);
+	const connect = async (
+		input: NativeNetworkConnectInput,
+		kind: "tcp" | "tls",
+	): Promise<NativeNetworkConnection> => {
+		const startedAt = Date.now();
+		let proxy: NativeGatewayProxy | undefined;
+		let request: NativeNetworkConnectInput | undefined;
+		let tunnelMs = 0;
+		let outcome: NativeConnectTelemetryEvent["outcome"] = "error";
+		let failure: unknown;
+		try {
+			request = snapshotNativeConnectInput(input);
+			const tls = kind === "tls" ? "required" : "disabled";
+			egress.assertConnect(request, tls);
+			const deadline = deadlineFrom(request.timeoutMs);
+			assertCanStart(request.signal, deadline);
+			proxy = await resolveConnectionProxy(options, request, deadline);
+			egress.assertConnect(request, tls);
+			let tunnel: Socket | undefined;
+			if (proxy) {
+				const tunnelStartedAt = Date.now();
+				try {
+					const destination = request;
+					tunnel = await connectProxyTunnel(proxy, request, deadline, () =>
+						egress.assertConnect(destination, tls),
+					);
+				} finally {
+					tunnelMs = Math.max(0, Date.now() - tunnelStartedAt);
+				}
+			}
+			const socket =
+				kind === "tls"
+					? await upgradeTls(tunnel, request, deadline)
+					: (tunnel ??
+						(await connectPlainSocket(request.host, request.port, request.signal, deadline)));
+			const connection = createNativeNetworkConnection(
+				socket,
+				proxy,
+				options,
+				request.idleTimeoutMs,
+			);
+			outcome = "ok";
+			return connection;
+		} catch (error) {
+			failure = error;
+			throw error;
+		} finally {
+			// One terminal sample for this connect call, including preflight and rethrows.
+			emitTelemetry(() =>
+				options.nativeTelemetry?.recordConnect({
+					kind,
+					outcome,
+					ms: Math.max(0, Date.now() - startedAt),
+					tunnelMs,
+					proxyUsed: proxy !== undefined,
+					...(proxy ? { vendor: proxy.vendor } : {}),
+					...(outcome === "error" ? { errorCode: nativeErrorCode(failure) } : {}),
+					diagnostics: {
+						...(request
+							? {
+									host: request.host,
+									port: request.port,
+									...(request.timeoutMs === undefined ? {} : { timeoutMs: request.timeoutMs }),
+									...(request.idleTimeoutMs === undefined
+										? {}
+										: { idleTimeoutMs: request.idleTimeoutMs }),
+									...(request.serverName ? { serverName: request.serverName } : {}),
+								}
+							: {}),
+						...(proxy
+							? {
+									protocol: new URL(proxy.url).protocol,
+									sticky: proxy.sticky,
+									...(proxy.sessionId ? { sessionId: proxy.sessionId } : {}),
+									...(proxy.expiresAt ? { expiresAt: proxy.expiresAt } : {}),
+								}
+							: {}),
+						...nativeErrorDiagnostics(failure),
+					},
+				}),
+			);
+		}
+	};
 	return {
-		connectTcp: async (input) => {
-			const request = snapshotNativeConnectInput(input);
-			egress.assertConnect(request, "disabled");
-			const deadline = deadlineFrom(request.timeoutMs);
-			assertCanStart(request.signal, deadline);
-			const proxy = await resolveConnectionProxy(options, request, deadline);
-			egress.assertConnect(request, "disabled");
-			const socket = proxy
-				? await connectProxyTunnel(proxy, request, deadline, () =>
-						egress.assertConnect(request, "disabled"),
-					)
-				: await connectPlainSocket(request.host, request.port, request.signal, deadline);
-			return createNativeNetworkConnection(socket, proxy, options, request.idleTimeoutMs);
-		},
-		connectTls: async (input) => {
-			const request = snapshotNativeConnectInput(input);
-			egress.assertConnect(request, "required");
-			const deadline = deadlineFrom(request.timeoutMs);
-			assertCanStart(request.signal, deadline);
-			const proxy = await resolveConnectionProxy(options, request, deadline);
-			egress.assertConnect(request, "required");
-			const tunnel = proxy
-				? await connectProxyTunnel(proxy, request, deadline, () =>
-						egress.assertConnect(request, "required"),
-					)
-				: undefined;
-			const socket = await upgradeTls(tunnel, request, deadline);
-			return createNativeNetworkConnection(socket, proxy, options, request.idleTimeoutMs);
-		},
+		connectTcp: (input) => connect(input, "tcp"),
+		connectTls: (input) => connect(input, "tls"),
 		grantTcpEgress: (input) => egress.grant(snapshotNativeGrantInput(input)),
 	};
 }

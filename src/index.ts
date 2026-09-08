@@ -540,3 +540,20 @@ export * from "./utils/date.js";
 export * from "./utils/parse.js";
 export * from "./utils/text.js";
 export * from "./utils/transform.js";
+
+export {
+	NativeTelemetryCollector,
+	type NativeAttemptSample,
+	type NativeConnectTelemetryEvent,
+	type NativeLifecycleTelemetryEvent,
+	type NativeTelemetryDiagnostics,
+	type NativeTelemetryErrorCode,
+	type NativeTelemetryHeaderPayload,
+	type NativeTelemetryKind,
+	type NativeTelemetryLifecycleKind,
+	type NativeTelemetryLogPayload,
+	type NativeTelemetryOutcome,
+	type NativeTelemetrySink,
+	type NativeTelemetryVendorSkipReason,
+	type NativeVendorSkipTelemetryEvent,
+} from "./runtime/native-telemetry.js";

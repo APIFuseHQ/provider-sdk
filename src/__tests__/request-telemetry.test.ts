@@ -208,6 +208,23 @@ describe("request telemetry ledger", () => {
 		expect(envelope.truncated).toBe(true);
 	});
 
+	it("drops native before resolver before proxy regardless of registration order", () => {
+		for (const resolverSize of [20, 64]) {
+			const ledger = new RequestTelemetry(createTraceContext());
+			ledger.register(castContributor("native", largeValidPayload("n", 32)));
+			ledger.register(castContributor("resolver", largeValidPayload("r", resolverSize)));
+			ledger.register(recordedProxy());
+			const header = ledger.toHeaderValue()!;
+			const envelope = decode(header);
+			expect(header.length).toBeLessThanOrEqual(4096);
+			expect(envelope.v).toBe(1);
+			expect(envelope.native).toBeUndefined();
+			expect(envelope.resolver !== undefined).toBe(resolverSize === 20);
+			expect(envelope.proxy).toEqual(recordedProxy().toLogPayload());
+			expect(envelope.truncated).toBe(true);
+		}
+	});
+
 	it.each([
 		["BigInt", "stealth", { big: 1n }],
 		[
