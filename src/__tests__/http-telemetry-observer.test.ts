@@ -154,7 +154,13 @@ it("guards observer getters and omits malformed summaries without changing fetch
 });
 
 it("absorbs asynchronous garbage from every synchronous hook, including the marker", async () => {
-	for (const hook of ["startRequest", "recordAttempt", "finish", "toTenantRetryPayload"] as const) {
+	for (const hook of [
+		"startRequest",
+		"recordAttempt",
+		"finish",
+		"toTenantRetryPayload",
+		"hidden-then",
+	] as const) {
 		const collector = new HttpTelemetryCollector();
 		const request = startHttpTelemetry(
 			{
@@ -169,7 +175,18 @@ it("absorbs asynchronous garbage from every synchronous hook, including the mark
 						return invalid as ReturnType<HttpTelemetryCollector["startRequest"]>;
 					}
 					const target = collector.startRequest(options);
-					return { ...target, [hook]: () => Promise.reject(new Error("async observer")) };
+					return {
+						...target,
+						[hook === "hidden-then" ? "recordAttempt" : hook]: () => {
+							if (hook === "hidden-then") {
+								const promise = Promise.reject(new Error("hidden then rejection"));
+								// biome-ignore lint/suspicious/noThenProperty: reproduces a Promise with a hidden then method.
+								Object.defineProperty(promise, "then", { value: undefined });
+								return promise;
+							}
+							return Promise.reject(new Error("async observer"));
+						},
+					};
 				},
 			},
 			undefined,

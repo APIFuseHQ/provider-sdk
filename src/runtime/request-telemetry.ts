@@ -140,7 +140,8 @@ const MAX_INGESTIBLE_ARRAY_LENGTH = 64;
 const MAX_INGESTIBLE_OBJECT_KEYS = 32;
 const MAX_INGESTIBLE_DEPTH = 4;
 const INGESTIBLE_TOKEN = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$/;
-const HEADER_PRIORITY = [
+/** @internal */
+export const HEADER_PRIORITY = [
 	"proxy",
 	"resolver",
 	"native",

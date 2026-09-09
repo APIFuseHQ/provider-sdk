@@ -1,3 +1,4 @@
+import { runCapabilitySpan } from "./capability-telemetry.js";
 import { registerDiagnosticSensitiveValues } from "./diagnostic-redactor.js";
 import type {
 	HttpStreamResponse,
@@ -35,7 +36,15 @@ export type InstrumentedProviderContext<T extends Pick<ProviderContext, "trace">
 	trace: TraceContext;
 };
 
-type InstrumentedNamespace = "http" | "stealth" | "browser" | "session" | "state" | "resolver";
+type InstrumentedNamespace =
+	| "http"
+	| "stealth"
+	| "browser"
+	| "session"
+	| "state"
+	| "resolver"
+	| "ocr"
+	| "stt";
 
 const BROWSER_PAGE_METHODS = new Set(["goto", "fill", "click", "type", "waitForSelector"]);
 const DIAGNOSTIC_BASE_URL = "http://apifuse-instrumentation.invalid";
@@ -398,8 +407,18 @@ function buildSpanAttributes(
 		attributes.method = method;
 	}
 
-	if (status !== undefined && (namespace === "http" || namespace === "stealth")) {
+	if (
+		status !== undefined &&
+		(namespace === "http" || namespace === "stealth" || namespace === "ocr" || namespace === "stt")
+	) {
 		attributes.status = status;
+	}
+	if ((namespace === "ocr" || namespace === "stt") && result && typeof result === "object") {
+		if ("model" in result && typeof result.model === "string") attributes.model = result.model;
+		if ("durationMs" in result && typeof result.durationMs === "number")
+			attributes.duration_ms = result.durationMs;
+		if ("warnings" in result && Array.isArray(result.warnings))
+			attributes.warnings = result.warnings.length;
 	}
 
 	if (duration !== undefined) {
@@ -621,10 +640,15 @@ function wrapNamespace<T extends object>(
 	trace: TraceContext,
 	shouldInstrument?: (methodName: string, args: unknown[]) => boolean,
 ): T {
-	const recorder = getTraceRecorder(trace);
-	if (!recorder) {
-		return target;
-	}
+	const baseRecorder = getTraceRecorder(trace);
+	if (!baseRecorder) return target;
+	const recorder: NonNullable<ReturnType<typeof getTraceRecorder>> =
+		namespace === "ocr" || namespace === "stt"
+			? {
+					runSpan: (name, fn, options) =>
+						runCapabilitySpan(target, () => baseRecorder.runSpan(name, fn, options)),
+				}
+			: baseRecorder;
 
 	const wrappedMethods = new Map<PropertyKey, unknown>();
 	const resolverMetadata =
@@ -878,7 +902,9 @@ export function wrapWithInstrumentation<T extends Pick<ProviderContext, "trace">
 				property === "browser" ||
 				property === "session" ||
 				property === "state" ||
-				property === "resolver"
+				property === "resolver" ||
+				property === "ocr" ||
+				property === "stt"
 			) {
 				const namespace = property;
 				if (wrappedTargets.has(namespace)) {

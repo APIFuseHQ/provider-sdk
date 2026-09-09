@@ -630,6 +630,20 @@ export interface AuthTurn {
 export type Bcp47Locale = string;
 
 // @public (undocumented)
+export function bindOcrTelemetry(context: OcrContext, sink: OcrTelemetrySink, options?: {
+    backend?: OcrTelemetryBackend;
+    engine?: OcrTelemetryEngine;
+    model?: string;
+}): OcrContext;
+
+// @public (undocumented)
+export function bindSttTelemetry(context: SttContext, sink: SttTelemetrySink, options?: {
+    backend?: SttTelemetryBackend;
+    engine?: SttTelemetryEngine;
+    model?: string;
+}): SttContext;
+
+// @public (undocumented)
 export type BoundedJsonPath = z.infer<typeof BoundedJsonPathSchema>;
 
 // @public (undocumented)
@@ -3546,6 +3560,107 @@ export interface OcrResult {
     readonly text: string;
     // (undocumented)
     readonly warnings?: readonly OcrWarning[];
+}
+
+// @public (undocumented)
+export type OcrTelemetryBackend = "cloudflare-workers-ai" | "openai-compatible" | "custom" | "unavailable";
+
+// @public (undocumented)
+export class OcrTelemetryCollector implements OcrTelemetrySink, TelemetryContributor<OcrTelemetryLogPayload, OcrTelemetryHeaderPayload> {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "ocr";
+    // (undocumented)
+    markTelemetryFailed(): void;
+    // (undocumented)
+    record(event: OcrTelemetryEvent): void;
+    // (undocumented)
+    toHeaderPayload(log: OcrTelemetryLogPayload): OcrTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(_spans: SpanIndex): OcrTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type OcrTelemetryEngine = "workers-ai" | "openai-compatible" | "custom";
+
+// @public (undocumented)
+export type OcrTelemetryErrorCode = "OCR_UNAVAILABLE" | "UNSUPPORTED_OCR_BACKEND" | "OCR_UPSTREAM_FAILED" | "OCR_INCOMPLETE_RESPONSE" | "transport_network_error" | "transport_timeout" | "other";
+
+// @public (undocumented)
+export type OcrTelemetryEvent = {
+    backend: OcrTelemetryBackend;
+    engine: OcrTelemetryEngine;
+    model?: string;
+    ms: number;
+    status?: number;
+    bytesIn?: number;
+    bytesOut?: number;
+    candidates?: number;
+    warnings?: number;
+    errorCode?: OcrTelemetryErrorCode;
+    diagnostics?: string;
+    finishReason?: OcrTelemetryFinishReason;
+};
+
+// @public (undocumented)
+export type OcrTelemetryFinishReason = "stop" | "length" | "content_filter" | "tool_calls" | "function_call" | "error" | "unknown";
+
+// @public (undocumented)
+export type OcrTelemetryHeaderPayload = {
+    backend: ClosedEnum<OcrTelemetryBackend>;
+    engine: ClosedEnum<OcrTelemetryEngine>;
+    model?: ClosedEnum<OcrTelemetryModel>;
+    ms: number;
+    status?: number;
+    bytesIn: number;
+    bytesOut: number;
+    candidates: number;
+    warnings: number;
+    lastErrorCode?: ClosedEnum<OcrTelemetryErrorCode>;
+    finishReason?: ClosedEnum<OcrTelemetryFinishReason>;
+    samples?: Array<{
+        ms: number;
+        status?: number;
+        bytesIn?: number;
+        bytesOut?: number;
+        candidates?: number;
+        warnings?: number;
+        errorCode?: ClosedEnum<OcrTelemetryErrorCode>;
+        finishReason?: ClosedEnum<OcrTelemetryFinishReason>;
+    }>;
+    samplesDropped?: number;
+};
+
+// @public (undocumented)
+export type OcrTelemetryLogPayload = {
+    telemetryFailed?: true;
+    diagnostics?: string[];
+    backend: OcrTelemetryBackend;
+    engine: OcrTelemetryEngine;
+    model?: string;
+    ms: number;
+    status?: number;
+    bytesIn: number;
+    bytesOut: number;
+    candidates: number;
+    warnings: number;
+    lastErrorCode?: OcrTelemetryErrorCode;
+    finishReason?: OcrTelemetryFinishReason;
+    samples?: Array<Omit<OcrTelemetryEvent, "backend" | "engine" | "model" | "diagnostics">>;
+    samplesDropped?: number;
+};
+
+// @public (undocumented)
+export type OcrTelemetryModel = "gemma-4-26b-a4b-it" | "glm-ocr" | "moondream3.1-9B-A2B" | "kimi-k2.7-code";
+
+// @public (undocumented)
+export interface OcrTelemetrySink {
+    // (undocumented)
+    markTelemetryFailed?(): void;
+    // (undocumented)
+    record(event: OcrTelemetryEvent): void;
 }
 
 // @public (undocumented)
@@ -7628,6 +7743,100 @@ export interface SttSegment {
     startMs?: number;
     // (undocumented)
     text: string;
+}
+
+// @public (undocumented)
+export type SttTelemetryBackend = "cloudflare-workers-ai" | "custom" | "unavailable";
+
+// @public (undocumented)
+export class SttTelemetryCollector implements SttTelemetrySink, TelemetryContributor<SttTelemetryLogPayload, SttTelemetryHeaderPayload> {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "stt";
+    // (undocumented)
+    markTelemetryFailed(): void;
+    // (undocumented)
+    record(event: SttTelemetryEvent): void;
+    // (undocumented)
+    toHeaderPayload(log: SttTelemetryLogPayload): SttTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(_spans: SpanIndex): SttTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type SttTelemetryEngine = "workers-ai" | "custom";
+
+// @public (undocumented)
+export type SttTelemetryErrorCode = "STT_UNAVAILABLE" | "UNSUPPORTED_STT_BACKEND" | "STT_UPSTREAM_FAILED" | "STT_AUDIO_TOO_LARGE" | "UNSUPPORTED_STT_OPTION" | "INVALID_STT_AUDIO" | "INVALID_STT_VERIFICATION_CODE_OPTIONS" | "NO_CODE_FOUND" | "AMBIGUOUS_CODE" | "transport_network_error" | "transport_timeout" | "other";
+
+// @public (undocumented)
+export type SttTelemetryEvent = {
+    backend: SttTelemetryBackend;
+    engine: SttTelemetryEngine;
+    model?: string;
+    ms: number;
+    status?: number;
+    audioBytes?: number;
+    durationMs?: number;
+    usage?: number;
+    warnings?: number;
+    errorCode?: SttTelemetryErrorCode;
+    diagnostics?: string;
+};
+
+// @public (undocumented)
+export type SttTelemetryHeaderPayload = {
+    backend: ClosedEnum<SttTelemetryBackend>;
+    engine: ClosedEnum<SttTelemetryEngine>;
+    model?: ClosedEnum<SttTelemetryModel>;
+    ms: number;
+    status?: number;
+    audioBytes: number;
+    durationMs: number;
+    usage: number;
+    warnings: number;
+    lastErrorCode?: ClosedEnum<SttTelemetryErrorCode>;
+    samples?: Array<{
+        ms: number;
+        status?: number;
+        audioBytes?: number;
+        durationMs?: number;
+        usage?: number;
+        warnings?: number;
+        errorCode?: ClosedEnum<SttTelemetryErrorCode>;
+    }>;
+    samplesDropped?: number;
+};
+
+// @public (undocumented)
+export type SttTelemetryLogPayload = {
+    telemetryFailed?: true;
+    diagnostics?: string[];
+    backend: SttTelemetryBackend;
+    engine: SttTelemetryEngine;
+    model?: string;
+    ms: number;
+    status?: number;
+    audioBytes: number;
+    durationMs: number;
+    usage: number;
+    warnings: number;
+    lastErrorCode?: SttTelemetryErrorCode;
+    samples?: Array<Omit<SttTelemetryEvent, "backend" | "engine" | "model" | "diagnostics">>;
+    samplesDropped?: number;
+};
+
+// @public (undocumented)
+export type SttTelemetryModel = "whisper-large-v3-turbo";
+
+// @public (undocumented)
+export interface SttTelemetrySink {
+    // (undocumented)
+    markTelemetryFailed?(): void;
+    // (undocumented)
+    record(event: SttTelemetryEvent): void;
 }
 
 // @public (undocumented)
