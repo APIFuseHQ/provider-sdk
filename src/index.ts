@@ -162,6 +162,19 @@ export { createEnvContext } from "./runtime/env.js";
 export { executeOperation } from "./runtime/executor.js";
 export { createHttpClient } from "./runtime/http.js";
 export {
+	OcrTelemetryCollector,
+	bindOcrTelemetry,
+	type OcrTelemetryBackend,
+	type OcrTelemetryEngine,
+	type OcrTelemetryErrorCode,
+	type OcrTelemetryEvent,
+	type OcrTelemetryFinishReason,
+	type OcrTelemetryHeaderPayload,
+	type OcrTelemetryLogPayload,
+	type OcrTelemetryModel,
+	type OcrTelemetrySink,
+} from "./runtime/ocr-telemetry.js";
+export {
 	NativeEgressGrantExpiredError,
 	NativeEgressNotDeclaredError,
 	NativeIdleTimeoutError,
@@ -242,6 +255,18 @@ export {
 	type StealthTelemetrySbsdOutcome,
 	type StealthTelemetrySink,
 } from "./runtime/stealth-telemetry.js";
+export {
+	SttTelemetryCollector,
+	bindSttTelemetry,
+	type SttTelemetryBackend,
+	type SttTelemetryEngine,
+	type SttTelemetryModel,
+	type SttTelemetryErrorCode,
+	type SttTelemetryEvent,
+	type SttTelemetryHeaderPayload,
+	type SttTelemetryLogPayload,
+	type SttTelemetrySink,
+} from "./runtime/stt-telemetry.js";
 export {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,

@@ -1,3 +1,4 @@
+import { bindCapabilityRoot } from "../runtime/capability-telemetry.js";
 import { STATUS_CODES } from "node:http";
 import { readDiagnosticEnv, withDiagnosticEnv } from "../runtime/diagnostic-env.js";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -86,6 +87,7 @@ import { HttpTelemetryCollector, type HttpTelemetryLogPayload } from "../runtime
 import { wrapWithInstrumentation } from "../runtime/instrumentation.js";
 import type * as NativeNetworkRuntimeModule from "../runtime/native-network.js";
 import { createOcrClientFromEnv } from "../runtime/ocr.js";
+import { bindOcrTelemetry, OcrTelemetryCollector } from "../runtime/ocr-telemetry.js";
 import { getProviderBaseUrl } from "../runtime/provider.js";
 import {
 	PROXY_AUTH_IP_DENIED_CODE,
@@ -134,6 +136,7 @@ import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js"
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import { StealthTelemetryCollector } from "../runtime/stealth-telemetry.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
+import { bindSttTelemetry, SttTelemetryCollector } from "../runtime/stt-telemetry.js";
 import {
 	createTraceContext,
 	getTraceRecorder,
@@ -790,6 +793,7 @@ function providerSecretNames(provider: ProviderDefinition): string[] {
 }
 
 type RequestScopeContext = {
+	run<T>(fn: () => Promise<T>): Promise<T>;
 	redact: DiagnosticRedactor;
 	trace: RuntimeTraceContext;
 	telemetry: RequestTelemetry;
@@ -797,6 +801,8 @@ type RequestScopeContext = {
 	nativeTelemetry: NativeTelemetryCollector;
 	httpTelemetry: HttpTelemetryCollector;
 	stealthTelemetry: StealthTelemetryCollector;
+	ocrTelemetry: OcrTelemetryCollector;
+	sttTelemetry: SttTelemetryCollector;
 };
 
 function createProviderContext(
@@ -931,8 +937,14 @@ function createProviderContext(
 			: {}),
 		trace: scope.trace,
 		auth: createAuthStub(),
-		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
-		stt: options.stt ?? createSttClientFromEnv(provider.stt),
+		ocr: bindCapabilityRoot(
+			bindOcrTelemetry(options.ocr ?? createOcrClientFromEnv(provider.ocr), scope.ocrTelemetry),
+			scope.run,
+		),
+		stt: bindCapabilityRoot(
+			bindSttTelemetry(options.stt ?? createSttClientFromEnv(provider.stt), scope.sttTelemetry),
+			scope.run,
+		),
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
 					(options.resolver
@@ -1199,8 +1211,14 @@ function createAuthFlowContext(
 		]),
 		credential,
 		context: flowContextStore.context,
-		ocr: options.ocr ?? createOcrClientFromEnv(provider.ocr),
-		stt: options.stt ?? createSttClientFromEnv(provider.stt),
+		ocr: bindCapabilityRoot(
+			bindOcrTelemetry(options.ocr ?? createOcrClientFromEnv(provider.ocr), scope.ocrTelemetry),
+			scope.run,
+		),
+		stt: bindCapabilityRoot(
+			bindSttTelemetry(options.stt ?? createSttClientFromEnv(provider.stt), scope.sttTelemetry),
+			scope.run,
+		),
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
 					(options.resolver
@@ -2251,12 +2269,16 @@ function createRequestScope(input: {
 	const nativeCollector = new NativeTelemetryCollector({ redact });
 	const httpCollector = new HttpTelemetryCollector({ redact });
 	const stealthCollector = new StealthTelemetryCollector({ redact });
+	const ocrCollector = new OcrTelemetryCollector({ redact });
+	const sttCollector = new SttTelemetryCollector({ redact });
 	const telemetry = new RequestTelemetry(trace);
 	telemetry.register(proxyCollector);
 	telemetry.register(resolverCollector);
 	telemetry.register(nativeCollector);
 	telemetry.register(httpCollector);
 	telemetry.register(stealthCollector);
+	telemetry.register(ocrCollector);
+	telemetry.register(sttCollector);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
 	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
 	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
@@ -2341,6 +2363,8 @@ function createRequestScope(input: {
 		nativeTelemetry: nativeCollector,
 		httpTelemetry: httpCollector,
 		stealthTelemetry: stealthCollector,
+		ocrTelemetry: ocrCollector,
+		sttTelemetry: sttCollector,
 		seedCredentials(rawBody, kind): void {
 			const harvested = rawRequestCredentials(rawBody, kind);
 			sensitiveRegistry.add(harvested.values);

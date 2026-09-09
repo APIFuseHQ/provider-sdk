@@ -24,6 +24,19 @@ export {
 	type TenantNeutral,
 } from "../runtime/request-telemetry.js";
 export {
+	OcrTelemetryCollector,
+	bindOcrTelemetry,
+	type OcrTelemetryBackend,
+	type OcrTelemetryEngine,
+	type OcrTelemetryErrorCode,
+	type OcrTelemetryEvent,
+	type OcrTelemetryModel,
+	type OcrTelemetryFinishReason,
+	type OcrTelemetryHeaderPayload,
+	type OcrTelemetryLogPayload,
+	type OcrTelemetrySink,
+} from "../runtime/ocr-telemetry.js";
+export {
 	ResolverTelemetryCollector,
 	type ResolverAttemptSample,
 	type ResolverCacheReadTelemetryEvent,
@@ -57,6 +70,18 @@ export {
 	type StealthTelemetrySbsdOutcome,
 	type StealthTelemetrySink,
 } from "../runtime/stealth-telemetry.js";
+export {
+	SttTelemetryCollector,
+	bindSttTelemetry,
+	type SttTelemetryBackend,
+	type SttTelemetryEngine,
+	type SttTelemetryErrorCode,
+	type SttTelemetryEvent,
+	type SttTelemetryModel,
+	type SttTelemetryHeaderPayload,
+	type SttTelemetryLogPayload,
+	type SttTelemetrySink,
+} from "../runtime/stt-telemetry.js";
 export type { ResolverVendorUnavailableReason } from "../runtime/resolver-vendors/types.js";
 export type { Span, TraceContext } from "../runtime/trace.js";
 export type { StealthBrowser, StealthOS, StealthProfileDescriptor } from "../types.js";

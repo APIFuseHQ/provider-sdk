@@ -1,3 +1,4 @@
+import { isPromise } from "node:util/types";
 import type { HttpRetrySummary } from "../types.js";
 import {
 	HttpTelemetryCollector,
@@ -46,12 +47,27 @@ function absorbObserverPromise(value: object): void {
 function isAsyncObserverReturn(value: unknown): boolean {
 	if (!value || (typeof value !== "object" && typeof value !== "function")) return false;
 	try {
-		if (!("then" in value) || typeof value.then !== "function") return false;
+		if (!isPromise(value) && (!("then" in value) || typeof value.then !== "function")) return false;
 	} catch {
 		// A rejected Promise can itself have a throwing `then` getter. Still absorb it.
 	}
 	absorbObserverPromise(value);
 	return true;
+}
+
+/** Shared synchronous observer boundary for transport and capability contributors. */
+export function observeTelemetry<T>(callback: () => T, fail: () => void): T | undefined {
+	try {
+		const result = callback();
+		if (isAsyncObserverReturn(result)) {
+			fail();
+			return undefined;
+		}
+		return result;
+	} catch {
+		fail();
+		return undefined;
+	}
 }
 
 /** Keep all public observers, including property access, outside transport failures. */
@@ -69,20 +85,7 @@ export function startHttpTelemetry(
 			// The failure reporter is itself an observer. Never recurse.
 		}
 	};
-	const observe = <T>(callback: () => T): T | undefined => {
-		try {
-			const result = callback();
-			if (isAsyncObserverReturn(result)) {
-				// The observer API is synchronous. Absorb invalid asynchronous returns too.
-				fail();
-				return undefined;
-			}
-			return result;
-		} catch {
-			fail();
-			return undefined;
-		}
-	};
+	const observe = <T>(callback: () => T): T | undefined => observeTelemetry(callback, fail);
 	const result = observe(() =>
 		(sink ?? new HttpTelemetryCollector()).startRequest({ retryPreset }),
 	);

@@ -1,4 +1,3 @@
-import { readDiagnosticEnv } from "./diagnostic-env.js";
 import { ProviderError, TransportError, ValidationError } from "../errors.js";
 import type {
 	Bcp47Locale,
@@ -15,6 +14,13 @@ import type {
 	VerificationCodeCandidateSource,
 	VerificationCodeExtractionResult,
 } from "../types.js";
+import { readCapabilityErrorBody } from "./capability-response.js";
+import {
+	captureCapability,
+	registerCapabilityInput,
+	tagCapability,
+} from "./capability-telemetry.js";
+import { readDiagnosticEnv, registerDiagnosticValue } from "./diagnostic-env.js";
 import { createTimeoutController, isTimeoutLikeError } from "./timeout.js";
 
 export const APIFUSE__STT__BACKEND_ENV = "APIFUSE__STT__BACKEND";
@@ -50,15 +56,18 @@ function providerError(message: string, options: { code: string; fix?: string })
 }
 
 function createErrorSttClient(options: ErrorSttClientOptions): SttContext {
-	return {
-		async transcribe() {
-			throw providerError(options.message, {
-				code: options.code,
-				fix: options.fix,
-			});
+	return tagCapability(
+		{
+			async transcribe() {
+				throw providerError(options.message, {
+					code: options.code,
+					fix: options.fix,
+				});
+			},
+			extractVerificationCode,
 		},
-		extractVerificationCode,
-	};
+		{ backend: "unavailable", engine: "custom" },
+	);
 }
 
 export function createUnsupportedSttClient(reason?: string): SttContext {
@@ -273,72 +282,85 @@ export function createCloudflareWorkersAiSttClient(
 ): SttContext {
 	const model = options.model ?? DEFAULT_CLOUDFLARE_WORKERS_AI_STT_MODEL;
 	const runFetch = options.fetch ?? fetch;
-	return {
-		async transcribe(request) {
-			const warnings = [];
-			if (request.initialPrompt && effectivePromptPolicy(request) !== "custom-hint") {
-				const warning = warnOrThrowUnsupportedOption(
-					request,
-					"initialPrompt is honored only when promptPolicy is custom-hint",
-				);
-				if (warning) warnings.push(warning);
-			}
-			const audioBytes = assertBase64Audio(request.audio, request.maxAudioBytes);
-			const timeout = createTimeoutController(request.timeoutMs ?? DEFAULT_STT_TIMEOUT_MS);
-			try {
-				let response: Response;
-				try {
-					response = await runFetch(
-						`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(options.accountId)}/ai/run/${model}`,
-						{
-							method: "POST",
-							headers: {
-								Authorization: `Bearer ${options.apiToken}`,
-								"Content-Type": "application/json",
-							},
-							body: JSON.stringify(toCloudflareInput(request)),
-							signal: timeout.controller.signal,
-						},
+	return tagCapability(
+		{
+			async transcribe(request) {
+				registerCapabilityInput(request.audio);
+				registerDiagnosticValue(options.apiToken);
+				registerDiagnosticValue(`Bearer ${options.apiToken}`);
+				const warnings = [];
+				if (request.initialPrompt && effectivePromptPolicy(request) !== "custom-hint") {
+					const warning = warnOrThrowUnsupportedOption(
+						request,
+						"initialPrompt is honored only when promptPolicy is custom-hint",
 					);
-				} catch (error) {
-					throw toSttTransportError(error);
+					if (warning) warnings.push(warning);
 				}
-				const payload = await response.json().catch(() => undefined);
-				if (!response.ok) {
-					throw new TransportError("STT upstream request failed", {
-						code: "STT_UPSTREAM_FAILED",
-						status: response.status,
-						upstreamStatus: response.status,
-					});
+				const audioBytes = assertBase64Audio(request.audio, request.maxAudioBytes);
+				const timeout = createTimeoutController(request.timeoutMs ?? DEFAULT_STT_TIMEOUT_MS);
+				try {
+					let response: Response;
+					try {
+						response = await runFetch(
+							`https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(options.accountId)}/ai/run/${model}`,
+							{
+								method: "POST",
+								headers: {
+									Authorization: `Bearer ${options.apiToken}`,
+									"Content-Type": "application/json",
+								},
+								body: JSON.stringify(toCloudflareInput(request)),
+								signal: timeout.controller.signal,
+							},
+						);
+					} catch (error) {
+						throw toSttTransportError(error);
+					}
+					captureCapability({ status: response.status });
+					if (!response.ok) {
+						const echoed = await readCapabilityErrorBody(response, timeout.controller.signal);
+						captureCapability({ diagnostics: echoed });
+						throw new TransportError("STT upstream request failed", {
+							code: "STT_UPSTREAM_FAILED",
+							status: response.status,
+							upstreamStatus: response.status,
+						});
+					}
+					const payload = await response.json().catch(() => undefined);
+					const envelope = unknownRecord(payload);
+					if (envelope?.success === false) {
+						captureCapability({ diagnostics: JSON.stringify(payload) });
+						throw new TransportError("STT upstream returned an error", {
+							code: "STT_UPSTREAM_FAILED",
+							status: 502,
+						});
+					}
+					const transcript = toSttTranscript(payload, audioBytes);
+					const withWarnings =
+						warnings.length > 0
+							? {
+									...transcript,
+									warnings: [...(transcript.warnings ?? []), ...warnings],
+								}
+							: transcript;
+					if (request.mode === "otp" || request.verificationCode) {
+						return {
+							...withWarnings,
+							verificationCode: extractVerificationCode(
+								withWarnings.text,
+								request.verificationCode,
+							),
+						};
+					}
+					return withWarnings;
+				} finally {
+					timeout.clear();
 				}
-				const envelope = unknownRecord(payload);
-				if (envelope?.success === false) {
-					throw new TransportError("STT upstream returned an error", {
-						code: "STT_UPSTREAM_FAILED",
-						status: 502,
-					});
-				}
-				const transcript = toSttTranscript(payload, audioBytes);
-				const withWarnings =
-					warnings.length > 0
-						? {
-								...transcript,
-								warnings: [...(transcript.warnings ?? []), ...warnings],
-							}
-						: transcript;
-				if (request.mode === "otp" || request.verificationCode) {
-					return {
-						...withWarnings,
-						verificationCode: extractVerificationCode(withWarnings.text, request.verificationCode),
-					};
-				}
-				return withWarnings;
-			} finally {
-				timeout.clear();
-			}
+			},
+			extractVerificationCode,
 		},
-		extractVerificationCode,
-	};
+		{ backend: "cloudflare-workers-ai", engine: "workers-ai", model },
+	);
 }
 
 const EN_DIGITS: Record<string, string> = {

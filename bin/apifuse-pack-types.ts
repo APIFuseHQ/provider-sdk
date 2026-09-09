@@ -523,6 +523,46 @@ const NEGATIVE_CONTROLS = [
 			"",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-ocr-telemetry-free-text.ts",
+		expectedCode: "TS2322",
+		description: "ocr gateway telemetry rejects a free-string field",
+		source: [
+			'import type { GatewayIngestible, OcrTelemetryHeaderPayload } from "@apifuse/provider-sdk";',
+			"type Unsafe = OcrTelemetryHeaderPayload & { message: string };",
+			"declare const value: Unsafe;",
+			"export const bad: GatewayIngestible<Unsafe> = value;",
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-ocr-telemetry-contributor.ts",
+		expectedCode: "",
+		description: "ocr telemetry contributor satisfies the gateway-ingestible contract",
+		source: [
+			'import { OcrTelemetryCollector, type TelemetryContributor, type OcrTelemetryLogPayload, type OcrTelemetryHeaderPayload } from "@apifuse/provider-sdk";',
+			"export const ocr: TelemetryContributor<OcrTelemetryLogPayload, OcrTelemetryHeaderPayload> = new OcrTelemetryCollector();",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-stt-telemetry-free-text.ts",
+		expectedCode: "TS2322",
+		description: "stt gateway telemetry rejects a free-string field",
+		source: [
+			'import type { GatewayIngestible, SttTelemetryHeaderPayload } from "@apifuse/provider-sdk";',
+			"type Unsafe = SttTelemetryHeaderPayload & { message: string };",
+			"declare const value: Unsafe;",
+			"export const bad: GatewayIngestible<Unsafe> = value;",
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-stt-telemetry-contributor.ts",
+		expectedCode: "",
+		description: "stt telemetry contributor satisfies the gateway-ingestible contract",
+		source: [
+			'import { SttTelemetryCollector, type TelemetryContributor, type SttTelemetryLogPayload, type SttTelemetryHeaderPayload } from "@apifuse/provider-sdk";',
+			"export const stt: TelemetryContributor<SttTelemetryLogPayload, SttTelemetryHeaderPayload> = new SttTelemetryCollector();",
+		].join("\n"),
+	},
 ] as const;
 
 assertTelemetryContributorControls();
