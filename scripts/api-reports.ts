@@ -148,10 +148,11 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 		`,
 	),
 	"runtime-browser.api.md": forgottenExports(
-		"These pre-existing indirect declarations are intentionally not direct entry-point exports; their full definitions are included in this report for semver review.",
+		"These indirect telemetry declarations are intentionally emitted by the root/server entry points while browser runtime types remain subpath implementation dependencies; full definitions stay included for semver review.",
 		`
 			BrowserChallengeRequest BrowserChallengeResult BrowserClient_2 BrowserCookie BrowserEngine BrowserFrame BrowserLocator BrowserOptions
 			BrowserPage BrowserPageContract BrowserResourceBody BrowserResourceDecision BrowserResourceMethod BrowserResourcePolicy BrowserResourceRequest BrowserResourceRoute
+			BrowserTelemetryEngine BrowserTelemetryErrorCode BrowserTelemetryPoolAcquireOutcome BrowserTelemetrySink
 		`,
 	),
 	"runtime-native-network.api.md": forgottenExports(
@@ -176,7 +177,7 @@ const forgottenExportAllowlist: Record<string, ForgottenExportAllowance> = {
 			ProviderCacheResult ProviderChallenge ProviderChallengeKind ProviderProxyMode ProviderProxyPolicy ProviderProxyProvider ProviderProxySessionAffinity ProviderResolverConfig
 			ProviderResolverVendor ProxyAttemptTelemetryEvent ProxyCacheStatus ProxyProtocol ProxyResolutionOptions ProxyResolutionTelemetryEvent ProxyTelemetrySink ProxyUserAgentSource
 			ProxyVendorFailoverTelemetryEvent ProxyVendorName ResolverChainClient ResolverContext ResolverIdentity ResolverIssuingIdentity ResolverVendorAdapter ResolverVendorTransport
-			SmartproxyAllocatorBodyClass SpanHookOptions TraceRecorder
+			SmartproxyAllocatorBodyClass SpanHookOptions TraceRecorder BrowserEngine BrowserTelemetryEngine BrowserTelemetryErrorCode BrowserTelemetryPoolAcquireOutcome BrowserTelemetrySink
 		`,
 	),
 	"runtime-stealth.api.md": forgottenExports(

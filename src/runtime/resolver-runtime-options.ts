@@ -1,9 +1,12 @@
 import type { ProviderCache, ProviderDefinition, ProviderProxyPolicy } from "../types.js";
 import type { ResolverRuntimeOptions } from "./resolver.js";
 import type { ResolverTelemetrySink } from "./resolver-telemetry.js";
+import type { BrowserTelemetrySink } from "./browser-telemetry.js";
 
 /** Normalize the `proxy` declaration shorthand (`true`/`false`) into the policy object the resolver chain consumes. */
-export function resolveNativeProxyPolicy(provider: ProviderDefinition): ProviderProxyPolicy | undefined {
+export function resolveNativeProxyPolicy(
+	provider: ProviderDefinition,
+): ProviderProxyPolicy | undefined {
 	if (typeof provider.proxy === "object") return provider.proxy;
 	if (provider.proxy === true) return { mode: "optional" };
 	if (provider.proxy === false) return { mode: "disabled" };
@@ -26,11 +29,13 @@ export function createResolverRuntimeOptions(
 	>,
 	stealthProfile: { readonly userAgent: string } | undefined,
 	telemetry: ResolverTelemetrySink,
+	browserTelemetry?: BrowserTelemetrySink,
 ): ResolverRuntimeOptions {
 	return {
 		allowedHosts: provider.allowedHosts,
 		cache,
 		telemetry,
+		browserTelemetry,
 		...(identityScope === undefined ? {} : { identityScope }),
 		...(proxyPolicy
 			? {

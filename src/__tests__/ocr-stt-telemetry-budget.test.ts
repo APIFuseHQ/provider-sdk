@@ -172,4 +172,46 @@ describe("OCR/STT telemetry header budget with realistic existing siblings", () 
 		for (const key of ["v", "taxonomy", "proxy", "resolver", "native", "http"])
 			expect(stealthStage).toHaveProperty(key);
 	});
+
+	it("drops all eight siblings in HEADER_PRIORITY order under increasing pressure", () => {
+		const keys = ["proxy", "resolver", "native", "http", "stealth", "browser", "ocr", "stt"] as const;
+		const baseSamples = [2, 2, 2, 2, 4, 6, 8, 10] as const;
+		const encodeEight = (proxyPressure: number) => {
+			const ledger = new RequestTelemetry(createTraceContext());
+			keys.forEach((key, index) => {
+				const samples = baseSamples[index] + (key === "proxy" ? proxyPressure : 0);
+				const payload = {
+					samples: Array.from({ length: samples }, () => closedEnum("x".repeat(63))),
+				};
+				ledger.register(fixture(key, payload));
+			});
+			const encoded = ledger.toHeaderValue();
+			return {
+				encoded,
+				size: encoded?.length,
+				keys: encoded
+					? (Object.keys(JSON.parse(Buffer.from(encoded, "base64url").toString())).filter((key) =>
+						keys.includes(key as (typeof keys)[number]),
+					) as string[])
+					: [],
+			};
+		};
+
+		const stages = [
+			[0, 3448, keys],
+			[8, 3268, ["proxy", "resolver", "native", "http", "stealth", "browser", "ocr"]],
+			[18, 3418, ["proxy", "resolver", "native", "http", "stealth", "browser"]],
+			[26, 3562, ["proxy", "resolver", "native", "http", "stealth"]],
+			[33, 3794, ["proxy", "resolver", "native", "http"]],
+			[37, 3942, ["proxy", "resolver", "native"]],
+			[39, 3911, ["proxy", "resolver"]],
+			[42, 3966, ["proxy"]],
+		] as const;
+		for (const [pressure, size, expectedKeys] of stages) {
+			const result = encodeEight(pressure);
+			expect(result.size).toBe(size);
+			expect(result.keys).toEqual([...expectedKeys]);
+		}
+		expect(encodeEight(44).encoded).toBeUndefined();
+	});
 });

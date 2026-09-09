@@ -2,8 +2,12 @@ import { ProviderError } from "../errors.js";
 import type { ChallengeSolution, ProviderChallenge, ResolverContext } from "../types.js";
 import type { TraceRecorder } from "./trace.js";
 import type { ResolverTelemetryOutcome, ResolverTelemetrySink } from "./resolver-telemetry.js";
+import type { BrowserTelemetrySink } from "./browser-telemetry.js";
 
-type ResolverTelemetryBinding = (sink: ResolverTelemetrySink) => ResolverContext;
+type ResolverTelemetryBinding = (
+	sink: ResolverTelemetrySink,
+	browserSink?: BrowserTelemetrySink,
+) => ResolverContext;
 const telemetryBindings = new WeakMap<ResolverContext, ResolverTelemetryBinding>();
 
 /** Internal contract: reconstruct a chain with a new request sink, without mutating the host chain. */
@@ -27,6 +31,7 @@ export function inheritResolverTelemetryBinding(
 export function bindResolverTelemetry(
 	resolver: ResolverContext,
 	sink: ResolverTelemetrySink | undefined,
+	browserSink?: BrowserTelemetrySink,
 ): ResolverContext {
 	if (!sink) return resolver;
 	const metadata = (
@@ -34,9 +39,9 @@ export function bindResolverTelemetry(
 			readonly [RESOLVER_INSTRUMENTATION_METADATA]?: { readonly target: ResolverContext };
 		}
 	)[RESOLVER_INSTRUMENTATION_METADATA];
-	if (metadata) return bindResolverTelemetry(metadata.target, sink);
+	if (metadata) return bindResolverTelemetry(metadata.target, sink, browserSink);
 	const bind = telemetryBindings.get(resolver);
-	if (bind) return bind(sink);
+	if (bind) return bind(sink, browserSink);
 	const wrapper: ResolverSolveWithRecorder = {
 		async solve(challenge, signal, recorder) {
 			const startedAt = Date.now();
@@ -74,7 +79,7 @@ export function bindResolverTelemetry(
 }
 
 function createOpaqueResolverTelemetryBinding(resolver: ResolverContext): ResolverTelemetryBinding {
-	return (sink) => bindResolverTelemetry(resolver, sink);
+	return (sink, browserSink) => bindResolverTelemetry(resolver, sink, browserSink);
 }
 
 export const RESOLVER_INSTRUMENTATION_METADATA = Symbol.for(

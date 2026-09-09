@@ -14,6 +14,16 @@ function isRecord(value: unknown): value is Record<PropertyKey, unknown> {
 
 const LEGACY_COOKIE_ORIGIN = "https://legacy-cookie.invalid/";
 
+/** Extract cookie values from Set-Cookie/header strings for request-scoped registration. */
+export function cookieValuesFromHeaders(headers: string | readonly string[]): string[] {
+	const values: string[] = [];
+	for (const header of typeof headers === "string" ? [headers] : headers) {
+		const cookie = Cookie.parse(header);
+		if (cookie?.value) values.push(cookie.value);
+	}
+	return values;
+}
+
 export class StealthCookieJar implements CookieJar, StealthSessionCookies {
 	private cookies: ToughCookieJar;
 	private readonly defaultUrl: string;
@@ -37,8 +47,7 @@ export class StealthCookieJar implements CookieJar, StealthSessionCookies {
 		const cookieUrl = this.normalizeUrl(url);
 		if (!cookieUrl) return;
 		for (const cookieString of cookieStrings) {
-			const cookie = Cookie.parse(cookieString);
-			if (cookie?.value) this.register?.(cookie.value);
+			for (const value of cookieValuesFromHeaders(cookieString)) this.register?.(value);
 			this.cookies.setCookieSync(cookieString, cookieUrl, { ignoreError: true });
 		}
 	}

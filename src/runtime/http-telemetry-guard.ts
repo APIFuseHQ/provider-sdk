@@ -156,3 +156,26 @@ export function startHttpTelemetry(
 		},
 	};
 }
+
+/** Generic observer guard shared by capability hooks. Returned thenables are absorbed. */
+export function observeTelemetryCallback(
+	sink: { markTelemetryFailed?: () => unknown } | undefined,
+	callback: () => unknown,
+): void {
+	let failed = false;
+	const fail = () => {
+		if (failed) return;
+		failed = true;
+		try {
+			isAsyncObserverReturn(sink?.markTelemetryFailed?.());
+		} catch {
+			// Observer failure is never transport failure.
+		}
+	};
+	try {
+		const result = callback();
+		if (isAsyncObserverReturn(result) || result !== undefined) fail();
+	} catch {
+		fail();
+	}
+}

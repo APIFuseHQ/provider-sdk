@@ -563,6 +563,26 @@ const NEGATIVE_CONTROLS = [
 			"export const stt: TelemetryContributor<SttTelemetryLogPayload, SttTelemetryHeaderPayload> = new SttTelemetryCollector();",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-browser-telemetry-free-text.ts",
+		expectedCode: "TS2322",
+		description: "browser gateway telemetry rejects a free-string field",
+		source: [
+			'import type { BrowserTelemetryHeaderPayload, GatewayIngestible } from "@apifuse/provider-sdk";',
+			"declare const header: BrowserTelemetryHeaderPayload;",
+			"type Unsafe = BrowserTelemetryHeaderPayload & { message: string };",
+			'export const bad: GatewayIngestible<Unsafe> = { ...header, message: "free text" };',
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-browser-telemetry-contributor.ts",
+		expectedCode: "",
+		description: "browser telemetry contributor satisfies the gateway-ingestible contract",
+		source: [
+			'import { BrowserTelemetryCollector, type BrowserTelemetryHeaderPayload, type BrowserTelemetryLogPayload, type TelemetryContributor } from "@apifuse/provider-sdk";',
+			"export const browser: TelemetryContributor<BrowserTelemetryLogPayload, BrowserTelemetryHeaderPayload> = new BrowserTelemetryCollector();",
+		].join("\n"),
+	},
 ] as const;
 
 assertTelemetryContributorControls();
