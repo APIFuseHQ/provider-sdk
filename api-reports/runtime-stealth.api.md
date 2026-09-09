@@ -415,6 +415,7 @@ interface StealthClient {
 //
 // @public (undocumented)
 export type StealthClientOptions = ProxyResolutionOptions & {
+    stealthTelemetry?: StealthTelemetrySink;
     warn?: (message: string) => void;
     signal?: AbortSignal;
     stealth?: StealthProfileSelection & {
@@ -565,6 +566,57 @@ interface StealthSessionCookies extends CookieJar {
 }
 
 // @public (undocumented)
+export type StealthTelemetryAttemptEvent = {
+    readonly ms: number;
+    readonly status?: number;
+    readonly errorCode?: StealthTelemetryErrorCode;
+    readonly diagnostics?: StealthTelemetryDiagnostics;
+    readonly profileId: StealthProfileDescriptor;
+    readonly proxyUsed: boolean;
+    readonly requestClass: StealthTelemetryRequestClass;
+    readonly kind?: StealthTelemetryAttemptKind;
+};
+
+// @public (undocumented)
+export type StealthTelemetryAttemptKind = "request" | "resolver" | "proxy_diagnostic";
+
+// @public (undocumented)
+export type StealthTelemetryDiagnostics = {
+    readonly name?: string;
+    readonly message?: string;
+    readonly code?: string;
+};
+
+// @public (undocumented)
+export type StealthTelemetryErrorCode = "transport_network_error" | "transport_timeout" | "transport_cancelled" | "upstream_http_error" | "response_too_large" | "proxy_connect_failed" | "PROXY_POOL_STALE" | "PROXY_EDGE_AUTH_REJECTED" | "PROXY_AUTH_IP_DENIED" | "PROXY_EDGE_TLS_REJECTED" | "PROXY_REQUIRED" | "other";
+
+// @public (undocumented)
+export type StealthTelemetryRequestClass = "navigation" | "script_navigation" | "xhr" | "post";
+
+// @public (undocumented)
+export type StealthTelemetrySbsdEvent = {
+    readonly detected: boolean;
+    readonly outcome?: StealthTelemetrySbsdOutcome;
+};
+
+// @public (undocumented)
+export type StealthTelemetrySbsdOutcome = StealthChallengeClassification["outcome"] | "detected" | "refetch_clear";
+
+// @public (undocumented)
+export interface StealthTelemetrySink {
+    // (undocumented)
+    recordAttempt(event: StealthTelemetryAttemptEvent): void;
+    // (undocumented)
+    recordPoolRefresh(): void;
+    // (undocumented)
+    recordRedirectHop(): void;
+    // (undocumented)
+    recordSafeRefetch(): void;
+    // (undocumented)
+    recordSbsd(event?: StealthTelemetrySbsdEvent | StealthTelemetrySbsdOutcome): void;
+}
+
+// @public (undocumented)
 type StealthTransportBody = {
     cancel(): Promise<void>;
     getReader(): {
@@ -606,8 +658,8 @@ type StealthTransportResponse = {
 // dist/config/loader.d.ts:108:5 - (ae-forgotten-export) The symbol "ProxyResolutionTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:109:5 - (ae-forgotten-export) The symbol "ProxyAttemptTelemetryEvent" needs to be exported by the entry point stealth.d.ts
 // dist/config/loader.d.ts:110:5 - (ae-forgotten-export) The symbol "ProxyVendorFailoverTelemetryEvent" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:45:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
-// dist/runtime/stealth.d.ts:47:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:49:5 - (ae-forgotten-export) The symbol "StealthTransportHeaders" needs to be exported by the entry point stealth.d.ts
+// dist/runtime/stealth.d.ts:51:5 - (ae-forgotten-export) The symbol "StealthTransportBody" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:887:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:892:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point stealth.d.ts
 // dist/types.d.ts:1204:5 - (ae-forgotten-export) The symbol "ProviderChallenge" needs to be exported by the entry point stealth.d.ts

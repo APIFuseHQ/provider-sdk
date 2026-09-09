@@ -43,8 +43,23 @@ export {
 	type ResolverTelemetrySink,
 	type ResolverVendorAttemptTelemetryEvent,
 } from "../runtime/resolver-telemetry.js";
+export {
+	StealthTelemetryCollector,
+	type StealthTelemetryAttemptEvent,
+	type StealthTelemetryAttemptKind,
+	type StealthTelemetryAttemptSample,
+	type StealthTelemetryDiagnostics,
+	type StealthTelemetryErrorCode,
+	type StealthTelemetryHeaderPayload,
+	type StealthTelemetryLogPayload,
+	type StealthTelemetryRequestClass,
+	type StealthTelemetrySbsdEvent,
+	type StealthTelemetrySbsdOutcome,
+	type StealthTelemetrySink,
+} from "../runtime/stealth-telemetry.js";
 export type { ResolverVendorUnavailableReason } from "../runtime/resolver-vendors/types.js";
 export type { Span, TraceContext } from "../runtime/trace.js";
+export type { StealthBrowser, StealthOS, StealthProfileDescriptor } from "../types.js";
 export {
 	createServerApp,
 	createServerAppAsync,

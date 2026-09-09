@@ -132,6 +132,7 @@ import {
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
+import { StealthTelemetryCollector } from "../runtime/stealth-telemetry.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import {
 	createTraceContext,
@@ -795,6 +796,7 @@ type RequestScopeContext = {
 	resolverTelemetry: ResolverTelemetryCollector;
 	nativeTelemetry: NativeTelemetryCollector;
 	httpTelemetry: HttpTelemetryCollector;
+	stealthTelemetry: StealthTelemetryCollector;
 };
 
 function createProviderContext(
@@ -842,6 +844,7 @@ function createProviderContext(
 		signal,
 	);
 	const stealthClientOptions = {
+		stealthTelemetry: scope.stealthTelemetry,
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: scope.telemetry.proxy,
@@ -1119,6 +1122,7 @@ function createAuthFlowContext(
 		signal,
 	);
 	const stealthClientOptions = {
+		stealthTelemetry: scope.stealthTelemetry,
 		upstream: proxyClientOptions.upstream,
 		affinityKey: proxyClientOptions.affinityKey,
 		telemetry: scope.telemetry.proxy,
@@ -2213,6 +2217,7 @@ function createRequestScope(input: {
 		),
 		finished: false,
 		staticValues: input.staticSensitiveValues,
+		register: sensitiveRegistry.add,
 	};
 	const traceConfig = withDiagnosticEnv(observeEnv, () => resolveTraceConfigFromEnv());
 	const details = {
@@ -2245,11 +2250,13 @@ function createRequestScope(input: {
 	const resolverCollector = new ResolverTelemetryCollector({ redact });
 	const nativeCollector = new NativeTelemetryCollector({ redact });
 	const httpCollector = new HttpTelemetryCollector({ redact });
+	const stealthCollector = new StealthTelemetryCollector({ redact });
 	const telemetry = new RequestTelemetry(trace);
 	telemetry.register(proxyCollector);
 	telemetry.register(resolverCollector);
 	telemetry.register(nativeCollector);
 	telemetry.register(httpCollector);
+	telemetry.register(stealthCollector);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
 	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
 	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
@@ -2333,6 +2340,7 @@ function createRequestScope(input: {
 		resolverTelemetry: resolverCollector,
 		nativeTelemetry: nativeCollector,
 		httpTelemetry: httpCollector,
+		stealthTelemetry: stealthCollector,
 		seedCredentials(rawBody, kind): void {
 			const harvested = rawRequestCredentials(rawBody, kind);
 			sensitiveRegistry.add(harvested.values);
