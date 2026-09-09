@@ -40,7 +40,11 @@ export type ProviderShapeKind =
 	| "single-phase-default-export"
 	/** `const p = defineProvider({ ..., operations }); export default p;` */
 	| "single-phase-variable-export"
-	/** `const p = defineProvider({ ..., operations }); export default { ...p, deployment };` */
+	/**
+	 * `const p = defineProvider({ ..., operations }); export default { ...p, extra };`
+	 * — extras stay on the spread export; a `deployment` extra is a legacy
+	 * surface that `apifuse migrate-deployment` hoists into the declaration.
+	 */
 	| "single-phase-variable-spread-export"
 	/** Already `const b = defineProvider(...); export default b({ operations })` */
 	| "two-phase";
@@ -221,7 +225,7 @@ type ShapeClassification =
 			/** Variable the declaration is currently bound to, when it is bound. */
 			readonly variableName?: string;
 			readonly variableStatement?: TS.VariableStatement;
-			/** Extra properties on a `{ ...provider, deployment }` default export. */
+			/** Extra properties on a `{ ...provider, ...extras }` default export. */
 			readonly spreadExportExtras?: string;
 	  }
 	| { readonly status: "skipped"; readonly reason: string };
@@ -360,7 +364,7 @@ function defaultExportCallsBuilder(
  * resolves to a builder-call result. Covers the three migrated layouts —
  * `export default buildProvider({...})`, an intermediate
  * `const provider = buildProvider({...}); export default provider;`, and the
- * spread export `export default { ...provider, deployment }` over such a
+ * spread export `export default { ...provider, ...extras }` over such a
  * binding. Without the latter two, re-running the transform on its own
  * spread-shape output reports "ambiguous" instead of "unchanged", which
  * breaks idempotency for repeated fan-out runs.
@@ -549,7 +553,9 @@ function rewriteDefaultExport(
 	}
 
 	// Spread export: re-introduce the provider binding so the extra properties
-	// (currently `deployment`) still spread over a built provider.
+	// (e.g. `healthAccountSeedInputs`, or a legacy `deployment` that
+	// `apifuse migrate-deployment` later hoists) still spread over a built
+	// provider.
 	const providerName = shape.variableName ?? "provider";
 	const extras = shape.spreadExportExtras ?? "";
 	const rebuilt =

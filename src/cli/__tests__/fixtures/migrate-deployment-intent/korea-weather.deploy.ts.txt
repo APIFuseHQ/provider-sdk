@@ -1,0 +1,51 @@
+// Provider deployment contract for the standalone reusable-deploy pipeline.
+//
+// Values mirror the resolved manifests at
+// infra/k8s/generated/providers/korea-weather/ in APIFuse monorepo commit
+// b2364839c7c42fd4e03ac0e7e1bf78f2b97c0a86.
+
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// Replicas is intentionally absent because the generated HPA owns scaling.
+// The provider uses only standard HTTP(S) upstream ports, while Redis is
+// enabled in the resolved manifest and injected by the platform.
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "25m",
+    memory: "128Mi",
+  },
+  cache: { redis: { enabled: true } },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

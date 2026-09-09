@@ -1,0 +1,52 @@
+// Provider deployment contract for the polyrepo reusable-deploy pipeline.
+//
+// Shape mirrors ProviderDeploymentConfigSchema in the monorepo-owned provider
+// registry package. This split repo intentionally keeps the deploy contract as a
+// plain object so the central deploy engine can validate it without making the
+// private registry package a runtime dependency here.
+//
+// Weverse is a credentialed HTTP provider on the shared TypeScript runtime. It
+// does not require the browser runtime or CDP pool injection.
+
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  replicas: 1,
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "25m",
+    memory: "128Mi",
+  },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

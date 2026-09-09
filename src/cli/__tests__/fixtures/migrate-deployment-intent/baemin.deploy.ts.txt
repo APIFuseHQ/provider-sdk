@@ -1,0 +1,53 @@
+// Provider deployment contract for the polyrepo reusable-deploy pipeline.
+//
+// Shape mirrors ProviderDeploymentConfigSchema in the monorepo-owned provider
+// registry package. This split repo intentionally keeps the deploy contract as a
+// plain object so the central deploy engine can validate it without making the
+// private registry package a runtime dependency here.
+
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  replicas: 1,
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 3,
+    targetCPUUtilizationPercentage: 60,
+  },
+  resources: {
+    cpu: "300m",
+    // 256Mi OOM-killed this provider on every boot (exit 137 before the HTTP
+    // listener came up). Measured on an arm64 node with the shipped image:
+    // ~357MiB boot peak, ~248MiB steady state across 49 operations. 512Mi
+    // clears the peak with ~30% headroom and reaches ready in 8s.
+    memory: "512Mi",
+  },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

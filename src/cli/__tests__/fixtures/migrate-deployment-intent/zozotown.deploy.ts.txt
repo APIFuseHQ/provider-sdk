@@ -1,0 +1,58 @@
+// Provider deployment contract for the polyrepo reusable-deploy pipeline.
+//
+// Shape mirrors ProviderDeploymentConfigSchema in the monorepo-owned provider
+// registry package. This split repo intentionally keeps the deploy contract as a
+// plain object so the central deploy engine can validate it without making the
+// private registry package a runtime dependency here.
+//
+// ZOZOTOWN is an SDK-stealth HTTP provider, not a browser provider: the
+// self-hosted CDP layer was removed and member pages are read through the
+// stealth transport, so neither the browser runtime nor CDP pool injection is
+// required. Public reads are gated by an Akamai SBSD interstitial that the
+// SDK-managed resolver solves in-process, which costs one extra vendor round
+// trip and one page refetch per session bootstrap. Memory is sized above the
+// baseline because a single SBSD solve holds the ~550 KB challenge script in
+// memory while the payload is generated.
+
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  replicas: 1,
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 3,
+    targetCPUUtilizationPercentage: 60,
+  },
+  resources: {
+    cpu: "300m",
+    memory: "768Mi",
+  },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

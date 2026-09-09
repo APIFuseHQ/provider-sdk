@@ -1,0 +1,49 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// Mirrors the resolved manifest truth for seoul-density. `replicas` is
+// intentionally absent: when an HPA is present the generator omits replicas
+// from the Deployment spec, so declaring it here would drift from what is
+// actually applied. `network.additionalTcpPorts` carries 8088 because the
+// Seoul citydata endpoint is served on that port and the generated Cilium FQDN
+// policy egress-allows it alongside 80/443.
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "25m",
+    memory: "128Mi",
+  },
+  cache: { redis: { enabled: true } },
+  network: { additionalTcpPorts: [8088] },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

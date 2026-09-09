@@ -1,0 +1,47 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// Mirrors the resolved manifest truth for triple
+// (infra/k8s/generated/providers/triple/). `replicas` is intentionally absent:
+// when an HPA is present the generator omits replicas from the Deployment spec.
+// Triple uses the browser runtime's standard CDP-pool wiring and standard
+// HTTPS upstream ports, so no additional TCP ports are declared. The generated
+// manifests do not enable Redis for this provider.
+const deployment = {
+  runtime: "browser",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "200m",
+    memory: "256Mi",
+  },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

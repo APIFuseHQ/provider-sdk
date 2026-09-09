@@ -1,0 +1,44 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// Mirrors the resolved manifest truth for daiso. A fixed replica count is
+// intentionally absent because the HPA owns scaling. The generated FQDN
+// policy exposes only standard HTTP/HTTPS ports, so no extra ports are needed.
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 3,
+    targetCPUUtilizationPercentage: 60,
+  },
+  resources: {
+    cpu: "350m",
+    memory: "256Mi",
+  },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

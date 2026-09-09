@@ -137,6 +137,45 @@ variable, the Cloudflare OCR/STT tokens and account identifier,
 `APIFUSE__OCR__API_KEY`, and `APIFUSE__CACHE__KEY_PEPPER`. `defineProvider`
 rejects them in `secrets`; the engine reads them from its own environment.
 
+### Deployment intent
+
+Deployment intent (runtime profile, resources, HPA, Redis, extra TCP ports) has
+exactly one authored home: the optional `deployment` key inside
+`defineProvider({...})`. The SDK passes it through verbatim; the APIFuse
+registry resolves omitted fields from the runtime profile and rejects anything
+it cannot resolve.
+
+- Declare only what differs from the profile. Profile defaults:
+  `runtime: "shared"`, `language: "typescript"`, `replicas: 1`,
+  `hpa: { enabled: true, minReplicas: 1, maxReplicas: 1, targetCPUUtilizationPercentage: 70 }`,
+  resources `25m/128Mi` (shared) or `200m/256Mi` (browser), `buildContext: "."`.
+  Most providers therefore declare no `deployment` key at all.
+- The deployment `runtime` axis (`shared | dedicated | browser`) is distinct
+  from the execution `runtime` (`standard | shared | browser`) declared next to
+  it.
+- Do not author a standalone `deploy.ts`, a `deployment` extra on a spread
+  default export (`export default { ...provider, deployment }`), or a
+  re-exported config module. A repository that still carries `deploy.ts`
+  migrates with `apifuse migrate-deployment .`: it hoists the file's non-default
+  values into the declaration, proves the result resolves identically, and
+  deletes the file. The `/deploy.ts` CODEOWNERS entry stays until the platform
+  stops honoring a re-added legacy file (`--drop-codeowners-lock` then). A
+  refusal names the manual step.
+- `apifuse check` warns during the migration window
+  (`deployment/legacy-deploy-file`, `deployment/spread-export`,
+  `deployment/redundant-default`); the rules become errors once no repository
+  carries the legacy file.
+
+```ts
+const buildProvider = defineProvider({
+  id: "example",
+  version: "1.0.0",
+  runtime: "standard",
+  deployment: { cache: { redis: { enabled: true } } },
+  // ...
+});
+```
+
 ### Factored operations
 
 `defineProvider(declaration)` returns the builder that accepts `operations`, so

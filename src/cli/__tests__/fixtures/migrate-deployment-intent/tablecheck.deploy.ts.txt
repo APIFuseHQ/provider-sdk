@@ -1,0 +1,40 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  cache?: { redis: { enabled: boolean } };
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: { cpu: string; memory: string };
+};
+
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  // Reservation cart handles and search cursors are server-stored runtime
+  // state (ctx.choice / ctx.state). Without a Redis-backed state store the
+  // SDK falls back to per-process memory, which breaks handle round-trips
+  // across replicas/restarts — cart create would succeed upstream but the
+  // returned handle would be unreadable at confirm time.
+  cache: { redis: { enabled: true } },
+  replicas: 1,
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 2,
+    targetCPUUtilizationPercentage: 70,
+  },
+  // 256Mi: the runtime's natural working set is ~155MB (bun 1.2.23 + module
+  // graph + JSC heap). Under the previous 128Mi cgroup limit the GC ran
+  // continuously to pin RSS below the ceiling, burning 300-430m CPU at zero
+  // traffic (measured A/B 2026-08-16: MemoryMax=128M -> 269% of one core idle,
+  // 256M -> 0.08%). That idle burn kept the HPA at max replicas
+  // (KubeHpaMaxedOut) because avg CPU (~150m) vastly exceeds the 25m request.
+  resources: { cpu: "25m", memory: "256Mi" },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

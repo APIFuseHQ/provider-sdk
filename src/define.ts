@@ -587,6 +587,9 @@ export interface ProviderDeclaration {
 	 * provider definition. The SDK types this field but does not deep-validate
 	 * it — the APIFuse registry builder owns deployment validation and
 	 * resolves omitted fields against the runtime deployment profiles.
+	 *
+	 * This is the only authored deployment surface (no standalone
+	 * `deploy.ts`); declare only the fields that differ from the profile.
 	 */
 	deployment?: ProviderDeploymentOverrides;
 	/** Declares the HTTP capability binding. A bare object states use without configuration. */

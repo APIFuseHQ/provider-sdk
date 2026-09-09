@@ -1,0 +1,36 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+};
+
+// Jalan search buffers and decodes public Windows-31J HTML before Cheerio
+// parsing. A 2026-08-18 SDK perf run over five live searches (1.13–1.37 MB
+// upstream documents) measured 378,978,304 bytes maximum RSS and 191,776,064
+// bytes peak footprint on macOS. Start above the measured RSS instead of using
+// the 128Mi REST-provider default; revisit after production working-set data.
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "25m",
+    memory: "512Mi",
+  },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;
