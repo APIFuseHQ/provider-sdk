@@ -70,6 +70,33 @@ export function observeTelemetry<T>(callback: () => T, fail: () => void): T | un
 	}
 }
 
+/** Isolate synchronous void capability hooks using the same Promise defence. */
+export function createTelemetryObserver(
+	sink: { markTelemetryFailed?(): void } | undefined,
+): (callback: () => unknown) => void {
+	let failed = false;
+	const fail = () => {
+		if (failed) return;
+		failed = true;
+		try {
+			isAsyncObserverReturn(sink?.markTelemetryFailed?.());
+		} catch {
+			// The failure marker is also an observer.
+		}
+	};
+	return (callback) => {
+		try {
+			const result = callback();
+			if (result !== undefined) {
+				isAsyncObserverReturn(result);
+				fail();
+			}
+		} catch {
+			fail();
+		}
+	};
+}
+
 /** Keep all public observers, including property access, outside transport failures. */
 export function startHttpTelemetry(
 	sink: HttpTelemetrySink | undefined,

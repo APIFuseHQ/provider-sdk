@@ -583,6 +583,50 @@ const NEGATIVE_CONTROLS = [
 			"export const browser: TelemetryContributor<BrowserTelemetryLogPayload, BrowserTelemetryHeaderPayload> = new BrowserTelemetryCollector();",
 		].join("\n"),
 	},
+	{
+		filename: "negative-control-cache-telemetry-free-text.ts",
+		expectedCode: "TS2322",
+		description: "cache gateway telemetry rejects raw cache-key samples",
+		source: [
+			'import type { TelemetryContributor } from "@apifuse/provider-sdk";',
+			"const bad: TelemetryContributor<{}, { key: string }> = {",
+			'\tkey: "cache",',
+			"\ttoLogPayload: () => ({}),",
+			'\ttoHeaderPayload: () => ({ key: "raw" }),',
+			"};",
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-cache-telemetry-contributor.ts",
+		expectedCode: "",
+		description: "cache telemetry contributor satisfies the public contributor contract",
+		source: [
+			'import { CacheTelemetryCollector, type TelemetryContributor, type CacheTelemetryHeaderPayload, type CacheTelemetryLogPayload } from "@apifuse/provider-sdk";',
+			"export const cache: TelemetryContributor<CacheTelemetryLogPayload, CacheTelemetryHeaderPayload> = new CacheTelemetryCollector();",
+		].join("\n"),
+	},
+	{
+		filename: "negative-control-state-telemetry-free-text.ts",
+		expectedCode: "TS2322",
+		description: "state gateway telemetry rejects raw state-key samples",
+		source: [
+			'import type { TelemetryContributor } from "@apifuse/provider-sdk";',
+			"const bad: TelemetryContributor<{}, { key: string }> = {",
+			'\tkey: "state",',
+			"\ttoLogPayload: () => ({}),",
+			'\ttoHeaderPayload: () => ({ key: "raw" }),',
+			"};",
+		].join("\n"),
+	},
+	{
+		filename: "positive-control-state-telemetry-contributor.ts",
+		expectedCode: "",
+		description: "state telemetry contributor satisfies the public contributor contract",
+		source: [
+			'import { StateTelemetryCollector, type TelemetryContributor, type StateTelemetryHeaderPayload, type StateTelemetryLogPayload } from "@apifuse/provider-sdk";',
+			"export const state: TelemetryContributor<StateTelemetryLogPayload, StateTelemetryHeaderPayload> = new StateTelemetryCollector();",
+		].join("\n"),
+	},
 ] as const;
 
 assertTelemetryContributorControls();

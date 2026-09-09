@@ -11,6 +11,7 @@ import type {
 	ProviderCacheResponseMeta,
 	ProviderCacheResult,
 } from "../types.js";
+import { cacheTelemetryFor, guardCacheTelemetry } from "./cache-telemetry.js";
 import {
 	createProviderRedisClient,
 	ensureRedisReady,
@@ -135,15 +136,13 @@ function assertJsonSafeSecretValue(
 	if (typeof value === "number") {
 		if (!Number.isFinite(value))
 			unsupportedSecretValue(reportedPath, "non-finite numbers are unsupported");
-		if (Object.is(value, -0))
-			unsupportedSecretValue(reportedPath, "negative zero is unsupported");
+		if (Object.is(value, -0)) unsupportedSecretValue(reportedPath, "negative zero is unsupported");
 		return;
 	}
 	if (typeof value !== "object") {
 		unsupportedSecretValue(reportedPath, `${typeof value} values are unsupported`);
 	}
-	if (ancestors.has(value))
-		unsupportedSecretValue(reportedPath, "cyclic values are unsupported");
+	if (ancestors.has(value)) unsupportedSecretValue(reportedPath, "cyclic values are unsupported");
 
 	ancestors.add(value);
 	try {
@@ -156,8 +155,7 @@ function assertJsonSafeSecretValue(
 				const key = String(index);
 				expectedNames.add(key);
 				const descriptor = Object.getOwnPropertyDescriptor(value, key);
-				if (!descriptor)
-					unsupportedSecretValue(reportedPath, "sparse arrays are unsupported");
+				if (!descriptor) unsupportedSecretValue(reportedPath, "sparse arrays are unsupported");
 				if (!descriptor.enumerable || !("value" in descriptor)) {
 					unsupportedSecretValue(reportedPath, "array accessors are unsupported");
 				}
@@ -275,10 +273,7 @@ function hashSecretValue(
 	return { value: `hmac-sha256:${digest}`, secretScoped: true };
 }
 
-function metadataKeys(
-	events: ProviderCacheLookupMeta[],
-	secretScopedKeys: Set<string>,
-): string[] {
+function metadataKeys(events: ProviderCacheLookupMeta[], secretScopedKeys: Set<string>): string[] {
 	let secretScopedIndex = 0;
 	return Array.from(new Set(events.map((event) => event.key))).map((key) => {
 		if (!secretScopedKeys.has(key)) return key;
@@ -369,10 +364,14 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 	const memoryMaxEntries = Math.max(1, options.memoryMaxEntries ?? DEFAULT_MEMORY_MAX_ENTRIES);
 	const now = options.now ?? Date.now;
 	const events: ProviderCacheLookupMeta[] = [];
+	const telemetry = guardCacheTelemetry(cacheTelemetryFor(options));
+	telemetry.setRedisConfigured?.(!!redisUrl);
+	let redisUnavailable = false;
 	const secretScopedKeys = new Set<string>();
 
 	function record(meta: ProviderCacheLookupMeta): void {
 		events.push(meta);
+		telemetry?.recordLookup(meta);
 	}
 
 	function sweepMemory(currentTime: number): void {
@@ -416,13 +415,22 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 	} | null> {
 		const redis = backend.redis;
 		if (!redis || !(await ensureRedisReady(redis, DEFAULT_REDIS_TIMEOUT_MS))) {
+			if (redis) {
+				redisUnavailable = true;
+				telemetry?.recordRedisFallback();
+			}
 			return null;
 		}
 
 		const raw = await withRedisFallback(async () => {
 			return await redis.get(key);
 		});
-		if (typeof raw !== "string" && raw !== null) return null;
+		if (typeof raw !== "string" && raw !== null) {
+			redisUnavailable = true;
+			telemetry.recordRedisFallback();
+			return null;
+		}
+		telemetry?.recordRedisRoundTrip?.();
 
 		const envelope = safeParseEnvelope(raw);
 		if (!envelope) return null;
@@ -473,6 +481,7 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 		value: T,
 		cacheOptions: ProviderCacheGetOrSetOptions,
 	): Promise<void> {
+		telemetry?.recordWrite();
 		const currentTime = now();
 		const freshTtlMs = jitteredTtlMs(cacheOptions.ttlMs, cacheOptions.jitterPct);
 		const staleIfErrorMs = cacheOptions.staleIfErrorMs ?? 0;
@@ -487,9 +496,21 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 
 		const redis = backend.redis;
 		if (!redis || !(await ensureRedisReady(redis, DEFAULT_REDIS_TIMEOUT_MS))) {
+			if (redis) {
+				redisUnavailable = true;
+				telemetry?.recordRedisFallback();
+				telemetry?.recordWriteError?.();
+			}
 			return;
 		}
-		await withRedisFallback(() => redis.set(key, JSON.stringify(envelope), "PX", staleTtlMs));
+		const written = await withRedisFallback(() =>
+			redis.set(key, JSON.stringify(envelope), "PX", staleTtlMs),
+		);
+		if (written === undefined) {
+			redisUnavailable = true;
+			telemetry?.recordRedisFallback();
+			telemetry?.recordWriteError?.();
+		} else telemetry?.recordRedisRoundTrip?.();
 	}
 
 	async function loadAndStore<T>(
@@ -514,6 +535,13 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 			if (staleCandidate?.meta.stale) {
 				return staleCandidate;
 			}
+			telemetry?.recordLookup({
+				key,
+				hit: false,
+				stale: false,
+				source: "loader",
+			});
+			telemetry?.recordLoaderError?.();
 			throw error;
 		}
 	}
@@ -530,18 +558,29 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 		async get<T = unknown>(key: string): Promise<ProviderCacheResult<T> | null> {
 			const result = await read<T>(key);
 			if (result) record(result.meta);
+			else
+				telemetry.recordLookup({
+					key,
+					hit: false,
+					stale: false,
+					source: backend.redis && !redisUnavailable ? "redis" : "memory",
+				});
 			return result;
 		},
 
 		set: write,
 
 		async delete(key: string): Promise<void> {
+			telemetry?.recordWrite();
 			backend.memory.delete(key);
 			const redis = backend.redis;
 			if (!redis || !(await ensureRedisReady(redis, DEFAULT_REDIS_TIMEOUT_MS))) {
+				if (redis) telemetry?.recordRedisFallback();
 				return;
 			}
-			await withRedisFallback(() => redis.del(key));
+			const deleted = await withRedisFallback(() => redis.del(key));
+			if (deleted === undefined) telemetry?.recordRedisFallback();
+			else telemetry?.recordRedisRoundTrip?.();
 		},
 
 		async getOrSet<T = unknown>(
@@ -557,10 +596,22 @@ export function createProviderCache(options: ProviderCacheOptions): ProviderCach
 
 			const existingInflight = backend.inflight.get(key);
 			if (existingInflight) {
-				const inflightResult = await existingInflight;
-				const result = resultWithValue<T>(inflightResult.value, inflightResult.meta);
-				record(result.meta);
-				return result;
+				try {
+					const inflightResult = await existingInflight;
+					const result = resultWithValue<T>(inflightResult.value, inflightResult.meta);
+					record(result.meta);
+					return result;
+				} catch (error) {
+					const meta: ProviderCacheLookupMeta = {
+						key,
+						hit: false,
+						stale: false,
+						source: "loader",
+					};
+					telemetry.recordLookup(meta);
+					telemetry?.recordLoaderError?.();
+					throw error;
+				}
 			}
 
 			const promise: Promise<ProviderCacheResult<unknown>> = loadAndStore(
