@@ -1,0 +1,48 @@
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+// Mirrors the resolved manifest truth for korea-neis-school-meals
+// (infra/k8s/generated/providers/korea-neis-school-meals/). `replicas` is
+// intentionally absent: when an HPA is present the generator omits replicas
+// from the Deployment spec, so declaring it here would drift from what is
+// actually applied. Redis caching is enabled because both operations serve
+// through a shared 6-hour TTL cache with stale-if-error fallback.
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 1,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "25m",
+    memory: "128Mi",
+  },
+  cache: { redis: { enabled: true } },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;

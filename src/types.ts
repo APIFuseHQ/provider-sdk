@@ -2398,6 +2398,14 @@ export interface OperationDefinition<
  * optional. Note that the deployment `runtime` axis
  * (`shared`/`dedicated`/`browser`) is distinct from the provider execution
  * `runtime` (`standard`/`shared`/`browser`).
+ *
+ * This key is the ONLY authored deployment surface. Declare it inside the
+ * `defineProvider({...})` literal, not on a spread default export and not
+ * in a standalone `deploy.ts` (legacy; `apifuse migrate-deployment` hoists
+ * and deletes it). Write only what differs from the runtime profile —
+ * shared `25m/128Mi`, browser `200m/256Mi`, `language: "typescript"`,
+ * `replicas: 1`, HPA enabled 1-1 at 70% CPU — so most providers declare
+ * nothing and `apifuse check` warns on restated defaults.
  */
 export interface ProviderDeploymentOverrides {
 	runtime?: "shared" | "dedicated" | "browser";

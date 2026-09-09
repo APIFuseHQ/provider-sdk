@@ -1,0 +1,57 @@
+// Provider deployment contract for the polyrepo reusable-deploy pipeline.
+//
+// Shape mirrors `ProviderDeploymentConfigSchema` in
+// `@apifuse/provider-registry` (monorepo). It is intentionally a plain object,
+// NOT a `defineProviderDeployment(...)` call: `@apifuse/provider-registry` is a
+// private, unpublished workspace package and cannot be a dependency of this
+// public split repo. The monorepo deploy engine imports this module and runs
+// `ProviderDeploymentConfigSchema.parse(default)` when it materializes the
+// provider, so the object is schema-validated centrally at deploy time.
+//
+// buyee is a plain-fetch HTML scraping provider: `runtime: "shared"`, with no
+// stealth transport, browser, or redis cache. The largest in-scope upstream
+// page is about 220KB of search HTML, and the SDK pre-buffers response bodies,
+// so 256Mi provides runtime headroom.
+
+type ProviderDeploymentConfig = {
+  runtime: "shared" | "dedicated" | "browser";
+  language: "typescript" | "python";
+  replicas?: number;
+  hpa?: {
+    enabled: boolean;
+    minReplicas?: number;
+    maxReplicas?: number;
+    targetCPUUtilizationPercentage?: number;
+  };
+  resources: {
+    cpu: string;
+    memory: string;
+  };
+  cache?: {
+    redis?: {
+      enabled: boolean;
+      url?: string;
+    };
+  };
+  network?: {
+    additionalTcpPorts?: number[];
+  };
+};
+
+const deployment = {
+  runtime: "shared",
+  language: "typescript",
+  replicas: 1,
+  hpa: {
+    enabled: true,
+    minReplicas: 1,
+    maxReplicas: 2,
+    targetCPUUtilizationPercentage: 70,
+  },
+  resources: {
+    cpu: "100m",
+    memory: "256Mi",
+  },
+} satisfies ProviderDeploymentConfig;
+
+export default deployment;
