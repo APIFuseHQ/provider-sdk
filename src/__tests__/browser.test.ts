@@ -2559,4 +2559,95 @@ describe("createBrowserClient", () => {
 		expect(browserState.browsers[0]?.closeCalls).toBe(1);
 		expect(browserState.browsers[0]?.connected).toBeFalse();
 	});
+
+	it.each([
+		"throw",
+		"reject",
+		"never",
+		"garbage",
+		"species",
+		"frozen",
+	] as const)("browser hooks preserve transport behavior for observer edge %s", async (edge) => {
+		const { createBrowserClient } = await import("../runtime/browser.js");
+		const { BrowserTelemetryCollector } = await import("../runtime/browser-telemetry.js");
+		let unhandled = 0;
+		const listener = () => {
+			unhandled += 1;
+		};
+		process.on("unhandledRejection", listener);
+		const collector = new BrowserTelemetryCollector();
+		const hooks: string[] = [];
+		const bad = (hook: string) => {
+			hooks.push(hook);
+			if (edge === "throw") throw new Error("observer");
+			if (edge === "reject") return Promise.reject(new Error("observer"));
+			if (edge === "never") return new Promise(() => {});
+			if (edge === "garbage") return 42;
+			if (edge === "frozen") return Object.freeze(Promise.reject(new Error("observer")));
+			class SpeciesPromise extends Promise<void> {
+				static get [Symbol.species](): PromiseConstructor {
+					throw new Error("species");
+				}
+			}
+			return new SpeciesPromise((_resolve, reject) => reject(new Error("observer")));
+		};
+		const run = async (record: boolean) => {
+			const responseStart = browserState.localCdpAuthResponses.length;
+			const client = createBrowserClient({
+				proxy: "http://username:password@proxy.test:8080",
+				telemetry: record
+					? {
+							recordEngine: () => bad("engine"),
+							recordPoolAcquire: () => bad("pool"),
+							recordProxyAuthChallenge: () => bad("auth"),
+							recordError: () => bad("error"),
+							markTelemetryFailed: () => collector.markTelemetryFailed(),
+						}
+					: undefined,
+			});
+			const page = await client.newPage();
+			await page.goto("https://example.com/");
+			await page.withResourcePolicy({ routes: [] }, async () => {
+				browserState.localCdpSessions
+					.at(-1)
+					?.dispatchAuthRequired({ requestId: "auth", authChallenge: { source: "Proxy" } });
+				await waitForCondition(
+					() => browserState.localCdpAuthResponses.length > responseStart,
+					"proxy auth response",
+				);
+			});
+			const error = await client.rawPage().catch((caught: unknown) => caught);
+			await client.close();
+			return {
+				auth: browserState.localCdpAuthResponses.slice(responseStart),
+				urls: browserState.browsers.at(-1)?.pages[0]?.state.gotoUrls,
+				error,
+			};
+		};
+		try {
+			const off = await run(false);
+			const on = await run(true);
+			expect(on.auth).toEqual(off.auth);
+			expect(on.urls).toEqual(off.urls);
+			expect(on.error instanceof Error && on.error.constructor).toBe(
+				off.error instanceof Error && off.error.constructor,
+			);
+			expect(on.error instanceof Error && on.error.message).toBe(
+				off.error instanceof Error && off.error.message,
+			);
+			expect(new Set(hooks)).toEqual(new Set(["engine", "pool", "auth", "error"]));
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(unhandled).toBe(0);
+			const log = collector.toLogPayload({
+				spans: [],
+				byName: new Map(),
+				count: () => 0,
+				durationMs: () => 0,
+			});
+			expect(log?.telemetryFailed).toBe(true);
+			expect(collector.toHeaderPayload(log!)).not.toHaveProperty("telemetryFailed");
+		} finally {
+			process.off("unhandledRejection", listener);
+		}
+	});
 });

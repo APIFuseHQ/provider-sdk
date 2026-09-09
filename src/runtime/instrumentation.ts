@@ -46,7 +46,16 @@ type InstrumentedNamespace =
 	| "ocr"
 	| "stt";
 
-const BROWSER_PAGE_METHODS = new Set(["goto", "fill", "click", "type", "waitForSelector"]);
+const BROWSER_PAGE_METHODS = new Set([
+	"goto",
+	"fill",
+	"click",
+	"type",
+	"waitForSelector",
+	"evaluate",
+	"content",
+	"screenshot",
+]);
 const DIAGNOSTIC_BASE_URL = "http://apifuse-instrumentation.invalid";
 
 type RequestDiagnostics = {
@@ -557,18 +566,33 @@ function wrapPage<T extends object>(page: T, trace: TraceContext): T {
 			const methodName = String(property);
 			const wrapped = (...args: unknown[]) => {
 				let elapsedMs = 0;
+				const diagnostics = snapshotRequestDiagnostics("browser", methodName, args);
+				registerDiagnosticSensitiveValues(trace, diagnostics.sensitiveValues);
 
 				return recorder.runSpan(
-					`browser.page.${methodName}`,
+					["evaluate", "content", "screenshot"].includes(methodName)
+						? `browser.${methodName}`
+						: `browser.page.${methodName}`,
 					async () => {
 						const startedAt = Date.now();
-						const result = await Reflect.apply(value, pageTarget, args);
+						let result: unknown;
+						try {
+							result = await Reflect.apply(value, pageTarget, args);
+						} catch (error) {
+							throw sanitizeRequestError(error, diagnostics);
+						}
 						elapsedMs = Date.now() - startedAt;
 						return result;
 					},
 					{
-						onSuccess: () => getBrowserPageAttributes(methodName, args, elapsedMs),
-						onError: (error) => getBrowserPageAttributes(methodName, args, undefined, error),
+						onSuccess: () => ({
+							...getBrowserPageAttributes(methodName, args, elapsedMs),
+							...(diagnostics.traceUrl ? { url: diagnostics.traceUrl } : {}),
+						}),
+						onError: (error) => ({
+							...getBrowserPageAttributes(methodName, args, undefined, error),
+							...(diagnostics.traceUrl ? { url: diagnostics.traceUrl } : {}),
+						}),
 					},
 				);
 			};
@@ -743,6 +767,32 @@ function wrapNamespace<T extends object>(
 				return wrapped;
 			}
 
+			if (namespace === "browser" && property === "rawPage") {
+				if (wrappedMethods.has(property)) return wrappedMethods.get(property);
+				const wrapped = (...args: unknown[]) =>
+					recorder.runSpan("browser.rawPage", async () => {
+						const page = await Reflect.apply(value, namespaceTarget, args);
+						return wrapPage(page, trace);
+					});
+				wrappedMethods.set(property, wrapped);
+				return wrapped;
+			}
+
+			if (namespace === "browser" && property === "withIsolatedContext") {
+				if (wrappedMethods.has(property)) return wrappedMethods.get(property);
+				const wrapped = (handler: unknown, ...args: unknown[]) =>
+					recorder.runSpan("browser.withIsolatedContext", async () => {
+						if (typeof handler !== "function")
+							return Reflect.apply(value, namespaceTarget, [handler, ...args]);
+						return Reflect.apply(value, namespaceTarget, [
+							(page: object) => Reflect.apply(handler, undefined, [wrapPage(page, trace)]),
+							...args,
+						]);
+					});
+				wrappedMethods.set(property, wrapped);
+				return wrapped;
+			}
+
 			if (wrappedMethods.has(property)) {
 				return wrappedMethods.get(property);
 			}
@@ -751,18 +801,31 @@ function wrapNamespace<T extends object>(
 			if (namespace === "browser") {
 				const wrapped = (...args: unknown[]) => {
 					let elapsedMs = 0;
+					const diagnostics = snapshotRequestDiagnostics("browser", methodName, args);
+					registerDiagnosticSensitiveValues(trace, diagnostics.sensitiveValues);
 
 					return recorder.runSpan(
 						`browser.${methodName}`,
 						async () => {
 							const startedAt = Date.now();
-							const result = await Reflect.apply(value, namespaceTarget, args);
+							let result: unknown;
+							try {
+								result = await Reflect.apply(value, namespaceTarget, args);
+							} catch (error) {
+								throw sanitizeRequestError(error, diagnostics);
+							}
 							elapsedMs = Date.now() - startedAt;
 							return result;
 						},
 						{
-							onSuccess: () => getBrowserPageAttributes(methodName, args, elapsedMs),
-							onError: (error) => getBrowserPageAttributes(methodName, args, undefined, error),
+							onSuccess: () => ({
+								...getBrowserPageAttributes(methodName, args, elapsedMs),
+								...(diagnostics.traceUrl ? { url: diagnostics.traceUrl } : {}),
+							}),
+							onError: (error) => ({
+								...getBrowserPageAttributes(methodName, args, undefined, error),
+								...(diagnostics.traceUrl ? { url: diagnostics.traceUrl } : {}),
+							}),
 						},
 					);
 				};

@@ -267,6 +267,17 @@ export {
 	type SttTelemetryLogPayload,
 	type SttTelemetrySink,
 } from "./runtime/stt-telemetry.js";
+
+export {
+	BrowserTelemetryCollector,
+	type BrowserTelemetryErrorCode,
+	type BrowserTelemetryHeaderPayload,
+	type BrowserTelemetryLogPayload,
+	type BrowserTelemetryPoolAcquireOutcome,
+	type BrowserTelemetrySink,
+	type BrowserTelemetrySampleName,
+	type BrowserTelemetryEngine,
+} from "./runtime/browser-telemetry.js";
 export {
 	APIFUSE__CDP_POOL__URL,
 	APIFUSE__RESOLVER__2CAPTCHA__API_KEY,

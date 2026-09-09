@@ -1,4 +1,33 @@
-import { readDiagnosticEnv } from "./diagnostic-env.js";
+import { readDiagnosticEnv, registerDiagnosticValue } from "./diagnostic-env.js";
+import { AsyncResource } from "node:async_hooks";
+import type {
+	BrowserTelemetryPoolAcquireOutcome,
+	BrowserTelemetrySink,
+} from "./browser-telemetry.js";
+import { observeTelemetryCallback as observeBrowserTelemetry } from "./http-telemetry-guard.js";
+import { cookieValuesFromHeaders } from "./stealth-cookies.js";
+
+function browserTelemetryErrorCode(
+	error: unknown,
+):
+	| "BROWSER_CDP_POOL_REQUIRED"
+	| "BROWSER_PROXY_INVALID"
+	| "BROWSER_RUNTIME_UNSUPPORTED"
+	| "BROWSER_CDP_POOL_ERROR"
+	| "other" {
+	const code =
+		error && typeof error === "object" && "code" in error
+			? (error as { code?: unknown }).code
+			: undefined;
+	if (
+		code === "BROWSER_CDP_POOL_REQUIRED" ||
+		code === "BROWSER_PROXY_INVALID" ||
+		code === "BROWSER_RUNTIME_UNSUPPORTED"
+	)
+		return code;
+	if (typeof code === "number") return "BROWSER_CDP_POOL_ERROR";
+	return "other";
+}
 import { createRequire } from "node:module";
 import type { CDPSession, Frame, LaunchOptions, Locator, Page, Request, Route } from "playwright";
 
@@ -416,9 +445,7 @@ function getCdpAuthRequiredRequestId(params: unknown): string | null {
 
 function isCdpProxyAuthChallenge(params: unknown): boolean {
 	return (
-		isRecord(params) &&
-		isRecord(params.authChallenge) &&
-		params.authChallenge.source === "Proxy"
+		isRecord(params) && isRecord(params.authChallenge) && params.authChallenge.source === "Proxy"
 	);
 }
 
@@ -427,6 +454,7 @@ async function handleCdpAuthRequired(
 	proxy: PlaywrightProxy & { username: string; password: string },
 	authAttempts: Set<string>,
 	params: unknown,
+	telemetry?: BrowserTelemetrySink,
 ): Promise<void> {
 	const requestId = getCdpAuthRequiredRequestId(params);
 	if (!requestId) return;
@@ -436,20 +464,21 @@ async function handleCdpAuthRequired(
 	const response =
 		isCdpProxyAuthChallenge(params) && !authAttempts.has(requestId)
 			? (() => {
-				authAttempts.add(requestId);
-				return {
-					authChallengeResponse: {
-						password: proxy.password,
-						response: "ProvideCredentials" as const,
-						username: proxy.username,
-					},
+					authAttempts.add(requestId);
+					observeBrowserTelemetry(telemetry, () => telemetry?.recordProxyAuthChallenge());
+					return {
+						authChallengeResponse: {
+							password: proxy.password,
+							response: "ProvideCredentials" as const,
+							username: proxy.username,
+						},
+						requestId,
+					};
+				})()
+			: {
+					authChallengeResponse: { response: "CancelAuth" as const },
 					requestId,
 				};
-			})()
-			: {
-				authChallengeResponse: { response: "CancelAuth" as const },
-				requestId,
-			};
 
 	await session.send("Fetch.continueWithAuth", response).catch(() => undefined);
 }
@@ -485,6 +514,7 @@ export type BrowserClientOptions = BrowserOptions & {
 	executablePath?: string;
 	extraArgs?: string[];
 	serviceWorkers?: "allow" | "block";
+	telemetry?: BrowserTelemetrySink;
 };
 
 type SupportedBrowserClient = {
@@ -602,6 +632,8 @@ function toPlaywrightProxy(proxy: string | undefined): LaunchOptions["proxy"] {
 			fix: "Percent-encode the proxy username and password as URL userinfo.",
 		});
 	}
+	registerDiagnosticValue(username);
+	registerDiagnosticValue(password);
 
 	return {
 		server: `${parsed.protocol}//${parsed.host}`,
@@ -803,13 +835,21 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 	constructor(
 		private readonly page: Page,
 		private readonly proxy: LaunchOptions["proxy"] = undefined,
+		private readonly telemetry?: BrowserTelemetrySink,
 	) {}
 
 	async goto(
 		url: string,
 		options?: { readonly timeout?: number; readonly waitUntil?: "load" | "domcontentloaded" },
 	): Promise<void> {
-		await this.page.goto(url, options);
+		const response = await this.page.goto(url, options);
+		const headers = await response?.headersArray().catch(() => []);
+		for (const header of headers ?? []) {
+			if (header.name.toLowerCase() === "set-cookie") {
+				registerDiagnosticValue(header.value);
+				for (const value of cookieValuesFromHeaders(header.value)) registerDiagnosticValue(value);
+			}
+		}
 	}
 
 	async evaluate<T>(fn: string | (() => T)): Promise<T> {
@@ -870,7 +910,9 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 	}
 
 	async cookies(): Promise<readonly BrowserCookie[]> {
-		return (await this.page.context().cookies()).map(toBrowserCookie);
+		const cookies = (await this.page.context().cookies()).map(toBrowserCookie);
+		for (const cookie of cookies) registerDiagnosticValue(cookie.value);
+		return cookies;
 	}
 
 	async withResourcePolicy<T>(policy: BrowserResourcePolicy, run: () => Promise<T>): Promise<T> {
@@ -914,7 +956,7 @@ class PlaywrightBrowserPage implements BrowserPageContract {
 			const authAttempts = new Set<string>();
 			const onAuthRequired = (params: unknown) => {
 				if (!proxy) return;
-				void handleCdpAuthRequired(session, proxy, authAttempts, params);
+				void handleCdpAuthRequired(session, proxy, authAttempts, params, this.telemetry);
 			};
 			session.on("Fetch.requestPaused", onRequestPaused);
 			if (proxy) {
@@ -990,10 +1032,14 @@ class PlaywrightBrowserClient implements SupportedBrowserClient {
 	}
 
 	async newPage(): Promise<BrowserPageContract> {
+		if (!this.options.cdpUrl)
+			observeBrowserTelemetry(this.options.telemetry, () =>
+				this.options.telemetry?.recordPoolAcquire("not_configured"),
+			);
 		const browser = await this.ensureBrowser();
 		const page = await browser.newPage();
 
-		return new PlaywrightBrowserPage(page, this.parsedProxy);
+		return new PlaywrightBrowserPage(page, this.parsedProxy, this.options.telemetry);
 	}
 
 	async rawPage(): Promise<BrowserPageContract> {
@@ -1004,10 +1050,14 @@ class PlaywrightBrowserClient implements SupportedBrowserClient {
 	}
 
 	async withIsolatedContext<T>(handler: (page: BrowserPageContract) => Promise<T>): Promise<T> {
+		if (!this.options.cdpUrl)
+			observeBrowserTelemetry(this.options.telemetry, () =>
+				this.options.telemetry?.recordPoolAcquire("not_configured"),
+			);
 		const browser = await this.ensureBrowser();
 		const context = await browser.newContext({ serviceWorkers: this.options.serviceWorkers });
 		const page = await context.newPage();
-		const browserPage = new PlaywrightBrowserPage(page, this.parsedProxy);
+		const browserPage = new PlaywrightBrowserPage(page, this.parsedProxy, this.options.telemetry);
 
 		try {
 			return await handler(browserPage);
@@ -1318,6 +1368,36 @@ function parsePoolAcquireResponse(value: unknown): PoolAcquireResponse {
 	};
 }
 
+function poolAcquireOutcome(error: unknown): BrowserTelemetryPoolAcquireOutcome {
+	const code =
+		error instanceof Error && typeof (error as Error & { code?: unknown }).code === "number"
+			? (error as Error & { code: number }).code
+			: undefined;
+	switch (code) {
+		case -32001:
+			return "queue_full";
+		case -32002:
+			return "timed_out";
+		case -32003:
+			return "shutting_down";
+		case -32004:
+			return "unknown_lease";
+		case -32005:
+			return "unknown_method";
+		case -32006:
+			return "missing_allowed_hosts";
+	}
+	if (error instanceof Error && /Unable to connect|WebSocket closed/.test(error.message))
+		return "transport_failure";
+	return "other";
+}
+
+function poolAcquireCode(error: unknown): number | undefined {
+	return error instanceof Error && typeof (error as Error & { code?: unknown }).code === "number"
+		? (error as Error & { code: number }).code
+		: undefined;
+}
+
 function parseCdpFrameTreeNode(value: unknown): CdpFrameTreeNode | undefined {
 	if (!isRecord(value) || !isRecord(value.frame)) {
 		return undefined;
@@ -1366,9 +1446,7 @@ function getCdpDestroyedExecutionContextId(params: unknown): number | undefined 
 		return undefined;
 	}
 
-	return typeof params.executionContextId === "number"
-		? params.executionContextId
-		: undefined;
+	return typeof params.executionContextId === "number" ? params.executionContextId : undefined;
 }
 
 function isMissingExecutionContextError(error: unknown): boolean {
@@ -1518,11 +1596,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 			if (typeof navigation.errorText === "string" && navigation.errorText.length > 0) {
 				throw new Error(`Page.navigate failed: ${navigation.errorText} at ${url}`);
 			}
-			await this.waitForDocumentReady(
-				startedAt + timeout,
-				() => expectedEventSeen,
-				waitUntil,
-			);
+			await this.waitForDocumentReady(startedAt + timeout, () => expectedEventSeen, waitUntil);
 		} finally {
 			unsubscribe();
 		}
@@ -1699,7 +1773,9 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 	async cookies(): Promise<readonly BrowserCookie[]> {
 		await this.initialize();
 		const result = await this.pageClient.send("Network.getCookies");
-		return parseCdpCookies(result.cookies);
+		const cookies = parseCdpCookies(result.cookies);
+		for (const cookie of cookies) registerDiagnosticValue(cookie.value);
+		return cookies;
 	}
 
 	async close(): Promise<void> {
@@ -1859,8 +1935,31 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 		this.pageClient.on("Runtime.executionContextsCleared", () => {
 			this.frameExecutionContexts.clear();
 		});
+		const registerResponseCookies = (params: unknown) => {
+			if (!isRecord(params)) return;
+			const headers = Array.isArray(params.responseHeaders)
+				? params.responseHeaders
+				: isRecord(params.headers)
+					? Object.entries(params.headers).map(([name, value]) => ({ name, value }))
+					: [];
+			for (const header of headers) {
+				if (
+					isRecord(header) &&
+					typeof header.name === "string" &&
+					header.name.toLowerCase() === "set-cookie" &&
+					typeof header.value === "string"
+				) {
+					registerDiagnosticValue(header.value);
+					for (const value of cookieValuesFromHeaders(header.value)) registerDiagnosticValue(value);
+				}
+			}
+		};
+		const scopedCookieRegistration = AsyncResource.bind(registerResponseCookies);
+		this.pageClient.on("Network.responseReceived", scopedCookieRegistration);
+		this.pageClient.on("Network.responseReceivedExtraInfo", scopedCookieRegistration);
 		await this.pageClient.send("Page.enable");
 		await this.pageClient.send("Runtime.enable");
+		await this.pageClient.send("Network.enable").catch(() => undefined);
 		this.initialized = true;
 	}
 
@@ -1910,6 +2009,7 @@ class CdpPoolBrowserPage implements BrowserPageContract {
 class CdpPoolBrowserClient implements SupportedBrowserClient {
 	private readonly allowedHosts: string[];
 	private readonly poolClient: JsonRpcWebSocketClient;
+	private readonly telemetry?: BrowserTelemetrySink;
 	readonly engine = "playwright-stealth" satisfies BrowserEngine;
 
 	constructor(options: BrowserClientOptions) {
@@ -1920,6 +2020,7 @@ class CdpPoolBrowserClient implements SupportedBrowserClient {
 		}
 
 		this.allowedHosts = [...new Set(options.allowedHosts ?? [])];
+		this.telemetry = options.telemetry;
 		this.poolClient = new JsonRpcWebSocketClient(options.cdpUrl);
 	}
 
@@ -1928,12 +2029,29 @@ class CdpPoolBrowserClient implements SupportedBrowserClient {
 	}
 
 	private async acquirePage(options?: { isolatedContext?: boolean }): Promise<BrowserPageContract> {
-		const acquireResult = parsePoolAcquireResponse(
-			await this.poolClient.send("acquire", {
-				...(this.allowedHosts.length > 0 ? { allowedHosts: this.allowedHosts } : {}),
-				...(options?.isolatedContext ? { isolationMode: "browserContext" } : {}),
-			}),
-		);
+		let acquireResult: PoolAcquireResponse;
+		try {
+			acquireResult = parsePoolAcquireResponse(
+				await this.poolClient.send("acquire", {
+					...(this.allowedHosts.length > 0 ? { allowedHosts: this.allowedHosts } : {}),
+					...(options?.isolatedContext ? { isolationMode: "browserContext" } : {}),
+				}),
+			);
+			observeBrowserTelemetry(this.telemetry, () => this.telemetry?.recordPoolAcquire("ok"));
+		} catch (error) {
+			observeBrowserTelemetry(this.telemetry, () =>
+				this.telemetry?.recordPoolAcquire(poolAcquireOutcome(error)),
+			);
+			observeBrowserTelemetry(this.telemetry, () =>
+				this.telemetry?.recordError("BROWSER_CDP_POOL_ERROR"),
+			);
+			const code = poolAcquireCode(error);
+			if (code !== undefined && ![-32001, -32002, -32003, -32004, -32005, -32006].includes(code))
+				observeBrowserTelemetry(this.telemetry, () =>
+					this.telemetry?.recordPoolAcquireUnknownCode?.(code),
+				);
+			throw error;
+		}
 		const pageClient = new CdpWebSocketClient(acquireResult.wsEndpoint);
 		const page = new CdpPoolBrowserPage(
 			acquireResult.pageId,
@@ -2025,6 +2143,7 @@ export class BrowserClient implements BrowserClientContract {
 	private activePage?: BrowserPageContract;
 	private readonly activePages = new Set<BrowserPageContract>();
 	private readonly _engine: BrowserEngine;
+	private readonly telemetry?: BrowserTelemetrySink;
 
 	constructor(options: BrowserClientOptions = {}) {
 		const resolvedOptions = {
@@ -2033,6 +2152,7 @@ export class BrowserClient implements BrowserClientContract {
 		};
 		const engine = resolvedOptions.engine ?? "playwright-stealth";
 		this._engine = engine;
+		this.telemetry = resolvedOptions.telemetry;
 		this.cdpUrl = resolvedOptions.cdpUrl;
 
 		if (resolvedOptions.requireCdpPool && !resolvedOptions.cdpUrl) {
@@ -2061,23 +2181,46 @@ export class BrowserClient implements BrowserClientContract {
 	}
 
 	async newPage(): Promise<BrowserPageContract> {
-		const page = await this.client.newPage();
-		return this.activatePage(page);
+		observeBrowserTelemetry(this.telemetry, () => this.telemetry?.recordEngine(this._engine));
+		try {
+			const page = await this.client.newPage();
+			return this.activatePage(page);
+		} catch (error) {
+			observeBrowserTelemetry(this.telemetry, () =>
+				this.telemetry?.recordError(browserTelemetryErrorCode(error)),
+			);
+			throw error;
+		}
 	}
 
 	async rawPage(): Promise<BrowserPageContract> {
+		observeBrowserTelemetry(this.telemetry, () => this.telemetry?.recordEngine(this._engine));
 		if (!this.cdpUrl) {
+			observeBrowserTelemetry(this.telemetry, () =>
+				this.telemetry?.recordPoolAcquire("not_configured"),
+			);
+			observeBrowserTelemetry(this.telemetry, () =>
+				this.telemetry?.recordError("BROWSER_RUNTIME_UNSUPPORTED"),
+			);
 			throw new ProviderError("ctx.browser.rawPage() requires a CDP pool", {
 				code: "BROWSER_RUNTIME_UNSUPPORTED",
 				fix: "Set APIFUSE__CDP_POOL__URL. The SDK escape hatch is CDP pool-backed only and never launches local Chromium.",
 			});
 		}
 
-		const page = await this.client.rawPage();
-		return this.activatePage(page);
+		try {
+			const page = await this.client.rawPage();
+			return this.activatePage(page);
+		} catch (error) {
+			observeBrowserTelemetry(this.telemetry, () =>
+				this.telemetry?.recordError(browserTelemetryErrorCode(error)),
+			);
+			throw error;
+		}
 	}
 
 	async withIsolatedContext<T>(handler: (page: BrowserPageContract) => Promise<T>): Promise<T> {
+		observeBrowserTelemetry(this.telemetry, () => this.telemetry?.recordEngine(this._engine));
 		const previousActivePage = this.activePage;
 		let trackedPage: BrowserPageContract | undefined;
 
@@ -2123,7 +2266,11 @@ export class BrowserClient implements BrowserClientContract {
 	}
 
 	async solveChallenge(request: BrowserChallengeRequest): Promise<BrowserChallengeResult> {
+		observeBrowserTelemetry(this.telemetry, () => this.telemetry?.recordEngine(this._engine));
 		if (request.type !== "recaptcha") {
+			observeBrowserTelemetry(this.telemetry, () =>
+				this.telemetry?.recordError("BROWSER_RUNTIME_UNSUPPORTED"),
+			);
 			throw new ProviderError(`Unsupported browser challenge: ${request.type}`, {
 				code: "BROWSER_RUNTIME_UNSUPPORTED",
 			});

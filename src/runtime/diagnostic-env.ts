@@ -51,7 +51,7 @@ export function readDiagnosticEnv(
 
 /** Register a runtime-discovered sensitive value in the active request inventory. */
 export function registerDiagnosticValue(value: string): void {
-	if (!value) return;
+	if (value.length < 4) return;
 	const scope = observers.getStore();
 	if (scope && !scope.finished && scope.register) {
 		scope.register([value]);

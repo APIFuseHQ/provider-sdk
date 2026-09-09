@@ -702,6 +702,7 @@ export type BrowserClientOptions = BrowserOptions & {
     executablePath?: string;
     extraArgs?: string[];
     serviceWorkers?: "allow" | "block";
+    telemetry?: BrowserTelemetrySink;
 };
 
 // @public (undocumented)
@@ -859,6 +860,108 @@ export type BrowserResourceRoute = {
     readonly match: string | RegExp | ((request: BrowserResourceRequest) => boolean);
     readonly handle: (request: BrowserResourceRequest) => Promise<BrowserResourceDecision> | BrowserResourceDecision;
 };
+
+// @public (undocumented)
+export class BrowserTelemetryCollector implements TelemetryContributor<BrowserTelemetryLogPayload, BrowserTelemetryHeaderPayload>, BrowserTelemetrySink {
+    constructor(options?: {
+        redact?: (value: string) => string;
+    });
+    // (undocumented)
+    readonly key: "browser";
+    // (undocumented)
+    markTelemetryFailed(): void;
+    // (undocumented)
+    recordEngine(engine: BrowserTelemetryEngine): void;
+    // (undocumented)
+    recordError(code: BrowserTelemetryErrorCode): void;
+    // (undocumented)
+    recordPoolAcquire(outcome: BrowserTelemetryPoolAcquireOutcome): void;
+    // (undocumented)
+    recordPoolAcquireUnknownCode(code: number): void;
+    // (undocumented)
+    recordProxyAuthChallenge(): void;
+    // (undocumented)
+    toHeaderPayload(log: BrowserTelemetryLogPayload): BrowserTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(spans: SpanIndex): BrowserTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type BrowserTelemetryEngine = BrowserEngine | "host";
+
+// @public (undocumented)
+export type BrowserTelemetryErrorCode = "BROWSER_CDP_POOL_REQUIRED" | "BROWSER_PROXY_INVALID" | "BROWSER_RUNTIME_UNSUPPORTED" | "BROWSER_CDP_POOL_ERROR" | "other";
+
+// @public (undocumented)
+export type BrowserTelemetryHeaderPayload = {
+    allocateMs: number;
+    pages: number;
+    navigations: number;
+    actions: number;
+    evaluate: number;
+    content: number;
+    screenshot: number;
+    poolAcquireOutcome?: ClosedEnum<BrowserTelemetryPoolAcquireOutcome>;
+    poolAcquireAttempts: number;
+    poolAcquireFailures: number;
+    proxyAuthChallenges: number;
+    engine?: ClosedEnum<BrowserTelemetryEngine>;
+    lastErrorCode?: ClosedEnum<BrowserTelemetryErrorCode>;
+    samples: {
+        name: ClosedEnum<BrowserTelemetrySampleName>;
+        ms: number;
+        status: ClosedEnum<"ok" | "error">;
+    }[];
+    dropped: number;
+};
+
+// @public (undocumented)
+export type BrowserTelemetryLogPayload = {
+    allocateMs: number;
+    pages: number;
+    navigations: number;
+    actions: number;
+    evaluate: number;
+    content: number;
+    screenshot: number;
+    poolAcquireOutcome?: BrowserTelemetryPoolAcquireOutcome;
+    poolAcquireAttempts: number;
+    poolAcquireFailures: number;
+    poolAcquireUnknownCode?: number;
+    proxyAuthChallenges: number;
+    engine?: BrowserTelemetryEngine;
+    lastErrorCode?: BrowserTelemetryErrorCode;
+    samples: {
+        name: BrowserTelemetrySampleName;
+        ms: number;
+        status: "ok" | "error";
+        diagnostics?: string;
+    }[];
+    dropped: number;
+    telemetryFailed?: true;
+};
+
+// @public (undocumented)
+export type BrowserTelemetryPoolAcquireOutcome = "ok" | "not_configured" | "queue_full" | "timed_out" | "shutting_down" | "unknown_lease" | "unknown_method" | "missing_allowed_hosts" | "transport_failure" | "other";
+
+// @public (undocumented)
+export type BrowserTelemetrySampleName = "browser.newPage" | "browser.page.goto" | "browser.page.fill" | "browser.page.click" | "browser.page.type" | "browser.page.waitForSelector" | "browser.evaluate" | "browser.content" | "browser.screenshot" | "other";
+
+// @public (undocumented)
+export interface BrowserTelemetrySink {
+    // (undocumented)
+    markTelemetryFailed?(): void;
+    // (undocumented)
+    recordEngine(engine: BrowserTelemetryEngine): void;
+    // (undocumented)
+    recordError(code: BrowserTelemetryErrorCode): void;
+    // (undocumented)
+    recordPoolAcquire(outcome: BrowserTelemetryPoolAcquireOutcome): void;
+    // (undocumented)
+    recordPoolAcquireUnknownCode?(code: number): void;
+    // (undocumented)
+    recordProxyAuthChallenge(): void;
+}
 
 // @public (undocumented)
 export type CandidateBlock = {
@@ -6056,6 +6159,7 @@ export type ResolverPaidUsageContext = {
 export interface ResolverRuntimeOptions {
     // (undocumented)
     readonly allowedHosts?: readonly string[];
+    readonly browserTelemetry?: BrowserTelemetrySink;
     // (undocumented)
     readonly cache?: ProviderCache;
     readonly createTransport?: (input: {

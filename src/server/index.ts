@@ -82,6 +82,17 @@ export {
 	type SttTelemetryLogPayload,
 	type SttTelemetrySink,
 } from "../runtime/stt-telemetry.js";
+
+export {
+	BrowserTelemetryCollector,
+	type BrowserTelemetryErrorCode,
+	type BrowserTelemetryHeaderPayload,
+	type BrowserTelemetryLogPayload,
+	type BrowserTelemetryPoolAcquireOutcome,
+	type BrowserTelemetrySink,
+	type BrowserTelemetrySampleName,
+	type BrowserTelemetryEngine,
+} from "../runtime/browser-telemetry.js";
 export type { ResolverVendorUnavailableReason } from "../runtime/resolver-vendors/types.js";
 export type { Span, TraceContext } from "../runtime/trace.js";
 export type { StealthBrowser, StealthOS, StealthProfileDescriptor } from "../types.js";

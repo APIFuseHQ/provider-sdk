@@ -135,6 +135,12 @@ import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
 import { StealthTelemetryCollector } from "../runtime/stealth-telemetry.js";
+import { BrowserTelemetryCollector } from "../runtime/browser-telemetry.js";
+import {
+	bindBrowserTelemetry,
+	isSupportedBrowserBinding,
+	warnUnsupportedBrowserBinding,
+} from "../runtime/browser-telemetry-binding.js";
 import { createSttClientFromEnv } from "../runtime/stt.js";
 import { bindSttTelemetry, SttTelemetryCollector } from "../runtime/stt-telemetry.js";
 import {
@@ -637,12 +643,17 @@ function createStealthChallengeDetection(
 						async solve(challenge, transport, solveSignal) {
 							const resolver = resolverRuntime.bindResolverSignal(
 								(resolverOverride
-									? bindResolverTelemetry(resolverOverride, resolverOptions.telemetry)
+									? bindResolverTelemetry(
+											resolverOverride,
+											resolverOptions.telemetry,
+											resolverOptions.browserTelemetry,
+										)
 									: undefined) ??
 									resolverRuntime.createResolverClientFromEnv(provider.resolver, undefined, {
 										allowedHosts: resolverOptions.allowedHosts,
 										cache: resolverOptions.cache,
 										telemetry: resolverOptions.telemetry,
+										browserTelemetry: resolverOptions.browserTelemetry,
 										identityScope: resolverOptions.identityScope,
 										// No proxyIntent: the transport is already bound to the initiating
 										// request's lease, and a second identity resolution would allocate
@@ -803,6 +814,7 @@ type RequestScopeContext = {
 	stealthTelemetry: StealthTelemetryCollector;
 	ocrTelemetry: OcrTelemetryCollector;
 	sttTelemetry: SttTelemetryCollector;
+	browserTelemetry: BrowserTelemetryCollector;
 };
 
 function createProviderContext(
@@ -840,6 +852,7 @@ function createProviderContext(
 		proxyClientOptions,
 		stealthProfile,
 		scope.resolverTelemetry,
+		scope.browserTelemetry,
 	);
 	const challengeRuntime = createStealthChallengeDetection(
 		provider,
@@ -917,6 +930,7 @@ function createProviderContext(
 						requireCdpPool: isProductionProviderBrowserMode(provider),
 						stealth: true,
 						engine: provider.browser?.engine,
+						telemetry: scope.browserTelemetry,
 					})
 				: createBrowserStub(),
 		...(provider.native
@@ -948,7 +962,11 @@ function createProviderContext(
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
 					(options.resolver
-						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						? bindResolverTelemetry(
+								options.resolver,
+								resolverOptions.telemetry,
+								resolverOptions.browserTelemetry,
+							)
 						: undefined) ??
 						capabilityModules.resolver.createResolverClientFromEnv(
 							provider.resolver,
@@ -959,7 +977,11 @@ function createProviderContext(
 				)
 			: bindResolverSignalWithoutRuntime(
 					(options.resolver
-						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						? bindResolverTelemetry(
+								options.resolver,
+								resolverOptions.telemetry,
+								resolverOptions.browserTelemetry,
+							)
 						: undefined) ??
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
@@ -977,6 +999,7 @@ function createProviderContext(
 		}),
 	};
 	const candidateHttp = bindings.http;
+	const candidateBrowser = bindings.browser;
 	const attached = options.engine.attach({ provider, bindings }) as ProviderContext;
 	const hostHttp = provider.http ? attached.http : undefined;
 	const supportedHostHttp = provider.http && isSupportedHttpBinding(hostHttp);
@@ -985,19 +1008,31 @@ function createProviderContext(
 		supportedHostHttp && hostHttp !== candidateHttp
 			? bindHttpTelemetry(hostHttp, scope.httpTelemetry)
 			: undefined;
-	const contextTarget = observedHttp
-		? new Proxy(attached, {
-				get(target, property, receiver) {
-					return property === "http" ? observedHttp : Reflect.get(target, property, receiver);
-				},
-			})
-		: provider.http && !supportedHostHttp
+	const hostBrowser = provider.runtime === "browser" ? attached.browser : undefined;
+	const supportedHostBrowser =
+		provider.runtime === "browser" && isSupportedBrowserBinding(hostBrowser);
+	if (provider.runtime === "browser" && !supportedHostBrowser) warnUnsupportedBrowserBinding();
+	const observedBrowser =
+		supportedHostBrowser && hostBrowser !== candidateBrowser
+			? bindBrowserTelemetry(hostBrowser, scope.browserTelemetry)
+			: undefined;
+	const contextTarget =
+		observedBrowser || observedHttp
 			? new Proxy(attached, {
 					get(target, property, receiver) {
-						return property === "http" ? undefined : Reflect.get(target, property, receiver);
+						if (property === "http" && observedHttp) return observedHttp;
+						if (property === "http" && provider.http && !supportedHostHttp) return undefined;
+						if (property === "browser" && observedBrowser) return observedBrowser;
+						return Reflect.get(target, property, receiver);
 					},
 				})
-			: attached;
+			: provider.http && !supportedHostHttp
+				? new Proxy(attached, {
+						get(target, property, receiver) {
+							return property === "http" ? undefined : Reflect.get(target, property, receiver);
+						},
+					})
+				: attached;
 	const context = wrapWithInstrumentation(contextTarget);
 	retryResponseMeta.set(context, scope.httpTelemetry);
 	return context;
@@ -1124,6 +1159,7 @@ function createAuthFlowContext(
 		proxyClientOptions,
 		stealthProfile,
 		scope.resolverTelemetry,
+		scope.browserTelemetry,
 	);
 	const challengeRuntime = createStealthChallengeDetection(
 		provider,
@@ -1189,6 +1225,18 @@ function createAuthFlowContext(
 				? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
 				: createLazyStealthClient(logStealthCleanupError, stealthBaseUrl, stealthClientOptions)
 			: createStealthStub(),
+		browser:
+			provider.runtime === "browser"
+				? capabilityModules.browser!.createBrowserClient({
+						allowedHosts: provider.allowedHosts,
+						cdpUrl: readDiagnosticEnv("APIFUSE__CDP_POOL__URL"),
+						headless: true,
+						requireCdpPool: isProductionProviderBrowserMode(provider),
+						stealth: true,
+						engine: provider.browser?.engine,
+						telemetry: scope.browserTelemetry,
+					})
+				: createBrowserStub(),
 		...(provider.native
 			? {
 					native: {
@@ -1222,7 +1270,11 @@ function createAuthFlowContext(
 		resolver: capabilityModules.resolver
 			? capabilityModules.resolver.bindResolverSignal(
 					(options.resolver
-						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						? bindResolverTelemetry(
+								options.resolver,
+								resolverOptions.telemetry,
+								resolverOptions.browserTelemetry,
+							)
 						: undefined) ??
 						capabilityModules.resolver.createResolverClientFromEnv(
 							provider.resolver,
@@ -1233,7 +1285,11 @@ function createAuthFlowContext(
 				)
 			: bindResolverSignalWithoutRuntime(
 					(options.resolver
-						? bindResolverTelemetry(options.resolver, resolverOptions.telemetry)
+						? bindResolverTelemetry(
+								options.resolver,
+								resolverOptions.telemetry,
+								resolverOptions.browserTelemetry,
+							)
 						: undefined) ??
 						createUnsupportedResolverClient("Provider does not declare resolver capability"),
 					signal,
@@ -2271,12 +2327,14 @@ function createRequestScope(input: {
 	const stealthCollector = new StealthTelemetryCollector({ redact });
 	const ocrCollector = new OcrTelemetryCollector({ redact });
 	const sttCollector = new SttTelemetryCollector({ redact });
+	const browserCollector = new BrowserTelemetryCollector({ redact });
 	const telemetry = new RequestTelemetry(trace);
 	telemetry.register(proxyCollector);
 	telemetry.register(resolverCollector);
 	telemetry.register(nativeCollector);
 	telemetry.register(httpCollector);
 	telemetry.register(stealthCollector);
+	telemetry.register(browserCollector);
 	telemetry.register(ocrCollector);
 	telemetry.register(sttCollector);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
@@ -2365,6 +2423,7 @@ function createRequestScope(input: {
 		stealthTelemetry: stealthCollector,
 		ocrTelemetry: ocrCollector,
 		sttTelemetry: sttCollector,
+		browserTelemetry: browserCollector,
 		seedCredentials(rawBody, kind): void {
 			const harvested = rawRequestCredentials(rawBody, kind);
 			sensitiveRegistry.add(harvested.values);
