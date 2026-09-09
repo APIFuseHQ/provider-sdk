@@ -54,6 +54,7 @@ import {
 import { createScratchpad } from "../runtime/auth-flow.js";
 import type * as BrowserRuntimeModule from "../runtime/browser.js";
 import { createProviderCache } from "../runtime/cache.js";
+import { bindCacheTelemetry, CacheTelemetryCollector } from "../runtime/cache-telemetry.js";
 import type { HandleTelemetryEvent } from "../handle.js";
 import { createHandleContext } from "../runtime/handle.js";
 import { createCredentialContext } from "../runtime/credential.js";
@@ -131,6 +132,10 @@ import {
 	createProviderRuntimeStateFromEnv,
 	createUnsupportedProviderRuntimeState,
 } from "../runtime/state.js";
+import {
+	StateTelemetryCollector,
+	instrumentProviderRuntimeState,
+} from "../runtime/state-telemetry.js";
 import type * as StealthRuntimeModule from "../runtime/stealth.js";
 import type { StealthChallengeRuntime } from "../runtime/stealth-akamai-sbsd.js";
 import { StealthCookieJar } from "../runtime/stealth-cookies.js";
@@ -815,6 +820,8 @@ type RequestScopeContext = {
 	ocrTelemetry: OcrTelemetryCollector;
 	sttTelemetry: SttTelemetryCollector;
 	browserTelemetry: BrowserTelemetryCollector;
+	cacheTelemetry: CacheTelemetryCollector;
+	stateTelemetry: StateTelemetryCollector;
 };
 
 function createProviderContext(
@@ -842,7 +849,9 @@ function createProviderContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
-	const cache = createProviderCache({ providerId: provider.id });
+	const cache = createProviderCache(
+		bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry),
+	);
 	const { capabilityModules } = options;
 	const resolverOptions = createResolverRuntimeOptions(
 		provider,
@@ -903,7 +912,11 @@ function createProviderContext(
 		connectionId: resolveOperationConnectionId(request),
 		headers: request.headers ?? {},
 	};
-	const requestState = state.forConnection(requestContext.connectionId);
+	const requestState = instrumentProviderRuntimeState(
+		state,
+		scope.stateTelemetry,
+		scope.redact,
+	).forConnection(requestContext.connectionId);
 	const bindings: ProviderEngineBindingCandidates = {
 		env,
 		credential,
@@ -1149,7 +1162,9 @@ function createAuthFlowContext(
 		proxyClientOptions.affinityKey,
 		request.requestId,
 	);
-	const cache = createProviderCache({ providerId: provider.id });
+	const cache = createProviderCache(
+		bindCacheTelemetry({ providerId: provider.id }, scope.cacheTelemetry),
+	);
 	const { capabilityModules } = options;
 	const resolverOptions = createResolverRuntimeOptions(
 		provider,
@@ -1219,7 +1234,11 @@ function createAuthFlowContext(
 			...(signal ? { signal } : {}),
 			httpTelemetry: scope.httpTelemetry,
 		}),
-		state: state.forConnection(resolveOperationConnectionId(request)),
+		state: instrumentProviderRuntimeState(
+			state,
+			scope.stateTelemetry,
+			scope.redact,
+		).forConnection(resolveOperationConnectionId(request)),
 		stealth: stealthBaseUrl
 			? capabilityModules.stealth
 				? capabilityModules.stealth.createStealthClient(stealthBaseUrl, stealthClientOptions)
@@ -2328,6 +2347,8 @@ function createRequestScope(input: {
 	const ocrCollector = new OcrTelemetryCollector({ redact });
 	const sttCollector = new SttTelemetryCollector({ redact });
 	const browserCollector = new BrowserTelemetryCollector({ redact });
+	const cacheTelemetry = new CacheTelemetryCollector({ redact });
+	const stateTelemetry = new StateTelemetryCollector({ redact });
 	const telemetry = new RequestTelemetry(trace);
 	telemetry.register(proxyCollector);
 	telemetry.register(resolverCollector);
@@ -2337,6 +2358,8 @@ function createRequestScope(input: {
 	telemetry.register(browserCollector);
 	telemetry.register(ocrCollector);
 	telemetry.register(sttCollector);
+	telemetry.register(cacheTelemetry);
+	telemetry.register(stateTelemetry);
 	let rootRunner: <T>(fn: () => Promise<T>) => Promise<T> = (fn) => fn();
 	let resolveRoot!: (outcome: RequestTerminalOutcome) => void;
 	const rootTerminal = new Promise<RequestTerminalOutcome>((resolve) => {
@@ -2424,6 +2447,8 @@ function createRequestScope(input: {
 		ocrTelemetry: ocrCollector,
 		sttTelemetry: sttCollector,
 		browserTelemetry: browserCollector,
+		cacheTelemetry,
+		stateTelemetry,
 		seedCredentials(rawBody, kind): void {
 			const harvested = rawRequestCredentials(rawBody, kind);
 			sensitiveRegistry.add(harvested.values);

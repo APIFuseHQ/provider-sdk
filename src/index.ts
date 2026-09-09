@@ -622,3 +622,22 @@ export {
 	type NativeTelemetryVendorSkipReason,
 	type NativeVendorSkipTelemetryEvent,
 } from "./runtime/native-telemetry.js";
+export {
+	CacheTelemetryCollector,
+	type CacheTelemetryHeaderPayload,
+	type CacheTelemetryLogPayload,
+	type CacheTelemetrySample,
+	type CacheTelemetrySink,
+	type CacheTelemetrySource,
+} from "./runtime/cache-telemetry.js";
+export {
+	StateTelemetryCollector,
+	instrumentProviderRuntimeState,
+	type StateTelemetryBackend,
+	type StateTelemetryHeaderPayload,
+	type StateTelemetryLogPayload,
+	type StateTelemetryOperation,
+	type StateTelemetrySample,
+	type StateTelemetrySink,
+	type StateTelemetryViolation,
+} from "./runtime/state-telemetry.js";

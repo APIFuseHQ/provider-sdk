@@ -964,6 +964,99 @@ export interface BrowserTelemetrySink {
 }
 
 // @public (undocumented)
+export class CacheTelemetryCollector implements TelemetryContributor<CacheTelemetryLogPayload, CacheTelemetryHeaderPayload>, CacheTelemetrySink {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "cache";
+    // (undocumented)
+    markTelemetryFailed(): void;
+    // (undocumented)
+    recordLoaderError(): void;
+    // (undocumented)
+    recordLookup(meta: ProviderCacheLookupMeta): void;
+    // (undocumented)
+    recordRedisFallback(): void;
+    // (undocumented)
+    recordRedisRoundTrip(): void;
+    // (undocumented)
+    recordWrite(): void;
+    // (undocumented)
+    recordWriteError(): void;
+    // (undocumented)
+    setRedisConfigured(configured: boolean): void;
+    // (undocumented)
+    toHeaderPayload(log: CacheTelemetryLogPayload): CacheTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(_spans: SpanIndex): CacheTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type CacheTelemetryHeaderPayload = Omit<CacheTelemetryLogPayload, "samples" | "ageMs" | "telemetryFailed"> & {
+    ageP50?: number;
+    ageMax?: number;
+};
+
+// @public (undocumented)
+export type CacheTelemetryLogPayload = {
+    telemetryFailed?: true;
+    lookups: number;
+    hits: number;
+    stale: number;
+    misses: number;
+    writes: number;
+    loaderErrors: number;
+    writeErrors: number;
+    source: {
+        memory: number;
+        redis: number;
+        loader: number;
+    };
+    redisFallbacks: number;
+    redisMode: ClosedEnum<"not_configured" | "configured" | "degraded">;
+    redisRoundTrips: number;
+    ageMs?: {
+        p50: number;
+        max: number;
+    };
+    samples: CacheTelemetrySample[];
+    dropped: number;
+};
+
+// @public (undocumented)
+export type CacheTelemetrySample = {
+    key: string;
+    hit: boolean;
+    stale: boolean;
+    ageMs?: number;
+    source: CacheTelemetrySource;
+};
+
+// @public (undocumented)
+export interface CacheTelemetrySink {
+    // (undocumented)
+    markTelemetryFailed?(): void;
+    // (undocumented)
+    recordLoaderError?(): void;
+    // (undocumented)
+    recordLookup(meta: ProviderCacheLookupMeta): void;
+    // (undocumented)
+    recordRedisFallback(): void;
+    // (undocumented)
+    recordRedisRoundTrip?(): void;
+    // (undocumented)
+    recordWrite(): void;
+    // (undocumented)
+    recordWriteError?(): void;
+    // (undocumented)
+    setRedisConfigured?(configured: boolean): void;
+}
+
+// @public (undocumented)
+export type CacheTelemetrySource = "memory" | "redis" | "loader";
+
+// @public (undocumented)
 export type CandidateBlock = {
     scope: "step_block";
     items: StepReference;
@@ -2887,6 +2980,9 @@ export interface InstrumentationOptions extends CreateTraceContextOptions {
 export type InstrumentedProviderContext<T extends Pick<ProviderContext, "trace">> = Omit<T, "trace"> & {
     trace: TraceContext;
 };
+
+// @public (undocumented)
+export function instrumentProviderRuntimeState(state: ProviderRuntimeState, sink: StateTelemetrySink, redact?: (text: string) => string): ProviderRuntimeState;
 
 // @public (undocumented)
 export function isCursorKind(kind: HandleKind): kind is CursorKind<any>;
@@ -7422,6 +7518,102 @@ export interface StateNamespaceOptions {
 
 // @public (undocumented)
 export type StateNamespaceScope = "connection" | "provider";
+
+// @public (undocumented)
+export type StateTelemetryBackend = "redis" | "memory" | "unsupported";
+
+// @public (undocumented)
+export class StateTelemetryCollector implements TelemetryContributor<StateTelemetryLogPayload, StateTelemetryHeaderPayload>, StateTelemetrySink {
+    constructor(options?: {
+        redact?: (text: string) => string;
+    });
+    // (undocumented)
+    readonly key: "state";
+    // (undocumented)
+    markTelemetryFailed(): void;
+    // (undocumented)
+    record(event: {
+        op: StateTelemetryOperation;
+        key?: string;
+        ms: number;
+        backend: StateTelemetryBackend;
+        ok: boolean;
+        conflict?: boolean;
+        violation?: StateTelemetryViolation;
+        redisTouched?: boolean;
+    }): void;
+    // (undocumented)
+    setRedisConfigured(configured: boolean): void;
+    // (undocumented)
+    toHeaderPayload(log: StateTelemetryLogPayload): StateTelemetryHeaderPayload;
+    // (undocumented)
+    toLogPayload(_spans: SpanIndex): StateTelemetryLogPayload | undefined;
+}
+
+// @public (undocumented)
+export type StateTelemetryHeaderPayload = Omit<StateTelemetryLogPayload, "samples" | "telemetryFailed">;
+
+// @public (undocumented)
+export type StateTelemetryLogPayload = {
+    telemetryFailed?: true;
+    ops: {
+        list: number;
+        get: number;
+        set: number;
+        patch: number;
+        delete: number;
+        cas: number;
+        increment: number;
+    };
+    casConflicts: number;
+    violations: {
+        quota: number;
+        ttl: number;
+        size: number;
+        unsupported: number;
+        error: number;
+    };
+    backend: ClosedEnum<StateTelemetryBackend>;
+    redisFallbacks: number;
+    redisMode: ClosedEnum<"not_configured" | "configured" | "degraded">;
+    redisRoundTrips: number;
+    ms: number;
+    samples: StateTelemetrySample[];
+    dropped: number;
+};
+
+// @public (undocumented)
+export type StateTelemetryOperation = "list" | "get" | "set" | "patch" | "delete" | "cas" | "increment";
+
+// @public (undocumented)
+export type StateTelemetrySample = {
+    key: string;
+    op: StateTelemetryOperation;
+    ms: number;
+    backend: StateTelemetryBackend;
+};
+
+// @public (undocumented)
+export interface StateTelemetrySink {
+    // (undocumented)
+    markTelemetryFailed?(): void;
+    // (undocumented)
+    record(event: {
+        op: StateTelemetryOperation;
+        key?: string;
+        ms: number;
+        backend: StateTelemetryBackend;
+        ok: boolean;
+        conflict?: boolean;
+        violation?: StateTelemetryViolation;
+        redisTouched?: boolean;
+    }): void;
+    // (undocumented)
+    setRedisConfigured?(configured: boolean): void;
+}
+
+// @public (undocumented)
+export type StateTelemetryViolation = "quota" | "ttl" | "size" | "unsupported" | "error";
 
 // @public (undocumented)
 export interface StateValue<T = unknown> {
