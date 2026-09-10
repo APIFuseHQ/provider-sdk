@@ -185,4 +185,65 @@ describe("HttpStatefulOwnerForwarder transport failures", () => {
 		);
 		expect(envelope?.operationRequest?.tenantId).toBe("org_forwarded_tenant");
 	});
+
+	it("rejects a malformed tenant scope at the source instead of at the owner", async () => {
+		// runtimeContext is consumer-supplied and only its requestId is guarded,
+		// so a non-string principal scope must fail here: the owner validates the
+		// envelope and would fail the whole forwarded operation instead.
+		let forwarded = 0;
+		const forwarder = new HttpStatefulOwnerForwarder({
+			currentPodId: "pod-source",
+			secret: "secret",
+			fetch: async () => {
+				forwarded += 1;
+				return Response.json({ data: { forwarded: true } });
+			},
+		});
+		const malformed = {
+			...request,
+			runtimeContext: {
+				forwarding: {
+					operationRequest: {
+						...request.runtimeContext.forwarding.operationRequest,
+						tenantId: { org: "not-a-string" },
+					},
+				},
+			},
+		};
+
+		const error = await capturedForwardingError(
+			forwarder.forward(owner("http://pod-owner"), malformed, new AbortController().signal),
+		);
+		expect(error.code).toBe("STATEFUL_FORWARDING_CONTEXT_INVALID");
+		expect(forwarded).toBe(0);
+	});
+
+	it("treats an empty tenant scope as absent rather than invalid", async () => {
+		let envelope: { operationRequest?: Record<string, unknown> } | undefined;
+		const forwarder = new HttpStatefulOwnerForwarder({
+			currentPodId: "pod-source",
+			secret: "secret",
+			fetch: async (_url, init) => {
+				envelope = JSON.parse(String(init?.body));
+				return Response.json({ data: { forwarded: true } });
+			},
+		});
+
+		await forwarder.forward(
+			owner("http://pod-owner"),
+			{
+				...request,
+				runtimeContext: {
+					forwarding: {
+						operationRequest: {
+							...request.runtimeContext.forwarding.operationRequest,
+							tenantId: "",
+						},
+					},
+				},
+			},
+			new AbortController().signal,
+		);
+		expect("tenantId" in (envelope?.operationRequest ?? {})).toBe(false);
+	});
 });

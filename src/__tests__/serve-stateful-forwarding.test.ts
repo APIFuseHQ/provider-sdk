@@ -254,6 +254,47 @@ describe("signed stateful operation forwarding", () => {
 		);
 	});
 
+	it("accepts an operation request field a previous SDK does not know", async () => {
+		// Rolling deploys run a newer source pod against an older owner pod for
+		// the whole update, so an additive OperationRequestSchema field must be
+		// stripped by the owner, never rejected: the rejection is terminal for
+		// the operation. The envelope's own keys stay strict (see the unknown
+		// top-level field case below).
+		const state = { defaultExecutions: 0 };
+		const provider = createTestProvider(state);
+		let received: ProviderServerOperationExecutorInput | undefined;
+		const app = createServerApp(provider, {
+			logger: () => {},
+			statefulForwarding: forwardingConfig(),
+			internalOperationExecutor: async (input) => {
+				received = input;
+				return { accepted: true };
+			},
+		});
+		const timestamp = new Date().toISOString();
+		const body = forwardingBody({
+			forwardedAt: timestamp,
+			operationRequest: {
+				requestId: "req-stateful-forward",
+				input: { value: "forwarded" },
+				futureAdditiveField: "from-a-newer-source-pod",
+			},
+		});
+
+		const response = await app.request(STATEFUL_ROUTE, {
+			method: "POST",
+			headers: signedHeaders(FORWARDING_SECRET, timestamp, body),
+			body,
+		});
+
+		expect(response.status).toBe(200);
+		expect(received?.request).toEqual({
+			requestId: "req-stateful-forward",
+			input: { value: "forwarded" },
+		});
+		expect(received?.ctx.request).toBeDefined();
+	});
+
 	it("logs proxy telemetry recorded by a forwarded operation", async () => {
 		const originalFetch = global.fetch;
 		const originalSmartproxyKey = process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY;
