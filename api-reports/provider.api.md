@@ -5943,17 +5943,17 @@ export { z }
 // dist/types.d.ts:674:5 - (ae-forgotten-export) The symbol "HealthCheckCaseResult" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:887:9 - (ae-forgotten-export) The symbol "Iso3166Alpha2CountryCode" needs to be exported by the entry point provider.d.ts
 // dist/types.d.ts:892:9 - (ae-forgotten-export) The symbol "ProviderProxySessionAffinity" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1282:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1282:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1589:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1595:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1596:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1600:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1607:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1642:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1920:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1926:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
-// dist/types.d.ts:1928:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1287:9 - (ae-forgotten-export) The symbol "StealthRedirectRunOptions" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1287:9 - (ae-forgotten-export) The symbol "StealthRedirectRunResult" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1594:5 - (ae-forgotten-export) The symbol "BrowserResourceBody" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1600:5 - (ae-forgotten-export) The symbol "BrowserResourceRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1601:5 - (ae-forgotten-export) The symbol "BrowserResourceDecision" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1605:5 - (ae-forgotten-export) The symbol "BrowserResourceMethod" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1612:5 - (ae-forgotten-export) The symbol "BrowserResourceRoute" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1647:5 - (ae-forgotten-export) The symbol "BrowserChallengeRequest" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1925:5 - (ae-forgotten-export) The symbol "ProviderCache" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1931:5 - (ae-forgotten-export) The symbol "BrowserClient" needs to be exported by the entry point provider.d.ts
+// dist/types.d.ts:1933:5 - (ae-forgotten-export) The symbol "AuthContext" needs to be exported by the entry point provider.d.ts
 
 // (No @packageDocumentation comment for this package)
 

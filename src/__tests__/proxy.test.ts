@@ -1725,6 +1725,109 @@ describe("proxy integration", () => {
 		).toEqual(["proof-1", "proof-2", "proof-3"]);
 	});
 
+	it("numbers the first issued header-factory attempt as 1 after failed proxy allocations", async () => {
+		// The retry loop counts an allocator failure as an attempt (it consumed a
+		// slot of the retry budget), but no request was built and no proof minted.
+		// A single-use proof minter must therefore still see `attempt: 1` on the
+		// first request that actually goes out, or callers branch on the wrong
+		// attempt (e.g. skip a first-attempt-only nonce cache).
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		let allocations = 0;
+		global.fetch = createFetchDouble(
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("get-ip-v3")) {
+					allocations += 1;
+					return allocations <= 3
+						? new Response("allocator unavailable", { status: 503 })
+						: new Response("5.78.24.25:31001", { status: 200 });
+				}
+				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				return new Response(JSON.stringify({ ok: true }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}),
+		);
+
+		const attempts: number[] = [];
+		const { createHttpClient } = await import("../runtime/http.js");
+		const response = await createHttpClient("https://example.com", {
+			affinityKey: "af_con_http_alloc_failure_factory",
+			upstream: {
+				proxy: {
+					mode: "required",
+					providers: ["smartproxy"],
+					geo: { country: "KR" },
+					session: { affinity: "connection", poolSize: 1 },
+				},
+			},
+		}).get("/health", {
+			retry: { attempts: 2, baseDelayMs: 0 },
+			headers: ({ attempt }) => {
+				attempts.push(attempt);
+				return { dpop: `proof-${attempt}` };
+			},
+		});
+
+		expect(response.status).toBe(200);
+		expect(nativeFetchCalls).toHaveLength(1);
+		expect(attempts).toEqual([1]);
+		expect((nativeFetchCalls[0]?.init?.headers as Record<string, string>).dpop).toBe("proof-1");
+	});
+
+	it("never starts the header factory once the per-call deadline fired during proxy resolution", async () => {
+		// Proxy resolution is awaited before header resolution, so the request
+		// timeout can fire while the allocator is in flight. Starting the factory
+		// then would burn a single-use proof for a request that can never be
+		// issued — and its rejection would land outside the transport error path
+		// (unredacted, unhandled).
+		process.env.APIFUSE__PROXY__SMARTPROXY_APP_KEY = "redacted-test-key";
+		global.fetch = createFetchDouble(
+			mock(async (input: string | URL | Request, init?: RequestInit) => {
+				const url = String(input);
+				if (url.includes("get-ip-v3")) {
+					await Bun.sleep(40);
+					return new Response("5.78.24.25:31001", { status: 200 });
+				}
+				nativeFetchCalls.push({ url, init: init as RequestInit & { proxy?: string } });
+				return new Response("{}", { status: 200 });
+			}),
+		);
+
+		let factoryCalls = 0;
+		const { createHttpClient } = await import("../runtime/http.js");
+		let caught: unknown;
+		try {
+			await createHttpClient("https://example.com", {
+				affinityKey: "af_con_http_deadline_factory",
+				upstream: {
+					proxy: {
+						mode: "required",
+						providers: ["smartproxy"],
+						geo: { country: "KR" },
+						session: { affinity: "connection", poolSize: 1 },
+					},
+				},
+			}).get("/health", {
+				retry: false,
+				timeout: 5,
+				sensitiveParams: { serviceKey: "redacted-test-secret" },
+				headers: ({ url }) => {
+					factoryCalls += 1;
+					throw new Error(`cannot sign ${url}`);
+				},
+			});
+		} catch (error) {
+			caught = error;
+		}
+
+		assertIsError(caught);
+		expect(caught).toMatchObject({ code: "transport_timeout" });
+		expect(factoryCalls).toBe(0);
+		expect(nativeFetchCalls).toHaveLength(0);
+	});
+
 	it("honors an explicit ctx.http retry count against a single-endpoint allocation", async () => {
 		// Regression: de-duplication must not engage for an explicit retry policy. A
 		// Smartproxy pool of 1 resolves the same endpoint every attempt, but a caller

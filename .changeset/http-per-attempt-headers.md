@@ -9,8 +9,9 @@ signatures, HMAC nonces) instead of replaying attempt 1's header set.
 `RequestOptions.headers` accepts `Record<string, string> | HttpHeadersFactory`,
 where `HttpHeadersFactory = (attempt: HttpAttemptContext) => Record<string, string> | Promise<Record<string, string>>`
 and `HttpAttemptContext = { attempt: number; url: string; method: HttpMethod }`
-(1-based issued attempt, the exact resolved URL including `baseUrl`, `params`
-and `sensitiveParams`, normalized upper-case method). Both types are exported
+(1-based number of the request build — a failed proxy allocation builds no
+request and is not numbered — the exact resolved URL including `baseUrl`,
+`params` and `sensitiveParams`, and the normalized upper-case method). Both types are exported
 from the package root and `@apifuse/provider-sdk/provider`.
 
 - Record headers behave exactly as before; this is an input widening. The

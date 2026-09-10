@@ -1231,7 +1231,12 @@ export interface HttpRetrySummary {
 
 /** Per-attempt input for a `RequestOptions.headers` factory. */
 export interface HttpAttemptContext {
-	/** 1-based count of issued attempts; the first request is `1`, its first retry `2`. */
+	/**
+	 * 1-based number of this request build: the first request is `1`, its first
+	 * retry `2`. Only attempts that reach header resolution count; a failed
+	 * proxy allocation or a skipped duplicate proxy offset builds no request
+	 * and is not numbered.
+	 */
 	attempt: number;
 	/**
 	 * Resolved request URL: `baseUrl` + path + `params` + `sensitiveParams`.

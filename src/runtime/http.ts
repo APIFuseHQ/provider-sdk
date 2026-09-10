@@ -252,12 +252,11 @@ function isHeaderRecord(value: unknown): value is Record<string, string> {
 function settleBeforeAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
 	if (!signal) return promise;
 	return new Promise<T>((resolve, reject) => {
-		if (signal.aborted) {
-			reject(signal.reason);
-			return;
-		}
 		const onAbort = () => reject(signal.reason);
-		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
+		else signal.addEventListener("abort", onAbort, { once: true });
+		// Always attach handlers: a late rejection after the abort must settle
+		// here (a no-op on the already-rejected promise), never go unhandled.
 		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
 	});
 }
@@ -265,15 +264,18 @@ function settleBeforeAbort<T>(promise: Promise<T>, signal: AbortSignal | undefin
 async function resolveAttemptHeaders(
 	options: RequestOptions & { body?: unknown },
 	clientOptions: HttpClientOptions,
-	attempt: HttpAttemptContext,
+	attempt: () => HttpAttemptContext,
 	signal: AbortSignal | undefined,
 ): Promise<Record<string, string> | undefined> {
 	const { headers } = options;
 	if (typeof headers !== "function") return headers;
+	// The per-call timeout may have fired during proxy resolution: do not start
+	// the factory at all once the request is already aborted.
+	if (signal?.aborted) throw signal.reason;
 	let minted: unknown;
 	try {
 		minted = await settleBeforeAbort(
-			Promise.resolve().then(() => headers(attempt)),
+			Promise.resolve().then(() => headers(attempt())),
 			signal,
 		);
 	} catch (error) {
@@ -846,7 +848,7 @@ async function fetchNativeHttp(
 	proxyAttemptOffset = 0,
 	dedupe?: { attempted: Set<string> },
 	observeProxy?: (used: boolean, status?: number) => void,
-	attempt = 1,
+	nextHeaderAttempt: () => number = () => 1,
 ): Promise<NativeHttpAttemptOutcome> {
 	const serializedUrl = serializeHttpRequestUrl(baseUrl, url, options);
 	const { requestUrl } = serializedUrl;
@@ -881,7 +883,7 @@ async function fetchNativeHttp(
 		const requestHeaders = await resolveAttemptHeaders(
 			options,
 			clientOptions,
-			{ attempt, url: requestUrl, method },
+			() => ({ attempt: nextHeaderAttempt(), url: requestUrl, method }),
 			signal,
 		);
 		const requestInit: NativeFetchInit = {
@@ -969,7 +971,7 @@ async function fetchNativeHttpStream(
 		const headers = await resolveAttemptHeaders(
 			options,
 			clientOptions,
-			{ attempt: 1, url: requestUrl, method },
+			() => ({ attempt: 1, url: requestUrl, method }),
 			signal,
 		);
 		const requestInit: NativeFetchInit = {
@@ -1142,10 +1144,17 @@ export function createHttpClient(
 			});
 			const dedupeContext = dedupeAllocatorEndpoints ? { attempted: new Set<string>() } : undefined;
 
-			const executeOnce = async (
-				proxyAttemptOffset = 0,
-				attempt = 1,
-			): Promise<NativeHttpAttemptOutcome> => {
+			// Numbers the attempts a header factory sees: only requests that reached
+			// header resolution count, so a failed proxy allocation (which increments
+			// the telemetry `issued` count below) or a dedupe-skipped offset does not
+			// make the first request that is actually built report `attempt: 2`.
+			let headerAttempts = 0;
+			const nextHeaderAttempt = () => {
+				headerAttempts += 1;
+				return headerAttempts;
+			};
+
+			const executeOnce = async (proxyAttemptOffset = 0): Promise<NativeHttpAttemptOutcome> => {
 				const started = performance.now();
 				let proxyUsed = false;
 				let observedStatus: number | undefined;
@@ -1167,7 +1176,7 @@ export function createHttpClient(
 							proxyUsed = used;
 							observedStatus = status;
 						},
-						attempt,
+						nextHeaderAttempt,
 					);
 					if (!isDedupeSkipOutcome(outcome))
 						record({
@@ -1215,8 +1224,7 @@ export function createHttpClient(
 				// re-threw as an upstream HTTP error.
 				let issuedThisAttempt = false;
 				try {
-					// Header factories see the issued count, not the raw proxy offset.
-					const outcome = await executeOnce(attempt - 1, issued + 1);
+					const outcome = await executeOnce(attempt - 1);
 					if (isDedupeSkipOutcome(outcome)) {
 						// Duplicate endpoint from a partial allocation: advance the flat
 						// offset without issuing the request (no backoff, not a failure) so

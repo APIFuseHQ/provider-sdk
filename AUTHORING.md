@@ -735,7 +735,9 @@ const response = await ctx.http.get(requestUrl, {
 ```
 
 The factory is not invoked for redirect hops (they reuse the attempt's
-headers) or for skipped duplicate proxy offsets. A factory that throws fails
+headers), for skipped duplicate proxy offsets, or for an attempt whose proxy
+allocation failed — those build no request, so `attempt` counts only the
+requests that are actually issued. A factory that throws fails
 the request with the non-retryable `TransportError` code
 `http_header_factory_failed`. `ctx.stealth` has its own `headers` option and
 does not accept a factory.
