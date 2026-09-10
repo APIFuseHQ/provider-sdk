@@ -212,6 +212,8 @@ export type {
 	HealthJourneyRunContext,
 	HealthJourneyRunResult,
 	HealthScheduleRandomization,
+	HttpAttemptContext,
+	HttpHeadersFactory,
 	HttpRedirectFailureReason,
 	HttpRedirectPolicy,
 	HttpRedirectPolicyMode,
