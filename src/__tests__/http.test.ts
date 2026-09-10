@@ -2209,7 +2209,10 @@ describe("createHttpClient", () => {
 
 			expect(caught).toBeInstanceOf(TransportError);
 			assertIsError(caught);
-			expect(caught).toMatchObject({ code: "http_header_factory_failed" });
+			expect(caught).toMatchObject({
+				code: "http_header_factory_failed",
+				options: { retryable: false },
+			});
 			expect(caught.message).toBe("Request header factory failed");
 			expect(caught.cause).toBeInstanceOf(Error);
 			expect(stringifyDiagnosticGraph(caught)).not.toContain(secret);
@@ -2233,6 +2236,56 @@ describe("createHttpClient", () => {
 
 			expect(caught).toBeInstanceOf(TransportError);
 			expect(caught).toMatchObject({ code: "http_header_factory_failed" });
+			expect(mockNativeFetchState.calls).toHaveLength(0);
+		});
+
+		it("cancels a pending factory from the ambient request signal", async () => {
+			const ambientController = new AbortController();
+			let factoryStarted: (() => void) | undefined;
+			const started = new Promise<void>((resolve) => {
+				factoryStarted = resolve;
+			});
+
+			const { createHttpClient } = await import("../runtime/http.js");
+			const pending = createHttpClient(undefined, { signal: ambientController.signal }).get(
+				"https://example.com/slow-signer",
+				{
+					headers: () => {
+						factoryStarted?.();
+						return new Promise<Record<string, string>>(() => {});
+					},
+				},
+			);
+
+			await started;
+			ambientController.abort();
+
+			await expect(pending).rejects.toMatchObject({ code: "transport_cancelled" });
+			expect(mockNativeFetchState.calls).toHaveLength(0);
+		});
+
+		it("applies the per-call timeout while the factory is pending", async () => {
+			const { createHttpClient } = await import("../runtime/http.js");
+
+			await expect(
+				createHttpClient().get("https://example.com/slow-signer", {
+					timeout: 1,
+					headers: () => new Promise<Record<string, string>>(() => {}),
+				}),
+			).rejects.toMatchObject({ code: "transport_timeout" });
+			expect(mockNativeFetchState.calls).toHaveLength(0);
+		});
+
+		it("sse() rejects a malformed factory result before issuing the request", async () => {
+			const { createHttpClient } = await import("../runtime/http.js");
+			const http = createHttpClient();
+
+			await expect(
+				http.sse("https://example.com/events", {
+					// @ts-expect-error test-invalid: runtime validation must reject a null factory result.
+					headers: () => null,
+				}),
+			).rejects.toMatchObject({ code: "http_header_factory_failed" });
 			expect(mockNativeFetchState.calls).toHaveLength(0);
 		});
 

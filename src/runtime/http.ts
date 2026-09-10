@@ -231,10 +231,34 @@ function headerFactoryFailure(message: string, cause?: unknown): TransportError 
 	// A dedicated code keeps a broken proof minter out of the retry predicate:
 	// toHttpTransportError would otherwise brand a plain throw as
 	// transport_network_error, which the default retry policy re-issues.
+	// retryable:false is explicit so the served error envelope does not
+	// advertise a deterministic signing failure as retryable (status 0 would
+	// otherwise classify as a retryable upstream_http failure).
 	return new TransportError(message, {
 		code: "http_header_factory_failed",
 		status: 0,
+		retryable: false,
 		...(cause instanceof Error ? { cause } : {}),
+	});
+}
+
+function isHeaderRecord(value: unknown): value is Record<string, string> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+// Settle `promise`, or reject with the signal's reason as soon as it aborts, so
+// a pending header factory cannot outlive the request deadline or an ambient
+// cancellation (native fetch has not started yet, so nothing else observes them).
+function settleBeforeAbort<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (!signal) return promise;
+	return new Promise<T>((resolve, reject) => {
+		if (signal.aborted) {
+			reject(signal.reason);
+			return;
+		}
+		const onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
 	});
 }
 
@@ -242,19 +266,25 @@ async function resolveAttemptHeaders(
 	options: RequestOptions & { body?: unknown },
 	clientOptions: HttpClientOptions,
 	attempt: HttpAttemptContext,
+	signal: AbortSignal | undefined,
 ): Promise<Record<string, string> | undefined> {
 	const { headers } = options;
 	if (typeof headers !== "function") return headers;
 	let minted: unknown;
 	try {
-		minted = await headers(attempt);
+		minted = await settleBeforeAbort(
+			Promise.resolve().then(() => headers(attempt)),
+			signal,
+		);
 	} catch (error) {
+		// An abort is classified by toHttpTransportError (cancelled / timed out).
+		if (signal?.aborted) throw error;
 		throw headerFactoryFailure("Request header factory failed", error);
 	}
-	if (minted === null || typeof minted !== "object" || Array.isArray(minted)) {
+	if (!isHeaderRecord(minted)) {
 		throw headerFactoryFailure("Request header factory must return a header record");
 	}
-	return withClientHeaderDefaults(minted as Record<string, string>, clientOptions, options.body);
+	return withClientHeaderDefaults(minted, clientOptions, options.body);
 }
 
 function parseHttpData(body: string, headers: Record<string, string>): unknown {
@@ -848,11 +878,12 @@ async function fetchNativeHttp(
 		// Resolve after the dedupe check so a skipped duplicate offset never burns
 		// a single-use proof, and with the serialized URL so URL-bound proofs
 		// match what is actually issued.
-		const requestHeaders = await resolveAttemptHeaders(options, clientOptions, {
-			attempt,
-			url: requestUrl,
-			method,
-		});
+		const requestHeaders = await resolveAttemptHeaders(
+			options,
+			clientOptions,
+			{ attempt, url: requestUrl, method },
+			signal,
+		);
 		const requestInit: NativeFetchInit = {
 			headers: requestHeaders,
 			method,
@@ -935,11 +966,12 @@ async function fetchNativeHttpStream(
 		observeProxy?.(Boolean(proxy));
 		throwIfAmbientAborted(clientOptions.signal);
 		// Streams never retry: a header factory is resolved once, as attempt 1.
-		const headers = await resolveAttemptHeaders(options, clientOptions, {
-			attempt: 1,
-			url: requestUrl,
-			method,
-		});
+		const headers = await resolveAttemptHeaders(
+			options,
+			clientOptions,
+			{ attempt: 1, url: requestUrl, method },
+			signal,
+		);
 		const requestInit: NativeFetchInit = {
 			headers,
 			method,
@@ -1325,10 +1357,12 @@ export function createHttpClient(
 			const callerHeaders = options.headers;
 			const headers: Record<string, string> | HttpHeadersFactory =
 				typeof callerHeaders === "function"
-					? async (attempt) => ({
-							Accept: "text/event-stream",
-							...(await callerHeaders(attempt)),
-						})
+					? async (attempt) => {
+							// Pass a malformed result through unchanged so the factory
+							// validation rejects it instead of spreading it into `{}`.
+							const minted = await callerHeaders(attempt);
+							return isHeaderRecord(minted) ? { Accept: "text/event-stream", ...minted } : minted;
+						}
 					: { Accept: "text/event-stream", ...callerHeaders };
 			const response = await streamRequest(url, options.method ?? "GET", {
 				...options,
