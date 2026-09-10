@@ -687,4 +687,6 @@ function extractLastMatch(
 	return matches[matches.length - 1];
 }
 
-void main();
+if (import.meta.main) {
+	await main();
+}
