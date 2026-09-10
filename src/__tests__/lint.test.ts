@@ -1185,6 +1185,45 @@ export function strip(headers: Record<string, string>, ctx: { stealth: unknown }
 		expect(diagnostics).toEqual([]);
 	});
 
+	it("ignores two-name lists, non-setter calls, and undefined entries in a ctx.stealth file", () => {
+		const diagnostics = lintSourceFile(`
+const CLIENT_HINTS = new Set(["sec-ch-ua-mobile", "sec-ch-ua-platform"]);
+const OWNED_PAIR = ["sec-fetch-dest", "sec-fetch-mode"];
+export function forward(name: string, headers: Record<string, string | undefined>, ctx: { stealth: unknown }) {
+  if (name.startsWith("sec-fetch-site", 0)) return CLIENT_HINTS.has(name) || OWNED_PAIR.includes(name);
+  console.log("sec-fetch-dest", headers);
+  const cleared = { ...headers, "Sec-Fetch-Site": undefined };
+  cleared["Sec-Fetch-Mode"] = undefined;
+  return [cleared, ctx.stealth];
+}
+`);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("does not scope a ctx.http file into the rule because a comment or string mentions ctx.stealth", () => {
+		const diagnostics = lintSourceFile(`
+// Use ctx.http, not ctx.stealth, for custom fetch metadata.
+const NOTE = "ctx.stealth would reject these";
+export function fetchPage(ctx: { http: { get: (url: string, init: { headers: Record<string, string> }) => unknown } }) {
+  return ctx.http.get("https://api.example.com/", { headers: { "Sec-Fetch-Site": "same-origin", note: NOTE } });
+}
+`);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("scopes a file that reaches the stealth client through destructuring or element access", () => {
+		for (const access of ["const { stealth } = ctx; return stealth;", 'return ctx["stealth"];']) {
+			const diagnostics = lintSourceFile(
+				`export const HEADERS = { "Sec-Fetch-Mode": "navigate" };\nexport function client(ctx: { stealth: unknown }) { ${access} }\n`,
+			);
+
+			expect(diagnostics).toHaveLength(1);
+			expect(diagnostics[0]?.message).toContain('ctx.stealth owns the "Sec-Fetch-Mode" header');
+		}
+	});
+
 	it("reports a versioned sec-ch-ua entry once in a ctx.stealth file and as a version literal elsewhere", () => {
 		const source = `export const headers = { "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131"' };\n`;
 
