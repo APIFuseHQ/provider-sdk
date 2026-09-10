@@ -16,6 +16,7 @@ import {
 	isHandleFieldMeta,
 } from "./handle-meta.js";
 import { lintPublicSchemaFieldNames } from "./public-schema-field-lint.js";
+import { isStealthOwnedHeaderName } from "./runtime/stealth-owned-headers.js";
 import { APIFUSE_DESCRIPTION_KEY_META_KEY, APIFUSE_SENSITIVE_META_KEY } from "./schema.js";
 import type { AuthMode, OperationApprovalPolicy, OperationRiskClass } from "./types.js";
 
@@ -836,7 +837,7 @@ function lintStealthTransportUsage(provider: {
 	const providerLabel = provider.id ? `Provider "${provider.id}"` : "Provider";
 	return Object.entries(provider.operations).flatMap(([operationKey, operation]) => {
 		const source = getOperationSource(operation);
-		if (!/\bctx\.stealth\b/.test(source)) {
+		if (!STEALTH_USAGE_PATTERN.test(source)) {
 			return [];
 		}
 		return [
@@ -1025,8 +1026,13 @@ const VERSIONED_PROFILE_LITERAL_PATTERN =
 const VERSIONED_USER_AGENT_PATTERN = /\b(?:Chrome|CriOS|Firefox|FxiOS|EdgA?|OPR)\/\d+(?:\.\d+)*/i;
 const VERSIONED_SAFARI_USER_AGENT_PATTERN = /\bVersion\/(\d+(?:\.\d+)*)(?=[\s\S]*\bSafari\/\d)/i;
 const VERSIONED_CLIENT_HINT_PATTERN = /(?:^|[;,\s])v\s*=\s*["']?\d+/i;
+// Shared with stealth-config-required: a file that mentions ctx.stealth is
+// linted as stealth code. Files that only use ctx.http may set Sec-Fetch-*.
+const STEALTH_USAGE_PATTERN = /\bctx\.stealth\b/;
+const OWNED_SEC_FETCH_HEADER_PREFIX = "sec-fetch-";
+const OWNED_CLIENT_HINT_HEADER_PREFIX = "sec-ch-ua";
 
-type BrowserVersionLiteralKind = "profile" | "user-agent" | "sec-ch-ua";
+type BrowserVersionLiteralKind = "profile" | "user-agent" | "sec-ch-ua" | "owned-header";
 
 type BrowserVersionLiteralFinding = {
 	kind: BrowserVersionLiteralKind;
@@ -1054,6 +1060,23 @@ function isSecChUaHeaderName(value: string | undefined): boolean {
 	return value?.toLowerCase() === "sec-ch-ua";
 }
 
+/**
+ * Header names this rule reports in ctx.stealth files: the Sec-Fetch-* and
+ * client-hint (sec-ch-ua*) families, restricted to what the stealth runtime
+ * really rejects (isStealthOwnedHeaderName). user-agent is covered by the
+ * "user-agent" kind; host, connection, and accept-encoding are left alone
+ * because ctx.http callers set them legitimately in the same files.
+ */
+function isReportedOwnedHeaderName(value: string | undefined): boolean {
+	if (value === undefined) return false;
+	const name = value.toLowerCase();
+	if (!isStealthOwnedHeaderName(name)) return false;
+	if (name.startsWith(OWNED_SEC_FETCH_HEADER_PREFIX)) {
+		return name.length > OWNED_SEC_FETCH_HEADER_PREFIX.length;
+	}
+	return name.startsWith(OWNED_CLIENT_HINT_HEADER_PREFIX);
+}
+
 function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLiteralFinding[] {
 	const ts = getTypeScript();
 	const sourceFile = ts.createSourceFile(
@@ -1065,6 +1088,7 @@ function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLit
 	);
 	const findings: BrowserVersionLiteralFinding[] = [];
 	const seen = new Set<string>();
+	const stealthScoped = STEALTH_USAGE_PATTERN.test(source);
 
 	const addFinding = (kind: BrowserVersionLiteralKind, literal: string, position: number) => {
 		const key = `${kind}:${position}:${literal}`;
@@ -1090,23 +1114,59 @@ function collectBrowserVersionLiteralFindings(source: string): BrowserVersionLit
 		}
 	};
 
+	// A header entry `name: value` in any of the shapes below. In a ctx.stealth
+	// file an owned name is the finding (the runtime rejects it whatever the
+	// value); elsewhere only a versioned sec-ch-ua value is.
+	const inspectHeaderEntry = (
+		nameNode: import("typescript").Node,
+		name: string | undefined,
+		valueNode: import("typescript").Node | undefined,
+		ownedHeaderShape: boolean,
+	) => {
+		if (name === undefined) return;
+		if (stealthScoped && ownedHeaderShape && isReportedOwnedHeaderName(name)) {
+			addFinding("owned-header", name, nameNode.getStart(sourceFile));
+			return;
+		}
+		if (isSecChUaHeaderName(name)) inspectSecChUaValue(valueNode);
+	};
+
 	const visit = (node: import("typescript").Node) => {
 		const text = staticStringText(node);
 		if (text !== undefined) inspectLiteral(text, node.getStart(sourceFile));
 
-		if (ts.isPropertyAssignment(node) && isSecChUaHeaderName(staticPropertyName(node.name))) {
-			inspectSecChUaValue(node.initializer);
+		if (ts.isPropertyAssignment(node)) {
+			inspectHeaderEntry(node.name, staticPropertyName(node.name), node.initializer, true);
 		}
 
-		if (ts.isCallExpression(node) && isSecChUaHeaderName(staticStringText(node.arguments[0]))) {
-			inspectSecChUaValue(node.arguments[1]);
+		if (ts.isCallExpression(node) && node.arguments[0]) {
+			// `name.startsWith("sec-fetch-")` is a one-argument predicate, not a header.
+			inspectHeaderEntry(
+				node.arguments[0],
+				staticStringText(node.arguments[0]),
+				node.arguments[1],
+				node.arguments.length >= 2,
+			);
+		}
+
+		if (ts.isArrayLiteralExpression(node) && node.elements[0]) {
+			// Only a `[name, value]` tuple is a header; a name list such as
+			// `new Set(["host", "sec-ch-ua", ...])` is not.
+			inspectHeaderEntry(
+				node.elements[0],
+				staticStringText(node.elements[0]),
+				node.elements[1],
+				node.elements.length === 2,
+			);
 		}
 
 		if (
-			ts.isArrayLiteralExpression(node) &&
-			isSecChUaHeaderName(staticStringText(node.elements[0]))
+			ts.isBinaryExpression(node) &&
+			node.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+			ts.isElementAccessExpression(node.left)
 		) {
-			inspectSecChUaValue(node.elements[1]);
+			const nameNode = node.left.argumentExpression;
+			inspectHeaderEntry(nameNode, staticStringText(nameNode), node.right, true);
 		}
 
 		ts.forEachChild(node, visit);
@@ -1124,6 +1184,8 @@ function browserVersionLiteralMessage(finding: BrowserVersionLiteralFinding): st
 			return `Hardcoded User-Agent browser version "${finding.literal}" can disagree with the stealth TLS fingerprint. Remove the literal. ctx.stealth owns User-Agent and rejects a caller value with STEALTH_HEADER_OVERRIDE_UNSUPPORTED, so omit the header there and select the profile with stealth: { browser: "chrome", os: "macos" }. For ctx.http only, derive it from getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.`;
 		case "sec-ch-ua":
 			return 'Hardcoded sec-ch-ua versions can disagree with the stealth TLS fingerprint. Remove the literal and let ctx.stealth generate client hints from stealth: { browser: "chrome", os: "macos" }. ctx.stealth also owns User-Agent, so omit that header there as well; for ctx.http only, derive it from getStealthProfile({ browser: "chrome", os: "macos" }).userAgent.';
+		case "owned-header":
+			return `ctx.stealth owns the "${finding.literal}" header and rejects a caller value with STEALTH_HEADER_OVERRIDE_UNSUPPORTED (HTTP 500 at request time). Remove it; declare stealth: { requestClass: "navigation" | "xhr" | "post" } to drive Sec-Fetch-* and select the profile with stealth: { browser: "chrome", os: "macos" } for client hints.`;
 	}
 }
 

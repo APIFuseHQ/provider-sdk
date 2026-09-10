@@ -1099,3 +1099,103 @@ describe("flat operation safety lint", () => {
 		expect(diagnostics.some((item) => item.rule === "redundant-approval")).toBe(false);
 	});
 });
+
+describe("lintProvider browser-version-literal owned headers", () => {
+	const OWNED_HEADER_LITERALS = `
+export const HEADERS = {
+  Accept: "text/html",
+  "Sec-Fetch-Dest": "document",
+};
+export function apply(headers: Headers, tuples: Array<[string, string]>) {
+  headers.set("sec-fetch-mode", "navigate");
+  tuples.push(["sec-ch-ua-platform", '"macOS"']);
+  const extra: Record<string, string> = {};
+  extra["Sec-Fetch-Site"] = "same-origin";
+  return extra;
+}
+`;
+
+	function lintSourceFile(source: string) {
+		return lintProvider({
+			id: "demo-provider",
+			allowedHosts: ["api.example.com"],
+			reviewed: "first-party",
+			providerSourceFiles: { "upstream/client.ts": source },
+			operations: {
+				search: {
+					riskClass: READ_RISK_CLASS,
+					descriptionKey:
+						"Use this operation when callers need upstream search results and when header ownership between ctx.stealth and ctx.http must be linted.",
+					input: z.object({ query: z.string().describe("Search query") }),
+					output: z.object({ ok: z.boolean().describe("Success flag") }),
+					fixtures: { request: { query: "desk" }, response: { ok: true } },
+					handler: async () => ({ ok: true }),
+				},
+			},
+		}).filter((diagnostic) => diagnostic.rule === "browser-version-literal");
+	}
+
+	it("errors on every stealth-owned header name shape in a file that uses ctx.stealth", () => {
+		const diagnostics = lintSourceFile(
+			`${OWNED_HEADER_LITERALS}\nexport function client(ctx: { stealth: unknown }) { return ctx.stealth; }\n`,
+		);
+
+		expect(diagnostics).toHaveLength(4);
+		for (const name of [
+			"Sec-Fetch-Dest",
+			"sec-fetch-mode",
+			"sec-ch-ua-platform",
+			"Sec-Fetch-Site",
+		]) {
+			const diagnostic = diagnostics.find((item) => item.message.includes(`"${name}"`));
+			expect(diagnostic).toEqual(
+				expect.objectContaining({
+					level: "error",
+					field: "sourceFiles.upstream/client.ts",
+				}),
+			);
+			expect(diagnostic?.message).toContain("STEALTH_HEADER_OVERRIDE_UNSUPPORTED");
+			expect(diagnostic?.message).toContain(
+				'stealth: { requestClass: "navigation" | "xhr" | "post" }',
+			);
+		}
+	});
+
+	it("does not report owned header names in a file that only uses ctx.http", () => {
+		const diagnostics = lintSourceFile(
+			`${OWNED_HEADER_LITERALS}\nexport function client(ctx: { http: { get: (url: string) => unknown } }) { return ctx.http.get("https://api.example.com/"); }\n`,
+		);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("ignores owned-name predicates and name lists that are not header entries", () => {
+		const diagnostics = lintSourceFile(`
+const OWNED = new Set(["host", "sec-ch-ua", "sec-ch-ua-mobile", "sec-ch-ua-platform"]);
+export function strip(headers: Record<string, string>, ctx: { stealth: unknown }) {
+  for (const name of Object.keys(headers)) {
+    if (OWNED.has(name.toLowerCase()) || name.toLowerCase().startsWith("sec-fetch-")) {
+      delete headers[name];
+    }
+  }
+  return ctx.stealth;
+}
+`);
+
+		expect(diagnostics).toEqual([]);
+	});
+
+	it("reports a versioned sec-ch-ua entry once in a ctx.stealth file and as a version literal elsewhere", () => {
+		const source = `export const headers = { "sec-ch-ua": '"Chromium";v="131", "Google Chrome";v="131"' };\n`;
+
+		const stealthDiagnostics = lintSourceFile(
+			`${source}export function client(ctx: { stealth: unknown }) { return ctx.stealth; }\n`,
+		);
+		expect(stealthDiagnostics).toHaveLength(1);
+		expect(stealthDiagnostics[0]?.message).toContain('ctx.stealth owns the "sec-ch-ua" header');
+
+		const httpDiagnostics = lintSourceFile(source);
+		expect(httpDiagnostics).toHaveLength(1);
+		expect(httpDiagnostics[0]?.message).toContain("Hardcoded sec-ch-ua versions");
+	});
+});

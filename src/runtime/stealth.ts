@@ -38,6 +38,7 @@ import type {
 } from "../types.js";
 import { chrome149HeaderOrder } from "./chrome149-header-order.js";
 import { registerDiagnosticValue } from "./diagnostic-env.js";
+import { isStealthOwnedHeaderName } from "./stealth-owned-headers.js";
 import {
 	ENGINE_CEREMONY_EGRESS_LEASE,
 	type CeremonyEgressBinding,
@@ -392,16 +393,6 @@ function normalizedHeaderEntries(
 	return entries;
 }
 
-const SDK_OWNED_EXACT_CHROME_HEADERS = new Set([
-	"host",
-	"connection",
-	"user-agent",
-	"sec-ch-ua",
-	"sec-ch-ua-mobile",
-	"sec-ch-ua-platform",
-	"accept-encoding",
-]);
-
 // Non-pseudo-header order of real Chrome 149. The fixture captures
 // (chrome-ground-truth-capture.json, chrome-extended-capture.json,
 // h1-casing-capture.json) were taken through Playwright's `locale` option, which
@@ -577,7 +568,7 @@ function normalizedCallerHeaderEntriesFromRecord(headers: Record<string, string>
 
 function assertCallerHeadersSupported(entries: readonly HeaderTuple[]): void {
 	for (const [name] of entries) {
-		if (SDK_OWNED_EXACT_CHROME_HEADERS.has(name) || name.startsWith("sec-fetch-")) {
+		if (isStealthOwnedHeaderName(name)) {
 			throw new SDKError(`Stealth transport owns the "${name}" header; remove it from headers.`, {
 				code: "STEALTH_HEADER_OVERRIDE_UNSUPPORTED",
 			});
