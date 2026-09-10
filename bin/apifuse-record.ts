@@ -28,6 +28,7 @@ import {
 	ValidationError,
 } from "../src/index.js";
 import { createCliResolverRuntime } from "../src/cli/resolver-runtime.js";
+import { assertProcessEngineModeSupported } from "../src/runtime/engine-mode.js";
 import type { JsonValue } from "../src/contract-json.js";
 import {
 	isSensitiveFixtureKey,
@@ -104,6 +105,8 @@ export async function main() {
 		const args = parseArgs(normalizeArgs(process.argv.slice(2)));
 		const location = resolveProviderLocation(args.providerPath);
 		const provider = await loadProvider(location.rootDir);
+		// The capture context attaches in-process; refuse an explicit remote request instead of ignoring it.
+		assertProcessEngineModeSupported();
 		const operationName = resolveOperationName(provider, args.operation);
 		const operation = provider.operations[operationName];
 		const parsedParams = await parseParams(operation, args.params);

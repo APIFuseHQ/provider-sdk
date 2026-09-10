@@ -48,6 +48,7 @@ const SOURCE_FIXTURE: ReadonlyArray<{ source: SourceKind; env?: string }> = [
 		env,
 	})),
 	{ source: "engineCeremonyLeaseCredentials", env: "APIFUSE__ENGINE__CEREMONY_LEASE_KEY" },
+	{ source: "engineClientCredentials", env: "APIFUSE__ENGINE__API_KEY" },
 	{ source: "ocrCredentials", env: "APIFUSE__OCR__CLOUDFLARE_API_TOKEN" },
 	{ source: "ocrCredentials", env: "APIFUSE__OCR__API_KEY" },
 	{ source: "sttCredentials", env: "APIFUSE__STT__CLOUDFLARE_API_TOKEN" },

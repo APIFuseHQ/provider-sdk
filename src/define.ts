@@ -952,6 +952,16 @@ function validateProviderProxy(config: {
 	secrets?: ProviderSecretDeclaration[];
 }): void {
 	for (const secret of config.secrets ?? []) {
+		if (
+			secret.issuer !== undefined &&
+			secret.issuer !== "apifuse" &&
+			secret.issuer !== "contributor"
+		) {
+			throw new ValidationError(
+				`Provider "${config.id}" secret "${secret.name}" has invalid issuer "${String(secret.issuer)}"`,
+				{ fix: `Set issuer to "apifuse" or "contributor", or omit it.` },
+			);
+		}
 		const engineName = engineOwnedResolverCredentialTarget(secret.name);
 		if (engineName !== undefined) {
 			throw new ValidationError(

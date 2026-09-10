@@ -137,6 +137,34 @@ variable, the Cloudflare OCR/STT tokens and account identifier,
 `APIFUSE__OCR__API_KEY`, and `APIFUSE__CACHE__KEY_PEPPER`. `defineProvider`
 rejects them in `secrets`; the engine reads them from its own environment.
 
+### Engine mode
+
+Provider processes attach their capability bindings through an engine. Today the
+default is the in-process engine; ADR-0011 replaces it with the authenticated
+remote engine in a phased migration, and `serve` logs every boot as
+`provider_engine_mode` (`deprecated: true` for in-process). You do not need to
+change anything now.
+
+A deployment names the mode with the engine-owned `APIFUSE__ENGINE__MODE`
+variable (`in-process` or `remote`; trimmed and case-folded, blank means unset);
+hosts may pass `engineMode` to `serve`/`createServerApp`/`startDevServer`
+instead. The manifest wins when the two disagree, so provider code cannot
+silently downgrade what the deployment asked for; the disagreement is reported in
+the boot event's `warnings`. An unrecognized value is warned about and ignored —
+it never crashes the process. `APIFUSE__ENGINE__MODE` cannot be declared in
+`secrets` (`APIFUSE__ENGINE__*` is engine-owned).
+
+`remote` has no client in this release: the server attaches an engine that fails
+every request with `PROVIDER_ENGINE_MODE_UNSUPPORTED` and reports `503` on
+`/readyz`. It never falls back to in-process. `apifuse dev` and `apifuse record`
+refuse to start instead.
+
+`GET /health` is liveness only and stays engine-blind; `GET /readyz` reports the
+resolved engine attachment and is what readiness/startup probes should use — but
+only for a provider already pinned to an SDK release that serves the route.
+Earlier pins answer `404`, and a failing readiness/startup probe is not
+self-healing, so manifests move to `/readyz` after the pin wave, never before.
+
 ### Deployment intent
 
 Deployment intent (runtime profile, resources, HPA, Redis, extra TCP ports) has

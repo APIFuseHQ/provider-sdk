@@ -12,6 +12,10 @@ import {
 	ENGINE_OWNED_PROXY_CREDENTIAL_ENV_NAMES,
 	ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES,
 } from "../engine.js";
+import {
+	REMOTE_ENGINE_CLIENT_API_KEY_ENV,
+	REMOTE_ENGINE_CLIENT_URL_ENV,
+} from "../runtime/engine-mode.js";
 import { APIFUSE__CACHE__KEY_PEPPER_ENV } from "../runtime/cache.js";
 import { APIFUSE__ENGINE__CEREMONY_LEASE_KEY } from "../runtime/egress-lease.js";
 import {
@@ -45,6 +49,7 @@ export const DIAGNOSTIC_SENSITIVE_SOURCE_KINDS = [
 	"engineProxyCredentials",
 	"engineSolverKeys",
 	"engineCeremonyLeaseCredentials",
+	"engineClientCredentials",
 	"ocrCredentials",
 	"sttCredentials",
 	"cdpCredentials",
@@ -120,6 +125,15 @@ export function collectDiagnosticSensitiveValues(
 		// These are the resolver-config API keys after #251's engine credential projection.
 		engineSolverKeys: () => resolvedEnvValues(ENGINE_OWNED_RESOLVER_CREDENTIAL_ENV_NAMES),
 		engineCeremonyLeaseCredentials: () => resolvedEnvValues([APIFUSE__ENGINE__CEREMONY_LEASE_KEY]),
+		// Remote engine client credential (projected before the ADR-0011 flip). The
+		// endpoint itself is an internal service URL, so only credentials embedded
+		// in it are inventoried, not the whole URL.
+		engineClientCredentials: () => [
+			...resolvedEnvValues([REMOTE_ENGINE_CLIENT_API_KEY_ENV]),
+			...resolvedStringVariants(env[REMOTE_ENGINE_CLIENT_URL_ENV]).flatMap((url) =>
+				urlCredentialComponents(url, { includePathAndQuery: false }),
+			),
+		],
 		ocrCredentials: () =>
 			resolvedEnvValues([APIFUSE__OCR__CLOUDFLARE_API_TOKEN_ENV, APIFUSE__OCR__API_KEY_ENV]),
 		sttCredentials: () => resolvedEnvValues([APIFUSE__STT__CLOUDFLARE_API_TOKEN_ENV]),
